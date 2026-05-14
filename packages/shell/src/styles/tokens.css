@@ -1,13 +1,9 @@
 :root {
-  --aura-color-primary:    #00ff41;
-  --aura-color-secondary:  #ff9900;
-  --aura-color-danger:     #ff2020;
-  --aura-color-bg:         #0a0a0a;
-  --aura-color-surface:    #111111;
-  --aura-color-surface-2:  #1a1a1a;
-  --aura-color-border:     rgba(0, 255, 65, 0.2);
-  --aura-color-text:       #ccffcc;
-  --aura-color-text-dim:   #557755;
+  /* Color tokens (--aura-color-*, --aura-glow-*) live in the runtime-served
+   * /api/os/theme.css — inlined into <style id="aura-theme"> by OSLayout for
+   * the shell, linked as a <link> in every app's iframe by the proxy. Don't
+   * hardcode color values here; they would either shadow the live theme or
+   * (worse) "win" via cascade ordering in scoped styles. */
 
   --aura-font-mono:        'Courier New', 'Courier', monospace;
   --aura-font-size-xs:     0.65rem;
@@ -15,11 +11,7 @@
   --aura-font-size-md:     0.875rem;
   --aura-font-size-lg:     1rem;
 
-  --aura-glow-primary:     0 0 8px #00ff41, 0 0 16px rgba(0,255,65,0.3);
-  --aura-glow-secondary:   0 0 8px #ff9900, 0 0 16px rgba(255,153,0,0.3);
-  --aura-glow-danger:      0 0 8px #ff2020, 0 0 16px rgba(255,32,32,0.3);
-  --aura-glow-subtle:      0 0 4px rgba(0,255,65,0.2);
-
+  /* Composed border that picks up the current theme's --aura-color-border */
   --aura-border:           1px solid var(--aura-color-border);
   --aura-radius:           0;
   --aura-spacing:          8px;

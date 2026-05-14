@@ -26,6 +26,7 @@ type InitialView = {
   isLoading: boolean;
   lifecycleState: string;
   createdAt: string;
+  minimizable?: boolean;
 };
 
 const initialViews: InitialView[] = [];
@@ -41,6 +42,9 @@ for (const inst of mgr.getAllInstances()) {
   if (manifest.activityMode === 'multi') {
     for (const act of mgr.getActivitiesByInstance(inst.instanceId)) {
       const stripped = (act.path ?? '/').replace(/^\/+/, '');
+      // Activity declared minimizable AND the parent is a background
+      // service — same gating as the live launchApp path.
+      const minimizable = !!act.minimizable && !!manifest.backgroundService;
       initialViews.push({
         viewId:     act.activityId,
         appId:      inst.appId,
@@ -54,6 +58,7 @@ for (const inst of mgr.getAllInstances()) {
         isLoading:  false,
         lifecycleState: inst.state,
         createdAt:  new Date().toISOString(),
+        ...(minimizable ? { minimizable: true } : {}),
       });
     }
   } else {
@@ -69,6 +74,9 @@ for (const inst of mgr.getAllInstances()) {
       isLoading:  false,
       lifecycleState: inst.state,
       createdAt:  new Date().toISOString(),
+      // Non-activity views are minimizable iff the app is a background
+      // service (otherwise minimizing strands a dead backend in the strip).
+      ...(manifest.backgroundService ? { minimizable: true } : {}),
     });
   }
 }
@@ -107,6 +115,15 @@ for (const inst of mgr.getAllInstances()) {
     isLoading: boolean;
     lifecycleState: string;
     createdAt: string;
+    /**
+     * Whether the user can minimize this view. True only when the app
+     * declared the activity as minimizable AND the app is a background
+     * service (otherwise minimizing would orphan the activity onto a
+     * backend about to auto-stop). Default false → only close button.
+     * For non-activity views (1:1 instance/view), this is set from
+     * `manifest.backgroundService` directly.
+     */
+    minimizable?: boolean;
   }
 
   interface AppManifestLite {
@@ -157,6 +174,7 @@ for (const inst of mgr.getAllInstances()) {
     activityId: string | undefined,
     path: string,
     lifecycleState: string,
+    minimizable: boolean,
   ): AppView {
     const stripped = path.replace(/^\/+/, '');
     const query = activityId ? `?_aura_activity=${encodeURIComponent(activityId)}` : '';
@@ -173,6 +191,7 @@ for (const inst of mgr.getAllInstances()) {
       isLoading:      lifecycleState !== 'resumed',
       lifecycleState,
       createdAt:      new Date().toISOString(),
+      ...(minimizable ? { minimizable: true } : {}),
     };
   }
 
@@ -239,7 +258,11 @@ for (const inst of mgr.getAllInstances()) {
         const existing = views.find((v) => v.viewId !== pending.pendingId && v.instanceId === instanceId && !v.activityId);
         if (existing) { pending.drop(); focusView_(existing.viewId); return; }
 
-        pending.replaceWith(buildView(appId, manifest.name, instanceId, undefined, '/', instance?.state ?? 'creating'));
+        // For activityMode='none' apps, a "view" maps 1:1 to an instance.
+        // The window is minimizable only if the app keeps running with no
+        // visible UI (backgroundService=true). Otherwise minimize would
+        // leave a dead backend in the strip — better to force close.
+        pending.replaceWith(buildView(appId, manifest.name, instanceId, undefined, '/', instance?.state ?? 'creating', !!manifest.backgroundService));
         return;
       }
 
@@ -277,8 +300,14 @@ for (const inst of mgr.getAllInstances()) {
           pending.drop();
           return;
         }
-        const { activityId, activity } = await actRes.json() as { activityId: string; activity: { path: string; title?: string } };
-        pending.replaceWith(buildView(appId, activity.title ?? manifest.name, targetInstanceId, activityId, activity.path ?? '/', targetInstanceState));
+        const { activityId, activity } = await actRes.json() as { activityId: string; activity: { path: string; title?: string; minimizable?: boolean } };
+        // Activity must declare itself minimizable AND parent app must be a
+        // background service — the OS already enforces the second condition
+        // server-side (openActivity strips minimizable=true when the app
+        // isn't backgroundable), but we mirror the check here so the chrome
+        // matches the server's view either way.
+        const minimizable = !!activity.minimizable && !!manifest.backgroundService;
+        pending.replaceWith(buildView(appId, activity.title ?? manifest.name, targetInstanceId, activityId, activity.path ?? '/', targetInstanceState, minimizable));
       } finally {
         markActivityOpenEnd(appId);
       }
@@ -313,8 +342,11 @@ for (const inst of mgr.getAllInstances()) {
         body:    data ? JSON.stringify(data) : undefined,
       });
       if (!res.ok) { console.error(`Failed to open activity on ${instanceId}`, await res.text()); pending.drop(); return; }
-      const { activityId, activity } = await res.json() as { activityId: string; activity: { path: string; title?: string } };
-      pending.replaceWith(buildView(appId, activity.title ?? name, instanceId, activityId, activity.path ?? '/', lifecycleState));
+      const { activityId, activity } = await res.json() as { activityId: string; activity: { path: string; title?: string; minimizable?: boolean } };
+      // Same gating as launchApp's activity branch — see comment there.
+      const manifest = await getManifest(appId).catch(() => null);
+      const minimizable = !!activity.minimizable && !!manifest?.backgroundService;
+      pending.replaceWith(buildView(appId, activity.title ?? name, instanceId, activityId, activity.path ?? '/', lifecycleState, minimizable));
     } catch (err) {
       console.error('[shell] openActivityOnInstance failed', err);
       pending.drop();
@@ -445,6 +477,11 @@ for (const inst of mgr.getAllInstances()) {
     });
 
     // ---- 3) Minimized strip ----
+    //
+    // Pinned at grid-row 1 spanning all columns. EXPLICIT grid placement
+    // (instead of relying on auto-flow + DOM order + `order` property) so
+    // it cannot end up below an app slot — which is exactly the "header on
+    // the bottom" bug that auto-placement caused when DOM order drifted.
     let strip = dynamicLayout.querySelector(':scope > [data-aura-strip]') as HTMLElement | null;
     if (minimized.length === 0) {
       strip?.remove();
@@ -453,16 +490,15 @@ for (const inst of mgr.getAllInstances()) {
       if (!strip) {
         strip = document.createElement('div');
         strip.setAttribute('data-aura-strip', '1');
-        strip.style.cssText = 'grid-column: 1 / -1; display:flex; gap:6px; padding:4px 8px; background: var(--aura-color-surface); border-bottom: var(--aura-border); overflow-x: auto;';
       }
+      strip.style.cssText = 'grid-row:1;grid-column:1 / -1;display:flex;gap:6px;padding:4px 8px;background:var(--aura-color-surface);border-bottom:var(--aura-border);overflow-x:auto;';
       strip.innerHTML = `<span style="font-size:0.6rem; color: var(--aura-color-text-dim); letter-spacing:0.12em; align-self:center;">MIN ▾</span>${
         minimized.map((v) => `
           <button data-action="restore" data-view-id="${escapeAttr(v.viewId)}"
             style="background:transparent; border:var(--aura-border); color:var(--aura-color-secondary); font-family:var(--aura-font-mono); font-size:0.65rem; padding:2px 8px; cursor:pointer; white-space:nowrap;"
             title="Restore ${escapeAttr(v.title)}">${escapeHtml(v.title)}</button>`).join('')
       }`;
-      if (strip.parentElement !== dynamicLayout) dynamicLayout.insertBefore(strip, dynamicLayout.firstChild);
-      else if (strip !== dynamicLayout.firstChild)  dynamicLayout.insertBefore(strip, dynamicLayout.firstChild);
+      if (strip.parentElement !== dynamicLayout) dynamicLayout.appendChild(strip);
     }
 
     // ---- 4) App slots ----
@@ -471,19 +507,22 @@ for (const inst of mgr.getAllInstances()) {
     // (this is the HTML spec: moving an iframe element invalidates its
     // browsing context). We therefore must NOT call `appendChild` on a slot
     // that's already in `dynamicLayout` — even just to "move it to the end"
-    // counts as a re-attach and would reload the iframe inside it. So:
-    //   - Append only newly-created slots (they have no iframe yet).
-    //   - Reuse existing slots in place, updating only their chrome content.
-    //   - Use the CSS `order` property to control visual ordering against the
-    //     `visible` array. The DOM order may drift from the visible order
-    //     over time (across minimize/restore), but CSS grid honours `order`
-    //     for placement, so users see them in the right slots.
+    // counts as a re-attach and would reload the iframe inside it.
+    //
+    // To avoid that AND still get deterministic visual ordering, we pin each
+    // slot to an explicit `(grid-row, grid-column)` based on its index in
+    // `visible`. This is independent of DOM order, so slots never collide
+    // with the strip and never end up in the wrong cell after minimize /
+    // restore churn. (`order` alone wasn't enough — auto-placement still
+    // walked DOM order for tie-breaking, which led to "window in wrong
+    // cell" / "header on the bottom" reports.)
     const existing = new Map<string, HTMLElement>();
     dynamicLayout.querySelectorAll(':scope > .app-slot[data-view-id]').forEach((el) => {
       const id = (el as HTMLElement).dataset['viewId'];
       if (id) existing.set(id, el as HTMLElement);
     });
 
+    const baseRow = minimized.length > 0 ? 2 : 1;
     const keep = new Set<string>();
     visible.forEach((v, i) => {
       keep.add(v.viewId);
@@ -494,7 +533,10 @@ for (const inst of mgr.getAllInstances()) {
       } else {
         updateSlot(el, v);
       }
-      el.style.order = String(i);
+      // Explicit placement — never relies on auto-flow.
+      el.style.gridColumn = String((i % cols) + 1);
+      el.style.gridRow    = String(Math.floor(i / cols) + baseRow);
+      el.style.removeProperty('order');
     });
     for (const [viewId, el] of existing) {
       if (!keep.has(viewId)) el.remove();
@@ -506,6 +548,13 @@ for (const inst of mgr.getAllInstances()) {
     slot.className = 'app-slot';
     slot.dataset['viewId'] = v.viewId;
     slot.style.cssText = 'display:flex;flex-direction:column;background:var(--aura-color-surface);border:var(--aura-border);overflow:hidden;';
+    // Minimize is opt-in per view (set by activity / non-activity manifest
+    // gating in buildView). Without it the slot only offers close — pressing
+    // X tears the activity down; there's no "hide for later" affordance for
+    // apps whose backend can't survive without a visible window.
+    const minimizeBtn = v.minimizable
+      ? `<button data-action="minimize" title="Minimize" style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 6px;cursor:pointer;">_</button>`
+      : '';
     slot.innerHTML = `
       <div class="slot-chrome" style="display:flex;align-items:center;justify-content:space-between;padding:0 8px;height:28px;background:var(--aura-color-surface-2);border-bottom:var(--aura-border);flex-shrink:0;">
         <span style="font-size:0.75rem;color:var(--aura-color-primary);text-transform:uppercase;letter-spacing:.08em;">
@@ -513,8 +562,8 @@ for (const inst of mgr.getAllInstances()) {
           <span class="slot-title-id" style="color:var(--aura-color-text-dim);font-size:0.6rem;margin-left:6px;"></span>
         </span>
         <div style="display:flex;gap:4px;">
-          <button data-action="minimize" title="Minimize" style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 6px;cursor:pointer;">_</button>
-          <button data-action="close"    title="Close"    style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 6px;cursor:pointer;">✕</button>
+          ${minimizeBtn}
+          <button data-action="close" title="Close" style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 6px;cursor:pointer;">✕</button>
         </div>
       </div>
       <div class="slot-body" style="flex:1;overflow:hidden;position:relative;"></div>`;
@@ -756,12 +805,14 @@ for (const inst of mgr.getAllInstances()) {
       const shellInFlight   = (pendingActivityOpens.get(ev.appId) ?? 0) > 0;
       if (alreadyHaveView || shellInFlight) return;
 
-      const cachedName = manifestCache.get(ev.appId)?.name ?? ev.appId;
-      const title      = ev.title ?? cachedName;
+      const cachedName  = manifestCache.get(ev.appId)?.name ?? ev.appId;
+      const cachedBg    = manifestCache.get(ev.appId)?.backgroundService === true;
+      const title       = ev.title ?? cachedName;
+      const minimizable = !!ev.minimizable && cachedBg;
       // We don't know the parent instance's exact lifecycle state from the
       // event payload — default to 'resumed' so the iframe loads right away.
       // (An open activity necessarily means the parent backend is running.)
-      views = [...views, buildView(ev.appId, title, ev.parentInstanceId, ev.activityId, ev.path ?? '/', 'resumed')];
+      views = [...views, buildView(ev.appId, title, ev.parentInstanceId, ev.activityId, ev.path ?? '/', 'resumed', minimizable)];
       renderLayout();
     }
     if (ev.type === 'activity:closed') {

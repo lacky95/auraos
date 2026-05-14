@@ -4,17 +4,19 @@ import StatusBar from '../components/shell/StatusBar.astro';
 import Dock from '../components/shell/Dock.astro';
 import LauncherOverlay from '../components/shell/LauncherOverlay.astro';
 import { getAppManager, ThemeManager } from '@aura/core';
-import type { AppManifest } from '@aura/core';
+import type { AppManifest, ColorMode } from '@aura/core';
 
 interface Props {
   pinnedApps?: AppManifest[];
 }
 const { pinnedApps = [] } = Astro.props;
 
-// SSR: ask the Settings provider for the active theme. Fall back to default if
-// Settings is not (yet) running.
-let activeThemeCss = '';
-let activeThemeId  = ThemeManager.DEFAULT_THEME_ID;
+// SSR: ask the Settings provider for the user's two-slot selection
+// (themeIdDark, themeIdLight) + colorMode. Falls back to defaults if Settings
+// isn't running yet.
+let themeIdDark:     string    = ThemeManager.DEFAULT_THEME_ID_DARK;
+let themeIdLight:    string    = ThemeManager.DEFAULT_THEME_ID_LIGHT;
+let activeColorMode: ColorMode = ThemeManager.DEFAULT_COLOR_MODE;
 try {
   const mgr = getAppManager();
   const settings = mgr.getInstancesByApp('com.aura.settings')[0];
@@ -23,19 +25,32 @@ try {
       signal: AbortSignal.timeout(500),
     });
     if (r.ok) {
-      const body = await r.json() as { themeId?: string };
-      if (body.themeId) activeThemeId = body.themeId;
+      const body = await r.json() as { themeIdDark?: string; themeIdLight?: string; colorMode?: ColorMode };
+      if (body.themeIdDark)  themeIdDark     = body.themeIdDark;
+      if (body.themeIdLight) themeIdLight    = body.themeIdLight;
+      if (body.colorMode)    activeColorMode = body.colorMode;
     }
   }
 } catch {}
-const theme = ThemeManager.getTheme(activeThemeId) ?? ThemeManager.getTheme(ThemeManager.DEFAULT_THEME_ID);
-if (theme) activeThemeCss = ThemeManager.toCss(theme);
+const { theme: activeTheme, resolvedMode } = ThemeManager.resolveActiveTheme(themeIdLight, themeIdDark, activeColorMode);
+const activeThemeCss  = ThemeManager.toCss(themeIdLight, themeIdDark, activeColorMode);
+const activeFramework = activeTheme.framework;
+const activeThemeId   = activeTheme.id;
 ---
-<html lang="en">
+<html lang="en" data-aura-theme={activeThemeId} data-aura-color-mode={activeColorMode}>
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AuraOS</title>
+  <!-- Design-framework + mode metadata. Apps in the shell read these the same
+       way iframes read the proxy-injected versions, so the API is uniform. -->
+  <meta name="aura-design-framework" content={activeFramework.id} />
+  <meta name="aura-design-framework-version" content={activeFramework.version} />
+  <meta name="aura-theme-id" content={activeThemeId} />
+  <meta name="aura-theme-id-dark" content={themeIdDark} />
+  <meta name="aura-theme-id-light" content={themeIdLight} />
+  <meta name="aura-color-mode" content={activeColorMode} />
+  <meta name="aura-resolved-mode" content={resolvedMode} />
   <style id="aura-theme" set:html={activeThemeCss}></style>
 
   <!--
@@ -336,25 +351,109 @@ if (theme) activeThemeCss = ThemeManager.toCss(theme);
   </script>
 
   <script>
-    // Live-update CSS-Vars when the OS broadcasts a theme change.
-    // Also nudge all iframes via postMessage so they can refresh their theme.
-    const sse = new EventSource('/api/apps/events');
-    sse.onmessage = async (e) => {
-      let ev: { type?: string; themeId?: string } = {};
-      try { ev = JSON.parse(e.data); } catch { return; }
-      if (ev.type !== 'theme:changed') return;
+    // Live-update CSS-Vars when the OS broadcasts a theme OR mode change.
+    // Both events trigger a fresh /api/os/theme.css fetch (the endpoint
+    // re-resolves the active palette server-side) + a postMessage relay so
+    // iframes can refresh their <link href="/api/os/theme.css"> tags too.
+    type ThemeEvt = {
+      type: 'theme:changed';
+      themeId?: string;          // active (resolved) theme id
+      themeName?: string;
+      themeIdDark?: string;
+      themeIdLight?: string;
+      colorMode?: 'light' | 'dark' | 'auto';
+      resolvedMode?: 'light' | 'dark';
+      activeTone?: 'light' | 'dark';
+      framework?: { id: string; version: string };
+    };
+    type ModeEvt = {
+      type: 'mode:changed';
+      themeId?: string;          // active (resolved) theme id
+      themeIdDark?: string;
+      themeIdLight?: string;
+      colorMode?: 'light' | 'dark' | 'auto';
+      resolvedMode?: 'light' | 'dark';
+      activeTone?: 'light' | 'dark';
+      framework?: { id: string; version: string };
+    };
 
+    // Native EventSource auto-reconnects only while in CONNECTING/OPEN. If a
+    // few failures push it to CLOSED (e.g. during a shell restart), it sits
+    // there forever and live updates silently stop working. We wrap it in a
+    // self-healing loop: on `error` after a close, recreate after 2 s.
+    let sse: EventSource | null = null;
+    const connectSse = () => {
+      sse = new EventSource('/api/apps/events');
+      sse.onopen  = () => console.log('[Theme/SSE] /api/apps/events connected');
+      sse.onerror = () => {
+        if (sse && sse.readyState === EventSource.CLOSED) {
+          console.warn('[Theme/SSE] disconnected — retrying in 2 s');
+          setTimeout(connectSse, 2000);
+        }
+      };
+      sse.onmessage = onSseMessage;
+    };
+
+    const onSseMessage = async (e: MessageEvent) => {
+      let ev: ThemeEvt | ModeEvt | { type?: string } = { type: undefined };
+      try { ev = JSON.parse(e.data); } catch { return; }
+      if (ev.type !== 'theme:changed' && ev.type !== 'mode:changed') return;
+      console.log('[Theme/SSE] received', ev.type, ev);
+
+      // Refresh the shell-side <style id="aura-theme"> block.
       try {
         const css = await (await fetch('/api/os/theme.css?t=' + Date.now())).text();
         const tag = document.getElementById('aura-theme');
         if (tag) tag.textContent = css;
       } catch (err) { console.error('[Theme] fetch failed', err); }
 
-      const themeId = ev.themeId;
+      // Mirror current mode/theme onto <html> data-attributes + meta tags so
+      // non-CSS selectors and DOM-based reads stay in sync. Best-effort.
+      const root = document.documentElement;
+      const m    = ev as ThemeEvt & ModeEvt;
+      const setMeta = (name: string, value: string | undefined) => {
+        if (!value) return;
+        const el = document.querySelector(`meta[name="${name}"]`);
+        if (el) el.setAttribute('content', value);
+      };
+      if (m.themeId)        root.dataset['auraTheme']         = m.themeId;
+      if (m.themeIdDark)    root.dataset['auraThemeDark']     = m.themeIdDark;
+      if (m.themeIdLight)   root.dataset['auraThemeLight']    = m.themeIdLight;
+      if (m.colorMode)      root.dataset['auraColorMode']     = m.colorMode;
+      if (m.resolvedMode)   root.dataset['auraResolvedMode']  = m.resolvedMode;
+      setMeta('aura-theme-id',        m.themeId);
+      setMeta('aura-theme-id-dark',   m.themeIdDark);
+      setMeta('aura-theme-id-light',  m.themeIdLight);
+      setMeta('aura-color-mode',      m.colorMode);
+      setMeta('aura-resolved-mode',   m.resolvedMode);
+
+      // Relay to every iframe so apps with `themeStrategy: 'themed'` or
+      // any in-app live-CSS link can refresh. Iframes typically bump their
+      // <link href="/api/os/theme.css"> with a cache-bust on receipt.
+      const payload = ev.type === 'theme:changed'
+        ? {
+            type:         'aura.theme.changed',
+            themeId:      m.themeId,
+            themeIdDark:  m.themeIdDark,
+            themeIdLight: m.themeIdLight,
+            colorMode:    m.colorMode,
+            resolvedMode: m.resolvedMode,
+            framework:    m.framework,
+          }
+        : {
+            type:         'aura.mode.changed',
+            themeId:      m.themeId,
+            themeIdDark:  m.themeIdDark,
+            themeIdLight: m.themeIdLight,
+            colorMode:    m.colorMode,
+            resolvedMode: m.resolvedMode,
+          };
       document.querySelectorAll('iframe').forEach((f) => {
-        try { f.contentWindow?.postMessage({ type: 'aura.theme.changed', themeId }, '*'); } catch {}
+        try { f.contentWindow?.postMessage(payload, '*'); } catch {}
       });
     };
+
+    connectSse();
   </script>
 </body>
 </html>

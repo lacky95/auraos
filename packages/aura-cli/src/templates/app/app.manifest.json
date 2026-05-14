@@ -3,22 +3,9 @@
   "name": "{{APP_NAME}}",
   "version": "0.1.0",
   "description": "Scaffolded by `aura dev new`.",
-  "entrypoint": "entrypoint.sh",
+  "category": "utility",
   "permissions": [],
   "tools": {{TOOLS_JSON}},
-  "rootfsMode": "shared",
-  "category": "utility",
   "instanceMode": "{{INSTANCE_MODE}}",
-  "maxInstances": 0,
-  "activityMode": "{{ACTIVITY_MODE}}",
-  "maxActivitiesPerInstance": 0,
-  "defaultLaunch": "new-instance",
-  "backgroundService": false,
-  "viewConfig": {
-    "defaultWidth": 600,
-    "defaultHeight": 400,
-    "resizable": true
-  },
-  "preferredLayout": "windowed",
-  "theme": { "mode": "os-components" }
+  "activityMode": "{{ACTIVITY_MODE}}"
 }

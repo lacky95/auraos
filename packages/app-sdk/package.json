@@ -6,6 +6,9 @@
   "main": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./integration": "./src/identity-middleware.mjs"
+    "./integration": "./src/integration.mjs"
+  },
+  "dependencies": {
+    "@aura/core": "workspace:*"
   }
 }

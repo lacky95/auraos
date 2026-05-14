@@ -13,13 +13,17 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
     Eliminates the ~300-500 ms cold-load CDN round-trip to jsdelivr and
     removes a third-party SPOF.
   -->
+  <!-- /api/os/theme.css is auto-injected by the proxy for themeStrategy='inherit'
+       apps (the default). The explicit link below is harmless and survives
+       direct curl/headless renders that don't go through the proxy. -->
+  <link rel="stylesheet" href="/api/os/theme.css" />
   <link rel="stylesheet" href="vendor/xterm/xterm.min.css" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      background: #0a0a0a;
-      color: #ccffcc;
-      font-family: 'Courier New', monospace;
+      background: var(--aura-color-bg);
+      color: var(--aura-color-text);
+      font-family: var(--aura-font-mono, 'Courier New', monospace);
       height: 100vh;
       overflow: hidden;
       display: flex;
@@ -30,17 +34,17 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
       align-items: center;
       padding: 0 12px;
       height: 24px;
-      background: #111;
-      border-bottom: 1px solid rgba(0,255,65,.2);
+      background: var(--aura-color-surface);
+      border-bottom: 1px solid var(--aura-color-border);
       font-size: 0.7rem;
-      color: #557755;
+      color: var(--aura-color-text-dim);
       text-transform: uppercase;
       letter-spacing: .1em;
       flex-shrink: 0;
     }
-    #terminal-bar span { color: #00ff41; margin-right: 8px; }
+    #terminal-bar span { color: var(--aura-color-primary); margin-right: 8px; }
     #terminal-bar #ws-url {
-      color: #557755;
+      color: var(--aura-color-text-dim);
       font-size: 0.6rem;
       letter-spacing: 0.04em;
       text-transform: none;
@@ -51,13 +55,13 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
     }
     #terminal { flex: 1; padding: 4px; overflow: hidden; }
     .xterm { height: 100%; }
-    .xterm-viewport { background: #0a0a0a !important; }
+    .xterm-viewport { background: var(--aura-color-bg) !important; }
     #status {
       padding: 2px 12px;
       font-size: 0.65rem;
-      color: #557755;
-      background: #111;
-      border-top: 1px solid rgba(0,255,65,.1);
+      color: var(--aura-color-text-dim);
+      background: var(--aura-color-surface);
+      border-top: 1px solid var(--aura-color-border);
       flex-shrink: 0;
     }
   </style>
@@ -73,26 +77,55 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
   <script is:inline src="vendor/xterm/xterm.min.js"></script>
   <script is:inline src="vendor/xterm/xterm-addon-fit.min.js"></script>
   <script is:inline define:vars={{ appId }}>
-    const term = new Terminal({
-      theme: {
-        background:  '#0a0a0a',
-        foreground:  '#ccffcc',
-        cursor:      '#00ff41',
-        cursorAccent:'#0a0a0a',
+    // Resolve current OS palette by reading the CSS vars injected by
+    // /api/os/theme.css. Re-runs on theme:changed / mode:changed broadcasts
+    // so xterm's internal theme follows the OS.
+    function readVar(name) {
+      return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    }
+    function readPalette() {
+      return {
+        background:  readVar('--aura-color-bg')        || '#0a0a0a',
+        foreground:  readVar('--aura-color-text')      || '#ccffcc',
+        cursor:      readVar('--aura-color-primary')   || '#00ff41',
+        cursorAccent: readVar('--aura-color-bg')       || '#0a0a0a',
         selectionBackground: 'rgba(0,255,65,.3)',
-        black:   '#0a0a0a', brightBlack:   '#557755',
-        red:     '#ff2020', brightRed:     '#ff4444',
-        green:   '#00ff41', brightGreen:   '#00ff41',
-        yellow:  '#ff9900', brightYellow:  '#ffbb00',
-        blue:    '#0088ff', brightBlue:    '#44aaff',
+        black:   readVar('--aura-color-bg')           || '#0a0a0a',
+        brightBlack: readVar('--aura-color-text-dim') || '#557755',
+        red:     readVar('--aura-color-danger')       || '#ff2020',
+        brightRed: '#ff4444',
+        green:   readVar('--aura-color-primary')      || '#00ff41',
+        brightGreen: readVar('--aura-color-primary')  || '#00ff41',
+        yellow:  readVar('--aura-color-secondary')    || '#ff9900',
+        brightYellow: readVar('--aura-color-warning') || '#ffbb00',
+        blue:    readVar('--aura-color-info')         || '#0088ff',
+        brightBlue:  readVar('--aura-color-info')     || '#44aaff',
         magenta: '#ff00ff', brightMagenta: '#ff44ff',
-        cyan:    '#00ffff', brightCyan:    '#44ffff',
-        white:   '#ccffcc', brightWhite:   '#ffffff',
-      },
+        cyan:    readVar('--aura-color-info')         || '#00ffff',
+        brightCyan: '#44ffff',
+        white:   readVar('--aura-color-text')         || '#ccffcc',
+        brightWhite: '#ffffff',
+      };
+    }
+
+    const term = new Terminal({
+      theme: readPalette(),
       fontFamily: "'Courier New', monospace",
       fontSize: 14,
       cursorBlink: true,
       allowProposedApi: true,
+    });
+
+    // Re-apply the palette when the OS broadcasts a theme or mode change.
+    // CSS vars update automatically via the proxy-injected theme.css link,
+    // but xterm caches its theme internally — push the new colors in.
+    function refreshTerminalTheme() {
+      // Slight defer so the new theme.css (cache-busted) has actually applied.
+      setTimeout(() => term.options.theme = readPalette(), 50);
+    }
+    window.addEventListener('message', (ev) => {
+      const t = ev.data?.type;
+      if (t === 'aura.theme.changed' || t === 'aura.mode.changed') refreshTerminalTheme();
     });
 
     const fitAddon = new FitAddon.FitAddon();
@@ -160,7 +193,7 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
         opened = true;
         stopDots();
         statusEl.textContent = 'CONNECTED';
-        statusEl.style.color = '#00ff41';
+        statusEl.style.color = 'var(--aura-color-primary)';
         // Clear the splash up-front, BEFORE the resize/PTY output arrives.
         // (Earlier we did this on a 120ms timer which raced with the bash
         // prompt and sometimes wiped the prompt itself — leaving the user
@@ -173,7 +206,7 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
 
       ws.onclose = () => {
         statusEl.textContent = 'DISCONNECTED — RECONNECTING...';
-        statusEl.style.color = '#ff9900';
+        statusEl.style.color = 'var(--aura-color-secondary)';
         if (opened) {
           // Was connected, now dropped — surface in-band.
           term.writeln('');
@@ -189,7 +222,7 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
 
       ws.onerror = () => {
         statusEl.textContent = 'ERROR';
-        statusEl.style.color = '#ff2020';
+        statusEl.style.color = 'var(--aura-color-danger)';
         if (!opened) {
           // Connection refused / handshake error — surface inline so the
           // user knows it's not just a black screen.

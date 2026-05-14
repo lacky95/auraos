@@ -1,12 +1,8 @@
-import type { APIRoute } from 'astro';
+import { createActivityDestroyHandler } from '@aura/app-sdk';
 import { state } from '../../../../state.js';
 
-export const POST: APIRoute = ({ params }) => {
-  const raw = params['activityId'];
-  const id  = raw ? decodeURIComponent(raw) : undefined;
-  if (id && state.activities.delete(id)) {
-    console.log(`[counter] onActivityDestroy ${id} (remaining: ${state.activities.size})`);
-    for (const cb of state.listeners) { try { cb(); } catch {} }
+export const POST = createActivityDestroyHandler((activityId) => {
+  if (state.activities.delete(activityId)) {
+    for (const cb of state.listeners) { try { cb(); } catch { /* listener errors are non-fatal */ } }
   }
-  return new Response(JSON.stringify({ ok: true }), { status: 200 });
-};
+});

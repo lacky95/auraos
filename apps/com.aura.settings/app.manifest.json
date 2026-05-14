@@ -3,14 +3,11 @@
   "name": "Settings",
   "version": "0.1.0",
   "description": "OS settings — themes, general preferences. Acts as a content provider for other apps.",
-  "entrypoint": "entrypoint.sh",
+  "category": "system",
   "permissions": ["storage.read", "storage.write", "system.theme.broadcast"],
   "tools": ["bash", "node"],
-  "rootfsMode": "shared",
-  "category": "system",
   "instanceMode": "single",
   "activityMode": "multi",
-  "maxActivitiesPerInstance": 0,
   "defaultLaunch": "new-activity",
   "backgroundService": true,
   "viewConfig": {
@@ -19,12 +16,12 @@
     "resizable": true
   },
   "preferredLayout": "tiling",
-  "theme": { "mode": "os-components" },
   "dataProvider": {
     "authority": "com.aura.settings",
     "providers": [
       { "path": "/api/data/settings", "readPermission": "settings.read", "writePermission": "settings.write" },
-      { "path": "/api/data/theme",    "readPermission": "settings.read", "writePermission": "settings.theme.write" }
+      { "path": "/api/data/theme",    "readPermission": "settings.read", "writePermission": "settings.theme.write" },
+      { "path": "/api/data/themes",   "readPermission": "settings.read" }
     ]
   }
 }

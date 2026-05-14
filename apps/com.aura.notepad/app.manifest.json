@@ -3,21 +3,16 @@
   "name": "Notepad",
   "version": "0.1.0",
   "description": "Shared note buffer — multiple activities edit the same text live (single backend, multi activities)",
-  "entrypoint": "entrypoint.sh",
+  "category": "productivity",
   "permissions": ["storage.read", "storage.write"],
   "tools": ["bash", "node"],
-  "rootfsMode": "shared",
-  "category": "productivity",
   "instanceMode": "single",
   "activityMode": "multi",
-  "maxActivitiesPerInstance": 0,
-  "backgroundService": false,
   "defaultLaunch": "new-activity",
   "viewConfig": {
     "defaultWidth": 600,
     "defaultHeight": 400,
     "resizable": true
   },
-  "preferredLayout": "tiling",
-  "theme": { "mode": "os-components" }
+  "preferredLayout": "tiling"
 }

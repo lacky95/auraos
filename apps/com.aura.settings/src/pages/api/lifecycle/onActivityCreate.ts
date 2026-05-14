@@ -1,24 +1,16 @@
-import type { APIRoute } from 'astro';
+import { createActivityCreateHandler } from '@aura/app-sdk';
 
 /**
  * Activity dispatcher. The launcher / Process Manager / other apps can pass
  * `data: { section: 'theme' | 'general' | 'about' }` to land on a specific
  * settings panel. Without it, you get the main overview.
  */
-export const POST: APIRoute = async ({ request }) => {
-  const body = await request.json().catch(() => ({})) as {
-    activityId?: string;
-    data?: { section?: string };
-  };
-  const section = body.data?.section;
-  let path  = '/';
-  let title = 'Settings';
+export const POST = createActivityCreateHandler(({ data }) => {
+  const section = (data as { section?: string } | undefined)?.section;
   switch (section) {
-    case 'theme':   path = '/theme';   title = 'Settings · Theme';   break;
-    case 'general': path = '/general'; title = 'Settings · General'; break;
-    case 'about':   path = '/about';   title = 'Settings · About';   break;
-    default:        path = '/';        title = 'Settings';
+    case 'theme':   return { path: '/theme',   title: 'Settings · Theme' };
+    case 'general': return { path: '/general', title: 'Settings · General' };
+    case 'about':   return { path: '/about',   title: 'Settings · About' };
+    default:        return { path: '/',        title: 'Settings' };
   }
-  console.log(`[settings] onActivityCreate ${body.activityId} → ${path} (${title})`);
-  return new Response(JSON.stringify({ path, title }), { status: 200 });
-};
+});

@@ -1,2 +1,2 @@
-import type { APIRoute } from 'astro';
-export const POST: APIRoute = () => new Response(JSON.stringify({ ok: true }), { status: 200 });
+import { createLifecycleHandler } from '@aura/app-sdk';
+export const POST = createLifecycleHandler('onStop');

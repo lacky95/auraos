@@ -7,6 +7,27 @@ const HEALTH_CHECK_INTERVAL_MS = 200;
 const HEALTH_CHECK_TIMEOUT_MS = 30_000;
 const LIFECYCLE_TIMEOUT_MS = 5_000;
 
+/**
+ * Default entrypoint command used when the app dir has no `entrypoint.sh`.
+ * Equivalent to the historical per-app entrypoint.sh — every app shipped a
+ * byte-identical copy of this script except for the app name in `echo`,
+ * which we now substitute from `$APP_ID`. With the SDK consolidation pass
+ * apps stop shipping `entrypoint.sh` and ProotRunner synthesises this
+ * inline command instead.
+ *
+ * Kept identical in spirit to the old script so the install-on-first-run
+ * fallback still works when a freshly scaffolded app doesn't yet have a
+ * populated `node_modules` (e.g. before the workspace `pnpm install` ran).
+ */
+const SYNTHESISED_ENTRYPOINT = `set -e
+export PORT="\${APP_PORT:-4001}"
+if [ ! -d node_modules ]; then
+  echo "[\${APP_ID:-app}] Installing dependencies..."
+  npm install --prefer-offline 2>&1 || npm install
+fi
+echo "[\${APP_ID:-app}] Starting Astro server on port \$PORT"
+exec node_modules/.bin/astro dev --host 0.0.0.0 --port "\$PORT"`;
+
 interface SpawnedApp {
   process: ChildProcess;
   port: number;
@@ -41,7 +62,10 @@ export class ProotRunner {
 
     const useProotEnv = process.env['AURA_USE_PROOT'];
     const prooted = useProotEnv === 'true' && existsSync(this.baseRootfs);
-    const args = this.buildProotArgs(port, manifest, appDir, dataDir, prooted);
+    // Resolve once — used by the proot-args builder AND (when not prooted) as
+    // the direct spawn argv.
+    const entrypointArgv = this.resolveEntrypoint(appDir, manifest);
+    const args = this.buildProotArgs(port, manifest, appDir, dataDir, prooted, entrypointArgv);
 
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
@@ -64,12 +88,11 @@ export class ProotRunner {
     // entire group on cleanup (including any detached astro children). Without
     // it, kill() only signals the proot pid and orphan astros survive on the
     // bound port — that's the squatter that caused the wrong-content bug.
-    const child = spawn(prooted ? 'proot' : 'bash', prooted ? args : [join(appDir, manifest.entrypoint)], {
-      cwd: appDir,
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: true,
-    });
+    const child = spawn(
+      prooted ? 'proot'          : entrypointArgv[0]!,
+      prooted ? args             : entrypointArgv.slice(1),
+      { cwd: appDir, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true },
+    );
 
     child.stdout?.on('data', (d) => process.stdout.write(`[${instanceId}] ${d}`));
     child.stderr?.on('data', (d) => process.stderr.write(`[${instanceId}] ${d}`));
@@ -89,14 +112,29 @@ export class ProotRunner {
     return child.pid ?? 0;
   }
 
+  /**
+   * Decide what to actually exec to start the app's astro server.
+   *   • App ships `entrypoint.sh` (or whatever `manifest.entrypoint` points
+   *     at): run it directly. This preserves any app-specific startup logic.
+   *   • App doesn't ship one: bash -c into the synthesised default, which
+   *     mirrors the old per-app entrypoint.sh and only differs in $APP_ID
+   *     being interpolated at runtime.
+   */
+  private resolveEntrypoint(appDir: string, manifest: AppManifest): string[] {
+    const entrypointPath = join(appDir, manifest.entrypoint);
+    if (existsSync(entrypointPath)) return ['bash', entrypointPath];
+    return ['bash', '-c', SYNTHESISED_ENTRYPOINT];
+  }
+
   private buildProotArgs(
     port: number,
     manifest: AppManifest,
     appDir: string,
     dataDir: string,
     useProot: boolean,
+    entrypointArgv: string[],
   ): string[] {
-    if (!useProot) return [join(appDir, manifest.entrypoint)];
+    if (!useProot) return entrypointArgv;
 
     // pnpm workspace creates node_modules as a forest of relative symlinks
     // (e.g. `node_modules/astro → ../../node_modules/.pnpm/astro@.../astro`).
@@ -142,7 +180,7 @@ export class ProotRunner {
       }
     }
 
-    args.push('bash', join(appDir, manifest.entrypoint));
+    args.push(...entrypointArgv);
     return args;
   }
 

@@ -88,7 +88,11 @@ importers:
         specifier: ^8.18.0
         version: 8.20.1
 
-  packages/app-sdk: {}
+  packages/app-sdk:
+    dependencies:
+      '@aura/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/aura-cli:
     dependencies:

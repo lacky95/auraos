@@ -204,15 +204,18 @@ export default {};
       //   <meta name="aura-theme-strategy">           inherit | themed | override
       //   <meta name="aura-color-mode">               user pref (light/dark/auto)
       //   <meta name="aura-resolved-mode">            server-resolved (light/dark)
-      //   <meta name="aura-theme-id">                 only for inherit + themed
+      //   <meta name="aura-theme-id">                 only for inherit + themed (active resolved id)
+      //   <meta name="aura-theme-id-dark">            user's dark pick (only for inherit + themed)
+      //   <meta name="aura-theme-id-light">           user's light pick (only for inherit + themed)
       //   <link href="/api/os/theme.css">             only for inherit (auto-injected)
       const manifest      = mgr.getManifest(instance.appId);
       const themeStrategy = (manifest?.themeStrategy ?? 'inherit') as 'inherit' | 'themed' | 'override';
       const themeSel      = await readShellThemeSelection().catch(() => null);
-      const themeId       = themeSel?.themeId   ?? ThemeManager.DEFAULT_THEME_ID;
-      const colorMode     = themeSel?.colorMode ?? ThemeManager.DEFAULT_COLOR_MODE;
-      const resolvedMode  = ThemeManager.resolveMode(colorMode);
-      const framework     = ThemeManager.getDesignFramework(themeId);
+      const themeIdDark   = themeSel?.themeIdDark  ?? ThemeManager.DEFAULT_THEME_ID_DARK;
+      const themeIdLight  = themeSel?.themeIdLight ?? ThemeManager.DEFAULT_THEME_ID_LIGHT;
+      const colorMode     = themeSel?.colorMode    ?? ThemeManager.DEFAULT_COLOR_MODE;
+      const { theme: activeTheme, resolvedMode } = ThemeManager.resolveActiveTheme(themeIdLight, themeIdDark, colorMode);
+      const framework     = activeTheme.framework;
 
       const escAttr = (s: string) => s.replace(/"/g, '&quot;');
       const metaParts: string[] = [
@@ -224,9 +227,11 @@ export default {};
         `<meta name="aura-color-mode" content="${escAttr(colorMode)}">`,
         `<meta name="aura-resolved-mode" content="${escAttr(resolvedMode)}">`,
       ];
-      // themed + inherit both see the theme id; override sees only mode.
+      // themed + inherit both see the theme ids; override sees only mode.
       if (themeStrategy !== 'override') {
-        metaParts.push(`<meta name="aura-theme-id" content="${escAttr(themeId)}">`);
+        metaParts.push(`<meta name="aura-theme-id" content="${escAttr(activeTheme.id)}">`);
+        metaParts.push(`<meta name="aura-theme-id-dark" content="${escAttr(themeIdDark)}">`);
+        metaParts.push(`<meta name="aura-theme-id-light" content="${escAttr(themeIdLight)}">`);
       }
 
       // Auto-inject /api/os/theme.css for inherit strategy. Skip if the app
@@ -296,12 +301,12 @@ var X=window.XMLHttpRequest;if(X){var oO=X.prototype.open,oS=X.prototype.send;X.
 };
 
 /**
- * Read current `{ themeId, colorMode }` from the Settings provider. Mirrors
- * OSLayout's SSR lookup but lives here so the proxy doesn't have to depend on
- * any shell-side helper. Falls back to defaults silently if Settings isn't
- * running yet — every value has a sane default in ThemeManager.
+ * Read current `{ themeIdDark, themeIdLight, colorMode }` from the Settings
+ * provider. Mirrors OSLayout's SSR lookup but lives here so the proxy doesn't
+ * have to depend on any shell-side helper. Falls back to defaults silently if
+ * Settings isn't running yet — every value has a sane default in ThemeManager.
  */
-async function readShellThemeSelection(): Promise<{ themeId: string; colorMode: ColorMode } | null> {
+async function readShellThemeSelection(): Promise<{ themeIdDark: string; themeIdLight: string; colorMode: ColorMode } | null> {
   const mgr = getAppManager();
   const settings = mgr.getInstancesByApp('com.aura.settings')[0];
   if (!settings?.port) return null;
@@ -310,10 +315,11 @@ async function readShellThemeSelection(): Promise<{ themeId: string; colorMode: 
       signal: AbortSignal.timeout(500),
     });
     if (!r.ok) return null;
-    const body = await r.json() as { themeId?: string; colorMode?: ColorMode };
+    const body = await r.json() as { themeIdDark?: string; themeIdLight?: string; colorMode?: ColorMode };
     return {
-      themeId:   body.themeId   ?? ThemeManager.DEFAULT_THEME_ID,
-      colorMode: body.colorMode ?? ThemeManager.DEFAULT_COLOR_MODE,
+      themeIdDark:  body.themeIdDark  ?? ThemeManager.DEFAULT_THEME_ID_DARK,
+      themeIdLight: body.themeIdLight ?? ThemeManager.DEFAULT_THEME_ID_LIGHT,
+      colorMode:    body.colorMode    ?? ThemeManager.DEFAULT_COLOR_MODE,
     };
   } catch { return null; }
 }

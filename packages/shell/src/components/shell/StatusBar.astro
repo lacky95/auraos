@@ -102,6 +102,21 @@
     </section>
 
     <section class="sci-section">
+      <div class="sci-section-head">// COLOR MODE</div>
+      <div class="sci-row">
+        <span class="sci-row-label">Mode</span>
+        <span class="sci-row-value sci-row-grow">
+          <div class="sci-segmented" role="radiogroup" aria-label="Color mode">
+            <button data-mode="light" type="button" class="sci-btn sci-mode-btn" role="radio">LIGHT</button>
+            <button data-mode="dark"  type="button" class="sci-btn sci-mode-btn" role="radio">DARK</button>
+            <button data-mode="auto"  type="button" class="sci-btn sci-mode-btn" role="radio">AUTO</button>
+          </div>
+          <span id="dlg-mode-resolved" class="sci-row-pill sci-row-pill--muted">DARK</span>
+        </span>
+      </div>
+    </section>
+
+    <section class="sci-section">
       <div class="sci-section-head">// MODE</div>
       <div class="sci-row">
         <span class="sci-row-label">Fullscreen</span>
@@ -301,6 +316,67 @@
   const dlgFsToggle = document.getElementById('dlg-fs-toggle');
   const dlgFsState  = document.getElementById('dlg-fs-state');
 
+  // Color-mode picker
+  type ColorMode = 'light' | 'dark' | 'auto';
+  const dlgModeButtons   = document.querySelectorAll<HTMLButtonElement>('.sci-mode-btn');
+  const dlgModeResolved  = document.getElementById('dlg-mode-resolved');
+  let currentColorMode: ColorMode = 'dark';  // refreshed on dialog open
+
+  function resolveColorMode(pref: ColorMode): 'light' | 'dark' {
+    if (pref === 'light') return 'light';
+    if (pref === 'dark')  return 'dark';
+    return (typeof window.matchMedia === 'function' &&
+            window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+  }
+
+  function paintModeButtons(pref: ColorMode) {
+    dlgModeButtons.forEach((b) => {
+      b.dataset['active'] = b.dataset['mode'] === pref ? 'true' : 'false';
+    });
+    if (dlgModeResolved) {
+      const resolved = resolveColorMode(pref);
+      dlgModeResolved.textContent = resolved.toUpperCase();
+      dlgModeResolved.classList.toggle('sci-row-pill--muted', false);
+    }
+  }
+
+  async function fetchCurrentMode(): Promise<ColorMode> {
+    try {
+      const r = await fetch('/api/data/com.aura.settings/theme');
+      if (!r.ok) return 'dark';
+      const body = await r.json() as { colorMode?: ColorMode };
+      return body.colorMode ?? 'dark';
+    } catch { return 'dark'; }
+  }
+
+  async function setColorMode(mode: ColorMode) {
+    currentColorMode = mode;
+    paintModeButtons(mode);
+    try {
+      await fetch('/api/data/com.aura.settings/theme', {
+        method:  'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ colorMode: mode }),
+      });
+    } catch (err) {
+      console.warn('[StatusBar] setColorMode failed', err);
+    }
+  }
+
+  dlgModeButtons.forEach((b) => b.addEventListener('click', () => {
+    const m = b.dataset['mode'] as ColorMode | undefined;
+    if (m === 'light' || m === 'dark' || m === 'auto') void setColorMode(m);
+  }));
+
+  // Keep the resolved-mode pill correct when the OS prefers-color-scheme
+  // flips under us (only matters while AUTO is selected).
+  if (typeof window.matchMedia === 'function') {
+    const mql = window.matchMedia('(prefers-color-scheme: light)');
+    const onMql = () => { if (currentColorMode === 'auto') paintModeButtons(currentColorMode); };
+    if (mql.addEventListener) mql.addEventListener('change', onMql);
+    else                       (mql as MediaQueryList).addListener?.(onMql);
+  }
+
   function syncDialogFromState() {
     if (dlgZoomSlider) dlgZoomSlider.value = String(Math.round(currentZoomValue * 100));
     if (dlgZoomValue)  dlgZoomValue.textContent = `${Math.round(currentZoomValue * 100)}%`;
@@ -313,6 +389,13 @@
       dlgFsState.textContent = isFs ? 'ON' : 'OFF';
       dlgFsState.classList.toggle('sci-row-pill--muted', !isFs);
     }
+    // Color mode is async — fetch fresh on open. Paint the previous value
+    // immediately so the dialog never flashes a stale state.
+    paintModeButtons(currentColorMode);
+    void fetchCurrentMode().then((m) => {
+      currentColorMode = m;
+      paintModeButtons(m);
+    });
   }
 
   function openSettings() {
@@ -571,7 +654,7 @@
     text-transform: uppercase;
     letter-spacing: 0.16em;
     font-weight: 500;
-    text-shadow: 0 0 6px rgba(0, 255, 65, 0.4);
+    text-shadow: var(--aura-glow-subtle);
   }
   .sci-dialog-title-prefix {
     margin-right: 6px;
@@ -675,6 +758,29 @@
     box-shadow: var(--aura-glow-primary);
   }
 
+  /* Active-state for segmented controls (used by COLOR MODE picker) */
+  .sci-btn[data-active="true"] {
+    color: var(--aura-color-bg);
+    background: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+  }
+  .sci-btn[data-active="true"]:hover {
+    color: var(--aura-color-bg);
+    box-shadow: var(--aura-glow-primary);
+  }
+
+  /* Segmented group (three buttons sharing a border seam) */
+  .sci-segmented {
+    display: inline-flex;
+    border: var(--aura-border);
+  }
+  .sci-segmented .sci-btn {
+    border: none;
+  }
+  .sci-segmented .sci-btn + .sci-btn {
+    border-left: 1px solid var(--aura-color-border);
+  }
+
   .sci-dialog-footer {
     display: flex;
     align-items: center;
@@ -735,7 +841,7 @@
     background: var(--aura-color-primary);
     border: 1px solid var(--aura-color-primary);
     margin-top: -5px;
-    box-shadow: 0 0 6px rgba(0, 255, 65, 0.5);
+    box-shadow: var(--aura-glow-primary);
   }
   .sci-slider::-moz-range-thumb {
     width: 12px;
@@ -743,7 +849,7 @@
     background: var(--aura-color-primary);
     border: 1px solid var(--aura-color-primary);
     border-radius: 0;
-    box-shadow: 0 0 6px rgba(0, 255, 65, 0.5);
+    box-shadow: var(--aura-glow-primary);
   }
   .sci-slider:focus-visible {
     outline: 1px dashed var(--aura-color-primary);

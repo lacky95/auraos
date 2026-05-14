@@ -28,4 +28,13 @@ export interface AppActivity {
   /** Optional metadata returned by the app (e.g. tab title). */
   title?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * Whether the user is allowed to minimize this activity. Default: false
+   * (activity windows can only be closed). The app declares this via the
+   * `onActivityCreate` hook returning `{ minimizable: true }`. The OS shell
+   * additionally requires `manifest.backgroundService=true` before showing
+   * the minimize button — minimizing a non-background app is pointless,
+   * since the backend dies as soon as no window is visible.
+   */
+  minimizable?: boolean;
 }

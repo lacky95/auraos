@@ -2,7 +2,7 @@ import type { Command } from 'commander';
 import { api } from '../lib/client.js';
 import { color, fail, ok } from '../lib/format.js';
 
-const PROVIDER = '/api/data/com.aura.settings/api/data/theme';
+const PROVIDER = '/api/data/com.aura.settings/theme';
 
 interface ThemeResponse {
   themeId: string;
@@ -17,7 +17,7 @@ export function registerTheme(program: Command): void {
     .description('List available theme presets.')
     .action(async () => {
       try {
-        const data = await api.get<{ themes: Array<{ id: string; name: string }> }>('/api/data/com.aura.settings/api/data/themes');
+        const data = await api.get<{ themes: Array<{ id: string; name: string }> }>('/api/data/com.aura.settings/themes');
         const current = await api.get<ThemeResponse>(PROVIDER).catch(() => null);
         for (const t of data.themes ?? []) {
           const marker = current?.themeId === t.id ? color.green('●') : color.dim('○');

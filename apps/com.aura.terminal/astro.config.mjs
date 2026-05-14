@@ -1,6 +1,6 @@
 import { defineConfig } from 'astro/config';
 import node from '@astrojs/node';
-import { auraIdentityIntegration } from '@aura/app-sdk/integration';
+import { auraAppIntegration } from '@aura/app-sdk/integration';
 
 const port = Number(process.env['APP_PORT'] ?? 4001);
 
@@ -32,7 +32,7 @@ export default defineConfig({
   adapter: node({ mode: 'standalone' }),
   security: { checkOrigin: false },
   server: { port, host: true },
-  integrations: [auraIdentityIntegration(), ptyWsIntegration()],
+  integrations: [auraAppIntegration(), ptyWsIntegration()],
   // Dev toolbar lives at the document root and tries to use Vite HMR — both
   // useless inside the shell's iframe. Disable it to keep the iframe clean.
   devToolbar: { enabled: false },

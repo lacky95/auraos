@@ -1,17 +1,31 @@
 ---
 import '../styles/settings.css';
 import { getState } from '../state.js';
-const { themeId: currentThemeId } = getState();
+const { themeIdDark: currentDarkId, themeIdLight: currentLightId, colorMode: currentColorMode } = getState();
 
-// Same theme definitions as the OS ThemeManager — duplicated here for SSR
-// preview swatches. In a future iteration we could fetch them from a content
-// provider like `/api/data/theme/list` on the shell.
-const THEMES = [
-  { id: 'scificn',   name: 'SCIFICN',   primary: '#00ff41', secondary: '#ff9900', bg: '#0a0a0a' },
-  { id: 'amber',     name: 'AMBER',     primary: '#ff9900', secondary: '#ffd166', bg: '#0a0805' },
-  { id: 'red-alert', name: 'RED ALERT', primary: '#ff2020', secondary: '#ff7070', bg: '#0a0303' },
-  { id: 'blue',      name: 'CYAN',      primary: '#00aaff', secondary: '#88ddff', bg: '#04080a' },
+/* Same theme catalog the OS ThemeManager ships. Kept in sync manually so the
+ * Settings app stays free of @aura/core (Phase 2 will refactor to a direct
+ * fetch from `/api/data/com.aura.settings/themes`). Swatches let us preview a
+ * theme without applying it. */
+type ToneSwatch = { primary: string; secondary: string; bg: string };
+type ThemeCard  = { id: string; name: string; description: string; tone: 'dark' | 'light'; swatch: ToneSwatch };
+
+const THEMES: ThemeCard[] = [
+  // dark
+  { id: 'sci-fi',    name: 'SCI-FI',    tone: 'dark',  description: 'Classic phosphor terminal — green-on-black.',          swatch: { primary: '#00ff41', secondary: '#ff9900', bg: '#0a0a0a' } },
+  { id: 'star-wars', name: 'STAR WARS', tone: 'dark',  description: 'Crawl-text yellow on pure black.',                     swatch: { primary: '#ffe81f', secondary: '#ff9900', bg: '#000000' } },
+  { id: 'alien',     name: 'ALIEN',     tone: 'dark',  description: 'Nostromo monitor green — industrial readout.',         swatch: { primary: '#48ff00', secondary: '#a8c800', bg: '#050a05' } },
+  { id: 'amber',     name: 'AMBER',     tone: 'dark',  description: 'Vintage amber CRT.',                                   swatch: { primary: '#ff9900', secondary: '#ffd166', bg: '#0a0805' } },
+  { id: 'red-alert', name: 'RED ALERT', tone: 'dark',  description: 'Critical-warning crimson.',                            swatch: { primary: '#ff2020', secondary: '#ff7070', bg: '#0a0303' } },
+  { id: 'cyan',      name: 'CYAN',      tone: 'dark',  description: 'Cool cyan retro-future.',                              swatch: { primary: '#00aaff', secondary: '#88ddff', bg: '#04080a' } },
+  // light
+  { id: 'paper',     name: 'PAPER',     tone: 'light', description: 'Phosphor green on cream.',                             swatch: { primary: '#007a1f', secondary: '#b35a00', bg: '#f4f7f1' } },
+  { id: 'parchment', name: 'PARCHMENT', tone: 'light', description: 'Amber ink on parchment.',                              swatch: { primary: '#b35a00', secondary: '#c79100', bg: '#fffaf0' } },
+  { id: 'mist',      name: 'MIST',      tone: 'light', description: 'Cool cyan-on-mist.',                                   swatch: { primary: '#00688b', secondary: '#0277bd', bg: '#f1f7fa' } },
 ];
+
+const darkThemes  = THEMES.filter(t => t.tone === 'dark');
+const lightThemes = THEMES.filter(t => t.tone === 'light');
 ---
 <!DOCTYPE html>
 <html lang="en">
@@ -26,69 +40,177 @@ const THEMES = [
     <span class="crumbs">› THEME</span>
   </header>
   <main class="settings-body">
-    <p style="margin-bottom: 16px; font-size: 0.75rem; color: var(--aura-color-text-dim); letter-spacing: 0.08em;">
-      PICK AN OS THEME — APPLIES LIVE TO SHELL + APPS WITH THEME LINK
+    <p class="theme-intro">
+      PICK YOUR DARK THEME AND YOUR LIGHT THEME — COLOR MODE TOGGLES BETWEEN THEM
     </p>
-    <div class="theme-row">
-      {THEMES.map(t => (
-        <button class="theme-card" data-theme-id={t.id} data-active={t.id === currentThemeId}>
-          <div class="swatches">
-            <div class="swatch" style={`background:${t.primary}`}></div>
-            <div class="swatch" style={`background:${t.secondary}`}></div>
-            <div class="swatch" style={`background:${t.bg}; border-color:#444`}></div>
-          </div>
-          <div class="name">{t.name}</div>
-          {t.id === currentThemeId && <span class="active-tag">● ACTIVE</span>}
-        </button>
-      ))}
-    </div>
-    <p id="status" style="margin-top: 18px; font-size: 0.7rem; color: var(--aura-color-text-dim); letter-spacing: 0.08em;">
-      CURRENT: <b style="color: var(--aura-color-primary);">{currentThemeId.toUpperCase()}</b>
+
+    <section class="theme-section">
+      <header class="theme-section-head">
+        <h2>// DARK THEMES</h2>
+        <span class="active-when">ACTIVE WHEN COLOR MODE = DARK<br/>OR AUTO + OS PREFERS DARK</span>
+      </header>
+      <div class="theme-row" data-slot="dark">
+        {darkThemes.map(t => (
+          <button class="theme-card" data-theme-id={t.id} data-slot="dark" data-active={t.id === currentDarkId} title={t.description}>
+            <div class="swatches">
+              <div class="swatch" style={`background:${t.swatch.primary}`}></div>
+              <div class="swatch" style={`background:${t.swatch.secondary}`}></div>
+              <div class="swatch" style={`background:${t.swatch.bg}; border-color:rgba(255,255,255,0.15)`}></div>
+            </div>
+            <div class="name">{t.name}</div>
+            <div class="card-desc">{t.description}</div>
+            {t.id === currentDarkId && <span class="active-tag">● ACTIVE</span>}
+          </button>
+        ))}
+      </div>
+    </section>
+
+    <section class="theme-section">
+      <header class="theme-section-head">
+        <h2>// LIGHT THEMES</h2>
+        <span class="active-when">ACTIVE WHEN COLOR MODE = LIGHT<br/>OR AUTO + OS PREFERS LIGHT</span>
+      </header>
+      <div class="theme-row" data-slot="light">
+        {lightThemes.map(t => (
+          <button class="theme-card" data-theme-id={t.id} data-slot="light" data-active={t.id === currentLightId} title={t.description}>
+            <div class="swatches">
+              <div class="swatch" style={`background:${t.swatch.primary}`}></div>
+              <div class="swatch" style={`background:${t.swatch.secondary}`}></div>
+              <div class="swatch" style={`background:${t.swatch.bg}; border-color:rgba(0,0,0,0.15)`}></div>
+            </div>
+            <div class="name">{t.name}</div>
+            <div class="card-desc">{t.description}</div>
+            {t.id === currentLightId && <span class="active-tag">● ACTIVE</span>}
+          </button>
+        ))}
+      </div>
+    </section>
+
+    <section class="theme-section">
+      <header class="theme-section-head">
+        <h2>// COLOR MODE</h2>
+        <span class="active-when">DECIDES WHICH SLOT IS ACTIVE</span>
+      </header>
+      <div class="mode-row" id="mode-row" role="radiogroup" aria-label="Color mode">
+        <button class="mode-btn" data-mode="light" data-active={currentColorMode === 'light'} role="radio">LIGHT</button>
+        <button class="mode-btn" data-mode="dark"  data-active={currentColorMode === 'dark'}  role="radio">DARK</button>
+        <button class="mode-btn" data-mode="auto"  data-active={currentColorMode === 'auto'}  role="radio">AUTO</button>
+        <span class="mode-resolved" id="mode-resolved">{currentColorMode.toUpperCase()}</span>
+      </div>
+      <p class="auto-hint">AUTO FOLLOWS YOUR OPERATING SYSTEM'S PREFERS-COLOR-SCHEME.</p>
+    </section>
+
+    <p id="status" class="theme-status">
+      DARK: <b style="color: var(--aura-color-primary);">{currentDarkId.toUpperCase()}</b>
+      &nbsp;·&nbsp;
+      LIGHT: <b style="color: var(--aura-color-primary);">{currentLightId.toUpperCase()}</b>
+      &nbsp;·&nbsp;
+      MODE: <b style="color: var(--aura-color-primary);">{currentColorMode.toUpperCase()}</b>
     </p>
   </main>
-  <footer class="settings-foot">PROVIDER · PUT /api/data/theme · BROADCASTS theme:changed</footer>
+  <footer class="settings-foot">PROVIDER · PUT api/data/theme · BROADCASTS theme:changed + mode:changed</footer>
 
   <script is:inline>
     const statusEl = document.getElementById('status');
 
-    document.querySelectorAll('.theme-card[data-theme-id]').forEach((card) => {
-      card.addEventListener('click', async () => {
-        const themeId = card.dataset.themeId;
-        statusEl.innerHTML = `APPLYING <b>${themeId.toUpperCase()}</b>…`;
+    function paintStatus({ themeIdDark, themeIdLight, colorMode }) {
+      statusEl.innerHTML =
+        `DARK: <b style="color: var(--aura-color-primary);">${themeIdDark.toUpperCase()}</b>` +
+        ` &middot; LIGHT: <b style="color: var(--aura-color-primary);">${themeIdLight.toUpperCase()}</b>` +
+        ` &middot; MODE: <b style="color: var(--aura-color-primary);">${colorMode.toUpperCase()}</b>`;
+    }
 
+    function markActiveCard(slot, themeId) {
+      document.querySelectorAll(`.theme-card[data-slot="${slot}"]`).forEach((c) => {
+        const active = c.dataset.themeId === themeId;
+        c.dataset.active = active ? 'true' : 'false';
+        let tag = c.querySelector('.active-tag');
+        if (active && !tag) {
+          tag = document.createElement('span');
+          tag.className = 'active-tag';
+          tag.textContent = '● ACTIVE';
+          c.appendChild(tag);
+        } else if (!active && tag) {
+          tag.remove();
+        }
+      });
+    }
+
+    async function selectTheme(slot, themeId) {
+      try {
+        const field = slot === 'dark' ? 'themeIdDark' : 'themeIdLight';
+        const res = await fetch('api/data/theme', {
+          method:  'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ [field]: themeId }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const next = await res.json();
+        markActiveCard(slot, themeId);
+        paintStatus(next);
+      } catch (err) {
+        statusEl.innerHTML = `<b style="color: var(--aura-color-danger);">ERROR — ${err.message}</b>`;
+      }
+    }
+
+    document.querySelectorAll('.theme-card[data-theme-id]').forEach((card) => {
+      card.addEventListener('click', () => selectTheme(card.dataset.slot, card.dataset.themeId));
+    });
+
+    /* ---- Color-mode picker ---- */
+    const modeResolved = document.getElementById('mode-resolved');
+
+    function resolveMode(pref) {
+      if (pref === 'light') return 'light';
+      if (pref === 'dark')  return 'dark';
+      return (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+    }
+    function paintModeButtons(pref) {
+      document.querySelectorAll('.mode-btn').forEach((b) => {
+        b.dataset.active = (b.dataset.mode === pref) ? 'true' : 'false';
+      });
+      if (modeResolved) modeResolved.textContent = resolveMode(pref).toUpperCase();
+    }
+    paintModeButtons(document.querySelector('.mode-btn[data-active="true"]')?.dataset?.mode || 'dark');
+
+    document.querySelectorAll('.mode-btn').forEach((b) => {
+      b.addEventListener('click', async () => {
+        const mode = b.dataset.mode;
+        if (!['light', 'dark', 'auto'].includes(mode)) return;
+        paintModeButtons(mode);
         try {
-          const res = await fetch('/api/data/theme', {
+          const res = await fetch('api/data/theme', {
             method:  'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ themeId }),
+            body:    JSON.stringify({ colorMode: mode }),
           });
-          if (!res.ok) throw new Error(await res.text());
-          document.querySelectorAll('.theme-card').forEach(c => {
-            c.dataset.active = (c.dataset.themeId === themeId) ? 'true' : 'false';
-            const tag = c.querySelector('.active-tag');
-            if (c.dataset.themeId === themeId && !tag) {
-              const span = document.createElement('span');
-              span.className = 'active-tag';
-              span.textContent = '● ACTIVE';
-              c.appendChild(span);
-            } else if (c.dataset.themeId !== themeId && tag) {
-              tag.remove();
-            }
-          });
-          statusEl.innerHTML = `CURRENT: <b style="color: var(--aura-color-primary);">${themeId.toUpperCase()}</b>`;
-        } catch (err) {
-          statusEl.innerHTML = `<b style="color: var(--aura-color-danger);">ERROR — ${err.message}</b>`;
-        }
+          if (res.ok) paintStatus(await res.json());
+        } catch (err) { console.warn('[settings] set colorMode failed', err); }
       });
     });
 
-    // Listen for live theme changes broadcast from the shell — update our own theme link tag
+    /* ---- Live updates from the shell ---- */
     window.addEventListener('message', (ev) => {
-      if (ev.data?.type === 'aura.theme.changed') {
-        const link = document.querySelector('link[rel="stylesheet"][href^="/api/os/theme.css"]');
-        if (link) link.setAttribute('href', '/api/os/theme.css?t=' + Date.now());
-      }
+      const t = ev.data?.type;
+      if (t !== 'aura.theme.changed' && t !== 'aura.mode.changed') return;
+      const link = document.querySelector('link[rel="stylesheet"][href^="/api/os/theme.css"]');
+      if (link) link.setAttribute('href', '/api/os/theme.css?t=' + Date.now());
+      if (ev.data.themeIdDark)  markActiveCard('dark',  ev.data.themeIdDark);
+      if (ev.data.themeIdLight) markActiveCard('light', ev.data.themeIdLight);
+      if (ev.data.colorMode)    paintModeButtons(ev.data.colorMode);
+      if (ev.data.themeIdDark && ev.data.themeIdLight && ev.data.colorMode) paintStatus(ev.data);
     });
+
+    /* Re-paint resolved pill when OS prefers-color-scheme flips while AUTO is selected */
+    if (window.matchMedia) {
+      const mql = window.matchMedia('(prefers-color-scheme: light)');
+      const handle = () => {
+        const active = document.querySelector('.mode-btn[data-active="true"]');
+        if (active?.dataset.mode === 'auto') paintModeButtons('auto');
+      };
+      if (mql.addEventListener) mql.addEventListener('change', handle);
+      else                       mql.addListener?.(handle);
+    }
   </script>
 </body>
 </html>

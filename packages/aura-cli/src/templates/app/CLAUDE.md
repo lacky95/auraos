@@ -28,18 +28,21 @@ where the app's Astro dev server listens.
 
 ## What an "Aura app" is
 
-It's an Astro app with a `app.manifest.json`, an `entrypoint.sh` that
-launches `astro dev` on `$APP_PORT`, and seven lifecycle HTTP endpoints
-under `src/pages/api/lifecycle/`. The shell calls those endpoints over HTTP
-when it spawns, pauses, resumes, or kills your instance.
+It's an Astro app with `app.manifest.json` and lifecycle HTTP endpoints under
+`src/pages/api/lifecycle/`. The shell calls those endpoints over HTTP when
+it spawns, pauses, resumes, or kills your instance.
+
+You **don't need to ship `entrypoint.sh` or `health.ts`** — `ProotRunner`
+synthesises the entrypoint, and `auraAppIntegration()` (in `astro.config.mjs`)
+injects `/api/lifecycle/health`. Both can still be overridden by shipping
+your own file if you really need to.
 
 ### Required surface
 
 | Path                                          | Purpose                                                                |
 |-----------------------------------------------|------------------------------------------------------------------------|
 | `app.manifest.json`                           | Identity, modes, tools, permissions, viewConfig, optional dataProvider |
-| `entrypoint.sh`                               | Started by `ProotRunner`; must `exec` astro on `$APP_PORT`             |
-| `src/pages/api/lifecycle/health.ts`           | `GET` returning 200 once ready — shell polls this to leave `creating`  |
+| `astro.config.mjs`                            | Must include `auraAppIntegration()`                                    |
 | `src/pages/api/lifecycle/onCreate.ts`         | `POST` — first hook after spawn                                        |
 | `src/pages/api/lifecycle/onStart.ts`          | `POST` — after `onCreate`                                              |
 | `src/pages/api/lifecycle/onResume.ts`         | `POST` — every time the instance becomes the foreground                |
@@ -48,40 +51,94 @@ when it spawns, pauses, resumes, or kills your instance.
 | `src/pages/api/lifecycle/onDestroy.ts`        | `POST` — final shutdown hook                                           |
 | `src/pages/api/lifecycle/onActivityCreate.ts` | (Optional) `POST` returning `{ path, title? }` for activity apps       |
 
-Lifecycle hooks may be no-ops; the shell tolerates 404 on the optional ones.
+The scaffold ships every required hook as a one-liner that uses
+`createLifecycleHandler()` from `@aura/app-sdk`. Add your own behaviour by
+passing an `impl`:
 
-## Key manifest fields
+```ts
+// src/pages/api/lifecycle/onDestroy.ts
+import { createLifecycleHandler } from '@aura/app-sdk';
+import { state } from '../../../state.js';
+export const POST = createLifecycleHandler('onDestroy', async () => {
+  state.activities.clear();
+  await flushPendingWrites();
+});
+```
+
+For activity-mode apps, use the typed activity factories:
+
+```ts
+// src/pages/api/lifecycle/onActivityCreate.ts
+import { createActivityCreateHandler } from '@aura/app-sdk';
+import { state } from '../../../state.js';
+export const POST = createActivityCreateHandler(({ activityId }) => {
+  state.activities.add(activityId);
+  return { path: '/', title: `My App ${activityId.split('#').pop()}` };
+});
+```
+
+```ts
+// src/pages/api/lifecycle/onActivityDestroy/[activityId].ts
+import { createActivityDestroyHandler } from '@aura/app-sdk';
+import { state } from '../../../../state.js';
+export const POST = createActivityDestroyHandler((activityId) => {
+  state.activities.delete(activityId);
+});
+```
+
+## Manifest fields
+
+The scaffold writes only the fields you actually need to pick — every other
+manifest field has a sensible schema default. Run `aura dev clean-manifest`
+to strip any default-valued fields you've written by hand.
 
 ```jsonc
 {
-  "id": "com.example.foo",                       // reverse-domain; equals dir name
+  "id": "com.example.foo",         // reverse-domain; equals dir name
   "name": "Foo",
   "version": "0.1.0",
-  "entrypoint": "entrypoint.sh",
-  "tools": ["bash", "node", "git"],              // bind-mounted into PRoot from /os/toolchain/bin/
-                                                 // also see `aura cap install <name>` for more
-  "permissions": [],                             // free-form strings; PermissionManager auto-grants in MVP
-  "instanceMode": "single",                      // single = at most one backend process; multi = N processes
-  "maxInstances": 0,                             // hard cap for multi (0 = unlimited)
-  "activityMode": "none",                        // none = 1 view = 1 instance; multi = N activities per instance
-  "maxActivitiesPerInstance": 0,
-  "defaultLaunch": "new-instance",               // only meaningful for multi/multi apps
-  "backgroundService": false,                    // true = instance survives last activity close
-  "viewConfig": { "defaultWidth": 600, "defaultHeight": 400, "resizable": true },
-  "dataProvider": {                              // optional content-provider declaration
-    "authority": "com.example.foo",
-    "providers": [
-      { "path": "/api/data/things", "readPermission": "foo.read", "writePermission": "foo.write" }
-    ]
-  }
+  "description": "...",
+  "category": "utility",            // also: productivity, media, communication, system, game, developer
+  "permissions": [],                // see Permission strings below
+  "tools": ["bash", "node"],        // bind-mounted from /os/toolchain/bin/
+  "instanceMode": "single",         // 'single' | 'multi'
+  "activityMode": "none"            // 'none' | 'multi'
 }
 ```
+
+Optional fields (all have defaults — only set them if you need a non-default):
+`maxInstances`, `maxActivitiesPerInstance`, `defaultLaunch`,
+`backgroundService`, `warmPool`, `viewConfig`, `preferredLayout`,
+`themeStrategy`, `theme`, `shortcuts`, `dataProvider`, `serverPort`, `icon`,
+`entrypoint`.
 
 **Instance vs. Activity**:
 - *Instance* = one running backend process (one Astro server, one PID, one port).
 - *Activity* = one UI screen / iframe. Multiple activities can share an instance.
 - Single-instance apps reuse the same backend; activity-mode apps get multiple
   views in the layout, each with its own `activityId` in the URL.
+
+## Theming (`themeStrategy`)
+
+AuraOS exposes its palette as CSS custom properties (`--aura-color-primary`,
+`--aura-color-bg`, …) plus a `prefers-color-scheme`-aware light/dark axis.
+Pick how this app participates by setting `themeStrategy` in the manifest:
+
+| Strategy    | What the proxy injects                                    | When to use                                     |
+|-------------|-----------------------------------------------------------|-------------------------------------------------|
+| `inherit`   | `<link rel="stylesheet" href="/api/os/theme.css">` + meta | **Default.** Use `var(--aura-color-*)` and you're done. |
+| `themed`    | `<meta name="aura-theme-id">`, `aura-color-mode`, framework | App ships its own palettes but reacts to OS theme/mode (via `osClient.onThemeChange()` / `onModeChange()`). |
+| `override`  | Only `aura-color-mode` meta as a hint                     | App owns its palette completely — photo editors, brand-locked surfaces, accessibility tools. |
+
+The Process Manager surfaces a `THEMED` / `OVERRIDE` chip on apps that don't
+`inherit`, so users understand why an app looks different.
+
+For most apps, leave it at `inherit` and just reference the CSS vars:
+
+```css
+body { background: var(--aura-color-bg); color: var(--aura-color-text); }
+.primary { color: var(--aura-color-primary); }
+```
 
 ## Runtime context the app sees
 
@@ -93,6 +150,15 @@ Inside the PRoot, your Astro process gets:
 | `APP_INSTANCE_ID`     | `appId` (single) or `appId-N` (multi)                                |
 | `APP_PORT`            | The port to bind your Astro server to                                |
 | `OS_API_BASE`         | Shell URL — usually `http://localhost:3000`                          |
+| `AURA_LAYER_TAG`      | "[proot+ctnr]" — for prompts / diagnostics                           |
+
+Don't reach for `process.env` directly — use the SDK's `getAppContext()`:
+
+```ts
+import { getAppContext } from '@aura/app-sdk';
+const ctx = getAppContext();
+// → { appId, instanceId, appPort, osApiBase, dataDir, layerTag }
+```
 
 On HTTP requests proxied through the shell, your handlers also receive:
 
@@ -102,11 +168,8 @@ On HTTP requests proxied through the shell, your handlers also receive:
 | `x-aura-instance-id`  | The instance id                                                      |
 | `x-aura-activity-id`  | The current activity id (only present for activity-mode apps)        |
 
-Read them in `.astro` frontmatter or API routes via `Astro.request.headers`.
-**Note**: a static HTML page (`src/pages/*.html`) cannot read these headers
-— if you need the ids client-side, read them from `?inst=` / `?activity=`
-querystring instead, which the shell will append when constructing the
-iframe `src`.
+Read them via `readIdentityHeaders(request)` from the SDK rather than
+hand-rolling `request.headers.get(...)`.
 
 ## Common patterns
 
@@ -145,6 +208,7 @@ aura inst logs    com.example.foo[-N]    # tail logs
 aura cap install  <name>                 # add a tool to /os/toolchain/bin/
 aura cap grant    com.example.foo <cap>  # add to this manifest's tools[]
 aura dev validate apps/com.example.foo   # schema-check the manifest
+aura dev clean-manifest <path>           # strip default-valued fields
 aura events       --filter "app:*"       # watch the event bus
 aura whereami                            # what layer am I in (proot/ctnr/host)
 ```
@@ -172,7 +236,8 @@ packages/core         AppManager, ProotRunner, OsEventBus, PermissionManager,
                       ContentProviderRegistry, ThemeManager, manifest schema
 packages/shell        Astro SSR shell, /api/proxy, /api/data, /api/apps,
                       OSLayout (console bridge, theme), launcher, layout
-packages/app-sdk      Tiny browser SDK: OsClient (queryProvider, theme, …)
+packages/app-sdk      App-side SDK: OsClient, lifecycle factories, context,
+                      auraAppIntegration
 packages/aura-cli     The `aura` CLI you just used to scaffold this app
 packages/ui           Shared UI primitives
 apps/<id>             Each app, including this one

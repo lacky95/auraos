@@ -26,4 +26,13 @@ export interface AppView {
   isLoading: boolean;
   lifecycleState: AppLifecycleState;
   createdAt: string;
+  /**
+   * Whether the user can minimize this view. False by default — clicking
+   * close tears the view (and its activity) down. Set true only when both
+   * (a) the activity declared itself minimizable via `onActivityCreate`
+   * returning `{ minimizable: true }`, AND (b) the parent app's manifest
+   * declares `backgroundService: true`. Otherwise minimizing would orphan
+   * a window onto a backend about to auto-stop.
+   */
+  minimizable?: boolean;
 }

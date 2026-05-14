@@ -392,6 +392,17 @@ export class AppManager {
     if (manifest.activityMode !== 'multi') {
       throw new Error(`App ${inst.appId} does not support activities (activityMode='${manifest.activityMode}')`);
     }
+    // Defensive auto-claim: opening an activity on a pool member is an
+    // implicit hand-off. Without this flip the Process Manager would hide
+    // the parent (inPool filter) and the activity would appear orphaned.
+    // Also schedules a refill so the pool stays at target size.
+    if (inst.inPool) {
+      inst.inPool = false;
+      this.providers.registerInstance(inst, manifest);
+      OsEventBus.emit('app:stateChanged', { instanceId: inst.instanceId, appId: inst.appId, state: inst.state, port: inst.port });
+      console.log(`[AppManager] pool: auto-claimed ${inst.instanceId} (activity open on pool member)`);
+      this.scheduleRefill(inst.appId);
+    }
     if (
       manifest.maxActivitiesPerInstance > 0 &&
       this.getActivitiesByInstance(instanceId).length >= manifest.maxActivitiesPerInstance
@@ -409,11 +420,19 @@ export class AppManager {
     let path = '/';
     let title: string | undefined;
     let metadata: Record<string, unknown> | undefined;
+    let minimizable = false;
     if (result && typeof result === 'object' && !Array.isArray(result)) {
-      const obj = result as { path?: unknown; title?: unknown; metadata?: unknown };
+      const obj = result as { path?: unknown; title?: unknown; metadata?: unknown; minimizable?: unknown };
       if (typeof obj.path === 'string' && obj.path.length > 0) path = obj.path;
       if (typeof obj.title === 'string') title = obj.title;
       if (obj.metadata && typeof obj.metadata === 'object') metadata = obj.metadata as Record<string, unknown>;
+      if (obj.minimizable === true) minimizable = true;
+    }
+    // Even if the app declares minimizable=true, the OS only honors it for
+    // apps that keep running with no visible windows. Otherwise minimizing
+    // would orphan an activity onto a backend that's about to auto-stop.
+    if (minimizable && !manifest.backgroundService) {
+      minimizable = false;
     }
 
     const activity: AppActivity = {
@@ -423,8 +442,9 @@ export class AppManager {
       path,
       createdAt: now,
       lastTransitionAt: now,
-      ...(title    !== undefined ? { title }    : {}),
-      ...(metadata !== undefined ? { metadata } : {}),
+      ...(title       !== undefined ? { title }       : {}),
+      ...(metadata    !== undefined ? { metadata }    : {}),
+      ...(minimizable ?               { minimizable: true } : {}),
     };
     this.activities.set(activityId, activity);
     OsEventBus.emit('activity:opened', {
@@ -433,6 +453,7 @@ export class AppManager {
       appId: inst.appId,
       path,
       ...(title !== undefined ? { title } : {}),
+      ...(minimizable ?         { minimizable: true } : {}),
     });
     return activity;
   }

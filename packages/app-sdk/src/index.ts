@@ -1,6 +1,32 @@
 export { OsClient } from './OsClient.js';
-// identity-middleware is `.mjs` so app `astro.config.mjs` can import it via
+
+// Lifecycle hook factories — apps use these in place of hand-rolled APIRoutes
+// for /api/lifecycle/* files. See ./lifecycle.ts for the full API.
+export {
+  createHealthEndpoint,
+  createLifecycleHandler,
+  createActivityCreateHandler,
+  createActivityDestroyHandler,
+} from './lifecycle.js';
+export type {
+  LifecycleHookName,
+  ActivityCreateRequest,
+  ActivityCreateResult,
+} from './lifecycle.js';
+
+// Android-`Context`-equivalent: env-var + header readers. See ./context.ts.
+export {
+  getAppContext,
+  readIdentityHeaders,
+} from './context.js';
+export type {
+  AppContext,
+  IdentityHeaders,
+} from './context.js';
+
+// integration.mjs is `.mjs` so app `astro.config.mjs` can import it via
 // Node's loader before Astro/Vite take over. Re-export through the package
-// barrel so it shows up alongside OsClient.
+// barrel so it shows up alongside OsClient. `auraIdentityIntegration` is a
+// back-compat alias for the previous name.
 // @ts-expect-error — JS file, no .d.ts; only consumed from .mjs configs anyway
-export { auraIdentityIntegration } from './identity-middleware.mjs';
+export { auraAppIntegration, auraIdentityIntegration } from './integration.mjs';

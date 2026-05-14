@@ -1,6 +1,5 @@
-import type { APIRoute } from 'astro';
+import { createLifecycleHandler } from '@aura/app-sdk';
 import { state } from '../../../state.js';
-export const POST: APIRoute = () => {
+export const POST = createLifecycleHandler('onDestroy', () => {
   state.activities.clear();
-  return new Response(JSON.stringify({ ok: true }), { status: 200 });
-};
+});

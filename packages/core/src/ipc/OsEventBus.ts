@@ -1,14 +1,42 @@
 import EventEmitter from 'eventemitter3';
 import type { AppLifecycleState } from '../types/lifecycle.js';
 
+/**
+ * Compact framework fingerprint carried on theme/mode change events. Apps that
+ * care about framework drift (e.g. when we eventually lift the single-framework
+ * invariant) can react without an extra fetch.
+ */
+export interface EventFramework {
+  id:      string;
+  version: string;
+}
+
 export interface OsEvents {
   'app:stateChanged': { instanceId: string; appId: string; state: AppLifecycleState; port: number | null };
   'app:crashed': { instanceId: string; appId: string; error: string };
   'app:installed': { appId: string };
   'app:removed': { appId: string };
-  'activity:opened': { activityId: string; parentInstanceId: string; appId: string; path: string; title?: string };
+  'activity:opened': { activityId: string; parentInstanceId: string; appId: string; path: string; title?: string; minimizable?: boolean };
   'activity:closed': { activityId: string; parentInstanceId: string; appId: string };
-  'theme:changed':   { themeId: string; themeName: string };
+  'theme:changed': {
+    themeId:       string;                     // the ACTIVE (resolved) theme id
+    themeName:     string;
+    themeIdDark:   string;                     // user's dark slot pick
+    themeIdLight:  string;                     // user's light slot pick
+    colorMode:     'light' | 'dark' | 'auto';
+    resolvedMode:  'light' | 'dark';
+    activeTone:    'light' | 'dark';           // === resolvedMode but semantic
+    framework:     EventFramework;
+  };
+  'mode:changed': {
+    themeId:       string;                     // the ACTIVE (resolved) theme id
+    themeIdDark:   string;
+    themeIdLight:  string;
+    colorMode:     'light' | 'dark' | 'auto';
+    resolvedMode:  'light' | 'dark';
+    activeTone:    'light' | 'dark';
+    framework:     EventFramework;
+  };
   'notification': { appId: string; title: string; body: string };
 }
 

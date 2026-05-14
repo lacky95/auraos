@@ -3,24 +3,18 @@
   "name": "Terminal",
   "version": "0.1.0",
   "description": "System terminal with AI toolchain access",
-  "entrypoint": "entrypoint.sh",
+  "category": "system",
   "permissions": ["storage.read", "storage.write", "network.local"],
   "tools": ["bash", "node", "git", "claude-code", "aura"],
-  "rootfsMode": "shared",
-  "category": "system",
   "instanceMode": "multi",
   "maxInstances": 2,
   "activityMode": "multi",
-  "maxActivitiesPerInstance": 0,
   "defaultLaunch": "new-activity",
   "warmPool": 1,
-  "windowConfig": {
+  "viewConfig": {
     "defaultWidth": 800,
     "defaultHeight": 500,
     "resizable": true
   },
-  "preferredLayout": "tiling",
-  "theme": {
-    "mode": "os-components"
-  }
+  "preferredLayout": "tiling"
 }

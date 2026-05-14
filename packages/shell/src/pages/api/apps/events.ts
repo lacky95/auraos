@@ -28,6 +28,7 @@ export const GET: APIRoute = () => {
       const onActOpened     = (ev: unknown) => send({ type: 'activity:opened',  ...(ev as object) });
       const onActClosed     = (ev: unknown) => send({ type: 'activity:closed',  ...(ev as object) });
       const onThemeChanged  = (ev: unknown) => send({ type: 'theme:changed',    ...(ev as object) });
+      const onModeChanged   = (ev: unknown) => send({ type: 'mode:changed',     ...(ev as object) });
       const onNotification  = (ev: unknown) => send({ type: 'notification',     ...(ev as object) });
 
       OsEventBus.on('app:stateChanged',   onStateChanged);
@@ -37,6 +38,7 @@ export const GET: APIRoute = () => {
       OsEventBus.on('activity:opened',    onActOpened);
       OsEventBus.on('activity:closed',    onActClosed);
       OsEventBus.on('theme:changed',      onThemeChanged);
+      OsEventBus.on('mode:changed',       onModeChanged);
       OsEventBus.on('notification',       onNotification);
 
       const heartbeat = setInterval(() => safeEnqueue(encoder.encode(': heartbeat\n\n')), 15_000);
@@ -50,6 +52,7 @@ export const GET: APIRoute = () => {
         OsEventBus.off('activity:opened',    onActOpened);
         OsEventBus.off('activity:closed',    onActClosed);
         OsEventBus.off('theme:changed',      onThemeChanged);
+        OsEventBus.off('mode:changed',       onModeChanged);
         OsEventBus.off('notification',       onNotification);
       };
 

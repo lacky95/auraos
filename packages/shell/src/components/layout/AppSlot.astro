@@ -12,7 +12,9 @@ const isLoading = view.lifecycleState !== 'resumed';
   <div class="slot-chrome">
     <span class="slot-title">{view.title}</span>
     <div class="slot-actions">
-      <button class="slot-btn" data-action="minimize" title="Minimize">_</button>
+      {view.minimizable && (
+        <button class="slot-btn" data-action="minimize" title="Minimize">_</button>
+      )}
       <button class="slot-btn danger" data-action="close" title="Close">✕</button>
     </div>
   </div>

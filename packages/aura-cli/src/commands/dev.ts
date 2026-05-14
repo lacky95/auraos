@@ -111,4 +111,110 @@ export function registerDev(program: Command): void {
       });
       child.on('exit', (code) => process.exit(code ?? 0));
     });
+
+  dev
+    .command('clean-manifest [path]')
+    .option('--all',     'Clean every manifest under apps/')
+    .option('--dry-run', 'Print the cleaned manifest without writing back')
+    .description('Strip manifest fields whose values equal the schema default (entrypoint, rootfsMode, viewConfig, theme, etc.).')
+    .action((path: string | undefined, opts: { all?: boolean; dryRun?: boolean }) => {
+      const targets: string[] = [];
+      if (opts.all) {
+        for (const entry of readdirSync(APPS_DIR)) {
+          const m = join(APPS_DIR, entry, 'app.manifest.json');
+          if (existsSync(m)) targets.push(m);
+        }
+      } else if (path) {
+        const abs = resolve(path);
+        const m = abs.endsWith('.json') ? abs : join(abs, 'app.manifest.json');
+        if (!existsSync(m)) fail(`Manifest not found: ${m}`);
+        targets.push(m);
+      } else {
+        fail('Pass a path or --all.');
+      }
+      let changedCount = 0;
+      for (const m of targets) {
+        try {
+          const before = readFileSync(m, 'utf-8');
+          const data   = JSON.parse(before) as Record<string, unknown>;
+          const after  = stripDefaultedFields(data);
+          const afterStr = JSON.stringify(after, null, 2) + '\n';
+          if (afterStr === before) {
+            info(`${m}: already minimal`);
+            continue;
+          }
+          changedCount++;
+          if (opts.dryRun) {
+            console.log(color.bold(m));
+            console.log(afterStr);
+          } else {
+            writeFileSync(m, afterStr);
+            ok(`${m}: stripped ${countStrippedFields(data, after)} default field(s)`);
+          }
+        } catch (err) {
+          warn(`${m}: ${String(err)}`);
+        }
+      }
+      info(`done; ${changedCount} of ${targets.length} manifest(s) ${opts.dryRun ? 'would be' : 'were'} cleaned`);
+    });
+}
+
+/**
+ * Manifest fields whose presence in JSON is redundant because the Zod schema
+ * fills the same value during parse. Listed here rather than introspected
+ * out of Zod because Zod's runtime API for "what's this field's default" is
+ * verbose and version-fragile; one explicit table is easier to audit.
+ *
+ * Kept in sync manually with `packages/core/src/types/manifest.ts` — if a
+ * default changes there, mirror it here.
+ */
+const SCHEMA_DEFAULTS: Record<string, unknown> = {
+  entrypoint:              'entrypoint.sh',
+  permissions:             [],
+  tools:                   [],
+  rootfsMode:              'shared',
+  category:                'utility',
+  instanceMode:            'single',
+  maxInstances:            0,
+  warmPool:                0,
+  activityMode:            'none',
+  maxActivitiesPerInstance: 0,
+  defaultLaunch:           'new-instance',
+  backgroundService:       false,
+  viewConfig:              { defaultWidth: 800, defaultHeight: 600, resizable: true },
+  lifecycleBasePath:       '/api/lifecycle',
+  preferredLayout:         'any',
+  shortcuts:               [],
+  theme:                   { mode: 'os-components' },
+  themeStrategy:           'inherit',
+};
+
+function stripDefaultedFields(manifest: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...manifest };
+  for (const [key, defaultValue] of Object.entries(SCHEMA_DEFAULTS)) {
+    if (!(key in out)) continue;
+    if (deepEqual(out[key], defaultValue)) delete out[key];
+  }
+  return out;
+}
+
+function countStrippedFields(before: Record<string, unknown>, after: Record<string, unknown>): number {
+  return Object.keys(before).filter((k) => !(k in after)).length;
+}
+
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== typeof b) return false;
+  if (a === null || b === null) return false;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return false;
+    return a.every((v, i) => deepEqual(v, b[i]));
+  }
+  if (typeof a === 'object' && typeof b === 'object') {
+    const aKeys = Object.keys(a as object).sort();
+    const bKeys = Object.keys(b as object).sort();
+    if (aKeys.length !== bKeys.length) return false;
+    return aKeys.every((k, i) => k === bKeys[i] && deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
+  }
+  return false;
 }
