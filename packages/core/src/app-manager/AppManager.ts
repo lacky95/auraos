@@ -29,6 +29,11 @@ export class AppManager {
   private dataDir: string;
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
   private reconcileRunning = false;
+  // Pool refills currently in flight per appId. The "pool" itself is just the
+  // subset of `instances` with `inPool === true`; we don't keep a separate
+  // queue (avoids stale instanceId references when a pool member dies). The
+  // refill counter prevents over-spawning when many slots open simultaneously.
+  private refillInFlight = new Map<string, number>();
 
   constructor(opts: {
     appsDir: string;
@@ -59,6 +64,14 @@ export class AppManager {
     await this.registry.init();
     console.log(`[AppManager] Ready. Apps found: ${this.registry.getAll().length}`);
     this.startReconciler();
+    // Kick off warm-pool fills for opted-in apps (non-blocking — init returns
+    // immediately, pool members spawn in the background). The reconciler tops
+    // up later if any of these fail or die.
+    for (const m of this.registry.getAll()) {
+      if (m.warmPool > 0 && m.instanceMode === 'multi') {
+        for (let i = 0; i < m.warmPool; i++) this.scheduleRefill(m.id);
+      }
+    }
   }
 
   /**
@@ -77,6 +90,8 @@ export class AppManager {
    * Start a new instance of an app.
    * For instanceMode='single': returns existing instanceId if one is already running.
    * For instanceMode='multi': always creates a new instance (subject to maxInstances cap).
+   * For apps with warmPool > 0 and instanceMode='multi': claims a pre-spawned
+   * idle instance from the warm pool if available; otherwise spawns fresh.
    * @returns instanceId of the (new or existing) running instance.
    */
   async start(appId: string): Promise<string> {
@@ -84,27 +99,65 @@ export class AppManager {
     if (!manifest) throw new Error(`App not found: ${appId}`);
 
     if (manifest.instanceMode === 'single') {
+      // Filter out inPool members from existing-instance reuse — pool members
+      // are "owned by the AppManager" until claimed; the user can't pick one
+      // up via single-instance reuse without going through claimFromPool.
+      // (Single-instance apps shouldn't have warmPool > 0 in practice, but
+      // defending the invariant keeps the code obviously correct.)
       const existing = this.getInstancesByApp(appId).find(
-        (i) => i.state === 'resumed' || i.state === 'resuming' || i.state === 'started',
+        (i) => !i.inPool && (i.state === 'resumed' || i.state === 'resuming' || i.state === 'started'),
       );
       if (existing) return existing.instanceId;
 
       // If a single-instance app is paused/stopped, resume it
       const paused = this.getInstancesByApp(appId).find(
-        (i) => i.state === 'paused' || i.state === 'stopped',
+        (i) => !i.inPool && (i.state === 'paused' || i.state === 'stopped'),
       );
       if (paused) {
         await this.resume(paused.instanceId);
         return paused.instanceId;
       }
     } else {
+      // maxInstances cap counts only USER-OWNED instances. Pool members would
+      // otherwise consume the cap and starve user launches.
       const running = this.getInstancesByApp(appId).filter(
-        (i) => i.state !== 'destroyed' && i.state !== 'error',
+        (i) => !i.inPool && i.state !== 'destroyed' && i.state !== 'error',
       );
       if (manifest.maxInstances > 0 && running.length >= manifest.maxInstances) {
         throw new Error(`App ${appId} reached maxInstances=${manifest.maxInstances}`);
       }
     }
+
+    // Warm-pool fast path: claim an already-resumed instance instead of paying
+    // the ~3s spawn cost. Only meaningful for multi-instance apps — for single
+    // mode, a pool member would BE the singleton, and refills would race the
+    // user's claim. Guarded explicitly.
+    if (manifest.warmPool > 0 && manifest.instanceMode === 'multi') {
+      const claimed = this.claimFromPool(appId);
+      if (claimed) {
+        this.scheduleRefill(appId);
+        return claimed.instanceId;
+      }
+    }
+
+    const instanceId = await this.spawnInstance(appId, { inPool: false });
+    if (manifest.warmPool > 0 && manifest.instanceMode === 'multi') {
+      // User stole a slot the pool could have filled; top up.
+      this.scheduleRefill(appId);
+    }
+    return instanceId;
+  }
+
+  /**
+   * Spawn a fresh app instance and run the full lifecycle chain
+   * (creating → created → starting → started → resuming → resumed).
+   * Used both by user-initiated `start()` and by pool refills. The only
+   * behavioural difference is whether content-provider routes get registered
+   * (pool members don't claim them — see comment below).
+   */
+  private async spawnInstance(appId: string, opts: { inPool: boolean }): Promise<string> {
+    const manifest = this.registry.getById(appId);
+    if (!manifest) throw new Error(`App not found: ${appId}`);
 
     const instanceId = this.allocateInstanceId(appId, manifest.instanceMode);
     mkdirSync(join(this.dataDir, 'apps', appId, instanceId), { recursive: true });
@@ -114,7 +167,7 @@ export class AppManager {
 
     try {
       const pid = await this.runner.spawn(instanceId, appId, port, manifest);
-      this.upsertInstance(instanceId, appId, { pid, port, startedAt: new Date() });
+      this.upsertInstance(instanceId, appId, { pid, port, startedAt: new Date(), inPool: opts.inPool });
       this.transition(instanceId, appId, 'created', port);
 
       await this.runner.callLifecycle(instanceId, 'onCreate');
@@ -127,9 +180,28 @@ export class AppManager {
       this.transition(instanceId, appId, 'resuming', port);
       this.transition(instanceId, appId, 'resumed', port);
 
-      // Register declared content providers, if any
-      const live = this.instances.get(instanceId);
-      if (live) this.providers.registerInstance(live, manifest);
+      // Register content providers ONLY for user-owned instances. If pool
+      // members claimed /api/data/<authority>/* routes, multiple pool entries
+      // would compete and the route would point at an instance the user
+      // doesn't own. Pool claim registers providers after the hand-off.
+      if (!opts.inPool) {
+        const live = this.instances.get(instanceId);
+        if (live) this.providers.registerInstance(live, manifest);
+      } else {
+        // Pool warm-up: pre-compile the iframe entry point (`/`) and the
+        // common heavy static assets so the user's FIRST iframe load after
+        // claim doesn't trigger Vite's on-demand compile + bundle path.
+        // waitHealthy only touched /api/lifecycle/health, leaving the
+        // index.astro module cold. Fire-and-forget; never blocks the spawn.
+        const warmups = ['/'];
+        if (appId === 'com.aura.terminal') {
+          warmups.push('/vendor/xterm/xterm.min.js', '/vendor/xterm/xterm.min.css');
+        }
+        for (const path of warmups) {
+          fetch(`http://localhost:${port}${path}`, { signal: AbortSignal.timeout(5000) })
+            .then((r) => r.body?.cancel()).catch(() => undefined);
+        }
+      }
 
       this.runner.onExit(instanceId, (code) => this.handleUnexpectedExit(instanceId, appId, code));
       return instanceId;
@@ -138,6 +210,74 @@ export class AppManager {
       this.transition(instanceId, appId, 'error', null, String(err));
       throw err;
     }
+  }
+
+  /**
+   * Pop a ready pool member and convert it to user-owned. Returns null when
+   * the pool is empty or every candidate failed its readiness check (e.g.
+   * the backing pid died between spawn and claim).
+   */
+  private claimFromPool(appId: string): AppInstance | null {
+    for (const inst of this.instances.values()) {
+      if (inst.appId !== appId || !inst.inPool) continue;
+      if (inst.state !== 'resumed' || inst.pid == null) continue;
+      let alive = false;
+      try { process.kill(inst.pid, 0); alive = true; } catch { /* dead */ }
+      if (!alive) {
+        // Reconciler will tidy this up on its next tick; just skip for now.
+        continue;
+      }
+      // Hand-off — keep the existing instanceId (its env was baked at spawn
+      // time with this id, so renaming would break identity invariants).
+      inst.inPool = false;
+      const manifest = this.registry.getById(appId);
+      if (manifest) this.providers.registerInstance(inst, manifest);
+      // Informational state-changed event so the Process Manager picks up the
+      // newly visible instance (it filters by !inPool, so this is effectively
+      // an "appeared" event for that view).
+      OsEventBus.emit('app:stateChanged', { instanceId: inst.instanceId, appId, state: inst.state, port: inst.port });
+      console.log(`[AppManager] pool: claimed ${inst.instanceId} for user`);
+      return inst;
+    }
+    return null;
+  }
+
+  /**
+   * Background refill: spawn one more pool member if the pool isn't already
+   * at target. Cap on `(currentPoolSize + inFlightRefills)` prevents
+   * over-spawning when many slots open simultaneously (init, rapid claims).
+   * Fire-and-forget — never blocks the caller.
+   */
+  private scheduleRefill(appId: string): void {
+    const manifest = this.registry.getById(appId);
+    if (!manifest || manifest.warmPool <= 0 || manifest.instanceMode !== 'multi') return;
+    const target   = manifest.warmPool;
+    const inPool   = this.countPool(appId);
+    const inFlight = this.refillInFlight.get(appId) ?? 0;
+    if (inPool + inFlight >= target) return;
+
+    this.refillInFlight.set(appId, inFlight + 1);
+    void this.spawnInstance(appId, { inPool: true })
+      .then((instanceId) => {
+        console.log(`[AppManager] pool: ${appId} refilled with ${instanceId} (now ${this.countPool(appId)}/${target})`);
+      })
+      .catch((err) => {
+        console.warn(`[AppManager] pool: refill spawn for ${appId} failed: ${(err as Error).message}`);
+      })
+      .finally(() => {
+        const n = (this.refillInFlight.get(appId) ?? 1) - 1;
+        if (n <= 0) this.refillInFlight.delete(appId);
+        else this.refillInFlight.set(appId, n);
+      });
+  }
+
+  /** Number of currently-idle pool members for an app. Used by Process Manager. */
+  countPool(appId: string): number {
+    let n = 0;
+    for (const i of this.instances.values()) {
+      if (i.appId === appId && i.inPool) n++;
+    }
+    return n;
   }
 
   async stop(instanceId: string): Promise<void> {
@@ -527,6 +667,18 @@ export class AppManager {
           this.forceKill(inst.instanceId);
         }
       } catch { /* health probe failed entirely — covered by liveness check next tick */ }
+    }
+
+    // 4) Pool top-up — re-fill any opted-in app's warm pool back to its
+    //    target after crashes, claims that haven't been refilled yet, or
+    //    failed init-time refills. scheduleRefill is idempotent against the
+    //    cap so calling it slack-times is safe.
+    for (const m of this.registry.getAll()) {
+      if (m.warmPool <= 0 || m.instanceMode !== 'multi') continue;
+      const inPool   = this.countPool(m.id);
+      const inFlight = this.refillInFlight.get(m.id) ?? 0;
+      const slack = m.warmPool - (inPool + inFlight);
+      for (let i = 0; i < slack; i++) this.scheduleRefill(m.id);
     }
   }
 

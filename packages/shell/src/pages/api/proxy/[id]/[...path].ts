@@ -1,5 +1,6 @@
 import type { APIRoute } from 'astro';
-import { getAppManager } from '@aura/core';
+import { getAppManager, ThemeManager } from '@aura/core';
+import type { ColorMode } from '@aura/core';
 
 /**
  * Reverse-proxy to a running app instance.
@@ -29,10 +30,19 @@ export const ALL: APIRoute = async ({ params, request }) => {
   const isLive = (state: string) =>
     state !== 'error' && state !== 'destroyed' && state !== 'destroying';
 
+  // Resolution rules:
+  //   - Exact instanceId match: serve it (even if it's a pool member — that
+  //     only happens when something inside the AppManager hands the id out,
+  //     e.g. immediately after claimFromPool returns).
+  //   - Bare appId match: pick a USER-OWNED live instance (skip inPool=true).
+  //     Otherwise a freshly-launched iframe would race the AppManager's claim
+  //     and route to a pool member that hasn't been handed over yet, leaving
+  //     the user's view pointing at an instance the AppManager doesn't think
+  //     they own.
   const exact = mgr.getInstance(id);
   const instance = exact && isLive(exact.state)
     ? exact
-    : mgr.getInstancesByApp(id).find((i) => isLive(i.state) && i.port != null);
+    : mgr.getInstancesByApp(id).find((i) => !i.inPool && isLive(i.state) && i.port != null);
 
   if (!instance?.port) {
     return new Response(notReadyHtml(id), {
@@ -182,13 +192,52 @@ export default {};
         );
       }
 
-      // Inject identity meta tags so the shell can verify on iframe `load` that
-      // the document rendered is actually for the requested app. Third line of
-      // defense after waitHealthy (spawn-time) and the response-header check
-      // (this same handler, above).
-      const idAttr   = instance.appId.replace(/"/g, '&quot;');
-      const instAttr = instance.instanceId.replace(/"/g, '&quot;');
-      const idMeta   = `<meta name="aura-app-id" content="${idAttr}"><meta name="aura-instance-id" content="${instAttr}">`;
+      // Inject identity + theme metadata so apps + shell can self-describe.
+      //
+      // Identity (always, all strategies):
+      //   <meta name="aura-app-id">     identity for the iframe load check
+      //   <meta name="aura-instance-id">
+      //
+      // Theming (varies by themeStrategy in the manifest):
+      //   <meta name="aura-design-framework">         scificn (always)
+      //   <meta name="aura-design-framework-version>  0.1.0   (always)
+      //   <meta name="aura-theme-strategy">           inherit | themed | override
+      //   <meta name="aura-color-mode">               user pref (light/dark/auto)
+      //   <meta name="aura-resolved-mode">            server-resolved (light/dark)
+      //   <meta name="aura-theme-id">                 only for inherit + themed
+      //   <link href="/api/os/theme.css">             only for inherit (auto-injected)
+      const manifest      = mgr.getManifest(instance.appId);
+      const themeStrategy = (manifest?.themeStrategy ?? 'inherit') as 'inherit' | 'themed' | 'override';
+      const themeSel      = await readShellThemeSelection().catch(() => null);
+      const themeId       = themeSel?.themeId   ?? ThemeManager.DEFAULT_THEME_ID;
+      const colorMode     = themeSel?.colorMode ?? ThemeManager.DEFAULT_COLOR_MODE;
+      const resolvedMode  = ThemeManager.resolveMode(colorMode);
+      const framework     = ThemeManager.getDesignFramework(themeId);
+
+      const escAttr = (s: string) => s.replace(/"/g, '&quot;');
+      const metaParts: string[] = [
+        `<meta name="aura-app-id" content="${escAttr(instance.appId)}">`,
+        `<meta name="aura-instance-id" content="${escAttr(instance.instanceId)}">`,
+        `<meta name="aura-design-framework" content="${escAttr(framework.id)}">`,
+        `<meta name="aura-design-framework-version" content="${escAttr(framework.version)}">`,
+        `<meta name="aura-theme-strategy" content="${escAttr(themeStrategy)}">`,
+        `<meta name="aura-color-mode" content="${escAttr(colorMode)}">`,
+        `<meta name="aura-resolved-mode" content="${escAttr(resolvedMode)}">`,
+      ];
+      // themed + inherit both see the theme id; override sees only mode.
+      if (themeStrategy !== 'override') {
+        metaParts.push(`<meta name="aura-theme-id" content="${escAttr(themeId)}">`);
+      }
+
+      // Auto-inject /api/os/theme.css for inherit strategy. Skip if the app
+      // already declared its own link (manual + auto both is harmless; only
+      // skip if the manual one is present to keep the doc smaller).
+      const headFragments: string[] = [...metaParts];
+      if (themeStrategy === 'inherit' &&
+          !/<link\b[^>]*href=["']\/api\/os\/theme\.css/i.test(rewritten)) {
+        headFragments.push('<link rel="stylesheet" href="/api/os/theme.css">');
+      }
+      const idMeta = headFragments.join('');
       rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${idMeta}`);
 
       // Inject a console-relay script into every app iframe so its `console.*`
@@ -245,6 +294,29 @@ var X=window.XMLHttpRequest;if(X){var oO=X.prototype.open,oS=X.prototype.send;X.
     });
   }
 };
+
+/**
+ * Read current `{ themeId, colorMode }` from the Settings provider. Mirrors
+ * OSLayout's SSR lookup but lives here so the proxy doesn't have to depend on
+ * any shell-side helper. Falls back to defaults silently if Settings isn't
+ * running yet — every value has a sane default in ThemeManager.
+ */
+async function readShellThemeSelection(): Promise<{ themeId: string; colorMode: ColorMode } | null> {
+  const mgr = getAppManager();
+  const settings = mgr.getInstancesByApp('com.aura.settings')[0];
+  if (!settings?.port) return null;
+  try {
+    const r = await fetch(`http://localhost:${settings.port}/api/data/theme`, {
+      signal: AbortSignal.timeout(500),
+    });
+    if (!r.ok) return null;
+    const body = await r.json() as { themeId?: string; colorMode?: ColorMode };
+    return {
+      themeId:   body.themeId   ?? ThemeManager.DEFAULT_THEME_ID,
+      colorMode: body.colorMode ?? ThemeManager.DEFAULT_COLOR_MODE,
+    };
+  } catch { return null; }
+}
 
 function notReadyHtml(id: string): string {
   return `<!DOCTYPE html><html><head><style>

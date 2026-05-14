@@ -57,6 +57,15 @@ export const AppManifestSchema = z.object({
   /** Optional hard cap on concurrent instances when instanceMode='multi'. 0 = unlimited. */
   maxInstances: z.number().int().min(0).default(0),
   /**
+   * Number of pre-spawned, idle instances the AppManager keeps in a "warm pool".
+   * When the user clicks Launch, an already-resumed instance from the pool is
+   * handed over (sub-100ms) instead of paying the full astro-dev cold-start
+   * (~3s+ per app). The AppManager spawns a refill in the background.
+   * 0 = no pool (default, behaviour unchanged). Capped at 8 to prevent
+   * runaway RAM use from a misconfigured manifest.
+   */
+  warmPool: z.number().int().min(0).max(8).default(0),
+  /**
    * Activity policy: 'none' = each window has its own backend instance,
    * 'multi' = one backend instance can host multiple concurrent activities (UI screens, tabs).
    * Analogous to Android's per-app Activity stack.
@@ -92,6 +101,18 @@ export const AppManifestSchema = z.object({
     mode: z.enum(['os-components', 'custom']).default('os-components'),
     accentColor: z.string().optional(),
   }).default({}),
+  /**
+   * How the app participates in the OS theming pipeline (Theme Manager v2).
+   *   'inherit'  → default. Proxy auto-injects `<link rel="stylesheet" href="/api/os/theme.css">`.
+   *                App uses `var(--aura-color-*)`; light/dark + theme flow through automatically.
+   *   'themed'   → app supplies its own palettes but adapts to the OS's (framework, themeId, mode).
+   *                Proxy injects framework + theme-id + color-mode `<meta>` tags; no theme.css link.
+   *                App reads the meta tags and picks a matching stylesheet; falls back to its default.
+   *   'override' → app owns its palette entirely. Proxy injects only color-mode meta as a hint.
+   *                Use sparingly — photo editors, accessibility tools, brand-locked experiences.
+   *                ProcessManager surfaces a chip so users see why this app looks different.
+   */
+  themeStrategy: z.enum(['inherit', 'themed', 'override']).default('inherit'),
   /**
    * Optional content-provider declaration. Apps that expose structured data
    * to OTHER apps register paths here. The OS routes `/api/data/<authority>/...`

@@ -16,4 +16,11 @@ export interface AppInstance {
   lastTransitionAt: Date;
   restartCount: number;
   error?: string;
+  /**
+   * True while this instance is sitting in the AppManager's warm pool —
+   * pre-spawned but not yet handed to a user. The Process Manager hides
+   * these from per-app rows and the proxy must not resolve bare-appId
+   * lookups to them. Cleared on claim (see AppManager.claimFromPool).
+   */
+  inPool?: boolean;
 }

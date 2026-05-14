@@ -9,7 +9,11 @@
   "rootfsMode": "shared",
   "category": "system",
   "instanceMode": "multi",
-  "maxInstances": 8,
+  "maxInstances": 2,
+  "activityMode": "multi",
+  "maxActivitiesPerInstance": 0,
+  "defaultLaunch": "new-activity",
+  "warmPool": 1,
   "windowConfig": {
     "defaultWidth": 800,
     "defaultHeight": 500,

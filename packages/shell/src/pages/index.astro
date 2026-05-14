@@ -31,6 +31,10 @@ type InitialView = {
 const initialViews: InitialView[] = [];
 for (const inst of mgr.getAllInstances()) {
   if (inst.state !== 'resumed' || inst.port === null) continue;
+  // Skip warm-pool members — they aren't user-owned and must NOT render as
+  // iframes on page load (otherwise the user sees N pool terminals appear
+  // before they've clicked anything).
+  if (inst.inPool) continue;
   const manifest = mgr.getManifest(inst.appId);
   if (!manifest) continue;
 
@@ -247,8 +251,12 @@ for (const inst of mgr.getAllInstances()) {
       let targetInstanceState = 'creating';
 
       if (!wantNewInstance) {
-        const apps = await (await fetch('/api/apps')).json() as Array<{ manifest: { id: string }; instances: Array<{ instanceId: string; state: string }> }>;
-        const inst = apps.find((a) => a.manifest.id === appId)?.instances?.[0];
+        const apps = await (await fetch('/api/apps')).json() as Array<{ manifest: { id: string }; instances: Array<{ instanceId: string; state: string; inPool?: boolean }> }>;
+        // Skip warm-pool members — opening an activity directly on them
+        // would bypass claimFromPool and leave the AppManager thinking the
+        // instance is still idle. The fall-through below calls /start which
+        // does claim properly.
+        const inst = apps.find((a) => a.manifest.id === appId)?.instances?.find((i) => !i.inPool);
         if (inst) { targetInstanceId = inst.instanceId; targetInstanceState = inst.state; }
       }
 
@@ -432,7 +440,7 @@ for (const inst of mgr.getAllInstances()) {
         ? `auto repeat(${rows}, 1fr)`
         : `repeat(${rows}, 1fr)`,
       gap: '2px',
-      background: 'var(--aura-color-border)',
+      background: 'var(--aura-color-bg)',
       alignItems: '', justifyContent: '', flexDirection: '',
     });
 
@@ -524,28 +532,48 @@ for (const inst of mgr.getAllInstances()) {
 
     const body = slot.querySelector('.slot-body') as HTMLElement | null;
     if (!body) return;
-    const hasIframe = !!body.querySelector('iframe');
+    const hasIframe   = !!body.querySelector('iframe');
+    const hasSkeleton = !!body.querySelector('[data-aura-skeleton]');
 
-    if (v.isLoading) {
-      // Skeleton state. If an iframe already exists (e.g. an instance went
-      // resumed → pausing), DON'T destroy it — the app keeps running and we
-      // want to preserve its inner state.
-      if (!hasIframe) {
-        // Update skeleton text in place — markup is stateless.
-        body.innerHTML = renderSkeleton(v);
-      }
-    } else {
-      // Skeleton → iframe transition happens exactly ONCE per slot. After this,
-      // we never touch the iframe again, no matter how many state events fire.
-      if (!hasIframe && v.iframeUrl) {
-        body.innerHTML = '';
-        const iframe = document.createElement('iframe');
-        iframe.title = v.title;
-        iframe.setAttribute('allow', 'clipboard-read; clipboard-write');
-        iframe.style.cssText = 'width:100%;height:100%;border:none;background:var(--aura-color-bg);';
-        iframe.src = v.iframeUrl;
-        body.appendChild(iframe);
-      }
+    // ALWAYS ensure a skeleton overlay exists when the slot is created. It
+    // covers the iframe area until the iframe finishes loading — without
+    // this overlay, the user stares at a black rectangle during the
+    // ~150-300ms between iframe-element creation and the embedded app's
+    // first paint. The skeleton is removed via iframe.onload below.
+    if (!hasSkeleton && !hasIframe) {
+      const sk = document.createElement('div');
+      sk.setAttribute('data-aura-skeleton', '1');
+      sk.style.cssText = 'position:absolute;inset:0;z-index:5;background:var(--aura-color-bg);';
+      sk.innerHTML = renderSkeleton(v);
+      body.appendChild(sk);
+    }
+
+    // If the view is still mid-spawn (isLoading=true) we don't have an
+    // iframeUrl yet (placeholder views set iframeUrl=''). Don't create the
+    // iframe element until we have a real URL.
+    if (v.isLoading) return;
+
+    // Transition: backend says resumed → mount iframe ONCE under the
+    // skeleton overlay. Skeleton stays visible until the iframe's `load`
+    // event fires, which is when the embedded app's document has finished
+    // loading (scripts have run, splash is painted). Then we remove it.
+    if (!hasIframe && v.iframeUrl) {
+      const iframe = document.createElement('iframe');
+      iframe.title = v.title;
+      iframe.setAttribute('allow', 'clipboard-read; clipboard-write');
+      iframe.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border:none;background:transparent;';
+      iframe.addEventListener('load', () => {
+        // Two RAFs = "wait until the browser has actually painted the iframe
+        // contents, then remove the overlay". Without this, fast-loading
+        // iframes flash black for one frame between onload and first paint.
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const sk = body.querySelector('[data-aura-skeleton]');
+          if (sk) sk.remove();
+        }));
+      }, { once: true });
+      iframe.src = v.iframeUrl;
+      // Insert as the FIRST child so the skeleton (appended above) stays on top.
+      body.insertBefore(iframe, body.firstChild);
     }
   }
 
