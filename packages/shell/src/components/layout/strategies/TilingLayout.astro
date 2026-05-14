@@ -1,0 +1,30 @@
+---
+import type { AppView } from '@aura/core';
+import AppSlot from '../AppSlot.astro';
+
+interface Props {
+  views: AppView[];
+}
+const { views } = Astro.props;
+
+// Build a CSS grid: ceil(sqrt(n)) columns
+const n = views.length;
+const cols = Math.ceil(Math.sqrt(n));
+const rows = Math.ceil(n / cols);
+const gridStyle = `grid-template-columns: repeat(${cols}, 1fr); grid-template-rows: repeat(${rows}, 1fr);`;
+---
+<div class="tiling-layout" style={gridStyle}>
+  {views.map(view => (
+    <AppSlot view={view} />
+  ))}
+</div>
+
+<style>
+  .tiling-layout {
+    display: grid;
+    width: 100%;
+    height: 100%;
+    gap: 2px;
+    background: var(--aura-color-border);
+  }
+</style>

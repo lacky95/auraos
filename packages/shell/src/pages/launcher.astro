@@ -1,0 +1,17 @@
+---
+import OSLayout from '../layouts/OSLayout.astro';
+import AppDrawer from '../components/launcher/AppDrawer.astro';
+import { getAppManager } from '@aura/core';
+
+const apps = getAppManager().getManifests();
+---
+<OSLayout>
+  <AppDrawer apps={apps} />
+</OSLayout>
+
+<script>
+  window.auraLaunchApp = async (appId: string) => {
+    await fetch(`/api/apps/${appId}/start`, { method: 'POST' });
+    window.location.href = '/';
+  };
+</script>

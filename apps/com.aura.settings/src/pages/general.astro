@@ -1,0 +1,60 @@
+---
+import '../styles/settings.css';
+import { getState } from '../state.js';
+const state = getState();
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Settings · General — AuraOS</title>
+  <link rel="stylesheet" href="/api/os/theme.css" />
+</head>
+<body>
+  <header class="settings-bar">
+    <span class="name">⚙ SETTINGS</span>
+    <span class="crumbs">› GENERAL</span>
+  </header>
+  <main class="settings-body">
+    <div class="form-row">
+      <label>CLOCK FORMAT</label>
+      <select id="clock-format">
+        <option value="24h"  selected={state.clockFormat === '24h'}>24-hour</option>
+        <option value="12h"  selected={state.clockFormat === '12h'}>12-hour</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>LOCALE</label>
+      <input id="locale" type="text" value={state.locale} placeholder="en-US" />
+    </div>
+    <p id="status" style="margin-top: 14px; font-size: 0.7rem; color: var(--aura-color-text-dim); letter-spacing: 0.08em;">
+      CHANGES PERSIST IMMEDIATELY · /api/data/settings PUT
+    </p>
+  </main>
+  <footer class="settings-foot">PROVIDER · /api/data/settings</footer>
+
+  <script is:inline>
+    const statusEl = document.getElementById('status');
+    const debounceTimers = new Map();
+
+    function patch(field, value) {
+      clearTimeout(debounceTimers.get(field));
+      debounceTimers.set(field, setTimeout(async () => {
+        try {
+          await fetch('/api/data/settings', {
+            method:  'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ [field]: value }),
+          });
+          statusEl.innerHTML = `SAVED <b>${field}</b> = ${value} · ${new Date().toLocaleTimeString()}`;
+        } catch (err) {
+          statusEl.innerHTML = `<b style="color: var(--aura-color-danger);">ERROR — ${err.message}</b>`;
+        }
+      }, 200));
+    }
+
+    document.getElementById('clock-format').addEventListener('change', (e) => patch('clockFormat', e.target.value));
+    document.getElementById('locale').addEventListener('input', (e) => patch('locale', e.target.value));
+  </script>
+</body>
+</html>

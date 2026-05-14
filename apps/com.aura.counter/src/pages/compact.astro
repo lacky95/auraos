@@ -1,0 +1,102 @@
+---
+const instanceId = Astro.request.headers.get('x-aura-instance-id') ?? 'com.aura.counter';
+const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Counter (compact) — AuraOS</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0a;
+      color: #ccffcc;
+      font-family: 'Courier New', monospace;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    header {
+      padding: 4px 10px;
+      background: #111;
+      border-bottom: 1px solid rgba(255,153,0,.2);
+      font-size: 0.6rem;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: #557755;
+      display: flex;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    header b { color: #ff9900; font-weight: normal; }
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+    }
+    #value {
+      font-size: 3.5rem;
+      color: #ff9900;
+      text-shadow: 0 0 8px #ff9900, 0 0 16px rgba(255,153,0,.4);
+    }
+    .row { display: flex; gap: 8px; }
+    button {
+      background: transparent;
+      color: #ccffcc;
+      border: 1px solid rgba(255,153,0,.3);
+      font-family: 'Courier New', monospace;
+      font-size: 1rem;
+      padding: 6px 14px;
+      cursor: pointer;
+    }
+    button:hover { color: #ff9900; box-shadow: 0 0 6px rgba(255,153,0,.4); }
+    footer {
+      padding: 4px 10px;
+      background: #111;
+      border-top: 1px solid rgba(255,153,0,.1);
+      font-size: 0.6rem;
+      color: #557755;
+      text-transform: uppercase;
+      letter-spacing: .1em;
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <span>ACT <b>{activityId}</b></span>
+    <span>MODE <b>COMPACT</b></span>
+  </header>
+  <main>
+    <div id="value">0</div>
+    <div class="row">
+      <button data-action="dec">−</button>
+      <button data-action="inc">+</button>
+    </div>
+  </main>
+  <footer>SHARED COUNTER · INST {instanceId}</footer>
+
+  <script is:inline>
+    const valueEl = document.getElementById('value');
+    const sse = new EventSource('/api/events');
+    sse.onmessage = (e) => {
+      const s = JSON.parse(e.data);
+      valueEl.textContent = String(s.value);
+    };
+    document.querySelectorAll('button[data-action]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        fetch('/api/counter', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: btn.dataset.action }),
+        }).catch(() => undefined);
+      });
+    });
+  </script>
+</body>
+</html>

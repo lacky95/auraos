@@ -1,0 +1,29 @@
+:root {
+  --aura-color-primary:    #00ff41;
+  --aura-color-secondary:  #ff9900;
+  --aura-color-danger:     #ff2020;
+  --aura-color-bg:         #0a0a0a;
+  --aura-color-surface:    #111111;
+  --aura-color-surface-2:  #1a1a1a;
+  --aura-color-border:     rgba(0, 255, 65, 0.2);
+  --aura-color-text:       #ccffcc;
+  --aura-color-text-dim:   #557755;
+
+  --aura-font-mono:        'Courier New', 'Courier', monospace;
+  --aura-font-size-xs:     0.65rem;
+  --aura-font-size-sm:     0.75rem;
+  --aura-font-size-md:     0.875rem;
+  --aura-font-size-lg:     1rem;
+
+  --aura-glow-primary:     0 0 8px #00ff41, 0 0 16px rgba(0,255,65,0.3);
+  --aura-glow-secondary:   0 0 8px #ff9900, 0 0 16px rgba(255,153,0,0.3);
+  --aura-glow-danger:      0 0 8px #ff2020, 0 0 16px rgba(255,32,32,0.3);
+  --aura-glow-subtle:      0 0 4px rgba(0,255,65,0.2);
+
+  --aura-border:           1px solid var(--aura-color-border);
+  --aura-radius:           0;
+  --aura-spacing:          8px;
+
+  --aura-statusbar-height: 28px;
+  --aura-dock-height:      64px;
+}

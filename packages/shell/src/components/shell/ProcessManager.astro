@@ -1,0 +1,401 @@
+---
+/**
+ * Slide-in panel listing every running app instance with controls:
+ *   FOCUS — promote to fullscreen focus mode (above the layout)
+ *   STOP  — graceful lifecycle stop (onPause → onStop → onDestroy → SIGTERM)
+ *   KILL  — immediate SIGKILL, no hooks
+ *
+ * The panel is empty in SSR — populated client-side from /api/apps and refreshed
+ * via the SSE stream from /api/apps/events.
+ */
+---
+<button id="pm-toggle" class="pm-toggle" title="Process Manager (running apps)">
+  <span class="pm-toggle-icon">▦</span>
+</button>
+
+<aside id="pm-panel" class="pm-panel" aria-hidden="true">
+  <header class="pm-header">
+    <span class="pm-title">▦ PROCESSES</span>
+    <button id="pm-close" class="pm-close" title="Close panel">✕</button>
+  </header>
+  <ul id="pm-list" class="pm-list">
+    <li class="pm-empty">NO RUNNING INSTANCES</li>
+  </ul>
+  <footer class="pm-footer">
+    <span id="pm-count">0 RUNNING</span>
+    <button id="pm-refresh" class="pm-action-btn" title="Reload list">↻ REFRESH</button>
+  </footer>
+</aside>
+
+<style>
+  .pm-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    color: var(--aura-color-secondary);
+    background: transparent;
+    border: var(--aura-border);
+    cursor: pointer;
+    flex-shrink: 0;
+    font-family: var(--aura-font-mono);
+    font-size: 1.2rem;
+    transition: box-shadow 0.1s;
+    position: relative;
+  }
+  .pm-toggle:hover { box-shadow: var(--aura-glow-secondary); }
+  .pm-toggle[data-has-instances="true"]::after {
+    content: '';
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 6px;
+    height: 6px;
+    background: var(--aura-color-primary);
+    box-shadow: var(--aura-glow-primary);
+  }
+  .pm-toggle-icon { line-height: 1; }
+
+  .pm-panel {
+    position: fixed;
+    top: var(--aura-statusbar-height);
+    right: 0;
+    bottom: var(--aura-dock-height);
+    width: 380px;
+    max-width: 90vw;
+    background: var(--aura-color-surface);
+    border-left: var(--aura-border);
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    transform: translateX(100%);
+    transition: transform 0.15s ease-out;
+  }
+  .pm-panel[aria-hidden="false"] { transform: translateX(0); }
+
+  .pm-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 12px;
+    height: 36px;
+    background: var(--aura-color-surface-2);
+    border-bottom: var(--aura-border);
+    flex-shrink: 0;
+  }
+  .pm-title {
+    font-size: var(--aura-font-size-sm);
+    color: var(--aura-color-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+  }
+  .pm-close {
+    background: transparent;
+    border: var(--aura-border);
+    color: var(--aura-color-text-dim);
+    cursor: pointer;
+    font-family: var(--aura-font-mono);
+    font-size: var(--aura-font-size-xs);
+    padding: 2px 6px;
+  }
+  .pm-close:hover { color: var(--aura-color-danger); box-shadow: var(--aura-glow-danger); }
+
+  .pm-list {
+    flex: 1;
+    overflow-y: auto;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .pm-empty {
+    padding: 24px 12px;
+    color: var(--aura-color-text-dim);
+    font-size: var(--aura-font-size-xs);
+    text-align: center;
+    letter-spacing: 0.1em;
+  }
+
+  .pm-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 4px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--aura-color-border);
+  }
+  .pm-row:hover { background: var(--aura-color-surface-2); }
+
+  .pm-row-meta { min-width: 0; }
+  .pm-row-name {
+    font-size: var(--aura-font-size-sm);
+    color: var(--aura-color-primary);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pm-row-sub {
+    font-size: var(--aura-font-size-xs);
+    color: var(--aura-color-text-dim);
+    margin-top: 2px;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .pm-row-sub .pm-state {
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .pm-state[data-state="resumed"]  { color: var(--aura-color-primary); }
+  .pm-state[data-state="paused"]   { color: var(--aura-color-secondary); }
+  .pm-state[data-state="error"]    { color: var(--aura-color-danger); }
+  .pm-state[data-state="starting"], .pm-state[data-state="creating"], .pm-state[data-state="resuming"] {
+    color: var(--aura-color-text-dim);
+  }
+
+  .pm-row-actions {
+    display: flex;
+    gap: 4px;
+    align-self: center;
+  }
+  .pm-action-btn {
+    background: transparent;
+    border: var(--aura-border);
+    color: var(--aura-color-text-dim);
+    font-family: var(--aura-font-mono);
+    font-size: var(--aura-font-size-xs);
+    letter-spacing: 0.06em;
+    padding: 4px 6px;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: color 0.1s, box-shadow 0.1s;
+  }
+  .pm-action-btn:hover { color: var(--aura-color-primary); box-shadow: var(--aura-glow-subtle); }
+  .pm-action-btn[data-variant="warn"]:hover { color: var(--aura-color-secondary); box-shadow: var(--aura-glow-secondary); }
+  .pm-action-btn[data-variant="danger"]:hover { color: var(--aura-color-danger); box-shadow: var(--aura-glow-danger); }
+
+  /* Subprocess sub-rows: indented and visually de-emphasized */
+  .pm-subrow {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 4px;
+    padding: 6px 12px 6px 28px;
+    border-bottom: 1px solid var(--aura-color-border);
+    background: rgba(0,0,0,0.15);
+  }
+  .pm-subrow:hover { background: var(--aura-color-surface-2); }
+  .pm-subrow-name {
+    font-size: var(--aura-font-size-xs);
+    color: var(--aura-color-secondary);
+    letter-spacing: 0.06em;
+  }
+  .pm-subrow-id {
+    font-size: var(--aura-font-size-xs);
+    color: var(--aura-color-text-dim);
+    margin-top: 2px;
+  }
+  .pm-bg-badge {
+    font-size: 0.55rem;
+    color: var(--aura-color-secondary);
+    border: 1px solid var(--aura-color-secondary);
+    padding: 1px 4px;
+    letter-spacing: 0.08em;
+    margin-left: 4px;
+  }
+
+  .pm-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px;
+    height: 30px;
+    border-top: var(--aura-border);
+    background: var(--aura-color-surface-2);
+    flex-shrink: 0;
+    font-size: var(--aura-font-size-xs);
+    color: var(--aura-color-text-dim);
+    letter-spacing: 0.08em;
+  }
+</style>
+
+<script>
+  interface InstanceListItem {
+    instanceId: string;
+    appId: string;
+    state: string;
+    pid: number | null;
+    port: number | null;
+  }
+  interface ActivityListItem {
+    activityId: string;
+    parentInstanceId: string;
+    appId: string;
+    path: string;
+    title?: string;
+  }
+  interface ManifestLite {
+    id: string;
+    name: string;
+    activityMode: 'none' | 'multi';
+    backgroundService: boolean;
+  }
+
+  const toggleBtn = document.getElementById('pm-toggle') as HTMLButtonElement;
+  const panel     = document.getElementById('pm-panel') as HTMLElement;
+  const closeBtn  = document.getElementById('pm-close') as HTMLButtonElement;
+  const list      = document.getElementById('pm-list') as HTMLUListElement;
+  const count     = document.getElementById('pm-count') as HTMLElement;
+  const refresh   = document.getElementById('pm-refresh') as HTMLButtonElement;
+
+  let manifests = new Map<string, ManifestLite>();
+
+  function openPanel()  { panel.setAttribute('aria-hidden', 'false'); refreshList(); }
+  function closePanel() { panel.setAttribute('aria-hidden', 'true'); }
+
+  toggleBtn.addEventListener('click', () => {
+    if (panel.getAttribute('aria-hidden') === 'false') closePanel();
+    else openPanel();
+  });
+  closeBtn.addEventListener('click', closePanel);
+  refresh.addEventListener('click', refreshList);
+
+  // Esc closes the panel
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && panel.getAttribute('aria-hidden') === 'false') closePanel();
+  });
+
+  async function refreshList() {
+    try {
+      const res = await fetch('/api/apps');
+      const apps = await res.json() as Array<{
+        manifest: ManifestLite;
+        instances: InstanceListItem[];
+        activities: ActivityListItem[];
+      }>;
+      manifests = new Map(apps.map(a => [a.manifest.id, a.manifest]));
+      const allInstances  = apps.flatMap(a => a.instances);
+      const allActivities = apps.flatMap(a => a.activities);
+      render(allInstances, allActivities);
+    } catch (err) {
+      console.error('[ProcessManager] refresh failed', err);
+    }
+  }
+
+  function render(instances: InstanceListItem[], activities: ActivityListItem[]) {
+    const total = instances.length + activities.length;
+    count.textContent = `${instances.length} INST · ${activities.length} ACT`;
+    toggleBtn.dataset['hasInstances'] = total > 0 ? 'true' : 'false';
+
+    if (instances.length === 0) {
+      list.innerHTML = `<li class="pm-empty">NO RUNNING INSTANCES</li>`;
+      return;
+    }
+
+    const actByInstance = new Map<string, ActivityListItem[]>();
+    for (const a of activities) {
+      const arr = actByInstance.get(a.parentInstanceId) ?? [];
+      arr.push(a);
+      actByInstance.set(a.parentInstanceId, arr);
+    }
+
+    list.innerHTML = instances.map(inst => {
+      const manifest = manifests.get(inst.appId);
+      const name = manifest?.name ?? inst.appId;
+      const supportsActivities = manifest?.activityMode === 'multi';
+      const isBg = manifest?.backgroundService === true;
+      const acts = actByInstance.get(inst.instanceId) ?? [];
+
+      const actRows = acts.map(act => {
+        const label = act.title ?? `↳ ${act.activityId.split('#').pop()}`;
+        return `
+          <li class="pm-subrow" data-activity-id="${act.activityId}" data-parent-id="${inst.instanceId}">
+            <div class="pm-row-meta">
+              <div class="pm-subrow-name">${label}</div>
+              <div class="pm-subrow-id">${act.activityId}${act.path && act.path !== '/' ? ` · ${act.path}` : ''}</div>
+            </div>
+            <div class="pm-row-actions">
+              <button class="pm-action-btn" data-action="focus-activity" title="Focus this activity">FOCUS</button>
+              <button class="pm-action-btn" data-action="close-activity" data-variant="warn" title="Close this activity">CLOSE</button>
+            </div>
+          </li>
+        `;
+      }).join('');
+
+      return `
+        <li class="pm-row" data-instance-id="${inst.instanceId}">
+          <div class="pm-row-meta">
+            <div class="pm-row-name">${name}${isBg ? '<span class="pm-bg-badge">BG</span>' : ''}</div>
+            <div class="pm-row-sub">
+              <span>${inst.instanceId}</span>
+              <span class="pm-state" data-state="${inst.state}">${inst.state}</span>
+              ${inst.pid !== null ? `<span>pid ${inst.pid}</span>` : ''}
+              ${inst.port !== null ? `<span>:${inst.port}</span>` : ''}
+            </div>
+          </div>
+          <div class="pm-row-actions">
+            <button class="pm-action-btn" data-action="focus" title="Bring to focus view">FOCUS</button>
+            ${supportsActivities ? `<button class="pm-action-btn" data-action="new-activity" title="Open a new activity on this instance">+ NEW ACTIVITY</button>` : ''}
+            <button class="pm-action-btn" data-action="app-close" data-variant="warn" title="Standard close — runs full lifecycle: onPause → onStop → onDestroy → SIGTERM">APP CLOSE</button>
+            <button class="pm-action-btn" data-action="task-kill" data-variant="danger" title="Force kill — immediate SIGKILL, no lifecycle hooks (only if app hangs)">TASK KILL</button>
+          </div>
+        </li>
+        ${actRows}
+      `;
+    }).join('');
+  }
+
+  list.addEventListener('click', async (e) => {
+    const btn = (e.target as HTMLElement).closest('[data-action]') as HTMLButtonElement | null;
+    if (!btn) return;
+    const action = btn.dataset['action']!;
+    btn.disabled = true;
+    try {
+      // Activity-level actions: row carries data-activity-id
+      const actRow = btn.closest('[data-activity-id]') as HTMLElement | null;
+      if (actRow) {
+        const activityId       = actRow.dataset['activityId']!;
+        const parentInstanceId = actRow.dataset['parentId']!;
+        if (action === 'focus-activity') {
+          (window as any).auraFocusInstance?.(parentInstanceId, activityId);
+          closePanel();
+        } else if (action === 'close-activity') {
+          await fetch(`/api/activities/${encodeURIComponent(activityId)}/close`, { method: 'POST' });
+          (window as any).auraRemoveViewByActivity?.(activityId);
+          await refreshList();
+        }
+        return;
+      }
+
+      // Instance-level actions: row carries data-instance-id
+      const row = btn.closest('[data-instance-id]') as HTMLElement | null;
+      if (!row) return;
+      const instanceId = row.dataset['instanceId']!;
+      if (action === 'focus') {
+        (window as any).auraFocusInstance?.(instanceId);
+        closePanel();
+      } else if (action === 'new-activity') {
+        await (window as any).auraOpenActivityOnInstance?.(instanceId);
+        await refreshList();
+      } else if (action === 'app-close') {
+        await fetch(`/api/instances/${encodeURIComponent(instanceId)}/stop`, { method: 'POST' });
+        (window as any).auraRemoveViewsByInstance?.(instanceId);
+        await refreshList();
+      } else if (action === 'task-kill') {
+        await fetch(`/api/instances/${encodeURIComponent(instanceId)}/kill`, { method: 'POST' });
+        (window as any).auraRemoveViewsByInstance?.(instanceId);
+        await refreshList();
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // Live-refresh via SSE from the OS event bus
+  const sse = new EventSource('/api/apps/events');
+  sse.onmessage = () => { if (panel.getAttribute('aria-hidden') === 'false') refreshList(); };
+
+  // Initial load to populate the badge dot on the toggle button
+  refreshList();
+</script>

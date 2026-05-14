@@ -1,0 +1,18 @@
+{
+  "name": "com.aura.terminal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev":   "APP_PORT=${APP_PORT:-4001} astro dev --host 0.0.0.0 --port ${APP_PORT:-4001}",
+    "build": "astro build",
+    "start": "node dist/server/entry.mjs"
+  },
+  "dependencies": {
+    "@astrojs/node": "^10.0.0",
+    "astro": "^6.0.0",
+    "node-pty": "^1.0.0",
+    "ws": "^8.18.0",
+    "@types/ws": "^8.5.0"
+  }
+}

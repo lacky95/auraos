@@ -1,0 +1,17 @@
+node_modules/
+**/node_modules/
+dist/
+.env
+.env.local
+*.tsbuildinfo
+.astro/
+**/.astro/
+.pnpm-store/
+.claude/
+data/
+
+# editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.log

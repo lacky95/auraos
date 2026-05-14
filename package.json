@@ -1,0 +1,21 @@
+{
+  "name": "aura",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22",
+    "pnpm": ">=9"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @aura/shell dev",
+    "build": "pnpm --filter @aura/core build && pnpm --filter @aura/ui build && pnpm --filter @aura/app-sdk build && pnpm --filter @aura/shell build",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild", "node-pty", "sharp", "@img/sharp-libvips-linux-x64"]
+  }
+}

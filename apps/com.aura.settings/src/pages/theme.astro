@@ -1,0 +1,94 @@
+---
+import '../styles/settings.css';
+import { getState } from '../state.js';
+const { themeId: currentThemeId } = getState();
+
+// Same theme definitions as the OS ThemeManager — duplicated here for SSR
+// preview swatches. In a future iteration we could fetch them from a content
+// provider like `/api/data/theme/list` on the shell.
+const THEMES = [
+  { id: 'scificn',   name: 'SCIFICN',   primary: '#00ff41', secondary: '#ff9900', bg: '#0a0a0a' },
+  { id: 'amber',     name: 'AMBER',     primary: '#ff9900', secondary: '#ffd166', bg: '#0a0805' },
+  { id: 'red-alert', name: 'RED ALERT', primary: '#ff2020', secondary: '#ff7070', bg: '#0a0303' },
+  { id: 'blue',      name: 'CYAN',      primary: '#00aaff', secondary: '#88ddff', bg: '#04080a' },
+];
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Settings · Theme — AuraOS</title>
+  <link rel="stylesheet" href="/api/os/theme.css" />
+</head>
+<body>
+  <header class="settings-bar">
+    <span class="name">⚙ SETTINGS</span>
+    <span class="crumbs">› THEME</span>
+  </header>
+  <main class="settings-body">
+    <p style="margin-bottom: 16px; font-size: 0.75rem; color: var(--aura-color-text-dim); letter-spacing: 0.08em;">
+      PICK AN OS THEME — APPLIES LIVE TO SHELL + APPS WITH THEME LINK
+    </p>
+    <div class="theme-row">
+      {THEMES.map(t => (
+        <button class="theme-card" data-theme-id={t.id} data-active={t.id === currentThemeId}>
+          <div class="swatches">
+            <div class="swatch" style={`background:${t.primary}`}></div>
+            <div class="swatch" style={`background:${t.secondary}`}></div>
+            <div class="swatch" style={`background:${t.bg}; border-color:#444`}></div>
+          </div>
+          <div class="name">{t.name}</div>
+          {t.id === currentThemeId && <span class="active-tag">● ACTIVE</span>}
+        </button>
+      ))}
+    </div>
+    <p id="status" style="margin-top: 18px; font-size: 0.7rem; color: var(--aura-color-text-dim); letter-spacing: 0.08em;">
+      CURRENT: <b style="color: var(--aura-color-primary);">{currentThemeId.toUpperCase()}</b>
+    </p>
+  </main>
+  <footer class="settings-foot">PROVIDER · PUT /api/data/theme · BROADCASTS theme:changed</footer>
+
+  <script is:inline>
+    const statusEl = document.getElementById('status');
+
+    document.querySelectorAll('.theme-card[data-theme-id]').forEach((card) => {
+      card.addEventListener('click', async () => {
+        const themeId = card.dataset.themeId;
+        statusEl.innerHTML = `APPLYING <b>${themeId.toUpperCase()}</b>…`;
+
+        try {
+          const res = await fetch('/api/data/theme', {
+            method:  'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ themeId }),
+          });
+          if (!res.ok) throw new Error(await res.text());
+          document.querySelectorAll('.theme-card').forEach(c => {
+            c.dataset.active = (c.dataset.themeId === themeId) ? 'true' : 'false';
+            const tag = c.querySelector('.active-tag');
+            if (c.dataset.themeId === themeId && !tag) {
+              const span = document.createElement('span');
+              span.className = 'active-tag';
+              span.textContent = '● ACTIVE';
+              c.appendChild(span);
+            } else if (c.dataset.themeId !== themeId && tag) {
+              tag.remove();
+            }
+          });
+          statusEl.innerHTML = `CURRENT: <b style="color: var(--aura-color-primary);">${themeId.toUpperCase()}</b>`;
+        } catch (err) {
+          statusEl.innerHTML = `<b style="color: var(--aura-color-danger);">ERROR — ${err.message}</b>`;
+        }
+      });
+    });
+
+    // Listen for live theme changes broadcast from the shell — update our own theme link tag
+    window.addEventListener('message', (ev) => {
+      if (ev.data?.type === 'aura.theme.changed') {
+        const link = document.querySelector('link[rel="stylesheet"][href^="/api/os/theme.css"]');
+        if (link) link.setAttribute('href', '/api/os/theme.css?t=' + Date.now());
+      }
+    });
+  </script>
+</body>
+</html>

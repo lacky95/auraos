@@ -1,0 +1,54 @@
+---
+import '../styles/settings.css';
+const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Settings — AuraOS</title>
+  <link rel="stylesheet" href="/api/os/theme.css" />
+</head>
+<body>
+  <header class="settings-bar">
+    <span class="name">⚙ SETTINGS</span>
+    <span class="crumbs">OVERVIEW</span>
+    <span>ACT <b>{activityId}</b></span>
+  </header>
+  <main class="settings-body">
+    <div class="tile-grid">
+      <button class="tile" data-section="theme">
+        <h3>▦ THEME</h3>
+        <p>Phosphor color · live preview · 4 presets</p>
+      </button>
+      <button class="tile" data-section="general">
+        <h3>⏱ GENERAL</h3>
+        <p>Clock format · locale</p>
+      </button>
+      <button class="tile" data-section="about">
+        <h3>ℹ ABOUT</h3>
+        <p>AuraOS · versions</p>
+      </button>
+    </div>
+  </main>
+  <footer class="settings-foot">CONTENT PROVIDER · com.aura.settings</footer>
+
+  <script is:inline>
+    // Open a new activity (panel) on this single-instance Settings app.
+    // The shell forwards { section } as `data` to our onActivityCreate hook,
+    // which translates it into the right path.
+    document.querySelectorAll('.tile[data-section]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const section = btn.dataset.section;
+        try {
+          await fetch('/api/instances/com.aura.settings/activities', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ section }),
+          });
+        } catch (err) { console.error('[settings] open activity failed', err); }
+      });
+    });
+  </script>
+</body>
+</html>

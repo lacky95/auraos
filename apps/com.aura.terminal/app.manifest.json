@@ -1,0 +1,22 @@
+{
+  "id": "com.aura.terminal",
+  "name": "Terminal",
+  "version": "0.1.0",
+  "description": "System terminal with AI toolchain access",
+  "entrypoint": "entrypoint.sh",
+  "permissions": ["storage.read", "storage.write", "network.local"],
+  "tools": ["bash", "node", "git", "claude-code"],
+  "rootfsMode": "shared",
+  "category": "system",
+  "instanceMode": "multi",
+  "maxInstances": 8,
+  "windowConfig": {
+    "defaultWidth": 800,
+    "defaultHeight": 500,
+    "resizable": true
+  },
+  "preferredLayout": "tiling",
+  "theme": {
+    "mode": "os-components"
+  }
+}

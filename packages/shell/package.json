@@ -1,0 +1,25 @@
+{
+  "name": "@aura/shell",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev --host 0.0.0.0",
+    "build": "astro build",
+    "preview": "astro preview",
+    "typecheck": "astro check"
+  },
+  "dependencies": {
+    "@aura/core": "workspace:*",
+    "@aura/ui": "workspace:*",
+    "@astrojs/node": "^10.0.0",
+    "astro": "^6.0.0",
+    "nanostores": "^0.11.0",
+    "@nanostores/persistent": "^0.10.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@astrojs/check": "^0.9.9"
+  }
+}

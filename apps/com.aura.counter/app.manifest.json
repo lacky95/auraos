@@ -1,0 +1,24 @@
+{
+  "id": "com.aura.counter",
+  "name": "Counter",
+  "version": "0.1.0",
+  "description": "Per-instance counter. Demonstrates multi×multi: each instance has its own counter; activities on the same instance share it.",
+  "entrypoint": "entrypoint.sh",
+  "permissions": [],
+  "tools": ["bash", "node"],
+  "rootfsMode": "shared",
+  "category": "utility",
+  "instanceMode": "multi",
+  "maxInstances": 5,
+  "activityMode": "multi",
+  "maxActivitiesPerInstance": 4,
+  "defaultLaunch": "new-instance",
+  "backgroundService": false,
+  "viewConfig": {
+    "defaultWidth": 360,
+    "defaultHeight": 300,
+    "resizable": true
+  },
+  "preferredLayout": "tiling",
+  "theme": { "mode": "os-components" }
+}

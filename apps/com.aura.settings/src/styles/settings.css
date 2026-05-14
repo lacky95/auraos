@@ -1,0 +1,141 @@
+/* Common style for all Settings pages.
+   We pull /api/os/theme.css from the shell so the app inherits the live OS theme. */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--aura-color-bg, #0a0a0a);
+  color: var(--aura-color-text, #ccffcc);
+  font-family: 'Courier New', monospace;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+header.settings-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  height: 28px;
+  background: var(--aura-color-surface, #111);
+  border-bottom: 1px solid var(--aura-color-border, rgba(0,255,65,0.2));
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--aura-color-text-dim, #557755);
+  flex-shrink: 0;
+}
+header.settings-bar .name {
+  color: var(--aura-color-primary, #00ff41);
+  font-size: 0.85rem;
+}
+header.settings-bar .crumbs {
+  flex: 1;
+  color: var(--aura-color-secondary, #ff9900);
+}
+
+main.settings-body {
+  flex: 1;
+  overflow: auto;
+  padding: 18px 22px;
+}
+
+.tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+}
+.tile {
+  border: 1px solid var(--aura-color-border, rgba(0,255,65,0.2));
+  background: var(--aura-color-surface, #111);
+  padding: 16px;
+  cursor: pointer;
+  transition: box-shadow 0.1s, color 0.1s;
+}
+.tile:hover {
+  color: var(--aura-color-primary, #00ff41);
+  box-shadow: var(--aura-glow-subtle, 0 0 4px rgba(0,255,65,0.3));
+}
+.tile h3 {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--aura-color-primary, #00ff41);
+}
+.tile p {
+  margin-top: 6px;
+  font-size: 0.7rem;
+  color: var(--aura-color-text-dim, #557755);
+}
+
+.theme-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 10px;
+}
+.theme-card {
+  border: 1px solid var(--aura-color-border, rgba(0,255,65,0.2));
+  padding: 14px;
+  cursor: pointer;
+  transition: box-shadow 0.1s;
+  position: relative;
+}
+.theme-card:hover { box-shadow: var(--aura-glow-primary, 0 0 8px #00ff41); }
+.theme-card[data-active="true"] { box-shadow: var(--aura-glow-primary, 0 0 8px #00ff41); }
+.theme-card .swatches {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.theme-card .swatch {
+  width: 24px;
+  height: 24px;
+  border: 1px solid rgba(255,255,255,0.1);
+}
+.theme-card .name {
+  font-size: 0.8rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.theme-card .active-tag {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  font-size: 0.55rem;
+  color: var(--aura-color-primary, #00ff41);
+  letter-spacing: 0.1em;
+}
+
+.form-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 12px;
+  font-size: 0.8rem;
+}
+.form-row label {
+  color: var(--aura-color-text-dim, #557755);
+  min-width: 120px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.form-row select, .form-row input[type="text"] {
+  background: var(--aura-color-bg, #0a0a0a);
+  border: 1px solid var(--aura-color-border, rgba(0,255,65,0.2));
+  color: var(--aura-color-text, #ccffcc);
+  padding: 6px 10px;
+  font-family: 'Courier New', monospace;
+  font-size: 0.8rem;
+}
+
+footer.settings-foot {
+  padding: 4px 14px;
+  background: var(--aura-color-surface, #111);
+  border-top: 1px solid var(--aura-color-border, rgba(0,255,65,0.1));
+  font-size: 0.6rem;
+  color: var(--aura-color-text-dim, #557755);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}

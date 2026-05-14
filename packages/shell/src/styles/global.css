@@ -1,0 +1,28 @@
+@import './tokens.css';
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--aura-color-bg);
+  color: var(--aura-color-text);
+  font-family: var(--aura-font-mono);
+  font-size: var(--aura-font-size-md);
+  -webkit-font-smoothing: none;
+}
+
+a { color: var(--aura-color-primary); text-decoration: none; }
+a:hover { text-shadow: var(--aura-glow-primary); }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--aura-color-surface); }
+::-webkit-scrollbar-thumb { background: var(--aura-color-border); }
+::-webkit-scrollbar-thumb:hover { background: var(--aura-color-primary); }
+
+.glow-text { text-shadow: var(--aura-glow-primary); }
+.glow-border { box-shadow: var(--aura-glow-subtle); border: var(--aura-border); }

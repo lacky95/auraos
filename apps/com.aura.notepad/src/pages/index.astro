@@ -1,0 +1,131 @@
+---
+const appId      = Astro.request.headers.get('x-aura-app-id')      ?? 'com.aura.notepad';
+const instanceId = Astro.request.headers.get('x-aura-instance-id') ?? appId;
+const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Notepad — AuraOS</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0a;
+      color: #ccffcc;
+      font-family: 'Courier New', monospace;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 6px 12px;
+      background: #111;
+      border-bottom: 1px solid rgba(0,255,65,.2);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: .1em;
+      color: #557755;
+      flex-shrink: 0;
+    }
+    header .name { color: #00ff41; font-size: 0.85rem; }
+    header .meta { display: flex; gap: 10px; flex-wrap: wrap; }
+    header .meta b { color: #ff9900; font-weight: normal; }
+    main { flex: 1; padding: 8px; display: flex; flex-direction: column; }
+    textarea {
+      flex: 1;
+      background: #050505;
+      color: #ccffcc;
+      border: 1px solid rgba(0,255,65,.2);
+      padding: 12px;
+      font-family: 'Courier New', monospace;
+      font-size: 0.95rem;
+      resize: none;
+      outline: none;
+    }
+    textarea:focus { box-shadow: 0 0 8px rgba(0,255,65,.3); }
+    footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 12px;
+      background: #111;
+      border-top: 1px solid rgba(0,255,65,.1);
+      font-size: 0.65rem;
+      color: #557755;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      flex-shrink: 0;
+    }
+    footer .ok { color: #00ff41; }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="name">▤ NOTEPAD</span>
+    <div class="meta">
+      <span>INST <b id="m-instance">{instanceId}</b></span>
+      <span>ACT <b id="m-activity">{activityId}</b></span>
+      <span>ACTIVITIES <b id="m-count">…</b></span>
+      <span>REV <b id="m-rev">0</b></span>
+    </div>
+  </header>
+  <main>
+    <textarea id="editor" placeholder="Tippe etwas — alle Activities auf dieser Instance sehen es live..."></textarea>
+  </main>
+  <footer>
+    <span id="status">CONNECTING…</span>
+    <span>SHARED BACKEND · ONE INSTANCE · MANY ACTIVITIES</span>
+  </footer>
+  <script is:inline>
+    const editor   = document.getElementById('editor');
+    const status   = document.getElementById('status');
+    const mCount   = document.getElementById('m-count');
+    const mRev     = document.getElementById('m-rev');
+
+    let lastRev = -1;
+    let suppressPut = false;
+
+    // Live sync: SSE pushes new state from the backend
+    const sse = new EventSource('/api/events');
+    sse.onopen    = () => { status.textContent = 'CONNECTED'; status.className = 'ok'; };
+    sse.onerror   = () => { status.textContent = 'DISCONNECTED'; status.className = ''; };
+    sse.onmessage = (e) => {
+      const data = JSON.parse(e.data);
+      mCount.textContent = String(data.activityCount);
+      mRev.textContent   = String(data.revision);
+      if (data.revision !== lastRev) {
+        lastRev = data.revision;
+        if (document.activeElement !== editor || editor.value !== data.text) {
+          // preserve caret if user is typing here
+          const wasFocused = document.activeElement === editor;
+          const pos = editor.selectionStart;
+          suppressPut = true;
+          editor.value = data.text;
+          suppressPut = false;
+          if (wasFocused) editor.setSelectionRange(pos, pos);
+        }
+      }
+    };
+
+    // Debounced PUT: send buffer changes upstream
+    let debounce;
+    editor.addEventListener('input', () => {
+      if (suppressPut) return;
+      clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        fetch('/api/note', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: editor.value }),
+        }).catch(() => undefined);
+      }, 150);
+    });
+  </script>
+</body>
+</html>

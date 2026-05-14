@@ -1,0 +1,53 @@
+---
+import type { AppView } from '@aura/core';
+import FullscreenLayout from './strategies/FullscreenLayout.astro';
+import TilingLayout from './strategies/TilingLayout.astro';
+
+interface Props {
+  views: AppView[];
+}
+const { views } = Astro.props;
+const visible = views.filter(v => v.state !== 'minimized');
+---
+<div id="layout-manager">
+  {visible.length === 0 && (
+    <div class="empty-desktop">
+      <span class="tagline">// NO ACTIVE PROCESSES</span>
+      <a href="/launcher" class="launch-hint">[ LAUNCH APP ]</a>
+    </div>
+  )}
+  {visible.length === 1 && <FullscreenLayout views={visible} />}
+  {visible.length >= 2  && <TilingLayout    views={visible} />}
+</div>
+
+<style>
+  #layout-manager {
+    width: 100%;
+    height: 100%;
+    position: relative;
+  }
+
+  .empty-desktop {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    gap: 16px;
+    color: var(--aura-color-text-dim);
+    font-size: var(--aura-font-size-sm);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+  }
+
+  .launch-hint {
+    color: var(--aura-color-primary);
+    border: var(--aura-border);
+    padding: 8px 24px;
+    text-decoration: none;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    transition: box-shadow 0.1s;
+  }
+  .launch-hint:hover { box-shadow: var(--aura-glow-primary); }
+</style>

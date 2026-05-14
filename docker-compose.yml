@@ -1,0 +1,35 @@
+services:
+  aura-os:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/workspace
+      - aura-node-modules:/workspace/node_modules
+      - aura-app-data:/data
+    working_dir: /workspace
+    environment:
+      NODE_ENV: development
+      AURA_APPS_DIR: /workspace/apps
+      AURA_DATA_DIR: /data
+      AURA_BASE_ROOTFS: /os/base-rootfs
+      AURA_TOOLCHAIN_DIR: /os/toolchain
+      AURA_APP_PORT_START: "4001"
+      AURA_APP_PORT_END: "4999"
+      AURA_AUTH_MODE: none
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    stdin_open: true
+    tty: true
+
+volumes:
+  aura-node-modules:
+  aura-app-data:

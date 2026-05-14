@@ -1,0 +1,22 @@
+---
+import type { AppView } from '@aura/core';
+import AppSlot from '../AppSlot.astro';
+
+interface Props {
+  views: AppView[];
+}
+const { views } = Astro.props;
+const active = views.find(v => v.isFocused) ?? views[0];
+---
+{active && (
+  <div class="fullscreen-layout">
+    <AppSlot view={active} />
+  </div>
+)}
+
+<style>
+  .fullscreen-layout {
+    width: 100%;
+    height: 100%;
+  }
+</style>

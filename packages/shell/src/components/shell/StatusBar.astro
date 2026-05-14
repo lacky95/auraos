@@ -1,0 +1,45 @@
+---
+---
+<header id="statusbar">
+  <span class="os-name">AURA<span class="os-ver">OS</span></span>
+  <div class="right">
+    <span id="clock" class="clock">--:--:--</span>
+  </div>
+</header>
+
+<script>
+  function tick() {
+    const el = document.getElementById('clock');
+    if (el) el.textContent = new Date().toLocaleTimeString('en-GB', { hour12: false });
+  }
+  tick();
+  setInterval(tick, 1000);
+</script>
+
+<style>
+  #statusbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 12px;
+    height: var(--aura-statusbar-height);
+    background: var(--aura-color-surface);
+    border-bottom: var(--aura-border);
+    font-size: var(--aura-font-size-sm);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    user-select: none;
+  }
+
+  .os-name {
+    color: var(--aura-color-primary);
+    font-weight: bold;
+    text-shadow: var(--aura-glow-primary);
+  }
+
+  .os-ver { color: var(--aura-color-text-dim); }
+
+  .right { display: flex; align-items: center; gap: 16px; }
+
+  .clock { color: var(--aura-color-text); font-family: var(--aura-font-mono); }
+</style>

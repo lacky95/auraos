@@ -1,0 +1,125 @@
+---
+const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Terminal — AuraOS</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0a;
+      color: #ccffcc;
+      font-family: 'Courier New', monospace;
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    #terminal-bar {
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      height: 24px;
+      background: #111;
+      border-bottom: 1px solid rgba(0,255,65,.2);
+      font-size: 0.7rem;
+      color: #557755;
+      text-transform: uppercase;
+      letter-spacing: .1em;
+      flex-shrink: 0;
+    }
+    #terminal-bar span { color: #00ff41; margin-right: 8px; }
+    #terminal { flex: 1; padding: 4px; overflow: hidden; }
+    .xterm { height: 100%; }
+    .xterm-viewport { background: #0a0a0a !important; }
+    #status {
+      padding: 2px 12px;
+      font-size: 0.65rem;
+      color: #557755;
+      background: #111;
+      border-top: 1px solid rgba(0,255,65,.1);
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+<body>
+  <div id="terminal-bar">
+    <span>></span> AURA TERMINAL
+    <span style="margin-left:auto;" id="conn-status">CONNECTING...</span>
+  </div>
+  <div id="terminal"></div>
+  <div id="ws-url-status"></div>
+
+  <script is:inline src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+  <script is:inline src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+  <script is:inline define:vars={{ appId }}>
+    const term = new Terminal({
+      theme: {
+        background:  '#0a0a0a',
+        foreground:  '#ccffcc',
+        cursor:      '#00ff41',
+        cursorAccent:'#0a0a0a',
+        selectionBackground: 'rgba(0,255,65,.3)',
+        black:   '#0a0a0a', brightBlack:   '#557755',
+        red:     '#ff2020', brightRed:     '#ff4444',
+        green:   '#00ff41', brightGreen:   '#00ff41',
+        yellow:  '#ff9900', brightYellow:  '#ffbb00',
+        blue:    '#0088ff', brightBlue:    '#44aaff',
+        magenta: '#ff00ff', brightMagenta: '#ff44ff',
+        cyan:    '#00ffff', brightCyan:    '#44ffff',
+        white:   '#ccffcc', brightWhite:   '#ffffff',
+      },
+      fontFamily: "'Courier New', monospace",
+      fontSize: 14,
+      cursorBlink: true,
+      allowProposedApi: true,
+    });
+
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(document.getElementById('terminal'));
+    fitAddon.fit();
+
+    const statusEl = document.getElementById('conn-status');
+    const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProto}//${location.host}/api/proxy/${appId}/ws`;
+    document.getElementById('ws-url-status').textContent = wsUrl;
+
+    function connect() {
+      const ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        statusEl.textContent = 'CONNECTED';
+        statusEl.style.color = '#00ff41';
+        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      };
+
+      ws.onmessage = (e) => term.write(e.data);
+
+      ws.onclose = () => {
+        statusEl.textContent = 'DISCONNECTED — RECONNECTING...';
+        statusEl.style.color = '#ff9900';
+        setTimeout(connect, 2000);
+      };
+
+      ws.onerror = () => {
+        statusEl.textContent = 'ERROR';
+        statusEl.style.color = '#ff2020';
+      };
+
+      term.onData((data) => ws.readyState === 1 && ws.send(JSON.stringify({ type: 'data', data })));
+    }
+
+    connect();
+
+    const resizeObs = new ResizeObserver(() => fitAddon.fit());
+    resizeObs.observe(document.getElementById('terminal'));
+
+    window.addEventListener('resize', () => fitAddon.fit());
+  </script>
+</body>
+</html>

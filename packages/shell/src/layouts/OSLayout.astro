@@ -1,0 +1,87 @@
+---
+import '../styles/global.css';
+import StatusBar from '../components/shell/StatusBar.astro';
+import Dock from '../components/shell/Dock.astro';
+import { getAppManager, ThemeManager } from '@aura/core';
+import type { AppManifest } from '@aura/core';
+
+interface Props {
+  pinnedApps?: AppManifest[];
+}
+const { pinnedApps = [] } = Astro.props;
+
+// SSR: ask the Settings provider for the active theme. Fall back to default if
+// Settings is not (yet) running.
+let activeThemeCss = '';
+let activeThemeId  = ThemeManager.DEFAULT_THEME_ID;
+try {
+  const mgr = getAppManager();
+  const settings = mgr.getInstancesByApp('com.aura.settings')[0];
+  if (settings?.port) {
+    const r = await fetch(`http://localhost:${settings.port}/api/data/theme`, {
+      signal: AbortSignal.timeout(500),
+    });
+    if (r.ok) {
+      const body = await r.json() as { themeId?: string };
+      if (body.themeId) activeThemeId = body.themeId;
+    }
+  }
+} catch {}
+const theme = ThemeManager.getTheme(activeThemeId) ?? ThemeManager.getTheme(ThemeManager.DEFAULT_THEME_ID);
+if (theme) activeThemeCss = ThemeManager.toCss(theme);
+---
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AuraOS</title>
+  <style id="aura-theme" set:html={activeThemeCss}></style>
+</head>
+<body>
+  <div id="os-root">
+    <StatusBar />
+    <main id="desktop">
+      <slot />
+    </main>
+    <Dock apps={pinnedApps} />
+  </div>
+
+  <script>
+    // Live-update CSS-Vars when the OS broadcasts a theme change.
+    // Also nudge all iframes via postMessage so they can refresh their theme.
+    const sse = new EventSource('/api/apps/events');
+    sse.onmessage = async (e) => {
+      let ev: { type?: string; themeId?: string } = {};
+      try { ev = JSON.parse(e.data); } catch { return; }
+      if (ev.type !== 'theme:changed') return;
+
+      try {
+        const css = await (await fetch('/api/os/theme.css?t=' + Date.now())).text();
+        const tag = document.getElementById('aura-theme');
+        if (tag) tag.textContent = css;
+      } catch (err) { console.error('[Theme] fetch failed', err); }
+
+      const themeId = ev.themeId;
+      document.querySelectorAll('iframe').forEach((f) => {
+        try { f.contentWindow?.postMessage({ type: 'aura.theme.changed', themeId }, '*'); } catch {}
+      });
+    };
+  </script>
+</body>
+</html>
+
+<style>
+  #os-root {
+    display: grid;
+    grid-template-rows: var(--aura-statusbar-height) 1fr var(--aura-dock-height);
+    height: 100vh;
+    width: 100vw;
+    overflow: hidden;
+  }
+
+  #desktop {
+    overflow: hidden;
+    position: relative;
+    background: var(--aura-color-bg);
+  }
+</style>

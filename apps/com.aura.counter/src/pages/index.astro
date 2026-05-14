@@ -1,0 +1,106 @@
+---
+const appId      = Astro.request.headers.get('x-aura-app-id')      ?? 'com.aura.counter';
+const instanceId = Astro.request.headers.get('x-aura-instance-id') ?? appId;
+const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Counter — AuraOS</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0a;
+      color: #ccffcc;
+      font-family: 'Courier New', monospace;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    header, footer {
+      padding: 6px 12px;
+      background: #111;
+      font-size: 0.65rem;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: #557755;
+      flex-shrink: 0;
+    }
+    header { border-bottom: 1px solid rgba(0,255,65,.2); display: flex; gap: 10px; flex-wrap: wrap; }
+    header b { color: #ff9900; font-weight: normal; }
+    footer { border-top: 1px solid rgba(0,255,65,.1); }
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+    }
+    #value {
+      font-size: 5rem;
+      color: #00ff41;
+      text-shadow: 0 0 12px #00ff41, 0 0 24px rgba(0,255,65,.4);
+    }
+    .row { display: flex; gap: 12px; }
+    button {
+      background: transparent;
+      color: #ccffcc;
+      border: 1px solid rgba(0,255,65,.3);
+      font-family: 'Courier New', monospace;
+      font-size: 1.2rem;
+      letter-spacing: .1em;
+      padding: 10px 22px;
+      cursor: pointer;
+      transition: box-shadow .1s, color .1s;
+    }
+    button:hover  { color: #00ff41; box-shadow: 0 0 8px rgba(0,255,65,.4); }
+    button.danger:hover { color: #ff9900; box-shadow: 0 0 8px rgba(255,153,0,.4); }
+  </style>
+</head>
+<body>
+  <header>
+    <span>INST <b id="m-instance">{instanceId}</b></span>
+    <span>ACT <b id="m-activity">{activityId}</b></span>
+    <span>ACTIVITIES <b id="m-count">…</b></span>
+    <span>MODE <b style="color:#00ff41;">MAIN</b></span>
+  </header>
+  <main>
+    <div id="value">0</div>
+    <div class="row">
+      <button data-action="dec">−</button>
+      <button data-action="inc">+</button>
+      <button data-action="reset" class="danger">RESET</button>
+    </div>
+  </main>
+  <footer id="status">CONNECTING…</footer>
+
+  <script is:inline>
+    const valueEl = document.getElementById('value');
+    const status  = document.getElementById('status');
+    const mCount  = document.getElementById('m-count');
+
+    function applyState(s) {
+      valueEl.textContent = String(s.value);
+      mCount.textContent  = String(s.activityCount);
+    }
+
+    const sse = new EventSource('/api/events');
+    sse.onopen    = () => { status.textContent = 'CONNECTED — SHARED COUNTER ON THIS INSTANCE'; };
+    sse.onerror   = () => { status.textContent = 'DISCONNECTED'; };
+    sse.onmessage = (e) => applyState(JSON.parse(e.data));
+
+    document.querySelectorAll('button[data-action]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        fetch('/api/counter', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: btn.dataset.action }),
+        }).catch(() => undefined);
+      });
+    });
+  </script>
+</body>
+</html>

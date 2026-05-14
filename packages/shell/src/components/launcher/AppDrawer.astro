@@ -1,0 +1,106 @@
+---
+import type { AppManifest } from '@aura/core';
+import AppIcon from './AppIcon.astro';
+
+interface Props {
+  apps: AppManifest[];
+}
+const { apps } = Astro.props;
+---
+<div id="app-drawer">
+  <div class="drawer-header">
+    <span class="title">// ALL APPS</span>
+    <a href="/" class="close-btn">✕ CLOSE</a>
+  </div>
+  <input
+    id="app-search"
+    class="search-input"
+    type="text"
+    placeholder="SEARCH APPS..."
+    autocomplete="off"
+  />
+  <div id="app-grid" class="app-grid">
+    {apps.map(app => <AppIcon app={app} />)}
+  </div>
+</div>
+
+<script>
+  const search = document.getElementById('app-search') as HTMLInputElement;
+  const grid = document.getElementById('app-grid');
+
+  search?.addEventListener('input', () => {
+    const q = search.value.toLowerCase();
+    grid?.querySelectorAll<HTMLElement>('.app-icon').forEach(el => {
+      const name = el.querySelector('.name')?.textContent?.toLowerCase() ?? '';
+      const id   = el.dataset['appId']?.toLowerCase() ?? '';
+      el.style.display = (!q || name.includes(q) || id.includes(q)) ? '' : 'none';
+    });
+  });
+
+  grid?.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-app-id]');
+    if (btn?.dataset['appId']) window.auraLaunchApp(btn.dataset['appId']);
+  });
+</script>
+
+<style>
+  #app-drawer {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 16px;
+    gap: 12px;
+    background: var(--aura-color-bg);
+  }
+
+  .drawer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: var(--aura-border);
+    padding-bottom: 8px;
+  }
+
+  .title {
+    color: var(--aura-color-primary);
+    text-shadow: var(--aura-glow-primary);
+    font-size: var(--aura-font-size-lg);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+
+  .close-btn {
+    color: var(--aura-color-text-dim);
+    font-size: var(--aura-font-size-sm);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 4px 8px;
+    border: var(--aura-border);
+    text-decoration: none;
+    transition: color 0.1s, box-shadow 0.1s;
+  }
+  .close-btn:hover { color: var(--aura-color-danger); box-shadow: var(--aura-glow-danger); }
+
+  .search-input {
+    background: var(--aura-color-surface);
+    border: var(--aura-border);
+    color: var(--aura-color-text);
+    font-family: var(--aura-font-mono);
+    font-size: var(--aura-font-size-md);
+    padding: 8px 12px;
+    outline: none;
+    width: 100%;
+    transition: box-shadow 0.1s;
+  }
+  .search-input:focus { box-shadow: var(--aura-glow-primary); border-color: var(--aura-color-primary); }
+  .search-input::placeholder { color: var(--aura-color-text-dim); }
+
+  .app-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    overflow-y: auto;
+    flex: 1;
+    align-content: flex-start;
+  }
+</style>

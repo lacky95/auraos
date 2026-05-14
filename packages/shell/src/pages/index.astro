@@ -1,0 +1,561 @@
+---
+import OSLayout from '../layouts/OSLayout.astro';
+import LayoutManager from '../components/layout/LayoutManager.astro';
+import { getAppManager } from '@aura/core';
+
+const mgr = getAppManager();
+const allApps = mgr.getManifests();
+const pinnedApps = allApps.slice(0, 5);
+
+/**
+ * SSR initial views.
+ *   • activityMode='multi' apps → one view per OPEN activity (skip bare instance — that's
+ *     just the backend process, no UI).
+ *   • activityMode='none'  apps → one view per running instance (legacy 1:1 mapping).
+ */
+type InitialView = {
+  viewId: string;
+  appId: string;
+  instanceId: string;
+  activityId?: string;
+  title: string;
+  iframeUrl: string;
+  state: 'normal' | 'minimized' | 'maximized';
+  zIndex: number;
+  isFocused: boolean;
+  isLoading: boolean;
+  lifecycleState: string;
+  createdAt: string;
+};
+
+const initialViews: InitialView[] = [];
+for (const inst of mgr.getAllInstances()) {
+  if (inst.state !== 'resumed' || inst.port === null) continue;
+  const manifest = mgr.getManifest(inst.appId);
+  if (!manifest) continue;
+
+  if (manifest.activityMode === 'multi') {
+    for (const act of mgr.getActivitiesByInstance(inst.instanceId)) {
+      const stripped = (act.path ?? '/').replace(/^\/+/, '');
+      initialViews.push({
+        viewId:     act.activityId,
+        appId:      inst.appId,
+        instanceId: inst.instanceId,
+        activityId: act.activityId,
+        title:      act.title ?? manifest.name,
+        iframeUrl:  `/api/proxy/${inst.instanceId}/${stripped}?_aura_activity=${encodeURIComponent(act.activityId)}`,
+        state:      'normal',
+        zIndex:     0,
+        isFocused:  true,
+        isLoading:  false,
+        lifecycleState: inst.state,
+        createdAt:  new Date().toISOString(),
+      });
+    }
+  } else {
+    initialViews.push({
+      viewId:     inst.instanceId,
+      appId:      inst.appId,
+      instanceId: inst.instanceId,
+      title:      manifest.name,
+      iframeUrl:  `/api/proxy/${inst.instanceId}/`,
+      state:      'normal',
+      zIndex:     0,
+      isFocused:  true,
+      isLoading:  false,
+      lifecycleState: inst.state,
+      createdAt:  new Date().toISOString(),
+    });
+  }
+}
+---
+<OSLayout pinnedApps={pinnedApps}>
+  <div id="desktop-content">
+    <div id="static-layout">
+      <LayoutManager views={initialViews} />
+    </div>
+    <div id="dynamic-layout" style="display:none; position:absolute; inset:0;"></div>
+    <script type="application/json" id="aura-initial-views" set:html={JSON.stringify(initialViews)}></script>
+
+    <!-- Focus mode: covers the entire viewport when activated from Process Manager -->
+    <div id="focus-view" aria-hidden="true">
+      <header id="focus-header">
+        <span id="focus-title">FOCUS</span>
+        <span id="focus-instance-id"></span>
+        <button id="focus-exit" title="Exit focus (Esc)">✕ EXIT FOCUS</button>
+      </header>
+      <iframe id="focus-frame" title="Focused app"></iframe>
+    </div>
+  </div>
+</OSLayout>
+
+<script>
+  interface AppView {
+    viewId: string;
+    appId: string;
+    instanceId: string;
+    activityId?: string;
+    title: string;
+    iframeUrl: string;
+    state: 'normal' | 'minimized' | 'maximized';
+    zIndex: number;
+    isFocused: boolean;
+    isLoading: boolean;
+    lifecycleState: string;
+    createdAt: string;
+  }
+
+  interface AppManifestLite {
+    id: string;
+    name: string;
+    instanceMode: 'single' | 'multi';
+    activityMode: 'none' | 'multi';
+    defaultLaunch: 'new-instance' | 'new-activity';
+    backgroundService: boolean;
+  }
+
+  let views: AppView[] = [];
+  let focusedInstanceId: string | null = null;
+  let focusedActivityId: string | null = null;
+  const manifestCache = new Map<string, AppManifestLite>();
+
+  const staticLayout  = document.getElementById('static-layout')!;
+  const dynamicLayout = document.getElementById('dynamic-layout')!;
+  const focusView     = document.getElementById('focus-view')!;
+  const focusFrame    = document.getElementById('focus-frame') as HTMLIFrameElement;
+  const focusInstIdEl = document.getElementById('focus-instance-id')!;
+  const focusTitleEl  = document.getElementById('focus-title')!;
+  const focusExitBtn  = document.getElementById('focus-exit')!;
+
+  // Hydrate from SSR initial views so the JS-side state matches what's already on screen.
+  // Once we have data, switch to the JS-managed dynamicLayout immediately so close/minimize
+  // and SSE updates work uniformly across SSR-rendered and dynamically-created slots.
+  try {
+    const ssrJson = document.getElementById('aura-initial-views')?.textContent;
+    if (ssrJson) {
+      const parsed = JSON.parse(ssrJson) as AppView[];
+      if (parsed.length > 0) views = parsed;
+    }
+  } catch (err) { console.warn('[shell] failed to hydrate initialViews', err); }
+
+  async function getManifest(appId: string): Promise<AppManifestLite> {
+    const cached = manifestCache.get(appId);
+    if (cached) return cached;
+    const data = (await (await fetch(`/api/apps/${appId}/status`)).json()) as { manifest: AppManifestLite };
+    manifestCache.set(appId, data.manifest);
+    return data.manifest;
+  }
+
+  function buildView(
+    appId: string,
+    name: string,
+    instanceId: string,
+    activityId: string | undefined,
+    path: string,
+    lifecycleState: string,
+  ): AppView {
+    const stripped = path.replace(/^\/+/, '');
+    const query = activityId ? `?_aura_activity=${encodeURIComponent(activityId)}` : '';
+    return {
+      viewId:         activityId ?? instanceId,
+      appId,
+      instanceId,
+      ...(activityId ? { activityId } : {}),
+      title:          name,
+      iframeUrl:      `/api/proxy/${instanceId}/${stripped}${query}`,
+      state:          'normal',
+      zIndex:         views.length,
+      isFocused:      true,
+      isLoading:      lifecycleState !== 'resumed',
+      lifecycleState,
+      createdAt:      new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Launch an app from the dock/launcher. Behavior depends on the manifest:
+   *   - activityMode='none'           → start instance + open view
+   *   - activityMode='multi', single  → reuse instance if running, always open new activity view
+   *   - activityMode='multi', multi   → defaultLaunch decides ('new-instance' vs 'new-activity')
+   */
+  window.auraLaunchApp = async (appId: string) => {
+    const manifest = await getManifest(appId);
+
+    // Activities not supported → original 1:1 instance/view behavior
+    if (manifest.activityMode === 'none') {
+      const res = await fetch(`/api/apps/${appId}/start`, { method: 'POST' });
+      if (!res.ok) { console.error(`Failed to start ${appId}`); return; }
+      const { instanceId, instance } = await res.json();
+
+      const existing = views.find((v) => v.instanceId === instanceId && !v.activityId);
+      if (existing) { focusView_(existing.viewId); return; }
+
+      views = [...views, buildView(appId, manifest.name, instanceId, undefined, '/', instance?.state ?? 'creating')];
+      renderLayout();
+      return;
+    }
+
+    // activityMode='multi' branch
+    const wantNewInstance =
+      manifest.instanceMode === 'multi' && manifest.defaultLaunch === 'new-instance';
+
+    let targetInstanceId: string | null = null;
+    let targetInstanceState = 'creating';
+
+    if (!wantNewInstance) {
+      const apps = await (await fetch('/api/apps')).json() as Array<{ manifest: { id: string }; instances: Array<{ instanceId: string; state: string }> }>;
+      const inst = apps.find((a) => a.manifest.id === appId)?.instances?.[0];
+      if (inst) { targetInstanceId = inst.instanceId; targetInstanceState = inst.state; }
+    }
+
+    if (!targetInstanceId) {
+      const res = await fetch(`/api/apps/${appId}/start`, { method: 'POST' });
+      if (!res.ok) { console.error(`Failed to start ${appId}`); return; }
+      const { instanceId, instance } = await res.json();
+      targetInstanceId = instanceId;
+      targetInstanceState = instance?.state ?? 'creating';
+    }
+
+    await openActivityOnInstance(targetInstanceId!, appId, manifest.name, targetInstanceState);
+  };
+
+  /** Open an explicit activity on an existing instance. Honors the path the app returns from onActivityCreate. */
+  async function openActivityOnInstance(instanceId: string, appId: string, name: string, lifecycleState: string, data?: Record<string, unknown>) {
+    const res = await fetch(`/api/instances/${encodeURIComponent(instanceId)}/activities`, {
+      method:  'POST',
+      headers: data ? { 'Content-Type': 'application/json' } : undefined,
+      body:    data ? JSON.stringify(data) : undefined,
+    });
+    if (!res.ok) { console.error(`Failed to open activity on ${instanceId}`, await res.text()); return; }
+    const { activityId, activity } = await res.json() as { activityId: string; activity: { path: string; title?: string } };
+    const title = activity.title ?? name;
+    views = [...views, buildView(appId, title, instanceId, activityId, activity.path ?? '/', lifecycleState)];
+    renderLayout();
+  }
+  (window as any).auraOpenActivityOnInstance = async (instanceId: string) => {
+    const inst = await (await fetch(`/api/instances/${encodeURIComponent(instanceId)}/status`)).json();
+    const appId = inst.instance?.appId;
+    if (!appId) return;
+    const manifest = await getManifest(appId);
+    await openActivityOnInstance(instanceId, appId, manifest.name, inst.instance?.state ?? 'resumed');
+  };
+
+  function focusView_(viewId: string) {
+    views = views.map((v) =>
+      v.viewId === viewId
+        // un-minimize when focused, so clicking the app icon brings it back
+        ? { ...v, isFocused: true, state: v.state === 'minimized' ? 'normal' : v.state }
+        : { ...v, isFocused: false },
+    );
+    renderLayout();
+  }
+
+  function closeView_(viewId: string) {
+    const v = views.find((x) => x.viewId === viewId);
+    if (v) {
+      if (v.activityId) {
+        // Activity view — close only this activity. Auto-stop handled server-side.
+        fetch(`/api/activities/${encodeURIComponent(v.activityId)}/close`, { method: 'POST' }).catch(() => undefined);
+      } else {
+        fetch(`/api/instances/${encodeURIComponent(v.instanceId)}/stop`, { method: 'POST' }).catch(() => undefined);
+      }
+    }
+    views = views.filter((x) => x.viewId !== viewId);
+    renderLayout();
+  }
+
+  function minimizeView_(viewId: string) {
+    views = views.map((v) => v.viewId === viewId ? { ...v, state: 'minimized' as const } : v);
+    renderLayout();
+  }
+
+  function renderLayout() {
+    // Once JS is in charge, never fall back to the SSR static layout — its
+    // buttons are bound to a snapshot and would show stale content after close.
+    staticLayout.style.display = 'none';
+
+    const visible   = views.filter((v) => v.state !== 'minimized');
+    const minimized = views.filter((v) => v.state === 'minimized');
+
+    if (visible.length === 0) {
+      dynamicLayout.style.display = 'flex';
+      dynamicLayout.style.flexDirection  = 'column';
+      dynamicLayout.style.alignItems     = 'center';
+      dynamicLayout.style.justifyContent = 'center';
+      dynamicLayout.style.background     = 'transparent';
+      dynamicLayout.style.gridTemplateColumns = '';
+      dynamicLayout.style.gridTemplateRows    = '';
+      dynamicLayout.style.gap = '';
+      dynamicLayout.innerHTML = `
+        <div style="color: var(--aura-color-text-dim); font-size: 0.8rem; letter-spacing: 0.15em; text-align: center;">
+          <div style="margin-bottom: 12px;">// NO ACTIVE PROCESSES</div>
+          <a href="/launcher" style="color: var(--aura-color-primary); border: var(--aura-border); padding: 8px 24px; text-decoration: none; letter-spacing: 0.1em;">[ LAUNCH APP ]</a>
+        </div>
+        ${renderMinimizedStrip(minimized)}`;
+      return;
+    }
+
+    const cols = Math.ceil(Math.sqrt(visible.length));
+    const rows = Math.ceil(visible.length / cols);
+
+    dynamicLayout.style.display = 'grid';
+    // If there are minimized views, reserve a row at the top for the strip
+    if (minimized.length > 0) {
+      dynamicLayout.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+      dynamicLayout.style.gridTemplateRows    = `auto repeat(${rows}, 1fr)`;
+    } else {
+      dynamicLayout.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+      dynamicLayout.style.gridTemplateRows    = `repeat(${rows}, 1fr)`;
+    }
+    dynamicLayout.style.gap = '2px';
+    dynamicLayout.style.background = 'var(--aura-color-border)';
+    dynamicLayout.style.alignItems     = '';
+    dynamicLayout.style.justifyContent = '';
+    dynamicLayout.style.flexDirection  = '';
+
+    const slotsHtml = visible.map((v) => `
+      <div class="app-slot" data-view-id="${v.viewId}" style="display:flex;flex-direction:column;background:var(--aura-color-surface);border:var(--aura-border);overflow:hidden;">
+        <div class="slot-chrome" style="display:flex;align-items:center;justify-content:space-between;padding:0 8px;height:28px;background:var(--aura-color-surface-2);border-bottom:var(--aura-border);flex-shrink:0;">
+          <span style="font-size:0.75rem;color:var(--aura-color-primary);text-transform:uppercase;letter-spacing:.08em;">
+            ${v.title} <span style="color:var(--aura-color-text-dim);font-size:0.6rem;margin-left:6px;">${v.activityId ?? v.instanceId}</span>
+          </span>
+          <div style="display:flex;gap:4px;">
+            <button data-action="minimize" title="Minimize" style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 6px;cursor:pointer;">_</button>
+            <button data-action="close"    title="Close"    style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 6px;cursor:pointer;">✕</button>
+          </div>
+        </div>
+        <div style="flex:1;overflow:hidden;">
+          ${v.isLoading
+            ? `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--aura-color-text-dim);font-size:0.75rem;letter-spacing:.1em;">LOADING ${v.appId}...</div>`
+            : `<iframe src="${v.iframeUrl}" style="width:100%;height:100%;border:none;background:var(--aura-color-bg);" title="${v.title}"></iframe>`
+          }
+        </div>
+      </div>
+    `).join('');
+
+    // Strip of minimized views (if any) sits in the first grid row, spanning all columns.
+    const stripHtml = minimized.length === 0 ? '' : `
+      <div style="grid-column: 1 / -1; display:flex; gap:6px; padding:4px 8px; background: var(--aura-color-surface); border-bottom: var(--aura-border); overflow-x: auto;">
+        <span style="font-size:0.6rem; color: var(--aura-color-text-dim); letter-spacing:0.12em; align-self:center;">MIN ▾</span>
+        ${minimized.map((v) => `
+          <button data-action="restore" data-view-id="${v.viewId}"
+            style="background:transparent; border:var(--aura-border); color:var(--aura-color-secondary); font-family:var(--aura-font-mono); font-size:0.65rem; padding:2px 8px; cursor:pointer; white-space:nowrap;"
+            title="Restore ${v.title}">
+            ${v.title}
+          </button>
+        `).join('')}
+      </div>`;
+
+    dynamicLayout.innerHTML = stripHtml + slotsHtml;
+  }
+
+  function renderMinimizedStrip(minimized: AppView[]): string {
+    if (minimized.length === 0) return '';
+    return `
+      <div style="margin-top: 28px; display:flex; flex-wrap:wrap; justify-content:center; gap:6px;">
+        <span style="font-size:0.6rem; color: var(--aura-color-text-dim); letter-spacing:0.12em; align-self:center;">MIN ▾</span>
+        ${minimized.map((v) => `
+          <button data-action="restore" data-view-id="${v.viewId}"
+            style="background:transparent; border:var(--aura-border); color:var(--aura-color-secondary); font-family:var(--aura-font-mono); font-size:0.65rem; padding:3px 8px; cursor:pointer; white-space:nowrap;"
+            title="Restore ${v.title}">
+            ${v.title}
+          </button>
+        `).join('')}
+      </div>`;
+  }
+
+  /**
+   * Event delegation for view actions. Works for both the SSR-rendered AppSlot
+   * (FullscreenLayout / TilingLayout in `#static-layout`) and the JS-generated
+   * `.app-slot`s plus minimized-strip chips inside `#dynamic-layout`.
+   *
+   * For close/minimize: the slot carries `data-view-id`, the button `data-action`.
+   * For restore: the button itself carries both `data-action="restore"` and
+   * `data-view-id`, since chips don't live inside a slot.
+   */
+  document.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement | null;
+    if (!target) return;
+    const btn = target.closest('button[data-action]') as HTMLButtonElement | null;
+    if (!btn) return;
+    const action = btn.dataset['action'];
+
+    // Restore: viewId is on the button itself
+    if (action === 'restore') {
+      const viewId = btn.dataset['viewId'];
+      if (viewId) { e.preventDefault(); restoreView_(viewId); }
+      return;
+    }
+
+    // close/minimize: viewId is on the surrounding .app-slot
+    const slot = btn.closest('.app-slot[data-view-id]') as HTMLElement | null;
+    if (!slot) return;
+    const viewId = slot.dataset['viewId'];
+    if (!viewId) return;
+    if (action === 'close')    { e.preventDefault(); closeView_(viewId); }
+    if (action === 'minimize') { e.preventDefault(); minimizeView_(viewId); }
+  });
+
+  function restoreView_(viewId: string) {
+    views = views.map((v) =>
+      v.viewId === viewId
+        ? { ...v, state: 'normal' as const, isFocused: true }
+        : { ...v, isFocused: false },
+    );
+    renderLayout();
+  }
+
+  // After hydration, if the SSR layout was non-empty, push it through the JS
+  // pipeline so close/minimize/SSE updates are wired up uniformly. The SSR DOM
+  // is replaced with the JS-managed dynamicLayout — same content, live handlers.
+  if (views.length > 0) renderLayout();
+
+  (window as any).auraClose    = closeView_;
+  (window as any).auraMinimize = minimizeView_;
+
+  // -------- Focus mode --------
+  /**
+   * Focus any running instance or activity in the full-viewport overlay above the layout.
+   * Pass instanceId for a plain instance view, or both (instanceId, activityId) for an activity.
+   */
+  async function focusInstance(instanceId: string, activityId?: string) {
+    let title = instanceId;
+    try {
+      const res = await fetch(`/api/instances/${encodeURIComponent(instanceId)}/status`);
+      if (res.ok) {
+        const data = await res.json();
+        title = data.instance?.appId ?? instanceId;
+      }
+    } catch {}
+
+    focusedInstanceId = instanceId;
+    focusedActivityId = activityId ?? null;
+    const suffix = activityId ? `?_aura_activity=${encodeURIComponent(activityId)}` : '';
+    focusFrame.src = `/api/proxy/${instanceId}/${suffix}`;
+    focusTitleEl.textContent = title;
+    focusInstIdEl.textContent = activityId ? `${instanceId}  ${activityId}` : instanceId;
+    focusView.setAttribute('aria-hidden', 'false');
+  }
+
+  function exitFocus() {
+    focusView.setAttribute('aria-hidden', 'true');
+    focusFrame.src = 'about:blank';
+    focusedInstanceId = null;
+    focusedActivityId = null;
+  }
+
+  focusExitBtn.addEventListener('click', exitFocus);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && focusedInstanceId !== null) exitFocus();
+  });
+
+  /** Remove all views belonging to an instance (called from Process Manager after close/kill). */
+  function removeViewsByInstance(instanceId: string) {
+    views = views.filter((v) => v.instanceId !== instanceId);
+    if (focusedInstanceId === instanceId) exitFocus();
+    renderLayout();
+  }
+
+  /** Remove a single activity view. */
+  function removeViewByActivity(activityId: string) {
+    views = views.filter((v) => v.activityId !== activityId);
+    if (focusedActivityId === activityId) exitFocus();
+    renderLayout();
+  }
+
+  (window as any).auraFocusInstance        = focusInstance;
+  (window as any).auraRemoveViewsByInstance = removeViewsByInstance;
+  (window as any).auraRemoveViewByActivity  = removeViewByActivity;
+
+  // SSE: live state updates per-instance / per-activity
+  const sse = new EventSource('/api/apps/events');
+  sse.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+    if (ev.type === 'app:stateChanged') {
+      views = views.map((v) => v.instanceId === ev.instanceId
+        ? { ...v, lifecycleState: ev.state, isLoading: ev.state !== 'resumed' }
+        : v
+      );
+      renderLayout();
+    }
+    if (ev.type === 'app:crashed') {
+      views = views.filter((v) => v.instanceId !== ev.instanceId);
+      if (focusedInstanceId === ev.instanceId) exitFocus();
+      renderLayout();
+      console.error(`[AuraOS] ${ev.instanceId} crashed:`, ev.error);
+    }
+    if (ev.type === 'activity:closed') {
+      // Backend says this activity is gone — drop the corresponding view
+      views = views.filter((v) => v.activityId !== ev.activityId);
+      if (focusedActivityId === ev.activityId) exitFocus();
+      renderLayout();
+    }
+  };
+</script>
+
+<style>
+  #desktop-content {
+    width: 100%;
+    height: 100%;
+    position: relative;
+  }
+  #static-layout, #dynamic-layout {
+    width: 100%;
+    height: 100%;
+  }
+
+  /* Focus view: covers the entire desktop area above layouts */
+  #focus-view {
+    position: absolute;
+    inset: 0;
+    display: none;
+    flex-direction: column;
+    background: var(--aura-color-bg);
+    z-index: 50;
+  }
+  #focus-view[aria-hidden="false"] { display: flex; }
+
+  #focus-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0 12px;
+    height: 32px;
+    background: var(--aura-color-surface-2);
+    border-bottom: var(--aura-border);
+    flex-shrink: 0;
+  }
+  #focus-title {
+    color: var(--aura-color-secondary);
+    font-size: var(--aura-font-size-sm);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+  }
+  #focus-instance-id {
+    color: var(--aura-color-text-dim);
+    font-size: var(--aura-font-size-xs);
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #focus-exit {
+    background: transparent;
+    border: var(--aura-border);
+    color: var(--aura-color-text-dim);
+    font-family: var(--aura-font-mono);
+    font-size: var(--aura-font-size-xs);
+    letter-spacing: 0.08em;
+    padding: 4px 8px;
+    cursor: pointer;
+    text-transform: uppercase;
+  }
+  #focus-exit:hover { color: var(--aura-color-danger); box-shadow: var(--aura-glow-danger); }
+
+  #focus-frame {
+    flex: 1;
+    width: 100%;
+    border: none;
+    background: var(--aura-color-bg);
+  }
+</style>

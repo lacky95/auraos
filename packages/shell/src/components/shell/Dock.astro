@@ -1,0 +1,97 @@
+---
+import type { AppManifest } from '@aura/core';
+import ProcessManager from './ProcessManager.astro';
+
+interface Props {
+  apps: AppManifest[];
+}
+const { apps } = Astro.props;
+---
+<nav id="dock">
+  <a href="/launcher" class="launcher-btn" title="All Apps">
+    <span class="grid-icon">⣿</span>
+  </a>
+  <ProcessManager />
+  <div class="separator"></div>
+  {apps.map(app => (
+    <button
+      class="dock-item"
+      data-app-id={app.id}
+      title={app.name}
+      onclick={`window.auraLaunchApp('${app.id}')`}
+    >
+      <span class="app-initial">{app.name.charAt(0).toUpperCase()}</span>
+      <span class="app-label">{app.name}</span>
+    </button>
+  ))}
+</nav>
+
+<style>
+  #dock {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 16px;
+    height: var(--aura-dock-height);
+    background: var(--aura-color-surface);
+    border-top: var(--aura-border);
+    overflow-x: auto;
+  }
+
+  .launcher-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    color: var(--aura-color-primary);
+    font-size: 1.2rem;
+    border: var(--aura-border);
+    background: transparent;
+    cursor: pointer;
+    text-decoration: none;
+    flex-shrink: 0;
+    transition: box-shadow 0.1s;
+  }
+  .launcher-btn:hover { box-shadow: var(--aura-glow-primary); }
+
+  .separator {
+    width: 1px;
+    height: 32px;
+    background: var(--aura-color-border);
+    margin: 0 8px;
+    flex-shrink: 0;
+  }
+
+  .dock-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 4px 8px;
+    background: transparent;
+    border: var(--aura-border);
+    color: var(--aura-color-text);
+    cursor: pointer;
+    font-family: var(--aura-font-mono);
+    font-size: var(--aura-font-size-xs);
+    min-width: 48px;
+    transition: box-shadow 0.1s;
+  }
+  .dock-item:hover { box-shadow: var(--aura-glow-primary); color: var(--aura-color-primary); }
+
+  .app-initial {
+    font-size: 1rem;
+    color: var(--aura-color-primary);
+  }
+
+  .app-label {
+    font-size: var(--aura-font-size-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 56px;
+  }
+</style>
