@@ -149,5 +149,7 @@ CMD ["sh", "-c", "pnpm install \
  && pnpm --filter @aura/cli build \
  && ln -sf /workspace/packages/aura-cli/dist/aura.cjs /usr/local/bin/aura \
  && ln -sf /workspace/packages/aura-cli/dist/aura.cjs /os/toolchain/bin/aura \
+ && install -D -m 0644 /workspace/os/bashrc.aura.sh /os/base-rootfs/root/.bashrc \
+ && install -D -m 0644 /workspace/os/bashrc.aura.sh /os/base-rootfs/etc/profile.d/aura-prompt.sh \
  && (pnpm --filter @aura/cli build:watch &) \
  && pnpm --filter @aura/shell dev --host 0.0.0.0"]

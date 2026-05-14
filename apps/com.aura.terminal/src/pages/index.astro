@@ -7,7 +7,13 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Terminal — AuraOS</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" />
+  <!--
+    Self-hosted xterm under public/vendor/xterm/. Served by the app's own
+    astro dev (loopback inside the container), proxied through the shell.
+    Eliminates the ~300-500 ms cold-load CDN round-trip to jsdelivr and
+    removes a third-party SPOF.
+  -->
+  <link rel="stylesheet" href="vendor/xterm/xterm.min.css" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -64,8 +70,8 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
   </div>
   <div id="terminal"></div>
 
-  <script is:inline src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
-  <script is:inline src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+  <script is:inline src="vendor/xterm/xterm.min.js"></script>
+  <script is:inline src="vendor/xterm/xterm-addon-fit.min.js"></script>
   <script is:inline define:vars={{ appId }}>
     const term = new Terminal({
       theme: {

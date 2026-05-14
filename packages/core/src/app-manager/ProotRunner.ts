@@ -49,6 +49,13 @@ export class ProotRunner {
       APP_INSTANCE_ID: instanceId,
       APP_PORT: String(port),
       OS_API_BASE: this.osApiBase,
+      // Statically known: AppManager runs inside the Docker container and
+      // every spawn we do is wrapped in PRoot. Baking the tag here means the
+      // /root/.bashrc snippet that renders the prompt never has to shell out
+      // to detect layers — saves ~100–300 ms off every interactive terminal
+      // launch (which is dominated by bash startup work, not by anything we
+      // can fix in pty-server or astro).
+      AURA_LAYER_TAG: '[proot+ctnr]',
     };
 
     console.log(`[ProotRunner] Spawning ${instanceId} (app=${appId}) on port ${port}`);
