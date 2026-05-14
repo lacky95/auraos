@@ -382,6 +382,21 @@ for (const inst of mgr.getAllInstances()) {
       </div>`;
   }
 
+  /**
+   * Keyed DOM reconciler over `views`. Critical UX property: an existing slot's
+   * `<iframe>` is NEVER recreated across renders — once a viewId has an iframe,
+   * it survives every subsequent state event (other apps starting/stopping,
+   * resize, minimize/restore of OTHER views, lifecycle transitions). Replacing
+   * `innerHTML` on every event used to nuke every iframe and force every app
+   * to fully reload (terminal WS reconnect, lost form state, etc.).
+   *
+   * Three independent reconcile passes per call:
+   *   1. Empty state — wipe everything, show the launch button.
+   *   2. Grid container styles — recomputed each call (cheap, no children touched).
+   *   3. Minimized strip — stateless markup, rebuilt cleanly inside its host node.
+   *   4. App slots — diff by viewId: keep, create, or remove. Reorder via
+   *      `appendChild` (which moves an existing node, no re-mount).
+   */
   function renderLayout() {
     // Once JS is in charge, never fall back to the SSR static layout — its
     // buttons are bound to a snapshot and would show stale content after close.
@@ -390,15 +405,14 @@ for (const inst of mgr.getAllInstances()) {
     const visible   = views.filter((v) => v.state !== 'minimized');
     const minimized = views.filter((v) => v.state === 'minimized');
 
+    // ---- 1) Empty state ----
     if (visible.length === 0) {
-      dynamicLayout.style.display = 'flex';
-      dynamicLayout.style.flexDirection  = 'column';
-      dynamicLayout.style.alignItems     = 'center';
-      dynamicLayout.style.justifyContent = 'center';
-      dynamicLayout.style.background     = 'transparent';
-      dynamicLayout.style.gridTemplateColumns = '';
-      dynamicLayout.style.gridTemplateRows    = '';
-      dynamicLayout.style.gap = '';
+      Object.assign(dynamicLayout.style, {
+        display: 'flex', flexDirection: 'column',
+        alignItems: 'center', justifyContent: 'center',
+        background: 'transparent',
+        gridTemplateColumns: '', gridTemplateRows: '', gap: '',
+      });
       dynamicLayout.innerHTML = `
         <div style="color: var(--aura-color-text-dim); font-size: 0.8rem; letter-spacing: 0.15em; text-align: center;">
           <div style="margin-bottom: 12px;">// NO ACTIVE PROCESSES</div>
@@ -408,58 +422,138 @@ for (const inst of mgr.getAllInstances()) {
       return;
     }
 
+    // ---- 2) Grid container ----
     const cols = Math.ceil(Math.sqrt(visible.length));
     const rows = Math.ceil(visible.length / cols);
+    Object.assign(dynamicLayout.style, {
+      display: 'grid',
+      gridTemplateColumns: `repeat(${cols}, 1fr)`,
+      gridTemplateRows: minimized.length > 0
+        ? `auto repeat(${rows}, 1fr)`
+        : `repeat(${rows}, 1fr)`,
+      gap: '2px',
+      background: 'var(--aura-color-border)',
+      alignItems: '', justifyContent: '', flexDirection: '',
+    });
 
-    dynamicLayout.style.display = 'grid';
-    // If there are minimized views, reserve a row at the top for the strip
-    if (minimized.length > 0) {
-      dynamicLayout.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-      dynamicLayout.style.gridTemplateRows    = `auto repeat(${rows}, 1fr)`;
+    // ---- 3) Minimized strip ----
+    let strip = dynamicLayout.querySelector(':scope > [data-aura-strip]') as HTMLElement | null;
+    if (minimized.length === 0) {
+      strip?.remove();
+      strip = null;
     } else {
-      dynamicLayout.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-      dynamicLayout.style.gridTemplateRows    = `repeat(${rows}, 1fr)`;
+      if (!strip) {
+        strip = document.createElement('div');
+        strip.setAttribute('data-aura-strip', '1');
+        strip.style.cssText = 'grid-column: 1 / -1; display:flex; gap:6px; padding:4px 8px; background: var(--aura-color-surface); border-bottom: var(--aura-border); overflow-x: auto;';
+      }
+      strip.innerHTML = `<span style="font-size:0.6rem; color: var(--aura-color-text-dim); letter-spacing:0.12em; align-self:center;">MIN ▾</span>${
+        minimized.map((v) => `
+          <button data-action="restore" data-view-id="${escapeAttr(v.viewId)}"
+            style="background:transparent; border:var(--aura-border); color:var(--aura-color-secondary); font-family:var(--aura-font-mono); font-size:0.65rem; padding:2px 8px; cursor:pointer; white-space:nowrap;"
+            title="Restore ${escapeAttr(v.title)}">${escapeHtml(v.title)}</button>`).join('')
+      }`;
+      if (strip.parentElement !== dynamicLayout) dynamicLayout.insertBefore(strip, dynamicLayout.firstChild);
+      else if (strip !== dynamicLayout.firstChild)  dynamicLayout.insertBefore(strip, dynamicLayout.firstChild);
     }
-    dynamicLayout.style.gap = '2px';
-    dynamicLayout.style.background = 'var(--aura-color-border)';
-    dynamicLayout.style.alignItems     = '';
-    dynamicLayout.style.justifyContent = '';
-    dynamicLayout.style.flexDirection  = '';
 
-    const slotsHtml = visible.map((v) => `
-      <div class="app-slot" data-view-id="${v.viewId}" style="display:flex;flex-direction:column;background:var(--aura-color-surface);border:var(--aura-border);overflow:hidden;">
-        <div class="slot-chrome" style="display:flex;align-items:center;justify-content:space-between;padding:0 8px;height:28px;background:var(--aura-color-surface-2);border-bottom:var(--aura-border);flex-shrink:0;">
-          <span style="font-size:0.75rem;color:var(--aura-color-primary);text-transform:uppercase;letter-spacing:.08em;">
-            ${v.title} <span style="color:var(--aura-color-text-dim);font-size:0.6rem;margin-left:6px;">${v.activityId ?? v.instanceId}</span>
-          </span>
-          <div style="display:flex;gap:4px;">
-            <button data-action="minimize" title="Minimize" style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 6px;cursor:pointer;">_</button>
-            <button data-action="close"    title="Close"    style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 6px;cursor:pointer;">✕</button>
-          </div>
-        </div>
-        <div style="flex:1;overflow:hidden;position:relative;">
-          ${v.isLoading
-            ? renderSkeleton(v)
-            : `<iframe src="${v.iframeUrl}" style="width:100%;height:100%;border:none;background:var(--aura-color-bg);" title="${v.title}"></iframe>`
-          }
+    // ---- 4) App slots ----
+    //
+    // CRITICAL: an iframe re-attached to the DOM is RELOADED by the browser
+    // (this is the HTML spec: moving an iframe element invalidates its
+    // browsing context). We therefore must NOT call `appendChild` on a slot
+    // that's already in `dynamicLayout` — even just to "move it to the end"
+    // counts as a re-attach and would reload the iframe inside it. So:
+    //   - Append only newly-created slots (they have no iframe yet).
+    //   - Reuse existing slots in place, updating only their chrome content.
+    //   - Use the CSS `order` property to control visual ordering against the
+    //     `visible` array. The DOM order may drift from the visible order
+    //     over time (across minimize/restore), but CSS grid honours `order`
+    //     for placement, so users see them in the right slots.
+    const existing = new Map<string, HTMLElement>();
+    dynamicLayout.querySelectorAll(':scope > .app-slot[data-view-id]').forEach((el) => {
+      const id = (el as HTMLElement).dataset['viewId'];
+      if (id) existing.set(id, el as HTMLElement);
+    });
+
+    const keep = new Set<string>();
+    visible.forEach((v, i) => {
+      keep.add(v.viewId);
+      let el = existing.get(v.viewId);
+      if (!el) {
+        el = createSlot(v);
+        dynamicLayout.appendChild(el); // OK: brand-new slot, no iframe to reload
+      } else {
+        updateSlot(el, v);
+      }
+      el.style.order = String(i);
+    });
+    for (const [viewId, el] of existing) {
+      if (!keep.has(viewId)) el.remove();
+    }
+  }
+
+  function createSlot(v: AppView): HTMLElement {
+    const slot = document.createElement('div');
+    slot.className = 'app-slot';
+    slot.dataset['viewId'] = v.viewId;
+    slot.style.cssText = 'display:flex;flex-direction:column;background:var(--aura-color-surface);border:var(--aura-border);overflow:hidden;';
+    slot.innerHTML = `
+      <div class="slot-chrome" style="display:flex;align-items:center;justify-content:space-between;padding:0 8px;height:28px;background:var(--aura-color-surface-2);border-bottom:var(--aura-border);flex-shrink:0;">
+        <span style="font-size:0.75rem;color:var(--aura-color-primary);text-transform:uppercase;letter-spacing:.08em;">
+          <span class="slot-title-name"></span>
+          <span class="slot-title-id" style="color:var(--aura-color-text-dim);font-size:0.6rem;margin-left:6px;"></span>
+        </span>
+        <div style="display:flex;gap:4px;">
+          <button data-action="minimize" title="Minimize" style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 6px;cursor:pointer;">_</button>
+          <button data-action="close"    title="Close"    style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 6px;cursor:pointer;">✕</button>
         </div>
       </div>
-    `).join('');
+      <div class="slot-body" style="flex:1;overflow:hidden;position:relative;"></div>`;
+    updateSlot(slot, v);
+    return slot;
+  }
 
-    // Strip of minimized views (if any) sits in the first grid row, spanning all columns.
-    const stripHtml = minimized.length === 0 ? '' : `
-      <div style="grid-column: 1 / -1; display:flex; gap:6px; padding:4px 8px; background: var(--aura-color-surface); border-bottom: var(--aura-border); overflow-x: auto;">
-        <span style="font-size:0.6rem; color: var(--aura-color-text-dim); letter-spacing:0.12em; align-self:center;">MIN ▾</span>
-        ${minimized.map((v) => `
-          <button data-action="restore" data-view-id="${v.viewId}"
-            style="background:transparent; border:var(--aura-border); color:var(--aura-color-secondary); font-family:var(--aura-font-mono); font-size:0.65rem; padding:2px 8px; cursor:pointer; white-space:nowrap;"
-            title="Restore ${v.title}">
-            ${v.title}
-          </button>
-        `).join('')}
-      </div>`;
+  function updateSlot(slot: HTMLElement, v: AppView): void {
+    // Title chrome — cheap to update, no preserved state.
+    const titleName = slot.querySelector('.slot-title-name') as HTMLElement | null;
+    const titleId   = slot.querySelector('.slot-title-id')   as HTMLElement | null;
+    if (titleName && titleName.textContent !== v.title) titleName.textContent = v.title;
+    const idText = v.activityId ?? v.instanceId;
+    if (titleId && titleId.textContent !== idText) titleId.textContent = idText;
 
-    dynamicLayout.innerHTML = stripHtml + slotsHtml;
+    const body = slot.querySelector('.slot-body') as HTMLElement | null;
+    if (!body) return;
+    const hasIframe = !!body.querySelector('iframe');
+
+    if (v.isLoading) {
+      // Skeleton state. If an iframe already exists (e.g. an instance went
+      // resumed → pausing), DON'T destroy it — the app keeps running and we
+      // want to preserve its inner state.
+      if (!hasIframe) {
+        // Update skeleton text in place — markup is stateless.
+        body.innerHTML = renderSkeleton(v);
+      }
+    } else {
+      // Skeleton → iframe transition happens exactly ONCE per slot. After this,
+      // we never touch the iframe again, no matter how many state events fire.
+      if (!hasIframe && v.iframeUrl) {
+        body.innerHTML = '';
+        const iframe = document.createElement('iframe');
+        iframe.title = v.title;
+        iframe.setAttribute('allow', 'clipboard-read; clipboard-write');
+        iframe.style.cssText = 'width:100%;height:100%;border:none;background:var(--aura-color-bg);';
+        iframe.src = v.iframeUrl;
+        body.appendChild(iframe);
+      }
+    }
+  }
+
+  function escapeHtml(s: string): string {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function escapeAttr(s: string): string {
+    return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
   }
 
   function renderMinimizedStrip(minimized: AppView[]): string {
@@ -599,6 +693,17 @@ for (const inst of mgr.getAllInstances()) {
   sse.onmessage = (e) => {
     const ev = JSON.parse(e.data);
     if (ev.type === 'app:stateChanged') {
+      // Terminal lifecycle states ⇒ the backing process is gone (forceKilled
+      // from process manager, reconciler force-kill on identity drift, or a
+      // clean stop). Drop the view so its iframe doesn't keep hammering a
+      // dead /api/proxy/<id>/ — same effect as app:crashed, just from a
+      // different code path.
+      if (ev.state === 'destroyed' || ev.state === 'error') {
+        views = views.filter((v) => v.instanceId !== ev.instanceId);
+        if (focusedInstanceId === ev.instanceId) exitFocus();
+        renderLayout();
+        return;
+      }
       views = views.map((v) => v.instanceId === ev.instanceId
         ? { ...v, lifecycleState: ev.state, isLoading: ev.state !== 'resumed' }
         : v
