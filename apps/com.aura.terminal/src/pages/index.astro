@@ -33,6 +33,16 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
       flex-shrink: 0;
     }
     #terminal-bar span { color: #00ff41; margin-right: 8px; }
+    #terminal-bar #ws-url {
+      color: #557755;
+      font-size: 0.6rem;
+      letter-spacing: 0.04em;
+      text-transform: none;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
     #terminal { flex: 1; padding: 4px; overflow: hidden; }
     .xterm { height: 100%; }
     .xterm-viewport { background: #0a0a0a !important; }
@@ -49,10 +59,10 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
 <body>
   <div id="terminal-bar">
     <span>></span> AURA TERMINAL
+    <span id="ws-url" title="WebSocket endpoint" style="margin-left: 2em;"></span>
     <span style="margin-left:auto;" id="conn-status">CONNECTING...</span>
   </div>
   <div id="terminal"></div>
-  <div id="ws-url-status"></div>
 
   <script is:inline src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
   <script is:inline src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
@@ -87,14 +97,69 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
     const statusEl = document.getElementById('conn-status');
     const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProto}//${location.host}/api/proxy/${appId}/ws`;
-    document.getElementById('ws-url-status').textContent = wsUrl;
+    document.getElementById('ws-url').textContent = wsUrl;
 
+    // ANSI color helpers — xterm.js parses these inline.
+    const GRN  = '\x1b[38;5;82m';  // bright green
+    const DIM  = '\x1b[38;5;65m';  // dim green
+    const ORG  = '\x1b[38;5;208m'; // orange (warn)
+    const RED  = '\x1b[38;5;196m'; // red (error)
+    const RST  = '\x1b[0m';
+    const BOLD = '\x1b[1m';
+
+    // Pre-WS splash so the terminal isn't a blank black box while the PTY
+    // backend boots. We write into the xterm itself (no extra DOM), then
+    // clear the screen the moment the WS opens and the PTY takes over.
+    function writeSplash() {
+      term.write('\x1b[2J\x1b[H'); // clear + home
+      term.writeln(`${GRN}${BOLD}  ╭──────────────────────────────╮${RST}`);
+      term.writeln(`${GRN}${BOLD}  │      A U R A   T E R M       │${RST}`);
+      term.writeln(`${GRN}${BOLD}  ╰──────────────────────────────╯${RST}`);
+      term.writeln('');
+      term.writeln(`${DIM}  app      ${RST}${appId}`);
+      term.writeln('');
+    }
+    writeSplash();
+
+    let dotsTimer  = null;
+    let dotsLine   = '';
+    function startDots(label) {
+      stopDots();
+      let n = 0;
+      const render = () => {
+        const dots = '.'.repeat(n % 4);
+        // \r returns to column 0; pad to overwrite previous longer line.
+        const text = `${DIM}  ${label}${dots}${RST}`;
+        term.write(`\r\x1b[2K${text}`);
+        dotsLine = text;
+        n++;
+      };
+      render();
+      dotsTimer = setInterval(render, 350);
+    }
+    function stopDots() {
+      if (dotsTimer) clearInterval(dotsTimer);
+      dotsTimer = null;
+    }
+
+    startDots('connecting to pty');
+
+    let attempt = 0;
     function connect() {
+      attempt++;
       const ws = new WebSocket(wsUrl);
+      let opened = false;
 
       ws.onopen = () => {
+        opened = true;
+        stopDots();
         statusEl.textContent = 'CONNECTED';
         statusEl.style.color = '#00ff41';
+        // Clear the splash up-front, BEFORE the resize/PTY output arrives.
+        // (Earlier we did this on a 120ms timer which raced with the bash
+        // prompt and sometimes wiped the prompt itself — leaving the user
+        // staring at an empty blinking cursor.)
+        term.write('\x1b[2J\x1b[H');
         ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
       };
 
@@ -103,12 +168,27 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
       ws.onclose = () => {
         statusEl.textContent = 'DISCONNECTED — RECONNECTING...';
         statusEl.style.color = '#ff9900';
+        if (opened) {
+          // Was connected, now dropped — surface in-band.
+          term.writeln('');
+          term.writeln(`${ORG}  [disconnected — reconnecting]${RST}`);
+          startDots('reconnecting');
+        } else {
+          // Never connected this attempt; keep the connecting animation
+          // but bump it to a "retry" label so the user sees something is happening.
+          startDots(`retry ${attempt}`);
+        }
         setTimeout(connect, 2000);
       };
 
       ws.onerror = () => {
         statusEl.textContent = 'ERROR';
         statusEl.style.color = '#ff2020';
+        if (!opened) {
+          // Connection refused / handshake error — surface inline so the
+          // user knows it's not just a black screen.
+          term.write(`\r\x1b[2K${RED}  ws error — retrying${RST}\r\n`);
+        }
       };
 
       term.onData((data) => ws.readyState === 1 && ws.send(JSON.stringify({ type: 'data', data })));

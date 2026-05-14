@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 
@@ -53,10 +53,15 @@ export class ProotRunner {
 
     console.log(`[ProotRunner] Spawning ${instanceId} (app=${appId}) on port ${port}`);
 
+    // detached: true makes proot a process-group leader so we can SIGKILL the
+    // entire group on cleanup (including any detached astro children). Without
+    // it, kill() only signals the proot pid and orphan astros survive on the
+    // bound port — that's the squatter that caused the wrong-content bug.
     const child = spawn(prooted ? 'proot' : 'bash', prooted ? args : [join(appDir, manifest.entrypoint)], {
       cwd: appDir,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
     });
 
     child.stdout?.on('data', (d) => process.stdout.write(`[${instanceId}] ${d}`));
@@ -64,7 +69,16 @@ export class ProotRunner {
 
     this.processes.set(instanceId, { process: child, port, appId });
 
-    await this.waitHealthy(instanceId, port);
+    try {
+      await this.waitHealthy(instanceId, appId, port);
+    } catch (err) {
+      // Either timeout or identity mismatch — clean up the partial spawn so we
+      // don't leak an orphan process or a stale instance entry. Caller is
+      // responsible for releasing the port.
+      console.error(`[ProotRunner] ${instanceId} health-check failed: ${(err as Error).message}`);
+      this.forceKill(instanceId);
+      throw err;
+    }
     return child.pid ?? 0;
   }
 
@@ -77,40 +91,90 @@ export class ProotRunner {
   ): string[] {
     if (!useProot) return [join(appDir, manifest.entrypoint)];
 
+    // pnpm workspace creates node_modules as a forest of relative symlinks
+    // (e.g. `node_modules/astro → ../../node_modules/.pnpm/astro@.../astro`).
+    // Those resolve correctly ONLY if the app dir keeps its `/workspace/apps/<id>`
+    // absolute path inside the PRoot. We therefore drop the `/app` alias and
+    // use the workspace path as cwd; `APP_ID`/`APP_INSTANCE_ID` env vars give
+    // the app its identity instead.
     const args = [
       `--rootfs=${this.baseRootfs}`,
-      `--bind=${appDir}:/app`,
+      '--bind=/workspace:/workspace',
       `--bind=${dataDir}:/data`,
       '--bind=/proc',
       '--bind=/dev',
       '--bind=/tmp',
-      '--cwd=/app',
+      '--bind=/etc/resolv.conf:/etc/resolv.conf',
+      // Bring the master container's Node 22 into the sandbox — Debian-bookworm
+      // ships Node 18 in its package archive, which is too old for our apps.
+      '--bind=/usr/local/bin/node:/usr/local/bin/node',
+      `--cwd=${appDir}`,
     ];
 
+    // Toolchain tools override the base-rootfs versions if a matching binary
+    // is present (e.g. host's `claude` cli). Tools the manifest doesn't declare
+    // stay invisible inside the sandbox.
+    //
+    // Resolve symlinks before constructing the bind argument: PRoot's bind
+    // mishandles a source path that is itself a symlink — `lstat` inside the
+    // sandbox sees it as a symlink but `readlink` returns EINVAL, which makes
+    // Node's `realpathSync` throw on entry-point resolution. Binding the
+    // resolved target (a regular file) sidesteps that entirely. Capabilities
+    // installed by `aura cap install` use symlinks, so this fix matters for
+    // every dynamically added tool, not just `aura` itself.
     const toolBinDir = join(this.toolchainDir, 'bin');
     for (const tool of manifest.tools) {
-      const toolPath = join(toolBinDir, tool === 'claude-code' ? 'claude' : tool);
+      const binaryName = tool === 'claude-code' ? 'claude' : tool;
+      const toolPath = join(toolBinDir, binaryName);
       if (existsSync(toolPath)) {
-        args.push(`--bind=${toolPath}:/usr/local/bin/${tool === 'claude-code' ? 'claude' : tool}`);
+        let bindSrc = toolPath;
+        try { bindSrc = realpathSync(toolPath); } catch { /* fall back to the literal path */ }
+        args.push(`--bind=${bindSrc}:/usr/local/bin/${binaryName}`);
+      } else {
+        console.warn(`[ProotRunner] Capability '${tool}' declared by manifest but not installed in toolchain (${toolPath}) — skipping bind-mount. Run \`aura cap install ${tool}\`.`);
       }
     }
 
-    args.push('bash', `/app/${manifest.entrypoint}`);
+    args.push('bash', join(appDir, manifest.entrypoint));
     return args;
   }
 
-  private async waitHealthy(instanceId: string, port: number): Promise<void> {
+  /**
+   * Probe /api/lifecycle/health until the app responds AND its declared
+   * identity matches what we just spawned. Identity match guards against the
+   * "another app squatting our port" failure mode that caused the wrong-
+   * content bug — a bare 200 is no longer enough.
+   */
+  private async waitHealthy(instanceId: string, appId: string, port: number): Promise<void> {
     const deadline = Date.now() + HEALTH_CHECK_TIMEOUT_MS;
+    let lastBody: string | null = null;
     while (Date.now() < deadline) {
       try {
         const res = await fetch(`http://localhost:${port}/api/lifecycle/health`, { signal: AbortSignal.timeout(1000) });
-        if (res.ok) return;
-      } catch {
-        // not ready yet
+        if (res.ok) {
+          const text = await res.text();
+          lastBody = text;
+          const verdict = verifyHealthIdentity(text, appId, instanceId);
+          if (verdict.kind === 'match') return;
+          if (verdict.kind === 'legacy') {
+            console.warn(`[ProotRunner] ${instanceId} health endpoint returned no identity body; accepting on legacy fallback.`);
+            return;
+          }
+          // Mismatch — port poisoned, fail loud.
+          throw new Error(
+            `[ProotRunner] ${instanceId} on port ${port}: health identity mismatch ` +
+            `(expected appId=${appId} instanceId=${instanceId}, got appId=${verdict.claimedApp} instanceId=${verdict.claimedInstance}). ` +
+            `Another process is likely squatting this port.`
+          );
+        }
+      } catch (err) {
+        // Re-throw identity mismatch immediately — port is poisoned, no point waiting.
+        if (err instanceof Error && err.message.includes('identity mismatch')) throw err;
+        // Otherwise keep polling (connection refused, etc.)
       }
       await sleep(HEALTH_CHECK_INTERVAL_MS);
     }
-    throw new Error(`[ProotRunner] ${instanceId} did not become healthy within ${HEALTH_CHECK_TIMEOUT_MS}ms`);
+    throw new Error(`[ProotRunner] ${instanceId} did not become healthy within ${HEALTH_CHECK_TIMEOUT_MS}ms (last body: ${lastBody ?? 'none'})`);
   }
 
   async callLifecycle(instanceId: string, hook: string): Promise<void> {
@@ -162,9 +226,9 @@ export class ProotRunner {
     // Detach all exit listeners so an intentional kill doesn't trigger
     // the AppManager's unexpected-exit → 'error' transition.
     spawned.process.removeAllListeners('exit');
-    spawned.process.kill('SIGTERM');
+    killProcessGroup(spawned.process.pid, 'SIGTERM');
     await sleep(5000).catch(() => undefined);
-    if (!spawned.process.killed) spawned.process.kill('SIGKILL');
+    if (!spawned.process.killed) killProcessGroup(spawned.process.pid, 'SIGKILL');
   }
 
   /** Immediate SIGKILL without grace period — for force-kill from process manager. */
@@ -173,7 +237,7 @@ export class ProotRunner {
     if (!spawned) return false;
     this.processes.delete(instanceId);
     spawned.process.removeAllListeners('exit');
-    spawned.process.kill('SIGKILL');
+    killProcessGroup(spawned.process.pid, 'SIGKILL');
     return true;
   }
 
@@ -185,6 +249,21 @@ export class ProotRunner {
     return this.processes.has(instanceId);
   }
 
+  /**
+   * Every PID we've spawned (whether or not waitHealthy has finished). The
+   * reconciler reads this — not just AppManager.instances[].pid — because
+   * during the 0..30s waitHealthy window, the instance entry's `pid` is still
+   * null even though the proot is live. Without this view the orphan reaper
+   * would kill the new instance's proot/astro before it ever became healthy.
+   */
+  getActivePids(): number[] {
+    const out: number[] = [];
+    for (const s of this.processes.values()) {
+      if (s.process.pid != null) out.push(s.process.pid);
+    }
+    return out;
+  }
+
   onExit(instanceId: string, cb: (code: number | null) => void): void {
     this.processes.get(instanceId)?.process.on('exit', cb);
   }
@@ -192,4 +271,57 @@ export class ProotRunner {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+export type IdentityVerdict =
+  | { kind: 'match' }
+  | { kind: 'legacy' }
+  | { kind: 'mismatch'; claimedApp: string | null; claimedInstance: string | null };
+
+/**
+ * Parse a `/api/lifecycle/health` response body and decide whether the
+ * upstream owner is who we expect. Pulled out of `waitHealthy` so the
+ * regression test can exercise the contract directly without spawning
+ * real processes.
+ *
+ * - `match`    : body identity matches both expected appId and instanceId.
+ * - `legacy`   : body has no identity fields at all (older app template) —
+ *                accepted with a warning during rollout.
+ * - `mismatch` : body identifies a different app/instance — fail loud.
+ */
+export function verifyHealthIdentity(
+  rawBody: string,
+  expectedAppId: string,
+  expectedInstanceId: string,
+): IdentityVerdict {
+  let body: { appId?: unknown; instanceId?: unknown } = {};
+  try { body = JSON.parse(rawBody) as typeof body; } catch { /* tolerate non-JSON / legacy */ }
+  const claimedApp      = typeof body.appId      === 'string' ? body.appId      : null;
+  const claimedInstance = typeof body.instanceId === 'string' ? body.instanceId : null;
+  if (claimedApp === null && claimedInstance === null) return { kind: 'legacy' };
+  if (claimedApp === expectedAppId && claimedInstance === expectedInstanceId) return { kind: 'match' };
+  return { kind: 'mismatch', claimedApp, claimedInstance };
+}
+
+/**
+ * Signal an entire process group, not just the spawned root. Required because
+ * apps spawn `bash entrypoint.sh` which spawns `astro dev` which may further
+ * detach — sending SIGTERM/SIGKILL only to the proot pid leaves orphan astros
+ * that then squat the released port. With `detached: true` on spawn() the
+ * child's pid is also its process-group id, so `kill(-pid, sig)` reaches
+ * every descendant.
+ *
+ * Falls back to single-pid kill if pid is missing or already gone.
+ */
+export function killProcessGroup(pid: number | undefined, signal: NodeJS.Signals): void {
+  if (!pid) return;
+  try {
+    process.kill(-pid, signal);
+  } catch (err) {
+    // ESRCH = group already gone; EPERM is unusual but harmless — try the
+    // single-pid path so we don't silently leak.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return;
+    try { process.kill(pid, signal); } catch { /* really gone */ }
+  }
 }

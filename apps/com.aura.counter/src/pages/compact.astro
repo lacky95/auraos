@@ -83,14 +83,14 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
 
   <script is:inline>
     const valueEl = document.getElementById('value');
-    const sse = new EventSource('/api/events');
+    const sse = new EventSource('api/events');
     sse.onmessage = (e) => {
       const s = JSON.parse(e.data);
       valueEl.textContent = String(s.value);
     };
     document.querySelectorAll('button[data-action]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        fetch('/api/counter', {
+        fetch('api/counter', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: btn.dataset.action }),

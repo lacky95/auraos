@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import type { AppLifecycleState } from '../types/lifecycle.js';
@@ -8,9 +8,12 @@ import { OsEventBus } from '../ipc/OsEventBus.js';
 import { AppRegistry } from './AppRegistry.js';
 import { PortAllocator } from './PortAllocator.js';
 import { LifecycleStateMachine } from './LifecycleStateMachine.js';
-import { ProotRunner } from './ProotRunner.js';
+import { ProotRunner, killProcessGroup } from './ProotRunner.js';
 import { PermissionManager } from '../permissions/PermissionManager.js';
 import { ContentProviderRegistry } from '../content/ContentProviderRegistry.js';
+
+const RECONCILE_INTERVAL_MS = 5_000;
+const ERROR_GRACE_MS        = 30_000;
 
 export class AppManager {
   private registry: AppRegistry;
@@ -24,6 +27,8 @@ export class AppManager {
   readonly permissions: PermissionManager;
   readonly providers:   ContentProviderRegistry;
   private dataDir: string;
+  private reconcileTimer: ReturnType<typeof setInterval> | null = null;
+  private reconcileRunning = false;
 
   constructor(opts: {
     appsDir: string;
@@ -53,6 +58,19 @@ export class AppManager {
     mkdirSync(join(this.dataDir, 'apps'), { recursive: true });
     await this.registry.init();
     console.log(`[AppManager] Ready. Apps found: ${this.registry.getAll().length}`);
+    this.startReconciler();
+  }
+
+  /**
+   * Stop background work. Used by the soft-restart endpoint before deleting
+   * the globalThis singleton, so the next `getAppManager()` call constructs a
+   * fresh instance against the latest @aura/core code.
+   */
+  dispose(): void {
+    if (this.reconcileTimer) {
+      clearInterval(this.reconcileTimer);
+      this.reconcileTimer = null;
+    }
   }
 
   /**
@@ -92,7 +110,7 @@ export class AppManager {
     mkdirSync(join(this.dataDir, 'apps', appId, instanceId), { recursive: true });
 
     this.transition(instanceId, appId, 'creating', null);
-    const port = this.ports.allocate(instanceId);
+    const port = await this.ports.allocate(instanceId);
 
     try {
       const pid = await this.runner.spawn(instanceId, appId, port, manifest);
@@ -269,7 +287,13 @@ export class AppManager {
       ...(metadata !== undefined ? { metadata } : {}),
     };
     this.activities.set(activityId, activity);
-    OsEventBus.emit('activity:opened', { activityId, parentInstanceId: instanceId, appId: inst.appId, path });
+    OsEventBus.emit('activity:opened', {
+      activityId,
+      parentInstanceId: instanceId,
+      appId: inst.appId,
+      path,
+      ...(title !== undefined ? { title } : {}),
+    });
     return activity;
   }
 
@@ -393,18 +417,184 @@ export class AppManager {
     };
   }
 
+  // ============================== Reconciler ==============================
+  // A 5s heartbeat that converges AppManager state to the OS reality. Without
+  // this loop, leaks/crashes/squatters can drift state silently and the proxy
+  // ends up routing requests to whoever happens to own the port. Three checks
+  // per tick — keep them cheap so we can run them often.
+
+  private startReconciler(): void {
+    if (this.reconcileTimer) return;
+    this.reconcileTimer = setInterval(() => {
+      if (this.reconcileRunning) return;
+      this.reconcileRunning = true;
+      this.reconcileOnce()
+        .catch((err) => console.error('[AppManager] reconcile failed:', err))
+        .finally(() => { this.reconcileRunning = false; });
+    }, RECONCILE_INTERVAL_MS);
+    if (typeof this.reconcileTimer.unref === 'function') this.reconcileTimer.unref();
+  }
+
+  private async reconcileOnce(): Promise<void> {
+    // 1) Tracked-instance liveness: any pid we believe is alive but isn't
+    //    must be flagged error, port released, view dropped.
+    //
+    //    SKIP instances with pid==null: that's the steady state during
+    //    'creating'/'starting' (before spawn() returns and patches the pid in).
+    //    Treating "no pid yet" as "process is dead" would kill every instance
+    //    in mid-spawn — exactly the regression we hit on first deploy.
+    for (const inst of Array.from(this.instances.values())) {
+      const pid = inst.pid;
+      if (pid != null) {
+        let alive = false;
+        try { process.kill(pid, 0); alive = true; }
+        catch { alive = false; }
+        if (!alive && inst.state !== 'error' && inst.state !== 'destroyed' && inst.state !== 'destroying') {
+          console.warn(`[AppManager] reconcile: ${inst.instanceId} pid=${pid} is gone — marking error`);
+          const releasedPort = inst.port;
+          inst.state = 'error';
+          inst.port  = null;
+          inst.error = 'reconciled: backing process disappeared';
+          this.fsm.set(inst.instanceId, 'error');
+          if (releasedPort) this.ports.release(releasedPort);
+          this.providers.unregisterInstance(inst, this.registry.getById(inst.appId));
+          this.purgeActivitiesOfInstance(inst.instanceId);
+          // Also drop the runner-side entry so the ProotRunner doesn't keep a
+          // stale ChildProcess reference. If the OS process is somehow still
+          // alive (e.g. we mis-diagnosed liveness), this also SIGKILLs the
+          // whole group — preferable to leaving a squatter behind.
+          try { this.runner.forceKill(inst.instanceId); } catch { /* runner may already have evicted it */ }
+          OsEventBus.emit('app:stateChanged', { instanceId: inst.instanceId, appId: inst.appId, state: 'error', port: null });
+          OsEventBus.emit('app:crashed',      { instanceId: inst.instanceId, appId: inst.appId, error: 'reconciled: backing process disappeared' });
+        }
+      }
+      // Drop long-dead instance entries so they don't pollute proxy lookups.
+      const age = Date.now() - inst.lastTransitionAt.getTime();
+      if ((inst.state === 'error' || inst.state === 'destroyed') && age > ERROR_GRACE_MS) {
+        this.instances.delete(inst.instanceId);
+        this.fsm.delete(inst.instanceId);
+        this.nextActivityNum.delete(inst.instanceId);
+      }
+    }
+
+    // 2) Orphan reap: any /proc process whose cmdline points at apps/com.aura.*
+    //    but whose ancestor chain doesn't reach a tracked proot pid is a
+    //    squatter — SIGKILL it. Runs unconditionally (including when trackedPids
+    //    is empty) so a fresh AppManager wipes any zombies from a previous
+    //    generation. Only cmdlines matching apps/com.aura.* qualify, so a user
+    //    debugging inside `aura inst shell` won't be killed.
+    //
+    //    IMPORTANT: include ProotRunner's in-flight PIDs too. During spawn(),
+    //    waitHealthy can poll for up to 30s before the instance entry's `pid`
+    //    field gets set — but the runner already has the live ChildProcess.
+    //    Without the runner's view, the reaper would kill mid-spawn instances.
+    const trackedPids = new Set<number>();
+    for (const t of this.instances.values()) if (t.pid != null) trackedPids.add(t.pid);
+    for (const pid of this.runner.getActivePids()) trackedPids.add(pid);
+    const squatters = listAppOrphans(trackedPids);
+    for (const orphan of squatters) {
+      console.warn(`[AppManager] reconcile: SIGKILL orphan pid=${orphan.pid} app=${orphan.appId} cmd=${orphan.cmdline.slice(0, 120)}`);
+      killProcessGroup(orphan.pid, 'SIGKILL');
+    }
+
+    // 3) Identity drift on tracked ports: a live pid + correct lookup is not
+    //    enough — verify the bound socket actually answers as our app.
+    for (const inst of Array.from(this.instances.values())) {
+      if (inst.port == null || inst.state !== 'resumed') continue;
+      try {
+        const res = await fetch(`http://localhost:${inst.port}/api/lifecycle/health`, {
+          signal: AbortSignal.timeout(1000),
+        });
+        if (!res.ok) continue; // transient — don't punish on a single bad response
+        const declaredHeaderApp  = res.headers.get('x-aura-app-id');
+        const declaredHeaderInst = res.headers.get('x-aura-instance-id');
+        let bodyApp: string | null = null;
+        let bodyInst: string | null = null;
+        try {
+          const body = await res.json() as { appId?: unknown; instanceId?: unknown };
+          if (typeof body.appId      === 'string') bodyApp  = body.appId;
+          if (typeof body.instanceId === 'string') bodyInst = body.instanceId;
+        } catch { /* legacy responder without identity body */ }
+        const seenApp  = declaredHeaderApp  ?? bodyApp;
+        const seenInst = declaredHeaderInst ?? bodyInst;
+        if (seenApp && seenApp !== inst.appId) {
+          console.error(`[AppManager] reconcile: port ${inst.port} now answers for ${seenApp}, expected ${inst.appId}. Force-killing ${inst.instanceId}.`);
+          this.forceKill(inst.instanceId);
+          continue;
+        }
+        if (seenInst && seenInst !== inst.instanceId) {
+          console.error(`[AppManager] reconcile: port ${inst.port} now answers for instance ${seenInst}, expected ${inst.instanceId}. Force-killing.`);
+          this.forceKill(inst.instanceId);
+        }
+      } catch { /* health probe failed entirely — covered by liveness check next tick */ }
+    }
+  }
+
   private handleUnexpectedExit(instanceId: string, appId: string, code: number | null): void {
     const port = this.runner.getPort(instanceId);
     if (port) this.ports.release(port);
-    this.fsm.set(instanceId, 'error');
     const inst = this.instances.get(instanceId);
+    if (inst) this.providers.unregisterInstance(inst, this.registry.getById(appId));
+    this.purgeActivitiesOfInstance(instanceId);
+    this.fsm.set(instanceId, 'error');
     if (inst) {
       inst.state = 'error';
+      inst.port = null;
       inst.error = `Process exited with code ${code}`;
     }
-    OsEventBus.emit('app:crashed', { instanceId, appId, error: `Process exited with code ${code}` });
+    OsEventBus.emit('app:stateChanged', { instanceId, appId, state: 'error', port: null });
+    OsEventBus.emit('app:crashed',      { instanceId, appId, error: `Process exited with code ${code}` });
     console.error(`[AppManager] ${instanceId} crashed (exit code ${code})`);
   }
+}
+
+interface AppOrphan { pid: number; appId: string; cmdline: string; }
+
+/**
+ * Walk /proc and return every process whose cmdline matches an Aura app dir
+ * but whose ancestor chain does NOT reach any of the trackedPids. Those are
+ * squatters — processes the AppManager doesn't know about that are running
+ * under an app identity (likely holding ports we think are free).
+ *
+ * Same logic as /api/admin/reap-orphans, kept here so the reconciler doesn't
+ * depend on the shell package.
+ */
+function listAppOrphans(trackedPids: Set<number>): AppOrphan[] {
+  let pids: string[];
+  try { pids = readdirSync('/proc').filter((n) => /^\d+$/.test(n)); }
+  catch { return []; }
+
+  const getPPid = (pid: number): number | null => {
+    try {
+      const status = readFileSync(`/proc/${pid}/status`, 'utf-8');
+      const m = status.match(/^PPid:\s+(\d+)/m);
+      return m ? Number(m[1]) : null;
+    } catch { return null; }
+  };
+  const reachesTracked = (pid: number): boolean => {
+    let cur: number | null = pid;
+    const seen = new Set<number>();
+    while (cur != null && !seen.has(cur)) {
+      if (trackedPids.has(cur)) return true;
+      seen.add(cur);
+      cur = getPPid(cur);
+    }
+    return false;
+  };
+
+  const orphans: AppOrphan[] = [];
+  for (const pidStr of pids) {
+    let cmdline = '';
+    try { cmdline = readFileSync(`/proc/${pidStr}/cmdline`, 'utf-8').replace(/\0/g, ' ').trim(); }
+    catch { continue; }
+    const m = cmdline.match(/apps\/(com\.aura\.[a-z.]+(?:-\d+)?)/);
+    if (!m) continue;
+    const pid = Number(pidStr);
+    if (reachesTracked(pid)) continue;
+    const appId = (m[1] ?? '').replace(/-\d+$/, '');
+    orphans.push({ pid, appId, cmdline });
+  }
+  return orphans;
 }
 
 /**

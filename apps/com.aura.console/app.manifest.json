@@ -1,0 +1,24 @@
+{
+  "id": "com.aura.console",
+  "name": "Console",
+  "version": "0.1.0",
+  "description": "Live frontend console viewer. Captures console.log/info/warn/error/debug + uncaught errors from the shell and every app iframe.",
+  "entrypoint": "entrypoint.sh",
+  "permissions": [],
+  "tools": ["bash", "node"],
+  "rootfsMode": "shared",
+  "category": "developer",
+  "instanceMode": "single",
+  "maxInstances": 1,
+  "activityMode": "none",
+  "maxActivitiesPerInstance": 0,
+  "defaultLaunch": "new-instance",
+  "backgroundService": false,
+  "viewConfig": {
+    "defaultWidth": 720,
+    "defaultHeight": 480,
+    "resizable": true
+  },
+  "preferredLayout": "tiling",
+  "theme": { "mode": "os-components" }
+}

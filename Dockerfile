@@ -1,3 +1,20 @@
+# ─── Stage: base-rootfs ───────────────────────────────────────────────────────
+# Debian-slim filesystem with the tools an app sandbox needs, exported as a
+# raw rootfs that PRoot can pivot into. Using debian-slim (not Alpine) keeps
+# glibc compatibility with host-side binaries bind-mounted into the rootfs.
+FROM debian:bookworm-slim AS base-rootfs
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    coreutils \
+    curl \
+    git \
+    ca-certificates \
+    procps \
+    nodejs \
+    npm \
+  && rm -rf /var/lib/apt/lists/*
+
 # ─── Stage: base ──────────────────────────────────────────────────────────────
 FROM node:22-slim AS base
 
@@ -33,10 +50,8 @@ RUN cp $(which git) /os/toolchain/bin/git && \
     cp $(which curl) /os/toolchain/bin/curl && \
     cp $(which bash) /os/toolchain/bin/bash
 
-# Minimal Alpine-based rootfs for PRoot apps (shared base)
-RUN mkdir -p /os/base-rootfs && \
-    curl -fsSL https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-minirootfs-3.20.0-x86_64.tar.gz \
-    | tar -xz -C /os/base-rootfs
+# Debian-slim base rootfs for PRoot apps (shared, glibc-compatible)
+COPY --from=base-rootfs / /os/base-rootfs
 
 # ─── Stage: deps ──────────────────────────────────────────────────────────────
 FROM base AS deps
@@ -48,6 +63,7 @@ COPY packages/core/package.json ./packages/core/package.json
 COPY packages/shell/package.json ./packages/shell/package.json
 COPY packages/app-sdk/package.json ./packages/app-sdk/package.json
 COPY packages/ui/package.json ./packages/ui/package.json
+COPY packages/aura-cli/package.json ./packages/aura-cli/package.json
 
 RUN pnpm install
 
@@ -59,6 +75,7 @@ COPY . .
 RUN pnpm --filter @aura/core build
 RUN pnpm --filter @aura/ui build
 RUN pnpm --filter @aura/app-sdk build
+RUN pnpm --filter @aura/cli build
 RUN pnpm --filter @aura/shell build
 
 # ─── Stage: runtime ───────────────────────────────────────────────────────────
@@ -70,7 +87,15 @@ COPY --from=build /workspace/packages/core/dist ./packages/core/dist
 COPY --from=build /workspace/packages/ui/dist ./packages/ui/dist
 COPY --from=build /workspace/packages/app-sdk/dist ./packages/app-sdk/dist
 COPY --from=build /workspace/packages/shell/dist ./packages/shell/dist
+COPY --from=build /workspace/packages/aura-cli/dist ./packages/aura-cli/dist
 COPY apps/ ./apps/
+
+# Install aura CLI globally + expose as a forwardable capability (bind-mountable into PRoots)
+# NOTE: toolchain symlink must point directly at the .cjs file, NOT at /usr/local/bin/aura.
+# When the toolchain entry is bind-mounted into a PRoot at /usr/local/bin/aura, a target of
+# /usr/local/bin/aura would become a self-referential symlink inside the sandbox.
+RUN ln -sf /workspace/packages/aura-cli/dist/aura.cjs /usr/local/bin/aura \
+ && ln -sf /workspace/packages/aura-cli/dist/aura.cjs /os/toolchain/bin/aura
 
 ENV NODE_ENV=development
 ENV AURA_APPS_DIR=/workspace/apps
@@ -102,18 +127,27 @@ ENV AURA_APP_PORT_END=4999
 EXPOSE 3000
 EXPOSE 4001-4100
 
-# Install Claude Code + toolchain at dev image build time
+# Install Claude Code + toolchain at dev image build time. The host's bash/git/curl
+# are still copied into /os/toolchain/bin/ for opt-in per-app bind-mounts, but the
+# base-rootfs below also has its own copies (apps default to those).
 RUN npm install -g @anthropic-ai/claude-code 2>/dev/null || true && \
     mkdir -p /os/toolchain/bin && \
     cp $(which git) /os/toolchain/bin/git && \
     cp $(which curl) /os/toolchain/bin/curl && \
     cp $(which bash) /os/toolchain/bin/bash
 
-# Download Alpine minirootfs for PRoot base
-RUN mkdir -p /os/base-rootfs && \
-    curl -fsSL https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-minirootfs-3.20.0-x86_64.tar.gz \
-    | tar -xz -C /os/base-rootfs
+# Debian-slim PRoot base rootfs (glibc-compatible — same libc as host binaries)
+COPY --from=base-rootfs / /os/base-rootfs
 
 WORKDIR /workspace
 
-CMD ["sh", "-c", "pnpm install && pnpm --filter @aura/shell dev --host 0.0.0.0"]
+# The aura CLI is built from /workspace (volume-mounted in dev). Initial build
+# + symlink + esbuild watcher in the background → every edit under
+# packages/aura-cli/src/ rebuilds dist/aura.cjs in place, so the symlinked
+# `aura` binary always reflects the latest code without a container rebuild.
+CMD ["sh", "-c", "pnpm install \
+ && pnpm --filter @aura/cli build \
+ && ln -sf /workspace/packages/aura-cli/dist/aura.cjs /usr/local/bin/aura \
+ && ln -sf /workspace/packages/aura-cli/dist/aura.cjs /os/toolchain/bin/aura \
+ && (pnpm --filter @aura/cli build:watch &) \
+ && pnpm --filter @aura/shell dev --host 0.0.0.0"]

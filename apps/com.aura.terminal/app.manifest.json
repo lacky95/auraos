@@ -5,7 +5,7 @@
   "description": "System terminal with AI toolchain access",
   "entrypoint": "entrypoint.sh",
   "permissions": ["storage.read", "storage.write", "network.local"],
-  "tools": ["bash", "node", "git", "claude-code"],
+  "tools": ["bash", "node", "git", "claude-code", "aura"],
   "rootfsMode": "shared",
   "category": "system",
   "instanceMode": "multi",

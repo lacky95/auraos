@@ -75,11 +75,21 @@ main.settings-body {
   gap: 10px;
 }
 .theme-card {
+  /* <button> defaults to system chrome (white/grey bg). Override explicitly
+     so the card uses the OS surface tone like the other settings tiles. */
+  background: var(--aura-color-surface, #111);
+  color: var(--aura-color-text, #ccffcc);
+  font-family: 'Courier New', monospace;
+  text-align: left;
   border: 1px solid var(--aura-color-border, rgba(0,255,65,0.2));
   padding: 14px;
   cursor: pointer;
-  transition: box-shadow 0.1s;
+  transition: box-shadow 0.1s, color 0.1s, border-color 0.1s;
   position: relative;
+}
+.theme-card:hover {
+  color: var(--aura-color-primary, #00ff41);
+  border-color: var(--aura-color-primary, #00ff41);
 }
 .theme-card:hover { box-shadow: var(--aura-glow-primary, 0 0 8px #00ff41); }
 .theme-card[data-active="true"] { box-shadow: var(--aura-glow-primary, 0 0 8px #00ff41); }

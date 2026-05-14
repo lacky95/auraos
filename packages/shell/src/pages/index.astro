@@ -178,59 +178,141 @@ for (const inst of mgr.getAllInstances()) {
    *   - activityMode='multi', single  → reuse instance if running, always open new activity view
    *   - activityMode='multi', multi   → defaultLaunch decides ('new-instance' vs 'new-activity')
    */
+  /**
+   * Synchronously add a placeholder "pending" view + render, before any await.
+   * The user sees the boot skeleton the instant they click — no waiting on the
+   * backend's `start` round-trip for first paint. The returned helpers swap the
+   * placeholder for the real view (or drop it on error).
+   */
+  function pushPendingView(appId: string, displayTitle: string): {
+    pendingId: string;
+    replaceWith: (real: AppView) => void;
+    drop: () => void;
+  } {
+    const pendingId = `pending-${appId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    views = [...views, {
+      viewId:         pendingId,
+      appId,
+      instanceId:     '',
+      title:          displayTitle,
+      iframeUrl:      '',
+      state:          'normal',
+      zIndex:         views.length,
+      isFocused:      true,
+      isLoading:      true,
+      lifecycleState: 'starting',
+      createdAt:      new Date().toISOString(),
+    }];
+    renderLayout();
+    return {
+      pendingId,
+      replaceWith: (real) => {
+        views = views.map((v) => v.viewId === pendingId ? real : v);
+        renderLayout();
+      },
+      drop: () => {
+        views = views.filter((v) => v.viewId !== pendingId);
+        renderLayout();
+      },
+    };
+  }
+
   window.auraLaunchApp = async (appId: string) => {
-    const manifest = await getManifest(appId);
+    // First paint: skeleton in the layout, before any network I/O.
+    const cached = manifestCache.get(appId);
+    const pending = pushPendingView(appId, cached?.name ?? appId);
 
-    // Activities not supported → original 1:1 instance/view behavior
-    if (manifest.activityMode === 'none') {
-      const res = await fetch(`/api/apps/${appId}/start`, { method: 'POST' });
-      if (!res.ok) { console.error(`Failed to start ${appId}`); return; }
-      const { instanceId, instance } = await res.json();
+    try {
+      const manifest = await getManifest(appId);
 
-      const existing = views.find((v) => v.instanceId === instanceId && !v.activityId);
-      if (existing) { focusView_(existing.viewId); return; }
+      // Activities not supported → original 1:1 instance/view behavior
+      if (manifest.activityMode === 'none') {
+        const res = await fetch(`/api/apps/${appId}/start`, { method: 'POST' });
+        if (!res.ok) { console.error(`Failed to start ${appId}`); pending.drop(); return; }
+        const { instanceId, instance } = await res.json();
 
-      views = [...views, buildView(appId, manifest.name, instanceId, undefined, '/', instance?.state ?? 'creating')];
-      renderLayout();
-      return;
+        // If a view for this instance is already open, drop the placeholder and focus it.
+        const existing = views.find((v) => v.viewId !== pending.pendingId && v.instanceId === instanceId && !v.activityId);
+        if (existing) { pending.drop(); focusView_(existing.viewId); return; }
+
+        pending.replaceWith(buildView(appId, manifest.name, instanceId, undefined, '/', instance?.state ?? 'creating'));
+        return;
+      }
+
+      // activityMode='multi' branch
+      const wantNewInstance =
+        manifest.instanceMode === 'multi' && manifest.defaultLaunch === 'new-instance';
+
+      let targetInstanceId: string | null = null;
+      let targetInstanceState = 'creating';
+
+      if (!wantNewInstance) {
+        const apps = await (await fetch('/api/apps')).json() as Array<{ manifest: { id: string }; instances: Array<{ instanceId: string; state: string }> }>;
+        const inst = apps.find((a) => a.manifest.id === appId)?.instances?.[0];
+        if (inst) { targetInstanceId = inst.instanceId; targetInstanceState = inst.state; }
+      }
+
+      if (!targetInstanceId) {
+        const res = await fetch(`/api/apps/${appId}/start`, { method: 'POST' });
+        if (!res.ok) { console.error(`Failed to start ${appId}`); pending.drop(); return; }
+        const { instanceId, instance } = await res.json();
+        targetInstanceId = instanceId;
+        targetInstanceState = instance?.state ?? 'creating';
+      }
+
+      // Open the activity, replacing the placeholder with the real activity view.
+      markActivityOpenStart(appId);
+      try {
+        const actRes = await fetch(`/api/instances/${encodeURIComponent(targetInstanceId)}/activities`, { method: 'POST' });
+        if (!actRes.ok) {
+          console.error(`Failed to open activity on ${targetInstanceId}`, await actRes.text());
+          pending.drop();
+          return;
+        }
+        const { activityId, activity } = await actRes.json() as { activityId: string; activity: { path: string; title?: string } };
+        pending.replaceWith(buildView(appId, activity.title ?? manifest.name, targetInstanceId, activityId, activity.path ?? '/', targetInstanceState));
+      } finally {
+        markActivityOpenEnd(appId);
+      }
+    } catch (err) {
+      console.error('[shell] launch failed', err);
+      pending.drop();
     }
-
-    // activityMode='multi' branch
-    const wantNewInstance =
-      manifest.instanceMode === 'multi' && manifest.defaultLaunch === 'new-instance';
-
-    let targetInstanceId: string | null = null;
-    let targetInstanceState = 'creating';
-
-    if (!wantNewInstance) {
-      const apps = await (await fetch('/api/apps')).json() as Array<{ manifest: { id: string }; instances: Array<{ instanceId: string; state: string }> }>;
-      const inst = apps.find((a) => a.manifest.id === appId)?.instances?.[0];
-      if (inst) { targetInstanceId = inst.instanceId; targetInstanceState = inst.state; }
-    }
-
-    if (!targetInstanceId) {
-      const res = await fetch(`/api/apps/${appId}/start`, { method: 'POST' });
-      if (!res.ok) { console.error(`Failed to start ${appId}`); return; }
-      const { instanceId, instance } = await res.json();
-      targetInstanceId = instanceId;
-      targetInstanceState = instance?.state ?? 'creating';
-    }
-
-    await openActivityOnInstance(targetInstanceId!, appId, manifest.name, targetInstanceState);
   };
+
+  // Tracks how many shell-initiated activity opens are currently in flight per
+  // appId. The SSE handler uses this to decide whether to render a view for an
+  // incoming activity:opened — if we initiated it, the in-flight fetch will
+  // add the view via pending.replaceWith(); the SSE event is just a duplicate.
+  const pendingActivityOpens = new Map<string, number>();
+  function markActivityOpenStart(appId: string) {
+    pendingActivityOpens.set(appId, (pendingActivityOpens.get(appId) ?? 0) + 1);
+  }
+  function markActivityOpenEnd(appId: string) {
+    const n = (pendingActivityOpens.get(appId) ?? 1) - 1;
+    if (n <= 0) pendingActivityOpens.delete(appId);
+    else        pendingActivityOpens.set(appId, n);
+  }
 
   /** Open an explicit activity on an existing instance. Honors the path the app returns from onActivityCreate. */
   async function openActivityOnInstance(instanceId: string, appId: string, name: string, lifecycleState: string, data?: Record<string, unknown>) {
-    const res = await fetch(`/api/instances/${encodeURIComponent(instanceId)}/activities`, {
-      method:  'POST',
-      headers: data ? { 'Content-Type': 'application/json' } : undefined,
-      body:    data ? JSON.stringify(data) : undefined,
-    });
-    if (!res.ok) { console.error(`Failed to open activity on ${instanceId}`, await res.text()); return; }
-    const { activityId, activity } = await res.json() as { activityId: string; activity: { path: string; title?: string } };
-    const title = activity.title ?? name;
-    views = [...views, buildView(appId, title, instanceId, activityId, activity.path ?? '/', lifecycleState)];
-    renderLayout();
+    const pending = pushPendingView(appId, name);
+    markActivityOpenStart(appId);
+    try {
+      const res = await fetch(`/api/instances/${encodeURIComponent(instanceId)}/activities`, {
+        method:  'POST',
+        headers: data ? { 'Content-Type': 'application/json' } : undefined,
+        body:    data ? JSON.stringify(data) : undefined,
+      });
+      if (!res.ok) { console.error(`Failed to open activity on ${instanceId}`, await res.text()); pending.drop(); return; }
+      const { activityId, activity } = await res.json() as { activityId: string; activity: { path: string; title?: string } };
+      pending.replaceWith(buildView(appId, activity.title ?? name, instanceId, activityId, activity.path ?? '/', lifecycleState));
+    } catch (err) {
+      console.error('[shell] openActivityOnInstance failed', err);
+      pending.drop();
+    } finally {
+      markActivityOpenEnd(appId);
+    }
   }
   (window as any).auraOpenActivityOnInstance = async (instanceId: string) => {
     const inst = await (await fetch(`/api/instances/${encodeURIComponent(instanceId)}/status`)).json();
@@ -252,7 +334,8 @@ for (const inst of mgr.getAllInstances()) {
 
   function closeView_(viewId: string) {
     const v = views.find((x) => x.viewId === viewId);
-    if (v) {
+    if (v && v.instanceId) {
+      // Skip backend call for placeholder views (no instance yet).
       if (v.activityId) {
         // Activity view — close only this activity. Auto-stop handled server-side.
         fetch(`/api/activities/${encodeURIComponent(v.activityId)}/close`, { method: 'POST' }).catch(() => undefined);
@@ -267,6 +350,36 @@ for (const inst of mgr.getAllInstances()) {
   function minimizeView_(viewId: string) {
     views = views.map((v) => v.viewId === viewId ? { ...v, state: 'minimized' as const } : v);
     renderLayout();
+  }
+
+  /**
+   * Boot skeleton shown inside an AppSlot while a backend instance transitions
+   * through created → started → resumed. Lifecycle state is surfaced as a chip
+   * so the user can see _why_ they're still waiting (e.g. "STARTED" vs "CREATED").
+   */
+  function renderSkeleton(v: AppView): string {
+    const stateLabel = (v.lifecycleState ?? 'creating').toUpperCase();
+    return `
+      <div class="aura-skeleton">
+        <div class="aura-skeleton-scan"></div>
+        <div class="aura-skeleton-content">
+          <div class="aura-skeleton-id">
+            <span class="sci-spinner sci-spinner--md" aria-hidden="true">|</span>
+            <span>${v.appId}</span>
+          </div>
+          <div class="aura-skeleton-bars">
+            <div class="aura-skeleton-bar" style="width:62%;"></div>
+            <div class="aura-skeleton-bar" style="width:84%;"></div>
+            <div class="aura-skeleton-bar" style="width:48%;"></div>
+            <div class="aura-skeleton-bar" style="width:72%;"></div>
+          </div>
+          <div class="aura-skeleton-status">
+            <span class="aura-skeleton-dot"></span>
+            <span>${stateLabel}</span>
+            <span class="aura-skeleton-dim">· LOADING PROCESS</span>
+          </div>
+        </div>
+      </div>`;
   }
 
   function renderLayout() {
@@ -289,7 +402,7 @@ for (const inst of mgr.getAllInstances()) {
       dynamicLayout.innerHTML = `
         <div style="color: var(--aura-color-text-dim); font-size: 0.8rem; letter-spacing: 0.15em; text-align: center;">
           <div style="margin-bottom: 12px;">// NO ACTIVE PROCESSES</div>
-          <a href="/launcher" style="color: var(--aura-color-primary); border: var(--aura-border); padding: 8px 24px; text-decoration: none; letter-spacing: 0.1em;">[ LAUNCH APP ]</a>
+          <button type="button" onclick="window.auraOpenLauncher && window.auraOpenLauncher()" style="color: var(--aura-color-primary); border: var(--aura-border); padding: 8px 24px; background: transparent; cursor: pointer; font-family: var(--aura-font-mono); letter-spacing: 0.1em;">[ LAUNCH APP ]</button>
         </div>
         ${renderMinimizedStrip(minimized)}`;
       return;
@@ -324,9 +437,9 @@ for (const inst of mgr.getAllInstances()) {
             <button data-action="close"    title="Close"    style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 6px;cursor:pointer;">✕</button>
           </div>
         </div>
-        <div style="flex:1;overflow:hidden;">
+        <div style="flex:1;overflow:hidden;position:relative;">
           ${v.isLoading
-            ? `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--aura-color-text-dim);font-size:0.75rem;letter-spacing:.1em;">LOADING ${v.appId}...</div>`
+            ? renderSkeleton(v)
             : `<iframe src="${v.iframeUrl}" style="width:100%;height:100%;border:none;background:var(--aura-color-bg);" title="${v.title}"></iframe>`
           }
         </div>
@@ -468,6 +581,20 @@ for (const inst of mgr.getAllInstances()) {
   (window as any).auraRemoveViewByActivity  = removeViewByActivity;
 
   // SSE: live state updates per-instance / per-activity
+  // Drive every `.sci-spinner` on the page through the | / - \ ASCII frame
+  // cycle at ~120ms per frame. One global interval handles all instances —
+  // newly-rendered skeletons (added by renderLayout/innerHTML) join the
+  // rotation automatically since we query the DOM each tick.
+  const SPINNER_FRAMES = ['|', '/', '-', '\\'];
+  let spinnerFrame = 0;
+  setInterval(() => {
+    spinnerFrame = (spinnerFrame + 1) % SPINNER_FRAMES.length;
+    const ch = SPINNER_FRAMES[spinnerFrame] as string;
+    document.querySelectorAll('.sci-spinner').forEach((el) => {
+      el.textContent = ch;
+    });
+  }, 120);
+
   const sse = new EventSource('/api/apps/events');
   sse.onmessage = (e) => {
     const ev = JSON.parse(e.data);
@@ -484,6 +611,26 @@ for (const inst of mgr.getAllInstances()) {
       renderLayout();
       console.error(`[AuraOS] ${ev.instanceId} crashed:`, ev.error);
     }
+    if (ev.type === 'activity:opened') {
+      // Render a view for activities the shell didn't initiate (e.g. an app
+      // iframe POSTed /api/instances/<id>/activities directly — common when
+      // the Settings app opens a sub-section). Skip if:
+      //   • a view for this activityId already exists (we initiated it and
+      //     the fetch response already added it), or
+      //   • the shell is currently mid-flight on a shell-initiated open for
+      //     this app — the pending fetch will add the view itself.
+      const alreadyHaveView = views.some((v) => v.activityId === ev.activityId);
+      const shellInFlight   = (pendingActivityOpens.get(ev.appId) ?? 0) > 0;
+      if (alreadyHaveView || shellInFlight) return;
+
+      const cachedName = manifestCache.get(ev.appId)?.name ?? ev.appId;
+      const title      = ev.title ?? cachedName;
+      // We don't know the parent instance's exact lifecycle state from the
+      // event payload — default to 'resumed' so the iframe loads right away.
+      // (An open activity necessarily means the parent backend is running.)
+      views = [...views, buildView(ev.appId, title, ev.parentInstanceId, ev.activityId, ev.path ?? '/', 'resumed')];
+      renderLayout();
+    }
     if (ev.type === 'activity:closed') {
       // Backend says this activity is gone — drop the corresponding view
       views = views.filter((v) => v.activityId !== ev.activityId);
@@ -493,7 +640,11 @@ for (const inst of mgr.getAllInstances()) {
   };
 </script>
 
-<style>
+<style is:global>
+  /* Style block is global so the dynamically-rendered skeleton + slot HTML
+     (built via innerHTML in renderLayout) gets these rules — Astro's scoped
+     styles target `[data-astro-cid-*]` and innerHTML elements don't carry
+     that attribute, so a scoped block would leave them unstyled. */
   #desktop-content {
     width: 100%;
     height: 100%;
@@ -558,4 +709,118 @@ for (const inst of mgr.getAllInstances()) {
     border: none;
     background: var(--aura-color-bg);
   }
+
+  /* ---------- Boot skeleton shown while an app instance is spawning ---------- */
+  .aura-skeleton {
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(transparent 50%, rgba(0, 0, 0, 0.25) 50%) 0 0 / 100% 4px,
+      var(--aura-color-bg);
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .aura-skeleton-scan {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      180deg,
+      transparent 0%,
+      color-mix(in srgb, var(--aura-color-primary) 18%, transparent) 50%,
+      transparent 100%
+    );
+    height: 30%;
+    animation: aura-skeleton-scan 2.2s linear infinite;
+    pointer-events: none;
+  }
+  @keyframes aura-skeleton-scan {
+    0%   { transform: translateY(-100%); }
+    100% { transform: translateY(400%); }
+  }
+  .aura-skeleton-content {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    width: min(72%, 320px);
+    padding: 18px 20px;
+    border: var(--aura-border);
+    background: color-mix(in srgb, var(--aura-color-surface) 70%, transparent);
+    backdrop-filter: blur(2px);
+  }
+  .aura-skeleton-id {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-family: var(--aura-font-mono);
+    font-size: var(--aura-font-size-sm, 0.8rem);
+    color: var(--aura-color-primary);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    animation: aura-skeleton-pulse 1.4s ease-in-out infinite;
+  }
+  .aura-skeleton-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .aura-skeleton-bar {
+    height: 8px;
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--aura-color-primary) 12%, transparent) 0%,
+      color-mix(in srgb, var(--aura-color-primary) 38%, transparent) 50%,
+      color-mix(in srgb, var(--aura-color-primary) 12%, transparent) 100%
+    );
+    background-size: 200% 100%;
+    animation: aura-skeleton-shimmer 1.6s linear infinite;
+  }
+  @keyframes aura-skeleton-shimmer {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+  .aura-skeleton-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--aura-font-mono);
+    font-size: var(--aura-font-size-xs, 0.65rem);
+    color: var(--aura-color-secondary);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+  .aura-skeleton-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--aura-color-primary);
+    box-shadow: 0 0 8px var(--aura-color-primary);
+    animation: aura-skeleton-pulse 1s ease-in-out infinite;
+  }
+  .aura-skeleton-dim { color: var(--aura-color-text-dim); }
+  @keyframes aura-skeleton-pulse {
+    0%, 100% { opacity: 1;   }
+    50%      { opacity: 0.35; }
+  }
+
+  /* ============ scificn-style ASCII spinner ============
+     Matches the @scificn/spinner spec: cycles through | / - \ at ~120ms per
+     frame. The rotation itself is driven by a single setInterval below
+     (works in every browser, no dependency on CSS-animated `content`).
+     Use `.sci-spinner--sm/--md/--lg` to switch sizes. */
+  .sci-spinner {
+    display: inline-block;
+    width: 1ch;
+    text-align: center;
+    color: var(--aura-color-primary);
+    font-family: var(--aura-font-mono);
+    line-height: 1;
+    /* don't inherit the parent's wide letter-spacing — the spinner is one char */
+    letter-spacing: 0;
+  }
+  .sci-spinner--sm { font-size: 0.75rem;  }
+  .sci-spinner--md { font-size: 0.875rem; }
+  .sci-spinner--lg { font-size: 1rem;     }
 </style>

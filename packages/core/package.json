@@ -14,7 +14,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsc && node --test test/identity-routing.test.mjs"
   },
   "dependencies": {
     "chokidar": "^3.6.0",

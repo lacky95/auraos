@@ -1,0 +1,211 @@
+---
+/**
+ * Slide-in launcher panel. Lives inside the running shell page (not a separate
+ * route), so opening it does NOT tear down other in-page state like the
+ * ProcessManager panel or live SSE connections. Clicking an app delegates to
+ * `window.auraLaunchApp` (defined on the home page) which spawns the instance
+ * with the boot-skeleton flow and updates the layout in place.
+ */
+import type { AppManifest } from '@aura/core';
+import { getAppManager } from '@aura/core';
+
+const apps: AppManifest[] = getAppManager().getManifests();
+---
+<aside id="lo-panel" class="lo-panel" aria-hidden="true">
+  <header class="lo-header">
+    <span class="lo-title">▦ LAUNCH APP</span>
+    <button id="lo-close" class="lo-close" title="Close launcher (Esc)">✕</button>
+  </header>
+  <input id="lo-search" class="lo-search" type="text" placeholder="SEARCH APPS..." autocomplete="off" />
+  <div id="lo-grid" class="lo-grid">
+    {apps.map(app => (
+      <button class="lo-app" data-app-id={app.id} title={app.name}>
+        <span class="lo-app-initial">{app.name.charAt(0).toUpperCase()}</span>
+        <span class="lo-app-name">{app.name}</span>
+        <span class="lo-app-id">{app.id}</span>
+      </button>
+    ))}
+  </div>
+</aside>
+
+<style is:global>
+  /* All selectors are lo-* prefixed; global to dodge any Astro scoping edge
+     cases (and to keep the panel visible even if rendered via fragments). */
+  .lo-panel {
+    position: fixed;
+    top: var(--aura-statusbar-height);
+    left: 0;
+    bottom: var(--aura-dock-height);
+    width: 420px;
+    max-width: 92%;  /* % not vw — body is scaled by the shell zoom */
+    background: var(--aura-color-surface);
+    border-right: var(--aura-border);
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    transform: translateX(-100%);
+    transition: transform 0.15s ease-out;
+  }
+  .lo-panel[aria-hidden="false"] { transform: translateX(0); }
+
+  .lo-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 12px;
+    height: 36px;
+    background: var(--aura-color-surface-2);
+    border-bottom: var(--aura-border);
+    flex-shrink: 0;
+  }
+  .lo-title {
+    font-size: var(--aura-font-size-sm);
+    color: var(--aura-color-primary);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+  }
+  .lo-close {
+    background: transparent;
+    border: var(--aura-border);
+    color: var(--aura-color-text-dim);
+    cursor: pointer;
+    font-family: var(--aura-font-mono);
+    font-size: var(--aura-font-size-xs);
+    padding: 2px 6px;
+  }
+  .lo-close:hover { color: var(--aura-color-danger); box-shadow: var(--aura-glow-danger); }
+
+  .lo-search {
+    margin: 10px 12px;
+    background: var(--aura-color-surface-2);
+    border: var(--aura-border);
+    color: var(--aura-color-text);
+    font-family: var(--aura-font-mono);
+    font-size: var(--aura-font-size-sm);
+    padding: 8px 12px;
+    outline: none;
+    flex-shrink: 0;
+    transition: box-shadow 0.1s;
+  }
+  .lo-search:focus { box-shadow: var(--aura-glow-primary); border-color: var(--aura-color-primary); }
+  .lo-search::placeholder { color: var(--aura-color-text-dim); }
+
+  .lo-grid {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 12px 12px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    gap: 6px;
+    align-content: start;
+  }
+
+  .lo-app {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 6px;
+    background: transparent;
+    border: var(--aura-border);
+    color: var(--aura-color-text);
+    cursor: pointer;
+    font-family: var(--aura-font-mono);
+    transition: box-shadow 0.1s, color 0.1s;
+    text-align: center;
+    min-width: 0;
+  }
+  .lo-app:hover { box-shadow: var(--aura-glow-primary); color: var(--aura-color-primary); }
+  .lo-app[hidden] { display: none; }
+
+  .lo-app-initial {
+    font-size: 1.4rem;
+    color: var(--aura-color-primary);
+    line-height: 1;
+  }
+  .lo-app-name {
+    font-size: var(--aura-font-size-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+  }
+  .lo-app-id {
+    font-size: 0.55rem;
+    color: var(--aura-color-text-dim);
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+  }
+</style>
+
+<script>
+  const panel  = document.getElementById('lo-panel') as HTMLElement;
+  const close  = document.getElementById('lo-close')  as HTMLButtonElement;
+  const search = document.getElementById('lo-search') as HTMLInputElement;
+  const grid   = document.getElementById('lo-grid')   as HTMLElement;
+
+  function openPanel() {
+    panel.setAttribute('aria-hidden', 'false');
+    search.value = '';
+    grid.querySelectorAll<HTMLElement>('.lo-app').forEach(el => el.hidden = false);
+    // defer focus until the slide-in starts, so the focus ring doesn't trigger
+    // a layout shift mid-animation
+    requestAnimationFrame(() => search.focus());
+  }
+  function closePanel() { panel.setAttribute('aria-hidden', 'true'); }
+
+  (window as any).auraToggleLauncher = () => {
+    if (panel.getAttribute('aria-hidden') === 'false') closePanel(); else openPanel();
+  };
+  (window as any).auraOpenLauncher  = openPanel;
+  (window as any).auraCloseLauncher = closePanel;
+
+  close.addEventListener('click', closePanel);
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && panel.getAttribute('aria-hidden') === 'false') {
+      closePanel();
+    }
+  });
+
+  search.addEventListener('input', () => {
+    const q = search.value.trim().toLowerCase();
+    grid.querySelectorAll<HTMLElement>('.lo-app').forEach(el => {
+      const name = el.querySelector('.lo-app-name')?.textContent?.toLowerCase() ?? '';
+      const id   = el.dataset['appId']?.toLowerCase() ?? '';
+      el.hidden = q !== '' && !name.includes(q) && !id.includes(q);
+    });
+  });
+
+  grid.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-app-id]');
+    const appId = btn?.dataset['appId'];
+    if (!appId) return;
+    const launch = (window as any).auraLaunchApp;
+    if (typeof launch === 'function') {
+      launch(appId);
+      closePanel();
+    } else {
+      // Fallback for pages that don't define the rich in-place launcher
+      // (e.g. standalone routes). POST the start, then go home.
+      void fetch(`/api/apps/${appId}/start`, { method: 'POST' }).finally(() => {
+        window.location.href = '/';
+      });
+    }
+  });
+
+  // Enter on the search input launches the first visible app
+  search.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const first = grid.querySelector<HTMLElement>('.lo-app:not([hidden])');
+    const appId = first?.dataset['appId'];
+    if (!appId) return;
+    const launch = (window as any).auraLaunchApp;
+    if (typeof launch === 'function') { launch(appId); closePanel(); }
+  });
+</script>

@@ -87,14 +87,14 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
       mCount.textContent  = String(s.activityCount);
     }
 
-    const sse = new EventSource('/api/events');
+    const sse = new EventSource('api/events');
     sse.onopen    = () => { status.textContent = 'CONNECTED — SHARED COUNTER ON THIS INSTANCE'; };
     sse.onerror   = () => { status.textContent = 'DISCONNECTED'; };
     sse.onmessage = (e) => applyState(JSON.parse(e.data));
 
     document.querySelectorAll('button[data-action]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        fetch('/api/counter', {
+        fetch('api/counter', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: btn.dataset.action }),

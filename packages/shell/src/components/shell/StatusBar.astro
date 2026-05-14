@@ -4,8 +4,120 @@
   <span class="os-name">AURA<span class="os-ver">OS</span></span>
   <div class="right">
     <span id="clock" class="clock">--:--:--</span>
+    <div class="status-zoom" role="group" aria-label="Page zoom">
+      <button id="zoom-out"   type="button" class="status-btn" title="Zoom out (Ctrl -)">-</button>
+      <button id="zoom-level" type="button" class="status-btn status-btn-text" title="Reset zoom to 100%">100%</button>
+      <button id="zoom-in"    type="button" class="status-btn" title="Zoom in (Ctrl +)">+</button>
+      <button id="settings-btn" type="button" class="status-btn" title="Settings" aria-haspopup="dialog">
+        <span class="status-btn-icon" aria-hidden="true">⚙</span>
+      </button>
+    </div>
+    <button
+      id="fullscreen-btn"
+      type="button"
+      class="status-btn"
+      title="Toggle fullscreen (F11)"
+      aria-pressed="false"
+    >
+      <span id="fullscreen-icon" class="status-btn-icon" aria-hidden="true">⛶</span>
+    </button>
   </div>
 </header>
+
+<!--
+  Settings dialog. Uses the native <dialog> element so we get a built-in modal
+  state, focus trap, Esc-to-close, and ::backdrop for free. Styling mirrors
+  scificn.dev's Dialog spec: corner-notched panel (clip-path), animated entry,
+  header with bottom border / body / footer with top border, uppercase
+  monospace title, single close action. The notch corners + backdrop keep it
+  visually consistent with the rest of the retro phosphor OS chrome.
+-->
+<dialog id="settings-dialog" class="sci-dialog" aria-labelledby="settings-dialog-title">
+  <header class="sci-dialog-header">
+    <h2 id="settings-dialog-title" class="sci-dialog-title">
+      <span class="sci-dialog-title-prefix">▦</span> VIEWPORT
+    </h2>
+    <button id="settings-dialog-close" type="button" class="sci-dialog-close" title="Close (Esc)">✕</button>
+  </header>
+
+  <div class="sci-dialog-body">
+    <section class="sci-section">
+      <div class="sci-section-head">// ZOOM</div>
+      <div class="sci-row">
+        <span class="sci-row-label">Level</span>
+        <span class="sci-row-value sci-row-grow">
+          <input id="dlg-zoom-slider" type="range" class="sci-slider" min="50" max="200" step="5" value="100" />
+          <span id="dlg-zoom-value" class="sci-row-pill">100%</span>
+          <button id="dlg-zoom-reset" type="button" class="sci-btn">RESET</button>
+        </span>
+      </div>
+    </section>
+
+    <section class="sci-section">
+      <div class="sci-section-head">// MARGIN FROM SCREEN EDGES</div>
+      <div class="sci-row">
+        <span class="sci-row-label">Top</span>
+        <span class="sci-row-value sci-row-grow">
+          <input id="dlg-m-top" type="range" class="sci-slider" min="0" max="200" step="2" value="0" />
+          <span class="sci-row-mono sci-row-fixed-w" id="dlg-m-top-val">0px</span>
+        </span>
+      </div>
+      <div class="sci-row">
+        <span class="sci-row-label">Right</span>
+        <span class="sci-row-value sci-row-grow">
+          <input id="dlg-m-right" type="range" class="sci-slider" min="0" max="200" step="2" value="0" />
+          <span class="sci-row-mono sci-row-fixed-w" id="dlg-m-right-val">0px</span>
+        </span>
+      </div>
+      <div class="sci-row">
+        <span class="sci-row-label">Bottom</span>
+        <span class="sci-row-value sci-row-grow">
+          <input id="dlg-m-bottom" type="range" class="sci-slider" min="0" max="200" step="2" value="0" />
+          <span class="sci-row-mono sci-row-fixed-w" id="dlg-m-bottom-val">0px</span>
+        </span>
+      </div>
+      <div class="sci-row">
+        <span class="sci-row-label">Left</span>
+        <span class="sci-row-value sci-row-grow">
+          <input id="dlg-m-left" type="range" class="sci-slider" min="0" max="200" step="2" value="0" />
+          <span class="sci-row-mono sci-row-fixed-w" id="dlg-m-left-val">0px</span>
+        </span>
+      </div>
+      <div class="sci-row">
+        <span class="sci-row-label">Uniform</span>
+        <span class="sci-row-value">
+          <label class="sci-check sci-check--inline" for="dlg-m-uniform">
+            <input type="checkbox" id="dlg-m-uniform" />
+            <span class="sci-check-box" aria-hidden="true"></span>
+            <span class="sci-check-label">LINK ALL SIDES</span>
+          </label>
+        </span>
+      </div>
+      <div class="sci-row">
+        <span class="sci-row-label"></span>
+        <span class="sci-row-value">
+          <button id="dlg-m-reset" type="button" class="sci-btn">RESET MARGINS</button>
+        </span>
+      </div>
+    </section>
+
+    <section class="sci-section">
+      <div class="sci-section-head">// MODE</div>
+      <div class="sci-row">
+        <span class="sci-row-label">Fullscreen</span>
+        <span class="sci-row-value">
+          <button id="dlg-fs-toggle" type="button" class="sci-btn">TOGGLE</button>
+          <span id="dlg-fs-state" class="sci-row-pill sci-row-pill--muted">OFF</span>
+        </span>
+      </div>
+    </section>
+  </div>
+
+  <footer class="sci-dialog-footer">
+    <button id="dlg-reset-all" type="button" class="sci-btn">RESET ALL</button>
+    <button id="settings-dialog-done" type="button" class="sci-btn sci-btn-primary">DONE</button>
+  </footer>
+</dialog>
 
 <script>
   function tick() {
@@ -14,6 +126,271 @@
   }
   tick();
   setInterval(tick, 1000);
+
+  // Fullscreen toggle. Browser fullscreen requires a user gesture, so this
+  // only works from the click handler — not via auraToggleFullscreen() from
+  // other code unless that code is itself in a user-initiated callback.
+  const fsBtn  = document.getElementById('fullscreen-btn') as HTMLButtonElement | null;
+  const fsIcon = document.getElementById('fullscreen-icon');
+
+  const ICON_ENTER = '⛶'; // four-corner expand (not fullscreen)
+  const ICON_EXIT  = '⛶'; // same glyph; we differentiate via the `data-state`
+                          // attribute + CSS to invert/dim. Most fonts don't ship
+                          // a "compress" twin to ⛶ at this size, so we lean on
+                          // the aria-pressed state for accessibility.
+
+  function syncState() {
+    const isFs = !!document.fullscreenElement;
+    if (fsBtn)  fsBtn.setAttribute('aria-pressed', isFs ? 'true' : 'false');
+    if (fsBtn)  fsBtn.dataset['fs'] = isFs ? 'on' : 'off';
+    if (fsBtn)  fsBtn.title = isFs ? 'Exit fullscreen (F11)' : 'Enter fullscreen (F11)';
+    if (fsIcon) fsIcon.textContent = isFs ? ICON_EXIT : ICON_ENTER;
+  }
+
+  async function toggleFullscreen() {
+    try {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen();
+      } else {
+        await document.exitFullscreen();
+      }
+    } catch (err) {
+      console.warn('[StatusBar] fullscreen toggle failed', err);
+    }
+  }
+
+  fsBtn?.addEventListener('click', toggleFullscreen);
+  // Stay in sync if the user exits via Esc or F11
+  document.addEventListener('fullscreenchange', syncState);
+  syncState();
+
+  // Expose for other components (e.g. process manager) to call.
+  (window as any).auraToggleFullscreen = toggleFullscreen;
+
+  // ---- Viewport (zoom + screen-edge margins) --------------------------
+  // We can't drive the browser's real zoom from JS, so we fake it via
+  //   body { transform: scale(Z); width: (100vw - mL - mR)/Z; height: ditto }
+  // and offset body with top/left for the margins. transform creates a new
+  // containing block for position:fixed children (LauncherOverlay,
+  // ProcessManager), so they scale + offset with the body cleanly.
+  const ZOOM_KEY    = 'aura.shell.zoom';
+  const MARGINS_KEY = 'aura.shell.margins';
+  const ZOOM_MIN  = 0.5;
+  const ZOOM_MAX  = 2.0;
+  const ZOOM_STEP = 0.1;
+  const MARGIN_MAX = 200;
+
+  type Margins = { top: number; right: number; bottom: number; left: number };
+
+  const zoomOutBtn   = document.getElementById('zoom-out')   as HTMLButtonElement | null;
+  const zoomInBtn    = document.getElementById('zoom-in')    as HTMLButtonElement | null;
+  const zoomLevelBtn = document.getElementById('zoom-level') as HTMLButtonElement | null;
+
+  let currentZoomValue: number = 1;
+  let margins: Margins = { top: 0, right: 0, bottom: 0, left: 0 };
+
+  function clampZoom(z: number) {
+    return Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round(z * 100) / 100));
+  }
+  function clampMargin(v: number) {
+    return Math.max(0, Math.min(MARGIN_MAX, Math.round(v)));
+  }
+
+  // The single source of truth for body sizing. Called whenever zoom OR
+  // margins change. When everything is at defaults, all inline styles are
+  // stripped so the body falls back to its CSS. The zoom is also exposed as
+  // a CSS custom property on <html> so the settings dialog — which renders
+  // in the browser's top layer above body's transform — can mirror the same
+  // scale and feel like part of the zoomed shell.
+  function applyViewport() {
+    const body = document.body;
+    const z = currentZoomValue;
+    const m = margins;
+    const isDefault = z === 1 && m.top === 0 && m.right === 0 && m.bottom === 0 && m.left === 0;
+
+    document.documentElement.style.setProperty('--aura-shell-zoom', String(z));
+    document.documentElement.style.background = isDefault ? '' : '#000';
+
+    if (isDefault) {
+      body.style.removeProperty('position');
+      body.style.removeProperty('top');
+      body.style.removeProperty('left');
+      body.style.removeProperty('width');
+      body.style.removeProperty('height');
+      body.style.removeProperty('transform');
+      body.style.removeProperty('transform-origin');
+    } else {
+      body.style.position        = 'fixed';
+      body.style.top             = `${m.top}px`;
+      body.style.left            = `${m.left}px`;
+      body.style.width           = `calc((100vw - ${m.left + m.right}px) / ${z})`;
+      body.style.height          = `calc((100vh - ${m.top + m.bottom}px) / ${z})`;
+      body.style.transformOrigin = 'top left';
+      body.style.transform       = `scale(${z})`;
+    }
+
+    if (zoomLevelBtn) zoomLevelBtn.textContent = `${Math.round(z * 100)}%`;
+  }
+
+  function setZoom(z: number, persist = true) {
+    currentZoomValue = clampZoom(z);
+    applyViewport();
+    if (persist) {
+      try { localStorage.setItem(ZOOM_KEY, String(currentZoomValue)); } catch {}
+    }
+  }
+  function setMargins(next: Partial<Margins>, persist = true) {
+    if (next.top    !== undefined) margins.top    = clampMargin(next.top);
+    if (next.right  !== undefined) margins.right  = clampMargin(next.right);
+    if (next.bottom !== undefined) margins.bottom = clampMargin(next.bottom);
+    if (next.left   !== undefined) margins.left   = clampMargin(next.left);
+    applyViewport();
+    if (persist) {
+      try { localStorage.setItem(MARGINS_KEY, JSON.stringify(margins)); } catch {}
+    }
+  }
+
+  // Restore persisted zoom + margins on load
+  try {
+    const z = parseFloat(localStorage.getItem(ZOOM_KEY) ?? '');
+    if (Number.isFinite(z) && z > 0) currentZoomValue = clampZoom(z);
+  } catch {}
+  try {
+    const raw = localStorage.getItem(MARGINS_KEY);
+    if (raw) {
+      const m = JSON.parse(raw);
+      margins = {
+        top:    clampMargin(Number(m.top)    || 0),
+        right:  clampMargin(Number(m.right)  || 0),
+        bottom: clampMargin(Number(m.bottom) || 0),
+        left:   clampMargin(Number(m.left)   || 0),
+      };
+    }
+  } catch {}
+  applyViewport();
+
+  zoomOutBtn?.addEventListener('click',   () => setZoom(currentZoomValue - ZOOM_STEP));
+  zoomInBtn?.addEventListener('click',    () => setZoom(currentZoomValue + ZOOM_STEP));
+  zoomLevelBtn?.addEventListener('click', () => setZoom(1));
+
+  (window as any).auraSetZoom    = setZoom;
+  (window as any).auraSetMargins = setMargins;
+
+  // ---- Settings dialog -------------------------------------------------
+  const settingsBtn  = document.getElementById('settings-btn')          as HTMLButtonElement | null;
+  const settingsDlg  = document.getElementById('settings-dialog')       as HTMLDialogElement | null;
+  const dlgClose     = document.getElementById('settings-dialog-close') as HTMLButtonElement | null;
+  const dlgDone      = document.getElementById('settings-dialog-done')  as HTMLButtonElement | null;
+  const dlgResetAll  = document.getElementById('dlg-reset-all')         as HTMLButtonElement | null;
+
+  const dlgZoomSlider = document.getElementById('dlg-zoom-slider') as HTMLInputElement | null;
+  const dlgZoomValue  = document.getElementById('dlg-zoom-value');
+  const dlgZoomReset  = document.getElementById('dlg-zoom-reset');
+
+  const dlgMTop    = document.getElementById('dlg-m-top')    as HTMLInputElement | null;
+  const dlgMRight  = document.getElementById('dlg-m-right')  as HTMLInputElement | null;
+  const dlgMBottom = document.getElementById('dlg-m-bottom') as HTMLInputElement | null;
+  const dlgMLeft   = document.getElementById('dlg-m-left')   as HTMLInputElement | null;
+  const dlgMTopVal    = document.getElementById('dlg-m-top-val');
+  const dlgMRightVal  = document.getElementById('dlg-m-right-val');
+  const dlgMBottomVal = document.getElementById('dlg-m-bottom-val');
+  const dlgMLeftVal   = document.getElementById('dlg-m-left-val');
+  const dlgMUniform   = document.getElementById('dlg-m-uniform') as HTMLInputElement | null;
+  const dlgMReset     = document.getElementById('dlg-m-reset');
+
+  const dlgFsToggle = document.getElementById('dlg-fs-toggle');
+  const dlgFsState  = document.getElementById('dlg-fs-state');
+
+  function syncDialogFromState() {
+    if (dlgZoomSlider) dlgZoomSlider.value = String(Math.round(currentZoomValue * 100));
+    if (dlgZoomValue)  dlgZoomValue.textContent = `${Math.round(currentZoomValue * 100)}%`;
+    if (dlgMTop)    { dlgMTop.value    = String(margins.top);    if (dlgMTopVal)    dlgMTopVal.textContent    = `${margins.top}px`; }
+    if (dlgMRight)  { dlgMRight.value  = String(margins.right);  if (dlgMRightVal)  dlgMRightVal.textContent  = `${margins.right}px`; }
+    if (dlgMBottom) { dlgMBottom.value = String(margins.bottom); if (dlgMBottomVal) dlgMBottomVal.textContent = `${margins.bottom}px`; }
+    if (dlgMLeft)   { dlgMLeft.value   = String(margins.left);   if (dlgMLeftVal)   dlgMLeftVal.textContent   = `${margins.left}px`; }
+    if (dlgFsState) {
+      const isFs = !!document.fullscreenElement;
+      dlgFsState.textContent = isFs ? 'ON' : 'OFF';
+      dlgFsState.classList.toggle('sci-row-pill--muted', !isFs);
+    }
+  }
+
+  function openSettings() {
+    if (!settingsDlg) return;
+    syncDialogFromState();
+    if (typeof settingsDlg.showModal === 'function') settingsDlg.showModal();
+    else settingsDlg.setAttribute('open', '');
+  }
+  function closeSettings() {
+    if (!settingsDlg) return;
+    if (typeof settingsDlg.close === 'function') settingsDlg.close();
+    else settingsDlg.removeAttribute('open');
+  }
+
+  settingsBtn?.addEventListener('click', openSettings);
+  dlgClose?.addEventListener('click',    closeSettings);
+  dlgDone?.addEventListener('click',     closeSettings);
+  settingsDlg?.addEventListener('click', (e) => {
+    if (e.target === settingsDlg) closeSettings();
+  });
+
+  // Zoom slider (50–200 in %, mapped to 0.5–2.0)
+  dlgZoomSlider?.addEventListener('input', () => {
+    const pct = Number(dlgZoomSlider.value);
+    setZoom(pct / 100);
+    if (dlgZoomValue) dlgZoomValue.textContent = `${Math.round(currentZoomValue * 100)}%`;
+  });
+  dlgZoomReset?.addEventListener('click', () => { setZoom(1); syncDialogFromState(); });
+
+  // Margin sliders. When "uniform" is on, dragging any one slider mirrors
+  // the value into the other three so all sides stay locked together.
+  function onMarginInput(side: keyof Margins, el: HTMLInputElement | null) {
+    if (!el) return;
+    el.addEventListener('input', () => {
+      const v = clampMargin(Number(el.value));
+      const next: Partial<Margins> = dlgMUniform?.checked
+        ? { top: v, right: v, bottom: v, left: v }
+        : { [side]: v };
+      setMargins(next);
+      syncDialogFromState();
+    });
+  }
+  onMarginInput('top',    dlgMTop);
+  onMarginInput('right',  dlgMRight);
+  onMarginInput('bottom', dlgMBottom);
+  onMarginInput('left',   dlgMLeft);
+
+  dlgMUniform?.addEventListener('change', () => {
+    // When the user enables uniform mode, snap all sides to the current top.
+    if (dlgMUniform.checked) {
+      setMargins({ top: margins.top, right: margins.top, bottom: margins.top, left: margins.top });
+      syncDialogFromState();
+    }
+  });
+
+  dlgMReset?.addEventListener('click', () => {
+    setMargins({ top: 0, right: 0, bottom: 0, left: 0 });
+    syncDialogFromState();
+  });
+
+  dlgResetAll?.addEventListener('click', () => {
+    setZoom(1);
+    setMargins({ top: 0, right: 0, bottom: 0, left: 0 });
+    if (dlgMUniform) dlgMUniform.checked = false;
+    syncDialogFromState();
+  });
+
+  dlgFsToggle?.addEventListener('click', async () => {
+    await toggleFullscreen();
+    syncDialogFromState();
+  });
+  document.addEventListener('fullscreenchange', () => {
+    // Keep the dialog's FS pill in sync if it's open.
+    if (settingsDlg?.open) syncDialogFromState();
+  });
+
+  (window as any).auraOpenSettings  = openSettings;
+  (window as any).auraCloseSettings = closeSettings;
 </script>
 
 <style>
@@ -39,7 +416,393 @@
 
   .os-ver { color: var(--aura-color-text-dim); }
 
-  .right { display: flex; align-items: center; gap: 16px; }
+  .right { display: flex; align-items: center; gap: 12px; }
 
   .clock { color: var(--aura-color-text); font-family: var(--aura-font-mono); }
+
+  /* Right-side status-bar buttons (fullscreen, future: notifications, etc.) */
+  .status-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    background: transparent;
+    border: var(--aura-border);
+    color: var(--aura-color-text-dim);
+    cursor: pointer;
+    font-family: var(--aura-font-mono);
+    font-size: 0.85rem;
+    line-height: 1;
+    padding: 0;
+    transition: color 0.1s, border-color 0.1s, box-shadow 0.1s;
+  }
+  .status-btn:hover {
+    color: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+    box-shadow: var(--aura-glow-subtle);
+  }
+  /* Filled/active state when fullscreen is on */
+  .status-btn[data-fs="on"] {
+    color: var(--aura-color-bg);
+    background: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+  }
+  .status-btn-icon { line-height: 1; }
+
+  /* Zoom controls: 3 buttons sharing a border like a segmented control */
+  .status-zoom {
+    display: inline-flex;
+    align-items: center;
+    border: var(--aura-border);
+  }
+  .status-zoom .status-btn {
+    border: none;
+    width: 22px;
+  }
+  .status-zoom .status-btn + .status-btn {
+    border-left: 1px solid var(--aura-color-border);
+  }
+  .status-zoom .status-btn:hover {
+    background: color-mix(in srgb, var(--aura-color-primary) 14%, transparent);
+    box-shadow: none;
+  }
+  /* The middle "value" button is wider and shows %, never gets the icon font */
+  .status-btn-text {
+    width: auto !important;
+    min-width: 44px;
+    padding: 0 6px;
+    font-size: 0.65rem;
+    letter-spacing: 0.06em;
+    color: var(--aura-color-text);
+  }
+
+  /* =====================================================================
+     scificn-style dialog (corner-notched panel + animated entry).
+     Built on the native <dialog> element so we inherit modal state, focus
+     trap, Esc-to-close, and ::backdrop without a JS dependency. Visuals
+     match the @scificn/dialog spec: dark panel, phosphor border, cut
+     corners, uppercase mono header, header/body/footer borders.
+     ===================================================================== */
+  .sci-dialog {
+    margin: auto;
+    padding: 0;
+    width: min(440px, 90vw);
+    max-height: 80vh;
+    background: var(--aura-color-surface);
+    border: none;          /* clip-path replaces the box border visually */
+    color: var(--aura-color-text);
+    font-family: var(--aura-font-mono);
+    overflow: visible;
+    /* Mirror the body's zoom so the dialog feels like part of the shell.
+       The dialog renders in the top layer (escaping body's transform), so
+       we re-apply the same scale here keyed off the --aura-shell-zoom var
+       that applyViewport() sets on <html>. Center-origin keeps it centered. */
+    transform: scale(var(--aura-shell-zoom, 1)) translateY(0);
+    transform-origin: center center;
+    /* Corner-notched silhouette — 10px cuts on all four corners */
+    clip-path: polygon(
+      10px 0,
+      calc(100% - 10px) 0,
+      100% 10px,
+      100% calc(100% - 10px),
+      calc(100% - 10px) 100%,
+      10px 100%,
+      0 calc(100% - 10px),
+      0 10px
+    );
+    /* The clip-path eats borders — fake a 1px phosphor edge with a layered
+       background (outer = primary, inset = surface). */
+    background-image:
+      linear-gradient(var(--aura-color-primary), var(--aura-color-primary));
+    background-origin: border-box;
+    background-clip: border-box;
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.6);
+    animation: sci-dialog-in 0.18s ease-out;
+  }
+  .sci-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.6);
+    animation: sci-dialog-backdrop-in 0.18s ease-out;
+  }
+  @keyframes sci-dialog-in {
+    /* Multiply by the shell zoom so the entry doesn't reset scale to 1 and
+       then snap up to the zoomed transform once the animation ends. */
+    from { transform: translateY(-8px) scale(calc(var(--aura-shell-zoom, 1) * 0.98)); opacity: 0; }
+    to   { transform: translateY(0)    scale(var(--aura-shell-zoom, 1));               opacity: 1; }
+  }
+  @keyframes sci-dialog-backdrop-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+
+  /* Inner panel: same clip, 1px inset, surface fill — this gives the
+     phosphor outline effect that clip-path alone can't provide. */
+  .sci-dialog > * { position: relative; z-index: 1; }
+  .sci-dialog::before {
+    content: '';
+    position: absolute;
+    inset: 1px;
+    background: var(--aura-color-surface);
+    clip-path: polygon(
+      9px 0,
+      calc(100% - 9px) 0,
+      100% 9px,
+      100% calc(100% - 9px),
+      calc(100% - 9px) 100%,
+      9px 100%,
+      0 calc(100% - 9px),
+      0 9px
+    );
+    z-index: 0;
+  }
+
+  .sci-dialog-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--aura-color-border);
+    background: var(--aura-color-surface-2);
+  }
+  .sci-dialog-title {
+    margin: 0;
+    font-size: var(--aura-font-size-sm);
+    color: var(--aura-color-primary);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    font-weight: 500;
+    text-shadow: 0 0 6px rgba(0, 255, 65, 0.4);
+  }
+  .sci-dialog-title-prefix {
+    margin-right: 6px;
+    color: var(--aura-color-primary);
+  }
+  .sci-dialog-close {
+    background: transparent;
+    border: var(--aura-border);
+    color: var(--aura-color-text-dim);
+    cursor: pointer;
+    font-family: var(--aura-font-mono);
+    font-size: var(--aura-font-size-xs);
+    padding: 2px 7px;
+    line-height: 1;
+    transition: color 0.1s, box-shadow 0.1s, border-color 0.1s;
+  }
+  .sci-dialog-close:hover {
+    color: var(--aura-color-danger);
+    border-color: var(--aura-color-danger);
+    box-shadow: var(--aura-glow-danger);
+  }
+
+  .sci-dialog-body {
+    padding: 14px 16px;
+    overflow-y: auto;
+    max-height: calc(80vh - 110px);
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .sci-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .sci-section-head {
+    font-size: 0.55rem;
+    color: var(--aura-color-text-dim);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    padding-bottom: 4px;
+    border-bottom: 1px dashed var(--aura-color-border);
+  }
+
+  .sci-row {
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    gap: 12px;
+    align-items: center;
+    padding: 3px 0;
+    font-size: var(--aura-font-size-xs);
+  }
+  .sci-row-label {
+    color: var(--aura-color-text-dim);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .sci-row-value {
+    color: var(--aura-color-text);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .sci-row-mono { font-family: var(--aura-font-mono); }
+  .sci-row-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    font-size: 0.6rem;
+    border: 1px solid var(--aura-color-primary);
+    background: color-mix(in srgb, var(--aura-color-primary) 14%, transparent);
+    color: var(--aura-color-primary);
+    letter-spacing: 0.12em;
+  }
+
+  .sci-btn {
+    background: transparent;
+    border: var(--aura-border);
+    color: var(--aura-color-text-dim);
+    font-family: var(--aura-font-mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.1em;
+    padding: 5px 10px;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: color 0.1s, border-color 0.1s, box-shadow 0.1s;
+  }
+  .sci-btn:hover {
+    color: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+    box-shadow: var(--aura-glow-subtle);
+  }
+  .sci-btn-primary {
+    color: var(--aura-color-bg);
+    background: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+  }
+  .sci-btn-primary:hover {
+    color: var(--aura-color-bg);
+    box-shadow: var(--aura-glow-primary);
+  }
+
+  .sci-dialog-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 16px;
+    border-top: 1px solid var(--aura-color-border);
+    background: var(--aura-color-surface-2);
+  }
+
+  /* Make the value column flex so sliders can stretch */
+  .sci-row-grow {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .sci-row-grow .sci-slider { flex: 1; min-width: 0; }
+  .sci-row-fixed-w {
+    display: inline-block;
+    min-width: 44px;
+    text-align: right;
+    color: var(--aura-color-text);
+    font-size: var(--aura-font-size-xs);
+  }
+  .sci-row-pill--muted {
+    color: var(--aura-color-text-dim);
+    border-color: var(--aura-color-border);
+    background: transparent;
+  }
+
+  /* Scificn-style range slider — flat track, square thumb, primary glow */
+  .sci-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 18px;
+    background: transparent;
+    cursor: pointer;
+    width: 100%;
+    padding: 0;
+    margin: 0;
+  }
+  .sci-slider::-webkit-slider-runnable-track {
+    height: 4px;
+    background: var(--aura-color-surface-2);
+    border: 1px solid var(--aura-color-border);
+  }
+  .sci-slider::-moz-range-track {
+    height: 4px;
+    background: var(--aura-color-surface-2);
+    border: 1px solid var(--aura-color-border);
+  }
+  .sci-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    background: var(--aura-color-primary);
+    border: 1px solid var(--aura-color-primary);
+    margin-top: -5px;
+    box-shadow: 0 0 6px rgba(0, 255, 65, 0.5);
+  }
+  .sci-slider::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    background: var(--aura-color-primary);
+    border: 1px solid var(--aura-color-primary);
+    border-radius: 0;
+    box-shadow: 0 0 6px rgba(0, 255, 65, 0.5);
+  }
+  .sci-slider:focus-visible {
+    outline: 1px dashed var(--aura-color-primary);
+    outline-offset: 4px;
+  }
+
+  /* Scificn-style checkbox (same visual spec as the Console app's). Native
+     input is hidden but drives state via :checked on the styled box. */
+  .sci-check {
+    --sci-size: 14px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    user-select: none;
+    font-size: var(--aura-font-size-xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--aura-color-text-dim);
+    transition: color 0.1s;
+  }
+  .sci-check:hover { color: var(--aura-color-primary); }
+  .sci-check input[type="checkbox"] {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+    width: 0;
+    height: 0;
+  }
+  .sci-check-box {
+    width: var(--sci-size);
+    height: var(--sci-size);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--aura-color-text-dim);
+    background: transparent;
+    color: var(--aura-color-primary);
+    font-family: inherit;
+    font-size: calc(var(--sci-size) - 4px);
+    line-height: 1;
+    flex-shrink: 0;
+    transition: border-color 0.1s, box-shadow 0.1s;
+  }
+  .sci-check:hover .sci-check-box {
+    border-color: var(--aura-color-primary);
+    box-shadow: var(--aura-glow-subtle);
+  }
+  .sci-check input:checked ~ .sci-check-box { border-color: var(--aura-color-primary); }
+  .sci-check input:checked ~ .sci-check-box::before { content: '■'; }
+  .sci-check input:focus-visible ~ .sci-check-box {
+    outline: 1px dashed var(--aura-color-primary);
+    outline-offset: 2px;
+  }
+  .sci-check input:checked ~ .sci-check-label { color: var(--aura-color-primary); }
+
+  /* Inline variant of the sci-check (used inside dialog rows) */
+  .sci-check.sci-check--inline {
+    --sci-size: 12px;
+    font-size: 0.6rem;
+  }
 </style>

@@ -21,7 +21,18 @@ export const ALL: APIRoute = async ({ params, request }) => {
   if (!id) return new Response('Missing instance id', { status: 400 });
 
   const mgr = getAppManager();
-  const instance = mgr.getInstance(id) ?? mgr.getInstancesByApp(id)[0];
+  // Prefer a live exact-instanceId match; fall back to the first non-dead
+  // instance of the bare appId. Skipping error/destroyed instances avoids
+  // routing to a stale port that the PortAllocator may have already handed
+  // to another app — that mismatch is how App A's iframe ends up showing
+  // App B's content after a crash.
+  const isLive = (state: string) =>
+    state !== 'error' && state !== 'destroyed' && state !== 'destroying';
+
+  const exact = mgr.getInstance(id);
+  const instance = exact && isLive(exact.state)
+    ? exact
+    : mgr.getInstancesByApp(id).find((i) => isLive(i.state) && i.port != null);
 
   if (!instance?.port) {
     return new Response(notReadyHtml(id), {
@@ -30,11 +41,52 @@ export const ALL: APIRoute = async ({ params, request }) => {
     });
   }
 
+  // Short-circuit Vite's HMR client: the iframe can't reach the upstream's WS
+  // port, so the real client would just flood the console with reconnect
+  // errors. We return a stub ES module that exports no-op versions of the
+  // names Vite-transformed code imports (createHotContext, updateStyle, …)
+  // so imports don't fail with `doesn't provide an export named 'X'`.
+  if (path === '@vite/client' || path === '@vite/env' || path.startsWith('@vite/')) {
+    const stub = `
+// AuraOS proxy stub for /@vite/* — the real Vite HMR client can't reach the
+// upstream's WS port from inside the iframe. All exports are no-ops; the
+// page works fine without HMR, full iframe reload picks up code changes.
+export function createHotContext() {
+  return {
+    accept(){}, acceptExports(){}, acceptDeps(){}, dispose(){}, prune(){},
+    decline(){}, invalidate(){}, on(){}, off(){}, send(){}, data:{},
+  };
+}
+export function updateStyle(){}
+export function removeStyle(){}
+export function injectQuery(url){ return url; }
+export const ErrorOverlay = class extends (typeof HTMLElement !== 'undefined' ? HTMLElement : Object) {};
+export const overlay = false;
+export const hot = { send(){}, on(){}, off(){} };
+export default {};
+`;
+    return new Response(stub, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/javascript',
+        'Cache-Control': 'no-store',
+      },
+    });
+  }
+
   // Strip _aura_activity from query before forwarding upstream
   const reqUrl = new URL(request.url);
   const activityId = reqUrl.searchParams.get('_aura_activity');
   if (activityId !== null) reqUrl.searchParams.delete('_aura_activity');
-  const search = reqUrl.search; // includes '?' or empty
+
+  // The HTML rewriter below escapes Vite virtual-module query markers so the
+  // shell's own Vite middleware doesn't try to compile them as its modules.
+  // Restore them before forwarding upstream so the app's Vite recognises them.
+  let search = reqUrl.search;
+  search = search
+    .replace(/(\?|&)_aura_vite_astro=1(?=&|$)/g, '$1astro')
+    .replace(/(\?|&)_aura_vite_vue(?=&|=|$)/g,   '$1vue')
+    .replace(/(\?|&)_aura_vite_svelte(?=&|=|$)/g,'$1svelte');
 
   const targetUrl = `http://localhost:${instance.port}/${path}${search}`;
 
@@ -45,14 +97,142 @@ export const ALL: APIRoute = async ({ params, request }) => {
     if (activityId) headers.set('X-Aura-Activity-Id', activityId);
     headers.delete('host');
 
+    // Forward the browser's abort signal so streams (SSE, long-poll) live as
+    // long as the iframe keeps the connection open and die cleanly when it
+    // doesn't. No hard timeout: localhost-to-localhost won't hang, and a
+    // timeout would kill `text/event-stream` after N seconds.
     const upstream = await fetch(targetUrl, {
       method:  request.method,
       headers,
       body:    ['GET', 'HEAD'].includes(request.method) ? undefined : request.body,
-      signal:  AbortSignal.timeout(30_000),
+      signal:  request.signal,
       // @ts-expect-error Node fetch supports this
       duplex: 'half',
     });
+
+    // Identity gate: the upstream must echo X-Aura-App-Id (and, when set, the
+    // instance id) matching the instance we resolved against. A mismatch means
+    // another process is squatting our port — refuse to forward, otherwise the
+    // iframe would render the wrong app's content. The auraIdentityIntegration
+    // in @aura/app-sdk adds these headers to every response.
+    const declaredApp  = upstream.headers.get('x-aura-app-id');
+    const declaredInst = upstream.headers.get('x-aura-instance-id');
+    if (declaredApp && declaredApp !== instance.appId) {
+      console.error(`[proxy] identity mismatch routing ${id}: expected appId=${instance.appId} but upstream on port ${instance.port} declared ${declaredApp}. Refusing to forward.`);
+      try { upstream.body?.cancel(); } catch { /* ignore */ }
+      return new Response(notReadyHtml(id), { status: 502, headers: { 'Content-Type': 'text/html' } });
+    }
+    if (declaredInst && declaredInst !== instance.instanceId) {
+      console.error(`[proxy] instance-id mismatch routing ${id}: expected ${instance.instanceId} but upstream declared ${declaredInst}.`);
+      try { upstream.body?.cancel(); } catch { /* ignore */ }
+      return new Response(notReadyHtml(id), { status: 502, headers: { 'Content-Type': 'text/html' } });
+    }
+
+    const contentType = upstream.headers.get('content-type') ?? '';
+    const proxyPrefix = `/api/proxy/${id}`;
+
+    // Vite virtual-module query markers (e.g. `?astro&type=style`) would be
+    // matched by the SHELL's own Vite middleware before the proxy route runs.
+    // Rename them so the shell's Vite ignores them; the request handler above
+    // restores the original names before forwarding upstream.
+    const escapeViteQuery = (val: string) => val
+      .replace(/(\?|&)astro(?=&|$)/g,    '$1_aura_vite_astro=1')
+      .replace(/(\?|&)vue(?=&|=|$)/g,    '$1_aura_vite_vue')
+      .replace(/(\?|&)svelte(?=&|=|$)/g, '$1_aura_vite_svelte');
+
+    // Prefix an absolute URL path with the proxy. Leaves relative, protocol-
+    // relative, shell-bound (`/api/*`), and already-prefixed URLs alone.
+    const prefixUrl = (val: string): string => {
+      if (!val.startsWith('/'))        return val;
+      if (val.startsWith('//'))        return val;
+      if (val.startsWith('/api/'))     return val;
+      if (val.startsWith(proxyPrefix)) return val;
+      return `${proxyPrefix}${escapeViteQuery(val)}`;
+    };
+
+    // HTML: rewrite src/href/action attributes + inject <base href>.
+    // Without this, Astro/Vite-emitted URLs like `/src/pages/foo.astro?astro...`
+    // hit the shell and 404.
+    if (contentType.includes('text/html')) {
+      const baseHref = `${proxyPrefix}/`;
+      const html = await upstream.text();
+
+      // Strip Vite's HMR client script tag. Vite always injects it in dev,
+      // even with `server.hmr: false`. The client then tries to open a
+      // WebSocket to the upstream port from the browser — which can't reach
+      // it through the proxy — and floods the console with retry errors
+      // (`ws-connection-refused`, `can't access property "send"`, etc.).
+      // Apps work fine without the client; only HMR is lost (already gone).
+      let rewritten = html.replace(
+        /<script\b[^>]*\bsrc=["'][^"']*\/@vite\/client[^"']*["'][^>]*>\s*<\/script>/gi,
+        '',
+      );
+
+      rewritten = rewritten.replace(
+        /\b(src|href|action)\s*=\s*(["'])([^"']*)\2/gi,
+        (full, attr, q, val) => {
+          const next = prefixUrl(val);
+          return next === val ? full : `${attr}=${q}${next}${q}`;
+        },
+      );
+      if (!/<base\s/i.test(rewritten)) {
+        rewritten = rewritten.replace(
+          /<head(\s[^>]*)?>/i,
+          (m) => `${m}<base href="${baseHref}">`,
+        );
+      }
+
+      // Inject identity meta tags so the shell can verify on iframe `load` that
+      // the document rendered is actually for the requested app. Third line of
+      // defense after waitHealthy (spawn-time) and the response-header check
+      // (this same handler, above).
+      const idAttr   = instance.appId.replace(/"/g, '&quot;');
+      const instAttr = instance.instanceId.replace(/"/g, '&quot;');
+      const idMeta   = `<meta name="aura-app-id" content="${idAttr}"><meta name="aura-instance-id" content="${instAttr}">`;
+      rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${idMeta}`);
+
+      // Inject a console-relay script into every app iframe so its `console.*`
+      // and uncaught errors flow up to the shell via postMessage. The shell's
+      // console-bridge (OSLayout) consumes these and re-broadcasts to the
+      // Console app (or anything else listening for `aura.console`).
+      const appIdJs = JSON.stringify(instance.appId);
+      const consoleRelay = `<script>(function(){try{
+var P=window.parent;if(!P||P===window)return;
+var SRC=${appIdJs};
+var LVL=['log','info','warn','error','debug'];
+var orig={};LVL.forEach(function(l){orig[l]=console[l].bind(console);});
+function fmt(a){if(a===null)return'null';if(a===undefined)return'undefined';if(typeof a==='string')return a;if(typeof a==='number'||typeof a==='boolean')return String(a);if(a instanceof Error)return a.name+': '+a.message+(a.stack?'\\n'+a.stack:'');try{var s=new WeakSet();return JSON.stringify(a,function(_k,v){if(typeof v==='object'&&v!==null){if(s.has(v))return'[Circular]';s.add(v);}if(typeof v==='function')return'[Function]';return v;},2)||String(a);}catch(e){try{return String(a);}catch(_){return'[unserializable]';}}}
+function relay(lvl,args){try{P.postMessage({type:'aura.console.relay',entry:{type:'aura.console',level:lvl,timestamp:Date.now(),source:SRC,args:Array.from(args).map(fmt)}},'*');}catch(_){}}
+LVL.forEach(function(l){console[l]=function(){orig[l].apply(console,arguments);relay(l,arguments);};});
+window.addEventListener('error',function(e){relay('error',['Uncaught '+e.message+' at '+(e.filename||'?')+':'+(e.lineno||0)+':'+(e.colno||0)]);});
+window.addEventListener('unhandledrejection',function(e){var r=e.reason;var m=r instanceof Error?(r.name+': '+r.message+(r.stack?'\\n'+r.stack:'')):String(r);relay('error',['Unhandled rejection: '+m]);});
+var NativeES=window.EventSource;if(NativeES){var W=function(u,i){var es=new NativeES(u,i);es.addEventListener('error',function(){var st=['CONNECTING','OPEN','CLOSED'][es.readyState]||'?';relay('warn',['EventSource error: '+u+' (readyState='+st+')']);});return es;};W.prototype=NativeES.prototype;['CONNECTING','OPEN','CLOSED'].forEach(function(k,i){W[k]=i;});window.EventSource=W;}
+var nFetch=window.fetch.bind(window);window.fetch=async function(input,init){var u=typeof input==='string'?input:(input&&input.url)||String(input);try{var r=await nFetch(input,init);if(!r.ok){relay(r.status>=500?'error':'warn',['fetch '+((init&&init.method)||'GET')+' '+u+' \\u2192 '+r.status+' '+r.statusText]);}return r;}catch(e){relay('error',['fetch '+((init&&init.method)||'GET')+' '+u+' failed: '+(e&&e.message||String(e))]);throw e;}};
+var X=window.XMLHttpRequest;if(X){var oO=X.prototype.open,oS=X.prototype.send;X.prototype.open=function(m,u){this.__am=m;this.__au=u;return oO.apply(this,arguments);};X.prototype.send=function(){var self=this;this.addEventListener('error',function(){relay('error',['xhr '+self.__am+' '+self.__au+' network error']);});this.addEventListener('load',function(){if(self.status>=400){relay(self.status>=500?'error':'warn',['xhr '+self.__am+' '+self.__au+' \\u2192 '+self.status]);}});return oS.apply(this,arguments);};}
+}catch(_){}})();</script>`;
+      // Place the relay right after <head ...> so it captures from frame 0.
+      rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${consoleRelay}`);
+
+      const outHeaders = new Headers(upstream.headers);
+      outHeaders.delete('content-length');
+      return new Response(rewritten, { status: upstream.status, headers: outHeaders });
+    }
+
+    // JS: rewrite absolute import URLs that Vite emits inside served modules.
+    // Catches patterns like `import "/@fs/..."`, `import("/node_modules/.vite/...")`,
+    // and bare quoted strings referencing /@vite/, /@id/, /@fs/, /node_modules/.
+    // Without this, the Vite HMR client's internal imports escape to the shell origin.
+    const isJs = /\b(javascript|typescript|ecmascript)\b/.test(contentType);
+    if (isJs) {
+      const js = await upstream.text();
+      const rewritten = js.replace(
+        /(["'`])(\/(?:@fs|@vite|@id|node_modules)\/[^"'`\s]*)\1/g,
+        (_full, q, url) => `${q}${prefixUrl(url)}${q}`,
+      );
+      const outHeaders = new Headers(upstream.headers);
+      outHeaders.delete('content-length');
+      return new Response(rewritten, { status: upstream.status, headers: outHeaders });
+    }
 
     return new Response(upstream.body, {
       status:  upstream.status,

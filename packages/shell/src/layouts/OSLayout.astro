@@ -2,6 +2,7 @@
 import '../styles/global.css';
 import StatusBar from '../components/shell/StatusBar.astro';
 import Dock from '../components/shell/Dock.astro';
+import LauncherOverlay from '../components/shell/LauncherOverlay.astro';
 import { getAppManager, ThemeManager } from '@aura/core';
 import type { AppManifest } from '@aura/core';
 
@@ -36,6 +37,201 @@ if (theme) activeThemeCss = ThemeManager.toCss(theme);
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AuraOS</title>
   <style id="aura-theme" set:html={activeThemeCss}></style>
+
+  <!--
+    Console bridge: wraps console.*, captures uncaught errors + promise
+    rejections, buffers entries, and broadcasts them via postMessage to every
+    iframe. App iframes can either:
+      • subscribe to 'aura.console' messages (the Console app does this), or
+      • relay their OWN console output up via 'aura.console.relay' (injected
+        into each iframe by the proxy — see /api/proxy/[id]/[...path].ts).
+    Placed in <head> as inline so it captures from the very first frame.
+  -->
+  <script is:inline>
+  (() => {
+    const MAX = 1000;
+    const buffer = [];
+    const orig = {};
+    ['log', 'info', 'warn', 'error', 'debug'].forEach((lvl) => {
+      orig[lvl] = console[lvl].bind(console);
+    });
+
+    function formatArg(a) {
+      if (a === null) return 'null';
+      if (a === undefined) return 'undefined';
+      if (typeof a === 'string') return a;
+      if (typeof a === 'number' || typeof a === 'boolean') return String(a);
+      if (a instanceof Error) return `${a.name}: ${a.message}${a.stack ? '\n' + a.stack : ''}`;
+      try {
+        const seen = new WeakSet();
+        return JSON.stringify(a, (_k, v) => {
+          if (typeof v === 'object' && v !== null) {
+            if (seen.has(v)) return '[Circular]';
+            seen.add(v);
+          }
+          if (typeof v === 'function') return `[Function ${v.name || 'anonymous'}]`;
+          return v;
+        }, 2) ?? String(a);
+      } catch { try { return String(a); } catch { return '[unserializable]'; } }
+    }
+
+    // Console-app WebSocket for persistent file backing. The shell's own
+    // Vite plugin proxies /api/proxy/<id>/<path> WS upgrades to the app's
+    // port, so we don't need to know the console port — just speak the
+    // proxy URL on whatever host the page came from. Reconnects with
+    // backoff; silently no-ops while console isn't running.
+    const consoleWsUrl = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/proxy/com.aura.console/ws`;
+    let consoleWs = null;
+    let consoleWsBackoff = 1000;
+    let consoleWsConnecting = false;
+    const pendingForWs = [];
+
+    function connectConsoleWs() {
+      if (consoleWsConnecting || (consoleWs && consoleWs.readyState <= 1)) return;
+      consoleWsConnecting = true;
+      try { consoleWs = new WebSocket(consoleWsUrl); }
+      catch { consoleWsConnecting = false; setTimeout(connectConsoleWs, consoleWsBackoff); return; }
+      consoleWs.addEventListener('open', () => {
+        consoleWsBackoff = 1000;
+        consoleWsConnecting = false;
+        while (pendingForWs.length && consoleWs.readyState === WebSocket.OPEN) {
+          try { consoleWs.send(JSON.stringify(pendingForWs.shift())); } catch { break; }
+        }
+      });
+      consoleWs.addEventListener('close', () => {
+        consoleWs = null;
+        consoleWsConnecting = false;
+        setTimeout(connectConsoleWs, consoleWsBackoff);
+        consoleWsBackoff = Math.min(consoleWsBackoff * 2, 30000);
+      });
+      consoleWs.addEventListener('error', () => { /* close fires next */ });
+    }
+
+    function sendToConsoleWs(entry) {
+      if (consoleWs && consoleWs.readyState === WebSocket.OPEN) {
+        try { consoleWs.send(JSON.stringify(entry)); } catch { /* socket may have torn down */ }
+      } else {
+        if (pendingForWs.length < 200) pendingForWs.push(entry);
+      }
+    }
+
+    connectConsoleWs();
+
+    function broadcast(entry) {
+      buffer.push(entry);
+      if (buffer.length > MAX) buffer.shift();
+      const iframes = document.querySelectorAll('iframe');
+      iframes.forEach((f) => { try { f.contentWindow && f.contentWindow.postMessage(entry, '*'); } catch (_) {} });
+      sendToConsoleWs(entry);
+    }
+
+    function makeEntry(level, source, args) {
+      return {
+        type: 'aura.console',
+        level,
+        timestamp: Date.now(),
+        source,
+        args: Array.from(args).map(formatArg),
+      };
+    }
+
+    ['log', 'info', 'warn', 'error', 'debug'].forEach((lvl) => {
+      console[lvl] = function (...args) {
+        orig[lvl](...args);
+        broadcast(makeEntry(lvl, 'shell', args));
+      };
+    });
+
+    window.addEventListener('error', (e) => {
+      broadcast(makeEntry('error', 'shell', [
+        `Uncaught ${e.message} at ${e.filename || '?'}:${e.lineno || 0}:${e.colno || 0}`,
+      ]));
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+      const r = e.reason;
+      const msg = r instanceof Error ? `${r.name}: ${r.message}${r.stack ? '\n' + r.stack : ''}` : String(r);
+      broadcast(makeEntry('error', 'shell', [`Unhandled rejection: ${msg}`]));
+    });
+
+    // EventSource: browser surfaces 'connection interrupted' / network errors via
+    // an 'error' event on the instance, not via console.*. Wrap the constructor
+    // so those bubble into our console.
+    const NativeES = window.EventSource;
+    if (NativeES) {
+      const Wrapped = function (url, init) {
+        const es = new NativeES(url, init);
+        es.addEventListener('error', () => {
+          const state = ['CONNECTING', 'OPEN', 'CLOSED'][es.readyState] || '?';
+          broadcast(makeEntry('warn', 'shell', [`EventSource error: ${url} (readyState=${state})`]));
+        });
+        return es;
+      };
+      Wrapped.prototype = NativeES.prototype;
+      ['CONNECTING', 'OPEN', 'CLOSED'].forEach((k, i) => { Wrapped[k] = i; });
+      window.EventSource = Wrapped;
+    }
+
+    // fetch: capture network failures (DNS/connection) and non-2xx responses.
+    // We don't log 2xx — that would flood the bus.
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = async function (input, init) {
+      const url = typeof input === 'string' ? input : (input && input.url) || String(input);
+      try {
+        const res = await nativeFetch(input, init);
+        if (!res.ok) {
+          broadcast(makeEntry(res.status >= 500 ? 'error' : 'warn', 'shell',
+            [`fetch ${(init && init.method) || 'GET'} ${url} → ${res.status} ${res.statusText}`]));
+        }
+        return res;
+      } catch (err) {
+        broadcast(makeEntry('error', 'shell',
+          [`fetch ${(init && init.method) || 'GET'} ${url} failed: ${err && err.message || String(err)}`]));
+        throw err;
+      }
+    };
+
+    // XMLHttpRequest: same idea for legacy XHR consumers.
+    const XHR = window.XMLHttpRequest;
+    if (XHR) {
+      const origOpen = XHR.prototype.open;
+      const origSend = XHR.prototype.send;
+      XHR.prototype.open = function (method, url) {
+        this.__aura_method = method;
+        this.__aura_url = url;
+        return origOpen.apply(this, arguments);
+      };
+      XHR.prototype.send = function () {
+        this.addEventListener('error', () => {
+          broadcast(makeEntry('error', 'shell', [`xhr ${this.__aura_method} ${this.__aura_url} network error`]));
+        });
+        this.addEventListener('load', () => {
+          if (this.status >= 400) {
+            broadcast(makeEntry(this.status >= 500 ? 'error' : 'warn', 'shell',
+              [`xhr ${this.__aura_method} ${this.__aura_url} → ${this.status}`]));
+          }
+        });
+        return origSend.apply(this, arguments);
+      };
+    }
+
+    window.addEventListener('message', (e) => {
+      const d = e.data;
+      if (!d || typeof d !== 'object') return;
+      // Iframe forwarding its own console (proxy-injected relay script)
+      if (d.type === 'aura.console.relay' && d.entry) {
+        broadcast(d.entry);
+        return;
+      }
+      // Console app asking for backlog on mount
+      if (d.type === 'aura.console.requestBacklog') {
+        try { e.source && e.source.postMessage({ type: 'aura.console.backlog', entries: buffer.slice() }, '*'); } catch (_) {}
+      }
+    });
+
+    window.auraGetConsoleBuffer = () => buffer.slice();
+    window.auraClearConsoleBuffer = () => { buffer.length = 0; };
+  })();
+  </script>
 </head>
 <body>
   <div id="os-root">
@@ -45,6 +241,99 @@ if (theme) activeThemeCss = ThemeManager.toCss(theme);
     </main>
     <Dock apps={pinnedApps} />
   </div>
+  <!--
+    LauncherOverlay mounted at body root (not inside the dock) so its
+    position:fixed isn't subject to any potential ancestor stacking context
+    or overflow:auto clipping from #dock / #os-root.
+  -->
+  <LauncherOverlay />
+
+  <!--
+    Iframe identity guard: on every iframe load, read the <meta name="aura-app-id">
+    the proxy injected and compare it to the appId the iframe was *supposed* to
+    show (parsed from the iframe's own src `/api/proxy/<id>/...`). Mismatch
+    means the proxy routed to the wrong upstream (or the upstream's identity
+    middleware is stale) — replace the iframe with a visible error overlay
+    instead of silently showing the wrong app's UI.
+
+    This is the third independent identity check after:
+      1. ProotRunner.waitHealthy   (spawn-time identity body match)
+      2. Proxy X-Aura-App-Id header (per-request middleware verification)
+  -->
+  <script is:inline>
+  (() => {
+    function expectedAppFromSrc(src) {
+      try {
+        const u = new URL(src, location.href);
+        const m = u.pathname.match(/^\/api\/proxy\/([^/]+)\//);
+        if (!m) return null;
+        // Strip optional -N instance suffix to compare against bare appId.
+        return m[1].replace(/-\d+$/, '');
+      } catch { return null; }
+    }
+
+    function showMismatchOverlay(frame, expected, got) {
+      const parent = frame.parentElement;
+      if (!parent) return;
+      const overlay = document.createElement('div');
+      overlay.setAttribute('data-aura-identity-error', '1');
+      overlay.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#1a0a0a;color:#ff5050;font-family:var(--aura-font-mono, monospace);font-size:0.8rem;text-align:center;padding:16px;letter-spacing:0.08em;gap:8px;';
+      overlay.innerHTML = '<div style="font-size:1rem;">// IDENTITY MISMATCH</div>'
+        + '<div>Expected app: <strong>' + expected + '</strong></div>'
+        + '<div>Got: <strong>' + (got || '(none)') + '</strong></div>'
+        + '<div style="color:#aa3030;">Iframe removed to prevent showing wrong content.</div>';
+      frame.remove();
+      if (getComputedStyle(parent).position === 'static') parent.style.position = 'relative';
+      parent.appendChild(overlay);
+    }
+
+    function verifyFrame(frame) {
+      if (frame.dataset.auraIdentityChecked === '1') return;
+      const src = frame.getAttribute('src') || '';
+      const expected = expectedAppFromSrc(src);
+      if (!expected) return;
+      let metaApp = null;
+      try {
+        const doc = frame.contentDocument;
+        const meta = doc && doc.querySelector('meta[name="aura-app-id"]');
+        metaApp = meta ? meta.getAttribute('content') : null;
+      } catch {
+        // cross-origin would throw — but same-origin proxy, so this only
+        // happens for about:blank or transient navigation states. Skip.
+        return;
+      }
+      if (!metaApp) return; // no meta injected yet (NOT READY splash, etc.) — let next load retry
+      frame.dataset.auraIdentityChecked = '1';
+      if (metaApp !== expected) {
+        console.error('[AuraOS] Iframe identity mismatch — expected ' + expected + ', got ' + metaApp + '. Removing iframe.');
+        showMismatchOverlay(frame, expected, metaApp);
+      }
+    }
+
+    function hookFrame(frame) {
+      if (frame.dataset.auraIdentityHooked === '1') return;
+      frame.dataset.auraIdentityHooked = '1';
+      frame.addEventListener('load', () => {
+        delete frame.dataset.auraIdentityChecked;
+        verifyFrame(frame);
+      });
+    }
+
+    // Hook every existing iframe and any future iframe added to the DOM.
+    document.querySelectorAll('iframe').forEach(hookFrame);
+    const mo = new MutationObserver((muts) => {
+      for (const m of muts) {
+        for (const node of m.addedNodes) {
+          if (node.nodeType !== 1) continue;
+          const el = node;
+          if (el.tagName === 'IFRAME') hookFrame(el);
+          else el.querySelectorAll && el.querySelectorAll('iframe').forEach(hookFrame);
+        }
+      }
+    });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+  })();
+  </script>
 
   <script>
     // Live-update CSS-Vars when the OS broadcasts a theme change.
@@ -74,8 +363,12 @@ if (theme) activeThemeCss = ThemeManager.toCss(theme);
   #os-root {
     display: grid;
     grid-template-rows: var(--aura-statusbar-height) 1fr var(--aura-dock-height);
-    height: 100vh;
-    width: 100vw;
+    /* 100% (not 100vw/100vh) so #os-root sizes against its parent (body).
+       The status-bar zoom rescales body inversely, and #os-root needs to
+       follow body's actual computed size — otherwise it overflows the
+       shrunken body at zoom > 1. */
+    height: 100%;
+    width: 100%;
     overflow: hidden;
   }
 

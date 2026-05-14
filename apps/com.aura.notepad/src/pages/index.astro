@@ -92,7 +92,7 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
     let suppressPut = false;
 
     // Live sync: SSE pushes new state from the backend
-    const sse = new EventSource('/api/events');
+    const sse = new EventSource('api/events');
     sse.onopen    = () => { status.textContent = 'CONNECTED'; status.className = 'ok'; };
     sse.onerror   = () => { status.textContent = 'DISCONNECTED'; status.className = ''; };
     sse.onmessage = (e) => {
@@ -119,7 +119,7 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
       if (suppressPut) return;
       clearTimeout(debounce);
       debounce = setTimeout(() => {
-        fetch('/api/note', {
+        fetch('api/note', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: editor.value }),

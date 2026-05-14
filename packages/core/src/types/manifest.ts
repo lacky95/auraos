@@ -49,9 +49,9 @@ export const AppManifestSchema = z.object({
   entrypoint: z.string().default('entrypoint.sh'),
   serverPort: z.number().int().min(1024).max(65535).optional(),
   permissions: z.array(PermissionSchema).default([]),
-  tools: z.array(z.enum(['claude-code', 'git', 'node', 'pnpm', 'curl', 'bash'])).default([]),
+  tools: z.array(z.string()).default([]),
   rootfsMode: z.enum(['shared', 'isolated']).default('shared'),
-  category: z.enum(['system', 'productivity', 'media', 'communication', 'utility', 'game']).default('utility'),
+  category: z.enum(['system', 'productivity', 'media', 'communication', 'utility', 'game', 'developer']).default('utility'),
   /** Instance policy: 'single' = at most one running BACKEND process, 'multi' = multiple concurrent processes allowed. */
   instanceMode: z.enum(['single', 'multi']).default('single'),
   /** Optional hard cap on concurrent instances when instanceMode='multi'. 0 = unlimited. */

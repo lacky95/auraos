@@ -15,19 +15,38 @@
 
 <aside id="pm-panel" class="pm-panel" aria-hidden="true">
   <header class="pm-header">
-    <span class="pm-title">▦ PROCESSES</span>
-    <button id="pm-close" class="pm-close" title="Close panel">✕</button>
+    <div class="pm-header-title">
+      <span class="pm-icon">▦</span>
+      <span class="pm-title">PROCESSES</span>
+      <span id="pm-count-badge" class="pm-count-badge">0</span>
+    </div>
+    <div class="pm-header-actions">
+      <div class="pm-view-toggle" role="group" aria-label="View mode">
+        <button type="button" class="pm-view-btn" data-view="cards" data-active="true" title="Card view">▦</button>
+        <button type="button" class="pm-view-btn" data-view="list"  data-active="false" title="List view">☰</button>
+      </div>
+      <button id="pm-close" class="pm-close" title="Close (Esc)">✕</button>
+    </div>
   </header>
   <ul id="pm-list" class="pm-list">
-    <li class="pm-empty">NO RUNNING INSTANCES</li>
+    <li class="pm-empty">
+      <div class="pm-empty-icon">○</div>
+      <div class="pm-empty-text">NO ACTIVE PROCESSES</div>
+      <div class="pm-empty-hint">// LAUNCH AN APP TO BEGIN</div>
+    </li>
   </ul>
   <footer class="pm-footer">
-    <span id="pm-count">0 RUNNING</span>
-    <button id="pm-refresh" class="pm-action-btn" title="Reload list">↻ REFRESH</button>
+    <span id="pm-count" class="pm-stats">0 INST · 0 ACT</span>
+    <button id="pm-refresh" class="pm-foot-btn" title="Reload list">↻ REFRESH</button>
   </footer>
 </aside>
 
-<style>
+<style is:global>
+  /* All selectors below are pm-* prefixed. We need `is:global` because the
+     cards are built via innerHTML in the script — those elements don't get
+     Astro's auto-injected `data-astro-cid-*` scope attribute, so a scoped
+     style block would leave them unstyled. */
+  /* ============ Toggle button (sits in the status bar) ============ */
   .pm-toggle {
     display: flex;
     align-items: center;
@@ -41,10 +60,10 @@
     flex-shrink: 0;
     font-family: var(--aura-font-mono);
     font-size: 1.2rem;
-    transition: box-shadow 0.1s;
+    transition: box-shadow 0.1s, color 0.1s;
     position: relative;
   }
-  .pm-toggle:hover { box-shadow: var(--aura-glow-secondary); }
+  .pm-toggle:hover { box-shadow: var(--aura-glow-secondary); color: var(--aura-color-primary); }
   .pm-toggle[data-has-instances="true"]::after {
     content: '';
     position: absolute;
@@ -54,16 +73,19 @@
     height: 6px;
     background: var(--aura-color-primary);
     box-shadow: var(--aura-glow-primary);
+    border-radius: 50%;
+    animation: pm-pulse 1.6s ease-in-out infinite;
   }
   .pm-toggle-icon { line-height: 1; }
 
+  /* ============ Panel shell ============ */
   .pm-panel {
     position: fixed;
     top: var(--aura-statusbar-height);
     right: 0;
     bottom: var(--aura-dock-height);
-    width: 380px;
-    max-width: 90vw;
+    width: 420px;
+    max-width: 92%;  /* % not vw — body is scaled by the shell zoom */
     background: var(--aura-color-surface);
     border-left: var(--aura-border);
     z-index: 1000;
@@ -71,6 +93,7 @@
     flex-direction: column;
     transform: translateX(100%);
     transition: transform 0.15s ease-out;
+    box-shadow: -8px 0 32px rgba(0, 0, 0, 0.4);
   }
   .pm-panel[aria-hidden="false"] { transform: translateX(0); }
 
@@ -79,16 +102,34 @@
     align-items: center;
     justify-content: space-between;
     padding: 0 12px;
-    height: 36px;
+    height: 40px;
     background: var(--aura-color-surface-2);
     border-bottom: var(--aura-border);
     flex-shrink: 0;
   }
+  .pm-header-title { display: flex; align-items: center; gap: 8px; }
+  .pm-icon { color: var(--aura-color-primary); font-size: 1rem; line-height: 1; }
   .pm-title {
     font-size: var(--aura-font-size-sm);
-    color: var(--aura-color-secondary);
+    color: var(--aura-color-primary);
     text-transform: uppercase;
-    letter-spacing: 0.12em;
+    letter-spacing: 0.14em;
+    font-weight: 500;
+  }
+  .pm-count-badge {
+    min-width: 22px;
+    padding: 2px 6px;
+    font-size: 0.6rem;
+    color: var(--aura-color-bg);
+    background: var(--aura-color-primary);
+    text-align: center;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+  }
+  .pm-count-badge[data-empty="true"] {
+    background: transparent;
+    color: var(--aura-color-text-dim);
+    border: 1px solid var(--aura-color-border);
   }
   .pm-close {
     background: transparent;
@@ -97,38 +138,408 @@
     cursor: pointer;
     font-family: var(--aura-font-mono);
     font-size: var(--aura-font-size-xs);
-    padding: 2px 6px;
+    padding: 3px 7px;
+    transition: color 0.1s, box-shadow 0.1s;
   }
   .pm-close:hover { color: var(--aura-color-danger); box-shadow: var(--aura-glow-danger); }
 
+  /* ============ List + cards ============ */
   .pm-list {
     flex: 1;
     overflow-y: auto;
     list-style: none;
     margin: 0;
-    padding: 0;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
   }
 
+  /* Empty state */
   .pm-empty {
-    padding: 24px 12px;
+    list-style: none;
+    margin: auto 0;
+    padding: 32px 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
     color: var(--aura-color-text-dim);
-    font-size: var(--aura-font-size-xs);
-    text-align: center;
+  }
+  .pm-empty-icon {
+    font-size: 3rem;
+    line-height: 1;
+    color: var(--aura-color-border);
+    animation: pm-pulse 2s ease-in-out infinite;
+  }
+  .pm-empty-text {
+    font-size: var(--aura-font-size-sm);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--aura-color-text);
+  }
+  .pm-empty-hint {
+    font-size: 0.6rem;
     letter-spacing: 0.1em;
+    color: var(--aura-color-text-dim);
   }
 
-  .pm-row {
+  /* Instance card */
+  .pm-card {
+    list-style: none;
+    background: var(--aura-color-surface-2);
+    border: 1px solid var(--aura-color-border);
+    display: flex;
+    flex-direction: column;
+    transition: border-color 0.1s, box-shadow 0.1s;
+  }
+  .pm-card:hover {
+    border-color: color-mix(in srgb, var(--aura-color-primary) 60%, var(--aura-color-border));
+    box-shadow: var(--aura-glow-subtle);
+  }
+
+  .pm-card-head {
+    display: grid;
+    grid-template-columns: 36px 1fr auto;
+    gap: 10px;
+    align-items: center;
+    padding: 10px;
+  }
+  .pm-card-initial {
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--aura-font-mono);
+    font-size: 1.2rem;
+    font-weight: 700;
+    color: var(--aura-color-primary);
+    border: 1px solid var(--aura-color-primary);
+    background: color-mix(in srgb, var(--aura-color-primary) 12%, transparent);
+    text-transform: uppercase;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .pm-card-title { min-width: 0; }
+  .pm-card-name {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--aura-font-size-sm);
+    color: var(--aura-color-primary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pm-card-meta {
+    margin-top: 3px;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-size: 0.6rem;
+    color: var(--aura-color-text-dim);
+    letter-spacing: 0.04em;
+  }
+  .pm-card-meta span::before { content: attr(data-label); color: var(--aura-color-border); margin-right: 4px; }
+
+  /* State chip */
+  .pm-state-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    font-size: 0.6rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    border: 1px solid currentColor;
+  }
+  .pm-state-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+    flex-shrink: 0;
+  }
+
+  /* Running / resumed */
+  .pm-state-chip[data-state="resumed"] {
+    color: var(--aura-color-primary);
+    background: color-mix(in srgb, var(--aura-color-primary) 14%, transparent);
+  }
+  .pm-state-chip[data-state="resumed"] .pm-state-dot {
+    box-shadow: 0 0 6px currentColor;
+    animation: pm-pulse 1.6s ease-in-out infinite;
+  }
+  /* Paused */
+  .pm-state-chip[data-state="paused"],
+  .pm-state-chip[data-state="pausing"] {
+    color: var(--aura-color-secondary);
+    background: color-mix(in srgb, var(--aura-color-secondary) 14%, transparent);
+  }
+  /* Booting (any pre-resumed lifecycle state) */
+  .pm-state-chip[data-state="creating"],
+  .pm-state-chip[data-state="created"],
+  .pm-state-chip[data-state="starting"],
+  .pm-state-chip[data-state="started"],
+  .pm-state-chip[data-state="resuming"] {
+    color: var(--aura-color-text-dim);
+    background: var(--aura-color-bg);
+  }
+  .pm-state-chip[data-state="creating"] .pm-state-dot,
+  .pm-state-chip[data-state="created"] .pm-state-dot,
+  .pm-state-chip[data-state="starting"] .pm-state-dot,
+  .pm-state-chip[data-state="started"] .pm-state-dot,
+  .pm-state-chip[data-state="resuming"] .pm-state-dot {
+    animation: pm-pulse 0.8s ease-in-out infinite;
+  }
+  /* Shutting down */
+  .pm-state-chip[data-state="stopping"],
+  .pm-state-chip[data-state="stopped"],
+  .pm-state-chip[data-state="destroying"],
+  .pm-state-chip[data-state="destroyed"] {
+    color: var(--aura-color-text-dim);
+    background: var(--aura-color-bg);
+    opacity: 0.7;
+  }
+  /* Error */
+  .pm-state-chip[data-state="error"],
+  .pm-state-chip[data-state="crashed"] {
+    color: var(--aura-color-danger);
+    background: color-mix(in srgb, var(--aura-color-danger) 14%, transparent);
+  }
+
+  .pm-bg-badge {
+    font-size: 0.5rem;
+    color: var(--aura-color-secondary);
+    border: 1px solid var(--aura-color-secondary);
+    padding: 1px 4px;
+    letter-spacing: 0.1em;
+    line-height: 1;
+  }
+
+  /* Activities nested inside the card */
+  .pm-activities {
+    border-top: 1px dashed var(--aura-color-border);
+    padding: 8px 10px;
+  }
+  .pm-activities-head {
+    font-size: 0.55rem;
+    color: var(--aura-color-text-dim);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .pm-activities-head::before {
+    content: '';
+    flex: 0 0 10px;
+    height: 1px;
+    background: var(--aura-color-border);
+  }
+  .pm-activity-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .pm-activity {
     display: grid;
     grid-template-columns: 1fr auto;
-    gap: 4px;
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--aura-color-border);
+    gap: 6px;
+    padding: 6px 8px;
+    background: var(--aura-color-bg);
+    border: 1px solid var(--aura-color-border);
+    align-items: center;
+    transition: border-color 0.1s;
   }
-  .pm-row:hover { background: var(--aura-color-surface-2); }
+  .pm-activity:hover { border-color: var(--aura-color-secondary); }
+  .pm-activity-info { min-width: 0; }
+  .pm-activity-title {
+    font-size: 0.72rem;
+    color: var(--aura-color-secondary);
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pm-activity-id {
+    margin-top: 2px;
+    font-size: 0.55rem;
+    color: var(--aura-color-text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pm-activity-actions { display: flex; gap: 3px; }
 
-  .pm-row-meta { min-width: 0; }
-  .pm-row-name {
-    font-size: var(--aura-font-size-sm);
+  /* Action buttons (card-level + activity-level icon buttons) */
+  .pm-card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 8px 10px;
+    border-top: 1px dashed var(--aura-color-border);
+  }
+  .pm-action-btn {
+    background: transparent;
+    border: 1px solid var(--aura-color-border);
+    color: var(--aura-color-text-dim);
+    font-family: var(--aura-font-mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.08em;
+    padding: 5px 8px;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: color 0.1s, border-color 0.1s, box-shadow 0.1s;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .pm-action-btn:hover {
+    color: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+    box-shadow: var(--aura-glow-subtle);
+  }
+  .pm-action-btn[data-variant="warn"]:hover {
+    color: var(--aura-color-secondary);
+    border-color: var(--aura-color-secondary);
+    box-shadow: var(--aura-glow-secondary);
+  }
+  .pm-action-btn[data-variant="danger"]:hover {
+    color: var(--aura-color-danger);
+    border-color: var(--aura-color-danger);
+    box-shadow: var(--aura-glow-danger);
+  }
+  .pm-action-btn[disabled] { opacity: 0.4; cursor: wait; }
+  .pm-action-btn-spacer { flex: 1; }
+
+  .pm-icon-btn {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    font-size: 0.7rem;
+    line-height: 1;
+    justify-content: center;
+  }
+
+  /* Footer */
+  .pm-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px;
+    height: 32px;
+    border-top: var(--aura-border);
+    background: var(--aura-color-surface-2);
+    flex-shrink: 0;
+  }
+  .pm-stats {
+    font-size: 0.6rem;
+    color: var(--aura-color-text-dim);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+  .pm-foot-btn {
+    background: transparent;
+    border: var(--aura-border);
+    color: var(--aura-color-text-dim);
+    font-family: var(--aura-font-mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.08em;
+    padding: 3px 8px;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: color 0.1s, box-shadow 0.1s;
+  }
+  .pm-foot-btn:hover { color: var(--aura-color-primary); box-shadow: var(--aura-glow-subtle); }
+
+  @keyframes pm-pulse {
+    0%, 100% { opacity: 1;   }
+    50%      { opacity: 0.35; }
+  }
+
+  /* ============ View-mode toggle (header) ============ */
+  .pm-header-actions { display: flex; align-items: center; gap: 8px; }
+  .pm-view-toggle {
+    display: inline-flex;
+    border: var(--aura-border);
+  }
+  .pm-view-btn {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    color: var(--aura-color-text-dim);
+    font-family: var(--aura-font-mono);
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: color 0.1s, background 0.1s;
+    padding: 0;
+    line-height: 1;
+  }
+  .pm-view-btn + .pm-view-btn { border-left: 1px solid var(--aura-color-border); }
+  .pm-view-btn:hover { color: var(--aura-color-primary); }
+  .pm-view-btn[data-active="true"] {
+    color: var(--aura-color-bg);
+    background: var(--aura-color-primary);
+  }
+
+  /* ============ List view (dense, ps-like rows) ============ */
+  .pm-list[data-view="list"] {
+    padding: 0;
+    gap: 0;
+  }
+  .pm-listrow {
+    list-style: none;
+    display: grid;
+    grid-template-columns: 16px 1fr auto;
+    gap: 8px;
+    align-items: center;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--aura-color-border);
+    transition: background 0.1s;
+  }
+  .pm-listrow:hover { background: var(--aura-color-surface-2); }
+
+  .pm-listrow-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--aura-color-text-dim);
+    justify-self: center;
+  }
+  .pm-listrow[data-state="resumed"] .pm-listrow-dot {
+    background: var(--aura-color-primary);
+    box-shadow: 0 0 6px var(--aura-color-primary);
+    animation: pm-pulse 1.6s ease-in-out infinite;
+  }
+  .pm-listrow[data-state="paused"]   .pm-listrow-dot,
+  .pm-listrow[data-state="pausing"]  .pm-listrow-dot { background: var(--aura-color-secondary); }
+  .pm-listrow[data-state="error"]    .pm-listrow-dot,
+  .pm-listrow[data-state="crashed"]  .pm-listrow-dot { background: var(--aura-color-danger); }
+  .pm-listrow[data-state="creating"]  .pm-listrow-dot,
+  .pm-listrow[data-state="created"]   .pm-listrow-dot,
+  .pm-listrow[data-state="starting"]  .pm-listrow-dot,
+  .pm-listrow[data-state="started"]   .pm-listrow-dot,
+  .pm-listrow[data-state="resuming"]  .pm-listrow-dot { animation: pm-pulse 0.8s ease-in-out infinite; }
+
+  .pm-listrow-info { min-width: 0; }
+  .pm-listrow-line1 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.7rem;
     color: var(--aura-color-primary);
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -136,87 +547,66 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .pm-row-sub {
-    font-size: var(--aura-font-size-xs);
-    color: var(--aura-color-text-dim);
-    margin-top: 2px;
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .pm-row-sub .pm-state {
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-  }
-  .pm-state[data-state="resumed"]  { color: var(--aura-color-primary); }
-  .pm-state[data-state="paused"]   { color: var(--aura-color-secondary); }
-  .pm-state[data-state="error"]    { color: var(--aura-color-danger); }
-  .pm-state[data-state="starting"], .pm-state[data-state="creating"], .pm-state[data-state="resuming"] {
-    color: var(--aura-color-text-dim);
-  }
-
-  .pm-row-actions {
-    display: flex;
-    gap: 4px;
-    align-self: center;
-  }
-  .pm-action-btn {
-    background: transparent;
-    border: var(--aura-border);
-    color: var(--aura-color-text-dim);
-    font-family: var(--aura-font-mono);
-    font-size: var(--aura-font-size-xs);
-    letter-spacing: 0.06em;
-    padding: 4px 6px;
-    cursor: pointer;
-    text-transform: uppercase;
-    transition: color 0.1s, box-shadow 0.1s;
-  }
-  .pm-action-btn:hover { color: var(--aura-color-primary); box-shadow: var(--aura-glow-subtle); }
-  .pm-action-btn[data-variant="warn"]:hover { color: var(--aura-color-secondary); box-shadow: var(--aura-glow-secondary); }
-  .pm-action-btn[data-variant="danger"]:hover { color: var(--aura-color-danger); box-shadow: var(--aura-glow-danger); }
-
-  /* Subprocess sub-rows: indented and visually de-emphasized */
-  .pm-subrow {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    gap: 4px;
-    padding: 6px 12px 6px 28px;
-    border-bottom: 1px solid var(--aura-color-border);
-    background: rgba(0,0,0,0.15);
-  }
-  .pm-subrow:hover { background: var(--aura-color-surface-2); }
-  .pm-subrow-name {
-    font-size: var(--aura-font-size-xs);
-    color: var(--aura-color-secondary);
-    letter-spacing: 0.06em;
-  }
-  .pm-subrow-id {
-    font-size: var(--aura-font-size-xs);
-    color: var(--aura-color-text-dim);
-    margin-top: 2px;
-  }
-  .pm-bg-badge {
+  .pm-listrow-state-label {
     font-size: 0.55rem;
-    color: var(--aura-color-secondary);
-    border: 1px solid var(--aura-color-secondary);
-    padding: 1px 4px;
-    letter-spacing: 0.08em;
-    margin-left: 4px;
+    color: var(--aura-color-text-dim);
+    letter-spacing: 0.1em;
+    padding-left: 6px;
+    border-left: 1px solid var(--aura-color-border);
+  }
+  .pm-listrow[data-state="error"]   .pm-listrow-state-label,
+  .pm-listrow[data-state="crashed"] .pm-listrow-state-label { color: var(--aura-color-danger); }
+
+  .pm-listrow-line2 {
+    margin-top: 2px;
+    font-size: 0.55rem;
+    color: var(--aura-color-text-dim);
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: flex;
+    gap: 10px;
   }
 
-  .pm-footer {
+  .pm-listrow-actions {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 6px 12px;
-    height: 30px;
-    border-top: var(--aura-border);
-    background: var(--aura-color-surface-2);
-    flex-shrink: 0;
-    font-size: var(--aura-font-size-xs);
+    gap: 2px;
+  }
+  .pm-listrow-actions .pm-action-btn {
+    padding: 0;
+    width: 22px;
+    height: 22px;
+    font-size: 0.7rem;
+    justify-content: center;
+    line-height: 1;
+  }
+
+  /* Activity sub-row in list view: indented, no dot, muted */
+  .pm-listrow-act {
+    grid-template-columns: 16px 1fr auto;
+    padding: 4px 10px 4px 32px;
+    background: rgba(0, 0, 0, 0.18);
+  }
+  .pm-listrow-act:hover { background: var(--aura-color-surface-2); }
+  .pm-listrow-arrow {
     color: var(--aura-color-text-dim);
-    letter-spacing: 0.08em;
+    font-size: 0.8rem;
+    line-height: 1;
+    justify-self: center;
+  }
+  .pm-listrow-act .pm-listrow-line1 {
+    color: var(--aura-color-secondary);
+    text-transform: none;
+    letter-spacing: 0.04em;
+    font-size: 0.65rem;
+  }
+
+  /* Cards view is the default; this rule pins it explicitly so toggling
+     back from list re-applies the card spacing without a full re-render. */
+  .pm-list[data-view="cards"] {
+    padding: 10px;
+    gap: 10px;
   }
 </style>
 
@@ -242,14 +632,49 @@
     backgroundService: boolean;
   }
 
-  const toggleBtn = document.getElementById('pm-toggle') as HTMLButtonElement;
-  const panel     = document.getElementById('pm-panel') as HTMLElement;
-  const closeBtn  = document.getElementById('pm-close') as HTMLButtonElement;
-  const list      = document.getElementById('pm-list') as HTMLUListElement;
-  const count     = document.getElementById('pm-count') as HTMLElement;
-  const refresh   = document.getElementById('pm-refresh') as HTMLButtonElement;
+  const toggleBtn  = document.getElementById('pm-toggle') as HTMLButtonElement;
+  const panel      = document.getElementById('pm-panel') as HTMLElement;
+  const closeBtn   = document.getElementById('pm-close') as HTMLButtonElement;
+  const list       = document.getElementById('pm-list') as HTMLUListElement;
+  const count      = document.getElementById('pm-count') as HTMLElement;
+  const countBadge = document.getElementById('pm-count-badge') as HTMLElement;
+  const refresh    = document.getElementById('pm-refresh') as HTMLButtonElement;
+  const viewBtns   = document.querySelectorAll<HTMLButtonElement>('.pm-view-btn');
 
   let manifests = new Map<string, ManifestLite>();
+
+  // Cache the last fetched payload so toggling the view doesn't trigger a
+  // fresh /api/apps fetch.
+  let lastInstances:  InstanceListItem[] = [];
+  let lastActivities: ActivityListItem[] = [];
+
+  type ViewMode = 'cards' | 'list';
+  const VIEW_STORAGE_KEY = 'aura.pm.viewMode';
+  let viewMode: ViewMode = (() => {
+    try {
+      const saved = localStorage.getItem(VIEW_STORAGE_KEY);
+      return saved === 'list' ? 'list' : 'cards';
+    } catch { return 'cards'; }
+  })();
+  list.dataset['view'] = viewMode;
+  viewBtns.forEach(b => {
+    b.dataset['active'] = (b.dataset['view'] === viewMode) ? 'true' : 'false';
+  });
+
+  function setViewMode(mode: ViewMode) {
+    if (mode === viewMode) return;
+    viewMode = mode;
+    list.dataset['view'] = mode;
+    viewBtns.forEach(b => {
+      b.dataset['active'] = (b.dataset['view'] === mode) ? 'true' : 'false';
+    });
+    try { localStorage.setItem(VIEW_STORAGE_KEY, mode); } catch {}
+    render(lastInstances, lastActivities);
+  }
+
+  viewBtns.forEach(b => {
+    b.addEventListener('click', () => setViewMode(b.dataset['view'] as ViewMode));
+  });
 
   function openPanel()  { panel.setAttribute('aria-hidden', 'false'); refreshList(); }
   function closePanel() { panel.setAttribute('aria-hidden', 'true'); }
@@ -261,7 +686,6 @@
   closeBtn.addEventListener('click', closePanel);
   refresh.addEventListener('click', refreshList);
 
-  // Esc closes the panel
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && panel.getAttribute('aria-hidden') === 'false') closePanel();
   });
@@ -275,21 +699,60 @@
         activities: ActivityListItem[];
       }>;
       manifests = new Map(apps.map(a => [a.manifest.id, a.manifest]));
-      const allInstances  = apps.flatMap(a => a.instances);
-      const allActivities = apps.flatMap(a => a.activities);
-      render(allInstances, allActivities);
+      lastInstances  = apps.flatMap(a => a.instances);
+      lastActivities = apps.flatMap(a => a.activities);
+      render(lastInstances, lastActivities);
     } catch (err) {
       console.error('[ProcessManager] refresh failed', err);
     }
   }
 
+  // Map verbose lifecycle states to a short 3-4 char chip label
+  function stateLabel(state: string): string {
+    switch (state) {
+      case 'resumed':    return 'RUN';
+      case 'paused':     return 'PSE';
+      case 'pausing':    return 'PSE';
+      case 'creating':   return 'BOOT';
+      case 'created':    return 'BOOT';
+      case 'starting':   return 'BOOT';
+      case 'started':    return 'BOOT';
+      case 'resuming':   return 'BOOT';
+      case 'stopping':   return 'STOP';
+      case 'stopped':    return 'STOP';
+      case 'destroying': return 'TERM';
+      case 'destroyed':  return 'OFF';
+      case 'error':      return 'ERR';
+      case 'crashed':    return 'ERR';
+      default:           return state.toUpperCase().slice(0, 4);
+    }
+  }
+
+  function escapeHtml(s: string): string {
+    return s.replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    } as Record<string, string>)[c]!);
+  }
+
+  /** Dispatcher: updates header counters + the empty state, then delegates
+   *  to the active view's renderer.
+   */
   function render(instances: InstanceListItem[], activities: ActivityListItem[]) {
-    const total = instances.length + activities.length;
-    count.textContent = `${instances.length} INST · ${activities.length} ACT`;
-    toggleBtn.dataset['hasInstances'] = total > 0 ? 'true' : 'false';
+    const totalInst = instances.length;
+    const totalAct  = activities.length;
+
+    count.textContent = `${totalInst} INST · ${totalAct} ACT`;
+    countBadge.textContent = String(totalInst);
+    countBadge.dataset['empty'] = totalInst === 0 ? 'true' : 'false';
+    toggleBtn.dataset['hasInstances'] = totalInst > 0 ? 'true' : 'false';
 
     if (instances.length === 0) {
-      list.innerHTML = `<li class="pm-empty">NO RUNNING INSTANCES</li>`;
+      list.innerHTML = `
+        <li class="pm-empty">
+          <div class="pm-empty-icon">○</div>
+          <div class="pm-empty-text">NO ACTIVE PROCESSES</div>
+          <div class="pm-empty-hint">// LAUNCH AN APP TO BEGIN</div>
+        </li>`;
       return;
     }
 
@@ -300,6 +763,79 @@
       actByInstance.set(a.parentInstanceId, arr);
     }
 
+    if (viewMode === 'list') renderList(instances, actByInstance);
+    else                     renderCards(instances, actByInstance);
+  }
+
+  function renderCards(instances: InstanceListItem[], actByInstance: Map<string, ActivityListItem[]>) {
+    list.innerHTML = instances.map(inst => {
+      const manifest = manifests.get(inst.appId);
+      const name = manifest?.name ?? inst.appId;
+      const supportsActivities = manifest?.activityMode === 'multi';
+      const isBg = manifest?.backgroundService === true;
+      const acts = actByInstance.get(inst.instanceId) ?? [];
+      const initial = name.charAt(0).toUpperCase();
+
+      const activitiesBlock = acts.length === 0 ? '' : `
+        <div class="pm-activities">
+          <div class="pm-activities-head">ACTIVITIES · ${acts.length}</div>
+          <ul class="pm-activity-list">
+            ${acts.map(act => {
+              const label = act.title ?? `↳ ${act.activityId.split('#').pop()}`;
+              const sub = `${escapeHtml(act.activityId)}${act.path && act.path !== '/' ? ` · ${escapeHtml(act.path)}` : ''}`;
+              return `
+                <li class="pm-activity" data-activity-id="${escapeHtml(act.activityId)}" data-parent-id="${escapeHtml(inst.instanceId)}">
+                  <div class="pm-activity-info">
+                    <div class="pm-activity-title">${escapeHtml(label)}</div>
+                    <div class="pm-activity-id">${sub}</div>
+                  </div>
+                  <div class="pm-activity-actions">
+                    <button class="pm-action-btn pm-icon-btn" data-action="focus-activity" title="Focus this activity">◉</button>
+                    <button class="pm-action-btn pm-icon-btn" data-action="close-activity" data-variant="warn" title="Close this activity">✕</button>
+                  </div>
+                </li>`;
+            }).join('')}
+          </ul>
+        </div>`;
+
+      const metaParts: string[] = [
+        `<span data-label="ID">${escapeHtml(inst.instanceId)}</span>`,
+      ];
+      if (inst.pid !== null)  metaParts.push(`<span data-label="PID">${inst.pid}</span>`);
+      if (inst.port !== null) metaParts.push(`<span data-label="PORT">${inst.port}</span>`);
+
+      return `
+        <li class="pm-card" data-instance-id="${escapeHtml(inst.instanceId)}">
+          <div class="pm-card-head">
+            <div class="pm-card-initial">${escapeHtml(initial)}</div>
+            <div class="pm-card-title">
+              <div class="pm-card-name">
+                <span>${escapeHtml(name)}</span>
+                ${isBg ? '<span class="pm-bg-badge" title="Background service">BG</span>' : ''}
+              </div>
+              <div class="pm-card-meta">${metaParts.join('')}</div>
+            </div>
+            <div class="pm-state-chip" data-state="${escapeHtml(inst.state)}" title="${escapeHtml(inst.state)}">
+              <span class="pm-state-dot"></span>
+              <span>${stateLabel(inst.state)}</span>
+            </div>
+          </div>
+          ${activitiesBlock}
+          <div class="pm-card-actions">
+            <button class="pm-action-btn" data-action="focus" title="Open in fullscreen focus mode">◉ FOCUS</button>
+            ${supportsActivities ? '<button class="pm-action-btn" data-action="new-activity" title="Open a new activity on this instance">+ ACTIVITY</button>' : ''}
+            <span class="pm-action-btn-spacer"></span>
+            <button class="pm-action-btn" data-action="app-close" data-variant="warn" title="Standard close — runs full lifecycle: onPause → onStop → onDestroy → SIGTERM">■ STOP</button>
+            <button class="pm-action-btn" data-action="task-kill" data-variant="danger" title="Force kill — immediate SIGKILL, no lifecycle hooks (only if app hangs)">⨂ KILL</button>
+          </div>
+        </li>`;
+    }).join('');
+  }
+
+  /** Dense, ps-like list view: one row per instance, indented activity rows
+   *  beneath their parent. Action labels collapse to icon-only buttons.
+   */
+  function renderList(instances: InstanceListItem[], actByInstance: Map<string, ActivityListItem[]>) {
     list.innerHTML = instances.map(inst => {
       const manifest = manifests.get(inst.appId);
       const name = manifest?.name ?? inst.appId;
@@ -307,42 +843,47 @@
       const isBg = manifest?.backgroundService === true;
       const acts = actByInstance.get(inst.instanceId) ?? [];
 
+      const metaParts: string[] = [`<span>${escapeHtml(inst.instanceId)}</span>`];
+      if (inst.pid  !== null) metaParts.push(`<span>PID ${inst.pid}</span>`);
+      if (inst.port !== null) metaParts.push(`<span>:${inst.port}</span>`);
+
+      const instRow = `
+        <li class="pm-listrow" data-instance-id="${escapeHtml(inst.instanceId)}" data-state="${escapeHtml(inst.state)}">
+          <span class="pm-listrow-dot" title="${escapeHtml(inst.state)}"></span>
+          <div class="pm-listrow-info">
+            <div class="pm-listrow-line1">
+              <span>${escapeHtml(name)}</span>
+              ${isBg ? '<span class="pm-bg-badge" title="Background service">BG</span>' : ''}
+              <span class="pm-listrow-state-label">${stateLabel(inst.state)}</span>
+            </div>
+            <div class="pm-listrow-line2">${metaParts.join('')}</div>
+          </div>
+          <div class="pm-listrow-actions">
+            <button class="pm-action-btn pm-icon-btn" data-action="focus"        title="Focus">◉</button>
+            ${supportsActivities ? '<button class="pm-action-btn pm-icon-btn" data-action="new-activity" title="+ Activity">+</button>' : ''}
+            <button class="pm-action-btn pm-icon-btn" data-action="app-close"   data-variant="warn"   title="Stop (graceful)">■</button>
+            <button class="pm-action-btn pm-icon-btn" data-action="task-kill"   data-variant="danger" title="Kill (SIGKILL)">⨂</button>
+          </div>
+        </li>`;
+
       const actRows = acts.map(act => {
-        const label = act.title ?? `↳ ${act.activityId.split('#').pop()}`;
+        const label = act.title ?? act.activityId.split('#').pop() ?? act.activityId;
+        const sub = `${escapeHtml(act.activityId)}${act.path && act.path !== '/' ? ` · ${escapeHtml(act.path)}` : ''}`;
         return `
-          <li class="pm-subrow" data-activity-id="${act.activityId}" data-parent-id="${inst.instanceId}">
-            <div class="pm-row-meta">
-              <div class="pm-subrow-name">${label}</div>
-              <div class="pm-subrow-id">${act.activityId}${act.path && act.path !== '/' ? ` · ${act.path}` : ''}</div>
+          <li class="pm-listrow pm-listrow-act" data-activity-id="${escapeHtml(act.activityId)}" data-parent-id="${escapeHtml(inst.instanceId)}">
+            <span class="pm-listrow-arrow">↳</span>
+            <div class="pm-listrow-info">
+              <div class="pm-listrow-line1">${escapeHtml(label)}</div>
+              <div class="pm-listrow-line2">${sub}</div>
             </div>
-            <div class="pm-row-actions">
-              <button class="pm-action-btn" data-action="focus-activity" title="Focus this activity">FOCUS</button>
-              <button class="pm-action-btn" data-action="close-activity" data-variant="warn" title="Close this activity">CLOSE</button>
+            <div class="pm-listrow-actions">
+              <button class="pm-action-btn pm-icon-btn" data-action="focus-activity" title="Focus">◉</button>
+              <button class="pm-action-btn pm-icon-btn" data-action="close-activity" data-variant="warn" title="Close">✕</button>
             </div>
-          </li>
-        `;
+          </li>`;
       }).join('');
 
-      return `
-        <li class="pm-row" data-instance-id="${inst.instanceId}">
-          <div class="pm-row-meta">
-            <div class="pm-row-name">${name}${isBg ? '<span class="pm-bg-badge">BG</span>' : ''}</div>
-            <div class="pm-row-sub">
-              <span>${inst.instanceId}</span>
-              <span class="pm-state" data-state="${inst.state}">${inst.state}</span>
-              ${inst.pid !== null ? `<span>pid ${inst.pid}</span>` : ''}
-              ${inst.port !== null ? `<span>:${inst.port}</span>` : ''}
-            </div>
-          </div>
-          <div class="pm-row-actions">
-            <button class="pm-action-btn" data-action="focus" title="Bring to focus view">FOCUS</button>
-            ${supportsActivities ? `<button class="pm-action-btn" data-action="new-activity" title="Open a new activity on this instance">+ NEW ACTIVITY</button>` : ''}
-            <button class="pm-action-btn" data-action="app-close" data-variant="warn" title="Standard close — runs full lifecycle: onPause → onStop → onDestroy → SIGTERM">APP CLOSE</button>
-            <button class="pm-action-btn" data-action="task-kill" data-variant="danger" title="Force kill — immediate SIGKILL, no lifecycle hooks (only if app hangs)">TASK KILL</button>
-          </div>
-        </li>
-        ${actRows}
-      `;
+      return instRow + actRows;
     }).join('');
   }
 
@@ -392,9 +933,29 @@
     }
   });
 
-  // Live-refresh via SSE from the OS event bus
+  // Live-refresh via SSE from the OS event bus. The list always reacts to
+  // events — even when the panel is closed — so the toggle-button's
+  // "running apps" badge dot stays in sync. A short debounce coalesces the 6
+  // rapid state-transition events that fire during a single app start
+  // (creating → created → starting → started → resuming → resumed) into one
+  // /api/apps refetch.
   const sse = new EventSource('/api/apps/events');
-  sse.onmessage = () => { if (panel.getAttribute('aria-hidden') === 'false') refreshList(); };
+  let refreshDebounce: ReturnType<typeof setTimeout> | null = null;
+  function scheduleRefresh() {
+    if (refreshDebounce) return;
+    refreshDebounce = setTimeout(() => { refreshDebounce = null; refreshList(); }, 80);
+  }
+  sse.onmessage = (e) => {
+    try {
+      const ev = JSON.parse(e.data);
+      if (
+        ev.type === 'app:stateChanged' ||
+        ev.type === 'app:crashed' ||
+        ev.type === 'activity:opened' ||
+        ev.type === 'activity:closed'
+      ) scheduleRefresh();
+    } catch { /* ignore malformed payloads */ }
+  };
 
   // Initial load to populate the badge dot on the toggle button
   refreshList();

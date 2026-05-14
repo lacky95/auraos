@@ -20,6 +20,7 @@ services:
       AURA_APP_PORT_START: "4001"
       AURA_APP_PORT_END: "4999"
       AURA_AUTH_MODE: none
+      AURA_USE_PROOT: "true"
     cap_add:
       - SYS_PTRACE
     security_opt:

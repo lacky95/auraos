@@ -8,9 +8,13 @@ interface Props {
 const { apps } = Astro.props;
 ---
 <nav id="dock">
-  <a href="/launcher" class="launcher-btn" title="All Apps">
+  <button
+    id="dock-launcher-btn"
+    type="button"
+    class="launcher-btn"
+    title="All Apps">
     <span class="grid-icon">⣿</span>
-  </a>
+  </button>
   <ProcessManager />
   <div class="separator"></div>
   {apps.map(app => (
@@ -95,3 +99,15 @@ const { apps } = Astro.props;
     max-width: 56px;
   }
 </style>
+
+<script>
+  // Inline `onclick="window.auraToggleLauncher()"` runs at click time, but it
+  // fails silently if `auraToggleLauncher` isn't defined yet — and inline
+  // event handlers can be hard to debug. Bind via addEventListener instead.
+  const btn = document.getElementById('dock-launcher-btn');
+  btn?.addEventListener('click', () => {
+    const toggle = (window as any).auraToggleLauncher;
+    if (typeof toggle === 'function') toggle();
+    else console.warn('[Dock] auraToggleLauncher not available — LauncherOverlay missing?');
+  });
+</script>

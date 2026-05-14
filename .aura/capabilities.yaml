@@ -1,0 +1,76 @@
+capabilities:
+  aura:
+    source: builtin
+    binary: aura
+    description: "AuraOS CLI itself (forward into PRoots)"
+
+  claude:
+    source: npm
+    package: "@anthropic-ai/claude-code"
+    binary: claude
+    description: "Claude Code CLI"
+
+  ssh:
+    source: apt
+    package: openssh-client
+    binary: ssh
+    description: "SSH client for remote connections"
+
+  rg:
+    source: apt
+    package: ripgrep
+    binary: rg
+    description: "ripgrep — fast recursive grep"
+
+  htop:
+    source: apt
+    package: htop
+    binary: htop
+    description: "Interactive process viewer"
+
+  jq:
+    source: apt
+    package: jq
+    binary: jq
+    description: "Command-line JSON processor"
+
+  fzf:
+    source: apt
+    package: fzf
+    binary: fzf
+    description: "Fuzzy finder"
+
+  gh:
+    source: apt
+    package: gh
+    binary: gh
+    description: "GitHub CLI"
+
+  bun:
+    source: curl
+    install_cmd: "curl -fsSL https://bun.sh/install | bash"
+    binary_path: /root/.bun/bin/bun
+    binary: bun
+    description: "Bun JavaScript runtime"
+
+services:
+  sshd:
+    source: apt
+    package: openssh-server
+    binary: /usr/sbin/sshd
+    port: 2222
+    default_config: |
+      Port 2222
+      PermitRootLogin yes
+      PasswordAuthentication yes
+      UsePAM no
+    start_cmd: "mkdir -p /run/sshd && /usr/sbin/sshd -D -p 2222"
+    description: "SSH server daemon (port 2222)"
+
+  code-server:
+    source: curl
+    install_cmd: "curl -fsSL https://code-server.dev/install.sh | sh"
+    binary: /usr/bin/code-server
+    port: 8443
+    start_cmd: "code-server --bind-addr 0.0.0.0:8443 --auth none"
+    description: "VS Code in the browser"
