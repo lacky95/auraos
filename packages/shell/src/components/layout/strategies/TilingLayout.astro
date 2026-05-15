@@ -4,6 +4,9 @@ import AppSlot from '../AppSlot.astro';
 
 interface Props {
   views: AppView[];
+  /** Unused — tiling is fully derived from view count. Accepted so the
+   *  LayoutManager dispatcher can forward layoutState uniformly. */
+  layoutState?: Record<string, unknown>;
 }
 const { views } = Astro.props;
 

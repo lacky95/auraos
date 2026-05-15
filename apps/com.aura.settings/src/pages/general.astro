@@ -1,7 +1,25 @@
 ---
+import '@aura/ui/styles/scificn-bridge.css';
 import '../styles/settings.css';
-import { getState } from '../state.js';
-const state = getState();
+import ColorModePicker from '../components/ColorModePicker.tsx';
+
+// SSR-read from the OS KV directly via the shell's internal port. Each
+// general-pref lives under its own key so a single field write doesn't
+// require a read-modify-write cycle.
+const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
+async function readKv<T>(key: string, fallback: T): Promise<T> {
+  try {
+    const r = await fetch(`${osBase}/api/kv/os/${key}`, { signal: AbortSignal.timeout(1500) });
+    if (!r.ok) return fallback;
+    const body = await r.json() as { value?: T };
+    return body.value ?? fallback;
+  } catch { return fallback; }
+}
+const clockFormat = await readKv<'12h' | '24h'>('clockFormat', '24h');
+const locale      = await readKv<string>('locale', 'en-US');
+const theme       = await readKv<{ colorMode?: 'light' | 'dark' | 'auto' }>('theme', {});
+const colorMode   = theme.colorMode ?? 'dark';
+const state = { clockFormat, locale, colorMode };
 ---
 <!DOCTYPE html>
 <html lang="en">
@@ -30,22 +48,17 @@ const state = getState();
     <div class="form-row" style="align-items: flex-start;">
       <label>COLOR MODE</label>
       <div>
-        <div class="mode-row" id="mode-row" role="radiogroup" aria-label="Color mode">
-          <button class="mode-btn" data-mode="light" data-active={state.colorMode === 'light'} role="radio">LIGHT</button>
-          <button class="mode-btn" data-mode="dark"  data-active={state.colorMode === 'dark'}  role="radio">DARK</button>
-          <button class="mode-btn" data-mode="auto"  data-active={state.colorMode === 'auto'}  role="radio">AUTO</button>
-          <span class="mode-resolved" id="mode-resolved">{state.colorMode.toUpperCase()}</span>
-        </div>
+        <ColorModePicker client:load defaultMode={state.colorMode} />
         <p style="margin-top: 6px; font-size: 0.6rem; color: var(--aura-color-text-dim); letter-spacing: 0.06em;">
           AUTO FOLLOWS YOUR OPERATING SYSTEM'S PREFERS-COLOR-SCHEME
         </p>
       </div>
     </div>
     <p id="status" style="margin-top: 14px; font-size: 0.7rem; color: var(--aura-color-text-dim); letter-spacing: 0.08em;">
-      CHANGES PERSIST IMMEDIATELY · /api/data/settings PUT
+      CHANGES PERSIST IMMEDIATELY · PUT /api/kv/os/&lt;field&gt;
     </p>
   </main>
-  <footer class="settings-foot">PROVIDER · /api/data/settings + /api/data/theme (mode)</footer>
+  <footer class="settings-foot">PROVIDER · /api/kv/os/clockFormat + /api/kv/os/locale + /api/kv/os/theme (mode)</footer>
 
   <script is:inline>
     const statusEl = document.getElementById('status');
@@ -55,10 +68,10 @@ const state = getState();
       clearTimeout(debounceTimers.get(field));
       debounceTimers.set(field, setTimeout(async () => {
         try {
-          await fetch('api/data/settings', {
+          await fetch(`/api/kv/os/${field}`, {
             method:  'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ [field]: value }),
+            body:    JSON.stringify({ value }),
           });
           statusEl.innerHTML = `SAVED <b>${field}</b> = ${value} · ${new Date().toLocaleTimeString()}`;
         } catch (err) {
@@ -70,54 +83,15 @@ const state = getState();
     document.getElementById('clock-format').addEventListener('change', (e) => patch('clockFormat', e.target.value));
     document.getElementById('locale').addEventListener('input', (e) => patch('locale', e.target.value));
 
-    // Color-mode picker — PUTs to /api/data/theme so the mode-changed broadcast fires.
-    const modeResolved = document.getElementById('mode-resolved');
-    function resolveMode(pref) {
-      if (pref === 'light') return 'light';
-      if (pref === 'dark')  return 'dark';
-      return (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
-    }
-    function paintModeButtons(pref) {
-      document.querySelectorAll('.mode-btn').forEach((b) => {
-        b.dataset.active = (b.dataset.mode === pref) ? 'true' : 'false';
-      });
-      if (modeResolved) modeResolved.textContent = resolveMode(pref).toUpperCase();
-    }
-    paintModeButtons(document.querySelector('.mode-btn[data-active="true"]')?.dataset?.mode || 'dark');
-
-    document.querySelectorAll('.mode-btn').forEach((b) => {
-      b.addEventListener('click', async () => {
-        const mode = b.dataset.mode;
-        if (!['light', 'dark', 'auto'].includes(mode)) return;
-        paintModeButtons(mode);
-        try {
-          await fetch('api/data/theme', {
-            method:  'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ colorMode: mode }),
-          });
-          statusEl.innerHTML = `SAVED <b>colorMode</b> = ${mode} · ${new Date().toLocaleTimeString()}`;
-        } catch (err) { console.warn('[settings] set colorMode failed', err); }
-      });
-    });
-
+    /* Color-mode picker now owned by <ColorModePicker /> React island.
+     * Live-update link refresh stays — the page's stylesheet link still needs
+     * to bump its href when the OS broadcasts a theme/mode change. */
     window.addEventListener('message', (ev) => {
       if (ev.data?.type === 'aura.theme.changed' || ev.data?.type === 'aura.mode.changed') {
         const link = document.querySelector('link[rel="stylesheet"][href^="/api/os/theme.css"]');
         if (link) link.setAttribute('href', '/api/os/theme.css?t=' + Date.now());
-        if (ev.data?.type === 'aura.mode.changed' && ev.data.colorMode) paintModeButtons(ev.data.colorMode);
       }
     });
-
-    if (window.matchMedia) {
-      const mql = window.matchMedia('(prefers-color-scheme: light)');
-      const handle = () => {
-        const active = document.querySelector('.mode-btn[data-active="true"]');
-        if (active?.dataset.mode === 'auto') paintModeButtons('auto');
-      };
-      if (mql.addEventListener) mql.addEventListener('change', handle);
-      else                       mql.addListener?.(handle);
-    }
   </script>
 </body>
 </html>

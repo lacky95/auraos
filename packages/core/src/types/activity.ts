@@ -37,4 +37,18 @@ export interface AppActivity {
    * since the backend dies as soon as no window is visible.
    */
   minimizable?: boolean;
+  /**
+   * Android back-stack equivalent. When set, this activity was launched on
+   * top of another one in the same instance, and `goBack()` should close
+   * this activity AND refocus its parent. Activities opened at the top level
+   * (from the launcher, the dock, intents without a parent context) leave
+   * this field unset — their close is a plain dismiss.
+   *
+   * Today task affinity is per-instance — `taskId === parentInstanceId`. If
+   * we later allow stacked activities to migrate across instances (Android
+   * `taskAffinity`), `taskId` becomes the source of truth instead.
+   */
+  stackParentId?: string;
+  /** Stable task identifier. Defaults to `parentInstanceId`. */
+  taskId: string;
 }

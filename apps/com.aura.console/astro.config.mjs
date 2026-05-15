@@ -1,6 +1,8 @@
 import { defineConfig } from 'astro/config';
 import node from '@astrojs/node';
-import { auraIdentityIntegration } from '@aura/app-sdk/integration';
+import react from '@astrojs/react';
+import tailwindcss from '@tailwindcss/vite';
+import { auraAppIntegration } from '@aura/app-sdk/integration';
 
 const port = Number(process.env['APP_PORT'] ?? 4001);
 
@@ -32,9 +34,19 @@ export default defineConfig({
   adapter: node({ mode: 'standalone' }),
   security: { checkOrigin: false },
   server: { port, host: true },
-  integrations: [auraIdentityIntegration(), logWsIntegration()],
+  integrations: [auraAppIntegration(), react(), logWsIntegration()],
   devToolbar: { enabled: false },
   vite: {
+    plugins: [tailwindcss()],
     server: { hmr: false },
+    // SSR-process @aura/ui through Vite (it ships .css + .tsx).
+    ssr: { noExternal: ['@aura/ui'] },
+    // react-dom/client and react/jsx-runtime are CJS — without explicit
+    // optimizeDeps pre-bundling, Vite serves them with default-only exports
+    // and astro-island hydration blows up with
+    //   SyntaxError: doesn't provide an export named: 'createRoot'
+    optimizeDeps: {
+      include: ['react-dom/client', 'react/jsx-runtime', 'react/jsx-dev-runtime'],
+    },
   },
 });

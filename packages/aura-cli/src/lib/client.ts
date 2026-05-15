@@ -1,4 +1,9 @@
-const DEFAULT_SHELL_URL = 'http://localhost:3000';
+// 127.0.0.1, not localhost: the CLI is most often invoked from inside a PRoot
+// sandbox, and the bound base-rootfs has no /etc/hosts entry for `localhost`
+// (Debian-slim ships an empty one). Using the literal address skips the DNS
+// lookup that would otherwise fail with ENOTFOUND. On the host or in a normal
+// container both resolve to the same loopback, so there's no downside.
+const DEFAULT_SHELL_URL = 'http://127.0.0.1:3000';
 
 export function shellUrl(): string {
   return process.env['AURA_SHELL_URL'] ?? DEFAULT_SHELL_URL;

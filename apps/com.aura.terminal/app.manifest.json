@@ -1,11 +1,23 @@
 {
   "id": "com.aura.terminal",
   "name": "Terminal",
+  "icon": "T",
   "version": "0.1.0",
   "description": "System terminal with AI toolchain access",
   "category": "system",
-  "permissions": ["storage.read", "storage.write", "network.local"],
-  "tools": ["bash", "node", "git", "claude-code", "aura"],
+  "permissions": [
+    "storage.read",
+    "storage.write",
+    "network.local"
+  ],
+  "tools": [
+    "bash",
+    "node",
+    "git",
+    "claude-code",
+    "aura",
+    "*"
+  ],
   "instanceMode": "multi",
   "maxInstances": 2,
   "activityMode": "multi",

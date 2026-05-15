@@ -16,8 +16,15 @@ export interface OsEvents {
   'app:crashed': { instanceId: string; appId: string; error: string };
   'app:installed': { appId: string };
   'app:removed': { appId: string };
-  'activity:opened': { activityId: string; parentInstanceId: string; appId: string; path: string; title?: string; minimizable?: boolean };
+  'activity:opened': { activityId: string; parentInstanceId: string; appId: string; path: string; title?: string; minimizable?: boolean; stackParentId?: string };
   'activity:closed': { activityId: string; parentInstanceId: string; appId: string };
+  /**
+   * Emitted by `goBack` after the popped activity is closed: the shell should
+   * re-focus the named activity (typically the back-stack parent). Independent
+   * event from `activity:opened` because the activity is already open and the
+   * shell handles "focus existing view" with a different code path.
+   */
+  'activity:focus':  { activityId: string; parentInstanceId: string; appId: string };
   'theme:changed': {
     themeId:       string;                     // the ACTIVE (resolved) theme id
     themeName:     string;
@@ -38,6 +45,25 @@ export interface OsEvents {
     framework:     EventFramework;
   };
   'notification': { appId: string; title: string; body: string };
+  /**
+   * Workspace list or contents changed. Payload contains lightweight
+   * summaries (no full member arrays) so the SSE wire stays small. The
+   * shell fetches the full state from the Settings provider when it needs
+   * to re-render layouts.
+   */
+  'workspaces:changed': {
+    workspaces:        Array<{ id: string; name: string; layoutId: string; memberCount: number }>;
+    activeWorkspaceId: string;
+  };
+  /** Active workspace changed (subset of `workspaces:changed`). */
+  'workspace:activated': { workspaceId: string };
+  /**
+   * KV write or delete. `value: null` means a delete. Namespace + key
+   * together form the Redis address (`os:theme`, `app/com.aura.notepad:foo`).
+   * SSE subscribers can topic-filter `kv:*` to get every change, or read
+   * the namespace from the payload to narrow further.
+   */
+  'kv:changed': { namespace: 'os' | `app/${string}`; key: string; value: unknown | null };
 }
 
 class TypedEventBus extends EventEmitter<OsEvents> {}

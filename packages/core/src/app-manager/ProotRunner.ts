@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 
@@ -56,19 +56,78 @@ export class ProotRunner {
     this.osApiBase = opts.osApiBase;
   }
 
+  /**
+   * Host-side path of the per-instance tool allowlist dir. This is what we
+   * bind into the proot at /aura/my-tools. Lives under dataDir so it shares
+   * the same volume + cleanup lifecycle as the instance's other state.
+   */
+  public toolsDir(instanceId: string): string {
+    return join(this.dataDir, 'aura', 'runtime', instanceId, 'tools');
+  }
+
+  /**
+   * Recreate the per-instance allowlist as a directory of symlinks into
+   * /aura/all-tools (path INSIDE the proot — the target string lives in the
+   * symlink, the kernel resolves it lazily when the proot looks the file up).
+   *
+   * Apps with `'*'` in tools[] mirror every entry in the host toolchain;
+   * explicit-list apps get just their declared tools (with the historical
+   * `claude-code` → `claude` rename preserved). Called once at spawn AND on
+   * cap grant/revoke/install for live instances — so a running terminal sees
+   * a new capability appear in PATH without a respawn.
+   */
+  public provisionToolsDir(instanceId: string, manifest: AppManifest): string {
+    const dir = this.toolsDir(instanceId);
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+    mkdirSync(dir, { recursive: true });
+
+    const toolBinDir = join(this.toolchainDir, 'bin');
+    const useWildcard = manifest.tools.includes('*');
+    const entries = useWildcard
+      ? (existsSync(toolBinDir) ? readdirSync(toolBinDir) : [])
+      : manifest.tools.filter((t) => t !== '*');
+
+    for (const tool of entries) {
+      const binaryName = tool === 'claude-code' ? 'claude' : tool;
+      const target = `/aura/all-tools/${binaryName}`;
+      try { symlinkSync(target, join(dir, binaryName)); } catch { /* dupe / racing refresh */ }
+    }
+    return dir;
+  }
+
+  /** Tear down the per-instance allowlist dir. Called on instance destroy. */
+  public clearToolsDir(instanceId: string): void {
+    try { rmSync(this.toolsDir(instanceId), { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+
   async spawn(instanceId: string, appId: string, port: number, manifest: AppManifest): Promise<number> {
     const appDir = join(this.appsDir, appId);
     const dataDir = join(this.dataDir, 'apps', appId, instanceId);
 
     const useProotEnv = process.env['AURA_USE_PROOT'];
-    const prooted = useProotEnv === 'true' && existsSync(this.baseRootfs);
+    // Two-level opt-out: the OS-wide env var, then the per-app manifest flag.
+    // useProot defaults to true; an app sets `"useProot": false` when its
+    // native deps (Tailwind 4 Oxide, etc.) hit PRoot's ptrace EFAULT bug.
+    const prooted = useProotEnv === 'true'
+                 && manifest.useProot !== false
+                 && existsSync(this.baseRootfs);
     // Resolve once — used by the proot-args builder AND (when not prooted) as
     // the direct spawn argv.
     const entrypointArgv = this.resolveEntrypoint(appDir, manifest);
-    const args = this.buildProotArgs(port, manifest, appDir, dataDir, prooted, entrypointArgv);
+    // Materialise the per-instance tool allowlist BEFORE building the args
+    // (the args reference the dir). Wildcard apps get the whole store mirrored;
+    // explicit apps get just their declared tools.
+    if (prooted) this.provisionToolsDir(instanceId, manifest);
+    const args = this.buildProotArgs(instanceId, port, manifest, appDir, dataDir, prooted, entrypointArgv);
 
+    // Prepend the per-instance allowlist to PATH so non-interactive children
+    // (which don't source .bashrc) still find granted tools. Interactive
+    // shells also benefit — the bashrc's PATH guard then short-circuits.
+    const inheritedPath = process.env['PATH'] ?? '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+    const path = prooted ? `/aura/my-tools:${inheritedPath}` : inheritedPath;
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
+      PATH: path,
       APP_ID: appId,
       APP_INSTANCE_ID: instanceId,
       APP_PORT: String(port),
@@ -79,7 +138,10 @@ export class ProotRunner {
       // to detect layers — saves ~100–300 ms off every interactive terminal
       // launch (which is dominated by bash startup work, not by anything we
       // can fix in pty-server or astro).
-      AURA_LAYER_TAG: '[proot+ctnr]',
+      // Drop the "proot" half of the layer tag when the app opted out of
+      // PRoot (the prompt should reflect the actual sandbox state, not the
+      // OS-wide intent). Bash startup .bashrc reads $AURA_LAYER_TAG verbatim.
+      AURA_LAYER_TAG: prooted ? '[proot+ctnr]' : '[ctnr]',
     };
 
     console.log(`[ProotRunner] Spawning ${instanceId} (app=${appId}) on port ${port}`);
@@ -127,6 +189,7 @@ export class ProotRunner {
   }
 
   private buildProotArgs(
+    instanceId: string,
     port: number,
     manifest: AppManifest,
     appDir: string,
@@ -167,17 +230,19 @@ export class ProotRunner {
     // resolved target (a regular file) sidesteps that entirely. Capabilities
     // installed by `aura cap install` use symlinks, so this fix matters for
     // every dynamically added tool, not just `aura` itself.
+    // Two-dir toolchain view (replaces the old per-tool bind loop):
+    //   /aura/all-tools  ← read-only window into the host's toolchain store.
+    //   /aura/my-tools   ← per-instance allowlist directory of symlinks into
+    //                      /aura/all-tools. Mutated from outside the proot at
+    //                      cap-grant / cap-install time so live instances see
+    //                      new tools without a respawn.
+    // bashrc + spawn env prepend /aura/my-tools to PATH.
     const toolBinDir = join(this.toolchainDir, 'bin');
-    for (const tool of manifest.tools) {
-      const binaryName = tool === 'claude-code' ? 'claude' : tool;
-      const toolPath = join(toolBinDir, binaryName);
-      if (existsSync(toolPath)) {
-        let bindSrc = toolPath;
-        try { bindSrc = realpathSync(toolPath); } catch { /* fall back to the literal path */ }
-        args.push(`--bind=${bindSrc}:/usr/local/bin/${binaryName}`);
-      } else {
-        console.warn(`[ProotRunner] Capability '${tool}' declared by manifest but not installed in toolchain (${toolPath}) — skipping bind-mount. Run \`aura cap install ${tool}\`.`);
-      }
+    if (existsSync(toolBinDir)) {
+      const myTools = this.toolsDir(instanceId);
+      mkdirSync(myTools, { recursive: true });
+      args.push(`--bind=${toolBinDir}:/aura/all-tools`);
+      args.push(`--bind=${myTools}:/aura/my-tools`);
     }
 
     args.push(...entrypointArgv);

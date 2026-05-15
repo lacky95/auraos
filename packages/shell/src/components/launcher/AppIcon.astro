@@ -5,10 +5,11 @@ interface Props {
   app: AppManifest;
 }
 const { app } = Astro.props;
+const glyph = (app.icon ?? app.name.charAt(0)).toUpperCase();
 ---
 <button class="app-icon" data-app-id={app.id} title={app.description ?? app.name}>
   <div class="icon-box">
-    <span class="initial">{app.name.charAt(0).toUpperCase()}</span>
+    <span class="initial" data-len={glyph.length}>{glyph}</span>
   </div>
   <span class="name">{app.name}</span>
   <span class="id">{app.id}</span>
@@ -47,9 +48,14 @@ const { app } = Astro.props;
   }
 
   .initial {
-    font-size: 1.4rem;
+    /* Single font-size for every glyph length — 1, 2, or 3 chars render
+     * at the same height. Sized to fit the 3-char worst case ("SET") in
+     * the 48×48 icon-box with breathing room. */
+    font-size: 1rem;
+    letter-spacing: 0.04em;
     color: var(--aura-color-primary);
     text-shadow: var(--aura-glow-primary);
+    font-weight: 500;
   }
 
   .name {

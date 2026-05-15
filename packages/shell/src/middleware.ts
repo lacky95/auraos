@@ -1,5 +1,7 @@
 import { defineMiddleware } from 'astro:middleware';
 import { getAppManager, initAppManager } from '@aura/core';
+import { kvServer } from '@aura/kv-store';
+import { bootstrapKv } from './lib/kvBootstrap.js';
 
 // Source of truth is the singleton on globalThis — NOT a module-scoped flag.
 // The soft-restart endpoint deletes that singleton; if we tracked init state
@@ -14,6 +16,17 @@ async function ensureAppManager() {
   // Single-threaded event loop: the `??=` plus the `try`/`catch` above run
   // synchronously, so concurrent requests share one in-flight init promise.
   initPromise ??= (async () => {
+    // Embedded Redis MUST come up before AppManager.init() because AppManager
+    // starts services + auto-starts apps, both of which may want to read OS
+    // state (theme, workspaces) from the KV. `kvServer.start()` is idempotent
+    // so a stale singleton across soft-restarts is a no-op.
+    const dataDir = process.env['AURA_DATA_DIR'] ?? '/data';
+    await kvServer.start({ dataDir: `${dataDir}/kv` });
+    // Migrate /data/settings.json (legacy Settings storage) into Redis on
+    // first boot; subsequent boots see `os/theme` already in Redis and
+    // skip this entirely. Idempotent.
+    await bootstrapKv({ dataDir });
+
     const mgr = initAppManager({
       appsDir:      process.env['AURA_APPS_DIR']      ?? '/workspace/apps',
       dataDir:      process.env['AURA_DATA_DIR']      ?? '/data',

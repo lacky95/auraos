@@ -8,9 +8,10 @@ import { createActivityCreateHandler } from '@aura/app-sdk';
 export const POST = createActivityCreateHandler(({ data }) => {
   const section = (data as { section?: string } | undefined)?.section;
   switch (section) {
-    case 'theme':   return { path: '/theme',   title: 'Settings · Theme' };
-    case 'general': return { path: '/general', title: 'Settings · General' };
-    case 'about':   return { path: '/about',   title: 'Settings · About' };
-    default:        return { path: '/',        title: 'Settings' };
+    case 'theme':      return { path: '/theme',      title: 'Settings · Theme' };
+    case 'workspaces': return { path: '/workspaces', title: 'Settings · Workspaces' };
+    case 'general':    return { path: '/general',    title: 'Settings · General' };
+    case 'about':      return { path: '/about',      title: 'Settings · About' };
+    default:           return { path: '/',           title: 'Settings' };
   }
 });

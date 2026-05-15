@@ -1,8 +1,21 @@
 ---
+import ViewportSettingsDialog from './ViewportSettingsDialog.tsx';
 ---
 <header id="statusbar">
   <span class="os-name">AURA<span class="os-ver">OS</span></span>
   <div class="right">
+    <!--
+      Workspace switcher: a row of numbered pills (1..N) plus a [+] add-new
+      button, followed by a chip showing the active workspace's layout
+      strategy (clickable to cycle). Populated client-side from the
+      workspaceClient — see the <script> block below.
+    -->
+    <div id="ws-pills" class="ws-pills" role="group" aria-label="Workspaces"></div>
+    <button id="ws-layout-chip" class="layout-chip" title="Cycle workspace layout" aria-label="Layout strategy">
+      <span class="layout-chip-icon" aria-hidden="true">▦</span>
+      <span class="layout-chip-name">—</span>
+      <span class="layout-chip-cycle" aria-hidden="true">↻</span>
+    </button>
     <span id="clock" class="clock">--:--:--</span>
     <div class="status-zoom" role="group" aria-label="Page zoom">
       <button id="zoom-out"   type="button" class="status-btn" title="Zoom out (Ctrl -)">-</button>
@@ -25,116 +38,22 @@
 </header>
 
 <!--
-  Settings dialog. Uses the native <dialog> element so we get a built-in modal
-  state, focus trap, Esc-to-close, and ::backdrop for free. Styling mirrors
-  scificn.dev's Dialog spec: corner-notched panel (clip-path), animated entry,
-  header with bottom border / body / footer with top border, uppercase
-  monospace title, single close action. The notch corners + backdrop keep it
-  visually consistent with the rest of the retro phosphor OS chrome.
+  Viewport / settings dialog. Now a React island composed of scificn primitives
+  via @aura/ui (Dialog, Tabs, Checkbox, Button). The vanilla `<dialog>` and
+  ~200 lines of bespoke `.sci-*` markup it replaced lived here from the days
+  before @aura/ui shipped.
+
+  The gear button (`#settings-btn` above) dispatches an `aura.viewport.open`
+  CustomEvent on click — the React component listens for that and flips its
+  open state. State plumbing (zoom + margins) flows through the same
+  `window.auraSetZoom` / `window.auraSetMargins` globals defined later in
+  this file, so the dialog stays a pure UI layer.
 -->
-<dialog id="settings-dialog" class="sci-dialog" aria-labelledby="settings-dialog-title">
-  <header class="sci-dialog-header">
-    <h2 id="settings-dialog-title" class="sci-dialog-title">
-      <span class="sci-dialog-title-prefix">▦</span> VIEWPORT
-    </h2>
-    <button id="settings-dialog-close" type="button" class="sci-dialog-close" title="Close (Esc)">✕</button>
-  </header>
-
-  <div class="sci-dialog-body">
-    <section class="sci-section">
-      <div class="sci-section-head">// ZOOM</div>
-      <div class="sci-row">
-        <span class="sci-row-label">Level</span>
-        <span class="sci-row-value sci-row-grow">
-          <input id="dlg-zoom-slider" type="range" class="sci-slider" min="50" max="200" step="5" value="100" />
-          <span id="dlg-zoom-value" class="sci-row-pill">100%</span>
-          <button id="dlg-zoom-reset" type="button" class="sci-btn">RESET</button>
-        </span>
-      </div>
-    </section>
-
-    <section class="sci-section">
-      <div class="sci-section-head">// MARGIN FROM SCREEN EDGES</div>
-      <div class="sci-row">
-        <span class="sci-row-label">Top</span>
-        <span class="sci-row-value sci-row-grow">
-          <input id="dlg-m-top" type="range" class="sci-slider" min="0" max="200" step="2" value="0" />
-          <span class="sci-row-mono sci-row-fixed-w" id="dlg-m-top-val">0px</span>
-        </span>
-      </div>
-      <div class="sci-row">
-        <span class="sci-row-label">Right</span>
-        <span class="sci-row-value sci-row-grow">
-          <input id="dlg-m-right" type="range" class="sci-slider" min="0" max="200" step="2" value="0" />
-          <span class="sci-row-mono sci-row-fixed-w" id="dlg-m-right-val">0px</span>
-        </span>
-      </div>
-      <div class="sci-row">
-        <span class="sci-row-label">Bottom</span>
-        <span class="sci-row-value sci-row-grow">
-          <input id="dlg-m-bottom" type="range" class="sci-slider" min="0" max="200" step="2" value="0" />
-          <span class="sci-row-mono sci-row-fixed-w" id="dlg-m-bottom-val">0px</span>
-        </span>
-      </div>
-      <div class="sci-row">
-        <span class="sci-row-label">Left</span>
-        <span class="sci-row-value sci-row-grow">
-          <input id="dlg-m-left" type="range" class="sci-slider" min="0" max="200" step="2" value="0" />
-          <span class="sci-row-mono sci-row-fixed-w" id="dlg-m-left-val">0px</span>
-        </span>
-      </div>
-      <div class="sci-row">
-        <span class="sci-row-label">Uniform</span>
-        <span class="sci-row-value">
-          <label class="sci-check sci-check--inline" for="dlg-m-uniform">
-            <input type="checkbox" id="dlg-m-uniform" />
-            <span class="sci-check-box" aria-hidden="true"></span>
-            <span class="sci-check-label">LINK ALL SIDES</span>
-          </label>
-        </span>
-      </div>
-      <div class="sci-row">
-        <span class="sci-row-label"></span>
-        <span class="sci-row-value">
-          <button id="dlg-m-reset" type="button" class="sci-btn">RESET MARGINS</button>
-        </span>
-      </div>
-    </section>
-
-    <section class="sci-section">
-      <div class="sci-section-head">// COLOR MODE</div>
-      <div class="sci-row">
-        <span class="sci-row-label">Mode</span>
-        <span class="sci-row-value sci-row-grow">
-          <div class="sci-segmented" role="radiogroup" aria-label="Color mode">
-            <button data-mode="light" type="button" class="sci-btn sci-mode-btn" role="radio">LIGHT</button>
-            <button data-mode="dark"  type="button" class="sci-btn sci-mode-btn" role="radio">DARK</button>
-            <button data-mode="auto"  type="button" class="sci-btn sci-mode-btn" role="radio">AUTO</button>
-          </div>
-          <span id="dlg-mode-resolved" class="sci-row-pill sci-row-pill--muted">DARK</span>
-        </span>
-      </div>
-    </section>
-
-    <section class="sci-section">
-      <div class="sci-section-head">// MODE</div>
-      <div class="sci-row">
-        <span class="sci-row-label">Fullscreen</span>
-        <span class="sci-row-value">
-          <button id="dlg-fs-toggle" type="button" class="sci-btn">TOGGLE</button>
-          <span id="dlg-fs-state" class="sci-row-pill sci-row-pill--muted">OFF</span>
-        </span>
-      </div>
-    </section>
-  </div>
-
-  <footer class="sci-dialog-footer">
-    <button id="dlg-reset-all" type="button" class="sci-btn">RESET ALL</button>
-    <button id="settings-dialog-done" type="button" class="sci-btn sci-btn-primary">DONE</button>
-  </footer>
-</dialog>
+<ViewportSettingsDialog client:load />
 
 <script>
+  import * as workspaceClient from '../../lib/workspaceClient';
+
   function tick() {
     const el = document.getElementById('clock');
     if (el) el.textContent = new Date().toLocaleTimeString('en-GB', { hour12: false });
@@ -292,188 +211,255 @@
   (window as any).auraSetMargins = setMargins;
 
   // ---- Settings dialog -------------------------------------------------
-  const settingsBtn  = document.getElementById('settings-btn')          as HTMLButtonElement | null;
-  const settingsDlg  = document.getElementById('settings-dialog')       as HTMLDialogElement | null;
-  const dlgClose     = document.getElementById('settings-dialog-close') as HTMLButtonElement | null;
-  const dlgDone      = document.getElementById('settings-dialog-done')  as HTMLButtonElement | null;
-  const dlgResetAll  = document.getElementById('dlg-reset-all')         as HTMLButtonElement | null;
-
-  const dlgZoomSlider = document.getElementById('dlg-zoom-slider') as HTMLInputElement | null;
-  const dlgZoomValue  = document.getElementById('dlg-zoom-value');
-  const dlgZoomReset  = document.getElementById('dlg-zoom-reset');
-
-  const dlgMTop    = document.getElementById('dlg-m-top')    as HTMLInputElement | null;
-  const dlgMRight  = document.getElementById('dlg-m-right')  as HTMLInputElement | null;
-  const dlgMBottom = document.getElementById('dlg-m-bottom') as HTMLInputElement | null;
-  const dlgMLeft   = document.getElementById('dlg-m-left')   as HTMLInputElement | null;
-  const dlgMTopVal    = document.getElementById('dlg-m-top-val');
-  const dlgMRightVal  = document.getElementById('dlg-m-right-val');
-  const dlgMBottomVal = document.getElementById('dlg-m-bottom-val');
-  const dlgMLeftVal   = document.getElementById('dlg-m-left-val');
-  const dlgMUniform   = document.getElementById('dlg-m-uniform') as HTMLInputElement | null;
-  const dlgMReset     = document.getElementById('dlg-m-reset');
-
-  const dlgFsToggle = document.getElementById('dlg-fs-toggle');
-  const dlgFsState  = document.getElementById('dlg-fs-state');
-
-  // Color-mode picker
-  type ColorMode = 'light' | 'dark' | 'auto';
-  const dlgModeButtons   = document.querySelectorAll<HTMLButtonElement>('.sci-mode-btn');
-  const dlgModeResolved  = document.getElementById('dlg-mode-resolved');
-  let currentColorMode: ColorMode = 'dark';  // refreshed on dialog open
-
-  function resolveColorMode(pref: ColorMode): 'light' | 'dark' {
-    if (pref === 'light') return 'light';
-    if (pref === 'dark')  return 'dark';
-    return (typeof window.matchMedia === 'function' &&
-            window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
-  }
-
-  function paintModeButtons(pref: ColorMode) {
-    dlgModeButtons.forEach((b) => {
-      b.dataset['active'] = b.dataset['mode'] === pref ? 'true' : 'false';
-    });
-    if (dlgModeResolved) {
-      const resolved = resolveColorMode(pref);
-      dlgModeResolved.textContent = resolved.toUpperCase();
-      dlgModeResolved.classList.toggle('sci-row-pill--muted', false);
-    }
-  }
-
-  async function fetchCurrentMode(): Promise<ColorMode> {
-    try {
-      const r = await fetch('/api/data/com.aura.settings/theme');
-      if (!r.ok) return 'dark';
-      const body = await r.json() as { colorMode?: ColorMode };
-      return body.colorMode ?? 'dark';
-    } catch { return 'dark'; }
-  }
-
-  async function setColorMode(mode: ColorMode) {
-    currentColorMode = mode;
-    paintModeButtons(mode);
-    try {
-      await fetch('/api/data/com.aura.settings/theme', {
-        method:  'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ colorMode: mode }),
-      });
-    } catch (err) {
-      console.warn('[StatusBar] setColorMode failed', err);
-    }
-  }
-
-  dlgModeButtons.forEach((b) => b.addEventListener('click', () => {
-    const m = b.dataset['mode'] as ColorMode | undefined;
-    if (m === 'light' || m === 'dark' || m === 'auto') void setColorMode(m);
-  }));
-
-  // Keep the resolved-mode pill correct when the OS prefers-color-scheme
-  // flips under us (only matters while AUTO is selected).
-  if (typeof window.matchMedia === 'function') {
-    const mql = window.matchMedia('(prefers-color-scheme: light)');
-    const onMql = () => { if (currentColorMode === 'auto') paintModeButtons(currentColorMode); };
-    if (mql.addEventListener) mql.addEventListener('change', onMql);
-    else                       (mql as MediaQueryList).addListener?.(onMql);
-  }
-
-  function syncDialogFromState() {
-    if (dlgZoomSlider) dlgZoomSlider.value = String(Math.round(currentZoomValue * 100));
-    if (dlgZoomValue)  dlgZoomValue.textContent = `${Math.round(currentZoomValue * 100)}%`;
-    if (dlgMTop)    { dlgMTop.value    = String(margins.top);    if (dlgMTopVal)    dlgMTopVal.textContent    = `${margins.top}px`; }
-    if (dlgMRight)  { dlgMRight.value  = String(margins.right);  if (dlgMRightVal)  dlgMRightVal.textContent  = `${margins.right}px`; }
-    if (dlgMBottom) { dlgMBottom.value = String(margins.bottom); if (dlgMBottomVal) dlgMBottomVal.textContent = `${margins.bottom}px`; }
-    if (dlgMLeft)   { dlgMLeft.value   = String(margins.left);   if (dlgMLeftVal)   dlgMLeftVal.textContent   = `${margins.left}px`; }
-    if (dlgFsState) {
-      const isFs = !!document.fullscreenElement;
-      dlgFsState.textContent = isFs ? 'ON' : 'OFF';
-      dlgFsState.classList.toggle('sci-row-pill--muted', !isFs);
-    }
-    // Color mode is async — fetch fresh on open. Paint the previous value
-    // immediately so the dialog never flashes a stale state.
-    paintModeButtons(currentColorMode);
-    void fetchCurrentMode().then((m) => {
-      currentColorMode = m;
-      paintModeButtons(m);
-    });
-  }
-
-  function openSettings() {
-    if (!settingsDlg) return;
-    syncDialogFromState();
-    if (typeof settingsDlg.showModal === 'function') settingsDlg.showModal();
-    else settingsDlg.setAttribute('open', '');
-  }
-  function closeSettings() {
-    if (!settingsDlg) return;
-    if (typeof settingsDlg.close === 'function') settingsDlg.close();
-    else settingsDlg.removeAttribute('open');
-  }
-
+  // The Viewport / settings dialog is a React island now (see
+  // <ViewportSettingsDialog client:load /> above). We just dispatch a
+  // custom event on the gear-button click; the React component listens for
+  // 'aura.viewport.open' and flips its own open state. All form plumbing
+  // (zoom + margins) flows through window.auraSetZoom / window.auraSetMargins
+  // exposed above — the React side reads localStorage on each open to seed
+  // its initial state.
+  const settingsBtn = document.getElementById('settings-btn') as HTMLButtonElement | null;
+  function openSettings()  { window.dispatchEvent(new CustomEvent('aura.viewport.open')); }
   settingsBtn?.addEventListener('click', openSettings);
-  dlgClose?.addEventListener('click',    closeSettings);
-  dlgDone?.addEventListener('click',     closeSettings);
-  settingsDlg?.addEventListener('click', (e) => {
-    if (e.target === settingsDlg) closeSettings();
-  });
+  (window as any).auraOpenSettings = openSettings;
 
-  // Zoom slider (50–200 in %, mapped to 0.5–2.0)
-  dlgZoomSlider?.addEventListener('input', () => {
-    const pct = Number(dlgZoomSlider.value);
-    setZoom(pct / 100);
-    if (dlgZoomValue) dlgZoomValue.textContent = `${Math.round(currentZoomValue * 100)}%`;
-  });
-  dlgZoomReset?.addEventListener('click', () => { setZoom(1); syncDialogFromState(); });
+  // ---- Workspace switcher ----------------------------------------------
+  // Pill row + layout chip wired against workspaceClient (which the
+  // desktop page also uses, so we share the same module-scoped cache).
+  //
+  // Click pill   → setActive(id)
+  // Click [+]    → createWorkspace()
+  // Click chip   → cycle the active workspace's layoutId across all
+  //                strategies registered in @aura/core's LayoutStrategyRegistry.
+  // Ctrl+1..9    → activate workspace #N (1-indexed)
+  // Ctrl+Shift+N → create + activate a new workspace
+  const pillsEl     = document.getElementById('ws-pills')        as HTMLElement       | null;
+  const layoutChip  = document.getElementById('ws-layout-chip')  as HTMLButtonElement | null;
 
-  // Margin sliders. When "uniform" is on, dragging any one slider mirrors
-  // the value into the other three so all sides stay locked together.
-  function onMarginInput(side: keyof Margins, el: HTMLInputElement | null) {
-    if (!el) return;
-    el.addEventListener('input', () => {
-      const v = clampMargin(Number(el.value));
-      const next: Partial<Margins> = dlgMUniform?.checked
-        ? { top: v, right: v, bottom: v, left: v }
-        : { [side]: v };
-      setMargins(next);
-      syncDialogFromState();
-    });
+  // Ordered list of registered strategy ids. Falls back to the v1 seeded
+  // set if the inventory endpoint isn't reachable (e.g. Settings down).
+  let availableLayouts: Array<{ id: string; name: string; icon?: string }> =
+    [{ id: 'tiling', name: 'Tiling', icon: '▦' },
+     { id: 'fullscreen', name: 'Fullscreen', icon: '▣' },
+     { id: 'stack', name: 'Stack / Float', icon: '▥' }];
+  // Retry on the boot-race 404: Settings autoStarts in parallel with the
+  // shell's first paint, so this fetch can land before the providers are
+  // registered. Five short tries cover the ~3s cold-start window.
+  (async () => {
+    for (let i = 0; i < 5; i++) {
+      try {
+        const r = await fetch('/api/os/layouts');
+        if (r.ok) {
+          const list = await r.json() as typeof availableLayouts;
+          if (Array.isArray(list) && list.length > 0) {
+            availableLayouts = list;
+            const cached = workspaceClient.getCached();
+            if (cached) renderLayoutChip(cached);  // pick up the icon list once it arrives
+          }
+          return;
+        }
+        if (r.status !== 404) return;
+      } catch { return; }
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  })();
+
+  // Pagination: show at most this many numbered pills at once. When the user
+  // has more workspaces than fit, render `< >` arrows that step the
+  // selection one workspace at a time. The window auto-shifts so whichever
+  // pill is currently "selected" stays visible.
+  const PILL_WINDOW = 4;
+  let pillOffset = 0;
+
+  // Debounced step: `<` / `>` clicks update the visually-selected pill
+  // immediately so the user gets instant feedback, but defer the real
+  // setActive() call by SCRUB_DELAY_MS. Tapping the chevrons several times
+  // in a row only swaps the layout once (to the final destination). A
+  // number-pill or `+` click cancels any pending step and fires instantly.
+  const SCRUB_DELAY_MS = 300;
+  let pendingActiveId: string | null = null;
+  let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function clearPending() {
+    if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+    pendingActiveId = null;
   }
-  onMarginInput('top',    dlgMTop);
-  onMarginInput('right',  dlgMRight);
-  onMarginInput('bottom', dlgMBottom);
-  onMarginInput('left',   dlgMLeft);
 
-  dlgMUniform?.addEventListener('change', () => {
-    // When the user enables uniform mode, snap all sides to the current top.
-    if (dlgMUniform.checked) {
-      setMargins({ top: margins.top, right: margins.top, bottom: margins.top, left: margins.top });
-      syncDialogFromState();
+  function scheduleScrubCommit() {
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = setTimeout(() => {
+      const target = pendingActiveId;
+      pendingActiveId = null;
+      pendingTimer = null;
+      if (target) {
+        workspaceClient.setActive(target).catch((err) => console.warn('[StatusBar] setActive failed', err));
+      }
+    }, SCRUB_DELAY_MS);
+  }
+
+  function clampOffset(total: number): number {
+    const max = Math.max(0, total - PILL_WINDOW);
+    return Math.min(Math.max(0, pillOffset), max);
+  }
+
+  function renderPills(state: workspaceClient.WorkspaceState) {
+    if (!pillsEl) return;
+    const total = state.workspaces.length;
+    const paginated = total > PILL_WINDOW;
+
+    // Effective active = the pending scrub target (if any), else the
+    // committed active. Both highlighting and window auto-shift use this so
+    // the user sees their click reflected even before the debounced commit
+    // fires.
+    const effectiveActiveId = pendingActiveId ?? state.activeWorkspaceId;
+    const activeIdx = state.workspaces.findIndex((w) => w.id === effectiveActiveId);
+    if (paginated && activeIdx >= 0) {
+      if (activeIdx < pillOffset) pillOffset = activeIdx;
+      else if (activeIdx >= pillOffset + PILL_WINDOW) pillOffset = activeIdx - PILL_WINDOW + 1;
+    }
+    pillOffset = clampOffset(total);
+
+    const start = paginated ? pillOffset : 0;
+    const end   = paginated ? Math.min(total, pillOffset + PILL_WINDOW) : total;
+
+    // Disable chevrons when at the absolute first / last workspace.
+    const atFirst = activeIdx <= 0;
+    const atLast  = activeIdx === -1 || activeIdx >= total - 1;
+    const prev = paginated
+      ? `<button class="ws-pill ws-pill-nav" data-ws-action="prev" ${atFirst ? 'disabled' : ''} title="Previous workspace">‹</button>`
+      : '';
+    const next = paginated
+      ? `<button class="ws-pill ws-pill-nav" data-ws-action="next" ${atLast ? 'disabled' : ''} title="Next workspace">›</button>`
+      : '';
+
+    const numbered = state.workspaces.slice(start, end).map((w, i) => {
+      const slot = start + i + 1;
+      const active = w.id === effectiveActiveId;
+      const pending = pendingActiveId === w.id;
+      return `<button class="ws-pill" data-ws-id="${w.id}" data-active="${active}" ${pending ? 'data-pending="true"' : ''} title="${escapeAttr(w.name)} (${w.members.length} window${w.members.length === 1 ? '' : 's'})">${slot}</button>`;
+    }).join('');
+
+    const add = `<button class="ws-pill ws-pill-add" data-ws-action="new" title="New workspace (Ctrl+Shift+N)">+</button>`;
+    pillsEl.innerHTML = prev + numbered + next + add;
+  }
+
+  function renderLayoutChip(state: workspaceClient.WorkspaceState) {
+    if (!layoutChip) return;
+    const iconEl = layoutChip.querySelector<HTMLElement>('.layout-chip-icon');
+    const nameEl = layoutChip.querySelector<HTMLElement>('.layout-chip-name');
+    const active = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
+    if (!active) {
+      if (iconEl) iconEl.textContent = '▦';
+      if (nameEl) nameEl.textContent = '—';
+      return;
+    }
+    const meta = availableLayouts.find((m) => m.id === active.layoutId);
+    const icon = meta?.icon ?? '▦';
+    const name = (meta?.name ?? active.layoutId).split('/')[0]!.trim().toUpperCase();
+    if (iconEl) iconEl.textContent = icon;
+    if (nameEl) nameEl.textContent = name;
+    layoutChip.title = `Layout: ${meta?.name ?? active.layoutId} — click to cycle`;
+  }
+
+  function escapeAttr(s: string): string {
+    return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+  }
+
+  // Hydrate from the SSR JSON if the desktop already injected it; otherwise
+  // pull straight from the provider. Either way the singleton ends up
+  // populated and the subscriber below fires.
+  (async () => {
+    try {
+      const node = document.getElementById('aura-initial-workspaces');
+      if (node?.textContent) {
+        workspaceClient.hydrate(JSON.parse(node.textContent) as workspaceClient.WorkspaceState);
+      } else if (!workspaceClient.getCached()) {
+        await workspaceClient.refresh();
+      }
+    } catch (err) {
+      console.warn('[StatusBar] failed to hydrate workspace state', err);
+    }
+  })();
+
+  workspaceClient.subscribe((state) => {
+    renderPills(state);
+    renderLayoutChip(state);
+  });
+
+  pillsEl?.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement | null)?.closest<HTMLButtonElement>('[data-ws-id], [data-ws-action]');
+    if (!btn || btn.disabled) return;
+    const action = btn.dataset['wsAction'];
+
+    // `+` create — cancel any pending scrub commit, then fire.
+    if (action === 'new') {
+      clearPending();
+      workspaceClient.createWorkspace().catch((err) => console.warn('[StatusBar] createWorkspace failed', err));
+      return;
+    }
+
+    // `‹` / `›` — step the SELECTED workspace by one. Highlight flips
+    // immediately; the actual setActive() call is debounced by
+    // SCRUB_DELAY_MS so rapid taps only commit the final destination.
+    if (action === 'prev' || action === 'next') {
+      const state = workspaceClient.getCached();
+      if (!state) return;
+      const total = state.workspaces.length;
+      if (total === 0) return;
+      const currentId = pendingActiveId ?? state.activeWorkspaceId;
+      const currentIdx = state.workspaces.findIndex((w) => w.id === currentId);
+      if (currentIdx < 0) return;
+      const nextIdx = action === 'prev'
+        ? Math.max(0, currentIdx - 1)
+        : Math.min(total - 1, currentIdx + 1);
+      if (nextIdx === currentIdx) return; // already at the end
+      pendingActiveId = state.workspaces[nextIdx]!.id;
+      scheduleScrubCommit();
+      renderPills(state);
+      return;
+    }
+
+    // Number-pill click — instant. Cancel any pending scrub first.
+    const id = btn.dataset['wsId'];
+    if (id) {
+      clearPending();
+      workspaceClient.setActive(id).catch((err) => console.warn('[StatusBar] setActive failed', err));
     }
   });
 
-  dlgMReset?.addEventListener('click', () => {
-    setMargins({ top: 0, right: 0, bottom: 0, left: 0 });
-    syncDialogFromState();
+  layoutChip?.addEventListener('click', () => {
+    const state = workspaceClient.getCached();
+    if (!state) return;
+    const active = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
+    if (!active) return;
+    const ids = availableLayouts.map((m) => m.id);
+    const idx = ids.indexOf(active.layoutId);
+    const next = ids[(idx + 1) % ids.length] ?? ids[0]!;
+    workspaceClient.patchWorkspace(active.id, { layoutId: next })
+      .catch((err) => console.warn('[StatusBar] patchWorkspace failed', err));
   });
 
-  dlgResetAll?.addEventListener('click', () => {
-    setZoom(1);
-    setMargins({ top: 0, right: 0, bottom: 0, left: 0 });
-    if (dlgMUniform) dlgMUniform.checked = false;
-    syncDialogFromState();
+  // Keyboard: Ctrl+1..9 → activate workspace at slot, Ctrl+Shift+N → new.
+  // We use Ctrl-only (not Cmd) because the OS shell intentionally takes
+  // priority over per-app shortcuts here; apps don't see these keys.
+  document.addEventListener('keydown', (e) => {
+    if (!e.ctrlKey || e.altKey || e.metaKey) return;
+    if (e.shiftKey && e.code === 'KeyN') {
+      e.preventDefault();
+      workspaceClient.createWorkspace().catch(() => undefined);
+      return;
+    }
+    if (e.shiftKey) return;
+    const n = e.code.startsWith('Digit') ? Number(e.code.slice(5)) : NaN;
+    if (Number.isInteger(n) && n >= 1 && n <= 9) {
+      const state = workspaceClient.getCached();
+      const target = state?.workspaces[n - 1];
+      if (target) {
+        e.preventDefault();
+        workspaceClient.setActive(target.id).catch(() => undefined);
+      }
+    }
   });
-
-  dlgFsToggle?.addEventListener('click', async () => {
-    await toggleFullscreen();
-    syncDialogFromState();
-  });
-  document.addEventListener('fullscreenchange', () => {
-    // Keep the dialog's FS pill in sync if it's open.
-    if (settingsDlg?.open) syncDialogFromState();
-  });
-
-  (window as any).auraOpenSettings  = openSettings;
-  (window as any).auraCloseSettings = closeSettings;
 </script>
 
 <style>
@@ -560,355 +546,130 @@
     color: var(--aura-color-text);
   }
 
-  /* =====================================================================
-     scificn-style dialog (corner-notched panel + animated entry).
-     Built on the native <dialog> element so we inherit modal state, focus
-     trap, Esc-to-close, and ::backdrop without a JS dependency. Visuals
-     match the @scificn/dialog spec: dark panel, phosphor border, cut
-     corners, uppercase mono header, header/body/footer borders.
-     ===================================================================== */
-  .sci-dialog {
-    margin: auto;
-    padding: 0;
-    width: min(440px, 90vw);
-    max-height: 80vh;
-    background: var(--aura-color-surface);
-    border: none;          /* clip-path replaces the box border visually */
-    color: var(--aura-color-text);
-    font-family: var(--aura-font-mono);
-    overflow: visible;
-    /* Mirror the body's zoom so the dialog feels like part of the shell.
-       The dialog renders in the top layer (escaping body's transform), so
-       we re-apply the same scale here keyed off the --aura-shell-zoom var
-       that applyViewport() sets on <html>. Center-origin keeps it centered. */
-    transform: scale(var(--aura-shell-zoom, 1)) translateY(0);
-    transform-origin: center center;
-    /* Corner-notched silhouette — 10px cuts on all four corners */
-    clip-path: polygon(
-      10px 0,
-      calc(100% - 10px) 0,
-      100% 10px,
-      100% calc(100% - 10px),
-      calc(100% - 10px) 100%,
-      10px 100%,
-      0 calc(100% - 10px),
-      0 10px
-    );
-    /* The clip-path eats borders — fake a 1px phosphor edge with a layered
-       background (outer = primary, inset = surface). */
-    background-image:
-      linear-gradient(var(--aura-color-primary), var(--aura-color-primary));
-    background-origin: border-box;
-    background-clip: border-box;
-    box-shadow: 0 0 24px rgba(0, 0, 0, 0.6);
-    animation: sci-dialog-in 0.18s ease-out;
-  }
-  .sci-dialog::backdrop {
-    background: rgba(0, 0, 0, 0.6);
-    animation: sci-dialog-backdrop-in 0.18s ease-out;
-  }
-  @keyframes sci-dialog-in {
-    /* Multiply by the shell zoom so the entry doesn't reset scale to 1 and
-       then snap up to the zoomed transform once the animation ends. */
-    from { transform: translateY(-8px) scale(calc(var(--aura-shell-zoom, 1) * 0.98)); opacity: 0; }
-    to   { transform: translateY(0)    scale(var(--aura-shell-zoom, 1));               opacity: 1; }
-  }
-  @keyframes sci-dialog-backdrop-in {
-    from { opacity: 0; }
-    to   { opacity: 1; }
-  }
-
-  /* Inner panel: same clip, 1px inset, surface fill — this gives the
-     phosphor outline effect that clip-path alone can't provide. */
-  .sci-dialog > * { position: relative; z-index: 1; }
-  .sci-dialog::before {
-    content: '';
-    position: absolute;
-    inset: 1px;
-    background: var(--aura-color-surface);
-    clip-path: polygon(
-      9px 0,
-      calc(100% - 9px) 0,
-      100% 9px,
-      100% calc(100% - 9px),
-      calc(100% - 9px) 100%,
-      9px 100%,
-      0 calc(100% - 9px),
-      0 9px
-    );
-    z-index: 0;
-  }
-
-  .sci-dialog-header {
-    display: flex;
+  /* ── Layout chip ──
+   * Distinguished from the generic status-btn-text by its three-part layout
+   * (icon · name · cycle hint) and a slightly stronger border treatment.
+   * The "↻" hint reveals on hover to telegraph that the chip cycles layouts. */
+  /* Fixed-width chip so it doesn't jiggle as the user cycles through layout
+   * names of different lengths (TILING/CASCADE/COLUMNS/FULLSCREEN/ROWS/
+   * STACK). Width budget: icon (~12) + gap (6) + name slot (84) + gap (6)
+   * + cycle slot (10) + 16px h-padding. Total ≈ 134px.
+   *
+   * The cycle hint uses visibility (not opacity-only) so its slot always
+   * reserves space — the chip can't grow on hover. */
+  .layout-chip {
+    display: inline-flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--aura-color-border);
-    background: var(--aura-color-surface-2);
-  }
-  .sci-dialog-title {
-    margin: 0;
-    font-size: var(--aura-font-size-sm);
-    color: var(--aura-color-primary);
-    text-transform: uppercase;
-    letter-spacing: 0.16em;
-    font-weight: 500;
-    text-shadow: var(--aura-glow-subtle);
-  }
-  .sci-dialog-title-prefix {
-    margin-right: 6px;
-    color: var(--aura-color-primary);
-  }
-  .sci-dialog-close {
-    background: transparent;
+    gap: 6px;
+    width: 134px;
+    height: 22px;
+    padding: 0 8px;
+    background: color-mix(in srgb, var(--aura-color-primary) 3%, transparent);
     border: var(--aura-border);
-    color: var(--aura-color-text-dim);
+    color: var(--aura-color-text);
     cursor: pointer;
     font-family: var(--aura-font-mono);
-    font-size: var(--aura-font-size-xs);
-    padding: 2px 7px;
+    font-size: 0.65rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
     line-height: 1;
-    transition: color 0.1s, box-shadow 0.1s, border-color 0.1s;
+    transition: color 0.1s, border-color 0.1s, background 0.1s;
   }
-  .sci-dialog-close:hover {
-    color: var(--aura-color-danger);
-    border-color: var(--aura-color-danger);
-    box-shadow: var(--aura-glow-danger);
-  }
-
-  .sci-dialog-body {
-    padding: 14px 16px;
-    overflow-y: auto;
-    max-height: calc(80vh - 110px);
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-  }
-
-  .sci-section {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .sci-section-head {
-    font-size: 0.55rem;
-    color: var(--aura-color-text-dim);
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-    padding-bottom: 4px;
-    border-bottom: 1px dashed var(--aura-color-border);
-  }
-
-  .sci-row {
-    display: grid;
-    grid-template-columns: 110px 1fr;
-    gap: 12px;
-    align-items: center;
-    padding: 3px 0;
-    font-size: var(--aura-font-size-xs);
-  }
-  .sci-row-label {
-    color: var(--aura-color-text-dim);
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-  .sci-row-value {
-    color: var(--aura-color-text);
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .sci-row-mono { font-family: var(--aura-font-mono); }
-  .sci-row-pill {
-    display: inline-flex;
-    align-items: center;
-    padding: 2px 8px;
-    font-size: 0.6rem;
-    border: 1px solid var(--aura-color-primary);
-    background: color-mix(in srgb, var(--aura-color-primary) 14%, transparent);
-    color: var(--aura-color-primary);
-    letter-spacing: 0.12em;
-  }
-
-  .sci-btn {
-    background: transparent;
-    border: var(--aura-border);
-    color: var(--aura-color-text-dim);
-    font-family: var(--aura-font-mono);
-    font-size: 0.6rem;
-    letter-spacing: 0.1em;
-    padding: 5px 10px;
-    cursor: pointer;
-    text-transform: uppercase;
-    transition: color 0.1s, border-color 0.1s, box-shadow 0.1s;
-  }
-  .sci-btn:hover {
+  .layout-chip:hover {
     color: var(--aura-color-primary);
     border-color: var(--aura-color-primary);
-    box-shadow: var(--aura-glow-subtle);
+    background: color-mix(in srgb, var(--aura-color-primary) 10%, transparent);
   }
-  .sci-btn-primary {
-    color: var(--aura-color-bg);
-    background: var(--aura-color-primary);
-    border-color: var(--aura-color-primary);
+  .layout-chip-icon {
+    flex-shrink: 0;
+    color: var(--aura-color-primary);
+    font-size: 0.85rem;
+    line-height: 1;
   }
-  .sci-btn-primary:hover {
-    color: var(--aura-color-bg);
-    box-shadow: var(--aura-glow-primary);
-  }
-
-  /* Active-state for segmented controls (used by COLOR MODE picker) */
-  .sci-btn[data-active="true"] {
-    color: var(--aura-color-bg);
-    background: var(--aura-color-primary);
-    border-color: var(--aura-color-primary);
-  }
-  .sci-btn[data-active="true"]:hover {
-    color: var(--aura-color-bg);
-    box-shadow: var(--aura-glow-primary);
-  }
-
-  /* Segmented group (three buttons sharing a border seam) */
-  .sci-segmented {
-    display: inline-flex;
-    border: var(--aura-border);
-  }
-  .sci-segmented .sci-btn {
-    border: none;
-  }
-  .sci-segmented .sci-btn + .sci-btn {
-    border-left: 1px solid var(--aura-color-border);
-  }
-
-  .sci-dialog-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 10px 16px;
-    border-top: 1px solid var(--aura-color-border);
-    background: var(--aura-color-surface-2);
-  }
-
-  /* Make the value column flex so sliders can stretch */
-  .sci-row-grow {
+  .layout-chip-name {
     flex: 1;
-    display: flex;
-    align-items: center;
-    gap: 8px;
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-  .sci-row-grow .sci-slider { flex: 1; min-width: 0; }
-  .sci-row-fixed-w {
-    display: inline-block;
-    min-width: 44px;
+  .layout-chip-cycle {
+    flex-shrink: 0;
+    width: 10px;
     text-align: right;
-    color: var(--aura-color-text);
-    font-size: var(--aura-font-size-xs);
-  }
-  .sci-row-pill--muted {
     color: var(--aura-color-text-dim);
-    border-color: var(--aura-color-border);
-    background: transparent;
-  }
-
-  /* Scificn-style range slider — flat track, square thumb, primary glow */
-  .sci-slider {
-    -webkit-appearance: none;
-    appearance: none;
-    height: 18px;
-    background: transparent;
-    cursor: pointer;
-    width: 100%;
-    padding: 0;
-    margin: 0;
-  }
-  .sci-slider::-webkit-slider-runnable-track {
-    height: 4px;
-    background: var(--aura-color-surface-2);
-    border: 1px solid var(--aura-color-border);
-  }
-  .sci-slider::-moz-range-track {
-    height: 4px;
-    background: var(--aura-color-surface-2);
-    border: 1px solid var(--aura-color-border);
-  }
-  .sci-slider::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 12px;
-    height: 12px;
-    background: var(--aura-color-primary);
-    border: 1px solid var(--aura-color-primary);
-    margin-top: -5px;
-    box-shadow: var(--aura-glow-primary);
-  }
-  .sci-slider::-moz-range-thumb {
-    width: 12px;
-    height: 12px;
-    background: var(--aura-color-primary);
-    border: 1px solid var(--aura-color-primary);
-    border-radius: 0;
-    box-shadow: var(--aura-glow-primary);
-  }
-  .sci-slider:focus-visible {
-    outline: 1px dashed var(--aura-color-primary);
-    outline-offset: 4px;
-  }
-
-  /* Scificn-style checkbox (same visual spec as the Console app's). Native
-     input is hidden but drives state via :checked on the styled box. */
-  .sci-check {
-    --sci-size: 14px;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    cursor: pointer;
-    user-select: none;
-    font-size: var(--aura-font-size-xs);
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--aura-color-text-dim);
+    font-size: 0.7rem;
+    visibility: hidden;
     transition: color 0.1s;
   }
-  .sci-check:hover { color: var(--aura-color-primary); }
-  .sci-check input[type="checkbox"] {
-    position: absolute;
-    opacity: 0;
-    pointer-events: none;
-    width: 0;
-    height: 0;
+  .layout-chip:hover .layout-chip-cycle {
+    visibility: visible;
+    color: var(--aura-color-primary);
   }
-  .sci-check-box {
-    width: var(--sci-size);
-    height: var(--sci-size);
+
+  /* The handwritten .sci-* dialog/section/row/slider/check/btn rules that
+   * lived here moved to @aura/ui (vendored scificn primitives via shadcn).
+   * The Viewport dialog above is now <ViewportSettingsDialog client:load />
+   * — see ViewportSettingsDialog.tsx for the new component tree. */
+</style>
+
+<!-- ── Workspace switcher (global) ──
+     The numbered pills + ‹/› chevrons + "+" button are rendered into
+     `#ws-pills` via `pillsEl.innerHTML = ...` at runtime. Astro's default
+     scoped <style> wouldn't match runtime-generated nodes (they don't carry
+     the cid attribute), so this rule set has to live in an unscoped block.
+     is:inline tells Astro to emit the CSS verbatim, no scoping. -->
+<style is:inline>
+  .ws-pills {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .ws-pill {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    border: 1px solid var(--aura-color-text-dim);
+    min-width: 22px;
+    height: 22px;
+    padding: 0 7px;
     background: transparent;
-    color: var(--aura-color-primary);
-    font-family: inherit;
-    font-size: calc(var(--sci-size) - 4px);
+    border: var(--aura-border);
+    color: var(--aura-color-text-dim);
+    cursor: pointer;
+    font-family: var(--aura-font-mono);
+    font-size: 0.7rem;
     line-height: 1;
-    flex-shrink: 0;
-    transition: border-color 0.1s, box-shadow 0.1s;
+    transition: color 0.1s, border-color 0.1s, background 0.1s;
   }
-  .sci-check:hover .sci-check-box {
+  .ws-pill:hover {
+    color: var(--aura-color-primary);
     border-color: var(--aura-color-primary);
-    box-shadow: var(--aura-glow-subtle);
   }
-  .sci-check input:checked ~ .sci-check-box { border-color: var(--aura-color-primary); }
-  .sci-check input:checked ~ .sci-check-box::before { content: '■'; }
-  .sci-check input:focus-visible ~ .sci-check-box {
-    outline: 1px dashed var(--aura-color-primary);
-    outline-offset: 2px;
+  .ws-pill[data-active="true"] {
+    color: var(--aura-color-bg);
+    background: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+    font-weight: 700;
   }
-  .sci-check input:checked ~ .sci-check-label { color: var(--aura-color-primary); }
-
-  /* Inline variant of the sci-check (used inside dialog rows) */
-  .sci-check.sci-check--inline {
-    --sci-size: 12px;
-    font-size: 0.6rem;
+  .ws-pill[disabled] {
+    opacity: 0.35;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+  /* "‹" / "›" pagination chevrons — same chrome as a pill but always dim. */
+  .ws-pill-nav {
+    color: var(--aura-color-text-dim);
+    font-size: 0.85rem;
+    padding: 0 5px;
+  }
+  /* "+" add-workspace button: secondary color on hover so it reads as a
+   * distinct creation affordance, not just another workspace number. */
+  .ws-pill-add {
+    color: var(--aura-color-text-dim);
+    margin-left: 4px;
+  }
+  .ws-pill-add:hover {
+    color: var(--aura-color-secondary);
+    border-color: var(--aura-color-secondary);
   }
 </style>

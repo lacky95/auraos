@@ -18,7 +18,7 @@ program
   .name('aura')
   .description('AuraOS control CLI — manage apps, capabilities, services, and OS state from the shell.')
   .version('0.1.0')
-  .option('--shell-url <url>', 'Override AuraOS shell URL (default: http://localhost:3000)')
+  .option('--shell-url <url>', 'Override AuraOS shell URL (default: http://127.0.0.1:3000)')
   .hook('preAction', (thisCmd) => {
     const url = thisCmd.opts()['shellUrl'];
     if (typeof url === 'string') process.env['AURA_SHELL_URL'] = url;

@@ -17,17 +17,20 @@ const { apps } = Astro.props;
   </button>
   <ProcessManager />
   <div class="separator"></div>
-  {apps.map(app => (
-    <button
-      class="dock-item"
-      data-app-id={app.id}
-      title={app.name}
-      onclick={`window.auraLaunchApp('${app.id}')`}
-    >
-      <span class="app-initial">{app.name.charAt(0).toUpperCase()}</span>
-      <span class="app-label">{app.name}</span>
-    </button>
-  ))}
+  {apps.map(app => {
+    const glyph = (app.icon ?? app.name.charAt(0)).toUpperCase();
+    return (
+      <button
+        class="dock-item"
+        data-app-id={app.id}
+        title={app.name}
+        onclick={`window.auraLaunchApp('${app.id}')`}
+      >
+        <span class="app-initial" data-len={glyph.length}>{glyph}</span>
+        <span class="app-label">{app.name}</span>
+      </button>
+    );
+  })}
 </nav>
 
 <style>
@@ -85,8 +88,11 @@ const { apps } = Astro.props;
   .dock-item:hover { box-shadow: var(--aura-glow-primary); color: var(--aura-color-primary); }
 
   .app-initial {
-    font-size: 1rem;
+    /* Uniform size across 1/2/3-char glyphs; sized to fit "SET" in the dock tile. */
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
     color: var(--aura-color-primary);
+    font-weight: 500;
   }
 
   .app-label {

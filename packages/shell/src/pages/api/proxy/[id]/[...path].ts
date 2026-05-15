@@ -1,6 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getAppManager, ThemeManager } from '@aura/core';
 import type { ColorMode } from '@aura/core';
+import { defaultKv } from '@aura/kv-store';
 
 /**
  * Reverse-proxy to a running app instance.
@@ -45,10 +46,7 @@ export const ALL: APIRoute = async ({ params, request }) => {
     : mgr.getInstancesByApp(id).find((i) => !i.inPool && isLive(i.state) && i.port != null);
 
   if (!instance?.port) {
-    return new Response(notReadyHtml(id), {
-      status: 503,
-      headers: { 'Content-Type': 'text/html' },
-    });
+    return notReadyResponse(id, path, 503);
   }
 
   // Short-circuit Vite's HMR client: the iframe can't reach the upstream's WS
@@ -130,12 +128,12 @@ export default {};
     if (declaredApp && declaredApp !== instance.appId) {
       console.error(`[proxy] identity mismatch routing ${id}: expected appId=${instance.appId} but upstream on port ${instance.port} declared ${declaredApp}. Refusing to forward.`);
       try { upstream.body?.cancel(); } catch { /* ignore */ }
-      return new Response(notReadyHtml(id), { status: 502, headers: { 'Content-Type': 'text/html' } });
+      return notReadyResponse(id, path, 502);
     }
     if (declaredInst && declaredInst !== instance.instanceId) {
       console.error(`[proxy] instance-id mismatch routing ${id}: expected ${instance.instanceId} but upstream declared ${declaredInst}.`);
       try { upstream.body?.cancel(); } catch { /* ignore */ }
-      return new Response(notReadyHtml(id), { status: 502, headers: { 'Content-Type': 'text/html' } });
+      return notReadyResponse(id, path, 502);
     }
 
     const contentType = upstream.headers.get('content-type') ?? '';
@@ -179,7 +177,7 @@ export default {};
       );
 
       rewritten = rewritten.replace(
-        /\b(src|href|action)\s*=\s*(["'])([^"']*)\2/gi,
+        /\b(src|href|action|component-url|renderer-url|before-hydration-url)\s*=\s*(["'])([^"']*)\2/gi,
         (full, attr, q, val) => {
           const next = prefixUrl(val);
           return next === val ? full : `${attr}=${q}${next}${q}`;
@@ -260,14 +258,23 @@ function relay(lvl,args){try{P.postMessage({type:'aura.console.relay',entry:{typ
 LVL.forEach(function(l){console[l]=function(){orig[l].apply(console,arguments);relay(l,arguments);};});
 window.addEventListener('error',function(e){relay('error',['Uncaught '+e.message+' at '+(e.filename||'?')+':'+(e.lineno||0)+':'+(e.colno||0)]);});
 window.addEventListener('unhandledrejection',function(e){var r=e.reason;var m=r instanceof Error?(r.name+': '+r.message+(r.stack?'\\n'+r.stack:'')):String(r);relay('error',['Unhandled rejection: '+m]);});
-var NativeES=window.EventSource;if(NativeES){var W=function(u,i){var es=new NativeES(u,i);es.addEventListener('error',function(){var st=['CONNECTING','OPEN','CLOSED'][es.readyState]||'?';relay('warn',['EventSource error: '+u+' (readyState='+st+')']);});return es;};W.prototype=NativeES.prototype;['CONNECTING','OPEN','CLOSED'].forEach(function(k,i){W[k]=i;});window.EventSource=W;}
-var nFetch=window.fetch.bind(window);window.fetch=async function(input,init){var u=typeof input==='string'?input:(input&&input.url)||String(input);try{var r=await nFetch(input,init);if(!r.ok){relay(r.status>=500?'error':'warn',['fetch '+((init&&init.method)||'GET')+' '+u+' \\u2192 '+r.status+' '+r.statusText]);}return r;}catch(e){relay('error',['fetch '+((init&&init.method)||'GET')+' '+u+' failed: '+(e&&e.message||String(e))]);throw e;}};
-var X=window.XMLHttpRequest;if(X){var oO=X.prototype.open,oS=X.prototype.send;X.prototype.open=function(m,u){this.__am=m;this.__au=u;return oO.apply(this,arguments);};X.prototype.send=function(){var self=this;this.addEventListener('error',function(){relay('error',['xhr '+self.__am+' '+self.__au+' network error']);});this.addEventListener('load',function(){if(self.status>=400){relay(self.status>=500?'error':'warn',['xhr '+self.__am+' '+self.__au+' \\u2192 '+self.status]);}});return oS.apply(this,arguments);};}
+var shuttingDown=false;var openES=new Set();var openWS=new Set();
+var NativeES=window.EventSource;if(NativeES){var W=function(u,i){var es=new NativeES(u,i);openES.add(es);var reported=false;es.addEventListener('error',function(){if(shuttingDown)return;if(reported)return;if(es.readyState!==2)return;reported=true;openES.delete(es);relay('debug',['EventSource closed: '+u]);});var origClose=es.close.bind(es);es.close=function(){openES.delete(es);return origClose();};return es;};W.prototype=NativeES.prototype;['CONNECTING','OPEN','CLOSED'].forEach(function(k,i){W[k]=i;});window.EventSource=W;}
+var NativeWS=window.WebSocket;if(NativeWS){var WW=function(u,p){var ws=p?new NativeWS(u,p):new NativeWS(u);openWS.add(ws);ws.addEventListener('close',function(){openWS.delete(ws);});return ws;};WW.prototype=NativeWS.prototype;['CONNECTING','OPEN','CLOSING','CLOSED'].forEach(function(k,i){WW[k]=i;});window.WebSocket=WW;}
+var nFetch=window.fetch.bind(window);window.fetch=async function(input,init){var u=typeof input==='string'?input:(input&&input.url)||String(input);try{var r=await nFetch(input,init);if(!r.ok&&!shuttingDown){relay(r.status>=500?'error':'warn',['fetch '+((init&&init.method)||'GET')+' '+u+' \\u2192 '+r.status+' '+r.statusText]);}return r;}catch(e){if(!shuttingDown)relay('error',['fetch '+((init&&init.method)||'GET')+' '+u+' failed: '+(e&&e.message||String(e))]);throw e;}};
+var X=window.XMLHttpRequest;if(X){var oO=X.prototype.open,oS=X.prototype.send;X.prototype.open=function(m,u){this.__am=m;this.__au=u;return oO.apply(this,arguments);};X.prototype.send=function(){var self=this;this.addEventListener('error',function(){if(!shuttingDown)relay('error',['xhr '+self.__am+' '+self.__au+' network error']);});this.addEventListener('load',function(){if(self.status>=400&&!shuttingDown){relay(self.status>=500?'error':'warn',['xhr '+self.__am+' '+self.__au+' \\u2192 '+self.status]);}});return oS.apply(this,arguments);};}
+// Lifecycle: the shell postMessages 'aura.shutdown' before removing the iframe.
+// Closing tracked EventSource/WebSocket first means their teardown is a clean
+// .close() call rather than a network-abort, so no spurious error events fire
+// in the moments before the iframe is torn down. We ack so the shell knows it
+// can proceed; the shell has a hard timeout regardless.
+window.addEventListener('message',function(ev){if(!ev.data||ev.data.type!=='aura.shutdown')return;shuttingDown=true;try{openES.forEach(function(es){try{es.close();}catch(_){}});openWS.forEach(function(ws){try{ws.close(1000,'app-shutdown');}catch(_){}});openES.clear();openWS.clear();}catch(_){}try{P.postMessage({type:'aura.shutdown.done',source:SRC},'*');}catch(_){}});
 }catch(_){}})();</script>`;
       // Place the relay right after <head ...> so it captures from frame 0.
       rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${consoleRelay}`);
 
       const outHeaders = new Headers(upstream.headers);
+      outHeaders.delete('content-encoding');
       outHeaders.delete('content-length');
       return new Response(rewritten, { status: upstream.status, headers: outHeaders });
     }
@@ -284,21 +291,94 @@ var X=window.XMLHttpRequest;if(X){var oO=X.prototype.open,oS=X.prototype.send;X.
         (_full, q, url) => `${q}${prefixUrl(url)}${q}`,
       );
       const outHeaders = new Headers(upstream.headers);
+      outHeaders.delete('content-encoding');
       outHeaders.delete('content-length');
       return new Response(rewritten, { status: upstream.status, headers: outHeaders });
     }
 
-    return new Response(upstream.body, {
+    // Node's fetch() transparently decompresses the body but leaves the
+    // Content-Encoding header on the response. Forwarding it would tell the
+    // browser to decode an already-decoded stream → NS_ERROR_CORRUPTED_CONTENT
+    // / empty MIME for assets like CSS, fonts, images. Strip both encoding
+    // and content-length (length no longer matches the decoded body).
+    const outHeaders = new Headers(upstream.headers);
+    outHeaders.delete('content-encoding');
+    outHeaders.delete('content-length');
+    return new Response(upstream.body ? wrapSafeStream(upstream.body) : null, {
       status:  upstream.status,
-      headers: upstream.headers,
+      headers: outHeaders,
     });
-  } catch {
-    return new Response(notReadyHtml(id), {
-      status: 502,
-      headers: { 'Content-Type': 'text/html' },
-    });
+  } catch (err) {
+    if (isExpectedAbort(err)) return new Response(null, { status: 499 });
+    return notReadyResponse(id, path, 502);
   }
 };
+
+/**
+ * Wrap an upstream `ReadableStream` so that aborts / socket terminations
+ * during forwarding don't bubble up as uncaught errors. These happen
+ * constantly during normal operation — every time an iframe unloads while
+ * piping an SSE stream, the proxy aborts the upstream fetch, undici tears
+ * down the socket, and the read throws `TypeError: terminated` or a
+ * `UND_ERR_SOCKET`. We close the stream cleanly instead so the response
+ * pipeline doesn't log noise.
+ */
+function wrapSafeStream(body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) { controller.close(); return; }
+        controller.enqueue(value);
+      } catch (err) {
+        if (isExpectedAbort(err)) { controller.close(); return; }
+        controller.error(err);
+      }
+    },
+    cancel(reason) { reader.cancel(reason).catch(() => { /* ignore */ }); },
+  });
+}
+
+function isExpectedAbort(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { name?: string; code?: string; message?: string; cause?: { code?: string; name?: string } };
+  if (e.name === 'AbortError') return true;
+  if (e.code === 'UND_ERR_SOCKET' || e.code === 'UND_ERR_ABORTED') return true;
+  if (typeof e.message === 'string' && /terminated|aborted|socket hang up/i.test(e.message)) return true;
+  if (e.cause && (e.cause.code === 'UND_ERR_SOCKET' || e.cause.code === 'UND_ERR_ABORTED' || e.cause.name === 'AbortError')) return true;
+  return false;
+}
+
+/**
+ * Return an upstream-not-ready response whose Content-Type matches what the
+ * browser was asking for. Without this, a JS/CSS module request that hits an
+ * unavailable upstream gets `text/html` back, and the browser refuses to load
+ * it with `disallowed MIME type ("text/html")` — breaking the iframe even
+ * after the upstream recovers (until the user hard-reloads). We sniff the
+ * URL path by extension and emit a same-type stub instead.
+ */
+function notReadyResponse(id: string, path: string, status: number): Response {
+  const ext = path.toLowerCase().match(/\.([a-z0-9]+)(?:[?#].*)?$/)?.[1] ?? '';
+  const jsLike  = ['js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'mts', 'cts'].includes(ext) || path.startsWith('@fs/') || path.startsWith('@id/') || path.startsWith('node_modules/');
+  const cssLike = ext === 'css';
+  if (jsLike) {
+    return new Response(`/* AuraOS proxy: ${id} not ready */\nthrow new Error("AuraOS proxy: upstream ${id} not ready");`, {
+      status,
+      headers: { 'Content-Type': 'application/javascript', 'Cache-Control': 'no-store' },
+    });
+  }
+  if (cssLike) {
+    return new Response(`/* AuraOS proxy: ${id} not ready */`, {
+      status,
+      headers: { 'Content-Type': 'text/css', 'Cache-Control': 'no-store' },
+    });
+  }
+  return new Response(notReadyHtml(id), {
+    status,
+    headers: { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' },
+  });
+}
 
 /**
  * Read current `{ themeIdDark, themeIdLight, colorMode }` from the Settings
@@ -307,21 +387,19 @@ var X=window.XMLHttpRequest;if(X){var oO=X.prototype.open,oS=X.prototype.send;X.
  * Settings isn't running yet — every value has a sane default in ThemeManager.
  */
 async function readShellThemeSelection(): Promise<{ themeIdDark: string; themeIdLight: string; colorMode: ColorMode } | null> {
-  const mgr = getAppManager();
-  const settings = mgr.getInstancesByApp('com.aura.settings')[0];
-  if (!settings?.port) return null;
+  // Read directly from the OS KV — no app dependency. The bootstrap step
+  // ensures `os/theme` is populated before any proxy request lands.
+  const kv = defaultKv();
   try {
-    const r = await fetch(`http://localhost:${settings.port}/api/data/theme`, {
-      signal: AbortSignal.timeout(500),
-    });
-    if (!r.ok) return null;
-    const body = await r.json() as { themeIdDark?: string; themeIdLight?: string; colorMode?: ColorMode };
+    const stored = await kv.getValue<{ themeIdDark?: string; themeIdLight?: string; colorMode?: ColorMode }>('os', 'theme');
+    if (!stored) return null;
     return {
-      themeIdDark:  body.themeIdDark  ?? ThemeManager.DEFAULT_THEME_ID_DARK,
-      themeIdLight: body.themeIdLight ?? ThemeManager.DEFAULT_THEME_ID_LIGHT,
-      colorMode:    body.colorMode    ?? ThemeManager.DEFAULT_COLOR_MODE,
+      themeIdDark:  stored.themeIdDark  ?? ThemeManager.DEFAULT_THEME_ID_DARK,
+      themeIdLight: stored.themeIdLight ?? ThemeManager.DEFAULT_THEME_ID_LIGHT,
+      colorMode:    stored.colorMode    ?? ThemeManager.DEFAULT_COLOR_MODE,
     };
   } catch { return null; }
+  finally { await kv.close().catch(() => undefined); }
 }
 
 function notReadyHtml(id: string): string {

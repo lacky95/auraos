@@ -89,6 +89,28 @@ const SCIFICN_FRAMEWORK: DesignFramework = {
 // Dark themes: SCI-FI / STAR WARS / ALIEN approximate the three themes that the
 // scificn library ships, plus our additions (AMBER, RED ALERT, CYAN). The
 // scificn lib itself ships no light/dark axis — we layer light themes on top.
+//
+// Semantic colors (`danger` / `warning` / `info` / `success`) are SHARED across
+// all themes of a given tone — a red error should look like an error in every
+// theme, not a desaturated theme-tinted hint. Brand color slots (`primary`,
+// `secondary`) stay per-theme. Spread `DARK_SEMANTIC` / `LIGHT_SEMANTIC` into
+// each palette so the contract is enforced by structure, not discipline.
+
+/** Universal status colors for all dark themes. */
+const DARK_SEMANTIC = {
+  danger:  '#ff2020',   // bright red — error / destructive
+  warning: '#ffd166',   // amber — caution
+  info:    '#00aaff',   // cyan — informational
+  success: '#7acc4d',   // green — confirmation (distinct from primary in green themes)
+} as const;
+
+/** Universal status colors for all light themes — desaturated for contrast on bright bg. */
+const LIGHT_SEMANTIC = {
+  danger:  '#c50f0f',
+  warning: '#b35a00',
+  info:    '#0277bd',
+  success: '#1f7a3a',
+} as const;
 
 const sciFi: OsTheme = {
   id:          'sci-fi',
@@ -100,20 +122,17 @@ const sciFi: OsTheme = {
   palette: {
     primary:   '#00ff41',
     secondary: '#ff9900',
-    danger:    '#ff2020',
-    info:      '#00aaff',
-    warning:   '#ffea00',
-    success:   '#00ff41',
+    ...DARK_SEMANTIC,
     bg:        '#0a0a0a',
     surface:   '#111111',
     surface2:  '#161616',
     text:      '#ccffcc',
     textDim:   '#557755',
     border:    'rgba(0, 255, 65, 0.20)',
-    glowPrimary:   '0 0 8px #00ff41, 0 0 16px rgba(0, 255, 65, 0.30)',
-    glowSecondary: '0 0 8px #ff9900, 0 0 16px rgba(255, 153, 0, 0.30)',
-    glowDanger:    '0 0 8px #ff2020, 0 0 16px rgba(255, 32, 32, 0.30)',
-    glowSubtle:    '0 0 4px rgba(0, 255, 65, 0.30)',
+    glowPrimary:   '0 0 4px #00ff41, 0 0 8px rgba(0, 255, 65, 0.18)',
+    glowSecondary: '0 0 4px #ff9900, 0 0 8px rgba(255, 153, 0, 0.18)',
+    glowDanger:    '0 0 4px #ff2020, 0 0 8px rgba(255, 32, 32, 0.18)',
+    glowSubtle:    '0 0 2px rgba(0, 255, 65, 0.18)',
   },
 };
 
@@ -127,20 +146,17 @@ const starWars: OsTheme = {
   palette: {
     primary:   '#ffe81f',   // the canonical Star Wars title yellow
     secondary: '#ff9900',
-    danger:    '#ff2020',
-    info:      '#88aaff',
-    warning:   '#ffd166',
-    success:   '#7acc4d',
+    ...DARK_SEMANTIC,
     bg:        '#000000',
     surface:   '#0a0a0a',
     surface2:  '#141414',
     text:      '#ffe9a0',
     textDim:   '#7a6a30',
     border:    'rgba(255, 232, 31, 0.20)',
-    glowPrimary:   '0 0 10px #ffe81f, 0 0 20px rgba(255, 232, 31, 0.30)',
-    glowSecondary: '0 0 8px #ff9900, 0 0 16px rgba(255, 153, 0, 0.30)',
-    glowDanger:    '0 0 8px #ff2020, 0 0 16px rgba(255, 32, 32, 0.30)',
-    glowSubtle:    '0 0 4px rgba(255, 232, 31, 0.25)',
+    glowPrimary:   '0 0 5px #ffe81f, 0 0 10px rgba(255, 232, 31, 0.18)',
+    glowSecondary: '0 0 4px #ff9900, 0 0 8px rgba(255, 153, 0, 0.18)',
+    glowDanger:    '0 0 4px #ff2020, 0 0 8px rgba(255, 32, 32, 0.18)',
+    glowSubtle:    '0 0 2px rgba(255, 232, 31, 0.15)',
   },
 };
 
@@ -154,20 +170,17 @@ const alien: OsTheme = {
   palette: {
     primary:   '#48ff00',
     secondary: '#a8c800',
-    danger:    '#ff2020',
-    info:      '#88aaff',
-    warning:   '#d8ff00',
-    success:   '#48ff00',
+    ...DARK_SEMANTIC,
     bg:        '#050a05',
     surface:   '#0a1006',
     surface2:  '#101a0a',
     text:      '#c0ffaa',
     textDim:   '#5a8a3a',
     border:    'rgba(72, 255, 0, 0.22)',
-    glowPrimary:   '0 0 8px #48ff00, 0 0 16px rgba(72, 255, 0, 0.30)',
-    glowSecondary: '0 0 6px #a8c800, 0 0 12px rgba(168, 200, 0, 0.30)',
-    glowDanger:    '0 0 8px #ff2020, 0 0 16px rgba(255, 32, 32, 0.30)',
-    glowSubtle:    '0 0 4px rgba(72, 255, 0, 0.25)',
+    glowPrimary:   '0 0 4px #48ff00, 0 0 8px rgba(72, 255, 0, 0.18)',
+    glowSecondary: '0 0 3px #a8c800, 0 0 6px rgba(168, 200, 0, 0.18)',
+    glowDanger:    '0 0 4px #ff2020, 0 0 8px rgba(255, 32, 32, 0.18)',
+    glowSubtle:    '0 0 2px rgba(72, 255, 0, 0.15)',
   },
 };
 
@@ -181,20 +194,17 @@ const amber: OsTheme = {
   palette: {
     primary:   '#ff9900',
     secondary: '#ffd166',
-    danger:    '#ff2020',
-    info:      '#88ddff',
-    warning:   '#ffd166',
-    success:   '#7acc4d',
+    ...DARK_SEMANTIC,
     bg:        '#0a0805',
     surface:   '#141008',
     surface2:  '#1d160b',
     text:      '#ffe9c2',
     textDim:   '#8a6b3a',
     border:    'rgba(255, 153, 0, 0.20)',
-    glowPrimary:   '0 0 8px #ff9900, 0 0 16px rgba(255, 153, 0, 0.30)',
-    glowSecondary: '0 0 8px #ffd166, 0 0 16px rgba(255, 209, 102, 0.30)',
-    glowDanger:    '0 0 8px #ff2020, 0 0 16px rgba(255, 32, 32, 0.30)',
-    glowSubtle:    '0 0 4px rgba(255, 153, 0, 0.30)',
+    glowPrimary:   '0 0 4px #ff9900, 0 0 8px rgba(255, 153, 0, 0.18)',
+    glowSecondary: '0 0 4px #ffd166, 0 0 8px rgba(255, 209, 102, 0.18)',
+    glowDanger:    '0 0 4px #ff2020, 0 0 8px rgba(255, 32, 32, 0.18)',
+    glowSubtle:    '0 0 2px rgba(255, 153, 0, 0.18)',
   },
 };
 
@@ -208,20 +218,17 @@ const redAlert: OsTheme = {
   palette: {
     primary:   '#ff2020',
     secondary: '#ff7070',
-    danger:    '#ffea00',
-    info:      '#88ddff',
-    warning:   '#ffea00',
-    success:   '#7acc4d',
+    ...DARK_SEMANTIC,
     bg:        '#0a0303',
     surface:   '#160808',
     surface2:  '#1f0a0a',
     text:      '#ffcccc',
     textDim:   '#7a4040',
     border:    'rgba(255, 32, 32, 0.25)',
-    glowPrimary:   '0 0 8px #ff2020, 0 0 18px rgba(255, 32, 32, 0.40)',
-    glowSecondary: '0 0 8px #ff7070, 0 0 16px rgba(255, 112, 112, 0.30)',
-    glowDanger:    '0 0 8px #ffea00, 0 0 16px rgba(255, 234, 0, 0.30)',
-    glowSubtle:    '0 0 4px rgba(255, 32, 32, 0.30)',
+    glowPrimary:   '0 0 4px #ff2020, 0 0 9px rgba(255, 32, 32, 0.22)',
+    glowSecondary: '0 0 4px #ff7070, 0 0 8px rgba(255, 112, 112, 0.18)',
+    glowDanger:    '0 0 4px #ffea00, 0 0 8px rgba(255, 234, 0, 0.18)',
+    glowSubtle:    '0 0 2px rgba(255, 32, 32, 0.18)',
   },
 };
 
@@ -235,20 +242,17 @@ const cyan: OsTheme = {
   palette: {
     primary:   '#00aaff',
     secondary: '#88ddff',
-    danger:    '#ff2020',
-    info:      '#88ddff',
-    warning:   '#ffea00',
-    success:   '#7acc4d',
+    ...DARK_SEMANTIC,
     bg:        '#04080a',
     surface:   '#0a1014',
     surface2:  '#0e1820',
     text:      '#ccecff',
     textDim:   '#557788',
     border:    'rgba(0, 170, 255, 0.20)',
-    glowPrimary:   '0 0 8px #00aaff, 0 0 16px rgba(0, 170, 255, 0.30)',
-    glowSecondary: '0 0 8px #88ddff, 0 0 16px rgba(136, 221, 255, 0.30)',
-    glowDanger:    '0 0 8px #ff2020, 0 0 16px rgba(255, 32, 32, 0.30)',
-    glowSubtle:    '0 0 4px rgba(0, 170, 255, 0.30)',
+    glowPrimary:   '0 0 4px #00aaff, 0 0 8px rgba(0, 170, 255, 0.18)',
+    glowSecondary: '0 0 4px #88ddff, 0 0 8px rgba(136, 221, 255, 0.18)',
+    glowDanger:    '0 0 4px #ff2020, 0 0 8px rgba(255, 32, 32, 0.18)',
+    glowSubtle:    '0 0 2px rgba(0, 170, 255, 0.18)',
   },
 };
 
@@ -267,20 +271,17 @@ const paper: OsTheme = {
   palette: {
     primary:   '#007a1f',
     secondary: '#b35a00',
-    danger:    '#c50f0f',
-    info:      '#0277bd',
-    warning:   '#b35a00',
-    success:   '#1f7a3a',
+    ...LIGHT_SEMANTIC,
     bg:        '#f4f7f1',
     surface:   '#e8ede2',
     surface2:  '#dde3d4',
     text:      '#142014',
     textDim:   '#5a6a5a',
     border:    'rgba(0, 122, 31, 0.25)',
-    glowPrimary:   '0 0 3px rgba(0, 122, 31, 0.35)',
-    glowSecondary: '0 0 3px rgba(179, 90, 0, 0.30)',
-    glowDanger:    '0 0 3px rgba(197, 15, 15, 0.30)',
-    glowSubtle:    '0 0 2px rgba(0, 122, 31, 0.20)',
+    glowPrimary:   '0 0 2px rgba(0, 122, 31, 0.22)',
+    glowSecondary: '0 0 2px rgba(179, 90, 0, 0.18)',
+    glowDanger:    '0 0 2px rgba(197, 15, 15, 0.18)',
+    glowSubtle:    '0 0 1px rgba(0, 122, 31, 0.12)',
   },
 };
 
@@ -294,20 +295,17 @@ const parchment: OsTheme = {
   palette: {
     primary:   '#b35a00',
     secondary: '#c79100',
-    danger:    '#c50f0f',
-    info:      '#0277bd',
-    warning:   '#c79100',
-    success:   '#3a7a1f',
+    ...LIGHT_SEMANTIC,
     bg:        '#fffaf0',
     surface:   '#fbeed6',
     surface2:  '#f5e3c0',
     text:      '#3a2606',
     textDim:   '#806a3a',
     border:    'rgba(179, 90, 0, 0.25)',
-    glowPrimary:   '0 0 3px rgba(179, 90, 0, 0.35)',
-    glowSecondary: '0 0 3px rgba(199, 145, 0, 0.30)',
-    glowDanger:    '0 0 3px rgba(197, 15, 15, 0.30)',
-    glowSubtle:    '0 0 2px rgba(179, 90, 0, 0.20)',
+    glowPrimary:   '0 0 2px rgba(179, 90, 0, 0.22)',
+    glowSecondary: '0 0 2px rgba(199, 145, 0, 0.18)',
+    glowDanger:    '0 0 2px rgba(197, 15, 15, 0.18)',
+    glowSubtle:    '0 0 1px rgba(179, 90, 0, 0.12)',
   },
 };
 
@@ -321,20 +319,17 @@ const mist: OsTheme = {
   palette: {
     primary:   '#00688b',
     secondary: '#0277bd',
-    danger:    '#c50f0f',
-    info:      '#0277bd',
-    warning:   '#b35a00',
-    success:   '#1f7a3a',
+    ...LIGHT_SEMANTIC,
     bg:        '#f1f7fa',
     surface:   '#dceaf2',
     surface2:  '#c8dde9',
     text:      '#0a1a22',
     textDim:   '#557788',
     border:    'rgba(0, 104, 139, 0.25)',
-    glowPrimary:   '0 0 3px rgba(0, 104, 139, 0.35)',
-    glowSecondary: '0 0 3px rgba(2, 119, 189, 0.30)',
-    glowDanger:    '0 0 3px rgba(197, 15, 15, 0.30)',
-    glowSubtle:    '0 0 2px rgba(0, 104, 139, 0.20)',
+    glowPrimary:   '0 0 2px rgba(0, 104, 139, 0.22)',
+    glowSecondary: '0 0 2px rgba(2, 119, 189, 0.18)',
+    glowDanger:    '0 0 2px rgba(197, 15, 15, 0.18)',
+    glowSubtle:    '0 0 1px rgba(0, 104, 139, 0.12)',
   },
 };
 

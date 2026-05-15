@@ -4,3 +4,4 @@ export * from './instance.js';
 export * from './activity.js';
 export * from './view.js';
 export * from './layout.js';
+export * from './workspace.js';

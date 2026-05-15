@@ -1,11 +1,30 @@
 ---
 import OSLayout from '../layouts/OSLayout.astro';
 import LayoutManager from '../components/layout/LayoutManager.astro';
-import { getAppManager } from '@aura/core';
+import { getAppManager, DEFAULT_WORKSPACE_STATE, type WorkspaceState } from '@aura/core';
+import { defaultKv } from '@aura/kv-store';
 
 const mgr = getAppManager();
 const allApps = mgr.getManifests();
 const pinnedApps = allApps.slice(0, 5);
+
+// SSR workspace state — comes from the OS KV (`os/workspaces`), populated
+// by bootstrapKv() before any request hits this route. Defaults are used
+// only if Redis is unhealthy (shouldn't happen in steady state).
+let workspaceState: WorkspaceState = DEFAULT_WORKSPACE_STATE;
+{
+  const kv = defaultKv();
+  try {
+    const stored = await kv.getValue<WorkspaceState>('os', 'workspaces');
+    if (stored && Array.isArray(stored.workspaces) && stored.workspaces.length > 0) {
+      workspaceState = stored;
+    }
+  } catch {
+    // fall back to DEFAULT_WORKSPACE_STATE
+  } finally {
+    await kv.close().catch(() => undefined);
+  }
+}
 
 /**
  * SSR initial views.
@@ -80,14 +99,49 @@ for (const inst of mgr.getAllInstances()) {
     });
   }
 }
+
+// Backfill orphans. Running views that no workspace claims (e.g. existed
+// before workspaces shipped, OR Settings briefly lost track) join the
+// active workspace. Avoids the "empty desktop despite running apps" trap
+// on first boot after upgrade. Service components (componentType=service)
+// are deliberately hidden from workspace membership — they have no UI.
+const knownMembers = new Set<string>(
+  workspaceState.workspaces.flatMap((w) => w.members),
+);
+const active = workspaceState.workspaces.find(w => w.id === workspaceState.activeWorkspaceId)
+            ?? workspaceState.workspaces[0]!;
+for (const v of initialViews) {
+  // Services don't get added to any workspace — their presence in `views`
+  // is incidental (they don't render UI in the desktop), and adding them
+  // would clutter the user's app set.
+  const m = mgr.getManifest(v.appId);
+  if (m?.componentType === 'service') continue;
+  if (!knownMembers.has(v.viewId)) {
+    active.members.push(v.viewId);
+    knownMembers.add(v.viewId);
+  }
+}
+
+// Filter the SSR views the same way the JS will at runtime — only the
+// active workspace's members render in the first paint. Services still
+// SSR (their iframe exists) but Phase 3+ will hide them visually via CSS
+// since they're not in `members`. For now: drop services from initial
+// render entirely.
+const ssrServiceViewIds = new Set<string>(
+  initialViews.filter((v) => mgr.getManifest(v.appId)?.componentType === 'service').map((v) => v.viewId),
+);
+const ssrVisibleViews = initialViews.filter(
+  (v) => active.members.includes(v.viewId) && !ssrServiceViewIds.has(v.viewId),
+);
 ---
 <OSLayout pinnedApps={pinnedApps}>
   <div id="desktop-content">
     <div id="static-layout">
-      <LayoutManager views={initialViews} />
+      <LayoutManager views={ssrVisibleViews} strategyId={active.layoutId} layoutState={active.layoutState} />
     </div>
     <div id="dynamic-layout" style="display:none; position:absolute; inset:0;"></div>
     <script type="application/json" id="aura-initial-views" set:html={JSON.stringify(initialViews)}></script>
+    <script type="application/json" id="aura-initial-workspaces" set:html={JSON.stringify(workspaceState)}></script>
 
     <!-- Focus mode: covers the entire viewport when activated from Process Manager -->
     <div id="focus-view" aria-hidden="true">
@@ -102,6 +156,8 @@ for (const inst of mgr.getAllInstances()) {
 </OSLayout>
 
 <script>
+  import * as workspaceClient from '../lib/workspaceClient';
+
   interface AppView {
     viewId: string;
     appId: string;
@@ -151,6 +207,10 @@ for (const inst of mgr.getAllInstances()) {
   // Hydrate from SSR initial views so the JS-side state matches what's already on screen.
   // Once we have data, switch to the JS-managed dynamicLayout immediately so close/minimize
   // and SSE updates work uniformly across SSR-rendered and dynamically-created slots.
+  try {
+    const wsJson = document.getElementById('aura-initial-workspaces')?.textContent;
+    if (wsJson) workspaceClient.hydrate(JSON.parse(wsJson) as workspaceClient.WorkspaceState);
+  } catch (err) { console.warn('[shell] failed to hydrate workspaceState', err); }
   try {
     const ssrJson = document.getElementById('aura-initial-views')?.textContent;
     if (ssrJson) {
@@ -231,6 +291,10 @@ for (const inst of mgr.getAllInstances()) {
       pendingId,
       replaceWith: (real) => {
         views = views.map((v) => v.viewId === pendingId ? real : v);
+        // The user launched this view from the active workspace by clicking
+        // the dock/launcher — claim membership for it. Fire-and-forget;
+        // the optimistic local update makes the view visible immediately.
+        workspaceClient.addMemberToActive(real.viewId).catch(() => undefined);
         renderLayout();
       },
       drop: () => {
@@ -383,6 +447,7 @@ for (const inst of mgr.getAllInstances()) {
         fetch(`/api/instances/${encodeURIComponent(v.instanceId)}/stop`, { method: 'POST' }).catch(() => undefined);
       }
     }
+    workspaceClient.removeMember(viewId).catch(() => undefined);
     views = views.filter((x) => x.viewId !== viewId);
     renderLayout();
   }
@@ -442,39 +507,78 @@ for (const inst of mgr.getAllInstances()) {
     // buttons are bound to a snapshot and would show stale content after close.
     staticLayout.style.display = 'none';
 
-    const visible   = views.filter((v) => v.state !== 'minimized');
-    const minimized = views.filter((v) => v.state === 'minimized');
+    // Workspace filter:
+    //   • Views belonging to the active workspace render normally.
+    //   • Views from OTHER workspaces stay in the DOM (display:none) so
+    //     their iframes survive workspace switches — switching back is
+    //     instant + state-preserving instead of reloading the app.
+    //   • Views removed from `views` entirely (close, crash) get pruned
+    //     from the DOM later in this function.
+    const wsState = workspaceClient.getCached();
+    let workspaceMembers: Set<string> | null = null;
+    if (wsState) {
+      const ws = wsState.workspaces.find(w => w.id === wsState.activeWorkspaceId);
+      if (ws) workspaceMembers = new Set(ws.members);
+    }
+    const inActiveWorkspace = (v: AppView) => {
+      // Placeholders (instanceId === '') always belong to the active
+      // workspace — the launch was initiated here.
+      if (v.instanceId === '') return true;
+      // Without hydrated workspace state, behave like the pre-workspaces
+      // shell — every view counts as active.
+      if (!workspaceMembers) return true;
+      return workspaceMembers.has(v.viewId);
+    };
 
-    // ---- 1) Empty state ----
-    if (visible.length === 0) {
-      Object.assign(dynamicLayout.style, {
-        display: 'flex', flexDirection: 'column',
-        alignItems: 'center', justifyContent: 'center',
-        background: 'transparent',
-        gridTemplateColumns: '', gridTemplateRows: '', gap: '',
-      });
-      dynamicLayout.innerHTML = `
-        <div style="color: var(--aura-color-text-dim); font-size: 0.8rem; letter-spacing: 0.15em; text-align: center;">
+    const nonMinimized = views.filter((v) => v.state !== 'minimized');
+    const visible      = nonMinimized.filter(inActiveWorkspace);
+    const hidden       = nonMinimized.filter((v) => !inActiveWorkspace(v));
+    const minimized    = views.filter((v) => v.state === 'minimized' && inActiveWorkspace(v));
+
+    // ---- 1) Empty-state overlay ----
+    // Use a separate <div data-aura-empty> child instead of overwriting
+    // dynamicLayout.innerHTML — that would nuke any hidden-other-workspace
+    // slot iframes we're holding alive across workspace switches.
+    let emptyEl = dynamicLayout.querySelector(':scope > [data-aura-empty]') as HTMLElement | null;
+    const desktopIsEmpty = visible.length === 0 && minimized.length === 0;
+    if (desktopIsEmpty) {
+      if (!emptyEl) {
+        emptyEl = document.createElement('div');
+        emptyEl.setAttribute('data-aura-empty', '1');
+        emptyEl.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:transparent;color:var(--aura-color-text-dim);font-size:0.8rem;letter-spacing:0.15em;text-align:center;pointer-events:auto;';
+        emptyEl.innerHTML = `
           <div style="margin-bottom: 12px;">// NO ACTIVE PROCESSES</div>
-          <button type="button" onclick="window.auraOpenLauncher && window.auraOpenLauncher()" style="color: var(--aura-color-primary); border: var(--aura-border); padding: 8px 24px; background: transparent; cursor: pointer; font-family: var(--aura-font-mono); letter-spacing: 0.1em;">[ LAUNCH APP ]</button>
-        </div>
-        ${renderMinimizedStrip(minimized)}`;
-      return;
+          <button type="button" onclick="window.auraOpenLauncher && window.auraOpenLauncher()" style="color: var(--aura-color-primary); border: var(--aura-border); padding: 8px 24px; background: transparent; cursor: pointer; font-family: var(--aura-font-mono); letter-spacing: 0.1em;">[ LAUNCH APP ]</button>`;
+        dynamicLayout.appendChild(emptyEl);
+      }
+    } else if (emptyEl) {
+      emptyEl.remove();
     }
 
     // ---- 2) Grid container ----
-    const cols = Math.ceil(Math.sqrt(visible.length));
-    const rows = Math.ceil(visible.length / cols);
-    Object.assign(dynamicLayout.style, {
-      display: 'grid',
-      gridTemplateColumns: `repeat(${cols}, 1fr)`,
-      gridTemplateRows: minimized.length > 0
-        ? `auto repeat(${rows}, 1fr)`
-        : `repeat(${rows}, 1fr)`,
-      gap: '2px',
-      background: 'var(--aura-color-bg)',
-      alignItems: '', justifyContent: '', flexDirection: '',
-    });
+    // When the active workspace is empty, leave the container as a plain
+    // positioned box so the empty-state overlay (above) is the only thing
+    // the user sees. Hidden slots live in the same container with
+    // display:none — they cost no layout space.
+    const cols = visible.length === 0 ? 1 : Math.ceil(Math.sqrt(visible.length));
+    if (visible.length === 0) {
+      Object.assign(dynamicLayout.style, {
+        display: 'block', gridTemplateColumns: '', gridTemplateRows: '',
+        gap: '', background: 'transparent',
+      });
+    } else {
+      const rows = Math.ceil(visible.length / cols);
+      Object.assign(dynamicLayout.style, {
+        display: 'grid',
+        gridTemplateColumns: `repeat(${cols}, 1fr)`,
+        gridTemplateRows: minimized.length > 0
+          ? `auto repeat(${rows}, 1fr)`
+          : `repeat(${rows}, 1fr)`,
+        gap: '2px',
+        background: 'var(--aura-color-bg)',
+        alignItems: '', justifyContent: '', flexDirection: '',
+      });
+    }
 
     // ---- 3) Minimized strip ----
     //
@@ -524,6 +628,9 @@ for (const inst of mgr.getAllInstances()) {
 
     const baseRow = minimized.length > 0 ? 2 : 1;
     const keep = new Set<string>();
+
+    // Visible-in-active-workspace slots: place into the grid, ensure
+    // display style is set to flex (in case they were previously hidden).
     visible.forEach((v, i) => {
       keep.add(v.viewId);
       let el = existing.get(v.viewId);
@@ -533,13 +640,62 @@ for (const inst of mgr.getAllInstances()) {
       } else {
         updateSlot(el, v);
       }
-      // Explicit placement — never relies on auto-flow.
+      el.style.display    = 'flex';
       el.style.gridColumn = String((i % cols) + 1);
       el.style.gridRow    = String(Math.floor(i / cols) + baseRow);
       el.style.removeProperty('order');
     });
+
+    // Hidden-in-other-workspace slots: keep DOM + iframe alive but make
+    // them invisible AND unreachable for layout. `display:none` removes
+    // them from the grid so they don't reserve a track; the iframe stays
+    // mounted, so switching workspaces restores the app instantly.
+    for (const v of hidden) {
+      keep.add(v.viewId);
+      let el = existing.get(v.viewId);
+      if (!el) {
+        // First time we're seeing this view AND it's not in the active
+        // workspace — still create the slot (otherwise switching to its
+        // workspace later would require a full mount). Cheap.
+        el = createSlot(v);
+        dynamicLayout.appendChild(el);
+      } else {
+        updateSlot(el, v);
+      }
+      el.style.display = 'none';
+    }
+
+    // Views removed from the `views` array entirely (close, crash, etc.)
+    // get pruned here. iframes inside DO reload if recreated later — but
+    // by definition they're gone, so this is the right teardown point.
+    //
+    // Graceful shutdown: postMessage 'aura.shutdown' into the iframe so the
+    // proxy-injected lifecycle agent can .close() all open EventSource +
+    // WebSocket cleanly before the iframe element is destroyed. Otherwise
+    // the iframe's auto-reconnect retries leak past the close, producing
+    // noisy "ws: connection refused" / "EventSource error" lines in the
+    // Console + browser DevTools. We hard-cap the wait at 200ms so a
+    // hanging app can't block the shell.
     for (const [viewId, el] of existing) {
-      if (!keep.has(viewId)) el.remove();
+      if (keep.has(viewId)) continue;
+      const ifr = el.querySelector('iframe') as HTMLIFrameElement | null;
+      if (ifr?.contentWindow) {
+        try { ifr.contentWindow.postMessage({ type: 'aura.shutdown' }, '*'); } catch (_) { /* ignore */ }
+        // Race the ack against a hard timeout. Either way el.remove() runs.
+        const done = new Promise<void>((resolve) => {
+          const onAck = (ev: MessageEvent) => {
+            if (ev.source === ifr.contentWindow && (ev.data as { type?: string } | null)?.type === 'aura.shutdown.done') {
+              window.removeEventListener('message', onAck);
+              resolve();
+            }
+          };
+          window.addEventListener('message', onAck);
+        });
+        const timeout = new Promise<void>((resolve) => setTimeout(resolve, 200));
+        void Promise.race([done, timeout]).then(() => el.remove());
+      } else {
+        el.remove();
+      }
     }
   }
 
@@ -609,7 +765,11 @@ for (const inst of mgr.getAllInstances()) {
     if (!hasIframe && v.iframeUrl) {
       const iframe = document.createElement('iframe');
       iframe.title = v.title;
-      iframe.setAttribute('allow', 'clipboard-read; clipboard-write');
+      // No `allow=` attribute: our iframes are same-origin (proxied through
+      // /api/proxy/<id>/ on the shell's port), so clipboard, microphone, etc.
+      // are inherited from the parent. Firefox warns ("unsupported feature
+      // name") on Chrome-specific Permissions Policy strings like
+      // `clipboard-read`/`clipboard-write`, which we don't need anyway.
       iframe.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border:none;background:transparent;';
       iframe.addEventListener('load', () => {
         // Two RAFs = "wait until the browser has actually painted the iframe
@@ -694,6 +854,11 @@ for (const inst of mgr.getAllInstances()) {
   // is replaced with the JS-managed dynamicLayout — same content, live handlers.
   if (views.length > 0) renderLayout();
 
+  // Workspace state mutations (active switch, member edits made from another
+  // tab / the Settings page, etc.) re-render the desktop — `inActiveWorkspace`
+  // picks up the new filter via `workspaceClient.getCached()`.
+  workspaceClient.subscribe(() => renderLayout());
+
   (window as any).auraClose    = closeView_;
   (window as any).auraMinimize = minimizeView_;
 
@@ -735,7 +900,9 @@ for (const inst of mgr.getAllInstances()) {
 
   /** Remove all views belonging to an instance (called from Process Manager after close/kill). */
   function removeViewsByInstance(instanceId: string) {
+    const dead = views.filter((v) => v.instanceId === instanceId);
     views = views.filter((v) => v.instanceId !== instanceId);
+    for (const v of dead) workspaceClient.removeMember(v.viewId).catch(() => undefined);
     if (focusedInstanceId === instanceId) exitFocus();
     renderLayout();
   }
@@ -743,6 +910,7 @@ for (const inst of mgr.getAllInstances()) {
   /** Remove a single activity view. */
   function removeViewByActivity(activityId: string) {
     views = views.filter((v) => v.activityId !== activityId);
+    workspaceClient.removeMember(activityId).catch(() => undefined);
     if (focusedActivityId === activityId) exitFocus();
     renderLayout();
   }
@@ -766,7 +934,12 @@ for (const inst of mgr.getAllInstances()) {
     });
   }, 120);
 
-  const sse = new EventSource('/api/apps/events');
+  // Topic-filtered SSE — desktop reacts to app/activity lifecycle + workspace
+  // changes (filter, switch, member edits). Theme + mode events have their
+  // own dedicated stream wired in OSLayout. `activity:*` includes the
+  // back-stack `activity:focus` event; `workspaces:*` is the bulk update
+  // pushed by Settings when the user (or any other tab) edits the list.
+  const sse = new EventSource('/api/apps/events?topics=app:*,activity:*,workspaces:*,workspace:*');
   sse.onmessage = (e) => {
     const ev = JSON.parse(e.data);
     if (ev.type === 'app:stateChanged') {
@@ -776,7 +949,9 @@ for (const inst of mgr.getAllInstances()) {
       // dead /api/proxy/<id>/ — same effect as app:crashed, just from a
       // different code path.
       if (ev.state === 'destroyed' || ev.state === 'error') {
+        const dead = views.filter((v) => v.instanceId === ev.instanceId);
         views = views.filter((v) => v.instanceId !== ev.instanceId);
+        for (const v of dead) workspaceClient.removeMember(v.viewId).catch(() => undefined);
         if (focusedInstanceId === ev.instanceId) exitFocus();
         renderLayout();
         return;
@@ -788,7 +963,9 @@ for (const inst of mgr.getAllInstances()) {
       renderLayout();
     }
     if (ev.type === 'app:crashed') {
+      const dead = views.filter((v) => v.instanceId === ev.instanceId);
       views = views.filter((v) => v.instanceId !== ev.instanceId);
+      for (const v of dead) workspaceClient.removeMember(v.viewId).catch(() => undefined);
       if (focusedInstanceId === ev.instanceId) exitFocus();
       renderLayout();
       console.error(`[AuraOS] ${ev.instanceId} crashed:`, ev.error);
@@ -813,13 +990,34 @@ for (const inst of mgr.getAllInstances()) {
       // event payload — default to 'resumed' so the iframe loads right away.
       // (An open activity necessarily means the parent backend is running.)
       views = [...views, buildView(ev.appId, title, ev.parentInstanceId, ev.activityId, ev.path ?? '/', 'resumed', minimizable)];
+      // The activity was opened externally (another iframe, an intent, etc.)
+      // — claim it on the active workspace so the user can actually see it.
+      workspaceClient.addMemberToActive(ev.activityId).catch(() => undefined);
       renderLayout();
     }
     if (ev.type === 'activity:closed') {
       // Backend says this activity is gone — drop the corresponding view
       views = views.filter((v) => v.activityId !== ev.activityId);
+      workspaceClient.removeMember(ev.activityId).catch(() => undefined);
       if (focusedActivityId === ev.activityId) exitFocus();
       renderLayout();
+    }
+    if (ev.type === 'activity:focus') {
+      // Back-stack pop — bring the named (already-open) activity back to the
+      // foreground. Bound to `auraFocusInstance`, the same primitive the
+      // Process Manager's FOCUS button uses, so the focus view + iframe
+      // routing follow the same code path.
+      const target = views.find((v) => v.activityId === ev.activityId);
+      if (target) {
+        (window as any).auraFocusInstance?.(target.instanceId, ev.activityId);
+      }
+    }
+    if (ev.type === 'workspaces:changed' || ev.type === 'workspace:activated') {
+      // The SSE payload only carries summaries (no member arrays), so we
+      // have to re-fetch the full state to reconcile membership. The
+      // refresh() call notifies subscribers — which triggers renderLayout()
+      // via the subscribe() wire-up further up.
+      workspaceClient.refresh().catch((err) => console.warn('[shell] workspace refresh failed', err));
     }
   };
 </script>

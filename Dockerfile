@@ -4,6 +4,15 @@
 # glibc compatibility with host-side binaries bind-mounted into the rootfs.
 FROM debian:bookworm-slim AS base-rootfs
 
+# Base-rootfs essentials — every proot inherits these at /usr/bin via its own
+# rootfs (no cap-system involvement, on PATH by default). Anything more
+# specialised (claude, gh, ripgrep, bun, …) stays in the toolchain store and
+# is opt-in per app via `aura cap grant`.
+#
+# Network tooling (ssh*, nslookup), filesystem/process introspection (lsof,
+# htop, ps), and a baseline editor + pager (nano, less) are present so an
+# operator dropped into ANY app's terminal can debug, edit, and reach the
+# outside world without first installing a thing.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     coreutils \
@@ -13,6 +22,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     nodejs \
     npm \
+    openssh-client \
+    openssh-server \
+    nano \
+    less \
+    htop \
+    lsof \
+    dnsutils \
+    iproute2 \
   && rm -rf /var/lib/apt/lists/*
 
 # ─── Stage: base ──────────────────────────────────────────────────────────────
@@ -142,13 +159,21 @@ COPY --from=base-rootfs / /os/base-rootfs
 WORKDIR /workspace
 
 # The aura CLI is built from /workspace (volume-mounted in dev). Initial build
-# + symlink + esbuild watcher in the background → every edit under
-# packages/aura-cli/src/ rebuilds dist/aura.cjs in place, so the symlinked
-# `aura` binary always reflects the latest code without a container rebuild.
+# + wrapper-script install + esbuild watcher in the background → every edit
+# under packages/aura-cli/src/ rebuilds dist/aura.cjs in place, and the wrapper
+# script always execs the current build.
+#
+# IMPORTANT: install /usr/local/bin/aura and /os/toolchain/bin/aura as
+# wrapper SCRIPTS, not symlinks. PRoot binds the toolchain entry into each
+# sandbox at /usr/local/bin/aura; if the bind source is a symlink, `lstat`
+# inside the PRoot sees the destination as a symlink but `readlink` returns
+# EINVAL → Node's `realpathSync` in run_main blows up. A wrapper script is
+# a regular file, bind cleanly, and execs `node` with the final path so
+# Node never has to readlink the bind destination.
 CMD ["sh", "-c", "pnpm install \
  && pnpm --filter @aura/cli build \
- && ln -sf /workspace/packages/aura-cli/dist/aura.cjs /usr/local/bin/aura \
- && ln -sf /workspace/packages/aura-cli/dist/aura.cjs /os/toolchain/bin/aura \
+ && install -D -m 0755 /workspace/os/aura-cli-shim.sh /usr/local/bin/aura \
+ && install -D -m 0755 /workspace/os/aura-cli-shim.sh /os/toolchain/bin/aura \
  && install -D -m 0644 /workspace/os/bashrc.aura.sh /os/base-rootfs/root/.bashrc \
  && install -D -m 0644 /workspace/os/bashrc.aura.sh /os/base-rootfs/etc/profile.d/aura-prompt.sh \
  && (pnpm --filter @aura/cli build:watch &) \

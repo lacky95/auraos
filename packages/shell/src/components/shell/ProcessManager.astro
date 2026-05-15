@@ -17,8 +17,16 @@
   <header class="pm-header">
     <div class="pm-header-title">
       <span class="pm-icon">▦</span>
-      <span class="pm-title">PROCESSES</span>
-      <span id="pm-count-badge" class="pm-count-badge">0</span>
+      <div class="pm-filter-group" role="group" aria-label="Section filter">
+        <button type="button" class="pm-filter-btn" data-filter="apps"     data-active="true"  title="Show user apps (foreground processes)">
+          <span class="pm-filter-label">APPS</span>
+          <span class="pm-filter-count" id="pm-filter-count-apps">0</span>
+        </button>
+        <button type="button" class="pm-filter-btn" data-filter="services" data-active="false" title="Show headless services (background)">
+          <span class="pm-filter-label">SVC</span>
+          <span class="pm-filter-count" id="pm-filter-count-services">0</span>
+        </button>
+      </div>
     </div>
     <div class="pm-header-actions">
       <div class="pm-view-toggle" role="group" aria-label="View mode">
@@ -116,21 +124,6 @@
     letter-spacing: 0.14em;
     font-weight: 500;
   }
-  .pm-count-badge {
-    min-width: 22px;
-    padding: 2px 6px;
-    font-size: 0.6rem;
-    color: var(--aura-color-bg);
-    background: var(--aura-color-primary);
-    text-align: center;
-    letter-spacing: 0.08em;
-    font-weight: 600;
-  }
-  .pm-count-badge[data-empty="true"] {
-    background: transparent;
-    color: var(--aura-color-text-dim);
-    border: 1px solid var(--aura-color-border);
-  }
   .pm-close {
     background: transparent;
     border: var(--aura-border);
@@ -153,6 +146,26 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
+  }
+
+  /* Section header — separates APPS from SERVICES in the panel list. */
+  .pm-section-head {
+    list-style: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 6px 2px;
+    font-size: 0.6rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--aura-color-text-dim);
+    border-bottom: 1px dashed var(--aura-color-border);
+    margin-top: 4px;
+  }
+  .pm-section-head:first-child { margin-top: 0; }
+  .pm-section-count {
+    color: var(--aura-color-secondary);
+    font-weight: bold;
   }
 
   /* Empty state */
@@ -212,7 +225,9 @@
     align-items: center;
     justify-content: center;
     font-family: var(--aura-font-mono);
-    font-size: 1.2rem;
+    /* Uniform size across 1/2/3-char glyphs; sized to fit "SET" in the 36×36 card initial. */
+    font-size: 0.75rem;
+    letter-spacing: 0.04em;
     font-weight: 700;
     color: var(--aura-color-primary);
     border: 1px solid var(--aura-color-primary);
@@ -486,6 +501,47 @@
     50%      { opacity: 0.35; }
   }
 
+  /* ============ Section filter pills (header) ============ */
+  /* PROC / SVC toggles. Active = primary, inactive = dim border-only. Each
+   * pill carries its own count badge so the user sees at a glance whether
+   * a section has anything before toggling it on. */
+  .pm-filter-group {
+    display: inline-flex;
+    border: var(--aura-border);
+  }
+  .pm-filter-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 8px;
+    background: transparent;
+    border: none;
+    color: var(--aura-color-text-dim);
+    font-family: var(--aura-font-mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: color 0.1s, background 0.1s;
+    line-height: 1;
+  }
+  .pm-filter-btn + .pm-filter-btn { border-left: 1px solid var(--aura-color-border); }
+  .pm-filter-btn:hover { color: var(--aura-color-primary); }
+  .pm-filter-btn[data-active="true"] {
+    color: var(--aura-color-bg);
+    background: var(--aura-color-primary);
+  }
+  .pm-filter-btn[data-active="true"] .pm-filter-count { color: var(--aura-color-bg); }
+  .pm-filter-count {
+    min-width: 14px;
+    text-align: center;
+    padding: 1px 4px;
+    background: color-mix(in srgb, currentColor 18%, transparent);
+    color: var(--aura-color-text);
+    font-weight: 600;
+    font-size: 0.58rem;
+  }
+
   /* ============ View-mode toggle (header) ============ */
   .pm-header-actions { display: flex; align-items: center; gap: 8px; }
   .pm-view-toggle {
@@ -653,16 +709,22 @@
     activityMode: 'none' | 'multi';
     backgroundService: boolean;
     themeStrategy?: 'inherit' | 'themed' | 'override';
+    /** 'activity' (default) or 'service' — services render under their own header. */
+    componentType?: 'activity' | 'service';
   }
 
-  const toggleBtn  = document.getElementById('pm-toggle') as HTMLButtonElement;
-  const panel      = document.getElementById('pm-panel') as HTMLElement;
-  const closeBtn   = document.getElementById('pm-close') as HTMLButtonElement;
-  const list       = document.getElementById('pm-list') as HTMLUListElement;
-  const count      = document.getElementById('pm-count') as HTMLElement;
-  const countBadge = document.getElementById('pm-count-badge') as HTMLElement;
-  const refresh    = document.getElementById('pm-refresh') as HTMLButtonElement;
-  const viewBtns   = document.querySelectorAll<HTMLButtonElement>('.pm-view-btn');
+  const toggleBtn   = document.getElementById('pm-toggle') as HTMLButtonElement;
+  const panel       = document.getElementById('pm-panel') as HTMLElement;
+  const closeBtn    = document.getElementById('pm-close') as HTMLButtonElement;
+  const list        = document.getElementById('pm-list') as HTMLUListElement;
+  const count       = document.getElementById('pm-count') as HTMLElement;
+  const refresh     = document.getElementById('pm-refresh') as HTMLButtonElement;
+  const viewBtns    = document.querySelectorAll<HTMLButtonElement>('.pm-view-btn');
+  const filterBtns  = document.querySelectorAll<HTMLButtonElement>('.pm-filter-btn');
+  const filterCount = {
+    apps:     document.getElementById('pm-filter-count-apps')!,
+    services: document.getElementById('pm-filter-count-services')!,
+  };
 
   let manifests = new Map<string, ManifestLite>();
 
@@ -697,6 +759,34 @@
 
   viewBtns.forEach(b => {
     b.addEventListener('click', () => setViewMode(b.dataset['view'] as ViewMode));
+  });
+
+  // Section filters (PROC / SVC). Default: apps visible, services hidden —
+  // services are background plumbing the user rarely needs to see.
+  type FilterKey = 'apps' | 'services';
+  const FILTER_STORAGE_KEY = 'aura.pm.filters';
+  const filters: Record<FilterKey, boolean> = (() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(FILTER_STORAGE_KEY) ?? '');
+      if (saved && typeof saved.apps === 'boolean' && typeof saved.services === 'boolean') return saved;
+    } catch {}
+    return { apps: true, services: false };
+  })();
+  function applyFilterButtonState() {
+    filterBtns.forEach(b => {
+      const key = b.dataset['filter'] as FilterKey;
+      b.dataset['active'] = filters[key] ? 'true' : 'false';
+    });
+  }
+  applyFilterButtonState();
+  filterBtns.forEach(b => {
+    b.addEventListener('click', () => {
+      const key = b.dataset['filter'] as FilterKey;
+      filters[key] = !filters[key];
+      applyFilterButtonState();
+      try { localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify(filters)); } catch {}
+      render(lastInstances, lastActivities);
+    });
   });
 
   function openPanel()  { panel.setAttribute('aria-hidden', 'false'); refreshList(); }
@@ -767,17 +857,34 @@
     const totalInst = instances.length;
     const totalAct  = activities.length;
 
-    count.textContent = `${totalInst} INST · ${totalAct} ACT`;
-    countBadge.textContent = String(totalInst);
-    countBadge.dataset['empty'] = totalInst === 0 ? 'true' : 'false';
+    // Split into apps + services so the panel can group them under separate
+    // headers. Services are headless background processes — they don't take
+    // a `+ ACTIVITY` action, and visually distinguishing them keeps the user
+    // from thinking they're stuck in an unusable BOOT state.
+    const isService = (i: InstanceListItem) => manifests.get(i.appId)?.componentType === 'service';
+    const appInstances     = instances.filter(i => !isService(i));
+    const serviceInstances = instances.filter(isService);
+
+    // Pill counts: always reflect totals on disk, not what's currently
+    // rendered, so the user sees `SVC 2` even when SVC is toggled off.
+    filterCount.apps.textContent     = String(appInstances.length);
+    filterCount.services.textContent = String(serviceInstances.length);
+
+    // Footer + toggle-button dot use the *visible* set so a hidden section's
+    // running services don't make the badge pulse.
+    const visibleApps     = filters.apps     ? appInstances     : [];
+    const visibleServices = filters.services ? serviceInstances : [];
+    const visibleCount    = visibleApps.length + visibleServices.length;
+    count.textContent = `${visibleCount} INST · ${totalAct} ACT`;
     toggleBtn.dataset['hasInstances'] = totalInst > 0 ? 'true' : 'false';
 
-    if (instances.length === 0) {
+    if (visibleCount === 0) {
+      const allHidden = totalInst > 0 && !filters.apps && !filters.services;
       list.innerHTML = `
         <li class="pm-empty">
           <div class="pm-empty-icon">○</div>
-          <div class="pm-empty-text">NO ACTIVE PROCESSES</div>
-          <div class="pm-empty-hint">// LAUNCH AN APP TO BEGIN</div>
+          <div class="pm-empty-text">${allHidden ? 'ALL SECTIONS HIDDEN' : 'NO ACTIVE PROCESSES'}</div>
+          <div class="pm-empty-hint">${allHidden ? '// ENABLE APPS OR SVC ABOVE' : '// LAUNCH AN APP TO BEGIN'}</div>
         </li>`;
       return;
     }
@@ -789,12 +896,16 @@
       actByInstance.set(a.parentInstanceId, arr);
     }
 
-    if (viewMode === 'list') renderList(instances, actByInstance);
-    else                     renderCards(instances, actByInstance);
+    if (viewMode === 'list') renderList(visibleApps, visibleServices, actByInstance);
+    else                     renderCards(visibleApps, visibleServices, actByInstance);
   }
 
-  function renderCards(instances: InstanceListItem[], actByInstance: Map<string, ActivityListItem[]>) {
-    list.innerHTML = instances.map(inst => {
+  function renderSectionHeader(label: string, count: number): string {
+    return `<li class="pm-section-head"><span>${label}</span><span class="pm-section-count">${count}</span></li>`;
+  }
+
+  function renderCards(appInstances: InstanceListItem[], serviceInstances: InstanceListItem[], actByInstance: Map<string, ActivityListItem[]>) {
+    const cardForInstance = (inst: InstanceListItem) => {
       const manifest = manifests.get(inst.appId);
       const name = manifest?.name ?? inst.appId;
       const supportsActivities = manifest?.activityMode === 'multi';
@@ -803,7 +914,8 @@
       const themeChip = themeStrategy === 'inherit' ? '' :
         `<span class="pm-theme-badge" data-strategy="${escapeHtml(themeStrategy)}" title="Theme strategy: ${escapeHtml(themeStrategy)} — app does not fully inherit OS palette">${escapeHtml(themeStrategy.toUpperCase())}</span>`;
       const acts = actByInstance.get(inst.instanceId) ?? [];
-      const initial = name.charAt(0).toUpperCase();
+      const initial = (manifest?.icon ?? name.charAt(0)).toUpperCase();
+      const initialLen = initial.length;
 
       const activitiesBlock = acts.length === 0 ? '' : `
         <div class="pm-activities">
@@ -836,7 +948,7 @@
       return `
         <li class="pm-card" data-instance-id="${escapeHtml(inst.instanceId)}">
           <div class="pm-card-head">
-            <div class="pm-card-initial">${escapeHtml(initial)}</div>
+            <div class="pm-card-initial" data-len="${initialLen}">${escapeHtml(initial)}</div>
             <div class="pm-card-title">
               <div class="pm-card-name">
                 <span>${escapeHtml(name)}</span>
@@ -859,14 +971,24 @@
             <button class="pm-action-btn" data-action="task-kill" data-variant="danger" title="Force kill — immediate SIGKILL, no lifecycle hooks (only if app hangs)">⨂ KILL</button>
           </div>
         </li>`;
-    }).join('');
+    };
+    const sections: string[] = [];
+    if (appInstances.length > 0) {
+      sections.push(renderSectionHeader('APPS', appInstances.length));
+      sections.push(appInstances.map(cardForInstance).join(''));
+    }
+    if (serviceInstances.length > 0) {
+      sections.push(renderSectionHeader('SERVICES', serviceInstances.length));
+      sections.push(serviceInstances.map(cardForInstance).join(''));
+    }
+    list.innerHTML = sections.join('');
   }
 
   /** Dense, ps-like list view: one row per instance, indented activity rows
    *  beneath their parent. Action labels collapse to icon-only buttons.
    */
-  function renderList(instances: InstanceListItem[], actByInstance: Map<string, ActivityListItem[]>) {
-    list.innerHTML = instances.map(inst => {
+  function renderList(appInstances: InstanceListItem[], serviceInstances: InstanceListItem[], actByInstance: Map<string, ActivityListItem[]>) {
+    const rowForInstance = (inst: InstanceListItem) => {
       const manifest = manifests.get(inst.appId);
       const name = manifest?.name ?? inst.appId;
       const supportsActivities = manifest?.activityMode === 'multi';
@@ -918,7 +1040,17 @@
       }).join('');
 
       return instRow + actRows;
-    }).join('');
+    };
+    const sections: string[] = [];
+    if (appInstances.length > 0) {
+      sections.push(renderSectionHeader('APPS', appInstances.length));
+      sections.push(appInstances.map(rowForInstance).join(''));
+    }
+    if (serviceInstances.length > 0) {
+      sections.push(renderSectionHeader('SERVICES', serviceInstances.length));
+      sections.push(serviceInstances.map(rowForInstance).join(''));
+    }
+    list.innerHTML = sections.join('');
   }
 
   list.addEventListener('click', async (e) => {
@@ -973,23 +1105,15 @@
   // rapid state-transition events that fire during a single app start
   // (creating → created → starting → started → resuming → resumed) into one
   // /api/apps refetch.
-  const sse = new EventSource('/api/apps/events');
+  // Topic-filtered SSE — the server drops everything outside app:*/activity:*
+  // before the wire write, so the client doesn't have to branch on event type.
+  const sse = new EventSource('/api/apps/events?topics=app:*,activity:*');
   let refreshDebounce: ReturnType<typeof setTimeout> | null = null;
   function scheduleRefresh() {
     if (refreshDebounce) return;
     refreshDebounce = setTimeout(() => { refreshDebounce = null; refreshList(); }, 80);
   }
-  sse.onmessage = (e) => {
-    try {
-      const ev = JSON.parse(e.data);
-      if (
-        ev.type === 'app:stateChanged' ||
-        ev.type === 'app:crashed' ||
-        ev.type === 'activity:opened' ||
-        ev.type === 'activity:closed'
-      ) scheduleRefresh();
-    } catch { /* ignore malformed payloads */ }
-  };
+  sse.onmessage = () => scheduleRefresh();
 
   // Initial load to populate the badge dot on the toggle button
   refreshList();

@@ -21,7 +21,7 @@ const isLoading = view.lifecycleState !== 'resumed';
   <div class="slot-body">
     {isLoading
       ? <div class="loading">LOADING {view.appId}...</div>
-      : <iframe src={view.iframeUrl} title={view.title} allow="clipboard-read; clipboard-write" />
+      : <iframe src={view.iframeUrl} title={view.title} />
     }
   </div>
 </div>

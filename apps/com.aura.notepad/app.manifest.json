@@ -1,6 +1,7 @@
 {
   "id": "com.aura.notepad",
   "name": "Notepad",
+  "icon": "NP",
   "version": "0.1.0",
   "description": "Shared note buffer — multiple activities edit the same text live (single backend, multi activities)",
   "category": "productivity",
@@ -14,5 +15,12 @@
     "defaultHeight": 400,
     "resizable": true
   },
-  "preferredLayout": "tiling"
+  "preferredLayout": "tiling",
+  "intentFilters": [
+    {
+      "action": "aura.intent.action.SEND",
+      "category": ["aura.intent.category.DEFAULT"],
+      "dataMime": ["text/plain"]
+    }
+  ]
 }

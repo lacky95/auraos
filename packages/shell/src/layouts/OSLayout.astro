@@ -1,37 +1,39 @@
 ---
+import '@aura/ui/styles/scificn-bridge.css';
 import '../styles/global.css';
 import StatusBar from '../components/shell/StatusBar.astro';
 import Dock from '../components/shell/Dock.astro';
 import LauncherOverlay from '../components/shell/LauncherOverlay.astro';
-import { getAppManager, ThemeManager } from '@aura/core';
+import { ThemeManager } from '@aura/core';
 import type { AppManifest, ColorMode } from '@aura/core';
+import { defaultKv } from '@aura/kv-store';
 
 interface Props {
   pinnedApps?: AppManifest[];
 }
 const { pinnedApps = [] } = Astro.props;
 
-// SSR: ask the Settings provider for the user's two-slot selection
-// (themeIdDark, themeIdLight) + colorMode. Falls back to defaults if Settings
-// isn't running yet.
+// SSR theme load now goes through the OS KV (Redis) directly — no app
+// dependency. `bootstrapKv()` ensures `os/theme` exists before this SSR
+// runs; the try/catch is defence-in-depth.
 let themeIdDark:     string    = ThemeManager.DEFAULT_THEME_ID_DARK;
 let themeIdLight:    string    = ThemeManager.DEFAULT_THEME_ID_LIGHT;
 let activeColorMode: ColorMode = ThemeManager.DEFAULT_COLOR_MODE;
-try {
-  const mgr = getAppManager();
-  const settings = mgr.getInstancesByApp('com.aura.settings')[0];
-  if (settings?.port) {
-    const r = await fetch(`http://localhost:${settings.port}/api/data/theme`, {
-      signal: AbortSignal.timeout(500),
-    });
-    if (r.ok) {
-      const body = await r.json() as { themeIdDark?: string; themeIdLight?: string; colorMode?: ColorMode };
-      if (body.themeIdDark)  themeIdDark     = body.themeIdDark;
-      if (body.themeIdLight) themeIdLight    = body.themeIdLight;
-      if (body.colorMode)    activeColorMode = body.colorMode;
-    }
+{
+  const kv = defaultKv();
+  try {
+    const theme = await kv.getValue<{
+      themeIdDark?: string; themeIdLight?: string; colorMode?: ColorMode;
+    }>('os', 'theme');
+    if (theme?.themeIdDark)  themeIdDark     = theme.themeIdDark;
+    if (theme?.themeIdLight) themeIdLight    = theme.themeIdLight;
+    if (theme?.colorMode)    activeColorMode = theme.colorMode;
+  } catch (err) {
+    console.warn(`[OSLayout/SSR] theme fetch threw — falling back to defaults`, err instanceof Error ? err.message : err);
+  } finally {
+    await kv.close().catch(() => undefined);
   }
-} catch {}
+}
 const { theme: activeTheme, resolvedMode } = ThemeManager.resolveActiveTheme(themeIdLight, themeIdDark, activeColorMode);
 const activeThemeCss  = ThemeManager.toCss(themeIdLight, themeIdDark, activeColorMode);
 const activeFramework = activeTheme.framework;
@@ -383,11 +385,18 @@ const activeThemeId   = activeTheme.id;
     // self-healing loop: on `error` after a close, recreate after 2 s.
     let sse: EventSource | null = null;
     const connectSse = () => {
-      sse = new EventSource('/api/apps/events');
-      sse.onopen  = () => console.log('[Theme/SSE] /api/apps/events connected');
+      // Only theme/mode events drive the shell's theme refresh — let the server
+      // filter the firehose for us so the message handler doesn't pay for
+      // app:* / activity:* / notification events it would discard anyway.
+      sse = new EventSource('/api/apps/events?topics=theme:*,mode:*');
+      // Connect/disconnect are demoted to debug — they fire on every container
+      // soft-restart and on idle network hiccups, which is normal in dev. The
+      // reconnect loop below recovers transparently; users don't need to see
+      // a yellow warning in the console for routine cycle behaviour.
+      sse.onopen  = () => console.debug('[Theme/SSE] /api/apps/events connected');
       sse.onerror = () => {
         if (sse && sse.readyState === EventSource.CLOSED) {
-          console.warn('[Theme/SSE] disconnected — retrying in 2 s');
+          console.debug('[Theme/SSE] disconnected — retrying in 2 s');
           setTimeout(connectSse, 2000);
         }
       };

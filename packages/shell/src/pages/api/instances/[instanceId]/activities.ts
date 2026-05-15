@@ -6,9 +6,23 @@ import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
 export const POST: APIRoute = async ({ params, request }) => {
   const instanceId = params['instanceId'];
   if (!instanceId) return errorResponse('Missing instance id', 400);
-  const data = await request.json().catch(() => undefined) as Record<string, unknown> | undefined;
+  // Body shape: `{ data?, stackParent? }`. Tolerate the legacy form where the
+  // whole body IS the data bag — only treat top-level `data`/`stackParent`
+  // keys specially when both shapes coexist, callers can be on either side
+  // during the rollout.
+  const body = await request.json().catch(() => undefined) as
+    | (Record<string, unknown> & { data?: Record<string, unknown>; stackParent?: string })
+    | undefined;
+  const stackParent = typeof body?.stackParent === 'string' ? body.stackParent : undefined;
+  const data = (body && typeof body.data === 'object' && body.data !== null)
+    ? body.data
+    : body; // legacy: whole body is the data bag
   try {
-    const activity = await getAppManager().openActivity(instanceId, data);
+    const activity = await getAppManager().openActivity(
+      instanceId,
+      data,
+      stackParent ? { stackParent } : undefined,
+    );
     return jsonResponse({ activityId: activity.activityId, activity });
   } catch (err) {
     return errorResponse(String(err), 500);

@@ -1,0 +1,114 @@
+/*
+ * AuraOS ⇄ scificn token bridge.
+ *
+ * scificn primitives reference an ad-hoc CSS-var namespace (`--color-green`,
+ * `--surface`, `--clip-corner-md`, etc.) directly inside arbitrary-value
+ * Tailwind utilities like `bg-[var(--color-green)]`. They do NOT use the
+ * shadcn standard token names (`--color-primary`, …). The bridge defines
+ * scificn's tokens on :root, aliasing them to our `--aura-color-*` family
+ * — owned by the runtime `/api/os/theme.css` endpoint and updated live
+ * whenever the user switches theme or color mode.
+ *
+ * Three things to know:
+ *
+ *   1. `@source` makes Tailwind walk @aura/ui's component folder when this
+ *      CSS is consumed from a different package. Without it, classes used
+ *      inside vendored scificn components aren't detected by the
+ *      consumer's Tailwind 4 vite plugin and styles silently miss.
+ *
+ *   2. The `:root` block below is the scificn alias layer. These are
+ *      regular CSS variables, NOT Tailwind tokens — `@theme` doesn't apply
+ *      because scificn never names them in `bg-foo` form.
+ *
+ *   3. The `@theme inline` block underneath maps to shadcn's STANDARD
+ *      token names so future non-scificn shadcn components also inherit
+ *      our theming. `inline` keeps the var() live (not snapshot at build).
+ *
+ * Do NOT redefine `--aura-color-*` here. The runtime /api/os/theme.css
+ * endpoint owns those.
+ */
+
+@import "tailwindcss";
+
+@source "../components/**/*.{tsx,ts}";
+
+/* ────────────────────────────────────────────────────────────────────────
+ * scificn token aliases (referenced via var() inside arbitrary utilities)
+ * ──────────────────────────────────────────────────────────────────────── */
+:root {
+  /* Surfaces */
+  --color-bg:         var(--aura-color-bg);
+  --surface:          var(--aura-color-surface);
+  --surface-raised:   var(--aura-color-surface-2);
+
+  /* Accents — scificn names these "green/red" but they're really primary/danger.
+   * Mapping to our brand vars lets `--color-green` follow the active theme
+   * (so STAR WARS still gets yellow buttons, RED ALERT gets red, etc). */
+  --color-green:      var(--aura-color-primary);
+  --color-red:        var(--aura-color-danger);
+
+  /* Borders */
+  --border:           var(--aura-color-border);
+  --border-active:    var(--aura-color-primary);
+
+  /* Text */
+  --text-secondary:   var(--aura-color-text-dim);
+  --text-muted:       var(--aura-color-text-dim);
+
+  /* Glows — box-shadow + text-shadow strings carried verbatim */
+  --glow-green:       var(--aura-glow-primary);
+  --glow-red:         var(--aura-glow-danger);
+  --text-glow-green:  var(--aura-glow-subtle);
+
+  /* Typography */
+  --font-mono:        var(--aura-font-mono);
+
+  /* Corner-notch clip-path used by Dialog, Panel, etc. The 12 px chamfer
+   * is the canonical scificn silhouette. */
+  --clip-corner-md:   polygon(
+                        12px 0,
+                        100% 0,
+                        100% calc(100% - 12px),
+                        calc(100% - 12px) 100%,
+                        0 100%,
+                        0 12px
+                      );
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * shadcn standard tokens — kept for forward-compat with non-scificn
+ * shadcn components that consumers may add later. `inline` preserves the
+ * var() reference at runtime so live theme switches propagate.
+ * ──────────────────────────────────────────────────────────────────────── */
+@theme inline {
+  --color-background:             var(--aura-color-bg);
+  --color-foreground:             var(--aura-color-text);
+
+  --color-card:                   var(--aura-color-surface);
+  --color-card-foreground:        var(--aura-color-text);
+
+  --color-popover:                var(--aura-color-surface);
+  --color-popover-foreground:     var(--aura-color-text);
+
+  --color-primary:                var(--aura-color-primary);
+  --color-primary-foreground:     var(--aura-color-bg);
+
+  --color-secondary:              var(--aura-color-secondary);
+  --color-secondary-foreground:   var(--aura-color-bg);
+
+  --color-muted:                  var(--aura-color-surface-2);
+  --color-muted-foreground:       var(--aura-color-text-dim);
+
+  --color-accent:                 var(--aura-color-secondary);
+  --color-accent-foreground:      var(--aura-color-bg);
+
+  --color-destructive:            var(--aura-color-danger);
+  --color-destructive-foreground: var(--aura-color-bg);
+
+  --color-border:                 var(--aura-color-border);
+  --color-input:                  var(--aura-color-border);
+  --color-ring:                   var(--aura-color-primary);
+
+  --font-mono-family:             var(--aura-font-mono);
+  --radius-default:               var(--aura-radius);
+}

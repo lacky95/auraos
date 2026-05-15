@@ -50,6 +50,63 @@ export class OsClient {
     this.base = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
   }
 
+  // -------- OS event subscription (BroadcastReceiver-equivalent) --------
+
+  /**
+   * Subscribe to the OS event bus with a topic filter. Browser-only; no-op on
+   * the server (returns a no-op unsubscribe). Topics use the glob syntax
+   * documented in `@aura/core` (`app:*`, `theme:**`, etc.) — the server-side
+   * filter drops non-matching events before they hit the wire.
+   *
+   * Mirrors Android's `registerReceiver(receiver, IntentFilter)`. Consumers
+   * stop having to do client-side `if (data.type === 'app:stateChanged')`
+   * branching and the SSE stream stays lean.
+   *
+   * Reconnects with simple linear backoff on transport drop.
+   */
+  subscribeOsEvents<T = Record<string, unknown>>(
+    topics: readonly string[],
+    handler: (ev: { type: string } & T) => void,
+  ): () => void {
+    if (typeof window === 'undefined' || typeof EventSource === 'undefined') {
+      return () => undefined;
+    }
+    const qs = topics.length ? `?topics=${encodeURIComponent(topics.join(','))}` : '';
+    const url = `${this.base}/api/apps/events${qs}`;
+
+    let es: EventSource | null = null;
+    let cancelled = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const open = () => {
+      if (cancelled) return;
+      es = new EventSource(url);
+      es.onmessage = (e) => {
+        try {
+          const parsed = JSON.parse(e.data) as { type?: unknown };
+          if (typeof parsed.type === 'string') {
+            handler(parsed as { type: string } & T);
+          }
+        } catch { /* malformed frame — ignore */ }
+      };
+      es.onerror = () => {
+        es?.close();
+        es = null;
+        if (cancelled) return;
+        // Browsers do their own reconnect by default; we still guard against
+        // the rare hard-close case (close called on us, etc.).
+        reconnectTimer = setTimeout(open, 1000);
+      };
+    };
+    open();
+
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      es?.close();
+    };
+  }
+
   // -------- Notifications + lifecycle --------
 
   async sendNotification(title: string, body = ''): Promise<void> {
@@ -67,6 +124,66 @@ export class OsClient {
     const res = await fetch(`${this.base}/api/instances/${encodeURIComponent(instanceId)}/status`);
     const data = await res.json() as { instance: { state: string } };
     return data.instance.state;
+  }
+
+  // -------- Intent dispatch (Android `startActivity(intent)` equivalent) --------
+
+  /**
+   * Resolve + start an intent. The OS picks the highest-scored handler from
+   * declared `intentFilters` across all installed apps. Returns the OS's
+   * verdict — a single chosen handler, a disambiguation list, or `noHandler`.
+   * Apps use this instead of hand-coding `start()` + `openActivity()` so the
+   * routing logic stays in one place.
+   *
+   * Throws on transport errors or non-JSON responses; HTTP 404 (no handler)
+   * is returned as `{ kind: 'noHandler' }` so the caller doesn't have to
+   * catch for the common case.
+   */
+  async startIntent(intent: {
+    action:    string;
+    category?: string[];
+    type?:     string;
+    uri?:      string;
+    extras?:   Record<string, unknown>;
+  }): Promise<
+    | { kind: 'started'; appId: string; instanceId: string; activityId?: string }
+    | { kind: 'disambiguation'; candidates: Array<{ appId: string; score: number }> }
+    | { kind: 'noHandler' }
+  > {
+    const res = await fetch(`${this.base}/api/intents/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(intent),
+    });
+    if (res.status === 404) return { kind: 'noHandler' };
+    if (!res.ok) throw new Error(`startIntent: HTTP ${res.status}`);
+    return (await res.json()) as Awaited<ReturnType<OsClient['startIntent']>>;
+  }
+
+  // -------- BackStack (Android-`Activity.finish()`-equivalent) --------
+
+  /**
+   * Close the calling activity and, if it was launched on top of another
+   * activity in the same instance, refocus the parent. Mirrors Android's
+   * `Activity.finish()` — apps can use this from a "← Back" button in
+   * a sub-screen instead of hand-rolling close + open-parent calls.
+   *
+   * Reads the current activity id from `APP_ACTIVITY_ID` (Node) or the
+   * proxy-injected `<meta name="aura-activity-id">` tag (browser). No-op
+   * if no activity id is available.
+   */
+  async finish(): Promise<void> {
+    let activityId: string | null = null;
+    if (typeof process !== 'undefined' && process.env) {
+      activityId = process.env['APP_ACTIVITY_ID'] ?? null;
+    }
+    if (!activityId && typeof document !== 'undefined') {
+      activityId = document.querySelector('meta[name="aura-activity-id"]')?.getAttribute('content') ?? null;
+    }
+    if (!activityId) return;
+    await fetch(`${this.base}/api/activities/${encodeURIComponent(activityId)}/back`, {
+      method: 'POST',
+    });
   }
 
   // -------- Content-Provider Access --------
@@ -120,27 +237,48 @@ export class OsClient {
 
   // -------- Theme (v3) — selection + inventory --------
 
-  /** Current selection from Settings: both slot ids plus colorMode. */
+  /**
+   * Current selection from the OS KV: both slot ids plus colorMode. The
+   * value lives at `/api/kv/os/theme` (shell-served); writes require the
+   * `system.kv.os.theme.write` permission, reads are public.
+   */
   async getThemeSelection(): Promise<ThemeSelection> {
-    return this.queryProvider<ThemeSelection>('com.aura.settings', 'theme');
+    const res = await fetch(`${this.base}/api/kv/os/theme`);
+    if (!res.ok) throw new Error(`getThemeSelection → HTTP ${res.status}`);
+    const body = await res.json() as { value: ThemeSelection };
+    return body.value;
   }
 
   /** Lightweight inventory of every theme the OS ships (no palettes). */
   async listThemes(): Promise<ThemeSummary[]> {
-    const res = await this.queryProvider<{ themes: ThemeSummary[] }>(
-      'com.aura.settings', 'themes',
-    );
-    return res.themes;
+    const res = await fetch(`${this.base}/api/os/themes`);
+    if (!res.ok) throw new Error(`listThemes → HTTP ${res.status}`);
+    const body = await res.json() as { themes: ThemeSummary[] };
+    return body.themes;
   }
 
   /**
    * Persist a theme pick for a specific tone slot. Slots are independent:
    * setting the dark slot doesn't disturb the light slot, and vice versa.
    * `colorMode` decides which slot is currently rendered.
+   *
+   * Read-modify-write against `/api/kv/os/theme` because KV PUT replaces
+   * the entire value at a key.
    */
   async setOsThemeForTone(tone: ThemeTone, themeId: string): Promise<void> {
-    const field = tone === 'dark' ? 'themeIdDark' : 'themeIdLight';
-    await this.writeProvider('com.aura.settings', 'theme', { [field]: themeId });
+    const previous = await this.getThemeSelection().catch(() => null);
+    const next = { ...(previous ?? {}), [tone === 'dark' ? 'themeIdDark' : 'themeIdLight']: themeId };
+    await this.kvPut('os', 'theme', next);
+  }
+
+  private async kvPut(namespace: string, key: string, value: unknown): Promise<void> {
+    const segs = `${namespace}/${key}`.split('/').map(encodeURIComponent).join('/');
+    const res = await fetch(`${this.base}/api/kv/${segs}`, {
+      method:  'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ value }),
+    });
+    if (!res.ok) throw new Error(`kv PUT ${namespace}/${key} → HTTP ${res.status}: ${await res.text()}`);
   }
 
   /** Reads `<meta name="aura-theme-id">` set by the proxy (synchronous). */
@@ -165,7 +303,9 @@ export class OsClient {
 
   /** Persist a colorMode preference. Broadcasts on the OS bus. */
   async setMode(mode: ColorMode): Promise<void> {
-    await this.writeProvider('com.aura.settings', 'theme', { colorMode: mode });
+    const previous = await this.getThemeSelection().catch(() => null);
+    const next = { ...(previous ?? {}), colorMode: mode };
+    await this.kvPut('os', 'theme', next);
   }
 
   // -------- Theme (v3) — palette + framework --------

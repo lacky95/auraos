@@ -3,8 +3,14 @@ packages:
   - 'apps/*'
 allowBuilds:
   esbuild: true
+  redis-memory-server: set this to true or false
 onlyBuiltDependencies:
   - esbuild
   - node-pty
   - sharp
   - '@img/sharp-libvips-linux-x64'
+
+# Workspace standardises on React 19 — that's what Radix peer-resolves to
+# (Radix peerDep is `^18 || ^19`, pnpm picks the highest). Consumers declare
+# `react: ^19.0.0` directly so everyone sees the same single React copy.
+# No overrides needed.

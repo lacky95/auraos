@@ -1,6 +1,7 @@
 {
   "id": "com.aura.counter",
   "name": "Counter",
+  "icon": "CT",
   "version": "0.1.0",
   "description": "Per-instance counter. Demonstrates multi×multi: each instance has its own counter; activities on the same instance share it.",
   "category": "utility",

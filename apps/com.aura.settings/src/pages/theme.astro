@@ -1,12 +1,31 @@
 ---
+import '@aura/ui/styles/scificn-bridge.css';
 import '../styles/settings.css';
-import { getState } from '../state.js';
-const { themeIdDark: currentDarkId, themeIdLight: currentLightId, colorMode: currentColorMode } = getState();
+import ColorModePicker from '../components/ColorModePicker.tsx';
 
-/* Same theme catalog the OS ThemeManager ships. Kept in sync manually so the
- * Settings app stays free of @aura/core (Phase 2 will refactor to a direct
- * fetch from `/api/data/com.aura.settings/themes`). Swatches let us preview a
- * theme without applying it. */
+// SSR-read the active theme selection from the OS KV. The page lives in
+// the Settings iframe, which is proxied by the shell — we hit the shell's
+// internal port (OS_API_BASE injected by ProotRunner) to bypass the proxy
+// and avoid the Referer-based permission gate.
+const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
+let currentDarkId    = 'sci-fi';
+let currentLightId   = 'paper';
+let currentColorMode: 'light' | 'dark' | 'auto' = 'dark';
+try {
+  const r = await fetch(`${osBase}/api/kv/os/theme`, { signal: AbortSignal.timeout(2000) });
+  if (r.ok) {
+    const body = await r.json() as { value?: { themeIdDark?: string; themeIdLight?: string; colorMode?: typeof currentColorMode } };
+    if (body.value?.themeIdDark)  currentDarkId    = body.value.themeIdDark;
+    if (body.value?.themeIdLight) currentLightId   = body.value.themeIdLight;
+    if (body.value?.colorMode)    currentColorMode = body.value.colorMode;
+  }
+} catch { /* fall back to defaults */ }
+
+/* Same theme catalog the OS ThemeManager ships. Kept inline so this page
+ * stays self-contained (no @aura/core import); the active selection comes
+ * from /api/kv/os/theme above, and `/api/os/themes` would serve the same
+ * list dynamically if we wanted a single source. Swatches let us preview
+ * a theme without applying it. */
 type ToneSwatch = { primary: string; secondary: string; bg: string };
 type ThemeCard  = { id: string; name: string; description: string; tone: 'dark' | 'light'; swatch: ToneSwatch };
 
@@ -91,12 +110,7 @@ const lightThemes = THEMES.filter(t => t.tone === 'light');
         <h2>// COLOR MODE</h2>
         <span class="active-when">DECIDES WHICH SLOT IS ACTIVE</span>
       </header>
-      <div class="mode-row" id="mode-row" role="radiogroup" aria-label="Color mode">
-        <button class="mode-btn" data-mode="light" data-active={currentColorMode === 'light'} role="radio">LIGHT</button>
-        <button class="mode-btn" data-mode="dark"  data-active={currentColorMode === 'dark'}  role="radio">DARK</button>
-        <button class="mode-btn" data-mode="auto"  data-active={currentColorMode === 'auto'}  role="radio">AUTO</button>
-        <span class="mode-resolved" id="mode-resolved">{currentColorMode.toUpperCase()}</span>
-      </div>
+      <ColorModePicker client:load defaultMode={currentColorMode} />
       <p class="auto-hint">AUTO FOLLOWS YOUR OPERATING SYSTEM'S PREFERS-COLOR-SCHEME.</p>
     </section>
 
@@ -108,7 +122,7 @@ const lightThemes = THEMES.filter(t => t.tone === 'light');
       MODE: <b style="color: var(--aura-color-primary);">{currentColorMode.toUpperCase()}</b>
     </p>
   </main>
-  <footer class="settings-foot">PROVIDER · PUT api/data/theme · BROADCASTS theme:changed + mode:changed</footer>
+  <footer class="settings-foot">PROVIDER · PUT /api/kv/os/theme · BROADCASTS theme:changed + mode:changed</footer>
 
   <script is:inline>
     const statusEl = document.getElementById('status');
@@ -138,14 +152,18 @@ const lightThemes = THEMES.filter(t => t.tone === 'light');
 
     async function selectTheme(slot, themeId) {
       try {
+        // KV is full-value-replace, so read-modify-write to merge the
+        // single field the user just clicked.
+        const cur = await fetch('/api/kv/os/theme');
+        const previous = cur.ok ? ((await cur.json()).value ?? {}) : {};
         const field = slot === 'dark' ? 'themeIdDark' : 'themeIdLight';
-        const res = await fetch('api/data/theme', {
+        const next = { ...previous, [field]: themeId };
+        const res = await fetch('/api/kv/os/theme', {
           method:  'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ [field]: themeId }),
+          body:    JSON.stringify({ value: next }),
         });
         if (!res.ok) throw new Error(await res.text());
-        const next = await res.json();
         markActiveCard(slot, themeId);
         paintStatus(next);
       } catch (err) {
@@ -157,39 +175,13 @@ const lightThemes = THEMES.filter(t => t.tone === 'light');
       card.addEventListener('click', () => selectTheme(card.dataset.slot, card.dataset.themeId));
     });
 
-    /* ---- Color-mode picker ---- */
-    const modeResolved = document.getElementById('mode-resolved');
+    /* ---- Color-mode picker ----
+     * Now owned by the <ColorModePicker /> React island. The island handles
+     * matchMedia, postMessage sync, PUT broadcasts, and its own visual state.
+     * We just keep the theme-card live-update logic + the status line refresh
+     * below, both of which sit outside the island. */
 
-    function resolveMode(pref) {
-      if (pref === 'light') return 'light';
-      if (pref === 'dark')  return 'dark';
-      return (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
-    }
-    function paintModeButtons(pref) {
-      document.querySelectorAll('.mode-btn').forEach((b) => {
-        b.dataset.active = (b.dataset.mode === pref) ? 'true' : 'false';
-      });
-      if (modeResolved) modeResolved.textContent = resolveMode(pref).toUpperCase();
-    }
-    paintModeButtons(document.querySelector('.mode-btn[data-active="true"]')?.dataset?.mode || 'dark');
-
-    document.querySelectorAll('.mode-btn').forEach((b) => {
-      b.addEventListener('click', async () => {
-        const mode = b.dataset.mode;
-        if (!['light', 'dark', 'auto'].includes(mode)) return;
-        paintModeButtons(mode);
-        try {
-          const res = await fetch('api/data/theme', {
-            method:  'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ colorMode: mode }),
-          });
-          if (res.ok) paintStatus(await res.json());
-        } catch (err) { console.warn('[settings] set colorMode failed', err); }
-      });
-    });
-
-    /* ---- Live updates from the shell ---- */
+    /* ---- Live updates from the shell (theme cards + status line) ---- */
     window.addEventListener('message', (ev) => {
       const t = ev.data?.type;
       if (t !== 'aura.theme.changed' && t !== 'aura.mode.changed') return;
@@ -197,20 +189,8 @@ const lightThemes = THEMES.filter(t => t.tone === 'light');
       if (link) link.setAttribute('href', '/api/os/theme.css?t=' + Date.now());
       if (ev.data.themeIdDark)  markActiveCard('dark',  ev.data.themeIdDark);
       if (ev.data.themeIdLight) markActiveCard('light', ev.data.themeIdLight);
-      if (ev.data.colorMode)    paintModeButtons(ev.data.colorMode);
       if (ev.data.themeIdDark && ev.data.themeIdLight && ev.data.colorMode) paintStatus(ev.data);
     });
-
-    /* Re-paint resolved pill when OS prefers-color-scheme flips while AUTO is selected */
-    if (window.matchMedia) {
-      const mql = window.matchMedia('(prefers-color-scheme: light)');
-      const handle = () => {
-        const active = document.querySelector('.mode-btn[data-active="true"]');
-        if (active?.dataset.mode === 'auto') paintModeButtons('auto');
-      };
-      if (mql.addEventListener) mql.addEventListener('change', handle);
-      else                       mql.addListener?.(handle);
-    }
   </script>
 </body>
 </html>

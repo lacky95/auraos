@@ -1,5 +1,5 @@
-import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readdirSync, readFileSync, lstatSync, writeFileSync, chmodSync, unlinkSync, existsSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import type { AppLifecycleState } from '../types/lifecycle.js';
 import type { AppInstance } from '../types/instance.js';
@@ -9,6 +9,7 @@ import { AppRegistry } from './AppRegistry.js';
 import { PortAllocator } from './PortAllocator.js';
 import { LifecycleStateMachine } from './LifecycleStateMachine.js';
 import { ProotRunner, killProcessGroup } from './ProotRunner.js';
+import { IntentResolver, type Intent, type IntentMatch } from './IntentResolver.js';
 import { PermissionManager } from '../permissions/PermissionManager.js';
 import { ContentProviderRegistry } from '../content/ContentProviderRegistry.js';
 
@@ -26,7 +27,9 @@ export class AppManager {
   private nextActivityNum = new Map<string, number>();
   readonly permissions: PermissionManager;
   readonly providers:   ContentProviderRegistry;
+  readonly intents:     IntentResolver;
   private dataDir: string;
+  private toolchainDir: string;
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
   private reconcileRunning = false;
   // Pool refills currently in flight per appId. The "pool" itself is just the
@@ -45,6 +48,7 @@ export class AppManager {
     shellPort?: number;
   }) {
     this.dataDir = opts.dataDir;
+    this.toolchainDir = opts.toolchainDir;
     this.registry = new AppRegistry(opts.appsDir);
     this.ports = new PortAllocator(opts.portStart ?? 4001, opts.portEnd ?? 4999);
     this.fsm = new LifecycleStateMachine();
@@ -53,15 +57,152 @@ export class AppManager {
       toolchainDir: opts.toolchainDir,
       appsDir: opts.appsDir,
       dataDir: opts.dataDir,
-      osApiBase: `http://localhost:${opts.shellPort ?? 3000}`,
+      // PRoot sandboxes don't always carry an /etc/hosts entry for `localhost`
+      // (the base rootfs we bind in doesn't ship one), so DNS resolution for
+      // the hostname `localhost` fails with ENOTFOUND when an app tries to
+      // POST back to /api/os/events/*. Using 127.0.0.1 sidesteps the lookup
+      // entirely and works in BOTH prooted and non-prooted spawns.
+      osApiBase: `http://127.0.0.1:${opts.shellPort ?? 3000}`,
     });
     this.permissions = new PermissionManager(this.registry);
     this.providers   = new ContentProviderRegistry();
+    this.intents     = new IntentResolver();
+  }
+
+  /**
+   * Replace any toolchain entry that's currently a symlink with the real
+   * shim-script content. PRoot's ptrace-based bind cannot translate
+   * `readlink()` on bound symlinks — Node's `realpathSync` then throws
+   * EINVAL on entry-point resolution (see ProotRunner bind setup).
+   *
+   * The Dockerfile's dev CMD already installs the shim via `install -D`,
+   * but that only runs on container create. If the running image was built
+   * before that change, the toolchain entries are still symlinks. Healing
+   * here makes the fix work the moment the shell process starts, without
+   * needing a `docker compose up --build`.
+   *
+   * Tools handled today: `aura` (the CLI). Add more entries here if other
+   * tools ever ship as `#!/usr/bin/env node` scripts. Plain executables
+   * (bash, node, git, curl, claude) don't need a shim.
+   */
+  private healToolchainShims(): void {
+    const shimSource = '/workspace/os/aura-cli-shim.sh';
+    if (!existsSync(shimSource)) return; // dev-only path; skip silently in prod
+    let shimContent: string;
+    try { shimContent = readFileSync(shimSource, 'utf-8'); }
+    catch { return; }
+
+    const targets = [
+      join(this.toolchainDir, 'bin', 'aura'),
+      '/usr/local/bin/aura',
+    ];
+    for (const target of targets) {
+      try {
+        let needsWrite = true;
+        if (existsSync(target)) {
+          const st = lstatSync(target);
+          if (st.isFile()) {
+            // Already a regular file — only rewrite if content drifted.
+            try { needsWrite = readFileSync(target, 'utf-8') !== shimContent; }
+            catch { needsWrite = true; }
+          } else {
+            // Symlink (or something else) — replace.
+            unlinkSync(target);
+          }
+        }
+        if (needsWrite) {
+          mkdirSync(dirname(target), { recursive: true });
+          writeFileSync(target, shimContent);
+          chmodSync(target, 0o755);
+          console.log(`[AppManager] healed toolchain shim → ${target}`);
+        }
+      } catch (err) {
+        console.warn(`[AppManager] could not heal ${target}: ${(err as Error).message}`);
+      }
+    }
+
+    // Mirror /workspace/os/bashrc.aura.sh into the base-rootfs that every
+    // PRoot uses as its `/`. The Dockerfile dev CMD already does this on
+    // container create, but a workspace-side edit to the bashrc otherwise
+    // requires `docker compose up --build` to land — this self-heal makes
+    // every shell startup pick up the latest version.
+    const bashrcSource = '/workspace/os/bashrc.aura.sh';
+    const baseRootfsRoot = process.env['AURA_BASE_ROOTFS'] ?? '/os/base-rootfs';
+    if (existsSync(bashrcSource) && existsSync(baseRootfsRoot)) {
+      try {
+        const content = readFileSync(bashrcSource, 'utf-8');
+        for (const dst of [join(baseRootfsRoot, 'root', '.bashrc'), join(baseRootfsRoot, 'etc', 'profile.d', 'aura-prompt.sh')]) {
+          mkdirSync(dirname(dst), { recursive: true });
+          let drift = true;
+          try { drift = readFileSync(dst, 'utf-8') !== content; } catch { /* not present */ }
+          if (drift) {
+            writeFileSync(dst, content);
+            chmodSync(dst, 0o644);
+            console.log(`[AppManager] healed bashrc → ${dst}`);
+          }
+        }
+      } catch (err) {
+        console.warn(`[AppManager] bashrc heal failed: ${(err as Error).message}`);
+      }
+    }
+
+    // Pre-create /aura/{all-tools,my-tools} as empty directories in the
+    // base-rootfs so PRoot's --bind has guaranteed mount points. PRoot can
+    // create missing dst paths in some versions but not others; pre-creating
+    // them removes the ambiguity and avoids the "binds silently dropped →
+    // /aura/my-tools doesn't exist in the proot → bashrc PATH guard skips →
+    // htop not found" failure mode.
+    if (existsSync(baseRootfsRoot)) {
+      for (const mountPoint of [join(baseRootfsRoot, 'aura', 'all-tools'), join(baseRootfsRoot, 'aura', 'my-tools')]) {
+        try { mkdirSync(mountPoint, { recursive: true }); }
+        catch (err) { console.warn(`[AppManager] could not pre-create ${mountPoint}: ${(err as Error).message}`); }
+      }
+    }
+  }
+
+  /**
+   * Re-materialise the per-instance tool allowlist for every live instance
+   * of `appId`. Call after a `cap grant` / `cap revoke` so a running app
+   * picks up the change WITHOUT a backend respawn — the proot's bind is at
+   * the directory level, so symlink mutations are immediately visible.
+   *
+   * Returns the list of affected instances (useful for endpoint responses
+   * that want to confirm what was refreshed).
+   */
+  refreshInstanceTools(appId: string): string[] {
+    const manifest = this.registry.getById(appId);
+    if (!manifest) return [];
+    const refreshed: string[] = [];
+    for (const inst of this.getInstancesByApp(appId)) {
+      try {
+        this.runner.provisionToolsDir(inst.instanceId, manifest);
+        refreshed.push(inst.instanceId);
+      } catch (err) {
+        console.warn(`[AppManager] refresh tools failed for ${inst.instanceId}: ${(err as Error).message}`);
+      }
+    }
+    return refreshed;
+  }
+
+  /**
+   * After a successful `cap install`, refresh every running instance whose
+   * manifest declares `'*'` so the new binary shows up in /aura/my-tools.
+   * Explicit-list apps are unaffected — they only see what's symlinked.
+   */
+  refreshWildcardApps(): string[] {
+    const refreshed: string[] = [];
+    for (const m of this.registry.getAll()) {
+      if (!m.tools.includes('*')) continue;
+      refreshed.push(...this.refreshInstanceTools(m.id));
+    }
+    return refreshed;
   }
 
   async init(): Promise<void> {
     mkdirSync(join(this.dataDir, 'apps'), { recursive: true });
+    this.healToolchainShims();
     await this.registry.init();
+    this.intents.reload(this.registry.getAll());
     console.log(`[AppManager] Ready. Apps found: ${this.registry.getAll().length}`);
     this.startReconciler();
     // Kick off warm-pool fills for opted-in apps (non-blocking — init returns
@@ -71,6 +212,29 @@ export class AppManager {
       if (m.warmPool > 0 && m.instanceMode === 'multi') {
         for (let i = 0; i < m.warmPool; i++) this.scheduleRefill(m.id);
       }
+    }
+    // Auto-start every Service component. Independent of the warm-pool path —
+    // services aren't pre-staged copies of a user-facing app, they ARE the
+    // running backend. The reconciler crash-recovers them on the same loop it
+    // already uses for orphan reaping, so we don't need a dedicated supervisor.
+    for (const m of this.registry.getAll()) {
+      if (m.componentType !== 'service') continue;
+      console.log(`[AppManager] starting service ${m.id}`);
+      this.startService(m.id).catch((err) => {
+        console.error(`[AppManager] service ${m.id} failed to start: ${(err as Error).message}`);
+      });
+    }
+    // Auto-start non-service apps that declared autoStart=true (e.g. Settings,
+    // whose content providers /api/data/{theme,workspaces,layouts} are read
+    // by the shell SSR and every iframe-side OsClient). Without this they 404
+    // on every cold load until the user happens to open the app manually.
+    for (const m of this.registry.getAll()) {
+      if (m.componentType === 'service') continue; // already handled above
+      if (!m.autoStart) continue;
+      console.log(`[AppManager] auto-starting ${m.id}`);
+      this.start(m.id).catch((err) => {
+        console.error(`[AppManager] autoStart ${m.id} failed: ${(err as Error).message}`);
+      });
     }
   }
 
@@ -146,6 +310,90 @@ export class AppManager {
       this.scheduleRefill(appId);
     }
     return instanceId;
+  }
+
+  // -------- Intent dispatch (Android startActivity(intent) equivalent) --------
+
+  /**
+   * Resolve and start an intent. When exactly one handler scores highest, it
+   * is auto-started + an activity is opened on it (if the handler supports
+   * activities). When multiple top-tied handlers exist, returns a
+   * `disambiguation` result so the shell can present a chooser. When no
+   * handler matches, returns `noHandler`.
+   *
+   * `extras` from the intent are forwarded as the activity's `data` payload —
+   * the receiving app reads them in `onActivityCreate`.
+   */
+  async startIntent(intent: Intent): Promise<
+    | { kind: 'started'; appId: string; instanceId: string; activityId?: string }
+    | { kind: 'disambiguation'; candidates: IntentMatch[] }
+    | { kind: 'noHandler' }
+  > {
+    const ranked = this.intents.resolve(intent);
+    if (ranked.length === 0) return { kind: 'noHandler' };
+
+    // Multiple equally-scored top candidates → ask the user.
+    const topScore = ranked[0]!.score;
+    const top = ranked.filter((m) => m.score === topScore);
+    if (top.length > 1) {
+      return { kind: 'disambiguation', candidates: top };
+    }
+
+    const chosen = top[0]!;
+    const manifest = this.registry.getById(chosen.appId);
+    if (!manifest) return { kind: 'noHandler' };
+
+    const instanceId = await this.start(chosen.appId);
+
+    // If the chosen handler supports activities, open one with the intent's
+    // extras. Services have activityMode='none' (Zod refinement); for those
+    // we just hand back the running instance.
+    if (manifest.activityMode === 'multi') {
+      const activity = await this.openActivity(instanceId, intent.extras);
+      return { kind: 'started', appId: chosen.appId, instanceId, activityId: activity.activityId };
+    }
+    return { kind: 'started', appId: chosen.appId, instanceId };
+  }
+
+  // -------- Service component (Android Service equivalent) --------
+
+  /**
+   * Start a `componentType: 'service'` app's headless backend. Idempotent:
+   * if a service instance is already running we return its id. Services
+   * always use instanceMode='single' in practice — the registry rejects
+   * activity-style multi-instance for services via the Zod refinement —
+   * so the singleton check is sufficient.
+   *
+   * Crash recovery is handled by the existing reconciler tick (marks the
+   * stale instance 'error', then init/auto-restart logic kicks in via the
+   * usual orphan-reap + state transition path).
+   */
+  async startService(appId: string): Promise<string> {
+    const manifest = this.registry.getById(appId);
+    if (!manifest) throw new Error(`App not found: ${appId}`);
+    if (manifest.componentType !== 'service') {
+      throw new Error(`startService called for non-service app ${appId} (componentType='${manifest.componentType}')`);
+    }
+    const existing = this.getInstancesByApp(appId).find(
+      (i) => i.state !== 'destroyed' && i.state !== 'error',
+    );
+    if (existing) return existing.instanceId;
+    return this.spawnInstance(appId, { inPool: false });
+  }
+
+  /**
+   * Stop a service instance. Thin wrapper over `stop()` that asserts the
+   * underlying app is actually a service — accidentally calling this on an
+   * activity-style app would skip its window-cleanup path and confuse the UI.
+   */
+  async stopService(instanceId: string): Promise<void> {
+    const inst = this.instances.get(instanceId);
+    if (!inst) return;
+    const manifest = this.registry.getById(inst.appId);
+    if (manifest && manifest.componentType !== 'service') {
+      throw new Error(`stopService called for non-service instance ${instanceId} (app=${inst.appId})`);
+    }
+    await this.stop(instanceId);
   }
 
   /**
@@ -308,6 +556,7 @@ export class AppManager {
     this.transition(instanceId, appId, 'destroyed', null);
 
     // Clear instance after destroy
+    this.runner.clearToolsDir(instanceId);
     this.instances.delete(instanceId);
     this.fsm.delete(instanceId);
     this.nextActivityNum.delete(instanceId);
@@ -336,6 +585,7 @@ export class AppManager {
       this.fsm.set(instanceId, 'destroyed');
       OsEventBus.emit('app:stateChanged', { instanceId, appId, state: 'destroyed', port: null });
     }
+    this.runner.clearToolsDir(instanceId);
     this.instances.delete(instanceId);
     this.fsm.delete(instanceId);
     this.nextActivityNum.delete(instanceId);
@@ -384,11 +634,22 @@ export class AppManager {
    *
    * Apps without the hook get activities transparently (default path `/`).
    */
-  async openActivity(instanceId: string, data?: Record<string, unknown>): Promise<AppActivity> {
+  async openActivity(
+    instanceId: string,
+    data?: Record<string, unknown>,
+    opts?: { stackParent?: string },
+  ): Promise<AppActivity> {
     const inst = this.instances.get(instanceId);
     if (!inst) throw new Error(`Instance not found: ${instanceId}`);
     const manifest = this.registry.getById(inst.appId);
     if (!manifest) throw new Error(`Manifest gone for ${inst.appId}`);
+    // Services are headless by contract — refusing openActivity here is the
+    // same invariant the Zod refinement enforces at manifest load (service ⇒
+    // activityMode='none'). The error message is callable-friendly: callers
+    // up the stack translate `service instances` to HTTP 409.
+    if (manifest.componentType === 'service') {
+      throw new Error(`service instances do not host activities (app=${inst.appId})`);
+    }
     if (manifest.activityMode !== 'multi') {
       throw new Error(`App ${inst.appId} does not support activities (activityMode='${manifest.activityMode}')`);
     }
@@ -435,6 +696,18 @@ export class AppManager {
       minimizable = false;
     }
 
+    // Stack parent is validated: must belong to the same instance — cross-
+    // instance back-stacks are deferred until we add Android-style task
+    // affinity. Silently drop a bogus parent rather than throwing — the
+    // caller (proxy or intent dispatcher) probably has a stale id.
+    let stackParent: string | undefined;
+    if (opts?.stackParent) {
+      const parent = this.activities.get(opts.stackParent);
+      if (parent && parent.parentInstanceId === instanceId) {
+        stackParent = opts.stackParent;
+      }
+    }
+
     const activity: AppActivity = {
       activityId,
       parentInstanceId: instanceId,
@@ -442,9 +715,11 @@ export class AppManager {
       path,
       createdAt: now,
       lastTransitionAt: now,
+      taskId: instanceId,
       ...(title       !== undefined ? { title }       : {}),
       ...(metadata    !== undefined ? { metadata }    : {}),
       ...(minimizable ?               { minimizable: true } : {}),
+      ...(stackParent ?               { stackParentId: stackParent } : {}),
     };
     this.activities.set(activityId, activity);
     OsEventBus.emit('activity:opened', {
@@ -454,8 +729,32 @@ export class AppManager {
       path,
       ...(title !== undefined ? { title } : {}),
       ...(minimizable ?         { minimizable: true } : {}),
+      ...(stackParent ?         { stackParentId: stackParent } : {}),
     });
     return activity;
+  }
+
+  /**
+   * Android-style back navigation. Closes the activity, then — if it was
+   * launched on top of another (`stackParentId` set) — emits a focus event
+   * so the shell can refocus the parent. With no parent, behaves exactly
+   * like `closeActivity` (no auto-focus).
+   *
+   * Idempotent: unknown activityId is a no-op.
+   */
+  async goBack(activityId: string): Promise<void> {
+    const activity = this.activities.get(activityId);
+    if (!activity) return;
+    const parentToFocus = activity.stackParentId ?? null;
+    await this.closeActivity(activityId);
+    if (parentToFocus && this.activities.has(parentToFocus)) {
+      const parent = this.activities.get(parentToFocus)!;
+      OsEventBus.emit('activity:focus', {
+        activityId: parent.activityId,
+        parentInstanceId: parent.parentInstanceId,
+        appId: parent.appId,
+      });
+    }
   }
 
   /**
@@ -700,6 +999,23 @@ export class AppManager {
       const inFlight = this.refillInFlight.get(m.id) ?? 0;
       const slack = m.warmPool - (inPool + inFlight);
       for (let i = 0; i < slack; i++) this.scheduleRefill(m.id);
+    }
+
+    // 5) Orphan-activity prune — activities whose parent instance is gone
+    //    (typical aftermath of a partially-recovered crash or an external
+    //    force-kill). Without this they linger in `this.activities`, get
+    //    surfaced by /api/apps and the Process Manager, and the iframes the
+    //    shell built from them point at a non-existent instance → 503/500
+    //    cascades. Cheap O(n) sweep, runs every 5s.
+    for (const act of Array.from(this.activities.values())) {
+      if (this.instances.has(act.parentInstanceId)) continue;
+      console.warn(`[AppManager] reconcile: orphan activity ${act.activityId} (parent ${act.parentInstanceId} is gone) — dropping`);
+      this.activities.delete(act.activityId);
+      OsEventBus.emit('activity:closed', {
+        activityId: act.activityId,
+        parentInstanceId: act.parentInstanceId,
+        appId: act.appId,
+      });
     }
   }
 

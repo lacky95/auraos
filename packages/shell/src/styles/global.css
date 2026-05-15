@@ -1,3 +1,8 @@
+/* The scificn-bridge CSS lives in @aura/ui and is imported from
+ * OSLayout.astro via Astro's JS import (which respects the Vite alias
+ * regex). Importing it here with a CSS @import would fail — postcss-import
+ * doesn't honour Vite's array aliases and would try to load
+ * `<index.ts>/styles/scificn-bridge.css` (ENOTDIR). */
 @import './tokens.css';
 
 *, *::before, *::after {

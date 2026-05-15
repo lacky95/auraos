@@ -42,10 +42,27 @@ export const AppManifestSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/, {
     message: 'App ID must be reverse-domain notation: com.example.app',
   }),
+  /**
+   * Component archetype — direct counterpart of Android's component model:
+   *   'activity' (default) → user-facing app. Spawn lazily on launch, lifecycle
+   *      includes onActivityCreate/onActivityDestroy, attaches to the UI shell.
+   *   'service'            → headless backend. Spawn at OS init (and respawn on
+   *      crash via the reconciler). Lifecycle truncates to onCreate/onStart/
+   *      onResume — no activities, no shell slot, no "+ activity" affordance.
+   *      activityMode MUST be 'none' (Zod refine below).
+   */
+  componentType: z.enum(['activity', 'service']).default('activity'),
   name: z.string().min(1).max(64),
   version: z.string().regex(/^\d+\.\d+\.\d+$/),
   description: z.string().max(256).optional(),
-  icon: z.string().optional(),
+  /**
+   * Short letter glyph (1-3 uppercase characters) used by launcher, dock,
+   * and Process Manager when no real icon exists. The shell scales the
+   * font-size based on length so 1-char ("C"), 2-char ("CT"), and 3-char
+   * ("SET") glyphs all fit the same 48×48 tile.
+   * Falls back to `name.charAt(0).toUpperCase()` when omitted.
+   */
+  icon: z.string().min(1).max(3).optional(),
   entrypoint: z.string().default('entrypoint.sh'),
   serverPort: z.number().int().min(1024).max(65535).optional(),
   permissions: z.array(PermissionSchema).default([]),
@@ -74,6 +91,29 @@ export const AppManifestSchema = z.object({
   /** Cap on concurrent activities per instance. 0 = unlimited. */
   maxActivitiesPerInstance: z.number().int().min(0).default(0),
   /**
+   * When true, the AppManager starts this app at OS init — before any user
+   * launch — so its content providers / services are available immediately.
+   * Default false: app spawns lazily on first launch.
+   *
+   * Differs from componentType='service' in that an autoStart app can still
+   * have a UI activity (e.g. Settings). componentType='service' is for
+   * headless backends; autoStart is for "needs to be ready before someone
+   * clicks anything".
+   */
+  autoStart: z.boolean().default(false),
+  /**
+   * Sandbox this app inside PRoot. Default true. Set false ONLY for apps
+   * that use native modules whose syscalls PRoot's ptrace-based emulation
+   * can't translate — Tailwind 4 (Oxide), node-pty in some configurations,
+   * etc. — where the app errors out with EFAULT on file opens.
+   *
+   * Cost of opting out: app sees the container's full filesystem (no
+   * `--bind` jail), and the AURA_LAYER_TAG prompt drops to `[ctnr]`.
+   * Process-group kill, port allocation, identity verification all still
+   * work — they're independent of the sandbox.
+   */
+  useProot: z.boolean().default(true),
+  /**
    * What happens when the user clicks the app icon while at least one instance is already running.
    * Only meaningful for apps where BOTH instanceMode='multi' AND activityMode='multi'.
    * 'new-instance' → always spawn a new backend process (activities opened explicitly via "+ NEW WINDOW")
@@ -91,7 +131,19 @@ export const AppManifestSchema = z.object({
     resizable: z.boolean().default(true),
   }).default({}),
   lifecycleBasePath: z.string().default('/api/lifecycle'),
-  preferredLayout: z.enum(['fullscreen', 'tiling', 'windowed', 'any']).default('any'),
+  /**
+   * The app's preferred layout-strategy id. Free-form string so third-party
+   * layout packs declared via `intentFilters`-style discovery (Phase 6 of
+   * the workspace plan) can be picked. `'any'` means "no preference — the
+   * workspace's current strategy stands". The shell validates the value
+   * against `layoutRegistry.has(id)` at consumption time and falls back to
+   * the workspace default on miss.
+   *
+   * The previous enum (`'fullscreen' | 'tiling' | 'windowed' | 'any'`) is
+   * still accepted byte-identical — those ids are seeded in the default
+   * registry.
+   */
+  preferredLayout: z.string().default('any'),
   shortcuts: z.array(z.object({
     name: z.string(),
     action: z.string(),
@@ -119,6 +171,28 @@ export const AppManifestSchema = z.object({
    * requests through this declaration and enforces permissions.
    */
   dataProvider: DataProviderSchema.optional(),
-});
+  /**
+   * Android `<intent-filter>` equivalent. Each entry declares ONE filter that
+   * makes this app a candidate handler for matching intents. The OS picks
+   * the highest-scored candidate (mime specificity beats wildcard; priority
+   * breaks ties) and routes via `startIntent`. Apps without filters can
+   * still be launched directly via `start()` + `openActivity()`.
+   */
+  intentFilters: z.array(z.object({
+    /** Canonical action, namespaced. e.g. `aura.intent.action.VIEW`. */
+    action:     z.string().min(1),
+    /** Optional category labels (intersected w/ intent's). e.g. `aura.intent.category.DEFAULT`. */
+    category:   z.array(z.string()).default([]),
+    /** Acceptable MIME types. `image/*` and `*\/*` count as wildcards in scoring. */
+    dataMime:   z.array(z.string()).default([]),
+    /** Acceptable URI schemes, e.g. `aura`, `http`, `https`. */
+    dataScheme: z.array(z.string()).default([]),
+    /** Manual tie-breaker — higher wins. Default 0. */
+    priority:   z.number().int().default(0),
+  })).default([]),
+}).refine(
+  (m) => m.componentType !== 'service' || m.activityMode === 'none',
+  { message: "componentType: 'service' requires activityMode: 'none' — services cannot host activities", path: ['componentType'] },
+);
 
 export type AppManifest = z.infer<typeof AppManifestSchema>;

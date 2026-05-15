@@ -1,23 +1,62 @@
 ---
+/**
+ * The desktop's layout dispatcher. Translates the active workspace's
+ * `layoutId` into the matching strategy component. The registry of
+ * available strategies lives in `@aura/core` (LayoutStrategyRegistry); the
+ * actual Astro components live here, in a static map keyed by id.
+ *
+ * The id→component mapping is deliberately static (not dynamic import) so
+ * Astro can tree-shake unused strategies + bundle them eagerly in the
+ * shell. The future plugin loader (Phase 6) will swap this for a dynamic
+ * `Map<id, () => Promise<Component>>` once strategies can come from
+ * external packages.
+ */
 import type { AppView } from '@aura/core';
+import { layoutRegistry } from '@aura/core';
 import FullscreenLayout from './strategies/FullscreenLayout.astro';
-import TilingLayout from './strategies/TilingLayout.astro';
+import TilingLayout     from './strategies/TilingLayout.astro';
+import StackLayout      from './strategies/StackLayout.astro';
 
 interface Props {
-  views: AppView[];
+  views:       AppView[];
+  /**
+   * Active workspace's layout strategy id. Defaults to `'tiling'` so callers
+   * that haven't migrated to workspaces yet (Phase 3) get the historical
+   * behaviour.
+   */
+  strategyId?: string;
+  /** Strategy-specific persisted state (e.g. saved rects for `stack`). */
+  layoutState?: Record<string, unknown>;
 }
-const { views } = Astro.props;
+const { views, strategyId = 'tiling', layoutState } = Astro.props;
 const visible = views.filter(v => v.state !== 'minimized');
+
+/**
+ * Component map. Keep keys aligned with the ids seeded in
+ * `DEFAULT_LAYOUT_STRATEGIES` (LayoutStrategyRegistry). The registry is the
+ * single source of truth for metadata; this map carries the render impl.
+ */
+const COMPONENTS = {
+  tiling:     TilingLayout,
+  fullscreen: FullscreenLayout,
+  stack:      StackLayout,
+} as const;
+
+type StrategyId = keyof typeof COMPONENTS;
+const resolvedId: StrategyId =
+  (layoutRegistry.has(strategyId) && (strategyId in COMPONENTS))
+    ? (strategyId as StrategyId)
+    : 'tiling';
+const StrategyComponent = COMPONENTS[resolvedId];
 ---
-<div id="layout-manager">
+<div id="layout-manager" data-strategy={resolvedId}>
   {visible.length === 0 && (
     <div class="empty-desktop">
       <span class="tagline">// NO ACTIVE PROCESSES</span>
       <a href="/launcher" class="launch-hint">[ LAUNCH APP ]</a>
     </div>
   )}
-  {visible.length === 1 && <FullscreenLayout views={visible} />}
-  {visible.length >= 2  && <TilingLayout    views={visible} />}
+  {visible.length > 0 && <StrategyComponent views={visible} layoutState={layoutState} />}
 </div>
 
 <style>

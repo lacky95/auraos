@@ -2,25 +2,27 @@ import type { Command } from 'commander';
 import { api } from '../lib/client.js';
 import { color, fail, ok } from '../lib/format.js';
 
-const PROVIDER = '/api/data/com.aura.settings/theme';
+const KV_THEME    = '/api/kv/os/theme';
+const OS_THEMES   = '/api/os/themes';
 
-interface ThemeResponse {
-  themeId: string;
-  theme?: { id: string; name: string };
-}
+interface KvEnvelope<T> { value: T; updatedAt: number; }
+interface ThemeSelection { themeIdDark?: string; themeIdLight?: string; colorMode?: 'light' | 'dark' | 'auto' }
 
 export function registerTheme(program: Command): void {
-  const theme = program.command('theme').description('Get / set the current AuraOS theme via the Settings content provider.');
+  const theme = program.command('theme').description('Get / set the current AuraOS theme via the OS KV.');
 
   theme
     .command('list')
     .description('List available theme presets.')
     .action(async () => {
       try {
-        const data = await api.get<{ themes: Array<{ id: string; name: string }> }>('/api/data/com.aura.settings/themes');
-        const current = await api.get<ThemeResponse>(PROVIDER).catch(() => null);
+        const data    = await api.get<{ themes: Array<{ id: string; name: string; tone?: string }> }>(OS_THEMES);
+        const current = await api.get<KvEnvelope<ThemeSelection>>(KV_THEME).catch(() => null);
+        const activeDark  = current?.value?.themeIdDark  ?? null;
+        const activeLight = current?.value?.themeIdLight ?? null;
         for (const t of data.themes ?? []) {
-          const marker = current?.themeId === t.id ? color.green('●') : color.dim('○');
+          const active = t.id === activeDark || t.id === activeLight;
+          const marker = active ? color.green('●') : color.dim('○');
           console.log(`${marker} ${t.id.padEnd(12)} ${color.dim(t.name)}`);
         }
       } catch (err) {
@@ -30,17 +32,25 @@ export function registerTheme(program: Command): void {
 
   theme
     .command('get')
-    .description('Print the currently active theme ID.')
+    .description('Print the currently active theme selection.')
     .action(async () => {
-      const res = await api.get<ThemeResponse>(PROVIDER);
-      console.log(res.themeId);
+      const res = await api.get<KvEnvelope<ThemeSelection>>(KV_THEME);
+      const v = res.value ?? {};
+      console.log(`dark:  ${v.themeIdDark  ?? '(none)'}`);
+      console.log(`light: ${v.themeIdLight ?? '(none)'}`);
+      console.log(`mode:  ${v.colorMode    ?? '(none)'}`);
     });
 
   theme
     .command('set <themeId>')
-    .description('Set the active theme. Triggers a live update across the shell + open apps.')
-    .action(async (themeId: string) => {
-      await api.put(PROVIDER, { themeId });
-      ok(`theme set to ${color.bold(themeId)}`);
+    .description('Set the active dark theme. Triggers a live update across the shell + open apps.')
+    .option('--tone <tone>', "'dark' or 'light' — which slot to update", 'dark')
+    .action(async (themeId: string, opts: { tone: 'dark' | 'light' }) => {
+      // Read-modify-write: KV PUT replaces the whole value.
+      const current = await api.get<KvEnvelope<ThemeSelection>>(KV_THEME).catch(() => null);
+      const previous = current?.value ?? {};
+      const field = opts.tone === 'light' ? 'themeIdLight' : 'themeIdDark';
+      await api.put(KV_THEME, { value: { ...previous, [field]: themeId } });
+      ok(`${opts.tone} theme set to ${color.bold(themeId)}`);
     });
 }

@@ -1,14 +1,23 @@
+---
+import '@aura/ui/styles/scificn-bridge.css';
+import AutoscrollCheckbox from '../components/AutoscrollCheckbox.tsx';
+---
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Console — AuraOS</title>
+  <!-- /api/os/theme.css is auto-injected by the proxy for themeStrategy='inherit'
+       apps (the default). The explicit link below is harmless and ensures the
+       page survives direct curl / headless renders that don't go through the
+       proxy. -->
+  <link rel="stylesheet" href="/api/os/theme.css" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      background: #0a0a0a;
-      color: #ccffcc;
+      background: var(--aura-color-bg);
+      color: var(--aura-color-text);
       font-family: 'Courier New', monospace;
       height: 100vh;
       display: flex;
@@ -21,17 +30,17 @@
       align-items: center;
       gap: 8px;
       padding: 6px 10px;
-      background: #111;
-      border-bottom: 1px solid rgba(0,255,65,.2);
+      background: var(--aura-color-surface);
+      border-bottom: 1px solid var(--aura-color-border);
       font-size: 0.6rem;
       text-transform: uppercase;
       letter-spacing: .08em;
-      color: #557755;
+      color: var(--aura-color-text-dim);
       flex-shrink: 0;
       flex-wrap: wrap;
     }
     header .title {
-      color: #00ff41;
+      color: var(--aura-color-primary);
       font-size: 0.7rem;
       letter-spacing: 0.12em;
     }
@@ -40,18 +49,18 @@
       gap: 2px;
       align-items: center;
       padding: 2px 6px;
-      border: 1px solid rgba(0,255,65,.15);
+      border: 1px solid var(--aura-color-border);
     }
     header .group-label {
       font-size: 0.5rem;
-      color: #557755;
+      color: var(--aura-color-text-dim);
       letter-spacing: 0.1em;
       margin-right: 4px;
     }
     .filter-btn, .source-btn {
       background: transparent;
-      border: 1px solid rgba(0,255,65,.2);
-      color: #557755;
+      border: 1px solid var(--aura-color-border);
+      color: var(--aura-color-text-dim);
       font-family: inherit;
       font-size: 0.55rem;
       letter-spacing: 0.06em;
@@ -60,15 +69,15 @@
       text-transform: uppercase;
       transition: color 0.1s, border-color 0.1s;
     }
-    .filter-btn[data-active="true"] { color: #00ff41; border-color: #00ff41; }
-    .filter-btn[data-level="warn"][data-active="true"]  { color: #ff9900; border-color: #ff9900; }
-    .filter-btn[data-level="error"][data-active="true"] { color: #ff2020; border-color: #ff2020; }
-    .filter-btn[data-level="info"][data-active="true"]  { color: #00aaff; border-color: #00aaff; }
-    .filter-btn[data-level="debug"][data-active="true"] { color: #888;    border-color: #888;    }
+    .filter-btn[data-active="true"] { color: var(--aura-color-primary); border-color: var(--aura-color-primary); }
+    .filter-btn[data-level="warn"][data-active="true"]  { color: var(--aura-color-warning); border-color: var(--aura-color-warning); }
+    .filter-btn[data-level="error"][data-active="true"] { color: var(--aura-color-danger); border-color: var(--aura-color-danger); }
+    .filter-btn[data-level="info"][data-active="true"]  { color: var(--aura-color-info); border-color: var(--aura-color-info); }
+    .filter-btn[data-level="debug"][data-active="true"] { color: var(--aura-color-text-dim);    border-color: var(--aura-color-text-dim);    }
 
     header .spacer { flex: 1; }
-    header .count-info { color: #557755; font-size: 0.55rem; }
-    header .count-info b { color: #ff9900; font-weight: normal; }
+    header .count-info { color: var(--aura-color-text-dim); font-size: 0.55rem; }
+    header .count-info b { color: var(--aura-color-secondary); font-weight: normal; }
     header label {
       display: flex;
       align-items: center;
@@ -78,9 +87,9 @@
     }
 
     .search {
-      background: #050505;
-      border: 1px solid rgba(0,255,65,.2);
-      color: #ccffcc;
+      background: var(--aura-color-bg);
+      border: 1px solid var(--aura-color-border);
+      color: var(--aura-color-text);
       font-family: inherit;
       font-size: 0.6rem;
       padding: 3px 8px;
@@ -88,8 +97,8 @@
       width: 140px;
       letter-spacing: 0.04em;
     }
-    .search:focus { border-color: #00ff41; box-shadow: 0 0 4px rgba(0,255,65,.3); }
-    .search::placeholder { color: #557755; }
+    .search:focus { border-color: var(--aura-color-primary); box-shadow: var(--aura-glow-subtle); }
+    .search::placeholder { color: var(--aura-color-text-dim); }
 
     main {
       flex: 1;
@@ -102,55 +111,55 @@
       grid-template-columns: 78px 52px 110px 1fr;
       gap: 8px;
       padding: 2px 10px;
-      border-bottom: 1px dashed rgba(0,255,65,.06);
+      border-bottom: 1px dashed color-mix(in srgb, var(--aura-color-border) 30%, transparent);
       align-items: start;
     }
-    .entry:hover { background: rgba(0,255,65,.03); }
-    .entry-time   { color: #557755; font-size: 0.6rem; white-space: nowrap; }
+    .entry:hover { background: color-mix(in srgb, var(--aura-color-primary) 4%, transparent); }
+    .entry-time   { color: var(--aura-color-text-dim); font-size: 0.6rem; white-space: nowrap; }
     .entry-level  { font-size: 0.55rem; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap; }
-    .entry-level[data-level="log"]   { color: #ccffcc; }
-    .entry-level[data-level="info"]  { color: #00aaff; }
-    .entry-level[data-level="warn"]  { color: #ff9900; }
-    .entry-level[data-level="error"] { color: #ff2020; }
-    .entry-level[data-level="debug"] { color: #888888; }
+    .entry-level[data-level="log"]   { color: var(--aura-color-text); }
+    .entry-level[data-level="info"]  { color: var(--aura-color-info); }
+    .entry-level[data-level="warn"]  { color: var(--aura-color-warning); }
+    .entry-level[data-level="error"] { color: var(--aura-color-danger); }
+    .entry-level[data-level="debug"] { color: var(--aura-color-text-dim); }
     .entry-source {
-      color: #557755;
+      color: var(--aura-color-text-dim);
       font-size: 0.6rem;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .entry-source[data-source="shell"] { color: #00ff41; }
+    .entry-source[data-source="shell"] { color: var(--aura-color-primary); }
     .entry-args {
       white-space: pre-wrap;
       word-break: break-word;
-      color: #ccffcc;
+      color: var(--aura-color-text);
     }
-    .entry-args[data-level="error"] { color: #ff8080; }
-    .entry-args[data-level="warn"]  { color: #ffcc99; }
-    .entry-args[data-level="info"]  { color: #aaccff; }
-    .entry-args[data-level="debug"] { color: #888888; }
+    .entry-args[data-level="error"] { color: var(--aura-color-danger); }
+    .entry-args[data-level="warn"]  { color: var(--aura-color-warning); }
+    .entry-args[data-level="info"]  { color: var(--aura-color-info); }
+    .entry-args[data-level="debug"] { color: var(--aura-color-text-dim); }
 
     footer {
       display: flex;
       justify-content: space-between;
       align-items: center;
       padding: 4px 10px;
-      background: #111;
-      border-top: 1px solid rgba(0,255,65,.1);
+      background: var(--aura-color-surface);
+      border-top: 1px solid var(--aura-color-border);
       font-size: 0.55rem;
-      color: #557755;
+      color: var(--aura-color-text-dim);
       letter-spacing: .08em;
       text-transform: uppercase;
       flex-shrink: 0;
       gap: 8px;
     }
-    footer .meta { color: #557755; }
-    footer .meta b { color: #ff9900; font-weight: normal; }
+    footer .meta { color: var(--aura-color-text-dim); }
+    footer .meta b { color: var(--aura-color-secondary); font-weight: normal; }
     footer button {
       background: transparent;
-      border: 1px solid rgba(0,255,65,.2);
-      color: #557755;
+      border: 1px solid var(--aura-color-border);
+      color: var(--aura-color-text-dim);
       font-family: inherit;
       font-size: 0.55rem;
       letter-spacing: 0.08em;
@@ -159,10 +168,10 @@
       text-transform: uppercase;
       transition: color 0.1s, border-color 0.1s;
     }
-    footer button:hover { color: #00ff41; border-color: #00ff41; }
+    footer button:hover { color: var(--aura-color-primary); border-color: var(--aura-color-primary); }
 
     .empty {
-      color: #557755;
+      color: var(--aura-color-text-dim);
       text-align: center;
       padding: 60px 0;
       font-size: 0.65rem;
@@ -171,72 +180,77 @@
     .empty .blink { animation: blink 1.2s steps(2,end) infinite; }
     @keyframes blink { 50% { opacity: 0; } }
 
-    /* ---- scificn-style checkbox ----
-       Built to match the @scificn/checkbox visual spec (Radix-based React in
-       the original library): empty bordered square unchecked, filled square
-       ■ when checked, retro sci-fi aesthetic. Native input is hidden but
-       drives state via `:checked`; keyboard + screen-reader still work. */
-    .sci-check {
-      --sci-size: 14px;
+    /* The handwritten `.sci-check*` block that lived here moved to
+     * `@aura/ui` (vendored scificn Checkbox primitive). The autoscroll
+     * row uses <AutoscrollCheckbox client:load /> — see
+     * src/components/AutoscrollCheckbox.tsx. */
+
+    /* Layout wrapper around the autoscroll Checkbox island. The scificn
+     * Checkbox renders its own box + indicator; we just need a row + label. */
+    .autoscroll-row {
       display: inline-flex;
       align-items: center;
       gap: 6px;
       cursor: pointer;
       user-select: none;
+    }
+    .autoscroll-label {
       font-size: 0.55rem;
       letter-spacing: 0.08em;
       text-transform: uppercase;
-      color: #557755;
-      transition: color 0.1s;
+      color: var(--aura-color-text-dim);
     }
-    .sci-check:hover { color: #00ff41; }
-    .sci-check input[type="checkbox"] {
-      /* hidden visually, but still focusable + reachable by AT */
-      position: absolute;
-      opacity: 0;
-      pointer-events: none;
-      width: 0;
-      height: 0;
+  </style>
+
+  <!-- Log-entry styling. is:inline keeps Astro from auto-scoping these
+       selectors so they continue to match the runtime-generated DOM the
+       legacy `<script is:inline>` builds via `output.innerHTML = …`.
+       Scoped styles would only match SSR-authored elements and the JS
+       entries would render as plain text. -->
+  <style is:inline>
+    .entry {
+      display: grid;
+      grid-template-columns: 78px 52px 110px 1fr;
+      gap: 8px;
+      padding: 2px 10px;
+      border-bottom: 1px dashed color-mix(in srgb, var(--aura-color-border) 30%, transparent);
+      align-items: start;
     }
-    .sci-check-box {
-      width: var(--sci-size);
-      height: var(--sci-size);
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      border: 1px solid #557755;
-      background: transparent;
-      color: #00ff41;
-      font-family: inherit;
-      font-size: calc(var(--sci-size) - 4px);
-      line-height: 1;
-      flex-shrink: 0;
-      transition: border-color 0.1s, box-shadow 0.1s;
+    .entry:hover { background: color-mix(in srgb, var(--aura-color-primary) 4%, transparent); }
+    .entry-time   { color: var(--aura-color-text-dim); font-size: 0.6rem; white-space: nowrap; }
+    .entry-level  { font-size: 0.55rem; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap; }
+    .entry-level[data-level="log"]   { color: var(--aura-color-text); }
+    .entry-level[data-level="info"]  { color: var(--aura-color-info); }
+    .entry-level[data-level="warn"]  { color: var(--aura-color-warning); }
+    .entry-level[data-level="error"] { color: var(--aura-color-danger); }
+    .entry-level[data-level="debug"] { color: var(--aura-color-text-dim); }
+    .entry-source {
+      color: var(--aura-color-text-dim);
+      font-size: 0.6rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    .sci-check:hover .sci-check-box {
-      border-color: #00ff41;
-      box-shadow: 0 0 4px rgba(0, 255, 65, 0.4);
+    .entry-source[data-source="shell"] { color: var(--aura-color-primary); }
+    .entry-args {
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--aura-color-text);
+      font-family: 'Courier New', monospace;
     }
-    /* glyph only renders when input is checked */
-    .sci-check-box::before { content: ''; }
-    .sci-check input:checked ~ .sci-check-box {
-      border-color: #00ff41;
+    .entry-args[data-level="error"] { color: var(--aura-color-danger); }
+    .entry-args[data-level="warn"]  { color: var(--aura-color-warning); }
+    .entry-args[data-level="info"]  { color: var(--aura-color-info); }
+    .entry-args[data-level="debug"] { color: var(--aura-color-text-dim); }
+    .empty {
+      color: var(--aura-color-text-dim);
+      text-align: center;
+      padding: 60px 0;
+      font-size: 0.65rem;
+      letter-spacing: 0.14em;
     }
-    .sci-check input:checked ~ .sci-check-box::before {
-      content: '■';
-    }
-    /* keyboard focus ring */
-    .sci-check input:focus-visible ~ .sci-check-box {
-      outline: 1px dashed #00ff41;
-      outline-offset: 2px;
-    }
-    /* disabled */
-    .sci-check[aria-disabled="true"],
-    .sci-check input:disabled ~ .sci-check-box {
-      opacity: 0.4;
-      cursor: not-allowed;
-    }
-    .sci-check input:checked ~ .sci-check-label { color: #00ff41; }
+    .empty .blink { animation: blink 1.2s steps(2,end) infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
   </style>
 </head>
 <body>
@@ -257,11 +271,7 @@
     <div class="spacer"></div>
 
     <span class="count-info"><b id="visible-count">0</b> / <b id="total-count">0</b></span>
-    <label class="sci-check" for="autoscroll">
-      <input type="checkbox" id="autoscroll" checked />
-      <span class="sci-check-box" aria-hidden="true"></span>
-      <span class="sci-check-label">AUTOSCROLL</span>
-    </label>
+    <AutoscrollCheckbox client:load id="autoscroll" defaultChecked label="AUTOSCROLL" />
   </header>
 
   <main id="output">
@@ -276,7 +286,7 @@
     <button id="clear-btn" title="Clear current buffer">CLEAR</button>
   </footer>
 
-  <script>
+  <script is:inline>
     const output       = document.getElementById('output');
     const visibleCount = document.getElementById('visible-count');
     const totalCount   = document.getElementById('total-count');
@@ -346,8 +356,14 @@
         </div>
       `).join('');
 
+      // Defer to the next frame so the browser has committed layout for the
+      // new entries before we read/write scrollHeight. Without this, scrollTop
+      // gets written against the pre-paint scrollHeight and the bottom
+      // appears to drift up as new lines arrive.
       if (autoscroll.checked || wasNearBottom) {
-        output.scrollTop = output.scrollHeight;
+        requestAnimationFrame(() => {
+          output.scrollTop = output.scrollHeight;
+        });
       }
     }
 

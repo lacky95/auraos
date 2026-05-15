@@ -1,0 +1,57 @@
+---
+/**
+ * Free-positioned z-stacked layout. Each view gets a free-floating slot the
+ * user can drag and resize. Positions persist into the workspace's
+ * `layoutState` (a `Record<viewId, {x,y,w,h,z}>`) so the layout survives
+ * workspace switches.
+ *
+ * SSR-only responsibilities here:
+ *   • Honor any saved geometry from `layoutState`.
+ *   • Default unplaced views to a 40px cascade pattern so the first paint
+ *     isn't a stack of perfectly-overlapping rectangles.
+ *
+ * Drag + resize are wired into `renderLayout()` in `pages/index.astro`
+ * during Phase 3 — keeping the interaction logic centralized so it
+ * composes with the keyed iframe reconciler (no slot rebuild on each
+ * mouse-move).
+ */
+import type { AppView } from '@aura/core';
+import AppSlot from '../AppSlot.astro';
+
+interface SavedRect { x: number; y: number; w: number; h: number; z: number; }
+interface Props {
+  views: AppView[];
+  layoutState?: { rects?: Record<string, SavedRect> };
+}
+const { views, layoutState } = Astro.props;
+const saved = layoutState?.rects ?? {};
+
+const DEFAULT_W = 560;
+const DEFAULT_H = 400;
+const CASCADE   = 40;
+
+function slotStyle(view: AppView, i: number): string {
+  const rect = saved[view.viewId];
+  const x = rect?.x ?? (24 + i * CASCADE);
+  const y = rect?.y ?? (24 + i * CASCADE);
+  const w = rect?.w ?? DEFAULT_W;
+  const h = rect?.h ?? DEFAULT_H;
+  const z = rect?.z ?? (10 + i);
+  return `position:absolute; left:${x}px; top:${y}px; width:${w}px; height:${h}px; z-index:${z};`;
+}
+---
+<div class="stack-layout">
+  {views.map((view, i) => (
+    <AppSlot view={view} style={slotStyle(view, i)} />
+  ))}
+</div>
+
+<style>
+  .stack-layout {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    background: var(--aura-color-bg);
+    overflow: hidden;
+  }
+</style>

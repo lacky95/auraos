@@ -8,6 +8,18 @@
 # (see Dockerfile). Mirror copy at /etc/profile.d/aura-prompt.sh so
 # non-login shells also pick it up.
 
+# The AuraOS toolchain is layered as a per-app allowlist on top of the
+# shared store. Prepend the allowlist so granted capabilities (and `*` apps,
+# whose allowlist mirrors the store) win over the base rootfs's /usr/bin
+# equivalents. Set unconditionally so non-interactive shells (scp, exec
+# probes, child processes spawned from the app) also see the caps.
+if [ -d /aura/my-tools ]; then
+  case ":$PATH:" in
+    *":/aura/my-tools:"*) ;;
+    *) export PATH="/aura/my-tools:$PATH" ;;
+  esac
+fi
+
 # Don't run on non-interactive shells (scp, ssh exec, etc.).
 case $- in *i*) ;; *) return ;; esac
 

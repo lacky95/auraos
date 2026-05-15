@@ -125,7 +125,7 @@ function enterProot(
     APP_ID: appId,
     APP_INSTANCE_ID: instanceId,
     APP_PORT: port?.toString() ?? '',
-    OS_API_BASE: process.env['AURA_SHELL_URL'] ?? 'http://localhost:3000',
+    OS_API_BASE: process.env['AURA_SHELL_URL'] ?? 'http://127.0.0.1:3000',
   };
 
   const command = cmd ? ['bash', '-lc', cmd] : ['bash', '-i'];

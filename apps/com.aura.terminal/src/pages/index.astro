@@ -183,10 +183,26 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
 
     startDots('connecting to pty');
 
+    // Active WS, so resize/data handlers below can reach the current socket
+    // across reconnects without recreating their listeners.
+    let activeWs = null;
+
+    // term.onResize fires whenever xterm's internal column/row count changes
+    // (fitAddon.fit, manual term.resize, etc.). Without forwarding to the pty,
+    // bash's $COLUMNS stays at the initial value and wraps lines at the wrong
+    // column — visible as the prompt overdrawing itself when a long command
+    // hits what xterm thinks is column 80 but is actually screen mid-row.
+    term.onResize(({ cols, rows }) => {
+      if (activeWs && activeWs.readyState === 1) {
+        activeWs.send(JSON.stringify({ type: 'resize', cols, rows }));
+      }
+    });
+
     let attempt = 0;
     function connect() {
       attempt++;
       const ws = new WebSocket(wsUrl);
+      activeWs = ws;
       let opened = false;
 
       ws.onopen = () => {
@@ -199,6 +215,11 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
         // prompt and sometimes wiped the prompt itself — leaving the user
         // staring at an empty blinking cursor.)
         term.write('\x1b[2J\x1b[H');
+        // Re-fit after the WS opens — the iframe layout may have settled
+        // between the eager fit at term.open() and now. If the dims changed,
+        // onResize above sends the update; if not, this initial send keeps
+        // the pty in sync with the actual current size.
+        fitAddon.fit();
         ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
       };
 

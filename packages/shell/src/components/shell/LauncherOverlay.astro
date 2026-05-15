@@ -18,13 +18,16 @@ const apps: AppManifest[] = getAppManager().getManifests();
   </header>
   <input id="lo-search" class="lo-search" type="text" placeholder="SEARCH APPS..." autocomplete="off" />
   <div id="lo-grid" class="lo-grid">
-    {apps.map(app => (
-      <button class="lo-app" data-app-id={app.id} title={app.name}>
-        <span class="lo-app-initial">{app.name.charAt(0).toUpperCase()}</span>
-        <span class="lo-app-name">{app.name}</span>
-        <span class="lo-app-id">{app.id}</span>
-      </button>
-    ))}
+    {apps.map(app => {
+      const glyph = (app.icon ?? app.name.charAt(0)).toUpperCase();
+      return (
+        <button class="lo-app" data-app-id={app.id} title={app.name}>
+          <span class="lo-app-initial" data-len={glyph.length}>{glyph}</span>
+          <span class="lo-app-name">{app.name}</span>
+          <span class="lo-app-id">{app.id}</span>
+        </button>
+      );
+    })}
   </div>
 </aside>
 
@@ -119,9 +122,12 @@ const apps: AppManifest[] = getAppManager().getManifests();
   .lo-app[hidden] { display: none; }
 
   .lo-app-initial {
-    font-size: 1.4rem;
+    /* Uniform size across 1/2/3-char glyphs; sized to fit "SET" in the overlay tile. */
+    font-size: 1rem;
+    letter-spacing: 0.04em;
     color: var(--aura-color-primary);
     line-height: 1;
+    font-weight: 500;
   }
   .lo-app-name {
     font-size: var(--aura-font-size-xs);

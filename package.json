@@ -16,6 +16,6 @@
     "typescript": "^5.5.0"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild", "node-pty", "sharp", "@img/sharp-libvips-linux-x64"]
+    "onlyBuiltDependencies": ["esbuild", "node-pty", "sharp", "@img/sharp-libvips-linux-x64", "redis-memory-server"]
   }
 }

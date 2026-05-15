@@ -1,27 +1,30 @@
 {
   "id": "com.aura.settings",
   "name": "Settings",
+  "icon": "SET",
   "version": "0.1.0",
-  "description": "OS settings — themes, general preferences. Acts as a content provider for other apps.",
+  "description": "OS settings — themes, workspaces, general preferences. UI over the OS KV (no longer a content provider).",
   "category": "system",
-  "permissions": ["storage.read", "storage.write", "system.theme.broadcast"],
+  "permissions": [
+    "storage.read",
+    "storage.write",
+    "system.theme.broadcast",
+    "system.kv.os.theme.write",
+    "system.kv.os.workspaces.write",
+    "system.kv.os.clockFormat.write",
+    "system.kv.os.locale.write"
+  ],
   "tools": ["bash", "node"],
   "instanceMode": "single",
   "activityMode": "multi",
   "defaultLaunch": "new-activity",
   "backgroundService": true,
+  "autoStart": false,
+  "useProot": false,
   "viewConfig": {
     "defaultWidth": 700,
     "defaultHeight": 500,
     "resizable": true
   },
-  "preferredLayout": "tiling",
-  "dataProvider": {
-    "authority": "com.aura.settings",
-    "providers": [
-      { "path": "/api/data/settings", "readPermission": "settings.read", "writePermission": "settings.write" },
-      { "path": "/api/data/theme",    "readPermission": "settings.read", "writePermission": "settings.theme.write" },
-      { "path": "/api/data/themes",   "readPermission": "settings.read" }
-    ]
-  }
+  "preferredLayout": "tiling"
 }

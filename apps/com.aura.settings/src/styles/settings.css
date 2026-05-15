@@ -1,5 +1,9 @@
 /* Common style for all Settings pages.
-   We pull /api/os/theme.css from the shell so the app inherits the live OS theme. */
+   We pull /api/os/theme.css from the shell so the app inherits the live OS
+   theme. The scificn-bridge file is imported via JS (frontmatter) from each
+   .astro page that uses scificn components — postcss-import here doesn't
+   honour Vite's array aliases. */
+
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 body {
@@ -194,43 +198,9 @@ main.settings-body {
   font-size: 0.8rem;
 }
 
-.mode-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 0;
-  border: 1px solid var(--aura-color-border, rgba(0,255,65,0.2));
-}
-.mode-row .mode-btn {
-  background: transparent;
-  border: none;
-  color: var(--aura-color-text-dim, #557755);
-  font-family: 'Courier New', monospace;
-  font-size: 0.65rem;
-  letter-spacing: 0.1em;
-  padding: 6px 14px;
-  cursor: pointer;
-  text-transform: uppercase;
-  transition: color 0.1s, background 0.1s;
-}
-.mode-row .mode-btn + .mode-btn {
-  border-left: 1px solid var(--aura-color-border, rgba(0,255,65,0.2));
-}
-.mode-row .mode-btn:hover { color: var(--aura-color-primary, #00ff41); }
-.mode-row .mode-btn[data-active="true"] {
-  color: var(--aura-color-bg, #0a0a0a);
-  background: var(--aura-color-primary, #00ff41);
-}
-.mode-resolved {
-  margin-left: 12px;
-  font-size: 0.6rem;
-  letter-spacing: 0.12em;
-  color: var(--aura-color-primary, #00ff41);
-  border: 1px solid var(--aura-color-primary, #00ff41);
-  background: color-mix(in srgb, var(--aura-color-primary, #00ff41) 14%, transparent);
-  padding: 2px 8px;
-  text-transform: uppercase;
-  align-self: center;
-}
+/* The handwritten `.mode-row` / `.mode-btn` / `.mode-resolved` block that
+ * lived here moved to <ColorModePicker />, a scificn Tabs-based React island.
+ * See apps/com.aura.settings/src/components/ColorModePicker.tsx. */
 
 footer.settings-foot {
   padding: 4px 14px;

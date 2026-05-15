@@ -21,6 +21,10 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
         <h3>▦ THEME</h3>
         <p>Phosphor color · live preview · 4 presets</p>
       </button>
+      <button class="tile" data-section="workspaces">
+        <h3>▥ WORKSPACES</h3>
+        <p>Virtual desktops · layouts · rename + delete</p>
+      </button>
       <button class="tile" data-section="general">
         <h3>⏱ GENERAL</h3>
         <p>Clock format · locale</p>
@@ -37,15 +41,27 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
     // Open a new activity (panel) on this single-instance Settings app.
     // The shell forwards { section } as `data` to our onActivityCreate hook,
     // which translates it into the right path.
+    //
+    // Body shape: the shell's POST /api/instances/[id]/activities handler
+    // looks for a top-level `data` key first, falling back to "whole body
+    // is the data bag" for legacy callers. We send the explicit `{ data }`
+    // shape so the meaning is unambiguous.
     document.querySelectorAll('.tile[data-section]').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const section = btn.dataset.section;
+        console.log('[settings] tile click → open activity, section =', section);
         try {
-          await fetch('/api/instances/com.aura.settings/activities', {
+          const res = await fetch('/api/instances/com.aura.settings/activities', {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ section }),
+            body:    JSON.stringify({ data: { section } }),
           });
+          if (!res.ok) {
+            console.error('[settings] open activity HTTP', res.status, await res.text());
+            return;
+          }
+          const body = await res.json();
+          console.log('[settings] activity opened →', body);
         } catch (err) { console.error('[settings] open activity failed', err); }
       });
     });

@@ -2,13 +2,11 @@ import type { Command } from 'commander';
 import { color, fail, info, ok, table } from '../lib/format.js';
 import {
   ensureRegistry,
-  installCapability,
   loadRegistry,
   loadState,
-  removeCapability,
   saveRegistry,
-  saveState,
   type CapabilityEntry,
+  type State,
 } from '../lib/registry.js';
 import { addToolToManifest, listAllManifests, removeToolFromManifest } from '../lib/manifest.js';
 import { api } from '../lib/client.js';
@@ -25,12 +23,25 @@ export function registerCap(program: Command): void {
     .action(async (opts: { installed?: boolean; available?: boolean }) => {
       ensureRegistry();
       const reg = loadRegistry();
-      const state = loadState();
+      // Prefer the shell's view of state (it's the writer; when this CLI runs
+      // inside a PRoot the local /data bind has shown stale reads in practice).
+      // Fall back to the local file if the shell is unreachable so `cap list`
+      // still works from a host shell with the server stopped.
+      let state: State;
+      try {
+        const remote = await api.get<{ state: State }>('/api/admin/cap');
+        state = remote.state;
+      } catch {
+        state = loadState();
+      }
       const manifests = listAllManifests();
       const rows = Object.entries(reg.capabilities).map(([name, entry]) => {
         const installed = state.capabilities[name]?.installed === true || entry.source === 'builtin';
+        // An app with `*` in tools[] gets every installed cap bound at spawn
+        // time (see ProotRunner.buildArgs). Surface that here as a normal
+        // grant for installed caps so DECLARED-BY reflects the real bind set.
         const declaredBy = manifests
-          .filter((m) => Array.isArray(m.tools) && m.tools.includes(name))
+          .filter((m) => Array.isArray(m.tools) && (m.tools.includes(name) || (installed && m.tools.includes('*'))))
           .map((m) => m.id);
         return {
           NAME:    name,
@@ -53,16 +64,21 @@ export function registerCap(program: Command): void {
     .action(async (names: string[]) => {
       ensureRegistry();
       const reg = loadRegistry();
-      const state = loadState();
+      // Always route install through the shell. The CLI is most often invoked
+      // from inside a PRoot terminal where apt-key/gnupg are unavailable and
+      // /os/toolchain isn't bind-mounted — letting the shell do it sidesteps
+      // both, and keeps a single source of truth for toolchain state.
       for (const name of names) {
         const entry = reg.capabilities[name];
         if (!entry) { fail(`Unknown capability: ${name}. See \`aura cap registry show\`.`); }
-        info(`Installing ${color.bold(name)} (source=${entry.source}) …`);
-        const result = await installCapability(name, entry);
-        state.capabilities[name] = { installed: true, installedAt: new Date().toISOString(), version: result.version ?? null };
-        ok(`installed ${name} → ${result.symlink}`);
+        info(`Installing ${color.bold(name)} (source=${entry.source}) via shell …`);
+        const res = await api.post<{ ok: boolean; symlink?: string; version?: string | null; error?: string }>(
+          '/api/admin/cap',
+          { action: 'install', name, entry },
+        );
+        if (!res?.ok) fail(`install ${name} failed: ${res?.error ?? 'unknown error'}`);
+        ok(`installed ${name} → ${res.symlink}${res.version ? ` (${res.version})` : ''}`);
       }
-      saveState(state);
     });
 
   cap
@@ -71,12 +87,13 @@ export function registerCap(program: Command): void {
     .action(async (name: string) => {
       ensureRegistry();
       const reg = loadRegistry();
-      const state = loadState();
       const entry = reg.capabilities[name];
       if (!entry) fail(`Unknown capability: ${name}`);
-      await removeCapability(name, entry);
-      delete state.capabilities[name];
-      saveState(state);
+      const res = await api.post<{ ok: boolean; error?: string }>(
+        '/api/admin/cap',
+        { action: 'remove', name, entry },
+      );
+      if (!res?.ok) fail(`remove ${name} failed: ${res?.error ?? 'unknown error'}`);
       const affected: string[] = [];
       for (const m of listAllManifests()) {
         if (removeToolFromManifest(m.id, name)) affected.push(m.id);
@@ -86,26 +103,28 @@ export function registerCap(program: Command): void {
 
   cap
     .command('grant <appId> <name...>')
-    .description('Add a capability to an app manifest. Restarts running instances so the bind-mount takes effect.')
+    .description("Add a capability to an app manifest. Use '*' (quote it: \"'*'\") to auto-bind every installed cap, including future ones. Hot-refreshes running instances — no respawn.")
     .action(async (appId: string, names: string[]) => {
+      let anyChange = false;
       for (const name of names) {
         const changed = addToolToManifest(appId, name);
-        if (changed) ok(`granted ${name} → ${appId}`);
+        if (changed) { ok(`granted ${name} → ${appId}`); anyChange = true; }
         else info(`${name} already declared by ${appId}`);
       }
-      await restartIfRunning(appId);
+      if (anyChange) await refreshRunning(appId);
     });
 
   cap
     .command('revoke <appId> <name...>')
     .description('Remove a capability from an app manifest and restart running instances.')
     .action(async (appId: string, names: string[]) => {
+      let anyChange = false;
       for (const name of names) {
         const changed = removeToolFromManifest(appId, name);
-        if (changed) ok(`revoked ${name} from ${appId}`);
+        if (changed) { ok(`revoked ${name} from ${appId}`); anyChange = true; }
         else info(`${name} was not declared by ${appId}`);
       }
-      await restartIfRunning(appId);
+      if (anyChange) await refreshRunning(appId);
     });
 
   cap
@@ -160,16 +179,25 @@ export function registerCap(program: Command): void {
     });
 }
 
-async function restartIfRunning(appId: string): Promise<void> {
+/**
+ * Hot-refresh every running instance of `appId` so it sees the updated
+ * manifest tools[] without a backend respawn. The shell rewrites the
+ * per-instance /aura/my-tools allowlist dir; PRoot's directory bind makes
+ * the new symlinks visible to the running shell on the next PATH lookup.
+ */
+async function refreshRunning(appId: string): Promise<void> {
   try {
-    const dto = await api.get<{ instances: Array<{ instanceId: string }> }>(
-      `/api/apps/${encodeURIComponent(appId)}/status`,
+    const res = await api.post<{ ok: boolean; refreshed?: string[]; error?: string }>(
+      '/api/admin/cap-refresh',
+      { appId },
     );
-    if (!dto.instances.length) return;
-    info(`restarting ${dto.instances.length} running instance(s) of ${appId}`);
-    await api.post(`/api/apps/${encodeURIComponent(appId)}/stop`);
-    await api.post(`/api/apps/${encodeURIComponent(appId)}/start`);
+    if (!res?.ok) {
+      info(`hot-refresh skipped: ${res?.error ?? 'unknown error'}`);
+      return;
+    }
+    const n = res.refreshed?.length ?? 0;
+    if (n > 0) info(`hot-refreshed ${n} running instance(s) of ${appId} — no respawn needed`);
   } catch (err) {
-    info(`could not auto-restart ${appId}: ${(err as Error).message}`);
+    info(`hot-refresh failed: ${(err as Error).message} (manifest is updated; affected apps will pick it up on next launch)`);
   }
 }
