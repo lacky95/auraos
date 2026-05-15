@@ -44,8 +44,12 @@ async function probeHealth(instance: AppInstance): Promise<AppHealth> {
 
   if (instance.port !== null) {
     const start = Date.now();
+    // For container-sandbox instances the host is the docker container name
+    // on the shared network, not 127.0.0.1. getUpstreamUrl encapsulates that.
+    const up = getAppManager().getUpstreamUrl?.(instance.instanceId);
+    const upHost = up?.host ?? 'localhost';
     try {
-      const res = await fetch(`http://localhost:${instance.port}/api/lifecycle/health`, {
+      const res = await fetch(`http://${upHost}:${instance.port}/api/lifecycle/health`, {
         signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
       });
       health.httpLatencyMs = Date.now() - start;

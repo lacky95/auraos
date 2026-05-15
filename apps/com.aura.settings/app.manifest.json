@@ -20,7 +20,7 @@
   "defaultLaunch": "new-activity",
   "backgroundService": true,
   "autoStart": false,
-  "useProot": false,
+  "useProot": true,
   "viewConfig": {
     "defaultWidth": 700,
     "defaultHeight": 500,

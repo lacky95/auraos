@@ -7,6 +7,7 @@
   "category": "utility",
   "permissions": [],
   "tools": ["bash", "node"],
+  "sandbox": "container",
   "instanceMode": "multi",
   "maxInstances": 5,
   "activityMode": "multi",

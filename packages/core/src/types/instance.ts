@@ -23,4 +23,11 @@ export interface AppInstance {
    * lookups to them. Cleared on claim (see AppManager.claimFromPool).
    */
   inPool?: boolean;
+  /**
+   * Which sandbox runner owns this instance. Latched at spawn time from the
+   * manifest's `sandbox` field; needed at call sites (kill, lifecycle hooks)
+   * because the manifest may change between spawn and teardown and we need
+   * to dispatch to the runner that ACTUALLY launched the process.
+   */
+  sandbox?: 'proot' | 'container';
 }

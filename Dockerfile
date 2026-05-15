@@ -47,7 +47,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     make \
     g++ \
     build-essential \
+    libtalloc-dev \
+    pkg-config \
   && rm -rf /var/lib/apt/lists/*
+
+# Replace Debian's proot (5.3.x with EFAULT on Rust-compiled native modules
+# like Tailwind 4 Oxide / jiti) with a fresh build from upstream proot-me.
+# /usr/local/bin precedes /usr/bin in PATH, so this version wins everywhere
+# `proot` is invoked by name. Without this, apps with native deps that hit
+# the EFAULT bug must opt out via `useProot: false` in their manifest —
+# which defeats the per-app-sandbox isolation we want.
+RUN git clone --depth 1 https://github.com/proot-me/proot /tmp/proot-src \
+ && make -C /tmp/proot-src/src -j$(nproc) \
+ && install -m 0755 /tmp/proot-src/src/proot /usr/local/bin/proot \
+ && rm -rf /tmp/proot-src
 
 RUN corepack enable && corepack prepare pnpm@latest --activate
 

@@ -6,7 +6,7 @@
   "description": "Headless log collector. Captures console.log/info/warn/error/debug + uncaught errors from the shell and every app iframe over a WebSocket.",
   "category": "developer",
   "componentType": "service",
-  "useProot": false,
+  "useProot": true,
   "permissions": [],
   "tools": ["bash", "node"]
 }

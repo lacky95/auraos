@@ -8,7 +8,9 @@ dist/
 **/.astro/
 .pnpm-store/
 .claude/
-data/
+# Runtime state — anchored so the shell's `pages/api/data/` route source
+# isn't accidentally ignored.
+/data/
 
 # editor / OS
 .DS_Store

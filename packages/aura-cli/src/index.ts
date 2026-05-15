@@ -11,6 +11,7 @@ import { registerTheme } from './commands/theme.js';
 import { registerData } from './commands/data.js';
 import { registerEvents } from './commands/events.js';
 import { registerWhereami } from './commands/whereami.js';
+import { registerJump } from './commands/jump.js';
 
 const program = new Command();
 
@@ -36,6 +37,7 @@ registerTheme(program);
 registerData(program);
 registerEvents(program);
 registerWhereami(program);
+registerJump(program);
 
 program
   .command('completion <shell>')

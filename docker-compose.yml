@@ -4,12 +4,23 @@ services:
       context: .
       dockerfile: Dockerfile
       target: development
+    container_name: aura-shell
+    hostname: aura-shell
     ports:
       - "3000:3000"
     volumes:
       - .:/workspace
       - aura-node-modules:/workspace/node_modules
       - aura-app-data:/data
+      # Sibling-container model: the AppManager can spawn additional
+      # containers as siblings (sandbox: 'container' apps) by talking to
+      # the host's docker daemon. Mounting the socket effectively grants
+      # AuraOS root on the host — acceptable for single-user dev, NOT for
+      # multi-tenant prod. The host paths in -v args inside ContainerRunner
+      # are passed verbatim to the host daemon, which is why AURA_HOST_WORKSPACE
+      # below points at the host's view of /workspace (the bind source
+      # of `.:/workspace` above).
+      - /var/run/docker.sock:/var/run/docker.sock
     working_dir: /workspace
     environment:
       NODE_ENV: development
@@ -21,6 +32,15 @@ services:
       AURA_APP_PORT_END: "4999"
       AURA_AUTH_MODE: none
       AURA_USE_PROOT: "true"
+      # The host-side absolute path that's bind-mounted at /workspace above.
+      # ContainerRunner passes this to `docker -v` as the bind source for
+      # sibling containers (they share the host's filesystem, not this
+      # container's namespaced view). Set to the host project root if
+      # different from /workspace.
+      AURA_HOST_WORKSPACE: ${AURA_HOST_WORKSPACE:-${PWD}}
+      AURA_DOCKER_NETWORK: aura-net
+      AURA_BASE_IMAGE: aura-base
+      AURA_SHELL_HOSTNAME: aura-shell
     cap_add:
       - SYS_PTRACE
     security_opt:
@@ -30,6 +50,13 @@ services:
       - 1.1.1.1
     stdin_open: true
     tty: true
+    networks:
+      - aura-net
+
+networks:
+  aura-net:
+    name: aura-net
+    driver: bridge
 
 volumes:
   aura-node-modules:

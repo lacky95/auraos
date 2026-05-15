@@ -51,34 +51,43 @@ function wsProxyPlugin() {
         //      can send bash output to a tab that doesn't own it, and after
         //      restarts a transient pool member is a common [0] match.
         //   3. fall back to any healthy instance of that app.
-        let port;
+        // Resolve the upstream {host, port} via the AppManager. Container-
+        // sandbox instances live on the shared docker network and have a
+        // hostname like 'aura-com.aura.terminal-3'; PRoot instances are on
+        // 127.0.0.1. getUpstreamUrl encapsulates this — proxy stays
+        // agnostic about which runner backs the instance.
+        let host = null;
+        let port = null;
         let chosenInstanceId = null;
         try {
           const tLoadStart = Date.now();
           const core = await server.ssrLoadModule('@aura/core');
           dbg('WS-PROXY', 'ssrLoadModule', `${Date.now() - tLoadStart}ms`);
           const mgr = core.getAppManager?.();
-          const direct = mgr?.getInstance?.(instanceId);
-          if (direct) { port = direct.port; chosenInstanceId = direct.instanceId; }
-          else if (mgr) {
+          const directInst = mgr?.getInstance?.(instanceId);
+          let targetInstanceId = directInst?.instanceId ?? null;
+          if (!targetInstanceId && mgr) {
             const candidates = mgr.getInstancesByApp(instanceId) ?? [];
-            dbg('WS-PROXY', 'candidates', JSON.stringify(candidates.map((i) => ({ id: i.instanceId, port: i.port, state: i.state, inPool: i.inPool }))));
+            dbg('WS-PROXY', 'candidates', JSON.stringify(candidates.map((i) => ({ id: i.instanceId, port: i.port, state: i.state, inPool: i.inPool, sandbox: i.sandbox }))));
             const preferred = candidates.find((i) => !i.inPool && (i.state === 'resumed' || i.state === 'started'));
-            const fallback = candidates.find((i) => i.state === 'resumed' || i.state === 'started');
-            const chosen = preferred ?? fallback;
-            port = chosen?.port;
-            chosenInstanceId = chosen?.instanceId;
+            const fallback  = candidates.find((i) => i.state === 'resumed' || i.state === 'started');
+            const chosen    = preferred ?? fallback;
+            targetInstanceId = chosen?.instanceId ?? null;
+          }
+          if (targetInstanceId && mgr) {
+            const upstream = mgr.getUpstreamUrl?.(targetInstanceId);
+            if (upstream) { host = upstream.host; port = upstream.port; chosenInstanceId = targetInstanceId; }
           }
         } catch (err) { dbg('WS-PROXY', 'resolve-err', String(err)); }
 
         if (!port) { dbg('WS-PROXY', 'no-port → destroy', instanceId, `t=${Date.now() - t0}ms`); socket.destroy(); return; }
-        dbg('WS-PROXY', 'chose', chosenInstanceId, `port=${port}`, `t=${Date.now() - t0}ms`);
+        dbg('WS-PROXY', 'chose', chosenInstanceId, `host=${host} port=${port}`, `t=${Date.now() - t0}ms`);
 
         // Inject activity header for the upstream upgrade request
         if (activityId) req.headers['x-aura-activity-id'] = activityId;
 
         const { WebSocket, WebSocketServer } = await import('ws');
-        const upstreamUrl = `ws://localhost:${port}/${proxyPath}${upstreamQuery}`;
+        const upstreamUrl = `ws://${host ?? 'localhost'}:${port}/${proxyPath}${upstreamQuery}`;
         const tUpstreamStart = Date.now();
         dbg('WS-PROXY', 'upstream-dial', upstreamUrl);
         const upstream = new WebSocket(upstreamUrl, {

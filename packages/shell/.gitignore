@@ -1,0 +1,8 @@
+
+# tsc-emitted artifacts when running typecheck (Astro+Vite handles runtime
+# build via different output paths, but tsc occasionally writes these
+# alongside the .ts sources).
+src/**/*.js
+src/**/*.js.map
+src/**/*.d.ts
+src/**/*.d.ts.map

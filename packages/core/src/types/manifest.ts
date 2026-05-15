@@ -114,6 +114,23 @@ export const AppManifestSchema = z.object({
    */
   useProot: z.boolean().default(true),
   /**
+   * Which sandbox backend hosts this app's instances:
+   *   'proot'     → ptrace sandbox inside the AuraOS container (default).
+   *                 Cheap to spawn but weak isolation; useProot still gates
+   *                 whether the PRoot wrapping is applied.
+   *   'container' → real kernel-namespace container (rootless docker)
+   *                 spawned as a sibling of the AuraOS container, sharing
+   *                 the host filesystem via SLICED bind mounts (only the
+   *                 app's own apps/<id> + workspace shared dirs are visible).
+   *                 Real PID/net/mount namespaces — `cd /workspace/apps`
+   *                 inside the sandbox shows ONLY the app's own folder.
+   *
+   * The two backends share the same manifest semantics (tools[], lifecycle,
+   * activities, content providers, two-dir cap allowlist) — only the spawn
+   * primitive differs. Apps migrate between them with no source change.
+   */
+  sandbox: z.enum(['proot', 'container']).default('proot'),
+  /**
    * What happens when the user clicks the app icon while at least one instance is already running.
    * Only meaningful for apps where BOTH instanceMode='multi' AND activityMode='multi'.
    * 'new-instance' → always spawn a new backend process (activities opened explicitly via "+ NEW WINDOW")

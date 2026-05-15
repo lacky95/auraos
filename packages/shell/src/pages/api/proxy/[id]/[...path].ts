@@ -96,7 +96,13 @@ export default {};
     .replace(/(\?|&)_aura_vite_vue(?=&|=|$)/g,   '$1vue')
     .replace(/(\?|&)_aura_vite_svelte(?=&|=|$)/g,'$1svelte');
 
-  const targetUrl = `http://localhost:${instance.port}/${path}${search}`;
+  // For container-sandbox instances, the upstream lives on the shared docker
+  // network with a hostname like `aura-com.aura.terminal-3`. For PRoot-
+  // sandbox instances it's 127.0.0.1. getUpstreamUrl encapsulates the choice.
+  const up = mgr.getUpstreamUrl?.(instance.instanceId);
+  const upHost = up?.host ?? 'localhost';
+  const upPort = up?.port ?? instance.port;
+  const targetUrl = `http://${upHost}:${upPort}/${path}${search}`;
 
   try {
     const headers = new Headers(request.headers);

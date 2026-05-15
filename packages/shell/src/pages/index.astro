@@ -319,8 +319,20 @@ const ssrVisibleViews = initialViews.filter(
         const { instanceId, instance } = await res.json();
 
         // If a view for this instance is already open, drop the placeholder and focus it.
+        //
+        // BUT: services (e.g. Console) are autostarted by AppManager.bootstrap()
+        // and arrive in SSR's `initialViews`, yet are deliberately excluded from
+        // workspace.members on SSR — they're headless by default. When the user
+        // clicks the launcher icon for such a service, the view exists but is
+        // display:none in renderLayout (workspace filter). Focusing alone won't
+        // show it; we must explicitly claim workspace membership too.
         const existing = views.find((v) => v.viewId !== pending.pendingId && v.instanceId === instanceId && !v.activityId);
-        if (existing) { pending.drop(); focusView_(existing.viewId); return; }
+        if (existing) {
+          pending.drop();
+          workspaceClient.addMemberToActive(existing.viewId).catch(() => undefined);
+          focusView_(existing.viewId);
+          return;
+        }
 
         // For activityMode='none' apps, a "view" maps 1:1 to an instance.
         // The window is minimizable only if the app keeps running with no
@@ -556,17 +568,57 @@ const ssrVisibleViews = initialViews.filter(
     }
 
     // ---- 2) Grid container ----
-    // When the active workspace is empty, leave the container as a plain
-    // positioned box so the empty-state overlay (above) is the only thing
-    // the user sees. Hidden slots live in the same container with
-    // display:none — they cost no layout space.
-    const cols = visible.length === 0 ? 1 : Math.ceil(Math.sqrt(visible.length));
+    // The active workspace's layoutId picks the grid shape. Without this the
+    // chip-driven layout switch in StatusBar would update state but never
+    // touch the actual DOM. Supported strategies:
+    //   tiling     — square-ish grid (sqrt rounding); current default
+    //   fullscreen — only the focused view, occupying the whole canvas
+    //   stack/rows — one column, one row per view (vertical strip)
+    //   columns    — one row, one column per view (horizontal strip)
+    // Unknown ids fall back to `tiling`.
+    const layoutId = wsState?.workspaces.find(w => w.id === wsState.activeWorkspaceId)?.layoutId ?? 'tiling';
+
     if (visible.length === 0) {
       Object.assign(dynamicLayout.style, {
         display: 'block', gridTemplateColumns: '', gridTemplateRows: '',
         gap: '', background: 'transparent',
       });
+    } else if (layoutId === 'fullscreen') {
+      // 1×1 grid — every visible view is placed at the same cell. The
+      // focused one wins via z-index in step 4; siblings sit underneath
+      // and stay warm (their iframes don't reload when the user switches
+      // focus). The minimized strip still gets its own row if present.
+      Object.assign(dynamicLayout.style, {
+        display: 'grid',
+        gridTemplateColumns: '1fr',
+        gridTemplateRows: minimized.length > 0 ? 'auto 1fr' : '1fr',
+        gap: '0',
+        background: 'var(--aura-color-bg)',
+        alignItems: '', justifyContent: '', flexDirection: '',
+      });
+    } else if (layoutId === 'columns') {
+      Object.assign(dynamicLayout.style, {
+        display: 'grid',
+        gridTemplateColumns: `repeat(${visible.length}, 1fr)`,
+        gridTemplateRows: minimized.length > 0 ? 'auto 1fr' : '1fr',
+        gap: '2px',
+        background: 'var(--aura-color-bg)',
+        alignItems: '', justifyContent: '', flexDirection: '',
+      });
+    } else if (layoutId === 'rows' || layoutId === 'stack') {
+      Object.assign(dynamicLayout.style, {
+        display: 'grid',
+        gridTemplateColumns: '1fr',
+        gridTemplateRows: minimized.length > 0
+          ? `auto repeat(${visible.length}, 1fr)`
+          : `repeat(${visible.length}, 1fr)`,
+        gap: '2px',
+        background: 'var(--aura-color-bg)',
+        alignItems: '', justifyContent: '', flexDirection: '',
+      });
     } else {
+      // tiling (default + fallback)
+      const cols = Math.ceil(Math.sqrt(visible.length));
       const rows = Math.ceil(visible.length / cols);
       Object.assign(dynamicLayout.style, {
         display: 'grid',
@@ -629,6 +681,18 @@ const ssrVisibleViews = initialViews.filter(
     const baseRow = minimized.length > 0 ? 2 : 1;
     const keep = new Set<string>();
 
+    // Per-layout slot placement. tiling reproduces the previous sqrt grid;
+    // fullscreen drops every slot into the same cell (the most recently-
+    // focused one ends up on top via DOM order); columns / rows / stack
+    // lay slots out in a single row / column respectively.
+    const tilingCols = Math.max(1, Math.ceil(Math.sqrt(visible.length)));
+    function placement(i: number): { col: number; row: number } {
+      if (layoutId === 'fullscreen') return { col: 1, row: baseRow };
+      if (layoutId === 'columns')    return { col: i + 1, row: baseRow };
+      if (layoutId === 'rows' || layoutId === 'stack') return { col: 1, row: i + baseRow };
+      return { col: (i % tilingCols) + 1, row: Math.floor(i / tilingCols) + baseRow };
+    }
+
     // Visible-in-active-workspace slots: place into the grid, ensure
     // display style is set to flex (in case they were previously hidden).
     visible.forEach((v, i) => {
@@ -641,8 +705,9 @@ const ssrVisibleViews = initialViews.filter(
         updateSlot(el, v);
       }
       el.style.display    = 'flex';
-      el.style.gridColumn = String((i % cols) + 1);
-      el.style.gridRow    = String(Math.floor(i / cols) + baseRow);
+      const p = placement(i);
+      el.style.gridColumn = String(p.col);
+      el.style.gridRow    = String(p.row);
       el.style.removeProperty('order');
     });
 

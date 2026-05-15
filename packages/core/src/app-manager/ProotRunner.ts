@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
+import type { SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
 const HEALTH_CHECK_TIMEOUT_MS = 30_000;
@@ -34,7 +35,7 @@ interface SpawnedApp {
   appId: string;
 }
 
-export class ProotRunner {
+export class ProotRunner implements SandboxRunner {
   private processes = new Map<string, SpawnedApp>();
   private baseRootfs: string;
   private toolchainDir: string;
@@ -42,13 +43,7 @@ export class ProotRunner {
   private dataDir: string;
   private osApiBase: string;
 
-  constructor(opts: {
-    baseRootfs: string;
-    toolchainDir: string;
-    appsDir: string;
-    dataDir: string;
-    osApiBase: string;
-  }) {
+  constructor(opts: SandboxRunnerOpts) {
     this.baseRootfs = opts.baseRootfs;
     this.toolchainDir = opts.toolchainDir;
     this.appsDir = opts.appsDir;
@@ -349,6 +344,15 @@ export class ProotRunner {
     spawned.process.removeAllListeners('exit');
     killProcessGroup(spawned.process.pid, 'SIGKILL');
     return true;
+  }
+
+  /**
+   * PRoot apps run in the same network namespace as the shell, so they're
+   * always reachable at 127.0.0.1. Returns null for unknown instances so
+   * callers can distinguish "not tracked" from "tracked but no host".
+   */
+  getHost(instanceId: string): string | null {
+    return this.processes.has(instanceId) ? '127.0.0.1' : null;
   }
 
   getPort(instanceId: string): number | null {

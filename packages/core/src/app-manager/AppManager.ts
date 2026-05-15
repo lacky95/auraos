@@ -9,6 +9,8 @@ import { AppRegistry } from './AppRegistry.js';
 import { PortAllocator } from './PortAllocator.js';
 import { LifecycleStateMachine } from './LifecycleStateMachine.js';
 import { ProotRunner, killProcessGroup } from './ProotRunner.js';
+import { ContainerRunner } from './ContainerRunner.js';
+import type { SandboxRunner } from './SandboxRunner.js';
 import { IntentResolver, type Intent, type IntentMatch } from './IntentResolver.js';
 import { PermissionManager } from '../permissions/PermissionManager.js';
 import { ContentProviderRegistry } from '../content/ContentProviderRegistry.js';
@@ -20,7 +22,16 @@ export class AppManager {
   private registry: AppRegistry;
   private ports: PortAllocator;
   private fsm: LifecycleStateMachine;
-  private runner: ProotRunner;
+  /**
+   * Default runner — used by the existing `this.runner` call-sites. We keep
+   * the field so the rest of AppManager doesn't have to know about the two
+   * backends. The `pickRunner(manifest)` method routes through `runners`
+   * for code paths that need per-app selection (spawn/health/exit, lifecycle
+   * dispatch). For utility calls without a manifest in scope (forceKill,
+   * port lookup, getActivePids) we union across runners.
+   */
+  private runner: SandboxRunner;
+  private runners: Record<'proot' | 'container', SandboxRunner>;
   private instances = new Map<string, AppInstance>();
   private nextInstanceNum = new Map<string, number>();
   private activities = new Map<string, AppActivity>();
@@ -52,7 +63,9 @@ export class AppManager {
     this.registry = new AppRegistry(opts.appsDir);
     this.ports = new PortAllocator(opts.portStart ?? 4001, opts.portEnd ?? 4999);
     this.fsm = new LifecycleStateMachine();
-    this.runner = new ProotRunner({
+    // Both runners share the same opts. ContainerRunner rewrites osApiBase
+    // to its docker-network hostname; ProotRunner keeps 127.0.0.1.
+    const runnerOpts = {
       baseRootfs: opts.baseRootfs,
       toolchainDir: opts.toolchainDir,
       appsDir: opts.appsDir,
@@ -63,10 +76,31 @@ export class AppManager {
       // POST back to /api/os/events/*. Using 127.0.0.1 sidesteps the lookup
       // entirely and works in BOTH prooted and non-prooted spawns.
       osApiBase: `http://127.0.0.1:${opts.shellPort ?? 3000}`,
-    });
+    };
+    this.runners = {
+      proot:     new ProotRunner(runnerOpts),
+      container: new ContainerRunner(runnerOpts),
+    };
+    // Default runner for utility calls; per-app spawn routes via runnerOf().
+    this.runner = this.runners['proot'];
     this.permissions = new PermissionManager(this.registry);
     this.providers   = new ContentProviderRegistry();
     this.intents     = new IntentResolver();
+  }
+
+  /**
+   * Resolve the runner that owns an instance. Reads the runner key off the
+   * stored AppInstance (latched at spawn time). Falls back to the manifest's
+   * `sandbox` field if the instance isn't recorded yet (during spawn), and
+   * finally to ProotRunner if neither is available. Never returns null —
+   * callers always get something they can call methods on.
+   */
+  private runnerOf(instanceIdOrAppId: string): SandboxRunner {
+    const inst = this.instances.get(instanceIdOrAppId);
+    if (inst?.sandbox) return this.runners[inst.sandbox];
+    const m = this.registry.getById(inst?.appId ?? instanceIdOrAppId);
+    if (m?.sandbox) return this.runners[m.sandbox];
+    return this.runners['proot'];
   }
 
   /**
@@ -175,7 +209,7 @@ export class AppManager {
     const refreshed: string[] = [];
     for (const inst of this.getInstancesByApp(appId)) {
       try {
-        this.runner.provisionToolsDir(inst.instanceId, manifest);
+        this.runnerOf(inst.instanceId).provisionToolsDir(inst.instanceId, manifest);
         refreshed.push(inst.instanceId);
       } catch (err) {
         console.warn(`[AppManager] refresh tools failed for ${inst.instanceId}: ${(err as Error).message}`);
@@ -414,17 +448,23 @@ export class AppManager {
     const port = await this.ports.allocate(instanceId);
 
     try {
-      const pid = await this.runner.spawn(instanceId, appId, port, manifest);
-      this.upsertInstance(instanceId, appId, { pid, port, startedAt: new Date(), inPool: opts.inPool });
+      // Pick the runner from the manifest's sandbox choice and latch it on
+      // the instance record. All subsequent lifecycle dispatches use
+      // runnerOf(instanceId) which reads that latched field — guarantees we
+      // tear down with the runner that actually launched the process even
+      // if the manifest is edited mid-lifetime.
+      const runner = this.runners[manifest.sandbox] ?? this.runners['proot'];
+      const pid = await runner.spawn(instanceId, appId, port, manifest);
+      this.upsertInstance(instanceId, appId, { pid, port, startedAt: new Date(), inPool: opts.inPool, sandbox: manifest.sandbox });
       this.transition(instanceId, appId, 'created', port);
 
-      await this.runner.callLifecycle(instanceId, 'onCreate');
+      await this.runnerOf(instanceId).callLifecycle(instanceId, 'onCreate');
       this.transition(instanceId, appId, 'starting', port);
 
-      await this.runner.callLifecycle(instanceId, 'onStart');
+      await this.runnerOf(instanceId).callLifecycle(instanceId, 'onStart');
       this.transition(instanceId, appId, 'started', port);
 
-      await this.runner.callLifecycle(instanceId, 'onResume');
+      await this.runnerOf(instanceId).callLifecycle(instanceId, 'onResume');
       this.transition(instanceId, appId, 'resuming', port);
       this.transition(instanceId, appId, 'resumed', port);
 
@@ -451,7 +491,7 @@ export class AppManager {
         }
       }
 
-      this.runner.onExit(instanceId, (code) => this.handleUnexpectedExit(instanceId, appId, code));
+      this.runnerOf(instanceId).onExit(instanceId, (code) => this.handleUnexpectedExit(instanceId, appId, code));
       return instanceId;
     } catch (err) {
       this.ports.release(port);
@@ -529,11 +569,11 @@ export class AppManager {
   }
 
   async stop(instanceId: string): Promise<void> {
-    if (!this.runner.isRunning(instanceId)) return;
+    if (!this.runnerOf(instanceId).isRunning(instanceId)) return;
     const inst = this.instances.get(instanceId);
     if (!inst) return;
     const appId = inst.appId;
-    const port = this.runner.getPort(instanceId);
+    const port = this.runnerOf(instanceId).getPort(instanceId);
 
     // Deregister content providers (so /api/data/<authority> stops resolving)
     this.providers.unregisterInstance(inst, this.registry.getById(appId));
@@ -542,21 +582,21 @@ export class AppManager {
     this.purgeActivitiesOfInstance(instanceId);
 
     this.transition(instanceId, appId, 'pausing', port);
-    await this.runner.callLifecycle(instanceId, 'onPause').catch(() => undefined);
+    await this.runnerOf(instanceId).callLifecycle(instanceId, 'onPause').catch(() => undefined);
     this.transition(instanceId, appId, 'paused', port);
 
     this.transition(instanceId, appId, 'stopping', port);
-    await this.runner.callLifecycle(instanceId, 'onStop').catch(() => undefined);
+    await this.runnerOf(instanceId).callLifecycle(instanceId, 'onStop').catch(() => undefined);
     this.transition(instanceId, appId, 'stopped', port);
 
     this.transition(instanceId, appId, 'destroying', null);
-    await this.runner.callLifecycle(instanceId, 'onDestroy').catch(() => undefined);
-    await this.runner.kill(instanceId);
+    await this.runnerOf(instanceId).callLifecycle(instanceId, 'onDestroy').catch(() => undefined);
+    await this.runnerOf(instanceId).kill(instanceId);
     if (port) this.ports.release(port);
     this.transition(instanceId, appId, 'destroyed', null);
 
     // Clear instance after destroy
-    this.runner.clearToolsDir(instanceId);
+    this.runnerOf(instanceId).clearToolsDir(instanceId);
     this.instances.delete(instanceId);
     this.fsm.delete(instanceId);
     this.nextActivityNum.delete(instanceId);
@@ -576,16 +616,16 @@ export class AppManager {
     const inst = this.instances.get(instanceId);
     if (!inst) return;
     const appId = inst.appId;
-    const port = this.runner.getPort(instanceId);
+    const port = this.runnerOf(instanceId).getPort(instanceId);
     this.providers.unregisterInstance(inst, this.registry.getById(appId));
     this.purgeActivitiesOfInstance(instanceId);
-    const killed = this.runner.forceKill(instanceId);
+    const killed = this.runnerOf(instanceId).forceKill(instanceId);
     if (port) this.ports.release(port);
     if (killed) {
       this.fsm.set(instanceId, 'destroyed');
       OsEventBus.emit('app:stateChanged', { instanceId, appId, state: 'destroyed', port: null });
     }
-    this.runner.clearToolsDir(instanceId);
+    this.runnerOf(instanceId).clearToolsDir(instanceId);
     this.instances.delete(instanceId);
     this.fsm.delete(instanceId);
     this.nextActivityNum.delete(instanceId);
@@ -595,9 +635,9 @@ export class AppManager {
     if (this.fsm.get(instanceId) !== 'resumed') return;
     const inst = this.instances.get(instanceId);
     if (!inst) return;
-    const port = this.runner.getPort(instanceId);
+    const port = this.runnerOf(instanceId).getPort(instanceId);
     this.transition(instanceId, inst.appId, 'pausing', port);
-    await this.runner.callLifecycle(instanceId, 'onPause').catch(() => undefined);
+    await this.runnerOf(instanceId).callLifecycle(instanceId, 'onPause').catch(() => undefined);
     this.transition(instanceId, inst.appId, 'paused', port);
   }
 
@@ -606,14 +646,31 @@ export class AppManager {
     if (state !== 'paused' && state !== 'stopped') return;
     const inst = this.instances.get(instanceId);
     if (!inst) return;
-    const port = this.runner.getPort(instanceId);
+    const port = this.runnerOf(instanceId).getPort(instanceId);
     this.transition(instanceId, inst.appId, 'resuming', port);
-    await this.runner.callLifecycle(instanceId, 'onResume').catch(() => undefined);
+    await this.runnerOf(instanceId).callLifecycle(instanceId, 'onResume').catch(() => undefined);
     this.transition(instanceId, inst.appId, 'resumed', port);
   }
 
   getInstance(instanceId: string): AppInstance | undefined {
     return this.instances.get(instanceId);
+  }
+
+  /**
+   * Resolve the upstream URL the shell should hit for a given instance.
+   * PRoot instances live in the shell's network namespace → host is
+   * '127.0.0.1'. Container instances are on the shared docker network →
+   * host is the container's name (e.g. 'aura-com.aura.terminal-3').
+   *
+   * Used by the WS proxy + HTTP proxy. Returns null if the instance has
+   * already exited or never existed.
+   */
+  getUpstreamUrl(instanceId: string): { host: string; port: number } | null {
+    const runner = this.runnerOf(instanceId);
+    const host   = runner.getHost(instanceId);
+    const port   = runner.getPort(instanceId);
+    if (host == null || port == null) return null;
+    return { host, port };
   }
 
   getInstancesByApp(appId: string): AppInstance[] {
@@ -677,7 +734,7 @@ export class AppManager {
     const now = new Date();
 
     // Optional notification to the app. 404 / errors are silently ignored.
-    const result = await this.runner.callOptionalLifecycle(instanceId, 'onActivityCreate', { activityId, data });
+    const result = await this.runnerOf(instanceId).callOptionalLifecycle(instanceId, 'onActivityCreate', { activityId, data });
     let path = '/';
     let title: string | undefined;
     let metadata: Record<string, unknown> | undefined;
@@ -767,7 +824,7 @@ export class AppManager {
     if (!activity) return;
     const { parentInstanceId, appId } = activity;
 
-    await this.runner.callOptionalLifecycle(parentInstanceId, `onActivityDestroy/${encodeURIComponent(activityId)}`);
+    await this.runnerOf(parentInstanceId).callOptionalLifecycle(parentInstanceId, `onActivityDestroy/${encodeURIComponent(activityId)}`);
 
     this.activities.delete(activityId);
     OsEventBus.emit('activity:closed', { activityId, parentInstanceId, appId });
@@ -778,7 +835,7 @@ export class AppManager {
       manifest &&
       !manifest.backgroundService &&
       this.getActivitiesByInstance(parentInstanceId).length === 0 &&
-      this.runner.isRunning(parentInstanceId)
+      this.runnerOf(parentInstanceId).isRunning(parentInstanceId)
     ) {
       await this.stop(parentInstanceId);
     }
@@ -923,7 +980,7 @@ export class AppManager {
           // stale ChildProcess reference. If the OS process is somehow still
           // alive (e.g. we mis-diagnosed liveness), this also SIGKILLs the
           // whole group — preferable to leaving a squatter behind.
-          try { this.runner.forceKill(inst.instanceId); } catch { /* runner may already have evicted it */ }
+          try { this.runnerOf(inst.instanceId).forceKill(inst.instanceId); } catch { /* runner may already have evicted it */ }
           OsEventBus.emit('app:stateChanged', { instanceId: inst.instanceId, appId: inst.appId, state: 'error', port: null });
           OsEventBus.emit('app:crashed',      { instanceId: inst.instanceId, appId: inst.appId, error: 'reconciled: backing process disappeared' });
         }
@@ -950,7 +1007,11 @@ export class AppManager {
     //    Without the runner's view, the reaper would kill mid-spawn instances.
     const trackedPids = new Set<number>();
     for (const t of this.instances.values()) if (t.pid != null) trackedPids.add(t.pid);
-    for (const pid of this.runner.getActivePids()) trackedPids.add(pid);
+    // Union pids from both runners so the reconciler doesn't mistake an
+    // in-flight container-spawn for a dead PRoot (or vice versa).
+    for (const r of Object.values(this.runners)) {
+      for (const pid of r.getActivePids()) trackedPids.add(pid);
+    }
     const squatters = listAppOrphans(trackedPids);
     for (const orphan of squatters) {
       console.warn(`[AppManager] reconcile: SIGKILL orphan pid=${orphan.pid} app=${orphan.appId} cmd=${orphan.cmdline.slice(0, 120)}`);
@@ -1020,7 +1081,7 @@ export class AppManager {
   }
 
   private handleUnexpectedExit(instanceId: string, appId: string, code: number | null): void {
-    const port = this.runner.getPort(instanceId);
+    const port = this.runnerOf(instanceId).getPort(instanceId);
     if (port) this.ports.release(port);
     const inst = this.instances.get(instanceId);
     if (inst) this.providers.unregisterInstance(inst, this.registry.getById(appId));
