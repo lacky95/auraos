@@ -53,6 +53,27 @@ export interface SandboxRunner {
   getActivePids(): number[];
   /** Register a one-shot exit-callback for the instance's root process. */
   onExit(instanceId: string, cb: (code: number | null) => void): void;
+
+  /**
+   * Optional — runners whose sandboxes outlive the shell process (currently
+   * just ContainerRunner) implement these so AppManager.init() can pick up
+   * survivors from the last shell lifetime. PRoot intentionally doesn't:
+   * its proots are direct child processes of the shell node and die with it.
+   */
+  listOrphanRecords?(): Promise<Array<{
+    instanceId: string;
+    appId:      string;
+    port:       number;
+    hostname:   string;
+    pid:        number;
+  }>>;
+  registerAdopted?(rec: {
+    instanceId: string;
+    appId:      string;
+    port:       number;
+    hostname:   string;
+    pid:        number;
+  }): void;
 }
 
 /** What every concrete runner needs to construct. */

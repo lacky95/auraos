@@ -135,7 +135,25 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
 
     const statusEl = document.getElementById('conn-status');
     const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProto}//${location.host}/api/proxy/${appId}/ws`;
+    // Route the WS to OUR OWN backend instance (the one this iframe was
+    // loaded from), NOT the app id. The shell's WS proxy resolves
+    // `/api/proxy/<instanceId>/...` directly to that instance (Pass 1 in
+    // wsProxyPlugin); routing by app id falls into Pass 2's "pick first
+    // matching instance" which lands EVERY terminal tab on the same
+    // backend container — they then fight over a single PTY session
+    // every 2 s.
+    //
+    // The iframe path is `/api/proxy/<instanceId>/...`, so the first
+    // segment after `/api/proxy/` is our backend identity.
+    const pathParts  = location.pathname.split('/').filter(Boolean);
+    const instanceId = pathParts[0] === 'api' && pathParts[1] === 'proxy' && pathParts[2] ? pathParts[2] : appId;
+    // Session id picks where the PTY-server's registry stores our shell.
+    // Inside each backend container there's at most one terminal anyway
+    // (each instance == one shell process), so a per-instance key is the
+    // right granularity. If activity-mode terminals land here later, the
+    // meta tag will be present and a per-activity key takes priority.
+    const activityId = document.querySelector('meta[name="aura-activity-id"]')?.getAttribute('content') ?? instanceId;
+    const wsUrl = `${wsProto}//${location.host}/api/proxy/${instanceId}/ws?_aura_session=${encodeURIComponent(activityId)}`;
     document.getElementById('ws-url').textContent = wsUrl;
 
     // ANSI color helpers — xterm.js parses these inline.

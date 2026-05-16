@@ -1,0 +1,16 @@
+{
+  "id": "com.aura.example",
+  "name": "Example",
+  "version": "0.1.0",
+  "description": "Simple example",
+  "icon": "EXP",
+  "instanceMode": "single",
+  "activityMode": "multi",
+  "sandbox": "container",
+  "tools": [
+    "bash",
+    "git",
+    "htop",
+    "claude"
+  ]
+}

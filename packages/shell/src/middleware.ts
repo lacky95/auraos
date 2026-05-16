@@ -1,6 +1,6 @@
 import { defineMiddleware } from 'astro:middleware';
 import { getAppManager, initAppManager } from '@aura/core';
-import { kvServer } from '@aura/kv-store';
+import { kvServer, defaultKv } from '@aura/kv-store';
 import { bootstrapKv } from './lib/kvBootstrap.js';
 
 // Source of truth is the singleton on globalThis — NOT a module-scoped flag.
@@ -36,6 +36,21 @@ async function ensureAppManager() {
       portEnd:      Number(process.env['AURA_APP_PORT_END']   ?? 4999),
       shellPort:    Number(process.env['AURA_SHELL_PORT']     ?? 3000),
     });
+    // Hydrate per-app enable state BEFORE init() so its autoStart / warmPool
+    // / service-spawn loops skip disabled apps from the very first tick.
+    // Stored under os/app-enabled; missing keys default to enabled (so newly
+    // scaffolded apps come online without any migration).
+    try {
+      const kv = defaultKv();
+      try {
+        const state = await kv.getValue<Record<string, boolean>>('os', 'app-enabled');
+        if (state) mgr.setEnabledState(state);
+      } finally {
+        await kv.close().catch(() => undefined);
+      }
+    } catch (err) {
+      console.warn(`[middleware] could not hydrate app-enabled state: ${(err as Error).message}`);
+    }
     await mgr.init();
   })();
   try { await initPromise; }

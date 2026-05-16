@@ -10,8 +10,11 @@ import { defaultKv } from '@aura/kv-store';
 
 interface Props {
   pinnedApps?: AppManifest[];
+  /** Per-app enable/disable map. Threaded down to the Dock so its tiles can
+   *  carry `data-enabled` for the live SSE-driven toggle. */
+  enabledMap?: Record<string, boolean>;
 }
-const { pinnedApps = [] } = Astro.props;
+const { pinnedApps = [], enabledMap = {} } = Astro.props;
 
 // SSR theme load now goes through the OS KV (Redis) directly — no app
 // dependency. `bootstrapKv()` ensures `os/theme` exists before this SSR
@@ -95,19 +98,46 @@ const activeThemeId   = activeTheme.id;
     // Console-app WebSocket for persistent file backing. The shell's own
     // Vite plugin proxies /api/proxy/<id>/<path> WS upgrades to the app's
     // port, so we don't need to know the console port — just speak the
-    // proxy URL on whatever host the page came from. Reconnects with
-    // backoff; silently no-ops while console isn't running.
+    // proxy URL on whatever host the page came from.
+    //
+    // Connection state is gated by app lifecycle events received over the
+    // shared socket.io channel (see the regular `<script>` block below
+    // that subscribes to 'app:stateChanged' for com.aura.console). When
+    // the console app is destroyed/crashed/stopped we stop retrying
+    // entirely; when it comes back to 'resumed'/'started' we fire an
+    // immediate reconnect. Without this gate, killing the console from
+    // Process Manager left the shell hammering /api/proxy/com.aura.console/
+    // ws forever, spamming "Firefox can't establish a connection" once
+    // per backoff tick.
     const consoleWsUrl = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/proxy/com.aura.console/ws`;
     let consoleWs = null;
     let consoleWsBackoff = 1000;
     let consoleWsConnecting = false;
+    let consoleWsRetryTimer = null;
+    // 'unknown' on first load — we don't know whether console is running
+    // until the first /api/apps fetch or 'app:stateChanged' event lands.
+    // 'down'   stops the retry loop; future event flips it to 'up' and
+    //          schedules an immediate reconnect.
+    // 'up'     re-enables retry on close.
+    let consoleAppState = 'unknown';
     const pendingForWs = [];
 
+    function clearConsoleRetry() {
+      if (consoleWsRetryTimer) { clearTimeout(consoleWsRetryTimer); consoleWsRetryTimer = null; }
+    }
+    function scheduleConsoleRetry() {
+      if (consoleAppState === 'down') return;   // app gone; don't bother
+      clearConsoleRetry();
+      consoleWsRetryTimer = setTimeout(connectConsoleWs, consoleWsBackoff);
+      consoleWsBackoff = Math.min(consoleWsBackoff * 2, 30000);
+    }
     function connectConsoleWs() {
+      consoleWsRetryTimer = null;
+      if (consoleAppState === 'down') return;
       if (consoleWsConnecting || (consoleWs && consoleWs.readyState <= 1)) return;
       consoleWsConnecting = true;
       try { consoleWs = new WebSocket(consoleWsUrl); }
-      catch { consoleWsConnecting = false; setTimeout(connectConsoleWs, consoleWsBackoff); return; }
+      catch { consoleWsConnecting = false; scheduleConsoleRetry(); return; }
       consoleWs.addEventListener('open', () => {
         consoleWsBackoff = 1000;
         consoleWsConnecting = false;
@@ -118,8 +148,7 @@ const activeThemeId   = activeTheme.id;
       consoleWs.addEventListener('close', () => {
         consoleWs = null;
         consoleWsConnecting = false;
-        setTimeout(connectConsoleWs, consoleWsBackoff);
-        consoleWsBackoff = Math.min(consoleWsBackoff * 2, 30000);
+        scheduleConsoleRetry();
       });
       consoleWs.addEventListener('error', () => { /* close fires next */ });
     }
@@ -132,9 +161,56 @@ const activeThemeId   = activeTheme.id;
       }
     }
 
-    connectConsoleWs();
+    // Exposed for the socket.io app-lifecycle listener (regular <script>
+    // block below) — toggles whether the retry loop is allowed to fire.
+    window.__auraConsoleBridge = {
+      setRunning(running) {
+        if (running) {
+          if (consoleAppState === 'up') return;   // already retrying / connected
+          consoleAppState = 'up';
+          consoleWsBackoff = 1000;
+          clearConsoleRetry();
+          connectConsoleWs();
+        } else {
+          consoleAppState = 'down';
+          clearConsoleRetry();
+          if (consoleWs) { try { consoleWs.close(); } catch (_) {} consoleWs = null; }
+        }
+      },
+    };
+
+    // Probe initial state. If the console app isn't running at boot we
+    // skip the first connect attempt entirely (no error in the console).
+    // Falls back to an optimistic attempt if /api/apps is unreachable.
+    fetch('/api/apps', { signal: AbortSignal.timeout(2000) })
+      .then((r) => r.ok ? r.json() : null)
+      .then((apps) => {
+        if (!Array.isArray(apps)) { connectConsoleWs(); return; }
+        const app = apps.find((a) => a?.manifest?.id === 'com.aura.console');
+        const running = !!app?.instances?.some?.((i) => i.state === 'resumed' || i.state === 'started');
+        window.__auraConsoleBridge.setRunning(running);
+      })
+      .catch(() => { connectConsoleWs(); /* unknown state, try once */ });
+
+    // Dev-mode noise we explicitly skip persisting + relaying to iframes.
+    // These messages fire constantly (every Vite restart, every HMR
+    // disconnect, every React island mount) and drown out real signal in
+    // the Console app. The original console.* still emits them so the
+    // browser DevTools console shows everything for active debugging —
+    // we just don't archive them.
+    function isNoisyDev(args) {
+      if (!args || args.length === 0) return false;
+      const first = String(args[0] ?? '');
+      if (first.startsWith('[vite] connect'))  return true;     // [vite] connecting / connected
+      if (first.startsWith('[vite] disc'))     return true;     // [vite] disconnected
+      if (first.startsWith('[vite] hot'))      return true;     // HMR update notifications
+      if (first.includes('Download the React DevTools')) return true;
+      if (first.includes('react-devtools'))    return true;
+      return false;
+    }
 
     function broadcast(entry) {
+      if (isNoisyDev(entry.args)) return;
       buffer.push(entry);
       if (buffer.length > MAX) buffer.shift();
       const iframes = document.querySelectorAll('iframe');
@@ -172,20 +248,90 @@ const activeThemeId   = activeTheme.id;
 
     // EventSource: browser surfaces 'connection interrupted' / network errors via
     // an 'error' event on the instance, not via console.*. Wrap the constructor
-    // so those bubble into our console.
+    // so those bubble into our console — EXCEPT for the OS-internal
+    // `/api/apps/events` SSE, which self-heals via the connector's own 2s
+    // retry. Logging every CLOSED on those endpoints just spams the bus
+    // every time the dev server bounces.
     const NativeES = window.EventSource;
+    const SELF_HEALING_SSE = /\/api\/apps\/events(\?|$)/;
     if (NativeES) {
+      // Track every live instance so pagehide can close them cleanly.
+      // Without this, Firefox surfaces "The connection to X was interrupted
+      // while the page was loading" for every in-flight SSE on every reload
+      // / nav — the browser aborts the request mid-response and reports it
+      // as if it were a real failure. Closing them ourselves trips the
+      // normal close path silently.
+      const live = new Map();   // es → { url, id, t0 }
+      let nextEsId = 1;
+      const esLog = (lvl, ...args) => {
+        // Honour the global AURA_LOG filter so this is silent by default.
+        // Enable with localStorage.setItem('aura.log','sse-client') (or '*').
+        let filter = '';
+        try { filter = localStorage.getItem('aura.log') || ''; } catch (_) {}
+        filter = filter || (window.__AURA_LOG__ || '');
+        if (!filter) return;
+        // Minimal namespace match — `sse-client` or wildcard.
+        const ns = 'sse-client';
+        let on = false;
+        for (const part of filter.split(/[\s,]+/)) {
+          if (!part) continue;
+          const neg = part.startsWith('-');
+          const body = neg ? part.slice(1) : part;
+          const at = body.indexOf('@');
+          const pat = at >= 0 ? body.slice(0, at) : body;
+          const lvName = at >= 0 ? body.slice(at + 1) : 'debug';
+          const lvOrder = { debug: 10, info: 20, log: 20, warn: 30, error: 40 };
+          if (new RegExp('^' + pat.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$').test(ns)) {
+            const min = lvOrder[lvName] ?? 10;
+            const cur = lvOrder[lvl]    ?? 10;
+            if (cur < min) continue;
+            if (neg) { on = false; break; }
+            on = true;
+          }
+        }
+        if (on) (console[lvl] || console.log).call(console, '[sse-client]', ...args);
+      };
       const Wrapped = function (url, init) {
         const es = new NativeES(url, init);
+        const id = nextEsId++;
+        live.set(es, { url: String(url), id, t0: Date.now() });
+        const isSelfHealing = SELF_HEALING_SSE.test(String(url));
+        esLog('info', 'open', `#${id}`, String(url));
+        es.addEventListener('open', () => esLog('debug', 'opened', `#${id}`, `+${Date.now() - live.get(es).t0}ms`));
         es.addEventListener('error', () => {
           const state = ['CONNECTING', 'OPEN', 'CLOSED'][es.readyState] || '?';
+          esLog('warn', 'error', `#${id}`, `readyState=${state}`, String(url));
+          if (isSelfHealing) return;
           broadcast(makeEntry('warn', 'shell', [`EventSource error: ${url} (readyState=${state})`]));
         });
+        const origClose = es.close.bind(es);
+        es.close = () => {
+          const info = live.get(es);
+          live.delete(es);
+          if (info) esLog('info', 'close', `#${info.id}`, `dur=${Date.now() - info.t0}ms`);
+          origClose();
+        };
         return es;
       };
       Wrapped.prototype = NativeES.prototype;
       ['CONNECTING', 'OPEN', 'CLOSED'].forEach((k, i) => { Wrapped[k] = i; });
       window.EventSource = Wrapped;
+      // Close every live SSE BEFORE the browser starts aborting in-flight
+      // requests. pagehide fires too late — by then Firefox has already
+      // logged "The connection to X was interrupted while the page was
+      // loading" for every open stream. beforeunload runs at the very top
+      // of the navigation lifecycle and we don't need to preventDefault,
+      // so it imposes no "Are you sure you want to leave?" dialog cost.
+      // pagehide stays as a safety net for Safari (which sometimes skips
+      // beforeunload during bfcache freezes).
+      const closeAll = (reason) => {
+        const n = live.size;
+        if (n) esLog('info', 'closeAll', reason, `n=${n}`);
+        for (const es of live.keys()) { try { es.close(); } catch (_) {} }
+        live.clear();
+      };
+      window.addEventListener('beforeunload', () => closeAll('beforeunload'));
+      window.addEventListener('pagehide',     () => closeAll('pagehide'));
     }
 
     // fetch: capture network failures (DNS/connection) and non-2xx responses.
@@ -256,7 +402,7 @@ const activeThemeId   = activeTheme.id;
     <main id="desktop">
       <slot />
     </main>
-    <Dock apps={pinnedApps} />
+    <Dock apps={pinnedApps} enabledMap={enabledMap} />
   </div>
   <!--
     LauncherOverlay mounted at body root (not inside the dock) so its
@@ -353,6 +499,13 @@ const activeThemeId   = activeTheme.id;
   </script>
 
   <script>
+    // Theme/mode live updates flow through the shared OS event channel
+    // (Socket.IO at /os-events) instead of a dedicated SSE connection.
+    // Firefox's HTTP/1.1 connection cap was killing parallel SSEs;
+    // socket.io lives on its own WS pool. See packages/shell/src/lib/
+    // osEvents.ts and the sioPlugin in astro.config.mjs.
+    import { osEvents as _osEvents } from '../lib/osEvents.ts';
+
     // Live-update CSS-Vars when the OS broadcasts a theme OR mode change.
     // Both events trigger a fresh /api/os/theme.css fetch (the endpoint
     // re-resolves the active palette server-side) + a postMessage relay so
@@ -379,35 +532,8 @@ const activeThemeId   = activeTheme.id;
       framework?: { id: string; version: string };
     };
 
-    // Native EventSource auto-reconnects only while in CONNECTING/OPEN. If a
-    // few failures push it to CLOSED (e.g. during a shell restart), it sits
-    // there forever and live updates silently stop working. We wrap it in a
-    // self-healing loop: on `error` after a close, recreate after 2 s.
-    let sse: EventSource | null = null;
-    const connectSse = () => {
-      // Only theme/mode events drive the shell's theme refresh — let the server
-      // filter the firehose for us so the message handler doesn't pay for
-      // app:* / activity:* / notification events it would discard anyway.
-      sse = new EventSource('/api/apps/events?topics=theme:*,mode:*');
-      // Connect/disconnect are demoted to debug — they fire on every container
-      // soft-restart and on idle network hiccups, which is normal in dev. The
-      // reconnect loop below recovers transparently; users don't need to see
-      // a yellow warning in the console for routine cycle behaviour.
-      sse.onopen  = () => console.debug('[Theme/SSE] /api/apps/events connected');
-      sse.onerror = () => {
-        if (sse && sse.readyState === EventSource.CLOSED) {
-          console.debug('[Theme/SSE] disconnected — retrying in 2 s');
-          setTimeout(connectSse, 2000);
-        }
-      };
-      sse.onmessage = onSseMessage;
-    };
-
-    const onSseMessage = async (e: MessageEvent) => {
-      let ev: ThemeEvt | ModeEvt | { type?: string } = { type: undefined };
-      try { ev = JSON.parse(e.data); } catch { return; }
-      if (ev.type !== 'theme:changed' && ev.type !== 'mode:changed') return;
-      console.log('[Theme/SSE] received', ev.type, ev);
+    const onThemeEvent = async (ev: ThemeEvt | ModeEvt) => {
+      console.log('[Theme] received', ev.type, ev);
 
       // Refresh the shell-side <style id="aura-theme"> block.
       try {
@@ -462,7 +588,91 @@ const activeThemeId   = activeTheme.id;
       });
     };
 
-    connectSse();
+    _osEvents.subscribe(['theme:changed', 'mode:changed'], (ev) => onThemeEvent(ev as ThemeEvt | ModeEvt));
+
+    // Console-bridge gating. The inline console-WS code at the top of this
+    // file exposes `window.__auraConsoleBridge.setRunning(bool)`. Flip it
+    // from app lifecycle events: when console is killed we stop hammering
+    // the proxy; when it comes back up we reconnect immediately.
+    _osEvents.subscribe('app:stateChanged', (ev: any) => {
+      if (ev?.appId !== 'com.aura.console') return;
+      const up   = ev.state === 'resumed' || ev.state === 'started';
+      const down = ev.state === 'destroyed' || ev.state === 'error' || ev.state === 'stopped' || ev.state === 'crashed';
+      if (!up && !down) return;
+      (window as any).__auraConsoleBridge?.setRunning(up);
+    });
+    _osEvents.subscribe('app:crashed', (ev: any) => {
+      if (ev?.appId !== 'com.aura.console') return;
+      (window as any).__auraConsoleBridge?.setRunning(false);
+    });
+  </script>
+
+  <!--
+    KeyDispatcher boot. Pins the singleton on `window.auraKeyDispatcher`,
+    loads the registry catalogue (`/api/os/keymap`) + the user overlay
+    (`/api/kv/os/keymap`), installs a top-level keydown listener, and
+    refreshes state on `kv:changed os/keymap` SSE events.
+
+    The dispatcher's catalogue + state need to be ready before iframes mount
+    so the first `aura.key.claim` broadcast carries the right combo list.
+    `index.astro`'s renderLayout sends the claim list per iframe on load.
+  -->
+  <script>
+    import { getKeyDispatcher } from '../lib/keyDispatcher.ts';
+    import { osEvents as _kvOsEvents } from '../lib/osEvents.ts';
+    // Subpath import — the bare `@aura/core` barrel pulls server-only deps
+    // (chokidar, node:fs via AppManager) into the browser bundle.
+    import type { KeyAction, OsKeymapState } from '@aura/core/keymap';
+
+    type CatalogueResponse = { actions: KeyAction[] };
+
+    const dispatcher = getKeyDispatcher();
+
+    async function loadCatalogue(): Promise<void> {
+      try {
+        const res = await fetch('/api/os/keymap');
+        if (!res.ok) return;
+        const body = (await res.json()) as CatalogueResponse;
+        if (Array.isArray(body.actions)) dispatcher.setActions(body.actions);
+      } catch (err) {
+        console.warn('[KeyDispatcher] failed to load catalogue', err);
+      }
+    }
+
+    async function loadState(): Promise<void> {
+      try {
+        const res = await fetch('/api/kv/os/keymap');
+        if (!res.ok) return;
+        const body = (await res.json()) as { value?: OsKeymapState };
+        if (body.value) dispatcher.setState(body.value);
+      } catch (err) {
+        console.warn('[KeyDispatcher] failed to load state', err);
+      }
+    }
+
+    void (async () => {
+      await Promise.all([loadCatalogue(), loadState()]);
+    })();
+
+    // OS-wide keydown listener. Iframes that own focus consume their own
+    // keystrokes and only forward CLAIMED combos via postMessage (handled
+    // in index.astro). This listener catches everything that bubbles up
+    // to the shell itself — launcher overlay open, process-manager open,
+    // status-bar focused, no iframe focused, etc.
+    document.addEventListener('keydown', (e) => {
+      const res = dispatcher.handleKeyEvent(e);
+      if (res.fired) e.preventDefault();
+    }, { capture: true });
+
+    // Socket.IO-driven state refresh. The dispatcher rebroadcasts claim
+    // lists automatically when state changes (see notifyClaims).
+    _kvOsEvents.subscribe('kv:changed', (ev) => {
+      const k = ev as { type: string; namespace?: string; key?: string };
+      if (k.namespace !== 'os' || k.key !== 'keymap') return;
+      void loadState();
+    });
+    // Surface the dispatcher in dev consoles for ad-hoc testing.
+    console.debug('[KeyDispatcher] ready (mode =', dispatcher.getMode(), ')');
   </script>
 </body>
 </html>

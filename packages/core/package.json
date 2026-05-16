@@ -13,6 +13,14 @@
     "./theme": {
       "import": "./dist/theme/index.js",
       "types": "./dist/theme/index.d.ts"
+    },
+    "./keymap": {
+      "import": "./dist/keymap/index.js",
+      "types": "./dist/keymap/index.d.ts"
+    },
+    "./logger": {
+      "import": "./dist/logger.js",
+      "types": "./dist/logger.d.ts"
     }
   },
   "scripts": {

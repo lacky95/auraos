@@ -43,11 +43,42 @@ export interface ThemeSelection {
 /** How an app participates in OS theming. Read from `<meta name="aura-theme-strategy">`. */
 export type ThemeStrategy = 'inherit' | 'themed' | 'override';
 
+import { KeymapApi } from './keymap.js';
+import { NavApi } from './nav.js';
+import { SystemApi } from './system.js';
+import { ActivityApi } from './activity.js';
+export type { KeymapHandler, KeymapHandlerCtx, KeymapChangeInfo } from './keymap.js';
+export type { BackEvent, BackHandler } from './nav.js';
+export type { NavigateOptions } from './activity.js';
+
 export class OsClient {
   private base: string;
 
+  /**
+   * Keyboard-action API. Apps declare actions in `app.manifest.json`'s
+   * `keymapActions` and register handlers here. The combo currently bound
+   * to each action is exposed via `keymap.getBinding('save')` so menu
+   * shortcut labels render the user's mapping, not a hard-coded combo.
+   */
+  readonly keymap: KeymapApi;
+  /** Android-style Back interception + `finish()`. */
+  readonly nav:    NavApi;
+  /** Programmatic OS actions (open launcher, switch workspace, …). */
+  readonly system: SystemApi;
+  /**
+   * In-place activity navigation — `navigate()` replaces the current
+   * iframe URL and records a back stack the OS pops on Escape. Use
+   * instead of opening a new activity when the next "screen" should
+   * occupy the SAME slot (Settings drill-downs, wizards).
+   */
+  readonly activity: ActivityApi;
+
   constructor() {
     this.base = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
+    this.keymap   = new KeymapApi(this);
+    this.nav      = new NavApi(this);
+    this.system   = new SystemApi(this);
+    this.activity = new ActivityApi(this);
   }
 
   // -------- OS event subscription (BroadcastReceiver-equivalent) --------

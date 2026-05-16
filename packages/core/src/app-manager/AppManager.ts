@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, readFileSync, lstatSync, writeFileSync, chmodSync, unlinkSync, existsSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, lstatSync, writeFileSync, chmodSync, copyFileSync, unlinkSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import type { AppLifecycleState } from '../types/lifecycle.js';
@@ -14,12 +14,16 @@ import type { SandboxRunner } from './SandboxRunner.js';
 import { IntentResolver, type Intent, type IntentMatch } from './IntentResolver.js';
 import { PermissionManager } from '../permissions/PermissionManager.js';
 import { ContentProviderRegistry } from '../content/ContentProviderRegistry.js';
+import { keymapRegistry } from '../keymap/KeymapRegistry.js';
 
 const RECONCILE_INTERVAL_MS = 5_000;
 const ERROR_GRACE_MS        = 30_000;
 
 export class AppManager {
-  private registry: AppRegistry;
+  // Public so the manifest-edit endpoint can call reloadFromDisk(appId)
+  // after writing — chokidar's lag would otherwise let refreshInstanceTools
+  // see a stale in-memory tools[] right after a `cap grant`.
+  public registry: AppRegistry;
   private ports: PortAllocator;
   private fsm: LifecycleStateMachine;
   /**
@@ -48,6 +52,14 @@ export class AppManager {
   // queue (avoids stale instanceId references when a pool member dies). The
   // refill counter prevents over-spawning when many slots open simultaneously.
   private refillInFlight = new Map<string, number>();
+  /**
+   * Per-app enable/disable state. Stores ONLY the explicit `false` flags —
+   * absence means "enabled" (the default). That way a newly scaffolded app
+   * is implicitly enabled and we don't have to migrate this map on every
+   * `chokidar add`. Hydrated from KV at boot via `setEnabledState()`;
+   * mutated via `setEnabled()` (which also stops running instances on disable).
+   */
+  private disabled = new Set<string>();
 
   constructor(opts: {
     appsDir: string;
@@ -180,6 +192,37 @@ export class AppManager {
       }
     }
 
+    // Make sure the host docker CLI is present in /os/toolchain/bin/docker so
+    // wildcard-cap apps (terminal: tools[] = ['*']) get it linked into their
+    // /aura/my-tools allowlist on next cap refresh — required for `aura jump`
+    // into container-mode apps from inside the terminal proot (the host's
+    // docker socket is bind-mounted alongside this; see ProotRunner). Cheap
+    // idempotent copy: skips if the toolchain entry already exists.
+    const dockerToolchain = join(this.toolchainDir, 'bin', 'docker');
+    if (!existsSync(dockerToolchain) && existsSync('/usr/local/bin/docker')) {
+      try {
+        mkdirSync(dirname(dockerToolchain), { recursive: true });
+        copyFileSync('/usr/local/bin/docker', dockerToolchain);
+        chmodSync(dockerToolchain, 0o755);
+        console.log(`[AppManager] healed docker → ${dockerToolchain}`);
+      } catch (err) {
+        console.warn(`[AppManager] could not heal docker into toolchain: ${(err as Error).message}`);
+      }
+    }
+
+    // Pre-create the shared user-home subpath inside the app-data named
+    // volume. ContainerRunner mounts /home/aura from this path into every
+    // sibling app container so tools like `claude` / `gh` / `ssh` persist
+    // their state across respawns AND across `aura jump` hops. Without
+    // pre-creating it, docker's volume-subpath mount fails on first spawn
+    // ("subpath … does not exist in the volume").
+    const sharedHome = join(this.dataDir, 'aura', 'home', 'user');
+    try {
+      mkdirSync(sharedHome, { recursive: true });
+    } catch (err) {
+      console.warn(`[AppManager] could not pre-create shared home ${sharedHome}: ${(err as Error).message}`);
+    }
+
     // Pre-create /aura/{all-tools,my-tools} as empty directories in the
     // base-rootfs so PRoot's --bind has guaranteed mount points. PRoot can
     // create missing dst paths in some versions but not others; pre-creating
@@ -190,6 +233,45 @@ export class AppManager {
       for (const mountPoint of [join(baseRootfsRoot, 'aura', 'all-tools'), join(baseRootfsRoot, 'aura', 'my-tools')]) {
         try { mkdirSync(mountPoint, { recursive: true }); }
         catch (err) { console.warn(`[AppManager] could not pre-create ${mountPoint}: ${(err as Error).message}`); }
+      }
+    }
+
+    // Mirror the toolchain into the aura-app-data named volume so sibling
+    // containers (sandbox: 'container' apps) can see it. Background: their
+    // bind sources are resolved by the HOST docker daemon, which cannot see
+    // paths that only exist inside the aura-shell image (like /os/toolchain).
+    // ContainerRunner mounts /data/aura/toolchain/bin into /aura/all-tools via
+    // a named-volume subpath, so this mirror is what makes the wildcard cap
+    // allowlist actually visible inside container-mode apps. PRoot apps
+    // continue to bind /os/toolchain/bin directly — they live in aura-shell's
+    // own mount namespace.
+    const srcBin    = join(this.toolchainDir, 'bin');
+    const mirrorBin = join(this.dataDir, 'aura', 'toolchain', 'bin');
+    if (existsSync(srcBin)) {
+      try {
+        mkdirSync(mirrorBin, { recursive: true });
+        for (const name of readdirSync(srcBin)) {
+          const src = join(srcBin, name);
+          const dst = join(mirrorBin, name);
+          let needsCopy = true;
+          try {
+            const sStat = lstatSync(src);
+            const dStat = lstatSync(dst);
+            // Skip when same size + dst mtime >= src mtime (good-enough idempotency
+            // for an image-shipped toolchain). Re-copy on size or mtime drift.
+            if (sStat.size === dStat.size && dStat.mtimeMs >= sStat.mtimeMs) needsCopy = false;
+          } catch { /* dst missing */ }
+          if (!needsCopy) continue;
+          try {
+            copyFileSync(src, dst);
+            chmodSync(dst, 0o755);
+          } catch (err) {
+            console.warn(`[AppManager] toolchain mirror ${src} → ${dst} failed: ${(err as Error).message}`);
+          }
+        }
+        console.log(`[AppManager] toolchain mirrored → ${mirrorBin} (${readdirSync(mirrorBin).length} entries)`);
+      } catch (err) {
+        console.warn(`[AppManager] toolchain mirror init failed: ${(err as Error).message}`);
       }
     }
   }
@@ -232,17 +314,125 @@ export class AppManager {
     return refreshed;
   }
 
+  // ─── Enable / disable apps ────────────────────────────────────────────────
+  // Android-style component enable state. Default is "enabled"; storing only
+  // the disabled set means a freshly-scaffolded app is live without any
+  // migration. The shell hydrates this from KV (`os/app-enabled`) before
+  // calling `init()` and persists every mutation through the corresponding
+  // /api/admin/apps/enabled endpoint.
+
+  isEnabled(appId: string): boolean {
+    return !this.disabled.has(appId);
+  }
+
+  /** Returns an explicit `{ appId → boolean }` map for every known app. */
+  getEnabledState(): Record<string, boolean> {
+    const out: Record<string, boolean> = {};
+    for (const m of this.registry.getAll()) out[m.id] = !this.disabled.has(m.id);
+    return out;
+  }
+
+  /** Bulk seed at boot. Accepts `{ appId → boolean }` from KV. */
+  setEnabledState(state: Record<string, boolean>): void {
+    this.disabled = new Set(Object.entries(state).filter(([, v]) => v === false).map(([k]) => k));
+  }
+
+  /**
+   * Flip the enabled flag. Disabling stops every running instance + clears
+   * the warm pool (matches Android's "force stop on disable" behaviour the
+   * user asked for). Enabling re-arms autoStart / warmPool by re-running
+   * the same init() side-effects, scoped to this app.
+   */
+  async setEnabled(appId: string, enabled: boolean): Promise<void> {
+    if (!this.registry.has(appId)) throw new Error(`Unknown app: ${appId}`);
+    const wasEnabled = !this.disabled.has(appId);
+    if (enabled === wasEnabled) return;
+    if (enabled) {
+      this.disabled.delete(appId);
+      // Re-arm: same code paths init() runs at boot, just for this app.
+      const m = this.registry.getById(appId);
+      if (m) {
+        if (m.componentType === 'service') {
+          this.startService(appId).catch((err) =>
+            console.error(`[AppManager] enable: service ${appId} failed: ${(err as Error).message}`),
+          );
+        } else if (m.autoStart) {
+          this.start(appId).catch((err) =>
+            console.error(`[AppManager] enable: autoStart ${appId} failed: ${(err as Error).message}`),
+          );
+        }
+        if (m.warmPool > 0 && m.instanceMode === 'multi') {
+          for (let i = 0; i < m.warmPool; i++) this.scheduleRefill(appId);
+        }
+      }
+    } else {
+      this.disabled.add(appId);
+      // Kill everything we know about for this app (instances + pool members
+      // both live in `this.instances`).
+      for (const inst of this.getInstancesByApp(appId)) {
+        try { await this.stop(inst.instanceId); }
+        catch (err) { console.warn(`[AppManager] disable: stop ${inst.instanceId} failed: ${(err as Error).message}`); }
+      }
+    }
+    OsEventBus.emit('app:enabledChanged', { appId, enabled });
+  }
+
   async init(): Promise<void> {
     mkdirSync(join(this.dataDir, 'apps'), { recursive: true });
     this.healToolchainShims();
     await this.registry.init();
     this.intents.reload(this.registry.getAll());
-    console.log(`[AppManager] Ready. Apps found: ${this.registry.getAll().length}`);
+    keymapRegistry.reloadFromManifests(this.registry.getAll());
+    console.log(`[AppManager] Ready. Apps found: ${this.registry.getAll().length}, keymap actions: ${keymapRegistry.list().length}`);
+    // Adopt every sibling container that survived the last shell lifetime.
+    // Without this, `docker compose restart aura-os` strands every running
+    // container-mode app as an orphan — they're still up on aura-net (they're
+    // siblings, not children, so SIGCHLD doesn't reap them), but AppManager
+    // has no record. That means `getInstancesByApp` returns empty, so cap
+    // grant/revoke can't hot-refresh them, lifecycle events don't fire, and
+    // warm-pool refills race with the surviving members. We hydrate from
+    // `docker ps` + `docker inspect` (env carries APP_ID/APP_INSTANCE_ID/
+    // APP_PORT — set in buildDockerArgs) and resurrect each instance in
+    // `state: 'resumed'` ready for normal lifecycle calls.
+    try {
+      const orphans = await this.runners.container.listOrphanRecords?.() ?? [];
+      for (const o of orphans) {
+        if (this.instances.has(o.instanceId)) continue;
+        const inst: AppInstance = {
+          instanceId:        o.instanceId,
+          appId:             o.appId,
+          state:             'resumed',
+          port:              o.port,
+          pid:               o.pid,
+          startedAt:         new Date(),
+          lastTransitionAt:  new Date(),
+          restartCount:      0,
+          inPool:            false,
+          sandbox:           'container',
+        };
+        this.instances.set(o.instanceId, inst);
+        // Bump nextInstanceNum so future spawns don't collide with this
+        // adopted name. Instance IDs are "<appId>-<n>" or "<appId>" (single).
+        const m = o.instanceId.match(/-(\d+)$/);
+        if (m) {
+          const n = parseInt(m[1]!, 10);
+          const cur = this.nextInstanceNum.get(o.appId) ?? 0;
+          if (n > cur) this.nextInstanceNum.set(o.appId, n);
+        }
+        this.runners.container.registerAdopted?.(o);
+        const manifest = this.registry.getById(o.appId);
+        if (manifest) this.providers.registerInstance(inst, manifest);
+        console.log(`[AppManager] adopted orphan container ${o.instanceId} (appId=${o.appId}, port=${o.port})`);
+      }
+    } catch (err) {
+      console.warn(`[AppManager] orphan adoption failed: ${(err as Error).message}`);
+    }
     this.startReconciler();
     // Kick off warm-pool fills for opted-in apps (non-blocking — init returns
     // immediately, pool members spawn in the background). The reconciler tops
     // up later if any of these fail or die.
     for (const m of this.registry.getAll()) {
+      if (!this.isEnabled(m.id)) continue;
       if (m.warmPool > 0 && m.instanceMode === 'multi') {
         for (let i = 0; i < m.warmPool; i++) this.scheduleRefill(m.id);
       }
@@ -253,6 +443,7 @@ export class AppManager {
     // already uses for orphan reaping, so we don't need a dedicated supervisor.
     for (const m of this.registry.getAll()) {
       if (m.componentType !== 'service') continue;
+      if (!this.isEnabled(m.id)) { console.log(`[AppManager] skipping disabled service ${m.id}`); continue; }
       console.log(`[AppManager] starting service ${m.id}`);
       this.startService(m.id).catch((err) => {
         console.error(`[AppManager] service ${m.id} failed to start: ${(err as Error).message}`);
@@ -265,6 +456,7 @@ export class AppManager {
     for (const m of this.registry.getAll()) {
       if (m.componentType === 'service') continue; // already handled above
       if (!m.autoStart) continue;
+      if (!this.isEnabled(m.id)) { console.log(`[AppManager] skipping disabled autoStart ${m.id}`); continue; }
       console.log(`[AppManager] auto-starting ${m.id}`);
       this.start(m.id).catch((err) => {
         console.error(`[AppManager] autoStart ${m.id} failed: ${(err as Error).message}`);
@@ -295,6 +487,9 @@ export class AppManager {
   async start(appId: string): Promise<string> {
     const manifest = this.registry.getById(appId);
     if (!manifest) throw new Error(`App not found: ${appId}`);
+    // Disabled apps refuse launches. Same error class as a missing manifest
+    // so callers (HTTP layer, intent dispatcher) translate it uniformly.
+    if (!this.isEnabled(appId)) throw new Error(`App ${appId} is disabled. Enable it from Settings → Apps or run \`aura app enable ${appId}\`.`);
 
     if (manifest.instanceMode === 'single') {
       // Filter out inPool members from existing-instance reuse — pool members
@@ -408,6 +603,7 @@ export class AppManager {
     if (manifest.componentType !== 'service') {
       throw new Error(`startService called for non-service app ${appId} (componentType='${manifest.componentType}')`);
     }
+    if (!this.isEnabled(appId)) throw new Error(`Service ${appId} is disabled.`);
     const existing = this.getInstancesByApp(appId).find(
       (i) => i.state !== 'destroyed' && i.state !== 'error',
     );
@@ -739,12 +935,17 @@ export class AppManager {
     let title: string | undefined;
     let metadata: Record<string, unknown> | undefined;
     let minimizable = false;
+    // Breadcrumb mode mirrors the `minimizable` pattern — app declares it
+    // per-activity via the lifecycle return. Default 'os' = OS chrome shows
+    // the trail; apps that want to render their own (or no) header set 'off'.
+    let breadcrumb: 'os' | 'off' = 'os';
     if (result && typeof result === 'object' && !Array.isArray(result)) {
-      const obj = result as { path?: unknown; title?: unknown; metadata?: unknown; minimizable?: unknown };
+      const obj = result as { path?: unknown; title?: unknown; metadata?: unknown; minimizable?: unknown; breadcrumb?: unknown };
       if (typeof obj.path === 'string' && obj.path.length > 0) path = obj.path;
       if (typeof obj.title === 'string') title = obj.title;
       if (obj.metadata && typeof obj.metadata === 'object') metadata = obj.metadata as Record<string, unknown>;
       if (obj.minimizable === true) minimizable = true;
+      if (obj.breadcrumb === 'off' || obj.breadcrumb === 'os') breadcrumb = obj.breadcrumb;
     }
     // Even if the app declares minimizable=true, the OS only honors it for
     // apps that keep running with no visible windows. Otherwise minimizing
@@ -773,6 +974,7 @@ export class AppManager {
       createdAt: now,
       lastTransitionAt: now,
       taskId: instanceId,
+      breadcrumb,
       ...(title       !== undefined ? { title }       : {}),
       ...(metadata    !== undefined ? { metadata }    : {}),
       ...(minimizable ?               { minimizable: true } : {}),
@@ -792,16 +994,51 @@ export class AppManager {
   }
 
   /**
-   * Android-style back navigation. Closes the activity, then — if it was
-   * launched on top of another (`stackParentId` set) — emits a focus event
-   * so the shell can refocus the parent. With no parent, behaves exactly
-   * like `closeActivity` (no auto-focus).
+   * Android-style back navigation. Resolution order:
+   *
+   *   1. **In-activity history non-empty** → pop the top URL off
+   *      `activity.history` and emit `activity:navigated { fromHistory:
+   *      true }`. The iframe stays mounted; only its `src` changes. This
+   *      is the canonical "navigate" launch mode, populated by
+   *      `navigateActivity()`.
+   *   2. **`stackParentId` set** → close this activity, refocus the
+   *      parent. Original Android-stack semantics for activities that
+   *      were launched on top of another.
+   *   3. **Otherwise** → plain `closeActivity` (no auto-focus). Apps
+   *      that want different Back semantics intercept earlier via
+   *      `osClient.nav.onBack` (SDK), or the shell's `aura.nav.back`
+   *      chain falls through to Nav mode.
    *
    * Idempotent: unknown activityId is a no-op.
    */
   async goBack(activityId: string): Promise<void> {
     const activity = this.activities.get(activityId);
     if (!activity) return;
+
+    // 1) In-activity history pop. Update path AND title together so the
+    //    OS chrome shows the right crumb after the pop. The popped entry's
+    //    title becomes the new `activity.title` so the breadcrumb trail is
+    //    a coherent walk backwards through the stack.
+    if (activity.history && activity.history.length > 0) {
+      const previous = activity.history[activity.history.length - 1]!;
+      activity.history.pop();
+      activity.path = previous.path;
+      activity.title = previous.title;
+      activity.lastTransitionAt = new Date();
+      OsEventBus.emit('activity:navigated', {
+        activityId:       activity.activityId,
+        parentInstanceId: activity.parentInstanceId,
+        appId:            activity.appId,
+        path:             activity.path,
+        history:          [...activity.history],
+        breadcrumb:       activity.breadcrumb ?? 'os',
+        fromHistory:      true,
+        ...(activity.title !== undefined ? { title: activity.title } : {}),
+      });
+      return;
+    }
+
+    // 2) Stacked activity → close + refocus parent (original behavior).
     const parentToFocus = activity.stackParentId ?? null;
     await this.closeActivity(activityId);
     if (parentToFocus && this.activities.has(parentToFocus)) {
@@ -812,6 +1049,80 @@ export class AppManager {
         appId: parent.appId,
       });
     }
+  }
+
+  /**
+   * "Navigate" launch mode — change the activity's iframe path in place.
+   *
+   * Modes:
+   *   • `pushHistory: true` (default) — push the OLD path onto
+   *     `activity.history` so OS Back returns to it.
+   *   • `pushHistory: false` — replace the URL without recording the
+   *     old one (use for redirects, error pages, anything where the
+   *     prior step shouldn't be reachable via Back).
+   *
+   * The shell listens for `activity:navigated` and updates the existing
+   * slot's iframe `src` + title without remounting — switching panels in
+   * a single-activity app like Settings becomes a same-iframe transition
+   * rather than a new layout slot.
+   *
+   * Returns true on success, false when the activity id is unknown.
+   */
+  navigateActivity(
+    activityId: string,
+    path: string,
+    opts?: { title?: string; pushHistory?: boolean },
+  ): boolean {
+    const activity = this.activities.get(activityId);
+    if (!activity) return false;
+    const pushHistory = opts?.pushHistory !== false;
+    const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+    if (pushHistory && normalizedPath !== activity.path) {
+      // Snapshot the OLD path+title onto history so the breadcrumb trail can
+      // re-label that prior step when rendered. Apps that omit title on
+      // navigate just leave the prior entry's title undefined — the OS
+      // chrome falls back to the path tail in that case.
+      const entry: { path: string; title?: string } = { path: activity.path };
+      if (activity.title !== undefined) entry.title = activity.title;
+      activity.history = [...(activity.history ?? []), entry];
+    }
+    activity.path = normalizedPath;
+    if (opts?.title !== undefined) activity.title = opts.title;
+    activity.lastTransitionAt = new Date();
+    OsEventBus.emit('activity:navigated', {
+      activityId:       activity.activityId,
+      parentInstanceId: activity.parentInstanceId,
+      appId:            activity.appId,
+      path:             activity.path,
+      history:          [...(activity.history ?? [])],
+      breadcrumb:       activity.breadcrumb ?? 'os',
+      fromHistory:      false,
+      ...(activity.title !== undefined ? { title: activity.title } : {}),
+    });
+    return true;
+  }
+
+  /**
+   * Runtime toggle for the OS-rendered breadcrumb chrome. Apps call this
+   * via `osClient.activity.setBreadcrumb('off')` when they decide to take
+   * over rendering (or back on with `'os'`). The chrome reacts to the
+   * `activity:breadcrumbChanged` event without a navigation occurring.
+   *
+   * Returns true on success, false when the activity id is unknown.
+   */
+  setActivityBreadcrumb(activityId: string, mode: 'os' | 'off'): boolean {
+    const activity = this.activities.get(activityId);
+    if (!activity) return false;
+    if (activity.breadcrumb === mode) return true;
+    activity.breadcrumb = mode;
+    activity.lastTransitionAt = new Date();
+    OsEventBus.emit('activity:breadcrumbChanged', {
+      activityId:       activity.activityId,
+      parentInstanceId: activity.parentInstanceId,
+      appId:            activity.appId,
+      breadcrumb:       mode,
+    });
+    return true;
   }
 
   /**
@@ -964,8 +1275,18 @@ export class AppManager {
       const pid = inst.pid;
       if (pid != null) {
         let alive = false;
-        try { process.kill(pid, 0); alive = true; }
-        catch { alive = false; }
+        // Liveness probe depends on sandbox: PRoot instances live in the
+        // shell's PID namespace so `process.kill(pid, 0)` works; container
+        // instances have HOST pids invisible from inside aura-shell — that
+        // call would always ESRCH and false-positive "dead", triggering a
+        // wrongful forceKill. Defer to the runner instead, which tracks
+        // its own liveness via docker wait.
+        if (inst.sandbox === 'container') {
+          alive = this.runnerOf(inst.instanceId).isRunning(inst.instanceId);
+        } else {
+          try { process.kill(pid, 0); alive = true; }
+          catch { alive = false; }
+        }
         if (!alive && inst.state !== 'error' && inst.state !== 'destroyed' && inst.state !== 'destroying') {
           console.warn(`[AppManager] reconcile: ${inst.instanceId} pid=${pid} is gone — marking error`);
           const releasedPort = inst.port;

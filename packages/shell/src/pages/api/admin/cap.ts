@@ -38,6 +38,12 @@ interface State {
 
 const STATE_PATH    = process.env['AURA_STATE_PATH']    ?? '/data/aura/state/capabilities.json';
 const TOOLCHAIN_BIN = join(process.env['AURA_TOOLCHAIN_DIR'] ?? '/os/toolchain', 'bin');
+// Mirror of the toolchain inside the aura-app-data named volume. Container-
+// sandbox apps mount this via --mount volume-subpath because they can't see
+// /os/toolchain (it only lives inside the aura-shell image). Keep both in
+// sync so wildcard-cap apps and explicit-grant apps see the same set of tools
+// regardless of which sandbox they run in.
+const TOOLCHAIN_BIN_MIRROR = join(process.env['AURA_DATA_DIR'] ?? '/data', 'aura', 'toolchain', 'bin');
 
 function sh(cmd: string): string {
   return execSync(cmd, { stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
@@ -52,13 +58,23 @@ function installBinary(src: string, dst: string): void {
   // binary clearly exists on the container. Real-file installs sidestep
   // the chained-resolution path entirely — every proot sees a plain file
   // in /aura/all-tools that translates one-hop to the store on the host.
-  mkdirSync(dirname(dst), { recursive: true });
-  try {
-    const st = lstatSync(dst);
-    if (st.isSymbolicLink() || st.isFile()) unlinkSync(dst);
-  } catch { /* not present */ }
-  copyFileSync(src, dst);
-  try { chmodSync(dst, 0o755); } catch { /* best effort */ }
+  //
+  // Always writes a second copy into the named-volume mirror so the cap is
+  // visible to sibling-container apps too (they can't bind /os/toolchain).
+  // See cap.ts header comment on TOOLCHAIN_BIN_MIRROR for the why.
+  const binaryName = dst.startsWith(TOOLCHAIN_BIN + '/') ? dst.slice(TOOLCHAIN_BIN.length + 1) : null;
+  const targets = binaryName
+    ? [dst, join(TOOLCHAIN_BIN_MIRROR, binaryName)]
+    : [dst];
+  for (const target of targets) {
+    mkdirSync(dirname(target), { recursive: true });
+    try {
+      const st = lstatSync(target);
+      if (st.isSymbolicLink() || st.isFile()) unlinkSync(target);
+    } catch { /* not present */ }
+    copyFileSync(src, target);
+    try { chmodSync(target, 0o755); } catch { /* best effort */ }
+  }
 }
 
 /**
@@ -165,8 +181,10 @@ async function installCapability(name: string, entry: CapabilityEntry): Promise<
 }
 
 async function removeCapability(name: string, entry: CapabilityEntry): Promise<void> {
-  const link = join(TOOLCHAIN_BIN, entry.binary ?? name);
-  try { unlinkSync(link); } catch { /* not present */ }
+  const binaryName = entry.binary ?? name;
+  for (const link of [join(TOOLCHAIN_BIN, binaryName), join(TOOLCHAIN_BIN_MIRROR, binaryName)]) {
+    try { unlinkSync(link); } catch { /* not present */ }
+  }
   if (entry.source === 'apt' && entry.package) {
     try { sh(`apt-get remove -y -q ${entry.package}`); } catch { /* ignore */ }
   } else if (entry.source === 'npm' && entry.package) {

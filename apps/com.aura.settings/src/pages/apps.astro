@@ -1,0 +1,393 @@
+---
+import '@aura/ui/styles/scificn-bridge.css';
+import '../styles/settings.css';
+
+// SSR-fetch the apps list + enable state from the shell. /api/apps already
+// includes `enabled` per app since the route was extended to surface it for
+// dock/launcher filtering, so a single request gives us everything we need.
+const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
+
+interface AppDto {
+  manifest: {
+    id: string;
+    name: string;
+    icon?: string;
+    description?: string;
+    version: string;
+    category?: string;
+    componentType?: 'activity' | 'service';
+    backgroundService?: boolean;
+    autoStart?: boolean;
+  };
+  enabled: boolean;
+  instances: Array<{ instanceId: string; state: string }>;
+}
+
+let apps: AppDto[] = [];
+try {
+  const r = await fetch(`${osBase}/api/apps`, { signal: AbortSignal.timeout(2000) });
+  if (r.ok) apps = await r.json() as AppDto[];
+} catch (err) {
+  console.warn(`[settings/apps] could not load apps: ${(err as Error).message}`);
+}
+
+// Stable ordering: system apps last (they're the OS components — Console,
+// Terminal, Settings — and the user rarely needs to disable them).
+apps.sort((a, b) => {
+  const aSys = a.manifest.category === 'system' ? 1 : 0;
+  const bSys = b.manifest.category === 'system' ? 1 : 0;
+  if (aSys !== bSys) return aSys - bSys;
+  return a.manifest.name.localeCompare(b.manifest.name);
+});
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Settings · Apps — AuraOS</title>
+  <link rel="stylesheet" href="/api/os/theme.css" />
+  <style>
+    .apps-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .app-row {
+      display: grid;
+      grid-template-columns: 36px 1fr auto auto;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      background: var(--aura-color-surface);
+      border: 1px solid var(--aura-color-border);
+      transition: border-color 0.1s;
+    }
+    .app-row[data-enabled="false"] { opacity: 0.55; }
+    .app-row:hover { border-color: var(--aura-color-primary); }
+    .app-glyph {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      color: var(--aura-color-primary);
+      background: var(--aura-color-bg);
+      border: 1px solid var(--aura-color-border);
+      font-family: var(--aura-font-mono);
+      font-size: 0.85rem;
+      letter-spacing: 0.04em;
+    }
+    .app-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+    .app-name {
+      font-size: 0.85rem;
+      color: var(--aura-color-text);
+      letter-spacing: 0.04em;
+    }
+    .app-id {
+      font-size: 0.6rem;
+      color: var(--aura-color-text-dim);
+      font-family: var(--aura-font-mono);
+      letter-spacing: 0.05em;
+    }
+    .app-tags {
+      display: flex;
+      gap: 5px;
+      margin-top: 2px;
+      flex-wrap: wrap;
+    }
+    .app-tag {
+      font-size: 0.55rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 1px 5px;
+      border: 1px solid var(--aura-color-border);
+      color: var(--aura-color-text-dim);
+    }
+    .app-tag[data-kind="running"]  { color: var(--aura-color-primary); border-color: var(--aura-color-primary); }
+    .app-tag[data-kind="bg"]       { color: var(--aura-color-secondary); border-color: var(--aura-color-secondary); }
+    .app-tag[data-kind="service"]  { color: var(--aura-color-secondary); border-color: var(--aura-color-secondary); }
+    .toggle {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      width: 52px;
+      height: 24px;
+      background: var(--aura-color-bg);
+      border: 1px solid var(--aura-color-border);
+      cursor: pointer;
+      padding: 0;
+      transition: border-color 0.1s, background 0.1s;
+    }
+    .toggle::after {
+      content: '';
+      position: absolute;
+      top: 2px; left: 2px;
+      width: 18px; height: 18px;
+      background: var(--aura-color-text-dim);
+      transition: left 0.15s, background 0.15s;
+    }
+    .toggle[data-on="true"] {
+      background: var(--aura-color-surface-2);
+      border-color: var(--aura-color-primary);
+    }
+    .toggle[data-on="true"]::after {
+      left: 30px;
+      background: var(--aura-color-primary);
+    }
+    .toggle:disabled { cursor: wait; opacity: 0.6; }
+
+    /* Inline trash button for "delete this app entirely". The actual confirm
+       happens via the themed dialog at the bottom — clicking just stages the
+       intent, the user has to OK the dialog to fire the API call. */
+    .app-remove {
+      background: transparent;
+      border: 1px solid var(--aura-color-border);
+      color: var(--aura-color-text-dim);
+      font-family: var(--aura-font-mono);
+      font-size: 0.9rem;
+      line-height: 1;
+      padding: 3px 8px;
+      cursor: pointer;
+      transition: color 0.1s, border-color 0.1s, box-shadow 0.1s;
+      /* Force text (monochrome) presentation of the 🗑 codepoint so it
+         picks up the surrounding color/glow instead of a colored emoji
+         font. Supported in modern Chromium + Firefox; falls back to the
+         emoji glyph elsewhere. */
+      font-variant-emoji: text;
+    }
+    .app-remove:hover {
+      color: var(--aura-color-danger);
+      border-color: var(--aura-color-danger);
+      box-shadow: var(--aura-glow-danger);
+    }
+    .app-remove:disabled { cursor: wait; opacity: 0.5; }
+
+    /* Confirm dialog — overlay + card. Plain DOM, no React island, so it
+       loads instantly. Wrapped in <dialog> for the modal behaviour the
+       browser gives us for free (Esc closes, focus trap, backdrop). */
+    #confirm-dialog {
+      padding: 0;
+      background: var(--aura-color-surface);
+      border: 1px solid var(--aura-color-danger);
+      color: var(--aura-color-text);
+      font-family: var(--aura-font-mono);
+      max-width: 460px;
+      width: 90%;
+    }
+    #confirm-dialog::backdrop { background: rgba(0,0,0,0.55); }
+    .cd-body { padding: 18px 22px 8px; }
+    .cd-title {
+      font-size: 0.85rem;
+      letter-spacing: 0.08em;
+      color: var(--aura-color-danger);
+      margin-bottom: 8px;
+    }
+    .cd-message { font-size: 0.78rem; line-height: 1.5; color: var(--aura-color-text); }
+    .cd-detail  { font-size: 0.7rem; color: var(--aura-color-text-dim); margin-top: 10px; }
+    .cd-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      padding: 12px 22px 18px;
+    }
+    .cd-btn {
+      background: transparent;
+      border: 1px solid var(--aura-color-border);
+      color: var(--aura-color-text);
+      font-family: var(--aura-font-mono);
+      font-size: 0.75rem;
+      padding: 6px 14px;
+      cursor: pointer;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .cd-btn:hover { box-shadow: var(--aura-glow-primary); }
+    .cd-btn[data-variant="danger"] {
+      border-color: var(--aura-color-danger);
+      color: var(--aura-color-danger);
+    }
+    .cd-btn[data-variant="danger"]:hover { box-shadow: var(--aura-glow-danger); }
+
+    #status {
+      margin-top: 14px;
+      font-size: 0.7rem;
+      color: var(--aura-color-text-dim);
+      letter-spacing: 0.08em;
+    }
+    #status[data-tone="error"] { color: var(--aura-color-danger); }
+  </style>
+</head>
+<body>
+  <main class="settings-body">
+    <h2 style="font-size: 0.95rem; letter-spacing: 0.1em; color: var(--aura-color-primary); margin-bottom: 4px;">▦ APPS</h2>
+    <p style="font-size: 0.7rem; color: var(--aura-color-text-dim); letter-spacing: 0.06em;">
+      Toggle apps off to hide them from the dock + launcher and stop their backends. Re-enable any time.
+    </p>
+
+    <div class="apps-list">
+      {apps.length === 0 && (
+        <p style="margin-top: 16px; color: var(--aura-color-text-dim); font-size: 0.75rem;">
+          No apps loaded (shell unreachable?).
+        </p>
+      )}
+      {apps.map((app) => {
+        const m = app.manifest;
+        const glyph = (m.icon ?? m.name.charAt(0)).toUpperCase();
+        const running = app.instances.filter((i) => i.state === 'resumed' || i.state === 'started').length;
+        const isService = m.componentType === 'service';
+        return (
+          <div class="app-row" data-app-id={m.id} data-enabled={String(app.enabled)}>
+            <div class="app-glyph">{glyph}</div>
+            <div class="app-meta">
+              <div class="app-name">{m.name}</div>
+              <div class="app-id">{m.id} · v{m.version}</div>
+              <div class="app-tags">
+                {running > 0 && <span class="app-tag" data-kind="running">{running} running</span>}
+                {isService && <span class="app-tag" data-kind="service">service</span>}
+                {m.backgroundService && <span class="app-tag" data-kind="bg">background</span>}
+                {m.autoStart && <span class="app-tag">autostart</span>}
+                {m.category && <span class="app-tag">{m.category}</span>}
+              </div>
+            </div>
+            <button
+              class="toggle"
+              type="button"
+              role="switch"
+              aria-checked={String(app.enabled)}
+              data-on={String(app.enabled)}
+              title={app.enabled ? `Disable ${m.name}` : `Enable ${m.name}`}
+            />
+            <button
+              class="app-remove"
+              type="button"
+              data-action="remove"
+              title={`Delete ${m.name}`}
+              aria-label={`Delete ${m.name}`}
+            >🗑</button>
+          </div>
+        );
+      })}
+    </div>
+
+    <p id="status"></p>
+  </main>
+
+  <dialog id="confirm-dialog" aria-labelledby="cd-title">
+    <div class="cd-body">
+      <div class="cd-title" id="cd-title">⚠ DELETE APP</div>
+      <p class="cd-message">
+        Do you want to delete <strong id="cd-app-name">this app</strong>?
+      </p>
+      <p class="cd-detail">
+        Stops every running instance and <code>rm -rf</code>s
+        <span id="cd-app-dest"></span> on disk. The OS KV state for this app is also dropped.
+        This can't be undone.
+      </p>
+    </div>
+    <form method="dialog" class="cd-actions">
+      <button class="cd-btn" type="submit" value="cancel">Cancel</button>
+      <button class="cd-btn" type="submit" value="confirm" data-variant="danger">Delete</button>
+    </form>
+  </dialog>
+  <footer class="settings-foot">PROVIDER · /api/admin/apps/enabled</footer>
+
+  <script is:inline>
+    const statusEl = document.getElementById('status');
+    function setStatus(msg, tone) {
+      statusEl.textContent = msg;
+      if (tone) statusEl.dataset.tone = tone;
+      else      delete statusEl.dataset.tone;
+    }
+
+    document.querySelectorAll('.app-row').forEach((row) => {
+      const btn = row.querySelector('.toggle');
+      const appId = row.dataset.appId;
+      btn.addEventListener('click', async () => {
+        const next = btn.dataset.on !== 'true';
+        btn.disabled = true;
+        try {
+          const r = await fetch('/api/admin/apps/enabled', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ appId, enabled: next }),
+          });
+          if (!r.ok) {
+            const body = await r.text();
+            throw new Error(`${r.status} ${body.slice(0, 200)}`);
+          }
+          // Optimistic UI: flip the toggle locally so the user sees the
+          // change before any reload. The data-enabled attribute drives the
+          // dim styling on the row.
+          btn.dataset.on = String(next);
+          btn.setAttribute('aria-checked', String(next));
+          row.dataset.enabled = String(next);
+          setStatus(`${next ? 'enabled' : 'disabled'} ${appId}`);
+        } catch (err) {
+          setStatus(`failed to toggle ${appId}: ${err.message}`, 'error');
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    });
+
+    // ─── Delete-app flow ───────────────────────────────────────────────────
+    // <dialog> gives us the modal + focus trap + backdrop for free. We
+    // populate the app name + path each time so the user can't get confused
+    // about which app they're about to remove.
+    const dialog       = document.getElementById('confirm-dialog');
+    const dialogName   = document.getElementById('cd-app-name');
+    const dialogDest   = document.getElementById('cd-app-dest');
+    let pendingRemoveId = null;
+    let pendingRemoveRow = null;
+    let pendingRemoveBtn = null;
+
+    document.querySelectorAll('.app-remove').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const row = btn.closest('.app-row');
+        const appId = row?.dataset.appId;
+        if (!appId) return;
+        const name = row.querySelector('.app-name')?.textContent ?? appId;
+        pendingRemoveId  = appId;
+        pendingRemoveRow = row;
+        pendingRemoveBtn = btn;
+        dialogName.textContent = `${name} (${appId})`;
+        // Mirror the server-side path so the user sees exactly what's about
+        // to disappear from disk. AURA_APPS_DIR is /workspace/apps by default.
+        dialogDest.textContent = `/workspace/apps/${appId}`;
+        dialog.showModal();
+      });
+    });
+
+    dialog.addEventListener('close', async () => {
+      const choice = dialog.returnValue;
+      const appId  = pendingRemoveId;
+      const row    = pendingRemoveRow;
+      const btn    = pendingRemoveBtn;
+      // Reset before the async work so a fast second-click can't reuse stale refs.
+      pendingRemoveId = pendingRemoveRow = pendingRemoveBtn = null;
+      if (choice !== 'confirm' || !appId || !btn) return;
+      btn.disabled = true;
+      try {
+        const r = await fetch(`/api/apps/${encodeURIComponent(appId)}/remove`, { method: 'POST' });
+        const body = await r.json().catch(() => null);
+        if (!r.ok || !body?.ok) {
+          throw new Error(body?.error ?? `HTTP ${r.status}`);
+        }
+        // Optimistic: drop the row immediately. The app:removed event from
+        // chokidar will land on the dock + launcher and clear them too.
+        row?.remove();
+        setStatus(`removed ${appId}`);
+      } catch (err) {
+        setStatus(`failed to remove ${appId}: ${err.message}`, 'error');
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

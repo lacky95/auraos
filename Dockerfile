@@ -1,3 +1,25 @@
+# ─── Stage: aura-base ─────────────────────────────────────────────────────────
+# Sibling-container image used by ContainerRunner. Rooted at the FULL Debian
+# Bookworm node:22 image (not -slim) so apps get the familiar Debian
+# environment with apt indexes, perl, gnupg, full procps, build tools, etc.
+# preinstalled — fewer `aura cap install` round-trips for everyday utilities,
+# and an interactive shell behaves the way Debian users expect.
+# Build with:
+#   docker build -t aura-base -f Dockerfile --target aura-base .
+FROM node:22 AS aura-base
+# Keep the explicit `apt-get install` line for the AuraOS-specific extras
+# that aren't in the full node:22 base (ssh client+server, htop, dnsutils,
+# iproute2). Most of bash/coreutils/curl/git/procps/nano/less is already
+# present in node:22 so this layer is small.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openssh-client \
+    openssh-server \
+    htop \
+    lsof \
+    dnsutils \
+    iproute2 \
+  && rm -rf /var/lib/apt/lists/*
+
 # ─── Stage: base-rootfs ───────────────────────────────────────────────────────
 # Debian-slim filesystem with the tools an app sandbox needs, exported as a
 # raw rootfs that PRoot can pivot into. Using debian-slim (not Alpine) keeps
@@ -51,6 +73,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
   && rm -rf /var/lib/apt/lists/*
 
+# Docker CLI — ContainerRunner uses this to drive sibling-container spawns
+# via the host's docker daemon (socket bind-mounted from compose). Static
+# binary from docker.com so it works on any host without adding repos.
+ARG DOCKER_VERSION=29.3.1
+RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_VERSION}.tgz" -o /tmp/docker.tgz \
+ && tar -xzf /tmp/docker.tgz -C /tmp \
+ && install -m 0755 /tmp/docker/docker /usr/local/bin/docker \
+ && rm -rf /tmp/docker.tgz /tmp/docker \
+ && docker --version
+
 # Replace Debian's proot (5.3.x with EFAULT on Rust-compiled native modules
 # like Tailwind 4 Oxide / jiti) with a fresh build from upstream proot-me.
 # /usr/local/bin precedes /usr/bin in PATH, so this version wins everywhere
@@ -75,10 +107,14 @@ RUN mkdir -p /os/toolchain/bin /os/toolchain/lib
 # Claude Code CLI (available globally via node from base image)
 RUN npm install -g @anthropic-ai/claude-code 2>/dev/null || true
 
-# Copy system tools into toolchain so PRoot apps can bind-mount them selectively
+# Copy system tools into toolchain so PRoot apps can bind-mount them selectively.
+# docker is here too so wildcard-cap apps (terminal) can drive sibling-container
+# spawns over the host daemon — paired with a /var/run/docker.sock bind that
+# ProotRunner adds when the manifest tools[] include 'docker' or '*'.
 RUN cp $(which git) /os/toolchain/bin/git && \
     cp $(which curl) /os/toolchain/bin/curl && \
-    cp $(which bash) /os/toolchain/bin/bash
+    cp $(which bash) /os/toolchain/bin/bash && \
+    cp $(which docker) /os/toolchain/bin/docker
 
 # Debian-slim base rootfs for PRoot apps (shared, glibc-compatible)
 COPY --from=base-rootfs / /os/base-rootfs
@@ -164,7 +200,8 @@ RUN npm install -g @anthropic-ai/claude-code 2>/dev/null || true && \
     mkdir -p /os/toolchain/bin && \
     cp $(which git) /os/toolchain/bin/git && \
     cp $(which curl) /os/toolchain/bin/curl && \
-    cp $(which bash) /os/toolchain/bin/bash
+    cp $(which bash) /os/toolchain/bin/bash && \
+    cp $(which docker) /os/toolchain/bin/docker
 
 # Debian-slim PRoot base rootfs (glibc-compatible — same libc as host binaries)
 COPY --from=base-rootfs / /os/base-rootfs

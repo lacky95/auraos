@@ -109,8 +109,8 @@ to strip any default-valued fields you've written by hand.
 Optional fields (all have defaults — only set them if you need a non-default):
 `maxInstances`, `maxActivitiesPerInstance`, `defaultLaunch`,
 `backgroundService`, `warmPool`, `viewConfig`, `preferredLayout`,
-`themeStrategy`, `theme`, `shortcuts`, `dataProvider`, `serverPort`, `icon`,
-`entrypoint`.
+`themeStrategy`, `theme`, `keymapActions`, `dataProvider`, `serverPort`,
+`icon`, `entrypoint`.
 
 **Instance vs. Activity**:
 - *Instance* = one running backend process (one Astro server, one PID, one port).
@@ -196,6 +196,49 @@ plain `fetch`.
 unhandled rejections, `fetch`/`XHR`/`EventSource` errors are auto-relayed
 to the shell and forwarded to the Console app (and persisted to a JSONL
 file via WebSocket → `apps/com.aura.console`). No setup needed.
+
+**Keyboard shortcuts + OS Back + system actions**: all flow through the
+single `@aura/app-sdk` framework. Declare actions in the manifest, register
+handlers via `osClient.keymap.on(...)`, intercept Back via
+`osClient.nav.onBack(...)`, trigger OS actions via `osClient.system.*`.
+Apps that integrate nothing keep every native browser keyboard behavior
+(text inputs, IME, Tab focus, Ctrl+A/C/Z, etc.) — the OS only intercepts
+combos that are explicitly claimed.
+
+```jsonc
+// app.manifest.json
+{
+  "keymapActions": [
+    { "id": "save", "label": "Save",  "category": "File", "defaultCombo": "Ctrl+s" },
+    { "id": "find", "label": "Find",  "category": "Edit", "defaultCombo": "Ctrl+f" }
+  ]
+}
+```
+
+```ts
+// in your page or React island
+import { OsClient } from '@aura/app-sdk';
+const osClient = new OsClient();
+
+osClient.keymap.on('save', () => saveDocument());
+osClient.keymap.on('find', () => openFindDialog());
+
+osClient.nav.onBack((e) => {
+  if (unsavedChanges()) { e.preventDefault(); confirmDiscard(); }
+});
+
+// Read the user's current mapping for menu shortcut hints — refreshed live.
+const saveCombo = osClient.keymap.getBinding('save');  // "Ctrl+KeyS" or null
+
+osClient.system.openLauncher();          // programmatic OS actions
+osClient.system.switchWorkspace(2);
+```
+
+Combos accept friendly shorthand (`Ctrl+s` ⇄ `Ctrl+KeyS`). The user can
+remap any action in **Settings → Keyboard**; your handler keeps firing
+under the new combo without code changes. Action ids are namespaced
+`app.<appId>.<short>` automatically — pass either the short id (`save`) or
+the fully qualified id; the SDK handles both.
 
 ## CLI cheatsheet
 

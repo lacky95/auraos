@@ -1,6 +1,5 @@
 ---
 import '../styles/settings.css';
-const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
 ---
 <!DOCTYPE html>
 <html lang="en">
@@ -10,11 +9,6 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
   <link rel="stylesheet" href="/api/os/theme.css" />
 </head>
 <body>
-  <header class="settings-bar">
-    <span class="name">⚙ SETTINGS</span>
-    <span class="crumbs">OVERVIEW</span>
-    <span>ACT <b>{activityId}</b></span>
-  </header>
   <main class="settings-body">
     <div class="tile-grid">
       <button class="tile" data-section="theme">
@@ -25,9 +19,17 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
         <h3>▥ WORKSPACES</h3>
         <p>Virtual desktops · layouts · rename + delete</p>
       </button>
+      <button class="tile" data-section="keyboard">
+        <h3>⌨ KEYBOARD</h3>
+        <p>Hotkeys · per-app actions · user shortcuts</p>
+      </button>
       <button class="tile" data-section="general">
         <h3>⏱ GENERAL</h3>
         <p>Clock format · locale</p>
+      </button>
+      <button class="tile" data-section="apps">
+        <h3>▦ APPS</h3>
+        <p>Enable · disable · force-stop installed apps</p>
       </button>
       <button class="tile" data-section="about">
         <h3>ℹ ABOUT</h3>
@@ -38,31 +40,72 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
   <footer class="settings-foot">CONTENT PROVIDER · com.aura.settings</footer>
 
   <script is:inline>
-    // Open a new activity (panel) on this single-instance Settings app.
-    // The shell forwards { section } as `data` to our onActivityCreate hook,
-    // which translates it into the right path.
+    // Two launch modes for Settings sections:
     //
-    // Body shape: the shell's POST /api/instances/[id]/activities handler
-    // looks for a top-level `data` key first, falling back to "whole body
-    // is the data bag" for legacy callers. We send the explicit `{ data }`
-    // shape so the meaning is unambiguous.
+    //   • Click       → IN-PLACE navigate. The current iframe URL changes
+    //                   to the section's path; OS Back returns here.
+    //   • Shift+Click → NEW ACTIVITY. Spawns a separate Settings panel in
+    //                   the layout (the original behavior). Useful for
+    //                   side-by-side compare or pinning a section.
+    //
+    // The in-place path uses the OS endpoint /api/activities/<id>/navigate.
+    // We resolve the activity id from the meta tag the shell proxy injects.
+    function getActivityId() {
+      const meta = document.querySelector('meta[name="aura-activity-id"]');
+      return meta ? meta.getAttribute('content') : null;
+    }
+
+    function pathForSection(section) {
+      switch (section) {
+        case 'theme':      return ['/theme',      'Settings · Theme'];
+        case 'workspaces': return ['/workspaces', 'Settings · Workspaces'];
+        case 'keyboard':   return ['/keyboard',   'Settings · Keyboard'];
+        case 'general':    return ['/general',    'Settings · General'];
+        case 'apps':       return ['/apps',       'Settings · Apps'];
+        case 'about':      return ['/about',      'Settings · About'];
+        default:           return ['/',           'Settings'];
+      }
+    }
+
     document.querySelectorAll('.tile[data-section]').forEach((btn) => {
-      btn.addEventListener('click', async () => {
+      btn.addEventListener('click', async (ev) => {
         const section = btn.dataset.section;
-        console.log('[settings] tile click → open activity, section =', section);
-        try {
-          const res = await fetch('/api/instances/com.aura.settings/activities', {
+        // Shift+Click → keep the old "new activity" behavior so the user
+        // can have multiple Settings panels open.
+        if (ev.shiftKey) {
+          try {
+            const r = await fetch('/api/instances/com.aura.settings/activities', {
+              method:  'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body:    JSON.stringify({ data: { section } }),
+            });
+            if (!r.ok) console.error('[settings] open activity HTTP', r.status, await r.text());
+          } catch (err) { console.error('[settings] open activity failed', err); }
+          return;
+        }
+
+        // Plain click → in-place navigation. The OS records '/' on the
+        // back stack so Escape returns to the overview.
+        const id = getActivityId();
+        const [path, title] = pathForSection(section);
+        if (!id) {
+          // No activity context (shouldn't happen in practice) — fall
+          // back to opening a new activity so the click still works.
+          await fetch('/api/instances/com.aura.settings/activities', {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             body:    JSON.stringify({ data: { section } }),
           });
-          if (!res.ok) {
-            console.error('[settings] open activity HTTP', res.status, await res.text());
-            return;
-          }
-          const body = await res.json();
-          console.log('[settings] activity opened →', body);
-        } catch (err) { console.error('[settings] open activity failed', err); }
+          return;
+        }
+        try {
+          const r = await fetch(`/api/activities/${encodeURIComponent(id)}/navigate`, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ path, title }),
+          });
+          if (!r.ok) console.error('[settings] navigate HTTP', r.status, await r.text());
+        } catch (err) { console.error('[settings] navigate failed', err); }
       });
     });
   </script>

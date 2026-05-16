@@ -80,6 +80,17 @@ export async function bootstrapKv(opts: { dataDir?: string } = {}): Promise<void
     await kv.set('os', 'workspaces', DEFAULT_WORKSPACE_STATE);
     console.log('[KvBootstrap] no settings.json — seeded defaults into Redis');
   } finally {
+    // Keymap is seeded independently from theme/workspaces so it survives the
+    // early-return branches above (legacy migration, theme-already-exists).
+    // Empty bindings + empty appOverlays means "use registry defaults".
+    try {
+      if (!(await kv.exists('os', 'keymap'))) {
+        await kv.set('os', 'keymap', { bindings: {}, appOverlays: {} });
+        console.log('[KvBootstrap] seeded empty os/keymap');
+      }
+    } catch (err) {
+      console.warn(`[KvBootstrap] could not seed os/keymap: ${(err as Error).message}`);
+    }
     await kv.close().catch(() => undefined);
   }
 }

@@ -161,10 +161,22 @@ export const AppManifestSchema = z.object({
    * registry.
    */
   preferredLayout: z.string().default('any'),
-  shortcuts: z.array(z.object({
-    name: z.string(),
-    action: z.string(),
-    icon: z.string().optional(),
+  /**
+   * Per-app keymap action declarations. Each entry surfaces a remappable
+   * shortcut in the OS Settings → Keyboard panel and becomes a registry
+   * action with id `app.<manifest.id>.<entry.id>`. Apps register handlers
+   * at runtime via `osClient.keymap.on(entry.id, handler)`.
+   *
+   * Apps cannot self-claim OS-scope ids — Zod pins `scope` to `'app'`. The
+   * `defaultCombo` is canonicalised by the KeymapRegistry on load.
+   */
+  keymapActions: z.array(z.object({
+    id:           z.string().regex(/^[a-z][a-z0-9.-]*$/, { message: "keymapActions[].id must be kebab/dot-case lowercase" }),
+    label:        z.string().min(1).max(64),
+    description:  z.string().optional(),
+    category:     z.string().default('App'),
+    defaultCombo: z.string().nullable().default(null),
+    scope:        z.enum(['app']).default('app'),
   })).default([]),
   theme: z.object({
     mode: z.enum(['os-components', 'custom']).default('os-components'),

@@ -1,5 +1,8 @@
 import type { APIRoute } from 'astro';
-import { OsEventBus, compileTopicMatcher, parseTopicsParam } from '@aura/core';
+import { OsEventBus, compileTopicMatcher, parseTopicsParam, createLogger } from '@aura/core';
+
+const log = createLogger('sse');
+let nextStreamId = 1;
 
 /**
  * SSE feed of OS events. Without `?topics=` it's a firehose (back-compat
@@ -16,10 +19,20 @@ export const GET: APIRoute = ({ url }) => {
   const accepts = topics ? compileTopicMatcher(topics) : null;
 
   const encoder = new TextEncoder();
+  const streamId = nextStreamId++;
+  const t0 = Date.now();
+  log.info('open', `#${streamId}`, 'topics=', topics ?? '*');
 
   const stream = new ReadableStream({
     start(controller) {
       let closed = false;
+
+      // Flush headers immediately. Without an initial chunk, Node's HTTP
+      // adapter holds the response open with no bytes on the wire — the
+      // browser then reports "can't establish a connection" and retries
+      // every few seconds because it never saw the 200 + headers. One
+      // SSE comment line is enough to commit the response.
+      controller.enqueue(encoder.encode(`: ok ${streamId}\n\n`));
 
       const safeEnqueue = (chunk: Uint8Array) => {
         if (closed) return;
@@ -43,6 +56,8 @@ export const GET: APIRoute = ({ url }) => {
       const onActOpened     = (ev: unknown) => send('activity:opened',  ev);
       const onActClosed     = (ev: unknown) => send('activity:closed',  ev);
       const onActFocus      = (ev: unknown) => send('activity:focus',   ev);
+      const onActNavigated  = (ev: unknown) => send('activity:navigated', ev);
+      const onActBreadcrumb = (ev: unknown) => send('activity:breadcrumbChanged', ev);
       const onThemeChanged  = (ev: unknown) => send('theme:changed',    ev);
       const onModeChanged   = (ev: unknown) => send('mode:changed',     ev);
       const onNotification  = (ev: unknown) => send('notification',     ev);
@@ -57,6 +72,8 @@ export const GET: APIRoute = ({ url }) => {
       OsEventBus.on('activity:opened',    onActOpened);
       OsEventBus.on('activity:closed',    onActClosed);
       OsEventBus.on('activity:focus',     onActFocus);
+      OsEventBus.on('activity:navigated', onActNavigated);
+      OsEventBus.on('activity:breadcrumbChanged', onActBreadcrumb);
       OsEventBus.on('theme:changed',      onThemeChanged);
       OsEventBus.on('mode:changed',       onModeChanged);
       OsEventBus.on('notification',       onNotification);
@@ -64,9 +81,12 @@ export const GET: APIRoute = ({ url }) => {
       OsEventBus.on('workspace:activated', onWsActivated);
       OsEventBus.on('kv:changed',          onKvChanged);
 
-      const heartbeat = setInterval(() => safeEnqueue(encoder.encode(': heartbeat\n\n')), 15_000);
+      // 10s keeps idle connections from being killed by reverse proxies
+      // (Nginx default 60s, Cloudflare 100s) without flooding the wire.
+      const heartbeat = setInterval(() => safeEnqueue(encoder.encode(': hb\n\n')), 10_000);
 
       const cleanup = () => {
+        log.info('close', `#${streamId}`, 'dur=', `${Date.now() - t0}ms`);
         clearInterval(heartbeat);
         OsEventBus.off('app:stateChanged',   onStateChanged);
         OsEventBus.off('app:crashed',        onCrashed);
@@ -75,6 +95,8 @@ export const GET: APIRoute = ({ url }) => {
         OsEventBus.off('activity:opened',    onActOpened);
         OsEventBus.off('activity:closed',    onActClosed);
         OsEventBus.off('activity:focus',     onActFocus);
+        OsEventBus.off('activity:navigated', onActNavigated);
+        OsEventBus.off('activity:breadcrumbChanged', onActBreadcrumb);
         OsEventBus.off('theme:changed',      onThemeChanged);
         OsEventBus.off('mode:changed',       onModeChanged);
         OsEventBus.off('notification',       onNotification);

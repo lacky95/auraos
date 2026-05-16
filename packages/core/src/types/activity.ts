@@ -51,4 +51,35 @@ export interface AppActivity {
   stackParentId?: string;
   /** Stable task identifier. Defaults to `parentInstanceId`. */
   taskId: string;
+  /**
+   * In-activity back stack — the prior `{ path, title }` pairs the iframe
+   * visited, in push order. Populated by `AppManager.navigateActivity()`
+   * (the "replace-current with history" launch mode); popped by `goBack()`
+   * before falling through to the close-activity / Nav-mode chain.
+   *
+   * Storing the title alongside the path lets the OS-rendered breadcrumb
+   * trail show meaningful labels (e.g. "Settings › Theme") without an extra
+   * round-trip to the app. Apps drive this via `osClient.activity.navigate(
+   * path, { title })`.
+   */
+  history?: Array<{ path: string; title?: string }>;
+  /**
+   * Whether the OS chrome renders the breadcrumb trail + back button in the
+   * window title bar.
+   *
+   *   'os'  (default) — Shell renders `← Title1 › Title2 › Current` from
+   *                     `path/title + history`. Clicking a prior crumb pops
+   *                     back to that level. Apps get this for free without
+   *                     shipping any per-page chrome.
+   *   'off'           — No OS-rendered trail. Use for apps that ship their
+   *                     own header (media player, photo editor, anything
+   *                     that wants its own typography). The back-stack
+   *                     itself still works via OS Back / `osClient.activity.
+   *                     back()` — only the visual is suppressed.
+   *
+   * Set per-activity via the `onActivityCreate` return (mirrors the
+   * `minimizable` pattern), or at runtime via
+   * `osClient.activity.setBreadcrumb('off')`.
+   */
+  breadcrumb?: 'os' | 'off';
 }

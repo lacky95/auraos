@@ -8,8 +8,34 @@ import {
   type CapabilityEntry,
   type State,
 } from '../lib/registry.js';
-import { addToolToManifest, listAllManifests, removeToolFromManifest } from '../lib/manifest.js';
 import { api } from '../lib/client.js';
+
+interface ManifestLite { id: string; tools?: string[] }
+interface AppDto { manifest: ManifestLite }
+
+/**
+ * Pull every installed app's manifest from the shell. Replaces the
+ * filesystem-walking `listAllManifests()` so this CLI works from inside a
+ * sliced container sandbox (Terminal etc.) where /workspace/apps only has
+ * the calling app's own subdir bound. /api/apps is the canonical source
+ * of truth and already returns the parsed manifest per app.
+ */
+async function fetchAllManifests(): Promise<ManifestLite[]> {
+  const apps = await api.get<AppDto[]>('/api/apps');
+  return apps.map((a) => a.manifest);
+}
+
+interface ManifestEditResult {
+  ok?: boolean;
+  changed?: boolean;
+  refreshed?: string[];
+  refreshError?: string;
+  error?: string;
+  message?: string;
+}
+async function editManifest(appId: string, action: 'add-tool' | 'remove-tool', tool: string): Promise<ManifestEditResult> {
+  return api.post<ManifestEditResult>('/api/admin/manifest-edit', { appId, action, tool });
+}
 
 export function registerCap(program: Command): void {
   const cap = program.command('cap').alias('capability').description('Manage shareable CLI capabilities (opt-in binaries bind-mounted into PRoot apps).');
@@ -34,7 +60,7 @@ export function registerCap(program: Command): void {
       } catch {
         state = loadState();
       }
-      const manifests = listAllManifests();
+      const manifests = await fetchAllManifests();
       const rows = Object.entries(reg.capabilities).map(([name, entry]) => {
         const installed = state.capabilities[name]?.installed === true || entry.source === 'builtin';
         // An app with `*` in tools[] gets every installed cap bound at spawn
@@ -94,9 +120,13 @@ export function registerCap(program: Command): void {
         { action: 'remove', name, entry },
       );
       if (!res?.ok) fail(`remove ${name} failed: ${res?.error ?? 'unknown error'}`);
+      // Strip the cap from every manifest that still declares it. Routes
+      // through the shell so we cross sliced-bind sandboxes correctly.
       const affected: string[] = [];
-      for (const m of listAllManifests()) {
-        if (removeToolFromManifest(m.id, name)) affected.push(m.id);
+      for (const m of await fetchAllManifests()) {
+        if (!m.tools?.includes(name)) continue;
+        const r = await editManifest(m.id, 'remove-tool', name);
+        if (r.changed) affected.push(m.id);
       }
       ok(`removed ${name}` + (affected.length ? ` (revoked from: ${affected.join(', ')})` : ''));
     });
@@ -105,26 +135,28 @@ export function registerCap(program: Command): void {
     .command('grant <appId> <name...>')
     .description("Add a capability to an app manifest. Use '*' (quote it: \"'*'\") to auto-bind every installed cap, including future ones. Hot-refreshes running instances — no respawn.")
     .action(async (appId: string, names: string[]) => {
-      let anyChange = false;
+      // Route through the shell so it works from any sandbox (the local
+      // /workspace/apps bind only covers the caller's own app in container
+      // sandboxes). The endpoint also triggers refreshInstanceTools, so the
+      // separate refreshRunning call below is just a defensive safety net.
       for (const name of names) {
-        const changed = addToolToManifest(appId, name);
-        if (changed) { ok(`granted ${name} → ${appId}`); anyChange = true; }
-        else info(`${name} already declared by ${appId}`);
+        const r = await editManifest(appId, 'add-tool', name);
+        if (!r.ok)            fail(`grant ${name} → ${appId} failed: ${r.error ?? 'unknown'} ${r.message ?? ''}`.trim());
+        if (r.changed)        ok(`granted ${name} → ${appId}${r.refreshError ? color.yellow(` (refresh: ${r.refreshError})`) : ''}`);
+        else                  info(`${name} already declared by ${appId}`);
       }
-      if (anyChange) await refreshRunning(appId);
     });
 
   cap
     .command('revoke <appId> <name...>')
     .description('Remove a capability from an app manifest and restart running instances.')
     .action(async (appId: string, names: string[]) => {
-      let anyChange = false;
       for (const name of names) {
-        const changed = removeToolFromManifest(appId, name);
-        if (changed) { ok(`revoked ${name} from ${appId}`); anyChange = true; }
-        else info(`${name} was not declared by ${appId}`);
+        const r = await editManifest(appId, 'remove-tool', name);
+        if (!r.ok)            fail(`revoke ${name} from ${appId} failed: ${r.error ?? 'unknown'} ${r.message ?? ''}`.trim());
+        if (r.changed)        ok(`revoked ${name} from ${appId}${r.refreshError ? color.yellow(` (refresh: ${r.refreshError})`) : ''}`);
+        else                  info(`${name} was not declared by ${appId}`);
       }
-      if (anyChange) await refreshRunning(appId);
     });
 
   cap
@@ -137,7 +169,10 @@ export function registerCap(program: Command): void {
       if (!entry) fail(`Unknown capability: ${name}`);
       const state = loadState();
       const installed = state.capabilities[name];
-      const declaredBy = listAllManifests().filter((m) => m.tools?.includes(name)).map((m) => m.id);
+      // Pull manifests via the shell so sliced-bind sandboxes see every
+      // installed app, not just the calling one.
+      const manifests = await fetchAllManifests();
+      const declaredBy = manifests.filter((m) => m.tools?.includes(name)).map((m) => m.id);
       console.log(color.bold(name));
       console.log(JSON.stringify({ registry: entry, installed: installed ?? false, declaredBy }, null, 2));
     });

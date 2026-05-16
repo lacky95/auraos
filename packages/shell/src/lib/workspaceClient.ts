@@ -21,12 +21,27 @@
  * matching `members.includes(view.viewId)` is the natural filter.
  */
 
+/** Per-window geometry persisted for `stack` layout. */
+export interface SavedRect { x: number; y: number; w: number; h: number; z: number }
+
+/**
+ * Per-workspace layout state. Empty / partial by design — different
+ * layout strategies use different fields:
+ *   • `stack`        → `rects[viewId]` (drag + resize persistence)
+ *   • `fullscreen`   → `focusedViewId` (which view fills the screen)
+ *   • tiling / etc.  → ordering comes from `members`, no extra state
+ */
+export interface LayoutState {
+  rects?:         Record<string, SavedRect>;
+  focusedViewId?: string;
+}
+
 export interface Workspace {
   id:        string;
   name:      string;
   layoutId:  string;
   members:   string[];
-  layoutState?: Record<string, unknown>;
+  layoutState?: LayoutState;
 }
 
 export interface WorkspaceState {
@@ -66,15 +81,54 @@ type Listener = (state: WorkspaceState) => void;
 let cached: WorkspaceState | null = null;
 const listeners = new Set<Listener>();
 
+function cloneLayoutState(ls: LayoutState | undefined): LayoutState | undefined {
+  if (!ls) return undefined;
+  const out: LayoutState = {};
+  if (ls.rects) {
+    const r: Record<string, SavedRect> = {};
+    for (const [k, v] of Object.entries(ls.rects)) r[k] = { ...v };
+    out.rects = r;
+  }
+  if (ls.focusedViewId) out.focusedViewId = ls.focusedViewId;
+  return out;
+}
 function clone(s: WorkspaceState): WorkspaceState {
   return {
     activeWorkspaceId: s.activeWorkspaceId,
     workspaces: s.workspaces.map((w) => ({
       id: w.id, name: w.name, layoutId: w.layoutId,
       members: [...w.members],
-      ...(w.layoutState ? { layoutState: { ...w.layoutState } } : {}),
+      ...(w.layoutState ? { layoutState: cloneLayoutState(w.layoutState)! } : {}),
     })),
   };
+}
+
+/**
+ * Coalesced write helper — multiple rapid calls within `delayMs` collapse
+ * into a single PUT to the workspace endpoint. Drag/resize call this ~60
+ * times a second; debouncing the network write keeps Redis from melting.
+ */
+const pendingPatch = new Map<string, { patch: Partial<Omit<Workspace, 'id'>>; timer: ReturnType<typeof setTimeout> }>();
+export function patchWorkspaceDebounced(id: string, patch: Partial<Omit<Workspace, 'id'>>, delayMs = 250): void {
+  const existing = pendingPatch.get(id);
+  const merged = existing ? { ...existing.patch, ...patch } : patch;
+  if (existing) clearTimeout(existing.timer);
+  const timer = setTimeout(() => {
+    pendingPatch.delete(id);
+    void patchWorkspace(id, merged);
+  }, delayMs);
+  pendingPatch.set(id, { patch: merged, timer });
+  // Apply optimistically locally so UI subscribers see the new state at once.
+  // (We don't want the debounce to delay the visual.)
+  if (cached) {
+    const s = clone(cached);
+    const idx = s.workspaces.findIndex((w) => w.id === id);
+    if (idx >= 0) {
+      s.workspaces[idx] = { ...s.workspaces[idx]!, ...merged };
+      cached = s;
+      notify(cached);
+    }
+  }
 }
 
 function notify(state: WorkspaceState): void {
@@ -208,14 +262,47 @@ export async function deleteWorkspace(id: string): Promise<void> {
   await pushState(s);
 }
 
-/** Append a viewId to the active workspace's members (unless already present). */
+/**
+ * Move a viewId so it lives ONLY in the currently-active workspace.
+ * Same exclusivity contract as `addMemberToWorkspace`: a view belongs to
+ * exactly one workspace, never two. Defends against racy paths where the
+ * shell-initiated launch already pinned the view to one workspace and the
+ * SSE `activity:opened` listener tries to add it to the active one too.
+ */
 export async function addMemberToActive(viewId: string): Promise<void> {
   const s = clone(require_());
-  const active = s.workspaces.find((w) => w.id === s.activeWorkspaceId);
-  if (!active) return;
-  if (active.members.includes(viewId)) return;
-  active.members.push(viewId);
-  await pushState(s);
+  return addMemberToWorkspaceInState(s, s.activeWorkspaceId, viewId);
+}
+
+/** Shared core for both `addMemberToActive` and `addMemberToWorkspace`. */
+async function addMemberToWorkspaceInState(s: WorkspaceState, wsId: string, viewId: string): Promise<void> {
+  const target = s.workspaces.find((w) => w.id === wsId);
+  if (!target) return;
+  let mutated = false;
+  for (const w of s.workspaces) {
+    if (w.id === wsId) continue;
+    const before = w.members.length;
+    w.members = w.members.filter((m) => m !== viewId);
+    if (w.members.length !== before) mutated = true;
+  }
+  if (!target.members.includes(viewId)) {
+    target.members.push(viewId);
+    mutated = true;
+  }
+  if (mutated) await pushState(s);
+}
+
+/**
+ * Move a viewId so it lives ONLY in the named workspace's members. Strips it
+ * from every other workspace first — a view belongs to exactly one
+ * workspace, never two. Used by the launch pipeline to pin a pending view
+ * to whichever workspace was active when the user clicked, so a mid-flight
+ * workspace switch doesn't end up double-claiming the view on the
+ * newly-active workspace via a racy SSE refresh or fallback path.
+ */
+export async function addMemberToWorkspace(wsId: string, viewId: string): Promise<void> {
+  const s = clone(require_());
+  return addMemberToWorkspaceInState(s, wsId, viewId);
 }
 
 /** Remove a viewId from every workspace's members (strict mode: at most one). */

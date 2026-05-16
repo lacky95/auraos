@@ -1,0 +1,62 @@
+---
+import '@aura/ui/styles/scificn-bridge.css';
+import '../styles/settings.css';
+import KeymapManager from '../components/KeymapManager.tsx';
+
+// SSR-load the registry catalogue + the persisted overlay so the React
+// island renders without an HTTP round-trip. The shell exposes both via
+// /api/os/keymap (catalogue, read-only) and /api/kv/os/keymap (overlay).
+// We hit OS_API_BASE to bypass the proxy + Referer-based permission gate
+// (the settings page lives inside its own iframe; SSR runs Node-side).
+const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
+
+type KeyScope = 'os-always' | 'os-nav' | 'os-modifier' | 'app';
+interface KeyAction {
+  id: string; category: string; label: string;
+  description?: string; scope: KeyScope; defaultCombo: string | null;
+}
+interface OsKeymapState {
+  bindings:    Record<string, string | null>;
+  appOverlays: Record<string, Record<string, string | null>>;
+}
+
+let initialActions: KeyAction[] = [];
+let initialState:   OsKeymapState = { bindings: {}, appOverlays: {} };
+
+try {
+  const r = await fetch(`${osBase}/api/os/keymap`, { signal: AbortSignal.timeout(2000) });
+  if (r.ok) {
+    const body = await r.json() as { actions?: KeyAction[] };
+    if (Array.isArray(body.actions)) initialActions = body.actions;
+  }
+} catch { /* dispatcher loads it client-side too */ }
+
+try {
+  const r = await fetch(`${osBase}/api/kv/os/keymap`, { signal: AbortSignal.timeout(2000) });
+  if (r.ok) {
+    const body = await r.json() as { value?: OsKeymapState };
+    if (body.value) initialState = {
+      bindings:    body.value.bindings    ?? {},
+      appOverlays: body.value.appOverlays ?? {},
+    };
+  }
+} catch { /* fall back to empty */ }
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Settings · Keyboard — AuraOS</title>
+  <link rel="stylesheet" href="/api/os/theme.css" />
+</head>
+<body>
+  <main class="settings-body">
+    <KeymapManager
+      client:load
+      initialActions={initialActions}
+      initialState={initialState}
+    />
+  </main>
+  <footer class="settings-foot">PUT /api/kv/os/keymap · BROADCASTS kv:changed os/keymap · LIVE-RELOAD APP CLAIM LISTS</footer>
+</body>
+</html>

@@ -4,7 +4,7 @@ import { moveCursor, clearScreenDown } from 'node:readline';
 import { api } from '../lib/client.js';
 import { readManifest } from '../lib/manifest.js';
 import { color, fail, info } from '../lib/format.js';
-import { enterProot } from '../lib/enter-proot.js';
+import { enterSandbox } from '../lib/enter-sandbox.js';
 
 interface InstanceLite {
   instanceId: string;
@@ -12,6 +12,7 @@ interface InstanceLite {
   state: string;
   port: number | null;
   inPool?: boolean;
+  sandbox?: 'proot' | 'container';
 }
 interface AppDto {
   manifest: { id: string; name: string; componentType?: 'activity' | 'service' };
@@ -25,6 +26,7 @@ interface JumpTarget {
   state: string;
   port: number | null;
   isService: boolean;
+  sandbox?: 'proot' | 'container';
 }
 
 /**
@@ -37,7 +39,7 @@ export function registerJump(program: Command): void {
   program
     .command('jump')
     .alias('j')
-    .description('Interactive picker: jump into a running app/service proot in this terminal.')
+    .description('Interactive picker: jump into a running app/service sandbox (proot or container) in this terminal.')
     .option('--no-services', 'Hide services, show only user apps')
     .option('--no-apps',     'Hide apps, show only services')
     .action(async (opts: { services?: boolean; apps?: boolean }) => {
@@ -52,7 +54,7 @@ export function registerJump(program: Command): void {
       const pick = await pickInteractively(targets);
       if (!pick) { info('jump cancelled'); return; }
       const manifest = readManifest(pick.appId);
-      enterProot(pick.instanceId, pick.appId, pick.port, manifest?.tools ?? [], undefined);
+      enterSandbox(pick.instanceId, pick.appId, pick.port, manifest?.tools ?? [], pick.sandbox, undefined);
     });
 }
 
@@ -77,6 +79,7 @@ async function collectTargets(showApps: boolean, showServices: boolean): Promise
         state:      inst.state,
         port:       inst.port,
         isService,
+        sandbox:    inst.sandbox,
       });
     }
   }
@@ -138,7 +141,7 @@ async function pickInteractively(targets: JumpTarget[]): Promise<JumpTarget | nu
     const lines: string[] = [];
     lines.push('');
     lines.push('  ' + color.bold('AURA  JUMP'));
-    lines.push(color.dim('  ↑↓ navigate   1–9 quick-pick   ↵ enter   esc/^C cancel'));
+    lines.push(color.dim('  ↑↓ navigate   1–9 quick-pick   ↵ enter   q/^C cancel'));
     let printedAppHeader = false;
     let printedSvcHeader = false;
     for (let i = 0; i < targets.length; i++) {
@@ -154,8 +157,13 @@ async function pickInteractively(targets: JumpTarget[]): Promise<JumpTarget | nu
       lines.push(renderRow(t, i === idx, i));
     }
     lines.push('');
-    stdout.write(lines.join('\n') + '\n');
-    linesWritten = lines.length + 1; // +1 for the trailing newline
+    const text = lines.join('\n') + '\n';
+    stdout.write(text);
+    // Count newlines in the rendered text directly rather than `lines.length`:
+    // sectionHeader() embeds a leading '\n' (blank separator before the header),
+    // so each section adds two terminal rows but only one array slot. Counting
+    // newlines is sandbox-proof against any future embedded \n in row strings.
+    linesWritten = (text.match(/\n/g) ?? []).length;
     void firstServiceIdx; // silence unused
   };
 
@@ -171,7 +179,11 @@ async function pickInteractively(targets: JumpTarget[]): Promise<JumpTarget | nu
     };
 
     const onData = (data: string) => {
-      if (data === KEY_CTRLC || data === KEY_ESC) {
+      // Esc is intentionally NOT a cancel key — pressing Esc inside a
+      // browser-fullscreen terminal would exit fullscreen. Use Ctrl-C or 'q'
+      // (handled further down) to cancel the picker instead.
+      if (data === KEY_ESC) return;
+      if (data === KEY_CTRLC) {
         cleanup();
         resolve(null);
         return;

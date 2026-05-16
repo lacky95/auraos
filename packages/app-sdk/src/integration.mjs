@@ -31,7 +31,17 @@ export function auraAppIntegration(opts = {}) {
   return {
     name: 'aura-app',
     hooks: {
-      'astro:config:setup': ({ injectRoute }) => {
+      'astro:config:setup': ({ injectRoute, updateConfig }) => {
+        // Vite's dev server in Astro 6 / Vite 5+ ships a `server.allowedHosts`
+        // safelist that rejects requests with a Host header not in the list
+        // (returns 403). PRoot apps are reached via 127.0.0.1 (auto-allowed)
+        // so this never surfaces. Container-sandbox apps are reached by
+        // their docker-network hostname (`aura-com.aura.counter-3`), which
+        // is unknown to Vite → 403 on every request including health probes.
+        // Allow any host because (a) the app is already network-isolated
+        // (sibling container on aura-net only) and (b) the shell's HTTP
+        // proxy verifies identity via X-Aura-App-Id headers anyway.
+        updateConfig({ vite: { server: { allowedHosts: true } } });
         if (!injectHealth) return;
         injectRoute({
           pattern: '/api/lifecycle/health',

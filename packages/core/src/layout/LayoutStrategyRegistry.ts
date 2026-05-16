@@ -82,11 +82,20 @@ export const DEFAULT_LAYOUT_STRATEGIES: readonly LayoutStrategyMeta[] = [
     minViews: 1,
   },
   {
+    // id stays 'stack' so existing persisted workspaces don't break; the
+    // user-facing name is "Free Window" since the strategy is traditional
+    // floating-WM behavior, not vertical row stacking.
     id: 'stack',
-    name: 'Stack / Float',
+    name: 'Free Window',
     description: 'Free-positioned floating windows you can drag and resize. Position persists per-workspace.',
     icon: '▥',
     supportsManualPlacement: true,
+  },
+  {
+    id: 'rows',
+    name: 'Rows',
+    description: 'Each window gets its own full-width row, stacked top to bottom. New windows pile on at the bottom.',
+    icon: '▤',
   },
 ];
 

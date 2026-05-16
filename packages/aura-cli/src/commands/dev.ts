@@ -1,9 +1,12 @@
 import type { Command } from 'commander';
 import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync, chmodSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { AppManifestSchema } from '@aura/core';
 import { color, fail, info, ok, warn } from '../lib/format.js';
+import { promptText, promptChoice, promptConfirm, promptMultiSelect, PromptCancelled, BACK, type MultiSelectMode } from '../lib/prompts.js';
+import { ensureRegistry, loadRegistry, loadState, type CapabilityEntry } from '../lib/registry.js';
+import { api } from '../lib/client.js';
 
 const TEMPLATE_DIR = (() => {
   if (process.env['AURA_TEMPLATE_DIR']) return process.env['AURA_TEMPLATE_DIR'];
@@ -17,14 +20,20 @@ const TEMPLATE_DIR = (() => {
 
 const APPS_DIR = process.env['AURA_APPS_DIR'] ?? '/workspace/apps';
 
-function renderTemplate(srcDir: string, destDir: string, vars: Record<string, string>): void {
+function renderTemplate(
+  srcDir: string,
+  destDir: string,
+  vars: Record<string, string>,
+  skip: Set<string> = new Set(),
+): void {
   mkdirSync(destDir, { recursive: true });
   for (const entry of readdirSync(srcDir)) {
+    if (skip.has(entry)) continue;
     const src = join(srcDir, entry);
     const dest = join(destDir, entry);
     const st = statSync(src);
     if (st.isDirectory()) {
-      renderTemplate(src, dest, vars);
+      renderTemplate(src, dest, vars, skip);
     } else {
       let body = readFileSync(src, 'utf-8');
       for (const [k, v] of Object.entries(vars)) body = body.replaceAll(`{{${k}}}`, v);
@@ -34,37 +43,547 @@ function renderTemplate(srcDir: string, destDir: string, vars: Record<string, st
   }
 }
 
+/** Three "shape" presets the wizard offers. Maps to manifest field combos. */
+type ComponentShape = 'activity' | 'activity-bg' | 'service';
+
+interface ScaffoldConfig {
+  appId:        string;
+  name:         string;
+  icon?:        string;
+  description?: string;
+  shape:        ComponentShape;
+  instanceMode: 'single' | 'multi';
+  sandbox:      'proot' | 'container';
+  tools:        string[];
+}
+
+/**
+ * Generate a clean app manifest from a config: emits only fields that DIFFER
+ * from the schema defaults, so the resulting manifest matches the
+ * `aura dev clean-manifest` output (no churn diff for the user). Shape preset
+ * decides componentType + backgroundService + autoStart in one place.
+ */
+function manifestFromConfig(cfg: ScaffoldConfig): Record<string, unknown> {
+  const m: Record<string, unknown> = {
+    id:          cfg.appId,
+    name:        cfg.name,
+    version:     '0.1.0',
+    description: cfg.description ?? 'Scaffolded by `aura dev new`.',
+  };
+  if (cfg.icon) m['icon'] = cfg.icon;
+
+  // Shape preset → component-type knobs. Each preset is the smallest set of
+  // fields that captures intent; everything else inherits from the schema.
+  if (cfg.shape === 'service') {
+    m['componentType']   = 'service';
+    // Services are headless by contract; autoStart is the typical companion
+    // (Console is the in-repo example). Always single-instance.
+    m['autoStart']       = true;
+    // Zod refuses service + activityMode!='none', so we MUST NOT emit
+    // activityMode here (the schema default 'none' already enforces it).
+  } else {
+    // Both 'activity' and 'activity-bg' are activity-component apps. We omit
+    // componentType (schema default 'activity') to keep manifests minimal.
+    m['instanceMode'] = cfg.instanceMode;
+    m['activityMode'] = 'multi';
+    if (cfg.instanceMode === 'multi') m['defaultLaunch'] = 'new-activity';
+    if (cfg.shape === 'activity-bg') m['backgroundService'] = true;
+  }
+
+  // Container sandbox is opt-in (heavier spawn but real kernel-namespace
+  // isolation + survives shell restarts). PRoot is the schema default; omit it.
+  if (cfg.sandbox === 'container') m['sandbox'] = 'container';
+
+  if (cfg.tools.length > 0) m['tools'] = cfg.tools;
+
+  return m;
+}
+
+const PKG_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
+
+function defaultIconFor(name: string): string {
+  // 1-3 char glyph, uppercase. Prefer first letters of camelCase / space-split
+  // words so "TaskList" → "TL", "voice memo" → "VM". Fall back to first letter.
+  const words = name.split(/[\s.-]+|(?=[A-Z])/).filter(Boolean);
+  if (words.length >= 2) {
+    return (words[0]![0]! + words[1]![0]!).toUpperCase();
+  }
+  return (name[0] ?? '?').toUpperCase();
+}
+
+/**
+ * Run the interactive wizard. Step-array architecture: each step reads &
+ * writes the partial-config draft, and either returns a value (advance) or
+ * BACK (rewind). Esc / left-arrow at any prompt → previous step; Esc at the
+ * first step → cancel the wizard. Re-running a previous step pre-fills the
+ * default from the draft so the user only edits what they want to change.
+ */
+async function runWizard(seed: { appId?: string; force?: boolean }): Promise<ScaffoldConfig | null> {
+  stdoutDivider();
+  console.log(`  ${color.bold('aura')} · scaffold a new app   ${color.dim('— esc/← to go back, ^C to cancel')}`);
+  stdoutDivider();
+
+  // Draft holds whatever the user has filled in so far. We never look up by
+  // step index — each step pulls only the keys it cares about, and writes
+  // its result back. That way reordering steps is a one-line change.
+  const draft: Partial<ScaffoldConfig> = {};
+  if (seed.appId) draft.appId = seed.appId;
+
+  type StepResult = 'advance' | 'back' | 'cancel';
+  const steps: Array<{ id: string; run: () => Promise<StepResult> }> = [
+    {
+      id: 'appId',
+      run: async () => {
+        const v = await promptText('Package name (reverse-domain)', {
+          default: draft.appId,
+          allowBack: true,
+          validate: (s) => {
+            if (!PKG_RE.test(s)) return `Invalid: ${s}. Use reverse-domain like com.example.app.`;
+            const dest = join(APPS_DIR, s);
+            if (existsSync(dest) && !seed.force) return `${dest} already exists. Re-run with --force to overwrite.`;
+            return null;
+          },
+        });
+        if (v === BACK) return 'cancel'; // first step → back == cancel
+        draft.appId = v;
+        return 'advance';
+      },
+    },
+    {
+      id: 'name',
+      run: async () => {
+        const shortName   = draft.appId!.split('.').pop() ?? draft.appId!;
+        const titled      = shortName.replace(/(^|-)([a-z])/g, (_, sep, ch) => (sep ? ' ' : '') + ch.toUpperCase());
+        const v = await promptText('Display name', {
+          default: draft.name ?? titled,
+          allowBack: true,
+          validate: (s) => s.length >= 1 ? null : 'Required.',
+        });
+        if (v === BACK) return 'back';
+        draft.name = v;
+        return 'advance';
+      },
+    },
+    {
+      id: 'icon',
+      run: async () => {
+        const v = await promptText('Launch icon (1–3 chars)', {
+          default: draft.icon ?? defaultIconFor(draft.name!),
+          allowBack: true,
+          validate: (s) => s.length >= 1 && s.length <= 3 ? null : 'Must be 1–3 characters.',
+        });
+        if (v === BACK) return 'back';
+        draft.icon = v;
+        return 'advance';
+      },
+    },
+    {
+      id: 'description',
+      run: async () => {
+        const v = await promptText('Short description', {
+          default: draft.description ?? 'Scaffolded by `aura dev new`.',
+          allowBack: true,
+        });
+        if (v === BACK) return 'back';
+        draft.description = v;
+        return 'advance';
+      },
+    },
+    {
+      id: 'shape',
+      run: async () => {
+        const opts = [
+          { value: 'activity'    as ComponentShape, label: 'Activity',              desc: 'Has a UI. Backend dies when the last window closes.' },
+          { value: 'activity-bg' as ComponentShape, label: 'Activity (background)', desc: 'Has a UI. Backend survives last-window close (like Terminal).' },
+          { value: 'service'     as ComponentShape, label: 'Service',               desc: 'Headless. No UI, autoStarts at OS init (like Console).' },
+        ];
+        const startIdx = Math.max(0, opts.findIndex((o) => o.value === draft.shape));
+        const v = await promptChoice<ComponentShape>('Component shape', opts, startIdx, { allowBack: true });
+        if (v === BACK) return 'back';
+        draft.shape = v;
+        return 'advance';
+      },
+    },
+    {
+      id: 'instanceMode',
+      run: async () => {
+        // Services are always single-instance — skip this step entirely when
+        // shape=service (advance silently so back/forward still works).
+        if (draft.shape === 'service') { draft.instanceMode = 'single'; return 'advance'; }
+        const opts = [
+          { value: 'single' as const, label: 'Single', desc: 'One backend process; activities are tabs on it.' },
+          { value: 'multi'  as const, label: 'Multi',  desc: 'Each launch can spawn its own backend (defaultLaunch: new-activity).' },
+        ];
+        const startIdx = Math.max(0, opts.findIndex((o) => o.value === draft.instanceMode));
+        const v = await promptChoice<'single' | 'multi'>('Instance mode', opts, startIdx, { allowBack: true });
+        if (v === BACK) return 'back';
+        draft.instanceMode = v;
+        return 'advance';
+      },
+    },
+    {
+      id: 'sandbox',
+      run: async () => {
+        // Container first = preselected default. The user wants the stronger
+        // isolation by default; PRoot stays available as a lighter alternative.
+        const opts = [
+          { value: 'container' as const, label: 'Container', desc: 'Real Docker namespace. Survives shell restart. Recommended.' },
+          { value: 'proot'     as const, label: 'PRoot',     desc: 'Lightweight ptrace sandbox. Fast cold start, weaker isolation.' },
+        ];
+        const startIdx = Math.max(0, opts.findIndex((o) => o.value === draft.sandbox));
+        const v = await promptChoice<'proot' | 'container'>('Sandbox', opts, startIdx, { allowBack: true });
+        if (v === BACK) return 'back';
+        draft.sandbox = v;
+        return 'advance';
+      },
+    },
+    {
+      id: 'tools',
+      run: async () => {
+        const v = await pickTools(draft.tools);
+        if (v === BACK) return 'back';
+        draft.tools = v;
+        return 'advance';
+      },
+    },
+    {
+      id: 'confirm',
+      run: async () => {
+        const cfg = draft as ScaffoldConfig;
+        stdoutDivider();
+        console.log(`  ${color.bold('Summary')}`);
+        stdoutDivider();
+        const summary = manifestFromConfig(cfg);
+        for (const [k, val] of Object.entries(summary)) {
+          console.log(`  ${color.dim(k.padEnd(18))} ${color.green(JSON.stringify(val))}`);
+        }
+        console.log(`  ${color.dim('dest'.padEnd(18))} ${color.green(join(APPS_DIR, cfg.appId))}`);
+        stdoutDivider();
+        const proceed = await promptConfirm('Create?', true, { allowBack: true });
+        if (proceed === BACK) return 'back';
+        return proceed ? 'advance' : 'cancel';
+      },
+    },
+  ];
+
+  try {
+    let i = 0;
+    while (i < steps.length) {
+      const r = await steps[i]!.run();
+      if (r === 'cancel') return null;
+      if (r === 'back') {
+        // Walk past skipped-by-shape steps. instanceMode auto-advances when
+        // shape=service; back from sandbox must hop OVER it to land on shape.
+        do { i = Math.max(0, i - 1); }
+        while (i > 0 && draft.shape === 'service' && steps[i]!.id === 'instanceMode');
+        continue;
+      }
+      i++;
+    }
+    return draft as ScaffoldConfig;
+  } catch (err) {
+    if (err instanceof PromptCancelled) return null;
+    throw err;
+  }
+}
+
+function stdoutDivider(): void {
+  process.stdout.write(color.dim('  ────────────────────────────────────────────────────\n'));
+}
+
+/**
+ * Interactive tool picker for the wizard. Two modes the user can flip with
+ * `m` or Tab:
+ *   • "enable only"      — installed caps + always-on builtins. Quickest path.
+ *   • "install + enable" — every registry entry. Failed installs are warned,
+ *                          not fatal — the manifest still gets the tool name
+ *                          and the user can re-run `aura cap install <name>`
+ *                          later. The shell is the install executor; if it's
+ *                          unreachable we skip install entirely and just write
+ *                          the names into tools[] (later launch will install).
+ *
+ * Returns the final list of cap names that should land in the manifest's
+ * `tools[]`. Empty list is allowed — the schema default is [].
+ */
+async function pickTools(prior?: string[]): Promise<string[] | typeof BACK> {
+  ensureRegistry();
+  const reg = loadRegistry();
+
+  // Prefer the shell's view of installed state; fall back to local file. Also
+  // pull /os/toolchain/bin via inspect-tools so we can surface system binaries
+  // (bash, git, docker, …) that aren't formally in the cap registry. The user
+  // wants those checkable too — manifest tools[] is an allowlist, not a
+  // registry-only set.
+  let installedNames: Set<string>;
+  let storeEntries: string[] = [];
+  try {
+    const [capRes, toolsRes] = await Promise.all([
+      api.get<{ state: { capabilities: Record<string, { installed: boolean }> } }>('/api/admin/cap'),
+      api.get<{ storeEntries: string[] }>('/api/admin/inspect-tools'),
+    ]);
+    installedNames = new Set(
+      Object.entries(capRes.state.capabilities).filter(([, s]) => s.installed).map(([n]) => n),
+    );
+    storeEntries = toolsRes.storeEntries ?? [];
+  } catch {
+    const state = loadState();
+    installedNames = new Set(
+      Object.entries(state.capabilities).filter(([, s]) => s.installed).map(([n]) => n),
+    );
+  }
+  // Anything physically present in /os/toolchain/bin counts as installed —
+  // the wildcard provisioner will bind it regardless of registry membership.
+  for (const name of storeEntries) installedNames.add(name);
+  for (const [name, entry] of Object.entries(reg.capabilities)) {
+    if (entry.source === 'builtin') installedNames.add(name);
+  }
+
+  // Mode A "enable only": union of registry-known caps AND system binaries.
+  // Mode B "install + enable": every registry entry (installed + not).
+  const enableOnly = new Map<string, { label: string; desc: string; tag: string }>();
+  for (const name of storeEntries) {
+    const entry = reg.capabilities[name];
+    enableOnly.set(name, {
+      label: name,
+      desc:  entry?.description ?? 'system binary in /os/toolchain/bin',
+      tag:   color.green('installed'),
+    });
+  }
+  for (const [name, entry] of Object.entries(reg.capabilities)) {
+    if (!installedNames.has(name)) continue;
+    if (enableOnly.has(name)) continue;
+    enableOnly.set(name, {
+      label: name,
+      desc:  entry.description ?? '',
+      tag:   color.green('installed'),
+    });
+  }
+
+  const sortedNames = (names: Iterable<string>) =>
+    Array.from(names).sort((a, b) => a.localeCompare(b));
+
+  // If the user already picked tools and is re-entering this step (via
+  // back/forward), honour those picks. Otherwise seed with bash + git as a
+  // sensible default starter set — every container/proot scaffold tends to
+  // want shell + version control on day one.
+  const priorSet = prior && prior.length > 0
+    ? new Set(prior)
+    : new Set<string>(['bash', 'git']);
+
+  const toOption = (name: string, label: string, desc: string, tag: string) => ({
+    value: name,
+    label,
+    desc,
+    tag,
+    initiallyChecked: priorSet.has(name),
+  });
+
+  const enableOnlyOptions = sortedNames(enableOnly.keys()).map((n) => {
+    const o = enableOnly.get(n)!;
+    return toOption(n, o.label, o.desc, o.tag);
+  });
+  const installEnableOptions = sortedNames(Object.keys(reg.capabilities)).map((n) => {
+    const e = reg.capabilities[n]!;
+    return toOption(
+      n,
+      n,
+      e.description ?? '',
+      installedNames.has(n) ? color.green('installed') : color.yellow(e.source),
+    );
+  });
+
+  const modes: MultiSelectMode<string>[] = [
+    { label: 'enable only',      options: enableOnlyOptions     },
+    { label: 'install + enable', options: installEnableOptions },
+  ];
+
+  const raw = await promptMultiSelect('Tools', modes, /* initialMode */ 0, { allowBack: true });
+  if (raw === BACK) return BACK;
+  const result = raw;
+
+  // Mode A = enable only → nothing to install, just return names.
+  if (result.modeIdx === 0) return result.selected;
+
+  // Mode B = install + enable → trigger an install for everything selected
+  // that ISN'T already installed. Failures are warned but not fatal: the
+  // tool still goes into tools[] (so a later `aura cap install` can retry).
+  const toInstall = result.selected.filter((n) => !installedNames.has(n));
+  if (toInstall.length === 0) return result.selected;
+
+  info(`installing ${toInstall.length} cap${toInstall.length === 1 ? '' : 's'}…`);
+  for (const name of toInstall) {
+    const entry = reg.capabilities[name] as CapabilityEntry | undefined;
+    if (!entry) { warn(`${name}: not in registry, skipping install`); continue; }
+    try {
+      const res = await api.post<{ ok: boolean; symlink?: string; version?: string | null; error?: string }>(
+        '/api/admin/cap',
+        { action: 'install', name, entry },
+      );
+      if (!res?.ok) {
+        warn(`${name}: install failed (${res?.error ?? 'unknown'}). Will land in manifest anyway — retry later with \`aura cap install ${name}\`.`);
+        continue;
+      }
+      ok(`installed ${name}${res.version ? ` (${res.version})` : ''}`);
+    } catch (err) {
+      warn(`${name}: install error (${(err as Error).message}). Will land in manifest anyway — retry later with \`aura cap install ${name}\`.`);
+    }
+  }
+  return result.selected;
+}
+
+interface PayloadFile {
+  relPath: string;
+  content: string;
+  mode?: number;
+}
+
+/**
+ * Render the template + manifest into a flat list of files. Used by both the
+ * shell-side scaffold POST and the local-write fallback so the two paths
+ * stay byte-identical.
+ */
+function buildScaffoldFiles(cfg: ScaffoldConfig): PayloadFile[] {
+  if (!existsSync(TEMPLATE_DIR)) fail(`Scaffold template missing: ${TEMPLATE_DIR}`);
+  const vars: Record<string, string> = {
+    APP_ID:        cfg.appId,
+    APP_NAME:      cfg.name,
+    APP_SHORT:     cfg.appId.split('.').pop() ?? cfg.appId,
+    // Legacy placeholders the template manifest used to consume — kept for
+    // any non-manifest files that might still reference them in the future.
+    INSTANCE_MODE: cfg.instanceMode,
+    ACTIVITY_MODE: cfg.shape === 'service' ? 'none' : 'multi',
+    TOOLS_JSON:    JSON.stringify(cfg.tools),
+  };
+  const files: PayloadFile[] = [];
+  const walk = (srcDir: string, relPrefix: string): void => {
+    for (const entry of readdirSync(srcDir)) {
+      // Skip the template's placeholder manifest — we render the manifest
+      // programmatically below to honor the shape preset cleanly.
+      if (entry === 'app.manifest.json' && relPrefix === '') continue;
+      const src = join(srcDir, entry);
+      const rel = relPrefix ? `${relPrefix}/${entry}` : entry;
+      const st = statSync(src);
+      if (st.isDirectory()) { walk(src, rel); continue; }
+      let body = readFileSync(src, 'utf-8');
+      for (const [k, v] of Object.entries(vars)) body = body.replaceAll(`{{${k}}}`, v);
+      files.push({
+        relPath: rel,
+        content: body,
+        ...(entry.endsWith('.sh') ? { mode: 0o755 } : {}),
+      });
+    }
+  };
+  walk(TEMPLATE_DIR, '');
+  files.push({
+    relPath: 'app.manifest.json',
+    content: JSON.stringify(manifestFromConfig(cfg), null, 2) + '\n',
+  });
+  return files;
+}
+
+/** Local-write fallback used when the shell isn't reachable. */
+function writeFilesLocal(cfg: ScaffoldConfig, files: PayloadFile[]): string {
+  const dest = join(APPS_DIR, cfg.appId);
+  mkdirSync(dest, { recursive: true });
+  for (const f of files) {
+    const target = join(dest, f.relPath);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, f.content);
+    if (f.mode) chmodSync(target, f.mode);
+  }
+  return dest;
+}
+
+/**
+ * Common scaffold path. Tries the shell endpoint first — required for
+ * container-sandbox callers (Terminal app), whose sliced `/workspace/apps`
+ * bind means a local write would land in the container's overlay rather
+ * than on the host where AppManager can see it. Falls back to a local
+ * write only when the shell is unreachable (e.g. host-shell usage with
+ * AuraOS not running).
+ */
+async function scaffoldFromConfig(cfg: ScaffoldConfig): Promise<void> {
+  const files = buildScaffoldFiles(cfg);
+
+  let dest: string;
+  let viaShell = false;
+  try {
+    const res = await api.post<{ ok: boolean; dest?: string; error?: string; message?: string }>(
+      '/api/admin/scaffold',
+      { appId: cfg.appId, force: true, files },
+    );
+    if (!res?.ok) fail(`scaffold failed via shell: ${res?.error ?? 'unknown'} ${res?.message ?? ''}`.trim());
+    dest    = res.dest!;
+    viaShell = true;
+  } catch (err) {
+    // Shell isn't running (or we hit a network error). Fall back to a local
+    // write — useful for `aura dev new` on the host with no aura-os up.
+    // If we're inside a sliced-bind sandbox, the write will succeed in our
+    // overlay but the host AppManager won't see it; warn the caller.
+    const msg = (err as Error).message;
+    warn(`shell scaffold unreachable (${msg.split('\n')[0]}); writing locally instead.`);
+    if (existsSync(join(APPS_DIR, cfg.appId))) {
+      fail(`${join(APPS_DIR, cfg.appId)} already exists.`);
+    }
+    dest = writeFilesLocal(cfg, files);
+  }
+
+  ok(`scaffolded ${color.bold(cfg.appId)} at ${dest}${viaShell ? color.dim(' (via shell)') : ''}`);
+  info(`Run \`aura app start ${cfg.appId}\` to launch it.`);
+}
+
 export function registerDev(program: Command): void {
   const dev = program.command('dev').description('Developer tools: scaffold apps, validate manifests, run an app standalone.');
 
   dev
-    .command('new <appId>')
-    .option('--name <name>',           'Display name for the new app')
+    .command('new [appId]')
+    .option('--name <name>',           'Display name')
+    .option('--icon <chars>',          'Launch glyph (1–3 chars)')
+    .option('--description <text>',    'Short description')
+    .option('--shape <preset>',        'activity | activity-bg | service')
     .option('--instance-mode <mode>',  'single | multi', 'single')
-    .option('--activity-mode <mode>',  'none | multi',   'none')
-    .option('--tools <list>',          'Comma-separated capabilities to declare',  '')
+    .option('--sandbox <kind>',        'proot | container', 'proot')
+    .option('--tools <list>',          'Comma-separated capabilities to declare', '')
     .option('--force',                 'Overwrite if target directory exists')
-    .description('Scaffold a new AuraOS app under apps/<id>/ from the built-in template.')
-    .action((appId: string, opts: { name?: string; instanceMode: string; activityMode: string; tools: string; force?: boolean }) => {
-      if (!/^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/.test(appId)) {
-        fail(`Invalid app ID: ${appId}. Use reverse-domain notation like com.example.app.`);
+    .option('--non-interactive',       'Never prompt; require flags + appId')
+    .description('Scaffold a new AuraOS app. Interactive wizard if no appId is given (or pass flags to script it).')
+    .action(async (
+      appId: string | undefined,
+      opts: {
+        name?: string; icon?: string; description?: string;
+        shape?: ComponentShape; instanceMode: 'single' | 'multi';
+        sandbox: 'proot' | 'container'; tools: string; force?: boolean;
+        nonInteractive?: boolean;
+      },
+    ) => {
+      // Interactive wizard: no positional appId AND a TTY is present (and the
+      // user didn't explicitly opt out via --non-interactive). Otherwise fall
+      // through to the flag-based path so CI/scripts keep working unchanged.
+      const wantInteractive = !opts.nonInteractive && process.stdin.isTTY && process.stdout.isTTY;
+      if (wantInteractive && !appId) {
+        const cfg = await runWizard({ ...(opts.force ? { force: true } : {}) });
+        if (!cfg) { info('cancelled'); return; }
+        await scaffoldFromConfig(cfg);
+        return;
       }
+
+      // Flag-based path (CI / scripted use).
+      if (!appId) fail('No appId given. Run interactively or pass `aura dev new <appId>`.');
+      if (!PKG_RE.test(appId)) fail(`Invalid app ID: ${appId}. Use reverse-domain notation like com.example.app.`);
       const dest = join(APPS_DIR, appId);
       if (existsSync(dest) && !opts.force) fail(`${dest} already exists. Pass --force to overwrite.`);
-      if (!existsSync(TEMPLATE_DIR)) fail(`Scaffold template missing: ${TEMPLATE_DIR}`);
 
-      const shortName = appId.split('.').pop() ?? appId;
-      const vars: Record<string, string> = {
-        APP_ID:        appId,
-        APP_NAME:      opts.name ?? shortName,
-        APP_SHORT:     shortName,
-        INSTANCE_MODE: opts.instanceMode,
-        ACTIVITY_MODE: opts.activityMode,
-        TOOLS_JSON:    JSON.stringify(opts.tools.split(',').map((t) => t.trim()).filter(Boolean)),
+      const cfg: ScaffoldConfig = {
+        appId,
+        name:         opts.name ?? (appId.split('.').pop() ?? appId),
+        ...(opts.icon        ? { icon:        opts.icon }        : {}),
+        ...(opts.description ? { description: opts.description } : {}),
+        shape:        opts.shape ?? 'activity',
+        instanceMode: opts.instanceMode,
+        sandbox:      opts.sandbox,
+        tools:        opts.tools.split(',').map((t) => t.trim()).filter(Boolean),
       };
-      renderTemplate(TEMPLATE_DIR, dest, vars);
-      ok(`scaffolded ${color.bold(appId)} at ${dest}`);
-      info('Run `pnpm install` from the repo root, then `aura app start ' + appId + '`.');
+      await scaffoldFromConfig(cfg);
     });
 
   dev
@@ -184,7 +703,7 @@ const SCHEMA_DEFAULTS: Record<string, unknown> = {
   viewConfig:              { defaultWidth: 800, defaultHeight: 600, resizable: true },
   lifecycleBasePath:       '/api/lifecycle',
   preferredLayout:         'any',
-  shortcuts:               [],
+  keymapActions:           [],
   theme:                   { mode: 'os-components' },
   themeStrategy:           'inherit',
 };

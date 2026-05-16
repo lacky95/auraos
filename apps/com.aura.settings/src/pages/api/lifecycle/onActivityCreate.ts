@@ -10,6 +10,7 @@ export const POST = createActivityCreateHandler(({ data }) => {
   switch (section) {
     case 'theme':      return { path: '/theme',      title: 'Settings · Theme' };
     case 'workspaces': return { path: '/workspaces', title: 'Settings · Workspaces' };
+    case 'keyboard':   return { path: '/keyboard',   title: 'Settings · Keyboard' };
     case 'general':    return { path: '/general',    title: 'Settings · General' };
     case 'about':      return { path: '/about',      title: 'Settings · About' };
     default:           return { path: '/',           title: 'Settings' };

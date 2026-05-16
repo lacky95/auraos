@@ -11,3 +11,5 @@ export * from './permissions/index.js';
 export * from './content/index.js';
 export * from './theme/index.js';
 export * from './layout/LayoutStrategyRegistry.js';
+export * from './keymap/index.js';
+export * from './logger.js';

@@ -16,6 +16,8 @@ export interface OsEvents {
   'app:crashed': { instanceId: string; appId: string; error: string };
   'app:installed': { appId: string };
   'app:removed': { appId: string };
+  /** A user toggled an app's enable state (Settings → Apps or `aura app enable/disable`). */
+  'app:enabledChanged': { appId: string; enabled: boolean };
   'activity:opened': { activityId: string; parentInstanceId: string; appId: string; path: string; title?: string; minimizable?: boolean; stackParentId?: string };
   'activity:closed': { activityId: string; parentInstanceId: string; appId: string };
   /**
@@ -25,6 +27,34 @@ export interface OsEvents {
    * shell handles "focus existing view" with a different code path.
    */
   'activity:focus':  { activityId: string; parentInstanceId: string; appId: string };
+  /**
+   * Activity navigated in place — the iframe URL changed without spawning
+   * a new view. Fired by `AppManager.navigateActivity()` (forward step) AND
+   * by `AppManager.goBack()` when it pops the history stack instead of
+   * closing. The shell updates `view.iframeUrl` + iframe `src` + title in
+   * response so the existing slot reflects the new path.
+   */
+  'activity:navigated': {
+    activityId:       string;
+    parentInstanceId: string;
+    appId:            string;
+    path:             string;
+    title?:           string;
+    /** Full updated history so the shell's breadcrumb trail can rerender in
+     *  one event (no second fetch). Empty array means "no prior steps". */
+    history:          Array<{ path: string; title?: string }>;
+    /** Mirror of `activity.breadcrumb` so the chrome can show/hide the trail. */
+    breadcrumb:       'os' | 'off';
+    /** True when the navigation is the result of a Back-pop; false on forward navigate. */
+    fromHistory:      boolean;
+  };
+  /** Fired when an app toggles its breadcrumb mode at runtime (SDK setter). */
+  'activity:breadcrumbChanged': {
+    activityId:       string;
+    parentInstanceId: string;
+    appId:            string;
+    breadcrumb:       'os' | 'off';
+  };
   'theme:changed': {
     themeId:       string;                     // the ACTIVE (resolved) theme id
     themeName:     string;

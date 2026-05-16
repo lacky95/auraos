@@ -46,6 +46,18 @@ export class AppRegistry {
     }
   }
 
+  /**
+   * Force a re-parse of `apps/<appId>/app.manifest.json`. Used by the
+   * `/api/admin/manifest-edit` endpoint to avoid the chokidar lag between
+   * "we just wrote the file" and "the registry has the updated tools[] in
+   * memory" — without this, refreshInstanceTools called immediately after
+   * the write would see the previous in-memory copy and skip the new entries.
+   */
+  public reloadFromDisk(appId: string): void {
+    const path = join(this.appsDir, appId, 'app.manifest.json');
+    this.loadManifestFile(path);
+  }
+
   private loadManifestFile(manifestPath: string): void {
     if (!existsSync(manifestPath)) return;
     try {

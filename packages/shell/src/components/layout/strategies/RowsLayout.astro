@@ -1,0 +1,39 @@
+---
+/**
+ * Rows layout: one full-width row per visible view, stacked top to bottom.
+ * Each row gets `1fr` so they share the desktop height evenly. New windows
+ * pile on at the bottom — first-in stays at the top.
+ *
+ * Counterpart to `tiling` (auto sqrt grid) and `fullscreen` (one wins). No
+ * persisted layout state — geometry is fully derived from view count.
+ */
+import type { AppView } from '@aura/core';
+import AppSlot from '../AppSlot.astro';
+
+interface Props {
+  views: AppView[];
+  /** Unused for rows — kept on the props shape so the LayoutManager
+   *  dispatcher can forward layoutState uniformly across strategies. */
+  layoutState?: Record<string, unknown>;
+}
+const { views } = Astro.props;
+
+const n = views.length;
+const gridStyle = `grid-template-rows: repeat(${n}, 1fr);`;
+---
+<div class="rows-layout" style={gridStyle}>
+  {views.map(view => (
+    <AppSlot view={view} />
+  ))}
+</div>
+
+<style>
+  .rows-layout {
+    display: grid;
+    grid-template-columns: 1fr;
+    width: 100%;
+    height: 100%;
+    gap: 2px;
+    background: var(--aura-color-bg);
+  }
+</style>

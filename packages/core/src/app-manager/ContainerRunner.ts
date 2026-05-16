@@ -1,4 +1,4 @@
-import { spawn, execSync, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, execSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
@@ -12,12 +12,20 @@ const BASE_IMAGE     = process.env['AURA_BASE_IMAGE']     ?? 'aura-base';
 
 const SYNTHESISED_ENTRYPOINT = `set -e
 export PORT="\${APP_PORT:-4001}"
-if [ ! -d node_modules ]; then
+# Skip install when /workspace/node_modules exists: that volume mount is
+# populated by the workspace-level pnpm install and contains every workspace
+# package (including @aura/app-sdk). Node's resolution walks UP from
+# /workspace/apps/<id> into it, so a scaffolded app with a 'workspace:*'
+# dep resolves without running 'npm install' — which would die anyway with
+# EUNSUPPORTEDPROTOCOL because npm doesn't understand the workspace: protocol.
+if [ ! -d node_modules ] && [ ! -d /workspace/node_modules ]; then
   echo "[\${APP_ID:-app}] Installing dependencies..."
   npm install --prefer-offline 2>&1 || npm install
 fi
-echo "[\${APP_ID:-app}] Starting Astro server on port \$PORT"
-exec node_modules/.bin/astro dev --host 0.0.0.0 --port "\$PORT"`;
+ASTRO="node_modules/.bin/astro"
+[ -x "\$ASTRO" ] || ASTRO="/workspace/node_modules/.bin/astro"
+echo "[\${APP_ID:-app}] Starting Astro server on port \$PORT via \$ASTRO"
+exec "\$ASTRO" dev --host 0.0.0.0 --port "\$PORT"`;
 
 interface TrackedContainer {
   /** docker container ID (long form). */
@@ -32,6 +40,15 @@ interface TrackedContainer {
   pid: number;
   /** Best-effort exit callback registered by AppManager. */
   exitCb: ((code: number | null) => void) | null;
+  /**
+   * Set true by kill()/forceKill() right before sending docker stop/kill.
+   * handleExit checks it and skips firing exitCb when true — the AppManager
+   * is already in the middle of its own stop sequence and doesn't want a
+   * stray "unexpected exit" event flipping the instance to 'error', which
+   * would then break the next FSM transition to 'destroyed' and 500 the
+   * /api/instances/X/stop response.
+   */
+  expectingKill: boolean;
 }
 
 /**
@@ -95,8 +112,20 @@ export class ContainerRunner implements SandboxRunner {
   }
   public provisionToolsDir(instanceId: string, manifest: AppManifest): string {
     const dir = this.toolsDir(instanceId);
-    try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+    // IMPORTANT: empty the directory IN PLACE rather than rm+mkdir. The
+    // container's `--mount type=volume,…,volume-subpath=<this dir>` binds the
+    // dir BY INODE at spawn time; rm-then-mkdir gives the dir a new inode,
+    // and the container keeps pointing at the unlinked-but-still-mounted old
+    // one. Result: every symlink we write after a refresh is invisible inside
+    // the container, manifesting as an empty /aura/my-tools and
+    // "bash: command not found" for everything the wildcard cap allowlist
+    // should provide. (Cap install + refreshWildcardApps both hit this path.)
     mkdirSync(dir, { recursive: true });
+    try {
+      for (const name of readdirSync(dir)) {
+        try { rmSync(join(dir, name), { force: true }); } catch { /* ignore */ }
+      }
+    } catch { /* dir was already empty */ }
     const toolBinDir = join(this.toolchainDir, 'bin');
     const useWildcard = manifest.tools.includes('*');
     const entries = useWildcard
@@ -125,13 +154,14 @@ export class ContainerRunner implements SandboxRunner {
     const args = this.buildDockerArgs(instanceId, appId, port, manifest, hostname);
     console.log(`[ContainerRunner] Spawning ${hostname} (app=${appId}) on port ${port}`);
 
-    let containerId: string;
-    try {
-      containerId = execSync(`docker ${args.join(' ')}`, { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 })
-        .toString().trim();
-    } catch (err) {
-      throw new Error(`docker run failed for ${instanceId}: ${(err as Error).message}`);
+    // Use spawnSync (not execSync with a joined string) so multi-word args
+    // like `bash -c '<SYNTHESISED_ENTRYPOINT>'` don't get re-split by the
+    // shell — every entry in `args` ends up as a separate argv slot.
+    const r = spawnSync('docker', args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, encoding: 'utf-8' });
+    if (r.status !== 0) {
+      throw new Error(`docker run failed for ${instanceId} (status=${r.status}): ${r.stderr?.trim() || r.error?.message || 'no stderr'}`);
     }
+    const containerId = (r.stdout ?? '').trim();
     if (!containerId) throw new Error(`docker run for ${instanceId} returned no container id`);
 
     // Fan-out container stdout/stderr into the shell's log so `docker logs`
@@ -148,7 +178,7 @@ export class ContainerRunner implements SandboxRunner {
       pid = parseInt(out, 10) || 0;
     } catch { /* leave 0; reaper will ignore */ }
 
-    const tracked: TrackedContainer = { containerId, hostname, port, appId, logTail, pid, exitCb: null };
+    const tracked: TrackedContainer = { containerId, hostname, port, appId, logTail, pid, exitCb: null, expectingKill: false };
     this.containers.set(instanceId, tracked);
 
     // Watch for container exit so we can fire the exit callback.
@@ -177,13 +207,31 @@ export class ContainerRunner implements SandboxRunner {
     manifest: AppManifest,
     hostname: string,
   ): string[] {
-    const appDir       = `${this.workspaceRoot}/apps/${appId}`;
+    // myTools is only used to provision the per-instance symlinks before
+    // docker run — the bind itself goes through aura-app-data's volume-subpath.
+    void this.toolsDir(instanceId);
+    // AppManager runs in the aura-shell container which has the app-data
+    // named volume mounted at /data — so creating this.dataDir/.../<inst>
+    // ALSO creates the subpath inside the volume that docker --mount
+    // volume-subpath will pluck out for the sibling container.
     const instDataDir  = join(this.dataDir, 'apps', appId, instanceId);
-    const myTools      = this.toolsDir(instanceId);
-    const toolBinDir   = join(this.toolchainDir, 'bin');
     mkdirSync(instDataDir, { recursive: true });
 
     const entrypoint = this.resolveEntrypoint(appId, manifest);
+
+    // node_modules + per-instance data live in the AuraOS named volumes,
+    // not on the host bind (the AuraOS container's pnpm install populates
+    // the named volume; the host's `./node_modules` is whatever was there
+    // before compose). Sibling containers MUST mount those volumes by name
+    // to see the same pnpm symlink targets the host pnpm install
+    // generated.
+    const nodeModulesVolume = process.env['AURA_NODE_MODULES_VOLUME'] ?? 'aura_aura-node-modules';
+    const appDataVolume     = process.env['AURA_APP_DATA_VOLUME']     ?? 'aura_aura-app-data';
+    // Subpath inside the app-data named volume — matches the layout the
+    // AppManager creates via mkdirSync(instDataDir) below ("apps/<id>/<inst>",
+    // NOT "aura/apps/..."). The dataDir is the mount point, not part of
+    // the volume-internal path.
+    const dataSubpath       = `apps/${appId}/${instanceId}`;
 
     // SLICED bind set — only this app's apps/<id> dir is visible at
     // /workspace/apps, with shared workspace dirs (node_modules, packages,
@@ -193,34 +241,105 @@ export class ContainerRunner implements SandboxRunner {
     const a: string[] = [
       'run', '--rm', '-d',
       '--name', hostname,
-      '--hostname', hostname,
+      // Docker DNS uses --name for cross-container resolution (the proxy at
+      // /api/proxy/<id> resolves to the aura-<instanceId> name), so --name
+      // stays unique. --hostname is purely cosmetic — it surfaces as the
+      // kernel hostname inside the container and feeds bash's `\h`. Setting
+      // it to the appId gives a friendlier prompt like
+      // `root@com.aura.counter:/workspace/apps/com.aura.counter$`. AURA_HOSTNAME
+      // env (read by bashrc.aura.sh below) keeps the override discoverable
+      // even when something resets `hostname`.
+      '--hostname', appId,
       '--network', SHARED_NETWORK,
       '--workdir', `/workspace/apps/${appId}`,
-      // Per-app slice of /workspace. Each volume mount counts as its own
-      // mount point in the container, so sibling apps in apps/<other> are
-      // not reachable — there's no parent /workspace/apps bind, the
-      // individual app folder is bound directly under it.
+      // Per-app slice of /workspace from the host. Sibling apps in
+      // apps/<other> are not visible — there's no parent /workspace/apps
+      // bind, the individual app folder is bound directly under it.
       '-v', `${this.workspaceRoot}/apps/${appId}:/workspace/apps/${appId}`,
-      '-v', `${this.workspaceRoot}/node_modules:/workspace/node_modules:ro`,
       '-v', `${this.workspaceRoot}/packages:/workspace/packages:ro`,
       '-v', `${this.workspaceRoot}/package.json:/workspace/package.json:ro`,
       '-v', `${this.workspaceRoot}/pnpm-lock.yaml:/workspace/pnpm-lock.yaml:ro`,
       '-v', `${this.workspaceRoot}/pnpm-workspace.yaml:/workspace/pnpm-workspace.yaml:ro`,
-      // Per-instance state (no slicing — this is unique to each instance).
-      '-v', `${instDataDir}:/data`,
-      // Two-dir cap allowlist.
-      '-v', `${toolBinDir}:/aura/all-tools:ro`,
-      '-v', `${myTools}:/aura/my-tools`,
+      // node_modules from the AuraOS named volume (so peer-dep variants
+      // match what pnpm installed inside the shell). --mount syntax
+      // (not -v) is needed because we want a NAMED volume, not a bind.
+      '--mount', `type=volume,source=${nodeModulesVolume},target=/workspace/node_modules,readonly`,
+      // Per-instance state — subpath of the shared app-data volume so each
+      // instance only sees ITS slice, not other instances'.
+      '--mount', `type=volume,source=${appDataVolume},target=/data,volume-subpath=${dataSubpath}`,
+      // Two-dir cap allowlist. We can't bind host paths here: /os/toolchain
+      // and /data/... only exist inside the aura-shell mount namespace, but
+      // sibling-container binds go through the HOST docker daemon, which
+      // would create empty stubs on its rootfs. Instead, mount the
+      // aura-app-data named volume at two different subpaths:
+      //   • aura/toolchain/bin  ← seeded from /os/toolchain/bin by
+      //                            AppManager.healToolchainShims()
+      //   • aura/runtime/<inst>/tools ← per-instance allowlist symlinks
+      //                                  written by provisionToolsDir()
+      // Both are populated from inside aura-shell (where /data IS the
+      // named volume), so the sibling container sees the same content.
+      '--mount', `type=volume,source=${appDataVolume},target=/aura/all-tools,volume-subpath=aura/toolchain/bin,readonly`,
+      '--mount', `type=volume,source=${appDataVolume},target=/aura/my-tools,volume-subpath=aura/runtime/${instanceId}/tools`,
+      // AuraOS bash startup — bind the same script the PRoot base-rootfs gets.
+      // Mounted into /etc/bash.bashrc (loaded by every interactive bash before
+      // ~/.bashrc) so the PS1 + PATH customisation kicks in regardless of who
+      // owns HOME. /etc/profile.d copy covers login shells.
+      '-v', `${this.workspaceRoot}/os/bashrc.aura.sh:/etc/bash.bashrc:ro`,
+      '-v', `${this.workspaceRoot}/os/bashrc.aura.sh:/etc/profile.d/aura-prompt.sh:ro`,
+      // Shared user HOME across EVERY app container. The subpath is constant
+      // (`aura/home/user`), so when the user logs into `claude` from the
+      // terminal app, the same `~/.claude/` is visible after `aura jump`s
+      // into another app — i.e. "the next container knows you". This is the
+      // "one user, one home" model the user asked for; tighter per-app
+      // isolation would mean each container only sees its own slice, but
+      // here we explicitly prefer convenience over isolation (dev OS).
+      // The dir is pre-created by AppManager.healToolchainShims so docker
+      // can mount the subpath at container start.
+      '--mount', `type=volume,source=${appDataVolume},target=/home/aura,volume-subpath=aura/home/user`,
       // Identity + callback URL.
+    ];
+
+    // Bind host docker socket if the manifest asks for it (explicit 'docker'
+    // in tools[] or the wildcard '*'). Matches ProotRunner's gating — needed
+    // so commands like `aura jump` from inside a container app can drive
+    // sibling-container spawns via the host daemon.
+    const wantsDocker =
+      manifest.tools?.includes('*') ||
+      manifest.tools?.includes('docker');
+    if (wantsDocker && existsSync('/var/run/docker.sock')) {
+      a.push('-v', '/var/run/docker.sock:/var/run/docker.sock');
+    }
+
+    a.push(
       '-e', `APP_ID=${appId}`,
       '-e', `APP_INSTANCE_ID=${instanceId}`,
       '-e', `APP_PORT=${port}`,
       '-e', `OS_API_BASE=${this.osApiBase}`,
       '-e', `AURA_LAYER_TAG=[ctnr]`,
+      // Hostname override read by bashrc.aura.sh's PS1. We also set the
+      // kernel hostname via --hostname above, but a process can sethostname()
+      // away from that; the env stays put across `docker exec` invocations
+      // too, so `aura jump` shells reliably show the right name.
+      '-e', `AURA_HOSTNAME=${appId}`,
+      // Point HOME at the shared persistent volume so tools like claude/gh/
+      // ssh persist their state across container respawns AND across
+      // `aura jump` hops between apps (one shared home, one logged-in user).
+      '-e', `HOME=/home/aura`,
+      // Terminal-capability env so TUI apps (claude, htop, vim, …) render
+      // their rich versions. Without these, docker's default TERM=xterm
+      // makes claude downgrade to a one-line greeting instead of the boxed
+      // welcome card. `aura jump`'s docker exec adds them too as a belt-
+      // and-suspenders; setting them here covers anything that bypasses
+      // jump (e.g. the terminal app's pty-server spawning bash directly).
+      '-e', `TERM=xterm-256color`,
+      '-e', `COLORTERM=truecolor`,
+      '-e', `LANG=C.UTF-8`,
+      '-e', `LC_ALL=C.UTF-8`,
       '-e', `PATH=/aura/my-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
       BASE_IMAGE,
-    ];
+    );
     a.push(...entrypoint);
+    void manifest; // unused — kept for future per-manifest customisation
     return a;
   }
 
@@ -237,6 +356,112 @@ export class ContainerRunner implements SandboxRunner {
     return 'aura-' + instanceId.replace(/[^a-zA-Z0-9_.-]/g, '_');
   }
 
+  /**
+   * Find every running `aura-*` container that survived the shell's last
+   * lifetime. AppManager.init() calls this so a docker-compose-restart of
+   * aura-shell doesn't strand the user's container-mode apps as orphans
+   * (no `getInstancesByApp` hit → no /aura/my-tools refresh on cap grant,
+   * no autoStart/warmPool reconcile, no live state events in the desktop).
+   * Each returned record is enough for AppManager to re-construct an
+   * `AppInstance` in `state: 'resumed'` without a fresh spawn.
+   *
+   * The container's own environment is the source of truth: APP_ID +
+   * APP_INSTANCE_ID + APP_PORT were set by buildDockerArgs at spawn time,
+   * so reading them back is reliable even if the AppManager's instanceId
+   * sanitisation ever changes.
+   */
+  public async listOrphanRecords(): Promise<Array<{
+    instanceId: string;
+    appId:      string;
+    port:       number;
+    hostname:   string;
+    pid:        number;
+  }>> {
+    type DockerPsRow = { Names: string };
+    type DockerInspect = { Config: { Env: string[] }; State: { Pid: number } };
+    let psOut: string;
+    try {
+      psOut = execSync(`docker ps --filter "name=aura-" --format "{{json .}}"`, {
+        encoding: 'utf-8',
+        timeout: 5_000,
+      });
+    } catch (err) {
+      console.warn(`[ContainerRunner] adoption scan: docker ps failed: ${(err as Error).message}`);
+      return [];
+    }
+    const lines = psOut.split('\n').map((l) => l.trim()).filter(Boolean);
+    const out: Array<{ instanceId: string; appId: string; port: number; hostname: string; pid: number }> = [];
+    for (const line of lines) {
+      let row: DockerPsRow;
+      try { row = JSON.parse(line) as DockerPsRow; }
+      catch { continue; }
+      if (!row.Names?.startsWith('aura-')) continue;
+      // Skip aura-shell itself — it's not an app instance, just the
+      // controller container that owns this runner.
+      if (row.Names === 'aura-shell') continue;
+      let inspect: DockerInspect;
+      try {
+        const raw = execSync(`docker inspect ${row.Names} --format "{{json .}}"`, {
+          encoding: 'utf-8',
+          timeout: 3_000,
+        });
+        inspect = JSON.parse(raw) as DockerInspect;
+      } catch (err) {
+        console.warn(`[ContainerRunner] inspect ${row.Names} failed: ${(err as Error).message}`);
+        continue;
+      }
+      const env: Record<string, string> = {};
+      for (const kv of inspect.Config?.Env ?? []) {
+        const i = kv.indexOf('=');
+        if (i > 0) env[kv.slice(0, i)] = kv.slice(i + 1);
+      }
+      const appId      = env['APP_ID'];
+      const instanceId = env['APP_INSTANCE_ID'];
+      const portStr    = env['APP_PORT'];
+      if (!appId || !instanceId || !portStr) continue;
+      const port = parseInt(portStr, 10);
+      if (!Number.isFinite(port) || port <= 0) continue;
+      out.push({
+        instanceId,
+        appId,
+        port,
+        hostname: row.Names,
+        pid: inspect.State?.Pid ?? 0,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * After AppManager re-constructs an AppInstance from a `listOrphanRecords`
+   * entry, this hooks the runner's bookkeeping (kill tracking, log streaming,
+   * exit callback) up to the surviving container — same fields a fresh
+   * `spawn()` would have set, just sourced from `docker inspect` rather than
+   * a new `docker run`.
+   */
+  public registerAdopted(rec: {
+    instanceId: string;
+    appId:      string;
+    port:       number;
+    hostname:   string;
+    pid:        number;
+  }): void {
+    if (this.containers.has(rec.instanceId)) return;
+    // We don't have the container ID handy — docker inspect would have it,
+    // but the bookkeeping methods that need it (kill/forceKill) accept the
+    // name as a fallback. Set containerId = name; docker accepts either.
+    this.containers.set(rec.instanceId, {
+      containerId:   rec.hostname,
+      hostname:      rec.hostname,
+      port:          rec.port,
+      appId:         rec.appId,
+      logTail:       null,
+      pid:           rec.pid,
+      exitCb:        null,
+      expectingKill: false,
+    });
+  }
+
   /** Probe the app's health endpoint until ready or timeout. */
   private async waitHealthy(instanceId: string, appId: string, hostname: string, port: number): Promise<void> {
     const deadline = Date.now() + HEALTH_CHECK_TIMEOUT_MS;
@@ -244,13 +469,15 @@ export class ContainerRunner implements SandboxRunner {
     while (Date.now() < deadline) {
       try {
         const res = await fetch(`http://${hostname}:${port}/api/lifecycle/health`);
+        // Capture body regardless of status so the timeout error message
+        // surfaces what the app actually said (403 = host gate, etc.).
+        const body = await res.text();
+        lastBody = body;
         if (res.ok) {
           // Identity check parallels ProotRunner — guard against the
           // "wrong app squatting our port" hazard. With container-per-app
           // this is extremely unlikely (one container, one app), but
           // keeping the check costs nothing and catches misconfig.
-          const body = await res.text();
-          lastBody = body;
           try {
             const j = JSON.parse(body);
             if (j.appId && j.appId !== appId) {
@@ -306,12 +533,14 @@ export class ContainerRunner implements SandboxRunner {
   async kill(instanceId: string): Promise<void> {
     const tracked = this.containers.get(instanceId);
     if (!tracked) return;
+    tracked.expectingKill = true;
     try { execSync(`docker stop -t 5 ${tracked.containerId}`, { stdio: 'ignore', timeout: 8_000 }); } catch { /* may already be dead */ }
     this.handleExit(instanceId, 0);
   }
   forceKill(instanceId: string): boolean {
     const tracked = this.containers.get(instanceId);
     if (!tracked) return false;
+    tracked.expectingKill = true;
     try { execSync(`docker kill ${tracked.containerId}`, { stdio: 'ignore', timeout: 5_000 }); } catch { /* already gone */ }
     this.handleExit(instanceId, null);
     return true;
@@ -321,8 +550,13 @@ export class ContainerRunner implements SandboxRunner {
     if (!tracked) return;
     if (tracked.logTail && !tracked.logTail.killed) { try { tracked.logTail.kill(); } catch { /* ignore */ } }
     const cb = tracked.exitCb;
+    const wasExpected = tracked.expectingKill;
     this.containers.delete(instanceId);
-    if (cb) cb(code);
+    // Only notify on UNEXPECTED exits. AppManager.stop() is mid-cleanup
+    // and doesn't want a stray "crashed" event flipping the instance to
+    // 'error' state — that breaks the subsequent FSM transition to
+    // 'destroyed' and returns 500 from /api/instances/X/stop.
+    if (cb && !wasExpected) cb(code);
   }
 
   // ─── Queries ──────────────────────────────────────────────────────────
@@ -336,7 +570,13 @@ export class ContainerRunner implements SandboxRunner {
     return this.containers.has(instanceId);
   }
   getActivePids(): number[] {
-    return Array.from(this.containers.values()).map((t) => t.pid).filter((p) => p > 0);
+    // Container instances have HOST pids — invisible from inside the shell's
+    // PID namespace. Returning them would just confuse the reconciler's
+    // orphan reaper (which scans the SHELL's process tree to find unknown
+    // PRoot squatters). Pretend container processes don't exist as far as
+    // pid-based tracking is concerned; we manage their lifecycle via
+    // `docker wait` / `docker kill` instead.
+    return [];
   }
   onExit(instanceId: string, cb: (code: number | null) => void): void {
     const tracked = this.containers.get(instanceId);

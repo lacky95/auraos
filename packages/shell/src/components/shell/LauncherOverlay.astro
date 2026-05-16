@@ -9,7 +9,13 @@
 import type { AppManifest } from '@aura/core';
 import { getAppManager } from '@aura/core';
 
-const apps: AppManifest[] = getAppManager().getManifests();
+// SSR EVERY installed app (incl. disabled) so live enable/disable toggles
+// can flip visibility without a server round-trip — the script block at the
+// bottom listens for `app:enabledChanged` on the OS event bus and just
+// flips data-enabled on the matching tile. CSS hides `[data-enabled=false]`.
+const mgr = getAppManager();
+const apps: AppManifest[] = mgr.getManifests();
+const enabledMap: Record<string, boolean> = mgr.getEnabledState();
 ---
 <aside id="lo-panel" class="lo-panel" aria-hidden="true">
   <header class="lo-header">
@@ -20,14 +26,32 @@ const apps: AppManifest[] = getAppManager().getManifests();
   <div id="lo-grid" class="lo-grid">
     {apps.map(app => {
       const glyph = (app.icon ?? app.name.charAt(0)).toUpperCase();
+      const enabled = enabledMap[app.id] !== false;
       return (
-        <button class="lo-app" data-app-id={app.id} title={app.name}>
+        <button class="lo-app" data-app-id={app.id} data-enabled={String(enabled)} title={app.name}>
           <span class="lo-app-initial" data-len={glyph.length}>{glyph}</span>
           <span class="lo-app-name">{app.name}</span>
           <span class="lo-app-id">{app.id}</span>
         </button>
       );
     })}
+  </div>
+
+  <!--
+    Right-click context menu. Positioned with inline top/left on each open
+    and hidden by default. The submenu (workspace picker) is populated from
+    the live workspaceClient cache the moment the user hovers/clicks the
+    parent item, so it always reflects current workspace names.
+  -->
+  <div id="lo-ctx" class="lo-ctx" role="menu" hidden>
+    <button class="lo-ctx-item" data-action="open" role="menuitem">Open</button>
+    <div class="lo-ctx-submenu-wrap">
+      <button class="lo-ctx-item lo-ctx-has-sub" data-action="open-in-ws" role="menuitem" aria-haspopup="true" aria-expanded="false">
+        <span>Open in workspace</span>
+        <span class="lo-ctx-chev">▸</span>
+      </button>
+      <div id="lo-ctx-submenu" class="lo-ctx-submenu" role="menu" hidden></div>
+    </div>
   </div>
 </aside>
 
@@ -120,6 +144,10 @@ const apps: AppManifest[] = getAppManager().getManifests();
   }
   .lo-app:hover { box-shadow: var(--aura-glow-primary); color: var(--aura-color-primary); }
   .lo-app[hidden] { display: none; }
+  /* Disabled apps stay out of the launcher entirely (matches Android's
+     "hide on disable" semantics the user picked). Flipped live via the
+     `app:enabledChanged` SSE handler at the bottom of this file. */
+  .lo-app[data-enabled="false"] { display: none; }
 
   .lo-app-initial {
     /* Uniform size across 1/2/3-char glyphs; sized to fit "SET" in the overlay tile. */
@@ -147,9 +175,113 @@ const apps: AppManifest[] = getAppManager().getManifests();
     text-overflow: ellipsis;
     max-width: 100%;
   }
+
+  /* ── Right-click context menu ──
+   * Positioned with inline top/left set by the contextmenu handler. The
+   * submenu opens to the right of its parent row (or to the left when
+   * there's not enough room — handled in JS). Submenu items are workspace
+   * targets, populated live from workspaceClient.getCached(). */
+  .lo-ctx {
+    position: absolute;
+    z-index: 1200;
+    min-width: 180px;
+    background: var(--aura-color-surface);
+    border: var(--aura-border);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    font-family: var(--aura-font-mono);
+    font-size: var(--aura-font-size-xs);
+  }
+  .lo-ctx[hidden] { display: none; }
+  .lo-ctx-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 6px 10px;
+    background: transparent;
+    border: none;
+    color: var(--aura-color-text);
+    cursor: pointer;
+    text-align: left;
+    font-family: inherit;
+    font-size: inherit;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .lo-ctx-item:hover {
+    background: color-mix(in srgb, var(--aura-color-primary) 14%, transparent);
+    color: var(--aura-color-primary);
+  }
+  .lo-ctx-chev {
+    color: var(--aura-color-text-dim);
+    font-size: 0.7rem;
+  }
+  .lo-ctx-submenu-wrap { position: relative; }
+  .lo-ctx-submenu {
+    position: absolute;
+    top: 0;
+    left: 100%;
+    margin-left: 2px;
+    min-width: 200px;
+    background: var(--aura-color-surface);
+    border: var(--aura-border);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    z-index: 1201;
+    max-height: 320px;
+    overflow-y: auto;
+  }
+  .lo-ctx-submenu[data-flip="left"] {
+    left: auto;
+    right: 100%;
+    margin-left: 0;
+    margin-right: 2px;
+  }
+  .lo-ctx-submenu[hidden] { display: none; }
+  .lo-ctx-ws {
+    display: grid;
+    grid-template-columns: 24px 1fr auto;
+    align-items: center;
+    gap: 10px;
+    padding: 5px 10px;
+    background: transparent;
+    border: none;
+    color: var(--aura-color-text);
+    cursor: pointer;
+    text-align: left;
+    font-family: inherit;
+    font-size: inherit;
+    letter-spacing: 0.06em;
+  }
+  .lo-ctx-ws:hover {
+    background: color-mix(in srgb, var(--aura-color-primary) 14%, transparent);
+    color: var(--aura-color-primary);
+  }
+  .lo-ctx-ws-slot {
+    color: var(--aura-color-primary);
+    font-weight: 700;
+  }
+  .lo-ctx-ws[data-active="true"] .lo-ctx-active-mark {
+    color: var(--aura-color-primary);
+  }
+  .lo-ctx-active-mark { color: transparent; font-size: 0.7rem; }
+  .lo-ctx-ws-name {
+    text-transform: uppercase;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 </style>
 
 <script>
+  import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
+  const keyDispatcher = getKeyDispatcher();
+
   const panel  = document.getElementById('lo-panel') as HTMLElement;
   const close  = document.getElementById('lo-close')  as HTMLButtonElement;
   const search = document.getElementById('lo-search') as HTMLInputElement;
@@ -173,10 +305,151 @@ const apps: AppManifest[] = getAppManager().getManifests();
 
   close.addEventListener('click', closePanel);
 
+  // Dispatcher: Ctrl+Alt+Space (default) opens/closes the launcher anywhere.
+  keyDispatcher.bind('aura.launcher.toggle', () => {
+    if (panel.getAttribute('aria-hidden') === 'false') closePanel();
+    else openPanel();
+  });
+
+  // Esc-to-close is a panel-local concern, not an OS action — kept as a
+  // plain DOM listener so it only consumes the keystroke while the
+  // launcher is open. Doesn't fight with `aura.nav.back`.
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && panel.getAttribute('aria-hidden') === 'false') {
+      e.preventDefault();
+      // Esc closes the context menu first if it's open; otherwise the panel.
+      if (!ctxMenu.hidden) { closeCtxMenu(); return; }
       closePanel();
     }
+  });
+
+  // ─── Right-click context menu ──────────────────────────────────────────
+  // Two entries:
+  //   • Open                — same as a plain click
+  //   • Open in workspace ▸ — submenu listing every workspace; clicking one
+  //                           switches to that workspace AND launches there.
+  //
+  // The submenu is rebuilt on every open from workspaceClient.getCached() so
+  // it always reflects the user's current workspace list (incl. renames).
+  const ctxMenu    = document.getElementById('lo-ctx')          as HTMLElement;
+  const ctxSubmenu = document.getElementById('lo-ctx-submenu')  as HTMLElement;
+  const ctxOpenInWs = ctxMenu.querySelector<HTMLButtonElement>('[data-action="open-in-ws"]')!;
+  let ctxAppId: string | null = null;
+
+  function openCtxMenu(appId: string, x: number, y: number) {
+    ctxAppId = appId;
+    ctxMenu.hidden = false;
+    ctxMenu.style.left = `${x}px`;
+    ctxMenu.style.top  = `${y}px`;
+    // Position adjust if it would overflow the panel's right/bottom edge.
+    requestAnimationFrame(() => {
+      const r = ctxMenu.getBoundingClientRect();
+      const p = panel.getBoundingClientRect();
+      if (r.right > p.right - 4)  ctxMenu.style.left = `${x - (r.right - (p.right - 4))}px`;
+      if (r.bottom > p.bottom - 4) ctxMenu.style.top = `${y - (r.bottom - (p.bottom - 4))}px`;
+    });
+    // Reset submenu visibility — open closed by default; user clicks/hovers
+    // the parent row to expand.
+    ctxSubmenu.hidden = true;
+    ctxOpenInWs.setAttribute('aria-expanded', 'false');
+  }
+  function closeCtxMenu() {
+    ctxMenu.hidden = true;
+    ctxSubmenu.hidden = true;
+    ctxOpenInWs.setAttribute('aria-expanded', 'false');
+    ctxAppId = null;
+  }
+
+  // Build the workspace submenu on demand. Each row shows the slot number,
+  // the workspace name, and a "●" marker on the currently active one.
+  async function showWorkspaceSubmenu() {
+    const wsClient = await import('../../lib/workspaceClient.ts');
+    const state = wsClient.getCached() ?? (await wsClient.refresh().catch(() => null));
+    if (!state) return;
+    const rows = state.workspaces.map((w, i) => {
+      const active = w.id === state.activeWorkspaceId;
+      return `<button type="button" class="lo-ctx-ws" role="menuitem"
+                      data-ws-id="${w.id}" data-active="${active}"
+                      title="Launch in ${escapeAttr(w.name)}">
+        <span class="lo-ctx-ws-slot">${i + 1}</span>
+        <span class="lo-ctx-ws-name">${escapeHtml(w.name)}</span>
+        <span class="lo-ctx-active-mark" aria-hidden="true">●</span>
+      </button>`;
+    }).join('');
+    ctxSubmenu.innerHTML = rows;
+    ctxSubmenu.hidden = false;
+    ctxOpenInWs.setAttribute('aria-expanded', 'true');
+
+    // Edge flip: if the submenu would overflow the panel's right edge, flip
+    // it to the parent's left side instead.
+    requestAnimationFrame(() => {
+      const r = ctxSubmenu.getBoundingClientRect();
+      const p = panel.getBoundingClientRect();
+      ctxSubmenu.dataset['flip'] = r.right > p.right - 4 ? 'left' : '';
+    });
+  }
+  function escapeHtml(s: string): string {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function escapeAttr(s: string): string {
+    return escapeHtml(s).replace(/"/g, '&quot;');
+  }
+
+  // Right-click on a tile → open menu. Use clientX/Y relative to the panel
+  // (the panel is fixed-positioned, and the context menu is absolutely-
+  // positioned inside it, so panel-local coords land in the right spot).
+  grid.addEventListener('contextmenu', (e) => {
+    const tile = (e.target as HTMLElement).closest<HTMLElement>('.lo-app');
+    if (!tile) return;
+    e.preventDefault();
+    const appId = tile.dataset['appId'];
+    if (!appId) return;
+    const p = panel.getBoundingClientRect();
+    openCtxMenu(appId, e.clientX - p.left, e.clientY - p.top);
+  });
+
+  // "Open" entry: same path as a left click on the tile.
+  // "Open in workspace ▸" entry: build + reveal the submenu.
+  ctxMenu.addEventListener('click', (e) => {
+    const item = (e.target as HTMLElement).closest<HTMLElement>('[data-action]');
+    if (!item) return;
+    const action = item.dataset['action'];
+    if (action === 'open') {
+      const id = ctxAppId;
+      closeCtxMenu();
+      if (id) (window as any).auraLaunchApp?.(id);
+      closePanel();
+      return;
+    }
+    if (action === 'open-in-ws') {
+      void showWorkspaceSubmenu();
+      return;
+    }
+  });
+
+  // Workspace-target click inside the submenu.
+  ctxSubmenu.addEventListener('click', (e) => {
+    const row = (e.target as HTMLElement).closest<HTMLElement>('.lo-ctx-ws');
+    const wsId = row?.dataset['wsId'];
+    if (!wsId || !ctxAppId) return;
+    const appId = ctxAppId;
+    closeCtxMenu();
+    (window as any).auraLaunchApp?.(appId, { workspaceId: wsId });
+    closePanel();
+  });
+
+  // Click anywhere outside the menu (including a different tile) dismisses.
+  panel.addEventListener('click', (e) => {
+    if (ctxMenu.hidden) return;
+    if (ctxMenu.contains(e.target as Node)) return;
+    closeCtxMenu();
+  });
+  // Suppress the browser's native context menu on rest of the panel so
+  // right-clicking outside a tile doesn't show the OS menu inside our chrome.
+  panel.addEventListener('contextmenu', (e) => {
+    if ((e.target as HTMLElement).closest('.lo-app')) return; // tile handler runs
+    e.preventDefault();
+    closeCtxMenu();
   });
 
   search.addEventListener('input', () => {
@@ -208,10 +481,62 @@ const apps: AppManifest[] = getAppManager().getManifests();
   // Enter on the search input launches the first visible app
   search.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
-    const first = grid.querySelector<HTMLElement>('.lo-app:not([hidden])');
+    // Skip disabled tiles — they're display:none via CSS but querySelector
+    // still finds them; filter explicitly so Enter never tries to launch one.
+    const first = grid.querySelector<HTMLElement>('.lo-app:not([hidden]):not([data-enabled="false"])');
     const appId = first?.dataset['appId'];
     if (!appId) return;
     const launch = (window as any).auraLaunchApp;
     if (typeof launch === 'function') { launch(appId); closePanel(); }
   });
+
+  // ─── Live enable/disable + install/remove updates ─────────────────────────
+  // Two cases the launcher reacts to:
+  //   • app:enabledChanged — flip data-enabled on the tile in place (CSS does
+  //     the rest). No re-fetch needed since the tile already exists in SSR
+  //     (we ship every installed app, not just enabled ones).
+  //   • app:installed / app:removed — re-fetch /api/apps and rebuild the
+  //     grid. Cheap (~5 KB), simpler than reasoning about insertion order.
+  // Transport is socket.io via osEvents (same channel the desktop already
+  // uses for app:* / activity:* / workspaces:* updates).
+  import('../../lib/osEvents.ts').then(({ osEvents }) => {
+    osEvents.subscribe(['app:enabledChanged', 'app:installed', 'app:removed'], (ev: any) => {
+      if (ev.type === 'app:enabledChanged' && typeof ev.appId === 'string' && typeof ev.enabled === 'boolean') {
+        const tile = grid.querySelector<HTMLElement>(`.lo-app[data-app-id="${CSS.escape(ev.appId)}"]`);
+        if (tile) tile.dataset['enabled'] = String(ev.enabled);
+        return;
+      }
+      if (ev.type === 'app:installed' || ev.type === 'app:removed') {
+        void rebuildGrid();
+      }
+    });
+  });
+
+  /**
+   * Reload the launcher tiles from /api/apps. Only used on install/remove
+   * (the much rarer event) — enable/disable just flips an attribute above.
+   */
+  async function rebuildGrid(): Promise<void> {
+    try {
+      const r = await fetch('/api/apps');
+      if (!r.ok) return;
+      const apps = await r.json() as Array<{ manifest: { id: string; name: string; icon?: string }; enabled: boolean }>;
+      // Sort by name to match the SSR ordering (alphabetical via Object key
+      // iteration order; getManifests doesn't guarantee, but that's close).
+      apps.sort((a, b) => a.manifest.name.localeCompare(b.manifest.name));
+      grid.innerHTML = apps.map((a) => {
+        const m = a.manifest;
+        const glyph = (m.icon ?? m.name.charAt(0)).toUpperCase();
+        const safeId   = m.id.replace(/[<>&"']/g, '');
+        const safeName = m.name.replace(/[<>&]/g, '');
+        return `<button class="lo-app" data-app-id="${safeId}" data-enabled="${a.enabled}" title="${safeName}">
+          <span class="lo-app-initial" data-len="${glyph.length}">${glyph}</span>
+          <span class="lo-app-name">${safeName}</span>
+          <span class="lo-app-id">${safeId}</span>
+        </button>`;
+      }).join('');
+    } catch {
+      /* network blip — leave the current grid alone, the next SSE event triggers a retry */
+    }
+  }
 </script>

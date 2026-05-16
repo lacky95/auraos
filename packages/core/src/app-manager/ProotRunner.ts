@@ -22,12 +22,21 @@ const LIFECYCLE_TIMEOUT_MS = 5_000;
  */
 const SYNTHESISED_ENTRYPOINT = `set -e
 export PORT="\${APP_PORT:-4001}"
-if [ ! -d node_modules ]; then
+# Skip install when /workspace/node_modules exists: the workspace-level
+# pnpm install already populated every dep there, and Node's resolution walks
+# UP from /workspace/apps/<id> to /workspace/node_modules just fine. Running
+# npm install here would die on the scaffolded package.json's
+# 'workspace:*' protocol with EUNSUPPORTEDPROTOCOL.
+if [ ! -d node_modules ] && [ ! -d /workspace/node_modules ]; then
   echo "[\${APP_ID:-app}] Installing dependencies..."
   npm install --prefer-offline 2>&1 || npm install
 fi
-echo "[\${APP_ID:-app}] Starting Astro server on port \$PORT"
-exec node_modules/.bin/astro dev --host 0.0.0.0 --port "\$PORT"`;
+# astro lives in /workspace/node_modules/.bin (workspace install). Prefer the
+# local copy when present (a power user may have isolated the app's deps).
+ASTRO="node_modules/.bin/astro"
+[ -x "\$ASTRO" ] || ASTRO="/workspace/node_modules/.bin/astro"
+echo "[\${APP_ID:-app}] Starting Astro server on port \$PORT via \$ASTRO"
+exec "\$ASTRO" dev --host 0.0.0.0 --port "\$PORT"`;
 
 interface SpawnedApp {
   process: ChildProcess;
@@ -238,6 +247,18 @@ export class ProotRunner implements SandboxRunner {
       mkdirSync(myTools, { recursive: true });
       args.push(`--bind=${toolBinDir}:/aura/all-tools`);
       args.push(`--bind=${myTools}:/aura/my-tools`);
+    }
+
+    // Bind the host docker socket if the manifest asks for it (explicit
+    // 'docker' in tools[] or the wildcard '*' allowlist). Required so that
+    // `docker` invocations from inside the proot — e.g. `aura jump` from
+    // the terminal app dropping into a sibling-container app via
+    // `docker exec` — reach the same daemon the shell uses.
+    const wantsDocker =
+      manifest.tools?.includes('*') ||
+      manifest.tools?.includes('docker');
+    if (wantsDocker && existsSync('/var/run/docker.sock')) {
+      args.push('--bind=/var/run/docker.sock:/var/run/docker.sock');
     }
 
     args.push(...entrypointArgv);

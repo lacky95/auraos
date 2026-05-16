@@ -1,4 +1,20 @@
 export { OsClient } from './OsClient.js';
+// Keyboard / Back / system-action namespaces mounted on `osClient.{keymap,nav,system}`.
+// Apps that just want to subscribe to a shortcut import only the types.
+export { KeymapApi }   from './keymap.js';
+export { NavApi }      from './nav.js';
+export { SystemApi }   from './system.js';
+export { ActivityApi } from './activity.js';
+export type {
+  KeymapHandler,
+  KeymapHandlerCtx,
+  KeymapChangeInfo,
+} from './keymap.js';
+export type {
+  BackEvent,
+  BackHandler,
+} from './nav.js';
+export type { NavigateOptions } from './activity.js';
 
 // Lifecycle hook factories — apps use these in place of hand-rolled APIRoutes
 // for /api/lifecycle/* files. See ./lifecycle.ts for the full API.

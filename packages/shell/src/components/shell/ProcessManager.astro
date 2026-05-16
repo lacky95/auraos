@@ -687,6 +687,10 @@
 </style>
 
 <script>
+  import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
+  import { osEvents } from '../../lib/osEvents.ts';
+  const keyDispatcher = getKeyDispatcher();
+
   interface InstanceListItem {
     instanceId: string;
     appId: string;
@@ -721,9 +725,13 @@
   const refresh     = document.getElementById('pm-refresh') as HTMLButtonElement;
   const viewBtns    = document.querySelectorAll<HTMLButtonElement>('.pm-view-btn');
   const filterBtns  = document.querySelectorAll<HTMLButtonElement>('.pm-filter-btn');
+  // Lazy-getters: the panel HTML may not have been parsed yet at module
+  // init time (Vite SSR + island hydration ordering), and a cached null
+  // would persist forever. Re-query each refresh so a late-mounted node
+  // is still found.
   const filterCount = {
-    apps:     document.getElementById('pm-filter-count-apps')!,
-    services: document.getElementById('pm-filter-count-services')!,
+    get apps()     { return document.getElementById('pm-filter-count-apps'); },
+    get services() { return document.getElementById('pm-filter-count-services'); },
   };
 
   let manifests = new Map<string, ManifestLite>();
@@ -799,8 +807,22 @@
   closeBtn.addEventListener('click', closePanel);
   refresh.addEventListener('click', refreshList);
 
+  // Toggle via dispatcher (default combo: Ctrl+Alt+M, remappable in Settings).
+  keyDispatcher.bind('aura.processmanager.toggle', () => {
+    if (panel.getAttribute('aria-hidden') === 'false') closePanel();
+    else openPanel();
+  });
+
+  // Panel-local Esc-to-close stays as a plain DOM listener — it's a
+  // contextual behavior of the open panel, not an OS action. Only consumes
+  // the keystroke while the panel is visible, so it doesn't compete with
+  // the dispatcher's `aura.nav.back` (which keeps Android-style semantics
+  // for the focused app/nav).
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && panel.getAttribute('aria-hidden') === 'false') closePanel();
+    if (e.key === 'Escape' && panel.getAttribute('aria-hidden') === 'false') {
+      e.preventDefault();
+      closePanel();
+    }
   });
 
   async function refreshList() {
@@ -867,8 +889,13 @@
 
     // Pill counts: always reflect totals on disk, not what's currently
     // rendered, so the user sees `SVC 2` even when SVC is toggled off.
-    filterCount.apps.textContent     = String(appInstances.length);
-    filterCount.services.textContent = String(serviceInstances.length);
+    // Defensive null-check: the script runs once at module init and caches
+    // these elements, but in some startup orderings (or after a Vite HMR
+    // re-import where the panel hasn't re-rendered yet) the cached nodes
+    // can be null. Without the guard, `refresh()` throws and the whole
+    // ProcessManager is wedged.
+    if (filterCount.apps)     filterCount.apps.textContent     = String(appInstances.length);
+    if (filterCount.services) filterCount.services.textContent = String(serviceInstances.length);
 
     // Footer + toggle-button dot use the *visible* set so a hidden section's
     // running services don't make the badge pulse.
@@ -1105,15 +1132,15 @@
   // rapid state-transition events that fire during a single app start
   // (creating → created → starting → started → resuming → resumed) into one
   // /api/apps refetch.
-  // Topic-filtered SSE — the server drops everything outside app:*/activity:*
-  // before the wire write, so the client doesn't have to branch on event type.
-  const sse = new EventSource('/api/apps/events?topics=app:*,activity:*');
+  // Listen on the shared socket.io channel — the server drops everything
+  // outside app:*/activity:* before the frame is written, so we don't have
+  // to branch on event type.
   let refreshDebounce: ReturnType<typeof setTimeout> | null = null;
   function scheduleRefresh() {
     if (refreshDebounce) return;
     refreshDebounce = setTimeout(() => { refreshDebounce = null; refreshList(); }, 80);
   }
-  sse.onmessage = () => scheduleRefresh();
+  osEvents.subscribe(['app:*', 'activity:*'], () => scheduleRefresh());
 
   // Initial load to populate the badge dot on the toggle button
   refreshList();

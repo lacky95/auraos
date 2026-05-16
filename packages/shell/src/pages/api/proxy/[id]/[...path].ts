@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
-import { getAppManager, ThemeManager } from '@aura/core';
-import type { ColorMode } from '@aura/core';
+import { getAppManager, ThemeManager, keymapRegistry } from '@aura/core';
+import type { ColorMode, KeyAction, OsKeymapState } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
 
 /**
@@ -47,6 +47,41 @@ export const ALL: APIRoute = async ({ params, request }) => {
 
   if (!instance?.port) {
     return notReadyResponse(id, path, 503);
+  }
+
+  // Architectural guard: services are headless by contract. The OS exposes
+  // their API surface (lifecycle, content providers, custom /api endpoints)
+  // through the proxy, but NOT their HTML root or any static asset. Even if
+  // a caller hand-crafts `/api/proxy/<service-id>/` into an <iframe src>, the
+  // OS refuses — the only legitimate way for a service to surface UI is to
+  // dispatch an intent (`AppManager.startIntent`) that resolves to a
+  // separate `componentType: 'activity'` app. Mirrors the SSR-time guard in
+  // packages/shell/src/pages/index.astro that already filters services out
+  // of initialViews + workspace.members.
+  const manifest = mgr.getManifest(instance.appId);
+  if (manifest?.componentType === 'service' && !path.startsWith('api/') && !path.startsWith('_aura_')) {
+    const payload = {
+      error: 'service-has-no-ui',
+      message: `${instance.appId} is a service (componentType='service'). Services are headless and cannot be rendered. Use an intent (or a separate activity-component app) to show UI.`,
+      appId:      instance.appId,
+      instanceId: instance.instanceId,
+      blockedPath: '/' + path,
+    };
+    // Browsers (iframes navigating to a service URL by mistake) get a themed
+    // HTML page so the warning is rendered in the OS palette instead of as
+    // raw JSON text. API clients (curl, fetch, content-provider probes)
+    // keep getting structured JSON for programmatic handling.
+    const acceptsHtml = (request.headers.get('accept') ?? '').includes('text/html');
+    if (acceptsHtml) {
+      return new Response(renderServiceBlockedHtml(payload), {
+        status: 403,
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      });
+    }
+    return new Response(JSON.stringify(payload, null, 2), {
+      status: 403,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   // Short-circuit Vite's HMR client: the iframe can't reach the upstream's WS
@@ -231,11 +266,53 @@ export default {};
         `<meta name="aura-color-mode" content="${escAttr(colorMode)}">`,
         `<meta name="aura-resolved-mode" content="${escAttr(resolvedMode)}">`,
       ];
+      // Activity id is the OS-level handle the SDK uses to call
+      // /api/activities/<id>/navigate and /back. The proxy already sets
+      // X-Aura-Activity-Id on the upstream request, but the browser SDK
+      // needs a synchronous way to read it — meta tag is the established
+      // pattern here (same as app-id / instance-id above).
+      if (activityId) {
+        metaParts.push(`<meta name="aura-activity-id" content="${escAttr(activityId)}">`);
+        // History + breadcrumb snapshot — the SDK reads these synchronously
+        // so apps that opted out of the OS chrome (`breadcrumb: 'off'`) can
+        // render their own trail without a round-trip on mount.
+        try {
+          const activity = mgr.getActivity(activityId) as {
+            history?: Array<{ path: string; title?: string }>;
+            breadcrumb?: 'os' | 'off';
+          } | undefined;
+          const history = activity?.history ?? [];
+          const breadcrumb = activity?.breadcrumb ?? 'os';
+          metaParts.push(`<meta name="aura-activity-history" content="${escAttr(JSON.stringify(history))}">`);
+          metaParts.push(`<meta name="aura-activity-breadcrumb" content="${escAttr(breadcrumb)}">`);
+        } catch { /* AppManager may be mid-restart; iframe will refetch next load */ }
+      }
       // themed + inherit both see the theme ids; override sees only mode.
       if (themeStrategy !== 'override') {
         metaParts.push(`<meta name="aura-theme-id" content="${escAttr(activeTheme.id)}">`);
         metaParts.push(`<meta name="aura-theme-id-dark" content="${escAttr(themeIdDark)}">`);
         metaParts.push(`<meta name="aura-theme-id-light" content="${escAttr(themeIdLight)}">`);
+      }
+
+      // Keymap snapshot for `osClient.keymap.getBinding()`. Two meta tags:
+      //   • aura-keymap-actions  — JSON array of every action this app
+      //     declared (manifest) plus OS-scope actions the app can reference
+      //     (e.g. `aura.launcher.toggle` for menu hints).
+      //   • aura-keymap-bindings — JSON map of actionId → currently-bound
+      //     combo (defaults overridden by the user's KV overlay).
+      // The SDK reads these synchronously on mount so menu shortcut labels
+      // are correct from the first paint; live changes flow via
+      // `aura.keymap.changed` postMessage from the shell.
+      try {
+        const keymapState = await readShellKeymapState();
+        const appActions  = keymapRegistry.list().filter((a) =>
+          a.id.startsWith(`app.${instance.appId}.`) || a.scope !== 'app',
+        );
+        const bindings    = resolveBindings(appActions, instance.appId, keymapState);
+        metaParts.push(`<meta name="aura-keymap-actions" content="${escAttr(JSON.stringify(appActions))}">`);
+        metaParts.push(`<meta name="aura-keymap-bindings" content="${escAttr(JSON.stringify(bindings))}">`);
+      } catch (err) {
+        console.warn('[proxy] could not inject keymap meta:', (err as Error).message);
       }
 
       // Auto-inject /api/os/theme.css for inherit strategy. Skip if the app
@@ -279,6 +356,28 @@ window.addEventListener('message',function(ev){if(!ev.data||ev.data.type!=='aura
       // Place the relay right after <head ...> so it captures from frame 0.
       rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${consoleRelay}`);
 
+      // Passive keystroke forwarder. The shell broadcasts an `aura.key.claim`
+      // postMessage listing the combos the OS wants to intercept (Phase 2 —
+      // OS-modifier + Home/Back; Phase 4 — plus any combos the app's SDK
+      // subscribed to). Everything outside the claim list flows to the app's
+      // own listeners and to the browser's native handling untouched — this
+      // is the "browser-default guarantee": an app that integrates nothing
+      // keeps every browser keyboard behaviour (text inputs, IME, native
+      // shortcuts like Ctrl+A/C/Z, Tab focus).
+      //
+      // Modifier order in the combo string matches the dispatcher's canonical
+      // form (Ctrl→Alt→Shift→Super), and the non-modifier key uses
+      // `KeyboardEvent.code` so bindings are layout-independent.
+      const keyForwarder = `<script>(function(){try{
+var P=window.parent;if(!P||P===window)return;
+var SRC=${appIdJs};
+var claims=new Set();
+function combo(e){var c=e.code;if(c==='ControlLeft'||c==='ControlRight'||c==='AltLeft'||c==='AltRight'||c==='ShiftLeft'||c==='ShiftRight'||c==='MetaLeft'||c==='MetaRight'||c==='OSLeft'||c==='OSRight')return null;var p=[];if(e.ctrlKey)p.push('Ctrl');if(e.altKey)p.push('Alt');if(e.shiftKey)p.push('Shift');if(e.metaKey)p.push('Super');p.push(c);return p.join('+');}
+window.addEventListener('message',function(ev){var d=ev.data;if(!d||d.type!=='aura.key.claim')return;claims=new Set(Array.isArray(d.combos)?d.combos:[]);});
+window.addEventListener('keydown',function(e){var c=combo(e);if(!c)return;if(!claims.has(c))return;e.preventDefault();e.stopPropagation();try{P.postMessage({type:'aura.key',combo:c,appId:SRC},'*');}catch(_){}}, {capture:true});
+}catch(_){}})();</script>`;
+      rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${keyForwarder}`);
+
       const outHeaders = new Headers(upstream.headers);
       outHeaders.delete('content-encoding');
       outHeaders.delete('content-length');
@@ -316,6 +415,7 @@ window.addEventListener('message',function(ev){if(!ev.data||ev.data.type!=='aura
     });
   } catch (err) {
     if (isExpectedAbort(err)) return new Response(null, { status: 499 });
+    console.error(`[proxy] fetch failed routing ${id} → ${targetUrl}: ${(err as Error).message}`);
     return notReadyResponse(id, path, 502);
   }
 };
@@ -408,6 +508,45 @@ async function readShellThemeSelection(): Promise<{ themeIdDark: string; themeId
   finally { await kv.close().catch(() => undefined); }
 }
 
+/**
+ * Read the persisted user keymap overlay from the OS KV. Returns the empty
+ * state on cold boot / missing key — that means "use registry defaults",
+ * which is what `resolveBindings` does anyway.
+ */
+async function readShellKeymapState(): Promise<OsKeymapState> {
+  const kv = defaultKv();
+  try {
+    const stored = await kv.getValue<OsKeymapState>('os', 'keymap');
+    if (!stored) return { bindings: {}, appOverlays: {} };
+    return {
+      bindings:    stored.bindings    ?? {},
+      appOverlays: stored.appOverlays ?? {},
+    };
+  } catch { return { bindings: {}, appOverlays: {} }; }
+  finally { await kv.close().catch(() => undefined); }
+}
+
+/**
+ * Resolve the currently-effective combo for each of the given actions,
+ * applying the user's KV overlay on top of the registry defaults. The map
+ * is { actionId → combo|null } — null means "explicitly unbound".
+ *
+ * Apps consume this via `<meta name="aura-keymap-bindings">` injected into
+ * their HTML; the SDK's `getBinding()` reads it synchronously.
+ */
+function resolveBindings(actions: readonly KeyAction[], appId: string, state: OsKeymapState): Record<string, string | null> {
+  const out: Record<string, string | null> = {};
+  const overlay = state.appOverlays[appId] ?? {};
+  for (const a of actions) {
+    if (a.id.startsWith(`app.${appId}.`)) {
+      out[a.id] = a.id in overlay ? (overlay[a.id] ?? null) : a.defaultCombo;
+    } else {
+      out[a.id] = a.id in state.bindings ? (state.bindings[a.id] ?? null) : a.defaultCombo;
+    }
+  }
+  return out;
+}
+
 function notReadyHtml(id: string): string {
   return `<!DOCTYPE html><html><head><style>
     body{background:#0a0a0a;color:#557755;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}
@@ -416,4 +555,99 @@ function notReadyHtml(id: string): string {
       <div class="id">${id}</div>
       <div>NOT READY — WAITING FOR PROCESS...</div>
     </div></body></html>`;
+}
+
+/**
+ * Themed warning page for the service-has-no-ui guard. Pulls colours from the
+ * live OS palette via /api/os/theme.css so the iframe inherits whatever theme
+ * the user has active. Falls back to the warning-orange literal in case the
+ * stylesheet hasn't loaded yet.
+ */
+function renderServiceBlockedHtml(p: {
+  error: string;
+  message: string;
+  appId: string;
+  instanceId: string;
+  blockedPath: string;
+}): string {
+  const esc = (s: string) => s.replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!
+  ));
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>${esc(p.appId)} — service has no UI</title>
+  <link rel="stylesheet" href="/api/os/theme.css" />
+  <style>
+    *  { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100%;
+      background: var(--aura-color-bg, #0a0a0a);
+      color: var(--aura-color-warning, #ff9900);
+      font-family: var(--aura-font-mono, 'Courier New', monospace);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    body { display: flex; align-items: center; justify-content: center; padding: 24px; }
+    .card {
+      max-width: 560px;
+      width: 100%;
+      padding: 20px 22px;
+      border: 1px solid var(--aura-color-warning, #ff9900);
+      background: var(--aura-color-surface, rgba(255,153,0,0.05));
+    }
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      margin-bottom: 14px;
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--aura-color-bg, #0a0a0a);
+      background: var(--aura-color-warning, #ff9900);
+    }
+    h1 {
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      color: var(--aura-color-warning, #ff9900);
+      margin-bottom: 12px;
+    }
+    p { color: var(--aura-color-text, #ccffcc); margin-bottom: 14px; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; font-size: 12px; }
+    dt { color: var(--aura-color-text-dim, #557755); text-transform: uppercase; letter-spacing: 0.08em; }
+    dd { color: var(--aura-color-warning, #ff9900); word-break: break-all; }
+    .hint {
+      margin-top: 16px; padding-top: 14px;
+      border-top: 1px dashed var(--aura-color-border, rgba(255,153,0,0.3));
+      font-size: 12px;
+      color: var(--aura-color-text-dim, #557755);
+    }
+    code {
+      padding: 0 4px;
+      color: var(--aura-color-warning, #ff9900);
+      background: var(--aura-color-bg, #0a0a0a);
+    }
+  </style>
+</head>
+<body>
+  <div class="card" role="alert">
+    <span class="tag">${esc(p.error)}</span>
+    <h1>Services have no UI</h1>
+    <p>${esc(p.message)}</p>
+    <dl>
+      <dt>app</dt>          <dd>${esc(p.appId)}</dd>
+      <dt>instance</dt>     <dd>${esc(p.instanceId)}</dd>
+      <dt>blocked path</dt> <dd>${esc(p.blockedPath)}</dd>
+    </dl>
+    <p class="hint">
+      Dispatch an intent via <code>AppManager.startIntent({ … })</code> so the OS
+      resolves it to a separate <code>componentType: "activity"</code> app — that
+      app's window will surface the UI. Services keep doing the headless work
+      behind it.
+    </p>
+  </div>
+</body>
+</html>`;
 }

@@ -8,13 +8,19 @@ interface Props {
 const { view, style = '' } = Astro.props;
 const isLoading = view.lifecycleState !== 'resumed';
 ---
-<div class="app-slot" data-view-id={view.viewId} data-app-id={view.appId} style={style}>
+<div class="app-slot"
+     data-view-id={view.viewId}
+     data-app-id={view.appId}
+     data-instance-id={view.instanceId}
+     data-activity-id={view.activityId ?? undefined}
+     style={style}>
   <div class="slot-chrome">
     <span class="slot-title">{view.title}</span>
     <div class="slot-actions">
       {view.minimizable && (
         <button class="slot-btn" data-action="minimize" title="Minimize">_</button>
       )}
+      <button class="slot-btn" data-action="maximize" title="Focus mode (maximize)">[ ]</button>
       <button class="slot-btn danger" data-action="close" title="Close">✕</button>
     </div>
   </div>

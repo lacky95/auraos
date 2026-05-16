@@ -5,7 +5,7 @@
 ## so there's exactly one definition of "what's in a fresh AuraOS sandbox".
 ## Re-run this whenever you change the base-rootfs apt list.
 aura-base:
-	docker build -t aura-base -f Dockerfile --target base-rootfs .
+	docker build -t aura-base -f Dockerfile --target aura-base .
 
 ## up — bring AuraOS up (depends on aura-base for sandbox: 'container' apps).
 up: aura-base

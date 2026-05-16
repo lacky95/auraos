@@ -12,7 +12,8 @@
     "system.kv.os.theme.write",
     "system.kv.os.workspaces.write",
     "system.kv.os.clockFormat.write",
-    "system.kv.os.locale.write"
+    "system.kv.os.locale.write",
+    "system.kv.os.keymap.write"
   ],
   "tools": ["bash", "node"],
   "instanceMode": "single",
@@ -21,6 +22,7 @@
   "backgroundService": true,
   "autoStart": false,
   "useProot": true,
+  "sandbox": "container",
   "viewConfig": {
     "defaultWidth": 700,
     "defaultHeight": 500,

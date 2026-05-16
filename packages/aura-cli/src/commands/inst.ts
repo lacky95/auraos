@@ -2,7 +2,7 @@ import type { Command } from 'commander';
 import { api } from '../lib/client.js';
 import { readManifest } from '../lib/manifest.js';
 import { color, fail, ok, stateColor, table, uptime } from '../lib/format.js';
-import { enterProot } from '../lib/enter-proot.js';
+import { enterSandbox } from '../lib/enter-sandbox.js';
 
 interface AppInstanceDto {
   instanceId: string;
@@ -79,15 +79,16 @@ export function registerInst(program: Command): void {
   inst
     .command('shell <instanceId>')
     .option('-c, --cmd <cmd>', 'Run a single command instead of an interactive shell')
-    .description('Drop into an interactive shell inside the running PRoot of an instance (docker-exec-style).')
+    .description('Drop into an interactive shell inside the running sandbox of an instance (docker-exec-style; works for both proot and container sandboxes).')
     .action(async (instanceId: string, opts: { cmd?: string }) => {
-      const dto = await api.get<{ appId: string; port: number | null }>(
-        `/api/instances/${encodeURIComponent(instanceId)}/status`,
-      );
-      if (!dto.appId) fail(`Instance not found: ${instanceId}`);
-      const manifest = readManifest(dto.appId);
-      if (!manifest) fail(`Manifest missing for ${dto.appId}`);
-      enterProot(instanceId, dto.appId, dto.port, manifest.tools ?? [], opts.cmd);
+      const dto = await api.get<{
+        instance: { appId: string; port: number | null; sandbox?: 'proot' | 'container' };
+      }>(`/api/instances/${encodeURIComponent(instanceId)}/status`);
+      const target = dto.instance;
+      if (!target?.appId) fail(`Instance not found: ${instanceId}`);
+      const manifest = readManifest(target.appId);
+      if (!manifest) fail(`Manifest missing for ${target.appId}`);
+      enterSandbox(instanceId, target.appId, target.port, manifest.tools ?? [], target.sandbox, opts.cmd);
     });
 
   inst

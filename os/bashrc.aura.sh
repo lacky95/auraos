@@ -31,7 +31,11 @@ case $- in *i*) ;; *) return ;; esac
 #   \[ \] tells bash these are non-printing chars (correct line wrap)
 #   38;5;82  = bright green
 #   38;5;208 = orange
-PS1='\[\e[38;5;82m\]\u@\h\[\e[0m\]${AURA_LAYER_TAG:+\[\e[38;5;208m\]$AURA_LAYER_TAG\[\e[0m\]}:\w\$ '
+# AURA_HOSTNAME overrides the kernel hostname for display purposes — used by
+# container-mode apps so the prompt shows the friendly appId (e.g.
+# `com.aura.counter`) rather than the sanitised instance container name. Falls
+# back to bash's \h when unset (PRoot apps + host shells).
+PS1='\[\e[38;5;82m\]\u@${AURA_HOSTNAME:-\h}\[\e[0m\]${AURA_LAYER_TAG:+\[\e[38;5;208m\]$AURA_LAYER_TAG\[\e[0m\]}:\w\$ '
 
 # Helpful aliases that don't slow us down.
 alias ll='ls -lah --color=auto'

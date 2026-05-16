@@ -5,7 +5,12 @@ import { getAppManager, DEFAULT_WORKSPACE_STATE, type WorkspaceState } from '@au
 import { defaultKv } from '@aura/kv-store';
 
 const mgr = getAppManager();
+// SSR ALL installed apps + per-app enable state — the dock applies the
+// `data-enabled` filter via CSS and flips it live on `app:enabledChanged`
+// events (handler at the end of this file). Same trick the LauncherOverlay
+// uses; keeps both in sync without a re-fetch on every toggle.
 const allApps = mgr.getManifests();
+const enabledMap: Record<string, boolean> = mgr.getEnabledState();
 const pinnedApps = allApps.slice(0, 5);
 
 // SSR workspace state — comes from the OS KV (`os/workspaces`), populated
@@ -55,6 +60,10 @@ for (const inst of mgr.getAllInstances()) {
   // iframes on page load (otherwise the user sees N pool terminals appear
   // before they've clicked anything).
   if (inst.inPool) continue;
+  // Skip instances of apps the user has explicitly disabled. AppManager
+  // already stops them on disable, but this guards against the brief
+  // window between the chokidar `add` event and the next SSR pass.
+  if (!mgr.isEnabled(inst.appId)) continue;
   const manifest = mgr.getManifest(inst.appId);
   if (!manifest) continue;
 
@@ -130,9 +139,26 @@ for (const v of initialViews) {
 const ssrServiceViewIds = new Set<string>(
   initialViews.filter((v) => mgr.getManifest(v.appId)?.componentType === 'service').map((v) => v.viewId),
 );
-const ssrVisibleViews = initialViews.filter(
-  (v) => active.members.includes(v.viewId) && !ssrServiceViewIds.has(v.viewId),
-);
+// Sort by workspace.members order so the tiling/stack/rows/columns layout
+// hands cell N to the same viewId on every reload. Without this, order
+// follows AppManager's instance-creation order (effectively process
+// startup time) which has no relation to the user's arrangement. New
+// views the workspace doesn't yet know about (backfilled above into
+// active.members) keep relative order because they were appended.
+const orderIndex = new Map<string, number>(active.members.map((id, i) => [id, i]));
+const ssrVisibleViews = initialViews
+  .filter((v) => active.members.includes(v.viewId) && !ssrServiceViewIds.has(v.viewId))
+  .sort((a, b) => (orderIndex.get(a.viewId) ?? 1e9) - (orderIndex.get(b.viewId) ?? 1e9));
+
+// Apply per-workspace focus state — `Workspace.layoutState.focusedViewId`.
+// Fullscreen mode renders only the focused view, so this drives which app
+// occupies the screen on cold load. Falls back to the first member when
+// unset so the layout never breaks.
+{
+  const focusedId = active.layoutState?.focusedViewId;
+  for (const v of ssrVisibleViews) v.isFocused = focusedId ? v.viewId === focusedId : false;
+  if (!ssrVisibleViews.some((v) => v.isFocused) && ssrVisibleViews[0]) ssrVisibleViews[0].isFocused = true;
+}
 ---
 <OSLayout pinnedApps={pinnedApps}>
   <div id="desktop-content">
@@ -157,6 +183,257 @@ const ssrVisibleViews = initialViews.filter(
 
 <script>
   import * as workspaceClient from '../lib/workspaceClient';
+  import { getKeyDispatcher } from '../lib/keyDispatcher.ts';
+  import { nextInDirection, rectFromSlot } from '../lib/windowNav.ts';
+  import { osEvents } from '../lib/osEvents.ts';
+
+  const keyDispatcher = getKeyDispatcher();
+
+  // -------- Iframe key bridge ---------------------------------------------
+  //
+  // The proxy injects a passive forwarder into every app iframe. That
+  // forwarder watches keydown events, canonicalises the combo, and only
+  // posts up the ones in its `aura.key.claim` list — everything else flows
+  // to the app and to the browser's native handling untouched (the
+  // "browser-default guarantee").
+  //
+  // Here we (a) listen for those forwarded combos and feed them to the
+  // dispatcher and (b) push the current claim list down to every iframe
+  // whenever it changes (state/catalogue/focus). Re-broadcast also happens
+  // on each iframe's `load` event so a freshly-mounted iframe never has an
+  // empty claim list.
+  window.addEventListener('message', (ev: MessageEvent) => {
+    const d = ev.data as { type?: string; combo?: string; appId?: string; actionIds?: string[]; reason?: string } | null;
+    if (!d || typeof d !== 'object') return;
+
+    // Forwarded keystroke from an app iframe.
+    if (d.type === 'aura.key') {
+      if (typeof d.combo !== 'string' || typeof d.appId !== 'string') return;
+      const res = keyDispatcher.handleIframeCombo(d.combo, d.appId);
+      // App-scope action that the shell can't run itself — bounce back so
+      // the SDK in-iframe fires the registered handler.
+      if (res.actionId && res.actionId.startsWith('app.') && !res.fired) {
+        try {
+          (ev.source as Window | null)?.postMessage(
+            { type: 'aura.action.fire', actionId: res.actionId, combo: d.combo },
+            '*',
+          );
+        } catch { /* iframe gone */ }
+      }
+      return;
+    }
+
+    // App SDK subscribed/unsubscribed from a set of actions. The claim list
+    // for the iframe is already derived from manifest declarations (every
+    // declared app action is claimed regardless of subscription state) — we
+    // just rebroadcast in case the iframe missed the initial send, and
+    // mirror the SDK contract that subscribe is the trigger.
+    if (d.type === 'aura.keymap.subscribe') {
+      const target = ev.source as Window | null;
+      try {
+        const combos = (() => {
+          if (typeof d.appId !== 'string') return [];
+          return keyDispatcher.getClaimListForApp(d.appId);
+        })();
+        target?.postMessage({ type: 'aura.key.claim', combos }, '*');
+      } catch { /* iframe gone */ }
+      return;
+    }
+
+    // App SDK requesting a system action.
+    if (d.type && d.type.startsWith('aura.system.')) {
+      handleSystemAction(d.type, d as { type: string });
+      return;
+    }
+  });
+
+  function handleSystemAction(type: string, _payload: { type: string }): void {
+    if (type === 'aura.system.openLauncher')        (window as { auraOpenLauncher?: () => void }).auraOpenLauncher?.();
+    else if (type === 'aura.system.closeLauncher')  (window as { auraCloseLauncher?: () => void }).auraCloseLauncher?.();
+    else if (type === 'aura.system.toggleLauncher') (window as { auraToggleLauncher?: () => void }).auraToggleLauncher?.();
+    else if (type === 'aura.system.toggleNavMode')  keyDispatcher.setMode(keyDispatcher.getMode() === 'nav' ? 'app' : 'nav');
+    else if (type === 'aura.system.toggleHome')     keyDispatcher.setMode('nav');
+  }
+
+  function appIdFromIframe(frame: HTMLIFrameElement): string | null {
+    const m = (frame.getAttribute('src') ?? '').match(/^\/api\/proxy\/([^/]+)\//);
+    if (!m) return null;
+    return (m[1] ?? '').replace(/-\d+$/, '');
+  }
+
+  function sendClaimList(frame: HTMLIFrameElement): void {
+    const appId    = appIdFromIframe(frame);
+    const combos   = keyDispatcher.getClaimListForApp(appId);
+    const bindings = keyDispatcher.getBindingsForApp(appId);
+    try {
+      frame.contentWindow?.postMessage({ type: 'aura.key.claim',     combos   }, '*');
+      // Bindings travel separately so the SDK's getBinding() can refresh
+      // without parsing the claim list. Sent on every iframe-load + every
+      // state change so menu shortcut hints stay current.
+      frame.contentWindow?.postMessage({ type: 'aura.keymap.changed', bindings }, '*');
+    } catch { /* cross-origin or torn-down frame */ }
+  }
+
+  function broadcastClaims(): void {
+    document.querySelectorAll('iframe').forEach((f) => sendClaimList(f as HTMLIFrameElement));
+  }
+
+  // Dispatcher re-emits on every setActions/setState — push the latest list
+  // to every mounted iframe so SDK subscriptions and remap events apply
+  // without an iframe reload.
+  keyDispatcher.onClaimListChange(() => broadcastClaims());
+
+  // OS Home — switches to Nav mode AND highlights the first window so the
+  // next arrow press picks a neighbour rather than the same slot.
+  keyDispatcher.bind('aura.nav.home', () => {
+    keyDispatcher.setMode('nav');
+    if (!navHighlightedViewId) {
+      const first = visibleViewIds()[0];
+      if (first) setNavHighlight(first);
+    }
+  });
+
+  // OS Back. Android-spirit chain:
+  //   1. Send `aura.back` to the focused iframe. The app's
+  //      `osClient.nav.onBack` listeners can `preventDefault()` to keep
+  //      Back inside the app and ack via `aura.back.ack`.
+  //   2. If not acked within 100ms, ask the OS to pop the in-activity
+  //      history (POST /api/activities/<id>/back). The endpoint's
+  //      AppManager.goBack() pops history if non-empty, else closes
+  //      the activity / refocuses parent.
+  //   3. If there is nothing to pop and no stacked activity, switch to
+  //      Nav mode as the final fallback.
+  //
+  // Source resolution: when Back came from an iframe-forwarded combo,
+  // `ctx.appId` carries the source app id. When it came from a shell-side
+  // keydown (focus on launcher/dock/etc.), `ctx.appId` is null and we
+  // fall straight through to Nav mode.
+  keyDispatcher.bind('aura.nav.back', async (ctx) => {
+    if (keyDispatcher.getMode() !== 'app') return;
+    const sourceFrame = findIframeByAppId(ctx.appId);
+    if (!sourceFrame) {
+      keyDispatcher.setMode('nav');
+      return;
+    }
+    const handled = await sendBackAndWaitForAck(sourceFrame, 100);
+    if (handled) return;
+    const activityId = activityIdOfFrame(sourceFrame);
+    if (activityId) {
+      // The endpoint's goBack pops in-activity history when non-empty,
+      // else closes/refocuses parent — fire-and-forget.
+      void fetch(`/api/activities/${encodeURIComponent(activityId)}/back`, { method: 'POST' });
+      return;
+    }
+    keyDispatcher.setMode('nav');
+  });
+
+  function findIframeByAppId(appId: string | null): HTMLIFrameElement | null {
+    if (!appId) return null;
+    for (const frame of document.querySelectorAll<HTMLIFrameElement>('iframe')) {
+      const src = frame.getAttribute('src') ?? '';
+      const m = src.match(/^\/api\/proxy\/([^/]+)\//);
+      if (m && (m[1] ?? '').replace(/-\d+$/, '') === appId) return frame;
+    }
+    return null;
+  }
+
+  function activityIdOfFrame(frame: HTMLIFrameElement): string | null {
+    const slot = frame.closest<HTMLElement>('.app-slot[data-view-id]');
+    return slot?.dataset['activityId'] ?? null;
+  }
+
+  async function sendBackAndWaitForAck(frame: HTMLIFrameElement, timeoutMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      let done = false;
+      const handler = (ev: MessageEvent) => {
+        if (ev.source !== frame.contentWindow) return;
+        const d = ev.data as { type?: string; handled?: boolean } | null;
+        if (!d || d.type !== 'aura.back.ack') return;
+        if (done) return;
+        done = true;
+        window.removeEventListener('message', handler);
+        resolve(!!d.handled);
+      };
+      window.addEventListener('message', handler);
+      try { frame.contentWindow?.postMessage({ type: 'aura.back' }, '*'); }
+      catch { /* iframe gone */ }
+      setTimeout(() => {
+        if (done) return;
+        done = true;
+        window.removeEventListener('message', handler);
+        resolve(false);
+      }, timeoutMs);
+    });
+  }
+
+  // -------- Nav-mode window focus -----------------------------------------
+  // In Nav mode arrow keys move a focus ring between visible windows; Enter
+  // hands focus to that window (and the OS flips to App mode). The ring is
+  // drawn via `data-aura-nav-focus="true"` on the highlighted `.app-slot`
+  // (see the <style is:global> at the bottom of this file).
+  let navHighlightedViewId: string | null = null;
+
+  function visibleViewIds(): string[] {
+    return Array.from(document.querySelectorAll<HTMLElement>('.app-slot[data-view-id]'))
+      .filter((el) => el.offsetParent !== null) // not display:none
+      .map((el) => el.dataset['viewId'] ?? '')
+      .filter(Boolean);
+  }
+
+  function setNavHighlight(viewId: string | null): void {
+    document.querySelectorAll<HTMLElement>('.app-slot[data-aura-nav-focus]').forEach((el) => {
+      el.removeAttribute('data-aura-nav-focus');
+    });
+    navHighlightedViewId = viewId;
+    if (!viewId) return;
+    const slot = document.querySelector<HTMLElement>(`.app-slot[data-view-id="${CSS.escape(viewId)}"]`);
+    if (slot) slot.setAttribute('data-aura-nav-focus', 'true');
+  }
+
+  keyDispatcher.onModeChange((mode) => {
+    if (mode === 'nav') {
+      if (!navHighlightedViewId) {
+        const first = visibleViewIds()[0];
+        if (first) setNavHighlight(first);
+      } else {
+        setNavHighlight(navHighlightedViewId); // refresh outline class
+      }
+    } else {
+      // App mode — drop the ring.
+      setNavHighlight(null);
+    }
+  });
+
+  function moveNav(dir: 'up' | 'down' | 'left' | 'right'): void {
+    if (keyDispatcher.getMode() !== 'nav') return;
+    const ids = visibleViewIds();
+    if (ids.length === 0) return;
+    const current = navHighlightedViewId && ids.includes(navHighlightedViewId)
+      ? navHighlightedViewId
+      : ids[0]!;
+    // Use the live bounding boxes — works for any layout strategy without
+    // bespoke math. windowNav's `nextInDirection` does the half-plane +
+    // off-axis penalty selection so straight arrows pick the obvious slot.
+    const rects = ids.map((vid) => {
+      const slot = document.querySelector<HTMLElement>(`.app-slot[data-view-id="${CSS.escape(vid)}"]`);
+      return rectFromSlot(slot!, vid);
+    });
+    const next = nextInDirection(rects, current, dir);
+    setNavHighlight(next);
+  }
+
+  keyDispatcher.bind('aura.nav.up',    () => moveNav('up'));
+  keyDispatcher.bind('aura.nav.down',  () => moveNav('down'));
+  keyDispatcher.bind('aura.nav.left',  () => moveNav('left'));
+  keyDispatcher.bind('aura.nav.right', () => moveNav('right'));
+
+  keyDispatcher.bind('aura.nav.enter', () => {
+    if (keyDispatcher.getMode() !== 'nav' || !navHighlightedViewId) return;
+    const slot = document.querySelector<HTMLElement>(`.app-slot[data-view-id="${CSS.escape(navHighlightedViewId)}"]`);
+    const iframe = slot?.querySelector<HTMLIFrameElement>('iframe');
+    iframe?.focus();
+    keyDispatcher.setMode('app');
+  });
 
   interface AppView {
     viewId: string;
@@ -180,6 +457,19 @@ const ssrVisibleViews = initialViews.filter(
      * `manifest.backgroundService` directly.
      */
     minimizable?: boolean;
+    /**
+     * In-activity history trail — the prior path/title pairs the iframe
+     * visited. Populated by `activity:navigated` SSE events when the
+     * activity used the "replace-current" launch mode. Drives the OS
+     * breadcrumb chrome.
+     */
+    history?: Array<{ path: string; title?: string }>;
+    /**
+     * Whether the slot chrome renders the OS breadcrumb trail. Mirrors
+     * `AppActivity.breadcrumb`. 'os' (default) shows the trail; 'off'
+     * lets the app render its own header.
+     */
+    breadcrumb?: 'os' | 'off';
   }
 
   interface AppManifestLite {
@@ -195,6 +485,159 @@ const ssrVisibleViews = initialViews.filter(
   let focusedInstanceId: string | null = null;
   let focusedActivityId: string | null = null;
   const manifestCache = new Map<string, AppManifestLite>();
+
+  // ---- Stack-layout drag/resize ------------------------------------------
+  //
+  // Free-floating windows. Per-window geometry persists to
+  // `workspace.layoutState.rects[viewId]` so positions survive browser
+  // reload and workspace switch. The dispatch in `renderLayout()` calls
+  // `applyStackPos` + `ensureStackHandlers` only when layoutId === 'stack'.
+  //
+  // Handlers are attached lazily and tracked on the element itself
+  // (`dataset.stackHandlersBound`) so re-render passes don't add new
+  // listeners. The slot already has the chrome (drag handle) and we
+  // append a small bottom-right grip for resize.
+  type SavedRect = { x: number; y: number; w: number; h: number; z: number };
+  const STACK_DEFAULTS = { w: 560, h: 400, cascade: 40 };
+  const STACK_MIN_W = 280;
+  const STACK_MIN_H = 160;
+
+  function applyStackPos(el: HTMLElement, viewId: string, rect: SavedRect | undefined, fallbackIndex: number): void {
+    const x = rect?.x ?? (24 + fallbackIndex * STACK_DEFAULTS.cascade);
+    const y = rect?.y ?? (24 + fallbackIndex * STACK_DEFAULTS.cascade);
+    const w = rect?.w ?? STACK_DEFAULTS.w;
+    const h = rect?.h ?? STACK_DEFAULTS.h;
+    const z = rect?.z ?? (10 + fallbackIndex);
+    el.style.position = 'absolute';
+    el.style.left   = x + 'px';
+    el.style.top    = y + 'px';
+    el.style.width  = w + 'px';
+    el.style.height = h + 'px';
+    el.style.zIndex = String(z);
+    el.dataset['viewId'] = viewId;
+  }
+  function clearStackPos(el: HTMLElement): void {
+    el.style.removeProperty('position');
+    el.style.removeProperty('left');
+    el.style.removeProperty('top');
+    el.style.removeProperty('width');
+    el.style.removeProperty('height');
+    el.style.removeProperty('z-index');
+  }
+
+  function readStackRect(el: HTMLElement): { x: number; y: number; w: number; h: number; z: number } {
+    return {
+      x: parseFloat(el.style.left)   || 0,
+      y: parseFloat(el.style.top)    || 0,
+      w: parseFloat(el.style.width)  || STACK_DEFAULTS.w,
+      h: parseFloat(el.style.height) || STACK_DEFAULTS.h,
+      z: parseInt(el.style.zIndex, 10) || 10,
+    };
+  }
+  function persistStackRect(viewId: string, rect: SavedRect): void {
+    const ws = workspaceClient.getCached();
+    if (!ws) return;
+    const active = ws.workspaces.find((w) => w.id === ws.activeWorkspaceId);
+    if (!active) return;
+    const rects = { ...(active.layoutState?.rects ?? {}), [viewId]: rect };
+    workspaceClient.patchWorkspaceDebounced(active.id, {
+      layoutState: { ...(active.layoutState ?? {}), rects },
+    });
+  }
+  function bringToFrontStack(el: HTMLElement, viewId: string): void {
+    const peers = dynamicLayout.querySelectorAll<HTMLElement>(':scope > .app-slot');
+    let maxZ = 10;
+    peers.forEach((p) => { maxZ = Math.max(maxZ, parseInt(p.style.zIndex, 10) || 10); });
+    const nextZ = maxZ + 1;
+    el.style.zIndex = String(nextZ);
+    const r = readStackRect(el); r.z = nextZ;
+    persistStackRect(viewId, r);
+  }
+
+  function ensureStackHandlers(el: HTMLElement, viewId: string): void {
+    if (el.dataset['stackHandlersBound'] === '1') return;
+    el.dataset['stackHandlersBound'] = '1';
+
+    const chrome = el.querySelector<HTMLElement>('.slot-chrome');
+    if (chrome) {
+      chrome.style.cursor = 'move';
+      const onDown = (ev: MouseEvent) => {
+        // Don't start a drag from controls (close/min/max) or the trail
+        // breadcrumb buttons — those have their own actions.
+        const target = ev.target as HTMLElement | null;
+        if (target?.closest('button')) return;
+        ev.preventDefault();
+        bringToFrontStack(el, viewId);
+        const startX = ev.clientX, startY = ev.clientY;
+        const startLeft = parseFloat(el.style.left) || 0;
+        const startTop  = parseFloat(el.style.top)  || 0;
+        const onMove = (mv: MouseEvent) => {
+          el.style.left = Math.max(0, startLeft + (mv.clientX - startX)) + 'px';
+          el.style.top  = Math.max(0, startTop  + (mv.clientY - startY)) + 'px';
+        };
+        const onUp = () => {
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+          persistStackRect(viewId, readStackRect(el));
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+      };
+      chrome.addEventListener('mousedown', onDown);
+      (el as any).__stackChromeDown = onDown;
+    }
+
+    // Bottom-right resize grip — appended once. Sized + styled inline so
+    // it doesn't depend on stylesheet load order.
+    let grip = el.querySelector<HTMLElement>(':scope > .stack-resize-grip');
+    if (!grip) {
+      grip = document.createElement('div');
+      grip.className = 'stack-resize-grip';
+      grip.style.cssText = 'position:absolute;right:0;bottom:0;width:14px;height:14px;cursor:nwse-resize;background:linear-gradient(135deg,transparent 50%,var(--aura-color-text-dim) 50%);opacity:0.6;z-index:2;';
+      el.appendChild(grip);
+    }
+    const onGripDown = (ev: MouseEvent) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const startX = ev.clientX, startY = ev.clientY;
+      const startW = parseFloat(el.style.width)  || STACK_DEFAULTS.w;
+      const startH = parseFloat(el.style.height) || STACK_DEFAULTS.h;
+      const onMove = (mv: MouseEvent) => {
+        el.style.width  = Math.max(STACK_MIN_W, startW + (mv.clientX - startX)) + 'px';
+        el.style.height = Math.max(STACK_MIN_H, startH + (mv.clientY - startY)) + 'px';
+      };
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        persistStackRect(viewId, readStackRect(el));
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    };
+    grip.addEventListener('mousedown', onGripDown);
+    (el as any).__stackGripDown = onGripDown;
+
+    // Z-order: any click in the slot brings it forward.
+    const onClickIn = () => bringToFrontStack(el, viewId);
+    el.addEventListener('mousedown', onClickIn);
+    (el as any).__stackClickIn = onClickIn;
+  }
+
+  function teardownStackHandlers(el: HTMLElement): void {
+    if (el.dataset['stackHandlersBound'] !== '1') return;
+    delete el.dataset['stackHandlersBound'];
+    const chrome = el.querySelector<HTMLElement>('.slot-chrome');
+    if (chrome && (el as any).__stackChromeDown) {
+      chrome.removeEventListener('mousedown', (el as any).__stackChromeDown);
+      chrome.style.removeProperty('cursor');
+    }
+    if ((el as any).__stackClickIn) el.removeEventListener('mousedown', (el as any).__stackClickIn);
+    const grip = el.querySelector<HTMLElement>(':scope > .stack-resize-grip');
+    if (grip) grip.remove();
+    delete (el as any).__stackChromeDown;
+    delete (el as any).__stackGripDown;
+    delete (el as any).__stackClickIn;
+  }
 
   const staticLayout  = document.getElementById('static-layout')!;
   const dynamicLayout = document.getElementById('dynamic-layout')!;
@@ -267,12 +710,24 @@ const ssrVisibleViews = initialViews.filter(
    * backend's `start` round-trip for first paint. The returned helpers swap the
    * placeholder for the real view (or drop it on error).
    */
+  // Workspace pin for pending placeholders. Keyed by the placeholder's
+  // viewId, the value is the workspace id active at the moment the user
+  // clicked launch. Read by:
+  //   • renderLayout — placeholders only render in their pinned workspace,
+  //     so switching workspaces mid-load doesn't drag the skeleton with you.
+  //   • pending.replaceWith — the real view is claimed for the pinned
+  //     workspace, not whichever workspace is active at fetch-completion
+  //     time (which would be a race if the user switched mid-flight).
+  const pendingWorkspace = new Map<string, string>();
+
   function pushPendingView(appId: string, displayTitle: string): {
     pendingId: string;
     replaceWith: (real: AppView) => void;
     drop: () => void;
   } {
     const pendingId = `pending-${appId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const pinnedWsId = workspaceClient.getCached()?.activeWorkspaceId ?? null;
+    if (pinnedWsId) pendingWorkspace.set(pendingId, pinnedWsId);
     views = [...views, {
       viewId:         pendingId,
       appId,
@@ -290,21 +745,40 @@ const ssrVisibleViews = initialViews.filter(
     return {
       pendingId,
       replaceWith: (real) => {
+        // Carry the pin from the placeholder over to the real view so
+        // workspace membership lands on the workspace where the user
+        // launched, not whichever workspace is active now.
+        const wsId = pendingWorkspace.get(pendingId) ?? null;
+        pendingWorkspace.delete(pendingId);
         views = views.map((v) => v.viewId === pendingId ? real : v);
-        // The user launched this view from the active workspace by clicking
-        // the dock/launcher — claim membership for it. Fire-and-forget;
-        // the optimistic local update makes the view visible immediately.
-        workspaceClient.addMemberToActive(real.viewId).catch(() => undefined);
+        if (wsId) {
+          workspaceClient.addMemberToWorkspace(wsId, real.viewId).catch(() => undefined);
+        } else {
+          // Fallback: no pin captured (workspace state wasn't hydrated
+          // yet). Drop on the active workspace as before.
+          workspaceClient.addMemberToActive(real.viewId).catch(() => undefined);
+        }
         renderLayout();
       },
       drop: () => {
+        pendingWorkspace.delete(pendingId);
         views = views.filter((v) => v.viewId !== pendingId);
         renderLayout();
       },
     };
   }
 
-  window.auraLaunchApp = async (appId: string) => {
+  window.auraLaunchApp = async (appId: string, opts?: { workspaceId?: string }) => {
+    // Optional target workspace: switch to it FIRST so `pushPendingView` and
+    // the eventual `addMemberToActive` from `pending.replaceWith` claim the
+    // app for that workspace (the context-menu "Open in workspace ▸ X" path).
+    // Fire-and-await so the launch only proceeds once the active workspace
+    // has flipped — otherwise the membership claim races and lands on the
+    // workspace the user came from.
+    if (opts?.workspaceId) {
+      try { await workspaceClient.setActive(opts.workspaceId); } catch { /* ignore */ }
+    }
+
     // First paint: skeleton in the layout, before any network I/O.
     const cached = manifestCache.get(appId);
     const pending = pushPendingView(appId, cached?.name ?? appId);
@@ -445,6 +919,18 @@ const ssrVisibleViews = initialViews.filter(
         ? { ...v, isFocused: true, state: v.state === 'minimized' ? 'normal' : v.state }
         : { ...v, isFocused: false },
     );
+    // Persist the focus pick so fullscreen-mode reloads land on the same
+    // view. patchWorkspaceDebounced collapses bursts (e.g. tabbing through
+    // windows) into a single Redis write.
+    const ws = workspaceClient.getCached();
+    if (ws) {
+      const active = ws.workspaces.find((w) => w.id === ws.activeWorkspaceId);
+      if (active && active.layoutState?.focusedViewId !== viewId) {
+        workspaceClient.patchWorkspaceDebounced(active.id, {
+          layoutState: { ...(active.layoutState ?? {}), focusedViewId: viewId },
+        });
+      }
+    }
     renderLayout();
   }
 
@@ -532,10 +1018,17 @@ const ssrVisibleViews = initialViews.filter(
       const ws = wsState.workspaces.find(w => w.id === wsState.activeWorkspaceId);
       if (ws) workspaceMembers = new Set(ws.members);
     }
+    const activeWsId = wsState?.activeWorkspaceId ?? null;
     const inActiveWorkspace = (v: AppView) => {
-      // Placeholders (instanceId === '') always belong to the active
-      // workspace — the launch was initiated here.
-      if (v.instanceId === '') return true;
+      // Placeholders (instanceId === '') are pinned to the workspace that
+      // was active at the moment of launch — see `pendingWorkspace` map.
+      // Switching workspaces mid-load doesn't drag the skeleton along,
+      // and the eventual real view ends up on the launch workspace too.
+      if (v.instanceId === '') {
+        const pinned = pendingWorkspace.get(v.viewId);
+        if (pinned) return pinned === activeWsId;
+        return true; // unpinned placeholder (pre-hydration launch): show inline
+      }
       // Without hydrated workspace state, behave like the pre-workspaces
       // shell — every view counts as active.
       if (!workspaceMembers) return true;
@@ -543,7 +1036,18 @@ const ssrVisibleViews = initialViews.filter(
     };
 
     const nonMinimized = views.filter((v) => v.state !== 'minimized');
-    const visible      = nonMinimized.filter(inActiveWorkspace);
+    // Sort by the active workspace's `members[]` order so the placement
+    // pass below assigns cell N to the same viewId on every render.
+    // Without this, the runtime order would follow `views[]` mutation
+    // history — adding the 3rd window then removing the 1st would leave
+    // the (former) 2nd/3rd windows swapped relative to their workspace
+    // member positions on the next reload.
+    const memberOrder = workspaceMembers
+      ? new Map<string, number>([...workspaceMembers].map((id, i) => [id, i] as [string, number]))
+      : null;
+    const orderKey = (v: AppView): number =>
+      memberOrder ? (memberOrder.get(v.viewId) ?? 1e9) : nonMinimized.indexOf(v);
+    const visible      = nonMinimized.filter(inActiveWorkspace).sort((a, b) => orderKey(a) - orderKey(b));
     const hidden       = nonMinimized.filter((v) => !inActiveWorkspace(v));
     const minimized    = views.filter((v) => v.state === 'minimized' && inActiveWorkspace(v));
 
@@ -578,6 +1082,11 @@ const ssrVisibleViews = initialViews.filter(
     // Unknown ids fall back to `tiling`.
     const layoutId = wsState?.workspaces.find(w => w.id === wsState.activeWorkspaceId)?.layoutId ?? 'tiling';
 
+    // Reset stack-mode container override before each layout-strategy
+    // branch; only the stack branch sets it back. Without this, switching
+    // away from stack leaves `position: relative` on the container and
+    // the new grid never lays out.
+    dynamicLayout.style.position = '';
     if (visible.length === 0) {
       Object.assign(dynamicLayout.style, {
         display: 'block', gridTemplateColumns: '', gridTemplateRows: '',
@@ -605,7 +1114,7 @@ const ssrVisibleViews = initialViews.filter(
         background: 'var(--aura-color-bg)',
         alignItems: '', justifyContent: '', flexDirection: '',
       });
-    } else if (layoutId === 'rows' || layoutId === 'stack') {
+    } else if (layoutId === 'rows') {
       Object.assign(dynamicLayout.style, {
         display: 'grid',
         gridTemplateColumns: '1fr',
@@ -613,6 +1122,20 @@ const ssrVisibleViews = initialViews.filter(
           ? `auto repeat(${visible.length}, 1fr)`
           : `repeat(${visible.length}, 1fr)`,
         gap: '2px',
+        background: 'var(--aura-color-bg)',
+        alignItems: '', justifyContent: '', flexDirection: '',
+        position: '',
+      });
+    } else if (layoutId === 'stack') {
+      // Stack = free-floating windows with absolute positioning.
+      // Per-window rects live in workspace.layoutState.rects and survive
+      // browser reload + workspace switch. Drag + resize are attached
+      // per-slot below (`ensureStackHandlers`).
+      Object.assign(dynamicLayout.style, {
+        display: 'block',
+        position: 'relative',
+        gridTemplateColumns: '', gridTemplateRows: '',
+        gap: '',
         background: 'var(--aura-color-bg)',
         alignItems: '', justifyContent: '', flexDirection: '',
       });
@@ -689,12 +1212,15 @@ const ssrVisibleViews = initialViews.filter(
     function placement(i: number): { col: number; row: number } {
       if (layoutId === 'fullscreen') return { col: 1, row: baseRow };
       if (layoutId === 'columns')    return { col: i + 1, row: baseRow };
-      if (layoutId === 'rows' || layoutId === 'stack') return { col: 1, row: i + baseRow };
+      if (layoutId === 'rows')       return { col: 1, row: i + baseRow };
       return { col: (i % tilingCols) + 1, row: Math.floor(i / tilingCols) + baseRow };
     }
 
-    // Visible-in-active-workspace slots: place into the grid, ensure
-    // display style is set to flex (in case they were previously hidden).
+    // Visible-in-active-workspace slots: place into the grid OR the
+    // stack-mode absolute-positioning space, ensure display style is set
+    // to flex (in case they were previously hidden).
+    const wsActiveForStack = wsState?.workspaces.find((w) => w.id === wsState.activeWorkspaceId);
+    const stackRects = (layoutId === 'stack' ? (wsActiveForStack?.layoutState?.rects ?? {}) : null) as Record<string, SavedRect> | null;
     visible.forEach((v, i) => {
       keep.add(v.viewId);
       let el = existing.get(v.viewId);
@@ -704,12 +1230,36 @@ const ssrVisibleViews = initialViews.filter(
       } else {
         updateSlot(el, v);
       }
-      el.style.display    = 'flex';
-      const p = placement(i);
-      el.style.gridColumn = String(p.col);
-      el.style.gridRow    = String(p.row);
+      el.style.display = 'flex';
       el.style.removeProperty('order');
+      if (stackRects) {
+        // Stack mode — absolute-positioned slot. Persisted rect wins;
+        // fall back to a 40px cascade so the first paint isn't an exact
+        // overlap. Handlers attached idempotently.
+        applyStackPos(el, v.viewId, stackRects[v.viewId], i);
+        ensureStackHandlers(el, v.viewId);
+        el.style.removeProperty('grid-column');
+        el.style.removeProperty('grid-row');
+      } else {
+        // Grid modes — clear stack overrides from any prior switch, then
+        // place into the explicit grid cell.
+        clearStackPos(el);
+        teardownStackHandlers(el);
+        const p = placement(i);
+        el.style.gridColumn = String(p.col);
+        el.style.gridRow    = String(p.row);
+      }
     });
+
+    // SSR iframes have to go now that the dynamic ones are mounted. They
+    // were rendered by Astro into #static-layout and would otherwise keep
+    // running their scripts (terminal WS connectors, polling fetches…) in
+    // the background — `display:none` doesn't unload an iframe's
+    // browsing context. With per-instance session keys in pty-server, the
+    // SSR + dynamic iframes for the same view both connect with the same
+    // sessionId and bounce each other every ~2 s. Tear down here, AFTER
+    // the dynamic replacements are in place, to avoid any visible gap.
+    if (staticLayout.firstChild) staticLayout.replaceChildren();
 
     // Hidden-in-other-workspace slots: keep DOM + iframe alive but make
     // them invisible AND unreachable for layout. `display:none` removes
@@ -767,24 +1317,33 @@ const ssrVisibleViews = initialViews.filter(
   function createSlot(v: AppView): HTMLElement {
     const slot = document.createElement('div');
     slot.className = 'app-slot';
-    slot.dataset['viewId'] = v.viewId;
+    slot.dataset['viewId']     = v.viewId;
+    slot.dataset['instanceId'] = v.instanceId;
+    if (v.activityId) slot.dataset['activityId'] = v.activityId;
     slot.style.cssText = 'display:flex;flex-direction:column;background:var(--aura-color-surface);border:var(--aura-border);overflow:hidden;';
     // Minimize is opt-in per view (set by activity / non-activity manifest
     // gating in buildView). Without it the slot only offers close — pressing
     // X tears the activity down; there's no "hide for later" affordance for
     // apps whose backend can't survive without a visible window.
+    const btnStyle = 'background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 6px;cursor:pointer;line-height:1;';
     const minimizeBtn = v.minimizable
-      ? `<button data-action="minimize" title="Minimize" style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 6px;cursor:pointer;">_</button>`
+      ? `<button data-action="minimize" title="Minimize" style="${btnStyle}">_</button>`
       : '';
+    // Maximize == focus-mode (the full-viewport overlay defined later in this
+    // file). Sibling of close so the user can promote any tiled slot into
+    // single-window mode with one click — the [ ] glyph matches the
+    // "expand window" affordance used by most desktop chrome.
+    const maximizeBtn = `<button data-action="maximize" title="Focus mode (maximize)" style="${btnStyle}">[ ]</button>`;
     slot.innerHTML = `
-      <div class="slot-chrome" style="display:flex;align-items:center;justify-content:space-between;padding:0 8px;height:28px;background:var(--aura-color-surface-2);border-bottom:var(--aura-border);flex-shrink:0;">
-        <span style="font-size:0.75rem;color:var(--aura-color-primary);text-transform:uppercase;letter-spacing:.08em;">
-          <span class="slot-title-name"></span>
-          <span class="slot-title-id" style="color:var(--aura-color-text-dim);font-size:0.6rem;margin-left:6px;"></span>
-        </span>
-        <div style="display:flex;gap:4px;">
+      <div class="slot-chrome" style="display:flex;align-items:center;justify-content:space-between;padding:0 8px;height:28px;background:var(--aura-color-surface-2);border-bottom:var(--aura-border);flex-shrink:0;gap:8px;min-width:0;">
+        <div class="slot-title" style="flex:1;min-width:0;display:flex;align-items:center;gap:6px;overflow:hidden;color:var(--aura-color-primary);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.08em;">
+          <span class="slot-title-trail" style="display:flex;align-items:center;gap:4px;flex:1;min-width:0;overflow:hidden;"></span>
+          <span class="slot-title-id" style="color:var(--aura-color-text-dim);font-size:0.6rem;flex-shrink:0;"></span>
+        </div>
+        <div class="slot-controls" style="display:flex;gap:4px;flex-shrink:0;">
           ${minimizeBtn}
-          <button data-action="close" title="Close" style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 6px;cursor:pointer;">✕</button>
+          ${maximizeBtn}
+          <button data-action="close" title="Close" style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 6px;cursor:pointer;line-height:1;">✕</button>
         </div>
       </div>
       <div class="slot-body" style="flex:1;overflow:hidden;position:relative;"></div>`;
@@ -793,10 +1352,47 @@ const ssrVisibleViews = initialViews.filter(
   }
 
   function updateSlot(slot: HTMLElement, v: AppView): void {
-    // Title chrome — cheap to update, no preserved state.
-    const titleName = slot.querySelector('.slot-title-name') as HTMLElement | null;
-    const titleId   = slot.querySelector('.slot-title-id')   as HTMLElement | null;
-    if (titleName && titleName.textContent !== v.title) titleName.textContent = v.title;
+    // Title chrome: when the activity has a non-empty back stack AND the
+    // app hasn't opted out (`breadcrumb === 'off'`), render an OS-managed
+    // breadcrumb trail with the back button + clickable prior crumbs.
+    // Otherwise render the plain title.
+    const trail = slot.querySelector('.slot-title-trail') as HTMLElement | null;
+    if (trail) {
+      const history     = v.history ?? [];
+      const mode        = v.breadcrumb ?? 'os';
+      const showTrail   = mode === 'os' && history.length > 0;
+      const escHtml = (s: string) => s
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      // Inline styles mirror the .crumb / .crumb-back / .crumb-prev /
+      // .crumb-current / .crumb-sep CSS at the bottom of this file. They
+      // exist as belt-and-suspenders: an iframe-side dev-overlay or a
+      // mid-deploy CSS-load skew shouldn't be able to make the chrome
+      // invisible — the slot-body needs the chrome height to compute its
+      // own height, otherwise the whole slot collapses.
+      const crumbBase = 'font-family:inherit;font-size:0.7rem;letter-spacing:0.05em;padding:2px 4px;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:2ch;';
+      const crumbPrev = `${crumbBase}background:transparent;border:none;cursor:pointer;color:var(--aura-color-text-dim);flex-shrink:1;max-width:18ch;`;
+      const crumbCurrent = `${crumbBase}color:var(--aura-color-primary);flex-shrink:0;min-width:4ch;max-width:24ch;`;
+      const crumbSep = 'color:var(--aura-color-text-dim);flex-shrink:0;opacity:0.5;';
+      const crumbBack = 'background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 6px;cursor:pointer;line-height:1;flex-shrink:0;margin-right:4px;';
+      if (showTrail) {
+        const fallback = (entry: { path: string; title?: string }) =>
+          entry.title ?? (entry.path === '/' ? '·' : entry.path.replace(/^\//, '').replace(/\/$/, '').split('/').slice(-1)[0] ?? '·');
+        const crumbs = history.map((h, i) =>
+          `<button class="crumb crumb-prev" data-action="back-to" data-index="${i}" title="${escHtml(h.path)}" style="${crumbPrev}">${escHtml(fallback(h))}</button>`
+        ).join(`<span class="crumb-sep" aria-hidden="true" style="${crumbSep}">›</span>`);
+        trail.innerHTML =
+          `<button class="crumb-back" data-action="back" title="Back" style="${crumbBack}">&lt;</button>` +
+          crumbs +
+          `<span class="crumb-sep" aria-hidden="true" style="${crumbSep}">›</span>` +
+          `<span class="crumb crumb-current" title="${escHtml(v.title)}" style="${crumbCurrent}">${escHtml(v.title)}</span>`;
+      } else {
+        // Plain title — current behaviour. The .crumb-current span keeps
+        // the same DOM hook so CSS doesn't need a separate selector.
+        trail.innerHTML = `<span class="crumb crumb-current" style="${crumbCurrent}">${escHtml(v.title)}</span>`;
+      }
+    }
+    const titleId = slot.querySelector('.slot-title-id') as HTMLElement | null;
     const idText = v.activityId ?? v.instanceId;
     if (titleId && titleId.textContent !== idText) titleId.textContent = idText;
 
@@ -845,6 +1441,10 @@ const ssrVisibleViews = initialViews.filter(
           if (sk) sk.remove();
         }));
       }, { once: true });
+      // Send the current claim list once the iframe's window object is
+      // ready to receive messages. Hooks every iframe (not { once: true })
+      // because each navigation inside the iframe re-emits `load`.
+      iframe.addEventListener('load', () => sendClaimList(iframe));
       iframe.src = v.iframeUrl;
       // Insert as the FIRST child so the skeleton (appended above) stays on top.
       body.insertBefore(iframe, body.firstChild);
@@ -903,6 +1503,35 @@ const ssrVisibleViews = initialViews.filter(
     if (!viewId) return;
     if (action === 'close')    { e.preventDefault(); closeView_(viewId); }
     if (action === 'minimize') { e.preventDefault(); minimizeView_(viewId); }
+    if (action === 'maximize') {
+      // Hand off to the focus-mode overlay (defined just below). Read the
+      // identifiers from the slot — the JS-generated chrome stamps them on
+      // createSlot; the SSR AppSlot.astro mirrors the same data-attrs.
+      e.preventDefault();
+      const instanceId = slot.dataset['instanceId'];
+      const activityId = slot.dataset['activityId'];
+      if (instanceId) focusInstance(instanceId, activityId);
+    }
+    // Breadcrumb crumb clicks → POST /back or /back-to.
+    if (action === 'back') {
+      e.preventDefault();
+      const activityId = slot.dataset['activityId'];
+      if (activityId) {
+        void fetch(`/api/activities/${encodeURIComponent(activityId)}/back`, { method: 'POST' });
+      }
+    }
+    if (action === 'back-to') {
+      e.preventDefault();
+      const activityId = slot.dataset['activityId'];
+      const idx = Number(btn.dataset['index']);
+      if (activityId && Number.isInteger(idx) && idx >= 0) {
+        void fetch(`/api/activities/${encodeURIComponent(activityId)}/back-to`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ index: idx }),
+        });
+      }
+    }
   });
 
   function restoreView_(viewId: string) {
@@ -959,8 +1588,15 @@ const ssrVisibleViews = initialViews.filter(
   }
 
   focusExitBtn.addEventListener('click', exitFocus);
+
+  // Esc-out-of-focus is contextual to the focus overlay, not an OS action.
+  // Local DOM listener — only consumes the keystroke while the overlay is up,
+  // so it doesn't compete with the dispatcher's `aura.nav.back` chain.
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && focusedInstanceId !== null) exitFocus();
+    if (e.key === 'Escape' && focusedInstanceId !== null) {
+      e.preventDefault();
+      exitFocus();
+    }
   });
 
   /** Remove all views belonging to an instance (called from Process Manager after close/kill). */
@@ -999,14 +1635,13 @@ const ssrVisibleViews = initialViews.filter(
     });
   }, 120);
 
-  // Topic-filtered SSE — desktop reacts to app/activity lifecycle + workspace
-  // changes (filter, switch, member edits). Theme + mode events have their
-  // own dedicated stream wired in OSLayout. `activity:*` includes the
-  // back-stack `activity:focus` event; `workspaces:*` is the bulk update
-  // pushed by Settings when the user (or any other tab) edits the list.
-  const sse = new EventSource('/api/apps/events?topics=app:*,activity:*,workspaces:*,workspace:*');
-  sse.onmessage = (e) => {
-    const ev = JSON.parse(e.data);
+  // Desktop reacts to app/activity lifecycle + workspace changes (filter,
+  // switch, member edits) over the shared socket.io channel. Theme + mode
+  // events have their own listener wired in OSLayout. `activity:*` includes
+  // the back-stack `activity:focus` event; `workspaces:*` is the bulk
+  // update pushed by Settings when the user (or any other tab) edits the
+  // list.
+  osEvents.subscribe(['app:*', 'activity:*', 'workspaces:*', 'workspace:*'], (ev: any) => {
     if (ev.type === 'app:stateChanged') {
       // Terminal lifecycle states ⇒ the backing process is gone (forceKilled
       // from process manager, reconciler force-kill on identity drift, or a
@@ -1067,6 +1702,44 @@ const ssrVisibleViews = initialViews.filter(
       if (focusedActivityId === ev.activityId) exitFocus();
       renderLayout();
     }
+    if (ev.type === 'activity:navigated') {
+      // In-place activity navigation — the iframe URL changed but the slot
+      // stays the same. Update `view.iframeUrl` + `view.title` + the
+      // history/breadcrumb pair, then re-point the existing iframe at the
+      // new path. No new layout slot, no workspace membership change, no
+      // skeleton overlay (the iframe is already mounted, the doc navigates).
+      const idx = views.findIndex((v) => v.activityId === ev.activityId);
+      if (idx >= 0) {
+        const v = views[idx]!;
+        const nextPath = ev.path ?? '/';
+        const nextTitle = ev.title ?? v.title;
+        const minimizable = !!v.minimizable;
+        const nextUrl = buildView(v.appId, nextTitle, v.instanceId, v.activityId, nextPath, v.lifecycleState, minimizable).iframeUrl;
+        const nextHistory = Array.isArray(ev.history) ? (ev.history as Array<{ path: string; title?: string }>) : v.history;
+        const nextBreadcrumb: 'os' | 'off' = ev.breadcrumb === 'off' ? 'off' : 'os';
+        views = [
+          ...views.slice(0, idx),
+          { ...v, iframeUrl: nextUrl, title: nextTitle, history: nextHistory, breadcrumb: nextBreadcrumb },
+          ...views.slice(idx + 1),
+        ];
+        const slot = document.querySelector<HTMLElement>(`.app-slot[data-view-id="${CSS.escape(v.viewId)}"]`);
+        const iframe = slot?.querySelector<HTMLIFrameElement>('iframe');
+        if (iframe && iframe.getAttribute('src') !== nextUrl) iframe.src = nextUrl;
+        renderLayout(); // refresh title chrome (breadcrumb trail + title)
+      }
+    }
+    if (ev.type === 'activity:breadcrumbChanged') {
+      // Runtime breadcrumb toggle — app called `osClient.activity.
+      // setBreadcrumb('os' | 'off')`. No iframe change; just refresh
+      // the chrome rendering.
+      const idx = views.findIndex((v) => v.activityId === ev.activityId);
+      if (idx >= 0) {
+        const v = views[idx]!;
+        const next: 'os' | 'off' = ev.breadcrumb === 'off' ? 'off' : 'os';
+        views = [...views.slice(0, idx), { ...v, breadcrumb: next }, ...views.slice(idx + 1)];
+        renderLayout();
+      }
+    }
     if (ev.type === 'activity:focus') {
       // Back-stack pop — bring the named (already-open) activity back to the
       // foreground. Bound to `auraFocusInstance`, the same primitive the
@@ -1078,13 +1751,13 @@ const ssrVisibleViews = initialViews.filter(
       }
     }
     if (ev.type === 'workspaces:changed' || ev.type === 'workspace:activated') {
-      // The SSE payload only carries summaries (no member arrays), so we
+      // The event payload only carries summaries (no member arrays), so we
       // have to re-fetch the full state to reconcile membership. The
       // refresh() call notifies subscribers — which triggers renderLayout()
       // via the subscribe() wire-up further up.
       workspaceClient.refresh().catch((err) => console.warn('[shell] workspace refresh failed', err));
     }
-  };
+  });
 </script>
 
 <style is:global>
@@ -1112,6 +1785,123 @@ const ssrVisibleViews = initialViews.filter(
     z-index: 50;
   }
   #focus-view[aria-hidden="false"] { display: flex; }
+
+  /* Nav-mode focus ring. Set on the highlighted `.app-slot` by
+     `pages/index.astro`'s arrow-key handler. Inset shadow rather than
+     `outline` so it doesn't bleed into adjacent slots in the tiling grid. */
+  .app-slot[data-aura-nav-focus="true"] {
+    box-shadow: inset 0 0 0 2px var(--aura-color-primary), 0 0 12px var(--aura-color-primary);
+    z-index: 2;
+  }
+
+  /* ---- Slot chrome (title + breadcrumb + controls) -------------------- */
+  .app-slot .slot-chrome {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 8px;
+    height: 28px;
+    background: var(--aura-color-surface-2);
+    border-bottom: var(--aura-border);
+    flex-shrink: 0;
+    gap: 8px;
+    /* min-width:0 so the title can actually shrink past its intrinsic
+       width inside this flex container. Without it, long breadcrumb
+       trails would force the slot wider than its grid cell. */
+    min-width: 0;
+  }
+  .app-slot .slot-title {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    overflow: hidden;
+    color: var(--aura-color-primary);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .app-slot .slot-title-trail {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .app-slot .slot-title-id {
+    color: var(--aura-color-text-dim);
+    font-size: 0.6rem;
+    flex-shrink: 0;
+  }
+  .app-slot .slot-controls { display: flex; gap: 4px; flex-shrink: 0; }
+  .app-slot .slot-controls button,
+  .app-slot .crumb-back {
+    background: transparent;
+    border: var(--aura-border);
+    color: var(--aura-color-text-dim);
+    font-family: var(--aura-font-mono);
+    font-size: 0.65rem;
+    padding: 2px 6px;
+    cursor: pointer;
+    line-height: 1;
+  }
+  .app-slot .slot-controls button:hover,
+  .app-slot .crumb-back:hover,
+  .app-slot .crumb-prev:hover {
+    color: var(--aura-color-text);
+    border-color: var(--aura-color-primary);
+  }
+
+  /* ---- Breadcrumb trail ----------------------------------------------- */
+  /*
+   * Space-aware behaviour:
+   *   • Back button (`←`) is always full size — fixed `flex-shrink: 0`.
+   *   • Previous crumbs shrink first when room runs short — each has
+   *     `min-width: 2ch` so they collapse to roughly two glyphs before
+   *     ellipsizing further. The leftmost crumb shrinks first because
+   *     flex distribution favours later items.
+   *   • Current crumb has slightly higher `min-width` so the user always
+   *     sees a recognisable label for where they are.
+   *   • The whole trail clips with `overflow: hidden`; nothing escapes
+   *     the slot chrome bar.
+   */
+  .app-slot .crumb {
+    color: var(--aura-color-text-dim);
+    font-family: inherit;
+    font-size: 0.7rem;
+    letter-spacing: 0.05em;
+    padding: 2px 4px;
+    line-height: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 2ch;
+  }
+  .app-slot .crumb-back {
+    flex-shrink: 0;
+    margin-right: 4px;
+  }
+  .app-slot .crumb-prev {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: var(--aura-color-text-dim);
+    flex-shrink: 1;
+    max-width: 18ch;
+  }
+  .app-slot .crumb-current {
+    color: var(--aura-color-primary);
+    flex-shrink: 0;
+    min-width: 4ch;
+    max-width: 24ch;
+  }
+  .app-slot .crumb-sep {
+    color: var(--aura-color-text-dim);
+    flex-shrink: 0;
+    opacity: 0.5;
+  }
 
   #focus-header {
     display: flex;

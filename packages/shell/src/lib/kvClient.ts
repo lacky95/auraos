@@ -88,18 +88,18 @@ export function subscribeKv(
   filter: { namespace?: string; key?: string },
   cb:     (ev: KvChangeEvent) => void,
 ): () => void {
-  if (typeof window === 'undefined' || typeof EventSource === 'undefined') {
-    return () => undefined;
-  }
-  const es = new EventSource(`/api/apps/events?topics=kv:*`);
-  es.onmessage = (e) => {
-    try {
-      const parsed = JSON.parse(e.data) as KvChangeEvent;
+  if (typeof window === 'undefined') return () => undefined;
+  // Dynamic import keeps kvClient usable in SSR without dragging socket.io
+  // into the server bundle of this module.
+  const off = { current: () => undefined as void };
+  void import('./osEvents.ts').then(({ osEvents }) => {
+    off.current = osEvents.subscribe('kv:changed', (ev) => {
+      const parsed = ev as unknown as KvChangeEvent;
       if (parsed.type !== 'kv:changed') return;
       if (filter.namespace && parsed.namespace !== filter.namespace) return;
       if (filter.key       && parsed.key       !== filter.key)       return;
       cb(parsed);
-    } catch { /* malformed frame */ }
-  };
-  return () => es.close();
+    });
+  });
+  return () => off.current();
 }

@@ -1,5 +1,24 @@
 ---
 import ViewportSettingsDialog from './ViewportSettingsDialog.tsx';
+import { defaultKv } from '@aura/kv-store';
+
+// SSR-resolve clock format + locale from the OS KV so the first paint
+// matches the user's preference (no flash of the default 24h/en-GB on
+// reload). The Settings → General page writes both to `os/clockFormat`
+// and `os/locale`. Live updates flow through the shared socket.io
+// channel (`kv:changed`) — see the tick + subscription below.
+let initialClockFormat: '12h' | '24h' = '24h';
+let initialLocale: string = 'en-GB';
+{
+  const kv = defaultKv();
+  try {
+    const cf = await kv.getValue<'12h' | '24h'>('os', 'clockFormat');
+    if (cf === '12h' || cf === '24h') initialClockFormat = cf;
+    const lc = await kv.getValue<string>('os', 'locale');
+    if (typeof lc === 'string' && lc) initialLocale = lc;
+  } catch { /* fall back to defaults */ }
+  finally { await kv.close().catch(() => undefined); }
+}
 ---
 <header id="statusbar">
   <span class="os-name">AURA<span class="os-ver">OS</span></span>
@@ -10,13 +29,35 @@ import ViewportSettingsDialog from './ViewportSettingsDialog.tsx';
       strategy (clickable to cycle). Populated client-side from the
       workspaceClient — see the <script> block below.
     -->
-    <div id="ws-pills" class="ws-pills" role="group" aria-label="Workspaces"></div>
-    <button id="ws-layout-chip" class="layout-chip" title="Cycle workspace layout" aria-label="Layout strategy">
-      <span class="layout-chip-icon" aria-hidden="true">▦</span>
-      <span class="layout-chip-name">—</span>
-      <span class="layout-chip-cycle" aria-hidden="true">↻</span>
-    </button>
-    <span id="clock" class="clock">--:--:--</span>
+    <!--
+      Workspace bundle: pills + layout chip live in `.ws-content`. A
+      ResizeObserver on `#statusbar` flips `data-compact` on the bundle
+      when the bar can't fit everything; in compact mode the controls
+      collapse into a single icon button (#ws-collapse-btn) that opens
+      `.ws-content` as a dropdown popover below it.
+    -->
+    <div id="ws-bundle" class="ws-bundle" data-compact="false">
+      <button
+        id="ws-collapse-btn"
+        type="button"
+        class="status-btn ws-collapse-btn"
+        title="Workspaces"
+        aria-haspopup="true"
+        aria-expanded="false"
+        aria-controls="ws-content"
+      >
+        <span class="ws-collapse-icon" aria-hidden="true">▦</span>
+      </button>
+      <div id="ws-content" class="ws-content" role="group" aria-label="Workspaces">
+        <div id="ws-pills" class="ws-pills"></div>
+        <button id="ws-layout-chip" class="layout-chip" title="Cycle workspace layout" aria-label="Layout strategy">
+          <span class="layout-chip-icon" aria-hidden="true">▦</span>
+          <span class="layout-chip-name">—</span>
+          <span class="layout-chip-cycle" aria-hidden="true">↻</span>
+        </button>
+      </div>
+    </div>
+    <span id="clock" class="clock" data-clock-format={initialClockFormat} data-locale={initialLocale}>--:--:--</span>
     <div class="status-zoom" role="group" aria-label="Page zoom">
       <button id="zoom-out"   type="button" class="status-btn" title="Zoom out (Ctrl -)">-</button>
       <button id="zoom-level" type="button" class="status-btn status-btn-text" title="Reset zoom to 100%">100%</button>
@@ -53,13 +94,50 @@ import ViewportSettingsDialog from './ViewportSettingsDialog.tsx';
 
 <script>
   import * as workspaceClient from '../../lib/workspaceClient';
+  import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
+  import { osEvents } from '../../lib/osEvents.ts';
 
+  const keyDispatcher = getKeyDispatcher();
+
+  // Clock: format + locale come from `os/clockFormat` + `os/locale` KV
+  // entries, hydrated by SSR into `data-*` attributes on #clock. The
+  // Settings → General page writes both; we live-update via the shared
+  // socket.io channel without a page reload.
+  function readClockPrefs() {
+    const el = document.getElementById('clock');
+    const fmt = (el?.dataset['clockFormat'] === '12h' ? '12h' : '24h') as '12h' | '24h';
+    const loc = el?.dataset['locale'] || 'en-GB';
+    return { fmt, loc };
+  }
   function tick() {
     const el = document.getElementById('clock');
-    if (el) el.textContent = new Date().toLocaleTimeString('en-GB', { hour12: false });
+    if (!el) return;
+    const { fmt, loc } = readClockPrefs();
+    try {
+      el.textContent = new Date().toLocaleTimeString(loc, { hour12: fmt === '12h' });
+    } catch {
+      // Bad locale string from the user — fall back to en-GB so the clock
+      // still ticks instead of crashing the whole script.
+      el.textContent = new Date().toLocaleTimeString('en-GB', { hour12: fmt === '12h' });
+    }
   }
   tick();
   setInterval(tick, 1000);
+
+  // Live-refresh when Settings → General writes a new value. The Redis
+  // KV PUT fires `kv:changed`, which arrives here over socket.io.
+  osEvents.subscribe('kv:changed', (ev: any) => {
+    if (ev?.namespace !== 'os') return;
+    const el = document.getElementById('clock');
+    if (!el) return;
+    if (ev.key === 'clockFormat' && (ev.value === '12h' || ev.value === '24h')) {
+      el.dataset['clockFormat'] = ev.value;
+      tick();
+    } else if (ev.key === 'locale' && typeof ev.value === 'string' && ev.value) {
+      el.dataset['locale'] = ev.value;
+      tick();
+    }
+  });
 
   // Fullscreen toggle. Browser fullscreen requires a user gesture, so this
   // only works from the click handler — not via auraToggleFullscreen() from
@@ -235,6 +313,50 @@ import ViewportSettingsDialog from './ViewportSettingsDialog.tsx';
   // Ctrl+Shift+N → create + activate a new workspace
   const pillsEl     = document.getElementById('ws-pills')        as HTMLElement       | null;
   const layoutChip  = document.getElementById('ws-layout-chip')  as HTMLButtonElement | null;
+  const bundleEl    = document.getElementById('ws-bundle')       as HTMLElement       | null;
+  const collapseBtn = document.getElementById('ws-collapse-btn') as HTMLButtonElement | null;
+  const statusBar   = document.getElementById('statusbar')       as HTMLElement       | null;
+
+  // ── Responsive collapse ───────────────────────────────────────────────
+  // When the status bar can't fit all its controls (narrow viewport / heavy
+  // zoom / lots of workspaces), collapse the pills + layout chip into a
+  // single icon-button dropdown. The breakpoint is a width threshold on
+  // #statusbar — measured via ResizeObserver so it tracks the actual rendered
+  // box, not viewport pixels (the shell body is `transform: scale()`d by the
+  // zoom slider).
+  const COMPACT_BREAKPOINT_PX = 720;
+  function applyResponsiveMode() {
+    if (!statusBar || !bundleEl) return;
+    const compact = statusBar.clientWidth < COMPACT_BREAKPOINT_PX;
+    bundleEl.dataset['compact'] = compact ? 'true' : 'false';
+    // Close any open popover when expanding (popover loses meaning inline).
+    if (!compact) {
+      bundleEl.dataset['open'] = 'false';
+      collapseBtn?.setAttribute('aria-expanded', 'false');
+    }
+  }
+  if (statusBar && typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(applyResponsiveMode).observe(statusBar);
+  }
+  applyResponsiveMode();
+
+  // Collapse-button toggle. In compact mode the bundle's [data-open] flips
+  // ws-content from `display: none` to an absolute-positioned popover. The
+  // click-outside listener below dismisses it on any click outside the
+  // bundle (including selecting a workspace from inside).
+  collapseBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!bundleEl) return;
+    const next = bundleEl.dataset['open'] !== 'true';
+    bundleEl.dataset['open'] = String(next);
+    collapseBtn.setAttribute('aria-expanded', String(next));
+  });
+  document.addEventListener('click', (e) => {
+    if (!bundleEl || bundleEl.dataset['open'] !== 'true') return;
+    if (bundleEl.contains(e.target as Node)) return;
+    bundleEl.dataset['open'] = 'false';
+    collapseBtn?.setAttribute('aria-expanded', 'false');
+  });
 
   // Ordered list of registered strategy ids. Falls back to the v1 seeded
   // set if the inventory endpoint isn't reachable (e.g. Settings down).
@@ -439,27 +561,36 @@ import ViewportSettingsDialog from './ViewportSettingsDialog.tsx';
       .catch((err) => console.warn('[StatusBar] patchWorkspace failed', err));
   });
 
-  // Keyboard: Ctrl+1..9 → activate workspace at slot, Ctrl+Shift+N → new.
-  // We use Ctrl-only (not Cmd) because the OS shell intentionally takes
-  // priority over per-app shortcuts here; apps don't see these keys.
-  document.addEventListener('keydown', (e) => {
-    if (!e.ctrlKey || e.altKey || e.metaKey) return;
-    if (e.shiftKey && e.code === 'KeyN') {
-      e.preventDefault();
-      workspaceClient.createWorkspace().catch(() => undefined);
-      return;
-    }
-    if (e.shiftKey) return;
-    const n = e.code.startsWith('Digit') ? Number(e.code.slice(5)) : NaN;
-    if (Number.isInteger(n) && n >= 1 && n <= 9) {
+  // Keyboard shortcuts → KeyDispatcher. The dispatcher resolves
+  // the bound combo per action (default OR user override), so we just
+  // register what each action DOES; the combo is the user's prerogative.
+  // Ctrl+1..9 → activate workspace at slot. Ctrl+Shift+N → new workspace.
+  // Ctrl+Tab / Ctrl+Shift+Tab → cycle workspaces.
+  {
+    const switchToSlot = (n: number) => {
       const state = workspaceClient.getCached();
       const target = state?.workspaces[n - 1];
-      if (target) {
-        e.preventDefault();
-        workspaceClient.setActive(target.id).catch(() => undefined);
-      }
+      if (!target) return;
+      workspaceClient.setActive(target.id).catch(() => undefined);
+    };
+    for (let i = 1; i <= 9; i++) {
+      keyDispatcher.bind(`aura.workspace.switch-${i}`, () => { switchToSlot(i); });
     }
-  });
+    keyDispatcher.bind('aura.workspace.new', () => {
+      workspaceClient.createWorkspace().catch(() => undefined);
+    });
+    keyDispatcher.bind('aura.workspace.cycle-next', () => cycleWorkspace(+1));
+    keyDispatcher.bind('aura.workspace.cycle-prev', () => cycleWorkspace(-1));
+  }
+
+  function cycleWorkspace(dir: 1 | -1): void {
+    const state = workspaceClient.getCached();
+    if (!state || state.workspaces.length === 0) return;
+    const i = state.workspaces.findIndex((w) => w.id === state.activeWorkspaceId);
+    const n = state.workspaces.length;
+    const next = state.workspaces[((i < 0 ? 0 : i) + dir + n) % n];
+    if (next) workspaceClient.setActive(next.id).catch(() => undefined);
+  }
 </script>
 
 <style>
@@ -544,6 +675,58 @@ import ViewportSettingsDialog from './ViewportSettingsDialog.tsx';
     font-size: 0.65rem;
     letter-spacing: 0.06em;
     color: var(--aura-color-text);
+  }
+
+  /* ── Workspace bundle (wraps pills + layout chip) ──
+   * Two modes, toggled by JS based on the statusbar width:
+   *
+   *   [data-compact="false"]  expanded — pills + chip render inline,
+   *                           the collapse trigger is hidden.
+   *
+   *   [data-compact="true"]   collapsed — only the trigger button shows;
+   *                           clicking it flips [data-open] to expose the
+   *                           same `.ws-content` as a popover dropdown
+   *                           anchored to the trigger.
+   *
+   * Always-on `position: relative` so the popover absolute-positions to
+   * the bundle, not the document. */
+  .ws-bundle {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .ws-collapse-btn { display: none; }
+  .ws-content {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .ws-collapse-icon { line-height: 1; font-size: 0.9rem; }
+
+  /* Compact mode — trigger replaces the inline strip; popover is hidden by
+   * default and only mounts when `[data-open="true"]`. */
+  .ws-bundle[data-compact="true"] .ws-collapse-btn { display: inline-flex; }
+  .ws-bundle[data-compact="true"] .ws-content { display: none; }
+  .ws-bundle[data-compact="true"][data-open="true"] .ws-content {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 1100;
+    padding: 8px;
+    background: var(--aura-color-surface);
+    border: var(--aura-border);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    min-width: 220px;
+    max-width: min(360px, 90vw);
+  }
+  /* The collapse button gets a subtle highlight while the dropdown is open. */
+  .ws-bundle[data-compact="true"][data-open="true"] .ws-collapse-btn {
+    color: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
   }
 
   /* ── Layout chip ──

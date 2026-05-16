@@ -7,6 +7,7 @@
   "category": "productivity",
   "permissions": ["storage.read", "storage.write"],
   "tools": ["bash", "node"],
+  "sandbox": "container",
   "instanceMode": "single",
   "activityMode": "multi",
   "defaultLaunch": "new-activity",

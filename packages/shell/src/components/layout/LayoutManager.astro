@@ -16,6 +16,7 @@ import { layoutRegistry } from '@aura/core';
 import FullscreenLayout from './strategies/FullscreenLayout.astro';
 import TilingLayout     from './strategies/TilingLayout.astro';
 import StackLayout      from './strategies/StackLayout.astro';
+import RowsLayout       from './strategies/RowsLayout.astro';
 
 interface Props {
   views:       AppView[];
@@ -39,7 +40,8 @@ const visible = views.filter(v => v.state !== 'minimized');
 const COMPONENTS = {
   tiling:     TilingLayout,
   fullscreen: FullscreenLayout,
-  stack:      StackLayout,
+  stack:      StackLayout,  // user-facing name: "Free Window"
+  rows:       RowsLayout,
 } as const;
 
 type StrategyId = keyof typeof COMPONENTS;

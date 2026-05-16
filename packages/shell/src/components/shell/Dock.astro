@@ -4,8 +4,11 @@ import ProcessManager from './ProcessManager.astro';
 
 interface Props {
   apps: AppManifest[];
+  /** `{ appId → enabled }`. Disabled tiles are hidden via CSS and live-flipped
+   *  through the SSE handler at the end of this file. */
+  enabledMap?: Record<string, boolean>;
 }
-const { apps } = Astro.props;
+const { apps, enabledMap = {} } = Astro.props;
 ---
 <nav id="dock">
   <button
@@ -19,10 +22,12 @@ const { apps } = Astro.props;
   <div class="separator"></div>
   {apps.map(app => {
     const glyph = (app.icon ?? app.name.charAt(0)).toUpperCase();
+    const enabled = enabledMap[app.id] !== false;
     return (
       <button
         class="dock-item"
         data-app-id={app.id}
+        data-enabled={String(enabled)}
         title={app.name}
         onclick={`window.auraLaunchApp('${app.id}')`}
       >
@@ -86,6 +91,10 @@ const { apps } = Astro.props;
     transition: box-shadow 0.1s;
   }
   .dock-item:hover { box-shadow: var(--aura-glow-primary); color: var(--aura-color-primary); }
+  /* Disabled apps disappear from the dock (Android-style "hide on disable").
+     The data-enabled attr is set at SSR + flipped live by the SSE handler
+     at the end of this file. */
+  .dock-item[data-enabled="false"] { display: none; }
 
   .app-initial {
     /* Uniform size across 1/2/3-char glyphs; sized to fit "SET" in the dock tile. */
@@ -116,4 +125,19 @@ const { apps } = Astro.props;
     if (typeof toggle === 'function') toggle();
     else console.warn('[Dock] auraToggleLauncher not available — LauncherOverlay missing?');
   });
+
+  // Live enable/disable updates over socket.io (same channel the desktop
+  // uses for app:* / activity:* / workspaces:* changes). When the user
+  // toggles an app in Settings → Apps or via `aura app enable/disable`,
+  // flip data-enabled on the matching dock tile — CSS handles the show/hide.
+  const dock = document.getElementById('dock') as HTMLElement | null;
+  if (dock) {
+    import('../../lib/osEvents.ts').then(({ osEvents }) => {
+      osEvents.subscribe('app:enabledChanged', (ev: any) => {
+        if (typeof ev?.appId !== 'string' || typeof ev?.enabled !== 'boolean') return;
+        const tile = dock.querySelector<HTMLElement>(`.dock-item[data-app-id="${CSS.escape(ev.appId)}"]`);
+        if (tile) tile.dataset['enabled'] = String(ev.enabled);
+      });
+    });
+  }
 </script>
