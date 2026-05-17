@@ -18,6 +18,8 @@ export interface OsEvents {
   'app:removed': { appId: string };
   /** A user toggled an app's enable state (Settings → Apps or `aura app enable/disable`). */
   'app:enabledChanged': { appId: string; enabled: boolean };
+  /** A user launched an app — dock uses this to re-order its MRU tiles live. */
+  'app:mruChanged': { appId: string; at: number };
   'activity:opened': { activityId: string; parentInstanceId: string; appId: string; path: string; title?: string; minimizable?: boolean; stackParentId?: string };
   'activity:closed': { activityId: string; parentInstanceId: string; appId: string };
   /**

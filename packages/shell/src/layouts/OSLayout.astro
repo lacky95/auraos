@@ -663,6 +663,15 @@ const activeThemeId   = activeTheme.id;
       const res = dispatcher.handleKeyEvent(e);
       if (res.fired) e.preventDefault();
     }, { capture: true });
+    // Modifier keyup tracking: the dispatcher needs to know when the user
+    // RELEASES a side-specific modifier so it doesn't think e.g. RShift is
+    // still held when the next non-modifier press arrives.
+    document.addEventListener('keyup', (e) => {
+      dispatcher.handleModifierKeyUp(e);
+    }, { capture: true });
+    // Blur reset: alt-tabbing away while holding Shift never delivers the
+    // keyup. Clear all side flags on blur so the next focus starts clean.
+    window.addEventListener('blur', () => dispatcher.resetModifierState());
 
     // Socket.IO-driven state refresh. The dispatcher rebroadcasts claim
     // lists automatically when state changes (see notifyClaims).
@@ -688,6 +697,7 @@ const activeThemeId   = activeTheme.id;
     height: 100%;
     width: 100%;
     overflow: hidden;
+    position: relative; /* anchor for fixed-style overlay bars in autohide mode */
   }
 
   #desktop {
@@ -695,4 +705,85 @@ const activeThemeId   = activeTheme.id;
     position: relative;
     background: var(--aura-color-bg);
   }
+
+  /* (auto-hide rules moved to the <style is:global> block below) */
+</style>
+
+<!--
+  Auto-hide bars mode. These rules need to be unscoped because the targets
+  (#statusbar, #dock) live in sibling .astro components (StatusBar, Dock)
+  and don't carry OSLayout's auto-injected `data-astro-cid-*` attribute.
+  A scoped selector would silently miss them and nothing would animate.
+
+  Toggle attributes (written by StatusBar's autohide script onto <body>):
+    body[data-autohide-bars="on"]   — turns the mode on globally
+    body[data-show-top="true"]      — reveals the status bar
+    body[data-show-bottom="true"]   — reveals the dock
+-->
+<style is:global>
+  /* Switch the grid off entirely in autohide mode — we don't want any
+   * implicit-row sizing weirdness when #statusbar and #dock are pulled
+   * out of flow. Plain block layout + #desktop at 100% gives the desktop
+   * the full viewport, deterministically. */
+  body[data-autohide-bars="on"] #os-root {
+    display: block;
+  }
+  body[data-autohide-bars="on"] #desktop {
+    height: 100%;
+  }
+  /* Animate top/bottom rather than `transform: translateY(...)` to avoid
+   * creating a new containing block on the bars. The Dock currently mounts
+   * <ProcessManager /> inside <nav id="dock">, and pm-panel is a
+   * `position: fixed` descendant. If the dock has any transform set, the
+   * pm-panel anchors to the dock's box instead of the viewport — when the
+   * dock slides off, the panel slides with it. Animating top/bottom keeps
+   * the bars containing-block-neutral so descendants like pm-panel stay
+   * viewport-positioned. */
+  body[data-autohide-bars="on"] #statusbar,
+  body[data-autohide-bars="on"] #dock {
+    position: fixed;
+    left: 0;
+    right: 0;
+    /* Lower than #lo-panel / #pm-panel (z-index: 1000) so an open
+     * launcher or process manager renders OVER the revealed bar —
+     * Windows Start-menu / Action Center style. */
+    z-index: 900;
+    transition: top 0.18s ease-out, bottom 0.18s ease-out;
+  }
+  body[data-autohide-bars="on"] #statusbar {
+    top: calc(-1 * var(--aura-statusbar-height));
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  }
+  body[data-autohide-bars="on"] #dock {
+    bottom: calc(-1 * var(--aura-dock-height));
+    box-shadow: 0 -4px 14px rgba(0, 0, 0, 0.35);
+  }
+  body[data-autohide-bars="on"][data-show-top="true"] #statusbar {
+    top: 0;
+  }
+  body[data-autohide-bars="on"][data-show-bottom="true"] #dock {
+    bottom: 0;
+  }
+  #autohide-btn[data-active="on"] {
+    color: var(--aura-color-bg);
+    background: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+  }
+
+  /* Slide-in panels (#lo-panel from LauncherOverlay, #pm-panel from
+   * ProcessManager) anchor to `top: var(--aura-statusbar-height)` and
+   * `bottom: var(--aura-dock-height)` in normal mode so they don't
+   * overlap the bars. In autohide mode the bars are fixed overlays that
+   * translate off-screen; we want the panels to span edge-to-edge so
+   * there are no dead gaps at top + bottom. The revealed bars sit on
+   * top via z-index when their hot zone fires — same as Windows-style
+   * autohide where the open menu covers the taskbar slot. */
+  body[data-autohide-bars="on"] #lo-panel,
+  body[data-autohide-bars="on"] #pm-panel {
+    top: 0 !important;
+    bottom: 0 !important;
+  }
+  /* (Bars stay below panels — panels render on top of revealed bars,
+   *  Windows-style. Z-index already set on the primary autohide rule
+   *  above.) */
 </style>

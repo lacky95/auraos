@@ -221,7 +221,7 @@ function sioPlugin() {
       // a new event lands in OsEventBus, add it here too.
       const EVENT_TYPES = [
         'app:stateChanged', 'app:crashed', 'app:installed', 'app:removed',
-        'app:enabledChanged',
+        'app:enabledChanged', 'app:mruChanged',
         'activity:opened', 'activity:closed', 'activity:focus',
         'activity:navigated', 'activity:breadcrumbChanged',
         'theme:changed', 'mode:changed', 'notification',

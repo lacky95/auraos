@@ -5,13 +5,20 @@
  * `<index.ts>/styles/scificn-bridge.css` (ENOTDIR). */
 @import './tokens.css';
 
+/* Reset. NOTE: deliberately does NOT include `padding: 0` on `*` — that
+ * would compete with @aura/ui (scificn) Button + utility classes like
+ * `px-3` and produce padding-less buttons whenever the cascade order or
+ * a property-name longhand mismatch tips the wrong way. Padding belongs
+ * on individual components, not on every element by default. */
 *, *::before, *::after {
   box-sizing: border-box;
   margin: 0;
-  padding: 0;
 }
 
+/* Only the document root needs `padding: 0` — Astro/Vite occasionally
+ * adds margin/padding through user-agent stylesheets we want to zero. */
 html, body {
+  padding: 0;
   height: 100%;
   overflow: hidden;
   background: var(--aura-color-bg);
@@ -24,10 +31,32 @@ html, body {
 a { color: var(--aura-color-primary); text-decoration: none; }
 a:hover { text-shadow: var(--aura-glow-primary); }
 
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: var(--aura-color-surface); }
-::-webkit-scrollbar-thumb { background: var(--aura-color-border); }
-::-webkit-scrollbar-thumb:hover { background: var(--aura-color-primary); }
+/* OS scrollbars. The runtime /api/os/theme.css endpoint also emits these
+ * rules so every app iframe (themeStrategy='inherit') gets the same look;
+ * we keep them duplicated here so the shell's own scrollbars stay themed
+ * even if /api/os/theme.css is briefly unavailable during a hot reload.
+ *
+ *   • Firefox       — scrollbar-width + scrollbar-color (CSS Scrollbars 1)
+ *   • Chrome/Safari — ::-webkit-scrollbar* pseudo-elements
+ *
+ * The thumb uses a `border + background-clip: padding-box` trick so it
+ * looks like a thin pill with breathing room inside an 8px track, instead
+ * of a flat colored block flush to the scrollbar edge. */
+* { scrollbar-width: thin; scrollbar-color: var(--aura-color-border) transparent; }
+*:hover { scrollbar-color: var(--aura-color-primary) transparent; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--aura-color-border);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--aura-color-primary);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-corner { background: transparent; }
 
 .glow-text { text-shadow: var(--aura-glow-primary); }
 .glow-border { box-shadow: var(--aura-glow-subtle); border: var(--aura-border); }

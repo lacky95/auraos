@@ -483,6 +483,24 @@ export class ThemeManager {
       lines.push('}');
     }
 
+    // OS-wide scrollbar styling. The proxy injects /api/os/theme.css into
+    // every app iframe (themeStrategy='inherit'), so emitting the scrollbar
+    // rules here gives EVERY app — and the shell itself — the same thin
+    // phosphor scrollbars without each app having to opt in.
+    //   • Firefox: `scrollbar-width` + `scrollbar-color` (CSS Scrollbars 1).
+    //   • Chrome / Safari / Edge / Webkit-based browsers: legacy
+    //     `::-webkit-scrollbar*` pseudo-elements. Both are emitted so
+    //     scrollbars look identical across browsers.
+    lines.push('');
+    lines.push('/* OS scrollbars — applied to every document that links /api/os/theme.css */');
+    lines.push('* { scrollbar-width: thin; scrollbar-color: var(--aura-color-border) transparent; }');
+    lines.push('*:hover { scrollbar-color: var(--aura-color-primary) transparent; }');
+    lines.push('::-webkit-scrollbar { width: 8px; height: 8px; }');
+    lines.push('::-webkit-scrollbar-track { background: transparent; }');
+    lines.push('::-webkit-scrollbar-thumb { background: var(--aura-color-border); border: 2px solid transparent; background-clip: padding-box; }');
+    lines.push('::-webkit-scrollbar-thumb:hover { background: var(--aura-color-primary); border: 2px solid transparent; background-clip: padding-box; }');
+    lines.push('::-webkit-scrollbar-corner { background: transparent; }');
+
     return lines.join('\n') + '\n';
   }
 }

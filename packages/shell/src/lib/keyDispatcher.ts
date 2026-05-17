@@ -30,9 +30,14 @@
 import {
   comboFromEvent,
   canonicalize,
+  expandCombo,
+  emptyModifierState,
+  updateModifierState,
+  isModifierCode,
   type KeyAction,
   type KeyScope,
   type KeyEventLike,
+  type ModifierState,
   type OsKeymapState,
 } from '@aura/core/keymap';
 import { createLogger } from '@aura/core/logger';
@@ -78,6 +83,11 @@ export class KeyDispatcher {
   private handlers = new Map<string, DispatchHandler>();
   private modeListeners = new Set<(mode: DispatchMode) => void>();
   private claimListeners = new Set<(claims: { os: string[]; perApp: Map<string, string[]> }) => void>();
+  // Side-specific modifier state — which physical Ctrl/Alt/Shift/Super
+  // is held. Updated from the modifier-key keydown/keyup events themselves
+  // (see ingestModifierEvent) so a subsequent non-modifier press can
+  // emit `RShift+Enter` rather than the side-agnostic `Shift+Enter`.
+  private modifierState: ModifierState = emptyModifierState();
 
   // ---- State setters --------------------------------------------------
 
@@ -146,9 +156,17 @@ export class KeyDispatcher {
 
   /**
    * Process a keydown from the shell's own window. Returns the matched
-   * action (if any) and whether a registered handler ran.
+   * action (if any) and whether a registered handler ran. Modifier-key
+   * keydowns also update the side-specific modifier state so the next
+   * non-modifier press resolves to the precise (`RShift+Enter`) form.
    */
   handleKeyEvent(event: KeyboardEvent): DispatchResult {
+    if (isModifierCode(event.code)) {
+      // For a Pressed modifier we update the tracked state. We still
+      // emit a combo (it equals event.code) — a binding to e.g. `AltRight`
+      // can fire on its own.
+      this.modifierState = updateModifierState(this.modifierState, event.code, true);
+    }
     const evLike: KeyEventLike = {
       code:     event.code,
       key:      event.key,
@@ -157,9 +175,28 @@ export class KeyDispatcher {
       shiftKey: event.shiftKey,
       metaKey:  event.metaKey,
     };
-    const combo = comboFromEvent(evLike);
+    const combo = comboFromEvent(evLike, this.modifierState);
     if (!combo) return { actionId: null, fired: false };
     return this.resolveAndFire(combo, { event, combo, appId: null, source: 'keyboard' });
+  }
+
+  /**
+   * Modifier keyup — clears the matching slot in the side-specific state
+   * so a later non-modifier press doesn't accidentally inherit a stale
+   * side qualifier. Call from a top-level `keyup` listener.
+   */
+  handleModifierKeyUp(event: KeyboardEvent): void {
+    if (!isModifierCode(event.code)) return;
+    this.modifierState = updateModifierState(this.modifierState, event.code, false);
+  }
+
+  /**
+   * Window-blur reset. When the page loses focus mid-modifier-hold (alt-tab
+   * away while holding Shift), we never see the keyup. Clear everything so
+   * the next focus doesn't think a phantom modifier is still pressed.
+   */
+  resetModifierState(): void {
+    this.modifierState = emptyModifierState();
   }
 
   /**
@@ -243,10 +280,16 @@ export class KeyDispatcher {
    * true if a handler ran.
    */
   private resolveAndFire(combo: string, ctx: DispatchCtx): DispatchResult {
+    // Expand the physical event combo into all the less-specific forms it
+    // also satisfies. A binding to "Shift+Enter" should fire on RShift+Enter
+    // even though comboFromEvent emitted the side-specific RShift+Enter.
+    // First entry of `candidates` is the most-specific (input itself).
+    const candidates = new Set(expandCombo(combo));
     const matches: ResolvedAction[] = [];
     for (const a of this.actions) {
       const eff = this.effectiveCombo(a, ctx.appId);
-      if (eff !== combo) continue;
+      if (eff === null) continue;
+      if (!candidates.has(eff)) continue;
       if (!this.scopeReachable(a.scope, ctx)) continue;
       matches.push({ action: a, combo: eff });
     }

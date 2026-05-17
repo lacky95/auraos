@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { comboFromEvent, canonicalize, isModifierCode } from '../dist/keymap/canonical.js';
+import { comboFromEvent, canonicalize, isModifierCode, expandCombo, emptyModifierState, updateModifierState } from '../dist/keymap/canonical.js';
 import { KeymapRegistry } from '../dist/keymap/KeymapRegistry.js';
 
 function ev(code, mods = {}) {
@@ -36,10 +36,48 @@ test('comboFromEvent: subset of modifiers preserves order', () => {
   assert.equal(comboFromEvent(ev('Space', { meta: true })),             'Super+Space');
 });
 
-test('comboFromEvent: lone modifier press returns null', () => {
-  for (const c of ['ControlLeft', 'ControlRight', 'AltLeft', 'ShiftLeft', 'MetaLeft', 'OSRight']) {
-    assert.equal(comboFromEvent(ev(c, { ctrl: true })), null, c);
+test('comboFromEvent: lone modifier press returns the bare code', () => {
+  // Lone-modifier combos are valid bindings (e.g. AltRight = Alt-Gr → Nav
+  // back). Bare-code form, no modifier-prefix: pressing AltRight emits
+  // "AltRight", not "Alt+AltRight". The dispatcher matches it only if
+  // some action is bound; otherwise it's a no-op.
+  for (const c of ['ControlLeft', 'ControlRight', 'AltLeft', 'AltRight', 'ShiftLeft', 'MetaLeft', 'OSRight']) {
+    assert.equal(comboFromEvent(ev(c, { ctrl: true })), c);
   }
+});
+
+test('comboFromEvent with state: side-specific modifier prefixes', () => {
+  let s = emptyModifierState();
+  s = updateModifierState(s, 'ShiftRight', true);
+  assert.equal(comboFromEvent(ev('Enter', { shift: true }), s), 'RShift+Enter');
+  s = updateModifierState(s, 'ShiftRight', false);
+  s = updateModifierState(s, 'ShiftLeft', true);
+  assert.equal(comboFromEvent(ev('Enter', { shift: true }), s), 'LShift+Enter');
+  // Both held → generic
+  s = updateModifierState(s, 'ShiftRight', true);
+  assert.equal(comboFromEvent(ev('Enter', { shift: true }), s), 'Shift+Enter');
+  // No state → generic
+  assert.equal(comboFromEvent(ev('Enter', { shift: true })), 'Shift+Enter');
+});
+
+test('expandCombo: side-specific implies generic', () => {
+  assert.deepEqual(expandCombo('RShift+Enter'), ['RShift+Enter', 'Shift+Enter']);
+  assert.deepEqual(expandCombo('Shift+Enter'),  ['Shift+Enter']);
+  // Multi-modifier: cartesian product of side variants. Output uses the
+  // canonical Ctrl→Alt→Shift→Super order regardless of input order.
+  const e = expandCombo('LCtrl+RShift+Enter');
+  assert.ok(e.includes('LCtrl+RShift+Enter'));
+  assert.ok(e.includes('LCtrl+Shift+Enter'));
+  assert.ok(e.includes('Ctrl+RShift+Enter'));
+  assert.ok(e.includes('Ctrl+Shift+Enter'));
+  assert.equal(e.length, 4);
+});
+
+test('canonicalize: accepts side-specific modifiers and altgr alias', () => {
+  assert.equal(canonicalize('rshift+enter'),       'RShift+Enter');
+  assert.equal(canonicalize('LShift+backspace'),   'LShift+Backspace');
+  assert.equal(canonicalize('altgr+a'),            'RAlt+KeyA');
+  assert.equal(canonicalize('LeftCtrl+RShift+k'),  'LCtrl+RShift+KeyK');
 });
 
 test('isModifierCode: identifies left/right Ctrl/Alt/Shift/Meta/OS', () => {
@@ -128,9 +166,10 @@ test('KeymapRegistry.resolveDefault: scope-gated by mode', () => {
   assert.ok(arrowUpNav.some((a) => a.id === 'aura.nav.up'));
   const arrowUpApp = r.resolveDefault('ArrowUp', 'app');
   assert.equal(arrowUpApp.length, 0);
-  // os-always: should resolve in both modes
-  const escNav = r.resolveDefault('Escape', 'nav');
-  const escApp = r.resolveDefault('Escape', 'app');
-  assert.ok(escNav.some((a) => a.id === 'aura.nav.back'));
-  assert.ok(escApp.some((a) => a.id === 'aura.nav.back'));
+  // os-always: should resolve in both modes (default for aura.nav.back is
+  // RShift+Backspace; Escape is free for browser-native behaviour).
+  const backNav = r.resolveDefault('RShift+Backspace', 'nav');
+  const backApp = r.resolveDefault('RShift+Backspace', 'app');
+  assert.ok(backNav.some((a) => a.id === 'aura.nav.back'));
+  assert.ok(backApp.some((a) => a.id === 'aura.nav.back'));
 });

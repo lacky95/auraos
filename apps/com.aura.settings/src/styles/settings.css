@@ -4,7 +4,12 @@
    .astro page that uses scificn components — postcss-import here doesn't
    honour Vite's array aliases. */
 
-* { margin: 0; padding: 0; box-sizing: border-box; }
+/* Reset — same rationale as shell global.css: never set `padding: 0` on
+ * `*`, because that fights with @aura/ui Button utilities like `px-3`
+ * (cascade order + shorthand/longhand interactions can leave bordered
+ * buttons painted flush to their text). Zero only at the document root. */
+* { margin: 0; box-sizing: border-box; }
+html, body { padding: 0; }
 
 body {
   background: var(--aura-color-bg, #0a0a0a);

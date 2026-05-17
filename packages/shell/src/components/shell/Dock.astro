@@ -11,6 +11,19 @@ interface Props {
 const { apps, enabledMap = {} } = Astro.props;
 ---
 <nav id="dock">
+  <!--
+    Keyboard-nav entry point. Ctrl+Alt+Space focuses this button so the
+    user can arrow-walk the chrome from a stable anchor. Visually a thin
+    "half-width" pill before the main app launcher — narrow on purpose so
+    it doesn't fight the launcher for prominence.
+  -->
+  <button
+    id="dock-nav-entry"
+    type="button"
+    class="nav-entry-btn"
+    title="Keyboard nav (Ctrl+Alt+Space)">
+    <span class="nav-entry-icon" aria-hidden="true">◐</span>
+  </button>
   <button
     id="dock-launcher-btn"
     type="button"
@@ -47,8 +60,42 @@ const { apps, enabledMap = {} } = Astro.props;
     height: var(--aura-dock-height);
     background: var(--aura-color-surface);
     border-top: var(--aura-border);
-    overflow-x: auto;
+    /* Responsive overflow: when there isn't room for every pinned-app tile
+       the JS `fitDockItems()` at the end of this file hides them from the
+       right edge inward (data-hidden="true"). `overflow: hidden` is the
+       safety net for the half-frame before that fit pass runs — we never
+       want a scrollbar in the dock. */
+    overflow: hidden;
   }
+
+  .nav-entry-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* Half the launcher-btn width (44 / 2). Same height so the dock row
+       stays visually aligned. */
+    width: 22px;
+    height: 44px;
+    color: var(--aura-color-text-dim);
+    font-size: 0.9rem;
+    border: var(--aura-border);
+    background: transparent;
+    cursor: pointer;
+    flex-shrink: 0;
+    padding: 0;
+    transition: box-shadow 0.1s, color 0.1s;
+  }
+  .nav-entry-btn:hover,
+  .nav-entry-btn:focus,
+  .nav-entry-btn:focus-visible {
+    color: var(--aura-color-primary);
+    box-shadow: var(--aura-glow-primary);
+    outline: none;
+  }
+  .nav-entry-btn:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--aura-color-primary), var(--aura-glow-primary);
+  }
+  .nav-entry-icon { line-height: 1; }
 
   .launcher-btn {
     display: flex;
@@ -65,7 +112,12 @@ const { apps, enabledMap = {} } = Astro.props;
     flex-shrink: 0;
     transition: box-shadow 0.1s;
   }
-  .launcher-btn:hover { box-shadow: var(--aura-glow-primary); }
+  .launcher-btn:hover,
+  .launcher-btn:focus,
+  .launcher-btn:focus-visible { box-shadow: var(--aura-glow-primary); outline: none; }
+  .launcher-btn:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--aura-color-primary), var(--aura-glow-primary);
+  }
 
   .separator {
     width: 1px;
@@ -80,21 +132,33 @@ const { apps, enabledMap = {} } = Astro.props;
     flex-direction: column;
     align-items: center;
     gap: 2px;
-    padding: 4px 8px;
+    padding: 4px 14px;
     background: transparent;
     border: var(--aura-border);
     color: var(--aura-color-text);
     cursor: pointer;
     font-family: var(--aura-font-mono);
     font-size: var(--aura-font-size-xs);
-    min-width: 48px;
+    min-width: 56px;
     transition: box-shadow 0.1s;
   }
-  .dock-item:hover { box-shadow: var(--aura-glow-primary); color: var(--aura-color-primary); }
+  .dock-item:hover,
+  .dock-item:focus,
+  .dock-item:focus-visible {
+    box-shadow: var(--aura-glow-primary); color: var(--aura-color-primary); outline: none;
+  }
+  .dock-item:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--aura-color-primary), var(--aura-glow-primary);
+  }
   /* Disabled apps disappear from the dock (Android-style "hide on disable").
      The data-enabled attr is set at SSR + flipped live by the SSE handler
      at the end of this file. */
   .dock-item[data-enabled="false"] { display: none; }
+  /* Responsive trimming. Tiles that don't fit the dock width are flagged
+     `data-hidden="true"` by `fitDockItems()` (bottom of this file) and
+     hidden via CSS. We hide from the rightmost pinned tile inwards so
+     the most-recently-used apps stay visible. */
+  .dock-item[data-hidden="true"] { display: none; }
 
   .app-initial {
     /* Uniform size across 1/2/3-char glyphs; sized to fit "SET" in the dock tile. */
@@ -126,6 +190,61 @@ const { apps, enabledMap = {} } = Astro.props;
     else console.warn('[Dock] auraToggleLauncher not available — LauncherOverlay missing?');
   });
 
+  // ─── Chrome arrow-key navigation ───────────────────────────────────────
+  // Bottom dock <-> top status bar focus chain. The keydown handler is
+  // bound on the dock container itself; bubbling reaches us no matter
+  // which button is currently focused. Movement rules:
+  //   • ArrowLeft / ArrowRight — prev/next focusable button in this bar.
+  //   • ArrowUp                — jump to the status bar; pick the button
+  //                              whose horizontal centre is closest to
+  //                              the current button's centre.
+  //   • ArrowDown              — no-op (already at the bottom).
+  //   • Enter / Space          — native button click (handled by browser).
+  const dockNav = document.getElementById('dock') as HTMLElement | null;
+  function focusables(container: HTMLElement): HTMLButtonElement[] {
+    return Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+      // offsetParent excludes display:none ancestors. Disabled buttons get
+      // skipped explicitly so the workspace-pill "prev/next" disabled
+      // buttons don't trap focus.
+      .filter((b) => !b.disabled && b.offsetParent !== null)
+      // Skip anything inside an `aria-hidden="true"` ancestor — the
+      // ProcessManager panel is technically rendered inside #dock but
+      // slid off-screen via transform (display:block, offsetParent !=
+      // null), so without this filter ArrowRight from the PM toggle
+      // would dive into the panel's invisible filter/view/close buttons.
+      .filter((b) => !b.closest('[aria-hidden="true"]'));
+  }
+  function closestByX(target: HTMLElement, candidates: HTMLButtonElement[]): HTMLButtonElement | null {
+    if (candidates.length === 0) return null;
+    const r = target.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    let best: HTMLButtonElement | null = null;
+    let bestD = Infinity;
+    for (const c of candidates) {
+      const cr = c.getBoundingClientRect();
+      const d = Math.abs(cx - (cr.left + cr.width / 2));
+      if (d < bestD) { bestD = d; best = c; }
+    }
+    return best;
+  }
+  dockNav?.addEventListener('keydown', (e) => {
+    const current = (e.target as HTMLElement).closest<HTMLButtonElement>('button');
+    if (!current || !dockNav.contains(current)) return;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      const list = focusables(dockNav);
+      const idx  = list.indexOf(current);
+      const next = list[idx + (e.key === 'ArrowLeft' ? -1 : 1)];
+      if (next) { next.focus(); e.preventDefault(); e.stopPropagation(); }
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      const bar = document.getElementById('statusbar');
+      if (!bar) return;
+      const pick = closestByX(current, focusables(bar));
+      if (pick) { pick.focus(); e.preventDefault(); e.stopPropagation(); }
+    }
+  });
+
   // Live enable/disable updates over socket.io (same channel the desktop
   // uses for app:* / activity:* / workspaces:* changes). When the user
   // toggles an app in Settings → Apps or via `aura app enable/disable`,
@@ -138,6 +257,117 @@ const { apps, enabledMap = {} } = Astro.props;
         const tile = dock.querySelector<HTMLElement>(`.dock-item[data-app-id="${CSS.escape(ev.appId)}"]`);
         if (tile) tile.dataset['enabled'] = String(ev.enabled);
       });
+
+      // MRU re-ordering. /api/apps/<id>/start writes a timestamp to
+      // os/app-mru on every successful launch and emits app:mruChanged via
+      // the OS event bus → sioPlugin → this handler. Two cases:
+      //   1. The launched app's tile is already in the dock → just move it
+      //      to the front (cheap DOM move, no fetch, no rebuild).
+      //   2. The launched app wasn't in the top-5 → it should be now;
+      //      re-fetch /api/apps + the live mru map and rebuild the tile
+      //      list so the newcomer appears + the oldest gets dropped.
+      const SEP_SEL = '.separator';
+      osEvents.subscribe('app:mruChanged', async (ev: any) => {
+        if (typeof ev?.appId !== 'string') return;
+        const existing = dock.querySelector<HTMLElement>(`.dock-item[data-app-id="${CSS.escape(ev.appId)}"]`);
+        const sep = dock.querySelector<HTMLElement>(SEP_SEL);
+        if (!sep) return;
+        if (existing) {
+          // Fast path: already in the dock — just promote.
+          const firstApp = sep.nextElementSibling;
+          if (existing !== firstApp) sep.parentNode?.insertBefore(existing, firstApp);
+          return;
+        }
+        // Slow path: newcomer. Fetch the canonical list + mru map and
+        // rebuild every tile after the separator.
+        try {
+          const [appsRes, mruRes] = await Promise.all([
+            fetch('/api/apps'),
+            fetch('/api/admin/apps/mru'),
+          ]);
+          if (!appsRes.ok || !mruRes.ok) return;
+          const apps = await appsRes.json() as Array<{
+            manifest: { id: string; name: string; icon?: string };
+            enabled: boolean;
+          }>;
+          const mru = (await mruRes.json()).mru as Record<string, number>;
+          const top5 = apps
+            .filter((a) => a.enabled !== false)
+            .sort((a, b) => {
+              const am = mru[a.manifest.id] ?? 0;
+              const bm = mru[b.manifest.id] ?? 0;
+              if (am !== bm) return bm - am;
+              return a.manifest.name.localeCompare(b.manifest.name);
+            })
+            .slice(0, 5);
+          // Drop every existing tile + re-emit the top 5 in order.
+          dock.querySelectorAll('.dock-item').forEach((el) => el.remove());
+          const frag = document.createDocumentFragment();
+          for (const a of top5) {
+            const m = a.manifest;
+            const glyph = (m.icon ?? m.name.charAt(0)).toUpperCase();
+            const btn = document.createElement('button');
+            btn.className = 'dock-item';
+            btn.dataset['appId']   = m.id;
+            btn.dataset['enabled'] = String(a.enabled);
+            btn.title = m.name;
+            btn.onclick = () => (window as any).auraLaunchApp?.(m.id);
+            btn.innerHTML = `<span class="app-initial" data-len="${glyph.length}">${glyph}</span><span class="app-label">${m.name.replace(/[<>&]/g, '')}</span>`;
+            frag.appendChild(btn);
+          }
+          sep.parentNode?.insertBefore(frag, sep.nextSibling);
+        } catch { /* network blip — next launch retries */ }
+      });
+    });
+  }
+
+  // ─── Responsive trimming ────────────────────────────────────────────────
+  // The dock is `overflow: hidden`, so anything past the right edge would be
+  // clipped silently. Instead, hide whole pinned-app tiles from the right
+  // inward (most-recent stays visible) until everything fits.
+  //
+  // Re-run on:
+  //   • viewport resize (ResizeObserver on #dock)
+  //   • MRU rebuild / enable-disable flips (MutationObserver on #dock —
+  //     children added/removed, or data-enabled attribute changes).
+  //
+  // ProcessManager's slide-in panel is absolutely positioned, so it doesn't
+  // contribute to dock width — we only need to react to the small #pm-toggle
+  // button, which is fixed-size. No PM observer needed.
+  const dockFit = document.getElementById('dock') as HTMLElement | null;
+  if (dockFit) {
+    const fitDockItems = () => {
+      const items = Array.from(dockFit.querySelectorAll<HTMLElement>('.dock-item'));
+      // Reset state first so we measure the natural width every pass —
+      // otherwise a previous trim would lock us into the smaller layout
+      // even after the viewport grows.
+      for (const el of items) delete el.dataset['hidden'];
+      // Disabled tiles stay hidden by the data-enabled rule; trim only
+      // among the currently-visible ones. Hide from the rightmost (least
+      // recent in MRU order) backwards.
+      const visible = items.filter((el) => el.dataset['enabled'] !== 'false');
+      let i = visible.length - 1;
+      // +1 fudge: sub-pixel rounding can put scrollWidth a hair over
+      // clientWidth even when no real overflow exists.
+      while (i >= 0 && dockFit.scrollWidth > dockFit.clientWidth + 1) {
+        visible[i].dataset['hidden'] = 'true';
+        i -= 1;
+      }
+    };
+
+    // Schedule on the next frame: layout isn't finalised at script-eval
+    // time, especially with the SSR fonts still loading.
+    requestAnimationFrame(fitDockItems);
+
+    const ro = new ResizeObserver(fitDockItems);
+    ro.observe(dockFit);
+
+    const mo = new MutationObserver(fitDockItems);
+    mo.observe(dockFit, {
+      childList: true,
+      subtree: false,
+      attributes: true,
+      attributeFilter: ['data-enabled'],
     });
   }
 </script>

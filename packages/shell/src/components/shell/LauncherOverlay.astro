@@ -58,6 +58,11 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
 <style is:global>
   /* All selectors are lo-* prefixed; global to dodge any Astro scoping edge
      cases (and to keep the panel visible even if rendered via fragments). */
+  /* Anchors + chrome mirror the Process Manager's panel
+   * (#pm-panel, see ProcessManager.astro) so both side panels behave
+   * identically — same top/bottom inset, same z-index, same drop
+   * shadow. The OSLayout autohide-mode override flips top/bottom to 0
+   * for both panels uniformly. */
   .lo-panel {
     position: fixed;
     top: var(--aura-statusbar-height);
@@ -72,6 +77,7 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
     flex-direction: column;
     transform: translateX(-100%);
     transition: transform 0.15s ease-out;
+    box-shadow: 8px 0 32px rgba(0, 0, 0, 0.4);
   }
   .lo-panel[aria-hidden="false"] { transform: translateX(0); }
 
@@ -98,9 +104,18 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
     cursor: pointer;
     font-family: var(--aura-font-mono);
     font-size: var(--aura-font-size-xs);
-    padding: 2px 6px;
+    padding: 2px 10px;
   }
-  .lo-close:hover { color: var(--aura-color-danger); box-shadow: var(--aura-glow-danger); }
+  .lo-close:hover,
+  .lo-close:focus,
+  .lo-close:focus-visible {
+    color: var(--aura-color-danger);
+    box-shadow: var(--aura-glow-danger);
+    outline: none;
+  }
+  .lo-close:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--aura-color-danger), var(--aura-glow-danger);
+  }
 
   .lo-search {
     margin: 10px 12px;
@@ -142,7 +157,17 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
     text-align: center;
     min-width: 0;
   }
-  .lo-app:hover { box-shadow: var(--aura-glow-primary); color: var(--aura-color-primary); }
+  .lo-app:hover,
+  .lo-app:focus,
+  .lo-app:focus-visible {
+    box-shadow: var(--aura-glow-primary);
+    color: var(--aura-color-primary);
+    outline: none;
+  }
+  /* Keyboard focus has a stronger ring so it's distinguishable from hover. */
+  .lo-app:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--aura-color-primary), var(--aura-glow-primary);
+  }
   .lo-app[hidden] { display: none; }
   /* Disabled apps stay out of the launcher entirely (matches Android's
      "hide on disable" semantics the user picked). Flipped live via the
@@ -296,6 +321,15 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
     requestAnimationFrame(() => search.focus());
   }
   function closePanel() { panel.setAttribute('aria-hidden', 'true'); }
+  // Variant used when the close came from the user dismissing the panel
+  // (✕ button, Esc) — returns keyboard focus to the dock's chrome-nav
+  // anchor so arrows continue from a stable spot. Launching an app uses
+  // the plain `closePanel()` so the iframe can claim focus instead.
+  function closePanelAndReturnFocus() {
+    closePanel();
+    (document.getElementById('dock-nav-entry')
+      ?? document.getElementById('dock-launcher-btn'))?.focus();
+  }
 
   (window as any).auraToggleLauncher = () => {
     if (panel.getAttribute('aria-hidden') === 'false') closePanel(); else openPanel();
@@ -303,12 +337,21 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
   (window as any).auraOpenLauncher  = openPanel;
   (window as any).auraCloseLauncher = closePanel;
 
-  close.addEventListener('click', closePanel);
+  close.addEventListener('click', closePanelAndReturnFocus);
 
-  // Dispatcher: Ctrl+Alt+Space (default) opens/closes the launcher anywhere.
+  // Dispatcher: Ctrl+Alt+Space (default) focuses the dock keyboard-nav
+  // entry button (the narrow `◐` chip just before the main launcher).
+  // From there the user can ArrowRight to walk the dock or ArrowUp to
+  // jump to the status bar. If the overlay is currently OPEN, close it
+  // first so the same combo doubles as "back to chrome".
   keyDispatcher.bind('aura.launcher.toggle', () => {
-    if (panel.getAttribute('aria-hidden') === 'false') closePanel();
-    else openPanel();
+    if (panel.getAttribute('aria-hidden') === 'false') {
+      closePanel();
+    }
+    const entry = document.getElementById('dock-nav-entry') as HTMLButtonElement | null;
+    // Fall back to the main launcher button if the entry chip is
+    // somehow missing (older Dock build) — same chrome focus behaviour.
+    (entry ?? document.getElementById('dock-launcher-btn') as HTMLButtonElement | null)?.focus();
   });
 
   // Esc-to-close is a panel-local concern, not an OS action — kept as a
@@ -319,7 +362,7 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
       e.preventDefault();
       // Esc closes the context menu first if it's open; otherwise the panel.
       if (!ctxMenu.hidden) { closeCtxMenu(); return; }
-      closePanel();
+      closePanelAndReturnFocus();
     }
   });
 
@@ -459,6 +502,13 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
       const id   = el.dataset['appId']?.toLowerCase() ?? '';
       el.hidden = q !== '' && !name.includes(q) && !id.includes(q);
     });
+    // If the user was on a tile that just got filtered out, leave focus on
+    // the search field — they're mid-typing. Don't auto-jump back into the
+    // grid; that would steal their cursor.
+    const focused = document.activeElement as HTMLElement | null;
+    if (focused && focused.classList.contains('lo-app') && focused.hidden) {
+      search.focus();
+    }
   });
 
   grid.addEventListener('click', (e) => {
@@ -478,16 +528,117 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
     }
   });
 
-  // Enter on the search input launches the first visible app
+  // ─── Keyboard navigation ───────────────────────────────────────────────
+  // Search input + grid form a single composer:
+  //   • Type to filter, ArrowDown / Enter inside the search field moves
+  //     focus down to the first visible app (then arrow + Enter to pick).
+  //     `Enter` doesn't directly launch — it's the "commit search, start
+  //     navigating" gesture; the user can still launch from the search
+  //     field via Ctrl+Enter.
+  //   • Inside the grid: Arrow keys move focus geometrically (Left/Right
+  //     within a row, Up/Down across rows). Enter on a focused tile
+  //     fires its native click (the browser does this for us via
+  //     <button> semantics).
+  //   • ArrowUp from the first row returns focus to the search input.
+  function visibleTiles(): HTMLElement[] {
+    return Array.from(grid.querySelectorAll<HTMLElement>('.lo-app'))
+      .filter((el) => !el.hidden && el.dataset['enabled'] !== 'false');
+  }
+  function focusFirstTile(): boolean {
+    const t = visibleTiles()[0];
+    if (!t) return false;
+    t.focus();
+    return true;
+  }
+  // Geometric next-tile-in-direction. Uses bounding rects so the user's
+  // actual visual layout is what we navigate, not a hardcoded column count
+  // (the grid is `auto-fill, minmax(96px, 1fr)` so columns vary by panel
+  // width). For Left/Right we prefer same-row neighbours; for Up/Down we
+  // pick the nearest tile on the prev/next row, biased to similar X.
+  function nextTile(current: HTMLElement, dir: 'up' | 'down' | 'left' | 'right'): HTMLElement | null {
+    const tiles = visibleTiles();
+    if (tiles.length === 0) return null;
+    const cur = current.getBoundingClientRect();
+    const cx  = cur.left + cur.width  / 2;
+    const cy  = cur.top  + cur.height / 2;
+    // Row tolerance: half the tile height. Anything whose center Y is
+    // within that of the current tile is "same row".
+    const rowTol = cur.height / 2;
+    let best: HTMLElement | null = null;
+    let bestCost = Infinity;
+    for (const t of tiles) {
+      if (t === current) continue;
+      const r = t.getBoundingClientRect();
+      const tx = r.left + r.width  / 2;
+      const ty = r.top  + r.height / 2;
+      const dx = tx - cx;
+      const dy = ty - cy;
+      let cost = Infinity;
+      if (dir === 'left'  && dx < 0 && Math.abs(dy) <= rowTol)  cost = -dx + Math.abs(dy) * 4;
+      if (dir === 'right' && dx > 0 && Math.abs(dy) <= rowTol)  cost =  dx + Math.abs(dy) * 4;
+      if (dir === 'up'    && dy < -rowTol)                       cost = -dy + Math.abs(dx) * 2;
+      if (dir === 'down'  && dy >  rowTol)                       cost =  dy + Math.abs(dx) * 2;
+      if (cost < bestCost) { bestCost = cost; best = t; }
+    }
+    return best;
+  }
+
+  // Vertical focus chain (top → bottom): close button → search → first tile.
+  // The two non-grid stops are the close button (header) and the search
+  // input (under the header); ArrowUp/Down on either jumps along the chain
+  // so a user can reach Close without taking their hands off the arrows.
+  //
+  //   • Search:  ArrowDown → first tile.  ArrowUp → close button.  Enter → first tile.
+  //   • Close:   ArrowDown → search input.  ArrowUp → no-op (top of chain).
+  //   • Grid:    ArrowUp from top row → search input.  (See grid handler.)
   search.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter') return;
-    // Skip disabled tiles — they're display:none via CSS but querySelector
-    // still finds them; filter explicitly so Enter never tries to launch one.
-    const first = grid.querySelector<HTMLElement>('.lo-app:not([hidden]):not([data-enabled="false"])');
-    const appId = first?.dataset['appId'];
-    if (!appId) return;
-    const launch = (window as any).auraLaunchApp;
-    if (typeof launch === 'function') { launch(appId); closePanel(); }
+    // Ctrl+Enter: skip the focus step and launch the first match directly.
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      const first = visibleTiles()[0];
+      const appId = first?.dataset['appId'];
+      if (!appId) return;
+      const launch = (window as any).auraLaunchApp;
+      if (typeof launch === 'function') { launch(appId); closePanel(); }
+      e.preventDefault(); e.stopPropagation();
+      return;
+    }
+    if (e.key === 'Enter' || e.key === 'ArrowDown') {
+      if (focusFirstTile()) { e.preventDefault(); e.stopPropagation(); }
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      close.focus();
+      e.preventDefault(); e.stopPropagation();
+    }
+  });
+  // Close button: ArrowDown drops back into the search field, Enter (native
+  // button click) actually closes the panel.
+  close.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') {
+      search.focus(); search.select();
+      e.preventDefault(); e.stopPropagation();
+    }
+  });
+
+  // Grid-level keydown: arrow keys move geometric focus; Enter falls
+  // through to native button click; ArrowUp from the top row returns
+  // to the search input.
+  grid.addEventListener('keydown', (e) => {
+    const current = (e.target as HTMLElement).closest<HTMLElement>('.lo-app');
+    if (!current) return;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      const dirMap: Record<string, 'left' | 'right' | 'up' | 'down'> = {
+        ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down',
+      };
+      const next = nextTile(current, dirMap[e.key]!);
+      if (next) { next.focus(); e.preventDefault(); e.stopPropagation(); }
+      else if (e.key === 'ArrowUp') {
+        // Top row, going further up → back to the search field.
+        search.focus();
+        search.select();
+        e.preventDefault(); e.stopPropagation();
+      }
+    }
   });
 
   // ─── Live enable/disable + install/remove updates ─────────────────────────

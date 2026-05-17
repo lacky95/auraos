@@ -368,13 +368,68 @@ window.addEventListener('message',function(ev){if(!ev.data||ev.data.type!=='aura
       // Modifier order in the combo string matches the dispatcher's canonical
       // form (Ctrl→Alt→Shift→Super), and the non-modifier key uses
       // `KeyboardEvent.code` so bindings are layout-independent.
+      // Tracks side-specific modifier state (LShift/RShift/etc.) so the
+      // forwarded combo can disambiguate `RShift+Enter` from `Shift+Enter`.
+      // Same shape as the shell-side dispatcher's logic.
       const keyForwarder = `<script>(function(){try{
 var P=window.parent;if(!P||P===window)return;
 var SRC=${appIdJs};
 var claims=new Set();
-function combo(e){var c=e.code;if(c==='ControlLeft'||c==='ControlRight'||c==='AltLeft'||c==='AltRight'||c==='ShiftLeft'||c==='ShiftRight'||c==='MetaLeft'||c==='MetaRight'||c==='OSLeft'||c==='OSRight')return null;var p=[];if(e.ctrlKey)p.push('Ctrl');if(e.altKey)p.push('Alt');if(e.shiftKey)p.push('Shift');if(e.metaKey)p.push('Super');p.push(c);return p.join('+');}
+var mod={cl:0,cr:0,al:0,ar:0,sl:0,sr:0,ml:0,mr:0};
+function isMod(c){return c==='ControlLeft'||c==='ControlRight'||c==='AltLeft'||c==='AltRight'||c==='ShiftLeft'||c==='ShiftRight'||c==='MetaLeft'||c==='MetaRight'||c==='OSLeft'||c==='OSRight';}
+function setMod(c,v){if(c==='ControlLeft')mod.cl=v;else if(c==='ControlRight')mod.cr=v;else if(c==='AltLeft')mod.al=v;else if(c==='AltRight')mod.ar=v;else if(c==='ShiftLeft')mod.sl=v;else if(c==='ShiftRight')mod.sr=v;else if(c==='MetaLeft'||c==='OSLeft')mod.ml=v;else if(c==='MetaRight'||c==='OSRight')mod.mr=v;}
+function pick(e,name,lf,rt){var n=e[name];if(!n)return null;if(rt&&!lf)return 'R'+'_';/*placeholder*/return lf&&!rt?'L_':null;}
+function combo(e){
+  var c=e.code;
+  if(isMod(c))return c;
+  var p=[];
+  if(e.ctrlKey){p.push(mod.cr&&!mod.cl?'RCtrl':(mod.cl&&!mod.cr?'LCtrl':'Ctrl'));}
+  if(e.altKey){p.push(mod.ar&&!mod.al?'RAlt':(mod.al&&!mod.ar?'LAlt':'Alt'));}
+  if(e.shiftKey){p.push(mod.sr&&!mod.sl?'RShift':(mod.sl&&!mod.sr?'LShift':'Shift'));}
+  if(e.metaKey){p.push(mod.mr&&!mod.ml?'RSuper':(mod.ml&&!mod.mr?'LSuper':'Super'));}
+  p.push(c);
+  return p.join('+');
+}
+function expand(combo){
+  // Mirror @aura/core/keymap's expandCombo: enumerate generic siblings
+  // so a binding of "Shift+Enter" matches "RShift+Enter" etc.
+  var segs=combo.split('+');
+  if(segs.length<=1)return [combo];
+  var key=segs[segs.length-1];
+  var mods=segs.slice(0,-1);
+  var variants=[[]];
+  for(var i=0;i<mods.length;i++){
+    var m=mods[i];var base=m;var sided=false;
+    if(m==='RShift'||m==='LShift'){base='Shift';sided=true;}
+    else if(m==='RCtrl'||m==='LCtrl'){base='Ctrl';sided=true;}
+    else if(m==='RAlt'||m==='LAlt'){base='Alt';sided=true;}
+    else if(m==='RSuper'||m==='LSuper'){base='Super';sided=true;}
+    var next=[];
+    for(var v=0;v<variants.length;v++){
+      next.push(variants[v].concat([m]));
+      if(sided)next.push(variants[v].concat([base]));
+    }
+    variants=next;
+  }
+  var out=[];
+  for(var v2=0;v2<variants.length;v2++){
+    out.push(variants[v2].concat([key]).join('+'));
+  }
+  return out;
+}
 window.addEventListener('message',function(ev){var d=ev.data;if(!d||d.type!=='aura.key.claim')return;claims=new Set(Array.isArray(d.combos)?d.combos:[]);});
-window.addEventListener('keydown',function(e){var c=combo(e);if(!c)return;if(!claims.has(c))return;e.preventDefault();e.stopPropagation();try{P.postMessage({type:'aura.key',combo:c,appId:SRC},'*');}catch(_){}}, {capture:true});
+window.addEventListener('keydown',function(e){
+  if(isMod(e.code))setMod(e.code,1);
+  var c=combo(e);if(!c)return;
+  // Iframe-side match must mirror dispatcher: expand the physical combo
+  // and forward if ANY generic sibling is claimed.
+  var cands=expand(c);var hit=false;for(var i=0;i<cands.length;i++){if(claims.has(cands[i])){hit=true;break;}}
+  if(!hit)return;
+  e.preventDefault();e.stopPropagation();
+  try{P.postMessage({type:'aura.key',combo:c,appId:SRC},'*');}catch(_){}
+},{capture:true});
+window.addEventListener('keyup',function(e){if(isMod(e.code))setMod(e.code,0);},{capture:true});
+window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod.sr=mod.ml=mod.mr=0;});
 }catch(_){}})();</script>`;
       rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${keyForwarder}`);
 

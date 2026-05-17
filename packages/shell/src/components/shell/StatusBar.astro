@@ -67,6 +67,15 @@ let initialLocale: string = 'en-GB';
       </button>
     </div>
     <button
+      id="autohide-btn"
+      type="button"
+      class="status-btn"
+      title="Auto-hide bars: desktop fills the screen; top/bottom bars reveal on edge-hover"
+      aria-pressed="false"
+    >
+      <span id="autohide-icon" class="status-btn-icon" aria-hidden="true">⇕</span>
+    </button>
+    <button
       id="fullscreen-btn"
       type="button"
       class="status-btn"
@@ -178,6 +187,127 @@ let initialLocale: string = 'en-GB';
 
   // Expose for other components (e.g. process manager) to call.
   (window as any).auraToggleFullscreen = toggleFullscreen;
+
+  // ─── Auto-hide top/bottom bars ───────────────────────────────────────
+  // When enabled, #os-root flips into single-row mode (desktop fills the
+  // whole viewport) and #statusbar / #dock fixed-position on top with a
+  // CSS transform that translates them off-edge. Moving the mouse into a
+  // small "hot zone" along the top / bottom edge reveals the matching bar
+  // for AUTOHIDE_DWELL_MS; the timer resets while the cursor remains in
+  // the hot zone OR over the bar itself.
+  const AUTOHIDE_KEY = 'aura.shell.autohide-bars';
+  const AUTOHIDE_DWELL_MS = 1800;     // how long a bar stays after the cursor leaves
+  const AUTOHIDE_TRIGGER_PX = 12;     // edge thickness that triggers reveal
+  const autohideBtn = document.getElementById('autohide-btn') as HTMLButtonElement | null;
+  // Mode + visibility attributes live on <body> so the selectors in
+  // OSLayout don't depend on the exact DOM nesting (Astro island wrappers
+  // can subtly break `#os-root > #statusbar` style direct-child selectors).
+  const root        = document.body;
+  let autohideEnabled = false;
+  let topTimer:    ReturnType<typeof setTimeout> | null = null;
+  let bottomTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Keyboard-focus pin: while a button inside #statusbar / #dock is
+  // focused, that bar stays revealed — no dwell-hide timer. Set/cleared
+  // by the focusin/focusout listeners installed further down.
+  let topPinned = false, bottomPinned = false;
+
+  function setBarVisible(which: 'top' | 'bottom', visible: boolean) {
+    if (!root) return;
+    root.dataset[which === 'top' ? 'showTop' : 'showBottom'] = visible ? 'true' : 'false';
+  }
+  function bumpReveal(which: 'top' | 'bottom') {
+    setBarVisible(which, true);
+    // Pinned bars never auto-hide. The pin is owned by the focus
+    // listeners — when focus leaves the bar they call bumpReveal again
+    // without the pin and the dwell timer is allowed to run.
+    if (which === 'top' && topPinned)    { if (topTimer)    { clearTimeout(topTimer);    topTimer    = null; } return; }
+    if (which === 'bottom' && bottomPinned) { if (bottomTimer) { clearTimeout(bottomTimer); bottomTimer = null; } return; }
+    if (which === 'top') {
+      if (topTimer) clearTimeout(topTimer);
+      topTimer = setTimeout(() => setBarVisible('top', false), AUTOHIDE_DWELL_MS);
+    } else {
+      if (bottomTimer) clearTimeout(bottomTimer);
+      bottomTimer = setTimeout(() => setBarVisible('bottom', false), AUTOHIDE_DWELL_MS);
+    }
+  }
+  function onMouseMove(e: MouseEvent) {
+    if (!autohideEnabled) return;
+    const h = window.innerHeight;
+    if (e.clientY <= AUTOHIDE_TRIGGER_PX)              bumpReveal('top');
+    else if (e.clientY >= h - AUTOHIDE_TRIGGER_PX)     bumpReveal('bottom');
+  }
+  // Hovering directly over a revealed bar keeps it open — re-bump on every
+  // mousemove inside the bar's bounding box.
+  function attachHoverPersist(barId: string, which: 'top' | 'bottom') {
+    const bar = document.getElementById(barId);
+    if (!bar) return;
+    bar.addEventListener('mousemove', () => { if (autohideEnabled) bumpReveal(which); });
+    bar.addEventListener('mouseleave', () => {
+      // Let the dwell timer fire normally; nothing to do here. (No special
+      // mouseleave handling — the next time the cursor crosses a hot zone
+      // the bar reappears.)
+    });
+  }
+  attachHoverPersist('statusbar', 'top');
+  attachHoverPersist('dock', 'bottom');
+
+  // Keyboard-focus pin. Ctrl+Alt+Space lands focus on the dock launcher
+  // button (see LauncherOverlay), and arrow keys move it between dock
+  // and status-bar buttons. In autohide mode the bar would dwell-hide
+  // even while the user is mid-navigation; pin the focused bar visible
+  // until focus actually leaves it.
+  function attachFocusPin(barId: string, which: 'top' | 'bottom') {
+    const bar = document.getElementById(barId);
+    if (!bar) return;
+    bar.addEventListener('focusin', () => {
+      if (which === 'top') topPinned = true; else bottomPinned = true;
+      // Clear any pending hide timer immediately and force the bar visible.
+      if (which === 'top'    && topTimer)    { clearTimeout(topTimer);    topTimer    = null; }
+      if (which === 'bottom' && bottomTimer) { clearTimeout(bottomTimer); bottomTimer = null; }
+      setBarVisible(which, true);
+    });
+    bar.addEventListener('focusout', (e) => {
+      // Only unpin if focus moves to something OUTSIDE this bar — not
+      // when the user just arrowed between two buttons of the same bar.
+      const related = (e as FocusEvent).relatedTarget as Node | null;
+      if (related && bar.contains(related)) return;
+      if (which === 'top') topPinned = false; else bottomPinned = false;
+      // Resume the normal dwell-hide cadence from this moment.
+      if (autohideEnabled) bumpReveal(which);
+    });
+  }
+  attachFocusPin('statusbar', 'top');
+  attachFocusPin('dock', 'bottom');
+
+  function applyAutohide(next: boolean, persist = true) {
+    autohideEnabled = next;
+    if (root) root.dataset['autohideBars'] = next ? 'on' : 'off';
+    if (autohideBtn) {
+      autohideBtn.setAttribute('aria-pressed', next ? 'true' : 'false');
+      autohideBtn.dataset['active'] = next ? 'on' : 'off';
+    }
+    if (next) {
+      // Reveal both bars briefly so the toggle is visible feedback.
+      bumpReveal('top');
+      bumpReveal('bottom');
+    } else {
+      setBarVisible('top', false);
+      setBarVisible('bottom', false);
+      if (topTimer)    { clearTimeout(topTimer);    topTimer    = null; }
+      if (bottomTimer) { clearTimeout(bottomTimer); bottomTimer = null; }
+    }
+    if (persist) {
+      try { localStorage.setItem(AUTOHIDE_KEY, next ? '1' : '0'); } catch {}
+    }
+  }
+  // Restore persisted preference.
+  try {
+    if (localStorage.getItem(AUTOHIDE_KEY) === '1') applyAutohide(true, /*persist*/ false);
+  } catch {}
+  autohideBtn?.addEventListener('click', () => applyAutohide(!autohideEnabled));
+  document.addEventListener('mousemove', onMouseMove);
+  (window as any).auraToggleAutohideBars = () => applyAutohide(!autohideEnabled);
 
   // ---- Viewport (zoom + screen-edge margins) --------------------------
   // We can't drive the browser's real zoom from JS, so we fake it via
@@ -340,6 +470,33 @@ let initialLocale: string = 'en-GB';
   }
   applyResponsiveMode();
 
+  // Width budget (visual; matches the CSS `min-width: 220px` on .ws-content).
+  // Used by the anchor-flip logic below — we want to predict the popover's
+  // width before it renders so we can pick the side that won't overflow.
+  const POPOVER_WIDTH_PX = 240;
+
+  // Pick `data-anchor="right" | "left"` on the bundle based on which side
+  // has room for the popover. Default `right` (popover extends leftward
+  // from the trigger) covers the common case where the bundle sits on the
+  // right half of the status bar; we only flip to `left` when anchoring
+  // right would push the popover off the left edge of the viewport.
+  function pickAnchor() {
+    if (!bundleEl) return;
+    const rect = bundleEl.getBoundingClientRect();
+    const vw   = window.innerWidth || document.documentElement.clientWidth;
+    // Anchoring `right: 0` means the popover's right edge aligns with
+    // bundleEl.right → popover spans [bundleEl.right - POPOVER, bundleEl.right].
+    const rightAnchorLeft = rect.right - POPOVER_WIDTH_PX;
+    // Anchoring `left: 0` means popover spans [bundleEl.left, bundleEl.left + POPOVER].
+    const leftAnchorRight = rect.left + POPOVER_WIDTH_PX;
+    const rightFits = rightAnchorLeft >= 8;          // 8px viewport gutter
+    const leftFits  = leftAnchorRight <= vw - 8;
+    // Prefer right anchor (it's the historical default + usually the bundle
+    // is on the right of the status bar). Flip only when right won't fit
+    // but left will.
+    bundleEl.dataset['anchor'] = (!rightFits && leftFits) ? 'left' : 'right';
+  }
+
   // Collapse-button toggle. In compact mode the bundle's [data-open] flips
   // ws-content from `display: none` to an absolute-positioned popover. The
   // click-outside listener below dismisses it on any click outside the
@@ -348,12 +505,29 @@ let initialLocale: string = 'en-GB';
     e.stopPropagation();
     if (!bundleEl) return;
     const next = bundleEl.dataset['open'] !== 'true';
+    if (next) pickAnchor();   // re-measure on every open so a resize between
+                              // toggles still picks the right side
     bundleEl.dataset['open'] = String(next);
     collapseBtn.setAttribute('aria-expanded', String(next));
   });
+  // Re-pick anchor if the viewport changes while the popover is open
+  // (responsive resize, zoom changes, etc.).
+  window.addEventListener('resize', () => {
+    if (bundleEl?.dataset['open'] === 'true') pickAnchor();
+  });
+  // Close-on-outside-click. `composedPath()` is captured at dispatch time
+  // so it survives DOM mutations during the click handler chain. We need
+  // that because pill-click → setActive → renderPills replaces the pill's
+  // HTML synchronously; by the time this document-level handler runs,
+  // `e.target` (the original pill button) is no longer in the DOM, and
+  // `bundleEl.contains(target)` would return false → mistakenly close the
+  // popover. composedPath().includes(bundleEl) tests the original path.
   document.addEventListener('click', (e) => {
     if (!bundleEl || bundleEl.dataset['open'] !== 'true') return;
-    if (bundleEl.contains(e.target as Node)) return;
+    const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+    if (path.includes(bundleEl)) return;
+    // Fallback for older browsers without composedPath: do the cheap check.
+    if (path.length === 0 && bundleEl.contains(e.target as Node)) return;
     bundleEl.dataset['open'] = 'false';
     collapseBtn?.setAttribute('aria-expanded', 'false');
   });
@@ -591,6 +765,51 @@ let initialLocale: string = 'en-GB';
     const next = state.workspaces[((i < 0 ? 0 : i) + dir + n) % n];
     if (next) workspaceClient.setActive(next.id).catch(() => undefined);
   }
+
+  // ─── Chrome arrow-key navigation ───────────────────────────────────────
+  // Mirror of the Dock handler — same rules but inverted:
+  //   • ArrowLeft / ArrowRight — prev/next button in this bar.
+  //   • ArrowDown              — jump to dock, button closest by X.
+  //   • ArrowUp                — no-op (already at the top).
+  const statusbar = document.getElementById('statusbar') as HTMLElement | null;
+  function sbFocusables(container: HTMLElement): HTMLButtonElement[] {
+    return Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+      .filter((b) => !b.disabled && b.offsetParent !== null)
+      // Same aria-hidden filter the dock uses — keeps any future
+      // off-screen popover (workspace dropdown, viewport-settings dialog
+      // chrome, etc.) from leaking buttons into the arrow-nav cycle.
+      .filter((b) => !b.closest('[aria-hidden="true"]'));
+  }
+  function sbClosestByX(target: HTMLElement, candidates: HTMLButtonElement[]): HTMLButtonElement | null {
+    if (candidates.length === 0) return null;
+    const r = target.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    let best: HTMLButtonElement | null = null;
+    let bestD = Infinity;
+    for (const c of candidates) {
+      const cr = c.getBoundingClientRect();
+      const d = Math.abs(cx - (cr.left + cr.width / 2));
+      if (d < bestD) { bestD = d; best = c; }
+    }
+    return best;
+  }
+  statusbar?.addEventListener('keydown', (e) => {
+    const current = (e.target as HTMLElement).closest<HTMLButtonElement>('button');
+    if (!current || !statusbar.contains(current)) return;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      const list = sbFocusables(statusbar);
+      const idx  = list.indexOf(current);
+      const next = list[idx + (e.key === 'ArrowLeft' ? -1 : 1)];
+      if (next) { next.focus(); e.preventDefault(); e.stopPropagation(); }
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      const dock = document.getElementById('dock');
+      if (!dock) return;
+      const pick = sbClosestByX(current, sbFocusables(dock));
+      if (pick) { pick.focus(); e.preventDefault(); e.stopPropagation(); }
+    }
+  });
 </script>
 
 <style>
@@ -637,10 +856,25 @@ let initialLocale: string = 'en-GB';
     padding: 0;
     transition: color 0.1s, border-color 0.1s, box-shadow 0.1s;
   }
-  .status-btn:hover {
+  .status-btn:hover,
+  .status-btn:focus,
+  .status-btn:focus-visible {
     color: var(--aura-color-primary);
     border-color: var(--aura-color-primary);
     box-shadow: var(--aura-glow-subtle);
+    outline: none;
+  }
+  .status-btn:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--aura-color-primary), var(--aura-glow-subtle);
+  }
+  /* Same keyboard-focus ring for the workspace-pill buttons (they're not
+     status-btn but live in the same chrome navigation chain). */
+  #statusbar button:focus,
+  #statusbar button:focus-visible {
+    outline: none;
+  }
+  #statusbar button:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--aura-color-primary), var(--aura-glow-subtle);
   }
   /* Filled/active state when fullscreen is on */
   .status-btn[data-fs="on"] {
@@ -671,7 +905,7 @@ let initialLocale: string = 'en-GB';
   .status-btn-text {
     width: auto !important;
     min-width: 44px;
-    padding: 0 6px;
+    padding: 0 10px;
     font-size: 0.65rem;
     letter-spacing: 0.06em;
     color: var(--aura-color-text);
@@ -708,13 +942,16 @@ let initialLocale: string = 'en-GB';
    * default and only mounts when `[data-open="true"]`. */
   .ws-bundle[data-compact="true"] .ws-collapse-btn { display: inline-flex; }
   .ws-bundle[data-compact="true"] .ws-content { display: none; }
+  /* Popover anchor (right by default). The collapse-button click handler
+   * measures available space below the trigger and flips `data-anchor`
+   * to whichever side has room — so a bundle near the right edge opens
+   * leftward, and one near the left edge opens rightward. */
   .ws-bundle[data-compact="true"][data-open="true"] .ws-content {
     display: inline-flex;
     flex-wrap: wrap;
     gap: 6px;
     position: absolute;
     top: calc(100% + 6px);
-    right: 0;
     z-index: 1100;
     padding: 8px;
     background: var(--aura-color-surface);
@@ -723,6 +960,8 @@ let initialLocale: string = 'en-GB';
     min-width: 220px;
     max-width: min(360px, 90vw);
   }
+  .ws-bundle[data-anchor="right"] .ws-content { right: 0; left: auto; }
+  .ws-bundle[data-anchor="left"]  .ws-content { left: 0;  right: auto; }
   /* The collapse button gets a subtle highlight while the dropdown is open. */
   .ws-bundle[data-compact="true"][data-open="true"] .ws-collapse-btn {
     color: var(--aura-color-primary);
@@ -812,9 +1051,13 @@ let initialLocale: string = 'en-GB';
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 22px;
+    /* Reserve room for at least two digits ("1" and "12" should be the
+     * same width) so the pill row doesn't reflow as workspaces cross
+     * the 10-slot boundary. ~14px of two-digit glyph + 20px horizontal
+     * padding → 34px-ish; rounded up for breathing room. */
+    min-width: 38px;
     height: 22px;
-    padding: 0 7px;
+    padding: 0 10px;
     background: transparent;
     border: var(--aura-border);
     color: var(--aura-color-text-dim);
@@ -843,13 +1086,14 @@ let initialLocale: string = 'en-GB';
   .ws-pill-nav {
     color: var(--aura-color-text-dim);
     font-size: 0.85rem;
-    padding: 0 5px;
+    padding: 0 8px;
   }
   /* "+" add-workspace button: secondary color on hover so it reads as a
    * distinct creation affordance, not just another workspace number. */
   .ws-pill-add {
     color: var(--aura-color-text-dim);
     margin-left: 4px;
+    padding: 0 12px;
   }
   .ws-pill-add:hover {
     color: var(--aura-color-secondary);

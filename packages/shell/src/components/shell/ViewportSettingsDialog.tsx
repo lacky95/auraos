@@ -282,7 +282,7 @@ export function ViewportSettingsDialog(): React.JSX.Element {
                   <TabsTrigger value="auto">AUTO</TabsTrigger>
                 </TabsList>
               </Tabs>
-              <span className="font-mono text-[0.65rem] uppercase tracking-widest text-[var(--text-muted)] border border-[var(--border)] px-2 py-1">
+              <span className="font-mono text-[0.65rem] uppercase tracking-widest text-[var(--text-muted)] border border-[var(--border)] px-3 py-1">
                 {resolvedMode}
               </span>
             </div>
@@ -296,7 +296,7 @@ export function ViewportSettingsDialog(): React.JSX.Element {
               <Button variant="OUTLINE" size="SM" onClick={() => void toggleFullscreen()}>
                 {isFullscreen ? 'EXIT' : 'ENTER'}
               </Button>
-              <span className="font-mono text-[0.65rem] uppercase tracking-widest text-[var(--text-muted)] border border-[var(--border)] px-2 py-1">
+              <span className="font-mono text-[0.65rem] uppercase tracking-widest text-[var(--text-muted)] border border-[var(--border)] px-3 py-1">
                 {isFullscreen ? 'ON' : 'OFF'}
               </span>
             </div>

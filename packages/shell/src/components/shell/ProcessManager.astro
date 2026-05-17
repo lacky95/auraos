@@ -131,7 +131,7 @@
     cursor: pointer;
     font-family: var(--aura-font-mono);
     font-size: var(--aura-font-size-xs);
-    padding: 3px 7px;
+    padding: 3px 10px;
     transition: color 0.1s, box-shadow 0.1s;
   }
   .pm-close:hover { color: var(--aura-color-danger); box-shadow: var(--aura-glow-danger); }
@@ -430,7 +430,7 @@
     font-family: var(--aura-font-mono);
     font-size: 0.6rem;
     letter-spacing: 0.08em;
-    padding: 5px 8px;
+    padding: 5px 12px;
     cursor: pointer;
     text-transform: uppercase;
     transition: color 0.1s, border-color 0.1s, box-shadow 0.1s;
@@ -455,6 +455,30 @@
   }
   .pm-action-btn[disabled] { opacity: 0.4; cursor: wait; }
   .pm-action-btn-spacer { flex: 1; }
+  /* Keyboard-focus ring across every button in the PM panel so the
+     arrow-nav target is visible. Same inset-ring pattern the dock /
+     statusbar use; tinted to match each button's hover variant. */
+  #pm-panel button:focus,
+  #pm-panel button:focus-visible { outline: none; }
+  #pm-panel button:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--aura-color-primary), var(--aura-glow-subtle);
+    color: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+  }
+  #pm-panel .pm-action-btn[data-variant="warn"]:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--aura-color-secondary), var(--aura-glow-secondary);
+    color: var(--aura-color-secondary);
+    border-color: var(--aura-color-secondary);
+  }
+  #pm-panel .pm-action-btn[data-variant="danger"]:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--aura-color-danger), var(--aura-glow-danger);
+    color: var(--aura-color-danger);
+    border-color: var(--aura-color-danger);
+  }
+  #pm-panel #pm-close:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--aura-color-danger), var(--aura-glow-danger);
+    color: var(--aura-color-danger);
+  }
 
   .pm-icon-btn {
     width: 24px;
@@ -489,7 +513,7 @@
     font-family: var(--aura-font-mono);
     font-size: 0.6rem;
     letter-spacing: 0.08em;
-    padding: 3px 8px;
+    padding: 3px 12px;
     cursor: pointer;
     text-transform: uppercase;
     transition: color 0.1s, box-shadow 0.1s;
@@ -513,7 +537,7 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    padding: 3px 8px;
+    padding: 3px 12px;
     background: transparent;
     border: none;
     color: var(--aura-color-text-dim);
@@ -797,14 +821,34 @@
     });
   });
 
-  function openPanel()  { panel.setAttribute('aria-hidden', 'false'); refreshList(); }
+  async function openPanel(): Promise<void> {
+    panel.setAttribute('aria-hidden', 'false');
+    await refreshList();
+    // Land focus on a useful starting point so arrows immediately work.
+    // Prefer the first instance's FOCUS action (the user typically opens
+    // the PM to act on a process); fall back to the close button so the
+    // panel still has a focused element when the list is empty.
+    const firstAction = panel.querySelector<HTMLButtonElement>('.pm-card [data-action="focus"], .pm-listrow [data-action="focus"]');
+    if (firstAction) firstAction.focus();
+    else closeBtn.focus();
+  }
   function closePanel() { panel.setAttribute('aria-hidden', 'true'); }
+  // Variant used when the close came from the user dismissing the panel
+  // (✕ button, Esc) — returns keyboard focus to the dock's chrome-nav
+  // anchor so arrows can continue from a stable spot. Action paths
+  // (FOCUS, etc.) call plain `closePanel()` so the targeted iframe can
+  // claim focus instead.
+  function closePanelAndReturnFocus() {
+    closePanel();
+    (document.getElementById('dock-nav-entry')
+      ?? document.getElementById('dock-launcher-btn'))?.focus();
+  }
 
   toggleBtn.addEventListener('click', () => {
     if (panel.getAttribute('aria-hidden') === 'false') closePanel();
     else openPanel();
   });
-  closeBtn.addEventListener('click', closePanel);
+  closeBtn.addEventListener('click', closePanelAndReturnFocus);
   refresh.addEventListener('click', refreshList);
 
   // Toggle via dispatcher (default combo: Ctrl+Alt+M, remappable in Settings).
@@ -821,7 +865,74 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && panel.getAttribute('aria-hidden') === 'false') {
       e.preventDefault();
-      closePanel();
+      closePanelAndReturnFocus();
+    }
+  });
+
+  // ─── Row-aware arrow navigation ───────────────────────────────────────
+  // The panel is a 2D grid of buttons: a header row (filter / view-toggle /
+  // close), one row per process (its action buttons), an extra row per
+  // activity (focus / close-activity), and a footer row (refresh).
+  // ArrowUp/Down moves between rows preserving X position (closest centre),
+  // ArrowLeft/Right walks the buttons within the focused row.
+  function pmFocusables(): HTMLButtonElement[] {
+    return Array.from(panel.querySelectorAll<HTMLButtonElement>('button'))
+      .filter((b) => !b.disabled && b.offsetParent !== null)
+      .filter((b) => !b.closest('[aria-hidden="true"]'));
+  }
+  type Cell = { btn: HTMLButtonElement; rect: DOMRect };
+  type Row  = { y: number; cells: Cell[] };
+  function pmGroupRows(buttons: HTMLButtonElement[]): Row[] {
+    const cells: Cell[] = buttons.map((b) => ({ btn: b, rect: b.getBoundingClientRect() }));
+    cells.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+    const rows: Row[] = [];
+    for (const c of cells) {
+      const last = rows[rows.length - 1];
+      // Same row if vertical centres overlap within half the button height.
+      const tol = Math.max(c.rect.height, last?.cells[0]?.rect.height ?? 0) * 0.6;
+      const lastY = last ? last.cells[0]!.rect.top : -Infinity;
+      if (last && Math.abs(lastY - c.rect.top) <= tol) last.cells.push(c);
+      else rows.push({ y: c.rect.top, cells: [c] });
+    }
+    for (const r of rows) r.cells.sort((a, b) => a.rect.left - b.rect.left);
+    return rows;
+  }
+  function pmClosestCol(currentRect: DOMRect, row: Row): HTMLButtonElement | null {
+    const cx = currentRect.left + currentRect.width / 2;
+    let best: HTMLButtonElement | null = null;
+    let bestD = Infinity;
+    for (const c of row.cells) {
+      const ccx = c.rect.left + c.rect.width / 2;
+      const d = Math.abs(cx - ccx);
+      if (d < bestD) { bestD = d; best = c.btn; }
+    }
+    return best;
+  }
+  panel.addEventListener('keydown', (e) => {
+    if (panel.getAttribute('aria-hidden') === 'true') return;
+    const current = (e.target as HTMLElement).closest<HTMLButtonElement>('button');
+    if (!current || !panel.contains(current)) return;
+    if (!(e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight')) return;
+    const rows = pmGroupRows(pmFocusables());
+    let rowIdx = -1, colIdx = -1;
+    for (let i = 0; i < rows.length; i++) {
+      const j = rows[i]!.cells.findIndex((c) => c.btn === current);
+      if (j >= 0) { rowIdx = i; colIdx = j; break; }
+    }
+    if (rowIdx < 0) return;
+    let target: HTMLButtonElement | null = null;
+    if (e.key === 'ArrowLeft')  target = rows[rowIdx]!.cells[colIdx - 1]?.btn ?? null;
+    else if (e.key === 'ArrowRight') target = rows[rowIdx]!.cells[colIdx + 1]?.btn ?? null;
+    else {
+      const dir = e.key === 'ArrowUp' ? -1 : 1;
+      const nextRow = rows[rowIdx + dir];
+      if (nextRow) target = pmClosestCol(current.getBoundingClientRect(), nextRow);
+    }
+    if (target) {
+      target.focus();
+      target.scrollIntoView({ block: 'nearest' });
+      e.preventDefault();
+      e.stopPropagation();
     }
   });
 
@@ -875,7 +986,96 @@
   /** Dispatcher: updates header counters + the empty state, then delegates
    *  to the active view's renderer.
    */
+  // Capture the keyboard-focused button BEFORE re-rendering the list so
+  // we can restore focus to "the same thing or the next-closest thing"
+  // after innerHTML is replaced. Without this, killing a process via
+  // Enter on KILL drops focus to <body>, breaking the arrow-nav chain.
+  type FocusSnap = {
+    instanceId: string | null;
+    activityId: string | null;
+    action:     string | null;
+    rowIndex:   number;       // position of the row in the rendered list
+  };
+  function snapshotFocus(): FocusSnap | null {
+    const active = document.activeElement as HTMLElement | null;
+    if (!active || !panel.contains(active)) return null;
+    const btn = active.closest<HTMLButtonElement>('button');
+    if (!btn) return null;
+    const action  = btn.dataset['action'] ?? null;
+    // Possible row classes:
+    //   .pm-card                 — card-view instance row
+    //   .pm-listrow              — list-view instance row (may also have
+    //                              .pm-listrow-act = an activity row)
+    //   .pm-activity             — card-view activity sub-row (nested
+    //                              under its parent .pm-card)
+    const row = btn.closest<HTMLElement>('.pm-card, .pm-listrow, .pm-activity');
+    const isActivity = !!row && (
+      row.classList.contains('pm-activity') ||
+      row.classList.contains('pm-listrow-act') ||
+      row.hasAttribute('data-activity-id')
+    );
+    const actId = isActivity ? (row!.dataset['activityId'] ?? null) : null;
+    // Instance id: direct attr on the row, OR ancestor with one (activity
+    // sub-row nested under a card), OR `data-parent-id` (list-view
+    // activity rows are flat siblings, not nested).
+    const instId =
+      row?.dataset['instanceId'] ??
+      row?.closest<HTMLElement>('[data-instance-id]')?.dataset['instanceId'] ??
+      row?.dataset['parentId'] ??
+      null;
+    // Index among all the panel's process rows (cards + listrows) so we
+    // can fall back to the "same slot" when the original row is gone.
+    const allRows = Array.from(panel.querySelectorAll<HTMLElement>('.pm-card, .pm-listrow'));
+    const idxRow  = row?.closest<HTMLElement>('.pm-card, .pm-listrow') ?? null;
+    const rowIndex = idxRow ? allRows.indexOf(idxRow) : -1;
+    return { instanceId: instId, activityId: actId, action, rowIndex };
+  }
+  function restoreFocus(snap: FocusSnap | null): void {
+    if (!snap) return;
+    if (panel.getAttribute('aria-hidden') === 'true') return;
+    // 1) Same activity + same action.
+    if (snap.activityId && snap.action) {
+      const t = panel.querySelector<HTMLButtonElement>(
+        `[data-activity-id="${cssEsc(snap.activityId)}"] [data-action="${cssEsc(snap.action)}"]`,
+      );
+      if (t) { t.focus(); return; }
+    }
+    // 2) Same instance + same action.
+    if (snap.instanceId && snap.action) {
+      const t = panel.querySelector<HTMLButtonElement>(
+        `[data-instance-id="${cssEsc(snap.instanceId)}"] [data-action="${cssEsc(snap.action)}"]`,
+      );
+      if (t) { t.focus(); return; }
+    }
+    // 3) Same instance, any action (prefer focus → first available).
+    if (snap.instanceId) {
+      const t = panel.querySelector<HTMLButtonElement>(
+        `[data-instance-id="${cssEsc(snap.instanceId)}"] [data-action]`,
+      );
+      if (t) { t.focus(); return; }
+    }
+    // 4) Slot fallback: take the row at the same index in the new list
+    //    (or the last row if there are fewer rows now). Restores the
+    //    "killed row gone, focus the row that took its place" feel.
+    const allRows = Array.from(panel.querySelectorAll<HTMLElement>('.pm-card, .pm-listrow'));
+    if (allRows.length > 0) {
+      const target = allRows[Math.min(snap.rowIndex, allRows.length - 1)] ?? allRows[0]!;
+      const action = target.querySelector<HTMLButtonElement>(
+        `[data-action="${cssEsc(snap.action ?? 'focus')}"]`,
+      ) ?? target.querySelector<HTMLButtonElement>('[data-action="focus"]')
+        ?? target.querySelector<HTMLButtonElement>('button');
+      if (action) { action.focus(); return; }
+    }
+    // 5) Nothing left in the list — focus the close button so arrow nav
+    //    still has somewhere to live.
+    closeBtn?.focus();
+  }
+  function cssEsc(s: string): string {
+    return (window as any).CSS?.escape ? CSS.escape(s) : s.replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+  }
+
   function render(instances: InstanceListItem[], activities: ActivityListItem[]) {
+    const snap = snapshotFocus();
     const totalInst = instances.length;
     const totalAct  = activities.length;
 
@@ -913,6 +1113,7 @@
           <div class="pm-empty-text">${allHidden ? 'ALL SECTIONS HIDDEN' : 'NO ACTIVE PROCESSES'}</div>
           <div class="pm-empty-hint">${allHidden ? '// ENABLE APPS OR SVC ABOVE' : '// LAUNCH AN APP TO BEGIN'}</div>
         </li>`;
+      restoreFocus(snap);
       return;
     }
 
@@ -925,6 +1126,7 @@
 
     if (viewMode === 'list') renderList(visibleApps, visibleServices, actByInstance);
     else                     renderCards(visibleApps, visibleServices, actByInstance);
+    restoreFocus(snap);
   }
 
   function renderSectionHeader(label: string, count: number): string {

@@ -14,7 +14,11 @@ import AutoscrollCheckbox from '../components/AutoscrollCheckbox.tsx';
        proxy. -->
   <link rel="stylesheet" href="/api/os/theme.css" />
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
+    /* Never `padding: 0` on `*` — see shell global.css for the rationale.
+     * It fights with scificn utility classes (`px-3` etc.) and produces
+     * padding-less bordered buttons whenever the cascade tips wrong. */
+    * { margin: 0; box-sizing: border-box; }
+    html, body { padding: 0; }
     body {
       background: var(--aura-color-bg);
       color: var(--aura-color-text);
@@ -242,6 +246,30 @@ import AutoscrollCheckbox from '../components/AutoscrollCheckbox.tsx';
     .entry-args[data-level="warn"]  { color: var(--aura-color-warning); }
     .entry-args[data-level="info"]  { color: var(--aura-color-info); }
     .entry-args[data-level="debug"] { color: var(--aura-color-text-dim); }
+
+    /* Single-line mode: long log lines stay on one row, and the WHOLE pane
+       scrolls horizontally (one shared scrollbar at the bottom of #output),
+       not each entry. Flipped by the WRAP toggle in the header; persisted
+       in localStorage('aura.console.wrap').
+         - `overflow-x: auto` on #output gives the pane the shared scrollbar.
+         - `min-width: max-content` on .entry stops the `1fr` args track from
+           clamping to the viewport, so all rows extend to a common width
+           and stay aligned under one horizontal axis.
+         - `.entry-args` just preserves whitespace; overflow is handled by
+           the ancestor, so no per-entry scroll surface appears. */
+    #output[data-wrap="false"] { overflow-x: auto; }
+    #output[data-wrap="false"] .entry { min-width: max-content; }
+    #output[data-wrap="false"] .entry-args {
+      white-space: pre;
+      word-break: normal;
+    }
+    /* Slim shared scrollbar — Chromium only; Firefox uses scrollbar-width. */
+    #output[data-wrap="false"]::-webkit-scrollbar { height: 6px; }
+    #output[data-wrap="false"]::-webkit-scrollbar-thumb {
+      background: var(--aura-color-border);
+    }
+    #output[data-wrap="false"] { scrollbar-width: thin; }
+
     .empty {
       color: var(--aura-color-text-dim);
       text-align: center;
@@ -271,10 +299,16 @@ import AutoscrollCheckbox from '../components/AutoscrollCheckbox.tsx';
     <div class="spacer"></div>
 
     <span class="count-info"><b id="visible-count">0</b> / <b id="total-count">0</b></span>
+    <button
+      id="wrap-btn"
+      class="filter-btn"
+      data-active="true"
+      title="Toggle line wrapping. When off, long log lines stay on a single row with horizontal scroll."
+    >WRAP</button>
     <AutoscrollCheckbox client:load id="autoscroll" defaultChecked label="AUTOSCROLL" />
   </header>
 
-  <main id="output">
+  <main id="output" data-wrap="true">
     <div class="empty">// WAITING FOR CONSOLE OUTPUT<span class="blink">_</span></div>
   </main>
 
@@ -296,7 +330,28 @@ import AutoscrollCheckbox from '../components/AutoscrollCheckbox.tsx';
     const search       = document.getElementById('search');
     const lastUpdate   = document.getElementById('last-update');
     const mInstance    = document.getElementById('m-instance');
-    const filterBtns   = document.querySelectorAll('.filter-btn');
+    const wrapBtn      = document.getElementById('wrap-btn');
+    // The WRAP button is also surfaced via .filter-btn for the shared header
+    // styling, but it's NOT a level filter — explicitly exclude it from the
+    // level-filter NodeList so toggling WRAP doesn't accidentally hide LOG/INF/etc.
+    const filterBtns   = Array.from(document.querySelectorAll('.filter-btn'))
+      .filter((b) => b.dataset.level);
+
+    /* WRAP toggle — flips data-wrap on #output. CSS at top of file gates
+     * the per-entry overflow behaviour off that attribute. Persisted so
+     * the choice survives reload + reattach across activity stacks. */
+    const WRAP_KEY = 'aura.console.wrap';
+    const savedWrap = localStorage.getItem(WRAP_KEY);
+    if (savedWrap === 'false') {
+      output.dataset.wrap = 'false';
+      wrapBtn.dataset.active = 'false';
+    }
+    wrapBtn?.addEventListener('click', () => {
+      const next = output.dataset.wrap !== 'false' ? 'false' : 'true';
+      output.dataset.wrap = next;
+      wrapBtn.dataset.active = next;
+      localStorage.setItem(WRAP_KEY, next);
+    });
 
     const MAX_ENTRIES  = 5000;
     let entries = [];

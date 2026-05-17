@@ -62,8 +62,15 @@ export const DEFAULT_OS_ACTIONS: readonly KeyAction[] = [
   { id: 'aura.nav.down',   category: 'Basic Navigation', label: 'Move focus down',  scope: 'os-nav',    defaultCombo: 'ArrowDown'  },
   { id: 'aura.nav.left',   category: 'Basic Navigation', label: 'Move focus left',  scope: 'os-nav',    defaultCombo: 'ArrowLeft'  },
   { id: 'aura.nav.right',  category: 'Basic Navigation', label: 'Move focus right', scope: 'os-nav',    defaultCombo: 'ArrowRight' },
-  { id: 'aura.nav.enter',  category: 'Basic Navigation', label: 'Focus selected window', scope: 'os-nav', defaultCombo: 'Enter'  },
-  { id: 'aura.nav.back',   category: 'Basic Navigation', label: 'Back (to Nav mode / pop activity)', scope: 'os-always',   defaultCombo: 'Escape'        },
+  // Pointer-style navigation primitives:
+  //   • Enter            = "left click"  — primary activate.
+  //   • RShift+Enter     = "right click" — secondary activate (context menu / alt action).
+  //   • RShift+Backspace = "back"         — pop activity / leave focus.
+  // Side-specific RShift so the user can still use generic Shift+Enter /
+  // Shift+Backspace for app-level shortcuts without colliding.
+  { id: 'aura.nav.enter',           category: 'Basic Navigation', label: 'Primary activate (focus selected window)',  scope: 'os-nav',    defaultCombo: 'Enter'              },
+  { id: 'aura.nav.enter-secondary', category: 'Basic Navigation', label: 'Secondary activate (context / alt action)', scope: 'os-nav',    defaultCombo: 'RShift+Enter'       },
+  { id: 'aura.nav.back',            category: 'Basic Navigation', label: 'Back (to Nav mode / pop activity)',         scope: 'os-always', defaultCombo: 'RShift+Backspace'   },
   { id: 'aura.nav.home',   category: 'Basic Navigation', label: 'Home (force Nav mode)',             scope: 'os-always',   defaultCombo: 'Ctrl+Alt+KeyH' },
 
   // Window Management
