@@ -216,6 +216,19 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
       }
     });
 
+    // PTY sessions are multicast — multiple iframes (e.g. two browser
+    // tabs of the same activity) attach to the same shell and see/share
+    // the same output. So there's no "displaced" state for us to
+    // handle; we just open, listen, and reconnect on actual drops.
+
+    // One outstanding reconnect timer at any time, so a flurry of close
+    // events collapses into a single retry rather than stacking.
+    let reconnectTimer = null;
+    function scheduleReconnect() {
+      if (reconnectTimer) return;
+      reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, 2000);
+    }
+
     let attempt = 0;
     function connect() {
       attempt++;
@@ -256,7 +269,7 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
           // but bump it to a "retry" label so the user sees something is happening.
           startDots(`retry ${attempt}`);
         }
-        setTimeout(connect, 2000);
+        scheduleReconnect();
       };
 
       ws.onerror = () => {
