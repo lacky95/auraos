@@ -1,6 +1,7 @@
 import type { APIRoute } from 'astro';
 import { mkdirSync, writeFileSync, chmodSync, existsSync } from 'node:fs';
-import { join, normalize, dirname } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { join, normalize, dirname, resolve } from 'node:path';
 
 /**
  * Server-side app scaffolding.
@@ -97,11 +98,40 @@ export const POST: APIRoute = async ({ request }) => {
     return json({ error: 'write-failed', message: (err as Error).message }, 500);
   }
 
+  // Register the new app with pnpm so its workspace-dep symlinks (@aura/
+  // app-sdk, astro, etc.) get created under apps/<id>/node_modules. Without
+  // this, the next `aura app start <id>` spawns a container, hits the
+  // synthesized entrypoint, can't find `node_modules/.bin/astro` (the
+  // workspace root doesn't hoist astro since each app declares its own),
+  // and the container dies before the health check.
+  //
+  // `pnpm-workspace.yaml` already lists `apps/*` so pnpm picks the new
+  // member up automatically; we just have to run the install. The
+  // workspace root is the parent of APPS_DIR.
+  const workspaceRoot = resolve(APPS_DIR, '..');
+  const install = spawnSync('pnpm', ['install', '--prefer-offline'], {
+    cwd: workspaceRoot,
+    encoding: 'utf-8',
+    timeout: 120_000,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const installOk = install.status === 0;
+  if (!installOk) {
+    // Don't fail the whole scaffold: the files are on disk and the user
+    // can `pnpm install` manually. Surface the diagnostic so the CLI can
+    // surface it too.
+    console.warn(`[scaffold] pnpm install after ${appId} failed:`, install.stderr?.slice(0, 800) || install.error?.message);
+  }
+
   // AppRegistry's chokidar watcher (packages/core/src/app-manager/AppRegistry.ts)
   // picks up the new manifest file automatically — no explicit reload call
   // needed. The chokidar `add` event fires within ~100 ms and triggers
   // `loadManifestFile`, which emits `app:installed` on the OsEventBus.
-  return json({ ok: true, appId, dest, fileCount: files.length });
+  return json({
+    ok: true, appId, dest, fileCount: files.length,
+    installed: installOk,
+    ...(installOk ? {} : { installError: (install.stderr ?? install.error?.message ?? '').slice(0, 400) }),
+  });
 };
 
 function json(payload: unknown, status = 200): Response {

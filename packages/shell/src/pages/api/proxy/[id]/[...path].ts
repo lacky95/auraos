@@ -257,9 +257,23 @@ export default {};
       const framework     = activeTheme.framework;
 
       const escAttr = (s: string) => s.replace(/"/g, '&quot;');
+      // The proxy URL prefix every iframe is loaded at. SPA frameworks
+      // (Next.js, SvelteKit, Nuxt, Angular) need this as their `basePath`
+      // so client-side router URLs match the SSR'd href values — without
+      // it, hydration mismatches blank the page. Static SSR apps don't
+      // need to read this; the existing href rewriter still works for
+      // them. Either pattern is supported.
+      //
+      // Exposed in two redundant places so apps can pick whichever fits
+      // their framework's config style:
+      //   - `<meta name="aura-app-base-path">`  for build-time / static reads
+      //   - `window.AURA_APP_BASE_PATH` global  for runtime reads
+      // Plus an SDK helper at `getAppBasePath()` for type-safe access.
+      const appBasePath = `/api/proxy/${instance.instanceId}`;
       const metaParts: string[] = [
         `<meta name="aura-app-id" content="${escAttr(instance.appId)}">`,
         `<meta name="aura-instance-id" content="${escAttr(instance.instanceId)}">`,
+        `<meta name="aura-app-base-path" content="${escAttr(appBasePath)}">`,
         `<meta name="aura-design-framework" content="${escAttr(framework.id)}">`,
         `<meta name="aura-design-framework-version" content="${escAttr(framework.version)}">`,
         `<meta name="aura-theme-strategy" content="${escAttr(themeStrategy)}">`,
@@ -323,6 +337,20 @@ export default {};
           !/<link\b[^>]*href=["']\/api\/os\/theme\.css/i.test(rewritten)) {
         headFragments.push('<link rel="stylesheet" href="/api/os/theme.css">');
       }
+      // Globals exposed before any app script runs. SPA frameworks read
+      // these synchronously during config evaluation — e.g. Next.js's
+      // next.config.mjs can `const APP_BASE = globalThis.AURA_APP_BASE_PATH`
+      // at runtime rather than hardcoding the proxy URL. Keeping it as a
+      // separate <script> (not a JSON blob in a data-attribute) means it's
+      // assigned synchronously at HTML-parse time, before any of the app's
+      // own <script>s execute.
+      headFragments.push(
+        `<script>(function(){` +
+          `window.AURA_APP_BASE_PATH=${JSON.stringify(appBasePath)};` +
+          `window.AURA_APP_ID=${JSON.stringify(instance.appId)};` +
+          `window.AURA_INSTANCE_ID=${JSON.stringify(instance.instanceId)};` +
+        `})();</script>`,
+      );
       const idMeta = headFragments.join('');
       rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${idMeta}`);
 
@@ -428,7 +456,18 @@ window.addEventListener('keydown',function(e){
   e.preventDefault();e.stopPropagation();
   try{P.postMessage({type:'aura.key',combo:c,appId:SRC},'*');}catch(_){}
 },{capture:true});
-window.addEventListener('keyup',function(e){if(isMod(e.code))setMod(e.code,0);},{capture:true});
+window.addEventListener('keyup',function(e){
+  if(isMod(e.code))setMod(e.code,0);
+  // Firefox-on-Linux ergonomic fix: a lone Alt keyup opens Firefox's
+  // window menu (File / Edit / View …), which steals focus from the
+  // iframe. That fires on AltGr release too — so pressing AltGr+Q to
+  // type @ (German layout) or AltGr+E for € pops the menu and kicks
+  // the user out of the terminal. preventDefault on every Alt /
+  // AltGraph keyup suppresses that activation without otherwise
+  // changing keyboard behaviour. Chromium isn't affected; the call is
+  // a no-op there.
+  if(e.key==='Alt'||e.key==='AltGraph'){e.preventDefault();}
+},{capture:true});
 window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod.sr=mod.ml=mod.mr=0;});
 }catch(_){}})();</script>`;
       rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${keyForwarder}`);

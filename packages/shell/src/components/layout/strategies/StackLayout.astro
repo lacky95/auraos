@@ -30,6 +30,14 @@ const DEFAULT_W = 560;
 const DEFAULT_H = 400;
 const CASCADE   = 40;
 
+/**
+ * SSR slot style. The hydrated JS in `pages/index.astro` re-applies +
+ * re-clamps every slot's geometry against the actual viewport on mount,
+ * so the values here only matter until hydration. We still emit them
+ * with CSS `max-width`/`max-height` clamps to the viewport so a phone
+ * loading a saved-on-laptop stack never paints a slot wider than the
+ * screen during the first frame.
+ */
 function slotStyle(view: AppView, i: number): string {
   const rect = saved[view.viewId];
   const x = rect?.x ?? (24 + i * CASCADE);
@@ -37,7 +45,14 @@ function slotStyle(view: AppView, i: number): string {
   const w = rect?.w ?? DEFAULT_W;
   const h = rect?.h ?? DEFAULT_H;
   const z = rect?.z ?? (10 + i);
-  return `position:absolute; left:${x}px; top:${y}px; width:${w}px; height:${h}px; z-index:${z};`;
+  return (
+    `position:absolute;left:${x}px;top:${y}px;`
+    + `width:${w}px;height:${h}px;`
+    // Cap to the viewport so a stack saved on a wide screen doesn't
+    // paint past the right edge on first reflow on a narrow one.
+    + `max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);`
+    + `z-index:${z};`
+  );
 }
 ---
 <div class="stack-layout">

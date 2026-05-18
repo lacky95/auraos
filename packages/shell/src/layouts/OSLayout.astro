@@ -668,6 +668,13 @@ const activeThemeId   = activeTheme.id;
     // still held when the next non-modifier press arrives.
     document.addEventListener('keyup', (e) => {
       dispatcher.handleModifierKeyUp(e);
+      // Firefox-on-Linux ergonomic fix: lone-Alt keyup opens the browser's
+      // window menu (File / Edit / View …), which steals focus. AltGr fires
+      // the same activation on release — so typing AltGr+Q (= @ on a German
+      // layout) inside the launcher search or any shell-native input pops
+      // the menu. preventDefault on every Alt / AltGraph keyup blocks the
+      // activation. No-op on Chromium.
+      if (e.key === 'Alt' || e.key === 'AltGraph') e.preventDefault();
     }, { capture: true });
     // Blur reset: alt-tabbing away while holding Shift never delivers the
     // keyup. Clear all side flags on blur so the next focus starts clean.
@@ -769,6 +776,12 @@ const activeThemeId   = activeTheme.id;
     background: var(--aura-color-primary);
     border-color: var(--aura-color-primary);
   }
+
+  /* The [SHOW BARS] escape hatch on the empty-desktop overlay is hidden
+     except when autohide is actually engaged. In normal mode the bars
+     are visible by default and the button would be redundant. */
+  [data-aura-empty] [data-aura-show-bars] { display: none; }
+  body[data-autohide-bars="on"] [data-aura-empty] [data-aura-show-bars] { display: inline-block; }
 
   /* Slide-in panels (#lo-panel from LauncherOverlay, #pm-panel from
    * ProcessManager) anchor to `top: var(--aura-statusbar-height)` and

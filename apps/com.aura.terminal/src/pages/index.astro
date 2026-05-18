@@ -56,6 +56,15 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
     #terminal { flex: 1; padding: 4px; overflow: hidden; }
     .xterm { height: 100%; }
     .xterm-viewport { background: var(--aura-color-bg) !important; }
+    /* xterm flips `.xterm-screen` to `cursor: crosshair` whenever Alt is
+       held over the terminal — a hint that Alt+drag does column
+       selection. That hint fires for every Alt-bearing OS shortcut
+       (Ctrl+Alt+Space etc.) and looks like our intercept misfired even
+       though it didn't. Override back to the text I-beam; Alt+drag
+       still selects columns, just without the visual cue. */
+    .xterm .xterm-screen,
+    .xterm-screen-mouse,
+    .xterm.column-select { cursor: text !important; }
     #status {
       padding: 2px 12px;
       font-size: 0.65rem;
@@ -114,6 +123,72 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
       fontSize: 14,
       cursorBlink: true,
       allowProposedApi: true,
+    });
+
+    // ─── OS shortcut yield ───────────────────────────────────────────────
+    // The proxy injects a window-capture-phase keydown forwarder that
+    // intercepts every combo in the OS claim list (Ctrl+Alt+Space etc.)
+    // BEFORE the event reaches xterm's textarea. That alone is enough
+    // for `aura.launcher.toggle` to fire while the user is typing.
+    //
+    // We ALSO tell xterm explicitly to ignore the same combos via
+    // `attachCustomKeyEventHandler` — returning false makes xterm skip
+    // its own preventDefault/handle pipeline. Defense in depth: if a
+    // future xterm release ever moves its keydown handling to a higher-
+    // priority listener (e.g. document-capture), this guarantees the OS
+    // still gets the key.
+    //
+    // The claim list is read from the `aura-keymap-bindings` meta tag the
+    // proxy emits — that map honours user keymap overrides, so a user who
+    // rebinds the launcher away from Ctrl+Alt+Space gets the new combo
+    // yielded instead of stale defaults.
+    const osComboSet = new Set();
+    try {
+      const bindingsMeta = document.querySelector('meta[name="aura-keymap-bindings"]');
+      const bindings = JSON.parse(bindingsMeta?.getAttribute('content') ?? '{}');
+      for (const [id, combo] of Object.entries(bindings)) {
+        // Only yield combos that look OS-level (modifier+key), not bare keys
+        // — bare-key bindings are claimed by os-nav, which is mode-gated and
+        // shouldn't steal typed characters from a focused terminal.
+        if (typeof combo === 'string' && combo.includes('+')) osComboSet.add(combo);
+      }
+    } catch { /* meta missing or malformed — no extra yields, the forwarder still works */ }
+
+    function comboFromEvent(e) {
+      const parts = [];
+      if (e.ctrlKey)  parts.push('Ctrl');
+      if (e.altKey)   parts.push('Alt');
+      if (e.shiftKey) parts.push('Shift');
+      if (e.metaKey)  parts.push('Super');
+      parts.push(e.code);
+      return parts.join('+');
+    }
+    term.attachCustomKeyEventHandler((event) => {
+      if (event.type !== 'keydown') return true;
+      return !osComboSet.has(comboFromEvent(event));
+    });
+
+    // NOTE: there used to be a direct `window.parent.postMessage({type:
+    // 'aura.system.toggleLauncher'})` handler here that intercepted
+    // Ctrl+Alt+Space and force-toggled the launcher panel. It was
+    // redundant — the proxy-injected `aura.key` forwarder (see the
+    // comment block above) already forwards the same combo through the
+    // OS dispatcher — AND it was actively wrong: the dispatcher now
+    // binds Ctrl+Alt+Space to "focus the first dock button" (chrome
+    // entry), not "toggle the launcher". The direct path overrode the
+    // intended behaviour, so we let the dispatcher own this combo.
+
+    // Live-update the yielded combos when the user remaps something. The
+    // shell broadcasts `aura.keymap.changed` to every iframe whenever
+    // bindings change, with the same shape as the meta tag.
+    window.addEventListener('message', (ev) => {
+      if (ev?.data?.type !== 'aura.keymap.changed') return;
+      const next = ev.data.bindings;
+      if (!next || typeof next !== 'object') return;
+      osComboSet.clear();
+      for (const [id, combo] of Object.entries(next)) {
+        if (typeof combo === 'string' && combo.includes('+')) osComboSet.add(combo);
+      }
     });
 
     // Re-apply the palette when the OS broadcasts a theme or mode change.

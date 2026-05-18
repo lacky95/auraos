@@ -204,7 +204,8 @@ const ssrVisibleViews = initialViews
 <script>
   import * as workspaceClient from '../lib/workspaceClient';
   import { getKeyDispatcher } from '../lib/keyDispatcher.ts';
-  import { nextInDirection, rectFromSlot } from '../lib/windowNav.ts';
+  import { nextInDirection, getViewRects } from '../lib/windowNav.ts';
+  import type { LayoutNavContext } from '../lib/windowNav.ts';
   import { osEvents } from '../lib/osEvents.ts';
 
   const keyDispatcher = getKeyDispatcher();
@@ -422,6 +423,12 @@ const ssrVisibleViews = initialViews
       // App mode — drop the ring.
       setNavHighlight(null);
     }
+    // Mirror the dispatcher mode onto the `◐` chip so its active style
+    // (filled primary background, set via CSS in Dock.astro) tracks the
+    // actual window-select state. Done here rather than in Dock.astro so
+    // the dispatcher reference stays inside this script's scope.
+    const navEntry = document.getElementById('dock-nav-entry');
+    if (navEntry) navEntry.dataset['mode'] = mode === 'nav' ? 'active' : '';
   });
 
   function moveNav(dir: 'up' | 'down' | 'left' | 'right'): void {
@@ -431,14 +438,21 @@ const ssrVisibleViews = initialViews
     const current = navHighlightedViewId && ids.includes(navHighlightedViewId)
       ? navHighlightedViewId
       : ids[0]!;
-    // Use the live bounding boxes — works for any layout strategy without
-    // bespoke math. windowNav's `nextInDirection` does the half-plane +
-    // off-axis penalty selection so straight arrows pick the obvious slot.
-    const rects = ids.map((vid) => {
-      const slot = document.querySelector<HTMLElement>(`.app-slot[data-view-id="${CSS.escape(vid)}"]`);
-      return rectFromSlot(slot!, vid);
-    });
-    const next = nextInDirection(rects, current, dir);
+    // Route through `getViewRects` so a future layout-strategy plugin can
+    // register a custom `(viewIds, ctx) => ViewRect[]` and override the
+    // default (live DOM bboxes). Every shipped strategy is bbox-driven, so
+    // the fallback inside getViewRects matches the previous behaviour.
+    const wsState = workspaceClient.getCached();
+    const active  = wsState?.workspaces.find((w) => w.id === wsState.activeWorkspaceId);
+    const ctx: LayoutNavContext = {
+      layoutId:      active?.layoutId ?? 'tiling',
+      desktopWidth:  dynamicLayout.clientWidth  || window.innerWidth,
+      desktopHeight: dynamicLayout.clientHeight || window.innerHeight,
+      layoutState:   active?.layoutState as Record<string, unknown> | undefined,
+      slotFor:       (vid) => document.querySelector(`.app-slot[data-view-id="${CSS.escape(vid)}"]`),
+    };
+    const rects = getViewRects(ids, ctx);
+    const next  = nextInDirection(rects, current, dir);
     setNavHighlight(next);
   }
 
@@ -453,6 +467,55 @@ const ssrVisibleViews = initialViews
     const iframe = slot?.querySelector<HTMLIFrameElement>('iframe');
     iframe?.focus();
     keyDispatcher.setMode('app');
+  });
+
+  // ── Window-selection mode plumbing ──────────────────────────────────────
+  // The `◐` chip at the start of the dock is the keyboard entry point.
+  // Focusing it (Ctrl+Alt+Space) and pressing Enter dispatches a custom
+  // event we listen for here; that flips dispatcher into Nav mode, which
+  // the `onModeChange` hook above turns into a window highlight.
+  //
+  // Three exit paths converge on the same end state ("dispatcher back to
+  // 'app', focus on the ◐ chip"):
+  //   • Escape  — modal-dismiss convention
+  //   • mousedown anywhere outside an `.app-slot` (and outside the chip
+  //     itself, so re-clicking it doesn't immediately re-toggle)
+  //   • the same `aura:window-select.toggle` event again
+  // The fourth exit — Enter on the highlighted window — is already wired
+  // by the `aura.nav.enter` binding above (it sets 'app' mode + focuses
+  // the iframe, so we don't refocus the chip in that case).
+  function refocusDockChip(): void {
+    (document.getElementById('dock-nav-entry') as HTMLButtonElement | null)?.focus();
+  }
+  document.addEventListener('aura:window-select.toggle', () => {
+    if (keyDispatcher.getMode() === 'nav') {
+      keyDispatcher.setMode('app');
+      refocusDockChip();
+    } else {
+      keyDispatcher.setMode('nav');
+    }
+  });
+  // Escape exit. Gated on nav mode so app-side Esc handlers (terminal,
+  // launcher overlay, dialogs) keep their own semantics in app mode.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (keyDispatcher.getMode() !== 'nav') return;
+    e.preventDefault();
+    keyDispatcher.setMode('app');
+    refocusDockChip();
+  });
+  // Click-outside exit. mousedown on chrome / empty desktop (anything that
+  // isn't an .app-slot and isn't the chip itself) cancels nav mode. The
+  // chip exclusion is what lets Ctrl+Alt+Space's focus-the-chip path stay
+  // idempotent — otherwise the focus call could double-fire the toggle.
+  document.addEventListener('mousedown', (e) => {
+    if (keyDispatcher.getMode() !== 'nav') return;
+    const t = e.target as HTMLElement | null;
+    if (!t) return;
+    if (t.closest('.app-slot')) return;
+    if (t.closest('#dock-nav-entry')) return;
+    keyDispatcher.setMode('app');
+    refocusDockChip();
   });
 
   interface AppView {
@@ -508,32 +571,94 @@ const ssrVisibleViews = initialViews
 
   // ---- Stack-layout drag/resize ------------------------------------------
   //
-  // Free-floating windows. Per-window geometry persists to
-  // `workspace.layoutState.rects[viewId]` so positions survive browser
+  // Free-floating windows ("Free Window" mode). Per-window geometry persists
+  // to `workspace.layoutState.rects[viewId]` so positions survive browser
   // reload and workspace switch. The dispatch in `renderLayout()` calls
   // `applyStackPos` + `ensureStackHandlers` only when layoutId === 'stack'.
   //
-  // Handlers are attached lazily and tracked on the element itself
-  // (`dataset.stackHandlersBound`) so re-render passes don't add new
-  // listeners. The slot already has the chrome (drag handle) and we
-  // append a small bottom-right grip for resize.
+  // Implementation notes:
+  //   • Drag + resize use POINTER events (not mouse) with
+  //     `setPointerCapture` so events keep flowing when the cursor crosses
+  //     into an app iframe. Without capture the iframe is a separate
+  //     browsing context and "steals" the move events — drag freezes mid-
+  //     motion. setPointerCapture makes the captured element the only
+  //     receiver until pointerup, which fixes drag-over-iframe AND wires
+  //     touch + stylus for free.
+  //   • A `.aura-stack-dragging` class on <body> disables iframe pointer
+  //     events as a belt-and-suspenders safety net (CSS at the end of
+  //     this file's <style> block, see global rule near `iframe`).
+  //   • Geometry is clamped so chrome always has a grab-handle visible:
+  //     even after a viewport rotation or window-resize, no slot can end
+  //     up entirely off-screen. A ResizeObserver on the layout container
+  //     re-clamps on viewport changes.
+  //   • Handlers are attached lazily and tracked on the element itself
+  //     (`dataset.stackHandlersBound`) so re-render passes don't double-
+  //     bind listeners.
   type SavedRect = { x: number; y: number; w: number; h: number; z: number };
-  const STACK_DEFAULTS = { w: 560, h: 400, cascade: 40 };
-  const STACK_MIN_W = 280;
-  const STACK_MIN_H = 160;
+
+  /** Minimum strip of chrome that must remain visible on every edge so the
+   *  user can always grab a slot to drag it back. Matches the chrome
+   *  height (28 px) with a tiny visual buffer. */
+  const STACK_EDGE_MARGIN = 32;
+  /** Smallest sensible window. Below this the chrome buttons start to
+   *  overlap and the iframe content stops being useful. */
+  const STACK_MIN_W = 240;
+  const STACK_MIN_H = 140;
+  /** Width threshold below which the layout treats itself as "mobile":
+   *  new windows default to filling the viewport instead of a 560×400
+   *  cascade, and the resize grip grows into a larger touch target. */
+  const STACK_MOBILE_BP = 640;
+
+  function stackDefaults(): { w: number; h: number; cascade: number } {
+    // Viewport-aware defaults. On desktop a 560×400 cascade is fine;
+    // on mobile we expand to nearly fill the viewport so a freshly
+    // launched app is usable without a manual resize.
+    const w = dynamicLayout.clientWidth  || window.innerWidth;
+    const h = dynamicLayout.clientHeight || window.innerHeight;
+    if (w < STACK_MOBILE_BP) {
+      return {
+        w: Math.max(STACK_MIN_W, w - 16),
+        h: Math.max(STACK_MIN_H, h - 16),
+        cascade: 0,
+      };
+    }
+    return { w: 560, h: 400, cascade: 40 };
+  }
+
+  function clampStackRect(rect: SavedRect): SavedRect {
+    // Confine the rect to the layout container so the slot is always at
+    // least partially reachable. We allow x/y to go slightly negative
+    // (so an off-axis edge can hide) but require STACK_EDGE_MARGIN px
+    // of chrome to remain inside the layout bounds on every side.
+    const W = dynamicLayout.clientWidth  || window.innerWidth;
+    const H = dynamicLayout.clientHeight || window.innerHeight;
+    const w = Math.max(STACK_MIN_W, Math.min(rect.w, W));
+    const h = Math.max(STACK_MIN_H, Math.min(rect.h, H));
+    const minX = STACK_EDGE_MARGIN - w; // leave EDGE_MARGIN px on the left
+    const maxX = W - STACK_EDGE_MARGIN;
+    const minY = 0;                     // top chrome must stay visible
+    const maxY = H - STACK_EDGE_MARGIN;
+    const x = Math.max(minX, Math.min(rect.x, maxX));
+    const y = Math.max(minY, Math.min(rect.y, maxY));
+    return { x, y, w, h, z: rect.z };
+  }
 
   function applyStackPos(el: HTMLElement, viewId: string, rect: SavedRect | undefined, fallbackIndex: number): void {
-    const x = rect?.x ?? (24 + fallbackIndex * STACK_DEFAULTS.cascade);
-    const y = rect?.y ?? (24 + fallbackIndex * STACK_DEFAULTS.cascade);
-    const w = rect?.w ?? STACK_DEFAULTS.w;
-    const h = rect?.h ?? STACK_DEFAULTS.h;
-    const z = rect?.z ?? (10 + fallbackIndex);
+    const d = stackDefaults();
+    const initial: SavedRect = rect ?? {
+      x: 24 + fallbackIndex * d.cascade,
+      y: 24 + fallbackIndex * d.cascade,
+      w: d.w,
+      h: d.h,
+      z: 10 + fallbackIndex,
+    };
+    const r = clampStackRect(initial);
     el.style.position = 'absolute';
-    el.style.left   = x + 'px';
-    el.style.top    = y + 'px';
-    el.style.width  = w + 'px';
-    el.style.height = h + 'px';
-    el.style.zIndex = String(z);
+    el.style.left   = r.x + 'px';
+    el.style.top    = r.y + 'px';
+    el.style.width  = r.w + 'px';
+    el.style.height = r.h + 'px';
+    el.style.zIndex = String(r.z);
     el.dataset['viewId'] = viewId;
   }
   function clearStackPos(el: HTMLElement): void {
@@ -545,12 +670,13 @@ const ssrVisibleViews = initialViews
     el.style.removeProperty('z-index');
   }
 
-  function readStackRect(el: HTMLElement): { x: number; y: number; w: number; h: number; z: number } {
+  function readStackRect(el: HTMLElement): SavedRect {
+    const d = stackDefaults();
     return {
       x: parseFloat(el.style.left)   || 0,
       y: parseFloat(el.style.top)    || 0,
-      w: parseFloat(el.style.width)  || STACK_DEFAULTS.w,
-      h: parseFloat(el.style.height) || STACK_DEFAULTS.h,
+      w: parseFloat(el.style.width)  || d.w,
+      h: parseFloat(el.style.height) || d.h,
       z: parseInt(el.style.zIndex, 10) || 10,
     };
   }
@@ -574,72 +700,158 @@ const ssrVisibleViews = initialViews
     persistStackRect(viewId, r);
   }
 
+  /** Walk every slot in stack mode and re-clamp its position into the
+   *  current layout bounds. Called by a ResizeObserver on the layout
+   *  container so a phone rotation or window-resize never leaves a slot
+   *  off-screen and unreachable. */
+  function reclampAllStackSlots(): void {
+    const slots = dynamicLayout.querySelectorAll<HTMLElement>(':scope > .app-slot[data-view-id]');
+    slots.forEach((el) => {
+      // Only touch slots that are participating in stack layout — grid
+      // modes leave inline left/top empty and we'd accidentally pin them.
+      if (el.style.position !== 'absolute') return;
+      const viewId = el.dataset['viewId'];
+      if (!viewId) return;
+      const before = readStackRect(el);
+      const after  = clampStackRect(before);
+      if (after.x !== before.x || after.y !== before.y || after.w !== before.w || after.h !== before.h) {
+        el.style.left   = after.x + 'px';
+        el.style.top    = after.y + 'px';
+        el.style.width  = after.w + 'px';
+        el.style.height = after.h + 'px';
+        persistStackRect(viewId, after);
+      }
+    });
+  }
+  // The `new ResizeObserver(...).observe(dynamicLayout)` registration is
+  // deferred until after `dynamicLayout` is declared (a few dozen lines
+  // below this block). Placing it here would hit the TDZ on the const.
+
+  /** Begin a pointer-driven drag or resize. The caller computes a delta
+   *  from `(dx, dy)` and we apply it via `apply(dx, dy)`. We capture the
+   *  pointer to `el` so the iframe can't steal `pointermove` mid-gesture,
+   *  add the `aura-stack-dragging` body class for the CSS safety net, and
+   *  persist on release. Returns nothing — fully managed inside. */
+  function startStackGesture(
+    el: HTMLElement,
+    captureEl: HTMLElement,
+    viewId: string,
+    ev: PointerEvent,
+    apply: (dx: number, dy: number) => void,
+  ): void {
+    ev.preventDefault();
+    const startX = ev.clientX;
+    const startY = ev.clientY;
+    try { captureEl.setPointerCapture(ev.pointerId); } catch { /* unsupported, fall through */ }
+    document.body.classList.add('aura-stack-dragging');
+
+    const onMove = (mv: PointerEvent) => {
+      if (mv.pointerId !== ev.pointerId) return;
+      apply(mv.clientX - startX, mv.clientY - startY);
+    };
+    const onEnd = (up: PointerEvent) => {
+      if (up.pointerId !== ev.pointerId) return;
+      captureEl.removeEventListener('pointermove',  onMove);
+      captureEl.removeEventListener('pointerup',    onEnd);
+      captureEl.removeEventListener('pointercancel', onEnd);
+      document.body.classList.remove('aura-stack-dragging');
+      // Re-clamp the final position so a fast drag that flew off-screen
+      // gets snapped back, then persist the clamped result.
+      const final = clampStackRect(readStackRect(el));
+      el.style.left   = final.x + 'px';
+      el.style.top    = final.y + 'px';
+      el.style.width  = final.w + 'px';
+      el.style.height = final.h + 'px';
+      persistStackRect(viewId, final);
+    };
+    captureEl.addEventListener('pointermove',  onMove);
+    captureEl.addEventListener('pointerup',    onEnd);
+    captureEl.addEventListener('pointercancel', onEnd);
+  }
+
   function ensureStackHandlers(el: HTMLElement, viewId: string): void {
     if (el.dataset['stackHandlersBound'] === '1') return;
     el.dataset['stackHandlersBound'] = '1';
 
     const chrome = el.querySelector<HTMLElement>('.slot-chrome');
     if (chrome) {
-      chrome.style.cursor = 'move';
-      const onDown = (ev: MouseEvent) => {
+      // Cursor states (`grab` idle / `grabbing` active) are handled by CSS
+      // keyed off the `data-stack-handlers-bound="1"` attribute on the slot
+      // and the `body.aura-stack-dragging` flag toggled by
+      // `startStackGesture`. See the rules in the <style is:global> block
+      // below. Doing it in CSS keeps non-stack layouts free of stray
+      // cursor inline styles after teardown.
+      //
+      // touch-action: none stops the browser from interpreting a touch
+      // drag on the chrome as a scroll/pinch, which would preempt our
+      // pointermove handlers on mobile.
+      chrome.style.touchAction = 'none';
+      const onDown = (ev: PointerEvent) => {
         // Don't start a drag from controls (close/min/max) or the trail
         // breadcrumb buttons — those have their own actions.
         const target = ev.target as HTMLElement | null;
         if (target?.closest('button')) return;
-        ev.preventDefault();
         bringToFrontStack(el, viewId);
-        const startX = ev.clientX, startY = ev.clientY;
         const startLeft = parseFloat(el.style.left) || 0;
         const startTop  = parseFloat(el.style.top)  || 0;
-        const onMove = (mv: MouseEvent) => {
-          el.style.left = Math.max(0, startLeft + (mv.clientX - startX)) + 'px';
-          el.style.top  = Math.max(0, startTop  + (mv.clientY - startY)) + 'px';
-        };
-        const onUp = () => {
-          window.removeEventListener('mousemove', onMove);
-          window.removeEventListener('mouseup', onUp);
-          persistStackRect(viewId, readStackRect(el));
-        };
-        window.addEventListener('mousemove', onMove);
-        window.addEventListener('mouseup', onUp);
+        startStackGesture(el, chrome, viewId, ev, (dx, dy) => {
+          // Live-clamp so the slot can't be flung past the layout edge.
+          // We clamp on each frame instead of only on release so the
+          // chrome stays under the pointer through the whole drag.
+          const next = clampStackRect({
+            x: startLeft + dx,
+            y: startTop  + dy,
+            w: parseFloat(el.style.width)  || STACK_MIN_W,
+            h: parseFloat(el.style.height) || STACK_MIN_H,
+            z: parseInt(el.style.zIndex, 10) || 10,
+          });
+          el.style.left = next.x + 'px';
+          el.style.top  = next.y + 'px';
+        });
       };
-      chrome.addEventListener('mousedown', onDown);
+      chrome.addEventListener('pointerdown', onDown);
       (el as any).__stackChromeDown = onDown;
     }
 
     // Bottom-right resize grip — appended once. Sized + styled inline so
-    // it doesn't depend on stylesheet load order.
+    // it doesn't depend on stylesheet load order. Hit target grows on
+    // pointer-coarse devices (touch) where 14px is below Apple's 44pt
+    // and Google's 48dp minimums.
     let grip = el.querySelector<HTMLElement>(':scope > .stack-resize-grip');
     if (!grip) {
       grip = document.createElement('div');
       grip.className = 'stack-resize-grip';
-      grip.style.cssText = 'position:absolute;right:0;bottom:0;width:14px;height:14px;cursor:nwse-resize;background:linear-gradient(135deg,transparent 50%,var(--aura-color-text-dim) 50%);opacity:0.6;z-index:2;';
+      const coarse = window.matchMedia('(pointer: coarse)').matches;
+      const size = coarse ? 28 : 16;
+      grip.style.cssText =
+        `position:absolute;right:0;bottom:0;width:${size}px;height:${size}px;`
+        + `cursor:nwse-resize;touch-action:none;z-index:2;`
+        + `background:linear-gradient(135deg,transparent 50%,var(--aura-color-text-dim) 50%);opacity:0.6;`;
       el.appendChild(grip);
     }
-    const onGripDown = (ev: MouseEvent) => {
-      ev.preventDefault();
+    const onGripDown = (ev: PointerEvent) => {
       ev.stopPropagation();
-      const startX = ev.clientX, startY = ev.clientY;
-      const startW = parseFloat(el.style.width)  || STACK_DEFAULTS.w;
-      const startH = parseFloat(el.style.height) || STACK_DEFAULTS.h;
-      const onMove = (mv: MouseEvent) => {
-        el.style.width  = Math.max(STACK_MIN_W, startW + (mv.clientX - startX)) + 'px';
-        el.style.height = Math.max(STACK_MIN_H, startH + (mv.clientY - startY)) + 'px';
-      };
-      const onUp = () => {
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup', onUp);
-        persistStackRect(viewId, readStackRect(el));
-      };
-      window.addEventListener('mousemove', onMove);
-      window.addEventListener('mouseup', onUp);
+      const startW = parseFloat(el.style.width)  || stackDefaults().w;
+      const startH = parseFloat(el.style.height) || stackDefaults().h;
+      startStackGesture(el, grip!, viewId, ev, (dx, dy) => {
+        const next = clampStackRect({
+          x: parseFloat(el.style.left) || 0,
+          y: parseFloat(el.style.top)  || 0,
+          w: startW + dx,
+          h: startH + dy,
+          z: parseInt(el.style.zIndex, 10) || 10,
+        });
+        el.style.width  = next.w + 'px';
+        el.style.height = next.h + 'px';
+      });
     };
-    grip.addEventListener('mousedown', onGripDown);
+    grip.addEventListener('pointerdown', onGripDown);
     (el as any).__stackGripDown = onGripDown;
 
-    // Z-order: any click in the slot brings it forward.
+    // Z-order: any pointerdown in the slot brings it forward. Listens on
+    // the bubbling phase so it doesn't fight the chrome/grip handlers.
     const onClickIn = () => bringToFrontStack(el, viewId);
-    el.addEventListener('mousedown', onClickIn);
+    el.addEventListener('pointerdown', onClickIn);
     (el as any).__stackClickIn = onClickIn;
   }
 
@@ -648,10 +860,14 @@ const ssrVisibleViews = initialViews
     delete el.dataset['stackHandlersBound'];
     const chrome = el.querySelector<HTMLElement>('.slot-chrome');
     if (chrome && (el as any).__stackChromeDown) {
-      chrome.removeEventListener('mousedown', (el as any).__stackChromeDown);
-      chrome.style.removeProperty('cursor');
+      chrome.removeEventListener('pointerdown', (el as any).__stackChromeDown);
+      // No `removeProperty('cursor')` — the cursor is CSS-driven via the
+      // `data-stack-handlers-bound` selector, which we already cleared
+      // a few lines above. Wiping cursor here would only matter if some
+      // older code path had set it inline, which no longer happens.
+      chrome.style.removeProperty('touch-action');
     }
-    if ((el as any).__stackClickIn) el.removeEventListener('mousedown', (el as any).__stackClickIn);
+    if ((el as any).__stackClickIn) el.removeEventListener('pointerdown', (el as any).__stackClickIn);
     const grip = el.querySelector<HTMLElement>(':scope > .stack-resize-grip');
     if (grip) grip.remove();
     delete (el as any).__stackChromeDown;
@@ -666,6 +882,21 @@ const ssrVisibleViews = initialViews
   const focusInstIdEl = document.getElementById('focus-instance-id')!;
   const focusTitleEl  = document.getElementById('focus-title')!;
   const focusExitBtn  = document.getElementById('focus-exit')!;
+
+  // Stack-layout viewport reclamp. Runs whenever `dynamicLayout` resizes
+  // (window resize, mobile rotation, devtools open) so a slot saved at a
+  // wider geometry doesn't end up off-screen and unreachable. ResizeObserver
+  // fires on initial observe too, catching the laptop-stack-on-phone case.
+  // Defined here (not next to `reclampAllStackSlots`) because that function
+  // captures `dynamicLayout` lexically, and the const isn't initialised
+  // when this script first evaluates — TDZ-error if we observe earlier.
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(() => {
+      const wsState = workspaceClient.getCached();
+      const active = wsState?.workspaces.find((w) => w.id === wsState.activeWorkspaceId);
+      if (active?.layoutId === 'stack') reclampAllStackSlots();
+    }).observe(dynamicLayout);
+  }
 
   // Hydrate from SSR initial views so the JS-side state matches what's already on screen.
   // Once we have data, switch to the JS-managed dynamicLayout immediately so close/minimize
@@ -1082,9 +1313,16 @@ const ssrVisibleViews = initialViews
         emptyEl = document.createElement('div');
         emptyEl.setAttribute('data-aura-empty', '1');
         emptyEl.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:transparent;color:var(--aura-color-text-dim);font-size:0.8rem;letter-spacing:0.15em;text-align:center;pointer-events:auto;';
+        // The autohide reveal button is rendered next to the launcher in
+        // the empty state ONLY when autohide is active — that's the mode
+        // where the bars are tucked off-screen and the user has no
+        // ambient way to dismiss it. CSS at `:scope` level toggles its
+        // display from body[data-autohide-bars="on"]; see global.css.
+        const btnStyle = 'color: var(--aura-color-primary); border: var(--aura-border); padding: 8px 24px; background: transparent; cursor: pointer; font-family: var(--aura-font-mono); letter-spacing: 0.1em;';
         emptyEl.innerHTML = `
           <div style="margin-bottom: 12px;">// NO ACTIVE PROCESSES</div>
-          <button type="button" onclick="window.auraOpenLauncher && window.auraOpenLauncher()" style="color: var(--aura-color-primary); border: var(--aura-border); padding: 8px 24px; background: transparent; cursor: pointer; font-family: var(--aura-font-mono); letter-spacing: 0.1em;">[ LAUNCH APP ]</button>`;
+          <button type="button" onclick="window.auraOpenLauncher && window.auraOpenLauncher()" style="${btnStyle}">[ LAUNCH APP ]</button>
+          <button type="button" data-aura-show-bars="1" onclick="window.auraToggleAutohideBars && window.auraToggleAutohideBars()" style="${btnStyle} margin-top: 10px;">[ SHOW BARS ]</button>`;
         dynamicLayout.appendChild(emptyEl);
       }
     } else if (emptyEl) {
@@ -1806,12 +2044,83 @@ const ssrVisibleViews = initialViews
   }
   #focus-view[aria-hidden="false"] { display: flex; }
 
-  /* Nav-mode focus ring. Set on the highlighted `.app-slot` by
-     `pages/index.astro`'s arrow-key handler. Inset shadow rather than
-     `outline` so it doesn't bleed into adjacent slots in the tiling grid. */
+  /* Window-selection mode highlight. Recolours the slot's existing thin
+     border to the high-contrast text colour. `--aura-color-text` is the
+     theme's foreground tone (near-white in dark themes, near-black in
+     light themes) so the frame is clearly visible in any palette — the
+     brand `--aura-color-primary` looked washed-out against several theme
+     surfaces.
+
+     `!important` is unavoidable here: `createSlot()` writes the base
+     `border: var(--aura-border)` as an INLINE style on the slot div
+     (see line ~1581 in this file), which beats every non-important CSS
+     selector. Keeping the inline shorthand simplifies createSlot vs.
+     moving its base styles into the global block.
+
+     `position: relative` is added so the watermark `::after` below has a
+     positioned containing block in grid layouts. In stack mode the
+     inline `position: absolute` set by `applyStackPos` already provides
+     that and beats this rule's specificity. */
   .app-slot[data-aura-nav-focus="true"] {
-    box-shadow: inset 0 0 0 2px var(--aura-color-primary), 0 0 12px var(--aura-color-primary);
+    border-color: var(--aura-color-text) !important;
+    position: relative;
     z-index: 2;
+  }
+  /* Centred watermark glyph above the iframe — at-a-glance "this is the
+     selected window" badge even when adjacent windows have similar
+     content. Full opacity (the user explicitly didn't want a faded
+     watermark) and the same `--aura-color-text` token used for the
+     border, so the frame and badge read as one piece. Sized small so
+     the badge doesn't obscure the app underneath; `pointer-events:
+     none` ensures it never eats clicks. */
+  .app-slot[data-aura-nav-focus="true"]::after {
+    content: '◉';
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: clamp(3rem, 16vmin, 7rem);
+    color: var(--aura-color-text);
+    opacity: 1;
+    pointer-events: none;
+    z-index: 3;
+  }
+
+  /* Free-Window drag safety net. The stack-mode drag/resize handlers use
+     `setPointerCapture` so iframes can't steal the pointermove stream —
+     this rule is the redundant CSS guard for browsers/edge cases where
+     capture isn't honoured (and to suppress text-selection across the
+     whole desktop while a drag is in flight). The body class is toggled
+     by `startStackGesture()` near the top of the inline script above. */
+  body.aura-stack-dragging {
+    cursor: grabbing;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  body.aura-stack-dragging .app-slot iframe {
+    pointer-events: none;
+  }
+
+  /* Free-Window cursor affordance. The chrome (title bar) shows an open
+     hand when the slot is drag-enabled (stack mode), and a closed hand
+     while a drag/resize is actually in flight. The data attribute is
+     set by `ensureStackHandlers()` only in stack mode, so chromes in
+     tiling/rows/columns/fullscreen stay with the default arrow cursor.
+     `!important` overrides the in-drag body-level `grabbing` cursor with
+     a more specific feedback (still grabbing — same shape, but the rule
+     here wins specificity so nested selectors below don't flicker back
+     to grab while the body class is on). */
+  .app-slot[data-stack-handlers-bound="1"] .slot-chrome {
+    cursor: grab;
+  }
+  body.aura-stack-dragging .app-slot[data-stack-handlers-bound="1"] .slot-chrome {
+    cursor: grabbing;
+  }
+  /* Buttons inside the chrome (close/minimize/maximize, breadcrumb) keep
+     the pointer cursor — the hand only applies to empty drag space. */
+  .app-slot[data-stack-handlers-bound="1"] .slot-chrome button {
+    cursor: pointer;
   }
 
   /* ---- Slot chrome (title + breadcrumb + controls) -------------------- */

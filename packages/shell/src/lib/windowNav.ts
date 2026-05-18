@@ -109,3 +109,65 @@ export function rectFromSlot(slot: Element, viewId: string): ViewRect {
     h:  bb.height,
   };
 }
+
+/**
+ * Context passed to a layout strategy's per-window coordinate function.
+ * Carries everything a strategy might need to compute logical positions
+ * without depending on the live DOM (e.g. a future "carousel" or "ring"
+ * layout that wants ordinal coords). Strategies that want the default
+ * live-bbox behaviour simply don't register anything — see `getViewRects`.
+ */
+export interface LayoutNavContext {
+  layoutId:      string;
+  desktopWidth:  number;
+  desktopHeight: number;
+  /** Strategy-specific persisted state (e.g. `rects` for stack mode). */
+  layoutState?:  Record<string, unknown>;
+  /** Resolver from viewId to the live `.app-slot` element. Used by the
+   *  default fallback path (live bboxes) and available to strategy
+   *  overrides that still want DOM measurements. */
+  slotFor:       (viewId: string) => Element | null;
+}
+
+export type GetViewRectsFn = (
+  viewIds: readonly string[],
+  ctx:     LayoutNavContext,
+) => ViewRect[];
+
+/**
+ * Per-layoutId override map. A layout strategy that wants to declare
+ * logical x/y positions per window (independent of the DOM) registers
+ * itself once at module load:
+ *
+ *   import { registerLayoutRects } from '.../windowNav';
+ *   registerLayoutRects('carousel', (viewIds, ctx) => …);
+ *
+ * No shipped strategy uses this today — tiling / rows / stack / fullscreen
+ * all reduce to plain `getBoundingClientRect()` reads, which the default
+ * path in `getViewRects` already handles.
+ */
+const layoutRectOverrides = new Map<string, GetViewRectsFn>();
+export function registerLayoutRects(layoutId: string, fn: GetViewRectsFn): void {
+  layoutRectOverrides.set(layoutId, fn);
+}
+
+/**
+ * Resolve every view's rect under the active layout. Looks up a registered
+ * override first; falls back to reading live DOM bounding boxes via
+ * `rectFromSlot`. The fallback covers every currently-shipped strategy
+ * (the CSS Grid + absolute-positioned layouts all produce sensible bboxes).
+ *
+ * Returns `(0,0,0,0)` rects for views whose slot can't be resolved — keeps
+ * caller code straightforward without scattering null checks.
+ */
+export function getViewRects(
+  viewIds: readonly string[],
+  ctx:     LayoutNavContext,
+): ViewRect[] {
+  const override = layoutRectOverrides.get(ctx.layoutId);
+  if (override) return override(viewIds, ctx);
+  return viewIds.map((vid) => {
+    const slot = ctx.slotFor(vid);
+    return slot ? rectFromSlot(slot, vid) : { viewId: vid, cx: 0, cy: 0, w: 0, h: 0 };
+  });
+}

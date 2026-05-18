@@ -34,6 +34,7 @@ export type {
 export {
   getAppContext,
   readIdentityHeaders,
+  getAppBasePath,
 } from './context.js';
 export type {
   AppContext,
@@ -46,3 +47,10 @@ export type {
 // back-compat alias for the previous name.
 // @ts-expect-error — JS file, no .d.ts; only consumed from .mjs configs anyway
 export { auraAppIntegration, auraIdentityIntegration } from './integration.mjs';
+
+// Proxy helper for apps writing Astro `[...path].ts` routes that forward to
+// an upstream HTTP service. Encapsulates the gzip-vs-decompressed-body
+// header dance that bites every author the first time. Direct subpath
+// import (`@aura/app-sdk/proxy`) also works for apps that prefer it.
+export { proxyFetch, sanitizeHeaders } from './proxy.js';
+export type { ProxyFetchOptions } from './proxy.js';

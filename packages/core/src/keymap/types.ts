@@ -95,6 +95,11 @@ export const DEFAULT_OS_ACTIONS: readonly KeyAction[] = [
 
   // Launcher
   { id: 'aura.launcher.toggle',       category: 'Launcher', label: 'Toggle app launcher',  scope: 'os-modifier', defaultCombo: 'Ctrl+Alt+Space' },
+  // Alternative combo for the launcher — useful when Ctrl+Alt+Space
+  // collides with a window-manager binding (some Linux compositors and
+  // accessibility tools claim it). Both actions share the same handler
+  // in LauncherOverlay.astro and either combo toggles the panel.
+  { id: 'aura.launcher.toggle-alt',   category: 'Launcher', label: 'Toggle app launcher (alt)', scope: 'os-modifier', defaultCombo: 'Ctrl+Alt+KeyC' },
   // NOTE: launcher's own Enter-to-launch lives inside `LauncherOverlay.astro`
   // as a local DOM handler. We DON'T register it as an OS keymap action
   // because that would put Enter in every iframe's claim list and break

@@ -1,7 +1,7 @@
 import type { Command } from 'commander';
 import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync, chmodSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { AppManifestSchema } from '@aura/core';
 import { color, fail, info, ok, warn } from '../lib/format.js';
 import { promptText, promptChoice, promptConfirm, promptMultiSelect, PromptCancelled, BACK, type MultiSelectMode } from '../lib/prompts.js';
@@ -455,6 +455,12 @@ function buildScaffoldFiles(cfg: ScaffoldConfig): PayloadFile[] {
     TOOLS_JSON:    JSON.stringify(cfg.tools),
   };
   const files: PayloadFile[] = [];
+  // `service`-shape apps don't have activities, so omit the activity
+  // lifecycle handlers — they'd be dead files in the scaffold. Other
+  // shapes (default + activity-bg) keep activityMode='multi' and need
+  // both handlers so `aura app start` doesn't 404 on the OS-side
+  // `onActivityCreate` POST.
+  const includeActivityFiles = cfg.shape !== 'service';
   const walk = (srcDir: string, relPrefix: string): void => {
     for (const entry of readdirSync(srcDir)) {
       // Skip the template's placeholder manifest — we render the manifest
@@ -462,6 +468,11 @@ function buildScaffoldFiles(cfg: ScaffoldConfig): PayloadFile[] {
       if (entry === 'app.manifest.json' && relPrefix === '') continue;
       const src = join(srcDir, entry);
       const rel = relPrefix ? `${relPrefix}/${entry}` : entry;
+      // Conditionally skip activity-lifecycle files for service shapes.
+      if (!includeActivityFiles && (
+        rel === 'src/pages/api/lifecycle/onActivityCreate.ts' ||
+        rel.startsWith('src/pages/api/lifecycle/onActivityDestroy/')
+      )) continue;
       const st = statSync(src);
       if (st.isDirectory()) { walk(src, rel); continue; }
       let body = readFileSync(src, 'utf-8');
@@ -507,14 +518,18 @@ async function scaffoldFromConfig(cfg: ScaffoldConfig): Promise<void> {
 
   let dest: string;
   let viaShell = false;
+  let installed = false;
+  let installError: string | undefined;
   try {
-    const res = await api.post<{ ok: boolean; dest?: string; error?: string; message?: string }>(
+    const res = await api.post<{ ok: boolean; dest?: string; error?: string; message?: string; installed?: boolean; installError?: string }>(
       '/api/admin/scaffold',
       { appId: cfg.appId, force: true, files },
     );
     if (!res?.ok) fail(`scaffold failed via shell: ${res?.error ?? 'unknown'} ${res?.message ?? ''}`.trim());
     dest    = res.dest!;
     viaShell = true;
+    installed = res.installed === true;
+    installError = res.installError;
   } catch (err) {
     // Shell isn't running (or we hit a network error). Fall back to a local
     // write — useful for `aura dev new` on the host with no aura-os up.
@@ -526,10 +541,38 @@ async function scaffoldFromConfig(cfg: ScaffoldConfig): Promise<void> {
       fail(`${join(APPS_DIR, cfg.appId)} already exists.`);
     }
     dest = writeFilesLocal(cfg, files);
+    // Local path also needs pnpm install — without the workspace symlinks
+    // the new app can't resolve @aura/app-sdk and astro at launch time.
+    const result = runPnpmInstallAt(dirname(dest));
+    installed = result.ok;
+    installError = result.error;
   }
 
   ok(`scaffolded ${color.bold(cfg.appId)} at ${dest}${viaShell ? color.dim(' (via shell)') : ''}`);
+  if (installed) {
+    info(`pnpm install: ${color.dim('ok')}`);
+  } else {
+    warn(`pnpm install did not complete (${installError ? installError.split('\n')[0] : 'unknown'}). Run \`pnpm install\` in the workspace root before launching.`);
+  }
   info(`Run \`aura app start ${cfg.appId}\` to launch it.`);
+}
+
+/**
+ * Wrapper around `pnpm install` for the local-write fallback. `appsDir`
+ * is the path to the apps/ directory; the workspace root is its parent.
+ * Returns ok=true on success, ok=false + error on failure (we never
+ * throw — a failed install shouldn't roll the whole scaffold back).
+ */
+function runPnpmInstallAt(appsDir: string): { ok: boolean; error?: string } {
+  const workspaceRoot = join(appsDir, '..');
+  const r = spawnSync('pnpm', ['install', '--prefer-offline'], {
+    cwd: workspaceRoot,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf-8',
+    timeout: 120_000,
+  });
+  if (r.status === 0) return { ok: true };
+  return { ok: false, error: (r.stderr ?? r.error?.message ?? 'pnpm install failed').slice(0, 400) };
 }
 
 export function registerDev(program: Command): void {

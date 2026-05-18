@@ -21,7 +21,8 @@ const { apps, enabledMap = {} } = Astro.props;
     id="dock-nav-entry"
     type="button"
     class="nav-entry-btn"
-    title="Keyboard nav (Ctrl+Alt+Space)">
+    aria-label="Window selection mode"
+    title="Window selection (Enter) — Ctrl+Alt+Space focuses this">
     <span class="nav-entry-icon" aria-hidden="true">◐</span>
   </button>
   <button
@@ -33,22 +34,46 @@ const { apps, enabledMap = {} } = Astro.props;
   </button>
   <ProcessManager />
   <div class="separator"></div>
-  {apps.map(app => {
-    const glyph = (app.icon ?? app.name.charAt(0)).toUpperCase();
-    const enabled = enabledMap[app.id] !== false;
-    return (
-      <button
-        class="dock-item"
-        data-app-id={app.id}
-        data-enabled={String(enabled)}
-        title={app.name}
-        onclick={`window.auraLaunchApp('${app.id}')`}
-      >
-        <span class="app-initial" data-len={glyph.length}>{glyph}</span>
-        <span class="app-label">{app.name}</span>
-      </button>
-    );
-  })}
+  <div id="dock-items" class="dock-items">
+    {apps.map(app => {
+      const glyph = (app.icon ?? app.name.charAt(0)).toUpperCase();
+      const enabled = enabledMap[app.id] !== false;
+      return (
+        <button
+          class="dock-item"
+          data-app-id={app.id}
+          data-enabled={String(enabled)}
+          title={app.name}
+          onclick={`window.auraLaunchApp('${app.id}')`}
+        >
+          <span class="app-initial" data-len={glyph.length}>{glyph}</span>
+          <span class="app-label">{app.name}</span>
+        </button>
+      );
+    })}
+  </div>
+
+  <!--
+    Overflow button + dropup popup. Hidden by default; shown by the
+    ResizeObserver in the script below when the dock is too narrow to
+    fit every tile. The dropup opens UP (since the dock is at the
+    bottom) and lists the tiles that didn't fit. When the dock is so
+    narrow that only one tile would be visible (or zero), every tile
+    collapses into the dropup so the layout never lands on a single
+    awkward visible tile.
+  -->
+  <button
+    id="dock-overflow-btn"
+    type="button"
+    class="dock-overflow-btn"
+    title="More apps"
+    aria-haspopup="menu"
+    aria-expanded="false"
+    hidden
+  >
+    <span class="dock-overflow-icon" aria-hidden="true">⋯</span>
+  </button>
+  <div id="dock-overflow-menu" class="dock-overflow-menu" role="menu" hidden></div>
 </nav>
 
 <style>
@@ -85,15 +110,30 @@ const { apps, enabledMap = {} } = Astro.props;
     padding: 0;
     transition: box-shadow 0.1s, color 0.1s;
   }
-  .nav-entry-btn:hover,
-  .nav-entry-btn:focus,
-  .nav-entry-btn:focus-visible {
+  .nav-entry-btn:hover {
     color: var(--aura-color-primary);
     box-shadow: var(--aura-glow-primary);
     outline: none;
   }
+  /* Loud focus indicator — the chip is only 22 px wide, so the default
+     thin focus ring was easy to miss when Ctrl+Alt+Space landed focus
+     here. Bright background fill + inset primary border + outer glow
+     makes the focus state unmistakable. */
+  .nav-entry-btn:focus,
   .nav-entry-btn:focus-visible {
-    box-shadow: inset 0 0 0 2px var(--aura-color-primary), var(--aura-glow-primary);
+    color: var(--aura-color-bg);
+    background: var(--aura-color-primary);
+    box-shadow: inset 0 0 0 2px var(--aura-color-primary), 0 0 12px var(--aura-color-primary);
+    outline: none;
+  }
+  /* Window-selection mode telegraph. `data-mode="active"` is flipped from
+     `pages/index.astro`'s `onModeChange` hook whenever the keyDispatcher
+     enters Nav mode — same visual as the focus state so the user reads
+     "this is the modal anchor while you arrow through windows". */
+  .nav-entry-btn[data-mode="active"] {
+    color: var(--aura-color-bg);
+    background: var(--aura-color-primary);
+    box-shadow: inset 0 0 0 2px var(--aura-color-primary), 0 0 12px var(--aura-color-primary);
   }
   .nav-entry-icon { line-height: 1; }
 
@@ -177,9 +217,123 @@ const { apps, enabledMap = {} } = Astro.props;
     text-overflow: ellipsis;
     max-width: 56px;
   }
+
+  /* ── Dock items container ──
+   * Wrapper around the pinned-app tiles. Sits between the separator and
+   * the overflow button. Must NOT have `overflow: hidden` or `min-width: 0`
+   * — those let the wrapper silently clip its children, hiding the very
+   * overflow that `fitDockItems` needs to detect. We rely on `#dock`'s own
+   * `overflow: hidden` to clip the visual overflow during the brief frame
+   * before the JS pass hides the rightmost tiles. */
+  .dock-items {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  /* ── Overflow trigger ── */
+  .dock-overflow-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 44px;
+    color: var(--aura-color-text-dim);
+    font-size: 1rem;
+    border: var(--aura-border);
+    background: transparent;
+    cursor: pointer;
+    flex-shrink: 0;
+    padding: 0;
+    transition: box-shadow 0.1s, color 0.1s;
+  }
+  .dock-overflow-btn:hover,
+  .dock-overflow-btn:focus,
+  .dock-overflow-btn:focus-visible {
+    color: var(--aura-color-primary);
+    box-shadow: var(--aura-glow-primary);
+    outline: none;
+  }
+  .dock-overflow-btn[aria-expanded="true"] {
+    color: var(--aura-color-bg);
+    background: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+  }
+  .dock-overflow-icon { line-height: 1; font-size: 1.2rem; letter-spacing: 0.1em; }
+
+  /* ── Dropup menu ── */
+  /* Positioned ABOVE the dock (the dock is fixed at the bottom of the
+   * viewport). Anchored to the right edge of the dock so it pops up from
+   * where the overflow button sits, matching macOS / Windows taskbar
+   * overflow popovers. */
+  .dock-overflow-menu {
+    position: fixed;
+    right: 16px;                /* matches dock horizontal padding */
+    bottom: calc(var(--aura-dock-height) + 6px);
+    z-index: 1050;
+    min-width: 220px;
+    max-width: min(360px, 90vw);
+    max-height: 60vh;
+    overflow-y: auto;
+    background: var(--aura-color-surface);
+    border: var(--aura-border);
+    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.45);
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .dock-overflow-menu[hidden] { display: none; }
+
+  .dock-overflow-item {
+    display: grid;
+    grid-template-columns: 28px 1fr;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--aura-color-text);
+    cursor: pointer;
+    font-family: var(--aura-font-mono);
+    text-align: left;
+    transition: background 0.1s, color 0.1s, border-color 0.1s;
+  }
+  .dock-overflow-item:hover,
+  .dock-overflow-item:focus,
+  .dock-overflow-item:focus-visible {
+    background: color-mix(in srgb, var(--aura-color-primary) 14%, transparent);
+    color: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+    outline: none;
+  }
+  .dock-overflow-glyph {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 24px;
+    border: 1px solid var(--aura-color-border);
+    color: var(--aura-color-primary);
+    font-size: 0.75rem;
+    letter-spacing: 0.04em;
+    font-weight: 500;
+  }
+  .dock-overflow-name {
+    font-size: var(--aura-font-size-xs);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 </style>
 
 <script>
+  import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
+  const keyDispatcher = getKeyDispatcher();
+
   // Inline `onclick="window.auraToggleLauncher()"` runs at click time, but it
   // fails silently if `auraToggleLauncher` isn't defined yet — and inline
   // event handlers can be hard to debug. Bind via addEventListener instead.
@@ -188,6 +342,33 @@ const { apps, enabledMap = {} } = Astro.props;
     const toggle = (window as any).auraToggleLauncher;
     if (typeof toggle === 'function') toggle();
     else console.warn('[Dock] auraToggleLauncher not available — LauncherOverlay missing?');
+  });
+
+  // ─── Window-selection mode trigger ─────────────────────────────────────
+  // The `◐` chip is keyboard-only by design: pressing Enter (or Space)
+  // while it's focused dispatches a custom event the shell-level handler
+  // in `pages/index.astro` listens for. That handler toggles dispatcher
+  // mode → 'nav', which highlights the first visible window. A mouse
+  // click on the chip is deliberately a no-op for now (the user wants to
+  // reserve the click affordance for later use).
+  //
+  // We bind on the button itself rather than the dock container so the
+  // existing dock arrow-key navigation (ArrowLeft/Right walks the chrome)
+  // keeps working unchanged — Enter is the only key we claim here.
+  const navEntry = document.getElementById('dock-nav-entry');
+  navEntry?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    // Bail on modifier combos. The chip's "press to enter window-select
+    // mode" affordance is plain Enter or plain Space only — any combo
+    // like Ctrl+Alt+Space is an OS shortcut owned by the dispatcher
+    // (`aura.launcher.toggle`). Without this check, a Ctrl+Alt+Space
+    // pressed while the chip is focused would fire BOTH the dispatcher
+    // (which flips nav→app) AND this handler (which flips app→nav) on
+    // the same keystroke, leaving the user stuck in nav mode.
+    if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    document.dispatchEvent(new CustomEvent('aura:window-select.toggle'));
   });
 
   // ─── Chrome arrow-key navigation ───────────────────────────────────────
@@ -228,6 +409,12 @@ const { apps, enabledMap = {} } = Astro.props;
     return best;
   }
   dockNav?.addEventListener('keydown', (e) => {
+    // In Nav (window-selection) mode the arrow keys belong to the OS
+    // window navigator — they move the highlight between app slots, not
+    // between dock buttons. The dispatcher fires in the capture phase
+    // and runs first, but this bubble-phase handler would still fire
+    // after it and shove dock focus around. Bail when nav mode is on.
+    if (keyDispatcher.getMode() === 'nav') return;
     const current = (e.target as HTMLElement).closest<HTMLButtonElement>('button');
     if (!current || !dockNav.contains(current)) return;
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
@@ -266,20 +453,19 @@ const { apps, enabledMap = {} } = Astro.props;
       //   2. The launched app wasn't in the top-5 → it should be now;
       //      re-fetch /api/apps + the live mru map and rebuild the tile
       //      list so the newcomer appears + the oldest gets dropped.
-      const SEP_SEL = '.separator';
       osEvents.subscribe('app:mruChanged', async (ev: any) => {
         if (typeof ev?.appId !== 'string') return;
-        const existing = dock.querySelector<HTMLElement>(`.dock-item[data-app-id="${CSS.escape(ev.appId)}"]`);
-        const sep = dock.querySelector<HTMLElement>(SEP_SEL);
-        if (!sep) return;
+        const itemsWrap = document.getElementById('dock-items');
+        if (!itemsWrap) return;
+        const existing = itemsWrap.querySelector<HTMLElement>(`.dock-item[data-app-id="${CSS.escape(ev.appId)}"]`);
         if (existing) {
-          // Fast path: already in the dock — just promote.
-          const firstApp = sep.nextElementSibling;
-          if (existing !== firstApp) sep.parentNode?.insertBefore(existing, firstApp);
+          // Fast path: already in the dock — just promote to first inside #dock-items.
+          const first = itemsWrap.firstElementChild;
+          if (existing !== first) itemsWrap.insertBefore(existing, first);
           return;
         }
         // Slow path: newcomer. Fetch the canonical list + mru map and
-        // rebuild every tile after the separator.
+        // rebuild every tile inside #dock-items.
         try {
           const [appsRes, mruRes] = await Promise.all([
             fetch('/api/apps'),
@@ -300,8 +486,7 @@ const { apps, enabledMap = {} } = Astro.props;
               return a.manifest.name.localeCompare(b.manifest.name);
             })
             .slice(0, 5);
-          // Drop every existing tile + re-emit the top 5 in order.
-          dock.querySelectorAll('.dock-item').forEach((el) => el.remove());
+          itemsWrap.replaceChildren();
           const frag = document.createDocumentFragment();
           for (const a of top5) {
             const m = a.manifest;
@@ -315,7 +500,7 @@ const { apps, enabledMap = {} } = Astro.props;
             btn.innerHTML = `<span class="app-initial" data-len="${glyph.length}">${glyph}</span><span class="app-label">${m.name.replace(/[<>&]/g, '')}</span>`;
             frag.appendChild(btn);
           }
-          sep.parentNode?.insertBefore(frag, sep.nextSibling);
+          itemsWrap.appendChild(frag);
         } catch { /* network blip — next launch retries */ }
       });
     });
@@ -336,24 +521,111 @@ const { apps, enabledMap = {} } = Astro.props;
   // button, which is fixed-size. No PM observer needed.
   const dockFit = document.getElementById('dock') as HTMLElement | null;
   if (dockFit) {
+    const overflowBtn  = document.getElementById('dock-overflow-btn')  as HTMLButtonElement | null;
+    const overflowMenu = document.getElementById('dock-overflow-menu') as HTMLDivElement    | null;
+
+    /** Build the dropup menu DOM from the array of overflowed tiles. Each
+     *  entry mirrors the dock-item glyph + name so the menu reads as a
+     *  vertical version of the dock. Clicking a row launches the app and
+     *  closes the menu. */
+    function populateOverflowMenu(overflow: HTMLElement[]) {
+      if (!overflowMenu) return;
+      overflowMenu.innerHTML = overflow.map((el) => {
+        const id    = el.dataset['appId'] ?? '';
+        const name  = el.title || id;
+        const glyph = el.querySelector<HTMLElement>('.app-initial')?.textContent ?? '?';
+        const escId  = id.replace(/"/g, '&quot;');
+        const escNm  = name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+        const escGl  = (glyph || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        return `<button type="button" class="dock-overflow-item" role="menuitem" data-app-id="${escId}" title="${escNm}">
+          <span class="dock-overflow-glyph" data-len="${glyph.length}">${escGl}</span>
+          <span class="dock-overflow-name">${escNm}</span>
+        </button>`;
+      }).join('');
+    }
+
+    function setOverflowOpen(open: boolean) {
+      if (!overflowBtn || !overflowMenu) return;
+      overflowMenu.hidden = !open;
+      overflowBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+
+    /** Single-tile threshold: below this many tiles fitting, collapse ALL
+     *  remaining tiles into the dropup so the layout doesn't land on a
+     *  single awkward visible tile. */
+    const MIN_VISIBLE_TILES = 2;
+
     const fitDockItems = () => {
-      const items = Array.from(dockFit.querySelectorAll<HTMLElement>('.dock-item'));
-      // Reset state first so we measure the natural width every pass —
-      // otherwise a previous trim would lock us into the smaller layout
-      // even after the viewport grows.
+      const items = Array.from(dockFit.querySelectorAll<HTMLElement>('.dock-items > .dock-item'));
+      // Reset state first so we measure natural width on every pass.
       for (const el of items) delete el.dataset['hidden'];
-      // Disabled tiles stay hidden by the data-enabled rule; trim only
-      // among the currently-visible ones. Hide from the rightmost (least
-      // recent in MRU order) backwards.
+      if (overflowBtn) overflowBtn.hidden = true;
+
+      // Disabled tiles stay hidden by the data-enabled rule.
       const visible = items.filter((el) => el.dataset['enabled'] !== 'false');
-      let i = visible.length - 1;
-      // +1 fudge: sub-pixel rounding can put scrollWidth a hair over
-      // clientWidth even when no real overflow exists.
-      while (i >= 0 && dockFit.scrollWidth > dockFit.clientWidth + 1) {
-        visible[i].dataset['hidden'] = 'true';
-        i -= 1;
+
+      // 1) Trim from the right while overflowing.
+      let trimIdx = visible.length;
+      while (trimIdx > 0 && dockFit.scrollWidth > dockFit.clientWidth + 1) {
+        // First overflow → reveal the overflow button so subsequent
+        // measurements account for its width.
+        if (overflowBtn && overflowBtn.hidden) {
+          overflowBtn.hidden = false;
+        }
+        trimIdx -= 1;
+        visible[trimIdx].dataset['hidden'] = 'true';
+      }
+
+      // 2) Sub-threshold rule: if fewer than MIN_VISIBLE_TILES are still
+      //    visible (but there ARE pinned tiles), collapse the rest into
+      //    the overflow menu too. Avoids the "single lonely tile" state.
+      const remainingVisible = trimIdx;
+      const someOverflow = remainingVisible < visible.length;
+      if (someOverflow && remainingVisible > 0 && remainingVisible < MIN_VISIBLE_TILES) {
+        for (let j = 0; j < remainingVisible; j++) {
+          visible[j].dataset['hidden'] = 'true';
+        }
+        trimIdx = 0;
+      }
+
+      // 3) Populate the overflow menu with everything that's hidden.
+      const overflowed = visible.slice(trimIdx);
+      if (overflowed.length > 0) {
+        if (overflowBtn) overflowBtn.hidden = false;
+        populateOverflowMenu(overflowed);
+      } else {
+        if (overflowBtn) overflowBtn.hidden = true;
+        setOverflowOpen(false);
       }
     };
+
+    // ── Overflow popup interaction ────────────────────────────────────
+    overflowBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const isOpen = overflowMenu?.hidden === false;
+      setOverflowOpen(!isOpen);
+    });
+    overflowMenu?.addEventListener('click', (e) => {
+      const btn = (e.target as HTMLElement | null)?.closest<HTMLButtonElement>('[data-app-id]');
+      const id = btn?.dataset['appId'];
+      if (!id) return;
+      setOverflowOpen(false);
+      (window as any).auraLaunchApp?.(id);
+    });
+    // Close on outside click (uses composedPath to survive DOM mutations
+    // from launching an app).
+    document.addEventListener('click', (e) => {
+      if (overflowMenu?.hidden) return;
+      const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+      if (overflowBtn  && path.includes(overflowBtn))  return;
+      if (overflowMenu && path.includes(overflowMenu)) return;
+      setOverflowOpen(false);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && overflowMenu?.hidden === false) {
+        setOverflowOpen(false);
+      }
+    });
 
     // Schedule on the next frame: layout isn't finalised at script-eval
     // time, especially with the SSR fonts still loading.
@@ -362,12 +634,18 @@ const { apps, enabledMap = {} } = Astro.props;
     const ro = new ResizeObserver(fitDockItems);
     ro.observe(dockFit);
 
-    const mo = new MutationObserver(fitDockItems);
-    mo.observe(dockFit, {
-      childList: true,
-      subtree: false,
-      attributes: true,
-      attributeFilter: ['data-enabled'],
-    });
+    // Watch the wrapper directly. MRU rebuilds replace its children, and
+    // SSE-driven data-enabled flips toggle attributes on the tile children
+    // (subtree:true so the attribute mutations are caught one level down).
+    const itemsWrap = document.getElementById('dock-items');
+    if (itemsWrap) {
+      const mo = new MutationObserver(fitDockItems);
+      mo.observe(itemsWrap, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['data-enabled'],
+      });
+    }
   }
 </script>

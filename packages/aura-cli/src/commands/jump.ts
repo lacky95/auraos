@@ -1,9 +1,10 @@
 import type { Command } from 'commander';
-import { stdin, stdout } from 'node:process';
+import { stdin, stdout, env as procEnv } from 'node:process';
+import { spawn } from 'node:child_process';
 import { moveCursor, clearScreenDown } from 'node:readline';
 import { api } from '../lib/client.js';
 import { readManifest } from '../lib/manifest.js';
-import { color, fail, info } from '../lib/format.js';
+import { color, fail, info, ok, warn } from '../lib/format.js';
 import { enterSandbox } from '../lib/enter-sandbox.js';
 
 interface InstanceLite {
@@ -19,14 +20,33 @@ interface AppDto {
   instances: InstanceLite[];
 }
 
-interface JumpTarget {
-  instanceId: string;
-  appId: string;
-  appName: string;
-  state: string;
-  port: number | null;
-  isService: boolean;
-  sandbox?: 'proot' | 'container';
+/** Discriminated union: `kind: 'instance'` is the app/service rows we
+ *  already had; `kind: 'master'` is the new shortcut into `aura-shell`. */
+type JumpTarget =
+  | {
+      kind: 'instance';
+      instanceId: string;
+      appId: string;
+      appName: string;
+      state: string;
+      port: number | null;
+      isService: boolean;
+      sandbox?: 'proot' | 'container';
+    }
+  | {
+      kind: 'master';
+      appName: string;       // 'MASTER' — kept for renderRow uniformity
+      state: string;         // 'shell' — purely cosmetic in the picker
+    };
+
+const MASTER_CONTAINER = 'aura-shell';
+
+/** True when the calling process is already inside the master container.
+ *  Detected via $HOSTNAME (docker sets this to the container name unless
+ *  the caller overrides). Used to hide the MASTER picker row so we don't
+ *  offer "jump into the place you already are". */
+function isInsideMaster(): boolean {
+  return (procEnv['HOSTNAME'] ?? '') === MASTER_CONTAINER;
 }
 
 /**
@@ -39,28 +59,70 @@ export function registerJump(program: Command): void {
   program
     .command('jump')
     .alias('j')
-    .description('Interactive picker: jump into a running app/service sandbox (proot or container) in this terminal.')
+    .description('Interactive picker: jump into a running app/service sandbox (proot or container) in this terminal. Pass --master to skip the picker and drop into the aura-shell master container.')
     .option('--no-services', 'Hide services, show only user apps')
     .option('--no-apps',     'Hide apps, show only services')
-    .action(async (opts: { services?: boolean; apps?: boolean }) => {
+    .option('-m, --master',  'Skip the picker and jump straight into the aura-shell master container')
+    .action(async (opts: { services?: boolean; apps?: boolean; master?: boolean }) => {
       if (!stdin.isTTY || !stdout.isTTY) {
         fail('aura jump needs a TTY (you piped/redirected stdio). Use `aura inst shell <id>` for non-interactive.');
       }
-      const targets = await collectTargets(opts.apps !== false, opts.services !== false);
+      if (opts.master) { enterMasterContainer(); return; }
+      const instanceTargets = await collectTargets(opts.apps !== false, opts.services !== false);
+      // Master is always offered (unless we're already inside it) — it's a
+      // useful escape hatch even when no apps are running, so we don't
+      // honour --no-apps / --no-services for it.
+      const targets: JumpTarget[] = [];
+      if (!isInsideMaster()) targets.push({ kind: 'master', appName: 'MASTER', state: 'shell' });
+      targets.push(...instanceTargets);
       if (targets.length === 0) {
         info('No running instances to jump into. Launch an app first.');
         return;
       }
       const pick = await pickInteractively(targets);
       if (!pick) { info('jump cancelled'); return; }
+      if (pick.kind === 'master') { enterMasterContainer(); return; }
       const manifest = readManifest(pick.appId);
       enterSandbox(pick.instanceId, pick.appId, pick.port, manifest?.tools ?? [], pick.sandbox, undefined);
     });
 }
 
-async function collectTargets(showApps: boolean, showServices: boolean): Promise<JumpTarget[]> {
+/** `docker exec -it aura-shell bash` — same TUI env passthrough we use for
+ *  app containers in enter-sandbox.ts so claude/htop/vim render with the
+ *  rich UI inside the master shell too. Requires the calling sandbox to
+ *  have the docker CLI on PATH and /var/run/docker.sock bind-mounted —
+ *  same prerequisites as jumping into any sibling container. */
+function enterMasterContainer(): void {
+  const passthrough: Record<string, string> = {
+    TERM:      procEnv['TERM']      ?? 'xterm-256color',
+    COLORTERM: procEnv['COLORTERM'] ?? 'truecolor',
+    LANG:      procEnv['LANG']      ?? 'C.UTF-8',
+    LC_ALL:    procEnv['LC_ALL']    ?? 'C.UTF-8',
+  };
+  const envFlags: string[] = [];
+  for (const [k, v] of Object.entries(passthrough)) envFlags.push('-e', `${k}=${v}`);
+  const args = ['exec', '-it', ...envFlags, MASTER_CONTAINER, 'bash', '-i'];
+  // Loud, multi-line banner — the master shell is the AuraOS process itself
+  // (PID 1 in aura-shell). Filesystem edits hit /workspace, /os, and /data
+  // directly; misbehaving processes can wedge the shell, the AppManager,
+  // or every running sandbox at once. App containers are throwaway; this
+  // one is not.
+  warn(`${color.bold('CAUTION')} — entering ${color.bold(MASTER_CONTAINER)} (master container)`);
+  warn(`Changes here run inside the live AuraOS shell process. Editing /workspace,`);
+  warn(`/os, /data, or killing the wrong process can break the entire OS. Prefer`);
+  warn(`an app sandbox unless you know exactly what you're touching.`);
+  info(`entering master container ${color.bold(MASTER_CONTAINER)}`);
+  const child = spawn('docker', args, { stdio: 'inherit' });
+  child.on('exit', (code) => { ok(`shell exited (code ${code ?? 0})`); process.exit(code ?? 0); });
+  child.on('error', (err) => fail(
+    `docker exec failed: ${err.message}\n` +
+    `  Hint: the calling sandbox needs both the docker CLI on PATH and a bound /var/run/docker.sock.`
+  ));
+}
+
+async function collectTargets(showApps: boolean, showServices: boolean): Promise<Extract<JumpTarget, { kind: 'instance' }>[]> {
   const apps = await api.get<AppDto[]>('/api/apps');
-  const out: JumpTarget[] = [];
+  const out: Extract<JumpTarget, { kind: 'instance' }>[] = [];
   for (const a of apps) {
     const isService = a.manifest.componentType === 'service';
     if (isService && !showServices) continue;
@@ -73,6 +135,7 @@ async function collectTargets(showApps: boolean, showServices: boolean): Promise
       // isn't actually serving anything to jump into.
       if (inst.state !== 'resumed' && inst.state !== 'paused' && inst.state !== 'started') continue;
       out.push({
+        kind:       'instance',
         instanceId: inst.instanceId,
         appId:      inst.appId,
         appName:    a.manifest.name,
@@ -107,17 +170,24 @@ const KEY_ESC   = '';
 const KEY_CTRLC = '';
 
 function renderRow(t: JumpTarget, selected: boolean, idx: number): string {
-  const cursor   = selected ? color.green('▸') : ' ';
-  const slot     = color.dim(`[${idx + 1}]`.padStart(4));
-  const name     = (selected ? color.bold : color.green)(t.appName.padEnd(14));
-  const state    = stateBadge(t.state);
-  const inst     = color.dim(`· ${t.instanceId}`);
-  const port     = t.port ? color.dim(`:${t.port}`) : '';
+  const cursor = selected ? color.green('▸') : ' ';
+  const slot   = color.dim(`[${idx + 1}]`.padStart(4));
+  const name   = (selected ? color.bold : color.green)(t.appName.padEnd(14));
+  const state  = stateBadge(t.state);
+  if (t.kind === 'master') {
+    // Master row: no instance id or port, just a fixed label so it stands
+    // out from the app/service rows that follow.
+    const label = color.dim('· aura-shell (master container)');
+    return `  ${cursor} ${slot} ${name} ${state} ${label}`;
+  }
+  const inst = color.dim(`· ${t.instanceId}`);
+  const port = t.port ? color.dim(`:${t.port}`) : '';
   return `  ${cursor} ${slot} ${name} ${state} ${inst} ${port}`;
 }
 function stateBadge(state: string): string {
   if (state === 'resumed') return color.green('● RUN ');
   if (state === 'paused')  return color.yellow('◐ PAUSE');
+  if (state === 'shell')   return color.green('◆ HOST');
   return color.dim(state.padEnd(7));
 }
 function sectionHeader(label: string): string {
@@ -125,11 +195,11 @@ function sectionHeader(label: string): string {
 }
 
 async function pickInteractively(targets: JumpTarget[]): Promise<JumpTarget | null> {
-  let idx = targets.findIndex((t) => !t.isService);
+  // Default selection: prefer the first app instance (most common case).
+  // Fall back to whatever is first in the list — that's MASTER when nothing
+  // is running, which is the only reachable target then anyway.
+  let idx = targets.findIndex((t) => t.kind === 'instance' && !t.isService);
   if (idx < 0) idx = 0;
-
-  // Pre-compute the section boundaries so renders + numbering are stable.
-  const firstServiceIdx = targets.findIndex((t) => t.isService);
 
   let linesWritten = 0;
 
@@ -142,15 +212,20 @@ async function pickInteractively(targets: JumpTarget[]): Promise<JumpTarget | nu
     lines.push('');
     lines.push('  ' + color.bold('AURA  JUMP'));
     lines.push(color.dim('  ↑↓ navigate   1–9 quick-pick   ↵ enter   q/^C cancel'));
+    let printedMasterHeader = false;
     let printedAppHeader = false;
     let printedSvcHeader = false;
     for (let i = 0; i < targets.length; i++) {
       const t = targets[i]!;
-      if (!t.isService && !printedAppHeader) {
+      if (t.kind === 'master' && !printedMasterHeader) {
+        lines.push(sectionHeader('MASTER'));
+        printedMasterHeader = true;
+      }
+      if (t.kind === 'instance' && !t.isService && !printedAppHeader) {
         lines.push(sectionHeader('APPS'));
         printedAppHeader = true;
       }
-      if (t.isService && !printedSvcHeader) {
+      if (t.kind === 'instance' && t.isService && !printedSvcHeader) {
         lines.push(sectionHeader('SERVICES'));
         printedSvcHeader = true;
       }
@@ -164,7 +239,6 @@ async function pickInteractively(targets: JumpTarget[]): Promise<JumpTarget | nu
     // so each section adds two terminal rows but only one array slot. Counting
     // newlines is sandbox-proof against any future embedded \n in row strings.
     linesWritten = (text.match(/\n/g) ?? []).length;
-    void firstServiceIdx; // silence unused
   };
 
   return new Promise<JumpTarget | null>((resolve) => {

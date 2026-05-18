@@ -339,20 +339,29 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
 
   close.addEventListener('click', closePanelAndReturnFocus);
 
-  // Dispatcher: Ctrl+Alt+Space (default) focuses the dock keyboard-nav
-  // entry button (the narrow `◐` chip just before the main launcher).
-  // From there the user can ArrowRight to walk the dock or ArrowUp to
-  // jump to the status bar. If the overlay is currently OPEN, close it
-  // first so the same combo doubles as "back to chrome".
-  keyDispatcher.bind('aura.launcher.toggle', () => {
-    if (panel.getAttribute('aria-hidden') === 'false') {
-      closePanel();
-    }
-    const entry = document.getElementById('dock-nav-entry') as HTMLButtonElement | null;
-    // Fall back to the main launcher button if the entry chip is
-    // somehow missing (older Dock build) — same chrome focus behaviour.
-    (entry ?? document.getElementById('dock-launcher-btn') as HTMLButtonElement | null)?.focus();
-  });
+  // Dispatcher: Ctrl+Alt+Space (default) and Ctrl+Alt+C (alt) drop
+  // keyboard focus on the FIRST item of the bottom bar — the narrow `◐`
+  // chip just before the launcher. From there ArrowRight walks the dock
+  // (launcher → PM → app tiles), ArrowUp jumps to the status bar, and
+  // Enter activates window-selection mode (handled in Dock.astro).
+  //
+  // The combo is the universal "back out to the bar" key — whatever modal
+  // state is on (launcher panel OR window-selection nav mode), drop it
+  // and land focus on the chip so the user has a predictable anchor.
+  const focusBarStart = () => {
+    if (panel.getAttribute('aria-hidden') === 'false') closePanel();
+    // Window-selection mode exit: if the dispatcher is currently in Nav
+    // mode (entered via the chip + Enter, or via aura.nav.home), drop
+    // back to App mode so the highlight clears. The chrome chip itself
+    // then gets focused below, giving the user the same end state as
+    // Esc or click-outside.
+    if (keyDispatcher.getMode() === 'nav') keyDispatcher.setMode('app');
+    const first = (document.getElementById('dock-nav-entry')
+      ?? document.getElementById('dock-launcher-btn')) as HTMLButtonElement | null;
+    first?.focus();
+  };
+  keyDispatcher.bind('aura.launcher.toggle',     focusBarStart);
+  keyDispatcher.bind('aura.launcher.toggle-alt', focusBarStart);
 
   // Esc-to-close is a panel-local concern, not an OS action — kept as a
   // plain DOM listener so it only consumes the keystroke while the

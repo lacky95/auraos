@@ -6,7 +6,8 @@
   "main": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./integration": "./src/integration.mjs"
+    "./integration": "./src/integration.mjs",
+    "./proxy": "./src/proxy.ts"
   },
   "dependencies": {
     "@aura/core": "workspace:*"

@@ -454,10 +454,10 @@ let initialLocale: string = 'en-GB';
   // #statusbar — measured via ResizeObserver so it tracks the actual rendered
   // box, not viewport pixels (the shell body is `transform: scale()`d by the
   // zoom slider).
-  const COMPACT_BREAKPOINT_PX = 720;
+  const COMPACT_BREAKPOINT_PX = 774;
   function applyResponsiveMode() {
     if (!statusBar || !bundleEl) return;
-    const compact = statusBar.clientWidth < COMPACT_BREAKPOINT_PX;
+    const compact = statusBar.clientWidth <= COMPACT_BREAKPOINT_PX;
     bundleEl.dataset['compact'] = compact ? 'true' : 'false';
     // Close any open popover when expanding (popover loses meaning inline).
     if (!compact) {
@@ -470,31 +470,18 @@ let initialLocale: string = 'en-GB';
   }
   applyResponsiveMode();
 
-  // Width budget (visual; matches the CSS `min-width: 220px` on .ws-content).
-  // Used by the anchor-flip logic below — we want to predict the popover's
-  // width before it renders so we can pick the side that won't overflow.
-  const POPOVER_WIDTH_PX = 240;
-
-  // Pick `data-anchor="right" | "left"` on the bundle based on which side
-  // has room for the popover. Default `right` (popover extends leftward
-  // from the trigger) covers the common case where the bundle sits on the
-  // right half of the status bar; we only flip to `left` when anchoring
-  // right would push the popover off the left edge of the viewport.
+  // Place the workspace dropdown horizontally centered in the viewport,
+  // vertically pinned just below the trigger button.
   function pickAnchor() {
     if (!bundleEl) return;
+    // Compact mode (the only state where the popover is shown) always
+    // centers the popover horizontally in the viewport — the bundle button
+    // sits in different places on the bar depending on layout/screen size,
+    // and the center placement is predictable for the user regardless.
+    // Vertical stays pinned just below the trigger via `--ws-popover-top`.
     const rect = bundleEl.getBoundingClientRect();
-    const vw   = window.innerWidth || document.documentElement.clientWidth;
-    // Anchoring `right: 0` means the popover's right edge aligns with
-    // bundleEl.right → popover spans [bundleEl.right - POPOVER, bundleEl.right].
-    const rightAnchorLeft = rect.right - POPOVER_WIDTH_PX;
-    // Anchoring `left: 0` means popover spans [bundleEl.left, bundleEl.left + POPOVER].
-    const leftAnchorRight = rect.left + POPOVER_WIDTH_PX;
-    const rightFits = rightAnchorLeft >= 8;          // 8px viewport gutter
-    const leftFits  = leftAnchorRight <= vw - 8;
-    // Prefer right anchor (it's the historical default + usually the bundle
-    // is on the right of the status bar). Flip only when right won't fit
-    // but left will.
-    bundleEl.dataset['anchor'] = (!rightFits && leftFits) ? 'left' : 'right';
+    bundleEl.style.setProperty('--ws-popover-top', `${rect.bottom + 6}px`);
+    bundleEl.dataset['anchor'] = 'center';
   }
 
   // Collapse-button toggle. In compact mode the bundle's [data-open] flips
@@ -794,6 +781,12 @@ let initialLocale: string = 'en-GB';
     return best;
   }
   statusbar?.addEventListener('keydown', (e) => {
+    // Same Nav-mode gate the dock applies — in window-selection mode the
+    // arrow keys belong to the OS window navigator. Without this, an
+    // ArrowLeft/Right pressed while the chip is focused would walk to the
+    // adjacent status-bar button INSTEAD of (or in addition to) moving
+    // the window highlight.
+    if (keyDispatcher.getMode() === 'nav') return;
     const current = (e.target as HTMLElement).closest<HTMLButtonElement>('button');
     if (!current || !statusbar.contains(current)) return;
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
@@ -962,6 +955,18 @@ let initialLocale: string = 'en-GB';
   }
   .ws-bundle[data-anchor="right"] .ws-content { right: 0; left: auto; }
   .ws-bundle[data-anchor="left"]  .ws-content { left: 0;  right: auto; }
+  /* Center anchor — used when neither side fits in a narrow viewport.
+   * Switches to `position: fixed` so the popover can escape the bundle's
+   * containing block and centre relative to the viewport. Vertical stays
+   * anchored to the trigger via `--ws-popover-top` (set in JS to
+   * bundleEl.getBoundingClientRect().bottom + 6). */
+  .ws-bundle[data-anchor="center"][data-open="true"] .ws-content {
+    position: fixed;
+    left: 50%;
+    right: auto;
+    top: var(--ws-popover-top, 64px);
+    transform: translateX(-50%);
+  }
   /* The collapse button gets a subtle highlight while the dropdown is open. */
   .ws-bundle[data-compact="true"][data-open="true"] .ws-collapse-btn {
     color: var(--aura-color-primary);
