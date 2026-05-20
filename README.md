@@ -7,6 +7,13 @@
 
 ![AuraOS](assets/aura-os.png)
 
+> [!WARNING]
+> **Pre-alpha — not for production use.**
+> Every service runs in dev mode by default: no authentication, no TLS,
+> no hardened sandbox, APIs fully exposed on localhost. This is intentional
+> for the current development stage. Do **not** expose port 3000 to a public
+> network or run untrusted apps inside the OS yet.
+
 ---
 
 ## What it is
