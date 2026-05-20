@@ -43,5 +43,16 @@ try {
     <WorkspaceManager client:load initialState={workspaces} />
   </main>
   <footer class="settings-foot">CONTENT PROVIDER · com.aura.settings/workspaces</footer>
+
+  <!-- Arrow-walk the WorkspaceManager island: panel buttons (activate /
+       delete / select / new workspace) + rename inputs. The rename input
+       is caught by the SDK's input bail so arrows inside it move the
+       caret instead of stealing focus. -->
+  <script>
+    import { OsClient } from '@aura/app-sdk';
+    new OsClient().nav.installGridNav({
+      selector: '.settings-body button, .settings-body input[type="text"]',
+    });
+  </script>
 </body>
 </html>

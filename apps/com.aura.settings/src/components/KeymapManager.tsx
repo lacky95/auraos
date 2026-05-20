@@ -62,6 +62,16 @@ export default function KeymapManager({ initialActions, initialState }: Props) {
   const [error, setError] = React.useState<string | null>(null);
   const [capturingFor, setCapturingFor] = React.useState<KeyAction | null>(null);
 
+  // Tell the outer page-level arrow-nav helper (installed in
+  // keyboard.astro via `osClient.nav.installGridNav`) to pause while the
+  // combo-capture dialog is open. Otherwise the user's first arrow press
+  // would be eaten by the helper instead of recorded as the new binding.
+  React.useEffect(() => {
+    if (capturingFor) document.body.dataset['keymapCapture'] = 'true';
+    else              delete document.body.dataset['keymapCapture'];
+    return () => { delete document.body.dataset['keymapCapture']; };
+  }, [capturingFor]);
+
   // ---- Effective combo for an action (default OR overlay) -----------------
   const effectiveCombo = React.useCallback((a: KeyAction): string | null => {
     if (a.id.startsWith('app.')) {

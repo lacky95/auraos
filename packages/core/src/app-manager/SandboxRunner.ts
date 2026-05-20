@@ -73,6 +73,7 @@ export interface SandboxRunner {
     port:       number;
     hostname:   string;
     pid:        number;
+    manifest:   AppManifest;
   }): void;
 }
 

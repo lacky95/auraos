@@ -95,4 +95,9 @@ export class AppRegistry {
   getAppDir(id: string): string {
     return join(this.appsDir, id);
   }
+
+  /** Filesystem root where every app lives. Used by Nexus + admin endpoints. */
+  getAppsDir(): string {
+    return this.appsDir;
+  }
 }

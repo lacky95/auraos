@@ -43,6 +43,16 @@ main.settings-body {
   color: var(--aura-color-primary, #00ff41);
   box-shadow: var(--aura-glow-subtle, 0 0 4px rgba(0,255,65,0.3));
 }
+/* Keyboard-focus ring. Stronger than the hover glow so the user can spot
+   the arrow-walked tile at a glance after entering Settings via window-
+   selection mode. Inset border + outer glow matches the chrome buttons'
+   focus state. */
+.tile:focus-visible {
+  outline: none;
+  color: var(--aura-color-primary, #00ff41);
+  box-shadow: inset 0 0 0 2px var(--aura-color-primary, #00ff41),
+              0 0 12px var(--aura-color-primary, #00ff41);
+}
 .tile h3 {
   font-size: 0.85rem;
   text-transform: uppercase;

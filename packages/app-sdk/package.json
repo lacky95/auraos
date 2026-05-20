@@ -7,7 +7,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./integration": "./src/integration.mjs",
-    "./proxy": "./src/proxy.ts"
+    "./proxy": "./src/proxy.ts",
+    "./runtime/next": "./src/runtime/next.ts"
   },
   "dependencies": {
     "@aura/core": "workspace:*"

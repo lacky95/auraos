@@ -19,6 +19,10 @@ import '../styles/settings.css';
         <h3>▥ WORKSPACES</h3>
         <p>Virtual desktops · layouts · rename + delete</p>
       </button>
+      <button class="tile" data-section="layouts">
+        <h3>▦ LAYOUT MANAGERS</h3>
+        <p>Window strategies · parameters · per-strategy settings</p>
+      </button>
       <button class="tile" data-section="keyboard">
         <h3>⌨ KEYBOARD</h3>
         <p>Hotkeys · per-app actions · user shortcuts</p>
@@ -59,6 +63,7 @@ import '../styles/settings.css';
       switch (section) {
         case 'theme':      return ['/theme',      'Settings · Theme'];
         case 'workspaces': return ['/workspaces', 'Settings · Workspaces'];
+        case 'layouts':    return ['/layouts',    'Settings · Layout Managers'];
         case 'keyboard':   return ['/keyboard',   'Settings · Keyboard'];
         case 'general':    return ['/general',    'Settings · General'];
         case 'apps':       return ['/apps',       'Settings · Apps'];
@@ -108,6 +113,44 @@ import '../styles/settings.css';
         } catch (err) { console.error('[settings] navigate failed', err); }
       });
     });
+
+    // Window-selection mode → Enter on the Settings window posts
+    // `aura.window.focus` to this iframe. Auto-focus the first tile so the
+    // arrow-nav helper has a starting point. Inline (not in the bundled
+    // SDK script below) so this is GUARANTEED to install on page load —
+    // any Vite resolution hiccup on the SDK import wouldn't break the
+    // initial focus.
+    //
+    // Retry across a few frames: the browser's "restore iframe last-
+    // focused descendant" task can fire AFTER our handler and overwrite
+    // our `.focus()` call with `body`. Up to 4 frames is enough in
+    // practice.
+    window.addEventListener('message', (ev) => {
+      if (ev.data?.type !== 'aura.window.focus') return;
+      const tiles = Array.from(document.querySelectorAll('.tile[data-section]'));
+      if (tiles.length === 0) return;
+      const first = tiles[0];
+      let attempt = 0;
+      const tryFocus = () => {
+        first.focus();
+        if (document.activeElement === first || attempt >= 4) return;
+        attempt += 1;
+        requestAnimationFrame(tryFocus);
+      };
+      requestAnimationFrame(tryFocus);
+    });
+  </script>
+
+  <!--
+    Arrow-walk the 7 tiles. Enter activates (native button click). Bound
+    here via the OS SDK so user remaps of `aura.nav.{up,down,left,right}`
+    (Settings → Keyboard) take effect on next load. The auto-focus on
+    `aura.window.focus` is duplicated above as an inline fallback in case
+    Astro/Vite hasn't bundled this script yet.
+  -->
+  <script>
+    import { OsClient } from '@aura/app-sdk';
+    new OsClient().nav.installGridNav({ selector: '.tile[data-section]' });
   </script>
 </body>
 </html>

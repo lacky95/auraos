@@ -1,0 +1,195 @@
+---
+interface Props {
+  title?: string;
+  active?: 'browse' | 'installed' | 'install' | 'publish';
+}
+
+const { title = 'Nexus', active = 'browse' } = Astro.props;
+
+const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: string }> = [
+  { id: 'browse',    label: 'BROWSE',    href: '/' },
+  { id: 'installed', label: 'INSTALLED', href: '/installed' },
+  { id: 'install',   label: 'INSTALL',   href: '/install' },
+  { id: 'publish',   label: 'PUBLISH',   href: '/publish' },
+];
+---
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>{title} · Nexus</title>
+  </head>
+  <body>
+    <header class="nexus-bar">
+      <h1 class="nexus-title">
+        <span class="glyph">NEX</span>
+        <span class="wordmark">NEXUS</span>
+        <span class="subtitle">// AuraOS app store</span>
+      </h1>
+      <nav class="nexus-tabs">
+        {TABS.map((tab) => (
+          <a
+            href={tab.href}
+            class:list={['nexus-tab', { active: tab.id === active }]}
+          >{tab.label}</a>
+        ))}
+      </nav>
+    </header>
+    <main class="nexus-main">
+      <slot />
+    </main>
+
+    <style is:global>
+      :root {
+        color-scheme: dark;
+      }
+      html, body {
+        margin: 0;
+        padding: 0;
+        font-family: var(--aura-font-mono, 'IBM Plex Mono', ui-monospace, monospace);
+        background: var(--aura-color-bg, #0a0a0a);
+        color: var(--aura-color-text, #ccffcc);
+        min-height: 100vh;
+      }
+      a { color: var(--aura-color-primary, #00ff41); text-decoration: none; }
+      a:hover { text-shadow: 0 0 6px var(--aura-color-primary, #00ff41); }
+      button {
+        font-family: inherit;
+        font-size: 0.85rem;
+        background: transparent;
+        color: var(--aura-color-primary);
+        border: 1px solid var(--aura-color-border);
+        padding: 6px 12px;
+        cursor: pointer;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        transition: box-shadow 0.1s, border-color 0.1s;
+      }
+      button:hover { border-color: var(--aura-color-primary); box-shadow: 0 0 8px var(--aura-color-primary); }
+      button[disabled] { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
+      input, textarea, select {
+        font-family: inherit;
+        background: var(--aura-color-surface);
+        color: var(--aura-color-text);
+        border: 1px solid var(--aura-color-border);
+        padding: 6px 10px;
+      }
+      input:focus, textarea:focus, select:focus {
+        outline: none;
+        border-color: var(--aura-color-primary);
+      }
+      .nexus-bar {
+        position: sticky; top: 0;
+        background: var(--aura-color-surface);
+        border-bottom: 1px solid var(--aura-color-border);
+        padding: 10px 16px;
+        display: flex;
+        align-items: center;
+        gap: 24px;
+        z-index: 10;
+      }
+      .nexus-title {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        margin: 0;
+        font-size: 0.95rem;
+      }
+      .nexus-title .glyph {
+        color: var(--aura-color-primary);
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        border: 1px solid var(--aura-color-primary);
+        padding: 2px 5px;
+        font-size: 0.7rem;
+      }
+      .nexus-title .wordmark {
+        font-weight: 700;
+        letter-spacing: 0.15em;
+        color: var(--aura-color-text);
+      }
+      .nexus-title .subtitle {
+        color: var(--aura-color-text-dim);
+        font-size: 0.7rem;
+        letter-spacing: 0.08em;
+      }
+      .nexus-tabs { display: flex; gap: 4px; }
+      .nexus-tab {
+        padding: 4px 10px;
+        font-size: 0.7rem;
+        letter-spacing: 0.12em;
+        color: var(--aura-color-text-dim);
+        border: 1px solid transparent;
+      }
+      .nexus-tab:hover { color: var(--aura-color-text); border-color: var(--aura-color-border); }
+      .nexus-tab.active {
+        color: var(--aura-color-primary);
+        border-color: var(--aura-color-primary);
+        background: color-mix(in srgb, var(--aura-color-primary) 8%, transparent);
+      }
+      .nexus-main { padding: 20px 16px; max-width: 1100px; margin: 0 auto; }
+      .nexus-card {
+        border: 1px solid var(--aura-color-border);
+        padding: 12px 14px;
+        margin-bottom: 10px;
+        background: var(--aura-color-surface);
+      }
+      .nexus-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+      .nexus-card-title {
+        font-weight: 600;
+        color: var(--aura-color-text);
+        letter-spacing: 0.05em;
+      }
+      .nexus-card-desc { color: var(--aura-color-text-dim); font-size: 0.8rem; margin-top: 4px; }
+      .nexus-card-meta { color: var(--aura-color-text-dim); font-size: 0.7rem; margin-top: 8px; letter-spacing: 0.04em; }
+      .nexus-card-actions { display: flex; gap: 6px; }
+      .nexus-empty {
+        text-align: center;
+        color: var(--aura-color-text-dim);
+        padding: 60px 16px;
+        font-size: 0.8rem;
+        letter-spacing: 0.08em;
+      }
+      .nexus-section {
+        margin: 16px 0;
+      }
+      .nexus-section h2 {
+        font-size: 0.75rem;
+        letter-spacing: 0.18em;
+        color: var(--aura-color-text-dim);
+        text-transform: uppercase;
+        margin: 0 0 10px;
+      }
+      .badge {
+        display: inline-block;
+        font-size: 0.65rem;
+        letter-spacing: 0.06em;
+        padding: 1px 6px;
+        border: 1px solid var(--aura-color-border);
+        color: var(--aura-color-text-dim);
+        text-transform: uppercase;
+      }
+      .badge.primary {
+        color: var(--aura-color-primary);
+        border-color: var(--aura-color-primary);
+      }
+      .nexus-form { display: flex; flex-direction: column; gap: 10px; max-width: 640px; }
+      .nexus-form label { font-size: 0.75rem; letter-spacing: 0.08em; color: var(--aura-color-text-dim); }
+      .nexus-form-row { display: flex; gap: 8px; }
+      .nexus-form-row > input { flex: 1; }
+      pre.nexus-log {
+        background: var(--aura-color-bg);
+        border: 1px solid var(--aura-color-border);
+        padding: 10px;
+        font-size: 0.75rem;
+        white-space: pre-wrap;
+        max-height: 40vh;
+        overflow-y: auto;
+      }
+      .diff-add    { color: var(--aura-color-warning); }
+      .diff-remove { color: var(--aura-color-text-dim); }
+      .diff-info   { color: var(--aura-color-info, var(--aura-color-primary)); }
+    </style>
+  </body>
+</html>

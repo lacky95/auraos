@@ -2,6 +2,7 @@ import { spawn, spawnSync, execSync, type ChildProcess } from 'node:child_proces
 import { existsSync, mkdirSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
+import { lifecyclePath } from '../types/manifest.js';
 import type { SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
@@ -49,6 +50,10 @@ interface TrackedContainer {
    * /api/instances/X/stop response.
    */
   expectingKill: boolean;
+  /** Cached manifest snapshot for lifecycle URL building. See ProotRunner's
+   *  SpawnedApp.manifest field for the rationale (raw-mode basePath apps
+   *  need the proxy prefix prepended to lifecycle URLs). */
+  manifest: AppManifest;
 }
 
 /**
@@ -178,7 +183,7 @@ export class ContainerRunner implements SandboxRunner {
       pid = parseInt(out, 10) || 0;
     } catch { /* leave 0; reaper will ignore */ }
 
-    const tracked: TrackedContainer = { containerId, hostname, port, appId, logTail, pid, exitCb: null, expectingKill: false };
+    const tracked: TrackedContainer = { containerId, hostname, port, appId, logTail, pid, exitCb: null, expectingKill: false, manifest };
     this.containers.set(instanceId, tracked);
 
     // Watch for container exit so we can fire the exit callback.
@@ -190,7 +195,7 @@ export class ContainerRunner implements SandboxRunner {
     watcher.on('error', () => this.handleExit(instanceId, null));
 
     try {
-      await this.waitHealthy(instanceId, appId, hostname, port);
+      await this.waitHealthy(instanceId, appId, hostname, port, manifest);
     } catch (err) {
       console.error(`[ContainerRunner] ${instanceId} health-check failed: ${(err as Error).message}`);
       this.forceKill(instanceId);
@@ -345,7 +350,17 @@ export class ContainerRunner implements SandboxRunner {
 
   private resolveEntrypoint(appId: string, manifest: AppManifest): string[] {
     const entrypointPath = join(this.appsDir, appId, manifest.entrypoint);
-    if (existsSync(entrypointPath)) return ['bash', `/workspace/apps/${appId}/${manifest.entrypoint}`];
+    const entrypointExists = existsSync(entrypointPath);
+    if (manifest.runtime === 'raw') {
+      if (!entrypointExists) {
+        throw new Error(
+          `[ContainerRunner] app '${manifest.id}' has runtime: 'raw' but no entrypoint file at ${entrypointPath}. ` +
+          `Raw apps must ship an executable entrypoint that binds the app to $APP_PORT.`,
+        );
+      }
+      return ['bash', `/workspace/apps/${appId}/${manifest.entrypoint}`];
+    }
+    if (entrypointExists) return ['bash', `/workspace/apps/${appId}/${manifest.entrypoint}`];
     return ['bash', '-c', SYNTHESISED_ENTRYPOINT];
   }
 
@@ -445,6 +460,7 @@ export class ContainerRunner implements SandboxRunner {
     port:       number;
     hostname:   string;
     pid:        number;
+    manifest:   AppManifest;
   }): void {
     if (this.containers.has(rec.instanceId)) return;
     // We don't have the container ID handy — docker inspect would have it,
@@ -459,16 +475,18 @@ export class ContainerRunner implements SandboxRunner {
       pid:           rec.pid,
       exitCb:        null,
       expectingKill: false,
+      manifest:      rec.manifest,
     });
   }
 
   /** Probe the app's health endpoint until ready or timeout. */
-  private async waitHealthy(instanceId: string, appId: string, hostname: string, port: number): Promise<void> {
+  private async waitHealthy(instanceId: string, appId: string, hostname: string, port: number, manifest: AppManifest): Promise<void> {
     const deadline = Date.now() + HEALTH_CHECK_TIMEOUT_MS;
+    const healthUrl = `http://${hostname}:${port}${lifecyclePath(manifest, instanceId, 'health')}`;
     let lastBody: string | null = null;
     while (Date.now() < deadline) {
       try {
-        const res = await fetch(`http://${hostname}:${port}/api/lifecycle/health`);
+        const res = await fetch(healthUrl);
         // Capture body regardless of status so the timeout error message
         // surfaces what the app actually said (403 = host gate, etc.).
         const body = await res.text();
@@ -502,7 +520,7 @@ export class ContainerRunner implements SandboxRunner {
   async callLifecycle(instanceId: string, hook: string): Promise<void> {
     const tracked = this.containers.get(instanceId);
     if (!tracked) return;
-    const url = `http://${tracked.hostname}:${tracked.port}/api/lifecycle/${hook}`;
+    const url = `http://${tracked.hostname}:${tracked.port}${lifecyclePath(tracked.manifest, instanceId, hook)}`;
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), LIFECYCLE_TIMEOUT_MS);
     try {
@@ -513,7 +531,7 @@ export class ContainerRunner implements SandboxRunner {
   async callOptionalLifecycle(instanceId: string, hook: string, body?: unknown): Promise<unknown> {
     const tracked = this.containers.get(instanceId);
     if (!tracked) return null;
-    const url = `http://${tracked.hostname}:${tracked.port}/api/lifecycle/${hook}`;
+    const url = `http://${tracked.hostname}:${tracked.port}${lifecyclePath(tracked.manifest, instanceId, hook)}`;
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), LIFECYCLE_TIMEOUT_MS);
     try {

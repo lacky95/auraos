@@ -336,26 +336,6 @@
     line-height: 1;
   }
 
-  /* themeStrategy chip — only rendered when an app declares 'themed' or
-   * 'override'. Mirrors .pm-bg-badge geometry so it sits alongside it. */
-  .pm-theme-badge {
-    font-size: 0.5rem;
-    padding: 1px 4px;
-    letter-spacing: 0.1em;
-    line-height: 1;
-    border: 1px solid;
-  }
-  .pm-theme-badge[data-strategy="themed"] {
-    color: var(--aura-color-secondary);
-    border-color: var(--aura-color-secondary);
-    background: color-mix(in srgb, var(--aura-color-secondary) 10%, transparent);
-  }
-  .pm-theme-badge[data-strategy="override"] {
-    color: var(--aura-color-danger);
-    border-color: var(--aura-color-danger);
-    background: color-mix(in srgb, var(--aura-color-danger) 12%, transparent);
-  }
-
   /* Activities nested inside the card */
   .pm-activities {
     border-top: 1px dashed var(--aura-color-border);
@@ -1139,9 +1119,6 @@
       const name = manifest?.name ?? inst.appId;
       const supportsActivities = manifest?.activityMode === 'multi';
       const isBg = manifest?.backgroundService === true;
-      const themeStrategy = manifest?.themeStrategy ?? 'inherit';
-      const themeChip = themeStrategy === 'inherit' ? '' :
-        `<span class="pm-theme-badge" data-strategy="${escapeHtml(themeStrategy)}" title="Theme strategy: ${escapeHtml(themeStrategy)} — app does not fully inherit OS palette">${escapeHtml(themeStrategy.toUpperCase())}</span>`;
       const acts = actByInstance.get(inst.instanceId) ?? [];
       const initial = (manifest?.icon ?? name.charAt(0)).toUpperCase();
       const initialLen = initial.length;
@@ -1182,7 +1159,6 @@
               <div class="pm-card-name">
                 <span>${escapeHtml(name)}</span>
                 ${isBg ? '<span class="pm-bg-badge" title="Background service">BG</span>' : ''}
-                ${themeChip}
               </div>
               <div class="pm-card-meta">${metaParts.join('')}</div>
             </div>
@@ -1222,9 +1198,6 @@
       const name = manifest?.name ?? inst.appId;
       const supportsActivities = manifest?.activityMode === 'multi';
       const isBg = manifest?.backgroundService === true;
-      const themeStrategy = manifest?.themeStrategy ?? 'inherit';
-      const themeChip = themeStrategy === 'inherit' ? '' :
-        `<span class="pm-theme-badge" data-strategy="${escapeHtml(themeStrategy)}" title="Theme strategy: ${escapeHtml(themeStrategy)} — app does not fully inherit OS palette">${escapeHtml(themeStrategy.toUpperCase())}</span>`;
       const acts = actByInstance.get(inst.instanceId) ?? [];
 
       const metaParts: string[] = [`<span>${escapeHtml(inst.instanceId)}</span>`];
@@ -1238,7 +1211,6 @@
             <div class="pm-listrow-line1">
               <span>${escapeHtml(name)}</span>
               ${isBg ? '<span class="pm-bg-badge" title="Background service">BG</span>' : ''}
-              ${themeChip}
               <span class="pm-listrow-state-label">${stateLabel(inst.state)}</span>
             </div>
             <div class="pm-listrow-line2">${metaParts.join('')}</div>

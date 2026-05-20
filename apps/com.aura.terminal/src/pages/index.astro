@@ -201,12 +201,65 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
     window.addEventListener('message', (ev) => {
       const t = ev.data?.type;
       if (t === 'aura.theme.changed' || t === 'aura.mode.changed') refreshTerminalTheme();
+      // OS told us this window just got focused (user pressed Enter on the
+      // highlighted slot in window-selection mode). Plain `iframe.focus()`
+      // only focuses the iframe element — without an explicit `term.focus()`
+      // xterm's textarea never receives focus and keystrokes go to the
+      // body, not the prompt.
+      //
+      // requestAnimationFrame is critical: the browser's focus transfer
+      // (parent calls iframe.focus() → iframe's document gets focus →
+      // last-focused descendant is restored, default = body) happens in
+      // microtasks AFTER our message listener runs. Calling term.focus()
+      // synchronously here loses the race; xterm focuses the textarea,
+      // then the browser overwrites that with the body. Deferring one
+      // frame puts our focus call after the browser's restoration so it
+      // sticks.
+      if (t === 'aura.window.focus') {
+        // requestAnimationFrame defers past the browser's iframe-focus-
+        // transfer microtask so term.focus() lands AFTER the body's
+        // restoration (otherwise the body steals focus back).
+        // We also re-sync size on every window-enter: a window-select
+        // round-trip can land us back in this iframe with a different
+        // layout than when we left (e.g. neighbour closed → grid
+        // reflowed, or we were focus-maximized and just exited). The
+        // ResizeObserver catches DOM resizes but not "the user came
+        // back to this window without anything actually moving" —
+        // doing fit+send unconditionally on every enter covers that.
+        requestAnimationFrame(() => {
+          try { fitAddon.fit(); } catch { /* addon not loaded yet */ }
+          if (activeWs && activeWs.readyState === 1) {
+            activeWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+          }
+          term.focus();
+        });
+      }
     });
 
     const fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
     term.open(document.getElementById('terminal'));
     fitAddon.fit();
+
+    // CRITICAL fresh-launch fix: re-fit (and resync with PTY) once the
+    // page's web fonts have finished loading. fitAddon.fit() computes
+    // `cols = floor(viewportWidth / charWidth)` — if the xterm monospace
+    // font hasn't loaded yet, charWidth comes from the browser's default
+    // monospace metric, not the actual font, and the resulting cols/rows
+    // are wrong. On an EXISTING terminal (Enter-from-highlight path)
+    // fonts are already cached so the initial fit reads correctly; on a
+    // FRESH launch from the launcher fonts are still loading at the
+    // moment of the initial fit. `document.fonts.ready` is the canonical
+    // "all fonts have loaded" signal. The promise resolves immediately
+    // for cached fonts (idempotent), so this is safe on every reload.
+    if (document.fonts && typeof document.fonts.ready?.then === 'function') {
+      document.fonts.ready.then(() => {
+        try { fitAddon.fit(); } catch { /* not yet loaded */ }
+        if (activeWs && activeWs.readyState === 1) {
+          activeWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+        }
+      });
+    }
 
     const statusEl = document.getElementById('conn-status');
     const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -321,12 +374,22 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
         // prompt and sometimes wiped the prompt itself — leaving the user
         // staring at an empty blinking cursor.)
         term.write('\x1b[2J\x1b[H');
-        // Re-fit after the WS opens — the iframe layout may have settled
-        // between the eager fit at term.open() and now. If the dims changed,
-        // onResize above sends the update; if not, this initial send keeps
-        // the pty in sync with the actual current size.
-        fitAddon.fit();
-        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+        // Double-rAF the fit + resize-send so it runs AFTER the iframe's
+        // second paint. On a fresh launch (especially via the launcher,
+        // where the WS handshake completes very fast over localhost) a
+        // single rAF can still measure mid-layout dims — the iframe's
+        // element exists with the slot's grid-given size, but the body's
+        // `100vh` and the inner #terminal flex chain don't always
+        // finalise until the second paint. Two rAFs guarantee we read
+        // the final dimensions. The server's `cols !== sess.cols` guard
+        // makes this idempotent if dims happen to match what the
+        // initial ResizeObserver sync already set.
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          try { fitAddon.fit(); } catch { /* not yet loaded */ }
+          if (ws.readyState !== 1) return; // closed between schedule + fire
+          try { ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows })); }
+          catch { /* socket closed between readyState check and send */ }
+        }));
       };
 
       ws.onmessage = (e) => term.write(e.data);
@@ -362,10 +425,67 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
 
     connect();
 
-    const resizeObs = new ResizeObserver(() => fitAddon.fit());
+    // The ResizeObserver is the natural "the iframe finally has its
+    // real size" hook — it fires both on initial observation AND on
+    // every subsequent layout change (window resize, slot reflow when
+    // siblings appear/disappear, focus-mode toggle, etc.). We fit +
+    // force-send the current cols/rows on every fire.
+    //
+    // The force-send (instead of relying on term.onResize) covers the
+    // launch-time path: the first `fitAddon.fit()` runs synchronously
+    // after `term.open()` while the iframe is still mid-paint and
+    // typically computes the PTY's default 80×24 — matching what xterm
+    // already has internally, so xterm.onResize wouldn't fire even
+    // when fit() later recomputes the SAME wrong dims from a momentarily-
+    // unfinished layout. By always echoing the current xterm dims down
+    // the WS whenever the element resizes, we let pty-server's
+    // `cols !== sess.cols` guard pick up the real dimensions as soon
+    // as the layout settles.
+    const syncSize = () => {
+      try { fitAddon.fit(); } catch { /* not yet loaded */ }
+      if (activeWs && activeWs.readyState === 1) {
+        activeWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      }
+    };
+    const resizeObs = new ResizeObserver(syncSize);
     resizeObs.observe(document.getElementById('terminal'));
 
-    window.addEventListener('resize', () => fitAddon.fit());
+    window.addEventListener('resize', syncSize);
+
+    // Belt-and-suspenders for the fresh-launch case: re-sync size on
+    // the user's first interactions with this iframe. The earlier
+    // event-driven chain (fonts.ready, ws.onopen, ResizeObserver) should
+    // already cover every fresh-launch ordering, but if any of those
+    // fired before the iframe's final paint AND no further layout
+    // change occurred, xterm would stay at the wrong cols/rows. The
+    // user's own typing is the most reliable "the terminal is now
+    // interactive" signal — by definition the layout has settled and
+    // the iframe is visible at that point.
+    //
+    // Two listeners on independent counters so coverage is complete:
+    //   • `keydown` (capture phase) — catches EVERY key including
+    //     arrows, modifiers, function keys. Fires before xterm's own
+    //     handler so even keys xterm swallows still count.
+    //   • `term.onData` — catches data xterm forwards to the PTY
+    //     (typed characters, paste events, IME composition output).
+    //     Covers paste cases where one paste = one `data` event but
+    //     potentially zero keydowns (programmatic paste / clipboard
+    //     event without preceding key).
+    // Both cap at 3 to avoid spamming the PTY with every subsequent
+    // keystroke; the server's `cols !== sess.cols` guard would dedup
+    // anyway, but no reason to postMessage on every character.
+    let initialKeydownFits = 0;
+    window.addEventListener('keydown', () => {
+      if (initialKeydownFits >= 3) return;
+      initialKeydownFits += 1;
+      syncSize();
+    }, { capture: true });
+    let initialDataFits = 0;
+    term.onData(() => {
+      if (initialDataFits >= 3) return;
+      initialDataFits += 1;
+      syncSize();
+    });
   </script>
 </body>
 </html>

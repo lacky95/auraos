@@ -394,6 +394,13 @@ const ssrVisibleViews = initialViews
   // (see the <style is:global> at the bottom of this file).
   let navHighlightedViewId: string | null = null;
 
+  // Sub-mode within Nav: "chrome-select" lets the user walk the highlighted
+  // window's title-bar buttons (close / minimize / maximize / breadcrumb)
+  // with arrows. Entered by Backspace on a highlighted window; second
+  // Backspace returns to window-selection. Default selection = the Close
+  // button, since it's the rightmost / most prominent chrome action.
+  let chromeSelectActive = false;
+
   function visibleViewIds(): string[] {
     return Array.from(document.querySelectorAll<HTMLElement>('.app-slot[data-view-id]'))
       .filter((el) => el.offsetParent !== null) // not display:none
@@ -413,15 +420,45 @@ const ssrVisibleViews = initialViews
 
   keyDispatcher.onModeChange((mode) => {
     if (mode === 'nav') {
-      if (!navHighlightedViewId) {
+      // If the user is currently in focus mode (a window maximized to the
+      // full-viewport overlay), entering window-selection should land on
+      // THAT window — otherwise the focused app is the obvious starting
+      // point but the default-first-visible logic would pick whichever
+      // slot is earliest in workspace member order. Exiting focus mode
+      // also matters: the overlay is z-50 over the desktop, so without
+      // exiting the user couldn't see the highlight ring or arrow-walk
+      // to any other window.
+      // Focus mode + nav mode: the focused window is the ONLY visible
+      // window, so it's also the "highlighted" one for window-selection.
+      // Don't exit focus mode — the user still sees the full-screen app,
+      // and chrome-select (Backspace) walks the focus-view's own header
+      // buttons (Exit Focus) instead of the hidden slot's chrome.
+      if (focusedInstanceId !== null) {
+        // Mark the focus-view as the selection target FIRST. We don't
+        // gate this on finding the view in `views` — stale workspace
+        // state could leave the user staring at a focused app with no
+        // visible "selected" cue. The visual is the load-bearing part
+        // for the user; the id tracking is for chrome-select to know
+        // which slot to fall back to after Exit Focus.
+        focusView.setAttribute('data-aura-nav-focus', 'true');
+        const fIid = focusedInstanceId;
+        const fAid = focusedActivityId;
+        const v = views.find((vv) =>
+          vv.instanceId === fIid && (fAid ? vv.activityId === fAid : true)
+        );
+        if (v) navHighlightedViewId = v.viewId;
+      } else if (!navHighlightedViewId) {
         const first = visibleViewIds()[0];
         if (first) setNavHighlight(first);
       } else {
         setNavHighlight(navHighlightedViewId); // refresh outline class
       }
     } else {
-      // App mode — drop the ring.
+      // App mode — drop the ring AND tear down any chrome-select sub-state.
       setNavHighlight(null);
+      chromeSelectActive = false;
+      // Clear the focus-view nav cue too (no-op if it wasn't set).
+      focusView.removeAttribute('data-aura-nav-focus');
     }
     // Mirror the dispatcher mode onto the `◐` chip so its active style
     // (filled primary background, set via CSS in Dock.astro) tracks the
@@ -433,6 +470,39 @@ const ssrVisibleViews = initialViews
 
   function moveNav(dir: 'up' | 'down' | 'left' | 'right'): void {
     if (keyDispatcher.getMode() !== 'nav') return;
+    // Focus mode: only one visible window (the focus overlay). Arrows
+    // would otherwise swap `navHighlightedViewId` to a slot hidden under
+    // the z-50 overlay — confusing. The user exits focus first if they
+    // want to walk other windows, or presses Backspace to enter
+    // chrome-select on the focus-view's own buttons.
+    if (focusedInstanceId !== null && !chromeSelectActive) return;
+    // Sub-mode: walking the chrome buttons of the highlighted slot.
+    // Only horizontal movement makes sense (single row of buttons); up/down
+    // is a no-op here so the user doesn't accidentally jump back to window
+    // selection by pressing the wrong axis. Backspace toggles out.
+    if (chromeSelectActive) {
+      if (dir !== 'left' && dir !== 'right') return;
+      // In focus mode the navigable chrome is the focus-view's header
+      // (currently just the Exit Focus button). In normal mode it's the
+      // highlighted slot's `.slot-chrome` buttons.
+      let btns: HTMLButtonElement[];
+      if (focusedInstanceId !== null) {
+        const header = document.getElementById('focus-header');
+        btns = header ? Array.from(header.querySelectorAll<HTMLButtonElement>('button')) : [];
+      } else {
+        if (!navHighlightedViewId) return;
+        const slot = document.querySelector<HTMLElement>(`.app-slot[data-view-id="${CSS.escape(navHighlightedViewId)}"]`);
+        if (!slot) return;
+        btns = Array.from(slot.querySelectorAll<HTMLButtonElement>('.slot-chrome button'));
+      }
+      if (btns.length === 0) return;
+      const cur = btns.indexOf(document.activeElement as HTMLButtonElement);
+      const nextIdx = dir === 'left'
+        ? Math.max(0, cur - 1)
+        : Math.min(btns.length - 1, cur + 1);
+      btns[nextIdx]?.focus();
+      return;
+    }
     const ids = visibleViewIds();
     if (ids.length === 0) return;
     const current = navHighlightedViewId && ids.includes(navHighlightedViewId)
@@ -463,9 +533,69 @@ const ssrVisibleViews = initialViews
 
   keyDispatcher.bind('aura.nav.enter', () => {
     if (keyDispatcher.getMode() !== 'nav' || !navHighlightedViewId) return;
+    // In chrome-select sub-mode Enter activates the focused title-bar
+    // button (close, minimize, etc.). The dispatcher's capture-phase
+    // listener has already preventDefault'd the keystroke, so the
+    // browser's native Enter→click on a focused button won't fire — we
+    // have to dispatch the click manually.
+    if (chromeSelectActive) {
+      const btn = document.activeElement as HTMLButtonElement | null;
+      const wasCloseAction = btn?.dataset?.['action'] === 'close';
+      const closedViewId = wasCloseAction ? navHighlightedViewId : null;
+      btn?.click?.();
+      // The button's effect (close, minimize, exit-focus…) drives
+      // downstream state. Reset chrome-select so the user emerges in a
+      // clean window-selection state from whichever slot now holds the
+      // highlight.
+      chromeSelectActive = false;
+      // Close specifically: keep the user in window-selection mode and
+      // re-highlight the next visible window so they can continue
+      // arrow-walking without going through Ctrl+Alt+Space → Enter
+      // again. The slot removal is processed by renderLayout in the
+      // same task as the close click (closeView_ → views state update
+      // → renderLayout); rAF defers until AFTER that layout pass so
+      // `visibleViewIds()` reflects the post-close state.
+      if (wasCloseAction) {
+        requestAnimationFrame(() => {
+          const remaining = visibleViewIds().filter((id) => id !== closedViewId);
+          if (remaining.length === 0) {
+            // Nothing left to select — exit nav mode entirely and land
+            // focus on the ◐ chip so Esc / Ctrl+Alt+Space's end state
+            // is consistent.
+            keyDispatcher.setMode('app');
+            refocusDockChip();
+            return;
+          }
+          setNavHighlight(remaining[0] ?? null);
+        });
+      }
+      return;
+    }
+    // Focus-mode + nav: the visible iframe is `#focus-frame`, not the
+    // slot's hidden iframe. Focus that one so the user lands directly
+    // on the live app the overlay is showing.
+    if (focusedInstanceId !== null) {
+      focusFrame.focus();
+      try { focusFrame.contentWindow?.postMessage({ type: 'aura.window.focus' }, '*'); }
+      catch { /* iframe gone or cross-origin */ }
+      keyDispatcher.setMode('app');
+      return;
+    }
     const slot = document.querySelector<HTMLElement>(`.app-slot[data-view-id="${CSS.escape(navHighlightedViewId)}"]`);
     const iframe = slot?.querySelector<HTMLIFrameElement>('iframe');
     iframe?.focus();
+    // Ask the app to route focus to its primary input. Plain
+    // `iframe.focus()` only focuses the iframe element — the browser then
+    // restores the iframe's LAST-focused descendant, which is nothing if
+    // the user has never interacted with this window. For apps with a
+    // dedicated input (xterm textarea in the terminal, search box in the
+    // launcher, etc.) we need them to explicitly call their inner
+    // `.focus()`. Apps opt in by listening for this message; apps that
+    // don't keep the default browser behaviour (the iframe stays focused
+    // at its outer element). Posted AFTER iframe.focus() so the inner
+    // focus call doesn't compete with the browser's focus restoration.
+    try { iframe?.contentWindow?.postMessage({ type: 'aura.window.focus' }, '*'); }
+    catch { /* iframe gone or cross-origin */ }
     keyDispatcher.setMode('app');
   });
 
@@ -504,16 +634,57 @@ const ssrVisibleViews = initialViews
     keyDispatcher.setMode('app');
     refocusDockChip();
   });
-  // Click-outside exit. mousedown on chrome / empty desktop (anything that
-  // isn't an .app-slot and isn't the chip itself) cancels nav mode. The
-  // chip exclusion is what lets Ctrl+Alt+Space's focus-the-chip path stay
-  // idempotent — otherwise the focus call could double-fire the toggle.
+  // Backspace toggles chrome-select sub-mode (window header buttons).
+  // Plain Backspace only — `aura.nav.back` (RShift+Backspace) is owned by
+  // the OS dispatcher and routes through activity history. We gate on
+  // (a) no modifiers, (b) Nav mode active, (c) a window is highlighted,
+  // (d) target isn't a text input (defensive — chip / chrome buttons
+  // aren't inputs, but a stray focus could land there).
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Backspace') return;
+    if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+    if (keyDispatcher.getMode() !== 'nav') return;
+    if (!navHighlightedViewId) return;
+    const t = e.target as Element | null;
+    if (t && t.matches?.('input, textarea, [contenteditable]')) return;
+    e.preventDefault();
+    if (chromeSelectActive) {
+      // Second Backspace — exit chrome-select. Window stays highlighted
+      // (border + watermark intact); take focus off the chrome button so
+      // subsequent arrows walk windows again.
+      chromeSelectActive = false;
+      if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+      return;
+    }
+    // First Backspace — enter chrome-select. In focus mode the visible
+    // chrome is the focus-view's own header (Exit Focus button); in
+    // normal mode it's the highlighted slot's title-bar buttons.
+    if (focusedInstanceId !== null) {
+      const exitBtn = document.getElementById('focus-exit') as HTMLButtonElement | null;
+      if (!exitBtn) return;
+      chromeSelectActive = true;
+      exitBtn.focus();
+      return;
+    }
+    const slot = document.querySelector<HTMLElement>(`.app-slot[data-view-id="${CSS.escape(navHighlightedViewId)}"]`);
+    if (!slot) return;
+    const target = slot.querySelector<HTMLButtonElement>('.slot-chrome button[data-action="close"]')
+                ?? slot.querySelector<HTMLButtonElement>('.slot-chrome button');
+    if (!target) return;
+    chromeSelectActive = true;
+    target.focus();
+  });
+  // Click-outside exit. mousedown anywhere that isn't an `.app-slot`
+  // cancels nav mode — chrome (status bar, dock buttons including the
+  // ◐ chip itself), the empty desktop area, etc. The chip is INCLUDED:
+  // a mouse click on the chip while in nav mode exits the mode, even
+  // though a click in app mode is still a no-op (the mode gate at the
+  // top of this handler covers that asymmetry).
   document.addEventListener('mousedown', (e) => {
     if (keyDispatcher.getMode() !== 'nav') return;
     const t = e.target as HTMLElement | null;
     if (!t) return;
     if (t.closest('.app-slot')) return;
-    if (t.closest('#dock-nav-entry')) return;
     keyDispatcher.setMode('app');
     refocusDockChip();
   });
@@ -1063,7 +1234,9 @@ const ssrVisibleViews = initialViews
         // The window is minimizable only if the app keeps running with no
         // visible UI (backgroundService=true). Otherwise minimize would
         // leave a dead backend in the strip — better to force close.
-        pending.replaceWith(buildView(appId, manifest.name, instanceId, undefined, '/', instance?.state ?? 'creating', !!manifest.backgroundService));
+        const real = buildView(appId, manifest.name, instanceId, undefined, '/', instance?.state ?? 'creating', !!manifest.backgroundService);
+        pendingAutoFocusViewIds.add(real.viewId);
+        pending.replaceWith(real);
         return;
       }
 
@@ -1108,7 +1281,9 @@ const ssrVisibleViews = initialViews
         // isn't backgroundable), but we mirror the check here so the chrome
         // matches the server's view either way.
         const minimizable = !!activity.minimizable && !!manifest.backgroundService;
-        pending.replaceWith(buildView(appId, activity.title ?? manifest.name, targetInstanceId, activityId, activity.path ?? '/', targetInstanceState, minimizable));
+        const real = buildView(appId, activity.title ?? manifest.name, targetInstanceId, activityId, activity.path ?? '/', targetInstanceState, minimizable);
+        pendingAutoFocusViewIds.add(real.viewId);
+        pending.replaceWith(real);
       } finally {
         markActivityOpenEnd(appId);
       }
@@ -1123,6 +1298,14 @@ const ssrVisibleViews = initialViews
   // incoming activity:opened — if we initiated it, the in-flight fetch will
   // add the view via pending.replaceWith(); the SSE event is just a duplicate.
   const pendingActivityOpens = new Map<string, number>();
+
+  // ViewIds of windows the user *just launched*. When their iframe finishes
+  // loading, `updateSlot` (the only place that creates the <iframe> element)
+  // fires focus() + a `aura.window.focus` postMessage and drops the id —
+  // same end-state as pressing Enter on a highlighted slot in window-select
+  // mode. Only user-initiated launches get added; SSE-driven views
+  // (activity:opened from elsewhere, orphan adoption) don't.
+  const pendingAutoFocusViewIds = new Set<string>();
   function markActivityOpenStart(appId: string) {
     pendingActivityOpens.set(appId, (pendingActivityOpens.get(appId) ?? 0) + 1);
   }
@@ -1147,7 +1330,9 @@ const ssrVisibleViews = initialViews
       // Same gating as launchApp's activity branch — see comment there.
       const manifest = await getManifest(appId).catch(() => null);
       const minimizable = !!activity.minimizable && !!manifest?.backgroundService;
-      pending.replaceWith(buildView(appId, activity.title ?? name, instanceId, activityId, activity.path ?? '/', lifecycleState, minimizable));
+      const real = buildView(appId, activity.title ?? name, instanceId, activityId, activity.path ?? '/', lifecycleState, minimizable);
+      pendingAutoFocusViewIds.add(real.viewId);
+      pending.replaceWith(real);
     } catch (err) {
       console.error('[shell] openActivityOnInstance failed', err);
       pending.drop();
@@ -1204,6 +1389,51 @@ const ssrVisibleViews = initialViews
   function minimizeView_(viewId: string) {
     views = views.map((v) => v.viewId === viewId ? { ...v, state: 'minimized' as const } : v);
     renderLayout();
+  }
+
+  /**
+   * Hard-reload the iframe inside a slot. Every Aura iframe is same-origin
+   * (proxied through the shell), so `contentWindow.location.reload()`
+   * works without the `src='about:blank'` dance — and avoids the white
+   * flash that re-assigning src would cause. The skeleton overlay is
+   * re-shown for the reload's duration so the user sees an immediate
+   * "something happened" signal, matching the cold-launch visual.
+   */
+  function refreshView_(viewId: string) {
+    const slot = dynamicLayout.querySelector<HTMLElement>(`.app-slot[data-view-id="${CSS.escape(viewId)}"]`);
+    if (!slot) return;
+    const body = slot.querySelector<HTMLElement>('.slot-body');
+    const ifr  = slot.querySelector<HTMLIFrameElement>('iframe');
+    if (!body || !ifr) return;
+    // Re-arm the skeleton overlay — the initial load listener installed in
+    // updateSlot is `{ once: true }` and has already been consumed.
+    if (!body.querySelector('[data-aura-skeleton]')) {
+      const v = views.find((x) => x.viewId === viewId);
+      if (v) {
+        const sk = document.createElement('div');
+        sk.setAttribute('data-aura-skeleton', '1');
+        sk.style.cssText = 'position:absolute;inset:0;z-index:5;background:var(--aura-color-bg);';
+        sk.innerHTML = renderSkeleton(v);
+        body.appendChild(sk);
+      }
+    }
+    // Remove the skeleton once the reload's `load` event has fired + the
+    // browser has painted (double-rAF, same pattern as cold launch).
+    ifr.addEventListener('load', () => {
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const sk = body.querySelector('[data-aura-skeleton]');
+        if (sk) sk.remove();
+      }));
+    }, { once: true });
+    try {
+      ifr.contentWindow?.location.reload();
+    } catch {
+      // Cross-origin guard (shouldn't trigger for Aura proxied iframes —
+      // defensive fallback). Re-assigning src to itself forces a navigate.
+      const url = ifr.src;
+      ifr.src = 'about:blank';
+      ifr.src = url;
+    }
   }
 
   /**
@@ -1592,6 +1822,10 @@ const ssrVisibleViews = initialViews
     // single-window mode with one click — the [ ] glyph matches the
     // "expand window" affordance used by most desktop chrome.
     const maximizeBtn = `<button data-action="maximize" title="Focus mode (maximize)" style="${btnStyle}">[ ]</button>`;
+    // Refresh = reload the iframe in place. Sits between maximize and close
+    // so close stays the rightmost destructive action. ↻ glyph matches the
+    // browser refresh affordance most users already know.
+    const refreshBtn  = `<button data-action="refresh" title="Reload window" style="${btnStyle}">↻</button>`;
     slot.innerHTML = `
       <div class="slot-chrome" style="display:flex;align-items:center;justify-content:space-between;padding:0 8px;height:28px;background:var(--aura-color-surface-2);border-bottom:var(--aura-border);flex-shrink:0;gap:8px;min-width:0;">
         <div class="slot-title" style="flex:1;min-width:0;display:flex;align-items:center;gap:6px;overflow:hidden;color:var(--aura-color-primary);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.08em;">
@@ -1600,6 +1834,7 @@ const ssrVisibleViews = initialViews
         </div>
         <div class="slot-controls" style="display:flex;gap:4px;flex-shrink:0;">
           ${minimizeBtn}
+          ${refreshBtn}
           ${maximizeBtn}
           <button data-action="close" title="Close" style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 10px;cursor:pointer;line-height:1;">✕</button>
         </div>
@@ -1703,6 +1938,24 @@ const ssrVisibleViews = initialViews
       // ready to receive messages. Hooks every iframe (not { once: true })
       // because each navigation inside the iframe re-emits `load`.
       iframe.addEventListener('load', () => sendClaimList(iframe));
+      // Auto-enter newly-launched windows: same end-state as Enter on a
+      // highlighted slot in window-select mode — focus the iframe + post
+      // `aura.window.focus` so the app's SDK helper (installGridNav)
+      // routes focus to its first interactive element (e.g. Settings'
+      // first tile, terminal's xterm textarea). One-shot per view: the
+      // `pendingAutoFocusViewIds` membership is consumed here.
+      const viewId = v.viewId;
+      iframe.addEventListener('load', () => {
+        if (!pendingAutoFocusViewIds.has(viewId)) return;
+        pendingAutoFocusViewIds.delete(viewId);
+        // rAF defer past the browser's iframe-focus-transfer microtask
+        // (same race the terminal's `term.focus()` hit on Enter).
+        requestAnimationFrame(() => {
+          iframe.focus();
+          try { iframe.contentWindow?.postMessage({ type: 'aura.window.focus' }, '*'); }
+          catch { /* iframe gone or cross-origin */ }
+        });
+      }, { once: true });
       iframe.src = v.iframeUrl;
       // Insert as the FIRST child so the skeleton (appended above) stays on top.
       body.insertBefore(iframe, body.firstChild);
@@ -1761,6 +2014,7 @@ const ssrVisibleViews = initialViews
     if (!viewId) return;
     if (action === 'close')    { e.preventDefault(); closeView_(viewId); }
     if (action === 'minimize') { e.preventDefault(); minimizeView_(viewId); }
+    if (action === 'refresh')  { e.preventDefault(); refreshView_(viewId); }
     if (action === 'maximize') {
       // Hand off to the focus-mode overlay (defined just below). Read the
       // identifiers from the slot — the JS-generated chrome stamps them on
@@ -2043,6 +2297,26 @@ const ssrVisibleViews = initialViews
     z-index: 50;
   }
   #focus-view[aria-hidden="false"] { display: flex; }
+  /* Window-selection mode cue while in focus mode. Mirrors the regular
+     `.app-slot[data-aura-nav-focus]` look (border + centred ◉ watermark)
+     but painted as a pseudo-element OVERLAY rather than `box-shadow` on
+     the container — children (the iframe) paint over a parent's
+     box-shadow, hiding it. `pointer-events: none` so the watermark +
+     border never intercept clicks meant for the focus-frame iframe. */
+  #focus-view[data-aura-nav-focus="true"]::after {
+    content: '◉';
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: clamp(3rem, 16vmin, 7rem);
+    color: var(--aura-color-text);
+    opacity: 1;
+    pointer-events: none;
+    box-shadow: inset 0 0 0 2px var(--aura-color-text);
+    z-index: 2;
+  }
 
   /* Window-selection mode highlight. Recolours the slot's existing thin
      border to the high-contrast text colour. `--aura-color-text` is the
@@ -2182,6 +2456,18 @@ const ssrVisibleViews = initialViews
     color: var(--aura-color-text);
     border-color: var(--aura-color-primary);
   }
+  /* Keyboard focus state for chrome buttons. Used by the window
+     chrome-select sub-mode (Backspace on a highlighted slot → close
+     button gets focus by default; arrows walk siblings). Stronger than
+     hover so it stays distinguishable even when the cursor is elsewhere. */
+  .app-slot .slot-controls button:focus-visible,
+  .app-slot .crumb-back:focus-visible,
+  .app-slot .crumb-prev:focus-visible {
+    outline: none;
+    color: var(--aura-color-text);
+    border-color: var(--aura-color-primary);
+    box-shadow: 0 0 0 1px var(--aura-color-primary), 0 0 8px var(--aura-color-primary);
+  }
 
   /* ---- Breadcrumb trail ----------------------------------------------- */
   /*
@@ -2268,6 +2554,14 @@ const ssrVisibleViews = initialViews
     text-transform: uppercase;
   }
   #focus-exit:hover { color: var(--aura-color-danger); box-shadow: var(--aura-glow-danger); }
+  /* Keyboard focus state for the Exit Focus button — used when the user
+     enters chrome-select inside focus mode (Backspace on the focus-view).
+     Same red glow as hover so the keyboard cue matches mouse hover. */
+  #focus-exit:focus-visible {
+    outline: none;
+    color: var(--aura-color-danger);
+    box-shadow: 0 0 0 1px var(--aura-color-danger), 0 0 8px var(--aura-color-danger);
+  }
 
   #focus-frame {
     flex: 1;

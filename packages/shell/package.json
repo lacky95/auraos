@@ -24,7 +24,8 @@
     "socket.io":             "^4.8.0",
     "socket.io-client":      "^4.8.0",
     "tailwindcss":           "^4.1.0",
-    "ws":                    "^8.18.0"
+    "ws":                    "^8.18.0",
+    "yaml":                  "^2.5.1"
   },
   "devDependencies": {
     "@astrojs/check":  "^0.9.9",

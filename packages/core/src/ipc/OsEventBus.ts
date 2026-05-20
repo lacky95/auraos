@@ -96,6 +96,14 @@ export interface OsEvents {
    * the namespace from the payload to narrow further.
    */
   'kv:changed': { namespace: 'os' | `app/${string}`; key: string; value: unknown | null };
+  /** Nexus install completed. `record` is the persisted install metadata. */
+  'nexus:install.complete':   { id: string; record: unknown };
+  /** Nexus update completed (or no-op'd when up-to-date). */
+  'nexus:update.complete':    { id: string; record: unknown | null };
+  /** Nexus uninstall completed. */
+  'nexus:uninstall.complete': { id: string };
+  /** Nexus publish completed. `ref` is the printable install command. */
+  'nexus:publish.complete':   { id?: string; ref: string };
 }
 
 class TypedEventBus extends EventEmitter<OsEvents> {}

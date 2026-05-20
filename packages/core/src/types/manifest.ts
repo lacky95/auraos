@@ -65,6 +65,49 @@ export const AppManifestSchema = z.object({
   icon: z.string().min(1).max(3).optional(),
   entrypoint: z.string().default('entrypoint.sh'),
   serverPort: z.number().int().min(1024).max(65535).optional(),
+  /**
+   * Which runtime the OS spawns this app under.
+   *   'astro' (default) → the historical path. The OS synthesises an
+   *                       `astro dev` entrypoint if the app doesn't ship one,
+   *                       and `auraAppIntegration()` adds identity headers
+   *                       and the `/api/lifecycle/health` route. The shell
+   *                       proxy injects `<base href>`, rewrites href/src,
+   *                       and stamps OS meta tags + relays.
+   *   'raw'             → no Astro wrapper. The runner spawns
+   *                       `manifest.entrypoint` directly; the app is
+   *                       responsible for binding to `$APP_PORT` (or
+   *                       `serverPort` when set) and serving the lifecycle
+   *                       endpoints. The shell proxy switches its inject
+   *                       defaults to pass-through (overridable per app via
+   *                       the `proxy` block below).
+   */
+  runtime: z.enum(['astro', 'raw']).default('astro'),
+  /**
+   * Per-app overrides for the shell proxy's HTML/JS rewriting and injection
+   * behaviour. Defaults are resolved at proxy-read time via
+   * `resolveProxyConfig(manifest)` and vary by `runtime` (Astro apps default
+   * to the today-behaviour; raw apps default to a pure pass-through). Any
+   * field set here wins over the default.
+   *
+   * - `rewriteHtml`:
+   *     'astro'    → rewrite href/src/action/etc., inject <base href>. Default for runtime:'astro'.
+   *     'absolute' → rewrite attributes but skip the <base href>. For SPAs that emit basePath-prefixed
+   *                  absolute URLs and don't want a <base> tag fighting their hydration.
+   *     'none'     → no HTML rewriting, no <base href>. Default for runtime:'raw'.
+   * - `preservePrefix`: when true, the proxy forwards `/api/proxy/<id>/<path>` to upstream as
+   *     `/api/proxy/<id>/<path>` instead of stripping its prefix. Needed by Next.js apps with
+   *     basePath so the upstream sees the URL it expects without 308-redirect round-trips.
+   * - `injectMeta`, `injectConsoleRelay`, `injectKeyForwarder`, `injectIdentityScript`: each toggles
+   *     the named injection in the proxy's HTML response pass. Defaults on; opt out per app.
+   */
+  proxy: z.object({
+    rewriteHtml:          z.enum(['astro', 'absolute', 'none']).optional(),
+    preservePrefix:       z.boolean().optional(),
+    injectMeta:           z.boolean().optional(),
+    injectConsoleRelay:   z.boolean().optional(),
+    injectKeyForwarder:   z.boolean().optional(),
+    injectIdentityScript: z.boolean().optional(),
+  }).optional(),
   permissions: z.array(PermissionSchema).default([]),
   tools: z.array(z.string()).default([]),
   rootfsMode: z.enum(['shared', 'isolated']).default('shared'),
@@ -219,9 +262,98 @@ export const AppManifestSchema = z.object({
     /** Manual tie-breaker — higher wins. Default 0. */
     priority:   z.number().int().default(0),
   })).default([]),
+  /**
+   * Optional Nexus publish metadata. Drives `aura nexus publish` — none of
+   * these are runtime fields, they just steer the publisher when an author
+   * runs the command without flags.
+   *   • `repo`     — `github.com/<user>/<repo>` for git publish.
+   *   • `registry` — `ghcr.io/<user>/<repo>` for OCI publish.
+   *   • `channels` — channel labels the publisher will tag against (in
+   *                  addition to `<version>` and `latest`).
+   *   • `ignore`  — extra paths excluded from the publish tarball/work-tree.
+   *                  Defaults strip the usual build artefacts.
+   */
+  publish: z.object({
+    repo:     z.string().optional(),
+    registry: z.string().optional(),
+    channels: z.array(z.string()).default(['stable']),
+    ignore:   z.array(z.string()).default([
+      'node_modules', '.next', 'dist', '.astro', '.turbo', '.cache',
+    ]),
+  }).optional(),
+  /**
+   * Cross-app dependencies. Declared by author, enforced at install time
+   * (the Nexus installer warns / refuses if a required dep is missing).
+   * v1: the installer warns + lists missing deps; v2 auto-installs them
+   * recursively. `version` is a semver range parsed by the resolver.
+   */
+  dependencies: z.array(z.object({
+    id:      z.string().regex(/^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/),
+    version: z.string(),
+  })).default([]),
 }).refine(
   (m) => m.componentType !== 'service' || m.activityMode === 'none',
   { message: "componentType: 'service' requires activityMode: 'none' — services cannot host activities", path: ['componentType'] },
 );
 
 export type AppManifest = z.infer<typeof AppManifestSchema>;
+
+/**
+ * Resolved proxy configuration for a single app. All fields are concrete —
+ * no `undefined` — because `resolveProxyConfig` fills defaults that vary by
+ * `manifest.runtime`. The shell proxy reads from this struct rather than
+ * the raw manifest so the conditional rewriting logic stays uniform across
+ * Astro and raw apps.
+ */
+export interface ProxyConfig {
+  rewriteHtml:          'astro' | 'absolute' | 'none';
+  preservePrefix:       boolean;
+  injectMeta:           boolean;
+  injectConsoleRelay:   boolean;
+  injectKeyForwarder:   boolean;
+  injectIdentityScript: boolean;
+}
+
+/**
+ * Pick the proxy behaviour for an app, defaulting based on `runtime`:
+ *   - astro apps keep today's full inject + HTML-rewriting profile.
+ *   - raw apps get a near pass-through default (no `<base>`, no attribute
+ *     rewriting). Meta / relay / key forwarder still inject so raw apps
+ *     can participate in the console + keymap pipeline if they want — opt
+ *     out per app by setting the flag to false.
+ *
+ * Any field set on `manifest.proxy` wins over the default.
+ */
+export function resolveProxyConfig(manifest: AppManifest): ProxyConfig {
+  const isRaw = manifest.runtime === 'raw';
+  const p = manifest.proxy ?? {};
+  return {
+    rewriteHtml:          p.rewriteHtml          ?? (isRaw ? 'none' : 'astro'),
+    preservePrefix:       p.preservePrefix       ?? false,
+    injectMeta:           p.injectMeta           ?? true,
+    injectConsoleRelay:   p.injectConsoleRelay   ?? true,
+    injectKeyForwarder:   p.injectKeyForwarder   ?? true,
+    injectIdentityScript: p.injectIdentityScript ?? true,
+  };
+}
+
+/**
+ * Build the upstream path the AppManager hits for a given lifecycle hook.
+ *
+ * For an Astro app (or any raw app with `proxy.preservePrefix: false`) this is
+ * just `/api/lifecycle/<hook>`. For raw apps whose framework uses a `basePath`
+ * matching the proxy prefix (Next.js, Remix, …), the framework only mounts
+ * routes under that prefix — a bare `/api/lifecycle/health` request 404s.
+ * We prepend the proxy prefix so the URL the runner builds is one the app's
+ * router actually serves.
+ *
+ * The `host:port` portion is the caller's concern; this helper only computes
+ * the path component so the same URL works whether the runner is calling
+ * localhost (PRoot) or a docker hostname (Container).
+ */
+export function lifecyclePath(manifest: AppManifest, instanceId: string, hook: string): string {
+  const prefix = manifest.proxy?.preservePrefix
+    ? `/api/proxy/${instanceId}/api/lifecycle`
+    : '/api/lifecycle';
+  return `${prefix}/${hook}`;
+}

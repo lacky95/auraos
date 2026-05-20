@@ -1,8 +1,15 @@
 packages:
   - 'packages/*'
   - 'apps/*'
+  # Raw-runtime apps nest their framework root one level deeper because the
+  # outer dir holds `entrypoint.sh` + the Aura manifest. The pattern keeps
+  # the convention general — any future raw app with a nested framework
+  # (e.g. `apps/<id>/sveltekit-site/`) is auto-registered as long as the
+  # inner dir name is added below.
+  - 'apps/*/fumadocs-site'
 allowBuilds:
   esbuild: true
+  msw: set this to true or false
   redis-memory-server: set this to true or false
 onlyBuiltDependencies:
   - esbuild

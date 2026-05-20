@@ -74,7 +74,17 @@ export class OsClient {
   readonly activity: ActivityApi;
 
   constructor() {
-    this.base = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
+    // Bare `process.env.X` throws `ReferenceError: process is not defined`
+    // in the browser, which would prevent every browser-side `new OsClient()`
+    // from working — the SDK is consumed both server-side (lifecycle
+    // endpoints, Astro frontmatter) and client-side (page <script> blocks,
+    // React islands), so the constructor has to be safe in both.
+    const env = (typeof process !== 'undefined' && process.env) ? process.env : {};
+    // In-browser default is same-origin (so the URL is correct even when
+    // the app's iframe was launched on a non-localhost host). The
+    // OS_API_BASE env var is only honoured server-side.
+    const browserDefault = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
+    this.base = env['OS_API_BASE'] ?? browserDefault;
     this.keymap   = new KeymapApi(this);
     this.nav      = new NavApi(this);
     this.system   = new SystemApi(this);

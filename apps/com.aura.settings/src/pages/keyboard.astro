@@ -58,5 +58,19 @@ try {
     />
   </main>
   <footer class="settings-foot">PUT /api/kv/os/keymap · BROADCASTS kv:changed os/keymap · LIVE-RELOAD APP CLAIM LISTS</footer>
+
+  <!-- Arrow-walk the KeymapManager: action rows + reset buttons + tab
+       triggers. `pauseWhen` defers to the combo-capture dialog when it's
+       open (KeymapManager sets `body.dataset.keymapCapture` while
+       capturing — see the React.useEffect inside KeymapManager). Without
+       this, the first arrow press would move outer focus instead of
+       being recorded as the new binding. -->
+  <script>
+    import { OsClient } from '@aura/app-sdk';
+    new OsClient().nav.installGridNav({
+      selector: '.settings-body button, .settings-body [role="tab"]',
+      pauseWhen: () => document.body.dataset.keymapCapture === 'true',
+    });
+  </script>
 </body>
 </html>

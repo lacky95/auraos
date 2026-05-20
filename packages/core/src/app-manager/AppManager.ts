@@ -1,6 +1,7 @@
 import { mkdirSync, readdirSync, readFileSync, lstatSync, writeFileSync, chmodSync, copyFileSync, unlinkSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
+import { lifecyclePath } from '../types/manifest.js';
 import type { AppLifecycleState } from '../types/lifecycle.js';
 import type { AppInstance } from '../types/instance.js';
 import type { AppActivity } from '../types/activity.js';
@@ -419,9 +420,16 @@ export class AppManager {
           const cur = this.nextInstanceNum.get(o.appId) ?? 0;
           if (n > cur) this.nextInstanceNum.set(o.appId, n);
         }
-        this.runners.container.registerAdopted?.(o);
         const manifest = this.registry.getById(o.appId);
-        if (manifest) this.providers.registerInstance(inst, manifest);
+        if (manifest) {
+          this.runners.container.registerAdopted?.({ ...o, manifest });
+          this.providers.registerInstance(inst, manifest);
+        } else {
+          // Manifest gone (app uninstalled mid-restart). Skip adoption — without
+          // a manifest the runner can't build correct lifecycle URLs and the
+          // reconciler will tear the container down on the next pass anyway.
+          console.warn(`[AppManager] skipping orphan adoption for ${o.instanceId}: manifest for ${o.appId} not found`);
+        }
         console.log(`[AppManager] adopted orphan container ${o.instanceId} (appId=${o.appId}, port=${o.port})`);
       }
     } catch (err) {
@@ -850,6 +858,16 @@ export class AppManager {
 
   getInstance(instanceId: string): AppInstance | undefined {
     return this.instances.get(instanceId);
+  }
+
+  /** Filesystem root where every app lives. Forwarded from AppRegistry. */
+  getAppsDir(): string {
+    return this.registry.getAppsDir();
+  }
+
+  /** Per-instance data dir root. Mirror of the constructor arg. */
+  getDataDir(): string {
+    return this.dataDir;
   }
 
   /**
@@ -1344,7 +1362,9 @@ export class AppManager {
     for (const inst of Array.from(this.instances.values())) {
       if (inst.port == null || inst.state !== 'resumed') continue;
       try {
-        const res = await fetch(`http://localhost:${inst.port}/api/lifecycle/health`, {
+        const manifest = this.registry.getById(inst.appId);
+        if (!manifest) continue; // app uninstalled mid-run; skip
+        const res = await fetch(`http://localhost:${inst.port}${lifecyclePath(manifest, inst.instanceId, 'health')}`, {
           signal: AbortSignal.timeout(1000),
         });
         if (!res.ok) continue; // transient — don't punish on a single bad response

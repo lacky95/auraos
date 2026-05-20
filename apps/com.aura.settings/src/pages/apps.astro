@@ -389,5 +389,15 @@ apps.sort((a, b) => {
       }
     });
   </script>
+
+  <!-- Arrow-walk: up/down moves between rows (one stop per app on the
+       toggle button); Tab from a focused toggle reaches the trash button.
+       We anchor on `.toggle` because it's the primary action; the spatial
+       picker's penalty for off-axis movement naturally prevents up/down
+       from jumping sideways into the trash button. -->
+  <script>
+    import { OsClient } from '@aura/app-sdk';
+    new OsClient().nav.installGridNav({ selector: '.app-row .toggle' });
+  </script>
 </body>
 </html>

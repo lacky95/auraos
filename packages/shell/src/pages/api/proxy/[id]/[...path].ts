@@ -1,7 +1,21 @@
 import type { APIRoute } from 'astro';
-import { getAppManager, ThemeManager, keymapRegistry } from '@aura/core';
-import type { ColorMode, KeyAction, OsKeymapState } from '@aura/core';
+import { getAppManager, ThemeManager, keymapRegistry, resolveProxyConfig } from '@aura/core';
+import type { AppManifest, ColorMode, KeyAction, OsKeymapState, ProxyConfig } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
+
+/**
+ * Fallback proxy config for the corner case where the AppManager can't
+ * resolve a manifest (race during pool warm-up / app reload). Mirrors the
+ * historical Astro-default behaviour so we never silently strip injection.
+ */
+const DEFAULT_PROXY_CONFIG: ProxyConfig = {
+  rewriteHtml:          'astro',
+  preservePrefix:       false,
+  injectMeta:           true,
+  injectConsoleRelay:   true,
+  injectKeyForwarder:   true,
+  injectIdentityScript: true,
+};
 
 /**
  * Reverse-proxy to a running app instance.
@@ -58,7 +72,11 @@ export const ALL: APIRoute = async ({ params, request }) => {
   // separate `componentType: 'activity'` app. Mirrors the SSR-time guard in
   // packages/shell/src/pages/index.astro that already filters services out
   // of initialViews + workspace.members.
-  const manifest = mgr.getManifest(instance.appId);
+  const manifest: AppManifest | null = mgr.getManifest(instance.appId) ?? null;
+  // Resolve the per-app proxy behaviour once. Apps with `runtime: 'raw'` get
+  // a near pass-through default (no <base>, no attribute rewriting); Astro
+  // apps keep the full inject pipeline. Each flag is overridable per manifest.
+  const cfg: ProxyConfig = manifest ? resolveProxyConfig(manifest) : DEFAULT_PROXY_CONFIG;
   if (manifest?.componentType === 'service' && !path.startsWith('api/') && !path.startsWith('_aura_')) {
     const payload = {
       error: 'service-has-no-ui',
@@ -137,7 +155,12 @@ export default {};
   const up = mgr.getUpstreamUrl?.(instance.instanceId);
   const upHost = up?.host ?? 'localhost';
   const upPort = up?.port ?? instance.port;
-  const targetUrl = `http://${upHost}:${upPort}/${path}${search}`;
+  // `preservePrefix` keeps the `/api/proxy/<id>` segment in the URL we send
+  // upstream. Needed by Next.js apps whose `basePath` config expects to see
+  // the proxy prefix on every request — without it we'd lose a round-trip
+  // to a 308 redirect chain back to the prefixed URL.
+  const upstreamPath = cfg.preservePrefix ? `api/proxy/${id}/${path}` : path;
+  const targetUrl = `http://${upHost}:${upPort}/${upstreamPath}${search}`;
 
   try {
     const headers = new Headers(request.headers);
@@ -212,19 +235,26 @@ export default {};
       // it through the proxy — and floods the console with retry errors
       // (`ws-connection-refused`, `can't access property "send"`, etc.).
       // Apps work fine without the client; only HMR is lost (already gone).
+      // Always-on (cheap regex, no false positives for non-Vite apps).
       let rewritten = html.replace(
         /<script\b[^>]*\bsrc=["'][^"']*\/@vite\/client[^"']*["'][^>]*>\s*<\/script>/gi,
         '',
       );
 
-      rewritten = rewritten.replace(
-        /\b(src|href|action|component-url|renderer-url|before-hydration-url)\s*=\s*(["'])([^"']*)\2/gi,
-        (full, attr, q, val) => {
-          const next = prefixUrl(val);
-          return next === val ? full : `${attr}=${q}${next}${q}`;
-        },
-      );
-      if (!/<base\s/i.test(rewritten)) {
+      // Attribute rewriting + <base href> injection are gated by manifest
+      // proxy.rewriteHtml. 'astro' = full pipeline (today's default). 'absolute'
+      // = rewrite attributes but skip <base href> (basePath-aware SPAs).
+      // 'none' = pass-through, no rewriting (raw apps that own their HTML).
+      if (cfg.rewriteHtml !== 'none') {
+        rewritten = rewritten.replace(
+          /\b(src|href|action|component-url|renderer-url|before-hydration-url)\s*=\s*(["'])([^"']*)\2/gi,
+          (full, attr, q, val) => {
+            const next = prefixUrl(val);
+            return next === val ? full : `${attr}=${q}${next}${q}`;
+          },
+        );
+      }
+      if (cfg.rewriteHtml === 'astro' && !/<base\s/i.test(rewritten)) {
         rewritten = rewritten.replace(
           /<head(\s[^>]*)?>/i,
           (m) => `${m}<base href="${baseHref}">`,
@@ -232,30 +262,11 @@ export default {};
       }
 
       // Inject identity + theme metadata so apps + shell can self-describe.
-      //
-      // Identity (always, all strategies):
-      //   <meta name="aura-app-id">     identity for the iframe load check
-      //   <meta name="aura-instance-id">
-      //
-      // Theming (varies by themeStrategy in the manifest):
-      //   <meta name="aura-design-framework">         scificn (always)
-      //   <meta name="aura-design-framework-version>  0.1.0   (always)
-      //   <meta name="aura-theme-strategy">           inherit | themed | override
-      //   <meta name="aura-color-mode">               user pref (light/dark/auto)
-      //   <meta name="aura-resolved-mode">            server-resolved (light/dark)
-      //   <meta name="aura-theme-id">                 only for inherit + themed (active resolved id)
-      //   <meta name="aura-theme-id-dark">            user's dark pick (only for inherit + themed)
-      //   <meta name="aura-theme-id-light">           user's light pick (only for inherit + themed)
-      //   <link href="/api/os/theme.css">             only for inherit (auto-injected)
-      const manifest      = mgr.getManifest(instance.appId);
+      // The aura-app-id / aura-instance-id pair is ALWAYS emitted — the
+      // OSLayout identity guard reads them to verify the iframe loaded our
+      // app, not someone else's. The rest sits behind `cfg.injectMeta` so
+      // raw apps that own their HTML can opt out of the extra weight.
       const themeStrategy = (manifest?.themeStrategy ?? 'inherit') as 'inherit' | 'themed' | 'override';
-      const themeSel      = await readShellThemeSelection().catch(() => null);
-      const themeIdDark   = themeSel?.themeIdDark  ?? ThemeManager.DEFAULT_THEME_ID_DARK;
-      const themeIdLight  = themeSel?.themeIdLight ?? ThemeManager.DEFAULT_THEME_ID_LIGHT;
-      const colorMode     = themeSel?.colorMode    ?? ThemeManager.DEFAULT_COLOR_MODE;
-      const { theme: activeTheme, resolvedMode } = ThemeManager.resolveActiveTheme(themeIdLight, themeIdDark, colorMode);
-      const framework     = activeTheme.framework;
-
       const escAttr = (s: string) => s.replace(/"/g, '&quot;');
       // The proxy URL prefix every iframe is loaded at. SPA frameworks
       // (Next.js, SvelteKit, Nuxt, Angular) need this as their `basePath`
@@ -270,70 +281,84 @@ export default {};
       //   - `window.AURA_APP_BASE_PATH` global  for runtime reads
       // Plus an SDK helper at `getAppBasePath()` for type-safe access.
       const appBasePath = `/api/proxy/${instance.instanceId}`;
+      // Identity meta — always emitted regardless of cfg.injectMeta.
       const metaParts: string[] = [
         `<meta name="aura-app-id" content="${escAttr(instance.appId)}">`,
         `<meta name="aura-instance-id" content="${escAttr(instance.instanceId)}">`,
-        `<meta name="aura-app-base-path" content="${escAttr(appBasePath)}">`,
-        `<meta name="aura-design-framework" content="${escAttr(framework.id)}">`,
-        `<meta name="aura-design-framework-version" content="${escAttr(framework.version)}">`,
-        `<meta name="aura-theme-strategy" content="${escAttr(themeStrategy)}">`,
-        `<meta name="aura-color-mode" content="${escAttr(colorMode)}">`,
-        `<meta name="aura-resolved-mode" content="${escAttr(resolvedMode)}">`,
       ];
-      // Activity id is the OS-level handle the SDK uses to call
-      // /api/activities/<id>/navigate and /back. The proxy already sets
-      // X-Aura-Activity-Id on the upstream request, but the browser SDK
-      // needs a synchronous way to read it — meta tag is the established
-      // pattern here (same as app-id / instance-id above).
-      if (activityId) {
-        metaParts.push(`<meta name="aura-activity-id" content="${escAttr(activityId)}">`);
-        // History + breadcrumb snapshot — the SDK reads these synchronously
-        // so apps that opted out of the OS chrome (`breadcrumb: 'off'`) can
-        // render their own trail without a round-trip on mount.
-        try {
-          const activity = mgr.getActivity(activityId) as {
-            history?: Array<{ path: string; title?: string }>;
-            breadcrumb?: 'os' | 'off';
-          } | undefined;
-          const history = activity?.history ?? [];
-          const breadcrumb = activity?.breadcrumb ?? 'os';
-          metaParts.push(`<meta name="aura-activity-history" content="${escAttr(JSON.stringify(history))}">`);
-          metaParts.push(`<meta name="aura-activity-breadcrumb" content="${escAttr(breadcrumb)}">`);
-        } catch { /* AppManager may be mid-restart; iframe will refetch next load */ }
-      }
-      // themed + inherit both see the theme ids; override sees only mode.
-      if (themeStrategy !== 'override') {
-        metaParts.push(`<meta name="aura-theme-id" content="${escAttr(activeTheme.id)}">`);
-        metaParts.push(`<meta name="aura-theme-id-dark" content="${escAttr(themeIdDark)}">`);
-        metaParts.push(`<meta name="aura-theme-id-light" content="${escAttr(themeIdLight)}">`);
-      }
 
-      // Keymap snapshot for `osClient.keymap.getBinding()`. Two meta tags:
-      //   • aura-keymap-actions  — JSON array of every action this app
-      //     declared (manifest) plus OS-scope actions the app can reference
-      //     (e.g. `aura.launcher.toggle` for menu hints).
-      //   • aura-keymap-bindings — JSON map of actionId → currently-bound
-      //     combo (defaults overridden by the user's KV overlay).
-      // The SDK reads these synchronously on mount so menu shortcut labels
-      // are correct from the first paint; live changes flow via
-      // `aura.keymap.changed` postMessage from the shell.
-      try {
-        const keymapState = await readShellKeymapState();
-        const appActions  = keymapRegistry.list().filter((a) =>
-          a.id.startsWith(`app.${instance.appId}.`) || a.scope !== 'app',
-        );
-        const bindings    = resolveBindings(appActions, instance.appId, keymapState);
-        metaParts.push(`<meta name="aura-keymap-actions" content="${escAttr(JSON.stringify(appActions))}">`);
-        metaParts.push(`<meta name="aura-keymap-bindings" content="${escAttr(JSON.stringify(bindings))}">`);
-      } catch (err) {
-        console.warn('[proxy] could not inject keymap meta:', (err as Error).message);
+      if (cfg.injectMeta) {
+        const themeSel      = await readShellThemeSelection().catch(() => null);
+        const themeIdDark   = themeSel?.themeIdDark  ?? ThemeManager.DEFAULT_THEME_ID_DARK;
+        const themeIdLight  = themeSel?.themeIdLight ?? ThemeManager.DEFAULT_THEME_ID_LIGHT;
+        const colorMode     = themeSel?.colorMode    ?? ThemeManager.DEFAULT_COLOR_MODE;
+        const { theme: activeTheme, resolvedMode } = ThemeManager.resolveActiveTheme(themeIdLight, themeIdDark, colorMode);
+        const framework     = activeTheme.framework;
+
+        metaParts.push(`<meta name="aura-app-base-path" content="${escAttr(appBasePath)}">`);
+        metaParts.push(`<meta name="aura-design-framework" content="${escAttr(framework.id)}">`);
+        metaParts.push(`<meta name="aura-design-framework-version" content="${escAttr(framework.version)}">`);
+        metaParts.push(`<meta name="aura-theme-strategy" content="${escAttr(themeStrategy)}">`);
+        metaParts.push(`<meta name="aura-color-mode" content="${escAttr(colorMode)}">`);
+        metaParts.push(`<meta name="aura-resolved-mode" content="${escAttr(resolvedMode)}">`);
+
+        // Activity id is the OS-level handle the SDK uses to call
+        // /api/activities/<id>/navigate and /back. The proxy already sets
+        // X-Aura-Activity-Id on the upstream request, but the browser SDK
+        // needs a synchronous way to read it — meta tag is the established
+        // pattern here (same as app-id / instance-id above).
+        if (activityId) {
+          metaParts.push(`<meta name="aura-activity-id" content="${escAttr(activityId)}">`);
+          // History + breadcrumb snapshot — the SDK reads these synchronously
+          // so apps that opted out of the OS chrome (`breadcrumb: 'off'`) can
+          // render their own trail without a round-trip on mount.
+          try {
+            const activity = mgr.getActivity(activityId) as {
+              history?: Array<{ path: string; title?: string }>;
+              breadcrumb?: 'os' | 'off';
+            } | undefined;
+            const history = activity?.history ?? [];
+            const breadcrumb = activity?.breadcrumb ?? 'os';
+            metaParts.push(`<meta name="aura-activity-history" content="${escAttr(JSON.stringify(history))}">`);
+            metaParts.push(`<meta name="aura-activity-breadcrumb" content="${escAttr(breadcrumb)}">`);
+          } catch { /* AppManager may be mid-restart; iframe will refetch next load */ }
+        }
+        // themed + inherit both see the theme ids; override sees only mode.
+        if (themeStrategy !== 'override') {
+          metaParts.push(`<meta name="aura-theme-id" content="${escAttr(activeTheme.id)}">`);
+          metaParts.push(`<meta name="aura-theme-id-dark" content="${escAttr(themeIdDark)}">`);
+          metaParts.push(`<meta name="aura-theme-id-light" content="${escAttr(themeIdLight)}">`);
+        }
+
+        // Keymap snapshot for `osClient.keymap.getBinding()`. Two meta tags:
+        //   • aura-keymap-actions  — JSON array of every action this app
+        //     declared (manifest) plus OS-scope actions the app can reference
+        //     (e.g. `aura.launcher.toggle` for menu hints).
+        //   • aura-keymap-bindings — JSON map of actionId → currently-bound
+        //     combo (defaults overridden by the user's KV overlay).
+        // The SDK reads these synchronously on mount so menu shortcut labels
+        // are correct from the first paint; live changes flow via
+        // `aura.keymap.changed` postMessage from the shell.
+        try {
+          const keymapState = await readShellKeymapState();
+          const appActions  = keymapRegistry.list().filter((a) =>
+            a.id.startsWith(`app.${instance.appId}.`) || a.scope !== 'app',
+          );
+          const bindings    = resolveBindings(appActions, instance.appId, keymapState);
+          metaParts.push(`<meta name="aura-keymap-actions" content="${escAttr(JSON.stringify(appActions))}">`);
+          metaParts.push(`<meta name="aura-keymap-bindings" content="${escAttr(JSON.stringify(bindings))}">`);
+        } catch (err) {
+          console.warn('[proxy] could not inject keymap meta:', (err as Error).message);
+        }
       }
 
       // Auto-inject /api/os/theme.css for inherit strategy. Skip if the app
       // already declared its own link (manual + auto both is harmless; only
       // skip if the manual one is present to keep the doc smaller).
+      // The link sits behind cfg.injectMeta so a raw app that ships its own
+      // stylesheet can opt out of the OS palette injection.
       const headFragments: string[] = [...metaParts];
-      if (themeStrategy === 'inherit' &&
+      if (cfg.injectMeta && themeStrategy === 'inherit' &&
           !/<link\b[^>]*href=["']\/api\/os\/theme\.css/i.test(rewritten)) {
         headFragments.push('<link rel="stylesheet" href="/api/os/theme.css">');
       }
@@ -344,13 +369,15 @@ export default {};
       // separate <script> (not a JSON blob in a data-attribute) means it's
       // assigned synchronously at HTML-parse time, before any of the app's
       // own <script>s execute.
-      headFragments.push(
-        `<script>(function(){` +
-          `window.AURA_APP_BASE_PATH=${JSON.stringify(appBasePath)};` +
-          `window.AURA_APP_ID=${JSON.stringify(instance.appId)};` +
-          `window.AURA_INSTANCE_ID=${JSON.stringify(instance.instanceId)};` +
-        `})();</script>`,
-      );
+      if (cfg.injectIdentityScript) {
+        headFragments.push(
+          `<script>(function(){` +
+            `window.AURA_APP_BASE_PATH=${JSON.stringify(appBasePath)};` +
+            `window.AURA_APP_ID=${JSON.stringify(instance.appId)};` +
+            `window.AURA_INSTANCE_ID=${JSON.stringify(instance.instanceId)};` +
+          `})();</script>`,
+        );
+      }
       const idMeta = headFragments.join('');
       rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${idMeta}`);
 
@@ -358,8 +385,11 @@ export default {};
       // and uncaught errors flow up to the shell via postMessage. The shell's
       // console-bridge (OSLayout) consumes these and re-broadcasts to the
       // Console app (or anything else listening for `aura.console`).
+      // Gated by cfg.injectConsoleRelay — raw apps can opt out, e.g. when
+      // they ship their own observability and don't want a duplicate stream.
       const appIdJs = JSON.stringify(instance.appId);
-      const consoleRelay = `<script>(function(){try{
+      if (cfg.injectConsoleRelay) {
+        const consoleRelay = `<script>(function(){try{
 var P=window.parent;if(!P||P===window)return;
 var SRC=${appIdJs};
 var LVL=['log','info','warn','error','debug'];
@@ -381,8 +411,9 @@ var X=window.XMLHttpRequest;if(X){var oO=X.prototype.open,oS=X.prototype.send;X.
 // can proceed; the shell has a hard timeout regardless.
 window.addEventListener('message',function(ev){if(!ev.data||ev.data.type!=='aura.shutdown')return;shuttingDown=true;try{openES.forEach(function(es){try{es.close();}catch(_){}});openWS.forEach(function(ws){try{ws.close(1000,'app-shutdown');}catch(_){}});openES.clear();openWS.clear();}catch(_){}try{P.postMessage({type:'aura.shutdown.done',source:SRC},'*');}catch(_){}});
 }catch(_){}})();</script>`;
-      // Place the relay right after <head ...> so it captures from frame 0.
-      rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${consoleRelay}`);
+        // Place the relay right after <head ...> so it captures from frame 0.
+        rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${consoleRelay}`);
+      }
 
       // Passive keystroke forwarder. The shell broadcasts an `aura.key.claim`
       // postMessage listing the combos the OS wants to intercept (Phase 2 —
@@ -399,7 +430,10 @@ window.addEventListener('message',function(ev){if(!ev.data||ev.data.type!=='aura
       // Tracks side-specific modifier state (LShift/RShift/etc.) so the
       // forwarded combo can disambiguate `RShift+Enter` from `Shift+Enter`.
       // Same shape as the shell-side dispatcher's logic.
-      const keyForwarder = `<script>(function(){try{
+      // Gated by cfg.injectKeyForwarder — raw apps that don't participate in
+      // the OS keymap can skip this script (saves ~3 KB per iframe load).
+      if (cfg.injectKeyForwarder) {
+        const keyForwarder = `<script>(function(){try{
 var P=window.parent;if(!P||P===window)return;
 var SRC=${appIdJs};
 var claims=new Set();
@@ -470,7 +504,8 @@ window.addEventListener('keyup',function(e){
 },{capture:true});
 window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod.sr=mod.ml=mod.mr=0;});
 }catch(_){}})();</script>`;
-      rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${keyForwarder}`);
+        rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${keyForwarder}`);
+      }
 
       const outHeaders = new Headers(upstream.headers);
       outHeaders.delete('content-encoding');
@@ -482,8 +517,11 @@ window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod
     // Catches patterns like `import "/@fs/..."`, `import("/node_modules/.vite/...")`,
     // and bare quoted strings referencing /@vite/, /@id/, /@fs/, /node_modules/.
     // Without this, the Vite HMR client's internal imports escape to the shell origin.
+    // Only fires when the manifest opts in to URL rewriting (cfg.rewriteHtml !== 'none')
+    // — raw apps that don't run Vite don't emit these patterns and don't need the
+    // body buffered/rewritten on every JS module fetch.
     const isJs = /\b(javascript|typescript|ecmascript)\b/.test(contentType);
-    if (isJs) {
+    if (isJs && cfg.rewriteHtml !== 'none') {
       const js = await upstream.text();
       const rewritten = js.replace(
         /(["'`])(\/(?:@fs|@vite|@id|node_modules)\/[^"'`\s]*)\1/g,

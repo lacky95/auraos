@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
+import { lifecyclePath } from '../types/manifest.js';
 import type { SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
@@ -42,6 +43,13 @@ interface SpawnedApp {
   process: ChildProcess;
   port: number;
   appId: string;
+  /**
+   * Cached manifest snapshot used by lifecycle/health URL building. Stored
+   * once at spawn so subsequent calls (`callLifecycle`, the reconciler probe)
+   * don't have to re-fetch from the registry. Currently only the proxy.preservePrefix
+   * flag matters; treated read-only after spawn.
+   */
+  manifest: AppManifest;
 }
 
 export class ProotRunner implements SandboxRunner {
@@ -163,10 +171,10 @@ export class ProotRunner implements SandboxRunner {
     child.stdout?.on('data', (d) => process.stdout.write(`[${instanceId}] ${d}`));
     child.stderr?.on('data', (d) => process.stderr.write(`[${instanceId}] ${d}`));
 
-    this.processes.set(instanceId, { process: child, port, appId });
+    this.processes.set(instanceId, { process: child, port, appId, manifest });
 
     try {
-      await this.waitHealthy(instanceId, appId, port);
+      await this.waitHealthy(instanceId, appId, port, manifest);
     } catch (err) {
       // Either timeout or identity mismatch — clean up the partial spawn so we
       // don't leak an orphan process or a stale instance entry. Caller is
@@ -179,16 +187,28 @@ export class ProotRunner implements SandboxRunner {
   }
 
   /**
-   * Decide what to actually exec to start the app's astro server.
-   *   • App ships `entrypoint.sh` (or whatever `manifest.entrypoint` points
-   *     at): run it directly. This preserves any app-specific startup logic.
-   *   • App doesn't ship one: bash -c into the synthesised default, which
-   *     mirrors the old per-app entrypoint.sh and only differs in $APP_ID
-   *     being interpolated at runtime.
+   * Decide what to actually exec to start the app's server.
+   *   • Astro runtime (default): app ships `entrypoint.sh` → run it directly;
+   *     no entrypoint file → fall back to the synthesised astro-dev command.
+   *   • Raw runtime: an explicit `manifest.entrypoint` file is REQUIRED. The
+   *     synthesised astro fallback is intentionally not used — a raw app
+   *     that ships nothing has no defensible default to spawn. Throw with a
+   *     clear message so the manifest error surfaces at spawn time, not in
+   *     the form of a hung health check.
    */
   private resolveEntrypoint(appDir: string, manifest: AppManifest): string[] {
     const entrypointPath = join(appDir, manifest.entrypoint);
-    if (existsSync(entrypointPath)) return ['bash', entrypointPath];
+    const entrypointExists = existsSync(entrypointPath);
+    if (manifest.runtime === 'raw') {
+      if (!entrypointExists) {
+        throw new Error(
+          `[ProotRunner] app '${manifest.id}' has runtime: 'raw' but no entrypoint file at ${entrypointPath}. ` +
+          `Raw apps must ship an executable entrypoint that binds the app to $APP_PORT.`,
+        );
+      }
+      return ['bash', entrypointPath];
+    }
+    if (entrypointExists) return ['bash', entrypointPath];
     return ['bash', '-c', SYNTHESISED_ENTRYPOINT];
   }
 
@@ -271,12 +291,13 @@ export class ProotRunner implements SandboxRunner {
    * "another app squatting our port" failure mode that caused the wrong-
    * content bug — a bare 200 is no longer enough.
    */
-  private async waitHealthy(instanceId: string, appId: string, port: number): Promise<void> {
+  private async waitHealthy(instanceId: string, appId: string, port: number, manifest: AppManifest): Promise<void> {
     const deadline = Date.now() + HEALTH_CHECK_TIMEOUT_MS;
+    const healthUrl = `http://localhost:${port}${lifecyclePath(manifest, instanceId, 'health')}`;
     let lastBody: string | null = null;
     while (Date.now() < deadline) {
       try {
-        const res = await fetch(`http://localhost:${port}/api/lifecycle/health`, { signal: AbortSignal.timeout(1000) });
+        const res = await fetch(healthUrl, { signal: AbortSignal.timeout(1000) });
         if (res.ok) {
           const text = await res.text();
           lastBody = text;
@@ -306,7 +327,7 @@ export class ProotRunner implements SandboxRunner {
   async callLifecycle(instanceId: string, hook: string): Promise<void> {
     const spawned = this.processes.get(instanceId);
     if (!spawned) throw new Error(`[ProotRunner] ${instanceId} is not running`);
-    const url = `http://localhost:${spawned.port}/api/lifecycle/${hook}`;
+    const url = `http://localhost:${spawned.port}${lifecyclePath(spawned.manifest, instanceId, hook)}`;
     const res = await fetch(url, {
       method: 'POST',
       signal: AbortSignal.timeout(LIFECYCLE_TIMEOUT_MS),
@@ -330,7 +351,7 @@ export class ProotRunner implements SandboxRunner {
     const spawned = this.processes.get(instanceId);
     if (!spawned) return null;
     try {
-      const res = await fetch(`http://localhost:${spawned.port}/api/lifecycle/${hook}`, {
+      const res = await fetch(`http://localhost:${spawned.port}${lifecyclePath(spawned.manifest, instanceId, hook)}`, {
         method: 'POST',
         headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
         body: body !== undefined ? JSON.stringify(body) : undefined,

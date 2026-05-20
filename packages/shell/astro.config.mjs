@@ -266,6 +266,11 @@ export default defineConfig({
   output: 'server',
   adapter: node({ mode: 'standalone' }),
   integrations: [react()],
+  // Astro's floating dev toolbar (audits / settings / x-ray) sits in the
+  // bottom-right of every page in dev mode and gets in the way of OS
+  // chrome — covers the launcher button, intercepts clicks on the dock
+  // edge. Apps all opt out of it; the shell should too.
+  devToolbar: { enabled: false },
   security: {
     checkOrigin: false,
   },

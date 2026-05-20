@@ -128,12 +128,24 @@ const { apps, enabledMap = {} } = Astro.props;
   }
   /* Window-selection mode telegraph. `data-mode="active"` is flipped from
      `pages/index.astro`'s `onModeChange` hook whenever the keyDispatcher
-     enters Nav mode — same visual as the focus state so the user reads
-     "this is the modal anchor while you arrow through windows". */
+     enters Nav mode. Distinct from the plain focus state (filled
+     background + static glow): in active mode the chip is UNFILLED
+     (transparent background, primary-toned glyph) but has a pulsing
+     outer glow, so it reads as "the mode is live elsewhere — focus is
+     on a window, not on the chip itself".
+
+     Active rule comes after `:focus`/`:focus-visible` in source order so
+     it wins the cascade when the chip is both focused AND active (which
+     is the normal case — Ctrl+Alt+Space focuses the chip, then Enter
+     enters the mode without moving focus). */
   .nav-entry-btn[data-mode="active"] {
-    color: var(--aura-color-bg);
-    background: var(--aura-color-primary);
-    box-shadow: inset 0 0 0 2px var(--aura-color-primary), 0 0 12px var(--aura-color-primary);
+    color: var(--aura-color-primary);
+    background: transparent;
+    animation: aura-chip-active-pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes aura-chip-active-pulse {
+    0%, 100% { box-shadow: 0 0  4px var(--aura-color-primary); }
+    50%      { box-shadow: 0 0 18px var(--aura-color-primary); }
   }
   .nav-entry-icon { line-height: 1; }
 
@@ -360,12 +372,18 @@ const { apps, enabledMap = {} } = Astro.props;
     if (e.key !== 'Enter' && e.key !== ' ') return;
     // Bail on modifier combos. The chip's "press to enter window-select
     // mode" affordance is plain Enter or plain Space only — any combo
-    // like Ctrl+Alt+Space is an OS shortcut owned by the dispatcher
-    // (`aura.launcher.toggle`). Without this check, a Ctrl+Alt+Space
-    // pressed while the chip is focused would fire BOTH the dispatcher
-    // (which flips nav→app) AND this handler (which flips app→nav) on
-    // the same keystroke, leaving the user stuck in nav mode.
+    // like Ctrl+Alt+Space is an OS shortcut owned by the dispatcher.
     if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+    // Bail if the OS dispatcher (capture phase, in OSLayout.astro) already
+    // handled this keystroke — it calls preventDefault when it fires. The
+    // canonical scenario: user is in nav mode, chip still has focus, user
+    // presses Enter. The dispatcher's `aura.nav.enter` runs first
+    // (focuses the highlighted iframe + flips to app mode); without this
+    // check, this bubble-phase handler would then dispatch the toggle
+    // event, which would flip back into nav mode and reset the highlight
+    // to the first window. End result before the fix: Enter required two
+    // presses, and the first one always re-anchored the selection.
+    if (e.defaultPrevented) return;
     e.preventDefault();
     e.stopPropagation();
     document.dispatchEvent(new CustomEvent('aura:window-select.toggle'));

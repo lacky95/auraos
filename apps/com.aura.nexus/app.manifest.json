@@ -1,0 +1,19 @@
+{
+  "id": "com.aura.nexus",
+  "name": "Nexus",
+  "version": "0.1.0",
+  "description": "AuraOS app store + package manager. Browse, install, update, publish.",
+  "icon": "NEX",
+  "category": "system",
+  "instanceMode": "single",
+  "activityMode": "none",
+  "sandbox": "container",
+  "tools": ["bash", "node", "git"],
+  "permissions": ["network.internet", "storage.read", "storage.write"],
+  "dataProvider": {
+    "authority": "com.aura.nexus",
+    "providers": [
+      { "path": "/api/data/installed" }
+    ]
+  }
+}

@@ -1,0 +1,125 @@
+---
+import Layout from '../layouts/Layout.astro';
+const initialRef = new URL(Astro.request.url).searchParams.get('ref') ?? '';
+---
+<Layout title="Install" active="install">
+  <section class="nexus-section">
+    <h2>// Install an app</h2>
+    <p style="color:var(--aura-color-text-dim);font-size:0.8rem">
+      Paste a Git URL, OCI ref, index id, or local path. Examples:
+      <code style="color:var(--aura-color-primary)">github.com/user/aura-foo</code>,
+      <code style="color:var(--aura-color-primary)">ghcr.io/user/aura-foo:1.0.0</code>,
+      <code style="color:var(--aura-color-primary)">com.example.foo</code>,
+      <code style="color:var(--aura-color-primary)">/workspace/apps/com.aura.example</code>.
+    </p>
+    <div class="nexus-form">
+      <label for="ref-input">Install ref</label>
+      <div class="nexus-form-row">
+        <input id="ref-input" type="text" placeholder="github.com/user/aura-foo#v1.0.0" value={initialRef} />
+        <button id="preview-btn">PREVIEW</button>
+        <button id="install-btn">INSTALL</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="nexus-section">
+    <h2>// Output</h2>
+    <pre class="nexus-log" id="log">(no output yet)</pre>
+  </section>
+
+  <script is:inline>
+    const input    = document.getElementById('ref-input');
+    const previewB = document.getElementById('preview-btn');
+    const installB = document.getElementById('install-btn');
+    const log      = document.getElementById('log');
+
+    function setLog(text) { log.textContent = text; }
+    function appendLog(line) { log.textContent += '\n' + line; }
+
+    function renderDiff(diff) {
+      const lines = [];
+      const v = diff.versionFrom
+        ? `${diff.versionFrom} → ${diff.versionTo}`
+        : diff.versionTo;
+      lines.push(`Install ${diff.appId} (${v})`);
+      lines.push('');
+      if (diff.toolsAdded?.length)        lines.push('+ tools:        ' + diff.toolsAdded.join(', '));
+      if (diff.toolsRemoved?.length)      lines.push('- tools:        ' + diff.toolsRemoved.join(', '));
+      if (diff.permissionsAdded?.length)  lines.push('+ permissions:  ' + diff.permissionsAdded.join(', '));
+      if (diff.permissionsRemoved?.length)lines.push('- permissions:  ' + diff.permissionsRemoved.join(', '));
+      if (diff.dataProviderAdded)         lines.push('+ data provider');
+      if (diff.dataProviderRemoved)       lines.push('- data provider');
+      if (diff.intentFiltersAdded?.length) {
+        lines.push('+ intent filters:');
+        for (const f of diff.intentFiltersAdded) lines.push('    ' + f);
+      }
+      return lines.join('\n');
+    }
+
+    previewB.addEventListener('click', async () => {
+      const ref = input.value.trim();
+      if (!ref) { setLog('paste a ref first'); return; }
+      setLog('resolving...');
+      try {
+        const res  = await fetch('/api/nexus/preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ref }),
+        });
+        const json = await res.json();
+        if (!json.ok) { setLog('ERROR: ' + (json.error || res.status)); return; }
+        const lines = [
+          `${json.manifest.id}  v${json.manifest.version}`,
+          `  source:  ${json.resolved.source}`,
+          `  address: ${json.resolved.address}`,
+        ];
+        if (json.resolved.digest) lines.push(`  digest:  ${json.resolved.digest.slice(0, 16)}`);
+        lines.push('');
+        if (json.diff) lines.push(renderDiff(json.diff));
+        setLog(lines.join('\n'));
+      } catch (err) {
+        setLog('ERROR: ' + (err && err.message ? err.message : err));
+      }
+    });
+
+    installB.addEventListener('click', async () => {
+      const ref = input.value.trim();
+      if (!ref) { setLog('paste a ref first'); return; }
+      installB.disabled = true;
+      installB.textContent = '...';
+      setLog('installing ' + ref + '...');
+      try {
+        // First call: no autoApprove. May return needsApproval + diff.
+        let res = await fetch('/api/nexus/install', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ref, autoApprove: false }),
+        });
+        let json = await res.json();
+        if (json.needsApproval && json.diff) {
+          appendLog('\n--- PERMISSION REVIEW ---\n' + renderDiff(json.diff));
+          if (!confirm('Approve and install?\n\n' + renderDiff(json.diff))) {
+            setLog('install cancelled');
+            return;
+          }
+          setLog('approved; installing...');
+          res = await fetch('/api/nexus/install', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ref, autoApprove: true }),
+          });
+          json = await res.json();
+        }
+        if (!json.ok) { appendLog('\nERROR: ' + (json.error || res.status)); return; }
+        appendLog('\ninstalled ' + json.record.id + ' v' + json.record.version);
+        appendLog('  source:  ' + json.record.source);
+        if (json.record.digest) appendLog('  digest:  ' + json.record.digest.slice(0, 16));
+      } catch (err) {
+        appendLog('\nERROR: ' + (err && err.message ? err.message : err));
+      } finally {
+        installB.disabled = false;
+        installB.textContent = 'INSTALL';
+      }
+    });
+  </script>
+</Layout>

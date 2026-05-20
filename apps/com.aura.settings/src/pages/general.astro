@@ -89,5 +89,15 @@ const state = { clockFormat, locale, colorMode };
       }
     });
   </script>
+
+  <!-- Arrow-walk the form controls + ColorModePicker tabs. The SDK's
+       installGridNav bails on `<input>`/`<select>` `e.target` so arrows
+       inside the locale input move the caret rather than jumping focus. -->
+  <script>
+    import { OsClient } from '@aura/app-sdk';
+    new OsClient().nav.installGridNav({
+      selector: '#clock-format, #locale, [role="tab"]',
+    });
+  </script>
 </body>
 </html>

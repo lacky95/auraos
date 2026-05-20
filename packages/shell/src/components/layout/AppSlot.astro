@@ -20,6 +20,7 @@ const isLoading = view.lifecycleState !== 'resumed';
       {view.minimizable && (
         <button class="slot-btn" data-action="minimize" title="Minimize">_</button>
       )}
+      <button class="slot-btn" data-action="refresh" title="Reload window">↻</button>
       <button class="slot-btn" data-action="maximize" title="Focus mode (maximize)">[ ]</button>
       <button class="slot-btn danger" data-action="close" title="Close">✕</button>
     </div>

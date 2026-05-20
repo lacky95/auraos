@@ -1,0 +1,101 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { shellGet } from '../lib/shellClient.ts';
+
+interface InstalledItem {
+  manifest: { id: string; name: string; version: string };
+  record: {
+    id: string; version: string;
+    source: 'oci' | 'git' | 'index' | 'local';
+    ref: string; digest: string; channel: string | null;
+    installedAt: string; updatedAt: string;
+  };
+  isNexusInstalled: boolean;
+}
+
+let items: InstalledItem[] = [];
+let error: string | null = null;
+try {
+  items = await shellGet<InstalledItem[]>('/api/nexus/installed');
+} catch (err) {
+  error = (err as Error).message;
+}
+---
+<Layout title="Installed" active="installed">
+  {error && <div class="nexus-empty">Error: {error}</div>}
+  {!error && items.length === 0 && (
+    <div class="nexus-empty">No apps installed.</div>
+  )}
+  {items.map((it) => (
+    <div class="nexus-card" data-app-id={it.manifest.id}>
+      <div class="nexus-card-head">
+        <div>
+          <div class="nexus-card-title">
+            {it.manifest.name}
+            <span style="color:var(--aura-color-text-dim);font-weight:400"> · {it.manifest.id} · v{it.manifest.version}</span>
+            <span class="badge" style="margin-left:8px">{it.record.source}</span>
+            {!it.isNexusInstalled && <span class="badge" style="margin-left:4px">monorepo</span>}
+            {it.record.channel && <span class="badge primary" style="margin-left:4px">{it.record.channel}</span>}
+          </div>
+          <div class="nexus-card-meta">
+            {it.record.ref}
+            {it.record.digest && <span> · digest {it.record.digest.slice(0, 16)}</span>}
+            {it.record.installedAt && <span> · installed {it.record.installedAt.slice(0, 10)}</span>}
+          </div>
+        </div>
+        <div class="nexus-card-actions">
+          {it.record.source !== 'local' && (
+            <button class="update-btn" data-app-id={it.manifest.id}>UPDATE</button>
+          )}
+          <button class="uninstall-btn" data-app-id={it.manifest.id}>UNINSTALL</button>
+        </div>
+      </div>
+    </div>
+  ))}
+
+  <script is:inline>
+    document.querySelectorAll('.uninstall-btn').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.getAttribute('data-app-id');
+        if (!confirm(`Uninstall ${id}? (data preserved at /data/apps/${id}/)`)) return;
+        btn.disabled = true;
+        btn.textContent = '...';
+        try {
+          const res = await fetch(`/api/proxy/com.aura.shell/api/nexus/uninstall/${encodeURIComponent(id)}`,
+            { method: 'POST' });
+          // Fallback to same-origin if proxy route doesn't exist (we run in iframe).
+          const r2 = res.ok ? res : await fetch(`/api/nexus/uninstall/${encodeURIComponent(id)}`, { method: 'POST' });
+          if (!r2.ok) throw new Error('uninstall failed');
+          location.reload();
+        } catch (err) {
+          alert('Uninstall failed: ' + (err && err.message ? err.message : err));
+          btn.disabled = false;
+          btn.textContent = 'UNINSTALL';
+        }
+      });
+    });
+    document.querySelectorAll('.update-btn').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.getAttribute('data-app-id');
+        btn.disabled = true;
+        btn.textContent = '...';
+        try {
+          const res = await fetch(`/api/nexus/update/${encodeURIComponent(id)}`,
+            { method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ autoApprove: false }) });
+          const j = await res.json();
+          if (j.needsApproval) {
+            alert('This update changes permissions — re-run with autoApprove via the Install tab to review.');
+          } else if (j.ok) {
+            location.reload();
+          } else {
+            alert('Update failed: ' + (j.error || '<?>'));
+          }
+        } finally {
+          btn.disabled = false;
+          btn.textContent = 'UPDATE';
+        }
+      });
+    });
+  </script>
+</Layout>

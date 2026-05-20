@@ -188,5 +188,13 @@ const lightThemes = THEMES.filter(t => t.tone === 'light');
       if (ev.data.themeIdDark && ev.data.themeIdLight && ev.data.colorMode) paintStatus(ev.data);
     });
   </script>
+
+  <!-- Arrow-walk the theme cards; Enter activates a card. Spatial picker
+       crosses the dark / light section boundary naturally because the two
+       rows live in different y-bands. -->
+  <script>
+    import { OsClient } from '@aura/app-sdk';
+    new OsClient().nav.installGridNav({ selector: '.theme-card[data-theme-id]' });
+  </script>
 </body>
 </html>

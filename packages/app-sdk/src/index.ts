@@ -13,6 +13,8 @@ export type {
 export type {
   BackEvent,
   BackHandler,
+  InstallGridNavOptions,
+  GridNavHandle,
 } from './nav.js';
 export type { NavigateOptions } from './activity.js';
 

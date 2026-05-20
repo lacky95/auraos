@@ -1,0 +1,97 @@
+---
+import Layout from '../layouts/Layout.astro';
+---
+<Layout title="Publish" active="publish">
+  <section class="nexus-section">
+    <h2>// Publish an app</h2>
+    <p style="color:var(--aura-color-text-dim);font-size:0.8rem">
+      v1 = Git publish working end-to-end; OCI publish needs <code>oras</code>
+      on PATH (install via <code>aura cap install oras</code>). The publisher
+      runs in the shell with your normal git credentials — no Nexus token
+      handling in v1.
+    </p>
+    <div class="nexus-form">
+      <label for="path-input">Local app path</label>
+      <input id="path-input" type="text" placeholder="/workspace/apps/com.example.foo" />
+
+      <label for="source-select">Source</label>
+      <select id="source-select">
+        <option value="git">git (v1 default)</option>
+        <option value="oci">oci (needs `oras`)</option>
+      </select>
+
+      <label for="repo-input">Git repo (overrides manifest.publish.repo)</label>
+      <input id="repo-input" type="text" placeholder="github.com/user/aura-foo" />
+
+      <label for="registry-input">OCI registry (overrides manifest.publish.registry)</label>
+      <input id="registry-input" type="text" placeholder="ghcr.io/user/aura-foo" />
+
+      <div style="display:flex;gap:8px">
+        <div style="flex:1">
+          <label for="tag-input">Tag (defaults to v&lt;manifest.version&gt;)</label>
+          <input id="tag-input" type="text" placeholder="v1.0.0" />
+        </div>
+        <div style="flex:1">
+          <label for="channel-input">Channel (extra tag, e.g. stable)</label>
+          <input id="channel-input" type="text" placeholder="stable" />
+        </div>
+        <div style="flex:1">
+          <label for="branch-input">Branch (git only)</label>
+          <input id="branch-input" type="text" placeholder="main" />
+        </div>
+      </div>
+
+      <div>
+        <button id="publish-btn">PUBLISH</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="nexus-section">
+    <h2>// Output</h2>
+    <pre class="nexus-log" id="log">(no output yet)</pre>
+  </section>
+
+  <script is:inline>
+    const log       = document.getElementById('log');
+    const publishB  = document.getElementById('publish-btn');
+
+    function val(id) { return (document.getElementById(id).value || '').trim() || undefined; }
+
+    publishB.addEventListener('click', async () => {
+      const path = val('path-input');
+      if (!path) { log.textContent = 'paste a local app path first'; return; }
+      const body = {
+        path,
+        source:    val('source-select') || 'git',
+        repo:      val('repo-input'),
+        registry:  val('registry-input'),
+        tag:       val('tag-input'),
+        channel:   val('channel-input'),
+        branch:    val('branch-input'),
+      };
+      publishB.disabled = true;
+      publishB.textContent = '...';
+      log.textContent = 'publishing ' + body.source + ' for ' + path + '...';
+      try {
+        const res = await fetch('/api/nexus/publish', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const json = await res.json();
+        if (!json.ok) { log.textContent += '\nERROR: ' + (json.error || res.status); return; }
+        for (const m of (json.messages || [])) log.textContent += '\n  ' + m;
+        log.textContent += '\n\nPUBLISHED ' + (json.result?.ref || '<?>');
+        if (json.result?.installCmd) {
+          log.textContent += '\n\nInstall elsewhere with:\n  ' + json.result.installCmd;
+        }
+      } catch (err) {
+        log.textContent += '\nERROR: ' + (err && err.message ? err.message : err);
+      } finally {
+        publishB.disabled = false;
+        publishB.textContent = 'PUBLISH';
+      }
+    });
+  </script>
+</Layout>

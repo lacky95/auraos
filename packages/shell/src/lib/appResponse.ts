@@ -1,4 +1,4 @@
-import { getAppManager } from '@aura/core';
+import { getAppManager, lifecyclePath } from '@aura/core';
 import type { AppManifest, AppInstance } from '@aura/core';
 
 export interface AppHealth {
@@ -46,10 +46,19 @@ async function probeHealth(instance: AppInstance): Promise<AppHealth> {
     const start = Date.now();
     // For container-sandbox instances the host is the docker container name
     // on the shared network, not 127.0.0.1. getUpstreamUrl encapsulates that.
-    const up = getAppManager().getUpstreamUrl?.(instance.instanceId);
+    const mgr = getAppManager();
+    const up = mgr.getUpstreamUrl?.(instance.instanceId);
     const upHost = up?.host ?? 'localhost';
+    // Raw apps with `proxy.preservePrefix` mount their lifecycle routes under
+    // the proxy prefix (Next.js basePath etc.). Use the manifest-aware
+    // `lifecyclePath` helper so the probe URL matches the runner's spawn
+    // probe instead of 404ing for the entire app's lifetime.
+    const manifest = mgr.getManifest(instance.appId);
+    const path = manifest
+      ? lifecyclePath(manifest, instance.instanceId, 'health')
+      : '/api/lifecycle/health';
     try {
-      const res = await fetch(`http://${upHost}:${instance.port}/api/lifecycle/health`, {
+      const res = await fetch(`http://${upHost}:${instance.port}${path}`, {
         signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
       });
       health.httpLatencyMs = Date.now() - start;
