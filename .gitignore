@@ -16,6 +16,9 @@ dist/
 # isn't accidentally ignored.
 /data/
 
+# Temp app scaffolds created by `aura dev new` (timestamp-suffixed staging dirs)
+apps/*.tmp.*/
+
 # editor / OS
 .DS_Store
 .vscode/
