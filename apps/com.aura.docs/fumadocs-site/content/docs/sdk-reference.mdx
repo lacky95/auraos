@@ -1,0 +1,324 @@
+---
+title: SDK Reference
+description: Every osClient.* method and loose @aura/app-sdk export, with copy-paste examples.
+---
+
+A flat, scannable reference for `@aura/app-sdk`. Mirrors the source —
+`packages/app-sdk/src/`. Each entry: signature, one-line purpose, a
+short example. Tags after the signature: **(B)** browser-only, **(S)**
+server-only, **(B+S)** both.
+
+For the conceptual model, read [Core Concepts](/docs/core-concepts).
+For the lifecycle factories in context, read [Develop an App](/docs/develop-an-app).
+
+## OsClient — top-level
+
+Instantiate once, in the browser (or server-side for the few async
+methods that take an URL):
+
+```ts
+import { OsClient } from '@aura/app-sdk';
+const os = new OsClient();
+```
+
+### Event bus
+
+| Method | Signature | Note |
+|---|---|---|
+| `subscribeOsEvents` | `(topics: string[], handler: (ev: {type:string} & T) => void) => () => void` | **(B)** SSE; auto-reconnect. |
+
+```ts
+const stop = os.subscribeOsEvents(['app:*'], (ev) => console.log(ev.type));
+// later: stop();
+```
+
+### Notifications + lifecycle
+
+| Method | Signature | Note |
+|---|---|---|
+| `sendNotification` | `(title: string, body?: string) => Promise<void>` | **(B+S)** Reads `APP_ID` from env on the server. |
+| `getState` | `() => Promise<string>` | **(B+S)** Returns `'creating' \| 'started' \| 'resumed' \| 'paused' \| 'stopped' \| 'destroyed' \| 'error'`. |
+
+### Intents
+
+| Method | Signature | Note |
+|---|---|---|
+| `startIntent` | `(intent: { action, category?, type?, uri?, extras? }) => Promise<{kind: 'started' \| 'disambiguation' \| 'noHandler', ...}>` | **(B+S)** OS picks the highest-scoring handler. |
+
+```ts
+const r = await os.startIntent({
+  action: 'aura.intent.action.VIEW',
+  type:   'application/pdf',
+  uri:    'file:///workspace/spec.pdf',
+});
+if (r.kind === 'noHandler') console.warn('no PDF viewer installed');
+```
+
+### Activity finish
+
+| Method | Signature | Note |
+|---|---|---|
+| `finish` | `() => Promise<void>` | **(B+S)** Close the calling activity; mirrors Android's `Activity.finish()`. Same as `osClient.nav.finish()`. |
+
+### Content providers
+
+Authority is the declaring app's id; resource is the path *after*
+`/api/data/<authority>/`. Permissions enforced by `PermissionManager`.
+
+| Method | Signature | Note |
+|---|---|---|
+| `queryProvider<T>` | `(authority: string, resource: string) => Promise<T>` | **(B+S)** GET. |
+| `writeProvider<T>` | `(authority: string, resource: string, body: unknown, method?: 'PUT' \| 'POST' \| 'PATCH' \| 'DELETE') => Promise<T>` | **(B+S)** Method defaults to PUT. |
+| `watchProvider` | `(authority: string, resource: string) => EventSource` | **(B)** SSE. Provider must serve `?watch=1`. |
+
+```ts
+const notes = await os.queryProvider('com.example.notes', 'list');
+await os.writeProvider('com.example.notes', 'list', { title: 'Hi' });
+const es   = os.watchProvider('com.example.notes', 'list');
+es.onmessage = (e) => console.log(JSON.parse(e.data));
+```
+
+### Theme — selection (slots + mode)
+
+| Method | Signature | Note |
+|---|---|---|
+| `getThemeSelection` | `() => Promise<{themeIdDark, themeIdLight, colorMode}>` | **(B+S)** |
+| `listThemes` | `() => Promise<ThemeSummary[]>` | **(B+S)** No palettes — lightweight inventory. |
+| `setOsThemeForTone` | `(tone: 'dark' \| 'light', themeId: string) => Promise<void>` | **(B+S)** Slots are independent. |
+| `getActiveThemeId` | `() => string \| null` | **(B)** Reads `<meta name="aura-theme-id">`. |
+| `getModePreference` | `() => Promise<'light' \| 'dark' \| 'auto'>` | **(B+S)** |
+| `getMode` | `() => Promise<'light' \| 'dark'>` | **(B+S)** Resolves `'auto'` via media query. |
+| `setMode` | `(mode: 'light' \| 'dark' \| 'auto') => Promise<void>` | **(B+S)** |
+
+### Theme — palette + framework
+
+| Method | Signature | Note |
+|---|---|---|
+| `getPalette` | `() => ColorPalette` | **(B)** Reads `var(--aura-color-*)` live. Most apps use CSS directly. |
+| `getDesignFramework` | `() => Promise<DesignFramework>` | **(B+S)** `{ id, name, source, version }`. |
+| `getTheme` | `() => Promise<OsTheme>` | **(B+S)** Full active theme: palette + tone + framework + tags. |
+| `getThemeStrategy` | `() => 'inherit' \| 'themed' \| 'override'` | **(B)** Reads `<meta name="aura-theme-strategy">`. |
+
+### Theme — subscriptions
+
+| Method | Signature | Note |
+|---|---|---|
+| `onThemeChange` | `(cb: (info) => void) => () => void` | **(B)** Fires on `aura.theme.changed` postMessage. |
+| `onModeChange` | `(cb: (info) => void) => () => void` | **(B)** Plus `prefers-color-scheme` bridge when mode === `'auto'`. |
+
+```ts
+const stop = os.onModeChange(({ resolvedMode }) => {
+  document.body.dataset.mode = resolvedMode;  // 'light' or 'dark'
+});
+```
+
+## osClient.keymap
+
+Declare actions in `manifest.keymapActions`; register handlers here.
+The SDK namespaces actions to `app.<appId>.<id>` automatically.
+
+| Method | Signature | Note |
+|---|---|---|
+| `on` | `(actionId: string, handler: (ctx: {actionId, combo}) => void) => () => void` | **(B)** One handler per action. |
+| `off` | `(actionId: string) => void` | **(B)** |
+| `getBinding` | `(actionId: string) => string \| null` | **(B)** Synchronous; reads meta tag. |
+| `onChange` | `(cb: (info: {actionId, oldCombo, newCombo}) => void) => () => void` | **(B)** Fires on remap. |
+
+```ts
+os.keymap.on('save', () => saveDocument());
+const combo = os.keymap.getBinding('save');         // "Ctrl+KeyS" — for menu label
+const stop  = os.keymap.onChange(({ actionId, newCombo }) => {
+  if (actionId === 'app.com.example.notes.save') menuLabel.textContent = newCombo ?? '';
+});
+```
+
+## osClient.nav
+
+### Back-key
+
+| Method | Signature | Note |
+|---|---|---|
+| `onBack` | `(handler: (e: BackEvent) => void) => () => void` | **(B)** Handlers stack; ANY `preventDefault()` consumes Back. |
+| `finish` | `() => Promise<void>` | **(B+S)** Alias for `osClient.finish()`. |
+
+```ts
+os.nav.onBack((e) => {
+  if (unsavedChanges()) {
+    e.preventDefault();   // tells OS we'll handle it
+    confirmDiscard();
+  }
+  // No preventDefault → OS falls through to in-activity history pop
+  //                     or "switch to Nav mode" as final fallback.
+});
+```
+
+### `installGridNav`
+
+Wires the user's basic-nav keys (`aura.nav.up/down/left/right`) to a
+list/grid of focusable elements in your page. Reads the user's current
+combo via `osClient.keymap.getBinding('aura.nav.up' …)` so remaps in
+Settings → Keyboard take effect on next load. Also auto-focuses the
+first element when the shell posts `aura.window.focus` (e.g. when the
+user enters this window from window-selection mode or launches it).
+
+```ts
+interface InstallGridNavOptions {
+  selector?:    string;                          // CSS selector
+  getElements?: () => HTMLElement[];             // OR dynamic resolver
+  pauseWhen?:   () => boolean;                   // skip when true (e.g. modal open)
+  onFocus?:     (el: HTMLElement) => void;
+}
+interface GridNavHandle {
+  focusFirst(): void;   // force-focus the first element
+  uninstall(): void;
+}
+
+os.nav.installGridNav({ selector: '.tile[data-section]' });
+```
+
+The helper bails inside `<input>`/`<textarea>`/`<select>`/
+`[contenteditable]`, so typing always wins. Backspace and modifier
+combos are never consumed.
+
+## osClient.system
+
+Programmatic OS actions. All **(B)**, all synchronous, all
+fire-and-forget.
+
+| Method | Signature | What it does |
+|---|---|---|
+| `openLauncher` | `() => void` | Open the app launcher overlay. |
+| `closeLauncher` | `() => void` | Close it. |
+| `toggleLauncher` | `() => void` | Toggle. |
+| `openProcessManager` | `() => void` | Open the Process Manager panel. |
+| `closeProcessManager` | `() => void` | Close it. |
+| `toggleProcessManager` | `() => void` | Toggle. |
+| `toggleNavMode` | `() => void` | Flip between App mode and Nav mode. |
+| `home` | `() => void` | Enter Nav mode + highlight the first window. |
+| `switchWorkspace` | `(slot: number) => void` | 1-based; out-of-range is normalised. |
+
+```ts
+os.system.openLauncher();
+os.system.switchWorkspace(2);
+```
+
+## osClient.activity
+
+In-place navigation within the current activity. The OS records a back
+stack the user pops with the OS Back key (or `osClient.nav.onBack`'s
+default fall-through).
+
+| Method | Signature | Note |
+|---|---|---|
+| `navigate` | `(path: string, opts?: { title?: string; pushHistory?: boolean }) => Promise<boolean>` | **(B+S)** Pushes previous path on the stack by default. |
+| `replace` | `(path: string, opts?: { title?: string }) => Promise<boolean>` | **(B+S)** Like `navigate` with `pushHistory: false`. |
+| `back` | `() => Promise<void>` | **(B+S)** Pop one step. |
+| `backTo` | `(index: number) => Promise<void>` | **(B+S)** Jump to position 0..n-1 in the stack. |
+| `setBreadcrumb` | `(mode: 'os' \| 'off') => Promise<void>` | **(B+S)** Hide OS breadcrumb when app draws its own. |
+| `getHistory` | `() => Array<{ path; title? }>` | **(B)** Reads meta tag; refreshed on every iframe load. |
+| `getActivityId` | `() => string \| null` | **(B+S)** From `APP_ACTIVITY_ID` env or proxy meta. |
+
+```ts
+// Settings drills down: index → /theme → /keyboard, OS Back pops back.
+await os.activity.navigate('/theme', { title: 'Settings · Theme' });
+await os.activity.navigate('/keyboard');
+await os.activity.back();   // → /theme
+```
+
+## Loose exports
+
+### Context (`packages/app-sdk/src/context.ts`)
+
+| Symbol | Signature | Note |
+|---|---|---|
+| `getAppContext` | `() => { appId, instanceId, appPort, osApiBase, dataDir, layerTag }` | **(S)** Reads `process.env` once at module load. |
+| `readIdentityHeaders` | `(req: Request) => { appId, instanceId, activityId }` | **(S)** Parses `X-Aura-*` request headers stamped by the proxy. |
+| `getAppBasePath` | `() => string` | **(B+S)** URL prefix the shell loads the iframe at, e.g. `/api/proxy/com.aura.docs-3`. Needed for SPA `basePath` config. |
+
+### Lifecycle (`packages/app-sdk/src/lifecycle.ts`)
+
+Factories that produce Astro `APIRoute`s. **(S)** server-only.
+
+| Symbol | Signature | Note |
+|---|---|---|
+| `createHealthEndpoint` | `() => APIRoute` | GET `/api/lifecycle/health` — returns `{ ok, appId, instanceId }`. |
+| `createLifecycleHandler` | `(hook: LifecycleHookName, impl?: () => void \| Promise<void>) => APIRoute` | Six hooks: `onCreate \| onStart \| onResume \| onPause \| onStop \| onDestroy`. |
+| `createActivityCreateHandler` | `(impl?: (req: { activityId, data? }) => { path?, title?, metadata? } \| Promise<…>) => APIRoute` | Activity create — returns the path the new view loads. |
+| `createActivityDestroyHandler` | `(impl?: (activityId: string) => void \| Promise<void>) => APIRoute` | Activity destroy. |
+
+Worked examples in [Develop an App](/docs/develop-an-app#lifecycle-hooks).
+
+### Astro integration (`packages/app-sdk/src/integration.mjs`)
+
+| Symbol | Behaviour |
+|---|---|
+| `auraAppIntegration(opts?)` | Stamps `X-Aura-App-Id` / `X-Aura-Instance-Id` response headers; injects `/api/lifecycle/health` (opt out: `{ injectHealth: false }`); sets Vite `allowedHosts: true`. Logs identity at server start. |
+| `auraIdentityIntegration()` | Back-compat alias = `auraAppIntegration({ injectHealth: false })`. |
+
+```js
+// astro.config.mjs
+import { auraAppIntegration } from '@aura/app-sdk/integration';
+export default defineConfig({
+  integrations: [auraAppIntegration()],
+});
+```
+
+### Proxy helpers (`packages/app-sdk/src/proxy.ts`)
+
+For apps that proxy upstream HTTP themselves (e.g. a content provider
+that forwards to a backend service). **(S)** server-only.
+
+| Symbol | Signature | Note |
+|---|---|---|
+| `proxyFetch` | `(upstreamUrl: string \| URL, req: Request, opts?: ProxyFetchOptions) => Promise<Response>` | Strips hop-by-hop + post-decompression headers; returns a sanitised Response. |
+| `proxyFetch.raw` | `(…) => Promise<{ upstream: Response; headers: Headers }>` | Escape hatch when you need to inspect/rewrite headers before returning. |
+| `sanitizeHeaders` | `(input: Headers) => Headers` | The standalone sanitiser. |
+
+```ts
+// src/pages/api/upstream/[...path].ts
+import { proxyFetch } from '@aura/app-sdk/proxy';
+import type { APIRoute } from 'astro';
+export const ALL: APIRoute = ({ request, params }) =>
+  proxyFetch(`http://localhost:8080/${params['path']}`, request);
+```
+
+### Next.js raw-runtime (`packages/app-sdk/src/runtime/next.ts`)
+
+Adapters that make a Next.js app conform to the Aura lifecycle
+contract. **(S)** server-only. Used by `com.aura.docs` (this app).
+
+| Symbol | Purpose |
+|---|---|
+| `createNextLifecycleRoutes(impl?: Partial<{onCreate,onStart,onResume,onPause,onStop,onDestroy: () => void \| Promise<void>}>)` | Returns `{ POST }` for `app/api/lifecycle/[...hook]/route.ts`. |
+| `createNextHealthRoute()` | Returns `{ GET }` for `app/api/lifecycle/health/route.ts`. |
+| `auraIdentityHeaders()` | Returns `{ 'X-Aura-App-Id', 'X-Aura-Instance-Id' }` — stamp from a Next middleware. |
+
+```ts
+// app/api/lifecycle/[...hook]/route.ts
+import { createNextLifecycleRoutes } from '@aura/app-sdk/runtime/next';
+export const { POST } = createNextLifecycleRoutes({
+  onDestroy: async () => { /* teardown */ },
+});
+
+// middleware.ts
+import { NextResponse } from 'next/server';
+import { auraIdentityHeaders } from '@aura/app-sdk/runtime/next';
+export function middleware() {
+  const res = NextResponse.next();
+  for (const [k, v] of Object.entries(auraIdentityHeaders())) res.headers.set(k, v);
+  return res;
+}
+export const config = { matcher: '/(.*)' };
+```
+
+For other frameworks: roll a 6-line equivalent — middleware that
+stamps the identity headers from `process.env` onto every response,
+plus a `GET /api/lifecycle/health` returning the identity body.
+Lifecycle hooks can default to no-op `{ ok: true }` JSON.
+
+## What to read next
+
+- [Core Concepts](/docs/core-concepts) — the model behind every API
+  above.
+- [CLI Reference](/docs/cli-reference) — the `aura` CLI commands that
+  drive these same APIs from the terminal.

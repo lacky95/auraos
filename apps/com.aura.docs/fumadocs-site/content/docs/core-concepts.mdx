@@ -1,0 +1,347 @@
+---
+title: Core Concepts
+description: The mental model — shell vs apps, instances vs activities, runtimes, sandboxes, proxy, theme, keymap, intents.
+---
+
+The shapes that recur across the codebase. Once these click, every
+manifest field and every CLI command has an obvious place.
+
+## Architecture
+
+Two layers. That's it.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│   aura-shell  (Astro SSR, port 3000)                         │
+│                                                              │
+│   • AppManager: lifecycle FSM, port allocator                │
+│   • Reverse proxy:   /api/proxy/<id>/<path>                  │
+│   • Content router:  /api/data/<authority>/<path>            │
+│   • OS event bus:    SSE + socket.io fan-out                 │
+└────┬─────────────────────────────────────────────────────┬───┘
+     │                                                     │
+     ▼                                                     ▼
+┌──────────────────────┐                    ┌──────────────────────────┐
+│  PRoot sandbox       │                    │  Sibling Docker container│
+│  ptrace, ~3 ms spawn │                    │  kernel namespaces       │
+│  shared kernel       │                    │  ~80-150 ms spawn        │
+└──────────────────────┘                    └──────────────────────────┘
+       ▲                                              ▲
+       └──── apps choose via `sandbox: 'proot' | 'container'` ────┘
+```
+
+The shell is one Astro server. Apps are many, each its own dev server
+on its own port. The shell never embeds an app's code; it just
+forwards HTTP + WebSocket through the proxy.
+
+## Instance vs activity
+
+The two concepts that confuse newcomers most.
+
+- **Instance** = one running backend process. One PID, one port,
+  one sandbox. The `aura-com.example.foo-3` docker container is an
+  instance.
+- **Activity** = one UI screen / iframe. Multiple activities can
+  share an instance — they each get their own URL with
+  `?_aura_activity=<id>` and a slot in the layout.
+
+`instanceMode: 'single'` means the app reuses one backend across all
+launches. `instanceMode: 'multi'` means each launch spawns a fresh
+backend. `activityMode: 'multi'` means a single backend hosts multiple
+activities (notepad-style: many notes, one backend).
+
+The matrix:
+
+| `instanceMode` × `activityMode` | Use case |
+|--------------------------------|----------|
+| single × none       | One running process, one window. (Settings.) |
+| single × multi      | One backend, many windows sharing state. (Notepad.) |
+| multi  × none       | Each launch is its own process + window. (Terminal.) |
+| multi  × multi      | N processes, M windows each. (Counter — power-user pattern.) |
+
+## Runtime modes
+
+Two ways to spawn an app.
+
+**`runtime: 'astro'` (default).** The OS synthesises an `astro dev`
+entrypoint if you don't ship one. `auraAppIntegration()` injects
+identity headers + the `/api/lifecycle/health` route automatically.
+Almost every app should use this.
+
+**`runtime: 'raw'`.** No Astro layer. The OS spawns
+`manifest.entrypoint` directly; the app is responsible for binding
+to `$APP_PORT` and serving the lifecycle endpoints itself. Pick this
+when your framework owns its own HTML + dev server (Next.js, SvelteKit,
+Nuxt, Remix). The `com.aura.docs` app is the reference — it runs
+Next.js + fumadocs raw on Turbopack.
+
+## Sandbox modes
+
+Both modes share the same manifest semantics (tools[], lifecycle,
+activities, content providers, identity gate). Only the spawn
+primitive differs. Apps migrate between them with no source change.
+
+- **`sandbox: 'proot'`** — ptrace-based filesystem sandbox inside the
+  master container. Cheap (~3 ms spawn), weak isolation. Shared host
+  kernel and PID space.
+- **`sandbox: 'container'`** — kernel-namespace container spawned as a
+  sibling of `aura-shell`, sharing the host filesystem only via sliced
+  bind mounts. Real PID/net/mount namespaces. Heavier (~80-150 ms
+  spawn) but actually isolated.
+
+Pick PRoot for quick utilities, container for anything that needs
+hard isolation or runs untrusted code.
+
+## Proxy and iframe
+
+Every request from the browser to an app goes through:
+
+```
+browser → /api/proxy/<instanceId>/<path>   →   aura-shell
+                                          ↓
+                                    proxy resolves
+                                          ↓
+                                    http://upstream:<port>/<path>
+```
+
+The proxy:
+
+1. Sets `X-Aura-App-Id` + `X-Aura-Instance-Id` on the request.
+2. Forwards to the app's port (with `preservePrefix: true` for
+   basePath-aware SPAs, it keeps the `/api/proxy/<id>` prefix in the
+   upstream URL).
+3. Identity-gates the response: if the app declares
+   `X-Aura-App-Id` and it doesn't match, the proxy 502s instead of
+   forwarding (port-squat protection).
+4. On HTML responses, optionally injects:
+   - `<base href>` (Astro apps with relative URLs)
+   - `<meta name="aura-*">` identity + theme + keymap tags
+   - `/api/os/theme.css` link (for `themeStrategy: 'inherit'`)
+   - A console relay that postMessages every `console.*` + uncaught
+     error up to the shell
+   - A keystroke forwarder that lets OS-claimed combos reach the
+     dispatcher
+5. JS module URL rewriting for Vite's `/@fs/...` style imports.
+
+Each step is gated by a manifest `proxy.*` flag — raw apps usually
+disable most injections.
+
+## Theme system
+
+The OS palette lives in `packages/core/src/theme/ThemeManager.ts`.
+Nine themes — six dark (sci-fi, star-wars, alien, amber, red-alert,
+cyan), three light (paper, parchment, mist). User picks two — one
+light, one dark — plus a color mode (`light` / `dark` / `auto`).
+
+`manifest.themeStrategy` chooses how an app participates:
+
+- **`inherit`** (default) — proxy injects
+  `<link href="/api/os/theme.css">`. Use `var(--aura-color-*)` and
+  you're done. Theme switches in Settings re-paint the iframe.
+- **`themed`** — app ships its own palettes but reacts to OS theme/
+  mode via the meta tags + `osClient.onThemeChange()`.
+- **`override`** — app owns its palette entirely. Only the
+  color-mode meta is injected as a hint. Photo editors, brand-locked
+  surfaces, accessibility tools.
+
+The canonical CSS variables the `inherit` strategy injects (full list
+straight from `ColorPalette` in `packages/core/src/theme/ThemeManager.ts`):
+
+```css
+/* Accents */
+--aura-color-primary    --aura-color-secondary
+--aura-color-danger     --aura-color-warning
+--aura-color-info       --aura-color-success
+
+/* Surfaces */
+--aura-color-bg         --aura-color-surface     --aura-color-surface-2
+
+/* Text + lines */
+--aura-color-text       --aura-color-text-dim    --aura-color-border
+
+/* Glows (designed per theme; light themes ship weak glows) */
+--aura-glow-primary     --aura-glow-secondary
+--aura-glow-danger      --aura-glow-subtle
+
+/* Mode flag (resolves 'auto' to 'light' or 'dark') */
+--aura-color-mode       /* values: 'light' | 'dark' */
+```
+
+## Keymap
+
+Declare actions in the manifest:
+
+```jsonc
+"keymapActions": [
+  { "id": "save", "label": "Save", "category": "File",
+    "defaultCombo": "Ctrl+s" }
+]
+```
+
+Register handlers at runtime:
+
+```ts
+import { OsClient } from '@aura/app-sdk';
+const osClient = new OsClient();
+osClient.keymap.on('save', () => saveDocument());
+```
+
+The OS namespaces every action to `app.<appId>.<id>` automatically.
+Users remap any action in **Settings → Keyboard**; your handler keeps
+firing under the new combo without code changes. Combos accept
+friendly shorthand (`Ctrl+s` ⇄ `Ctrl+KeyS`).
+
+The dispatcher has two modes: **App mode** routes keys to the focused
+iframe; **Nav mode** routes them to the OS shell (arrow-walk windows,
+Esc to exit). The `◐` chip in the dock is the keyboard anchor —
+`Ctrl+Alt+Space` focuses it.
+
+## Content providers
+
+Apps expose structured data to *other* apps by declaring a provider:
+
+```jsonc
+"dataProvider": {
+  "authority": "com.example.notes",
+  "providers": [
+    { "path": "/api/data/notes",
+      "readPermission":  "data:com.example.notes:read",
+      "writePermission": "data:com.example.notes:write" }
+  ]
+}
+```
+
+The OS routes `/api/data/<authority>/...` requests to the declaring
+app's HTTP handler. Other apps reach you via that URL on the shell;
+the `PermissionManager` enforces read/write perms against the
+caller's manifest.
+
+Read provider data from another app:
+
+```ts
+import { OsClient } from '@aura/app-sdk';
+const os = new OsClient();
+const notes = await os.queryProvider('com.example.notes', '/api/data/notes');
+await os.writeProvider('com.example.notes', '/api/data/notes', { title: '…' });
+const stop  = os.watchProvider('com.example.notes', '/api/data/notes', (rows) => {});
+```
+
+## Intent system
+
+Android-style `<intent-filter>` for cross-app routing:
+
+```jsonc
+"intentFilters": [
+  { "action": "aura.intent.action.VIEW",
+    "dataMime": ["application/pdf"],
+    "priority": 0 }
+]
+```
+
+`AppManager.startIntent({ action, mime, ... })` picks the highest-
+scoring filter (specific MIME beats wildcard; priority breaks ties)
+and routes the intent. Apps without filters can still be launched
+directly via `start()` + `openActivity()`.
+
+## Permissions
+
+Whitelist-based. The built-in list:
+
+```
+storage.read           storage.write
+network.internet       network.local
+system.notifications   system.clipboard
+system.overlay         system.theme.broadcast
+ipc.broadcast
+```
+
+Plus dynamic content-provider perms in the form
+`data:<authority>:<perm-name>`. Declare what you need in
+`manifest.permissions`; the `PermissionManager` checks them at the
+call site (provider router, theme broadcaster, etc.).
+
+## Workspaces and layouts
+
+Each user has N workspaces (status-bar pills 1..N). Each workspace
+remembers:
+
+- `members[]` — which views are currently in it (ordering matters
+  for placement).
+- `layoutId` — the layout strategy: `tiling` / `columns` / `rows` /
+  `fullscreen` / `stack` (Free Window).
+- `layoutState` — per-strategy persisted state (e.g. window rects for
+  Free Window).
+- `focusedViewId` — which view fullscreen mode shows.
+
+Apps can declare a `preferredLayout` in their manifest; the
+workspace adopts it when no user override is set.
+
+## SDK surface in one page
+
+What `@aura/app-sdk` ships, by file:
+
+- `getAppContext()` — read your `appId`, `instanceId`, `appPort`,
+  `osApiBase`, `dataDir`, `layerTag`.
+- `readIdentityHeaders(request)` — parse the X-Aura-* headers on
+  incoming requests.
+- `createLifecycleHandler(hook, impl?)` — Astro route factory for
+  the six plain hooks.
+- `createActivityCreateHandler(impl?)` / `createActivityDestroyHandler(impl?)`
+  — activity-mode hooks.
+- `auraAppIntegration()` — Astro integration: identity-header
+  middleware, health route, vite `allowedHosts: true`.
+- `OsClient` — runtime client: `keymap.on/getBinding`, `nav.onBack`,
+  `nav.installGridNav` (spatial arrow-walk over any list/grid of
+  focusables), `system.openLauncher/switchWorkspace/home`,
+  `activity.navigate/back/getHistory`, `queryProvider/writeProvider/
+  watchProvider`, `startIntent`, `subscribeOsEvents`,
+  `onThemeChange/onModeChange`. Full list: [SDK Reference](/docs/sdk-reference).
+- `/runtime/next` — `createNextLifecycleRoutes`,
+  `createNextHealthRoute`, `auraIdentityHeaders` — for raw-runtime
+  Next.js apps.
+- `proxyFetch`, `sanitizeHeaders` — for apps that proxy upstream HTTP
+  themselves (rare; the shell's `/api/proxy/*` already covers iframe
+  traffic).
+
+## Distribution (Nexus)
+
+Apps get on and off the system through **Nexus** — the resolver +
+fetcher + validator + installer pipeline that handles Git, OCI,
+curated-index, and local sources. New permissions in an update pause
+the pipeline behind a user-approval gate. See [Nexus](./nexus) for
+the full pipeline + source-type reference; `aura nexus install`
+is the day-to-day command.
+
+## Where the code lives
+
+```
+packages/core         AppManager, ProotRunner, ContainerRunner,
+                      OsEventBus, PermissionManager,
+                      ContentProviderRegistry, ThemeManager,
+                      manifest schema
+packages/shell        Astro SSR shell, /api/proxy, /api/data,
+                      /api/apps, OSLayout (console bridge, theme),
+                      launcher, layout, status bar, dock,
+                      Process Manager
+packages/app-sdk      OsClient, lifecycle factories, context,
+                      auraAppIntegration, runtime adapters
+packages/aura-cli     The `aura` CLI
+packages/ui           Shared UI primitives (@aura/ui)
+apps/<id>             Each app, including this one
+```
+
+## Where to look when stuck
+
+- Lifecycle FSM + allowed transitions:
+  `packages/core/src/app-manager/LifecycleStateMachine.ts`
+- How the shell builds your iframe URL:
+  `packages/shell/src/pages/index.astro` (`buildView`)
+- How HTML/JS get rewritten on the way to the iframe:
+  `packages/shell/src/pages/api/proxy/[id]/[...path].ts`
+- How the spawner constructs the PRoot args:
+  `packages/core/src/app-manager/ProotRunner.ts` (`buildProotArgs`)
+- Reference apps for richer patterns: `apps/com.aura.terminal`
+  (WS+PTY), `apps/com.aura.notepad` (multi-activity shared state),
+  `apps/com.aura.counter` (multi×multi), `apps/com.aura.settings`
+  (content provider + theme), `apps/com.aura.console` (WS
+  persistence), `apps/com.aura.docs` (raw runtime).

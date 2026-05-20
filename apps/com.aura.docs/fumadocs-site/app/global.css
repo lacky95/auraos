@@ -1,0 +1,250 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap');
+
+@import 'tailwindcss';
+@import 'fumadocs-ui/css/neutral.css';
+@import 'fumadocs-ui/css/preset.css';
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+html {
+  scrollbar-gutter: stable;
+}
+
+html > body[data-scroll-locked] {
+  margin-right: 0px !important;
+  --removed-body-scroll-bar-size: 0px !important;
+}
+
+/* ============================================================
+   AuraOS theme bridge.
+   The shell proxy injects `<link rel="stylesheet" href="/api/os/theme.css">`
+   into every iframe whose manifest has themeStrategy='inherit'. That
+   stylesheet exposes the active OS theme's palette via `--aura-color-*`
+   custom properties — light theme, dark theme, theme switch — all live
+   there. We bind the scificn + fumadocs token sets to those vars so the
+   docs app always paints in whatever palette the OS currently has active.
+   No local theme list, no per-app picker: pick the theme in OS Settings
+   and the docs follows automatically.
+   ============================================================ */
+@theme inline {
+  --font-mono: 'IBM Plex Mono', 'Space Mono', ui-monospace, 'Courier New', monospace;
+  --font-sans: 'IBM Plex Mono', 'Space Mono', ui-monospace, 'Courier New', monospace;
+  --font-heading: 'IBM Plex Mono', 'Space Mono', ui-monospace, 'Courier New', monospace;
+
+  /* Force zero radius across shadcn radius scale */
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+  --radius-2xl: 0px;
+  --radius-3xl: 0px;
+  --radius-4xl: 0px;
+
+  /* shadcn semantic tokens → AuraOS palette */
+  --color-background: var(--aura-color-bg);
+  --color-foreground: var(--aura-color-text);
+  --color-card: var(--aura-color-surface);
+  --color-card-foreground: var(--aura-color-text);
+  --color-popover: var(--aura-color-surface);
+  --color-popover-foreground: var(--aura-color-text);
+  --color-primary: var(--aura-color-primary);
+  --color-primary-foreground: var(--aura-color-bg);
+  --color-secondary: var(--aura-color-surface-2);
+  --color-secondary-foreground: var(--aura-color-text);
+  --color-muted: var(--aura-color-surface);
+  --color-muted-foreground: var(--aura-color-text-dim);
+  --color-accent: var(--aura-color-surface-2);
+  --color-accent-foreground: var(--aura-color-primary);
+  --color-destructive: var(--aura-color-danger);
+  --color-border: var(--aura-color-border);
+  --color-input: var(--aura-color-border);
+  --color-ring: var(--aura-color-primary);
+  --color-sidebar: var(--aura-color-surface);
+  --color-sidebar-foreground: var(--aura-color-text);
+  --color-sidebar-primary: var(--aura-color-primary);
+  --color-sidebar-primary-foreground: var(--aura-color-bg);
+  --color-sidebar-accent: var(--aura-color-surface-2);
+  --color-sidebar-accent-foreground: var(--aura-color-primary);
+  --color-sidebar-border: var(--aura-color-border);
+  --color-sidebar-ring: var(--aura-color-primary);
+}
+
+/* ============================================================
+   scificn semantic tokens + fumadocs --color-fd-* tokens — both
+   bound to the OS palette. These apply globally (no per-theme
+   blocks) because the OS already swaps `--aura-color-*` when the
+   user changes theme.
+   ============================================================ */
+:root {
+  --background:     var(--aura-color-bg);
+  --surface:        var(--aura-color-surface);
+  --surface-raised: var(--aura-color-surface-2);
+  --foreground:     var(--aura-color-text);
+
+  --border:        var(--aura-color-border);
+  --border-active: var(--aura-color-primary);
+  --input:         var(--aura-color-border);
+
+  --text-primary:   var(--aura-color-primary);
+  --text-secondary: var(--aura-color-text);
+  --text-muted:     var(--aura-color-text-dim);
+  --text-warning:   var(--aura-color-warning);
+  --text-danger:    var(--aura-color-danger);
+
+  --accent-primary:   var(--aura-color-primary);
+  --accent-secondary: var(--aura-color-secondary);
+  --accent-warning:   var(--aura-color-warning);
+
+  --glow-green:  var(--aura-glow-primary);
+  --glow-amber:  var(--aura-glow-secondary);
+  --glow-red:    var(--aura-glow-danger);
+  --glow-blue:   var(--aura-glow-subtle);
+
+  --text-glow-green:  var(--aura-glow-primary);
+  --text-glow-amber:  var(--aura-glow-secondary);
+  --text-glow-red:    var(--aura-glow-danger);
+  --text-glow-blue:   var(--aura-glow-subtle);
+
+  /* Corner notch clip-paths (theme-agnostic — geometry, not colour) */
+  --clip-corner-sm: polygon(6px 0%, 100% 0%, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0% 100%, 0% 6px);
+  --clip-corner-md: polygon(10px 0%, 100% 0%, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0% 100%, 0% 10px);
+  --clip-corner-lg: polygon(16px 0%, 100% 0%, 100% calc(100% - 16px), calc(100% - 16px) 100%, 0% 100%, 0% 16px);
+
+  --radius: 0px;
+
+  /* shadcn variables (fallback layer fumadocs reads) */
+  --card:             var(--aura-color-surface);
+  --card-foreground:  var(--aura-color-text);
+  --popover:          var(--aura-color-surface);
+  --popover-foreground: var(--aura-color-text);
+  --primary:           var(--aura-color-primary);
+  --primary-foreground: var(--aura-color-bg);
+  --secondary:         var(--aura-color-surface-2);
+  --secondary-foreground: var(--aura-color-text);
+  --muted:             var(--aura-color-surface);
+  --muted-foreground:  var(--aura-color-text-dim);
+  --accent:            var(--aura-color-surface-2);
+  --accent-foreground: var(--aura-color-primary);
+  --destructive:       var(--aura-color-danger);
+  --ring:              var(--aura-color-primary);
+
+  /* Fumadocs UI tokens — bound to OS palette */
+  --color-fd-background:           var(--aura-color-bg);
+  --color-fd-foreground:           var(--aura-color-text);
+  --color-fd-muted:                var(--aura-color-surface);
+  --color-fd-muted-foreground:     var(--aura-color-text-dim);
+  --color-fd-popover:              var(--aura-color-surface);
+  --color-fd-popover-foreground:   var(--aura-color-text);
+  --color-fd-card:                 var(--aura-color-surface);
+  --color-fd-card-foreground:      var(--aura-color-text);
+  --color-fd-border:               var(--aura-color-border);
+  --color-fd-primary:              var(--aura-color-primary);
+  --color-fd-primary-foreground:   var(--aura-color-bg);
+  --color-fd-secondary:            var(--aura-color-surface-2);
+  --color-fd-secondary-foreground: var(--aura-color-text);
+  --color-fd-accent:               var(--aura-color-surface-2);
+  --color-fd-accent-foreground:    var(--aura-color-primary);
+  --color-fd-ring:                 var(--aura-color-primary);
+}
+
+/* ============================================================
+   Keyframes
+   ============================================================ */
+@keyframes flicker {
+  0%, 89%, 91%, 93%, 100% { opacity: 1; }
+  90%  { opacity: 0.4; }
+  92%  { opacity: 0.8; }
+  94%  { opacity: 0.6; }
+}
+@keyframes blink-cursor {
+  0%, 49%   { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.6; }
+  50%      { opacity: 1; }
+}
+
+/* ============================================================
+   Base reset — phosphor terminal look stays regardless of palette.
+   ============================================================ */
+@layer base {
+  * {
+    border-radius: 0 !important;
+  }
+  html {
+    font-family: var(--font-mono);
+    font-size: 14px;
+  }
+  body {
+    background-color: var(--aura-color-bg);
+    color: var(--aura-color-text);
+    font-family: var(--font-mono);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    color: var(--aura-color-text);
+  }
+  a {
+    color: var(--aura-color-primary);
+  }
+  a:hover {
+    text-shadow: var(--aura-glow-primary);
+  }
+  button, input, textarea, select {
+    font-family: var(--font-mono);
+  }
+}
+
+/* Default text selection (active palette colour) */
+::selection {
+  background: var(--aura-color-primary);
+  color: var(--aura-color-bg);
+}
+
+/* ============================================================
+   Utility classes
+   ============================================================ */
+/* Scanlines — phosphor-CRT overlay. Looks right on dark palettes,
+ * busy and weird on light ones. Scoped to `html.dark` so the OS
+ * color-mode resolution (synced into <html> by the layout's
+ * bootstrap script) gates it automatically. */
+.dark .scanlines::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0px,
+    transparent 3px,
+    rgba(0, 0, 0, 0.12) 3px,
+    rgba(0, 0, 0, 0.12) 4px
+  );
+  pointer-events: none;
+  z-index: 10;
+}
+.flicker      { animation: flicker 8s infinite; }
+.pulse-glow   { animation: pulse-glow 2s ease-in-out infinite; }
+.clip-corner-sm { clip-path: var(--clip-corner-sm); }
+.clip-corner-md { clip-path: var(--clip-corner-md); }
+.clip-corner-lg { clip-path: var(--clip-corner-lg); }
+
+.glow-green   { box-shadow: var(--aura-glow-primary); }
+.glow-amber   { box-shadow: var(--aura-glow-secondary); }
+.glow-red     { box-shadow: var(--aura-glow-danger); }
+.glow-blue    { box-shadow: var(--aura-glow-subtle); }
+.text-glow-green { text-shadow: var(--aura-glow-primary); }
+.text-glow-amber { text-shadow: var(--aura-glow-secondary); }
+
+.terminal-prompt::before {
+  content: '> ';
+  color: var(--aura-color-primary);
+  text-shadow: var(--aura-glow-primary);
+}

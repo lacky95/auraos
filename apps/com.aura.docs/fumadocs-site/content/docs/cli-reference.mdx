@@ -1,0 +1,196 @@
+---
+title: CLI Reference
+description: Every aura command with usage and flags, grouped by topic.
+---
+
+The `aura` CLI is the entry point for everything you can drive from a
+terminal: lifecycle, capabilities, services, content providers, the
+event bus, sandbox shells. Source: `packages/aura-cli/src/commands/`.
+
+Run any command with `--help` for context-sensitive usage.
+
+## Aliases at a glance
+
+| Short | Long |
+|---|---|
+| `aura ls` | `aura app list` |
+| `aura ps` | `aura inst list` (running only) |
+| `aura j`  | `aura jump` |
+| `aura inst ls` | `aura inst list` |
+| `aura app rm` | `aura app remove` |
+| `aura cap ls` | `aura cap list` |
+| `aura activity ls` | `aura activity list` |
+
+## Distribution — `aura nexus …`
+
+Install, update, and publish apps from Git, OCI registries, the curated
+index, or local paths. Every command posts to the shell's `/api/nexus/*`
+endpoints; a future settings UI shares the same backend. See
+[Nexus](./nexus) for the pipeline + source-type reference.
+
+| Command | Description | Key flags |
+|---|---|---|
+| `aura nexus install <ref>` | Resolve + fetch + validate + install. Pauses on new-permission diffs unless `--yes`. | `--yes`, `--channel <name>` |
+| `aura nexus update [<id>\|--all]` | Re-resolve the stored ref and reinstall if changed. | `--yes`, `--all` |
+| `aura nexus uninstall <id>` | Stop instances + remove from disk. `--purge` also wipes `/data/<id>`. | `--purge` |
+| `aura nexus list` | Installed apps with their source ref, channel, and digest. | `--source git\|oci\|index\|local` |
+| `aura nexus search [<q>]` | Search the curated index by id / name / description / category. | `--category <slug>` |
+| `aura nexus info <ref>` | Dry-run resolve — print the resolved address + manifest preview without installing. | — |
+| `aura nexus publish [<path>]` | Push the app at `<path>` to Git or OCI; prints the install command for what was published. | `--source git\|oci`, `--repo <url>`, `--tag <tag>`, `--channel <name>` |
+
+Ref shapes the resolver accepts:
+
+| Shape | Example |
+|---|---|
+| Local path | `./apps/com.example.foo`, `/abs/path` |
+| Git URL with optional ref | `https://github.com/u/r#main`, `git@host:u/r.git#v1.2.3` |
+| Bare GitHub | `github.com/u/r#v1.2.3` |
+| OCI | `oci://ghcr.io/u/foo:1.2.3`, `ghcr.io/u/foo@sha256:…` |
+| Curated index | `com.example.foo`, `com.example.foo@beta` |
+
+## App management — `aura app …`
+
+| Command | Description | Key flags |
+|---|---|---|
+| `aura app list` | All installed apps (ID, NAME, VERSION, INSTANCES, MODE, BG, EN). | — |
+| `aura app info <appId>` | Full manifest + instances + activities (JSON). | — |
+| `aura app start <appId>` | Spawn a new instance; returns its instanceId. | — |
+| `aura app stop <appId>` | Stop ALL instances of the app gracefully. | — |
+| `aura app restart <appId>` | `stop` then `start` one fresh instance. | — |
+| `aura app install <path>` | Install app from a local directory (must contain `app.manifest.json`). | — |
+| `aura app remove <appId>` | Stop all instances + delete from disk. | `-y, --yes` skip confirm |
+| `aura app enable <appId>` | Re-arm `autoStart`/`warmPool`; unhide from dock + launcher. | — |
+| `aura app disable <appId>` | Stop all instances + hide from dock/launcher. | — |
+
+## Instance management — `aura inst …`
+
+| Command | Description | Key flags |
+|---|---|---|
+| `aura inst list` | Running instances (INSTANCE, APP, STATE, PORT, PID, UPTIME). | `-a, --app <appId>` filter |
+| `aura inst info <instanceId>` | Full status (manifest, state, activities) JSON. | — |
+| `aura inst stop <instanceId>` | Graceful stop: `onPause` → `onStop` → `onDestroy` then kill sandbox. | — |
+| `aura inst kill <instanceId>` | SIGKILL the sandbox immediately. No hooks. | — |
+| `aura inst pause <instanceId>` | Fire `onPause` only. | — |
+| `aura inst resume <instanceId>` | Fire `onResume` on a paused instance. | — |
+| `aura inst shell <instanceId>` | Drop into an interactive shell inside the sandbox. | `-c, --cmd "<cmd>"` |
+| `aura inst logs <instanceId>` | Tail recent log output. | `-f, --follow` |
+
+## Activity management — `aura activity …`
+
+| Command | Description | Key flags |
+|---|---|---|
+| `aura activity list` | All activities (ACTIVITY, INSTANCE, APP, PATH, TITLE). | `-i, --instance <id>` filter |
+| `aura activity open <instanceId>` | Open a new activity on a running instance. | `-d, --data '<json>'` payload |
+| `aura activity close <activityId>` | Close one activity. The instance stops too if it was the last activity and the app isn't `backgroundService`. | — |
+
+## Capabilities — `aura cap …`
+
+Allowlist-based binary access. `cap install` adds a tool to the OS-
+wide toolchain (`/aura/all-tools`); `cap grant` exposes it to a
+specific app's sandbox (`/aura/my-tools`).
+
+| Command | Description | Key flags |
+|---|---|---|
+| `aura cap list` | Registry inventory (NAME, SOURCE, INSTALLED, DECLARED-BY). | `--installed`, `--available` |
+| `aura cap info <name>` | Registry entry + install status + apps declaring it. | — |
+| `aura cap install <name…>` | Install one+ capabilities (apt/npm/curl per registry). | — |
+| `aura cap remove <name>` | Uninstall + remove from every app manifest. | — |
+| `aura cap grant <appId> <name…>` | Add to app's `tools[]`; hot-refresh running instances. Use `'*'` to grant all. | — |
+| `aura cap revoke <appId> <name…>` | Remove from app's `tools[]`; restart running instances. | — |
+| `aura cap registry show` | Print the capability registry (JSON). | — |
+| `aura cap registry add <name>` | Add a new capability to the registry. | `--source <type>` `--package <pkg>` `--binary <bin>` `--url <url>` |
+| `aura cap registry remove <name>` | Remove a capability definition. | — |
+
+## Services — `aura service …`
+
+Long-running daemons (e.g. Redis) that aren't AuraOS apps.
+
+| Command | Description | Key flags |
+|---|---|---|
+| `aura service list` | Services with installed + running status (NAME, SOURCE, INSTALLED, RUNNING, PORT). | — |
+| `aura service install <name>` | Install service from registry. | — |
+| `aura service start <name>` | Start detached; PID recorded under `/data/aura/state/services/`. | — |
+| `aura service stop <name>` | SIGTERM. | — |
+| `aura service status <name>` | Installed + running status + registry config (JSON). | — |
+| `aura service logs <name>` | Tail logs. | `-f, --follow` |
+| `aura service uninstall <name>` | Stop (if running) + uninstall. | — |
+
+## Dev tools — `aura dev …`
+
+| Command | Description | Key flags |
+|---|---|---|
+| `aura dev new [appId]` | Scaffold a new app. Interactive wizard if `appId` omitted. | `--name`, `--icon`, `--description`, `--shape`, `--instance-mode`, `--sandbox`, `--tools`, `--force`, `--non-interactive` |
+| `aura dev validate [path]` | Validate one manifest, or all with `--all`. Runs the Zod schema. | `--all` |
+| `aura dev clean-manifest [path]` | Strip manifest fields equal to schema defaults. | `--all`, `--dry-run` |
+| `aura dev standalone <appId>` | Run an app directly with `astro dev` (no PRoot/shell) for fast UI iteration. | — |
+
+## Theme — `aura theme …`
+
+| Command | Description | Key flags |
+|---|---|---|
+| `aura theme list` | Available presets; active marked with `●`. | — |
+| `aura theme get` | Print active selection (themeIdDark, themeIdLight, colorMode). | — |
+| `aura theme set <themeId>` | Set active theme for a tone slot. Triggers live update across shell + apps. | `--tone <light \| dark>` |
+
+## Content provider — `aura data …`
+
+| Command | Description | Key flags |
+|---|---|---|
+| `aura data query <authority>/<resource>` | GET from a content provider; print JSON. | — |
+| `aura data write <authority>/<resource> [body]` | Write to a provider. Body from arg or stdin if `"-"`. | `-m, --method <PUT \| POST \| PATCH \| DELETE>` |
+| `aura data watch <authority>/<resource>` | Follow an SSE-capable provider (`?watch=1`). | — |
+
+## Event bus — `aura events`
+
+| Command | Description | Key flags |
+|---|---|---|
+| `aura events` | Follow the OS event bus (live timeline of state changes). | `-f, --filter <pattern>` |
+
+Glob patterns (`app:*`, `theme:**`) work in the filter. The event bus
+fan-out lives in `packages/core/src/ipc/OsEventBus.ts`.
+
+## Sandbox navigation — `aura jump`
+
+Interactive picker: drop into a running app or service sandbox from
+your current terminal.
+
+| Command | Description | Key flags |
+|---|---|---|
+| `aura jump` | Pick a target interactively. | `--no-services`, `--no-apps`, `-m, --master` (straight into `aura-shell`) |
+| `aura jump <appId>` | Direct jump by app id. | — |
+| `aura j` | Alias. | — |
+
+## Process listing — `aura ps`
+
+| Command | Description | Key flags |
+|---|---|---|
+| `aura ps` | docker-ps-style table of running instances (INSTANCE, APP, STATE, PORT, ACTIVITIES, UPTIME). | `-w, --watch` |
+
+## System info — `aura whereami`, `aura status`
+
+| Command | Description | Key flags |
+|---|---|---|
+| `aura whereami` | Where in the layer stack am I (host / aura-shell / proot / proot+ctnr)? Plus env, mounts, tools, CPU/memory snapshot. | `--json` |
+| `aura status` | Summary of AuraOS health: shell, apps, capabilities, services, paths. | — |
+
+## Built-in
+
+| Command | Description |
+|---|---|
+| `aura completion <bash \| zsh>` | Print shell completion script. Add to `~/.bashrc` / `~/.zshrc`. |
+| `aura --version` | Print CLI version. |
+| `aura --help` / `aura <cmd> --help` | Help for any command. |
+
+## Global options
+
+| Option | Default | Effect |
+|---|---|---|
+| `--shell-url <url>` | `http://127.0.0.1:3000` | Override the AuraOS shell URL. Useful when the CLI runs outside the master container (e.g. host-side scripts hitting a remote shell). |
+
+## Where to read next
+
+- [Develop an App](/docs/develop-an-app) — `aura dev new` walkthrough.
+- [Develop in the App Sandbox](/docs/develop-in-sandbox) — the
+  `aura jump` + Claude Code workflow.
+- [SDK Reference](/docs/sdk-reference) — the runtime APIs the CLI
+  drives from the outside.

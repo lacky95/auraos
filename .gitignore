@@ -6,6 +6,10 @@ dist/
 *.tsbuildinfo
 .astro/
 **/.astro/
+.next/
+**/.next/
+# Fumadocs auto-generated source manifest (rebuilt by `fumadocs-mdx` on dev/build)
+**/.source/
 .pnpm-store/
 .claude/
 # Runtime state — anchored so the shell's `pages/api/data/` route source

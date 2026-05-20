@@ -1,0 +1,135 @@
+---
+title: Develop in the App Sandbox
+description: The aura jump workflow — drop into a running app, edit with Claude Code, tail logs.
+---
+
+Every Aura app runs inside its own sandbox (PRoot or container). To
+edit its source with full tooling, you drop a shell *into* that
+sandbox. `aura jump` is the picker.
+
+## Why this matters
+
+The host file system holds the code, but the *runtime* the app sees
+isn't your host — it's the sandbox. `/aura/my-tools`, the bind-mount
+layout, the env vars, the layer tag — they're all sandbox-side. If
+you `cd apps/com.example.hello` on the host and run `claude`, you're
+in the wrong world: you see your host tools, not the app's
+allowlist; you see your `$PATH`, not the sandbox's; the prompt tag
+says `[host]` not `[proot+ctnr]`.
+
+Develop *inside* the sandbox and every command behaves the way the
+app sees the system at runtime.
+
+## The workflow
+
+Assuming you've already scaffolded with `aura dev new` and started
+with `aura app start <id>`:
+
+```bash
+# From any Aura terminal (the Terminal app's TTY is the easiest):
+aura jump                    # interactive picker — lists running apps
+aura jump com.example.hello  # direct jump by id
+aura jump --master           # straight into the aura-shell master container
+```
+
+Inside the sandbox:
+
+```
+root@aura[proot+ctnr]:/workspace/apps/com.example.hello#
+```
+
+The `[proot+ctnr]` (or `[ctnr]` for container-mode apps) is added by
+the OS-shipped bashrc snippet — it tells you which sandbox layer the
+prompt is in.
+
+## Develop with Claude Code
+
+Once inside:
+
+```bash
+claude   # launches Claude Code in the current directory
+```
+
+`claude` is one of the allowlisted tools symlinked into
+`/aura/my-tools` from the manifest's `tools[]` array. If it's not in
+the manifest, grant it without a respawn:
+
+```bash
+# from outside the sandbox, or from another terminal:
+aura cap grant com.example.hello claude
+```
+
+The AppManager re-provisions the allowlist dir live; back inside the
+sandbox `claude` appears in `$PATH` without restarting the app.
+
+## What's bind-mounted inside
+
+- **`/workspace`** — the full repo. Edit any package from here; pnpm
+  workspace symlinks Just Work.
+- **`/workspace/apps/<id>`** — this app's directory. The default cwd.
+- **`/data`** — per-instance writable state. Survives app restarts.
+- **`/aura/my-tools`** — symlinks for every binary in `manifest.tools`.
+  Prepended to `$PATH` automatically.
+- **`/proc`, `/dev`, `/tmp`** — host kernel pass-throughs (PRoot mode).
+- **`/etc/resolv.conf`** — host DNS.
+
+What's *not* there: the host's `$HOME`, your shell history, your SSH
+keys. Cooperating sandboxes, not adversarial — but the isolation is
+real enough to surprise you the first time.
+
+## Reload the iframe
+
+Astro apps: edit-save → Vite picks it up, but the iframe doesn't
+receive the HMR signal through the proxy. Hit the iframe's reload —
+or close + reopen the window — to see changes.
+
+Raw-runtime apps (Next.js / SvelteKit / etc.): same story. Turbopack
+recompiles on save; reload the iframe.
+
+Full restart from another terminal:
+
+```bash
+aura app stop  com.example.hello
+aura app start com.example.hello
+```
+
+## Tail logs without leaving
+
+From any shell — host, master, another app sandbox:
+
+```bash
+aura inst logs com.example.hello              # follow live
+aura inst logs com.example.hello-2            # by instance (multi-instance apps)
+aura inst logs com.example.hello | grep ERR
+```
+
+stdout/stderr of the app's entrypoint stream straight through.
+
+## Validate manifest changes
+
+After editing `app.manifest.json`:
+
+```bash
+aura dev validate apps/com.example.hello       # schema check
+aura dev clean-manifest apps/com.example.hello # strip default-valued fields
+```
+
+`validate` runs the Zod schema — same checks the AppRegistry uses at
+boot. `clean-manifest` is opt-in tidy mode: if you've left fields at
+their defaults, it removes them so the manifest only declares what
+actually differs.
+
+## Where to look when stuck
+
+- **App not loaded after a manifest edit?** Restart the shell — the
+  AppRegistry reads manifests once at boot. `docker restart aura-shell`.
+- **`aura jump` says "no running instances"?** Start the app first
+  (`aura app start <id>`). `aura jump` only lists live sandboxes.
+- **Tools missing inside the sandbox?** Confirm they're in
+  `manifest.tools` AND installed in `/aura/all-tools` on the host
+  (`aura cap install <tool>` adds new ones to the registry).
+
+## What to read next
+
+- [Core Concepts](/docs/core-concepts) — how the sandbox + proxy +
+  lifecycle fit together.

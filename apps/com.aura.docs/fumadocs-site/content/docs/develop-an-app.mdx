@@ -1,0 +1,196 @@
+---
+title: Develop an App
+description: Scaffold a new Aura app — manifest, lifecycle, first run.
+---
+
+The shortest path from idea to running iframe. Every step happens
+inside the OS — open a Terminal, scaffold, launch, jump in to edit.
+
+## The workflow at a glance
+
+```
+1. Open the Terminal app (launcher → Terminal, or Ctrl+Alt+Space)
+2. aura dev new com.example.hello       → wizard scaffolds the app
+3. aura app start com.example.hello     → backend boots
+4. Click the new icon in the launcher   → iframe loads
+5. aura jump com.example.hello          → drop into the sandbox to edit
+                                          → run `claude` for Claude Code
+```
+
+Steps 1-4 are this page. Step 5 is its own page —
+[Develop in the App Sandbox](/docs/develop-in-sandbox).
+
+## Scaffold with `aura dev new`
+
+```bash
+aura dev new com.example.hello
+```
+
+The wizard walks you through:
+
+| Prompt | What it sets |
+|--------|--------------|
+| **Package name** | Reverse-domain `id`, equals the directory name. Regex `^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$`. |
+| **Display name** | Shown in launcher, dock, Process Manager. |
+| **Icon** | 1-3 char glyph (e.g. `H`, `HL`, `HEL`). Falls back to the first letter of the name. |
+| **Shape preset** | `activity` (default, has a UI) · `activity-bg` (UI + stays alive when last window closes) · `service` (headless backend, no UI). |
+| **Instance mode** | `single` (reuse one backend) · `multi` (new backend per launch). |
+| **Sandbox** | `proot` (cheap, ~3 ms spawn) · `container` (kernel-namespace isolation, ~80-150 ms). |
+| **Tools** | Allowlist of binaries bind-mounted into `/aura/my-tools`. Pick from the registry; `bash` and `node` are almost always wanted. |
+
+The scaffold writes a minimal manifest (only the fields you actually
+chose differ from defaults), the Astro config wired to
+`auraAppIntegration()`, lifecycle stubs that call SDK factories, and a
+`CLAUDE.md` primer for the new app.
+
+## What the scaffold ships
+
+```
+apps/com.example.hello/
+├── app.manifest.json
+├── astro.config.mjs
+├── package.json
+├── CLAUDE.md
+└── src/
+    ├── pages/
+    │   ├── index.astro
+    │   └── api/
+    │       └── lifecycle/
+    │           ├── onCreate.ts
+    │           ├── onStart.ts
+    │           ├── onResume.ts
+    │           ├── onPause.ts
+    │           ├── onStop.ts
+    │           ├── onDestroy.ts
+    │           └── onActivityCreate.ts        (activity-mode only)
+```
+
+You don't need to ship `entrypoint.sh` or `health.ts` — the runner
+synthesises the entrypoint, and `auraAppIntegration()` injects the
+health route. Both can still be overridden by shipping your own files.
+
+## Launch the new app
+
+```bash
+aura app start com.example.hello
+```
+
+The AppManager allocates a port, spawns the sandbox, runs
+`onCreate → onStart → onResume`, then marks the instance `resumed`.
+Click the icon in the launcher (it appears as soon as the manifest
+loads) — the iframe boots and renders `src/pages/index.astro`.
+
+## Manifest fields that actually matter
+
+The full schema lives in `packages/core/src/types/manifest.ts`. In
+practice, after scaffolding you'll touch six fields. Run
+`aura dev clean-manifest apps/<id>` to drop everything else back to
+schema defaults.
+
+```jsonc
+{
+  "id": "com.example.hello",
+  "name": "Hello",
+  "instanceMode": "single",        // or "multi"
+  "activityMode": "none",          // or "multi"
+  "tools": ["bash", "node"],
+
+  // Optional but common:
+  "intentFilters": [               // declare you can handle SEND text/plain
+    { "action": "aura.intent.action.SEND", "dataMime": ["text/plain"] }
+  ],
+  "dataProvider": {                // expose data to other apps
+    "authority": "com.example.hello",
+    "providers": [{ "path": "/api/data/notes" }]
+  }
+}
+```
+
+See [Core Concepts](/docs/core-concepts) for what each policy does at
+runtime.
+
+## Lifecycle hooks
+
+Six plain hooks + two activity hooks. Every one is a one-line
+`createLifecycleHandler` call from `@aura/app-sdk`. Add behaviour by
+passing `impl`:
+
+```ts
+// src/pages/api/lifecycle/onDestroy.ts
+import { createLifecycleHandler } from '@aura/app-sdk';
+import { state } from '../../../state.js';
+
+export const POST = createLifecycleHandler('onDestroy', async () => {
+  state.activities.clear();
+  await flushPendingWrites();
+});
+```
+
+Activity hooks return path/title for new windows:
+
+```ts
+// src/pages/api/lifecycle/onActivityCreate.ts
+import { createActivityCreateHandler } from '@aura/app-sdk';
+import { state } from '../../../state.js';
+
+export const POST = createActivityCreateHandler(({ activityId }) => {
+  state.activities.add(activityId);
+  return { path: '/', title: `Hello #${activityId.split('#').pop()}` };
+});
+```
+
+### Inside a hook: identity + runtime context
+
+Hooks (and every other server-side handler in your app) can read
+their runtime identity via two SDK helpers. Don't reach for
+`process.env` directly:
+
+```ts
+import { getAppContext, readIdentityHeaders } from '@aura/app-sdk';
+
+const ctx = getAppContext();
+//  ctx = { appId, instanceId, appPort, osApiBase, dataDir, layerTag }
+//
+// In a request handler — pull headers the proxy stamps on every
+// incoming request:
+export const POST: APIRoute = async ({ request }) => {
+  const { appId, instanceId, activityId } = readIdentityHeaders(request);
+  // … your logic
+};
+```
+
+`activityId` is only present on requests coming through an activity-
+scoped iframe URL; for non-activity apps it's `null`.
+
+## Need a non-Astro framework?
+
+The `com.aura.docs` app you're reading right now runs on Next.js +
+fumadocs via `runtime: 'raw'`. Set `runtime: "raw"` in the manifest,
+ship an `entrypoint.sh` that execs your framework on `$APP_PORT`,
+serve `/api/lifecycle/{onCreate,onStart,onResume,health}` from inside
+the framework, and the rest is identical to an Astro app. Until that
+gets its own page, the docs app is the working reference —
+`apps/com.aura.docs/` in the repo.
+
+## Reference apps to learn from
+
+| App | Pattern |
+|-----|---------|
+| **`com.aura.terminal`** | Multi-instance shell + PTY over WebSocket. |
+| **`com.aura.notepad`** | Multi-activity shared state (one backend, many views). |
+| **`com.aura.counter`** | Multi×multi archetype: N instances, M activities per. |
+| **`com.aura.settings`** | Content provider + theme + permissions. |
+| **`com.aura.console`** | Background WebSocket log persistence. |
+| **`com.aura.example`** | Scaffold reference (minimal Astro). |
+| **`com.aura.docs`** | Raw runtime (Next.js + fumadocs). |
+
+## What to read next
+
+- [Develop in the App Sandbox](/docs/develop-in-sandbox) — `aura jump`,
+  Claude Code inside the sandbox, log tailing.
+- [Core Concepts](/docs/core-concepts) — the mental model behind
+  every field above.
+- [SDK Reference](/docs/sdk-reference) — every `osClient.*` method and
+  loose helper export with a copy-paste example.
+- [CLI Reference](/docs/cli-reference) — every `aura <cmd>` with usage
+  and key flags.

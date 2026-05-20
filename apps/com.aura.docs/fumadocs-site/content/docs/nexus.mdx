@@ -1,0 +1,115 @@
+---
+title: Nexus
+description: AuraOS's distribution layer — how apps are installed, updated, and published from Git, OCI, the curated index, or local paths.
+---
+
+Nexus is how apps get on and off the system. It sits next to the
+AppManager — once an app is installed by Nexus, the AppManager runs
+it like any other. Pure backend layer: nothing in the app SDK depends
+on Nexus, and apps never call into it.
+
+## The pipeline
+
+Every install — whether from `aura nexus install`, the shell HTTP API,
+or a future UI — walks the same five stages:
+
+```
+ref string  →  Resolver  →  Fetcher  →  Validator  →  PermissionDiff  →  Installer
+                                                              ↓
+                                                       (approval gate)
+                                                              ↓
+                                                       install record
+```
+
+- **Resolver** parses the ref and figures out where it lives.
+  See `packages/core/src/nexus/Resolver.ts`.
+- **Fetcher** pulls the source into a staging directory. One per
+  source type (`GitFetcher.ts`, `OciFetcher.ts`, `LocalFetcher.ts`).
+- **Validator** runs the manifest schema against `app.manifest.json`
+  and rejects the install if anything's off.
+- **PermissionDiff** compares the new manifest's permissions /
+  capabilities against whatever's currently installed. New perms
+  pause the pipeline and yield a `permission.needed` event — the
+  caller decides whether to approve.
+- **Installer** moves the staging directory into `appsDir`, records
+  the source ref + digest in `install-records.json`, and emits
+  `nexus:install.complete` on the OS event bus.
+
+The pipeline is an async generator (`NexusManager.install`), so the
+caller drives it event-by-event. The CLI streams the events over
+SSE; an in-OS install UI would consume the same shape.
+
+## Source types
+
+Nexus accepts four ref shapes. Resolver dispatch is keyed on the ref
+string — no flags needed.
+
+| Shape                                | Example                              | Routed to        |
+|--------------------------------------|--------------------------------------|------------------|
+| Local path (`./` / `/`)              | `./apps/com.example.foo`             | `LocalFetcher`   |
+| Git URL (with optional `#<ref>`)     | `https://github.com/u/repo#main`     | `GitFetcher`     |
+| OCI registry (`oci://` or `host/x:tag`) | `ghcr.io/u/foo:1.2.3`             | `OciFetcher`     |
+| Curated index (`<reverse.domain>[@channel]`) | `com.example.foo@stable`     | `IndexClient` → Git or OCI |
+
+The curated index is a YAML file with channel mappings:
+
+```yaml
+# /data/nexus/index.yaml
+apps:
+  com.example.foo:
+    sources:
+      git: { ref: github.com/example/foo, default-branch: main }
+      oci: { ref: ghcr.io/example/foo }
+    channels:
+      stable:  { git-tag: v1.2.3, oci-tag: 1.2.3 }
+      beta:    { git-tag: v1.3.0-rc1, oci-tag: 1.3.0-rc1 }
+```
+
+The index is just convenience — `aura nexus install
+github.com/example/foo#v1.2.3` works without any index entry.
+
+## Permission gating
+
+The diff compares old vs new on `permissions[]`, `tools[]`, and
+`dataProvider`. An update that only patches application code goes
+through without prompting. Adding a new permission (say
+`storage.write`), a new tool, or a new content-provider authority
+yields `permission.needed` — the caller MUST call `next({ approve:
+true })` for the install to continue.
+
+Pass `--yes` to the CLI or `autoApprove: true` to `NexusManager.install`
+to skip the gate. That's the right default for CI, never for user-
+driven installs.
+
+## Publishing
+
+Two paths. Both stage a tarball / OCI layer, push to the remote, and
+print the install command that fetches what you just pushed.
+
+- **Git** (`publishGit` / `aura nexus publish --source git`) tags the
+  commit, pushes it, and prints `aura nexus install
+  <repo>#<tag>` as the install cmd.
+- **OCI** (`publishOci` / `aura nexus publish --source oci`) packs the
+  app via `oras` and prints `aura nexus install oci://<reg>:<tag>`.
+
+Requires the corresponding tool on PATH (`git` or `oras`). Neither
+binary ships in the OS toolchain by default — install via `aura cap
+install git`.
+
+## CLI
+
+Day-to-day commands live in **[CLI Reference](./cli-reference)** under
+`aura nexus …`. Quick form:
+
+```sh
+aura nexus install   <ref>               # install or update
+aura nexus update    [<id>|--all]        # re-resolve + reinstall
+aura nexus uninstall <id> [--purge]      # remove (purge wipes /data too)
+aura nexus list                          # what's installed
+aura nexus search   [<q>]                # curated index search
+aura nexus info     <ref>                # dry-run resolve + preview
+aura nexus publish  [<path>] --source …  # push your app upstream
+```
+
+Each command flows through the same `/api/nexus/*` HTTP endpoint on
+the shell — so the CLI and a future settings UI share one backend.

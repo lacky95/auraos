@@ -1,0 +1,133 @@
+---
+title: Troubleshooting
+description: Common AuraOS dev issues — port conflicts, stuck iframes, missing routes, log namespaces.
+---
+
+When things break, look here first. Each recipe is the actual fix, not
+a paragraph about the diagnosis.
+
+## `localhost:3000` is already in use
+
+The shell binds to `3000`. If another process owns it, `docker compose
+up` fails or the shell crash-loops.
+
+Remap in `docker-compose.yml`:
+
+```yaml
+services:
+  aura-os:
+    ports:
+      - "3030:3000"   # host:container — change the host side
+```
+
+Then `docker compose up -d` and open `http://localhost:3030`. App
+instances bind container-internal ports (4000+) only, so no other
+ports need changing.
+
+## App's iframe stuck on the boot skeleton
+
+The slot shows the loading pattern but the app never paints. Check
+the lifecycle state:
+
+```sh
+curl -s http://localhost:3000/api/apps | jq '.[] | select(.manifest.id=="com.example.foo")'
+```
+
+If `state` is `'starting'` for more than ~10 s, the app's dev server
+didn't bind in time. Jump in and check the log:
+
+```sh
+aura jump com.example.foo
+# inside the sandbox:
+ls /workspace/apps/com.example.foo
+tail -f /data/logs/com.example.foo.log
+```
+
+If `state` is `'error'` or `'crashed'`, force-kill from the Process
+Manager (✕ button) and relaunch; the crash reason is in the same log.
+
+## New page in an app returns 404
+
+Astro builds its route manifest at server start. A `pages/foo.astro`
+added while the container is running may not be picked up until the
+app process restarts. Bounce just that container:
+
+```sh
+docker restart aura-com.example.foo
+```
+
+Wait ~5 s for the dev server to come back up, then refresh the iframe.
+(The shell itself uses Vite-style auto-detection and doesn't need
+this — only individual app containers do.)
+
+## Terminal reload starts a fresh shell
+
+PTY sessions are keyed per **instance**, not per browser tab. If you
+launch two terminal activities on the same instance you'll share one
+shell; reloading the browser reattaches to that same shell and
+replays the last ~256 KiB of scrollback.
+
+Two reasons you might still see a fresh prompt:
+
+- The terminal container was restarted (`docker restart
+  aura-com.aura.terminal-3`). Restart wipes PTY state — code changes
+  to `pty-server.ts` require this, so it's intentional.
+- You opened a different instance (`com.aura.terminal-4`) in the new
+  tab. Each instance has its own PTY.
+
+## Where are the logs?
+
+Every namespace ships its own log channel, gated by `AURA_LOG`. None
+of them print by default.
+
+Server-side (host shell that runs the container):
+
+```sh
+AURA_LOG=app-manager,sse docker compose up
+```
+
+Or live for a running container:
+
+```sh
+docker exec aura-shell sh -c 'export AURA_LOG=ws-proxy; …'
+```
+
+Browser-side:
+
+```js
+localStorage.setItem('aura.log', 'os-events,keymap');
+location.reload();
+```
+
+Filter spec: comma-separated namespaces; `*` matches all; `*@warn`
+limits to warn-and-up; `-noisy` excludes one.
+
+| Namespace      | Where it lives                       | Use when…                                  |
+|----------------|--------------------------------------|--------------------------------------------|
+| `sse`          | shell `/api/apps/events` legacy SSE  | event-bus events stop arriving             |
+| `os-events`    | browser socket.io client             | clock/theme/workspace updates miss         |
+| `sio`          | shell socket.io server               | server-side fan-out troubleshooting        |
+| `ws-proxy`     | shell WS upgrade proxy               | terminal/console WebSocket fails to connect|
+| `keymap`       | KeyDispatcher (browser)              | keybinding doesn't fire                    |
+| `app-manager`  | core AppManager                      | spawn/lifecycle/port issues                |
+| `pty`          | `apps/com.aura.terminal`             | PTY session attach/detach                  |
+
+## App doesn't appear in the launcher after install
+
+The launcher reads from the in-memory manifest cache. If you `aura
+nexus install` an app and the launcher still doesn't list it, the
+AppManager hasn't reloaded its manifest list.
+
+```sh
+aura app list
+```
+
+If the install record exists but the entry is missing, restart the
+shell container:
+
+```sh
+docker restart aura-shell
+```
+
+Shell-side caches re-seed from disk on boot; the app shows up
+immediately after.

@@ -1,0 +1,28 @@
+{
+  "id": "com.aura.docs",
+  "name": "Aura Docs",
+  "version": "0.1.0",
+  "description": "Aura Documentation",
+  "icon": "DOC",
+  "instanceMode": "single",
+  "activityMode": "multi",
+  "sandbox": "container",
+  "runtime": "raw",
+  "entrypoint": "entrypoint.sh",
+  "autoStart": true,
+  "backgroundService": true,
+  "themeStrategy": "inherit",
+  "proxy": {
+    "rewriteHtml": "none",
+    "preservePrefix": true,
+    "injectMeta": true,
+    "injectConsoleRelay": true,
+    "injectKeyForwarder": true
+  },
+  "tools": [
+    "bash",
+    "git",
+    "claude",
+    "node"
+  ]
+}

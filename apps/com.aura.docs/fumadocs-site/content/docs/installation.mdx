@@ -1,0 +1,67 @@
+---
+title: Installation
+description: Run AuraOS on a host machine in a single docker compose command.
+---
+
+AuraOS ships as one Docker image — `aura-shell` — that hosts the
+desktop + AppManager + reverse proxy. Sibling app containers come up
+on demand. You don't install per-app dependencies on the host.
+
+## Prerequisites
+
+- **Docker** + **docker compose** (Compose v2 syntax).
+- A modern browser (anything with WebGL2 + ES2022 support; we test
+  Firefox + Chromium).
+- ~2 GB free disk space for the base image + workspace caches.
+- (Optional, host-side dev) `pnpm` ≥ 9, Node ≥ 22 — only needed if
+  you want to edit OS internals from the host instead of from inside
+  an app sandbox.
+
+## Run AuraOS
+
+```bash
+git clone https://github.com/<org>/aura.git
+cd aura
+docker compose up
+```
+
+The first build takes a few minutes. Subsequent boots are seconds.
+
+Open `http://localhost:3000` in your browser. The desktop comes up
+with the launcher, dock, and a clock in the status bar.
+
+## First boot
+
+`autoStart` apps spawn before you click anything:
+
+- **Settings** — theme, keyboard remap, apps registry.
+- **Console** — relayed `console.*` + uncaught errors from every iframe.
+- **Aura Docs** — this site.
+
+Open the launcher (`⣿` in the dock, or `Ctrl+Alt+Space → Enter →
+launcher icon`) to see every installed app. Click an icon, the
+sandbox spawns, the iframe loads. First-spawn cold start is ~1-3 s;
+subsequent launches hit the warm pool when present.
+
+## Troubleshooting
+
+**`GET /api/proxy/com.aura.foo/ → 503`.** The app is mid-spawn. The
+proxy returns 503 until the AppManager's health probe passes. Wait
+2-3 s and reload the iframe; the skeleton in the slot will swap to
+the real content as soon as health is green.
+
+**Nothing in the launcher.** Check `docker logs aura-shell` for
+`[AppRegistry] Loaded: <id>` lines — if your app isn't in the list,
+its manifest probably failed schema validation. Run
+`aura dev validate apps/<id>` from inside the master container.
+
+**Apps stuck in `error` state.** The Process Manager (`Ctrl+Alt+M`)
+shows lifecycle state per instance. Hit the **Kill** button to
+SIGKILL, then **Launch** to respawn cold.
+
+**Port in use.** The shell binds `:3000` on the host. Edit
+`docker-compose.yml` to map a different host port if needed; the
+shell's internal port stays 3000 either way.
+
+See [Core Concepts → Proxy + iframe](/docs/core-concepts#proxy-and-iframe)
+if you want the gory details of how requests flow.

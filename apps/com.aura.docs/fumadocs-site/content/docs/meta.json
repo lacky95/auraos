@@ -1,0 +1,15 @@
+{
+  "title": "Aura Docs",
+  "pages": [
+    "introduction",
+    "installation",
+    "quick-start",
+    "develop-an-app",
+    "develop-in-sandbox",
+    "core-concepts",
+    "sdk-reference",
+    "cli-reference",
+    "nexus",
+    "troubleshooting"
+  ]
+}

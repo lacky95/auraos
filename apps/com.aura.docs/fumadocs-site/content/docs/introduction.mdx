@@ -1,0 +1,72 @@
+---
+title: Introduction
+description: AuraOS — the OS for everywhere. One coherent surface, any device, any input.
+---
+
+> AuraOS — the OS for everywhere. Phone, desktop, TV, AR, VR — one
+> coherent surface, any device, any input. Apps live in their own
+> Docker sandboxes with activities, and every layer is open for
+> builders to extend, remix, and shape into whatever comes next.
+
+## What it is
+
+AuraOS is a browser-based WebOS that runs inside one Docker container.
+The shell draws the desktop — status bar, dock, launcher, layout
+manager, process manager — and every app you launch boots inside its
+own sandbox (PRoot or container) and is rendered in an iframe.
+
+The shell talks to apps only through the reverse proxy at
+`/api/proxy/<id>/<path>`. Apps never reach the browser directly; the
+proxy injects identity headers, theme tokens, a console relay, and a
+keystroke forwarder on the way in.
+
+## Architecture in one diagram
+
+```
+                       ┌──────────────────────────┐
+                       │       Browser            │
+                       │  ┌────────────────────┐  │
+                       │  │  iframe per app    │  │
+                       │  └────────────────────┘  │
+                       └────────────┬─────────────┘
+                                    │ http://shell:3000
+                                    ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │  aura-shell  (Astro SSR + AppManager + SSE event bus)    │
+   │                                                          │
+   │  /api/proxy/<id>/<path>  ──────► (HTML rewrites, meta,   │
+   │                                    console relay, keys)   │
+   │  /api/data/<authority>/* ──────► (content provider router)│
+   │  /api/apps, /api/events  ──────► (lifecycle + bus)        │
+   └────────────┬────────────────────────────┬────────────────┘
+                │                            │
+                ▼                            ▼
+   ┌────────────────────────┐    ┌───────────────────────────┐
+   │  PRoot sandbox         │    │  Docker sibling container │
+   │  apps/<id>             │    │  aura-<id>                │
+   │  Astro dev / raw rt    │    │  full kernel namespaces   │
+   └────────────────────────┘    └───────────────────────────┘
+```
+
+The shell is one process. Apps are many — each one its own dev server
+listening on its own port, reached only through the proxy.
+
+## Why
+
+- **Per-app isolation without per-app VMs.** PRoot keeps the spawn
+  cost at a few ms; container mode adds real kernel namespaces when
+  you need them. Manifest field flips between the two.
+- **One SDK across every app.** Lifecycle hooks, content providers,
+  keymap actions, intents, themes — all the same surface, whether the
+  app is Astro, Next.js, or anything else that speaks HTTP.
+- **Open at every layer.** The shell, the SDK, the apps, the CLI —
+  all in one repo, all changeable, all in the docs.
+
+## Where next
+
+- [Installation](/docs/installation) — get AuraOS running.
+- [Quick Start](/docs/quick-start) — first time inside the OS.
+- [Develop an App](/docs/develop-an-app) — scaffold one in a minute.
+- [Develop in the App Sandbox](/docs/develop-in-sandbox) — the
+  `aura jump` + Claude Code workflow.
+- [Core Concepts](/docs/core-concepts) — the mental model.

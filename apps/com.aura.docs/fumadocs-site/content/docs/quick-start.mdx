@@ -1,0 +1,97 @@
+---
+title: Quick Start
+description: First moves inside AuraOS — launcher, window selection, workspaces, Process Manager.
+---
+
+Once `docker compose up` is running and `http://localhost:3000` shows
+the desktop, you're in. Five things to know before you go further.
+
+## 1. The launcher
+
+Three ways to open it:
+
+- Click the `⣿` icon in the dock.
+- Press **`Ctrl+Alt+Space`** — focus jumps to the dock's `◐` chip;
+  press `Enter` on it, then `→` to the launcher icon, then `Enter`.
+- Press **`Ctrl+Alt+C`** (alt combo, same toggle).
+
+The launcher overlays the desktop with the full app grid. Click an
+icon to launch. Right-click for "Open in workspace ▸" to send the new
+window to a specific workspace.
+
+## 2. Window selection mode
+
+The keyboard-driven way to focus a window without a mouse:
+
+```
+Ctrl+Alt+Space   →  focus the ◐ chip in the dock
+Enter            →  enter Nav mode (first window gets a highlight)
+←↑→↓             →  move the highlight between windows
+Enter            →  hand focus to the iframe; OS flips back to App mode
+Backspace        →  enter chrome-select on the highlighted slot
+                    (close button focused by default)
+←→               →   walk the slot's title-bar buttons
+Enter            →   activate (close removes the window and
+                     re-highlights the next; min/max do their thing)
+Backspace        →   exit chrome-select; window stays highlighted
+Esc              →  exit Nav mode; focus returns to the ◐ chip
+Ctrl+Alt+Space   →  same exit (round-trip back to the chip)
+```
+
+The chip pulses while Nav mode is active. Mousedown outside an
+`.app-slot` also exits.
+
+**Focus mode + Nav.** If a window is currently maximised (focus mode,
+`[ ]` button), entering Nav mode highlights that window — the focus
+overlay gets a `--aura-color-text` border + a centred `◉` watermark
+instead of moving you to the desktop. Backspace lands on the
+`✕ EXIT FOCUS` button.
+
+**Auto-enter on launch.** Clicking a launcher tile or pressing Enter
+on a window in Nav mode posts `aura.window.focus` to the iframe so
+apps that participate (Settings tile grid, Terminal's xterm) route
+keyboard focus to their first interactive element automatically.
+
+## 3. Workspaces
+
+The status bar shows numbered pills for each workspace. Click a pill
+to switch; the `+` adds a new one. **`Ctrl+Tab`** cycles forward,
+**`Ctrl+Shift+Tab`** backward. **`Ctrl+1` ... `Ctrl+9`** jumps direct.
+
+Each workspace remembers its own layout, focused view, and (in Free
+Window mode) per-window rectangles. Switching workspaces is instant
+— iframes from other workspaces stay in the DOM (display:none) so
+state survives.
+
+## 4. Layouts
+
+The chip next to the workspace pills cycles layouts:
+
+- **TILING** — square-ish grid (cols = ceil(√n)).
+- **COLUMNS** — one row, one column per window.
+- **ROWS** — one column, one row per window.
+- **FULLSCREEN** — only the focused view; siblings sit underneath.
+- **FREE WINDOW** — absolute positioning + drag + resize.
+
+Apps can declare a `preferredLayout` in their manifest; the
+workspace honours it when no user override is set.
+
+## 5. Process Manager
+
+**`Ctrl+Alt+M`** opens the panel. Per-instance you see:
+
+- The lifecycle state (`creating` → `started` → `resumed` → ...).
+- **Focus** (◉) — bring the iframe to front.
+- **+ Activity** (+) — only for `activityMode: 'multi'` apps;
+  opens a new view sharing the same backend.
+- **Stop** (■) — graceful: fires `onPause` → `onStop` → `onDestroy`,
+  then kills the sandbox.
+- **Kill** (⨂) — SIGKILL the sandbox immediately.
+
+`Esc` closes the panel.
+
+## What to read next
+
+- [Develop an App](/docs/develop-an-app) — scaffold one in 30 s.
+- [Core Concepts](/docs/core-concepts) — instance vs activity,
+  runtime modes, sandbox modes, the rest of the mental model.
