@@ -12,5 +12,12 @@
     "bash",
     "git",
     "claude"
+  ],
+  "intentFilters": [
+    {
+      "action": "aura.intent.action.VIEW",
+      "category": ["aura.intent.category.DEFAULT"],
+      "dataScheme": ["http", "https"]
+    }
   ]
 }

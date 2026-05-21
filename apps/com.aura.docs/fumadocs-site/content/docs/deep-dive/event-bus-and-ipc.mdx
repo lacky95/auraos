@@ -1,0 +1,175 @@
+---
+title: Event bus + IPC
+description: One typed EventEmitter, SSE fan-out, postMessage iframe bridge — three pipes, one truth.
+---
+
+**TL;DR.** The OS has one in-process `OsEventBus` (`eventemitter3` under
+the hood) with ~20 named events. The shell exposes it over SSE at
+`/api/apps/events?topics=…` for cross-process listeners. The browser
+layer talks to iframes through `postMessage` with documented message
+types. Everything else is a thin wrapper. The bus is **pinned to
+globalThis** so Vite's split module graph in dev doesn't accidentally
+create two copies.
+
+Source of truth:
+- Bus + event signatures: `packages/core/src/ipc/OsEventBus.ts`
+- Topic glob: `packages/core/src/ipc/topicMatcher.ts`
+- SSE endpoint: `packages/shell/src/pages/api/apps/events.ts`
+- postMessage protocol: read each `type` constant; canonical senders
+  are the proxy inject scripts in `packages/shell/src/pages/api/proxy/[id]/[...path].ts`.
+
+## The 20 events
+
+```
+app:stateChanged           { instanceId, appId, state, port|null }
+app:crashed                { instanceId, appId, error }
+app:installed              { appId }
+app:removed                { appId }
+app:enabledChanged         { appId, enabled }
+app:mruChanged             { appId, at }
+activity:opened            { activityId, parentInstanceId, appId, path, title?,
+                              minimizable?, stackParentId? }
+activity:closed            { activityId, parentInstanceId, appId }
+activity:focus             { activityId, parentInstanceId, appId }
+activity:navigated         { activityId, parentInstanceId, appId, path, title?,
+                              history[], breadcrumb, fromHistory }
+activity:breadcrumbChanged { activityId, parentInstanceId, appId, breadcrumb }
+theme:changed              { themeId, themeName, themeIdDark, themeIdLight,
+                              colorMode, resolvedMode, activeTone, framework }
+mode:changed               { themeId, themeIdDark, themeIdLight, colorMode,
+                              resolvedMode, activeTone, framework }
+notification               { appId, title, body }
+workspaces:changed         { workspaces[], activeWorkspaceId }
+workspace:activated        { workspaceId }
+kv:changed                 { namespace, key, value|null }
+nexus:install.complete     { id, record }
+nexus:update.complete      { id, record|null }
+nexus:uninstall.complete   { id }
+nexus:publish.complete     { id?, ref }
+```
+
+The shape is exhaustively typed via the `OsEvents` interface; emitting
+a payload that doesn't match the declared shape fails at TypeScript
+compile time.
+
+## Why globalThis pinning
+
+```ts
+const GLOBAL_KEY = '__aura_os_event_bus__';
+const existing = (globalThis as GlobalWithBus)[GLOBAL_KEY];
+export const OsEventBus: TypedEventBus = existing ?? new TypedEventBus();
+if (!existing) (globalThis as GlobalWithBus)[GLOBAL_KEY] = OsEventBus;
+```
+
+In dev, Astro's Vite SSR splits `@aura/core` into two module graphs:
+once for the route handler context, once for any plugin/middleware that
+imports it via a different path. Each graph would get its own
+`OsEventBus` instance with its own listener set. That breaks every
+multi-process subscriber. Pinning to `globalThis` defeats the split
+without requiring a singleton service.
+
+Production builds don't hit this — but the cheap defensive pattern stays.
+
+## Topic glob — the SSE filter
+
+`?topics=app:*,nexus:**` syntax compiles to a regex once at request time.
+Rules:
+- `*` matches one segment, NOT the `:` separator.
+  `app:*` → matches `app:stateChanged`, NOT `app:foo:bar`.
+- `**` matches any chars including separators.
+  `app:**` → matches both above.
+- `[]` empty list → matches nothing.
+- absent param → "firehose" (no filter, every event).
+
+Why this matters: a noisy subscriber that filters `notification` only
+should pass `?topics=notification` — the SSE endpoint never serialises
+events that don't match, so per-event cost is one regex test, not a
+JSON encode.
+
+## The SSE endpoint
+
+`GET /api/apps/events?topics=…` opens a persistent text/event-stream.
+Each event becomes one frame:
+
+```
+event: app:stateChanged
+data: {"instanceId":"com.aura.notepad","appId":"com.aura.notepad","state":"resumed","port":4007}
+
+```
+
+Subscribers in the browser use `new EventSource('/api/apps/events?topics=app:*')`.
+Subscribers in node (the CLI's `aura events` command) use plain
+`fetch()` with a streaming body. There is no WebSocket fallback — SSE
+is one-way and that's all the bus needs.
+
+Per-connection lifecycle:
+1. Parse `?topics=` → matcher closure
+2. Attach listeners to `OsEventBus` for `*` (the bus's wildcard, then we filter)
+3. On any event: matcher.test(topic) → write SSE frame → flush
+4. On `request.signal.aborted`: detach all listeners
+
+## postMessage bridge (browser ↔ iframe)
+
+This is the only IPC channel that crosses the security boundary into
+the app iframe. Apps can't reach the host's `OsEventBus` directly —
+they bridge via injected scripts that send/receive postMessage.
+
+### Host → iframe (the OS speaks)
+
+| `type` | Sent when | Payload |
+|---|---|---|
+| `aura.theme.changed` | `theme:changed` bus event fires | Full theme payload |
+| `aura.mode.changed` | `mode:changed` bus event fires | Mode payload |
+| `aura.key.claim` | A new keymap binding is registered | `{ combos: string[], generation: number }` |
+| `aura.key` | The user pressed a globally-claimed combo | `{ combo: string }` — for apps WITHOUT the key forwarder |
+| `aura.nav.back` | User pressed OS-Back | `{ activityId? }` |
+| `aura.activity.focus` | The shell activates this slot | `{ activityId? }` |
+| `aura.activity.blur` | The shell backgrounds this slot | `{ activityId? }` |
+| `aura.shutdown` | Iframe about to be unmounted | `{}` — apps close their streams + ack |
+
+### Iframe → host (the app speaks)
+
+| `type` | Sent when | Payload |
+|---|---|---|
+| `aura.console.relay` | Patched console.* or window error fires | `{ entry: { level, args, ts, stack? } }` |
+| `aura.key` | App's key forwarder caught a claimed combo | `{ combo: string }` |
+| `aura.identity` | Iframe loaded; sanity check | `{ appId, instanceId }` |
+| `aura.shutdown.done` | App finished its teardown | `{}` |
+| `aura.activity.navigate` | App called `osClient.activity.navigate()` | `{ path, title?, replace? }` |
+| `aura.activity.finish` | App called `osClient.activity.finish()` | `{ activityId? }` |
+| `aura.system.openLauncher` | App called `osClient.system.openLauncher()` | `{}` |
+
+The host validates every incoming message: `event.origin` must match
+the proxied iframe origin, `event.data.type` must start with `aura.`,
+and the message must reference an instance the sender actually owns
+(spoofing across activities is rejected).
+
+## Why three pipes and not one
+
+| Layer | Needed when | Why not the others |
+|---|---|---|
+| In-process emitter | Same process (shell ↔ AppManager ↔ proxy ↔ launcher) | postMessage doesn't exist server-side; SSE adds JSON overhead for callers in the same Node process |
+| SSE | Browser tab observers (Console app, Settings, status bar) + the CLI | postMessage can't reach a tab that's not iframed; in-process emitter doesn't cross the V8 boundary |
+| postMessage | Host ↔ iframe within one tab | SSE re-uses an iframe's connection budget; in-process emitter doesn't exist on the page |
+
+The bus is the *single source* — SSE and postMessage are both
+subscribers that re-broadcast.
+
+## Reading the source
+
+```sh
+aura jump --master
+$ less packages/core/src/ipc/OsEventBus.ts       # 121 lines, look at the OsEvents interface
+$ less packages/core/src/ipc/topicMatcher.ts     # 55 lines
+$ less packages/shell/src/pages/api/apps/events.ts          # SSE endpoint
+$ grep -rn "OsEventBus.emit" packages/             # every emit site
+$ grep -rn "aura.console.relay\|aura.key.claim" packages/shell  # postMessage senders
+```
+
+To trace why a UI didn't update, this order works 90% of the time:
+1. Did the emit fire? (`grep -rn "OsEventBus.emit('that:event'" packages/`)
+2. Did the SSE frame leave? (DevTools → Network → events → EventStream tab)
+3. Did the listener attach? (search the consumer for the topic glob)
+
+If 1 fires and 2 doesn't, the bus instance was duplicated — re-check
+the globalThis pin or the import path.

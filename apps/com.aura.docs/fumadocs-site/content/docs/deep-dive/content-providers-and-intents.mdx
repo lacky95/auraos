@@ -1,0 +1,197 @@
+---
+title: Content providers + intents
+description: Android-style data sharing — /api/data/<authority>/* routing, intent-filter scoring, permission gates.
+---
+
+**TL;DR.** Two complementary Android-inspired primitives let apps share
+data and dispatch work without naming each other directly:
+
+- **Content providers**: an app declares `dataProvider.authority` in its
+  manifest and serves `GET/POST/PUT/DELETE /api/data/<...>` from its own
+  HTTP server. Other apps fetch through the shell at
+  `/api/data/<authority>/<path>` — the shell proxies into the right
+  running instance and gates each request on the declared permission.
+
+- **Intents**: an app declares `intentFilters[]` in its manifest. Any
+  caller can `startIntent({ action, type?, uri?, category? })` and the
+  resolver scores every filter, returning a ranked list. The top
+  scorer's app gets an `onActivityCreate` with the intent's extras.
+
+Source of truth:
+- Provider registry: `packages/core/src/content/ContentProviderRegistry.ts`
+- Intent resolver: `packages/core/src/app-manager/IntentResolver.ts`
+- Manifest schema for both: `packages/core/src/types/manifest.ts`
+- Routing endpoints: `packages/shell/src/pages/api/data/` and `packages/shell/src/pages/api/intents/`
+
+## Content provider — the wire
+
+```
+                                         X-Aura-Permission: <perm-from-manifest>
+                                         X-Aura-Caller-App-Id: <caller>
+caller (app)                                       ↑
+   │ fetch('/api/data/notes/recent?n=5')           │
+   ▼                                               │
+┌───────────────────────────────────────────────┐  │
+│ shell:                                        │  │
+│   /api/data/[authority]/[...path].ts          │  │
+│   1. resolveProvider(authority, path)         │  │
+│   2. PermissionManager.assert(caller, perm)   │  │
+│   3. proxy to upstream: GET http://<host>:<port>
+│                            /api/data/recent?n=5│
+└───────────────────────────────────────────────┘
+         │
+         ▼
+provider app (com.aura.notepad)
+   src/pages/api/data/recent.ts → returns JSON
+```
+
+### Manifest shape
+
+```jsonc
+"dataProvider": {
+  "authority": "notes",                   // globally unique. Bare name, no scheme.
+  "providers": [
+    { "path": "/recent",   "readPerm":  "com.aura.notepad.read",
+                            "writePerm": "com.aura.notepad.write" },
+    { "path": "/notes",    "readPerm":  "com.aura.notepad.read",
+                            "writePerm": "com.aura.notepad.write" }
+  ]
+}
+```
+
+Read perms gate `GET`; write perms gate the other verbs. A perm of `null`
+or omitted means "no permission required for this verb".
+
+### Path matching
+
+`ContentProviderRegistry.resolveProvider(authority, requestPath)`:
+- exact match: `/recent` matches `path: '/recent'`
+- prefix match: `/notes/abc-123` matches `path: '/notes'` (sub-resource)
+- nothing else matches; returns `null`
+
+The provider implementation owns sub-resource routing internally
+(`src/pages/api/data/notes/[id].ts` etc).
+
+### Lifecycle integration
+
+`AppManager.transition(*, 'resumed')` calls
+`ContentProviderRegistry.registerInstance(instance, manifest)`. Stopping
+the instance clears the registration ONLY IF this exact instance is the
+one currently registered for the authority (the paranoia check exists
+because warm-pool reshuffles can interleave register/unregister calls).
+
+Two consequences:
+- A provider that's `paused` or `stopped` returns 503.
+- A provider that's still `starting` returns 503 even if it's about to
+  serve — callers should retry with backoff. (`OsClient.queryProvider`
+  does this transparently.)
+
+## Intent — the resolver
+
+Every app's manifest may declare `intentFilters[]`:
+
+```jsonc
+"intentFilters": [
+  {
+    "action":     "aura.intent.action.VIEW",
+    "category":   ["aura.intent.category.DEFAULT"],
+    "dataMime":   ["image/png", "image/jpeg"],
+    "dataScheme": ["file", "data"],
+    "priority":   0
+  }
+]
+```
+
+A caller dispatches:
+
+```ts
+await osClient.startIntent({
+  action: 'aura.intent.action.VIEW',
+  type:   'image/png',
+  uri:    'file:///data/screenshots/2026-05-21.png',
+  extras: { fromApp: 'com.aura.console' }
+});
+```
+
+`IntentResolver.resolve(intent)` returns ranked matches. The OS picks
+the top scorer (or opens the chooser when multiple tie at the top).
+
+### Scoring rules (in order of contribution)
+
+```
+action equal-match?  no → drop filter
+                    yes → continue
+MIME exact match?    +100
+MIME major/* match?   +50
+MIME */*  match?      +10
+MIME declared but no match → drop filter
+Scheme match?         +30
+Scheme declared but no match → drop filter
+Each matched category +5 per
++ manifest.priority   (added as-is, signed int)
+```
+
+A `null` return from `scoreFilter()` means "this filter declared a
+constraint the intent didn't satisfy" — the filter is **dropped**
+entirely (not 0-scored).
+
+### Why this design — and how it differs from "just import each other"
+
+The intent system answers four questions that direct imports can't:
+1. Multiple apps can claim the same action; the user picks.
+2. The user can pin a default per-action (settings UI is planned).
+3. Apps can be installed/removed without other apps recompiling.
+4. The resolver returns scores, so analytics can see what was almost picked.
+
+For internal coordination between two apps you've both written, a
+content provider is usually the better tool — the wire is shorter.
+
+## Permission strings
+
+The PermissionManager checks string permissions against the caller's
+manifest. Three shapes the system understands:
+
+| Pattern | Example | Where it's used |
+|---|---|---|
+| `<provider-app-id>.read` / `.write` | `com.aura.notepad.read` | Granted to callers in the caller's manifest `permissions: ["com.aura.notepad.read"]` |
+| `system.kv.os.<key>.read` / `.write` | `system.kv.os.theme.read` | KV store namespace, OS scope |
+| `system.kv.app.<own-id>.<key>.<verb>` | `system.kv.app.com.aura.notepad.notes.write` | KV store namespace, app scope. App always has `.read`/`.write` to its own scope without declaring it |
+
+The grant is in the **caller's** manifest, not the provider's. Provider
+declares what it needs; caller declares what it asks for; the shell
+mediates.
+
+## Endpoint summary
+
+```
+GET  /api/data/<authority>/<path>   → proxied GET    (readPerm check)
+POST /api/data/<authority>/<path>   → proxied POST   (writePerm check)
+PUT  /api/data/<authority>/<path>   → proxied PUT    (writePerm check)
+DEL  /api/data/<authority>/<path>   → proxied DEL    (writePerm check)
+
+POST /api/intents/resolve           → returns IntentMatch[] (preview)
+POST /api/intents/start             → dispatch + spawn handler activity
+```
+
+The intent endpoints don't carry user payload through the shell. The
+shell only orchestrates: resolve the filter, spawn the handler app's
+new activity, hand the `intent` body to that activity's
+`onActivityCreate` (where it lands in `extras`).
+
+## Reading the source
+
+```sh
+aura jump --master
+$ less packages/core/src/content/ContentProviderRegistry.ts        # 70 lines
+$ less packages/core/src/app-manager/IntentResolver.ts             # 152 lines, well-commented
+$ less packages/shell/src/pages/api/data/\[authority\]/\[...path\].ts
+$ less packages/shell/src/pages/api/intents/resolve.ts
+$ less packages/shell/src/pages/api/intents/start.ts
+$ grep -rn "intentFilters" apps/                  # which apps declare what
+$ grep -rn "dataProvider" apps/                   # which apps offer what
+```
+
+When chasing "why didn't my intent open the app?" the first move is
+`POST /api/intents/resolve` with the intent body — the response shows
+the score for every candidate, so you can see whether the filter wasn't
+matched at all or just out-scored.

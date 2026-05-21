@@ -1,0 +1,245 @@
+---
+title: Proxy + iframe
+description: Every step of the /api/proxy/<id>/<path> pipeline — identity gate, HTML rewriter, JS module URL rewriter, WS upgrade.
+---
+
+**TL;DR.** The shell hosts a single Astro route at
+`/api/proxy/[id]/[...path].ts` that handles every byte going between the
+browser and an app instance. It resolves the instance, forwards the request
+upstream, identity-gates the response, optionally rewrites HTML (inject
+`<base>`, meta, console relay, keystroke forwarder) and JS module URLs
+(`/@fs/...` → proxied), strips `Content-Encoding`/`Content-Length` to undo
+Node fetch's auto-decompression, and streams the body back to the browser.
+WebSocket upgrades take a separate path through a Vite plugin.
+
+Source of truth: `packages/shell/src/pages/api/proxy/[id]/[...path].ts`.
+
+## URL shape
+
+```
+/api/proxy/<id>/<path>?<query>
+            ▲    ▲
+            │    └── `[...path]` — everything after the id is forwarded verbatim
+            └────── instance id (or bare app id; the resolver picks the live instance)
+```
+
+Activity routing piggybacks on a magic query param:
+
+```
+/api/proxy/com.aura.notepad/?_aura_activity=com.aura.notepad%23a3
+                                           ▲
+                                           └── proxy strips this and sets
+                                               X-Aura-Activity-Id on the upstream request
+```
+
+## Pipeline, in order
+
+```
+incoming request
+      │
+      ▼
+┌─────────────────────────────────────────────────┐
+│ 1. Resolve instance                             │
+│    - exact instanceId match (live state)        │
+│    - fall back: first non-pool live instance    │
+│      of the bare appId                          │
+│    - 503 if no candidate has a bound port       │
+└─────────────────────────────────────────────────┘
+      │
+      ▼
+┌─────────────────────────────────────────────────┐
+│ 2. Service guard                                │
+│    if manifest.componentType === 'service'      │
+│    and path doesn't start with 'api/'           │
+│    → 403 (themed HTML for browsers, JSON for API)│
+└─────────────────────────────────────────────────┘
+      │
+      ▼
+┌─────────────────────────────────────────────────┐
+│ 3. /@vite/* short-circuit                       │
+│    return a no-op ES module stub                │
+│    (the iframe can't reach upstream's HMR WS)   │
+└─────────────────────────────────────────────────┘
+      │
+      ▼
+┌─────────────────────────────────────────────────┐
+│ 4. Activity id extraction                       │
+│    strip `?_aura_activity=...` from query       │
+│    set X-Aura-Activity-Id on the upstream req   │
+└─────────────────────────────────────────────────┘
+      │
+      ▼
+┌─────────────────────────────────────────────────┐
+│ 5. Vite virtual-module query escaping           │
+│    rename `?astro` / `?vue` / `?svelte`         │
+│    so the SHELL's Vite middleware ignores them; │
+│    restore before forwarding upstream           │
+└─────────────────────────────────────────────────┘
+      │
+      ▼
+┌─────────────────────────────────────────────────┐
+│ 6. Build upstream URL                           │
+│    - host: PRoot → 127.0.0.1                    │
+│             container → aura-<instanceId>       │
+│    - port: from AppManager.getUpstreamUrl()     │
+│    - path: forwarded verbatim, OR               │
+│      `/api/proxy/<id>/<path>` if manifest's     │
+│      proxy.preservePrefix is true (basePath)    │
+└─────────────────────────────────────────────────┘
+      │
+      ▼
+┌─────────────────────────────────────────────────┐
+│ 7. fetch(upstream) — headers stamped:           │
+│    X-Aura-App-Id, X-Aura-Instance-Id,           │
+│    X-Aura-Activity-Id (if applicable)           │
+│    body streamed (duplex: 'half')               │
+└─────────────────────────────────────────────────┘
+      │
+      ▼
+┌─────────────────────────────────────────────────┐
+│ 8. IDENTITY GATE on the response                │
+│    if response's X-Aura-App-Id is set AND       │
+│    doesn't match the resolved instance →        │
+│    cancel body, return 502 + log error          │
+│    (port-squat protection)                      │
+└─────────────────────────────────────────────────┘
+      │
+      ▼
+┌─────────────────────────────────────────────────┐
+│ 9. If text/html: HTML rewriter (per-manifest)   │
+│    9a. strip <script src=".../@vite/client">    │
+│    9b. cfg.rewriteHtml !== 'none' →             │
+│        rewrite src/href/action/component-url/    │
+│        renderer-url/before-hydration-url        │
+│    9c. cfg.rewriteHtml === 'astro' →            │
+│        inject <base href="/api/proxy/<id>/">    │
+│    9d. always: inject <meta name="aura-app-id"> │
+│        + aura-instance-id                       │
+│    9e. cfg.injectMeta → emit theme + keymap +   │
+│        activity + base-path meta blob           │
+│    9f. cfg.injectIdentityScript →               │
+│        <script>window.AURA_APP_*</script>       │
+│    9g. cfg.injectConsoleRelay → console relay   │
+│    9h. cfg.injectKeyForwarder → keystroke fwd   │
+└─────────────────────────────────────────────────┘
+      │
+      ▼
+┌─────────────────────────────────────────────────┐
+│ 10. If JS/TS and cfg.rewriteHtml !== 'none':    │
+│     rewrite quoted `/@fs/...`, `/@vite/...`,    │
+│     `/@id/...`, `/node_modules/...` strings     │
+│     to proxied paths                            │
+└─────────────────────────────────────────────────┘
+      │
+      ▼
+┌─────────────────────────────────────────────────┐
+│ 11. Strip Content-Encoding + Content-Length    │
+│     from response headers                       │
+│     (Node fetch auto-decompresses but leaves    │
+│      headers stale — would break the browser)   │
+└─────────────────────────────────────────────────┘
+      │
+      ▼
+   browser receives body
+```
+
+## ProxyConfig — the per-manifest knobs
+
+Resolved per request via `resolveProxyConfig(manifest)` from
+`packages/core/src/types/manifest.ts`. Defaults vary by `runtime`:
+
+| Flag | Astro default | Raw default | Effect when true |
+|---|---|---|---|
+| `rewriteHtml` | `'astro'` | `'none'` | `'astro'` = attr rewrite + `<base>`; `'absolute'` = attrs only; `'none'` = passthrough |
+| `preservePrefix` | `false` | `false` | Forward `/api/proxy/<id>/<path>` to upstream as-is (for Next basePath etc.) |
+| `injectMeta` | `true` | `true` | Emit theme/keymap/activity meta tags into `<head>` |
+| `injectConsoleRelay` | `true` | `true` | postMessage every `console.*` + error to the parent (shell collects them) |
+| `injectKeyForwarder` | `true` | `true` | Forward claimed OS-modifier combos to the dispatcher |
+| `injectIdentityScript` | `true` | `true` | `window.AURA_APP_BASE_PATH/APP_ID/INSTANCE_ID` globals |
+
+Set in the manifest:
+
+```jsonc
+"runtime": "raw",
+"proxy": {
+  "rewriteHtml": "none",
+  "preservePrefix": true,
+  "injectConsoleRelay": false
+}
+```
+
+## The console relay (injected per HTML response)
+
+Patches `window.console.*` to also `postMessage({ type: 'aura.console.relay', entry: {...} }, '*')`
+to the parent. The shell's `OSLayout` listens for these messages and
+re-broadcasts to subscribers (the Console app, log persistence WS).
+
+Additionally:
+- `window.addEventListener('error')` → relayed as level=error
+- `window.addEventListener('unhandledrejection')` → relayed as level=error
+- `window.fetch` wrapped: non-2xx responses become a warn/error log
+- `window.EventSource` + `window.WebSocket` are tracked so the shell can
+  close them cleanly when an iframe is about to be unmounted
+- `aura.shutdown` postMessage → close every tracked stream, ack with
+  `aura.shutdown.done`
+
+Full source: lines 357–385 of the proxy file.
+
+## The key forwarder (also injected per HTML response)
+
+Mirrors the dispatcher's combo logic so the iframe and the shell agree
+on what counts as a "claim". Tracks LShift/RShift/LCtrl/RCtrl etc. via
+`KeyboardEvent.code`, builds a canonical combo string, expands generic
+siblings (`Shift+Enter` matches `RShift+Enter`), and only forwards a
+`postMessage({ type: 'aura.key', combo })` when the combo is in the
+claim set the shell broadcast earlier via `aura.key.claim`.
+
+Result: an app that integrates nothing keeps every native browser
+keyboard behaviour — text inputs, IME, Ctrl+A/C/Z, native Tab focus —
+while the OS still gets the combos it cares about.
+
+## The WebSocket upgrade chain — a SEPARATE plugin
+
+The Astro route only handles HTTP. WS upgrades go through a Vite plugin
+in `packages/shell/astro.config.mjs:62+` (`wsProxyPlugin`). It listens
+for `server.httpServer.on('upgrade')` events, parses the same
+`/api/proxy/<instanceId>/<path>` shape from `req.url`, resolves the
+upstream via a localhost HTTP call to `/api/apps` (NOT via a direct
+`@aura/core` import — Vite SSR module-graph splits would create a
+second AppManager singleton), and proxies the upgrade through using
+`ws` v8.
+
+The activity-id query param works there too: `_aura_activity` is
+stripped and stamped as `X-Aura-Activity-Id` on the upgrade request.
+
+## Failure modes
+
+| Symptom | Cause | Where to look |
+|---|---|---|
+| **503** on iframe load | Instance not yet `resumed`; warm-pool race | `AppManager.start()` + `waitHealthy` |
+| **502** with `[proxy] identity mismatch` log | Different process bound the port; squatter | Identity gate around line 167 of the proxy file |
+| Blank iframe, no errors | Site set `X-Frame-Options: DENY`; this is browser-enforced and we can't dodge it from JS | n/a — host-level WebView only |
+| `NS_ERROR_CORRUPTED_CONTENT` for assets | Forgot to strip `Content-Encoding`; Node fetch decompressed but headers still said gzip | Strip block around line 511 |
+| **404** on `/api/lifecycle/health` for a raw app | Next.js `basePath` mounts routes only under the prefix; missing `proxy.preservePrefix: true` | The lifecycle URL builder in `ProotRunner.ts` honours `proxy.preservePrefix` |
+| HMR storms / `/_next/webpack-hmr` reconnect spam | `wsProxyPlugin` forwards the upgrade but the inner framework's WS client can't auth | Known limitation; turn HMR off in the app's `vite.server.hmr: false` |
+
+## Reading the proxy source
+
+```sh
+aura jump --master
+$ less packages/shell/src/pages/api/proxy/\[id\]/\[...path\].ts
+# Sections in order:
+# - lines 1-50    imports + DEFAULT_PROXY_CONFIG
+# - lines 50-90   instance resolve + service guard
+# - lines 92-118  /@vite/* stub
+# - lines 120-145 activity id extraction + upstream URL build
+# - lines 162-178 identity gate (the 502 path)
+# - lines 200-300 HTML rewriter
+# - lines 300-475 inject blocks (meta / relay / forwarder / id-script)
+# - lines 480-510 JS module URL rewriter
+# - lines 510+   Content-Encoding stripping + final response
+```
+
+When you change this file the AppManager singleton **does not** need to
+be re-initialised — Astro/Vite reloads the route on save. But the WS
+plugin lives in `astro.config.mjs`, which **does** require a shell restart.

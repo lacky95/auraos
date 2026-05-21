@@ -14,7 +14,12 @@ import { getAppManager } from '@aura/core';
 // bottom listens for `app:enabledChanged` on the OS event bus and just
 // flips data-enabled on the matching tile. CSS hides `[data-enabled=false]`.
 const mgr = getAppManager();
-const apps: AppManifest[] = mgr.getManifests();
+// Services are headless components with no UI surface. Their launcher tile
+// would only ever produce the SERVICE-HAS-NO-UI placeholder when clicked,
+// so we hide them from the grid entirely. Start/stop is done from Process
+// Manager (or the CLI). Activity-only apps that bundle a service still
+// show up here — only the `componentType: 'service'` apps are filtered.
+const apps: AppManifest[] = mgr.getManifests().filter((m) => m.componentType !== 'service');
 const enabledMap: Record<string, boolean> = mgr.getEnabledState();
 ---
 <aside id="lo-panel" class="lo-panel" aria-hidden="true">
@@ -680,7 +685,13 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
     try {
       const r = await fetch('/api/apps');
       if (!r.ok) return;
-      const apps = await r.json() as Array<{ manifest: { id: string; name: string; icon?: string }; enabled: boolean }>;
+      const apps = (await r.json() as Array<{
+        manifest: { id: string; name: string; icon?: string; componentType?: 'activity' | 'service' };
+        enabled: boolean;
+      }>)
+        // Services are headless — see the SSR filter at the top of this
+        // file for the rationale.
+        .filter((a) => a.manifest.componentType !== 'service');
       // Sort by name to match the SSR ordering (alphabetical via Object key
       // iteration order; getManifests doesn't guarantee, but that's close).
       apps.sort((a, b) => a.manifest.name.localeCompare(b.manifest.name));

@@ -1,0 +1,196 @@
+---
+title: Keymap dispatcher
+description: Two-layer keymap system — registry + dispatcher, browser-default guarantee, scope precedence.
+---
+
+**TL;DR.** Two singletons cooperate to route every keystroke without
+breaking native browser behaviour:
+
+- **`KeymapRegistry`** (server, `packages/core/src/keymap/`) — the
+  catalogue of every known action. OS actions hard-coded; app actions
+  reloaded from manifests after every AppRegistry change.
+- **`KeyDispatcher`** (browser, `packages/shell/src/lib/keyDispatcher.ts`)
+  — turns a keypress into an action dispatch. Knows the active mode,
+  consults user bindings vs. defaults, broadcasts a *claim list* to
+  every iframe so apps know which combos to forward back up.
+
+The design invariant: **apps that don't touch the OS keymap keep every
+native browser keyboard behaviour** — text input, IME, Tab focus, Ctrl+A/C/Z,
+the lot. Only **claimed** combos cross back into the shell.
+
+Source of truth:
+- `packages/core/src/keymap/KeymapRegistry.ts` (152 lines)
+- `packages/core/src/keymap/canonical.ts` — combo string normalisation
+- `packages/core/src/keymap/types.ts` — `KeyAction`, `KeyScope`, `DEFAULT_OS_ACTIONS`
+- `packages/shell/src/lib/keyDispatcher.ts` — browser-side router
+- `packages/shell/src/pages/api/os/keymap.ts` — SSR endpoint that ships the catalogue + user bindings to the page
+
+## The four scopes
+
+```
+os-always       Always claimed. Survives iframe focus.
+                Examples: aura.system.toggleLauncher (Ctrl+Alt+Space)
+
+os-modifier     A modifier-only press (Ctrl, Alt, Shift, Super) that the OS
+                cares about. Claim is tight: only the modifier itself, not
+                modifier+letter. Examples: hold Alt to show window picker.
+
+os-nav          Claimed ONLY in Nav mode. Examples: arrow keys to move
+                between windows. In App mode the same keys go to the iframe.
+
+app             An action declared by an app via manifest.keymapActions.
+                Claimed ONLY when that app's iframe is focused. Always
+                handled inside the iframe by an osClient.keymap.on listener.
+```
+
+`KeymapRegistry.resolveDefault(combo, mode)` walks the catalogue and
+returns every action whose `defaultCombo` matches AND whose scope is
+reachable from `mode`. Multiple matches happen when an OS action and an
+app action both claim the same combo — scope precedence breaks the tie
+at dispatch time.
+
+## Two input sources, one dispatcher
+
+```
+                         ┌─────────────────────────┐
+                         │   KeyDispatcher (browser)│
+                         │   mode: 'nav' | 'app'    │
+                         └────────┬─────────┬──────┘
+                                  │         │
+       window.keydown ────────────┘         └─────── postMessage
+       (OSLayout, no iframe focus)                   { type: 'aura.key', combo }
+                                                     from focused iframe
+```
+
+The first path fires when nothing in an iframe has keyboard focus (the
+shell's chrome is interactive, or the user is in Nav mode). The second
+path fires when an app's iframe is focused — but only for combos the
+shell told it to forward.
+
+## The claim list (the keep-it-quiet contract)
+
+The shell maintains:
+
+```ts
+claims = {
+  os: string[],                              // os-always + os-modifier + os-nav (if in Nav mode)
+  perApp: Map<appId, string[]>,              // app-scope combos this app subscribed to
+}
+```
+
+After bindings change, the dispatcher rebuilds the list and
+postMessages each iframe its applicable subset:
+
+```js
+{ type: 'aura.key.claim', combos: [...os, ...perApp.get(thisAppId) ?? []], generation: N }
+```
+
+Inside the iframe (the proxy-injected key forwarder) maintains its own
+canonical-combo machine — duplicates the dispatcher's logic — and ONLY
+postMessages keys whose canonical combo is in the claim set. Everything
+else gets the browser's native handling.
+
+This is why a fresh app with no SDK integration "just works" — the
+claim list starts at the OS minimum, and the forwarder forwards
+nothing else.
+
+## Modifier-state tracking
+
+Combos like `RShift+Enter` need to distinguish left vs. right modifiers.
+The dispatcher updates a per-side `ModifierState` from every modifier
+keydown/keyup:
+
+```ts
+state.modifierState.shift.left  = down/up
+state.modifierState.shift.right = down/up
+state.modifierState.ctrl.left/right
+state.modifierState.alt.left/right
+state.modifierState.super.left/right
+```
+
+When a non-modifier keydown arrives, `comboFromEvent` reads this state
+to build the canonical combo, choosing `LShift` vs `RShift` (or the
+side-agnostic `Shift` when both are down) based on which side is held.
+
+`expandCombo('Shift+Enter')` returns `['Shift+Enter', 'LShift+Enter', 'RShift+Enter']`
+— the dispatcher tries each in priority order against the bindings, so
+a generic `Shift+Enter` binding catches every side combination but a
+specific `RShift+Enter` binding wins when both exist.
+
+## Mode flip — when Nav claims arrows back
+
+```
+App mode (default):                  Nav mode (overlay):
+- Arrow keys → iframe                - Arrow keys → window picker
+- Enter      → iframe                - Enter      → activate window
+- Escape     → iframe                - Escape     → exit Nav mode
+- Backspace  → iframe                - Backspace  → chrome-select sub-mode
+```
+
+`setMode('nav')` triggers `notifyClaims()` which postMessages every
+iframe its updated claim set. App iframes immediately stop forwarding
+arrows/Enter — the shell starts claiming them.
+
+When the user exits Nav mode (Escape, click into a window), the reverse
+happens. App keystrokes resume native handling within one frame.
+
+## Why two singletons (registry + dispatcher) and not one
+
+| | Registry (server) | Dispatcher (browser) |
+|---|---|---|
+| Lives in | Node, shell process | Browser tab, every page load |
+| Authoritative for | What actions exist | Active mode, what's bound, what's claimed |
+| Pinned to globalThis | Yes (Vite SSR split) | No — fresh per tab |
+| Sees user bindings | No (those are KV state) | Yes (subscribes to `kv:changed` for `os/keymap`) |
+| Reloads when | `AppRegistry` fires | `OsClient` keymap SSE frame, or initial SSR |
+
+The registry can't be in the browser because every tab would refetch
+manifests. The dispatcher can't be on the server because keystrokes
+happen in the browser. They communicate through one SSR-emitted JSON
+blob on `OSLayout` mount, plus SSE frames for live updates.
+
+## User binding precedence
+
+A user binding in KV `os/keymap` is `{ actionId: 'app.com.aura.notepad.save', combo: 'Ctrl+s' }`.
+
+```
+Resolution order for a keypress:
+1. canonicalize the press → "Ctrl+KeyS"
+2. user binding for "Ctrl+KeyS"?           → use that actionId
+3. registry default for "Ctrl+KeyS" (mode-filtered)?  → use that actionId
+4. no match → drop, browser handles natively
+```
+
+Step 2 means a user remap shadows the default entirely. If the user
+binds Ctrl+S to a different action, the original default holder
+(notepad save) becomes unreachable via keypress until either the user
+unbinds the override or notepad's manifest declares a different
+`defaultCombo`.
+
+The `app.` action id prefix is mandatory and applied automatically by
+`reloadFromManifests` — no app can declare an OS-scoped action just by
+naming it `aura.system.*`.
+
+## Reading the source
+
+```sh
+aura jump --master
+$ less packages/core/src/keymap/types.ts                # KeyAction, KeyScope, DEFAULT_OS_ACTIONS
+$ less packages/core/src/keymap/canonical.ts            # canonicalize, expandCombo, comboFromEvent
+$ less packages/core/src/keymap/KeymapRegistry.ts       # 152 lines
+$ less packages/shell/src/lib/keyDispatcher.ts          # ~700 lines, dense
+$ less packages/shell/src/pages/api/os/keymap.ts        # SSR endpoint
+$ grep -rn "keymapActions" apps/                        # apps that declare actions
+$ grep -rn "osClient.keymap.on" apps/                   # apps that listen
+```
+
+When a keystroke "doesn't work" the diagnostic order is:
+1. **In the iframe forwarder, did the combo end up in the claim list?**
+   (look at the `aura.key.claim` postMessage payload — DevTools).
+2. **Did the iframe postMessage `aura.key` back?** (Network tab → Frames).
+3. **Did the dispatcher find an action?** Check `osClient.keymap.getBinding('your.action')` — `null` means no binding.
+4. **Did the handler fire?** Set a breakpoint or `console.log` in the registered handler.
+
+90% of "shortcut broken" tickets land at step 1: the action was never
+declared in the manifest, so it never enters the claim list, so the
+forwarder lets the browser eat the keypress.

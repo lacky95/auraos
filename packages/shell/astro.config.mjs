@@ -58,6 +58,41 @@ async function fetchAppsList() {
   return res.json();
 }
 
+/**
+ * Vite plugin: intercept `/api/proxy/<id>/<path>?astro|?vue|?svelte` requests
+ * BEFORE vite-plugin-astro sees them. The shell's Vite middleware claims any
+ * URL with an `?astro` query and tries to compile the file relative to
+ * `packages/shell/`. For proxy paths the file lives in `apps/<id>/...`, not in
+ * the shell — compilation fails with `No cached compile metadata`.
+ *
+ * The proxy route handler already escapes these queries on the *outbound* HTML
+ * side (?astro → ?_aura_vite_astro=1). But if a request arrives with the
+ * un-escaped query directly (DevTools sourcemap probe, an HMR ping, a hand-
+ * issued curl, anything), it skips the proxy route. Rewriting the URL here
+ * routes it back through the normal proxy handler, which then forwards the
+ * unescaped query upstream to the app's own Vite.
+ *
+ * Registered WITHOUT returning a function from configureServer so it lands
+ * BEFORE Vite's internal middlewares (and therefore before vite-plugin-astro).
+ */
+function proxyViteQueryEscape() {
+  return {
+    name: 'aura-proxy-vite-query-escape',
+    configureServer(server) {
+      server.middlewares.use((req, _res, next) => {
+        const url = req.url;
+        if (!url || !url.startsWith('/api/proxy/')) return next();
+        if (!/[?&](astro|vue|svelte)(=|&|$)/.test(url)) return next();
+        req.url = url
+          .replace(/(\?|&)astro(?=&|$)/g,    '$1_aura_vite_astro=1')
+          .replace(/(\?|&)vue(?=&|=|$)/g,    '$1_aura_vite_vue')
+          .replace(/(\?|&)svelte(?=&|=|$)/g, '$1_aura_vite_svelte');
+        next();
+      });
+    },
+  };
+}
+
 /** Vite plugin: proxy WebSocket upgrades for /api/proxy/[appId]/[path] */
 function wsProxyPlugin() {
   return {
@@ -329,6 +364,6 @@ export default defineConfig({
     },
     // tailwindcss() must come before wsProxyPlugin so its content-scanning
     // hooks run on every transformed module.
-    plugins: [tailwindcss(), wsProxyPlugin(), sioPlugin()],
+    plugins: [tailwindcss(), proxyViteQueryEscape(), wsProxyPlugin(), sioPlugin()],
   },
 });

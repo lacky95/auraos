@@ -20,8 +20,30 @@
  * permit framing (lite/AMP variants, many docs sites, our own AuraOS
  * pages, etc.) work fine.
  */
+import { readIdentityHeaders } from '@aura/app-sdk';
 
 const DEFAULT_HOME = 'https://duckduckgo.com/?q=AuraOS';
+
+// Initial URL seeding. When the OS dispatches a VIEW intent (e.g. a
+// host-intercepted popup), onActivityCreate builds the iframe URL as
+// `/?url=<encoded>` so the engine paints the right destination on first
+// load. Without a `?url=`, we fall back to DEFAULT_HOME. The home button
+// always navigates to DEFAULT_HOME regardless — see `data-home` below.
+const rawUrl = Astro.url.searchParams.get('url');
+const INITIAL_URL = rawUrl && /^https?:\/\//i.test(rawUrl) ? rawUrl : DEFAULT_HOME;
+
+// Identity for the host's URL-relay script. Every nested frame the
+// WebView host loads runs an injected script that postMessages
+// `aura.host.url-changed` to `window.top` on every navigation (SPA
+// pushState, popstate, hashchange, title mutations, …). The script
+// includes `instanceId` + `activityId` parsed from the iframe's
+// `window.name`, so we encode them here. The shell routes the event
+// back down to THIS browser activity by `activityId`.
+const ids = readIdentityHeaders(Astro.request);
+const FRAME_NAME = JSON.stringify({
+  instanceId: ids.instanceId ?? null,
+  activityId: ids.activityId ?? null,
+});
 ---
 <!DOCTYPE html>
 <html lang="en">
@@ -40,7 +62,7 @@ const DEFAULT_HOME = 'https://duckduckgo.com/?q=AuraOS';
         <button id="debug-btn"   title="Debug panel"     aria-label="Debug" aria-pressed="false">⚙</button>
       </div>
       <form id="url-form" class="url-form" autocomplete="off">
-        <input id="url-input" type="text" spellcheck="false" placeholder="Enter URL or search query…" />
+        <input id="url-input" type="text" spellcheck="false" placeholder="Enter URL or search query…" value={INITIAL_URL} />
         <button id="go-btn" type="submit" title="Go (Enter)">GO</button>
       </form>
     </header>
@@ -50,7 +72,9 @@ const DEFAULT_HOME = 'https://duckduckgo.com/?q=AuraOS';
         id="engine"
         class="engine"
         title="Web view"
-        src={DEFAULT_HOME}
+        name={FRAME_NAME}
+        data-home={DEFAULT_HOME}
+        src={INITIAL_URL}
         referrerpolicy="no-referrer-when-downgrade"
         allow="clipboard-read; clipboard-write; fullscreen"
         sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
@@ -137,6 +161,17 @@ const DEFAULT_HOME = 'https://duckduckgo.com/?q=AuraOS';
         letter-spacing: 0.02em;
       }
       .url-form input:focus { outline: none; border-color: var(--aura-color-primary, #00ff41); }
+      /* When the engine has navigated cross-origin since the URL bar was
+       * last truthful (link click / form submit inside the iframe taking
+       * us off-host), browser security prevents reading the new URL. We
+       * dim the bar and prefix it with `≈` to make that visible — the
+       * value shown is the *last known* URL, not necessarily the current
+       * one. Cleared the moment we navigate ourselves or capture a fresh
+       * same-origin URL from the load event. */
+      .url-form input[data-stale="true"] {
+        color: var(--aura-color-text-dim, #888);
+        font-style: italic;
+      }
       .url-form button {
         font: inherit;
         font-size: 0.75rem;
@@ -311,10 +346,15 @@ const DEFAULT_HOME = 'https://duckduckgo.com/?q=AuraOS';
         var dbgClear = document.getElementById('debug-clear');
         var dbgClose = document.getElementById('debug-close');
 
-        var HOME = engine.getAttribute('src');
+        // HOME = the home-button target (DEFAULT_HOME, baked in by SSR
+        // via the iframe's data-home attribute). The engine's initial
+        // `src` may differ when an intent dispatched us at a specific
+        // URL — that's the first history entry, not the home target.
+        var HOME = engine.dataset.home || engine.getAttribute('src');
+        var INITIAL = engine.getAttribute('src');
         // History stack of URLs. cursor points at the currently-visible
         // entry. Pushing a new URL truncates anything past the cursor.
-        var history = [HOME];
+        var history = [INITIAL];
         var cursor = 0;
         // True while we triggered the next iframe `load`; lets us skip
         // history pushes for back/forward jumps.
@@ -330,7 +370,17 @@ const DEFAULT_HOME = 'https://duckduckgo.com/?q=AuraOS';
           if (/^[^\s]+\.[^\s]+$/.test(v)) return 'https://' + v;        // looks like a host
           return 'https://duckduckgo.com/?q=' + encodeURIComponent(v);  // fallthrough: search
         }
-        function syncInputFromHistory() { urlInput.value = history[cursor] || ''; }
+        function syncInputFromHistory() {
+          // Don't clobber the user mid-edit — if they have the URL bar
+          // focused and have typed something, leave their input alone
+          // and let the next submit / blur take over.
+          if (document.activeElement === urlInput) return;
+          urlInput.value = history[cursor] || '';
+        }
+        function setUrlStale(stale) {
+          if (stale) urlInput.setAttribute('data-stale', 'true');
+          else       urlInput.removeAttribute('data-stale');
+        }
         function syncButtons() {
           backBtn.disabled = cursor <= 0;
           fwdBtn.disabled  = cursor >= history.length - 1;
@@ -374,6 +424,8 @@ const DEFAULT_HOME = 'https://duckduckgo.com/?q=AuraOS';
             cursor = history.length - 1;
           }
           suppressPush = true;
+          // We're setting the src ourselves — the URL bar is truthful again.
+          setUrlStale(false);
           chrome.dataset.loading = 'true';
           navStartedAt = performance.now();
           dbgSetState('loading');
@@ -412,8 +464,14 @@ const DEFAULT_HOME = 'https://duckduckgo.com/?q=AuraOS';
               syncButtons();
               dbgLog_line('ok', 'same-origin nav captured → ' + real);
             }
+            // Successfully read the URL — the bar is truthful.
+            setUrlStale(false);
             dbgLog_line('ok', 'load ' + ms + 'ms');
           } catch (_) {
+            // Cross-origin: we got a load event so a navigation happened,
+            // but browser security forbids reading where to. If this load
+            // wasn't our own setAttribute, the URL bar value is now stale.
+            if (!suppressPush) setUrlStale(true);
             dbgLog_line('ok', 'load ' + ms + 'ms (cross-origin, can\'t read URL)');
           }
           suppressPush = false;
@@ -439,6 +497,39 @@ const DEFAULT_HOME = 'https://duckduckgo.com/?q=AuraOS';
         });
         reloadB.addEventListener('click', function () { navigate(history[cursor], { push: false }); });
         homeBtn.addEventListener('click', function () { navigate(HOME); });
+
+        // ── Host URL-relay (cross-origin URL tracking) ───────────
+        // The WebView host injects a script into every nested frame
+        // that postMessages `aura.host.url-changed` to window.top on
+        // every navigation (initial / pushState / replaceState /
+        // popstate / hashchange / title). The shell receives those
+        // and forwards the matching event back to *this* browser
+        // activity. We update the URL bar + in-memory history so
+        // back/forward and the address bar reflect the real iframe
+        // location even across origins.
+        window.addEventListener('message', function (e) {
+          var d = e.data;
+          if (!d || typeof d !== 'object') return;
+          if (d.type !== 'aura.host.url-changed') return;
+          if (d.source !== 'host') return;
+          if (typeof d.url !== 'string' || !d.url) return;
+          var reason = typeof d.reason === 'string' ? d.reason : 'unknown';
+          // `title` arrives without a URL change — leave history alone,
+          // just refresh the URL bar styling to "fresh".
+          if (reason !== 'title' && d.url !== history[cursor]) {
+            history.length = cursor + 1;
+            history.push(d.url);
+            cursor = history.length - 1;
+            syncButtons();
+          }
+          // Force the URL bar even if the user is mid-edit? No: keep
+          // syncInputFromHistory's blur-respect rule. The bar will
+          // re-sync on next blur / submit.
+          syncInputFromHistory();
+          setUrlStale(false);
+          dbgLog_line('ok', 'host url-changed (' + reason + ') → ' + d.url);
+          dbgRefresh();
+        });
 
         // ── Debug panel toggle ────────────────────────────────────
         function toggleDebug(open) {

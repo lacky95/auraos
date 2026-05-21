@@ -1,0 +1,25 @@
+{
+  "id": "com.aura.whisper",
+  "name": "Whisper Service",
+  "version": "0.1.0",
+  "description": "Local Whisper transcription service. Headless backend that boots two sibling Docker containers (faster-whisper-server + litellm) and exposes /api/transcribe, /api/clean, /api/status, /api/config. UI lives in com.aura.whisper.config.",
+  "icon": "WSP",
+  "category": "system",
+  "componentType": "service",
+  "instanceMode": "single",
+  "activityMode": "none",
+  "sandbox": "container",
+  "runtime": "raw",
+  "entrypoint": "entrypoint.sh",
+  "autoStart": true,
+  "tools": ["bash", "node", "docker"],
+  "permissions": ["storage.read", "storage.write", "network.internet"],
+  "proxy": {
+    "rewriteHtml": "none",
+    "preservePrefix": false,
+    "injectMeta": false,
+    "injectConsoleRelay": false,
+    "injectKeyForwarder": false,
+    "injectIdentityScript": false
+  }
+}

@@ -3,15 +3,30 @@ import { createActivityCreateHandler } from '@aura/app-sdk';
 /**
  * Called by the OS when a new activity for this app is opened.
  *
- * Return value (all fields optional):
- *   • `path`       — initial iframe path the activity opens at (default '/')
- *   • `title`      — window-title hint shown in the slot chrome
- *   • `metadata`   — free-form bag the OS keeps with the activity
- *   • `minimizable` — true ONLY for background-service apps; default false
- *   • `breadcrumb` — 'os' (default) shows the OS-managed back trail in the
- *                    slot chrome; 'off' hides it
+ * When the OS dispatches a VIEW intent (e.g. from a host-intercepted popup),
+ * `data.url` carries the destination. We forward it through the activity's
+ * `path` as a `?url=` query param so the SSR page (`index.astro`) can seed
+ * the engine iframe at the right URL from the first paint.
  *
- * Default impl returns `{}` — activity opens at `/`, the manifest name is
- * used as the title, no breadcrumb override. Customise as the app grows.
+ * No `data.url` → behave like a regular "open browser" launch (DEFAULT_HOME).
  */
-export const POST = createActivityCreateHandler(async () => ({}));
+export const POST = createActivityCreateHandler(({ activityId, data }) => {
+  const shortId = activityId.split('#').pop() ?? '';
+  const url = typeof data?.['url'] === 'string' ? data['url'] : null;
+  if (url && /^https?:\/\//i.test(url)) {
+    return {
+      path:  `/?url=${encodeURIComponent(url)}`,
+      title: titleForUrl(url, shortId),
+    };
+  }
+  return { path: '/', title: `Browser ${shortId}` };
+});
+
+function titleForUrl(url: string, fallback: string): string {
+  try {
+    const host = new URL(url).host;
+    return host || `Browser ${fallback}`;
+  } catch {
+    return `Browser ${fallback}`;
+  }
+}

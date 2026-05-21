@@ -1,0 +1,16 @@
+{
+  "title": "Deep Dive",
+  "description": "OS internals — every wire, every state machine.",
+  "pages": [
+    "index",
+    "architecture",
+    "proxy-and-iframe",
+    "sandbox-runners",
+    "lifecycle-fsm",
+    "event-bus-and-ipc",
+    "content-providers-and-intents",
+    "keymap-dispatcher",
+    "theme-pipeline",
+    "nexus-pipeline"
+  ]
+}

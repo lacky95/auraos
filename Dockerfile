@@ -220,7 +220,7 @@ WORKDIR /workspace
 # EINVAL → Node's `realpathSync` in run_main blows up. A wrapper script is
 # a regular file, bind cleanly, and execs `node` with the final path so
 # Node never has to readlink the bind destination.
-CMD ["sh", "-c", "pnpm install \
+CMD ["sh", "-c", "{ pnpm install || echo '[aura] pnpm install exited non-zero (likely ERR_PNPM_IGNORED_BUILDS) — continuing'; } \
  && pnpm --filter @aura/cli build \
  && install -D -m 0755 /workspace/os/aura-cli-shim.sh /usr/local/bin/aura \
  && install -D -m 0755 /workspace/os/aura-cli-shim.sh /os/toolchain/bin/aura \

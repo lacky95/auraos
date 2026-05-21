@@ -25,6 +25,11 @@ const mruMap: Record<string, number> = await (async () => {
 })();
 const pinnedApps = [...allApps]
   .filter((m) => enabledMap[m.id] !== false)
+  // Services are headless by design — they have no UI and clicking their
+  // launcher tile only produces the SERVICE-HAS-NO-UI placeholder. Hide
+  // them from the dock + launcher entirely; users start/stop services via
+  // Process Manager (or `aura inst …`).
+  .filter((m) => m.componentType !== 'service')
   .sort((a, b) => {
     const am = mruMap[a.id] ?? 0;
     const bm = mruMap[b.id] ?? 0;
@@ -266,7 +271,73 @@ const ssrVisibleViews = initialViews
       handleSystemAction(d.type, d as { type: string });
       return;
     }
+
+    // Host URL-relay: a script the WebView host injects into every
+    // nested frame postMessages `window.top` on every navigation it
+    // sees (initial load, SPA pushState, popstate, hashchange, title
+    // mutations). We route the event by `activityId` (or instanceId
+    // for non-activity apps) to the iframe that owns that view, and
+    // postMessage it down to the app so its URL bar can update.
+    if (d.type === 'aura.host.url-changed') {
+      const p = d as unknown as { type: string; source?: unknown; activityId?: unknown; instanceId?: unknown };
+      if (p.source !== 'host') return;
+      const aid = typeof p.activityId === 'string' ? p.activityId : null;
+      const iid = typeof p.instanceId === 'string' ? p.instanceId : null;
+      let slot: HTMLElement | null = null;
+      if (aid) slot = document.querySelector<HTMLElement>(`.app-slot[data-activity-id="${CSS.escape(aid)}"]`);
+      if (!slot && iid) slot = document.querySelector<HTMLElement>(`.app-slot[data-instance-id="${CSS.escape(iid)}"]`);
+      const target = slot?.querySelector<HTMLIFrameElement>('iframe');
+      try { target?.contentWindow?.postMessage(d, '*'); } catch { /* iframe gone */ }
+      return;
+    }
+
+    // Native popup intercepted by the host WebView (Android/Electron).
+    // The host denies the real popup and posts the URL here; we dispatch
+    // an aura.intent.action.VIEW so whichever app claims http/https
+    // picks it up (Browser, today). userGesture==false is treated as a
+    // pop-up-blocker drop; non-http(s) schemes are also rejected.
+    if (d.type === 'aura.host.popup') {
+      const p = d as unknown as {
+        type: string; source?: unknown; url?: unknown;
+        userGesture?: unknown; platform?: unknown; disposition?: unknown;
+      };
+      if (p.source !== 'host') return;
+      if (p.userGesture !== true) return;
+      const url = typeof p.url === 'string' ? p.url.trim() : '';
+      if (!url || url === 'about:blank') return;
+      if (!/^https?:\/\//i.test(url)) return;
+      void dispatchHostPopup(url, p.platform, p.disposition);
+      return;
+    }
   });
+
+  async function dispatchHostPopup(url: string, platform: unknown, disposition: unknown): Promise<void> {
+    try {
+      const r = await fetch('/api/intents/start', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          action:   'aura.intent.action.VIEW',
+          uri:      url,
+          category: ['aura.intent.category.DEFAULT'],
+          extras:   {
+            url,
+            fromHost:    true,
+            platform:    typeof platform    === 'string' ? platform    : null,
+            disposition: typeof disposition === 'string' ? disposition : null,
+          },
+        }),
+      });
+      if (!r.ok) { console.warn('[popup] intent rejected', r.status); return; }
+      const res = await r.json() as { kind?: string; candidates?: Array<{ appId: string }> };
+      if (res.kind === 'disambiguation' && res.candidates?.[0]) {
+        // v1: no chooser UI — pick the top candidate.
+        await fetch(`/api/apps/${res.candidates[0].appId}/start`, { method: 'POST' });
+      }
+    } catch (err) {
+      console.warn('[popup] dispatch failed', err);
+    }
+  }
 
   function handleSystemAction(type: string, _payload: { type: string }): void {
     if (type === 'aura.system.openLauncher')        (window as { auraOpenLauncher?: () => void }).auraOpenLauncher?.();
@@ -729,6 +800,7 @@ const ssrVisibleViews = initialViews
   interface AppManifestLite {
     id: string;
     name: string;
+    componentType: 'activity' | 'service';
     instanceMode: 'single' | 'multi';
     activityMode: 'none' | 'multi';
     defaultLaunch: 'new-instance' | 'new-activity';
@@ -1374,7 +1446,15 @@ const ssrVisibleViews = initialViews
     const v = views.find((x) => x.viewId === viewId);
     if (v && v.instanceId) {
       // Skip backend call for placeholder views (no instance yet).
-      if (v.activityId) {
+      // Services are headless by design — their iframe rendering is just
+      // the proxy's SERVICE-HAS-NO-UI placeholder, so closing that window
+      // must NOT stop the underlying backend (sidecars + state would die
+      // with it). Drop the visual slot only; the AppManager keeps the
+      // service running.
+      const manifest = manifestCache.get(v.appId);
+      if (manifest?.componentType === 'service') {
+        // No stop / close call. Just remove the view from the layout.
+      } else if (v.activityId) {
         // Activity view — close only this activity. Auto-stop handled server-side.
         fetch(`/api/activities/${encodeURIComponent(v.activityId)}/close`, { method: 'POST' }).catch(() => undefined);
       } else {

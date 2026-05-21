@@ -1,0 +1,244 @@
+---
+title: Sandbox runners
+description: How ProotRunner + ContainerRunner spawn an app — entrypoints, bind mounts, tools allowlist, identity health check.
+---
+
+**TL;DR.** Two `SandboxRunner` implementations, one interface. Both spawn
+a bash entrypoint with `$APP_PORT`, `$APP_ID`, `$APP_INSTANCE_ID`, `$OS_API_BASE`,
+`$AURA_LAYER_TAG`, and `$PATH` (prepending `/aura/my-tools` for the
+per-instance allowlist). They differ in two places: **isolation primitive**
+(ptrace vs kernel namespaces) and **spawn cost** (~3 ms vs ~80-150 ms). Both
+poll `/api/lifecycle/health` after spawn and verify identity.
+
+Source of truth:
+- `packages/core/src/app-manager/ProotRunner.ts`
+- `packages/core/src/app-manager/ContainerRunner.ts`
+- `packages/core/src/app-manager/SandboxRunner.ts` (the interface)
+
+## The interface
+
+Both runners expose the same shape:
+
+```ts
+interface SandboxRunner {
+  spawn(instanceId, appId, port, manifest):     Promise<number>;  // returns pid
+  callLifecycle(instanceId, hook):              Promise<void>;
+  callOptionalLifecycle(instanceId, hook, body): Promise<unknown | null>;
+  kill(instanceId):                             Promise<void>;
+  forceKill(instanceId):                        void;            // SIGKILL
+  onExit(instanceId, callback):                 void;
+  getHost(instanceId):                          string | null;
+  getPort(instanceId):                          number | null;
+  listOrphanRecords?():                         Promise<…[]>;    // ContainerRunner only
+  registerAdopted?(rec):                        void;             // ContainerRunner only
+}
+```
+
+The AppManager picks which runner per spawn from `manifest.sandbox`:
+
+```ts
+const runner = this.runners[manifest.sandbox] ?? this.runners['proot'];
+```
+
+`ContainerRunner.listOrphanRecords()` is how containers survive a shell
+restart: sibling containers tagged `aura-*` get re-adopted at boot.
+
+## The synthesised entrypoint
+
+When an app doesn't ship its own `entrypoint.sh`, the runner synthesises
+one. Identical in spirit between runners, only `node_modules` discovery
+differs:
+
+```bash
+set -e
+export PORT="${APP_PORT:-4001}"
+if [ ! -d node_modules ] && [ ! -d /workspace/node_modules ]; then
+  npm install --prefer-offline 2>&1 || npm install
+fi
+ASTRO="node_modules/.bin/astro"
+[ -x "$ASTRO" ] || ASTRO="/workspace/node_modules/.bin/astro"
+exec "$ASTRO" dev --host 0.0.0.0 --port "$PORT"
+```
+
+For `runtime: 'raw'` apps (Next, SvelteKit, Go, anything), the runner
+**requires** an explicit `entrypoint.sh` and throws if it's missing:
+
+> `[ProotRunner] app 'com.aura.docs' has runtime: 'raw' but no entrypoint file at /workspace/apps/com.aura.docs/entrypoint.sh`
+
+## Environment variables passed to every child
+
+| Var | Set by | Meaning |
+|---|---|---|
+| `APP_ID` | runner | manifest.id |
+| `APP_INSTANCE_ID` | runner | `appId` (single) or `appId-N` (multi) |
+| `APP_PORT` | runner | allocated by `PortAllocator` |
+| `OS_API_BASE` | runner | usually `http://localhost:3000` |
+| `AURA_LAYER_TAG` | runner | `[proot+ctnr]` for PRoot, `[ctnr]` for container, `[host]` for outside |
+| `PATH` | runner | prepends `/aura/my-tools` so the manifest's `tools[]` allowlist wins |
+
+The bashrc snippet at `/os/bashrc.aura.sh` annotates the interactive prompt
+with `$AURA_LAYER_TAG`, which is how `aura whereami` and the terminal
+prompt know which layer they're in.
+
+## ProotRunner — the cheap one
+
+PRoot is a ptrace-based filesystem sandbox. It rewrites file-access
+syscalls so the child sees a virtual rootfs, but it shares the host's
+kernel, PID space, and network. ~3 ms spawn. Weak isolation — treat
+apps as cooperating, not adversarial.
+
+### Bind mounts (`buildProotArgs`)
+
+```
+--rootfs=<base-rootfs>           the shared base image (Debian)
+--bind=/workspace:/workspace     the full monorepo
+--bind=<dataDir>:/data           per-instance data
+--bind=/proc                     host /proc
+--bind=/dev                      host /dev
+--bind=/tmp                      host /tmp (shared with siblings)
+--bind=/etc/resolv.conf          host DNS
+--bind=<sharedHome>:/root        per-user home (shared across apps)
+--bind=<toolchainDir>:/aura/all-tools
+--bind=<perInstanceToolsDir>:/aura/my-tools   the allowlist
+--bind=/var/run/docker.sock:...  only if 'docker' in tools[] (or wildcard)
+```
+
+The two-dir tools layout (`all-tools` + `my-tools`) is the cap mechanism.
+`/aura/all-tools/` mirrors the toolchain registry. `/aura/my-tools/`
+holds symlinks ONLY for entries in `manifest.tools[]`. PATH inside
+the sandbox is `/aura/my-tools:<inherited>`. So `tools: ["bash", "node"]`
+means the child can `bash` and `node` but not `claude` even if claude is
+installed on the host.
+
+### The cap-grant fast path
+
+`aura cap grant com.example.foo claude` writes the manifest, AppRegistry's
+chokidar fires, AND the AppManager calls `provisionToolsDir(instanceId, manifest)`
+again — re-running the symlink loop. The running child sees the new
+binding within a tick without a respawn, because `/aura/my-tools/` is
+the same bound directory.
+
+### Identity gate at spawn (`waitHealthy`)
+
+After spawn the runner polls `/api/lifecycle/health` (with basePath
+respected for raw apps via `lifecyclePath(manifest, instanceId, 'health')`).
+The response body MUST include `appId` and `instanceId` matching the
+spawn. If they don't match → port squatter detected, spawn fails loud:
+
+> `[ProotRunner] com.aura.foo on port 4003: health identity mismatch (expected appId=com.aura.foo, got appId=com.aura.bar). Another process is likely squatting this port.`
+
+`verifyHealthIdentity` (line 427 of `ProotRunner.ts`) returns one of:
+- `{ kind: 'match' }` — appId + instanceId both present and correct
+- `{ kind: 'legacy' }` — both absent (older apps); warn but accept
+- `{ kind: 'mismatch', claimedApp, claimedInstance }` — fail
+
+`auraAppIntegration()` in `@aura/app-sdk` stamps both headers on every
+response automatically. Raw-runtime apps use middleware (e.g.
+`auraIdentityHeaders()` for Next via `@aura/app-sdk/runtime/next`).
+
+## ContainerRunner — the strong one
+
+Docker container sibling on the `aura-net` network. Each instance gets:
+- its own PID/net/mount namespaces
+- a hostname like `aura-com.aura.terminal-3` (proxy uses it as the upstream host)
+- a sliced bind of `apps/<id>/` (the container sees ONLY its own app dir)
+- shared bind of `packages/` (so workspace imports resolve)
+- shared `aura-node-modules` volume so pnpm hoist works
+- shared `aura-app-data` volume scoped to `<dataDir>/apps/<id>/`
+
+### Spawn args (`buildDockerArgs`)
+
+```
+docker run -d --rm
+  --name aura-<sanitized-instanceId>
+  --hostname aura-<sanitized-instanceId>
+  --network aura-net
+  --env APP_ID=… --env APP_INSTANCE_ID=… --env APP_PORT=… --env OS_API_BASE=…
+  --env AURA_LAYER_TAG=[ctnr]
+  -v /workspace/apps/<id>:/workspace/apps/<id>       # sliced
+  -v /workspace/packages:/workspace/packages          # shared
+  -v /workspace/node_modules:/workspace/node_modules  # hoisted
+  -v aura-app-data:/data
+  -v /workspace/os/bashrc.aura.sh:/root/.bashrc:ro
+  <BASE_IMAGE>                                        # default: aura-base
+  <entrypoint argv>
+```
+
+The aura-net network is what lets the shell reach each app by
+hostname. The shell joins the same network at compose time.
+
+### Orphan adoption at shell boot
+
+`listOrphanRecords()` walks `docker ps --filter name=aura-*` at AppManager
+init. For each surviving container it:
+- parses `APP_ID` / `APP_INSTANCE_ID` from env
+- inspects the container's pid + port
+- re-registers as state `resumed` without re-running `onCreate/onStart/onResume`
+
+This is why `docker compose restart aura-shell` doesn't kill your
+running terminal/console — the containers outlive the shell.
+
+PRoot apps don't survive: they're direct children of the shell node and
+die with it. Only `sandbox: 'container'` apps adopt.
+
+## Tools allowlist mechanics
+
+```
+manifest.tools: ["bash", "node", "git"]
+                 │
+                 ▼
+provisionToolsDir(instanceId, manifest)
+   creates /data/aura/runtime/<instanceId>/tools/
+   then symlinks:
+     bash → /aura/all-tools/bash
+     node → /aura/all-tools/node
+     git  → /aura/all-tools/git
+                 │
+                 ▼ (PRoot bind mount)
+   /aura/my-tools/* visible inside the sandbox
+                 │
+                 ▼ (PATH prepend)
+   $PATH = "/aura/my-tools:${inherited}"
+```
+
+`'*'` in `tools[]` mirrors the entire `/aura/all-tools/` directory.
+`'claude-code'` symlinks to `claude` (historical name change preserved).
+
+## Spawn flow comparison
+
+```
+PRoot                                 Container
+─────                                 ─────────
+resolveEntrypoint()                   resolveEntrypoint()
+provisionToolsDir()                   buildDockerArgs()
+buildProotArgs()                      execFileSync('docker', args)
+spawn('proot', args, env)             attach `docker logs -f` for stdio
+processes.set(instanceId, {...})      docker inspect → pid
+waitHealthy(...)                      tracked.set(instanceId, {...})
+                                       watcher = spawn('docker', ['wait', ...])
+                                       waitHealthy(...)
+~3 ms                                 ~80-150 ms
+```
+
+## Process exit + cleanup
+
+Both runners call the per-instance `exitCb` registered by AppManager
+when their child exits unexpectedly. AppManager flips the instance to
+`'error'` state and emits `app:crashed` on the event bus.
+
+For ProotRunner: `child.on('exit')` fires. The runner sets `processes.set(instanceId, …)` → null and reports.
+
+For ContainerRunner: a `docker wait <containerId>` watcher prints the
+exit code; the runner parses + reports. `expectingKill: true` on the
+tracked record suppresses the callback (the AppManager just did
+`docker kill` itself).
+
+## Where to read more
+
+```sh
+aura jump --master
+$ less packages/core/src/app-manager/ProotRunner.ts        # ~700 lines, well-commented
+$ less packages/core/src/app-manager/ContainerRunner.ts    # ~600 lines
+$ less packages/core/src/app-manager/SandboxRunner.ts      # the interface
+$ less packages/core/src/app-manager/PortAllocator.ts      # /proc/net/tcp drift heal
+```

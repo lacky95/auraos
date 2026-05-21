@@ -1,0 +1,211 @@
+---
+title: Theme pipeline
+description: Two-slot picker, intrinsic tone, CSS-var palette, three themeStrategy modes.
+---
+
+**TL;DR.** Each theme is intrinsically light or dark. The user picks
+**one light theme and one dark theme**, plus a `colorMode` (`'light' |
+'dark' | 'auto'`) — auto defers to `prefers-color-scheme`. The shell
+serves the active palette at `/api/os/theme.css`, the proxy auto-injects
+this stylesheet into every `themeStrategy: 'inherit'` app, and theme
+changes broadcast over SSE so live windows swap their palette without
+reload.
+
+Source of truth:
+- Theme catalogue + types: `packages/core/src/theme/ThemeManager.ts` (530 lines)
+- CSS endpoint: `packages/shell/src/pages/api/os/theme.css.ts`
+- Theme list endpoint: `packages/shell/src/pages/api/os/themes.ts`
+- KV scope: `os/theme` in `@aura/kv-store`
+- App-side subscription: `OsClient.onThemeChange()` / `onModeChange()`
+
+## The two-slot model
+
+```
+user prefs (KV @ os/theme):
+{ themeIdLight: 'paper', themeIdDark: 'sci-fi', colorMode: 'auto' }
+                                                          │
+                                                          ▼
+                                          prefers-color-scheme: dark?
+                                                  │ yes
+                                                  ▼
+                                          resolvedMode = 'dark'
+                                          active theme = themeIdDark
+                                                       = 'sci-fi'
+                                                          │
+                                                          ▼
+                                              ThemeManager.toCss(...)
+                                                  emits one CSS block
+                                                  with --aura-color-* vars
+```
+
+The user-facing implication: switching to dark mode in the OS toggles
+which of two pre-chosen themes is active — it doesn't re-pick a theme.
+This is why the theme picker UI shows two slots ("Light" and "Dark"),
+not "current theme + mode".
+
+## The ColorPalette shape
+
+Every theme provides exactly these 16 colors:
+
+```ts
+interface ColorPalette {
+  // Accents
+  primary, secondary, danger, info, warning, success    // 6
+  // Surfaces
+  bg, surface, surface2                                 // 3
+  // Text + lines
+  text, textDim, border                                 // 3
+  // Glows
+  glowPrimary, glowSecondary, glowDanger, glowSubtle    // 4
+}
+```
+
+`ThemeManager.toCss(...)` emits each as a `--aura-color-<key>` custom
+property under `:root`, kebab-cased (`glowPrimary` → `--aura-glow-primary`,
+glows live under `--aura-glow-*` not `--aura-color-glow-*`).
+
+The semantic colors (`danger`, `warning`, `info`, `success`) are
+**shared across all themes of a given tone** — a red error looks red in
+every theme. Spread `DARK_SEMANTIC` / `LIGHT_SEMANTIC` into each palette
+so the contract is enforced by structure, not discipline.
+
+## Three themeStrategy modes
+
+Each app declares one in its manifest. The proxy reacts:
+
+| Strategy | What the proxy injects into the iframe | App responsibility |
+|---|---|---|
+| `inherit` (default) | `<link rel="stylesheet" href="/api/os/theme.css">` + meta tags | Reference `var(--aura-color-*)` in CSS. Theme switches happen automatically — no JS needed |
+| `themed` | `<meta name="aura-theme-id">`, `aura-color-mode`, framework | Ship per-theme palettes server-side. Listen to `osClient.onThemeChange()` and swap CSS class on `<html>` |
+| `override` | Only `aura-color-mode` meta as a hint | App owns its palette completely. Use the meta tag to detect light/dark for syntax-highlighting choice etc. |
+
+The Process Manager surfaces a `THEMED` / `OVERRIDE` chip on apps that
+don't `inherit`, so users understand why an app looks different from
+the rest of the OS.
+
+## The live update path
+
+```
+Theme picker (Settings) sets new themeIdDark
+        │
+        ▼
+KV writes os/theme.themeIdDark = 'amber'
+        │
+        ▼
+OsEventBus.emit('theme:changed', { themeId, themeName, ... })
+        │
+        ├─→ SSE subscribers: shell's OSLayout
+        │           │
+        │           ▼
+        │   - GET /api/os/theme.css (fresh palette)
+        │   - swap inline <style id="aura-theme">…</style>
+        │     in the host page (no reload)
+        │   - postMessage('aura.theme.changed', payload)
+        │     to every iframe
+        │
+        └─→ SSE subscribers: aura CLI watchers, Console app
+```
+
+Inside each iframe, the `OsClient.onThemeChange()` handler fires (for
+`themed` apps that subscribed). `inherit` apps don't need to do anything
+— the stylesheet they injected refetches under the same URL or the
+shell-side swap of `<style id="aura-theme">` cascades into the iframe.
+
+Wait — does it cascade into the iframe? It can't. `<style>` in the host
+document doesn't reach the iframe document. The mechanism for `inherit`
+apps is: the proxy injects `<link rel="stylesheet" href="/api/os/theme.css">`
+into the iframe's own `<head>`. On theme change, the iframe's `OsClient`
+listens for `aura.theme.changed` postMessage and either:
+- re-`<link>` toggle to bust cache, or
+- fetch the new CSS and replace the existing stylesheet contents
+
+The exact mechanism is in `packages/app-sdk/src/runtime/inheritTheme.ts`
+(grep for it). The point: `inherit` apps need zero theme code; the
+inject does it all.
+
+## Adding a new theme
+
+One file, one section, no other code changes:
+
+```ts
+// packages/core/src/theme/ThemeManager.ts — append to the THEMES array
+
+const sunset: OsTheme = {
+  id:          'sunset',
+  name:        'SUNSET',
+  description: 'Warm-orange phosphor for evening reading.',
+  tags:        ['warm', 'reduced-blue-light'],
+  tone:        'dark',
+  framework:   SCIFICN_FRAMEWORK,  // or your own
+  palette: {
+    ...DARK_SEMANTIC,
+    primary:       '#ff8844',
+    secondary:     '#ffd166',
+    bg:            '#1a0e08',
+    surface:       '#241409',
+    surface2:      '#2e1a0c',
+    text:          '#ffd9a8',
+    textDim:       '#bb7a48',
+    border:        'rgba(255, 136, 68, 0.35)',
+    glowPrimary:   'rgba(255, 136, 68, 0.4)',
+    glowSecondary: 'rgba(255, 209, 102, 0.3)',
+    glowDanger:    'rgba(255, 32, 32, 0.5)',
+    glowSubtle:    'rgba(255, 136, 68, 0.1)',
+  },
+};
+
+const THEMES: OsTheme[] = [sciFi, paper, /* … */ sunset];
+```
+
+Restart the shell. The picker shows the new entry; no other file needs to
+change. The shell's bootstrap doesn't validate `id` uniqueness against
+the existing array — adding a duplicate id silently shadows the older
+entry.
+
+## Endpoint summary
+
+```
+GET  /api/os/theme.css       → CSS document with the active palette
+GET  /api/os/themes          → JSON list of every ThemeSummary
+POST /api/os/themes/select   → body: { themeIdLight, themeIdDark, colorMode }
+                               writes os/theme; triggers theme:changed event
+```
+
+## Why two slots, not one + mode toggle
+
+Originally the OS had a single "active theme" plus a `colorMode` toggle
+that inverted the palette. That broke in two ways:
+1. Themes designed for dark (phosphor glow) couldn't be auto-inverted
+   into anything that looked good on a light background. Glows that work
+   at 0.4 alpha on `#000` become invisible on `#fff`.
+2. Users wanted DIFFERENT themes per mode — e.g. `paper` for daytime
+   reading, `sci-fi` for night terminal work — not one theme that
+   adapted.
+
+Splitting into two slots and an `auto` resolver matches the way users
+actually want it. The deciding moment is at commit
+[`9f0e96e`](https://github.com/lacky95/auraos/commit/9f0e96e) (the "App
+SDK refactor + Theme Manager v3" commit).
+
+## Reading the source
+
+```sh
+aura jump --master
+$ less packages/core/src/theme/ThemeManager.ts       # 530 lines, big but linear
+  # - lines 1-60   types (OsTheme, ColorPalette, ColorMode)
+  # - lines 80-110 frameworks + DARK_SEMANTIC / LIGHT_SEMANTIC
+  # - lines 115-450 the THEMES array
+  # - lines 450-530 ThemeManager class + toCss()
+$ less packages/shell/src/pages/api/os/theme.css.ts  # 51 lines
+$ less packages/shell/src/pages/api/os/themes.ts     # 15 lines
+$ grep -rn "var(--aura-color-" apps/                  # who uses what
+$ grep -rn "themeStrategy" apps/*/app.manifest.json   # who declares what
+```
+
+When a colour "looks wrong" the diagnostic order is:
+1. **Which theme is active?** `aura data os.theme` reads the KV.
+2. **Did the iframe get the CSS?** DevTools → Network → `/api/os/theme.css`.
+3. **Is the CSS var defined?** Inspect `<html>` in DevTools — the
+   `--aura-color-*` custom properties should be on `:root`.
+4. **Is the manifest `themeStrategy: 'override'`?** Then the OS palette
+   isn't injected — by design.

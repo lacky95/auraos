@@ -1,0 +1,266 @@
+---
+title: Nexus pipeline
+description: Resolve → fetch → validate → permission-diff → install — five stages, three fetchers, one async generator.
+---
+
+**TL;DR.** Nexus is AuraOS's distribution layer. Installing an app
+walks five stages: **Resolve** the ref (`oci://`, `git://`, bare
+reverse-domain ID, or `local:`) → **Fetch** into a staging dir → 
+**Validate** the staged manifest → **Diff** permissions against any
+prior install → **Install** by atomic move into `apps/`. The pipeline
+is an async generator that yields `NexusProgressEvent`s and *pauses* on
+`permission.needed`, letting either the CLI or the Nexus GUI app drive
+the approval UI through the same protocol.
+
+Source of truth:
+- Orchestrator: `packages/core/src/nexus/NexusManager.ts` (240 lines)
+- Each stage in its own file: `Resolver.ts`, `Fetchers/*`, `Validator.ts`, `PermissionDiff.ts`, `Installer.ts`, `Publisher.ts`
+- Types (shared with CLI + GUI): `packages/core/src/nexus/types.ts`
+- HTTP API endpoints: `packages/shell/src/pages/api/nexus/`
+- GUI: `apps/com.aura.nexus/`
+
+## The pipeline, in order
+
+```
+input: rawRef = "github.com/lacky95/aura-foo"
+       OR     = "ghcr.io/lacky95/aura-foo:1.2.3"
+       OR     = "com.aura.foo"           ← bare id, resolved via index.yaml
+       OR     = "local:./my-app"
+              │
+              ▼
+┌─────────────────────────────────────────────────┐
+│ 1. RESOLVE                                       │
+│    Resolver.resolve(rawRef) → ResolvedRef        │
+│      { source, address, digest, channel?,        │
+│        manifestPreview?: AppManifest | null }    │
+│    yields: resolve.start, resolve.done            │
+└─────────────────────────────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────────────┐
+│ 2. FETCH (per source)                            │
+│    fetchLocal | fetchGit | fetchOci              │
+│      → into stagingDir = data/nexus/staging/...  │
+│    yields: fetch.start, fetch.progress*, fetch.done│
+└─────────────────────────────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────────────┐
+│ 3. VALIDATE                                      │
+│    validateStagedDir(stagingDir)                 │
+│      → AppManifest (schema-checked, id matches   │
+│        dir name, version is semver-compatible)   │
+│    yields: validate.done                         │
+└─────────────────────────────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────────────┐
+│ 4. PERMISSION DIFF                               │
+│    computePermissionDiff(prev?, next):           │
+│      { toolsAdded/Removed, permissionsAdded/Removed,
+│        dataProviderAdded/Removed, intentFiltersAdded }│
+│    if diffRequiresApproval(diff):                │
+│      yield permission.needed → PAUSE             │
+│      caller decides → next({ approve: bool })    │
+│    if approved → yield permission.approved       │
+│    if denied   → yield permission.denied → throw │
+└─────────────────────────────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────────────┐
+│ 5. INSTALL                                       │
+│    Installer.install():                          │
+│      - rm -rf existing apps/<id>/  (if updating) │
+│      - mv stagingDir → apps/<id>/                │
+│      - write data/nexus/installed/<id>.json      │
+│      - bus.emit('nexus:install.complete')        │
+│      - bus.emit('app:installed') for AppRegistry │
+│    yields: install.start, install.done           │
+└─────────────────────────────────────────────────┘
+              │
+              ▼
+   InstallRecord (the generator's return value)
+```
+
+## The pause-for-permission generator
+
+```ts
+const it = nexus.install({ ref: 'github.com/lacky95/aura-foo' });
+let cursor = await it.next();
+while (!cursor.done) {
+  const ev = cursor.value;
+  if (ev.type === 'permission.needed') {
+    const ok = await askUser(ev.diff);             // your UI
+    cursor = await it.next({ approve: ok });        // 2-arg next() resumes
+  } else {
+    cursor = await it.next();
+  }
+}
+const record = cursor.value;                       // InstallRecord
+```
+
+The HTTP endpoint at `POST /api/nexus/install` shortcuts this by
+returning early when permission is needed:
+
+```jsonc
+// Response, when needsApproval:
+{ "ok": false, "needsApproval": true, "diff": { /* PermissionDiff */ } }
+
+// The caller (Nexus GUI or CLI) then re-POSTs with autoApprove: true
+// to actually install. The pipeline runs from scratch the second time —
+// staging is cheap, fetch is cached.
+```
+
+This 2-RPC dance avoids holding a long-lived HTTP stream open during
+the user's approval prompt. CLIs that want one-shot semantics pass
+`--yes` (translates to `autoApprove: true`).
+
+## Three fetchers
+
+| Source | Fetcher | What it does |
+|---|---|---|
+| `oci://`, `ghcr.io/...`, `docker.io/...` | `OciFetcher` | `oras pull` against the registry into stagingDir. Auth via `~/.docker/config.json` |
+| `github.com/u/r`, `git+https://...` | `GitFetcher` | `git clone --depth=1 --branch=<ref>` into stagingDir. Tag/branch from the resolver |
+| `local:./path` | `LocalFetcher` | `cp -r` from the path into stagingDir. Dev loop |
+
+The OCI fetcher emits `fetch.progress` events from `oras`'s stderr
+parsing. Git emits one start + one done (no progress mid-clone). Local
+emits start + done only.
+
+## The permission diff (the security gate)
+
+`PermissionDiff` is the user-facing payload of the gate. It's computed
+between the CURRENTLY-installed manifest (or null on first install) and
+the incoming one:
+
+```ts
+interface PermissionDiff {
+  appId, versionFrom (null|prev), versionTo
+  toolsAdded[], toolsRemoved[]             // /aura/my-tools symlinks
+  permissionsAdded[], permissionsRemoved[] // declared permissions[]
+  dataProviderAdded: bool                  // app now offers /api/data
+  dataProviderRemoved: bool
+  intentFiltersAdded[]                     // new <intent-filter>s
+}
+```
+
+`diffRequiresApproval(diff)` returns true if any of:
+- toolsAdded.length > 0 (a new binary became available inside the sandbox)
+- permissionsAdded.length > 0 (the app now wants new privileges)
+- dataProviderAdded (the app now exposes a content provider)
+- intentFiltersAdded.length > 0 (the app now claims a new intent)
+
+Removals never prompt — they're strictly safe.
+
+## Singleton + bus integration
+
+`getNexusManager()` from `singleton.ts` returns the shared instance, lazy-
+initialised on first call with the OS's `appsDir`/`dataDir` paths and a
+reference to `OsEventBus`. The four nexus events the bus emits:
+
+```
+nexus:install.complete    { id, record }
+nexus:update.complete     { id, record|null }     // null = no-op (up-to-date)
+nexus:uninstall.complete  { id }
+nexus:publish.complete    { id?, ref }
+```
+
+Plus, when install/uninstall changes the apps/ directory:
+
+```
+app:installed             { appId }
+app:removed               { appId }
+```
+
+The AppRegistry's chokidar fires on the same file system change a
+moment later — both events arrive, with the bus event preceding by
+~1-10 ms. Subscribers should be idempotent.
+
+## The index.yaml — the curated catalogue
+
+`IndexClient` fetches `index.yaml` from a configured remote (default:
+the AuraOS team's repo) and caches at `data/nexus/index.yaml`. Each
+entry:
+
+```yaml
+- id: com.aura.notepad
+  name: Notepad
+  description: Markdown editor with sharing.
+  publisher: aura-team
+  categories: [productivity]
+  sources:
+    git:
+      ref: github.com/auraos/notepad
+      default-branch: main
+    oci:
+      ref: ghcr.io/auraos/notepad
+  channels:
+    stable: { git-tag: v1.2.3, oci-tag: 1.2.3 }
+    beta:   { git-tag: v1.3.0-beta.2, oci-tag: 1.3.0-beta.2 }
+```
+
+A bare-id install (`aura nexus install com.aura.notepad`) walks the
+index, picks the stable channel by default, prefers OCI over Git (faster,
+deterministic digest), and resolves the ref accordingly.
+
+## Publishing — the inverse pipeline
+
+```
+Publisher.publishGit({ stagingDir, repo, tag })   → git push tag
+Publisher.publishOci({ stagingDir, ref })         → oras push artifact
+```
+
+Both stream `publish.progress` events that wrap underlying tool output
+and yield `publish.done` with the install command to share:
+
+```
+$ aura nexus publish ./apps/com.example.foo --to oci://ghcr.io/u/foo --tag 0.1.0
+nexus:publish.progress  Building artifact…
+nexus:publish.progress  Pushing to ghcr.io/u/foo:0.1.0…
+nexus:publish.done      Install with: aura nexus install ghcr.io/u/foo:0.1.0
+```
+
+The publish flow doesn't go through the permission gate — you're
+authoring, not consuming.
+
+## Endpoint summary
+
+```
+POST   /api/nexus/install              streaming SSE, the full pipeline
+POST   /api/nexus/install/preview      resolve + fetch + validate only
+                                       (returns the PermissionDiff)
+POST   /api/nexus/update/[id]          re-resolve same ref, install
+DELETE /api/nexus/uninstall/[id]       remove from apps/ + remove record
+POST   /api/nexus/publish              streaming SSE
+GET    /api/nexus/index                cached index.yaml + refresh hint
+GET    /api/nexus/installed            list of InstallRecord
+```
+
+The Nexus GUI (`apps/com.aura.nexus/`) is a thin client over these
+endpoints — its 4 pages (BROWSE / INSTALLED / INSTALL / PUBLISH) all
+proxy through `osClient.fetch('/api/nexus/...')`. The CLI's `aura nexus
+*` commands are equally thin.
+
+## Reading the source
+
+```sh
+aura jump --master
+$ less packages/core/src/nexus/types.ts          # 131 lines — every interface
+$ less packages/core/src/nexus/NexusManager.ts   # 240 lines, the orchestrator
+$ less packages/core/src/nexus/Resolver.ts       # 159 lines
+$ less packages/core/src/nexus/Installer.ts      # 163 lines
+$ less packages/core/src/nexus/PermissionDiff.ts # 118 lines
+$ less packages/core/src/nexus/Publisher.ts      # 296 lines (both publishGit + publishOci)
+$ ls packages/core/src/nexus/Fetchers/           # OciFetcher, GitFetcher, LocalFetcher
+$ ls packages/shell/src/pages/api/nexus/         # the HTTP API
+```
+
+When an install fails:
+1. **Resolve fails** — bad ref. The error message includes the rawRef.
+2. **Fetch fails** — registry/git auth missing. Check `~/.docker/config.json` or `~/.gitconfig`.
+3. **Validate fails** — manifest schema mismatch. `aura dev validate apps/<id>` against the staging dir gives the same error.
+4. **Permission denied** — user clicked deny. Pipeline throws after the `permission.denied` event.
+5. **Install fails** — disk error or `apps/<id>` already exists and is locked. Check filesystem permissions on `apps/`.
+
+The streaming events in DevTools (Network → /api/nexus/install →
+EventStream) show exactly which stage tripped.

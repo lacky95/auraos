@@ -1,0 +1,31 @@
+---
+title: Deep Dive
+description: OS internals — proxy plumbing, sandbox runners, FSMs, IPC. Nerdy, exhaustive, source-cited.
+---
+
+> Everything past Core Concepts. **Source-cited**: every claim points
+> at a real file in the monorepo, usually with a line number. If you're
+> writing apps you don't need this; if you're hacking on the OS itself,
+> start here.
+
+## What's in this section
+
+| Page | What it covers |
+|---|---|
+| [Architecture](/docs/deep-dive/architecture) | Every package, every wire. The full system map. |
+| [Proxy + iframe](/docs/deep-dive/proxy-and-iframe) | `/api/proxy/<id>/<path>` HTML rewriting, identity gate, JS module URL rewriter, WebSocket upgrade chain. |
+| [Sandbox runners](/docs/deep-dive/sandbox-runners) | PRoot args vs Docker container args. Bind mounts. Tools allowlist. Spawn cost. |
+| [Lifecycle FSM](/docs/deep-dive/lifecycle-fsm) | State machine, transitions, edge cases (pool claim, autostart, crash recovery). |
+| [Event bus + IPC](/docs/deep-dive/event-bus-and-ipc) | `OsEventBus` topic shape, the SSE pipeline + socket.io fanout. |
+| [Content providers + intents](/docs/deep-dive/content-providers-and-intents) | `/api/data/<authority>/*` routing, the permission gate, intent filter scoring. |
+| [Keymap dispatcher](/docs/deep-dive/keymap-dispatcher) | App / Nav modes, claim list, combo expansion, side-specific modifiers. |
+| [Theme pipeline](/docs/deep-dive/theme-pipeline) | `ThemeManager.toCss()` emit shape, the `inherit` / `themed` / `override` strategies, live SSE swap. |
+| [Nexus install pipeline](/docs/deep-dive/nexus-pipeline) | Resolver → fetcher → validator → permission diff → installer. EXDEV fallback. |
+
+## Conventions used in this section
+
+- **File paths** are repo-relative, e.g. `packages/core/src/app-manager/AppManager.ts:1489`.
+- **`grep` recipes** appear in fenced blocks — run them inside the master container (`aura jump --master`) to inspect live state.
+- **ASCII diagrams** show flow; the canonical state lives in the linked source files.
+- **Versions assumed:** Astro 6, Vite 7, React 19, Node 22 (the workspace pins).
+- Each page opens with a **TL;DR** box so you can scan; if you don't read past it, you still know the load-bearing facts.

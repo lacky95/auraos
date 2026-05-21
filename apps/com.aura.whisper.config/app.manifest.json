@@ -1,0 +1,31 @@
+{
+  "id": "com.aura.whisper.config",
+  "name": "Whisper",
+  "version": "0.1.0",
+  "description": "Settings UI for the headless com.aura.whisper service. Reads / writes the same KV blob the backend consumes and triggers sidecar restarts via the service's /api/config endpoint.",
+  "icon": "WSP",
+  "category": "system",
+  "instanceMode": "single",
+  "activityMode": "multi",
+  "defaultLaunch": "new-activity",
+  "sandbox": "proot",
+  "runtime": "raw",
+  "entrypoint": "entrypoint.sh",
+  "tools": ["bash", "node"],
+  "permissions": ["network.internet"],
+  "intentFilters": [
+    {
+      "action": "aura.intent.action.CONFIGURE",
+      "category": ["aura.intent.category.SETTINGS"],
+      "extras": { "appId": "com.aura.whisper" },
+      "priority": 0
+    }
+  ],
+  "proxy": {
+    "rewriteHtml": "none",
+    "preservePrefix": false,
+    "injectMeta": true,
+    "injectConsoleRelay": true,
+    "injectKeyForwarder": true
+  }
+}

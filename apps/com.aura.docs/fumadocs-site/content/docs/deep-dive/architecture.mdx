@@ -1,0 +1,153 @@
+---
+title: Architecture
+description: Every package, every wire — the full AuraOS system map.
+---
+
+**TL;DR.** One shell process (`aura-shell` container) hosts the AppManager,
+the reverse proxy, the content-provider router, the SSE/socket.io event bus,
+the theme manager, the keymap registry, and the launcher UI. **N app processes**
+(PRoot or Docker sibling containers) each run their own framework (Astro by
+default, or anything via raw runtime). The browser only talks to apps through
+the proxy — apps never see the browser directly.
+
+## System map
+
+```
+                            ┌────────────────────┐
+                            │      Browser       │
+                            │                    │
+                            │   shell iframe     │      one per visible
+                            │   ┌────────────┐   │      app window
+                            │   │   app      │   │
+                            │   │   iframe   │   │
+                            │   └────────────┘   │
+                            └─────────┬──────────┘
+                                      │  http(s) :3000
+                                      ▼
+   ┌──────────────────────────────────────────────────────────────┐
+   │  aura-shell  (Astro SSR, Node 22)                            │
+   │                                                              │
+   │  ┌────────────────────────┐  ┌───────────────────────────┐   │
+   │  │  AppManager + FSM      │  │  Reverse proxy            │   │
+   │  │  packages/core/src/    │  │  /api/proxy/<id>/<path>   │   │
+   │  │   app-manager/         │  │  packages/shell/src/      │   │
+   │  │  - lifecycle hooks     │  │   pages/api/proxy/        │   │
+   │  │  - PortAllocator       │  │   [id]/[...path].ts       │   │
+   │  │  - identity gate       │  └───────────────────────────┘   │
+   │  └────────────────────────┘                                  │
+   │                                                              │
+   │  ┌────────────────────────┐  ┌───────────────────────────┐   │
+   │  │  ContentProvider       │  │  OsEventBus + SSE +       │   │
+   │  │   router               │  │   socket.io               │   │
+   │  │  /api/data/<auth>/...  │  │  packages/core/src/ipc/   │   │
+   │  └────────────────────────┘  └───────────────────────────┘   │
+   │                                                              │
+   │  ┌────────────────────────┐  ┌───────────────────────────┐   │
+   │  │  ThemeManager          │  │  KeymapRegistry +         │   │
+   │  │  packages/core/src/    │  │   dispatcher              │   │
+   │  │   theme/               │  │  packages/core/src/keymap │   │
+   │  └────────────────────────┘  │  packages/shell .../lib/  │   │
+   │                              │   keyDispatcher.ts        │   │
+   │                              └───────────────────────────┘   │
+   │                                                              │
+   │  ┌────────────────────────┐  ┌───────────────────────────┐   │
+   │  │  Nexus core            │  │  AppRegistry              │   │
+   │  │  packages/core/src/    │  │  chokidar-watches         │   │
+   │  │   nexus/               │  │  apps/*/app.manifest.json │   │
+   │  └────────────────────────┘  └───────────────────────────┘   │
+   └────────────────────┬──────────────────────────────┬──────────┘
+                        │                              │
+                        ▼ (proot exec)                 ▼ (docker run)
+        ┌─────────────────────────────┐  ┌──────────────────────────────┐
+        │   PRoot sandbox             │  │  Sibling Docker container    │
+        │   ptrace, ~3 ms spawn       │  │  aura-<instanceId>           │
+        │   shared kernel, sliced fs  │  │  full PID/net/mount NS       │
+        │   bind: /workspace, /data   │  │  network: aura-net           │
+        │                             │  │  ~80–150 ms spawn            │
+        │   apps with sandbox:'proot' │  │  apps with sandbox:'container'│
+        └─────────────────────────────┘  └──────────────────────────────┘
+```
+
+## Package map (`packages/`)
+
+| Package | What it is | Key files |
+|---|---|---|
+| `@aura/core` | The OS brain. Lifecycle FSM, port allocator, sandbox runners, theme/keymap/intent registries, content-provider router, event bus, **Nexus**. | `app-manager/`, `theme/`, `keymap/`, `nexus/`, `ipc/OsEventBus.ts` |
+| `@aura/shell` | The Astro SSR app that draws the desktop + serves the reverse proxy + content-provider router + WS-upgrade proxy. | `src/pages/api/proxy/[id]/[...path].ts`, `src/pages/index.astro`, `astro.config.mjs` (the `wsProxyPlugin`) |
+| `@aura/app-sdk` | The library every app imports. Lifecycle factories, `OsClient`, `auraAppIntegration()`, raw-runtime adapters. | `src/lifecycle.ts`, `src/OsClient.ts`, `src/integration.mjs`, `src/runtime/next.ts` |
+| `@aura/ui` | shadcn/scificn React primitives. Card, Dialog, Spinner, Checkbox, etc. | `src/components/`, `src/styles/scificn-bridge.css` |
+| `@aura/kv-store` | Tiny Redis-backed KV client; backing store for theme prefs, workspace state, app enable map. | `src/index.ts` (server + browser flavours) |
+| `@aura/aura-cli` | The `aura` command. Talks to the shell via HTTP. | `src/index.ts`, `src/commands/*.ts` |
+
+## App map (`apps/`)
+
+| App | Role | Notable manifest fields |
+|---|---|---|
+| `com.aura.docs` | This site. Raw-runtime Next.js + fumadocs. | `runtime: "raw"`, `proxy: { preservePrefix: true }` |
+| `com.aura.terminal` | TTY over WebSocket via PTY. | `instanceMode: "multi"`, `tools: ["bash", "node", "git", "claude-code", "aura", "*"]` |
+| `com.aura.console` | Log viewer + WS persistence. | `autoStart: true`, `backgroundService: true` |
+| `com.aura.settings` | Theme, workspaces, keymap, apps. | Content provider, `system.theme.broadcast` perm |
+| `com.aura.notepad` | Multi-activity shared state. | `activityMode: "multi"`, `defaultLaunch: "new-activity"` |
+| `com.aura.counter` | Multi × multi archetype. | `instanceMode: "multi"`, `activityMode: "multi"` |
+| `com.aura.example` | Scaffold reference. | minimal manifest |
+| `com.aura.nexus` | Appstore + package manager. | container sandbox, data provider |
+| `com.aura.browser` | Minimal web browser. | nested iframe engine, sandbox attrs |
+
+## How a click ends up running app code
+
+The full path of a single user click from the launcher to "iframe paints":
+
+```
+1.  User clicks launcher tile
+       └─► window.auraLaunchApp(appId)         (shell front-end)
+2.  Front-end issues POST /api/apps/<appId>/start
+3.  AppRegistry resolves the manifest
+       └─► AppManager.start(appId)
+4.  AppManager:
+     ─ allocates a port (PortAllocator)
+     ─ picks a runner (sandbox: 'proot' | 'container')
+     ─ calls runner.spawn(instanceId, appId, port, manifest)
+        ProotRunner       → bash entrypoint inside PRoot
+        ContainerRunner   → docker run aura-base + entrypoint
+5.  Runner waits for /api/lifecycle/health
+       └─► verifyHealthIdentity() — the X-Aura-* echo gate
+6.  AppManager calls onCreate, onStart, onResume in sequence
+7.  Instance state ↦ 'resumed' on the FSM
+8.  AppManager emits app:stateChanged on OsEventBus
+9.  The shell front-end (subscribed via SSE) receives the event
+       └─► pushes an <iframe src='/api/proxy/<instanceId>/'> slot
+           into the active workspace layout
+10. The iframe loads — request goes back through the shell:
+       └─► proxy resolves instance → forwards to runner upstream
+       └─► identity gate verifies X-Aura-App-Id on the response
+       └─► HTML rewriter optionally injects meta + console relay +
+           key forwarder per manifest.proxy.*
+11. App's HTML lands in the browser. First paint.
+```
+
+Every step is a reachable function with a real source location. The
+rest of this section walks each box.
+
+## Read the source
+
+For when this page is out of date:
+
+```sh
+# Master container shell — see what's actually wired.
+aura jump --master
+
+# AppManager FSM and start path
+$ less packages/core/src/app-manager/AppManager.ts
+
+# Reverse proxy + HTML rewriter
+$ less packages/shell/src/pages/api/proxy/\[id\]/\[...path\].ts
+
+# WS upgrade chain (its own Vite plugin)
+$ less packages/shell/astro.config.mjs   # search for wsProxyPlugin
+
+# AppRegistry chokidar watcher
+$ less packages/core/src/app-manager/AppRegistry.ts
+
+# OsEventBus topic shape
+$ less packages/core/src/ipc/OsEventBus.ts
+```

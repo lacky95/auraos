@@ -1,0 +1,174 @@
+---
+title: Lifecycle FSM
+description: 14 states, the transition table, what each hook does, what 'error' actually means.
+---
+
+**TL;DR.** Every instance walks a 14-state finite state machine.
+`LifecycleStateMachine` (33 lines, deliberately tiny) owns the
+transitions; `AppManager` orchestrates them by spawning the runner,
+calling lifecycle hooks, and emitting events. Illegal transitions throw
+`LifecycleTransitionError` — the FSM is the safety rail that prevents
+double-starts, leaked PIDs, and stuck `pausing`/`stopping` states.
+
+Source of truth:
+- States + transition table: `packages/core/src/types/lifecycle.ts`
+- The FSM itself: `packages/core/src/app-manager/LifecycleStateMachine.ts`
+- The orchestrator: `packages/core/src/app-manager/AppManager.ts`
+
+## The 14 states
+
+```
+installed                  ← fresh from the registry; nothing running
+   │
+   ▼
+creating  → created
+   │
+   ▼
+starting  → started ────────────┐
+                                │
+                                ▼
+                          resuming → resumed
+                                       │
+                                       ▼
+                                    pausing → paused
+                                                 │  (foreground again)
+                                                 │
+                                                 │   stopping →  stopped
+                                                                   │
+                                                                   ▼
+                                                              destroying → destroyed
+                                                                              │
+                                                                              ▼
+                                                                         (back to installed)
+
+error  ← any failure during the *-ing transitions
+```
+
+`installed` is the implicit zero state: an app exists in the registry but
+no runner has been spawned for it. `destroyed` immediately maps back to
+`installed` — you don't see `destroyed` in steady state.
+
+## Transition table (verbatim)
+
+The source of truth is one constant, 16 lines:
+
+```ts
+// packages/core/src/types/lifecycle.ts
+export const VALID_TRANSITIONS: Record<AppLifecycleState, AppLifecycleState[]> = {
+  installed:  ['creating'],
+  creating:   ['created', 'error'],
+  created:    ['starting'],
+  starting:   ['started'],
+  started:    ['resuming', 'stopping'],
+  resumed:    ['pausing'],
+  pausing:    ['paused'],
+  paused:     ['resuming', 'stopping'],
+  stopping:   ['stopped'],
+  stopped:    ['starting', 'destroying'],
+  destroying: ['destroyed'],
+  destroyed:  ['installed'],
+  error:      ['creating', 'destroying', 'installed'],
+};
+```
+
+Anything not in this map throws `LifecycleTransitionError`. The error
+travels up through `AppManager.start/resume/pause/stop` and into the SSE
+event bus as a `app:lifecycle.error` event.
+
+## Hooks per transition
+
+The `creating → created → starting → started → resuming → resumed` chain
+is what users perceive as "launching an app". Each `-ing` state runs the
+matching POST hook in the app:
+
+| Transition | What the runner does | App hook |
+|---|---|---|
+| `installed → creating` | spawn child process; bind port; wait for `/health` identity match | — |
+| `creating → created` | (synchronous) FSM marker only | `POST /api/lifecycle/onCreate` |
+| `created → starting` | (synchronous) | `POST /api/lifecycle/onStart` |
+| `starting → started` | (synchronous) | — |
+| `started → resuming` | viewportcounter; iframe mount begins | `POST /api/lifecycle/onResume` |
+| `resuming → resumed` | iframe load fires, focus delivered | — |
+| `resumed → pausing` | user backgrounded the view | `POST /api/lifecycle/onPause` |
+| `pausing → paused` | — | — |
+| `paused → stopping` | last user reference dropped; backgroundService=false | `POST /api/lifecycle/onStop` |
+| `stopping → stopped` | runner stays up, port stays bound | — |
+| `stopped → destroying` | terminal teardown | `POST /api/lifecycle/onDestroy` |
+| `destroying → destroyed` | runner.kill(); port returned to allocator | — |
+
+Activity-mode apps also see `POST /api/lifecycle/onActivityCreate` and
+`POST /api/lifecycle/onActivityDestroy/[activityId]` outside the FSM:
+they don't transition instance state. New activities can be created on
+a `resumed` instance and destroyed on a `paused` one — instance state
+doesn't change.
+
+## What "error" really means
+
+`creating → error` is the common failure path. Causes:
+- Port allocation drift (PortAllocator and `/proc/net/tcp` disagree → another process won the race)
+- `/health` identity mismatch (port squatter)
+- Child died before health responded (entrypoint.sh exit code != 0)
+- Bind-mount failure (PRoot couldn't access the rootfs)
+
+From `error` you can recover three ways:
+- `error → creating` — try the spawn again (what `aura app start` does)
+- `error → destroying` — fully tear down
+- `error → installed` — force back to zero without running destroy hooks (used by `AppManager.forceReset()`)
+
+`error` is **not** a runtime crash state. If the child crashes from
+`resumed`, the runner's `onExit` fires, `AppManager` calls
+`set(instanceId, 'error')` directly (bypassing `transition()` because no
+prior state predicts a crash from there), emits `app:crashed`, and the
+launcher surfaces the red status pill.
+
+## The startup race + warm pool
+
+Cold start through this FSM costs ~3 ms (PRoot) or ~150 ms (container)
+plus 50–200 ms for the inner Astro dev server to come up plus ~1.5 s for
+the first iframe paint. That's slow enough that the OS pre-warms.
+
+**Warm pool**: an app with `warmPool: true` in its manifest is
+pre-spawned to `resumed` state and idled with no iframe mounted. When
+the user launches it for real, the launcher's RPC binds the existing
+instance to the new view instead of going through the FSM at all. The
+pool refills in the background.
+
+You can see this in `AppManager.warmPoolEnsure()`. Cold-start path:
+`installed → creating → … → resumed`. Warm path: skip to "iframe mount".
+
+## Calling lifecycle hooks — how the runner talks to the app
+
+`SandboxRunner.callLifecycle(instanceId, hook)` does an HTTP POST to:
+
+```
+http://<runner.getHost>:<runner.getPort>/api/lifecycle/<hook>
+```
+
+(PRoot: host = `127.0.0.1`. Container: host = `aura-<sanitized-id>`.)
+
+Body is JSON `{ instanceId, appId, activityId? }`. The app responds
+`{ ok: true }` to advance, or any 4xx/5xx to halt the transition. For
+activity-mode apps the lifecycle hook path is slightly different —
+`onActivityCreate` returns `{ path, title? }` which the shell uses to
+build the iframe URL.
+
+The proxy is **not** in this loop. Runner → app is direct over the
+inner network (loopback in PRoot mode, the `aura-net` bridge in
+container mode). The proxy only ever serves the browser-facing iframe.
+
+## Reading the source
+
+```sh
+aura jump --master
+$ less packages/core/src/types/lifecycle.ts             # the transition table
+$ less packages/core/src/app-manager/LifecycleStateMachine.ts   # 33 lines
+$ less packages/core/src/app-manager/AppManager.ts      # the orchestrator
+  - around line 200 — start() / spawnInstance()
+  - around line 400 — resume() / pause()
+  - around line 600 — stop() / destroy()
+  - around line 800 — warmPoolEnsure()
+```
+
+The whole FSM file is short on purpose: every line you add here makes
+the entire OS harder to reason about. Resist enrichment — push behaviour
+into AppManager and keep the FSM dumb.
