@@ -76,7 +76,13 @@ const { apps, enabledMap = {} } = Astro.props;
   <div id="dock-overflow-menu" class="dock-overflow-menu" role="menu" hidden></div>
 </nav>
 
-<style>
+<style is:global>
+  /* All selectors are either id-anchored (#dock), dock-* prefixed, or
+     nested under a specific parent — because dock-item tiles are rebuilt
+     via document.createElement in the MRU/install SSE handler and those
+     elements don't carry Astro's data-astro-cid-* scope attribute, so a
+     scoped style block would leave them unstyled. Same rationale as the
+     is:global block in ProcessManager.astro. */
   #dock {
     display: flex;
     align-items: center;
@@ -171,7 +177,7 @@ const { apps, enabledMap = {} } = Astro.props;
     box-shadow: inset 0 0 0 2px var(--aura-color-primary), var(--aura-glow-primary);
   }
 
-  .separator {
+  #dock .separator {
     width: 1px;
     height: 32px;
     background: var(--aura-color-border);
@@ -212,7 +218,7 @@ const { apps, enabledMap = {} } = Astro.props;
      the most-recently-used apps stay visible. */
   .dock-item[data-hidden="true"] { display: none; }
 
-  .app-initial {
+  .dock-item .app-initial {
     /* Uniform size across 1/2/3-char glyphs; sized to fit "SET" in the dock tile. */
     font-size: 0.7rem;
     letter-spacing: 0.04em;
@@ -220,7 +226,7 @@ const { apps, enabledMap = {} } = Astro.props;
     font-weight: 500;
   }
 
-  .app-label {
+  .dock-item .app-label {
     font-size: var(--aura-font-size-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -491,12 +497,15 @@ const { apps, enabledMap = {} } = Astro.props;
           ]);
           if (!appsRes.ok || !mruRes.ok) return;
           const apps = await appsRes.json() as Array<{
-            manifest: { id: string; name: string; icon?: string };
+            manifest: { id: string; name: string; icon?: string; componentType?: 'activity' | 'service' };
             enabled: boolean;
           }>;
           const mru = (await mruRes.json()).mru as Record<string, number>;
           const top5 = apps
             .filter((a) => a.enabled !== false)
+            // Services have no UI and shouldn't squat a dock slot. Mirrors
+            // the SSR pinned-apps filter in pages/index.astro.
+            .filter((a) => a.manifest.componentType !== 'service')
             .sort((a, b) => {
               const am = mru[a.manifest.id] ?? 0;
               const bm = mru[b.manifest.id] ?? 0;

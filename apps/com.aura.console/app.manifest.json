@@ -9,7 +9,7 @@
   "instanceMode": "single",
   "activityMode": "multi",
   "defaultLaunch": "new-activity",
-  "autoStart": true,
+  "autoStart": false,
   "backgroundService": true,
   "useProot": true,
   "sandbox": "container",
