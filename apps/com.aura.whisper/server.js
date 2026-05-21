@@ -137,12 +137,25 @@ app.post('/api/lifecycle/onDestroy', ah(async (_req, res) => {
 // the `/api/proxy/com.aura.whisper/…` referer to gate same-app writes.
 const KV_PATH = `/api/kv/app/${encodeURIComponent(APP_ID)}/config`;
 
+// Empty strings / null / undefined in the stored value must NOT override
+// DEFAULT_CONFIG — otherwise a UI save that forwarded every form field
+// (some of them blank) would zero out `llmModel`, `whisperModel`, etc.
+// and the next sidecar boot would `docker run --model '' --port 4000`
+// which exits immediately. Treat blanks as "use the default".
+function defined(v) { return v !== '' && v !== undefined && v !== null; }
+function withDefaults(stored) {
+  const clean = Object.fromEntries(
+    Object.entries(stored ?? {}).filter(([, v]) => defined(v)),
+  );
+  return { ...DEFAULT_CONFIG, ...clean };
+}
+
 async function kvGet() {
   try {
     const r = await fetch(`${OS_API_BASE}${KV_PATH}`);
     if (!r.ok) return { ...DEFAULT_CONFIG };
     const body = await r.json();
-    return { ...DEFAULT_CONFIG, ...(body?.value ?? {}) };
+    return withDefaults(body?.value);
   } catch {
     return { ...DEFAULT_CONFIG };
   }
@@ -170,8 +183,14 @@ app.get('/api/config', ah(async (_req, res) => {
 }));
 
 app.post('/api/config', ah(async (req, res) => {
-  const incoming = req.body ?? {};
-  const merged = { ...(await kvGet()), ...incoming };
+  // Drop blank fields from the incoming patch so the UI form never
+  // overwrites a sensible default with an empty string. The user clears
+  // a field by submitting an explicit `null` (we don't expose that path
+  // in the UI today; we can add a `reset` endpoint later if needed).
+  const incoming = Object.fromEntries(
+    Object.entries(req.body ?? {}).filter(([, v]) => defined(v) || typeof v === 'boolean'),
+  );
+  const merged = withDefaults({ ...(await kvGet()), ...incoming });
   try {
     await kvPut(merged);
   } catch (e) {
@@ -398,7 +417,11 @@ async function ensureSidecarContainers() {
   // --- faster-whisper-server ---
   // First-time pull is ~500MB; allow a generous timeout. Same reasoning
   // as the litellm container below.
-  if (await isContainerRunning(ASR_NAME)) await removeContainer(ASR_NAME);
+  // Always force-remove — `isContainerRunning` returns false for stopped/
+  // exited containers, but `docker run --name X` still 409s if such a
+  // zombie exists (e.g. from a previous failed pull). `docker rm -f` is
+  // a no-op if the container is gone.
+  await removeContainer(ASR_NAME);
   await dockerExec([
     'run', '-d',
     '--name', ASR_NAME,
@@ -420,7 +443,7 @@ async function ensureSidecarContainers() {
   // generous timeout — otherwise the initial `docker run -d …` exits
   // with a `signal=null` error and the user thinks the save failed.
   if (cfg.openrouterApiKey) {
-    if (await isContainerRunning(LLM_NAME)) await removeContainer(LLM_NAME);
+    await removeContainer(LLM_NAME);
     await dockerExec([
       'run', '-d',
       '--name', LLM_NAME,
