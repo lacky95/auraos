@@ -101,15 +101,20 @@ app.get('/api/lifecycle/health', (_req, res) => {
 
 app.post('/api/lifecycle/onCreate',  (_req, res) => res.json({ ok: true }));
 
-app.post('/api/lifecycle/onStart', ah(async (_req, res) => {
-  try {
-    await ensureSidecarContainers();
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('[whisper] onStart sidecar boot failed:', e);
-    res.json({ ok: true, warning: String(e?.message || e) });
-  }
-}));
+// IMPORTANT: respond to onStart immediately. ensureSidecarContainers can
+// take minutes on first run (LiteLLM image is ~1 GB, faster-whisper is
+// ~500 MB). The AppManager's lifecycle-hook RPC has a much shorter
+// timeout — if we await the docker pulls here, the AppManager FSM gets
+// stuck in `starting` even though the service is healthy, and the
+// Process Manager UI then shows the app as "BOOT" forever. Boot the
+// sidecars in the background; the settings activity surfaces their
+// readiness via /api/status.
+app.post('/api/lifecycle/onStart', (_req, res) => {
+  res.json({ ok: true });
+  ensureSidecarContainers().catch((e) => {
+    console.error('[whisper] background sidecar boot failed:', e?.message || e);
+  });
+});
 
 app.post('/api/lifecycle/onResume',  (_req, res) => res.json({ ok: true }));
 app.post('/api/lifecycle/onPause',   (_req, res) => res.json({ ok: true }));
