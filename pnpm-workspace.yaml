@@ -8,10 +8,12 @@ packages:
   # inner dir name is added below.
   - 'apps/*/fumadocs-site'
 allowBuilds:
-  msw: set this to true or false
-  node-pty: set this to true or false
-  redis-memory-server: set this to true or false
-  sharp: set this to true or false
+  esbuild: true
+  msw: true
+  node-pty: true
+  redis-memory-server: true
+  sharp: true
+  '@img/sharp-libvips-linux-x64': true
 onlyBuiltDependencies:
   - esbuild
   - msw
