@@ -1,0 +1,16 @@
+{
+  "id": "com.aura.browser",
+  "name": "Browser",
+  "version": "0.1.0",
+  "description": "minimal web browser",
+  "icon": "BR",
+  "instanceMode": "single",
+  "activityMode": "multi",
+  "backgroundService": true,
+  "sandbox": "container",
+  "tools": [
+    "bash",
+    "git",
+    "claude"
+  ]
+}

@@ -26,16 +26,16 @@ import Layout from '../layouts/Layout.astro';
       <label for="registry-input">OCI registry (overrides manifest.publish.registry)</label>
       <input id="registry-input" type="text" placeholder="ghcr.io/user/aura-foo" />
 
-      <div style="display:flex;gap:8px">
-        <div style="flex:1">
+      <div class="nexus-form-grid">
+        <div>
           <label for="tag-input">Tag (defaults to v&lt;manifest.version&gt;)</label>
           <input id="tag-input" type="text" placeholder="v1.0.0" />
         </div>
-        <div style="flex:1">
+        <div>
           <label for="channel-input">Channel (extra tag, e.g. stable)</label>
           <input id="channel-input" type="text" placeholder="stable" />
         </div>
-        <div style="flex:1">
+        <div>
           <label for="branch-input">Branch (git only)</label>
           <input id="branch-input" type="text" placeholder="main" />
         </div>

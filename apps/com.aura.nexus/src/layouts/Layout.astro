@@ -79,14 +79,28 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
         outline: none;
         border-color: var(--aura-color-primary);
       }
+      /* ── Responsive top bar + tab nav ───────────────────────────────────
+       * Three regimes, controlled by the bar's container width — not the
+       * viewport — so the same logic works inside the OS launcher, a
+       * narrow tiling cell, or full-screen.
+       *
+       *   ≥ 720px  — title + subtitle on the left, all four tabs on the
+       *              right, single row.
+       *   ≥ 480px  — subtitle drops; tabs flow under the title on a
+       *              second row, still all visible.
+       *   < 480px  — tabs become a scroll-snap horizontal strip so the
+       *              user can swipe through them without stacking into a
+       *              tall vertical menu that eats half the iframe. */
       .nexus-bar {
         position: sticky; top: 0;
         background: var(--aura-color-surface);
         border-bottom: 1px solid var(--aura-color-border);
         padding: 10px 16px;
         display: flex;
+        flex-wrap: wrap;            /* nav can drop below title on narrow */
         align-items: center;
-        gap: 24px;
+        column-gap: 24px;
+        row-gap: 8px;
         z-index: 10;
       }
       .nexus-title {
@@ -95,6 +109,8 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
         gap: 10px;
         margin: 0;
         font-size: 0.95rem;
+        min-width: 0;                /* allows the title to shrink */
+        flex: 0 0 auto;
       }
       .nexus-title .glyph {
         color: var(--aura-color-primary);
@@ -103,6 +119,7 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
         border: 1px solid var(--aura-color-primary);
         padding: 2px 5px;
         font-size: 0.7rem;
+        flex-shrink: 0;
       }
       .nexus-title .wordmark {
         font-weight: 700;
@@ -113,20 +130,66 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
         color: var(--aura-color-text-dim);
         font-size: 0.7rem;
         letter-spacing: 0.08em;
+        white-space: nowrap;
       }
-      .nexus-tabs { display: flex; gap: 4px; }
+      .nexus-tabs {
+        display: flex;
+        flex-wrap: wrap;             /* tabs line-break when there's no room */
+        gap: 4px;
+        flex: 1 1 auto;              /* takes remaining row when both fit */
+        justify-content: flex-start;
+        min-width: 0;
+      }
       .nexus-tab {
         padding: 4px 10px;
         font-size: 0.7rem;
         letter-spacing: 0.12em;
         color: var(--aura-color-text-dim);
         border: 1px solid transparent;
+        white-space: nowrap;
+        flex-shrink: 0;              /* tabs never squash */
       }
       .nexus-tab:hover { color: var(--aura-color-text); border-color: var(--aura-color-border); }
       .nexus-tab.active {
         color: var(--aura-color-primary);
         border-color: var(--aura-color-primary);
         background: color-mix(in srgb, var(--aura-color-primary) 8%, transparent);
+      }
+
+      /* Medium: drop the subtitle so the title chunk stays compact while
+       * the tabs flow onto their second row neatly. */
+      @media (max-width: 720px) {
+        .nexus-title .subtitle { display: none; }
+        .nexus-bar { column-gap: 16px; padding: 8px 12px; }
+      }
+
+      /* Tight: lock tabs into a balanced 2-up grid so they wrap as a
+       * unit (2 + 2) instead of 3-on-top-and-PUBLISH-dangling-below.
+       *
+       * `flex: 1 1 calc(50% - 2px)` makes each tab basis half-row minus
+       * half the gap (4px gap → 2px share each). All four reach for the
+       * same width, so they break into rows of 2 cleanly. When the
+       * container is so narrow that 50%-of-row is smaller than the
+       * widest label ("INSTALLED") the basis floors out and they stack
+       * 1-per-row instead. */
+      @media (max-width: 480px) {
+        .nexus-bar  { padding: 8px 10px; }
+        .nexus-tabs { width: 100%; }      /* the tab grid owns its own row */
+        .nexus-tab {
+          flex: 1 1 calc(50% - 2px);
+          text-align: center;
+          padding: 6px 10px;
+        }
+      }
+      /* Phone-narrow: stack one tab per row so the labels can breathe
+       * even with the chunky letter-spacing. */
+      @media (max-width: 360px) {
+        .nexus-tab { flex: 1 1 100%; }
+      }
+
+      /* Extra-tight: drop the wordmark — glyph + tabs alone. */
+      @media (max-width: 320px) {
+        .nexus-title .wordmark { display: none; }
       }
       .nexus-main { padding: 20px 16px; max-width: 1100px; margin: 0 auto; }
       .nexus-card {
@@ -135,15 +198,65 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
         margin-bottom: 10px;
         background: var(--aura-color-surface);
       }
-      .nexus-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+      .nexus-card-head {
+        display: flex;
+        flex-wrap: wrap;             /* action row drops below info when tight */
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      /* The first child of card-head is the info column (title + meta).
+       * Letting it own a soft min of ~220px means the actions row gets
+       * shoved onto its own line once info would have to squash narrower
+       * than that — instead of crushing both columns into illegible strips. */
+      .nexus-card-head > :first-child {
+        flex: 1 1 220px;
+        min-width: 0;
+      }
       .nexus-card-title {
         font-weight: 600;
         color: var(--aura-color-text);
         letter-spacing: 0.05em;
+        display: flex;
+        flex-wrap: wrap;            /* badge + name + id wrap on narrow */
+        align-items: center;
+        gap: 6px;
+        word-break: break-word;
       }
-      .nexus-card-desc { color: var(--aura-color-text-dim); font-size: 0.8rem; margin-top: 4px; }
-      .nexus-card-meta { color: var(--aura-color-text-dim); font-size: 0.7rem; margin-top: 8px; letter-spacing: 0.04em; }
-      .nexus-card-actions { display: flex; gap: 6px; }
+      .nexus-card-desc {
+        color: var(--aura-color-text-dim);
+        font-size: 0.8rem;
+        margin-top: 4px;
+        word-break: break-word;
+      }
+      .nexus-card-meta {
+        color: var(--aura-color-text-dim);
+        font-size: 0.7rem;
+        margin-top: 8px;
+        letter-spacing: 0.04em;
+        word-break: break-all;      /* long refs / digests wrap mid-string */
+      }
+      /* Inline <code> in body text — keep long paths from forcing
+       * horizontal scroll. */
+      .nexus-main code { word-break: break-all; }
+      .nexus-card-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        flex-shrink: 0;
+      }
+      /* When the info column above wraps the actions onto their own
+       * line (`flex-basis: 100%`), expand the action buttons to fill
+       * the row so they read as a full-width control bar instead of a
+       * cluster on the right. */
+      @media (max-width: 480px) {
+        .nexus-card-actions { width: 100%; }
+        .nexus-card-actions > button,
+        .nexus-card-actions > a.nexus-tab {
+          flex: 1 1 auto;
+          text-align: center;
+        }
+      }
       .nexus-empty {
         text-align: center;
         color: var(--aura-color-text-dim);
@@ -176,8 +289,54 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
       }
       .nexus-form { display: flex; flex-direction: column; gap: 10px; max-width: 640px; }
       .nexus-form label { font-size: 0.75rem; letter-spacing: 0.08em; color: var(--aura-color-text-dim); }
-      .nexus-form-row { display: flex; gap: 8px; }
-      .nexus-form-row > input { flex: 1; }
+      /* Bare inputs inside .nexus-form fill the column width. */
+      .nexus-form input,
+      .nexus-form textarea,
+      .nexus-form select {
+        width: 100%;
+        box-sizing: border-box;
+      }
+
+      /* Input + button row. The input keeps a soft min of 220px so it
+       * never shrinks below usable; below that, the buttons after it
+       * wrap onto their own line (full width on narrow screens). */
+      .nexus-form-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .nexus-form-row > input  { flex: 1 1 220px; min-width: 0; }
+      .nexus-form-row > button { flex: 0 0 auto; }
+      @media (max-width: 480px) {
+        .nexus-form-row > button { flex: 1 1 auto; }
+      }
+
+      /* Multi-input grid (publish page's tag/channel/branch row). Uses
+       * `auto-fit + minmax(180px, 1fr)` so children break to a new row as
+       * soon as 180px is more than half the available width. Each field
+       * keeps a sensible minimum, the row collapses to single-column on
+       * narrow screens automatically. */
+      .nexus-form-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 8px;
+        align-items: stretch;       /* every cell takes the row's full height */
+      }
+      /* Each cell is a flex column: label at natural height on top, input
+       * pushed to the bottom via `margin-top: auto`. Result: regardless of
+       * which label wrapped onto two lines and which didn't, every input
+       * in the row sits on a shared baseline. */
+      .nexus-form-grid > div {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      .nexus-form-grid > div > input,
+      .nexus-form-grid > div > select {
+        margin-top: auto;           /* float to bottom of the cell */
+        width: 100%;
+        box-sizing: border-box;
+      }
       pre.nexus-log {
         background: var(--aura-color-bg);
         border: 1px solid var(--aura-color-border);

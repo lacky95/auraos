@@ -1,0 +1,474 @@
+---
+/**
+ * com.aura.browser — minimal web browser.
+ *
+ * Layout: a sticky toolbar at the top (back / forward / reload / URL bar /
+ * go / home) and a single nested <iframe> filling the rest of the viewport.
+ * That nested iframe is the "browser engine" — when the user hits Enter on
+ * the URL bar we just point the iframe at the typed URL. Aura's own window
+ * is already an iframe; the engine is an iframe inside that iframe.
+ *
+ * History is a plain in-memory array we push to on every navigation. We
+ * don't (and can't, cross-origin) rely on the inner iframe's own history,
+ * so back/forward walk our own list — same way every native browser UI
+ * separates "tab history" from the underlying window history.
+ *
+ * Practical limit users will hit: most popular sites set
+ * `X-Frame-Options: DENY` or `Content-Security-Policy: frame-ancestors`
+ * which forbid being framed. Those refuse to load and the iframe stays
+ * blank — that's a browser-side restriction we can't bypass. Sites that
+ * permit framing (lite/AMP variants, many docs sites, our own AuraOS
+ * pages, etc.) work fine.
+ */
+
+const DEFAULT_HOME = 'https://duckduckgo.com/?q=AuraOS';
+---
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>Browser — AuraOS</title>
+  </head>
+  <body>
+    <header class="chrome">
+      <div class="nav-group">
+        <button id="back-btn"    title="Back (Alt+←)"    aria-label="Back"    disabled>◂</button>
+        <button id="fwd-btn"     title="Forward (Alt+→)" aria-label="Forward" disabled>▸</button>
+        <button id="reload-btn"  title="Reload (Ctrl+R)" aria-label="Reload">⟳</button>
+        <button id="home-btn"    title="Home"            aria-label="Home">⌂</button>
+        <button id="debug-btn"   title="Debug panel"     aria-label="Debug" aria-pressed="false">⚙</button>
+      </div>
+      <form id="url-form" class="url-form" autocomplete="off">
+        <input id="url-input" type="text" spellcheck="false" placeholder="Enter URL or search query…" />
+        <button id="go-btn" type="submit" title="Go (Enter)">GO</button>
+      </form>
+    </header>
+
+    <div class="engine-wrap">
+      <iframe
+        id="engine"
+        class="engine"
+        title="Web view"
+        src={DEFAULT_HOME}
+        referrerpolicy="no-referrer-when-downgrade"
+        allow="clipboard-read; clipboard-write; fullscreen"
+        sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
+      ></iframe>
+      <aside id="debug-panel" class="debug-panel" hidden aria-label="Debug">
+        <header class="debug-head">
+          <span>// DEBUG</span>
+          <button id="debug-clear" type="button" title="Clear log">CLEAR</button>
+          <button id="debug-close" type="button" title="Close debug panel">✕</button>
+        </header>
+        <dl class="debug-stats">
+          <dt>state</dt>      <dd id="dbg-state">idle</dd>
+          <dt>last load</dt>  <dd id="dbg-loadms">—</dd>
+          <dt>cursor</dt>     <dd id="dbg-cursor">0 / 1</dd>
+          <dt>current url</dt><dd id="dbg-url"></dd>
+        </dl>
+        <div class="debug-section">
+          <div class="debug-section-title">HISTORY</div>
+          <ol id="dbg-history" class="debug-history"></ol>
+        </div>
+        <div class="debug-section">
+          <div class="debug-section-title">EVENTS</div>
+          <pre id="dbg-log" class="debug-log"></pre>
+        </div>
+      </aside>
+    </div>
+
+    <style is:global>
+      :root { color-scheme: dark; }
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100vh;
+        overflow: hidden;
+        font-family: var(--aura-font-mono, 'IBM Plex Mono', ui-monospace, monospace);
+        background: var(--aura-color-bg, #0a0a0a);
+        color: var(--aura-color-text, #ccffcc);
+        display: flex;
+        flex-direction: column;
+      }
+
+      /* ── Top chrome ──────────────────────────────────────────────── */
+      .chrome {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: stretch;
+        gap: 8px;
+        padding: 6px 10px;
+        background: var(--aura-color-surface, #111);
+        border-bottom: 1px solid var(--aura-color-border, #222);
+        flex-shrink: 0;
+      }
+      .nav-group { display: flex; gap: 2px; flex-shrink: 0; }
+      .nav-group button {
+        font: inherit;
+        font-size: 0.95rem;
+        line-height: 1;
+        background: transparent;
+        color: var(--aura-color-primary, #00ff41);
+        border: 1px solid var(--aura-color-border, #222);
+        cursor: pointer;
+        min-width: 32px;
+        padding: 0 8px;
+        transition: border-color 0.1s, box-shadow 0.1s;
+      }
+      .nav-group button:hover:not([disabled]),
+      .nav-group button:focus-visible:not([disabled]) {
+        border-color: var(--aura-color-primary, #00ff41);
+        box-shadow: 0 0 8px var(--aura-color-primary, #00ff41);
+        outline: none;
+      }
+      .nav-group button[disabled] { opacity: 0.3; cursor: not-allowed; }
+
+      .url-form { display: flex; flex: 1 1 320px; min-width: 0; gap: 0; }
+      .url-form input {
+        flex: 1 1 auto;
+        min-width: 0;
+        font: inherit;
+        font-size: 0.85rem;
+        background: var(--aura-color-bg, #0a0a0a);
+        color: var(--aura-color-text, #ccffcc);
+        border: 1px solid var(--aura-color-border, #222);
+        padding: 6px 10px;
+        letter-spacing: 0.02em;
+      }
+      .url-form input:focus { outline: none; border-color: var(--aura-color-primary, #00ff41); }
+      .url-form button {
+        font: inherit;
+        font-size: 0.75rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        background: transparent;
+        color: var(--aura-color-primary, #00ff41);
+        border: 1px solid var(--aura-color-border, #222);
+        border-left: none;
+        padding: 0 12px;
+        cursor: pointer;
+        flex-shrink: 0;
+      }
+      .url-form button:hover {
+        border-color: var(--aura-color-primary, #00ff41);
+        box-shadow: 0 0 8px var(--aura-color-primary, #00ff41);
+      }
+      .chrome[data-loading="true"] .url-form button { animation: pulse 0.8s ease-in-out infinite; }
+      @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+      /* ── Engine viewport ──────────────────────────────────────── */
+      .engine-wrap {
+        position: relative;
+        flex: 1 1 auto;
+        background: var(--aura-color-bg, #0a0a0a);
+      }
+      .engine {
+        width: 100%;
+        height: 100%;
+        border: none;
+        display: block;
+        background: white;
+      }
+      /* ── Debug panel ─────────────────────────────────────────── */
+      /* Anchored bottom-right of the engine viewport, never blocks the
+       * page. Toggled by the ⚙ button in the chrome. */
+      .debug-panel {
+        position: absolute;
+        right: 12px;
+        bottom: 12px;
+        width: min(380px, calc(100% - 24px));
+        max-height: min(70%, 480px);
+        background: var(--aura-color-surface, #111);
+        border: 1px solid var(--aura-color-primary, #00ff41);
+        box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        font-size: 0.72rem;
+        line-height: 1.4;
+        display: flex;
+        flex-direction: column;
+        z-index: 5;
+      }
+      .debug-panel[hidden] { display: none; }
+      .debug-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 6px 10px;
+        background: color-mix(in srgb, var(--aura-color-primary, #00ff41) 12%, transparent);
+        color: var(--aura-color-primary, #00ff41);
+        letter-spacing: 0.15em;
+        border-bottom: 1px solid var(--aura-color-border, #222);
+      }
+      .debug-head button {
+        font: inherit;
+        font-size: 0.65rem;
+        letter-spacing: 0.1em;
+        background: transparent;
+        color: var(--aura-color-text-dim, #557755);
+        border: 1px solid var(--aura-color-border, #222);
+        padding: 2px 8px;
+        cursor: pointer;
+      }
+      .debug-head button:hover { color: var(--aura-color-primary, #00ff41); border-color: var(--aura-color-primary, #00ff41); }
+      .debug-stats {
+        display: grid;
+        grid-template-columns: minmax(0, max-content) 1fr;
+        gap: 4px 12px;
+        margin: 0;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--aura-color-border, #222);
+      }
+      .debug-stats dt {
+        color: var(--aura-color-text-dim, #557755);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-size: 0.65rem;
+      }
+      .debug-stats dd {
+        margin: 0;
+        color: var(--aura-color-text, #ccffcc);
+        word-break: break-all;
+      }
+      .debug-section {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--aura-color-border, #222);
+      }
+      .debug-section:last-of-type { border-bottom: none; }
+      .debug-section-title {
+        color: var(--aura-color-text-dim, #557755);
+        font-size: 0.6rem;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        margin-bottom: 6px;
+      }
+      .debug-history {
+        margin: 0;
+        padding: 0 0 0 20px;
+        overflow-y: auto;
+        max-height: 100px;
+        color: var(--aura-color-text-dim, #557755);
+      }
+      .debug-history li { word-break: break-all; }
+      .debug-history li[data-current="true"] {
+        color: var(--aura-color-primary, #00ff41);
+        list-style-type: square;
+      }
+      .debug-log {
+        margin: 0;
+        flex: 1 1 auto;
+        min-height: 80px;
+        max-height: 160px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        word-break: break-all;
+        font-size: 0.7rem;
+        color: var(--aura-color-text-dim, #557755);
+      }
+      .debug-log .ev-warn { color: var(--aura-color-warning, #ffd166); }
+      .debug-log .ev-error { color: var(--aura-color-danger, #ff2020); }
+      .debug-log .ev-ok    { color: var(--aura-color-primary, #00ff41); }
+
+      /* Debug button uses the same nav-group styling but highlights when on. */
+      .nav-group button[aria-pressed="true"] {
+        background: color-mix(in srgb, var(--aura-color-primary, #00ff41) 12%, transparent);
+        border-color: var(--aura-color-primary, #00ff41);
+      }
+
+      /* ── Narrow tile: URL bar drops onto its own row below nav ── */
+      @media (max-width: 480px) {
+        .chrome { gap: 6px; padding: 6px; }
+        .url-form { flex-basis: 100%; order: 2; }
+        .nav-group { order: 1; }
+        .nav-group button { min-width: 28px; padding: 0 6px; }
+      }
+    </style>
+
+    <script is:inline>
+      (function () {
+        var chrome   = document.querySelector('.chrome');
+        var engine   = document.getElementById('engine');
+        var urlInput = document.getElementById('url-input');
+        var urlForm  = document.getElementById('url-form');
+        var backBtn  = document.getElementById('back-btn');
+        var fwdBtn   = document.getElementById('fwd-btn');
+        var reloadB  = document.getElementById('reload-btn');
+        var homeBtn  = document.getElementById('home-btn');
+        var debugBtn = document.getElementById('debug-btn');
+
+        // Debug panel handles
+        var dbgPanel = document.getElementById('debug-panel');
+        var dbgState = document.getElementById('dbg-state');
+        var dbgLoadMs= document.getElementById('dbg-loadms');
+        var dbgCursor= document.getElementById('dbg-cursor');
+        var dbgUrl   = document.getElementById('dbg-url');
+        var dbgHist  = document.getElementById('dbg-history');
+        var dbgLog   = document.getElementById('dbg-log');
+        var dbgClear = document.getElementById('debug-clear');
+        var dbgClose = document.getElementById('debug-close');
+
+        var HOME = engine.getAttribute('src');
+        // History stack of URLs. cursor points at the currently-visible
+        // entry. Pushing a new URL truncates anything past the cursor.
+        var history = [HOME];
+        var cursor = 0;
+        // True while we triggered the next iframe `load`; lets us skip
+        // history pushes for back/forward jumps.
+        var suppressPush = true;        // initial home load is the seed entry
+        // Per-navigation timing.
+        var navStartedAt = 0;
+        var loadWatchdog = null;        // 15s timer for "still loading" warn
+
+        function normalize(value) {
+          var v = (value || '').trim();
+          if (!v) return null;
+          if (/^(https?|file|about|data):/i.test(v)) return v;          // explicit scheme
+          if (/^[^\s]+\.[^\s]+$/.test(v)) return 'https://' + v;        // looks like a host
+          return 'https://duckduckgo.com/?q=' + encodeURIComponent(v);  // fallthrough: search
+        }
+        function syncInputFromHistory() { urlInput.value = history[cursor] || ''; }
+        function syncButtons() {
+          backBtn.disabled = cursor <= 0;
+          fwdBtn.disabled  = cursor >= history.length - 1;
+        }
+
+        // ── Debug logger ─────────────────────────────────────────
+        function dbgLog_line(level, msg) {
+          if (!dbgLog) return;
+          var ts = new Date().toISOString().slice(11, 23);  // HH:MM:SS.mmm
+          var line = '[' + ts + '] ' + msg + '\n';
+          var span = document.createElement('span');
+          span.className = 'ev-' + level;
+          span.textContent = line;
+          dbgLog.appendChild(span);
+          dbgLog.scrollTop = dbgLog.scrollHeight;
+        }
+        function dbgRefresh() {
+          if (!dbgPanel || dbgPanel.hidden) return;
+          dbgCursor.textContent = (cursor + 1) + ' / ' + history.length;
+          dbgUrl.textContent    = history[cursor] || '';
+          dbgHist.innerHTML = '';
+          for (var i = 0; i < history.length; i++) {
+            var li = document.createElement('li');
+            li.textContent = history[i];
+            if (i === cursor) li.dataset.current = 'true';
+            dbgHist.appendChild(li);
+          }
+        }
+        function dbgSetState(s) { if (dbgState) dbgState.textContent = s; }
+        function dbgSetLoadMs(ms) {
+          if (dbgLoadMs) dbgLoadMs.textContent = ms == null ? '—' : ms + ' ms';
+        }
+
+        function navigate(url, opts) {
+          opts = opts || {};
+          var push = opts.push !== false;
+          if (!url) return;
+          if (push) {
+            history.length = cursor + 1;
+            history.push(url);
+            cursor = history.length - 1;
+          }
+          suppressPush = true;
+          chrome.dataset.loading = 'true';
+          navStartedAt = performance.now();
+          dbgSetState('loading');
+          dbgSetLoadMs(null);
+          dbgLog_line('ok', 'navigate → ' + url);
+          // Watchdog: if load doesn't fire in 15s the engine may be
+          // hung (slow site / XFO block). We just log it to the debug
+          // panel — no modal overlay, the user keeps using the browser.
+          clearTimeout(loadWatchdog);
+          loadWatchdog = setTimeout(function () {
+            dbgLog_line('warn', 'still loading after 15s — site may refuse framing (X-Frame-Options / CSP frame-ancestors)');
+            dbgSetState('slow');
+          }, 15000);
+          engine.setAttribute('src', url);
+          syncInputFromHistory();
+          syncButtons();
+          dbgRefresh();
+        }
+
+        engine.addEventListener('load', function () {
+          clearTimeout(loadWatchdog);
+          chrome.dataset.loading = '';
+          var ms = Math.round(performance.now() - navStartedAt);
+          dbgSetLoadMs(ms);
+          dbgSetState('idle');
+          // Same-origin frames let us peek contentWindow.location to
+          // capture user-driven nav (link clicks). Cross-origin throws;
+          // we just trust the URL we set ourselves in that case.
+          try {
+            var real = engine.contentWindow && engine.contentWindow.location.href;
+            if (real && !suppressPush && real !== history[cursor]) {
+              history.length = cursor + 1;
+              history.push(real);
+              cursor = history.length - 1;
+              syncInputFromHistory();
+              syncButtons();
+              dbgLog_line('ok', 'same-origin nav captured → ' + real);
+            }
+            dbgLog_line('ok', 'load ' + ms + 'ms');
+          } catch (_) {
+            dbgLog_line('ok', 'load ' + ms + 'ms (cross-origin, can\'t read URL)');
+          }
+          suppressPush = false;
+          dbgRefresh();
+        });
+        engine.addEventListener('error', function () {
+          clearTimeout(loadWatchdog);
+          chrome.dataset.loading = '';
+          dbgSetState('error');
+          dbgLog_line('error', 'engine error event fired');
+        });
+
+        urlForm.addEventListener('submit', function (e) {
+          e.preventDefault();
+          var url = normalize(urlInput.value);
+          if (url) navigate(url);
+        });
+        backBtn.addEventListener('click', function () {
+          if (cursor > 0) { cursor -= 1; navigate(history[cursor], { push: false }); }
+        });
+        fwdBtn.addEventListener('click', function () {
+          if (cursor < history.length - 1) { cursor += 1; navigate(history[cursor], { push: false }); }
+        });
+        reloadB.addEventListener('click', function () { navigate(history[cursor], { push: false }); });
+        homeBtn.addEventListener('click', function () { navigate(HOME); });
+
+        // ── Debug panel toggle ────────────────────────────────────
+        function toggleDebug(open) {
+          var next = (open == null) ? dbgPanel.hidden : open;
+          dbgPanel.hidden = !next;
+          debugBtn.setAttribute('aria-pressed', String(next));
+          if (next) dbgRefresh();
+        }
+        debugBtn.addEventListener('click', function () { toggleDebug(); });
+        dbgClose.addEventListener('click', function () { toggleDebug(false); });
+        dbgClear.addEventListener('click', function () {
+          dbgLog.textContent = '';
+          dbgLog_line('ok', 'log cleared');
+        });
+
+        // Common browser shortcuts. Bubble phase so URL-bar typing still
+        // works normally — input consumes the event first when focused.
+        window.addEventListener('keydown', function (e) {
+          if (e.altKey && e.key === 'ArrowLeft')  { e.preventDefault(); backBtn.click(); }
+          if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); fwdBtn.click();  }
+          if (e.ctrlKey && (e.key === 'r' || e.key === 'R')) { e.preventDefault(); reloadB.click(); }
+          if (e.ctrlKey && (e.key === 'l' || e.key === 'L')) { e.preventDefault(); urlInput.focus(); urlInput.select(); }
+          if (e.ctrlKey && e.shiftKey && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); toggleDebug(); }
+        });
+
+        syncInputFromHistory();
+        syncButtons();
+        dbgLog_line('ok', 'browser ready · home = ' + HOME);
+        navStartedAt = performance.now();   // first paint timing starts here
+      })();
+    </script>
+  </body>
+</html>
