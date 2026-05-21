@@ -216,7 +216,25 @@ app.post('/api/config', ah(async (req, res) => {
 // as the original whisper-tester's /api/transcribe so existing clients
 // keep working.
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
+// Flow-style dictation rarely exceeds 60 s; cap at 8 MB to reject
+// mis-routed traffic fast. Opus@24 kbps fills ~3 KB/s, so 8 MB ≈ 45 min
+// of speech — plenty.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
+
+// Whisper response formats the upstream OpenAI-compatible endpoint
+// accepts. `verbose_json` is the interesting one — it returns segments
+// with timestamps (and `words` when the model supports it) which unlocks
+// live highlighting + word-level editing UX on the client.
+const ALLOWED_FORMATS = new Set(['json', 'text', 'srt', 'vtt', 'verbose_json']);
+
+// Coerce multipart string booleans → real booleans. multipart bodies are
+// always strings, but JSON bodies could already have booleans, so accept
+// both.
+function toBool(v) {
+  if (v === undefined || v === null || v === '') return undefined;
+  if (typeof v === 'boolean') return v;
+  return v === 'true' || v === '1';
+}
 
 app.post('/api/transcribe', upload.single('audio'), ah(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'no audio file in field "audio"' });
@@ -224,11 +242,15 @@ app.post('/api/transcribe', upload.single('audio'), ah(async (req, res) => {
   const model    = req.body.model    || cfg.whisperModel;
   const language = req.body.language || cfg.language;
   // Per-request override of the KV-level `cleanupOnTranscribe` toggle.
-  // Accepts string 'true'/'false' (multipart bodies are strings) or boolean.
-  const cleanupParam = req.body.cleanup;
-  const wantCleanup = (cleanupParam === undefined)
-    ? !!cfg.cleanupOnTranscribe
-    : (cleanupParam === true || cleanupParam === 'true' || cleanupParam === '1');
+  const wantCleanup = toBool(req.body.cleanup) ?? !!cfg.cleanupOnTranscribe;
+  // VAD passthrough — when true, faster-whisper-server runs Silero VAD
+  // on the upload and skips silent regions, which both speeds inference
+  // and avoids hallucinated "Thanks for watching!" on pure-silence input.
+  const vadFilter = toBool(req.body.vad_filter);
+  // Caller-selected output shape. Default keeps the prior `{ text }` JSON.
+  const respFormat = ALLOWED_FORMATS.has(req.body.response_format)
+    ? req.body.response_format
+    : 'json';
   const llmModelOverride = req.body.llmModel;
   const filename = req.file.originalname
     || `audio.${(req.file.mimetype.split('/')[1] || 'webm').split(';')[0]}`;
@@ -237,15 +259,31 @@ app.post('/api/transcribe', upload.single('audio'), ah(async (req, res) => {
     fd.append('file', new Blob([req.file.buffer], { type: req.file.mimetype }), filename);
     fd.append('model', model);
     fd.append('language', language);
-    fd.append('response_format', 'json');
+    fd.append('response_format', respFormat);
+    if (vadFilter !== undefined) fd.append('vad_filter', String(vadFilter));
     const t0 = Date.now();
     const r  = await fetch(`http://${ASR_NAME}:8000/v1/audio/transcriptions`, { method: 'POST', body: fd });
     const bodyText = await r.text();
     if (!r.ok) return res.status(r.status).json({ error: 'whisper failed', detail: bodyText });
     let text;
-    try { text = JSON.parse(bodyText).text; } catch { text = bodyText; }
+    let parsed;
+    if (respFormat === 'json' || respFormat === 'verbose_json') {
+      try { parsed = JSON.parse(bodyText); text = parsed?.text; } catch { text = bodyText; }
+    } else {
+      text = bodyText;
+    }
     const transcript = (text || '').trim();
     const out = { text: transcript, ms: Date.now() - t0, model };
+    // Surface segments + word timestamps for callers that asked for them.
+    if (respFormat === 'verbose_json' && parsed) {
+      if (Array.isArray(parsed.segments)) out.segments = parsed.segments;
+      if (Array.isArray(parsed.words))    out.words    = parsed.words;
+      if (parsed.duration != null)        out.duration = parsed.duration;
+    }
+    // For non-JSON formats (srt/vtt/text) the raw upstream body is what
+    // the caller actually wants — return it on `raw` so they don't have
+    // to re-fetch.
+    if (respFormat === 'srt' || respFormat === 'vtt') out.raw = bodyText;
     // Optional LLM cleanup chain — runs only when the toggle is on AND
     // we have something to clean. The clean step's errors are reported
     // alongside the original transcript so the caller still gets the raw
@@ -340,6 +378,68 @@ async function inspectContainer(name) {
     };
   } catch {
     return { state: 'missing' };
+  }
+}
+
+/** Build a 0.5 s 16 kHz mono 16-bit PCM WAV of silence in-memory. The
+ *  44-byte header + 32 000 bytes of zeroed PCM is enough to make the
+ *  faster-whisper-server load the model and run one forward pass — that
+ *  primes the model cache so the first user-supplied audio doesn't pay
+ *  the cold-load tax. No ffmpeg or sox needed in the sandbox. */
+function silentWav(durationSec = 0.5, sampleRate = 16000) {
+  const numSamples = Math.floor(sampleRate * durationSec);
+  const dataSize   = numSamples * 2; // 16-bit mono
+  const buf = Buffer.alloc(44 + dataSize);
+  buf.write('RIFF', 0);
+  buf.writeUInt32LE(36 + dataSize, 4);
+  buf.write('WAVE', 8);
+  buf.write('fmt ', 12);
+  buf.writeUInt32LE(16, 16);            // fmt chunk size
+  buf.writeUInt16LE(1, 20);             // PCM
+  buf.writeUInt16LE(1, 22);             // mono
+  buf.writeUInt32LE(sampleRate, 24);
+  buf.writeUInt32LE(sampleRate * 2, 28); // byte rate
+  buf.writeUInt16LE(2, 32);             // block align
+  buf.writeUInt16LE(16, 34);            // bits per sample
+  buf.write('data', 36);
+  buf.writeUInt32LE(dataSize, 40);
+  // Remaining bytes are zero — that's our silence.
+  return buf;
+}
+
+/** Wait for `aura-whisper-asr` HTTP to be ready, then POST a tiny silent
+ *  WAV so the configured model gets loaded into memory ahead of the
+ *  first real /api/transcribe. Runs once per `ensureSidecarContainers`
+ *  call (so a model swap re-warms automatically). Bounded total time:
+ *  the readiness poll waits up to ~60 s; the transcribe call is capped
+ *  at 5 min to cover the first-time HuggingFace download. */
+async function warmupWhisperModel(cfg) {
+  const healthUrl = `http://${ASR_NAME}:8000/health`;
+  let ready = false;
+  for (let i = 0; i < 30; i++) {
+    try {
+      const r = await fetch(healthUrl, { signal: AbortSignal.timeout(2000) });
+      if (r.ok) { ready = true; break; }
+    } catch { /* container still booting */ }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  if (!ready) {
+    console.warn('[whisper] warmup: ASR /health never came up — skipping');
+    return;
+  }
+  const fd = new FormData();
+  fd.append('file', new Blob([silentWav()], { type: 'audio/wav' }), 'warmup.wav');
+  fd.append('model', cfg.whisperModel);
+  fd.append('language', cfg.language || 'en');
+  fd.append('response_format', 'json');
+  const t0 = Date.now();
+  const r  = await fetch(`http://${ASR_NAME}:8000/v1/audio/transcriptions`, {
+    method: 'POST', body: fd, signal: AbortSignal.timeout(5 * 60_000),
+  });
+  if (r.ok) {
+    console.log(`[whisper] model warmup OK in ${Date.now() - t0}ms (model=${cfg.whisperModel})`);
+  } else {
+    console.warn(`[whisper] model warmup HTTP ${r.status}`);
   }
 }
 
@@ -439,6 +539,13 @@ async function ensureSidecarContainers() {
     'fedirz/faster-whisper-server:latest-cpu',
   ], { timeout: 5 * 60_000 });
   console.log(`[whisper] ${ASR_NAME} up — model=${cfg.whisperModel} device=${cfg.whisperDevice}`);
+  // Fire-and-forget model warmup so the *first* real transcription
+  // doesn't pay the model-load latency (cold base/small ≈ 5-15 s;
+  // large-v3-turbo ≈ 30-60 s; plus HuggingFace download if the model
+  // isn't yet in the `aura-whisper-models` volume — base is ~145 MB).
+  warmupWhisperModel(cfg).catch((e) => {
+    console.warn('[whisper] model warmup failed:', e?.message || e);
+  });
 
   // --- litellm ---
   // Single-model CLI mode (no config.yaml mount needed). The model
