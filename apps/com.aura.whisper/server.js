@@ -237,6 +237,7 @@ function toBool(v) {
 }
 
 app.post('/api/transcribe', upload.single('audio'), ah(async (req, res) => {
+  const tStart = Date.now();
   if (!req.file) return res.status(400).json({ error: 'no audio file in field "audio"' });
   const cfg = await kvGet();
   const model    = req.body.model    || cfg.whisperModel;
@@ -254,6 +255,7 @@ app.post('/api/transcribe', upload.single('audio'), ah(async (req, res) => {
   const llmModelOverride = req.body.llmModel;
   const filename = req.file.originalname
     || `audio.${(req.file.mimetype.split('/')[1] || 'webm').split(';')[0]}`;
+  const audioKb = Math.round(req.file.buffer.length / 1024);
   try {
     const fd = new FormData();
     fd.append('file', new Blob([req.file.buffer], { type: req.file.mimetype }), filename);
@@ -264,7 +266,11 @@ app.post('/api/transcribe', upload.single('audio'), ah(async (req, res) => {
     const t0 = Date.now();
     const r  = await fetch(`http://${ASR_NAME}:8000/v1/audio/transcriptions`, { method: 'POST', body: fd });
     const bodyText = await r.text();
-    if (!r.ok) return res.status(r.status).json({ error: 'whisper failed', detail: bodyText });
+    const asrMs = Date.now() - t0;
+    if (!r.ok) {
+      console.log(`[whisper] POST /api/transcribe FAIL HTTP ${r.status} (audio=${audioKb}KB model=${model} asr=${asrMs}ms)`);
+      return res.status(r.status).json({ error: 'whisper failed', detail: bodyText });
+    }
     let text;
     let parsed;
     if (respFormat === 'json' || respFormat === 'verbose_json') {
@@ -273,7 +279,8 @@ app.post('/api/transcribe', upload.single('audio'), ah(async (req, res) => {
       text = bodyText;
     }
     const transcript = (text || '').trim();
-    const out = { text: transcript, ms: Date.now() - t0, model };
+    const duration = parsed?.duration ?? null;
+    const out = { text: transcript, ms: asrMs, model };
     // Surface segments + word timestamps for callers that asked for them.
     if (respFormat === 'verbose_json' && parsed) {
       if (Array.isArray(parsed.segments)) out.segments = parsed.segments;
@@ -288,16 +295,27 @@ app.post('/api/transcribe', upload.single('audio'), ah(async (req, res) => {
     // we have something to clean. The clean step's errors are reported
     // alongside the original transcript so the caller still gets the raw
     // text even if the LLM hop fails.
+    let cleanMs = null;
     if (wantCleanup && transcript) {
       try {
         const cleaned = await runLlmCleanup(transcript, language, llmModelOverride ?? cfg.llmModel, cfg);
         out.clean = cleaned;
+        cleanMs = cleaned.ms;
       } catch (e) {
         out.cleanError = String(e?.message || e);
       }
     }
+    const totalMs = Date.now() - tStart;
+    console.log(
+      `[whisper] /api/transcribe ok ` +
+      `audio=${audioKb}KB dur=${duration ?? '?'}s ` +
+      `model=${model} lang=${language} vad=${vadFilter ?? false} fmt=${respFormat} ` +
+      `asr=${asrMs}ms clean=${cleanMs ?? '-'}ms total=${totalMs}ms ` +
+      `text=${transcript.length}ch${out.segments ? ` segments=${out.segments.length}` : ''}${out.cleanError ? ` cleanError="${out.cleanError}"` : ''}`
+    );
     res.json(out);
   } catch (e) {
+    console.log(`[whisper] /api/transcribe ERR audio=${audioKb}KB: ${e?.message || e}`);
     res.status(502).json({ error: 'whisper unreachable', detail: String(e?.message || e) });
   }
 }));
@@ -313,8 +331,10 @@ app.post('/api/clean', ah(async (req, res) => {
   const model    = req.body.model    || cfg.llmModel;
   try {
     const out = await runLlmCleanup(text, language, model, cfg);
+    console.log(`[whisper] /api/clean ok in=${text.length}ch out=${out.text.length}ch model=${model} lang=${language} ms=${out.ms}`);
     res.json(out);
   } catch (e) {
+    console.log(`[whisper] /api/clean ERR model=${model} lang=${language} in=${text.length}ch: ${e?.message || e}`);
     if (e.status) return res.status(e.status).json({ error: 'litellm failed', detail: e.detail });
     res.status(502).json({ error: 'litellm unreachable', detail: String(e?.message || e) });
   }
@@ -413,6 +433,52 @@ function silentWav(durationSec = 0.5, sampleRate = 16000) {
  *  call (so a model swap re-warms automatically). Bounded total time:
  *  the readiness poll waits up to ~60 s; the transcribe call is capped
  *  at 5 min to cover the first-time HuggingFace download. */
+// Keep-alive interval — faster-whisper-server unloads the model after ~5
+// min of idle, which adds 0.5–15 s to the first transcribe after a pause
+// (varies by model size). Pinging every 4 min with a 0.5 s silent WAV
+// keeps the model resident at near-zero cost (each ping is ~100 ms of
+// CPU + 1 KB upload through the in-network Docker bridge).
+const KEEPALIVE_INTERVAL_MS = 4 * 60_000;
+let keepAliveHandle = null;
+
+async function pingAsrToKeepWarm(cfg) {
+  try {
+    const fd = new FormData();
+    fd.append('file', new Blob([silentWav()], { type: 'audio/wav' }), 'keepalive.wav');
+    fd.append('model', cfg.whisperModel);
+    fd.append('language', cfg.language || 'en');
+    fd.append('response_format', 'json');
+    const t0 = Date.now();
+    const r = await fetch(`http://${ASR_NAME}:8000/v1/audio/transcriptions`, {
+      method: 'POST', body: fd, signal: AbortSignal.timeout(30_000),
+    });
+    if (r.ok) {
+      console.log(`[whisper] keep-alive ping ok ${Date.now() - t0}ms`);
+    } else {
+      console.warn(`[whisper] keep-alive ping HTTP ${r.status}`);
+    }
+  } catch (e) {
+    console.warn(`[whisper] keep-alive ping failed: ${e?.message || e}`);
+  }
+}
+
+function startKeepAliveLoop(cfg) {
+  stopKeepAliveLoop();
+  keepAliveHandle = setInterval(() => {
+    // Re-read config so a model swap immediately retargets the pinger.
+    kvGet().then(pingAsrToKeepWarm).catch(() => {});
+  }, KEEPALIVE_INTERVAL_MS);
+  console.log(`[whisper] keep-alive loop armed (every ${KEEPALIVE_INTERVAL_MS / 1000}s)`);
+}
+
+function stopKeepAliveLoop() {
+  if (keepAliveHandle) {
+    clearInterval(keepAliveHandle);
+    keepAliveHandle = null;
+    console.log('[whisper] keep-alive loop stopped');
+  }
+}
+
 async function warmupWhisperModel(cfg) {
   const healthUrl = `http://${ASR_NAME}:8000/health`;
   let ready = false;
@@ -543,9 +609,11 @@ async function ensureSidecarContainers() {
   // doesn't pay the model-load latency (cold base/small ≈ 5-15 s;
   // large-v3-turbo ≈ 30-60 s; plus HuggingFace download if the model
   // isn't yet in the `aura-whisper-models` volume — base is ~145 MB).
-  warmupWhisperModel(cfg).catch((e) => {
-    console.warn('[whisper] model warmup failed:', e?.message || e);
-  });
+  warmupWhisperModel(cfg)
+    .then(() => startKeepAliveLoop(cfg))
+    .catch((e) => {
+      console.warn('[whisper] model warmup failed:', e?.message || e);
+    });
 
   // --- litellm ---
   // Single-model CLI mode (no config.yaml mount needed). The model
@@ -576,6 +644,7 @@ async function ensureSidecarContainers() {
 }
 
 async function teardownSidecarContainers() {
+  stopKeepAliveLoop();
   await Promise.allSettled([removeContainer(ASR_NAME), removeContainer(LLM_NAME)]);
   console.log('[whisper] sidecars torn down');
 }
