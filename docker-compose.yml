@@ -6,6 +6,11 @@ services:
       target: development
     container_name: aura-shell
     hostname: aura-shell
+    # Auto-recover after a host reboot or docker daemon restart. Without
+    # this the master container stays down until someone runs `compose up`
+    # again, while the sibling sidecars (spawned with --restart
+    # unless-stopped) come back on their own — leaving the OS headless.
+    restart: unless-stopped
     ports:
       - "3000:3000"
     volumes:
