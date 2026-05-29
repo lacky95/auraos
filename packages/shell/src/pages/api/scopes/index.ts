@@ -1,5 +1,5 @@
 import type { APIRoute } from 'astro';
-import { getAppManager } from '@aura/core';
+import { getAppManager, ScopeRegistry } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
 import { jsonResponse } from '../../../lib/appResponse.js';
 
@@ -25,17 +25,29 @@ async function getScopeGitRepo(id: string): Promise<string | null> {
 /**
  * GET /api/scopes
  * Returns all three scope definitions with appCount + gitRepo.
+ *
+ * Constructs ScopeRegistry directly from env vars to avoid depending on
+ * the AppManager globalThis singleton having getScopeRegistry() — that
+ * method may be absent if the singleton was cached before the scope system
+ * was deployed and the shell hasn't fully restarted yet.
  */
 export const GET: APIRoute = async () => {
-  const mgr      = getAppManager();
-  const registry = mgr.getScopeRegistry();
-  const scopes   = registry.getAll();
+  const registry = new ScopeRegistry({
+    systemAppsDir: process.env['AURA_APPS_DIR'] ?? '/workspace/apps',
+    dataDir:       process.env['AURA_DATA_DIR'] ?? '/data',
+  });
+  const scopes = registry.getAll();
 
+  // Count manifests per scope. Fall back to empty if getManifests isn't
+  // present on an old cached singleton.
   const countByScopeId: Record<string, number> = {};
-  for (const m of mgr.getManifests()) {
-    const sid = (m as { scopeId?: string }).scopeId ?? 'system';
-    countByScopeId[sid] = (countByScopeId[sid] ?? 0) + 1;
-  }
+  try {
+    const mgr = getAppManager();
+    for (const m of mgr.getManifests()) {
+      const sid = (m as { scopeId?: string }).scopeId ?? 'system';
+      countByScopeId[sid] = (countByScopeId[sid] ?? 0) + 1;
+    }
+  } catch { /* stale singleton — counts stay 0 */ }
 
   const result = await Promise.all(scopes.map(async (scope) => ({
     ...scope,
