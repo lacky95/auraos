@@ -4,6 +4,7 @@ import '../styles/global.css';
 import StatusBar from '../components/shell/StatusBar.astro';
 import Dock from '../components/shell/Dock.astro';
 import LauncherOverlay from '../components/shell/LauncherOverlay.astro';
+import LockScreenOverlay from '../components/shell/LockScreenOverlay.astro';
 import { ThemeManager } from '@aura/core';
 import type { AppManifest, ColorMode } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
@@ -410,6 +411,13 @@ const activeThemeId   = activeTheme.id;
     or overflow:auto clipping from #dock / #os-root.
   -->
   <LauncherOverlay />
+  <!--
+    LockScreenOverlay mounted last so its z-index 2000 sits above every
+    other shell surface (launcher 1000, focus-view 50, dock, statusbar,
+    app iframes). Activated via window.auraLockScreen() or the
+    `aura.lockscreen.activate` key binding.
+  -->
+  <LockScreenOverlay />
 
   <!--
     Iframe identity guard: on every iframe load, read the <meta name="aura-app-id">

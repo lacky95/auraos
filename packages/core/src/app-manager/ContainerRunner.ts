@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
 import type { SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
+import type { SpawnContext } from '../scopes/types.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
 const HEALTH_CHECK_TIMEOUT_MS = 60_000; // slightly higher than PRoot because container spawn adds ~100 ms
@@ -147,7 +148,7 @@ export class ContainerRunner implements SandboxRunner {
   }
 
   // ─── Spawn ────────────────────────────────────────────────────────────
-  async spawn(instanceId: string, appId: string, port: number, manifest: AppManifest): Promise<number> {
+  async spawn(instanceId: string, appId: string, port: number, manifest: AppManifest, ctx: SpawnContext): Promise<number> {
     this.provisionToolsDir(instanceId, manifest);
 
     const hostname = this.containerName(instanceId);
@@ -156,7 +157,7 @@ export class ContainerRunner implements SandboxRunner {
     // shell can leave them behind.
     try { execSync(`docker rm -f ${hostname}`, { stdio: 'ignore', timeout: 5_000 }); } catch { /* didn't exist */ }
 
-    const args = this.buildDockerArgs(instanceId, appId, port, manifest, hostname);
+    const args = this.buildDockerArgs(instanceId, appId, port, manifest, hostname, ctx);
     console.log(`[ContainerRunner] Spawning ${hostname} (app=${appId}) on port ${port}`);
 
     // Use spawnSync (not execSync with a joined string) so multi-word args
@@ -211,18 +212,17 @@ export class ContainerRunner implements SandboxRunner {
     port: number,
     manifest: AppManifest,
     hostname: string,
+    ctx: SpawnContext,
   ): string[] {
     // myTools is only used to provision the per-instance symlinks before
     // docker run — the bind itself goes through aura-app-data's volume-subpath.
     void this.toolsDir(instanceId);
-    // AppManager runs in the aura-shell container which has the app-data
-    // named volume mounted at /data — so creating this.dataDir/.../<inst>
-    // ALSO creates the subpath inside the volume that docker --mount
-    // volume-subpath will pluck out for the sibling container.
-    const instDataDir  = join(this.dataDir, 'apps', appId, instanceId);
+    // AppManager has already created ctx.instanceDataDir via mkdirSync before
+    // calling spawn(), which also creates the subpath inside the named volume.
+    const instDataDir = ctx.instanceDataDir;
     mkdirSync(instDataDir, { recursive: true });
 
-    const entrypoint = this.resolveEntrypoint(appId, manifest);
+    const entrypoint = this.resolveEntrypoint(ctx.appDir, appId, manifest);
 
     // node_modules + per-instance data live in the AuraOS named volumes,
     // not on the host bind (the AuraOS container's pnpm install populates
@@ -236,7 +236,10 @@ export class ContainerRunner implements SandboxRunner {
     // AppManager creates via mkdirSync(instDataDir) below ("apps/<id>/<inst>",
     // NOT "aura/apps/..."). The dataDir is the mount point, not part of
     // the volume-internal path.
-    const dataSubpath       = `apps/${appId}/${instanceId}`;
+    // Compute subpath by stripping the root dataDir prefix from instanceDataDir.
+    // For system apps: "scopes/system/apps/<id>/<inst>"
+    // For global/user: "scopes/global/apps/<id>/<inst>" etc.
+    const dataSubpath = instDataDir.slice(this.dataDir.length).replace(/^\//, '');
 
     // SLICED bind set — only this app's apps/<id> dir is visible at
     // /workspace/apps, with shared workspace dirs (node_modules, packages,
@@ -260,7 +263,9 @@ export class ContainerRunner implements SandboxRunner {
       // Per-app slice of /workspace from the host. Sibling apps in
       // apps/<other> are not visible — there's no parent /workspace/apps
       // bind, the individual app folder is bound directly under it.
-      '-v', `${this.workspaceRoot}/apps/${appId}:/workspace/apps/${appId}`,
+      // Use ctx.appDir (host path) so global/user scope apps bind from their
+      // actual location rather than workspaceRoot/apps/<id>.
+      '-v', `${ctx.appDir}:/workspace/apps/${appId}`,
       '-v', `${this.workspaceRoot}/packages:/workspace/packages:ro`,
       '-v', `${this.workspaceRoot}/package.json:/workspace/package.json:ro`,
       '-v', `${this.workspaceRoot}/pnpm-lock.yaml:/workspace/pnpm-lock.yaml:ro`,
@@ -326,6 +331,10 @@ export class ContainerRunner implements SandboxRunner {
       // away from that; the env stays put across `docker exec` invocations
       // too, so `aura jump` shells reliably show the right name.
       '-e', `AURA_HOSTNAME=${appId}`,
+      // Forward the master host name so the Terminal app's base shell can show
+      // the host ("aura-shell") in its session-host indicator rather than its
+      // own `--hostname <appId>` kernel name. Read by pty-server / index.astro.
+      '-e', `AURA_SHELL_HOSTNAME=${this.shellHostname}`,
       // Point HOME at the shared persistent volume so tools like claude/gh/
       // ssh persist their state across container respawns AND across
       // `aura jump` hops between apps (one shared home, one logged-in user).
@@ -348,8 +357,8 @@ export class ContainerRunner implements SandboxRunner {
     return a;
   }
 
-  private resolveEntrypoint(appId: string, manifest: AppManifest): string[] {
-    const entrypointPath = join(this.appsDir, appId, manifest.entrypoint);
+  private resolveEntrypoint(appDir: string, appId: string, manifest: AppManifest): string[] {
+    const entrypointPath = join(appDir, manifest.entrypoint);
     const entrypointExists = existsSync(entrypointPath);
     if (manifest.runtime === 'raw') {
       if (!entrypointExists) {

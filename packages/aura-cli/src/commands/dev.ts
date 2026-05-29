@@ -616,6 +616,22 @@ export function registerDev(program: Command): void {
       const dest = join(APPS_DIR, appId);
       if (existsSync(dest) && !opts.force) fail(`${dest} already exists. Pass --force to overwrite.`);
 
+      // Validate the enum flags up front so a typo fails fast with a clear
+      // message instead of producing a manifest that only blows up later at
+      // `aura dev validate` / schema load. The interactive wizard constrains
+      // these to valid choices; the flag path has to enforce it itself. `shape`
+      // is optional (defaults to 'activity'); `instance-mode`/`sandbox` always
+      // carry an option default but are still validated in case of an explicit
+      // bad value.
+      const enumGuard = <T extends string>(flag: string, value: string | undefined, allowed: readonly T[]): void => {
+        if (value !== undefined && !allowed.includes(value as T)) {
+          fail(`Invalid ${flag}: '${value}'. Expected one of: ${allowed.join(' | ')}.`);
+        }
+      };
+      enumGuard('--shape',          opts.shape,        ['activity', 'activity-bg', 'service'] as const);
+      enumGuard('--instance-mode',  opts.instanceMode, ['single', 'multi'] as const);
+      enumGuard('--sandbox',        opts.sandbox,      ['proot', 'container'] as const);
+
       const cfg: ScaffoldConfig = {
         appId,
         name:         opts.name ?? (appId.split('.').pop() ?? appId),

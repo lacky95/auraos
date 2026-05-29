@@ -199,9 +199,15 @@ const ssrVisibleViews = initialViews
       <header id="focus-header">
         <span id="focus-title">FOCUS</span>
         <span id="focus-instance-id"></span>
+        <button id="focus-fullscreen" title="Toggle full size (overlay top + bottom bars)" aria-pressed="false">⛶ FULL SIZE</button>
         <button id="focus-exit" title="Exit focus (Esc)">✕ EXIT FOCUS</button>
       </header>
-      <iframe id="focus-frame" title="Focused app"></iframe>
+      <!-- Positioned wrapper so #focus-frame can be absolutely sized and
+           counter-scaled by --aura-iframe-scale (app zoom), exactly like a
+           windowed app's .slot-body iframe. -->
+      <div id="focus-body">
+        <iframe id="focus-frame" title="Focused app"></iframe>
+      </div>
     </div>
   </div>
 </OSLayout>
@@ -212,6 +218,10 @@ const ssrVisibleViews = initialViews
   import { nextInDirection, getViewRects } from '../lib/windowNav.ts';
   import type { LayoutNavContext } from '../lib/windowNav.ts';
   import { osEvents } from '../lib/osEvents.ts';
+  import {
+    postViewportTo,
+    queueViewportBroadcast,
+  } from '../lib/viewportBroadcaster.ts';
 
   const keyDispatcher = getKeyDispatcher();
 
@@ -369,6 +379,20 @@ const ssrVisibleViews = initialViews
   function broadcastClaims(): void {
     document.querySelectorAll('iframe').forEach((f) => sendClaimList(f as HTMLIFrameElement));
   }
+
+  // Tell app iframes their usable size / scale changed. The shell resizes
+  // apps several ways the child can't otherwise detect reliably:
+  //   • tiling reflow (CSS Grid recompute in renderLayout) — the child's
+  //     own ResizeObserver races the layout-settle,
+  //   • viewport zoom (CSS `transform: scale()` on <body>) — paint-only,
+  //     so a child ResizeObserver NEVER fires,
+  //   • free-window drag-resize release, and browser window resize.
+  // An explicit per-iframe message covers them all, carrying that iframe's
+  // exact logical content box so the app does pure arithmetic instead of
+  // re-measuring its own settling DOM. Apps consume it via the SDK's
+  // onViewportChange(). `postViewportTo` / `queueViewportBroadcast` now live
+  // in ../lib/viewportBroadcaster.ts (imported above) — the single
+  // broadcaster shared with StatusBar.astro (was duplicated per island).
 
   // Dispatcher re-emits on every setActions/setState — push the latest list
   // to every mounted iframe so SDK subscriptions and remap events apply
@@ -810,7 +834,27 @@ const ssrVisibleViews = initialViews
   let views: AppView[] = [];
   let focusedInstanceId: string | null = null;
   let focusedActivityId: string | null = null;
+  // In-place "focus/maximize": the viewId of the window promoted to fill the
+  // desktop. Unlike the old #focus-frame overlay (which spun up a SECOND
+  // iframe and reloaded the app), this just restyles the EXISTING slot — its
+  // iframe is never moved or re-created, so the app keeps its state exactly
+  // like it does across a workspace switch. null = nothing maximized.
+  let maximizedViewId: string | null = null;
+  // Full-size focus: when true, the maximized window covers the WHOLE shell
+  // (over the status bar + dock) instead of just the desktop area — the
+  // in-place equivalent of the old focus overlay's "FULL SIZE" toggle. Always
+  // starts windowed for each new focus session (reset in maximize/unmaximize).
+  let maximizedFull = false;
   const manifestCache = new Map<string, AppManifestLite>();
+
+  // Per-window USER LABEL — an ephemeral, instance-only name the user types in
+  // the title bar (the ✎ button, or double-click the title). Keyed by viewId
+  // (the per-window identity: activityId for activity views, instanceId
+  // otherwise). Deliberately in-memory ONLY: NOT persisted to the server,
+  // workspace, or localStorage, so it vanishes on window close and on page
+  // reload — exactly the "just for this instance" contract. renderLayout()
+  // prunes entries whose window has gone away.
+  const windowNames = new Map<string, string>();
 
   // ---- Stack-layout drag/resize ------------------------------------------
   //
@@ -1006,6 +1050,10 @@ const ssrVisibleViews = initialViews
       el.style.width  = final.w + 'px';
       el.style.height = final.h + 'px';
       persistStackRect(viewId, final);
+      // Live drag stayed CSS-only (smooth, no per-frame postMessage); fire the
+      // authoritative size signal once on release so the app re-fits to the
+      // final box.
+      queueViewportBroadcast('layout');
     };
     captureEl.addEventListener('pointermove',  onMove);
     captureEl.addEventListener('pointerup',    onEnd);
@@ -1125,6 +1173,7 @@ const ssrVisibleViews = initialViews
   const focusInstIdEl = document.getElementById('focus-instance-id')!;
   const focusTitleEl  = document.getElementById('focus-title')!;
   const focusExitBtn  = document.getElementById('focus-exit')!;
+  const focusFullscreenBtn = document.getElementById('focus-fullscreen') as HTMLButtonElement;
 
   // Stack-layout viewport reclamp. Runs whenever `dynamicLayout` resizes
   // (window resize, mobile rotation, devtools open) so a slot saved at a
@@ -1442,7 +1491,39 @@ const ssrVisibleViews = initialViews
     renderLayout();
   }
 
+  // Promote a window to fill the desktop WITHOUT reloading it. The slot stays
+  // exactly where it is in the DOM (so its iframe's browsing context survives,
+  // per the HTML spec — moving an iframe reloads it); renderLayout() just
+  // restyles it to span the whole canvas, on top of its siblings, with a
+  // focused glow. This is the no-reload counterpart of the old #focus-frame
+  // overlay. Toggling the same window restores it. Maximizing also focuses it.
+  function maximizeView_(viewId: string) {
+    maximizedViewId = viewId;
+    maximizedFull = false; // each focus session starts windowed (desktop area)
+    focusView_(viewId); // sets isFocused + persists focus; calls renderLayout()
+  }
+  function unmaximizeView_() {
+    if (maximizedViewId === null) return;
+    maximizedViewId = null;
+    maximizedFull = false;
+    renderLayout();
+  }
+  function toggleMaximizeView_(viewId: string) {
+    if (maximizedViewId === viewId) unmaximizeView_();
+    else                            maximizeView_(viewId);
+  }
+  // Full-size toggle for the focused window: covers the whole shell (over the
+  // bars) ⇄ desktop area only. No-op unless something is maximized.
+  function toggleMaximizeFull_() {
+    if (maximizedViewId === null) return;
+    maximizedFull = !maximizedFull;
+    renderLayout();
+  }
+
   function closeView_(viewId: string) {
+    // A maximized window that's being closed must release the maximize state,
+    // or the desktop would stay "stuck" promoting a dead viewId.
+    if (maximizedViewId === viewId) maximizedViewId = null;
     const v = views.find((x) => x.viewId === viewId);
     if (v && v.instanceId) {
       // Skip backend call for placeholder views (no instance yet).
@@ -1467,6 +1548,9 @@ const ssrVisibleViews = initialViews
   }
 
   function minimizeView_(viewId: string) {
+    // Minimizing the maximized window cancels the maximize so the desktop
+    // returns to its normal layout instead of promoting an off-screen slot.
+    if (maximizedViewId === viewId) maximizedViewId = null;
     views = views.map((v) => v.viewId === viewId ? { ...v, state: 'minimized' as const } : v);
     renderLayout();
   }
@@ -1565,6 +1649,16 @@ const ssrVisibleViews = initialViews
     // Once JS is in charge, never fall back to the SSR static layout — its
     // buttons are bound to a snapshot and would show stale content after close.
     staticLayout.style.display = 'none';
+
+    // Drop ephemeral window labels whose window is gone (closed/crashed by any
+    // path). `views` holds every running view across all workspaces — a viewId
+    // missing from it means the window no longer exists, so the label dies with
+    // it. (Minimized + other-workspace views remain in `views`, so their labels
+    // survive, as intended.)
+    if (windowNames.size > 0) {
+      const live = new Set(views.map((v) => v.viewId));
+      for (const id of windowNames.keys()) if (!live.has(id)) windowNames.delete(id);
+    }
 
     // Workspace filter:
     //   • Views belonging to the active workspace render normally.
@@ -1800,6 +1894,41 @@ const ssrVisibleViews = initialViews
       }
       el.style.display = 'flex';
       el.style.removeProperty('order');
+
+      // Maximized (in-place focus): promote this slot to cover the whole
+      // desktop area, on top of its siblings, WITHOUT moving its iframe — so
+      // the app keeps its state (no reload). It's taken out of the grid/stack
+      // flow via absolute positioning relative to #dynamic-layout (which is
+      // `position:absolute; inset:0`). The properties used here (position /
+      // top / left / width / height / z-index) are exactly the ones
+      // clearStackPos() strips, so the grid branch below cleans them up once
+      // the window is un-maximized. Siblings stay mounted underneath, warm.
+      if (v.viewId === maximizedViewId) {
+        el.dataset['maximized'] = 'true';
+        el.dataset['maximizedFull'] = maximizedFull ? 'true' : 'false';
+        teardownStackHandlers(el); // no dragging while maximized
+        if (maximizedFull) {
+          // Full size: cover the WHOLE shell (over the bars). `fixed` anchors
+          // to the zoom-transformed <body>, so it respects page zoom + margins
+          // exactly like the bars; z-index 950 matches the old focus overlay —
+          // above the autohide bars (900), below launcher/PM panels (1000).
+          el.style.position = 'fixed';
+        } else {
+          // Windowed: fill just the desktop area, on top of sibling slots,
+          // below the bars.
+          el.style.position = 'absolute';
+        }
+        el.style.left   = '0';
+        el.style.top    = '0';
+        el.style.width  = '100%';
+        el.style.height = '100%';
+        el.style.zIndex = maximizedFull ? '950' : '60';
+        el.style.removeProperty('grid-column');
+        el.style.removeProperty('grid-row');
+        return;
+      }
+      if (el.dataset['maximized']) { delete el.dataset['maximized']; delete el.dataset['maximizedFull']; }
+
       if (stackRects) {
         // Stack mode — absolute-positioned slot. Persisted rect wins;
         // fall back to a 40px cascade so the first paint isn't an exact
@@ -1880,6 +2009,12 @@ const ssrVisibleViews = initialViews
         el.remove();
       }
     }
+
+    // The grid just reflowed (open/close/minimize/workspace switch/focus
+    // toggle all funnel through here): tell every app its tile may have
+    // resized so it can re-fit. Coalesced + double-rAF'd so we measure
+    // after paint.
+    queueViewportBroadcast('layout');
   }
 
   function createSlot(v: AppView): HTMLElement {
@@ -1897,26 +2032,42 @@ const ssrVisibleViews = initialViews
     const minimizeBtn = v.minimizable
       ? `<button data-action="minimize" title="Minimize" style="${btnStyle}">_</button>`
       : '';
-    // Maximize == focus-mode (the full-viewport overlay defined later in this
-    // file). Sibling of close so the user can promote any tiled slot into
-    // single-window mode with one click — the [ ] glyph matches the
-    // "expand window" affordance used by most desktop chrome.
-    const maximizeBtn = `<button data-action="maximize" title="Focus mode (maximize)" style="${btnStyle}">[ ]</button>`;
+    // Maximize == in-place focus: promote this slot to fill the desktop
+    // WITHOUT reloading its iframe (renderLayout restyles the existing slot;
+    // see maximizeView_). Sibling of close so the user can promote any tiled
+    // slot into single-window mode with one click — the [ ] glyph matches the
+    // "expand window" affordance used by most desktop chrome. updateSlot()
+    // swaps the glyph/title to a restore affordance while this view is the
+    // maximized one.
+    const maximizeBtn = `<button data-action="maximize" class="slot-maximize-btn" title="Focus this window (maximize)" style="${btnStyle}">[ ]</button>`;
+    // Full-size (focus mode only): toggles the maximized window between
+    // filling the DESKTOP area and covering the ENTIRE shell (over the status
+    // bar + dock). Hidden until this window is the maximized one — updateSlot()
+    // reveals it + swaps its glyph. This restores the old focus-overlay's
+    // "⛶ FULL SIZE" button without the separate reloading iframe.
+    const fullSizeBtn = `<button data-action="maximize-full" class="slot-fullsize-btn" title="Full size (cover bars)" style="${btnStyle};display:none;">⛶</button>`;
     // Refresh = reload the iframe in place. Sits between maximize and close
     // so close stays the rightmost destructive action. ↻ glyph matches the
     // browser refresh affordance most users already know.
     const refreshBtn  = `<button data-action="refresh" title="Reload window" style="${btnStyle}">↻</button>`;
+    // Rename = set this window's ephemeral user label. Leftmost (least
+    // destructive) control; ✎ matches the "edit/rename" affordance.
+    const renameBtn   = `<button data-action="rename" title="Name this window" style="${btnStyle}">✎</button>`;
     slot.innerHTML = `
       <div class="slot-chrome" style="display:flex;align-items:center;justify-content:space-between;padding:0 8px;height:28px;background:var(--aura-color-surface-2);border-bottom:var(--aura-border);flex-shrink:0;gap:8px;min-width:0;">
-        <div class="slot-title" style="flex:1;min-width:0;display:flex;align-items:center;gap:6px;overflow:hidden;color:var(--aura-color-primary);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.08em;">
+        <div class="slot-title" title="Double-click to name this window" style="flex:1;min-width:0;display:flex;align-items:center;gap:6px;overflow:hidden;color:var(--aura-color-primary);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.08em;">
+          <span class="slot-window-name" style="display:none;flex-shrink:0;max-width:24ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:1px 6px;background:var(--aura-color-surface);border:var(--aura-border);color:var(--aura-color-primary);text-transform:none;letter-spacing:0.04em;"></span>
           <span class="slot-title-trail" style="display:flex;align-items:center;gap:4px;flex:1;min-width:0;overflow:hidden;"></span>
           <span class="slot-title-id" style="color:var(--aura-color-text-dim);font-size:0.6rem;flex-shrink:0;"></span>
         </div>
-        <div class="slot-controls" style="display:flex;gap:4px;flex-shrink:0;">
+        <div class="slot-controls" style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
+          <span class="slot-focus-hint" style="display:none;align-items:center;gap:4px;margin-right:4px;padding:1px 6px;border:1px solid var(--aura-color-primary);color:var(--aura-color-primary);font-family:var(--aura-font-mono);font-size:0.55rem;letter-spacing:0.1em;white-space:nowrap;">◉ FOCUS · ESC</span>
+          ${renameBtn}
           ${minimizeBtn}
           ${refreshBtn}
+          ${fullSizeBtn}
           ${maximizeBtn}
-          <button data-action="close" title="Close" style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 10px;cursor:pointer;line-height:1;">✕</button>
+          <button data-action="close" class="slot-close-btn" title="Close" style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 10px;cursor:pointer;line-height:1;">✕</button>
         </div>
       </div>
       <div class="slot-body" style="flex:1;overflow:hidden;position:relative;"></div>`;
@@ -1969,6 +2120,47 @@ const ssrVisibleViews = initialViews
     const idText = v.activityId ?? v.instanceId;
     if (titleId && titleId.textContent !== idText) titleId.textContent = idText;
 
+    // The ephemeral user label (if set) renders as a pill BEFORE the app
+    // title, so both are visible: "[My Notes]  EDITOR". textContent, not
+    // innerHTML — the name is user input and must not be interpreted as markup.
+    const nameEl = slot.querySelector('.slot-window-name') as HTMLElement | null;
+    if (nameEl) {
+      const custom = windowNames.get(v.viewId);
+      if (custom) {
+        if (nameEl.textContent !== custom) nameEl.textContent = custom;
+        nameEl.style.display = '';
+        nameEl.title = `Window name: ${custom}`;
+      } else {
+        nameEl.textContent = '';
+        nameEl.style.display = 'none';
+        nameEl.removeAttribute('title');
+      }
+    }
+
+    // Reflect focus-mode state on the maximize + full-size controls. When this
+    // window is the maximized (focused) one, the maximize button becomes an
+    // "exit focus" affordance and the full-size toggle appears beside it; both
+    // are hidden / reset otherwise.
+    const isMax = v.viewId === maximizedViewId;
+    const maxBtn = slot.querySelector('.slot-maximize-btn') as HTMLButtonElement | null;
+    if (maxBtn) {
+      maxBtn.textContent = isMax ? '⊟' : '[ ]';
+      maxBtn.title = isMax ? 'Exit focus (Esc)' : 'Focus this window (maximize)';
+    }
+    const fullBtn = slot.querySelector('.slot-fullsize-btn') as HTMLButtonElement | null;
+    if (fullBtn) {
+      fullBtn.style.display = isMax ? '' : 'none';
+      fullBtn.textContent = maximizedFull ? '⊠' : '⛶';
+      fullBtn.title = maximizedFull ? 'Exit full size' : 'Full size (cover bars)';
+    }
+    // Hide the destructive close (✕) while focused — exiting focus is the
+    // expected action there (⊟ / Esc), not tearing the window down — and show
+    // a short "we're in focus mode" hint in its place.
+    const closeBtn = slot.querySelector('.slot-close-btn') as HTMLButtonElement | null;
+    if (closeBtn) closeBtn.style.display = isMax ? 'none' : '';
+    const focusHint = slot.querySelector('.slot-focus-hint') as HTMLElement | null;
+    if (focusHint) focusHint.style.display = isMax ? 'inline-flex' : 'none';
+
     const body = slot.querySelector('.slot-body') as HTMLElement | null;
     if (!body) return;
     const hasIframe   = !!body.querySelector('iframe');
@@ -2018,6 +2210,10 @@ const ssrVisibleViews = initialViews
       // ready to receive messages. Hooks every iframe (not { once: true })
       // because each navigation inside the iframe re-emits `load`.
       iframe.addEventListener('load', () => sendClaimList(iframe));
+      // Hand the freshly-loaded iframe the current viewport scale so an app
+      // opened INTO an already-zoomed/tiled shell fits on first paint
+      // (no layout/zoom change will fire afterwards to trigger a re-fit).
+      iframe.addEventListener('load', () => postViewportTo(iframe, 'mount'));
       // Auto-enter newly-launched windows: same end-state as Enter on a
       // highlighted slot in window-select mode — focus the iframe + post
       // `aura.window.focus` so the app's SDK helper (installGridNav)
@@ -2095,14 +2291,19 @@ const ssrVisibleViews = initialViews
     if (action === 'close')    { e.preventDefault(); closeView_(viewId); }
     if (action === 'minimize') { e.preventDefault(); minimizeView_(viewId); }
     if (action === 'refresh')  { e.preventDefault(); refreshView_(viewId); }
+    if (action === 'rename')   { e.preventDefault(); beginRenameWindow(slot, viewId); }
     if (action === 'maximize') {
-      // Hand off to the focus-mode overlay (defined just below). Read the
-      // identifiers from the slot — the JS-generated chrome stamps them on
-      // createSlot; the SSR AppSlot.astro mirrors the same data-attrs.
+      // In-place focus: promote/restore THIS slot without reloading its
+      // iframe (see maximizeView_). Toggles, so the same button collapses a
+      // maximized window back into the layout.
       e.preventDefault();
-      const instanceId = slot.dataset['instanceId'];
-      const activityId = slot.dataset['activityId'];
-      if (instanceId) focusInstance(instanceId, activityId);
+      toggleMaximizeView_(viewId);
+    }
+    if (action === 'maximize-full') {
+      // Toggle the focused window between full size (over the bars) and the
+      // desktop-area view. Only meaningful while this window is maximized.
+      e.preventDefault();
+      toggleMaximizeFull_();
     }
     // Breadcrumb crumb clicks → POST /back or /back-to.
     if (action === 'back') {
@@ -2126,6 +2327,78 @@ const ssrVisibleViews = initialViews
     }
   });
 
+  // Double-click the title (anywhere but the crumb buttons) to rename — the
+  // familiar desktop "rename" gesture, complementing the ✎ control. Delegated
+  // on document so it covers both SSR and JS-generated slots, like the click
+  // handler above.
+  document.addEventListener('dblclick', (e) => {
+    const target = e.target as HTMLElement | null;
+    if (!target || target.closest('button')) return;
+    const titleEl = target.closest('.slot-title') as HTMLElement | null;
+    if (!titleEl) return;
+    const slot = titleEl.closest('.app-slot[data-view-id]') as HTMLElement | null;
+    const viewId = slot?.dataset['viewId'];
+    if (!slot || !viewId) return;
+    e.preventDefault();
+    beginRenameWindow(slot, viewId);
+  });
+
+  /**
+   * Swap the slot title for an inline text input to set this window's
+   * ephemeral label. Commits on Enter/blur (empty clears the label), cancels
+   * on Escape. The existing title spans are hidden (not removed) so the
+   * subsequent updateSlot() — the single rendering path — can repaint them.
+   */
+  function beginRenameWindow(slot: HTMLElement, viewId: string): void {
+    const titleEl = slot.querySelector('.slot-title') as HTMLElement | null;
+    if (!titleEl || titleEl.querySelector('input[data-window-rename]')) return;
+    const v = views.find((x) => x.viewId === viewId);
+
+    const hidden = (Array.from(titleEl.children) as HTMLElement[]);
+    hidden.forEach((k) => { k.dataset['renamePrev'] = k.style.display; k.style.display = 'none'; });
+
+    const input = document.createElement('input');
+    input.setAttribute('data-window-rename', '1');
+    input.type = 'text';
+    input.value = windowNames.get(viewId) ?? '';
+    input.placeholder = v?.title ?? 'Window name';
+    input.maxLength = 60;
+    input.style.cssText =
+      'flex:1;min-width:0;background:var(--aura-color-surface);border:var(--aura-border);'
+      + 'color:var(--aura-color-primary);font:inherit;font-size:0.72rem;text-transform:none;'
+      + 'letter-spacing:0.04em;padding:1px 6px;outline:none;';
+    // Stop pointerdown reaching the chrome's stack-drag handler (which only
+    // skips <button> targets, not inputs) so typing/selecting doesn't drag.
+    input.addEventListener('pointerdown', (ev) => ev.stopPropagation());
+    input.addEventListener('mousedown',   (ev) => ev.stopPropagation());
+
+    let settled = false;
+    const finish = (save: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (save) {
+        const name = input.value.trim();
+        if (name) windowNames.set(viewId, name);
+        else      windowNames.delete(viewId);
+      }
+      input.remove();
+      hidden.forEach((k) => { k.style.display = k.dataset['renamePrev'] ?? ''; delete k.dataset['renamePrev']; });
+      // Repaint through the canonical path so the name pill reflects the edit.
+      const liveSlot = document.querySelector<HTMLElement>(`.app-slot[data-view-id="${CSS.escape(viewId)}"]`);
+      const liveView = views.find((x) => x.viewId === viewId);
+      if (liveSlot && liveView) updateSlot(liveSlot, liveView);
+    };
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter')       { ev.preventDefault(); finish(true); }
+      else if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
+    });
+    input.addEventListener('blur', () => finish(true));
+
+    titleEl.appendChild(input);
+    input.focus();
+    input.select();
+  }
+
   function restoreView_(viewId: string) {
     views = views.map((v) =>
       v.viewId === viewId
@@ -2145,6 +2418,12 @@ const ssrVisibleViews = initialViews
   // picks up the new filter via `workspaceClient.getCached()`.
   workspaceClient.subscribe(() => renderLayout());
 
+  // Browser window resize changes every iframe's content box without a
+  // renderLayout (the CSS Grid just reflows). Rebroadcast centrally so apps
+  // re-fit; the double-rAF in queueViewportBroadcast both coalesces the resize
+  // burst and waits for the grid to settle before measuring.
+  window.addEventListener('resize', () => queueViewportBroadcast('layout'));
+
   (window as any).auraClose    = closeView_;
   (window as any).auraMinimize = minimizeView_;
 
@@ -2154,6 +2433,35 @@ const ssrVisibleViews = initialViews
    * Pass instanceId for a plain instance view, or both (instanceId, activityId) for an activity.
    */
   async function focusInstance(instanceId: string, activityId?: string) {
+    // Prefer focusing the EXISTING window in place — no reload. Only fall back
+    // to the legacy overlay iframe (further down) when this instance/activity
+    // has no live window to promote (e.g. a headless service with no slot).
+    const view = activityId
+      ? views.find((v) => v.activityId === activityId)
+      : (views.find((v) => v.instanceId === instanceId && !v.activityId)
+          ?? views.find((v) => v.instanceId === instanceId));
+    if (view) {
+      // If the window lives in another workspace, bring that workspace forward
+      // so the promoted slot is actually on screen. The resulting refresh
+      // re-renders the layout, which promotes the maximized slot once it
+      // becomes visible.
+      const ws = workspaceClient.getCached();
+      if (ws) {
+        const owner = ws.workspaces.find((w) => w.members.includes(view.viewId));
+        if (owner && owner.id !== ws.activeWorkspaceId) {
+          workspaceClient.setActive(owner.id).catch((err) => console.warn('[shell] setActive failed', err));
+        }
+      }
+      // Un-minimize, then maximize in place (focuses + re-renders).
+      if (view.state === 'minimized') {
+        views = views.map((v) => v.viewId === view.viewId ? { ...v, state: 'normal' as const } : v);
+      }
+      maximizeView_(view.viewId);
+      return;
+    }
+
+    // ── Fallback: no live window to reuse → mount the overlay iframe. This
+    // path DOES load the app fresh, but there's nothing warm to promote. ──
     let title = instanceId;
     try {
       const res = await fetch(`/api/instances/${encodeURIComponent(instanceId)}/status`);
@@ -2177,7 +2485,23 @@ const ssrVisibleViews = initialViews
     focusFrame.src = 'about:blank';
     focusedInstanceId = null;
     focusedActivityId = null;
+    // Drop back to windowed so the next focus session starts inside the
+    // desktop area, not spanning the bars.
+    setFocusFullscreen(false);
   }
+
+  // Full-size toggle: lift the focus overlay above the status bar + dock so
+  // the focused app spans the whole shell. The `[data-fullscreen="true"]`
+  // CSS state switches the overlay to `position: fixed`, escaping the
+  // #desktop grid cell (see the focus-view rules in the style block).
+  function setFocusFullscreen(on: boolean) {
+    focusView.setAttribute('data-fullscreen', on ? 'true' : 'false');
+    focusFullscreenBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    focusFullscreenBtn.textContent = on ? '⛶ EXIT FULL SIZE' : '⛶ FULL SIZE';
+  }
+  focusFullscreenBtn.addEventListener('click', () => {
+    setFocusFullscreen(focusView.getAttribute('data-fullscreen') !== 'true');
+  });
 
   focusExitBtn.addEventListener('click', exitFocus);
 
@@ -2185,7 +2509,13 @@ const ssrVisibleViews = initialViews
   // Local DOM listener — only consumes the keystroke while the overlay is up,
   // so it doesn't compete with the dispatcher's `aura.nav.back` chain.
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && focusedInstanceId !== null) {
+    if (e.key !== 'Escape') return;
+    // In-place maximize exits first (it's the common, no-reload focus path);
+    // otherwise dismiss the legacy overlay if it's up.
+    if (maximizedViewId !== null) {
+      e.preventDefault();
+      unmaximizeView_();
+    } else if (focusedInstanceId !== null) {
       e.preventDefault();
       exitFocus();
     }
@@ -2194,6 +2524,7 @@ const ssrVisibleViews = initialViews
   /** Remove all views belonging to an instance (called from Process Manager after close/kill). */
   function removeViewsByInstance(instanceId: string) {
     const dead = views.filter((v) => v.instanceId === instanceId);
+    if (dead.some((v) => v.viewId === maximizedViewId)) maximizedViewId = null;
     views = views.filter((v) => v.instanceId !== instanceId);
     for (const v of dead) workspaceClient.removeMember(v.viewId).catch(() => undefined);
     if (focusedInstanceId === instanceId) exitFocus();
@@ -2202,6 +2533,8 @@ const ssrVisibleViews = initialViews
 
   /** Remove a single activity view. */
   function removeViewByActivity(activityId: string) {
+    const dead = views.find((v) => v.activityId === activityId);
+    if (dead && dead.viewId === maximizedViewId) maximizedViewId = null;
     views = views.filter((v) => v.activityId !== activityId);
     workspaceClient.removeMember(activityId).catch(() => undefined);
     if (focusedActivityId === activityId) exitFocus();
@@ -2242,6 +2575,7 @@ const ssrVisibleViews = initialViews
       // different code path.
       if (ev.state === 'destroyed' || ev.state === 'error') {
         const dead = views.filter((v) => v.instanceId === ev.instanceId);
+        if (dead.some((v) => v.viewId === maximizedViewId)) maximizedViewId = null;
         views = views.filter((v) => v.instanceId !== ev.instanceId);
         for (const v of dead) workspaceClient.removeMember(v.viewId).catch(() => undefined);
         if (focusedInstanceId === ev.instanceId) exitFocus();
@@ -2256,6 +2590,7 @@ const ssrVisibleViews = initialViews
     }
     if (ev.type === 'app:crashed') {
       const dead = views.filter((v) => v.instanceId === ev.instanceId);
+      if (dead.some((v) => v.viewId === maximizedViewId)) maximizedViewId = null;
       views = views.filter((v) => v.instanceId !== ev.instanceId);
       for (const v of dead) workspaceClient.removeMember(v.viewId).catch(() => undefined);
       if (focusedInstanceId === ev.instanceId) exitFocus();
@@ -2377,6 +2712,18 @@ const ssrVisibleViews = initialViews
     z-index: 50;
   }
   #focus-view[aria-hidden="false"] { display: flex; }
+  /* Full-size mode (toggled by the FULL SIZE header button): lift the
+     overlay out of the #desktop grid cell so it covers the status bar and
+     dock too. `fixed` anchors to the zoom-transformed <body> (the shell
+     box), so it respects page zoom + screen-edge margins exactly like the
+     bars do. z-index 950 sits above the autohide bars (900) yet below the
+     launcher / process-manager panels (1000) and the lock screen (2000),
+     so those still open over a full-size focused app. */
+  #focus-view[data-fullscreen="true"] {
+    position: fixed;
+    inset: 0;
+    z-index: 950;
+  }
   /* Window-selection mode cue while in focus mode. Mirrors the regular
      `.app-slot[data-aura-nav-focus]` look (border + centred ◉ watermark)
      but painted as a pseudo-element OVERLAY rather than `box-shadow` on
@@ -2439,6 +2786,18 @@ const ssrVisibleViews = initialViews
     opacity: 1;
     pointer-events: none;
     z-index: 3;
+  }
+
+  /* Maximized (in-place focus) window. renderLayout() promotes the EXISTING
+     slot to fill the desktop (position:absolute; inset; z-index:60) without
+     touching its iframe — so the app keeps its state, no reload. This rule
+     gives it the "shown in a special way" treatment: a primary-toned frame +
+     glow so the focused window reads as lifted above its peers. `!important`
+     on the border for the same reason as the nav-focus rule above — it beats
+     createSlot()'s inline `border` shorthand. */
+  .app-slot[data-maximized="true"] {
+    border-color: var(--aura-color-primary) !important;
+    box-shadow: 0 0 0 1px var(--aura-color-primary), var(--aura-glow-primary), 0 12px 32px rgba(0, 0, 0, 0.5);
   }
 
   /* Free-Window drag safety net. The stack-mode drag/resize handlers use
@@ -2622,7 +2981,8 @@ const ssrVisibleViews = initialViews
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  #focus-exit {
+  #focus-exit,
+  #focus-fullscreen {
     background: transparent;
     border: var(--aura-border);
     color: var(--aura-color-text-dim);
@@ -2632,6 +2992,20 @@ const ssrVisibleViews = initialViews
     padding: 4px 8px;
     cursor: pointer;
     text-transform: uppercase;
+  }
+  /* Full-size toggle: primary (not danger) accent on hover/keyboard, and a
+     filled "engaged" look while full-size mode is active — mirrors the
+     status-bar autohide button's pressed state. */
+  #focus-fullscreen:hover { color: var(--aura-color-primary); box-shadow: var(--aura-glow-primary); }
+  #focus-fullscreen:focus-visible {
+    outline: none;
+    color: var(--aura-color-primary);
+    box-shadow: 0 0 0 1px var(--aura-color-primary), 0 0 8px var(--aura-color-primary);
+  }
+  #focus-fullscreen[aria-pressed="true"] {
+    color: var(--aura-color-bg);
+    background: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
   }
   #focus-exit:hover { color: var(--aura-color-danger); box-shadow: var(--aura-glow-danger); }
   /* Keyboard focus state for the Exit Focus button — used when the user
@@ -2643,11 +3017,34 @@ const ssrVisibleViews = initialViews
     box-shadow: 0 0 0 1px var(--aura-color-danger), 0 0 8px var(--aura-color-danger);
   }
 
-  #focus-frame {
+  #focus-body {
     flex: 1;
+    position: relative;
+    overflow: hidden;
+  }
+  #focus-frame {
+    position: absolute;
+    inset: 0;
     width: 100%;
+    height: 100%;
     border: none;
     background: var(--aura-color-bg);
+  }
+
+  /* ── Per-layer app-content zoom ──────────────────────────────────────────
+   * `--aura-iframe-scale` (set on <html> by StatusBar's viewport script) is
+   * appZoom ÷ shellZoom. The body transform already scales every app iframe
+   * by mainZoom·shellZoom along with the rest of the chrome; counter-scaling
+   * the iframe content here by appZoom/shellZoom nets out to mainZoom·appZoom,
+   * so app content zooms independently of the OS chrome. Defaults to 1 (a
+   * no-op: scale(1) + width/height 100%). !important overrides the inline
+   * width/height/inset createSlot() writes on each slot iframe. */
+  .app-slot .slot-body > iframe,
+  #focus-body > iframe {
+    transform-origin: top left;
+    transform: scale(var(--aura-iframe-scale, 1)) !important;
+    width:  calc(100% / var(--aura-iframe-scale, 1)) !important;
+    height: calc(100% / var(--aura-iframe-scale, 1)) !important;
   }
 
   /* ---------- Boot skeleton shown while an app instance is spawning ---------- */

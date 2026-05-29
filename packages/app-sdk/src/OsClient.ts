@@ -503,6 +503,90 @@ export class OsClient {
       }
     };
   }
+
+  // -------- Viewport --------
+
+  /**
+   * Subscribe to viewport changes — fires whenever the shell resizes this
+   * app's tile (tiling reflow / window open-close) or changes the viewport
+   * scale (zoom / margins). These are signals a child cannot detect on its
+   * own: a CSS `transform: scale()` is paint-only (no ResizeObserver fires)
+   * and grid reflow can race the iframe's layout-settle. Apps that measure
+   * their own size (e.g. a terminal fitting xterm to its container) should
+   * re-measure here. Browser-only — no-op on the server. Returns an
+   * unsubscribe function.
+   *
+   * `reason` distinguishes 'layout' (tile resized), 'zoom' (scale changed)
+   * and 'mount' (sent once on iframe load with the current scale).
+   *
+   * `contentW`/`contentH` are this iframe's authoritative LOGICAL content box
+   * in CSS px, measured by the shell (transform-independent). An app should
+   * size off these instead of re-measuring its own (still-settling) DOM. A
+   * value of 0 means the iframe is hidden / off the active workspace — apps
+   * should skip resizing then (a stale grid is harmless; a 0-wide one is not).
+   * For grid-based apps, pair with the exported `viewportGrid()` helper.
+   */
+  onViewportChange(cb: (info: ViewportChangeInfo) => void): () => void {
+    if (typeof window === 'undefined') return () => undefined;
+    const handler = (ev: MessageEvent) => {
+      // Same-origin proxied iframes: trust the parent only.
+      if (ev.source !== window.parent) return;
+      const d = ev.data as {
+        type?: string; reason?: string; shellZoom?: number; iframeScale?: number;
+        contentW?: number; contentH?: number;
+      } | null;
+      if (!d || d.type !== 'aura.viewport.changed') return;
+      cb({
+        reason:      d.reason === 'zoom' || d.reason === 'mount' ? d.reason : 'layout',
+        shellZoom:   typeof d.shellZoom   === 'number' ? d.shellZoom   : 1,
+        iframeScale: typeof d.iframeScale === 'number' ? d.iframeScale : 1,
+        contentW:    typeof d.contentW    === 'number' ? d.contentW    : 0,
+        contentH:    typeof d.contentH    === 'number' ? d.contentH    : 0,
+      });
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }
+}
+
+/**
+ * Payload delivered to {@link OsClient.onViewportChange} subscribers. `reason`
+ * says why ('layout' tile resize / 'zoom' scale change / 'mount' first paint);
+ * `shellZoom`/`iframeScale` are the live scale factors; `contentW`/`contentH`
+ * are this iframe's authoritative logical content box in CSS px (0 = hidden).
+ */
+export interface ViewportChangeInfo {
+  reason:      'layout' | 'zoom' | 'mount';
+  shellZoom:   number;
+  iframeScale: number;
+  contentW:    number;
+  contentH:    number;
+}
+
+/**
+ * Compute a character/cell grid that fits a content box. Pure arithmetic — the
+ * shell hands an app its authoritative box via {@link OsClient.onViewportChange}
+ * and the app divides by its (font-dependent, size-independent) cell metrics.
+ * This replaces measure-and-settle DOM races with one floor division.
+ *
+ * @param boxW   available width in logical px (e.g. `contentW` minus chrome)
+ * @param boxH   available height in logical px
+ * @param cell   measured cell size `{ w, h }` in logical px
+ * @param chrome optional fixed insets `{ x, y }` to subtract before dividing
+ *               (toolbars, padding, scrollbars). Defaults to 0.
+ * @returns `{ cols, rows }`, each clamped to a minimum of 1.
+ */
+export function viewportGrid(
+  boxW: number,
+  boxH: number,
+  cell: { w: number; h: number },
+  chrome?: { x?: number; y?: number },
+): { cols: number; rows: number } {
+  const x = chrome?.x ?? 0;
+  const y = chrome?.y ?? 0;
+  const cols = Math.max(1, Math.floor((boxW - x) / cell.w));
+  const rows = Math.max(1, Math.floor((boxH - y) / cell.h));
+  return { cols, rows };
 }
 
 // -------- internals --------

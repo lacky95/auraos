@@ -31,9 +31,17 @@ import '../styles/settings.css';
         <h3>⏱ GENERAL</h3>
         <p>Clock format · locale</p>
       </button>
+      <button class="tile" data-section="lockscreen">
+        <h3>⊞ LOCK SCREEN</h3>
+        <p>Blackout overlay · text · placement · clock</p>
+      </button>
       <button class="tile" data-section="apps">
         <h3>▦ APPS</h3>
         <p>Enable · disable · force-stop installed apps</p>
+      </button>
+      <button class="tile" data-section="scopes">
+        <h3>⊕ SCOPES</h3>
+        <p>System · global · user · git repos</p>
       </button>
       <button class="tile" data-section="about">
         <h3>ℹ ABOUT</h3>
@@ -66,7 +74,9 @@ import '../styles/settings.css';
         case 'layouts':    return ['/layouts',    'Settings · Layout Managers'];
         case 'keyboard':   return ['/keyboard',   'Settings · Keyboard'];
         case 'general':    return ['/general',    'Settings · General'];
+        case 'lockscreen': return ['/lockscreen', 'Settings · Lock Screen'];
         case 'apps':       return ['/apps',       'Settings · Apps'];
+        case 'scopes':     return ['/scopes',     'Settings · Scopes'];
         case 'about':      return ['/about',      'Settings · About'];
         default:           return ['/',           'Settings'];
       }

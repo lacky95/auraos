@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
 import type { SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
+import type { SpawnContext } from '../scopes/types.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
 const HEALTH_CHECK_TIMEOUT_MS = 30_000;
@@ -112,9 +113,9 @@ export class ProotRunner implements SandboxRunner {
     try { rmSync(this.toolsDir(instanceId), { recursive: true, force: true }); } catch { /* ignore */ }
   }
 
-  async spawn(instanceId: string, appId: string, port: number, manifest: AppManifest): Promise<number> {
-    const appDir = join(this.appsDir, appId);
-    const dataDir = join(this.dataDir, 'apps', appId, instanceId);
+  async spawn(instanceId: string, appId: string, port: number, manifest: AppManifest, ctx: SpawnContext): Promise<number> {
+    const appDir = ctx.appDir;
+    const dataDir = ctx.instanceDataDir;
 
     const useProotEnv = process.env['AURA_USE_PROOT'];
     // Two-level opt-out: the OS-wide env var, then the per-app manifest flag.

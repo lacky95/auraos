@@ -13,9 +13,16 @@
     "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {
+    "playwright": "^1.60.0",
     "typescript": "^5.5.0"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild", "node-pty", "sharp", "@img/sharp-libvips-linux-x64", "redis-memory-server"]
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "node-pty",
+      "sharp",
+      "@img/sharp-libvips-linux-x64",
+      "redis-memory-server"
+    ]
   }
 }

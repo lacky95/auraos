@@ -1,4 +1,5 @@
 import type { AppManifest } from '../types/manifest.js';
+import type { SpawnContext } from '../scopes/types.js';
 
 /**
  * Shared abstraction for "spawn an isolated bash process that runs an app".
@@ -26,7 +27,7 @@ export interface SandboxRunner {
   clearToolsDir(instanceId: string): void;
 
   /** Launch the app's astro process and wait until it's healthy. */
-  spawn(instanceId: string, appId: string, port: number, manifest: AppManifest): Promise<number>;
+  spawn(instanceId: string, appId: string, port: number, manifest: AppManifest, ctx: SpawnContext): Promise<number>;
 
   /** Graceful shutdown (SIGTERM, wait, then SIGKILL on the proot group). */
   kill(instanceId: string): Promise<void>;

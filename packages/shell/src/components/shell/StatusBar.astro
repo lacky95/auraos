@@ -2,11 +2,11 @@
 import ViewportSettingsDialog from './ViewportSettingsDialog.tsx';
 import { defaultKv } from '@aura/kv-store';
 
-// SSR-resolve clock format + locale from the OS KV so the first paint
-// matches the user's preference (no flash of the default 24h/en-GB on
-// reload). The Settings → General page writes both to `os/clockFormat`
-// and `os/locale`. Live updates flow through the shared socket.io
-// channel (`kv:changed`) — see the tick + subscription below.
+// SSR-resolve clock format + locale from the OS KV so the first paint matches
+// the user's preference (no flash of the default 24h/en-GB clock on reload).
+// Viewport profiles are NOT SSR-hydrated — they live in device localStorage
+// (see lib/viewportClient), which the server can't read. The client script
+// applies them on boot; expect ~1 frame of unzoomed paint on hard reload.
 let initialClockFormat: '12h' | '24h' = '24h';
 let initialLocale: string = 'en-GB';
 {
@@ -30,13 +30,38 @@ let initialLocale: string = 'en-GB';
       workspaceClient — see the <script> block below.
     -->
     <!--
-      Workspace bundle: pills + layout chip live in `.ws-content`. A
-      ResizeObserver on `#statusbar` flips `data-compact` on the bundle
-      when the bar can't fit everything; in compact mode the controls
-      collapse into a single icon button (#ws-collapse-btn) that opens
-      `.ws-content` as a dropdown popover below it.
+      Workspace bundle. Inline reading order is: name field → numbered pills
+      (switcher) → layout chip. Children degrade in PRIORITY order as the bar
+      narrows, driven by `data-fold` (none → chip → all) set by fitWorkspaceUI():
+        • the numbered pills + ‹/› arrows and the name field are the priority
+          controls and stay inline the longest;
+        • the layout chip is the lowest-priority control — it folds into the
+          dropdown FIRST so the number buttons keep their room;
+        • only when even one pill won't fit do the pills fold in too, leaving
+          the name field beside the ▦ button;
+        • `data-name-hidden` drops the name only as a last resort.
+      `#ws-content` is the dropdown popover HOST: fitWorkspaceUI relocates the
+      folded nodes (chip, then pills) into it, and the ▦ trigger (#ws-collapse-
+      btn) opens it. The pills/chip otherwise live inline as direct children.
     -->
-    <div id="ws-bundle" class="ws-bundle" data-compact="false">
+    <div id="ws-bundle" class="ws-bundle" data-fold="none" data-name-hidden="false">
+      <!--
+        The name field leads the bundle (workspace name → switcher → layout
+        chip). It stays beside the ▦ button when the pills + chip fold into the
+        dropdown; it is only dropped (data-name-hidden) as a last resort when
+        even button + field won't fit.
+      -->
+      <input
+        id="ws-name-input"
+        class="ws-name-input"
+        type="text"
+        autocomplete="off"
+        spellcheck="false"
+        maxlength="40"
+        placeholder="Workspace"
+        aria-label="Active workspace name"
+        title="Rename the active workspace"
+      />
       <button
         id="ws-collapse-btn"
         type="button"
@@ -48,15 +73,26 @@ let initialLocale: string = 'en-GB';
       >
         <span class="ws-collapse-icon" aria-hidden="true">▦</span>
       </button>
-      <div id="ws-content" class="ws-content" role="group" aria-label="Workspaces">
-        <div id="ws-pills" class="ws-pills"></div>
-        <button id="ws-layout-chip" class="layout-chip" title="Cycle workspace layout" aria-label="Layout strategy">
-          <span class="layout-chip-icon" aria-hidden="true">▦</span>
-          <span class="layout-chip-name">—</span>
-          <span class="layout-chip-cycle" aria-hidden="true">↻</span>
-        </button>
-      </div>
+      <div id="ws-pills" class="ws-pills"></div>
+      <button id="ws-layout-chip" class="layout-chip" title="Cycle workspace layout" aria-label="Layout strategy">
+        <span class="layout-chip-icon" aria-hidden="true">▦</span>
+        <span class="layout-chip-name">—</span>
+        <span class="layout-chip-cycle" aria-hidden="true">↻</span>
+      </button>
+      <!-- Dropdown popover host: starts empty; fitWorkspaceUI() relocates the
+           folded controls (chip, then pills) into it. Absolutely positioned,
+           so its DOM position here doesn't affect the inline bar layout. -->
+      <div id="ws-content" class="ws-content" role="group" aria-label="Workspaces"></div>
     </div>
+    {import.meta.env.DEV && (
+      <button
+        id="shell-reload-pending"
+        type="button"
+        class="reload-pending-chip"
+        title="Source changed while auto-reload is off — click to reload the shell"
+        hidden
+      >↻ RELOAD</button>
+    )}
     <span id="clock" class="clock" data-clock-format={initialClockFormat} data-locale={initialLocale}>--:--:--</span>
     <div class="status-zoom" role="group" aria-label="Page zoom">
       <button id="zoom-out"   type="button" class="status-btn" title="Zoom out (Ctrl -)">-</button>
@@ -99,14 +135,32 @@ let initialLocale: string = 'en-GB';
   `window.auraSetZoom` / `window.auraSetMargins` globals defined later in
   this file, so the dialog stays a pure UI layer.
 -->
+<!--
+  Viewport profiles live in device localStorage — viewportClient.refresh()
+  reads them on boot. No SSR hydration: the server can't see localStorage.
+-->
 <ViewportSettingsDialog client:load />
 
 <script>
   import * as workspaceClient from '../../lib/workspaceClient';
+  import * as viewportClient from '../../lib/viewportClient';
+  import { queueViewportBroadcast } from '../../lib/viewportBroadcaster.ts';
   import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
   import { osEvents } from '../../lib/osEvents.ts';
+  import { installShellReloadGuard, RELOAD_PENDING_EVENT } from '../../lib/devReload';
 
   const keyDispatcher = getKeyDispatcher();
+
+  // Dev-only: when the user turns OFF "auto-reload on source change" in the
+  // Viewport dialog, this intercepts Vite's full reload and instead reveals a
+  // "reload pending" chip. No-op in production (no HMR). The chip element only
+  // renders under import.meta.env.DEV, so the listener wiring is dev-only too.
+  installShellReloadGuard();
+  const reloadChip = document.getElementById('shell-reload-pending');
+  if (reloadChip) {
+    window.addEventListener(RELOAD_PENDING_EVENT, () => reloadChip.removeAttribute('hidden'));
+    reloadChip.addEventListener('click', () => location.reload());
+  }
 
   // Clock: format + locale come from `os/clockFormat` + `os/locale` KV
   // entries, hydrated by SSR into `data-*` attributes on #clock. The
@@ -315,12 +369,16 @@ let initialLocale: string = 'en-GB';
   // and offset body with top/left for the margins. transform creates a new
   // containing block for position:fixed children (LauncherOverlay,
   // ProcessManager), so they scale + offset with the body cleanly.
-  const ZOOM_KEY    = 'aura.shell.zoom';
-  const MARGINS_KEY = 'aura.shell.margins';
+  //
+  // The three zoom values + margins are NOT persisted here — they belong to
+  // the active VIEWPORT PROFILE in device localStorage. This script owns only
+  // the apply primitives (window.auraSet*); lib/viewportClient owns the
+  // persistence, profile CRUD, and cross-tab sync. See the refresh/init call
+  // after the globals below.
   const ZOOM_MIN  = 0.5;
-  const ZOOM_MAX  = 2.0;
+  const ZOOM_MAX  = 4.0;
   const ZOOM_STEP = 0.1;
-  const MARGIN_MAX = 200;
+  const MARGIN_MAX = 400;
 
   type Margins = { top: number; right: number; bottom: number; left: number };
 
@@ -328,7 +386,9 @@ let initialLocale: string = 'en-GB';
   const zoomInBtn    = document.getElementById('zoom-in')    as HTMLButtonElement | null;
   const zoomLevelBtn = document.getElementById('zoom-level') as HTMLButtonElement | null;
 
-  let currentZoomValue: number = 1;
+  let currentZoomValue: number = 1;   // M — main zoom (everything)
+  let shellZoomValue:   number = 1;   // S — OS chrome multiplier
+  let appZoomValue:     number = 1;   // A — app-content multiplier
   let margins: Margins = { top: 0, right: 0, bottom: 0, left: 0 };
 
   function clampZoom(z: number) {
@@ -338,22 +398,36 @@ let initialLocale: string = 'en-GB';
     return Math.max(0, Math.min(MARGIN_MAX, Math.round(v)));
   }
 
-  // The single source of truth for body sizing. Called whenever zoom OR
-  // margins change. When everything is at defaults, all inline styles are
-  // stripped so the body falls back to its CSS. The zoom is also exposed as
-  // a CSS custom property on <html> so the settings dialog — which renders
-  // in the browser's top layer above body's transform — can mirror the same
-  // scale and feel like part of the zoomed shell.
+  // The single source of truth for body sizing. Called whenever any of the
+  // three zooms OR the margins change. When the body ends up at defaults, all
+  // inline styles are stripped so it falls back to its CSS.
+  //
+  // Three composable zoom factors:
+  //   • main  (M) — scales EVERYTHING (chrome + app content). The status-bar
+  //                 −/＋ buttons drive this one.
+  //   • shell (S) — extra multiplier on the OS chrome only (status bar, dock,
+  //                 launcher, window frames + buttons, desktop spacing).
+  //   • app   (A) — extra multiplier on app content (every iframe).
+  //
+  // We can only transform `body`, so the split is done with two scales:
+  //   body is scaled by  M·S       → all chrome lands at M·S
+  //   each app iframe is counter-scaled by  A/S  (via --aura-iframe-scale; the
+  //   global rule in index.astro applies it) → net app content = M·S·(A/S) =
+  //   M·A, independent of the shell zoom. All three default to 1, where this
+  //   collapses to the original single-zoom behaviour.
   function applyViewport() {
     const body = document.body;
-    const z = currentZoomValue;
     const m = margins;
-    const isDefault = z === 1 && m.top === 0 && m.right === 0 && m.bottom === 0 && m.left === 0;
+    const bodyScale   = currentZoomValue * shellZoomValue; // chrome + desktop
+    const iframeScale = appZoomValue / shellZoomValue;     // → net app = M·A
+    const marginsZero = m.top === 0 && m.right === 0 && m.bottom === 0 && m.left === 0;
+    const bodyIsDefault = bodyScale === 1 && marginsZero;
 
-    document.documentElement.style.setProperty('--aura-shell-zoom', String(z));
-    document.documentElement.style.background = isDefault ? '' : '#000';
+    document.documentElement.style.setProperty('--aura-shell-zoom', String(bodyScale));
+    document.documentElement.style.setProperty('--aura-iframe-scale', String(iframeScale));
+    document.documentElement.style.background = bodyIsDefault ? '' : '#000';
 
-    if (isDefault) {
+    if (bodyIsDefault) {
       body.style.removeProperty('position');
       body.style.removeProperty('top');
       body.style.removeProperty('left');
@@ -365,58 +439,71 @@ let initialLocale: string = 'en-GB';
       body.style.position        = 'fixed';
       body.style.top             = `${m.top}px`;
       body.style.left            = `${m.left}px`;
-      body.style.width           = `calc((100vw - ${m.left + m.right}px) / ${z})`;
-      body.style.height          = `calc((100vh - ${m.top + m.bottom}px) / ${z})`;
+      body.style.width           = `calc((100vw - ${m.left + m.right}px) / ${bodyScale})`;
+      body.style.height          = `calc((100vh - ${m.top + m.bottom}px) / ${bodyScale})`;
       body.style.transformOrigin = 'top left';
-      body.style.transform       = `scale(${z})`;
+      body.style.transform       = `scale(${bodyScale})`;
     }
 
-    if (zoomLevelBtn) zoomLevelBtn.textContent = `${Math.round(z * 100)}%`;
+    // The status-bar % readout always reflects the MAIN zoom.
+    if (zoomLevelBtn) zoomLevelBtn.textContent = `${Math.round(currentZoomValue * 100)}%`;
+
+    // Tell app iframes the viewport scale changed. The body `transform:
+    // scale()` above is paint-only, so a child's ResizeObserver never
+    // fires — without this message an app (e.g. the terminal) keeps its
+    // old character grid. The shared broadcaster reads the --aura-shell-zoom
+    // / --aura-iframe-scale vars we just set above and measures each iframe's
+    // box itself, so we only pass the reason.
+    queueViewportBroadcast('zoom');
+
+    // Zoom + margins change the bar's available LAYOUT width (body is scaled
+    // and width-compensated by `bodyScale`), so the workspace switcher must
+    // re-fit to the new space. The ResizeObserver on #statusbar also catches
+    // this, but calling directly closes any RO-timing gap and makes the
+    // dependency on the active viewport/zoom profile explicit.
+    queueFit();
   }
 
-  function setZoom(z: number, persist = true) {
+  // Apply primitives — pure (no persistence). viewportClient calls these to
+  // push the active profile onto the live shell; persistence to localStorage
+  // is the client's job.
+  function setZoom(z: number) {
     currentZoomValue = clampZoom(z);
     applyViewport();
-    if (persist) {
-      try { localStorage.setItem(ZOOM_KEY, String(currentZoomValue)); } catch {}
-    }
   }
-  function setMargins(next: Partial<Margins>, persist = true) {
+  function setShellZoom(z: number) {
+    shellZoomValue = clampZoom(z);
+    applyViewport();
+  }
+  function setAppZoom(z: number) {
+    appZoomValue = clampZoom(z);
+    applyViewport();
+  }
+  function setMargins(next: Partial<Margins>) {
     if (next.top    !== undefined) margins.top    = clampMargin(next.top);
     if (next.right  !== undefined) margins.right  = clampMargin(next.right);
     if (next.bottom !== undefined) margins.bottom = clampMargin(next.bottom);
     if (next.left   !== undefined) margins.left   = clampMargin(next.left);
     applyViewport();
-    if (persist) {
-      try { localStorage.setItem(MARGINS_KEY, JSON.stringify(margins)); } catch {}
-    }
   }
 
-  // Restore persisted zoom + margins on load
-  try {
-    const z = parseFloat(localStorage.getItem(ZOOM_KEY) ?? '');
-    if (Number.isFinite(z) && z > 0) currentZoomValue = clampZoom(z);
-  } catch {}
-  try {
-    const raw = localStorage.getItem(MARGINS_KEY);
-    if (raw) {
-      const m = JSON.parse(raw);
-      margins = {
-        top:    clampMargin(Number(m.top)    || 0),
-        right:  clampMargin(Number(m.right)  || 0),
-        bottom: clampMargin(Number(m.bottom) || 0),
-        left:   clampMargin(Number(m.left)   || 0),
-      };
-    }
-  } catch {}
-  applyViewport();
+  (window as any).auraSetZoom      = setZoom;
+  (window as any).auraSetShellZoom = setShellZoom;
+  (window as any).auraSetAppZoom   = setAppZoom;
+  (window as any).auraSetMargins   = setMargins;
 
-  zoomOutBtn?.addEventListener('click',   () => setZoom(currentZoomValue - ZOOM_STEP));
-  zoomInBtn?.addEventListener('click',    () => setZoom(currentZoomValue + ZOOM_STEP));
-  zoomLevelBtn?.addEventListener('click', () => setZoom(1));
+  // The status-bar −/＋/% buttons edit the MAIN zoom of the ACTIVE profile.
+  // They go through viewportClient so the change persists to localStorage and
+  // echoes to every other tab via the `storage` event; viewportClient calls
+  // back into the apply primitives above for the instant visual.
+  zoomOutBtn?.addEventListener('click',   () => viewportClient.patchActive({ zoom: currentZoomValue - ZOOM_STEP }));
+  zoomInBtn?.addEventListener('click',    () => viewportClient.patchActive({ zoom: currentZoomValue + ZOOM_STEP }));
+  zoomLevelBtn?.addEventListener('click', () => viewportClient.patchActive({ zoom: 1 }));
 
-  (window as any).auraSetZoom    = setZoom;
-  (window as any).auraSetMargins = setMargins;
+  // Load viewport profiles from device localStorage, then apply the active
+  // profile + wire the cross-tab `storage` sync. refresh() is synchronous
+  // under the hood (just a localStorage read) but kept async for the dialog.
+  void viewportClient.refresh().finally(() => viewportClient.init());
 
   // ---- Settings dialog -------------------------------------------------
   // The Viewport / settings dialog is a React island now (see
@@ -442,52 +529,93 @@ let initialLocale: string = 'en-GB';
   // Ctrl+1..9    → activate workspace #N (1-indexed)
   // Ctrl+Shift+N → create + activate a new workspace
   const pillsEl     = document.getElementById('ws-pills')        as HTMLElement       | null;
+  const nameInput   = document.getElementById('ws-name-input')   as HTMLInputElement  | null;
   const layoutChip  = document.getElementById('ws-layout-chip')  as HTMLButtonElement | null;
   const bundleEl    = document.getElementById('ws-bundle')       as HTMLElement       | null;
+  const popoverEl   = document.getElementById('ws-content')      as HTMLElement       | null;
   const collapseBtn = document.getElementById('ws-collapse-btn') as HTMLButtonElement | null;
   const statusBar   = document.getElementById('statusbar')       as HTMLElement       | null;
+  const rightEl     = statusBar?.querySelector('.right')         as HTMLElement       | null;
+  const osNameEl    = statusBar?.querySelector('.os-name')       as HTMLElement       | null;
 
   // ── Responsive collapse ───────────────────────────────────────────────
-  // When the status bar can't fit all its controls (narrow viewport / heavy
-  // zoom / lots of workspaces), collapse the pills + layout chip into a
-  // single icon-button dropdown. The breakpoint is a width threshold on
-  // #statusbar — measured via ResizeObserver so it tracks the actual rendered
-  // box, not viewport pixels (the shell body is `transform: scale()`d by the
-  // zoom slider).
-  const COMPACT_BREAKPOINT_PX = 774;
-  function applyResponsiveMode() {
-    if (!statusBar || !bundleEl) return;
-    const compact = statusBar.clientWidth <= COMPACT_BREAKPOINT_PX;
-    bundleEl.dataset['compact'] = compact ? 'true' : 'false';
-    // Close any open popover when expanding (popover loses meaning inline).
-    if (!compact) {
-      bundleEl.dataset['open'] = 'false';
-      collapseBtn?.setAttribute('aria-expanded', 'false');
-    }
+  // The workspace switcher degrades gracefully as the bar narrows (narrow
+  // viewport / heavy zoom / lots of workspaces):
+  //
+  // Controls degrade in PRIORITY order — the numbered pills + ‹/› arrows are
+  // the controls we fight hardest to keep on screen:
+  //
+  //   1. `data-fold="chip"` — the lowest-priority control, the layout chip,
+  //      folds into the dropdown FIRST, so dropping it (not a pill) is the
+  //      first response to overflow and the number buttons keep their room;
+  //   2. shrink the number of numbered pills shown inline, 4 → 3 → 2 → 1
+  //      (the dynamic `pillWindow`; `‹/›` pagination keeps every workspace
+  //      reachable as the window tightens);
+  //   3. `data-fold="all"` — when even a SINGLE pill won't fit, the pills fold
+  //      into the dropdown too (it now hosts pills + chip), but the name field
+  //      stays beside the ▦ button so the active workspace name stays visible;
+  //   4. last resort, if button + name field still won't fit, drop the name
+  //      field too (`data-name-hidden`) and show only the icon button.
+  //
+  // Overflow is measured in LAYOUT pixels, which is what makes this honest
+  // about the active viewport/zoom profile:
+  //
+  //   • The shell fakes zoom with `body { transform: scale(bodyScale);
+  //     width: calc((100vw − margins) / bodyScale) }`. `transform` is paint
+  //     only — it does NOT change layout — but the width compensation DOES.
+  //     So `#statusbar.clientWidth` is the bar's real layout width and already
+  //     reflects zoom + margins (zoom IN → smaller layout width).
+  //   • The pills/clock/chip are sized in fixed CSS px, so their `offsetWidth`
+  //     stays constant in that same layout space.
+  //   → zoom in shrinks the available width while the controls keep their px
+  //     footprint, so they overflow and we shed pills. Exactly the ask.
+  //
+  // We compare the right-hand group's intrinsic width against the space left
+  // after the OS name, instead of `#statusbar.scrollWidth`. A `space-between`
+  // flex container does NOT reliably grow scrollWidth when an inner item's
+  // fixed-width children overflow a shrunk box, so the old scrollWidth check
+  // silently read "no overflow" under zoom. `.right` is pinned `flex-shrink: 0`
+  // (see CSS), so `rightEl.offsetWidth` is its true intrinsic width here.
+  const SAFETY_GAP_PX = 8;  // keep a little air between the OS name and the controls
+  function rightOverflowing(): boolean {
+    if (!statusBar || !rightEl) return false;
+    const cs = getComputedStyle(statusBar);
+    const padX = parseFloat(cs.paddingLeft || '0') + parseFloat(cs.paddingRight || '0');
+    const available = statusBar.clientWidth - padX - (osNameEl?.offsetWidth ?? 0) - SAFETY_GAP_PX;
+    return rightEl.offsetWidth > available;
+  }
+
+  // Coalesce refits to one per frame — ResizeObserver fires in bursts during a
+  // drag, and each refit re-renders the pill row a few times.
+  let fitQueued = false;
+  function queueFit() {
+    if (fitQueued) return;
+    fitQueued = true;
+    requestAnimationFrame(() => { fitQueued = false; fitWorkspaceUI(); });
   }
   if (statusBar && typeof ResizeObserver !== 'undefined') {
-    new ResizeObserver(applyResponsiveMode).observe(statusBar);
+    new ResizeObserver(queueFit).observe(statusBar);
   }
-  applyResponsiveMode();
 
   // Place the workspace dropdown horizontally centered in the viewport,
   // vertically pinned just below the trigger button.
   function pickAnchor() {
     if (!bundleEl) return;
-    // Compact mode (the only state where the popover is shown) always
-    // centers the popover horizontally in the viewport — the bundle button
-    // sits in different places on the bar depending on layout/screen size,
-    // and the center placement is predictable for the user regardless.
+    // The dropdown (only shown once something has folded) always centers
+    // horizontally in the viewport — the ▦ trigger sits in different places
+    // on the bar depending on layout/screen size, and the center placement is
+    // predictable for the user regardless.
     // Vertical stays pinned just below the trigger via `--ws-popover-top`.
     const rect = bundleEl.getBoundingClientRect();
     bundleEl.style.setProperty('--ws-popover-top', `${rect.bottom + 6}px`);
     bundleEl.dataset['anchor'] = 'center';
   }
 
-  // Collapse-button toggle. In compact mode the bundle's [data-open] flips
-  // ws-content from `display: none` to an absolute-positioned popover. The
-  // click-outside listener below dismisses it on any click outside the
-  // bundle (including selecting a workspace from inside).
+  // Collapse-button toggle. Once anything has folded (data-fold ≠ none) the
+  // ▦ trigger is shown; clicking it flips [data-open], which reveals the
+  // dropdown host `.ws-content` (with its folded controls) as an absolute-
+  // positioned popover. The click-outside listener below dismisses it on any
+  // click outside the bundle (including selecting a workspace from inside).
   collapseBtn?.addEventListener('click', (e) => {
     e.stopPropagation();
     if (!bundleEl) return;
@@ -547,11 +675,17 @@ let initialLocale: string = 'en-GB';
     }
   })();
 
-  // Pagination: show at most this many numbered pills at once. When the user
-  // has more workspaces than fit, render `< >` arrows that step the
+  // Pagination: show at most `pillWindow` numbered pills at once. When the
+  // user has more workspaces than fit, render `< >` arrows that step the
   // selection one workspace at a time. The window auto-shifts so whichever
   // pill is currently "selected" stays visible.
-  const PILL_WINDOW = 4;
+  //
+  // `pillWindow` is dynamic: it starts at MAX and `fitWorkspaceUI()` shrinks it
+  // toward MIN (1) as the bar runs out of room, so the switcher reduces the
+  // number of workspaces shown instead of overflowing the bar.
+  const MAX_PILL_WINDOW = 4;   // most numbered pills shown inline at full width
+  const MIN_PILL_WINDOW = 1;   // last resort before collapsing into the dropdown
+  let pillWindow = MAX_PILL_WINDOW;
   let pillOffset = 0;
 
   // Debounced step: `<` / `>` clicks update the visually-selected pill
@@ -581,14 +715,14 @@ let initialLocale: string = 'en-GB';
   }
 
   function clampOffset(total: number): number {
-    const max = Math.max(0, total - PILL_WINDOW);
+    const max = Math.max(0, total - pillWindow);
     return Math.min(Math.max(0, pillOffset), max);
   }
 
   function renderPills(state: workspaceClient.WorkspaceState) {
     if (!pillsEl) return;
     const total = state.workspaces.length;
-    const paginated = total > PILL_WINDOW;
+    const paginated = total > pillWindow;
 
     // Effective active = the pending scrub target (if any), else the
     // committed active. Both highlighting and window auto-shift use this so
@@ -598,12 +732,12 @@ let initialLocale: string = 'en-GB';
     const activeIdx = state.workspaces.findIndex((w) => w.id === effectiveActiveId);
     if (paginated && activeIdx >= 0) {
       if (activeIdx < pillOffset) pillOffset = activeIdx;
-      else if (activeIdx >= pillOffset + PILL_WINDOW) pillOffset = activeIdx - PILL_WINDOW + 1;
+      else if (activeIdx >= pillOffset + pillWindow) pillOffset = activeIdx - pillWindow + 1;
     }
     pillOffset = clampOffset(total);
 
     const start = paginated ? pillOffset : 0;
-    const end   = paginated ? Math.min(total, pillOffset + PILL_WINDOW) : total;
+    const end   = paginated ? Math.min(total, pillOffset + pillWindow) : total;
 
     // Disable chevrons when at the absolute first / last workspace.
     const atFirst = activeIdx <= 0;
@@ -626,6 +760,83 @@ let initialLocale: string = 'en-GB';
     pillsEl.innerHTML = prev + numbered + next + add;
   }
 
+  // Relocate the pills + layout chip between their inline home (as direct
+  // children of `.ws-bundle`, after the name field + ▦ button) and the dropdown
+  // popover host (`#ws-content`), per the requested fold level. The inline
+  // reading order is name → ▦ → pills → chip, and `#ws-content` is the LAST
+  // child of the bundle, so relocating a node inline = `insertBefore(node,
+  // popoverEl)` (drops it just before the popover host, after ▦). `insertBefore`
+  // MOVES an existing node, so these calls are idempotent and the controls keep
+  // their event listeners (delegation on `#ws-pills`, click on the chip).
+  //
+  //   'none' → pills + chip inline (name, then pills, then chip)
+  //   'chip' → chip in the dropdown; name + pills still inline
+  //   'all'  → pills + chip both in the dropdown (pills first); name inline
+  function setFold(fold: 'none' | 'chip' | 'all'): void {
+    if (!bundleEl || !popoverEl) return;
+    bundleEl.dataset['fold'] = fold;
+    if (fold === 'none') {
+      // Inline, in order: pills before chip (both before the popover host).
+      if (pillsEl)    bundleEl.insertBefore(pillsEl, popoverEl);
+      if (layoutChip) bundleEl.insertBefore(layoutChip, popoverEl);
+    } else if (fold === 'chip') {
+      if (pillsEl)    bundleEl.insertBefore(pillsEl, popoverEl);
+      if (layoutChip) popoverEl.appendChild(layoutChip);
+    } else {
+      // 'all' — pills first so the dropdown reads pills · chip top-to-bottom.
+      if (pillsEl)    popoverEl.appendChild(pillsEl);
+      if (layoutChip) popoverEl.appendChild(layoutChip);
+    }
+  }
+
+  // Size the workspace switcher to the available bar width, degrading in
+  // priority order (see the "Responsive collapse" note above): drop the layout
+  // chip first, then shrink the numbered pills MAX → MIN, then fold the pills
+  // into the dropdown too (name stays beside the button), and only as a last
+  // resort drop the name field. Safe to call on every resize and state change.
+  function fitWorkspaceUI(): void {
+    if (!statusBar || !bundleEl) return;
+    const state = workspaceClient.getCached();
+
+    // Tier 0: everything inline at full pill count. Overflow is measured in
+    // LAYOUT pixels (the popover is out of flow and never "overflows").
+    setFold('none');
+    bundleEl.dataset['nameHidden'] = 'false';
+    pillWindow = MAX_PILL_WINDOW;
+    if (state) renderPills(state);
+    if (!rightOverflowing()) {
+      bundleEl.dataset['open'] = 'false';
+      collapseBtn?.setAttribute('aria-expanded', 'false');
+      return;
+    }
+
+    // Tier 1: fold the chip into the dropdown FIRST (lowest priority), so the
+    // number buttons keep their room, then shrink the pills one at a time.
+    setFold('chip');
+    pillWindow = MAX_PILL_WINDOW;
+    if (state) renderPills(state);
+    while (pillWindow > MIN_PILL_WINDOW && rightOverflowing()) {
+      pillWindow -= 1;
+      if (state) renderPills(state);
+    }
+    if (!rightOverflowing()) {
+      bundleEl.dataset['open'] = 'false';
+      collapseBtn?.setAttribute('aria-expanded', 'false');
+      return;
+    }
+
+    // Tier 2: even a single pill won't fit → fold the pills into the dropdown
+    // too (it now hosts pills + chip). Keep the name field beside the ▦ button.
+    // The popover has its own width, so restore the full window for it.
+    setFold('all');
+    pillWindow = MAX_PILL_WINDOW;
+    if (state) renderPills(state);
+
+    // Tier 3 (last resort): if button + name field still overflow (very narrow
+    // bar / heavy zoom), drop the name field too and show just the ▦ button.
+    bundleEl.dataset['nameHidden'] = rightOverflowing() ? 'true' : 'false';
+  }
+
   function renderLayoutChip(state: workspaceClient.WorkspaceState) {
     if (!layoutChip) return;
     const iconEl = layoutChip.querySelector<HTMLElement>('.layout-chip-icon');
@@ -643,6 +854,64 @@ let initialLocale: string = 'en-GB';
     if (nameEl) nameEl.textContent = name;
     layoutChip.title = `Layout: ${meta?.name ?? active.layoutId} — click to cycle`;
   }
+
+  // The active workspace's name lives in an editable field beside the pills.
+  // `renderNameField` keeps it in sync with the workspace state, but must NOT
+  // clobber the user's in-progress edit — so it skips re-writing the value
+  // while the field is focused AND still bound to the same workspace. If the
+  // active workspace changed underneath the cursor (e.g. a Ctrl+Digit switch
+  // fired while typing), we re-sync to the newly-active workspace's name.
+  let nameFieldBoundId: string | null = null;
+  function renderNameField(state: workspaceClient.WorkspaceState) {
+    if (!nameInput) return;
+    const active = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
+    const activeId = active?.id ?? null;
+    if (document.activeElement === nameInput && activeId === nameFieldBoundId) return;
+    nameFieldBoundId = activeId;
+    nameInput.value = active?.name ?? '';
+    nameInput.disabled = !active;
+  }
+
+  // Live rename. Each keystroke patches the active workspace's name through
+  // the debounced writer (optimistic local update + coalesced PUT), so the
+  // pills' tooltips and the Settings page track the edit without a reload.
+  // Empty input is allowed mid-edit but never persisted — blur restores the
+  // stored name if the field was left blank.
+  nameInput?.addEventListener('input', () => {
+    const state = workspaceClient.getCached();
+    if (!state) return;
+    const name = nameInput.value;
+    if (name.trim().length === 0) return;
+    workspaceClient.patchWorkspaceDebounced(state.activeWorkspaceId, { name });
+  });
+  nameInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      nameInput.blur();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      const active = workspaceClient.getCached()?.workspaces
+        .find((w) => w.id === nameFieldBoundId);
+      nameInput.value = active?.name ?? '';
+      nameInput.blur();
+    }
+  });
+  // Finalize on blur: trim the value (restoring the stored name if the user
+  // left it blank), then push the final value through the debounced writer so
+  // it both supersedes any pending mid-edit patch and persists the trimmed
+  // result.
+  nameInput?.addEventListener('blur', () => {
+    const state = workspaceClient.getCached();
+    if (!state) return;
+    const active = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
+    if (!active) return;
+    const trimmed = nameInput.value.trim();
+    const finalName = trimmed.length > 0 ? trimmed : active.name;
+    nameInput.value = finalName;
+    if (finalName !== active.name) {
+      workspaceClient.patchWorkspaceDebounced(active.id, { name: finalName });
+    }
+  });
 
   function escapeAttr(s: string): string {
     return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
@@ -665,8 +934,11 @@ let initialLocale: string = 'en-GB';
   })();
 
   workspaceClient.subscribe((state) => {
-    renderPills(state);
+    // Render the fixed-width neighbours (name field + layout chip) first so the
+    // pill fit measures against their final widths, then fit/render the pills.
+    renderNameField(state);
     renderLayoutChip(state);
+    fitWorkspaceUI();
   });
 
   pillsEl?.addEventListener('click', (e) => {
@@ -726,7 +998,7 @@ let initialLocale: string = 'en-GB';
   // the bound combo per action (default OR user override), so we just
   // register what each action DOES; the combo is the user's prerogative.
   // Ctrl+1..9 → activate workspace at slot. Ctrl+Shift+N → new workspace.
-  // Ctrl+Tab / Ctrl+Shift+Tab → cycle workspaces.
+  // Ctrl+Shift+ArrowRight / Ctrl+Shift+ArrowLeft → cycle workspaces.
   {
     const switchToSlot = (n: number) => {
       const state = workspaceClient.getCached();
@@ -742,6 +1014,12 @@ let initialLocale: string = 'en-GB';
     });
     keyDispatcher.bind('aura.workspace.cycle-next', () => cycleWorkspace(+1));
     keyDispatcher.bind('aura.workspace.cycle-prev', () => cycleWorkspace(-1));
+    // Lock-screen blackout — the overlay's script registers
+    // window.auraLockScreen on body-script load; the action is a registry
+    // entry so users can rebind it from Settings → Keyboard.
+    keyDispatcher.bind('aura.lockscreen.activate', () => {
+      (window as any).auraLockScreen?.();
+    });
   }
 
   function cycleWorkspace(dir: 1 | -1): void {
@@ -824,13 +1102,47 @@ let initialLocale: string = 'en-GB';
     color: var(--aura-color-primary);
     font-weight: bold;
     text-shadow: var(--aura-glow-primary);
+    /* Never shrink: if the bar's children are allowed to flex-shrink, an
+       overflowing bar quietly compresses their boxes (content spills INSIDE
+       each item) instead of growing #statusbar.scrollWidth — and the
+       responsive pill-fit logic, which keys off real overflow, never trips.
+       Pinning shrink to 0 makes an over-full bar overflow for real so
+       fitWorkspaceUI() can measure it and drop workspace pills. */
+    flex-shrink: 0;
+    white-space: nowrap;
   }
 
   .os-ver { color: var(--aura-color-text-dim); }
 
-  .right { display: flex; align-items: center; gap: 12px; }
+  .right { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
 
   .clock { color: var(--aura-color-text); font-family: var(--aura-font-mono); }
+
+  /* Dev-only "reload pending" chip: shown when auto-reload is off and a source
+     change was suppressed. Attention-toned (warning color) + pulse so it's
+     obvious a change is waiting. `hidden` by default; the script reveals it. */
+  .reload-pending-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 22px;
+    padding: 0 8px;
+    font-family: var(--aura-font-mono);
+    font-size: var(--aura-font-size-xs);
+    letter-spacing: 0.08em;
+    color: var(--aura-color-bg);
+    background: var(--aura-color-warning, #d8a657);
+    border: 1px solid var(--aura-color-warning, #d8a657);
+    cursor: pointer;
+    animation: aura-reload-pending-pulse 1.6s ease-in-out infinite;
+  }
+  .reload-pending-chip[hidden] { display: none; }
+  .reload-pending-chip:hover,
+  .reload-pending-chip:focus-visible { box-shadow: var(--aura-glow-primary); outline: none; }
+  @keyframes aura-reload-pending-pulse {
+    0%, 100% { opacity: 0.78; }
+    50%      { opacity: 1; }
+  }
 
   /* Right-side status-bar buttons (fullscreen, future: notifications, etc.) */
   .status-btn {
@@ -904,19 +1216,21 @@ let initialLocale: string = 'en-GB';
     color: var(--aura-color-text);
   }
 
-  /* ── Workspace bundle (wraps pills + layout chip) ──
-   * Two modes, toggled by JS based on the statusbar width:
+  /* ── Workspace bundle ──
+   * Priority-ordered responsive folding, driven by [data-fold] (set by JS
+   * from the statusbar width):
    *
-   *   [data-compact="false"]  expanded — pills + chip render inline,
-   *                           the collapse trigger is hidden.
+   *   [data-fold="none"]  everything inline (pills + chip + name); the ▦
+   *                       collapse trigger is hidden.
+   *   [data-fold="chip"]  the layout chip has been relocated into the dropdown
+   *                       (`.ws-content`); pills + name stay inline, ▦ shows.
+   *   [data-fold="all"]   pills + chip both relocated into the dropdown; only
+   *                       the name field stays beside ▦.
    *
-   *   [data-compact="true"]   collapsed — only the trigger button shows;
-   *                           clicking it flips [data-open] to expose the
-   *                           same `.ws-content` as a popover dropdown
-   *                           anchored to the trigger.
-   *
-   * Always-on `position: relative` so the popover absolute-positions to
-   * the bundle, not the document. */
+   * `.ws-content` is the dropdown HOST: empty at [data-fold="none"], it
+   * receives the folded nodes and is shown as a popover when [data-open].
+   * Always-on `position: relative` so the popover absolute-positions to the
+   * bundle, not the document. */
   .ws-bundle {
     position: relative;
     display: inline-flex;
@@ -924,22 +1238,60 @@ let initialLocale: string = 'en-GB';
     gap: 8px;
   }
   .ws-collapse-btn { display: none; }
-  .ws-content {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-  }
+  /* The ▦ trigger appears as soon as anything has folded into the dropdown. */
+  .ws-bundle[data-fold="chip"] .ws-collapse-btn,
+  .ws-bundle[data-fold="all"]  .ws-collapse-btn { display: inline-flex; }
+  /* Dropdown host is hidden until opened (it only holds folded controls). */
+  .ws-content { display: none; }
   .ws-collapse-icon { line-height: 1; font-size: 0.9rem; }
 
-  /* Compact mode — trigger replaces the inline strip; popover is hidden by
-   * default and only mounts when `[data-open="true"]`. */
-  .ws-bundle[data-compact="true"] .ws-collapse-btn { display: inline-flex; }
-  .ws-bundle[data-compact="true"] .ws-content { display: none; }
-  /* Popover anchor (right by default). The collapse-button click handler
+  /* ── Workspace name field ──
+   * Editable text input for the active workspace's name, the priority control
+   * kept inline beside the pills. Sized to match the 22px chrome row; focus
+   * adopts the same primary-toned ring as the other status-bar controls. */
+  .ws-name-input {
+    width: 120px;
+    height: 22px;
+    padding: 0 8px;
+    background: transparent;
+    border: var(--aura-border);
+    color: var(--aura-color-text);
+    font-family: var(--aura-font-mono);
+    font-size: 0.65rem;
+    letter-spacing: 0.06em;
+    line-height: 1;
+    transition: color 0.1s, border-color 0.1s, box-shadow 0.1s;
+  }
+  .ws-name-input::placeholder {
+    color: var(--aura-color-text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .ws-name-input:hover {
+    border-color: var(--aura-color-primary);
+  }
+  .ws-name-input:focus,
+  .ws-name-input:focus-visible {
+    outline: none;
+    color: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+    box-shadow: inset 0 0 0 1px var(--aura-color-primary), var(--aura-glow-subtle);
+  }
+  .ws-name-input:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  /* Last-resort: when even the collapse button + name field won't fit, drop
+   * the field too (button only). Set by fitWorkspaceUI() when space is tight. */
+  .ws-bundle[data-name-hidden="true"] .ws-name-input { display: none; }
+  /* The dropdown popover mounts only when opened (the ▦ trigger only exists
+   * once something has folded, so [data-open] always implies folded content).
+   * Popover anchor (right by default). The collapse-button click handler
    * measures available space below the trigger and flips `data-anchor`
    * to whichever side has room — so a bundle near the right edge opens
    * leftward, and one near the left edge opens rightward. */
-  .ws-bundle[data-compact="true"][data-open="true"] .ws-content {
+  .ws-bundle[data-open="true"] .ws-content {
     display: inline-flex;
     flex-wrap: wrap;
     gap: 6px;
@@ -968,7 +1320,7 @@ let initialLocale: string = 'en-GB';
     transform: translateX(-50%);
   }
   /* The collapse button gets a subtle highlight while the dropdown is open. */
-  .ws-bundle[data-compact="true"][data-open="true"] .ws-collapse-btn {
+  .ws-bundle[data-open="true"] .ws-collapse-btn {
     color: var(--aura-color-primary);
     border-color: var(--aura-color-primary);
   }

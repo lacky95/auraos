@@ -206,7 +206,13 @@ footer.settings-foot {
 }
 
 /* ---- Keyboard Settings ------------------------------------------------- */
-.keymap-panel { width: 100%; height: 100%; }
+/* Panel sets overflow:hidden; without an internal scroll region a tab with
+   more rows than fit the viewport (e.g. Workspaces: switch 1-9 + new + the
+   two cycle actions) would clip its bottom rows with no way to reach them.
+   Lay the panel out as a column and let only the content region scroll so
+   the header (RESET/EXPORT/IMPORT) and footer stay pinned. */
+.keymap-panel { width: 100%; height: 100%; display: flex; flex-direction: column; }
+.keymap-content { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 .keymap-table {
   width: 100%;
   border-collapse: collapse;

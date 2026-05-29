@@ -13,10 +13,10 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import type { OsEventBus as OsEventBusSingleton } from '../ipc/OsEventBus.js';
+import type { ScopeDefinition, ScopeId } from '../scopes/types.js';
+import type { ScopeRegistry } from '../scopes/ScopeRegistry.js';
 import { Resolver } from './Resolver.js';
 
-// `OsEventBus` is exported as a runtime singleton (not a class). Its type
-// is `typeof OsEventBus`. Alias here so the field declaration reads clean.
 type OsEventBus = typeof OsEventBusSingleton;
 import { IndexClient } from './IndexClient.js';
 import { Installer } from './Installer.js';
@@ -31,93 +31,128 @@ import type {
 } from './types.js';
 
 export interface NexusManagerOpts {
-  appsDir: string;
-  dataDir: string;
+  scopes:  ScopeDefinition[];
+  /** Root dataDir used for shared staging/index paths (not scoped per-app). */
+  rootDataDir: string;
+  scopeRegistry?: ScopeRegistry;
   bus?:    OsEventBus;
 }
 
 export class NexusManager {
-  public readonly index:    IndexClient;
+  public readonly index:     IndexClient;
   private readonly resolver: Resolver;
-  private readonly installer: Installer;
-  private readonly appsDir: string;
-  private readonly dataDir: string;
+  /** One installer per non-system scope. */
+  private readonly installers: Map<ScopeId, Installer>;
+  private readonly rootDataDir: string;
+  private readonly scopeRegistry?: ScopeRegistry;
   private readonly bus?: OsEventBus;
 
   constructor(opts: NexusManagerOpts) {
-    this.appsDir = opts.appsDir;
-    this.dataDir = opts.dataDir;
-    this.bus = opts.bus;
-    this.index = new IndexClient({
-      cachePath: join(opts.dataDir, 'nexus', 'index.yaml'),
+    this.rootDataDir    = opts.rootDataDir;
+    this.scopeRegistry  = opts.scopeRegistry;
+    this.bus            = opts.bus;
+    this.index          = new IndexClient({
+      cachePath: join(opts.rootDataDir, 'nexus', 'index.yaml'),
     });
-    this.resolver  = new Resolver({ index: this.index });
-    this.installer = new Installer({ appsDir: this.appsDir, dataDir: this.dataDir });
+    this.resolver       = new Resolver({ index: this.index });
+    this.installers     = new Map();
+    for (const scope of opts.scopes) {
+      if (scope.immutable) continue;
+      this.installers.set(scope.id, new Installer({
+        appsDir: scope.appsDir,
+        dataDir: scope.dataDir,
+        scope:   scope.id,
+      }));
+    }
   }
 
-  /** Read access to the installer's persisted records — used by API
-   *  endpoints that need to list installed apps or look up a single one. */
+  /**
+   * Read access to install records aggregated across all scopes.
+   * Higher-priority scope wins when the same appId appears in multiple scopes.
+   */
   get records(): { get(id: string): InstallRecord | null; list(): InstallRecord[] } {
     return {
-      get:  (id) => this.installer.getRecord(id),
-      list: () => this.installer.listRecords(),
+      get:  (id) => this.getRecord(id),
+      list: () => this.listAllRecords(),
     };
   }
 
-  /** Resolve a ref without fetching or installing. Used by the preview
-   *  endpoint and the CLI's `nexus info` command. */
+  private getRecord(id: string): InstallRecord | null {
+    // Check higher-priority scopes first (user before global).
+    for (const [, installer] of [...this.installers].reverse()) {
+      const r = installer.getRecord(id);
+      if (r) return r;
+    }
+    return null;
+  }
+
+  private listAllRecords(): InstallRecord[] {
+    const seen = new Set<string>();
+    const out: InstallRecord[] = [];
+    // Higher-priority scopes win; iterate in reverse to push user-scope first.
+    for (const [, installer] of [...this.installers].reverse()) {
+      for (const r of installer.listRecords()) {
+        if (!seen.has(r.id)) {
+          seen.add(r.id);
+          out.push(r);
+        }
+      }
+    }
+    return out;
+  }
+
+  private installerFor(scopeId: ScopeId): Installer {
+    const inst = this.installers.get(scopeId);
+    if (!inst) throw new Error(`Cannot install into scope '${scopeId}' — it is immutable or unknown`);
+    return inst;
+  }
+
+  /** Resolve a ref without fetching or installing. */
   async resolveRef(rawRef: string): Promise<ResolvedRef> {
     return this.resolver.resolve(rawRef);
   }
 
-  /** Fetch a resolved ref into a directory without validating or installing.
-   *  Used by the preview endpoint to compute a permission diff before
-   *  committing to the install. */
+  /** Fetch a resolved ref into a directory without validating or installing. */
   async fetchInto(resolved: ResolvedRef, stagingDir: string): Promise<void> {
     return this.fetch(resolved, stagingDir);
   }
 
-  /** Streaming install pipeline. Caller drives it like:
-   *
-   *      const it = manager.install({ ref: 'github.com/u/r' });
-   *      for await (const ev of it) {
-   *        if (ev.type === 'permission.needed') {
-   *          const ok = await ask(ev.diff);
-   *          await it.next({ approve: ok });   // 2-arg next() resumes
-   *        }
-   *      }
-   *
-   * For convenience the generator also accepts `autoApprove` up-front. */
+  /** Streaming install pipeline. Defaults to 'global' scope. */
   async *install(opts: {
-    ref: string;
+    ref:         string;
+    scope?:      'global' | 'user';
     autoApprove?: boolean;
   }): AsyncGenerator<NexusProgressEvent, InstallRecord, { approve: boolean } | void> {
-    const stagingDir = join(this.dataDir, 'nexus', 'staging', `pending-${Date.now()}`);
+    const targetScope = opts.scope ?? 'global';
+    const installer   = this.installerFor(targetScope);
+    const stagingDir  = join(this.rootDataDir, 'nexus', 'staging', `pending-${Date.now()}`);
     mkdirSync(stagingDir, { recursive: true });
 
+    // Ensure the scope dir is a git repo before the first install.
+    if (this.scopeRegistry) {
+      await this.scopeRegistry.ensureScopeRepo(targetScope);
+    }
+
     try {
-      // 1. Resolve.
       yield { type: 'resolve.start', ref: opts.ref };
       const resolved = await this.resolver.resolve(opts.ref);
       yield { type: 'resolve.done', resolved };
 
-      // 2. Fetch.
       yield { type: 'fetch.start' };
       await this.fetch(resolved, stagingDir);
       yield { type: 'fetch.done', stagingDir };
 
-      // 3. Validate.
       const manifest = validateStagedDir(stagingDir);
       yield { type: 'validate.done', manifest };
 
-      // 4. Permission diff vs. currently-installed (if any).
-      const currentRecord = this.installer.getRecord(manifest.id);
+      // Permission diff vs. currently-installed version in any scope.
+      const currentRecord = this.getRecord(manifest.id);
       let currentManifest: AppManifest | null = null;
       if (currentRecord) {
-        // Best-effort read of the previously-installed manifest.
+        const currentInstaller = this.installerFor(currentRecord.scope ?? targetScope);
         try {
-          currentManifest = validateStagedDir(join(this.appsDir, manifest.id));
-        } catch { /* corrupt or missing; treat as fresh install */ }
+          currentManifest = validateStagedDir(join(currentInstaller.appsDir, manifest.id));
+        } catch { /* treat as fresh install */ }
       }
       const diff = computePermissionDiff(currentManifest, manifest);
 
@@ -130,9 +165,8 @@ export class NexusManager {
         yield { type: 'permission.approved' };
       }
 
-      // 5. Install.
       yield { type: 'install.start' };
-      const record = await this.installer.install(stagingDir, manifest, resolved);
+      const record = await installer.install(stagingDir, manifest, resolved);
       yield { type: 'install.done', record };
 
       this.bus?.emit('nexus:install.complete', { id: manifest.id, record });
@@ -143,30 +177,28 @@ export class NexusManager {
     }
   }
 
-  /** Update flow — re-resolve the stored ref + channel, install if changed. */
   async *update(appId: string, opts: { autoApprove?: boolean } = {}): AsyncGenerator<NexusProgressEvent, InstallRecord | null, { approve: boolean } | void> {
-    const current = this.installer.getRecord(appId);
+    const current = this.getRecord(appId);
     if (!current) {
       yield { type: 'error', code: 'not-installed',
               message: `'${appId}' is not installed; nothing to update` };
       return null;
     }
-    // Re-run install with the same ref; the install pipeline's permission
-    // diff against the currently-installed manifest gates new perms.
-    const result = yield* this.install({ ref: current.ref, autoApprove: opts.autoApprove });
+    const scope = (current.scope === 'system' ? 'global' : current.scope) ?? 'global';
+    const result = yield* this.install({ ref: current.ref, scope, autoApprove: opts.autoApprove });
     this.bus?.emit('nexus:update.complete', { id: appId, record: result });
     return result;
   }
 
-  /** Uninstall: stop instances (caller's responsibility) and drop the
-   *  app directory. We don't reach into AppManager from here to keep the
-   *  Nexus module dependency-free; the HTTP route layer stops first. */
   async uninstall(appId: string, opts: { purge?: boolean } = {}): Promise<void> {
-    await this.installer.uninstall(appId, opts);
+    const current = this.getRecord(appId);
+    if (!current) throw new Error(`'${appId}' is not installed`);
+    const scope = (current.scope === 'system' ? undefined : current.scope);
+    if (!scope) throw new Error(`Cannot uninstall '${appId}' from system scope`);
+    await this.installerFor(scope).uninstall(appId, opts);
     this.bus?.emit('nexus:uninstall.complete', { id: appId });
   }
 
-  /** Publish — Git path (v1 required). */
   async *publishGit(opts: {
     appPath:  string;
     repo?:    string;
@@ -178,7 +210,7 @@ export class NexusManager {
     const messages: string[] = [];
     const result = await publishGit({
       ...opts,
-      dataDir: this.dataDir,
+      dataDir: this.rootDataDir,
       onMessage: (m) => messages.push(m),
     });
     for (const m of messages) yield { type: 'publish.progress', message: m };
@@ -188,7 +220,6 @@ export class NexusManager {
     return { ref, installCmd: result.installCmd };
   }
 
-  /** Publish — OCI path (v1 stretch, requires `oras` on PATH). */
   async *publishOci(opts: {
     appPath:  string;
     registry: string;
@@ -199,7 +230,7 @@ export class NexusManager {
     const messages: string[] = [];
     const result = await publishOci({
       ...opts,
-      dataDir: this.dataDir,
+      dataDir: this.rootDataDir,
       onMessage: (m) => messages.push(m),
     });
     for (const m of messages) yield { type: 'publish.progress', message: m };
@@ -216,7 +247,6 @@ export class NexusManager {
       case 'index': {
         if (resolved.address.startsWith('oci://') || resolved.address.startsWith('ghcr.io')
             || /^[\w.-]+:[^/]+$/.test(resolved.address)) {
-          // Index resolved to OCI source.
           const [registry, tag] = splitOnLastColon(resolved.address);
           return fetchOci({ registry, tag }, stagingDir);
         }

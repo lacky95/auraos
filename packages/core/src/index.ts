@@ -14,3 +14,4 @@ export * from './layout/LayoutStrategyRegistry.js';
 export * from './keymap/index.js';
 export * from './nexus/index.js';
 export * from './logger.js';
+export * from './scopes/index.js';

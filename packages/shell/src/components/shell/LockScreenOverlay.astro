@@ -1,0 +1,246 @@
+---
+/**
+ * Lock-screen overlay — a black blackout panel that covers the entire shell
+ * (status bar, dock, launcher, app iframes) until the user clicks or presses
+ * any key. The user configures what's shown (text, optional clock) and where
+ * it sits (3×3 anchor grid) from Settings → Lock Screen, which writes the
+ * `os/lockscreen` KV key. Activation is via `window.auraLockScreen()` or the
+ * `aura.lockscreen.activate` key binding (default: Ctrl+Alt+L).
+ */
+import { defaultKv } from '@aura/kv-store';
+
+type LockPosition =
+  | 'top-left'    | 'top-center'    | 'top-right'
+  | 'middle-left' | 'center'        | 'middle-right'
+  | 'bottom-left' | 'bottom-center' | 'bottom-right';
+
+interface LockScreenConfig {
+  text:      string;
+  position:  LockPosition;
+  showClock: boolean;
+}
+
+const DEFAULT_CONFIG: LockScreenConfig = {
+  text:      'LOCKED',
+  position:  'center',
+  showClock: true,
+};
+
+const VALID_POSITIONS: ReadonlySet<LockPosition> = new Set([
+  'top-left', 'top-center', 'top-right',
+  'middle-left', 'center', 'middle-right',
+  'bottom-left', 'bottom-center', 'bottom-right',
+]);
+
+function normalize(raw: unknown): LockScreenConfig {
+  if (!raw || typeof raw !== 'object') return DEFAULT_CONFIG;
+  const r = raw as Partial<LockScreenConfig>;
+  return {
+    text:      typeof r.text === 'string' ? r.text : DEFAULT_CONFIG.text,
+    position:  typeof r.position === 'string' && VALID_POSITIONS.has(r.position as LockPosition)
+                 ? r.position as LockPosition
+                 : DEFAULT_CONFIG.position,
+    showClock: typeof r.showClock === 'boolean' ? r.showClock : DEFAULT_CONFIG.showClock,
+  };
+}
+
+let initial: LockScreenConfig = DEFAULT_CONFIG;
+{
+  const kv = defaultKv();
+  try {
+    const v = await kv.getValue('os', 'lockscreen');
+    if (v) initial = normalize(v);
+  } catch { /* fall back to defaults */ }
+  finally { await kv.close().catch(() => undefined); }
+}
+---
+<div
+  id="lockscreen"
+  aria-hidden="true"
+  role="dialog"
+  aria-label="Locked"
+  data-position={initial.position}
+>
+  <div id="lockscreen-clock" data-show={String(initial.showClock)}>--:--:--</div>
+  <div id="lockscreen-text">{initial.text}</div>
+  <div id="lockscreen-hint">CLICK OR PRESS ANY KEY TO UNLOCK</div>
+</div>
+
+<script type="application/json" id="aura-initial-lockscreen" set:html={JSON.stringify(initial)}></script>
+
+<script>
+  // The overlay sits at body root (z-index 2000) so it covers the launcher,
+  // dock, status bar and every app iframe. Config flows in from
+  // /api/kv/os/lockscreen and refreshes live on `kv:changed`. Trigger is
+  // window.auraLockScreen() — bound to the `aura.lockscreen.activate` key
+  // dispatcher action in StatusBar.astro.
+  import { osEvents } from '../../lib/osEvents.ts';
+
+  type LockPosition =
+    | 'top-left'    | 'top-center'    | 'top-right'
+    | 'middle-left' | 'center'        | 'middle-right'
+    | 'bottom-left' | 'bottom-center' | 'bottom-right';
+  interface LockScreenConfig { text: string; position: LockPosition; showClock: boolean; }
+
+  const overlay  = document.getElementById('lockscreen')!;
+  const clockEl  = document.getElementById('lockscreen-clock')!;
+  const textEl   = document.getElementById('lockscreen-text')!;
+
+  const DEFAULT_CONFIG: LockScreenConfig = { text: 'LOCKED', position: 'center', showClock: true };
+  let cfg: LockScreenConfig = DEFAULT_CONFIG;
+  try {
+    const node = document.getElementById('aura-initial-lockscreen');
+    if (node?.textContent) cfg = { ...DEFAULT_CONFIG, ...JSON.parse(node.textContent) };
+  } catch { /* keep defaults */ }
+
+  let clockTimer: number | null = null;
+  function tickClock() {
+    try { clockEl.textContent = new Date().toLocaleTimeString(); }
+    catch { clockEl.textContent = '--:--:--'; }
+  }
+  function startClock() {
+    if (clockTimer != null) return;
+    tickClock();
+    clockTimer = window.setInterval(tickClock, 1000);
+  }
+  function stopClock() {
+    if (clockTimer != null) { clearInterval(clockTimer); clockTimer = null; }
+  }
+
+  function applyConfig(next: LockScreenConfig) {
+    cfg = next;
+    overlay.dataset['position'] = next.position;
+    textEl.textContent = next.text;
+    clockEl.dataset['show'] = String(next.showClock);
+    if (overlay.getAttribute('aria-hidden') === 'false') {
+      // Live-update while visible: keep / drop the clock interval to match.
+      if (next.showClock) startClock(); else stopClock();
+    }
+  }
+  applyConfig(cfg);
+
+  // Live re-render on KV writes from the Settings page.
+  osEvents.subscribe('kv:changed', (ev: unknown) => {
+    const e = ev as { namespace?: string; key?: string; value?: unknown };
+    if (e?.namespace !== 'os' || e?.key !== 'lockscreen') return;
+    applyConfig({ ...DEFAULT_CONFIG, ...(e.value && typeof e.value === 'object' ? e.value as Partial<LockScreenConfig> : {}) });
+  });
+
+  // ── Activation ──────────────────────────────────────────────────────────
+  // Capture-phase listeners on window so the overlay dismisses BEFORE any
+  // app iframe or shell handler sees the dismissing input. A short grace
+  // window after activate() avoids the keystroke / mouse-click that
+  // triggered the lock from instantly dismissing it.
+  let active = false;
+  let armedAt = 0;
+  const GRACE_MS = 200;
+
+  function dismiss(ev: Event) {
+    if (!active) return;
+    if (performance.now() - armedAt < GRACE_MS) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      return;
+    }
+    ev.preventDefault();
+    ev.stopPropagation();
+    deactivate();
+  }
+
+  function activate() {
+    if (active) return;
+    active = true;
+    armedAt = performance.now();
+    overlay.setAttribute('aria-hidden', 'false');
+    if (cfg.showClock) startClock();
+    // Capture phase + non-passive so we can prevent default on the
+    // dismissing event (e.g. stop a Ctrl+L from opening a browser dialog
+    // even after the overlay has gone).
+    window.addEventListener('keydown',   dismiss, { capture: true });
+    window.addEventListener('mousedown', dismiss, { capture: true });
+    window.addEventListener('touchstart', dismiss, { capture: true, passive: false });
+    // Pull focus away from any app iframe so the next keystroke definitely
+    // routes to the window listener above (not the focused frame's doc).
+    try { (document.activeElement as HTMLElement | null)?.blur(); } catch { /* ignore */ }
+    overlay.focus?.();
+  }
+
+  function deactivate() {
+    if (!active) return;
+    active = false;
+    overlay.setAttribute('aria-hidden', 'true');
+    stopClock();
+    window.removeEventListener('keydown',    dismiss, { capture: true } as EventListenerOptions);
+    window.removeEventListener('mousedown',  dismiss, { capture: true } as EventListenerOptions);
+    window.removeEventListener('touchstart', dismiss, { capture: true } as EventListenerOptions);
+  }
+
+  (window as unknown as { auraLockScreen?: () => void }).auraLockScreen = activate;
+
+  // Some triggers (e.g. the Settings-page "TEST" button) live in iframes;
+  // let them post a message to ask us to lock.
+  window.addEventListener('message', (ev: MessageEvent) => {
+    if (ev?.data?.type === 'aura.lockscreen.activate') activate();
+  });
+</script>
+
+<style>
+  /* z-index 2000: above LauncherOverlay/ProcessManager (1000), focus-view
+     (50), app slots (~5), dock (3), status bar (2). Below absolutely
+     nothing in the shell — that's the point. */
+  #lockscreen {
+    position: fixed;
+    inset: 0;
+    z-index: 2000;
+    display: none;
+    flex-direction: column;
+    padding: 48px;
+    box-sizing: border-box;
+    background: #000;
+    color: var(--aura-color-text, #ccffcc);
+    font-family: var(--aura-font-mono, 'Courier New', monospace);
+    user-select: none;
+    cursor: pointer;
+  }
+  #lockscreen[aria-hidden="false"] { display: flex; }
+
+  /* 3×3 anchor grid driven by data-position. Vertical from the row part,
+     horizontal from the column part — both default to `center`. */
+  #lockscreen[data-position^="top-"]    { justify-content: flex-start; }
+  #lockscreen[data-position^="middle-"],
+  #lockscreen[data-position="center"]   { justify-content: center;      }
+  #lockscreen[data-position^="bottom-"] { justify-content: flex-end;    }
+
+  #lockscreen[data-position$="-left"]   { align-items: flex-start; text-align: left; }
+  #lockscreen[data-position$="-center"],
+  #lockscreen[data-position="center"]   { align-items: center;    text-align: center; }
+  #lockscreen[data-position$="-right"]  { align-items: flex-end;  text-align: right; }
+
+  #lockscreen-clock {
+    font-size: clamp(2.5rem, 8vmin, 5rem);
+    color: var(--aura-color-primary, #00ff41);
+    text-shadow: var(--aura-glow-primary, 0 0 12px #00ff41);
+    letter-spacing: 0.08em;
+    line-height: 1;
+    margin-bottom: 16px;
+  }
+  #lockscreen-clock[data-show="false"] { display: none; }
+
+  #lockscreen-text {
+    font-size: clamp(1rem, 3vmin, 1.4rem);
+    color: var(--aura-color-text, #ccffcc);
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    white-space: pre-wrap;
+    max-width: 80ch;
+  }
+
+  #lockscreen-hint {
+    margin-top: 24px;
+    font-size: 0.7rem;
+    color: var(--aura-color-text-dim, #557755);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    opacity: 0.6;
+  }
+</style>

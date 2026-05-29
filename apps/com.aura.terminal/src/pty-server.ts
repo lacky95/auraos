@@ -35,12 +35,30 @@ interface Session {
   buffer:     string[];    // scrollback ring (joined chunks)
   bufferSize: number;      // total bytes in buffer; cap at SCROLLBACK_BYTES
   killTimer:  NodeJS.Timeout | null;
-  cols:       number;
+  reconcileTimer: NodeJS.Timeout | null;  // winsize self-heal heartbeat
+  // Per-client reported size + primary flag — the shared PTY size is derived
+  // from these (smallest-fit, or the primary device when one is set).
+  clientSizes: Map<WebSocket, { cols: number; rows: number; primary: boolean }>;
+  cols:       number;   // current EFFECTIVE PTY size (result of recomputeEffective)
   rows:       number;
 }
 
 const SCROLLBACK_BYTES = 256 * 1024;
 const GRACE_MS         = 5 * 60_000;   // 5 minutes after last client leaves
+const RECONCILE_MS     = 5_000;        // winsize self-heal heartbeat interval
+
+// The host this terminal physically lives on — the AuraOS master ("aura-shell"
+// by default, overridable via AURA_SHELL_HOSTNAME, which ContainerRunner now
+// forwards into every app container). We DON'T use os.hostname()/$HOSTNAME here
+// because the container is started with `--hostname <appId>`, so the kernel
+// name is the package id ("com.aura.terminal") — not the host the user means.
+const HOST_LABEL = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
+
+// OSC window-title sequence. The Terminal page listens via xterm's
+// onTitleChange and shows it as the session-host indicator.
+function oscTitle(label: string): string {
+  return `]0;${label}`;
+}
 
 const sessions = new Map<string, Session>();
 
@@ -64,7 +82,11 @@ function spawnPty(cols: number, rows: number): IPty {
     cols,
     rows,
     cwd: process.env['HOME'] ?? '/app',
-    env: process.env as Record<string, string>,
+    // AURA_TERM_LABEL marks this as the base/host shell so bashrc.aura.sh's
+    // window-title shows the host ("aura-shell") rather than this app's id.
+    // `aura jump` shells run in a different sandbox where it's absent (or
+    // explicitly blanked, see enter-sandbox.ts), so they show the app instead.
+    env: { ...process.env, AURA_TERM_LABEL: HOST_LABEL } as Record<string, string>,
   });
 }
 
@@ -83,10 +105,40 @@ function attachPtyOutput(sess: Session): void {
     log('pty exit', sess.id);
     // PTY exited (user typed `exit`, signal, etc.). Drop the session
     // entirely — no point holding scrollback for a dead shell.
+    if (sess.reconcileTimer) { clearInterval(sess.reconcileTimer); sess.reconcileTimer = null; }
     for (const ws of sess.wss) { try { ws.close(); } catch { /* ignore */ } }
     sess.wss.clear();
     sessions.delete(sess.id);
   });
+}
+
+/**
+ * Winsize self-heal heartbeat.
+ *
+ * `sess.cols/rows` is the AUTHORITATIVE size — the browser terminal computes it
+ * from the shell's exact tile box and sends it on every change. But a program
+ * running INSIDE the PTY can move the kernel winsize out from under us at any
+ * time (a TUI that calls TIOCSWINSZ, `stty cols N`, a size probe, an
+ * `aura jump` child, …). Nothing in the event-driven path corrects that —
+ * there's no browser resize to react to — so a long-running CLI tool ends up
+ * wrapping at the wrong column with the user doing nothing.
+ *
+ * So we re-assert the size we KNOW is right on a slow heartbeat. This is
+ * silent in the steady state: Linux's tty_do_resize() early-returns WITHOUT
+ * signalling when the winsize is unchanged, so re-applying the same dimensions
+ * sends no SIGWINCH and triggers no repaint. Only when something actually
+ * drifted the winsize does the re-apply differ → SIGWINCH → the shell/TUI
+ * snaps back to the correct width. Runs only while a client is attached.
+ */
+function startReconcile(sess: Session): void {
+  if (sess.reconcileTimer) return;
+  sess.reconcileTimer = setInterval(() => {
+    if (sess.wss.size === 0) return;          // detached → nothing to keep in sync
+    if (sess.cols <= 0 || sess.rows <= 0) return;
+    try { sess.pty.resize(sess.cols, sess.rows); } catch { /* pty gone */ }
+  }, RECONCILE_MS);
+  // Never hold the process open just for the heartbeat.
+  if (typeof sess.reconcileTimer.unref === 'function') sess.reconcileTimer.unref();
 }
 
 function attachWs(sess: Session, ws: WebSocket): void {
@@ -104,17 +156,20 @@ function attachWs(sess: Session, ws: WebSocket): void {
   ws.on('message', (msg: Buffer | string) => {
     const raw = msg.toString();
     try {
-      const parsed = JSON.parse(raw) as { type: string; cols?: number; rows?: number; data?: string };
+      const parsed = JSON.parse(raw) as { type: string; cols?: number; rows?: number; data?: string; primary?: boolean };
       if (parsed.type === 'resize') {
-        // Resize is a shared property of the PTY — every connected client
-        // sees the same dimensions. We adopt the resize the latest client
-        // sent. If clients disagree, the most recent one wins (consistent
-        // with how `term.onResize` fires after fit() inside each iframe).
+        // A PTY has ONE winsize, but clients (different devices / screens) can
+        // each want a different one. So clients REPORT their own desired size
+        // here and the server picks the shared size in recomputeEffective():
+        // smallest of everyone (so content wraps to fit every screen) unless a
+        // client flags itself `primary`, in which case the primary device's
+        // size wins. Each client still renders its own xterm at its own size;
+        // this only governs the shared PTY the shell actually formats against.
         const cols = parsed.cols ?? sess.cols;
         const rows = parsed.rows ?? sess.rows;
-        if (cols !== sess.cols || rows !== sess.rows) {
-          sess.cols = cols; sess.rows = rows;
-          try { sess.pty.resize(cols, rows); } catch { /* ignore */ }
+        if (cols > 0 && rows > 0) {
+          sess.clientSizes.set(ws, { cols, rows, primary: parsed.primary === true });
+          recomputeEffective(sess);
         }
       } else if (parsed.type === 'data') {
         sess.pty.write(parsed.data ?? '');
@@ -126,6 +181,10 @@ function attachWs(sess: Session, ws: WebSocket): void {
 
   ws.on('close', (code) => {
     sess.wss.delete(ws);
+    sess.clientSizes.delete(ws);
+    // A client leaving can grow the effective size (e.g. the smallest screen
+    // disconnected) — recompute so the remaining devices reclaim the space.
+    recomputeEffective(sess);
     log('detach', sess.id, `code=${code} remaining=${sess.wss.size}`);
     // Last client left — start grace timer. If anything reattaches
     // within the window we cancel it (in attachWs above).
@@ -138,12 +197,38 @@ function attachWs(sess: Session, ws: WebSocket): void {
   });
 }
 
+/**
+ * Pick the shared PTY winsize from every attached client's reported size.
+ *
+ * Default: the SMALLEST cols/rows across all clients, so the shell's output
+ * wraps to fit the narrowest screen — larger screens just show unused space on
+ * the right (tmux-style), never wrong-wrapped text. Override: if any client
+ * flagged itself `primary` (the user pressed the ★ button on that device), the
+ * primary device's size wins instead — its screen fills exactly, others render
+ * best-effort. Multiple primaries fall back to the smallest among them.
+ *
+ * Re-applying is idempotent: when the result is unchanged we don't touch the
+ * PTY, and even the reconcile heartbeat's identical re-apply is a Linux no-op.
+ */
+function recomputeEffective(sess: Session): void {
+  const all = [...sess.clientSizes.values()].filter((s) => s.cols > 0 && s.rows > 0);
+  if (all.length === 0) return;                 // no sized clients yet — keep current
+  const primaries = all.filter((s) => s.primary);
+  const pool = primaries.length > 0 ? primaries : all;
+  const cols = Math.min(...pool.map((s) => s.cols));
+  const rows = Math.min(...pool.map((s) => s.rows));
+  if (cols === sess.cols && rows === sess.rows) return;
+  sess.cols = cols; sess.rows = rows;
+  try { sess.pty.resize(cols, rows); } catch { /* ignore */ }
+}
+
 /** Public entry — called by the OS lifecycle hook when the activity is destroyed. */
 export function killSession(sessionId: string): boolean {
   const sess = sessions.get(sessionId);
   if (!sess) return false;
   log('killSession', sessionId, `clients=${sess.wss.size}`);
   if (sess.killTimer) clearTimeout(sess.killTimer);
+  if (sess.reconcileTimer) { clearInterval(sess.reconcileTimer); sess.reconcileTimer = null; }
   try { sess.pty.kill(); } catch { /* already gone */ }
   for (const ws of sess.wss) { try { ws.close(); } catch { /* ignore */ } }
   sess.wss.clear();
@@ -194,10 +279,15 @@ export function getPtyWss(): WebSocketServer {
       sess = {
         id: sessionId, pty: spawnPty(80, 24),
         wss: new Set(), buffer: [], bufferSize: 0,
-        killTimer: null, cols: 80, rows: 24,
+        killTimer: null, reconcileTimer: null, clientSizes: new Map(), cols: 80, rows: 24,
       };
       sessions.set(sessionId, sess);
       attachPtyOutput(sess);
+      startReconcile(sess);
+      // Seed the host indicator before the shell's first prompt renders. It
+      // sits first in the scrollback, so any later prompt title (incl. an
+      // `aura jump` target) naturally overrides it on replay.
+      bufferPush(sess, oscTitle(HOST_LABEL));
     }
     attachWs(sess, ws);
   });

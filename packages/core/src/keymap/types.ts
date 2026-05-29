@@ -90,8 +90,8 @@ export const DEFAULT_OS_ACTIONS: readonly KeyAction[] = [
   { id: 'aura.workspace.switch-8',    category: 'Workspaces', label: 'Switch to workspace 8', scope: 'os-modifier', defaultCombo: 'Ctrl+Digit8' },
   { id: 'aura.workspace.switch-9',    category: 'Workspaces', label: 'Switch to workspace 9', scope: 'os-modifier', defaultCombo: 'Ctrl+Digit9' },
   { id: 'aura.workspace.new',         category: 'Workspaces', label: 'New workspace',         scope: 'os-modifier', defaultCombo: 'Ctrl+Shift+KeyN' },
-  { id: 'aura.workspace.cycle-next',  category: 'Workspaces', label: 'Cycle workspace forward',  scope: 'os-modifier', defaultCombo: 'Ctrl+Tab'        },
-  { id: 'aura.workspace.cycle-prev',  category: 'Workspaces', label: 'Cycle workspace backward', scope: 'os-modifier', defaultCombo: 'Ctrl+Shift+Tab'  },
+  { id: 'aura.workspace.cycle-next',  category: 'Workspaces', label: 'Cycle workspace forward',  scope: 'os-modifier', defaultCombo: 'Ctrl+Shift+ArrowRight' },
+  { id: 'aura.workspace.cycle-prev',  category: 'Workspaces', label: 'Cycle workspace backward', scope: 'os-modifier', defaultCombo: 'Ctrl+Shift+ArrowLeft'  },
 
   // Launcher
   { id: 'aura.launcher.toggle',       category: 'Launcher', label: 'Toggle app launcher',  scope: 'os-modifier', defaultCombo: 'Ctrl+Alt+Space' },
@@ -107,6 +107,9 @@ export const DEFAULT_OS_ACTIONS: readonly KeyAction[] = [
 
   // Process Manager
   { id: 'aura.processmanager.toggle', category: 'Process Manager', label: 'Toggle process manager', scope: 'os-modifier', defaultCombo: 'Ctrl+Alt+KeyM' },
+
+  // Lock Screen — blackout overlay until the user clicks or hits any key.
+  { id: 'aura.lockscreen.activate',   category: 'Lock Screen', label: 'Lock screen (blackout)', scope: 'os-modifier', defaultCombo: 'Ctrl+Alt+KeyL' },
 
   // Custom user slots — default unbound. The Settings UI lets the user bind
   // a launcher slot to "open <app>" and assign a combo (typically Ctrl+Alt+DigitN).

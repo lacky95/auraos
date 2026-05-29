@@ -1,7 +1,73 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { stdout, env as procEnv } from 'node:process';
 import { color, fail, info, ok } from './format.js';
+
+/**
+ * Tell the AuraOS Terminal which sandbox the live shell is now in.
+ *
+ * This is how `aura jump` "communicates" with the Terminal app: it writes an
+ * OSC window-title sequence to its OWN stdout. That sequence rides the same
+ * PTY stream straight back to the terminal that launched us, so it's always
+ * routed to the right session — no session id, no out-of-band API call. The
+ * Terminal page picks it up via xterm's onTitleChange and updates its host
+ * indicator. Doing it here (rather than only via the shell's PROMPT_COMMAND)
+ * means the bar updates the instant we jump, even if the destination shell
+ * never loads bashrc.aura.sh.
+ */
+export function setTerminalHost(label: string): void {
+  if (!stdout.isTTY || !label) return;
+  try { stdout.write(`\x1b]0;${label}\x07`); } catch { /* not a tty */ }
+}
+
+/** Host label of wherever we're jumping FROM — restored on exit so the bar
+ *  snaps back when the user leaves the sandbox. Mirrors bashrc's fallback
+ *  order; read before we spawn so it reflects the caller, not the child. */
+export function callerHostLabel(): string {
+  return procEnv['AURA_TERM_LABEL']
+    || procEnv['AURA_HOSTNAME']
+    || procEnv['APP_ID']
+    || procEnv['HOSTNAME']
+    || 'aura-shell';
+}
+
+/**
+ * Work around `docker exec -it`'s TTY-size race for jumped shells.
+ *
+ * docker reads the local TTY winsize once at attach and otherwise only
+ * resizes the remote PTY when it receives a SIGWINCH. On a freshly-attached
+ * interactive shell that the user doesn't manually resize, the remote PTY can
+ * stay at node-pty's 80x24 default — so TUIs and line-wrapping inside the
+ * jumped session render at 80 columns even though the host terminal is sized
+ * correctly. The terminal app's own fit/resize logic can't help here: it sizes
+ * the xterm/node-pty, not this new remote PTY.
+ *
+ * Emitting SIGWINCH at the docker client right after it starts forces it to
+ * re-read our (correct) TTY size and POST it to the remote PTY. It's harmless
+ * when the size is already right — it just re-applies the same dimensions.
+ *
+ * Two layers, both idempotent:
+ *   1. Staggered initial nudges cover the gap between the child starting and
+ *      docker finishing the attach + installing its SIGWINCH handler. They run
+ *      a bit longer/denser than strictly needed so a slow daemon or cold image
+ *      pull (attach >600 ms) still gets sized without the user touching the
+ *      window.
+ *   2. A live SIGWINCH forwarder for the child's whole lifetime: every resize
+ *      the host TTY sees while we're jumped is re-posted to the docker client,
+ *      so ongoing resizes propagate to the remote PTY even if process-group
+ *      delivery races docker's own handler. Removed on exit so we don't leak a
+ *      listener across successive jumps.
+ */
+export function syncDockerExecWinsize(child: ChildProcess): void {
+  const nudge = () => { try { child.kill('SIGWINCH'); } catch { /* already exited */ } };
+  child.once('spawn', () => {
+    for (const ms of [120, 300, 600, 1200, 2000]) setTimeout(nudge, ms);
+  });
+  const onWinch = () => nudge();
+  process.on('SIGWINCH', onWinch);
+  child.on('exit', () => process.removeListener('SIGWINCH', onWinch));
+}
 
 /**
  * Drop into the target instance's sandbox in the CURRENT terminal session
@@ -74,8 +140,16 @@ function enterContainer(instanceId: string, appId: string, cmd?: string): void {
   const shellArgs = cmd ? ['bash', '-lc', cmd] : ['bash', '-i'];
   const args = [...execArgs, ...shellArgs];
   info(`entering container ${color.bold(containerName)} (sandbox=container, cwd=${appDir})`);
+  // Interactive jumps update the Terminal's host indicator; one-off `cmd` runs
+  // don't (they return immediately and shouldn't flicker the bar).
+  const restoreHost = cmd ? null : callerHostLabel();
+  if (!cmd) setTerminalHost(appId);
   const child = spawn('docker', args, { stdio: 'inherit' });
-  child.on('exit', (code) => { ok(`shell exited (code ${code ?? 0})`); process.exit(code ?? 0); });
+  syncDockerExecWinsize(child);
+  child.on('exit', (code) => {
+    if (restoreHost) setTerminalHost(restoreHost);
+    ok(`shell exited (code ${code ?? 0})`); process.exit(code ?? 0);
+  });
   child.on('error', (err) => fail(
     `docker exec failed: ${err.message}\n` +
     `  Hint: the calling sandbox needs both the docker CLI on PATH and a bound /var/run/docker.sock.\n` +
@@ -109,14 +183,27 @@ function enterProot(
     APP_INSTANCE_ID: instanceId,
     APP_PORT: port?.toString() ?? '',
     OS_API_BASE: process.env['AURA_SHELL_URL'] ?? 'http://127.0.0.1:3000',
+    // The host shell exports AURA_TERM_LABEL (= "aura-shell") to pin its own
+    // title; clear it here so the jumped proot shows the app (via APP_ID),
+    // not the host we jumped from. Container jumps get a fresh env, so this
+    // leak only affects proot.
+    AURA_TERM_LABEL: '',
   };
 
   const command = cmd ? ['bash', '-lc', cmd] : ['bash', '-i'];
 
+  // Drive the Terminal's host indicator (interactive jumps only). Capture the
+  // caller's label before spawning so we can restore the bar on exit.
+  const restoreHost = cmd ? null : callerHostLabel();
+  if (!cmd) setTerminalHost(appId);
+
   if (!useProot) {
     info(`PRoot disabled — opening shell in master cwd=${appDir}`);
     const child = spawn(command[0]!, command.slice(1), { cwd: appDir, env, stdio: 'inherit' });
-    child.on('exit', (code) => process.exit(code ?? 0));
+    child.on('exit', (code) => {
+      if (restoreHost) setTerminalHost(restoreHost);
+      process.exit(code ?? 0);
+    });
     return;
   }
 
@@ -140,7 +227,10 @@ function enterProot(
 
   info(`entering PRoot for ${color.bold(instanceId)} (sandbox=proot, cwd=${appDir})`);
   const child = spawn('proot', args, { env, stdio: 'inherit' });
-  child.on('exit', (code) => { ok(`shell exited (code ${code ?? 0})`); process.exit(code ?? 0); });
+  child.on('exit', (code) => {
+    if (restoreHost) setTerminalHost(restoreHost);
+    ok(`shell exited (code ${code ?? 0})`); process.exit(code ?? 0);
+  });
   child.on('error', (err) => fail(`proot failed: ${err.message}`));
 }
 

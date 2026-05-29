@@ -91,6 +91,9 @@ export async function bootstrapKv(opts: { dataDir?: string } = {}): Promise<void
     } catch (err) {
       console.warn(`[KvBootstrap] could not seed os/keymap: ${(err as Error).message}`);
     }
+    // Viewport profiles used to be seeded here, but they moved to device
+    // localStorage (`aura.os.viewport`) since they're per-device, not
+    // per-account. See lib/viewportClient.
     await kv.close().catch(() => undefined);
   }
 }

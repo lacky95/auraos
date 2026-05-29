@@ -67,6 +67,13 @@ export type ColorMode    = 'light' | 'dark' | 'auto';
 /** What the active palette actually is right now (`auto` resolved). */
 export type ResolvedMode = 'light' | 'dark';
 
+/** The three palette colors a picker needs to render a preview swatch. */
+export interface ThemeSwatch {
+  primary:   string;
+  secondary: string;
+  bg:        string;
+}
+
 /** Lightweight summary used by the theme inventory provider. */
 export interface ThemeSummary {
   id:           string;
@@ -75,6 +82,8 @@ export interface ThemeSummary {
   tags?:        string[];
   tone:         ThemeTone;
   framework:    DesignFramework;
+  /** Just enough palette to draw a preview chip — not the full ColorPalette. */
+  swatch:       ThemeSwatch;
 }
 
 const SCIFICN_FRAMEWORK: DesignFramework = {
@@ -256,6 +265,54 @@ const cyan: OsTheme = {
   },
 };
 
+const mono: OsTheme = {
+  id:          'mono',
+  name:        'MONO',
+  description: 'Monochrome grayscale — bright white on pure black.',
+  tags:        ['scificn', 'minimal', 'high-contrast'],
+  tone:        'dark',
+  framework:   SCIFICN_FRAMEWORK,
+  palette: {
+    primary:   '#ffffff',
+    secondary: '#9a9a9a',
+    ...DARK_SEMANTIC,
+    bg:        '#000000',
+    surface:   '#0d0d0d',
+    surface2:  '#1a1a1a',
+    text:      '#ffffff',
+    textDim:   '#808080',
+    border:    'rgba(255, 255, 255, 0.20)',
+    glowPrimary:   '0 0 4px rgba(255, 255, 255, 0.45), 0 0 8px rgba(255, 255, 255, 0.18)',
+    glowSecondary: '0 0 4px rgba(154, 154, 154, 0.35), 0 0 8px rgba(154, 154, 154, 0.15)',
+    glowDanger:    '0 0 4px #ff2020, 0 0 8px rgba(255, 32, 32, 0.18)',
+    glowSubtle:    '0 0 2px rgba(255, 255, 255, 0.15)',
+  },
+};
+
+const monoDark: OsTheme = {
+  id:          'monodark',
+  name:        'MONODARK',
+  description: 'Monochrome grayscale — bright white on black, deeper grays.',
+  tags:        ['scificn', 'minimal', 'high-contrast'],
+  tone:        'dark',
+  framework:   SCIFICN_FRAMEWORK,
+  palette: {
+    primary:   '#ffffff',
+    secondary: '#5a5a5a',
+    ...DARK_SEMANTIC,
+    bg:        '#000000',
+    surface:   '#060606',
+    surface2:  '#0e0e0e',
+    text:      '#ffffff',
+    textDim:   '#c4c4c4',
+    border:    'rgba(255, 255, 255, 0.12)',
+    glowPrimary:   '0 0 4px rgba(255, 255, 255, 0.40), 0 0 8px rgba(255, 255, 255, 0.14)',
+    glowSecondary: '0 0 4px rgba(90, 90, 90, 0.30), 0 0 8px rgba(90, 90, 90, 0.12)',
+    glowDanger:    '0 0 4px #ff2020, 0 0 8px rgba(255, 32, 32, 0.18)',
+    glowSubtle:    '0 0 2px rgba(255, 255, 255, 0.10)',
+  },
+};
+
 // ---- Light themes ----
 //
 // Light glows are intentionally weak (small radius, low alpha) — bloom on a
@@ -348,7 +405,7 @@ export class ThemeManager {
 
   static readonly THEMES: readonly OsTheme[] = [
     // dark
-    sciFi, starWars, alien, amber, redAlert, cyan,
+    sciFi, starWars, alien, amber, redAlert, cyan, mono, monoDark,
     // light
     paper, parchment, mist,
   ];
@@ -395,6 +452,7 @@ export class ThemeManager {
       ...(t.tags        !== undefined ? { tags:        t.tags        } : {}),
       tone:        t.tone,
       framework:   t.framework,
+      swatch:      { primary: t.palette.primary, secondary: t.palette.secondary, bg: t.palette.bg },
     }));
   }
 

@@ -1,5 +1,11 @@
 ---
 const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
+// Pre-prompt placeholder for the session-host indicator: the AuraOS master
+// host name. We avoid os.hostname() because the container runs with
+// `--hostname <appId>`, so that would render the package id. The live value
+// arrives via term.onTitleChange once the shell emits its first OSC title —
+// and follows the user as they `aura jump` between sandboxes.
+const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
 ---
 <!DOCTYPE html>
 <html lang="en">
@@ -43,6 +49,56 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
       flex-shrink: 0;
     }
     #terminal-bar span { color: var(--aura-color-primary); margin-right: 8px; }
+    /* Shared-terminal sizing mode: two icon buttons (fit-smallest | primary).
+       Plain scoped selectors (same as the rest of this bar) — the buttons are
+       static template elements, so Astro's scope attribute lands on them just
+       like #terminal-bar. Every palette var carries a literal fallback (the
+       Settings/browser app pattern), and a bare <button> keeps native OS chrome
+       (grey bg, system font) unless reset — hence `appearance:none` + explicit
+       colors. NOTE: keep this in the SCOPED <style>, never `is:global` — in
+       `astro dev`, global styles are injected by the Vite client at runtime,
+       which can't reach its HMR socket through the OS proxy inside an app
+       iframe, so the whole bar would lose its styling on load. */
+    #terminal-bar .term-size-mode { display: inline-flex; align-items: center; margin: 0 4px; }
+    #terminal-bar .term-size-mode .tsm-btn {
+      -webkit-appearance: none;
+      appearance: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      box-sizing: border-box;
+      min-width: 22px;
+      height: 18px;
+      color: var(--aura-color-text-dim, #557755);
+      background: var(--aura-color-surface, #111);
+      border: 1px solid var(--aura-color-border, rgba(0,255,65,0.2));
+      border-radius: 0;
+      font-family: var(--aura-font-mono, 'Courier New', monospace);
+      font-size: 0.72rem;
+      line-height: 1;
+      letter-spacing: 0;
+      text-transform: none;
+      padding: 0 6px;
+      margin: 0;
+      cursor: pointer;
+      outline: none;
+      transition: color .1s, border-color .1s, background .1s, box-shadow .1s;
+    }
+    #terminal-bar .term-size-mode .tsm-btn + .tsm-btn { border-left: none; }
+    #terminal-bar .term-size-mode .tsm-btn:hover,
+    #terminal-bar .term-size-mode .tsm-btn:focus-visible {
+      color: var(--aura-color-primary, #00ff41);
+      border-color: var(--aura-color-primary, #00ff41);
+    }
+    /* Active mode = the OS chrome's "glow" affordance (matches the browser
+       app's button hover + Settings' .theme-card[data-active]) so the selected
+       mode reads as filled. */
+    #terminal-bar .term-size-mode .tsm-btn[data-active="true"] {
+      color: var(--aura-color-bg, #0a0a0a);
+      background: var(--aura-color-primary, #00ff41);
+      border-color: var(--aura-color-primary, #00ff41);
+      box-shadow: var(--aura-glow-primary, 0 0 8px #00ff41);
+    }
     #terminal-bar #ws-url {
       color: var(--aura-color-text-dim);
       font-size: 0.6rem;
@@ -73,15 +129,106 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
       border-top: 1px solid var(--aura-color-border);
       flex-shrink: 0;
     }
+    /* Quick-commands sidebar — structural/layout only (static elements, so
+       scoped CSS reaches them like the bar). All BUTTONS are styled inline
+       (see markup + qcRender) because scoped CSS proved unreliable for
+       <button>s and the command buttons are built via innerHTML (no scope
+       attr). Slides in from the left over the console. */
+    #qc-panel {
+      position: fixed;
+      top: 24px; left: 0; bottom: 0;
+      width: 280px; max-width: 80%;
+      display: flex;
+      flex-direction: column;
+      background: var(--aura-color-surface);
+      border-right: 1px solid var(--aura-color-border);
+      box-shadow: 4px 0 18px rgba(0, 0, 0, 0.45);
+      transform: translateX(-100%);
+      transition: transform .18s ease-out;
+      z-index: 50;
+      overflow: hidden;
+    }
+    #qc-panel[aria-hidden="false"] { transform: translateX(0); }
+    #qc-panel .qc-head {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      height: 24px;
+      padding: 0 6px 0 10px;
+      border-bottom: 1px solid var(--aura-color-border);
+      color: var(--aura-color-text-dim);
+      text-transform: uppercase;
+      letter-spacing: .12em;
+      font-size: 0.6rem;
+      flex-shrink: 0;
+    }
+    #qc-list {
+      flex: 1;
+      list-style: none;
+      margin: 0;
+      padding: 6px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    #qc-add {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      padding: 6px;
+      border-top: 1px solid var(--aura-color-border);
+      flex-shrink: 0;
+    }
+    #qc-add input {
+      box-sizing: border-box;
+      width: 100%;
+      background: var(--aura-color-bg);
+      color: var(--aura-color-text);
+      border: 1px solid var(--aura-color-border);
+      padding: 4px 6px;
+      font-family: var(--aura-font-mono, 'Courier New', monospace);
+      font-size: 0.7rem;
+      outline: none;
+    }
+    #qc-add input:focus { border-color: var(--aura-color-primary); }
   </style>
 </head>
 <body>
   <div id="terminal-bar">
-    <span>></span> AURA TERMINAL
-    <span id="ws-url" title="WebSocket endpoint" style="margin-left: 2em;"></span>
+    <button id="qc-toggle" type="button" title="Quick commands"
+            style="appearance:none;-webkit-appearance:none;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;min-width:22px;height:18px;padding:0 6px;margin-right:8px;border:1px solid var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:transparent;color:var(--aura-color-primary,#00ff41);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.8rem;line-height:1;cursor:pointer;outline:none;">⚡</button>
+    <span class="term-size-mode" role="group" aria-label="Shared terminal sizing"
+          style="display:inline-flex;align-items:center;gap:3px;margin:0 6px;">
+      <button id="size-fit" class="tsm-btn" type="button"
+              style="appearance:none;-webkit-appearance:none;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;min-width:22px;height:18px;padding:0 6px;border:1px solid var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:transparent;color:var(--aura-color-primary,#00ff41);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.72rem;line-height:1;cursor:pointer;outline:none;"
+              title="Fit to smallest (default): size the shared terminal so it fits every connected device — larger screens show unused space, never wrong wrapping.">⊟</button>
+      <button id="size-primary" class="tsm-btn" type="button"
+              style="appearance:none;-webkit-appearance:none;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;min-width:22px;height:18px;padding:0 6px;border:1px solid var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:transparent;color:var(--aura-color-primary,#00ff41);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.72rem;line-height:1;cursor:pointer;outline:none;"
+              title="Make this device primary: size the shared terminal to THIS screen. Other devices render best-effort. Applies to every terminal on this device.">★</button>
+    </span>
+    <span id="ws-url" title="Session host" style="margin-left: 2em;">{sessionHost}</span>
     <span style="margin-left:auto;" id="conn-status">CONNECTING...</span>
   </div>
   <div id="terminal"></div>
+
+  <!-- Quick-commands sidebar: slides in from the left over the console. -->
+  <aside id="qc-panel" aria-hidden="true">
+    <div class="qc-head">
+      <span>QUICK COMMANDS</span>
+      <button id="qc-edit" type="button" title="Edit: add / rename / remove"
+              style="appearance:none;-webkit-appearance:none;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;min-width:20px;height:18px;margin-left:auto;padding:0 5px;border:1px solid var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:transparent;color:var(--aura-color-primary,#00ff41);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.72rem;line-height:1;cursor:pointer;outline:none;">✎</button>
+      <button id="qc-close" type="button" title="Close"
+              style="appearance:none;-webkit-appearance:none;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;min-width:20px;height:18px;padding:0 5px;border:1px solid var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:transparent;color:var(--aura-color-primary,#00ff41);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.72rem;line-height:1;cursor:pointer;outline:none;">✕</button>
+    </div>
+    <ul id="qc-list"></ul>
+    <form id="qc-add" hidden>
+      <input id="qc-cmd"  type="text" placeholder="command — e.g. git status" autocomplete="off" spellcheck="false" />
+      <input id="qc-name" type="text" placeholder="display name (optional)"   autocomplete="off" spellcheck="false" />
+      <button id="qc-save" type="submit"
+              style="appearance:none;-webkit-appearance:none;box-sizing:border-box;padding:5px;border:1px solid var(--aura-color-primary,#00ff41);border-radius:0;background:var(--aura-color-primary,#00ff41);color:var(--aura-color-bg,#0a0a0a);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.62rem;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;outline:none;">Add</button>
+    </form>
+  </aside>
 
   <script is:inline src="vendor/xterm/xterm.min.js"></script>
   <script is:inline src="vendor/xterm/xterm-addon-fit.min.js"></script>
@@ -123,6 +270,32 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
       fontSize: 14,
       cursorBlink: true,
       allowProposedApi: true,
+    });
+
+    // ─── Shared-terminal sizing mode (device-wide) ───────────────────────
+    // A PTY has one winsize, but the same session can be open on several
+    // devices. Default "fit to smallest" lets every device report its size
+    // and the server sizes the PTY to the smallest. Pressing ★ marks THIS
+    // device primary so the PTY sizes to this screen instead. The choice is
+    // device-wide (localStorage) and mirrored across this device's terminal
+    // iframes via the `storage` event — every terminal re-reports with the
+    // flag so all the device's sessions follow. We only send the flag; the
+    // server decides the shared size (see pty-server recomputeEffective).
+    const PRIMARY_KEY = 'aura.terminal.primary';
+    let isPrimary = (() => {
+      try { return localStorage.getItem(PRIMARY_KEY) === 'true'; } catch { return false; }
+    })();
+
+    // ─── Session host indicator ──────────────────────────────────────────
+    // The shell's PROMPT_COMMAND (os/bashrc.aura.sh) emits an OSC window-title
+    // sequence carrying the current hostname on every prompt. xterm parses it
+    // and fires onTitleChange — so as the user `aura jump`s between sandboxes
+    // the bar follows them to wherever the live shell now is. The server-
+    // rendered {sessionHost} is just the pre-prompt placeholder.
+    const hostEl = document.getElementById('ws-url');
+    term.onTitleChange((title) => {
+      const host = title?.trim();
+      if (host) hostEl.textContent = host;
     });
 
     // ─── OS shortcut yield ───────────────────────────────────────────────
@@ -219,46 +392,33 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
         // requestAnimationFrame defers past the browser's iframe-focus-
         // transfer microtask so term.focus() lands AFTER the body's
         // restoration (otherwise the body steals focus back).
-        // We also re-sync size on every window-enter: a window-select
-        // round-trip can land us back in this iframe with a different
-        // layout than when we left (e.g. neighbour closed → grid
-        // reflowed, or we were focus-maximized and just exited). The
-        // ResizeObserver catches DOM resizes but not "the user came
-        // back to this window without anything actually moving" —
-        // doing fit+send unconditionally on every enter covers that.
-        requestAnimationFrame(() => {
-          try { fitAddon.fit(); } catch { /* addon not loaded yet */ }
-          if (activeWs && activeWs.readyState === 1) {
-            activeWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-          }
-          term.focus();
-        });
+        //
+        // Focus only — no refit here. Any layout change that happened while
+        // we were away (neighbour closed → grid reflowed, focus-maximize
+        // exit) already rebroadcast our box via `aura.viewport.changed`, so
+        // our size is current by the time we're re-entered.
+        requestAnimationFrame(() => term.focus());
       }
     });
 
+    // FitAddon is kept ONLY as the ground-truth measurer for the deferred
+    // verify-and-repair pass (`scheduleVerify` below). The hot resize path is
+    // pure arithmetic (`applyFit`); fit() is never on it. The one synchronous
+    // fit here gives a sane initial grid before the first authoritative box
+    // arrives (applyFit can't run yet — its cached metrics live below in TDZ).
     const fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
     term.open(document.getElementById('terminal'));
-    fitAddon.fit();
+    try { fitAddon.fit(); } catch { /* addon not ready */ }
 
-    // CRITICAL fresh-launch fix: re-fit (and resync with PTY) once the
-    // page's web fonts have finished loading. fitAddon.fit() computes
-    // `cols = floor(viewportWidth / charWidth)` — if the xterm monospace
-    // font hasn't loaded yet, charWidth comes from the browser's default
-    // monospace metric, not the actual font, and the resulting cols/rows
-    // are wrong. On an EXISTING terminal (Enter-from-highlight path)
-    // fonts are already cached so the initial fit reads correctly; on a
-    // FRESH launch from the launcher fonts are still loading at the
-    // moment of the initial fit. `document.fonts.ready` is the canonical
-    // "all fonts have loaded" signal. The promise resolves immediately
-    // for cached fonts (idempotent), so this is safe on every reload.
+    // Once fonts settle, re-measure the cell (the active mono font may differ
+    // from the pre-load metric) and re-fit. `document.fonts.ready` resolves
+    // immediately for cached fonts, so this is safe on every reload. The
+    // verify pass that applyFit schedules will calibrate against ground truth
+    // regardless, but re-measuring here makes the very first authoritative
+    // fit already correct.
     if (document.fonts && typeof document.fonts.ready?.then === 'function') {
-      document.fonts.ready.then(() => {
-        try { fitAddon.fit(); } catch { /* not yet loaded */ }
-        if (activeWs && activeWs.readyState === 1) {
-          activeWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-        }
-      });
+      document.fonts.ready.then(() => { cellW = 0; cellH = 0; applyFit(); });
     }
 
     const statusEl = document.getElementById('conn-status');
@@ -282,7 +442,9 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
     // meta tag will be present and a per-activity key takes priority.
     const activityId = document.querySelector('meta[name="aura-activity-id"]')?.getAttribute('content') ?? instanceId;
     const wsUrl = `${wsProto}//${location.host}/api/proxy/${instanceId}/ws?_aura_session=${encodeURIComponent(activityId)}`;
-    document.getElementById('ws-url').textContent = wsUrl;
+    // Keep the server-rendered session host as the visible label; surface
+    // the WS endpoint on hover for debugging.
+    document.getElementById('ws-url').title = wsUrl;
 
     // ANSI color helpers — xterm.js parses these inline.
     const GRN  = '\x1b[38;5;82m';  // bright green
@@ -333,16 +495,164 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
     // across reconnects without recreating their listeners.
     let activeWs = null;
 
-    // term.onResize fires whenever xterm's internal column/row count changes
-    // (fitAddon.fit, manual term.resize, etc.). Without forwarding to the pty,
-    // bash's $COLUMNS stays at the initial value and wraps lines at the wrong
-    // column — visible as the prompt overdrawing itself when a long command
-    // hits what xterm thinks is column 80 but is actually screen mid-row.
-    term.onResize(({ cols, rows }) => {
+    // ─── Resize plumbing ─────────────────────────────────────────────────
+    // One driver, authoritative box, pure arithmetic:
+    //
+    //  • SINGLE DRIVER. The shell owns layout and emits `aura.viewport.changed`
+    //    once per size change, AFTER the grid has re-laid-out and painted (its
+    //    double-rAF settle). `applyFit` runs only from that signal (plus
+    //    fonts.ready and ws.onopen). No ResizeObserver / window-resize /
+    //    keydown / data fallbacks and no local debounce.
+    //
+    //  • AUTHORITATIVE BOX, NO INNER RE-MEASURE. The earlier flakiness came
+    //    from `fitAddon.fit()` re-measuring xterm's OWN DOM: when the shell
+    //    resizes the iframe (grid reflow on launch / add-window), the iframe's
+    //    INTERNAL layout lags the new iframe box by a frame, so fit() read the
+    //    stale inner width and xterm settled on the wrong column count. Instead
+    //    we take the box the SHELL measured (`contentW/contentH`, already
+    //    correct + settled) and divide by cached cell metrics → `term.resize`
+    //    with no DOM read, so there is nothing left to race. fonts.ready /
+    //    ws.onopen have no message in hand, so they self-measure the iframe
+    //    viewport (window.innerWidth/Height === the shell's contentW/H, since
+    //    the iframe has no internal transform).
+    //
+    //  • SEND ONLY ON CHANGE. `sendResizeIfChanged` forwards cols/rows to the
+    //    PTY only when they differ from the last value we sent, so a broadcast
+    //    whose reflow doesn't change OUR size produces NO PTY traffic — and
+    //    therefore no SIGWINCH storm repainting a full-screen TUI (htop, Claude
+    //    Code).
+    let lastSentCols = -1, lastSentRows = -1;
+
+    function sendResizeIfChanged() {
+      if (term.cols === lastSentCols && term.rows === lastSentRows) return;
+      lastSentCols = term.cols; lastSentRows = term.rows;
       if (activeWs && activeWs.readyState === 1) {
-        activeWs.send(JSON.stringify({ type: 'resize', cols, rows }));
+        try { activeWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows, primary: isPrimary })); }
+        catch { /* socket closed between check and send */ }
       }
-    });
+    }
+
+    // Re-report our size + primary flag even when the dimensions are unchanged
+    // — used when the mode toggles (the server needs the new primary flag to
+    // recompute the shared size, but our own cols/rows didn't move).
+    function forceSendResize() {
+      lastSentCols = -1; lastSentRows = -1;
+      sendResizeIfChanged();
+    }
+
+    // ── Cell metrics: font-dependent, SIZE-independent, so measured once ──
+    // xterm's own CharSizeService sizes its grid from one char's advance width
+    // and line-box height in the terminal font. We replicate that with an
+    // offscreen probe in the SAME font xterm uses (hardcoded below), so cellW
+    // matches what xterm would compute — but we read it ONCE and cache, keeping
+    // it out of the per-resize hot path (Courier New is a system font, so it's
+    // available immediately; fonts.ready just re-measures defensively).
+    const FONT_FAMILY = "'Courier New', monospace";
+    const FONT_SIZE   = 14;
+    // Chrome the xterm grid can't use — all constants from this file's CSS:
+    const BAR_H = 24;   // #terminal-bar height
+    const PAD   = 4;    // #terminal padding (each side)
+    let cellW = 0, cellH = 0;
+    let scrollbarW = -1; // OS scrollbar reserved by .xterm-viewport (overflow-y:scroll)
+
+    function measureCell() {
+      const probe = document.createElement('div');
+      probe.style.cssText =
+        'position:absolute;visibility:hidden;white-space:pre;top:-9999px;left:-9999px;' +
+        `font-family:${FONT_FAMILY};font-size:${FONT_SIZE}px;line-height:normal;`;
+      probe.textContent = 'W'.repeat(100);
+      document.body.appendChild(probe);
+      const rect = probe.getBoundingClientRect();
+      cellW = rect.width / 100;
+      cellH = Math.ceil(rect.height);
+      probe.remove();
+    }
+    function measureScrollbar() {
+      // xterm forces overflow-y:scroll on the viewport, so it always reserves
+      // the OS scrollbar — a stable constant (0 on overlay-scrollbar OSes,
+      // ~15px on Linux/Windows). Cache the first non-degenerate read.
+      const vp = document.querySelector('.xterm-viewport');
+      if (vp && vp.offsetWidth > 0) scrollbarW = vp.offsetWidth - vp.clientWidth;
+    }
+
+    // Compute + apply the grid for a known LOGICAL box (CSS px). Pure
+    // arithmetic — never reads xterm's own (lagging) layout. `boxW/boxH`
+    // default to the iframe's own viewport for the message-less callers
+    // (fonts.ready, ws.onopen), which equals the shell's contentW/H. After the
+    // immediate (race-free) resize it schedules a verify-and-repair pass that
+    // confirms the result against ground truth once the DOM has settled.
+    function applyFit(boxW, boxH) {
+      const w = boxW ?? window.innerWidth;
+      const h = boxH ?? window.innerHeight;
+      if (!w || !h) return;                 // hidden / off-workspace → skip
+      if (!cellW || !cellH) measureCell();
+      if (scrollbarW < 0)   measureScrollbar();
+      if (!cellW || !cellH) return;         // probe failed; nothing safe to do
+      const sb     = scrollbarW > 0 ? scrollbarW : 0;
+      const availW = w - PAD * 2 - sb;
+      const availH = h - BAR_H - PAD * 2;
+      const cols = Math.max(1, Math.floor(availW / cellW));
+      const rows = Math.max(1, Math.floor(availH / cellH));
+      if (cols !== term.cols || rows !== term.rows) term.resize(cols, rows);
+      sendResizeIfChanged();
+      scheduleVerify();
+    }
+
+    // ── Verify-and-repair ─────────────────────────────────────────────────
+    // The arithmetic above is fast and race-free but trusts cached cell
+    // metrics + a constant chrome model. To guarantee the BEST width in every
+    // situation we compare against ground truth: FitAddon.proposeDimensions(),
+    // which measures the real DOM exactly the way xterm renders it. If it
+    // disagrees with what's applied, the measurement wins — we resize to it AND
+    // recalibrate the cached cell size from xterm's own render metrics, so the
+    // arithmetic self-corrects and the next resize is already exact. This is a
+    // pure CHECK: when the grid is already correct (the common case),
+    // proposeDimensions matches term.cols/rows and we do NOTHING — no
+    // term.resize, and send-on-change emits no PTY traffic. So it's safe to run
+    // both after every fit (settled via double-rAF) and on a slow heartbeat.
+    function verifyAndRepair() {
+      if (!document.getElementById('terminal')?.offsetWidth) return false; // hidden → skip
+      // Recalibrate cached metrics from xterm's actual render dimensions
+      // (the exact cell size it's drawing with) — best-effort, guarded.
+      const cell = term?._core?._renderService?.dimensions?.css?.cell;
+      if (cell && cell.width > 0 && cell.height > 0) {
+        cellW = cell.width; cellH = cell.height;
+      }
+      measureScrollbar();
+      let dims;
+      try { dims = fitAddon.proposeDimensions(); } catch { return false; }
+      if (!dims || !dims.cols || !dims.rows) return false;
+      if (dims.cols === term.cols && dims.rows === term.rows) return false; // already perfect
+      term.resize(dims.cols, dims.rows);
+      sendResizeIfChanged();
+      return true;
+    }
+
+    // Run the check once the layout has settled past the resize lag (double-rAF
+    // is the very wait that made direct fit() flaky when done eagerly). Called
+    // after every applyFit; coalesced so a burst collapses to one check.
+    let verifyQueued = false;
+    function scheduleVerify() {
+      if (verifyQueued) return;
+      verifyQueued = true;
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        verifyQueued = false;
+        verifyAndRepair();
+      }));
+    }
+
+    // Low-frequency watchdog: every 5 s confirm the grid still matches ground
+    // truth and repair only if it drifted. 5 s (not faster) keeps it from
+    // churning a running TUI; the check is idempotent and silent when the width
+    // is already perfect, so the steady state costs one proposeDimensions read
+    // and nothing else. Catches drift the event-driven path can't see — a CSS
+    // var / font swap that changed the cell, a layout mutation that didn't
+    // broadcast, or a fractional-cell off-by-one — without any extra triggers.
+    setInterval(verifyAndRepair, 5000);
+
+    // xterm's own cols/rows changed (any internal path) → forward to the PTY so
+    // bash's $COLUMNS tracks the real width.
+    term.onResize(() => sendResizeIfChanged());
 
     // PTY sessions are multicast — multiple iframes (e.g. two browser
     // tabs of the same activity) attach to the same shell and see/share
@@ -374,22 +684,13 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
         // prompt and sometimes wiped the prompt itself — leaving the user
         // staring at an empty blinking cursor.)
         term.write('\x1b[2J\x1b[H');
-        // Double-rAF the fit + resize-send so it runs AFTER the iframe's
-        // second paint. On a fresh launch (especially via the launcher,
-        // where the WS handshake completes very fast over localhost) a
-        // single rAF can still measure mid-layout dims — the iframe's
-        // element exists with the slot's grid-given size, but the body's
-        // `100vh` and the inner #terminal flex chain don't always
-        // finalise until the second paint. Two rAFs guarantee we read
-        // the final dimensions. The server's `cols !== sess.cols` guard
-        // makes this idempotent if dims happen to match what the
-        // initial ResizeObserver sync already set.
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          try { fitAddon.fit(); } catch { /* not yet loaded */ }
-          if (ws.readyState !== 1) return; // closed between schedule + fire
-          try { ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows })); }
-          catch { /* socket closed between readyState check and send */ }
-        }));
+        // Fresh PTY on (re)connect: reset the send baseline so the first sync
+        // always asserts our real size to it, even if our cols didn't change
+        // since before the drop. No double-rAF settle needed — the shell's
+        // viewport broadcast already fits us to the settled box; this just
+        // (re)asserts that size to the new PTY.
+        lastSentCols = -1; lastSentRows = -1;
+        applyFit();
       };
 
       ws.onmessage = (e) => term.write(e.data);
@@ -425,67 +726,310 @@ const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
 
     connect();
 
-    // The ResizeObserver is the natural "the iframe finally has its
-    // real size" hook — it fires both on initial observation AND on
-    // every subsequent layout change (window resize, slot reflow when
-    // siblings appear/disappear, focus-mode toggle, etc.). We fit +
-    // force-send the current cols/rows on every fire.
-    //
-    // The force-send (instead of relying on term.onResize) covers the
-    // launch-time path: the first `fitAddon.fit()` runs synchronously
-    // after `term.open()` while the iframe is still mid-paint and
-    // typically computes the PTY's default 80×24 — matching what xterm
-    // already has internally, so xterm.onResize wouldn't fire even
-    // when fit() later recomputes the SAME wrong dims from a momentarily-
-    // unfinished layout. By always echoing the current xterm dims down
-    // the WS whenever the element resizes, we let pty-server's
-    // `cols !== sess.cols` guard pick up the real dimensions as soon
-    // as the layout settles.
-    const syncSize = () => {
-      try { fitAddon.fit(); } catch { /* not yet loaded */ }
-      if (activeWs && activeWs.readyState === 1) {
-        activeWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-      }
-    };
-    const resizeObs = new ResizeObserver(syncSize);
-    resizeObs.observe(document.getElementById('terminal'));
-
-    window.addEventListener('resize', syncSize);
-
-    // Belt-and-suspenders for the fresh-launch case: re-sync size on
-    // the user's first interactions with this iframe. The earlier
-    // event-driven chain (fonts.ready, ws.onopen, ResizeObserver) should
-    // already cover every fresh-launch ordering, but if any of those
-    // fired before the iframe's final paint AND no further layout
-    // change occurred, xterm would stay at the wrong cols/rows. The
-    // user's own typing is the most reliable "the terminal is now
-    // interactive" signal — by definition the layout has settled and
-    // the iframe is visible at that point.
-    //
-    // Two listeners on independent counters so coverage is complete:
-    //   • `keydown` (capture phase) — catches EVERY key including
-    //     arrows, modifiers, function keys. Fires before xterm's own
-    //     handler so even keys xterm swallows still count.
-    //   • `term.onData` — catches data xterm forwards to the PTY
-    //     (typed characters, paste events, IME composition output).
-    //     Covers paste cases where one paste = one `data` event but
-    //     potentially zero keydowns (programmatic paste / clipboard
-    //     event without preceding key).
-    // Both cap at 3 to avoid spamming the PTY with every subsequent
-    // keystroke; the server's `cols !== sess.cols` guard would dedup
-    // anyway, but no reason to postMessage on every character.
-    let initialKeydownFits = 0;
-    window.addEventListener('keydown', () => {
-      if (initialKeydownFits >= 3) return;
-      initialKeydownFits += 1;
-      syncSize();
-    }, { capture: true });
-    let initialDataFits = 0;
-    term.onData(() => {
-      if (initialDataFits >= 3) return;
-      initialDataFits += 1;
-      syncSize();
+    // THE single resize driver. The shell posts `aura.viewport.changed` for
+    // every size change — tiling reflow, workspace switch (reveals our tile),
+    // zoom (a paint-only `transform: scale()` no ResizeObserver can see), free-
+    // window drag-resize release, and browser window resize — each carrying
+    // this iframe's authoritative logical box. We feed contentW/contentH
+    // straight into the arithmetic (no inner re-measure → no race), then the
+    // verify pass confirms it. `contentW === 0` means we're hidden / off the
+    // active workspace: skip. send-on-change keeps an unrelated broadcast (one
+    // that doesn't move OUR box) from churning the PTY.
+    window.addEventListener('message', (ev) => {
+      if (ev.source !== window.parent) return;
+      const d = ev.data;
+      if (d?.type !== 'aura.viewport.changed') return;
+      if (d.contentW === 0) return;
+      applyFit(d.contentW, d.contentH);
     });
+
+    // ─── Sizing-mode buttons (⊟ fit-smallest | ★ primary) ────────────────
+    // The visual styling is painted as INLINE styles from JS rather than via
+    // the scoped <style> block. Astro's scoped CSS reliably reaches the bar's
+    // own elements but proved flaky for these <button>s in the proxied iframe;
+    // inline styles always win and never depend on a scope attribute, so the
+    // buttons are themed in every case. Colors use the OS palette vars (with
+    // literal fallbacks) so they still track the active theme.
+    const sizeFitBtn     = document.getElementById('size-fit');
+    const sizePrimaryBtn = document.getElementById('size-primary');
+    const C = {
+      dim:     'var(--aura-color-text-dim, #557755)',
+      surface: 'var(--aura-color-surface, #111)',
+      border:  'var(--aura-color-border, rgba(0,255,65,0.2))',
+      primary: 'var(--aura-color-primary, #00ff41)',
+      bg:      'var(--aura-color-bg, #0a0a0a)',
+      glow:    'var(--aura-glow-primary, 0 0 8px #00ff41)',
+    };
+    function paintBtn(btn, active, hover) {
+      if (!btn) return;
+      const s = btn.style;
+      s.webkitAppearance = 'none';
+      s.appearance = 'none';
+      s.display = 'inline-flex';
+      s.alignItems = 'center';
+      s.justifyContent = 'center';
+      s.boxSizing = 'border-box';
+      s.minWidth = '22px';
+      s.height = '18px';
+      s.borderWidth = '1px';
+      s.borderStyle = 'solid';
+      s.borderRadius = '0';
+      s.fontFamily = "var(--aura-font-mono, 'Courier New', monospace)";
+      s.fontSize = '0.72rem';
+      s.lineHeight = '1';
+      s.letterSpacing = '0';
+      s.textTransform = 'none';
+      s.padding = '0 6px';
+      s.cursor = 'pointer';
+      s.outline = 'none';
+      s.transition = 'color .1s, border-color .1s, background .1s, box-shadow .1s';
+      if (active) {
+        // Selected mode: filled primary with glow (clearly "on").
+        s.color = C.bg; s.background = C.primary; s.borderColor = C.primary; s.boxShadow = C.glow;
+      } else if (hover) {
+        s.color = C.primary; s.background = 'transparent'; s.borderColor = C.primary; s.boxShadow = 'none';
+      } else {
+        // Idle: transparent (NOT surface — that matches the bar and vanishes),
+        // primary-green glyph + themed border, like the browser app's chrome.
+        s.color = C.primary; s.background = 'transparent'; s.borderColor = C.border; s.boxShadow = 'none';
+      }
+    }
+    function reflectMode() {
+      // Exactly one is active: ★ when this device is primary, ⊟ otherwise.
+      if (sizePrimaryBtn) sizePrimaryBtn.dataset.active = isPrimary ? 'true' : 'false';
+      if (sizeFitBtn)     sizeFitBtn.dataset.active     = isPrimary ? 'false' : 'true';
+      paintBtn(sizePrimaryBtn, isPrimary,  false);
+      paintBtn(sizeFitBtn,     !isPrimary, false);
+    }
+    function setPrimary(next) {
+      if (next === isPrimary) return;
+      isPrimary = next;
+      try { localStorage.setItem(PRIMARY_KEY, String(next)); } catch { /* private mode */ }
+      reflectMode();
+      forceSendResize();   // re-report so the server recomputes the shared size
+    }
+    reflectMode();
+    sizePrimaryBtn?.addEventListener('click', () => setPrimary(true));
+    sizeFitBtn?.addEventListener('click',     () => setPrimary(false));
+    // Hover repaint (inline styles have no :hover) — only when not the active one.
+    for (const [btn, isActive] of [[sizeFitBtn, () => !isPrimary], [sizePrimaryBtn, () => isPrimary]]) {
+      if (!btn) continue;
+      btn.addEventListener('mouseenter', () => { if (!isActive()) paintBtn(btn, false, true); });
+      btn.addEventListener('mouseleave', () => paintBtn(btn, isActive(), false));
+    }
+    // Device-wide: toggling in one terminal iframe updates the others on this
+    // device (the `storage` event fires in every same-origin context except
+    // the one that wrote it), so all the device's sessions follow the mode.
+    window.addEventListener('storage', (e) => {
+      if (e.key !== PRIMARY_KEY) return;
+      const next = e.newValue === 'true';
+      if (next === isPrimary) return;
+      isPrimary = next;
+      reflectMode();
+      forceSendResize();
+    });
+
+    // ─── Quick commands (left sidebar overlay) ───────────────────────────
+    // A slide-in panel of saved commands. Clicking one types it into the PTY
+    // and runs it. Edit mode (✎) reveals the add form + per-item remove, and
+    // clicking an item loads it back into the form to rename/edit. Each entry
+    // is {command, name?}; the button shows `name` if set, else the command
+    // (truncated with an ellipsis). Persisted in localStorage so they survive
+    // reloads and are shared across this device's terminals.
+    const QC_KEY = 'aura.terminal.quickCommands';
+    const qcPanel    = document.getElementById('qc-panel');
+    const qcToggleBtn= document.getElementById('qc-toggle');
+    const qcEditBtn  = document.getElementById('qc-edit');
+    const qcCloseBtn = document.getElementById('qc-close');
+    const qcList     = document.getElementById('qc-list');
+    const qcAddForm  = document.getElementById('qc-add');
+    const qcCmdInput = document.getElementById('qc-cmd');
+    const qcNameInput= document.getElementById('qc-name');
+    const qcSaveBtn  = document.getElementById('qc-save');
+    let qcCommands = (() => {
+      try { const v = JSON.parse(localStorage.getItem(QC_KEY) || '[]'); return Array.isArray(v) ? v : []; }
+      catch { return []; }
+    })();
+    let qcEditing = false;
+    let qcEditIdx = null;
+
+    function qcSave() { try { localStorage.setItem(QC_KEY, JSON.stringify(qcCommands)); } catch { /* private mode */ } }
+    function qcEsc(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    // Inline style strings (scope-proof) for the dynamically-built buttons.
+    const qcCmdBtnCss =
+      "appearance:none;-webkit-appearance:none;display:block;flex:1;min-width:0;box-sizing:border-box;" +
+      "text-align:left;padding:5px 8px;border:1px solid var(--aura-color-border,rgba(0,255,65,0.2));" +
+      "border-radius:0;background:transparent;color:var(--aura-color-primary,#00ff41);" +
+      "font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.7rem;line-height:1.3;" +
+      "cursor:pointer;outline:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+    const qcDelBtnCss =
+      "appearance:none;-webkit-appearance:none;flex:0 0 auto;box-sizing:border-box;padding:0 8px;" +
+      "border:1px solid var(--aura-color-danger,#ff2020);border-radius:0;background:transparent;" +
+      "color:var(--aura-color-danger,#ff2020);font-family:var(--aura-font-mono,'Courier New',monospace);" +
+      "font-size:0.7rem;cursor:pointer;outline:none;";
+
+    function qcRender() {
+      if (!qcList) return;
+      if (qcCommands.length === 0) {
+        qcList.innerHTML =
+          '<li style="color:var(--aura-color-text-dim,#557755);padding:10px 6px;text-align:center;' +
+          'font-size:0.62rem;line-height:1.5;">No quick commands yet.' +
+          (qcEditing ? '<br>Add one below.' : '<br>Press ✎ to add.') + '</li>';
+        return;
+      }
+      qcList.innerHTML = qcCommands.map((c, i) => {
+        const label = (c && c.name && c.name.trim()) ? c.name : (c ? c.command : '');
+        const main =
+          '<button data-qc="' + (qcEditing ? 'edit' : 'run') + '" data-idx="' + i + '" ' +
+          'title="' + qcEsc(c ? c.command : '') + '" style="' + qcCmdBtnCss + '">' + qcEsc(label) + '</button>';
+        const del = qcEditing
+          ? '<button data-qc="del" data-idx="' + i + '" title="Remove" style="' + qcDelBtnCss + '">✕</button>'
+          : '';
+        return '<li style="display:flex;gap:4px;">' + main + del + '</li>';
+      }).join('');
+    }
+
+    // Style the panel + its structure INLINE (scope-proof) so the overlay and
+    // slide work even when the scoped <style> doesn't reach these elements in
+    // the proxied iframe. The panel is position:fixed over the console (below
+    // the 24px bar) and slides in via a transform we toggle in open/close.
+    function qcInitStyles() {
+      if (qcPanel) Object.assign(qcPanel.style, {
+        position: 'fixed', top: '24px', left: '0', bottom: '0',
+        width: '280px', maxWidth: '80%',
+        display: 'flex', flexDirection: 'column',
+        background: 'var(--aura-color-surface, #111)',
+        borderRight: '1px solid var(--aura-color-border, rgba(0,255,65,0.2))',
+        boxShadow: '4px 0 18px rgba(0,0,0,0.45)',
+        transform: 'translateX(-100%)',
+        transition: 'transform .18s ease-out',
+        zIndex: '50', overflow: 'hidden',
+      });
+      const head = qcPanel && qcPanel.querySelector('.qc-head');
+      if (head) Object.assign(head.style, {
+        display: 'flex', alignItems: 'center', gap: '5px',
+        height: '24px', padding: '0 6px 0 10px',
+        borderBottom: '1px solid var(--aura-color-border, rgba(0,255,65,0.2))',
+        color: 'var(--aura-color-text-dim, #557755)',
+        textTransform: 'uppercase', letterSpacing: '.12em',
+        fontSize: '0.6rem', flexShrink: '0',
+      });
+      if (qcList) Object.assign(qcList.style, {
+        flex: '1', listStyle: 'none', margin: '0', padding: '6px',
+        overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px',
+      });
+      if (qcAddForm) {
+        qcAddForm.removeAttribute('hidden');
+        Object.assign(qcAddForm.style, {
+          flexDirection: 'column', gap: '5px', padding: '6px',
+          borderTop: '1px solid var(--aura-color-border, rgba(0,255,65,0.2))',
+          flexShrink: '0', display: 'none', // shown only in edit mode
+        });
+      }
+      for (const inp of [qcCmdInput, qcNameInput]) {
+        if (inp) Object.assign(inp.style, {
+          boxSizing: 'border-box', width: '100%',
+          background: 'var(--aura-color-bg, #0a0a0a)',
+          color: 'var(--aura-color-text, #ccffcc)',
+          border: '1px solid var(--aura-color-border, rgba(0,255,65,0.2))',
+          padding: '4px 6px',
+          fontFamily: "var(--aura-font-mono, 'Courier New', monospace)",
+          fontSize: '0.7rem', outline: 'none',
+        });
+      }
+    }
+    function qcOpen()  {
+      qcCommands = (() => { try { const v = JSON.parse(localStorage.getItem(QC_KEY) || '[]'); return Array.isArray(v) ? v : []; } catch { return []; } })();
+      qcRender();
+      if (qcPanel) { qcPanel.setAttribute('aria-hidden', 'false'); qcPanel.style.transform = 'translateX(0)'; }
+    }
+    function qcClose() {
+      if (qcPanel) { qcPanel.setAttribute('aria-hidden', 'true'); qcPanel.style.transform = 'translateX(-100%)'; }
+    }
+    function qcRun(cmd) {
+      if (activeWs && activeWs.readyState === 1) {
+        try { activeWs.send(JSON.stringify({ type: 'data', data: cmd + '\r' })); } catch { /* socket gone */ }
+      }
+      qcClose();
+      term.focus();
+    }
+    function qcSetEditing(on) {
+      qcEditing = on;
+      qcEditIdx = null;
+      if (qcAddForm) qcAddForm.style.display = on ? 'flex' : 'none';
+      if (qcSaveBtn) qcSaveBtn.textContent = 'Add';
+      if (qcCmdInput)  qcCmdInput.value = '';
+      if (qcNameInput) qcNameInput.value = '';
+      if (qcEditBtn) {  // reflect active edit-mode on the ✎ button (filled when on)
+        const s = qcEditBtn.style;
+        s.background  = on ? 'var(--aura-color-primary,#00ff41)' : 'transparent';
+        s.color       = on ? 'var(--aura-color-bg,#0a0a0a)' : 'var(--aura-color-primary,#00ff41)';
+        s.borderColor = 'var(--aura-color-primary,#00ff41)';
+      }
+      qcRender();
+    }
+
+    qcToggleBtn?.addEventListener('click', () => {
+      if (qcPanel?.getAttribute('aria-hidden') === 'false') qcClose();
+      else qcOpen();
+    });
+    qcCloseBtn?.addEventListener('click', qcClose);
+    qcEditBtn?.addEventListener('click', () => qcSetEditing(!qcEditing));
+
+    qcList?.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-qc]');
+      if (!btn) return;
+      const idx = parseInt(btn.dataset.idx, 10);
+      const c = qcCommands[idx];
+      if (!c) return;
+      const action = btn.dataset.qc;
+      if (action === 'run') qcRun(c.command);
+      else if (action === 'del') {
+        qcCommands.splice(idx, 1);
+        qcSave();
+        // Cancel any in-progress edit (indices just shifted) and reset the form.
+        qcEditIdx = null;
+        if (qcCmdInput)  qcCmdInput.value = '';
+        if (qcNameInput) qcNameInput.value = '';
+        if (qcSaveBtn)   qcSaveBtn.textContent = 'Add';
+        qcRender();
+      }
+      else if (action === 'edit') {
+        qcEditIdx = idx;
+        if (qcCmdInput)  qcCmdInput.value  = c.command;
+        if (qcNameInput) qcNameInput.value = c.name || '';
+        if (qcSaveBtn)   qcSaveBtn.textContent = 'Save';
+        qcCmdInput?.focus();
+      }
+    });
+
+    qcAddForm?.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const command = (qcCmdInput?.value || '').trim();
+      if (!command) { qcCmdInput?.focus(); return; }
+      const name = (qcNameInput?.value || '').trim();
+      const entry = name ? { command, name } : { command };
+      if (qcEditIdx != null && qcCommands[qcEditIdx]) { qcCommands[qcEditIdx] = entry; qcEditIdx = null; }
+      else { qcCommands.push(entry); }
+      qcSave();
+      if (qcCmdInput)  qcCmdInput.value = '';
+      if (qcNameInput) qcNameInput.value = '';
+      if (qcSaveBtn)   qcSaveBtn.textContent = 'Add';
+      qcRender();
+      qcCmdInput?.focus();
+    });
+
+    // Esc closes — bound to the panel so it only fires when focus is inside it
+    // (never steals Esc from the terminal / a running TUI).
+    qcPanel?.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); qcClose(); term.focus(); }
+    });
+
+    qcInitStyles();
+    qcRender();
   </script>
 </body>
 </html>

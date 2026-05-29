@@ -16,6 +16,8 @@ import { IntentResolver, type Intent, type IntentMatch } from './IntentResolver.
 import { PermissionManager } from '../permissions/PermissionManager.js';
 import { ContentProviderRegistry } from '../content/ContentProviderRegistry.js';
 import { keymapRegistry } from '../keymap/KeymapRegistry.js';
+import { ScopeRegistry } from '../scopes/ScopeRegistry.js';
+import type { ScopeDefinition } from '../scopes/types.js';
 
 const RECONCILE_INTERVAL_MS = 5_000;
 const ERROR_GRACE_MS        = 30_000;
@@ -46,6 +48,7 @@ export class AppManager {
   readonly intents:     IntentResolver;
   private dataDir: string;
   private toolchainDir: string;
+  private scopeRegistry: ScopeRegistry;
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
   private reconcileRunning = false;
   // Pool refills currently in flight per appId. The "pool" itself is just the
@@ -73,7 +76,8 @@ export class AppManager {
   }) {
     this.dataDir = opts.dataDir;
     this.toolchainDir = opts.toolchainDir;
-    this.registry = new AppRegistry(opts.appsDir);
+    this.scopeRegistry = new ScopeRegistry({ systemAppsDir: opts.appsDir, dataDir: opts.dataDir });
+    this.registry = new AppRegistry(this.scopeRegistry.getAll());
     this.ports = new PortAllocator(opts.portStart ?? 4001, opts.portEnd ?? 4999);
     this.fsm = new LifecycleStateMachine();
     // Both runners share the same opts. ContainerRunner rewrites osApiBase
@@ -645,20 +649,20 @@ export class AppManager {
     const manifest = this.registry.getById(appId);
     if (!manifest) throw new Error(`App not found: ${appId}`);
 
+    const scope = this.scopeRegistry.getById(manifest.scopeId);
     const instanceId = this.allocateInstanceId(appId, manifest.instanceMode);
-    mkdirSync(join(this.dataDir, 'apps', appId, instanceId), { recursive: true });
+    const instanceDataDir = join(scope.dataDir, 'apps', appId, instanceId);
+    mkdirSync(instanceDataDir, { recursive: true });
 
     this.transition(instanceId, appId, 'creating', null);
     const port = await this.ports.allocate(instanceId);
 
     try {
-      // Pick the runner from the manifest's sandbox choice and latch it on
-      // the instance record. All subsequent lifecycle dispatches use
-      // runnerOf(instanceId) which reads that latched field — guarantees we
-      // tear down with the runner that actually launched the process even
-      // if the manifest is edited mid-lifetime.
       const runner = this.runners[manifest.sandbox] ?? this.runners['proot'];
-      const pid = await runner.spawn(instanceId, appId, port, manifest);
+      const pid = await runner.spawn(instanceId, appId, port, manifest, {
+        appDir:          manifest.appDir,
+        instanceDataDir,
+      });
       this.upsertInstance(instanceId, appId, { pid, port, startedAt: new Date(), inPool: opts.inPool, sandbox: manifest.sandbox });
       this.transition(instanceId, appId, 'created', port);
 
@@ -863,6 +867,16 @@ export class AppManager {
   /** Filesystem root where every app lives. Forwarded from AppRegistry. */
   getAppsDir(): string {
     return this.registry.getAppsDir();
+  }
+
+  /** All three scope definitions. Used by NexusManager singleton. */
+  getScopeDefinitions(): ScopeDefinition[] {
+    return this.scopeRegistry.getAll();
+  }
+
+  /** The ScopeRegistry instance — used by shell API endpoints. */
+  getScopeRegistry(): ScopeRegistry {
+    return this.scopeRegistry;
   }
 
   /** Per-instance data dir root. Mirror of the constructor arg. */

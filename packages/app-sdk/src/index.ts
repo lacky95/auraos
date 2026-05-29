@@ -1,4 +1,5 @@
-export { OsClient } from './OsClient.js';
+export { OsClient, viewportGrid } from './OsClient.js';
+export type { ViewportChangeInfo } from './OsClient.js';
 // Keyboard / Back / system-action namespaces mounted on `osClient.{keymap,nav,system}`.
 // Apps that just want to subscribe to a shortcut import only the types.
 export { KeymapApi }   from './keymap.js';

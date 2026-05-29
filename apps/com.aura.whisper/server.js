@@ -253,9 +253,87 @@ app.post('/api/transcribe', upload.single('audio'), ah(async (req, res) => {
     ? req.body.response_format
     : 'json';
   const llmModelOverride = req.body.llmModel;
+  // When stream=true the client gets a text/event-stream response: a
+  // `transcript` frame the moment ASR finishes, then a `clean_token`
+  // frame per LLM token, then `clean_done`. Lets the popup show tokens
+  // as they arrive (~300-500 ms TTFT) instead of staring at "Improving…"
+  // for the full LLM round-trip.
+  const wantStream = toBool(req.body.stream);
   const filename = req.file.originalname
     || `audio.${(req.file.mimetype.split('/')[1] || 'webm').split(';')[0]}`;
   const audioKb = Math.round(req.file.buffer.length / 1024);
+
+  // ============ SSE streaming branch ===================================
+  if (wantStream) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+
+    const fd = new FormData();
+    fd.append('file', new Blob([req.file.buffer], { type: req.file.mimetype }), filename);
+    fd.append('model', model);
+    fd.append('language', language);
+    fd.append('response_format', respFormat);
+    if (vadFilter !== undefined) fd.append('vad_filter', String(vadFilter));
+    const tAsr = Date.now();
+    let asrResp;
+    try {
+      asrResp = await fetch(`http://${ASR_NAME}:8000/v1/audio/transcriptions`, { method: 'POST', body: fd });
+    } catch (e) {
+      sseWrite(res, 'error', { error: 'whisper unreachable', detail: String(e?.message || e) });
+      return res.end();
+    }
+    const asrBody = await asrResp.text();
+    const asrMs = Date.now() - tAsr;
+    if (!asrResp.ok) {
+      sseWrite(res, 'error', { error: 'whisper failed', status: asrResp.status, detail: asrBody });
+      return res.end();
+    }
+    let text;
+    let parsed;
+    if (respFormat === 'json' || respFormat === 'verbose_json') {
+      try { parsed = JSON.parse(asrBody); text = parsed?.text; } catch { text = asrBody; }
+    } else { text = asrBody; }
+    const transcript = (text || '').trim();
+    const transcriptPayload = { text: transcript, ms: asrMs, model };
+    if (respFormat === 'verbose_json' && parsed) {
+      if (Array.isArray(parsed.segments)) transcriptPayload.segments = parsed.segments;
+      if (Array.isArray(parsed.words))    transcriptPayload.words    = parsed.words;
+      if (parsed.duration != null)        transcriptPayload.duration = parsed.duration;
+    }
+    sseWrite(res, 'transcript', transcriptPayload);
+
+    let cleanInfo = null;
+    let cleanErrorMsg = null;
+    if (wantCleanup && transcript) {
+      try {
+        cleanInfo = await streamLlmCleanup(
+          transcript,
+          language,
+          llmModelOverride ?? cfg.llmModel,
+          cfg,
+          (delta) => sseWrite(res, 'clean_token', { delta }),
+        );
+        sseWrite(res, 'clean_done', cleanInfo);
+      } catch (e) {
+        cleanErrorMsg = String(e?.message || e);
+        sseWrite(res, 'clean_error', { error: cleanErrorMsg });
+      }
+    }
+    const totalMs = Date.now() - tStart;
+    console.log(
+      `[whisper] /api/transcribe stream ok ` +
+      `audio=${audioKb}KB dur=${transcriptPayload.duration ?? '?'}s ` +
+      `model=${model} lang=${language} vad=${vadFilter ?? false} ` +
+      `asr=${asrMs}ms clean=${cleanInfo?.ms ?? '-'}ms ttft=${cleanInfo?.ttftMs ?? '-'}ms total=${totalMs}ms ` +
+      `text=${transcript.length}ch${cleanErrorMsg ? ` cleanError="${cleanErrorMsg}"` : ''}`
+    );
+    return res.end();
+  }
+  // ============ end SSE branch =========================================
+
   try {
     const fd = new FormData();
     fd.append('file', new Blob([req.file.buffer], { type: req.file.mimetype }), filename);
@@ -509,6 +587,97 @@ async function warmupWhisperModel(cfg) {
   }
 }
 
+/** Write a single Server-Sent-Event frame. */
+function sseWrite(res, event, data) {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+/**
+ * Streaming variant of LLM cleanup — posts to LiteLLM with stream:true,
+ * reads its `data:` SSE frames, and pushes each token via [onToken] as it
+ * arrives. Resolves once `[DONE]` is seen (or the upstream stream ends)
+ * and returns the assembled full text + timing. First-token-time is
+ * reported as `ttftMs` so the client can show how snappy the LLM felt.
+ */
+async function streamLlmCleanup(text, language, model, cfg, onToken) {
+  const systemPrompt = SYSTEM_PROMPTS[language] || SYSTEM_PROMPTS['en'];
+  if (!systemPrompt) {
+    const err = new Error(`no system prompt for language "${language}"`);
+    err.status = 500;
+    throw err;
+  }
+  if (!cfg.openrouterApiKey) {
+    const err = new Error('openrouterApiKey is empty — set it in the Whisper settings');
+    err.status = 503;
+    throw err;
+  }
+  const t0 = Date.now();
+  let firstTokenAt = null;
+  let fullText = '';
+  const r = await fetch(`http://${LLM_NAME}:4000/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${cfg.llmMasterKey || 'sk-wispr-local-dev'}`,
+      'Content-Type':  'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.2,
+      stream: true,
+      provider: {
+        order: ['Groq', 'Together', 'Fireworks', 'DeepInfra'],
+        allow_fallbacks: true,
+      },
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user',   content: text },
+      ],
+    }),
+  });
+  if (!r.ok) {
+    const detail = await r.text().catch(() => '');
+    const err = new Error(`litellm ${r.status}`);
+    err.status = r.status;
+    err.detail = detail;
+    throw err;
+  }
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  for await (const chunk of r.body) {
+    buffer += decoder.decode(chunk, { stream: true });
+    let nl;
+    while ((nl = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (payload === '[DONE]') {
+        return finishCleanup();
+      }
+      try {
+        const obj = JSON.parse(payload);
+        const delta = obj?.choices?.[0]?.delta?.content || '';
+        if (delta) {
+          if (firstTokenAt === null) firstTokenAt = Date.now();
+          fullText += delta;
+          onToken(delta);
+        }
+      } catch { /* partial line — wait for more */ }
+    }
+  }
+  return finishCleanup();
+
+  function finishCleanup() {
+    return {
+      text: fullText,
+      ms: Date.now() - t0,
+      model,
+      language,
+      ttftMs: firstTokenAt ? firstTokenAt - t0 : null,
+    };
+  }
+}
+
 async function runLlmCleanup(text, language, model, cfg) {
   const systemPrompt = SYSTEM_PROMPTS[language] || SYSTEM_PROMPTS['en'];
   if (!systemPrompt) {
@@ -522,6 +691,11 @@ async function runLlmCleanup(text, language, model, cfg) {
     throw err;
   }
   const t0 = Date.now();
+  // OpenRouter `provider` routing: prefer fast back-ends for the same
+  // model identity. Groq's Llama 3.3 70B p50 is ~400 ms TTFT, Together
+  // ~600 ms; default routing can land on a slower provider and add 1-3 s.
+  // `allow_fallbacks: true` means if Groq + Together are both unavailable
+  // OpenRouter still serves the request rather than 503'ing.
   const r = await fetch(`http://${LLM_NAME}:4000/v1/chat/completions`, {
     method: 'POST',
     headers: {
@@ -531,6 +705,10 @@ async function runLlmCleanup(text, language, model, cfg) {
     body: JSON.stringify({
       model,
       temperature: 0.2,
+      provider: {
+        order: ['Groq', 'Together', 'Fireworks', 'DeepInfra'],
+        allow_fallbacks: true,
+      },
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user',   content: text },

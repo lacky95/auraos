@@ -18,14 +18,18 @@ import {
 import { dirname, join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import type { InstallRecord, ResolvedRef } from './types.js';
+import type { ScopeId } from '../scopes/types.js';
 
 export interface InstallerOpts {
   appsDir: string;
   dataDir: string;
+  scope:   ScopeId;
 }
 
 export class Installer {
   constructor(private opts: InstallerOpts) {}
+
+  get appsDir(): string { return this.opts.appsDir; }
 
   /**
    * Move a validated staging dir into `apps/<id>/`, writing the install
@@ -60,7 +64,7 @@ export class Installer {
 
     // 4. Write the install record. Stored under data/, NOT in the app
     //    dir (keeps the app dir reproducible across publishes).
-    const record = buildInstallRecord(manifest, resolved, ts);
+    const record = buildInstallRecord(manifest, resolved, ts, this.opts.scope);
     const recordPath = join(this.opts.dataDir, 'nexus', 'installed', `${manifest.id}.json`);
     mkdirSync(dirname(recordPath), { recursive: true });
     writeFileSync(recordPath, JSON.stringify(record, null, 2));
@@ -94,7 +98,10 @@ export class Installer {
     const recordPath = join(this.opts.dataDir, 'nexus', 'installed', `${appId}.json`);
     if (!existsSync(recordPath)) return null;
     try {
-      return JSON.parse(readFileSync(recordPath, 'utf-8')) as InstallRecord;
+      const r = JSON.parse(readFileSync(recordPath, 'utf-8')) as InstallRecord;
+      // Backward compat: records written before scopes default to 'system'.
+      if (!r.scope) r.scope = 'system';
+      return r;
     } catch {
       return null;
     }
@@ -108,8 +115,9 @@ export class Installer {
     for (const file of readdirSafe(dir)) {
       if (!file.endsWith('.json')) continue;
       try {
-        const text = readFileSync(join(dir, file), 'utf-8');
-        out.push(JSON.parse(text) as InstallRecord);
+        const r = JSON.parse(readFileSync(join(dir, file), 'utf-8')) as InstallRecord;
+        if (!r.scope) r.scope = 'system';
+        out.push(r);
       } catch { /* skip corrupt */ }
     }
     return out;
@@ -148,7 +156,7 @@ function moveOrCopy(src: string, dst: string): void {
   }
 }
 
-function buildInstallRecord(m: AppManifest, r: ResolvedRef, ts: number): InstallRecord {
+function buildInstallRecord(m: AppManifest, r: ResolvedRef, ts: number, scope: ScopeId): InstallRecord {
   const iso = new Date(ts).toISOString();
   return {
     id:          m.id,
@@ -159,5 +167,6 @@ function buildInstallRecord(m: AppManifest, r: ResolvedRef, ts: number): Install
     channel:     r.channel ?? null,
     installedAt: iso,
     updatedAt:   iso,
+    scope,
   };
 }

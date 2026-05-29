@@ -5,7 +5,7 @@ import { moveCursor, clearScreenDown } from 'node:readline';
 import { api } from '../lib/client.js';
 import { readManifest } from '../lib/manifest.js';
 import { color, fail, info, ok, warn } from '../lib/format.js';
-import { enterSandbox } from '../lib/enter-sandbox.js';
+import { enterSandbox, syncDockerExecWinsize, setTerminalHost, callerHostLabel } from '../lib/enter-sandbox.js';
 
 interface InstanceLite {
   instanceId: string;
@@ -112,8 +112,15 @@ function enterMasterContainer(): void {
   warn(`/os, /data, or killing the wrong process can break the entire OS. Prefer`);
   warn(`an app sandbox unless you know exactly what you're touching.`);
   info(`entering master container ${color.bold(MASTER_CONTAINER)}`);
+  // Update the Terminal's host indicator to the master host, restore on exit.
+  const restoreHost = callerHostLabel();
+  setTerminalHost(MASTER_CONTAINER);
   const child = spawn('docker', args, { stdio: 'inherit' });
-  child.on('exit', (code) => { ok(`shell exited (code ${code ?? 0})`); process.exit(code ?? 0); });
+  syncDockerExecWinsize(child);
+  child.on('exit', (code) => {
+    setTerminalHost(restoreHost);
+    ok(`shell exited (code ${code ?? 0})`); process.exit(code ?? 0);
+  });
   child.on('error', (err) => fail(
     `docker exec failed: ${err.message}\n` +
     `  Hint: the calling sandbox needs both the docker CLI on PATH and a bound /var/run/docker.sock.`

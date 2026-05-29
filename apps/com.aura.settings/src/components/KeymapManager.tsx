@@ -209,7 +209,7 @@ export default function KeymapManager({ initialActions, initialState }: Props) {
         </div>
       </PanelHeader>
 
-      <PanelContent>
+      <PanelContent className="keymap-content">
         {error && (
           <p style={{ color: 'var(--aura-color-danger)', fontFamily: 'var(--aura-font-mono)', fontSize: '0.75rem' }}>
             ERROR — {error}

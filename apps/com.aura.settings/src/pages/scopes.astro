@@ -1,0 +1,163 @@
+---
+import '../styles/settings.css';
+
+const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
+
+interface ScopeStatus {
+  id:        string;
+  appsDir:   string;
+  dataDir:   string;
+  immutable: boolean;
+  priority:  number;
+  appCount:  number;
+  gitRepo:   string | null;
+}
+
+let scopes: ScopeStatus[] = [];
+try {
+  const r = await fetch(`${osBase}/api/scopes`, { signal: AbortSignal.timeout(2000) });
+  if (r.ok) scopes = await r.json() as ScopeStatus[];
+} catch { /* render empty — shell may be booting */ }
+
+const SCOPE_ICONS: Record<string, string> = { system: '⊟', global: '⊞', user: '⊕' };
+const SCOPE_LABELS: Record<string, string> = {
+  system: 'SYSTEM — AuraOS monorepo (immutable)',
+  global: 'GLOBAL — shared across all sessions',
+  user:   'USER — per-user install tier',
+};
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Settings · Scopes — AuraOS</title>
+  <link rel="stylesheet" href="/api/os/theme.css" />
+  <style>
+    .scope-card {
+      border: var(--aura-border);
+      padding: 16px;
+      margin-bottom: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .scope-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .scope-icon { font-size: 1.2rem; color: var(--aura-color-primary); }
+    .scope-title {
+      font-size: var(--aura-font-size-sm);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--aura-color-primary);
+      flex: 1;
+    }
+    .scope-badge {
+      font-size: 0.6rem;
+      letter-spacing: 0.1em;
+      padding: 2px 6px;
+      border: var(--aura-border);
+      color: var(--aura-color-text-dim);
+    }
+    .scope-badge.immutable { color: var(--aura-color-danger, #ff4a4a); }
+    .scope-meta {
+      font-size: 0.65rem;
+      color: var(--aura-color-text-dim);
+      letter-spacing: 0.05em;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .scope-meta span { font-family: var(--aura-font-mono); }
+    .form-row-inline {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .form-row-inline label {
+      font-size: 0.65rem;
+      letter-spacing: 0.1em;
+      color: var(--aura-color-text-dim);
+      white-space: nowrap;
+    }
+    .form-row-inline input[type="text"] {
+      flex: 1;
+      font-size: 0.7rem;
+    }
+  </style>
+</head>
+<body>
+  <main class="settings-body">
+    {scopes.length === 0 && (
+      <p style="color: var(--aura-color-text-dim); font-size: 0.7rem; letter-spacing: 0.08em;">
+        LOADING SCOPES…
+      </p>
+    )}
+    {scopes.map((scope) => (
+      <div class="scope-card" data-scope-id={scope.id}>
+        <div class="scope-header">
+          <span class="scope-icon">{SCOPE_ICONS[scope.id] ?? '○'}</span>
+          <span class="scope-title">{SCOPE_LABELS[scope.id] ?? scope.id.toUpperCase()}</span>
+          <span class={`scope-badge${scope.immutable ? ' immutable' : ''}`}>
+            {scope.immutable ? 'IMMUTABLE' : 'WRITABLE'}
+          </span>
+          <span class="scope-badge">{scope.appCount} APP{scope.appCount !== 1 ? 'S' : ''}</span>
+        </div>
+        <div class="scope-meta">
+          <span>APPS DIR: {scope.appsDir}</span>
+          <span>DATA DIR: {scope.dataDir}</span>
+        </div>
+        {!scope.immutable && (
+          <div class="form-row-inline">
+            <label>GIT REMOTE</label>
+            <input
+              type="text"
+              class="git-repo-input"
+              data-scope={scope.id}
+              value={scope.gitRepo ?? ''}
+              placeholder="https://github.com/you/my-apps.git"
+            />
+          </div>
+        )}
+        {scope.immutable && (
+          <div class="scope-meta">
+            <span>GIT REPO: AuraOS monorepo</span>
+          </div>
+        )}
+      </div>
+    ))}
+    <p id="status" style="font-size: 0.65rem; color: var(--aura-color-text-dim); letter-spacing: 0.08em; margin-top: 4px;">
+      CHANGES PERSIST IMMEDIATELY
+    </p>
+  </main>
+  <footer class="settings-foot">PROVIDER · /api/scopes</footer>
+
+  <script is:inline>
+    const statusEl = document.getElementById('status');
+    const debounceTimers = new Map();
+
+    document.querySelectorAll('.git-repo-input').forEach((input) => {
+      input.addEventListener('input', () => {
+        const scopeId = input.dataset.scope;
+        clearTimeout(debounceTimers.get(scopeId));
+        debounceTimers.set(scopeId, setTimeout(async () => {
+          const url = input.value.trim() || null;
+          try {
+            const r = await fetch(`/api/scopes/${scopeId}/git-repo`, {
+              method:  'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body:    JSON.stringify({ url }),
+            });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            statusEl.innerHTML = `SAVED git repo for <b>${scopeId}</b> · ${new Date().toLocaleTimeString()}`;
+          } catch (err) {
+            statusEl.innerHTML = `<b style="color: var(--aura-color-danger);">ERROR — ${err.message}</b>`;
+          }
+        }, 400));
+      });
+    });
+  </script>
+</body>
+</html>

@@ -5,6 +5,7 @@
  * compile cycle.
  */
 import type { AppManifest } from '../types/manifest.js';
+import type { ScopeId } from '../scopes/types.js';
 
 /** Where an app came from. Stored in the install record per app. */
 export type NexusSource = 'oci' | 'git' | 'index' | 'local';
@@ -45,6 +46,8 @@ export interface InstallRecord {
   channel:     string | null;
   installedAt: string;   // ISO-8601
   updatedAt:   string;   // ISO-8601
+  /** Which scope this app is installed in. Absent in pre-scope records → treat as 'system'. */
+  scope?:      ScopeId;
 }
 
 /**

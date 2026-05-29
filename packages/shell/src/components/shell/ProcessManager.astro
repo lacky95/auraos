@@ -9,7 +9,7 @@
  * via the SSE stream from /api/apps/events.
  */
 ---
-<button id="pm-toggle" class="pm-toggle" title="Process Manager (running apps)">
+<button id="pm-toggle" class="pm-toggle" title="Process Manager (running apps)" aria-expanded="false" aria-controls="pm-panel">
   <span class="pm-toggle-icon">▦</span>
 </button>
 
@@ -100,11 +100,23 @@
     display: flex;
     flex-direction: column;
     transform: translateX(100%);
-    transition: transform 0.15s ease-out;
+    /* `visibility: hidden` (not just the off-screen transform) is what pulls
+       the closed panel out of the TAB ORDER and the accessibility tree — a
+       translated element is still focusable, so without this, Tab from the
+       dock could land on the invisible FOCUS/STOP/KILL buttons. The 0.15s
+       visibility delay on the CLOSED state keeps the panel visible through
+       the slide-out animation, then flips it hidden once the transform has
+       finished; opening makes it visible immediately (no delay). */
+    visibility: hidden;
+    transition: transform 0.15s ease-out, visibility 0s linear 0.15s;
     box-shadow: -8px 0 32px rgba(0, 0, 0, 0.4);
     will-change: transform;
   }
-  .pm-panel[aria-hidden="false"] { transform: translateX(0); }
+  .pm-panel[aria-hidden="false"] {
+    transform: translateX(0);
+    visibility: visible;
+    transition: transform 0.15s ease-out, visibility 0s;
+  }
 
   .pm-header {
     display: flex;
@@ -819,6 +831,7 @@
 
   async function openPanel(): Promise<void> {
     panel.setAttribute('aria-hidden', 'false');
+    toggleBtn.setAttribute('aria-expanded', 'true');
     await refreshList();
     // Land focus on a useful starting point so arrows immediately work.
     // Prefer the first instance's FOCUS action (the user typically opens
@@ -828,7 +841,10 @@
     if (firstAction) firstAction.focus({ preventScroll: true });
     else closeBtn.focus({ preventScroll: true });
   }
-  function closePanel() { panel.setAttribute('aria-hidden', 'true'); }
+  function closePanel() {
+    panel.setAttribute('aria-hidden', 'true');
+    toggleBtn.setAttribute('aria-expanded', 'false');
+  }
   // Variant used when the close came from the user dismissing the panel
   // (✕ button, Esc) — returns keyboard focus to the dock's chrome-nav
   // anchor so arrows can continue from a stable spot. Action paths

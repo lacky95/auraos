@@ -31,8 +31,9 @@ export const POST: APIRoute = async ({ request }) => {
 
     const current = nexus.records.get(manifest.id);
     let currentManifest = null;
-    if (current && existsSync(join(mgr.getAppsDir(), manifest.id))) {
-      try { currentManifest = validateStagedDir(join(mgr.getAppsDir(), manifest.id)); }
+    const currentAppDir = mgr.registry.getAppDir(manifest.id);
+    if (current && existsSync(currentAppDir)) {
+      try { currentManifest = validateStagedDir(currentAppDir); }
       catch { /* leave null */ }
     }
     const diff = computePermissionDiff(currentManifest, manifest);

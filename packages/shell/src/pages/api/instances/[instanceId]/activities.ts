@@ -1,6 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getAppManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
+import { bumpMru } from '../../../../lib/appMru.js';
 
 /** Open a new activity on an existing instance. Optional `data` is passed to the app's onActivityCreate hook. */
 export const POST: APIRoute = async ({ params, request }) => {
@@ -46,6 +47,13 @@ export const POST: APIRoute = async ({ params, request }) => {
       data,
       stackParent ? { stackParent } : undefined,
     );
+    // Opening an activity is a "user is using this app now" signal. Cold
+    // launches bump MRU in /api/apps/<id>/start, but reusing an
+    // already-running instance (the common dock-click case) never hits
+    // /start — so without this the dock's recency would go stale and never
+    // promote apps the user actively returns to. Fire-and-forget; don't
+    // block the response on the KV round-trip.
+    void bumpMru(inst.appId);
     return jsonResponse({ activityId: activity.activityId, activity });
   } catch (err) {
     return errorResponse(String(err), 500);

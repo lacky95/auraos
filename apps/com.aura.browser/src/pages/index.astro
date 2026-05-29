@@ -59,12 +59,22 @@ const FRAME_NAME = JSON.stringify({
         <button id="fwd-btn"     title="Forward (Alt+→)" aria-label="Forward" disabled>▸</button>
         <button id="reload-btn"  title="Reload (Ctrl+R)" aria-label="Reload">⟳</button>
         <button id="home-btn"    title="Home"            aria-label="Home">⌂</button>
-        <button id="debug-btn"   title="Debug panel"     aria-label="Debug" aria-pressed="false">⚙</button>
       </div>
       <form id="url-form" class="url-form" autocomplete="off">
         <input id="url-input" type="text" spellcheck="false" placeholder="Enter URL or search query…" value={INITIAL_URL} />
         <button id="go-btn" type="submit" title="Go (Enter)">GO</button>
       </form>
+      <div class="tools-group">
+        <button id="zoom-out-btn"   title="Zoom out (Ctrl+-)"     aria-label="Zoom out">−</button>
+        <button id="zoom-reset-btn" title="Reset zoom (Ctrl+0)"   aria-label="Reset zoom">100%</button>
+        <button id="zoom-in-btn"    title="Zoom in (Ctrl++)"      aria-label="Zoom in">+</button>
+        <div class="menu-wrap">
+          <button id="settings-btn" title="Settings" aria-label="Settings" aria-haspopup="true" aria-expanded="false">⚙</button>
+          <div id="settings-menu" class="settings-menu" role="menu" hidden>
+            <button id="menu-debug-btn" type="button" role="menuitem" aria-pressed="false">Debug panel</button>
+          </div>
+        </div>
+      </div>
     </header>
 
     <div class="engine-wrap">
@@ -127,8 +137,13 @@ const FRAME_NAME = JSON.stringify({
         border-bottom: 1px solid var(--aura-color-border, #222);
         flex-shrink: 0;
       }
-      .nav-group { display: flex; gap: 2px; flex-shrink: 0; }
-      .nav-group button {
+      .nav-group, .tools-group { display: flex; gap: 2px; flex-shrink: 0; order: 1; }
+      /* Layout: both button groups live on row 1 — nav-group pinned left,
+       * tools-group (zoom + settings) pushed right via margin-left:auto. The
+       * URL form has flex-basis:100% + order:2, so it always wraps onto its
+       * own row 2 below the buttons. */
+      .tools-group { margin-left: auto; }
+      .nav-group button, .tools-group button {
         font: inherit;
         font-size: 0.95rem;
         line-height: 1;
@@ -140,15 +155,20 @@ const FRAME_NAME = JSON.stringify({
         padding: 0 8px;
         transition: border-color 0.1s, box-shadow 0.1s;
       }
+      /* The zoom-reset button shows a "100%" label, so it needs a touch more
+       * room and a smaller font than the single-glyph icon buttons. */
+      #zoom-reset-btn { font-size: 0.7rem; min-width: 44px; letter-spacing: 0.02em; }
       .nav-group button:hover:not([disabled]),
-      .nav-group button:focus-visible:not([disabled]) {
+      .nav-group button:focus-visible:not([disabled]),
+      .tools-group button:hover:not([disabled]),
+      .tools-group button:focus-visible:not([disabled]) {
         border-color: var(--aura-color-primary, #00ff41);
         box-shadow: 0 0 8px var(--aura-color-primary, #00ff41);
         outline: none;
       }
-      .nav-group button[disabled] { opacity: 0.3; cursor: not-allowed; }
+      .nav-group button[disabled], .tools-group button[disabled] { opacity: 0.3; cursor: not-allowed; }
 
-      .url-form { display: flex; flex: 1 1 320px; min-width: 0; gap: 0; }
+      .url-form { display: flex; flex: 1 1 100%; order: 2; min-width: 0; gap: 0; }
       .url-form input {
         flex: 1 1 auto;
         min-width: 0;
@@ -197,13 +217,22 @@ const FRAME_NAME = JSON.stringify({
         position: relative;
         flex: 1 1 auto;
         background: var(--aura-color-bg, #0a0a0a);
+        overflow: hidden;
       }
+      /* Zoom is applied via transform: scale() on the iframe with a
+       * counter-sized width/height (set inline from JS), so the engine still
+       * exactly fills the wrap at any zoom level. The iframe is pinned to the
+       * wrap's top-left corner and scaled from that same corner (origin 0 0),
+       * so the content never drifts off-centre when zooming. */
       .engine {
+        position: absolute;
+        top: 0;
+        left: 0;
         width: 100%;
         height: 100%;
         border: none;
-        display: block;
         background: white;
+        transform-origin: 0 0;
       }
       /* ── Debug panel ─────────────────────────────────────────── */
       /* Anchored bottom-right of the engine viewport, never blocks the
@@ -308,18 +337,63 @@ const FRAME_NAME = JSON.stringify({
       .debug-log .ev-error { color: var(--aura-color-danger, #ff2020); }
       .debug-log .ev-ok    { color: var(--aura-color-primary, #00ff41); }
 
-      /* Debug button uses the same nav-group styling but highlights when on. */
-      .nav-group button[aria-pressed="true"] {
+      /* Settings/debug button uses the same styling but highlights when on
+       * (debug active) or while its dropdown is open. */
+      .tools-group button[aria-pressed="true"],
+      .tools-group button[aria-expanded="true"] {
         background: color-mix(in srgb, var(--aura-color-primary, #00ff41) 12%, transparent);
         border-color: var(--aura-color-primary, #00ff41);
       }
 
-      /* ── Narrow tile: URL bar drops onto its own row below nav ── */
+      /* ── Settings dropdown ─────────────────────────────────────── */
+      /* Anchored to the bottom-right of the ⚙ trigger. Clicking an item
+       * runs its action (e.g. open the debug panel) and closes the menu. */
+      .menu-wrap { position: relative; display: flex; }
+      .settings-menu {
+        position: absolute;
+        top: calc(100% + 4px);
+        right: 0;
+        min-width: 160px;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 4px;
+        background: var(--aura-color-surface, #111);
+        border: 1px solid var(--aura-color-primary, #00ff41);
+        box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        z-index: 10;
+      }
+      .settings-menu[hidden] { display: none; }
+      .settings-menu button {
+        font: inherit;
+        font-size: 0.78rem;
+        line-height: 1.3;
+        text-align: left;
+        min-width: 0;
+        background: transparent;
+        color: var(--aura-color-text, #ccffcc);
+        border: 1px solid transparent;
+        padding: 6px 10px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .settings-menu button:hover,
+      .settings-menu button:focus-visible {
+        border-color: var(--aura-color-primary, #00ff41);
+        color: var(--aura-color-primary, #00ff41);
+        outline: none;
+      }
+      .settings-menu button[aria-pressed="true"] {
+        background: color-mix(in srgb, var(--aura-color-primary, #00ff41) 12%, transparent);
+        border-color: var(--aura-color-primary, #00ff41);
+        color: var(--aura-color-primary, #00ff41);
+      }
+
+      /* ── Narrow tile: tighten spacing (row layout is already two-row) ── */
       @media (max-width: 480px) {
         .chrome { gap: 6px; padding: 6px; }
-        .url-form { flex-basis: 100%; order: 2; }
-        .nav-group { order: 1; }
-        .nav-group button { min-width: 28px; padding: 0 6px; }
+        .nav-group button, .tools-group button { min-width: 28px; padding: 0 6px; }
+        #zoom-reset-btn { min-width: 40px; padding: 0 4px; }
       }
     </style>
 
@@ -333,7 +407,12 @@ const FRAME_NAME = JSON.stringify({
         var fwdBtn   = document.getElementById('fwd-btn');
         var reloadB  = document.getElementById('reload-btn');
         var homeBtn  = document.getElementById('home-btn');
-        var debugBtn = document.getElementById('debug-btn');
+        var settingsBtn = document.getElementById('settings-btn');
+        var settingsMenu= document.getElementById('settings-menu');
+        var menuDebugBtn= document.getElementById('menu-debug-btn');
+        var zoomInB  = document.getElementById('zoom-in-btn');
+        var zoomOutB = document.getElementById('zoom-out-btn');
+        var zoomRstB = document.getElementById('zoom-reset-btn');
 
         // Debug panel handles
         var dbgPanel = document.getElementById('debug-panel');
@@ -384,6 +463,29 @@ const FRAME_NAME = JSON.stringify({
         function syncButtons() {
           backBtn.disabled = cursor <= 0;
           fwdBtn.disabled  = cursor >= history.length - 1;
+        }
+
+        // ── Zoom ─────────────────────────────────────────────────
+        // Most framed sites are cross-origin, so we can't touch their DOM
+        // to zoom. Instead we scale the iframe element itself and counter-
+        // size it (width/height = 100/zoom %) so it still fills the wrap.
+        // The transform lives on the element, not the document, so it
+        // survives navigation without re-applying.
+        var ZOOM_MIN = 0.3, ZOOM_MAX = 3, ZOOM_STEP = 0.1;
+        var zoom = 1;
+        function applyZoom() {
+          zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(zoom * 100) / 100));
+          // Pin the scale anchor to the top-left inline too — a stray
+          // transform-origin from anywhere else would make content drift.
+          engine.style.transformOrigin = '0 0';
+          engine.style.transform = 'scale(' + zoom + ')';
+          engine.style.width  = (100 / zoom) + '%';
+          engine.style.height = (100 / zoom) + '%';
+          var pct = Math.round(zoom * 100);
+          zoomRstB.textContent = pct + '%';
+          zoomInB.disabled  = zoom >= ZOOM_MAX;
+          zoomOutB.disabled = zoom <= ZOOM_MIN;
+          dbgLog_line('ok', 'zoom → ' + pct + '%');
         }
 
         // ── Debug logger ─────────────────────────────────────────
@@ -497,6 +599,9 @@ const FRAME_NAME = JSON.stringify({
         });
         reloadB.addEventListener('click', function () { navigate(history[cursor], { push: false }); });
         homeBtn.addEventListener('click', function () { navigate(HOME); });
+        zoomInB.addEventListener('click',  function () { zoom += ZOOM_STEP; applyZoom(); });
+        zoomOutB.addEventListener('click', function () { zoom -= ZOOM_STEP; applyZoom(); });
+        zoomRstB.addEventListener('click', function () { zoom = 1; applyZoom(); });
 
         // ── Host URL-relay (cross-origin URL tracking) ───────────
         // The WebView host injects a script into every nested frame
@@ -531,14 +636,34 @@ const FRAME_NAME = JSON.stringify({
           dbgRefresh();
         });
 
+        // ── Settings dropdown ─────────────────────────────────────
+        function toggleMenu(open) {
+          var next = (open == null) ? settingsMenu.hidden : open;
+          settingsMenu.hidden = !next;
+          settingsBtn.setAttribute('aria-expanded', String(next));
+        }
+        settingsBtn.addEventListener('click', function (e) {
+          e.stopPropagation();   // don't let the outside-click handler re-close it
+          toggleMenu();
+        });
+        // Close the menu on any click outside it (the ⚙ click is stopped above).
+        document.addEventListener('click', function (e) {
+          if (settingsMenu.hidden) return;
+          if (settingsMenu.contains(e.target)) return;
+          toggleMenu(false);
+        });
+
         // ── Debug panel toggle ────────────────────────────────────
         function toggleDebug(open) {
           var next = (open == null) ? dbgPanel.hidden : open;
           dbgPanel.hidden = !next;
-          debugBtn.setAttribute('aria-pressed', String(next));
+          menuDebugBtn.setAttribute('aria-pressed', String(next));
           if (next) dbgRefresh();
         }
-        debugBtn.addEventListener('click', function () { toggleDebug(); });
+        menuDebugBtn.addEventListener('click', function () {
+          toggleDebug();
+          toggleMenu(false);   // selecting an item closes the dropdown
+        });
         dbgClose.addEventListener('click', function () { toggleDebug(false); });
         dbgClear.addEventListener('click', function () {
           dbgLog.textContent = '';
@@ -553,6 +678,10 @@ const FRAME_NAME = JSON.stringify({
           if (e.ctrlKey && (e.key === 'r' || e.key === 'R')) { e.preventDefault(); reloadB.click(); }
           if (e.ctrlKey && (e.key === 'l' || e.key === 'L')) { e.preventDefault(); urlInput.focus(); urlInput.select(); }
           if (e.ctrlKey && e.shiftKey && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); toggleDebug(); }
+          if (e.key === 'Escape' && !settingsMenu.hidden) { e.preventDefault(); toggleMenu(false); }
+          if (e.ctrlKey && (e.key === '=' || e.key === '+')) { e.preventDefault(); zoomInB.click(); }
+          if (e.ctrlKey && e.key === '-')                    { e.preventDefault(); zoomOutB.click(); }
+          if (e.ctrlKey && e.key === '0')                    { e.preventDefault(); zoomRstB.click(); }
         });
 
         syncInputFromHistory();

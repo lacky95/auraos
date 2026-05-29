@@ -4,15 +4,16 @@ import { jsonResponse } from '../../../lib/appResponse.js';
 
 /**
  * Lists every installed app the AppRegistry knows about, merged with its
- * Nexus install record (source, version, channel, install timestamps).
- * Apps without a Nexus record (cloned from the monorepo, scaffolded
- * locally, etc.) get `source: 'local'` and the rest of the record null.
+ * Nexus install record. The `scope` field indicates which tier the app
+ * came from (system / global / user).
  */
 export const GET: APIRoute = () => {
   const mgr   = getAppManager();
   const nexus = getNexusManager();
   const installed = mgr.getManifests().map((manifest) => {
     const record = nexus.records.get(manifest.id);
+    // ScopedManifest carries scopeId set at registry load time.
+    const scopeId = (manifest as { scopeId?: string }).scopeId ?? 'system';
     return {
       manifest,
       record: record ?? {
@@ -24,8 +25,10 @@ export const GET: APIRoute = () => {
         channel:     null,
         installedAt: '',
         updatedAt:   '',
+        scope:       scopeId,
       },
       isNexusInstalled: !!record,
+      scope: record?.scope ?? scopeId,
     };
   });
   return jsonResponse(installed);

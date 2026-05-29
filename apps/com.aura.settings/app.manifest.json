@@ -13,7 +13,8 @@
     "system.kv.os.workspaces.write",
     "system.kv.os.clockFormat.write",
     "system.kv.os.locale.write",
-    "system.kv.os.keymap.write"
+    "system.kv.os.keymap.write",
+    "system.kv.os.lockscreen.write"
   ],
   "tools": ["bash", "node"],
   "instanceMode": "single",

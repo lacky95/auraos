@@ -42,6 +42,7 @@ interface InstallRecord {
   channel:     string | null;
   installedAt: string;
   updatedAt:   string;
+  scope?:      'system' | 'global' | 'user';
 }
 
 interface InstallResponse {
@@ -76,14 +77,16 @@ export function registerNexus(program: Command): void {
   nexus
     .command('install <ref>')
     .description('Install an app. <ref> can be a git URL, OCI tag, index id, or local path.')
-    .option('-y, --yes',         'auto-approve any permission changes')
-    .option('--channel <name>',  'channel to install (when <ref> is an index id)', 'stable')
-    .action(async (rawRef: string, opts: { yes?: boolean; channel?: string }) => {
+    .option('-y, --yes',             'auto-approve any permission changes')
+    .option('--channel <name>',      'channel to install (when <ref> is an index id)', 'stable')
+    .option('--scope <global|user>', 'install into this scope (default: global)', 'global')
+    .action(async (rawRef: string, opts: { yes?: boolean; channel?: string; scope?: string }) => {
       const ref = normaliseRef(rawRef);
+      if (opts.scope === 'system') fail('cannot install into system scope');
+      const scope = opts.scope === 'user' ? 'user' : 'global';
 
-      // First attempt — autoApprove only if --yes was passed.
       let res = await api.post<InstallResponse>('/api/nexus/install',
-        { ref, autoApprove: !!opts.yes });
+        { ref, scope, autoApprove: !!opts.yes });
 
       if (res.needsApproval && res.diff) {
         printPermissionDiff(res.diff);
@@ -95,13 +98,13 @@ export function registerNexus(program: Command): void {
           throw err;
         }
         res = await api.post<InstallResponse>('/api/nexus/install',
-          { ref, autoApprove: true });
+          { ref, scope, autoApprove: true });
       }
 
       if (!res.ok || !res.record) {
         fail(res.error ?? 'install failed');
       }
-      ok(`installed ${color.cyan(res.record!.id)} (${res.record!.version}) from ${res.record!.source}`);
+      ok(`installed ${color.cyan(res.record!.id)} (${res.record!.version}) from ${res.record!.source} → scope:${scope}`);
       info(`  ref:    ${res.record!.ref}`);
       if (res.record!.digest) info(`  digest: ${res.record!.digest.slice(0, 16)}`);
     });
@@ -178,10 +181,11 @@ export function registerNexus(program: Command): void {
         filtered.map((r) => ({
           id:      r.manifest.id,
           version: r.manifest.version,
+          scope:   (r as { scope?: string }).scope ?? r.record.scope ?? 'system',
           source:  r.record.source,
           ref:     r.record.source === 'local' ? r.record.ref : shortenRef(r.record.ref),
         })),
-        ['id', 'version', 'source', 'ref'],
+        ['id', 'version', 'scope', 'source', 'ref'],
       ));
     });
 

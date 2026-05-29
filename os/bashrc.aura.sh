@@ -42,8 +42,19 @@ alias ll='ls -lah --color=auto'
 alias l='ls --color=auto'
 alias grep='grep --color=auto'
 
-# Surface the running app id in the title for AuraOS terminals (xterm sequence).
-# `${APP_INSTANCE_ID:-${APP_ID:-bash}}` is pure parameter expansion — no exec.
-if [ -n "${APP_INSTANCE_ID-}${APP_ID-}" ]; then
-  PROMPT_COMMAND='printf "\033]0;%s\007" "${APP_INSTANCE_ID:-${APP_ID:-bash}}"'
-fi
+# Surface the current location's hostname in the xterm window title so the
+# AuraOS terminal chrome can show which sandbox/container the live shell is in.
+# The Terminal app listens for this OSC sequence (term.onTitleChange) and
+# updates its host indicator — so it follows the user as they `aura jump`
+# between sandboxes, since each jumped bash re-runs this snippet.
+#
+# Value resolves with sensible fallbacks:
+#   • base terminal  → AURA_TERM_LABEL (the host, e.g. `aura-shell`; set by the
+#                       Terminal app's pty-server on the host shell so it shows
+#                       the machine, not the `com.aura.terminal` package id)
+#   • container apps  → AURA_HOSTNAME (the friendly appId, set by enter-sandbox)
+#   • proot apps      → APP_ID (AURA_HOSTNAME is unset; proot inherits the host
+#                       kernel hostname, so APP_ID is the meaningful label)
+#   • master / host   → $HOSTNAME (e.g. `aura-shell`)
+# Pure parameter expansion — no exec.
+PROMPT_COMMAND='printf "\033]0;%s\007" "${AURA_TERM_LABEL:-${AURA_HOSTNAME:-${APP_ID:-$HOSTNAME}}}"'

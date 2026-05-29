@@ -1,0 +1,226 @@
+---
+import '@aura/ui/styles/scificn-bridge.css';
+import '../styles/settings.css';
+
+// SSR-read `os/lockscreen` directly from the shell's internal port. Falls
+// back to the same defaults the shell's LockScreenOverlay uses so the form
+// always has something sane to render.
+type LockPosition =
+  | 'top-left'    | 'top-center'    | 'top-right'
+  | 'middle-left' | 'center'        | 'middle-right'
+  | 'bottom-left' | 'bottom-center' | 'bottom-right';
+
+interface LockScreenConfig {
+  text:      string;
+  position:  LockPosition;
+  showClock: boolean;
+}
+
+const DEFAULT_CONFIG: LockScreenConfig = {
+  text:      'LOCKED',
+  position:  'center',
+  showClock: true,
+};
+
+const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
+let cfg: LockScreenConfig = DEFAULT_CONFIG;
+try {
+  const r = await fetch(`${osBase}/api/kv/os/lockscreen`, { signal: AbortSignal.timeout(1500) });
+  if (r.ok) {
+    const body = await r.json() as { value?: Partial<LockScreenConfig> };
+    if (body.value) cfg = { ...DEFAULT_CONFIG, ...body.value };
+  }
+} catch { /* keep defaults */ }
+
+const POSITIONS: { id: LockPosition; label: string }[] = [
+  { id: 'top-left',      label: '↖' },
+  { id: 'top-center',    label: '↑' },
+  { id: 'top-right',     label: '↗' },
+  { id: 'middle-left',   label: '←' },
+  { id: 'center',        label: '◉' },
+  { id: 'middle-right',  label: '→' },
+  { id: 'bottom-left',   label: '↙' },
+  { id: 'bottom-center', label: '↓' },
+  { id: 'bottom-right',  label: '↘' },
+];
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Settings · Lock Screen — AuraOS</title>
+  <link rel="stylesheet" href="/api/os/theme.css" />
+</head>
+<body>
+  <main class="settings-body">
+    <p style="margin: 0 0 18px; font-size: 0.7rem; color: var(--aura-color-text-dim); letter-spacing: 0.08em;">
+      THE LOCK SCREEN BLACKS OUT THE WHOLE SHELL UNTIL ANY CLICK OR KEYPRESS. TRIGGER IT WITH <b>CTRL+ALT+L</b> OR THE TEST BUTTON BELOW.
+    </p>
+
+    <div class="form-row" style="align-items: flex-start;">
+      <label>TEXT</label>
+      <input id="text" type="text" value={cfg.text} placeholder="LOCKED" />
+    </div>
+
+    <div class="form-row" style="align-items: flex-start;">
+      <label>POSITION</label>
+      <div class="pos-grid" role="radiogroup" aria-label="Lock-screen content position">
+        {POSITIONS.map((p) => (
+          <button
+            type="button"
+            class="pos-cell"
+            role="radio"
+            data-position={p.id}
+            data-selected={String(p.id === cfg.position)}
+            aria-checked={p.id === cfg.position ? 'true' : 'false'}
+            title={p.id}
+          >{p.label}</button>
+        ))}
+      </div>
+    </div>
+
+    <div class="form-row">
+      <label>CLOCK</label>
+      <label class="checkbox-row">
+        <input id="show-clock" type="checkbox" checked={cfg.showClock} />
+        <span>SHOW A LIVE CLOCK</span>
+      </label>
+    </div>
+
+    <div class="form-row">
+      <label></label>
+      <button id="test-btn" class="action-btn" type="button">⊞ TEST LOCK NOW</button>
+    </div>
+
+    <p id="status" style="margin-top: 14px; font-size: 0.7rem; color: var(--aura-color-text-dim); letter-spacing: 0.08em;">
+      CHANGES PERSIST IMMEDIATELY · PUT /api/kv/os/lockscreen
+    </p>
+  </main>
+  <footer class="settings-foot">PROVIDER · /api/kv/os/lockscreen</footer>
+
+  <style>
+    .pos-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 36px);
+      grid-template-rows:    repeat(3, 36px);
+      gap: 4px;
+    }
+    .pos-cell {
+      width: 36px; height: 36px;
+      background: var(--aura-color-bg, #0a0a0a);
+      border: 1px solid var(--aura-color-border, rgba(0,255,65,0.2));
+      color: var(--aura-color-text-dim, #557755);
+      font-family: 'Courier New', monospace;
+      font-size: 1rem;
+      cursor: pointer;
+      transition: color 0.1s, border-color 0.1s, background 0.1s;
+    }
+    .pos-cell:hover {
+      color: var(--aura-color-primary);
+      border-color: var(--aura-color-primary);
+    }
+    .pos-cell[data-selected="true"] {
+      color: var(--aura-color-bg);
+      background: var(--aura-color-primary);
+      border-color: var(--aura-color-primary);
+    }
+    .checkbox-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.7rem;
+      letter-spacing: 0.08em;
+      color: var(--aura-color-text);
+      cursor: pointer;
+    }
+    .action-btn {
+      background: var(--aura-color-bg, #0a0a0a);
+      border: 1px solid var(--aura-color-primary, #00ff41);
+      color: var(--aura-color-primary, #00ff41);
+      padding: 8px 14px;
+      font-family: 'Courier New', monospace;
+      font-size: 0.7rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+    .action-btn:hover {
+      background: color-mix(in srgb, var(--aura-color-primary) 14%, transparent);
+    }
+  </style>
+
+  <script is:inline>
+    const statusEl = document.getElementById('status');
+    const textEl   = document.getElementById('text');
+    const clockEl  = document.getElementById('show-clock');
+    const grid     = document.querySelector('.pos-grid');
+
+    // Single-key state. Debounced writes coalesce rapid typing into one PUT.
+    let state = {
+      text:      textEl.value,
+      position:  grid.querySelector('[data-selected="true"]')?.dataset.position ?? 'center',
+      showClock: clockEl.checked,
+    };
+
+    let putTimer = null;
+    function schedulePut() {
+      clearTimeout(putTimer);
+      putTimer = setTimeout(async () => {
+        try {
+          const r = await fetch('/api/kv/os/lockscreen', {
+            method:  'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ value: state }),
+          });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          statusEl.innerHTML = `SAVED · ${new Date().toLocaleTimeString()}`;
+        } catch (err) {
+          statusEl.innerHTML = `<b style="color: var(--aura-color-danger);">ERROR — ${err.message}</b>`;
+        }
+      }, 250);
+    }
+
+    textEl.addEventListener('input', () => {
+      state = { ...state, text: textEl.value };
+      schedulePut();
+    });
+    clockEl.addEventListener('change', () => {
+      state = { ...state, showClock: clockEl.checked };
+      schedulePut();
+    });
+    grid.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('.pos-cell');
+      if (!btn) return;
+      grid.querySelectorAll('.pos-cell').forEach((c) => {
+        const on = c === btn;
+        c.dataset.selected = String(on);
+        c.setAttribute('aria-checked', on ? 'true' : 'false');
+      });
+      state = { ...state, position: btn.dataset.position };
+      schedulePut();
+    });
+
+    // "Test" — postMessage to the parent shell which forwards to the
+    // LockScreenOverlay's activate handler. The shell saves first, so the
+    // overlay sees the current draft on next render via `kv:changed`.
+    document.getElementById('test-btn').addEventListener('click', async () => {
+      clearTimeout(putTimer);
+      try {
+        await fetch('/api/kv/os/lockscreen', {
+          method:  'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ value: state }),
+        });
+      } catch { /* test still useful with stale config */ }
+      window.parent?.postMessage({ type: 'aura.lockscreen.activate' }, '*');
+    });
+  </script>
+
+  <script>
+    import { OsClient } from '@aura/app-sdk';
+    new OsClient().nav.installGridNav({
+      selector: '#text, .pos-cell, #show-clock, #test-btn',
+    });
+  </script>
+</body>
+</html>

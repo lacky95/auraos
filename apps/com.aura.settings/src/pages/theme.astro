@@ -21,27 +21,26 @@ try {
   }
 } catch { /* fall back to defaults */ }
 
-/* Same theme catalog the OS ThemeManager ships. Kept inline so this page
- * stays self-contained (no @aura/core import); the active selection comes
- * from /api/kv/os/theme above, and `/api/os/themes` would serve the same
- * list dynamically if we wanted a single source. Swatches let us preview
- * a theme without applying it. */
+/* Theme catalog — sourced LIVE from the OS so this picker never drifts from
+ * the real ThemeManager (the viewport dialog reads the same catalog). We hit
+ * the shell's `/api/os/themes` endpoint, which serves ThemeManager.listSummaries()
+ * including a preview swatch. Falls back to an empty list only if the shell is
+ * unreachable; the active selection still comes from /api/kv/os/theme above. */
 type ToneSwatch = { primary: string; secondary: string; bg: string };
 type ThemeCard  = { id: string; name: string; description: string; tone: 'dark' | 'light'; swatch: ToneSwatch };
 
-const THEMES: ThemeCard[] = [
-  // dark
-  { id: 'sci-fi',    name: 'SCI-FI',    tone: 'dark',  description: 'Classic phosphor terminal — green-on-black.',          swatch: { primary: '#00ff41', secondary: '#ff9900', bg: '#0a0a0a' } },
-  { id: 'star-wars', name: 'STAR WARS', tone: 'dark',  description: 'Crawl-text yellow on pure black.',                     swatch: { primary: '#ffe81f', secondary: '#ff9900', bg: '#000000' } },
-  { id: 'alien',     name: 'ALIEN',     tone: 'dark',  description: 'Nostromo monitor green — industrial readout.',         swatch: { primary: '#48ff00', secondary: '#a8c800', bg: '#050a05' } },
-  { id: 'amber',     name: 'AMBER',     tone: 'dark',  description: 'Vintage amber CRT.',                                   swatch: { primary: '#ff9900', secondary: '#ffd166', bg: '#0a0805' } },
-  { id: 'red-alert', name: 'RED ALERT', tone: 'dark',  description: 'Critical-warning crimson.',                            swatch: { primary: '#ff2020', secondary: '#ff7070', bg: '#0a0303' } },
-  { id: 'cyan',      name: 'CYAN',      tone: 'dark',  description: 'Cool cyan retro-future.',                              swatch: { primary: '#00aaff', secondary: '#88ddff', bg: '#04080a' } },
-  // light
-  { id: 'paper',     name: 'PAPER',     tone: 'light', description: 'Phosphor green on cream.',                             swatch: { primary: '#007a1f', secondary: '#b35a00', bg: '#f4f7f1' } },
-  { id: 'parchment', name: 'PARCHMENT', tone: 'light', description: 'Amber ink on parchment.',                              swatch: { primary: '#b35a00', secondary: '#c79100', bg: '#fffaf0' } },
-  { id: 'mist',      name: 'MIST',      tone: 'light', description: 'Cool cyan-on-mist.',                                   swatch: { primary: '#00688b', secondary: '#0277bd', bg: '#f1f7fa' } },
-];
+let THEMES: ThemeCard[] = [];
+try {
+  const tr = await fetch(`${osBase}/api/os/themes`, { signal: AbortSignal.timeout(2000) });
+  if (tr.ok) {
+    const body = await tr.json() as {
+      themes?: Array<{ id: string; name: string; description?: string; tone: 'dark' | 'light'; swatch: ToneSwatch }>;
+    };
+    THEMES = (body.themes ?? []).map(t => ({
+      id: t.id, name: t.name, tone: t.tone, description: t.description ?? '', swatch: t.swatch,
+    }));
+  }
+} catch { /* shell unreachable — render with no cards rather than a stale copy */ }
 
 const darkThemes  = THEMES.filter(t => t.tone === 'dark');
 const lightThemes = THEMES.filter(t => t.tone === 'light');
