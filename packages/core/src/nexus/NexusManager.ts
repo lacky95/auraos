@@ -14,7 +14,6 @@ import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import type { OsEventBus as OsEventBusSingleton } from '../ipc/OsEventBus.js';
 import type { ScopeDefinition, ScopeId } from '../scopes/types.js';
-import type { ScopeRegistry } from '../scopes/ScopeRegistry.js';
 import { Resolver } from './Resolver.js';
 
 type OsEventBus = typeof OsEventBusSingleton;
@@ -34,7 +33,6 @@ export interface NexusManagerOpts {
   scopes:  ScopeDefinition[];
   /** Root dataDir used for shared staging/index paths (not scoped per-app). */
   rootDataDir: string;
-  scopeRegistry?: ScopeRegistry;
   bus?:    OsEventBus;
 }
 
@@ -44,12 +42,10 @@ export class NexusManager {
   /** One installer per non-system scope. */
   private readonly installers: Map<ScopeId, Installer>;
   private readonly rootDataDir: string;
-  private readonly scopeRegistry?: ScopeRegistry;
   private readonly bus?: OsEventBus;
 
   constructor(opts: NexusManagerOpts) {
     this.rootDataDir    = opts.rootDataDir;
-    this.scopeRegistry  = opts.scopeRegistry;
     this.bus            = opts.bus;
     this.index          = new IndexClient({
       cachePath: join(opts.rootDataDir, 'nexus', 'index.yaml'),
@@ -127,11 +123,6 @@ export class NexusManager {
     const installer   = this.installerFor(targetScope);
     const stagingDir  = join(this.rootDataDir, 'nexus', 'staging', `pending-${Date.now()}`);
     mkdirSync(stagingDir, { recursive: true });
-
-    // Ensure the scope dir is a git repo before the first install.
-    if (this.scopeRegistry) {
-      await this.scopeRegistry.ensureScopeRepo(targetScope);
-    }
 
     try {
       yield { type: 'resolve.start', ref: opts.ref };

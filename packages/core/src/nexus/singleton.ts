@@ -14,10 +14,9 @@ export function getNexusManager(): NexusManager {
   if (existing) return existing;
   const mgr = getAppManager();
   const instance = new NexusManager({
-    scopes:        mgr.getScopeDefinitions(),
-    rootDataDir:   mgr.getDataDir(),
-    scopeRegistry: mgr.getScopeRegistry(),
-    bus:           OsEventBus,
+    scopes:      mgr.getScopeDefinitions(),
+    rootDataDir: mgr.getDataDir(),
+    bus:         OsEventBus,
   });
   (globalThis as GlobalWithNexus)[GLOBAL_KEY] = instance;
   return instance;
