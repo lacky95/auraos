@@ -113,3 +113,10 @@ aura nexus publish  [<path>] --source …  # push your app upstream
 
 Each command flows through the same `/api/nexus/*` HTTP endpoint on
 the shell — so the CLI and a future settings UI share one backend.
+
+## Where installs land
+
+By default `aura nexus install` targets the **global scope**. Pass
+`--scope user` to install into the user-scoped tier instead. See
+[Scopes](./scopes) for how the three tiers relate and where each one
+stores its apps and runtime data.

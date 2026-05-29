@@ -1,0 +1,142 @@
+---
+title: Scopes
+description: How AuraOS separates app installations into system, global, and user tiers — with independent git repos for non-system scopes.
+---
+
+Every app in AuraOS lives in exactly one **scope**. The scope determines
+where the app is installed on disk, where its runtime data lives, and
+whether Nexus is allowed to touch it.
+
+Three fixed scopes ship today:
+
+| Scope | Priority | Mutable | Backed by |
+|---|---|---|---|
+| `system` | 0 (lowest) | No | AuraOS git monorepo |
+| `global` | 1 | Yes | Independent git repo |
+| `user` | 2 (highest) | Yes | Independent git repo |
+
+**Conflict rule:** when the same app id exists in more than one scope,
+the highest-priority scope wins and the others are invisible. Uninstalling
+from the winning scope unmasks the next one automatically.
+
+---
+
+## system — the AuraOS monorepo
+
+Apps bundled with AuraOS — Terminal, Notepad, Settings, Console, Nexus,
+Docs, and the reference apps — live in `/workspace/apps/` as part of the
+monorepo. They are part of the AuraOS git repository itself.
+
+Nexus refuses to install into or remove from this scope. The only way to
+change a system app is to modify the monorepo source and redeploy.
+
+**Update path:** pull a new AuraOS release — system apps update with it.
+
+---
+
+## global — shared, persistent, independently versioned
+
+The default install target. When you run:
+
+```sh
+aura nexus install com.example.foo
+```
+
+the app lands in `/data/scopes/global/apps/com.example.foo/`. That path
+lives on the `aura-app-data` Docker named volume so it survives container
+restarts and AuraOS upgrades.
+
+On the first install into the global scope, AuraOS initialises
+`/data/scopes/global/` as a **separate git repository** — completely
+independent from the AuraOS monorepo. A `.aura-scope` marker file is
+committed so the repo always has a clean baseline.
+
+**Update path:** `aura nexus update com.example.foo` re-resolves the
+original ref and reinstalls if the source has changed.
+
+### Optional remote
+
+The global scope repo starts with no remote. You can attach one in
+**Settings → Scopes** or via the API:
+
+```sh
+# API
+curl -X PUT http://localhost:3000/api/scopes/global/git-repo \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://github.com/you/my-global-apps.git"}'
+```
+
+Adding a remote does not push automatically — that is a future
+push/restore sync feature. The URL is persisted so tooling will know
+where to push when that feature lands.
+
+---
+
+## user — per-user tier
+
+Identical to global in behaviour, but sits at
+`/data/scopes/users/default/` and has a higher priority, so a user-scoped
+install shadows the global one for the same app id.
+
+```sh
+aura nexus install com.example.foo --scope user
+```
+
+The `default` user id is a placeholder for the single-user model. When
+multi-user support arrives the path becomes
+`/data/scopes/users/<userId>/` — nothing else in the scope model changes.
+
+---
+
+## Runtime data isolation
+
+App runtime data (writable state, KV store, PTY scrollback, etc.) is
+stored under the scope's own data directory, not the shared `/data/` root:
+
+| Scope | Runtime data path |
+|---|---|
+| system | `/data/scopes/system/apps/<id>/<instanceId>/` |
+| global | `/data/scopes/global/apps/<id>/<instanceId>/` |
+| user | `/data/scopes/users/default/apps/<id>/<instanceId>/` |
+
+Inside the sandbox this path is always bind-mounted as `/data`, so an
+app's code never needs to know which scope it came from.
+
+---
+
+## CLI
+
+```sh
+# list scopes with app counts and paths
+aura scope list
+
+# install into global (default)
+aura nexus install <ref>
+
+# install into user scope
+aura nexus install <ref> --scope user
+
+# list shows SCOPE column
+aura nexus list
+```
+
+See [CLI Reference](./cli-reference) for the full `aura nexus` and
+`aura scope` command set.
+
+---
+
+## Settings UI
+
+**Settings → Scopes** shows all three scopes with their app counts,
+install paths, and an editable git remote URL field for global and user
+scopes.
+
+---
+
+## What is NOT scoped
+
+- **Installed toolchain capabilities** (`aura cap install`) — these land
+  in `/os/toolchain/bin/` and are shared across all scopes.
+- **Services** (`aura service`) — system-wide, not per-scope.
+- **OS settings** (theme, keymap, workspaces) — stored in the OS KV
+  store, not tied to any scope.

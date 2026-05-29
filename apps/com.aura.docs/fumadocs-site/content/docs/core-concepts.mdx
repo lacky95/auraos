@@ -312,6 +312,14 @@ the pipeline behind a user-approval gate. See [Nexus](./nexus) for
 the full pipeline + source-type reference; `aura nexus install`
 is the day-to-day command.
 
+## Scopes
+
+Every installed app belongs to a **scope** that determines where it
+lives on disk and who can change it: `system` (the AuraOS monorepo,
+immutable), `global` (shared, Nexus-managed, its own git repo), or
+`user` (per-user overlay, highest priority, its own git repo). See
+[Scopes](./scopes) for the full breakdown.
+
 ## Where the code lives
 
 ```
