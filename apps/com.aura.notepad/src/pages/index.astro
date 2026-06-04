@@ -368,18 +368,40 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
       // Scroll active tab into view
       const activeEl = tabList.querySelector('.tab.active');
       if (activeEl) activeEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-      updateScrollButtons();
+      updateTabLayout();
     }
 
-    // ── Tab horizontal scrolling ───────────────────────────────────────────
+    // ── Tab horizontal scrolling + dynamic + button placement ──────────────
+    const tabBar         = document.getElementById('tab-bar');
+    const tabActions     = document.getElementById('tab-actions');
+    const newBtn         = document.getElementById('tab-new');
     const scrollLeftBtn  = document.getElementById('tab-scroll-left');
     const scrollRightBtn = document.getElementById('tab-scroll-right');
 
-    function updateScrollButtons() {
-      const overflowing = tabList.scrollWidth > tabList.clientWidth + 1;
-      if (!overflowing) {
-        scrollLeftBtn.hidden  = true;
-        scrollRightBtn.hidden = true;
+    function hideArrows() {
+      scrollLeftBtn.hidden  = true;
+      scrollRightBtn.hidden = true;
+    }
+
+    // Decides where the + button lives and whether scroll arrows show:
+    //   • tabs fit            → + sits inline directly after the last tab,
+    //                            no arrows
+    //   • tabs overflow       → + sticks static on the right, arrows shown
+    function updateTabLayout() {
+      // Tentatively place + inline at the end of the scrollable list.
+      if (newBtn.parentNode !== tabList || newBtn.nextSibling !== null) {
+        tabList.appendChild(newBtn);
+      }
+      // Does the list (tabs + inline +) overflow its track?
+      if (tabList.scrollWidth <= tabList.clientWidth + 1) {
+        hideArrows();
+        return;
+      }
+      // Overflow: pull + out to its static slot before OPEN/SAVE.
+      tabBar.insertBefore(newBtn, tabActions);
+      // With + removed, do the tabs alone still overflow?
+      if (tabList.scrollWidth <= tabList.clientWidth + 1) {
+        hideArrows();   // tabs fit; + stays static right, no arrows needed
         return;
       }
       const atStart = tabList.scrollLeft <= 0;
@@ -397,12 +419,12 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
     }
     scrollLeftBtn.addEventListener('click',  () => scrollTabs(-1));
     scrollRightBtn.addEventListener('click', () => scrollTabs(1));
-    tabList.addEventListener('scroll', updateScrollButtons, { passive: true });
+    tabList.addEventListener('scroll', updateTabLayout, { passive: true });
+    // React to both the list resizing and the window/iframe resizing.
     if (typeof ResizeObserver !== 'undefined') {
-      new ResizeObserver(updateScrollButtons).observe(tabList);
-    } else {
-      window.addEventListener('resize', updateScrollButtons);
+      new ResizeObserver(updateTabLayout).observe(tabBar);
     }
+    window.addEventListener('resize', updateTabLayout);
 
     function updateFooter() {
       const active = tabs.find(t => t.id === activeId);
