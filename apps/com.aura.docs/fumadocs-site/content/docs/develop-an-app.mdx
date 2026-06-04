@@ -162,6 +162,73 @@ export const POST: APIRoute = async ({ request }) => {
 `activityId` is only present on requests coming through an activity-
 scoped iframe URL; for non-activity apps it's `null`.
 
+## Persisting app data
+
+Every app instance has a private, writable directory at **`/data`** inside
+the sandbox. It is bind-mounted by the OS from the scope's per-instance
+data path — `scopes/<scope>/apps/<appId>/<instanceId>/` on the
+`aura-app-data` Docker volume — so anything written there **survives
+container restarts and OS reboots**.
+
+```ts
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+
+const DATA_DIR  = process.env['AURA_DATA_DIR'] ?? '/data';   // always /data inside sandbox
+const DATA_FILE = `${DATA_DIR}/mydata.json`;
+
+// Load on module init (runs once per process lifetime)
+const saved = existsSync(DATA_FILE)
+  ? JSON.parse(readFileSync(DATA_FILE, 'utf-8'))
+  : { defaultValue: 0 };
+
+// Write on every mutation
+function save(value: unknown) {
+  mkdirSync(DATA_DIR, { recursive: true });
+  writeFileSync(DATA_FILE, JSON.stringify(value), 'utf-8');
+}
+```
+
+Or use `getAppContext()` from the SDK which resolves the same path:
+
+```ts
+import { getAppContext } from '@aura/app-sdk';
+const { dataDir } = getAppContext();   // → '/data'
+```
+
+### Two storage patterns — don't mix them up
+
+AuraOS has two distinct persistence mechanisms. Use the right one:
+
+| Need | Use | Where data lives |
+|---|---|---|
+| App-private state (documents, history, counter values, scrollback) | **`/data` filesystem** | `aura-app-data` volume, per-instance path |
+| OS-level settings (theme, keymap, workspaces, clock format) | **KV store** (`/api/kv/os/<key>`) | Redis in `aura-app-data` volume |
+
+`/data` is per-instance, isolated, and only visible to your app.
+The KV store is shared OS infrastructure — apps that write there
+need the correct permission (`system.kv.os.*`) and the data is
+visible to every app that reads the same namespace.
+
+**Do not write app state to the KV store.** Use it only for OS-wide
+settings that the shell or other apps need to react to. For everything
+else — documents, user preferences private to your app, caches,
+session state — write to `/data`.
+
+### What survives a restart
+
+| State | Survives? |
+|---|---|
+| Files written to `/data` | ✅ yes |
+| KV store values | ✅ yes |
+| In-memory variables / `globalThis` singletons | ❌ no |
+| Active instances and activities | ❌ no (need relaunch) |
+
+If your app holds user-facing state in a `globalThis` singleton without
+writing it to `/data`, that data is lost every time the container
+restarts — either from a crash, an `aura app restart`, or a code
+change. The reference apps Notepad, Counter, and Terminal all persist
+their state to `/data` as working examples of this pattern.
+
 ## Need a non-Astro framework?
 
 The `com.aura.docs` app you're reading right now runs on Next.js +

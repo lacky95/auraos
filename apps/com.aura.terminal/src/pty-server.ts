@@ -1,6 +1,8 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import pty, { type IPty } from 'node-pty';
 import { parse as parseUrl } from 'node:url';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 /**
  * PTY session registry — multicast, survives browser reload.
@@ -61,6 +63,34 @@ function oscTitle(label: string): string {
 }
 
 const sessions = new Map<string, Session>();
+
+// Scrollback persistence — write to /data/scrollback/<sessionId> when the
+// last client disconnects, reload when a session is recreated after a restart.
+const SCROLLBACK_DIR = join(process.env['AURA_DATA_DIR'] ?? '/data', 'scrollback');
+
+function saveScrollback(sess: Session): void {
+  if (sess.buffer.length === 0) return;
+  try {
+    mkdirSync(SCROLLBACK_DIR, { recursive: true });
+    writeFileSync(join(SCROLLBACK_DIR, sess.id), sess.buffer.join(''), 'utf-8');
+  } catch { /* best-effort */ }
+}
+
+function loadScrollback(sessionId: string): { buffer: string[]; bufferSize: number } {
+  try {
+    const file = join(SCROLLBACK_DIR, sessionId);
+    if (!existsSync(file)) return { buffer: [], bufferSize: 0 };
+    const text = readFileSync(file, 'utf-8');
+    // Treat the whole file as one chunk — it was already capped at SCROLLBACK_BYTES.
+    return { buffer: [text], bufferSize: text.length };
+  } catch {
+    return { buffer: [], bufferSize: 0 };
+  }
+}
+
+function deleteScrollback(sessionId: string): void {
+  try { rmSync(join(SCROLLBACK_DIR, sessionId), { force: true }); } catch { /* ignore */ }
+}
 
 function log(...args: unknown[]): void {
   console.log('[pty]', ...args);
@@ -189,6 +219,7 @@ function attachWs(sess: Session, ws: WebSocket): void {
     // Last client left — start grace timer. If anything reattaches
     // within the window we cancel it (in attachWs above).
     if (sess.wss.size === 0) {
+      saveScrollback(sess);
       sess.killTimer = setTimeout(() => {
         log('grace expired', sess.id);
         killSession(sess.id);
@@ -233,6 +264,7 @@ export function killSession(sessionId: string): boolean {
   for (const ws of sess.wss) { try { ws.close(); } catch { /* ignore */ } }
   sess.wss.clear();
   sessions.delete(sessionId);
+  deleteScrollback(sessionId);
   return true;
 }
 
@@ -276,9 +308,10 @@ export function getPtyWss(): WebSocketServer {
     let sess = sessions.get(sessionId);
     if (!sess) {
       log('new session', sessionId);
+      const saved = loadScrollback(sessionId);
       sess = {
         id: sessionId, pty: spawnPty(80, 24),
-        wss: new Set(), buffer: [], bufferSize: 0,
+        wss: new Set(), ...saved,
         killTimer: null, reconcileTimer: null, clientSizes: new Map(), cols: 80, rows: 24,
       };
       sessions.set(sessionId, sess);
@@ -287,7 +320,7 @@ export function getPtyWss(): WebSocketServer {
       // Seed the host indicator before the shell's first prompt renders. It
       // sits first in the scrollback, so any later prompt title (incl. an
       // `aura jump` target) naturally overrides it on replay.
-      bufferPush(sess, oscTitle(HOST_LABEL));
+      if (saved.buffer.length === 0) bufferPush(sess, oscTitle(HOST_LABEL));
     }
     attachWs(sess, ws);
   });
