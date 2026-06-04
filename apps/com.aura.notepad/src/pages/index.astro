@@ -204,8 +204,9 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
   </header>
 
   <div id="tab-bar">
-    <div id="tab-list"></div>
-    <div id="tab-new" title="New tab (Ctrl+T)">+</div>
+    <div id="tab-list">
+      <div id="tab-new" title="New tab (Ctrl+T)">+</div>
+    </div>
     <div id="tab-actions">
       <button class="tab-btn" id="btn-open" title="Open file (Ctrl+O)">OPEN</button>
       <button class="tab-btn" id="btn-save" title="Save file (Ctrl+S)">SAVE</button>
@@ -290,7 +291,6 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
         display:flex;align-items:center;justify-content:center;width:36px;
         font-size:1.1rem;color:var(--aura-color-text-dim,#557755);
         cursor:pointer;flex-shrink:0;
-        border-right:1px solid var(--aura-color-border,rgba(0,255,65,.15));
         transition:color .1s,background .1s;
       }
       #tab-new:hover{color:var(--aura-color-primary,#00ff41);background:rgba(0,255,65,.05)}
@@ -327,7 +327,9 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
 
     // ── Tab rendering ──────────────────────────────────────────────────────
     function renderTabs() {
-      tabList.innerHTML = '';
+      const newBtn = document.getElementById('tab-new');
+      // Remove only existing tab elements — keep the trailing + button in place.
+      tabList.querySelectorAll('.tab').forEach((t) => t.remove());
       for (const t of tabs) {
         const el = document.createElement('div');
         el.className = 'tab' + (t.id === activeId ? ' active' : '') + (!t.path ? ' untitled' : '');
@@ -350,7 +352,8 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
         el.appendChild(closeBtn);
 
         el.addEventListener('click', () => switchTab(t.id));
-        tabList.appendChild(el);
+        // Insert each tab before the + button so it always trails the tabs.
+        tabList.insertBefore(el, newBtn);
       }
       // Scroll active tab into view
       const activeEl = tabList.querySelector('.tab.active');
