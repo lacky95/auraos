@@ -344,6 +344,13 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
       }
       .dialog-entry .icon{font-size:.85rem;flex-shrink:0;width:14px;text-align:center;color:var(--aura-color-secondary,#ff9900)}
       .dialog-entry.is-dir .icon{color:var(--aura-color-primary,#00ff41)}
+      .dialog-entry.is-parent .entry-name{color:var(--aura-color-text-dim,#557755);letter-spacing:.15em}
+      .dialog-entry.dragging{opacity:.4}
+      .dialog-entry.is-dir.drag-over{
+        background:rgba(0,255,65,.22);
+        border-left-color:var(--aura-color-primary,#00ff41);
+        outline:1px dashed var(--aura-color-primary,#00ff41);outline-offset:-2px;
+      }
       .dialog-entry .entry-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
       .dialog-entry .entry-rename-input{
         flex:1;background:var(--aura-color-bg,#050505);color:var(--aura-color-text,#ccffcc);
@@ -672,8 +679,61 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
       }
     }
 
+    function parentDir() {
+      return dialogCurDir.split('/').slice(0, -1).join('/');
+    }
+
+    // Move srcName (relative to the current dir) into targetRelDir (relative to
+    // the files root). Used by drag-and-drop onto folders / the ".." entry.
+    function moveEntry(srcName, targetRelDir) {
+      const srcRel = relOf(srcName);
+      const dstRel = targetRelDir ? `${targetRelDir}/${srcName}` : srcName;
+      if (dstRel === srcRel || dstRel.startsWith(srcRel + '/')) return; // self / own subtree
+      fetch('api/files', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ op: 'rename', path: srcRel, newPath: dstRel }),
+      }).then(() => {
+        if (dialogSelected === srcName) dialogSelected = null;
+        refreshDialogList();
+      }).catch(() => refreshDialogList());
+    }
+
+    function makeDropTarget(el, targetDirFn) {
+      el.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+        el.classList.add('drag-over');
+      });
+      el.addEventListener('dragleave', () => el.classList.remove('drag-over'));
+      el.addEventListener('drop', (e) => {
+        e.preventDefault();
+        el.classList.remove('drag-over');
+        const srcName = e.dataTransfer?.getData('text/plain');
+        if (srcName) moveEntry(srcName, targetDirFn());
+      });
+    }
+
     function renderDialogEntries(entries) {
       dialogList.innerHTML = '';
+
+      // ".." parent entry (navigate up + drop target to move a level up).
+      if (dialogCurDir) {
+        const up = document.createElement('div');
+        up.className = 'dialog-entry is-dir is-parent';
+        const icon = document.createElement('span');
+        icon.className = 'icon';
+        icon.textContent = '↰';
+        const name = document.createElement('span');
+        name.className = 'entry-name';
+        name.textContent = '..';
+        up.appendChild(icon);
+        up.appendChild(name);
+        up.addEventListener('click', () => navigateDialog(parentDir()));
+        makeDropTarget(up, parentDir);
+        dialogList.appendChild(up);
+      }
+
       if (!entries || entries.length === 0) {
         const empty = document.createElement('div');
         empty.id = 'dialog-empty';
@@ -681,6 +741,7 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
         dialogList.appendChild(empty);
         return;
       }
+
       for (const entry of entries) {
         const el = document.createElement('div');
         el.className = 'dialog-entry' + (entry.isDir ? ' is-dir' : '');
@@ -716,8 +777,20 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
         el.appendChild(name);
         el.appendChild(actions);
 
+        // Draggable — files and folders can be dragged onto folders / "..".
+        el.draggable = true;
+        el.addEventListener('dragstart', (e) => {
+          if (e.dataTransfer) {
+            e.dataTransfer.setData('text/plain', entry.name);
+            e.dataTransfer.effectAllowed = 'move';
+          }
+          el.classList.add('dragging');
+        });
+        el.addEventListener('dragend', () => el.classList.remove('dragging'));
+
         if (entry.isDir) {
           el.addEventListener('click', () => navigateDialog(relOf(entry.name)));
+          makeDropTarget(el, () => relOf(entry.name));
         } else {
           el.addEventListener('click', () => selectEntry(entry.name));
           el.addEventListener('dblclick', () => { selectEntry(entry.name); confirmDialogFn(); });
