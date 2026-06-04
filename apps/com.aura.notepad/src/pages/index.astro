@@ -384,9 +384,11 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
   (() => {
     // ── State ──────────────────────────────────────────────────────────────
     let tabs       = [];      // [{ id, name, path, revision }]
-    let activeId   = '';
+    let activeId   = '';      // PER-WINDOW selected tab (local only)
     let textCache  = {};      // { [id]: string } — last known text per tab
     let suppressPut = false;
+    let dirty       = false;  // unsaved local keystrokes in the active editor
+    let shownTabId  = '';     // which tab's text the editor currently shows
 
     const editor      = document.getElementById('editor');
     const tabList     = document.getElementById('tab-list');
@@ -490,45 +492,54 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
     }
 
     // ── Tab actions ────────────────────────────────────────────────────────
+    // The active/selected tab is PER WINDOW. The tab list + every tab's text
+    // stay fully synced across all windows via SSE; only which tab THIS window
+    // is viewing is local state (`activeId`).
+
+    /** Push the active tab's cached text into the editor, preserving caret. */
+    function showActiveText() {
+      const txt = textCache[activeId] ?? '';
+      shownTabId = activeId;
+      if (editor.value === txt) return;
+      const wasFocused = document.activeElement === editor;
+      const start = editor.selectionStart, end = editor.selectionEnd;
+      suppressPut = true;
+      editor.value = txt;
+      suppressPut = false;
+      if (wasFocused) editor.setSelectionRange(start, end);
+    }
+
     function switchTab(id) {
       if (id === activeId) return;
-      // Optimistic: show cached text immediately
-      const cached = textCache[id];
-      if (cached !== undefined) {
-        suppressPut = true;
-        editor.value = cached;
-        suppressPut = false;
-      }
       activeId = id;
+      dirty = false;
+      showActiveText();
       renderTabs();
       updateFooter();
-      // Tell server + fetch fresh text
+      // Persist as the server's "default active" so a freshly-opened window
+      // lands here. Does NOT change any other window's active tab.
       fetch(`api/tabs/${id}/active`, { method: 'PUT' }).catch(() => {});
-      fetch(`api/tabs/${id}`)
-        .then(r => r.json())
-        .then(data => {
-          if (data.id !== activeId) return; // switched again
-          textCache[data.id] = data.text;
-          const rev = parseInt(data.revision, 10);
-          if (rev !== (tabs.find(t => t.id === data.id)?.revision ?? -1) || editor.value !== data.text) {
-            suppressPut = true;
-            const wasFocused = document.activeElement === editor;
-            const pos = editor.selectionStart;
-            editor.value = data.text;
-            suppressPut = false;
-            if (wasFocused) editor.setSelectionRange(pos, pos);
-          }
-        })
-        .catch(() => {});
     }
 
     function closeTab(id) {
-      fetch(`api/tabs/${id}`, { method: 'DELETE' }).catch(() => {});
+      // Optimistically move our own selection off the tab we're closing.
+      if (id === activeId) {
+        const idx = tabs.findIndex(t => t.id === id);
+        const next = tabs[idx + 1] || tabs[idx - 1];
+        if (next) { activeId = next.id; dirty = false; showActiveText(); renderTabs(); updateFooter(); }
+      }
       delete textCache[id];
+      fetch(`api/tabs/${id}`, { method: 'DELETE' }).catch(() => {});
     }
 
     function newTab() {
-      fetch('api/tabs', { method: 'POST' }).catch(() => {});
+      fetch('api/tabs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      }).then(r => r.json())
+        .then(tab => { if (tab && tab.id) { textCache[tab.id] = ''; switchTab(tab.id); } })
+        .catch(() => {});
     }
 
     // ── SSE sync ───────────────────────────────────────────────────────────
@@ -537,34 +548,40 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
     sse.onerror = () => { status.textContent = 'DISCONNECTED'; status.className = ''; };
     sse.onmessage = (e) => {
       const data = JSON.parse(e.data);
-      tabs     = data.tabs ?? [];
+      const oldTabs  = tabs;
+      const oldIndex = oldTabs.findIndex(t => t.id === activeId);
+      tabs = data.tabs ?? [];
       mCount.textContent = String(data.activityCount ?? 0);
 
-      const prevActiveId = activeId;
-      activeId = data.activeTabId ?? (tabs[0]?.id ?? '');
+      // Authoritative text for every tab comes from the server.
+      const cache = {};
+      for (const t of tabs) cache[t.id] = t.text ?? '';
+      textCache = cache;
 
-      // Update active tab's text if it changed
-      const activeTab = tabs.find(t => t.id === activeId);
-      if (activeTab && data.activeText !== undefined) {
-        const prev = textCache[activeId];
-        textCache[activeId] = data.activeText;
-        if (activeId === prevActiveId) {
-          if (data.activeText !== prev || activeTab.revision !== parseInt(mRev.textContent, 10)) {
-            const wasFocused = document.activeElement === editor;
-            const pos = editor.selectionStart;
-            if (editor.value !== data.activeText) {
-              suppressPut = true;
-              editor.value = data.activeText;
-              suppressPut = false;
-              if (wasFocused) editor.setSelectionRange(pos, pos);
-            }
-          }
+      // Resolve our (local) active tab.
+      if (!activeId || !tabs.find(t => t.id === activeId)) {
+        if (tabs.length === 0) {
+          activeId = '';
+        } else if (!activeId && data.defaultActiveId && tabs.find(t => t.id === data.defaultActiveId)) {
+          activeId = data.defaultActiveId;               // fresh window → server default
+        } else if (oldIndex >= 0) {
+          activeId = tabs[Math.min(oldIndex, tabs.length - 1)].id;  // our tab was closed elsewhere
         } else {
-          // Tab switched from server side
-          suppressPut = true;
-          editor.value = data.activeText;
-          suppressPut = false;
+          activeId = tabs[0].id;
         }
+      }
+
+      // Update the editor for our active tab. If we switched tabs (or our tab
+      // was closed and reassigned), always show the new tab's text. Otherwise,
+      // while the user is mid-typing in this tab don't clobber their unsaved
+      // keystrokes — just clear `dirty` once the server echo catches up.
+      if (shownTabId !== activeId) {
+        dirty = false;
+        showActiveText();
+      } else if (dirty && document.activeElement === editor) {
+        if ((textCache[activeId] ?? '') === editor.value) dirty = false;
+      } else {
+        showActiveText();
       }
 
       renderTabs();
@@ -575,6 +592,7 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
     let debounce;
     editor.addEventListener('input', () => {
       if (suppressPut) return;
+      dirty = true;
       textCache[activeId] = editor.value;
       clearTimeout(debounce);
       debounce = setTimeout(() => {
@@ -920,6 +938,11 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ path: absPath, name, text: content ?? '' }),
             });
+          })
+          .then(r => r && r.json())
+          .then((tab) => {
+            // Switch THIS window to the opened tab (per-window active).
+            if (tab && tab.id) { textCache[tab.id] = (textCache[tab.id] ?? ''); switchTab(tab.id); }
           })
           .catch(() => {});
       } else {

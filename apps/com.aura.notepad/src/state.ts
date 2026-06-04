@@ -127,14 +127,19 @@ export const state = g[KEY]!;
 
 // ── Snapshots ────────────────────────────────────────────────────────────────
 
-/** Metadata-only snapshot for SSE (no per-tab text except the active one). */
+/**
+ * SSE snapshot. Includes EVERY tab's text so each window can display whichever
+ * tab it has locally selected — the active tab is a per-window concept, not a
+ * shared one. `defaultActiveId` is only a hint for what a freshly-opened window
+ * should show before the user picks a tab.
+ */
 export function sseSnapshot() {
-  const active = state.tabs.find(t => t.id === state.activeTabId);
   return {
-    tabs:         state.tabs.map(t => ({ id: t.id, name: t.name, path: t.path, revision: t.revision })),
-    activeTabId:  state.activeTabId,
-    activeText:   active?.text ?? '',
-    activityCount: state.activities.size,
+    tabs: state.tabs.map(t => ({
+      id: t.id, name: t.name, path: t.path, revision: t.revision, text: t.text,
+    })),
+    defaultActiveId: state.activeTabId,
+    activityCount:   state.activities.size,
   };
 }
 
