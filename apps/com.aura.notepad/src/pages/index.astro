@@ -204,9 +204,10 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
   </header>
 
   <div id="tab-bar">
-    <div id="tab-list">
-      <div id="tab-new" title="New tab (Ctrl+T)">+</div>
-    </div>
+    <div id="tab-scroll-left" class="tab-scroll" title="Scroll tabs left" hidden>◀</div>
+    <div id="tab-list"></div>
+    <div id="tab-scroll-right" class="tab-scroll" title="Scroll tabs right" hidden>▶</div>
+    <div id="tab-new" title="New tab (Ctrl+T)">+</div>
     <div id="tab-actions">
       <button class="tab-btn" id="btn-open" title="Open file (Ctrl+O)">OPEN</button>
       <button class="tab-btn" id="btn-save" title="Save file (Ctrl+S)">SAVE</button>
@@ -291,9 +292,21 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
         display:flex;align-items:center;justify-content:center;width:36px;
         font-size:1.1rem;color:var(--aura-color-text-dim,#557755);
         cursor:pointer;flex-shrink:0;
+        border-left:1px solid var(--aura-color-border,rgba(0,255,65,.15));
         transition:color .1s,background .1s;
       }
       #tab-new:hover{color:var(--aura-color-primary,#00ff41);background:rgba(0,255,65,.05)}
+      .tab-scroll{
+        display:flex;align-items:center;justify-content:center;width:26px;
+        font-size:.7rem;color:var(--aura-color-text-dim,#557755);
+        cursor:pointer;flex-shrink:0;
+        background:color-mix(in srgb,var(--aura-color-surface,#111) 60%,#000 40%);
+        transition:color .1s,background .1s;
+      }
+      .tab-scroll:hover{color:var(--aura-color-primary,#00ff41);background:rgba(0,255,65,.05)}
+      #tab-scroll-left{border-right:1px solid var(--aura-color-border,rgba(0,255,65,.15))}
+      #tab-scroll-right{border-left:1px solid var(--aura-color-border,rgba(0,255,65,.15))}
+      .tab-scroll[hidden]{display:none}
       #tab-actions{
         display:flex;align-items:center;gap:4px;padding:0 10px;flex-shrink:0;
         border-left:1px solid var(--aura-color-border,rgba(0,255,65,.15));
@@ -327,9 +340,7 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
 
     // ── Tab rendering ──────────────────────────────────────────────────────
     function renderTabs() {
-      const newBtn = document.getElementById('tab-new');
-      // Remove only existing tab elements — keep the trailing + button in place.
-      tabList.querySelectorAll('.tab').forEach((t) => t.remove());
+      tabList.innerHTML = '';
       for (const t of tabs) {
         const el = document.createElement('div');
         el.className = 'tab' + (t.id === activeId ? ' active' : '') + (!t.path ? ' untitled' : '');
@@ -352,12 +363,45 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
         el.appendChild(closeBtn);
 
         el.addEventListener('click', () => switchTab(t.id));
-        // Insert each tab before the + button so it always trails the tabs.
-        tabList.insertBefore(el, newBtn);
+        tabList.appendChild(el);
       }
       // Scroll active tab into view
       const activeEl = tabList.querySelector('.tab.active');
       if (activeEl) activeEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      updateScrollButtons();
+    }
+
+    // ── Tab horizontal scrolling ───────────────────────────────────────────
+    const scrollLeftBtn  = document.getElementById('tab-scroll-left');
+    const scrollRightBtn = document.getElementById('tab-scroll-right');
+
+    function updateScrollButtons() {
+      const overflowing = tabList.scrollWidth > tabList.clientWidth + 1;
+      if (!overflowing) {
+        scrollLeftBtn.hidden  = true;
+        scrollRightBtn.hidden = true;
+        return;
+      }
+      const atStart = tabList.scrollLeft <= 0;
+      const atEnd   = tabList.scrollLeft + tabList.clientWidth >= tabList.scrollWidth - 1;
+      scrollLeftBtn.hidden  = false;
+      scrollRightBtn.hidden = false;
+      scrollLeftBtn.style.opacity  = atStart ? '0.3' : '1';
+      scrollRightBtn.style.opacity = atEnd   ? '0.3' : '1';
+      scrollLeftBtn.style.pointerEvents  = atStart ? 'none' : 'auto';
+      scrollRightBtn.style.pointerEvents = atEnd   ? 'none' : 'auto';
+    }
+
+    function scrollTabs(dir) {
+      tabList.scrollBy({ left: dir * Math.max(120, tabList.clientWidth * 0.6), behavior: 'smooth' });
+    }
+    scrollLeftBtn.addEventListener('click',  () => scrollTabs(-1));
+    scrollRightBtn.addEventListener('click', () => scrollTabs(1));
+    tabList.addEventListener('scroll', updateScrollButtons, { passive: true });
+    if (typeof ResizeObserver !== 'undefined') {
+      new ResizeObserver(updateScrollButtons).observe(tabList);
+    } else {
+      window.addEventListener('resize', updateScrollButtons);
     }
 
     function updateFooter() {
