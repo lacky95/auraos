@@ -1,5 +1,5 @@
 import type { APIRoute } from 'astro';
-import { state, snapshot } from '../../state.js';
+import { sseSnapshot, state } from '../../state.js';
 
 export const GET: APIRoute = () => {
   const encoder = new TextEncoder();
@@ -11,10 +11,10 @@ export const GET: APIRoute = () => {
         if (closed) return;
         try { controller.enqueue(chunk); } catch { closed = true; cleanup(); }
       };
-      const send = () => safeEnqueue(encoder.encode(`data: ${JSON.stringify(snapshot())}\n\n`));
+      const send = () => safeEnqueue(encoder.encode(`data: ${JSON.stringify(sseSnapshot())}\n\n`));
 
       state.listeners.add(send);
-      send();  // initial state
+      send();
       const heartbeat = setInterval(() => safeEnqueue(encoder.encode(': hb\n\n')), 15_000);
 
       const cleanup = () => {

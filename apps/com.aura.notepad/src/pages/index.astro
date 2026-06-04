@@ -1,6 +1,5 @@
 ---
-const appId      = Astro.request.headers.get('x-aura-app-id')      ?? 'com.aura.notepad';
-const instanceId = Astro.request.headers.get('x-aura-instance-id') ?? appId;
+const instanceId = Astro.request.headers.get('x-aura-instance-id') ?? 'com.aura.notepad';
 const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
 ---
 <!DOCTYPE html>
@@ -9,12 +8,6 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Notepad — AuraOS</title>
-  <!-- /api/os/theme.css is auto-injected by the proxy for themeStrategy='inherit'
-       apps (the default). The explicit link below is harmless and survives
-       direct curl/headless renders that don't go through the proxy. It exposes
-       the active theme's palette as --aura-color-* / --aura-glow-* variables,
-       so the styles below pick up whichever of the OS themes is active and
-       react live to theme/mode changes without any JS. -->
   <link rel="stylesheet" href="/api/os/theme.css" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -27,52 +20,265 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
       flex-direction: column;
       overflow: hidden;
     }
+
+    /* ── Header ─────────────────────────────────────────────────────── */
     header {
       display: flex;
       align-items: center;
       gap: 12px;
-      padding: 6px 12px;
+      padding: 4px 12px;
       background: var(--aura-color-surface, #111);
       border-bottom: 1px solid var(--aura-color-border, rgba(0,255,65,.2));
-      font-size: 0.7rem;
+      font-size: 0.65rem;
       text-transform: uppercase;
       letter-spacing: .1em;
       color: var(--aura-color-text-dim, #557755);
       flex-shrink: 0;
     }
-    header .name { color: var(--aura-color-primary, #00ff41); font-size: 0.85rem; }
-    header .meta { display: flex; gap: 10px; flex-wrap: wrap; }
+    header .name { color: var(--aura-color-primary, #00ff41); font-size: 0.8rem; }
+    header .meta { display: flex; gap: 10px; }
     header .meta b { color: var(--aura-color-secondary, #ff9900); font-weight: normal; }
-    main { flex: 1; padding: 8px; display: flex; flex-direction: column; }
-    textarea {
+
+    /* ── Tab bar ─────────────────────────────────────────────────────── */
+    #tab-bar {
+      display: flex;
+      align-items: stretch;
+      background: var(--aura-color-surface, #111);
+      border-bottom: 1px solid var(--aura-color-border, rgba(0,255,65,.2));
+      flex-shrink: 0;
+      min-height: 32px;
+    }
+    #tab-list {
+      display: flex;
+      align-items: stretch;
+      overflow-x: auto;
+      flex: 1;
+      scrollbar-width: none;
+    }
+    #tab-list::-webkit-scrollbar { display: none; }
+    .tab {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 10px;
+      font-size: 0.65rem;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: var(--aura-color-text-dim, #557755);
+      border-right: 1px solid var(--aura-color-border, rgba(0,255,65,.1));
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+      border-bottom: 2px solid transparent;
+      user-select: none;
+    }
+    .tab:hover { color: var(--aura-color-text, #ccffcc); background: rgba(0,255,65,.04); }
+    .tab.active {
+      color: var(--aura-color-primary, #00ff41);
+      border-bottom-color: var(--aura-color-primary, #00ff41);
+      background: rgba(0,255,65,.07);
+    }
+    .tab.untitled { color: var(--aura-color-text-dim, #557755); }
+    .tab.untitled.active { color: var(--aura-color-primary, #00ff41); }
+    .tab-close {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      font-size: 0.7rem;
+      color: inherit;
+      opacity: 0.5;
+      border-radius: 2px;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .tab-close:hover { opacity: 1; background: rgba(255,74,74,.2); color: #ff4a4a; }
+    #tab-new {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      font-size: 1rem;
+      color: var(--aura-color-text-dim, #557755);
+      cursor: pointer;
+      flex-shrink: 0;
+      border-right: 1px solid var(--aura-color-border, rgba(0,255,65,.1));
+    }
+    #tab-new:hover { color: var(--aura-color-primary, #00ff41); background: rgba(0,255,65,.04); }
+
+    #tab-actions {
+      display: flex;
+      align-items: center;
+      gap: 1px;
+      padding: 0 6px;
+      flex-shrink: 0;
+    }
+    .tab-btn {
+      display: flex;
+      align-items: center;
+      padding: 0 8px;
+      height: 22px;
+      font-size: 0.6rem;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--aura-color-text-dim, #557755);
+      border: 1px solid var(--aura-color-border, rgba(0,255,65,.2));
+      background: transparent;
+      cursor: pointer;
+    }
+    .tab-btn:hover { color: var(--aura-color-primary, #00ff41); border-color: var(--aura-color-primary, #00ff41); }
+
+    /* ── Editor ──────────────────────────────────────────────────────── */
+    main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    #editor {
       flex: 1;
       background: var(--aura-color-bg, #050505);
       color: var(--aura-color-text, #ccffcc);
-      border: 1px solid var(--aura-color-border, rgba(0,255,65,.2));
+      border: none;
       padding: 12px;
       font-family: var(--aura-font-mono, 'Courier New', monospace);
       font-size: 0.95rem;
       resize: none;
       outline: none;
     }
-    textarea:focus {
-      border-color: var(--aura-color-primary, #00ff41);
-      box-shadow: var(--aura-glow-primary, 0 0 8px rgba(0,255,65,.3));
-    }
+    #editor:focus { box-shadow: inset 0 0 0 1px var(--aura-color-primary, #00ff41); }
+
+    /* ── Footer ──────────────────────────────────────────────────────── */
     footer {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 6px 12px;
+      padding: 4px 12px;
       background: var(--aura-color-surface, #111);
       border-top: 1px solid var(--aura-color-border, rgba(0,255,65,.1));
-      font-size: 0.65rem;
+      font-size: 0.6rem;
       color: var(--aura-color-text-dim, #557755);
       letter-spacing: .08em;
       text-transform: uppercase;
       flex-shrink: 0;
     }
     footer .ok { color: var(--aura-color-primary, #00ff41); }
+    footer .path { color: var(--aura-color-text, #ccffcc); opacity: 0.6; }
+
+    /* ── File dialog ─────────────────────────────────────────────────── */
+    #dialog-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.75);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+    #dialog-overlay[hidden] { display: none; }
+    #dialog-box {
+      background: var(--aura-color-surface, #111);
+      border: 1px solid var(--aura-color-primary, #00ff41);
+      box-shadow: 0 0 24px rgba(0,255,65,.15);
+      width: 480px;
+      max-width: 92vw;
+      max-height: 70vh;
+      display: flex;
+      flex-direction: column;
+      font-size: 0.7rem;
+      letter-spacing: .06em;
+    }
+    #dialog-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px;
+      background: var(--aura-color-surface-2, #191919);
+      border-bottom: 1px solid var(--aura-color-border, rgba(0,255,65,.2));
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      letter-spacing: .1em;
+      color: var(--aura-color-primary, #00ff41);
+    }
+    #dialog-close-btn {
+      cursor: pointer; color: var(--aura-color-text-dim, #557755); font-size: 0.8rem;
+    }
+    #dialog-close-btn:hover { color: #ff4a4a; }
+    #dialog-breadcrumb {
+      padding: 6px 12px;
+      font-size: 0.6rem;
+      color: var(--aura-color-text-dim, #557755);
+      border-bottom: 1px solid var(--aura-color-border, rgba(0,255,65,.1));
+      display: flex;
+      gap: 2px;
+      flex-wrap: wrap;
+    }
+    .breadcrumb-seg {
+      cursor: pointer;
+      color: var(--aura-color-primary, #00ff41);
+      opacity: .7;
+    }
+    .breadcrumb-seg:hover { opacity: 1; }
+    .breadcrumb-sep { color: var(--aura-color-text-dim, #557755); }
+    #dialog-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 4px 0;
+      min-height: 120px;
+    }
+    .dialog-entry {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      cursor: pointer;
+      color: var(--aura-color-text, #ccffcc);
+    }
+    .dialog-entry:hover { background: rgba(0,255,65,.06); }
+    .dialog-entry.selected { background: rgba(0,255,65,.12); color: var(--aura-color-primary, #00ff41); }
+    .dialog-entry .icon { font-size: 0.85rem; flex-shrink: 0; }
+    .dialog-entry .entry-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #dialog-empty { padding: 12px; color: var(--aura-color-text-dim, #557755); text-align: center; }
+    #dialog-filename-row {
+      padding: 8px 12px;
+      border-top: 1px solid var(--aura-color-border, rgba(0,255,65,.1));
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    #dialog-filename-row[hidden] { display: none; }
+    #dialog-filename-row label { color: var(--aura-color-text-dim, #557755); font-size: 0.6rem; text-transform: uppercase; letter-spacing: .1em; white-space: nowrap; }
+    #dialog-filename {
+      flex: 1;
+      background: var(--aura-color-bg, #050505);
+      color: var(--aura-color-text, #ccffcc);
+      border: 1px solid var(--aura-color-border, rgba(0,255,65,.2));
+      padding: 4px 8px;
+      font-family: var(--aura-font-mono, 'Courier New', monospace);
+      font-size: 0.7rem;
+      outline: none;
+    }
+    #dialog-filename:focus { border-color: var(--aura-color-primary, #00ff41); }
+    #dialog-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      padding: 8px 12px;
+      border-top: 1px solid var(--aura-color-border, rgba(0,255,65,.1));
+    }
+    .dialog-btn {
+      padding: 4px 14px;
+      font-family: var(--aura-font-mono, 'Courier New', monospace);
+      font-size: 0.65rem;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      cursor: pointer;
+      background: transparent;
+      color: var(--aura-color-text-dim, #557755);
+      border: 1px solid var(--aura-color-border, rgba(0,255,65,.2));
+    }
+    .dialog-btn:hover { color: var(--aura-color-text, #ccffcc); border-color: var(--aura-color-text-dim); }
+    .dialog-btn.primary {
+      color: var(--aura-color-primary, #00ff41);
+      border-color: var(--aura-color-primary, #00ff41);
+    }
+    .dialog-btn.primary:hover { box-shadow: 0 0 8px rgba(0,255,65,.3); }
   </style>
 </head>
 <body>
@@ -80,62 +286,377 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
     <span class="name">▤ NOTEPAD</span>
     <div class="meta">
       <span>INST <b id="m-instance">{instanceId}</b></span>
-      <span>ACT <b id="m-activity">{activityId}</b></span>
       <span>ACTIVITIES <b id="m-count">…</b></span>
-      <span>REV <b id="m-rev">0</b></span>
     </div>
   </header>
+
+  <div id="tab-bar">
+    <div id="tab-list"></div>
+    <div id="tab-new" title="New tab (Ctrl+T)">+</div>
+    <div id="tab-actions">
+      <button class="tab-btn" id="btn-open" title="Open file (Ctrl+O)">OPEN</button>
+      <button class="tab-btn" id="btn-save" title="Save file (Ctrl+S)">SAVE</button>
+    </div>
+  </div>
+
   <main>
-    <textarea id="editor" placeholder="Tippe etwas — alle Activities auf dieser Instance sehen es live..."></textarea>
+    <textarea id="editor" placeholder="Start typing…"></textarea>
   </main>
+
   <footer>
     <span id="status">CONNECTING…</span>
-    <span>SHARED BACKEND · ONE INSTANCE · MANY ACTIVITIES</span>
+    <span id="footer-path" class="path"></span>
+    <span>REV <b id="m-rev">0</b></span>
   </footer>
-  <script is:inline>
-    const editor   = document.getElementById('editor');
-    const status   = document.getElementById('status');
-    const mCount   = document.getElementById('m-count');
-    const mRev     = document.getElementById('m-rev');
 
-    let lastRev = -1;
+  <!-- File dialog -->
+  <div id="dialog-overlay" hidden>
+    <div id="dialog-box">
+      <div id="dialog-title-row">
+        <span id="dialog-title">OPEN FILE</span>
+        <span id="dialog-close-btn" title="Cancel">✕</span>
+      </div>
+      <div id="dialog-breadcrumb"></div>
+      <div id="dialog-list"></div>
+      <div id="dialog-filename-row">
+        <label for="dialog-filename">FILENAME</label>
+        <input id="dialog-filename" type="text" autocomplete="off" spellcheck="false" />
+      </div>
+      <div id="dialog-footer">
+        <button class="dialog-btn" id="dialog-cancel">CANCEL</button>
+        <button class="dialog-btn primary" id="dialog-confirm">OPEN</button>
+      </div>
+    </div>
+  </div>
+
+  <script is:inline>
+  (() => {
+    // ── State ──────────────────────────────────────────────────────────────
+    let tabs       = [];      // [{ id, name, path, revision }]
+    let activeId   = '';
+    let textCache  = {};      // { [id]: string } — last known text per tab
     let suppressPut = false;
 
-    // Live sync: SSE pushes new state from the backend
+    const editor      = document.getElementById('editor');
+    const tabList     = document.getElementById('tab-list');
+    const status      = document.getElementById('status');
+    const mCount      = document.getElementById('m-count');
+    const mRev        = document.getElementById('m-rev');
+    const footerPath  = document.getElementById('footer-path');
+
+    // ── Tab rendering ──────────────────────────────────────────────────────
+    function renderTabs() {
+      tabList.innerHTML = '';
+      for (const t of tabs) {
+        const el = document.createElement('div');
+        el.className = 'tab' + (t.id === activeId ? ' active' : '') + (!t.path ? ' untitled' : '');
+        el.dataset.id = t.id;
+        el.title = t.path ?? t.name;
+
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = t.name;
+        el.appendChild(nameSpan);
+
+        const closeBtn = document.createElement('span');
+        closeBtn.className = 'tab-close';
+        closeBtn.textContent = '×';
+        closeBtn.title = 'Close tab';
+        closeBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          closeTab(t.id);
+        });
+        el.appendChild(closeBtn);
+
+        el.addEventListener('click', () => switchTab(t.id));
+        tabList.appendChild(el);
+      }
+      // Scroll active tab into view
+      const activeEl = tabList.querySelector('.tab.active');
+      if (activeEl) activeEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+
+    function updateFooter() {
+      const active = tabs.find(t => t.id === activeId);
+      footerPath.textContent = active?.path ? active.path.replace('/data/files/', '') : active ? '(untitled)' : '';
+      mRev.textContent = String(active?.revision ?? 0);
+    }
+
+    // ── Tab actions ────────────────────────────────────────────────────────
+    function switchTab(id) {
+      if (id === activeId) return;
+      // Optimistic: show cached text immediately
+      const cached = textCache[id];
+      if (cached !== undefined) {
+        suppressPut = true;
+        editor.value = cached;
+        suppressPut = false;
+      }
+      activeId = id;
+      renderTabs();
+      updateFooter();
+      // Tell server + fetch fresh text
+      fetch(`api/tabs/${id}/active`, { method: 'PUT' }).catch(() => {});
+      fetch(`api/tabs/${id}`)
+        .then(r => r.json())
+        .then(data => {
+          if (data.id !== activeId) return; // switched again
+          textCache[data.id] = data.text;
+          const rev = parseInt(data.revision, 10);
+          if (rev !== (tabs.find(t => t.id === data.id)?.revision ?? -1) || editor.value !== data.text) {
+            suppressPut = true;
+            const wasFocused = document.activeElement === editor;
+            const pos = editor.selectionStart;
+            editor.value = data.text;
+            suppressPut = false;
+            if (wasFocused) editor.setSelectionRange(pos, pos);
+          }
+        })
+        .catch(() => {});
+    }
+
+    function closeTab(id) {
+      fetch(`api/tabs/${id}`, { method: 'DELETE' }).catch(() => {});
+      delete textCache[id];
+    }
+
+    function newTab() {
+      fetch('api/tabs', { method: 'POST' }).catch(() => {});
+    }
+
+    // ── SSE sync ───────────────────────────────────────────────────────────
     const sse = new EventSource('api/events');
-    sse.onopen    = () => { status.textContent = 'CONNECTED'; status.className = 'ok'; };
-    sse.onerror   = () => { status.textContent = 'DISCONNECTED'; status.className = ''; };
+    sse.onopen  = () => { status.textContent = 'CONNECTED'; status.className = 'ok'; };
+    sse.onerror = () => { status.textContent = 'DISCONNECTED'; status.className = ''; };
     sse.onmessage = (e) => {
       const data = JSON.parse(e.data);
-      mCount.textContent = String(data.activityCount);
-      mRev.textContent   = String(data.revision);
-      if (data.revision !== lastRev) {
-        lastRev = data.revision;
-        if (document.activeElement !== editor || editor.value !== data.text) {
-          // preserve caret if user is typing here
-          const wasFocused = document.activeElement === editor;
-          const pos = editor.selectionStart;
+      tabs     = data.tabs ?? [];
+      mCount.textContent = String(data.activityCount ?? 0);
+
+      const prevActiveId = activeId;
+      activeId = data.activeTabId ?? (tabs[0]?.id ?? '');
+
+      // Update active tab's text if it changed
+      const activeTab = tabs.find(t => t.id === activeId);
+      if (activeTab && data.activeText !== undefined) {
+        const prev = textCache[activeId];
+        textCache[activeId] = data.activeText;
+        if (activeId === prevActiveId) {
+          if (data.activeText !== prev || activeTab.revision !== parseInt(mRev.textContent, 10)) {
+            const wasFocused = document.activeElement === editor;
+            const pos = editor.selectionStart;
+            if (editor.value !== data.activeText) {
+              suppressPut = true;
+              editor.value = data.activeText;
+              suppressPut = false;
+              if (wasFocused) editor.setSelectionRange(pos, pos);
+            }
+          }
+        } else {
+          // Tab switched from server side
           suppressPut = true;
-          editor.value = data.text;
+          editor.value = data.activeText;
           suppressPut = false;
-          if (wasFocused) editor.setSelectionRange(pos, pos);
         }
       }
+
+      renderTabs();
+      updateFooter();
     };
 
-    // Debounced PUT: send buffer changes upstream
+    // ── Text input → server ────────────────────────────────────────────────
     let debounce;
     editor.addEventListener('input', () => {
       if (suppressPut) return;
+      textCache[activeId] = editor.value;
       clearTimeout(debounce);
       debounce = setTimeout(() => {
-        fetch('api/note', {
+        if (!activeId) return;
+        fetch(`api/tabs/${activeId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: editor.value }),
-        }).catch(() => undefined);
+        }).catch(() => {});
       }, 150);
     });
+
+    // ── Toolbar buttons ────────────────────────────────────────────────────
+    document.getElementById('tab-new').addEventListener('click', newTab);
+    document.getElementById('btn-open').addEventListener('click', () => openDialog('open'));
+    document.getElementById('btn-save').addEventListener('click', () => openDialog('save'));
+
+    // ── Keyboard shortcuts ─────────────────────────────────────────────────
+    document.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 't') { e.preventDefault(); newTab(); }
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); openDialog('save'); }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'o') { e.preventDefault(); openDialog('open'); }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'w') { e.preventDefault(); if (activeId) closeTab(activeId); }
+      if (e.key === 'Escape' && !dialogOverlay.hidden) closeDialogFn();
+    });
+
+    // ── File dialog ────────────────────────────────────────────────────────
+    const dialogOverlay  = document.getElementById('dialog-overlay');
+    const dialogTitle    = document.getElementById('dialog-title');
+    const dialogBreadcrumb = document.getElementById('dialog-breadcrumb');
+    const dialogList     = document.getElementById('dialog-list');
+    const dialogFilenameRow = document.getElementById('dialog-filename-row');
+    const dialogFilename = document.getElementById('dialog-filename');
+    const dialogConfirm  = document.getElementById('dialog-confirm');
+    const dialogCancel   = document.getElementById('dialog-cancel');
+    const dialogCloseBtn = document.getElementById('dialog-close-btn');
+
+    let dialogMode = 'open';       // 'open' | 'save'
+    let dialogCurDir = '';         // relative path within /data/files/
+    let dialogSelected = null;     // selected file name
+
+    function openDialog(mode) {
+      dialogMode = mode;
+      dialogTitle.textContent = mode === 'save' ? 'SAVE FILE' : 'OPEN FILE';
+      dialogConfirm.textContent = mode === 'save' ? 'SAVE' : 'OPEN';
+      dialogFilenameRow.hidden = mode !== 'save';
+      if (mode === 'save') {
+        const active = tabs.find(t => t.id === activeId);
+        dialogFilename.value = active?.name ?? 'untitled.txt';
+      }
+      dialogSelected = null;
+      navigateDialog('');
+      dialogOverlay.hidden = false;
+      if (mode === 'save') setTimeout(() => dialogFilename.focus(), 50);
+    }
+
+    function closeDialogFn() {
+      dialogOverlay.hidden = true;
+      dialogSelected = null;
+      editor.focus();
+    }
+
+    function navigateDialog(relDir) {
+      dialogCurDir = relDir;
+      dialogSelected = null;
+      renderBreadcrumb();
+      fetch(`api/files?dir=${encodeURIComponent(relDir)}`)
+        .then(r => r.json())
+        .then(({ entries }) => renderDialogEntries(entries))
+        .catch(() => renderDialogEntries([]));
+    }
+
+    function renderBreadcrumb() {
+      dialogBreadcrumb.innerHTML = '';
+      const parts = dialogCurDir ? dialogCurDir.split('/').filter(Boolean) : [];
+      const addSeg = (label, dir) => {
+        const s = document.createElement('span');
+        s.className = 'breadcrumb-seg';
+        s.textContent = label;
+        s.addEventListener('click', () => navigateDialog(dir));
+        dialogBreadcrumb.appendChild(s);
+      };
+      const addSep = () => {
+        const s = document.createElement('span');
+        s.className = 'breadcrumb-sep';
+        s.textContent = ' / ';
+        dialogBreadcrumb.appendChild(s);
+      };
+      addSeg('files', '');
+      for (let i = 0; i < parts.length; i++) {
+        addSep();
+        addSeg(parts[i], parts.slice(0, i + 1).join('/'));
+      }
+    }
+
+    function renderDialogEntries(entries) {
+      dialogList.innerHTML = '';
+      if (!entries || entries.length === 0) {
+        const empty = document.createElement('div');
+        empty.id = 'dialog-empty';
+        empty.textContent = 'empty directory';
+        dialogList.appendChild(empty);
+        return;
+      }
+      for (const entry of entries) {
+        const el = document.createElement('div');
+        el.className = 'dialog-entry';
+        const icon = document.createElement('span');
+        icon.className = 'icon';
+        icon.textContent = entry.isDir ? '▸' : '▤';
+        const name = document.createElement('span');
+        name.className = 'entry-name';
+        name.textContent = entry.name;
+        el.appendChild(icon);
+        el.appendChild(name);
+
+        if (entry.isDir) {
+          el.addEventListener('click', () => {
+            const sub = dialogCurDir ? `${dialogCurDir}/${entry.name}` : entry.name;
+            navigateDialog(sub);
+          });
+        } else {
+          el.addEventListener('click', () => {
+            document.querySelectorAll('.dialog-entry.selected').forEach(e => e.classList.remove('selected'));
+            el.classList.add('selected');
+            dialogSelected = entry.name;
+            if (dialogMode === 'save') dialogFilename.value = entry.name;
+          });
+          if (dialogMode === 'open') {
+            el.addEventListener('dblclick', () => { dialogSelected = entry.name; confirmDialogFn(); });
+          }
+        }
+        dialogList.appendChild(el);
+      }
+    }
+
+    function confirmDialogFn() {
+      if (dialogMode === 'open') {
+        if (!dialogSelected) return;
+        const relPath = dialogCurDir ? `${dialogCurDir}/${dialogSelected}` : dialogSelected;
+        fetch(`api/files?file=${encodeURIComponent(relPath)}`)
+          .then(r => r.json())
+          .then(({ content }) => {
+            const absPath = `/data/files/${relPath}`;
+            const name = dialogSelected;
+            // Check if already open
+            const existing = tabs.find(t => t.path === absPath);
+            if (existing) {
+              fetch(`api/tabs/${existing.id}/active`, { method: 'PUT' }).catch(() => {});
+            } else {
+              fetch('api/tabs', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+              }).then(r => r.json()).then(tab => {
+                return fetch(`api/tabs/${tab.id}`, {
+                  method: 'PUT',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ text: content, path: absPath, name }),
+                });
+              }).catch(() => {});
+            }
+          })
+          .catch(() => {});
+      } else {
+        // Save mode
+        const fname = dialogFilename.value.trim();
+        if (!fname) { dialogFilename.focus(); return; }
+        const relPath = dialogCurDir ? `${dialogCurDir}/${fname}` : fname;
+        const absPath = `/data/files/${relPath}`;
+        if (!activeId) { closeDialogFn(); return; }
+        fetch(`api/tabs/${activeId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: absPath, name: fname }),
+        }).catch(() => {});
+      }
+      closeDialogFn();
+    }
+
+    dialogConfirm.addEventListener('click', confirmDialogFn);
+    dialogCancel.addEventListener('click', closeDialogFn);
+    dialogCloseBtn.addEventListener('click', closeDialogFn);
+    dialogFilename.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') confirmDialogFn();
+    });
+
+    // Prevent dialog close on overlay click (click inside box stays open)
+    document.getElementById('dialog-box').addEventListener('click', (e) => e.stopPropagation());
+    dialogOverlay.addEventListener('click', closeDialogFn);
+  })();
   </script>
 </body>
 </html>
