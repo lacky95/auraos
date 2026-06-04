@@ -411,9 +411,9 @@ export class ThemeManager {
   ];
 
   /** Default pick for the dark slot when no user pref exists. */
-  static readonly DEFAULT_THEME_ID_DARK  = 'sci-fi';
+  static readonly DEFAULT_THEME_ID_DARK  = 'cyan';
   /** Default pick for the light slot when no user pref exists. */
-  static readonly DEFAULT_THEME_ID_LIGHT = 'paper';
+  static readonly DEFAULT_THEME_ID_LIGHT = 'mist';
   /** Backwards-compat alias — most call sites still want "the active dark theme". */
   static readonly DEFAULT_THEME_ID       = ThemeManager.DEFAULT_THEME_ID_DARK;
   static readonly DEFAULT_COLOR_MODE: ColorMode = 'dark';
