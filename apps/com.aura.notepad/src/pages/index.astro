@@ -122,32 +122,34 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
       gap: 2px;
       flex-wrap: wrap;
     }
-    .breadcrumb-seg {
-      cursor: pointer;
-      color: var(--aura-color-primary, #00ff41);
-      opacity: .7;
+    /* Breadcrumb segments are created in JS — styled in the injected block below. */
+    #dialog-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      border-bottom: 1px solid var(--aura-color-border, rgba(0,255,65,.1));
     }
-    .breadcrumb-seg:hover { opacity: 1; }
-    .breadcrumb-sep { color: var(--aura-color-text-dim, #557755); }
+    .dialog-tool-btn {
+      padding: 3px 8px;
+      font-family: var(--aura-font-mono, 'Courier New', monospace);
+      font-size: 0.6rem;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      cursor: pointer;
+      background: transparent;
+      color: var(--aura-color-text-dim, #557755);
+      border: 1px solid var(--aura-color-border, rgba(0,255,65,.2));
+    }
+    .dialog-tool-btn:hover { color: var(--aura-color-primary, #00ff41); border-color: var(--aura-color-primary, #00ff41); }
     #dialog-list {
       flex: 1;
       overflow-y: auto;
       padding: 4px 0;
       min-height: 120px;
     }
-    .dialog-entry {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 12px;
-      cursor: pointer;
-      color: var(--aura-color-text, #ccffcc);
-    }
-    .dialog-entry:hover { background: rgba(0,255,65,.06); }
-    .dialog-entry.selected { background: rgba(0,255,65,.12); color: var(--aura-color-primary, #00ff41); }
-    .dialog-entry .icon { font-size: 0.85rem; flex-shrink: 0; }
-    .dialog-entry .entry-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    #dialog-empty { padding: 12px; color: var(--aura-color-text-dim, #557755); text-align: center; }
+    /* .dialog-entry, .breadcrumb-*, #dialog-empty and per-entry action styles
+       are created in JS — defined in the injected <style> block below. */
     #dialog-filename-row {
       padding: 8px 12px;
       border-top: 1px solid var(--aura-color-border, rgba(0,255,65,.1));
@@ -232,6 +234,10 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
         <span id="dialog-close-btn" title="Cancel">✕</span>
       </div>
       <div id="dialog-breadcrumb"></div>
+      <div id="dialog-toolbar">
+        <button class="dialog-tool-btn" id="dialog-mkdir" title="Create folder here">＋ FOLDER</button>
+        <button class="dialog-tool-btn" id="dialog-refresh" title="Refresh">↻</button>
+      </div>
       <div id="dialog-list"></div>
       <div id="dialog-filename-row">
         <label for="dialog-filename">FILENAME</label>
@@ -320,6 +326,50 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
         background:transparent;cursor:pointer;transition:color .1s,border-color .1s;
       }
       .tab-btn:hover{color:var(--aura-color-primary,#00ff41);border-color:var(--aura-color-primary,#00ff41)}
+
+      /* ── File dialog (entries/breadcrumb created in JS) ─────────────── */
+      .breadcrumb-seg{cursor:pointer;color:var(--aura-color-primary,#00ff41);opacity:.7}
+      .breadcrumb-seg:hover{opacity:1;text-decoration:underline}
+      .breadcrumb-sep{color:var(--aura-color-text-dim,#557755)}
+      .dialog-entry{
+        display:flex;align-items:center;gap:8px;padding:6px 12px;cursor:pointer;
+        color:var(--aura-color-text,#ccffcc);
+        border-left:2px solid transparent;
+      }
+      .dialog-entry:hover{background:rgba(0,255,65,.06)}
+      .dialog-entry.selected{
+        background:rgba(0,255,65,.14);
+        border-left-color:var(--aura-color-primary,#00ff41);
+        color:var(--aura-color-primary,#00ff41);
+      }
+      .dialog-entry .icon{font-size:.85rem;flex-shrink:0;width:14px;text-align:center;color:var(--aura-color-secondary,#ff9900)}
+      .dialog-entry.is-dir .icon{color:var(--aura-color-primary,#00ff41)}
+      .dialog-entry .entry-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .dialog-entry .entry-rename-input{
+        flex:1;background:var(--aura-color-bg,#050505);color:var(--aura-color-text,#ccffcc);
+        border:1px solid var(--aura-color-primary,#00ff41);padding:2px 6px;
+        font-family:var(--aura-font-mono,'Courier New',monospace);font-size:.7rem;outline:none;
+      }
+      .entry-actions{display:flex;gap:2px;flex-shrink:0;opacity:0;transition:opacity .1s}
+      .dialog-entry:hover .entry-actions,.dialog-entry.selected .entry-actions{opacity:1}
+      .entry-action{
+        display:flex;align-items:center;justify-content:center;width:18px;height:18px;
+        font-size:.7rem;border-radius:2px;cursor:pointer;color:var(--aura-color-text-dim,#557755);
+      }
+      .entry-action:hover{background:rgba(0,255,65,.15);color:var(--aura-color-primary,#00ff41)}
+      .entry-action.danger:hover{background:rgba(255,74,74,.25);color:#ff6060}
+      .entry-action.confirm{color:#ff6060;font-weight:bold}
+      #dialog-empty{padding:12px;color:var(--aura-color-text-dim,#557755);text-align:center}
+      .dialog-newfolder{
+        display:flex;align-items:center;gap:8px;padding:6px 12px;
+        border-bottom:1px solid var(--aura-color-border,rgba(0,255,65,.1));
+      }
+      .dialog-newfolder .icon{font-size:.85rem;color:var(--aura-color-primary,#00ff41);flex-shrink:0;width:14px;text-align:center}
+      .dialog-newfolder input{
+        flex:1;background:var(--aura-color-bg,#050505);color:var(--aura-color-text,#ccffcc);
+        border:1px solid var(--aura-color-primary,#00ff41);padding:2px 6px;
+        font-family:var(--aura-font-mono,'Courier New',monospace);font-size:.7rem;outline:none;
+      }
     `;
     document.head.appendChild(s);
   })();
@@ -554,10 +604,15 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
     const dialogConfirm  = document.getElementById('dialog-confirm');
     const dialogCancel   = document.getElementById('dialog-cancel');
     const dialogCloseBtn = document.getElementById('dialog-close-btn');
+    const dialogMkdirBtn = document.getElementById('dialog-mkdir');
+    const dialogRefreshBtn = document.getElementById('dialog-refresh');
 
     let dialogMode = 'open';       // 'open' | 'save'
     let dialogCurDir = '';         // relative path within /data/files/
     let dialogSelected = null;     // selected file name
+    let dialogEntries  = [];       // last-fetched entries for the current dir
+
+    function relOf(name) { return dialogCurDir ? `${dialogCurDir}/${name}` : name; }
 
     function openDialog(mode) {
       dialogMode = mode;
@@ -584,10 +639,14 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
       dialogCurDir = relDir;
       dialogSelected = null;
       renderBreadcrumb();
-      fetch(`api/files?dir=${encodeURIComponent(relDir)}`)
+      refreshDialogList();
+    }
+
+    function refreshDialogList() {
+      fetch(`api/files?dir=${encodeURIComponent(dialogCurDir)}`)
         .then(r => r.json())
-        .then(({ entries }) => renderDialogEntries(entries))
-        .catch(() => renderDialogEntries([]));
+        .then(({ entries }) => { dialogEntries = entries || []; renderDialogEntries(dialogEntries); })
+        .catch(() => { dialogEntries = []; renderDialogEntries([]); });
     }
 
     function renderBreadcrumb() {
@@ -618,40 +677,158 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
       if (!entries || entries.length === 0) {
         const empty = document.createElement('div');
         empty.id = 'dialog-empty';
-        empty.textContent = 'empty directory';
+        empty.textContent = '(empty — use ＋ FOLDER or type a filename to save)';
         dialogList.appendChild(empty);
         return;
       }
       for (const entry of entries) {
         const el = document.createElement('div');
-        el.className = 'dialog-entry';
+        el.className = 'dialog-entry' + (entry.isDir ? ' is-dir' : '');
+        if (!entry.isDir && entry.name === dialogSelected) el.classList.add('selected');
+
         const icon = document.createElement('span');
         icon.className = 'icon';
         icon.textContent = entry.isDir ? '▸' : '▤';
+
         const name = document.createElement('span');
         name.className = 'entry-name';
         name.textContent = entry.name;
+
+        const actions = document.createElement('span');
+        actions.className = 'entry-actions';
+
+        const renameBtn = document.createElement('span');
+        renameBtn.className = 'entry-action';
+        renameBtn.textContent = '✎';
+        renameBtn.title = 'Rename';
+        renameBtn.addEventListener('click', (e) => { e.stopPropagation(); beginRename(el, entry); });
+
+        const delBtn = document.createElement('span');
+        delBtn.className = 'entry-action danger';
+        delBtn.textContent = '✕';
+        delBtn.title = 'Delete';
+        delBtn.addEventListener('click', (e) => { e.stopPropagation(); confirmDelete(delBtn, entry); });
+
+        actions.appendChild(renameBtn);
+        actions.appendChild(delBtn);
+
         el.appendChild(icon);
         el.appendChild(name);
+        el.appendChild(actions);
 
         if (entry.isDir) {
-          el.addEventListener('click', () => {
-            const sub = dialogCurDir ? `${dialogCurDir}/${entry.name}` : entry.name;
-            navigateDialog(sub);
-          });
+          el.addEventListener('click', () => navigateDialog(relOf(entry.name)));
         } else {
-          el.addEventListener('click', () => {
-            document.querySelectorAll('.dialog-entry.selected').forEach(e => e.classList.remove('selected'));
-            el.classList.add('selected');
-            dialogSelected = entry.name;
-            if (dialogMode === 'save') dialogFilename.value = entry.name;
-          });
-          if (dialogMode === 'open') {
-            el.addEventListener('dblclick', () => { dialogSelected = entry.name; confirmDialogFn(); });
-          }
+          el.addEventListener('click', () => selectEntry(entry.name));
+          el.addEventListener('dblclick', () => { selectEntry(entry.name); confirmDialogFn(); });
         }
         dialogList.appendChild(el);
       }
+    }
+
+    function selectEntry(name) {
+      dialogSelected = name;
+      document.querySelectorAll('.dialog-entry.selected').forEach(e => e.classList.remove('selected'));
+      const els = dialogList.querySelectorAll('.dialog-entry:not(.is-dir)');
+      for (const el of els) {
+        if (el.querySelector('.entry-name')?.textContent === name) el.classList.add('selected');
+      }
+      if (dialogMode === 'save') dialogFilename.value = name;
+    }
+
+    // ── Inline rename ────────────────────────────────────────────────────────
+    function beginRename(rowEl, entry) {
+      const nameSpan = rowEl.querySelector('.entry-name');
+      if (!nameSpan) return;
+      const input = document.createElement('input');
+      input.className = 'entry-rename-input';
+      input.value = entry.name;
+      input.spellcheck = false;
+      rowEl.replaceChild(input, nameSpan);
+      input.focus();
+      input.select();
+      let done = false;
+      const commit = () => {
+        if (done) return; done = true;
+        const newName = input.value.trim();
+        if (!newName || newName === entry.name) { refreshDialogList(); return; }
+        fetch('api/files', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ op: 'rename', path: relOf(entry.name), newPath: relOf(newName) }),
+        }).then(() => refreshDialogList()).catch(() => refreshDialogList());
+      };
+      input.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') commit();
+        else if (e.key === 'Escape') { done = true; refreshDialogList(); }
+      });
+      input.addEventListener('blur', commit);
+    }
+
+    // ── Two-step delete ──────────────────────────────────────────────────────
+    function confirmDelete(btn, entry) {
+      if (btn.dataset.confirming === '1') {
+        fetch('api/files', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ op: 'delete', path: relOf(entry.name) }),
+        }).then(() => {
+          if (dialogSelected === entry.name) dialogSelected = null;
+          refreshDialogList();
+        }).catch(() => refreshDialogList());
+        return;
+      }
+      btn.dataset.confirming = '1';
+      btn.textContent = '✓';
+      btn.classList.add('confirm');
+      btn.title = 'Click again to confirm delete';
+      setTimeout(() => {
+        if (btn.dataset.confirming === '1') {
+          btn.dataset.confirming = '';
+          btn.textContent = '✕';
+          btn.classList.remove('confirm');
+          btn.title = 'Delete';
+        }
+      }, 2500);
+    }
+
+    // ── New folder ─────────────────────────────────────────────────────────
+    function beginNewFolder() {
+      if (dialogList.querySelector('.dialog-newfolder')) return;
+      const row = document.createElement('div');
+      row.className = 'dialog-newfolder';
+      const icon = document.createElement('span');
+      icon.className = 'icon';
+      icon.textContent = '▸';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = 'folder name…';
+      input.spellcheck = false;
+      row.appendChild(icon);
+      row.appendChild(input);
+      dialogList.insertBefore(row, dialogList.firstChild);
+      input.focus();
+      let done = false;
+      const commit = (save) => {
+        if (done) return; done = true;
+        const fname = input.value.trim();
+        if (save && fname) {
+          fetch('api/files', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ op: 'mkdir', path: relOf(fname) }),
+          }).then(() => refreshDialogList()).catch(() => refreshDialogList());
+        } else {
+          refreshDialogList();
+        }
+      };
+      input.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') commit(true);
+        else if (e.key === 'Escape') commit(false);
+      });
+      input.addEventListener('blur', () => commit(true));
     }
 
     function confirmDialogFn() {
@@ -700,6 +877,8 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
     dialogConfirm.addEventListener('click', confirmDialogFn);
     dialogCancel.addEventListener('click', closeDialogFn);
     dialogCloseBtn.addEventListener('click', closeDialogFn);
+    dialogMkdirBtn.addEventListener('click', beginNewFolder);
+    dialogRefreshBtn.addEventListener('click', refreshDialogList);
     dialogFilename.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') confirmDialogFn();
     });
