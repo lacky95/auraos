@@ -350,6 +350,19 @@ export class AppManager {
    */
   async setEnabled(appId: string, enabled: boolean): Promise<void> {
     if (!this.registry.has(appId)) throw new Error(`Unknown app: ${appId}`);
+    // Critical OS-infrastructure apps (e.g. com.aura.registry) refuse the
+    // disable path. They can still be stopped/restarted via the normal
+    // lifecycle endpoints — the guard only blocks the persistent
+    // "user said no, don't auto-start this anymore" toggle.
+    if (!enabled) {
+      const m = this.registry.getById(appId);
+      if (m?.critical) {
+        throw new Error(
+          `App ${appId} is marked critical: true in its manifest and cannot be disabled. ` +
+          `Use \`aura inst stop ${appId}\` for a one-shot stop instead.`,
+        );
+      }
+    }
     const wasEnabled = !this.disabled.has(appId);
     if (enabled === wasEnabled) return;
     if (enabled) {

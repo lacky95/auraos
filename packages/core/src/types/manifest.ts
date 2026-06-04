@@ -145,6 +145,19 @@ export const AppManifestSchema = z.object({
    */
   autoStart: z.boolean().default(false),
   /**
+   * Mark an app as critical OS infrastructure (e.g. the local OCI registry).
+   * Critical apps cannot be disabled via Settings / `aura app disable` —
+   * AppManager.setEnabled(id, false) throws — because disabling them would
+   * break dependent functionality (Nexus install/publish, in the registry
+   * case). They're still subject to normal lifecycle / stop / restart;
+   * `critical: true` only guards the explicit user-facing disable path.
+   *
+   * Default false. Apps the user installs themselves should never set this;
+   * it's reserved for OS-supplied apps that other parts of the system
+   * implicitly depend on.
+   */
+  critical: z.boolean().default(false),
+  /**
    * Sandbox this app inside PRoot. Default true. Set false ONLY for apps
    * that use native modules whose syscalls PRoot's ptrace-based emulation
    * can't translate — Tailwind 4 (Oxide), node-pty in some configurations,
