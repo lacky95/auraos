@@ -3,12 +3,28 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./styles/scificn-bridge.css": "./src/styles/scificn-bridge.css",
-    "./lib/utils": "./src/lib/utils.ts"
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./styles/scificn-bridge.css": "./dist/styles/scificn-bridge.css",
+    "./lib/utils": {
+      "import": "./dist/lib/utils.js",
+      "types": "./dist/lib/utils.d.ts"
+    }
   },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node -e \"const f=require('node:fs');f.mkdirSync('dist/styles',{recursive:true});f.cpSync('src/styles','dist/styles',{recursive:true})\"",
+    "dev": "tsc -p tsconfig.build.json --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "dependencies": {
     "@radix-ui/react-checkbox": "^1.1.2",
     "@radix-ui/react-dialog": "^1.1.2",
@@ -26,5 +42,10 @@
   "peerDependencies": {
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.5.0"
   }
 }

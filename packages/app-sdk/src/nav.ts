@@ -164,7 +164,8 @@ export class NavApi {
       });
 
       const activeIdx = elements.indexOf(document.activeElement as HTMLElement);
-      const current   = activeIdx >= 0 ? rects[activeIdx] : null;
+      // noUncheckedIndexedAccess: rects[i] is T|undefined → coalesce.
+      const current   = activeIdx >= 0 ? (rects[activeIdx] ?? null) : null;
 
       const next = pickNeighbour(rects, current, dir);
       if (!next || next === current) return;
