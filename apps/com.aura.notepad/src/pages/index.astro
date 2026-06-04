@@ -9,7 +9,7 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Notepad — AuraOS</title>
   <link rel="stylesheet" href="/api/os/theme.css" />
-  <style is:global>
+  <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
       background: var(--aura-color-bg, #0a0a0a);
@@ -39,119 +39,8 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
     header .meta { display: flex; gap: 10px; }
     header .meta b { color: var(--aura-color-secondary, #ff9900); font-weight: normal; }
 
-    /* ── Tab bar ─────────────────────────────────────────────────────── */
-    #tab-bar {
-      display: flex;
-      align-items: stretch;
-      background: color-mix(in srgb, var(--aura-color-surface, #111) 80%, #000 20%);
-      border-bottom: 1px solid var(--aura-color-border, rgba(0,255,65,.2));
-      flex-shrink: 0;
-    }
-    #tab-list {
-      display: flex;
-      align-items: stretch;
-      overflow-x: auto;
-      flex: 1;
-      scrollbar-width: none;
-    }
-    #tab-list::-webkit-scrollbar { display: none; }
-
-    .tab {
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      padding: 0 12px 0 14px;
-      font-size: 0.68rem;
-      letter-spacing: .07em;
-      text-transform: uppercase;
-      color: var(--aura-color-text-dim, #557755);
-      border-right: 1px solid var(--aura-color-border, rgba(0,255,65,.1));
-      border-top: 3px solid transparent;
-      cursor: pointer;
-      white-space: nowrap;
-      flex-shrink: 0;
-      user-select: none;
-      min-height: 36px;
-      transition: background 0.1s, color 0.1s;
-      position: relative;
-    }
-    .tab:hover {
-      color: var(--aura-color-text, #ccffcc);
-      background: rgba(0,255,65,.05);
-    }
-    .tab.active {
-      color: var(--aura-color-primary, #00ff41);
-      border-top-color: var(--aura-color-primary, #00ff41);
-      background: var(--aura-color-bg, #0a0a0a);
-      /* Active tab "connects" to the editor — cancel the bottom border */
-      margin-bottom: -1px;
-      border-bottom: 1px solid var(--aura-color-bg, #0a0a0a);
-    }
-    /* Dot before untitled tab names so they're visually distinct */
-    .tab.untitled .tab-name::before {
-      content: '· ';
-      color: var(--aura-color-text-dim, #557755);
-    }
-    .tab.untitled.active .tab-name::before {
-      color: var(--aura-color-primary, #00ff41);
-      opacity: .6;
-    }
-
-    .tab-close {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 16px;
-      height: 16px;
-      font-size: 0.75rem;
-      line-height: 1;
-      color: transparent;          /* hidden until tab hovered */
-      border-radius: 2px;
-      cursor: pointer;
-      flex-shrink: 0;
-      transition: background 0.1s, color 0.1s;
-    }
-    .tab:hover .tab-close,
-    .tab.active .tab-close { color: var(--aura-color-text-dim, #557755); }
-    .tab-close:hover { background: rgba(255,74,74,.25) !important; color: #ff6060 !important; }
-
-    #tab-new {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 36px;
-      font-size: 1.1rem;
-      color: var(--aura-color-text-dim, #557755);
-      cursor: pointer;
-      flex-shrink: 0;
-      border-right: 1px solid var(--aura-color-border, rgba(0,255,65,.15));
-      transition: color 0.1s, background 0.1s;
-    }
-    #tab-new:hover { color: var(--aura-color-primary, #00ff41); background: rgba(0,255,65,.05); }
-
-    #tab-actions {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      padding: 0 10px;
-      flex-shrink: 0;
-      border-left: 1px solid var(--aura-color-border, rgba(0,255,65,.15));
-    }
-    .tab-btn {
-      display: flex;
-      align-items: center;
-      padding: 3px 10px;
-      font-family: var(--aura-font-mono, 'Courier New', monospace);
-      font-size: 0.6rem;
-      letter-spacing: .1em;
-      text-transform: uppercase;
-      color: var(--aura-color-text-dim, #557755);
-      border: 1px solid var(--aura-color-border, rgba(0,255,65,.2));
-      background: transparent;
-      cursor: pointer;
-      transition: color 0.1s, border-color 0.1s;
-    }
-    .tab-btn:hover { color: var(--aura-color-primary, #00ff41); border-color: var(--aura-color-primary, #00ff41); }
+    /* Tab bar styles live in the injected <style> in the script block below,
+       because tab elements are created via JS and won't carry Astro's scope attr. */
 
     /* ── Editor ──────────────────────────────────────────────────────── */
     main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
@@ -354,6 +243,74 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
   </div>
 
   <script is:inline>
+  /* Tab CSS injected here so it applies to JS-created elements (which don't
+     carry Astro's data-astro-cid-* scope attribute and would miss scoped rules). */
+  (() => {
+    const s = document.createElement('style');
+    s.textContent = `
+      #tab-bar {
+        display:flex;align-items:stretch;
+        background:color-mix(in srgb,var(--aura-color-surface,#111) 80%,#000 20%);
+        border-bottom:1px solid var(--aura-color-border,rgba(0,255,65,.2));
+        flex-shrink:0;
+      }
+      #tab-list {
+        display:flex;align-items:stretch;overflow-x:auto;flex:1;scrollbar-width:none;
+      }
+      #tab-list::-webkit-scrollbar{display:none}
+      .tab {
+        display:flex;align-items:center;gap:7px;padding:0 12px 0 14px;
+        font-size:.68rem;letter-spacing:.07em;text-transform:uppercase;
+        color:var(--aura-color-text-dim,#557755);
+        border-right:1px solid var(--aura-color-border,rgba(0,255,65,.1));
+        border-top:3px solid transparent;
+        cursor:pointer;white-space:nowrap;flex-shrink:0;user-select:none;
+        min-height:36px;transition:background .1s,color .1s;position:relative;
+        font-family:var(--aura-font-mono,'Courier New',monospace);
+      }
+      .tab:hover{color:var(--aura-color-text,#ccffcc);background:rgba(0,255,65,.05)}
+      .tab.active{
+        color:var(--aura-color-primary,#00ff41);
+        border-top-color:var(--aura-color-primary,#00ff41);
+        background:var(--aura-color-bg,#0a0a0a);
+        margin-bottom:-1px;
+        border-bottom:1px solid var(--aura-color-bg,#0a0a0a);
+      }
+      .tab.untitled .tab-name::before{content:'· ';color:var(--aura-color-text-dim,#557755)}
+      .tab.untitled.active .tab-name::before{color:var(--aura-color-primary,#00ff41);opacity:.6}
+      .tab-close{
+        display:flex;align-items:center;justify-content:center;
+        width:16px;height:16px;font-size:.75rem;line-height:1;
+        color:transparent;border-radius:2px;cursor:pointer;flex-shrink:0;
+        transition:background .1s,color .1s;
+      }
+      .tab:hover .tab-close,.tab.active .tab-close{color:var(--aura-color-text-dim,#557755)}
+      .tab-close:hover{background:rgba(255,74,74,.25)!important;color:#ff6060!important}
+      #tab-new{
+        display:flex;align-items:center;justify-content:center;width:36px;
+        font-size:1.1rem;color:var(--aura-color-text-dim,#557755);
+        cursor:pointer;flex-shrink:0;
+        border-right:1px solid var(--aura-color-border,rgba(0,255,65,.15));
+        transition:color .1s,background .1s;
+      }
+      #tab-new:hover{color:var(--aura-color-primary,#00ff41);background:rgba(0,255,65,.05)}
+      #tab-actions{
+        display:flex;align-items:center;gap:4px;padding:0 10px;flex-shrink:0;
+        border-left:1px solid var(--aura-color-border,rgba(0,255,65,.15));
+      }
+      .tab-btn{
+        display:flex;align-items:center;padding:3px 10px;
+        font-family:var(--aura-font-mono,'Courier New',monospace);
+        font-size:.6rem;letter-spacing:.1em;text-transform:uppercase;
+        color:var(--aura-color-text-dim,#557755);
+        border:1px solid var(--aura-color-border,rgba(0,255,65,.2));
+        background:transparent;cursor:pointer;transition:color .1s,border-color .1s;
+      }
+      .tab-btn:hover{color:var(--aura-color-primary,#00ff41);border-color:var(--aura-color-primary,#00ff41)}
+    `;
+    document.head.appendChild(s);
+  })();
+
   (() => {
     // ── State ──────────────────────────────────────────────────────────────
     let tabs       = [];      // [{ id, name, path, revision }]
