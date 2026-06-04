@@ -126,6 +126,7 @@ COPY package.json pnpm-workspace.yaml ./
 
 # Copy package manifests for workspace packages
 COPY packages/core/package.json ./packages/core/package.json
+COPY packages/kv-store/package.json ./packages/kv-store/package.json
 COPY packages/shell/package.json ./packages/shell/package.json
 COPY packages/app-sdk/package.json ./packages/app-sdk/package.json
 COPY packages/ui/package.json ./packages/ui/package.json
@@ -139,6 +140,7 @@ FROM deps AS build
 COPY . .
 
 RUN pnpm --filter @aura/core build
+RUN pnpm --filter @aura/kv-store build
 RUN pnpm --filter @aura/ui build
 RUN pnpm --filter @aura/app-sdk build
 RUN pnpm --filter @aura/cli build
@@ -150,6 +152,7 @@ FROM base AS runtime
 COPY --from=toolchain /os /os
 COPY --from=build /workspace/node_modules ./node_modules
 COPY --from=build /workspace/packages/core/dist ./packages/core/dist
+COPY --from=build /workspace/packages/kv-store/dist ./packages/kv-store/dist
 COPY --from=build /workspace/packages/ui/dist ./packages/ui/dist
 COPY --from=build /workspace/packages/app-sdk/dist ./packages/app-sdk/dist
 COPY --from=build /workspace/packages/shell/dist ./packages/shell/dist
@@ -220,7 +223,13 @@ WORKDIR /workspace
 # EINVAL → Node's `realpathSync` in run_main blows up. A wrapper script is
 # a regular file, bind cleanly, and execs `node` with the final path so
 # Node never has to readlink the bind destination.
+# NOTE: @aura/core and @aura/kv-store are consumed via their dist/ (main →
+# ./dist/index.js), so the shell dev server crashes on a fresh clone unless
+# they're built first. `--filter @aura/cli build` alone does NOT build the
+# CLI's deps, and kv-store isn't a CLI dep at all — build both explicitly.
 CMD ["sh", "-c", "{ pnpm install || echo '[aura] pnpm install exited non-zero (likely ERR_PNPM_IGNORED_BUILDS) — continuing'; } \
+ && pnpm --filter @aura/core build \
+ && pnpm --filter @aura/kv-store build \
  && pnpm --filter @aura/cli build \
  && install -D -m 0755 /workspace/os/aura-cli-shim.sh /usr/local/bin/aura \
  && install -D -m 0755 /workspace/os/aura-cli-shim.sh /os/toolchain/bin/aura \
