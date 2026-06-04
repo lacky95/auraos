@@ -122,26 +122,14 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
       gap: 2px;
       flex-wrap: wrap;
     }
-    /* Breadcrumb segments are created in JS — styled in the injected block below. */
+    /* Breadcrumb segments + toolbar buttons are styled in the injected block below. */
     #dialog-toolbar {
       display: flex;
       align-items: center;
       gap: 6px;
-      padding: 5px 12px;
+      padding: 6px 12px;
       border-bottom: 1px solid var(--aura-color-border, rgba(0,255,65,.1));
     }
-    .dialog-tool-btn {
-      padding: 3px 8px;
-      font-family: var(--aura-font-mono, 'Courier New', monospace);
-      font-size: 0.6rem;
-      letter-spacing: .08em;
-      text-transform: uppercase;
-      cursor: pointer;
-      background: transparent;
-      color: var(--aura-color-text-dim, #557755);
-      border: 1px solid var(--aura-color-border, rgba(0,255,65,.2));
-    }
-    .dialog-tool-btn:hover { color: var(--aura-color-primary, #00ff41); border-color: var(--aura-color-primary, #00ff41); }
     #dialog-list {
       flex: 1;
       overflow-y: auto;
@@ -328,6 +316,18 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
       .tab-btn:hover{color:var(--aura-color-primary,#00ff41);border-color:var(--aura-color-primary,#00ff41)}
 
       /* ── File dialog (entries/breadcrumb created in JS) ─────────────── */
+      .dialog-tool-btn{
+        display:inline-flex;align-items:center;justify-content:center;gap:5px;
+        height:24px;padding:0 10px;box-sizing:border-box;
+        font-family:var(--aura-font-mono,'Courier New',monospace);
+        font-size:.6rem;letter-spacing:.08em;text-transform:uppercase;line-height:1;
+        cursor:pointer;background:transparent;
+        color:var(--aura-color-text-dim,#557755);
+        border:1px solid var(--aura-color-border,rgba(0,255,65,.2));
+        transition:color .1s,border-color .1s,background .1s;
+      }
+      .dialog-tool-btn:hover{color:var(--aura-color-primary,#00ff41);border-color:var(--aura-color-primary,#00ff41);background:rgba(0,255,65,.05)}
+      #dialog-refresh{width:24px;padding:0;font-size:.8rem}
       .breadcrumb-seg{cursor:pointer;color:var(--aura-color-primary,#00ff41);opacity:.7}
       .breadcrumb-seg:hover{opacity:1;text-decoration:underline}
       .breadcrumb-sep{color:var(--aura-color-text-dim,#557755)}
@@ -835,27 +835,18 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
       if (dialogMode === 'open') {
         if (!dialogSelected) return;
         const relPath = dialogCurDir ? `${dialogCurDir}/${dialogSelected}` : dialogSelected;
+        const absPath = `/data/files/${relPath}`;
+        const name = dialogSelected;
         fetch(`api/files?file=${encodeURIComponent(relPath)}`)
           .then(r => r.json())
           .then(({ content }) => {
-            const absPath = `/data/files/${relPath}`;
-            const name = dialogSelected;
-            // Check if already open
-            const existing = tabs.find(t => t.path === absPath);
-            if (existing) {
-              fetch(`api/tabs/${existing.id}/active`, { method: 'PUT' }).catch(() => {});
-            } else {
-              fetch('api/tabs', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-              }).then(r => r.json()).then(tab => {
-                return fetch(`api/tabs/${tab.id}`, {
-                  method: 'PUT',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ text: content, path: absPath, name }),
-                });
-              }).catch(() => {});
-            }
+            // Single atomic call — server reuses an existing tab for this path
+            // or creates a named tab with the content (no untitled-then-rename).
+            return fetch('api/tabs', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ path: absPath, name, text: content ?? '' }),
+            });
           })
           .catch(() => {});
       } else {
