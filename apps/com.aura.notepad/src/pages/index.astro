@@ -43,10 +43,9 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
     #tab-bar {
       display: flex;
       align-items: stretch;
-      background: var(--aura-color-surface, #111);
+      background: color-mix(in srgb, var(--aura-color-surface, #111) 80%, #000 20%);
       border-bottom: 1px solid var(--aura-color-border, rgba(0,255,65,.2));
       flex-shrink: 0;
-      min-height: 32px;
     }
     #tab-list {
       display: flex;
@@ -56,69 +55,93 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
       scrollbar-width: none;
     }
     #tab-list::-webkit-scrollbar { display: none; }
+
     .tab {
       display: flex;
       align-items: center;
-      gap: 6px;
-      padding: 0 10px;
-      font-size: 0.65rem;
-      letter-spacing: .06em;
+      gap: 7px;
+      padding: 0 12px 0 14px;
+      font-size: 0.68rem;
+      letter-spacing: .07em;
       text-transform: uppercase;
       color: var(--aura-color-text-dim, #557755);
       border-right: 1px solid var(--aura-color-border, rgba(0,255,65,.1));
+      border-top: 3px solid transparent;
       cursor: pointer;
       white-space: nowrap;
       flex-shrink: 0;
-      border-bottom: 2px solid transparent;
       user-select: none;
+      min-height: 36px;
+      transition: background 0.1s, color 0.1s;
+      position: relative;
     }
-    .tab:hover { color: var(--aura-color-text, #ccffcc); background: rgba(0,255,65,.04); }
+    .tab:hover {
+      color: var(--aura-color-text, #ccffcc);
+      background: rgba(0,255,65,.05);
+    }
     .tab.active {
       color: var(--aura-color-primary, #00ff41);
-      border-bottom-color: var(--aura-color-primary, #00ff41);
-      background: rgba(0,255,65,.07);
+      border-top-color: var(--aura-color-primary, #00ff41);
+      background: var(--aura-color-bg, #0a0a0a);
+      /* Active tab "connects" to the editor — cancel the bottom border */
+      margin-bottom: -1px;
+      border-bottom: 1px solid var(--aura-color-bg, #0a0a0a);
     }
-    .tab.untitled { color: var(--aura-color-text-dim, #557755); }
-    .tab.untitled.active { color: var(--aura-color-primary, #00ff41); }
+    /* Dot before untitled tab names so they're visually distinct */
+    .tab.untitled .tab-name::before {
+      content: '· ';
+      color: var(--aura-color-text-dim, #557755);
+    }
+    .tab.untitled.active .tab-name::before {
+      color: var(--aura-color-primary, #00ff41);
+      opacity: .6;
+    }
+
     .tab-close {
       display: flex;
       align-items: center;
       justify-content: center;
-      width: 14px;
-      height: 14px;
-      font-size: 0.7rem;
-      color: inherit;
-      opacity: 0.5;
+      width: 16px;
+      height: 16px;
+      font-size: 0.75rem;
+      line-height: 1;
+      color: transparent;          /* hidden until tab hovered */
       border-radius: 2px;
       cursor: pointer;
       flex-shrink: 0;
+      transition: background 0.1s, color 0.1s;
     }
-    .tab-close:hover { opacity: 1; background: rgba(255,74,74,.2); color: #ff4a4a; }
+    .tab:hover .tab-close,
+    .tab.active .tab-close { color: var(--aura-color-text-dim, #557755); }
+    .tab-close:hover { background: rgba(255,74,74,.25) !important; color: #ff6060 !important; }
+
     #tab-new {
       display: flex;
       align-items: center;
       justify-content: center;
-      width: 32px;
-      font-size: 1rem;
+      width: 36px;
+      font-size: 1.1rem;
       color: var(--aura-color-text-dim, #557755);
       cursor: pointer;
       flex-shrink: 0;
-      border-right: 1px solid var(--aura-color-border, rgba(0,255,65,.1));
+      border-right: 1px solid var(--aura-color-border, rgba(0,255,65,.15));
+      transition: color 0.1s, background 0.1s;
     }
-    #tab-new:hover { color: var(--aura-color-primary, #00ff41); background: rgba(0,255,65,.04); }
+    #tab-new:hover { color: var(--aura-color-primary, #00ff41); background: rgba(0,255,65,.05); }
 
     #tab-actions {
       display: flex;
       align-items: center;
-      gap: 1px;
-      padding: 0 6px;
+      gap: 4px;
+      padding: 0 10px;
       flex-shrink: 0;
+      border-left: 1px solid var(--aura-color-border, rgba(0,255,65,.15));
     }
     .tab-btn {
       display: flex;
       align-items: center;
-      padding: 0 8px;
-      height: 22px;
+      padding: 3px 10px;
+      font-family: var(--aura-font-mono, 'Courier New', monospace);
       font-size: 0.6rem;
       letter-spacing: .1em;
       text-transform: uppercase;
@@ -126,6 +149,7 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
       border: 1px solid var(--aura-color-border, rgba(0,255,65,.2));
       background: transparent;
       cursor: pointer;
+      transition: color 0.1s, border-color 0.1s;
     }
     .tab-btn:hover { color: var(--aura-color-primary, #00ff41); border-color: var(--aura-color-primary, #00ff41); }
 
@@ -354,6 +378,7 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
         el.title = t.path ?? t.name;
 
         const nameSpan = document.createElement('span');
+        nameSpan.className = 'tab-name';
         nameSpan.textContent = t.name;
         el.appendChild(nameSpan);
 
