@@ -134,7 +134,8 @@ RUN npm install -g @anthropic-ai/claude-code 2>/dev/null || true
 RUN cp $(which git) /os/toolchain/bin/git && \
     cp $(which curl) /os/toolchain/bin/curl && \
     cp $(which bash) /os/toolchain/bin/bash && \
-    cp $(which docker) /os/toolchain/bin/docker
+    cp $(which docker) /os/toolchain/bin/docker && \
+    cp $(which oras) /os/toolchain/bin/oras
 
 # Debian-slim base rootfs for PRoot apps (shared, glibc-compatible)
 COPY --from=base-rootfs / /os/base-rootfs

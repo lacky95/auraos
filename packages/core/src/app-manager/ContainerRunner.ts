@@ -254,14 +254,17 @@ export class ContainerRunner implements SandboxRunner {
     // apps are genuinely invisible — `cd /workspace/apps` shows ONLY this
     // app's folder.
     //
-    // ctx.appDir is the CONTAINER-internal view (e.g. "/workspace/apps/<id>"
-    // for system scope, "/data/scopes/.../<id>" for global/user). Sibling
-    // Docker binds need a HOST path. For system-scope apps we swap the
-    // shell-container "/workspace" prefix with workspaceRoot (= the host
-    // path AURA_HOST_WORKSPACE). For global/user-scope apps the appDir
-    // lives inside the aura-app-data named volume and the bind source has
-    // to be a volume-subpath — TODO once that scope is in active use.
-    const hostAppDir = this.toHostAppDir(ctx.appDir, appId);
+    // Two paths depending on scope:
+    //   • System-scope apps' source lives in the host's workspace, so we
+    //     swap `/workspace` for AURA_HOST_WORKSPACE and do a plain `-v`
+    //     bind (toHostAppDir).
+    //   • User/global-scope apps live INSIDE the aura-app-data named
+    //     volume (path inside-volume is e.g. scopes/users/default/apps/<id>).
+    //     Sibling containers can't bind from the volume by host path — the
+    //     volume's storage dir isn't a stable host path — so we use the
+    //     same volume-subpath pattern already used for /data, /aura/*-tools,
+    //     /home/aura below.
+    const appDirMount = this.buildAppDirMount(ctx.appDir, appId, appDataVolume);
     const a: string[] = [
       'run', '--rm', '-d',
       '--name', hostname,
@@ -276,10 +279,9 @@ export class ContainerRunner implements SandboxRunner {
       '--hostname', appId,
       '--network', SHARED_NETWORK,
       '--workdir', `/workspace/apps/${appId}`,
-      // Per-app slice of /workspace from the host. Sibling apps in
-      // apps/<other> are not visible — there's no parent /workspace/apps
-      // bind, the individual app folder is bound directly under it.
-      '-v', `${hostAppDir}:/workspace/apps/${appId}`,
+      // Per-app slice of /workspace. System scope: host-path bind. User/
+      // global scope: volume-subpath mount of the aura-app-data volume.
+      ...appDirMount,
       '-v', `${this.workspaceRoot}/packages:/workspace/packages:ro`,
       '-v', `${this.workspaceRoot}/package.json:/workspace/package.json:ro`,
       '-v', `${this.workspaceRoot}/pnpm-lock.yaml:/workspace/pnpm-lock.yaml:ro`,
@@ -387,23 +389,37 @@ export class ContainerRunner implements SandboxRunner {
     return ['bash', '-c', SYNTHESISED_ENTRYPOINT];
   }
 
-  /** Translate a container-internal app dir to the host path Docker needs
-   *  for `-v <source>:<dest>`. The shell container mounts `AURA_HOST_WORKSPACE`
-   *  at `/workspace`, so anything under `/workspace/...` maps cleanly. For
-   *  paths the AppRegistry produces for system-scope apps that's exactly
-   *  `/workspace/apps/<id>`. Fallback for non-`/workspace/` paths
-   *  (global/user scope under `/data/scopes/...`) returns the input
-   *  unchanged — those need a volume-subpath mount strategy that doesn't
-   *  exist yet; tracked as a TODO above the bind. */
-  private toHostAppDir(ctxAppDir: string, appId: string): string {
+  /** Build the `-v` / `--mount` args for binding an app's source dir into
+   *  `/workspace/apps/<appId>` inside the sibling container. Two paths:
+   *
+   *  • System scope (ctx.appDir starts with `/workspace/`): the source
+   *    lives on the host at `AURA_HOST_WORKSPACE/apps/<id>`. Plain `-v`
+   *    bind works.
+   *
+   *  • User/global scope (ctx.appDir starts with `/data/`): the source
+   *    lives INSIDE the `aura-app-data` named volume. Sibling Docker
+   *    containers can't bind from a volume's storage path (it isn't a
+   *    stable host path), so we use the same `--mount type=volume,
+   *    volume-subpath=...` pattern already used for /data, /aura/*-tools,
+   *    and /home/aura below.
+   *
+   *  Both paths produce the same in-container view: `/workspace/apps/<id>`. */
+  private buildAppDirMount(ctxAppDir: string, appId: string, appDataVolume: string): string[] {
+    const target = `/workspace/apps/${appId}`;
     if (ctxAppDir.startsWith('/workspace/')) {
-      return ctxAppDir.replace(/^\/workspace/, this.workspaceRoot);
+      const hostPath = ctxAppDir.replace(/^\/workspace/, this.workspaceRoot);
+      return ['-v', `${hostPath}:${target}`];
     }
-    // Best-effort fallback so callers in older callsites still work; the
-    // bind will likely break for non-system scopes until we add the
-    // volume-subpath path. Logging makes the regression visible.
-    console.warn(`[ContainerRunner] non-/workspace appDir for ${appId}: ${ctxAppDir} — bind may fail until volume-subpath mode is added`);
-    return ctxAppDir;
+    if (ctxAppDir.startsWith(`${this.dataDir}/`) || ctxAppDir.startsWith('/data/')) {
+      // Strip the dataDir prefix to get the volume-internal path.
+      const prefix = ctxAppDir.startsWith(this.dataDir + '/') ? this.dataDir : '/data';
+      const subpath = ctxAppDir.slice(prefix.length).replace(/^\/+/, '');
+      return ['--mount', `type=volume,source=${appDataVolume},target=${target},volume-subpath=${subpath}`];
+    }
+    // Unrecognised prefix — fall back to the plain bind and log. Most likely
+    // a misconfigured scope; the bind will probably fail at container start.
+    console.warn(`[ContainerRunner] unrecognised appDir prefix for ${appId}: ${ctxAppDir} — falling back to plain bind`);
+    return ['-v', `${ctxAppDir}:${target}`];
   }
 
   private containerName(instanceId: string): string {

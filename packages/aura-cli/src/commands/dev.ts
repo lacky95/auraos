@@ -103,7 +103,16 @@ function manifestFromConfig(cfg: ScaffoldConfig): Record<string, unknown> {
   // isolation + survives shell restarts). PRoot is the schema default; omit it.
   if (cfg.sandbox === 'container') m['sandbox'] = 'container';
 
-  if (cfg.tools.length > 0) m['tools'] = cfg.tools;
+  // User/global-scope apps NEED `aura` + `oras` available at runtime so the
+  // synth entrypoint's `aura sdk install` call can resolve @aura/* from the
+  // local OCI registry. System-scope apps don't (their @aura/* is already
+  // in /workspace/node_modules via pnpm workspace symlinks). Merge into
+  // whatever tools the user requested explicitly; dedupe.
+  const baseTools = cfg.tools;
+  const merged = (cfg.scope === 'system')
+    ? baseTools
+    : [...new Set([...baseTools, 'bash', 'node', 'aura', 'oras'])];
+  if (merged.length > 0) m['tools'] = merged;
 
   return m;
 }

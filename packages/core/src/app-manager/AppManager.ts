@@ -215,6 +215,23 @@ export class AppManager {
       }
     }
 
+    // Same as docker above, but for oras — needed by user-scope apps' synth
+    // entrypoint which calls `aura sdk install` → `oras pull` to fetch
+    // @aura/* packages from the local OCI registry. Without oras in the
+    // toolchain volume, granting `oras` to an app's tools[] would create a
+    // dangling symlink in /aura/my-tools/oras → /aura/all-tools/oras.
+    const orasToolchain = join(this.toolchainDir, 'bin', 'oras');
+    if (!existsSync(orasToolchain) && existsSync('/usr/local/bin/oras')) {
+      try {
+        mkdirSync(dirname(orasToolchain), { recursive: true });
+        copyFileSync('/usr/local/bin/oras', orasToolchain);
+        chmodSync(orasToolchain, 0o755);
+        console.log(`[AppManager] healed oras → ${orasToolchain}`);
+      } catch (err) {
+        console.warn(`[AppManager] could not heal oras into toolchain: ${(err as Error).message}`);
+      }
+    }
+
     // Pre-create the shared user-home subpath inside the app-data named
     // volume. ContainerRunner mounts /home/aura from this path into every
     // sibling app container so tools like `claude` / `gh` / `ssh` persist
