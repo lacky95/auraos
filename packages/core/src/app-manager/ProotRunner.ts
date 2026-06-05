@@ -33,6 +33,14 @@ if [ ! -d node_modules ] && [ ! -d /workspace/node_modules ]; then
   echo "[\${APP_ID:-app}] Installing dependencies..."
   npm install --prefer-offline 2>&1 || npm install
 fi
+# User-scope + global-scope apps don't get @aura/* via workspace symlinks
+# (they live outside pnpm globs). Pull them from the local OCI registry
+# via the SDK installer when their node_modules is missing the @aura/ dir
+# AND the app's package.json actually references @aura/*. No-op for
+# system-scope apps where the workspace already provides everything.
+if [ ! -d node_modules/@aura ] && grep -q '"@aura/' package.json 2>/dev/null; then
+  command -v aura >/dev/null && aura sdk install --quiet || true
+fi
 # astro lives in /workspace/node_modules/.bin (workspace install). Prefer the
 # local copy when present (a power user may have isolated the app's deps).
 ASTRO="node_modules/.bin/astro"

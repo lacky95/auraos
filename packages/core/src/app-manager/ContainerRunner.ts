@@ -13,6 +13,13 @@ const SHARED_NETWORK = process.env['AURA_DOCKER_NETWORK'] ?? 'aura-net';
 const BASE_IMAGE     = process.env['AURA_BASE_IMAGE']     ?? 'aura-base';
 
 const SYNTHESISED_ENTRYPOINT = `set -e
+# Pull @aura/* SDK packages from the local OCI registry when the app
+# references them but the workspace symlinks didn't materialise them
+# (user/global-scope apps live outside pnpm globs). No-op for system-scope
+# apps where pnpm already populated /workspace/node_modules/@aura/*.
+if [ ! -d node_modules/@aura ] && grep -q '"@aura/' package.json 2>/dev/null; then
+  command -v aura >/dev/null && aura sdk install --quiet || true
+fi
 export PORT="\${APP_PORT:-4001}"
 # Skip install when /workspace/node_modules exists: that volume mount is
 # populated by the workspace-level pnpm install and contains every workspace
