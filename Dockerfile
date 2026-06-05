@@ -92,6 +92,17 @@ RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${
  && rm -rf /tmp/docker.tgz /tmp/docker \
  && docker --version
 
+# oras — OCI Registry Access tool. Nexus uses it to push/pull both apps
+# (oras push <ref> bundle.tar.gz) and @aura/* SDK packages. Static binary
+# from the GitHub releases. ORAS_VERSION is build-arg-bumpable; the artifact
+# format is OCI Distribution v1.1 which has been stable since 2023.
+ARG ORAS_VERSION=1.2.0
+RUN curl -fsSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" -o /tmp/oras.tgz \
+ && tar -xzf /tmp/oras.tgz -C /tmp oras \
+ && install -m 0755 /tmp/oras /usr/local/bin/oras \
+ && rm -f /tmp/oras.tgz /tmp/oras \
+ && oras version
+
 # Replace Debian's proot (5.3.x with EFAULT on Rust-compiled native modules
 # like Tailwind 4 Oxide / jiti) with a fresh build from upstream proot-me.
 # /usr/local/bin precedes /usr/bin in PATH, so this version wins everywhere

@@ -36,14 +36,14 @@ export interface RegistryConfig {
  *  `aura-<sanitized-instanceId>` ContainerRunner uses. */
 export const LOCAL_REGISTRY_HOST = 'aura-com.aura.registry';
 
-/** Internal port the registry app's wrapper listens on (matches
- *  ContainerRunner's port allocator — first port in the 4001-4099 range).
- *  We point the local registry entry at the wrapper, not zot's :5000,
- *  because the wrapper enforces identity headers + forwards everything to
- *  zot. The wrapper port is allocated dynamically; the URL gets corrected
- *  on first boot if AppManager surfaces the actual port. v1 hard-codes the
- *  default to keep the seed deterministic. */
-export const LOCAL_REGISTRY_DEFAULT_URL = `http://${LOCAL_REGISTRY_HOST}:4001`;
+/** Port the registry app's wrapper listens on. Pinned via the registry
+ *  manifest's `serverPort: 4090` so AppManager always allocates the same
+ *  port — without that pin, the AppManager port allocator hands out a
+ *  fresh number per boot, breaking the URL we hard-code in the seeded
+ *  RegistryConfig + the synth entrypoint's `aura sdk install` calls. The
+ *  wrapper enforces identity headers + forwards everything to the internal
+ *  zot on :5000. */
+export const LOCAL_REGISTRY_DEFAULT_URL = `http://${LOCAL_REGISTRY_HOST}:4090`;
 
 export const DEFAULT_REGISTRY_CONFIG: RegistryConfig = {
   registries: [

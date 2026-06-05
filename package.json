@@ -10,6 +10,9 @@
   "scripts": {
     "dev": "pnpm --filter @aura/shell dev",
     "build": "pnpm --filter @aura/core build && pnpm --filter @aura/ui build && pnpm --filter @aura/app-sdk build && pnpm --filter @aura/shell build",
+    "build:libs": "pnpm --filter @aura/core --filter @aura/kv-store --filter @aura/app-sdk --filter @aura/ui --filter @aura/cli build",
+    "publish:local": "node ./os/publish-aura-packages.mjs",
+    "publish:local:fresh": "pnpm build:libs && pnpm publish:local",
     "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {

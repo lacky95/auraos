@@ -487,6 +487,65 @@ export class AppManager {
         console.error(`[AppManager] autoStart ${m.id} failed: ${(err as Error).message}`);
       });
     }
+
+    // First-boot seed for the local OCI registry: once com.aura.registry is
+    // healthy, ensure the @aura/* packages are published into it. On a fresh
+    // `aura-app-data` volume the catalog is empty and any user-scope app
+    // scaffolded by `aura dev new` would fail at `aura sdk install` because
+    // it'd find no @aura/* artifacts to pull. Runs in the background;
+    // shell can serve while seeding takes its ~10-30s.
+    if (this.registry.has('com.aura.registry')) {
+      this.seedLocalRegistryIfEmpty().catch((err) => {
+        console.warn(`[AppManager] local registry seed: ${(err as Error).message}`);
+      });
+    }
+  }
+
+  /** Wait for com.aura.registry to be healthy, then publish every @aura/*
+   *  package if the catalog is empty. Idempotent — re-runs are cheap (the
+   *  publish script's tagExists() check skips already-pushed versions).
+   *  Always returns; failures are logged but don't break boot. */
+  private async seedLocalRegistryIfEmpty(): Promise<void> {
+    const { LOCAL_REGISTRY_DEFAULT_URL } = await import('../nexus/RegistryConfig.js');
+    const url = LOCAL_REGISTRY_DEFAULT_URL;
+    // 1. Wait for /v2/ ping (zot answers it once boot's done). Up to 60 s.
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      try {
+        const r = await fetch(`${url}/v2/`, { signal: AbortSignal.timeout(2_000) });
+        if (r.status === 200 || r.status === 404) break;  // 404 is normal for /v2/ on empty registry
+      } catch { /* not up yet */ }
+      await new Promise((res) => setTimeout(res, 2_000));
+    }
+    if (Date.now() >= deadline) {
+      console.warn('[AppManager] local registry never became healthy; skipping seed');
+      return;
+    }
+    // 2. Catalog populated already? Skip.
+    try {
+      const r = await fetch(`${url}/v2/_catalog`, { signal: AbortSignal.timeout(5_000) });
+      const body = await r.json().catch(() => ({})) as { repositories?: string[] };
+      if (Array.isArray(body.repositories) && body.repositories.some((n) => n.startsWith('aura/'))) {
+        console.log(`[AppManager] local registry catalog already has aura/* (${body.repositories.length} repos) — skipping seed`);
+        return;
+      }
+    } catch (err) {
+      console.warn(`[AppManager] catalog probe failed: ${(err as Error).message} — attempting seed anyway`);
+    }
+    // 3. Run publish script as a detached subprocess. The shell keeps
+    //    serving traffic; the script handles its own logging.
+    console.log('[AppManager] seeding local OCI registry with @aura/* packages...');
+    const { spawn } = await import('node:child_process');
+    const child = spawn('pnpm', ['publish:local'], {
+      cwd:    '/workspace',
+      stdio:  ['ignore', 'inherit', 'inherit'],
+      env:    { ...process.env, AURA_REGISTRY_URL: url },
+      detached: false,  // keep tied so logs flow into shell logs
+    });
+    child.on('exit', (code) => {
+      if (code === 0) console.log('[AppManager] local registry seed: complete');
+      else            console.warn(`[AppManager] local registry seed: exit ${code}`);
+    });
   }
 
   /**
@@ -668,7 +727,9 @@ export class AppManager {
     mkdirSync(instanceDataDir, { recursive: true });
 
     this.transition(instanceId, appId, 'creating', null);
-    const port = await this.ports.allocate(instanceId);
+    // Honor manifest.serverPort when present (currently used by
+    // com.aura.registry to pin :4090 so RegistryConfig URLs stay stable).
+    const port = await this.ports.allocate(instanceId, manifest.serverPort);
 
     try {
       const runner = this.runners[manifest.sandbox] ?? this.runners['proot'];

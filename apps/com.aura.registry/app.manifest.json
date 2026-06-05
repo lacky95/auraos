@@ -15,6 +15,7 @@
   "critical":       true,
   "tools":          ["bash", "node"],
   "permissions":    ["storage.read", "storage.write"],
+  "serverPort":     4090,
   "proxy": {
     "rewriteHtml":          "none",
     "preservePrefix":       false,

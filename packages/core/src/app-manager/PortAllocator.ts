@@ -22,7 +22,19 @@ export class PortAllocator {
    * sockets and try once more, so allocator drift across restarts can heal
    * itself.
    */
-  async allocate(appId: string): Promise<number> {
+  async allocate(appId: string, pin?: number): Promise<number> {
+    // When an app's manifest declares a `serverPort`, AppManager passes it
+    // as `pin`. Pinning bypasses range/availability checks — we assume the
+    // sibling container will bind it inside its own network namespace, so
+    // host-side `inUse` bookkeeping and isPortBindable() (host-side socket
+    // probe) aren't authoritative for container apps. The trade-off: two
+    // apps pinning the same port will collide at spawn time with a clear
+    // "port already in use" from inside the container. v1 only pins for
+    // OS-critical infra apps (com.aura.registry).
+    if (pin !== undefined) {
+      this.inUse.add(pin);
+      return pin;
+    }
     for (let pass = 0; pass < 2; pass++) {
       for (let port = this.start; port <= this.end; port++) {
         if (this.inUse.has(port)) continue;
