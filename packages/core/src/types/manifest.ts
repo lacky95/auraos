@@ -107,6 +107,17 @@ export const AppManifestSchema = z.object({
     injectConsoleRelay:   z.boolean().optional(),
     injectKeyForwarder:   z.boolean().optional(),
     injectIdentityScript: z.boolean().optional(),
+    /**
+     * Service apps (componentType='service') are normally restricted to
+     * /api/* and /_aura_* — the proxy 403s every other path with
+     * "service-has-no-ui" so a stray iframe src= can't accidentally render
+     * a headless backend as a window. Set to true when a service legitimately
+     * serves a non-/api/ protocol surface that external tools speak directly
+     * — e.g. com.aura.registry serves /v2/ for OCI Distribution clients
+     * (`oras`, `docker push`, Aura's own Nexus). The service still has no UI;
+     * this just opens the protocol path through the proxy.
+     */
+    exposeAllPaths:       z.boolean().optional(),
   }).optional(),
   permissions: z.array(PermissionSchema).default([]),
   tools: z.array(z.string()).default([]),
@@ -325,6 +336,7 @@ export interface ProxyConfig {
   injectConsoleRelay:   boolean;
   injectKeyForwarder:   boolean;
   injectIdentityScript: boolean;
+  exposeAllPaths:       boolean;
 }
 
 /**
@@ -347,6 +359,7 @@ export function resolveProxyConfig(manifest: AppManifest): ProxyConfig {
     injectConsoleRelay:   p.injectConsoleRelay   ?? true,
     injectKeyForwarder:   p.injectKeyForwarder   ?? true,
     injectIdentityScript: p.injectIdentityScript ?? true,
+    exposeAllPaths:       p.exposeAllPaths       ?? false,
   };
 }
 

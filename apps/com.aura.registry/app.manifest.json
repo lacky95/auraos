@@ -1,0 +1,27 @@
+{
+  "id":             "com.aura.registry",
+  "name":           "Registry",
+  "version":        "0.1.0",
+  "description":    "Local OCI registry (Zot) — system infrastructure. Nexus pushes/pulls @aura/* packages and AuraOS apps through here.",
+  "icon":           "REG",
+  "category":       "system",
+  "componentType":  "service",
+  "instanceMode":   "single",
+  "activityMode":   "none",
+  "sandbox":        "container",
+  "runtime":        "raw",
+  "entrypoint":     "entrypoint.sh",
+  "autoStart":      true,
+  "critical":       true,
+  "tools":          ["bash", "node"],
+  "permissions":    ["storage.read", "storage.write"],
+  "proxy": {
+    "rewriteHtml":          "none",
+    "preservePrefix":       false,
+    "injectMeta":           false,
+    "injectConsoleRelay":   false,
+    "injectKeyForwarder":   false,
+    "injectIdentityScript": false,
+    "exposeAllPaths":       true
+  }
+}

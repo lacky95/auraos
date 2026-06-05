@@ -20,6 +20,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
   && rm -rf /var/lib/apt/lists/*
 
+# Zot — OCI Distribution registry, baked in so com.aura.registry doesn't
+# pay a first-boot download tax (decision in plan: bake-in over fetch).
+# Static linux-amd64 binary from the GitHub releases. Bump ZOT_VERSION to
+# pull in upstream fixes — no source changes needed; just rebuild aura-base.
+ARG ZOT_VERSION=v2.1.7
+RUN curl -fsSL "https://github.com/project-zot/zot/releases/download/${ZOT_VERSION}/zot-linux-amd64-minimal" -o /usr/local/bin/zot \
+ && chmod +x /usr/local/bin/zot \
+ && zot --version
+
 # ─── Stage: base-rootfs ───────────────────────────────────────────────────────
 # Debian-slim filesystem with the tools an app sandbox needs, exported as a
 # raw rootfs that PRoot can pivot into. Using debian-slim (not Alpine) keeps

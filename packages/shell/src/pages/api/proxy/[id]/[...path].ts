@@ -15,6 +15,7 @@ const DEFAULT_PROXY_CONFIG: ProxyConfig = {
   injectConsoleRelay:   true,
   injectKeyForwarder:   true,
   injectIdentityScript: true,
+  exposeAllPaths:       false,
 };
 
 /**
@@ -77,7 +78,7 @@ export const ALL: APIRoute = async ({ params, request }) => {
   // a near pass-through default (no <base>, no attribute rewriting); Astro
   // apps keep the full inject pipeline. Each flag is overridable per manifest.
   const cfg: ProxyConfig = manifest ? resolveProxyConfig(manifest) : DEFAULT_PROXY_CONFIG;
-  if (manifest?.componentType === 'service' && !path.startsWith('api/') && !path.startsWith('_aura_')) {
+  if (manifest?.componentType === 'service' && !cfg.exposeAllPaths && !path.startsWith('api/') && !path.startsWith('_aura_')) {
     const payload = {
       error: 'service-has-no-ui',
       message: `${instance.appId} is a service (componentType='service'). Services are headless and cannot be rendered. Use an intent (or a separate activity-component app) to show UI.`,
