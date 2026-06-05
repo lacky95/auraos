@@ -13,23 +13,23 @@ const SHARED_NETWORK = process.env['AURA_DOCKER_NETWORK'] ?? 'aura-net';
 const BASE_IMAGE     = process.env['AURA_BASE_IMAGE']     ?? 'aura-base';
 
 const SYNTHESISED_ENTRYPOINT = `set -e
-# Pull @aura/* SDK packages from the local OCI registry when the app
-# references them but the workspace symlinks didn't materialise them
-# (user/global-scope apps live outside pnpm globs). No-op for system-scope
-# apps where pnpm already populated /workspace/node_modules/@aura/*.
-if [ ! -d node_modules/@aura ] && grep -q '"@aura/' package.json 2>/dev/null; then
-  command -v aura >/dev/null && aura sdk install --quiet || true
-fi
 export PORT="\${APP_PORT:-4001}"
-# Skip install when /workspace/node_modules exists: that volume mount is
-# populated by the workspace-level pnpm install and contains every workspace
-# package (including @aura/app-sdk). Node's resolution walks UP from
-# /workspace/apps/<id> into it, so a scaffolded app with a 'workspace:*'
-# dep resolves without running 'npm install' — which would die anyway with
-# EUNSUPPORTEDPROTOCOL because npm doesn't understand the workspace: protocol.
-if [ ! -d node_modules ] && [ ! -d /workspace/node_modules ]; then
-  echo "[\${APP_ID:-app}] Installing dependencies..."
+# Resolve astro. System-scope apps inherit it from the workspace's hoisted
+# /workspace/node_modules/.bin/astro (the workspace pnpm install populated
+# this via the mounted named volume). User/global-scope apps live outside
+# the pnpm workspace; they have to install astro into their own
+# node_modules. Run npm install only when neither path has astro yet.
+if [ ! -x "node_modules/.bin/astro" ] && [ ! -x "/workspace/node_modules/.bin/astro" ]; then
+  echo "[\${APP_ID:-app}] npm install (astro not yet present)..."
   npm install --prefer-offline 2>&1 || npm install
+fi
+# Pull @aura/* SDK packages from the local OCI registry when the app
+# references them in \`auraDependencies\` (user/global scope) or legacy
+# \`dependencies\` and the workspace symlinks didn't materialise them.
+# No-op for system-scope apps where pnpm already populated
+# /workspace/node_modules/@aura/* via workspace:*.
+if [ ! -d node_modules/@aura ] && grep -qE '"(aura)?[dD]ependencies"|"@aura/' package.json 2>/dev/null; then
+  command -v aura >/dev/null && aura sdk install --quiet || true
 fi
 ASTRO="node_modules/.bin/astro"
 [ -x "\$ASTRO" ] || ASTRO="/workspace/node_modules/.bin/astro"

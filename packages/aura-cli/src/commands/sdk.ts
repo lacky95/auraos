@@ -43,22 +43,39 @@ function isOrasAvailable(): boolean {
   catch { return false; }
 }
 
-/** Discover @aura/* deps from the cwd's package.json. Returns name+version
- *  pairs; version strings like "^0.0.1" → "0.0.1" (oras tag, exact). */
+/** Discover @aura/* deps from the cwd's package.json. Reads two fields:
+ *
+ *   • `auraDependencies` — preferred for user/global-scope apps. npm/pnpm
+ *     ignore unknown fields, so listing @aura/* here lets `npm install`
+ *     succeed for the rest of the tree without choking on a spec it can't
+ *     resolve from the (OCI-only) local registry.
+ *
+ *   • `dependencies` + `devDependencies` — legacy / system-scope. We still
+ *     scan these for @aura/* entries so apps that opted into the previous
+ *     "@aura/foo in dependencies" shape keep working.
+ *
+ *   workspace:* entries are skipped — those resolve via pnpm symlinks
+ *   (system-scope path), not OCI. Version specs are stripped to exact tags
+ *   ("^0.0.1" → "0.0.1") because oras refs are exact. */
 function discoverDeps(cwd: string): Array<{ fullName: string; basename: string; version: string }> {
   const path = join(cwd, 'package.json');
   if (!existsSync(path)) return [];
-  let manifest: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+  let manifest: {
+    dependencies?:      Record<string, string>;
+    devDependencies?:   Record<string, string>;
+    auraDependencies?:  Record<string, string>;
+  };
   try { manifest = JSON.parse(readFileSync(path, 'utf8')); }
   catch { return []; }
-  const all = { ...(manifest.dependencies ?? {}), ...(manifest.devDependencies ?? {}) };
+  const merged: Record<string, string> = {
+    ...(manifest.dependencies     ?? {}),
+    ...(manifest.devDependencies  ?? {}),
+    ...(manifest.auraDependencies ?? {}),  // takes precedence on duplicates
+  };
   const out: Array<{ fullName: string; basename: string; version: string }> = [];
-  for (const [fullName, spec] of Object.entries(all)) {
+  for (const [fullName, spec] of Object.entries(merged)) {
     if (!fullName.startsWith('@aura/')) continue;
-    // Skip workspace:* — those resolve via pnpm symlinks; if the user
-    // landed here with workspace:* deps, they're in the wrong scope.
     if (typeof spec !== 'string' || spec === 'workspace:*' || spec.startsWith('workspace:')) continue;
-    // ^0.0.1 / ~0.0.1 / 0.0.1 → 0.0.1. oras tags are exact.
     const version = spec.replace(/^[~^]/, '');
     const basename = fullName.replace(/^@aura\//, '');
     out.push({ fullName, basename, version });

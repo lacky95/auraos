@@ -466,25 +466,19 @@ interface PayloadFile {
  */
 function buildScaffoldFiles(cfg: ScaffoldConfig): PayloadFile[] {
   if (!existsSync(TEMPLATE_DIR)) fail(`Scaffold template missing: ${TEMPLATE_DIR}`);
-  // Scope-aware `@aura/*` dep version:
-  //   system → "workspace:*" (monorepo dev workflow, pnpm symlinks)
-  //   user/global → "^<version>" (resolved by `aura sdk install` at runtime
-  //                 from the local OCI registry).
-  // The version we plug in matches what's actually published — read it from
-  // the workspace's @aura/app-sdk package.json so a single bump there
-  // propagates everywhere.
+  // Pull the live @aura/app-sdk version from the monorepo so user/global
+  // scopes pin to whatever's published in the local OCI registry. Used
+  // when post-processing package.json below.
   const sdkVersion = readSdkVersion();
-  const auraDepSpec = cfg.scope === 'system' ? 'workspace:*' : `^${sdkVersion}`;
   const vars: Record<string, string> = {
-    APP_ID:           cfg.appId,
-    APP_NAME:         cfg.name,
-    APP_SHORT:        cfg.appId.split('.').pop() ?? cfg.appId,
-    AURA_DEP_SPEC:    auraDepSpec,
+    APP_ID:        cfg.appId,
+    APP_NAME:      cfg.name,
+    APP_SHORT:     cfg.appId.split('.').pop() ?? cfg.appId,
     // Legacy placeholders the template manifest used to consume — kept for
     // any non-manifest files that might still reference them in the future.
-    INSTANCE_MODE:    cfg.instanceMode,
-    ACTIVITY_MODE:    cfg.shape === 'service' ? 'none' : 'multi',
-    TOOLS_JSON:       JSON.stringify(cfg.tools),
+    INSTANCE_MODE: cfg.instanceMode,
+    ACTIVITY_MODE: cfg.shape === 'service' ? 'none' : 'multi',
+    TOOLS_JSON:    JSON.stringify(cfg.tools),
   };
   const files: PayloadFile[] = [];
   // `service`-shape apps don't have activities, so omit the activity
@@ -521,19 +515,40 @@ function buildScaffoldFiles(cfg: ScaffoldConfig): PayloadFile[] {
     relPath: 'app.manifest.json',
     content: JSON.stringify(manifestFromConfig(cfg), null, 2) + '\n',
   });
-  // User/global-scope apps live outside the pnpm workspace, so they can't
-  // resolve `@aura/*` via workspace symlinks. Drop a `.npmrc` documenting
-  // where the registry lives — primarily for IDE/Tooling hints and for the
-  // future day Zot grows native npm-protocol support. Actual install for
-  // these scopes happens via `aura sdk install` invoked from the sandbox's
-  // synth entrypoint, which speaks OCI Distribution directly via `oras`.
+  // Post-process package.json: insert the @aura/app-sdk dep in the right
+  // shape per scope. The template ships ONLY astro + @astrojs/node so the
+  // shape difference lives in code (not three template variants).
+  //   • system → "@aura/app-sdk": "workspace:*" in `dependencies`, picked
+  //     up by the workspace pnpm install. npm/pnpm both understand
+  //     workspace:* in the monorepo.
+  //   • user/global → moved to a custom `auraDependencies` field that
+  //     npm/pnpm silently ignore. `aura sdk install` reads it (run from
+  //     the synth entrypoint on first boot) and pulls from the local OCI
+  //     registry. This split lets `npm install` succeed for astro/normal
+  //     deps without choking on the @aura/* spec that doesn't resolve to
+  //     a real npm registry.
+  const pkgIdx = files.findIndex((f) => f.relPath === 'package.json');
+  if (pkgIdx >= 0) {
+    const pkg = JSON.parse(files[pkgIdx]!.content) as Record<string, unknown>;
+    if (cfg.scope === 'system') {
+      pkg['dependencies'] = { '@aura/app-sdk': 'workspace:*', ...(pkg['dependencies'] as object) };
+    } else {
+      pkg['auraDependencies'] = { '@aura/app-sdk': `^${sdkVersion}` };
+    }
+    files[pkgIdx] = { ...files[pkgIdx]!, content: JSON.stringify(pkg, null, 2) + '\n' };
+  }
+  // User/global-scope apps live outside the pnpm workspace. Drop a `.npmrc`
+  // documenting where the local OCI registry lives — primarily for IDE/
+  // Tooling hints and the future day Zot grows native npm-protocol support.
+  // Actual install for these scopes happens via `aura sdk install` invoked
+  // from the sandbox's synth entrypoint (reads auraDependencies above).
   if (cfg.scope !== 'system') {
     files.push({
       relPath: '.npmrc',
       content:
-        '# @aura/* packages are resolved from the local AuraOS OCI registry.\n' +
-        '# `npm install` here will currently fail to find them — install them\n' +
-        '# via `aura sdk install` (run automatically by the sandbox entrypoint).\n' +
+        '# AuraOS user-scope apps: @aura/* packages live in `auraDependencies`,\n' +
+        '# not `dependencies` (npm/pnpm ignore it; `aura sdk install` reads it).\n' +
+        '# The registry below is documentation; resolution happens via OCI.\n' +
         '@aura:registry=http://aura-com.aura.registry:4090/\n',
     });
   }

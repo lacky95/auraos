@@ -24,25 +24,21 @@ const LIFECYCLE_TIMEOUT_MS = 5_000;
  */
 const SYNTHESISED_ENTRYPOINT = `set -e
 export PORT="\${APP_PORT:-4001}"
-# Skip install when /workspace/node_modules exists: the workspace-level
-# pnpm install already populated every dep there, and Node's resolution walks
-# UP from /workspace/apps/<id> to /workspace/node_modules just fine. Running
-# npm install here would die on the scaffolded package.json's
-# 'workspace:*' protocol with EUNSUPPORTEDPROTOCOL.
-if [ ! -d node_modules ] && [ ! -d /workspace/node_modules ]; then
-  echo "[\${APP_ID:-app}] Installing dependencies..."
+# Resolve astro. System-scope apps inherit it from the workspace's hoisted
+# /workspace/node_modules/.bin/astro. User/global-scope apps live outside
+# the pnpm workspace; they have to install astro into their own
+# node_modules. Run npm install only when neither path has astro yet.
+if [ ! -x "node_modules/.bin/astro" ] && [ ! -x "/workspace/node_modules/.bin/astro" ]; then
+  echo "[\${APP_ID:-app}] npm install (astro not yet present)..."
   npm install --prefer-offline 2>&1 || npm install
 fi
-# User-scope + global-scope apps don't get @aura/* via workspace symlinks
-# (they live outside pnpm globs). Pull them from the local OCI registry
-# via the SDK installer when their node_modules is missing the @aura/ dir
-# AND the app's package.json actually references @aura/*. No-op for
-# system-scope apps where the workspace already provides everything.
-if [ ! -d node_modules/@aura ] && grep -q '"@aura/' package.json 2>/dev/null; then
+# Pull @aura/* SDK packages from the local OCI registry when referenced in
+# \`auraDependencies\` (user/global) or legacy \`dependencies\` and the
+# workspace symlinks didn't materialise them. No-op when /workspace's
+# pnpm install already populated /workspace/node_modules/@aura/*.
+if [ ! -d node_modules/@aura ] && grep -qE '"(aura)?[dD]ependencies"|"@aura/' package.json 2>/dev/null; then
   command -v aura >/dev/null && aura sdk install --quiet || true
 fi
-# astro lives in /workspace/node_modules/.bin (workspace install). Prefer the
-# local copy when present (a power user may have isolated the app's deps).
 ASTRO="node_modules/.bin/astro"
 [ -x "\$ASTRO" ] || ASTRO="/workspace/node_modules/.bin/astro"
 echo "[\${APP_ID:-app}] Starting Astro server on port \$PORT via \$ASTRO"
