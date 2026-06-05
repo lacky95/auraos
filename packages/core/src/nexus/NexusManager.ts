@@ -28,12 +28,17 @@ import { computePermissionDiff, diffRequiresApproval } from './PermissionDiff.js
 import type {
   InstallRecord, NexusProgressEvent, ResolvedRef,
 } from './types.js';
+import type { RegistryConfig } from './RegistryConfig.js';
+import { resolveByName } from './RegistryConfig.js';
 
 export interface NexusManagerOpts {
   scopes:  ScopeDefinition[];
   /** Root dataDir used for shared staging/index paths (not scoped per-app). */
   rootDataDir: string;
   bus?:    OsEventBus;
+  /** Multi-registry config from the KV store. Used by Resolver to choose
+   *  mirror URLs and by Publisher to resolve bare-name `--registry` args. */
+  registryConfig?: RegistryConfig;
 }
 
 export class NexusManager {
@@ -43,14 +48,18 @@ export class NexusManager {
   private readonly installers: Map<ScopeId, Installer>;
   private readonly rootDataDir: string;
   private readonly bus?: OsEventBus;
+  /** Currently-known registry config. Snapshot from the singleton's load;
+   *  refreshed when the shell route persists a change (TODO: live refresh). */
+  private registryConfig?: RegistryConfig;
 
   constructor(opts: NexusManagerOpts) {
     this.rootDataDir    = opts.rootDataDir;
     this.bus            = opts.bus;
+    this.registryConfig = opts.registryConfig;
     this.index          = new IndexClient({
       cachePath: join(opts.rootDataDir, 'nexus', 'index.yaml'),
     });
-    this.resolver       = new Resolver({ index: this.index });
+    this.resolver       = new Resolver({ index: this.index, registryConfig: opts.registryConfig });
     this.installers     = new Map();
     for (const scope of opts.scopes) {
       if (scope.immutable) continue;
@@ -60,6 +69,17 @@ export class NexusManager {
         scope:   scope.id,
       }));
     }
+  }
+
+  /** Expose the current registry config so callers (shell routes, publish
+   *  script) can read or mutate it. The setter swaps it in for use by
+   *  subsequent fetches/publishes; existing in-flight installs keep their
+   *  original snapshot to avoid mid-flight surprises. */
+  getRegistryConfig(): RegistryConfig | null { return this.registryConfig ?? null; }
+  setRegistryConfig(cfg: RegistryConfig): void { this.registryConfig = cfg; }
+  /** Convenience for Publisher / sdk install: resolve a bare-name registry. */
+  resolveRegistryName(bareName: string): string | null {
+    return this.registryConfig ? resolveByName(this.registryConfig, bareName) : null;
   }
 
   /**

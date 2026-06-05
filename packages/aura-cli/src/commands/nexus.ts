@@ -279,6 +279,59 @@ export function registerNexus(program: Command): void {
         info(`    ${color.cyan(res.result!.installCmd)}`);
       }
     });
+
+  // ── registries ──────────────────────────────────────────────────────────
+  // List / add / remove the Nexus multi-registry config (KV-backed via
+  // /api/nexus/registries). The local zot at `aura-com.aura.registry:4001`
+  // is seeded by default with priority 0; this lets the user wire in
+  // additional mirrors (a customer-private registry, a corporate ghcr.io
+  // mirror, etc.) without restarting the shell.
+  const registries = nexus
+    .command('registries')
+    .description('List and manage the configured OCI registries Nexus pulls from.');
+
+  registries
+    .command('list', { isDefault: true })
+    .description('Print every registered registry with its priority + mirror flag.')
+    .action(async () => {
+      const cfg = await api.get<{ registries: Array<{ name: string; url: string; priority: number; mirror?: boolean }> }>('/api/nexus/registries');
+      if (!cfg.registries.length) { info('no registries configured.'); return; }
+      const rows = [...cfg.registries]
+        .sort((a, b) => a.priority - b.priority)
+        .map((e) => ({
+          NAME:     e.name,
+          URL:      e.url,
+          PRIORITY: String(e.priority),
+          MIRROR:   e.mirror ? '✓' : '',
+        }));
+      console.log(table(rows));
+    });
+
+  registries
+    .command('add <name> <url>')
+    .description('Add a registry. URL must include the http(s):// scheme.')
+    .option('--priority <n>', 'lower = checked first', '10')
+    .option('--mirror',       'probe this registry for ANY ref before the canonical host')
+    .action(async (name: string, url: string, opts: { priority?: string; mirror?: boolean }) => {
+      if (!/^https?:\/\//.test(url)) fail('url must start with http:// or https://');
+      const res = await api.post<{ ok?: boolean; error?: string; detail?: string }>(
+        '/api/nexus/registries',
+        { name, url, priority: Number(opts.priority ?? 10), mirror: !!opts.mirror },
+      );
+      if (!res.ok) fail(`${res.error}${res.detail ? ` (${res.detail})` : ''}`);
+      ok(`added registry ${color.cyan(name)} → ${url}`);
+    });
+
+  registries
+    .command('remove <name>')
+    .description('Remove a registry by name. Refuses to remove the last entry.')
+    .action(async (name: string) => {
+      const res = await api.del<{ ok?: boolean; error?: string; detail?: string }>(
+        `/api/nexus/registries/${encodeURIComponent(name)}`,
+      );
+      if (!res.ok) fail(`${res.error}${res.detail ? ` (${res.detail})` : ''}`);
+      ok(`removed registry ${color.cyan(name)}`);
+    });
 }
 
 /** Normalise a user-typed ref so the shell receives an absolute path

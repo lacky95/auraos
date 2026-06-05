@@ -232,11 +232,23 @@ function readdirSafe(p: string): string[] {
  */
 export interface PublishOciOpts {
   appPath:   string;
+  /** Either a full registry path (`ghcr.io/user/app`) or a bare name
+   *  registered in RegistryConfig (`local`, `my-private-mirror`). When a
+   *  bare name is used, `registryResolver` must translate it to a full
+   *  URL, from which the path component becomes the OCI repo. */
   registry:  string;
   tag:       string;
   channel?:  string;
   dataDir:   string;
   onMessage?: (msg: string) => void;
+  /** When `opts.registry` is a bare name (no `/`), call this to resolve
+   *  the full URL. Returns null when unknown — the caller then falls back
+   *  to treating `opts.registry` as a literal path. */
+  registryResolver?: (bareName: string) => string | null;
+  /** When `opts.registry` resolves to a bare name, the actual OCI repo path
+   *  has to come from somewhere. Defaults to `aura/<manifestId>` (matches
+   *  the @aura/* publish convention); callers can override. */
+  repoPathForName?: string;
 }
 
 export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }> {
@@ -265,26 +277,47 @@ export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }>
   tarArgs.push('.');
   execFileSync('tar', tarArgs, { stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 });
 
+  // Resolve a bare-name registry through the RegistryConfig before pushing.
+  // Bare = no `/` AND no `:` — looks like a label, not a URL/path. When it
+  // resolves to a URL, strip the scheme + use the URL's host as the registry
+  // and the configured repo path (default `aura/<manifestId>`) as the OCI
+  // repo. Plain-HTTP URLs get `--plain-http` added to every oras call.
+  const isBareName = !opts.registry.includes('/') && !opts.registry.includes(':');
+  let registryPath = opts.registry;
+  let extraFlags: string[] = [];
+  if (isBareName && opts.registryResolver) {
+    const url = opts.registryResolver(opts.registry);
+    if (!url) {
+      throw new Error(`[NexusPublish] registry '${opts.registry}' isn't a URL and isn't a configured registry name.`);
+    }
+    const { orasHostFromUrl, orasFlagsForUrl } = await import('./RegistryConfig.js');
+    const host = orasHostFromUrl(url);
+    const repo = opts.repoPathForName ?? `aura/${manifest.id}`;
+    registryPath = `${host}/${repo}`;
+    extraFlags = orasFlagsForUrl(url);
+  }
+
   // Push as a single layer with the app config blob inline.
   log('pushing oci artifact...');
-  const ref = `${opts.registry}:${opts.tag}`;
+  const ref = `${registryPath}:${opts.tag}`;
   execFileSync('oras', [
     'push', ref,
     `${tarPath}:application/vnd.aura.app.bundle.v1.tar+gzip`,
     '--artifact-type', 'application/vnd.aura.app.manifest.v1+json',
+    ...extraFlags,
   ], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 180_000, cwd: stagingDir });
 
   if (opts.channel) {
     log(`tagging channel '${opts.channel}'...`);
     try {
-      execFileSync('oras', ['tag', ref, opts.channel],
+      execFileSync('oras', ['tag', ref, opts.channel, ...extraFlags],
         { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
     } catch { /* tag is best-effort */ }
   }
 
   // Verify the just-pushed ref exists.
   log('verifying...');
-  execFileSync('oras', ['manifest', 'fetch', ref],
+  execFileSync('oras', ['manifest', 'fetch', ref, ...extraFlags],
     { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
 
   // Clean up the staging dir.

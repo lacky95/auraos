@@ -18,6 +18,8 @@
 import type { IndexClient } from './IndexClient.js';
 import { resolveGitCommit } from './Fetchers/GitFetcher.js';
 import { resolveOciDigest } from './Fetchers/OciFetcher.js';
+import type { RegistryConfig } from './RegistryConfig.js';
+import { pickMirror } from './RegistryConfig.js';
 import type { ResolvedRef, NexusSource } from './types.js';
 
 export interface ResolverOpts {
@@ -25,6 +27,10 @@ export interface ResolverOpts {
   /** v1 picks git over oci when an index entry has both. Override to 'oci' to
    *  prefer OCI once it's fully wired. */
   preferredSource?: 'git' | 'oci';
+  /** Optional multi-registry config. When provided AND it contains a
+   *  `mirror: true` entry, OCI digest resolution probes the mirror first
+   *  before the canonical host in the ref. */
+  registryConfig?: RegistryConfig;
 }
 
 export class Resolver {
@@ -94,9 +100,21 @@ export class Resolver {
       registry = refBody.slice(0, colonIdx);
       tag = refBody.slice(colonIdx + 1);
     }
-    const digest = tag.startsWith('sha256:')
-      ? tag
-      : (resolveOciDigest({ registry, tag }) ?? '');
+    // Multi-registry: when a mirror is configured, try resolving the digest
+    // against it first. The mirror is expected to host the same repo path
+    // (e.g. `user/foo`) at a different host (e.g. local zot). Falls through
+    // to the canonical registry on miss so non-mirrored refs still work.
+    const mirror = this.opts.registryConfig ? pickMirror(this.opts.registryConfig) : null;
+    let digest = '';
+    if (tag.startsWith('sha256:')) {
+      digest = tag;
+    } else if (mirror) {
+      digest = resolveOciDigest({ registry, tag }, mirror.url)
+            ?? resolveOciDigest({ registry, tag })
+            ?? '';
+    } else {
+      digest = resolveOciDigest({ registry, tag }) ?? '';
+    }
     return {
       source:  'oci',
       rawRef,
