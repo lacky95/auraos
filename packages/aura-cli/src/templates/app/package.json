@@ -9,7 +9,7 @@
     "start": "node dist/server/entry.mjs"
   },
   "dependencies": {
-    "@aura/app-sdk": "workspace:*",
+    "@aura/app-sdk": "{{AURA_DEP_SPEC}}",
     "@astrojs/node": "^10.0.0",
     "astro": "^6.0.0"
   }
