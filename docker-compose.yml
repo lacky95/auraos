@@ -25,6 +25,14 @@ services:
       # are passed verbatim to the host daemon, which is why AURA_HOST_WORKSPACE
       # below points at the host's view of /workspace (the bind source
       # of `.:/workspace` above).
+      #
+      # NOTE for macOS (Docker Desktop / Rancher Desktop / OrbStack): the
+      # daemon lives inside a Linux VM and resolves both sides of this bind
+      # against the VM, where /var/run/docker.sock IS the daemon socket — so
+      # this path is correct on Mac too, even when the host-side symlink at
+      # /var/run/docker.sock is absent (e.g. Rancher without admin access).
+      # On the host, set DOCKER_HOST to the VM-forwarded socket
+      # (e.g. unix://$HOME/.rd/docker.sock) before running `make up`.
       - /var/run/docker.sock:/var/run/docker.sock
     working_dir: /workspace
     environment:
@@ -46,6 +54,13 @@ services:
       AURA_DOCKER_NETWORK: aura-net
       AURA_BASE_IMAGE: aura-base
       AURA_SHELL_HOSTNAME: aura-shell
+      # Sibling containers mount these named volumes to see the same
+      # node_modules + app-data the shell's pnpm install populated. Compose
+      # prefixes volume names with the project name (the directory name,
+      # `auraos`), so pin them explicitly — ContainerRunner's defaults
+      # (`aura_*`) only match when the directory is named `aura`.
+      AURA_NODE_MODULES_VOLUME: auraos_aura-node-modules
+      AURA_APP_DATA_VOLUME: auraos_aura-app-data
     cap_add:
       - SYS_PTRACE
     security_opt:
