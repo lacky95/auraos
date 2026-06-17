@@ -76,8 +76,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Docker CLI — ContainerRunner uses this to drive sibling-container spawns
 # via the host's docker daemon (socket bind-mounted from compose). Static
 # binary from docker.com so it works on any host without adding repos.
+# Arch resolved at build time via `uname -m` so the same Dockerfile produces
+# a correct binary on both x86_64 hosts and Apple Silicon (linux/arm64 ⇒ aarch64).
 ARG DOCKER_VERSION=29.3.1
-RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_VERSION}.tgz" -o /tmp/docker.tgz \
+RUN ARCH=$(uname -m) \
+ && curl -fsSL "https://download.docker.com/linux/static/stable/${ARCH}/docker-${DOCKER_VERSION}.tgz" -o /tmp/docker.tgz \
  && tar -xzf /tmp/docker.tgz -C /tmp \
  && install -m 0755 /tmp/docker/docker /usr/local/bin/docker \
  && rm -rf /tmp/docker.tgz /tmp/docker \

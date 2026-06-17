@@ -205,6 +205,21 @@ export class ContainerRunner implements SandboxRunner {
     return pid;
   }
 
+  /**
+   * Translate an in-container path under /workspace to its equivalent host
+   * path so docker bind-mount sources resolve correctly when the daemon
+   * runs in a separate filesystem namespace (Docker Desktop / Rancher
+   * Desktop / OrbStack on macOS, or any rootless setup). On a Linux host
+   * where workspaceRoot===/workspace this is a no-op.
+   */
+  private toHostPath(inContainerPath: string): string {
+    if (inContainerPath === '/workspace') return this.workspaceRoot;
+    if (inContainerPath.startsWith('/workspace/')) {
+      return this.workspaceRoot + inContainerPath.slice('/workspace'.length);
+    }
+    return inContainerPath;
+  }
+
   /** Build the `docker run` argv mirroring ProotRunner's bind topology. */
   private buildDockerArgs(
     instanceId: string,
@@ -263,9 +278,12 @@ export class ContainerRunner implements SandboxRunner {
       // Per-app slice of /workspace from the host. Sibling apps in
       // apps/<other> are not visible — there's no parent /workspace/apps
       // bind, the individual app folder is bound directly under it.
-      // Use ctx.appDir (host path) so global/user scope apps bind from their
-      // actual location rather than workspaceRoot/apps/<id>.
-      '-v', `${ctx.appDir}:/workspace/apps/${appId}`,
+      // ctx.appDir is the path inside aura-shell (e.g. /workspace/apps/<id>);
+      // the daemon resolves bind sources on the HOST, so we rewrite the
+      // /workspace prefix to workspaceRoot. Works for Linux-host setups where
+      // workspaceRoot==/workspace (a no-op rewrite) and for Mac VM-based
+      // daemons where /workspace doesn't exist outside the shell container.
+      '-v', `${this.toHostPath(ctx.appDir)}:/workspace/apps/${appId}`,
       '-v', `${this.workspaceRoot}/packages:/workspace/packages:ro`,
       '-v', `${this.workspaceRoot}/package.json:/workspace/package.json:ro`,
       '-v', `${this.workspaceRoot}/pnpm-lock.yaml:/workspace/pnpm-lock.yaml:ro`,
