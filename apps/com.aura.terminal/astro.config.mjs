@@ -43,5 +43,15 @@ export default defineConfig({
     // The terminal's own PTY WebSocket on `/ws` is unaffected (handled in the
     // ptyWsIntegration above, with its own upgrade hook).
     server: { hmr: false },
+    // Force pre-bundle for the xterm packages. Vite's dep scanner picks them
+    // up from the `<script>` block in index.astro on FIRST server start, but
+    // subsequent re-scans (triggered by the "optimized dependencies changed
+    // → reloading" cycle) intermittently drop them from _metadata.json.
+    // Result: /node_modules/.vite/deps/@xterm_xterm.js 404s and the browser
+    // errors with NS_ERROR_CORRUPTED_CONTENT / disallowed MIME type. Listing
+    // them explicitly pins them into every optimization pass.
+    optimizeDeps: {
+      include: ['@xterm/xterm', '@xterm/addon-fit'],
+    },
   },
 });
