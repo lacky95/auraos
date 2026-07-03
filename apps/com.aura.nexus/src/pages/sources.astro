@@ -1,0 +1,214 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { shellGet } from '../lib/shellClient.ts';
+
+interface SourceEntry {
+  kind:     'oci' | 'git-index' | 'git-app';
+  name:     string;
+  url:      string;
+  priority: number;
+  mirror?:  boolean;
+  ref?:     string;
+}
+interface SourcesConfig { schema: number; sources: SourceEntry[]; }
+interface SourceStatus { name: string; kind: string; ok: boolean; apps: number; error?: string; }
+interface Catalog { sources?: SourceStatus[]; }
+
+let cfg: SourcesConfig = { schema: 1, sources: [] };
+let status: Record<string, SourceStatus> = {};
+try {
+  cfg = await shellGet<SourcesConfig>('/api/nexus/sources');
+} catch { /* empty */ }
+try {
+  const cat = await shellGet<Catalog>('/api/nexus');
+  for (const s of cat.sources ?? []) status[s.name] = s;
+} catch { /* no status */ }
+
+const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
+---
+<Layout title="Sources" active="sources">
+  <section class="nexus-section">
+    <h2>// Sources</h2>
+    <p style="color:var(--aura-color-text-dim);font-size:0.8rem">
+      Nexus aggregates apps from every source below into the
+      <a href="/">Browse</a> tab. A source is either an <b>OCI registry</b>
+      (self-describing — publish apps to it and they appear automatically), a
+      <b>git-index</b> catalog (a repo hosting an <code>index.yaml</code> of many
+      apps), or a <b>git-app</b> (a repo that is a single app).
+    </p>
+
+    {sorted.length === 0 ? (
+      <div class="nexus-empty"><p>No sources configured yet. Add one below.</p></div>
+    ) : (
+      sorted.map((s) => (
+        <div class="nexus-card">
+          <div class="nexus-card-head">
+            <div>
+              <div class="nexus-card-title">
+                <span class="badge primary" style="margin-right:8px">{s.kind}</span>
+                {s.name}
+                <span style="color:var(--aura-color-text-dim);font-weight:400;margin-left:6px">priority {s.priority}</span>
+              </div>
+              <div class="nexus-card-desc"><code>{s.url}</code></div>
+              <div class="nexus-card-meta">
+                {s.kind === 'oci' && s.mirror && <span class="badge" style="margin-right:6px">mirror</span>}
+                {s.ref && <span class="badge" style="margin-right:6px">ref: {s.ref}</span>}
+                {status[s.name]
+                  ? (status[s.name].ok
+                      ? <span style="color:var(--aura-color-primary)">● {status[s.name].apps} app(s)</span>
+                      : <span style="color:var(--aura-color-warning,#e0a000)">● unavailable{status[s.name].error ? `: ${status[s.name].error}` : ''}</span>)
+                  : <span style="color:var(--aura-color-text-dim)">● status unknown</span>}
+              </div>
+            </div>
+            <div class="nexus-card-actions">
+              <button class="remove-src" data-name={s.name} data-kind={s.kind}>REMOVE</button>
+            </div>
+          </div>
+        </div>
+      ))
+    )}
+  </section>
+
+  <section class="nexus-section">
+    <h2>// Add a source</h2>
+    <div class="nexus-form">
+      <label for="src-kind">Kind</label>
+      <select id="src-kind">
+        <option value="oci">oci — OCI registry (apps published to it appear automatically)</option>
+        <option value="git-index">git-index — a repo hosting index.yaml (many apps)</option>
+        <option value="git-app">git-app — a repo that is a single app</option>
+      </select>
+
+      <label for="src-name">Name (unique)</label>
+      <input id="src-name" type="text" placeholder="my-registry" />
+
+      <label for="src-url" id="src-url-label">Registry URL (http(s)://host:port)</label>
+      <input id="src-url" type="text" placeholder="https://ghcr.io" />
+
+      <div class="nexus-form-grid">
+        <div>
+          <label for="src-priority">Priority (lower = checked first)</label>
+          <input id="src-priority" type="number" value="10" />
+        </div>
+        <div id="mirror-cell">
+          <label for="src-mirror">Mirror (oci — probe first for any ref)</label>
+          <select id="src-mirror"><option value="false">no</option><option value="true">yes</option></select>
+        </div>
+        <div id="ref-cell" style="display:none">
+          <label for="src-ref">Git ref (branch/tag/commit, optional)</label>
+          <input id="src-ref" type="text" placeholder="main" />
+        </div>
+      </div>
+
+      <div class="nexus-form-row">
+        <button id="add-btn">ADD SOURCE</button>
+        <button id="refresh-btn">REFRESH CATALOG</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="nexus-section">
+    <h2>// Output</h2>
+    <pre class="nexus-log" id="log">(no output yet)</pre>
+  </section>
+
+  <script is:inline>
+    const $ = (id) => document.getElementById(id);
+    const log = $('log');
+    const setLog = (t) => { log.textContent = t; };
+
+    // Toggle kind-specific fields + URL hint.
+    const kindSel = $('src-kind');
+    function syncFields() {
+      const kind = kindSel.value;
+      const isOci = kind === 'oci';
+      $('mirror-cell').style.display = isOci ? '' : 'none';
+      $('ref-cell').style.display    = isOci ? 'none' : '';
+      $('src-url-label').textContent = isOci
+        ? 'Registry URL (http(s)://host:port)'
+        : (kind === 'git-index'
+            ? 'Repo URL or direct index.yaml URL'
+            : 'Repo URL (a single-app repo)');
+      $('src-url').placeholder = isOci
+        ? 'https://ghcr.io'
+        : 'github.com/you/catalog';
+    }
+    kindSel.addEventListener('change', syncFields);
+    syncFields();
+
+    $('add-btn').addEventListener('click', async () => {
+      const kind = kindSel.value;
+      const name = $('src-name').value.trim();
+      const url  = $('src-url').value.trim();
+      const priority = Number($('src-priority').value || '10');
+      if (!name) { setLog('name is required'); return; }
+      if (!url)  { setLog('url is required'); return; }
+      if (kind === 'oci' && !/^https?:\/\//.test(url)) {
+        setLog('oci url must start with http:// or https://'); return;
+      }
+      const entry = { kind, name, url, priority };
+      if (kind === 'oci') { if ($('src-mirror').value === 'true') entry.mirror = true; }
+      else { const ref = $('src-ref').value.trim(); if (ref) entry.ref = ref; }
+
+      const btn = $('add-btn');
+      btn.disabled = true; btn.textContent = kind === 'oci' ? 'ADDING…' : 'VALIDATING…';
+      setLog(kind === 'oci' ? 'registering registry…' : 'validating source (cloning/fetching)…');
+      try {
+        const res  = await fetch('/api/nexus/sources', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(entry),
+        });
+        const json = await res.json();
+        if (!res.ok || json.error) {
+          setLog('ERROR: ' + (json.error || res.status) + (json.detail ? ' — ' + json.detail : ''));
+          return;
+        }
+        setLog('added ' + kind + ' source "' + name + '" ✓  reloading…');
+        setTimeout(() => location.reload(), 600);
+      } catch (err) {
+        setLog('ERROR: ' + (err && err.message ? err.message : err));
+      } finally {
+        btn.disabled = false; btn.textContent = 'ADD SOURCE';
+      }
+    });
+
+    $('refresh-btn').addEventListener('click', async () => {
+      setLog('refreshing catalog from all sources…');
+      try {
+        const res = await fetch('/api/nexus?refresh=1');
+        const json = await res.json();
+        const lines = ['catalog refreshed — ' + (json.apps ? json.apps.length : 0) + ' app(s)'];
+        for (const s of json.sources || []) {
+          lines.push('  ' + s.name + ' (' + s.kind + '): ' + (s.ok ? s.apps + ' app(s)' : 'ERROR ' + (s.error || '')));
+        }
+        setLog(lines.join('\n'));
+      } catch (err) {
+        setLog('ERROR: ' + (err && err.message ? err.message : err));
+      }
+    });
+
+    document.querySelectorAll('.remove-src').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const name = btn.getAttribute('data-name');
+        if (!confirm('Remove source "' + name + '"?')) return;
+        btn.disabled = true; btn.textContent = '…';
+        setLog('removing "' + name + '"…');
+        try {
+          const res  = await fetch('/api/nexus/sources/' + encodeURIComponent(name), { method: 'DELETE' });
+          const json = await res.json();
+          if (!res.ok || json.error) {
+            setLog('ERROR: ' + (json.error || res.status) + (json.detail ? ' — ' + json.detail : ''));
+            btn.disabled = false; btn.textContent = 'REMOVE';
+            return;
+          }
+          setLog('removed "' + name + '" ✓  reloading…');
+          setTimeout(() => location.reload(), 500);
+        } catch (err) {
+          setLog('ERROR: ' + (err && err.message ? err.message : err));
+          btn.disabled = false; btn.textContent = 'REMOVE';
+        }
+      });
+    });
+  </script>
+</Layout>

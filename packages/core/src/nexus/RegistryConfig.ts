@@ -15,7 +15,7 @@
 export interface RegistryEntry {
   /** Human-readable label. Unique within the config. */
   name:     string;
-  /** Full URL with scheme: 'http://aura-com.aura.registry:4001'. */
+  /** Full URL with scheme: 'http://aura-com.aura.registry:4090'. */
   url:      string;
   /** Lower wins. Tied priorities fall back to insertion order. */
   priority: number;
@@ -119,6 +119,15 @@ export function resolveByName(cfg: RegistryConfig, bareName: string): string | n
   return entry?.url ?? null;
 }
 
+/** Find the configured registry URL whose oras host matches `host`
+ *  (e.g. 'aura-com.aura.registry:4090'). Lets OCI fetch/resolve recover the
+ *  scheme so plain-HTTP registries get `--plain-http` instead of failing an
+ *  HTTPS handshake. Returns null when no registry hosts that ref. */
+export function urlForHost(cfg: RegistryConfig, host: string): string | null {
+  const entry = cfg.registries.find((e) => orasHostFromUrl(e.url) === host);
+  return entry?.url ?? null;
+}
+
 /** Sort by priority (ascending). Stable for equal priorities. */
 export function sorted(cfg: RegistryConfig): RegistryEntry[] {
   return [...cfg.registries].sort((a, b) => a.priority - b.priority);
@@ -126,7 +135,7 @@ export function sorted(cfg: RegistryConfig): RegistryEntry[] {
 
 // ─── URL ↔ oras CLI helpers ─────────────────────────────────────────────
 /** Strip scheme + trailing slash so the result is a valid `oras` host
- *  prefix: 'http://aura-com.aura.registry:4001' → 'aura-com.aura.registry:4001'. */
+ *  prefix: 'http://aura-com.aura.registry:4090' → 'aura-com.aura.registry:4090'. */
 export function orasHostFromUrl(url: string): string {
   return url.replace(/^https?:\/\//, '').replace(/\/+$/, '');
 }

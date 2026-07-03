@@ -1,0 +1,219 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { shellGet } from '../lib/shellClient.ts';
+
+interface CatalogEntry {
+  id:           string;
+  name:         string;
+  description?: string;
+  icon?:        string;
+  publisher?:   string;
+  homepage?:    string;
+  categories?:  string[];
+  tags?:        string[];
+  screenshots?: string[];
+  version?:     string;
+  sourceName?:  string;
+  sourceKind?:  string;
+  installed?:   boolean;
+  installedVersion?: string | null;
+  sources?:     { git?: { ref: string }; oci?: { ref: string } };
+}
+interface Catalog { apps: CatalogEntry[]; }
+
+const url = new URL(Astro.request.url);
+const id = url.searchParams.get('id') ?? '';
+
+let entry: CatalogEntry | null = null;
+if (id) {
+  try {
+    const doc = await shellGet<Catalog>('/api/nexus');
+    entry = doc.apps.find((a) => a.id === id) ?? null;
+  } catch { entry = null; }
+}
+
+// Derive all display values in the frontmatter so the template stays free of
+// JSX-in-ternary expressions (which the Astro/esbuild expression parser trips
+// on). Every field below is a plain string / boolean.
+const pageTitle    = entry ? entry.name : 'App';
+const glyph        = entry ? (entry.icon ?? entry.name.charAt(0).toUpperCase()) : '';
+const installed    = !!entry?.installed;
+const installedLbl = installed ? `INSTALLED${entry?.installedVersion ? ` v${entry.installedVersion}` : ''}` : '';
+const distRef      = entry?.sources?.oci?.ref ?? entry?.sources?.git?.ref ?? '—';
+const categoriesText = (entry?.categories ?? []).join(', ') || '—';
+const tagsText       = (entry?.tags ?? []).join(', ') || '—';
+const sourceText     = `${entry?.sourceName ?? '—'} (${entry?.sourceKind ?? '—'})`;
+const installHref    = entry ? `/install?ref=${encodeURIComponent(entry.id)}` : '#';
+---
+<Layout title={pageTitle} active="browse">
+  {!entry && (
+    <section class="nexus-section">
+      <div class="nexus-empty">
+        <p>App <code>{id}</code> not found in the catalog.</p>
+        <p style="margin-top:8px"><a href="/">← back to browse</a></p>
+      </div>
+    </section>
+  )}
+
+  {entry && (
+    <section class="nexus-section">
+      <a href="/" style="font-size:0.72rem">← browse</a>
+      <div class="nexus-detail-head">
+        <span class="glyph-lg">{glyph}</span>
+        <div style="min-width:0">
+          <div class="nexus-detail-title">
+            {entry.name}
+            {entry.version && <span class="badge" style="margin-left:8px">v{entry.version}</span>}
+          </div>
+          <div class="nexus-card-meta" style="margin-top:6px">
+            <span>{entry.id}</span>
+            {entry.publisher && <span> · {entry.publisher}</span>}
+            {entry.sourceName && <span class="badge" style="margin-left:8px">{entry.sourceName} · {entry.sourceKind}</span>}
+          </div>
+        </div>
+        <div class="nexus-card-actions" style="margin-left:auto">
+          {installed && <span class="badge primary" style="align-self:center">{installedLbl}</span>}
+          {!installed && <a class="nexus-tab" href={installHref}>INSTALL</a>}
+        </div>
+      </div>
+    </section>
+  )}
+
+  {entry && (
+    <section class="nexus-section">
+      <h2>// Install</h2>
+      {installed && (
+        <p style="color:var(--aura-color-primary);font-size:0.85rem">
+          ✓ Installed{entry.installedVersion ? ` (v${entry.installedVersion})` : ''}. Manage it from the <a href="/installed">Installed</a> tab.
+        </p>
+      )}
+      {!installed && (
+        <div>
+          <button id="detail-install-btn" class="install-cta" data-ref={entry.id} data-name={entry.name}>INSTALL {entry.name}</button>
+          <pre class="nexus-log" id="install-log" style="display:none;margin-top:10px"></pre>
+        </div>
+      )}
+    </section>
+  )}
+
+  {entry && entry.description && (
+    <section class="nexus-section">
+      <p class="nexus-card-desc" style="font-size:0.85rem">{entry.description}</p>
+    </section>
+  )}
+
+  {entry && entry.screenshots && entry.screenshots.length > 0 && (
+    <section class="nexus-section">
+      <h2>// Screenshots</h2>
+      <div class="nexus-shots">
+        {entry.screenshots.map((src) => (
+          <img src={src} alt="screenshot" loading="lazy" />
+        ))}
+      </div>
+    </section>
+  )}
+
+  {entry && (
+    <section class="nexus-section">
+      <h2>// Details</h2>
+      <table class="nexus-kv">
+        <tbody>
+          <tr><td>publisher</td><td>{entry.publisher ?? '—'}</td></tr>
+          <tr>
+            <td>homepage</td>
+            <td>
+              {entry.homepage && <a href={entry.homepage} target="_blank" rel="noreferrer">{entry.homepage}</a>}
+              {!entry.homepage && '—'}
+            </td>
+          </tr>
+          <tr><td>categories</td><td>{categoriesText}</td></tr>
+          <tr><td>tags</td><td>{tagsText}</td></tr>
+          <tr><td>source</td><td>{sourceText}</td></tr>
+          <tr><td>distribution</td><td><code>{distRef}</code></td></tr>
+        </tbody>
+      </table>
+    </section>
+  )}
+
+  <script is:inline>
+    const btn = document.getElementById('detail-install-btn');
+    if (btn) {
+      const log = document.getElementById('install-log');
+      const ref = btn.getAttribute('data-ref');
+      const name = btn.getAttribute('data-name') || ref;
+      const show = (t) => { log.style.display = 'block'; log.textContent = t; };
+      const append = (t) => { log.textContent += '\n' + t; };
+
+      function renderDiff(diff) {
+        const lines = [];
+        const v = diff.versionFrom ? `${diff.versionFrom} → ${diff.versionTo}` : diff.versionTo;
+        lines.push(`Install ${diff.appId} (${v})`, '');
+        if (diff.toolsAdded?.length)         lines.push('+ tools:        ' + diff.toolsAdded.join(', '));
+        if (diff.permissionsAdded?.length)   lines.push('+ permissions:  ' + diff.permissionsAdded.join(', '));
+        if (diff.dataProviderAdded)          lines.push('+ data provider');
+        if (diff.intentFiltersAdded?.length) { lines.push('+ intent filters:'); for (const f of diff.intentFiltersAdded) lines.push('    ' + f); }
+        return lines.join('\n');
+      }
+
+      btn.addEventListener('click', async () => {
+        btn.disabled = true; btn.textContent = 'INSTALLING…';
+        show('installing ' + ref + '…');
+        try {
+          let res  = await fetch('/api/nexus/install', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ref, autoApprove: false }),
+          });
+          let json = await res.json();
+          if (json.needsApproval && json.diff) {
+            append('\n--- PERMISSION REVIEW ---\n' + renderDiff(json.diff));
+            if (!confirm('Approve and install ' + name + '?\n\n' + renderDiff(json.diff))) {
+              append('\ninstall cancelled');
+              btn.disabled = false; btn.textContent = 'INSTALL ' + name;
+              return;
+            }
+            append('\napproved; installing…');
+            res  = await fetch('/api/nexus/install', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ref, autoApprove: true }),
+            });
+            json = await res.json();
+          }
+          if (!json.ok) {
+            append('\nERROR: ' + (json.error || res.status));
+            btn.disabled = false; btn.textContent = 'INSTALL ' + name;
+            return;
+          }
+          append('\n✓ installed ' + json.record.id + ' v' + json.record.version + ' (scope: ' + (json.record.scope || 'global') + ')');
+          btn.textContent = 'INSTALLED ✓';
+          setTimeout(() => location.reload(), 900);
+        } catch (err) {
+          append('\nERROR: ' + (err && err.message ? err.message : err));
+          btn.disabled = false; btn.textContent = 'INSTALL ' + name;
+        }
+      });
+    }
+  </script>
+
+  <style is:global>
+    .install-cta {
+      color: var(--aura-color-primary);
+      border-color: var(--aura-color-primary);
+      font-weight: 700;
+      padding: 8px 18px;
+    }
+    .install-cta:hover { box-shadow: 0 0 10px var(--aura-color-primary); }
+    .nexus-detail-head { display: flex; align-items: flex-start; gap: 14px; margin-top: 10px; flex-wrap: wrap; }
+    .glyph-lg {
+      flex-shrink: 0; width: 56px; height: 56px;
+      display: flex; align-items: center; justify-content: center;
+      border: 1px solid var(--aura-color-primary); color: var(--aura-color-primary);
+      font-weight: 700; letter-spacing: 0.08em; font-size: 1.1rem;
+    }
+    .nexus-detail-title { font-size: 1.05rem; font-weight: 700; letter-spacing: 0.05em; color: var(--aura-color-text); }
+    .nexus-shots { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 6px; }
+    .nexus-shots img { max-height: 220px; border: 1px solid var(--aura-color-border); flex: 0 0 auto; }
+    table.nexus-kv { border-collapse: collapse; font-size: 0.78rem; width: 100%; max-width: 720px; }
+    table.nexus-kv td { padding: 5px 10px; border-bottom: 1px solid var(--aura-color-border); vertical-align: top; word-break: break-all; }
+    table.nexus-kv td:first-child { color: var(--aura-color-text-dim); width: 130px; text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.68rem; }
+  </style>
+</Layout>

@@ -21,6 +21,7 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { validateStagedDir } from './Validator.js';
+import { APP_ARTIFACT_TYPE, APP_REPO_PREFIX, buildStoreAnnotations } from './ociMetadata.js';
 import type { AppManifest } from '../types/manifest.js';
 
 export interface PublishGitOpts {
@@ -246,8 +247,9 @@ export interface PublishOciOpts {
    *  to treating `opts.registry` as a literal path. */
   registryResolver?: (bareName: string) => string | null;
   /** When `opts.registry` resolves to a bare name, the actual OCI repo path
-   *  has to come from somewhere. Defaults to `aura/<manifestId>` (matches
-   *  the @aura/* publish convention); callers can override. */
+   *  has to come from somewhere. Defaults to `aura-apps/<manifestId>` (the app
+   *  store prefix — kept distinct from the `aura/<pkg>` SDK artifacts); callers
+   *  can override. */
   repoPathForName?: string;
 }
 
@@ -266,7 +268,12 @@ export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }>
   const ts = Date.now();
   const stagingDir = join(opts.dataDir, 'nexus', 'publish-staging', `${manifest.id}-${ts}`);
   mkdirSync(stagingDir, { recursive: true });
-  const tarPath = join(stagingDir, 'bundle.tar.gz');
+  // Keep the tar basename relative: `oras push` runs with cwd=stagingDir and
+  // (as of 1.2.0) REJECTS absolute file args unless --disable-path-validation.
+  // A relative name also keeps the OCI layer title clean (`bundle.tar.gz`,
+  // not a leaked tmp path).
+  const tarName = 'bundle.tar.gz';
+  const tarPath = join(stagingDir, tarName);
 
   // Build an --exclude list from manifest.publish.ignore.
   const ignores = manifest.publish?.ignore ?? [
@@ -292,9 +299,18 @@ export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }>
     }
     const { orasHostFromUrl, orasFlagsForUrl } = await import('./RegistryConfig.js');
     const host = orasHostFromUrl(url);
-    const repo = opts.repoPathForName ?? `aura/${manifest.id}`;
+    const repo = opts.repoPathForName ?? `${APP_REPO_PREFIX}/${manifest.id}`;
     registryPath = `${host}/${repo}`;
     extraFlags = orasFlagsForUrl(url);
+  }
+
+  // Embed storefront metadata as OCI manifest annotations so the catalog
+  // aggregator can read it back with a single `oras manifest fetch` — no
+  // bundle pull needed to list the app.
+  const annotations = buildStoreAnnotations(manifest, { createdAt: new Date().toISOString() });
+  const annotationFlags: string[] = [];
+  for (const [k, v] of Object.entries(annotations)) {
+    annotationFlags.push('--annotation', `${k}=${v}`);
   }
 
   // Push as a single layer with the app config blob inline.
@@ -302,15 +318,22 @@ export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }>
   const ref = `${registryPath}:${opts.tag}`;
   execFileSync('oras', [
     'push', ref,
-    `${tarPath}:application/vnd.aura.app.bundle.v1.tar+gzip`,
-    '--artifact-type', 'application/vnd.aura.app.manifest.v1+json',
+    `${tarName}:application/vnd.aura.app.bundle.v1.tar+gzip`,
+    '--artifact-type', APP_ARTIFACT_TYPE,
+    ...annotationFlags,
     ...extraFlags,
   ], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 180_000, cwd: stagingDir });
 
-  if (opts.channel) {
-    log(`tagging channel '${opts.channel}'...`);
+  // Tag additional refs. `latest` is what the catalog aggregator anchors on
+  // when listing a repo; the channel label (e.g. `stable`) lets installs pin
+  // a track. Both best-effort — a failed extra tag doesn't fail the publish.
+  const extraTags = new Set<string>(['latest']);
+  if (opts.channel) extraTags.add(opts.channel);
+  extraTags.delete(opts.tag);   // already pushed as the primary ref
+  for (const t of extraTags) {
+    log(`tagging '${t}'...`);
     try {
-      execFileSync('oras', ['tag', ref, opts.channel, ...extraFlags],
+      execFileSync('oras', ['tag', ref, t, ...extraFlags],
         { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
     } catch { /* tag is best-effort */ }
   }

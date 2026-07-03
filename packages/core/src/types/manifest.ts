@@ -306,6 +306,28 @@ export const AppManifestSchema = z.object({
     ]),
   }).optional(),
   /**
+   * Optional storefront metadata. Surfaces in the Nexus app store's browse +
+   * detail views. On OCI publish these fields are embedded into the artifact's
+   * manifest annotations (`app.aura.*` + OCI standard keys) so the store can
+   * read them back from `oras manifest fetch` without pulling the bundle.
+   * None are runtime fields — the OS ignores them at spawn time.
+   *   • `publisher`       — author/vendor label ("Aura Labs").
+   *   • `homepage`        — project/marketing URL.
+   *   • `license`         — SPDX id or short label ("MIT", "Proprietary").
+   *   • `tags`            — free-form search keywords.
+   *   • `longDescription` — multi-paragraph body for the detail page. Plain text.
+   *   • `screenshots`     — ABSOLUTE https URLs only (v1 does not host images;
+   *                          point at git-raw URLs or a CDN).
+   */
+  store: z.object({
+    publisher:       z.string().max(64).optional(),
+    homepage:        z.string().url().optional(),
+    license:         z.string().max(32).optional(),
+    tags:            z.array(z.string().max(24)).max(16).default([]),
+    longDescription: z.string().max(4096).optional(),
+    screenshots:     z.array(z.string().url()).max(8).default([]),
+  }).optional(),
+  /**
    * Cross-app dependencies. Declared by author, enforced at install time
    * (the Nexus installer warns / refuses if a required dep is missing).
    * v1: the installer warns + lists missing deps; v2 auto-installs them

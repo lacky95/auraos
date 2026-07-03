@@ -14,7 +14,7 @@
  *
  *   pnpm publish:local                     # all five packages
  *   pnpm publish:local --pkg @aura/app-sdk  # only one
- *   pnpm publish:local --registry http://aura-com.aura.registry:4001
+ *   pnpm publish:local --registry http://aura-com.aura.registry:4090
  *   pnpm publish:local --force              # re-push even if digest matches
  *
  * Pre-requisites: each `@aura/*` package must have a built `dist/` (run

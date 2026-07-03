@@ -1,27 +1,21 @@
 import type { APIRoute } from 'astro';
 import {
-  loadRegistryConfig, saveRegistryConfig,
-  refreshNexusRegistryConfig,
-  type RegistryConfig, type RegistryEntry,
+  loadSourcesConfig, saveSourcesConfig, refreshNexusSources, ociRegistryView,
+  type RegistryConfig, type RegistryEntry, type SourceEntry,
 } from '@aura/core';
 import { jsonResponse } from '../../../lib/appResponse.js';
 
 /**
- * Nexus multi-registry config — list / replace / add a single entry.
+ * Legacy multi-registry API — now a WRITE-THROUGH SHIM over the unified
+ * sources config (`os/nexus/sources`). Kept so older callers (`aura nexus
+ * registries …`, pre-existing scripts) keep working byte-for-byte:
  *
- *   GET    /api/nexus/registries           → current config (KV-backed)
- *   PUT    /api/nexus/registries           → replace whole config
- *   POST   /api/nexus/registries           → add one entry, validate uniqueness
+ *   GET  /api/nexus/registries → the `kind:'oci'` subset, as RegistryConfig
+ *   PUT  /api/nexus/registries → replace ALL oci sources (git-* sources kept)
+ *   POST /api/nexus/registries → add one oci source
  *
- * Per-entry DELETE lives in ./registries/[name].ts (Astro filesystem
- * routing — the bracket-param file is the only way to express it).
- *
- * Every mutating handler:
- *   1. validates the payload shape;
- *   2. persists to KV via saveRegistryConfig (round-trips through
- *      /api/kv/os/nexus/registries on this same shell);
- *   3. refreshes the NexusManager singleton so subsequent installs see the
- *      new mirrors immediately without a shell restart.
+ * Everything funnels through the same KV key + singleton refresh as
+ * /api/nexus/sources so the two views can never drift.
  */
 
 const OS_API_BASE = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
@@ -35,44 +29,48 @@ function isEntry(v: unknown): v is RegistryEntry {
       && (e['mirror'] === undefined || typeof e['mirror'] === 'boolean');
 }
 
+function toOciSource(e: RegistryEntry): SourceEntry {
+  return { kind: 'oci', name: e.name, url: e.url, priority: e.priority, mirror: e.mirror ?? false };
+}
+
 export const GET: APIRoute = async () => {
-  const cfg = await loadRegistryConfig(OS_API_BASE);
-  return jsonResponse(cfg);
+  const cfg = await loadSourcesConfig(OS_API_BASE);
+  return jsonResponse(ociRegistryView(cfg));
 };
 
 export const PUT: APIRoute = async ({ request }) => {
   let body: unknown;
   try { body = await request.json(); }
   catch { return jsonResponse({ error: 'invalid-json' }, 400); }
-  const cfg = body as RegistryConfig;
-  if (!cfg || !Array.isArray(cfg.registries) || !cfg.registries.every(isEntry)) {
+  const reg = body as RegistryConfig;
+  if (!reg || !Array.isArray(reg.registries) || !reg.registries.every(isEntry)) {
     return jsonResponse({ error: 'invalid-config' }, 400);
   }
   const names = new Set<string>();
-  for (const e of cfg.registries) {
-    if (names.has(e.name)) {
-      return jsonResponse({ error: 'duplicate-name', detail: e.name }, 400);
-    }
+  for (const e of reg.registries) {
+    if (names.has(e.name)) return jsonResponse({ error: 'duplicate-name', detail: e.name }, 400);
     names.add(e.name);
   }
-  await saveRegistryConfig(OS_API_BASE, cfg);
-  refreshNexusRegistryConfig(cfg);
-  return jsonResponse({ ok: true, config: cfg });
+  // Replace all OCI sources; preserve any git-index / git-app sources.
+  const cfg = await loadSourcesConfig(OS_API_BASE);
+  const kept = cfg.sources.filter((s) => s.kind !== 'oci');
+  cfg.sources = [...reg.registries.map(toOciSource), ...kept];
+  await saveSourcesConfig(OS_API_BASE, cfg);
+  refreshNexusSources(cfg);
+  return jsonResponse(ociRegistryView(cfg));
 };
 
 export const POST: APIRoute = async ({ request }) => {
   let body: unknown;
   try { body = await request.json(); }
   catch { return jsonResponse({ error: 'invalid-json' }, 400); }
-  if (!isEntry(body)) {
-    return jsonResponse({ error: 'invalid-entry' }, 400);
-  }
-  const cfg = await loadRegistryConfig(OS_API_BASE);
-  if (cfg.registries.some((e) => e.name === body.name)) {
+  if (!isEntry(body)) return jsonResponse({ error: 'invalid-entry' }, 400);
+  const cfg = await loadSourcesConfig(OS_API_BASE);
+  if (cfg.sources.some((s) => s.name === body.name)) {
     return jsonResponse({ error: 'duplicate-name', detail: body.name }, 409);
   }
-  cfg.registries.push(body);
-  await saveRegistryConfig(OS_API_BASE, cfg);
-  refreshNexusRegistryConfig(cfg);
-  return jsonResponse({ ok: true, config: cfg });
+  cfg.sources.push(toOciSource(body));
+  await saveSourcesConfig(OS_API_BASE, cfg);
+  refreshNexusSources(cfg);
+  return jsonResponse(ociRegistryView(cfg));
 };

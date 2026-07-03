@@ -4,8 +4,9 @@
  * deserialised result on disk, refreshes on demand + every 6 hours.
  *
  * The index is OPTIONAL — when the repo is unreachable, the cache is
- * empty, or the schema is wrong, all methods return empty results
- * instead of throwing. URL install + Git install still work without it.
+ * empty, or the schema is wrong, all methods fall back to the bundled
+ * seed (`defaultIndex.ts`: category taxonomy, no apps) instead of
+ * throwing. URL install + Git install still work without it.
  *
  * YAML over JSON to match the existing tools-registry pattern at
  * `packages/aura-cli/src/registry-defaults.yaml`.
@@ -14,6 +15,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from 'no
 import { dirname, join } from 'node:path';
 import * as YAML from 'yaml';
 import type { IndexDocument, IndexEntry } from './types.js';
+import { seedIndex } from './defaultIndex.js';
 
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;   // 6h
 const FETCH_TIMEOUT_MS = 10_000;
@@ -61,8 +63,8 @@ export class IndexClient {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       text = await res.text();
     } catch (err) {
-      console.warn(`[NexusIndex] refresh failed (${(err as Error).message}); using stale cache or empty index`);
-      // Fall back to whatever's cached, otherwise an empty doc.
+      console.warn(`[NexusIndex] refresh failed (${(err as Error).message}); using stale cache or seed index`);
+      // Fall back to whatever's cached, otherwise the bundled seed.
       if (existsSync(this.cachePath)) {
         try {
           const cached = readFileSync(this.cachePath, 'utf-8');
@@ -70,7 +72,7 @@ export class IndexClient {
           return this.memo;
         } catch { /* corrupt cache */ }
       }
-      this.memo = emptyIndex();
+      this.memo = seedIndex();
       return this.memo;
     }
     mkdirSync(dirname(this.cachePath), { recursive: true });
@@ -115,14 +117,10 @@ export class IndexClient {
   }
 }
 
-function emptyIndex(): IndexDocument {
-  return { schema: 1, apps: [], featured: [], categories: [] };
-}
-
 function parseIndex(text: string): IndexDocument {
   try {
     const raw = YAML.parse(text) as Partial<IndexDocument> | null;
-    if (!raw || typeof raw !== 'object') return emptyIndex();
+    if (!raw || typeof raw !== 'object') return seedIndex();
     return {
       schema:     raw.schema ?? 1,
       apps:       Array.isArray(raw.apps)       ? raw.apps       : [],
@@ -130,7 +128,7 @@ function parseIndex(text: string): IndexDocument {
       categories: Array.isArray(raw.categories) ? raw.categories : [],
     };
   } catch (err) {
-    console.warn(`[NexusIndex] parse failed: ${(err as Error).message}; falling back to empty`);
-    return emptyIndex();
+    console.warn(`[NexusIndex] parse failed: ${(err as Error).message}; falling back to seed`);
+    return seedIndex();
   }
 }

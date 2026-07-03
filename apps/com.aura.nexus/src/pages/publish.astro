@@ -5,10 +5,12 @@ import Layout from '../layouts/Layout.astro';
   <section class="nexus-section">
     <h2>// Publish an app</h2>
     <p style="color:var(--aura-color-text-dim);font-size:0.8rem">
-      v1 = Git publish working end-to-end; OCI publish needs <code>oras</code>
-      on PATH (install via <code>aura cap install oras</code>). The publisher
-      runs in the shell with your normal git credentials — no Nexus token
-      handling in v1.
+      Prefer the CLI: <code>aura nexus app publish</code> runs an interactive
+      wizard (or takes flags for CI). Publishing to an OCI registry embeds your
+      app's store metadata into the artifact so it shows up here automatically.
+      OCI publish needs <code>oras</code> on PATH (install via
+      <code>aura cap install oras</code>); git publish uses your normal git
+      credentials — no Nexus token handling in v1.
     </p>
     <div class="nexus-form">
       <label for="path-input">Local app path</label>

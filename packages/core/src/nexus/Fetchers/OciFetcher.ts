@@ -12,7 +12,8 @@
  * single-file change.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { orasHostFromUrl, orasFlagsForUrl } from '../RegistryConfig.js';
 
 export interface OciRef {
@@ -69,9 +70,10 @@ export async function fetchOci(ref: OciRef, stagingDir: string, registryUrl?: st
   mkdirSync(stagingDir, { recursive: true });
   const { fullRef, extraFlags } = buildRef(ref, registryUrl);
   try {
-    // `oras pull <ref> -o <dir>` extracts every layer of the artifact
-    // into <dir>. For our publish format (one tar.gz layer of the app
-    // source) this leaves the manifest + source files in place.
+    // `oras pull <ref> -o <dir>` writes each LAYER FILE of the artifact into
+    // <dir>. Our publish format (Publisher.publishOci) is a single layer whose
+    // file is `bundle.tar.gz` — a gzip tar of the app source — so the pull
+    // leaves `<dir>/bundle.tar.gz`, NOT the unpacked source. Unpack it below.
     execFileSync(
       'oras',
       ['pull', fullRef, '-o', stagingDir, ...extraFlags],
@@ -79,6 +81,19 @@ export async function fetchOci(ref: OciRef, stagingDir: string, registryUrl?: st
     );
   } catch (err) {
     throw new Error(`[NexusOciFetcher] pull failed for ${fullRef}: ${(err as Error).message}`);
+  }
+
+  // Unpack the app-bundle layer in place so the staging dir holds the actual
+  // app files (app.manifest.json at the root) for the validator + installer.
+  const bundlePath = join(stagingDir, 'bundle.tar.gz');
+  if (existsSync(bundlePath)) {
+    try {
+      execFileSync('tar', ['-xzf', bundlePath, '-C', stagingDir],
+        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 });
+      rmSync(bundlePath, { force: true });
+    } catch (err) {
+      throw new Error(`[NexusOciFetcher] failed to unpack bundle for ${fullRef}: ${(err as Error).message}`);
+    }
   }
 }
 

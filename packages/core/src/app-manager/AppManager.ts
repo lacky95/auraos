@@ -775,15 +775,14 @@ export class AppManager {
         const live = this.instances.get(instanceId);
         if (live) this.providers.registerInstance(live, manifest);
       } else {
-        // Pool warm-up: pre-compile the iframe entry point (`/`) and the
-        // common heavy static assets so the user's FIRST iframe load after
-        // claim doesn't trigger Vite's on-demand compile + bundle path.
-        // waitHealthy only touched /api/lifecycle/health, leaving the
-        // index.astro module cold. Fire-and-forget; never blocks the spawn.
+        // Pool warm-up: pre-compile the iframe entry point (`/`) so the user's
+        // FIRST iframe load after claim doesn't trigger Vite's on-demand compile
+        // + bundle path. waitHealthy only touched /api/lifecycle/health, leaving
+        // the index.astro module cold. Warming `/` also primes the bundled
+        // page modules it references (e.g. the terminal's xterm bundle, now an
+        // npm dep pulled in via the page's <script> rather than a static vendor
+        // file). Fire-and-forget; never blocks the spawn.
         const warmups = ['/'];
-        if (appId === 'com.aura.terminal') {
-          warmups.push('/vendor/xterm/xterm.min.js', '/vendor/xterm/xterm.min.css');
-        }
         for (const path of warmups) {
           fetch(`http://localhost:${port}${path}`, { signal: AbortSignal.timeout(5000) })
             .then((r) => r.body?.cancel()).catch(() => undefined);

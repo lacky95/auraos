@@ -35,5 +35,5 @@ ZOT_PID=$!
 # AppManager respawns the whole container.
 trap "echo '[registry] zot died ($?), stopping wrapper'; kill 0" EXIT
 
-echo "[${APP_ID:-com.aura.registry}] starting wrapper on :${APP_PORT:-4001}"
+echo "[${APP_ID:-com.aura.registry}] starting wrapper on :${APP_PORT:-4090}"
 exec node server.js

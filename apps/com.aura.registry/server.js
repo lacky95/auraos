@@ -20,7 +20,7 @@ const http = require('node:http');
 
 const APP_ID       = process.env.APP_ID          || 'com.aura.registry';
 const INSTANCE_ID  = process.env.APP_INSTANCE_ID || APP_ID;
-const APP_PORT     = Number(process.env.APP_PORT || 4001);
+const APP_PORT     = Number(process.env.APP_PORT || 4090);
 const ZOT_HOST     = '127.0.0.1';
 const ZOT_PORT     = 5000;
 

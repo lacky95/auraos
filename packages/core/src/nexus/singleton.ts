@@ -6,38 +6,37 @@
 import { NexusManager } from './NexusManager.js';
 import { getAppManager } from '../app-manager/AppManager.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
-import type { RegistryConfig } from './RegistryConfig.js';
-import { DEFAULT_REGISTRY_CONFIG } from './RegistryConfig.js';
+import type { SourcesConfig } from './SourcesConfig.js';
+import { DEFAULT_SOURCES_CONFIG } from './SourcesConfig.js';
 
 const GLOBAL_KEY = '__aura_nexus_manager__';
 type GlobalWithNexus = typeof globalThis & { [GLOBAL_KEY]?: NexusManager };
 
-/** Synchronous singleton accessor. The registry config defaults to
- *  DEFAULT_REGISTRY_CONFIG on first construction; AppManager's first-boot
+/** Synchronous singleton accessor. The sources config defaults to
+ *  DEFAULT_SOURCES_CONFIG on first construction; AppManager's first-boot
  *  seeder rewrites the KV-persisted version and the live shell route handler
- *  calls `setRegistryConfig` on the singleton when the user mutates it. */
+ *  calls `setSourcesConfig` on the singleton when the user mutates it. */
 export function getNexusManager(): NexusManager {
   const existing = (globalThis as GlobalWithNexus)[GLOBAL_KEY];
   if (existing) return existing;
   const mgr = getAppManager();
   const instance = new NexusManager({
-    scopes:         mgr.getScopeDefinitions(),
-    rootDataDir:    mgr.getDataDir(),
-    bus:            OsEventBus,
-    registryConfig: DEFAULT_REGISTRY_CONFIG,
+    scopes:        mgr.getScopeDefinitions(),
+    rootDataDir:   mgr.getDataDir(),
+    bus:           OsEventBus,
+    sourcesConfig: DEFAULT_SOURCES_CONFIG,
   });
   (globalThis as GlobalWithNexus)[GLOBAL_KEY] = instance;
   return instance;
 }
 
-/** Replace the singleton's RegistryConfig in-place. Called by the
- *  /api/nexus/registries shell route after a successful PUT/POST/DELETE so
- *  subsequent installs see the new mirrors immediately. Idempotent if no
- *  singleton exists yet (next getNexusManager() will pick up the saved KV
- *  value via AppManager's seeder). */
-export function refreshNexusRegistryConfig(cfg: RegistryConfig): void {
+/** Replace the singleton's sources config in-place. Called by the
+ *  /api/nexus/sources (and /registries shim) shell routes after a successful
+ *  persist so subsequent catalog reads + installs see the change immediately.
+ *  Idempotent if no singleton exists yet. */
+export function refreshNexusSources(cfg: SourcesConfig): void {
   const existing = (globalThis as GlobalWithNexus)[GLOBAL_KEY];
-  if (existing) existing.setRegistryConfig(cfg);
+  if (existing) existing.setSourcesConfig(cfg);
 }
 
 export function initNexusManager(opts: { appsDir: string; dataDir: string }): NexusManager {
