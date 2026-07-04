@@ -248,3 +248,18 @@ html > body[data-scroll-locked] {
   color: var(--aura-color-primary);
   text-shadow: var(--aura-glow-primary);
 }
+
+/* ============================================================
+   Code blocks (Shiki syntax highlighting).
+   Fumadocs paints the code-block wrapper with `bg-fd-card` (the AuraOS
+   palette) but the syntax colours come from the Shiki theme, switched only
+   by the `.dark` class. Those two can desync — a dark AuraOS palette with
+   the light-theme text ( `--shiki-light` = near-black `#24292e` ) is
+   unreadable. Fix: source the code-block BACKGROUND from the same Shiki
+   theme as its text, and switch both on `.dark` (which the layout keeps in
+   sync with the OS colour-mode). So a dark code block always gets the dark
+   highlighting theme, a light one the light theme — never a mismatch. The
+   rest of the app stays on the AuraOS palette.
+   ============================================================ */
+.shiki { background-color: var(--shiki-light-bg) !important; }
+.dark .shiki { background-color: var(--shiki-dark-bg) !important; }

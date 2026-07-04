@@ -21,32 +21,49 @@ Run any command with `--help` for context-sensitive usage.
 | `aura cap ls` | `aura cap list` |
 | `aura activity ls` | `aura activity list` |
 
-## Distribution — `aura nexus …`
+## App store & distribution — `aura nexus …`
 
-Install, update, and publish apps from Git, OCI registries, the curated
-index, or local paths. Every command posts to the shell's `/api/nexus/*`
-endpoints; a future settings UI shares the same backend. See
-[Nexus](./nexus) for the pipeline + source-type reference.
+Publish, install, update apps and manage registries. Commands are grouped
+into `app`, `registry`, and `search`; every one posts to the shell's
+`/api/nexus/*` endpoints, so the CLI and the Nexus app share one backend.
+See [Nexus](./nexus) for the model and [Publish an App](./publish-an-app)
+for a walkthrough. (The old flat spellings — `aura nexus install`,
+`aura nexus publish`, `aura nexus registries …` — still work as hidden
+aliases.)
+
+**Apps — `aura nexus app …`**
 
 | Command | Description | Key flags |
 |---|---|---|
-| `aura nexus install <ref>` | Resolve + fetch + validate + install. Pauses on new-permission diffs unless `--yes`. | `--yes`, `--channel <name>` |
-| `aura nexus update [<id>\|--all]` | Re-resolve the stored ref and reinstall if changed. | `--yes`, `--all` |
-| `aura nexus uninstall <id>` | Stop instances + remove from disk. `--purge` also wipes `/data/<id>`. | `--purge` |
-| `aura nexus list` | Installed apps with their source ref, channel, and digest. | `--source git\|oci\|index\|local` |
-| `aura nexus search [<q>]` | Search the curated index by id / name / description / category. | `--category <slug>` |
-| `aura nexus info <ref>` | Dry-run resolve — print the resolved address + manifest preview without installing. | — |
-| `aura nexus publish [<path>]` | Push the app at `<path>` to Git or OCI; prints the install command for what was published. | `--source git\|oci`, `--repo <url>`, `--tag <tag>`, `--channel <name>` |
+| `aura nexus app publish [<path>]` | Push the app to a registry (OCI) or git repo. Bare + interactive = wizard. | `--to <name\|url\|repo>`, `--kind oci\|git`, `--tag`, `--channel`, `--branch`, `-y` |
+| `aura nexus app install <ref>` | Resolve + fetch + validate + install. Pauses on new-permission diffs unless `-y`. | `-y`, `--channel <name>`, `--scope global\|user` |
+| `aura nexus app update [<id>\|--all]` | Re-resolve the stored ref and reinstall if changed. | `-y`, `--all` |
+| `aura nexus app uninstall <id>` | Kill all instances + remove from disk. `--purge` also wipes `/data/<id>`. | `--purge` |
+| `aura nexus app list` | Installed apps with id, version, scope, source, ref. | `--source git\|oci\|index\|local` |
+| `aura nexus app info <ref>` | Dry-run resolve — resolved address + permission preview, no install. | — |
 
-Ref shapes the resolver accepts:
+**Registries / sources — `aura nexus registry …`**
+
+| Command | Description | Key flags |
+|---|---|---|
+| `aura nexus registry add <name> <url>` | Register a source. Kind is required. | `--kind oci\|git-index\|git-app`, `--priority <n>`, `--mirror`, `--ref <git-ref>` |
+| `aura nexus registry list` | Every source: name, kind, url, priority, flags. | — |
+| `aura nexus registry remove <name>` | Drop a source (refuses the last OCI registry). | — |
+
+**Search**
+
+| Command | Description | Key flags |
+|---|---|---|
+| `aura nexus search [<q>]` | Search the aggregated catalog by id / name / description / tag. | `--category <slug>`, `--refresh` |
+
+Ref shapes `aura nexus app install` / `info` accept (dispatched on shape):
 
 | Shape | Example |
 |---|---|
-| Local path | `./apps/com.example.foo`, `/abs/path` |
-| Git URL with optional ref | `https://github.com/u/r#main`, `git@host:u/r.git#v1.2.3` |
-| Bare GitHub | `github.com/u/r#v1.2.3` |
+| Store id | `com.example.foo`, `com.example.foo@beta` |
 | OCI | `oci://ghcr.io/u/foo:1.2.3`, `ghcr.io/u/foo@sha256:…` |
-| Curated index | `com.example.foo`, `com.example.foo@beta` |
+| Git URL with optional ref | `https://github.com/u/r#main`, `github.com/u/r#v1.2.3` |
+| Local path | `./apps/com.example.foo`, `/abs/path` |
 
 ## App management — `aura app …`
 
