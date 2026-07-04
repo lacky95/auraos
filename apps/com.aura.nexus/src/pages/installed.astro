@@ -11,6 +11,7 @@ interface InstalledItem {
     installedAt: string; updatedAt: string;
   };
   isNexusInstalled: boolean;
+  scope?: string;
 }
 
 let items: InstalledItem[] = [];
@@ -44,58 +45,113 @@ try {
           </div>
         </div>
         <div class="nexus-card-actions">
-          {it.record.source !== 'local' && (
+          {it.scope === 'system' && <span class="badge">system · built-in</span>}
+          {it.scope !== 'system' && it.record.source !== 'local' && (
             <button class="update-btn" data-app-id={it.manifest.id}>UPDATE</button>
           )}
-          <button class="uninstall-btn" data-app-id={it.manifest.id}>UNINSTALL</button>
+          {it.scope !== 'system' && (
+            <button class="uninstall-btn" data-app-id={it.manifest.id}>UNINSTALL</button>
+          )}
         </div>
       </div>
     </div>
   ))}
 
   <script is:inline>
+    // Inline feedback per card (no native confirm()/alert() — both are
+    // suppressed inside the OS app iframe).
+    function feedback(card, text, cls) {
+      if (!card) return;
+      let fb = card.querySelector('.row-feedback');
+      if (!fb) {
+        fb = document.createElement('div'); fb.className = 'row-feedback';
+        fb.style.cssText = 'margin-top:8px;padding-top:6px;border-top:1px dashed var(--aura-color-border);font-size:0.72rem;white-space:pre-wrap;word-break:break-word;';
+        card.appendChild(fb);
+      }
+      fb.style.color = cls === 'ok' ? 'var(--aura-color-primary)'
+                     : cls === 'err' ? 'var(--aura-color-warning, #e0a000)'
+                     : 'var(--aura-color-text-dim)';
+      fb.textContent = text;
+    }
+    const dangerOn  = (b) => { b.style.color = 'var(--aura-color-warning, #e0a000)'; b.style.borderColor = 'var(--aura-color-warning, #e0a000)'; };
+    const dangerOff = (b) => { b.style.color = ''; b.style.borderColor = ''; };
+
+    // Reconcile the rendered list against server truth — the authority for
+    // "what's actually installed". Drops cards for apps no longer installed.
+    async function reconcileList() {
+      try {
+        const items = await (await fetch('/api/nexus/installed', { cache: 'no-store' })).json();
+        const ids = new Set((items || []).map((it) => it && it.manifest && it.manifest.id).filter(Boolean));
+        document.querySelectorAll('.nexus-card[data-app-id]').forEach((el) => {
+          if (!ids.has(el.getAttribute('data-app-id'))) el.remove();
+        });
+        if (!document.querySelector('.nexus-card[data-app-id]') && !document.querySelector('.nexus-empty')) {
+          const main = document.querySelector('.nexus-main') || document.body;
+          const empty = document.createElement('div');
+          empty.className = 'nexus-empty'; empty.textContent = 'No apps installed.';
+          main.appendChild(empty);
+        }
+      } catch { /* transient */ }
+    }
+
     document.querySelectorAll('.uninstall-btn').forEach((btn) => {
+      const id   = btn.getAttribute('data-app-id');
+      const card = btn.closest('.nexus-card');
       btn.addEventListener('click', async () => {
-        const id = btn.getAttribute('data-app-id');
-        if (!confirm(`Uninstall ${id}? (data preserved at /data/apps/${id}/)`)) return;
-        btn.disabled = true;
-        btn.textContent = '...';
+        // First click arms; second click confirms (no modal needed).
+        if (btn.dataset.confirm !== '1') {
+          btn.dataset.confirm = '1'; btn.textContent = 'CONFIRM REMOVE'; dangerOn(btn);
+          feedback(card, 'Per-app data is preserved. Click "CONFIRM REMOVE" again to uninstall.');
+          return;
+        }
+        btn.disabled = true; btn.textContent = 'REMOVING…';
+        feedback(card, 'uninstalling ' + id + '…');
         try {
-          const res = await fetch(`/api/proxy/com.aura.shell/api/nexus/uninstall/${encodeURIComponent(id)}`,
-            { method: 'POST' });
-          // Fallback to same-origin if proxy route doesn't exist (we run in iframe).
-          const r2 = res.ok ? res : await fetch(`/api/nexus/uninstall/${encodeURIComponent(id)}`, { method: 'POST' });
-          if (!r2.ok) throw new Error('uninstall failed');
-          location.reload();
+          const res = await fetch('/api/nexus/uninstall/' + encodeURIComponent(id), { method: 'POST' });
+          const j = await res.json().catch(() => ({}));
+          if (!res.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + res.status));
+          feedback(card, '✓ uninstalled — data preserved', 'ok');
+          if (card) card.style.opacity = '0.45';   // instant visual cue
+          // Authority: reconcile the list against the server (the app is gone
+          // now, so its card is dropped) — robust regardless of DOM quirks.
+          reconcileList();
         } catch (err) {
-          alert('Uninstall failed: ' + (err && err.message ? err.message : err));
-          btn.disabled = false;
-          btn.textContent = 'UNINSTALL';
+          feedback(card, 'ERROR: ' + (err && err.message ? err.message : err), 'err');
+          btn.disabled = false; btn.dataset.confirm = ''; btn.textContent = 'UNINSTALL'; dangerOff(btn);
         }
       });
     });
+
     document.querySelectorAll('.update-btn').forEach((btn) => {
+      const id   = btn.getAttribute('data-app-id');
+      const card = btn.closest('.nexus-card');
       btn.addEventListener('click', async () => {
-        const id = btn.getAttribute('data-app-id');
-        btn.disabled = true;
-        btn.textContent = '...';
+        btn.disabled = true; btn.textContent = 'UPDATING…';
+        feedback(card, 'updating ' + id + '…');
         try {
-          const res = await fetch(`/api/nexus/update/${encodeURIComponent(id)}`,
-            { method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ autoApprove: false }) });
-          const j = await res.json();
-          if (j.needsApproval) {
-            alert('This update changes permissions — re-run with autoApprove via the Install tab to review.');
-          } else if (j.ok) {
-            location.reload();
-          } else {
-            alert('Update failed: ' + (j.error || '<?>'));
-          }
-        } finally {
-          btn.disabled = false;
-          btn.textContent = 'UPDATE';
+          const res = await fetch('/api/nexus/update/' + encodeURIComponent(id), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ autoApprove: true }),
+          });
+          const j = await res.json().catch(() => ({}));
+          if (j.ok) { feedback(card, '✓ updated to v' + (j.record ? j.record.version : '?'), 'ok'); setTimeout(() => location.reload(), 700); }
+          else { feedback(card, 'update: ' + (j.error || 'nothing to update'), 'err'); btn.disabled = false; btn.textContent = 'UPDATE'; }
+        } catch (err) {
+          feedback(card, 'ERROR: ' + (err && err.message ? err.message : err), 'err'); btn.disabled = false; btn.textContent = 'UPDATE';
         }
       });
     });
+
+    // Continuous reconcile (visible-only): the list always matches the server,
+    // so a removed app drops out even if a handler hung or it was uninstalled
+    // from elsewhere.
+    let listTimer = null;
+    function listLoop() {
+      listTimer = null;
+      if (!document.hidden) reconcileList();
+      listTimer = setTimeout(listLoop, 2500);
+    }
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) reconcileList(); });
+    listLoop();
   </script>
 </Layout>

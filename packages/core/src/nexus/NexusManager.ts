@@ -42,6 +42,11 @@ export interface NexusManagerOpts {
    *  aggregation, the Resolver's mirror probing, and Publisher's bare-name
    *  `--registry` resolution (via the derived OCI registry view). */
   sourcesConfig?: SourcesConfig;
+  /** Called after an app is installed/uninstalled so the AppRegistry can
+   *  (re)register it deterministically — the fs-watch on scope dirs is
+   *  unreliable. Injected by the singleton (which owns the AppManager ref) to
+   *  avoid a NexusManager→AppManager import cycle. */
+  onAppChanged?: (appId: string) => void;
 }
 
 export class NexusManager {
@@ -57,10 +62,21 @@ export class NexusManager {
   private sourcesConfig: SourcesConfig;
   /** Guards the one-time lazy KV load (singleton starts on defaults). */
   private sourcesLoaded = false;
+  /** Deterministic AppRegistry (re)registration hook. */
+  private readonly onAppChanged?: (appId: string) => void;
+  /** App ids (and raw refs) currently mid-install. Exposed so the store UI can
+   *  render/persist an "installing…" state that survives a page reload. */
+  private readonly installing = new Set<string>();
+
+  /** True while an install for this id/ref is in flight. */
+  isInstalling(id: string): boolean { return this.installing.has(id); }
+  /** Snapshot of everything currently installing (ids + refs). */
+  getInstallingIds(): string[] { return [...this.installing]; }
 
   constructor(opts: NexusManagerOpts) {
     this.rootDataDir   = opts.rootDataDir;
     this.bus           = opts.bus;
+    this.onAppChanged  = opts.onAppChanged;
     this.sourcesConfig = opts.sourcesConfig ?? cloneDefaultSources();
     this.catalog       = new CatalogAggregator({
       rootDataDir: opts.rootDataDir,
@@ -186,6 +202,16 @@ export class NexusManager {
     const stagingDir  = join(this.rootDataDir, 'nexus', 'staging', `pending-${Date.now()}`);
     mkdirSync(stagingDir, { recursive: true });
 
+    // Track this install so the UI can show/persist an "installing…" state.
+    // Keyed by both the raw ref and (once known) the app id so a browse card
+    // (ref === id) and a URL/git install both match. Cleared before any
+    // suspend/return point (the shell route abandons the generator on the
+    // permission-needed and install-done yields, so `finally` alone is unsafe).
+    const keys = new Set<string>([opts.ref]);
+    const mark   = () => { for (const k of keys) this.installing.add(k); };
+    const unmark = () => { for (const k of keys) this.installing.delete(k); };
+    mark();
+
     try {
       yield { type: 'resolve.start', ref: opts.ref };
       const resolved = await this.resolver.resolve(opts.ref);
@@ -196,6 +222,7 @@ export class NexusManager {
       yield { type: 'fetch.done', stagingDir };
 
       const manifest = validateStagedDir(stagingDir);
+      keys.add(manifest.id); this.installing.add(manifest.id);
       yield { type: 'validate.done', manifest };
 
       // Permission diff vs. currently-installed version in any scope.
@@ -210,21 +237,31 @@ export class NexusManager {
       const diff = computePermissionDiff(currentManifest, manifest);
 
       if (!opts.autoApprove && diffRequiresApproval(diff)) {
+        // Pausing for the user's decision — not actively installing. Clear the
+        // flag (the route returns here and abandons this generator).
+        unmark();
         const decision = yield { type: 'permission.needed', diff };
         if (!decision || !decision.approve) {
           yield { type: 'permission.denied' };
           throw new Error('Install cancelled by user');
         }
+        mark();
         yield { type: 'permission.approved' };
       }
 
       yield { type: 'install.start' };
       const record = await installer.install(stagingDir, manifest, resolved);
-      yield { type: 'install.done', record };
-
+      // Register with the AppRegistry NOW — before yielding install.done. The
+      // shell route early-returns on install.done and never resumes this
+      // generator, so anything after that yield (incl. the bus emit) never
+      // runs. Registering here makes the app visible/launchable immediately.
+      this.onAppChanged?.(manifest.id);
+      unmark();
       this.bus?.emit('nexus:install.complete', { id: manifest.id, record });
+      yield { type: 'install.done', record };
       return record;
     } finally {
+      unmark();
       try { rmSync(stagingDir, { recursive: true, force: true }); }
       catch { /* best-effort */ }
     }
@@ -249,6 +286,8 @@ export class NexusManager {
     const scope = (current.scope === 'system' ? undefined : current.scope);
     if (!scope) throw new Error(`Cannot uninstall '${appId}' from system scope`);
     await this.installerFor(scope).uninstall(appId, opts);
+    // Deregister (or unmask a lower-scope copy) immediately.
+    this.onAppChanged?.(appId);
     this.bus?.emit('nexus:uninstall.complete', { id: appId });
   }
 

@@ -25,6 +25,9 @@ export function getNexusManager(): NexusManager {
     rootDataDir:   mgr.getDataDir(),
     bus:           OsEventBus,
     sourcesConfig: DEFAULT_SOURCES_CONFIG,
+    // Deterministically (re)register scoped apps after install/uninstall —
+    // the fs-watch on scope dirs is unreliable (see AppManager.reloadScopedApp).
+    onAppChanged:  (id) => { try { getAppManager().reloadScopedApp(id); } catch { /* pre-init */ } },
   });
   (globalThis as GlobalWithNexus)[GLOBAL_KEY] = instance;
   return instance;

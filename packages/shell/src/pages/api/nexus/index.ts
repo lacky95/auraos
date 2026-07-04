@@ -23,7 +23,12 @@ export const GET: APIRoute = async ({ url }) => {
     const cat = refresh ? await nexus.catalog.refresh() : await nexus.catalog.get();
     const apps = cat.apps.map((a) => {
       const rec = nexus.records.get(a.id);
-      return { ...a, installed: !!rec, installedVersion: rec?.version ?? null };
+      return {
+        ...a,
+        installed: !!rec,
+        installedVersion: rec?.version ?? null,
+        installing: nexus.isInstalling(a.id),
+      };
     });
     return jsonResponse({ ...cat, apps });
   } catch (err) {

@@ -64,6 +64,9 @@ export class AppManager {
    * mutated via `setEnabled()` (which also stops running instances on disable).
    */
   private disabled = new Set<string>();
+  /** Apps currently being uninstalled — suppresses warm-pool refill so we can
+   *  kill every instance without the reconciler respawning them. */
+  private readonly uninstalling = new Set<string>();
 
   constructor(opts: {
     appsDir: string;
@@ -835,6 +838,9 @@ export class AppManager {
    * Fire-and-forget — never blocks the caller.
    */
   private scheduleRefill(appId: string): void {
+    // Never top up the warm pool for an app that is being uninstalled — else
+    // the reconciler respawns instances after we've killed them all.
+    if (this.uninstalling.has(appId)) return;
     const manifest = this.registry.getById(appId);
     if (!manifest || manifest.warmPool <= 0 || manifest.instanceMode !== 'multi') return;
     const target   = manifest.warmPool;
@@ -904,6 +910,33 @@ export class AppManager {
   async stopAll(appId: string): Promise<void> {
     const instances = this.getInstancesByApp(appId);
     await Promise.all(instances.map((i) => this.stop(i.instanceId)));
+  }
+
+  /** Mark/unmark an app as being uninstalled. While marked, the warm-pool
+   *  refill (scheduleRefill + reconciler top-up) is suppressed so nothing
+   *  respawns while we're killing every instance. */
+  markUninstalling(appId: string, on: boolean): void {
+    if (on) this.uninstalling.add(appId);
+    else    this.uninstalling.delete(appId);
+  }
+
+  /**
+   * Kill EVERY instance of an app (running, paused, warm-pool) and sweep any
+   * stray sibling containers, so nothing survives an uninstall. Callers should
+   * `markUninstalling(appId, true)` first (suppresses refill) and unmark after
+   * the app is removed/deregistered.
+   */
+  async killAllForApp(appId: string): Promise<void> {
+    // 1. Graceful stop of all tracked instances (parallel; includes pool).
+    try { await this.stopAll(appId); } catch { /* fall through to force */ }
+    // 2. Force-kill any survivors still tracked.
+    for (const inst of this.getInstancesByApp(appId)) {
+      try { this.forceKill(inst.instanceId); } catch { /* ignore */ }
+    }
+    // 3. Belt-and-braces: remove any container the host still has for this app
+    //    (untracked survivors — adoption-skipped, lost across restarts, etc.).
+    try { await this.runners.container.killAllForApp?.(appId); }
+    catch (err) { console.warn(`[AppManager] container sweep for ${appId} failed: ${(err as Error).message}`); }
   }
 
   /**
@@ -1302,6 +1335,22 @@ export class AppManager {
     }
   }
 
+  /**
+   * Deterministically (re)register a scoped app after a Nexus install/uninstall.
+   * The install pipeline lands files into a scope's appsDir via an atomic
+   * rename; the chokidar watcher is unreliable for that (dir may not exist at
+   * boot, and whole-dir renames don't reliably emit `add`). NexusManager calls
+   * this directly (wired via the singleton) so the AppRegistry — the single
+   * source of truth for /api/apps, /api/nexus/installed, Settings, and launch —
+   * picks up the change immediately instead of depending on fs events.
+   */
+  reloadScopedApp(appId: string): void {
+    this.registry.reloadFromDisk(appId);
+    this.intents.reload(this.registry.getAll());
+    keymapRegistry.reloadFromManifests(this.registry.getAll());
+    OsEventBus.emit(this.registry.has(appId) ? 'app:installed' : 'app:removed', { appId });
+  }
+
   getManifests(): AppManifest[] {
     return this.registry.getAll();
   }
@@ -1501,6 +1550,7 @@ export class AppManager {
     //    cap so calling it slack-times is safe.
     for (const m of this.registry.getAll()) {
       if (m.warmPool <= 0 || m.instanceMode !== 'multi') continue;
+      if (this.uninstalling.has(m.id)) continue;   // don't respawn mid-uninstall
       const inPool   = this.countPool(m.id);
       const inFlight = this.refillInFlight.get(m.id) ?? 0;
       const slack = m.warmPool - (inPool + inFlight);

@@ -443,6 +443,35 @@ export class ContainerRunner implements SandboxRunner {
    * so reading them back is reliable even if the AppManager's instanceId
    * sanitisation ever changes.
    */
+  /**
+   * Belt-and-braces uninstall cleanup: remove every host container belonging to
+   * this app — the single-instance `aura-<id>` and any multi `aura-<id>-<n>`
+   * siblings — including ones AppManager no longer tracks. Anchored name match
+   * so it never touches another app's containers.
+   */
+  public async killAllForApp(appId: string): Promise<void> {
+    const base = 'aura-' + appId.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    let names: string[] = [];
+    try {
+      const out = execSync(`docker ps -a --filter "name=${base}" --format "{{.Names}}"`, {
+        stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000, encoding: 'utf-8',
+      });
+      names = out.split('\n').map((s) => s.trim()).filter(Boolean);
+    } catch (err) {
+      console.warn(`[ContainerRunner] killAllForApp: docker ps failed: ${(err as Error).message}`);
+      return;
+    }
+    // `--filter name=` is a substring match — keep only this app's exact
+    // containers (base, or base-<n>), not e.g. `aura-<id>.other`.
+    const re = new RegExp('^' + base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(-\\d+)?$');
+    for (const n of names.filter((n) => re.test(n))) {
+      try {
+        execSync(`docker rm -f ${n}`, { stdio: 'ignore', timeout: 10_000 });
+        console.log(`[ContainerRunner] killAllForApp: removed ${n} (app=${appId})`);
+      } catch { /* already gone */ }
+    }
+  }
+
   public async listOrphanRecords(): Promise<Array<{
     instanceId: string;
     appId:      string;
