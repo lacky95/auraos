@@ -162,7 +162,7 @@ export default function KeymapManager({ initialActions, initialState }: Props) {
     return cats;
   }, [actions]);
 
-  const tabOrder = ['Basic Navigation', 'Window Management', 'Workspaces', 'Launcher', 'Process Manager', 'Custom', 'Apps']
+  const tabOrder = ['Basic Navigation', 'Window Management', 'Workspaces', 'Launcher', 'Process Manager', 'Lock Screen', 'Custom', 'Apps']
     .filter((c) => categories.has(c));
 
   // ---- Import / Export ---------------------------------------------------

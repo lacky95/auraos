@@ -531,6 +531,10 @@ window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod
       const outHeaders = new Headers(upstream.headers);
       outHeaders.delete('content-encoding');
       outHeaders.delete('content-length');
+      // App HTML must never be cached: WebView hosts cache heuristically when
+      // no Cache-Control is present, leaving devices on stale app pages even
+      // after a reload (scripts keep loading fine, so it looks half-updated).
+      outHeaders.set('cache-control', 'no-store');
       return new Response(rewritten, { status: upstream.status, headers: outHeaders });
     }
 

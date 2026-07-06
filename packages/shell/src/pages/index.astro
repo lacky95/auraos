@@ -4,6 +4,11 @@ import LayoutManager from '../components/layout/LayoutManager.astro';
 import { getAppManager, DEFAULT_WORKSPACE_STATE, type WorkspaceState } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
 
+// The shell page must never be served stale: WebView hosts (Android) cache
+// heuristically when no Cache-Control is present, which leaves devices
+// running old shell code after a deploy/edit even through pull-to-refresh.
+Astro.response.headers.set('Cache-Control', 'no-store');
+
 const mgr = getAppManager();
 // SSR ALL installed apps + per-app enable state — the dock applies the
 // `data-enabled` filter via CSS and flips it live on `app:enabledChanged`
@@ -358,6 +363,7 @@ const ssrVisibleViews = initialViews
     else if (type === 'aura.system.toggleLauncher') (window as { auraToggleLauncher?: () => void }).auraToggleLauncher?.();
     else if (type === 'aura.system.toggleNavMode')  keyDispatcher.setMode(keyDispatcher.getMode() === 'nav' ? 'app' : 'nav');
     else if (type === 'aura.system.toggleHome')     keyDispatcher.setMode('nav');
+    else if (type === 'aura.system.lockScreen')     (window as { auraLockScreen?: () => void }).auraLockScreen?.();
   }
 
   function appIdFromIframe(frame: HTMLIFrameElement): string | null {
