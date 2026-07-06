@@ -112,7 +112,10 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     /* Hidden until the first authoritative fit reveals it (see revealTerminal),
        so the user never sees the grid resize from its initial guess to the
        final column count — the boot fit happens behind the curtain. */
-    #terminal { flex: 1; padding: 4px; overflow: hidden; visibility: hidden; }
+    /* Extra 3px on the bottom so the last row never sits flush against the
+       slot's bottom edge (it was occasionally clipped there). chromeInset()
+       measures this padding, so the row count adjusts automatically. */
+    #terminal { flex: 1; padding: 4px 4px 7px; overflow: hidden; visibility: hidden; }
     .xterm { height: 100%; }
     .xterm-viewport { background: var(--aura-color-bg) !important; }
     /* xterm flips `.xterm-screen` to `cursor: crosshair` whenever Alt is
