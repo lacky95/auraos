@@ -18,20 +18,17 @@ export const POST: APIRoute = async ({ params, url }) => {
   }
   const purge = url.searchParams.get('purge') === '1';
 
-  // Stop every instance (graceful → SIGKILL fallback if it lingers).
-  for (const inst of mgr.getInstancesByApp(id)) {
-    try { await mgr.stop(inst.instanceId); }
-    catch (err) { console.warn(`[nexus uninstall] graceful stop failed for ${inst.instanceId}: ${(err as Error).message}`); }
-  }
-  // Belt-and-braces force-kill for any survivors.
-  for (const inst of mgr.getInstancesByApp(id)) {
-    try { mgr.forceKill(inst.instanceId); } catch { /* ignore */ }
-  }
-
+  // Suppress warm-pool refill for this app so the reconciler can't respawn
+  // instances while we're killing them, then kill EVERY instance + sweep any
+  // stray sibling containers BEFORE removing the files.
+  mgr.markUninstalling(id, true);
   try {
-    await nexus.uninstall(id, { purge });
+    await mgr.killAllForApp(id);
+    await nexus.uninstall(id, { purge });   // move files to trash + deregister
     return jsonResponse({ ok: true, id, purged: purge });
   } catch (err) {
     return errorResponse((err as Error).message, 500);
+  } finally {
+    mgr.markUninstalling(id, false);
   }
 };

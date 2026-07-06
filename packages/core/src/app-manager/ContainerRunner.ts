@@ -14,15 +14,22 @@ const BASE_IMAGE     = process.env['AURA_BASE_IMAGE']     ?? 'aura-base';
 
 const SYNTHESISED_ENTRYPOINT = `set -e
 export PORT="\${APP_PORT:-4001}"
-# Skip install when /workspace/node_modules exists: that volume mount is
-# populated by the workspace-level pnpm install and contains every workspace
-# package (including @aura/app-sdk). Node's resolution walks UP from
-# /workspace/apps/<id> into it, so a scaffolded app with a 'workspace:*'
-# dep resolves without running 'npm install' — which would die anyway with
-# EUNSUPPORTEDPROTOCOL because npm doesn't understand the workspace: protocol.
-if [ ! -d node_modules ] && [ ! -d /workspace/node_modules ]; then
-  echo "[\${APP_ID:-app}] Installing dependencies..."
+# Resolve astro. System-scope apps inherit it from the workspace's hoisted
+# /workspace/node_modules/.bin/astro (the workspace pnpm install populated
+# this via the mounted named volume). User/global-scope apps live outside
+# the pnpm workspace; they have to install astro into their own
+# node_modules. Run npm install only when neither path has astro yet.
+if [ ! -x "node_modules/.bin/astro" ] && [ ! -x "/workspace/node_modules/.bin/astro" ]; then
+  echo "[\${APP_ID:-app}] npm install (astro not yet present)..."
   npm install --prefer-offline 2>&1 || npm install
+fi
+# Pull @aura/* SDK packages from the local OCI registry when the app
+# references them in \`auraDependencies\` (user/global scope) or legacy
+# \`dependencies\` and the workspace symlinks didn't materialise them.
+# No-op for system-scope apps where pnpm already populated
+# /workspace/node_modules/@aura/* via workspace:*.
+if [ ! -d node_modules/@aura ] && grep -qE '"(aura)?[dD]ependencies"|"@aura/' package.json 2>/dev/null; then
+  command -v aura >/dev/null && aura sdk install --quiet || true
 fi
 ASTRO="node_modules/.bin/astro"
 [ -x "\$ASTRO" ] || ASTRO="/workspace/node_modules/.bin/astro"
@@ -261,6 +268,18 @@ export class ContainerRunner implements SandboxRunner {
     // pnpm lockfiles) mounted alongside so pnpm symlinks resolve. Sibling
     // apps are genuinely invisible — `cd /workspace/apps` shows ONLY this
     // app's folder.
+    //
+    // Two paths depending on scope:
+    //   • System-scope apps' source lives in the host's workspace, so we
+    //     swap `/workspace` for AURA_HOST_WORKSPACE and do a plain `-v`
+    //     bind (toHostAppDir).
+    //   • User/global-scope apps live INSIDE the aura-app-data named
+    //     volume (path inside-volume is e.g. scopes/users/default/apps/<id>).
+    //     Sibling containers can't bind from the volume by host path — the
+    //     volume's storage dir isn't a stable host path — so we use the
+    //     same volume-subpath pattern already used for /data, /aura/*-tools,
+    //     /home/aura below.
+    const appDirMount = this.buildAppDirMount(ctx.appDir, appId, appDataVolume);
     const a: string[] = [
       'run', '--rm', '-d',
       '--name', hostname,
@@ -275,15 +294,16 @@ export class ContainerRunner implements SandboxRunner {
       '--hostname', appId,
       '--network', SHARED_NETWORK,
       '--workdir', `/workspace/apps/${appId}`,
-      // Per-app slice of /workspace from the host. Sibling apps in
-      // apps/<other> are not visible — there's no parent /workspace/apps
-      // bind, the individual app folder is bound directly under it.
-      // ctx.appDir is the path inside aura-shell (e.g. /workspace/apps/<id>);
-      // the daemon resolves bind sources on the HOST, so we rewrite the
-      // /workspace prefix to workspaceRoot. Works for Linux-host setups where
-      // workspaceRoot==/workspace (a no-op rewrite) and for Mac VM-based
-      // daemons where /workspace doesn't exist outside the shell container.
-      '-v', `${this.toHostPath(ctx.appDir)}:/workspace/apps/${appId}`,
+      // Per-app slice of /workspace. Sibling apps in apps/<other> are not
+      // visible — the individual app folder is bound directly, with no parent
+      // /workspace/apps bind. buildAppDirMount dispatches on scope:
+      //   • System scope: host-path bind. ctx.appDir (e.g. /workspace/apps/<id>)
+      //     has its /workspace prefix rewritten to workspaceRoot, so bind
+      //     sources resolve on the HOST daemon — a no-op on Linux
+      //     (workspaceRoot==/workspace) and the correct rewrite for Mac VM-based
+      //     daemons where /workspace doesn't exist outside the shell container.
+      //   • User/global scope: volume-subpath mount of the aura-app-data volume.
+      ...appDirMount,
       '-v', `${this.workspaceRoot}/packages:/workspace/packages:ro`,
       '-v', `${this.workspaceRoot}/package.json:/workspace/package.json:ro`,
       '-v', `${this.workspaceRoot}/pnpm-lock.yaml:/workspace/pnpm-lock.yaml:ro`,
@@ -391,6 +411,42 @@ export class ContainerRunner implements SandboxRunner {
     return ['bash', '-c', SYNTHESISED_ENTRYPOINT];
   }
 
+  /** Build the `-v` / `--mount` args for binding an app's source dir into
+   *  `/workspace/apps/<appId>` inside the sibling container. Two paths:
+   *
+   *  • System scope (ctx.appDir starts with `/workspace/`): the source
+   *    lives on the host at `AURA_HOST_WORKSPACE/apps/<id>`. Plain `-v`
+   *    bind works.
+   *
+   *  • User/global scope (ctx.appDir starts with `/data/`): the source
+   *    lives INSIDE the `aura-app-data` named volume. Sibling Docker
+   *    containers can't bind from a volume's storage path (it isn't a
+   *    stable host path), so we use the same `--mount type=volume,
+   *    volume-subpath=...` pattern already used for /data, /aura/*-tools,
+   *    and /home/aura below.
+   *
+   *  Both paths produce the same in-container view: `/workspace/apps/<id>`. */
+  private buildAppDirMount(ctxAppDir: string, appId: string, appDataVolume: string): string[] {
+    const target = `/workspace/apps/${appId}`;
+    if (ctxAppDir.startsWith('/workspace/')) {
+      // toHostPath rewrites the /workspace prefix to AURA_HOST_WORKSPACE so the
+      // bind source resolves on the HOST daemon (no-op on Linux, required for
+      // Mac VM-based daemons).
+      const hostPath = this.toHostPath(ctxAppDir);
+      return ['-v', `${hostPath}:${target}`];
+    }
+    if (ctxAppDir.startsWith(`${this.dataDir}/`) || ctxAppDir.startsWith('/data/')) {
+      // Strip the dataDir prefix to get the volume-internal path.
+      const prefix = ctxAppDir.startsWith(this.dataDir + '/') ? this.dataDir : '/data';
+      const subpath = ctxAppDir.slice(prefix.length).replace(/^\/+/, '');
+      return ['--mount', `type=volume,source=${appDataVolume},target=${target},volume-subpath=${subpath}`];
+    }
+    // Unrecognised prefix — fall back to the plain bind and log. Most likely
+    // a misconfigured scope; the bind will probably fail at container start.
+    console.warn(`[ContainerRunner] unrecognised appDir prefix for ${appId}: ${ctxAppDir} — falling back to plain bind`);
+    return ['-v', `${ctxAppDir}:${target}`];
+  }
+
   private containerName(instanceId: string): string {
     // Docker names must be [a-zA-Z0-9_.-]; instance IDs are
     // "com.aura.terminal-3" — `.` is allowed but `:` (used in some
@@ -412,6 +468,35 @@ export class ContainerRunner implements SandboxRunner {
    * so reading them back is reliable even if the AppManager's instanceId
    * sanitisation ever changes.
    */
+  /**
+   * Belt-and-braces uninstall cleanup: remove every host container belonging to
+   * this app — the single-instance `aura-<id>` and any multi `aura-<id>-<n>`
+   * siblings — including ones AppManager no longer tracks. Anchored name match
+   * so it never touches another app's containers.
+   */
+  public async killAllForApp(appId: string): Promise<void> {
+    const base = 'aura-' + appId.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    let names: string[] = [];
+    try {
+      const out = execSync(`docker ps -a --filter "name=${base}" --format "{{.Names}}"`, {
+        stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000, encoding: 'utf-8',
+      });
+      names = out.split('\n').map((s) => s.trim()).filter(Boolean);
+    } catch (err) {
+      console.warn(`[ContainerRunner] killAllForApp: docker ps failed: ${(err as Error).message}`);
+      return;
+    }
+    // `--filter name=` is a substring match — keep only this app's exact
+    // containers (base, or base-<n>), not e.g. `aura-<id>.other`.
+    const re = new RegExp('^' + base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(-\\d+)?$');
+    for (const n of names.filter((n) => re.test(n))) {
+      try {
+        execSync(`docker rm -f ${n}`, { stdio: 'ignore', timeout: 10_000 });
+        console.log(`[ContainerRunner] killAllForApp: removed ${n} (app=${appId})`);
+      } catch { /* already gone */ }
+    }
+  }
+
   public async listOrphanRecords(): Promise<Array<{
     instanceId: string;
     appId:      string;

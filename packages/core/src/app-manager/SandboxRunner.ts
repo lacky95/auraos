@@ -76,6 +76,12 @@ export interface SandboxRunner {
     pid:        number;
     manifest:   AppManifest;
   }): void;
+  /**
+   * Remove EVERY host sandbox belonging to an app (all instances, incl.
+   * untracked survivors) — used as a belt-and-braces step before uninstall.
+   * Container-only; PRoot's children die with the shell so it doesn't implement it.
+   */
+  killAllForApp?(appId: string): Promise<void>;
 }
 
 /** What every concrete runner needs to construct. */

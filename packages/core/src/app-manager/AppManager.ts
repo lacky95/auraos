@@ -64,6 +64,9 @@ export class AppManager {
    * mutated via `setEnabled()` (which also stops running instances on disable).
    */
   private disabled = new Set<string>();
+  /** Apps currently being uninstalled — suppresses warm-pool refill so we can
+   *  kill every instance without the reconciler respawning them. */
+  private readonly uninstalling = new Set<string>();
 
   constructor(opts: {
     appsDir: string;
@@ -215,6 +218,23 @@ export class AppManager {
       }
     }
 
+    // Same as docker above, but for oras — needed by user-scope apps' synth
+    // entrypoint which calls `aura sdk install` → `oras pull` to fetch
+    // @aura/* packages from the local OCI registry. Without oras in the
+    // toolchain volume, granting `oras` to an app's tools[] would create a
+    // dangling symlink in /aura/my-tools/oras → /aura/all-tools/oras.
+    const orasToolchain = join(this.toolchainDir, 'bin', 'oras');
+    if (!existsSync(orasToolchain) && existsSync('/usr/local/bin/oras')) {
+      try {
+        mkdirSync(dirname(orasToolchain), { recursive: true });
+        copyFileSync('/usr/local/bin/oras', orasToolchain);
+        chmodSync(orasToolchain, 0o755);
+        console.log(`[AppManager] healed oras → ${orasToolchain}`);
+      } catch (err) {
+        console.warn(`[AppManager] could not heal oras into toolchain: ${(err as Error).message}`);
+      }
+    }
+
     // Pre-create the shared user-home subpath inside the app-data named
     // volume. ContainerRunner mounts /home/aura from this path into every
     // sibling app container so tools like `claude` / `gh` / `ssh` persist
@@ -350,6 +370,19 @@ export class AppManager {
    */
   async setEnabled(appId: string, enabled: boolean): Promise<void> {
     if (!this.registry.has(appId)) throw new Error(`Unknown app: ${appId}`);
+    // Critical OS-infrastructure apps (e.g. com.aura.registry) refuse the
+    // disable path. They can still be stopped/restarted via the normal
+    // lifecycle endpoints — the guard only blocks the persistent
+    // "user said no, don't auto-start this anymore" toggle.
+    if (!enabled) {
+      const m = this.registry.getById(appId);
+      if (m?.critical) {
+        throw new Error(
+          `App ${appId} is marked critical: true in its manifest and cannot be disabled. ` +
+          `Use \`aura inst stop ${appId}\` for a one-shot stop instead.`,
+        );
+      }
+    }
     const wasEnabled = !this.disabled.has(appId);
     if (enabled === wasEnabled) return;
     if (enabled) {
@@ -474,6 +507,65 @@ export class AppManager {
         console.error(`[AppManager] autoStart ${m.id} failed: ${(err as Error).message}`);
       });
     }
+
+    // First-boot seed for the local OCI registry: once com.aura.registry is
+    // healthy, ensure the @aura/* packages are published into it. On a fresh
+    // `aura-app-data` volume the catalog is empty and any user-scope app
+    // scaffolded by `aura dev new` would fail at `aura sdk install` because
+    // it'd find no @aura/* artifacts to pull. Runs in the background;
+    // shell can serve while seeding takes its ~10-30s.
+    if (this.registry.has('com.aura.registry')) {
+      this.seedLocalRegistryIfEmpty().catch((err) => {
+        console.warn(`[AppManager] local registry seed: ${(err as Error).message}`);
+      });
+    }
+  }
+
+  /** Wait for com.aura.registry to be healthy, then publish every @aura/*
+   *  package if the catalog is empty. Idempotent — re-runs are cheap (the
+   *  publish script's tagExists() check skips already-pushed versions).
+   *  Always returns; failures are logged but don't break boot. */
+  private async seedLocalRegistryIfEmpty(): Promise<void> {
+    const { LOCAL_REGISTRY_DEFAULT_URL } = await import('../nexus/RegistryConfig.js');
+    const url = LOCAL_REGISTRY_DEFAULT_URL;
+    // 1. Wait for /v2/ ping (zot answers it once boot's done). Up to 60 s.
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      try {
+        const r = await fetch(`${url}/v2/`, { signal: AbortSignal.timeout(2_000) });
+        if (r.status === 200 || r.status === 404) break;  // 404 is normal for /v2/ on empty registry
+      } catch { /* not up yet */ }
+      await new Promise((res) => setTimeout(res, 2_000));
+    }
+    if (Date.now() >= deadline) {
+      console.warn('[AppManager] local registry never became healthy; skipping seed');
+      return;
+    }
+    // 2. Catalog populated already? Skip.
+    try {
+      const r = await fetch(`${url}/v2/_catalog`, { signal: AbortSignal.timeout(5_000) });
+      const body = await r.json().catch(() => ({})) as { repositories?: string[] };
+      if (Array.isArray(body.repositories) && body.repositories.some((n) => n.startsWith('aura/'))) {
+        console.log(`[AppManager] local registry catalog already has aura/* (${body.repositories.length} repos) — skipping seed`);
+        return;
+      }
+    } catch (err) {
+      console.warn(`[AppManager] catalog probe failed: ${(err as Error).message} — attempting seed anyway`);
+    }
+    // 3. Run publish script as a detached subprocess. The shell keeps
+    //    serving traffic; the script handles its own logging.
+    console.log('[AppManager] seeding local OCI registry with @aura/* packages...');
+    const { spawn } = await import('node:child_process');
+    const child = spawn('pnpm', ['publish:local'], {
+      cwd:    '/workspace',
+      stdio:  ['ignore', 'inherit', 'inherit'],
+      env:    { ...process.env, AURA_REGISTRY_URL: url },
+      detached: false,  // keep tied so logs flow into shell logs
+    });
+    child.on('exit', (code) => {
+      if (code === 0) console.log('[AppManager] local registry seed: complete');
+      else            console.warn(`[AppManager] local registry seed: exit ${code}`);
+    });
   }
 
   /**
@@ -655,7 +747,9 @@ export class AppManager {
     mkdirSync(instanceDataDir, { recursive: true });
 
     this.transition(instanceId, appId, 'creating', null);
-    const port = await this.ports.allocate(instanceId);
+    // Honor manifest.serverPort when present (currently used by
+    // com.aura.registry to pin :4090 so RegistryConfig URLs stay stable).
+    const port = await this.ports.allocate(instanceId, manifest.serverPort);
 
     try {
       const runner = this.runners[manifest.sandbox] ?? this.runners['proot'];
@@ -684,15 +778,14 @@ export class AppManager {
         const live = this.instances.get(instanceId);
         if (live) this.providers.registerInstance(live, manifest);
       } else {
-        // Pool warm-up: pre-compile the iframe entry point (`/`) and the
-        // common heavy static assets so the user's FIRST iframe load after
-        // claim doesn't trigger Vite's on-demand compile + bundle path.
-        // waitHealthy only touched /api/lifecycle/health, leaving the
-        // index.astro module cold. Fire-and-forget; never blocks the spawn.
+        // Pool warm-up: pre-compile the iframe entry point (`/`) so the user's
+        // FIRST iframe load after claim doesn't trigger Vite's on-demand compile
+        // + bundle path. waitHealthy only touched /api/lifecycle/health, leaving
+        // the index.astro module cold. Warming `/` also primes the bundled
+        // page modules it references (e.g. the terminal's xterm bundle, now an
+        // npm dep pulled in via the page's <script> rather than a static vendor
+        // file). Fire-and-forget; never blocks the spawn.
         const warmups = ['/'];
-        if (appId === 'com.aura.terminal') {
-          warmups.push('/vendor/xterm/xterm.min.js', '/vendor/xterm/xterm.min.css');
-        }
         for (const path of warmups) {
           fetch(`http://localhost:${port}${path}`, { signal: AbortSignal.timeout(5000) })
             .then((r) => r.body?.cancel()).catch(() => undefined);
@@ -745,6 +838,9 @@ export class AppManager {
    * Fire-and-forget — never blocks the caller.
    */
   private scheduleRefill(appId: string): void {
+    // Never top up the warm pool for an app that is being uninstalled — else
+    // the reconciler respawns instances after we've killed them all.
+    if (this.uninstalling.has(appId)) return;
     const manifest = this.registry.getById(appId);
     if (!manifest || manifest.warmPool <= 0 || manifest.instanceMode !== 'multi') return;
     const target   = manifest.warmPool;
@@ -814,6 +910,33 @@ export class AppManager {
   async stopAll(appId: string): Promise<void> {
     const instances = this.getInstancesByApp(appId);
     await Promise.all(instances.map((i) => this.stop(i.instanceId)));
+  }
+
+  /** Mark/unmark an app as being uninstalled. While marked, the warm-pool
+   *  refill (scheduleRefill + reconciler top-up) is suppressed so nothing
+   *  respawns while we're killing every instance. */
+  markUninstalling(appId: string, on: boolean): void {
+    if (on) this.uninstalling.add(appId);
+    else    this.uninstalling.delete(appId);
+  }
+
+  /**
+   * Kill EVERY instance of an app (running, paused, warm-pool) and sweep any
+   * stray sibling containers, so nothing survives an uninstall. Callers should
+   * `markUninstalling(appId, true)` first (suppresses refill) and unmark after
+   * the app is removed/deregistered.
+   */
+  async killAllForApp(appId: string): Promise<void> {
+    // 1. Graceful stop of all tracked instances (parallel; includes pool).
+    try { await this.stopAll(appId); } catch { /* fall through to force */ }
+    // 2. Force-kill any survivors still tracked.
+    for (const inst of this.getInstancesByApp(appId)) {
+      try { this.forceKill(inst.instanceId); } catch { /* ignore */ }
+    }
+    // 3. Belt-and-braces: remove any container the host still has for this app
+    //    (untracked survivors — adoption-skipped, lost across restarts, etc.).
+    try { await this.runners.container.killAllForApp?.(appId); }
+    catch (err) { console.warn(`[AppManager] container sweep for ${appId} failed: ${(err as Error).message}`); }
   }
 
   /**
@@ -1212,6 +1335,22 @@ export class AppManager {
     }
   }
 
+  /**
+   * Deterministically (re)register a scoped app after a Nexus install/uninstall.
+   * The install pipeline lands files into a scope's appsDir via an atomic
+   * rename; the chokidar watcher is unreliable for that (dir may not exist at
+   * boot, and whole-dir renames don't reliably emit `add`). NexusManager calls
+   * this directly (wired via the singleton) so the AppRegistry — the single
+   * source of truth for /api/apps, /api/nexus/installed, Settings, and launch —
+   * picks up the change immediately instead of depending on fs events.
+   */
+  reloadScopedApp(appId: string): void {
+    this.registry.reloadFromDisk(appId);
+    this.intents.reload(this.registry.getAll());
+    keymapRegistry.reloadFromManifests(this.registry.getAll());
+    OsEventBus.emit(this.registry.has(appId) ? 'app:installed' : 'app:removed', { appId });
+  }
+
   getManifests(): AppManifest[] {
     return this.registry.getAll();
   }
@@ -1411,6 +1550,7 @@ export class AppManager {
     //    cap so calling it slack-times is safe.
     for (const m of this.registry.getAll()) {
       if (m.warmPool <= 0 || m.instanceMode !== 'multi') continue;
+      if (this.uninstalling.has(m.id)) continue;   // don't respawn mid-uninstall
       const inPool   = this.countPool(m.id);
       const inFlight = this.refillInFlight.get(m.id) ?? 0;
       const slack = m.warmPool - (inPool + inFlight);

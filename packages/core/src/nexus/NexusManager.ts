@@ -17,7 +17,7 @@ import type { ScopeDefinition, ScopeId } from '../scopes/types.js';
 import { Resolver } from './Resolver.js';
 
 type OsEventBus = typeof OsEventBusSingleton;
-import { IndexClient } from './IndexClient.js';
+import { CatalogAggregator } from './CatalogAggregator.js';
 import { Installer } from './Installer.js';
 import { validateStagedDir } from './Validator.js';
 import { fetchLocal } from './Fetchers/LocalFetcher.js';
@@ -28,30 +28,65 @@ import { computePermissionDiff, diffRequiresApproval } from './PermissionDiff.js
 import type {
   InstallRecord, NexusProgressEvent, ResolvedRef,
 } from './types.js';
+import type { RegistryConfig } from './RegistryConfig.js';
+import { resolveByName, urlForHost } from './RegistryConfig.js';
+import type { SourcesConfig } from './SourcesConfig.js';
+import { DEFAULT_SOURCES_CONFIG, loadSourcesConfig, ociRegistryView } from './SourcesConfig.js';
 
 export interface NexusManagerOpts {
   scopes:  ScopeDefinition[];
   /** Root dataDir used for shared staging/index paths (not scoped per-app). */
   rootDataDir: string;
   bus?:    OsEventBus;
+  /** Registered sources config from the KV store. Drives the catalog
+   *  aggregation, the Resolver's mirror probing, and Publisher's bare-name
+   *  `--registry` resolution (via the derived OCI registry view). */
+  sourcesConfig?: SourcesConfig;
+  /** Called after an app is installed/uninstalled so the AppRegistry can
+   *  (re)register it deterministically — the fs-watch on scope dirs is
+   *  unreliable. Injected by the singleton (which owns the AppManager ref) to
+   *  avoid a NexusManager→AppManager import cycle. */
+  onAppChanged?: (appId: string) => void;
 }
 
 export class NexusManager {
-  public readonly index:     IndexClient;
+  /** Aggregated app-store catalog across all registered sources. */
+  public readonly catalog:   CatalogAggregator;
   private readonly resolver: Resolver;
   /** One installer per non-system scope. */
   private readonly installers: Map<ScopeId, Installer>;
   private readonly rootDataDir: string;
   private readonly bus?: OsEventBus;
+  /** Currently-known sources config. Snapshot from the singleton's load;
+   *  live-refreshed when a shell route persists a change. */
+  private sourcesConfig: SourcesConfig;
+  /** Guards the one-time lazy KV load (singleton starts on defaults). */
+  private sourcesLoaded = false;
+  /** Deterministic AppRegistry (re)registration hook. */
+  private readonly onAppChanged?: (appId: string) => void;
+  /** App ids (and raw refs) currently mid-install. Exposed so the store UI can
+   *  render/persist an "installing…" state that survives a page reload. */
+  private readonly installing = new Set<string>();
+
+  /** True while an install for this id/ref is in flight. */
+  isInstalling(id: string): boolean { return this.installing.has(id); }
+  /** Snapshot of everything currently installing (ids + refs). */
+  getInstallingIds(): string[] { return [...this.installing]; }
 
   constructor(opts: NexusManagerOpts) {
-    this.rootDataDir    = opts.rootDataDir;
-    this.bus            = opts.bus;
-    this.index          = new IndexClient({
-      cachePath: join(opts.rootDataDir, 'nexus', 'index.yaml'),
+    this.rootDataDir   = opts.rootDataDir;
+    this.bus           = opts.bus;
+    this.onAppChanged  = opts.onAppChanged;
+    this.sourcesConfig = opts.sourcesConfig ?? cloneDefaultSources();
+    this.catalog       = new CatalogAggregator({
+      rootDataDir: opts.rootDataDir,
+      getSources:  () => this.sourcesConfig,
     });
-    this.resolver       = new Resolver({ index: this.index });
-    this.installers     = new Map();
+    this.resolver      = new Resolver({
+      catalog:        this.catalog,
+      registryConfig: ociRegistryView(this.sourcesConfig),
+    });
+    this.installers    = new Map();
     for (const scope of opts.scopes) {
       if (scope.immutable) continue;
       this.installers.set(scope.id, new Installer({
@@ -60,6 +95,49 @@ export class NexusManager {
         scope:   scope.id,
       }));
     }
+  }
+
+  /** Expose the registered sources config. The setter swaps it in for
+   *  subsequent catalog reads / fetches / publishes; in-flight installs keep
+   *  their original snapshot. */
+  getSourcesConfig(): SourcesConfig { return this.sourcesConfig; }
+  setSourcesConfig(cfg: SourcesConfig): void {
+    this.sourcesConfig = cfg;
+    this.sourcesLoaded = true;
+    this.resolver.setRegistryConfig(ociRegistryView(cfg));
+    this.catalog.invalidate();   // next get() re-aggregates against the new set
+  }
+
+  /**
+   * One-time lazy load of the persisted sources config from the shell KV
+   * store. The singleton is constructed synchronously on DEFAULT_SOURCES_CONFIG
+   * (can't await KV in a getter), so shell routes call this before reading the
+   * catalog to pick up user-registered sources across a shell restart. No-op
+   * after the first call or once a route has mutated the config.
+   */
+  async ensureSourcesLoaded(osApiBase: string): Promise<void> {
+    if (this.sourcesLoaded) return;
+    this.sourcesLoaded = true;
+    try {
+      const cfg = await loadSourcesConfig(osApiBase);
+      this.sourcesConfig = cfg;
+      this.resolver.setRegistryConfig(ociRegistryView(cfg));
+      this.catalog.invalidate();
+    } catch { /* keep defaults */ }
+  }
+
+  /** Legacy view: the OCI-registry subset of the sources config. Kept for the
+   *  `/api/nexus/registries` write-through shim + publish script. */
+  getRegistryConfig(): RegistryConfig { return ociRegistryView(this.sourcesConfig); }
+  /** Convenience for Publisher / sdk install: resolve a bare-name registry. */
+  resolveRegistryName(bareName: string): string | null {
+    return resolveByName(ociRegistryView(this.sourcesConfig), bareName);
+  }
+  /** Recover a registry URL (with scheme) from an OCI host so fetch/resolve
+   *  can add `--plain-http` for the local zot. */
+  private ociUrlForHost(registry: string): string | undefined {
+    const host = registry.split('/')[0] ?? registry;
+    return urlForHost(ociRegistryView(this.sourcesConfig), host) ?? undefined;
   }
 
   /**
@@ -124,6 +202,16 @@ export class NexusManager {
     const stagingDir  = join(this.rootDataDir, 'nexus', 'staging', `pending-${Date.now()}`);
     mkdirSync(stagingDir, { recursive: true });
 
+    // Track this install so the UI can show/persist an "installing…" state.
+    // Keyed by both the raw ref and (once known) the app id so a browse card
+    // (ref === id) and a URL/git install both match. Cleared before any
+    // suspend/return point (the shell route abandons the generator on the
+    // permission-needed and install-done yields, so `finally` alone is unsafe).
+    const keys = new Set<string>([opts.ref]);
+    const mark   = () => { for (const k of keys) this.installing.add(k); };
+    const unmark = () => { for (const k of keys) this.installing.delete(k); };
+    mark();
+
     try {
       yield { type: 'resolve.start', ref: opts.ref };
       const resolved = await this.resolver.resolve(opts.ref);
@@ -134,6 +222,7 @@ export class NexusManager {
       yield { type: 'fetch.done', stagingDir };
 
       const manifest = validateStagedDir(stagingDir);
+      keys.add(manifest.id); this.installing.add(manifest.id);
       yield { type: 'validate.done', manifest };
 
       // Permission diff vs. currently-installed version in any scope.
@@ -148,21 +237,31 @@ export class NexusManager {
       const diff = computePermissionDiff(currentManifest, manifest);
 
       if (!opts.autoApprove && diffRequiresApproval(diff)) {
+        // Pausing for the user's decision — not actively installing. Clear the
+        // flag (the route returns here and abandons this generator).
+        unmark();
         const decision = yield { type: 'permission.needed', diff };
         if (!decision || !decision.approve) {
           yield { type: 'permission.denied' };
           throw new Error('Install cancelled by user');
         }
+        mark();
         yield { type: 'permission.approved' };
       }
 
       yield { type: 'install.start' };
       const record = await installer.install(stagingDir, manifest, resolved);
-      yield { type: 'install.done', record };
-
+      // Register with the AppRegistry NOW — before yielding install.done. The
+      // shell route early-returns on install.done and never resumes this
+      // generator, so anything after that yield (incl. the bus emit) never
+      // runs. Registering here makes the app visible/launchable immediately.
+      this.onAppChanged?.(manifest.id);
+      unmark();
       this.bus?.emit('nexus:install.complete', { id: manifest.id, record });
+      yield { type: 'install.done', record };
       return record;
     } finally {
+      unmark();
       try { rmSync(stagingDir, { recursive: true, force: true }); }
       catch { /* best-effort */ }
     }
@@ -187,6 +286,8 @@ export class NexusManager {
     const scope = (current.scope === 'system' ? undefined : current.scope);
     if (!scope) throw new Error(`Cannot uninstall '${appId}' from system scope`);
     await this.installerFor(scope).uninstall(appId, opts);
+    // Deregister (or unmask a lower-scope copy) immediately.
+    this.onAppChanged?.(appId);
     this.bus?.emit('nexus:uninstall.complete', { id: appId });
   }
 
@@ -223,6 +324,9 @@ export class NexusManager {
       ...opts,
       dataDir: this.rootDataDir,
       onMessage: (m) => messages.push(m),
+      // Let authors write `--registry local` (a source name) instead of the
+      // full zot URL; Publisher derives host + `--plain-http` + repo path.
+      registryResolver: (name) => this.resolveRegistryName(name),
     });
     for (const m of messages) yield { type: 'publish.progress', message: m };
     yield { type: 'publish.done', ref: result.ref };
@@ -234,24 +338,30 @@ export class NexusManager {
     switch (resolved.source) {
       case 'local':
         return fetchLocal(resolved.address, stagingDir);
+      case 'oci': {
+        const [registry, tag] = splitOnLastColon(resolved.address);
+        return fetchOci({ registry, tag }, stagingDir, this.ociUrlForHost(registry));
+      }
       case 'git':
       case 'index': {
-        if (resolved.address.startsWith('oci://') || resolved.address.startsWith('ghcr.io')
-            || /^[\w.-]+:[^/]+$/.test(resolved.address)) {
-          const [registry, tag] = splitOnLastColon(resolved.address);
-          return fetchOci({ registry, tag }, stagingDir);
+        // Index/git addresses that resolved to an OCI artifact are prefixed
+        // with `oci://` by the resolver; everything else is a git URL
+        // (optionally with a `#ref` fragment).
+        if (resolved.address.startsWith('oci://')) {
+          const [registry, tag] = splitOnLastColon(resolved.address.slice('oci://'.length));
+          return fetchOci({ registry, tag }, stagingDir, this.ociUrlForHost(registry));
         }
         const fragIdx = resolved.address.indexOf('#');
         const url = fragIdx > 0 ? resolved.address.slice(0, fragIdx) : resolved.address;
         const ref = fragIdx > 0 ? resolved.address.slice(fragIdx + 1) : undefined;
         return fetchGit({ url, ref }, stagingDir);
       }
-      case 'oci': {
-        const [registry, tag] = splitOnLastColon(resolved.address);
-        return fetchOci({ registry, tag }, stagingDir);
-      }
     }
   }
+}
+
+function cloneDefaultSources(): SourcesConfig {
+  return JSON.parse(JSON.stringify(DEFAULT_SOURCES_CONFIG)) as SourcesConfig;
 }
 
 function splitOnLastColon(addr: string): [string, string] {

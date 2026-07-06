@@ -1,122 +1,127 @@
 ---
 title: Nexus
-description: AuraOS's distribution layer — how apps are installed, updated, and published from Git, OCI, the curated index, or local paths.
+description: AuraOS's app store and distribution layer — sources, registries, and how apps are installed, updated, and published via the aura CLI.
 ---
 
-Nexus is how apps get on and off the system. It sits next to the
-AppManager — once an app is installed by Nexus, the AppManager runs
-it like any other. Pure backend layer: nothing in the app SDK depends
+Nexus is how apps get on and off AuraOS. It's both the **distribution
+layer** (resolve → fetch → validate → install) and the **app store** (a
+catalog aggregated across every registered source). Once Nexus installs an
+app, the AppManager runs it like any other — nothing in the app SDK depends
 on Nexus, and apps never call into it.
 
-## The pipeline
+To ship your own app, jump to **[Publish an App](./publish-an-app)**. This
+page covers the model and how to manage registries.
 
-Every install — whether from `aura nexus install`, the shell HTTP API,
-or a future UI — walks the same five stages:
+## Sources
 
-```
-ref string  →  Resolver  →  Fetcher  →  Validator  →  PermissionDiff  →  Installer
-                                                              ↓
-                                                       (approval gate)
-                                                              ↓
-                                                       install record
-```
+Nexus aggregates apps from a set of **sources** you register. Each source is
+exactly one strict kind — the store never guesses:
 
-- **Resolver** parses the ref and figures out where it lives.
-  See `packages/core/src/nexus/Resolver.ts`.
-- **Fetcher** pulls the source into a staging directory. One per
-  source type (`GitFetcher.ts`, `OciFetcher.ts`, `LocalFetcher.ts`).
-- **Validator** runs the manifest schema against `app.manifest.json`
-  and rejects the install if anything's off.
-- **PermissionDiff** compares the new manifest's permissions /
-  capabilities against whatever's currently installed. New perms
-  pause the pipeline and yield a `permission.needed` event — the
-  caller decides whether to approve.
-- **Installer** moves the staging directory into `appsDir`, records
-  the source ref + digest in `install-records.json`, and emits
-  `nexus:install.complete` on the OS event bus.
+| Kind | What it is | Distributes |
+|---|---|---|
+| `oci` | An OCI registry. Self-describing: apps are pushed as annotated artifacts under the `aura-apps/<id>` repo, and the store reads their metadata straight back. Can also be a pull `--mirror`. | Many apps |
+| `git-index` | A git repo (or a direct `*.yaml` URL) hosting an `index.yaml` that lists many apps. Contains no app code itself. | Many apps |
+| `git-app` | A git repo that **is** a single app (manifest at its root). | One app |
 
-The pipeline is an async generator (`NexusManager.install`), so the
-caller drives it event-by-event. The CLI streams the events over
-SSE; an in-OS install UI would consume the same shape.
+Two distribution forms follow: an **OCI artifact** (from an `oci` source or
+an index entry's `oci` ref) or a **git repo** (a `git-app` or an index
+entry's `git` ref). Sources are persisted in the shell KV store at
+`os/nexus/sources`.
 
-## Source types
+### The local registry
 
-Nexus accepts four ref shapes. Resolver dispatch is keyed on the ref
-string — no flags needed.
+Every OS ships with `com.aura.registry` — a [zot](https://zotregistry.dev)
+OCI registry running as a system service at
+`http://aura-com.aura.registry:4090`. It's pre-registered as the source
+`local` (priority 0), so you can publish and install end-to-end with no
+external account. It's the default target for `aura nexus app publish`.
 
-| Shape                                | Example                              | Routed to        |
-|--------------------------------------|--------------------------------------|------------------|
-| Local path (`./` / `/`)              | `./apps/com.example.foo`             | `LocalFetcher`   |
-| Git URL (with optional `#<ref>`)     | `https://github.com/u/repo#main`     | `GitFetcher`     |
-| OCI registry (`oci://` or `host/x:tag`) | `ghcr.io/u/foo:1.2.3`             | `OciFetcher`     |
-| Curated index (`<reverse.domain>[@channel]`) | `com.example.foo@stable`     | `IndexClient` → Git or OCI |
+## Managing sources
 
-The curated index is a YAML file with channel mappings:
+```bash
+aura nexus registry list                          # every source: kind, url, priority
+aura nexus registry remove <name>                 # drop a source
 
-```yaml
-# /data/nexus/index.yaml
-apps:
-  com.example.foo:
-    sources:
-      git: { ref: github.com/example/foo, default-branch: main }
-      oci: { ref: ghcr.io/example/foo }
-    channels:
-      stable:  { git-tag: v1.2.3, oci-tag: 1.2.3 }
-      beta:    { git-tag: v1.3.0-rc1, oci-tag: 1.3.0-rc1 }
+# Add an OCI registry (a private mirror, a corporate ghcr.io, …):
+aura nexus registry add myreg https://reg.example.com --kind oci
+
+# Add a git-index catalog (a repo with an index.yaml of many apps):
+aura nexus registry add community github.com/you/aura-catalog --kind git-index
+
+# Add a single-app git repo:
+aura nexus registry add hello github.com/you/hello --kind git-app
 ```
 
-The index is just convenience — `aura nexus install
-github.com/example/foo#v1.2.3` works without any index entry.
+`--priority <n>` orders sources (lower wins when the same app id appears in
+several); `--mirror` (oci) probes that registry first for any ref;
+`--ref <branch|tag>` pins a git source. When you add a `git-index` or
+`git-app`, Nexus fetches/clones it once to validate it before saving.
+
+Run your own store by standing up any OCI registry (or hosting an
+`index.yaml` in a repo) and registering it here — no AuraOS-specific server
+needed.
+
+## Installing
+
+```bash
+aura nexus app install <ref>            # resolve + fetch + validate + install
+aura nexus app list                     # what's installed (id, version, scope, source)
+aura nexus app info <ref>               # dry-run: resolved address + permission preview
+aura nexus app update [<id>|--all]      # re-resolve the stored ref, reinstall if changed
+aura nexus app uninstall <id> [--purge] # stop instances, remove (purge also wipes /data)
+aura nexus search [<q>] [--refresh]     # search the aggregated catalog
+```
+
+`<ref>` can be a store id, a registry ref, a git URL, or a local path — the
+resolver dispatches on the shape, no flags needed:
+
+| Shape | Example | Routed to |
+|---|---|---|
+| Store id (`<reverse.domain>[@channel]`) | `com.example.hello@stable` | catalog → OCI or git |
+| OCI ref | `oci://ghcr.io/u/foo:1.2.3`, `host/u/foo@sha256:…` | OCI (via `oras`) |
+| Git URL (optional `#ref`) | `github.com/u/repo#v1.2.3` | git |
+| Local path | `./apps/com.example.foo`, `/abs/path` | filesystem |
+
+Installs default to the **global** [scope](./scopes); pass `--scope user`
+for a per-user install. Full command flags live in the
+[CLI Reference](./cli-reference).
 
 ## Permission gating
 
-The diff compares old vs new on `permissions[]`, `tools[]`, and
-`dataProvider`. An update that only patches application code goes
-through without prompting. Adding a new permission (say
-`storage.write`), a new tool, or a new content-provider authority
-yields `permission.needed` — the caller MUST call `next({ approve:
-true })` for the install to continue.
+Before an install lands, Nexus diffs the incoming manifest's `permissions[]`,
+`tools[]`, and `dataProvider` against the currently-installed version. Pure
+code updates go through silently; anything that **adds** a permission, a
+tool, or a content-provider authority pauses and asks for approval. Pass
+`-y` / `--yes` to skip the gate (right for CI, never for user-driven
+installs).
 
-Pass `--yes` to the CLI or `autoApprove: true` to `NexusManager.install`
-to skip the gate. That's the right default for CI, never for user-
-driven installs.
+## The pipeline
 
-## Publishing
+Every install walks the same stages, driven as an async generator
+(`NexusManager.install`) so the CLI and the shell UI consume the same event
+stream:
 
-Two paths. Both stage a tarball / OCI layer, push to the remote, and
-print the install command that fetches what you just pushed.
-
-- **Git** (`publishGit` / `aura nexus publish --source git`) tags the
-  commit, pushes it, and prints `aura nexus install
-  <repo>#<tag>` as the install cmd.
-- **OCI** (`publishOci` / `aura nexus publish --source oci`) packs the
-  app via `oras` and prints `aura nexus install oci://<reg>:<tag>`.
-
-Requires the corresponding tool on PATH (`git` or `oras`). Neither
-binary ships in the OS toolchain by default — install via `aura cap
-install git`.
-
-## CLI
-
-Day-to-day commands live in **[CLI Reference](./cli-reference)** under
-`aura nexus …`. Quick form:
-
-```sh
-aura nexus install   <ref>               # install or update
-aura nexus update    [<id>|--all]        # re-resolve + reinstall
-aura nexus uninstall <id> [--purge]      # remove (purge wipes /data too)
-aura nexus list                          # what's installed
-aura nexus search   [<q>]                # curated index search
-aura nexus info     <ref>                # dry-run resolve + preview
-aura nexus publish  [<path>] --source …  # push your app upstream
+```
+ref  →  Resolver  →  Fetcher  →  Validator  →  PermissionDiff  →  Installer
+                                                     ↓
+                                              (approval gate)
+                                                     ↓
+                                              install record
 ```
 
-Each command flows through the same `/api/nexus/*` HTTP endpoint on
-the shell — so the CLI and a future settings UI share one backend.
+- **Resolver** classifies the ref and, for store ids, looks it up in the
+  aggregated catalog.
+- **Fetcher** pulls the source into staging — `oras pull` for OCI, `git
+  clone` for git, copy for local.
+- **Validator** runs the manifest schema and rejects anything malformed.
+- **PermissionDiff** computes the approval gate above.
+- **Installer** lands the app into the target scope's `appsDir` and writes an
+  install record; the AppRegistry picks it up and the app becomes launchable.
 
-## Where installs land
+For the internals, see the [Nexus pipeline deep-dive](./deep-dive/nexus-pipeline).
 
-By default `aura nexus install` targets the **global scope**. Pass
-`--scope user` to install into the user-scoped tier instead. See
-[Scopes](./scopes) for how the three tiers relate and where each one
-stores its apps and runtime data.
+## Next
+
+- **[Publish an App](./publish-an-app)** — ship your app to a registry.
+- **[Scopes](./scopes)** — where installs land (system / global / user).
+- **[CLI Reference](./cli-reference)** — every `aura nexus …` flag.

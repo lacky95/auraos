@@ -14,13 +14,21 @@ interface LockScreenConfig {
   text:      string;
   position:  LockPosition;
   showClock: boolean;
+  zoom:      number;
 }
 
 const DEFAULT_CONFIG: LockScreenConfig = {
   text:      'LOCKED',
   position:  'center',
   showClock: true,
+  zoom:      1,
 };
+
+// Content-scale bounds — must match the overlay's clampZoom in
+// packages/shell/src/components/shell/LockScreenOverlay.astro.
+const ZOOM_MIN = 0.2;
+const ZOOM_MAX = 3;
+const ZOOM_STEP = 0.01;
 
 const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
 let cfg: LockScreenConfig = DEFAULT_CONFIG;
@@ -31,6 +39,9 @@ try {
     if (body.value) cfg = { ...DEFAULT_CONFIG, ...body.value };
   }
 } catch { /* keep defaults */ }
+// Guard the SSR value so a bad/out-of-range zoom can't render a broken slider.
+cfg.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN,
+  typeof cfg.zoom === 'number' && isFinite(cfg.zoom) ? cfg.zoom : 1));
 
 const POSITIONS: { id: LockPosition; label: string }[] = [
   { id: 'top-left',      label: '↖' },
@@ -87,13 +98,36 @@ const POSITIONS: { id: LockPosition; label: string }[] = [
       </label>
     </div>
 
+    <div class="form-row" style="align-items: center;">
+      <label>ZOOM</label>
+      <div class="zoom-row">
+        <input id="zoom" type="range" min={ZOOM_MIN} max={ZOOM_MAX} step={ZOOM_STEP} value={cfg.zoom} aria-label="Lock-screen content size" />
+        <span id="zoom-val">{cfg.zoom.toFixed(2)}×</span>
+      </div>
+    </div>
+
     <div class="form-row">
       <label></label>
       <button id="test-btn" class="action-btn" type="button">⊞ TEST LOCK NOW</button>
     </div>
 
+    <div class="form-row" style="align-items: flex-start;">
+      <label>PREVIEW</label>
+      <div
+        id="ls-preview"
+        class="ls-preview"
+        data-position={cfg.position}
+        style={`--ls-zoom: ${cfg.zoom}`}
+        aria-hidden="true"
+      >
+        <div id="ls-preview-clock" class="ls-preview-clock" data-show={String(cfg.showClock)}>--:--:--</div>
+        <div id="ls-preview-text" class="ls-preview-text">{cfg.text || 'LOCKED'}</div>
+        <div class="ls-preview-hint">CLICK OR PRESS ANY KEY TO UNLOCK</div>
+      </div>
+    </div>
+
     <p id="status" style="margin-top: 14px; font-size: 0.7rem; color: var(--aura-color-text-dim); letter-spacing: 0.08em;">
-      CHANGES PERSIST IMMEDIATELY · PUT /api/kv/os/lockscreen
+      V4 · CHANGES PERSIST IMMEDIATELY · ZOOM + LIVE PREVIEW
     </p>
   </main>
   <footer class="settings-foot">PROVIDER · /api/kv/os/lockscreen</footer>
@@ -147,6 +181,81 @@ const POSITIONS: { id: LockPosition; label: string }[] = [
     .action-btn:hover {
       background: color-mix(in srgb, var(--aura-color-primary) 14%, transparent);
     }
+
+    /* ── Zoom slider ── */
+    .zoom-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 240px;
+    }
+    .zoom-row input[type="range"] {
+      flex: 1;
+      accent-color: var(--aura-color-primary, #00ff41);
+      cursor: pointer;
+    }
+    #zoom-val {
+      min-width: 5ch;
+      font-family: 'Courier New', monospace;
+      font-size: 0.8rem;
+      color: var(--aura-color-primary, #00ff41);
+    }
+
+    /* ── Live preview ──
+       A miniature of the real overlay. `container-type: size` lets the content
+       size itself in `cqmin` (1% of the box's smaller side), mirroring the
+       overlay's `vmin`, so position + relative scale look faithful. The zoom
+       multiplier is the same --ls-zoom the overlay uses. */
+    .ls-preview {
+      width: 100%;
+      max-width: 460px;
+      aspect-ratio: 16 / 10;
+      background: #000;
+      border: 1px solid var(--aura-color-border, rgba(0,255,65,0.2));
+      box-sizing: border-box;
+      padding: 6cqmin;
+      container-type: size;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      color: var(--aura-color-text, #ccffcc);
+      font-family: var(--aura-font-mono, 'Courier New', monospace);
+      user-select: none;
+    }
+    .ls-preview[data-position^="top-"]    { justify-content: flex-start; }
+    .ls-preview[data-position^="middle-"],
+    .ls-preview[data-position="center"]   { justify-content: center;     }
+    .ls-preview[data-position^="bottom-"] { justify-content: flex-end;   }
+    .ls-preview[data-position$="-left"]   { align-items: flex-start; text-align: left;   }
+    .ls-preview[data-position$="-center"],
+    .ls-preview[data-position="center"]   { align-items: center;    text-align: center; }
+    .ls-preview[data-position$="-right"]  { align-items: flex-end;  text-align: right;  }
+
+    .ls-preview-clock {
+      font-size: calc(11cqmin * var(--ls-zoom, 1));
+      color: var(--aura-color-primary, #00ff41);
+      text-shadow: var(--aura-glow-primary, 0 0 8px #00ff41);
+      letter-spacing: 0.06em;
+      line-height: 1;
+      margin-bottom: calc(2cqmin * var(--ls-zoom, 1));
+    }
+    .ls-preview-clock[data-show="false"] { display: none; }
+    .ls-preview-text {
+      font-size: calc(4.1cqmin * var(--ls-zoom, 1));
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      white-space: pre-wrap;
+      max-width: 100%;
+      word-break: break-word;
+    }
+    .ls-preview-hint {
+      margin-top: calc(3cqmin * var(--ls-zoom, 1));
+      font-size: calc(2.2cqmin * var(--ls-zoom, 1));
+      color: var(--aura-color-text-dim, #557755);
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      opacity: 0.6;
+    }
   </style>
 
   <script is:inline>
@@ -154,13 +263,37 @@ const POSITIONS: { id: LockPosition; label: string }[] = [
     const textEl   = document.getElementById('text');
     const clockEl  = document.getElementById('show-clock');
     const grid     = document.querySelector('.pos-grid');
+    const zoomEl   = document.getElementById('zoom');
+    const zoomVal  = document.getElementById('zoom-val');
+
+    // Live preview elements (a miniature of the real overlay).
+    const preview      = document.getElementById('ls-preview');
+    const previewClock = document.getElementById('ls-preview-clock');
+    const previewText  = document.getElementById('ls-preview-text');
 
     // Single-key state. Debounced writes coalesce rapid typing into one PUT.
     let state = {
       text:      textEl.value,
       position:  grid.querySelector('[data-selected="true"]')?.dataset.position ?? 'center',
       showClock: clockEl.checked,
+      zoom:      parseFloat(zoomEl.value) || 1,
     };
+
+    // Mirror `state` into the preview so the user sees exactly what will show.
+    function syncPreview() {
+      preview.dataset.position = state.position;
+      preview.style.setProperty('--ls-zoom', String(state.zoom));
+      previewText.textContent = state.text || 'LOCKED';
+      previewClock.dataset.show = String(state.showClock);
+    }
+    // Keep the preview clock ticking like the real one.
+    function tickPreviewClock() {
+      try { previewClock.textContent = new Date().toLocaleTimeString(); }
+      catch { previewClock.textContent = '--:--:--'; }
+    }
+    tickPreviewClock();
+    setInterval(tickPreviewClock, 1000);
+    syncPreview();
 
     let putTimer = null;
     function schedulePut() {
@@ -182,10 +315,19 @@ const POSITIONS: { id: LockPosition; label: string }[] = [
 
     textEl.addEventListener('input', () => {
       state = { ...state, text: textEl.value };
+      syncPreview();
       schedulePut();
     });
     clockEl.addEventListener('change', () => {
       state = { ...state, showClock: clockEl.checked };
+      syncPreview();
+      schedulePut();
+    });
+    zoomEl.addEventListener('input', () => {
+      const z = Math.min(3, Math.max(0.2, parseFloat(zoomEl.value) || 1));
+      state = { ...state, zoom: z };
+      zoomVal.textContent = z.toFixed(2) + '×';
+      syncPreview();
       schedulePut();
     });
     grid.addEventListener('click', (ev) => {
@@ -197,29 +339,55 @@ const POSITIONS: { id: LockPosition; label: string }[] = [
         c.setAttribute('aria-checked', on ? 'true' : 'false');
       });
       state = { ...state, position: btn.dataset.position };
+      syncPreview();
       schedulePut();
     });
 
-    // "Test" — postMessage to the parent shell which forwards to the
-    // LockScreenOverlay's activate handler. The shell saves first, so the
-    // overlay sees the current draft on next render via `kv:changed`.
+    // "Test" — postMessage the shell, which arms the LockScreenOverlay. We PUT
+    // the draft first so the overlay re-fetches and shows the current settings.
+    // Post to BOTH window.parent and window.top: the overlay listens on the
+    // shell's top window, and depending on how this app is embedded (extra
+    // WebView/host frame nesting) the shell may be `parent`, `top`, or both.
     document.getElementById('test-btn').addEventListener('click', async () => {
       clearTimeout(putTimer);
+
+      // THE RELIABLE TRIGGER: one PUT to the config key we hold write
+      // permission for, carrying the draft config PLUS a `lockAt` timestamp.
+      // The shell's overlay polls this key over plain HTTP and locks when
+      // `lockAt` increases — no cross-frame messaging (unreliable in the
+      // Android WebView), no extra KV key (a different key would be 403'd
+      // by the per-topic permission gate).
+      let signalled = false;
+      let failText  = '';
       try {
-        await fetch('/api/kv/os/lockscreen', {
+        const r = await fetch('/api/kv/os/lockscreen', {
           method:  'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ value: state }),
+          body:    JSON.stringify({ value: { ...state, lockAt: Date.now() } }),
         });
-      } catch { /* test still useful with stale config */ }
-      window.parent?.postMessage({ type: 'aura.lockscreen.activate' }, '*');
+        signalled = r.ok;
+        if (!r.ok) failText = 'HTTP ' + r.status;
+      } catch (err) {
+        failText = err && err.message ? err.message : 'network error';
+      }
+
+      // Fast path: also postMessage (instant where messaging works).
+      const targets = new Set([window.parent, window.top].filter((w) => w && w !== window));
+      targets.forEach((w) => {
+        try { w.postMessage({ type: 'aura.lockscreen.activate' }, '*'); } catch { /* frame gone */ }
+        try { w.postMessage({ type: 'aura.system.lockScreen' }, '*'); } catch { /* frame gone */ }
+      });
+
+      statusEl.innerHTML = signalled
+        ? `🔒 LOCK SIGNAL SENT · ${new Date().toLocaleTimeString()} — overlay appears within ~1s`
+        : `<b style="color: var(--aura-color-danger);">LOCK SIGNAL FAILED — ${failText}</b>`;
     });
   </script>
 
   <script>
     import { OsClient } from '@aura/app-sdk';
     new OsClient().nav.installGridNav({
-      selector: '#text, .pos-cell, #show-clock, #test-btn',
+      selector: '#text, .pos-cell, #show-clock, #zoom, #test-btn',
     });
   </script>
 </body>

@@ -20,6 +20,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
   && rm -rf /var/lib/apt/lists/*
 
+# Zot — OCI Distribution registry, baked in so com.aura.registry doesn't
+# pay a first-boot download tax (decision in plan: bake-in over fetch).
+# Static linux-amd64 binary from the GitHub releases. Bump ZOT_VERSION to
+# pull in upstream fixes — no source changes needed; just rebuild aura-base.
+ARG ZOT_VERSION=v2.1.7
+RUN curl -fsSL "https://github.com/project-zot/zot/releases/download/${ZOT_VERSION}/zot-linux-amd64-minimal" -o /usr/local/bin/zot \
+ && chmod +x /usr/local/bin/zot \
+ && zot --version
+
 # ─── Stage: base-rootfs ───────────────────────────────────────────────────────
 # Debian-slim filesystem with the tools an app sandbox needs, exported as a
 # raw rootfs that PRoot can pivot into. Using debian-slim (not Alpine) keeps
@@ -86,6 +95,17 @@ RUN ARCH=$(uname -m) \
  && rm -rf /tmp/docker.tgz /tmp/docker \
  && docker --version
 
+# oras — OCI Registry Access tool. Nexus uses it to push/pull both apps
+# (oras push <ref> bundle.tar.gz) and @aura/* SDK packages. Static binary
+# from the GitHub releases. ORAS_VERSION is build-arg-bumpable; the artifact
+# format is OCI Distribution v1.1 which has been stable since 2023.
+ARG ORAS_VERSION=1.2.0
+RUN curl -fsSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" -o /tmp/oras.tgz \
+ && tar -xzf /tmp/oras.tgz -C /tmp oras \
+ && install -m 0755 /tmp/oras /usr/local/bin/oras \
+ && rm -f /tmp/oras.tgz /tmp/oras \
+ && oras version
+
 # Replace Debian's proot (5.3.x with EFAULT on Rust-compiled native modules
 # like Tailwind 4 Oxide / jiti) with a fresh build from upstream proot-me.
 # /usr/local/bin precedes /usr/bin in PATH, so this version wins everywhere
@@ -117,7 +137,8 @@ RUN npm install -g @anthropic-ai/claude-code 2>/dev/null || true
 RUN cp $(which git) /os/toolchain/bin/git && \
     cp $(which curl) /os/toolchain/bin/curl && \
     cp $(which bash) /os/toolchain/bin/bash && \
-    cp $(which docker) /os/toolchain/bin/docker
+    cp $(which docker) /os/toolchain/bin/docker && \
+    cp $(which oras) /os/toolchain/bin/oras
 
 # Debian-slim base rootfs for PRoot apps (shared, glibc-compatible)
 COPY --from=base-rootfs / /os/base-rootfs

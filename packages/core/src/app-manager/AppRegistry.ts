@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import chokidar from 'chokidar';
 import { AppManifestSchema, type AppManifest } from '../types/manifest.js';
@@ -15,6 +15,16 @@ export class AppRegistry {
   }
 
   async init(): Promise<void> {
+    // Ensure every scope's appsDir exists BEFORE scanning/watching. The
+    // global/user scope dirs (under /data/scopes/…) don't exist on a fresh
+    // boot; without this, chokidar tries to watch a missing glob-parent, hits
+    // ENOENT, and silently establishes no watch (never re-arming when the dir
+    // later appears). Creating them up front makes both the boot scan and the
+    // watcher reliable.
+    for (const scope of this.scopes) {
+      try { mkdirSync(scope.appsDir, { recursive: true }); } catch { /* best-effort */ }
+    }
+
     // Initial scan of all scope dirs in priority order (lower first so higher
     // priority overwrites on conflict when calling mergeForApp).
     for (const scope of this.scopes) {

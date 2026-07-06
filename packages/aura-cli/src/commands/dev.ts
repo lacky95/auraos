@@ -46,6 +46,8 @@ function renderTemplate(
 /** Three "shape" presets the wizard offers. Maps to manifest field combos. */
 type ComponentShape = 'activity' | 'activity-bg' | 'service';
 
+type ScopeId = 'system' | 'global' | 'user';
+
 interface ScaffoldConfig {
   appId:        string;
   name:         string;
@@ -55,6 +57,13 @@ interface ScaffoldConfig {
   instanceMode: 'single' | 'multi';
   sandbox:      'proot' | 'container';
   tools:        string[];
+  /** Where the app lives on disk. Default `user`. Determines:
+   *    • destination directory (scope.appsDir/<id>)
+   *    • whether the template package.json uses workspace:* (system) or
+   *      versioned `@aura/*` deps (user/global)
+   *    • whether a `.npmrc` pointing at the local registry is emitted
+   *    • whether pnpm install runs after scaffold (skipped for non-system) */
+  scope:        ScopeId;
 }
 
 /**
@@ -94,7 +103,16 @@ function manifestFromConfig(cfg: ScaffoldConfig): Record<string, unknown> {
   // isolation + survives shell restarts). PRoot is the schema default; omit it.
   if (cfg.sandbox === 'container') m['sandbox'] = 'container';
 
-  if (cfg.tools.length > 0) m['tools'] = cfg.tools;
+  // User/global-scope apps NEED `aura` + `oras` available at runtime so the
+  // synth entrypoint's `aura sdk install` call can resolve @aura/* from the
+  // local OCI registry. System-scope apps don't (their @aura/* is already
+  // in /workspace/node_modules via pnpm workspace symlinks). Merge into
+  // whatever tools the user requested explicitly; dedupe.
+  const baseTools = cfg.tools;
+  const merged = (cfg.scope === 'system')
+    ? baseTools
+    : [...new Set([...baseTools, 'bash', 'node', 'aura', 'oras'])];
+  if (merged.length > 0) m['tools'] = merged;
 
   return m;
 }
@@ -280,6 +298,10 @@ async function runWizard(seed: { appId?: string; force?: boolean }): Promise<Sca
       }
       i++;
     }
+    // Wizard always defaults to user-scope. Devs who want system-scope
+    // (monorepo dev workflow, workspace:* deps) opt in non-interactively
+    // via `aura dev new <id> --non-interactive --scope system`.
+    draft.scope ??= 'user';
     return draft as ScaffoldConfig;
   } catch (err) {
     if (err instanceof PromptCancelled) return null;
@@ -444,6 +466,10 @@ interface PayloadFile {
  */
 function buildScaffoldFiles(cfg: ScaffoldConfig): PayloadFile[] {
   if (!existsSync(TEMPLATE_DIR)) fail(`Scaffold template missing: ${TEMPLATE_DIR}`);
+  // Pull the live @aura/app-sdk version from the monorepo so user/global
+  // scopes pin to whatever's published in the local OCI registry. Used
+  // when post-processing package.json below.
+  const sdkVersion = readSdkVersion();
   const vars: Record<string, string> = {
     APP_ID:        cfg.appId,
     APP_NAME:      cfg.name,
@@ -489,7 +515,58 @@ function buildScaffoldFiles(cfg: ScaffoldConfig): PayloadFile[] {
     relPath: 'app.manifest.json',
     content: JSON.stringify(manifestFromConfig(cfg), null, 2) + '\n',
   });
+  // Post-process package.json: insert the @aura/app-sdk dep in the right
+  // shape per scope. The template ships ONLY astro + @astrojs/node so the
+  // shape difference lives in code (not three template variants).
+  //   • system → "@aura/app-sdk": "workspace:*" in `dependencies`, picked
+  //     up by the workspace pnpm install. npm/pnpm both understand
+  //     workspace:* in the monorepo.
+  //   • user/global → moved to a custom `auraDependencies` field that
+  //     npm/pnpm silently ignore. `aura sdk install` reads it (run from
+  //     the synth entrypoint on first boot) and pulls from the local OCI
+  //     registry. This split lets `npm install` succeed for astro/normal
+  //     deps without choking on the @aura/* spec that doesn't resolve to
+  //     a real npm registry.
+  const pkgIdx = files.findIndex((f) => f.relPath === 'package.json');
+  if (pkgIdx >= 0) {
+    const pkg = JSON.parse(files[pkgIdx]!.content) as Record<string, unknown>;
+    if (cfg.scope === 'system') {
+      pkg['dependencies'] = { '@aura/app-sdk': 'workspace:*', ...(pkg['dependencies'] as object) };
+    } else {
+      pkg['auraDependencies'] = { '@aura/app-sdk': `^${sdkVersion}` };
+    }
+    files[pkgIdx] = { ...files[pkgIdx]!, content: JSON.stringify(pkg, null, 2) + '\n' };
+  }
+  // User/global-scope apps live outside the pnpm workspace. Drop a `.npmrc`
+  // documenting where the local OCI registry lives — primarily for IDE/
+  // Tooling hints and the future day Zot grows native npm-protocol support.
+  // Actual install for these scopes happens via `aura sdk install` invoked
+  // from the sandbox's synth entrypoint (reads auraDependencies above).
+  if (cfg.scope !== 'system') {
+    files.push({
+      relPath: '.npmrc',
+      content:
+        '# AuraOS user-scope apps: @aura/* packages live in `auraDependencies`,\n' +
+        '# not `dependencies` (npm/pnpm ignore it; `aura sdk install` reads it).\n' +
+        '# The registry below is documentation; resolution happens via OCI.\n' +
+        '@aura:registry=http://aura-com.aura.registry:4090/\n',
+    });
+  }
   return files;
+}
+
+/** Read the published @aura/app-sdk version from the monorepo. Used to
+ *  pin user/global-scope apps' deps to whatever the local registry has. */
+function readSdkVersion(): string {
+  try {
+    // APPS_DIR points at AURA_APPS_DIR (= /workspace/apps inside the shell,
+    // or .../apps on the host). packages/ is its sibling.
+    const root = resolve(APPS_DIR, '..');
+    const pkg = JSON.parse(readFileSync(join(root, 'packages/app-sdk/package.json'), 'utf-8'));
+    return typeof pkg.version === 'string' ? pkg.version : '0.0.1';
+  } catch {
+    return '0.0.1';
+  }
 }
 
 /** Local-write fallback used when the shell isn't reachable. */
@@ -523,7 +600,7 @@ async function scaffoldFromConfig(cfg: ScaffoldConfig): Promise<void> {
   try {
     const res = await api.post<{ ok: boolean; dest?: string; error?: string; message?: string; installed?: boolean; installError?: string }>(
       '/api/admin/scaffold',
-      { appId: cfg.appId, force: true, files },
+      { appId: cfg.appId, force: true, files, scope: cfg.scope },
     );
     if (!res?.ok) fail(`scaffold failed via shell: ${res?.error ?? 'unknown'} ${res?.message ?? ''}`.trim());
     dest    = res.dest!;
@@ -587,6 +664,7 @@ export function registerDev(program: Command): void {
     .option('--instance-mode <mode>',  'single | multi', 'single')
     .option('--sandbox <kind>',        'proot | container', 'proot')
     .option('--tools <list>',          'Comma-separated capabilities to declare', '')
+    .option('--scope <id>',            'system | global | user — where to install (default: user)', 'user')
     .option('--force',                 'Overwrite if target directory exists')
     .option('--non-interactive',       'Never prompt; require flags + appId')
     .description('Scaffold a new AuraOS app. Interactive wizard if no appId is given (or pass flags to script it).')
@@ -595,7 +673,8 @@ export function registerDev(program: Command): void {
       opts: {
         name?: string; icon?: string; description?: string;
         shape?: ComponentShape; instanceMode: 'single' | 'multi';
-        sandbox: 'proot' | 'container'; tools: string; force?: boolean;
+        sandbox: 'proot' | 'container'; tools: string; scope: ScopeId;
+        force?: boolean;
         nonInteractive?: boolean;
       },
     ) => {
@@ -631,6 +710,7 @@ export function registerDev(program: Command): void {
       enumGuard('--shape',          opts.shape,        ['activity', 'activity-bg', 'service'] as const);
       enumGuard('--instance-mode',  opts.instanceMode, ['single', 'multi'] as const);
       enumGuard('--sandbox',        opts.sandbox,      ['proot', 'container'] as const);
+      enumGuard('--scope',          opts.scope,        ['system', 'global', 'user'] as const);
 
       const cfg: ScaffoldConfig = {
         appId,
@@ -641,6 +721,7 @@ export function registerDev(program: Command): void {
         instanceMode: opts.instanceMode,
         sandbox:      opts.sandbox,
         tools:        opts.tools.split(',').map((t) => t.trim()).filter(Boolean),
+        scope:        opts.scope,
       };
       await scaffoldFromConfig(cfg);
     });

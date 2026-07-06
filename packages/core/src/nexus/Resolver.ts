@@ -15,20 +15,41 @@
  * The index path goes through IndexClient.lookup() and picks the
  * `sources.git` (v1 default) or `sources.oci` source from the entry.
  */
-import type { IndexClient } from './IndexClient.js';
+import type { CatalogAggregator } from './CatalogAggregator.js';
 import { resolveGitCommit } from './Fetchers/GitFetcher.js';
 import { resolveOciDigest } from './Fetchers/OciFetcher.js';
-import type { ResolvedRef, NexusSource } from './types.js';
+import type { RegistryConfig } from './RegistryConfig.js';
+import { pickMirror, urlForHost } from './RegistryConfig.js';
+import type { ResolvedRef } from './types.js';
 
 export interface ResolverOpts {
-  index: IndexClient;
+  /** Aggregated catalog used to resolve bare reverse-domain ids. */
+  catalog: CatalogAggregator;
   /** v1 picks git over oci when an index entry has both. Override to 'oci' to
    *  prefer OCI once it's fully wired. */
   preferredSource?: 'git' | 'oci';
+  /** Optional multi-registry config. Used to (a) probe a `mirror: true` entry
+   *  first for OCI digests and (b) recover the scheme of a configured host so
+   *  plain-HTTP registries get `--plain-http`. */
+  registryConfig?: RegistryConfig;
 }
 
 export class Resolver {
   constructor(private opts: ResolverOpts) {}
+
+  /** Swap in a new registry config (called when the sources config changes). */
+  setRegistryConfig(cfg: RegistryConfig): void {
+    this.opts.registryConfig = cfg;
+  }
+
+  /** Recover a configured registry URL (with scheme) for an OCI host, so
+   *  digest resolution can add `--plain-http` for the local zot. */
+  private urlForOciHost(registry: string): string | undefined {
+    const cfg = this.opts.registryConfig;
+    if (!cfg) return undefined;
+    const host = registry.split('/')[0] ?? registry;
+    return urlForHost(cfg, host) ?? undefined;
+  }
 
   async resolve(rawRef: string): Promise<ResolvedRef> {
     const ref = rawRef.trim();
@@ -94,9 +115,22 @@ export class Resolver {
       registry = refBody.slice(0, colonIdx);
       tag = refBody.slice(colonIdx + 1);
     }
-    const digest = tag.startsWith('sha256:')
-      ? tag
-      : (resolveOciDigest({ registry, tag }) ?? '');
+    // Multi-registry: when a mirror is configured, try resolving the digest
+    // against it first. The mirror is expected to host the same repo path
+    // (e.g. `user/foo`) at a different host (e.g. local zot). Falls through
+    // to the canonical registry on miss so non-mirrored refs still work.
+    const mirror = this.opts.registryConfig ? pickMirror(this.opts.registryConfig) : null;
+    const hostUrl = this.urlForOciHost(registry);
+    let digest = '';
+    if (tag.startsWith('sha256:')) {
+      digest = tag;
+    } else if (mirror) {
+      digest = resolveOciDigest({ registry, tag }, mirror.url)
+            ?? resolveOciDigest({ registry, tag }, hostUrl)
+            ?? '';
+    } else {
+      digest = resolveOciDigest({ registry, tag }, hostUrl) ?? '';
+    }
     return {
       source:  'oci',
       rawRef,
@@ -108,20 +142,27 @@ export class Resolver {
 
   private async resolveIndex(bareRef: string, rawRef: string): Promise<ResolvedRef> {
     const [id, channel = 'stable'] = bareRef.split('@');
-    const entry = await this.opts.index.lookup(id!);
+    const entry = await this.opts.catalog.lookup(id!);
     if (!entry) {
-      throw new Error(`[NexusResolver] '${id}' not found in the curated index`);
+      throw new Error(`[NexusResolver] '${id}' not found in any registered source`);
     }
-    const prefer = this.opts.preferredSource ?? 'git';
     const channelInfo = entry.channels?.[channel];
 
-    // Prefer the requested source; fall back to the other if the preferred
-    // is missing.
+    // Prefer the entry's NATIVE distribution: an OCI-sourced catalog entry
+    // only carries `sources.oci`, a git-app/git-index entry carries
+    // `sources.git`. When an entry declares both (a curated index can), honour
+    // `preferredSource` (default git). The loop picks the first available.
+    const nativelyOci = !!entry.sources.oci && !entry.sources.git;
+    const prefer = nativelyOci ? 'oci' : (this.opts.preferredSource ?? 'git');
     const order: Array<'git' | 'oci'> = prefer === 'git' ? ['git', 'oci'] : ['oci', 'git'];
 
     for (const src of order) {
       if (src === 'git' && entry.sources.git) {
-        const url = `https://${entry.sources.git.ref}`;
+        // Catalog entries store the git ref host-relative (`github.com/u/r`);
+        // full URLs already carry a scheme.
+        const gitRef = entry.sources.git.ref;
+        const url = /^https?:\/\//.test(gitRef) || gitRef.startsWith('git@')
+          ? gitRef : `https://${gitRef}`;
         const ref = channelInfo?.['git-tag']
                  ?? entry.sources.git['default-branch']
                  ?? undefined;
@@ -138,18 +179,21 @@ export class Resolver {
       if (src === 'oci' && entry.sources.oci) {
         const tag = channelInfo?.['oci-tag'] ?? 'latest';
         const registry = entry.sources.oci.ref;
-        const digest = resolveOciDigest({ registry, tag }) ?? '';
+        const hostUrl = this.urlForOciHost(registry);
+        const digest = resolveOciDigest({ registry, tag }, hostUrl) ?? '';
         return {
           source:  'index',
           rawRef,
-          address: `${registry}:${tag}`,
+          // `oci://` prefix flags the fetch dispatcher to pull via oras (a bare
+          // `host:port/repo:tag` string is ambiguous vs. a git URL).
+          address: `oci://${registry}:${tag}`,
           digest,
           channel,
           manifestPreview: null,
         };
       }
     }
-    throw new Error(`[NexusResolver] index entry for '${id}' has no usable source`);
+    throw new Error(`[NexusResolver] catalog entry for '${id}' has no usable source`);
   }
 }
 

@@ -30,7 +30,15 @@
 
 @import "tailwindcss";
 
-@source "../components/**/*.{tsx,ts}";
+/* Glob includes `js` on purpose. This CSS is shipped via the package
+ * `exports` map as `dist/styles/scificn-bridge.css`, so consumers resolve
+ * it from `dist/` — where `../components` holds the COMPILED output
+ * (`*.js` carry the className strings; `*.d.ts` do not). Matching only
+ * `{tsx,ts}` would scan just the class-less `.d.ts` files and Tailwind
+ * would silently drop every utility used inside these components
+ * (e.g. the Dialog overlay's `inset-0` and centering transforms). The
+ * `tsx`/`ts` entries keep it working when consumed straight from `src/`. */
+@source "../components/**/*.{tsx,ts,js}";
 
 /* ────────────────────────────────────────────────────────────────────────
  * scificn token aliases (referenced via var() inside arbitrary utilities)

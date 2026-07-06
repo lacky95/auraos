@@ -15,6 +15,7 @@ const DEFAULT_PROXY_CONFIG: ProxyConfig = {
   injectConsoleRelay:   true,
   injectKeyForwarder:   true,
   injectIdentityScript: true,
+  exposeAllPaths:       false,
 };
 
 /**
@@ -77,7 +78,7 @@ export const ALL: APIRoute = async ({ params, request }) => {
   // a near pass-through default (no <base>, no attribute rewriting); Astro
   // apps keep the full inject pipeline. Each flag is overridable per manifest.
   const cfg: ProxyConfig = manifest ? resolveProxyConfig(manifest) : DEFAULT_PROXY_CONFIG;
-  if (manifest?.componentType === 'service' && !path.startsWith('api/') && !path.startsWith('_aura_')) {
+  if (manifest?.componentType === 'service' && !cfg.exposeAllPaths && !path.startsWith('api/') && !path.startsWith('_aura_')) {
     const payload = {
       error: 'service-has-no-ui',
       message: `${instance.appId} is a service (componentType='service'). Services are headless and cannot be rendered. Use an intent (or a separate activity-component app) to show UI.`,
@@ -110,16 +111,36 @@ export const ALL: APIRoute = async ({ params, request }) => {
   if (path === '@vite/client' || path === '@vite/env' || path.startsWith('@vite/')) {
     const stub = `
 // AuraOS proxy stub for /@vite/* — the real Vite HMR client can't reach the
-// upstream's WS port from inside the iframe. All exports are no-ops; the
-// page works fine without HMR, full iframe reload picks up code changes.
+// upstream's WS port from inside the iframe. HMR-side exports are no-ops
+// (page works fine without HMR; full iframe reload picks up code changes),
+// BUT updateStyle/removeStyle actually mount/unmount <style> tags: when
+// an app does \`import 'pkg/foo.css'\`, Vite compiles the CSS-through-a-JS
+// module that calls updateStyle(id, css) → without a real impl, npm-
+// installed CSS (e.g. xterm.css) never enters the DOM and the widget
+// renders unstyled. The impl below mirrors Vite's own client.
+const __aura_styles = new Map();
+export function updateStyle(id, content) {
+  if (typeof document === 'undefined') return;
+  let el = __aura_styles.get(id);
+  if (!el) {
+    el = document.createElement('style');
+    el.setAttribute('type', 'text/css');
+    el.setAttribute('data-vite-dev-id', id);
+    document.head.appendChild(el);
+    __aura_styles.set(id, el);
+  }
+  el.textContent = content;
+}
+export function removeStyle(id) {
+  const el = __aura_styles.get(id);
+  if (el) { el.remove(); __aura_styles.delete(id); }
+}
 export function createHotContext() {
   return {
     accept(){}, acceptExports(){}, acceptDeps(){}, dispose(){}, prune(){},
     decline(){}, invalidate(){}, on(){}, off(){}, send(){}, data:{},
   };
 }
-export function updateStyle(){}
-export function removeStyle(){}
 export function injectQuery(url){ return url; }
 export const ErrorOverlay = class extends (typeof HTMLElement !== 'undefined' ? HTMLElement : Object) {};
 export const overlay = false;
@@ -510,6 +531,10 @@ window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod
       const outHeaders = new Headers(upstream.headers);
       outHeaders.delete('content-encoding');
       outHeaders.delete('content-length');
+      // App HTML must never be cached: WebView hosts cache heuristically when
+      // no Cache-Control is present, leaving devices on stale app pages even
+      // after a reload (scripts keep loading fine, so it looks half-updated).
+      outHeaders.set('cache-control', 'no-store');
       return new Response(rewritten, { status: upstream.status, headers: outHeaders });
     }
 

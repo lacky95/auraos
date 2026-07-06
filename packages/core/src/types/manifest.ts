@@ -107,6 +107,17 @@ export const AppManifestSchema = z.object({
     injectConsoleRelay:   z.boolean().optional(),
     injectKeyForwarder:   z.boolean().optional(),
     injectIdentityScript: z.boolean().optional(),
+    /**
+     * Service apps (componentType='service') are normally restricted to
+     * /api/* and /_aura_* — the proxy 403s every other path with
+     * "service-has-no-ui" so a stray iframe src= can't accidentally render
+     * a headless backend as a window. Set to true when a service legitimately
+     * serves a non-/api/ protocol surface that external tools speak directly
+     * — e.g. com.aura.registry serves /v2/ for OCI Distribution clients
+     * (`oras`, `docker push`, Aura's own Nexus). The service still has no UI;
+     * this just opens the protocol path through the proxy.
+     */
+    exposeAllPaths:       z.boolean().optional(),
   }).optional(),
   permissions: z.array(PermissionSchema).default([]),
   tools: z.array(z.string()).default([]),
@@ -144,6 +155,19 @@ export const AppManifestSchema = z.object({
    * clicks anything".
    */
   autoStart: z.boolean().default(false),
+  /**
+   * Mark an app as critical OS infrastructure (e.g. the local OCI registry).
+   * Critical apps cannot be disabled via Settings / `aura app disable` —
+   * AppManager.setEnabled(id, false) throws — because disabling them would
+   * break dependent functionality (Nexus install/publish, in the registry
+   * case). They're still subject to normal lifecycle / stop / restart;
+   * `critical: true` only guards the explicit user-facing disable path.
+   *
+   * Default false. Apps the user installs themselves should never set this;
+   * it's reserved for OS-supplied apps that other parts of the system
+   * implicitly depend on.
+   */
+  critical: z.boolean().default(false),
   /**
    * Sandbox this app inside PRoot. Default true. Set false ONLY for apps
    * that use native modules whose syscalls PRoot's ptrace-based emulation
@@ -282,6 +306,28 @@ export const AppManifestSchema = z.object({
     ]),
   }).optional(),
   /**
+   * Optional storefront metadata. Surfaces in the Nexus app store's browse +
+   * detail views. On OCI publish these fields are embedded into the artifact's
+   * manifest annotations (`app.aura.*` + OCI standard keys) so the store can
+   * read them back from `oras manifest fetch` without pulling the bundle.
+   * None are runtime fields — the OS ignores them at spawn time.
+   *   • `publisher`       — author/vendor label ("Aura Labs").
+   *   • `homepage`        — project/marketing URL.
+   *   • `license`         — SPDX id or short label ("MIT", "Proprietary").
+   *   • `tags`            — free-form search keywords.
+   *   • `longDescription` — multi-paragraph body for the detail page. Plain text.
+   *   • `screenshots`     — ABSOLUTE https URLs only (v1 does not host images;
+   *                          point at git-raw URLs or a CDN).
+   */
+  store: z.object({
+    publisher:       z.string().max(64).optional(),
+    homepage:        z.string().url().optional(),
+    license:         z.string().max(32).optional(),
+    tags:            z.array(z.string().max(24)).max(16).default([]),
+    longDescription: z.string().max(4096).optional(),
+    screenshots:     z.array(z.string().url()).max(8).default([]),
+  }).optional(),
+  /**
    * Cross-app dependencies. Declared by author, enforced at install time
    * (the Nexus installer warns / refuses if a required dep is missing).
    * v1: the installer warns + lists missing deps; v2 auto-installs them
@@ -312,6 +358,7 @@ export interface ProxyConfig {
   injectConsoleRelay:   boolean;
   injectKeyForwarder:   boolean;
   injectIdentityScript: boolean;
+  exposeAllPaths:       boolean;
 }
 
 /**
@@ -334,6 +381,7 @@ export function resolveProxyConfig(manifest: AppManifest): ProxyConfig {
     injectConsoleRelay:   p.injectConsoleRelay   ?? true,
     injectKeyForwarder:   p.injectKeyForwarder   ?? true,
     injectIdentityScript: p.injectIdentityScript ?? true,
+    exposeAllPaths:       p.exposeAllPaths       ?? false,
   };
 }
 

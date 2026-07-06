@@ -354,7 +354,7 @@ export async function promptMultiSelect<T>(
     linesWritten = (text.match(/\n/g) ?? []).length;
   };
 
-  return new Promise<MultiSelectResult<T>>((resolve, reject) => {
+  return new Promise<MultiSelectResult<T> | BackSignal>((resolve, reject) => {
     stdin.setRawMode(true);
     stdin.resume();
     stdin.setEncoding('utf8');

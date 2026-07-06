@@ -2,6 +2,7 @@ import type { APIRoute } from 'astro';
 import { mkdirSync, writeFileSync, chmodSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, normalize, dirname, resolve } from 'node:path';
+import { getAppManager } from '@aura/core';
 
 /**
  * Server-side app scaffolding.
@@ -20,7 +21,28 @@ import { join, normalize, dirname, resolve } from 'node:path';
  * needs apt/gnupg + write access to /os/toolchain).
  */
 
-const APPS_DIR = process.env['AURA_APPS_DIR'] ?? '/workspace/apps';
+/** Fallback when no scope was sent (legacy callers). System scope keeps the
+ *  pre-multi-scope behaviour: writes into the monorepo's apps/ + runs
+ *  workspace pnpm install. */
+const SYSTEM_APPS_DIR = process.env['AURA_APPS_DIR'] ?? '/workspace/apps';
+
+type ScopeId = 'system' | 'global' | 'user';
+const ALLOWED_SCOPES: readonly ScopeId[] = ['system', 'global', 'user'];
+
+/** Look up the scope's host-side apps directory via AppManager's ScopeRegistry.
+ *  Returns null on unknown scope. */
+function resolveScopeAppsDir(scope: ScopeId): string | null {
+  try {
+    const mgr = getAppManager();
+    const def = mgr.getScopeDefinitions().find((s) => s.id === scope);
+    return def?.appsDir ?? null;
+  } catch {
+    // AppManager not yet initialised — fall back to system path for the
+    // common "scaffolding right after first boot" case.
+    return scope === 'system' ? SYSTEM_APPS_DIR : null;
+  }
+}
+
 // Enforce reverse-domain notation server-side too — never trust the client's
 // validation alone. Same regex AppManifestSchema uses.
 const APP_ID_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
@@ -40,6 +62,10 @@ interface ScaffoldRequest {
   force?: boolean;
   /** Rendered template payload (placeholders already substituted client-side). */
   files: FileEntry[];
+  /** Where to install. Default 'user' (the most common case for `aura dev new`).
+   *  'system' keeps the legacy behaviour — apps go into the monorepo's
+   *  apps/ dir + workspace pnpm install runs. */
+  scope?: ScopeId;
 }
 
 export const POST: APIRoute = async ({ request }) => {
@@ -48,6 +74,7 @@ export const POST: APIRoute = async ({ request }) => {
   catch { return json({ error: 'invalid-json' }, 400); }
 
   const { appId, force, files } = body;
+  const scope: ScopeId = (body.scope && ALLOWED_SCOPES.includes(body.scope)) ? body.scope : 'user';
   if (!appId || !APP_ID_RE.test(appId)) {
     return json({ error: 'invalid-app-id', message: `appId must match reverse-domain notation (got ${JSON.stringify(appId)}).` }, 400);
   }
@@ -62,7 +89,17 @@ export const POST: APIRoute = async ({ request }) => {
     return json({ error: 'payload-too-large', bytes: totalBytes }, 413);
   }
 
-  const dest = join(APPS_DIR, appId);
+  // Scope-aware destination: system → workspace's apps/, user/global →
+  // /data/scopes/{users/default,global}/apps/<id>. The shell's ScopeRegistry
+  // already creates these dirs on first access (see ScopeRegistry.ensure()).
+  const appsDir = resolveScopeAppsDir(scope);
+  if (!appsDir) {
+    return json({ error: 'unknown-scope', message: `Unknown scope '${scope}'. Expected one of: ${ALLOWED_SCOPES.join(', ')}.` }, 400);
+  }
+  // Make sure the scope's apps dir exists — for non-system scopes on first
+  // boot it may not have been created yet.
+  try { mkdirSync(appsDir, { recursive: true }); } catch { /* best-effort */ }
+  const dest = join(appsDir, appId);
   if (existsSync(dest) && !force) {
     return json({ error: 'exists', message: `${dest} already exists. Pass force=true to overwrite.` }, 409);
   }
@@ -105,22 +142,31 @@ export const POST: APIRoute = async ({ request }) => {
   // workspace root doesn't hoist astro since each app declares its own),
   // and the container dies before the health check.
   //
-  // `pnpm-workspace.yaml` already lists `apps/*` so pnpm picks the new
-  // member up automatically; we just have to run the install. The
-  // workspace root is the parent of APPS_DIR.
-  const workspaceRoot = resolve(APPS_DIR, '..');
-  const install = spawnSync('pnpm', ['install', '--prefer-offline'], {
-    cwd: workspaceRoot,
-    encoding: 'utf-8',
-    timeout: 120_000,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const installOk = install.status === 0;
-  if (!installOk) {
-    // Don't fail the whole scaffold: the files are on disk and the user
-    // can `pnpm install` manually. Surface the diagnostic so the CLI can
-    // surface it too.
-    console.warn(`[scaffold] pnpm install after ${appId} failed:`, install.stderr?.slice(0, 800) || install.error?.message);
+  // Scope semantics:
+  //   • system → run `pnpm install` at workspace root. `pnpm-workspace.yaml`
+  //     globs `apps/*` so the new member auto-registers.
+  //   • user/global → DON'T run workspace pnpm install. These apps live
+  //     outside the workspace globs; their `@aura/*` deps resolve at app-
+  //     start time via `aura sdk install` (synth entrypoint hooks it in).
+  //     Their other deps install on first container spawn via the existing
+  //     `npm install --prefer-offline` block in SYNTHESISED_ENTRYPOINT.
+  let installOk = true;
+  let installError: string | undefined;
+  if (scope === 'system') {
+    const workspaceRoot = resolve(appsDir, '..');
+    const install = spawnSync('pnpm', ['install', '--prefer-offline'], {
+      cwd: workspaceRoot,
+      encoding: 'utf-8',
+      timeout: 120_000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    installOk = install.status === 0;
+    if (!installOk) {
+      installError = (install.stderr ?? install.error?.message ?? '').slice(0, 400);
+      console.warn(`[scaffold] pnpm install after ${appId} failed:`, installError);
+    }
+  } else {
+    console.log(`[scaffold] ${appId} scoped to '${scope}'; skipping workspace pnpm install (deps resolve at app-start time).`);
   }
 
   // AppRegistry's chokidar watcher (packages/core/src/app-manager/AppRegistry.ts)
@@ -128,9 +174,9 @@ export const POST: APIRoute = async ({ request }) => {
   // needed. The chokidar `add` event fires within ~100 ms and triggers
   // `loadManifestFile`, which emits `app:installed` on the OsEventBus.
   return json({
-    ok: true, appId, dest, fileCount: files.length,
+    ok: true, appId, scope, dest, fileCount: files.length,
     installed: installOk,
-    ...(installOk ? {} : { installError: (install.stderr ?? install.error?.message ?? '').slice(0, 400) }),
+    ...(installError ? { installError } : {}),
   });
 };
 

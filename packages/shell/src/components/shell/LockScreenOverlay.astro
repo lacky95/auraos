@@ -18,19 +18,30 @@ interface LockScreenConfig {
   text:      string;
   position:  LockPosition;
   showClock: boolean;
+  zoom:      number;
 }
 
 const DEFAULT_CONFIG: LockScreenConfig = {
   text:      'LOCKED',
   position:  'center',
   showClock: true,
+  zoom:      1,
 };
+
+// Content scale bounds — must match the Settings slider (min/max/step).
+const ZOOM_MIN = 0.2;
+const ZOOM_MAX = 3;
 
 const VALID_POSITIONS: ReadonlySet<LockPosition> = new Set([
   'top-left', 'top-center', 'top-right',
   'middle-left', 'center', 'middle-right',
   'bottom-left', 'bottom-center', 'bottom-right',
 ]);
+
+function clampZoom(n: unknown): number {
+  const v = typeof n === 'number' && isFinite(n) ? n : DEFAULT_CONFIG.zoom;
+  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, v));
+}
 
 function normalize(raw: unknown): LockScreenConfig {
   if (!raw || typeof raw !== 'object') return DEFAULT_CONFIG;
@@ -41,6 +52,7 @@ function normalize(raw: unknown): LockScreenConfig {
                  ? r.position as LockPosition
                  : DEFAULT_CONFIG.position,
     showClock: typeof r.showClock === 'boolean' ? r.showClock : DEFAULT_CONFIG.showClock,
+    zoom:      clampZoom(r.zoom),
   };
 }
 
@@ -60,6 +72,7 @@ let initial: LockScreenConfig = DEFAULT_CONFIG;
   role="dialog"
   aria-label="Locked"
   data-position={initial.position}
+  style={`--ls-zoom: ${initial.zoom}`}
 >
   <div id="lockscreen-clock" data-show={String(initial.showClock)}>--:--:--</div>
   <div id="lockscreen-text">{initial.text}</div>
@@ -68,120 +81,183 @@ let initial: LockScreenConfig = DEFAULT_CONFIG;
 
 <script type="application/json" id="aura-initial-lockscreen" set:html={JSON.stringify(initial)}></script>
 
-<script>
+<script is:inline>
+  // Deliberately an `is:inline` script with ZERO imports. It must run in every
+  // host (desktop browser, Android WebView, Capacitor, …). A bundled module
+  // <script> would statically pull in the Socket.IO event bus; if that module
+  // graph fails to load/evaluate anywhere, the whole script aborts and the
+  // lock screen can never arm. Inlining removes that entire failure class.
+  //
   // The overlay sits at body root (z-index 2000) so it covers the launcher,
-  // dock, status bar and every app iframe. Config flows in from
-  // /api/kv/os/lockscreen and refreshes live on `kv:changed`. Trigger is
-  // window.auraLockScreen() — bound to the `aura.lockscreen.activate` key
-  // dispatcher action in StatusBar.astro.
-  import { osEvents } from '../../lib/osEvents.ts';
+  // dock, status bar and every app iframe. Trigger via window.auraLockScreen()
+  // (bound to `aura.lockscreen.activate` in StatusBar.astro) or by posting
+  // { type: 'aura.lockscreen.activate' } to this window. Config is read from
+  // the embedded JSON on load and re-fetched fresh each time we arm.
+  (function () {
+    var overlay = document.getElementById('lockscreen');
+    var clockEl = document.getElementById('lockscreen-clock');
+    var textEl  = document.getElementById('lockscreen-text');
+    if (!overlay || !clockEl || !textEl) return;
 
-  type LockPosition =
-    | 'top-left'    | 'top-center'    | 'top-right'
-    | 'middle-left' | 'center'        | 'middle-right'
-    | 'bottom-left' | 'bottom-center' | 'bottom-right';
-  interface LockScreenConfig { text: string; position: LockPosition; showClock: boolean; }
+    var DEFAULT_CONFIG = { text: 'LOCKED', position: 'center', showClock: true, zoom: 1 };
+    var ZOOM_MIN = 0.2, ZOOM_MAX = 3;
+    var VALID_POSITIONS = {
+      'top-left': 1, 'top-center': 1, 'top-right': 1,
+      'middle-left': 1, 'center': 1, 'middle-right': 1,
+      'bottom-left': 1, 'bottom-center': 1, 'bottom-right': 1,
+    };
 
-  const overlay  = document.getElementById('lockscreen')!;
-  const clockEl  = document.getElementById('lockscreen-clock')!;
-  const textEl   = document.getElementById('lockscreen-text')!;
-
-  const DEFAULT_CONFIG: LockScreenConfig = { text: 'LOCKED', position: 'center', showClock: true };
-  let cfg: LockScreenConfig = DEFAULT_CONFIG;
-  try {
-    const node = document.getElementById('aura-initial-lockscreen');
-    if (node?.textContent) cfg = { ...DEFAULT_CONFIG, ...JSON.parse(node.textContent) };
-  } catch { /* keep defaults */ }
-
-  let clockTimer: number | null = null;
-  function tickClock() {
-    try { clockEl.textContent = new Date().toLocaleTimeString(); }
-    catch { clockEl.textContent = '--:--:--'; }
-  }
-  function startClock() {
-    if (clockTimer != null) return;
-    tickClock();
-    clockTimer = window.setInterval(tickClock, 1000);
-  }
-  function stopClock() {
-    if (clockTimer != null) { clearInterval(clockTimer); clockTimer = null; }
-  }
-
-  function applyConfig(next: LockScreenConfig) {
-    cfg = next;
-    overlay.dataset['position'] = next.position;
-    textEl.textContent = next.text;
-    clockEl.dataset['show'] = String(next.showClock);
-    if (overlay.getAttribute('aria-hidden') === 'false') {
-      // Live-update while visible: keep / drop the clock interval to match.
-      if (next.showClock) startClock(); else stopClock();
+    function clampZoom(n) {
+      var v = typeof n === 'number' && isFinite(n) ? n : DEFAULT_CONFIG.zoom;
+      return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, v));
     }
-  }
-  applyConfig(cfg);
 
-  // Live re-render on KV writes from the Settings page.
-  osEvents.subscribe('kv:changed', (ev: unknown) => {
-    const e = ev as { namespace?: string; key?: string; value?: unknown };
-    if (e?.namespace !== 'os' || e?.key !== 'lockscreen') return;
-    applyConfig({ ...DEFAULT_CONFIG, ...(e.value && typeof e.value === 'object' ? e.value as Partial<LockScreenConfig> : {}) });
-  });
+    function normalize(raw) {
+      if (!raw || typeof raw !== 'object') return { text: DEFAULT_CONFIG.text, position: DEFAULT_CONFIG.position, showClock: DEFAULT_CONFIG.showClock, zoom: DEFAULT_CONFIG.zoom };
+      return {
+        text:      typeof raw.text === 'string' ? raw.text : DEFAULT_CONFIG.text,
+        position:  typeof raw.position === 'string' && VALID_POSITIONS[raw.position] ? raw.position : DEFAULT_CONFIG.position,
+        showClock: typeof raw.showClock === 'boolean' ? raw.showClock : DEFAULT_CONFIG.showClock,
+        zoom:      clampZoom(raw.zoom),
+      };
+    }
 
-  // ── Activation ──────────────────────────────────────────────────────────
-  // Capture-phase listeners on window so the overlay dismisses BEFORE any
-  // app iframe or shell handler sees the dismissing input. A short grace
-  // window after activate() avoids the keystroke / mouse-click that
-  // triggered the lock from instantly dismissing it.
-  let active = false;
-  let armedAt = 0;
-  const GRACE_MS = 200;
+    var cfg = { text: DEFAULT_CONFIG.text, position: DEFAULT_CONFIG.position, showClock: DEFAULT_CONFIG.showClock, zoom: DEFAULT_CONFIG.zoom };
+    try {
+      var node = document.getElementById('aura-initial-lockscreen');
+      if (node && node.textContent) cfg = normalize(JSON.parse(node.textContent));
+    } catch (_) { /* keep defaults */ }
 
-  function dismiss(ev: Event) {
-    if (!active) return;
-    if (performance.now() - armedAt < GRACE_MS) {
+    var clockTimer = null;
+    function tickClock() {
+      try { clockEl.textContent = new Date().toLocaleTimeString(); }
+      catch (_) { clockEl.textContent = '--:--:--'; }
+    }
+    function startClock() {
+      if (clockTimer != null) return;
+      tickClock();
+      clockTimer = window.setInterval(tickClock, 1000);
+    }
+    function stopClock() {
+      if (clockTimer != null) { clearInterval(clockTimer); clockTimer = null; }
+    }
+
+    function applyConfig(next) {
+      cfg = next;
+      overlay.dataset['position'] = next.position;
+      textEl.textContent = next.text;
+      clockEl.dataset['show'] = String(next.showClock);
+      overlay.style.setProperty('--ls-zoom', String(next.zoom));
+      if (overlay.getAttribute('aria-hidden') === 'false') {
+        // Live-update while visible: keep / drop the clock interval to match.
+        if (next.showClock) startClock(); else stopClock();
+      }
+    }
+    applyConfig(cfg);
+
+    // ── Activation ────────────────────────────────────────────────────────
+    // Capture-phase listeners on window so the overlay dismisses BEFORE any
+    // app iframe or shell handler sees the dismissing input. A short grace
+    // window after activate() avoids the keystroke / mouse-click that
+    // triggered the lock from instantly dismissing it.
+    var active = false;
+    var armedAt = 0;
+    var GRACE_MS = 200;
+
+    function dismiss(ev) {
+      if (!active) return;
       ev.preventDefault();
       ev.stopPropagation();
-      return;
+      if (performance.now() - armedAt < GRACE_MS) return;
+      deactivate();
     }
-    ev.preventDefault();
-    ev.stopPropagation();
-    deactivate();
-  }
 
-  function activate() {
-    if (active) return;
-    active = true;
-    armedAt = performance.now();
-    overlay.setAttribute('aria-hidden', 'false');
-    if (cfg.showClock) startClock();
-    // Capture phase + non-passive so we can prevent default on the
-    // dismissing event (e.g. stop a Ctrl+L from opening a browser dialog
-    // even after the overlay has gone).
-    window.addEventListener('keydown',   dismiss, { capture: true });
-    window.addEventListener('mousedown', dismiss, { capture: true });
-    window.addEventListener('touchstart', dismiss, { capture: true, passive: false });
-    // Pull focus away from any app iframe so the next keystroke definitely
-    // routes to the window listener above (not the focused frame's doc).
-    try { (document.activeElement as HTMLElement | null)?.blur(); } catch { /* ignore */ }
-    overlay.focus?.();
-  }
+    function show() {
+      if (active) return;
+      active = true;
+      armedAt = performance.now();
+      overlay.setAttribute('aria-hidden', 'false');
+      if (cfg.showClock) startClock();
+      // Capture phase + non-passive so we can prevent default on the
+      // dismissing event (e.g. stop a Ctrl+L from opening a browser dialog
+      // even after the overlay has gone).
+      window.addEventListener('keydown',   dismiss, { capture: true });
+      window.addEventListener('mousedown', dismiss, { capture: true });
+      window.addEventListener('touchstart', dismiss, { capture: true, passive: false });
+      // Pull focus away from any app iframe so the next keystroke definitely
+      // routes to the window listener above (not the focused frame's doc).
+      try { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); } catch (_) { /* ignore */ }
+      if (overlay.focus) overlay.focus();
+    }
 
-  function deactivate() {
-    if (!active) return;
-    active = false;
-    overlay.setAttribute('aria-hidden', 'true');
-    stopClock();
-    window.removeEventListener('keydown',    dismiss, { capture: true } as EventListenerOptions);
-    window.removeEventListener('mousedown',  dismiss, { capture: true } as EventListenerOptions);
-    window.removeEventListener('touchstart', dismiss, { capture: true } as EventListenerOptions);
-  }
+    function activate() {
+      // Re-read the latest saved config so the overlay always reflects current
+      // Settings — including a draft the Settings page just PUT before asking
+      // us to lock. Best-effort: a failed/slow fetch must never block arming,
+      // so we show immediately with what we have and refine if the fetch wins.
+      if (active) return;
+      show();
+      try {
+        fetch('/api/kv/os/lockscreen', { headers: { 'accept': 'application/json' } })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (body) {
+            if (body && body.value && active) applyConfig(normalize(body.value));
+          })
+          .catch(function () { /* keep embedded config */ });
+      } catch (_) { /* keep embedded config */ }
+    }
 
-  (window as unknown as { auraLockScreen?: () => void }).auraLockScreen = activate;
+    function deactivate() {
+      if (!active) return;
+      active = false;
+      overlay.setAttribute('aria-hidden', 'true');
+      stopClock();
+      window.removeEventListener('keydown',    dismiss, { capture: true });
+      window.removeEventListener('mousedown',  dismiss, { capture: true });
+      window.removeEventListener('touchstart', dismiss, { capture: true });
+    }
 
-  // Some triggers (e.g. the Settings-page "TEST" button) live in iframes;
-  // let them post a message to ask us to lock.
-  window.addEventListener('message', (ev: MessageEvent) => {
-    if (ev?.data?.type === 'aura.lockscreen.activate') activate();
-  });
+    // ── Triggers (registered synchronously, before anything that could throw) ──
+    window.auraLockScreen = activate;
+
+    // Some triggers (e.g. the Settings-page "TEST" button) live in iframes and
+    // post a message asking us to lock. Accept it regardless of which frame
+    // boundary it arrived through. (Fast path when messaging works.)
+    window.addEventListener('message', function (ev) {
+      if (ev && ev.data && ev.data.type === 'aura.lockscreen.activate') activate();
+    });
+
+    // ── Backend signal (the reliable path) ──────────────────────────────────
+    // postMessage across frames is unreliable in some hosts (Android WebView),
+    // so the real trigger rides on the config key itself: the Settings button
+    // PUTs `os/lockscreen` with a `lockAt` timestamp alongside the config
+    // (that key is the one the Settings app has write permission for — a
+    // separate signal key would be rejected 403 by the KV permission gate).
+    // We POLL it with a plain fetch: no frame messaging, no socket. Two
+    // independent timestamps drive it — `lockAt` (bumped by the Settings TEST
+    // button and POST /api/os/lock) arms the overlay; `unlockAt` (bumped by
+    // POST /api/os/unlock) dismisses it. The first poll only establishes the
+    // baseline; any later increase in either fires its action.
+    var lastLockAt = null;
+    var lastUnlockAt = null;
+    function pollLockSignal() {
+      fetch('/api/kv/os/lockscreen', { headers: { 'accept': 'application/json' } })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (body) {
+          var v = body && body.value;
+          if (!v || typeof v !== 'object') return;
+          applyConfig(normalize(v));  // poll doubles as live config refresh
+          var la = typeof v.lockAt   === 'number' ? v.lockAt   : 0;
+          var ua = typeof v.unlockAt === 'number' ? v.unlockAt : 0;
+          if (lastLockAt === null) { lastLockAt = la; lastUnlockAt = ua; return; }  // baseline
+          if (la > lastLockAt)   { lastLockAt = la;   activate();   }
+          if (ua > lastUnlockAt) { lastUnlockAt = ua; deactivate(); }
+        })
+        .catch(function () { /* offline / not set yet — try again next tick */ });
+    }
+    pollLockSignal();                       // establish baseline immediately
+    setInterval(pollLockSignal, 1000);      // then watch once a second
+  })();
 </script>
 
 <style>
@@ -216,18 +292,20 @@ let initial: LockScreenConfig = DEFAULT_CONFIG;
   #lockscreen[data-position="center"]   { align-items: center;    text-align: center; }
   #lockscreen[data-position$="-right"]  { align-items: flex-end;  text-align: right; }
 
+  /* Content scales with the user's zoom (--ls-zoom, default 1) — applied as a
+     plain multiplier on each font-size so the responsive clamp() still holds. */
   #lockscreen-clock {
-    font-size: clamp(2.5rem, 8vmin, 5rem);
+    font-size: calc(clamp(2.5rem, 8vmin, 5rem) * var(--ls-zoom, 1));
     color: var(--aura-color-primary, #00ff41);
     text-shadow: var(--aura-glow-primary, 0 0 12px #00ff41);
     letter-spacing: 0.08em;
     line-height: 1;
-    margin-bottom: 16px;
+    margin-bottom: calc(16px * var(--ls-zoom, 1));
   }
   #lockscreen-clock[data-show="false"] { display: none; }
 
   #lockscreen-text {
-    font-size: clamp(1rem, 3vmin, 1.4rem);
+    font-size: calc(clamp(1rem, 3vmin, 1.4rem) * var(--ls-zoom, 1));
     color: var(--aura-color-text, #ccffcc);
     letter-spacing: 0.16em;
     text-transform: uppercase;
@@ -236,8 +314,8 @@ let initial: LockScreenConfig = DEFAULT_CONFIG;
   }
 
   #lockscreen-hint {
-    margin-top: 24px;
-    font-size: 0.7rem;
+    margin-top: calc(24px * var(--ls-zoom, 1));
+    font-size: calc(0.7rem * var(--ls-zoom, 1));
     color: var(--aura-color-text-dim, #557755);
     letter-spacing: 0.18em;
     text-transform: uppercase;

@@ -21,8 +21,8 @@ const { apps, enabledMap = {} } = Astro.props;
     id="dock-nav-entry"
     type="button"
     class="nav-entry-btn"
-    aria-label="Window selection mode"
-    title="Window selection (Enter) — Ctrl+Alt+Space focuses this">
+    aria-label="Lock screen"
+    title="Lock screen (tap) · Window selection (Enter) · Ctrl+Alt+Space focuses this">
     <span class="nav-entry-icon" aria-hidden="true">◐</span>
   </button>
   <button
@@ -393,6 +393,18 @@ const { apps, enabledMap = {} } = Astro.props;
     e.preventDefault();
     e.stopPropagation();
     document.dispatchEvent(new CustomEvent('aura:window-select.toggle'));
+  });
+
+  // Mouse / touch click on the chip triggers the lock screen — this uses the
+  // click affordance the keydown handler above deliberately left free (it
+  // preventDefaults plain Enter/Space, so keyboard activation never
+  // synthesises a click here; window-select stays keyboard-only). Direct
+  // in-window call: the LockScreenOverlay defines `auraLockScreen` on this
+  // same top window, so there's no cross-frame messaging to fail.
+  navEntry?.addEventListener('click', () => {
+    const lock = (window as any).auraLockScreen;
+    if (typeof lock === 'function') lock();
+    else console.warn('[Dock] auraLockScreen not available — LockScreenOverlay missing?');
   });
 
   // ─── Chrome arrow-key navigation ───────────────────────────────────────

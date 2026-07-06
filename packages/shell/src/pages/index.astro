@@ -4,6 +4,11 @@ import LayoutManager from '../components/layout/LayoutManager.astro';
 import { getAppManager, DEFAULT_WORKSPACE_STATE, type WorkspaceState } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
 
+// The shell page must never be served stale: WebView hosts (Android) cache
+// heuristically when no Cache-Control is present, which leaves devices
+// running old shell code after a deploy/edit even through pull-to-refresh.
+Astro.response.headers.set('Cache-Control', 'no-store');
+
 const mgr = getAppManager();
 // SSR ALL installed apps + per-app enable state — the dock applies the
 // `data-enabled` filter via CSS and flips it live on `app:enabledChanged`
@@ -219,8 +224,11 @@ const ssrVisibleViews = initialViews
   import type { LayoutNavContext } from '../lib/windowNav.ts';
   import { osEvents } from '../lib/osEvents.ts';
   import {
-    postViewportTo,
     queueViewportBroadcast,
+    observeIframe,
+    unobserveIframe,
+    postViewportMount,
+    setROSuppressed,
   } from '../lib/viewportBroadcaster.ts';
 
   const keyDispatcher = getKeyDispatcher();
@@ -355,6 +363,7 @@ const ssrVisibleViews = initialViews
     else if (type === 'aura.system.toggleLauncher') (window as { auraToggleLauncher?: () => void }).auraToggleLauncher?.();
     else if (type === 'aura.system.toggleNavMode')  keyDispatcher.setMode(keyDispatcher.getMode() === 'nav' ? 'app' : 'nav');
     else if (type === 'aura.system.toggleHome')     keyDispatcher.setMode('nav');
+    else if (type === 'aura.system.lockScreen')     (window as { auraLockScreen?: () => void }).auraLockScreen?.();
   }
 
   function appIdFromIframe(frame: HTMLIFrameElement): string | null {
@@ -380,19 +389,19 @@ const ssrVisibleViews = initialViews
     document.querySelectorAll('iframe').forEach((f) => sendClaimList(f as HTMLIFrameElement));
   }
 
-  // Tell app iframes their usable size / scale changed. The shell resizes
-  // apps several ways the child can't otherwise detect reliably:
-  //   • tiling reflow (CSS Grid recompute in renderLayout) — the child's
-  //     own ResizeObserver races the layout-settle,
-  //   • viewport zoom (CSS `transform: scale()` on <body>) — paint-only,
-  //     so a child ResizeObserver NEVER fires,
-  //   • free-window drag-resize release, and browser window resize.
-  // An explicit per-iframe message covers them all, carrying that iframe's
+  // Tell app iframes their usable size / scale changed, carrying that iframe's
   // exact logical content box so the app does pure arithmetic instead of
-  // re-measuring its own settling DOM. Apps consume it via the SDK's
-  // onViewportChange(). `postViewportTo` / `queueViewportBroadcast` now live
-  // in ../lib/viewportBroadcaster.ts (imported above) — the single
-  // broadcaster shared with StatusBar.astro (was duplicated per island).
+  // re-measuring its own settling DOM. Two kinds of signal:
+  //   • GEOMETRY (tiling reflow, window open/close, fullscreen, rows,
+  //     free-window resize, maximize, browser resize) — driven by the
+  //     per-iframe ResizeObserver (observeIframe), which fires once per real
+  //     box change. No layout code has to remember to broadcast.
+  //   • NON-GEOMETRY (viewport zoom: a paint-only `transform: scale()` no
+  //     observer can see; first mount) — stays explicit via
+  //     queueViewportBroadcast('zoom') in StatusBar.astro and postViewportMount.
+  // Apps consume it via the SDK's onViewportChange(). All of this lives in
+  // ../lib/viewportBroadcaster.ts — the single broadcaster shared with
+  // StatusBar.astro (was duplicated per island).
 
   // Dispatcher re-emits on every setActions/setState — push the latest list
   // to every mounted iframe so SDK subscriptions and remap events apply
@@ -1031,6 +1040,10 @@ const ssrVisibleViews = initialViews
     const startY = ev.clientY;
     try { captureEl.setPointerCapture(ev.pointerId); } catch { /* unsupported, fall through */ }
     document.body.classList.add('aura-stack-dragging');
+    // Live drag mutates el's box every frame; mute the per-iframe observer so
+    // it doesn't broadcast (and refit the app) on every move — we fire once on
+    // release below.
+    setROSuppressed(true);
 
     const onMove = (mv: PointerEvent) => {
       if (mv.pointerId !== ev.pointerId) return;
@@ -1050,9 +1063,10 @@ const ssrVisibleViews = initialViews
       el.style.width  = final.w + 'px';
       el.style.height = final.h + 'px';
       persistStackRect(viewId, final);
-      // Live drag stayed CSS-only (smooth, no per-frame postMessage); fire the
-      // authoritative size signal once on release so the app re-fits to the
-      // final box.
+      // Live drag stayed CSS-only (smooth, no per-frame postMessage); re-arm the
+      // observer and fire the authoritative size signal once on release so the
+      // app re-fits to the final box.
+      setROSuppressed(false);
       queueViewportBroadcast('layout');
     };
     captureEl.addEventListener('pointermove',  onMove);
@@ -1170,6 +1184,9 @@ const ssrVisibleViews = initialViews
   const dynamicLayout = document.getElementById('dynamic-layout')!;
   const focusView     = document.getElementById('focus-view')!;
   const focusFrame    = document.getElementById('focus-frame') as HTMLIFrameElement;
+  // Persistent (never torn down) — observe it once so a focused/nav app refits
+  // when the focus overlay box changes (fullscreen toggle, browser resize).
+  if (focusFrame) observeIframe(focusFrame);
   const focusInstIdEl = document.getElementById('focus-instance-id')!;
   const focusTitleEl  = document.getElementById('focus-title')!;
   const focusExitBtn  = document.getElementById('focus-exit')!;
@@ -1991,6 +2008,7 @@ const ssrVisibleViews = initialViews
     for (const [viewId, el] of existing) {
       if (keep.has(viewId)) continue;
       const ifr = el.querySelector('iframe') as HTMLIFrameElement | null;
+      if (ifr) unobserveIframe(ifr); // stop the RO before the element is torn down
       if (ifr?.contentWindow) {
         try { ifr.contentWindow.postMessage({ type: 'aura.shutdown' }, '*'); } catch (_) { /* ignore */ }
         // Race the ack against a hard timeout. Either way el.remove() runs.
@@ -2010,10 +2028,13 @@ const ssrVisibleViews = initialViews
       }
     }
 
-    // The grid just reflowed (open/close/minimize/workspace switch/focus
-    // toggle all funnel through here): tell every app its tile may have
-    // resized so it can re-fit. Coalesced + double-rAF'd so we measure
-    // after paint.
+    // The grid just reflowed (open/close/minimize/workspace switch/focus toggle
+    // / maximize all funnel through here): broadcast every iframe its (possibly
+    // new) box. This explicit pass is the PRIMARY, proven driver — it reaches
+    // every iframe regardless of engine quirks. The per-iframe ResizeObserver
+    // (observeIframe) is a supplementary geometry hook for changes that don't
+    // route through renderLayout. Both are idempotent at the app (the terminal
+    // only resizes when cols/rows actually change), so the overlap is a no-op.
     queueViewportBroadcast('layout');
   }
 
@@ -2213,7 +2234,9 @@ const ssrVisibleViews = initialViews
       // Hand the freshly-loaded iframe the current viewport scale so an app
       // opened INTO an already-zoomed/tiled shell fits on first paint
       // (no layout/zoom change will fire afterwards to trigger a re-fit).
-      iframe.addEventListener('load', () => postViewportTo(iframe, 'mount'));
+      // Seeds the observer's dedupe so its initial fire for the same box is a
+      // no-op (no double mount fit).
+      iframe.addEventListener('load', () => postViewportMount(iframe));
       // Auto-enter newly-launched windows: same end-state as Enter on a
       // highlighted slot in window-select mode — focus the iframe + post
       // `aura.window.focus` so the app's SDK helper (installGridNav)
@@ -2235,6 +2258,12 @@ const ssrVisibleViews = initialViews
       iframe.src = v.iframeUrl;
       // Insert as the FIRST child so the skeleton (appended above) stays on top.
       body.insertBefore(iframe, body.firstChild);
+      // Geometry-driven refit hook — a SUPPLEMENT to the explicit broadcasts in
+      // renderLayout / window-resize / stack-release. Observe AFTER attach so the
+      // observation reliably registers (observing a detached element doesn't
+      // fire in every engine). Catches box changes that don't route through
+      // renderLayout; deduped + idempotent at the app, so it never double-fits.
+      observeIframe(iframe);
     }
   }
 
@@ -2420,8 +2449,9 @@ const ssrVisibleViews = initialViews
 
   // Browser window resize changes every iframe's content box without a
   // renderLayout (the CSS Grid just reflows). Rebroadcast centrally so apps
-  // re-fit; the double-rAF in queueViewportBroadcast both coalesces the resize
-  // burst and waits for the grid to settle before measuring.
+  // re-fit; the double-rAF in queueViewportBroadcast coalesces the resize burst
+  // and waits for the grid to settle before measuring. (The per-iframe RO also
+  // catches this; the explicit call guarantees it.)
   window.addEventListener('resize', () => queueViewportBroadcast('layout'));
 
   (window as any).auraClose    = closeView_;

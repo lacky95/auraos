@@ -14,16 +14,16 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Terminal — AuraOS</title>
   <!--
-    Self-hosted xterm under public/vendor/xterm/. Served by the app's own
-    astro dev (loopback inside the container), proxied through the shell.
-    Eliminates the ~300-500 ms cold-load CDN round-trip to jsdelivr and
-    removes a third-party SPOF.
+    xterm.js is bundled from npm (@xterm/xterm + @xterm/addon-fit) by the app's
+    own Vite build — the module <script> at the end of <body> imports the library
+    and its CSS. No CDN, no hand-vendored files: upgrades are tracked in
+    package.json and the bundle is served (minified, hashed) by the app itself,
+    proxied through the shell like every other asset.
   -->
   <!-- /api/os/theme.css is auto-injected by the proxy for themeStrategy='inherit'
        apps (the default). The explicit link below is harmless and survives
        direct curl/headless renders that don't go through the proxy. -->
   <link rel="stylesheet" href="/api/os/theme.css" />
-  <link rel="stylesheet" href="vendor/xterm/xterm.min.css" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -109,7 +109,13 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       white-space: nowrap;
       min-width: 0;
     }
-    #terminal { flex: 1; padding: 4px; overflow: hidden; }
+    /* Hidden until the first authoritative fit reveals it (see revealTerminal),
+       so the user never sees the grid resize from its initial guess to the
+       final column count — the boot fit happens behind the curtain. */
+    /* Extra 3px on the bottom so the last row never sits flush against the
+       slot's bottom edge (it was occasionally clipped there). chromeInset()
+       measures this padding, so the row count adjusts automatically. */
+    #terminal { flex: 1; padding: 4px 4px 7px; overflow: hidden; visibility: hidden; }
     .xterm { height: 100%; }
     .xterm-viewport { background: var(--aura-color-bg) !important; }
     /* xterm flips `.xterm-screen` to `cursor: crosshair` whenever Alt is
@@ -210,7 +216,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     <span id="ws-url" title="Session host" style="margin-left: 2em;">{sessionHost}</span>
     <span style="margin-left:auto;" id="conn-status">CONNECTING...</span>
   </div>
-  <div id="terminal"></div>
+  <div id="terminal" data-app-id={appId}></div>
 
   <!-- Quick-commands sidebar: slides in from the left over the console. -->
   <aside id="qc-panel" aria-hidden="true">
@@ -230,9 +236,17 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     </form>
   </aside>
 
-  <script is:inline src="vendor/xterm/xterm.min.js"></script>
-  <script is:inline src="vendor/xterm/xterm-addon-fit.min.js"></script>
-  <script is:inline define:vars={{ appId }}>
+  <script>
+    import { Terminal } from '@xterm/xterm';
+    import { FitAddon } from '@xterm/addon-fit';
+    import '@xterm/xterm/css/xterm.css';
+
+    // appId is server-rendered onto #terminal's data-app-id. A bundled module
+    // script can't use Astro's define:vars (that requires is:inline), so we read
+    // it from the DOM instead — same pattern as the aura-activity-id meta tag.
+    // The fallback keeps the label sane for direct/headless renders.
+    const appId = document.getElementById('terminal')?.dataset.appId ?? 'com.aura.terminal';
+
     // Resolve current OS palette by reading the CSS vars injected by
     // /api/os/theme.css. Re-runs on theme:changed / mode:changed broadcasts
     // so xterm's internal theme follows the OS.
@@ -401,22 +415,20 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       }
     });
 
-    // FitAddon is kept ONLY as the ground-truth measurer for the deferred
-    // verify-and-repair pass (`scheduleVerify` below). The hot resize path is
-    // pure arithmetic (`applyFit`); fit() is never on it. The one synchronous
-    // fit here gives a sane initial grid before the first authoritative box
-    // arrives (applyFit can't run yet — its cached metrics live below in TDZ).
-    const fitAddon = new FitAddon.FitAddon();
+    // FitAddon is kept ONLY as the ground-truth measurer for the slow watchdog
+    // (verifyAndRepair below). The hot resize path is pure arithmetic
+    // (applyFit) and never calls fit(). No eager fit() here: the grid stays at
+    // xterm's default (and #terminal is visibility:hidden) until the first
+    // authoritative box arrives and reveals it — so the boot fit is invisible
+    // instead of a visible jump from a wrong guess.
+    const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(document.getElementById('terminal'));
-    try { fitAddon.fit(); } catch { /* addon not ready */ }
 
-    // Once fonts settle, re-measure the cell (the active mono font may differ
-    // from the pre-load metric) and re-fit. `document.fonts.ready` resolves
-    // immediately for cached fonts, so this is safe on every reload. The
-    // verify pass that applyFit schedules will calibrate against ground truth
-    // regardless, but re-measuring here makes the very first authoritative
-    // fit already correct.
+    // Once fonts settle the mono cell can change, so invalidate the cached cell
+    // (next applyFit re-reads xterm's real metrics) and refit. Resolves
+    // immediately for cached fonts, so it's safe on every reload; if it lands
+    // before the first box it just primes the metrics for the first real fit.
     if (document.fonts && typeof document.fonts.ready?.then === 'function') {
       document.fonts.ready.then(() => { cellW = 0; cellH = 0; applyFit(); });
     }
@@ -540,84 +552,118 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       sendResizeIfChanged();
     }
 
-    // ── Cell metrics: font-dependent, SIZE-independent, so measured once ──
-    // xterm's own CharSizeService sizes its grid from one char's advance width
-    // and line-box height in the terminal font. We replicate that with an
-    // offscreen probe in the SAME font xterm uses (hardcoded below), so cellW
-    // matches what xterm would compute — but we read it ONCE and cache, keeping
-    // it out of the per-resize hot path (Courier New is a system font, so it's
-    // available immediately; fonts.ready just re-measures defensively).
+    // ── Cell metrics: the size of one xterm grid cell, in CSS px ──────────
+    // xterm sizes its grid from its OWN rendered cell (a char's advance width +
+    // the line box), rounded to device pixels. We read that EXACT value from
+    // xterm's render service so our arithmetic agrees with proposeDimensions()
+    // to the pixel — one resize per change, no "repair" second pass, no
+    // flicker. The render service only exists after the first paint, so a
+    // one-time estimate seeds the very first fit; realCell() overwrites it the
+    // instant xterm has rendered. We invalidate (cellW=0) only on font load and
+    // devicePixelRatio change — the two things that actually move the cell.
     const FONT_FAMILY = "'Courier New', monospace";
     const FONT_SIZE   = 14;
-    // Chrome the xterm grid can't use — all constants from this file's CSS:
-    const BAR_H = 24;   // #terminal-bar height
-    const PAD   = 4;    // #terminal padding (each side)
     let cellW = 0, cellH = 0;
-    let scrollbarW = -1; // OS scrollbar reserved by .xterm-viewport (overflow-y:scroll)
 
-    function measureCell() {
+    // Read xterm's actual rendered cell. False until the first render populates
+    // renderService.dimensions.
+    function realCell() {
+      const c = term?._core?._renderService?.dimensions?.css?.cell;
+      if (c && c.width > 0 && c.height > 0) { cellW = c.width; cellH = c.height; return true; }
+      return false;
+    }
+    // Pre-first-render estimate ONLY (realCell overwrites it on the first fit).
+    // Mirrors xterm's own formula: advance width from a `line-height:1` probe
+    // (NOT `normal` — xterm's default lineHeight is 1), cell height = fontSize ×
+    // lineHeight rounded. Good enough to seed the hidden boot grid.
+    function estimateCell() {
       const probe = document.createElement('div');
       probe.style.cssText =
         'position:absolute;visibility:hidden;white-space:pre;top:-9999px;left:-9999px;' +
-        `font-family:${FONT_FAMILY};font-size:${FONT_SIZE}px;line-height:normal;`;
+        `font-family:${FONT_FAMILY};font-size:${FONT_SIZE}px;line-height:1;`;
       probe.textContent = 'W'.repeat(100);
       document.body.appendChild(probe);
-      const rect = probe.getBoundingClientRect();
-      cellW = rect.width / 100;
-      cellH = Math.ceil(rect.height);
+      cellW = probe.getBoundingClientRect().width / 100;
       probe.remove();
+      cellH = Math.round(FONT_SIZE * (term.options.lineHeight ?? 1));
     }
+
+    // ── Chrome inset: pixels around the grid the cols/rows can't use ──────
+    // MEASURED, not hardcoded, so it can't silently drift from the CSS (the old
+    // BAR_H=24 ignored the bar's 1px border — a guaranteed off-by-one). #terminal
+    // padding + the #terminal-bar's real box height + the OS scrollbar xterm
+    // reserves (it forces overflow-y:scroll). Width never lags the iframe reflow
+    // (the terminal is full-width); the bar height is static, so subtracting it
+    // from the authoritative box stays race-free.
+    let scrollbarW = -1; // cached first non-degenerate read
     function measureScrollbar() {
-      // xterm forces overflow-y:scroll on the viewport, so it always reserves
-      // the OS scrollbar — a stable constant (0 on overlay-scrollbar OSes,
-      // ~15px on Linux/Windows). Cache the first non-degenerate read.
       const vp = document.querySelector('.xterm-viewport');
       if (vp && vp.offsetWidth > 0) scrollbarW = vp.offsetWidth - vp.clientWidth;
     }
+    function chromeInset() {
+      const el = document.getElementById('terminal');
+      const cs = getComputedStyle(el);
+      const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+      const padY = parseFloat(cs.paddingTop)  + parseFloat(cs.paddingBottom);
+      const barH = document.getElementById('terminal-bar')?.getBoundingClientRect().height ?? 0;
+      if (scrollbarW < 0) measureScrollbar();
+      const sb = scrollbarW > 0 ? scrollbarW : 0;
+      return { x: padX + sb, y: padY + barH };
+    }
 
     // Compute + apply the grid for a known LOGICAL box (CSS px). Pure
-    // arithmetic — never reads xterm's own (lagging) layout. `boxW/boxH`
-    // default to the iframe's own viewport for the message-less callers
-    // (fonts.ready, ws.onopen), which equals the shell's contentW/H. After the
-    // immediate (race-free) resize it schedules a verify-and-repair pass that
-    // confirms the result against ground truth once the DOM has settled.
+    // arithmetic on xterm's REAL cell + MEASURED chrome, so floor(avail/cell)
+    // === proposeDimensions() — the result is exact on the first try, with no
+    // DOM read of xterm's own (lagging) layout and no follow-up repair. boxW/H
+    // default to the iframe viewport for the message-less callers (fonts.ready,
+    // ws.onopen), which equals the shell's contentW/H (the iframe has no inner
+    // transform). The first call with a real box reveals the terminal.
     function applyFit(boxW, boxH) {
       const w = boxW ?? window.innerWidth;
       const h = boxH ?? window.innerHeight;
-      if (!w || !h) return;                 // hidden / off-workspace → skip
-      if (!cellW || !cellH) measureCell();
-      if (scrollbarW < 0)   measureScrollbar();
-      if (!cellW || !cellH) return;         // probe failed; nothing safe to do
-      const sb     = scrollbarW > 0 ? scrollbarW : 0;
-      const availW = w - PAD * 2 - sb;
-      const availH = h - BAR_H - PAD * 2;
-      const cols = Math.max(1, Math.floor(availW / cellW));
-      const rows = Math.max(1, Math.floor(availH / cellH));
-      if (cols !== term.cols || rows !== term.rows) term.resize(cols, rows);
+      if (!w || !h) return;                 // hidden / off-workspace → never resize
+      if (!cellW || !cellH) { if (!realCell()) estimateCell(); }
+      if (!cellW || !cellH) return;         // nothing safe to compute with yet
+      const { x, y } = chromeInset();
+      const cols = Math.max(1, Math.floor((w - x) / cellW));
+      const rows = Math.max(1, Math.floor((h - y) / cellH));
+      if (cols !== term.cols || rows !== term.rows) {
+        term.resize(cols, rows);
+        realCell();                         // refresh cache from ground truth post-resize (cheap, no extra render)
+        console.debug('[terminal] fit →', cols, '×', rows, boxW != null ? '(box)' : '(self)'); // TEMP: resize-count instrumentation
+      }
       sendResizeIfChanged();
-      scheduleVerify();
+      revealTerminal();
     }
 
-    // ── Verify-and-repair ─────────────────────────────────────────────────
-    // The arithmetic above is fast and race-free but trusts cached cell
-    // metrics + a constant chrome model. To guarantee the BEST width in every
-    // situation we compare against ground truth: FitAddon.proposeDimensions(),
-    // which measures the real DOM exactly the way xterm renders it. If it
-    // disagrees with what's applied, the measurement wins — we resize to it AND
-    // recalibrate the cached cell size from xterm's own render metrics, so the
-    // arithmetic self-corrects and the next resize is already exact. This is a
-    // pure CHECK: when the grid is already correct (the common case),
-    // proposeDimensions matches term.cols/rows and we do NOTHING — no
-    // term.resize, and send-on-change emits no PTY traffic. So it's safe to run
-    // both after every fit (settled via double-rAF) and on a slow heartbeat.
+    // Reveal the grid on the first authoritative fit (idempotent). Until then
+    // #terminal is visibility:hidden so the boot fit is invisible.
+    let revealed = false;
+    function revealTerminal() {
+      if (revealed) return;
+      revealed = true;
+      const el = document.getElementById('terminal');
+      if (el) el.style.visibility = 'visible';
+    }
+    // Safety net: never leave the terminal invisible. If — for any reason — no
+    // applyFit lands a valid box in the first second (e.g. metrics probe fails,
+    // no viewport message, ws never opens), reveal anyway so the user always
+    // sees the terminal. The watchdog will still correct the grid afterwards.
+    setTimeout(revealTerminal, 1000);
+
+    // ── Watchdog (safety net only) ────────────────────────────────────────
+    // With a real cell + measured chrome the event-driven applyFit is already
+    // exact, so this should essentially never repair. It stays as a slow
+    // heartbeat for drift the event path can't see (a CSS-var/font swap that
+    // moved the cell, a layout mutation that didn't broadcast). It recalibrates
+    // from xterm's render metrics and only resizes if proposeDimensions truly
+    // disagrees — idempotent and silent in steady state. The repair counter is
+    // temporary instrumentation: it should read 0 across a session; if it
+    // climbs, the cell/chrome model still disagrees with xterm.
+    let watchdogRepairs = 0;
     function verifyAndRepair() {
       if (!document.getElementById('terminal')?.offsetWidth) return false; // hidden → skip
-      // Recalibrate cached metrics from xterm's actual render dimensions
-      // (the exact cell size it's drawing with) — best-effort, guarded.
-      const cell = term?._core?._renderService?.dimensions?.css?.cell;
-      if (cell && cell.width > 0 && cell.height > 0) {
-        cellW = cell.width; cellH = cell.height;
-      }
+      realCell();
       measureScrollbar();
       let dims;
       try { dims = fitAddon.proposeDimensions(); } catch { return false; }
@@ -625,30 +671,25 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       if (dims.cols === term.cols && dims.rows === term.rows) return false; // already perfect
       term.resize(dims.cols, dims.rows);
       sendResizeIfChanged();
+      watchdogRepairs++;
+      console.debug('[terminal] watchdog repaired grid →', dims.cols, '×', dims.rows, '(total', watchdogRepairs + ')');
       return true;
     }
-
-    // Run the check once the layout has settled past the resize lag (double-rAF
-    // is the very wait that made direct fit() flaky when done eagerly). Called
-    // after every applyFit; coalesced so a burst collapses to one check.
-    let verifyQueued = false;
-    function scheduleVerify() {
-      if (verifyQueued) return;
-      verifyQueued = true;
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        verifyQueued = false;
-        verifyAndRepair();
-      }));
-    }
-
-    // Low-frequency watchdog: every 5 s confirm the grid still matches ground
-    // truth and repair only if it drifted. 5 s (not faster) keeps it from
-    // churning a running TUI; the check is idempotent and silent when the width
-    // is already perfect, so the steady state costs one proposeDimensions read
-    // and nothing else. Catches drift the event-driven path can't see — a CSS
-    // var / font swap that changed the cell, a layout mutation that didn't
-    // broadcast, or a fractional-cell off-by-one — without any extra triggers.
     setInterval(verifyAndRepair, 5000);
+
+    // devicePixelRatio changes (monitor move, browser zoom) re-round xterm's
+    // cell — invalidate, re-read from the new render, refit, and re-arm for the
+    // next dpr (matchMedia resolution queries are one-shot per threshold).
+    function watchDpr() {
+      const mq = matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+      mq.addEventListener('change', () => {
+        cellW = cellH = 0;
+        realCell();
+        applyFit();
+        watchDpr();
+      }, { once: true });
+    }
+    watchDpr();
 
     // xterm's own cols/rows changed (any internal path) → forward to the PTY so
     // bash's $COLUMNS tracks the real width.

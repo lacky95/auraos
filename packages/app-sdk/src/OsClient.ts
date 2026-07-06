@@ -521,10 +521,11 @@ export class OsClient {
    *
    * `contentW`/`contentH` are this iframe's authoritative LOGICAL content box
    * in CSS px, measured by the shell (transform-independent). An app should
-   * size off these instead of re-measuring its own (still-settling) DOM. A
-   * value of 0 means the iframe is hidden / off the active workspace — apps
-   * should skip resizing then (a stale grid is harmless; a 0-wide one is not).
-   * For grid-based apps, pair with the exported `viewportGrid()` helper.
+   * size off these instead of re-measuring its own (still-settling) DOM. The
+   * callback is never invoked with a 0-sized box (iframe hidden / off the
+   * active workspace) — those are swallowed here, so `contentW`/`contentH` are
+   * always usable. For grid-based apps, pair with the exported `viewportGrid()`
+   * helper.
    */
   onViewportChange(cb: (info: ViewportChangeInfo) => void): () => void {
     if (typeof window === 'undefined') return () => undefined;
@@ -536,6 +537,10 @@ export class OsClient {
         contentW?: number; contentH?: number;
       } | null;
       if (!d || d.type !== 'aura.viewport.changed') return;
+      // A 0-sized box means the iframe is display:none (off the active
+      // workspace). Swallow it centrally so no app ever refits to a degenerate
+      // box — the next non-zero box (slot revealed) delivers the real size.
+      if (d.contentW === 0 || d.contentH === 0) return;
       cb({
         reason:      d.reason === 'zoom' || d.reason === 'mount' ? d.reason : 'layout',
         shellZoom:   typeof d.shellZoom   === 'number' ? d.shellZoom   : 1,

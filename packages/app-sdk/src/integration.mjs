@@ -43,9 +43,15 @@ export function auraAppIntegration(opts = {}) {
         // proxy verifies identity via X-Aura-App-Id headers anyway.
         updateConfig({ vite: { server: { allowedHosts: true } } });
         if (!injectHealth) return;
+        // Resolve relative to whatever's on disk (this file ships in both
+        // src/ during dev AND in dist/ after tsc, with runtime/ as a sibling
+        // each way). Try the compiled .js first because that's what's
+        // published; fall back to .ts for the in-monorepo source-only path
+        // that older system-scope apps may still hit.
+        const routeUrl = new URL('./runtime/health-route.js', import.meta.url);
         injectRoute({
           pattern: '/api/lifecycle/health',
-          entrypoint: new URL('./runtime/health-route.ts', import.meta.url),
+          entrypoint: routeUrl,
         });
       },
       'astro:server:setup': ({ server }) => {

@@ -1,7 +1,7 @@
 ---
 interface Props {
   title?: string;
-  active?: 'browse' | 'installed' | 'install' | 'publish';
+  active?: 'browse' | 'installed' | 'install' | 'publish' | 'sources';
 }
 
 const { title = 'Nexus', active = 'browse' } = Astro.props;
@@ -11,6 +11,7 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
   { id: 'installed', label: 'INSTALLED', href: '/installed' },
   { id: 'install',   label: 'INSTALL',   href: '/install' },
   { id: 'publish',   label: 'PUBLISH',   href: '/publish' },
+  { id: 'sources',   label: 'SOURCES',   href: '/sources' },
 ];
 ---
 <!DOCTYPE html>

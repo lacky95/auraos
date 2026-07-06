@@ -14,6 +14,7 @@ import { registerWhereami } from './commands/whereami.js';
 import { registerJump } from './commands/jump.js';
 import { registerNexus } from './commands/nexus.js';
 import { registerScope } from './commands/scope.js';
+import { registerSdk } from './commands/sdk.js';
 
 const program = new Command();
 
@@ -42,6 +43,7 @@ registerWhereami(program);
 registerJump(program);
 registerNexus(program);
 registerScope(program);
+registerSdk(program);
 
 program
   .command('completion <shell>')
