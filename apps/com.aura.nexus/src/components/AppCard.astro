@@ -1,0 +1,51 @@
+---
+/** One app card in the Browse list. The INSTALL action is a real button that
+ *  installs inline (handled by the delegated script in index.astro) and shows
+ *  per-card feedback in the `.install-feedback` element below the head. */
+interface CatalogEntry {
+  id:           string;
+  name:         string;
+  description?: string;
+  icon?:        string;
+  publisher?:   string;
+  categories?:  string[];
+  version?:     string;
+  sourceName?:  string;
+  sourceKind?:  string;
+  installed?:   boolean;
+  installedVersion?: string | null;
+  installing?:  boolean;
+}
+interface Props { entry: CatalogEntry; }
+const { entry: e } = Astro.props;
+const detailHref   = `/app?id=${encodeURIComponent(e.id)}`;
+// One state-driven button (a poller flips it install ↔ installing ↔ installed).
+const state = e.installed ? 'installed' : (e.installing ? 'installing' : 'install');
+const label = state === 'installed'
+  ? `INSTALLED${e.installedVersion ? ` v${e.installedVersion}` : ''} ✓`
+  : state === 'installing' ? 'INSTALLING…' : 'INSTALL';
+const btnDisabled = state !== 'install';
+---
+<div class="nexus-card">
+  <div class="nexus-card-head">
+    <div>
+      <div class="nexus-card-title">
+        {e.icon && <span class="badge primary" style="margin-right:8px">{e.icon}</span>}
+        {e.name}
+        {e.version && <span class="badge" style="margin-left:6px">v{e.version}</span>}
+        <span style="color:var(--aura-color-text-dim);font-weight:400">· {e.id}</span>
+      </div>
+      {e.description && <div class="nexus-card-desc">{e.description}</div>}
+      <div class="nexus-card-meta">
+        {e.publisher && <span>{e.publisher} · </span>}
+        {e.sourceName && <span class="badge" style="margin-right:6px">{e.sourceName} · {e.sourceKind}</span>}
+        {(e.categories ?? []).map((c) => <span class="badge" style="margin-right:6px">{c}</span>)}
+      </div>
+    </div>
+    <div class="nexus-card-actions">
+      <a class="nexus-tab" href={detailHref}>DETAILS</a>
+      <button type="button" class="install-cta" data-ref={e.id} data-name={e.name} data-state={state} disabled={btnDisabled}>{label}</button>
+    </div>
+  </div>
+  <div class="install-feedback" hidden></div>
+</div>

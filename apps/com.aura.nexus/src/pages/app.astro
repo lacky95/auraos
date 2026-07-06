@@ -1,0 +1,272 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { shellGet } from '../lib/shellClient.ts';
+
+interface CatalogEntry {
+  id:           string;
+  name:         string;
+  description?: string;
+  icon?:        string;
+  publisher?:   string;
+  homepage?:    string;
+  categories?:  string[];
+  tags?:        string[];
+  screenshots?: string[];
+  version?:     string;
+  sourceName?:  string;
+  sourceKind?:  string;
+  installed?:   boolean;
+  installedVersion?: string | null;
+  installing?:  boolean;
+  sources?:     { git?: { ref: string }; oci?: { ref: string } };
+}
+interface Catalog { apps: CatalogEntry[]; }
+
+const url = new URL(Astro.request.url);
+const id = url.searchParams.get('id') ?? '';
+
+let entry: CatalogEntry | null = null;
+if (id) {
+  try {
+    const doc = await shellGet<Catalog>('/api/nexus');
+    entry = doc.apps.find((a) => a.id === id) ?? null;
+  } catch { entry = null; }
+}
+
+// Derive display values in the frontmatter — keeps the template free of
+// JSX-in-ternary expressions (which the Astro/esbuild parser trips on).
+const pageTitle      = entry ? entry.name : 'App';
+const glyph          = entry ? (entry.icon ?? entry.name.charAt(0).toUpperCase()) : '';
+const installed      = !!entry?.installed;
+// One state-driven button (a poller keeps it correct: install ↔ installing ↔ installed).
+const btnState       = installed ? 'installed' : (entry?.installing ? 'installing' : 'install');
+const btnLabel       = btnState === 'installed'
+  ? `INSTALLED${entry?.installedVersion ? ` v${entry.installedVersion}` : ''} ✓`
+  : btnState === 'installing' ? 'INSTALLING…' : 'INSTALL';
+const btnDisabled    = btnState !== 'install';
+const distRef        = entry?.sources?.oci?.ref ?? entry?.sources?.git?.ref ?? '—';
+const distKind       = entry?.sources?.oci ? 'oci' : (entry?.sources?.git ? 'git' : '—');
+const categoriesText = (entry?.categories ?? []).join(', ') || '—';
+const tagsText       = (entry?.tags ?? []).join(', ') || '—';
+const sourceText     = `${entry?.sourceName ?? '—'} · ${entry?.sourceKind ?? '—'}`;
+const cats           = entry?.categories ?? [];
+const shots          = entry?.screenshots ?? [];
+---
+<Layout title={pageTitle} active="browse">
+  <a href="/" class="btn-back"><span class="back-arrow">←</span> BROWSE</a>
+
+  {!entry && (
+    <div class="nexus-card" style="border-left:3px solid var(--aura-color-primary)">
+      <div class="nexus-empty" style="padding:36px 16px">
+        <p>App <code>{id}</code> not found in the catalog.</p>
+      </div>
+    </div>
+  )}
+
+  {entry && (
+    <div class="nexus-card detail-panel">
+      <div class="nexus-card-head">
+        <div>
+          <div class="nexus-card-title">
+            <span class="badge primary" style="margin-right:8px">{glyph}</span>
+            {entry.name}
+            {entry.version && <span class="badge" style="margin-left:6px">v{entry.version}</span>}
+            <span style="color:var(--aura-color-text-dim);font-weight:400">· {entry.id}</span>
+          </div>
+          <div class="nexus-card-meta">
+            {entry.publisher && <span>{entry.publisher} · </span>}
+            {entry.sourceName && <span class="badge" style="margin-right:6px">{sourceText}</span>}
+            {cats.map((c) => <a class="badge" style="margin-right:6px" href={`/?category=${c}`}>{c}</a>)}
+          </div>
+        </div>
+        <div class="nexus-card-actions">
+          <button type="button" id="detail-install-btn" class="install-cta" data-ref={entry.id} data-name={entry.name} data-state={btnState} disabled={btnDisabled}>{btnLabel}</button>
+        </div>
+      </div>
+
+      {entry.description && <p class="detail-desc">{entry.description}</p>}
+
+      <pre class="nexus-log" id="install-log" hidden></pre>
+
+      <div class="panel-sec"><span class="panel-lbl">Details</span></div>
+      <table class="kv">
+        <tbody>
+          <tr><td>publisher</td><td>{entry.publisher ?? '—'}</td></tr>
+          <tr>
+            <td>homepage</td>
+            <td>
+              {entry.homepage && <a href={entry.homepage} target="_blank" rel="noreferrer">{entry.homepage}</a>}
+              {!entry.homepage && '—'}
+            </td>
+          </tr>
+          <tr><td>categories</td><td>{categoriesText}</td></tr>
+          <tr><td>tags</td><td>{tagsText}</td></tr>
+          <tr><td>source</td><td>{sourceText}</td></tr>
+          <tr><td>distribution</td><td><span class="badge" style="margin-right:6px">{distKind}</span><code>{distRef}</code></td></tr>
+        </tbody>
+      </table>
+
+      {shots.length > 0 && (
+        <div>
+          <div class="panel-sec"><span class="panel-lbl">Screenshots</span></div>
+          <div class="detail-shots">
+            {shots.map((src) => (<img src={src} alt="screenshot" loading="lazy" />))}
+          </div>
+        </div>
+      )}
+    </div>
+  )}
+
+  <script is:inline>
+    const btn = document.getElementById('detail-install-btn');
+    const log = document.getElementById('install-log');
+    const show = (t, cls) => { if (!log) return; log.hidden = false; log.className = 'nexus-log' + (cls ? ' ' + cls : ''); log.textContent = t; };
+
+    // Apply server truth to the button (also flips INSTALLED → INSTALL on an
+    // uninstall performed elsewhere).
+    function applyState(st) {
+      if (!btn) return;
+      if (Date.now() < (Number(btn.dataset.busyUntil) || 0)) return;   // brief optimistic window
+      const ref = btn.getAttribute('data-ref');
+      const installed = st.installed || {};
+      const installing = new Set(st.installing || []);
+      if (installed[ref] != null) {
+        const txt = 'INSTALLED v' + installed[ref] + ' ✓';
+        if (btn.dataset.state !== 'installed' || btn.textContent !== txt) { btn.dataset.state = 'installed'; btn.disabled = true; btn.textContent = txt; }
+      } else if (installing.has(ref)) {
+        if (btn.dataset.state !== 'installing') { btn.dataset.state = 'installing'; btn.disabled = true; btn.textContent = 'INSTALLING…'; }
+      } else {
+        if (btn.dataset.state !== 'install') { btn.dataset.state = 'install'; btn.disabled = false; btn.textContent = 'INSTALL'; }
+      }
+    }
+    async function syncNow() {
+      if (!btn) return;
+      try { applyState(await (await fetch('/api/nexus/status', { cache: 'no-store' })).json()); } catch { /* transient */ }
+    }
+
+    if (btn) {
+      const ref  = btn.getAttribute('data-ref');
+      const name = btn.getAttribute('data-name') || ref;
+      // One click installs — the explicit INSTALL click is the consent.
+      btn.addEventListener('click', async () => {
+        if (btn.dataset.state !== 'install' || btn.disabled) return;
+        btn.dataset.busyUntil = String(Date.now() + 6000);
+        btn.dataset.state = 'installing'; btn.disabled = true; btn.textContent = 'INSTALLING…';
+        show('installing ' + ref + '…');
+        try {
+          const res = await fetch('/api/nexus/install', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ref, autoApprove: true }),
+          });
+          const json = await res.json();
+          if (!json.ok) { show('ERROR: ' + (json.error || res.status), 'err'); btn.dataset.busyUntil = '0'; btn.dataset.state = 'install'; btn.disabled = false; btn.textContent = 'INSTALL'; return; }
+          show('✓ installed ' + json.record.id + ' v' + json.record.version + ' — scope: ' + (json.record.scope || 'global'), 'ok');
+          btn.dataset.busyUntil = '0';
+          syncNow();
+        } catch (err) {
+          show('ERROR: ' + (err && err.message ? err.message : err), 'err');
+          btn.dataset.busyUntil = '0'; btn.dataset.state = 'install'; btn.disabled = false; btn.textContent = 'INSTALL';
+        }
+      });
+    }
+
+    // ── Continuous, visible-only state sync ────────────────────────────────
+    let pollTimer = null;
+    function pollLoop() {
+      pollTimer = null;
+      if (!document.hidden) syncNow();
+      pollTimer = setTimeout(pollLoop, 2500);
+    }
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) syncNow(); });
+    syncNow();
+    pollLoop();
+  </script>
+
+  <style is:global>
+    /* Back button — clearly bordered ghost button. */
+    .btn-back {
+      display: inline-flex; align-items: center; gap: 7px;
+      margin-bottom: 14px;
+      padding: 7px 15px 7px 12px;
+      font-size: 0.72rem; letter-spacing: 0.1em; text-transform: uppercase;
+      color: var(--aura-color-text, #ccffcc);
+      background: color-mix(in srgb, var(--aura-color-primary) 5%, transparent);
+      border: 1px solid var(--aura-color-text-dim, #6a8a6a);
+      transition: color .12s, border-color .12s, box-shadow .12s, background .12s;
+    }
+    .btn-back:hover {
+      color: var(--aura-color-primary);
+      border-color: var(--aura-color-primary);
+      background: color-mix(in srgb, var(--aura-color-primary) 12%, transparent);
+      box-shadow: 0 0 8px color-mix(in srgb, var(--aura-color-primary) 45%, transparent);
+      text-shadow: none;
+    }
+    .btn-back .back-arrow { font-size: 0.9rem; line-height: 1; transition: transform .12s; }
+    .btn-back:hover .back-arrow { transform: translateX(-3px); }
+
+    /* One combined panel. */
+    .detail-panel {
+      border-left: 3px solid var(--aura-color-primary);
+      padding: 16px 18px;
+    }
+    .detail-desc {
+      margin: 12px 0 0; font-size: 0.82rem; line-height: 1.55;
+      color: var(--aura-color-text); word-break: break-word;
+    }
+
+    /* Inline install feedback (shared .nexus-log + ok/err accents). */
+    .nexus-log.ok  { border-color: var(--aura-color-primary); color: var(--aura-color-primary); }
+    .nexus-log.err { border-color: var(--aura-color-warning, #e0a000); color: var(--aura-color-warning, #e0a000); }
+
+    /* Internal section divider — keeps everything reading as one panel. */
+    .panel-sec {
+      display: flex; align-items: center;
+      margin: 16px 0 8px;
+      border-top: 1px solid var(--aura-color-border);
+    }
+    .panel-lbl {
+      margin-top: -8px; padding-right: 10px;
+      background: var(--aura-color-surface);
+      font-size: 0.64rem; letter-spacing: 0.16em; text-transform: uppercase;
+      color: var(--aura-color-primary);
+    }
+
+    .detail-shots { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+    .detail-shots img { max-height: 180px; flex: 0 0 auto; border: 1px solid var(--aura-color-border); }
+
+    table.kv { border-collapse: collapse; font-size: 0.76rem; width: 100%; max-width: 680px; }
+    table.kv td { padding: 5px 10px; vertical-align: top; word-break: break-all; }
+    table.kv td:first-child {
+      color: var(--aura-color-text-dim); width: 120px;
+      text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.64rem;
+    }
+    a.badge:hover { color: var(--aura-color-primary); border-color: var(--aura-color-primary); text-shadow: none; }
+
+    .install-cta {
+      color: var(--aura-color-primary);
+      border: 1px solid var(--aura-color-primary);
+      background: color-mix(in srgb, var(--aura-color-primary) 8%, transparent);
+      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+      padding: 6px 14px; cursor: pointer; white-space: nowrap;
+    }
+    .install-cta:hover { box-shadow: 0 0 8px var(--aura-color-primary); }
+    .install-cta[disabled] { opacity: 0.5; cursor: default; box-shadow: none; }
+    /* Emphasised state when the button is asking for approval. */
+    .install-cta.cta-approve {
+      background: color-mix(in srgb, var(--aura-color-primary) 22%, transparent);
+      box-shadow: 0 0 10px color-mix(in srgb, var(--aura-color-primary) 55%, transparent);
+      animation: cta-pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes cta-pulse { 0%,100% { box-shadow: 0 0 6px color-mix(in srgb, var(--aura-color-primary) 40%, transparent); } 50% { box-shadow: 0 0 14px var(--aura-color-primary); } }
+
+    .approve-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .btn-ghost {
+      color: var(--aura-color-text-dim, #6a8a6a);
+      border: 1px solid var(--aura-color-text-dim, #6a8a6a);
+      background: transparent;
+      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+      padding: 6px 14px; cursor: pointer; white-space: nowrap;
+    }
+    .btn-ghost:hover { color: var(--aura-color-text); border-color: var(--aura-color-text); }
+  </style>
+</Layout>

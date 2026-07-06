@@ -1,0 +1,179 @@
+---
+title: Publish an App
+description: Package your app and ship it to an AuraOS registry with the aura CLI, so anyone can find and install it from the Nexus app store.
+---
+
+You've built an app (see [Develop an App](./develop-an-app)). Now put it
+where others can install it. Publishing is one command — `aura nexus app
+publish` — that pushes your app to a **registry** and embeds its store
+metadata so it shows up in the Nexus app store automatically.
+
+Everything here runs from the **Terminal app** (or any shell with `aura` on
+PATH). This is the CLI path; the Nexus app's UI is just a viewer over the
+same backend.
+
+## Prerequisites
+
+- A runnable app with a valid `app.manifest.json`. Sanity-check it first:
+  ```bash
+  aura dev validate apps/com.example.hello
+  ```
+- The transport tool for how you publish:
+  - **OCI registry** (recommended) needs `oras`:
+    ```bash
+    aura cap install oras
+    ```
+  - **Git repo** needs `git` (`aura cap install git`).
+
+The OS already ships a local registry — `com.aura.registry`, a zot instance
+at `http://aura-com.aura.registry:4090`, registered as the source named
+`local`. It's the default publish + test target, so you can go end-to-end
+without any external account.
+
+## 1. Add store metadata
+
+Two optional manifest blocks drive how your app appears in the store and
+where it publishes. Add them to `app.manifest.json`:
+
+```jsonc
+{
+  "id": "com.example.hello",
+  "name": "Hello",
+  "version": "0.1.0",
+  "description": "A tiny demo app.",
+  "icon": "HI",
+  "category": "utility",
+
+  // Storefront metadata — shown on the Browse + detail pages.
+  "store": {
+    "publisher": "Example Labs",
+    "homepage": "https://example.com/hello",
+    "license": "MIT",
+    "tags": ["demo", "hello"],
+    "longDescription": "A longer description for the app's detail page.",
+    "screenshots": ["https://example.com/hello/shot1.png"]
+  },
+
+  // Publish defaults — used when you run `aura nexus app publish` with no flags.
+  "publish": {
+    "registry": "local",          // an OCI source name, or a full registry URL
+    "channels": ["stable"],       // channel tags to push alongside the version
+    "ignore": ["node_modules", "dist", ".astro"]
+  }
+}
+```
+
+`screenshots` must be **absolute https URLs** (AuraOS doesn't host images —
+point at git-raw URLs or a CDN). Everything in `store` is optional; missing
+fields just render as "—".
+
+## 2. Publish
+
+Run it from the app directory (or pass the path):
+
+```bash
+cd apps/com.example.hello
+aura nexus app publish
+```
+
+Bare + interactive, this opens a short **wizard**: pick the destination
+(OCI registry or git repo), choose the target registry, the tag, and a
+channel, review the store metadata, and confirm.
+
+For scripts / CI, pass flags to skip the wizard:
+
+```bash
+aura nexus app publish --to local --kind oci --channel stable -y
+```
+
+| Flag | Meaning |
+|---|---|
+| `--to <name\|url\|repo>` | Destination: a registered source name (`local`), a registry URL, or a git repo. |
+| `--kind oci\|git` | Distribution form (default `oci`). |
+| `--tag <tag>` | Version tag (default: `<version>` for OCI, `v<version>` for git). |
+| `--channel <name>` | Channel label pushed alongside (e.g. `stable`, `beta`). |
+| `-y, --yes` | Non-interactive: publish with resolved defaults. |
+
+Publishing to an OCI registry pushes your app as a single annotated
+artifact:
+
+```
+aura-com.aura.registry:4090/aura-apps/com.example.hello:0.1.0   ← the version
+                                                        :stable  ← the channel
+                                                        :latest  ← always
+```
+
+Your `store` fields + core manifest are embedded in the artifact's OCI
+annotations (`org.opencontainers.image.*` and `app.aura.*`), so the store
+can list your app with full metadata **without pulling the bundle**. Apps
+live under the `aura-apps/` repo prefix, which keeps them cleanly separate
+from any other artifacts in the same registry.
+
+## 3. See it in the store
+
+The store aggregates every registered source. Refresh and search:
+
+```bash
+aura nexus search --refresh          # re-fetch all sources, list everything
+aura nexus app info com.example.hello  # resolved source + address + permission preview
+```
+
+It also appears in the Nexus app's **Browse** tab (open Nexus from the
+launcher) — same data, rendered.
+
+## 4. Install it
+
+From any AuraOS with your registry configured:
+
+```bash
+aura nexus app install com.example.hello
+```
+
+Installs default to the **global** [scope](./scopes); add `--scope user` for
+a per-user install, or `--channel beta` to pin a channel. First install of an
+app prompts to approve the tools/permissions it declares — pass `-y` to
+auto-approve (right for CI, not for user-driven installs).
+
+## Versions & channels
+
+- Bump `version` in the manifest and re-run `aura nexus app publish` to cut a
+  new release. The new `<version>` tag is pushed, and `:latest` (plus the
+  channel) move to it.
+- Channels are just extra tags. Ship `--channel beta` for pre-releases; users
+  opt in with `aura nexus app install <id> --channel beta`.
+- Update installed apps in place:
+  ```bash
+  aura nexus app update com.example.hello   # or --all
+  ```
+
+## Alternative: publish to a git repo
+
+No registry? Publish the app **as a git repo** (manifest at the repo root):
+
+```bash
+aura nexus app publish --kind git --to github.com/you/hello --tag v0.1.0
+```
+
+Then register that repo as a `git-app` source so it appears in the store, or
+install it directly by URL:
+
+```bash
+aura nexus registry add hello github.com/you/hello --kind git-app
+# or, one-off:
+aura nexus app install github.com/you/hello#v0.1.0
+```
+
+See [Nexus](./nexus) for the source kinds and how to run your own registry
+or catalog.
+
+## End-to-end, against the local registry
+
+```bash
+aura dev new com.example.hello           # scaffold (adds a runnable app)
+# …edit app.manifest.json: add the store + publish blocks…
+cd apps/com.example.hello
+aura nexus app publish --to local --kind oci -y   # push
+aura nexus search --refresh                        # it's in the catalog
+aura nexus app install com.example.hello           # install into global scope
+aura nexus app list                                # confirm it's installed
+```
