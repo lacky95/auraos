@@ -247,14 +247,16 @@ WORKDIR /workspace
 # EINVAL → Node's `realpathSync` in run_main blows up. A wrapper script is
 # a regular file, bind cleanly, and execs `node` with the final path so
 # Node never has to readlink the bind destination.
-# NOTE: @aura/core and @aura/kv-store are consumed via their dist/ (main →
-# ./dist/index.js), so the shell dev server crashes on a fresh clone unless
-# they're built first. `--filter @aura/cli build` alone does NOT build the
-# CLI's deps, and kv-store isn't a CLI dep at all — build both explicitly.
+# NOTE: every workspace package under packages/* is now consumed via its
+# built dist/ (main → ./dist/index.js, @aura/app-sdk/integration →
+# ./dist/integration.mjs, @aura/ui styles, …), so the shell dev server (and
+# app astro.config.mjs files that import @aura/app-sdk/integration) crash on a
+# fresh clone / bind-mount unless the packages are built first. Build ALL of
+# packages/* via a single recursive, dependency-ordered pnpm run so this never
+# drifts again when a package is added or flips to dist exports — an earlier
+# hardcoded core/kv-store/cli list silently missed @aura/ui and @aura/app-sdk.
 CMD ["sh", "-c", "{ pnpm install || echo '[aura] pnpm install exited non-zero (likely ERR_PNPM_IGNORED_BUILDS) — continuing'; } \
- && pnpm --filter @aura/core build \
- && pnpm --filter @aura/kv-store build \
- && pnpm --filter @aura/cli build \
+ && pnpm --filter \"./packages/*\" build \
  && install -D -m 0755 /workspace/os/aura-cli-shim.sh /usr/local/bin/aura \
  && install -D -m 0755 /workspace/os/aura-cli-shim.sh /os/toolchain/bin/aura \
  && install -D -m 0644 /workspace/os/bashrc.aura.sh /os/base-rootfs/root/.bashrc \
