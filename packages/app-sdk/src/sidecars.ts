@@ -61,6 +61,14 @@ export interface SidecarOptions {
   network?: string;          // default 'aura-net'
   /** Named-volume prefix; volume = `<prefix>-<vol.name>`. Default `aura-<appId>`. */
   volumePrefix?: string;
+  /**
+   * Value sent as `X-Forwarded-Prefix` on proxied requests so a subpath-aware
+   * upstream (Starlette/FastAPI root_path, many SPA dashboards) emits correctly
+   * prefixed URLs instead of root-absolute ones that escape the iframe proxy.
+   * Defaults to the AuraOS shell proxy path `/api/proxy/<instanceId>` (no
+   * trailing slash). Set '' to disable.
+   */
+  forwardedPrefix?: string;
   /** Base image used for throwaway helper containers (seeding). Default 'aura-base'. */
   helperImage?: string;
   auth?: SidecarAuth;
@@ -98,7 +106,12 @@ export class SidecarHost {
       helperImage: process.env['AURA_BASE_IMAGE'] || 'aura-base',
       ...options,
     };
+    // Default the reverse-proxy prefix to the AuraOS shell proxy path so a
+    // subpath-aware dashboard emits prefixed URLs. `?? ` (not `||`) so callers
+    // can pass '' to opt out.
+    this.forwardedPrefix = options.forwardedPrefix ?? `/api/proxy/${options.instanceId}`;
   }
+  private readonly forwardedPrefix: string;
 
   private log(msg: string): void { (this.opts.log ?? ((m: string) => console.log(m)))(`[sidecars] ${msg}`); }
   private setPhase(p: SidecarPhase, detail = ''): void { this.phase = p; this.detail = detail; this.log(`→ ${p}${detail ? ` (${detail})` : ''}`); }
@@ -240,6 +253,7 @@ export class SidecarHost {
 
     const forward = async (req: http.IncomingMessage, res: http.ServerResponse, allowRetry: boolean): Promise<void> => {
       const headers: http.OutgoingHttpHeaders = { ...req.headers, host: `${dashHost}:${dashPort}` };
+      if (this.forwardedPrefix) headers['x-forwarded-prefix'] = this.forwardedPrefix;
       if (this.opts.auth) Object.assign(headers, await this.opts.auth.headers());
       const upstream = http.request({ hostname: dashHost!, port: dashPort!, method: req.method, path: req.url, headers }, (upRes) => {
         const loc = (upRes.headers.location as string) || '';
@@ -269,6 +283,7 @@ export class SidecarHost {
       if (!dashHost) { sock.destroy(); return; }
       void (async () => {
         const headers: http.OutgoingHttpHeaders = { ...req.headers, host: `${dashHost}:${dashPort}` };
+        if (this.forwardedPrefix) headers['x-forwarded-prefix'] = this.forwardedPrefix;
         if (this.opts.auth) Object.assign(headers, await this.opts.auth.headers());
         const lines = [`${req.method} ${req.url} HTTP/1.1`];
         for (const [k, v] of Object.entries(headers)) {
