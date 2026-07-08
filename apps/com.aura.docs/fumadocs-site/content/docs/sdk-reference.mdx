@@ -282,6 +282,16 @@ export const ALL: APIRoute = ({ request, params }) =>
   proxyFetch(`http://localhost:8080/${params['path']}`, request);
 ```
 
+### Sidecars — bring-your-own-runtime (`packages/app-sdk/src/sidecars.ts`)
+
+`createSidecars({ appId, instanceId, appPort, services, auth?, onSeed? })` runs
+foreign Docker images as sibling containers and reverse-proxies one of them as
+the app's UI. It owns `docker run`/naming/DNS/volumes/labels/teardown, the
+lifecycle contract on `$APP_PORT`, and an auth-injecting HTTP+WS proxy. Declare
+the runtime in the manifest `services` block; see the dedicated guide:
+[Bring-your-own-runtime apps](/docs/bring-your-own-runtime). Also importable as
+`@aura/app-sdk/sidecars`.
+
 ### Next.js raw-runtime (`packages/app-sdk/src/runtime/next.ts`)
 
 Adapters that make a Next.js app conform to the Aura lifecycle

@@ -337,6 +337,52 @@ export const AppManifestSchema = z.object({
     id:      z.string().regex(/^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/),
     version: z.string(),
   })).default([]),
+  /**
+   * Sibling RUNTIME services this app brings up as its own environment —
+   * a declarative form of the "spawn a foreign Docker image as a sibling
+   * container and proxy it" pattern (com.aura.whisper, com.aura.hermes).
+   *
+   * Each entry is one Docker image the app runs alongside itself on the
+   * shared `aura-net` network. The @aura/app-sdk `createSidecars(...)` helper
+   * consumes this array to ensure/teardown the containers and reverse-proxy
+   * one of them as the app's UI — so a bring-your-own-runtime app no longer
+   * hand-rolls `docker run`, naming, DNS, volumes, health, and teardown.
+   *
+   * Requires `sandbox: 'container'` and `tools` including `"docker"` (the
+   * OS only bind-mounts the host docker socket for those apps). Sibling
+   * containers are named `aura-<instanceId>--<service.name>` and labelled
+   * `aura.parent=<instanceId>` so the OS can reap them (see AppManager).
+   */
+  services: z.array(z.object({
+    /** Service id; becomes the container suffix `aura-<instanceId>--<name>`. */
+    name:  z.string().regex(/^[a-z][a-z0-9-]*$/, { message: 'service.name must be kebab-case lowercase' }),
+    /** Docker image reference to run (e.g. `nousresearch/hermes-agent:latest`). */
+    image: z.string().min(1),
+    /** Command/args appended after the image (overrides/sets the image CMD). */
+    command: z.array(z.string()).default([]),
+    /** Pre-pull the image at install time (Nexus) instead of first boot. */
+    prePull: z.boolean().default(false),
+    /** Port inside the service to reverse-proxy / health-check. */
+    port: z.number().int().min(1).max(65535).optional(),
+    /** When true, this service's `port` is what the app window renders. */
+    proxyDashboard: z.boolean().default(false),
+    /** Extra env passed to the service container (`-e KEY=VALUE`). */
+    env: z.record(z.string(), z.string()).default({}),
+    /** Named volumes mounted into the service; volume = `aura-<appId>-<name>`. */
+    volumes: z.array(z.object({
+      name:   z.string().regex(/^[a-z][a-z0-9-]*$/),
+      target: z.string().min(1),
+    })).default([]),
+    /** DNS servers for the service container (app containers get none by default). */
+    dns: z.array(z.string()).default([]),
+    /** Docker restart policy for the service. */
+    restart: z.enum(['no', 'on-failure', 'always', 'unless-stopped']).default('unless-stopped'),
+    /** Optional readiness probe used to gate `proxyDashboard` traffic. */
+    readiness: z.object({
+      path:      z.string().default('/'),
+      timeoutMs: z.number().int().min(1000).default(600_000),
+    }).optional(),
+  })).default([]),
 }).refine(
   (m) => m.componentType !== 'service' || m.activityMode === 'none',
   { message: "componentType: 'service' requires activityMode: 'none' — services cannot host activities", path: ['componentType'] },

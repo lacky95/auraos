@@ -495,6 +495,44 @@ export class ContainerRunner implements SandboxRunner {
         console.log(`[ContainerRunner] killAllForApp: removed ${n} (app=${appId})`);
       } catch { /* already gone */ }
     }
+    // Also reap any SIBLING runtime containers this app spawned (via the
+    // @aura/app-sdk sidecar manager or hand-rolled `docker run`). They carry
+    // an `aura.app=<appId>` label so we can find them even though their names
+    // don't follow the `aura-<id>` scheme. Without this, a bring-your-own-
+    // runtime app's siblings (e.g. `nousresearch/hermes-agent`) would leak on
+    // uninstall.
+    this.reapSiblings('aura.app', appId);
+  }
+
+  /**
+   * Reap app-spawned sibling containers by label. Siblings are `docker run`
+   * by an app (with the host socket) OUTSIDE AppManager's tracking; they are
+   * labelled `aura.parent=<instanceId>` / `aura.app=<appId>` / `aura.service`
+   * by the SDK so the OS can find and remove them. Idempotent.
+   */
+  private reapSiblings(labelKey: 'aura.parent' | 'aura.app', labelVal: string): void {
+    let ids: string[] = [];
+    try {
+      const out = execSync(`docker ps -aq --filter "label=${labelKey}=${labelVal}"`, {
+        stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000, encoding: 'utf-8',
+      });
+      ids = out.split('\n').map((s) => s.trim()).filter(Boolean);
+    } catch (err) {
+      console.warn(`[ContainerRunner] reapSiblings ${labelKey}=${labelVal}: docker ps failed: ${(err as Error).message}`);
+      return;
+    }
+    for (const id of ids) {
+      try {
+        execSync(`docker rm -f ${id}`, { stdio: 'ignore', timeout: 10_000 });
+        console.log(`[ContainerRunner] reaped sibling ${id} (${labelKey}=${labelVal})`);
+      } catch { /* already gone */ }
+    }
+  }
+
+  /** Remove sibling containers belonging to a specific instance. Public so
+   *  AppManager can reap on graceful stop AND unexpected-exit (crash). */
+  public reapSiblingsOf(instanceId: string): void {
+    this.reapSiblings('aura.parent', instanceId);
   }
 
   public async listOrphanRecords(): Promise<Array<{
@@ -505,7 +543,7 @@ export class ContainerRunner implements SandboxRunner {
     pid:        number;
   }>> {
     type DockerPsRow = { Names: string };
-    type DockerInspect = { Config: { Env: string[] }; State: { Pid: number } };
+    type DockerInspect = { Config: { Env: string[]; Labels?: Record<string, string> }; State: { Pid: number } };
     let psOut: string;
     try {
       psOut = execSync(`docker ps --filter "name=aura-" --format "{{json .}}"`, {
@@ -537,6 +575,10 @@ export class ContainerRunner implements SandboxRunner {
         console.warn(`[ContainerRunner] inspect ${row.Names} failed: ${(err as Error).message}`);
         continue;
       }
+      // App-spawned SIBLING runtime containers (labelled `aura.parent`) are not
+      // AppManager instances — they belong to an app and are managed via
+      // reapSiblings, not adopted as instances.
+      if (inspect.Config?.Labels?.['aura.parent']) continue;
       const env: Record<string, string> = {};
       for (const kv of inspect.Config?.Env ?? []) {
         const i = kv.indexOf('=');
@@ -576,19 +618,33 @@ export class ContainerRunner implements SandboxRunner {
   }): void {
     if (this.containers.has(rec.instanceId)) return;
     // We don't have the container ID handy — docker inspect would have it,
-    // but the bookkeeping methods that need it (kill/forceKill) accept the
-    // name as a fallback. Set containerId = name; docker accepts either.
+    // but the bookkeeping methods that need it (kill/forceKill/wait/logs)
+    // accept the name as a fallback. Set containerId = name; docker accepts either.
+    const logTail = spawn('docker', ['logs', '-f', '--tail', '0', rec.hostname], { stdio: ['ignore', 'pipe', 'pipe'] });
+    logTail.stdout?.on('data', (d: Buffer) => process.stdout.write(`[${rec.instanceId}] ${d}`));
+    logTail.stderr?.on('data', (d: Buffer) => process.stderr.write(`[${rec.instanceId}] ${d}`));
     this.containers.set(rec.instanceId, {
       containerId:   rec.hostname,
       hostname:      rec.hostname,
       port:          rec.port,
       appId:         rec.appId,
-      logTail:       null,
+      logTail,
       pid:           rec.pid,
       exitCb:        null,
       expectingKill: false,
       manifest:      rec.manifest,
     });
+    // CRITICAL for restart stability: watch the adopted container for exit,
+    // exactly like spawn() does. Without this, if an adopted container dies
+    // (crash, or an external `docker rm`), AppManager never learns — the
+    // instance stays stuck in `resumed`, `start` reuses the phantom and
+    // no-ops, and the app can't be recovered without a full shell restart.
+    const watcher = spawn('docker', ['wait', rec.hostname], { stdio: ['ignore', 'pipe', 'ignore'] });
+    watcher.stdout?.on('data', (d: Buffer) => {
+      const code = parseInt(d.toString().trim(), 10);
+      this.handleExit(rec.instanceId, isNaN(code) ? null : code);
+    });
+    watcher.on('error', () => this.handleExit(rec.instanceId, null));
   }
 
   /** Probe the app's health endpoint until ready or timeout. */
@@ -665,6 +721,10 @@ export class ContainerRunner implements SandboxRunner {
     if (!tracked) return;
     tracked.expectingKill = true;
     try { execSync(`docker stop -t 5 ${tracked.containerId}`, { stdio: 'ignore', timeout: 8_000 }); } catch { /* may already be dead */ }
+    // Stop this instance's sibling runtime containers too (the app's own
+    // onDestroy usually tears them down first; this is belt-and-braces so a
+    // failed/slow teardown can't leak them).
+    this.reapSiblingsOf(instanceId);
     this.handleExit(instanceId, 0);
   }
   forceKill(instanceId: string): boolean {

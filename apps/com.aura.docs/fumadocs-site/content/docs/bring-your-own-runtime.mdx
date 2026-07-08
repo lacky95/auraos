@@ -1,0 +1,156 @@
+---
+title: Bring-your-own-runtime apps
+description: Run a foreign Docker image (a whole app/agent/service) as your app's own isolated environment, and surface its UI as an AuraOS window.
+---
+
+Some apps aren't a single web server — they wrap a whole external runtime: an
+agent, a model server, a registry, a database. AuraOS runs every app container
+from the shared `aura-base` image, so an app **can't be** a foreign image
+directly. Instead it acts as a thin **controller**: it bind-mounts the host
+Docker socket and runs the foreign image as a **sibling container** on the
+`aura-net` network, then reverse-proxies it.
+
+This used to be ~200 lines of hand-rolled `docker run` per app (see
+`com.aura.whisper`, `com.aura.registry`). Now you **declare** the runtime in the
+manifest and wire it up with `@aura/app-sdk/sidecars` in about a dozen lines.
+
+## 1. Declare the runtime in the manifest
+
+Add a `services` array to `app.manifest.json`. Each entry is one sibling image.
+The app must be `sandbox: "container"` and list `"docker"` in `tools` (only then
+does the OS bind-mount the host Docker socket).
+
+```jsonc
+{
+  "id": "com.example.agent",
+  "componentType": "activity",
+  "runtime": "raw",
+  "sandbox": "container",
+  "tools": ["bash", "node", "docker"],
+  "serverPort": 4110,
+  "proxy": { "rewriteHtml": "astro" },
+  "services": [
+    {
+      "name": "runtime",                 // container = aura-<instanceId>--runtime
+      "image": "vendor/their-image:tag",
+      "command": ["serve", "--port", "8080"],  // args appended after the image
+      "port": 8080,                       // port to proxy / health-check
+      "proxyDashboard": true,             // this service's UI becomes the app window
+      "env": { "SOME_FLAG": "1" },
+      "volumes": [{ "name": "data", "target": "/var/lib/app" }], // vol = aura-<appId>-data
+      "dns": ["8.8.8.8", "1.1.1.1"],      // app containers get no DNS by default
+      "prePull": true,                    // pull at install (Nexus) instead of first boot
+      "restart": "unless-stopped"
+    }
+  ]
+}
+```
+
+Field notes:
+
+- **`name`** → the sibling container is named `aura-<instanceId>--<name>` and
+  labelled `aura.parent=<instanceId>` / `aura.app=<appId>` so the OS can reap it.
+- **`command`** → appended after the image (sets the container's CMD). Many
+  images need an explicit run subcommand — without it they exit and crash-loop.
+- **`proxyDashboard`** → the SDK reverse-proxies this service's `port` through
+  your `$APP_PORT`, so it renders in the app window. At most one per app.
+- **`volumes`** → named Docker volumes (`aura-<appId>-<name>`), the durable
+  home for the runtime's state. They survive restarts and app updates.
+- **`dns`** → sibling containers get outbound DNS via these; the app's own
+  container gets none, so set this if the runtime reaches the internet.
+- **`prePull`** → hint that Nexus should pull the image at install time.
+
+## 2. Wire it up with `@aura/app-sdk/sidecars`
+
+`createSidecars(...)` owns all the boilerplate: idempotent `docker run`, naming,
+DNS, volumes, labels, the AuraOS lifecycle contract on `$APP_PORT` (health
+answers **immediately** so a slow first-run image pull can't blow the 60 s
+health window), teardown on `onDestroy`, and a streaming reverse proxy
+(HTTP + WebSocket) with a "starting…" interstitial.
+
+```js
+// server.mjs — runtime: "raw", entrypoint execs `node server.mjs`
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { createSidecars } from '@aura/app-sdk/sidecars';
+
+const HERE = fileURLToPath(new URL('.', import.meta.url));
+const manifest = JSON.parse(readFileSync(HERE + 'app.manifest.json', 'utf8'));
+
+createSidecars({
+  appId:      process.env.APP_ID,
+  instanceId: process.env.APP_INSTANCE_ID,
+  appPort:    Number(process.env.APP_PORT),
+  services:   manifest.services,
+}).listen();
+```
+
+That's a complete bring-your-own-runtime app. `@aura/app-sdk` resolves from the
+workspace `node_modules` mounted into every container — no `aura sdk install`
+needed for the sidecar module.
+
+### Auth injection (optional)
+
+If the runtime's UI is behind a login, pass an `auth` hook so the user isn't
+prompted twice. The SDK injects the returned headers on every proxied request
+(HTTP + WS) and re-authenticates on an auth bounce:
+
+```js
+createSidecars({
+  /* …ctx, services… */
+  auth: {
+    async headers() { if (!session) await login(); return { cookie: session }; },
+    isAuthBounce: (status, loc) => status >= 300 && status < 400 && /\/login/.test(loc),
+    async reauth() { session = ''; await login(); },
+  },
+});
+```
+
+### First-run seeding (optional)
+
+`onSeed` runs once per volume before the service starts — drop default config in
+without clobbering user edits:
+
+```js
+createSidecars({
+  /* … */
+  async onSeed({ run }) {
+    try { await run(['test', '-f', '/vol/config.yaml']); return; } catch { /* absent */ }
+    await run(['sh', '-c', 'cat > /vol/config.yaml'], readFileSync(HERE + 'seed/config.yaml'));
+  },
+});
+```
+`run(args, stdin?)` executes a throwaway helper container with the target volume
+mounted at `/vol`, so you never need a host-path bind of your source tree.
+
+## 3. The OS owns sibling lifecycle
+
+Because siblings are labelled `aura.parent` / `aura.app`, the OS tracks them
+even though it didn't spawn them:
+
+- **Stop** → the instance's siblings are reaped (`aura.parent=<instanceId>`).
+- **Crash** → a crashed app never runs `onDestroy`, so the OS reaps its siblings
+  by label (a respawn re-creates fresh ones) — no orphans with `--restart`.
+- **Uninstall** → every sibling of the app is reaped (`aura.app=<appId>`).
+- **Adoption** → the orphan scanner skips `aura.parent`-labelled containers;
+  they belong to an app, not to the AppManager.
+
+## Requirements & caveats
+
+- Needs `sandbox: "container"` + `tools: ["docker"]` — this grants host Docker
+  access (effectively root on the host). Same trust model as any `docker`-tool
+  app. Don't publish host ports.
+- The host Docker daemon must be able to pull the image. If it can't, the app
+  still boots and shows an interstitial telling the operator to `docker pull` it;
+  it starts automatically once the image is present.
+- The dashboard's assets should resolve under the proxy — set
+  `proxy.rewriteHtml: "astro"` so the shell injects `<base href>` and rewrites
+  relative URLs. SPAs that emit root-absolute (`/assets`) URLs may need
+  `rewriteHtml: "absolute"` + `preservePrefix`.
+
+## Reference apps
+
+- `com.aura.hermes` — runs the Nous Research Hermes Agent (`services` +
+  `createSidecars` + auto-login + SOUL.md seeding).
+- `com.aura.whisper` — the original hand-rolled pattern (two sibling images).
+- `com.aura.registry` — wraps a third-party binary behind a lifecycle/proxy shim.

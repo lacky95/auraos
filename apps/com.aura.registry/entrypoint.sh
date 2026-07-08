@@ -27,8 +27,21 @@ cat > "$CFG_DIR/config.json" <<'JSON'
 }
 JSON
 
-echo "[${APP_ID:-com.aura.registry}] starting zot (internal :5000)..."
-zot serve "$CFG_DIR/config.json" &
+# Resolve the zot binary robustly. It ships baked into aura-base, but is also
+# installable as the `zot` capability (bind-mounted via tools[] into
+# /aura/my-tools) so the registry survives images that don't carry it. Fail
+# loudly if it's genuinely absent instead of silently leaving a dead upstream.
+ZOT_BIN="$(command -v zot || true)"
+for cand in /aura/my-tools/zot /aura/all-tools/zot /usr/local/bin/zot; do
+  [ -z "$ZOT_BIN" ] && [ -x "$cand" ] && ZOT_BIN="$cand"
+done
+if [ -z "$ZOT_BIN" ]; then
+  echo "[${APP_ID:-com.aura.registry}] FATAL: zot binary not found. Install it with: aura cap install zot" >&2
+  exit 1
+fi
+
+echo "[${APP_ID:-com.aura.registry}] starting zot ($ZOT_BIN, internal :5000)..."
+"$ZOT_BIN" serve "$CFG_DIR/config.json" &
 ZOT_PID=$!
 
 # If zot dies the wrapper has no upstream — propagate the failure so

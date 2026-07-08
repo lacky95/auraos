@@ -13,7 +13,7 @@
   "entrypoint":     "entrypoint.sh",
   "autoStart":      true,
   "critical":       true,
-  "tools":          ["bash", "node"],
+  "tools":          ["bash", "node", "zot"],
   "permissions":    ["storage.read", "storage.write"],
   "serverPort":     4090,
   "proxy": {

@@ -460,6 +460,11 @@ export class AppManager {
         const manifest = this.registry.getById(o.appId);
         if (manifest) {
           this.runners.container.registerAdopted?.({ ...o, manifest });
+          // Wire the crash handler so a dying adopted container is detected
+          // (registerAdopted starts the `docker wait` watcher that fires this).
+          // Without it the instance would stick in `resumed` forever and be
+          // unrecoverable via `start`/`restart`.
+          this.runners.container.onExit(o.instanceId, (code) => this.handleUnexpectedExit(o.instanceId, o.appId, code));
           this.providers.registerInstance(inst, manifest);
         } else {
           // Manifest gone (app uninstalled mid-restart). Skip adoption — without
@@ -1581,6 +1586,10 @@ export class AppManager {
     const inst = this.instances.get(instanceId);
     if (inst) this.providers.unregisterInstance(inst, this.registry.getById(appId));
     this.purgeActivitiesOfInstance(instanceId);
+    // A crashed app never runs its onDestroy, so any sibling runtime containers
+    // it spawned (with `--restart unless-stopped`) would keep running orphaned.
+    // Reap them by label; a respawn re-creates fresh ones via the SDK.
+    this.runnerOf(instanceId).reapSiblingsOf?.(instanceId);
     this.fsm.set(instanceId, 'error');
     if (inst) {
       inst.state = 'error';

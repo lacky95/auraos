@@ -57,3 +57,10 @@ export { auraAppIntegration, auraIdentityIntegration } from './integration.mjs';
 // import (`@aura/app-sdk/proxy`) also works for apps that prefer it.
 export { proxyFetch, sanitizeHeaders } from './proxy.js';
 export type { ProxyFetchOptions } from './proxy.js';
+
+// Sibling-container runtime manager for "bring-your-own-runtime" apps that run
+// a foreign Docker image alongside themselves and proxy it (see the manifest
+// `services` block). Server-side only; also importable via
+// `@aura/app-sdk/sidecars`.
+export { SidecarHost, createSidecars } from './sidecars.js';
+export type { ServiceSpec, SidecarAuth, SidecarOptions, SidecarPhase, HelperRun } from './sidecars.js';

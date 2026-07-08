@@ -53,6 +53,20 @@ capabilities:
     binary: bun
     description: "Bun JavaScript runtime"
 
+  oras:
+    source: curl
+    install_cmd: "curl -fsSL https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_linux_amd64.tar.gz | tar -xz -C /usr/local/bin oras"
+    binary_path: /usr/local/bin/oras
+    binary: oras
+    description: "OCI Registry As Storage client — transport for Nexus app publish/install"
+
+  zot:
+    source: curl
+    install_cmd: "curl -fsSL https://github.com/project-zot/zot/releases/download/v2.1.7/zot-linux-amd64-minimal -o /usr/local/bin/zot && chmod +x /usr/local/bin/zot"
+    binary_path: /usr/local/bin/zot
+    binary: zot
+    description: "OCI Distribution registry server — backs the com.aura.registry Nexus store"
+
 services:
   sshd:
     source: apt

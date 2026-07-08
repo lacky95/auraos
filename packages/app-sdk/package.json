@@ -17,6 +17,10 @@
       "import": "./dist/proxy.js",
       "types": "./dist/proxy.d.ts"
     },
+    "./sidecars": {
+      "import": "./dist/sidecars.js",
+      "types": "./dist/sidecars.d.ts"
+    },
     "./runtime/next": {
       "import": "./dist/runtime/next.js",
       "types": "./dist/runtime/next.d.ts"

@@ -82,6 +82,13 @@ export interface SandboxRunner {
    * Container-only; PRoot's children die with the shell so it doesn't implement it.
    */
   killAllForApp?(appId: string): Promise<void>;
+  /**
+   * Remove sibling runtime containers an app spawned for a given instance
+   * (labelled `aura.parent=<instanceId>`). Called on graceful stop and on
+   * unexpected exit so a crashed bring-your-own-runtime app doesn't leak its
+   * siblings. Container-only; PRoot apps don't spawn siblings.
+   */
+  reapSiblingsOf?(instanceId: string): void;
 }
 
 /** What every concrete runner needs to construct. */
