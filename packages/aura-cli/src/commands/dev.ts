@@ -19,6 +19,32 @@ const TEMPLATE_DIR = (() => {
 })();
 
 const APPS_DIR = process.env['AURA_APPS_DIR'] ?? '/workspace/apps';
+const DATA_DIR = process.env['AURA_DATA_DIR'] ?? '/data';
+
+/**
+ * Scopes a developer may scaffold into with `aura dev new`. `system` is
+ * deliberately excluded: it's the immutable in-repo monorepo scope
+ * (workspace:* deps, lives in /workspace/apps) and must NEVER be a target for
+ * the CLI. The scaffold API and Nexus still know about system for internal/
+ * legacy use, but the CLI neither offers it in the wizard nor accepts it via
+ * --scope. New apps are `user` by default, or `global` if opted into.
+ */
+const SELECTABLE_SCOPES = ['user', 'global'] as const;
+type SelectableScope = typeof SELECTABLE_SCOPES[number];
+
+/**
+ * Host-side apps directory for a scope — mirrors core's ScopeRegistry so the
+ * wizard preview, the flag path, and the offline local-write fallback all
+ * agree on where an app actually lands (rather than always assuming the
+ * system /workspace/apps dir).
+ */
+function scopeAppsDir(scope: ScopeId): string {
+  switch (scope) {
+    case 'system': return APPS_DIR;
+    case 'global': return join(DATA_DIR, 'scopes', 'global', 'apps');
+    case 'user':   return join(DATA_DIR, 'scopes', 'users', 'default', 'apps');
+  }
+}
 
 function renderTemplate(
   srcDir: string,
@@ -157,8 +183,8 @@ async function runWizard(seed: { appId?: string; force?: boolean }): Promise<Sca
           allowBack: true,
           validate: (s) => {
             if (!PKG_RE.test(s)) return `Invalid: ${s}. Use reverse-domain like com.example.app.`;
-            const dest = join(APPS_DIR, s);
-            if (existsSync(dest) && !seed.force) return `${dest} already exists. Re-run with --force to overwrite.`;
+            // Existence is checked at the confirm step, once the target scope
+            // (and therefore the destination directory) has been chosen.
             return null;
           },
         });
@@ -256,6 +282,22 @@ async function runWizard(seed: { appId?: string; force?: boolean }): Promise<Sca
       },
     },
     {
+      id: 'scope',
+      run: async () => {
+        // Only user/global are offered — `system` is reserved for the in-repo
+        // OS apps and is never a scaffold target (see SELECTABLE_SCOPES).
+        const opts = [
+          { value: 'user'   as SelectableScope, label: 'User',   desc: 'Private to you. Lives in your user data dir. The usual choice.' },
+          { value: 'global' as SelectableScope, label: 'Global', desc: 'Shared across every user on this machine.' },
+        ];
+        const startIdx = Math.max(0, opts.findIndex((o) => o.value === draft.scope));
+        const v = await promptChoice<SelectableScope>('Scope', opts, startIdx, { allowBack: true });
+        if (v === BACK) return 'back';
+        draft.scope = v;
+        return 'advance';
+      },
+    },
+    {
       id: 'tools',
       run: async () => {
         const v = await pickTools(draft.tools);
@@ -268,6 +310,7 @@ async function runWizard(seed: { appId?: string; force?: boolean }): Promise<Sca
       id: 'confirm',
       run: async () => {
         const cfg = draft as ScaffoldConfig;
+        const dest = join(scopeAppsDir(cfg.scope), cfg.appId);
         stdoutDivider();
         console.log(`  ${color.bold('Summary')}`);
         stdoutDivider();
@@ -275,8 +318,12 @@ async function runWizard(seed: { appId?: string; force?: boolean }): Promise<Sca
         for (const [k, val] of Object.entries(summary)) {
           console.log(`  ${color.dim(k.padEnd(18))} ${color.green(JSON.stringify(val))}`);
         }
-        console.log(`  ${color.dim('dest'.padEnd(18))} ${color.green(join(APPS_DIR, cfg.appId))}`);
+        console.log(`  ${color.dim('scope'.padEnd(18))} ${color.green(cfg.scope)}`);
+        console.log(`  ${color.dim('dest'.padEnd(18))} ${color.green(dest)}`);
         stdoutDivider();
+        if (existsSync(dest) && !seed.force) {
+          warn(`${dest} already exists — creating will overwrite it.`);
+        }
         const proceed = await promptConfirm('Create?', true, { allowBack: true });
         if (proceed === BACK) return 'back';
         return proceed ? 'advance' : 'cancel';
@@ -298,9 +345,9 @@ async function runWizard(seed: { appId?: string; force?: boolean }): Promise<Sca
       }
       i++;
     }
-    // Wizard always defaults to user-scope. Devs who want system-scope
-    // (monorepo dev workflow, workspace:* deps) opt in non-interactively
-    // via `aura dev new <id> --non-interactive --scope system`.
+    // The scope step already set this; `??=` is just a safety net for an
+    // unexpected empty draft. `user` is the default — `system` is never an
+    // option (it's reserved for the in-repo OS apps; see SELECTABLE_SCOPES).
     draft.scope ??= 'user';
     return draft as ScaffoldConfig;
   } catch (err) {
@@ -571,7 +618,7 @@ function readSdkVersion(): string {
 
 /** Local-write fallback used when the shell isn't reachable. */
 function writeFilesLocal(cfg: ScaffoldConfig, files: PayloadFile[]): string {
-  const dest = join(APPS_DIR, cfg.appId);
+  const dest = join(scopeAppsDir(cfg.scope), cfg.appId);
   mkdirSync(dest, { recursive: true });
   for (const f of files) {
     const target = join(dest, f.relPath);
@@ -614,22 +661,35 @@ async function scaffoldFromConfig(cfg: ScaffoldConfig): Promise<void> {
     // overlay but the host AppManager won't see it; warn the caller.
     const msg = (err as Error).message;
     warn(`shell scaffold unreachable (${msg.split('\n')[0]}); writing locally instead.`);
-    if (existsSync(join(APPS_DIR, cfg.appId))) {
-      fail(`${join(APPS_DIR, cfg.appId)} already exists.`);
+    const localDest = join(scopeAppsDir(cfg.scope), cfg.appId);
+    if (existsSync(localDest)) {
+      fail(`${localDest} already exists.`);
     }
     dest = writeFilesLocal(cfg, files);
-    // Local path also needs pnpm install — without the workspace symlinks
-    // the new app can't resolve @aura/app-sdk and astro at launch time.
-    const result = runPnpmInstallAt(dirname(dest));
-    installed = result.ok;
-    installError = result.error;
+    // Only system-scope apps live in the pnpm workspace and need a workspace
+    // install to get their @aura/* + astro symlinks. user/global apps live
+    // outside the workspace globs; their deps resolve at app-start time via
+    // `aura sdk install` (the synth entrypoint hooks it in), so there's
+    // nothing to install here. NB: system isn't reachable from the CLI, so in
+    // practice this branch always skips — kept for completeness.
+    if (cfg.scope === 'system') {
+      const result = runPnpmInstallAt(dirname(dest));
+      installed = result.ok;
+      installError = result.error;
+    } else {
+      installed = true;
+    }
   }
 
   ok(`scaffolded ${color.bold(cfg.appId)} at ${dest}${viaShell ? color.dim(' (via shell)') : ''}`);
-  if (installed) {
-    info(`pnpm install: ${color.dim('ok')}`);
+  if (cfg.scope === 'system') {
+    if (installed) {
+      info(`pnpm install: ${color.dim('ok')}`);
+    } else {
+      warn(`pnpm install did not complete (${installError ? installError.split('\n')[0] : 'unknown'}). Run \`pnpm install\` in the workspace root before launching.`);
+    }
   } else {
-    warn(`pnpm install did not complete (${installError ? installError.split('\n')[0] : 'unknown'}). Run \`pnpm install\` in the workspace root before launching.`);
+    info(`@aura/* deps resolve on first launch via ${color.dim('aura sdk install')}.`);
   }
   info(`Run \`aura app start ${cfg.appId}\` to launch it.`);
 }
@@ -664,7 +724,7 @@ export function registerDev(program: Command): void {
     .option('--instance-mode <mode>',  'single | multi', 'single')
     .option('--sandbox <kind>',        'proot | container', 'proot')
     .option('--tools <list>',          'Comma-separated capabilities to declare', '')
-    .option('--scope <id>',            'system | global | user — where to install (default: user)', 'user')
+    .option('--scope <id>',            'user | global — where to install (default: user). system is reserved and cannot be targeted.', 'user')
     .option('--force',                 'Overwrite if target directory exists')
     .option('--non-interactive',       'Never prompt; require flags + appId')
     .description('Scaffold a new AuraOS app. Interactive wizard if no appId is given (or pass flags to script it).')
@@ -692,8 +752,6 @@ export function registerDev(program: Command): void {
       // Flag-based path (CI / scripted use).
       if (!appId) fail('No appId given. Run interactively or pass `aura dev new <appId>`.');
       if (!PKG_RE.test(appId)) fail(`Invalid app ID: ${appId}. Use reverse-domain notation like com.example.app.`);
-      const dest = join(APPS_DIR, appId);
-      if (existsSync(dest) && !opts.force) fail(`${dest} already exists. Pass --force to overwrite.`);
 
       // Validate the enum flags up front so a typo fails fast with a clear
       // message instead of producing a manifest that only blows up later at
@@ -710,7 +768,16 @@ export function registerDev(program: Command): void {
       enumGuard('--shape',          opts.shape,        ['activity', 'activity-bg', 'service'] as const);
       enumGuard('--instance-mode',  opts.instanceMode, ['single', 'multi'] as const);
       enumGuard('--sandbox',        opts.sandbox,      ['proot', 'container'] as const);
-      enumGuard('--scope',          opts.scope,        ['system', 'global', 'user'] as const);
+      // `system` is reserved for the immutable in-repo OS scope and must never
+      // be a scaffold target — surface a dedicated message before the generic
+      // enum guard so the reason is obvious.
+      if ((opts.scope as string) === 'system') {
+        fail('system scope is reserved for in-repo OS apps and cannot be created with `aura dev new`. Use --scope user (the default) or --scope global.');
+      }
+      enumGuard('--scope',          opts.scope,        SELECTABLE_SCOPES);
+
+      const dest = join(scopeAppsDir(opts.scope), appId);
+      if (existsSync(dest) && !opts.force) fail(`${dest} already exists. Pass --force to overwrite.`);
 
       const cfg: ScaffoldConfig = {
         appId,
