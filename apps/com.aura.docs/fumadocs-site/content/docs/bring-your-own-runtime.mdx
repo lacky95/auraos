@@ -148,9 +148,32 @@ even though it didn't spawn them:
   relative URLs. SPAs that emit root-absolute (`/assets`) URLs may need
   `rewriteHtml: "absolute"` + `preservePrefix`.
 
+## Rendering fidelity — let the runtime render as-is
+
+A third-party dashboard ships its own complete styling; you usually want it to
+look exactly like it does natively, not adopt the AuraOS theme. Two manifest
+settings control what the shell proxy injects into the app document:
+
+- **`themeStrategy: "override"`** (top-level) — stops the proxy injecting
+  `<link rel="stylesheet" href="/api/os/theme.css">`. That OS stylesheet is
+  mostly harmless `:root { --aura-* }` variables, but it also carries global
+  `*`/`::-webkit-scrollbar` rules that restyle the app's scrollbars — `override`
+  keeps them out so the runtime renders in its own skin. (The Process Manager
+  shows an `OVERRIDE` chip so users know why it looks different.)
+- **`proxy.injectMeta: false`** — drops the non-rendering `aura-*` meta tags
+  (design-framework, theme, keymap blobs). Optional/cosmetic; the always-injected
+  `aura-app-id`/`aura-instance-id` identity meta stay, so the iframe identity gate
+  is unaffected.
+
+Keep `rewriteHtml: "astro"` even so — it's what rewrites the runtime's
+root-absolute `/assets/*` tags to `/api/proxy/<id>/assets/*`; it doesn't touch
+appearance. `com.aura.hermes` uses exactly this combination
+(`themeStrategy: "override"` + `injectMeta: false`) to render the Hermes
+dashboard natively.
+
 ## Reference apps
 
 - `com.aura.hermes` — runs the Nous Research Hermes Agent (`services` +
-  `createSidecars` + auto-login + SOUL.md seeding).
+  `createSidecars` + auto-login + SOUL.md seeding + native rendering).
 - `com.aura.whisper` — the original hand-rolled pattern (two sibling images).
 - `com.aura.registry` — wraps a third-party binary behind a lifecycle/proxy shim.
