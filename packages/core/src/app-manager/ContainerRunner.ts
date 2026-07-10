@@ -198,9 +198,9 @@ export class ContainerRunner implements SandboxRunner {
     const watcher = spawn('docker', ['wait', containerId], { stdio: ['ignore', 'pipe', 'ignore'] });
     watcher.stdout?.on('data', (d: Buffer) => {
       const code = parseInt(d.toString().trim(), 10);
-      this.handleExit(instanceId, isNaN(code) ? null : code);
+      this.handleExit(instanceId, isNaN(code) ? null : code, containerId);
     });
-    watcher.on('error', () => this.handleExit(instanceId, null));
+    watcher.on('error', () => this.handleExit(instanceId, null, containerId));
 
     try {
       await this.waitHealthy(instanceId, appId, hostname, port, manifest);
@@ -642,9 +642,9 @@ export class ContainerRunner implements SandboxRunner {
     const watcher = spawn('docker', ['wait', rec.hostname], { stdio: ['ignore', 'pipe', 'ignore'] });
     watcher.stdout?.on('data', (d: Buffer) => {
       const code = parseInt(d.toString().trim(), 10);
-      this.handleExit(rec.instanceId, isNaN(code) ? null : code);
+      this.handleExit(rec.instanceId, isNaN(code) ? null : code, rec.hostname);
     });
-    watcher.on('error', () => this.handleExit(rec.instanceId, null));
+    watcher.on('error', () => this.handleExit(rec.instanceId, null, rec.hostname));
   }
 
   /** Probe the app's health endpoint until ready or timeout. */
@@ -735,9 +735,17 @@ export class ContainerRunner implements SandboxRunner {
     this.handleExit(instanceId, null);
     return true;
   }
-  private handleExit(instanceId: string, code: number | null): void {
+  private handleExit(instanceId: string, code: number | null, watchedId?: string): void {
     const tracked = this.containers.get(instanceId);
     if (!tracked) return;
+    // Guard against a STALE watcher clobbering a freshly-respawned container.
+    // A single-instance app reuses the same instanceId, so a `docker wait`
+    // watcher from a previous container (or the adopted one, keyed by name)
+    // can fire while a NEW container is already tracked under this id. Only
+    // act if the exit belongs to the container we're currently tracking —
+    // otherwise a re-spawn's pre-cleanup `docker rm -f <name>` would delete
+    // the new container's tracking and the reconciler would mark it "gone".
+    if (watchedId && tracked.containerId !== watchedId) return;
     if (tracked.logTail && !tracked.logTail.killed) { try { tracked.logTail.kill(); } catch { /* ignore */ } }
     const cb = tracked.exitCb;
     const wasExpected = tracked.expectingKill;
