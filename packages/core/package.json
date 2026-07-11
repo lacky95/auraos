@@ -27,7 +27,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test test/identity-routing.test.mjs"
+    "test": "tsc && node --test test/identity-routing.test.mjs test/container-volume.test.mjs"
   },
   "dependencies": {
     "chokidar": "^3.6.0",

@@ -1,5 +1,6 @@
 import { spawn, spawnSync, execSync, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
@@ -11,6 +12,25 @@ const HEALTH_CHECK_TIMEOUT_MS = 60_000; // slightly higher than PRoot because co
 const LIFECYCLE_TIMEOUT_MS = 5_000;
 const SHARED_NETWORK = process.env['AURA_DOCKER_NETWORK'] ?? 'aura-net';
 const BASE_IMAGE     = process.env['AURA_BASE_IMAGE']     ?? 'aura-base';
+
+/** One entry of `docker inspect`'s `.Mounts` array (only the fields we read). */
+interface DockerMount {
+  Type?: string;
+  Name?: string;
+  Source?: string;
+  Destination?: string;
+}
+
+/**
+ * Pick the NAMED-volume name attached at `destination` from a docker inspect
+ * `.Mounts` array. Returns undefined when there is no such mount or it is a
+ * bind mount (which has no volume name). Pure — unit-tested in
+ * test/container-volume.test.mjs.
+ */
+export function pickVolumeByDestination(mounts: DockerMount[], destination: string): string | undefined {
+  const m = mounts.find((x) => x.Destination === destination && x.Type === 'volume' && !!x.Name);
+  return m?.Name;
+}
 
 const SYNTHESISED_ENTRYPOINT = `set -e
 export PORT="\${APP_PORT:-4001}"
@@ -94,6 +114,10 @@ export class ContainerRunner implements SandboxRunner {
   /** Public name the shell uses for itself on the shared docker network. */
   private shellHostname: string;
   private workspaceRoot: string;
+  /** Named volume backing /data (app-data). Resolved once at construction. */
+  private appDataVolume!: string;
+  /** Named volume backing /workspace/node_modules. Resolved once. */
+  private nodeModulesVolume!: string;
 
   constructor(opts: SandboxRunnerOpts) {
     this.toolchainDir = opts.toolchainDir;
@@ -117,6 +141,7 @@ export class ContainerRunner implements SandboxRunner {
     this.workspaceRoot = process.env['AURA_HOST_WORKSPACE'] ?? '/workspace';
     void opts.baseRootfs; // unused — containers bring their own rootfs via the image
     this.ensureNetwork();
+    this.resolveVolumeNames();
   }
 
   // ─── Tool-allowlist dir (shared semantics with PRoot) ─────────────────
@@ -251,9 +276,11 @@ export class ContainerRunner implements SandboxRunner {
     // the named volume; the host's `./node_modules` is whatever was there
     // before compose). Sibling containers MUST mount those volumes by name
     // to see the same pnpm symlink targets the host pnpm install
-    // generated.
-    const nodeModulesVolume = process.env['AURA_NODE_MODULES_VOLUME'] ?? 'aura_aura-node-modules';
-    const appDataVolume     = process.env['AURA_APP_DATA_VOLUME']     ?? 'aura_aura-app-data';
+    // generated. Names are resolved once in resolveVolumeNames() (discovered
+    // from the shell's own mounts, so they match regardless of the compose
+    // project name / directory).
+    const nodeModulesVolume = this.nodeModulesVolume;
+    const appDataVolume     = this.appDataVolume;
     // Subpath inside the app-data named volume — matches the layout the
     // AppManager creates via mkdirSync(instDataDir) below ("apps/<id>/<inst>",
     // NOT "aura/apps/..."). The dataDir is the mount point, not part of
@@ -793,5 +820,82 @@ export class ContainerRunner implements SandboxRunner {
         console.warn(`[ContainerRunner] could not create ${SHARED_NETWORK}: ${(err as Error).message}. Set AURA_DOCKER_NETWORK or create it manually.`);
       }
     }
+  }
+
+  // ─── Volume-name resolution ───────────────────────────────────────────
+  //
+  // Sibling app containers must mount the SAME named volumes the shell uses
+  // for /data (app-data) and /workspace/node_modules. Compose names volumes
+  // `<project>_<volume>`, and the project name comes from the directory /
+  // COMPOSE_PROJECT_NAME — which ContainerRunner can't guess. Hardcoding a
+  // prefix is fragile: it only matches when the dir happens to be named a
+  // certain way (this exact mismatch — dir `auraos` vs project `aura` — left
+  // every spawned app mounting an empty auto-created volume, so nothing but
+  // the shell itself worked). Instead, DISCOVER the real names from the
+  // shell's own mounts.
+  //
+  // Precedence per volume:
+  //   1. explicit env override (AURA_APP_DATA_VOLUME / AURA_NODE_MODULES_VOLUME)
+  //      — for setups where discovery can't work (e.g. a remote daemon).
+  //   2. auto-discovered from `docker inspect` of this container's mounts.
+  //   3. legacy `aura_*` default — last resort so a discovery failure still
+  //      spawns on the historical dev layout.
+  private resolveVolumeNames(): void {
+    const discovered = this.discoverVolumeNames();
+    const pick = (envName: string, dest: string, found: string | undefined, fallback: string): string => {
+      const env = process.env[envName];
+      if (env) {
+        console.log(`[ContainerRunner] ${dest} volume = ${env} (override ${envName})`);
+        return env;
+      }
+      if (found) {
+        console.log(`[ContainerRunner] ${dest} volume = ${found} (auto-discovered)`);
+        return found;
+      }
+      console.warn(`[ContainerRunner] ${dest} volume not discoverable; falling back to ${fallback}. Set ${envName} to override.`);
+      return fallback;
+    };
+    this.appDataVolume     = pick('AURA_APP_DATA_VOLUME',     '/data',                   discovered.appData,     'aura_aura-app-data');
+    this.nodeModulesVolume = pick('AURA_NODE_MODULES_VOLUME', '/workspace/node_modules', discovered.nodeModules, 'aura_aura-node-modules');
+  }
+
+  /**
+   * Inspect this (the shell's own) container's mounts and read back the named
+   * volumes docker actually attached at /data and /workspace/node_modules.
+   * Best-effort: any failure (no socket, unknown id, bind mount without a
+   * volume name, JSON error) yields an empty result and the caller falls back.
+   */
+  private discoverVolumeNames(): { appData?: string; nodeModules?: string } {
+    const ref = this.getOwnContainerId();
+    if (!ref) return {};
+    let mounts: DockerMount[];
+    try {
+      const out = execSync(`docker inspect -f '{{json .Mounts}}' ${ref}`, {
+        stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000, encoding: 'utf-8',
+      }).trim();
+      mounts = JSON.parse(out) as DockerMount[];
+    } catch (err) {
+      console.warn(`[ContainerRunner] volume auto-discovery failed (inspect ${ref}): ${(err as Error).message}`);
+      return {};
+    }
+    return {
+      appData:     pickVolumeByDestination(mounts, '/data'),
+      nodeModules: pickVolumeByDestination(mounts, '/workspace/node_modules'),
+    };
+  }
+
+  /**
+   * Resolve the id/name of the container this process runs inside. Primary
+   * source is /proc/self/mountinfo — docker bind-mounts /etc/hostname & co.
+   * from /var/lib/docker/containers/<id>/…, which is present under both
+   * cgroup v1 and v2. Falls back to the shell's known name/hostname (equal to
+   * `container_name` in the compose file, which `docker inspect` also accepts).
+   */
+  private getOwnContainerId(): string | null {
+    try {
+      const id = readFileSync('/proc/self/mountinfo', 'utf-8').match(/\/containers\/([0-9a-f]{64})\//)?.[1];
+      if (id) return id;
+    } catch { /* not in a container / no procfs */ }
+    return this.shellHostname || hostname() || null;
   }
 }

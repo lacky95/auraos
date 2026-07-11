@@ -54,13 +54,15 @@ services:
       AURA_DOCKER_NETWORK: aura-net
       AURA_BASE_IMAGE: aura-base
       AURA_SHELL_HOSTNAME: aura-shell
-      # Sibling containers mount these named volumes to see the same
-      # node_modules + app-data the shell's pnpm install populated. Compose
-      # prefixes volume names with the project name (the directory name,
-      # `auraos`), so pin them explicitly — ContainerRunner's defaults
-      # (`aura_*`) only match when the directory is named `aura`.
-      AURA_NODE_MODULES_VOLUME: auraos_aura-node-modules
-      AURA_APP_DATA_VOLUME: auraos_aura-app-data
+      # Sibling containers mount the same node_modules + app-data named volumes
+      # the shell's pnpm install populated. Compose prefixes volume names with
+      # the project name (`<project>_<volume>`), which depends on the directory
+      # / COMPOSE_PROJECT_NAME. ContainerRunner AUTO-DISCOVERS the real names
+      # from the shell's own mounts, so nothing needs pinning here — it works
+      # whatever the directory is called. Uncomment and set these ONLY to force
+      # an override (e.g. a remote docker daemon where self-inspect can't run):
+      # AURA_NODE_MODULES_VOLUME: myproject_aura-node-modules
+      # AURA_APP_DATA_VOLUME: myproject_aura-app-data
     cap_add:
       - SYS_PTRACE
     security_opt:
