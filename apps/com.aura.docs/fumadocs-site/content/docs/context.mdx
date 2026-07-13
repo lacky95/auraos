@@ -1,0 +1,133 @@
+---
+title: Context
+description: Aura Context — the OS-wide store for environment variables and secrets, injected into every app and the master container.
+---
+
+**Aura Context** is where AuraOS keeps environment variables and secrets —
+things like `GITHUB_TOKEN`, `OPENAI_API_KEY`, or a plain `LOG_LEVEL`. You set
+them once in **Settings → Context**, and the OS makes them available to your
+apps (and to the master shell) as environment variables and/or files.
+
+The name is deliberately broad: today it's a single global **System Context**;
+the model leaves room for per-app **App Context** later.
+
+---
+
+## The two choices per entry
+
+Every entry has a **kind** and one or more **inject** targets — chosen
+independently, per variable.
+
+### Kind — how it's shown
+
+| Kind | In the UI | Returned by the API |
+|---|---|---|
+| `secret` | masked (`••••`), never shown again | value withheld |
+| `variable` | value visible and editable | value included |
+
+The kind only affects *visibility*. It does **not** change how the value
+reaches your app — both kinds are encrypted at rest and injected the same way.
+
+### Inject — how it reaches containers
+
+| Target | Delivered as | Update behaviour |
+|---|---|---|
+| `env` | `-e KEY=VALUE` at spawn → `$KEY` | app **respawn** to pick up a change |
+| `file` | `/run/context/KEY` inside the app | **live** — no respawn |
+
+Tick either, or both. A key must be a valid env-var name: `[A-Z_][A-Z0-9_]*`
+(e.g. `GITHUB_TOKEN`, `LOG_LEVEL`).
+
+---
+
+## Where values show up
+
+### In an app container
+
+```sh
+echo "$GITHUB_TOKEN"        # if injected as env  (set at spawn)
+cat /run/context/GITHUB_TOKEN   # if injected as file (updates live)
+```
+
+- **env** entries are baked into the container at start, so changing one
+  needs the app to respawn.
+- **file** entries live-mirror from the master, so editing the value shows up
+  on the app's next read — no restart.
+
+### In the master (shell) container
+
+The master is one long-running process, so a real `$ENV` var can't change in
+it without a restart. Instead, **File**-injected values are exposed there:
+
+```sh
+cat /run/context/GITHUB_TOKEN       # live
+aura jump -m                        # new master shell...
+echo "$GITHUB_TOKEN"                # ...exports File entries automatically
+```
+
+Any newly-opened master shell (including `aura jump -m`) auto-exports the
+File-injected values as `$KEY`. Already-open shells pick them up on the next
+shell. Env-only entries stay app-container-only.
+
+---
+
+## Managing context
+
+### Settings UI
+
+**Settings → Context** lists every entry with its type and inject targets, and
+lets you add or delete one. Secrets are masked; variables show their value.
+Adding a key that already exists prompts for override.
+
+### API
+
+```sh
+# list (secret values are withheld)
+curl localhost:3000/api/os/context
+
+# upsert
+curl -X POST localhost:3000/api/os/context \
+  -H 'Content-Type: application/json' \
+  -d '{"key":"GITHUB_TOKEN","value":"ghp_...","kind":"secret","inject":["env","file"]}'
+
+# delete
+curl -X DELETE localhost:3000/api/os/context/GITHUB_TOKEN
+```
+
+`kind` defaults to `secret`, `inject` defaults to both targets.
+
+---
+
+## Storage & security
+
+- Values are stored in the OS KV store under the isolated `context:system:*`
+  namespace and **sealed with AES-256-GCM** at rest — nothing sits plaintext
+  in the on-disk snapshot.
+- The master key comes from `AURA_CONTEXT_KEY` (base64 of 32 bytes, e.g.
+  `openssl rand -base64 32`). In dev, a key is generated automatically; set it
+  explicitly in production.
+- The public KV proxy (`/api/kv/...`) **refuses** the `context:*` namespace, so
+  an app can't read another entry's raw value out of band. Context reaches apps
+  only through the OS-controlled env/file injection.
+- The materialised `/run/context/<KEY>` files are plaintext by necessity — the
+  app has to read them. Encryption covers the store, not the delivered file.
+
+---
+
+## Gotchas
+
+- **Env changes need a respawn.** Container env is fixed at start. Change an
+  `env` value → restart the app to see it. `file` values update live.
+- **Already-running apps** spawned before an entry existed won't have it until
+  their next spawn.
+- **Master shells** must be freshly opened after a change to see updated
+  `$KEY` values (files are always current).
+- Keys are env-var names only (`[A-Z_][A-Z0-9_]*`).
+
+---
+
+## Not yet
+
+- **App Context** (`context:app:<id>:*`) — per-app entries with granular grants.
+  The schema is reserved; only the global System Context ships today.
+- Manifest-declared context requirements.
