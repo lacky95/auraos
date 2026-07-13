@@ -1,0 +1,286 @@
+---
+import '../styles/settings.css';
+
+// SSR-read the current context entries from the OS. `variable` entries carry
+// their value; `secret` entries never do (value is null) — we show a masked
+// marker for those.
+const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
+type Kind = 'secret' | 'variable';
+type Inject = 'env' | 'file';
+interface ContextEntry { key: string; kind: Kind; inject: Inject[]; updatedAt: number; value: string | null }
+let entries: ContextEntry[] = [];
+try {
+  const r = await fetch(`${osBase}/api/os/context`, { signal: AbortSignal.timeout(1500) });
+  if (r.ok) entries = ((await r.json()) as { entries?: ContextEntry[] }).entries ?? [];
+} catch { /* OS unreachable at SSR time — client will refetch */ }
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Settings · Context — AuraOS</title>
+  <link rel="stylesheet" href="/api/os/theme.css" />
+  <!-- is:global — rows are re-rendered client-side via innerHTML after SET,
+       and those elements don't carry Astro's scoped data-astro-cid attribute.
+       Scoped styles would stop matching them (table appears unstyled on update). -->
+  <style is:global>
+    .ctx-table { width: 100%; border-collapse: collapse; margin-bottom: 18px; }
+    .ctx-table th, .ctx-table td {
+      text-align: left; padding: 8px 10px; font-size: 0.72rem; letter-spacing: 0.04em;
+      border-bottom: 1px solid var(--aura-color-border, #333); vertical-align: middle;
+    }
+    .ctx-table th { color: var(--aura-color-text-dim); font-weight: 600; }
+    .ctx-key { font-family: monospace; }
+    .ctx-val { font-family: monospace; word-break: break-all; }
+    .ctx-val.secret { color: var(--aura-color-text-dim); letter-spacing: 0.2em; }
+    .ctx-badge {
+      display: inline-block; font-size: 0.56rem; letter-spacing: 0.1em; padding: 2px 6px;
+      border: 1px solid var(--aura-color-border, #444); border-radius: 2px;
+    }
+    .ctx-badge.secret   { color: var(--aura-color-danger, #e55); }
+    .ctx-badge.variable { color: var(--aura-color-accent, #2a6); }
+    .ctx-inject { color: var(--aura-color-text-dim); font-size: 0.6rem; letter-spacing: 0.08em; }
+    .ctx-checks { display: flex; gap: 12px; align-items: center; }
+    .ctx-checks label { display: inline-flex; align-items: center; gap: 4px; margin: 0; cursor: pointer; }
+    .ctx-checks input { width: auto; }
+    .ctx-empty { color: var(--aura-color-text-dim); font-size: 0.72rem; padding: 10px; }
+    .ctx-del {
+      background: none; border: 1px solid var(--aura-color-border, #444);
+      color: var(--aura-color-danger, #e55); cursor: pointer; font-size: 0.62rem;
+      padding: 3px 8px; letter-spacing: 0.08em;
+    }
+    .ctx-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
+    .ctx-form label { display: block; font-size: 0.62rem; color: var(--aura-color-text-dim); margin-bottom: 4px; }
+    .ctx-form input, .ctx-form select {
+      background: var(--aura-color-bg-elev, #111); color: var(--aura-color-text, #ddd);
+      border: 1px solid var(--aura-color-border, #444); padding: 6px 8px; font-size: 0.72rem;
+      font-family: monospace;
+    }
+    .ctx-form button {
+      background: var(--aura-color-accent, #2a6); color: #000; border: none;
+      padding: 7px 14px; font-size: 0.7rem; letter-spacing: 0.08em; cursor: pointer;
+    }
+    .ctx-hint { color: var(--aura-color-text-dim); font-size: 0.62rem; margin-top: 6px; }
+    .ctx-dialog-backdrop {
+      position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6);
+      display: none; align-items: center; justify-content: center; z-index: 50;
+    }
+    .ctx-dialog-backdrop.open { display: flex; }
+    .ctx-dialog {
+      background: var(--aura-color-bg-elev, #111); border: 1px solid var(--aura-color-border, #444);
+      padding: 18px 20px; max-width: 340px;
+    }
+    .ctx-dialog p { font-size: 0.74rem; margin-bottom: 14px; letter-spacing: 0.03em; }
+    .ctx-dialog-actions { display: flex; gap: 10px; justify-content: flex-end; }
+    .ctx-dialog-actions button { padding: 6px 14px; font-size: 0.68rem; letter-spacing: 0.08em; cursor: pointer; }
+    #ctx-dialog-cancel {
+      background: none; border: 1px solid var(--aura-color-border, #444); color: var(--aura-color-text, #ddd);
+    }
+    #ctx-dialog-ok { background: var(--aura-color-accent, #2a6); color: #000; border: none; }
+  </style>
+</head>
+<body>
+  <main class="settings-body">
+    <table class="ctx-table">
+      <thead>
+        <tr><th style="width:28%">KEY</th><th style="width:12%">TYPE</th><th style="width:26%">VALUE</th><th style="width:12%">INJECT</th><th style="width:12%">UPDATED</th><th></th></tr>
+      </thead>
+      <tbody id="ctx-rows">
+        {entries.length === 0 && (
+          <tr><td colspan="6" class="ctx-empty">No context entries yet. Add one below.</td></tr>
+        )}
+        {entries.map((e) => (
+          <tr data-key={e.key}>
+            <td class="ctx-key">{e.key}</td>
+            <td><span class={`ctx-badge ${e.kind}`}>{e.kind === 'secret' ? 'SECRET' : 'VARIABLE'}</span></td>
+            <td class={`ctx-val ${e.kind}`}>{e.kind === 'variable' ? e.value : '••••••••'}</td>
+            <td class="ctx-inject">{e.inject.map((t) => t.toUpperCase()).join(' · ')}</td>
+            <td>{e.updatedAt ? new Date(e.updatedAt).toLocaleString() : '—'}</td>
+            <td><button class="ctx-del" data-key={e.key}>DELETE</button></td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+
+    <div class="ctx-form">
+      <div>
+        <label for="ctx-kind">TYPE</label>
+        <select id="ctx-kind">
+          <option value="secret">Secret (masked)</option>
+          <option value="variable">Variable (visible)</option>
+        </select>
+      </div>
+      <div>
+        <label for="ctx-key">KEY</label>
+        <input id="ctx-key" type="text" placeholder="GITHUB_TOKEN" autocomplete="off" spellcheck="false" />
+      </div>
+      <div>
+        <label for="ctx-value">VALUE</label>
+        <input id="ctx-value" type="password" placeholder="secret value" autocomplete="off" spellcheck="false" />
+      </div>
+      <div>
+        <label>INJECT AS</label>
+        <div class="ctx-checks">
+          <label><input type="checkbox" id="ctx-inject-env" checked /> Env var</label>
+          <label><input type="checkbox" id="ctx-inject-file" checked /> File</label>
+        </div>
+      </div>
+      <button id="ctx-add">SET</button>
+    </div>
+    <p class="ctx-hint">
+      Injected into every app as <b>$KEY</b> and <b>/run/context/KEY</b>.
+      File changes apply live; env changes on next app restart.
+    </p>
+    <p id="status" class="ctx-hint"></p>
+  </main>
+
+  <div id="ctx-dialog" class="ctx-dialog-backdrop">
+    <div class="ctx-dialog">
+      <p id="ctx-dialog-msg"></p>
+      <div class="ctx-dialog-actions">
+        <button id="ctx-dialog-cancel">CANCEL</button>
+        <button id="ctx-dialog-ok">OVERRIDE</button>
+      </div>
+    </div>
+  </div>
+
+  <footer class="settings-foot">PROVIDER · /api/os/context</footer>
+
+  <script is:inline>
+    const statusEl = document.getElementById('status');
+    const kindEl = document.getElementById('ctx-kind');
+    const valueEl = document.getElementById('ctx-value');
+    const KEY_RE = /^[A-Z_][A-Z0-9_]*$/;
+
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, (c) =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    function setStatus(html, danger) {
+      statusEl.innerHTML = danger
+        ? `<b style="color: var(--aura-color-danger);">${html}</b>`
+        : html;
+    }
+
+    // Secret → password field; variable → plain text (it's not sensitive).
+    function syncValueField() {
+      const secret = kindEl.value === 'secret';
+      valueEl.type = secret ? 'password' : 'text';
+      valueEl.placeholder = secret ? 'secret value' : 'visible value';
+    }
+    kindEl.addEventListener('change', syncValueField);
+    syncValueField();
+
+    // Keys currently present, read straight from the rendered rows.
+    function existingKeys() {
+      return new Set(Array.from(document.querySelectorAll('#ctx-rows tr[data-key]')).map((tr) => tr.dataset.key));
+    }
+
+    // In-page confirm (native confirm() can be blocked in the sandboxed app
+    // iframe). Resolves true = override, false = cancel.
+    function confirmOverride(key) {
+      return new Promise((resolve) => {
+        const bd = document.getElementById('ctx-dialog');
+        const okBtn = document.getElementById('ctx-dialog-ok');
+        const cancelBtn = document.getElementById('ctx-dialog-cancel');
+        document.getElementById('ctx-dialog-msg').innerHTML =
+          `<b>${esc(key)}</b> already exists. Override its value and settings?`;
+        bd.classList.add('open');
+        const done = (val) => {
+          bd.classList.remove('open');
+          okBtn.removeEventListener('click', onOk);
+          cancelBtn.removeEventListener('click', onCancel);
+          resolve(val);
+        };
+        const onOk = () => done(true);
+        const onCancel = () => done(false);
+        okBtn.addEventListener('click', onOk);
+        cancelBtn.addEventListener('click', onCancel);
+        okBtn.focus();
+      });
+    }
+
+    async function refresh() {
+      const r = await fetch('/api/os/context');
+      if (!r.ok) return;
+      const { entries } = await r.json();
+      const tbody = document.getElementById('ctx-rows');
+      if (!entries || entries.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="ctx-empty">No context entries yet. Add one below.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = entries.map((e) => {
+        const badge = e.kind === 'secret' ? 'SECRET' : 'VARIABLE';
+        const val = e.kind === 'variable' ? esc(e.value ?? '') : '••••••••';
+        const inject = (e.inject || []).map((t) => t.toUpperCase()).join(' · ');
+        return `
+        <tr data-key="${esc(e.key)}">
+          <td class="ctx-key">${esc(e.key)}</td>
+          <td><span class="ctx-badge ${e.kind}">${badge}</span></td>
+          <td class="ctx-val ${e.kind}">${val}</td>
+          <td class="ctx-inject">${esc(inject)}</td>
+          <td>${e.updatedAt ? new Date(e.updatedAt).toLocaleString() : '—'}</td>
+          <td><button class="ctx-del" data-key="${esc(e.key)}">DELETE</button></td>
+        </tr>`;
+      }).join('');
+      bindDeletes();
+    }
+
+    async function addVar() {
+      const key = document.getElementById('ctx-key').value.trim();
+      const value = valueEl.value;
+      const kind = kindEl.value;
+      const inject = [];
+      if (document.getElementById('ctx-inject-env').checked) inject.push('env');
+      if (document.getElementById('ctx-inject-file').checked) inject.push('file');
+      if (!KEY_RE.test(key)) {
+        setStatus(`Invalid key — must be an env-var name (A–Z, 0–9, _), e.g. GITHUB_TOKEN`, true);
+        return;
+      }
+      if (!value) { setStatus('Value must not be empty', true); return; }
+      if (inject.length === 0) { setStatus('Select at least one inject target (Env var / File)', true); return; }
+      if (existingKeys().has(key)) {
+        const override = await confirmOverride(key);
+        if (!override) { setStatus(`Cancelled — existing <b>${esc(key)}</b> kept`); return; }
+      }
+      try {
+        const r = await fetch('/api/os/context', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key, value, kind, inject }),
+        });
+        if (!r.ok) { setStatus(`ERROR — ${(await r.json()).error ?? r.status}`, true); return; }
+        document.getElementById('ctx-key').value = '';
+        valueEl.value = '';
+        setStatus(`SAVED <b>${esc(key)}</b> (${kind} · ${inject.join('+')}) · ${new Date().toLocaleTimeString()}`);
+        await refresh();
+      } catch (err) { setStatus(`ERROR — ${err.message}`, true); }
+    }
+
+    async function delVar(key) {
+      try {
+        const r = await fetch(`/api/os/context/${encodeURIComponent(key)}`, { method: 'DELETE' });
+        if (!r.ok) { setStatus(`ERROR — ${(await r.json()).error ?? r.status}`, true); return; }
+        setStatus(`DELETED <b>${esc(key)}</b> · ${new Date().toLocaleTimeString()}`);
+        await refresh();
+      } catch (err) { setStatus(`ERROR — ${err.message}`, true); }
+    }
+
+    function bindDeletes() {
+      document.querySelectorAll('.ctx-del').forEach((btn) => {
+        btn.addEventListener('click', () => delVar(btn.dataset.key));
+      });
+    }
+
+    document.getElementById('ctx-add').addEventListener('click', addVar);
+    valueEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') addVar(); });
+    bindDeletes();
+  </script>
+
+  <script>
+    import { OsClient } from '@aura/app-sdk';
+    new OsClient().nav.installGridNav({ selector: '#ctx-kind, #ctx-key, #ctx-value, #ctx-inject-env, #ctx-inject-file, #ctx-add, .ctx-del' });
+  </script>
+</body>
+</html>

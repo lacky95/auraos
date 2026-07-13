@@ -39,6 +39,14 @@ export const ALL: APIRoute = async ({ params, request }) => {
     key = segments.slice(1).join('/');
   }
 
+  // The `context:*` namespace (Aura Context env/secrets) is OS-managed and
+  // must NEVER be reachable through the public KV proxy — an app could
+  // otherwise read every stored token. It is only accessible via the
+  // dedicated /api/os/context API and the server-internal ContextStore.
+  if (ns.startsWith('context')) {
+    return jsonError('The context namespace is OS-managed and not accessible via KV', 403);
+  }
+
   if (!isValidNamespace(ns))  return jsonError(`Invalid namespace '${ns}'`,  400);
   if (!isValidKey(key))       return jsonError(`Invalid key '${key}'`,       400);
 

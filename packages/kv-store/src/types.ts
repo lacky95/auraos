@@ -14,7 +14,7 @@
  * `app/<id>` is preserved because it never collides with the `:` separator.
  */
 
-export type KvNamespace = 'os' | `app/${string}`;
+export type KvNamespace = 'os' | `app/${string}` | `context:${string}`;
 
 /**
  * The stored shape. The shell stores values together with a wall-clock
@@ -42,8 +42,19 @@ export const KV_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._\-\/]{0,127}$/;
  */
 export const KV_NAMESPACE_PATTERN = /^(?:os|app\/[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+)$/;
 
+/**
+ * OS-managed **context** namespaces (env vars / secrets). Deliberately kept
+ * separate from `KV_NAMESPACE_PATTERN` and colon-delimited (`context:system`,
+ * `context:app:<appId>`) so it never collides with the public `os`/`app/<id>`
+ * shapes. IMPORTANT: the public `/api/kv/...` proxy additionally rejects any
+ * namespace beginning with `context` — these are only reachable via the
+ * dedicated `/api/os/context` API and the server-internal `ContextStore`.
+ */
+export const KV_CONTEXT_NAMESPACE_PATTERN =
+  /^context:(?:system|app:[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+)$/;
+
 export function isValidNamespace(ns: string): ns is KvNamespace {
-  return KV_NAMESPACE_PATTERN.test(ns);
+  return KV_NAMESPACE_PATTERN.test(ns) || KV_CONTEXT_NAMESPACE_PATTERN.test(ns);
 }
 
 export function isValidKey(key: string): boolean {

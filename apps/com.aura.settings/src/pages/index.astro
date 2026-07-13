@@ -43,6 +43,10 @@ import '../styles/settings.css';
         <h3>⊕ SCOPES</h3>
         <p>System · global · user · git repos</p>
       </button>
+      <button class="tile" data-section="context">
+        <h3>⊞ CONTEXT</h3>
+        <p>Env vars · tokens · secrets · injected into apps</p>
+      </button>
       <button class="tile" data-section="about">
         <h3>ℹ ABOUT</h3>
         <p>AuraOS · versions</p>
@@ -77,6 +81,7 @@ import '../styles/settings.css';
         case 'lockscreen': return ['/lockscreen', 'Settings · Lock Screen'];
         case 'apps':       return ['/apps',       'Settings · Apps'];
         case 'scopes':     return ['/scopes',     'Settings · Scopes'];
+        case 'context':    return ['/context',    'Settings · Context'];
         case 'about':      return ['/about',      'Settings · About'];
         default:           return ['/',           'Settings'];
       }

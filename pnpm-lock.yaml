@@ -305,6 +305,9 @@ importers:
 
   packages/core:
     dependencies:
+      '@aura/kv-store':
+        specifier: workspace:*
+        version: link:../kv-store
       chokidar:
         specifier: ^3.6.0
         version: 3.6.0

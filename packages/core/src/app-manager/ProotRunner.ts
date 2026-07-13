@@ -5,6 +5,7 @@ import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
 import type { SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import type { SpawnContext } from '../scopes/types.js';
+import { ContextStore } from '../context/ContextStore.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
 const HEALTH_CHECK_TIMEOUT_MS = 30_000;
@@ -64,6 +65,8 @@ export class ProotRunner implements SandboxRunner {
   private appsDir: string;
   private dataDir: string;
   private osApiBase: string;
+  /** OS-wide env/secret store, injected into every sandbox. */
+  private contextStore: ContextStore;
 
   constructor(opts: SandboxRunnerOpts) {
     this.baseRootfs = opts.baseRootfs;
@@ -71,6 +74,7 @@ export class ProotRunner implements SandboxRunner {
     this.appsDir = opts.appsDir;
     this.dataDir = opts.dataDir;
     this.osApiBase = opts.osApiBase;
+    this.contextStore = new ContextStore(opts.dataDir);
   }
 
   /**
@@ -135,6 +139,9 @@ export class ProotRunner implements SandboxRunner {
     // (the args reference the dir). Wildcard apps get the whole store mirrored;
     // explicit apps get just their declared tools.
     if (prooted) this.provisionToolsDir(instanceId, manifest);
+    // Resolve OS Context (env/secret) LIVE from Redis on every spawn.
+    this.contextStore.ensureDir();
+    const contextEnv = await this.contextStore.resolveEnv();
     const args = this.buildProotArgs(instanceId, port, manifest, appDir, dataDir, prooted, entrypointArgv);
 
     // Prepend the per-instance allowlist to PATH so non-interactive children
@@ -144,6 +151,9 @@ export class ProotRunner implements SandboxRunner {
     const path = prooted ? `/aura/my-tools:${inheritedPath}` : inheritedPath;
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
+      // OS Context env FIRST — the fixed OS vars below override, so a context
+      // key can't clobber PATH/APP_ID/OS_API_BASE etc.
+      ...contextEnv,
       PATH: path,
       APP_ID: appId,
       APP_INSTANCE_ID: instanceId,
@@ -245,6 +255,10 @@ export class ProotRunner implements SandboxRunner {
       // Bring the master container's Node 22 into the sandbox — Debian-bookworm
       // ships Node 18 in its package archive, which is too old for our apps.
       '--bind=/usr/local/bin/node:/usr/local/bin/node',
+      // OS Context files. The master writes decrypted values here; binding the
+      // dir at /run/context mirrors changes live (no respawn to pick up a file
+      // edit — mirrors the ContainerRunner volume-subpath mount).
+      `--bind=${this.contextStore.systemDir}:/run/context`,
       `--cwd=${appDir}`,
     ];
 

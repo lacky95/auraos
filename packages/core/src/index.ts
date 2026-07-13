@@ -15,3 +15,4 @@ export * from './keymap/index.js';
 export * from './nexus/index.js';
 export * from './logger.js';
 export * from './scopes/index.js';
+export * from './context/index.js';

@@ -1,5 +1,5 @@
 import { defineMiddleware } from 'astro:middleware';
-import { getAppManager, initAppManager } from '@aura/core';
+import { getAppManager, initAppManager, ContextStore } from '@aura/core';
 import { kvServer, defaultKv } from '@aura/kv-store';
 import { bootstrapKv } from './lib/kvBootstrap.js';
 
@@ -26,6 +26,15 @@ async function ensureAppManager() {
     // first boot; subsequent boots see `os/theme` already in Redis and
     // skip this entirely. Idempotent.
     await bootstrapKv({ dataDir });
+
+    // Materialise Aura Context (env/secret) files from Redis BEFORE apps start,
+    // so the /run/context volume-subpath mount source exists and holds current
+    // values on the very first spawn. Idempotent; prunes files for deleted keys.
+    try {
+      await new ContextStore(dataDir).materializeAll();
+    } catch (err) {
+      console.warn(`[middleware] context materialize failed: ${(err as Error).message}`);
+    }
 
     const mgr = initAppManager({
       appsDir:      process.env['AURA_APPS_DIR']      ?? '/workspace/apps',

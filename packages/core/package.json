@@ -30,6 +30,7 @@
     "test": "tsc && node --test test/identity-routing.test.mjs test/container-volume.test.mjs"
   },
   "dependencies": {
+    "@aura/kv-store": "workspace:*",
     "chokidar": "^3.6.0",
     "eventemitter3": "^5.0.1",
     "node-fetch": "^3.3.2",
