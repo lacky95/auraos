@@ -147,10 +147,19 @@ export class SidecarHost {
     try { await execDocker(['image', 'inspect', image]); return true; } catch { return false; }
   }
 
-  /** Run a throwaway helper container mounting a volume — used for seeding. */
-  private helperRun(volumeName: string): HelperRun {
+  /**
+   * Run a throwaway helper container mounting a volume — used for seeding.
+   * Honors `volume` / `subpath` overrides so the seed lands where the runtime
+   * actually reads, not on the auto-derived legacy volume name.
+   */
+  private helperRun(v: { name: string; volume?: string; subpath?: string }): HelperRun {
+    const source = v.volume ?? this.volumeName(v.name);
+    // `-v` doesn't support volume-subpath; use `--mount` when a subpath is set.
+    const mountArgs = v.subpath
+      ? ['--mount', `type=volume,source=${source},target=/vol,volume-subpath=${v.subpath}`]
+      : ['-v', `${source}:/vol`];
     return (args: string[], stdin?: Buffer | string) => new Promise<void>((resolve, reject) => {
-      const p = spawn('docker', ['run', '--rm', '-i', '-v', `${volumeName}:/vol`, this.opts.helperImage, ...args],
+      const p = spawn('docker', ['run', '--rm', '-i', ...mountArgs, this.opts.helperImage, ...args],
         { stdio: [stdin !== undefined ? 'pipe' : 'ignore', 'inherit', 'inherit'] });
       p.on('error', reject);
       p.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`helper exited ${code}`))));
@@ -186,8 +195,8 @@ export class SidecarHost {
     if (this.opts.onSeed) {
       this.setPhase('seeding');
       for (const v of svc.volumes ?? []) {
-        const volumeName = this.volumeName(v.name);
-        await this.opts.onSeed({ service: svc, volumeName, run: this.helperRun(volumeName) });
+        const volumeName = v.volume ?? this.volumeName(v.name);
+        await this.opts.onSeed({ service: svc, volumeName, run: this.helperRun(v) });
       }
     }
 
