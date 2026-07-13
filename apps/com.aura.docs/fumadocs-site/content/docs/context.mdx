@@ -54,6 +54,10 @@ cat /run/context/GITHUB_TOKEN   # if injected as file (updates live)
 - **file** entries live-mirror from the master, so editing the value shows up
   on the app's next read — no restart.
 
+`/run/context` is **read-only** and OS-managed — it is *not* app storage. For
+data your app writes and owns, use the per-instance `/data` directory instead;
+see [Persisting app data](./develop-an-app#persisting-app-data).
+
 ### In the master (shell) container
 
 The master is one long-running process, so a real `$ENV` var can't change in
