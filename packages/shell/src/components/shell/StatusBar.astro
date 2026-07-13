@@ -1,5 +1,6 @@
 ---
 import ViewportSettingsDialog from './ViewportSettingsDialog.tsx';
+import AboutDialog from './AboutDialog.tsx';
 import { defaultKv } from '@aura/kv-store';
 
 // SSR-resolve clock format + locale from the OS KV so the first paint matches
@@ -21,7 +22,7 @@ let initialLocale: string = 'en-GB';
 }
 ---
 <header id="statusbar">
-  <span class="os-name">AURA<span class="os-ver">OS</span></span>
+  <span id="os-about-btn" class="os-name" role="button" tabindex="0" aria-haspopup="dialog" title="About AuraOS">AURA<span class="os-ver">OS</span></span>
   <div class="right">
     <!--
       Workspace switcher: a row of numbered pills (1..N) plus a [+] add-new
@@ -140,6 +141,7 @@ let initialLocale: string = 'en-GB';
   reads them on boot. No SSR hydration: the server can't see localStorage.
 -->
 <ViewportSettingsDialog client:load />
+<AboutDialog client:load />
 
 <script>
   import * as workspaceClient from '../../lib/workspaceClient';
@@ -517,6 +519,17 @@ let initialLocale: string = 'en-GB';
   function openSettings()  { window.dispatchEvent(new CustomEvent('aura.viewport.open')); }
   settingsBtn?.addEventListener('click', openSettings);
   (window as any).auraOpenSettings = openSettings;
+
+  // ---- About dialog ----------------------------------------------------
+  // The AURAOS logo opens the About panel (React island <AboutDialog/> above),
+  // same event-dispatch pattern as the gear button. Keyboard-accessible since
+  // the logo is role="button" tabindex="0".
+  const aboutBtn = document.getElementById('os-about-btn');
+  function openAbout() { window.dispatchEvent(new CustomEvent('aura.about.open')); }
+  aboutBtn?.addEventListener('click', openAbout);
+  aboutBtn?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openAbout(); }
+  });
 
   // ---- Workspace switcher ----------------------------------------------
   // Pill row + layout chip wired against workspaceClient (which the
@@ -1110,7 +1123,11 @@ let initialLocale: string = 'en-GB';
        fitWorkspaceUI() can measure it and drop workspace pills. */
     flex-shrink: 0;
     white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
   }
+  .os-name:hover { filter: brightness(1.25); }
+  .os-name:focus-visible { outline: 1px solid var(--aura-color-primary); outline-offset: 2px; }
 
   .os-ver { color: var(--aura-color-text-dim); }
 
