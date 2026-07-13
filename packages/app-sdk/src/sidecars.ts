@@ -36,7 +36,20 @@ export interface ServiceSpec {
   port?: number;
   proxyDashboard?: boolean;
   env?: Record<string, string>;
-  volumes?: Array<{ name: string; target: string }>;
+  /**
+   * Sibling-runtime bind points.
+   *   - `name`   — logical id; becomes part of the derived docker volume name
+   *                (`${volumePrefix}-${name}`) unless `volume` overrides it.
+   *   - `target` — path inside the runtime container.
+   *   - `volume` (optional) — override the derived name with an externally
+   *                managed docker volume (e.g. AuraOS's shared
+   *                `aura_aura-app-data`). Bypasses `volumePrefix`.
+   *   - `subpath` (optional) — mount only a subpath of the source volume
+   *                (docker's `--mount volume-subpath=…`). Lets sidecars park
+   *                their state under `/data/aura/runtime/<appId>/…` on the
+   *                shared OS volume without needing their own top-level bind.
+   */
+  volumes?: Array<{ name: string; target: string; volume?: string; subpath?: string }>;
   dns?: string[];
   restart?: 'no' | 'on-failure' | 'always' | 'unless-stopped';
   readiness?: { path?: string; timeoutMs?: number };
@@ -189,7 +202,11 @@ export class SidecarHost {
       '--label', `aura.app=${this.opts.appId}`,
       '--label', `aura.service=${svc.name}`,
       ...(svc.dns ?? []).flatMap((d) => ['--dns', d]),
-      ...(svc.volumes ?? []).flatMap((v) => ['--mount', `type=volume,source=${this.volumeName(v.name)},target=${v.target}`]),
+      ...(svc.volumes ?? []).flatMap((v) => {
+        const source  = v.volume ?? this.volumeName(v.name);
+        const subpath = v.subpath ? `,volume-subpath=${v.subpath}` : '';
+        return ['--mount', `type=volume,source=${source},target=${v.target}${subpath}`];
+      }),
       ...Object.entries(svc.env ?? {}).flatMap(([k, val]) => ['-e', `${k}=${val}`]),
       svc.image,
       ...(svc.command ?? []),
