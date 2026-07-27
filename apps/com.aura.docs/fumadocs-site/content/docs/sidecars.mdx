@@ -1,0 +1,243 @@
+---
+title: Sidecars & inheritance
+description: Run a second runtime (database, agent, any foreign image) as a sibling container — and choose exactly how much of your app it inherits.
+---
+
+**TL;DR.** A **sidecar** is a Docker container your *app* starts next to itself
+via `@aura/app-sdk/sidecars`. Declare it in `services[]`, and the SDK does the
+`docker run`. By default it is **isolated**: no AuraOS identity, no tools, no
+mounts. Six opt-in flags hand it a *slice* of what your app already has — never
+more (with one loud exception, `inheritDockerSocket`).
+
+Source of truth: `packages/app-sdk/src/sidecars.ts`.
+Related: [Bring-your-own-runtime](/docs/bring-your-own-runtime) (proxying a
+sidecar's UI as the app window) and
+[Sandbox runners](/docs/deep-dive/sandbox-runners) (how the OS spawns your app
+container in the first place).
+
+## What a sidecar actually is
+
+Not something the OS runs for you. **Your app spawns it.** AuraOS runs every app
+from the shared `aura-base` image, so an app can't *be* `postgres:16` — instead
+it acts as a thin controller holding the Docker socket and starts the foreign
+image as a sibling on `aura-net`.
+
+The SDK names and labels each sibling so the OS can still find and reap it:
+
+| | |
+|---|---|
+| Container name | `aura-<instanceId>--<service.name>` |
+| Labels | `aura.parent=<instanceId>`, `aura.app=<appId>`, `aura.service=<name>` |
+
+`ContainerRunner.reapSiblingsOf(instanceId)` deletes by `aura.parent` on stop
+**and on crash**, so a sidecar never outlives its app even though the OS never
+started it. The orphan-adoption scanner skips `aura.parent`-labelled containers.
+
+## Minimal working example
+
+Requirements: `sandbox: "container"`, and `"docker"` in `tools[]` — the OS binds
+the host Docker socket into an app only when its `tools[]` grants `docker`.
+
+```jsonc
+// app.manifest.json
+{
+  "sandbox": "container",
+  "tools": ["bash", "node", "docker"],
+  "services": [
+    { "name": "db", "image": "ghcr.io/muchobien/pocketbase:latest", "port": 8090 }
+  ]
+}
+```
+
+```js
+import { readFileSync } from 'node:fs';
+import { createSidecars } from '@aura/app-sdk/sidecars';
+
+const manifest = JSON.parse(readFileSync('./app.manifest.json', 'utf8'));
+
+const host = createSidecars({
+  appId:      process.env.APP_ID,
+  instanceId: process.env.APP_INSTANCE_ID,
+  appPort:    Number(process.env.APP_PORT),
+  services:   manifest.services,
+});
+
+await host.ensureAll();   // idempotent — start the siblings
+// host.teardownAll()     // call from your onDestroy hook
+```
+
+That's it. The sibling is reachable from your app at
+`http://aura-<instanceId>--db:8090`.
+
+Two ways to wire it up:
+
+- **Astro app** (like the PocketBuilder template) — call `ensureAll()` from
+  `onCreate`/`onStart` and `teardownAll()` from `onDestroy`. Keep your own server.
+- **`runtime: "raw"` controller** — call `host.listen()` instead. The SDK serves
+  the whole lifecycle contract on `$APP_PORT` and reverse-proxies the service
+  marked `proxyDashboard`. See [Bring-your-own-runtime](/docs/bring-your-own-runtime).
+
+## Inheritance flags
+
+Every flag is **opt-in and defaults to `false`**. Set them per service.
+
+| Flag | What the sibling gets |
+|---|---|
+| `inheritIdentity` | `AURA_APP_ID`, `AURA_INSTANCE_ID`, `AURA_OS_URL`/`OS_API_BASE` — so it can call the OS API *as your app*. |
+| `inheritPermissions` | `AURA_PERMISSIONS=<comma-joined>` from your manifest `permissions[]`. (Enforcement is still a no-op today; this is forward-looking.) |
+| `inheritTools` | `/aura/my-tools` — **exactly** your manifest's `tools[]` grant, read-only. |
+| `inheritMounts` | `/mnt/aura` — your [cross-app mounts](/docs/cross-app-mounts) (`aura mount`), each keeping its own ro/rw. |
+| `inheritDockerSocket` | The host Docker socket. ⚠️ See below. |
+| `envInherit: string[]` | Named vars from your controller's `process.env` (typically API keys injected by AuraOS Context). |
+
+**The containment principle:** every flag except `inheritDockerSocket` hands the
+sibling a **slice** of what the controller already has — never more. An ungranted
+tool is simply *not present* in `/aura/my-tools`; an unmounted app is simply not
+under `/mnt/aura`.
+
+### `inheritTools` — details worth knowing
+
+- `/aura/my-tools` is **prepended** to the image's *own baked* `PATH` (read from
+  `docker image inspect`), so a foreign image's `venv/bin` and friends survive.
+- The SDK also binds `/workspace/packages` (read-only) and the workspace
+  `node_modules` volume, because AuraOS CLI tools are wrapper scripts that
+  `exec node /workspace/packages/<tool>/dist/…`. Without those, `aura` in a
+  sibling is a broken script.
+- It binds `/etc/profile.d/aura-prompt.sh` too, so a **login shell**
+  (`bash -l`, e.g. an in-container agent shelling out) keeps the PATH —
+  `/etc/profile` otherwise assigns `PATH` outright and drops it.
+- `/aura/all-tools` (the whole toolchain) is mounted **only** in legacy
+  `AURA_TOOLS_MODE=symlink`, where allowlist entries are symlinks that need it
+  to resolve. In the default hardlink mode it is omitted — mounting it would
+  hand the sibling every installed tool by absolute path and bypass your grant.
+
+To expose a tool inside the sibling, add it to your app's `tools[]`.
+
+### `inheritMounts` is live
+
+Docker leaves `--mount type=volume` as a slave of the host peer group, so a bind
+made by `aura mount` **after** the sibling started still propagates into it.
+Mounting and unmounting are visible without recreating the container — no
+polling, no re-exec.
+
+Caveat: this requires the app container to be on the canonical `/mnt/aura` root.
+Containers spawned before that existed fall back to `/data/.mnt`, which the
+sibling does not mount — the sibling would see an empty root until you restart
+the app.
+
+### `inheritDockerSocket` is not a slice
+
+This one is different, and the name is deliberately awkward so nobody reaches
+for it by accident while wanting the `docker` CLI (which `inheritTools` already
+provides).
+
+The Docker socket is **not scoped to your app at all**. Anything holding it can
+start a privileged container, bind the host filesystem, and read every volume on
+the machine. Enabling this gives a *foreign runtime image* host root.
+
+It is bounded by exactly one thing: the controller can only pass on a socket it
+already has. The SDK checks for `/var/run/docker.sock` physically — if your
+manifest's `tools[]` doesn't grant `docker`, there is nothing to forward and the
+flag is skipped with a warning. **A sibling can never exceed its controller.**
+
+### Worked example — `com.aura.hermes`
+
+The canonical real-world case: a foreign agent image with every flag on.
+
+```jsonc
+"tools": ["bash", "node", "docker", "*"],
+"permissions": ["storage.read", "storage.write", "network.internet", "apps.mount"],
+"services": [{
+  "name": "runtime",
+  "image": "nousresearch/hermes-agent:latest",
+  "command": ["gateway", "run"],
+  "port": 9119,
+  "proxyDashboard": true,
+  "prePull": true,
+  "env": { "HERMES_DASHBOARD": "1", "HERMES_DASHBOARD_PORT": "9119" },
+  "envInherit": ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+  "inheritIdentity": true,
+  "inheritPermissions": true,
+  "inheritTools": true,
+  "inheritMounts": true,
+  "inheritDockerSocket": true,
+  "volumes": [{
+    "name": "data",
+    "target": "/opt/data",
+    "volume": "aura_aura-app-data",
+    "subpath": "aura/runtime/com.aura.hermes/hermes-home"
+  }],
+  "dns": ["8.8.8.8", "1.1.1.1"],
+  "restart": "unless-stopped"
+}]
+```
+
+`envInherit` names that aren't set are **skipped silently** — list every
+plausible key without breaking when the user hasn't configured it. An explicit
+`env` entry **wins** over `envInherit` on a name collision.
+
+For contrast, the PocketBuilder template's sidecar sets **no** inheritance flags
+at all — a database doesn't need your identity, your tools, or your mounts.
+That's the right default.
+
+## `volumes[]`
+
+```jsonc
+{ "name": "data", "target": "/opt/data", "volume": "…", "subpath": "…" }
+```
+
+| Field | Meaning |
+|---|---|
+| `name` | Logical id. Derives the volume name `aura-<appId>-<name>`. |
+| `target` | Path inside the sibling. |
+| `volume` | *Optional.* Use this **external** volume instead of the derived name (e.g. the shared `aura_aura-app-data`). Bypasses the prefix. |
+| `subpath` | *Optional.* Mount only a subpath of the source volume (`--mount volume-subpath=…`), so a sidecar can park its state under `aura/runtime/<appId>/…` on the shared OS volume. |
+
+<Callout type="warn">
+**Caveat.** The OS's manifest schema (`packages/core/src/types/manifest.ts`,
+the `services[]` block) declares only `{ name, target }` per volume — and,
+in fact, none of the `inherit*` flags or `envInherit` either. Zod **strips**
+unknown keys, so all of those are absent from the OS's *parsed* view of your
+manifest. Validation still passes; nothing errors.
+
+It works anyway because the SDK never reads the OS's parsed manifest — your
+controller does `JSON.parse(readFileSync('app.manifest.json'))` itself and hands
+the **raw** `services` array to `createSidecars`. Keep it that way: don't feed
+`createSidecars` a manifest that has round-tripped through the OS schema.
+</Callout>
+
+## Lifecycle gotcha — the one that bites
+
+`ensure()` **short-circuits on `isRunning`**:
+
+```ts
+if (await this.isRunning(svc.name)) { /* ready: already running */ return; }
+```
+
+A still-running sidecar is **adopted, not rebuilt**. Combined with the default
+`restart: "unless-stopped"`, siblings survive app restarts, shell restarts, and
+`docker compose restart`.
+
+So: **editing `services[]` — a new image, a new env var, a newly enabled
+`inherit*` flag — does nothing on an app restart alone.** The container must
+actually be gone first:
+
+```sh
+docker rm -f aura-<instanceId>--<service-name>
+```
+
+Then start the app again. (`teardownAll()` from `onDestroy` does the same thing,
+but a crashed app never runs `onDestroy` — hence the label-based reap.)
+
+## Other `ServiceSpec` fields
+
+| Field | Notes |
+|---|---|
+| `command: string[]` | Appended after the image (sets CMD). Many images exit immediately without an explicit subcommand. |
+| `port` | Port to proxy / health-check. |
+| `proxyDashboard` | This service's UI becomes the app window. At most one per app. |
+| `prePull` | Pull at install time (Nexus) instead of first boot. |
+| `dns: string[]` | Sibling containers get no DNS by default — set this if the runtime reaches the internet. |
+| `restart` | `no` \| `on-failure` \| `always` \| `unless-stopped` (default). |
+| `capabilities` / `devices` / `privileged` | Kernel-level grants (`--cap-add`, `--device`, `--privileged`). Prefer the narrow two over `privileged`. |
+| `readiness` | `{ path, timeoutMs }` probe. |

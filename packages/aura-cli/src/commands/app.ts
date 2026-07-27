@@ -2,8 +2,18 @@ import type { Command } from 'commander';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { api } from '../lib/client.js';
-import { color, fail, info, ok, table } from '../lib/format.js';
-import { promptConfirm, PromptCancelled } from '../lib/prompts.js';
+import { color, fail, info, ok, table, warn } from '../lib/format.js';
+import { promptChoice, promptConfirm, promptMultiSelect, BACK, PromptCancelled } from '../lib/prompts.js';
+import { BUILTIN_PERMISSIONS } from '@aura/core';
+
+/** Concrete array form of the core const (typed as a readonly tuple there). */
+const BUILTIN_PERMISSIONS_LIST: string[] = [...BUILTIN_PERMISSIONS];
+/**
+ * Permissions that actually deny today. Mirrors `ENFORCED` in
+ * core's PermissionManager — everything else is auto-granted by the MVP path,
+ * so the picker should not imply otherwise.
+ */
+const ENFORCED_PERMISSIONS: string[] = ['apps.mount'];
 
 interface ManifestLite {
   id: string;
@@ -149,4 +159,167 @@ export function registerApp(program: Command): void {
       await api.post('/api/admin/apps/enabled', { appId, enabled: false });
       ok(`disabled ${color.bold(appId)}`);
     });
+
+  registerPerm(app);
+}
+
+// ─── aura app perm ─────────────────────────────────────────────────────────
+
+interface PermEditResult {
+  ok: true;
+  appId: string;
+  permission: string;
+  changed: boolean;
+  permissions: string[];
+  /** Not in BUILTIN_PERMISSIONS — probably a typo, since it would grant nothing. */
+  unknown?: boolean;
+  /** Whether the running registry picked the change up. False ⇒ needs a restart. */
+  reloaded?: boolean;
+  reloadError?: string;
+}
+
+async function editPerm(
+  appId: string,
+  action: 'add-permission' | 'remove-permission',
+  permission: string,
+): Promise<PermEditResult> {
+  return api.post<PermEditResult>('/api/admin/manifest-edit', { appId, action, permission });
+}
+
+/**
+ * Report one edit honestly. Two things matter beyond "ok":
+ *   • `unknown` — permissions are free-form strings, so a typo is accepted by
+ *     the schema and then silently grants nothing.
+ *   • `reloaded` — the file can be written while the in-memory registry keeps
+ *     the old value, in which case the app still gets 403s. That gap is what
+ *     made hermes look granted while every mount failed.
+ */
+function reportPerm(res: PermEditResult, verb: string): void {
+  if (!res.changed) info(`${res.appId} already ${verb === 'granted' ? 'has' : 'lacks'} ${color.bold(res.permission)}`);
+  else ok(`${verb} ${color.bold(res.permission)} ${verb === 'granted' ? 'to' : 'from'} ${color.bold(res.appId)}`);
+  if (res.unknown) {
+    warn(`'${res.permission}' is not a built-in permission — it will grant nothing unless an app defines it.`);
+  }
+  if (res.reloaded === false) {
+    warn(`manifest written but the running registry did NOT reload${res.reloadError ? ` (${res.reloadError})` : ''} — restart the shell for it to take effect.`);
+  }
+}
+
+async function fetchAppsWithPerms(): Promise<Array<{ id: string; name: string; permissions: string[] }>> {
+  const apps = await api.get<Array<{ manifest: { id: string; name?: string; permissions?: string[] } }>>('/api/apps');
+  return apps
+    .map((a) => ({ id: a.manifest.id, name: a.manifest.name ?? '', permissions: a.manifest.permissions ?? [] }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function registerPerm(app: Command): void {
+  const perm = app
+    .command('perm')
+    .description(
+      'Manage an app\'s manifest permissions[]. Note most permissions are still ' +
+      'auto-granted by the MVP PermissionManager — only those in its ENFORCED set ' +
+      '(currently apps.mount) actually deny.',
+    );
+
+  perm
+    .command('ls [appId]')
+    .alias('list')
+    .description('Show declared permissions — for one app, or all apps.')
+    .action(async (appId?: string) => {
+      const apps = await fetchAppsWithPerms();
+      const picked = appId ? apps.filter((a) => a.id === appId) : apps;
+      if (picked.length === 0) fail(`App not found: ${appId}`);
+      console.log(table(picked.map((a) => ({
+        APP: a.id,
+        PERMISSIONS: a.permissions.length ? a.permissions.join(', ') : color.dim('(none)'),
+      }))));
+    });
+
+  perm
+    .command('grant [appId] [permissions...]')
+    .description(
+      'Grant permissions. With no arguments, opens an interactive picker: choose ' +
+      'an app, then check/uncheck its permissions (unchecking revokes).',
+    )
+    .action(async (appId?: string, permissions?: string[]) => {
+      try {
+        if (!appId || !permissions || permissions.length === 0) {
+          await grantInteractive(appId);
+          return;
+        }
+        for (const p of permissions) reportPerm(await editPerm(appId, 'add-permission', p), 'granted');
+      } catch (err) {
+        if (err instanceof PromptCancelled) { info('cancelled'); return; }
+        throw err;
+      }
+    });
+
+  perm
+    .command('revoke <appId> <permissions...>')
+    .description('Revoke one or more permissions from an app.')
+    .action(async (appId: string, permissions: string[]) => {
+      for (const p of permissions) reportPerm(await editPerm(appId, 'remove-permission', p), 'revoked');
+    });
+}
+
+/**
+ * Interactive grant. Mirrors `cap grant -i`: pick ONE app (unless given), then
+ * check/uncheck against its current set. Unchecking revokes, so one screen is
+ * the whole truth rather than an add-only list.
+ */
+async function grantInteractive(appIdArg?: string): Promise<void> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    fail('Interactive grant needs a TTY. Pass arguments: `aura app perm grant <appId> <permission...>`.');
+  }
+  const apps = await fetchAppsWithPerms();
+  let appId = appIdArg;
+
+  if (!appId) {
+    const picked = await promptChoice<string>(
+      'Grant permissions to which app?',
+      apps.map((a) => ({
+        value: a.id,
+        label: a.id,
+        desc: a.permissions.length ? a.permissions.join(', ') : '(none)',
+      })),
+      0,
+      { allowBack: true },
+    );
+    if (picked === BACK) { info('cancelled'); return; }
+    appId = picked;
+  }
+
+  const target = apps.find((a) => a.id === appId);
+  if (!target) fail(`App not found: ${appId}`);
+  const current = new Set(target!.permissions);
+
+  // Built-ins first, then anything the app declares that isn't a built-in, so a
+  // custom permission is preserved rather than silently dropped on save.
+  const names = [...BUILTIN_PERMISSIONS_LIST, ...target!.permissions.filter((p) => !BUILTIN_PERMISSIONS_LIST.includes(p))];
+  const res = await promptMultiSelect<string>(
+    `Permissions for ${color.bold(appId!)}   ${color.dim('(unchecking revokes)')}`,
+    [{
+      label: 'permissions',
+      options: names.map((p) => ({
+        value: p,
+        label: p,
+        tag: ENFORCED_PERMISSIONS.includes(p) ? color.green('enforced') : color.dim('mvp: auto'),
+        desc: BUILTIN_PERMISSIONS_LIST.includes(p) ? '' : color.yellow('not a built-in'),
+        initiallyChecked: current.has(p),
+      })),
+    }],
+    0,
+    { allowBack: true },
+  );
+  if (res === BACK) { info('cancelled'); return; }
+
+  const next = new Set(res.selected);
+  const toAdd    = [...next].filter((p) => !current.has(p));
+  const toRemove = [...current].filter((p) => !next.has(p));
+  if (toAdd.length === 0 && toRemove.length === 0) { info(`no change — ${appId} already declares exactly that set`); return; }
+
+  // One request per change: manifest-edit has no bulk permission action, so a
+  // failure partway leaves a partial set rather than rolling back.
+  for (const p of toRemove) reportPerm(await editPerm(appId!, 'remove-permission', p), 'revoked');
+  for (const p of toAdd)    reportPerm(await editPerm(appId!, 'add-permission', p), 'granted');
 }

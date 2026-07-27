@@ -1,0 +1,134 @@
+---
+title: Cross-App Mounts
+description: aura mount — attach another app's files into a running container, live, with no restart.
+---
+
+An app container only sees its own slice of `/workspace/apps`. So from
+inside app A you cannot open app B's source at all — the only escape
+was `aura jump`, which *replaces* your context instead of composing it.
+
+`aura mount` attaches another app's directory into an **already-running**
+container. No restart, no respawn, native speed. Read-only by default.
+
+## Worked example
+
+You are inside `com.aura.terminal` and want to read (then edit)
+`com.example.hello`:
+
+```bash
+# once, from anywhere: the CONSUMER app needs the permission
+aura app perm grant com.aura.terminal apps.mount
+
+# inside the terminal app's sandbox
+aura mount add com.example.hello     # read-only
+aura mount ls                        # TARGET SCOPE KIND MODE PATH
+ls /mnt/aura/com.example.hello       # …its source, right there
+
+aura mount rm com.example.hello      # detach
+```
+
+To actually edit it, ask for write access:
+
+```bash
+aura mount rm  com.example.hello
+aura mount add com.example.hello --rw
+```
+
+A mode change is detach + re-add — POSTing over a live mount returns
+409. The interactive wizard does that for you.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `aura mount` | Interactive wizard: pick target app → instance → the set of apps to have mounted. Per row, `space` checks it, `r` toggles `rw`, `d` adds `+data`. Unchecking a row **detaches** it. |
+| `aura mount ls` | What is mounted into the instance. Use the `PATH` column — do not hardcode a root. |
+| `aura mount add <appId>…` | Attach one or more apps. With no appId, opens a multi-select over every installed app (`m`/Tab switches scope). |
+| `aura mount rm <appId>…` | Detach. A bare appId drops both its source and data mounts; `<appId>:data` drops just the data one. |
+
+| Flag | Applies to | Meaning |
+|---|---|---|
+| `--rw` | `add` | Mount read-**write**. Default is `ro`. |
+| `--data` | `add` | Mount the target's data dir **instead of** its source. |
+| `--all` | `rm` | Detach every mount from the instance. |
+| `--instance <id>` | all | Which instance to mount *into*. Defaults to `$APP_INSTANCE_ID`, which both runners set — so inside an app sandbox you never pass it. |
+
+## Where the files land
+
+Two roots. Which one you get depends on when the *consumer* container
+was started, so always read the `PATH` column from `aura mount ls`
+rather than hardcoding either.
+
+| Root | When |
+|---|---|
+| `/mnt/aura/<appId>` | Canonical. Containers started since the feature landed. `$AURA_MOUNT_ROOT` is set to `/mnt/aura` in these. |
+| `/data/.mnt/<appId>` | Fallback for older containers, which have no `/mnt/aura` to receive the mount. Permanent fallback, not a migration. |
+
+Data mounts land next to the source one, at `<appId>.data`.
+
+## The `apps.mount` permission
+
+Required by the **consumer** — the app being mounted *into*, not the app
+being mounted. Without it, `POST`/`DELETE` on the mounts API return
+**403** (listing still works).
+
+This is the first permission in AuraOS that actually denies. Every other
+permission is still auto-granted by the `PermissionManager`'s MVP path;
+only names in its `ENFORCED` set really 403. Handing one app read/write
+access to another app's source tree is not defensible to auto-grant.
+
+Declare it in the manifest:
+
+```jsonc
+// app.manifest.json
+{ "permissions": ["apps.mount"] }
+```
+
+Or manage it live:
+
+```bash
+aura app perm ls [appId]                        # who declares what
+aura app perm grant [appId] [permissions...]    # bare = interactive picker
+aura app perm revoke <appId> <permissions...>
+```
+
+Grants take effect **immediately** — the endpoint reloads the app
+registry from disk, so there is no shell restart and no respawn. The
+picker tags each permission `enforced` or `mvp: auto` so you can see
+which ones bite.
+
+## Limits
+
+Read these before you rely on it.
+
+- **Container sandboxes only.** A PRoot instance has no `/data` volume
+  mount to receive propagation; the API answers **409**.
+- **Not atomic.** There is no bulk endpoint, so the wizard issues one
+  request per change. A failure partway leaves a *partial* set — the CLI
+  reports each outcome rather than implying the whole plan applied.
+- **Mounts don't survive an instance restart.** Stop, force-kill and
+  crash all detach every mount (a leaked bind pins the source filesystem
+  and makes the app-data volume unremovable). They *do* survive a shell
+  restart — the `MountManager` reconciles against the kernel on boot,
+  re-adopting live ones and reaping orphans.
+- **`--rw` writes the target app's real source.** Its dev server will
+  hot-reload — that's the point — but a careless write restarts someone
+  else's app.
+
+## How it works
+
+Docker cannot add a mount to a running container, so AuraOS goes
+underneath it. Every app container's mount root is a volume-subpath
+mount, which docker leaves as a *slave* of the host's peer group — and a
+slave receives propagation. A privileged helper container makes a plain
+`mount --bind` on the host side, and it appears inside the running
+container instantly.
+
+Read-only is not `remount,ro`: mount-attribute changes don't propagate
+to slaves, so a "read-only" remount would leave the container writable.
+Instead the helper binds from a source that is *already* read-only, and
+every mount is then verified against the target container's own
+`/proc/self/mountinfo` — if the mode doesn't match what was promised,
+the mount is rolled back and the command fails.
+
+Source: `packages/core/src/app-manager/MountManager.ts`.

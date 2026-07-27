@@ -1,6 +1,7 @@
 import type { APIRoute } from 'astro';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { BUILTIN_PERMISSIONS } from '@aura/core';
 
 /**
  * Server-side manifest mutation. Required because container-sandbox apps
@@ -24,7 +25,7 @@ import { join } from 'node:path';
 
 const APP_ID_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
 
-type Action = 'add-tool' | 'remove-tool' | 'set-tools';
+type Action = 'add-tool' | 'remove-tool' | 'set-tools' | 'add-permission' | 'remove-permission';
 
 interface Body {
   appId?: string;
@@ -33,7 +34,11 @@ interface Body {
   tool?: string;
   /** For set-tools: the full replacement tools[] (may include markers '*'/'#'). */
   tools?: string[];
+  /** For add-permission / remove-permission. */
+  permission?: string;
 }
+
+const PERMISSION_ACTIONS = new Set<Action>(['add-permission', 'remove-permission']);
 
 export const POST: APIRoute = async ({ request }) => {
   let body: Body;
@@ -44,12 +49,18 @@ export const POST: APIRoute = async ({ request }) => {
   if (typeof appId !== 'string' || !APP_ID_RE.test(appId)) {
     return json({ error: 'invalid-app-id', message: `appId must be reverse-domain (got ${JSON.stringify(appId)}).` }, 400);
   }
-  if (action !== 'add-tool' && action !== 'remove-tool' && action !== 'set-tools') {
-    return json({ error: 'invalid-action', message: `action must be 'add-tool', 'remove-tool', or 'set-tools' (got ${JSON.stringify(action)}).` }, 400);
+  const VALID: Action[] = ['add-tool', 'remove-tool', 'set-tools', 'add-permission', 'remove-permission'];
+  if (!action || !VALID.includes(action)) {
+    return json({ error: 'invalid-action', message: `action must be one of ${VALID.join(', ')} (got ${JSON.stringify(action)}).` }, 400);
+  }
+  if (PERMISSION_ACTIONS.has(action) && (typeof body.permission !== 'string' || body.permission.length === 0)) {
+    return json({ error: 'invalid-permission', message: `${action} requires a non-empty \`permission\`.` }, 400);
   }
   // Validate the payload shape per action.
   let setTools: string[] | null = null;
-  if (action === 'set-tools') {
+  if (PERMISSION_ACTIONS.has(action)) {
+    // no tools payload to validate
+  } else if (action === 'set-tools') {
     if (!Array.isArray(body.tools) || body.tools.some((t) => typeof t !== 'string' || t.length === 0)) {
       return json({ error: 'invalid-tools', message: 'set-tools requires a non-empty-string array `tools`.' }, 400);
     }
@@ -71,6 +82,50 @@ export const POST: APIRoute = async ({ request }) => {
   let manifest: Record<string, unknown>;
   try { manifest = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>; }
   catch (err) { return json({ error: 'manifest-parse-failed', message: (err as Error).message }, 500); }
+
+  // ─── permissions ────────────────────────────────────────────────────────
+  // Separate from tools: permissions gate API calls, not binaries, so there's
+  // no allowlist dir to re-provision. The registry reload is the whole point —
+  // `PermissionManager` reads `manifest.permissions` out of the in-memory
+  // registry, so without it a granted permission wouldn't take effect until
+  // the shell restarted.
+  if (PERMISSION_ACTIONS.has(action)) {
+    const perm = body.permission!;
+    const current = Array.isArray(manifest['permissions']) ? (manifest['permissions'] as string[]) : [];
+    let next = current;
+    let changed = false;
+    if (action === 'add-permission') {
+      if (!current.includes(perm)) { next = [...current, perm]; changed = true; }
+    } else if (current.includes(perm)) {
+      next = current.filter((p) => p !== perm); changed = true;
+    }
+
+    // Unknown names are allowed through (PermissionSchema is a free-form
+    // string and apps may define their own) but flagged, since a typo would
+    // otherwise silently grant nothing.
+    const unknown = action === 'add-permission' && !BUILTIN_PERMISSIONS.includes(perm as never);
+
+    if (changed) {
+      manifest['permissions'] = next;
+      try { writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n'); }
+      catch (err) { return json({ error: 'write-failed', message: (err as Error).message }, 500); }
+    }
+
+    // Reload even on a no-op. The in-memory registry can drift from disk (a
+    // manifest edited outside the OS, or written before this shell booted),
+    // and in that state the permission LOOKS granted in the file while every
+    // request still 403s. Re-reading unconditionally makes this endpoint the
+    // way to resync, not just the way to mutate.
+    try {
+      mgr.registry.reloadFromDisk(appId);
+      return json({ ok: true, appId, action, permission: perm, changed, permissions: next, unknown, reloaded: true });
+    } catch (err) {
+      // The file is written but the running registry still has the old value,
+      // so the grant won't take effect until a restart. Say so rather than
+      // reporting a success the caller can't actually use.
+      return json({ ok: true, appId, action, permission: perm, changed, permissions: next, unknown, reloaded: false, reloadError: (err as Error).message });
+    }
+  }
 
   const tools = Array.isArray(manifest['tools']) ? (manifest['tools'] as string[]) : [];
   let changed = false;

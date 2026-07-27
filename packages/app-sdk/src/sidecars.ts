@@ -24,7 +24,10 @@
 
 import http from 'node:http';
 import net from 'node:net';
+import { existsSync } from 'node:fs';
 import { execFile, spawn } from 'node:child_process';
+
+const DOCKER_SOCK = '/var/run/docker.sock';
 
 /** One sibling runtime image — mirrors the manifest `services[]` entry. */
 export interface ServiceSpec {
@@ -165,6 +168,31 @@ export interface ServiceSpec {
    * Default false.
    */
   inheritMounts?: boolean;
+
+  /**
+   * Bind the host docker socket into the sibling.
+   *
+   * ⚠️ This is NOT a slice of the controller's privileges the way the other
+   * `inherit*` flags are. `inheritTools` hands over exactly the granted
+   * binaries, `inheritMounts` exactly the mounted apps, `inheritPermissions`
+   * exactly the declared strings. The docker socket is not scoped to the app
+   * at all: anything holding it can start a privileged container, bind the
+   * host filesystem and read every volume on the machine. Enabling this gives
+   * a FOREIGN runtime image host root. Named `inheritDockerSocket` rather than
+   * `inheritDocker` so a manifest can't ask for it by accident while reaching
+   * for the `docker` CLI — which `inheritTools` already provides.
+   *
+   * Bounded by one thing: the controller can only pass on a socket it already
+   * has. AuraOS binds `/var/run/docker.sock` into an app container only when
+   * its manifest `tools[]` grants `docker` (ContainerRunner), so if the
+   * controlling app wasn't granted it there is no socket here to forward and
+   * this is skipped with a warning. A sibling therefore can never exceed its
+   * controller — enforced by what's actually present, not by re-reading a
+   * manifest the SDK doesn't have.
+   *
+   * Default false.
+   */
+  inheritDockerSocket?: boolean;
 
   dns?: string[];
   restart?: 'no' | 'on-failure' | 'always' | 'unless-stopped';
@@ -333,6 +361,25 @@ export class SidecarHost {
    * prevent a writable child — it would just misrepresent what the sibling can
    * do. Access control lives on the individual mounts.
    */
+  /**
+   * `-v` arg forwarding the host docker socket for `inheritDockerSocket`.
+   *
+   * The gate is physical rather than declarative: we forward the socket only
+   * if THIS container has one. AuraOS binds it only for apps whose `tools[]`
+   * grants `docker`, so an ungranted controller simply has nothing to pass on
+   * and we skip loudly instead of producing a sibling with a dead socket path.
+   */
+  private dockerSocketArgs(): string[] {
+    if (!existsSync(DOCKER_SOCK)) {
+      this.log(
+        `inheritDockerSocket: no ${DOCKER_SOCK} in this app — its manifest tools[] does not grant 'docker', so there is nothing to forward. Skipping.`,
+      );
+      return [];
+    }
+    this.log(`inheritDockerSocket: forwarding ${DOCKER_SOCK} — the sibling gets HOST ROOT via the daemon.`);
+    return ['-v', `${DOCKER_SOCK}:${DOCKER_SOCK}`];
+  }
+
   private mountInheritArgs(): string[] {
     return [
       '--mount', `type=volume,source=${this.opts.appDataVolume},target=/mnt/aura,volume-subpath=aura/mounts/${this.opts.instanceId}`,
@@ -448,6 +495,7 @@ export class SidecarHost {
     // list so the rest stays a flat literal.
     const toolArgs = svc.inheritTools ? await this.toolInheritArgs(svc.image) : [];
     const mountArgs = svc.inheritMounts ? this.mountInheritArgs() : [];
+    const sockArgs  = svc.inheritDockerSocket ? this.dockerSocketArgs() : [];
     const args = [
       'run', '-d',
       '--name', this.containerName(svc.name),
@@ -488,6 +536,7 @@ export class SidecarHost {
       // after svc.env/envInherit so docker's last-wins keeps our prepend.
       ...toolArgs,
       ...mountArgs,
+      ...sockArgs,
       svc.image,
       ...(svc.command ?? []),
     ];
