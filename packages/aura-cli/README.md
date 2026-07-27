@@ -79,27 +79,28 @@ command that talks to the shell. You can also set `AURA_SHELL_URL`.
 
 19. `aura dev new com.aura.demo` — scaffolds a new app under `apps/com.aura.demo/` with a valid manifest.
 20. `aura dev validate apps/com.aura.demo` — zero errors against the AuraOS schema.
-21. `aura app install apps/com.aura.demo` — `app:installed` broadcast.
-22. `aura app start com.aura.demo` — starts (assuming `entrypoint.sh` is good).
+21. `aura dev clone com.aura.counter com.aura.demo2 --scope user` — copies the app server-side, rewrites the manifest id + package name, ports `@aura/*` deps to `auraDependencies`, and lands it in the user scope.
+22. `aura app install apps/com.aura.demo` — `app:installed` broadcast.
+23. `aura app start com.aura.demo` — starts (assuming `entrypoint.sh` is good).
 
 ### OS Wrapper
 
-23. `aura theme get` → `scificn`.
-24. `aura theme set amber` → 200; the browser shell switches to amber live (SSE-driven).
-25. `aura theme get` → `amber`.
-26. `aura data query com.aura.settings/api/data/settings` → settings JSON.
-27. In a second terminal: `aura events` → live timeline.
-28. In the first terminal: `aura app start com.aura.counter` → the event stream shows `app:stateChanged` events.
+24. `aura theme get` → `scificn`.
+25. `aura theme set amber` → 200; the browser shell switches to amber live (SSE-driven).
+26. `aura theme get` → `amber`.
+27. `aura data query com.aura.settings/api/data/settings` → settings JSON.
+28. In a second terminal: `aura events` → live timeline.
+29. In the first terminal: `aura app start com.aura.counter` → the event stream shows `app:stateChanged` events.
 
 ### PRoot Forward of the CLI
 
-29. `aura cap grant com.aura.terminal aura` (already seeded by default).
-30. `aura inst shell com.aura.terminal-1` → inside the sandbox, `aura ps` shows the same table as on the master.
+30. `aura cap grant com.aura.terminal aura` (already seeded by default).
+31. `aura inst shell com.aura.terminal-1` → inside the sandbox, `aura ps` shows the same table as on the master.
 
 ### Cleanup & Resilience
 
-31. `aura cap remove ripgrep` — uninstall + cleanup symlinks.
-32. Container restart → `aura cap list` still shows installed capabilities (state persisted to `/data/aura/state/capabilities.json`).
+32. `aura cap remove ripgrep` — uninstall + cleanup symlinks.
+33. Container restart → `aura cap list` still shows installed capabilities (state persisted to `/data/aura/state/capabilities.json`).
 
 ## Capabilities — `/workspace/.aura/capabilities.yaml`
 

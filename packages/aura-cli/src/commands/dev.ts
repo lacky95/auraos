@@ -2,11 +2,16 @@ import type { Command } from 'commander';
 import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync, chmodSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { AppManifestSchema } from '@aura/core';
+import { AppManifestSchema, AURA_NPMRC, needsNpmrc, portPackageJsonForScope, portToolsForScope } from '@aura/core';
 import { color, fail, info, ok, warn } from '../lib/format.js';
 import { promptText, promptChoice, promptConfirm, promptMultiSelect, PromptCancelled, BACK, type MultiSelectMode } from '../lib/prompts.js';
 import { ensureRegistry, loadRegistry, loadState, type CapabilityEntry } from '../lib/registry.js';
 import { api } from '../lib/client.js';
+import {
+  ALL_SCOPES, PKG_RE, SELECTABLE_SCOPES, defaultIconFor, scopeAppsDir, stdoutDivider,
+  type ScopeId, type SelectableScope,
+} from '../lib/appid.js';
+import { registerDevClone } from './dev-clone.js';
 
 const TEMPLATE_DIR = (() => {
   if (process.env['AURA_TEMPLATE_DIR']) return process.env['AURA_TEMPLATE_DIR'];
@@ -19,35 +24,6 @@ const TEMPLATE_DIR = (() => {
 })();
 
 const APPS_DIR = process.env['AURA_APPS_DIR'] ?? '/workspace/apps';
-const DATA_DIR = process.env['AURA_DATA_DIR'] ?? '/data';
-
-/**
- * Scopes a developer may scaffold into with `aura dev new`. `system` is
- * deliberately excluded: it's the immutable in-repo monorepo scope
- * (workspace:* deps, lives in /workspace/apps) and must NEVER be a target for
- * the CLI. The scaffold API and Nexus still know about system for internal/
- * legacy use, but the CLI neither offers it in the wizard nor accepts it via
- * --scope. New apps are `user` by default, or `global` if opted into.
- */
-const SELECTABLE_SCOPES = ['user', 'global'] as const;
-type SelectableScope = typeof SELECTABLE_SCOPES[number];
-
-/**
- * Host-side apps directory for a scope — mirrors core's ScopeRegistry so the
- * wizard preview, the flag path, and the offline local-write fallback all
- * agree on where an app actually lands (rather than always assuming the
- * system /workspace/apps dir).
- */
-function scopeAppsDir(scope: ScopeId): string {
-  switch (scope) {
-    case 'system': return APPS_DIR;
-    case 'global': return join(DATA_DIR, 'scopes', 'global', 'apps');
-    case 'user':   return join(DATA_DIR, 'scopes', 'users', 'default', 'apps');
-  }
-}
-
-/** All scope apps dirs in AppRegistry priority order (system→global→user). */
-const ALL_SCOPES: ScopeId[] = ['system', 'global', 'user'];
 
 /**
  * Every `app.manifest.json` across ALL scopes, for `--all` sweeps. Higher-
@@ -102,8 +78,6 @@ function renderTemplate(
 
 /** Three "shape" presets the wizard offers. Maps to manifest field combos. */
 type ComponentShape = 'activity' | 'activity-bg' | 'service';
-
-type ScopeId = 'system' | 'global' | 'user';
 
 interface ScaffoldConfig {
   appId:        string;
@@ -163,27 +137,12 @@ function manifestFromConfig(cfg: ScaffoldConfig): Record<string, unknown> {
   // User/global-scope apps NEED `aura` + `oras` available at runtime so the
   // synth entrypoint's `aura sdk install` call can resolve @aura/* from the
   // local OCI registry. System-scope apps don't (their @aura/* is already
-  // in /workspace/node_modules via pnpm workspace symlinks). Merge into
-  // whatever tools the user requested explicitly; dedupe.
-  const baseTools = cfg.tools;
-  const merged = (cfg.scope === 'system')
-    ? baseTools
-    : [...new Set([...baseTools, 'bash', 'node', 'aura', 'oras'])];
+  // in /workspace/node_modules via pnpm workspace symlinks). `dev clone`
+  // applies the same union server-side, hence the shared helper.
+  const merged = portToolsForScope(cfg.tools, cfg.scope);
   if (merged.length > 0) m['tools'] = merged;
 
   return m;
-}
-
-const PKG_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
-
-function defaultIconFor(name: string): string {
-  // 1-3 char glyph, uppercase. Prefer first letters of camelCase / space-split
-  // words so "TaskList" → "TL", "voice memo" → "VM". Fall back to first letter.
-  const words = name.split(/[\s.-]+|(?=[A-Z])/).filter(Boolean);
-  if (words.length >= 2) {
-    return (words[0]![0]! + words[1]![0]!).toUpperCase();
-  }
-  return (name[0] ?? '?').toUpperCase();
 }
 
 /**
@@ -385,10 +344,6 @@ async function runWizard(seed: { appId?: string; force?: boolean }): Promise<Sca
     if (err instanceof PromptCancelled) return null;
     throw err;
   }
-}
-
-function stdoutDivider(): void {
-  process.stdout.write(color.dim('  ────────────────────────────────────────────────────\n'));
 }
 
 /**
@@ -608,11 +563,12 @@ function buildScaffoldFiles(cfg: ScaffoldConfig): PayloadFile[] {
   const pkgIdx = files.findIndex((f) => f.relPath === 'package.json');
   if (pkgIdx >= 0) {
     const pkg = JSON.parse(files[pkgIdx]!.content) as Record<string, unknown>;
-    if (cfg.scope === 'system') {
-      pkg['dependencies'] = { '@aura/app-sdk': 'workspace:*', ...(pkg['dependencies'] as object) };
-    } else {
-      pkg['auraDependencies'] = { '@aura/app-sdk': `^${sdkVersion}` };
-    }
+    // Always declare the dep in workspace form first, then let the shared
+    // portability helper decide whether it stays there (system) or moves to
+    // `auraDependencies` (user/global). Same helper `dev clone` runs
+    // server-side, so both commands can never drift apart.
+    pkg['dependencies'] = { '@aura/app-sdk': 'workspace:*', ...(pkg['dependencies'] as object) };
+    portPackageJsonForScope(pkg, cfg.scope, sdkVersion);
     files[pkgIdx] = { ...files[pkgIdx]!, content: JSON.stringify(pkg, null, 2) + '\n' };
   }
   // User/global-scope apps live outside the pnpm workspace. Drop a `.npmrc`
@@ -620,15 +576,8 @@ function buildScaffoldFiles(cfg: ScaffoldConfig): PayloadFile[] {
   // Tooling hints and the future day Zot grows native npm-protocol support.
   // Actual install for these scopes happens via `aura sdk install` invoked
   // from the sandbox's synth entrypoint (reads auraDependencies above).
-  if (cfg.scope !== 'system') {
-    files.push({
-      relPath: '.npmrc',
-      content:
-        '# AuraOS user-scope apps: @aura/* packages live in `auraDependencies`,\n' +
-        '# not `dependencies` (npm/pnpm ignore it; `aura sdk install` reads it).\n' +
-        '# The registry below is documentation; resolution happens via OCI.\n' +
-        '@aura:registry=http://aura-com.aura.registry:4090/\n',
-    });
+  if (needsNpmrc(cfg.scope)) {
+    files.push({ relPath: '.npmrc', content: AURA_NPMRC });
   }
   return files;
 }
@@ -823,6 +772,10 @@ export function registerDev(program: Command): void {
       };
       await scaffoldFromConfig(cfg);
     });
+
+  // `dev clone` lives in its own module — same command group, but a full
+  // command + wizard of its own (see commands/dev-clone.ts).
+  registerDevClone(dev);
 
   dev
     .command('validate [path]')

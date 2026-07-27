@@ -137,6 +137,7 @@ Long-running daemons (e.g. Redis) that aren't AuraOS apps.
 | Command | Description | Key flags |
 |---|---|---|
 | `aura dev new [appId]` | Scaffold a new app. Interactive wizard if `appId` omitted. | `--name`, `--icon`, `--description`, `--shape`, `--instance-mode`, `--sandbox`, `--tools`, `--force`, `--non-interactive` |
+| `aura dev clone [sourceAppId] [targetAppId]` | Clone an existing app into a new one. Interactive wizard if the ids are omitted. Any app can be cloned — system included — but the clone always lands in `user` or `global` scope. | `--scope`, `--source-scope`, `--name`, `--icon`, `--description`, `--version`, `--no-rewrite-ids`, `--exclude-git`, `--strip-publish`, `--strip-store`, `--with-data`, `--force`, `--dry-run`, `--non-interactive`, `--json` |
 | `aura dev validate [path]` | Validate one manifest, or all with `--all`. Runs the Zod schema. | `--all` |
 | `aura dev clean-manifest [path]` | Strip manifest fields equal to schema defaults. | `--all`, `--dry-run` |
 | `aura dev standalone <appId>` | Run an app directly with `astro dev` (no PRoot/shell) for fast UI iteration. | — |
