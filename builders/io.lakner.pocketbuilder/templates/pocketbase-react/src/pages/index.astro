@@ -1,0 +1,88 @@
+---
+import { pbStatus } from '../lib/pocketbase.ts';
+
+const status = await pbStatus();
+const appName = '{{APP_NAME}}';
+const appId   = '{{APP_ID}}';
+---
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>{appName}</title>
+  </head>
+  <body>
+    <main>
+      <h1>{appName}</h1>
+      <p class="id">{appId}</p>
+
+      <section class="card">
+        <h2>PocketBase</h2>
+        <p id="state" class:list={['state', status.healthy ? 'ok' : status.running ? 'warn' : 'dim']}>
+          {status.healthy ? 'ready' : status.running ? 'starting' : status.phase}
+        </p>
+        <p class="meta" id="detail">{status.detail || status.host}</p>
+        <p class="meta">
+          API proxied at <code>/api/pb/…</code> · admin UI at
+          <a href="/api/pb/_/" target="_blank">/api/pb/_/</a>
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>Next</h2>
+        <p class="meta">
+          The frontend lives in <code>src/pages/</code>. Talk to PocketBase through
+          the relative <code>/api/pb</code> base — no container names, no CORS.
+        </p>
+      </section>
+    </main>
+
+    <script is:inline>
+      // Poll until PocketBase reports healthy — the first boot pulls the image,
+      // which can take a while.
+      const state  = document.getElementById('state');
+      const detail = document.getElementById('detail');
+      const tick = async () => {
+        try {
+          const s = await (await fetch('/api/status', { cache: 'no-store' })).json();
+          state.textContent = s.healthy ? 'ready' : s.running ? 'starting' : s.phase;
+          state.className = 'state ' + (s.healthy ? 'ok' : s.running ? 'warn' : 'dim');
+          detail.textContent = s.detail || s.host;
+          if (s.healthy) return;
+        } catch { /* keep polling */ }
+        setTimeout(tick, 3000);
+      };
+      setTimeout(tick, 3000);
+    </script>
+
+    <style is:global>
+      :root { color-scheme: dark; }
+      html, body {
+        margin: 0; padding: 0; min-height: 100vh;
+        font-family: var(--aura-font-mono, ui-monospace, monospace);
+        background: var(--aura-color-bg, #0a0a0a);
+        color: var(--aura-color-text, #ccffcc);
+      }
+      main { padding: 24px 20px; max-width: 720px; margin: 0 auto; }
+      h1 { font-size: 1.1rem; letter-spacing: 0.12em; margin: 0 0 4px; }
+      .id { color: var(--aura-color-text-dim); font-size: 0.72rem; margin: 0 0 20px; }
+      .card {
+        border: 1px solid var(--aura-color-border);
+        background: var(--aura-color-surface);
+        padding: 14px 16px; margin-bottom: 12px;
+      }
+      .card h2 {
+        font-size: 0.7rem; letter-spacing: 0.18em; text-transform: uppercase;
+        color: var(--aura-color-text-dim); margin: 0 0 10px;
+      }
+      .state { font-size: 0.95rem; letter-spacing: 0.08em; margin: 0; }
+      .state.ok   { color: var(--aura-color-primary); }
+      .state.warn { color: var(--aura-color-warning, #e0a000); }
+      .state.dim  { color: var(--aura-color-text-dim); }
+      .meta { color: var(--aura-color-text-dim); font-size: 0.75rem; margin: 8px 0 0; word-break: break-word; }
+      a { color: var(--aura-color-primary); }
+      code { word-break: break-all; }
+    </style>
+  </body>
+</html>

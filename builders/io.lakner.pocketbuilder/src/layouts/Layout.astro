@@ -1,0 +1,790 @@
+---
+import { ClientRouter } from 'astro:transitions';
+import { listProjects, type Project } from '../lib/projects.ts';
+
+interface Props {
+  title?: string;
+  active?: 'projects' | 'new';
+  /** App id of the project this page is about, so the rail can mark it. */
+  activeProject?: string | null;
+}
+
+const { title = 'Projects', active = 'projects', activeProject = null } = Astro.props;
+
+const NAV: Array<{ id: NonNullable<Props['active']>; label: string; href: string; glyph: string }> = [
+  { id: 'projects', label: 'Projects',    href: '/',    glyph: '▤' },
+  { id: 'new',      label: 'New project', href: '/new', glyph: '+' },
+];
+
+// The rail doubles as the project switcher — that's what makes a side nav
+// worth having here over the old tab strip. A failure to load must never take
+// the page down with it; the rail just falls back to the two nav links.
+let projects: Project[] = [];
+try { projects = await listProjects(); } catch { projects = []; }
+
+// Build stamp: the mtime of this app's own manifest, i.e. when it was last
+// deployed. Shown in the rail so "is this page running current code, or a
+// document the browser has been holding since before the last deploy?" is a
+// question you can answer by looking, instead of by guessing.
+let build = 'unknown';
+try {
+  const { statSync } = await import('node:fs');
+  build = new Date(statSync(`${process.cwd()}/app.manifest.json`).mtimeMs)
+    .toISOString().slice(11, 19) + 'Z';
+} catch { /* leave 'unknown' */ }
+---
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>{title} · Pocket Builder</title>
+    {/* Swaps pages in place instead of reloading the document — no white
+        flash, no re-parse of CSS, rail scroll position preserved. */}
+    <ClientRouter />
+  </head>
+  <body>
+    <header class="pb-bar">
+      <button class="pb-rail-toggle" id="rail-toggle" aria-label="Toggle navigation" aria-expanded="false">☰</button>
+      <h1 class="pb-title">
+        <span class="glyph">PB</span>
+        <span class="wordmark">POCKET BUILDER</span>
+        <span class="subtitle">// every project is an app</span>
+      </h1>
+    </header>
+
+    <div class="pb-shell">
+      <aside class="pb-rail" id="rail">
+        <nav class="pb-rail-group">
+          {NAV.map((item) => (
+            <a href={item.href} class:list={['pb-rail-item', { active: item.id === active && !activeProject }]}>
+              <span class="pb-rail-glyph">{item.glyph}</span>
+              <span class="pb-rail-label">{item.label}</span>
+            </a>
+          ))}
+        </nav>
+
+        <div class="pb-rail-group">
+          <h2 class="pb-rail-heading">Projects <span class="pb-rail-count">{projects.length}</span></h2>
+          {projects.length === 0 && <p class="pb-rail-empty">none yet</p>}
+          {projects.map((p) => (
+            <a
+              href={`/project/${p.id}`}
+              class:list={['pb-rail-item', 'project', { active: p.id === activeProject }]}
+              title={p.id}
+            >
+              <span class:list={['pb-dot', { on: p.running, missing: !p.installed }]}></span>
+              <span class="pb-rail-label">{p.name}</span>
+            </a>
+          ))}
+        </div>
+
+        <p class="pb-rail-build" title="When this build was deployed. If this is older than the last deploy, the page is stale — reload the window.">build {build}</p>
+      </aside>
+
+      <main class="pb-main">
+        <slot />
+      </main>
+    </div>
+
+    <script>
+      /**
+       * All dashboard behaviour lives here, in one bundled module.
+       *
+       * With ClientRouter installed the document survives navigation — only
+       * the body content is swapped — so per-page inline scripts would either
+       * re-run and stack listeners, or not re-run at all. Instead everything is
+       * delegated off `document` (bound exactly once) and any per-page setup
+       * hangs off `astro:page-load`, which fires on first load and after every
+       * swap.
+       *
+       * Nothing here calls location.reload(). State changes patch the DOM in
+       * place; when the shape of the page really has changed (a project
+       * appeared or vanished) we re-render through the router instead, which
+       * is a swap, not a reload.
+       */
+      import { navigate } from 'astro:transitions/client';
+
+      const mine = (p: string) => new URL(p, document.baseURI).toString();
+
+      async function post(path: string, body: unknown, timeoutMs = 120_000) {
+        // Always bounded. A git call goes out to `docker exec` or a helper
+        // container; without a deadline a wedged docker daemon leaves the UI
+        // sitting on "Checking…" with nothing to tell the user.
+        const res = await fetch(mine(path), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || (data as { ok?: boolean }).ok === false) {
+          throw new Error((data as { error?: string }).error || `HTTP ${res.status}`);
+        }
+        return data as Record<string, any>;
+      }
+
+      function feedback(host: Element | null, text: string, kind?: 'ok' | 'err') {
+        if (!host) return;
+        let fb = host.querySelector('.row-feedback') as HTMLElement | null;
+        if (!fb) {
+          fb = document.createElement('div');
+          fb.className = 'row-feedback';
+          fb.style.cssText = 'margin-top:8px;padding-top:6px;border-top:1px dashed var(--aura-color-border);font-size:0.72rem;white-space:pre-wrap;word-break:break-word;';
+          host.appendChild(fb);
+        }
+        fb.style.color = kind === 'ok' ? 'var(--aura-color-primary)'
+                       : kind === 'err' ? 'var(--aura-color-warning, #e0a000)'
+                       : 'var(--aura-color-text-dim)';
+        fb.textContent = text;
+      }
+
+      function show(el: HTMLElement | null, text: string, kind?: 'ok' | 'err') {
+        if (!el) return;
+        el.hidden = !text;
+        el.style.color = kind === 'ok' ? 'var(--aura-color-primary)'
+                       : kind === 'err' ? 'var(--aura-color-warning, #e0a000)'
+                       : 'var(--aura-color-text-dim)';
+        el.textContent = text;
+      }
+
+      // ── live state ────────────────────────────────────────────────────────
+      /**
+       * Patch the rail and any visible cards from the current project list.
+       *
+       * This used to call `navigate()` when the set of projects changed, to
+       * re-render the page. That was a mistake: a router navigation triggered
+       * from a background event races whatever the user is doing. It swaps the
+       * document out from under an in-flight handler — so a git response would
+       * land on elements that were no longer in the page — and if a transition
+       * was already running it rejected with "Transition was aborted because of
+       * invalid state". Background updates now only ever patch the DOM;
+       * navigation is exclusively a user action.
+       */
+      async function syncProjects() {
+        let projects: any[];
+        try {
+          const res = await fetch(mine('api/projects/list'), { cache: 'no-store' });
+          projects = (await res.json()).projects ?? [];
+        } catch { return; }
+
+        // Reconcile the rail's project list in place: drop what's gone, add
+        // what's new, leave the rest alone.
+        const group = document.querySelectorAll('.pb-rail-group')[1];
+        if (group) {
+          const wanted = new Set(projects.map((p) => p.id));
+          for (const a of [...document.querySelectorAll('.pb-rail-item.project')]) {
+            if (!wanted.has(a.getAttribute('title') ?? '')) a.remove();
+          }
+          const count = document.querySelector('.pb-rail-count');
+          if (count) count.textContent = String(projects.length);
+          for (const p of projects) {
+            if (document.querySelector(`.pb-rail-item.project[title="${CSS.escape(p.id)}"]`)) continue;
+            const a = document.createElement('a');
+            a.className = 'pb-rail-item project';
+            a.href = mine(`project/${p.id}`);
+            a.title = p.id;
+            a.innerHTML = '<span class="pb-dot"></span><span class="pb-rail-label"></span>';
+            a.querySelector('.pb-rail-label')!.textContent = p.name;
+            group.appendChild(a);
+          }
+          const empty = document.querySelector('.pb-rail-empty') as HTMLElement | null;
+          if (empty) empty.hidden = projects.length > 0;
+        }
+
+        for (const p of projects) {
+          const dot = document.querySelector(`.pb-rail-item.project[title="${CSS.escape(p.id)}"] .pb-dot`);
+          if (dot) dot.className = 'pb-dot' + (p.running ? ' on' : !p.installed ? ' missing' : '');
+
+          const card = document.querySelector(`.pb-card[data-project="${CSS.escape(p.id)}"]`);
+          if (card) {
+            const badge = card.querySelector('[data-state]');
+            if (badge) {
+              badge.textContent = p.installed ? p.state : 'missing';
+              badge.className = 'badge' + (p.running ? ' running' : !p.installed ? ' warn' : '');
+            }
+            const btn = (a: string) => card.querySelector(`button[data-action="${a}"]`) as HTMLButtonElement | null;
+            const start = btn('start'), stop = btn('stop');
+            if (start) start.disabled = p.running || !p.installed;
+            if (stop)  stop.disabled  = !p.running;
+          }
+        }
+
+        // Project detail header, when we're on one.
+        const page = document.getElementById('project-page');
+        const current = projects.find((p) => p.id === page?.dataset.projectId);
+        if (page && current) {
+          const badge = page.querySelector('[data-state]');
+          if (badge) {
+            badge.textContent = current.installed ? current.state : 'missing';
+            badge.className = 'badge' + (current.running ? ' running' : !current.installed ? ' warn' : '');
+          }
+          const b = (s: string) => page.querySelector(`button[data-lifecycle="${s}"]`) as HTMLButtonElement | null;
+          const start = b('start'), stop = b('stop');
+          if (start) start.disabled = current.running || !current.installed;
+          if (stop)  stop.disabled  = !current.running;
+        }
+      }
+
+      // ── git panel (project detail) ────────────────────────────────────────
+      function renderGitStatus(st: any, via: string) {
+        const summary  = document.getElementById('git-summary');
+        const filesEl  = document.getElementById('git-files') as HTMLElement | null;
+        const controls = document.getElementById('git-controls') as HTMLElement | null;
+        const initWrap = document.getElementById('git-init-wrap') as HTMLElement | null;
+        if (!summary) return;
+
+        if (!st.repo) {
+          summary.textContent = 'Not a git repository yet.';
+          summary.style.color = 'var(--aura-color-text-dim)';
+          if (filesEl) filesEl.hidden = true;
+          if (controls) controls.hidden = true;
+          if (initWrap) initWrap.hidden = false;
+          return;
+        }
+        if (initWrap) initWrap.hidden = true;
+        if (controls) controls.hidden = false;
+        const dirty = st.files.length;
+        summary.style.color = 'var(--aura-color-text-dim)';
+        summary.textContent =
+          `branch ${st.branch || '?'}`
+          + ` · ${dirty ? `${dirty} change${dirty === 1 ? '' : 's'}` : 'clean'}`
+          + (st.remote ? ` · origin ${st.remote}` : ' · no remote')
+          + (st.head ? ` · HEAD ${st.head}` : '')
+          + ` · via ${via}`;
+        show(filesEl, st.files.map((f: any) => f.code.padEnd(3) + f.path).join('\n'));
+      }
+
+      async function refreshGit() {
+        const page = document.getElementById('project-page');
+        const summary = document.getElementById('git-summary');
+        if (!page || !summary) return;
+        // Every element is re-queried AFTER the await, never captured before
+        // it. A view transition can swap the document while the request is in
+        // flight; writing to a reference taken beforehand updates a detached
+        // node, which looks exactly like "the request never finished".
+        const bad = (why: string) => {
+          const s = document.getElementById('git-summary');
+          if (!s) return;
+          s.textContent = why;
+          s.style.color = 'var(--aura-color-warning, #e0a000)';
+        };
+        const done = () => {
+          const b = document.getElementById('git-fetch') as HTMLButtonElement | null;
+          if (b) { b.disabled = false; b.textContent = 'Fetch git info'; }
+        };
+        const btn0 = document.getElementById('git-fetch') as HTMLButtonElement | null;
+        if (btn0) { btn0.disabled = true; btn0.textContent = 'Fetching…'; }
+        summary.textContent = 'Checking…';
+
+        let data: Record<string, any>;
+        try {
+          data = await post('api/projects/git', { id: page.dataset.projectId, action: 'status' });
+        } catch (err) {
+          bad(`git status request failed — ${(err as Error).message || err}\nClick “Fetch git info” to retry.`);
+          done();
+          return;
+        }
+        // Rendering is fallible too (an unexpected payload shape). Reported
+        // separately so "the call failed" and "the answer confused us" don't
+        // look the same.
+        try {
+          renderGitStatus(data.status, data.via);
+        } catch (err) {
+          bad(`could not render git status — ${(err as Error).message || err}\n${JSON.stringify(data).slice(0, 300)}`);
+        } finally {
+          done();
+        }
+      }
+
+      // ── delegated handlers, bound once for the life of the document ───────
+      const armedDelete = new Set<string>();
+
+      async function onClick(ev: Event) {
+        const target = ev.target as HTMLElement;
+
+        // Narrow-window rail toggle.
+        const toggle = target.closest('#rail-toggle');
+        if (toggle) {
+          const rail = document.getElementById('rail');
+          const open = rail?.classList.toggle('open');
+          toggle.setAttribute('aria-expanded', String(!!open));
+          return;
+        }
+
+        // Project grid: start / stop / delete.
+        const gridBtn = target.closest('button[data-action]') as HTMLButtonElement | null;
+        if (gridBtn) {
+          const id = gridBtn.dataset.id!;
+          const action = gridBtn.dataset.action!;
+          const card = gridBtn.closest('.pb-card');
+
+          // Two-step delete — confirm() is suppressed inside the app iframe.
+          if (action === 'remove' && !armedDelete.has(id)) {
+            armedDelete.add(id);
+            gridBtn.textContent = 'Confirm?';
+            feedback(card, 'Deletes the project directory and unregisters the app. Click again to confirm.', 'err');
+            setTimeout(() => {
+              if (!armedDelete.delete(id)) return;
+              gridBtn.textContent = 'Delete';
+              feedback(card, '');
+            }, 5000);
+            return;
+          }
+          armedDelete.delete(id);
+
+          gridBtn.disabled = true;
+          feedback(card, `${action}…`);
+          try {
+            await post('api/projects/lifecycle', { id, action });
+            if (action === 'remove') { card?.remove(); }
+            else feedback(card, `${action} ok`, 'ok');
+            await syncProjects();
+          } catch (err) {
+            feedback(card, String((err as Error).message || err), 'err');
+            gridBtn.disabled = false;
+            if (action === 'remove') gridBtn.textContent = 'Delete';
+          }
+          return;
+        }
+
+        // Project detail: start / stop.
+        const lifeBtn = target.closest('button[data-lifecycle]') as HTMLButtonElement | null;
+        if (lifeBtn) {
+          const page = document.getElementById('project-page');
+          const log = document.getElementById('lifecycle-log') as HTMLElement | null;
+          const action = lifeBtn.dataset.lifecycle!;
+          lifeBtn.disabled = true;
+          show(log, `${action}…`);
+          try {
+            await post('api/projects/lifecycle', { id: page!.dataset.projectId, action });
+            show(log, `${action} ok`, 'ok');
+            await syncProjects();
+            // Transport flips between exec and helper with running state.
+            refreshGit();
+          } catch (err) {
+            show(log, String((err as Error).message || err), 'err');
+            lifeBtn.disabled = false;
+          }
+          return;
+        }
+
+        // Project detail: git actions.
+        const gitBtn = target.closest('button[data-git]') as HTMLButtonElement | null;
+        if (gitBtn) {
+          const page = document.getElementById('project-page');
+          const gitLog = document.getElementById('git-log') as HTMLElement | null;
+          const action = gitBtn.dataset.git!;
+          if (action === 'status') { refreshGit(); return; }
+
+          const body: Record<string, unknown> = { id: page!.dataset.projectId, action };
+          if (action === 'commit') {
+            const input = document.getElementById('commit-msg') as HTMLInputElement;
+            body.message = input.value.trim();
+            if (!body.message) { show(gitLog, 'A commit message is required.', 'err'); return; }
+          }
+          if (action === 'remote') {
+            const input = document.getElementById('remote-url') as HTMLInputElement;
+            body.url = input.value.trim();
+            if (!body.url) { show(gitLog, 'A remote URL is required.', 'err'); return; }
+          }
+
+          gitBtn.disabled = true;
+          show(gitLog, `${action}…`);
+          try {
+            const data = await post('api/projects/git', body);
+            // Re-query: the node captured above may be detached by now.
+            const gitLog = document.getElementById('git-log') as HTMLElement | null;
+            if (action === 'log') {
+              show(gitLog, data.log || '(no commits)', data.ok ? 'ok' : 'err');
+            } else {
+              const text = (data.steps || [])
+                .map((s: any) => `$ ${s.cmd}\n${s.output || '(no output)'}`).join('\n\n');
+              show(gitLog, text, data.ok ? 'ok' : 'err');
+            }
+            if (action === 'commit') {
+              const input = document.getElementById('commit-msg') as HTMLInputElement | null;
+              if (input) input.value = '';
+            }
+            refreshGit();
+          } catch (err) {
+            show(document.getElementById('git-log'), String((err as Error).message || err), 'err');
+          } finally {
+            gitBtn.disabled = false;
+          }
+        }
+      }
+
+      // ── create form ──────────────────────────────────────────────────────
+      const APP_ID_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
+
+      async function onSubmit(ev: Event) {
+        const form = (ev.target as HTMLElement).closest('#form') as HTMLFormElement | null;
+        if (!form) return;
+        ev.preventDefault();
+
+        const prefix = form.dataset.prefix!;
+        const idEl   = document.getElementById('id') as HTMLInputElement;
+        const nameEl = document.getElementById('name') as HTMLInputElement;
+        const tplEl  = document.getElementById('template') as HTMLSelectElement;
+        const logEl  = document.getElementById('log') as HTMLElement;
+        const submit = document.getElementById('submit') as HTMLButtonElement;
+        const id = idEl.value.trim();
+
+        if (!APP_ID_RE.test(id)) {
+          show(logEl, `Invalid app id: ${id}\nExpected reverse-domain notation, e.g. ${prefix}.myapp`, 'err');
+          return;
+        }
+        if (!id.startsWith(prefix + '.')) {
+          show(logEl, `Project ids must start with ${prefix}.`, 'err');
+          return;
+        }
+
+        submit.disabled = true;
+        show(logEl, `Scaffolding ${id} and installing dependencies…\nThis takes a minute — doing it now means the first start is fast.`);
+        try {
+          const data = await post('api/projects/create', {
+            id,
+            name: nameEl.value.trim(),
+            template: tplEl.value,
+            initGit: (document.getElementById('initGit') as HTMLInputElement).checked,
+          });
+          let msg = `Created ${id}.`;
+          if (data.prepare && !data.prepare.ok) {
+            msg += `\n\nDependency install FAILED — the first start will be slow and may need a retry:\n${data.prepare.output}`;
+          }
+          if (data.git) msg += `\n\n${data.git.ok ? 'git initialised.' : 'git init FAILED:'}\n${data.git.output}`;
+          show(logEl, `${msg}\n\nOpening…`, 'ok');
+          // `mine()`, not a root-absolute path: inside the OS iframe the
+          // document lives under /api/proxy/<instanceId>/, and the proxy only
+          // rewrites URLs in HTML — never strings built at runtime.
+          // Guarded: an interrupted transition rejects, and an unhandled one
+          // would surface as a scary "Transition was aborted" message for what
+          // is really just a navigation that got superseded.
+          setTimeout(() => { void navigate(mine(`project/${id}`)).catch(() => undefined); }, 700);
+        } catch (err) {
+          show(logEl, String((err as Error).message || err), 'err');
+          submit.disabled = false;
+        }
+      }
+
+      /**
+       * Per-page setup. Runs on first load and after every swap.
+       *
+       * Guarded per element rather than globally: this is called both directly
+       * (below) and from `astro:page-load`, because on a direct load that event
+       * can fire before this module has registered its listener — which left a
+       * project page stuck on "Checking…" forever. A swap always brings fresh
+       * DOM, so the dataset flags reset on their own.
+       */
+      function pageInit() {
+        // Create form: derive the id from the display name until the user
+        // edits the id field themselves.
+        const form = document.getElementById('form') as HTMLFormElement | null;
+        if (form && !form.dataset.pbInit) {
+          form.dataset.pbInit = '1';
+          const nameEl = document.getElementById('name') as HTMLInputElement;
+          const idEl   = document.getElementById('id') as HTMLInputElement;
+          const tplEl  = document.getElementById('template') as HTMLSelectElement;
+          let idTouched = false;
+          idEl.addEventListener('input', () => { idTouched = true; });
+          nameEl.addEventListener('input', () => {
+            if (idTouched) return;
+            const slug = nameEl.value.toLowerCase().replace(/[^a-z0-9]+/g, '').replace(/^[^a-z]+/, '');
+            idEl.value = slug ? `${form.dataset.prefix}.${slug}` : '';
+          });
+          const syncDesc = () => document.querySelectorAll<HTMLElement>('.tpl-desc')
+            .forEach((el) => { el.hidden = el.dataset.tpl !== tplEl.value; });
+          tplEl.addEventListener('change', syncDesc);
+          syncDesc();
+          nameEl.focus();
+        }
+
+        // Deliberately NOT re-fetching git here: the page arrives with the
+        // status already rendered by the server. Fetching on load would only
+        // replace good content with "Checking…" and reintroduce the failure
+        // mode where a stalled request leaves the panel blank. The client
+        // re-fetches on demand (the button) and after start/stop, when the
+        // transport changes.
+      }
+
+      /**
+       * Surface client-side failures in the page instead of only the devtools
+       * console. This app runs in an iframe inside the OS shell, so an
+       * uncaught error is invisible unless you go looking for it — which is
+       * exactly how a panel ends up stuck on a loading message with no
+       * explanation.
+       */
+      /**
+       * Rejections that are noise, not faults.
+       *
+       * Astro's ClientRouter calls `document.startViewTransition()`, which the
+       * browser rejects with this message whenever the document isn't in a
+       * state that can animate — an AuraOS app window that is backgrounded,
+       * hidden by the tiling manager, or mid-transition when a second
+       * navigation starts. The navigation itself still completes; there is
+       * nothing for the user to do about it, so it doesn't earn a banner.
+       * Everything else still shows.
+       */
+      const BENIGN = [/Transition was aborted because of invalid state/i];
+
+      function clientError(what: string, detail: string) {
+        if (BENIGN.some((re) => re.test(detail))) return;
+        let bar = document.getElementById('pb-error-bar');
+        if (!bar) {
+          bar = document.createElement('div');
+          bar.id = 'pb-error-bar';
+          bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:99;'
+            + 'display:flex;align-items:flex-start;gap:10px;padding:8px 10px 8px 12px;'
+            + 'background:var(--aura-color-surface);border-top:1px solid var(--aura-color-warning, #e0a000);'
+            + 'color:var(--aura-color-warning, #e0a000);font-size:0.7rem;';
+
+          const msg = document.createElement('div');
+          msg.id = 'pb-error-msg';
+          msg.style.cssText = 'flex:1 1 auto;min-width:0;white-space:pre-wrap;word-break:break-word;max-height:30vh;overflow:auto;';
+
+          const close = document.createElement('button');
+          close.id = 'pb-error-close';
+          close.type = 'button';
+          close.textContent = '×';
+          close.setAttribute('aria-label', 'Dismiss');
+          close.style.cssText = 'flex:0 0 auto;padding:0 7px;line-height:1.3;font-size:0.95rem;'
+            + 'color:var(--aura-color-warning, #e0a000);border-color:var(--aura-color-warning, #e0a000);';
+          close.addEventListener('click', () => bar!.remove());
+
+          bar.append(msg, close);
+          document.body.appendChild(bar);
+        }
+        const msg = document.getElementById('pb-error-msg')!;
+        const text = `${what}: ${detail}`;
+        // Repeats collapse into a counter instead of scrolling the same line
+        // past you — the second occurrence of a bug is rarely news.
+        const seen = Number(msg.dataset.count ?? '0');
+        if (msg.dataset.last === text) {
+          msg.dataset.count = String(seen + 1);
+          msg.textContent = `${text}  (×${seen + 1})`;
+        } else {
+          msg.dataset.last = text;
+          msg.dataset.count = '1';
+          msg.textContent = text;
+        }
+      }
+
+      if (!(window as any).__pbBound) {
+        (window as any).__pbBound = true;
+        window.addEventListener('error', (e) => clientError('script error', e.message));
+        window.addEventListener('unhandledrejection', (e) =>
+          clientError('unhandled rejection', String((e.reason as Error)?.message ?? e.reason)));
+        document.addEventListener('click', onClick);
+        document.addEventListener('submit', onSubmit);
+        document.addEventListener('astro:page-load', pageInit);
+        // …and run it now, for the load that got us here.
+        pageInit();
+
+        // OS events → patch state in place. Debounced: a start emits several.
+        try {
+          let pending: ReturnType<typeof setTimeout>;
+          const es = new EventSource('/api/apps/events?topics=app:*');
+          es.onmessage = () => { clearTimeout(pending); pending = setTimeout(syncProjects, 600); };
+        } catch { /* SSE unavailable — buttons still work, just no live updates */ }
+      }
+    </script>
+
+    <style is:global>
+      :root { color-scheme: dark; }
+      html, body {
+        margin: 0; padding: 0; min-height: 100vh;
+        font-family: var(--aura-font-mono, 'IBM Plex Mono', ui-monospace, monospace);
+        background: var(--aura-color-bg, #0a0a0a);
+        color: var(--aura-color-text, #ccffcc);
+      }
+      a { color: var(--aura-color-primary, #00ff41); text-decoration: none; }
+      a:hover { text-shadow: 0 0 6px var(--aura-color-primary, #00ff41); }
+      button {
+        font-family: inherit; font-size: 0.8rem;
+        background: transparent;
+        color: var(--aura-color-primary);
+        border: 1px solid var(--aura-color-border);
+        padding: 6px 12px; cursor: pointer;
+        text-transform: uppercase; letter-spacing: 0.06em;
+        transition: box-shadow 0.1s, border-color 0.1s;
+      }
+      button:hover { border-color: var(--aura-color-primary); box-shadow: 0 0 8px var(--aura-color-primary); }
+      button[disabled] { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
+      button.danger { color: var(--aura-color-warning, #e0a000); }
+      button.danger:hover { border-color: var(--aura-color-warning, #e0a000); box-shadow: 0 0 8px var(--aura-color-warning, #e0a000); }
+      input, textarea, select {
+        font-family: inherit;
+        background: var(--aura-color-surface);
+        color: var(--aura-color-text);
+        border: 1px solid var(--aura-color-border);
+        padding: 6px 10px;
+      }
+      input:focus, textarea:focus, select:focus { outline: none; border-color: var(--aura-color-primary); }
+
+      .pb-bar {
+        position: sticky; top: 0; z-index: 10;
+        background: var(--aura-color-surface);
+        border-bottom: 1px solid var(--aura-color-border);
+        padding: 10px 16px;
+        display: flex; flex-wrap: wrap; align-items: center;
+        column-gap: 24px; row-gap: 8px;
+      }
+      .pb-title { display: flex; align-items: baseline; gap: 10px; margin: 0; font-size: 0.95rem; flex: 0 0 auto; min-width: 0; }
+      .pb-title .glyph {
+        color: var(--aura-color-primary); font-weight: 700; letter-spacing: 0.12em;
+        border: 1px solid var(--aura-color-primary); padding: 2px 5px; font-size: 0.7rem; flex-shrink: 0;
+      }
+      .pb-title .wordmark { font-weight: 700; letter-spacing: 0.15em; color: var(--aura-color-text); }
+      .pb-title .subtitle { color: var(--aura-color-text-dim); font-size: 0.7rem; letter-spacing: 0.08em; white-space: nowrap; }
+      /* `.pb-tab` survives as the inline link-button style used inside cards
+       * (Open, Cancel) — it is no longer the top-level navigation. */
+      .pb-tab {
+        padding: 4px 10px; font-size: 0.7rem; letter-spacing: 0.12em;
+        color: var(--aura-color-text-dim); border: 1px solid var(--aura-color-border);
+        white-space: nowrap; flex-shrink: 0;
+      }
+      .pb-tab:hover { color: var(--aura-color-text); border-color: var(--aura-color-primary); }
+
+      /* ── Shell: header on top, nav rail on the left, content on the right ──
+       * The rail is its own scroll container so a long project list never
+       * pushes the page down — content and nav scroll independently, the way
+       * an IDE sidebar does. `min-height: 0` on the row is what lets the two
+       * children scroll instead of growing the body. */
+      .pb-shell {
+        display: flex;
+        align-items: stretch;
+        min-height: calc(100vh - 45px);   /* viewport minus the header */
+      }
+      .pb-rail {
+        flex: 0 0 200px;
+        border-right: 1px solid var(--aura-color-border);
+        background: var(--aura-color-surface);
+        padding: 14px 0;
+        overflow-y: auto;
+        position: sticky; top: 45px;
+        max-height: calc(100vh - 45px);
+        box-sizing: border-box;
+      }
+      .pb-rail-group { margin-bottom: 18px; }
+      .pb-rail-heading {
+        font-size: 0.62rem; letter-spacing: 0.18em; text-transform: uppercase;
+        color: var(--aura-color-text-dim); margin: 0 0 6px; padding: 0 14px;
+        display: flex; align-items: center; justify-content: space-between; gap: 6px;
+      }
+      .pb-rail-count {
+        font-size: 0.6rem; letter-spacing: 0.04em; padding: 0 5px;
+        border: 1px solid var(--aura-color-border); color: var(--aura-color-text-dim);
+      }
+      .pb-rail-empty { margin: 0; padding: 2px 14px; font-size: 0.7rem; color: var(--aura-color-text-dim); }
+      .pb-rail-item {
+        display: flex; align-items: center; gap: 9px;
+        padding: 7px 14px;
+        font-size: 0.78rem; letter-spacing: 0.04em;
+        color: var(--aura-color-text-dim);
+        border-left: 2px solid transparent;
+        text-decoration: none;
+      }
+      .pb-rail-item:hover {
+        color: var(--aura-color-text);
+        background: color-mix(in srgb, var(--aura-color-primary) 6%, transparent);
+        text-shadow: none;
+      }
+      .pb-rail-item.active {
+        color: var(--aura-color-primary);
+        border-left-color: var(--aura-color-primary);
+        background: color-mix(in srgb, var(--aura-color-primary) 10%, transparent);
+      }
+      .pb-rail-glyph {
+        width: 1em; text-align: center; flex-shrink: 0;
+        color: var(--aura-color-primary); font-weight: 700;
+      }
+      .pb-rail-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .pb-rail-item.project { font-size: 0.74rem; }
+      /* Running-state dot: green when the project's container is up, amber
+       * when the app is gone from the registry, hollow when merely stopped. */
+      .pb-dot {
+        width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+        border: 1px solid var(--aura-color-text-dim); background: transparent;
+      }
+      .pb-dot.on {
+        background: var(--aura-color-primary); border-color: var(--aura-color-primary);
+        box-shadow: 0 0 5px var(--aura-color-primary);
+      }
+      .pb-dot.missing { border-color: var(--aura-color-warning, #e0a000); background: var(--aura-color-warning, #e0a000); }
+
+      .pb-rail-toggle { display: none; padding: 4px 9px; font-size: 0.85rem; line-height: 1; }
+      .pb-rail-build {
+        margin: 0; padding: 8px 14px 0;
+        font-size: 0.6rem; letter-spacing: 0.08em;
+        color: var(--aura-color-text-dim); opacity: 0.65;
+        border-top: 1px solid var(--aura-color-border);
+      }
+
+      .pb-main { flex: 1 1 auto; min-width: 0; padding: 20px 20px; max-width: 1000px; }
+
+      @media (max-width: 720px) { .pb-title .subtitle { display: none; } .pb-bar { column-gap: 16px; padding: 8px 12px; } }
+      @media (max-width: 420px) { .pb-title .wordmark { display: none; } }
+
+      /* Narrow: the rail collapses behind the ☰ button rather than eating
+       * half an already-small app window. Open, it becomes a full-width
+       * block above the content — no overlay, nothing to trap focus. */
+      @media (max-width: 640px) {
+        .pb-rail-toggle { display: block; }
+        .pb-shell { display: block; min-height: 0; }
+        .pb-rail {
+          display: none;
+          position: static; max-height: none; width: 100%;
+          border-right: none; border-bottom: 1px solid var(--aura-color-border);
+        }
+        .pb-rail.open { display: block; }
+        .pb-main { max-width: none; padding: 16px 14px; }
+      }
+      .pb-card {
+        border: 1px solid var(--aura-color-border);
+        background: var(--aura-color-surface);
+        padding: 12px 14px; margin-bottom: 10px;
+      }
+      .pb-card-head {
+        display: flex; flex-wrap: wrap; align-items: center;
+        justify-content: space-between; gap: 12px;
+      }
+      .pb-card-head > :first-child { flex: 1 1 220px; min-width: 0; }
+      .pb-card-title {
+        font-weight: 600; color: var(--aura-color-text); letter-spacing: 0.05em;
+        display: flex; flex-wrap: wrap; align-items: center; gap: 6px; word-break: break-word;
+      }
+      .pb-card-meta { color: var(--aura-color-text-dim); font-size: 0.72rem; margin-top: 6px; word-break: break-all; }
+      .pb-card-actions { display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0; }
+      @media (max-width: 480px) {
+        .pb-card-actions { width: 100%; }
+        .pb-card-actions > button, .pb-card-actions > a { flex: 1 1 auto; text-align: center; }
+      }
+      .pb-empty { text-align: center; color: var(--aura-color-text-dim); padding: 60px 16px; font-size: 0.8rem; letter-spacing: 0.08em; }
+      .pb-section { margin: 18px 0; }
+      .pb-section h2 {
+        font-size: 0.7rem; letter-spacing: 0.18em; color: var(--aura-color-text-dim);
+        text-transform: uppercase; margin: 0 0 10px;
+      }
+      .badge {
+        display: inline-block; font-size: 0.62rem; letter-spacing: 0.06em; padding: 1px 6px;
+        border: 1px solid var(--aura-color-border); color: var(--aura-color-text-dim); text-transform: uppercase;
+      }
+      .badge.running { color: var(--aura-color-primary); border-color: var(--aura-color-primary); }
+      .badge.warn { color: var(--aura-color-warning, #e0a000); border-color: var(--aura-color-warning, #e0a000); }
+      .pb-form { display: flex; flex-direction: column; gap: 12px; max-width: 620px; }
+      .pb-form label { font-size: 0.72rem; letter-spacing: 0.08em; color: var(--aura-color-text-dim); display: block; margin-bottom: 4px; }
+      .pb-form input, .pb-form select, .pb-form textarea { width: 100%; box-sizing: border-box; }
+      .pb-form-row { display: flex; flex-wrap: wrap; gap: 8px; }
+      .pb-form-row > input { flex: 1 1 220px; min-width: 0; }
+      .pb-form-row > button { flex: 0 0 auto; }
+      @media (max-width: 480px) { .pb-form-row > button { flex: 1 1 auto; } }
+      pre.pb-log {
+        background: var(--aura-color-bg); border: 1px solid var(--aura-color-border);
+        padding: 10px; font-size: 0.72rem; white-space: pre-wrap; word-break: break-word;
+        max-height: 40vh; overflow-y: auto; margin: 10px 0 0;
+      }
+      .pb-hint { color: var(--aura-color-text-dim); font-size: 0.72rem; }
+    </style>
+  </body>
+</html>

@@ -1,0 +1,48 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { listProjects, type Project } from '../lib/projects.ts';
+
+let projects: Project[] = [];
+let error: string | null = null;
+try { projects = await listProjects(); }
+catch (err) { error = (err as Error).message; }
+---
+<Layout title="Projects" active="projects">
+  {error && <div class="pb-empty">Error: {error}</div>}
+
+  {!error && projects.length === 0 && (
+    <div class="pb-empty">
+      No projects yet.<br /><br />
+      <a href="/new">Create your first one →</a>
+    </div>
+  )}
+
+  <div id="grid">
+    {projects.map((p) => (
+      <div class="pb-card" data-project={p.id}>
+        <div class="pb-card-head">
+          <div>
+            <div class="pb-card-title">
+              <a href={`/project/${p.id}`}>{p.name}</a>
+              <span class:list={['badge', { running: p.running, warn: !p.installed }]} data-state>
+                {p.installed ? p.state : 'missing'}
+              </span>
+              <span class="badge">{p.template}</span>
+            </div>
+            <div class="pb-card-meta">
+              {p.id} · created {p.createdAt.slice(0, 10)}
+              {p.gitRemote && <span> · {p.gitRemote}</span>}
+            </div>
+          </div>
+          <div class="pb-card-actions">
+            <button data-action="start" data-id={p.id} disabled={p.running || !p.installed}>Start</button>
+            <button data-action="stop"  data-id={p.id} disabled={!p.running}>Stop</button>
+            <a class="pb-tab" href={`/project/${p.id}`}>Open</a>
+            <button class="danger" data-action="remove" data-id={p.id}>Delete</button>
+          </div>
+        </div>
+      </div>
+    ))}
+  </div>
+
+</Layout>

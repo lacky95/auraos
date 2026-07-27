@@ -1,0 +1,54 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { TEMPLATES, PROJECT_ID_PREFIX } from '../lib/template.ts';
+---
+<Layout title="New project" active="new">
+  <div class="pb-section">
+    <h2>New project</h2>
+    <p class="pb-hint">
+      A project is a real AuraOS app installed into the <b>user</b> scope. It gets its
+      own container, its own PocketBase sibling, and its own git repo.
+    </p>
+  </div>
+
+  <form class="pb-form" id="form" data-prefix={PROJECT_ID_PREFIX}>
+    <div>
+      <label for="name">Display name</label>
+      <input id="name" name="name" placeholder="My Notes App" autocomplete="off" required />
+    </div>
+
+    <div>
+      <label for="id">App id</label>
+      <input id="id" name="id" placeholder={`${PROJECT_ID_PREFIX}.mynotesapp`} autocomplete="off" required />
+      <p class="pb-hint" style="margin:4px 0 0">
+        Derived from the name. Projects live under <code>{PROJECT_ID_PREFIX}.</code> so their
+        origin is readable from the app id alone.
+      </p>
+    </div>
+
+    <div>
+      <label for="template">Template</label>
+      <select id="template" name="template">
+        {TEMPLATES.map((t) => <option value={t.id}>{t.label}</option>)}
+      </select>
+      {TEMPLATES.map((t) => (
+        <p class="pb-hint tpl-desc" data-tpl={t.id} style="margin:4px 0 0">{t.description}</p>
+      ))}
+    </div>
+
+    <div>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" id="initGit" checked style="width:auto" />
+        Initialise a git repository with an initial commit
+      </label>
+    </div>
+
+    <div class="pb-form-row">
+      <button type="submit" id="submit">Create project</button>
+      <a class="pb-tab" href="/">Cancel</a>
+    </div>
+  </form>
+
+  <pre class="pb-log" id="log" hidden></pre>
+
+</Layout>

@@ -7,14 +7,13 @@
  *   • A subscriber list — anything that cares about the workspace state
  *     (the desktop, the status-bar pills, the Settings page) registers a
  *     callback and gets re-notified whenever the state moves.
- *   • Convenience helpers (createWorkspace, deleteWorkspace, moveActivity,
+ *   • Convenience helpers (createWorkspace, deleteWorkspace, moveWorkspace,
  *     setActive, patchWorkspace) that compose the above primitives.
  *
- * The PUT endpoint is the source of truth — every mutation funnels through
- * `pushState()` which posts the FULL workspace list. Server-side validation
- * (id uniqueness, activeWorkspaceId existence, etc.) lives in
- * `apps/com.aura.settings/src/pages/api/data/workspaces.ts` — this file
- * doesn't duplicate it.
+ * Every mutation funnels through `pushState()`, which posts the FULL workspace
+ * list to the KV endpoint. That endpoint stores whatever JSON it's given — the
+ * invariants (id uniqueness, activeWorkspaceId existence, never deleting the
+ * last workspace) are enforced here, on the client.
  *
  * Members are kept as activityIds (or instanceIds for activityMode='none'
  * apps). The shell's viewId already equals `activityId ?? instanceId`, so
@@ -259,6 +258,29 @@ export async function deleteWorkspace(id: string): Promise<void> {
   fallback.members = [...fallback.members, ...victim.members];
   s.workspaces = s.workspaces.filter((w) => w.id !== id);
   if (s.activeWorkspaceId === id) s.activeWorkspaceId = fallback.id;
+  await pushState(s);
+}
+
+/**
+ * Reposition a workspace to a 0-based index in the list. Splice-move
+ * semantics: the workspace is pulled out and reinserted, so everything from
+ * `toIndex` onwards shifts one slot up (moving #5 to slot 2 gives
+ * `1, 5, 2, 3, 4`).
+ *
+ * The displayed pill number is purely `index + 1` — ids stay put, and every
+ * pointer into workspace state (members, activeWorkspaceId, layoutState,
+ * launch pins) keys off the id. So this is a pure presentation reorder and
+ * `activeWorkspaceId` is deliberately left alone: whichever workspace was
+ * active stays active, it just renumbers.
+ */
+export async function moveWorkspace(id: string, toIndex: number): Promise<void> {
+  const s = clone(require_());
+  const from = s.workspaces.findIndex((w) => w.id === id);
+  if (from < 0) return;
+  const to = Math.min(Math.max(0, toIndex), s.workspaces.length - 1);
+  if (to === from) return;
+  const [ws] = s.workspaces.splice(from, 1);
+  s.workspaces.splice(to, 0, ws!);
   await pushState(s);
 }
 

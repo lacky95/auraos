@@ -1555,6 +1555,12 @@ const ssrVisibleViews = initialViews
       } else if (v.activityId) {
         // Activity view — close only this activity. Auto-stop handled server-side.
         fetch(`/api/activities/${encodeURIComponent(v.activityId)}/close`, { method: 'POST' }).catch(() => undefined);
+      } else if (manifest?.backgroundService) {
+        // activityMode='none' app that declares backgroundService=true (e.g.
+        // Hermes): closing its window must NOT stop the backend — the sidecar
+        // runtime + agent keep running. Drop the visual slot only; the instance
+        // stays live in the dock / Process Manager and reopens on next launch.
+        // Same rationale as the service branch above.
       } else {
         fetch(`/api/instances/${encodeURIComponent(v.instanceId)}/stop`, { method: 'POST' }).catch(() => undefined);
       }

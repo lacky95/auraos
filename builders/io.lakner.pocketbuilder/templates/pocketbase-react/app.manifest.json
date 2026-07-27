@@ -1,0 +1,36 @@
+{
+  "id": "{{APP_ID}}",
+  "name": "{{APP_NAME}}",
+  "icon": "PB",
+  "version": "0.1.0",
+  "description": "PocketBuilder project — PocketBase backend + web frontend.",
+  "category": "developer",
+  "sandbox": "container",
+  "instanceMode": "single",
+  "activityMode": "none",
+  "tools": ["bash", "node", "git", "docker", "aura"],
+  "permissions": [
+    "storage.read",
+    "storage.write",
+    "network.local",
+    "network.internet"
+  ],
+  "services": [
+    {
+      "name": "pocketbase",
+      "image": "ghcr.io/muchobien/pocketbase:latest",
+      "port": 8090,
+      "proxyDashboard": false,
+      "restart": "unless-stopped",
+      "volumes": [
+        { "name": "pb-data", "target": "/pb_data" }
+      ],
+      "readiness": { "path": "/api/health", "timeoutMs": 120000 }
+    }
+  ],
+  "viewConfig": {
+    "defaultWidth": 900,
+    "defaultHeight": 640,
+    "resizable": true
+  }
+}

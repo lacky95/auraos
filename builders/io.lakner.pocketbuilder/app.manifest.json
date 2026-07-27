@@ -1,0 +1,24 @@
+{
+  "id": "io.lakner.pocketbuilder",
+  "name": "Pocket Builder",
+  "icon": "PB",
+  "version": "0.1.0",
+  "description": "Vibe IDE — create and manage PocketBase + React apps inside AuraOS. Every project is its own AuraOS app.",
+  "category": "developer",
+  "sandbox": "container",
+  "instanceMode": "single",
+  "activityMode": "none",
+  "tools": ["bash", "node", "git", "docker", "aura"],
+  "permissions": [
+    "storage.read",
+    "storage.write",
+    "network.local",
+    "network.internet"
+  ],
+  "viewConfig": {
+    "defaultWidth": 1100,
+    "defaultHeight": 720,
+    "resizable": true
+  },
+  "preferredLayout": "tiling"
+}

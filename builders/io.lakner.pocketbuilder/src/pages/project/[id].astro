@@ -1,0 +1,122 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { getProject, runTargetFor } from '../../lib/projects.ts';
+import { readGitStatus, type GitStatusResult } from '../../lib/git.ts';
+
+const id = Astro.params.id!;
+const project = await getProject(id);
+
+// Read git state on the SERVER so the panel arrives populated. The client
+// script only re-fetches; it is no longer required for the page to be useful.
+let git: GitStatusResult | null = null;
+let gitError: string | null = null;
+if (project?.installed) {
+  try { git = await readGitStatus(await runTargetFor(project)); }
+  catch (err) { gitError = (err as Error).message; }
+}
+const st = git?.status ?? null;
+---
+{!project && (
+  <Layout title="Not found">
+    <div class="pb-empty">
+      <b>{id}</b> is not a Pocket Builder project.<br /><br />
+      <a href="/">← Back to projects</a>
+    </div>
+  </Layout>
+)}
+
+{project && (
+  <Layout title={project.name} activeProject={project.id}>
+    <div id="project-page" data-project-id={project.id}>
+    <div class="pb-section">
+      <h2>Project</h2>
+      <div class="pb-card">
+        <div class="pb-card-head">
+          <div>
+            <div class="pb-card-title">
+              {project.name}
+              <span data-state class:list={['badge', { running: project.running, warn: !project.installed }]}>
+                {project.installed ? project.state : 'missing'}
+              </span>
+              <span class="badge">{project.template}</span>
+            </div>
+            <div class="pb-card-meta">
+              {project.id}
+              {project.instanceId && <span> · instance {project.instanceId}</span>}
+              <span> · created {project.createdAt.slice(0, 10)}</span>
+            </div>
+          </div>
+          <div class="pb-card-actions">
+            <button data-lifecycle="start" disabled={project.running || !project.installed}>Start</button>
+            <button data-lifecycle="stop" disabled={!project.running}>Stop</button>
+          </div>
+        </div>
+        <pre class="pb-log" id="lifecycle-log" hidden></pre>
+      </div>
+    </div>
+
+    <div class="pb-section">
+      <h2>Git</h2>
+      <div class="pb-card" id="git-card">
+        {/* The fetch button lives OUTSIDE #git-controls on purpose: those are
+            hidden until a status renders, so if the first call never lands the
+            only control that could recover it would be invisible. */}
+        <div class="pb-card-head">
+          <p class="pb-hint" id="git-summary" style="margin:0">
+            {gitError && `git unavailable — ${gitError}`}
+            {!gitError && git?.error && `git error — ${git.error}`}
+            {!gitError && !git?.error && st && !st.repo && 'Not a git repository yet.'}
+            {!gitError && !git?.error && st?.repo && [
+              `branch ${st.branch || '?'}`,
+              st.files.length ? `${st.files.length} change${st.files.length === 1 ? '' : 's'}` : 'clean',
+              st.remote ? `origin ${st.remote}` : 'no remote',
+              st.head ? `HEAD ${st.head}` : null,
+              `via ${git!.via}`,
+            ].filter(Boolean).join(' · ')}
+            {!project.installed && 'Project is not installed.'}
+          </p>
+          <div class="pb-card-actions">
+            {/* A LINK, not a button. The page renders git status server-side,
+                so re-requesting it is the most reliable possible refresh: it
+                works with JavaScript broken, stale, or disabled outright. The
+                cache-busting param guarantees the router treats it as a real
+                navigation rather than a no-op to the current URL. */}
+            <a class="pb-tab" id="git-fetch" href={`/project/${project.id}?r=${Date.now()}`}>Fetch git info</a>
+          </div>
+        </div>
+        <pre class="pb-log" id="git-files" hidden={!st?.files.length}>{st?.files.map((f) => `${f.code.padEnd(3)}${f.path}`).join('\n')}</pre>
+
+        <div id="git-controls" hidden={!st?.repo}>
+          <div class="pb-form" style="margin-top:12px">
+            <div class="pb-form-row">
+              <input id="commit-msg" placeholder="Commit message" autocomplete="off" />
+              <button data-git="commit">Commit</button>
+            </div>
+            <div class="pb-form-row">
+              <input id="remote-url" placeholder="https://github.com/you/repo.git" autocomplete="off"
+                     value={project.gitRemote ?? ''} />
+              <button data-git="remote">Set remote</button>
+              <button data-git="push">Push</button>
+            </div>
+            <div class="pb-form-row">
+              <button data-git="log">Show log</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="git-init-wrap" hidden={!!st?.repo} style="margin-top:12px">
+          <button data-git="init">git init + first commit</button>
+        </div>
+
+        <pre class="pb-log" id="git-log" hidden></pre>
+      </div>
+      <p class="pb-hint">
+        Git runs inside the project — through <code>docker exec</code> when it's running,
+        through a throwaway helper container when it's stopped. Push needs credentials in
+        the project's environment; failures are shown verbatim.
+      </p>
+    </div>
+    </div>
+
+  </Layout>
+)}

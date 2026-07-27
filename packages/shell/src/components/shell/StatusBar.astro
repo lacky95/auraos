@@ -84,6 +84,56 @@ let initialLocale: string = 'en-GB';
            folded controls (chip, then pills) into it. Absolutely positioned,
            so its DOM position here doesn't affect the inline bar layout. -->
       <div id="ws-content" class="ws-content" role="group" aria-label="Workspaces"></div>
+      <!--
+        Per-pill context menu (right-click / long-press on a numbered pill).
+        Static markup so Astro's scoped <style> applies — the pills themselves
+        are innerHTML-generated and need the is:inline block, this doesn't.
+
+        It lives here as the LAST child of the bundle, but openCtxMenu()
+        re-parents it to whichever element currently hosts `#ws-pills` (this
+        bundle inline, or `#ws-content` when the pills have folded into the
+        dropdown) so it can anchor to the clicked pill in both modes.
+
+        Each row is a disclosure: clicking it expands the panel below it, and
+        only one panel is open at a time. Delete deliberately hides behind a
+        `Sure? [Yes] [No]` confirm — the menu can be opened by an accidental
+        long-press, so a destructive action must not be one stray click away.
+      -->
+      <div id="ws-ctx" class="ws-ctx" role="menu" aria-label="Workspace actions" hidden>
+        <div id="ws-ctx-title" class="ws-ctx-title"></div>
+
+        <button class="ws-ctx-item" data-ws-ctx="move" type="button" role="menuitem"
+                aria-haspopup="true" aria-expanded="false" aria-controls="ws-ctx-move-panel">
+          <span>Move</span><span class="ws-ctx-chev" aria-hidden="true">▸</span>
+        </button>
+        <div id="ws-ctx-move-panel" class="ws-ctx-panel" hidden>
+          <button id="ws-ctx-dec" class="ws-ctx-step" data-ws-ctx="dec" type="button" aria-label="Previous slot">‹</button>
+          <input id="ws-ctx-slot" class="ws-ctx-slot" type="text" inputmode="numeric"
+                 autocomplete="off" maxlength="3" aria-label="Target slot" />
+          <button id="ws-ctx-inc" class="ws-ctx-step" data-ws-ctx="inc" type="button" aria-label="Next slot">›</button>
+          <button class="ws-ctx-ok" data-ws-ctx="move-ok" type="button">OK</button>
+        </div>
+
+        <button class="ws-ctx-item" data-ws-ctx="rename" type="button" role="menuitem"
+                aria-haspopup="true" aria-expanded="false" aria-controls="ws-ctx-rename-panel">
+          <span>Rename</span><span class="ws-ctx-chev" aria-hidden="true">▸</span>
+        </button>
+        <div id="ws-ctx-rename-panel" class="ws-ctx-panel" hidden>
+          <input id="ws-ctx-name" class="ws-ctx-name" type="text" maxlength="40"
+                 autocomplete="off" spellcheck="false" aria-label="Workspace name" />
+          <button class="ws-ctx-ok" data-ws-ctx="rename-ok" type="button">OK</button>
+        </div>
+
+        <button id="ws-ctx-delete" class="ws-ctx-item ws-ctx-danger" data-ws-ctx="delete" type="button" role="menuitem"
+                aria-haspopup="true" aria-expanded="false" aria-controls="ws-ctx-delete-panel">
+          <span>Delete</span><span class="ws-ctx-chev" aria-hidden="true">▸</span>
+        </button>
+        <div id="ws-ctx-delete-panel" class="ws-ctx-panel" hidden>
+          <span class="ws-ctx-confirm-q">Sure?</span>
+          <button class="ws-ctx-ok ws-ctx-ok-danger" data-ws-ctx="delete-yes" type="button">Yes</button>
+          <button class="ws-ctx-cancel" data-ws-ctx="delete-no" type="button">No</button>
+        </div>
+      </div>
     </div>
     {import.meta.env.DEV && (
       <button
@@ -551,6 +601,18 @@ let initialLocale: string = 'en-GB';
   const rightEl     = statusBar?.querySelector('.right')         as HTMLElement       | null;
   const osNameEl    = statusBar?.querySelector('.os-name')       as HTMLElement       | null;
 
+  // Per-pill context menu (see the `#ws-ctx` markup above).
+  const ctxEl        = document.getElementById('ws-ctx')               as HTMLElement       | null;
+  const ctxTitleEl   = document.getElementById('ws-ctx-title')         as HTMLElement       | null;
+  const ctxMovePanel = document.getElementById('ws-ctx-move-panel')    as HTMLElement       | null;
+  const ctxRenPanel  = document.getElementById('ws-ctx-rename-panel')  as HTMLElement       | null;
+  const ctxDelPanel  = document.getElementById('ws-ctx-delete-panel')  as HTMLElement       | null;
+  const ctxSlotInput = document.getElementById('ws-ctx-slot')          as HTMLInputElement  | null;
+  const ctxNameInput = document.getElementById('ws-ctx-name')          as HTMLInputElement  | null;
+  const ctxDecBtn    = document.getElementById('ws-ctx-dec')           as HTMLButtonElement | null;
+  const ctxIncBtn    = document.getElementById('ws-ctx-inc')           as HTMLButtonElement | null;
+  const ctxDelBtn    = document.getElementById('ws-ctx-delete')        as HTMLButtonElement | null;
+
   // ── Responsive collapse ───────────────────────────────────────────────
   // The workspace switcher degrades gracefully as the bar narrows (narrow
   // viewport / heavy zoom / lots of workspaces):
@@ -807,7 +869,17 @@ let initialLocale: string = 'en-GB';
   // chip first, then shrink the numbered pills MAX → MIN, then fold the pills
   // into the dropdown too (name stays beside the button), and only as a last
   // resort drop the name field. Safe to call on every resize and state change.
+  //
+  // Every path through the fit re-runs `renderPills()`, which replaces the pill
+  // DOM wholesale — so an open context menu has to be re-anchored (or closed,
+  // if its pill scrolled out of the window) afterwards. The wrapper guarantees
+  // that happens on all three exits of the tier cascade below.
   function fitWorkspaceUI(): void {
+    fitWorkspaceUITiers();
+    reanchorCtxMenu();
+  }
+
+  function fitWorkspaceUITiers(): void {
     if (!statusBar || !bundleEl) return;
     const state = workspaceClient.getCached();
 
@@ -955,6 +1027,15 @@ let initialLocale: string = 'en-GB';
   });
 
   pillsEl?.addEventListener('click', (e) => {
+    // A long-press already opened the context menu for this pill; the click
+    // that follows pointerup must not also switch workspace. stopPropagation
+    // additionally keeps the document-level dismiss handlers from closing the
+    // menu we just opened (and from collapsing the ▦ dropdown around it).
+    if (suppressNextPillClick) {
+      suppressNextPillClick = false;
+      e.stopPropagation();
+      return;
+    }
     const btn = (e.target as HTMLElement | null)?.closest<HTMLButtonElement>('[data-ws-id], [data-ws-action]');
     if (!btn || btn.disabled) return;
     const action = btn.dataset['wsAction'];
@@ -994,6 +1075,339 @@ let initialLocale: string = 'en-GB';
       workspaceClient.setActive(id).catch((err) => console.warn('[StatusBar] setActive failed', err));
     }
   });
+
+  // ---- Per-pill context menu ------------------------------------------
+  // Right-click or long-press a numbered pill → a menu with Move / Rename /
+  // Delete. Each row is a disclosure that expands a panel in place; only one
+  // panel is open at a time.
+  //
+  // Move is the interesting one: a bounded `‹ N ›  OK` stepper pre-filled with
+  // the pill's current slot. Committing splices the workspace to that position
+  // (see workspaceClient.moveWorkspace) — everything from the target slot
+  // onwards shifts up one. `activeWorkspaceId` is untouched, so the workspace
+  // you're on stays the one you're on; it just renumbers.
+  //
+  // We track the target by ID only, never by element: `renderPills()` replaces
+  // the entire pill row on every state change, so any element reference we
+  // held would be stale within a frame.
+  let ctxWsId: string | null = null;
+  let ctxPanel: 'move' | 'rename' | 'delete' | null = null;
+  const LONGPRESS_MS = 500;
+  const LONGPRESS_SLOP_PX = 8;
+
+  function clamp(n: number, lo: number, hi: number): number {
+    return Math.min(Math.max(n, lo), hi);
+  }
+  /** Total workspaces = the highest selectable slot (there is no configured max). */
+  function ctxTotal(): number {
+    return workspaceClient.getCached()?.workspaces.length ?? 0;
+  }
+  /** 1-based slot of the workspace the menu is bound to, or 0 if it's gone. */
+  function ctxSlot(): number {
+    const state = workspaceClient.getCached();
+    if (!state || !ctxWsId) return 0;
+    return state.workspaces.findIndex((w) => w.id === ctxWsId) + 1;
+  }
+  function ctxPill(): HTMLElement | null {
+    if (!pillsEl || !ctxWsId) return null;
+    return pillsEl.querySelector<HTMLElement>(`.ws-pill[data-ws-id="${CSS.escape(ctxWsId)}"]`);
+  }
+
+  /** Expand one disclosure panel (or none) and sync the rows' aria-expanded. */
+  function openCtxPanel(which: 'move' | 'rename' | 'delete' | null): void {
+    if (!ctxEl) return;
+    ctxPanel = which;
+    if (ctxMovePanel) ctxMovePanel.hidden = which !== 'move';
+    if (ctxRenPanel)  ctxRenPanel.hidden  = which !== 'rename';
+    if (ctxDelPanel)  ctxDelPanel.hidden  = which !== 'delete';
+    ctxEl.querySelectorAll<HTMLElement>('.ws-ctx-item[aria-haspopup]').forEach((row) => {
+      row.setAttribute('aria-expanded', String(row.dataset['wsCtx'] === which));
+    });
+    if (which === 'move' && ctxSlotInput) {
+      ctxSlotInput.value = String(ctxSlot());
+      syncStepBounds();
+      ctxSlotInput.focus();
+      ctxSlotInput.select();
+    }
+    if (which === 'rename' && ctxNameInput) {
+      const state = workspaceClient.getCached();
+      ctxNameInput.value = state?.workspaces.find((w) => w.id === ctxWsId)?.name ?? '';
+      ctxNameInput.focus();
+      ctxNameInput.select();
+    }
+    // Panels change the menu's height/width — re-run the overflow correction.
+    positionCtxMenu();
+  }
+
+  /** Disable ‹ at slot 1 and › at the last slot. */
+  function syncStepBounds(): void {
+    const n = Number(ctxSlotInput?.value);
+    if (ctxDecBtn) ctxDecBtn.disabled = !Number.isFinite(n) || n <= 1;
+    if (ctxIncBtn) ctxIncBtn.disabled = !Number.isFinite(n) || n >= ctxTotal();
+  }
+
+  /**
+   * Anchor the menu under its pill.
+   *
+   * `#ws-pills` is relocated between the bundle (inline) and `#ws-content`
+   * (the ▦ dropdown) by setFold(), so the menu has to follow it — both hosts
+   * are positioned elements, and `.ws-pills` itself is not, which makes
+   * `pill.offsetParent` the host in either mode.
+   *
+   * Offsets, not client rects: the shell zooms via `body { transform: scale() }`,
+   * which scales getBoundingClientRect() output but leaves CSS `left`/`top` in
+   * unscaled layout px. Mixing the two would misplace the menu at any zoom
+   * other than 100%.
+   */
+  function positionCtxMenu(): boolean {
+    if (!ctxEl || !pillsEl) return false;
+    const pill = ctxPill();
+    const host = pillsEl.parentElement;
+    if (!pill || !host) return false;
+    if (ctxEl.parentElement !== host) host.appendChild(ctxEl);
+
+    const left = pill.offsetLeft;
+    ctxEl.style.left = `${left}px`;
+    ctxEl.style.top  = `${pill.offsetTop + pill.offsetHeight + 4}px`;
+
+    // Nudge back inside the viewport if the menu hangs off the right edge.
+    // The overflow is measured in client px, so divide by the current body
+    // scale to convert it into the layout px that `left` speaks.
+    const rect = ctxEl.getBoundingClientRect();
+    const overflow = rect.right - (window.innerWidth - 6);
+    if (overflow > 0) {
+      const scale = ctxEl.offsetWidth > 0 ? rect.width / ctxEl.offsetWidth : 1;
+      ctxEl.style.left = `${left - overflow / (scale || 1)}px`;
+    }
+    return true;
+  }
+
+  function openCtxMenu(wsId: string): void {
+    if (!ctxEl) return;
+    const state = workspaceClient.getCached();
+    const ws = state?.workspaces.find((w) => w.id === wsId);
+    if (!state || !ws) return;
+    ctxWsId = wsId;
+    if (ctxTitleEl) ctxTitleEl.textContent = `${ws.name} · Slot ${ctxSlot()}`;
+    // deleteWorkspace() refuses to remove the last workspace — reflect that in
+    // the UI rather than letting the user confirm a no-op.
+    if (ctxDelBtn) ctxDelBtn.disabled = state.workspaces.length <= 1;
+    ctxEl.hidden = false;
+    openCtxPanel(null);
+    if (!positionCtxMenu()) closeCtxMenu();
+  }
+
+  function closeCtxMenu(refocusPill = false): void {
+    if (!ctxEl || ctxEl.hidden) return;
+    const pill = refocusPill ? ctxPill() : null;
+    ctxEl.hidden = true;
+    openCtxPanel(null);
+    ctxWsId = null;
+    pill?.focus();
+  }
+
+  /**
+   * Called at the end of every fitWorkspaceUI() pass — i.e. after every
+   * `renderPills()` — because the pill the menu points at has just been
+   * replaced by a fresh node (or dropped from the paginated window, or
+   * deleted). Re-anchor to the new node, or give up and close.
+   */
+  function reanchorCtxMenu(): void {
+    if (!ctxEl || ctxEl.hidden) return;
+    if (!positionCtxMenu()) { closeCtxMenu(); return; }
+    const state = workspaceClient.getCached();
+    const ws = state?.workspaces.find((w) => w.id === ctxWsId);
+    if (ctxTitleEl && ws) ctxTitleEl.textContent = `${ws.name} · Slot ${ctxSlot()}`;
+    if (ctxDelBtn && state) ctxDelBtn.disabled = state.workspaces.length <= 1;
+  }
+
+  // ── Triggers ──
+  // Right-click a numbered pill. The `+` and ‹/› buttons have no data-ws-id,
+  // so they fall through to the bundle-level suppressor below.
+  pillsEl?.addEventListener('contextmenu', (e) => {
+    const pill = (e.target as HTMLElement | null)?.closest<HTMLElement>('.ws-pill[data-ws-id]');
+    const id = pill?.dataset['wsId'];
+    if (!id) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openCtxMenu(id);
+  });
+  // Right-clicking anywhere else in the switcher shouldn't pop the browser's
+  // native menu inside our chrome (same guard the launcher uses on its panel).
+  bundleEl?.addEventListener('contextmenu', (e) => {
+    if ((e.target as HTMLElement | null)?.closest('#ws-ctx')) return;  // let inputs keep their menu
+    e.preventDefault();
+    closeCtxMenu();
+  });
+
+  // Long-press (touch / pen / mouse-hold) — the touch equivalent of right-click.
+  // On fire we flag the pointerup's click so it doesn't ALSO switch workspace.
+  let longPressTimer: ReturnType<typeof setTimeout> | null = null;
+  let longPressOrigin: { x: number; y: number } | null = null;
+  let suppressNextPillClick = false;
+
+  function cancelLongPress(): void {
+    if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+    longPressOrigin = null;
+  }
+
+  pillsEl?.addEventListener('pointerdown', (e) => {
+    // A click that never arrived (touch cancel, focus loss) must not swallow
+    // the next real one — reset on every fresh press.
+    suppressNextPillClick = false;
+    cancelLongPress();
+    if (e.button !== 0) return;
+    const pill = (e.target as HTMLElement | null)?.closest<HTMLElement>('.ws-pill[data-ws-id]');
+    const id = pill?.dataset['wsId'];
+    if (!id) return;
+    longPressOrigin = { x: e.clientX, y: e.clientY };
+    longPressTimer = setTimeout(() => {
+      longPressTimer = null;
+      longPressOrigin = null;
+      suppressNextPillClick = true;
+      openCtxMenu(id);
+    }, LONGPRESS_MS);
+  });
+  pillsEl?.addEventListener('pointermove', (e) => {
+    if (!longPressOrigin) return;
+    const dx = e.clientX - longPressOrigin.x;
+    const dy = e.clientY - longPressOrigin.y;
+    if (Math.hypot(dx, dy) > LONGPRESS_SLOP_PX) cancelLongPress();  // it's a drag/scroll
+  });
+  for (const ev of ['pointerup', 'pointercancel', 'pointerleave'] as const) {
+    pillsEl?.addEventListener(ev, cancelLongPress);
+  }
+
+  // Keyboard equivalent — the pills are real <button>s and the bar already has
+  // arrow-key navigation, so Shift+F10 / the Menu key should work on them too.
+  pillsEl?.addEventListener('keydown', (e) => {
+    if (e.key !== 'ContextMenu' && !(e.key === 'F10' && e.shiftKey)) return;
+    const pill = (e.target as HTMLElement | null)?.closest<HTMLElement>('.ws-pill[data-ws-id]');
+    const id = pill?.dataset['wsId'];
+    if (!id) return;
+    e.preventDefault();
+    openCtxMenu(id);
+  });
+
+  // ── Menu actions ──
+  ctxEl?.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement | null)?.closest<HTMLButtonElement>('[data-ws-ctx]');
+    if (!btn || btn.disabled) return;
+    const action = btn.dataset['wsCtx'];
+    const id = ctxWsId;
+    if (!id) return;
+
+    switch (action) {
+      // Disclosure rows toggle their panel.
+      case 'move':
+      case 'rename':
+      case 'delete':
+        openCtxPanel(ctxPanel === action ? null : action);
+        return;
+
+      case 'dec':
+      case 'inc': {
+        if (!ctxSlotInput) return;
+        const cur = Number(ctxSlotInput.value);
+        const base = Number.isFinite(cur) && cur > 0 ? cur : ctxSlot();
+        ctxSlotInput.value = String(clamp(base + (action === 'inc' ? 1 : -1), 1, ctxTotal()));
+        syncStepBounds();
+        return;
+      }
+
+      case 'move-ok':
+        commitMove();
+        return;
+
+      case 'rename-ok':
+        commitRename();
+        closeCtxMenu();
+        return;
+
+      case 'delete-no':
+        openCtxPanel(null);
+        return;
+
+      case 'delete-yes':
+        closeCtxMenu();
+        workspaceClient.deleteWorkspace(id)
+          .catch((err) => console.warn('[StatusBar] deleteWorkspace failed', err));
+        return;
+    }
+  });
+
+  function commitMove(): void {
+    if (!ctxSlotInput || !ctxWsId) return;
+    const id = ctxWsId;
+    const slot = normalizeSlotInput();
+    closeCtxMenu();
+    workspaceClient.moveWorkspace(id, slot - 1)
+      .catch((err) => console.warn('[StatusBar] moveWorkspace failed', err));
+  }
+
+  function commitRename(): void {
+    if (!ctxNameInput || !ctxWsId) return;
+    const state = workspaceClient.getCached();
+    const ws = state?.workspaces.find((w) => w.id === ctxWsId);
+    if (!ws) return;
+    // Blank is allowed mid-edit but never persisted — same contract as the
+    // inline #ws-name-input blur handler.
+    const trimmed = ctxNameInput.value.trim();
+    if (!trimmed || trimmed === ws.name) return;
+    workspaceClient.patchWorkspaceDebounced(ws.id, { name: trimmed });
+  }
+
+  /**
+   * Clamp the typed slot into [1, total] and write it back to the field.
+   * Runs on blur ("type 99 with 6 workspaces → snaps to 6 when you click
+   * away"), and again on commit so an OK click that didn't blur the field
+   * first can't push an out-of-range index.
+   */
+  function normalizeSlotInput(): number {
+    const total = ctxTotal();
+    const current = ctxSlot() || 1;
+    if (!ctxSlotInput) return current;
+    const parsed = parseInt(ctxSlotInput.value, 10);
+    const slot = Number.isFinite(parsed) ? clamp(parsed, 1, Math.max(1, total)) : current;
+    ctxSlotInput.value = String(slot);
+    syncStepBounds();
+    return slot;
+  }
+
+  // Digits only, but don't fight the user mid-edit: an empty field is fine
+  // while typing and resolves on blur.
+  ctxSlotInput?.addEventListener('input', () => {
+    const digits = ctxSlotInput.value.replace(/\D+/g, '');
+    if (digits !== ctxSlotInput.value) ctxSlotInput.value = digits;
+    syncStepBounds();
+  });
+  ctxSlotInput?.addEventListener('blur', () => { normalizeSlotInput(); });
+  ctxSlotInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter')  { e.preventDefault(); commitMove(); }
+    if (e.key === 'Escape') { e.preventDefault(); closeCtxMenu(true); }
+  });
+  ctxNameInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter')  { e.preventDefault(); commitRename(); closeCtxMenu(); }
+    if (e.key === 'Escape') { e.preventDefault(); closeCtxMenu(true); }
+  });
+
+  // ── Dismissal ──
+  // composedPath() rather than contains(e.target): pill clicks re-render
+  // `#ws-pills` synchronously, so by the time this runs the original target
+  // may already be detached (see the identical note on the ▦ popover handler).
+  document.addEventListener('click', (e) => {
+    if (!ctxEl || ctxEl.hidden) return;
+    const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+    if (path.includes(ctxEl)) return;
+    if (path.length === 0 && ctxEl.contains(e.target as Node)) return;
+    closeCtxMenu();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && ctxEl && !ctxEl.hidden) {
+      e.stopPropagation();
+      closeCtxMenu(true);
+    }
+  }, true);
 
   layoutChip?.addEventListener('click', () => {
     const state = workspaceClient.getCached();
@@ -1341,6 +1755,184 @@ let initialLocale: string = 'en-GB';
     color: var(--aura-color-primary);
     border-color: var(--aura-color-primary);
   }
+
+  /* ── Pill context menu ──
+   * Right-click / long-press menu anchored under a numbered pill. Same chrome
+   * as the launcher's `.lo-ctx` menu (LauncherOverlay.astro) — surface panel,
+   * hard border, no radius, monospace uppercase rows.
+   *
+   * Positioned absolutely against whichever host currently holds `#ws-pills`
+   * (`.ws-bundle` inline, `.ws-content` when folded) — both are positioned
+   * elements, and openCtxMenu() re-parents the menu accordingly. Inline
+   * `left`/`top` are written in LAYOUT px from `pill.offsetLeft/offsetTop`,
+   * NOT client rects: the shell zooms via `body { transform: scale() }`, which
+   * scales client rects but not CSS offsets.
+   *
+   * z-index sits above the `.ws-content` dropdown (1100) so it stays visible
+   * when a folded pill is right-clicked inside it. */
+  .ws-ctx {
+    position: absolute;
+    z-index: 1150;
+    min-width: 176px;
+    display: flex;
+    flex-direction: column;
+    padding: 4px;
+    background: var(--aura-color-surface);
+    border: var(--aura-border);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    font-family: var(--aura-font-mono);
+    font-size: var(--aura-font-size-xs);
+    text-transform: none;
+  }
+  .ws-ctx[hidden] { display: none; }
+  /* Which pill this menu belongs to — "<name> · SLOT <n>". */
+  .ws-ctx-title {
+    padding: 4px 10px 6px;
+    color: var(--aura-color-text-dim);
+    font-size: 0.55rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    border-bottom: var(--aura-border);
+    margin-bottom: 4px;
+  }
+
+  .ws-ctx-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 6px 10px;
+    background: transparent;
+    border: none;
+    color: var(--aura-color-text);
+    cursor: pointer;
+    text-align: left;
+    font-family: inherit;
+    font-size: inherit;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .ws-ctx-item:hover,
+  .ws-ctx-item:focus-visible {
+    outline: none;
+    background: color-mix(in srgb, var(--aura-color-primary) 14%, transparent);
+    color: var(--aura-color-primary);
+  }
+  .ws-ctx-item:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+  .ws-ctx-chev {
+    color: var(--aura-color-text-dim);
+    font-size: 0.7rem;
+    transition: transform 0.1s;
+  }
+  /* Chevron rotates down while its panel is expanded. */
+  .ws-ctx-item[aria-expanded="true"] .ws-ctx-chev { transform: rotate(90deg); }
+  .ws-ctx-item[aria-expanded="true"] {
+    color: var(--aura-color-primary);
+  }
+  /* Delete reads as destructive: secondary tone rather than primary. */
+  .ws-ctx-danger:hover,
+  .ws-ctx-danger:focus-visible,
+  .ws-ctx-danger[aria-expanded="true"] {
+    background: color-mix(in srgb, var(--aura-color-secondary) 14%, transparent);
+    color: var(--aura-color-secondary);
+  }
+
+  /* Disclosure panel shared by Move / Rename / Delete-confirm. */
+  .ws-ctx-panel {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 8px;
+    background: color-mix(in srgb, var(--aura-color-primary) 6%, transparent);
+  }
+  .ws-ctx-panel[hidden] { display: none; }
+
+  /* Stepper number field. Fixed width so ‹ / › don't shift as digits change. */
+  .ws-ctx-slot,
+  .ws-ctx-name {
+    height: 22px;
+    padding: 0 6px;
+    background: transparent;
+    border: var(--aura-border);
+    color: var(--aura-color-text);
+    font-family: var(--aura-font-mono);
+    font-size: 0.7rem;
+    line-height: 1;
+    transition: color 0.1s, border-color 0.1s, box-shadow 0.1s;
+  }
+  .ws-ctx-slot { width: 44px; text-align: center; }
+  .ws-ctx-name { flex: 1; min-width: 0; }
+  .ws-ctx-slot:focus,
+  .ws-ctx-slot:focus-visible,
+  .ws-ctx-name:focus,
+  .ws-ctx-name:focus-visible {
+    outline: none;
+    color: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+    box-shadow: inset 0 0 0 1px var(--aura-color-primary), var(--aura-glow-subtle);
+  }
+
+  /* ‹ / › steppers and the OK / No buttons all borrow the `.ws-pill` metrics. */
+  .ws-ctx-step,
+  .ws-ctx-ok,
+  .ws-ctx-cancel {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 22px;
+    padding: 0 8px;
+    background: transparent;
+    border: var(--aura-border);
+    color: var(--aura-color-text-dim);
+    cursor: pointer;
+    font-family: var(--aura-font-mono);
+    font-size: 0.7rem;
+    line-height: 1;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    transition: color 0.1s, border-color 0.1s, background 0.1s;
+  }
+  .ws-ctx-step { font-size: 0.85rem; }
+  .ws-ctx-step:hover,
+  .ws-ctx-cancel:hover {
+    color: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+  }
+  /* Disabled at a bound — same treatment as `.ws-pill[disabled]`. */
+  .ws-ctx-step:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+  /* OK is the commit affordance: filled, like the active pill. */
+  .ws-ctx-ok {
+    margin-left: auto;
+    padding: 0 10px;
+    color: var(--aura-color-bg);
+    background: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+    font-weight: 700;
+  }
+  .ws-ctx-ok:hover { box-shadow: var(--aura-glow-subtle); }
+  .ws-ctx-ok-danger {
+    background: var(--aura-color-secondary);
+    border-color: var(--aura-color-secondary);
+  }
+  .ws-ctx-confirm-q {
+    color: var(--aura-color-text-dim);
+    font-size: 0.6rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  /* "No" sits after the filled "Yes", which has `margin-left: auto`. */
+  .ws-ctx-cancel { padding: 0 10px; }
 
   /* ── Layout chip ──
    * Distinguished from the generic status-btn-text by its three-part layout
