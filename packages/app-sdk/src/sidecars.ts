@@ -312,6 +312,18 @@ export class SidecarHost {
       '-v', `${this.opts.workspaceRoot}/packages:/workspace/packages:ro`,
       '--mount', `type=volume,source=${this.opts.nodeModulesVolume},target=/workspace/node_modules,readonly`,
       '-e', `PATH=/aura/my-tools:${basePath}`,
+      // The `-e PATH` above only covers processes that inherit the container's
+      // env. A LOGIN shell doesn't: /etc/profile assigns PATH outright (both
+      // its root and non-root branches), dropping /aura/my-tools, so anything
+      // shelling out via `bash -l` — an in-container agent running tool
+      // commands, say — finds no toolchain no matter which user it runs as.
+      // /etc/profile sources /etc/profile.d/*.sh AFTER that assignment, so the
+      // same drop-in ContainerRunner installs in app containers re-prepends the
+      // dir and wins, for every user. Unlike ContainerRunner we do NOT also
+      // bind it over /etc/bash.bashrc: a sibling is a foreign image that may
+      // ship its own, and clobbering it would be a regression the OS has no
+      // business causing.
+      '-v', `${this.opts.workspaceRoot}/os/bashrc.aura.sh:/etc/profile.d/aura-prompt.sh:ro`,
     ];
   }
 
