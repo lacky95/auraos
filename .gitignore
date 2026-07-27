@@ -19,6 +19,18 @@ dist/
 # Temp app scaffolds created by `aura dev new` (timestamp-suffixed staging dirs)
 apps/*.tmp.*/
 
+# Per-machine state written by the boot/seed path. Anchored to the repo root
+# so a similarly-named file inside an app is still versioned.
+# .aura-seeded  — marker that this checkout's volumes have been seeded
+# .image-version — provenance of the running image (a nix store path here)
+/.aura-seeded
+/.image-version
+
+# Local compose overrides — volume names, ports and project prefixes differ per
+# machine (e.g. COMPOSE_PROJECT_NAME=aura vs the upstream auraos_ prefix), so
+# committing one host's version breaks every other host.
+/docker-compose.override.yml
+
 # editor / OS
 .DS_Store
 .vscode/
