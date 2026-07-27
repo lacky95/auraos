@@ -1,9 +1,11 @@
 import { spawn, spawnSync, execSync, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
+import { toolsGrant } from './tool-allowlist.js';
+import { MY_TOOLS_PATH, currentToolsMode, provisionAllowlist, toolchainMirrorBin } from './tool-provision.js';
 import type { SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import type { SpawnContext } from '../scopes/types.js';
 import { ContextStore } from '../context/ContextStore.js';
@@ -154,29 +156,15 @@ export class ContainerRunner implements SandboxRunner {
   }
   public provisionToolsDir(instanceId: string, manifest: AppManifest): string {
     const dir = this.toolsDir(instanceId);
-    // IMPORTANT: empty the directory IN PLACE rather than rm+mkdir. The
-    // container's `--mount type=volume,…,volume-subpath=<this dir>` binds the
-    // dir BY INODE at spawn time; rm-then-mkdir gives the dir a new inode,
-    // and the container keeps pointing at the unlinked-but-still-mounted old
-    // one. Result: every symlink we write after a refresh is invisible inside
-    // the container, manifesting as an empty /aura/my-tools and
-    // "bash: command not found" for everything the wildcard cap allowlist
-    // should provide. (Cap install + refreshWildcardApps both hit this path.)
-    mkdirSync(dir, { recursive: true });
-    try {
-      for (const name of readdirSync(dir)) {
-        try { rmSync(join(dir, name), { force: true }); } catch { /* ignore */ }
-      }
-    } catch { /* dir was already empty */ }
-    const toolBinDir = join(this.toolchainDir, 'bin');
-    const useWildcard = manifest.tools.includes('*');
-    const entries = useWildcard
-      ? (existsSync(toolBinDir) ? readdirSync(toolBinDir) : [])
-      : manifest.tools.filter((t) => t !== '*');
-    for (const tool of entries) {
-      const binaryName = tool === 'claude-code' ? 'claude' : tool;
-      try { symlinkSync(`/aura/all-tools/${binaryName}`, join(dir, binaryName)); } catch { /* dupe */ }
-    }
+    provisionAllowlist({
+      dataDir: this.dataDir,
+      dir,
+      tools: manifest.tools,
+      // Containers can't see /os/toolchain (it exists only in the shell's
+      // mount namespace), so their /aura/all-tools mount — and therefore
+      // legacy symlink-mode enumeration — comes from the in-volume mirror.
+      legacyStoreBin: toolchainMirrorBin(this.dataDir),
+    });
     return dir;
   }
   public clearToolsDir(instanceId: string): void {
@@ -319,6 +307,31 @@ export class ContainerRunner implements SandboxRunner {
     //     same volume-subpath pattern already used for /data, /aura/*-tools,
     //     /home/aura below.
     const appDirMount = this.buildAppDirMount(ctx.appDir, appId, appDataVolume);
+    // Cap allowlist mounts. We can't bind host paths here: /os/toolchain and
+    // /data/... only exist inside the aura-shell mount namespace, but
+    // sibling-container binds go through the HOST docker daemon, which would
+    // create empty stubs on its rootfs. Instead we mount subpaths of the
+    // aura-app-data named volume, populated from inside aura-shell (where
+    // /data IS that volume).
+    //
+    //   • aura/runtime/<inst>/tools → /aura/my-tools — the per-instance
+    //     allowlist provisionToolsDir() writes. Mounted READ-ONLY: it is only
+    //     ever written from the shell side, and in hardlink mode its entries
+    //     share inodes with the mirror, so a writable mount would let a
+    //     container corrupt a binary for every app on the system.
+    //   • aura/toolchain/bin → /aura/all-tools — the WHOLE toolchain. Mounted
+    //     only in legacy symlink mode, where allowlist entries are symlinks
+    //     that need this path to resolve against. In hardlink mode the
+    //     allowlist entries are the binaries themselves, so mounting the store
+    //     would hand every app every tool by absolute path and defeat the
+    //     grant entirely.
+    const toolsMode = currentToolsMode(this.dataDir);
+    const toolMounts = [
+      ...(toolsMode === 'symlink'
+        ? ['--mount', `type=volume,source=${appDataVolume},target=/aura/all-tools,volume-subpath=aura/toolchain/bin,readonly`]
+        : []),
+      '--mount', `type=volume,source=${appDataVolume},target=${MY_TOOLS_PATH},volume-subpath=aura/runtime/${instanceId}/tools,readonly`,
+    ];
     const a: string[] = [
       'run', '--rm', '-d',
       '--name', hostname,
@@ -354,19 +367,8 @@ export class ContainerRunner implements SandboxRunner {
       // Per-instance state — subpath of the shared app-data volume so each
       // instance only sees ITS slice, not other instances'.
       '--mount', `type=volume,source=${appDataVolume},target=/data,volume-subpath=${dataSubpath}`,
-      // Two-dir cap allowlist. We can't bind host paths here: /os/toolchain
-      // and /data/... only exist inside the aura-shell mount namespace, but
-      // sibling-container binds go through the HOST docker daemon, which
-      // would create empty stubs on its rootfs. Instead, mount the
-      // aura-app-data named volume at two different subpaths:
-      //   • aura/toolchain/bin  ← seeded from /os/toolchain/bin by
-      //                            AppManager.healToolchainShims()
-      //   • aura/runtime/<inst>/tools ← per-instance allowlist symlinks
-      //                                  written by provisionToolsDir()
-      // Both are populated from inside aura-shell (where /data IS the
-      // named volume), so the sibling container sees the same content.
-      '--mount', `type=volume,source=${appDataVolume},target=/aura/all-tools,volume-subpath=aura/toolchain/bin,readonly`,
-      '--mount', `type=volume,source=${appDataVolume},target=/aura/my-tools,volume-subpath=aura/runtime/${instanceId}/tools`,
+      // Cap allowlist mounts — see toolMounts above.
+      ...toolMounts,
       // AuraOS bash startup — bind the same script the PRoot base-rootfs gets.
       // Mounted into /etc/bash.bashrc (loaded by every interactive bash before
       // ~/.bashrc) so the PS1 + PATH customisation kicks in regardless of who
@@ -395,9 +397,7 @@ export class ContainerRunner implements SandboxRunner {
     // in tools[] or the wildcard '*'). Matches ProotRunner's gating — needed
     // so commands like `aura jump` from inside a container app can drive
     // sibling-container spawns via the host daemon.
-    const wantsDocker =
-      manifest.tools?.includes('*') ||
-      manifest.tools?.includes('docker');
+    const wantsDocker = toolsGrant(manifest.tools ?? [], 'docker');
     if (wantsDocker && existsSync('/var/run/docker.sock')) {
       a.push('-v', '/var/run/docker.sock:/var/run/docker.sock');
     }
@@ -436,7 +436,13 @@ export class ContainerRunner implements SandboxRunner {
       '-e', `COLORTERM=truecolor`,
       '-e', `LANG=C.UTF-8`,
       '-e', `LC_ALL=C.UTF-8`,
-      '-e', `PATH=/aura/my-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
+      '-e', `PATH=${MY_TOOLS_PATH}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
+      // Which allowlist mode the OS provisioned this instance with. Read by
+      // @aura/app-sdk's sidecar host (`inheritTools`) so a sibling runtime
+      // mounts the same set the OS gave the controlling app — and, in
+      // hardlink mode, skips the shared /aura/all-tools mount instead of
+      // silently re-opening the whole toolchain to the sibling.
+      '-e', `AURA_TOOLS_MODE=${toolsMode}`,
       BASE_IMAGE,
     );
     a.push(...entrypoint);

@@ -58,9 +58,14 @@ export { auraAppIntegration, auraIdentityIntegration } from './integration.mjs';
 export { proxyFetch, sanitizeHeaders } from './proxy.js';
 export type { ProxyFetchOptions } from './proxy.js';
 
-// Sibling-container runtime manager for "bring-your-own-runtime" apps that run
-// a foreign Docker image alongside themselves and proxy it (see the manifest
-// `services` block). Server-side only; also importable via
-// `@aura/app-sdk/sidecars`.
-export { SidecarHost, createSidecars } from './sidecars.js';
-export type { ServiceSpec, SidecarAuth, SidecarOptions, SidecarPhase, HelperRun } from './sidecars.js';
+// Sibling-container runtime manager for "bring-your-own-runtime" apps.
+//
+// NOTE: intentionally NOT re-exported from the barrel. `sidecars.ts` imports
+// `node:child_process`, and any client-side module that pulls `@aura/app-sdk`
+// via the barrel (e.g. `import { OsClient } from '@aura/app-sdk'`) would drag
+// `sidecars.ts` into the browser bundle. Vite externalizes `node:child_process`
+// for the browser and the app then breaks with "Module has been externalized
+// for browser compatibility" the moment it renders. Server code that needs it
+// imports directly from the subpath instead:
+//
+//   import { createSidecars } from '@aura/app-sdk/sidecars';

@@ -9,9 +9,20 @@ import {
   type State,
 } from '../lib/registry.js';
 import { api } from '../lib/client.js';
+import {
+  promptChoice,
+  promptMultiSelect,
+  BACK,
+  PromptCancelled,
+  type MultiSelectMode,
+} from '../lib/prompts.js';
 
-interface ManifestLite { id: string; tools?: string[] }
+interface ManifestLite { id: string; name?: string; tools?: string[] }
 interface AppDto { manifest: ManifestLite }
+
+/** The two special allowlist markers (see core's tool-allowlist). */
+const WILDCARD = '*';   // grant ALL tools; overrides everything
+const ALL_EXCEPT = '#'; // grant all tools EXCEPT the named ones; overridden by '*'
 
 /**
  * Pull every installed app's manifest from the shell. Replaces the
@@ -35,6 +46,143 @@ interface ManifestEditResult {
 }
 async function editManifest(appId: string, action: 'add-tool' | 'remove-tool', tool: string): Promise<ManifestEditResult> {
   return api.post<ManifestEditResult>('/api/admin/manifest-edit', { appId, action, tool });
+}
+
+/** Replace an app's whole tools[] atomically (used by the interactive picker). */
+async function setToolsManifest(appId: string, tools: string[]): Promise<ManifestEditResult> {
+  return api.post<ManifestEditResult>('/api/admin/manifest-edit', { appId, action: 'set-tools', tools });
+}
+
+/** Human-readable summary of what a tools[] effectively grants, honoring the
+ *  '*' (all) and '#' (all-except) markers with '*' taking precedence. */
+function grantSummary(tools: string[]): string {
+  const named = tools.filter((t) => t !== WILDCARD && t !== ALL_EXCEPT);
+  if (tools.includes(WILDCARD)) {
+    const kept = named.length ? color.dim(` (keeps: ${named.join(', ')})`) : '';
+    return color.green('ALL tools') + color.dim(' via *') + kept;
+  }
+  if (tools.includes(ALL_EXCEPT)) {
+    return color.green('ALL except') + ` ${named.join(', ') || '(none)'}` + color.dim(' via #');
+  }
+  return named.length ? named.join(', ') : color.dim('(none)');
+}
+
+/** Available tools = installed caps ∪ /os/toolchain/bin binaries, plus
+ *  not-yet-installed registry caps (so the picker can surface them). */
+async function gatherAvailableTools(): Promise<Array<{ name: string; installed: boolean; desc: string }>> {
+  ensureRegistry();
+  const reg = loadRegistry();
+  const out = new Map<string, { installed: boolean; desc: string }>();
+  try {
+    const [capRes, toolsRes] = await Promise.all([
+      api.get<{ state: { capabilities: Record<string, { installed: boolean }> } }>('/api/admin/cap'),
+      api.get<{ storeEntries: string[] }>('/api/admin/inspect-tools'),
+    ]);
+    for (const n of toolsRes.storeEntries ?? []) {
+      out.set(n, { installed: true, desc: reg.capabilities[n]?.description ?? 'system binary in /os/toolchain/bin' });
+    }
+    for (const [n, s] of Object.entries(capRes.state.capabilities)) {
+      if (s.installed && !out.has(n)) out.set(n, { installed: true, desc: reg.capabilities[n]?.description ?? '' });
+    }
+  } catch {
+    const state = loadState();
+    for (const [n, s] of Object.entries(state.capabilities)) {
+      if (s.installed) out.set(n, { installed: true, desc: reg.capabilities[n]?.description ?? '' });
+    }
+  }
+  for (const [n, e] of Object.entries(reg.capabilities)) {
+    if (e.source === 'builtin') out.set(n, { installed: true, desc: e.description ?? '' });
+    else if (!out.has(n))       out.set(n, { installed: false, desc: e.description ?? '' });
+  }
+  return [...out.entries()]
+    .map(([name, v]) => ({ name, ...v }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Interactive tool-grant picker (`aura cap grant` with no tool names). Mirrors
+ * the `aura dev new` wizard's multi-select. Flow: pick ONE app (unless given) →
+ * check/uncheck tools, with the app's current grants pre-checked → the two
+ * special markers `*` (all) and `#` (all-except) are just extra checkboxes that
+ * coexist with the named selection. The full checked set (markers included) is
+ * persisted so unchecking a marker restores the underlying list. `*` overrides
+ * `#`; both override the named list for the EFFECTIVE grant.
+ */
+async function grantInteractive(appIdArg?: string): Promise<void> {
+  const manifests = await fetchAllManifests();
+  if (manifests.length === 0) fail('No installed apps to grant to.');
+
+  // 1 — pick the target app (skip if one was passed on the CLI).
+  let appId = appIdArg;
+  if (!appId) {
+    const choices = manifests
+      .slice()
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map((m) => ({ value: m.id, label: m.id, desc: grantSummary(m.tools ?? []) }));
+    const picked = await promptChoice<string>('Grant tools to which app?', choices, 0, { allowBack: true });
+    if (picked === BACK) { info('cancelled'); return; }
+    appId = picked;
+  }
+  const manifest = manifests.find((m) => m.id === appId);
+  if (!manifest) fail(`App not installed: ${appId}`);
+  const current = manifest!.tools ?? [];
+  const currentSet = new Set(current);
+
+  // 2 — build the checkbox list: two marker rows first, then every tool.
+  const available = await gatherAvailableTools();
+  const markerOptions = [
+    {
+      value: WILDCARD,
+      label: `${WILDCARD}  (all tools)`,
+      desc: 'Grant every tool. Overrides everything below.',
+      tag: color.magenta('wildcard'),
+      initiallyChecked: currentSet.has(WILDCARD),
+    },
+    {
+      value: ALL_EXCEPT,
+      label: `${ALL_EXCEPT}  (all except checked)`,
+      desc: 'Grant everything EXCEPT the tools checked below. Ignored when * is checked.',
+      tag: color.magenta('deny-list'),
+      initiallyChecked: currentSet.has(ALL_EXCEPT),
+    },
+  ];
+  const toolOptions = available.map((t) => ({
+    value: t.name,
+    label: t.name,
+    desc: t.desc,
+    tag: currentSet.has(t.name)
+      ? color.green('granted')
+      : (t.installed ? color.dim('installed') : color.yellow('not installed')),
+    initiallyChecked: currentSet.has(t.name),
+  }));
+  // Any named tools already in the manifest that aren't in the available set
+  // (e.g. a tool no longer installed) — keep them checkable so we don't drop them.
+  for (const t of current) {
+    if (t === WILDCARD || t === ALL_EXCEPT) continue;
+    if (!available.some((a) => a.name === t)) {
+      toolOptions.push({ value: t, label: t, desc: '', tag: color.green('granted'), initiallyChecked: true });
+    }
+  }
+
+  const modes: MultiSelectMode<string>[] = [
+    { label: 'grant', options: [...markerOptions, ...toolOptions] },
+  ];
+  const raw = await promptMultiSelect<string>(`Tools for ${color.bold(appId!)}`, modes, 0, { allowBack: true });
+  if (raw === BACK) { info('cancelled'); return; }
+  const selected = raw.selected;
+
+  // 3 — persist the full selection (markers included) and report.
+  const before = [...currentSet].sort().join(',');
+  const after = [...new Set(selected)].sort().join(',');
+  if (before === after) { info(`no change — ${appId} already grants: ${grantSummary(current)}`); return; }
+
+  const r = await setToolsManifest(appId!, selected);
+  if (!r.ok) fail(`grant → ${appId} failed: ${r.error ?? 'unknown'} ${r.message ?? ''}`.trim());
+  ok(`updated ${appId}${r.refreshError ? color.yellow(` (refresh: ${r.refreshError})`) : ''}`);
+  info(`effective grant: ${grantSummary(selected)}`);
+  if (selected.includes(WILDCARD) && selected.some((t) => t !== WILDCARD && t !== ALL_EXCEPT)) {
+    info(color.dim('  (* overrides the named list, but the list is kept for when you uncheck *)'));
+  }
 }
 
 export function registerCap(program: Command): void {
@@ -132,15 +280,33 @@ export function registerCap(program: Command): void {
     });
 
   cap
-    .command('grant <appId> <name...>')
-    .description("Add a capability to an app manifest. Use '*' (quote it: \"'*'\") to auto-bind every installed cap, including future ones. Hot-refreshes running instances — no respawn.")
-    .action(async (appId: string, names: string[]) => {
+    .command('grant [appId] [name...]')
+    .option('-i, --interactive', 'Open the interactive tool picker (TUI)')
+    .description(
+      "Grant capabilities to an app. With tool names: adds them (use '*' for all, " +
+      "'#' for all-except). With no names (or -i): opens an interactive picker to " +
+      'check/uncheck tools, showing what is already granted. Hot-refreshes running ' +
+      'instances — no respawn.',
+    )
+    .action(async (appId: string | undefined, names: string[], opts: { interactive?: boolean }) => {
+      // Interactive when explicitly asked, or when no tool names were given
+      // (with or without an appId — a bare appId opens the picker for that app).
+      if (opts.interactive || names.length === 0) {
+        try {
+          await grantInteractive(appId);
+        } catch (err) {
+          if (err instanceof PromptCancelled) { info('cancelled'); return; }
+          throw err;
+        }
+        return;
+      }
+      // Non-interactive: append each named tool/marker (back-compat path).
       // Route through the shell so it works from any sandbox (the local
       // /workspace/apps bind only covers the caller's own app in container
-      // sandboxes). The endpoint also triggers refreshInstanceTools, so the
-      // separate refreshRunning call below is just a defensive safety net.
+      // sandboxes). The endpoint also triggers refreshInstanceTools.
+      if (!appId) fail('Missing appId. Pass an app id, or run with no args for the picker.');
       for (const name of names) {
-        const r = await editManifest(appId, 'add-tool', name);
+        const r = await editManifest(appId!, 'add-tool', name);
         if (!r.ok)            fail(`grant ${name} → ${appId} failed: ${r.error ?? 'unknown'} ${r.message ?? ''}`.trim());
         if (r.changed)        ok(`granted ${name} → ${appId}${r.refreshError ? color.yellow(` (refresh: ${r.refreshError})`) : ''}`);
         else                  info(`${name} already declared by ${appId}`);

@@ -1,8 +1,10 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
+import { toolsGrant } from './tool-allowlist.js';
+import { ALL_TOOLS_PATH, MY_TOOLS_PATH, currentToolsMode, provisionAllowlist } from './tool-provision.js';
 import type { SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import type { SpawnContext } from '../scopes/types.js';
 import { ContextStore } from '../context/ContextStore.js';
@@ -87,32 +89,28 @@ export class ProotRunner implements SandboxRunner {
   }
 
   /**
-   * Recreate the per-instance allowlist as a directory of symlinks into
-   * /aura/all-tools (path INSIDE the proot — the target string lives in the
-   * symlink, the kernel resolves it lazily when the proot looks the file up).
+   * Recreate the per-instance allowlist so it holds exactly the binaries this
+   * app's `tools[]` grants — hardlinks from the toolchain mirror by default,
+   * symlinks into /aura/all-tools on filesystems that can't hardlink. See
+   * tool-provision.ts for the two modes and why the mode decides whether
+   * buildProotArgs also binds the shared store.
    *
-   * Apps with `'*'` in tools[] mirror every entry in the host toolchain;
-   * explicit-list apps get just their declared tools (with the historical
-   * `claude-code` → `claude` rename preserved). Called once at spawn AND on
-   * cap grant/revoke/install for live instances — so a running terminal sees
-   * a new capability appear in PATH without a respawn.
+   * Apps with `'*'` in tools[] get every entry in the toolchain; explicit-list
+   * apps get just their declared tools (with the historical `claude-code` →
+   * `claude` rename preserved). Called once at spawn AND on cap
+   * grant/revoke/install for live instances — so a running terminal sees a new
+   * capability appear in PATH without a respawn.
    */
   public provisionToolsDir(instanceId: string, manifest: AppManifest): string {
     const dir = this.toolsDir(instanceId);
-    try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
-    mkdirSync(dir, { recursive: true });
-
-    const toolBinDir = join(this.toolchainDir, 'bin');
-    const useWildcard = manifest.tools.includes('*');
-    const entries = useWildcard
-      ? (existsSync(toolBinDir) ? readdirSync(toolBinDir) : [])
-      : manifest.tools.filter((t) => t !== '*');
-
-    for (const tool of entries) {
-      const binaryName = tool === 'claude-code' ? 'claude' : tool;
-      const target = `/aura/all-tools/${binaryName}`;
-      try { symlinkSync(target, join(dir, binaryName)); } catch { /* dupe / racing refresh */ }
-    }
+    provisionAllowlist({
+      dataDir: this.dataDir,
+      dir,
+      tools: manifest.tools,
+      // PRoot binds the real store at /aura/all-tools (it lives in the shell's
+      // own mount namespace), so that's what legacy mode enumerates.
+      legacyStoreBin: join(this.toolchainDir, 'bin'),
+    });
     return dir;
   }
 
@@ -148,7 +146,7 @@ export class ProotRunner implements SandboxRunner {
     // (which don't source .bashrc) still find granted tools. Interactive
     // shells also benefit — the bashrc's PATH guard then short-circuits.
     const inheritedPath = process.env['PATH'] ?? '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
-    const path = prooted ? `/aura/my-tools:${inheritedPath}` : inheritedPath;
+    const path = prooted ? `${MY_TOOLS_PATH}:${inheritedPath}` : inheritedPath;
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
       // OS Context env FIRST — the fixed OS vars below override, so a context
@@ -273,19 +271,24 @@ export class ProotRunner implements SandboxRunner {
     // resolved target (a regular file) sidesteps that entirely. Capabilities
     // installed by `aura cap install` use symlinks, so this fix matters for
     // every dynamically added tool, not just `aura` itself.
-    // Two-dir toolchain view (replaces the old per-tool bind loop):
-    //   /aura/all-tools  ← read-only window into the host's toolchain store.
-    //   /aura/my-tools   ← per-instance allowlist directory of symlinks into
-    //                      /aura/all-tools. Mutated from outside the proot at
-    //                      cap-grant / cap-install time so live instances see
-    //                      new tools without a respawn.
-    // bashrc + spawn env prepend /aura/my-tools to PATH.
+    // Toolchain view. /aura/my-tools is the per-instance allowlist dir,
+    // mutated from OUTSIDE the proot at cap-grant / cap-install time — the
+    // bind is at the directory level, so live instances see new tools without
+    // a respawn. bashrc + spawn env prepend it to PATH.
+    //
+    // /aura/all-tools (the whole toolchain store) is bound ONLY in legacy
+    // symlink mode, where the allowlist entries are symlinks that need that
+    // path to resolve against. In hardlink mode the allowlist entries ARE the
+    // binaries, so binding the store would just hand every app every tool by
+    // absolute path and defeat the grant. See tool-provision.ts.
     const toolBinDir = join(this.toolchainDir, 'bin');
     if (existsSync(toolBinDir)) {
       const myTools = this.toolsDir(instanceId);
       mkdirSync(myTools, { recursive: true });
-      args.push(`--bind=${toolBinDir}:/aura/all-tools`);
-      args.push(`--bind=${myTools}:/aura/my-tools`);
+      if (currentToolsMode(this.dataDir) === 'symlink') {
+        args.push(`--bind=${toolBinDir}:${ALL_TOOLS_PATH}`);
+      }
+      args.push(`--bind=${myTools}:${MY_TOOLS_PATH}`);
     }
 
     // Bind the host docker socket if the manifest asks for it (explicit
@@ -293,9 +296,7 @@ export class ProotRunner implements SandboxRunner {
     // `docker` invocations from inside the proot — e.g. `aura jump` from
     // the terminal app dropping into a sibling-container app via
     // `docker exec` — reach the same daemon the shell uses.
-    const wantsDocker =
-      manifest.tools?.includes('*') ||
-      manifest.tools?.includes('docker');
+    const wantsDocker = toolsGrant(manifest.tools ?? [], 'docker');
     if (wantsDocker && existsSync('/var/run/docker.sock')) {
       args.push('--bind=/var/run/docker.sock:/var/run/docker.sock');
     }

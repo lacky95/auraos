@@ -15,17 +15,24 @@ import { join } from 'node:path';
  * chokidar watcher picks up the JSON change automatically and re-parses,
  * but we ALSO trigger the per-app /aura/my-tools refresh so the running
  * container sees the new binding within a tick (no respawn).
+ *
+ * The manifest path is resolved via `AppRegistry.getAppDir`, which knows each
+ * app's real install directory across ALL scopes (system `/workspace/apps`,
+ * global + user `/data/scopes/…/apps`). A hardcoded `/workspace/apps` only
+ * covers system-scope apps and 404s on user/global installs.
  */
 
-const APPS_DIR  = process.env['AURA_APPS_DIR'] ?? '/workspace/apps';
 const APP_ID_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
 
-type Action = 'add-tool' | 'remove-tool';
+type Action = 'add-tool' | 'remove-tool' | 'set-tools';
 
 interface Body {
   appId?: string;
   action?: Action;
+  /** For add-tool / remove-tool. */
   tool?: string;
+  /** For set-tools: the full replacement tools[] (may include markers '*'/'#'). */
+  tools?: string[];
 }
 
 export const POST: APIRoute = async ({ request }) => {
@@ -37,14 +44,26 @@ export const POST: APIRoute = async ({ request }) => {
   if (typeof appId !== 'string' || !APP_ID_RE.test(appId)) {
     return json({ error: 'invalid-app-id', message: `appId must be reverse-domain (got ${JSON.stringify(appId)}).` }, 400);
   }
-  if (action !== 'add-tool' && action !== 'remove-tool') {
-    return json({ error: 'invalid-action', message: `action must be 'add-tool' or 'remove-tool' (got ${JSON.stringify(action)}).` }, 400);
+  if (action !== 'add-tool' && action !== 'remove-tool' && action !== 'set-tools') {
+    return json({ error: 'invalid-action', message: `action must be 'add-tool', 'remove-tool', or 'set-tools' (got ${JSON.stringify(action)}).` }, 400);
   }
-  if (typeof tool !== 'string' || tool.length === 0) {
+  // Validate the payload shape per action.
+  let setTools: string[] | null = null;
+  if (action === 'set-tools') {
+    if (!Array.isArray(body.tools) || body.tools.some((t) => typeof t !== 'string' || t.length === 0)) {
+      return json({ error: 'invalid-tools', message: 'set-tools requires a non-empty-string array `tools`.' }, 400);
+    }
+    // De-dupe while preserving order (markers '*'/'#' are valid entries).
+    setTools = [...new Set(body.tools)];
+  } else if (typeof tool !== 'string' || tool.length === 0) {
     return json({ error: 'invalid-tool' }, 400);
   }
 
-  const path = join(APPS_DIR, appId, 'app.manifest.json');
+  // Resolve the manifest across every scope via the registry, not a hardcoded
+  // system dir — otherwise user/global-scoped apps 404.
+  const { getAppManager } = await import('@aura/core');
+  const mgr = getAppManager();
+  const path = join(mgr.registry.getAppDir(appId), 'app.manifest.json');
   if (!existsSync(path)) {
     return json({ error: 'manifest-not-found', appId, path }, 404);
   }
@@ -56,10 +75,15 @@ export const POST: APIRoute = async ({ request }) => {
   const tools = Array.isArray(manifest['tools']) ? (manifest['tools'] as string[]) : [];
   let changed = false;
   let nextTools = tools;
-  if (action === 'add-tool') {
-    if (!tools.includes(tool)) { nextTools = [...tools, tool]; changed = true; }
+  if (action === 'set-tools') {
+    nextTools = setTools!;
+    // Order-insensitive equality check so a no-op reorder doesn't rewrite.
+    const a = [...tools].sort(), b = [...nextTools].sort();
+    changed = a.length !== b.length || a.some((t, i) => t !== b[i]);
+  } else if (action === 'add-tool') {
+    if (!tools.includes(tool!)) { nextTools = [...tools, tool!]; changed = true; }
   } else {
-    if (tools.includes(tool))  { nextTools = tools.filter((t) => t !== tool); changed = true; }
+    if (tools.includes(tool!))  { nextTools = tools.filter((t) => t !== tool!); changed = true; }
   }
 
   if (changed) {
@@ -72,8 +96,6 @@ export const POST: APIRoute = async ({ request }) => {
     // already drives this via refreshInstanceTools — same path
     // /api/admin/cap-refresh uses after `cap install`.
     try {
-      const { getAppManager } = await import('@aura/core');
-      const mgr = getAppManager();
       // Force the registry to re-read the manifest from disk before refreshing
       // tools dirs — chokidar will eventually fire `change` but the lag
       // between our write and that event means refreshInstanceTools would

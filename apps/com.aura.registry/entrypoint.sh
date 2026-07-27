@@ -28,11 +28,14 @@ cat > "$CFG_DIR/config.json" <<'JSON'
 JSON
 
 # Resolve the zot binary robustly. It ships baked into aura-base, but is also
-# installable as the `zot` capability (bind-mounted via tools[] into
-# /aura/my-tools) so the registry survives images that don't carry it. Fail
-# loudly if it's genuinely absent instead of silently leaving a dead upstream.
+# installable as the `zot` capability, provisioned via tools[] into
+# /aura/my-tools (this app declares "zot", so the grant is what puts it there).
+# Fail loudly if it's genuinely absent instead of silently leaving a dead
+# upstream. Note: /aura/all-tools is deliberately NOT probed — reaching into
+# the shared store would route around the grant, and the OS no longer mounts
+# it for apps anyway.
 ZOT_BIN="$(command -v zot || true)"
-for cand in /aura/my-tools/zot /aura/all-tools/zot /usr/local/bin/zot; do
+for cand in /aura/my-tools/zot /usr/local/bin/zot; do
   [ -z "$ZOT_BIN" ] && [ -x "$cand" ] && ZOT_BIN="$cand"
 done
 if [ -z "$ZOT_BIN" ]; then
