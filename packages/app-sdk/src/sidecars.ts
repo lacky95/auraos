@@ -141,6 +141,31 @@ export interface ServiceSpec {
    */
   inheritTools?: boolean;
 
+  /**
+   * Share the controlling app's cross-app mount root (`aura mount`) with the
+   * sibling at `/mnt/aura`.
+   *
+   * The sibling mounts the SAME per-instance subpath the app does
+   * (`aura/mounts/<instanceId>`), so it inherits exactly what the controller
+   * has mounted and nothing more — the same containment model as
+   * `inheritTools`. Each mounted app keeps the ro/rw mode it was mounted with;
+   * this flag grants visibility, not additional write access.
+   *
+   * **Inheritance is LIVE.** Docker leaves `--mount type=volume` mounts as
+   * slaves of the host peer group, so a host-side bind made by `aura mount`
+   * after the sibling started still propagates into it — mounting and
+   * unmounting are visible in the sibling without recreating it. That falls
+   * out of the propagation design; no polling or re-exec is involved.
+   *
+   * Requires the app container to be using the CANONICAL `/mnt/aura` root.
+   * Containers spawned before that existed fall back to `/data/.mnt` inside
+   * their own data dir, which a sibling does not mount — so the sibling would
+   * see an empty root until the controlling app is restarted.
+   *
+   * Default false.
+   */
+  inheritMounts?: boolean;
+
   dns?: string[];
   restart?: 'no' | 'on-failure' | 'always' | 'unless-stopped';
   readiness?: { path?: string; timeoutMs?: number };
@@ -297,6 +322,24 @@ export class SidecarHost {
    * its tools is a hard failure, whereas the extra mount only costs isolation
    * on a deployment that wasn't enforcing it anyway.
    */
+  /**
+   * `--mount` args sharing the controller's cross-app mount root with a
+   * sibling for `inheritMounts`.
+   *
+   * Same subpath as the app container gets from `ContainerRunner`, so the
+   * sibling sees exactly the controller's mounts. Deliberately NOT `readonly`:
+   * each mounted app is its own child mount carrying the ro/rw it was mounted
+   * with, and marking the PARENT read-only would neither propagate down nor
+   * prevent a writable child — it would just misrepresent what the sibling can
+   * do. Access control lives on the individual mounts.
+   */
+  private mountInheritArgs(): string[] {
+    return [
+      '--mount', `type=volume,source=${this.opts.appDataVolume},target=/mnt/aura,volume-subpath=aura/mounts/${this.opts.instanceId}`,
+      '-e', 'AURA_MOUNT_ROOT=/mnt/aura',
+    ];
+  }
+
   private async toolInheritArgs(image: string): Promise<string[]> {
     const vol = this.opts.appDataVolume;
     const basePath = await this.imagePath(image);
@@ -404,6 +447,7 @@ export class SidecarHost {
     // Toolchain mounts are computed async (image PATH lookup) before the arg
     // list so the rest stays a flat literal.
     const toolArgs = svc.inheritTools ? await this.toolInheritArgs(svc.image) : [];
+    const mountArgs = svc.inheritMounts ? this.mountInheritArgs() : [];
     const args = [
       'run', '-d',
       '--name', this.containerName(svc.name),
@@ -443,6 +487,7 @@ export class SidecarHost {
       // AuraOS CLI toolchain (allowlist mounts + PATH). `-e PATH` here lands
       // after svc.env/envInherit so docker's last-wins keeps our prepend.
       ...toolArgs,
+      ...mountArgs,
       svc.image,
       ...(svc.command ?? []),
     ];

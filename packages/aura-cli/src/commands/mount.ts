@@ -397,6 +397,7 @@ async function runWizard(): Promise<void> {
   const apps = await fetchApps();
   const draft: WizardDraft = {};
   const currentAppId = process.env['APP_ID'];
+  const currentInstanceId = process.env['APP_INSTANCE_ID'];
 
   divider();
   console.log(`  ${color.bold('aura')} · mount apps into a container   ${color.dim('— ⌃B back, ^C cancel')}`);
@@ -439,11 +440,24 @@ async function runWizard(): Promise<void> {
       run: async () => {
         const live = instancesOf(apps, draft.targetAppId!);
         if (live.length === 1) { draft.instanceId = live[0]!.instanceId; return 'advance'; }
-        const choices = live.map((i) => ({
+        // Pin the instance we're RUNNING IN to the top, same as the app step
+        // pins the current app. With 8 sibling terminals the one you're typing
+        // in is almost always the one you mean, and hunting for it in a sorted
+        // list is the common case, not the exception.
+        const ordered = live.slice().sort((a, b) => {
+          if (a.instanceId === currentInstanceId) return -1;
+          if (b.instanceId === currentInstanceId) return 1;
+          return a.instanceId.localeCompare(b.instanceId);
+        });
+        const choices = ordered.map((i) => ({
           value: i.instanceId,
-          label: i.instanceId,
+          label: i.instanceId === currentInstanceId
+            ? `${i.instanceId} ${color.green('[current]')}`
+            : i.instanceId,
           desc: `${i.state}${i.sandbox === 'container' ? '' : color.yellow(` · ${i.sandbox ?? 'proot'} (not mountable)`)}`,
         }));
+        // Default the cursor to a prior choice if we're re-entering via BACK,
+        // else to the top row (which is `current` when we're inside an app).
         const startIdx = Math.max(0, choices.findIndex((c) => c.value === draft.instanceId));
         const v = await promptChoice<string>('Which instance?', choices, startIdx, { allowBack: true });
         if (v === BACK) return 'back';
