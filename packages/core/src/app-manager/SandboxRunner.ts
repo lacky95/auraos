@@ -21,7 +21,11 @@ import type { SpawnContext } from '../scopes/types.js';
 export interface SandboxRunner {
   /** Resolve the per-instance toolchain allowlist directory on the host. */
   toolsDir(instanceId: string): string;
-  /** (Re)create the allowlist dir as symlinks into /aura/all-tools. */
+  /**
+   * (Re)create the allowlist dir so it holds exactly the binaries the
+   * manifest's `tools[]` grants. Delegates to `provisionAllowlist` — see
+   * tool-provision.ts for the hardlink/symlink modes.
+   */
   provisionToolsDir(instanceId: string, manifest: AppManifest): string;
   /** Tear down the allowlist dir. Called on instance destroy. */
   clearToolsDir(instanceId: string): void;

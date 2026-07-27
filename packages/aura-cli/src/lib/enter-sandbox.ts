@@ -90,6 +90,15 @@ export function syncDockerExecWinsize(child: ChildProcess): void {
  *     CLI can reach the host daemon. ProotRunner binds it for any app
  *     whose manifest tools[] mentions 'docker' (incl. via '*' wildcard).
  */
+export interface SandboxLaunch {
+  /** Scoped host path to the app's source dir. Resolved server-side (any
+   *  scope). Falls back to `/workspace/apps/<appId>` when absent. */
+  appDir?: string;
+  /** Scoped host path to this instance's data dir. Falls back to the legacy
+   *  `/data/apps/<appId>/<instanceId>` when absent. */
+  instanceDataDir?: string;
+}
+
 export function enterSandbox(
   instanceId: string,
   appId: string,
@@ -97,9 +106,14 @@ export function enterSandbox(
   tools: string[],
   sandbox: 'proot' | 'container' | undefined,
   cmd?: string,
+  launch?: SandboxLaunch,
 ): void {
+  // Container sandboxes normalise every scope to `/workspace/apps/<appId>`
+  // INSIDE the container (ContainerRunner), so enterContainer keeps that
+  // in-container path and ignores the scoped host `launch` paths. Only the
+  // proot path runs against real host paths and needs the scope-correct dirs.
   if (sandbox === 'container') return enterContainer(instanceId, appId, cmd);
-  return enterProot(instanceId, appId, port, tools, cmd);
+  return enterProot(instanceId, appId, port, tools, cmd, launch);
 }
 
 /** Joins the sibling container's namespace via docker exec. */
@@ -166,6 +180,7 @@ function enterProot(
   port: number | null,
   tools: string[],
   cmd?: string,
+  launch?: SandboxLaunch,
 ): void {
   const appsDir   = process.env['AURA_APPS_DIR']      ?? '/workspace/apps';
   const dataDir   = process.env['AURA_DATA_DIR']      ?? '/data';
@@ -173,8 +188,11 @@ function enterProot(
   const toolchain = process.env['AURA_TOOLCHAIN_DIR'] ?? '/os/toolchain';
   const useProot  = process.env['AURA_USE_PROOT'] === 'true' && existsSync(rootfs);
 
-  const appDir       = join(appsDir, appId);
-  const instDataDir  = join(dataDir, 'apps', appId, instanceId);
+  // Prefer the scope-correct paths resolved server-side; fall back to the
+  // legacy system-scope layout only when the caller didn't supply them (older
+  // shell without the `launch` DTO field).
+  const appDir       = launch?.appDir          ?? join(appsDir, appId);
+  const instDataDir  = launch?.instanceDataDir ?? join(dataDir, 'apps', appId, instanceId);
   const toolBinDir   = join(toolchain, 'bin');
 
   const env: NodeJS.ProcessEnv = {

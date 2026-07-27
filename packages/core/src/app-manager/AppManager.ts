@@ -7,6 +7,8 @@ import type { AppInstance } from '../types/instance.js';
 import type { AppActivity } from '../types/activity.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
 import { AppRegistry } from './AppRegistry.js';
+import { toolsTrackInstalledCaps } from './tool-allowlist.js';
+import { toolchainMirrorBin } from './tool-provision.js';
 import { PortAllocator } from './PortAllocator.js';
 import { LifecycleStateMachine } from './LifecycleStateMachine.js';
 import { ProotRunner, killProcessGroup } from './ProotRunner.js';
@@ -221,8 +223,9 @@ export class AppManager {
     // Same as docker above, but for oras — needed by user-scope apps' synth
     // entrypoint which calls `aura sdk install` → `oras pull` to fetch
     // @aura/* packages from the local OCI registry. Without oras in the
-    // toolchain volume, granting `oras` to an app's tools[] would create a
-    // dangling symlink in /aura/my-tools/oras → /aura/all-tools/oras.
+    // toolchain volume, granting `oras` to an app's tools[] would resolve to
+    // nothing — provisionAllowlist reports it as `missing` and the app's
+    // entrypoint fails on the first `oras pull`.
     const orasToolchain = join(this.toolchainDir, 'bin', 'oras');
     if (!existsSync(orasToolchain) && existsSync('/usr/local/bin/oras')) {
       try {
@@ -261,51 +264,73 @@ export class AppManager {
       }
     }
 
-    // Mirror the toolchain into the aura-app-data named volume so sibling
-    // containers (sandbox: 'container' apps) can see it. Background: their
-    // bind sources are resolved by the HOST docker daemon, which cannot see
-    // paths that only exist inside the aura-shell image (like /os/toolchain).
-    // ContainerRunner mounts /data/aura/toolchain/bin into /aura/all-tools via
-    // a named-volume subpath, so this mirror is what makes the wildcard cap
-    // allowlist actually visible inside container-mode apps. PRoot apps
-    // continue to bind /os/toolchain/bin directly — they live in aura-shell's
-    // own mount namespace.
+    this.syncToolchainMirror();
+  }
+
+  /**
+   * Mirror /os/toolchain/bin into the aura-app-data named volume.
+   *
+   * Two reasons this mirror exists:
+   *  1. Sibling containers' bind sources are resolved by the HOST docker
+   *     daemon, which cannot see paths that only exist inside the aura-shell
+   *     image (like /os/toolchain). A named-volume subpath can be mounted
+   *     into them; a shell-internal path cannot.
+   *  2. It is the only toolchain copy on the SAME filesystem as the
+   *     per-instance allowlist dirs (`<dataDir>/aura/runtime/<inst>/tools`),
+   *     which is what lets `provisionAllowlist` hardlink from it. /os/toolchain
+   *     lives on the shell image's overlay, so linking from there fails EXDEV.
+   *
+   * Idempotent, and must run BEFORE any allowlist provisioning that expects a
+   * newly installed capability — in hardlink mode you cannot link a binary
+   * that hasn't reached the mirror yet. `cap install` calls this before
+   * refreshing running instances for exactly that reason.
+   *
+   * Returns the number of entries in the mirror afterwards (0 when the source
+   * toolchain is absent, which leaves the OS in legacy symlink mode).
+   */
+  syncToolchainMirror(): number {
     const srcBin    = join(this.toolchainDir, 'bin');
-    const mirrorBin = join(this.dataDir, 'aura', 'toolchain', 'bin');
-    if (existsSync(srcBin)) {
-      try {
-        mkdirSync(mirrorBin, { recursive: true });
-        for (const name of readdirSync(srcBin)) {
-          const src = join(srcBin, name);
-          const dst = join(mirrorBin, name);
-          let needsCopy = true;
-          try {
-            const sStat = lstatSync(src);
-            const dStat = lstatSync(dst);
-            // Skip when same size + dst mtime >= src mtime (good-enough idempotency
-            // for an image-shipped toolchain). Re-copy on size or mtime drift.
-            if (sStat.size === dStat.size && dStat.mtimeMs >= sStat.mtimeMs) needsCopy = false;
-          } catch { /* dst missing */ }
-          if (!needsCopy) continue;
-          try {
-            copyFileSync(src, dst);
-            chmodSync(dst, 0o755);
-          } catch (err) {
-            console.warn(`[AppManager] toolchain mirror ${src} → ${dst} failed: ${(err as Error).message}`);
-          }
+    const mirrorBin = toolchainMirrorBin(this.dataDir);
+    if (!existsSync(srcBin)) return 0;
+    try {
+      mkdirSync(mirrorBin, { recursive: true });
+      for (const name of readdirSync(srcBin)) {
+        const src = join(srcBin, name);
+        const dst = join(mirrorBin, name);
+        let needsCopy = true;
+        try {
+          const sStat = lstatSync(src);
+          const dStat = lstatSync(dst);
+          // Skip when same size + dst mtime >= src mtime (good-enough idempotency
+          // for an image-shipped toolchain). Re-copy on size or mtime drift.
+          if (sStat.size === dStat.size && dStat.mtimeMs >= sStat.mtimeMs) needsCopy = false;
+        } catch { /* dst missing */ }
+        if (!needsCopy) continue;
+        try {
+          // copyFileSync truncates in place, preserving the inode — so any
+          // allowlist hardlinks already pointing at this binary see the new
+          // content instead of being left on an orphaned old version.
+          copyFileSync(src, dst);
+          chmodSync(dst, 0o755);
+        } catch (err) {
+          console.warn(`[AppManager] toolchain mirror ${src} → ${dst} failed: ${(err as Error).message}`);
         }
-        console.log(`[AppManager] toolchain mirrored → ${mirrorBin} (${readdirSync(mirrorBin).length} entries)`);
-      } catch (err) {
-        console.warn(`[AppManager] toolchain mirror init failed: ${(err as Error).message}`);
       }
+      const count = readdirSync(mirrorBin).length;
+      console.log(`[AppManager] toolchain mirrored → ${mirrorBin} (${count} entries)`);
+      return count;
+    } catch (err) {
+      console.warn(`[AppManager] toolchain mirror failed: ${(err as Error).message}`);
+      return 0;
     }
   }
 
   /**
    * Re-materialise the per-instance tool allowlist for every live instance
    * of `appId`. Call after a `cap grant` / `cap revoke` so a running app
-   * picks up the change WITHOUT a backend respawn — the proot's bind is at
-   * the directory level, so symlink mutations are immediately visible.
+   * picks up the change WITHOUT a backend respawn — the sandbox mount is at
+   * the directory level, so adding/removing entries is immediately visible
+   * inside a running instance (true for hardlinks and symlinks alike).
    *
    * Returns the list of affected instances (useful for endpoint responses
    * that want to confirm what was refreshed).
@@ -327,13 +352,18 @@ export class AppManager {
 
   /**
    * After a successful `cap install`, refresh every running instance whose
-   * manifest declares `'*'` so the new binary shows up in /aura/my-tools.
-   * Explicit-list apps are unaffected — they only see what's symlinked.
+   * effective tool set depends on what's installed — wildcard (`'*'`) AND
+   * deny-list (`'#'`, all-except) apps both gain the new binary. Plain
+   * allow-list apps are unaffected — they only get what they name.
+   *
+   * Callers must run `syncToolchainMirror()` FIRST: allowlist entries are
+   * hardlinked from the mirror, so a cap that hasn't reached it yet has
+   * nothing to link from.
    */
   refreshWildcardApps(): string[] {
     const refreshed: string[] = [];
     for (const m of this.registry.getAll()) {
-      if (!m.tools.includes('*')) continue;
+      if (!toolsTrackInstalledCaps(m.tools)) continue;
       refreshed.push(...this.refreshInstanceTools(m.id));
     }
     return refreshed;

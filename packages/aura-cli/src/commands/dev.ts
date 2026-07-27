@@ -46,6 +46,37 @@ function scopeAppsDir(scope: ScopeId): string {
   }
 }
 
+/** All scope apps dirs in AppRegistry priority order (system→global→user). */
+const ALL_SCOPES: ScopeId[] = ['system', 'global', 'user'];
+
+/**
+ * Every `app.manifest.json` across ALL scopes, for `--all` sweeps. Higher-
+ * priority scopes shadow lower ones by appId (user > global > system), so an
+ * app overridden in the user scope is validated/cleaned once, at its winning
+ * location — matching what the running OS actually loads.
+ */
+function allManifestPaths(): string[] {
+  const byId = new Map<string, string>();
+  for (const dir of ALL_SCOPES.map(scopeAppsDir)) {
+    if (!existsSync(dir)) continue;
+    for (const entry of readdirSync(dir)) {
+      const m = join(dir, entry, 'app.manifest.json');
+      if (existsSync(m)) byId.set(entry, m); // later (higher-priority) dirs win
+    }
+  }
+  return [...byId.values()];
+}
+
+/** Resolve an app's source dir across all scopes (highest priority wins). */
+function resolveAppDir(appId: string): string | null {
+  let found: string | null = null;
+  for (const dir of ALL_SCOPES.map(scopeAppsDir)) {
+    const d = join(dir, appId);
+    if (existsSync(join(d, 'app.manifest.json')) || existsSync(join(d, 'package.json'))) found = d;
+  }
+  return found;
+}
+
 function renderTemplate(
   srcDir: string,
   destDir: string,
@@ -795,15 +826,12 @@ export function registerDev(program: Command): void {
 
   dev
     .command('validate [path]')
-    .option('--all', 'Validate every app under apps/')
+    .option('--all', 'Validate every app across all scopes (system/global/user)')
     .description('Validate one or all app manifests against the AuraOS schema.')
     .action((path: string | undefined, opts: { all?: boolean }) => {
       const targets: string[] = [];
       if (opts.all) {
-        for (const entry of readdirSync(APPS_DIR)) {
-          const m = join(APPS_DIR, entry, 'app.manifest.json');
-          if (existsSync(m)) targets.push(m);
-        }
+        targets.push(...allManifestPaths());
       } else if (path) {
         const abs = resolve(path);
         const m = abs.endsWith('.json') ? abs : join(abs, 'app.manifest.json');
@@ -828,8 +856,10 @@ export function registerDev(program: Command): void {
     .command('standalone <appId>')
     .description('Run an app directly with astro dev (no PRoot, no shell wrapper) for fast UI iteration.')
     .action((appId: string) => {
-      const dir = join(APPS_DIR, appId);
-      if (!existsSync(join(dir, 'package.json'))) fail(`App not found: ${dir}`);
+      // Resolve across all scopes — a hardcoded /workspace/apps only finds
+      // system-scope apps and fails on user/global installs.
+      const dir = resolveAppDir(appId);
+      if (!dir || !existsSync(join(dir, 'package.json'))) fail(`App not found: ${appId} (searched all scopes)`);
       const child = spawn('pnpm', ['exec', 'astro', 'dev'], {
         cwd: dir,
         stdio: 'inherit',
@@ -840,16 +870,13 @@ export function registerDev(program: Command): void {
 
   dev
     .command('clean-manifest [path]')
-    .option('--all',     'Clean every manifest under apps/')
+    .option('--all',     'Clean every manifest across all scopes (system/global/user)')
     .option('--dry-run', 'Print the cleaned manifest without writing back')
     .description('Strip manifest fields whose values equal the schema default (entrypoint, rootfsMode, viewConfig, theme, etc.).')
     .action((path: string | undefined, opts: { all?: boolean; dryRun?: boolean }) => {
       const targets: string[] = [];
       if (opts.all) {
-        for (const entry of readdirSync(APPS_DIR)) {
-          const m = join(APPS_DIR, entry, 'app.manifest.json');
-          if (existsSync(m)) targets.push(m);
-        }
+        targets.push(...allManifestPaths());
       } else if (path) {
         const abs = resolve(path);
         const m = abs.endsWith('.json') ? abs : join(abs, 'app.manifest.json');

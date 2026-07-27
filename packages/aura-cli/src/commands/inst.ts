@@ -1,6 +1,5 @@
 import type { Command } from 'commander';
 import { api } from '../lib/client.js';
-import { readManifest } from '../lib/manifest.js';
 import { color, fail, ok, stateColor, table, uptime } from '../lib/format.js';
 import { enterSandbox } from '../lib/enter-sandbox.js';
 
@@ -83,12 +82,14 @@ export function registerInst(program: Command): void {
     .action(async (instanceId: string, opts: { cmd?: string }) => {
       const dto = await api.get<{
         instance: { appId: string; port: number | null; sandbox?: 'proot' | 'container' };
+        launch?: { appDir?: string; instanceDataDir?: string; tools?: string[] };
       }>(`/api/instances/${encodeURIComponent(instanceId)}/status`);
       const target = dto.instance;
       if (!target?.appId) fail(`Instance not found: ${instanceId}`);
-      const manifest = readManifest(target.appId);
-      if (!manifest) fail(`Manifest missing for ${target.appId}`);
-      enterSandbox(instanceId, target.appId, target.port, manifest.tools ?? [], target.sandbox, opts.cmd);
+      // Tools + scoped paths come from the registry-backed DTO (scope-correct
+      // for system/global/user apps), not a hardcoded /workspace/apps read.
+      const tools = dto.launch?.tools ?? [];
+      enterSandbox(instanceId, target.appId, target.port, tools, target.sandbox, opts.cmd, dto.launch);
     });
 
   inst

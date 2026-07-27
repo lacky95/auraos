@@ -220,11 +220,17 @@ export const POST: APIRoute = async ({ request }) => {
     const result = await installCapability(name, entry);
     state.capabilities[name] = { installed: true, installedAt: new Date().toISOString(), version: result.version };
     saveState(state);
-    // Hot-refresh every running app with `'*'` in tools[] so its
-    // /aura/my-tools allowlist picks up the new symlink without a respawn.
-    // Explicit-list apps don't get the new cap until someone runs
-    // `aura cap grant <appId> <name>` (which calls the refresh endpoint).
-    const refreshed = getAppManager().refreshWildcardApps();
+    const mgr = getAppManager();
+    // Push the freshly installed binary into the toolchain mirror BEFORE
+    // refreshing any allowlist. Allowlist entries are hardlinks FROM the
+    // mirror, so a refresh that runs first would find nothing to link and
+    // provision the new cap as missing.
+    mgr.syncToolchainMirror();
+    // Hot-refresh every running app whose effective tool set tracks what's
+    // installed (`'*'` and `'#'`) so its /aura/my-tools allowlist picks the
+    // new binary up without a respawn. Explicit-list apps don't get the new
+    // cap until someone runs `aura cap grant <appId> <name>`.
+    const refreshed = mgr.refreshWildcardApps();
     return new Response(JSON.stringify({ ok: true, action, name, symlink: result.symlink, version: result.version, libsCopied: result.libsCopied, refreshed }), { status: 200 });
   } catch (err) {
     return new Response(JSON.stringify({ error: (err as Error).message }), { status: 500 });

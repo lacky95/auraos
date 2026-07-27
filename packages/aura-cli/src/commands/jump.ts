@@ -3,7 +3,6 @@ import { stdin, stdout, env as procEnv } from 'node:process';
 import { spawn } from 'node:child_process';
 import { moveCursor, clearScreenDown } from 'node:readline';
 import { api } from '../lib/client.js';
-import { readManifest } from '../lib/manifest.js';
 import { color, fail, info, ok, warn } from '../lib/format.js';
 import { enterSandbox, syncDockerExecWinsize, setTerminalHost, callerHostLabel } from '../lib/enter-sandbox.js';
 
@@ -82,8 +81,13 @@ export function registerJump(program: Command): void {
       const pick = await pickInteractively(targets);
       if (!pick) { info('jump cancelled'); return; }
       if (pick.kind === 'master') { enterMasterContainer(); return; }
-      const manifest = readManifest(pick.appId);
-      enterSandbox(pick.instanceId, pick.appId, pick.port, manifest?.tools ?? [], pick.sandbox, undefined);
+      // Pull the app's tools + scope-correct sandbox paths from the
+      // registry-backed instance DTO (works for system/global/user scopes),
+      // rather than reading a hardcoded /workspace/apps manifest.
+      const dto = await api.get<{
+        launch?: { appDir?: string; instanceDataDir?: string; tools?: string[] };
+      }>(`/api/instances/${encodeURIComponent(pick.instanceId)}/status`);
+      enterSandbox(pick.instanceId, pick.appId, pick.port, dto.launch?.tools ?? [], pick.sandbox, undefined, dto.launch);
     });
 }
 

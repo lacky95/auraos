@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { getAppManager, lifecyclePath } from '@aura/core';
 import type { AppManifest, AppInstance } from '@aura/core';
 
@@ -12,9 +13,27 @@ export interface AppHealth {
   error: string | null;
 }
 
+/**
+ * Scope-correct launch coordinates for an instance, resolved server-side via
+ * the registry + scope registry. Exposed so CLI callers (`aura inst shell`,
+ * `aura jump`) can enter a proot sandbox with the RIGHT host paths for the
+ * app's scope (system/global/user) instead of hardcoding `/workspace/apps`
+ * and `/data/apps`, which only work for system-scope apps.
+ */
+export interface InstanceLaunch {
+  /** Scoped host path to the app's source dir (`<scope.appsDir>/<appId>`). */
+  appDir: string;
+  /** Scoped host path to this instance's data dir. */
+  instanceDataDir: string;
+  /** The app's declared tool allowlist (`manifest.tools`). */
+  tools: string[];
+}
+
 export interface InstanceDTO {
   instance: AppInstance;
   health: AppHealth;
+  /** Present when the app's manifest resolves; carries scope-correct paths. */
+  launch?: InstanceLaunch;
 }
 
 /** DTO for a single app: manifest + all its running instances. */
@@ -79,7 +98,25 @@ export async function buildInstanceDTO(instanceId: string): Promise<InstanceDTO 
   const instance = mgr.getInstance(instanceId);
   if (!instance) return null;
   const health = await probeHealth(instance);
-  return { instance, health };
+  return { instance, health, launch: resolveLaunch(instanceId, instance.appId) };
+}
+
+/**
+ * Resolve scope-correct launch paths for an instance. Mirrors exactly what
+ * `AppManager.spawnInstance` computes (`manifest.appDir` +
+ * `join(scope.dataDir, 'apps', appId, instanceId)`), so a jumped/exec'd shell
+ * lands where the live app actually runs, for ANY scope.
+ */
+function resolveLaunch(instanceId: string, appId: string): InstanceLaunch | undefined {
+  const mgr = getAppManager();
+  const manifest = mgr.registry.getById(appId); // ScopedManifest: has appDir + scopeId
+  if (!manifest) return undefined;
+  const scope = mgr.getScopeRegistry().getById(manifest.scopeId);
+  return {
+    appDir: manifest.appDir,
+    instanceDataDir: join(scope.dataDir, 'apps', appId, instanceId),
+    tools: Array.isArray(manifest.tools) ? manifest.tools : [],
+  };
 }
 
 export async function buildAppDTO(appId: string): Promise<AppDTO | null> {
