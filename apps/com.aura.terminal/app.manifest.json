@@ -8,7 +8,8 @@
   "permissions": [
     "storage.read",
     "storage.write",
-    "network.local"
+    "network.local",
+    "apps.mount"
   ],
   "tools": [
     "bash",

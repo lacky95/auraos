@@ -13,6 +13,7 @@ import { PortAllocator } from './PortAllocator.js';
 import { LifecycleStateMachine } from './LifecycleStateMachine.js';
 import { ProotRunner, killProcessGroup } from './ProotRunner.js';
 import { ContainerRunner } from './ContainerRunner.js';
+import { MountManager } from './MountManager.js';
 import type { SandboxRunner } from './SandboxRunner.js';
 import { IntentResolver, type Intent, type IntentMatch } from './IntentResolver.js';
 import { PermissionManager } from '../permissions/PermissionManager.js';
@@ -48,6 +49,8 @@ export class AppManager {
   readonly permissions: PermissionManager;
   readonly providers:   ContentProviderRegistry;
   readonly intents:     IntentResolver;
+  /** Cross-app filesystem mounts (container sandboxes only). */
+  readonly mounts:      MountManager;
   private dataDir: string;
   private toolchainDir: string;
   private scopeRegistry: ScopeRegistry;
@@ -108,6 +111,22 @@ export class AppManager {
     this.permissions = new PermissionManager(this.registry);
     this.providers   = new ContentProviderRegistry();
     this.intents     = new IntentResolver();
+    this.mounts      = new MountManager({
+      dataDir:       opts.dataDir,
+      registry:      this.registry,
+      scopeRegistry: this.scopeRegistry,
+      runner:        this.runners['container'] as ContainerRunner,
+      // Mirrors spawnInstance's own derivation so a mount lands in exactly the
+      // dir the instance has bound at /data.
+      instanceDataDir: (instanceId) => {
+        const inst = this.instances.get(instanceId);
+        if (!inst) return null;
+        const manifest = this.registry.getById(inst.appId);
+        if (!manifest) return null;
+        const scope = this.scopeRegistry.getById(manifest.scopeId);
+        return join(scope.dataDir, 'apps', inst.appId, instanceId);
+      },
+    });
   }
 
   /**
@@ -506,6 +525,15 @@ export class AppManager {
       }
     } catch (err) {
       console.warn(`[AppManager] orphan adoption failed: ${(err as Error).message}`);
+    }
+    // Cross-app mounts live in the HOST kernel, so they outlive this process
+    // entirely. Run AFTER orphan adoption so the live-instance set is complete
+    // — otherwise every mount belonging to a surviving container would look
+    // orphaned and get reaped out from under it.
+    try {
+      this.mounts.reconcile(new Set(this.instances.keys()));
+    } catch (err) {
+      console.warn(`[AppManager] mount reconcile failed: ${(err as Error).message}`);
     }
     this.startReconciler();
     // Kick off warm-pool fills for opted-in apps (non-blocking — init returns
@@ -930,12 +958,16 @@ export class AppManager {
 
     this.transition(instanceId, appId, 'destroying', null);
     await this.runnerOf(instanceId).callLifecycle(instanceId, 'onDestroy').catch(() => undefined);
+    // Detach cross-app mounts BEFORE the container goes: a live bind under the
+    // instance's data dir pins the source filesystem and would outlive it.
+    this.mounts.removeAll(instanceId);
     await this.runnerOf(instanceId).kill(instanceId);
     if (port) this.ports.release(port);
     this.transition(instanceId, appId, 'destroyed', null);
 
     // Clear instance after destroy
     this.runnerOf(instanceId).clearToolsDir(instanceId);
+    this.runners.container.clearMountRoot?.(instanceId);
     this.instances.delete(instanceId);
     this.fsm.delete(instanceId);
     this.nextActivityNum.delete(instanceId);
@@ -985,6 +1017,9 @@ export class AppManager {
     const port = this.runnerOf(instanceId).getPort(instanceId);
     this.providers.unregisterInstance(inst, this.registry.getById(appId));
     this.purgeActivitiesOfInstance(instanceId);
+    // A force-kill runs no lifecycle hooks, so this is the only chance to
+    // detach mounts before the instance record is dropped.
+    this.mounts.removeAll(instanceId);
     const killed = this.runnerOf(instanceId).forceKill(instanceId);
     if (port) this.ports.release(port);
     if (killed) {
@@ -992,6 +1027,7 @@ export class AppManager {
       OsEventBus.emit('app:stateChanged', { instanceId, appId, state: 'destroyed', port: null });
     }
     this.runnerOf(instanceId).clearToolsDir(instanceId);
+    this.runners.container.clearMountRoot?.(instanceId);
     this.instances.delete(instanceId);
     this.fsm.delete(instanceId);
     this.nextActivityNum.delete(instanceId);
@@ -1620,6 +1656,9 @@ export class AppManager {
     // it spawned (with `--restart unless-stopped`) would keep running orphaned.
     // Reap them by label; a respawn re-creates fresh ones via the SDK.
     this.runnerOf(instanceId).reapSiblingsOf?.(instanceId);
+    // Same reasoning for cross-app mounts: a crash skips onDestroy, and a bind
+    // left under the dead instance's data dir pins the source filesystem.
+    this.mounts.removeAll(instanceId);
     this.fsm.set(instanceId, 'error');
     if (inst) {
       inst.state = 'error';

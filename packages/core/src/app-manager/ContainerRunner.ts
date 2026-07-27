@@ -6,6 +6,9 @@ import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
 import { toolsGrant } from './tool-allowlist.js';
 import { MY_TOOLS_PATH, currentToolsMode, provisionAllowlist, toolchainMirrorBin } from './tool-provision.js';
+// Value import, but MountManager imports ContainerRunner type-only, so there
+// is no runtime cycle.
+import { MOUNT_ROOT_PATH } from './MountManager.js';
 import type { SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import type { SpawnContext } from '../scopes/types.js';
 import { ContextStore } from '../context/ContextStore.js';
@@ -171,6 +174,28 @@ export class ContainerRunner implements SandboxRunner {
     try { rmSync(this.toolsDir(instanceId), { recursive: true, force: true }); } catch { /* ignore */ }
   }
 
+  // ─── Cross-app mount root ─────────────────────────────────────────────
+  /**
+   * Per-instance root that `MountManager` binds other apps' dirs into. Mounted
+   * as a volume-subpath (NOT a `-v` bind) because docker leaves volume mounts
+   * as slaves of the host peer group, which is what lets a host-side bind
+   * propagate into the already-running container. A plain `-v` bind arrives
+   * `private` and would receive nothing.
+   *
+   * Empty for apps that never mount anything — it costs one empty dir, and
+   * creating it unconditionally means granting the ability later doesn't
+   * require a respawn (which would defeat the point of live mounting).
+   */
+  public mountRootDir(instanceId: string): string {
+    return join(this.dataDir, 'aura', 'mounts', instanceId);
+  }
+  public mountRootSubpath(instanceId: string): string {
+    return `aura/mounts/${instanceId}`;
+  }
+  public clearMountRoot(instanceId: string): void {
+    try { rmSync(this.mountRootDir(instanceId), { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+
   // ─── Spawn ────────────────────────────────────────────────────────────
   async spawn(instanceId: string, appId: string, port: number, manifest: AppManifest, ctx: SpawnContext): Promise<number> {
     this.provisionToolsDir(instanceId, manifest);
@@ -249,6 +274,83 @@ export class ContainerRunner implements SandboxRunner {
       return this.workspaceRoot + inContainerPath.slice('/workspace'.length);
     }
     return inContainerPath;
+  }
+
+  /**
+   * Mountpoint of the app-data named volume as the DAEMON sees it (e.g.
+   * `/var/lib/docker/volumes/aura_aura-app-data/_data`). Cached — a volume's
+   * mountpoint is fixed for its lifetime.
+   *
+   * Needed because cross-app mounting (`MountManager`) performs a host-side
+   * `mount --bind`, which needs a real daemon-visible path. The rest of the
+   * runner never needs this: it hands docker a volume NAME plus a
+   * `volume-subpath` and lets the daemon resolve it.
+   */
+  private volumeMountpointCache: string | null = null;
+  public appDataVolumeMountpoint(): string {
+    if (this.volumeMountpointCache) return this.volumeMountpointCache;
+    const out = execSync(
+      `docker volume inspect -f '{{.Mountpoint}}' ${this.appDataVolume}`,
+      { stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000, encoding: 'utf-8' },
+    ).trim();
+    if (!out) throw new Error(`could not resolve mountpoint for volume ${this.appDataVolume}`);
+    this.volumeMountpointCache = out;
+    return out;
+  }
+
+  /**
+   * Translate a SHELL-side path (under /workspace or /data) to the path the
+   * docker daemon sees. Mirrors `buildAppDirMount`'s scope dispatch, but
+   * yields a plain host path instead of docker args:
+   *
+   *   - `/workspace/...` (system scope)      → `toHostPath` → `<workspaceRoot>/...`
+   *   - `<dataDir>/...`  (user/global scope) → `<volumeMountpoint>/...`
+   *
+   * Throws on anything else rather than guessing — a wrong bind source here
+   * would mount the wrong app's files, which is worse than a hard failure.
+   */
+  public toDaemonHostPath(shellPath: string): string {
+    if (shellPath === '/workspace' || shellPath.startsWith('/workspace/')) {
+      return this.toHostPath(shellPath);
+    }
+    for (const prefix of [this.dataDir, '/data']) {
+      if (shellPath === prefix || shellPath.startsWith(`${prefix}/`)) {
+        const rel = shellPath.slice(prefix.length).replace(/^\/+/, '');
+        return rel ? join(this.appDataVolumeMountpoint(), rel) : this.appDataVolumeMountpoint();
+      }
+    }
+    throw new Error(`cannot resolve a daemon host path for ${shellPath}`);
+  }
+
+  /**
+   * Whether this host can propagate mounts into running containers. The
+   * `/data` mount must be `shared:` or `master:` (a peer or slave of a host
+   * peer group); a `private` mount receives nothing and cross-app mounting
+   * would silently no-op. Cached after the first probe.
+   */
+  private propagationCache: { ok: boolean; reason?: string } | null = null;
+  public canPropagateMounts(): { ok: boolean; reason?: string } {
+    if (this.propagationCache) return this.propagationCache;
+    let result: { ok: boolean; reason?: string };
+    try {
+      const info = readFileSync('/proc/self/mountinfo', 'utf-8');
+      const line = info.split('\n').find((l) => l.split(' ')[4] === this.dataDir);
+      if (!line) {
+        result = { ok: false, reason: `no mount found at ${this.dataDir}` };
+      } else {
+        // Optional fields sit between field 6 and the '-' separator.
+        const optional = line.split(' ').slice(6, line.split(' ').indexOf('-'));
+        const shared = optional.some((f) => f.startsWith('shared:') || f.startsWith('master:'));
+        result = shared
+          ? { ok: true }
+          : { ok: false, reason: `${this.dataDir} is a private mount — the host's / must be a shared mount (run: mount --make-rshared /)` };
+      }
+    } catch (err) {
+      result = { ok: false, reason: `could not read /proc/self/mountinfo: ${(err as Error).message}` };
+    }
+    if (!result.ok) console.warn(`[ContainerRunner] mount propagation unavailable: ${result.reason}`);
+    this.propagationCache = result;
+    return result;
   }
 
   /** Build the `docker run` argv mirroring ProotRunner's bind topology. */
@@ -332,6 +434,14 @@ export class ContainerRunner implements SandboxRunner {
         : []),
       '--mount', `type=volume,source=${appDataVolume},target=${MY_TOOLS_PATH},volume-subpath=aura/runtime/${instanceId}/tools,readonly`,
     ];
+    // Cross-app mount root. Docker requires the subpath to exist before `run`.
+    // Deliberately NOT `readonly`: read-only-ness is a property of each child
+    // bind (set by the source it was mounted from), and marking the parent
+    // read-only neither propagates down nor prevents children being writable.
+    mkdirSync(this.mountRootDir(instanceId), { recursive: true });
+    toolMounts.push(
+      '--mount', `type=volume,source=${appDataVolume},target=${MOUNT_ROOT_PATH},volume-subpath=${this.mountRootSubpath(instanceId)}`,
+    );
     const a: string[] = [
       'run', '--rm', '-d',
       '--name', hostname,
@@ -443,6 +553,9 @@ export class ContainerRunner implements SandboxRunner {
       // hardlink mode, skips the shared /aura/all-tools mount instead of
       // silently re-opening the whole toolchain to the sibling.
       '-e', `AURA_TOOLS_MODE=${toolsMode}`,
+      // Where cross-app mounts appear, so apps and the CLI can find them
+      // without hardcoding a path the OS may move.
+      '-e', `AURA_MOUNT_ROOT=${MOUNT_ROOT_PATH}`,
       BASE_IMAGE,
     );
     a.push(...entrypoint);

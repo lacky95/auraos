@@ -237,13 +237,31 @@ export interface MultiSelectMode<T> {
     tag?: string;
     /** Pre-checked at first paint. Honored only on the first mode that has it. */
     initiallyChecked?: boolean;
+    /**
+     * Per-row toggles, keyed by the hotkey that flips them (e.g. `r` → rw,
+     * `d` → data). Pressing the key flips the flag on the HIGHLIGHTED row and
+     * implicitly checks it — you don't set a mode on something you aren't
+     * selecting. Flag state is shared across modes, like `checked`.
+     *
+     * The key must not collide with a built-in (see RESERVED_KEYS); a clash
+     * throws at call time rather than silently shadowing navigation.
+     */
+    flags?: Record<string, { label: string; initial?: boolean }>;
   }>;
 }
 
 export interface MultiSelectResult<T> {
   modeIdx: number;
   selected: T[];
+  /** Per-row flag state, for every row that has `flags` declared. */
+  flags: Map<T, Record<string, boolean>>;
 }
+
+/**
+ * Keys promptMultiSelect handles itself. A row flag may not reuse one, or it
+ * would shadow navigation in a way that's invisible until someone presses it.
+ */
+const RESERVED_KEYS = new Set([' ', '/', 'm', '\t', 'a', 'j', 'k']);
 
 /**
  * Checkbox picker with three super-powers compared to `promptChoice`:
@@ -270,11 +288,25 @@ export async function promptMultiSelect<T>(
 
   let modeIdx = Math.max(0, Math.min(initialModeIdx, modes.length - 1));
   const checked = new Set<T>();
+  /** value → { flagKey: on }. Shared across modes, exactly like `checked`. */
+  const flagState = new Map<T, Record<string, boolean>>();
+  /** flagKey → label, for the help line. */
+  const flagLabels = new Map<string, string>();
   // Seed from initiallyChecked across all modes (first-occurrence wins so
   // identical values in multiple modes don't double-toggle).
   for (const mode of modes) {
     for (const opt of mode.options) {
       if (opt.initiallyChecked) checked.add(opt.value);
+      if (!opt.flags) continue;
+      for (const [key, spec] of Object.entries(opt.flags)) {
+        if (RESERVED_KEYS.has(key) || key.length !== 1) {
+          throw new Error(`promptMultiSelect: flag key '${key}' is reserved or not a single char`);
+        }
+        flagLabels.set(key, spec.label);
+        if (!flagState.has(opt.value)) flagState.set(opt.value, {});
+        const cur = flagState.get(opt.value)!;
+        if (!(key in cur)) cur[key] = spec.initial ?? false;
+      }
     }
   }
   let cursor = 0;
@@ -333,7 +365,15 @@ export async function promptMultiSelect<T>(
         const name = isCursor ? color.bold(o.label.padEnd(widthLabel)) : o.label.padEnd(widthLabel);
         const tag  = o.tag ? color.dim(o.tag.padEnd(10)) : ' '.repeat(10);
         const desc = o.desc ? color.dim('— ' + o.desc) : '';
-        lines.push(`  ${cur} ${box} ${name}  ${tag} ${desc}`);
+        // Active per-row flags render as green badges after the tag, so the
+        // row shows its mode without the user having to remember what they set.
+        const on = o.flags
+          ? Object.keys(o.flags).filter((k) => flagState.get(o.value)?.[k])
+          : [];
+        const flagBadges = on.length
+          ? ' ' + on.map((k) => color.green(o.flags![k]!.label)).join(' ')
+          : '';
+        lines.push(`  ${cur} ${box} ${name}  ${tag}${flagBadges} ${desc}`);
       }
       if (end < visible.length) {
         lines.push(color.dim(`  … ${visible.length - end} more below`));
@@ -342,11 +382,13 @@ export async function promptMultiSelect<T>(
 
     lines.push('');
     const backHint = opts.allowBack ? '   ⌃B/← back' : '';
+    const modeHint = modes.length > 1 ? '   m/⇥ switch mode' : '';
+    const flagHint = flagLabels.size
+      ? '   ' + [...flagLabels].map(([k, l]) => `${k} ${l}`).join('  ')
+      : '';
     const help = filter
       ? color.dim('  type to filter   ⌫ del   ⌃B clear filter   ↑↓ navigate   space toggle   ↵ apply')
-      : modes.length > 1
-        ? color.dim(`  ↑↓ navigate   space toggle   / search   m/⇥ switch mode   ↵ done${backHint}   ^C cancel`)
-        : color.dim(`  ↑↓ navigate   space toggle   / search   ↵ done${backHint}   ^C cancel`);
+      : color.dim(`  ↑↓ navigate   space toggle${flagHint}   / search${modeHint}   ↵ done${backHint}   ^C cancel`);
     lines.push(help);
 
     const text = lines.join('\n') + '\n';
@@ -414,7 +456,7 @@ export async function promptMultiSelect<T>(
       }
       if (data === KEY_ENTER) {
         cleanup();
-        resolve({ modeIdx, selected: Array.from(checked) });
+        resolve({ modeIdx, selected: Array.from(checked), flags: flagState });
         return;
       }
       if (data === KEY_UP   || data === 'k') { const v = visibleOptions(); if (v.length) cursor = (cursor - 1 + v.length) % v.length; draw(false); return; }
@@ -442,6 +484,21 @@ export async function promptMultiSelect<T>(
           else              checked.delete(o.value);
         }
         draw(false);
+        return;
+      }
+      // Per-row flag hotkeys. Checked LAST so a built-in key can never be
+      // shadowed (RESERVED_KEYS already rejects the overlap at call time —
+      // this ordering is the belt to that braces). Setting a flag also checks
+      // the row: you don't choose a mode for something you aren't selecting.
+      if (flagLabels.has(data)) {
+        const o = visibleOptions()[cursor];
+        if (o?.flags?.[data]) {
+          const state = flagState.get(o.value) ?? {};
+          state[data] = !state[data];
+          flagState.set(o.value, state);
+          checked.add(o.value);
+          draw(false);
+        }
         return;
       }
     };

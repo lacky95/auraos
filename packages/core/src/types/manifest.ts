@@ -15,6 +15,13 @@ export const BUILTIN_PERMISSIONS = [
   'system.overlay',
   'system.theme.broadcast',
   'ipc.broadcast',
+  /**
+   * Mount another app's source (and optionally its /data) into this app's
+   * sandbox via `POST /api/instances/:id/mounts`. ENFORCED for real — see
+   * `ENFORCED` in PermissionManager — an app without it gets a 403, it is NOT
+   * auto-granted like the other MVP permissions.
+   */
+  'apps.mount',
 ] as const;
 
 export const PermissionSchema = z.string();

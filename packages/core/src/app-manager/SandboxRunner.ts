@@ -93,6 +93,13 @@ export interface SandboxRunner {
    * siblings. Container-only; PRoot apps don't spawn siblings.
    */
   reapSiblingsOf?(instanceId: string): void;
+  /**
+   * Remove an instance's cross-app mount root. Container-only; PRoot instances
+   * have no mount root because they get no volume mount to propagate into.
+   * Call only AFTER the mounts themselves are detached — removing the dir out
+   * from under a live bind would leave the bind pinned and unreachable.
+   */
+  clearMountRoot?(instanceId: string): void;
 }
 
 /** What every concrete runner needs to construct. */
