@@ -787,6 +787,14 @@ export class ContainerRunner implements SandboxRunner {
     if (!tracked) return false;
     tracked.expectingKill = true;
     try { execSync(`docker kill ${tracked.containerId}`, { stdio: 'ignore', timeout: 5_000 }); } catch { /* already gone */ }
+    // A force-kill runs no lifecycle hooks by design, so the app's own
+    // onDestroy -> teardownAll() never fires. Unlike `kill()` there is no
+    // graceful teardown to be belt-and-braces for — this IS the only thing
+    // reaping the siblings. Without it they survive on `restart:
+    // unless-stopped`, and the next start adopts the stale container via the
+    // `isRunning` short-circuit in the SDK's `ensure()` instead of rebuilding
+    // it, so config changes never reach a long-running sibling.
+    this.reapSiblingsOf(instanceId);
     this.handleExit(instanceId, null);
     return true;
   }
