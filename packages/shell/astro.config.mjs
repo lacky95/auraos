@@ -93,6 +93,19 @@ function proxyViteQueryEscape() {
   };
 }
 
+/**
+ * Browser-leg keepalive interval for proxied WebSockets.
+ *
+ * The proxy relays MESSAGE frames only — a ping the upstream app sends stops
+ * here (our `ws` client answers it itself) and never reaches the browser. So
+ * an idle terminal leaves the browser↔shell leg completely silent, and silent
+ * connections get reaped by whatever sits in between (reverse proxy, tunnel,
+ * NAT conntrack, sleeping OS network stack). We therefore run an independent
+ * heartbeat on the leg we own, and terminate a client that misses two pings so
+ * the upstream learns about the drop immediately instead of leaking a relay.
+ */
+const WS_PING_MS = 25_000;
+
 /** Vite plugin: proxy WebSocket upgrades for /api/proxy/[appId]/[path] */
 function wsProxyPlugin() {
   return {
@@ -205,8 +218,26 @@ function wsProxyPlugin() {
             upstream.on('message', (data, isBinary) => {
               if (client.readyState === WebSocket.OPEN) client.send(data, { binary: isBinary });
             });
-            client.on('close', () => upstream.terminate());
-            upstream.on('close', () => { try { client.terminate(); } catch {} });
+
+            // Heartbeat the browser leg (see WS_PING_MS). `alive` flips true on
+            // every pong; a sweep that finds it still false means the previous
+            // ping went unanswered → the client is gone, terminate and let the
+            // close handlers tear the pair down.
+            let alive = true;
+            client.on('pong', () => { alive = true; });
+            const hb = setInterval(() => {
+              if (!alive) {
+                dbg('WS-PROXY', 'client-keepalive-timeout', instanceId);
+                try { client.terminate(); } catch {}
+                return;
+              }
+              alive = false;
+              try { client.ping(); } catch {}
+            }, WS_PING_MS);
+            if (typeof hb.unref === 'function') hb.unref();
+
+            client.on('close', () => { clearInterval(hb); upstream.terminate(); });
+            upstream.on('close', () => { clearInterval(hb); try { client.terminate(); } catch {} });
           });
         });
 

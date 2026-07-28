@@ -1,8 +1,10 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import pty, { type IPty } from 'node-pty';
+import { spawnSync } from 'node:child_process';
 import { parse as parseUrl } from 'node:url';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * PTY session registry — multicast, survives browser reload.
@@ -17,8 +19,9 @@ import { join } from 'node:path';
  * Lifetime:
  *   • A new WS arriving for a session that has no PTY yet spawns one.
  *   • A WS closing detaches itself; the PTY stays alive.
- *   • When the LAST WS detaches we start a 5-min grace timer; if no
- *     reattach happens, the PTY is killed.
+ *   • A detached session is held INDEFINITELY by default (see GRACE_MS) —
+ *     the only thing that ends a shell is the user typing `exit`, the OS
+ *     destroying the activity, or the container going away.
  *   • The OS `onActivityDestroy` lifecycle hook calls `killSession`
  *     which closes all bound WSes and kills the PTY immediately.
  *
@@ -54,9 +57,44 @@ interface Session {
 }
 
 const SCROLLBACK_BYTES = 256 * 1024;
-const GRACE_MS         = 5 * 60_000;   // 5 minutes after last client leaves
 const RECONCILE_MS     = 5_000;        // winsize self-heal heartbeat interval
 const OUTPUT_FRAME_MS  = 16;           // output-coalescing frame (~60Hz)
+
+/**
+ * Detached-session grace — how long a PTY is held after its LAST client goes
+ * away. `0` (the default) means "forever": the shell lives until the user
+ * exits it, the OS destroys the activity, or the container stops.
+ *
+ * This used to be 5 minutes, which quietly made sessions mortal. A WebSocket
+ * is not a reliable liveness signal for "the user left": a backgrounded tab, a
+ * closed laptop lid, a sleeping phone, a Wi-Fi handover — any of those tear the
+ * socket down (code 1006, no close frame) while the user very much still has
+ * that terminal open. Worse, the reattach that would have cancelled the timer
+ * CAN'T happen while the tab is frozen: browsers throttle/suspend background
+ * timers, so the client's reconnect fires only when the user comes back —
+ * long after the 5 minutes were up and the shell was killed.
+ *
+ * The PTY is cheap (an idle bash is a few MB) and the real cleanup path is
+ * explicit: `killSession` from the `onActivityDestroy` lifecycle hook when the
+ * activity is closed for real, plus the natural `pty.onExit` when the shell
+ * ends. So we default to holding on. `AURA_PTY_GRACE_MS` can restore a finite
+ * window for constrained hosts.
+ */
+const GRACE_MS = Number(process.env['AURA_PTY_GRACE_MS'] ?? 0);
+
+/**
+ * WebSocket keepalive. An idle terminal sends zero bytes for hours, and every
+ * hop in between (the shell's WS proxy, a reverse proxy / tunnel, a NAT
+ * conntrack entry, a corporate middlebox) is free to drop a silent connection.
+ * A protocol-level ping every 25s keeps the path warm in BOTH directions (the
+ * browser's automatic pong is return traffic) and gives us a real liveness
+ * check — a client that misses two pings is genuinely gone, so we stop
+ * broadcasting into a dead socket instead of waiting for TCP to notice.
+ *
+ * Dropping a dead WS does NOT touch the PTY: it only detaches, and with
+ * GRACE_MS=0 the session simply waits for the reattach.
+ */
+const PING_MS = 25_000;
 
 // The host this terminal physically lives on — the AuraOS master ("aura-shell"
 // by default, overridable via AURA_SHELL_HOSTNAME, which ContainerRunner now
@@ -114,19 +152,83 @@ function bufferPush(sess: Session, chunk: string): void {
   }
 }
 
-function spawnPty(cols: number, rows: number): IPty {
+/**
+ * tmux backing — the shell OUTLIVES the PTY.
+ *
+ * Holding the PTY across disconnects (see GRACE_MS) fixes the common case, but
+ * the PTY is still the shell's parent: anything that ends the pty-server ends
+ * every shell with it — an app-instance restart, a Vite reload of this module,
+ * a crash, `aura dev` cycling the container's process. That's the last way a
+ * long-running session can vanish without the user doing anything.
+ *
+ * So the shell runs inside a tmux session instead, and the PTY becomes a
+ * disposable pipe onto it. `new-session -A` means attach-or-create: a respawned
+ * PTY reattaches to the SAME live shell — same cwd, same env, same running
+ * command, same scrollback. What survives now is bounded by the container's
+ * lifetime, not this process's.
+ *
+ * tmux is meant to be invisible (see tmux.conf); the user still just gets a
+ * bash prompt. If the binary isn't in the image we degrade silently to a bare
+ * shell — which behaves exactly like before — so an app running on an older
+ * base image, or with AURA_TERM_TMUX=0, is never left broken.
+ */
+const TMUX_SOCKET = 'aura';   // private -L namespace, never collides with a user's own tmux
+const TMUX_CONF   = join(dirname(fileURLToPath(import.meta.url)), '..', 'tmux.conf');
+
+const tmuxBin = (() => {
+  if (process.env['AURA_TERM_TMUX'] === '0') return null;
+  const bin = process.env['AURA_TERM_TMUX_BIN'] ?? 'tmux';
+  try {
+    const probe = spawnSync(bin, ['-V'], { stdio: 'ignore' });
+    if (probe.status === 0) return bin;
+  } catch { /* not installed / not executable */ }
+  return null;
+})();
+
+/**
+ * tmux session name for one of our session ids. Session ids look like
+ * `com.aura.terminal-16#a12`, and tmux forbids `.` and `:` in names (it parses
+ * them as window/pane addressing), so everything outside a safe set is folded
+ * to `_`. The mapping only has to be stable and collision-free within one
+ * container, which it is — the id is already unique there.
+ */
+function tmuxName(sessionId: string): string {
+  return `aura-${sessionId.replace(/[^A-Za-z0-9_-]/g, '_')}`;
+}
+
+/** Kill the backing tmux session. Returns true if one actually existed. */
+function tmuxKill(sessionId: string): boolean {
+  if (!tmuxBin) return false;
+  try {
+    const r = spawnSync(tmuxBin, ['-L', TMUX_SOCKET, 'kill-session', '-t', tmuxName(sessionId)], { stdio: 'ignore' });
+    return r.status === 0;
+  } catch { /* no server / no such session — nothing to clean up */ }
+  return false;
+}
+
+function spawnPty(sessionId: string | null, cols: number, rows: number): IPty {
   const shell = process.env['SHELL'] ?? '/bin/bash';
-  return pty.spawn(shell, [], {
-    name: 'xterm-256color',
-    cols,
-    rows,
-    cwd: process.env['HOME'] ?? '/app',
-    // AURA_TERM_LABEL marks this as the base/host shell so bashrc.aura.sh's
-    // window-title shows the host ("aura-shell") rather than this app's id.
-    // `aura jump` shells run in a different sandbox where it's absent (or
-    // explicitly blanked, see enter-sandbox.ts), so they show the app instead.
-    env: { ...process.env, AURA_TERM_LABEL: HOST_LABEL } as Record<string, string>,
-  });
+  // AURA_TERM_LABEL marks this as the base/host shell so bashrc.aura.sh's
+  // window-title shows the host ("aura-shell") rather than this app's id.
+  // `aura jump` shells run in a different sandbox where it's absent (or
+  // explicitly blanked, see enter-sandbox.ts), so they show the app instead.
+  const env = { ...process.env, AURA_TERM_LABEL: HOST_LABEL } as Record<string, string>;
+  const opts = { name: 'xterm-256color', cols, rows, cwd: process.env['HOME'] ?? '/app', env };
+
+  // Anonymous connections (sessionId === null) are explicitly ephemeral —
+  // they die with their socket by design, so persistence would only leak
+  // tmux servers for curl/test clients.
+  if (!tmuxBin || sessionId === null) return pty.spawn(shell, [], opts);
+
+  // attach-or-create. `-u` forces UTF-8 regardless of the container's locale
+  // (node:22 images ship POSIX, which would otherwise mangle box-drawing).
+  return pty.spawn(tmuxBin, [
+    '-L', TMUX_SOCKET,
+    '-f', TMUX_CONF,
+    '-u',
+    'new-session', '-A', '-s', tmuxName(sessionId),
+    shell,
+  ], opts);
 }
 
 function broadcastToWss(sess: Session, data: string): void {
@@ -200,6 +302,7 @@ function startReconcile(sess: Session): void {
 
 function attachWs(sess: Session, ws: WebSocket): void {
   if (sess.killTimer) { clearTimeout(sess.killTimer); sess.killTimer = null; }
+  markAlive(ws);
   sess.wss.add(ws);
   log('attach', sess.id, `clients=${sess.wss.size} scrollback=${sess.bufferSize}B`);
 
@@ -248,17 +351,54 @@ function attachWs(sess: Session, ws: WebSocket): void {
     // disconnected) — recompute so the remaining devices reclaim the space.
     recomputeEffective(sess);
     log('detach', sess.id, `code=${code} remaining=${sess.wss.size}`);
-    // Last client left — start grace timer. If anything reattaches
-    // within the window we cancel it (in attachWs above).
+    // Last client left. Persist the scrollback so the session survives even a
+    // pty-server restart, then hold the PTY: with GRACE_MS=0 (the default) the
+    // shell waits indefinitely for the user to come back. A finite grace is
+    // opt-in via AURA_PTY_GRACE_MS.
     if (sess.wss.size === 0) {
       emitOut(sess);                 // fold any buffered tail into the ring before we persist it
       saveScrollback(sess);
-      sess.killTimer = setTimeout(() => {
-        log('grace expired', sess.id);
-        killSession(sess.id);
-      }, GRACE_MS);
+      if (GRACE_MS > 0) {
+        sess.killTimer = setTimeout(() => {
+          log('grace expired', sess.id);
+          killSession(sess.id);
+        }, GRACE_MS);
+      } else {
+        log('idle', sess.id, 'no clients — holding session indefinitely');
+      }
     }
   });
+}
+
+/**
+ * Global keepalive sweep — one timer for every attached socket rather than one
+ * timer per socket. Marks each client unacknowledged, pings it, and terminates
+ * anything that didn't pong since the previous sweep. `ws` answers incoming
+ * pings automatically, so browsers need no cooperation for this to work.
+ */
+const alive = new WeakSet<WebSocket>();
+
+function markAlive(ws: WebSocket): void {
+  alive.add(ws);
+  ws.on('pong', () => alive.add(ws));
+}
+
+function sweepKeepalive(): void {
+  for (const sess of sessions.values()) {
+    for (const ws of sess.wss) {
+      if (ws.readyState !== WebSocket.OPEN) continue;
+      if (!alive.has(ws)) {
+        // Missed the previous ping — the socket is a zombie (half-open TCP,
+        // sleeping device). Terminate so `close` fires and it detaches; the
+        // PTY itself is untouched and waits for the reattach.
+        log('keepalive timeout', sess.id);
+        try { ws.terminate(); } catch { /* already gone */ }
+        continue;
+      }
+      alive.delete(ws);
+      try { ws.ping(); } catch { /* socket died between check and ping */ }
+    }
+  }
 }
 
 /**
@@ -289,11 +429,28 @@ function recomputeEffective(sess: Session): void {
 /** Public entry — called by the OS lifecycle hook when the activity is destroyed. */
 export function killSession(sessionId: string): boolean {
   const sess = sessions.get(sessionId);
-  if (!sess) return false;
+
+  // Tear down the tmux session and the persisted scrollback UNCONDITIONALLY —
+  // before the in-memory lookup, not after it. Now that shells outlive this
+  // process, an empty registry no longer means "no shell": after a pty-server
+  // restart the shell is alive in tmux while `sessions` is empty. Early-
+  // returning there would strand that shell forever, and the next activity to
+  // reuse the id would attach to a stale one.
+  const killedTmux = tmuxKill(sessionId);
+  deleteScrollback(sessionId);
+
+  if (!sess) {
+    if (killedTmux) log('killSession', sessionId, 'detached tmux session reaped (no in-memory session)');
+    return killedTmux;
+  }
   log('killSession', sessionId, `clients=${sess.wss.size}`);
   if (sess.killTimer) clearTimeout(sess.killTimer);
   if (sess.reconcileTimer) { clearInterval(sess.reconcileTimer); sess.reconcileTimer = null; }
   if (sess.outTimer) { clearTimeout(sess.outTimer); sess.outTimer = null; }
+  // Kill the tmux session FIRST. Killing only the PTY would leave the shell
+  // running detached forever — and the next activity to reuse this id would
+  // silently attach to that stale shell instead of getting a fresh one.
+  tmuxKill(sessionId);
   try { sess.pty.kill(); } catch { /* already gone */ }
   for (const ws of sess.wss) { try { ws.close(); } catch { /* ignore */ } }
   sess.wss.clear();
@@ -308,6 +465,12 @@ export function getPtyWss(): WebSocketServer {
   if (ptyWss) return ptyWss;
 
   ptyWss = new WebSocketServer({ noServer: true });
+
+  // Keepalive sweep — armed once with the server, unref'd so it never keeps
+  // the process alive on its own.
+  const keepalive = setInterval(sweepKeepalive, PING_MS);
+  if (typeof keepalive.unref === 'function') keepalive.unref();
+  log('keepalive armed', `${PING_MS}ms`, GRACE_MS > 0 ? `grace=${GRACE_MS}ms` : 'grace=never');
 
   ptyWss.on('connection', (ws: WebSocket, req) => {
     // `req` is the upgrade request — the WS server's `connection` event
@@ -332,7 +495,7 @@ export function getPtyWss(): WebSocketServer {
     // its own private PTY.
     if (!sessionId) {
       log('anon connect');
-      const term = spawnPty(80, 24);
+      const term = spawnPty(null, 80, 24);
       term.onData((data) => ws.readyState === WebSocket.OPEN && ws.send(data));
       term.onExit(() => ws.close());
       ws.on('message', (msg: Buffer | string) => {
@@ -353,7 +516,7 @@ export function getPtyWss(): WebSocketServer {
       log('new session', sessionId);
       const saved = loadScrollback(sessionId);
       sess = {
-        id: sessionId, pty: spawnPty(80, 24),
+        id: sessionId, pty: spawnPty(sessionId, 80, 24),
         wss: new Set(), ...saved,
         killTimer: null, reconcileTimer: null, clientSizes: new Map(), cols: 80, rows: 24,
         outBuf: '', outTimer: null,

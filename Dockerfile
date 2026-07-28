@@ -11,9 +11,16 @@ FROM node:22 AS aura-base
 # that aren't in the full node:22 base (ssh client+server, htop, dnsutils,
 # iproute2). Most of bash/coreutils/curl/git/procps/nano/less is already
 # present in node:22 so this layer is small.
+#
+# tmux is not a user convenience here — com.aura.terminal runs every shell
+# inside a tmux session so the shell's lifetime is decoupled from the PTY's
+# (see apps/com.aura.terminal/tmux.conf). Without it in the image the terminal
+# silently falls back to a bare shell that dies with its PTY on every app
+# restart or code reload.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     openssh-server \
+    tmux \
     htop \
     lsof \
     dnsutils \

@@ -700,12 +700,48 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // the same output. So there's no "displaced" state for us to
     // handle; we just open, listen, and reconnect on actual drops.
 
-    // One outstanding reconnect timer at any time, so a flurry of close
-    // events collapses into a single retry rather than stacking.
+    // ─── Reconnect policy ────────────────────────────────────────────────
+    // The PTY on the server side now outlives its sockets indefinitely, so a
+    // dropped WS is never fatal — it just has to be noticed and redialled.
+    // The hard part is that the drop usually happens while nobody is looking:
+    // the tab is backgrounded, the laptop is shut, the phone is asleep. In
+    // that state browsers throttle timers to ~1/min and may FREEZE the page
+    // outright, so a plain `setTimeout(connect, 2000)` can sit unfired for an
+    // hour. We therefore drive reconnection from three sources:
+    //
+    //   1. the close event (backoff timer, for drops we're awake for),
+    //   2. wake-up signals — visibilitychange / focus / pageshow / online —
+    //      which fire the instant the user actually returns, and
+    //   3. a slow watchdog, as a floor under both.
+    //
+    // All three funnel through `ensureConnected`, which is idempotent: if a
+    // socket is already OPEN or CONNECTING it does nothing, so the wake-up
+    // burst (several of these fire together when a tab is restored) can't
+    // produce duplicate sockets.
     let reconnectTimer = null;
+    function clearReconnectTimer() {
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    }
+    function wsHealthy() {
+      return activeWs && (activeWs.readyState === 0 /* CONNECTING */ || activeWs.readyState === 1 /* OPEN */);
+    }
+    // Backoff for unattended retries: quick at first (a shell restart is back
+    // in a second or two), capped at 10s so a long outage doesn't turn into a
+    // long wait once the network returns. The wake-up path below bypasses this
+    // entirely — when the user is present we redial immediately.
+    function backoffMs() {
+      return Math.min(500 * Math.pow(2, Math.max(0, attempt - 1)), 10_000);
+    }
     function scheduleReconnect() {
-      if (reconnectTimer) return;
-      reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, 2000);
+      if (reconnectTimer || wsHealthy()) return;
+      const delay = backoffMs();
+      reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, delay);
+    }
+    function ensureConnected(reason) {
+      if (wsHealthy()) return;
+      clearReconnectTimer();
+      console.debug('[terminal] reconnect →', reason);
+      connect();
     }
 
     let attempt = 0;
@@ -717,6 +753,8 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
 
       ws.onopen = () => {
         opened = true;
+        attempt = 0;                 // reset the backoff ladder for the next drop
+        clearReconnectTimer();
         stopDots();
         statusEl.textContent = 'CONNECTED';
         statusEl.style.color = 'var(--aura-color-primary)';
@@ -761,11 +799,36 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
           term.write(`\r\x1b[2K${RED}  ws error — retrying${RST}\r\n`);
         }
       };
-
-      term.onData((data) => ws.readyState === 1 && ws.send(JSON.stringify({ type: 'data', data })));
     }
 
+    // Keystrokes go to whatever socket is current. Bound ONCE, outside
+    // connect(): registering it per-connection stacked a new (permanently
+    // inert, since its captured `ws` is closed forever) handler on every
+    // reconnect, so an overnight session accumulated one dead listener per
+    // drop and ran them all on every keypress.
+    term.onData((data) => {
+      if (activeWs && activeWs.readyState === 1) {
+        activeWs.send(JSON.stringify({ type: 'data', data }));
+      }
+    });
+
     connect();
+
+    // Wake-up reconnects. These fire the moment the user is actually back —
+    // before any throttled timer would — which is what turns "my session died
+    // while I was away" into "it was there when I came back".
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) ensureConnected('visible');
+    });
+    window.addEventListener('focus',   () => ensureConnected('focus'));
+    window.addEventListener('online',  () => ensureConnected('online'));
+    window.addEventListener('pageshow', () => ensureConnected('pageshow'));
+
+    // Floor under everything: if the socket is dead and no retry is pending
+    // (a close event we somehow missed, a frozen-then-thawed timer), redial.
+    setInterval(() => {
+      if (!wsHealthy() && !reconnectTimer) ensureConnected('watchdog');
+    }, 5000);
 
     // THE single resize driver. The shell posts `aura.viewport.changed` for
     // every size change — tiling reflow, workspace switch (reveals our tile),
