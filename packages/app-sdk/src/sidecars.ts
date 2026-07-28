@@ -25,7 +25,7 @@
 import http from 'node:http';
 import net from 'node:net';
 import { existsSync } from 'node:fs';
-import { execFile, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 
 const DOCKER_SOCK = '/var/run/docker.sock';
 
@@ -438,6 +438,84 @@ export class SidecarHost {
   }
 
   /**
+   * `-e AURA_VOLUME_HOST_<NAME>` for every declared volume, holding the path as
+   * the DOCKER DAEMON sees it.
+   *
+   * Why this exists: a sibling that drives the docker socket (see
+   * `inheritDockerSocket`) and wants to bind part of its own data into a
+   * container it spawns CANNOT use its own paths. `-v /opt/data/x:/y` is
+   * resolved by the daemon against the HOST, where `/opt/data` doesn't exist —
+   * and docker doesn't error on a missing bind source, it silently creates an
+   * empty dir. So the mount appears to work and is simply empty.
+   *
+   * The sibling can't look this up itself either: at spawn time it doesn't
+   * exist yet, so there's nothing to `docker inspect`. The controller is the
+   * only side that knows, because it DECLARED the volume — so we resolve it
+   * here and hand the answer over as env.
+   *
+   * `<NAME>` is the volume's `name` upper-cased with non-alphanumerics turned
+   * into underscores: `{ name: 'data' }` → `AURA_VOLUME_HOST_DATA`.
+   *
+   * Requires the controller to have the docker socket (its `tools[]` grants
+   * `docker`). Without it, or before the volume exists, resolution is skipped
+   * with a warning rather than exporting a path that would silently misbind.
+   */
+  private volumeHostArgs(svc: ServiceSpec): string[] {
+    const vols = svc.volumes ?? [];
+    if (vols.length === 0) return [];
+    // Only meaningful for a sibling that can reach the daemon: a host path is
+    // unusable — and misleading — without a socket to spend it on. Scoping it
+    // to `inheritDockerSocket` keeps the env of every ordinary sidecar clean
+    // and avoids a `docker volume inspect` per volume on every spawn.
+    if (!svc.inheritDockerSocket) return [];
+    if (!existsSync(DOCKER_SOCK)) return [];   // controller has no daemon access
+
+    const out: string[] = [];
+    for (const v of vols) {
+      const source = v.volume ?? this.volumeName(v.name);
+      const key = v.name.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+      let mountpoint = '';
+      try {
+        mountpoint = execFileSync('docker', ['volume', 'inspect', '-f', '{{.Mountpoint}}', source], {
+          stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000, encoding: 'utf-8',
+        }).trim();
+      } catch {
+        // Volume not created yet (first run, pre-seed). Starting without the
+        // hint beats starting with a wrong one: docker does NOT error on a
+        // missing bind source, it silently creates an empty dir, so a bad path
+        // fails quietly and looks like it worked.
+        this.log(`volume host path: could not inspect '${source}' yet; AURA_VOLUME_HOST_${key} omitted`);
+        continue;
+      }
+      if (!mountpoint) continue;
+      const hostPath = v.subpath ? `${mountpoint}/${v.subpath}` : mountpoint;
+      out.push('-e', `AURA_VOLUME_HOST_${key}=${hostPath}`);
+
+      // PATH PARITY — mount the same data a SECOND time at its host-identical
+      // path, so one string means the same thing in both namespaces.
+      //
+      // Without this, a sibling that computes a path from its own filesystem
+      // (`$DATA/skills`) and hands it to the daemon is describing somewhere the
+      // host has never heard of. Docker then creates an empty dir rather than
+      // erroring, so the mount looks fine and is silently empty — the failure
+      // mode this whole mechanism exists to prevent.
+      //
+      // With parity, the sibling can point its own config at `hostPath` and
+      // both its `mkdir` and the daemon's bind resolve to the same bytes. It's
+      // the same trick the OS uses for `/workspace` (host `/workspace` →
+      // container `/workspace`).
+      //
+      // Skipped when the declared target already IS the host path — that's an
+      // app that opted into parity by hand, and re-mounting would be a
+      // duplicate-destination error.
+      if (v.target !== hostPath) {
+        out.push('--mount', `type=volume,source=${source},target=${hostPath}${v.subpath ? `,volume-subpath=${v.subpath}` : ''}`);
+      }
+    }
+    return out;
+  }
+
+  /**
    * `-e` args forwarding the controller's AuraOS identity + OS-API base into a
    * sibling (for `inheritIdentity`). Only vars actually present in the
    * controller env are forwarded, so a sibling never gets an empty/misleading
@@ -510,6 +588,25 @@ export class SidecarHost {
         const subpath = v.subpath ? `,volume-subpath=${v.subpath}` : '';
         return ['--mount', `type=volume,source=${source},target=${v.target}${subpath}`];
       }),
+      // The shared app-data volume's NAME. Always exported: a sibling that
+      // drives the docker socket needs it to spawn containers with
+      // `--mount type=volume,source=$AURA_APP_DATA_VOLUME,volume-subpath=…`,
+      // which lets the daemon resolve the volume itself instead of naming a
+      // host path. Together with AURA_INSTANCE_ID this makes a sidecar's own
+      // spawn config portable across apps rather than hardcoding ids.
+      '-e', `AURA_APP_DATA_VOLUME=${this.opts.appDataVolume}`,
+      // The other two coordinates a spawned container needs to make the
+      // toolchain actually usable. Real binaries work from `/aura/my-tools`
+      // alone, but wrapper-script tools (`aura` is `exec node
+      // /workspace/packages/aura-cli/dist/aura.cjs`) also need the workspace
+      // source and its node_modules — otherwise the tool is present, on PATH,
+      // and fails on every call.
+      '-e', `AURA_NODE_MODULES_VOLUME=${this.opts.nodeModulesVolume}`,
+      '-e', `AURA_HOST_WORKSPACE=${this.opts.workspaceRoot}`,
+      // Host paths of the declared volumes, resolved by the controller because
+      // the sibling can't look them up before it exists. Emitted BEFORE
+      // `svc.env` so an explicit manifest value still wins on collision.
+      ...this.volumeHostArgs(svc),
       ...Object.entries(svc.env ?? {}).flatMap(([k, val]) => ['-e', `${k}=${val}`]),
       // Inherit named vars from the controller's process.env (populated by
       // AuraOS Context on boot). Missing names are skipped so the manifest
