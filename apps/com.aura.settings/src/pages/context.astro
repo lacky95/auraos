@@ -1,18 +1,23 @@
 ---
 import '../styles/settings.css';
 
-// SSR-read the current context entries from the OS. `variable` entries carry
-// their value; `secret` entries never do (value is null) — we show a masked
-// marker for those.
+// SSR-read the current context entries + volumes from the OS.
 const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
 type Kind = 'secret' | 'variable';
 type Inject = 'env' | 'file';
 interface ContextEntry { key: string; kind: Kind; inject: Inject[]; updatedAt: number; value: string | null }
+interface VolumeEntry { name: string; mountPath: string; mode: 'rw' | 'ro'; createdAt: number }
+
 let entries: ContextEntry[] = [];
+let volumes: VolumeEntry[] = [];
 try {
   const r = await fetch(`${osBase}/api/os/context`, { signal: AbortSignal.timeout(1500) });
   if (r.ok) entries = ((await r.json()) as { entries?: ContextEntry[] }).entries ?? [];
 } catch { /* OS unreachable at SSR time — client will refetch */ }
+try {
+  const r = await fetch(`${osBase}/api/os/volumes`, { signal: AbortSignal.timeout(1500) });
+  if (r.ok) volumes = ((await r.json()) as { volumes?: VolumeEntry[] }).volumes ?? [];
+} catch { /* client will refetch */ }
 ---
 <!DOCTYPE html>
 <html lang="en">
@@ -20,10 +25,18 @@ try {
   <meta charset="UTF-8" />
   <title>Settings · Context — AuraOS</title>
   <link rel="stylesheet" href="/api/os/theme.css" />
-  <!-- is:global — rows are re-rendered client-side via innerHTML after SET,
-       and those elements don't carry Astro's scoped data-astro-cid attribute.
-       Scoped styles would stop matching them (table appears unstyled on update). -->
+  <!-- is:global — rows are re-rendered client-side via innerHTML, and those
+       elements don't carry Astro's scoped data-astro-cid attribute. Scoped
+       styles would stop matching them. -->
   <style is:global>
+    .ctx-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--aura-color-border, #333); margin-bottom: 16px; }
+    .ctx-tab {
+      background: none; border: none; border-bottom: 2px solid transparent; color: var(--aura-color-text-dim);
+      font-size: 0.68rem; letter-spacing: 0.1em; padding: 8px 14px; cursor: pointer; text-transform: uppercase;
+    }
+    .ctx-tab.active { color: var(--aura-color-primary); border-bottom-color: var(--aura-color-primary); }
+    .ctx-panel { display: none; }
+    .ctx-panel.active { display: block; }
     .ctx-table { width: 100%; border-collapse: collapse; margin-bottom: 18px; }
     .ctx-table th, .ctx-table td {
       text-align: left; padding: 8px 10px; font-size: 0.72rem; letter-spacing: 0.04em;
@@ -39,6 +52,8 @@ try {
     }
     .ctx-badge.secret   { color: var(--aura-color-danger, #e55); }
     .ctx-badge.variable { color: var(--aura-color-accent, #2a6); }
+    .ctx-badge.rw       { color: var(--aura-color-accent, #2a6); }
+    .ctx-badge.ro       { color: var(--aura-color-text-dim); }
     .ctx-inject { color: var(--aura-color-text-dim); font-size: 0.6rem; letter-spacing: 0.08em; }
     .ctx-checks { display: flex; gap: 12px; align-items: center; }
     .ctx-checks label { display: inline-flex; align-items: center; gap: 4px; margin: 0; cursor: pointer; }
@@ -81,56 +96,111 @@ try {
 </head>
 <body>
   <main class="settings-body">
-    <table class="ctx-table">
-      <thead>
-        <tr><th style="width:28%">KEY</th><th style="width:12%">TYPE</th><th style="width:26%">VALUE</th><th style="width:12%">INJECT</th><th style="width:12%">UPDATED</th><th></th></tr>
-      </thead>
-      <tbody id="ctx-rows">
-        {entries.length === 0 && (
-          <tr><td colspan="6" class="ctx-empty">No context entries yet. Add one below.</td></tr>
-        )}
-        {entries.map((e) => (
-          <tr data-key={e.key}>
-            <td class="ctx-key">{e.key}</td>
-            <td><span class={`ctx-badge ${e.kind}`}>{e.kind === 'secret' ? 'SECRET' : 'VARIABLE'}</span></td>
-            <td class={`ctx-val ${e.kind}`}>{e.kind === 'variable' ? e.value : '••••••••'}</td>
-            <td class="ctx-inject">{e.inject.map((t) => t.toUpperCase()).join(' · ')}</td>
-            <td>{e.updatedAt ? new Date(e.updatedAt).toLocaleString() : '—'}</td>
-            <td><button class="ctx-del" data-key={e.key}>DELETE</button></td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-
-    <div class="ctx-form">
-      <div>
-        <label for="ctx-kind">TYPE</label>
-        <select id="ctx-kind">
-          <option value="secret">Secret (masked)</option>
-          <option value="variable">Variable (visible)</option>
-        </select>
-      </div>
-      <div>
-        <label for="ctx-key">KEY</label>
-        <input id="ctx-key" type="text" placeholder="GITHUB_TOKEN" autocomplete="off" spellcheck="false" />
-      </div>
-      <div>
-        <label for="ctx-value">VALUE</label>
-        <input id="ctx-value" type="password" placeholder="secret value" autocomplete="off" spellcheck="false" />
-      </div>
-      <div>
-        <label>INJECT AS</label>
-        <div class="ctx-checks">
-          <label><input type="checkbox" id="ctx-inject-env" checked /> Env var</label>
-          <label><input type="checkbox" id="ctx-inject-file" checked /> File</label>
-        </div>
-      </div>
-      <button id="ctx-add">SET</button>
+    <div class="ctx-tabs">
+      <button class="ctx-tab active" data-tab="vars">Var / Secrets</button>
+      <button class="ctx-tab" data-tab="volumes">Volumes</button>
     </div>
-    <p class="ctx-hint">
-      Injected into every app as <b>$KEY</b> and <b>/run/context/KEY</b>.
-      File changes apply live; env changes on next app restart.
-    </p>
+
+    <!-- ── VAR / SECRETS ─────────────────────────────────────────────── -->
+    <div class="ctx-panel active" id="panel-vars">
+      <table class="ctx-table">
+        <thead>
+          <tr><th style="width:28%">KEY</th><th style="width:12%">TYPE</th><th style="width:26%">VALUE</th><th style="width:12%">INJECT</th><th style="width:12%">UPDATED</th><th></th></tr>
+        </thead>
+        <tbody id="ctx-rows">
+          {entries.length === 0 && (
+            <tr><td colspan="6" class="ctx-empty">No context entries yet. Add one below.</td></tr>
+          )}
+          {entries.map((e) => (
+            <tr data-key={e.key}>
+              <td class="ctx-key">{e.key}</td>
+              <td><span class={`ctx-badge ${e.kind}`}>{e.kind === 'secret' ? 'SECRET' : 'VARIABLE'}</span></td>
+              <td class={`ctx-val ${e.kind}`}>{e.kind === 'variable' ? e.value : '••••••••'}</td>
+              <td class="ctx-inject">{e.inject.map((t) => t.toUpperCase()).join(' · ')}</td>
+              <td>{e.updatedAt ? new Date(e.updatedAt).toLocaleString() : '—'}</td>
+              <td><button class="ctx-del" data-key={e.key}>DELETE</button></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <div class="ctx-form">
+        <div>
+          <label for="ctx-kind">TYPE</label>
+          <select id="ctx-kind">
+            <option value="secret">Secret (masked)</option>
+            <option value="variable">Variable (visible)</option>
+          </select>
+        </div>
+        <div>
+          <label for="ctx-key">KEY</label>
+          <input id="ctx-key" type="text" placeholder="GITHUB_TOKEN" autocomplete="off" spellcheck="false" />
+        </div>
+        <div>
+          <label for="ctx-value">VALUE</label>
+          <input id="ctx-value" type="password" placeholder="secret value" autocomplete="off" spellcheck="false" />
+        </div>
+        <div>
+          <label>INJECT AS</label>
+          <div class="ctx-checks">
+            <label><input type="checkbox" id="ctx-inject-env" checked /> Env var</label>
+            <label><input type="checkbox" id="ctx-inject-file" checked /> File</label>
+          </div>
+        </div>
+        <button id="ctx-add">SET</button>
+      </div>
+      <p class="ctx-hint">
+        Injected into every app as <b>$KEY</b> and <b>/run/context/KEY</b>.
+        File changes apply live; env changes on next app restart.
+      </p>
+    </div>
+
+    <!-- ── VOLUMES ───────────────────────────────────────────────────── -->
+    <div class="ctx-panel" id="panel-volumes">
+      <table class="ctx-table">
+        <thead>
+          <tr><th style="width:24%">NAME</th><th style="width:34%">MOUNT PATH</th><th style="width:12%">MODE</th><th style="width:18%">CREATED</th><th></th></tr>
+        </thead>
+        <tbody id="vol-rows">
+          {volumes.length === 0 && (
+            <tr><td colspan="5" class="ctx-empty">No volumes yet. Create one below.</td></tr>
+          )}
+          {volumes.map((v) => (
+            <tr data-name={v.name}>
+              <td class="ctx-key">{v.name}</td>
+              <td class="ctx-val">{v.mountPath}</td>
+              <td><span class={`ctx-badge ${v.mode}`}>{v.mode.toUpperCase()}</span></td>
+              <td>{v.createdAt ? new Date(v.createdAt).toLocaleString() : '—'}</td>
+              <td><button class="ctx-vol-del" data-name={v.name}>DELETE</button></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <div class="ctx-form">
+        <div>
+          <label for="vol-name">NAME</label>
+          <input id="vol-name" type="text" placeholder="shared" autocomplete="off" spellcheck="false" />
+        </div>
+        <div>
+          <label for="vol-path">MOUNT PATH</label>
+          <input id="vol-path" type="text" placeholder="/mnt/shared" autocomplete="off" spellcheck="false" />
+        </div>
+        <div>
+          <label for="vol-mode">MODE</label>
+          <select id="vol-mode">
+            <option value="rw">Read-write</option>
+            <option value="ro">Read-only</option>
+          </select>
+        </div>
+        <button id="vol-add">CREATE</button>
+      </div>
+      <p class="ctx-hint">
+        Mounted into <b>every app</b> at your chosen path — shared storage between apps.
+        Applies on the app's next restart. RO is enforced for container apps.
+      </p>
+    </div>
+
     <p id="status" class="ctx-hint"></p>
   </main>
 
@@ -144,48 +214,43 @@ try {
     </div>
   </div>
 
-  <footer class="settings-foot">PROVIDER · /api/os/context</footer>
+  <footer class="settings-foot">PROVIDER · /api/os/context · /api/os/volumes</footer>
 
   <script is:inline>
     const statusEl = document.getElementById('status');
     const kindEl = document.getElementById('ctx-kind');
     const valueEl = document.getElementById('ctx-value');
     const KEY_RE = /^[A-Z_][A-Z0-9_]*$/;
+    const VOL_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
     function esc(s) {
       return String(s).replace(/[&<>"']/g, (c) =>
         ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
-
     function setStatus(html, danger) {
       statusEl.innerHTML = danger
         ? `<b style="color: var(--aura-color-danger);">${html}</b>`
         : html;
     }
 
-    // Secret → password field; variable → plain text (it's not sensitive).
-    function syncValueField() {
-      const secret = kindEl.value === 'secret';
-      valueEl.type = secret ? 'password' : 'text';
-      valueEl.placeholder = secret ? 'secret value' : 'visible value';
-    }
-    kindEl.addEventListener('change', syncValueField);
-    syncValueField();
+    // ── Tabs ──────────────────────────────────────────────────────────
+    document.querySelectorAll('.ctx-tab').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.ctx-tab').forEach((b) => b.classList.toggle('active', b === btn));
+        const tab = btn.dataset.tab;
+        document.getElementById('panel-vars').classList.toggle('active', tab === 'vars');
+        document.getElementById('panel-volumes').classList.toggle('active', tab === 'volumes');
+      });
+    });
 
-    // Keys currently present, read straight from the rendered rows.
-    function existingKeys() {
-      return new Set(Array.from(document.querySelectorAll('#ctx-rows tr[data-key]')).map((tr) => tr.dataset.key));
-    }
-
-    // In-page confirm (native confirm() can be blocked in the sandboxed app
-    // iframe). Resolves true = override, false = cancel.
-    function confirmOverride(key) {
+    // ── Generic confirm dialog ────────────────────────────────────────
+    function confirmDialog(msgHtml, okLabel) {
       return new Promise((resolve) => {
         const bd = document.getElementById('ctx-dialog');
         const okBtn = document.getElementById('ctx-dialog-ok');
         const cancelBtn = document.getElementById('ctx-dialog-cancel');
-        document.getElementById('ctx-dialog-msg').innerHTML =
-          `<b>${esc(key)}</b> already exists. Override its value and settings?`;
+        document.getElementById('ctx-dialog-msg').innerHTML = msgHtml;
+        okBtn.textContent = okLabel;
         bd.classList.add('open');
         const done = (val) => {
           bd.classList.remove('open');
@@ -199,6 +264,19 @@ try {
         cancelBtn.addEventListener('click', onCancel);
         okBtn.focus();
       });
+    }
+
+    // ── Var / Secrets ─────────────────────────────────────────────────
+    function syncValueField() {
+      const secret = kindEl.value === 'secret';
+      valueEl.type = secret ? 'password' : 'text';
+      valueEl.placeholder = secret ? 'secret value' : 'visible value';
+    }
+    kindEl.addEventListener('change', syncValueField);
+    syncValueField();
+
+    function existingKeys() {
+      return new Set(Array.from(document.querySelectorAll('#ctx-rows tr[data-key]')).map((tr) => tr.dataset.key));
     }
 
     async function refresh() {
@@ -234,20 +312,16 @@ try {
       const inject = [];
       if (document.getElementById('ctx-inject-env').checked) inject.push('env');
       if (document.getElementById('ctx-inject-file').checked) inject.push('file');
-      if (!KEY_RE.test(key)) {
-        setStatus(`Invalid key — must be an env-var name (A–Z, 0–9, _), e.g. GITHUB_TOKEN`, true);
-        return;
-      }
+      if (!KEY_RE.test(key)) { setStatus(`Invalid key — must be an env-var name (A–Z, 0–9, _), e.g. GITHUB_TOKEN`, true); return; }
       if (!value) { setStatus('Value must not be empty', true); return; }
       if (inject.length === 0) { setStatus('Select at least one inject target (Env var / File)', true); return; }
       if (existingKeys().has(key)) {
-        const override = await confirmOverride(key);
-        if (!override) { setStatus(`Cancelled — existing <b>${esc(key)}</b> kept`); return; }
+        const ok = await confirmDialog(`<b>${esc(key)}</b> already exists. Override its value and settings?`, 'OVERRIDE');
+        if (!ok) { setStatus(`Cancelled — existing <b>${esc(key)}</b> kept`); return; }
       }
       try {
         const r = await fetch('/api/os/context', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ key, value, kind, inject }),
         });
         if (!r.ok) { setStatus(`ERROR — ${(await r.json()).error ?? r.status}`, true); return; }
@@ -273,14 +347,77 @@ try {
       });
     }
 
+    // ── Volumes ───────────────────────────────────────────────────────
+    async function refreshVols() {
+      const r = await fetch('/api/os/volumes');
+      if (!r.ok) return;
+      const { volumes } = await r.json();
+      const tbody = document.getElementById('vol-rows');
+      if (!volumes || volumes.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="ctx-empty">No volumes yet. Create one below.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = volumes.map((v) => `
+        <tr data-name="${esc(v.name)}">
+          <td class="ctx-key">${esc(v.name)}</td>
+          <td class="ctx-val">${esc(v.mountPath)}</td>
+          <td><span class="ctx-badge ${v.mode}">${esc(String(v.mode).toUpperCase())}</span></td>
+          <td>${v.createdAt ? new Date(v.createdAt).toLocaleString() : '—'}</td>
+          <td><button class="ctx-vol-del" data-name="${esc(v.name)}">DELETE</button></td>
+        </tr>`).join('');
+      bindVolDeletes();
+    }
+
+    async function addVol() {
+      const name = document.getElementById('vol-name').value.trim();
+      const mountPath = document.getElementById('vol-path').value.trim();
+      const mode = document.getElementById('vol-mode').value;
+      if (!VOL_NAME_RE.test(name)) { setStatus('Invalid name — lowercase letters/digits/-/_ , e.g. shared', true); return; }
+      if (!mountPath.startsWith('/')) { setStatus('Mount path must be absolute (start with /), e.g. /mnt/shared', true); return; }
+      try {
+        const r = await fetch('/api/os/volumes', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, mountPath, mode }),
+        });
+        if (!r.ok) { setStatus(`ERROR — ${(await r.json()).error ?? r.status}`, true); return; }
+        document.getElementById('vol-name').value = '';
+        document.getElementById('vol-path').value = '';
+        setStatus(`CREATED volume <b>${esc(name)}</b> → ${esc(mountPath)} (${mode}) · restart apps to mount`);
+        await refreshVols();
+      } catch (err) { setStatus(`ERROR — ${err.message}`, true); }
+    }
+
+    async function delVol(name) {
+      const ok = await confirmDialog(`Delete volume <b>${esc(name)}</b>? This removes its data and unmounts it from apps.`, 'DELETE');
+      if (!ok) { setStatus(`Cancelled — volume <b>${esc(name)}</b> kept`); return; }
+      try {
+        const r = await fetch(`/api/os/volumes/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        if (!r.ok) { setStatus(`ERROR — ${(await r.json()).error ?? r.status}`, true); return; }
+        setStatus(`DELETED volume <b>${esc(name)}</b> · ${new Date().toLocaleTimeString()}`);
+        await refreshVols();
+      } catch (err) { setStatus(`ERROR — ${err.message}`, true); }
+    }
+
+    function bindVolDeletes() {
+      document.querySelectorAll('.ctx-vol-del').forEach((btn) => {
+        btn.addEventListener('click', () => delVol(btn.dataset.name));
+      });
+    }
+
+    // ── Wire up ───────────────────────────────────────────────────────
     document.getElementById('ctx-add').addEventListener('click', addVar);
     valueEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') addVar(); });
+    document.getElementById('vol-add').addEventListener('click', addVol);
+    document.getElementById('vol-path').addEventListener('keydown', (e) => { if (e.key === 'Enter') addVol(); });
     bindDeletes();
+    bindVolDeletes();
   </script>
 
   <script>
     import { OsClient } from '@aura/app-sdk';
-    new OsClient().nav.installGridNav({ selector: '#ctx-kind, #ctx-key, #ctx-value, #ctx-inject-env, #ctx-inject-file, #ctx-add, .ctx-del' });
+    new OsClient().nav.installGridNav({
+      selector: '.ctx-tab, #ctx-kind, #ctx-key, #ctx-value, #ctx-inject-env, #ctx-inject-file, #ctx-add, .ctx-del, #vol-name, #vol-path, #vol-mode, #vol-add, .ctx-vol-del',
+    });
   </script>
 </body>
 </html>

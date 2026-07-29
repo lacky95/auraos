@@ -1,5 +1,5 @@
 import { defineMiddleware } from 'astro:middleware';
-import { getAppManager, initAppManager, ContextStore } from '@aura/core';
+import { getAppManager, initAppManager, ContextStore, VolumeStore } from '@aura/core';
 import { kvServer, defaultKv } from '@aura/kv-store';
 import { bootstrapKv } from './lib/kvBootstrap.js';
 
@@ -34,6 +34,13 @@ async function ensureAppManager() {
       await new ContextStore(dataDir).materializeAll();
     } catch (err) {
       console.warn(`[middleware] context materialize failed: ${(err as Error).message}`);
+    }
+    // Ensure Context Volume subpath dirs exist BEFORE apps start, so their
+    // volume-subpath mounts / proot binds don't fail on a missing source.
+    try {
+      await new VolumeStore(dataDir).ensureAll();
+    } catch (err) {
+      console.warn(`[middleware] context volumes ensure failed: ${(err as Error).message}`);
     }
 
     const mgr = initAppManager({

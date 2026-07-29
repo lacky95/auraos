@@ -51,7 +51,7 @@ export const KV_NAMESPACE_PATTERN = /^(?:os|app\/[a-z][a-z0-9]*(?:\.[a-z][a-z0-9
  * dedicated `/api/os/context` API and the server-internal `ContextStore`.
  */
 export const KV_CONTEXT_NAMESPACE_PATTERN =
-  /^context:(?:system|app:[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+)$/;
+  /^context:(?:system|volumes|app:[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+)$/;
 
 export function isValidNamespace(ns: string): ns is KvNamespace {
   return KV_NAMESPACE_PATTERN.test(ns) || KV_CONTEXT_NAMESPACE_PATTERN.test(ns);

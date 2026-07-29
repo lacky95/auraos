@@ -8,6 +8,7 @@ import { ALL_TOOLS_PATH, MY_TOOLS_PATH, currentToolsMode, provisionAllowlist } f
 import type { SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import type { SpawnContext } from '../scopes/types.js';
 import { ContextStore } from '../context/ContextStore.js';
+import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
 const HEALTH_CHECK_TIMEOUT_MS = 30_000;
@@ -69,6 +70,8 @@ export class ProotRunner implements SandboxRunner {
   private osApiBase: string;
   /** OS-wide env/secret store, injected into every sandbox. */
   private contextStore: ContextStore;
+  /** OS-managed shared volumes, bound into every sandbox. */
+  private volumeStore: VolumeStore;
 
   constructor(opts: SandboxRunnerOpts) {
     this.baseRootfs = opts.baseRootfs;
@@ -77,6 +80,7 @@ export class ProotRunner implements SandboxRunner {
     this.dataDir = opts.dataDir;
     this.osApiBase = opts.osApiBase;
     this.contextStore = new ContextStore(opts.dataDir);
+    this.volumeStore = new VolumeStore(opts.dataDir);
   }
 
   /**
@@ -140,7 +144,11 @@ export class ProotRunner implements SandboxRunner {
     // Resolve OS Context (env/secret) LIVE from Redis on every spawn.
     this.contextStore.ensureDir();
     const contextEnv = await this.contextStore.resolveEnv();
-    const args = this.buildProotArgs(instanceId, port, manifest, appDir, dataDir, prooted, entrypointArgv);
+    // OS-managed shared volumes — bound into the proot (RW; proot --bind can't
+    // enforce read-only, so RO volumes are effectively RW here).
+    await this.volumeStore.ensureAll();
+    const contextVolumes = await this.volumeStore.resolveMounts();
+    const args = this.buildProotArgs(instanceId, port, manifest, appDir, dataDir, prooted, entrypointArgv, contextVolumes);
 
     // Prepend the per-instance allowlist to PATH so non-interactive children
     // (which don't source .bashrc) still find granted tools. Interactive
@@ -233,6 +241,7 @@ export class ProotRunner implements SandboxRunner {
     dataDir: string,
     useProot: boolean,
     entrypointArgv: string[],
+    contextVolumes: VolumeEntry[] = [],
   ): string[] {
     if (!useProot) return entrypointArgv;
 
@@ -257,6 +266,9 @@ export class ProotRunner implements SandboxRunner {
       // dir at /run/context mirrors changes live (no respawn to pick up a file
       // edit — mirrors the ContainerRunner volume-subpath mount).
       `--bind=${this.contextStore.systemDir}:/run/context`,
+      // OS-managed shared Context Volumes — bind each volume's subpath dir at
+      // the user-chosen mount path (proot binds are RW regardless of mode).
+      ...contextVolumes.map((v) => `--bind=${join(this.volumeStore.volumesDir, v.name)}:${v.mountPath}`),
       `--cwd=${appDir}`,
     ];
 
