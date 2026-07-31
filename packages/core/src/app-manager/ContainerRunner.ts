@@ -401,6 +401,13 @@ export class ContainerRunner implements SandboxRunner {
     // For system apps: "scopes/system/apps/<id>/<inst>"
     // For global/user: "scopes/global/apps/<id>/<inst>" etc.
     const dataSubpath = instDataDir.slice(this.dataDir.length).replace(/^\//, '');
+    // The APP-level dir (one segment up from the instance dir), exported below
+    // so the app — and @aura/app-sdk's sidecar host — can address it as a
+    // volume-subpath. Sidecar state belongs beside the app's own data rather
+    // than in a dedicated docker volume nothing else can see; app-level, not
+    // instance-level, because a sidecar is per-app (it doesn't multiply with
+    // instances).
+    const appDataSubpath = dataSubpath.split('/').slice(0, -1).join('/');
 
     // SLICED bind set — only this app's apps/<id> dir is visible at
     // /workspace/apps, with shared workspace dirs (node_modules, packages,
@@ -550,6 +557,13 @@ export class ContainerRunner implements SandboxRunner {
       // the host ("aura-shell") in its session-host indicator rather than its
       // own `--hostname <appId>` kernel name. Read by pty-server / index.astro.
       '-e', `AURA_SHELL_HOSTNAME=${this.shellHostname}`,
+      // Where this app's data lives inside the shared app-data volume. The SDK
+      // needs BOTH halves to mount a sidecar's state next to it
+      // (`<subpath>/.sidecars/<service>/<volume>`): the volume name varies with
+      // the compose project prefix, and the subpath varies with the app's
+      // scope, so neither can be derived inside the container.
+      '-e', `AURA_APP_DATA_VOLUME=${appDataVolume}`,
+      '-e', `AURA_APP_DATA_SUBPATH=${appDataSubpath}`,
       // Point HOME at the shared persistent volume so tools like claude/gh/
       // ssh persist their state across container respawns AND across
       // `aura jump` hops between apps (one shared home, one logged-in user).
