@@ -823,6 +823,15 @@ export class AppManager {
       this.upsertInstance(instanceId, appId, { pid, port, startedAt: new Date(), inPool: opts.inPool, sandbox: manifest.sandbox });
       this.transition(instanceId, appId, 'created', port);
 
+      // Re-attach the instance's declared cross-app mounts. Binds are reaped on
+      // stop and a fresh container does NOT inherit ones made under its mount
+      // root while it was down, so without this every `aura mount` evaporated
+      // at the next restart — while `aura mount ls` still claimed it was there.
+      // Best-effort: a mount that can't be restored must not fail the spawn.
+      await this.mounts.reapply(instanceId).catch((err: unknown) => {
+        console.warn(`[AppManager] mount reapply failed for ${instanceId}: ${(err as Error).message}`);
+      });
+
       await this.runnerOf(instanceId).callLifecycle(instanceId, 'onCreate');
       this.transition(instanceId, appId, 'starting', port);
 
