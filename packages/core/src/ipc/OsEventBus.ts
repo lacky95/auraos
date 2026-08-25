@@ -102,6 +102,12 @@ export interface OsEvents {
    * is `'system'` for the v1 global context (`app:<id>` reserved for later).
    */
   'context:changed': { scope: string; key: string; deleted: boolean };
+  /**
+   * Aura Context VOLUME added/removed (OS-managed shared volume). No values,
+   * just the name + whether it was a removal. `scope` is implicitly system in
+   * phase 1 (global, mounted into every app).
+   */
+  'context:volumes:changed': { name: string; deleted: boolean };
   /** Nexus install completed. `record` is the persisted install metadata. */
   'nexus:install.complete':   { id: string; record: unknown };
   /** Nexus update completed (or no-op'd when up-to-date). */

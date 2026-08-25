@@ -12,6 +12,7 @@ import { MOUNT_ROOT_PATH } from './MountManager.js';
 import type { SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import type { SpawnContext } from '../scopes/types.js';
 import { ContextStore } from '../context/ContextStore.js';
+import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
 const HEALTH_CHECK_TIMEOUT_MS = 60_000; // slightly higher than PRoot because container spawn adds ~100 ms
@@ -126,6 +127,8 @@ export class ContainerRunner implements SandboxRunner {
   private nodeModulesVolume!: string;
   /** OS-wide env/secret store, injected into every container. */
   private contextStore: ContextStore;
+  /** OS-managed shared volumes, mounted into every container. */
+  private volumeStore: VolumeStore;
 
   constructor(opts: SandboxRunnerOpts) {
     this.toolchainDir = opts.toolchainDir;
@@ -133,6 +136,7 @@ export class ContainerRunner implements SandboxRunner {
     this.dataDir      = opts.dataDir;
     this.osApiBase    = opts.osApiBase;
     this.contextStore = new ContextStore(opts.dataDir);
+    this.volumeStore  = new VolumeStore(opts.dataDir);
     // Apps need to call back into the shell over the shared network. If
     // osApiBase points at 127.0.0.1 (the PRoot-compatible default), rewrite
     // it to the shell's docker hostname so sibling containers can reach it.
@@ -213,7 +217,12 @@ export class ContainerRunner implements SandboxRunner {
     this.contextStore.ensureDir();
     const contextEnv = await this.contextStore.resolveEnv();
 
-    const args = this.buildDockerArgs(instanceId, appId, port, manifest, hostname, ctx, contextEnv);
+    // OS-managed shared volumes — resolved live too, and ensureAll guarantees
+    // each volume's subpath dir exists before docker mounts it.
+    await this.volumeStore.ensureAll();
+    const contextVolumes = await this.volumeStore.resolveMounts();
+
+    const args = this.buildDockerArgs(instanceId, appId, port, manifest, hostname, ctx, contextEnv, contextVolumes);
     console.log(`[ContainerRunner] Spawning ${hostname} (app=${appId}) on port ${port}`);
 
     // Use spawnSync (not execSync with a joined string) so multi-word args
@@ -362,6 +371,7 @@ export class ContainerRunner implements SandboxRunner {
     hostname: string,
     ctx: SpawnContext,
     contextEnv: Record<string, string>,
+    contextVolumes: VolumeEntry[],
   ): string[] {
     // myTools is only used to provision the per-instance symlinks before
     // docker run — the bind itself goes through aura-app-data's volume-subpath.
@@ -500,6 +510,14 @@ export class ContainerRunner implements SandboxRunner {
       // the same volume subpath here at /run/context read-only mirrors those
       // files live — a `set` reaches a RUNNING app on its next read, no respawn.
       '--mount', `type=volume,source=${appDataVolume},target=/run/context,volume-subpath=context/system,readonly`,
+      // OS-managed shared Context Volumes. Each is a subpath of the app-data
+      // volume mounted at the user-chosen path — same mechanism as /run/context,
+      // so every app sees the same shared storage. `ensureAll()` (spawn) has
+      // created each subpath dir. RO volumes add ,readonly.
+      ...contextVolumes.flatMap((v) => [
+        '--mount',
+        `type=volume,source=${appDataVolume},target=${v.mountPath},volume-subpath=context/volumes/${v.name}${v.mode === 'ro' ? ',readonly' : ''}`,
+      ]),
       // Identity + callback URL.
     ];
 
