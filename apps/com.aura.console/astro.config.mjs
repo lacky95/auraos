@@ -2,9 +2,12 @@ import { defineConfig } from 'astro/config';
 import node from '@astrojs/node';
 import react from '@astrojs/react';
 import tailwindcss from '@tailwindcss/vite';
-import { auraAppIntegration } from '@aura/app-sdk/integration';
+import { auraAppIntegration , resolveAppPort } from '@aura/app-sdk/integration';
 
-const port = Number(process.env['APP_PORT'] ?? 4001);
+// APP_PORT when the OS assigned one, otherwise a free port picked at
+// startup — so running this app by hand (or `astro check`) never fights
+// whatever already holds 4001.
+const port = await resolveAppPort();
 
 function logWsIntegration() {
   return {

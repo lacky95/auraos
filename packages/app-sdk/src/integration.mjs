@@ -81,3 +81,48 @@ export function auraAppIntegration(opts = {}) {
 export function auraIdentityIntegration() {
   return auraAppIntegration({ injectHealth: false });
 }
+
+/**
+ * The port this app's dev server should bind.
+ *
+ * Normally the OS assigns one and passes it as APP_PORT — that is the port it
+ * proxies to, so it must be honoured exactly. Everywhere else (a developer
+ * running the app by hand, `astro check` in CI, two checks at once) there is
+ * no assigned port, and the historical fallback of a hardcoded 4001 meant the
+ * second thing to start died on EADDRINUSE — as `astro check` did inside the
+ * shell container, with a SIGKILL and no explanation.
+ *
+ * So: APP_PORT when set, otherwise ask the OS for a free one. `APP_PORT=0`
+ * asks for that explicitly, which is the convention `listen(0)` already uses
+ * — but Astro needs a real number, so we resolve it here rather than passing
+ * 0 down.
+ *
+ * Async because finding a free port means binding one. Astro config files are
+ * ESM and may use top-level await:
+ *
+ *     const port = await resolveAppPort();
+ */
+export async function resolveAppPort(fallbackToFree = true) {
+  const raw = process.env['APP_PORT'];
+  const n = Number(raw);
+  if (raw !== undefined && raw !== '' && Number.isInteger(n) && n > 0) return n;
+  if (!fallbackToFree) return 4001;
+  return freePort();
+}
+
+/** Bind port 0, note what the OS handed out, release it. */
+function freePort() {
+  return new Promise((resolve) => {
+    import('node:net').then(({ createServer }) => {
+      const srv = createServer();
+      // Any failure here (no permission, exotic sandbox) must not stop the app
+      // from starting — fall back to the historical default.
+      srv.once('error', () => resolve(4001));
+      srv.listen(0, '127.0.0.1', () => {
+        const addr = srv.address();
+        const port = typeof addr === 'object' && addr ? addr.port : 4001;
+        srv.close(() => resolve(port));
+      });
+    }).catch(() => resolve(4001));
+  });
+}

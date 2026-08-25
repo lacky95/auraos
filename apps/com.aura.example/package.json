@@ -4,9 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev":   "APP_PORT=${APP_PORT:-4001} astro dev --host 0.0.0.0 --port ${APP_PORT:-4001}",
+    "dev": "APP_PORT=${APP_PORT:-4001} astro dev --host 0.0.0.0 --port ${APP_PORT:-4001}",
     "build": "astro build",
-    "start": "node dist/server/entry.mjs"
+    "start": "node dist/server/entry.mjs",
+    "typecheck": "astro check"
   },
   "dependencies": {
     "@aura/app-sdk": "workspace:*",
