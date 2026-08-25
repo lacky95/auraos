@@ -51,6 +51,18 @@ export type UpdatePhase =
   | 'queued' | 'checking' | 'pulling' | 'building' | 'verifying'
   | 'rolling-back' | 'done' | 'failed' | 'rolled-back';
 
+/**
+ * What a run actually does. All three share the same machinery — detached
+ * container, job file, checklist, transcript — because all three destroy the
+ * shell that would otherwise be supervising them.
+ *
+ *   update   fetch + rebase + rebuild + recreate + verify (with rollback)
+ *   rebuild  rebuild the image from the checkout AS IS, recreate, verify.
+ *            No git: for picking up local edits, or retrying a failed build.
+ *   restart  recreate nothing, just restart the master container and verify.
+ */
+export type UpdateMode = 'update' | 'rebuild' | 'restart';
+
 export type StepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
 
 /**
@@ -71,14 +83,25 @@ export interface UpdateStep {
 
 /** The checklist, in the order the updater performs it. */
 export const UPDATE_STEPS: ReadonlyArray<{ key: string; label: string }> = [
+  // Not a step the updater performs — it records WHICH button started this
+  // run, so a finished checklist explains itself without knowing which of the
+  // three was pressed. Set at job creation, hence already done.
+  { key: 'action',   label: 'Action triggered' },
   { key: 'inspect',  label: 'Workspace inspected (git checkout, clean tree)' },
   { key: 'fetch',    label: 'Latest commit fetched from the remote' },
   { key: 'rebase',   label: 'Checkout moved to the new revision' },
   { key: 'compose',  label: 'Docker Compose available' },
   { key: 'build',    label: 'Image rebuilt' },
   { key: 'recreate', label: 'Master container recreated' },
+  { key: 'restart',  label: 'Master container restarted' },
   { key: 'verify',   label: 'New shell answered a health check' },
   { key: 'rollback', label: 'Rollback (only if the update failed)' },
+  // Written by the updater as its LAST act, on every exit path. Its purpose
+  // is not to restate the phase: it is the backend acknowledging that the
+  // process ran to the end. A job whose other steps look finished while this
+  // one is still pending means the updater died — killed, host rebooted, OOM
+  // — and nobody would otherwise have noticed.
+  { key: 'complete', label: 'Done — process finished and acknowledged' },
 ];
 
 export interface UpdateJob {
@@ -88,6 +111,7 @@ export interface UpdateJob {
   steps: UpdateStep[];
   startedAt: string;
   finishedAt?: string;
+  mode: UpdateMode;
   branch: string;
   dryRun: boolean;
   fromRev?: string;
@@ -144,7 +168,7 @@ export class SelfUpdater {
         file = join(dir, latest);
       }
       if (!existsSync(file)) return null;
-      return JSON.parse(readFileSync(file, 'utf-8')) as UpdateJob;
+      return this.reapIfAbandoned(JSON.parse(readFileSync(file, 'utf-8')) as UpdateJob);
     } catch { return null; }
   }
 
@@ -168,6 +192,44 @@ export class SelfUpdater {
     const job = this.readJob();
     if (!job) return false;
     return !['done', 'failed', 'rolled-back'].includes(job.phase);
+  }
+
+  /**
+   * Close out a job whose updater is gone.
+   *
+   * The final `complete` step is written by the updater as its last act, so a
+   * job that has no acknowledgement AND no live container behind it did not
+   * finish — the container was killed, the host rebooted, docker restarted.
+   * Without this the UI would poll a phantom run forever and the buttons
+   * would stay disabled with no way back.
+   *
+   * The 90s grace is for the gap between spawning the container and docker
+   * having it inspectable; reaping inside that window would kill every run at
+   * birth.
+   */
+  private reapIfAbandoned(job: UpdateJob): UpdateJob {
+    if (['done', 'failed', 'rolled-back'].includes(job.phase)) return job;
+    const startedMs = Date.parse(job.startedAt);
+    if (Number.isFinite(startedMs) && Date.now() - startedMs < 90_000) return job;
+    try {
+      const out = execFileSync('docker', ['inspect', '-f', '{{.State.Running}}', `${UPDATER_NAME}-${job.id}`],
+        { stdio: ['ignore', 'pipe', 'ignore'], timeout: 8_000, encoding: 'utf-8' }).trim();
+      if (out === 'true') return job;   // still working
+    } catch { /* container gone → fall through and close the job out */ }
+    const closed: UpdateJob = {
+      ...job,
+      phase: 'failed',
+      finishedAt: new Date().toISOString(),
+      error: 'the updater process disappeared before it finished',
+      steps: job.steps.map((st) => (
+        st.key === 'complete' ? { ...st, status: 'failed' as StepStatus, detail: 'updater process disappeared', at: new Date().toISOString() }
+        : st.status === 'running' ? { ...st, status: 'failed' as StepStatus, at: new Date().toISOString() }
+        : st
+      )),
+      log: [...job.log, 'the updater container is gone and never acknowledged completion — marking this run failed'],
+    };
+    try { writeFileSync(this.jobFile(job.id), JSON.stringify(closed, null, 2)); } catch { /* best effort */ }
+    return closed;
   }
 
   /**
@@ -315,15 +377,22 @@ export class SelfUpdater {
    * Launch the updater. Returns the job id immediately — the work outlives
    * this process, so there is nothing to await.
    */
-  start(opts: { branch?: string; dryRun?: boolean } = {}): { ok: true; job: UpdateJob } | { ok: false; reason: string } {
+  start(opts: { mode?: UpdateMode; branch?: string; dryRun?: boolean } = {}):
+      { ok: true; job: UpdateJob } | { ok: false; reason: string } {
+    const mode: UpdateMode = opts.mode ?? 'update';
     if (this.isRunning()) return { ok: false, reason: 'An update is already running.' };
     const probed = this.probe();
     if (!probed.ok) return { ok: false, reason: probed.reason };
-    // Re-run the checks here rather than trusting the caller: the UI's
-    // pre-flight result can be minutes stale, and a dirty tree that appeared
-    // in between must not get rebuilt over.
-    const pre = this.preflight(opts.branch ?? 'main');
-    if (pre.blockers.length) return { ok: false, reason: pre.blockers[0]! };
+    // Git preconditions apply to `update` only. A rebuild deliberately builds
+    // whatever is on disk — uncommitted edits included, that being the point —
+    // and a restart touches neither git nor the image.
+    if (mode === 'update') {
+      // Re-run the checks here rather than trusting the caller: the UI's
+      // pre-flight result can be minutes stale, and a dirty tree that appeared
+      // in between must not get rebuilt over.
+      const pre = this.preflight(opts.branch ?? 'main');
+      if (pre.blockers.length) return { ok: false, reason: pre.blockers[0]! };
+    }
 
     const branch = (opts.branch ?? 'main').trim();
     if (!/^[A-Za-z0-9._\/-]{1,120}$/.test(branch)) {
@@ -334,22 +403,25 @@ export class SelfUpdater {
     const id = new Date().toISOString().replace(/[:.]/g, '-');
     const job: UpdateJob = {
       id, phase: 'queued', startedAt: new Date().toISOString(),
-      branch, dryRun,
-      steps: UPDATE_STEPS.map((s) => ({ ...s, status: 'pending' as StepStatus })),
-      log: [`queued (branch=${branch}${dryRun ? ', dry-run' : ''})`],
+      mode, branch, dryRun,
+      steps: UPDATE_STEPS.map((s) => (s.key === 'action'
+        ? { ...s, status: 'done' as StepStatus, detail: describeMode(mode, branch, dryRun), at: new Date().toISOString() }
+        : { ...s, status: 'pending' as StepStatus })),
+      log: [`queued: ${mode}${mode === 'update' ? ` (branch=${branch})` : ''}${dryRun ? ' [dry-run]' : ''}`],
     };
     mkdirSync(this.jobsDir(), { recursive: true });
     writeFileSync(this.jobFile(id), JSON.stringify(job, null, 2));
 
     // Same remote resolution the pre-flight used: the remote is often not
     // called "origin" and is usually SSH, which no sandbox can authenticate.
-    const remote = this.remoteInfo(branch);
+    const remote = mode === 'update' ? this.remoteInfo(branch) : { remote: '', fetchUrl: '' };
     if (!remote) return { ok: false, reason: 'No git remote configured to update from.' };
 
     const script = updaterScript({
       jobFile: `/data/aura/update/${id}.json`,
       logFile: `/data/aura/update/${id}.log`,
       fetchUrl: remote.fetchUrl,
+      mode,
       branch, dryRun,
       project: probed.project,
       composeFile: probed.composeFile,
@@ -400,13 +472,21 @@ export class SelfUpdater {
   }
 }
 
+/** Human label for the button that started a run. */
+function describeMode(mode: UpdateMode, branch: string, dryRun: boolean): string {
+  const base = mode === 'update'  ? `Update — pull ${branch} and rebuild`
+             : mode === 'rebuild' ? 'Rebuild — image from the current checkout'
+             :                      'Restart — master container only';
+  return dryRun ? `${base} (dry run)` : base;
+}
+
 /**
  * The updater's program. Plain bash so it can be read (and run by hand) on any
  * machine, and so it has no dependency on the node/TS build of the revision it
  * is in the middle of replacing.
  */
 function updaterScript(o: {
-  jobFile: string; logFile: string; fetchUrl: string; branch: string; dryRun: boolean;
+  jobFile: string; logFile: string; fetchUrl: string; mode: UpdateMode; branch: string; dryRun: boolean;
   project: string; composeFile: string; workDir: string;
 }): string {
   const dry = o.dryRun ? '1' : '0';
@@ -417,6 +497,7 @@ LOGFILE=${o.logFile}
 WS=${JSON.stringify(o.workDir)}
 BRANCH=${JSON.stringify(o.branch)}
 FETCH_URL=${JSON.stringify(o.fetchUrl)}
+MODE=${JSON.stringify(o.mode)}
 DRY=${dry}
 PROJECT=${JSON.stringify(o.project)}
 COMPOSE_FILE=${JSON.stringify(o.composeFile)}
@@ -472,6 +553,7 @@ fail() {
     j.steps=(j.steps||[]).map(s=> s.status==="running" ? {...s, status:"failed", at:new Date().toISOString()} : s);
     fs.writeFileSync(f, JSON.stringify(j,null,2));
   ' "$JOB" || true
+  step complete failed "$1"
   say failed "$1"
   exit 1
 }
@@ -504,6 +586,12 @@ confirm_stuck() {
   return 0
 }
 
+if [ "$MODE" != "update" ]; then
+  # No git in a rebuild or a restart: those act on what is already checked out.
+  for k in inspect fetch rebase; do step "$k" skipped "$MODE does not touch git"; done
+fi
+
+if [ "$MODE" = "update" ]; then
 step inspect running
 say checking "inspecting the workspace"
 if ! g rev-parse --git-dir >/dev/null 2>&1; then
@@ -554,15 +642,19 @@ chown -R "$OWNER" "$WS/.git" 2>/dev/null || true
 
 if [ "$FROM_REV" = "$TO_REV" ]; then
   step rebase done "already at \${TO_REV:0:12}"
-  for k in compose build recreate verify rollback; do step "$k" skipped "nothing to update"; done
+  for k in compose build recreate restart verify rollback; do step "$k" skipped "nothing to update"; done
+  step complete done "nothing to do"
   say done "already up to date at \${TO_REV:0:12} — nothing to build"
   exit 0
 fi
 say pulling "updated \${FROM_REV:0:12} → \${TO_REV:0:12}"
 
+fi   # end MODE=update git section
+
 if [ "$DRY" = "1" ]; then
-  for k in compose build recreate verify rollback; do step "$k" skipped "dry run"; done
-  say done "dry run: would rebuild and recreate '$PROJECT' from $COMPOSE_FILE"
+  for k in compose build recreate restart verify rollback; do step "$k" skipped "dry run"; done
+  step complete done "dry run finished"
+  say done "dry run: would $MODE '$PROJECT' from $COMPOSE_FILE"
   exit 0
 fi
 
@@ -634,6 +726,35 @@ healthy() {
   done
 }
 
+if [ "$MODE" = "restart" ]; then
+  for k in compose build recreate rollback; do step "$k" skipped "restart only"; done
+  step restart running
+  say building "restarting aura-shell"
+  OLD_STARTED=$(docker inspect -f '{{.State.StartedAt}}' aura-shell 2>/dev/null || echo none)
+  if ! docker restart aura-shell >/dev/null 2>&1; then
+    step restart failed "docker restart failed"
+    fail "could not restart aura-shell"
+  fi
+  NEW_STARTED=$(docker inspect -f '{{.State.StartedAt}}' aura-shell 2>/dev/null || echo none)
+  if [ "$NEW_STARTED" = "$OLD_STARTED" ]; then
+    step restart failed "container start time unchanged"
+  else
+    step restart done "restarted at $NEW_STARTED"
+  fi
+  step verify running
+  say verifying "waiting for the shell to come back"
+  if healthy; then
+    step verify done "answered after the restart"
+    step complete done "restart finished"
+    say done "aura-shell restarted and healthy"
+    exit 0
+  fi
+  step verify failed "no response after the restart"
+  fail "aura-shell did not come back after the restart"
+fi
+
+# rebuild and update share everything from here down.
+step restart skipped "container is recreated, not restarted"
 step compose running
 if ! ensure_compose; then
   fail "docker compose is unavailable and could not be downloaded — cannot rebuild."
@@ -647,15 +768,27 @@ step compose done "$(docker compose version --short 2>/dev/null || echo availabl
 OLD_ID=$(docker inspect -f '{{.Id}}' aura-shell 2>/dev/null || echo none)
 
 step build running
-say building "rebuilding the image and recreating aura-shell — this blocks until the build finishes, so no rollback can interrupt it (kills the old shell at the end)"
+say building "[$MODE] rebuilding the image and recreating aura-shell — this blocks until the build finishes, so no rollback can interrupt it (kills the old shell at the end)"
 if ! rebuild; then
   step build failed "compose build/up failed"
+  if [ "$MODE" != "update" ]; then
+    step rollback skipped "nothing to roll back to — the checkout was not changed"
+    fail "the build failed; the checkout is untouched, so there is nothing to revert"
+  fi
   step rollback running
 say rolling-back "build failed — restoring \${FROM_REV:0:12}"
   g reset --hard "$FROM_REV" >/dev/null 2>&1
   chown -R "$OWNER" "$WS/.git" 2>/dev/null || true
   rebuild || true
-  if healthy; then step rollback done "restored \${FROM_REV:0:12}"; say rolled-back "build failed; restored \${FROM_REV:0:12}"; else step rollback failed "restore did not come up"; say failed "build failed and the restore did not come up — manual attention needed"; fi
+  if healthy; then
+  step rollback done "restored \${FROM_REV:0:12}"
+  step complete done "finished — build failed, previous revision restored"
+  say rolled-back "build failed; restored \${FROM_REV:0:12}"
+else
+  step rollback failed "restore did not come up"
+  step complete failed "finished — neither revision is up"
+  say failed "build failed and the restore did not come up — manual attention needed"
+fi
   exit 1
 fi
 
@@ -676,6 +809,7 @@ say verifying "waiting for the new shell — a first boot installs deps and buil
 if healthy; then
   step verify done "answered on the new revision"
   step rollback skipped "not needed"
+  step complete done "$MODE finished"
   say done "updated to \${TO_REV:0:12} and healthy"
   exit 0
 fi
@@ -690,6 +824,7 @@ if ! confirm_stuck; then
   if healthy; then
     step verify done "answered on the new revision (after a longer wait)"
     step rollback skipped "not needed"
+    step complete done "$MODE finished"
     say done "updated to \${TO_REV:0:12} and healthy"
     exit 0
   fi
@@ -697,6 +832,10 @@ if ! confirm_stuck; then
 fi
 
 step verify failed "no response from the new shell"
+if [ "$MODE" != "update" ]; then
+  step rollback skipped "nothing to roll back to — the checkout was not changed"
+  fail "the rebuilt shell never answered; the checkout is unchanged, so there is nothing to revert"
+fi
 step rollback running
 say rolling-back "\${TO_REV:0:12} never became healthy — restoring \${FROM_REV:0:12}"
 g reset --hard "$FROM_REV" >/dev/null 2>&1
@@ -704,9 +843,11 @@ chown -R "$OWNER" "$WS/.git" 2>/dev/null || true
 rebuild || true
 if healthy; then
   step rollback done "restored \${FROM_REV:0:12}"
+  step complete done "finished — update reverted"
   say rolled-back "restored \${FROM_REV:0:12}; the update to \${TO_REV:0:12} was reverted"
 else
   step rollback failed "restore did not come up either"
+  step complete failed "finished — neither revision is up"
   say failed "neither \${TO_REV:0:12} nor \${FROM_REV:0:12} came up — manual attention needed"
 fi
 exit 1

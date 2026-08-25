@@ -12,7 +12,9 @@ import { SelfUpdater } from '@aura/core';
  *         IN THIS PROCESS (a couple of seconds, no container) so the user
  *         learns "nothing to update" or "you have uncommitted changes"
  *         immediately, instead of after a heavy updater has spun up.
- * POST → { ok, job }                   launch an update; 202, because the
+ * POST { mode } → { ok, job }         launch a run — 'update' (default),
+ *         'rebuild' (image from the current checkout, no git) or 'restart'
+ *         (bounce the master container). 202, because the
  *         work outlives this request AND this whole process — the updater
  *         recreates the container serving it.
  *
@@ -54,9 +56,9 @@ export const GET: APIRoute = ({ url }) => {
 };
 
 export const POST: APIRoute = async ({ request }) => {
-  let body: { branch?: string; dryRun?: boolean } = {};
+  let body: { mode?: 'update' | 'rebuild' | 'restart'; branch?: string; dryRun?: boolean } = {};
   try { body = await request.json() as typeof body; } catch { /* empty body is fine */ }
-  const res = updater().start({ branch: body.branch, dryRun: body.dryRun });
+  const res = updater().start({ mode: body.mode, branch: body.branch, dryRun: body.dryRun });
   if (!res.ok) return json({ ok: false, error: res.reason }, 409);
   return json({ ok: true, job: res.job }, 202);
 };
