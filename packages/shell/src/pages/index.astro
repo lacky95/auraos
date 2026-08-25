@@ -223,6 +223,7 @@ const ssrVisibleViews = initialViews
   import { nextInDirection, getViewRects } from '../lib/windowNav.ts';
   import type { LayoutNavContext } from '../lib/windowNav.ts';
   import { osEvents } from '../lib/osEvents.ts';
+  import { markLaunchedHere } from '../lib/launchOrigin.ts';
   import {
     queueViewportBroadcast,
     observeIframe,
@@ -1374,6 +1375,7 @@ const ssrVisibleViews = initialViews
         // leave a dead backend in the strip — better to force close.
         const real = buildView(appId, manifest.name, instanceId, undefined, '/', instance?.state ?? 'creating', !!manifest.backgroundService);
         pendingAutoFocusViewIds.add(real.viewId);
+        markLaunchedHere(real.viewId);
         pending.replaceWith(real);
         return;
       }
@@ -1421,6 +1423,7 @@ const ssrVisibleViews = initialViews
         const minimizable = !!activity.minimizable && !!manifest.backgroundService;
         const real = buildView(appId, activity.title ?? manifest.name, targetInstanceId, activityId, activity.path ?? '/', targetInstanceState, minimizable);
         pendingAutoFocusViewIds.add(real.viewId);
+        markLaunchedHere(real.viewId);
         pending.replaceWith(real);
       } finally {
         markActivityOpenEnd(appId);
@@ -1437,7 +1440,13 @@ const ssrVisibleViews = initialViews
   // add the view via pending.replaceWith(); the SSE event is just a duplicate.
   const pendingActivityOpens = new Map<string, number>();
 
-  // ViewIds of windows the user *just launched*. When their iframe finishes
+  // ViewIds of windows the user *just launched*. Every site that arms this set
+  // also calls `markLaunchedHere` (lib/launchOrigin.ts): both answer the same
+  // question — "did THIS browser start this window?" — one for focus, one so an
+  // app that can only be live in one browser (the Terminal) takes the session
+  // here instead of losing a race to another browser's iframe.
+  //
+  // When their iframe finishes
   // loading, `updateSlot` (the only place that creates the <iframe> element)
   // fires focus() + a `aura.window.focus` postMessage and drops the id —
   // same end-state as pressing Enter on a highlighted slot in window-select
@@ -1470,6 +1479,7 @@ const ssrVisibleViews = initialViews
       const minimizable = !!activity.minimizable && !!manifest?.backgroundService;
       const real = buildView(appId, activity.title ?? name, instanceId, activityId, activity.path ?? '/', lifecycleState, minimizable);
       pendingAutoFocusViewIds.add(real.viewId);
+      markLaunchedHere(real.viewId);
       pending.replaceWith(real);
     } catch (err) {
       console.error('[shell] openActivityOnInstance failed', err);

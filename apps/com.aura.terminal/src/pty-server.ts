@@ -7,14 +7,53 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
- * PTY session registry — multicast, survives browser reload.
+ * PTY session registry — one live VIEW at a time, survives browser reload.
  *
  * Each session is keyed by the OS activity id (forwarded by the terminal
- * page as `?_aura_session=<id>` on its WS URL). MULTIPLE WebSocket
- * clients can attach to the same session simultaneously — PTY output is
- * broadcast to all of them, and any of them can write input. Two
- * browser tabs / two windows of the same activity end up sharing the
- * same live shell instead of ping-ponging displaces.
+ * page as `?_aura_session=<id>` on its WS URL). The shell behind it is a
+ * long-lived REMOTE session; what is exclusive is the *view* onto it.
+ *
+ * Every WS also carries a browser id (`?_aura_browser=<id>`) identifying the
+ * browser it came from — one per browser tab, see the client. At most ONE
+ * browser owns a session at a time:
+ *
+ *   • the owner's sockets get the scrollback replay + live output and may write;
+ *   • every other socket stays attached as a CONTROL CHANNEL ONLY and is told
+ *     `{type:'busy'}`, so its page can swap the terminal for "This terminal is
+ *     in use somewhere else. [Use terminal here]";
+ *   • that button sends `{type:'claim'}`, which revokes the previous owner (it
+ *     gets `{type:'busy'}` and hides its terminal) and grants this one.
+ *
+ * Revoking only stops a browser DRAWING the session — the shell keeps running
+ * throughout. Nothing here ever ends a session; that's `killSession` and
+ * `pty.onExit` alone.
+ *
+ * Why: a PTY has ONE winsize. We used to broadcast to every socket at once and
+ * referee the size conflict here (smallest-fit, or a "primary device" flag the
+ * user set from the terminal bar). Two live xterms of different sizes on one
+ * winsize never really worked — the losing screen wrapped wrong, TUIs worst of
+ * all. Exclusivity removes the conflict at the source: one live view, and the
+ * PTY is sized to exactly that view.
+ *
+ * Ownership does NOT move when a socket drops. A WebSocket is not a signal
+ * that the user left (the same reasoning as GRACE_MS below): a reload of the
+ * OS UI tears every socket down and rebuilds them a second later, and so do a
+ * backgrounded tab, a sleeping phone, a Wi-Fi handover. Handing the session to
+ * another browser on close therefore lost the terminal on every reload — you
+ * came back and were told your own terminal was in use somewhere else.
+ *
+ * So the owner is remembered across the gap and simply picks its session back
+ * up when it reconnects (same browser id ⇒ same owner). A session only moves
+ * to a different browser when someone presses the button, when a launch claims
+ * it, or when it is genuinely abandoned — nobody rendering it and the owner
+ * gone for longer than OWNER_HOLD_MS.
+ *
+ * One case must not be left to first-come: a LAUNCH. The new window appears in
+ * every browser the user has open and each mounts its own iframe, so the
+ * session would go to whichever socket connected first — often not the browser
+ * the user launched from. That browser therefore attaches with `?_aura_claim=1`
+ * (it holds the shell's one-shot "launched here" mark) and takes the session
+ * outright, exactly as if its take-over button had been pressed.
  *
  * Lifetime:
  *   • A new WS arriving for a session that has no PTY yet spawns one.
@@ -25,25 +64,36 @@ import { fileURLToPath } from 'node:url';
  *   • The OS `onActivityDestroy` lifecycle hook calls `killSession`
  *     which closes all bound WSes and kills the PTY immediately.
  *
- * Scrollback: each new WS gets a one-shot replay of the session's
- * scrollback ring buffer (256 KiB cap) before live output continues —
- * so a browser reload returns to exactly where it left off.
+ * Scrollback: each newly GRANTED socket gets a one-shot replay of the
+ * session's scrollback ring buffer (256 KiB cap) before live output continues
+ * — so a browser reload, or a take-over from a different browser, returns to
+ * exactly where the session left off.
  *
  * Anonymous connections (no `_aura_session`) get the old "kill on
  * close" behavior — keeps direct `/ws` consumers (curl, tests) working.
  */
 
+/** One attached socket. `granted` sockets are the live view; the rest are
+ *  control channels waiting on a take-over. */
+interface ClientState {
+  browserId: string;
+  cols:    number;   // size this socket last reported (0 until it reports)
+  rows:    number;
+  granted: boolean;
+}
+
 interface Session {
   id:         string;
   pty:        IPty;
-  wss:        Set<WebSocket>;
+  clients:    Map<WebSocket, ClientState>;
+  /** Browser id currently rendering this session; null ⇒ up for grabs. */
+  owner:      string | null;
+  /** When the owner's last live socket went away (epoch ms; 0 ⇒ it's here). */
+  ownerLeftAt: number;
   buffer:     string[];    // scrollback ring (joined chunks)
   bufferSize: number;      // total bytes in buffer; cap at SCROLLBACK_BYTES
   killTimer:  NodeJS.Timeout | null;
   reconcileTimer: NodeJS.Timeout | null;  // winsize self-heal heartbeat
-  // Per-client reported size + primary flag — the shared PTY size is derived
-  // from these (smallest-fit, or the primary device when one is set).
-  clientSizes: Map<WebSocket, { cols: number; rows: number; primary: boolean }>;
   cols:       number;   // current EFFECTIVE PTY size (result of recomputeEffective)
   rows:       number;
   // Output coalescing: accumulate PTY output and flush it in ~60Hz frames so a
@@ -81,6 +131,27 @@ const OUTPUT_FRAME_MS  = 16;           // output-coalescing frame (~60Hz)
  * window for constrained hosts.
  */
 const GRACE_MS = Number(process.env['AURA_PTY_GRACE_MS'] ?? 0);
+
+/**
+ * How long a session stays reserved for its owner after that browser's last
+ * socket drops — the window in which a disconnect is assumed to be a reload or
+ * a blip rather than a departure.
+ *
+ * The owner itself is never affected by this: it reconnects with the same
+ * browser id and is granted immediately, however long it was away. The hold
+ * only stops a DIFFERENT browser from inheriting the session in the seconds
+ * where the owner is mid-reload — without it, a spectator that happened to
+ * reconnect in that gap would take the terminal from under it.
+ *
+ * Past the hold the session is treated as abandoned and the next browser to
+ * attach gets it. Pressing "Use terminal here" bypasses the hold entirely, so
+ * this is never something a user has to wait out.
+ *
+ * Read lazily so tests can shorten it.
+ */
+function ownerHoldMs(): number {
+  return Number(process.env['AURA_TERM_OWNER_HOLD_MS'] ?? 10_000);
+}
 
 /**
  * WebSocket keepalive. An idle terminal sends zero bytes for hours, and every
@@ -231,10 +302,73 @@ function spawnPty(sessionId: string | null, cols: number, rows: number): IPty {
   ], opts);
 }
 
-function broadcastToWss(sess: Session, data: string): void {
-  for (const ws of sess.wss) {
-    if (ws.readyState === WebSocket.OPEN) ws.send(data);
+/**
+ * Control frames go out as BINARY, PTY output as TEXT. That single rule is the
+ * whole demux on the client (`typeof ev.data === 'string'`): no sentinel to
+ * escape, no way a `cat` of some JSON is mistaken for a control message, and
+ * zero framing cost on the hot output path.
+ */
+function sendCtl(ws: WebSocket, msg: Record<string, unknown>): void {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  try { ws.send(Buffer.from(JSON.stringify(msg), 'utf-8')); } catch { /* socket gone */ }
+}
+
+/** The sockets currently rendering this session (the owner browser's — normally one). */
+function liveSockets(sess: Session): WebSocket[] {
+  const out: WebSocket[] = [];
+  for (const [ws, c] of sess.clients) {
+    if (c.granted && ws.readyState === WebSocket.OPEN) out.push(ws);
   }
+  return out;
+}
+
+function broadcastLive(sess: Session, data: string): void {
+  for (const ws of liveSockets(sess)) ws.send(data);
+}
+
+/**
+ * Make a socket the live view: replay the scrollback, then stream. Idempotent,
+ * so re-granting an already-live socket can't double-replay it.
+ */
+function grant(sess: Session, ws: WebSocket): void {
+  const c = sess.clients.get(ws);
+  if (!c || c.granted || ws.readyState !== WebSocket.OPEN) return;
+  // Fold anything still sitting in the coalescing buffer into the ring FIRST
+  // (this socket isn't live yet, so it can't be double-sent), so the replay we
+  // are about to send is complete and the live stream picks up cleanly after it.
+  emitOut(sess);
+  c.granted = true;
+  sendCtl(ws, { type: 'granted' });
+  if (sess.buffer.length > 0) {
+    try { ws.send(sess.buffer.join('')); } catch { /* socket may have torn down */ }
+  }
+}
+
+/** Stop streaming to a socket and tell its page to show the take-over panel. */
+function revoke(sess: Session, ws: WebSocket): void {
+  const c = sess.clients.get(ws);
+  if (!c) return;
+  c.granted = false;
+  sendCtl(ws, { type: 'busy' });
+}
+
+/**
+ * Hand the live terminal to `browserId`: every socket of the previous owner is
+ * revoked, every socket of the new one granted, and the PTY resized to what the
+ * new browser reports. Called on attach (no live owner, or a launch claim), on
+ * an explicit `claim`, and on automatic handover when the owner's last socket
+ * drops.
+ */
+function setOwner(sess: Session, browserId: string): void {
+  const prev = sess.owner;
+  sess.owner = browserId;
+  sess.ownerLeftAt = 0;          // an owner is being installed — it's here now
+  if (prev && prev !== browserId) {
+    for (const [ws, c] of sess.clients) if (c.browserId === prev) revoke(sess, ws);
+    log('handover', sess.id, `${prev} → ${browserId}`);
+  }
+  for (const [ws, c] of sess.clients) if (c.browserId === browserId) grant(sess, ws);
+  recomputeEffective(sess);
 }
 
 // Flush whatever output is buffered right now — append it to the scrollback
@@ -246,7 +380,7 @@ function emitOut(sess: Session): void {
   const data = sess.outBuf;
   sess.outBuf = '';
   bufferPush(sess, data);
-  broadcastToWss(sess, data);
+  broadcastLive(sess, data);
 }
 
 function attachPtyOutput(sess: Session): void {
@@ -265,8 +399,8 @@ function attachPtyOutput(sess: Session): void {
     emitOut(sess);
     if (sess.outTimer) { clearTimeout(sess.outTimer); sess.outTimer = null; }
     if (sess.reconcileTimer) { clearInterval(sess.reconcileTimer); sess.reconcileTimer = null; }
-    for (const ws of sess.wss) { try { ws.close(); } catch { /* ignore */ } }
-    sess.wss.clear();
+    for (const ws of sess.clients.keys()) { try { ws.close(); } catch { /* ignore */ } }
+    sess.clients.clear();
     sessions.delete(sess.id);
   });
 }
@@ -292,7 +426,7 @@ function attachPtyOutput(sess: Session): void {
 function startReconcile(sess: Session): void {
   if (sess.reconcileTimer) return;
   sess.reconcileTimer = setInterval(() => {
-    if (sess.wss.size === 0) return;          // detached → nothing to keep in sync
+    if (liveSockets(sess).length === 0) return;   // no live view → nothing to keep in sync
     if (sess.cols <= 0 || sess.rows <= 0) return;
     try { sess.pty.resize(sess.cols, sess.rows); } catch { /* pty gone */ }
   }, RECONCILE_MS);
@@ -300,62 +434,87 @@ function startReconcile(sess: Session): void {
   if (typeof sess.reconcileTimer.unref === 'function') sess.reconcileTimer.unref();
 }
 
-function attachWs(sess: Session, ws: WebSocket): void {
+function attachWs(sess: Session, ws: WebSocket, browserId: string, launchClaim: boolean): void {
   if (sess.killTimer) { clearTimeout(sess.killTimer); sess.killTimer = null; }
   markAlive(ws);
-  sess.wss.add(ws);
-  log('attach', sess.id, `clients=${sess.wss.size} scrollback=${sess.bufferSize}B`);
+  sess.clients.set(ws, { browserId, cols: 0, rows: 0, granted: false });
+  log('attach', sess.id,
+    `browser=${browserId} clients=${sess.clients.size} scrollback=${sess.bufferSize}B`
+    + (launchClaim ? ' launch-claim' : ''));
 
-  // Flush any output still sitting in the coalescing buffer into the ring so
-  // this client's replay below reflects the very latest state. Safe: the new
-  // ws isn't in sess.wss yet, so emitOut's broadcast can't double-send to it.
-  emitOut(sess);
-
-  // Replay scrollback before live output resumes. One write of the joined
-  // buffer is preferable to N small frames — xterm.js batches paint, but
-  // the network round-trips would still show as a sluggish redraw.
-  if (sess.buffer.length > 0) {
-    try { ws.send(sess.buffer.join('')); } catch { /* socket may have torn down */ }
+  // Who renders the terminal?
+  //   • launchClaim — this browser launched the window; it wins outright, even
+  //     against another browser's iframe that merely connected first. Without
+  //     this the launch is a plain race, and the user who pressed the button is
+  //     the one who tends to lose it.
+  //   • nobody owns it yet — a fresh session.
+  //   • WE own it. This is the reload path, and it must not depend on how long
+  //     we were away or on what happened while we were: same browser id ⇒ same
+  //     owner, terminal comes straight back.
+  //   • it's abandoned — nobody rendering it and the owner gone past the hold.
+  // Anything else is somebody else's terminal, so we get the take-over panel
+  // (grant() sends the scrollback replay; a spectator gets nothing).
+  const abandoned = liveSockets(sess).length === 0
+    && sess.ownerLeftAt > 0
+    && Date.now() - sess.ownerLeftAt > ownerHoldMs();
+  if (launchClaim || !sess.owner || sess.owner === browserId || abandoned) {
+    setOwner(sess, browserId);
+  } else {
+    sendCtl(ws, { type: 'busy' });
   }
 
   ws.on('message', (msg: Buffer | string) => {
+    const c = sess.clients.get(ws);
     const raw = msg.toString();
     try {
-      const parsed = JSON.parse(raw) as { type: string; cols?: number; rows?: number; data?: string; primary?: boolean };
+      const parsed = JSON.parse(raw) as { type: string; cols?: number; rows?: number; data?: string };
+      if (parsed.type === 'claim') {
+        // "Use terminal here" — move the live view to this browser. The
+        // previous owner is revoked (its page hides its terminal, nothing is
+        // stopped) and we get the scrollback, so the session continues exactly
+        // where it was.
+        if (c) setOwner(sess, c.browserId);
+        return;
+      }
+      // Everything below is the live view's privilege: a spectator's stray
+      // keystroke or resize must never reach the shared shell.
+      if (!c?.granted) return;
       if (parsed.type === 'resize') {
-        // A PTY has ONE winsize, but clients (different devices / screens) can
-        // each want a different one. So clients REPORT their own desired size
-        // here and the server picks the shared size in recomputeEffective():
-        // smallest of everyone (so content wraps to fit every screen) unless a
-        // client flags itself `primary`, in which case the primary device's
-        // size wins. Each client still renders its own xterm at its own size;
-        // this only governs the shared PTY the shell actually formats against.
-        const cols = parsed.cols ?? sess.cols;
-        const rows = parsed.rows ?? sess.rows;
+        // The live view REPORTS its size and the PTY follows it exactly (see
+        // recomputeEffective) — no cross-device compromise to make any more,
+        // because no other view is rendering.
+        const cols = parsed.cols ?? c.cols;
+        const rows = parsed.rows ?? c.rows;
         if (cols > 0 && rows > 0) {
-          sess.clientSizes.set(ws, { cols, rows, primary: parsed.primary === true });
+          c.cols = cols; c.rows = rows;
           recomputeEffective(sess);
         }
       } else if (parsed.type === 'data') {
         sess.pty.write(parsed.data ?? '');
       }
     } catch {
-      sess.pty.write(raw);
+      if (c?.granted) sess.pty.write(raw);
     }
   });
 
   ws.on('close', (code) => {
-    sess.wss.delete(ws);
-    sess.clientSizes.delete(ws);
-    // A client leaving can grow the effective size (e.g. the smallest screen
-    // disconnected) — recompute so the remaining devices reclaim the space.
+    const c = sess.clients.get(ws);
+    sess.clients.delete(ws);
+    log('detach', sess.id, `code=${code} remaining=${sess.clients.size}`);
+    // The owner's last socket went away. Do NOT hand the session on: this is
+    // what a reload looks like, and the owner is about to reconnect and expect
+    // its terminal back. Just stamp when it went, so the session can be
+    // recognised as abandoned later (see the attach rule) if it never returns.
+    if (c && sess.owner === c.browserId && liveSockets(sess).length === 0) {
+      sess.ownerLeftAt = Date.now();
+      log('owner offline', sess.id, `${c.browserId} — holding its session`);
+    }
     recomputeEffective(sess);
-    log('detach', sess.id, `code=${code} remaining=${sess.wss.size}`);
     // Last client left. Persist the scrollback so the session survives even a
     // pty-server restart, then hold the PTY: with GRACE_MS=0 (the default) the
     // shell waits indefinitely for the user to come back. A finite grace is
     // opt-in via AURA_PTY_GRACE_MS.
-    if (sess.wss.size === 0) {
+    if (sess.clients.size === 0) {
       emitOut(sess);                 // fold any buffered tail into the ring before we persist it
       saveScrollback(sess);
       if (GRACE_MS > 0) {
@@ -385,7 +544,7 @@ function markAlive(ws: WebSocket): void {
 
 function sweepKeepalive(): void {
   for (const sess of sessions.values()) {
-    for (const ws of sess.wss) {
+    for (const ws of sess.clients.keys()) {
       if (ws.readyState !== WebSocket.OPEN) continue;
       if (!alive.has(ws)) {
         // Missed the previous ping — the socket is a zombie (half-open TCP,
@@ -402,25 +561,23 @@ function sweepKeepalive(): void {
 }
 
 /**
- * Pick the shared PTY winsize from every attached client's reported size.
+ * Size the PTY to the LIVE VIEW.
  *
- * Default: the SMALLEST cols/rows across all clients, so the shell's output
- * wraps to fit the narrowest screen — larger screens just show unused space on
- * the right (tmux-style), never wrong-wrapped text. Override: if any client
- * flagged itself `primary` (the user pressed the ★ button on that device), the
- * primary device's size wins instead — its screen fills exactly, others render
- * best-effort. Multiple primaries fall back to the smallest among them.
+ * With exclusive views this is almost a pass-through: one socket is granted, so
+ * the PTY simply gets that browser's cols/rows and the shell formats for the
+ * screen actually looking at it. The min() only matters in the degenerate case
+ * where one browser id holds two sockets (a duplicated tab copies sessionStorage),
+ * and there it keeps the narrower one wrap-safe. Spectator sockets are excluded
+ * entirely — that's the whole point of the take-over model.
  *
  * Re-applying is idempotent: when the result is unchanged we don't touch the
  * PTY, and even the reconcile heartbeat's identical re-apply is a Linux no-op.
  */
 function recomputeEffective(sess: Session): void {
-  const all = [...sess.clientSizes.values()].filter((s) => s.cols > 0 && s.rows > 0);
-  if (all.length === 0) return;                 // no sized clients yet — keep current
-  const primaries = all.filter((s) => s.primary);
-  const pool = primaries.length > 0 ? primaries : all;
-  const cols = Math.min(...pool.map((s) => s.cols));
-  const rows = Math.min(...pool.map((s) => s.rows));
+  const live = [...sess.clients.values()].filter((c) => c.granted && c.cols > 0 && c.rows > 0);
+  if (live.length === 0) return;                // no sized live view yet — keep current
+  const cols = Math.min(...live.map((c) => c.cols));
+  const rows = Math.min(...live.map((c) => c.rows));
   if (cols === sess.cols && rows === sess.rows) return;
   sess.cols = cols; sess.rows = rows;
   try { sess.pty.resize(cols, rows); } catch { /* ignore */ }
@@ -443,7 +600,7 @@ export function killSession(sessionId: string): boolean {
     if (killedTmux) log('killSession', sessionId, 'detached tmux session reaped (no in-memory session)');
     return killedTmux;
   }
-  log('killSession', sessionId, `clients=${sess.wss.size}`);
+  log('killSession', sessionId, `clients=${sess.clients.size}`);
   if (sess.killTimer) clearTimeout(sess.killTimer);
   if (sess.reconcileTimer) { clearInterval(sess.reconcileTimer); sess.reconcileTimer = null; }
   if (sess.outTimer) { clearTimeout(sess.outTimer); sess.outTimer = null; }
@@ -452,14 +609,17 @@ export function killSession(sessionId: string): boolean {
   // silently attach to that stale shell instead of getting a fresh one.
   tmuxKill(sessionId);
   try { sess.pty.kill(); } catch { /* already gone */ }
-  for (const ws of sess.wss) { try { ws.close(); } catch { /* ignore */ } }
-  sess.wss.clear();
+  for (const ws of sess.clients.keys()) { try { ws.close(); } catch { /* ignore */ } }
+  sess.clients.clear();
   sessions.delete(sessionId);
   deleteScrollback(sessionId);
   return true;
 }
 
 let ptyWss: WebSocketServer | null = null;
+
+// Fallback browser-id counter for sockets that don't send one (see below).
+let socketSeq = 0;
 
 export function getPtyWss(): WebSocketServer {
   if (ptyWss) return ptyWss;
@@ -488,6 +648,16 @@ export function getPtyWss(): WebSocketServer {
     const sessionId = typeof url.query?.['_aura_session'] === 'string'
       ? url.query['_aura_session']
       : null;
+    // Which browser is this socket? The terminal page sends a per-tab id (see
+    // the client's BROWSER_KEY). A socket without one — an older client, or a
+    // hand-rolled consumer — gets a unique synthetic id so it is treated as its
+    // own browser rather than silently sharing one with everybody else.
+    const rawBrowser = url.query?.['_aura_browser'];
+    const browserId = typeof rawBrowser === 'string' && rawBrowser.length > 0
+      ? rawBrowser
+      : `sock-${++socketSeq}`;
+    // Set by the browser that launched this window (see the header doc).
+    const launchClaim = url.query?.['_aura_claim'] === '1';
 
     // Anonymous mode: no session id → fall back to legacy "kill on close"
     // behaviour. Keeps direct `/ws` consumers (curl, tests, anything that
@@ -517,8 +687,8 @@ export function getPtyWss(): WebSocketServer {
       const saved = loadScrollback(sessionId);
       sess = {
         id: sessionId, pty: spawnPty(sessionId, 80, 24),
-        wss: new Set(), ...saved,
-        killTimer: null, reconcileTimer: null, clientSizes: new Map(), cols: 80, rows: 24,
+        clients: new Map(), owner: null, ownerLeftAt: 0, ...saved,
+        killTimer: null, reconcileTimer: null, cols: 80, rows: 24,
         outBuf: '', outTimer: null,
       };
       sessions.set(sessionId, sess);
@@ -529,7 +699,7 @@ export function getPtyWss(): WebSocketServer {
       // `aura jump` target) naturally overrides it on replay.
       if (saved.buffer.length === 0) bufferPush(sess, oscTitle(HOST_LABEL));
     }
-    attachWs(sess, ws);
+    attachWs(sess, ws, browserId, launchClaim);
   });
 
   return ptyWss;
