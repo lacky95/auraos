@@ -131,3 +131,25 @@ apps/<id>             Reference apps:
 ## License
 
 [Apache License 2.0](LICENSE) — Copyright 2026 Lukas Lakner.
+
+## Updating
+
+AuraOS updates itself. In **Settings → About**, `Update AuraOS` first runs a
+quick check in the running shell — is there a newer commit on `main`, and is
+the working tree clean — and only then, on confirmation, hands the work to a
+detached updater container that rebases, rebuilds the image and recreates the
+shell.
+
+The updater is a separate container by necessity: the rebuild recreates
+`aura-shell`, so anything running inside it would be killed mid-update. It
+writes progress to a job file on the app-data volume, which is how the new
+shell reports on work its predecessor started — including the full build
+transcript behind *Show full log*.
+
+A first boot after a rebuild installs dependencies and builds every package,
+so several minutes is normal. The updater treats a container that is still
+producing output as progress and keeps waiting; a rollback needs the new
+shell to go silent and unresponsive, not merely to be slow.
+
+Nothing has to be installed for this to work: the compose plugin ships in the
+image, and an older image downloads it on the fly.
