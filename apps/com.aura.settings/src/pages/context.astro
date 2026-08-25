@@ -51,14 +51,18 @@ try {
       border: 1px solid var(--aura-color-border, #444); border-radius: 2px;
     }
     .ctx-badge.secret   { color: var(--aura-color-danger, #e55); }
-    .ctx-badge.variable { color: var(--aura-color-accent, #2a6); }
-    .ctx-badge.rw       { color: var(--aura-color-accent, #2a6); }
+    .ctx-badge.variable { color: var(--aura-color-success); }
+    .ctx-badge.rw       { color: var(--aura-color-success); }
     .ctx-badge.ro       { color: var(--aura-color-text-dim); }
     .ctx-inject { color: var(--aura-color-text-dim); font-size: 0.6rem; letter-spacing: 0.08em; }
     .ctx-checks { display: flex; gap: 12px; align-items: center; }
     .ctx-checks label { display: inline-flex; align-items: center; gap: 4px; margin: 0; cursor: pointer; }
     .ctx-checks input { width: auto; }
     .ctx-empty { color: var(--aura-color-text-dim); font-size: 0.72rem; padding: 10px; }
+    /* One styled class for BOTH delete buttons. Which table a button belongs to
+       is expressed by its data-* hook (data-key / data-vol), never by a second
+       class — a JS-only class silently has no rule and falls back to the UA's
+       default button chrome. Style by class, select by data attribute. */
     .ctx-del {
       background: none; border: 1px solid var(--aura-color-border, #444);
       color: var(--aura-color-danger, #e55); cursor: pointer; font-size: 0.62rem;
@@ -66,13 +70,19 @@ try {
     }
     .ctx-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
     .ctx-form label { display: block; font-size: 0.62rem; color: var(--aura-color-text-dim); margin-bottom: 4px; }
+    /* Theme tokens only, no literal fallbacks: every one of these is defined by
+       /api/os/theme.css, and a literal is what hid the bug this page had — a
+       misspelt token (--aura-color-bg-elev, which never existed) silently used
+       its dark fallback and stayed black under light themes. */
     .ctx-form input, .ctx-form select {
-      background: var(--aura-color-bg-elev, #111); color: var(--aura-color-text, #ddd);
-      border: 1px solid var(--aura-color-border, #444); padding: 6px 8px; font-size: 0.72rem;
+      background: var(--aura-color-surface); color: var(--aura-color-text);
+      border: 1px solid var(--aura-color-border); padding: 6px 8px; font-size: 0.72rem;
       font-family: monospace;
     }
+    /* Filled with the theme's primary; the label takes the page background so
+       it stays legible whether primary is dark (light mode) or bright (dark). */
     .ctx-form button {
-      background: var(--aura-color-accent, #2a6); color: #000; border: none;
+      background: var(--aura-color-primary); color: var(--aura-color-bg); border: none;
       padding: 7px 14px; font-size: 0.7rem; letter-spacing: 0.08em; cursor: pointer;
     }
     .ctx-hint { color: var(--aura-color-text-dim); font-size: 0.62rem; margin-top: 6px; }
@@ -82,16 +92,16 @@ try {
     }
     .ctx-dialog-backdrop.open { display: flex; }
     .ctx-dialog {
-      background: var(--aura-color-bg-elev, #111); border: 1px solid var(--aura-color-border, #444);
+      background: var(--aura-color-surface-2); border: 1px solid var(--aura-color-border);
       padding: 18px 20px; max-width: 340px;
     }
     .ctx-dialog p { font-size: 0.74rem; margin-bottom: 14px; letter-spacing: 0.03em; }
     .ctx-dialog-actions { display: flex; gap: 10px; justify-content: flex-end; }
     .ctx-dialog-actions button { padding: 6px 14px; font-size: 0.68rem; letter-spacing: 0.08em; cursor: pointer; }
     #ctx-dialog-cancel {
-      background: none; border: 1px solid var(--aura-color-border, #444); color: var(--aura-color-text, #ddd);
+      background: none; border: 1px solid var(--aura-color-border); color: var(--aura-color-text);
     }
-    #ctx-dialog-ok { background: var(--aura-color-accent, #2a6); color: #000; border: none; }
+    #ctx-dialog-ok { background: var(--aura-color-primary); color: var(--aura-color-bg); border: none; }
   </style>
 </head>
 <body>
@@ -171,7 +181,7 @@ try {
               <td class="ctx-val">{v.mountPath}</td>
               <td><span class={`ctx-badge ${v.mode}`}>{v.mode.toUpperCase()}</span></td>
               <td>{v.createdAt ? new Date(v.createdAt).toLocaleString() : '—'}</td>
-              <td><button class="ctx-vol-del" data-name={v.name}>DELETE</button></td>
+              <td><button class="ctx-del" data-vol={v.name}>DELETE</button></td>
             </tr>
           ))}
         </tbody>
@@ -280,8 +290,8 @@ try {
     }
 
     async function refresh() {
-      const r = await fetch('/api/os/context');
-      if (!r.ok) return;
+      const r = await fetch('/api/os/context', { cache: 'no-store' });
+      if (!r.ok) throw new Error(`GET /api/os/context → ${r.status}`);
       const { entries } = await r.json();
       const tbody = document.getElementById('ctx-rows');
       if (!entries || entries.length === 0) {
@@ -302,7 +312,6 @@ try {
           <td><button class="ctx-del" data-key="${esc(e.key)}">DELETE</button></td>
         </tr>`;
       }).join('');
-      bindDeletes();
     }
 
     async function addVar() {
@@ -328,7 +337,7 @@ try {
         document.getElementById('ctx-key').value = '';
         valueEl.value = '';
         setStatus(`SAVED <b>${esc(key)}</b> (${kind} · ${inject.join('+')}) · ${new Date().toLocaleTimeString()}`);
-        await refresh();
+        try { await refresh(); } catch (err) { console.warn('[context] entry list reconcile failed', err); }
       } catch (err) { setStatus(`ERROR — ${err.message}`, true); }
     }
 
@@ -337,35 +346,71 @@ try {
         const r = await fetch(`/api/os/context/${encodeURIComponent(key)}`, { method: 'DELETE' });
         if (!r.ok) { setStatus(`ERROR — ${(await r.json()).error ?? r.status}`, true); return; }
         setStatus(`DELETED <b>${esc(key)}</b> · ${new Date().toLocaleTimeString()}`);
-        await refresh();
+        try { await refresh(); } catch (err) { console.warn('[context] entry list reconcile failed', err); }
       } catch (err) { setStatus(`ERROR — ${err.message}`, true); }
     }
 
-    function bindDeletes() {
-      document.querySelectorAll('.ctx-del').forEach((btn) => {
-        btn.addEventListener('click', () => delVar(btn.dataset.key));
+    /**
+     * Delegated once per table, so rows can be re-rendered or inserted
+     * individually without rebinding (and without stacking a second listener
+     * on rows that survived the update).
+     */
+    function bindRowDeletes() {
+      document.getElementById('ctx-rows').addEventListener('click', (e) => {
+        const btn = e.target.closest('.ctx-del[data-key]');
+        if (btn) delVar(btn.dataset.key);
+      });
+      document.getElementById('vol-rows').addEventListener('click', (e) => {
+        const btn = e.target.closest('.ctx-del[data-vol]');
+        if (btn) delVol(btn.dataset.vol);
       });
     }
 
     // ── Volumes ───────────────────────────────────────────────────────
+    function volRowHtml(v) {
+      return `
+        <tr data-name="${esc(v.name)}">
+          <td class="ctx-key">${esc(v.name)}</td>
+          <td class="ctx-val">${esc(v.mountPath)}</td>
+          <td><span class="ctx-badge ${v.mode}">${esc(String(v.mode).toUpperCase())}</span></td>
+          <td>${v.createdAt ? new Date(v.createdAt).toLocaleString() : '—'}</td>
+          <td><button class="ctx-del" data-vol="${esc(v.name)}">DELETE</button></td>
+        </tr>`;
+    }
+
+    /**
+     * Put one volume into the table without waiting for a re-list. POST
+     * /api/os/volumes returns the created entry, so the row it describes is
+     * authoritative — rendering it here means a create shows up immediately
+     * even if the follow-up GET is slow, cached or fails.
+     */
+    function upsertVolRow(v) {
+      const tbody = document.getElementById('vol-rows');
+      const empty = tbody.querySelector('.ctx-empty');
+      if (empty) empty.closest('tr').remove();
+      const existing = tbody.querySelector(`tr[data-name="${CSS.escape(v.name)}"]`);
+      if (existing) existing.outerHTML = volRowHtml(v);
+      else {
+        // Keep the server's name-sorted order.
+        const after = Array.from(tbody.querySelectorAll('tr[data-name]'))
+          .find((tr) => tr.dataset.name.localeCompare(v.name) > 0);
+        if (after) after.insertAdjacentHTML('beforebegin', volRowHtml(v));
+        else tbody.insertAdjacentHTML('beforeend', volRowHtml(v));
+      }
+    }
+
     async function refreshVols() {
-      const r = await fetch('/api/os/volumes');
-      if (!r.ok) return;
+      // no-store: this list must reflect the write that just happened, never a
+      // cached copy of the pre-write state.
+      const r = await fetch('/api/os/volumes', { cache: 'no-store' });
+      if (!r.ok) throw new Error(`GET /api/os/volumes → ${r.status}`);
       const { volumes } = await r.json();
       const tbody = document.getElementById('vol-rows');
       if (!volumes || volumes.length === 0) {
         tbody.innerHTML = '<tr><td colspan="5" class="ctx-empty">No volumes yet. Create one below.</td></tr>';
         return;
       }
-      tbody.innerHTML = volumes.map((v) => `
-        <tr data-name="${esc(v.name)}">
-          <td class="ctx-key">${esc(v.name)}</td>
-          <td class="ctx-val">${esc(v.mountPath)}</td>
-          <td><span class="ctx-badge ${v.mode}">${esc(String(v.mode).toUpperCase())}</span></td>
-          <td>${v.createdAt ? new Date(v.createdAt).toLocaleString() : '—'}</td>
-          <td><button class="ctx-vol-del" data-name="${esc(v.name)}">DELETE</button></td>
-        </tr>`).join('');
-      bindVolDeletes();
+      tbody.innerHTML = volumes.map(volRowHtml).join('');
     }
 
     async function addVol() {
@@ -380,10 +425,14 @@ try {
           body: JSON.stringify({ name, mountPath, mode }),
         });
         if (!r.ok) { setStatus(`ERROR — ${(await r.json()).error ?? r.status}`, true); return; }
+        // Render the created row from the POST response first, then reconcile
+        // against the server list. The row is up whichever way the GET goes.
+        const created = await r.json().catch(() => null);
+        upsertVolRow(created ?? { name, mountPath, mode, createdAt: Date.now() });
         document.getElementById('vol-name').value = '';
         document.getElementById('vol-path').value = '';
         setStatus(`CREATED volume <b>${esc(name)}</b> → ${esc(mountPath)} (${mode}) · restart apps to mount`);
-        await refreshVols();
+        try { await refreshVols(); } catch (err) { console.warn('[context] volume list reconcile failed', err); }
       } catch (err) { setStatus(`ERROR — ${err.message}`, true); }
     }
 
@@ -393,15 +442,12 @@ try {
       try {
         const r = await fetch(`/api/os/volumes/${encodeURIComponent(name)}`, { method: 'DELETE' });
         if (!r.ok) { setStatus(`ERROR — ${(await r.json()).error ?? r.status}`, true); return; }
+        // Drop the row up-front for the same reason creates render up-front.
+        const row = document.querySelector(`#vol-rows tr[data-name="${CSS.escape(name)}"]`);
+        if (row) row.remove();
         setStatus(`DELETED volume <b>${esc(name)}</b> · ${new Date().toLocaleTimeString()}`);
-        await refreshVols();
+        try { await refreshVols(); } catch (err) { console.warn('[context] volume list reconcile failed', err); }
       } catch (err) { setStatus(`ERROR — ${err.message}`, true); }
-    }
-
-    function bindVolDeletes() {
-      document.querySelectorAll('.ctx-vol-del').forEach((btn) => {
-        btn.addEventListener('click', () => delVol(btn.dataset.name));
-      });
     }
 
     // ── Wire up ───────────────────────────────────────────────────────
@@ -409,14 +455,13 @@ try {
     valueEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') addVar(); });
     document.getElementById('vol-add').addEventListener('click', addVol);
     document.getElementById('vol-path').addEventListener('keydown', (e) => { if (e.key === 'Enter') addVol(); });
-    bindDeletes();
-    bindVolDeletes();
+    bindRowDeletes();
   </script>
 
   <script>
     import { OsClient } from '@aura/app-sdk';
     new OsClient().nav.installGridNav({
-      selector: '.ctx-tab, #ctx-kind, #ctx-key, #ctx-value, #ctx-inject-env, #ctx-inject-file, #ctx-add, .ctx-del, #vol-name, #vol-path, #vol-mode, #vol-add, .ctx-vol-del',
+      selector: '.ctx-tab, #ctx-kind, #ctx-key, #ctx-value, #ctx-inject-env, #ctx-inject-file, #ctx-add, .ctx-del, #vol-name, #vol-path, #vol-mode, #vol-add',
     });
   </script>
 </body>

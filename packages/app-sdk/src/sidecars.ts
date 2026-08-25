@@ -29,6 +29,41 @@ import { execFile, execFileSync, spawn } from 'node:child_process';
 
 const DOCKER_SOCK = '/var/run/docker.sock';
 
+/**
+ * Where a sidecar volume lands by default, as a path inside the app-data
+ * volume. Exported so a controller can resolve the location BEFORE it has a
+ * `SidecarHost` — building the `services` array often needs the answer already
+ * (e.g. to pass the runtime a host-resolvable path), and computing it a second
+ * time by hand is how the two ends drift apart.
+ */
+export function defaultSidecarSubpath(appDataSubpath: string, service: string, volume: string): string {
+  return `${appDataSubpath}/.sidecars/${service}/${volume}`;
+}
+
+/**
+ * The app's own data dir as a path inside the app-data volume, discovered by
+ * asking the daemon where our `/data` comes from: the OS mounts it as
+ * `volume-subpath=<…>/apps/<appId>/<instanceId>`, so one segment up is the
+ * app-level dir. Prefer the OS-exported `AURA_APP_DATA_SUBPATH`; this is the
+ * fallback for a shell older than that env var. Needs the docker socket.
+ */
+export function discoverAppDataSubpath(instanceId: string): string | undefined {
+  if (!existsSync(DOCKER_SOCK)) return undefined;
+  try {
+    const out = execFileSync('docker',
+      ['inspect', '--format', '{{json .HostConfig.Mounts}}', `aura-${instanceId}`],
+      { stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000, encoding: 'utf-8' });
+    const mounts = JSON.parse(out || '[]') as Array<{
+      Target?: string; VolumeOptions?: { Subpath?: string };
+    }>;
+    const sub = mounts.find((m) => m.Target === '/data')?.VolumeOptions?.Subpath;
+    if (!sub) return undefined;
+    return sub.split('/').slice(0, -1).join('/') || undefined;
+  } catch {
+    return undefined;   // not inspectable — caller falls back to the legacy volume
+  }
+}
+
 /** One sibling runtime image — mirrors the manifest `services[]` entry. */
 export interface ServiceSpec {
   name: string;
@@ -51,6 +86,19 @@ export interface ServiceSpec {
    *                (docker's `--mount volume-subpath=…`). Lets sidecars park
    *                their state under `/data/aura/runtime/<appId>/…` on the
    *                shared OS volume without needing their own top-level bind.
+   *
+   * With NEITHER `volume` nor `subpath` set, placement is resolved as:
+   *   1. the legacy per-app volume `aura-<appId>-<name>`, IF it already exists
+   *      — an app that has been running keeps its data where it wrote it;
+   *   2. otherwise `<AURA_APP_DATA_SUBPATH>/.sidecars/<service>/<name>` on the
+   *      shared app-data volume, i.e. INSIDE the app's own data dir.
+   *
+   * (2) is the default for anything new. One directory then holds everything
+   * the app owns: `aura mount --data <appId>` reaches the sidecar's state,
+   * backup/move/uninstall take it along, and no volume outlives the app
+   * unnoticed. Falls back to (1)'s name when the OS didn't export
+   * `AURA_APP_DATA_SUBPATH` (older shell) — guessing a subpath would mount an
+   * empty dir and look like data loss.
    */
   volumes?: Array<{ name: string; target: string; volume?: string; subpath?: string }>;
   /**
@@ -226,6 +274,14 @@ export interface SidecarOptions {
    */
   appDataVolume?: string;
   /**
+   * This app's own data dir as a path INSIDE `appDataVolume` (e.g.
+   * `scopes/users/default/apps/com.example.foo`). Exported by the OS as
+   * `AURA_APP_DATA_SUBPATH`; it can't be derived in-container because the app
+   * only ever sees its INSTANCE dir mounted at `/data`. Used as the base for
+   * default sidecar volume placement — see `volumes`.
+   */
+  appDataSubpath?: string;
+  /**
    * Host path to the AuraOS `/workspace` tree, bind-mounted read-only into a
    * sibling for `inheritTools` (the CLI wrappers `exec node
    * /workspace/packages/<tool>/dist/…`). Default reads `AURA_HOST_WORKSPACE`,
@@ -291,6 +347,7 @@ export class SidecarHost {
       volumePrefix: `aura-${options.appId}`,
       helperImage: process.env['AURA_BASE_IMAGE'] || 'aura-base',
       appDataVolume: process.env['AURA_APP_DATA_VOLUME'] || 'aura_aura-app-data',
+      appDataSubpath: process.env['AURA_APP_DATA_SUBPATH'] || undefined,
       workspaceRoot: process.env['AURA_HOST_WORKSPACE'] || '/workspace',
       nodeModulesVolume: process.env['AURA_NODE_MODULES_VOLUME'] || 'aura_aura-node-modules',
       ...options,
@@ -307,6 +364,70 @@ export class SidecarHost {
 
   containerName(name: string): string { return `aura-${this.opts.instanceId}--${name}`; }
   volumeName(name: string): string { return `${this.opts.volumePrefix}-${name}`; }
+
+  /**
+   * Where a declared volume actually lives — the single answer every code path
+   * below asks for (mount args, seeding helpers, host-path export), so they
+   * can't drift apart. Precedence and rationale: see `ServiceSpec.volumes`.
+   */
+  resolveVolume(
+    serviceName: string,
+    v: { name: string; volume?: string; subpath?: string },
+  ): { source: string; subpath?: string } {
+    // Explicit wins, and an explicit subpath without a volume keeps its
+    // historic source (the derived name) rather than silently moving.
+    if (v.volume || v.subpath) {
+      const source = v.volume ?? this.volumeName(v.name);
+      return v.subpath ? { source, subpath: v.subpath } : { source };
+    }
+    const legacy = this.volumeName(v.name);
+    if (this.legacyVolumeExists(legacy)) return { source: legacy };
+    const base = this.opts.appDataSubpath ?? this.discoverAppDataSubpath();
+    if (!base) return { source: legacy };
+    return { source: this.opts.appDataVolume, subpath: defaultSidecarSubpath(base, serviceName, v.name) };
+  }
+
+  private discoveredSubpath?: string | null;
+  /**
+   * Fallback for `appDataSubpath` when the OS didn't export it (a shell older
+   * than the env var): ask the daemon where our OWN `/data` comes from. The OS
+   * mounts it as `volume-subpath=<…>/apps/<appId>/<instanceId>`, so one segment
+   * up is the app-level dir. Needs the docker socket — apps without it get the
+   * env var or the legacy volume, never a guess.
+   */
+  private discoverAppDataSubpath(): string | undefined {
+    if (this.discoveredSubpath !== undefined) return this.discoveredSubpath ?? undefined;
+    const found = discoverAppDataSubpath(this.opts.instanceId);
+    this.discoveredSubpath = found ?? null;
+    if (found) this.log(`app data subpath discovered by self-inspect: ${found}`);
+    return found;
+  }
+
+  private readonly legacyVolumes = new Map<string, boolean>();
+  /** Does the pre-`.sidecars` derived volume exist? Cached: asked per spawn. */
+  private legacyVolumeExists(source: string): boolean {
+    const hit = this.legacyVolumes.get(source);
+    if (hit !== undefined) return hit;
+    let exists = true;
+    try {
+      execFileSync('docker', ['volume', 'inspect', source],
+        { stdio: ['ignore', 'ignore', 'ignore'], timeout: 10_000 });
+    } catch { exists = false; }
+    this.legacyVolumes.set(source, exists);
+    return exists;
+  }
+
+  /**
+   * Create a subpath dir before anything mounts it. Docker ERRORS on a missing
+   * `volume-subpath` (unlike a bind source, which it silently creates), and the
+   * app can't mkdir it itself: only its INSTANCE dir is mounted, at `/data` —
+   * the app-level dir one segment up isn't visible anywhere in the container.
+   * Idempotent, so it runs on every spawn rather than needing a first-run flag.
+   */
+  private async ensureVolumeSubpath(source: string, subpath: string): Promise<void> {
+    await execDocker(['run', '--rm', '-v', `${source}:/vol`, this.opts.helperImage,
+      'mkdir', '-p', `/vol/${subpath}`]);
+  }
   dashboard(): ServiceSpec | undefined { return this.opts.services.find((s) => s.proxyDashboard); }
 
   async isRunning(name: string): Promise<boolean> {
@@ -422,11 +543,11 @@ export class SidecarHost {
    * Honors `volume` / `subpath` overrides so the seed lands where the runtime
    * actually reads, not on the auto-derived legacy volume name.
    */
-  private helperRun(v: { name: string; volume?: string; subpath?: string }): HelperRun {
-    const source = v.volume ?? this.volumeName(v.name);
+  private helperRun(loc: { source: string; subpath?: string }): HelperRun {
+    const { source } = loc;
     // `-v` doesn't support volume-subpath; use `--mount` when a subpath is set.
-    const mountArgs = v.subpath
-      ? ['--mount', `type=volume,source=${source},target=/vol,volume-subpath=${v.subpath}`]
+    const mountArgs = loc.subpath
+      ? ['--mount', `type=volume,source=${source},target=/vol,volume-subpath=${loc.subpath}`]
       : ['-v', `${source}:/vol`];
     return (args: string[], stdin?: Buffer | string) => new Promise<void>((resolve, reject) => {
       const p = spawn('docker', ['run', '--rm', '-i', ...mountArgs, this.opts.helperImage, ...args],
@@ -472,7 +593,8 @@ export class SidecarHost {
 
     const out: string[] = [];
     for (const v of vols) {
-      const source = v.volume ?? this.volumeName(v.name);
+      const loc = this.resolveVolume(svc.name, v);
+      const source = loc.source;
       const key = v.name.toUpperCase().replace(/[^A-Z0-9]/g, '_');
       let mountpoint = '';
       try {
@@ -488,7 +610,7 @@ export class SidecarHost {
         continue;
       }
       if (!mountpoint) continue;
-      const hostPath = v.subpath ? `${mountpoint}/${v.subpath}` : mountpoint;
+      const hostPath = loc.subpath ? `${mountpoint}/${loc.subpath}` : mountpoint;
       out.push('-e', `AURA_VOLUME_HOST_${key}=${hostPath}`);
 
       // PATH PARITY — mount the same data a SECOND time at its host-identical
@@ -509,7 +631,7 @@ export class SidecarHost {
       // app that opted into parity by hand, and re-mounting would be a
       // duplicate-destination error.
       if (v.target !== hostPath) {
-        out.push('--mount', `type=volume,source=${source},target=${hostPath}${v.subpath ? `,volume-subpath=${v.subpath}` : ''}`);
+        out.push('--mount', `type=volume,source=${source},target=${hostPath}${loc.subpath ? `,volume-subpath=${loc.subpath}` : ''}`);
       }
     }
     return out;
@@ -558,12 +680,19 @@ export class SidecarHost {
       }
     }
 
+    // A volume-subpath mount needs its dir to exist BEFORE anything mounts it
+    // (docker errors instead of creating it), and seeding below mounts it too.
+    for (const v of svc.volumes ?? []) {
+      const loc = this.resolveVolume(svc.name, v);
+      if (loc.subpath) await this.ensureVolumeSubpath(loc.source, loc.subpath);
+    }
+
     // First-run seeding into each named volume.
     if (this.opts.onSeed) {
       this.setPhase('seeding');
       for (const v of svc.volumes ?? []) {
-        const volumeName = v.volume ?? this.volumeName(v.name);
-        await this.opts.onSeed({ service: svc, volumeName, run: this.helperRun(v) });
+        const loc = this.resolveVolume(svc.name, v);
+        await this.opts.onSeed({ service: svc, volumeName: loc.source, run: this.helperRun(loc) });
       }
     }
 
@@ -584,9 +713,9 @@ export class SidecarHost {
       '--label', `aura.service=${svc.name}`,
       ...(svc.dns ?? []).flatMap((d) => ['--dns', d]),
       ...(svc.volumes ?? []).flatMap((v) => {
-        const source  = v.volume ?? this.volumeName(v.name);
-        const subpath = v.subpath ? `,volume-subpath=${v.subpath}` : '';
-        return ['--mount', `type=volume,source=${source},target=${v.target}${subpath}`];
+        const loc = this.resolveVolume(svc.name, v);
+        const subpath = loc.subpath ? `,volume-subpath=${loc.subpath}` : '';
+        return ['--mount', `type=volume,source=${loc.source},target=${v.target}${subpath}`];
       }),
       // The shared app-data volume's NAME. Always exported: a sibling that
       // drives the docker socket needs it to spawn containers with

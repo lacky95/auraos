@@ -213,6 +213,12 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
               style="appearance:none;-webkit-appearance:none;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;min-width:22px;height:18px;padding:0 6px;border:1px solid var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:transparent;color:var(--aura-color-primary,#00ff41);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.72rem;line-height:1;cursor:pointer;outline:none;"
               title="Make this device primary: size the shared terminal to THIS screen. Other devices render best-effort. Applies to every terminal on this device.">★</button>
     </span>
+    <!-- Terminal-local color mode (◐ auto | ☀ light | ☾ dark). Overrides the
+         palette for THIS app only — the desktop and other apps keep the OS
+         mode. Painted from JS like the sizing buttons (see paintBtn). -->
+    <button id="mode-toggle" class="tsm-btn" type="button" data-mode="auto"
+            style="appearance:none;-webkit-appearance:none;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;min-width:22px;height:18px;padding:0 6px;margin:0 2px;border:1px solid var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:transparent;color:var(--aura-color-primary,#00ff41);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.72rem;line-height:1;cursor:pointer;outline:none;"
+            title="Color mode: AUTO (follows the OS)">◐</button>
     <span id="ws-url" title="Session host" style="margin-left: 2em;">{sessionHost}</span>
     <span style="margin-left:auto;" id="conn-status">CONNECTING...</span>
   </div>
@@ -931,6 +937,91 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       isPrimary = next;
       reflectMode();
       forceSendResize();
+    });
+
+    // ─── Terminal-local color mode (◐ auto | ☀ light | ☾ dark) ───────────
+    // The OS ships BOTH palettes on every page: /api/os/theme.css defines the
+    // active `--aura-color-*` set plus the full `--aura-light-color-*` and
+    // `--aura-dark-color-*` variants. So flipping this app's mode is a pure
+    // client-side re-point of the active vars at one variant — no server call,
+    // no write to the OS `colorMode`, nothing to undo for other apps.
+    //
+    // The overrides are `var(--aura-<variant>-color-x)` REFERENCES, not copied
+    // literals, so they keep tracking the user's chosen light/dark themes when
+    // the OS theme changes underneath us.
+    //
+    // Inline style on <html> beats the :root rule from the stylesheet, which is
+    // what makes the override win without touching theme.css.
+    const MODE_KEY = 'aura.terminal.colorMode';   // 'auto' | 'light' | 'dark'
+    const MODE_CYCLE = { auto: 'light', light: 'dark', dark: 'auto' };
+    const MODE_GLYPH = { auto: '◐', light: '☀', dark: '☾' };
+    const MODE_TITLE = {
+      auto:  'Color mode: AUTO (follows the OS) — click for LIGHT',
+      light: 'Color mode: LIGHT (this terminal only) — click for DARK',
+      dark:  'Color mode: DARK (this terminal only) — click to follow the OS',
+    };
+    const PALETTE_VARS = [
+      'primary', 'secondary', 'danger', 'info', 'warning', 'success',
+      'bg', 'surface', 'surface-2', 'text', 'text-dim', 'border',
+    ];
+    const GLOW_VARS = ['primary', 'secondary', 'danger', 'subtle'];
+    const modeBtn = document.getElementById('mode-toggle');
+    let colorMode = (() => {
+      try { const v = localStorage.getItem(MODE_KEY); return v in MODE_CYCLE ? v : 'auto'; }
+      catch { return 'auto'; }
+    })();
+
+    function applyColorMode(mode) {
+      const root = document.documentElement.style;
+      for (const v of PALETTE_VARS) {
+        const name = `--aura-color-${v}`;
+        if (mode === 'auto') root.removeProperty(name);
+        else root.setProperty(name, `var(--aura-${mode}-color-${v})`);
+      }
+      for (const g of GLOW_VARS) {
+        const name = `--aura-glow-${g}`;
+        if (mode === 'auto') root.removeProperty(name);
+        else root.setProperty(name, `var(--aura-${mode}-glow-${g})`);
+      }
+      // Keep the advertised mode honest for anything that reads it back.
+      if (mode === 'auto') root.removeProperty('--aura-resolved-mode');
+      else root.setProperty('--aura-resolved-mode', mode);
+      // xterm caches its palette internally — same push the OS broadcast does.
+      refreshTerminalTheme();
+    }
+
+    function reflectColorMode() {
+      if (!modeBtn) return;
+      modeBtn.dataset.mode = colorMode;
+      modeBtn.textContent = MODE_GLYPH[colorMode];
+      modeBtn.title = MODE_TITLE[colorMode];
+      modeBtn.setAttribute('aria-label', MODE_TITLE[colorMode]);
+      // Filled only when overriding; AUTO reads as "not doing anything".
+      paintBtn(modeBtn, colorMode !== 'auto', false);
+    }
+
+    function setColorMode(next) {
+      colorMode = next;
+      try { localStorage.setItem(MODE_KEY, next); } catch { /* private mode */ }
+      applyColorMode(next);
+      reflectColorMode();
+    }
+
+    applyColorMode(colorMode);
+    reflectColorMode();
+    modeBtn?.addEventListener('click', () => setColorMode(MODE_CYCLE[colorMode]));
+    modeBtn?.addEventListener('mouseenter', () => { if (colorMode === 'auto') paintBtn(modeBtn, false, true); });
+    modeBtn?.addEventListener('mouseleave', () => paintBtn(modeBtn, colorMode !== 'auto', false));
+
+    // Device-wide like the sizing mode: every terminal window on this device
+    // follows, without touching any other app.
+    window.addEventListener('storage', (e) => {
+      if (e.key !== MODE_KEY) return;
+      const next = e.newValue && e.newValue in MODE_CYCLE ? e.newValue : 'auto';
+      if (next === colorMode) return;
+      colorMode = next;
+      applyColorMode(next);
+      reflectColorMode();
     });
 
     // ─── Quick commands (left sidebar overlay) ───────────────────────────

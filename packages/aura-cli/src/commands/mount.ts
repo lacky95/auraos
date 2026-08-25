@@ -486,8 +486,14 @@ async function runWizard(): Promise<void> {
         // and forward doesn't discard edits.
         const seed = draft.picked ?? current;
 
+        // The consumer app is offered too. Mounting an app into its own
+        // instance is legal and useful: it lands at /mnt/aura/<id> like any
+        // other mount, which is how an app (or a sidecar that inherits
+        // /mnt/aura) gets at its own source/data dir. The server still refuses
+        // the shapes that would nest the mount root inside its own source, so
+        // the picker doesn't need to pre-judge it — see MountManager.add().
         const sorted = apps
-          .filter((a) => a.manifest.id !== draft.targetAppId) // can't mount into itself
+          .slice()
           .sort((a, b) => {
             const sa = SCOPE_ORDER.indexOf(a.manifest.scopeId ?? '');
             const sb = SCOPE_ORDER.indexOf(b.manifest.scopeId ?? '');
@@ -496,9 +502,10 @@ async function runWizard(): Promise<void> {
         const toOption = (a: AppDto) => {
           const id = a.manifest.id;
           const st = seed.get(id);
+          const isSelf = id === draft.targetAppId;
           return {
             value: id,
-            label: id,
+            label: isSelf ? `${id} ${color.cyan('[self]')}` : id,
             tag: current.has(id) ? color.yellow('mounted') : scopeColor(a.manifest.scopeId ?? '-'),
             desc: a.manifest.name ?? '',
             initiallyChecked: seed.has(id),

@@ -234,6 +234,61 @@ body { background: var(--aura-color-bg); color: var(--aura-color-text); }
 .primary { color: var(--aura-color-primary); }
 ```
 
+## Styling rules that stop silent misses
+
+CSS that doesn't apply never errors — the element just falls back to the
+browser's default chrome, which still *looks* like a deliberate design. Four
+rules keep that from happening:
+
+**1. Style by class, select by `data-*`.** A class on an element must exist
+because it carries styling. When JS needs to find an element, give it a data
+attribute, not a second class — a JS-only class has no rule behind it, and the
+day someone reuses it for a new control it renders unstyled.
+
+```html
+<!-- WRONG: .row-del-vol is a JS hook with no rule; it renders as a UA button -->
+<button class="row-del-vol" data-name="shared">DELETE</button>
+
+<!-- RIGHT: one styled class, the hook lives in the data attribute -->
+<button class="row-del" data-vol="shared">DELETE</button>
+```
+
+```js
+tbody.addEventListener('click', (e) => {          // delegate, don't rebind
+  const btn = e.target.closest('.row-del[data-vol]');
+  if (btn) removeVolume(btn.dataset.vol);
+});
+```
+
+Delegation matters for the same reason: re-rendering rows drops per-button
+listeners, and rebinding after a partial update stacks a second listener on
+the rows that survived.
+
+**2. Rows built with `innerHTML` need `<style is:global>`.** Astro scopes a
+plain `<style>` by stamping `data-astro-cid-*` on the markup it renders. HTML
+you inject at runtime never gets that attribute, so scoped rules stop matching
+the moment a row is re-rendered. Either render those elements with `is:global`
+styles (say why in a comment) or keep the whole list server-rendered.
+
+**3. Tailwind only sees files it scans.** Utilities used inside a package
+outside your app's scan roots (e.g. `@aura/ui` components) are dropped from
+the build unless that path is declared with `@source`. When a utility class
+does nothing, check the scan roots before debugging the markup.
+
+**4. Theme tokens are a closed set.** `/api/os/theme.css` defines exactly
+`--aura-color-{primary,secondary,danger,info,warning,success,bg,surface,surface-2,text,text-dim,border}`
+and `--aura-glow-{primary,secondary,danger,subtle}`. Any other name is not an
+error — `var(--aura-color-bg-elev, #111)` silently uses the literal, so an
+invented token looks correct under dark themes and renders black under light
+ones. Don't give these vars literal fallbacks either: if the token exists the
+fallback is dead code, and if it doesn't you want to see that. For a filled
+control, `background: var(--aura-color-primary); color: var(--aura-color-bg)`
+keeps the label legible in both modes.
+
+When something looks unstyled, confirm it with computed style rather than by
+eye — `getComputedStyle(el).borderTopStyle === 'outset'` is the tell for a
+button that got no rule at all.
+
 ## Runtime context the app sees
 
 Inside the PRoot, your Astro process gets:
@@ -360,6 +415,11 @@ The terminal apps' bash also annotates the prompt with the detected layer
 - Don't import server-only Node modules into client-rendered Astro pages.
 - HMR is disabled in app iframes (the upstream Vite WS isn't reachable from
   the browser through the proxy). Full iframe reload picks up changes.
+- Class names are for styling, `data-*` attributes are for JS hooks — see
+  "Styling rules that stop silent misses".
+- After a write, render the row from the response you already have; treat the
+  follow-up list GET as reconciliation, and never swallow its failure with a
+  bare `if (!res.ok) return`.
 - Apps cannot mutate state in `/os/` or the shell — only `/data` is writable
   per-instance. Use a content provider if you need to expose state to others.
 - PRoot is a filesystem sandbox, not a security sandbox: it shares the host

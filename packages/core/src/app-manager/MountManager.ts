@@ -33,8 +33,8 @@
  * container's own `/proc/self/mountinfo`, and rolled back if it doesn't match.
  */
 import { execFileSync, execSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import type { AppRegistry } from './AppRegistry.js';
 import type { ScopeRegistry } from '../scopes/ScopeRegistry.js';
 import type { ContainerRunner } from './ContainerRunner.js';
@@ -99,6 +99,78 @@ export class MountManager {
   private mounts = new Map<string, Map<string, AuraMount>>();
 
   constructor(private readonly opts: MountManagerOpts) {}
+
+  // ─── Declarations ──────────────────────────────────────────────────────
+  //
+  // The kernel is authoritative for what IS mounted, but it can't answer what
+  // the user ASKED FOR: binds are reaped whenever an instance stops (a leaked
+  // bind pins the source filesystem), and a container created afterwards does
+  // NOT inherit binds that already exist under its mount root — docker's volume
+  // mount is a non-recursive bind, so only containers that were running at
+  // add-time receive propagation. Without a durable record, every mount
+  // silently evaporated on the next restart while `aura mount ls` kept
+  // reporting it.
+  //
+  // So the DECLARATION is persisted next to (not inside) the mount root, and
+  // re-applied by `reapply()` once the container is up again.
+
+  private declFile(instanceId: string): string {
+    return join(this.opts.dataDir, 'aura', 'mounts', '.state', `${instanceId}.json`);
+  }
+
+  private readDecls(instanceId: string): AddMountSpec[] {
+    try {
+      const raw = JSON.parse(readFileSync(this.declFile(instanceId), 'utf-8')) as unknown;
+      return Array.isArray(raw) ? raw as AddMountSpec[] : [];
+    } catch { return []; }   // absent or corrupt — nothing declared
+  }
+
+  /** Persist the current mount set as declarations. Never throws: a failed
+   *  write must not fail the mount the user just asked for. */
+  private writeDecls(instanceId: string): void {
+    const specs: AddMountSpec[] = this.list(instanceId).map((m) => ({
+      targetAppId: m.targetAppId, mode: m.mode, data: m.kind === 'data',
+    }));
+    try {
+      mkdirSync(dirname(this.declFile(instanceId)), { recursive: true });
+      if (specs.length === 0) rmSync(this.declFile(instanceId), { force: true });
+      else writeFileSync(this.declFile(instanceId), JSON.stringify(specs, null, 2));
+    } catch (err) {
+      console.warn(`[MountManager] could not persist mounts for ${instanceId}: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Re-create every declared mount for an instance whose container has just
+   * started. Called by the AppManager after `onCreate`, so the app sees its
+   * mounts as early as propagation allows.
+   *
+   * Best-effort per mount: one target that has since been uninstalled must not
+   * stop the rest from coming back, and none of it may block a spawn.
+   */
+  async reapply(instanceId: string): Promise<{ restored: number; failed: number }> {
+    const specs = this.readDecls(instanceId);
+    if (specs.length === 0) return { restored: 0, failed: 0 };
+    if (!this.capable().ok) return { restored: 0, failed: specs.length };
+
+    let restored = 0;
+    let failed   = 0;
+    for (const spec of specs) {
+      const id = this.mountId(spec.targetAppId, spec.data ? 'data' : 'source');
+      if (this.mounts.get(instanceId)?.has(id)) continue;   // already there (adopted)
+      try {
+        await this.add(instanceId, spec, { persist: false });
+        restored++;
+      } catch (err) {
+        failed++;
+        console.warn(`[MountManager] could not restore ${id} into ${instanceId}: ${(err as Error).message}`);
+      }
+    }
+    if (restored || failed) {
+      console.log(`[MountManager] reapply ${instanceId}: restored ${restored}, failed ${failed}`);
+    }
+    return { restored, failed };
+  }
 
   // ─── Queries ───────────────────────────────────────────────────────────
 
@@ -174,7 +246,7 @@ export class MountManager {
 
   // ─── Mutations ─────────────────────────────────────────────────────────
 
-  async add(instanceId: string, spec: AddMountSpec): Promise<AuraMount> {
+  async add(instanceId: string, spec: AddMountSpec, opts: { persist?: boolean } = {}): Promise<AuraMount> {
     const cap = this.capable();
     if (!cap.ok) throw new Error(`mount propagation unavailable: ${cap.reason}`);
 
@@ -227,6 +299,8 @@ export class MountManager {
 
     if (!this.mounts.has(instanceId)) this.mounts.set(instanceId, new Map());
     this.mounts.get(instanceId)!.set(id, mount);
+    // `persist: false` while reapply() is replaying what is already on disk.
+    if (opts.persist !== false) this.writeDecls(instanceId);
     return mount;
   }
 
@@ -235,6 +309,7 @@ export class MountManager {
     if (!mount) throw new Error(`${mountId} is not mounted into ${instanceId}`);
     this.unmountHost(instanceId, mount.hostDest);
     this.mounts.get(instanceId)!.delete(mountId);
+    this.writeDecls(instanceId);   // an explicit detach is a change of intent
     if (this.mounts.get(instanceId)!.size === 0) this.mounts.delete(instanceId);
   }
 
@@ -307,6 +382,11 @@ export class MountManager {
       this.mounts.get(instanceId)!.set(mount.id, mount);
       adopted++;
     }
+
+    // An adopted mount was declared by someone, even if the shell that recorded
+    // it is gone — persist it so the next restart can re-apply rather than
+    // adopt-or-lose. Pre-existing mounts thus become durable on first contact.
+    for (const instanceId of this.mounts.keys()) this.writeDecls(instanceId);
 
     if (adopted || reaped) console.log(`[MountManager] reconcile: adopted ${adopted}, reaped ${reaped}`);
     return { adopted, reaped };
