@@ -113,6 +113,19 @@ RUN curl -fsSL "https://github.com/oras-project/oras/releases/download/v${ORAS_V
  && rm -f /tmp/oras.tgz /tmp/oras \
  && oras version
 
+# Docker Compose plugin. Needed by SELF-UPDATE (Settings → About): the updater
+# runs as a sibling container from THIS image and rebuilds the shell with
+# `docker compose up -d --build`, so compose has to exist inside the image —
+# the static docker CLI installed above ships no plugins. Same static-binary
+# approach as the docker CLI: no repos, works on any host, arch resolved at
+# build time.
+ARG COMPOSE_VERSION=2.40.3
+RUN ARCH=$(uname -m) \
+ && curl -fsSL "https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-${ARCH}" \
+      -o /usr/local/lib/docker/cli-plugins/docker-compose --create-dirs \
+ && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
+ && docker compose version
+
 # Replace Debian's proot (5.3.x with EFAULT on Rust-compiled native modules
 # like Tailwind 4 Oxide / jiti) with a fresh build from upstream proot-me.
 # /usr/local/bin precedes /usr/bin in PATH, so this version wins everywhere
