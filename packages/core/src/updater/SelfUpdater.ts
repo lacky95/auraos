@@ -51,9 +51,41 @@ export type UpdatePhase =
   | 'queued' | 'checking' | 'pulling' | 'building' | 'verifying'
   | 'rolling-back' | 'done' | 'failed' | 'rolled-back';
 
+export type StepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+
+/**
+ * One line of the update checklist. The point is to answer "what actually
+ * happened?" without reading a transcript: was the image really rebuilt, did
+ * the health check pass, did a rollback run. `skipped` is a first-class
+ * answer — a dry run legitimately never builds.
+ */
+export interface UpdateStep {
+  key: string;
+  label: string;
+  status: StepStatus;
+  /** Short result, e.g. the rev moved to or why a step was skipped. */
+  detail?: string;
+  /** When the step last changed state. */
+  at?: string;
+}
+
+/** The checklist, in the order the updater performs it. */
+export const UPDATE_STEPS: ReadonlyArray<{ key: string; label: string }> = [
+  { key: 'inspect',  label: 'Workspace inspected (git checkout, clean tree)' },
+  { key: 'fetch',    label: 'Latest commit fetched from the remote' },
+  { key: 'rebase',   label: 'Checkout moved to the new revision' },
+  { key: 'compose',  label: 'Docker Compose available' },
+  { key: 'build',    label: 'Image rebuilt' },
+  { key: 'recreate', label: 'Master container recreated' },
+  { key: 'verify',   label: 'New shell answered a health check' },
+  { key: 'rollback', label: 'Rollback (only if the update failed)' },
+];
+
 export interface UpdateJob {
   id: string;
   phase: UpdatePhase;
+  /** Per-step outcome — see {@link UPDATE_STEPS}. */
+  steps: UpdateStep[];
   startedAt: string;
   finishedAt?: string;
   branch: string;
@@ -302,7 +334,9 @@ export class SelfUpdater {
     const id = new Date().toISOString().replace(/[:.]/g, '-');
     const job: UpdateJob = {
       id, phase: 'queued', startedAt: new Date().toISOString(),
-      branch, dryRun, log: [`queued (branch=${branch}${dryRun ? ', dry-run' : ''})`],
+      branch, dryRun,
+      steps: UPDATE_STEPS.map((s) => ({ ...s, status: 'pending' as StepStatus })),
+      log: [`queued (branch=${branch}${dryRun ? ', dry-run' : ''})`],
     };
     mkdirSync(this.jobsDir(), { recursive: true });
     writeFileSync(this.jobFile(id), JSON.stringify(job, null, 2));
@@ -418,7 +452,29 @@ setrev() {
     j[k]=v; fs.writeFileSync(f, JSON.stringify(j,null,2));
   ' "$JOB" "$1" "$2" || true
 }
-fail() { say failed "$1"; exit 1; }
+# Mark one checklist entry. Same node-based JSON edit as say(), for the same
+# reason: shell quoting must never be able to corrupt the job file.
+step() {
+  node -e '
+    const fs=require("fs"); const [f,key,status,detail]=process.argv.slice(1);
+    let j={}; try{ j=JSON.parse(fs.readFileSync(f,"utf8")); }catch{}
+    j.steps=(j.steps||[]).map(s=> s.key===key
+      ? {...s, status, detail: detail || s.detail, at:new Date().toISOString()} : s);
+    fs.writeFileSync(f, JSON.stringify(j,null,2));
+  ' "$JOB" "$1" "$2" "\${3:-}" || true
+}
+# Whatever was in flight when we give up is what failed; anything never
+# reached stays "pending" rather than pretending to be skipped on purpose.
+fail() {
+  node -e '
+    const fs=require("fs"); const [f]=process.argv.slice(1);
+    let j={}; try{ j=JSON.parse(fs.readFileSync(f,"utf8")); }catch{}
+    j.steps=(j.steps||[]).map(s=> s.status==="running" ? {...s, status:"failed", at:new Date().toISOString()} : s);
+    fs.writeFileSync(f, JSON.stringify(j,null,2));
+  ' "$JOB" || true
+  say failed "$1"
+  exit 1
+}
 
 # Every git call goes through g(): -C for the repo, and safe.directory inline
 # rather than via a global git config, which writes to $HOME — and $HOME in
@@ -448,6 +504,7 @@ confirm_stuck() {
   return 0
 }
 
+step inspect running
 say checking "inspecting the workspace"
 if ! g rev-parse --git-dir >/dev/null 2>&1; then
   fail "$WS is not a git checkout — nothing to update from."
@@ -460,6 +517,7 @@ if [ -n "$(g status --porcelain --untracked-files=no)" ]; then
 fi
 FROM_REV=$(g rev-parse HEAD)
 setrev fromRev "$FROM_REV"
+step inspect done "clean tree at \${FROM_REV:0:12}"
 OWNER=$(stat -c '%u:%g' "$WS")
 
 ON_BRANCH=$(g rev-parse --abbrev-ref HEAD)
@@ -468,8 +526,11 @@ if [ "$ON_BRANCH" != "$BRANCH" ]; then
   g checkout "$BRANCH" 2>&1 | tail -2 || fail "could not check out $BRANCH"
 fi
 
+step fetch running
 say pulling "fetching $BRANCH from $FETCH_URL"
 g fetch "$FETCH_URL" "$BRANCH" 2>&1 | tee -a "$LOGFILE" | tail -3 || fail "git fetch failed"
+step fetch done
+step rebase running
 # Rebase, not merge: local commits on this machine get REPLAYED on top of
 # upstream, so the machine ends up on latest without a merge bubble and
 # without losing local work. A conflict is a human decision — abort and leave
@@ -486,17 +547,21 @@ if ! g rebase FETCH_HEAD 2>&1 | tee -a "$LOGFILE" | tail -4; then
 fi
 TO_REV=$(g rev-parse HEAD)
 setrev toRev "$TO_REV"
+step rebase done "\${FROM_REV:0:12} → \${TO_REV:0:12}"
 # git ran as root in here; hand the objects back to whoever owns the checkout
 # so the host user's own git keeps working.
 chown -R "$OWNER" "$WS/.git" 2>/dev/null || true
 
 if [ "$FROM_REV" = "$TO_REV" ]; then
+  step rebase done "already at \${TO_REV:0:12}"
+  for k in compose build recreate verify rollback; do step "$k" skipped "nothing to update"; done
   say done "already up to date at \${TO_REV:0:12} — nothing to build"
   exit 0
 fi
 say pulling "updated \${FROM_REV:0:12} → \${TO_REV:0:12}"
 
 if [ "$DRY" = "1" ]; then
+  for k in compose build recreate verify rollback; do step "$k" skipped "dry run"; done
   say done "dry run: would rebuild and recreate '$PROJECT' from $COMPOSE_FILE"
   exit 0
 fi
@@ -569,22 +634,48 @@ healthy() {
   done
 }
 
+step compose running
 if ! ensure_compose; then
   fail "docker compose is unavailable and could not be downloaded — cannot rebuild."
 fi
+step compose done "$(docker compose version --short 2>/dev/null || echo available)"
 
+# Container identity BEFORE the rebuild. Comparing it afterwards is what
+# turns "compose exited 0" into "the master container was really replaced" —
+# a compose run can succeed and leave an unchanged container (nothing to do),
+# which would otherwise be reported as a successful recreate.
+OLD_ID=$(docker inspect -f '{{.Id}}' aura-shell 2>/dev/null || echo none)
+
+step build running
 say building "rebuilding the image and recreating aura-shell — this blocks until the build finishes, so no rollback can interrupt it (kills the old shell at the end)"
 if ! rebuild; then
-  say rolling-back "build failed — restoring \${FROM_REV:0:12}"
+  step build failed "compose build/up failed"
+  step rollback running
+say rolling-back "build failed — restoring \${FROM_REV:0:12}"
   g reset --hard "$FROM_REV" >/dev/null 2>&1
   chown -R "$OWNER" "$WS/.git" 2>/dev/null || true
   rebuild || true
-  if healthy; then say rolled-back "build failed; restored \${FROM_REV:0:12}"; else say failed "build failed and the restore did not come up — manual attention needed"; fi
+  if healthy; then step rollback done "restored \${FROM_REV:0:12}"; say rolled-back "build failed; restored \${FROM_REV:0:12}"; else step rollback failed "restore did not come up"; say failed "build failed and the restore did not come up — manual attention needed"; fi
   exit 1
 fi
 
+step build done
+NEW_ID=$(docker inspect -f '{{.Id}}' aura-shell 2>/dev/null || echo none)
+if [ "$NEW_ID" = none ]; then
+  step recreate failed "aura-shell is not present after the rebuild"
+elif [ "$NEW_ID" = "$OLD_ID" ]; then
+  # Same container: compose decided nothing changed. The new code is on disk
+  # but is NOT running, so say so instead of implying a restart happened.
+  step recreate failed "container unchanged (\${OLD_ID:0:12}) — compose did not replace it"
+else
+  step recreate done "\${OLD_ID:0:12} → \${NEW_ID:0:12}"
+fi
+
+step verify running
 say verifying "waiting for the new shell — a first boot installs deps and builds every package, so this can take several minutes"
 if healthy; then
+  step verify done "answered on the new revision"
+  step rollback skipped "not needed"
   say done "updated to \${TO_REV:0:12} and healthy"
   exit 0
 fi
@@ -597,19 +688,25 @@ fi
 if ! confirm_stuck; then
   say verifying "still working after all — resuming the wait"
   if healthy; then
+    step verify done "answered on the new revision (after a longer wait)"
+    step rollback skipped "not needed"
     say done "updated to \${TO_REV:0:12} and healthy"
     exit 0
   fi
   confirm_stuck || true
 fi
 
+step verify failed "no response from the new shell"
+step rollback running
 say rolling-back "\${TO_REV:0:12} never became healthy — restoring \${FROM_REV:0:12}"
 g reset --hard "$FROM_REV" >/dev/null 2>&1
 chown -R "$OWNER" "$WS/.git" 2>/dev/null || true
 rebuild || true
 if healthy; then
+  step rollback done "restored \${FROM_REV:0:12}"
   say rolled-back "restored \${FROM_REV:0:12}; the update to \${TO_REV:0:12} was reverted"
 else
+  step rollback failed "restore did not come up either"
   say failed "neither \${TO_REV:0:12} nor \${FROM_REV:0:12} came up — manual attention needed"
 fi
 exit 1

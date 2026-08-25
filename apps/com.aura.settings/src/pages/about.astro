@@ -56,6 +56,7 @@ const S = {
       + 'background:transparent;color:var(--aura-color-primary);font-family:monospace;font-size:0.66rem;'
       + 'letter-spacing:.14em;text-transform:uppercase;cursor:pointer;outline:none;',
   note: 'margin-top:8px;font-size:0.6rem;line-height:1.6;color:var(--aura-color-text-dim);',
+  steps: 'list-style:none;margin:10px 0 0;padding:0;font-size:0.62rem;line-height:1.9;',
   link: 'appearance:none;background:none;border:none;padding:4px 0;margin-top:4px;cursor:pointer;'
       + 'color:var(--aura-color-primary);font-family:monospace;font-size:0.6rem;letter-spacing:.08em;'
       + 'text-align:left;outline:none;',
@@ -114,6 +115,9 @@ const S = {
       <div id="upd-note" style={S.note}>Checking…</div>
       <!-- Only shown once a run exists: loads that run's full transcript
            (build output included) on demand — see ?logs=<id>. -->
+      <!-- What actually happened, step by step. Filled from the job's steps[]
+           so a finished update can be audited without reading the transcript. -->
+      <ul id="upd-steps" style={S.steps} hidden></ul>
       <button id="upd-logs-btn" type="button" style={S.link} hidden>▸ Show full log</button>
       <div id="upd-log" style={S.logbox}></div>
     </div>
@@ -163,6 +167,36 @@ const S = {
     });
 
     const TERMINAL = ['done', 'failed', 'rolled-back'];
+    const stepsEl = document.getElementById('upd-steps');
+
+    // One glyph + colour per state. `skipped` is deliberately neutral: a dry
+    // run never building is a correct outcome, not a half-failure.
+    const STEP_UI = {
+      done:    ['✓', 'var(--aura-color-primary,#00ff41)'],
+      failed:  ['✗', 'var(--aura-color-danger,#ff2020)'],
+      running: ['◌', 'var(--aura-color-secondary,#ff9900)'],
+      skipped: ['–', 'var(--aura-color-text-dim,#557755)'],
+      pending: ['·', 'var(--aura-color-text-dim,#557755)'],
+    };
+    function renderSteps(job) {
+      if (!stepsEl) return;
+      const steps = (job && job.steps) || [];
+      if (!steps.length) { stepsEl.hidden = true; stepsEl.innerHTML = ''; return; }
+      stepsEl.hidden = false;
+      stepsEl.innerHTML = steps.map((st) => {
+        const [glyph, color] = STEP_UI[st.status] || STEP_UI.pending;
+        const dim = st.status === 'pending' || st.status === 'skipped';
+        const detail = st.detail
+          ? `<span style="color:var(--aura-color-text-dim,#557755);"> — ${escapeHtml(st.detail)}</span>` : '';
+        return `<li style="color:${dim ? 'var(--aura-color-text-dim,#557755)' : 'var(--aura-color-text,#ccffcc)'};">`
+          + `<span style="color:${color};display:inline-block;width:1.2em;">${glyph}</span>`
+          + `${escapeHtml(st.label)}${detail}</li>`;
+      }).join('');
+    }
+    function escapeHtml(v) {
+      return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
     let polling = false;
 
     function paint(state) {
@@ -179,6 +213,7 @@ const S = {
       btn.style.opacity = busy ? '0.45' : '1';
       btn.style.cursor = busy ? 'wait' : 'pointer';
       btn.textContent = busy ? `Updating — ${job ? job.phase : 'working'}…` : 'Update AuraOS';
+      renderSteps(job);
       if (job) {
         lastJobId = job.id;
         logsBtn.hidden = false;
