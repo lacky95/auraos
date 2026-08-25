@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, readFileSync, lstatSync, writeFileSync, chmodSync, copyFileSync, unlinkSync, existsSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, lstatSync, writeFileSync, chmodSync, copyFileSync, renameSync, unlinkSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
@@ -8,7 +8,8 @@ import type { AppActivity } from '../types/activity.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
 import { AppRegistry } from './AppRegistry.js';
 import { toolsTrackInstalledCaps } from './tool-allowlist.js';
-import { toolchainMirrorBin } from './tool-provision.js';
+import { SHARED_HOME_PATH, toolchainMirrorBin } from './tool-provision.js';
+import { legacySharedHomeDir, masterHomeDir, userHomeDir } from '../scopes/home.js';
 import { PortAllocator } from './PortAllocator.js';
 import { LifecycleStateMachine } from './LifecycleStateMachine.js';
 import { ProotRunner, killProcessGroup } from './ProotRunner.js';
@@ -257,18 +258,21 @@ export class AppManager {
       }
     }
 
-    // Pre-create the shared user-home subpath inside the app-data named
-    // volume. ContainerRunner mounts /home/aura from this path into every
-    // sibling app container so tools like `claude` / `gh` / `ssh` persist
-    // their state across respawns AND across `aura jump` hops. Without
-    // pre-creating it, docker's volume-subpath mount fails on first spawn
-    // ("subpath … does not exist in the volume").
-    const sharedHome = join(this.dataDir, 'aura', 'home', 'user');
-    try {
-      mkdirSync(sharedHome, { recursive: true });
-    } catch (err) {
-      console.warn(`[AppManager] could not pre-create shared home ${sharedHome}: ${(err as Error).message}`);
+    // Pre-create the two homes inside the app-data named volume: the user's
+    // (mounted at /home/aura in every app sandbox) and the master's (the OS's
+    // own — see scopes/home.ts for why they are separate). Both must exist
+    // before a spawn: docker's volume-subpath mount fails outright on a
+    // missing subpath ("subpath … does not exist in the volume"), and a PRoot
+    // bind from a missing source is silently dropped, which would send the
+    // app's tool state back to the throwaway base-rootfs.
+    for (const home of [userHomeDir(this.dataDir), masterHomeDir(this.dataDir)]) {
+      try {
+        mkdirSync(home, { recursive: true });
+      } catch (err) {
+        console.warn(`[AppManager] could not pre-create home ${home}: ${(err as Error).message}`);
+      }
     }
+    this.migrateLegacySharedHome();
 
     // Pre-create /aura/{all-tools,my-tools} as empty directories in the
     // base-rootfs so PRoot's --bind has guaranteed mount points. PRoot can
@@ -277,7 +281,15 @@ export class AppManager {
     // /aura/my-tools doesn't exist in the proot → bashrc PATH guard skips →
     // htop not found" failure mode.
     if (existsSync(baseRootfsRoot)) {
-      for (const mountPoint of [join(baseRootfsRoot, 'aura', 'all-tools'), join(baseRootfsRoot, 'aura', 'my-tools')]) {
+      // SHARED_HOME_PATH is in this list for the same reason: ProotRunner binds
+      // the volume-backed home there, and a missing mount point means the bind
+      // is silently dropped — every tool inside the proot would then write its
+      // state to the throwaway base-rootfs again.
+      for (const mountPoint of [
+        join(baseRootfsRoot, 'aura', 'all-tools'),
+        join(baseRootfsRoot, 'aura', 'my-tools'),
+        join(baseRootfsRoot, ...SHARED_HOME_PATH.split('/').filter(Boolean)),
+      ]) {
         try { mkdirSync(mountPoint, { recursive: true }); }
         catch (err) { console.warn(`[AppManager] could not pre-create ${mountPoint}: ${(err as Error).message}`); }
       }
@@ -287,9 +299,55 @@ export class AppManager {
   }
 
   /**
-   * Mirror /os/toolchain/bin into the aura-app-data named volume.
+   * One-time move of the pre-multi-user home (`aura/home/user`, a single dir
+   * shared by every app container) onto the per-user layout
+   * (`scopes/users/<id>/home`).
    *
-   * Two reasons this mirror exists:
+   * Runs on boot and is a no-op afterwards. Only ever MOVES entries the new
+   * home doesn't already have, and never deletes: if both dirs hold the same
+   * name the new one wins and the legacy copy is left in place for the user
+   * to inspect. Leaving the legacy dir behind (rather than removing it once
+   * empty) is deliberate — it costs nothing and a home is the last thing that
+   * should be cleaned up automatically.
+   */
+  private migrateLegacySharedHome(): void {
+    const legacy = legacySharedHomeDir(this.dataDir);
+    const target = userHomeDir(this.dataDir);
+    if (!existsSync(legacy)) return;
+    let entries: string[];
+    try { entries = readdirSync(legacy); } catch { return; }
+    const moved: string[] = [];
+    const kept:  string[] = [];
+    for (const name of entries) {
+      const dst = join(target, name);
+      if (existsSync(dst)) { kept.push(name); continue; }
+      try {
+        renameSync(join(legacy, name), dst);
+        moved.push(name);
+      } catch (err) {
+        // Cross-device or permission problems: leave the entry where it is
+        // rather than half-copying someone's home.
+        console.warn(`[AppManager] home migration skipped ${name}: ${(err as Error).message}`);
+      }
+    }
+    if (moved.length) {
+      console.log(
+        `[AppManager] migrated ${moved.length} home entries ${legacy} → ${target} (${moved.join(', ')})`,
+      );
+    }
+    if (kept.length) {
+      console.log(
+        `[AppManager] left ${kept.length} legacy home entries in ${legacy} — the new home already has ` +
+        `them (${kept.join(', ')})`,
+      );
+    }
+  }
+
+  /**
+   * Keep /os/toolchain/bin and its mirror in the aura-app-data named volume
+   * in sync — in BOTH directions.
+   *
+   * Three reasons this mirror exists:
    *  1. Sibling containers' bind sources are resolved by the HOST docker
    *     daemon, which cannot see paths that only exist inside the aura-shell
    *     image (like /os/toolchain). A named-volume subpath can be mounted
@@ -298,22 +356,42 @@ export class AppManager {
    *     per-instance allowlist dirs (`<dataDir>/aura/runtime/<inst>/tools`),
    *     which is what lets `provisionAllowlist` hardlink from it. /os/toolchain
    *     lives on the shell image's overlay, so linking from there fails EXDEV.
+   *  3. It is the only copy that SURVIVES a container recreate. /os/toolchain
+   *     is an image layer, so every `cap install` addition to it is thrown
+   *     away with the old writable layer on `compose up --build` / recreate,
+   *     while `capabilities.json` (also on the volume) still reports the cap
+   *     as installed. The mirror keeps the binary; the restore pass below
+   *     copies it back so the two never drift apart again.
+   *
+   * The restore pass only ever ADDS names the mirror has and the toolchain
+   * lacks. `cap remove` unlinks from both dirs, so a mirror-only name can't
+   * be an uninstall we're resurrecting — it is always a lost binary.
+   *
+   * Caveat: only the binary comes back. Shared libraries that `cap install`
+   * staged into /os/base-rootfs (also an image layer) are lost with the same
+   * recreate, so a restored dynamically-linked cap can still fail inside a
+   * PRoot with "cannot open shared object file". Re-run `aura cap install
+   * <name>` to re-stage those.
    *
    * Idempotent, and must run BEFORE any allowlist provisioning that expects a
    * newly installed capability — in hardlink mode you cannot link a binary
    * that hasn't reached the mirror yet. `cap install` calls this before
    * refreshing running instances for exactly that reason.
    *
-   * Returns the number of entries in the mirror afterwards (0 when the source
-   * toolchain is absent, which leaves the OS in legacy symlink mode).
+   * Returns the number of entries in the mirror afterwards (0 only when
+   * neither dir is usable, which leaves the OS in legacy symlink mode).
    */
   syncToolchainMirror(): number {
     const srcBin    = join(this.toolchainDir, 'bin');
     const mirrorBin = toolchainMirrorBin(this.dataDir);
-    if (!existsSync(srcBin)) return 0;
     try {
       mkdirSync(mirrorBin, { recursive: true });
-      for (const name of readdirSync(srcBin)) {
+      // The toolchain dir itself can be missing after a recreate if nothing
+      // in the image populated it — create it so the restore pass below has
+      // somewhere to put the binaries the mirror still holds.
+      try { mkdirSync(srcBin, { recursive: true }); }
+      catch (err) { console.warn(`[AppManager] could not create ${srcBin}: ${(err as Error).message}`); }
+      for (const name of existsSync(srcBin) ? readdirSync(srcBin) : []) {
         const src = join(srcBin, name);
         const dst = join(mirrorBin, name);
         let needsCopy = true;
@@ -334,6 +412,30 @@ export class AppManager {
         } catch (err) {
           console.warn(`[AppManager] toolchain mirror ${src} → ${dst} failed: ${(err as Error).message}`);
         }
+      }
+      // ─── restore pass: mirror → toolchain ────────────────────────────
+      // Anything the volume-backed mirror has that the image-layer toolchain
+      // lost (container recreate) is copied back, so /os/toolchain/bin,
+      // `cap list` and the sandboxes agree again. Symlink-mode instances
+      // enumerate the real store, so without this they'd silently lose caps
+      // that hardlink-mode instances still get.
+      const restored: string[] = [];
+      for (const name of readdirSync(mirrorBin)) {
+        const dst = join(srcBin, name);
+        if (existsSync(dst)) continue;
+        try {
+          copyFileSync(join(mirrorBin, name), dst);
+          chmodSync(dst, 0o755);
+          restored.push(name);
+        } catch (err) {
+          console.warn(`[AppManager] toolchain restore ${name} → ${dst} failed: ${(err as Error).message}`);
+        }
+      }
+      if (restored.length) {
+        console.log(
+          `[AppManager] restored ${restored.length} lost toolchain binaries from the mirror ` +
+          `(${restored.join(', ')}) — re-run \`aura cap install <name>\` if one needs its shared libs re-staged`,
+        );
       }
       const count = readdirSync(mirrorBin).length;
       console.log(`[AppManager] toolchain mirrored → ${mirrorBin} (${count} entries)`);

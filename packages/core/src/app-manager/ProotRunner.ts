@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
 import { toolsGrant } from './tool-allowlist.js';
-import { ALL_TOOLS_PATH, MY_TOOLS_PATH, currentToolsMode, provisionAllowlist } from './tool-provision.js';
+import { ALL_TOOLS_PATH, MY_TOOLS_PATH, SHARED_HOME_PATH, currentToolsMode, provisionAllowlist } from './tool-provision.js';
+import { userHomeDir } from '../scopes/home.js';
 import type { SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import type { SpawnContext } from '../scopes/types.js';
 import { ContextStore } from '../context/ContextStore.js';
@@ -161,6 +162,12 @@ export class ProotRunner implements SandboxRunner {
       // key can't clobber PATH/APP_ID/OS_API_BASE etc.
       ...contextEnv,
       PATH: path,
+      // Apps get the USER's home, never the master's. Prooted apps reach it
+      // through the bind in buildProotArgs; non-prooted apps run inside the
+      // master container, where /home/aura is a symlink to the same dir (see
+      // Dockerfile). Set unconditionally — inheriting the master's $HOME here
+      // would leak OS-operator state into an app and write app state into it.
+      HOME: SHARED_HOME_PATH,
       APP_ID: appId,
       APP_INSTANCE_ID: instanceId,
       APP_PORT: String(port),
@@ -262,6 +269,17 @@ export class ProotRunner implements SandboxRunner {
       // Bring the master container's Node 22 into the sandbox — Debian-bookworm
       // ships Node 18 in its package archive, which is too old for our apps.
       '--bind=/usr/local/bin/node:/usr/local/bin/node',
+      // The user's HOME — the SAME `aura/home/<userId>` dir ContainerRunner
+      // mounts at /home/aura in every app container. (The master container's
+      // own home is deliberately elsewhere — see scopes/home.ts.) Without this
+      // bind a PRoot's HOME resolves inside the base-rootfs
+      // (/os/base-rootfs/root), which is an
+      // IMAGE LAYER: every `claude` login, `gh auth`, ssh key and tool dotfile
+      // written there is destroyed by the next `compose up --build` or
+      // container recreate. The base-rootfs was already a home shared by all
+      // proots, so this changes nothing about isolation — it only moves that
+      // shared home onto the app-data volume, where it survives.
+      `--bind=${userHomeDir(this.dataDir)}:${SHARED_HOME_PATH}`,
       // OS Context files. The master writes decrypted values here; binding the
       // dir at /run/context mirrors changes live (no respawn to pick up a file
       // edit — mirrors the ContainerRunner volume-subpath mount).
