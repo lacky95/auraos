@@ -481,6 +481,27 @@ function describeMode(mode: UpdateMode, branch: string, dryRun: boolean): string
 }
 
 /**
+ * Render the updater program for a given run. Exported for tests: this is
+ * generated shell, so `tsc` can prove nothing about it — every previous bug
+ * in here (a backtick ending the template early, a variable only the update
+ * path assigns) was invisible to the type checker and fatal at runtime.
+ *
+ * @see test/updater-script.test.mjs, which executes it against stubbed
+ * docker/git/curl for every mode.
+ */
+export function renderUpdaterScript(o: {
+  jobFile: string; logFile: string; fetchUrl: string; mode: UpdateMode; branch: string; dryRun: boolean;
+  project?: string; composeFile?: string; workDir?: string;
+}): string {
+  return updaterScript({
+    project: 'aura',
+    composeFile: '/workspace/docker-compose.yml',
+    workDir: '/workspace',
+    ...o,
+  });
+}
+
+/**
  * The updater's program. Plain bash so it can be read (and run by hand) on any
  * machine, and so it has no dependency on the node/TS build of the revision it
  * is in the middle of replacing.
@@ -498,6 +519,12 @@ WS=${JSON.stringify(o.workDir)}
 BRANCH=${JSON.stringify(o.branch)}
 FETCH_URL=${JSON.stringify(o.fetchUrl)}
 MODE=${JSON.stringify(o.mode)}
+# Only the update path sets these. Under 'set -u' an unset variable is fatal,
+# so a rebuild/restart referencing one in a message would abort the script
+# AFTER the work succeeded — losing the final status and leaving the job stuck
+# on its last phase forever. Default them.
+FROM_REV=none
+TO_REV=none
 DRY=${dry}
 PROJECT=${JSON.stringify(o.project)}
 COMPOSE_FILE=${JSON.stringify(o.composeFile)}
@@ -676,6 +703,15 @@ rebuild() {
   docker compose -p "$PROJECT" -f "$COMPOSE_FILE" --project-directory "$WS" up -d --build aura-os 2>&1 \
     | tee -a "$LOGFILE" | tail -5
 }
+# Final "it worked" line, phrased for the mode that ran: only an update has a
+# revision to name.
+finish_ok() {
+  if [ "$MODE" = "update" ]; then
+    say done "updated to \${TO_REV:0:12} and healthy"
+  else
+    say done "$MODE finished — aura-shell is up and healthy"
+  fi
+}
 ping_ok() { [ "$(curl -s -o /dev/null -w '%{http_code}' -m 8 "$HEALTH" 2>/dev/null)" = 200 ]; }
 shell_running() { [ "$(docker inspect -f '{{.State.Running}}' aura-shell 2>/dev/null || echo false)" = true ]; }
 shell_log_size() { docker logs aura-shell 2>&1 | wc -c | tr -d ' '; }
@@ -810,7 +846,7 @@ if healthy; then
   step verify done "answered on the new revision"
   step rollback skipped "not needed"
   step complete done "$MODE finished"
-  say done "updated to \${TO_REV:0:12} and healthy"
+  finish_ok
   exit 0
 fi
 
@@ -825,7 +861,7 @@ if ! confirm_stuck; then
     step verify done "answered on the new revision (after a longer wait)"
     step rollback skipped "not needed"
     step complete done "$MODE finished"
-    say done "updated to \${TO_REV:0:12} and healthy"
+    finish_ok
     exit 0
   fi
   confirm_stuck || true
