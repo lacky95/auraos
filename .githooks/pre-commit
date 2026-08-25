@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+#
+# Bump the root package.json PATCH version — main branch only, on commit.
+#
+# The version this touches is the one Settings → About shows (the shell reads
+# repo-root package.json), so any running system says which commit it is on
+# without asking git.
+#
+# Enable once per clone (hooks are not cloned):
+#
+#     git config core.hooksPath .githooks
+#
+# Skips itself when a bump would be wrong or surprising:
+#   • not on main    — feature branches keep the version they inherit; the
+#                      bump belongs to the commit that lands on main
+#   • detached HEAD  — rebase, bisect, or a checked-out revision
+#   • merge / cherry-pick / revert / rebase in progress — replaying existing
+#                      commits must not invent a new version each time
+#   • the commit already changes "version" — someone set it deliberately,
+#                      including the post-merge hook's own bump commit
+#   • AURA_NO_BUMP=1 — escape hatch
+#
+set -euo pipefail
+
+[ "${AURA_NO_BUMP:-0}" = "1" ] && exit 0
+[ "$(git symbolic-ref --short -q HEAD || true)" = "main" ] || exit 0
+
+git_dir=$(git rev-parse --git-dir)
+for marker in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-merge rebase-apply; do
+  [ -e "$git_dir/$marker" ] && exit 0
+done
+
+pkg="$(git rev-parse --show-toplevel)/package.json"
+if git diff --cached -U0 -- "$pkg" | grep -qE '^\+[[:space:]]*"version"[[:space:]]*:'; then
+  exit 0
+fi
+
+read -r from to < <("$(dirname "$0")/lib/bump-patch.sh") || exit 0
+git add -- "$pkg"
+echo "[pre-commit] version $from → $to"
