@@ -269,6 +269,16 @@ export class ProotRunner implements SandboxRunner {
       // OS-managed shared Context Volumes — bind each volume's subpath dir at
       // the user-chosen mount path (proot binds are RW regardless of mode).
       ...contextVolumes.map((v) => `--bind=${join(this.volumeStore.volumesDir, v.name)}:${v.mountPath}`),
+      // Expose the app's own source dir at its real absolute path. Required for
+      // user/global-scope apps, whose appDir lives UNDER /data (e.g.
+      // /data/scopes/users/<u>/apps/<id>): the `${dataDir}:/data` bind above
+      // remaps /data to the per-instance data dir, which would otherwise shadow
+      // the app source — `chdir(appDir)` then fails and proot falls back to `/`,
+      // so `astro dev` never finds package.json/node_modules. Binding appDir
+      // onto itself overlays that subtree back. For system-scope apps (appDir
+      // under /workspace) this is a no-op — the path already maps to the same
+      // host dir via the /workspace bind.
+      `--bind=${appDir}:${appDir}`,
       `--cwd=${appDir}`,
     ];
 

@@ -668,7 +668,16 @@ async function scaffoldFromConfig(cfg: ScaffoldConfig): Promise<void> {
     } else {
       warn(`pnpm install did not complete (${installError ? installError.split('\n')[0] : 'unknown'}). Run \`pnpm install\` in the workspace root before launching.`);
     }
+  } else if (viaShell) {
+    // The shell's /api/admin/scaffold installs user/global deps into the app
+    // dir (pnpm install + aura sdk install) so the first launch is health-ready.
+    if (installed) {
+      info(`deps installed: ${color.dim('astro + @aura/* ok')}`);
+    } else {
+      warn(`dep install did not complete (${installError ? installError.split('\n')[0] : 'unknown'}). It will be retried on first launch (may exceed the health window; re-run \`aura app start\` if so).`);
+    }
   } else {
+    // Local-write fallback (shell unreachable): deps resolve on first launch.
     info(`@aura/* deps resolve on first launch via ${color.dim('aura sdk install')}.`);
   }
   info(`Run \`aura app start ${cfg.appId}\` to launch it.`);
