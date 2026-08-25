@@ -145,9 +145,9 @@ const S = {
     // no business owning it.
     const api = '/api/admin/self-update';
 
-    const btn  = document.getElementById('upd-btn');
-    const rebuildBtn = document.getElementById('rebuild-btn');
-    const restartBtn = document.getElementById('restart-btn');
+    const btn        = document.getElementById('upd-btn')     as HTMLButtonElement;
+    const rebuildBtn = document.getElementById('rebuild-btn') as HTMLButtonElement;
+    const restartBtn = document.getElementById('restart-btn') as HTMLButtonElement;
     const note = document.getElementById('upd-note');
     const log  = document.getElementById('upd-log');
     const logsBtn = document.getElementById('upd-logs-btn');

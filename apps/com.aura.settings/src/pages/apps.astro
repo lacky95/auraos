@@ -259,7 +259,7 @@ apps.sort((a, b) => {
               class="toggle"
               type="button"
               role="switch"
-              aria-checked={String(app.enabled)}
+              aria-checked={app.enabled ? 'true' : 'false'}
               data-on={String(app.enabled)}
               title={app.enabled ? `Disable ${m.name}` : `Enable ${m.name}`}
             />

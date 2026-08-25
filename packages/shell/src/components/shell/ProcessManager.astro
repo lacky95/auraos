@@ -732,6 +732,8 @@
     themeStrategy?: 'inherit' | 'themed' | 'override';
     /** 'activity' (default) or 'service' — services render under their own header. */
     componentType?: 'activity' | 'service';
+    /** Single glyph/emoji shown when the app has no icon asset. */
+    icon?: string;
   }
 
   const toggleBtn   = document.getElementById('pm-toggle') as HTMLButtonElement;

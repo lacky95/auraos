@@ -611,7 +611,9 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // Read xterm's actual rendered cell. False until the first render populates
     // renderService.dimensions.
     function realCell() {
-      const c = term?._core?._renderService?.dimensions?.css?.cell;
+      // Reading xterm's private renderer state on purpose: there is no public
+      // API for the measured cell size. Cast so the intent is explicit.
+      const c = (term as any)?._core?._renderService?.dimensions?.css?.cell;
       if (c && c.width > 0 && c.height > 0) { cellW = c.width; cellH = c.height; return true; }
       return false;
     }
@@ -640,7 +642,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // from the authoritative box stays race-free.
     let scrollbarW = -1; // cached first non-degenerate read
     function measureScrollbar() {
-      const vp = document.querySelector('.xterm-viewport');
+      const vp = document.querySelector('.xterm-viewport') as HTMLElement | null;
       if (vp && vp.offsetWidth > 0) scrollbarW = vp.offsetWidth - vp.clientWidth;
     }
     function chromeInset() {
@@ -661,7 +663,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // default to the iframe viewport for the message-less callers (fonts.ready,
     // ws.onopen), which equals the shell's contentW/H (the iframe has no inner
     // transform). The first call with a real box reveals the terminal.
-    function applyFit(boxW, boxH) {
+    function applyFit(boxW?: number, boxH?: number) {
       if (locked) return;                   // another view owns the terminal → nothing of ours to fit
       const w = boxW ?? window.innerWidth;
       const h = boxH ?? window.innerHeight;
@@ -1171,8 +1173,8 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     const qcCloseBtn = document.getElementById('qc-close');
     const qcList     = document.getElementById('qc-list');
     const qcAddForm  = document.getElementById('qc-add');
-    const qcCmdInput = document.getElementById('qc-cmd');
-    const qcNameInput= document.getElementById('qc-name');
+    const qcCmdInput = document.getElementById('qc-cmd')  as HTMLInputElement | null;
+    const qcNameInput= document.getElementById('qc-name') as HTMLInputElement | null;
     const qcSaveBtn  = document.getElementById('qc-save');
     // Two independent lists, rendered as one panel: `remote` lives on the app
     // backend (shared by every terminal instance and browser, survives an OS
@@ -1341,7 +1343,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         transition: 'transform .18s ease-out',
         zIndex: '50', overflow: 'hidden',
       });
-      const head = qcPanel && qcPanel.querySelector('.qc-head');
+      const head = qcPanel && qcPanel.querySelector('.qc-head') as HTMLElement | null;
       if (head) Object.assign(head.style, {
         display: 'flex', alignItems: 'center', gap: '5px',
         height: '24px', padding: '0 6px 0 10px',
@@ -1447,7 +1449,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     qcEditBtn?.addEventListener('click', () => qcSetEditing(!qcEditing));
 
     qcList?.addEventListener('click', async (e) => {
-      const btn = e.target.closest('button[data-qc]');
+      const btn = (e.target as Element).closest('button[data-qc]') as HTMLElement | null;
       if (!btn) return;
       const store = btn.dataset.store === 'local' ? 'local' : 'remote';
       const idx = parseInt(btn.dataset.idx, 10);

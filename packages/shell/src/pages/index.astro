@@ -1404,6 +1404,14 @@ const ssrVisibleViews = initialViews
         targetInstanceId = instanceId;
         targetInstanceState = instance?.state ?? 'creating';
       }
+      // The start response is untyped JSON: if it came back without an
+      // instanceId we would otherwise carry a null through the activity call
+      // and build a view pointing at "null".
+      if (!targetInstanceId) {
+        console.error(`No instance id for ${appId} — cannot open an activity`);
+        pending.drop();
+        return;
+      }
 
       // Open the activity, replacing the placeholder with the real activity view.
       markActivityOpenStart(appId);

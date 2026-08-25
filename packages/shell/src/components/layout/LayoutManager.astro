@@ -29,7 +29,7 @@ interface Props {
   /** Strategy-specific persisted state (e.g. saved rects for `stack`). */
   layoutState?: Record<string, unknown>;
 }
-const { views, strategyId = 'tiling', layoutState } = Astro.props;
+const { views, strategyId = 'tiling', layoutState } = Astro.props as Props;
 const visible = views.filter(v => v.state !== 'minimized');
 
 /**

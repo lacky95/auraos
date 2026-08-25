@@ -612,7 +612,9 @@ const { apps, enabledMap = {} } = Astro.props;
           overflowBtn.hidden = false;
         }
         trimIdx -= 1;
-        visible[trimIdx].dataset['hidden'] = 'true';
+        const tile = visible[trimIdx];
+        if (!tile) break;          // ran out of tiles to trim
+        tile.dataset['hidden'] = 'true';
       }
 
       // 2) Sub-threshold rule: if fewer than MIN_VISIBLE_TILES are still
@@ -622,7 +624,8 @@ const { apps, enabledMap = {} } = Astro.props;
       const someOverflow = remainingVisible < visible.length;
       if (someOverflow && remainingVisible > 0 && remainingVisible < MIN_VISIBLE_TILES) {
         for (let j = 0; j < remainingVisible; j++) {
-          visible[j].dataset['hidden'] = 'true';
+          const tile = visible[j];
+          if (tile) tile.dataset['hidden'] = 'true';
         }
         trimIdx = 0;
       }

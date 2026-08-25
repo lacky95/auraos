@@ -553,7 +553,12 @@ const activeThemeId   = activeTheme.id;
       // Mirror current mode/theme onto <html> data-attributes + meta tags so
       // non-CSS selectors and DOM-based reads stay in sync. Best-effort.
       const root = document.documentElement;
-      const m    = ev as ThemeEvt & ModeEvt;
+      // NOT `ThemeEvt & ModeEvt`: their `type` fields are different string
+      // literals, so the intersection has `type: never` and TypeScript
+      // collapses the whole thing to `never` — every field read off it then
+      // errors. Both events carry the same payload fields, so the union the
+      // parameter already has is exactly what we want.
+      const m    = ev;
       const setMeta = (name: string, value: string | undefined) => {
         if (!value) return;
         const el = document.querySelector(`meta[name="${name}"]`);

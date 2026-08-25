@@ -39,7 +39,9 @@ const { apps } = Astro.props;
 
   grid?.addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-app-id]');
-    if (btn?.dataset['appId']) window.auraLaunchApp(btn.dataset['appId']);
+    // Optional call: the drawer can be clicked before the shell script that
+    // installs auraLaunchApp has run.
+    if (btn?.dataset['appId']) window.auraLaunchApp?.(btn.dataset['appId']);
   });
 </script>
 
