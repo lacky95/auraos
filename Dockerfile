@@ -113,6 +113,19 @@ RUN curl -fsSL "https://github.com/oras-project/oras/releases/download/v${ORAS_V
  && rm -f /tmp/oras.tgz /tmp/oras \
  && oras version
 
+# Docker Compose plugin. Needed by SELF-UPDATE (Settings → About): the updater
+# runs as a sibling container from THIS image and rebuilds the shell with
+# `docker compose up -d --build`, so compose has to exist inside the image —
+# the static docker CLI installed above ships no plugins. Same static-binary
+# approach as the docker CLI: no repos, works on any host, arch resolved at
+# build time.
+ARG COMPOSE_VERSION=2.40.3
+RUN ARCH=$(uname -m) \
+ && curl -fsSL "https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-${ARCH}" \
+      -o /usr/local/lib/docker/cli-plugins/docker-compose --create-dirs \
+ && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
+ && docker compose version
+
 # Replace Debian's proot (5.3.x with EFAULT on Rust-compiled native modules
 # like Tailwind 4 Oxide / jiti) with a fresh build from upstream proot-me.
 # /usr/local/bin precedes /usr/bin in PATH, so this version wins everywhere
@@ -204,11 +217,32 @@ ENV AURA_BASE_ROOTFS=/os/base-rootfs
 ENV AURA_TOOLCHAIN_DIR=/os/toolchain
 ENV AURA_APP_PORT_START=4001
 ENV AURA_APP_PORT_END=4999
+# See the development stage / os/toolchain-path.sh: the master container runs
+# the whole toolchain on PATH, sourced from the volume mirror so it survives
+# a container recreate.
+ENV PATH=$PATH:/data/aura/toolchain/bin
+COPY os/toolchain-path.sh /etc/profile.d/aura-toolchain.sh
+
+# See the development stage: one persistent home per identity — the master's
+# own (system scope) here, the user's at /home/aura for the apps it spawns.
+ENV HOME=/home/master
+
+# Corepack caches the pnpm binary under $HOME. The image already baked one
+# (`corepack prepare pnpm@latest --activate` → /root/.cache/node/corepack);
+# moving HOME onto the volume orphaned it, so corepack tried to re-download
+# pnpm and BLOCKED on its interactive "Do you want to continue? [Y/n]" prompt
+# — compose gives this container a TTY, so nothing answered it and the OS
+# never finished booting. Pin COREPACK_HOME at the image's cache: the package
+# manager belongs to the IMAGE, only user/tool state belongs to the volume.
+# The prompt is disabled too, so a pnpm version bump downloads unattended
+# instead of hanging the boot again.
+ENV COREPACK_HOME=/root/.cache/node/corepack
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
 EXPOSE 3000
 
 # AuraOS always runs in dev mode for live-reload (AI-native, always editable)
-CMD ["sh", "-c", "pnpm install && pnpm --filter @aura/shell dev --host 0.0.0.0"]
+CMD ["sh", "-c", "mkdir -p /data/aura/home/master /data/aura/home/default && rm -f /home/master /home/aura && ln -s /data/aura/home/master /home/master && ln -s /data/aura/home/default /home/aura && pnpm install && pnpm --filter @aura/shell dev --host 0.0.0.0"]
 
 # ─── Stage: development ───────────────────────────────────────────────────────
 # Used by docker-compose for local dev — code is volume-mounted from host
@@ -240,6 +274,49 @@ RUN npm install -g @anthropic-ai/claude-code 2>/dev/null || true && \
 # Debian-slim PRoot base rootfs (glibc-compatible — same libc as host binaries)
 COPY --from=base-rootfs / /os/base-rootfs
 
+# Master-container PATH. aura-shell is the OS itself, not a sandbox, so it
+# gets the whole toolchain instead of a per-app `tools[]` allowlist — see
+# os/toolchain-path.sh for the reasoning and why it's the volume mirror
+# rather than /os/toolchain/bin. ENV covers the shell process and its
+# children plus `bash -i` (what `aura jump --master` execs); the profile.d
+# copy covers LOGIN shells, where Debian's /etc/profile hard-resets root's
+# PATH and would otherwise drop this. Kept as the last layers before CMD so
+# editing them doesn't invalidate the expensive npm/rootfs layers above.
+ENV PATH=$PATH:/data/aura/toolchain/bin
+COPY os/toolchain-path.sh /etc/profile.d/aura-toolchain.sh
+
+# Master-container HOME. The master's own filesystem is an image layer, so a
+# $HOME of /root means every tool's state — `claude` logins and session
+# history, `gh auth`, ssh keys, any dotfile any future tool writes — is
+# destroyed by the next rebuild, recreate, or host reboot that recreates the
+# container. Pointing HOME at the app-data volume makes tool state persist for
+# EVERY tool at once, with no per-tool list of "paths worth keeping" to
+# maintain and no work needed when a new tool shows up.
+#
+# Same philosophy as the user's home, DIFFERENT home: the master is the OS,
+# not a user, so it gets its own home beside them (/data/aura/home/master)
+# while apps get the user's (/data/aura/home/default, mounted at
+# /home/aura in every sandbox). See packages/core/src/scopes/home.ts. Both
+# symlinks exist here because non-prooted apps run inside this container and
+# must still land in the USER's home.
+#
+# Symlinks rather than compose `volume-subpath` mounts: a subpath mount fails
+# on a first boot when the dir doesn't exist yet. The CMD creates both dirs
+# before anything reads HOME.
+ENV HOME=/home/master
+
+# Corepack caches the pnpm binary under $HOME. The image already baked one
+# (`corepack prepare pnpm@latest --activate` → /root/.cache/node/corepack);
+# moving HOME onto the volume orphaned it, so corepack tried to re-download
+# pnpm and BLOCKED on its interactive "Do you want to continue? [Y/n]" prompt
+# — compose gives this container a TTY, so nothing answered it and the OS
+# never finished booting. Pin COREPACK_HOME at the image's cache: the package
+# manager belongs to the IMAGE, only user/tool state belongs to the volume.
+# The prompt is disabled too, so a pnpm version bump downloads unattended
+# instead of hanging the boot again.
+ENV COREPACK_HOME=/root/.cache/node/corepack
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+
 WORKDIR /workspace
 
 # The aura CLI is built from /workspace (volume-mounted in dev). Initial build
@@ -262,11 +339,14 @@ WORKDIR /workspace
 # packages/* via a single recursive, dependency-ordered pnpm run so this never
 # drifts again when a package is added or flips to dist exports — an earlier
 # hardcoded core/kv-store/cli list silently missed @aura/ui and @aura/app-sdk.
-CMD ["sh", "-c", "{ pnpm install || echo '[aura] pnpm install exited non-zero (likely ERR_PNPM_IGNORED_BUILDS) — continuing'; } \
+CMD ["sh", "-c", "mkdir -p /data/aura/home/master /data/aura/home/default && rm -f /home/master /home/aura && ln -s /data/aura/home/master /home/master && ln -s /data/aura/home/default /home/aura \
+ && { pnpm install || echo '[aura] pnpm install exited non-zero (likely ERR_PNPM_IGNORED_BUILDS) — continuing'; } \
  && pnpm --filter \"./packages/*\" build \
  && install -D -m 0755 /workspace/os/aura-cli-shim.sh /usr/local/bin/aura \
  && install -D -m 0755 /workspace/os/aura-cli-shim.sh /os/toolchain/bin/aura \
  && install -D -m 0644 /workspace/os/bashrc.aura.sh /os/base-rootfs/root/.bashrc \
  && install -D -m 0644 /workspace/os/bashrc.aura.sh /os/base-rootfs/etc/profile.d/aura-prompt.sh \
+ && install -D -m 0644 /workspace/os/bashrc.aura.sh /os/base-rootfs/etc/bash.bashrc \
+ && install -D -m 0644 /workspace/os/toolchain-path.sh /etc/profile.d/aura-toolchain.sh \
  && (pnpm --filter @aura/cli build:watch &) \
  && pnpm --filter @aura/shell dev --host 0.0.0.0"]

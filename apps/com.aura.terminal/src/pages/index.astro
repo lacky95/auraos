@@ -49,56 +49,6 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       flex-shrink: 0;
     }
     #terminal-bar span { color: var(--aura-color-primary); margin-right: 8px; }
-    /* Shared-terminal sizing mode: two icon buttons (fit-smallest | primary).
-       Plain scoped selectors (same as the rest of this bar) — the buttons are
-       static template elements, so Astro's scope attribute lands on them just
-       like #terminal-bar. Every palette var carries a literal fallback (the
-       Settings/browser app pattern), and a bare <button> keeps native OS chrome
-       (grey bg, system font) unless reset — hence `appearance:none` + explicit
-       colors. NOTE: keep this in the SCOPED <style>, never `is:global` — in
-       `astro dev`, global styles are injected by the Vite client at runtime,
-       which can't reach its HMR socket through the OS proxy inside an app
-       iframe, so the whole bar would lose its styling on load. */
-    #terminal-bar .term-size-mode { display: inline-flex; align-items: center; margin: 0 4px; }
-    #terminal-bar .term-size-mode .tsm-btn {
-      -webkit-appearance: none;
-      appearance: none;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      box-sizing: border-box;
-      min-width: 22px;
-      height: 18px;
-      color: var(--aura-color-text-dim, #557755);
-      background: var(--aura-color-surface, #111);
-      border: 1px solid var(--aura-color-border, rgba(0,255,65,0.2));
-      border-radius: 0;
-      font-family: var(--aura-font-mono, 'Courier New', monospace);
-      font-size: 0.72rem;
-      line-height: 1;
-      letter-spacing: 0;
-      text-transform: none;
-      padding: 0 6px;
-      margin: 0;
-      cursor: pointer;
-      outline: none;
-      transition: color .1s, border-color .1s, background .1s, box-shadow .1s;
-    }
-    #terminal-bar .term-size-mode .tsm-btn + .tsm-btn { border-left: none; }
-    #terminal-bar .term-size-mode .tsm-btn:hover,
-    #terminal-bar .term-size-mode .tsm-btn:focus-visible {
-      color: var(--aura-color-primary, #00ff41);
-      border-color: var(--aura-color-primary, #00ff41);
-    }
-    /* Active mode = the OS chrome's "glow" affordance (matches the browser
-       app's button hover + Settings' .theme-card[data-active]) so the selected
-       mode reads as filled. */
-    #terminal-bar .term-size-mode .tsm-btn[data-active="true"] {
-      color: var(--aura-color-bg, #0a0a0a);
-      background: var(--aura-color-primary, #00ff41);
-      border-color: var(--aura-color-primary, #00ff41);
-      box-shadow: var(--aura-glow-primary, 0 0 8px #00ff41);
-    }
     #terminal-bar #ws-url {
       color: var(--aura-color-text-dim);
       font-size: 0.6rem;
@@ -204,18 +154,9 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
   <div id="terminal-bar">
     <button id="qc-toggle" type="button" title="Quick commands"
             style="appearance:none;-webkit-appearance:none;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;min-width:22px;height:18px;padding:0 6px;margin-right:8px;border:1px solid var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:transparent;color:var(--aura-color-primary,#00ff41);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.8rem;line-height:1;cursor:pointer;outline:none;">⚡</button>
-    <span class="term-size-mode" role="group" aria-label="Shared terminal sizing"
-          style="display:inline-flex;align-items:center;gap:3px;margin:0 6px;">
-      <button id="size-fit" class="tsm-btn" type="button"
-              style="appearance:none;-webkit-appearance:none;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;min-width:22px;height:18px;padding:0 6px;border:1px solid var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:transparent;color:var(--aura-color-primary,#00ff41);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.72rem;line-height:1;cursor:pointer;outline:none;"
-              title="Fit to smallest (default): size the shared terminal so it fits every connected device — larger screens show unused space, never wrong wrapping.">⊟</button>
-      <button id="size-primary" class="tsm-btn" type="button"
-              style="appearance:none;-webkit-appearance:none;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;min-width:22px;height:18px;padding:0 6px;border:1px solid var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:transparent;color:var(--aura-color-primary,#00ff41);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.72rem;line-height:1;cursor:pointer;outline:none;"
-              title="Make this device primary: size the shared terminal to THIS screen. Other devices render best-effort. Applies to every terminal on this device.">★</button>
-    </span>
     <!-- Terminal-local color mode (◐ auto | ☀ light | ☾ dark). Overrides the
          palette for THIS app only — the desktop and other apps keep the OS
-         mode. Painted from JS like the sizing buttons (see paintBtn). -->
+         mode. Painted from JS (see paintBtn) because inline styles have no :hover. -->
     <button id="mode-toggle" class="tsm-btn" type="button" data-mode="auto"
             style="appearance:none;-webkit-appearance:none;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;min-width:22px;height:18px;padding:0 6px;margin:0 2px;border:1px solid var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:transparent;color:var(--aura-color-primary,#00ff41);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.72rem;line-height:1;cursor:pointer;outline:none;"
             title="Color mode: AUTO (follows the OS)">◐</button>
@@ -223,6 +164,36 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     <span style="margin-left:auto;" id="conn-status">CONNECTING...</span>
   </div>
   <div id="terminal" data-app-id={appId}></div>
+
+  <!-- Shown INSTEAD of the terminal while another browser view holds this
+       session (driven by the server's control frames — see the ws.onmessage
+       demux). The window and all its other state stay exactly as they are;
+       only the live terminal moves. Styled inline for the same reason the
+       bar's buttons are: Astro's scoped CSS proved unreliable for elements
+       inside the proxied app iframe, and inline styles never depend on a
+       scope attribute landing. -->
+  <div id="session-lock" role="status" aria-live="polite"
+       style="display:none;flex:1;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center;">
+    <div style="font-size:0.95rem;line-height:1;letter-spacing:.18em;text-transform:uppercase;color:var(--aura-color-primary,#00ff41);">Terminal</div>
+    <div style="font-size:0.8rem;letter-spacing:.04em;color:var(--aura-color-text,#ccffcc);">This terminal is in use somewhere else.</div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:5px;">
+      <button id="lock-claim" type="button"
+              style="appearance:none;-webkit-appearance:none;box-sizing:border-box;padding:7px 14px;border:1px solid var(--aura-color-primary,#00ff41);border-radius:0;background:transparent;color:var(--aura-color-primary,#00ff41);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.7rem;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;outline:none;transition:color .1s,background .1s,box-shadow .1s;">Use terminal here</button>
+      <!-- Decorative separator between the two actions. aria-hidden so it is
+           never read out as content between two buttons. -->
+      <div aria-hidden="true" style="font-size:0.62rem;line-height:1;color:var(--aura-color-text-dim,#557755);">·</div>
+      <!-- Deliberately the quiet one: dim border + dim text, and it never
+           fills on hover the way the primary action does. Same job, wider
+           blast radius, so it shouldn't compete for the click. -->
+      <button id="lock-claim-all" type="button"
+              title="Bring every terminal session to this browser"
+              style="appearance:none;-webkit-appearance:none;box-sizing:border-box;padding:5px 12px;border:1px solid var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:transparent;color:var(--aura-color-text-dim,#557755);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.62rem;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;outline:none;transition:color .1s,border-color .1s;">Use all terminals here</button>
+    </div>
+    <div style="max-width:44ch;font-size:0.62rem;line-height:1.6;color:var(--aura-color-text-dim,#557755);">
+      The session keeps running either way. Taking it over here hides the
+      terminal in the other browser — that window stays open.
+    </div>
+  </div>
 
   <!-- Quick-commands sidebar: slides in from the left over the console. -->
   <aside id="qc-panel" aria-hidden="true">
@@ -237,6 +208,16 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     <form id="qc-add" hidden>
       <input id="qc-cmd"  type="text" placeholder="command — e.g. git status" autocomplete="off" spellcheck="false" />
       <input id="qc-name" type="text" placeholder="display name (optional)"   autocomplete="off" spellcheck="false" />
+      <!-- Where this entry is stored. Chosen per entry at add/edit time; on
+           save an existing entry MOVES between stores if the choice changed. -->
+      <div id="qc-store" style="display:flex;gap:4px;">
+        <button id="qc-store-remote" type="button" data-store="remote"
+                title="Synced — saved on the terminal backend, shared by every terminal and browser"
+                style="flex:1;appearance:none;-webkit-appearance:none;box-sizing:border-box;padding:4px;border:1px solid var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:transparent;color:var(--aura-color-primary,#00ff41);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.58rem;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;outline:none;">&#8645; Synced</button>
+        <button id="qc-store-local" type="button" data-store="local"
+                title="Local — saved in this browser only"
+                style="flex:1;appearance:none;-webkit-appearance:none;box-sizing:border-box;padding:4px;border:1px dotted var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:transparent;color:var(--aura-color-text-dim,#557755);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.58rem;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;outline:none;">&#9642; Local</button>
+      </div>
       <button id="qc-save" type="submit"
               style="appearance:none;-webkit-appearance:none;box-sizing:border-box;padding:5px;border:1px solid var(--aura-color-primary,#00ff41);border-radius:0;background:var(--aura-color-primary,#00ff41);color:var(--aura-color-bg,#0a0a0a);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.62rem;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;outline:none;">Add</button>
     </form>
@@ -292,19 +273,40 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       allowProposedApi: true,
     });
 
-    // ─── Shared-terminal sizing mode (device-wide) ───────────────────────
-    // A PTY has one winsize, but the same session can be open on several
-    // devices. Default "fit to smallest" lets every device report its size
-    // and the server sizes the PTY to the smallest. Pressing ★ marks THIS
-    // device primary so the PTY sizes to this screen instead. The choice is
-    // device-wide (localStorage) and mirrored across this device's terminal
-    // iframes via the `storage` event — every terminal re-reports with the
-    // flag so all the device's sessions follow. We only send the flag; the
-    // server decides the shared size (see pty-server recomputeEffective).
-    const PRIMARY_KEY = 'aura.terminal.primary';
-    let isPrimary = (() => {
-      try { return localStorage.getItem(PRIMARY_KEY) === 'true'; } catch { return false; }
+    // ─── One live view per session ───────────────────────────────────────
+    // The shell behind this window is a long-lived remote session; the xterm in
+    // front of it is not. A PTY has ONE winsize, so two live terminals of
+    // different sizes on the same session fought over it — the old ⊟/★ buttons
+    // tried to referee that (fit-to-smallest vs. a "primary" device) and never
+    // worked well enough to keep.
+    //
+    // Instead exactly ONE browser renders a session at a time. Any other one
+    // keeps its window — and all of its state — and swaps the terminal for
+    // "This terminal is in use somewhere else. [Use terminal here]". Pressing
+    // that moves the live view here and hides it over there; the shell itself
+    // never stops, it just isn't drawn in two places at once. The server
+    // arbitrates (see pty-server) and tells us which side we're on via control
+    // frames on the same socket.
+    //
+    // The browser id identifies this browser TAB: sessionStorage is per-tab and
+    // shared by same-origin iframes within it, so every terminal iframe in this
+    // tab reports the same id and survives a reload, while another tab or
+    // another browser gets its own. (Not to be confused with the shell's
+    // `viewId`, which identifies a WINDOW — activityId ?? instanceId.)
+    const BROWSER_KEY = 'aura.terminal.browserId';
+    function randomId() { return Math.random().toString(36).slice(2, 10); }
+    const browserId = (() => {
+      try {
+        let v = sessionStorage.getItem(BROWSER_KEY);
+        if (!v) { v = 'b-' + randomId() + randomId(); sessionStorage.setItem(BROWSER_KEY, v); }
+        return v;
+      } catch { return 'b-' + randomId() + randomId(); }  // private mode — fresh id per load
     })();
+
+    // true ⇒ another view holds the terminal and ours is swapped for the
+    // take-over panel. Set only from the server's control frames (setLocked).
+    let locked = false;
+    const ctlDecoder = new TextDecoder();
 
     // ─── Session host indicator ──────────────────────────────────────────
     // The shell's PROMPT_COMMAND (os/bashrc.aura.sh) emits an OSC window-title
@@ -459,7 +461,41 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // right granularity. If activity-mode terminals land here later, the
     // meta tag will be present and a per-activity key takes priority.
     const activityId = document.querySelector('meta[name="aura-activity-id"]')?.getAttribute('content') ?? instanceId;
-    const wsUrl = `${wsProto}//${location.host}/api/proxy/${instanceId}/ws?_aura_session=${encodeURIComponent(activityId)}`;
+    // `_aura_browser` is how the server knows which browser this socket belongs
+    // to, and therefore whether we get the live terminal or the take-over
+    // panel. It's on the URL (not a first message) so the decision is made at
+    // attach time — no window where we'd render before knowing.
+    const wsUrl = `${wsProto}//${location.host}/api/proxy/${instanceId}/ws`
+      + `?_aura_session=${encodeURIComponent(activityId)}`
+      + `&_aura_browser=${encodeURIComponent(browserId)}`;
+
+    // ─── Did THIS browser launch this window? ────────────────────────────
+    // A launch is server-side state, so the new window appears in EVERY browser
+    // the user has open and each mounts its own iframe for it. First-come
+    // ownership then hands the session to whichever iframe's socket connected
+    // first — regularly the browser the user is NOT at, who then sees "in use
+    // somewhere else" on a terminal they just opened.
+    //
+    // So the launching browser leaves a one-shot mark (shell lib/launchOrigin.ts)
+    // keyed by this window's id, written before our iframe existed. Finding it
+    // means "this page load IS the launch" → take the session outright rather
+    // than racing for it. Consume it immediately: a later reload of the same
+    // window must never steal the terminal back from wherever the user moved it.
+    const LAUNCHED_HERE_KEY = 'aura.launchedHere';
+    const launchedHere = (() => {
+      try {
+        const raw = sessionStorage.getItem(LAUNCHED_HERE_KEY);
+        if (!raw) return false;
+        const map = JSON.parse(raw);
+        if (!map || typeof map !== 'object' || !(activityId in map)) return false;
+        delete map[activityId];
+        sessionStorage.setItem(LAUNCHED_HERE_KEY, JSON.stringify(map));
+        return true;
+      } catch { return false; }   // no storage → plain first-come, as before
+    })();
+    // Held until a socket actually OPENS, not just until the first attempt, so
+    // a retry (backend still booting) still carries the claim.
+    let claimOnConnect = launchedHere;
     // Keep the server-rendered session host as the visible label; surface
     // the WS endpoint on hover for debugging.
     document.getElementById('ws-url').title = wsUrl;
@@ -542,17 +578,18 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     let lastSentCols = -1, lastSentRows = -1;
 
     function sendResizeIfChanged() {
+      if (locked) return;                     // not the live view — our size must not move the shared PTY
       if (term.cols === lastSentCols && term.rows === lastSentRows) return;
       lastSentCols = term.cols; lastSentRows = term.rows;
       if (activeWs && activeWs.readyState === 1) {
-        try { activeWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows, primary: isPrimary })); }
+        try { activeWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows })); }
         catch { /* socket closed between check and send */ }
       }
     }
 
-    // Re-report our size + primary flag even when the dimensions are unchanged
-    // — used when the mode toggles (the server needs the new primary flag to
-    // recompute the shared size, but our own cols/rows didn't move).
+    // Re-report our size even when the dimensions are unchanged — used right
+    // after we're granted the session, where the PTY is now sized to US but our
+    // own cols/rows never moved, so send-on-change alone would say nothing.
     function forceSendResize() {
       lastSentCols = -1; lastSentRows = -1;
       sendResizeIfChanged();
@@ -625,6 +662,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // ws.onopen), which equals the shell's contentW/H (the iframe has no inner
     // transform). The first call with a real box reveals the terminal.
     function applyFit(boxW, boxH) {
+      if (locked) return;                   // another view owns the terminal → nothing of ours to fit
       const w = boxW ?? window.innerWidth;
       const h = boxH ?? window.innerHeight;
       if (!w || !h) return;                 // hidden / off-workspace → never resize
@@ -753,12 +791,16 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     let attempt = 0;
     function connect() {
       attempt++;
-      const ws = new WebSocket(wsUrl);
+      const ws = new WebSocket(claimOnConnect ? `${wsUrl}&_aura_claim=1` : wsUrl);
+      // Control frames arrive as binary (see pty-server sendCtl); read them
+      // synchronously as an ArrayBuffer rather than a Blob.
+      ws.binaryType = 'arraybuffer';
       activeWs = ws;
       let opened = false;
 
       ws.onopen = () => {
         opened = true;
+        claimOnConnect = false;      // the launch claim is spent once it lands
         attempt = 0;                 // reset the backoff ladder for the next drop
         clearReconnectTimer();
         stopDots();
@@ -778,12 +820,22 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         applyFit();
       };
 
-      ws.onmessage = (e) => term.write(e.data);
+      // TEXT frame ⇒ raw PTY output. BINARY frame ⇒ a control message from the
+      // session arbiter. Demuxing on the frame type means there is no sentinel
+      // to escape and no way for shell output that happens to look like JSON to
+      // be mistaken for a control message.
+      ws.onmessage = (e) => {
+        if (typeof e.data === 'string') { term.write(e.data); return; }
+        let msg;
+        try { msg = JSON.parse(ctlDecoder.decode(e.data)); } catch { return; }
+        if (msg?.type === 'granted')   setLocked(false);
+        else if (msg?.type === 'busy') setLocked(true);
+      };
 
       ws.onclose = () => {
         statusEl.textContent = 'DISCONNECTED — RECONNECTING...';
         statusEl.style.color = 'var(--aura-color-secondary)';
-        if (opened) {
+        if (opened && !locked) {
           // Was connected, now dropped — surface in-band.
           term.writeln('');
           term.writeln(`${ORG}  [disconnected — reconnecting]${RST}`);
@@ -799,7 +851,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       ws.onerror = () => {
         statusEl.textContent = 'ERROR';
         statusEl.style.color = 'var(--aura-color-danger)';
-        if (!opened) {
+        if (!opened && !locked) {
           // Connection refused / handshake error — surface inline so the
           // user knows it's not just a black screen.
           term.write(`\r\x1b[2K${RED}  ws error — retrying${RST}\r\n`);
@@ -853,15 +905,151 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       applyFit(d.contentW, d.contentH);
     });
 
-    // ─── Sizing-mode buttons (⊟ fit-smallest | ★ primary) ────────────────
-    // The visual styling is painted as INLINE styles from JS rather than via
-    // the scoped <style> block. Astro's scoped CSS reliably reaches the bar's
-    // own elements but proved flaky for these <button>s in the proxied iframe;
-    // inline styles always win and never depend on a scope attribute, so the
-    // buttons are themed in every case. Colors use the OS palette vars (with
-    // literal fallbacks) so they still track the active theme.
-    const sizeFitBtn     = document.getElementById('size-fit');
-    const sizePrimaryBtn = document.getElementById('size-primary');
+    // ─── Take-over panel ("in use somewhere else") ───────────────────────
+    // Driven entirely by the server's control frames: `busy` ⇒ another view has
+    // the terminal, `granted` ⇒ it's ours. We never guess locally, so the two
+    // sides can't both think they're live.
+    const lockEl      = document.getElementById('session-lock');
+    const lockBtn     = document.getElementById('lock-claim');
+    const lockAllBtn  = document.getElementById('lock-claim-all');
+    const terminalEl  = document.getElementById('terminal');
+
+    function setLocked(next) {
+      const changed = next !== locked;
+      locked = next;
+      // Swap terminal ↔ panel. `display:none` (not visibility) so the hidden
+      // one takes no space and applyFit's box arithmetic is never fed a
+      // collapsed terminal.
+      if (lockEl)     lockEl.style.display     = next ? 'flex' : 'none';
+      if (terminalEl) terminalEl.style.display = next ? 'none' : '';
+      if (next) {
+        // Hide the terminal HERE — nothing is closed or stopped, the shell goes
+        // on running behind another browser. We drop the rendered screen and
+        // scrollback so no stale frame sits behind the panel (the server
+        // replays all of it when we're live again) and stop the connect
+        // animation. The socket stays open as a control channel — that's what
+        // makes the take-over button work and lets the server hand the session
+        // back to us the moment the other side lets go.
+        stopDots();
+        if (changed) term.reset();
+        statusEl.textContent = 'IN USE ELSEWHERE';
+        statusEl.style.color = 'var(--aura-color-secondary)';
+      } else if (changed) {
+        // We're the live view again, and the order here is the whole trick:
+        //   1. the terminal is already back to display:'' (above), so
+        //      chromeInset/measureScrollbar force a real layout and measure the
+        //      visible box instead of the collapsed one;
+        //   2. reset BEFORE the server's scrollback replay, which follows
+        //      `granted` on the very next frame — otherwise it paints on top of
+        //      whatever was on screen when we were revoked;
+        //   3. fit BEFORE that replay too, so it reflows into the final width
+        //      once instead of being written narrow and re-wrapped;
+        //   4. forceSendResize because the PTY is sized to US now even though
+        //      our own cols/rows never moved (send-on-change would say nothing).
+        stopDots();
+        statusEl.textContent = 'CONNECTED';
+        statusEl.style.color = 'var(--aura-color-primary)';
+        revealTerminal();
+        term.reset();
+        applyFit();
+        forceSendResize();
+        term.focus();
+      }
+    }
+
+    /** Ask the server for this session. Returns false if we have no socket. */
+    function sendClaim() {
+      if (!activeWs || activeWs.readyState !== 1) return false;
+      try { activeWs.send(JSON.stringify({ type: 'claim' })); return true; }
+      catch { return false; }   // socket died between the check and the send
+    }
+
+    // ─── "Use ALL terminals here" ────────────────────────────────────────
+    // Every terminal window is its own app instance with its own socket to its
+    // own backend, so there is no single server call that means "all of them".
+    // The fan-out happens in the browser instead: each terminal iframe claims
+    // its OWN session when it hears the broadcast.
+    //
+    // BroadcastChannel reaches every same-origin context in the whole browser
+    // profile — including terminals in a SECOND tab, which are a different
+    // browser view with their own id and must not be dragged along. So the
+    // message carries our browser id (per-tab) and each listener ignores
+    // anything that isn't its own. Without the API we simply claim ourselves,
+    // which is the button's single-terminal behaviour.
+    const CLAIM_ALL_CHANNEL = 'aura.terminal.claimAll';
+    let claimAllBus = null;
+    try { claimAllBus = new BroadcastChannel(CLAIM_ALL_CHANNEL); } catch { /* unsupported */ }
+    claimAllBus?.addEventListener('message', (ev) => {
+      if (ev?.data?.type !== CLAIM_ALL_CHANNEL) return;
+      if (ev.data.browserId !== browserId) return;   // another tab's terminals
+      sendClaim();                                   // a live terminal re-claiming is a no-op
+    });
+
+    lockBtn?.addEventListener('click', () => {
+      // No optimistic unlock: the server answers with `granted`, which is what
+      // flips the panel. Until then, say something happened.
+      if (sendClaim()) statusEl.textContent = 'CLAIMING...';
+    });
+    lockAllBtn?.addEventListener('click', () => {
+      // The channel doesn't echo to the sender, so claim ourselves too.
+      try { claimAllBus?.postMessage({ type: CLAIM_ALL_CHANNEL, browserId }); } catch { /* channel closed */ }
+      if (sendClaim()) statusEl.textContent = 'CLAIMING...';
+    });
+
+    // Inline styles have no :hover, so paint by hand (same approach as the
+    // quick-commands buttons). The primary action fills; the "all" variant only
+    // brightens, so the two never read as equals.
+    lockBtn?.addEventListener('mouseenter', () => {
+      lockBtn.style.background = 'var(--aura-color-primary,#00ff41)';
+      lockBtn.style.color      = 'var(--aura-color-bg,#0a0a0a)';
+      lockBtn.style.boxShadow  = 'var(--aura-glow-primary, 0 0 8px #00ff41)';
+    });
+    lockBtn?.addEventListener('mouseleave', () => {
+      lockBtn.style.background = 'transparent';
+      lockBtn.style.color      = 'var(--aura-color-primary,#00ff41)';
+      lockBtn.style.boxShadow  = 'none';
+    });
+    lockAllBtn?.addEventListener('mouseenter', () => {
+      lockAllBtn.style.color       = 'var(--aura-color-primary,#00ff41)';
+      lockAllBtn.style.borderColor = 'var(--aura-color-primary,#00ff41)';
+    });
+    lockAllBtn?.addEventListener('mouseleave', () => {
+      lockAllBtn.style.color       = 'var(--aura-color-text-dim,#557755)';
+      lockAllBtn.style.borderColor = 'var(--aura-color-border,rgba(0,255,65,0.2))';
+    });
+
+    // ─── Terminal-local color mode (◐ auto | ☀ light | ☾ dark) ───────────
+    // The OS ships BOTH palettes on every page: /api/os/theme.css defines the
+    // active `--aura-color-*` set plus the full `--aura-light-color-*` and
+    // `--aura-dark-color-*` variants. So flipping this app's mode is a pure
+    // client-side re-point of the active vars at one variant — no server call,
+    // no write to the OS `colorMode`, nothing to undo for other apps.
+    //
+    // The overrides are `var(--aura-<variant>-color-x)` REFERENCES, not copied
+    // literals, so they keep tracking the user's chosen light/dark themes when
+    // the OS theme changes underneath us.
+    //
+    // Inline style on <html> beats the :root rule from the stylesheet, which is
+    // what makes the override win without touching theme.css.
+    const MODE_KEY = 'aura.terminal.colorMode';   // 'auto' | 'light' | 'dark'
+    const MODE_CYCLE = { auto: 'light', light: 'dark', dark: 'auto' };
+    const MODE_GLYPH = { auto: '◐', light: '☀', dark: '☾' };
+    const MODE_TITLE = {
+      auto:  'Color mode: AUTO (follows the OS) — click for LIGHT',
+      light: 'Color mode: LIGHT (this terminal only) — click for DARK',
+      dark:  'Color mode: DARK (this terminal only) — click to follow the OS',
+    };
+    const PALETTE_VARS = [
+      'primary', 'secondary', 'danger', 'info', 'warning', 'success',
+      'bg', 'surface', 'surface-2', 'text', 'text-dim', 'border',
+    ];
+    const GLOW_VARS = ['primary', 'secondary', 'danger', 'subtle'];
+    // Button painting for the color-mode toggle. This helper (and the C
+    // palette it reads) used to be shared with the terminal-sizing buttons;
+    // those were removed upstream when sessions became one-live-view, so it
+    // now serves the toggle alone. Inline styles because the bar lives in a
+    // proxied app iframe where Astro's scoped CSS proved unreliable — and
+    // inline styles carry no :hover, hence the explicit hover repaint.
     const C = {
       dim:     'var(--aura-color-text-dim, #557755)',
       surface: 'var(--aura-color-surface, #111)',
@@ -904,67 +1092,6 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         s.color = C.primary; s.background = 'transparent'; s.borderColor = C.border; s.boxShadow = 'none';
       }
     }
-    function reflectMode() {
-      // Exactly one is active: ★ when this device is primary, ⊟ otherwise.
-      if (sizePrimaryBtn) sizePrimaryBtn.dataset.active = isPrimary ? 'true' : 'false';
-      if (sizeFitBtn)     sizeFitBtn.dataset.active     = isPrimary ? 'false' : 'true';
-      paintBtn(sizePrimaryBtn, isPrimary,  false);
-      paintBtn(sizeFitBtn,     !isPrimary, false);
-    }
-    function setPrimary(next) {
-      if (next === isPrimary) return;
-      isPrimary = next;
-      try { localStorage.setItem(PRIMARY_KEY, String(next)); } catch { /* private mode */ }
-      reflectMode();
-      forceSendResize();   // re-report so the server recomputes the shared size
-    }
-    reflectMode();
-    sizePrimaryBtn?.addEventListener('click', () => setPrimary(true));
-    sizeFitBtn?.addEventListener('click',     () => setPrimary(false));
-    // Hover repaint (inline styles have no :hover) — only when not the active one.
-    for (const [btn, isActive] of [[sizeFitBtn, () => !isPrimary], [sizePrimaryBtn, () => isPrimary]]) {
-      if (!btn) continue;
-      btn.addEventListener('mouseenter', () => { if (!isActive()) paintBtn(btn, false, true); });
-      btn.addEventListener('mouseleave', () => paintBtn(btn, isActive(), false));
-    }
-    // Device-wide: toggling in one terminal iframe updates the others on this
-    // device (the `storage` event fires in every same-origin context except
-    // the one that wrote it), so all the device's sessions follow the mode.
-    window.addEventListener('storage', (e) => {
-      if (e.key !== PRIMARY_KEY) return;
-      const next = e.newValue === 'true';
-      if (next === isPrimary) return;
-      isPrimary = next;
-      reflectMode();
-      forceSendResize();
-    });
-
-    // ─── Terminal-local color mode (◐ auto | ☀ light | ☾ dark) ───────────
-    // The OS ships BOTH palettes on every page: /api/os/theme.css defines the
-    // active `--aura-color-*` set plus the full `--aura-light-color-*` and
-    // `--aura-dark-color-*` variants. So flipping this app's mode is a pure
-    // client-side re-point of the active vars at one variant — no server call,
-    // no write to the OS `colorMode`, nothing to undo for other apps.
-    //
-    // The overrides are `var(--aura-<variant>-color-x)` REFERENCES, not copied
-    // literals, so they keep tracking the user's chosen light/dark themes when
-    // the OS theme changes underneath us.
-    //
-    // Inline style on <html> beats the :root rule from the stylesheet, which is
-    // what makes the override win without touching theme.css.
-    const MODE_KEY = 'aura.terminal.colorMode';   // 'auto' | 'light' | 'dark'
-    const MODE_CYCLE = { auto: 'light', light: 'dark', dark: 'auto' };
-    const MODE_GLYPH = { auto: '◐', light: '☀', dark: '☾' };
-    const MODE_TITLE = {
-      auto:  'Color mode: AUTO (follows the OS) — click for LIGHT',
-      light: 'Color mode: LIGHT (this terminal only) — click for DARK',
-      dark:  'Color mode: DARK (this terminal only) — click to follow the OS',
-    };
-    const PALETTE_VARS = [
-      'primary', 'secondary', 'danger', 'info', 'warning', 'success',
-      'bg', 'surface', 'surface-2', 'text', 'text-dim', 'border',
-    ];
-    const GLOW_VARS = ['primary', 'secondary', 'danger', 'subtle'];
     const modeBtn = document.getElementById('mode-toggle');
     let colorMode = (() => {
       try { const v = localStorage.getItem(MODE_KEY); return v in MODE_CYCLE ? v : 'auto'; }
@@ -1032,6 +1159,12 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // (truncated with an ellipsis). Persisted in localStorage so they survive
     // reloads and are shared across this device's terminals.
     const QC_KEY = 'aura.terminal.quickCommands';
+    // Backend endpoint for the synced list. Our page is served through the OS
+    // proxy at /api/proxy/<instanceId>/…, so a bare '/api/…' would hit the
+    // SHELL instead of our own backend — prefix it the same way the WS URL is.
+    const qcApiUrl = (pathParts[0] === 'api' && pathParts[1] === 'proxy' && pathParts[2]
+      ? `/api/proxy/${pathParts[2]}`
+      : '') + '/api/quick-commands';
     const qcPanel    = document.getElementById('qc-panel');
     const qcToggleBtn= document.getElementById('qc-toggle');
     const qcEditBtn  = document.getElementById('qc-edit');
@@ -1041,14 +1174,68 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     const qcCmdInput = document.getElementById('qc-cmd');
     const qcNameInput= document.getElementById('qc-name');
     const qcSaveBtn  = document.getElementById('qc-save');
-    let qcCommands = (() => {
+    // Two independent lists, rendered as one panel: `remote` lives on the app
+    // backend (shared by every terminal instance and browser, survives an OS
+    // rebuild), `local` lives in this browser's localStorage. Neither is a
+    // cache of the other — an entry is in exactly one of them, and the store
+    // is chosen per entry when it is added or edited.
+    const qcStoreRemoteBtn = document.getElementById('qc-store-remote');
+    const qcStoreLocalBtn  = document.getElementById('qc-store-local');
+    function qcLoadLocal() {
       try { const v = JSON.parse(localStorage.getItem(QC_KEY) || '[]'); return Array.isArray(v) ? v : []; }
       catch { return []; }
-    })();
-    let qcEditing = false;
-    let qcEditIdx = null;
+    }
+    let qcLocal  = qcLoadLocal();
+    let qcRemote = [];
+    // Whether the backend answered last time we asked. When it hasn't, the
+    // synced half is hidden rather than shown empty — an empty list would read
+    // as "you have no synced commands", which is a different (and alarming)
+    // statement from "we couldn't reach the backend".
+    let qcRemoteOk = false;
+    let qcEditing  = false;
+    let qcEditIdx  = null;   // index within qcEditStore's list, or null
+    let qcEditStore = null;  // which list the entry being edited came from
+    let qcFormStore = 'remote'; // store the form will save to
 
-    function qcSave() { try { localStorage.setItem(QC_KEY, JSON.stringify(qcCommands)); } catch { /* private mode */ } }
+    function qcSaveLocal() { try { localStorage.setItem(QC_KEY, JSON.stringify(qcLocal)); } catch { /* private mode */ } }
+    async function qcFetchRemote() {
+      try {
+        const res = await fetch(qcApiUrl, { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const body = await res.json();
+        qcRemote = Array.isArray(body?.commands) ? body.commands : [];
+        qcRemoteOk = true;
+      } catch (err) {
+        // Backend down / not yet reachable: keep working with the local list.
+        qcRemoteOk = false;
+        console.warn('[quick-commands] backend unreachable:', err);
+      }
+    }
+    /** Push the whole synced list; returns false when it didn't land. */
+    async function qcSaveRemote() {
+      try {
+        const res = await fetch(qcApiUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ commands: qcRemote }),
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        qcRemoteOk = true;
+        return true;
+      } catch (err) {
+        qcRemoteOk = false;
+        console.warn('[quick-commands] could not save to backend:', err);
+        return false;
+      }
+    }
+    /** The list an entry lives in, by store name. */
+    function qcListOf(store) { return store === 'remote' ? qcRemote : qcLocal; }
+    /** Persist whichever list just changed. */
+    async function qcPersist(store) {
+      if (store === 'remote') return qcSaveRemote();
+      qcSaveLocal();
+      return true;
+    }
     function qcEsc(s) {
       return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
         .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -1060,31 +1247,82 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       "border-radius:0;background:transparent;color:var(--aura-color-primary,#00ff41);" +
       "font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.7rem;line-height:1.3;" +
       "cursor:pointer;outline:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+    // The '>' button that types a command WITHOUT running it. Primary-coloured
+    // (it's a normal action, not a destructive one like ✕) and narrow, since
+    // it sits at the far right of every row in run mode.
+    const qcInsBtnCss =
+      "appearance:none;-webkit-appearance:none;flex:0 0 auto;box-sizing:border-box;padding:0 7px;" +
+      "border:1px solid var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:transparent;" +
+      "color:var(--aura-color-primary,#00ff41);font-family:var(--aura-font-mono,'Courier New',monospace);" +
+      "font-size:0.7rem;line-height:1.3;cursor:pointer;outline:none;";
     const qcDelBtnCss =
       "appearance:none;-webkit-appearance:none;flex:0 0 auto;box-sizing:border-box;padding:0 8px;" +
       "border:1px solid var(--aura-color-danger,#ff2020);border-radius:0;background:transparent;" +
       "color:var(--aura-color-danger,#ff2020);font-family:var(--aura-font-mono,'Courier New',monospace);" +
       "font-size:0.7rem;cursor:pointer;outline:none;";
 
+    // The two stores are told apart by the left edge of the row only: a solid
+    // accent bar for synced, a dotted dim one for local. Deliberately quiet —
+    // enough to see the grouping and answer "will this follow me?", not a
+    // second colour scheme fighting the terminal for attention.
+    const qcRowAccent = {
+      remote: "border-left:2px solid var(--aura-color-primary,#00ff41);",
+      local:  "border-left:2px dotted var(--aura-color-text-dim,#557755);",
+    };
+
+    function qcRowHtml(c, i, store) {
+      const label = (c && c.name && c.name.trim()) ? c.name : (c ? c.command : '');
+      const where = store === 'remote' ? 'synced' : 'this browser only';
+      const main =
+        '<button data-qc="' + (qcEditing ? 'edit' : 'run') + '" data-idx="' + i + '" ' +
+        'data-store="' + store + '" title="' + qcEsc(c ? c.command : '') + '\n(' + where + ')" ' +
+        'style="' + qcCmdBtnCss + qcRowAccent[store] + '">' + qcEsc(label) + '</button>';
+      // Run mode: an insert-only '>' at the far right. Edit mode: the remove
+      // ✕ in that slot instead — never both, so the row width is stable.
+      const ins = qcEditing
+        ? ''
+        : '<button data-qc="ins" data-idx="' + i + '" data-store="' + store + '" ' +
+          'title="Type it without running" style="' + qcInsBtnCss + '">&gt;</button>';
+      const del = qcEditing
+        ? '<button data-qc="del" data-idx="' + i + '" data-store="' + store + '" ' +
+          'title="Remove" style="' + qcDelBtnCss + '">✕</button>'
+        : '';
+      return '<li style="display:flex;gap:4px;">' + main + ins + del + '</li>';
+    }
+
+    function qcGroupLabel(text) {
+      return '<li style="color:var(--aura-color-text-dim,#557755);font-size:0.55rem;' +
+             'letter-spacing:.12em;text-transform:uppercase;padding:4px 2px 1px;">' + text + '</li>';
+    }
+
     function qcRender() {
       if (!qcList) return;
-      if (qcCommands.length === 0) {
+      const remote = qcRemoteOk ? qcRemote : [];
+      if (remote.length === 0 && qcLocal.length === 0) {
         qcList.innerHTML =
           '<li style="color:var(--aura-color-text-dim,#557755);padding:10px 6px;text-align:center;' +
           'font-size:0.62rem;line-height:1.5;">No quick commands yet.' +
           (qcEditing ? '<br>Add one below.' : '<br>Press ✎ to add.') + '</li>';
         return;
       }
-      qcList.innerHTML = qcCommands.map((c, i) => {
-        const label = (c && c.name && c.name.trim()) ? c.name : (c ? c.command : '');
-        const main =
-          '<button data-qc="' + (qcEditing ? 'edit' : 'run') + '" data-idx="' + i + '" ' +
-          'title="' + qcEsc(c ? c.command : '') + '" style="' + qcCmdBtnCss + '">' + qcEsc(label) + '</button>';
-        const del = qcEditing
-          ? '<button data-qc="del" data-idx="' + i + '" title="Remove" style="' + qcDelBtnCss + '">✕</button>'
-          : '';
-        return '<li style="display:flex;gap:4px;">' + main + del + '</li>';
-      }).join('');
+      // Synced first, then local. Headings appear only when BOTH stores have
+      // entries — with one store in play the accent bar alone is enough, and a
+      // lone heading would just eat vertical space in a narrow panel.
+      const showHeads = remote.length > 0 && qcLocal.length > 0;
+      const parts = [];
+      if (showHeads && remote.length) parts.push(qcGroupLabel('⇅ Synced'));
+      parts.push(...remote.map((c, i) => qcRowHtml(c, i, 'remote')));
+      if (showHeads && qcLocal.length) parts.push(qcGroupLabel('▪ This browser'));
+      parts.push(...qcLocal.map((c, i) => qcRowHtml(c, i, 'local')));
+      qcList.innerHTML = parts.join('');
+      // Dim the Synced choice while the backend is unreachable, so the form
+      // shows WHY it defaulted to Local instead of silently preferring it.
+      if (qcStoreRemoteBtn) {
+        qcStoreRemoteBtn.style.opacity = qcRemoteOk ? '1' : '0.45';
+        qcStoreRemoteBtn.title = qcRemoteOk
+          ? 'Synced — saved on the terminal backend, shared by every terminal and browser'
+          : 'Synced — backend unreachable right now';
+      }
     }
 
     // Style the panel + its structure INLINE (scope-proof) so the overlay and
@@ -1137,23 +1375,57 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       }
     }
     function qcOpen()  {
-      qcCommands = (() => { try { const v = JSON.parse(localStorage.getItem(QC_KEY) || '[]'); return Array.isArray(v) ? v : []; } catch { return []; } })();
+      // Render immediately from what we have, then fold the backend list in
+      // when it answers — the panel must never wait on the network to open.
+      qcLocal = qcLoadLocal();
       qcRender();
       if (qcPanel) { qcPanel.setAttribute('aria-hidden', 'false'); qcPanel.style.transform = 'translateX(0)'; }
+      qcFetchRemote().then(qcRender);
     }
     function qcClose() {
       if (qcPanel) { qcPanel.setAttribute('aria-hidden', 'true'); qcPanel.style.transform = 'translateX(-100%)'; }
     }
-    function qcRun(cmd) {
+    /**
+     * Type a command into the PTY. `enter` appends the carriage return that
+     * makes the shell execute it — the difference between clicking the entry
+     * (run it) and clicking its '>' (leave it on the prompt to edit first).
+     * Either way the panel closes and focus returns to the terminal, so the
+     * user can keep typing straight after the click.
+     */
+    function qcSend(cmd, enter) {
       if (activeWs && activeWs.readyState === 1) {
-        try { activeWs.send(JSON.stringify({ type: 'data', data: cmd + '\r' })); } catch { /* socket gone */ }
+        try { activeWs.send(JSON.stringify({ type: 'data', data: enter ? cmd + '\r' : cmd })); }
+        catch { /* socket gone */ }
       }
       qcClose();
       term.focus();
     }
+    function qcRun(cmd) { qcSend(cmd, true); }
+    /** Reflect + set which store the add/edit form will write to. */
+    function qcSetFormStore(store) {
+      qcFormStore = store === 'local' ? 'local' : 'remote';
+      const on = {
+        background: 'var(--aura-color-primary,#00ff41)',
+        color: 'var(--aura-color-bg,#0a0a0a)',
+        borderColor: 'var(--aura-color-primary,#00ff41)',
+      };
+      const off = { background: 'transparent', borderColor: 'var(--aura-color-border,rgba(0,255,65,0.2))' };
+      if (qcStoreRemoteBtn) Object.assign(qcStoreRemoteBtn.style,
+        qcFormStore === 'remote' ? on : { ...off, color: 'var(--aura-color-primary,#00ff41)' });
+      if (qcStoreLocalBtn) Object.assign(qcStoreLocalBtn.style,
+        qcFormStore === 'local' ? on : { ...off, color: 'var(--aura-color-text-dim,#557755)' });
+    }
+    qcStoreRemoteBtn?.addEventListener('click', () => qcSetFormStore('remote'));
+    qcStoreLocalBtn?.addEventListener('click',  () => qcSetFormStore('local'));
+
     function qcSetEditing(on) {
       qcEditing = on;
       qcEditIdx = null;
+      qcEditStore = null;
+      // New entries default to synced — the store you almost always want —
+      // unless the backend is unreachable, where local is the only one that
+      // can actually accept the write.
+      qcSetFormStore(qcRemoteOk ? 'remote' : 'local');
       if (qcAddForm) qcAddForm.style.display = on ? 'flex' : 'none';
       if (qcSaveBtn) qcSaveBtn.textContent = 'Add';
       if (qcCmdInput)  qcCmdInput.value = '';
@@ -1174,47 +1446,78 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     qcCloseBtn?.addEventListener('click', qcClose);
     qcEditBtn?.addEventListener('click', () => qcSetEditing(!qcEditing));
 
-    qcList?.addEventListener('click', (e) => {
+    qcList?.addEventListener('click', async (e) => {
       const btn = e.target.closest('button[data-qc]');
       if (!btn) return;
+      const store = btn.dataset.store === 'local' ? 'local' : 'remote';
       const idx = parseInt(btn.dataset.idx, 10);
-      const c = qcCommands[idx];
+      const list = qcListOf(store);
+      const c = list[idx];
       if (!c) return;
       const action = btn.dataset.qc;
       if (action === 'run') qcRun(c.command);
+      else if (action === 'ins') qcSend(c.command, false);
       else if (action === 'del') {
-        qcCommands.splice(idx, 1);
-        qcSave();
+        const removed = list.splice(idx, 1);
         // Cancel any in-progress edit (indices just shifted) and reset the form.
         qcEditIdx = null;
+        qcEditStore = null;
         if (qcCmdInput)  qcCmdInput.value = '';
         if (qcNameInput) qcNameInput.value = '';
         if (qcSaveBtn)   qcSaveBtn.textContent = 'Add';
         qcRender();
+        // A failed backend write must not silently swallow the entry: put it
+        // back and re-render so what's on screen is what's actually stored.
+        if (!(await qcPersist(store))) { list.splice(idx, 0, ...removed); qcRender(); }
       }
       else if (action === 'edit') {
         qcEditIdx = idx;
+        qcEditStore = store;
         if (qcCmdInput)  qcCmdInput.value  = c.command;
         if (qcNameInput) qcNameInput.value = c.name || '';
         if (qcSaveBtn)   qcSaveBtn.textContent = 'Save';
+        qcSetFormStore(store);   // pre-select where it currently lives
         qcCmdInput?.focus();
       }
     });
 
-    qcAddForm?.addEventListener('submit', (e) => {
+    qcAddForm?.addEventListener('submit', async (e) => {
       e.preventDefault();
       const command = (qcCmdInput?.value || '').trim();
       if (!command) { qcCmdInput?.focus(); return; }
       const name = (qcNameInput?.value || '').trim();
       const entry = name ? { command, name } : { command };
-      if (qcEditIdx != null && qcCommands[qcEditIdx]) { qcCommands[qcEditIdx] = entry; qcEditIdx = null; }
-      else { qcCommands.push(entry); }
-      qcSave();
+      const target = qcFormStore;
+
+      // Editing an entry whose store changed is a MOVE: drop it from the old
+      // list, append to the new one, and persist both. Same-store edits just
+      // replace in place.
+      const from = qcEditStore;
+      const fromIdx = qcEditIdx;
+      const editing = from != null && fromIdx != null && qcListOf(from)[fromIdx];
+      if (editing && from === target) {
+        qcListOf(target)[fromIdx] = entry;
+      } else {
+        if (editing) qcListOf(from).splice(fromIdx, 1);
+        qcListOf(target).push(entry);
+      }
+      qcEditIdx = null;
+      qcEditStore = null;
       if (qcCmdInput)  qcCmdInput.value = '';
       if (qcNameInput) qcNameInput.value = '';
       if (qcSaveBtn)   qcSaveBtn.textContent = 'Add';
       qcRender();
       qcCmdInput?.focus();
+
+      const ok = await qcPersist(target);
+      if (editing && from !== target) await qcPersist(from);
+      if (!ok) {
+        // Backend refused the write — say so instead of leaving a row on
+        // screen that isn't stored anywhere.
+        qcRemoteOk = false;
+        qcRender();
+        alert('Could not save to the terminal backend — the entry is not stored. Try "Local" instead.');
+      }
     });
 
     // Esc closes — bound to the panel so it only fires when focus is inside it
@@ -1224,7 +1527,12 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     });
 
     qcInitStyles();
+    qcSetFormStore('remote');
     qcRender();
+    // Warm the synced list once at start-up so the first open shows it without
+    // a flash, and so qcSetEditing's "default to synced unless unreachable"
+    // decision is based on a real answer rather than the initial `false`.
+    qcFetchRemote().then(qcRender);
   </script>
 </body>
 </html>

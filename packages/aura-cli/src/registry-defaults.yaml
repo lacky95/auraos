@@ -28,6 +28,12 @@ capabilities:
     binary: htop
     description: "Interactive process viewer"
 
+  nano:
+    source: apt
+    package: nano
+    binary: nano
+    description: "Nano — small terminal text editor"
+
   jq:
     source: apt
     package: jq

@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+#
+# Bump the root package.json PATCH version after something is merged INTO main.
+#
+# Companion to pre-commit, for the normal workflow: work happens on a feature
+# branch (no bumps there) and the version moves once, when that work lands on
+# main. Git runs this for `git pull` too, which is correct — pulling other
+# people's commits into main is also something landing on main.
+#
+# The bump is its own commit AFTER the merge, because there is no way to fold
+# it into the merge itself: a post-merge hook runs once the merge commit is
+# already written, and `pre-merge-commit` can stage all it likes — git builds
+# the merge commit from its own tree and drops those changes on the floor
+# (verified, not assumed).
+#
+# That commit is created with plumbing rather than `git commit`, because at
+# post-merge time git still has MERGE_HEAD around: a normal commit would be
+# refused outright ("cannot do a partial commit during a merge") or, without a
+# pathspec, would produce a second two-parent merge commit. commit-tree with
+# an explicit single parent sidesteps both.
+#
+# Acts only when ALL of these hold:
+#   • the branch merged into is main
+#   • the merge actually moved HEAD
+#   • the merge didn't already carry a version change (a merged branch may
+#     contain a bump made by pre-commit on main earlier)
+#   • it wasn't a squash merge — git leaves that for the user to commit, and
+#     pre-commit bumps it then
+#   • nothing unrelated is staged
+#   • AURA_NO_BUMP != 1
+#
+set -euo pipefail
+
+[ "${1:-0}" = "1" ] && exit 0                      # squash merge
+[ "${AURA_NO_BUMP:-0}" = "1" ] && exit 0
+[ "$(git symbolic-ref --short -q HEAD || true)" = "main" ] || exit 0
+
+prev=$(git rev-parse -q --verify ORIG_HEAD || true)
+[ -n "$prev" ] || exit 0
+[ "$prev" = "$(git rev-parse HEAD)" ] && exit 0
+
+pkg="$(git rev-parse --show-toplevel)/package.json"
+if git diff "$prev..HEAD" -U0 -- "$pkg" | grep -qE '^\+[[:space:]]*"version"[[:space:]]*:'; then
+  echo "[post-merge] merge already carried a version change — not bumping"
+  exit 0
+fi
+
+# Never fold someone's staged work into the bump commit: bump the file, leave
+# the committing to them.
+if ! git diff --cached --quiet; then
+  "$(dirname "$0")/lib/bump-patch.sh" >/dev/null || exit 0
+  echo "[post-merge] staged changes present — package.json bumped but NOT committed"
+  exit 0
+fi
+
+read -r from to < <("$(dirname "$0")/lib/bump-patch.sh") || exit 0
+git add -- "$pkg"
+tree=$(git write-tree)
+commit=$(git commit-tree "$tree" -p HEAD -m "chore(version): bump to $to")
+git update-ref -m "version bump to $to" HEAD "$commit"
+git reset -q                                       # index/worktree already match
+echo "[post-merge] version $from → $to (committed ${commit:0:12})"

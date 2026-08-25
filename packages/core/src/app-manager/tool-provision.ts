@@ -36,6 +36,25 @@ export const ALL_TOOLS_PATH = '/aura/all-tools';
 /** Path every sandbox gets its own allowlist dir at; prepended to PATH. */
 export const MY_TOOLS_PATH = '/aura/my-tools';
 
+/**
+ * Where a sandbox sees the current user's home — the mount point, not the
+ * storage. The backing dir is per-user (`scopes/users/<id>/home`, see
+ * scopes/home.ts); this path is deliberately the SAME for every user and
+ * every sandbox, because each sandbox serves exactly one user and tools bake
+ * absolute paths into their state (claude keys its project history by cwd,
+ * ssh by config path). A per-user mount point would invalidate all of that
+ * the moment a second user existed, and buys nothing: whose home it is, is
+ * already decided by which dir gets mounted here.
+ *
+ * The master container reaches the same dir through a /home/aura symlink, so
+ * "one user, one home" holds across every layer: log into `claude` (or `gh`,
+ * or drop an ssh key) once in any terminal and every other sandbox sees it,
+ * including after an `aura jump`. That sharing is deliberate — a single-user
+ * dev OS trades sandbox-level home isolation for not logging in five times.
+ */
+export const SHARED_HOME_PATH = '/home/aura';
+
+
 export type ToolsMode = 'hardlink' | 'symlink';
 
 /**

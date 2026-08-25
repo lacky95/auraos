@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
 import { toolsGrant } from './tool-allowlist.js';
-import { MY_TOOLS_PATH, currentToolsMode, provisionAllowlist, toolchainMirrorBin } from './tool-provision.js';
+import { MY_TOOLS_PATH, SHARED_HOME_PATH, currentToolsMode, provisionAllowlist, toolchainMirrorBin } from './tool-provision.js';
+import { userHomeSubpath } from '../scopes/home.js';
 // Value import, but MountManager imports ContainerRunner type-only, so there
 // is no runtime cycle.
 import { MOUNT_ROOT_PATH } from './MountManager.js';
@@ -511,7 +512,7 @@ export class ContainerRunner implements SandboxRunner {
       // here we explicitly prefer convenience over isolation (dev OS).
       // The dir is pre-created by AppManager.healToolchainShims so docker
       // can mount the subpath at container start.
-      '--mount', `type=volume,source=${appDataVolume},target=/home/aura,volume-subpath=aura/home/user`,
+      '--mount', `type=volume,source=${appDataVolume},target=${SHARED_HOME_PATH},volume-subpath=${userHomeSubpath()}`,
       // OS Context (env vars / secrets). The master writes decrypted values to
       // /data/context/system/<KEY> (its view of the app-data volume); mounting
       // the same volume subpath here at /run/context read-only mirrors those
@@ -567,7 +568,7 @@ export class ContainerRunner implements SandboxRunner {
       // Point HOME at the shared persistent volume so tools like claude/gh/
       // ssh persist their state across container respawns AND across
       // `aura jump` hops between apps (one shared home, one logged-in user).
-      '-e', `HOME=/home/aura`,
+      '-e', `HOME=${SHARED_HOME_PATH}`,
       // Terminal-capability env so TUI apps (claude, htop, vim, …) render
       // their rich versions. Without these, docker's default TERM=xterm
       // makes claude downgrade to a one-line greeting instead of the boxed

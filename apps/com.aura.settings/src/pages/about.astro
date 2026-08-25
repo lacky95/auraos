@@ -51,6 +51,22 @@ const S = {
   k:    'flex:0 0 96px;color:var(--aura-color-text-dim);font-size:0.62rem;letter-spacing:0.08em;',
   v:    'flex:1;color:var(--aura-color-secondary);font-size:0.7rem;word-break:break-all;text-align:left;',
   dim:  'color:var(--aura-color-text-dim);',
+  upd:  'max-width:460px;margin:22px auto 0;font-family:monospace;text-align:left;',
+  btn:  'appearance:none;box-sizing:border-box;flex:1;padding:9px;border:1px solid var(--aura-color-primary);'
+      + 'background:transparent;color:var(--aura-color-primary);font-family:monospace;font-size:0.66rem;'
+      + 'letter-spacing:.14em;text-transform:uppercase;cursor:pointer;outline:none;',
+  btn2: 'appearance:none;box-sizing:border-box;flex:0 0 auto;padding:9px 12px;'
+      + 'border:1px solid var(--aura-color-border,#333);background:transparent;'
+      + 'color:var(--aura-color-text-dim,#557755);font-family:monospace;font-size:0.66rem;'
+      + 'letter-spacing:.14em;text-transform:uppercase;cursor:pointer;outline:none;',
+  note: 'margin-top:8px;font-size:0.6rem;line-height:1.6;color:var(--aura-color-text-dim);',
+  steps: 'list-style:none;margin:10px 0 0;padding:0;font-size:0.62rem;line-height:1.9;',
+  link: 'appearance:none;background:none;border:none;padding:4px 0;margin-top:4px;cursor:pointer;'
+      + 'color:var(--aura-color-primary);font-family:monospace;font-size:0.6rem;letter-spacing:.08em;'
+      + 'text-align:left;outline:none;',
+  logbox: 'margin-top:10px;padding:8px;border:1px solid var(--aura-color-border,#333);'
+        + 'max-height:190px;overflow:auto;font-size:0.6rem;line-height:1.6;'
+        + 'color:var(--aura-color-secondary);white-space:pre-wrap;display:none;',
 };
 ---
 <!DOCTYPE html>
@@ -94,7 +110,282 @@ const S = {
         <div style={S.row}><span style={S.k}>MESSAGE</span><span style={S.v}>{git.subject}</span></div>
       )}
     </div>
+
+    <!-- Self-update. The OS rebuilds and recreates its own master container,
+         so this page WILL lose its backend for a minute or two mid-update —
+         the poller below treats that as normal and waits it out. -->
+    <div style={S.upd}>
+      <!-- Three ways to act on the master container, in descending order of
+           how much they change: pull + rebuild, rebuild what is on disk,
+           or just bounce it. All three run in the same detached updater and
+           report through the same checklist below. -->
+      <div style="display:flex;gap:6px;">
+        <button id="upd-btn"     type="button" style={S.btn}>Update AuraOS</button>
+        <button id="rebuild-btn" type="button" style={S.btn2}
+                title="Rebuild the image from the current checkout — no git pull">Rebuild</button>
+        <button id="restart-btn" type="button" style={S.btn2}
+                title="Restart the master container — no rebuild">Restart</button>
+      </div>
+      <div id="upd-note" style={S.note}>Checking…</div>
+      <!-- Only shown once a run exists: loads that run's full transcript
+           (build output included) on demand — see ?logs=<id>. -->
+      <!-- What actually happened, step by step. Filled from the job's steps[]
+           so a finished update can be audited without reading the transcript. -->
+      <ul id="upd-steps" style={S.steps} hidden></ul>
+      <button id="upd-logs-btn" type="button" style={S.link} hidden>▸ Show full log</button>
+      <div id="upd-log" style={S.logbox}></div>
+    </div>
   </main>
   <footer class="settings-foot">{about ? `AURAOS V${about.version}` : 'ABOUT'}</footer>
+  <script>
+    // The shell's own endpoint, called with an ABSOLUTE path on purpose: this
+    // page is served through the OS proxy, so its origin already IS the shell
+    // (same origin as /api/os/theme.css linked above). Going straight there
+    // avoids proxying an OS-level operation through an app backend that has
+    // no business owning it.
+    const api = '/api/admin/self-update';
+
+    const btn  = document.getElementById('upd-btn');
+    const rebuildBtn = document.getElementById('rebuild-btn');
+    const restartBtn = document.getElementById('restart-btn');
+    const note = document.getElementById('upd-note');
+    const log  = document.getElementById('upd-log');
+    const logsBtn = document.getElementById('upd-logs-btn');
+    let lastJobId = null;
+    let fullLogOpen = false;
+
+    // The transcript is fetched only when asked for: a failed build can print
+    // megabytes, and nobody wants that arriving with every 3s status poll.
+    async function showFullLog() {
+      if (!lastJobId) return;
+      logsBtn.textContent = '… loading log';
+      try {
+        const r = await fetch(`${api}?logs=${encodeURIComponent(lastJobId)}`, { cache: 'no-store' });
+        const text = await r.text();
+        log.style.display = 'block';
+        log.textContent = text;
+        log.scrollTop = log.scrollHeight;
+        fullLogOpen = true;
+        logsBtn.textContent = '▾ Hide full log';
+      } catch {
+        logsBtn.textContent = '▸ Show full log (could not load — retry)';
+      }
+    }
+    logsBtn?.addEventListener('click', () => {
+      if (fullLogOpen) {
+        fullLogOpen = false;
+        logsBtn.textContent = '▸ Show full log';
+        log.textContent = '';
+        log.style.display = 'none';
+        return;
+      }
+      showFullLog();
+    });
+
+    const TERMINAL = ['done', 'failed', 'rolled-back'];
+    const stepsEl = document.getElementById('upd-steps');
+
+    // One glyph + colour per state. `skipped` is deliberately neutral: a dry
+    // run never building is a correct outcome, not a half-failure.
+    const STEP_UI = {
+      done:    ['✓', 'var(--aura-color-primary,#00ff41)'],
+      failed:  ['✗', 'var(--aura-color-danger,#ff2020)'],
+      running: ['◌', 'var(--aura-color-secondary,#ff9900)'],
+      skipped: ['–', 'var(--aura-color-text-dim,#557755)'],
+      pending: ['·', 'var(--aura-color-text-dim,#557755)'],
+    };
+    function renderSteps(job) {
+      if (!stepsEl) return;
+      const steps = (job && job.steps) || [];
+      if (!steps.length) { stepsEl.hidden = true; stepsEl.innerHTML = ''; return; }
+      stepsEl.hidden = false;
+      stepsEl.innerHTML = steps.map((st) => {
+        const [glyph, color] = STEP_UI[st.status] || STEP_UI.pending;
+        const dim = st.status === 'pending' || st.status === 'skipped';
+        const detail = st.detail
+          ? `<span style="color:var(--aura-color-text-dim,#557755);"> — ${escapeHtml(st.detail)}</span>` : '';
+        return `<li style="color:${dim ? 'var(--aura-color-text-dim,#557755)' : 'var(--aura-color-text,#ccffcc)'};">`
+          + `<span style="color:${color};display:inline-block;width:1.2em;">${glyph}</span>`
+          + `${escapeHtml(st.label)}${detail}</li>`;
+      }).join('');
+    }
+    function escapeHtml(v) {
+      return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    let polling = false;
+
+    function paint(state) {
+      const { supported, reason, running, job } = state || {};
+      if (supported === false) {
+        btn.disabled = true;
+        btn.style.opacity = '0.45';
+        btn.style.cursor = 'not-allowed';
+        note.textContent = reason || 'Self-update is not available on this machine.';
+        return;
+      }
+      const busy = running || (job && !TERMINAL.includes(job.phase));
+      for (const b of [btn, rebuildBtn, restartBtn]) {
+        b.disabled = !!busy;
+        b.style.opacity = busy ? '0.45' : '1';
+        b.style.cursor = busy ? 'wait' : 'pointer';
+      }
+      btn.textContent = busy
+        ? `${job && job.mode ? job.mode : 'working'} — ${job ? job.phase : ''}…`
+        : 'Update AuraOS';
+      renderSteps(job);
+      if (job) {
+        lastJobId = job.id;
+        logsBtn.hidden = false;
+        // While the user has the transcript open, keep refreshing THAT rather
+        // than clobbering it with the step summary on every poll.
+        if (fullLogOpen) {
+          showFullLog();
+        } else {
+          log.style.display = 'block';
+          log.textContent = (job.log || []).join('\n');
+          log.scrollTop = log.scrollHeight;
+        }
+        note.textContent = describe(job);
+      } else {
+        logsBtn.hidden = true;
+        note.textContent = 'Checks for a newer commit, then rebuilds the container — and rolls back if it does not come up.';
+      }
+    }
+    function describe(job) {
+      const when = job.finishedAt || job.startedAt;
+      const rev = job.toRev ? ` → ${job.toRev.slice(0, 12)}` : '';
+      if (job.phase === 'done')        return `Last update: succeeded${rev} · ${when}`;
+      if (job.phase === 'rolled-back') return `Last update: rolled back${rev} — click "Show full log" for why · ${when}`;
+      if (job.phase === 'failed')      return `Last update: FAILED — click "Show full log" below for the details · ${when}`;
+      return `Update in progress (${job.phase})… the OS restarts itself partway through; this page keeps waiting.`;
+    }
+
+    async function refresh() {
+      // A failed fetch during an update is EXPECTED (the backend is being
+      // recreated). Report it as waiting, never as an error.
+      try {
+        const r = await fetch(api, { cache: 'no-store' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return await r.json();
+      } catch {
+        return null;
+      }
+    }
+    async function poll() {
+      if (polling) return;
+      polling = true;
+      // No timeout on purpose: a rebuild can take minutes, and giving up
+      // would leave the button lying about what the machine is doing.
+      for (;;) {
+        const state = await refresh();
+        if (state) {
+          paint(state);
+          const job = state.job;
+          if (job && TERMINAL.includes(job.phase) && !state.running) break;
+          if (!job) break;
+        } else {
+          note.textContent = 'Backend restarting — waiting for the OS to come back…';
+        }
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+      polling = false;
+    }
+
+    // Click = CHECK first, in the shell process: a couple of seconds, no
+    // container, no changes to the checkout. Only once we know there is
+    // something to update AND the tree is clean do we ask to launch the
+    // heavy updater. Nothing destructive happens behind a single click.
+    // Rebuild and Restart skip the "is there a newer commit?" check — neither
+    // consults git at all — so they go straight to confirm-and-launch.
+    async function launch(mode, confirmText, label) {
+      if (!confirm(confirmText)) return;
+      for (const b of [btn, rebuildBtn, restartBtn]) b.disabled = true;
+      note.textContent = `Starting ${label}…`;
+      try {
+        const r = await fetch(api, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode }),
+        });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          note.textContent = body.error || `Could not start ${label} (HTTP ${r.status}).`;
+          for (const b of [btn, rebuildBtn, restartBtn]) b.disabled = false;
+          return;
+        }
+      } catch {
+        note.textContent = `Could not reach the backend to start ${label}.`;
+        for (const b of [btn, rebuildBtn, restartBtn]) b.disabled = false;
+        return;
+      }
+      poll();
+    }
+
+    rebuildBtn?.addEventListener('click', () => launch('rebuild',
+      'Rebuild the image?\n\nRebuilds from the checkout as it is right now — no git pull, so any uncommitted changes are baked in. The OS restarts when the build finishes. There is nothing to roll back to if it fails, because the checkout is not changed.',
+      'the rebuild'));
+
+    restartBtn?.addEventListener('click', () => launch('restart',
+      'Restart the master container?\n\nNo rebuild — the OS goes down and comes back on the current image. Running apps keep running; the desktop reconnects when the shell is back.',
+      'the restart'));
+
+    btn?.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.textContent = 'Checking…';
+      note.textContent = 'Fetching the latest commit from the remote…';
+      let pre = null;
+      try {
+        const r = await fetch(api + '?check=1', { cache: 'no-store' });
+        const state = await r.json();
+        pre = state.preflight;
+      } catch { /* handled below */ }
+      btn.disabled = false;
+      btn.textContent = 'Update AuraOS';
+      if (!pre) { note.textContent = 'Could not reach the backend to run the check.'; return; }
+      if (pre.blockers && pre.blockers.length) {
+        log.style.display = 'block';
+        log.textContent = pre.blockers.join('\n') + (pre.dirtyFiles && pre.dirtyFiles.length
+          ? '\n\nUncommitted:\n  ' + pre.dirtyFiles.join('\n  ') : '');
+        note.textContent = 'Cannot update yet — see below.';
+        return;
+      }
+      if (!pre.updateAvailable) {
+        log.style.display = 'none';
+        note.textContent = `Already up to date — ${(pre.currentRev || '').slice(0, 12)} on ${pre.branch}`
+          + (pre.ahead ? ` (${pre.ahead} local commit(s) not pushed)` : '');
+        return;
+      }
+      const summary = `${pre.behind} new commit(s) on ${pre.branch}\n`
+        + `${(pre.currentRev || '').slice(0, 12)} → ${(pre.latestRev || '').slice(0, 12)}\n`
+        + (pre.latestSubject ? `\nLatest: ${pre.latestSubject}\n` : '')
+        + (pre.ahead ? `\n${pre.ahead} local commit(s) will be rebased on top.\n` : '');
+      if (!confirm(`Update AuraOS?\n\n${summary}\nThis rebuilds the container image and restarts the OS. Running apps keep running; the desktop reconnects when the shell is back. If the new build does not come up, it rolls back automatically.`)) return;
+      btn.disabled = true;
+      btn.textContent = 'Starting…';
+      try {
+        const r = await fetch(api, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ branch: 'main' }),
+        });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          note.textContent = body.error || `Could not start the update (HTTP ${r.status}).`;
+          for (const b of [btn, rebuildBtn, restartBtn]) b.disabled = false;
+          btn.textContent = 'Update AuraOS';
+          return;
+        }
+      } catch (err) {
+        note.textContent = 'Could not reach the backend to start the update.';
+        btn.disabled = false;
+        btn.textContent = 'Update AuraOS';
+        return;
+      }
+      poll();
+    });
+
+    refresh().then((s) => { paint(s || {}); if (s && (s.running || (s.job && !TERMINAL.includes(s.job.phase)))) poll(); });
+  </script>
 </body>
 </html>

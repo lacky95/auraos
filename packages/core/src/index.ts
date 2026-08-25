@@ -19,3 +19,4 @@ export * from './nexus/index.js';
 export * from './logger.js';
 export * from './scopes/index.js';
 export * from './context/index.js';
+export * from './updater/SelfUpdater.js';
