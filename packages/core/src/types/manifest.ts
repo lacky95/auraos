@@ -61,7 +61,7 @@ const INTERFACE_NAME_RE = /^[a-z][a-z0-9-]*$/;
 /** Kinds whose `address` is a path on the providing app's own server. */
 const INTERFACE_PATH_KINDS = new Set<string>(['http', 'rest', 'mcp', 'ws']);
 
-const ProvidedInterfaceSchema = z.object({
+export const ProvidedInterfaceSchema = z.object({
   /** App-local, kebab-case. Unique within the app (enforced on the manifest). */
   name: z.string().regex(INTERFACE_NAME_RE, {
     message: 'Interface name must be kebab-case: e.g. transcribe, mcp-tools',

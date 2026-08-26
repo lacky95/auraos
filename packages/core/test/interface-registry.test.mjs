@@ -203,14 +203,63 @@ test('runtime: unregister removes only runtime entries, never a declaration', ()
   assert.equal(reg.list({ name: 'transcribe' })[0].status, 'live');
 });
 
+/** The shape AppManager passes to reconcile(). */
+function liveMap(...pairs) {
+  return new Map(pairs.map(([inst, m]) => [inst.instanceId, { instance: inst, manifest: m }]));
+}
+
 test('reconcile drops records for instances the OS no longer tracks', () => {
   const reg = new InterfaceRegistry();
   const m = manifest({ provides: [REST] });
   reg.reload([m]);
-  reg.registerInstance(instance(), m);
+  const inst = instance();
+  reg.registerInstance(inst, m);
 
-  assert.equal(reg.reconcile(new Set(['com.acme.api'])), 0, 'a tracked instance survives');
-  assert.equal(reg.reconcile(new Set()), 1);
+  assert.deepEqual(reg.reconcile(liveMap([inst, m])), { dropped: 0, restored: 0 }, 'a tracked instance survives');
+  assert.deepEqual(reg.reconcile(new Map()), { dropped: 1, restored: 0 });
+  assert.equal(reg.list()[0].status, 'catalog');
+});
+
+test('reconcile restores a live instance that lost its declared interfaces', () => {
+  // Observed for real: stop() deregisters BEFORE it transitions, so a stop that
+  // then throws leaves a running, resumed app with no interfaces and nothing to
+  // re-register it. Discovery would keep lying until the next restart.
+  const reg = new InterfaceRegistry();
+  const m = manifest({ provides: [REST] });
+  reg.reload([m]);
+  const inst = instance();
+  reg.registerInstance(inst, m);
+
+  reg.unregisterInstance(inst);                       // the failed stop
+  assert.equal(reg.list()[0].status, 'catalog', 'precondition: the entry is gone');
+
+  const delta = reg.reconcile(liveMap([inst, m]));    // the app never actually stopped
+  assert.deepEqual(delta, { dropped: 0, restored: 1 });
+  assert.equal(reg.list()[0].status, 'live', 'the projection heals itself');
+});
+
+test('reconcile never resurrects runtime registrations', () => {
+  // A runtime entry is a fact about a process; only that process can assert it.
+  const reg = new InterfaceRegistry();
+  const m = manifest({ provides: [REST] });
+  reg.reload([m]);
+  const inst = instance();
+  reg.registerInstance(inst, m);
+  reg.register(inst.instanceId, { name: 'feed', kind: 'ws', address: '/ws', version: '1' });
+
+  reg.unregisterInstance(inst);
+  reg.reconcile(liveMap([inst, m]));
+  assert.equal(reg.list({ name: 'transcribe' })[0].status, 'live', 'declared entries come back');
+  assert.equal(reg.list({ name: 'feed' }).length, 0, 'runtime entries do not');
+});
+
+test('reconcile leaves pool members alone', () => {
+  const reg = new InterfaceRegistry();
+  const m = manifest({ provides: [REST] });
+  reg.reload([m]);
+  const pooled = instance({ inPool: true });
+
+  assert.deepEqual(reg.reconcile(liveMap([pooled, m])), { dropped: 0, restored: 0 });
   assert.equal(reg.list()[0].status, 'catalog');
 });
 

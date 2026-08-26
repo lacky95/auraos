@@ -1734,9 +1734,14 @@ export class AppManager {
     // table. Principle: the registry is derived state, so a bug in ANY of the
     // register/unregister call sites above must not be able to leave a
     // permanent ghost — at worst it survives one heartbeat.
-    const droppedIfaces = this.interfaces.reconcile(new Set(this.instances.keys()));
-    if (droppedIfaces > 0) {
-      console.warn(`[AppManager] reconcile: dropped ${droppedIfaces} orphan interface record(s)`);
+    const liveForIfaces = new Map(
+      [...this.instances].map(([id, inst]) => [id, { instance: inst, manifest: this.registry.getById(inst.appId) }]),
+    );
+    const ifaceDelta = this.interfaces.reconcile(liveForIfaces);
+    if (ifaceDelta.dropped > 0 || ifaceDelta.restored > 0) {
+      console.warn(
+        `[AppManager] reconcile: interfaces dropped=${ifaceDelta.dropped} restored=${ifaceDelta.restored}`,
+      );
     }
 
     // 2) Orphan reap: any /proc process whose cmdline points at apps/com.aura.*

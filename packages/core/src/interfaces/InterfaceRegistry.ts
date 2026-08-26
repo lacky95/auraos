@@ -247,21 +247,49 @@ export class InterfaceRegistry {
   }
 
   /**
-   * Force the live layer back into agreement with the instance table. Called
-   * on the AppManager heartbeat: principle 2 made operational, so no bug in
-   * any register/unregister call site can leave a permanent ghost.
+   * Force the live layer back into agreement with the instance table — in BOTH
+   * directions. Called on the AppManager heartbeat.
    *
-   * @returns how many orphan records were dropped.
+   * This is principle 2 made operational, and it needs both halves:
+   *
+   *   • DROP a record whose instance the OS no longer tracks. Without this a
+   *     missed unregister would be a permanent ghost.
+   *   • RESTORE manifest-declared entries for a live instance that lost them.
+   *     Observed in practice: `stop()` deregisters BEFORE it transitions, so a
+   *     stop that then fails (e.g. an invalid lifecycle transition on an
+   *     adopted orphan) leaves a running, `resumed` app with no interfaces —
+   *     discovery quietly lying about an app that is still serving. Nothing
+   *     re-registers it, because from the OS's point of view it never stopped.
+   *
+   * Runtime registrations are never restored: they are facts about a process
+   * that only the process can assert.
+   *
+   * @returns how many records were dropped and restored.
    */
-  reconcile(liveInstanceIds: ReadonlySet<string>): number {
+  reconcile(live: ReadonlyMap<string, { instance: AppInstance; manifest: AppManifest | undefined }>):
+      { dropped: number; restored: number } {
     let dropped = 0;
+    let restored = 0;
+
     for (const instanceId of [...this.live.keys()]) {
-      if (!liveInstanceIds.has(instanceId)) {
+      if (!live.has(instanceId)) {
         this.live.delete(instanceId);
         dropped++;
       }
     }
-    return dropped;
+
+    for (const [instanceId, { instance, manifest }] of live) {
+      if (!manifest || instance.inPool || manifest.provides.length === 0) continue;
+      const rec = this.live.get(instanceId);
+      const missing = manifest.provides.filter((i) => rec?.entries.get(i.name)?.source !== 'manifest');
+      if (missing.length === 0) continue;
+      const entries = rec?.entries ?? new Map<string, LiveEntry>();
+      for (const iface of missing) entries.set(iface.name, { iface, source: 'manifest' });
+      this.live.set(instanceId, { instance, entries });
+      restored++;
+    }
+
+    return { dropped, restored };
   }
 
   // ─────────────────────────────── reads ───────────────────────────────────
