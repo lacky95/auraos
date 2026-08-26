@@ -45,7 +45,7 @@ services:
       AURA_APP_PORT_END: "4999"
       AURA_AUTH_MODE: none
       # Aura Context (env/secret manager) master key — base64 of 32 bytes,
-      # e.g. `openssl rand -base64 32`. Seals context values at rest in Redis.
+      # e.g. `openssl rand -base64 32`. Seals context values at rest in Valkey.
       # If unset (dev default), a random key is generated once and persisted at
       # /data/context/.masterkey. Set this in production so the key doesn't sit
       # beside the ciphertext.

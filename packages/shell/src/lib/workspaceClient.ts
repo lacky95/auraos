@@ -51,8 +51,8 @@ export interface WorkspaceState {
 const ENDPOINT = '/api/kv/os/workspaces';
 
 /**
- * Boot-race retry: the shell middleware spins up Redis + AppManager on the
- * first request, so a very fast browser can land before Redis is ready.
+ * Boot-race retry: the shell middleware spins up Valkey + AppManager on the
+ * first request, so a very fast browser can land before Valkey is ready.
  * That window is now sub-second (no Settings autoStart in the path), but
  * we keep the retry as defence-in-depth.
  */
@@ -105,7 +105,7 @@ function clone(s: WorkspaceState): WorkspaceState {
 /**
  * Coalesced write helper — multiple rapid calls within `delayMs` collapse
  * into a single PUT to the workspace endpoint. Drag/resize call this ~60
- * times a second; debouncing the network write keeps Redis from melting.
+ * times a second; debouncing the network write keeps Valkey from melting.
  */
 const pendingPatch = new Map<string, { patch: Partial<Omit<Workspace, 'id'>>; timer: ReturnType<typeof setTimeout> }>();
 export function patchWorkspaceDebounced(id: string, patch: Partial<Omit<Workspace, 'id'>>, delayMs = 250): void {

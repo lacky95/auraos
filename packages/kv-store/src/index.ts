@@ -17,7 +17,7 @@ export type { KvNamespace, KvValue } from './types.js';
  *
  * Each call returns a NEW client (so individual API handlers can hold
  * their own connection without sharing socket state). ioredis maintains
- * one TCP connection per Redis instance though, so the cost is just an
+ * one TCP connection per server though, so the cost is just an
  * extra event-emitter not an extra socket.
  */
 import { kvServer } from './server.js';

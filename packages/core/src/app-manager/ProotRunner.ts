@@ -142,7 +142,7 @@ export class ProotRunner implements SandboxRunner {
     // (the args reference the dir). Wildcard apps get the whole store mirrored;
     // explicit apps get just their declared tools.
     if (prooted) this.provisionToolsDir(instanceId, manifest);
-    // Resolve OS Context (env/secret) LIVE from Redis on every spawn.
+    // Resolve OS Context (env/secret) LIVE from Valkey on every spawn.
     this.contextStore.ensureDir();
     const contextEnv = await this.contextStore.resolveEnv();
     // OS-managed shared volumes — bound into the proot (RW; proot --bind can't

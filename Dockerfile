@@ -89,6 +89,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
   && rm -rf /var/lib/apt/lists/*
 
+# Valkey — the embedded KV store the shell spawns as a child process
+# (`packages/kv-store/src/server.ts`). BSD-licensed drop-in for Redis, wire-
+# and config-compatible, so `ioredis` and every consumer are unaffected.
+# Copied from the official image rather than apt-installed: bookworm has no
+# valkey package, and this pins the exact version. All of its shared-library
+# deps (libssl3, libsystemd0, libgcrypt20, liblzma5, libzstd1, liblz4-1,
+# libcap2) are already in node:22-slim's bookworm base.
+COPY --from=valkey/valkey:8-bookworm /usr/local/bin/valkey-server /usr/local/bin/valkey-server
+COPY --from=valkey/valkey:8-bookworm /usr/local/bin/valkey-cli    /usr/local/bin/valkey-cli
+
 # Docker CLI — ContainerRunner uses this to drive sibling-container spawns
 # via the host's docker daemon (socket bind-mounted from compose). Static
 # binary from docker.com so it works on any host without adding repos.

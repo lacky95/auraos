@@ -2,7 +2,7 @@ import type { APIRoute } from 'astro';
 import { ContextStore } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
 
-/** DELETE /api/os/context/<KEY> — remove a context value (Redis + file). */
+/** DELETE /api/os/context/<KEY> — remove a context value (Valkey + file). */
 
 const KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 

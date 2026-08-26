@@ -14,15 +14,15 @@
  *   • inject `env`    — injected as `-e KEY=VALUE` at spawn (respawn to change).
  *   • inject `file`   — materialised to `/run/context/<KEY>` (updates live).
  * An entry may target env, file, or both. Values are sealed (AES-256-GCM) at
- * rest so nothing sits plaintext in the Redis AOF/RDB on disk.
+ * rest so nothing sits plaintext in the Valkey AOF/RDB on disk.
  *
  * Two representations, kept in lock-step by `set`/`del`:
- *   • Redis (`context:system:<KEY>`) — source of truth: `{ kind, sealed, inject }`.
+ *   • Valkey (`context:system:<KEY>`) — source of truth: `{ kind, sealed, inject }`.
  *   • Files (`<dataDir>/context/system/<KEY>`) — plaintext, materialised
  *     atomically, ONLY for entries whose inject set contains `file`. This dir
  *     is the mount source for `/run/context` in every app container, so a value
  *     change reaches a RUNNING app on its next file read — no app restart, and
- *     never a master restart (the master reads Redis live at point-of-use).
+ *     never a master restart (the master reads Valkey live at point-of-use).
  *
  * Access is server-internal only. The public `/api/kv/...` proxy rejects the
  * `context:*` namespace; callers go through `/api/os/context`.
@@ -33,7 +33,7 @@ import { defaultKv, type KvNamespace } from '@aura/kv-store';
 import { OsEventBus } from '../ipc/OsEventBus.js';
 import { open, resolveMasterKey, seal } from './seal.js';
 
-/** Redis namespace for the v1 global context. */
+/** KV namespace for the v1 global context. */
 const SYSTEM_NS: KvNamespace = 'context:system';
 
 /** Context keys are env-var names: uppercase, digits, underscore. */
@@ -215,7 +215,7 @@ export class ContextStore {
     }
   }
 
-  /** Upsert: seal into Redis with its kind + inject targets, sync the file, broadcast. */
+  /** Upsert: seal into Valkey with its kind + inject targets, sync the file, broadcast. */
   async set(
     key: string,
     value: string,
@@ -239,7 +239,7 @@ export class ContextStore {
     }
   }
 
-  /** Remove from Redis + unlink the file + broadcast. */
+  /** Remove from Valkey + unlink the file + broadcast. */
   async del(key: string): Promise<boolean> {
     ContextStore.assertKey(key);
     const kv = defaultKv();
@@ -257,7 +257,7 @@ export class ContextStore {
 
   /**
    * Decrypted `KEY → value` map for spawn-time `-e` env injection. Only entries
-   * whose inject set contains `env`. Read live from Redis on every spawn so a
+   * whose inject set contains `env`. Read live from Valkey on every spawn so a
    * respawned app gets current values.
    */
   async resolveEnv(): Promise<Record<string, string>> {
@@ -268,7 +268,7 @@ export class ContextStore {
   }
 
   /**
-   * Rebuild the whole `system/` dir from Redis. Called once at OS boot so the
+   * Rebuild the whole `system/` dir from Valkey. Called once at OS boot so the
    * files exist before the first app mount. Writes files ONLY for entries whose
    * inject set contains `file`, and prunes every other file (deleted keys or
    * entries toggled to env-only).

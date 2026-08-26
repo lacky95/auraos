@@ -1,12 +1,15 @@
 /**
  * Server-side KV client. Lives inside the shell process; API routes
- * import it to read + write Redis. The browser does NOT touch this
+ * import it to read + write Valkey. The browser does NOT touch this
  * class — it goes through the shell's HTTP `/api/kv/...` endpoints.
  *
- * Wraps `ioredis` so we can swap implementations later (real Redis,
- * cluster mode, etc.) without rewriting consumers.
+ * Wraps `ioredis` so we can swap implementations later (a standalone
+ * Valkey, cluster mode, etc.) without rewriting consumers. Valkey speaks
+ * the Redis wire protocol, so ioredis is the right client either way.
  */
 
+// `ioredis` is named for the protocol, not the server — it drives Valkey
+// unchanged, and `redis://` stays the correct URI scheme.
 import { Redis } from 'ioredis';
 import { isValidKey, isValidNamespace, type KvNamespace, type KvValue } from './types.js';
 
@@ -19,7 +22,7 @@ export class KvClient {
     // through immediately; reconnection is handled by ioredis internally.
     this.redis = new Redis(uri, {
       // Retry strategy: exponential backoff capped at 2s. The shell's
-      // own restart will outlive a Redis hiccup, so we want commands to
+      // own restart will outlive a Valkey hiccup, so we want commands to
       // queue + retry rather than throw mid-handler.
       retryStrategy: (times) => Math.min(times * 100, 2000),
       maxRetriesPerRequest: 5,
@@ -44,7 +47,7 @@ export class KvClient {
       return JSON.parse(raw) as KvValue<T>;
     } catch (err) {
       // A non-JSON value is a sign someone wrote to the same key via
-      // raw Redis — surface loudly. Better to throw than silently
+      // raw Valkey — surface loudly. Better to throw than silently
       // return wrong-shaped data.
       throw new Error(`[KvClient] non-JSON value at ${ns}:${key}: ${(err as Error).message}`);
     }
@@ -75,7 +78,7 @@ export class KvClient {
 
   /**
    * List every key in a namespace. The HTTP layer caps this with a
-   * `limit` arg so a runaway scan can't lock up the shell — Redis
+   * `limit` arg so a runaway scan can't lock up the shell — Valkey
    * `SCAN` is cursor-based but we still don't want to dump 100k keys.
    */
   async list(ns: KvNamespace | string, opts: { limit?: number } = {}): Promise<string[]> {

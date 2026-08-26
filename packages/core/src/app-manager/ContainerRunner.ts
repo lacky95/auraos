@@ -211,7 +211,7 @@ export class ContainerRunner implements SandboxRunner {
     // shell can leave them behind.
     try { execSync(`docker rm -f ${hostname}`, { stdio: 'ignore', timeout: 5_000 }); } catch { /* didn't exist */ }
 
-    // Resolve OS Context (env/secret) LIVE from Redis on every spawn so a
+    // Resolve OS Context (env/secret) LIVE from Valkey on every spawn so a
     // respawned app always sees current values (the master never restarts,
     // never caches these). ensureDir guarantees the volume-subpath mount
     // source exists even before the first `set`.

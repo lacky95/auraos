@@ -2,7 +2,7 @@
  * Browser-side client for the OS-wide KV store. Wraps the shell's
  * `/api/kv/<ns>/<key>` HTTP API with:
  *   • Typed JSON marshalling.
- *   • Boot-race retry on 404 (the shell's middleware ensures Redis is up
+ *   • Boot-race retry on 404 (the shell's middleware ensures Valkey is up
  *     before any request returns, but cold-page-load can still race the
  *     soft-restart singleton reset).
  *   • SSE subscription helper for live updates.

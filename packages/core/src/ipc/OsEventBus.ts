@@ -91,7 +91,7 @@ export interface OsEvents {
   'workspace:activated': { workspaceId: string };
   /**
    * KV write or delete. `value: null` means a delete. Namespace + key
-   * together form the Redis address (`os:theme`, `app/com.aura.notepad:foo`).
+   * together form the KV address (`os:theme`, `app/com.aura.notepad:foo`).
    * SSE subscribers can topic-filter `kv:*` to get every change, or read
    * the namespace from the payload to narrow further.
    */

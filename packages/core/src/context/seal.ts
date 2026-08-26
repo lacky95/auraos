@@ -2,10 +2,10 @@
  * Envelope encryption for Aura Context values.
  *
  * Context values (tokens / secrets) are sealed with AES-256-GCM before they
- * are written to Redis, so the append-only file / RDB snapshot on disk never
+ * are written to Valkey, so the append-only file / RDB snapshot on disk never
  * holds plaintext credentials. The materialised `/run/context/<KEY>` files
  * that mount into app containers ARE plaintext by necessity (the app has to
- * read them) — encryption only protects the at-rest Redis store.
+ * read them) — encryption only protects the at-rest Valkey store.
  *
  * Key resolution (see `resolveMasterKey`):
  *   1. `AURA_CONTEXT_KEY` env — base64 of exactly 32 bytes. Use this in prod.

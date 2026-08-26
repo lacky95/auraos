@@ -24,8 +24,7 @@
       "esbuild",
       "node-pty",
       "sharp",
-      "@img/sharp-libvips-linux-x64",
-      "redis-memory-server"
+      "@img/sharp-libvips-linux-x64"
     ]
   }
 }

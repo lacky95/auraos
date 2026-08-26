@@ -16,18 +16,18 @@ async function ensureAppManager() {
   // Single-threaded event loop: the `??=` plus the `try`/`catch` above run
   // synchronously, so concurrent requests share one in-flight init promise.
   initPromise ??= (async () => {
-    // Embedded Redis MUST come up before AppManager.init() because AppManager
+    // Embedded Valkey MUST come up before AppManager.init() because AppManager
     // starts services + auto-starts apps, both of which may want to read OS
     // state (theme, workspaces) from the KV. `kvServer.start()` is idempotent
     // so a stale singleton across soft-restarts is a no-op.
     const dataDir = process.env['AURA_DATA_DIR'] ?? '/data';
     await kvServer.start({ dataDir: `${dataDir}/kv` });
-    // Migrate /data/settings.json (legacy Settings storage) into Redis on
-    // first boot; subsequent boots see `os/theme` already in Redis and
+    // Migrate /data/settings.json (legacy Settings storage) into Valkey on
+    // first boot; subsequent boots see `os/theme` already in Valkey and
     // skip this entirely. Idempotent.
     await bootstrapKv({ dataDir });
 
-    // Materialise Aura Context (env/secret) files from Redis BEFORE apps start,
+    // Materialise Aura Context (env/secret) files from Valkey BEFORE apps start,
     // so the /run/context volume-subpath mount source exists and holds current
     // values on the very first spawn. Idempotent; prunes files for deleted keys.
     try {

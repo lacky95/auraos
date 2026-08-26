@@ -168,7 +168,7 @@ packages/core         AppManager, ProotRunner, ContainerRunner, OsEventBus,
 packages/shell        Astro SSR shell — /api/proxy, /api/os/*, /api/apps,
                       /api/data, middleware (OS bootstrap), layout + launcher
 packages/app-sdk      OsClient, lifecycle factories, auraAppIntegration
-packages/kv-store     Redis-backed KV + namespace validation
+packages/kv-store     Valkey-backed KV + namespace validation
 packages/aura-cli     the `aura` CLI, and the app template it scaffolds from
 packages/ui           shared UI primitives (React/scificn) + theme bridge
 apps/<id>             apps shipped with the OS

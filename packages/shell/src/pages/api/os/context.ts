@@ -8,7 +8,7 @@ import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
  *   GET  /api/os/context           → { entries: [{ key, updatedAt }] }  (NO values)
  *   POST /api/os/context           → body { key, value } upserts; returns { key, updatedAt }
  *
- * Values are sealed at rest in Redis and materialised to /data/context/system/<KEY>
+ * Values are sealed at rest in the KV and materialised to /data/context/system/<KEY>
  * (mounted into every app container at /run/context). Values are NEVER returned
  * over this API — the UI shows a "set" indicator, not the secret.
  *

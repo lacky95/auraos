@@ -1,10 +1,11 @@
-// End-to-end tests for the embedded Redis lifecycle + KvClient.
+// End-to-end tests for the embedded Valkey lifecycle + KvClient.
 //
 //   pnpm --filter @aura/kv-store build
 //   node --test packages/kv-store/test/kv-roundtrip.test.mjs
 //
-// Spawns a real RedisMemoryServer per test (cheap — the binary is cached),
-// so we exercise the *same* code path the shell uses on boot.
+// Spawns a real valkey-server per test (cheap — the binary is baked into
+// the image), so we exercise the *same* code path the shell uses on boot.
+// Outside the container, point AURA_VALKEY_BIN at a local build.
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -120,13 +121,13 @@ test('list respects the limit option', async () => {
   assert.equal(capped.length, 3);
 });
 
-test('invalid namespace throws before touching Redis', async () => {
+test('invalid namespace throws before touching the store', async () => {
   const kv = await getSharedClient();
   await assert.rejects(() => kv.set('arbitrary', 'k', 'v'), /invalid namespace/);
   await assert.rejects(() => kv.get('os:evil',   'k'),     /invalid namespace/);
 });
 
-test('invalid key throws before touching Redis', async () => {
+test('invalid key throws before touching the store', async () => {
   const kv = await getSharedClient();
   await assert.rejects(() => kv.set('os', 'bad:key', 'v'), /invalid key/);
 });
@@ -134,14 +135,14 @@ test('invalid key throws before touching Redis', async () => {
 test('persistence: a fresh server pointed at the same dataDir reloads values', async () => {
   // Spin up a SEPARATE server with its own dataDir; set a value; stop; spin
   // up a second server pointed at the same dir; the value should reappear
-  // after Redis loads the RDB on boot. Forces save with `--save 1 1` so
+  // after Valkey loads the RDB on boot. Forces save with `--save 1 1` so
   // we don't wait 60 seconds for the first snapshot.
   const dataDir = mkdtempSync(join(tmpdir(), 'aura-kv-persist-'));
   const a = new KvServer();
   const uriA = await a.start({ dataDir, saveSeconds: 1, saveChanges: 1 });
   const ca   = new KvClient(uriA);
   await ca.set('os', 'persisted', { color: 'green' });
-  // Give Redis at least one second + a small slack to flush the RDB.
+  // Give Valkey at least one second + a small slack to flush the RDB.
   await new Promise((r) => setTimeout(r, 1500));
   await ca.close();
   await a.stop();

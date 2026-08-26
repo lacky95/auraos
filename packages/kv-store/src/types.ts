@@ -9,7 +9,7 @@
  *                          read+write its own bucket; the HTTP layer
  *                          rejects cross-app writes via Referer check.
  *
- * The namespace string is encoded into the Redis key as a colon-separated
+ * The namespace string is encoded into the Valkey key as a colon-separated
  * prefix (`os:theme`, `app/com.aura.notepad:lastFile`). The slash inside
  * `app/<id>` is preserved because it never collides with the `:` separator.
  */
@@ -31,7 +31,7 @@ export interface KvValue<T = unknown> {
  * hyphens, underscores, slashes for sub-paths. Disallows control chars,
  * spaces, colons (the internal separator) and anything outside ASCII.
  *
- * Exported so the HTTP layer can validate before hitting Redis.
+ * Exported so the HTTP layer can validate before hitting Valkey.
  */
 export const KV_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._\-\/]{0,127}$/;
 
