@@ -45,6 +45,72 @@ export const DataProviderSchema = z.object({
 export type DataProviderEntry = z.infer<typeof DataProviderEntrySchema>;
 export type DataProvider      = z.infer<typeof DataProviderSchema>;
 
+/**
+ * Interface Registry — the transports the OS can currently describe.
+ *
+ * `stream` (Valkey streams) is deliberately absent: every kind listed here has
+ * a transport that already exists, so declaring one is never a promise the OS
+ * can't keep. Adding a kind later is an additive change to this enum.
+ */
+export const INTERFACE_KINDS = ['http', 'rest', 'mcp', 'ws', 'event', 'kv'] as const;
+export const InterfaceKindSchema = z.enum(INTERFACE_KINDS);
+
+/** Interface names are app-local; the globally unique ref is `<appId>/<name>`. */
+const INTERFACE_NAME_RE = /^[a-z][a-z0-9-]*$/;
+
+/** Kinds whose `address` is a path on the providing app's own server. */
+const INTERFACE_PATH_KINDS = new Set<string>(['http', 'rest', 'mcp', 'ws']);
+
+const ProvidedInterfaceSchema = z.object({
+  /** App-local, kebab-case. Unique within the app (enforced on the manifest). */
+  name: z.string().regex(INTERFACE_NAME_RE, {
+    message: 'Interface name must be kebab-case: e.g. transcribe, mcp-tools',
+  }),
+  kind: InterfaceKindSchema,
+  /**
+   * Where it lives. Semantics are per-kind, and the OS NEVER rewrites this —
+   * it only prefixes path kinds with the instance's proxy base when handing
+   * out a live address:
+   *   http|rest|mcp|ws → path on the app's own server, must start with '/'
+   *   event            → OsEventBus topic (or glob), e.g. `whisper:transcript.*`
+   *   kv               → KV namespace/key prefix, e.g. `app/com.aura.whisper/jobs`
+   */
+  address: z.string().min(1),
+  /** Free-form contract version. Consumers may pin it; the OS never interprets it. */
+  version: z.string().default('1'),
+  description: z.string().optional(),
+  /** Pointer to a schema doc (app-relative path or URL). Descriptive only. */
+  schema: z.string().optional(),
+  /**
+   * Permission a consumer will be REQUIRED to hold once grants land. Advisory
+   * today: surfaced in discovery and the Settings panel, never enforced.
+   */
+  permission: z.string().optional(),
+}).refine(
+  (i) => (INTERFACE_PATH_KINDS.has(i.kind) ? i.address.startsWith('/') : !i.address.startsWith('/')),
+  {
+    message: "http/rest/mcp/ws addresses must start with '/' (a path on the app's server); event/kv addresses must not",
+    path: ['address'],
+  },
+);
+
+const ConsumedInterfaceSchema = z.object({
+  /** Name of the interface this app wants, matched against providers' `name`. */
+  name: z.string().regex(INTERFACE_NAME_RE),
+  kind: InterfaceKindSchema,
+  /** Pin to one provider app. Omit to accept any app providing this kind + name. */
+  appId: z.string().regex(/^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/).optional(),
+  /** Accepted contract version, exact compare. Omit to accept any — no ranges in v1. */
+  version: z.string().optional(),
+  /** false ⇒ the app degrades gracefully without it. Drives the panel's danger styling. */
+  required: z.boolean().default(true),
+  description: z.string().optional(),
+});
+
+export type InterfaceKind     = z.infer<typeof InterfaceKindSchema>;
+export type ProvidedInterface = z.infer<typeof ProvidedInterfaceSchema>;
+export type ConsumedInterface = z.infer<typeof ConsumedInterfaceSchema>;
+
 export const AppManifestSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/, {
     message: 'App ID must be reverse-domain notation: com.example.app',
@@ -293,6 +359,21 @@ export const AppManifestSchema = z.object({
     /** Manual tie-breaker — higher wins. Default 0. */
     priority:   z.number().int().default(0),
   })).default([]),
+
+  /**
+   * Interfaces this app OFFERS to others — the Interface Registry's catalog
+   * layer. Declared here means "this app CAN provide it": the entry survives
+   * the app being stopped (the manifest on disk is the source of truth), which
+   * is what lets a consumer discover a provider that isn't running yet.
+   * Materialised as a live, dialable address whenever an instance is up.
+   */
+  provides: z.array(ProvidedInterfaceSchema).default([]),
+  /**
+   * Interfaces this app NEEDS. Purely declarative — the OS never injects
+   * anything. It drives the resolution report (satisfied / unmet), which is
+   * how you find out WHY a composition doesn't work.
+   */
+  consumes: z.array(ConsumedInterfaceSchema).default([]),
   /**
    * Optional Nexus publish metadata. Drives `aura nexus publish` — none of
    * these are runtime fields, they just steer the publisher when an author
@@ -393,6 +474,12 @@ export const AppManifestSchema = z.object({
 }).refine(
   (m) => m.componentType !== 'service' || m.activityMode === 'none',
   { message: "componentType: 'service' requires activityMode: 'none' — services cannot host activities", path: ['componentType'] },
+).refine(
+  // The registry's unique ref is `<appId>/<name>`, so a duplicate name inside
+  // one app would make resolution ambiguous with no way to express which was
+  // meant. Caught here rather than at registration, where it would be silent.
+  (m) => new Set(m.provides.map((p) => p.name)).size === m.provides.length,
+  { message: 'provides[].name must be unique within an app', path: ['provides'] },
 );
 
 export type AppManifest = z.infer<typeof AppManifestSchema>;
