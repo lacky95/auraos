@@ -76,8 +76,12 @@ export interface InterfaceView {
   state?: AppLifecycleState;
   /** Dialable address — present only when `live`. Relative: same-origin in an app iframe. */
   url?: string;
-  /** Direct host:port, filled in by AppManager (it owns the runners). */
-  upstream?: string | null;
+  /**
+   * Direct host:port, filled in by AppManager (it owns the runners). Lets a
+   * node-side consumer skip the shell proxy entirely — the OS is out of the
+   * data path either way.
+   */
+  upstream?: { host: string; port: number } | null;
 }
 
 export interface ConsumerView {
