@@ -4,6 +4,9 @@ Status: **idea / design sketch**. Nothing here is built. Written up from a
 design conversation (2026-08-26) so the reasoning survives — not a plan of
 record, and two of its claims are untested (see *Assumptions to test*).
 
+Companion: [shipping-projects.md](./shipping-projects.md) — this sketch is
+about who does the work, that one is about what the work arrives in.
+
 The starting observation, from building Hermes as an app: an agent app *works*
 — Hermes gave real orchestration and a dashboard out of the box — but it never
 feels native. The app is the shipping vehicle. The agent is something else, and
