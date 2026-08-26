@@ -4,9 +4,9 @@
 > **Created with agents, curated by humans.**
 
 A self-hosted WebOS where people and AI agents work side by side. Every tool and
-agent runs sandboxed in its own container, installs like an app, composes like
-Lego — and is visible in one transparent control plane. One container. Every
-tool. Fully yours.
+agent runs sandboxed in its own container, installs like an app, snaps together
+like building blocks — and is visible in one transparent control plane. One
+container. Every tool. Fully yours.
 
 ## What we're building
 
