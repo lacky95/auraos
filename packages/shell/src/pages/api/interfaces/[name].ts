@@ -10,9 +10,9 @@ import { identifyInstance } from './identify.js';
  * so an app that never calls this cannot leak. Manifest-declared interfaces
  * are not removable — they are the app's contract, not a runtime detail.
  *
- * There is no appId in the path on purpose. The caller's identity supplies it,
- * which is what makes writing to another app's entry inexpressible rather than
- * merely forbidden.
+ * There is no appId in the path on purpose: the caller's identity supplies it,
+ * so the ordinary way of touching another app's entry does not exist. (Identity
+ * itself is self-asserted — see identify.ts for exactly how far that goes.)
  */
 export const DELETE: APIRoute = ({ params, request }) => {
   const mgr = getAppManager();

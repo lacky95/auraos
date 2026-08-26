@@ -199,17 +199,18 @@ export class InterfaceRegistry {
    * claim an address — it would advertise an instance no user owns.
    */
   registerInstance(instance: AppInstance, manifest: AppManifest | undefined): void {
-    if (!manifest || instance.inPool) return;
-    if (manifest.provides.length === 0) {
-      // Nothing declared. Still drop any stale record for this id so a
-      // re-spawn can't inherit the previous occupant's runtime entries.
-      this.live.delete(instance.instanceId);
-      return;
-    }
+    if (instance.inPool) return;
+    // A record is created even when the manifest declares nothing: the record
+    // IS the instance's slot, and an app whose interfaces only exist at
+    // runtime (address not known until it is up) has nothing to declare.
+    // Without the slot, register() could only ever work for apps that had
+    // already declared something — which is exactly backwards.
     const entries = new Map<string, LiveEntry>();
-    for (const iface of manifest.provides) {
+    for (const iface of manifest?.provides ?? []) {
       entries.set(iface.name, { iface, source: 'manifest' });
     }
+    // Replacing wholesale also drops any runtime entries a previous occupant
+    // of this instanceId left behind (single-instance apps reuse the id).
     this.live.set(instance.instanceId, { instance, entries });
   }
 

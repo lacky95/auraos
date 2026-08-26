@@ -6,6 +6,15 @@ export { KeymapApi }   from './keymap.js';
 export { NavApi }      from './nav.js';
 export { SystemApi }   from './system.js';
 export { ActivityApi } from './activity.js';
+// Interface Registry — `osClient.interfaces`. Discovery + runtime registration.
+export { InterfacesApi } from './interfaces.js';
+export type {
+  InterfaceView,
+  ConsumerView,
+  InterfaceFilter,
+  InterfaceSpec,
+  InterfaceKind,
+} from './interfaces.js';
 export type {
   KeymapHandler,
   KeymapHandlerCtx,

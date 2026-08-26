@@ -47,9 +47,11 @@ import { KeymapApi } from './keymap.js';
 import { NavApi } from './nav.js';
 import { SystemApi } from './system.js';
 import { ActivityApi } from './activity.js';
+import { InterfacesApi } from './interfaces.js';
 export type { KeymapHandler, KeymapHandlerCtx, KeymapChangeInfo } from './keymap.js';
 export type { BackEvent, BackHandler } from './nav.js';
 export type { NavigateOptions } from './activity.js';
+export type { InterfaceView, ConsumerView, InterfaceFilter, InterfaceSpec, InterfaceKind } from './interfaces.js';
 
 export class OsClient {
   private base: string;
@@ -72,6 +74,12 @@ export class OsClient {
    * occupy the SAME slot (Settings drill-downs, wizards).
    */
   readonly activity: ActivityApi;
+  /**
+   * Interface Registry — discover who provides what, publish what this app
+   * provides. Returns addresses you then talk to directly; the OS is a
+   * phone book, never the data path.
+   */
+  readonly interfaces: InterfacesApi;
 
   constructor() {
     // Bare `process.env.X` throws `ReferenceError: process is not defined`
@@ -89,6 +97,7 @@ export class OsClient {
     this.nav      = new NavApi(this);
     this.system   = new SystemApi(this);
     this.activity = new ActivityApi(this);
+    this.interfaces = new InterfacesApi(this);
   }
 
   // -------- OS event subscription (BroadcastReceiver-equivalent) --------

@@ -175,6 +175,20 @@ test('runtime: register appears, and dies with the instance even without unregis
   assert.equal(reg.list()[0].status, 'catalog', 'the declared one falls back to catalog');
 });
 
+test('runtime: an app that declares nothing can still register at runtime', () => {
+  // The dynamic case: an app whose interface address is not known until it is
+  // up has nothing to put in its manifest. Being live is what earns the slot.
+  const reg = new InterfaceRegistry();
+  const m = manifest();                       // no `provides` at all
+  reg.reload([m]);
+  reg.registerInstance(instance(), m);
+
+  assert.deepEqual(reg.register('com.acme.api', { name: 'feed', kind: 'ws', address: '/ws', version: '1' }), { ok: true });
+  const [view] = reg.list();
+  assert.equal(view.source, 'runtime');
+  assert.equal(view.status, 'live');
+});
+
 test('runtime: unknown instance → 404, manifest name → 409, runtime name → overwrite', () => {
   const reg = new InterfaceRegistry();
   const m = manifest({ provides: [REST] });

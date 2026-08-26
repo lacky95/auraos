@@ -23,14 +23,23 @@ import type { AppInstance, AppManager } from '@aura/core';
  * Referer as privileged; for writes that would let any unattributed caller
  * register interfaces, so an unidentifiable caller is simply refused.
  *
- * On the trust model: this matches what the OS already assumes everywhere
- * (apps are cooperating, not adversarial) while being strictly tighter than
- * the neighbouring routes — the claimed instance must exist in the live table,
- * and there is no field in the request that can name a *different* instance,
- * so a cross-app write is inexpressible rather than merely forbidden. Even a
- * spoofed registration dies at that instance's next stop, or at the next
- * reconcile tick. Cryptographic instance identity would fix /api/kv and
- * /api/data too and is a whole-OS change; it is not this feature's to invent.
+ * On the trust model, stated plainly because it is easy to overclaim:
+ * **both sources are self-asserted.** Anything that can reach the shell API
+ * can set a Referer or an X-Aura-Instance-Id and register under another app's
+ * identity. That is not a hole this route opens — it is the OS's existing
+ * app-identity model (`/api/kv` and `/api/data` trust the same Referer, and
+ * the KV route additionally treats a *missing* Referer as privileged
+ * `'system'`). Apps here are assumed cooperating, not adversarial.
+ *
+ * What this route does add is containment: the claimed instance must exist in
+ * the live table, writes are refused outright when no instance can be named,
+ * and every entry dies with its instance — at the next stop, or at the next
+ * reconcile tick. So the blast radius of a forged registration is one
+ * advertised address until that app next stops, never a persistent lie.
+ *
+ * Real instance identity (a per-instance token minted at spawn) would fix
+ * this route, /api/kv and /api/data together. It is a whole-OS change and
+ * deliberately not invented here.
  */
 export function identifyInstance(request: Request, mgr: AppManager): AppInstance | null {
   const referer = request.headers.get('referer');
