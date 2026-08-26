@@ -27,7 +27,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test test/identity-routing.test.mjs test/container-volume.test.mjs test/updater-script.test.mjs"
+    "test": "tsc && node --test test/identity-routing.test.mjs test/container-volume.test.mjs test/updater-script.test.mjs test/intent-resolver.test.mjs test/interface-registry.test.mjs"
   },
   "dependencies": {
     "@aura/kv-store": "workspace:*",
