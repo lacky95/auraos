@@ -2,6 +2,7 @@ import { defineMiddleware } from 'astro:middleware';
 import { getAppManager, initAppManager, ContextStore, VolumeStore } from '@aura/core';
 import { kvServer, defaultKv } from '@aura/kv-store';
 import { bootstrapKv } from './lib/kvBootstrap.js';
+import { ensureSdkPublished } from './lib/sdkBootstrap.js';
 
 // Source of truth is the singleton on globalThis — NOT a module-scoped flag.
 // The soft-restart endpoint deletes that singleton; if we tracked init state
@@ -68,6 +69,13 @@ async function ensureAppManager() {
       console.warn(`[middleware] could not hydrate app-enabled state: ${(err as Error).message}`);
     }
     await mgr.init();
+
+    // Seed the local OCI registry with @aura/* AFTER init(), because init() is
+    // what starts com.aura.registry (autoStart + critical) — before this point
+    // nothing is listening on 4090. Detached and non-fatal: user/global-scope
+    // apps need these packages to resolve `auraDependencies` at first launch,
+    // but an OS that can't reach its registry should still boot.
+    ensureSdkPublished();
   })();
   try { await initPromise; }
   finally { initPromise = null; }  // future soft-restart can trigger another cycle
