@@ -182,6 +182,8 @@
   .pr .cmd { margin-top:12px; padding-top:12px; border-top:1px solid var(--border);
     font-family:var(--mono); font-size:.76rem; color:var(--dim); word-break:break-word; }
   .pr .cmd code { color:var(--secondary); font-size:1em; }
+  .pr .cmd a { color:var(--primary); text-decoration:none; border-bottom:1px solid var(--border-2); }
+  .pr .cmd a:hover { text-shadow:var(--glow); }
   .pr b { color:var(--text); font-weight:600; }
 
   /* principles compact list */
@@ -310,6 +312,8 @@
   <div class="in">
     <span class="os-name">AURA<span class="os-ver">OS</span></span>
     <nav class="bar-right">
+      <a class="bar-link hide" href="https://nexus.aura.lakner.io">Store</a>
+      <span class="sep hide" aria-hidden="true">·</span>
       <a class="bar-link hide" href="https://github.com/lacky95/auraos/tree/main/apps/com.aura.docs/fumadocs-site/content/docs" target="_blank" rel="noopener">Docs</a>
       <span class="sep hide" aria-hidden="true">·</span>
       <a class="bar-link hide" href="https://github.com/lacky95/auraos/blob/main/LICENSE" target="_blank" rel="noopener">Apache 2.0</a>
@@ -339,6 +343,7 @@
 
     <nav class="cta rv">
       <a class="btn primary" href="#quickstart">▸ Quick Start</a>
+      <a class="btn" href="https://nexus.aura.lakner.io">Store <small>↗</small></a>
       <a class="btn" href="https://github.com/lacky95/auraos/tree/main/apps/com.aura.docs/fumadocs-site/content/docs" target="_blank" rel="noopener">Documentation</a>
       <a class="btn ghost" href="https://github.com/lacky95/auraos" target="_blank" rel="noopener">GitHub <small>↗</small></a>
     </nav>
@@ -393,7 +398,7 @@
           <div class="panel brackets pr">
             <h3>Nexus &mdash; the built-in store</h3>
             <p>Install, update and publish apps from Git, an OCI registry, a curated index or a local path &mdash; into <b>system</b>, <b>global</b> or <b>user</b> scope, each non-system scope its own git repo.</p>
-            <p class="cmd"><code>aura nexus install com.example.foo</code></p>
+            <p class="cmd"><code>aura nexus install com.example.foo</code> &middot; <a href="https://nexus.aura.lakner.io">browse the store &#8599;</a></p>
           </div>
           <div class="panel brackets pr">
             <h3>One CLI, inside and out</h3>
@@ -492,6 +497,8 @@
       <a href="https://github.com/lacky95/auraos/tree/main/apps/com.aura.docs/fumadocs-site/content/docs" target="_blank" rel="noopener">Docs</a>
       <span class="sep" aria-hidden="true">·</span>
       <a href="#quickstart">Quick Start</a>
+      <span class="sep" aria-hidden="true">·</span>
+      <a href="https://nexus.aura.lakner.io">Store</a>
       <span class="sep" aria-hidden="true">·</span>
       <a href="https://github.com/lacky95/auraos/blob/main/LICENSE" target="_blank" rel="noopener">Apache 2.0</a>
       <span class="sep" aria-hidden="true">·</span>
