@@ -20,7 +20,11 @@ import { seedIndex } from './defaultIndex.js';
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;   // 6h
 const FETCH_TIMEOUT_MS = 10_000;
 
-const DEFAULT_INDEX_URL = 'https://raw.githubusercontent.com/aura-os/nexus-index/main/index.yaml';
+// NOTE: this class is exported but never constructed — bare-id resolution goes
+// through CatalogAggregator.lookup(), not here. The URL used to point at
+// aura-os/nexus-index, a repository that never existed; it now names the real
+// store so reviving this does not send anyone to a dead host.
+const DEFAULT_INDEX_URL = 'https://nexus.aura.lakner.io/index.yaml';
 
 export interface IndexClientOpts {
   /** Override the upstream URL (env: `AURA_NEXUS_INDEX_URL`). */

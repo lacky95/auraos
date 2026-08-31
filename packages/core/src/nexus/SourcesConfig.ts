@@ -81,10 +81,21 @@ export interface SourcesConfig {
 }
 
 // ─── Defaults ───────────────────────────────────────────────────────────
+
+/** The official AuraOS store — a curated index, published from
+ *  github.com/lacky95/auraos-store and served as static files. */
+export const OFFICIAL_INDEX_URL = 'https://nexus.aura.lakner.io/index.yaml';
 export const DEFAULT_SOURCES_CONFIG: SourcesConfig = {
   schema: 1,
   sources: [
     { kind: 'oci', name: 'local', url: LOCAL_REGISTRY_DEFAULT_URL, priority: 0, mirror: false },
+    // The official curated store. Priority 10 keeps `local` (0) ahead of it, so
+    // an app you are building locally still shadows the published one.
+    //
+    // The URL ends in .yaml deliberately: CatalogAggregator.loadGitIndexDoc
+    // matches /\.ya?ml$/i and fetches it directly, instead of cloning the repo
+    // behind it on every aggregation.
+    { kind: 'git-index', name: 'official', url: OFFICIAL_INDEX_URL, priority: 10 },
   ],
 };
 

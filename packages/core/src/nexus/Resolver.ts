@@ -12,7 +12,7 @@
  *   https?://…                                → git (assumed)
  *   <reverse.domain.id>[@<channel>]           → index
  *
- * The index path goes through IndexClient.lookup() and picks the
+ * The index path goes through CatalogAggregator.lookup() and picks the
  * `sources.git` (v1 default) or `sources.oci` source from the entry.
  */
 import type { CatalogAggregator } from './CatalogAggregator.js';
