@@ -154,6 +154,39 @@ No registry? Publish the app **as a git repo** (manifest at the repo root):
 aura nexus app publish --kind git --to github.com/you/hello --tag v0.1.0
 ```
 
+The target repo must **already exist** — publishing inits and pushes, but never
+creates it. And pass `--to` explicitly: without it the target falls back to the
+app dir's `git remote get-url origin`, which inside the monorepo is AuraOS
+itself.
+
+<Callout type="warn">
+**If `--kind git` hangs and fails with `spawnSync git ETIMEDOUT`,** it is
+almost always git authentication. Publishing runs **server-side inside the OS
+container**, not on your host, so it uses that container's git credentials —
+which is also why an SSH remote (`git@github.com:…`) does not work there. Use
+the `github.com/user/repo` shorthand, which resolves to HTTPS.
+
+A public repo reads fine unauthenticated, so `git ls-remote` succeeds and the
+publish looks healthy right up to the push. If the credential helper cannot
+run, git falls back to prompting for a username against a closed stdin and
+simply blocks until the timeout — the error names git, not the credentials.
+
+Check that the helper points at a binary that actually exists:
+
+```bash
+git config --global --get-all credential.https://github.com.helper
+command -v gh                       # must match the path in the helper
+gh auth status
+```
+
+Repair it with `--replace-all`, since a stale entry may already be set:
+
+```bash
+git config --global --replace-all \
+  credential.https://github.com.helper "!$(command -v gh) auth git-credential"
+```
+</Callout>
+
 Then register that repo as a `git-app` source so it appears in the store, or
 install it directly by URL:
 
