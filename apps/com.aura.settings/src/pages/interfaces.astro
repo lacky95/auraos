@@ -1,0 +1,192 @@
+---
+import '../styles/settings.css';
+
+// Read-only view of the Interface Registry: what apps offer, what they need,
+// and whether those needs are actually met. Interfaces are app-DECLARED, which
+// is what makes this its own tile rather than part of Context (user-granted).
+const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
+
+interface InterfaceView {
+  id: string; appId: string; name: string; kind: string; version: string;
+  address: string; description?: string; permission?: string;
+  source: 'manifest' | 'runtime';
+  status: 'catalog' | 'live' | 'down';
+  instanceId?: string; state?: string; url?: string;
+}
+interface ConsumerView {
+  appId: string;
+  need: { name: string; kind: string; appId?: string; required: boolean; description?: string };
+  status: 'live' | 'installed' | 'unmet';
+  matches: string[];
+}
+
+let interfaces: InterfaceView[] = [];
+let consumers:  ConsumerView[]  = [];
+let reachable = true;
+try {
+  const r = await fetch(`${osBase}/api/interfaces`, { signal: AbortSignal.timeout(2000) });
+  if (r.ok) {
+    const body = await r.json() as { interfaces?: InterfaceView[]; consumers?: ConsumerView[] };
+    interfaces = body.interfaces ?? [];
+    consumers  = body.consumers  ?? [];
+  } else { reachable = false; }
+} catch { reachable = false; }   // shell may be booting — render empty, not broken
+
+// Group providers by app so the page reads as a directory.
+const byApp = new Map<string, InterfaceView[]>();
+for (const i of interfaces) {
+  const list = byApp.get(i.appId) ?? [];
+  list.push(i);
+  byApp.set(i.appId, list);
+}
+const apps = [...byApp.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+
+const liveCount  = interfaces.filter((i) => i.status === 'live').length;
+const unmetCount = consumers.filter((c) => c.status === 'unmet').length;
+
+// Inline styles only — a page <style> block is injected by Vite's client
+// runtime, which does not run inside the proxied app iframe, so it never
+// applies. Inline style= attributes always render.
+const S = {
+  wrap:    'max-width:900px;margin:22px auto 0;font-family:monospace;',
+  counts:  'font-size:0.62rem;color:var(--aura-color-text-dim);letter-spacing:0.08em;margin-bottom:16px;',
+  h2:      'font-size:0.68rem;letter-spacing:0.16em;text-transform:uppercase;color:var(--aura-color-primary);'
+         + 'margin:22px 0 8px;',
+  appHead: 'font-size:0.66rem;color:var(--aura-color-secondary);margin:14px 0 4px;letter-spacing:0.06em;',
+  table:   'width:100%;border-collapse:collapse;font-size:0.62rem;',
+  th:      'text-align:left;padding:4px 8px 4px 0;color:var(--aura-color-text-dim);font-weight:normal;'
+         + 'letter-spacing:0.08em;border-bottom:1px solid var(--aura-color-border);',
+  td:      'padding:5px 8px 5px 0;border-bottom:1px solid var(--aura-color-border);vertical-align:top;'
+         + 'color:var(--aura-color-text);',
+  mono:    'color:var(--aura-color-secondary);word-break:break-all;',
+  dim:     'color:var(--aura-color-text-dim);',
+  url:     'display:block;margin-top:2px;font-size:0.58rem;color:var(--aura-color-text-dim);word-break:break-all;',
+  empty:   'padding:18px 0;color:var(--aura-color-text-dim);font-size:0.64rem;line-height:1.7;',
+};
+
+/** Status → [label, colour var]. `catalog` is not a failure — it is "installed, not running". */
+function statusStyle(s: string): [string, string] {
+  if (s === 'live')      return ['LIVE',      'var(--aura-color-primary)'];
+  if (s === 'down')      return ['DOWN',      'var(--aura-color-warning)'];
+  if (s === 'installed') return ['INSTALLED', 'var(--aura-color-text-dim)'];
+  if (s === 'unmet')     return ['UNMET',     'var(--aura-color-danger)'];
+  return ['CATALOG', 'var(--aura-color-text-dim)'];
+}
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Settings · Interfaces — AuraOS</title>
+  <link rel="stylesheet" href="/api/os/theme.css" />
+</head>
+<body>
+  <main class="settings-body">
+    <div style={S.wrap}>
+      <div style={S.counts}>
+        {reachable
+          ? `${interfaces.length} INTERFACE${interfaces.length === 1 ? '' : 'S'} · ${liveCount} LIVE · ${consumers.length} CONSUMER${consumers.length === 1 ? '' : 'S'}${unmetCount ? ` · ${unmetCount} UNMET` : ''}`
+          : 'OS UNREACHABLE — IS THE SHELL UP?'}
+      </div>
+
+      <h2 style={S.h2}>Provides</h2>
+      {apps.length === 0 ? (
+        <div style={S.empty}>
+          No app declares an interface yet.<br />
+          Add a <span style={S.mono}>provides</span> block to an app manifest — name, kind
+          (http · rest · mcp · ws · event · kv) and an address — and it shows up here.
+        </div>
+      ) : apps.map(([appId, list]) => (
+        <div>
+          <div style={S.appHead}>{appId}</div>
+          <table style={S.table}>
+            <thead>
+              <tr>
+                <th style={S.th}>NAME</th>
+                <th style={S.th}>KIND</th>
+                <th style={S.th}>ADDRESS</th>
+                <th style={S.th}>VER</th>
+                <th style={S.th}>SOURCE</th>
+                <th style={S.th}>STATUS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.map((i) => {
+                const [label, colour] = statusStyle(i.status);
+                return (
+                  <tr>
+                    <td style={S.td}>
+                      {i.name}
+                      {i.description && <span style={S.url}>{i.description}</span>}
+                    </td>
+                    <td style={S.td}><span style={S.dim}>{i.kind}</span></td>
+                    <td style={S.td}>
+                      <span style={S.mono}>{i.address}</span>
+                      {/* The dialable form — the single most useful thing here. */}
+                      {i.url && <span style={S.url}>→ {i.url}</span>}
+                    </td>
+                    <td style={S.td}><span style={S.dim}>{i.version}</span></td>
+                    <td style={S.td}><span style={S.dim}>{i.source}</span></td>
+                    <td style={S.td}>
+                      <span style={`color:${colour};`}>{label}</span>
+                      {i.instanceId && i.status !== 'catalog' && (
+                        <span style={S.url}>{i.instanceId}{i.state ? ` · ${i.state}` : ''}</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ))}
+
+      <h2 style={S.h2}>Consumes</h2>
+      {consumers.length === 0 ? (
+        <div style={S.empty}>No app declares a dependency on another's interface.</div>
+      ) : (
+        <table style={S.table}>
+          <thead>
+            <tr>
+              <th style={S.th}>APP</th>
+              <th style={S.th}>NEEDS</th>
+              <th style={S.th}>REQUIRED</th>
+              <th style={S.th}>STATUS</th>
+              <th style={S.th}>RESOLVED BY</th>
+            </tr>
+          </thead>
+          <tbody>
+            {consumers.map((c) => {
+              const [label, colourRaw] = statusStyle(c.status);
+              // An unmet OPTIONAL dependency is not a problem — the app said so.
+              const colour = c.status === 'unmet' && !c.need.required
+                ? 'var(--aura-color-text-dim)' : colourRaw;
+              return (
+                <tr>
+                  <td style={S.td}>{c.appId}</td>
+                  <td style={S.td}>
+                    <span style={S.mono}>{c.need.kind}:{c.need.name}</span>
+                    {c.need.appId && <span style={S.dim}> @{c.need.appId}</span>}
+                    {c.need.description && <span style={S.url}>{c.need.description}</span>}
+                  </td>
+                  <td style={S.td}>
+                    <span style={S.dim}>{c.need.required ? 'yes' : 'optional'}</span>
+                  </td>
+                  <td style={S.td}><span style={`color:${colour};`}>{label}</span></td>
+                  <td style={S.td}>
+                    {c.matches.length > 0
+                      ? <span style={S.mono}>{c.matches[0]}</span>
+                      : <span style={S.dim}>—</span>}
+                    {c.matches.length > 1 && <span style={S.url}>+{c.matches.length - 1} more</span>}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
+  </main>
+  <footer class="settings-foot">PROVIDER · /api/interfaces</footer>
+</body>
+</html>

@@ -12,6 +12,7 @@ export * from './app-manager/MountManager.js';
 export * from './app-manager/IntentResolver.js';
 export * from './permissions/index.js';
 export * from './content/index.js';
+export * from './interfaces/index.js';
 export * from './theme/index.js';
 export * from './layout/LayoutStrategyRegistry.js';
 export * from './keymap/index.js';

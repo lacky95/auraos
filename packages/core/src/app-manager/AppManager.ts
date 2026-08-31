@@ -19,6 +19,8 @@ import type { SandboxRunner } from './SandboxRunner.js';
 import { IntentResolver, type Intent, type IntentMatch } from './IntentResolver.js';
 import { PermissionManager } from '../permissions/PermissionManager.js';
 import { ContentProviderRegistry } from '../content/ContentProviderRegistry.js';
+import { InterfaceRegistry } from '../interfaces/InterfaceRegistry.js';
+import type { InterfaceView } from '../interfaces/InterfaceRegistry.js';
 import { keymapRegistry } from '../keymap/KeymapRegistry.js';
 import { ScopeRegistry } from '../scopes/ScopeRegistry.js';
 import type { ScopeDefinition } from '../scopes/types.js';
@@ -50,6 +52,8 @@ export class AppManager {
   readonly permissions: PermissionManager;
   readonly providers:   ContentProviderRegistry;
   readonly intents:     IntentResolver;
+  /** Who provides/consumes which interfaces — catalog + live (see InterfaceRegistry). */
+  readonly interfaces:  InterfaceRegistry;
   /** Cross-app filesystem mounts (container sandboxes only). */
   readonly mounts:      MountManager;
   private dataDir: string;
@@ -112,6 +116,10 @@ export class AppManager {
     this.permissions = new PermissionManager(this.registry);
     this.providers   = new ContentProviderRegistry();
     this.intents     = new IntentResolver();
+    // Reads liveness through the CURRENT instance record: upsertInstance
+    // replaces instance objects on every transition, so a held reference
+    // would go stale immediately.
+    this.interfaces  = new InterfaceRegistry((id) => this.instances.get(id));
     this.mounts      = new MountManager({
       dataDir:       opts.dataDir,
       registry:      this.registry,
@@ -570,8 +578,7 @@ export class AppManager {
     mkdirSync(join(this.dataDir, 'apps'), { recursive: true });
     this.healToolchainShims();
     await this.registry.init();
-    this.intents.reload(this.registry.getAll());
-    keymapRegistry.reloadFromManifests(this.registry.getAll());
+    this.refreshManifestDerived();
     console.log(`[AppManager] Ready. Apps found: ${this.registry.getAll().length}, keymap actions: ${keymapRegistry.list().length}`);
     // Adopt every sibling container that survived the last shell lifetime.
     // Without this, `docker compose restart aura-os` strands every running
@@ -617,6 +624,7 @@ export class AppManager {
           // unrecoverable via `start`/`restart`.
           this.runners.container.onExit(o.instanceId, (code) => this.handleUnexpectedExit(o.instanceId, o.appId, code));
           this.providers.registerInstance(inst, manifest);
+          this.interfaces.registerInstance(inst, manifest);
         } else {
           // Manifest gone (app uninstalled mid-restart). Skip adoption — without
           // a manifest the runner can't build correct lifecycle URLs and the
@@ -944,13 +952,17 @@ export class AppManager {
       this.transition(instanceId, appId, 'resuming', port);
       this.transition(instanceId, appId, 'resumed', port);
 
+      const spawned = this.instances.get(instanceId);
+      // Called unconditionally: InterfaceRegistry applies the warm-pool rule
+      // itself, so it is stated once instead of repeated at all four of its
+      // register call sites.
+      if (spawned) this.interfaces.registerInstance(spawned, manifest);
       // Register content providers ONLY for user-owned instances. If pool
       // members claimed /api/data/<authority>/* routes, multiple pool entries
       // would compete and the route would point at an instance the user
       // doesn't own. Pool claim registers providers after the hand-off.
       if (!opts.inPool) {
-        const live = this.instances.get(instanceId);
-        if (live) this.providers.registerInstance(live, manifest);
+        if (spawned) this.providers.registerInstance(spawned, manifest);
       } else {
         // Pool warm-up: pre-compile the iframe entry point (`/`) so the user's
         // FIRST iframe load after claim doesn't trigger Vite's on-demand compile
@@ -994,7 +1006,10 @@ export class AppManager {
       // time with this id, so renaming would break identity invariants).
       inst.inPool = false;
       const manifest = this.registry.getById(appId);
-      if (manifest) this.providers.registerInstance(inst, manifest);
+      if (manifest) {
+        this.providers.registerInstance(inst, manifest);
+        this.interfaces.registerInstance(inst, manifest);
+      }
       // Informational state-changed event so the Process Manager picks up the
       // newly visible instance (it filters by !inPool, so this is effectively
       // an "appeared" event for that view).
@@ -1055,6 +1070,7 @@ export class AppManager {
 
     // Deregister content providers (so /api/data/<authority> stops resolving)
     this.providers.unregisterInstance(inst, this.registry.getById(appId));
+    this.interfaces.unregisterInstance(inst);
 
     // Close all activities first (purely OS-side cleanup — app's onDestroy will run anyway)
     this.purgeActivitiesOfInstance(instanceId);
@@ -1127,6 +1143,7 @@ export class AppManager {
     const appId = inst.appId;
     const port = this.runnerOf(instanceId).getPort(instanceId);
     this.providers.unregisterInstance(inst, this.registry.getById(appId));
+    this.interfaces.unregisterInstance(inst);
     this.purgeActivitiesOfInstance(instanceId);
     // A force-kill runs no lifecycle hooks, so this is the only chance to
     // detach mounts before the instance record is dropped.
@@ -1206,6 +1223,26 @@ export class AppManager {
     return { host, port };
   }
 
+  /**
+   * Interfaces, with `upstream` filled in. Lives here rather than in the
+   * registry because only AppManager knows the runners — the registry stays a
+   * pure projection with no transport knowledge.
+   */
+  listInterfaces(filter?: Parameters<InterfaceRegistry['list']>[0]): InterfaceView[] {
+    return this.interfaces.list(filter).map((v) => this.withUpstream(v));
+  }
+
+  /** Single best provider for a ref, `upstream` included. */
+  resolveInterface(ref: Parameters<InterfaceRegistry['resolve']>[0]): InterfaceView | null {
+    const view = this.interfaces.resolve(ref);
+    return view ? this.withUpstream(view) : null;
+  }
+
+  private withUpstream(view: InterfaceView): InterfaceView {
+    if (view.status !== 'live' || !view.instanceId) return view;
+    return { ...view, upstream: this.getUpstreamUrl?.(view.instanceId) ?? null };
+  }
+
   getInstancesByApp(appId: string): AppInstance[] {
     return Array.from(this.instances.values()).filter((i) => i.appId === appId);
   }
@@ -1250,6 +1287,7 @@ export class AppManager {
     if (inst.inPool) {
       inst.inPool = false;
       this.providers.registerInstance(inst, manifest);
+      this.interfaces.registerInstance(inst, manifest);
       OsEventBus.emit('app:stateChanged', { instanceId: inst.instanceId, appId: inst.appId, state: inst.state, port: inst.port });
       console.log(`[AppManager] pool: auto-claimed ${inst.instanceId} (activity open on pool member)`);
       this.scheduleRefill(inst.appId);
@@ -1527,10 +1565,30 @@ export class AppManager {
    * picks up the change immediately instead of depending on fs events.
    */
   reloadScopedApp(appId: string): void {
-    this.registry.reloadFromDisk(appId);
-    this.intents.reload(this.registry.getAll());
-    keymapRegistry.reloadFromManifests(this.registry.getAll());
+    this.reloadManifest(appId);
     OsEventBus.emit(this.registry.has(appId) ? 'app:installed' : 'app:removed', { appId });
+  }
+
+  /**
+   * Re-read ONE app's manifest from disk and rebuild every projection derived
+   * from it. Emits nothing — for callers that changed a manifest in place (a
+   * cap grant, a clone) and have no business claiming the app was installed.
+   */
+  reloadManifest(appId: string): void {
+    this.registry.reloadFromDisk(appId);
+    this.refreshManifestDerived();
+  }
+
+  /**
+   * Rebuild everything derived from manifests. One method so the set can never
+   * drift again: these were previously refreshed by hand at two call sites,
+   * and any route that forgot one left it silently stale.
+   */
+  private refreshManifestDerived(): void {
+    const all = this.registry.getAll();
+    this.intents.reload(all);
+    keymapRegistry.reloadFromManifests(all);
+    this.interfaces.reload(all);
   }
 
   getManifests(): AppManifest[] {
@@ -1649,6 +1707,7 @@ export class AppManager {
           this.fsm.set(inst.instanceId, 'error');
           if (releasedPort) this.ports.release(releasedPort);
           this.providers.unregisterInstance(inst, this.registry.getById(inst.appId));
+          this.interfaces.unregisterInstance(inst);
           this.purgeActivitiesOfInstance(inst.instanceId);
           // Also drop the runner-side entry so the ProotRunner doesn't keep a
           // stale ChildProcess reference. If the OS process is somehow still
@@ -1662,10 +1721,27 @@ export class AppManager {
       // Drop long-dead instance entries so they don't pollute proxy lookups.
       const age = Date.now() - inst.lastTransitionAt.getTime();
       if ((inst.state === 'error' || inst.state === 'destroyed') && age > ERROR_GRACE_MS) {
+        // Covers instances that reached 'error' via the spawn catch and so
+        // never passed a normal teardown path.
+        this.interfaces.unregisterInstance(inst);
         this.instances.delete(inst.instanceId);
         this.fsm.delete(inst.instanceId);
         this.nextActivityNum.delete(inst.instanceId);
       }
+    }
+
+    // Force the interface projection back into agreement with the instance
+    // table. Principle: the registry is derived state, so a bug in ANY of the
+    // register/unregister call sites above must not be able to leave a
+    // permanent ghost — at worst it survives one heartbeat.
+    const liveForIfaces = new Map(
+      [...this.instances].map(([id, inst]) => [id, { instance: inst, manifest: this.registry.getById(inst.appId) }]),
+    );
+    const ifaceDelta = this.interfaces.reconcile(liveForIfaces);
+    if (ifaceDelta.dropped > 0 || ifaceDelta.restored > 0) {
+      console.warn(
+        `[AppManager] reconcile: interfaces dropped=${ifaceDelta.dropped} restored=${ifaceDelta.restored}`,
+      );
     }
 
     // 2) Orphan reap: any /proc process whose cmdline points at apps/com.aura.*
@@ -1761,7 +1837,10 @@ export class AppManager {
     const port = this.runnerOf(instanceId).getPort(instanceId);
     if (port) this.ports.release(port);
     const inst = this.instances.get(instanceId);
-    if (inst) this.providers.unregisterInstance(inst, this.registry.getById(appId));
+    if (inst) {
+      this.providers.unregisterInstance(inst, this.registry.getById(appId));
+      this.interfaces.unregisterInstance(inst);
+    }
     this.purgeActivitiesOfInstance(instanceId);
     // A crashed app never runs its onDestroy, so any sibling runtime containers
     // it spawned (with `--restart unless-stopped`) would keep running orphaned.

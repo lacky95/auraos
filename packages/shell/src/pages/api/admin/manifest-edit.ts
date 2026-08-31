@@ -117,7 +117,10 @@ export const POST: APIRoute = async ({ request }) => {
     // request still 403s. Re-reading unconditionally makes this endpoint the
     // way to resync, not just the way to mutate.
     try {
-      mgr.registry.reloadFromDisk(appId);
+      // reloadManifest, not reloadFromDisk: the latter refreshes the manifest
+      // but leaves every projection derived from it (intents, keymaps,
+      // interfaces) stale until a restart.
+      mgr.reloadManifest(appId);
       return json({ ok: true, appId, action, permission: perm, changed, permissions: next, unknown, reloaded: true });
     } catch (err) {
       // The file is written but the running registry still has the old value,
@@ -155,7 +158,10 @@ export const POST: APIRoute = async ({ request }) => {
       // tools dirs — chokidar will eventually fire `change` but the lag
       // between our write and that event means refreshInstanceTools would
       // otherwise use a stale in-memory tools[].
-      mgr.registry.reloadFromDisk(appId);
+      // reloadManifest, not reloadFromDisk: the latter refreshes the manifest
+      // but leaves every projection derived from it (intents, keymaps,
+      // interfaces) stale until a restart.
+      mgr.reloadManifest(appId);
       const refreshed = mgr.refreshInstanceTools(appId);
       return json({ ok: true, appId, action, tool, changed, tools: nextTools, refreshed });
     } catch (err) {

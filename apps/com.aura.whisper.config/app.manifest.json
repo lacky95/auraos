@@ -11,13 +11,22 @@
   "sandbox": "proot",
   "runtime": "raw",
   "entrypoint": "entrypoint.sh",
-  "tools": ["bash", "node"],
-  "permissions": ["network.internet"],
+  "tools": [
+    "bash",
+    "node"
+  ],
+  "permissions": [
+    "network.internet"
+  ],
   "intentFilters": [
     {
       "action": "aura.intent.action.CONFIGURE",
-      "category": ["aura.intent.category.SETTINGS"],
-      "extras": { "appId": "com.aura.whisper" },
+      "category": [
+        "aura.intent.category.SETTINGS"
+      ],
+      "extras": {
+        "appId": "com.aura.whisper"
+      },
       "priority": 0
     }
   ],
@@ -27,5 +36,13 @@
     "injectMeta": true,
     "injectConsoleRelay": true,
     "injectKeyForwarder": true
-  }
+  },
+  "consumes": [
+    {
+      "name": "config",
+      "kind": "rest",
+      "appId": "com.aura.whisper",
+      "description": "The service's configuration API \u2014 this app is its UI."
+    }
+  ]
 }

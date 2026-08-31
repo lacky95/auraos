@@ -332,7 +332,9 @@ export const POST: APIRoute = async ({ request }) => {
     // chokidar picks the new dir up on its own within ~100 ms, but a CLI that
     // immediately runs `aura app start` would race it. Reload explicitly, the
     // same way /api/admin/manifest-edit does after a direct file write.
-    try { mgr.registry.reloadFromDisk(targetAppId); } catch { /* watcher will reconcile */ }
+    // reloadManifest also rebuilds the manifest-derived projections (intents,
+    // keymaps, interfaces); reloadFromDisk alone would leave them stale.
+    try { mgr.reloadManifest(targetAppId); } catch { /* watcher will reconcile */ }
 
     return json({
       ok: true, sourceAppId, sourceScope, targetAppId, scope: targetScopeId,

@@ -12,8 +12,16 @@
   "runtime": "raw",
   "entrypoint": "entrypoint.sh",
   "autoStart": true,
-  "tools": ["bash", "node", "docker"],
-  "permissions": ["storage.read", "storage.write", "network.internet"],
+  "tools": [
+    "bash",
+    "node",
+    "docker"
+  ],
+  "permissions": [
+    "storage.read",
+    "storage.write",
+    "network.internet"
+  ],
   "proxy": {
     "rewriteHtml": "none",
     "preservePrefix": false,
@@ -21,5 +29,25 @@
     "injectConsoleRelay": false,
     "injectKeyForwarder": false,
     "injectIdentityScript": false
-  }
+  },
+  "provides": [
+    {
+      "name": "transcribe",
+      "kind": "rest",
+      "address": "/api/transcribe",
+      "description": "POST multipart audio \u2192 text. Forwards to the faster-whisper sibling."
+    },
+    {
+      "name": "config",
+      "kind": "rest",
+      "address": "/api/config",
+      "description": "Read/write the service's model + prompt configuration."
+    },
+    {
+      "name": "status",
+      "kind": "rest",
+      "address": "/api/status",
+      "description": "Readiness of the whisper + litellm sibling containers."
+    }
+  ]
 }
