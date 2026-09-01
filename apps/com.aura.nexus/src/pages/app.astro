@@ -147,25 +147,36 @@ const shots          = entry?.screenshots ?? [];
     if (btn) {
       const ref  = btn.getAttribute('data-ref');
       const name = btn.getAttribute('data-name') || ref;
-      // One click installs — the explicit INSTALL click is the consent.
+      // A click starts the install; it is not consent to a permission list the
+      // user never saw. auraInstall() (layout) shows the server-computed diff
+      // and only proceeds once it is approved.
+      const reset = () => {
+        btn.dataset.busyUntil = '0'; btn.dataset.state = 'install';
+        btn.disabled = false; btn.textContent = 'INSTALL';
+      };
       btn.addEventListener('click', async () => {
         if (btn.dataset.state !== 'install' || btn.disabled) return;
-        btn.dataset.busyUntil = String(Date.now() + 6000);
-        btn.dataset.state = 'installing'; btn.disabled = true; btn.textContent = 'INSTALLING…';
-        show('installing ' + ref + '…');
+        // No optimistic window until the dialog is answered — it would expire
+        // while the user is still reading.
+        btn.disabled = true; btn.textContent = 'REVIEWING…';
+        show('checking what ' + ref + ' asks for…');
         try {
-          const res = await fetch('/api/nexus/install', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ref, autoApprove: true }),
+          const json = await window.auraInstall(ref, {
+            name: name,
+            onApproved: () => {
+              btn.dataset.busyUntil = String(Date.now() + 6000);
+              btn.dataset.state = 'installing'; btn.textContent = 'INSTALLING…';
+              show('installing ' + ref + '…');
+            },
           });
-          const json = await res.json();
-          if (!json.ok) { show('ERROR: ' + (json.error || res.status), 'err'); btn.dataset.busyUntil = '0'; btn.dataset.state = 'install'; btn.disabled = false; btn.textContent = 'INSTALL'; return; }
+          if (json.cancelled) { show('cancelled — nothing was installed'); reset(); return; }
+          if (!json.ok) { show('ERROR: ' + (json.error || 'install failed'), 'err'); reset(); return; }
           show('✓ installed ' + json.record.id + ' v' + json.record.version + ' — scope: ' + (json.record.scope || 'global'), 'ok');
           btn.dataset.busyUntil = '0';
           syncNow();
         } catch (err) {
           show('ERROR: ' + (err && err.message ? err.message : err), 'err');
-          btn.dataset.busyUntil = '0'; btn.dataset.state = 'install'; btn.disabled = false; btn.textContent = 'INSTALL';
+          reset();
         }
       });
     }

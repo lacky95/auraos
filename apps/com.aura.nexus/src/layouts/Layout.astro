@@ -350,6 +350,242 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
       .diff-add    { color: var(--aura-color-warning); }
       .diff-remove { color: var(--aura-color-text-dim); }
       .diff-info   { color: var(--aura-color-info, var(--aura-color-primary)); }
+      /* ── permission approval ──────────────────────────────────────────
+         Installing grants tools and permissions to code the user has not
+         read. The OS computes the diff server-side already and the CLI
+         shows it; this is the same information for the GUI, so a one-click
+         install stops being a blind grant. */
+      .perm-overlay {
+        position: fixed; inset: 0; z-index: 100;
+        display: flex; align-items: center; justify-content: center;
+        padding: 20px;
+        background: color-mix(in srgb, var(--aura-color-bg) 88%, transparent);
+      }
+      .perm-overlay[hidden] { display: none; }
+      .perm-dialog {
+        width: min(560px, 100%);
+        max-height: 86vh; overflow-y: auto;
+        background: var(--aura-color-surface);
+        border: 1px solid var(--aura-color-primary);
+        box-shadow: var(--aura-glow-primary);
+        padding: 18px 20px;
+      }
+      .perm-title {
+        margin: 0 0 4px; font-size: 0.95rem; letter-spacing: 0.06em;
+        text-transform: uppercase; color: var(--aura-color-primary);
+      }
+      .perm-sub { margin: 0 0 14px; font-size: 0.78rem; color: var(--aura-color-text-dim); }
+      .perm-group { margin-bottom: 12px; }
+      .perm-group-label {
+        font-size: 0.7rem; letter-spacing: 0.16em; text-transform: uppercase;
+        color: var(--aura-color-text-dim); margin-bottom: 5px;
+      }
+      .perm-list { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 6px; }
+      .perm-item {
+        font-size: 0.78rem; padding: 3px 8px;
+        border: 1px solid var(--aura-color-border);
+      }
+      /* A tool that is effectively root on the host should not look like a
+         tool that lets the app read a file. */
+      .perm-item.is-danger {
+        color: var(--aura-color-danger);
+        border-color: var(--aura-color-danger);
+      }
+      .perm-warn {
+        margin: 12px 0 0; padding: 9px 11px; font-size: 0.76rem; line-height: 1.5;
+        color: var(--aura-color-danger);
+        border: 1px solid var(--aura-color-danger);
+      }
+      .perm-none { font-size: 0.8rem; color: var(--aura-color-text-dim); }
+      .perm-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
+      .perm-actions .perm-ok { color: var(--aura-color-bg); background: var(--aura-color-primary); border-color: var(--aura-color-primary); }
+      .perm-actions .perm-ok:hover { box-shadow: var(--aura-glow-primary); }
     </style>
+
+    <!-- Permission approval. One dialog for every page that can install; the
+         pages call `auraInstall()` rather than POSTing /api/nexus/install
+         themselves, so none of them can skip the diff by accident. -->
+    <div class="perm-overlay" data-perm-overlay hidden>
+      <div class="perm-dialog" role="dialog" aria-modal="true" aria-labelledby="perm-title">
+        <h2 class="perm-title" id="perm-title" data-perm-title>Review permissions</h2>
+        <p class="perm-sub" data-perm-sub></p>
+        <div data-perm-body></div>
+        <div class="perm-actions">
+          <button type="button" data-perm-cancel>Cancel</button>
+          <button type="button" class="perm-ok" data-perm-ok>Install</button>
+        </div>
+      </div>
+    </div>
+
+    <script is:inline>
+      /* Install with informed consent.
+       *
+       * The server already computes a PermissionDiff and refuses to proceed
+       * without approval unless `autoApprove` is passed — the CLI has always
+       * honoured that. The GUI used to pass autoApprove:true on every install,
+       * so a click granted every tool and permission an app declared without
+       * ever naming them. `docker` in an app's tools[] is host root via the
+       * socket; that is not something to hand over silently.
+       *
+       * Flow: install without autoApprove → if the server asks for approval,
+       * show the diff → on approve, install again with autoApprove.
+       */
+      (function () {
+        var overlay = document.querySelector('[data-perm-overlay]');
+        if (!overlay) return;
+        var titleEl  = overlay.querySelector('[data-perm-title]');
+        var subEl    = overlay.querySelector('[data-perm-sub]');
+        var bodyEl   = overlay.querySelector('[data-perm-body]');
+        var okBtn    = overlay.querySelector('[data-perm-ok]');
+        var cancelBtn= overlay.querySelector('[data-perm-cancel]');
+        var resolver = null;
+        var opener   = null;
+
+        /* Tools that are not really "a tool" — they hand over the host. Kept in
+         * step with the store's own RISKY_TOOLS. */
+        var DANGEROUS = { 'docker': 1, '*': 1 };
+
+        function group(label, items, cls) {
+          if (!items || !items.length) return null;
+          var wrap = document.createElement('div');
+          wrap.className = 'perm-group';
+          var lab = document.createElement('div');
+          lab.className = 'perm-group-label';
+          lab.textContent = label;
+          var ul = document.createElement('ul');
+          ul.className = 'perm-list';
+          items.forEach(function (t) {
+            var li = document.createElement('li');
+            li.className = 'perm-item ' + (cls || '') + (DANGEROUS[t] ? ' is-danger' : '');
+            li.textContent = t;
+            ul.appendChild(li);
+          });
+          wrap.appendChild(lab); wrap.appendChild(ul);
+          return wrap;
+        }
+
+        function render(diff, name) {
+          titleEl.textContent = (diff.versionFrom ? 'Update' : 'Install') + ' ' + (name || diff.appId);
+          subEl.textContent = diff.versionFrom
+            ? diff.appId + '  v' + diff.versionFrom + ' → v' + diff.versionTo
+            : diff.appId + '  v' + diff.versionTo;
+
+          bodyEl.textContent = '';
+          var added = [
+            group('Tools it will gain', diff.toolsAdded, 'diff-add'),
+            group('Permissions it will gain', diff.permissionsAdded, 'diff-add'),
+            group('New intent filters', diff.intentFiltersAdded, 'diff-info'),
+            group('Tools it gives up', diff.toolsRemoved, 'diff-remove'),
+            group('Permissions it gives up', diff.permissionsRemoved, 'diff-remove'),
+          ].filter(Boolean);
+
+          if (diff.dataProviderAdded) {
+            var dp = document.createElement('div');
+            dp.className = 'perm-group';
+            var dl = document.createElement('div');
+            dl.className = 'perm-group-label';
+            dl.textContent = 'Data provider';
+            var dv = document.createElement('div');
+            dv.className = 'perm-item diff-add';
+            dv.textContent = 'exposes data other apps can read';
+            dp.appendChild(dl); dp.appendChild(dv);
+            added.push(dp);
+          }
+
+          if (!added.length) {
+            var none = document.createElement('p');
+            none.className = 'perm-none';
+            none.textContent = 'No new tools or permissions.';
+            bodyEl.appendChild(none);
+          } else {
+            added.forEach(function (n) { bodyEl.appendChild(n); });
+          }
+
+          var risky = (diff.toolsAdded || []).filter(function (t) { return DANGEROUS[t]; });
+          if (risky.length) {
+            var w = document.createElement('p');
+            w.className = 'perm-warn';
+            w.textContent = risky.indexOf('docker') >= 0
+              ? '⚠ `docker` grants control of the container runtime — effectively root on the host.'
+              : '⚠ `*` grants every tool the OS can provide.';
+            bodyEl.appendChild(w);
+          }
+        }
+
+        function close(result) {
+          overlay.hidden = true;
+          if (opener && opener.focus) opener.focus();
+          opener = null;
+          var r = resolver; resolver = null;
+          if (r) r(result);
+        }
+        okBtn.addEventListener('click', function () { close(true); });
+        cancelBtn.addEventListener('click', function () { close(false); });
+        overlay.addEventListener('click', function (ev) { if (ev.target === overlay) close(false); });
+        document.addEventListener('keydown', function (ev) {
+          if (overlay.hidden) return;
+          if (ev.key === 'Escape') { ev.preventDefault(); close(false); }
+        });
+
+        function ask(diff, name) {
+          render(diff, name);
+          opener = document.activeElement;
+          overlay.hidden = false;
+          okBtn.focus();
+          return new Promise(function (res) { resolver = res; });
+        }
+
+        /** Update an installed app, asking for approval when the server
+         *  requires it. Same contract as install: the route returns
+         *  { needsApproval, diff } unless autoApprove is passed. */
+        window.auraUpdate = async function (id, opts) {
+          opts = opts || {};
+          var url = '/api/nexus/update/' + encodeURIComponent(id);
+          var post = function (auto) {
+            return fetch(url, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(auto ? { autoApprove: true } : {}),
+            }).then(function (r) { return r.json().catch(function () { return {}; }); });
+          };
+          var json = await post(false);
+          if (json.ok) return json;
+          if (!json.needsApproval) return { error: json.error || 'nothing to update' };
+          var approved = await ask(json.diff, opts.name);
+          if (!approved) return { cancelled: true };
+          if (opts.onApproved) opts.onApproved();
+          var json2 = await post(true);
+          return json2.ok ? json2 : { error: json2.error || 'update failed' };
+        };
+
+        /** Install `ref`, asking for approval when the server requires it.
+         *  Resolves { ok, record } | { cancelled: true } | { error }. */
+        window.auraInstall = async function (ref, opts) {
+          opts = opts || {};
+          var body = { ref: ref };
+          if (opts.scope) body.scope = opts.scope;
+
+          var res  = await fetch('/api/nexus/install', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          var json = await res.json();
+
+          if (json.ok) return json;
+          if (!json.needsApproval) return { error: json.error || ('HTTP ' + res.status) };
+
+          var approved = await ask(json.diff, opts.name);
+          if (!approved) return { cancelled: true };
+          if (opts.onApproved) opts.onApproved();
+
+          body.autoApprove = true;
+          var res2  = await fetch('/api/nexus/install', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          var json2 = await res2.json();
+          return json2.ok ? json2 : { error: json2.error || ('HTTP ' + res2.status) };
+        };
+      })();
+    </script>
   </body>
 </html>

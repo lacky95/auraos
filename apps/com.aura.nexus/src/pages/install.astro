@@ -89,28 +89,17 @@ const initialRef = new URL(Astro.request.url).searchParams.get('ref') ?? '';
       installB.textContent = '...';
       setLog('installing ' + ref + '...');
       try {
-        // First call: no autoApprove. May return needsApproval + diff.
-        let res = await fetch('/api/nexus/install', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ref, autoApprove: false }),
+        // This tab always asked for approval, but through a native confirm(),
+        // which is unreliable inside the shell's app iframe — the very reason
+        // the other tabs gave for skipping the prompt entirely. auraInstall()
+        // uses the in-page dialog instead, so all four install paths share one
+        // review that actually renders.
+        const json = await window.auraInstall(ref, {
+          name: ref,
+          onApproved: () => setLog('approved; installing...'),
         });
-        let json = await res.json();
-        if (json.needsApproval && json.diff) {
-          appendLog('\n--- PERMISSION REVIEW ---\n' + renderDiff(json.diff));
-          if (!confirm('Approve and install?\n\n' + renderDiff(json.diff))) {
-            setLog('install cancelled');
-            return;
-          }
-          setLog('approved; installing...');
-          res = await fetch('/api/nexus/install', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ref, autoApprove: true }),
-          });
-          json = await res.json();
-        }
-        if (!json.ok) { appendLog('\nERROR: ' + (json.error || res.status)); return; }
+        if (json.cancelled) { setLog('install cancelled'); return; }
+        if (!json.ok) { appendLog('\nERROR: ' + (json.error || 'install failed')); return; }
         appendLog('\ninstalled ' + json.record.id + ' v' + json.record.version);
         appendLog('  source:  ' + json.record.source);
         if (json.record.digest) appendLog('  digest:  ' + json.record.digest.slice(0, 16));

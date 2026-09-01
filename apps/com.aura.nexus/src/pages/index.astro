@@ -102,15 +102,13 @@ const degraded = (doc.sources ?? []).filter((s) => !s.ok);
   )}
 
   <script is:inline>
-    // One-click install: the explicit INSTALL click is the consent, so we pass
-    // autoApprove and skip a separate approval step (native confirm() is
-    // unreliable inside the OS app iframe anyway).
-    async function postInstall(ref, auto) {
-      const res = await fetch('/api/nexus/install', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ref, autoApprove: auto }),
-      });
-      return { res, json: await res.json() };
+    // Installing grants tools and permissions to code the user has not read,
+    // so it goes through auraInstall() (defined in the layout), which shows the
+    // server-computed permission diff and only proceeds once it is approved.
+    // A click is consent to *begin*; it cannot be consent to a list nobody saw.
+    async function postInstall(ref, name, onApproved) {
+      const json = await window.auraInstall(ref, { name: name, onApproved: onApproved });
+      return { json };
     }
 
     // Apply the server's truth to one button. `st` = { installing:[], installed:{id:ver} }.
@@ -149,18 +147,30 @@ const degraded = (doc.sources ?? []).filter((s) => !s.ok);
       const card = btn.closest('.nexus-card');
       const fb   = card ? card.querySelector('.install-feedback') : null;
       const show = (t, cls) => { if (!fb) return; fb.hidden = false; fb.className = 'install-feedback' + (cls ? ' ' + cls : ''); fb.textContent = t; };
-      btn.dataset.busyUntil = String(Date.now() + 6000);   // optimistic window; poller wins after
-      btn.dataset.state = 'installing'; btn.disabled = true; btn.textContent = 'INSTALLING…';
-      show('installing ' + ref + '…');
+      const name = btn.getAttribute('data-name') || ref;
+      const reset = () => {
+        btn.dataset.busyUntil = '0'; btn.dataset.state = 'install';
+        btn.disabled = false; btn.textContent = 'INSTALL';
+      };
+      // No optimistic window yet: the permission dialog may be up for a while,
+      // and a 6s timer started here would expire mid-read and let the poller
+      // flip the button back underneath the user.
+      btn.disabled = true; btn.textContent = 'REVIEWING…';
+      show('checking what ' + ref + ' asks for…');
       try {
-        const r = await postInstall(ref, true);
-        if (!r.json.ok) { show('ERROR: ' + (r.json.error || r.res.status), 'err'); btn.dataset.busyUntil = '0'; btn.dataset.state = 'install'; btn.disabled = false; btn.textContent = 'INSTALL'; return; }
+        const r = await postInstall(ref, name, () => {
+          btn.dataset.busyUntil = String(Date.now() + 6000);   // optimistic window; poller wins after
+          btn.dataset.state = 'installing'; btn.textContent = 'INSTALLING…';
+          show('installing ' + ref + '…');
+        });
+        if (r.json.cancelled) { show('cancelled — nothing was installed'); reset(); return; }
+        if (!r.json.ok) { show('ERROR: ' + (r.json.error || 'install failed'), 'err'); reset(); return; }
         show('✓ installed v' + r.json.record.version + ' — scope: ' + (r.json.record.scope || 'global'), 'ok');
         btn.dataset.busyUntil = '0';
         syncNow();   // reflect the new INSTALLED state immediately
       } catch (err) {
         show('ERROR: ' + (err && err.message ? err.message : err), 'err');
-        btn.dataset.busyUntil = '0'; btn.dataset.state = 'install'; btn.disabled = false; btn.textContent = 'INSTALL';
+        reset();
       }
     });
 

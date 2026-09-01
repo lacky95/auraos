@@ -126,14 +126,17 @@ try {
       const id   = btn.getAttribute('data-app-id');
       const card = btn.closest('.nexus-card');
       btn.addEventListener('click', async () => {
-        btn.disabled = true; btn.textContent = 'UPDATING…';
-        feedback(card, 'updating ' + id + '…');
+        // An update can ask for MORE than the installed version had — a new
+        // tool, a new permission, a data provider. Showing that diff is the
+        // whole point: the user already trusted v1, not necessarily v2.
+        btn.disabled = true; btn.textContent = 'CHECKING…';
+        feedback(card, 'checking what the update asks for…');
         try {
-          const res = await fetch('/api/nexus/update/' + encodeURIComponent(id), {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ autoApprove: true }),
+          const j = await window.auraUpdate(id, {
+            name: id,
+            onApproved: () => { btn.textContent = 'UPDATING…'; feedback(card, 'updating ' + id + '…'); },
           });
-          const j = await res.json().catch(() => ({}));
+          if (j.cancelled) { feedback(card, 'cancelled — nothing was updated'); btn.disabled = false; btn.textContent = 'UPDATE'; return; }
           if (j.ok) { feedback(card, '✓ updated to v' + (j.record ? j.record.version : '?'), 'ok'); setTimeout(() => location.reload(), 700); }
           else { feedback(card, 'update: ' + (j.error || 'nothing to update'), 'err'); btn.disabled = false; btn.textContent = 'UPDATE'; }
         } catch (err) {
