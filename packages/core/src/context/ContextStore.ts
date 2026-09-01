@@ -61,11 +61,23 @@ export interface ContextEntry {
   value: string | null;
 }
 
-/** Normalise an arbitrary inject value to a valid, deduped, non-empty set. */
+/**
+ * Normalise an arbitrary inject value to a valid, deduped set.
+ *
+ * An EMPTY array is meaningful and is preserved: "sealed in the KV, injected
+ * nowhere" — an OS-only credential. That matters because both targets are
+ * broadcast: `env` hands the value to every app container at spawn, and `file`
+ * materialises it into `/run/context`, which every app container mounts. A
+ * credential the OS needs but apps must not see (a GitHub token used to open a
+ * store pull request, say) has no safe home under the old behaviour, where an
+ * empty selection silently widened to both.
+ *
+ * A NON-array (legacy rows written before `inject` existed) still defaults to
+ * every target, so existing entries keep behaving exactly as before.
+ */
 export function normaliseInject(raw: unknown): InjectTarget[] {
   if (!Array.isArray(raw)) return [...ALL_TARGETS];
-  const set = ALL_TARGETS.filter((t) => raw.includes(t));
-  return set.length ? set : [...ALL_TARGETS];
+  return ALL_TARGETS.filter((t) => raw.includes(t));
 }
 
 export class ContextStore {

@@ -5,6 +5,8 @@ export { validateStagedDir, NexusValidationError } from './Validator.js';
 export { Resolver } from './Resolver.js';
 export { IndexClient } from './IndexClient.js';
 export * from './StoreEntry.js';
+export * from './GitHubClient.js';
+export * from './StoreSubmitter.js';
 export { DEFAULT_INDEX, seedIndex } from './defaultIndex.js';
 export { Installer } from './Installer.js';
 export { NexusManager } from './NexusManager.js';

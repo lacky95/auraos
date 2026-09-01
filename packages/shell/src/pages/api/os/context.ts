@@ -39,11 +39,13 @@ export const POST: APIRoute = async ({ request }) => {
   if (kind === null) {
     return errorResponse(`invalid kind '${String(body.kind)}' — must be "secret" or "variable"`, 422);
   }
-  // An explicit but empty inject array means "inject nowhere" — reject it as a
-  // likely mistake (normaliseInject would otherwise silently default to both).
-  if (Array.isArray(body.inject) && body.inject.length === 0) {
-    return errorResponse('inject must select at least one of "env" / "file"', 422);
-  }
+  // An explicit but empty inject array means "inject nowhere": sealed in the
+  // KV, handed to no app. This used to be rejected as a likely mistake, but it
+  // is the only safe shape for an OS-level credential — both targets are
+  // broadcast (`env` at every app spawn, `file` via /run/context in every app
+  // container), so without it a token the OS needs would also reach every
+  // installed app. `normaliseInject` preserves an empty array; a non-array
+  // still defaults to both, so existing entries are unaffected.
   const inject = normaliseInject(body.inject);
   try {
     const entry = await new ContextStore().set(body.key, body.value, kind, inject);

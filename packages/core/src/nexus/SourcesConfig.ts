@@ -52,6 +52,14 @@ export interface GitIndexSource extends SourceCommon {
   url:  string;
   /** Branch/tag/commit for the clone; default remote HEAD. */
   ref?: string;
+  /**
+   * The REPOSITORY behind the index, as `owner/repo`, when submissions are
+   * accepted by pull request. `url` names the artifact a client fetches; this
+   * names the place a new entry is proposed, which is a different thing — the
+   * official index is served from a static host, not from the repo that
+   * generates it. Optional: an index can be published with no submission path.
+   */
+  repo?: string;
 }
 
 /** Snapshot of a git-app's manifest, captured at registration + refresh so
@@ -85,6 +93,11 @@ export interface SourcesConfig {
 /** The official AuraOS store — a curated index, published from
  *  github.com/lacky95/auraos-store and served as static files. */
 export const OFFICIAL_INDEX_URL = 'https://nexus.aura.lakner.io/index.yaml';
+
+/** The repository behind that index — where `aura nexus app submit` opens its
+ *  pull request. Separate constant because the index URL is a static host and
+ *  says nothing about where submissions go. */
+export const OFFICIAL_STORE_REPO = 'lacky95/auraos-store';
 export const DEFAULT_SOURCES_CONFIG: SourcesConfig = {
   schema: 1,
   sources: [
@@ -95,7 +108,7 @@ export const DEFAULT_SOURCES_CONFIG: SourcesConfig = {
     // The URL ends in .yaml deliberately: CatalogAggregator.loadGitIndexDoc
     // matches /\.ya?ml$/i and fetches it directly, instead of cloning the repo
     // behind it on every aggregation.
-    { kind: 'git-index', name: 'official', url: OFFICIAL_INDEX_URL, priority: 10 },
+    { kind: 'git-index', name: 'official', url: OFFICIAL_INDEX_URL, repo: OFFICIAL_STORE_REPO, priority: 10 },
   ],
 };
 
