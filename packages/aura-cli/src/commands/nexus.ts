@@ -125,6 +125,12 @@ export function registerNexus(program: Command): void {
   wirePublish(app);                       // aura nexus app publish
   wirePublish(nexus, { hidden: true });   // aura nexus publish (legacy alias)
 
+  // ── app submit (open a store PR) ──────────────────────────────────────────
+  wireSubmit(app);
+
+  // ── store credentials ─────────────────────────────────────────────────────
+  wireStore(nexus);
+
   // ── app install / update / uninstall / list / info ────────────────────────
   wireInstall(app);
   wireInstall(nexus, { hidden: true });
@@ -158,9 +164,14 @@ function wirePublish(parent: Command, opts: { hidden?: boolean } = {}): void {
     .option('--channel <name>',  'channel label (extra tag pushed alongside)')
     .option('--branch <name>',   'git branch (default main)')
     .option('-y, --yes',         'skip the wizard; publish with resolved defaults')
+    .option('--submit',          'after publishing, open a pull request listing the app in the store')
+    .option('--store-repo <slug>', 'store index repo to submit to (owner/repo)')
+    .option('--category <slug>',   'store category, when the manifest category has no store equivalent')
+    .option('--accept-policy',     'attest namespace ownership + that you have read POLICY.md')
     .action(async (path: string | undefined, o: {
       to?: string; kind?: string; source?: string; repo?: string; registry?: string;
       tag?: string; channel?: string; branch?: string; yes?: boolean;
+      submit?: boolean; storeRepo?: string; category?: string; acceptPolicy?: boolean;
     }) => {
       const appPath = resolve(path ?? '.');
       if (!existsSync(appPath) || !statSync(appPath).isDirectory()) {
@@ -178,12 +189,15 @@ function wirePublish(parent: Command, opts: { hidden?: boolean } = {}): void {
 
       const hasDest = !!(kind || toTarget);
       const interactive = !hasDest && !o.yes && !!process.stdin.isTTY;
+      // Set by the wizard's submit step; --submit is the non-interactive form.
+      let wantSubmit = false;
 
       if (interactive) {
         try {
           const plan = await runPublishWizard(appPath, manifest);
           if (!plan) { info('publish cancelled'); return; }
           kind = plan.kind; toTarget = plan.to; tag = plan.tag; channel = plan.channel;
+          wantSubmit = plan.submit === true;
         } catch (err) {
           if (err instanceof PromptCancelled) { info('publish cancelled'); return; }
           throw err;
@@ -213,6 +227,21 @@ function wirePublish(parent: Command, opts: { hidden?: boolean } = {}): void {
       if (!res.ok || !res.result) fail(res.error ?? 'publish failed');
       for (const m of res.messages ?? []) info(`  ${m}`);
       ok(`published ${color.cyan(res.result!.ref)}`);
+
+      if (o.submit || wantSubmit) {
+        const r = res.result as PublishResult;
+        await runSubmit({
+          manifest,
+          source: kind === 'git'
+            ? { kind: 'git', ref: r.repoUrl ?? r.ref, defaultBranch: o.branch ?? 'main' }
+            : { kind: 'oci', ref: r.ref },
+          channel: channel ?? 'stable',
+          tag:     tag ?? (kind === 'oci' ? manifest.version : `v${manifest.version}`),
+          storeRepo:    o.storeRepo,
+          category:     o.category,
+          acceptPolicy: o.acceptPolicy || wantSubmit,
+        });
+      }
       if (kind === 'oci') {
         info(`  it will appear in the Nexus store — browse it or run ${color.cyan('aura nexus search --refresh')}`);
         info(`  install elsewhere: ${color.cyan(`aura nexus app install ${manifest.id}`)}`);
@@ -222,18 +251,19 @@ function wirePublish(parent: Command, opts: { hidden?: boolean } = {}): void {
     });
 }
 
-interface PublishPlan { kind: 'oci' | 'git'; to: string; tag: string; channel?: string; }
+interface PublishPlan { kind: 'oci' | 'git'; to: string; tag: string; channel?: string; submit?: boolean; }
 
 /** Interactive publish wizard. Step machine with ⌃B back navigation, mirroring
  *  `aura dev new`. Returns null when the user declines at confirm. */
 async function runPublishWizard(appPath: string, manifest: LocalManifest): Promise<PublishPlan | null> {
-  type Step = 'kind' | 'target' | 'tag' | 'channel' | 'confirm';
-  const order: Step[] = ['kind', 'target', 'tag', 'channel', 'confirm'];
+  type Step = 'kind' | 'target' | 'tag' | 'channel' | 'submit' | 'confirm';
+  const order: Step[] = ['kind', 'target', 'tag', 'channel', 'submit', 'confirm'];
   let i = 0;
   let kind: 'oci' | 'git' = 'oci';
   let to = '';
   let tag = '';
   let channel: string | undefined;
+  let submit = false;
   const CUSTOM = ' custom';
   const NONE = ' none';
 
@@ -305,6 +335,27 @@ async function runPublishWizard(appPath: string, manifest: LocalManifest): Promi
       continue;
     }
 
+    if (step === 'submit') {
+      // Only worth asking when what we just published is reachable by anyone
+      // else. A local-registry publish is a test, not a release; offering to
+      // list it would be an invitation to open a broken PR.
+      if (isLocalTarget(to)) {
+        info(color.dim(`  (skipping the store step — ${to} is not publicly reachable)`));
+        submit = false;
+        i++;
+        continue;
+      }
+      info('');
+      info('Listing it in the AuraOS store opens a pull request for a maintainer to review.');
+      info(color.dim('  Answering yes attests that you control this app id and have read'));
+      info(color.dim('  https://github.com/lacky95/auraos-store/blob/main/POLICY.md'));
+      const want = await promptConfirm('Submit to the store?', false, { allowBack: true });
+      if (want === BACK) { i--; continue; }
+      submit = want === true;
+      i++;
+      continue;
+    }
+
     // confirm
     reviewStoreMetadata(manifest);
     info('');
@@ -313,12 +364,25 @@ async function runPublishWizard(appPath: string, manifest: LocalManifest): Promi
     info(`  target:   ${to}`);
     info(`  tag:      ${tag}`);
     info(`  channel:  ${channel ?? color.dim('(none)')}`);
+    info(`  submit:   ${submit ? color.cyan('yes — opens a store pull request') : color.dim('no')}`);
     const yes = await promptConfirm('Publish now?', true, { allowBack: true });
     if (yes === BACK) { i--; continue; }
     if (!yes) return null;
-    return { kind, to, tag, channel };
+    return { kind, to, tag, channel, submit };
   }
   return null;
+}
+
+/** True when a publish target only this machine can reach. The store lists
+ *  sources anyone can pull, so submitting one of these would produce an entry
+ *  that resolves for nobody. */
+function isLocalTarget(to: string): boolean {
+  const t = to.trim().toLowerCase();
+  return t === 'local'
+    || t.startsWith('http://')
+    || t.startsWith('localhost')
+    || t.startsWith('127.')
+    || t.includes('aura-com.aura.registry');
 }
 
 /** Print the storefront metadata and warn about anything missing — those
@@ -364,6 +428,180 @@ function readManifestAt(appPath: string): LocalManifest {
 }
 
 // ─── app install ──────────────────────────────────────────────────────────
+// ─── app submit ─────────────────────────────────────────────────────────────
+/** What `/api/nexus/publish` actually returns for a git publish — richer than
+ *  the CLI historically typed. `repoUrl` is what a store entry needs. */
+interface PublishResult { ref: string; repoUrl?: string; tag?: string; installCmd?: string }
+
+interface SubmitArgs {
+  manifest:      LocalManifest;
+  source:        { kind: 'git' | 'oci'; ref: string; defaultBranch?: string };
+  channel:       string;
+  tag:           string;
+  storeRepo?:    string;
+  category?:     string;
+  dryRun?:       boolean;
+  updateMetadata?: boolean;
+  noCodeowners?: boolean;
+  force?:        boolean;
+  acceptPolicy?: boolean;
+}
+
+/** POST the submission and render the outcome. Shared by `app submit` and
+ *  `app publish --submit` so the two cannot drift. */
+async function runSubmit(a: SubmitArgs): Promise<void> {
+  const res = await api.post<{
+    ok: boolean; storeRepo: string; error?: string; hint?: string;
+    messages?: string[];
+    result?: {
+      problems: Array<{ field: string; severity: 'error' | 'warn'; message: string }>;
+      entryYaml: string; change: 'create' | 'update'; branch: string;
+      prUrl?: string; unchanged?: boolean; mode?: 'owner' | 'fork'; diffStat?: string;
+    };
+  }>('/api/nexus/submit', {
+    manifest: a.manifest, source: a.source, channel: a.channel, tag: a.tag,
+    storeRepo: a.storeRepo, category: a.category,
+    dryRun: a.dryRun, updateMetadata: a.updateMetadata,
+    noCodeowners: a.noCodeowners, force: a.force, acceptPolicy: a.acceptPolicy,
+  });
+
+  for (const m of res.messages ?? []) info(`  ${m}`);
+
+  if (!res.ok || !res.result) {
+    if (res.error) console.error(`\n${color.red('✗')} ${res.error}`);
+    if (res.hint)  info(`  ${res.hint}`);
+    fail('submission failed');
+  }
+
+  const r = res.result;
+  for (const p of r.problems.filter((x) => x.severity === 'warn')) {
+    warn(`${p.field}: ${p.message}`);
+  }
+
+  if (r.unchanged) {
+    ok(`${color.cyan(res.storeRepo)} already lists this exact entry — nothing to do`);
+    return;
+  }
+  if (a.dryRun) {
+    info('');
+    info(color.dim(`  would open: ${r.change === 'create' ? 'a new listing' : 'an update'} on branch ${r.branch}`));
+    if (r.diffStat) for (const l of r.diffStat.split('\n')) info(`  ${l}`);
+    info('');
+    for (const l of r.entryYaml.trimEnd().split('\n')) info(color.dim(`  ${l}`));
+    ok('dry run — nothing was pushed');
+    return;
+  }
+  ok(`${r.change === 'create' ? 'submitted' : 'updated'} ${color.cyan(res.storeRepo)} — ${r.prUrl}`);
+  info('  a maintainer reviews and merges it; the index rebuilds on merge.');
+}
+
+function wireSubmit(parent: Command): void {
+  parent
+    .command('submit [path]')
+    .description('Open a pull request listing an already-published app in the store.')
+    .option('--kind <kind>',       'how it was published: git | oci (default: git)')
+    .option('--from <ref>',        'the published source: a git repo or an OCI ref')
+    .option('--tag <tag>',         'the published tag (default: v<version> for git, <version> for oci)')
+    .option('--channel <name>',    'channel the tag belongs to', 'stable')
+    .option('--branch <name>',     'default branch of the source repo', 'main')
+    .option('--store-repo <slug>', 'store index repo (owner/repo)')
+    .option('--category <slug>',   'store category, when the manifest category has no store equivalent')
+    .option('--dry-run',           'show the entry and the diff without touching GitHub')
+    .option('--update-metadata',   'refresh the whole entry, not just the channel tag')
+    .option('--no-codeowners',     'do not claim the entry in CODEOWNERS')
+    .option('--force',             'overwrite a submission branch someone has edited')
+    .option('--accept-policy',     'attest namespace ownership + that you have read POLICY.md')
+    .action(async (path: string | undefined, o: {
+      kind?: string; from?: string; tag?: string; channel: string; branch: string;
+      storeRepo?: string; category?: string; dryRun?: boolean; updateMetadata?: boolean;
+      codeowners?: boolean; force?: boolean; acceptPolicy?: boolean;
+    }) => {
+      const appPath = resolve(path ?? '.');
+      if (!existsSync(appPath) || !statSync(appPath).isDirectory()) fail(`not a directory: ${appPath}`);
+      const manifest = readManifestAt(appPath);
+      info(`app: ${color.cyan(manifest.id)} ${manifest.name} v${manifest.version}`);
+
+      const kind = (o.kind === 'oci' ? 'oci' : 'git') as 'git' | 'oci';
+      // Fall back to what the manifest says it publishes to, then to the app
+      // dir's own origin — the same resolution order publish uses.
+      const from = o.from
+        ?? (kind === 'git' ? (manifest.publish?.repo ?? gitOrigin(appPath)) : manifest.publish?.registry);
+      if (!from) {
+        fail(`no published source — pass --from (e.g. --from github.com/you/repo)`);
+      }
+      const tag = o.tag ?? (kind === 'oci' ? manifest.version : `v${manifest.version}`);
+
+      await runSubmit({
+        manifest,
+        source: { kind, ref: from!, defaultBranch: o.branch },
+        channel: o.channel, tag,
+        storeRepo: o.storeRepo, category: o.category,
+        dryRun: o.dryRun, updateMetadata: o.updateMetadata,
+        noCodeowners: o.codeowners === false,
+        force: o.force, acceptPolicy: o.acceptPolicy,
+      });
+    });
+}
+
+// ─── store credentials ──────────────────────────────────────────────────────
+/** Read all of stdin — used for piping a secret in rather than typing it. */
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const c of process.stdin) chunks.push(c as Buffer);
+  return Buffer.concat(chunks).toString('utf8').trim();
+}
+
+function wireStore(parent: Command): void {
+  const store = parent.command('store').description('Credentials + status for submitting to the app store.');
+
+  store
+    .command('login')
+    .description('Store a GitHub token for store submissions (sealed in Aura Context, injected into no app).')
+    .action(async () => {
+      info('A fine-grained token needs Contents and Pull requests: read and write.');
+      info('If you already use the GitHub CLI, `gh auth login` is enough — no token needed here.');
+      // Read from stdin when piped, the way `gh auth login --with-token` does:
+      // it keeps the value out of shell history, out of argv (where `ps` would
+      // show it) and out of the terminal scrollback.
+      const token = process.stdin.isTTY
+        ? await promptText('GitHub token (input is visible — piping is safer: aura nexus store login < token.txt)')
+        : await readStdin();
+      if (!token) { info('cancelled'); return; }
+      // inject: [] — sealed in the KV and handed to no app container. Both
+      // other targets are broadcast to every app, which is not acceptable for
+      // a credential that can write to repositories.
+      await api.post('/api/os/context', {
+        key: 'GITHUB_TOKEN', value: token, kind: 'secret', inject: [],
+      });
+      ok('stored GITHUB_TOKEN (OS only — not injected into any app)');
+    });
+
+  store
+    .command('status')
+    .description('Show which store submissions target, and whether a token is available.')
+    .action(async () => {
+      const res = await api.get<{
+        storeRepo: string; tokenOrigin: string | null; login: string | null;
+        mode: 'owner' | 'fork' | null; error?: string;
+      }>('/api/nexus/submit');
+      info(`store:  ${color.cyan(res.storeRepo)}`);
+      info(`token:  ${res.tokenOrigin
+        ? `${res.tokenOrigin === 'gh' ? 'gh auth' : 'Aura Context'}`
+        : color.red('none')}`);
+      info(`user:   ${res.login ?? color.dim('—')}`);
+      // owner = can push a branch straight to the store; fork = we open the PR
+      // from a fork of it. Worth surfacing, because it changes what a failure
+      // later on will mean.
+      info(`mode:   ${res.mode === 'owner' ? 'owner (direct branch)'
+        : res.mode === 'fork' ? 'fork (PR from your fork)'
+        : color.dim('—')}`);
+      if (res.error) warn(res.error);
+      if (!res.tokenOrigin) {
+        info('  run `gh auth login`, or `aura nexus store login` to store a token');
+      }
+    });
+}
+
 function wireInstall(parent: Command, opts: { hidden?: boolean } = {}): void {
   parent
     .command('install <ref>', { hidden: opts.hidden })
