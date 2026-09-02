@@ -35,6 +35,9 @@ import {
   type EntryProblem, type StoreEntry, type StoreEntryCtx,
 } from './StoreEntry.js';
 import { GitHubClient, GitHubError, parseRepoSlug } from './GitHubClient.js';
+import {
+  identifyImage, assetPath, assetUrl, isOwnAsset, MAX_SCREENSHOTS,
+} from './StoreAssets.js';
 
 export interface SubmitOpts {
   manifest: AppManifest;
@@ -128,28 +131,8 @@ export async function submitToStore(opts: SubmitOpts): Promise<SubmitResult> {
   }
 
   // ── Phase 1: local clone + index ───────────────────────────────────────
-  const cloneDir = join(opts.dataDir, 'nexus', 'store-submit', `${owner}-${repo}`);
-  const upstream = `https://github.com/${owner}/${repo}.git`;
-
-  if (existsSync(join(cloneDir, '.git'))) {
-    log('refreshing the store clone...');
-    git(cloneDir, ['remote', 'set-url', 'origin', upstream], opts.token);
-    git(cloneDir, ['fetch', 'origin', '--prune'], opts.token);
-  } else {
-    log(`cloning ${owner}/${repo}...`);
-    rmSync(cloneDir, { recursive: true, force: true });
-    mkdirSync(dirname(cloneDir), { recursive: true });
-    git(dirname(cloneDir), ['clone', upstream, cloneDir], opts.token, 180_000);
-  }
-
-  const defaultBranch = git(cloneDir, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], opts.token)
-    .trim().replace(/^origin\//, '') || 'main';
-
   const branch = `nexus/submit/${opts.manifest.id}-v${opts.manifest.version}`;
-  // Always rebuild from upstream, so the branch is fully derived from the
-  // current index. No drift, no conflicts, and a re-run after someone else's
-  // merge does not carry their changes back as a revert.
-  git(cloneDir, ['checkout', '-B', branch, `origin/${defaultBranch}`], opts.token);
+  const { cloneDir } = openClone({ owner, repo, dataDir: opts.dataDir, token: opts.token, branch, log });
 
   const entryPath = join(cloneDir, 'apps', `${opts.manifest.id}.yaml`);
   const existed = existsSync(entryPath);
@@ -175,6 +158,257 @@ export async function submitToStore(opts: SubmitOpts): Promise<SubmitResult> {
     } catch { /* not fatal — a maintainer can add it */ }
   }
 
+  const change: 'create' | 'update' = existed ? 'update' : 'create';
+  const title = change === 'create'
+    ? `Add ${opts.manifest.id}`
+    : `Update ${opts.manifest.id} to ${opts.manifest.version}`;
+
+  const out = await buildAndOpenPr({
+    owner, repo, cloneDir, branch, title,
+    body: () => renderPrBody(opts, entry, problems, change),
+    token: opts.token, dryRun: opts.dryRun, force: opts.force, log,
+    nothingChangedNote: 'the store already lists this exact entry',
+  });
+
+  return { problems, entry, entryYaml, change, branch, ...out };
+}
+
+
+// ─── screenshots ────────────────────────────────────────────────────────────
+
+export interface ScreenshotOpts {
+  appId:     string;
+  action:    'list' | 'add' | 'remove' | 'replace';
+  /** add / replace: a local file path, or an absolute https URL. */
+  source?:   string;
+  /** remove / replace: 1-based position, as printed by `list`. */
+  index?:    number;
+  storeRepo: string;
+  /** The store's index URL — assets are served from its origin. */
+  indexUrl:  string;
+  token?:    string;
+  dataDir:   string;
+  dryRun?:   boolean;
+  force?:    boolean;
+  onMessage?: (m: string) => void;
+}
+
+export interface ScreenshotResult {
+  appId:       string;
+  /** The list AFTER the operation (or the current list, for `list`). */
+  screenshots: string[];
+  /** Set when a local file was uploaded into the store repo. */
+  uploaded?:   { path: string; url: string; bytes: number };
+  /** Set when removing dropped an asset this store was hosting. */
+  deleted?:    string;
+  branch?:     string;
+  prUrl?:      string;
+  unchanged?:  boolean;
+  mode?:       'owner' | 'fork';
+  diffStat?:   string;
+}
+
+/**
+ * Add, replace, remove or list the screenshots on an existing listing.
+ *
+ * Deliberately separate from `submitToStore`: pictures change on their own
+ * schedule, and routing them through a version bump would mean either
+ * re-publishing an app that has not changed, or using --update-metadata and
+ * overwriting a description a maintainer edited during review.
+ *
+ * The PR it opens touches exactly the entry's `screenshots` (plus the image
+ * itself, when one is uploaded), so it is reviewable at a glance.
+ */
+export async function manageScreenshots(opts: ScreenshotOpts): Promise<ScreenshotResult> {
+  const log = (m: string) => opts.onMessage?.(m);
+  const { owner, repo } = parseRepoSlug(opts.storeRepo);
+
+  const branch = `nexus/shots/${opts.appId}`;
+  const { cloneDir } = openClone({
+    owner, repo, dataDir: opts.dataDir, token: opts.token, branch, log,
+  });
+
+  const entryPath = join(cloneDir, 'apps', `${opts.appId}.yaml`);
+  if (!existsSync(entryPath)) {
+    throw new SubmitError(
+      `${opts.appId} is not listed in ${opts.storeRepo}`,
+      'Screenshots attach to an existing listing. Submit the app first with `aura nexus app submit`.',
+    );
+  }
+  const entry = parse(readFileSync(entryPath, 'utf8')) as StoreEntry;
+  const shots: string[] = Array.isArray(entry.screenshots) ? entry.screenshots.slice() : [];
+
+  if (opts.action === 'list') {
+    return { appId: opts.appId, screenshots: shots };
+  }
+
+  // 1-based on the wire because that is what `list` prints; a user typing the
+  // number they can see should not have to subtract one.
+  const at = (opts.index ?? 0) - 1;
+  const needsIndex = opts.action === 'remove' || opts.action === 'replace';
+  if (needsIndex && (at < 0 || at >= shots.length)) {
+    throw new SubmitError(
+      `there is no screenshot ${opts.index} — the listing has ${shots.length}`,
+      'Run `aura nexus app screenshots list` to see the current numbering.',
+    );
+  }
+
+  let uploaded: ScreenshotResult['uploaded'];
+  let deleted: string | undefined;
+
+  /** Resolve `source` to a URL, uploading a local file when that is what it is. */
+  const resolveSource = (): string => {
+    const src = (opts.source ?? '').trim();
+    if (!src) throw new SubmitError('no image given', 'Pass a file path or an https:// URL.');
+    if (/^https:\/\//i.test(src)) return src;
+    if (/^http:\/\//i.test(src)) {
+      throw new SubmitError(`${src} must be https`, 'The store only lists images served over https.');
+    }
+    if (!existsSync(src)) {
+      throw new SubmitError(`no such file: ${src}`,
+        'Pass a path this OS can see, or an https:// URL. Publishing runs inside the '
+        + 'AuraOS container, so a path from your host may not resolve here.');
+    }
+    const buf  = readFileSync(src);
+    const info = identifyImage(buf);           // throws on non-images and oversize
+    const rel  = assetPath(opts.appId, info);
+    const url  = assetUrl(opts.indexUrl, opts.appId, info);
+    const dest = join(cloneDir, rel);
+    mkdirSync(dirname(dest), { recursive: true });
+    writeFileSync(dest, buf);
+    uploaded = { path: rel, url, bytes: info.bytes };
+    log(`  added ${rel} (${(info.bytes / 1024).toFixed(0)} kB) — served at ${url}`);
+    return url;
+  };
+
+  /** Drop an asset file when nothing references it any more. Only ever touches
+   *  images this store hosts; a URL pointing elsewhere is not ours to delete. */
+  const gcAsset = (url: string, keep: string[]) => {
+    if (!isOwnAsset(url, opts.indexUrl, opts.appId)) return;
+    if (keep.includes(url)) return;
+    const rel = url.slice(new URL(opts.indexUrl).origin.length + 1);
+    const abs = join(cloneDir, rel);
+    if (existsSync(abs)) { rmSync(abs); deleted = rel; log(`  removed ${rel}`); }
+  };
+
+  if (opts.action === 'add') {
+    if (shots.length >= MAX_SCREENSHOTS) {
+      throw new SubmitError(
+        `the listing already has ${shots.length} screenshots, the store allows ${MAX_SCREENSHOTS}`,
+        'Remove one first with `aura nexus app screenshots remove <n>`.',
+      );
+    }
+    const url = resolveSource();
+    if (shots.includes(url)) {
+      // Content-addressed names mean re-adding the same picture lands on the
+      // same URL; saying so is better than silently duplicating it.
+      log('  that image is already listed — nothing to do');
+      return { appId: opts.appId, screenshots: shots, unchanged: true };
+    }
+    shots.push(url);
+  } else if (opts.action === 'remove') {
+    const [gone] = shots.splice(at, 1);
+    if (gone) gcAsset(gone, shots);
+  } else {
+    const url = resolveSource();
+    const [gone] = shots.splice(at, 1, url);
+    if (gone) gcAsset(gone, shots);
+  }
+
+  if (shots.length) entry.screenshots = shots;
+  else delete entry.screenshots;
+  writeFileSync(entryPath, renderEntryYaml(entry));
+
+  const verb = opts.action === 'add' ? 'Add a screenshot to'
+    : opts.action === 'remove' ? 'Remove a screenshot from'
+    : 'Replace a screenshot in';
+  const title = `${verb} ${opts.appId}`;
+
+  const out = await buildAndOpenPr({
+    owner, repo, cloneDir, branch, title,
+    body: () => [
+      `## What is this app?`, '',
+      `A screenshot change for \`${opts.appId}\` — no version change, no new code.`, '',
+      '## Checklist', '',
+      `- [x] \`apps/<id>.yaml\` — the filename matches the \`id\``,
+      `- [x] The \`id\` matches the \`id\` in the app's \`app.manifest.json\``,
+      `- [x] \`node scripts/validate.mjs --no-network\` passes (run before this PR was opened)`,
+      `- [x] Screenshots are absolute \`https://\` URLs`,
+      '', '## Capabilities', '',
+      '- None. This changes listing images only; the app, its source and its',
+      '  permissions are untouched.',
+      '', '## Type of change', '', '- [x] Metadata update',
+      '', '---', '',
+      `Screenshots now (${shots.length}):`, '',
+      ...shots.map((u, i) => `${i + 1}. ${u}`),
+      ...(uploaded ? ['', `Uploaded \`${uploaded.path}\` (${(uploaded.bytes / 1024).toFixed(0)} kB).`] : []),
+      ...(deleted ? [`Deleted \`${deleted}\`, no longer referenced.`] : []),
+      '', 'Opened by `aura nexus app screenshots` from AuraOS.',
+    ].join('\n'),
+    token: opts.token, dryRun: opts.dryRun, force: opts.force, log,
+    nothingChangedNote: 'the listing already has exactly these screenshots',
+  });
+
+  return { appId: opts.appId, screenshots: shots, uploaded, deleted, branch, ...out };
+}
+
+/**
+ * Clone the store (or refresh a cached clone) and cut a submission branch.
+ *
+ * The clone is cached under the data dir and reused: re-runs are then a fetch
+ * rather than a full clone, and node_modules stays warm across submissions.
+ * The branch is ALWAYS recut from upstream, so it is fully derived from the
+ * current index — no drift, no conflicts, and a re-run after someone else's
+ * merge cannot carry their changes back as a revert.
+ */
+function openClone(o: {
+  owner: string; repo: string; dataDir: string; token?: string;
+  branch: string; log: (m: string) => void;
+}): { cloneDir: string; defaultBranch: string } {
+  const cloneDir = join(o.dataDir, 'nexus', 'store-submit', `${o.owner}-${o.repo}`);
+  const upstream = `https://github.com/${o.owner}/${o.repo}.git`;
+
+  if (existsSync(join(cloneDir, '.git'))) {
+    o.log('refreshing the store clone...');
+    git(cloneDir, ['remote', 'set-url', 'origin', upstream], o.token);
+    git(cloneDir, ['fetch', 'origin', '--prune'], o.token);
+  } else {
+    o.log(`cloning ${o.owner}/${o.repo}...`);
+    rmSync(cloneDir, { recursive: true, force: true });
+    mkdirSync(dirname(cloneDir), { recursive: true });
+    git(dirname(cloneDir), ['clone', upstream, cloneDir], o.token, 180_000);
+  }
+
+  const defaultBranch = git(cloneDir, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], o.token)
+    .trim().replace(/^origin\//, '') || 'main';
+
+  git(cloneDir, ['checkout', '-B', o.branch, `origin/${defaultBranch}`], o.token);
+  // `checkout -B` does NOT discard uncommitted work, so a cached clone carries
+  // the last run's edits into the next one — a dry run would silently poison
+  // the real run that followed it, which is exactly how this was found. Reset
+  // hard and clean so the branch really is derived from upstream alone.
+  // `clean -fd` without -x deliberately spares ignored paths: node_modules is
+  // the reason the clone is cached at all.
+  git(cloneDir, ['reset', '--hard', `origin/${defaultBranch}`], o.token);
+  git(cloneDir, ['clean', '-fd'], o.token);
+  return { cloneDir, defaultBranch };
+}
+
+/**
+ * Regenerate the index, validate, then commit, push and open or update the PR.
+ *
+ * Shared by every kind of store change, so a screenshot edit and a new listing
+ * cannot drift apart in how they are proposed — same branch discipline, same
+ * fork handling, same idempotency.
+ */
+async function buildAndOpenPr(o: {
+  owner: string; repo: string; cloneDir: string; branch: string;
+  title: string; body: () => string;
+  token?: string; dryRun?: boolean; force?: boolean;
+  log: (m: string) => void; nothingChangedNote: string;
+}): Promise<{ prUrl?: string; unchanged?: boolean; mode?: 'owner' | 'fork'; diffStat?: string }> {
+  const { cloneDir, owner, repo, branch, log } = o;
+
   // The store's own toolchain. `yaml`/`ajv` are devDependencies, so a
   // production-only install would leave the scripts unable to run.
   // --ignore-scripts because this executes code from a repo the caller named.
@@ -192,37 +426,30 @@ export async function submitToStore(opts: SubmitOpts): Promise<SubmitResult> {
   // Self-assert: what CI will run.
   runStoreScript(cloneDir, 'scripts/build-index.mjs', ['--check']);
 
-  git(cloneDir, ['add', '-A'], opts.token);
-  const diffStat = git(cloneDir, ['diff', '--cached', '--stat'], opts.token).trim();
-  const change: 'create' | 'update' = existed ? 'update' : 'create';
+  git(cloneDir, ['add', '-A'], o.token);
+  const diffStat = git(cloneDir, ['diff', '--cached', '--stat'], o.token).trim();
 
   if (!diffStat) {
-    log('nothing changed — the store already lists this exact entry');
-    return { problems, entry, entryYaml, change, branch, unchanged: true };
+    log(`nothing changed — ${o.nothingChangedNote}`);
+    return { unchanged: true };
   }
-
-  if (opts.dryRun) {
+  if (o.dryRun) {
     log('dry run — stopping before GitHub');
-    return { problems, entry, entryYaml, change, branch, diffStat };
+    return { diffStat };
   }
 
-  // ── Phase 2: GitHub ────────────────────────────────────────────────────
-  if (!opts.token) {
+  if (!o.token) {
     throw new SubmitError('a GitHub token is required to open a pull request',
       'Run `gh auth login`, or store one with `aura nexus store login`.');
   }
-  const gh = new GitHubClient(opts.token);
+  const gh = new GitHubClient(o.token);
   const info = await gh.repoInfo(owner, repo);
   const login = await gh.whoami();
   const mode: 'owner' | 'fork' = info.canPush ? 'owner' : 'fork';
   log(`submitting as ${login} (${mode} mode)`);
 
-  const title = change === 'create'
-    ? `Add ${opts.manifest.id}`
-    : `Update ${opts.manifest.id} to ${opts.manifest.version}`;
-
   git(cloneDir, ['-c', 'user.name=AuraOS Nexus', '-c', 'user.email=nexus@aura.local',
-    'commit', '-m', title], opts.token);
+    'commit', '-m', o.title], o.token);
 
   let pushRemote = 'origin';
   if (mode === 'fork') {
@@ -231,38 +458,36 @@ export async function submitToStore(opts: SubmitOpts): Promise<SubmitResult> {
     // Branch from UPSTREAM but push to the fork: a stale fork would otherwise
     // turn the PR into a pile of unrelated reverts.
     const forkUrl = `https://github.com/${login}/${repo}.git`;
-    try { git(cloneDir, ['remote', 'add', 'fork', forkUrl], opts.token); }
-    catch { git(cloneDir, ['remote', 'set-url', 'fork', forkUrl], opts.token); }
+    try { git(cloneDir, ['remote', 'add', 'fork', forkUrl], o.token); }
+    catch { git(cloneDir, ['remote', 'set-url', 'fork', forkUrl], o.token); }
     pushRemote = 'fork';
   }
 
-  log('pushing the submission branch...');
+  log('pushing the branch...');
   try {
     git(cloneDir, ['push', '--force-with-lease', pushRemote, `HEAD:refs/heads/${branch}`],
-      opts.token, 180_000);
+      o.token, 180_000);
   } catch (err) {
     const msg = String((err as { stderr?: Buffer }).stderr ?? (err as Error).message);
-    if (!opts.force && /stale info|rejected/i.test(msg)) {
+    if (!o.force && /stale info|rejected/i.test(msg)) {
       throw new SubmitError(
-        `the submission branch ${branch} has been modified on the remote`,
-        'Someone edited it after the last submit. Re-run with --force to overwrite it.',
+        `the branch ${branch} has been modified on the remote`,
+        'Someone edited it after the last run. Re-run with --force to overwrite it.',
       );
     }
-    if (opts.force) {
-      git(cloneDir, ['push', '--force', pushRemote, `HEAD:refs/heads/${branch}`], opts.token, 180_000);
+    if (o.force) {
+      git(cloneDir, ['push', '--force', pushRemote, `HEAD:refs/heads/${branch}`], o.token, 180_000);
     } else throw err;
   }
 
   const head = `${mode === 'fork' ? login : owner}:${branch}`;
-  const body = renderPrBody(opts, entry, problems, change);
-
   const existing = await gh.findOpenPr(owner, repo, head);
   const pr = existing
-    ? await gh.updatePr(owner, repo, existing.number, { title, body })
-    : await gh.createPr(owner, repo, { title, body, head, base: info.defaultBranch });
+    ? await gh.updatePr(owner, repo, existing.number, { title: o.title, body: o.body() })
+    : await gh.createPr(owner, repo, { title: o.title, body: o.body(), head, base: info.defaultBranch });
 
   log(existing ? `updated PR #${pr.number}` : `opened PR #${pr.number}`);
-  return { problems, entry, entryYaml, change, branch, prUrl: pr.html_url, mode, diffStat };
+  return { prUrl: pr.html_url, mode, diffStat };
 }
 
 /** Run one of the store's scripts, surfacing its output verbatim on failure —

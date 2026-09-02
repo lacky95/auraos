@@ -128,6 +128,9 @@ export function registerNexus(program: Command): void {
   // ── app submit (open a store PR) ──────────────────────────────────────────
   wireSubmit(app);
 
+  // ── app screenshots ───────────────────────────────────────────────────────
+  wireScreenshots(app);
+
   // ── store credentials ─────────────────────────────────────────────────────
   wireStore(nexus);
 
@@ -428,6 +431,27 @@ function readManifestAt(appPath: string): LocalManifest {
 }
 
 // ─── app install ──────────────────────────────────────────────────────────
+/**
+ * POST and keep the server's own error message and hint.
+ *
+ * `api.post` throws on any non-2xx, and the store routes answer user errors
+ * with a 400 whose body carries a precisely worded `error` and a `hint` for
+ * fixing it. Without this the caller's error rendering never runs and the user
+ * sees a raw `POST /api/... failed with 400: {"ok":false,...}` instead — the
+ * information is all there, just wrapped in the wrong thing.
+ */
+async function postStore<T>(path: string, body: unknown): Promise<T> {
+  try {
+    return await api.post<T>(path, body);
+  } catch (err) {
+    const raw = (err as { body?: string }).body;
+    if (raw) {
+      try { return JSON.parse(raw) as T; } catch { /* not JSON — rethrow below */ }
+    }
+    throw err;
+  }
+}
+
 // ─── app submit ─────────────────────────────────────────────────────────────
 /** What `/api/nexus/publish` actually returns for a git publish — richer than
  *  the CLI historically typed. `repoUrl` is what a store entry needs. */
@@ -450,7 +474,7 @@ interface SubmitArgs {
 /** POST the submission and render the outcome. Shared by `app submit` and
  *  `app publish --submit` so the two cannot drift. */
 async function runSubmit(a: SubmitArgs): Promise<void> {
-  const res = await api.post<{
+  const res = await postStore<{
     ok: boolean; storeRepo: string; error?: string; hint?: string;
     messages?: string[];
     result?: {
@@ -540,6 +564,81 @@ function wireSubmit(parent: Command): void {
         noCodeowners: o.codeowners === false,
         force: o.force, acceptPolicy: o.acceptPolicy,
       });
+    });
+}
+
+
+// ─── app screenshots ────────────────────────────────────────────────────────
+/** Screenshots change on their own schedule — a better picture is not a new
+ *  release — so they get their own command rather than riding on publish. */
+function wireScreenshots(parent: Command): void {
+  const shots = parent
+    .command('screenshots')
+    .alias('shots')
+    .description('Add, replace, remove or list the screenshots on a store listing.');
+
+  const call = async (
+    appId: string,
+    action: 'list' | 'add' | 'remove' | 'replace',
+    o: { source?: string; index?: number; storeRepo?: string; dryRun?: boolean; force?: boolean },
+  ) => {
+    const res = await postStore<{
+      ok: boolean; storeRepo: string; error?: string; hint?: string; messages?: string[];
+      result?: {
+        appId: string; screenshots: string[];
+        uploaded?: { path: string; url: string; bytes: number };
+        deleted?: string; prUrl?: string; unchanged?: boolean; diffStat?: string;
+      };
+    }>('/api/nexus/screenshots', {
+      appId, action, source: o.source, index: o.index,
+      storeRepo: o.storeRepo, dryRun: o.dryRun, force: o.force,
+    });
+
+    for (const m of res.messages ?? []) info(`  ${m}`);
+    if (!res.ok || !res.result) {
+      if (res.error) console.error(`\n${color.red('✗')} ${res.error}`);
+      if (res.hint)  info(`  ${res.hint}`);
+      fail('screenshots: no change made');
+    }
+
+    const r = res.result;
+    if (!r.screenshots.length) info(color.dim('  (no screenshots)'));
+    r.screenshots.forEach((u, i) => info(`  ${color.dim(String(i + 1) + '.')} ${u}`));
+
+    if (action === 'list') return;
+    if (r.unchanged) { ok('nothing to change'); return; }
+    if (o.dryRun)    { ok('dry run — nothing was pushed'); return; }
+    ok(`${color.cyan(res.storeRepo)} — ${r.prUrl}`);
+    info('  a maintainer reviews and merges it; the listing updates on merge.');
+  };
+
+  const common = (c: Command) => c
+    .option('--store-repo <slug>', 'store index repo (owner/repo)')
+    .option('--dry-run',           'show the change without touching GitHub')
+    .option('--force',             'overwrite a screenshot branch someone has edited');
+
+  common(shots.command('list <appId>')
+    .description('Show the screenshots currently listed, numbered.'))
+    .action(async (appId: string, o: { storeRepo?: string }) => {
+      await call(appId, 'list', o);
+    });
+
+  common(shots.command('add <appId> <image>')
+    .description('Add a screenshot. <image> is a local file (uploaded to the store) or an https URL.'))
+    .action(async (appId: string, image: string, o: { storeRepo?: string; dryRun?: boolean; force?: boolean }) => {
+      await call(appId, 'add', { ...o, source: image });
+    });
+
+  common(shots.command('replace <appId> <n> <image>')
+    .description('Replace screenshot <n> (as printed by `list`).'))
+    .action(async (appId: string, n: string, image: string, o: { storeRepo?: string; dryRun?: boolean; force?: boolean }) => {
+      await call(appId, 'replace', { ...o, index: Number(n), source: image });
+    });
+
+  common(shots.command('remove <appId> <n>')
+    .description('Remove screenshot <n>. An image this store hosts is deleted with it.'))
+    .action(async (appId: string, n: string, o: { storeRepo?: string; dryRun?: boolean; force?: boolean }) => {
+      await call(appId, 'remove', { ...o, index: Number(n) });
     });
 }
 

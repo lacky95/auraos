@@ -6,6 +6,7 @@ export { Resolver } from './Resolver.js';
 export { IndexClient } from './IndexClient.js';
 export * from './StoreEntry.js';
 export * from './GitHubClient.js';
+export * from './StoreAssets.js';
 export * from './StoreSubmitter.js';
 export { DEFAULT_INDEX, seedIndex } from './defaultIndex.js';
 export { Installer } from './Installer.js';
