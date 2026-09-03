@@ -36,7 +36,7 @@
  *     including the failure paths.
  */
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 
@@ -446,8 +446,14 @@ export class SelfUpdater {
       '-v', `${probed.appDataVolume}:/data`,
       '-w', probed.workDir,
       // The image's HOME (/home/master) is a symlink its CMD creates, and we
-      // replace the command — so point HOME somewhere that exists unaided.
-      '-e', 'HOME=/root',
+      // replace the command — so point HOME at the symlink's target, which
+      // lives on the app-data volume we just mounted and so exists unaided.
+      // It has to be a real home, not /root: git reads the credential helper
+      // from $HOME/.gitconfig, and without it the fetch goes out anonymous.
+      // GitHub answers unauthenticated protocol-v2 upload-pack with an
+      // intermittent 401, which git turns into a username prompt it cannot
+      // answer — an update that fails on GitHub's throttle, not on our state.
+      '-e', `HOME=${updaterHome()}`,
       probed.image,
       'bash', '-lc', script,
     ];
@@ -470,6 +476,24 @@ export class SelfUpdater {
     } catch { /* not in a container */ }
     return process.env['AURA_SHELL_HOSTNAME'] || hostname() || null;
   }
+}
+
+/**
+ * $HOME for the updater container.
+ *
+ * The shell's own /home/master is a symlink into the app-data volume, and that
+ * volume is mounted at the same /data path inside the updater — so the resolved
+ * target is valid in both containers, while the symlink itself is not (the
+ * image's CMD creates it, and the updater replaces the command). Anything
+ * outside /data would not survive the crossing, so fall back to /root: the
+ * fetch then runs unauthenticated, which is degraded but not broken.
+ */
+function updaterHome(): string {
+  try {
+    const real = realpathSync(process.env['HOME'] || '/home/master');
+    if (real === '/data' || real.startsWith('/data/')) return real;
+  } catch { /* no home to resolve */ }
+  return '/root';
 }
 
 /** Human label for the button that started a run. */
