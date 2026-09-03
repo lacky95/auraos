@@ -25,6 +25,7 @@ export {
   loadSourcesConfig, saveSourcesConfig, seedSourcesConfigIfMissing,
   sortedSources, ociSources, findSource, ociRegistryView, isSourceEntry,
   DEFAULT_SOURCES_CONFIG, DEFAULT_APP_REPO_PREFIX, OFFICIAL_INDEX_URL,
+  OFFICIAL_STORE_REPO,
 } from './SourcesConfig.js';
 export type {
   SourcesConfig, SourceEntry, SourceKind,
