@@ -461,6 +461,9 @@ const FRAME_NAME = JSON.stringify({
           else       urlInput.removeAttribute('data-stale');
         }
         function syncButtons() {
+          // In native mode the button state arrives with aura.surface.state —
+          // our history array is only a mirror and would disagree.
+          if (nativeMode && surfaceId) return;
           backBtn.disabled = cursor <= 0;
           fwdBtn.disabled  = cursor >= history.length - 1;
         }
@@ -481,6 +484,7 @@ const FRAME_NAME = JSON.stringify({
           engine.style.transform = 'scale(' + zoom + ')';
           engine.style.width  = (100 / zoom) + '%';
           engine.style.height = (100 / zoom) + '%';
+          if (nativeMode && surfaceId) surfaceCommand('setZoom', { factor: zoom });
           var pct = Math.round(zoom * 100);
           zoomRstB.textContent = pct + '%';
           zoomInB.disabled  = zoom >= ZOOM_MAX;
@@ -541,7 +545,15 @@ const FRAME_NAME = JSON.stringify({
             dbgLog_line('warn', 'still loading after 15s — site may refuse framing (X-Frame-Options / CSP frame-ancestors)');
             dbgSetState('slow');
           }, 15000);
-          engine.setAttribute('src', url);
+          if (nativeMode) {
+            // The native window IS the engine here; the iframe stays parked at
+            // about:blank underneath it.
+            if (surfaceId) surfaceCommand('navigate', { url: url });
+            else attachSurface(url);
+          } else {
+            detachSurface('navigate');
+            engine.setAttribute('src', url);
+          }
           syncInputFromHistory();
           syncButtons();
           dbgRefresh();
@@ -592,12 +604,20 @@ const FRAME_NAME = JSON.stringify({
           if (url) navigate(url);
         });
         backBtn.addEventListener('click', function () {
+          // In native mode the WebView owns the real session history, including
+          // in-page navigations we never saw. Ask it to go back rather than
+          // re-navigating to a URL from our own list.
+          if (nativeMode && surfaceId) { surfaceCommand('goBack'); return; }
           if (cursor > 0) { cursor -= 1; navigate(history[cursor], { push: false }); }
         });
         fwdBtn.addEventListener('click', function () {
+          if (nativeMode && surfaceId) { surfaceCommand('goForward'); return; }
           if (cursor < history.length - 1) { cursor += 1; navigate(history[cursor], { push: false }); }
         });
-        reloadB.addEventListener('click', function () { navigate(history[cursor], { push: false }); });
+        reloadB.addEventListener('click', function () {
+          if (nativeMode && surfaceId) { surfaceCommand('reload'); return; }
+          navigate(history[cursor], { push: false });
+        });
         homeBtn.addEventListener('click', function () { navigate(HOME); });
         zoomInB.addEventListener('click',  function () { zoom += ZOOM_STEP; applyZoom(); });
         zoomOutB.addEventListener('click', function () { zoom -= ZOOM_STEP; applyZoom(); });
@@ -636,11 +656,217 @@ const FRAME_NAME = JSON.stringify({
           dbgRefresh();
         });
 
+        // ── Native surface: pages that refuse to be framed ────────
+        //
+        // Some sites can only run as a top-level document — duck.ai's
+        // anti-abuse challenge reads window.top.location while computing the
+        // token that unlocks its UI, and frame-busters fail the same way.
+        // window.top is [LegacyUnforgeable], so no shim is possible; the page
+        // has to be top-level, which only the native host can provide.
+        //
+        // The OS detects the failure and tells us. We decide what to do with
+        // it, and which part of our layout the native view should cover — the
+        // OS then keeps it glued there through every window move, resize,
+        // zoom and workspace switch.
+        // nativeMode is decided once, at startup, by asking the OS whether the
+        // host can give us a native window. We cannot check for Capacitor
+        // ourselves: the host injects its bridge only into the shell's own
+        // document, so window.Capacitor is undefined in here. Only the OS knows.
+        var nativeMode  = false;
+        var surfaceId   = null;
+        var surfaceUrl  = null;
+        var surfaceRO   = null;
+        var nativeState = null;
+
+        function sameSite(a, b) {
+          try { return new URL(a).host === new URL(b).host; } catch (err) { return a === b; }
+        }
+
+        function engineRect() {
+          // Our own CSS pixels — the OS converts out of this space.
+          var r = engine.getBoundingClientRect();
+          return { x: r.left, y: r.top, width: r.width, height: r.height };
+        }
+
+        function postToOs(type, extras) {
+          if (window.parent === window) return;
+          var msg = { type: type };
+          for (var k in extras) if (Object.prototype.hasOwnProperty.call(extras, k)) msg[k] = extras[k];
+          try { window.parent.postMessage(msg, '*'); } catch (err) { /* parent gone */ }
+        }
+
+        // Everything that wants the native window out of the way registers a
+        // reason here. It is shown again only when the last reason clears —
+        // two independent booleans would race (close the menu while the
+        // launcher is still open and the window would pop up over it).
+        //
+        // Two sources: the OS reports its own overlays (launcher, process
+        // manager, dialogs, lock screen) via aura.surface.occluded, and we add
+        // our own popups, which are painted under the surface just the same.
+        var hideReasons = {};
+
+        function setHidden(reason, hidden) {
+          if (hidden) hideReasons[reason] = true; else delete hideReasons[reason];
+          var anyone = Object.keys(hideReasons).length > 0;
+          if (anyone === surfaceHidden) return;
+          surfaceHidden = anyone;
+          surfaceCommand('setVisible', { visible: !anyone });
+          dbgLog_line('ok', 'native window ' + (anyone ? 'hidden (' + Object.keys(hideReasons).join(',') + ')' : 'shown'));
+        }
+        var surfaceHidden = false;
+
+        function surfaceCommand(action, payload) {
+          if (!surfaceId) return;
+          postToOs('aura.surface.command', {
+            surfaceId: surfaceId, action: action, payload: payload || {},
+          });
+        }
+
+        function attachSurface(url) {
+          if (surfaceId && surfaceUrl === url) return;
+          detachSurface('replace');
+          // Unique per window: two Browser windows launching in the same
+          // millisecond would otherwise pick the same id and fight over one
+          // native view, since the host keys its surfaces by this string.
+          surfaceId  = 's' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+          surfaceUrl = url;
+          postToOs('aura.surface.attach', {
+            surfaceId: surfaceId, url: url, rect: engineRect(),
+            // We already have an address bar and back/forward/reload/zoom —
+            // the native window renders the page only.
+            chrome: false,
+          });
+          // The iframe underneath is blanked so nothing peeks out around the
+          // native view (in nativeMode it never renders a page at all).
+          // visibility, not display: its rect is what defines the surface
+          // bounds, so it has to keep its place in the layout. Without this the
+          // iframe's white about:blank flashes through whenever the surface
+          // hides for an overlay, on an otherwise dark desktop.
+          engine.style.visibility = 'hidden';
+          engine.setAttribute('src', 'about:blank');
+          chrome.dataset.loading = 'false';
+          dbgSetState('native');
+          dbgLog_line('ok', 'native surface attached → ' + url);
+          // Our own layout can change without the window moving (debug panel
+          // opening, toolbar wrapping); the OS handles the window, we handle us.
+          if (window.ResizeObserver && !surfaceRO) {
+            surfaceRO = new ResizeObserver(function () { syncSurfaceBox(); });
+            surfaceRO.observe(engine);
+          }
+          syncSurfaceBox();
+        }
+
+        /**
+         * Our own box, watched by a ResizeObserver, is the workspace-switch
+         * hook. The shell puts an off-workspace slot behind `display: none`, so
+         * everything inside it — including this element — collapses to 0x0, and
+         * that is a signal the app can read without knowing anything about
+         * workspaces. Minimising the window looks identical, which is the point.
+         *
+         * The surface has to be hidden rather than just left alone: it is a
+         * native view positioned in screen coordinates, so it does not follow
+         * the iframe out of view — it would keep painting over whatever
+         * workspace you switched to.
+         */
+        function syncSurfaceBox() {
+          if (!surfaceId) return;
+          var r = engineRect();
+          var offscreen = r.width <= 0 || r.height <= 0;
+          setHidden('offscreen', offscreen);
+          // A zero rect is not a position; only send real geometry.
+          if (!offscreen) postToOs('aura.surface.setRect', { surfaceId: surfaceId, rect: r });
+        }
+
+        function detachSurface(why) {
+          if (!surfaceId) return;
+          postToOs('aura.surface.detach', { surfaceId: surfaceId });
+          dbgLog_line('ok', 'native surface detached (' + why + ')');
+          surfaceId = null;
+          surfaceUrl = null;
+          hideReasons = {};
+          surfaceHidden = false;
+          engine.style.visibility = '';
+          if (surfaceRO) { try { surfaceRO.disconnect(); } catch (err) {} surfaceRO = null; }
+        }
+
+        window.addEventListener('message', function (e) {
+          var d = e.data;
+          if (!d || typeof d !== 'object') return;
+
+          // Startup capability answer.
+          if (d.type === 'aura.surface.capability') {
+            nativeMode = d.supported === true;
+            dbgLog_line('ok', 'native window support: ' + (nativeMode ? 'yes' : 'no'));
+            if (nativeMode) {
+              // Take over immediately: whatever the iframe was showing gets
+              // re-opened natively so there is one consistent engine.
+              var start = history[cursor] || HOME;
+              engine.setAttribute('src', 'about:blank');
+              attachSurface(start);
+            }
+            return;
+          }
+
+          // A shell overlay (launcher, process manager, dialog, lock screen)
+          // has moved over our window. Nothing in the DOM can draw above a
+          // native surface, so the overlay would be invisible until we step
+          // aside. The OS only reports the overlap; hiding is ours to do.
+          if (d.type === 'aura.surface.occluded' && d.surfaceId === surfaceId) {
+            // One reason slot, not one per overlay name: the OS tracks a single
+            // occluder and reports `by: null` when it clears, so keying on the
+            // name would leave the hide-reason stuck forever and the window
+            // would never come back.
+            if (d.by) dbgLog_line('ok', 'covered by ' + d.by);
+            setHidden('shellOverlay', d.occluded === true);
+            return;
+          }
+
+          // Live navigation state from the native window. Our address bar,
+          // title and back/forward buttons run entirely off this.
+          if (d.type === 'aura.surface.state' && d.surfaceId === surfaceId) {
+            var st = d.state || {};
+            nativeState = st;
+            if (typeof st.url === 'string' && st.url && st.url !== 'about:blank') {
+              if (st.url !== history[cursor]) {
+                history.length = cursor + 1;
+                history.push(st.url);
+                cursor = history.length - 1;
+              }
+              surfaceUrl = st.url;
+              syncInputFromHistory();
+              setUrlStale(false);
+            }
+            // canGoBack/Forward come from the native view's own history, which
+            // is the truth — our array only mirrors what we asked for.
+            if (typeof st.canGoBack === 'boolean') backBtn.disabled = !st.canGoBack;
+            if (typeof st.canGoForward === 'boolean') fwdBtn.disabled = !st.canGoForward;
+            chrome.dataset.loading = (st.progress != null && st.progress < 100) ? 'true' : 'false';
+            if (st.reason === 'pageFinished') { dbgSetState('idle'); dbgRefresh(); }
+            return;
+          }
+
+          if (d.type !== 'aura.host.needsTopLevel') return;
+          if (typeof d.url !== 'string' || !d.url) return;
+          // Only act when it is OUR page: the OS broadcasts remembered hosts
+          // to every window, since it cannot tell which one framed the URL.
+          var current = history[cursor];
+          if (!current || !sameSite(d.url, current)) return;
+          dbgLog_line('warn', 'cannot be framed (' + (d.reason || '?') + ') → going native');
+          attachSurface(d.url);
+        });
+
+        // Startup probe: does the host offer native windows? The answer
+        // arrives as aura.surface.capability and decides nativeMode for the
+        // rest of this session.
+        postToOs('aura.surface.query', {});
+
         // ── Settings dropdown ─────────────────────────────────────
         function toggleMenu(open) {
           var next = (open == null) ? settingsMenu.hidden : open;
           settingsMenu.hidden = !next;
           settingsBtn.setAttribute('aria-expanded', String(next));
+          // The dropdown opens downward over the engine area.
+          if (nativeMode) setHidden('settingsMenu', next);
         }
         settingsBtn.addEventListener('click', function (e) {
           e.stopPropagation();   // don't let the outside-click handler re-close it
@@ -659,6 +885,8 @@ const FRAME_NAME = JSON.stringify({
           dbgPanel.hidden = !next;
           menuDebugBtn.setAttribute('aria-pressed', String(next));
           if (next) dbgRefresh();
+          // The debug panel is absolutely positioned inside .engine-wrap.
+          if (nativeMode) setHidden('debugPanel', next);
         }
         menuDebugBtn.addEventListener('click', function () {
           toggleDebug();

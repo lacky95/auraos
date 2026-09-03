@@ -19,6 +19,8 @@
  * island. Apps consume via `osClient.onViewportChange`.
  */
 
+import { detachIfOwnedBy } from './nativeSurface.js';
+
 export type ViewportReason = 'layout' | 'zoom' | 'mount';
 
 export interface ViewportMessage {
@@ -174,6 +176,8 @@ export function observeIframe(frame: HTMLIFrameElement): void {
 
 /** Stop observing a torn-down iframe and drop its dedupe entry. */
 export function unobserveIframe(frame: HTMLIFrameElement): void {
+  // The window is going away; its surface must not outlive it.
+  detachIfOwnedBy(frame);
   ro?.unobserve(frame);
   pending.delete(frame);
   lastBox.delete(frame);

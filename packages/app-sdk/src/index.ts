@@ -5,6 +5,10 @@ export type { ViewportChangeInfo } from './OsClient.js';
 export { KeymapApi }   from './keymap.js';
 export { NavApi }      from './nav.js';
 export { SystemApi }   from './system.js';
+export { SurfaceApi }  from './surface.js';
+export type {
+  SurfaceRect, NeedsTopLevelInfo, NeedsTopLevelHandler, OccludedInfo, OccludedHandler,
+} from './surface.js';
 export { ActivityApi } from './activity.js';
 // Interface Registry — `osClient.interfaces`. Discovery + runtime registration.
 export { InterfacesApi } from './interfaces.js';
