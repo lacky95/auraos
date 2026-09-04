@@ -268,6 +268,30 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
       .nexus-section {
         margin: 16px 0;
       }
+      /* The catalogue's staleness is bounded by the aggregator's TTLs, but a
+         maintainer who just merged a store PR should not have to wait out even
+         a short one. `?refresh=1` makes the route re-fetch every source,
+         bypassing the memo and the per-source disk caches. */
+      .nexus-h2-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .nexus-refresh {
+        font-size: 0.65rem;
+        letter-spacing: 0.12em;
+        padding: 3px 8px;
+        color: var(--aura-color-text-dim);
+        border: 1px solid var(--aura-color-border);
+        text-transform: uppercase;
+        white-space: nowrap;
+        flex-shrink: 0;
+      }
+      .nexus-refresh:hover {
+        color: var(--aura-color-primary);
+        border-color: var(--aura-color-primary);
+      }
       .nexus-section h2 {
         font-size: 0.75rem;
         letter-spacing: 0.18em;
