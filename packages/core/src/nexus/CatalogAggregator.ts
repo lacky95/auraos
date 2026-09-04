@@ -32,7 +32,18 @@ import {
   type GitIndexSource, type OciSource, type SourceEntry, type SourcesConfig,
 } from './SourcesConfig.js';
 
-const CACHE_TTL_MS      = 10 * 60 * 1000;   // 10 min
+/** How long a source's fetched entries stay usable on disk before we go back
+ *  to the network. This is the layer that protects the network, so it is the
+ *  one that decides how stale a catalogue can be. An index is a few kB behind
+ *  a CDN, so a minute costs nothing and keeps "new app appears in the store"
+ *  measured in seconds rather than tens of minutes. */
+const CACHE_TTL_MS      = 60 * 1000;        // 1 min
+
+/** How long the in-memory aggregate is reused before re-reading the per-source
+ *  disk caches. Its only job is to stop a burst of requests re-parsing the same
+ *  small JSON files; it must NOT outlive the disk TTL, or it silently becomes
+ *  the real cache and the one below it never gets consulted. */
+const MEMO_TTL_MS       = 15 * 1000;        // 15 s
 const FETCH_TIMEOUT_MS  = 10_000;
 const ORAS_TIMEOUT_MS   = 15_000;
 const MAX_REPOS_PER_OCI = 200;              // defensive cap on N+1 fetches
@@ -74,8 +85,15 @@ export interface CatalogAggregatorOpts {
 export class CatalogAggregator {
   private readonly cacheDir: string;
   private readonly getSources: () => SourcesConfig;
-  /** In-memory memo of the last full aggregation. */
+  /** In-memory memo of the last full aggregation, and when it was taken.
+   *
+   *  The timestamp is the point. Without it, get() returned the first
+   *  aggregation for the entire life of the process: the disk TTL below was
+   *  unreachable, and a store that had been open since boot never showed an
+   *  app added afterwards. It looked like a caching policy and behaved like a
+   *  snapshot. */
   private memo: Catalog | null = null;
+  private memoAt = 0;
 
   constructor(opts: CatalogAggregatorOpts) {
     this.cacheDir   = join(opts.rootDataDir, 'nexus', 'sources');
@@ -84,14 +102,16 @@ export class CatalogAggregator {
 
   /** Aggregated catalog, using per-source disk caches when fresh. */
   async get(): Promise<Catalog> {
-    if (this.memo) return this.memo;
+    if (this.memo && Date.now() - this.memoAt < MEMO_TTL_MS) return this.memo;
     this.memo = await this.aggregate(false);
+    this.memoAt = Date.now();
     return this.memo;
   }
 
   /** Force every source to re-fetch, bypassing caches. */
   async refresh(): Promise<Catalog> {
     this.memo = await this.aggregate(true);
+    this.memoAt = Date.now();
     return this.memo;
   }
 
@@ -99,12 +119,14 @@ export class CatalogAggregator {
    *  re-aggregates against the current sources config. Cheap — no I/O. */
   invalidate(): void {
     this.memo = null;
+    this.memoAt = 0;
   }
 
   /** Drop the memo + one source's disk cache so the next read re-fetches it.
    *  Called after a publish so the store reflects the new app immediately. */
   bustSource(name: string): void {
     this.memo = null;
+    this.memoAt = 0;
     try {
       const p = this.cachePath(name);
       if (existsSync(p)) writeFileSync(p, JSON.stringify({ ts: 0, entries: [] }));
@@ -321,7 +343,23 @@ export async function loadGitIndexDoc(src: GitIndexSource): Promise<IndexDocumen
 }
 
 async function fetchYamlUrl(url: string): Promise<string> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  // Ask any cache in front of the index to revalidate rather than answer from
+  // its own copy: a store index on GitHub Pages comes back with
+  // cache-control max-age=600, which would otherwise stack a second ten-minute
+  // window on top of ours.
+  //
+  // Measured, so the expectation here is honest: Fastly, which fronts Pages,
+  // IGNORES a client no-cache and still answers x-cache: HIT. CDNs generally
+  // do, or any client could bust their cache at will. The header stays because
+  // it is the correct instruction to intermediaries that DO honour it, such as
+  // a proxy between an AuraOS box and the internet.
+  //
+  // Pages purges its own edge on deploy, so a merged PR shows up almost at
+  // once regardless; max-age is the ceiling, not the usual case.
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    headers: { 'cache-control': 'no-cache', pragma: 'no-cache' },
+  });
   if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
   return res.text();
 }

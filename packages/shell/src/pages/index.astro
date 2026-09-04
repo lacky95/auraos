@@ -219,6 +219,7 @@ const ssrVisibleViews = initialViews
 
 <script>
   import * as workspaceClient from '../lib/workspaceClient';
+  import * as nativeSurface from '../lib/nativeSurface.ts';
   import { getKeyDispatcher } from '../lib/keyDispatcher.ts';
   import { nextInDirection, getViewRects } from '../lib/windowNav.ts';
   import type { LayoutNavContext } from '../lib/windowNav.ts';
@@ -328,7 +329,161 @@ const ssrVisibleViews = initialViews
       void dispatchHostPopup(url, p.platform, p.disposition);
       return;
     }
+
+    // A framed site that can only run as a top-level document. The host
+    // detects this from an unhandled cross-origin frame SecurityError raised
+    // inside the frame itself, and posts from there — so ev.source identifies
+    // the failing frame, which is the only way to know WHICH window is
+    // affected (the native side sees a URL and nothing more).
+    //
+    // The OS does not decide what to do about it. It resolves the owning app
+    // and hands the app the notification; the app asks for a native surface if
+    // it wants one. Routing it straight to the Browser app would be wrong on
+    // its own terms anyway — that app renders in a nested <iframe>, so it
+    // would re-frame the URL and reproduce the exact failure.
+    if (d.type === 'aura.frame.needsTopLevel') {
+      const p = d as unknown as { type: string; url?: unknown; reason?: unknown };
+      const url = typeof p.url === 'string' ? p.url.trim() : '';
+      if (!url || !/^https?:\/\//i.test(url)) return;
+      const owner = ownerFrameOf(ev.source as Window | null);
+      if (!owner) { console.debug('[needsTopLevel] no owning window for', url); return; }
+      try {
+        owner.contentWindow?.postMessage(
+          { type: 'aura.host.needsTopLevel', url, reason: p.reason ?? 'detector' }, '*');
+      } catch { /* frame gone */ }
+      return;
+    }
+
+    // Native-originated notification (a host already known to need top-level
+    // context, reported before the page loads). Same routing, but we have to
+    // find the owner by URL because there is no source frame to walk.
+    if (d.type === 'aura.host.needsTopLevel') {
+      const p = d as unknown as { type: string; source?: unknown; url?: unknown; reason?: unknown };
+      if (p.source !== 'host') return;
+      const url = typeof p.url === 'string' ? p.url.trim() : '';
+      if (!url || !/^https?:\/\//i.test(url)) return;
+      // Broadcast: only the app that actually framed this URL will act on it.
+      document.querySelectorAll<HTMLIFrameElement>('.app-slot iframe').forEach((f) => {
+        try { f.contentWindow?.postMessage({ type: 'aura.host.needsTopLevel', url, reason: p.reason ?? 'known-host' }, '*'); }
+        catch { /* frame gone */ }
+      });
+      return;
+    }
+
+    // ── Native surface API (osClient.surface) ────────────────────────────
+    // The OS supplies the capability; the requesting app supplies the policy.
+    // Every call is bound to the caller's own frame, so an app can only ever
+    // place a surface over itself.
+    // Capability probe. An app iframe cannot see window.Capacitor — the host
+    // injects its bridge only into the shell's own document — so "am I running
+    // under the native host?" is a question only the OS can answer.
+    if (d.type === 'aura.surface.query') {
+      const src = ev.source as Window | null;
+      if (!appFrameFor(src)) return;
+      try {
+        src?.postMessage({ type: 'aura.surface.capability', supported: nativeSurface.isSupported() }, '*');
+      } catch { /* frame gone */ }
+      return;
+    }
+
+    // Navigation commands from the app that owns the surface.
+    if (d.type === 'aura.surface.command') {
+      const frame = appFrameFor(ev.source as Window | null);
+      if (!frame) return;
+      const p = d as unknown as { surfaceId?: unknown; action?: unknown; payload?: unknown };
+      const surfaceId = typeof p.surfaceId === 'string' ? p.surfaceId : '';
+      const action = typeof p.action === 'string' ? p.action : '';
+      const allowed = ['navigate', 'goBack', 'goForward', 'reload', 'setZoom', 'getState', 'setVisible'];
+      if (!surfaceId || !allowed.includes(action)) return;
+      const payload = (p.payload && typeof p.payload === 'object')
+        ? p.payload as Record<string, unknown> : {};
+      nativeSurface.command(frame, surfaceId, action as nativeSurface.SurfaceCommand, payload);
+      return;
+    }
+
+    if (d.type === 'aura.surface.attach'
+     || d.type === 'aura.surface.setRect'
+     || d.type === 'aura.surface.detach') {
+      const frame = appFrameFor(ev.source as Window | null);
+      if (!frame) return;
+      const p = d as unknown as { surfaceId?: unknown; url?: unknown; rect?: unknown };
+      const surfaceId = typeof p.surfaceId === 'string' ? p.surfaceId : '';
+      if (!surfaceId) return;
+
+      if (d.type === 'aura.surface.detach') {
+        nativeSurface.detach(frame, surfaceId);
+        return;
+      }
+      const rect = readRect(p.rect);
+      if (!rect) return;
+      if (d.type === 'aura.surface.setRect') {
+        nativeSurface.setRect(frame, surfaceId, rect);
+        return;
+      }
+      const url = typeof p.url === 'string' ? p.url.trim() : '';
+      if (!url || !/^https?:\/\//i.test(url)) return;
+      const chrome = (d as unknown as { chrome?: unknown }).chrome !== false;
+      nativeSurface.attach(frame, surfaceId, url, rect, { chrome });
+      return;
+    }
   });
+
+  function readRect(v: unknown): nativeSurface.SurfaceRect | null {
+    if (!v || typeof v !== 'object') return null;
+    const r = v as Record<string, unknown>;
+    // Read each field by name rather than mapping into an array and
+    // destructuring it: the array form is identical at runtime, but its
+    // elements type as `number | undefined`, so every use downstream needs a
+    // non-null assertion that would outlive whatever made it true.
+    const x = Number(r['x']);
+    const y = Number(r['y']);
+    const width = Number(r['width']);
+    const height = Number(r['height']);
+    // Rejects NaN and Infinity, which is what a missing or non-numeric field
+    // becomes — this rect crosses a postMessage boundary from an app.
+    if (![x, y, width, height].every((n) => Number.isFinite(n))) return null;
+    if (width <= 0 || height <= 0) return null;
+    return { x, y, width, height };
+  }
+
+  /** The `.app-slot` iframe whose contentWindow is exactly `w`. */
+  function appFrameFor(w: Window | null): HTMLIFrameElement | null {
+    if (!w) return null;
+    for (const f of document.querySelectorAll<HTMLIFrameElement>('.app-slot iframe')) {
+      if (f.contentWindow === w) return f;
+    }
+    return null;
+  }
+
+  /**
+   * Walk up from an arbitrary (possibly deeply nested, cross-origin) frame to
+   * the app window that contains it.
+   *
+   * Reading `.parent` on a cross-origin WindowProxy and comparing WindowProxy
+   * references are both permitted — it is reading *properties* of a
+   * cross-origin document that is blocked. So the chain can be climbed even
+   * though nothing inside those frames is readable.
+   */
+  function ownerFrameOf(w: Window | null): HTMLIFrameElement | null {
+    let cur: Window | null = w;
+    for (let hops = 0; cur && hops < 20; hops++) {
+      const match = appFrameFor(cur);
+      if (match) return match;
+      let parent: Window | null = null;
+      try { parent = cur.parent; } catch { return null; }
+      if (!parent || parent === cur) return null;
+      cur = parent;
+    }
+    return null;
+  }
+
+  // Tells the host a handler is installed AND able to act. If the bridge is
+  // missing (desktop browser, Electron parity pending) we leave this unset so
+  // the native side falls back to opening the overlay fullscreen itself,
+  // rather than claiming the event and dropping it.
+  if (nativeSurface.isSupported()) {
+    (window as { __auraHandlesNeedsTopLevel?: boolean }).__auraHandlesNeedsTopLevel = true;
+  }
 
   async function dispatchHostPopup(url: string, platform: unknown, disposition: unknown): Promise<void> {
     try {

@@ -46,6 +46,7 @@ export type ThemeStrategy = 'inherit' | 'themed' | 'override';
 import { KeymapApi } from './keymap.js';
 import { NavApi } from './nav.js';
 import { SystemApi } from './system.js';
+import { SurfaceApi } from './surface.js';
 import { ActivityApi } from './activity.js';
 import { InterfacesApi } from './interfaces.js';
 export type { KeymapHandler, KeymapHandlerCtx, KeymapChangeInfo } from './keymap.js';
@@ -80,6 +81,11 @@ export class OsClient {
    * phone book, never the data path.
    */
   readonly interfaces: InterfacesApi;
+  /**
+   * Native surfaces — a host-rendered top-level document painted over part of
+   * this window, for sites that refuse to run in an iframe. See ./surface.ts.
+   */
+  readonly surface: SurfaceApi;
 
   constructor() {
     // Bare `process.env.X` throws `ReferenceError: process is not defined`
@@ -96,6 +102,7 @@ export class OsClient {
     this.keymap   = new KeymapApi(this);
     this.nav      = new NavApi(this);
     this.system   = new SystemApi(this);
+    this.surface  = new SurfaceApi(this);
     this.activity = new ActivityApi(this);
     this.interfaces = new InterfacesApi(this);
   }

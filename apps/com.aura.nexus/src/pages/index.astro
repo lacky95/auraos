@@ -46,6 +46,9 @@ const visible = activeCategory
   ? doc.apps.filter((a) => (a.categories ?? []).includes(activeCategory))
   : doc.apps;
 const degraded = (doc.sources ?? []).filter((s) => !s.ok);
+// Keep the category the user is looking at across a refresh — dropping it
+// would look like the button navigated somewhere rather than reloaded.
+const refreshHref = activeCategory ? `/?category=${activeCategory}&refresh=1` : '/?refresh=1';
 ---
 <Layout title="Browse" active="browse">
   {degraded.length > 0 && (
@@ -66,6 +69,9 @@ const degraded = (doc.sources ?? []).filter((s) => !s.ok);
         </p>
         <p style="margin-top:8px">
           You can still install directly from the <a href="/install">Install</a> tab.
+        </p>
+        <p style="margin-top:16px">
+          <a class="nexus-refresh" href={refreshHref}>↻ Refresh sources</a>
         </p>
       </div>
     </section>
@@ -91,7 +97,10 @@ const degraded = (doc.sources ?? []).filter((s) => !s.ok);
       )}
 
       <section class="nexus-section">
-        <h2>// {activeCategory ? `${activeCategory} apps` : 'All apps'} <span style="opacity:.6">({visible.length})</span></h2>
+        <h2 class="nexus-h2-row">
+          <span>// {activeCategory ? `${activeCategory} apps` : 'All apps'} <span style="opacity:.6">({visible.length})</span></span>
+          <a class="nexus-refresh" href={refreshHref} title="Re-fetch every source now, bypassing all caches">↻ Refresh</a>
+        </h2>
         {visible.length === 0 ? (
           <div class="nexus-empty"><p>No apps in this category.</p></div>
         ) : (
