@@ -14,6 +14,9 @@ import type { SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import type { SpawnContext } from '../scopes/types.js';
 import { ContextStore } from '../context/ContextStore.js';
 import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
+import {
+  PROVISION_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
+} from './provisioning.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
 const HEALTH_CHECK_TIMEOUT_MS = 60_000; // slightly higher than PRoot because container spawn adds ~100 ms
@@ -42,29 +45,16 @@ export function pickVolumeByDestination(mounts: DockerMount[], destination: stri
 
 const SYNTHESISED_ENTRYPOINT = `set -e
 export PORT="\${APP_PORT:-4001}"
-# Resolve astro. System-scope apps inherit it from the workspace's hoisted
-# /workspace/node_modules/.bin/astro (the workspace pnpm install populated
-# this via the mounted named volume). User/global-scope apps live outside
-# the pnpm workspace; they have to install astro into their own
-# node_modules. Run npm install only when neither path has astro yet.
-if [ ! -x "node_modules/.bin/astro" ] && [ ! -x "/workspace/node_modules/.bin/astro" ]; then
-  echo "[\${APP_ID:-app}] npm install (astro not yet present)..."
-  npm install --prefer-offline 2>&1 || npm install
-fi
-# Pull @aura/* SDK packages from the local OCI registry when the app
-# references them in \`auraDependencies\` (user/global scope) or legacy
-# \`dependencies\` and the workspace symlinks didn't materialise them.
-# No-op for system-scope apps where pnpm already populated
-# /workspace/node_modules/@aura/* via workspace:*.
-if [ ! -d node_modules/@aura ] && grep -qE '"(aura)?[dD]ependencies"|"@aura/' package.json 2>/dev/null; then
-  command -v aura >/dev/null && aura sdk install --quiet || true
-fi
+${PROVISION_SHELL}
 ASTRO="node_modules/.bin/astro"
 [ -x "\$ASTRO" ] || ASTRO="/workspace/node_modules/.bin/astro"
 echo "[\${APP_ID:-app}] Starting Astro server on port \$PORT via \$ASTRO"
 exec "\$ASTRO" dev --host 0.0.0.0 --port "\$PORT"`;
 
 interface TrackedContainer {
+  /** Watches the app's log to tell "installing dependencies" from "failing
+   *  to boot", so the health deadline can stay open for the former. */
+  provision: ProvisionWatch;
   /** docker container ID (long form). */
   containerId: string;
   /** Hostname siblings reach this container by — `aura-<sanitized-instanceId>`. */
@@ -239,9 +229,16 @@ export class ContainerRunner implements SandboxRunner {
     // Fan-out container stdout/stderr into the shell's log so `docker logs`
     // isn't the only place to see app output. Survives until the container
     // exits or we kill it.
+    const provision = new ProvisionWatch();
     const logTail = spawn('docker', ['logs', '-f', containerId], { stdio: ['ignore', 'pipe', 'pipe'] });
-    logTail.stdout?.on('data', (d: Buffer) => process.stdout.write(`[${instanceId}] ${d}`));
-    logTail.stderr?.on('data', (d: Buffer) => process.stderr.write(`[${instanceId}] ${d}`));
+    logTail.stdout?.on('data', (d: Buffer) => {
+      provision.observe(d.toString());
+      process.stdout.write(`[${instanceId}] ${d}`);
+    });
+    logTail.stderr?.on('data', (d: Buffer) => {
+      provision.observe(d.toString());
+      process.stderr.write(`[${instanceId}] ${d}`);
+    });
 
     // `docker inspect` for the pid; useful for orphan-reaper accounting.
     let pid = 0;
@@ -250,7 +247,7 @@ export class ContainerRunner implements SandboxRunner {
       pid = parseInt(out, 10) || 0;
     } catch { /* leave 0; reaper will ignore */ }
 
-    const tracked: TrackedContainer = { containerId, hostname, port, appId, logTail, pid, exitCb: null, expectingKill: false, manifest };
+    const tracked: TrackedContainer = { containerId, hostname, port, appId, logTail, pid, exitCb: null, expectingKill: false, manifest, provision };
     this.containers.set(instanceId, tracked);
 
     // Watch for container exit so we can fire the exit callback.
@@ -821,9 +818,18 @@ export class ContainerRunner implements SandboxRunner {
     // We don't have the container ID handy — docker inspect would have it,
     // but the bookkeeping methods that need it (kill/forceKill/wait/logs)
     // accept the name as a fallback. Set containerId = name; docker accepts either.
+    // An adopted container is normally past provisioning, but it can be
+    // re-adopted mid-install after an OS restart — so watch its log too.
+    const provision = new ProvisionWatch();
     const logTail = spawn('docker', ['logs', '-f', '--tail', '0', rec.hostname], { stdio: ['ignore', 'pipe', 'pipe'] });
-    logTail.stdout?.on('data', (d: Buffer) => process.stdout.write(`[${rec.instanceId}] ${d}`));
-    logTail.stderr?.on('data', (d: Buffer) => process.stderr.write(`[${rec.instanceId}] ${d}`));
+    logTail.stdout?.on('data', (d: Buffer) => {
+      provision.observe(d.toString());
+      process.stdout.write(`[${rec.instanceId}] ${d}`);
+    });
+    logTail.stderr?.on('data', (d: Buffer) => {
+      provision.observe(d.toString());
+      process.stderr.write(`[${rec.instanceId}] ${d}`);
+    });
     this.containers.set(rec.instanceId, {
       containerId:   rec.hostname,
       hostname:      rec.hostname,
@@ -834,6 +840,7 @@ export class ContainerRunner implements SandboxRunner {
       exitCb:        null,
       expectingKill: false,
       manifest:      rec.manifest,
+      provision,
     });
     // CRITICAL for restart stability: watch the adopted container for exit,
     // exactly like spawn() does. Without this, if an adopted container dies
@@ -850,7 +857,19 @@ export class ContainerRunner implements SandboxRunner {
 
   /** Probe the app's health endpoint until ready or timeout. */
   private async waitHealthy(instanceId: string, appId: string, hostname: string, port: number, manifest: AppManifest): Promise<void> {
-    const deadline = Date.now() + HEALTH_CHECK_TIMEOUT_MS;
+    // Two clocks, because "not answering yet" has two very different causes.
+    //
+    // A cold user/global-scope app installs its whole dependency tree in the
+    // entrypoint before astro ever starts. Timing that with the boot budget
+    // meant every heavy app was killed mid-install on first launch and only
+    // worked on the retry that found a warm node_modules. So: while the
+    // entrypoint says it is provisioning, keep pushing the boot deadline out —
+    // the app has not been asked to start yet — and bound the whole thing with
+    // an absolute ceiling so a wedged install still fails instead of hanging.
+    const startedAt   = Date.now();
+    const hardDeadline = startedAt + PROVISION_TIMEOUT_MS;
+    const provision   = this.containers.get(instanceId)?.provision;
+    let   deadline    = startedAt + HEALTH_CHECK_TIMEOUT_MS;
     const healthUrl = `http://${hostname}:${port}${lifecyclePath(manifest, instanceId, 'health')}`;
     let lastBody: string | null = null;
     while (Date.now() < deadline) {
@@ -880,9 +899,21 @@ export class ContainerRunner implements SandboxRunner {
         // Network refused / not ready yet — retry until deadline.
         void e;
       }
+      // Re-arm only while provisioning is actually in flight, so the boot
+      // budget starts counting from the moment dependencies are ready.
+      deadline = nextHealthDeadline({
+        now: Date.now(), deadline, hardDeadline,
+        isProvisioning: provision?.isProvisioning ?? false,
+        bootBudgetMs:   HEALTH_CHECK_TIMEOUT_MS,
+      });
       await new Promise((r) => setTimeout(r, HEALTH_CHECK_INTERVAL_MS));
     }
-    throw new Error(`container ${instanceId} did not become healthy within ${HEALTH_CHECK_TIMEOUT_MS}ms (lastBody=${lastBody?.slice(0, 200)})`);
+    const waited = Math.round((Date.now() - startedAt) / 1000);
+    throw new Error(
+      provision?.everProvisioned
+        ? `container ${instanceId} did not become healthy ${waited}s after starting to install its dependencies (lastBody=${lastBody?.slice(0, 200)})`
+        : `container ${instanceId} did not become healthy within ${HEALTH_CHECK_TIMEOUT_MS}ms (lastBody=${lastBody?.slice(0, 200)})`,
+    );
   }
 
   // ─── Lifecycle hooks (identical shape to ProotRunner) ─────────────────

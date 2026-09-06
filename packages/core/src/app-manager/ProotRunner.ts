@@ -10,6 +10,9 @@ import type { SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import type { SpawnContext } from '../scopes/types.js';
 import { ContextStore } from '../context/ContextStore.js';
 import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
+import {
+  PROVISION_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
+} from './provisioning.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
 const HEALTH_CHECK_TIMEOUT_MS = 30_000;
@@ -29,21 +32,7 @@ const LIFECYCLE_TIMEOUT_MS = 5_000;
  */
 const SYNTHESISED_ENTRYPOINT = `set -e
 export PORT="\${APP_PORT:-4001}"
-# Resolve astro. System-scope apps inherit it from the workspace's hoisted
-# /workspace/node_modules/.bin/astro. User/global-scope apps live outside
-# the pnpm workspace; they have to install astro into their own
-# node_modules. Run npm install only when neither path has astro yet.
-if [ ! -x "node_modules/.bin/astro" ] && [ ! -x "/workspace/node_modules/.bin/astro" ]; then
-  echo "[\${APP_ID:-app}] npm install (astro not yet present)..."
-  npm install --prefer-offline 2>&1 || npm install
-fi
-# Pull @aura/* SDK packages from the local OCI registry when referenced in
-# \`auraDependencies\` (user/global) or legacy \`dependencies\` and the
-# workspace symlinks didn't materialise them. No-op when /workspace's
-# pnpm install already populated /workspace/node_modules/@aura/*.
-if [ ! -d node_modules/@aura ] && grep -qE '"(aura)?[dD]ependencies"|"@aura/' package.json 2>/dev/null; then
-  command -v aura >/dev/null && aura sdk install --quiet || true
-fi
+${PROVISION_SHELL}
 ASTRO="node_modules/.bin/astro"
 [ -x "\$ASTRO" ] || ASTRO="/workspace/node_modules/.bin/astro"
 echo "[\${APP_ID:-app}] Starting Astro server on port \$PORT via \$ASTRO"
@@ -51,6 +40,9 @@ exec "\$ASTRO" dev --host 0.0.0.0 --port "\$PORT"`;
 
 interface SpawnedApp {
   process: ChildProcess;
+  /** Watches the app's output to tell "installing dependencies" from
+   *  "failing to boot" — see provisioning.ts. */
+  provision: ProvisionWatch;
   port: number;
   appId: string;
   /**
@@ -196,10 +188,17 @@ export class ProotRunner implements SandboxRunner {
       { cwd: appDir, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true },
     );
 
-    child.stdout?.on('data', (d) => process.stdout.write(`[${instanceId}] ${d}`));
-    child.stderr?.on('data', (d) => process.stderr.write(`[${instanceId}] ${d}`));
+    const provision = new ProvisionWatch();
+    child.stdout?.on('data', (d) => {
+      provision.observe(d.toString());
+      process.stdout.write(`[${instanceId}] ${d}`);
+    });
+    child.stderr?.on('data', (d) => {
+      provision.observe(d.toString());
+      process.stderr.write(`[${instanceId}] ${d}`);
+    });
 
-    this.processes.set(instanceId, { process: child, port, appId, manifest });
+    this.processes.set(instanceId, { process: child, port, appId, manifest, provision });
 
     try {
       await this.waitHealthy(instanceId, appId, port, manifest);
@@ -352,7 +351,12 @@ export class ProotRunner implements SandboxRunner {
    * content bug — a bare 200 is no longer enough.
    */
   private async waitHealthy(instanceId: string, appId: string, port: number, manifest: AppManifest): Promise<void> {
-    const deadline = Date.now() + HEALTH_CHECK_TIMEOUT_MS;
+    // See ContainerRunner.waitHealthy — a cold app installs its dependency
+    // tree in the entrypoint, which must not be timed with the boot budget.
+    const startedAt    = Date.now();
+    const hardDeadline = startedAt + PROVISION_TIMEOUT_MS;
+    const provision    = this.processes.get(instanceId)?.provision;
+    let   deadline     = startedAt + HEALTH_CHECK_TIMEOUT_MS;
     const healthUrl = `http://localhost:${port}${lifecyclePath(manifest, instanceId, 'health')}`;
     let lastBody: string | null = null;
     while (Date.now() < deadline) {
@@ -379,9 +383,19 @@ export class ProotRunner implements SandboxRunner {
         if (err instanceof Error && err.message.includes('identity mismatch')) throw err;
         // Otherwise keep polling (connection refused, etc.)
       }
+      deadline = nextHealthDeadline({
+        now: Date.now(), deadline, hardDeadline,
+        isProvisioning: provision?.isProvisioning ?? false,
+        bootBudgetMs:   HEALTH_CHECK_TIMEOUT_MS,
+      });
       await sleep(HEALTH_CHECK_INTERVAL_MS);
     }
-    throw new Error(`[ProotRunner] ${instanceId} did not become healthy within ${HEALTH_CHECK_TIMEOUT_MS}ms (last body: ${lastBody ?? 'none'})`);
+    const waited = Math.round((Date.now() - startedAt) / 1000);
+    throw new Error(
+      provision?.everProvisioned
+        ? `[ProotRunner] ${instanceId} did not become healthy ${waited}s after starting to install its dependencies (last body: ${lastBody ?? 'none'})`
+        : `[ProotRunner] ${instanceId} did not become healthy within ${HEALTH_CHECK_TIMEOUT_MS}ms (last body: ${lastBody ?? 'none'})`,
+    );
   }
 
   async callLifecycle(instanceId: string, hook: string): Promise<void> {

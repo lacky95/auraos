@@ -127,6 +127,7 @@ export type NexusProgressEvent =
   | { type: 'permission.approved' }
   | { type: 'permission.denied' }
   | { type: 'install.start' }
+  | { type: 'install.provision'; message: string }
   | { type: 'install.done';       record: InstallRecord }
   | { type: 'publish.start' }
   | { type: 'publish.progress';   message: string }

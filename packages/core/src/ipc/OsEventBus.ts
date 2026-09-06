@@ -108,6 +108,9 @@ export interface OsEvents {
    * phase 1 (global, mounted into every app).
    */
   'context:volumes:changed': { name: string; deleted: boolean };
+  /** A line of output from the dependency install an app install performs.
+   *  Chatty by nature (npm progress) — for a live log view, not for state. */
+  'nexus:install.progress':   { id: string; line: string };
   /** Nexus install completed. `record` is the persisted install metadata. */
   'nexus:install.complete':   { id: string; record: unknown };
   /** Nexus update completed (or no-op'd when up-to-date). */
