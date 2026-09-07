@@ -68,6 +68,11 @@ try {
       color: var(--aura-color-danger, #e55); cursor: pointer; font-size: 0.62rem;
       padding: 3px 8px; letter-spacing: 0.08em;
     }
+    /* A row whose write is still in flight (data-pending set by markPending).
+       Attribute selector on purpose: the flag is JS state, not a style class. */
+    .ctx-table tr[data-pending] { opacity: 0.55; }
+    .ctx-del:disabled { cursor: default; opacity: 0.6; }
+    .ctx-form button:disabled { cursor: progress; opacity: 0.6; }
     .ctx-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
     .ctx-form label { display: block; font-size: 0.62rem; color: var(--aura-color-text-dim); margin-bottom: 4px; }
     /* Theme tokens only, no literal fallbacks: every one of these is defined by
@@ -110,6 +115,10 @@ try {
       <button class="ctx-tab active" data-tab="vars">Var / Secrets</button>
       <button class="ctx-tab" data-tab="volumes">Volumes</button>
     </div>
+    <!-- Status sits under the tabs, not at the page bottom: in a small tile
+         the bottom is below the fold and a SAVING/ERROR line there is never seen. -->
+    <p id="status" class="ctx-hint"></p>
+
 
     <!-- ── VAR / SECRETS ─────────────────────────────────────────────── -->
     <div class="ctx-panel active" id="panel-vars">
@@ -211,7 +220,6 @@ try {
       </p>
     </div>
 
-    <p id="status" class="ctx-hint"></p>
   </main>
 
   <div id="ctx-dialog" class="ctx-dialog-backdrop">
@@ -232,6 +240,13 @@ try {
     const valueEl = document.getElementById('ctx-value');
     const KEY_RE = /^[A-Z_][A-Z0-9_]*$/;
     const VOL_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+    // How long a write may go unanswered before the page stops waiting on it
+    // and re-reads the list instead (see writeJson).
+    const WRITE_TIMEOUT_MS = 8000;
+    // While a write is in flight, re-read the list this often; the row is
+    // confirmed from the list as soon as the server shows it, whether or not
+    // the write's own response ever arrives.
+    const POLL_MS = 2000;
 
     function esc(s) {
       return String(s).replace(/[&<>"']/g, (c) =>
@@ -241,6 +256,65 @@ try {
       statusEl.innerHTML = danger
         ? `<b style="color: var(--aura-color-danger);">${html}</b>`
         : html;
+    }
+    function now() { return new Date().toLocaleTimeString(); }
+
+    /**
+     * Write with a hard deadline that does not depend on fetch honouring an
+     * abort: the deadline is a plain timer raced against the request. On the
+     * deadline the caller re-reads the list to learn what actually happened.
+     * Resolves { ok, status, body }; throws an Error with `timedOut: true`
+     * when the deadline passes, any other fetch error as-is.
+     */
+    async function writeJson(url, init) {
+      const ctrl = new AbortController();
+      let timer;
+      const deadline = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const e = new Error(`no response after ${WRITE_TIMEOUT_MS / 1000}s`);
+          e.timedOut = true;
+          reject(e);
+          try { ctrl.abort(); } catch { /* ignore */ }
+        }, WRITE_TIMEOUT_MS);
+      });
+      deadline.catch(() => undefined);   // handled by whoever loses the race
+      try {
+        const r = await Promise.race([fetch(url, { ...init, cache: 'no-store', signal: ctrl.signal }), deadline]);
+        const body = await Promise.race([r.json().catch(() => null), deadline]);
+        return { ok: r.ok, status: r.status, body };
+      } catch (err) {
+        if (err && !err.timedOut && err.name === 'AbortError') err.timedOut = true;
+        throw err;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    /**
+     * Poll `check()` every POLL_MS until it returns true or `stop()` is
+     * called. Used alongside a write so the UI confirms from the list.
+     */
+    function pollUntil(check) {
+      let stopped = false;
+      let timer = null;
+      const tick = async () => {
+        if (stopped) return;
+        let done = false;
+        try { done = await check(); } catch { done = false; }
+        if (stopped) return;
+        if (done) { stopped = true; return; }
+        timer = setTimeout(tick, POLL_MS);
+      };
+      timer = setTimeout(tick, POLL_MS);
+      return () => { stopped = true; clearTimeout(timer); };
+    }
+
+    /** Mark a row as "write in flight": dimmed, its DELETE button inert. */
+    function markPending(tr, on) {
+      if (!tr) return;
+      if (on) tr.dataset.pending = '1';
+      else delete tr.dataset.pending;
+      tr.querySelectorAll('.ctx-del').forEach((b) => { b.disabled = on; });
     }
 
     // ── Tabs ──────────────────────────────────────────────────────────
@@ -288,21 +362,17 @@ try {
     function existingKeys() {
       return new Set(Array.from(document.querySelectorAll('#ctx-rows tr[data-key]')).map((tr) => tr.dataset.key));
     }
+    function varRow(key) {
+      return document.querySelector(`#ctx-rows tr[data-key="${CSS.escape(key)}"]`);
+    }
 
-    async function refresh() {
-      const r = await fetch('/api/os/context', { cache: 'no-store' });
-      if (!r.ok) throw new Error(`GET /api/os/context → ${r.status}`);
-      const { entries } = await r.json();
-      const tbody = document.getElementById('ctx-rows');
-      if (!entries || entries.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="ctx-empty">No context entries yet. Add one below.</td></tr>';
-        return;
-      }
-      tbody.innerHTML = entries.map((e) => {
-        const badge = e.kind === 'secret' ? 'SECRET' : 'VARIABLE';
-        const val = e.kind === 'variable' ? esc(e.value ?? '') : '••••••••';
-        const inject = (e.inject || []).map((t) => t.toUpperCase()).join(' · ');
-        return `
+    const CTX_EMPTY_ROW = '<tr><td colspan="6" class="ctx-empty">No context entries yet. Add one below.</td></tr>';
+
+    function varRowHtml(e) {
+      const badge = e.kind === 'secret' ? 'SECRET' : 'VARIABLE';
+      const val = e.kind === 'variable' ? esc(e.value ?? '') : '••••••••';
+      const inject = (e.inject || []).map((t) => t.toUpperCase()).join(' · ');
+      return `
         <tr data-key="${esc(e.key)}">
           <td class="ctx-key">${esc(e.key)}</td>
           <td><span class="ctx-badge ${e.kind}">${badge}</span></td>
@@ -311,10 +381,54 @@ try {
           <td>${e.updatedAt ? new Date(e.updatedAt).toLocaleString() : '—'}</td>
           <td><button class="ctx-del" data-key="${esc(e.key)}">DELETE</button></td>
         </tr>`;
-      }).join('');
+    }
+
+    /**
+     * Put one entry into the table without waiting for a re-list. Used both
+     * for the optimistic row (before the write) and for the authoritative
+     * one from the response or the list. Keeps the server's key-sorted order.
+     */
+    function upsertVarRow(e) {
+      const tbody = document.getElementById('ctx-rows');
+      const empty = tbody.querySelector('.ctx-empty');
+      if (empty) empty.closest('tr').remove();
+      const existing = varRow(e.key);
+      if (existing) existing.outerHTML = varRowHtml(e);
+      else {
+        const after = Array.from(tbody.querySelectorAll('tr[data-key]'))
+          .find((tr) => tr.dataset.key.localeCompare(e.key) > 0);
+        if (after) after.insertAdjacentHTML('beforebegin', varRowHtml(e));
+        else tbody.insertAdjacentHTML('beforeend', varRowHtml(e));
+      }
+    }
+
+    function removeVarRow(key) {
+      const tbody = document.getElementById('ctx-rows');
+      const row = varRow(key);
+      if (row) row.remove();
+      // Restore the placeholder so the table never renders blank.
+      if (!tbody.querySelector('tr[data-key]')) tbody.innerHTML = CTX_EMPTY_ROW;
+    }
+
+    /** Read the list; same deadline as a write so a hung read can't park the page. */
+    async function fetchEntries() {
+      const res = await writeJson('/api/os/context', { method: 'GET' });
+      if (!res.ok) throw new Error(`GET /api/os/context → ${res.status}`);
+      return (res.body && res.body.entries) || [];
+    }
+
+    function renderEntries(entries) {
+      const tbody = document.getElementById('ctx-rows');
+      tbody.innerHTML = entries.length ? entries.map(varRowHtml).join('') : CTX_EMPTY_ROW;
+    }
+
+    async function refresh() {
+      renderEntries(await fetchEntries());
     }
 
     async function addVar() {
+      const addBtn = document.getElementById('ctx-add');
+      if (addBtn.disabled) return;   // a write is already in flight
       const key = document.getElementById('ctx-key').value.trim();
       const value = valueEl.value;
       const kind = kindEl.value;
@@ -328,26 +442,115 @@ try {
         const ok = await confirmDialog(`<b>${esc(key)}</b> already exists. Override its value and settings?`, 'OVERRIDE');
         if (!ok) { setStatus(`Cancelled — existing <b>${esc(key)}</b> kept`); return; }
       }
+
+      // React to the click BEFORE the request: pending status, optimistic
+      // row, button locked. The page must visibly change whether or not the
+      // write's response ever comes back.
+      const local = { key, kind, inject, updatedAt: Date.now(), value: kind === 'variable' ? value : null };
+      const prev = varRow(key);
+      const prevHtml = prev ? prev.outerHTML : null;
+      const sentAt = Date.now();
+      let settled = false;
+      const revert = () => {
+        const tr = varRow(key);
+        if (!tr) return;
+        if (prevHtml) tr.outerHTML = prevHtml;
+        else removeVarRow(key);
+      };
+      const confirmed = (entry, how) => {
+        if (settled) return;
+        settled = true;
+        upsertVarRow(entry || local);          // re-render clears pending
+        document.getElementById('ctx-key').value = '';
+        valueEl.value = '';
+        addBtn.disabled = false;
+        setStatus(`SAVED <b>${esc(key)}</b> (${kind} · ${inject.join('+')}) · ${now()}${how ? ` — ${how}` : ''}`);
+      };
+      addBtn.disabled = true;
+      setStatus(`SAVING <b>${esc(key)}</b>…`);
+      upsertVarRow(local);
+      markPending(varRow(key), true);
+
+      // Confirm from the list while the write is in flight. An entry newer
+      // than our click proves the write landed even if its response is lost.
+      const stopPoll = pollUntil(async () => {
+        const entries = await fetchEntries();
+        const hit = entries.find((e) => e.key === key && e.updatedAt >= sentAt - 1000);
+        if (!hit) return false;
+        confirmed(hit, 'confirmed by re-read');
+        return true;
+      });
+
       try {
-        const r = await fetch('/api/os/context', {
+        const res = await writeJson('/api/os/context', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ key, value, kind, inject }),
         });
-        if (!r.ok) { setStatus(`ERROR — ${(await r.json()).error ?? r.status}`, true); return; }
-        document.getElementById('ctx-key').value = '';
-        valueEl.value = '';
-        setStatus(`SAVED <b>${esc(key)}</b> (${kind} · ${inject.join('+')}) · ${new Date().toLocaleTimeString()}`);
+        stopPoll();
+        if (settled) return;
+        if (!res.ok) { revert(); setStatus(`ERROR — ${esc(res.body?.error ?? res.status)}`, true); return; }
+        confirmed(res.body && res.body.key ? res.body : local, '');
         try { await refresh(); } catch (err) { console.warn('[context] entry list reconcile failed', err); }
-      } catch (err) { setStatus(`ERROR — ${err.message}`, true); }
+      } catch (err) {
+        stopPoll();
+        if (settled) return;
+        if (!err.timedOut) { revert(); setStatus(`ERROR — ${esc(err.message)}`, true); return; }
+        // Deadline hit and the poll hasn't confirmed either: one last read.
+        console.warn(`[context] POST /api/os/context ${key}: ${err.message} — re-reading the list`);
+        try {
+          const entries = await fetchEntries();
+          const hit = entries.find((e) => e.key === key);
+          if (hit) confirmed(hit, "confirmed by re-read; the write's response never reached this page");
+          else { revert(); setStatus(`ERROR — <b>${esc(key)}</b> was not saved (${esc(err.message)})`, true); }
+          if (hit) renderEntries(entries);
+        } catch (err2) {
+          revert();
+          setStatus(`ERROR — ${esc(err.message)}, and the re-read failed too (${esc(err2.message)}). Reload to see the current state.`, true);
+        }
+      } finally {
+        addBtn.disabled = false;
+      }
     }
 
     async function delVar(key) {
+      const tr = varRow(key);
+      if (tr && tr.dataset.pending) return;   // already being written
+      markPending(tr, true);
+      setStatus(`DELETING <b>${esc(key)}</b>…`);
+      let settled = false;
+      const confirmed = (how) => {
+        if (settled) return;
+        settled = true;
+        removeVarRow(key);
+        setStatus(`DELETED <b>${esc(key)}</b> · ${now()}${how ? ` — ${how}` : ''}`);
+      };
+      const stopPoll = pollUntil(async () => {
+        const entries = await fetchEntries();
+        if (entries.some((e) => e.key === key)) return false;
+        confirmed('confirmed by re-read');
+        return true;
+      });
       try {
-        const r = await fetch(`/api/os/context/${encodeURIComponent(key)}`, { method: 'DELETE' });
-        if (!r.ok) { setStatus(`ERROR — ${(await r.json()).error ?? r.status}`, true); return; }
-        setStatus(`DELETED <b>${esc(key)}</b> · ${new Date().toLocaleTimeString()}`);
+        const res = await writeJson(`/api/os/context/${encodeURIComponent(key)}`, { method: 'DELETE' });
+        stopPoll();
+        if (settled) return;
+        if (!res.ok) { markPending(varRow(key), false); setStatus(`ERROR — ${esc(res.body?.error ?? res.status)}`, true); return; }
+        confirmed('');
         try { await refresh(); } catch (err) { console.warn('[context] entry list reconcile failed', err); }
-      } catch (err) { setStatus(`ERROR — ${err.message}`, true); }
+      } catch (err) {
+        stopPoll();
+        if (settled) return;
+        if (!err.timedOut) { markPending(varRow(key), false); setStatus(`ERROR — ${esc(err.message)}`, true); return; }
+        console.warn(`[context] DELETE /api/os/context/${key}: ${err.message} — re-reading the list`);
+        try {
+          const entries = await fetchEntries();
+          if (!entries.some((e) => e.key === key)) { confirmed("confirmed by re-read; the write's response never reached this page"); renderEntries(entries); }
+          else { markPending(varRow(key), false); setStatus(`ERROR — <b>${esc(key)}</b> still exists (${esc(err.message)})`, true); }
+        } catch (err2) {
+          markPending(varRow(key), false);
+          setStatus(`ERROR — ${esc(err.message)}, and the re-read failed too (${esc(err2.message)}). Reload to see the current state.`, true);
+        }
+      }
     }
 
     /**
@@ -358,15 +561,21 @@ try {
     function bindRowDeletes() {
       document.getElementById('ctx-rows').addEventListener('click', (e) => {
         const btn = e.target.closest('.ctx-del[data-key]');
-        if (btn) delVar(btn.dataset.key);
+        if (btn && !btn.disabled) delVar(btn.dataset.key);
       });
       document.getElementById('vol-rows').addEventListener('click', (e) => {
         const btn = e.target.closest('.ctx-del[data-vol]');
-        if (btn) delVol(btn.dataset.vol);
+        if (btn && !btn.disabled) delVol(btn.dataset.vol);
       });
     }
 
     // ── Volumes ───────────────────────────────────────────────────────
+    const VOL_EMPTY_ROW = '<tr><td colspan="5" class="ctx-empty">No volumes yet. Create one below.</td></tr>';
+
+    function volRow(name) {
+      return document.querySelector(`#vol-rows tr[data-name="${CSS.escape(name)}"]`);
+    }
+
     function volRowHtml(v) {
       return `
         <tr data-name="${esc(v.name)}">
@@ -378,20 +587,14 @@ try {
         </tr>`;
     }
 
-    /**
-     * Put one volume into the table without waiting for a re-list. POST
-     * /api/os/volumes returns the created entry, so the row it describes is
-     * authoritative — rendering it here means a create shows up immediately
-     * even if the follow-up GET is slow, cached or fails.
-     */
+    /** Same contract as upsertVarRow, for the volumes table. */
     function upsertVolRow(v) {
       const tbody = document.getElementById('vol-rows');
       const empty = tbody.querySelector('.ctx-empty');
       if (empty) empty.closest('tr').remove();
-      const existing = tbody.querySelector(`tr[data-name="${CSS.escape(v.name)}"]`);
+      const existing = volRow(v.name);
       if (existing) existing.outerHTML = volRowHtml(v);
       else {
-        // Keep the server's name-sorted order.
         const after = Array.from(tbody.querySelectorAll('tr[data-name]'))
           .find((tr) => tr.dataset.name.localeCompare(v.name) > 0);
         if (after) after.insertAdjacentHTML('beforebegin', volRowHtml(v));
@@ -399,55 +602,135 @@ try {
       }
     }
 
-    async function refreshVols() {
-      // no-store: this list must reflect the write that just happened, never a
-      // cached copy of the pre-write state.
-      const r = await fetch('/api/os/volumes', { cache: 'no-store' });
-      if (!r.ok) throw new Error(`GET /api/os/volumes → ${r.status}`);
-      const { volumes } = await r.json();
+    function removeVolRow(name) {
       const tbody = document.getElementById('vol-rows');
-      if (!volumes || volumes.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" class="ctx-empty">No volumes yet. Create one below.</td></tr>';
-        return;
-      }
-      tbody.innerHTML = volumes.map(volRowHtml).join('');
+      const row = volRow(name);
+      if (row) row.remove();
+      if (!tbody.querySelector('tr[data-name]')) tbody.innerHTML = VOL_EMPTY_ROW;
+    }
+
+    async function fetchVolumes() {
+      const res = await writeJson('/api/os/volumes', { method: 'GET' });
+      if (!res.ok) throw new Error(`GET /api/os/volumes → ${res.status}`);
+      return (res.body && res.body.volumes) || [];
+    }
+
+    function renderVolumes(volumes) {
+      const tbody = document.getElementById('vol-rows');
+      tbody.innerHTML = volumes.length ? volumes.map(volRowHtml).join('') : VOL_EMPTY_ROW;
+    }
+
+    async function refreshVols() {
+      renderVolumes(await fetchVolumes());
     }
 
     async function addVol() {
+      const addBtn = document.getElementById('vol-add');
+      if (addBtn.disabled) return;
       const name = document.getElementById('vol-name').value.trim();
       const mountPath = document.getElementById('vol-path').value.trim();
       const mode = document.getElementById('vol-mode').value;
       if (!VOL_NAME_RE.test(name)) { setStatus('Invalid name — lowercase letters/digits/-/_ , e.g. shared', true); return; }
       if (!mountPath.startsWith('/')) { setStatus('Mount path must be absolute (start with /), e.g. /mnt/shared', true); return; }
+
+      const local = { name, mountPath, mode, createdAt: Date.now() };
+      const prev = volRow(name);
+      const prevHtml = prev ? prev.outerHTML : null;
+      let settled = false;
+      const revert = () => {
+        const tr = volRow(name);
+        if (!tr) return;
+        if (prevHtml) tr.outerHTML = prevHtml;
+        else removeVolRow(name);
+      };
+      const confirmed = (entry, how) => {
+        if (settled) return;
+        settled = true;
+        upsertVolRow(entry || local);
+        document.getElementById('vol-name').value = '';
+        document.getElementById('vol-path').value = '';
+        addBtn.disabled = false;
+        setStatus(`CREATED volume <b>${esc(name)}</b> → ${esc(mountPath)} (${mode}) · restart apps to mount${how ? ` — ${how}` : ''}`);
+      };
+      addBtn.disabled = true;
+      setStatus(`CREATING volume <b>${esc(name)}</b>…`);
+      upsertVolRow(local);
+      markPending(volRow(name), true);
+      const stopPoll = pollUntil(async () => {
+        const hit = (await fetchVolumes()).find((v) => v.name === name);
+        if (!hit) return false;
+        confirmed(hit, 'confirmed by re-read');
+        return true;
+      });
       try {
-        const r = await fetch('/api/os/volumes', {
+        const res = await writeJson('/api/os/volumes', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name, mountPath, mode }),
         });
-        if (!r.ok) { setStatus(`ERROR — ${(await r.json()).error ?? r.status}`, true); return; }
-        // Render the created row from the POST response first, then reconcile
-        // against the server list. The row is up whichever way the GET goes.
-        const created = await r.json().catch(() => null);
-        upsertVolRow(created ?? { name, mountPath, mode, createdAt: Date.now() });
-        document.getElementById('vol-name').value = '';
-        document.getElementById('vol-path').value = '';
-        setStatus(`CREATED volume <b>${esc(name)}</b> → ${esc(mountPath)} (${mode}) · restart apps to mount`);
+        stopPoll();
+        if (settled) return;
+        if (!res.ok) { revert(); setStatus(`ERROR — ${esc(res.body?.error ?? res.status)}`, true); return; }
+        confirmed(res.body && res.body.name ? res.body : local, '');
         try { await refreshVols(); } catch (err) { console.warn('[context] volume list reconcile failed', err); }
-      } catch (err) { setStatus(`ERROR — ${err.message}`, true); }
+      } catch (err) {
+        stopPoll();
+        if (settled) return;
+        if (!err.timedOut) { revert(); setStatus(`ERROR — ${esc(err.message)}`, true); return; }
+        console.warn(`[context] POST /api/os/volumes ${name}: ${err.message} — re-reading the list`);
+        try {
+          const volumes = await fetchVolumes();
+          const hit = volumes.find((v) => v.name === name);
+          if (hit) { confirmed(hit, "confirmed by re-read; the write's response never reached this page"); renderVolumes(volumes); }
+          else { revert(); setStatus(`ERROR — volume <b>${esc(name)}</b> was not created (${esc(err.message)})`, true); }
+        } catch (err2) {
+          revert();
+          setStatus(`ERROR — ${esc(err.message)}, and the re-read failed too (${esc(err2.message)}). Reload to see the current state.`, true);
+        }
+      } finally {
+        addBtn.disabled = false;
+      }
     }
 
     async function delVol(name) {
+      const tr = volRow(name);
+      if (tr && tr.dataset.pending) return;
       const ok = await confirmDialog(`Delete volume <b>${esc(name)}</b>? This removes its data and unmounts it from apps.`, 'DELETE');
       if (!ok) { setStatus(`Cancelled — volume <b>${esc(name)}</b> kept`); return; }
+      markPending(volRow(name), true);
+      setStatus(`DELETING volume <b>${esc(name)}</b>…`);
+      let settled = false;
+      const confirmed = (how) => {
+        if (settled) return;
+        settled = true;
+        removeVolRow(name);
+        setStatus(`DELETED volume <b>${esc(name)}</b> · ${now()}${how ? ` — ${how}` : ''}`);
+      };
+      const stopPoll = pollUntil(async () => {
+        if ((await fetchVolumes()).some((v) => v.name === name)) return false;
+        confirmed('confirmed by re-read');
+        return true;
+      });
       try {
-        const r = await fetch(`/api/os/volumes/${encodeURIComponent(name)}`, { method: 'DELETE' });
-        if (!r.ok) { setStatus(`ERROR — ${(await r.json()).error ?? r.status}`, true); return; }
-        // Drop the row up-front for the same reason creates render up-front.
-        const row = document.querySelector(`#vol-rows tr[data-name="${CSS.escape(name)}"]`);
-        if (row) row.remove();
-        setStatus(`DELETED volume <b>${esc(name)}</b> · ${new Date().toLocaleTimeString()}`);
+        const res = await writeJson(`/api/os/volumes/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        stopPoll();
+        if (settled) return;
+        if (!res.ok) { markPending(volRow(name), false); setStatus(`ERROR — ${esc(res.body?.error ?? res.status)}`, true); return; }
+        confirmed('');
         try { await refreshVols(); } catch (err) { console.warn('[context] volume list reconcile failed', err); }
-      } catch (err) { setStatus(`ERROR — ${err.message}`, true); }
+      } catch (err) {
+        stopPoll();
+        if (settled) return;
+        if (!err.timedOut) { markPending(volRow(name), false); setStatus(`ERROR — ${esc(err.message)}`, true); return; }
+        console.warn(`[context] DELETE /api/os/volumes/${name}: ${err.message} — re-reading the list`);
+        try {
+          const volumes = await fetchVolumes();
+          if (!volumes.some((v) => v.name === name)) { confirmed("confirmed by re-read; the write's response never reached this page"); renderVolumes(volumes); }
+          else { markPending(volRow(name), false); setStatus(`ERROR — volume <b>${esc(name)}</b> still exists (${esc(err.message)})`, true); }
+        } catch (err2) {
+          markPending(volRow(name), false);
+          setStatus(`ERROR — ${esc(err.message)}, and the re-read failed too (${esc(err2.message)}). Reload to see the current state.`, true);
+        }
+      }
     }
 
     // ── Wire up ───────────────────────────────────────────────────────

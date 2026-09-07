@@ -326,6 +326,16 @@ The terminal apps' bash also annotates the prompt with the detected layer
 - After a write, render the row from the response you already have; treat the
   follow-up list GET as reconciliation, and never swallow its failure with a
   bare `if (!res.ok) return`.
+- Never let the UI wait on a write forever. Inside an app iframe a write's
+  response can fail to reach the page while reads keep working (confirmed in
+  Chromium behind a local tunnel: the POST lands on the server in ms, reads
+  answer in ms, the page never receives the write's response headers). So:
+  change the page *before* the request (pending status, optimistic row,
+  control disabled); race the fetch against a plain `setTimeout` deadline —
+  `AbortSignal.timeout` alone did not fire there; and while the write is in
+  flight, re-read the list every ~2 s and confirm the row from the list as
+  soon as the server shows it. `apps/com.aura.settings/src/pages/context.astro`
+  (`writeJson`, `pollUntil`) is the reference implementation.
 - Apps cannot mutate state in `/os/` or the shell — only `/data` is writable
   per-instance. Use a content provider if you need to expose state to others.
 - PRoot is a filesystem sandbox, not a security sandbox: it shares the host
