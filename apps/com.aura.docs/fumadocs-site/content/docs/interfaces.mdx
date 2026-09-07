@@ -1,0 +1,198 @@
+---
+title: Interfaces
+description: The Interface Registry — declare what your app provides, discover what others provide, and connect directly.
+---
+
+The **Interface Registry** is the OS's phone book. An app declares what it
+**provides** (a REST path, an MCP server, a WebSocket, an event topic, a KV
+prefix) and what it **consumes**. Any app can then ask "who provides X, and
+what address do I dial?"
+
+Two things follow from that, and they explain most of the design:
+
+- **Registry, not bus.** The OS answers the lookup and then gets out of the
+  way. Provider and consumer talk **directly** — no traffic passes through the
+  OS. There is no broker, no canonical message format, no transform layer.
+- **Projection, not store.** Nothing is persisted. The registry is derived
+  from installed manifests plus running instances, and is rebuilt from them
+  continuously. Nothing can rot, orphan, or drift from reality.
+
+---
+
+## Provide an interface
+
+Add `provides` to your `app.manifest.json`:
+
+```json
+{
+  "id": "com.acme.api",
+  "provides": [
+    {
+      "name": "transcribe",
+      "kind": "rest",
+      "address": "/api/transcribe",
+      "description": "POST multipart audio → text."
+    }
+  ]
+}
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `name` | yes | kebab-case, unique within your app. The global ref is `<appId>/<name>`. |
+| `kind` | yes | `http` · `rest` · `mcp` · `ws` · `event` · `kv` |
+| `address` | yes | see below — semantics depend on `kind` |
+| `version` | no | free-form string, defaults to `"1"`. The OS never interprets it. |
+| `description` | no | shown in Settings → Interfaces |
+| `schema` | no | pointer to a schema doc (path or URL); descriptive only |
+| `permission` | no | advisory today — surfaced, never enforced |
+
+### What `address` means
+
+The OS **never rewrites your address**. It only prefixes path kinds with the
+proxy base when handing out a live URL.
+
+| Kind | `address` is | Example | Dialable `url` becomes |
+|---|---|---|---|
+| `http` `rest` `mcp` `ws` | a path on **your own server**, must start with `/` | `/api/transcribe` | `/api/proxy/<instanceId>/api/transcribe` |
+| `event` | an OsEventBus topic or glob, **no** leading `/` | `whisper:transcript.*` | `/api/apps/events?topics=…` |
+| `kv` | a KV namespace/key prefix, **no** leading `/` | `app/com.acme.api/jobs` | `/api/kv/app/com.acme.api/jobs` |
+
+That leading-slash rule is validated at parse time: get it wrong and the
+manifest is rejected rather than silently producing an address nobody can dial.
+
+`ws` needs no extra work — the shell already upgrades WebSockets on the proxy
+prefix.
+
+---
+
+## Consume an interface
+
+```json
+{
+  "consumes": [
+    { "name": "transcribe", "kind": "rest", "appId": "com.acme.api" }
+  ]
+}
+```
+
+`appId` pins you to one provider; omit it to accept any app offering that
+kind + name. `version` is an exact match when set. `required` defaults to
+`true` — set it to `false` if your app degrades gracefully without it.
+
+Declaring `consumes` **injects nothing**. It is how you get a
+resolution report: Settings → Interfaces shows each dependency as `LIVE`,
+`INSTALLED` (declared by an installed app that isn't running) or `UNMET`
+(nothing installed provides it). That column is the fastest answer to "why
+doesn't this work?".
+
+---
+
+## Use it from an app
+
+```ts
+import { OsClient } from '@aura/app-sdk';
+const os = new OsClient();
+
+// Who provides this? Returns the best match, or null.
+const view = await os.interfaces.resolve('com.acme.api/transcribe');
+
+if (view?.status === 'live') {
+  const res = await fetch(os.interfaces.urlFor(view)!, { method: 'POST', body: audio });
+}
+```
+
+| Method | Does |
+|---|---|
+| `list(filter?)` | everything, filterable by `kind` · `appId` · `name` · `live` |
+| `resolve(ref)` | single best provider, or `null`. Takes `'appId/name'` or an object |
+| `urlFor(view)` | a fetchable URL (`view.url` is shell-relative) — `null` if not live |
+| `consumers()` | the resolution report |
+| `register(spec)` | publish an interface opened at runtime |
+| `unregister(name)` | withdraw one |
+
+`resolve()` returns a **stopped-but-installed** provider with
+`status: 'catalog'` rather than `null`, so you can tell "not installed" from
+"not running" — those need different fixes.
+
+### Statuses
+
+| Status | Means |
+|---|---|
+| `live` | a running instance serves it; `url` is dialable |
+| `catalog` | installed and declared, but nothing is running |
+| `down` | an instance holds it but has no port (starting, or dying) |
+
+---
+
+## Runtime registration
+
+For interfaces whose address isn't known until the app is up:
+
+```ts
+await os.interfaces.register({ name: 'live-feed', kind: 'ws', address: '/ws' });
+```
+
+An app with **no** `provides` block can still register this way — being live
+is what earns you the slot.
+
+Registrations are bound to your **instance**, not to your good behaviour: the
+OS drops all of them when the instance stops, so forgetting `unregister()`
+cannot leak an entry. `unregister()` is therefore best-effort cleanup, not a
+requirement.
+
+Two rules: a runtime name may not shadow one from your manifest (`409` — the
+manifest is the contract others discovered you by), and re-registering an
+existing runtime name **moves** its address rather than duplicating it.
+
+---
+
+## HTTP API
+
+```
+GET    /api/interfaces                     → { interfaces, consumers }
+       ?kind= &appId= &name= &live=1       filters (ANDed)
+       ?consumers=0                        skip the resolution report
+POST   /api/interfaces                     register (body = a provides entry)
+DELETE /api/interfaces/<name>              withdraw a runtime registration
+```
+
+Reads are open to every app — they expose only what apps themselves declared.
+Writes are caller-scoped: there is no `appId` field in a write, so you can only
+ever register under your own instance. In a browser context the OS identifies
+you from the iframe's proxy URL; server-side (no Referer) the SDK sends the
+`X-Aura-Instance-Id` the OS injected at spawn.
+
+<Callout type="warn">
+App identity is **self-asserted**, exactly as it is for `/api/kv` and
+`/api/data` — apps here are assumed cooperating, not adversarial. The
+containment is that entries die with their instance, so a bad registration is
+one wrong address until that app stops, never a persistent lie.
+</Callout>
+
+---
+
+## Gotchas
+
+- **Rebuild core after editing a manifest schema.** Adding `provides` to a
+  manifest without rebuilding `@aura/core` silently drops the field (zod strips
+  unknown keys) and looks like "the registry can't see my app".
+- **Hand-editing a manifest while the OS runs** does not refresh the catalog
+  until the app is reinstalled, an admin route touches it, or the shell
+  restarts.
+- **The OS never probes your address.** If you declare `/mcp` and don't serve
+  it, callers get a 404 from *your* app. A phone book is not a health checker.
+- **Warm-pool instances never register** — they'd advertise an address for an
+  instance no user owns.
+- A **paused** app stays `live`: its port is still bound.
+
+---
+
+## Not yet
+
+- **`stream` kind** (Valkey streams) — the only transport not yet wired.
+  Everything listed above already exists.
+- **Permission enforcement.** `permission` is carried and displayed; grants
+  between consumer and provider come later.
+- **On-demand activation** — the catalog knows about stopped providers, which
+  is what will later let the OS cold-start one when someone dials it.
