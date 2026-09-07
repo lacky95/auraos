@@ -14,16 +14,9 @@ import type { APIRoute } from 'astro';
 import {
   existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
-import { dirname, join, normalize } from 'node:path';
+import { dirname, join } from 'node:path';
 import { FILES_DIR } from '../../state.js';
-
-function safePath(rel: string): string | null {
-  if (!rel || rel.split('/').includes('..')) return null;
-  const abs = join(FILES_DIR, normalize(rel));
-  // Ensure the resolved path is still inside FILES_DIR
-  if (!abs.startsWith(FILES_DIR)) return null;
-  return abs;
-}
+import { safePath } from '../../paths.js';
 
 export const GET: APIRoute = ({ url }) => {
   const dir  = url.searchParams.get('dir');

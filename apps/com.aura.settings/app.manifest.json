@@ -3,7 +3,7 @@
   "name": "Settings",
   "icon": "SET",
   "version": "0.1.0",
-  "description": "OS settings — themes, workspaces, general preferences. UI over the OS KV (no longer a content provider).",
+  "description": "OS settings \u2014 themes, workspaces, general preferences. UI over the OS KV (no longer a content provider). Also serves the Interface Registry as an MCP server.",
   "category": "system",
   "permissions": [
     "storage.read",
@@ -16,7 +16,21 @@
     "system.kv.os.keymap.write",
     "system.kv.os.lockscreen.write"
   ],
-  "tools": ["bash", "node"],
+  "provides": [
+    {
+      "name": "interfaces",
+      "kind": "mcp",
+      "address": "/mcp/interfaces",
+      "version": "1",
+      "description": "MCP server over the OS Interface Registry: list providers, resolve a ref, read the consumer report."
+    }
+  ],
+  "tools": [
+    "bash",
+    "node",
+    "claude",
+    "gh"
+  ],
   "instanceMode": "single",
   "activityMode": "multi",
   "defaultLaunch": "new-activity",

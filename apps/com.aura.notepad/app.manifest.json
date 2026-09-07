@@ -3,10 +3,25 @@
   "name": "Notepad",
   "icon": "NP",
   "version": "0.1.0",
-  "description": "Shared note buffer — multiple activities edit the same text live (single backend, multi activities)",
+  "description": "Shared note buffer — multiple activities edit the same text live (single backend, multi activities). Also serves an MCP server over open tabs and saved notes.",
   "category": "productivity",
-  "permissions": ["storage.read", "storage.write"],
-  "tools": ["bash", "node"],
+  "permissions": [
+    "storage.read",
+    "storage.write"
+  ],
+  "provides": [
+    {
+      "name": "notes",
+      "kind": "mcp",
+      "address": "/mcp/notes",
+      "version": "1",
+      "description": "MCP over the notepad: open tabs (incl. unsaved 'new N' buffers, edited live in every window) and the saved-notes tree under /data/files (filesystem tools)."
+    }
+  ],
+  "tools": [
+    "bash",
+    "node"
+  ],
   "sandbox": "container",
   "instanceMode": "single",
   "activityMode": "multi",
@@ -20,8 +35,12 @@
   "intentFilters": [
     {
       "action": "aura.intent.action.SEND",
-      "category": ["aura.intent.category.DEFAULT"],
-      "dataMime": ["text/plain"]
+      "category": [
+        "aura.intent.category.DEFAULT"
+      ],
+      "dataMime": [
+        "text/plain"
+      ]
     }
   ]
 }

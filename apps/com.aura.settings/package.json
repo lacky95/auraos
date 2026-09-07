@@ -10,15 +10,17 @@
     "typecheck": "astro check"
   },
   "dependencies": {
-    "@aura/app-sdk": "workspace:*",
-    "@aura/ui": "workspace:*",
     "@astrojs/node": "^10.0.0",
     "@astrojs/react": "^4.4.0",
+    "@aura/app-sdk": "workspace:*",
+    "@aura/ui": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@tailwindcss/vite": "^4.1.0",
     "astro": "^6.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "tailwindcss": "^4.1.0"
+    "tailwindcss": "^4.1.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",

@@ -14,7 +14,7 @@
 import {
   existsSync, mkdirSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 export type Tab = {
   id:       string;
@@ -244,4 +244,74 @@ export function loadFile(path: string, name: string, text: string): string {
 export function clearAll(): void {
   state.activities.clear();
   broadcast(state);
+}
+
+// ── Lookups + disk-driven updates (used by the MCP server) ──────────────────
+
+/**
+ * Find an open tab by id, exact name, case-insensitive name ("NEW 2" → `new 2`),
+ * or path (absolute, or relative to FILES_DIR). Agents refer to tabs by
+ * whatever they saw last, so every stable handle works.
+ */
+export function findTab(ref: string): Tab | undefined {
+  const r = ref.trim();
+  if (!r) return undefined;
+  return state.tabs.find(t => t.id === r)
+    ?? state.tabs.find(t => t.name === r)
+    ?? state.tabs.find(t => t.name.toLowerCase() === r.toLowerCase())
+    ?? state.tabs.find(t => t.path !== null && (t.path === r || t.path === join(FILES_DIR, r)));
+}
+
+/**
+ * Re-read a saved tab's file after something else wrote it (the filesystem
+ * MCP tools). The disk copy is the source of truth here, so this does NOT
+ * write anything back — it only refreshes the buffer and pushes it to every
+ * open window. Returns the tab, or undefined when no tab has that path.
+ */
+export function refreshTabFromDisk(absPath: string): Tab | undefined {
+  const tab = state.tabs.find(t => t.path === absPath);
+  if (!tab) return undefined;
+  let text = '';
+  try { text = readFileSync(absPath, 'utf-8'); } catch { return tab; }
+  if (text === tab.text) return tab;
+  tab.text = text;
+  tab.revision += 1;
+  saveMeta(state);
+  broadcast(state);
+  return tab;
+}
+
+/**
+ * A file or folder under FILES_DIR moved on disk. Repoint every open tab at
+ * or below `oldAbs` so the tab bar and the auto-save target follow the file
+ * instead of silently recreating it at the old location on the next keystroke.
+ * Returns the tabs that changed.
+ */
+export function relocateTabs(oldAbs: string, newAbs: string): Tab[] {
+  const moved: Tab[] = [];
+  for (const tab of state.tabs) {
+    if (!tab.path) continue;
+    if (tab.path === oldAbs) {
+      tab.path = newAbs;
+      tab.name = basename(newAbs);
+      moved.push(tab);
+    } else if (tab.path.startsWith(oldAbs + '/')) {
+      tab.path = newAbs + tab.path.slice(oldAbs.length);
+      moved.push(tab);
+    }
+  }
+  if (moved.length > 0) {
+    saveMeta(state);
+    broadcast(state);
+  }
+  return moved;
+}
+
+/** Close every tab whose file is at or below a path that was deleted. Returns the closed ids. */
+export function removeTabsUnder(abs: string): string[] {
+  const ids = state.tabs
+    .filter(t => t.path !== null && (t.path === abs || t.path.startsWith(abs + '/')))
+    .map(t => t.id);
+  for (const id of ids) closeTab(id);
+  return ids;
 }

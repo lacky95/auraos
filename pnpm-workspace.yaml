@@ -13,7 +13,6 @@ allowBuilds:
   node-pty: true
   sharp: true
   '@img/sharp-libvips-linux-x64': true
-  redis-memory-server: set this to true or false
 onlyBuiltDependencies:
   - esbuild
   - msw

@@ -10,8 +10,12 @@
     "typecheck": "astro check"
   },
   "dependencies": {
-    "@aura/app-sdk": "workspace:*",
     "@astrojs/node": "^10.0.0",
-    "astro": "^6.0.0"
+    "@aura/app-sdk": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/server-filesystem": "^2026.8.31",
+    "astro": "^6.0.0",
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.25.2"
   }
 }
