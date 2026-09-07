@@ -10,6 +10,16 @@ capabilities:
     binary: claude
     description: "Claude Code CLI"
 
+  codex:
+    source: npm
+    package: "@openai/codex"
+    binary: codex
+    # The npm bin is a JS launcher that resolves a platform package relative
+    # to itself, so copying it into the toolchain would break. Point at the
+    # statically linked native binary shipped in the optional platform dep.
+    binary_path: /usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
+    description: "OpenAI Codex CLI"
+
   ssh:
     source: apt
     package: openssh-client

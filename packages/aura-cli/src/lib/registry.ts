@@ -126,7 +126,8 @@ export async function installCapability(name: string, entry: CapabilityEntry): P
     case 'npm': {
       if (!entry.package) throw new Error(`Registry entry ${name}: npm source requires 'package'`);
       sh(`npm install -g ${entry.package}`);
-      const found = which(binaryName);
+      // Prefer an explicit binary_path (see the shell's /api/admin/cap for why).
+      const found = entry.binary_path && existsSync(entry.binary_path) ? entry.binary_path : which(binaryName);
       if (!found) throw new Error(`npm install succeeded but binary '${binaryName}' not found on PATH`);
       ensureSymlink(found, link);
       let version: string | null = null;

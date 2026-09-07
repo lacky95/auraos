@@ -160,7 +160,10 @@ async function installCapability(name: string, entry: CapabilityEntry): Promise<
     case 'npm': {
       if (!entry.package) throw new Error(`npm source requires 'package'`);
       sh(`npm install -g ${entry.package}`);
-      const found = which(binaryName);
+      // Prefer an explicit binary_path: some packages (e.g. @openai/codex)
+      // expose a JS launcher as their bin that only works from inside the
+      // package tree, while the real executable lives in a platform dep.
+      const found = entry.binary_path && existsSync(entry.binary_path) ? entry.binary_path : which(binaryName);
       if (!found) throw new Error(`npm install succeeded but binary '${binaryName}' not on PATH`);
       installBinary(found, link);
       libsCopied = copyLibraryDeps(found, baseRootfs).length;
