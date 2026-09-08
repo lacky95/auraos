@@ -190,6 +190,102 @@ main.settings-body {
   font-size: 0.8rem;
 }
 
+/* ── Combobox (time zone) ─────────────────────────────────────────────
+ * A text input with a searchable list beneath it. The list is rendered by
+ * JS, so these rules live here — a scoped <style> would never match runtime
+ * markup. Same box as the other controls; the open list is a surface with
+ * the primary glow, rows are flat, the active row is the inverse-video
+ * "selected" treatment the chrome buttons use. Theme tokens only. */
+.combo {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  min-width: 300px;
+}
+.combo-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--aura-color-bg);
+  border: 1px solid var(--aura-color-border);
+  border-right: 0;
+  color: var(--aura-color-text);
+  padding: 6px 10px;
+  font-family: 'Courier New', monospace;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  outline: none;
+}
+.combo-input::placeholder { color: var(--aura-color-text-dim); letter-spacing: 0.08em; }
+.combo-toggle {
+  background: var(--aura-color-surface);
+  border: 1px solid var(--aura-color-border);
+  color: var(--aura-color-text-dim);
+  width: 30px;
+  padding: 0;
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.combo[data-open="true"] .combo-input,
+.combo[data-open="true"] .combo-toggle,
+.combo-input:focus,
+.combo-input:focus + .combo-toggle {
+  border-color: var(--aura-color-primary);
+  color: var(--aura-color-primary);
+  box-shadow: var(--aura-glow-subtle);
+}
+.combo-list {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  max-height: 260px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 2px 0;
+  list-style: none;
+  background: var(--aura-color-surface);
+  border: 1px solid var(--aura-color-primary);
+  box-shadow: var(--aura-glow-primary);
+}
+.combo-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 10px;
+  font-family: 'Courier New', monospace;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  color: var(--aura-color-text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.combo-item mark {
+  background: transparent;
+  color: var(--aura-color-primary);
+  font-weight: bold;
+}
+.combo-item[aria-selected="true"] .combo-label::before { content: '▸ '; color: var(--aura-color-primary); }
+.combo-item[data-active="true"] {
+  background: var(--aura-color-primary);
+  color: var(--aura-color-bg);
+}
+.combo-item[data-active="true"] mark,
+.combo-item[data-active="true"] .combo-meta,
+.combo-item[data-active="true"] .combo-label::before { color: var(--aura-color-bg); }
+.combo-meta {
+  color: var(--aura-color-text-dim);
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+}
+.combo-empty {
+  padding: 6px 10px;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  color: var(--aura-color-text-dim);
+}
+
 /* The handwritten `.mode-row` / `.mode-btn` / `.mode-resolved` block that
  * lived here moved to <ColorModePicker />, a scificn Tabs-based React island.
  * See apps/com.aura.settings/src/components/ColorModePicker.tsx. */

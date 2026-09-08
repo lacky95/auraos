@@ -48,12 +48,19 @@ const state = { clockFormat, locale, timeZone, colorMode };
     <div class="form-row">
       <label>TIME ZONE</label>
       <div>
-        <select id="time-zone">
-          <option value="" selected={state.timeZone === ''}>DEVICE DEFAULT</option>
-          {zones.map((z) => <option value={z} selected={state.timeZone === z}>{z}</option>)}
-        </select>
+        <!-- A searchable combobox: ~420 IANA zones are too many for a select.
+             The list is rendered at runtime, so its rules live in settings.css
+             (a plain global stylesheet), not a scoped <style>. -->
+        <div class="combo" data-combo="time-zone" data-value={state.timeZone}>
+          <input id="time-zone" class="combo-input" type="text" role="combobox" autocomplete="off" spellcheck="false"
+                 aria-expanded="false" aria-controls="time-zone-list" aria-autocomplete="list"
+                 placeholder="DEVICE DEFAULT" value={state.timeZone} />
+          <button type="button" class="combo-toggle" tabindex="-1" aria-label="Open the time zone list" data-combo-toggle>▾</button>
+          <ul id="time-zone-list" class="combo-list" role="listbox" hidden></ul>
+        </div>
+        <script type="application/json" id="time-zone-zones" set:html={JSON.stringify(zones)}></script>
         <p id="time-zone-hint" style="margin-top: 6px; font-size: 0.6rem; color: var(--aura-color-text-dim); letter-spacing: 0.06em;">
-          USED BY THE STATUS BAR, LOCK SCREEN AND THE SHELL MCP'S DATE/TIME
+          TYPE TO SEARCH · USED BY THE STATUS BAR, LOCK SCREEN AND THE SHELL MCP'S DATE/TIME
         </p>
       </div>
     </div>
@@ -94,13 +101,156 @@ const state = { clockFormat, locale, timeZone, colorMode };
 
     document.getElementById('clock-format').addEventListener('change', (e) => patch('clockFormat', e.target.value));
     document.getElementById('locale').addEventListener('input', (e) => patch('locale', e.target.value));
-    document.getElementById('time-zone').addEventListener('change', (e) => patch('timeZone', e.target.value));
-    // Say what "device default" currently resolves to, and what time that is.
-    try {
-      const dev = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    // ── Time-zone combobox ─────────────────────────────────────────────
+    // Fuzzy search over the IANA list: every typed character must appear in
+    // order (so "nyork" finds America/New_York and "berl" Europe/Berlin);
+    // contiguous runs and hits at the start of a word score higher, and the
+    // matched characters are highlighted. Each row shows the zone's current
+    // UTC offset, which is usually the fastest way to spot the right one.
+    (function () {
+      const combo = document.querySelector('[data-combo="time-zone"]');
+      const input = document.getElementById('time-zone');
+      const list  = document.getElementById('time-zone-list');
+      const toggle = combo.querySelector('[data-combo-toggle]');
+      const zones = JSON.parse(document.getElementById('time-zone-zones').textContent || '[]');
+      const DEVICE = { value: '', label: 'DEVICE DEFAULT' };
+      const MAX = 60;
+      let items = [];          // currently rendered rows: { value, label, score, hits }
+      let active = -1;         // highlighted row index
+      let committed = combo.dataset.value || '';
+
+      const deviceZone = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (_) { return ''; } })();
       const hint = document.getElementById('time-zone-hint');
-      hint.textContent = `DEVICE DEFAULT IS ${dev.toUpperCase()} · USED BY THE STATUS BAR, LOCK SCREEN AND THE SHELL MCP'S DATE/TIME`;
-    } catch (_) { /* keep the static hint */ }
+      if (deviceZone) hint.textContent = `DEVICE DEFAULT IS ${deviceZone.toUpperCase()} · TYPE TO SEARCH · USED BY THE STATUS BAR, LOCK SCREEN AND THE SHELL MCP'S DATE/TIME`;
+
+      const offsetCache = new Map();
+      function offsetOf(zone) {
+        if (!zone) return deviceZone ? offsetOf(deviceZone) : '';
+        if (offsetCache.has(zone)) return offsetCache.get(zone);
+        let out = '';
+        try {
+          const part = new Intl.DateTimeFormat('en-US', { timeZone: zone, timeZoneName: 'shortOffset' })
+            .formatToParts(new Date()).find((p) => p.type === 'timeZoneName');
+          out = (part ? part.value : '').replace(/^GMT$/, 'UTC±0').replace(/^GMT/, 'UTC');
+        } catch (_) { out = ''; }
+        offsetCache.set(zone, out);
+        return out;
+      }
+
+      /** Subsequence match with a score; null when a char is missing. */
+      function fuzzy(query, text) {
+        const q = query.toLowerCase(), t = text.toLowerCase();
+        if (!q) return { score: 0, hits: [] };
+        const hits = []; let ti = 0, score = 0, run = 0;
+        for (let qi = 0; qi < q.length; qi++) {
+          const c = q[qi];
+          if (c === ' ') continue;                   // spaces never have to match
+          const at = t.indexOf(c, ti);
+          if (at < 0) return null;
+          const prev = t[at - 1];
+          const wordStart = at === 0 || prev === '/' || prev === '_' || prev === '-';
+          run = at === ti ? run + 1 : 0;              // contiguous with the last hit
+          score += 1 + run * 2 + (wordStart ? 3 : 0);
+          hits.push(at); ti = at + 1;
+        }
+        score -= (t.length - q.length) * 0.02;        // shorter names first on a tie
+        return { score, hits };
+      }
+
+      function search(query) {
+        const q = query.trim();
+        const rows = [];
+        const dev = fuzzy(q, DEVICE.label) || (q === '' ? { score: 0, hits: [] } : null);
+        if (dev) rows.push({ ...DEVICE, ...dev, score: dev.score + 1 });
+        for (const z of zones) {
+          const m = fuzzy(q, z) || fuzzy(q, z.replace(/_/g, ' '));
+          if (m) rows.push({ value: z, label: z, ...m });
+        }
+        rows.sort((a, b) => b.score - a.score || a.label.localeCompare(b.label));
+        return rows.slice(0, MAX);
+      }
+
+      const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+      function highlight(label, hits) {
+        const set = new Set(hits); let out = '';
+        for (let i = 0; i < label.length; i++) out += set.has(i) ? `<mark>${esc(label[i])}</mark>` : esc(label[i]);
+        return out;
+      }
+
+      function render(rows) {
+        items = rows;
+        list.innerHTML = rows.length
+          ? rows.map((r, i) =>
+              `<li class="combo-item" role="option" id="time-zone-opt-${i}" data-index="${i}" data-value="${esc(r.value)}"` +
+              ` aria-selected="${r.value === committed}">` +
+              `<span class="combo-label">${highlight(r.label, r.hits)}</span>` +
+              `<span class="combo-meta">${esc(offsetOf(r.value))}</span></li>`).join('')
+          : '<li class="combo-empty" role="option" aria-disabled="true">NO ZONE MATCHES</li>';
+        setActive(rows.length ? Math.max(0, rows.findIndex((r) => r.value === committed)) : -1);
+      }
+
+      function setActive(i) {
+        active = i;
+        list.querySelectorAll('.combo-item').forEach((el) => { el.dataset.active = String(Number(el.dataset.index) === i); });
+        const el = list.querySelector(`.combo-item[data-index="${i}"]`);
+        input.setAttribute('aria-activedescendant', el ? el.id : '');
+        if (el) el.scrollIntoView({ block: 'nearest' });
+      }
+
+      function open(query) {
+        render(search(query === undefined ? '' : query));
+        list.hidden = false;
+        input.setAttribute('aria-expanded', 'true');
+        combo.dataset.open = 'true';
+      }
+      function close() {
+        list.hidden = true;
+        input.setAttribute('aria-expanded', 'false');
+        combo.dataset.open = 'false';
+        active = -1;
+      }
+      const isOpen = () => !list.hidden;
+
+      function commit(value) {
+        committed = value;
+        combo.dataset.value = value;
+        input.value = value;                       // '' shows the DEVICE DEFAULT placeholder
+        close();
+        patch('timeZone', value);
+      }
+      /** Leaving without choosing puts the committed value back. */
+      function revert() { input.value = committed; close(); }
+
+      input.addEventListener('input', () => open(input.value));
+      input.addEventListener('focus', () => { input.select(); open(''); });
+      toggle.addEventListener('mousedown', (e) => { e.preventDefault(); if (isOpen()) close(); else { input.focus(); open(''); } });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault(); e.stopPropagation();           // keep the page's grid-nav out of it
+          if (!isOpen()) { open(input.value); return; }
+          if (!items.length) return;
+          setActive((active + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length);
+        } else if (e.key === 'Home' && isOpen()) { e.preventDefault(); setActive(0); }
+        else if (e.key === 'End' && isOpen())    { e.preventDefault(); setActive(items.length - 1); }
+        else if (e.key === 'Enter') {
+          e.preventDefault();
+          if (isOpen() && active >= 0 && items[active]) commit(items[active].value);
+          else if (!isOpen()) open(input.value);
+        } else if (e.key === 'Escape') {
+          if (isOpen()) { e.preventDefault(); e.stopPropagation(); revert(); }
+        }
+      });
+      list.addEventListener('mousedown', (e) => {
+        e.preventDefault();                                   // keep focus on the input
+        const row = e.target.closest('.combo-item[data-value]');
+        if (row) commit(row.dataset.value);
+      });
+      list.addEventListener('mousemove', (e) => {
+        const row = e.target.closest('.combo-item[data-index]');
+        if (row && Number(row.dataset.index) !== active) setActive(Number(row.dataset.index));
+      });
+      input.addEventListener('blur', () => { if (isOpen()) revert(); });
+    })();
 
     /* Color-mode picker now owned by <ColorModePicker /> React island.
      * Live-update link refresh stays — the page's stylesheet link still needs
