@@ -77,17 +77,19 @@ interface OwnTool {
   description: string;
   inputSchema: Tool['inputSchema'];
   annotations: ToolAnnotations;
+  /** Answers change with every call (a clock): never serve a repeat from the dedupe window. */
+  noDedupe?: boolean;
   run: (raw: Record<string, unknown>) => CallToolResult | Promise<CallToolResult>;
 }
 
 function define<S extends z.ZodObject<z.ZodRawShape>>(opts: {
-  name: string; title: string; description: string; schema: S; annotations: ToolAnnotations;
+  name: string; title: string; description: string; schema: S; annotations: ToolAnnotations; noDedupe?: boolean;
   run: (args: z.infer<S>) => CallToolResult | Promise<CallToolResult>;
 }): OwnTool {
   const { $schema: _drop, ...json } = zodToJsonSchema(opts.schema, { $refStrategy: 'none' }) as Record<string, unknown>;
   return {
     name: opts.name, title: opts.title, description: opts.description,
-    inputSchema: json as Tool['inputSchema'], annotations: opts.annotations,
+    inputSchema: json as Tool['inputSchema'], annotations: opts.annotations, noDedupe: opts.noDedupe,
     run: (raw) => {
       const parsed = opts.schema.safeParse(raw);
       if (!parsed.success) {
@@ -210,6 +212,35 @@ const TOOLS: OwnTool[] = [
           launcher: snap?.launcher ?? null,
           processManager: snap?.processManager ?? null,
         },
+      });
+    },
+  }),
+
+  define({
+    name: 'get_datetime',
+    title: 'Current date and time',
+    description:
+      'The current date and time as the user sees it: the browser\'s local time, date, time zone and UTC offset '
+      + '(plus ISO 8601 and epoch). Without a connected browser it is the OS server\'s clock, which is UTC — '
+      + 'the result says which. Never cached: every call is a fresh reading.',
+    schema: z.object({}),
+    annotations: READ,
+    noDedupe: true,
+    run: async () => {
+      const r = await ui<Record<string, unknown>>('clock', {}, 2_000);
+      if (r.ok) return ok({ source: 'the user\'s browser', ...r.result });
+      const now = new Date();
+      const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      return ok({
+        source: 'the OS server (no browser connected)',
+        iso: now.toISOString(),
+        epochMs: now.getTime(),
+        local: now.toLocaleString('en-GB', { dateStyle: 'full', timeStyle: 'long', timeZone: zone }),
+        date: now.toLocaleDateString('en-GB', { dateStyle: 'full', timeZone: zone }),
+        time: now.toLocaleTimeString('en-GB', { timeStyle: 'medium', timeZone: zone }),
+        timeZone: zone,
+        utcOffsetMinutes: -now.getTimezoneOffset(),
+        note: 'the server clock, not the user\'s; open the shell in a browser for local time',
       });
     },
   }),
@@ -685,7 +716,8 @@ export function buildShellServer(): Server {
     const tool = BY_NAME.get(req.params.name);
     if (!tool) return fail(`Unknown tool "${req.params.name}".`);
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
-    const { duplicate, result } = dedupe(tool.name, args, () => Promise.resolve(tool.run(args)));
+    const exec = () => Promise.resolve(tool.run(args));
+    const { duplicate, result } = tool.noDedupe ? { duplicate: false, result: exec() } : dedupe(tool.name, args, exec);
     let out: CallToolResult;
     try { out = await result; }
     catch (err) { return fail(`${tool.name} failed: ${(err as Error).message}`); }

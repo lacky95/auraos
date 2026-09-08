@@ -73,10 +73,10 @@ async function connect() {
 }
 const call = (client, name, args = {}) => client.callTool({ name, arguments: args });
 
-test('the tool list is the documented 24, all with object schemas', async () => {
+test('the tool list is the documented 25, all with object schemas', async () => {
   fakeOs();
   const { tools } = await (await connect()).listTools();
-  assert.equal(tools.length, 24);
+  assert.equal(tools.length, 25);
   assert.deepEqual(tools.map((t) => t.name).sort(), [...TOOL_NAMES].sort());
   assert.ok(tools.every((t) => t.inputSchema.type === 'object'));
   assert.equal(tools.find((t) => t.name === 'stop_process').annotations.destructiveHint, true);
@@ -226,4 +226,22 @@ test('an identical call within the window is answered from the first one, marked
   // Different arguments are a different call.
   const other = await call(client, 'switch_workspace', { workspace: 2 });
   assert.equal(other.structuredContent.deduplicated, undefined);
+});
+
+test('get_datetime reports the browser clock when there is one, the server clock otherwise, never cached', async () => {
+  fakeOs({ uiMode: 'ok', uiResult: (body) => body.action === 'clock'
+    ? { iso: '2026-09-08T21:00:00.000Z', epochMs: 1, local: 'Tuesday, 8 September 2026 at 23:00:00 CEST', timeZone: 'Europe/Berlin', utcOffsetMinutes: 120 }
+    : {} });
+  const client = await connect();
+  const r = await call(client, 'get_datetime');
+  assert.equal(r.structuredContent.timeZone, 'Europe/Berlin');
+  assert.match(r.structuredContent.source, /browser/);
+  const again = await call(client, 'get_datetime');
+  assert.equal(again.structuredContent.deduplicated, undefined, 'a clock is never served from the dedupe window');
+
+  fakeOs();
+  const s = (await call(await connect(), 'get_datetime')).structuredContent;
+  assert.match(s.source, /OS server/);
+  assert.match(s.iso, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(typeof s.epochMs, 'number');
 });

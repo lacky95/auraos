@@ -91,10 +91,31 @@ async function handle(ev: { id?: unknown; action?: unknown; params?: unknown }):
   await post('/api/os/ui/result', answer);
 }
 
+/**
+ * The user's clock. Built in here rather than in a component: the daemon's
+ * container runs on UTC, and "what time is it" means the time on the screen
+ * the person is looking at — this browser's locale and zone.
+ */
+function clock(): Record<string, unknown> {
+  const now = new Date();
+  const opts = Intl.DateTimeFormat().resolvedOptions();
+  return {
+    iso: now.toISOString(),
+    epochMs: now.getTime(),
+    local: now.toLocaleString(opts.locale, { dateStyle: 'full', timeStyle: 'long' }),
+    date: now.toLocaleDateString(opts.locale, { dateStyle: 'full' }),
+    time: now.toLocaleTimeString(opts.locale, { timeStyle: 'medium' }),
+    timeZone: opts.timeZone,
+    utcOffsetMinutes: -now.getTimezoneOffset(),
+    locale: opts.locale,
+  };
+}
+
 /** Subscribe once per page; safe to call from any island. */
 export function startUiCommandListener(): void {
   const r = registry();
   if (r.started) return;
   r.started = true;
+  r.handlers.set('clock', clock);
   osEvents.subscribe(['ui:command'], (ev) => { void handle(ev as { id?: unknown; action?: unknown; params?: unknown }); });
 }
