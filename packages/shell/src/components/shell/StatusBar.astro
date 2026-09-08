@@ -1474,14 +1474,18 @@ let initialTimeZone: string = '';
   // ── Shell UI commands (see ../../lib/uiCommands.ts) — what this bar owns:
   // the main zoom, browser fullscreen, a workspace's layout, the layout list.
   registerUiCommand('setZoom', ({ percent, step, reset }) => {
+    const before = currentZoomValue;
     let target: number;
     if (reset === true)                     target = 1;
+    // `step` is in ZOOM_STEP units and may be several: "zoom in twice" is 2.
     else if (typeof step === 'number')      target = currentZoomValue + step * ZOOM_STEP;
     else if (typeof percent === 'number')   target = percent / 100;
     else throw new Error('setZoom needs percent, step or reset');
     // Through viewportClient, like the −/＋ buttons: persists + syncs tabs.
     viewportClient.patchActive({ zoom: target });
-    return { percent: Math.round(clampZoom(target) * 100) };
+    // `from` lets the caller see a request that hit the 50–400 % limit and
+    // moved nothing, rather than reporting a zoom that never happened.
+    return { percent: Math.round(clampZoom(target) * 100), from: Math.round(before * 100) };
   });
   registerUiCommand('fullscreen', async ({ mode }) => {
     const want = mode === 'toggle' ? !document.fullscreenElement : mode === 'on';

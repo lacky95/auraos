@@ -321,3 +321,52 @@ test('the brake repeats the answer the tool led with, not its JSON', async () =>
   assert.match(last.content[0].text, /The answer is still: Workspace 1 "Main"/);
   assert.ok(!last.content[0].text.includes('The answer is still: {'));
 });
+
+test('zoom moves one step by default, `times` steps on request, and reports a limit', async () => {
+  // The browser is scripted to answer as if it clamped at 400 %.
+  let sent = null;
+  fakeOs({ uiMode: 'ok', uiResult: (body) => { sent = body.params; return { percent: 400, from: 400 }; } });
+  const client = await connect();
+
+  await call(client, 'zoom', { action: 'in' });
+  assert.deepEqual(sent, { step: 1 }, 'one step by default');
+  await call(client, 'zoom', { action: 'out', times: 3 });
+  assert.deepEqual(sent, { step: -3 }, '"zoom out three times" is one call');
+  await call(client, 'zoom', { action: 'reset' });
+  assert.deepEqual(sent, { reset: true });
+
+  // Nothing moved: say so rather than report a zoom that did not happen.
+  const capped = await call(client, 'zoom', { action: 'in', times: 2 });
+  assert.equal(capped.structuredContent.zoom, '400%');
+  assert.equal(capped.structuredContent.steps, 2);
+  assert.match(capped.structuredContent.note, /already at the maximum zoom \(400%\)/);
+
+  const bad = await call(client, 'zoom', { action: 'reset', times: 2 });
+  assert.equal(bad.isError, true);
+  assert.match(bad.content[0].text, /only applies to zoom in and out/);
+});
+
+test('zoom reports the move when the browser actually zoomed', async () => {
+  fakeOs({ uiMode: 'ok', uiResult: () => ({ percent: 120, from: 100 }) });
+  const r = await call(await connect(), 'zoom', { action: 'in', times: 2 });
+  assert.deepEqual(r.structuredContent, { zoom: '120%', from: '100%', steps: 2 });
+});
+
+test('a repeated COMMAND runs again — only questions are absorbed', async () => {
+  // The bug this pins: zoom set → reset → reset served the first reset's
+  // answer and never zoomed, leaving the shell where it was.
+  const seen = [];
+  fakeOs({ uiMode: 'ok', uiResult: (body) => { seen.push(body.params); return { percent: 100, from: 150 }; } });
+  const client = await connect();
+  await call(client, 'zoom', { action: 'reset' });
+  await call(client, 'zoom', { action: 'reset' });
+  assert.equal(seen.length, 2, 'the second reset reached the browser');
+  const r = await call(client, 'zoom', { action: 'reset' });
+  assert.equal(r.structuredContent.deduplicated, undefined, 'a command is never marked deduplicated');
+
+  // Questions still are.
+  const a = await call(client, 'list_apps');
+  const b = await call(client, 'list_apps');
+  assert.equal(a.structuredContent.deduplicated, undefined);
+  assert.equal(b.structuredContent.deduplicated, true);
+});

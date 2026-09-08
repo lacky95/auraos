@@ -496,19 +496,41 @@ const TOOLS: OwnTool[] = [
     name: 'zoom',
     title: 'Zoom the shell',
     description:
-      'Zoom the whole shell UI: `in` / `out` step by 10 %, `reset` returns to 100 %, `set` uses `percent` '
-      + '(50–400). Returns the effective zoom after clamping. Needs the shell open in a browser.',
+      'Zoom the whole shell UI. `in` and `out` move one step of 10 %; `times` repeats that in a single call, so '
+      + '"zoom in twice" is action "in" with times 2 and "zoom out three times" is action "out" with times 3. '
+      + '`reset` returns to 100 %, `set` goes straight to `percent` (50–400). The result gives the zoom before '
+      + 'and after, and says so when the limit was already reached. Needs the shell open in a browser.',
     schema: z.object({
       action: z.enum(['in', 'out', 'reset', 'set']),
+      times: z.number().int().min(1).max(35).optional()
+        .describe('How many 10 % steps to move for `in`/`out`. Default 1 — "zoom in twice" is 2.'),
       percent: z.number().int().min(50).max(400).optional().describe('Target zoom for `set`.'),
     }),
     annotations: WRITE,
-    run: async ({ action, percent }) => {
+    run: async ({ action, percent, times }) => {
       if (action === 'set' && percent === undefined) return fail('`set` needs `percent` (50–400).');
-      const params = action === 'in' ? { step: 1 } : action === 'out' ? { step: -1 } : action === 'reset' ? { reset: true } : { percent };
-      const r = await ui<{ percent: number }>('setZoom', params);
+      if (times !== undefined && action !== 'in' && action !== 'out') {
+        return fail(`\`times\` only applies to zoom in and out, not \`${action}\`.`);
+      }
+      const steps = times ?? 1;
+      const params = action === 'in' ? { step: steps }
+        : action === 'out' ? { step: -steps }
+        : action === 'reset' ? { reset: true }
+        : { percent };
+      const r = await ui<{ percent: number; from?: number }>('setZoom', params);
       if (!r.ok) return needUi(r);
-      return ok({ zoom: `${r.result.percent}%` });
+      const { percent: now, from } = r.result;
+      const moved = from === undefined || from !== now;
+      return ok({
+        zoom: `${now}%`,
+        ...(from !== undefined ? { from: `${from}%` } : {}),
+        ...(steps > 1 && (action === 'in' || action === 'out') ? { steps } : {}),
+        ...(moved ? {} : {
+          note: action === 'in' ? `already at the maximum zoom (${now}%)`
+            : action === 'out' ? `already at the minimum zoom (${now}%)`
+            : `already at ${now}%`,
+        }),
+      });
     },
   }),
 
@@ -779,7 +801,8 @@ export function buildShellServer(): Server {
     // Reading the same thing again and again, with nothing changed in
     // between, is a loop the answers themselves cannot break — so stop
     // answering with data and say so. A mutating call clears the count.
-    if (tool.annotations.readOnlyHint) {
+    const readOnly = tool.annotations.readOnlyHint === true;
+    if (readOnly) {
       const { count, tripped } = recordRead(tool.name);
       if (tripped) {
         const msg = stopMessage(tool.name, count, Math.round(LOOP_WINDOW_MS / 1000));
@@ -790,7 +813,13 @@ export function buildShellServer(): Server {
       noteMutation();
     }
 
-    const { duplicate, result } = dedupe(tool.name, args, () => Promise.resolve(tool.run(args)));
+    // Absorption is for QUESTIONS only. Repeating a question gets the same
+    // answer, so serving it from the last one is honest. Repeating a COMMAND
+    // is not the same: `zoom set 150` then `zoom reset` then `zoom reset`
+    // would hand back the first reset's answer and never zoom — the shell
+    // stayed at 150 % while the result said 100 %. Commands always run.
+    const exec = () => Promise.resolve(tool.run(args));
+    const { duplicate, result } = readOnly ? dedupe(tool.name, args, exec) : { duplicate: false, result: exec() };
     let out: CallToolResult;
     try { out = await result; }
     catch (err) { return fail(`${tool.name} failed: ${(err as Error).message}`); }
