@@ -240,6 +240,9 @@ importers:
       '@aura/app-sdk':
         specifier: workspace:*
         version: link:../../packages/app-sdk
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.29.0
+        version: 1.30.0(zod@3.25.76)
       '@types/ws':
         specifier: ^8.5.0
         version: 8.18.1
@@ -258,6 +261,12 @@ importers:
       ws:
         specifier: ^8.18.0
         version: 8.20.1
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+      zod-to-json-schema:
+        specifier: ^3.25.2
+        version: 3.25.2(zod@3.25.76)
 
   apps/com.aura.whisper:
     dependencies:

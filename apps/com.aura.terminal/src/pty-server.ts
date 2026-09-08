@@ -1,10 +1,9 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import pty, { type IPty } from 'node-pty';
-import { spawnSync } from 'node:child_process';
 import { parse as parseUrl } from 'node:url';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import { HOST_LABEL, TMUX_CONF, TMUX_SOCKET, liveTmuxSessions, tmuxBin, tmuxKill, tmuxName } from './tmux-control.ts';
 
 /**
  * PTY session registry — one live VIEW at a time, survives browser reload.
@@ -167,20 +166,23 @@ function ownerHoldMs(): number {
  */
 const PING_MS = 25_000;
 
-// The host this terminal physically lives on — the AuraOS master ("aura-shell"
-// by default, overridable via AURA_SHELL_HOSTNAME, which ContainerRunner now
-// forwards into every app container). We DON'T use os.hostname()/$HOSTNAME here
-// because the container is started with `--hostname <appId>`, so the kernel
-// name is the package id ("com.aura.terminal") — not the host the user means.
-const HOST_LABEL = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
-
 // OSC window-title sequence. The Terminal page listens via xterm's
 // onTitleChange and shows it as the session-host indicator.
 function oscTitle(label: string): string {
   return `]0;${label}`;
 }
 
-const sessions = new Map<string, Session>();
+// Pinned on globalThis, not a module local. The WebSocket server is loaded
+// once at startup (astro.config's ssrLoadModule), while the API routes import
+// this file through Vite's module graph — and Vite hands them a FRESH module
+// instance whenever this file or an import of it changes. With a module-local
+// map the two halves silently diverge after any edit: the WS side keeps the
+// real sessions, the routes (and the MCP's `inUse`) see an empty container.
+// One shared map keeps them consistent; the Session shape is the same code.
+const SESSIONS_KEY = '__aura_pty_sessions__';
+const sessions: Map<string, Session> =
+  ((globalThis as Record<string, unknown>)[SESSIONS_KEY] as Map<string, Session> | undefined)
+  ?? ((globalThis as Record<string, unknown>)[SESSIONS_KEY] = new Map<string, Session>()) as Map<string, Session>;
 
 // Scrollback persistence — write to /data/scrollback/<sessionId> when the
 // last client disconnects, reload when a session is recreated after a restart.
@@ -243,51 +245,6 @@ function bufferPush(sess: Session, chunk: string): void {
  * shell — which behaves exactly like before — so an app running on an older
  * base image, or with AURA_TERM_TMUX=0, is never left broken.
  */
-const TMUX_SOCKET = 'aura';   // private -L namespace, never collides with a user's own tmux
-const TMUX_CONF   = join(dirname(fileURLToPath(import.meta.url)), '..', 'tmux.conf');
-
-const tmuxBin = (() => {
-  if (process.env['AURA_TERM_TMUX'] === '0') return null;
-  const bin = process.env['AURA_TERM_TMUX_BIN'] ?? 'tmux';
-  try {
-    const probe = spawnSync(bin, ['-V'], { stdio: 'ignore' });
-    if (probe.status === 0) return bin;
-  } catch { /* not installed / not executable */ }
-  return null;
-})();
-
-/**
- * tmux session name for one of our session ids. Session ids look like
- * `com.aura.terminal-16#a12`, and tmux forbids `.` and `:` in names (it parses
- * them as window/pane addressing), so everything outside a safe set is folded
- * to `_`. The mapping only has to be stable and collision-free within one
- * container, which it is — the id is already unique there.
- */
-function tmuxName(sessionId: string): string {
-  return `aura-${sessionId.replace(/[^A-Za-z0-9_-]/g, '_')}`;
-}
-
-/** Names of the tmux sessions on our private socket; empty when tmux is absent. */
-function liveTmuxSessions(): Set<string> {
-  if (!tmuxBin) return new Set();
-  try {
-    const r = spawnSync(tmuxBin, ['-L', TMUX_SOCKET, 'list-sessions', '-F', '#{session_name}'],
-      { encoding: 'utf-8' });
-    if (r.status !== 0 || !r.stdout) return new Set();   // no server running ⇒ no sessions
-    return new Set(r.stdout.split('\n').map((l) => l.trim()).filter(Boolean));
-  } catch { return new Set(); }
-}
-
-/** Kill the backing tmux session. Returns true if one actually existed. */
-function tmuxKill(sessionId: string): boolean {
-  if (!tmuxBin) return false;
-  try {
-    const r = spawnSync(tmuxBin, ['-L', TMUX_SOCKET, 'kill-session', '-t', tmuxName(sessionId)], { stdio: 'ignore' });
-    return r.status === 0;
-  } catch { /* no server / no such session — nothing to clean up */ }
-  return false;
-}
-
 function spawnPty(sessionId: string | null, cols: number, rows: number): IPty {
   const shell = process.env['SHELL'] ?? '/bin/bash';
   // AURA_TERM_LABEL marks this as the base/host shell so bashrc.aura.sh's
@@ -751,6 +708,25 @@ export function reservedSessionNames(): string[] {
   const ids = new Set<string>(sessions.keys());
   try { for (const f of readdirSync(SCROLLBACK_DIR)) ids.add(f); } catch { /* no dir yet */ }
   return [...ids];
+}
+
+/**
+ * Make a session name known to this container before any PTY has touched it.
+ *
+ * A session created straight in tmux (the MCP's `open_session`) has no
+ * in-memory entry and no scrollback file — and the scrollback dir is the name
+ * registry `listSessions` and `reservedSessionNames` enumerate, so without a
+ * file the shell would be alive and invisible, and `nextSessionId` would hand
+ * out its name again. The seed is the same host-title the first attach would
+ * write, so the picker and a later window see exactly what they would for a
+ * session that started in a window.
+ */
+export function reserveSessionName(sessionId: string): void {
+  try {
+    mkdirSync(SCROLLBACK_DIR, { recursive: true });
+    const file = join(SCROLLBACK_DIR, sessionId);
+    if (!existsSync(file)) writeFileSync(file, oscTitle(HOST_LABEL), 'utf-8');
+  } catch { /* best-effort, like saveScrollback */ }
 }
 
 /**

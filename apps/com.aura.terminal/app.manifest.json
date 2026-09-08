@@ -20,6 +20,15 @@
     "claude-code",
     "adb"
   ],
+  "provides": [
+    {
+      "name": "terminal",
+      "kind": "mcp",
+      "address": "/mcp/terminal",
+      "version": "1",
+      "description": "MCP over terminal sessions on every terminal instance: list/open/kill sessions, read the screen as a text grid (cursor, alternate-screen mode, scrollback), type text and send keys."
+    }
+  ],
   "instanceMode": "multi",
   "maxInstances": 4,
   "activityMode": "multi",
