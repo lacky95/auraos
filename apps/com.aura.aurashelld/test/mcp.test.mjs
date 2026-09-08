@@ -232,13 +232,27 @@ test('an identical call within the window is answered from the first one, marked
 });
 
 test('get_datetime reports the browser clock when there is one, the server clock otherwise, and absorbs repeats', async () => {
+  // 21:00 UTC is 23:00 in Berlin — the phrasings must be in the user's zone,
+  // not the server's.
   fakeOs({ uiMode: 'ok', uiResult: (body) => body.action === 'clock'
-    ? { iso: '2026-09-08T21:00:00.000Z', epochMs: 1, local: 'Tuesday, 8 September 2026 at 23:00:00 CEST', timeZone: 'Europe/Berlin', utcOffsetMinutes: 120 }
+    ? { iso: '2026-09-08T21:00:00.000Z', epochMs: Date.parse('2026-09-08T21:00:00.000Z'),
+        timeZone: 'Europe/Berlin', locale: 'en-GB', utcOffsetMinutes: 120, hour12: false }
     : {} });
   const client = await connect();
   const r = await call(client, 'get_datetime');
-  assert.equal(r.structuredContent.timeZone, 'Europe/Berlin');
-  assert.match(r.structuredContent.source, /browser/);
+  assert.equal(r.structuredContent.technical.timeZone, 'Europe/Berlin');
+  assert.match(r.structuredContent.technical.source, /browser/);
+  // One reading, four phrasings — the model picks by what was asked.
+  const say = r.structuredContent.say;
+  assert.match(say.date, /^\w+day, \d{1,2} \w+ 20\d\d$/, say.date);
+  assert.match(say.time, /^\d{2}:\d{2}$/, say.time);
+  assert.equal(say.dateTime, `${say.date}, ${say.time}`);
+  assert.equal(say.date, 'Tuesday, 8 September 2026');
+  assert.equal(say.time, '23:00', 'the user\'s zone, not the server\'s 21:00 UTC');
+  assert.match(say.full, /at \d{2}:\d{2}:\d{2}, Europe\/Berlin \(UTC\+\d\)$/, say.full);
+  assert.match(r.structuredContent.summary, /only what was asked/);
+  assert.match(r.structuredContent.technical.timeWithSeconds, /^\d{2}:\d{2}:\d{2}$/);
+  assert.equal(r.content[0].text.split('\n')[0], say.dateTime, 'the text leads with the everyday phrasing');
   // A repeat moments later is absorbed like any other tool: the reading is
   // to the minute, so the same answer is still the right answer.
   const again = await call(client, 'get_datetime');
@@ -247,22 +261,31 @@ test('get_datetime reports the browser clock when there is one, the server clock
 
   fakeOs();
   const s = (await call(await connect(), 'get_datetime')).structuredContent;
-  assert.match(s.source, /OS server/);
-  assert.match(s.iso, /^\d{4}-\d{2}-\d{2}T/);
-  assert.equal(typeof s.epochMs, 'number');
-  assert.match(s.zoneSource, /set yours in Settings/);
+  assert.match(s.technical.source, /OS server/);
+  assert.match(s.technical.iso, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(typeof s.technical.epochMs, 'number');
+  assert.match(s.technical.zoneSource, /set yours in Settings/);
+  assert.ok(s.say.time && s.say.date && s.say.dateTime && s.say.full);
 
   // With a zone chosen in Settings → General, the server fallback is the user's time.
   fakeOs({ region: { timeZone: 'Europe/Berlin', locale: 'de-DE', clockFormat: '24h' } });
   const b = (await call(await connect(), 'get_datetime')).structuredContent;
-  assert.equal(b.timeZone, 'Europe/Berlin');
-  assert.equal(b.locale, 'de-DE');
-  assert.ok(b.utcOffsetMinutes === 60 || b.utcOffsetMinutes === 120, `Berlin offset, got ${b.utcOffsetMinutes}`);
-  assert.match(b.zoneSource, /AuraOS setting/);
-  assert.match(b.local, /2\d{3}/);
-  const text = (await call(await connect(), 'get_datetime')).content[0].text;
-  assert.match(text, /^\S.*20\d\d, \d{1,2}:\d{2}$/, `readable date + time, no zone: ${text}`);
-  assert.ok(!/UTC|GMT|Europe/.test(text));
+  assert.equal(b.technical.timeZone, 'Europe/Berlin');
+  assert.equal(b.technical.locale, 'de-DE');
+  assert.match(b.technical.utcOffset, /^UTC\+\d/);
+  assert.match(b.technical.zoneSource, /AuraOS setting/);
+  assert.match(b.say.date, /20\d\d/);
+  // The everyday phrasings never carry a zone label; only `full` does.
+  const firstLine = (await call(await connect(), 'get_datetime')).content[0].text.split('\n')[0];
+  assert.ok(!/UTC|GMT|Europe/.test(firstLine), firstLine);
+  assert.ok(!/UTC|GMT|Europe/.test(b.say.time + b.say.date + b.say.dateTime));
+  assert.match(b.say.full, /Europe\/Berlin/);
+
+  // 12-hour clock in Settings reaches the phrasings.
+  fakeOs({ region: { timeZone: 'America/New_York', locale: 'en-US', clockFormat: '12h' } });
+  const h = (await call(await connect(), 'get_datetime')).structuredContent;
+  assert.match(h.say.time, /(AM|PM)$/, h.say.time);
+  assert.equal(h.technical.clockFormat, '12h');
 });
 
 test('reading the same thing in a loop hits the brake, and a change releases it', async () => {

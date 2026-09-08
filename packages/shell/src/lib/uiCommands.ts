@@ -114,15 +114,18 @@ function clock(): Record<string, unknown> {
   const offsetName = fmt.formatToParts(now).find((p) => p.type === 'timeZoneName')?.value ?? 'GMT';
   const m = /([+-])(\d{1,2})(?::?(\d{2}))?/.exec(offsetName);
   const utcOffsetMinutes = m ? (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3] ?? 0)) : 0;
+  const hour12 = prefs['clockFormat'] === '12h';
   return {
     iso: now.toISOString(),
     epochMs: now.getTime(),
-    local: now.toLocaleString(locale, { dateStyle: 'full', timeStyle: 'short', timeZone, hour12: prefs['clockFormat'] === '12h' }),
+    local: now.toLocaleString(locale, { dateStyle: 'full', timeStyle: 'short', timeZone, hour12 }),
     date: now.toLocaleDateString(locale, { dateStyle: 'full', timeZone }),
-    time: now.toLocaleTimeString(locale, { timeStyle: 'short', timeZone, hour12: prefs['clockFormat'] === '12h' }),
+    time: now.toLocaleTimeString(locale, { timeStyle: 'short', timeZone, hour12 }),
+    timeWithSeconds: now.toLocaleTimeString(locale, { timeStyle: 'medium', timeZone, hour12 }),
     timeZone,
     utcOffsetMinutes,
     locale,
+    hour12,
     zoneSource: setZone ? 'AuraOS setting (Settings → General)' : 'the browser\'s device',
     deviceTimeZone: device.timeZone,
   };

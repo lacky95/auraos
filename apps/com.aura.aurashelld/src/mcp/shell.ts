@@ -111,6 +111,40 @@ const WS_REF = z.union([z.number().int().min(1), z.string().min(1)])
 const WINDOW_REF = z.string().min(1)
   .describe('The name the user gave the window, the app name, or a viewId from list_windows.');
 
+/**
+ * One moment, phrased the four ways a person asks for it. Built here rather
+ * than in the browser so both paths (browser clock, server fallback) word it
+ * identically — given the zone, the locale and the clock format, the instant
+ * is all that is left to differ.
+ */
+function phrasings(epochMs: number, timeZone: string, locale: string, hour12: boolean) {
+  const at = new Date(epochMs);
+  const fmt = (opts: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat(locale, { timeZone, ...opts }).format(at);
+  const date = fmt({ dateStyle: 'full' });
+  const time = fmt({ hour: '2-digit', minute: '2-digit', hour12 });
+  const timeWithSeconds = fmt({ hour: '2-digit', minute: '2-digit', second: '2-digit', hour12 });
+  // Intl says "GMT+2"; everyone else says "UTC+2". Normalise once, here, so
+  // the field and the sentence can never disagree.
+  const offset = (new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'shortOffset' })
+    .formatToParts(at).find((p) => p.type === 'timeZoneName')?.value ?? 'GMT')
+    .replace(/^GMT$/, 'UTC+0').replace(/^GMT/, 'UTC');
+  return {
+    time,
+    date,
+    dateTime: `${date}, ${time}`,
+    full: `${date} at ${timeWithSeconds}, ${timeZone} (${offset})`,
+    timeWithSeconds,
+    offset,
+  };
+}
+
+/** How to speak a time — the rule the model should follow. */
+const SAY_RULE =
+  'Say back only what was asked: the time alone → `say.time`; the date alone → `say.date`; both '
+  + '("date and time", "time and date", "datetime") → `say.dateTime`; "full time" or "full date" → `say.full`. '
+  + 'Word it like a person would; never read out the ISO string, the epoch or the offset unless the user asks '
+  + 'for them. Everything precise is under `technical`.';
+
 /** The workspace that is current now — re-read, so it reflects what a call just did. */
 async function currentWorkspace(state: ShellState): Promise<Record<string, unknown>> {
   const ws = await getWorkspaces();
@@ -219,45 +253,55 @@ const TOOLS: OwnTool[] = [
     name: 'get_datetime',
     title: 'Current date and time',
     description:
-      'The current date and time as the user sees it — in the time zone from Settings → General when one is '
-      + 'set, otherwise the browser device\'s zone — with date, time, time zone, UTC offset, ISO 8601 and epoch. '
-      + 'Answer the user with the readable text (e.g. "Tuesday, 8 September 2026, 23:12") and do not mention the '
-      + 'time zone unless asked; `timeZone` and `zoneSource` are there for your own reference. If the zone is wrong, '
-      + 'the user picks theirs in Settings → General. One call is enough: the answer is to the minute, and an '
-      + 'immediate repeat returns the same reading marked `deduplicated`.',
+      'The current date and time as the user sees it — in the time zone from Settings → General when one is set, '
+      + 'otherwise the browser device\'s zone. `say` holds the sentence to use for each way of asking (time, '
+      + 'date, both, full) and `summary` states the rule; `technical` holds the precise values (seconds, ISO, '
+      + 'epoch, zone, offset) for your own use. ' + SAY_RULE
+      + ' If the zone is wrong, the user picks theirs in Settings → General. One call is enough: the answer is to '
+      + 'the second, and an immediate repeat returns the same reading marked `deduplicated`.',
     schema: z.object({}),
     annotations: READ,
     run: async () => {
-      // Readable line first — a person's answer, no zone label — the fields behind it.
-      const readable = (payload: Record<string, unknown>): CallToolResult => ({
-        content: [{ type: 'text', text: `${payload['date']}, ${payload['time']}` }],
-        structuredContent: payload,
-      });
-      const r = await ui<Record<string, unknown>>('clock', {}, 2_000);
-      if (r.ok) return readable({ source: 'the user\'s browser', ...r.result });
-      // No browser: the instant is the same everywhere, so the server clock
-      // is exact — only the zone needs the user's setting.
-      const region = await getRegion();
-      const now = new Date();
-      let timeZone = region.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone;
-      let locale = region.locale;
+      const [clock, region] = await Promise.all([ui<Record<string, unknown>>('clock', {}, 2_000), getRegion()]);
+      const hour12 = region.clockFormat === '12h';
+      const serverZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+      // The browser knows where the user is; the server only knows the
+      // setting. Either way the instant is the same — only the zone differs.
+      const fromUi = clock.ok ? clock.result : null;
+      let timeZone = String(fromUi?.['timeZone'] ?? region.timeZone ?? '') || serverZone;
+      let locale = String(fromUi?.['locale'] ?? region.locale ?? '') || 'en-GB';
+      const epochMs = typeof fromUi?.['epochMs'] === 'number' ? fromUi['epochMs'] as number : Date.now();
       try { new Intl.DateTimeFormat(locale, { timeZone }); }
-      catch { timeZone = 'UTC'; locale = 'en-US'; }
-      const offsetName = new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'shortOffset' })
-        .formatToParts(now).find((p) => p.type === 'timeZoneName')?.value ?? 'GMT';
-      const m = /([+-])(\d{1,2})(?::?(\d{2}))?/.exec(offsetName);
-      return readable({
-        source: 'the OS server (no browser connected)',
-        iso: now.toISOString(),
-        epochMs: now.getTime(),
-        local: now.toLocaleString(locale, { dateStyle: 'full', timeStyle: 'short', timeZone, hour12: region.clockFormat === '12h' }),
-        date: now.toLocaleDateString(locale, { dateStyle: 'full', timeZone }),
-        time: now.toLocaleTimeString(locale, { timeStyle: 'short', timeZone, hour12: region.clockFormat === '12h' }),
-        timeZone,
-        utcOffsetMinutes: m ? (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3] ?? 0)) : 0,
-        locale,
-        zoneSource: region.timeZone ? 'AuraOS setting (Settings → General)' : 'the OS server\'s own zone — set yours in Settings → General',
-      });
+      catch { timeZone = 'UTC'; locale = 'en-GB'; }
+
+      const say = phrasings(epochMs, timeZone, locale, hour12);
+      const zoneSource = fromUi?.['zoneSource'] ?? (region.timeZone
+        ? 'AuraOS setting (Settings → General)'
+        : 'the OS server\'s own zone — set yours in Settings → General');
+
+      const payload = {
+        summary: SAY_RULE,
+        say: { time: say.time, date: say.date, dateTime: say.dateTime, full: say.full },
+        technical: {
+          iso: new Date(epochMs).toISOString(),
+          epochMs,
+          timeWithSeconds: say.timeWithSeconds,
+          timeZone,
+          utcOffset: say.offset,
+          utcOffsetMinutes: fromUi?.['utcOffsetMinutes'] ?? null,
+          locale,
+          clockFormat: region.clockFormat,
+          source: fromUi ? 'the user\'s browser' : 'the OS server (no browser connected)',
+          zoneSource,
+        },
+      };
+      // Lead with the everyday phrasing, then the rule — a model that reads
+      // only the text still has the answer and knows how to trim it.
+      return {
+        content: [{ type: 'text', text: `${say.dateTime}\n${SAY_RULE}\n${JSON.stringify(payload.say, null, 2)}` }],
+        structuredContent: payload,
+      };
     },
   }),
 
@@ -750,14 +794,14 @@ export function buildShellServer(): Server {
     let out: CallToolResult;
     try { out = await result; }
     catch (err) { return fail(`${tool.name} failed: ${(err as Error).message}`); }
-    // Keep the headline so the brake can repeat it instead of the payload.
-    // `summary` first: a tool whose text is JSON would otherwise contribute
-    // an opening brace as its "answer".
-    const summary = out.structuredContent?.['summary'];
+    // Keep the headline so the brake can repeat it instead of the payload:
+    // the first line of the text, unless that is JSON (then `summary`, which
+    // is what a JSON-bodied tool leads with).
     const head = out.content.find((c) => c.type === 'text');
-    const headline = typeof summary === 'string' ? summary
-      : (head && typeof head.text === 'string' ? head.text.split('\n')[0] ?? '' : '');
-    if (headline && !headline.startsWith('{')) rememberAnswer(tool.name, headline);
+    const first = head && typeof head.text === 'string' ? head.text.split('\n')[0] ?? '' : '';
+    const summary = out.structuredContent?.['summary'];
+    const headline = first && !first.startsWith('{') ? first : (typeof summary === 'string' ? summary : '');
+    if (headline) rememberAnswer(tool.name, headline);
     if (!duplicate) return out;
     // Same call, moments ago: hand back that answer and say so, so a model
     // that repeated itself sees it already has what it asked for.
