@@ -17,9 +17,13 @@ async function readKv<T>(key: string, fallback: T): Promise<T> {
 }
 const clockFormat = await readKv<'12h' | '24h'>('clockFormat', '24h');
 const locale      = await readKv<string>('locale', 'en-US');
+// '' = the device's own zone. The device running the browser may sit on UTC
+// (a kiosk or WebView host), which is why this is a setting at all.
+const timeZone    = await readKv<string>('timeZone', '');
+const zones: string[] = (() => { try { return Intl.supportedValuesOf('timeZone'); } catch { return []; } })();
 const theme       = await readKv<{ colorMode?: 'light' | 'dark' | 'auto' }>('theme', {});
 const colorMode   = theme.colorMode ?? 'dark';
-const state = { clockFormat, locale, colorMode };
+const state = { clockFormat, locale, timeZone, colorMode };
 ---
 <!DOCTYPE html>
 <html lang="en">
@@ -41,6 +45,18 @@ const state = { clockFormat, locale, colorMode };
       <label>LOCALE</label>
       <input id="locale" type="text" value={state.locale} placeholder="en-US" />
     </div>
+    <div class="form-row">
+      <label>TIME ZONE</label>
+      <div>
+        <select id="time-zone">
+          <option value="" selected={state.timeZone === ''}>DEVICE DEFAULT</option>
+          {zones.map((z) => <option value={z} selected={state.timeZone === z}>{z}</option>)}
+        </select>
+        <p id="time-zone-hint" style="margin-top: 6px; font-size: 0.6rem; color: var(--aura-color-text-dim); letter-spacing: 0.06em;">
+          USED BY THE STATUS BAR, LOCK SCREEN AND THE SHELL MCP'S DATE/TIME
+        </p>
+      </div>
+    </div>
     <div class="form-row" style="align-items: flex-start;">
       <label>COLOR MODE</label>
       <div>
@@ -54,7 +70,7 @@ const state = { clockFormat, locale, colorMode };
       CHANGES PERSIST IMMEDIATELY · PUT /api/kv/os/&lt;field&gt;
     </p>
   </main>
-  <footer class="settings-foot">PROVIDER · /api/kv/os/clockFormat + /api/kv/os/locale + /api/kv/os/theme (mode)</footer>
+  <footer class="settings-foot">PROVIDER · /api/kv/os/clockFormat + /api/kv/os/locale + /api/kv/os/timeZone + /api/kv/os/theme (mode)</footer>
 
   <script is:inline>
     const statusEl = document.getElementById('status');
@@ -78,6 +94,13 @@ const state = { clockFormat, locale, colorMode };
 
     document.getElementById('clock-format').addEventListener('change', (e) => patch('clockFormat', e.target.value));
     document.getElementById('locale').addEventListener('input', (e) => patch('locale', e.target.value));
+    document.getElementById('time-zone').addEventListener('change', (e) => patch('timeZone', e.target.value));
+    // Say what "device default" currently resolves to, and what time that is.
+    try {
+      const dev = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const hint = document.getElementById('time-zone-hint');
+      hint.textContent = `DEVICE DEFAULT IS ${dev.toUpperCase()} · USED BY THE STATUS BAR, LOCK SCREEN AND THE SHELL MCP'S DATE/TIME`;
+    } catch (_) { /* keep the static hint */ }
 
     /* Color-mode picker now owned by <ColorModePicker /> React island.
      * Live-update link refresh stays — the page's stylesheet link still needs
@@ -96,7 +119,7 @@ const state = { clockFormat, locale, colorMode };
   <script>
     import { OsClient } from '@aura/app-sdk';
     new OsClient().nav.installGridNav({
-      selector: '#clock-format, #locale, [role="tab"]',
+      selector: '#clock-format, #locale, #time-zone, [role="tab"]',
     });
   </script>
 </body>

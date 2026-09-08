@@ -129,9 +129,22 @@ let initial: LockScreenConfig = DEFAULT_CONFIG;
     } catch (_) { /* keep defaults */ }
 
     var clockTimer = null;
+    // Same format, locale and time zone as the status-bar clock: its #clock
+    // element carries them as data-* (hydrated from the os/* KV keys), and it
+    // lives in this document. Falling back to the device clock keeps this
+    // script import-free.
     function tickClock() {
-      try { clockEl.textContent = new Date().toLocaleTimeString(); }
-      catch (_) { clockEl.textContent = '--:--:--'; }
+      var prefs = document.getElementById('clock');
+      var d = (prefs && prefs.dataset) || {};
+      try {
+        clockEl.textContent = new Date().toLocaleTimeString(d.locale || undefined, {
+          hour12: d.clockFormat === '12h',
+          timeZone: d.timeZone || undefined,
+        });
+      } catch (_) {
+        try { clockEl.textContent = new Date().toLocaleTimeString(); }
+        catch (_2) { clockEl.textContent = '--:--:--'; }
+      }
     }
     function startClock() {
       if (clockTimer != null) return;

@@ -34,7 +34,7 @@ const workspaces = {
 const layouts = [{ id: 'tiling', name: 'Tiling' }, { id: 'stack', name: 'Free Window' }];
 
 /** Script the OS. `uiMode` decides what /api/os/ui/command answers. */
-function fakeOs({ uiMode = 'no-ui', uiResult = {} } = {}) {
+function fakeOs({ uiMode = 'no-ui', uiResult = {}, region = {} } = {}) {
   resetDedupe();
   const calls = [];
   const state = { workspaces: JSON.parse(JSON.stringify(workspaces)) };
@@ -51,6 +51,9 @@ function fakeOs({ uiMode = 'no-ui', uiResult = {} } = {}) {
       case 'GET /api/os/layouts':        return json(layouts);
       case 'GET /api/admin/apps/mru':    return json({ mru: { 'com.aura.terminal': 2, 'io.x.notes': 1 } });
       case 'GET /api/kv/os/lockscreen':  return json({ value: { lockAt: 5, unlockAt: 9 } });
+      case 'GET /api/kv/os/timeZone':    return region.timeZone === undefined ? json({ error: 'not found' }, 404) : json({ value: region.timeZone });
+      case 'GET /api/kv/os/locale':      return json({ value: region.locale ?? 'en-US' });
+      case 'GET /api/kv/os/clockFormat': return json({ value: region.clockFormat ?? '24h' });
       case 'POST /api/os/lock':          return json({ locked: true });
       case 'POST /api/apps/com.aura.terminal/start': return json({ instanceId: 'com.aura.terminal-3' });
       case 'POST /api/instances/com.aura.terminal-2/stop': return json({ stopped: true });
@@ -244,4 +247,17 @@ test('get_datetime reports the browser clock when there is one, the server clock
   assert.match(s.source, /OS server/);
   assert.match(s.iso, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(typeof s.epochMs, 'number');
+  assert.match(s.zoneSource, /set yours in Settings/);
+
+  // With a zone chosen in Settings → General, the server fallback is the user's time.
+  fakeOs({ region: { timeZone: 'Europe/Berlin', locale: 'de-DE', clockFormat: '24h' } });
+  const b = (await call(await connect(), 'get_datetime')).structuredContent;
+  assert.equal(b.timeZone, 'Europe/Berlin');
+  assert.equal(b.locale, 'de-DE');
+  assert.ok(b.utcOffsetMinutes === 60 || b.utcOffsetMinutes === 120, `Berlin offset, got ${b.utcOffsetMinutes}`);
+  assert.match(b.zoneSource, /AuraOS setting/);
+  assert.match(b.local, /2\d{3}/);
+  const text = (await call(await connect(), 'get_datetime')).content[0].text;
+  assert.match(text, /^\S.*20\d\d, \d{1,2}:\d{2}$/, `readable date + time, no zone: ${text}`);
+  assert.ok(!/UTC|GMT|Europe/.test(text));
 });

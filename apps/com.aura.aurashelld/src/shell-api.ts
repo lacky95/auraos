@@ -86,6 +86,19 @@ export async function getMru(): Promise<Record<string, number>> {
   catch { return {}; }
 }
 
+/** Settings → General: time zone (IANA, '' = device), locale, clock format. Missing keys are simply unset. */
+export async function getRegion(): Promise<{ timeZone: string; locale: string; clockFormat: '12h' | '24h' }> {
+  const read = async (key: string) => {
+    try { return (await call<{ value?: unknown }>(`/api/kv/os/${key}`)).value; } catch { return undefined; }
+  };
+  const [tz, loc, cf] = await Promise.all([read('timeZone'), read('locale'), read('clockFormat')]);
+  return {
+    timeZone: typeof tz === 'string' ? tz : '',
+    locale: typeof loc === 'string' && loc ? loc : 'en-US',
+    clockFormat: cf === '12h' ? '12h' : '24h',
+  };
+}
+
 export async function getLockscreen(): Promise<{ lockAt?: number; unlockAt?: number } | null> {
   try { return (await call<{ value?: { lockAt?: number; unlockAt?: number } | null }>('/api/kv/os/lockscreen')).value ?? null; }
   catch { return null; }

@@ -94,20 +94,37 @@ async function handle(ev: { id?: unknown; action?: unknown; params?: unknown }):
 /**
  * The user's clock. Built in here rather than in a component: the daemon's
  * container runs on UTC, and "what time is it" means the time on the screen
- * the person is looking at — this browser's locale and zone.
+ * the person is looking at. The zone and locale come from the status-bar
+ * clock's data-* (Settings → General, KV os/timeZone + os/locale) when set —
+ * the device running this browser may itself sit on UTC — and from the
+ * device otherwise.
  */
 function clock(): Record<string, unknown> {
   const now = new Date();
-  const opts = Intl.DateTimeFormat().resolvedOptions();
+  const device = Intl.DateTimeFormat().resolvedOptions();
+  const prefs = document.getElementById('clock')?.dataset ?? {};
+  const setZone = prefs['timeZone'] || '';
+  const locale = prefs['locale'] || device.locale;
+  let timeZone = setZone || device.timeZone;
+  let fmt: Intl.DateTimeFormat;
+  try { fmt = new Intl.DateTimeFormat(locale, { timeZone, timeZoneName: 'shortOffset' }); }
+  catch { timeZone = device.timeZone; fmt = new Intl.DateTimeFormat(device.locale, { timeZone, timeZoneName: 'shortOffset' }); }
+  // Offset of THAT zone, from its formatted "GMT+2"-style name; the device's
+  // getTimezoneOffset would be wrong when a zone is set.
+  const offsetName = fmt.formatToParts(now).find((p) => p.type === 'timeZoneName')?.value ?? 'GMT';
+  const m = /([+-])(\d{1,2})(?::?(\d{2}))?/.exec(offsetName);
+  const utcOffsetMinutes = m ? (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3] ?? 0)) : 0;
   return {
     iso: now.toISOString(),
     epochMs: now.getTime(),
-    local: now.toLocaleString(opts.locale, { dateStyle: 'full', timeStyle: 'long' }),
-    date: now.toLocaleDateString(opts.locale, { dateStyle: 'full' }),
-    time: now.toLocaleTimeString(opts.locale, { timeStyle: 'medium' }),
-    timeZone: opts.timeZone,
-    utcOffsetMinutes: -now.getTimezoneOffset(),
-    locale: opts.locale,
+    local: now.toLocaleString(locale, { dateStyle: 'full', timeStyle: 'short', timeZone, hour12: prefs['clockFormat'] === '12h' }),
+    date: now.toLocaleDateString(locale, { dateStyle: 'full', timeZone }),
+    time: now.toLocaleTimeString(locale, { timeStyle: 'short', timeZone, hour12: prefs['clockFormat'] === '12h' }),
+    timeZone,
+    utcOffsetMinutes,
+    locale,
+    zoneSource: setZone ? 'AuraOS setting (Settings → General)' : 'the browser\'s device',
+    deviceTimeZone: device.timeZone,
   };
 }
 
