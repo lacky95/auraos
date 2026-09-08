@@ -1,0 +1,24 @@
+{
+  "id": "com.aura.aurashelld",
+  "name": "Aura Shell Daemon",
+  "version": "0.1.0",
+  "description": "Headless service hosting the `shell` MCP — an agent's remote control for the AuraOS shell UI: overview, apps, workspaces, layouts, windows, zoom, fullscreen, lock screen, launcher, process manager.",
+  "icon": "SHD",
+  "category": "system",
+  "componentType": "service",
+  "instanceMode": "single",
+  "activityMode": "none",
+  "sandbox": "container",
+  "autoStart": true,
+  "tools": ["node"],
+  "permissions": ["network.local"],
+  "provides": [
+    {
+      "name": "shell",
+      "kind": "mcp",
+      "address": "/api/mcp/shell",
+      "version": "1",
+      "description": "MCP that drives the AuraOS shell UI: one-call overview, apps by name, workspaces (list/switch/rename/new), layouts, windows (focus/rename/close/reload), zoom, fullscreen, lock screen, launcher search, process manager, stop/kill with a confirmation challenge."
+    }
+  ]
+}

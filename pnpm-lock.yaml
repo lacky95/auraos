@@ -15,6 +15,27 @@ importers:
         specifier: ^5.5.0
         version: 5.9.3
 
+  apps/com.aura.aurashelld:
+    dependencies:
+      '@astrojs/node':
+        specifier: ^10.0.0
+        version: 10.1.0(astro@6.3.1(@types/node@22.19.19)(ioredis@5.10.1)(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.60.3)(tsx@4.21.0)(yaml@2.9.0))
+      '@aura/app-sdk':
+        specifier: workspace:*
+        version: link:../../packages/app-sdk
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.29.0
+        version: 1.30.0(zod@3.25.76)
+      astro:
+        specifier: ^6.0.0
+        version: 6.3.1(@types/node@22.19.19)(ioredis@5.10.1)(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.60.3)(tsx@4.21.0)(yaml@2.9.0)
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+      zod-to-json-schema:
+        specifier: ^3.25.2
+        version: 3.25.2(zod@3.25.76)
+
   apps/com.aura.browser:
     dependencies:
       '@astrojs/node':
@@ -9817,7 +9838,7 @@ snapshots:
       '@babel/plugin-transform-typescript': 7.28.6(@babel/core@7.29.0)
       '@babel/preset-typescript': 7.28.5(@babel/core@7.29.0)
       '@dotenvx/dotenvx': 1.66.0
-      '@modelcontextprotocol/sdk': 1.29.0(zod@3.25.76)
+      '@modelcontextprotocol/sdk': 1.30.0(zod@3.25.76)
       '@types/validate-npm-package-name': 4.0.2
       browserslist: 4.28.2
       commander: 14.0.3

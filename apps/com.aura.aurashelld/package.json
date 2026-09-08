@@ -1,0 +1,21 @@
+{
+  "name": "com.aura.aurashelld",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "APP_PORT=${APP_PORT:-4001} astro dev --host 0.0.0.0 --port ${APP_PORT:-4001}",
+    "build": "astro build",
+    "start": "node dist/server/entry.mjs",
+    "test": "node --test --experimental-strip-types test/*.test.mjs",
+    "typecheck": "astro check"
+  },
+  "dependencies": {
+    "@astrojs/node": "^10.0.0",
+    "@aura/app-sdk": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "astro": "^6.0.0",
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.25.2"
+  }
+}
