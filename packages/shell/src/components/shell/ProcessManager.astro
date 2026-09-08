@@ -706,6 +706,7 @@
 <script>
   import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
   import { osEvents } from '../../lib/osEvents.ts';
+  import { registerUiCommand, registerSnapshotPart } from '../../lib/uiCommands.ts';
   const keyDispatcher = getKeyDispatcher();
 
   interface InstanceListItem {
@@ -870,6 +871,39 @@
     if (panel.getAttribute('aria-hidden') === 'false') closePanel();
     else openPanel();
   });
+
+  // ── Shell UI commands (see ../../lib/uiCommands.ts) + the globals the
+  // SDK's aura.system.*ProcessManager messages have always implied existed.
+  const isOpen = () => panel.getAttribute('aria-hidden') === 'false';
+  function setFilters(next: Partial<Record<FilterKey, boolean>>): void {
+    let changed = false;
+    for (const key of ['apps', 'services'] as FilterKey[]) {
+      const v = next[key];
+      if (typeof v === 'boolean' && v !== filters[key]) { filters[key] = v; changed = true; }
+    }
+    if (!changed) return;
+    applyFilterButtonState();
+    try { localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify(filters)); } catch {}
+    render(lastInstances, lastActivities);
+  }
+  (window as any).auraOpenProcessManager   = () => { void openPanel(); };
+  (window as any).auraCloseProcessManager  = closePanel;
+  (window as any).auraToggleProcessManager = () => { if (isOpen()) closePanel(); else void openPanel(); };
+
+  registerUiCommand('openProcessManager', async ({ showApps, showServices }) => {
+    setFilters({
+      apps:     typeof showApps === 'boolean' ? showApps : undefined,
+      services: typeof showServices === 'boolean' ? showServices : undefined,
+    });
+    await openPanel();
+    return { open: true, filters: { ...filters } };
+  });
+  registerUiCommand('closeProcessManager', () => { closePanel(); return { open: false, filters: { ...filters } }; });
+  registerUiCommand('toggleProcessManager', async () => {
+    if (isOpen()) closePanel(); else await openPanel();
+    return { open: isOpen(), filters: { ...filters } };
+  });
+  registerSnapshotPart('processManager', () => ({ open: isOpen(), filters: { ...filters } }));
 
   // Panel-local Esc-to-close stays as a plain DOM listener — it's a
   // contextual behavior of the open panel, not an OS action. Only consumes

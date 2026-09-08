@@ -310,6 +310,7 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
 
 <script>
   import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
+  import { registerUiCommand, registerSnapshotPart } from '../../lib/uiCommands.ts';
   const keyDispatcher = getKeyDispatcher();
 
   const panel  = document.getElementById('lo-panel') as HTMLElement;
@@ -509,12 +510,21 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
     closeCtxMenu();
   });
 
-  search.addEventListener('input', () => {
-    const q = search.value.trim().toLowerCase();
+  /**
+   * Filter the grid to tiles whose name or id contains `q`, mirroring `q`
+   * into the search box. One function for the box's own keystrokes and for
+   * the shell MCP's search_launcher, so an agent typing into the launcher
+   * looks exactly like a human doing it. Returns what is left visible.
+   */
+  function applyLauncherFilter(q: string): Array<{ appId: string; name: string }> {
+    if (search.value !== q) search.value = q;
+    const needle = q.trim().toLowerCase();
+    const matches: Array<{ appId: string; name: string }> = [];
     grid.querySelectorAll<HTMLElement>('.lo-app').forEach(el => {
-      const name = el.querySelector('.lo-app-name')?.textContent?.toLowerCase() ?? '';
-      const id   = el.dataset['appId']?.toLowerCase() ?? '';
-      el.hidden = q !== '' && !name.includes(q) && !id.includes(q);
+      const name = el.querySelector('.lo-app-name')?.textContent ?? '';
+      const id   = el.dataset['appId'] ?? '';
+      el.hidden = needle !== '' && !name.toLowerCase().includes(needle) && !id.toLowerCase().includes(needle);
+      if (!el.hidden) matches.push({ appId: id, name });
     });
     // If the user was on a tile that just got filtered out, leave focus on
     // the search field — they're mid-typing. Don't auto-jump back into the
@@ -523,7 +533,24 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
     if (focused && focused.classList.contains('lo-app') && focused.hidden) {
       search.focus();
     }
+    return matches;
+  }
+  search.addEventListener('input', () => { applyLauncherFilter(search.value); });
+  (window as any).auraLauncherSearch = applyLauncherFilter;
+
+  const isOpen = () => panel.getAttribute('aria-hidden') === 'false';
+  registerUiCommand('openLauncher', ({ query }) => {
+    openPanel();   // clears the box — so the filter goes on after
+    const q = typeof query === 'string' ? query : '';
+    return { open: true, query: q, ...(q ? { matches: applyLauncherFilter(q) } : {}) };
   });
+  registerUiCommand('closeLauncher', () => { closePanel(); return { open: false }; });
+  registerUiCommand('searchLauncher', ({ query }) => {
+    if (!isOpen()) openPanel();
+    const q = typeof query === 'string' ? query : '';
+    return { open: true, query: q, matches: applyLauncherFilter(q) };
+  });
+  registerSnapshotPart('launcher', () => ({ open: isOpen(), query: search.value }));
 
   grid.addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-app-id]');

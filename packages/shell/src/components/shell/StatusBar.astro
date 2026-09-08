@@ -198,6 +198,7 @@ let initialLocale: string = 'en-GB';
   import * as viewportClient from '../../lib/viewportClient';
   import { queueViewportBroadcast } from '../../lib/viewportBroadcaster.ts';
   import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
+  import { registerUiCommand, registerSnapshotPart } from '../../lib/uiCommands.ts';
   import { osEvents } from '../../lib/osEvents.ts';
   import { installShellReloadGuard, RELOAD_PENDING_EVENT } from '../../lib/devReload';
 
@@ -1457,6 +1458,50 @@ let initialLocale: string = 'en-GB';
     const next = state.workspaces[((i < 0 ? 0 : i) + dir + n) % n];
     if (next) workspaceClient.setActive(next.id).catch(() => undefined);
   }
+
+  // ── Shell UI commands (see ../../lib/uiCommands.ts) — what this bar owns:
+  // the main zoom, browser fullscreen, a workspace's layout, the layout list.
+  registerUiCommand('setZoom', ({ percent, step, reset }) => {
+    let target: number;
+    if (reset === true)                     target = 1;
+    else if (typeof step === 'number')      target = currentZoomValue + step * ZOOM_STEP;
+    else if (typeof percent === 'number')   target = percent / 100;
+    else throw new Error('setZoom needs percent, step or reset');
+    // Through viewportClient, like the −/＋ buttons: persists + syncs tabs.
+    viewportClient.patchActive({ zoom: target });
+    return { percent: Math.round(clampZoom(target) * 100) };
+  });
+  registerUiCommand('fullscreen', async ({ mode }) => {
+    const want = mode === 'toggle' ? !document.fullscreenElement : mode === 'on';
+    if (want && !document.fullscreenElement) {
+      try { await document.documentElement.requestFullscreen(); }
+      catch {
+        // Browsers only grant fullscreen from a user gesture; a command that
+        // arrived over the network is not one. Say so instead of failing quietly.
+        throw new Error('the browser refused to enter fullscreen: it only allows that from a user gesture — ask the user to press F11 or click the ⛶ button');
+      }
+    } else if (!want && document.fullscreenElement) {
+      await document.exitFullscreen();
+    }
+    return { fullscreen: !!document.fullscreenElement };
+  });
+  registerUiCommand('switchLayout', async ({ workspaceId, layoutId }) => {
+    const wsId = String(workspaceId ?? '');
+    const id = String(layoutId ?? '');
+    if (!availableLayouts.some((m) => m.id === id)) throw new Error(`unknown layout "${id}"`);
+    await workspaceClient.patchWorkspace(wsId, { layoutId: id });
+    return { workspaceId: wsId, layoutId: id };
+  });
+  registerSnapshotPart('statusBar', () => ({
+    zoom: {
+      percent: Math.round(currentZoomValue * 100),
+      shellPercent: Math.round(shellZoomValue * 100),
+      appPercent: Math.round(appZoomValue * 100),
+      min: ZOOM_MIN * 100, max: ZOOM_MAX * 100, step: ZOOM_STEP * 100,
+    },
+    fullscreen: !!document.fullscreenElement,
+    layouts: availableLayouts,
+  }));
 
   // ─── Chrome arrow-key navigation ───────────────────────────────────────
   // Mirror of the Dock handler — same rules but inverted:

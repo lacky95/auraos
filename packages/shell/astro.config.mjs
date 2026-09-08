@@ -299,7 +299,7 @@ function sioPlugin() {
         'app:enabledChanged', 'app:mruChanged',
         'activity:opened', 'activity:closed', 'activity:focus',
         'activity:navigated', 'activity:breadcrumbChanged',
-        'theme:changed', 'mode:changed', 'notification',
+        'theme:changed', 'mode:changed', 'notification', 'ui:command',
         'workspaces:changed', 'workspace:activated', 'kv:changed',
       ];
 

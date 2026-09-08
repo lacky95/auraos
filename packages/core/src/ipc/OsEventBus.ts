@@ -78,6 +78,13 @@ export interface OsEvents {
   };
   'notification': { appId: string; title: string; body: string };
   /**
+   * A command for the shell's browser UI from a server-side caller — the Aura
+   * Shell Daemon's MCP, through the shell's uiCommandBroker. Imperative,
+   * unlike every other event here: the browser tab that CLAIMS `id`
+   * (POST /api/os/ui/claim) runs `action` and answers via POST /api/os/ui/result.
+   */
+  'ui:command': { id: string; action: string; params?: Record<string, unknown> };
+  /**
    * Workspace list or contents changed. Payload contains lightweight
    * summaries (no full member arrays) so the SSE wire stays small. The
    * shell fetches the full state from the Settings provider when it needs

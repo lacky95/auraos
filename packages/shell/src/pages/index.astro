@@ -224,6 +224,7 @@ const ssrVisibleViews = initialViews
   import { nextInDirection, getViewRects } from '../lib/windowNav.ts';
   import type { LayoutNavContext } from '../lib/windowNav.ts';
   import { osEvents } from '../lib/osEvents.ts';
+  import { registerUiCommand, registerSnapshotPart, invokeLocal, startUiCommandListener } from '../lib/uiCommands.ts';
   import { markLaunchedHere } from '../lib/launchOrigin.ts';
   import {
     queueViewportBroadcast,
@@ -545,13 +546,24 @@ const ssrVisibleViews = initialViews
     }
   }
 
-  function handleSystemAction(type: string, _payload: { type: string }): void {
+  function handleSystemAction(type: string, payload: { type: string }): void {
     if (type === 'aura.system.openLauncher')        (window as { auraOpenLauncher?: () => void }).auraOpenLauncher?.();
     else if (type === 'aura.system.closeLauncher')  (window as { auraCloseLauncher?: () => void }).auraCloseLauncher?.();
     else if (type === 'aura.system.toggleLauncher') (window as { auraToggleLauncher?: () => void }).auraToggleLauncher?.();
     else if (type === 'aura.system.toggleNavMode')  keyDispatcher.setMode(keyDispatcher.getMode() === 'nav' ? 'app' : 'nav');
     else if (type === 'aura.system.toggleHome')     keyDispatcher.setMode('nav');
     else if (type === 'aura.system.lockScreen')     (window as { auraLockScreen?: () => void }).auraLockScreen?.();
+    // The SDK has posted these four for a long time; nothing answered them.
+    // They are the same operations the shell MCP drives, so route them
+    // through the same command table rather than a second set of globals.
+    else if (type === 'aura.system.openProcessManager')   void invokeLocal('openProcessManager').catch((err) => console.warn('[shell]', err));
+    else if (type === 'aura.system.closeProcessManager')  void invokeLocal('closeProcessManager').catch((err) => console.warn('[shell]', err));
+    else if (type === 'aura.system.toggleProcessManager') void invokeLocal('toggleProcessManager').catch((err) => console.warn('[shell]', err));
+    else if (type === 'aura.system.switchWorkspace') {
+      const slot = Number((payload as { slot?: unknown }).slot);
+      const target = workspaceClient.getCached()?.workspaces[slot - 1];
+      if (target) workspaceClient.setActive(target.id).catch((err) => console.warn('[shell] setActive failed', err));
+    }
   }
 
   function appIdFromIframe(frame: HTMLIFrameElement): string | null {
@@ -2761,6 +2773,26 @@ const ssrVisibleViews = initialViews
    * on Escape. The existing title spans are hidden (not removed) so the
    * subsequent updateSlot() — the single rendering path — can repaint them.
    */
+  /** Repaint one window through the canonical path. */
+  function repaintSlot(viewId: string): void {
+    const liveSlot = document.querySelector<HTMLElement>(`.app-slot[data-view-id="${CSS.escape(viewId)}"]`);
+    const liveView = views.find((x) => x.viewId === viewId);
+    if (liveSlot && liveView) updateSlot(liveSlot, liveView);
+  }
+
+  /**
+   * Set (or, with an empty name, clear) a window's user label and repaint.
+   * Shared by the inline ✎ editor and the shell MCP's rename_window, so the
+   * pill can never disagree with the map whichever side wrote it.
+   */
+  function setWindowName(viewId: string, raw: string): string | null {
+    const name = raw.trim().slice(0, 60);
+    if (name) windowNames.set(viewId, name);
+    else      windowNames.delete(viewId);
+    repaintSlot(viewId);
+    return windowNames.get(viewId) ?? null;
+  }
+
   function beginRenameWindow(slot: HTMLElement, viewId: string): void {
     const titleEl = slot.querySelector('.slot-title') as HTMLElement | null;
     if (!titleEl || titleEl.querySelector('input[data-window-rename]')) return;
@@ -2788,17 +2820,12 @@ const ssrVisibleViews = initialViews
     const finish = (save: boolean) => {
       if (settled) return;
       settled = true;
-      if (save) {
-        const name = input.value.trim();
-        if (name) windowNames.set(viewId, name);
-        else      windowNames.delete(viewId);
-      }
+      const name = input.value;
       input.remove();
       hidden.forEach((k) => { k.style.display = k.dataset['renamePrev'] ?? ''; delete k.dataset['renamePrev']; });
       // Repaint through the canonical path so the name pill reflects the edit.
-      const liveSlot = document.querySelector<HTMLElement>(`.app-slot[data-view-id="${CSS.escape(viewId)}"]`);
-      const liveView = views.find((x) => x.viewId === viewId);
-      if (liveSlot && liveView) updateSlot(liveSlot, liveView);
+      if (save) setWindowName(viewId, name);
+      else      repaintSlot(viewId);
     };
     input.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter')       { ev.preventDefault(); finish(true); }
@@ -2957,6 +2984,82 @@ const ssrVisibleViews = initialViews
   (window as any).auraFocusInstance        = focusInstance;
   (window as any).auraRemoveViewsByInstance = removeViewsByInstance;
   (window as any).auraRemoveViewByActivity  = removeViewByActivity;
+
+  // ── Shell UI commands (server → this page; see ../lib/uiCommands.ts) ─────
+  // The desktop registers what only it can do: the live window list, focus,
+  // close, reload, rename, launching into a workspace — and the workspace
+  // operations, routed through workspaceClient so this page stays the single
+  // writer of that state and the MCP never races the browser on the KV blob.
+  const needView = (raw: unknown): AppView => {
+    const id = String(raw ?? '');
+    const v = views.find((x) => x.viewId === id);
+    if (!v) throw new Error(`no window "${id}" is open`);
+    return v;
+  };
+  const ownerOf = (viewId: string) =>
+    workspaceClient.getCached()?.workspaces.find((w) => w.members.includes(viewId)) ?? null;
+
+  registerUiCommand('launchApp', async ({ appId, workspaceId }) => {
+    if (typeof appId !== 'string' || !appId) throw new Error('appId required');
+    const wsId = typeof workspaceId === 'string' && workspaceId ? workspaceId : undefined;
+    await (window as any).auraLaunchApp(appId, wsId ? { workspaceId: wsId } : undefined);
+    return { launched: appId, workspaceId: wsId ?? workspaceClient.getCached()?.activeWorkspaceId ?? null };
+  });
+  registerUiCommand('focusWindow', async ({ viewId }) => {
+    const v = needView(viewId);
+    const ws = workspaceClient.getCached();
+    const owner = ownerOf(v.viewId);
+    // Bring the owning workspace forward first, exactly like focusInstance.
+    if (ws && owner && owner.id !== ws.activeWorkspaceId) await workspaceClient.setActive(owner.id);
+    focusView_(v.viewId);
+    return { viewId: v.viewId, workspaceId: owner?.id ?? ws?.activeWorkspaceId ?? null };
+  });
+  registerUiCommand('closeWindow',  ({ viewId }) => { const v = needView(viewId); closeView_(v.viewId);   return { closed: v.viewId }; });
+  registerUiCommand('reloadWindow', ({ viewId }) => { const v = needView(viewId); refreshView_(v.viewId); return { reloaded: v.viewId }; });
+  registerUiCommand('renameWindow', ({ viewId, name }) => {
+    const v = needView(viewId);
+    return { viewId: v.viewId, name: setWindowName(v.viewId, typeof name === 'string' ? name : '') };
+  });
+  registerUiCommand('switchWorkspace', async ({ workspaceId }) => {
+    const id = String(workspaceId ?? '');
+    if (!workspaceClient.getCached()?.workspaces.some((w) => w.id === id)) throw new Error(`no workspace "${id}"`);
+    await workspaceClient.setActive(id);
+    return { workspaceId: id };
+  });
+  registerUiCommand('renameWorkspace', async ({ workspaceId, name }) => {
+    const id = String(workspaceId ?? '');
+    if (typeof name !== 'string' || !name.trim()) throw new Error('name required');
+    await workspaceClient.patchWorkspace(id, { name: name.trim() });
+    return { workspaceId: id, name: name.trim() };
+  });
+  registerUiCommand('newWorkspace', async ({ name }) => {
+    const w = await workspaceClient.createWorkspace(typeof name === 'string' && name.trim() ? name.trim() : undefined);
+    return { workspace: { id: w.id, name: w.name, layoutId: w.layoutId } };
+  });
+  registerUiCommand('lockScreen', ({ mode }) => {
+    const w = window as { auraLockScreen?: () => void; auraUnlockScreen?: () => void; auraLockScreenActive?: () => boolean };
+    if (mode === 'on') w.auraLockScreen?.(); else w.auraUnlockScreen?.();
+    return { locked: w.auraLockScreenActive?.() ?? null };
+  });
+  registerSnapshotPart('desktop', () => {
+    const ws = workspaceClient.getCached();
+    return {
+      activeWorkspaceId: ws?.activeWorkspaceId ?? null,
+      focusedViewId: views.find((v) => v.isFocused)?.viewId ?? null,
+      maximizedViewId,
+      maximizedFull,
+      navMode: keyDispatcher.getMode(),
+      windows: views.map((v) => ({
+        viewId: v.viewId, appId: v.appId, instanceId: v.instanceId, activityId: v.activityId ?? null,
+        title: v.title, name: windowNames.get(v.viewId) ?? null, sessionLabel: v.sessionLabel ?? null,
+        state: v.state, isFocused: v.isFocused, workspaceId: ownerOf(v.viewId)?.id ?? null,
+      })),
+    };
+  });
+  registerSnapshotPart('lockScreen', () => ({
+    active: (window as { auraLockScreenActive?: () => boolean }).auraLockScreenActive?.() ?? null,
+  }));
+  startUiCommandListener();
 
   // SSE: live state updates per-instance / per-activity
   // Drive every `.sci-spinner` on the page through the | / - \ ASCII frame

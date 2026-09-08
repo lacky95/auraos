@@ -219,6 +219,11 @@ let initial: LockScreenConfig = DEFAULT_CONFIG;
 
     // ── Triggers (registered synchronously, before anything that could throw) ──
     window.auraLockScreen = activate;
+    // The shell MCP (through index.astro's `lockScreen` UI command) needs the
+    // inverse and the current state. Kept beside the trigger so the three
+    // can never drift apart; this script stays import-free by design.
+    window.auraUnlockScreen = deactivate;
+    window.auraLockScreenActive = function () { return active; };
 
     // Some triggers (e.g. the Settings-page "TEST" button) live in iframes and
     // post a message asking us to lock. Accept it regardless of which frame
