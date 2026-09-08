@@ -286,6 +286,38 @@ const ssrVisibleViews = initialViews
       return;
     }
 
+    // App reporting what its window should be called. Same trust model as
+    // rebind: resolved from the sender's frame, so an app can only rename the
+    // window it is running in, and the text is only ever set as textContent.
+    if (d.type === 'aura.window.label') {
+      const text = (d as { text?: unknown }).text;
+      if (text !== null && typeof text !== 'string') return;
+      const frame = appFrameFor(ev.source as Window | null);
+      const viewId = frame?.closest<HTMLElement>('.app-slot')?.dataset['viewId'];
+      if (!viewId) return;
+      const idx = views.findIndex((v) => v.viewId === viewId);
+      if (idx < 0) return;
+      const v = views[idx]!;
+      const next = typeof text === 'string' && text ? text : undefined;
+      if (v.sessionLabel === next) return;
+      views = [...views.slice(0, idx), { ...v, sessionLabel: next }, ...views.slice(idx + 1)];
+      renderLayout();
+      return;
+    }
+
+    // App asking to move ITS OWN window to another backend instance of the
+    // same app (the Terminal's container switcher). Resolved from the sender's
+    // frame, never from a payload-supplied view id — an app may only move the
+    // window it is actually running in.
+    if (d.type === 'aura.window.rebind') {
+      const targetId = (d as { instanceId?: unknown }).instanceId;
+      if (typeof targetId !== 'string' || !targetId) return;
+      const frame = appFrameFor(ev.source as Window | null);
+      const viewId = frame?.closest<HTMLElement>('.app-slot')?.dataset['viewId'];
+      if (viewId) void rebindViewToInstance(viewId, targetId);
+      return;
+    }
+
     // App SDK requesting a system action.
     if (d.type && d.type.startsWith('aura.system.')) {
       handleSystemAction(d.type, d as { type: string });
@@ -972,6 +1004,21 @@ const ssrVisibleViews = initialViews
      */
     minimizable?: boolean;
     /**
+     * What the app wants shown as this window's id, when that differs from its
+     * OS handle. The Terminal reports which SESSION it is showing: a window can
+     * change session without the shell being involved at all (same instance,
+     * new socket), so the activity id alone would sit there naming a shell the
+     * user is no longer looking at.
+     */
+    sessionLabel?: string;
+    /**
+     * Window handles (activities) this view still holds on instances it was
+     * switched away from. Reused on a switch back so handles don't pile up,
+     * and closed with the window. NOT sessions: which shell a window shows is
+     * the app's own business — see the terminal's session picker.
+     */
+    rebindTrail?: string[];
+    /**
      * In-activity history trail — the prior path/title pairs the iframe
      * visited. Populated by `activity:navigated` SSE events when the
      * activity used the "replace-current" launch mode. Drives the OS
@@ -1651,6 +1698,155 @@ const ssrVisibleViews = initialViews
       markActivityOpenEnd(appId);
     }
   }
+  /**
+   * Move an existing window to a DIFFERENT backend instance of the same app.
+   *
+   * Why the shell has to do this rather than the app self-navigating: the app
+   * could set `location` itself (the iframe is same-origin), but `views[]`
+   * would keep the old `instanceId` — and that field is what drives the
+   * chrome's id label, the `data-instance-id` routing for host URL relays, and
+   * the `app:stateChanged` / `app:crashed` reconciliation. A self-navigated
+   * window would survive the wrong crash and die on the wrong one, and
+   * `updateSlot` would snap the iframe back to the old instance on remount.
+   *
+   * The activity moves with the window because an activity belongs to exactly
+   * one instance. We ADOPT an existing activity on the target that no window
+   * is showing before opening a new one — for the Terminal that is what makes
+   * switching back and forth land in the same shell each time, since its PTY
+   * session is keyed by activity id. The old activity is deliberately left
+   * OPEN for the same reason: closing it would drop the session you are
+   * switching away from, which is never what "show me the other container"
+   * means.
+   */
+  async function rebindViewToInstance(viewId: string, targetInstanceId: string): Promise<void> {
+    const v = views.find((x) => x.viewId === viewId);
+    if (!v || v.instanceId === targetInstanceId) return;
+
+    // Refuse a cross-app move: the window's chrome, keymap claim and manifest
+    // gating all belong to `v.appId`, and the target's app id is the only
+    // thing that makes an activity on it meaningful.
+    const status = await fetch(`/api/instances/${encodeURIComponent(targetInstanceId)}/status`)
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null);
+    const target = status?.instance;
+    if (!target || target.appId !== v.appId) {
+      console.error(`[shell] rebind refused: ${targetInstanceId} is not a live instance of ${v.appId}`);
+      return;
+    }
+
+    // Only activities a VISIBLE window holds are off-limits; a view that exists
+    // but sits in no workspace is a leftover handle, free to reuse.
+    const shown = new Set(views
+      .filter((x) => workspaceClient.findOwner(x.viewId))
+      .map((x) => x.activityId).filter(Boolean) as string[]);
+    let nextActivityId: string | undefined;
+    let nextPath = '/';
+    let nextTitle = v.title;
+
+    markActivityOpenStart(v.appId);
+    try {
+      const existing: Array<{ activityId: string; path?: string; title?: string }> =
+        await fetch(`/api/instances/${encodeURIComponent(targetInstanceId)}/activities`)
+          .then((r) => (r.ok ? r.json() : []))
+          .catch(() => []);
+      // Reuse a window handle this view already held on the target, else one no
+      // VISIBLE window is using, else make one. An activity here is just the
+      // window's handle on that instance — which shell it shows is the app's
+      // own business (see the terminal's session picker) — so this only needs
+      // to keep handles from piling up on every switch.
+      //
+      // The "no window shows it" test is deliberately second: SSR builds a view
+      // for every open activity, including ones hidden by workspace membership,
+      // so without the workspace check almost nothing looks free and every
+      // switch would mint another handle.
+      const adopt = existing.find((a) => (v.rebindTrail ?? []).includes(a.activityId))
+                 ?? existing.find((a) => !shown.has(a.activityId));
+      if (adopt) {
+        nextActivityId = adopt.activityId;
+        nextPath  = adopt.path ?? '/';
+        nextTitle = adopt.title ?? v.title;
+      } else {
+        const res = await fetch(`/api/instances/${encodeURIComponent(targetInstanceId)}/activities`, { method: 'POST' });
+        if (!res.ok) { console.error(`[shell] rebind: could not open an activity on ${targetInstanceId}`, await res.text()); return; }
+        const body = await res.json() as { activityId: string; activity?: { path?: string; title?: string } };
+        nextActivityId = body.activityId;
+        nextPath  = body.activity?.path ?? '/';
+        nextTitle = body.activity?.title ?? v.title;
+      }
+    } finally {
+      markActivityOpenEnd(v.appId);
+    }
+    if (!nextActivityId) return;
+
+    // viewId is `activityId ?? instanceId`, so it changes with the activity.
+    // Everything keyed by it has to come along, or the window silently leaves
+    // its workspace (and loses its user-given name) on a switch.
+    // The activity we are leaving joins the trail; the one we just adopted
+    // leaves it (it is the current activity again).
+    const trail = [...(v.rebindTrail ?? []), ...(v.activityId ? [v.activityId] : [])]
+      .filter((a) => a !== nextActivityId);
+
+    const next = buildView(v.appId, nextTitle, targetInstanceId, nextActivityId, nextPath, target.state ?? 'resumed', !!v.minimizable);
+    // Absorb the placeholder view SSR made for this activity while no window
+    // was showing it — viewId IS the activity id, so leaving it would put two
+    // entries with the same key in views[].
+    views = views.filter((x) => x.viewId !== next.viewId || x.viewId === viewId);
+    const idx  = views.findIndex((x) => x.viewId === viewId);
+    if (idx < 0) return;
+    views = [
+      ...views.slice(0, idx),
+      { ...next, state: v.state, zIndex: v.zIndex, isFocused: true, history: [], breadcrumb: v.breadcrumb,
+        ...(trail.length ? { rebindTrail: [...new Set(trail)] } : {}) },
+      ...views.slice(idx + 1),
+    ];
+
+    const customName = windowNames.get(viewId);
+    if (customName) { windowNames.delete(viewId); windowNames.set(next.viewId, customName); }
+    if (maximizedViewId === viewId) maximizedViewId = next.viewId;
+
+    // Move workspace membership from the old view id to the new one, as ONE
+    // write computed from a fresh server read.
+    //
+    // Both halves matter. Fresh, because a remove-then-add-then-reorder built
+    // its final array from a cached workspace that hadn't caught up, so the
+    // reorder wrote the old id straight back — the window it had just left
+    // stayed on the desktop as a second copy. And one write, because tiling
+    // order comes from `members`: appending would shunt the window to the end
+    // of the layout on every switch, so the id is swapped in place instead.
+    const state = await workspaceClient.refresh().catch(() => workspaceClient.getCached());
+    const owner = state?.workspaces.find((w) => w.members.includes(viewId));
+    if (owner) {
+      const seen = new Set<string>();
+      const members = owner.members
+        .map((m) => (m === viewId ? next.viewId : m))
+        .filter((m) => (seen.has(m) ? false : (seen.add(m), true)));
+      await workspaceClient.patchWorkspace(owner.id, { members }).catch(() => undefined);
+      // A view belongs to exactly one workspace; the id we just claimed may
+      // have been left in another one by an earlier switch.
+      for (const w of state?.workspaces ?? []) {
+        if (w.id === owner.id || !w.members.includes(next.viewId)) continue;
+        await workspaceClient.patchWorkspace(w.id, {
+          members: w.members.filter((m) => m !== next.viewId),
+        }).catch(() => undefined);
+      }
+    } else {
+      await workspaceClient.addMemberToActive(next.viewId).catch(() => undefined);
+    }
+
+    // The slot element is keyed by viewId; re-point it so renderLayout reuses
+    // the existing DOM (and its iframe) instead of tearing the window down.
+    const slot = document.querySelector<HTMLElement>(`.app-slot[data-view-id="${CSS.escape(viewId)}"]`);
+    if (slot) {
+      slot.dataset['viewId']     = next.viewId;
+      slot.dataset['instanceId'] = next.instanceId;
+      slot.dataset['activityId'] = next.activityId ?? '';
+      const iframe = slot.querySelector<HTMLIFrameElement>('iframe');
+      if (iframe && iframe.getAttribute('src') !== next.iframeUrl) iframe.src = next.iframeUrl;
+    }
+    markLaunchedHere(next.viewId);
+    renderLayout();
+  }
+
   (window as any).auraOpenActivityOnInstance = async (instanceId: string) => {
     const inst = await (await fetch(`/api/instances/${encodeURIComponent(instanceId)}/status`)).json();
     const appId = inst.instance?.appId;
@@ -1728,6 +1924,14 @@ const ssrVisibleViews = initialViews
       } else if (v.activityId) {
         // Activity view — close only this activity. Auto-stop handled server-side.
         fetch(`/api/activities/${encodeURIComponent(v.activityId)}/close`, { method: 'POST' }).catch(() => undefined);
+        // …plus the handles this window still holds on instances it was
+        // switched away from. A handle is not a session — the app owns those,
+        // and they outlive every window — so nothing a user cares about is
+        // lost here; skipping it just leaves dead handles that come back as
+        // hidden views on the next shell load.
+        for (const a of v.rebindTrail ?? []) {
+          fetch(`/api/activities/${encodeURIComponent(a)}/close`, { method: 'POST' }).catch(() => undefined);
+        }
       } else if (manifest?.backgroundService) {
         // activityMode='none' app that declares backgroundService=true (e.g.
         // Hermes): closing its window must NOT stop the backend — the sidecar
@@ -2317,7 +2521,7 @@ const ssrVisibleViews = initialViews
       }
     }
     const titleId = slot.querySelector('.slot-title-id') as HTMLElement | null;
-    const idText = v.activityId ?? v.instanceId;
+    const idText = v.sessionLabel ?? v.activityId ?? v.instanceId;
     if (titleId && titleId.textContent !== idText) titleId.textContent = idText;
 
     // The ephemeral user label (if set) renders as a pill BEFORE the app

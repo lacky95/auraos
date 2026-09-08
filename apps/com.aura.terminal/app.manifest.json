@@ -12,15 +12,16 @@
     "apps.mount"
   ],
   "tools": [
-    "bash",
-    "node",
-    "git",
-    "claude-code",
+    "*",
     "aura",
-    "*"
+    "bash",
+    "git",
+    "node",
+    "claude-code",
+    "adb"
   ],
   "instanceMode": "multi",
-  "maxInstances": 2,
+  "maxInstances": 4,
   "activityMode": "multi",
   "defaultLaunch": "new-activity",
   "warmPool": 1,

@@ -1,5 +1,10 @@
 ---
+import manifest from '../../app.manifest.json';
 const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
+// The instance cap the OS enforces (AppManager throws past it). Read from the
+// same manifest rather than hardcoded, so the switcher's "+ NEW INSTANCE" row
+// greys out for the real reason instead of guessing.
+const maxInstances = manifest.maxInstances ?? 0;
 // Pre-prompt placeholder for the session-host indicator: the AuraOS master
 // host name. We avoid os.hostname() because the container runs with
 // `--hostname <appId>`, so that would render the package id. The live value
@@ -162,8 +167,42 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
             title="Color mode: AUTO (follows the OS)">◐</button>
     <span id="ws-url" title="Session host" style="margin-left: 2em;">{sessionHost}</span>
     <span style="margin-left:auto;" id="conn-status">CONNECTING...</span>
+    <!-- Instance switcher: which backend CONTAINER this window is attached to.
+         Each instance is its own container with its own PTY/tmux sessions, so
+         switching is a real move, not a view filter — the shell re-points the
+         whole window (see the `aura.window.rebind` handler in the shell's
+         index.astro). Painted by paintBtn so it matches the bar's other
+         buttons; the menu is position:fixed because the bar is only 24px tall
+         and would clip it. -->
+    <button id="inst-btn" class="tsm-btn" type="button"
+            aria-haspopup="menu" aria-expanded="false"
+            title="Backend instance — click to switch container">–</button>
   </div>
-  <div id="terminal" data-app-id={appId}></div>
+  <!-- Rows are built with innerHTML, so every row is styled inline: Astro's
+       scoped CSS stamps data-astro-cid-* on server-rendered markup only, and
+       runtime-injected rows never get the attribute (see the repo's styling
+       rules). Same reason the bar's buttons are inline-styled. -->
+  <!-- Block, not flex: in a column flex box the rows are flex items and shrink
+       to fit a capped height instead of overflowing, so the list would squash
+       rather than scroll. `max-height` is set from the window height when the
+       menu opens (see openInstMenu) — an app window can be a few hundred px
+       tall, and a menu listing several instances' sessions runs past it.
+       `overscroll-behavior:contain` keeps a touch scroll that reaches the end
+       of the list from carrying on into the terminal underneath. -->
+  <div id="inst-menu" role="menu" aria-hidden="true"
+       style="position:fixed;display:none;min-width:230px;max-width:90vw;z-index:60;background:var(--aura-color-surface);border:1px solid var(--aura-color-border);box-shadow:0 6px 20px rgba(0,0,0,0.5);font-family:var(--aura-font-mono);font-size:0.68rem;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;"></div>
+  <!-- Shown INSTEAD of the terminal when this window is attached to no
+       session — after closing the current one from the picker. The window,
+       its size and its place in the layout all stay; only the shell is gone.
+       Inline-styled for the same reason the lock panel is: Astro's scoped CSS
+       proved unreliable for elements inside the proxied app iframe. -->
+  <div id="no-session" role="status" aria-live="polite"
+       style="display:none;flex:1;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px;text-align:center;">
+    <div data-ph-title style="font-size:0.95rem;line-height:1;letter-spacing:.18em;text-transform:uppercase;color:var(--aura-color-text-dim);">No session</div>
+    <div data-ph-detail style="font-size:0.8rem;letter-spacing:.04em;color:var(--aura-color-text);">This window is not attached to a shell.</div>
+    <div data-ph-hint style="font-size:0.7rem;color:var(--aura-color-text-dim);">Pick one from the <span style="color:var(--aura-color-primary);">session menu</span> in the bar, or start a new one.</div>
+  </div>
+  <div id="terminal" data-app-id={appId} data-max-instances={String(maxInstances)}></div>
 
   <!-- Shown INSTEAD of the terminal while another browser view holds this
        session (driven by the server's control frames — see the ws.onmessage
@@ -288,19 +327,28 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // arbitrates (see pty-server) and tells us which side we're on via control
     // frames on the same socket.
     //
-    // The browser id identifies this browser TAB: sessionStorage is per-tab and
-    // shared by same-origin iframes within it, so every terminal iframe in this
-    // tab reports the same id and survives a reload, while another tab or
-    // another browser gets its own. (Not to be confused with the shell's
-    // `viewId`, which identifies a WINDOW — activityId ?? instanceId.)
+    // The viewer id identifies this WINDOW, as `<tab>#<window>`.
+    //
+    // The tab half is sessionStorage, which is per-tab and shared by
+    // same-origin iframes within it. The window half is the OS activity id.
+    // Both halves matter:
+    //   • without the tab half, two tabs showing the same window would fight;
+    //   • without the window half, two windows in ONE tab would report the same
+    //     viewer, so the server would grant both — they would mirror each other
+    //     instead of one taking the session over. Taking a session from another
+    //     window is exactly what the picker offers, so they have to be distinct.
+    // It is stable across reloads (the activity id is the window's identity),
+    // which is what keeps a refresh from losing the session to a 10s owner-hold.
     const BROWSER_KEY = 'aura.terminal.browserId';
     function randomId() { return Math.random().toString(36).slice(2, 10); }
     const browserId = (() => {
+      const windowKey = document.querySelector('meta[name="aura-activity-id"]')?.getAttribute('content') ?? 'main';
+      let tab = '';
       try {
-        let v = sessionStorage.getItem(BROWSER_KEY);
-        if (!v) { v = 'b-' + randomId() + randomId(); sessionStorage.setItem(BROWSER_KEY, v); }
-        return v;
-      } catch { return 'b-' + randomId() + randomId(); }  // private mode — fresh id per load
+        tab = sessionStorage.getItem(BROWSER_KEY);
+        if (!tab) { tab = 'b-' + randomId() + randomId(); sessionStorage.setItem(BROWSER_KEY, tab); }
+      } catch { tab = 'b-' + randomId() + randomId(); }  // private mode — fresh id per load
+      return `${tab}#${windowKey}`;
     })();
 
     // true ⇒ another view holds the terminal and ours is swapped for the
@@ -455,19 +503,55 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // segment after `/api/proxy/` is our backend identity.
     const pathParts  = location.pathname.split('/').filter(Boolean);
     const instanceId = pathParts[0] === 'api' && pathParts[1] === 'proxy' && pathParts[2] ? pathParts[2] : appId;
-    // Session id picks where the PTY-server's registry stores our shell.
-    // Inside each backend container there's at most one terminal anyway
-    // (each instance == one shell process), so a per-instance key is the
-    // right granularity. If activity-mode terminals land here later, the
-    // meta tag will be present and a per-activity key takes priority.
+    // The OS activity id — this WINDOW's handle. Not the session: a session is
+    // a shell, and any window may take one over (that is what the "in use
+    // elsewhere" screen is for), so the two are deliberately separate.
     const activityId = document.querySelector('meta[name="aura-activity-id"]')?.getAttribute('content') ?? instanceId;
-    // `_aura_browser` is how the server knows which browser this socket belongs
+
+    // Which shell we are showing. Mutable — the session picker re-points it
+    // without reloading the page. Defaults to the activity id so a window that
+    // has never switched keeps the shell it has always had.
+    //
+    // A cross-instance pick can't be carried in the message that moves the
+    // window (the shell rebinds us and this document is replaced), so it is
+    // handed over through localStorage, keyed by the instance we are about to
+    // become. Same origin for every proxied app, so it survives the move.
+    const PENDING_SESSION_KEY = 'aura.terminal.pendingSession';
+    function takePendingSession() {
+      try {
+        const raw = localStorage.getItem(PENDING_SESSION_KEY);
+        if (!raw) return null;
+        const map = JSON.parse(raw);
+        const want = map?.[instanceId];
+        if (!want) return null;
+        delete map[instanceId];                       // one-shot: a later reload must not re-steal
+        localStorage.setItem(PENDING_SESSION_KEY, JSON.stringify(map));
+        return String(want);
+      } catch { return null; }
+    }
+    function stashPendingSession(targetInstanceId, sessionId) {
+      try {
+        const map = JSON.parse(localStorage.getItem(PENDING_SESSION_KEY) || '{}') || {};
+        map[targetInstanceId] = sessionId;
+        localStorage.setItem(PENDING_SESSION_KEY, JSON.stringify(map));
+      } catch { /* private mode — the move still happens, on the default session */ }
+    }
+    const pendingSession = takePendingSession();
+    let currentSessionId = pendingSession ?? activityId;
+    // A session handed over from another window was explicitly chosen, so take
+    // it rather than politely losing the race to whoever holds it.
+    let claimNextConnect = pendingSession !== null;
+
+    // `_aura_browser` is how the server knows which viewer this socket belongs
     // to, and therefore whether we get the live terminal or the take-over
     // panel. It's on the URL (not a first message) so the decision is made at
     // attach time — no window where we'd render before knowing.
-    const wsUrl = `${wsProto}//${location.host}/api/proxy/${instanceId}/ws`
-      + `?_aura_session=${encodeURIComponent(activityId)}`
-      + `&_aura_browser=${encodeURIComponent(browserId)}`;
+    function wsUrlFor(sessionId, claim) {
+      return `${wsProto}//${location.host}/api/proxy/${instanceId}/ws`
+        + `?_aura_session=${encodeURIComponent(sessionId)}`
+        + `&_aura_browser=${encodeURIComponent(browserId)}`
+        + (claim ? '&_aura_claim=1' : '');
+    }
 
     // ─── Did THIS browser launch this window? ────────────────────────────
     // A launch is server-side state, so the new window appears in EVERY browser
@@ -498,7 +582,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     let claimOnConnect = launchedHere;
     // Keep the server-rendered session host as the visible label; surface
     // the WS endpoint on hover for debugging.
-    document.getElementById('ws-url').title = wsUrl;
+    document.getElementById('ws-url').title = wsUrlFor(currentSessionId, false);
 
     // ANSI color helpers — xterm.js parses these inline.
     const GRN  = '\x1b[38;5;82m';  // bright green
@@ -764,6 +848,51 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // socket is already OPEN or CONNECTING it does nothing, so the wake-up
     // burst (several of these fire together when a tab is restored) can't
     // produce duplicate sockets.
+    // `currentSessionId === null` ⇒ this window is deliberately attached to no
+    // shell (the user closed it). Every path that would dial has to respect
+    // that, or the watchdog below would cheerfully reconnect a window the user
+    // just detached — and `wsUrlFor(null)` would ask for a session named
+    // "null", quietly creating one.
+    const noSessionEl = document.getElementById('no-session');
+    function detached() { return currentSessionId === null; }
+
+    /**
+     * Put a message where the terminal goes, or take it away.
+     *
+     * One element for both "no session" and "starting an instance": in each
+     * case the window is real and staying put but has no shell to draw, and the
+     * only honest thing to show is why. Without it, starting an instance left
+     * the OLD session on screen for the seconds a container takes to boot,
+     * which reads as a click that did nothing.
+     */
+    function showPlaceholder(on, title, detail, hint) {
+      if (noSessionEl) {
+        if (on) {
+          const set = (sel, text) => {
+            const el = noSessionEl.querySelector(sel);
+            if (el && text != null) el.textContent = text;
+          };
+          set('[data-ph-title]', title);
+          set('[data-ph-detail]', detail);
+          if (hint != null) set('[data-ph-hint]', hint);
+        }
+        noSessionEl.style.display = on ? 'flex' : 'none';
+      }
+      if (terminalEl) terminalEl.style.display = on ? 'none' : (locked ? 'none' : '');
+      if (lockEl && on) lockEl.style.display = 'none';
+    }
+
+    function setDetached(on) {
+      showPlaceholder(on, 'No session', 'This window is not attached to a shell.',
+        'Pick one from the session menu in the bar, or start a new one.');
+      if (on) {
+        stopDots();
+        statusEl.textContent = 'NO SESSION';
+        statusEl.style.color = 'var(--aura-color-text-dim)';
+      }
+      reflectInstance();
+    }
+
     let reconnectTimer = null;
     function clearReconnectTimer() {
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
@@ -779,12 +908,12 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       return Math.min(500 * Math.pow(2, Math.max(0, attempt - 1)), 10_000);
     }
     function scheduleReconnect() {
-      if (reconnectTimer || wsHealthy()) return;
+      if (detached() || reconnectTimer || wsHealthy()) return;
       const delay = backoffMs();
       reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, delay);
     }
     function ensureConnected(reason) {
-      if (wsHealthy()) return;
+      if (detached() || wsHealthy()) return;
       clearReconnectTimer();
       console.debug('[terminal] reconnect →', reason);
       connect();
@@ -792,8 +921,15 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
 
     let attempt = 0;
     function connect() {
+      if (detached()) return;
+      // Never leave two sockets running. A previous one that is merely CLOSING
+      // is still an attached, granted client on the server, so it receives the
+      // same output and answers the same terminal queries — and the duplicate
+      // reply arrives at the shell as a second `0;276;0c` on the command line.
+      // onclose ignores superseded sockets, so this cannot trigger a reconnect.
+      if (activeWs) { try { activeWs.close(1000, 'superseded'); } catch { /* already gone */ } }
       attempt++;
-      const ws = new WebSocket(claimOnConnect ? `${wsUrl}&_aura_claim=1` : wsUrl);
+      const ws = new WebSocket(wsUrlFor(currentSessionId, claimOnConnect || claimNextConnect));
       // Control frames arrive as binary (see pty-server sendCtl); read them
       // synchronously as an ArrayBuffer rather than a Blob.
       ws.binaryType = 'arraybuffer';
@@ -803,6 +939,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       ws.onopen = () => {
         opened = true;
         claimOnConnect = false;      // the launch claim is spent once it lands
+        claimNextConnect = false;    // …and so is an explicit session take-over
         attempt = 0;                 // reset the backoff ladder for the next drop
         clearReconnectTimer();
         stopDots();
@@ -835,6 +972,15 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       };
 
       ws.onclose = () => {
+        // Only the CURRENT socket's close is news. A session switch closes the
+        // old one and dials the next in the same tick, so without this the dead
+        // socket's handler overwrites "SWITCHING…" with a reconnect warning and
+        // the transition looks like a fault.
+        if (activeWs !== ws) return;
+        // A close we asked for. The window is showing the no-session
+        // placeholder; announcing a reconnect would contradict it, and the
+        // reconnect is never coming — scheduleReconnect no-ops while detached.
+        if (detached()) { stopDots(); return; }
         statusEl.textContent = 'DISCONNECTED — RECONNECTING...';
         statusEl.style.color = 'var(--aura-color-secondary)';
         if (opened && !locked) {
@@ -887,7 +1033,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // Floor under everything: if the socket is dead and no retry is pending
     // (a close event we somehow missed, a frozen-then-thawed timer), redial.
     setInterval(() => {
-      if (!wsHealthy() && !reconnectTimer) ensureConnected('watchdog');
+      if (!detached() && !wsHealthy() && !reconnectTimer) ensureConnected('watchdog');
     }, 5000);
 
     // THE single resize driver. The shell posts `aura.viewport.changed` for
@@ -1152,6 +1298,585 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       applyColorMode(next);
       reflectColorMode();
     });
+
+    // ─── Instance + session switcher ─────────────────────────────────────
+    // Two different things, deliberately:
+    //
+    //   INSTANCE (`-15`) is a container. The app document itself is served
+    //   from it, so only the shell can change it — it owns views[], the iframe
+    //   src and the window chrome. We ask (`aura.window.rebind`); it acts.
+    //
+    //   SESSION (`#a1`) is a shell inside that container. It belongs to the
+    //   app, not the OS: any window may take one over, which is what the
+    //   "in use somewhere else" panel has always been for. Switching session
+    //   inside the same container is just a new socket — no reload, no shell.
+    //
+    // Instance list comes from the SHELL (`/api/apps/...`); session lists come
+    // from each INSTANCE's own app (`/api/proxy/<id>/api/sessions`). Our page
+    // is proxied from the shell's origin, so a bare `/api/...` is the shell's
+    // and only the `/api/proxy/<id>` prefix reaches an app backend.
+    const instBtn  = document.getElementById('inst-btn');
+    const instMenu = document.getElementById('inst-menu');
+    /** Escape for both text and attribute positions in the rows we inject. */
+    function instEsc(v) {
+      return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    // The two ids the user actually reasons about, in the OS's own notation:
+    // instances are the `-15` suffix, sessions the `#a1` one.
+    /** `com.aura.terminal-15` → `-15`. */
+    function instShort(id) {
+      const m = /(-\d+)$/.exec(id);
+      return m ? m[1] : id;
+    }
+    /** `com.aura.terminal-15#a2` → `#a2`; the instance is already the heading. */
+    function sessionShort(id) {
+      const m = /(#.+)$/.exec(id);
+      return m ? m[1] : id;
+    }
+
+    function reflectInstance() {
+      if (!instBtn) return;
+      const sess = currentSessionId ? sessionShort(currentSessionId) : '—';
+      instBtn.textContent = `${instShort(instanceId)} ${sess} ▾`;
+      instBtn.title = currentSessionId
+        ? `Instance ${instanceId}, session ${sess} — click to switch`
+        : `Instance ${instanceId}, no session — click to pick one`;
+      instBtn.setAttribute('aria-label', instBtn.title);
+      paintBtn(instBtn, false, false);
+      // Keep the OS window chrome honest. Its id label is the window's ACTIVITY
+      // by default, which stops being the truth the moment a session switch
+      // happens without the shell — same instance, new socket, no rebind.
+      if (window.parent && window.parent !== window) {
+        try {
+          window.parent.postMessage({
+            type: 'aura.window.label',
+            text: currentSessionId ?? instanceId,
+          }, '*');
+        } catch { /* parent gone */ }
+      }
+    }
+
+    /**
+     * Show a different shell in THIS window, without reloading the page.
+     *
+     * Always claims. The user picked this session, so if another window is
+     * rendering it we take it — that window keeps all of its own state and
+     * flips to the take-over panel, the same hand-off the app already does
+     * between browsers.
+     */
+    function switchSession(sessionId) {
+      if (!sessionId) { reportSwitchError('no session to switch to', 'empty id'); return; }
+      if (sessionId === currentSessionId) {
+        // Not an error, but silence here is indistinguishable from a broken
+        // control — which is exactly how it gets reported.
+        statusEl.textContent = `ALREADY ON ${sessionShort(sessionId)}`;
+        statusEl.style.color = 'var(--aura-color-text-dim)';
+        setTimeout(() => { if (!locked) { statusEl.textContent = 'CONNECTED'; statusEl.style.color = 'var(--aura-color-primary)'; } }, 1600);
+        return;
+      }
+      console.debug('[terminal] switching session', currentSessionId, '→', sessionId);
+      const wasDetached = detached();
+      currentSessionId = sessionId;
+      claimNextConnect = true;
+      if (wasDetached) setDetached(false);
+      reflectInstance();
+      const urlEl = document.getElementById('ws-url');
+      if (urlEl) urlEl.title = wsUrlFor(currentSessionId, false);
+      // Clear the screen BEFORE the new session's scrollback replays, so the
+      // old shell's output can't sit behind the new one's (same ordering
+      // setLocked depends on).
+      term.reset();
+      setLocked(false);
+      statusEl.textContent = 'SWITCHING...';
+      statusEl.style.color = 'var(--aura-color-text-dim)';
+      try { activeWs?.close(1000, 'session-switch'); } catch { /* already gone */ }
+      connect();
+    }
+
+    /**
+     * Ask the shell to move this window to another container.
+     *
+     * If it doesn't, move ourselves. The shell is the right actor — it owns
+     * views[], the iframe src and the window chrome, so letting it drive keeps
+     * all three in step — but it is a separate page that may be running older
+     * code than this one (the shell reloads on its own schedule; an app iframe
+     * reloads on its own), and a message an old handler ignores fails utterly
+     * silently. Self-navigating is worse (the shell's record of which instance
+     * this window is on goes stale) but it is not nothing, which is what the
+     * user would otherwise get. The session was stashed before we asked, so
+     * whichever route we take the new page lands on the right shell.
+     */
+    function requestRebind(targetInstanceId) {
+      if (targetInstanceId === instanceId) return;
+      const selfNavigate = () => location.assign(`/api/proxy/${encodeURIComponent(targetInstanceId)}/`);
+      if (!window.parent || window.parent === window) { selfNavigate(); return; }
+      window.parent.postMessage({ type: 'aura.window.rebind', instanceId: targetInstanceId }, '*');
+      statusEl.textContent = 'MOVING...';
+      statusEl.style.color = 'var(--aura-color-text-dim)';
+      // A real move replaces this whole document, so this timer only ever
+      // fires when nothing happened.
+      setTimeout(selfNavigate, 2500);
+    }
+
+    /**
+     * Show `sessionId`, which lives on `targetInstanceId`.
+     *
+     * Same container → swap the socket, no reload. Another container → the app
+     * document has to come from over there, so hand the session across in
+     * localStorage and ask the shell to move the window; the page that loads on
+     * the other side picks it up (takePendingSession) and claims it.
+     */
+    function goToSession(targetInstanceId, sessionId) {
+      if (targetInstanceId === instanceId) { switchSession(sessionId); return; }
+      stashPendingSession(targetInstanceId, sessionId);
+      requestRebind(targetInstanceId);
+    }
+
+    async function fetchInstances() {
+      const res = await fetch(`/api/apps/${encodeURIComponent(appId)}/instances`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = await res.json();
+      const all = Array.isArray(body) ? body : [];
+      // Warm-pool members are not switch targets: they exist to be CLAIMED by
+      // the next launch, and attaching to one would hand the user a container
+      // the OS is about to give away. "+ NEW INSTANCE" claims one properly,
+      // through the OS.
+      const targets = all.filter(
+        (i) => !i.inPool && i.state !== 'destroyed' && i.state !== 'destroying' && i.state !== 'error',
+      );
+      // Counted the way AppManager counts it (it does NOT exclude 'destroying'),
+      // so the row we grey out and the limit the OS enforces can't disagree —
+      // an enabled row the OS then refuses reads as a broken button.
+      const counted = all.filter((i) => !i.inPool && i.state !== 'destroyed' && i.state !== 'error').length;
+
+      const groups = await Promise.all(targets.map(async (instance) => ({
+        instance, sessions: await sessionsFor(instance.instanceId),
+      })));
+      return { groups, counted };
+    }
+
+    /**
+     * The shells on one instance.
+     *
+     * Preferred source is that container's OWN app (src/pages/api/sessions.ts),
+     * which knows which shells exist and which are being rendered right now.
+     *
+     * The fallback is the OS activity list, and it is not a lesser answer by
+     * accident: a window's default session id IS its activity id, so the two
+     * lists name the same shells — the OS one just can't say which are in use.
+     * It matters because an Astro dev server fixes its route table at startup,
+     * so a newly added endpoint 404s until the app process restarts; without
+     * this the picker would sit empty on every instance until then.
+     */
+    // Names an instance says are already spoken for — live sessions plus dead
+    // ones whose scrollback survives. Filled by sessionsFor when the menu
+    // opens; empty for instances too old to have the endpoint.
+    const reservedByInstance = new Map();
+
+    async function sessionsFor(targetInstanceId) {
+      const own = await fetch(`/api/proxy/${encodeURIComponent(targetInstanceId)}/api/sessions`, { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null);
+      reservedByInstance.set(targetInstanceId, Array.isArray(own?.reserved) ? own.reserved : []);
+      const items = Array.isArray(own?.sessions)
+        ? [...own.sessions]
+        : await (async () => {
+            const acts = await fetch(`/api/instances/${encodeURIComponent(targetInstanceId)}/activities`, { cache: 'no-store' })
+              .then((r) => (r.ok ? r.json() : []))
+              .catch(() => []);
+            return (Array.isArray(acts) ? acts : []).map((a) => ({
+              id: a.activityId, label: sessionShort(a.activityId), live: false, inUse: false,
+            }));
+          })();
+
+      // Merge in what only THIS device knows, whichever source produced the
+      // list above. Both can lag:
+      //   • the OS activity list never knows about "+ new session" ids at all —
+      //     they are sessions, not activities;
+      //   • the instance's own list is built from live PTYs and saved
+      //     scrollback, so a session that was just named but whose socket has
+      //     not landed yet is genuinely not there.
+      // Either way the session would vanish from the picker the instant it was
+      // created, with no way back to it — so anything we created, plus the one
+      // this window is showing, is always listed.
+      const have = new Set(items.map((sn) => sn.id));
+      const local = [...rememberedSessions(targetInstanceId)];
+      if (targetInstanceId === instanceId) local.push(currentSessionId);
+      for (const id of local) {
+        if (!id || have.has(id)) continue;
+        have.add(id);
+        items.push({ id, label: sessionShort(id), live: false, inUse: false });
+      }
+      return items.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+    }
+
+    // Sessions this device created, per instance. Merged into every list (see
+    // sessionsFor) so a just-made session is selectable immediately, before
+    // either the OS or the instance itself can report it.
+    const KNOWN_SESSIONS_KEY = 'aura.terminal.knownSessions';
+    function rememberedSessions(targetInstanceId) {
+      try {
+        const map = JSON.parse(localStorage.getItem(KNOWN_SESSIONS_KEY) || '{}') || {};
+        return Array.isArray(map[targetInstanceId]) ? map[targetInstanceId] : [];
+      } catch { return []; }
+    }
+    function forgetSession(targetInstanceId, sessionId) {
+      try {
+        const map = JSON.parse(localStorage.getItem(KNOWN_SESSIONS_KEY) || '{}') || {};
+        const list = Array.isArray(map[targetInstanceId]) ? map[targetInstanceId] : [];
+        map[targetInstanceId] = list.filter((id) => id !== sessionId);
+        localStorage.setItem(KNOWN_SESSIONS_KEY, JSON.stringify(map));
+      } catch { /* private mode */ }
+    }
+    function rememberSession(targetInstanceId, sessionId) {
+      try {
+        const map = JSON.parse(localStorage.getItem(KNOWN_SESSIONS_KEY) || '{}') || {};
+        const list = Array.isArray(map[targetInstanceId]) ? map[targetInstanceId] : [];
+        if (!list.includes(sessionId)) list.push(sessionId);
+        map[targetInstanceId] = list;
+        localStorage.setItem(KNOWN_SESSIONS_KEY, JSON.stringify(map));
+      } catch { /* private mode — the session still works, it just isn't listed */ }
+    }
+
+    /**
+     * An id for a new shell on `targetInstanceId`.
+     *
+     * Only an id is needed: the PTY server creates the session the first time a
+     * socket asks for it, so minting is naming. `#s<n>` deliberately avoids the
+     * `#a<n>` shape the OS uses for activity ids, so an app-made session can
+     * never collide with a window handle.
+     */
+    async function mintSession(targetInstanceId, known) {
+      // Continue the instance's own `#a<n>` numbering. A separate `#s<n>`
+      // series was safer — it could never meet an activity id — but it reads
+      // as a second kind of thing when it isn't one; `#a1, #a2, #a3` is what
+      // the list should say.
+      //
+      // Deliberately NO network call.
+      //
+      // The instance's app can allocate an id (POST /api/sessions), but asking
+      // it buys nothing: a session springs into existence when a socket first
+      // connects with an id, and `known` — which the just-opened menu fetched —
+      // already says which ids are in use, so the name below is exact.
+      //
+      // It also costs everything. Inside the Capacitor WebView a POST that
+      // returns 200 hangs on the body read, and awaiting it froze this click
+      // with nothing on screen. That is precisely why the failure only showed
+      // on instances where the route EXISTS: where it 404s, the old code never
+      // read a body and worked fine. An abort is meant to bound that, but the
+      // safe move in a host that has already shown it can stall a read is not
+      // to depend on the read at all.
+      const acts = await fetch(`/api/instances/${encodeURIComponent(targetInstanceId)}/activities`, { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : []))
+        .catch(() => []);
+      const taken = new Set([
+        ...(known ?? []).map((sn) => sn.id),
+        ...(reservedByInstance.get(targetInstanceId) ?? []),
+        ...(Array.isArray(acts) ? acts.map((a) => a.activityId) : []),
+        ...rememberedSessions(targetInstanceId),
+      ]);
+      // Above every number in use, not merely absent from the set: the highest
+      // may belong to a dead session whose scrollback is still on disk, and
+      // reusing that name would replay its output into the new shell.
+      let max = 0;
+      for (const id of taken) {
+        const m = /#a(\d+)$/.exec(id);
+        if (m && m[1]) max = Math.max(max, Number(m[1]));
+      }
+      for (let n = max + 1; ; n++) {
+        const id = `${targetInstanceId}#a${n}`;
+        if (!taken.has(id)) return id;
+      }
+    }
+
+    const INST_ROW = 'display:block;width:100%;box-sizing:border-box;text-align:left;'
+      + 'appearance:none;-webkit-appearance:none;border:0;border-radius:0;background:transparent;'
+      + "font-family:var(--aura-font-mono);font-size:0.68rem;line-height:1.3;letter-spacing:0.02em;"
+      + 'padding:5px 10px;cursor:pointer;outline:none;';
+    // The close chip on the current session. Its own dark background rather
+    // than the row's: the current row is filled with the primary colour, and
+    // danger-on-primary is unreadable — a chip keeps the red legible whichever
+    // row state it sits on. Painted, not just a glyph, so it reads as a control
+    // you press rather than decoration next to the label.
+    const CLOSE_BTN = 'appearance:none;-webkit-appearance:none;display:inline-flex;align-items:center;'
+      + 'justify-content:center;box-sizing:border-box;flex:0 0 auto;width:22px;'
+      + 'margin:3px 6px 3px 2px;padding:0;border:1px solid var(--aura-color-danger);border-radius:0;'
+      + 'background:var(--aura-color-bg);color:var(--aura-color-danger);'
+      + "font-family:var(--aura-font-mono);font-size:0.82rem;font-weight:700;line-height:1;"
+      + 'cursor:pointer;outline:none;transition:background .1s,color .1s;';
+
+    // Sticky so you can still see WHICH instance's sessions you are scrolling
+    // through. Needs its own background or the rows scroll through it.
+    const INST_HEAD = 'display:block;padding:5px 10px 3px;color:var(--aura-color-text-dim);'
+      + 'font-size:0.6rem;text-transform:uppercase;letter-spacing:0.08em;'
+      + 'border-top:1px solid var(--aura-color-border);'
+      + 'position:sticky;top:0;z-index:1;background:var(--aura-color-surface);';
+
+    function instMenuHtml(groups, atCap) {
+      const body = groups.map(({ instance, sessions }) => {
+        const head = `<div style="${INST_HEAD}">${instEsc(instance.instanceId)}`
+          + `<span style="float:right;text-transform:none;letter-spacing:0.02em;">${instEsc(instance.state)}</span></div>`;
+        const rows = sessions.map((sn) => {
+          const here = sn.id === currentSessionId && instance.instanceId === instanceId;
+          const color = here ? 'var(--aura-color-bg)' : 'var(--aura-color-primary)';
+          const bg    = here ? 'var(--aura-color-primary)' : 'transparent';
+          // `inUse` means another view is rendering it: picking it TAKES it,
+          // and that view drops to its take-over panel. Say so on the row —
+          // it is the difference between resuming a shell and interrupting
+          // someone, and the row otherwise looks identical.
+          const note = here ? 'this window' : (sn.inUse ? 'in use — take over' : '');
+          const row = `<button type="button" role="menuitem" class="inst-row"`
+            + ` data-inst="${instEsc(instance.instanceId)}" data-sess="${instEsc(sn.id)}"`
+            + ` style="${INST_ROW}flex:1;min-width:0;color:${color};background:${bg};"${here ? ' aria-current="true"' : ''}>`
+            + `${here ? '▸ ' : '&nbsp;&nbsp;'}${instEsc(sn.label)}`
+            + (note ? `<span style="float:right;font-size:0.6rem;opacity:0.8;">${instEsc(note)}</span>` : '')
+            + '</button>';
+          // Close only on the session this window is showing. Offering it for
+          // any row would let one window kill a shell another is using from a
+          // menu that cannot say who that is — and a sibling of the row button,
+          // not a child, because a button inside a button is not valid HTML and
+          // the two clicks would be impossible to tell apart.
+          const close = here
+            ? `<button type="button" class="inst-close" data-inst="${instEsc(instance.instanceId)}"`
+              + ` data-sess-close="${instEsc(sn.id)}" title="Close this session" aria-label="Close session ${instEsc(sn.label)}"`
+              + ` style="${CLOSE_BTN}">×</button>`
+            : '';
+          return `<div style="display:flex;align-items:stretch;">${row}${close}</div>`;
+        }).join('');
+        const add = `<button type="button" role="menuitem" class="inst-row"`
+          + ` data-inst="${instEsc(instance.instanceId)}" data-sess-new="1"`
+          + ` style="${INST_ROW}color:var(--aura-color-primary);">&nbsp;&nbsp;+ new session</button>`;
+        return head + rows + add;
+      }).join('');
+      // The cap is the manifest's maxInstances, enforced by the OS. Say WHY the
+      // row is dead rather than leaving a control that silently does nothing —
+      // the OS would answer 500 and the click would look lost.
+      const newInst = atCap
+        ? `<div style="${INST_ROW}cursor:default;color:var(--aura-color-text-dim);border-top:1px solid var(--aura-color-border);">`
+          + '+ NEW INSTANCE<span style="display:block;font-size:0.6rem;">at the instance limit — close one first</span></div>'
+        : `<button type="button" role="menuitem" class="inst-row" data-inst-new="1"`
+          + ` style="${INST_ROW}color:var(--aura-color-primary);border-top:1px solid var(--aura-color-border);">+ NEW INSTANCE</button>`;
+      return body + newInst;
+    }
+
+    /** What the currently-open menu was built from, so a "+ new session" click
+     *  can name an id that isn't already taken on that instance. */
+    let lastGroups = [];
+
+    function closeInstMenu() {
+      if (!instMenu) return;
+      instMenu.style.display = 'none';
+      instMenu.setAttribute('aria-hidden', 'true');
+      instBtn?.setAttribute('aria-expanded', 'false');
+    }
+
+    async function openInstMenu() {
+      if (!instMenu || !instBtn) return;
+      const r = instBtn.getBoundingClientRect();
+      instMenu.style.display = 'block';
+      instMenu.setAttribute('aria-hidden', 'false');
+      instBtn.setAttribute('aria-expanded', 'true');
+      // Size and place it against the window, not just below the button.
+      // Normally it hangs under the bar and is capped to the room left below.
+      // When there isn't enough room for even a couple of rows — an app window
+      // can be barely 100px tall — it stops hanging and takes the window
+      // instead, because a menu that spills past the bottom edge loses its last
+      // entries entirely, while one that starts higher only overlaps the bar.
+      const MIN_MENU_H = 96;
+      const fit = () => {
+        const below = Math.round(window.innerHeight - r.bottom - 10);
+        if (below >= MIN_MENU_H) {
+          instMenu.style.top = `${Math.round(r.bottom + 2)}px`;
+          instMenu.style.maxHeight = `${below}px`;
+        } else {
+          const h = Math.max(64, window.innerHeight - 8);
+          instMenu.style.maxHeight = `${h}px`;
+          instMenu.style.top = `${Math.max(4, Math.round(window.innerHeight - h - 4))}px`;
+        }
+      };
+      fit();
+      instMenu.innerHTML = '<div style="padding:6px 10px;color:var(--aura-color-text-dim);font-size:0.6rem;">LOADING…</div>';
+      // Right-align under the button, clamped into the iframe's viewport.
+      instMenu.style.left = `${Math.max(4, Math.round(r.right - instMenu.offsetWidth))}px`;
+      try {
+        const { groups, counted } = await fetchInstances();
+        // A stale open (the user closed it while the fetch was in flight) must
+        // not repaint a hidden menu into view.
+        if (instMenu.getAttribute('aria-hidden') === 'true') return;
+        const cap = Number(document.getElementById('terminal')?.dataset.maxInstances ?? 0);
+        lastGroups = groups;
+        instMenu.innerHTML = instMenuHtml(groups, cap > 0 && counted >= cap);
+        fit();
+        instMenu.scrollTop = 0;
+      } catch (err) {
+        instMenu.innerHTML = '<div style="padding:6px 10px;color:var(--aura-color-danger);font-size:0.6rem;">'
+          + `COULD NOT LIST INSTANCES — ${instEsc(String(err && err.message ? err.message : err))}</div>`;
+      }
+      instMenu.style.left = `${Math.max(4, Math.round(r.right - instMenu.offsetWidth))}px`;
+    }
+
+    instBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (instMenu?.getAttribute('aria-hidden') === 'false') closeInstMenu();
+      else void openInstMenu();
+    });
+    instBtn?.addEventListener('mouseenter', () => paintBtn(instBtn, false, true));
+    instBtn?.addEventListener('mouseleave', () => paintBtn(instBtn, false, false));
+
+    // Delegated: rows are re-rendered on every open, so per-row listeners would
+    // be rebound (and stacked) each time.
+    instMenu?.addEventListener('click', (e) => {
+      const el = e.target instanceof Element ? e.target : null;
+      // Checked first: the × is a sibling of the row, so it never matches
+      // `.inst-row`, but ordering it up front keeps the intent obvious.
+      const kill = el?.closest('[data-sess-close]');
+      if (kill instanceof HTMLElement) {
+        // Stay open: closing sessions is a thing you may want to do more than
+        // once, and the menu is also the only place that shows the result.
+        // stopPropagation because the document-level handler closes it.
+        e.stopPropagation();
+        closeSession(kill.dataset.inst, kill.dataset.sessClose);
+        void openInstMenu();   // re-render: the row is gone, nothing is current
+        return;
+      }
+      const hit = el ? el.closest('.inst-row') : null;
+      const row = hit instanceof HTMLElement ? hit : null;
+      if (!row) return;
+      closeInstMenu();
+      // Traced because this app also runs inside a Capacitor WebView, where a
+      // failed click leaves nothing on screen and the console is not visible
+      // without adb — but IS relayed to the OS Console (the proxy injects the
+      // relay), so a debug line here is readable after the fact.
+      console.debug('[terminal] picker click', JSON.stringify({
+        inst: row.dataset.inst ?? null, sess: row.dataset.sess ?? null,
+        sessNew: row.dataset.sessNew ?? null, instNew: row.dataset.instNew ?? null,
+      }));
+      if (row.dataset.instNew === '1') { void startNewInstance(); return; }
+      const target = row.dataset.inst;
+      if (!target) return;
+      if (row.dataset.sessNew === '1') void newSessionOn(target);
+      else                             goToSession(target, row.dataset.sess);
+    });
+    // Delegated hover for the close chip — inline styles can't express :hover,
+    // and the rows are rebuilt on every open so per-element listeners would
+    // stack up.
+    const paintClose = (el, hot) => {
+      el.style.background = hot ? 'var(--aura-color-danger)' : 'var(--aura-color-bg)';
+      el.style.color      = hot ? 'var(--aura-color-bg)'     : 'var(--aura-color-danger)';
+    };
+    instMenu?.addEventListener('mouseover', (e) => {
+      const el = e.target instanceof Element ? e.target.closest('[data-sess-close]') : null;
+      if (el instanceof HTMLElement) paintClose(el, true);
+    });
+    instMenu?.addEventListener('mouseout', (e) => {
+      const el = e.target instanceof Element ? e.target.closest('[data-sess-close]') : null;
+      if (el instanceof HTMLElement) paintClose(el, false);
+    });
+
+    document.addEventListener('click', () => closeInstMenu());
+    window.addEventListener('blur', () => closeInstMenu());
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeInstMenu(); }, true);
+
+    /**
+     * Surface a failed switch in BOTH places: the bar and the terminal.
+     *
+     * The terminal alone isn't enough — it is hidden whenever this window is
+     * showing the take-over panel, which is exactly when a user is most likely
+     * to be reaching for the session picker. An error written there would go
+     * to a display:none element and the click would look like it did nothing.
+     */
+    function reportSwitchError(what, err) {
+      const msg = String(err && err.message ? err.message : err);
+      statusEl.textContent = what.toUpperCase();
+      statusEl.style.color = 'var(--aura-color-danger)';
+      statusEl.title = msg;
+      term.writeln(`${ORG}  [${what}: ${msg}]${RST}`);
+      console.error('[terminal]', what, err);
+    }
+
+    /**
+     * Close the session this window is showing and detach.
+     *
+     * Detaches FIRST, then asks the instance to kill the shell. The window must
+     * respond to the click immediately, and the kill is best-effort anyway: the
+     * DELETE route only exists on instances started since it was added, so on
+     * an older one the shell survives and stays listed — which is recoverable
+     * (pick it again), whereas a click that appears to do nothing is not.
+     *
+     * Nothing reads the response. See startNewInstance for why a POST/DELETE
+     * body is never touched in this app.
+     */
+    function closeSession(targetInstanceId, sessionId) {
+      if (!sessionId) return;
+      const isOurs = targetInstanceId === instanceId && sessionId === currentSessionId;
+      if (isOurs) {
+        console.debug('[terminal] closing session', sessionId);
+        currentSessionId = null;
+        clearReconnectTimer();
+        try { activeWs?.close(1000, 'session-closed'); } catch { /* already gone */ }
+        activeWs = null;
+        term.reset();
+        setDetached(true);
+      }
+      forgetSession(targetInstanceId, sessionId);
+      fetch(`/api/proxy/${encodeURIComponent(targetInstanceId)}/api/sessions?id=${encodeURIComponent(sessionId)}`,
+        { method: 'DELETE' })
+        .then((r) => { if (!r.ok) console.debug('[terminal] session kill unavailable →', r.status); })
+        .catch(() => { /* older instance, or offline — the detach already happened */ });
+    }
+
+    async function newSessionOn(targetInstanceId) {
+      try {
+        const known = lastGroups.find((g) => g.instance.instanceId === targetInstanceId)?.sessions ?? [];
+        const id = await mintSession(targetInstanceId, known);
+        console.debug('[terminal] minted session', id, 'on', targetInstanceId);
+        rememberSession(targetInstanceId, id);
+        goToSession(targetInstanceId, id);
+      } catch (err) { reportSwitchError('could not open a new session', err); }
+    }
+
+    async function startNewInstance() {
+      try {
+        statusEl.textContent = 'STARTING...';
+        statusEl.style.color = 'var(--aura-color-text-dim)';
+        // A container takes seconds to boot. Say so, instead of leaving the
+        // session we are about to leave on screen as if nothing happened.
+        showPlaceholder(true, 'Starting instance', 'A new container is booting…',
+          'The window will move to it and open its first session.');
+        const before = new Set((await fetchInstances()).groups.map((g) => g.instance.instanceId));
+
+        // The response BODY is deliberately never read.
+        //
+        // In the Capacitor WebView a POST's headers arrive — the status is
+        // there and gets logged — but reading the body never completes, and an
+        // AbortSignal does not cancel a read already in flight. So any
+        // `await res.json()` on a POST parks the click forever. The status
+        // alone catches a refusal, and a GET (which works here) says which
+        // instance appeared — better evidence than the reply anyway, since the
+        // instance really is created either way.
+        const res = await fetch(`/api/apps/${encodeURIComponent(appId)}/start`, { method: 'POST' });
+        if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+
+        let next = null;
+        for (let i = 0; !next && i < 20; i++) {
+          await new Promise((r) => setTimeout(r, 750));
+          const fresh = (await fetchInstances()).groups.map((g) => g.instance.instanceId);
+          next = fresh.find((id) => !before.has(id)) ?? null;
+        }
+        console.debug('[terminal] start instance ->', next ?? '(none)');
+        if (!next) throw new Error('instance did not appear');
+        requestRebind(next);
+      } catch (err) {
+        // The move never happened, so this document stays — put the terminal
+        // back rather than stranding the user on a boot message.
+        showPlaceholder(detached(), 'No session', 'This window is not attached to a shell.',
+          'Pick one from the session menu in the bar, or start a new one.');
+        reportSwitchError('could not start a new instance', err);
+      }
+    }
+
+    reflectInstance();
 
     // ─── Quick commands (left sidebar overlay) ───────────────────────────
     // A slide-in panel of saved commands. Clicking one types it into the PTY

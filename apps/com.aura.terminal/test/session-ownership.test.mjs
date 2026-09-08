@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { WebSocket } from 'ws';
 
-import { getPtyWss, killSession } from '../src/pty-server.ts';
+import { getPtyWss, killSession, stripTerminalQueries } from '../src/pty-server.ts';
 
 const SESSION = 'test-session-ownership';
 const decoder = new TextDecoder();
@@ -196,4 +196,41 @@ test('the browser that launched a window wins the attach race', async () => {
   killSession(session);
   await sleep(200);
   server.close();
+});
+
+// ── replaying scrollback must not make the terminal talk back ──────────────
+//
+// The bug these pin: reconnecting to a session replays its scrollback into a
+// fresh xterm, which dutifully ANSWERS any query still in it. The answer to a
+// Device Attributes request travels back as input and lands on the command
+// line as literal `0;276;0c` — twice, with two viewers attached.
+test('a Device Attributes request is stripped from the replay', () => {
+  const buf = `hello\x1b[>0;276;0cworld`;
+  assert.equal(stripTerminalQueries(buf), 'helloworld');
+});
+
+test('every reply-provoking form goes, and nothing that draws', () => {
+  const queries = [
+    '\x1b[c', '\x1b[0c',            // DA1
+    '\x1b[>c', '\x1b[>0c',          // DA2
+    '\x1b[=c',                      // DA3
+    '\x1b[5n', '\x1b[6n', '\x1b[?6n', // DSR / cursor position
+    '\x1b[?2026$p',                 // DECRQM
+    '\x1b[>0q',                     // XTVERSION
+    '\x1b]11;?\x07',                // OSC colour query (BEL-terminated)
+    '\x1b]10;?\x1b\\',              // …and ST-terminated
+  ];
+  for (const q of queries) {
+    assert.equal(stripTerminalQueries(`a${q}b`), 'ab', `not stripped: ${JSON.stringify(q)}`);
+  }
+  // Rendering sequences must survive untouched — colour, cursor moves, erase.
+  const drawing = '\x1b[1;32mgreen\x1b[0m\x1b[2J\x1b[H\x1b[10;5H\x1b[K\r\n';
+  assert.equal(stripTerminalQueries(drawing), drawing);
+});
+
+test('a query split across two buffer chunks is still caught', () => {
+  // The ring stores chunks as they arrived, so a sequence can straddle two of
+  // them; the replay joins before stripping precisely for this case.
+  const chunks = ['before\x1b[>0;27', '6;0cafter'];
+  assert.equal(stripTerminalQueries(chunks.join('')), 'beforeafter');
 });

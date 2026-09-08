@@ -2,7 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import pty, { type IPty } from 'node-pty';
 import { spawnSync } from 'node:child_process';
 import { parse as parseUrl } from 'node:url';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -267,6 +267,17 @@ function tmuxName(sessionId: string): string {
   return `aura-${sessionId.replace(/[^A-Za-z0-9_-]/g, '_')}`;
 }
 
+/** Names of the tmux sessions on our private socket; empty when tmux is absent. */
+function liveTmuxSessions(): Set<string> {
+  if (!tmuxBin) return new Set();
+  try {
+    const r = spawnSync(tmuxBin, ['-L', TMUX_SOCKET, 'list-sessions', '-F', '#{session_name}'],
+      { encoding: 'utf-8' });
+    if (r.status !== 0 || !r.stdout) return new Set();   // no server running ⇒ no sessions
+    return new Set(r.stdout.split('\n').map((l) => l.trim()).filter(Boolean));
+  } catch { return new Set(); }
+}
+
 /** Kill the backing tmux session. Returns true if one actually existed. */
 function tmuxKill(sessionId: string): boolean {
   if (!tmuxBin) return false;
@@ -327,6 +338,39 @@ function broadcastLive(sess: Session, data: string): void {
 }
 
 /**
+ * Escape sequences that make a terminal ANSWER.
+ *
+ * Replaying scrollback re-feeds old output to a fresh xterm, and xterm answers
+ * anything in it that asks a question — a Device Attributes request replied to
+ * with `\x1b[>0;276;0c`, which travels back down this socket as INPUT and lands
+ * on the shell's command line as literal `0;276;0c`. Two viewers attached, or
+ * two queries in the buffer, and you get it twice.
+ *
+ * Stripped from the REPLAY only. Live output keeps them: answering a query the
+ * running program just asked is the terminal doing its job. The dead copy in
+ * the scrollback is the only one that has no listener left.
+ *
+ * Covers: DA1/DA2/DA3 (`CSI c`), DSR incl. cursor-position (`CSI n`), DECRQM
+ * (`CSI ? … $p`), XTVERSION (`CSI > … q`) and the OSC colour/palette queries
+ * (`OSC … ; ? BEL|ST`). None of these draw anything, so removing them cannot
+ * change how the replay looks.
+ */
+const REPLY_PROVOKING = new RegExp(
+  [
+    '\\x1b\\[[?>=]?[0-9;]*[cn]',            // DA1 / DA2 / DA3, DSR
+    '\\x1b\\[\\?[0-9;]*\\$[pq]',            // DECRQM / DECRQSS-style requests
+    '\\x1b\\[>[0-9;]*q',                    // XTVERSION
+    '\\x1b\\][0-9;]*;\\?(?:\\x07|\\x1b\\\\)', // OSC colour / palette queries
+  ].join('|'),
+  'g',
+);
+
+/** Remove the sequences above. Exported for the tests. */
+export function stripTerminalQueries(text: string): string {
+  return text.replace(REPLY_PROVOKING, '');
+}
+
+/**
  * Make a socket the live view: replay the scrollback, then stream. Idempotent,
  * so re-granting an already-live socket can't double-replay it.
  */
@@ -340,7 +384,10 @@ function grant(sess: Session, ws: WebSocket): void {
   c.granted = true;
   sendCtl(ws, { type: 'granted' });
   if (sess.buffer.length > 0) {
-    try { ws.send(sess.buffer.join('')); } catch { /* socket may have torn down */ }
+    // Joined first, then stripped: a query can straddle two chunks, and half a
+    // sequence is exactly the case a per-chunk filter would miss.
+    const replay = stripTerminalQueries(sess.buffer.join(''));
+    if (replay) { try { ws.send(replay); } catch { /* socket may have torn down */ } }
   }
 }
 
@@ -383,9 +430,54 @@ function emitOut(sess: Session): void {
   broadcastLive(sess, data);
 }
 
+/**
+ * Terminal capability questions we answer HERE, and never forward.
+ *
+ * tmux opens every session with `CSI > c` (secondary Device Attributes) and
+ * `CSI > q` (XTVERSION). Forwarding those to the browser means the answer has
+ * to travel back over the WebSocket, and by the time it lands tmux has stopped
+ * listening — so the bytes fall through to the shell and appear at the prompt
+ * as literal `0;276;0c`. That round trip is the bug; the answer never needed
+ * to leave this process.
+ *
+ * The replies mimic xterm 276, which is what xterm.js reports, so nothing
+ * downstream can tell the difference.
+ *
+ * Cursor-position reports (`CSI 6n`) are deliberately NOT here: only the
+ * browser knows where the cursor actually is, so those must round-trip.
+ */
+const LOCAL_ANSWERS: ReadonlyArray<{ q: RegExp; a: string }> = [
+  { q: /\x1b\[>0?c/g,  a: '\x1b[>0;276;0c' },          // DA2 — secondary device attributes
+  { q: /\x1b\[0?c/g,   a: '\x1b[?1;2c' },              // DA1 — primary device attributes
+  { q: /\x1b\[>0?q/g,  a: '\x1bP>|xterm(276)\x1b\\' }, // XTVERSION
+];
+
+/**
+ * Strip the questions above out of `data`, answering each straight back into
+ * the PTY. Returns what the viewers should actually see.
+ *
+ * A query split across two PTY reads would slip through; tmux writes them in
+ * one go, and the replay filter catches whatever reaches the scrollback.
+ */
+function answerLocally(sess: Session, data: string): string {
+  let out = data;
+  for (const { q, a } of LOCAL_ANSWERS) {
+    q.lastIndex = 0;
+    const hits = out.match(q);
+    if (!hits) continue;
+    out = out.replace(q, '');
+    for (let i = 0; i < hits.length; i++) {
+      try { sess.pty.write(a); } catch { /* pty gone */ }
+    }
+  }
+  return out;
+}
+
 function attachPtyOutput(sess: Session): void {
   sess.pty.onData((data) => {
-    sess.outBuf += data;
+    const visible = answerLocally(sess, data);
+    if (!visible) return;                          // the whole read was a query
+    sess.outBuf += visible;
     if (sess.outTimer) return;                   // window open → coalesce; it will flush at window end
     emitOut(sess);                               // leading edge: idle → send now (0ms added for echo)
     sess.outTimer = setTimeout(() => { sess.outTimer = null; emitOut(sess); }, OUTPUT_FRAME_MS);
@@ -584,6 +676,107 @@ function recomputeEffective(sess: Session): void {
 }
 
 /** Public entry — called by the OS lifecycle hook when the activity is destroyed. */
+/** One shell this container can show, as the session picker sees it. */
+export interface SessionInfo {
+  /** Full session id, e.g. `com.aura.terminal-15#a1`. Keys the tmux session. */
+  id: string;
+  /** Short form the UI shows, e.g. `#a1`. */
+  label: string;
+  /** A PTY is attached right now (this process has it in memory). */
+  live: boolean;
+  /** Someone is rendering it — picking it means taking it over. */
+  inUse: boolean;
+  /** Bytes of saved scrollback; 0 for a session that has never been used. */
+  bytes: number;
+}
+
+/**
+ * Every shell in THIS container, whether or not a browser is on it.
+ *
+ * Two sources, unioned: the in-memory map (sessions with a live PTY right now)
+ * and `/data/scrollback`, whose filenames are the exact session ids. The
+ * on-disk half is what makes sessions outlive an app restart — the map is
+ * rebuilt lazily, one entry per reconnect, so on its own it would report a
+ * container full of shells as empty.
+ *
+ * `/data` is per-instance, so this never has to filter by instance id.
+ */
+export function listSessions(): SessionInfo[] {
+  const ids = new Set<string>(sessions.keys());
+  try { for (const f of readdirSync(SCROLLBACK_DIR)) ids.add(f); } catch { /* no dir yet */ }
+
+  // Scrollback alone does NOT mean the session exists.
+  //
+  // Instance ids are reused, and `/data` is per-instance AND persistent — so a
+  // freshly started `com.aura.terminal-19` opens onto the saved scrollback of
+  // whatever `-19` ran weeks ago. Listing those files reported half a dozen
+  // sessions on a brand-new container, none of which had a shell behind it.
+  //
+  // A session is a live shell: this process has it, or tmux does (tmux
+  // outlives an app restart, which is the case worth keeping). The files stay
+  // where they are — attaching to one of those names still replays its history
+  // — they just aren't advertised as something you can pick.
+  const alive = liveTmuxSessions();
+  const out: SessionInfo[] = [];
+  for (const id of ids) {
+    const sess = sessions.get(id);
+    if (!sess && !alive.has(tmuxName(id))) continue;
+    let bytes = sess?.bufferSize ?? 0;
+    if (!sess) {
+      try { bytes = statSync(join(SCROLLBACK_DIR, id)).size; } catch { bytes = 0; }
+    }
+    out.push({
+      id,
+      label: id.includes('#') ? `#${id.split('#').slice(1).join('#')}` : id,
+      live: !!sess,
+      // "In use" means a socket is actually rendering it. An owner whose
+      // sockets have all gone is NOT in use — that session is free to pick up,
+      // which is the common case after closing a window.
+      inUse: !!sess && [...sess.clients.values()].some((c) => c.granted),
+      bytes,
+    });
+  }
+  return out.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+}
+
+/**
+ * Every session name this container has ever used, live or not.
+ *
+ * Distinct from `listSessions`, which reports only shells that exist. This is
+ * for NAMING: scrollback outlives its session, so reusing a name would replay
+ * a long-dead shell's output into a brand-new one — and instance ids get
+ * recycled, so those files can be months old and belong to nobody here.
+ */
+export function reservedSessionNames(): string[] {
+  const ids = new Set<string>(sessions.keys());
+  try { for (const f of readdirSync(SCROLLBACK_DIR)) ids.add(f); } catch { /* no dir yet */ }
+  return [...ids];
+}
+
+/**
+ * The next free session name, continuing the instance's own `#a<n>` numbering
+ * rather than starting a parallel series — `#a1, #a2, #a3` is what a user
+ * reading the picker expects, and a second scheme just raises the question of
+ * what the difference is.
+ *
+ * Numbers above everything ever used here, so a new session never inherits an
+ * old one's scrollback. It can in principle meet an activity id the OS mints
+ * later (its counter is its own); that just means a window opens onto an
+ * existing shell, which the session lock already handles.
+ */
+export function nextSessionId(instanceId: string): string {
+  const taken = new Set(reservedSessionNames());
+  let max = 0;
+  for (const id of taken) {
+    const m = /#a(\d+)$/.exec(id);
+    if (m?.[1]) max = Math.max(max, Number(m[1]));
+  }
+  for (let n = max + 1; ; n++) {
+    const id = `${instanceId}#a${n}`;
+    if (!taken.has(id)) return id;
+  }
+}
+
 export function killSession(sessionId: string): boolean {
   const sess = sessions.get(sessionId);
 
