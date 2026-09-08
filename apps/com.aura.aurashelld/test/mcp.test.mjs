@@ -10,6 +10,7 @@ process.env.OS_API_BASE = 'http://os.test';
 const { setFetch } = await import('../src/shell-api.ts');
 const { buildShellServer, TOOL_NAMES } = await import('../src/mcp/shell.ts');
 const { _resetForTests } = await import('../src/challenges.ts');
+const { _resetForTests: resetDedupe } = await import('../src/dedupe.ts');
 const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
 const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
 
@@ -34,6 +35,7 @@ const layouts = [{ id: 'tiling', name: 'Tiling' }, { id: 'stack', name: 'Free Wi
 
 /** Script the OS. `uiMode` decides what /api/os/ui/command answers. */
 function fakeOs({ uiMode = 'no-ui', uiResult = {} } = {}) {
+  resetDedupe();
   const calls = [];
   const state = { workspaces: JSON.parse(JSON.stringify(workspaces)) };
   setFetch(async (input, init = {}) => {
@@ -85,12 +87,14 @@ test('overview without a browser: server-side facts, ui "not connected", names n
   const r = await call(await connect(), 'get_shell_overview');
   assert.ok(!r.isError, r.content[0].text);
   const o = r.structuredContent;
-  assert.equal(o.ui, 'not connected');
-  assert.deepEqual(o.workspace, { number: 1, name: 'Main', layout: 'Tiling' });
-  assert.equal(o.workspaces[0].windows[0].app, 'Terminal');
-  assert.equal(o.lockScreen, false);
+  assert.equal(o.details.ui, 'not connected');
+  assert.deepEqual(o.workspace, { number: 1, name: 'Main', windows: [{ app: 'Terminal', name: null, title: 'Terminal', viewId: 'com.aura.terminal-2#a1', workspace: '1 Main' }] });
+  assert.deepEqual(o.otherWorkspaces, [{ number: 2, name: 'Work', windows: [] }]);
+  assert.equal(o.details.lockScreen, false);
   assert.deepEqual(o.lastUsedApps, ['Terminal', 'Notes (io.x.notes)']);
   assert.deepEqual(o.runningApps, ['Terminal']);   // pool member hidden, service not an app
+  assert.match(o.summary, /^Workspace 1 "Main" — nothing focused\. 1 window here, 1 app running, 2 workspaces\./);
+  assert.deepEqual(o.attention, ['no shell UI is connected — window names, zoom and panels are unknown']);
 });
 
 test('overview with a browser merges the snapshot: names, zoom, panels', async () => {
@@ -101,11 +105,13 @@ test('overview with a browser merges the snapshot: names, zoom, panels', async (
     launcher: { open: false, query: '' }, processManager: { open: true, filters: { apps: true, services: false } }, lockScreen: { active: true },
   } });
   const o = (await call(await connect(), 'get_shell_overview')).structuredContent;
-  assert.equal(o.ui, 'connected');
-  assert.equal(o.zoom, '120%');
-  assert.equal(o.lockScreen, true);
+  assert.equal(o.details.ui, 'connected');
+  assert.equal(o.details.zoom, '120%');
+  assert.equal(o.details.lockScreen, true);
   assert.equal(o.focusedWindow.name, 'build');
-  assert.equal(o.processManager.open, true);
+  assert.equal(o.details.processManager.open, true);
+  assert.match(o.summary, /focused: Terminal "build"/);
+  assert.deepEqual(o.attention, ['the lock screen is active', 'the shell is zoomed to 120%', 'the process manager is open']);
 });
 
 test('start_app: shared names return candidates with ids; unique names launch into the current workspace', async () => {
@@ -203,4 +209,21 @@ test('invalid arguments are rejected before anything runs', async () => {
   assert.equal(r.isError, true);
   assert.match(r.content[0].text, /Invalid arguments for rename_workspace/);
   assert.equal(os.calls.length, 0);
+});
+
+test('an identical call within the window is answered from the first one, marked deduplicated', async () => {
+  const os = fakeOs({ uiMode: 'ok', uiResult: { desktop: { activeWorkspaceId: 'ws-1', focusedViewId: null, maximizedViewId: null, maximizedFull: false, navMode: 'app', windows: [] } } });
+  const client = await connect();
+  const [a, b, c] = await Promise.all([
+    call(client, 'get_shell_overview'), call(client, 'get_shell_overview'), call(client, 'get_shell_overview'),
+  ]);
+  assert.ok(!a.isError && !b.isError && !c.isError);
+  const snapshots = os.calls.filter((x) => x.path === '/api/os/ui/command');
+  assert.equal(snapshots.length, 1, 'three concurrent identical calls share one browser round trip');
+  const dups = [a, b, c].filter((r) => r.structuredContent.deduplicated === true);
+  assert.equal(dups.length, 2);
+  assert.match(dups[0].content.at(-1).text, /deduplicated: identical get_shell_overview call/);
+  // Different arguments are a different call.
+  const other = await call(client, 'switch_workspace', { workspace: 2 });
+  assert.equal(other.structuredContent.deduplicated, undefined);
 });

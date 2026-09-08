@@ -39,6 +39,7 @@ import {
   type ShellState, type UiSnapshot,
 } from '../overview.ts';
 import { issueChallenge, verifyChallenge } from '../challenges.ts';
+import { dedupe } from '../dedupe.ts';
 
 const INSTRUCTIONS =
   'Remote control for the AuraOS shell (the desktop in the browser). Start with get_shell_overview. '
@@ -48,7 +49,9 @@ const INSTRUCTIONS =
   + 'result lists candidates — pick one and call again. Results that change something carry `workspace`, the '
   + 'workspace that is current afterwards. Stopping or killing a process is a two-step call with a challenge '
   + 'code: put the returned question to the user and only call again with the code once they agree. '
-  + 'Anything marked "no shell UI is connected" needs the shell open in a browser.';
+  + 'Anything marked "no shell UI is connected" needs the shell open in a browser. '
+  + 'Call each tool ONCE per turn: an identical call within a few seconds returns the same answer marked '
+  + '`deduplicated: true` — you already have it, do not repeat it.';
 
 // ── Result helpers ──────────────────────────────────────────────────────────
 
@@ -145,10 +148,12 @@ const TOOLS: OwnTool[] = [
     name: 'get_shell_overview',
     title: 'Shell overview',
     description:
-      'One call to see the whole desktop: the current workspace, every workspace with its windows (app and '
-      + 'window name), the focused window, zoom, fullscreen, lock screen, launcher and process-manager state, '
-      + 'available layouts, running apps and the five last-used apps. `ui: "not connected"` means no browser has '
-      + 'the shell open — window names, zoom and panel state are then unavailable and windows come from the OS.',
+      'The cockpit view of the desktop, in one call. Answer the user from `summary`, `workspace` (the current one '
+      + 'with its windows), `focusedWindow`, `attention` and `runningApps`; `otherWorkspaces` says what is elsewhere; '
+      + '`lastUsedApps` are the dock\'s recent apps. `details` (zoom, layout, fullscreen, launcher and process-manager '
+      + 'state) is there for completeness — mention it only when asked or when `attention` flags it. '
+      + '`ui: "not connected"` (in details) means no browser has the shell open: window names, zoom and panel state '
+      + 'are then unavailable. Call this once per turn; the answer stays valid until you change something.',
     schema: z.object({}),
     annotations: READ,
     run: async () => {
@@ -159,24 +164,52 @@ const TOOLS: OwnTool[] = [
       const running = processes(state).filter((p) => p.kind === 'app')
         .map((p) => p.app).filter((n, i, arr) => arr.indexOf(n) === i);
       const focused = state.windows.find((w) => w.focused) ?? null;
-      const lockedFromKv = lockKv ? (lockKv.lockAt ?? 0) > (lockKv.unlockAt ?? 0) : false;
+      const locked = snap?.lockScreen?.active ?? (lockKv ? (lockKv.lockAt ?? 0) > (lockKv.unlockAt ?? 0) : false);
+      const here = windowsOf(state, state.active);
+      const line = workspaceLine(state.active, state.layouts);
+      const zoom = snap?.statusBar?.zoom.percent ?? null;
+
+      // What a person would want pointed out — only states that are not the
+      // everyday default, so an empty list means "nothing unusual".
+      const attention: string[] = [];
+      if (locked) attention.push('the lock screen is active');
+      if (snap?.statusBar?.fullscreen) attention.push('the browser is in fullscreen');
+      if (zoom !== null && zoom !== 100) attention.push(`the shell is zoomed to ${zoom}%`);
+      if (snap?.launcher?.open) attention.push('the launcher is open');
+      if (snap?.processManager?.open) attention.push('the process manager is open');
+      if (!snap) attention.push('no shell UI is connected — window names, zoom and panels are unknown');
+      const broken = processes(state).filter((p) => p.label === 'ERR').map((p) => p.app);
+      if (broken.length) attention.push(`in error: ${broken.join(', ')}`);
+
+      const windowWord = (n: number) => `${n} window${n === 1 ? '' : 's'}`;
+      const summary =
+        `Workspace ${line.number} "${line.name}"`
+        + (focused ? ` — focused: ${focused.name ? `${focused.app} "${focused.name}"` : focused.app}` : ' — nothing focused')
+        + `. ${windowWord(here.length)} here, ${running.length} app${running.length === 1 ? '' : 's'} running, `
+        + `${state.wsSummaries.length} workspace${state.wsSummaries.length === 1 ? '' : 's'}.`
+        + (attention.length ? ` Note: ${attention.join('; ')}.` : '');
+
       return ok({
-        ui: snap ? 'connected' : 'not connected',
-        ...(state.uiError && !snap ? { uiNote: state.uiError } : {}),
-        workspace: workspaceLine(state.active, state.layouts),
-        workspaces: state.wsSummaries.map((w) => ({
-          ...workspaceLine(w, state.layouts), active: w.id === state.active.id,
-          windows: windowsOf(state, w),
-        })),
+        summary,
+        ...(attention.length ? { attention } : {}),
+        workspace: { number: line.number, name: line.name, windows: here },
         focusedWindow: focused ? windowView(focused) : null,
-        zoom: snap?.statusBar ? `${snap.statusBar.zoom.percent}%` : null,
-        fullscreen: snap?.statusBar?.fullscreen ?? null,
-        lockScreen: snap?.lockScreen?.active ?? lockedFromKv,
-        launcher: snap?.launcher ?? null,
-        processManager: snap?.processManager ?? null,
-        layouts: state.layouts.map((l) => l.name),
         runningApps: running,
+        otherWorkspaces: state.wsSummaries.filter((w) => w.id !== state.active.id).map((w) => {
+          const wins = state.windows.filter((x) => x.workspace?.number === w.number);
+          return { number: w.number, name: w.name, windows: wins.map((x) => x.name ? `${x.app} "${x.name}"` : x.app) };
+        }),
         lastUsedApps: lastUsed,
+        details: {
+          ui: snap ? 'connected' : 'not connected',
+          layout: line.layout,
+          layouts: state.layouts.map((l) => l.name),
+          zoom: zoom === null ? null : `${zoom}%`,
+          fullscreen: snap?.statusBar?.fullscreen ?? null,
+          lockScreen: locked,
+          launcher: snap?.launcher ?? null,
+          processManager: snap?.processManager ?? null,
+        },
       });
     },
   }),
@@ -651,8 +684,20 @@ export function buildShellServer(): Server {
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const tool = BY_NAME.get(req.params.name);
     if (!tool) return fail(`Unknown tool "${req.params.name}".`);
-    try { return await tool.run((req.params.arguments ?? {}) as Record<string, unknown>); }
+    const args = (req.params.arguments ?? {}) as Record<string, unknown>;
+    const { duplicate, result } = dedupe(tool.name, args, () => Promise.resolve(tool.run(args)));
+    let out: CallToolResult;
+    try { out = await result; }
     catch (err) { return fail(`${tool.name} failed: ${(err as Error).message}`); }
+    if (!duplicate) return out;
+    // Same call, moments ago: hand back that answer and say so, so a model
+    // that repeated itself sees it already has what it asked for.
+    const note = `(deduplicated: identical ${tool.name} call a moment ago — this is the same answer; no need to call again)`;
+    return {
+      ...out,
+      content: [...out.content, { type: 'text', text: note }],
+      ...(out.structuredContent ? { structuredContent: { ...out.structuredContent, deduplicated: true } } : {}),
+    };
   });
 
   return server;
