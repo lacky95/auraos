@@ -10,7 +10,7 @@ process.env.OS_API_BASE = 'http://os.test';
 const { setFetch } = await import('../src/shell-api.ts');
 const { buildShellServer, TOOL_NAMES } = await import('../src/mcp/shell.ts');
 const { _resetForTests } = await import('../src/challenges.ts');
-const { _resetForTests: resetDedupe } = await import('../src/dedupe.ts');
+const { _resetForTests: resetDedupe, LOOP_LIMIT } = await import('../src/dedupe.ts');
 const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
 const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
 
@@ -263,4 +263,38 @@ test('get_datetime reports the browser clock when there is one, the server clock
   const text = (await call(await connect(), 'get_datetime')).content[0].text;
   assert.match(text, /^\S.*20\d\d, \d{1,2}:\d{2}$/, `readable date + time, no zone: ${text}`);
   assert.ok(!/UTC|GMT|Europe/.test(text));
+});
+
+test('reading the same thing in a loop hits the brake, and a change releases it', async () => {
+  const os = fakeOs();
+  const client = await connect();
+  // Distinct arguments each time, so absorption never applies — only the brake can stop this.
+  for (let i = 0; i <= LOOP_LIMIT; i++) {
+    const r = await call(client, 'list_workspaces');
+    if (i < LOOP_LIMIT) {
+      assert.ok(!r.isError && r.structuredContent?.workspaces, `call ${i + 1} should answer with data`);
+    } else {
+      assert.equal(r.structuredContent, undefined, 'the brake returns text, not another payload');
+      assert.match(r.content[0].text, /called list_workspaces 4 times/);
+      assert.match(r.content[0].text, /Stop calling tools/);
+      assert.ok(!r.isError, 'the brake is not an error — it is an instruction');
+    }
+  }
+  // Changing something makes re-reading legitimate again.
+  await call(client, 'switch_workspace', { workspace: 2 });
+  const after = await call(client, 'list_workspaces');
+  assert.ok(after.structuredContent?.workspaces, 'a mutating call clears the brake');
+  assert.ok(os.calls.length > 0);
+});
+
+test('the brake repeats the answer the tool led with, not its JSON', async () => {
+  fakeOs();
+  const client = await connect();
+  let last;
+  for (let i = 0; i <= LOOP_LIMIT; i++) last = await call(client, 'get_shell_overview');
+  assert.equal(last.structuredContent, undefined);
+  // `summary` is the headline for a tool whose text body is JSON — an
+  // opening brace would be no use to the model being told to answer.
+  assert.match(last.content[0].text, /The answer is still: Workspace 1 "Main"/);
+  assert.ok(!last.content[0].text.includes('The answer is still: {'));
 });

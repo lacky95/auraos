@@ -39,7 +39,7 @@ import {
   type ShellState, type UiSnapshot,
 } from '../overview.ts';
 import { issueChallenge, verifyChallenge } from '../challenges.ts';
-import { dedupe } from '../dedupe.ts';
+import { LOOP_WINDOW_MS, dedupe, noteMutation, recordRead, rememberAnswer, stopMessage } from '../dedupe.ts';
 
 const INSTRUCTIONS =
   'Remote control for the AuraOS shell (the desktop in the browser). Start with get_shell_overview. '
@@ -51,7 +51,8 @@ const INSTRUCTIONS =
   + 'code: put the returned question to the user and only call again with the code once they agree. '
   + 'Anything marked "no shell UI is connected" needs the shell open in a browser. '
   + 'Call each tool ONCE per turn: an identical call within a few seconds returns the same answer marked '
-  + '`deduplicated: true` — you already have it, do not repeat it.';
+  + '`deduplicated: true` — you already have it, do not repeat it. Reading the same thing over and over without '
+  + 'changing anything is a loop: after a few repeats the tool stops returning data and tells you to answer.';
 
 // ── Result helpers ──────────────────────────────────────────────────────────
 
@@ -731,10 +732,32 @@ export function buildShellServer(): Server {
     const tool = BY_NAME.get(req.params.name);
     if (!tool) return fail(`Unknown tool "${req.params.name}".`);
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
+    // Reading the same thing again and again, with nothing changed in
+    // between, is a loop the answers themselves cannot break — so stop
+    // answering with data and say so. A mutating call clears the count.
+    if (tool.annotations.readOnlyHint) {
+      const { count, tripped } = recordRead(tool.name);
+      if (tripped) {
+        const msg = stopMessage(tool.name, count, Math.round(LOOP_WINDOW_MS / 1000));
+        console.warn(`[mcp] loop brake: ${tool.name} ×${count}`);
+        return { content: [{ type: 'text', text: msg }] };
+      }
+    } else {
+      noteMutation();
+    }
+
     const { duplicate, result } = dedupe(tool.name, args, () => Promise.resolve(tool.run(args)));
     let out: CallToolResult;
     try { out = await result; }
     catch (err) { return fail(`${tool.name} failed: ${(err as Error).message}`); }
+    // Keep the headline so the brake can repeat it instead of the payload.
+    // `summary` first: a tool whose text is JSON would otherwise contribute
+    // an opening brace as its "answer".
+    const summary = out.structuredContent?.['summary'];
+    const head = out.content.find((c) => c.type === 'text');
+    const headline = typeof summary === 'string' ? summary
+      : (head && typeof head.text === 'string' ? head.text.split('\n')[0] ?? '' : '');
+    if (headline && !headline.startsWith('{')) rememberAnswer(tool.name, headline);
     if (!duplicate) return out;
     // Same call, moments ago: hand back that answer and say so, so a model
     // that repeated itself sees it already has what it asked for.
