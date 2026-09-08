@@ -30,13 +30,15 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 /**
  * Turn an McpServer factory into an Astro route. Export the result as `ALL`
  * so GET and DELETE reach the transport too — it knows how to answer each
- * method per spec, so the route should not second-guess it. Observed through
- * the proxy: GET with `Accept: text/event-stream` opens the server→client
- * notification stream, which the per-request teardown below ends at once (a
- * stateless server has nothing to push); DELETE (session teardown) is a 200 no-op.
+ * method per spec. DELETE (session teardown) is a 200 no-op. GET is the one
+ * exception, answered 405 below — see the comment there.
  */
 export function createMcpRoute(build: () => McpServer): APIRoute {
   return async ({ request }) => {
+    // A stateless server has no notification stream to offer. Letting the
+    // transport open one that the teardown below closes at once made clients
+    // reconnect every second, forever; the spec's answer is 405.
+    if (request.method === 'GET') return new Response(null, { status: 405, headers: { allow: 'POST, DELETE' } });
     const server = build();
     const transport = new WebStandardStreamableHTTPServerTransport({
       // No sessionIdGenerator → stateless mode (see header).

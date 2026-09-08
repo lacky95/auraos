@@ -30,13 +30,19 @@ import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 
 /**
- * Turn a low-level `Server` factory into an Astro route. Export the result as
- * `ALL` so GET and DELETE reach the transport too — it answers each method
- * per spec (GET opens a notification stream the per-request teardown ends at
- * once; DELETE is a 200 no-op).
+ * Turn a server factory into an Astro route. Export the result as `ALL` so
+ * DELETE reaches the transport too (a 200 no-op for a stateless server).
+ *
+ * GET is answered here with 405, not by the transport. A client opens GET to
+ * listen for server notifications; a stateless server has none, and letting
+ * the transport open a stream that the per-request teardown closes at once
+ * made clients reconnect every second, forever (119 GETs in one short agent
+ * session). The spec's answer for "no stream here" is 405, which clients
+ * take as final.
  */
 export function createMcpRoute(build: () => Server): APIRoute {
   return async ({ request }) => {
+    if (request.method === 'GET') return new Response(null, { status: 405, headers: { allow: 'POST, DELETE' } });
     const server = build();
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
