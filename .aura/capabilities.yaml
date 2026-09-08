@@ -62,6 +62,37 @@ capabilities:
     binary: gh
     description: "GitHub CLI"
 
+  adb:
+    source: curl
+    # Debian's `adb` package is platform-tools 29 (2019). It predates `adb
+    # pair`, so wireless debugging against Android 11+ is simply impossible
+    # with it, and it lags the device protocol besides. Google's
+    # platform-tools is upstream — take it directly.
+    #
+    # `latest` rather than a pinned release, matching `bun` and `code-server`
+    # here: `cap install` is an explicit, on-demand action, and an adb that is
+    # a year stale is the exact problem this entry exists to avoid.
+    #
+    # unzip is not in the shell image (node:22-slim), hence the guarded apt
+    # install. Everything lands in ONE directory so `adb`, `fastboot` and the
+    # bundled lib64/ stay together the way the RUNPATH expects.
+    install_cmd: |-
+      set -e
+      command -v unzip >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -q unzip; }
+      t=$(mktemp -d)
+      curl -fsSL -o "$t/pt.zip" https://dl.google.com/android/repository/platform-tools-latest-linux.zip
+      unzip -q "$t/pt.zip" -d "$t"
+      rm -rf /usr/local/lib/android-sdk-platform-tools
+      mv "$t/platform-tools" /usr/local/lib/android-sdk-platform-tools
+      chmod +x /usr/local/lib/android-sdk-platform-tools/adb /usr/local/lib/android-sdk-platform-tools/fastboot
+      rm -rf "$t"
+    # Explicit, and load-bearing: `which adb` finds Debian's /usr/bin/adb
+    # whenever the apt package happens to be installed, and the cap would
+    # silently install THAT — the stale binary this entry replaces.
+    binary_path: /usr/local/lib/android-sdk-platform-tools/adb
+    binary: adb
+    description: "Android Debug Bridge — Google platform-tools (has `adb pair` for wireless debugging)"
+
   bun:
     source: curl
     install_cmd: "curl -fsSL https://bun.sh/install | bash"

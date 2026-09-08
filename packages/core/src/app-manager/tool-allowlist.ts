@@ -19,6 +19,18 @@
  *
  * `claude-code` is an alias for the `claude` binary (kept for manifest
  * readability); it's normalised here so comparisons/symlinks use the real name.
+ *
+ * SIDECARS. A capability is not always one file. `codex` spawns
+ * `codex-code-mode-host` as a sibling of its own executable, so an allowlist
+ * holding only the main binary leaves the feature permanently broken ("host
+ * executable was not found") even though the capability installed cleanly.
+ * A `SidecarMap` (built at install time, see tool-provision) records which
+ * helper files belong to which tool, and every function here treats an owner
+ * and its helpers as ONE grant: granting the owner brings the helpers, denying
+ * it takes them away, and a helper is never provisioned on its own. That last
+ * rule matters — a tool whose helper is present but whose owner is not is
+ * worse than a missing command, because the tool reports a broken feature
+ * instead of being absent.
  */
 export const TOOL_MARKERS = new Set(['*', '#']);
 
@@ -32,18 +44,71 @@ export function namedTools(tools: string[]): string[] {
 }
 
 /**
+ * Owner binary name → the helper binaries that must travel with it.
+ * Persisted next to the toolchain binaries; see `SIDECAR_MANIFEST`.
+ */
+export type SidecarMap = Record<string, string[]>;
+
+/**
+ * Every name that belongs to some owner — i.e. every name that is NOT
+ * independently grantable. UIs use this to keep helpers out of tool pickers:
+ * `codex-code-mode-host` is an implementation detail of `codex`, not a
+ * capability a user should reason about.
+ */
+export function sidecarNames(sidecars: SidecarMap): Set<string> {
+  const out = new Set<string>();
+  for (const list of Object.values(sidecars)) for (const n of list) out.add(n);
+  return out;
+}
+
+/** helper → owner, for the "is this grantable on its own?" checks below. */
+function sidecarOwners(sidecars: SidecarMap): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const [owner, list] of Object.entries(sidecars)) {
+    for (const n of list) out.set(n, owner);
+  }
+  return out;
+}
+
+/** `names` plus the helpers of every owner in it. */
+function withSidecars(names: Iterable<string>, sidecars: SidecarMap): Set<string> {
+  const out = new Set<string>(names);
+  for (const n of [...out]) for (const s of sidecars[n] ?? []) out.add(s);
+  return out;
+}
+
+/**
  * @param tools        the manifest `tools[]` array (may include `'*'` / `'#'`).
  * @param allBinaries  every binary name available in the toolchain bin dir.
- * @returns            binary names to symlink into the instance allowlist.
+ * @param sidecars     owner → helper names, so a tool is granted as a unit.
+ * @returns            binary names to materialise into the instance allowlist.
+ *
+ * Names with no binary behind them are deliberately kept: the caller reports
+ * them as `missing` ("granted but not installed"), which is the signal that
+ * sends someone to `aura cap install`.
  */
-export function resolveToolBinaries(tools: string[], allBinaries: string[]): string[] {
-  if (tools.includes('*')) return [...allBinaries];       // wildcard wins
+export function resolveToolBinaries(
+  tools: string[],
+  allBinaries: string[],
+  sidecars: SidecarMap = {},
+): string[] {
+  // Wildcard wins, and already covers helpers — they are in `allBinaries`.
+  if (tools.includes('*')) return [...allBinaries];
   const named = namedTools(tools);
   if (tools.includes('#')) {                              // all-except
-    const deny = new Set(named);
+    // Denying an owner denies its helpers too, so a partial tool never
+    // reaches the sandbox.
+    const deny = withSidecars(named, sidecars);
     return allBinaries.filter((b) => !deny.has(b));
   }
-  return named;                                            // plain allow-list
+  const grant = withSidecars(named, sidecars);             // plain allow-list
+  const owners = sidecarOwners(sidecars);
+  // Drop orphan helpers: naming one directly, or a stale map entry, must not
+  // hand a tool's private helper to an app that wasn't granted the tool.
+  return [...grant].filter((b) => {
+    const owner = owners.get(b);
+    return owner === undefined || grant.has(owner);
+  });
 }
 
 /**
@@ -61,10 +126,12 @@ export function toolsTrackInstalledCaps(tools: string[]): boolean {
  * `'*'` (all) and `'#'` (all-except) markers. Used to gate side effects tied to
  * a particular tool — e.g. binding the docker socket when `docker` is granted.
  */
-export function toolsGrant(tools: string[], name: string): boolean {
+export function toolsGrant(tools: string[], name: string, sidecars: SidecarMap = {}): boolean {
   if (tools.includes('*')) return true;
   const bin = toolBinaryName(name);
   const named = namedTools(tools);
-  if (tools.includes('#')) return !named.includes(bin); // all-except: granted unless explicitly excepted
-  return named.includes(bin);
+  // A helper follows its owner's grant, never its own name.
+  const probe = sidecarOwners(sidecars).get(bin) ?? bin;
+  if (tools.includes('#')) return !named.includes(probe); // all-except: granted unless explicitly excepted
+  return named.includes(probe);
 }

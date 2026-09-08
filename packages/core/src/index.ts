@@ -5,6 +5,7 @@ export * from './app-manager/AppManager.js';
 export * from './app-manager/AppRegistry.js';
 export * from './app-manager/tool-allowlist.js';
 export * from './app-manager/tool-provision.js';
+export * from './app-manager/tool-libs.js';
 export * from './app-manager/LifecycleStateMachine.js';
 export * from './app-manager/PortAllocator.js';
 export * from './app-manager/ProotRunner.js';

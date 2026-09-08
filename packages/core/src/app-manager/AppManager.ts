@@ -9,6 +9,7 @@ import { OsEventBus } from '../ipc/OsEventBus.js';
 import { AppRegistry } from './AppRegistry.js';
 import { toolsTrackInstalledCaps } from './tool-allowlist.js';
 import { SHARED_HOME_PATH, toolchainMirrorBin } from './tool-provision.js';
+import { readLibMap, restoreLibsFromStore, toolchainLibFor, toolchainMirrorLib } from './tool-libs.js';
 import { legacySharedHomeDir, masterHomeDir, userHomeDir } from '../scopes/home.js';
 import { PortAllocator } from './PortAllocator.js';
 import { LifecycleStateMachine } from './LifecycleStateMachine.js';
@@ -58,6 +59,8 @@ export class AppManager {
   readonly mounts:      MountManager;
   private dataDir: string;
   private toolchainDir: string;
+  /** PRoot's `/`. Kept so the lib restore pass can re-stage into it. */
+  private baseRootfs: string;
   private scopeRegistry: ScopeRegistry;
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
   private reconcileRunning = false;
@@ -89,6 +92,7 @@ export class AppManager {
   }) {
     this.dataDir = opts.dataDir;
     this.toolchainDir = opts.toolchainDir;
+    this.baseRootfs = opts.baseRootfs;
     this.scopeRegistry = new ScopeRegistry({ systemAppsDir: opts.appsDir, dataDir: opts.dataDir });
     this.registry = new AppRegistry(this.scopeRegistry.getAll());
     this.ports = new PortAllocator(opts.portStart ?? 4001, opts.portEnd ?? 4999);
@@ -375,11 +379,14 @@ export class AppManager {
    * lacks. `cap remove` unlinks from both dirs, so a mirror-only name can't
    * be an uninstall we're resurrecting — it is always a lost binary.
    *
-   * Caveat: only the binary comes back. Shared libraries that `cap install`
-   * staged into /os/base-rootfs (also an image layer) are lost with the same
-   * recreate, so a restored dynamically-linked cap can still fail inside a
-   * PRoot with "cannot open shared object file". Re-run `aura cap install
-   * <name>` to re-stage those.
+   * Shared libraries come back too. They are mirrored the same way (see
+   * `toolchainMirrorLib`), and because `.libs.json` records each one's ORIGINAL
+   * absolute path, the restore pass can put them back where the loader expects
+   * them — in /os/base-rootfs for PRoot, and in this container's own /usr/lib,
+   * which is the copy `apt-get install` wrote into the writable layer and the
+   * recreate threw away. Without that second restore a dynamically-linked cap
+   * breaks in `aura-shell` itself, since os/toolchain-path.sh puts the mirror
+   * on the master's PATH. Verify any time with `aura cap doctor`.
    *
    * Idempotent, and must run BEFORE any allowlist provisioning that expects a
    * newly installed capability — in hardlink mode you cannot link a binary
@@ -442,15 +449,75 @@ export class AppManager {
       if (restored.length) {
         console.log(
           `[AppManager] restored ${restored.length} lost toolchain binaries from the mirror ` +
-          `(${restored.join(', ')}) — re-run \`aura cap install <name>\` if one needs its shared libs re-staged`,
+          `(${restored.join(', ')})`,
         );
       }
+      this.syncToolchainLibs(srcBin, mirrorBin);
+
       const count = readdirSync(mirrorBin).length;
       console.log(`[AppManager] toolchain mirrored → ${mirrorBin} (${count} entries)`);
       return count;
     } catch (err) {
       console.warn(`[AppManager] toolchain mirror failed: ${(err as Error).message}`);
       return 0;
+    }
+  }
+
+  /**
+   * Mirror the toolchain LIB store both ways, then put every recorded library
+   * back at its original absolute path wherever that path is now empty.
+   *
+   * Three trees need the same libraries and lose them for different reasons:
+   * `/os/toolchain/lib` and `/os/base-rootfs` are image layers, and the shell's
+   * own `/usr/lib` is a writable layer — a recreate discards all three, while
+   * the named volume keeps the store. `.libs.json` carries each library's
+   * origin path, so the restore is exact rather than a guess.
+   *
+   * Only ever ADDS absent paths, exactly like the binary restore pass above,
+   * so it can never overwrite a library the image legitimately ships.
+   */
+  private syncToolchainLibs(srcBin: string, mirrorBin: string): void {
+    const srcLib    = toolchainLibFor(srcBin);
+    const mirrorLib = toolchainMirrorLib(this.dataDir);
+    try {
+      mkdirSync(mirrorLib, { recursive: true });
+      try { mkdirSync(srcLib, { recursive: true }); }
+      catch (err) { console.warn(`[AppManager] could not create ${srcLib}: ${(err as Error).message}`); }
+
+      // Forward + restore, by soname. Same size+mtime idempotency as the bin
+      // pass, and the same in-place copyFileSync: truncating rather than
+      // replacing preserves the inode, so per-instance `.lib` hardlinks see
+      // the new content instead of being stranded on an orphaned old version.
+      for (const [from, to] of [[srcLib, mirrorLib], [mirrorLib, srcLib]] as const) {
+        for (const name of existsSync(from) ? readdirSync(from) : []) {
+          const src = join(from, name);
+          const dst = join(to, name);
+          try {
+            const sStat = lstatSync(src);
+            try {
+              const dStat = lstatSync(dst);
+              if (sStat.size === dStat.size && dStat.mtimeMs >= sStat.mtimeMs) continue;
+            } catch { /* dst missing */ }
+            copyFileSync(src, dst);
+            chmodSync(dst, 0o755);
+          } catch (err) {
+            console.warn(`[AppManager] toolchain lib ${src} → ${dst} failed: ${(err as Error).message}`);
+          }
+        }
+      }
+
+      const map = readLibMap(mirrorBin);
+      const intoShell   = restoreLibsFromStore(map, mirrorLib, '/');
+      const intoRootfs  = restoreLibsFromStore(map, mirrorLib, this.baseRootfs);
+      const total = intoShell.length + intoRootfs.length;
+      if (total) {
+        console.log(
+          `[AppManager] restored ${total} shared librar${total === 1 ? 'y' : 'ies'} lost to a recreate ` +
+          `(${intoShell.length} in the shell, ${intoRootfs.length} in base-rootfs)`,
+        );
+      }
+    } catch (err) {
+      console.warn(`[AppManager] toolchain lib mirror failed: ${(err as Error).message}`);
     }
   }
 

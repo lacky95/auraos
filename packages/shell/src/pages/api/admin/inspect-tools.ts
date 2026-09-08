@@ -1,5 +1,5 @@
 import type { APIRoute } from 'astro';
-import { getAppManager, currentToolsMode, toolchainMirrorBin, listToolchainBinaries } from '@aura/core';
+import { getAppManager, currentToolsMode, toolchainMirrorBin, listToolchainBinaries, readSidecarMap, sidecarNames, readLibMap, INSTANCE_LIB_DIR } from '@aura/core';
 import { existsSync, readdirSync, readlinkSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -21,11 +21,16 @@ export const GET: APIRoute = ({ url }) => {
   const mirrorBin = toolchainMirrorBin(dataDir);
   const mode = currentToolsMode(dataDir);
 
+  const libMap = readLibMap(mirrorBin);
   const instances = mgr.getInstancesByApp(appId).map((i) => {
     const dir = join(dataDir, 'aura', 'runtime', i.instanceId, 'tools');
     let entries: Array<{ name: string; kind: string; target: string | null; resolves: boolean }> = [];
     if (existsSync(dir)) {
-      entries = readdirSync(dir).map((name) => {
+      // Dotfiles are not tools: `.lib` is the granted libraries' dir, and
+      // reporting it as an entry would both inflate entryCount (which the
+      // grant picker reads) and classify a directory as kind:'unknown' — a
+      // broken-looking tool that isn't one.
+      entries = readdirSync(dir).filter((n) => !n.startsWith('.')).map((name) => {
         const path = join(dir, name);
         let kind = 'unknown';
         let target: string | null = null;
@@ -44,7 +49,18 @@ export const GET: APIRoute = ({ url }) => {
             resolves = st.size > 0;
           }
         } catch { /* raced with a refresh */ }
-        return { name, kind, target, resolves };
+        // `resolves` used to mean only "the file is there", which is exactly
+        // the blind spot that let a cap whose shared libraries were missing
+        // report healthy right up until someone ran it.
+        const needed = (libMap[name] ?? []).filter((d) => d.kind === 'staged');
+        const missing = needed
+          .filter((d) => !existsSync(join(dir, INSTANCE_LIB_DIR, d.soname)))
+          .map((d) => d.soname);
+        return {
+          name, kind, target,
+          resolves: resolves && missing.length === 0,
+          libs: { needed: needed.length, missing },
+        };
       });
     }
     return {
@@ -54,13 +70,25 @@ export const GET: APIRoute = ({ url }) => {
       dirExists: existsSync(dir),
       entryCount: entries.length,
       entries,
+      libDir: (() => {
+        const p = join(dir, INSTANCE_LIB_DIR);
+        const exists = existsSync(p);
+        return { path: p, exists, entries: exists ? readdirSync(p).sort() : [] };
+      })(),
     };
   });
 
+  // `storeEntries` feeds the tool pickers, so it lists only what a user can
+  // meaningfully grant. A sidecar (e.g. `codex-code-mode-host`) is part of its
+  // owner's grant, never a choice of its own — reported separately so the
+  // picker can say "codex (+1 helper)" instead of offering the helper.
+  const sidecars = readSidecarMap(mirrorBin);
+  const helpers = sidecarNames(sidecars);
   return new Response(JSON.stringify({
     mode,
     toolBinDir: mirrorBin,
-    storeEntries: listToolchainBinaries(mirrorBin),
+    storeEntries: listToolchainBinaries(mirrorBin).filter((n) => !helpers.has(n)),
+    sidecars,
     instances,
   }, null, 2), { status: 200, headers: { 'Content-Type': 'application/json' } });
 };

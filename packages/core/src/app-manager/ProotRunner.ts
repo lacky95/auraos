@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
 import { toolsGrant } from './tool-allowlist.js';
-import { ALL_TOOLS_PATH, MY_TOOLS_PATH, SHARED_HOME_PATH, currentToolsMode, provisionAllowlist } from './tool-provision.js';
+import { ALL_TOOLS_PATH, MY_TOOLS_LIB_PATH, MY_TOOLS_PATH, SHARED_HOME_PATH, currentToolsMode, provisionAllowlist } from './tool-provision.js';
 import { userHomeDir } from '../scopes/home.js';
 import type { SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import type { SpawnContext } from '../scopes/types.js';
@@ -148,12 +148,22 @@ export class ProotRunner implements SandboxRunner {
     // shells also benefit — the bashrc's PATH guard then short-circuits.
     const inheritedPath = process.env['PATH'] ?? '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
     const path = prooted ? `${MY_TOOLS_PATH}:${inheritedPath}` : inheritedPath;
+    // Same treatment for the granted tools' shared libraries. PRoot already
+    // binds the allowlist dir, so `.lib` is there for free. `cap install` also
+    // stages libs into base-rootfs at their original paths (which survives an
+    // exec that scrubs the environment, e.g. sudo) — this is the copy that
+    // keeps working after a container recreate throws that image layer away.
+    const inheritedLdPath = process.env['LD_LIBRARY_PATH'] ?? '';
+    const ldPath = prooted
+      ? (inheritedLdPath ? `${MY_TOOLS_LIB_PATH}:${inheritedLdPath}` : MY_TOOLS_LIB_PATH)
+      : inheritedLdPath;
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
       // OS Context env FIRST — the fixed OS vars below override, so a context
       // key can't clobber PATH/APP_ID/OS_API_BASE etc.
       ...contextEnv,
       PATH: path,
+      ...(ldPath ? { LD_LIBRARY_PATH: ldPath } : {}),
       // Apps get the USER's home, never the master's. Prooted apps reach it
       // through the bind in buildProotArgs; non-prooted apps run inside the
       // master container, where /home/aura is a symlink to the same dir (see

@@ -53,6 +53,30 @@ async function setToolsManifest(appId: string, tools: string[]): Promise<Manifes
   return api.post<ManifestEditResult>('/api/admin/manifest-edit', { appId, action: 'set-tools', tools });
 }
 
+interface CapDoctorRow {
+  name: string;
+  linkage: 'dynamic' | 'static' | 'script' | 'unreadable';
+  sidecars: string[];
+  staged: string[];
+  unresolved: string[];
+  proot: { ok: boolean | null; missing: string[] };
+  /** `null` = unknown: without the probe the shell cannot see inside the image. */
+  container: { ok: boolean | null; missing: string[]; observed: boolean };
+}
+
+/** The NOTES cell: what this cap carries with it, or exactly what it lacks. */
+function doctorNote(c: CapDoctorRow): string {
+  const parts: string[] = [];
+  if (c.linkage === 'static' || c.staged.length === 0) parts.push(color.dim('static'));
+  else parts.push(`${c.staged.length} libs staged`);
+  if (c.sidecars.length) parts.push(color.dim(`(+${c.sidecars.length} sidecar${c.sidecars.length > 1 ? 's' : ''})`));
+
+  const missing = [...new Set([...c.proot.missing, ...c.container.missing])];
+  if (missing.length) parts.push(color.red(`missing: ${missing.join(', ')}`));
+  if (c.unresolved.length) parts.push(color.red(`unresolved: ${c.unresolved.join(', ')}`));
+  return parts.join(' ');
+}
+
 /** Human-readable summary of what a tools[] effectively grants, honoring the
  *  '*' (all) and '#' (all-except) markers with '*' taking precedence. */
 function grantSummary(tools: string[]): string {
@@ -76,10 +100,18 @@ async function gatherAvailableTools(): Promise<Array<{ name: string; installed: 
   try {
     const [capRes, toolsRes] = await Promise.all([
       api.get<{ state: { capabilities: Record<string, { installed: boolean }> } }>('/api/admin/cap'),
-      api.get<{ storeEntries: string[] }>('/api/admin/inspect-tools'),
+      api.get<{ storeEntries: string[]; sidecars?: Record<string, string[]> }>('/api/admin/inspect-tools'),
     ]);
+    // `storeEntries` already excludes sidecars; annotate their owners so it's
+    // visible that granting one tool provisions more than one file.
+    const helperCount = new Map<string, number>();
+    for (const [owner, list] of Object.entries(toolsRes.sidecars ?? {})) {
+      if (list.length) helperCount.set(owner, list.length);
+    }
     for (const n of toolsRes.storeEntries ?? []) {
-      out.set(n, { installed: true, desc: reg.capabilities[n]?.description ?? 'system binary in /os/toolchain/bin' });
+      const base = reg.capabilities[n]?.description ?? 'system binary in /os/toolchain/bin';
+      const helpers = helperCount.get(n);
+      out.set(n, { installed: true, desc: helpers ? `${base} (+${helpers} helper${helpers > 1 ? 's' : ''})` : base });
     }
     for (const [n, s] of Object.entries(capRes.state.capabilities)) {
       if (s.installed && !out.has(n)) out.set(n, { installed: true, desc: reg.capabilities[n]?.description ?? '' });
@@ -246,12 +278,87 @@ export function registerCap(program: Command): void {
         const entry = reg.capabilities[name];
         if (!entry) { fail(`Unknown capability: ${name}. See \`aura cap registry show\`.`); }
         info(`Installing ${color.bold(name)} (source=${entry.source}) via shell …`);
-        const res = await api.post<{ ok: boolean; symlink?: string; version?: string | null; error?: string }>(
+        const res = await api.post<{ ok: boolean; symlink?: string; version?: string | null; sidecars?: string[]; libs?: string[]; libsMissing?: string[]; error?: string }>(
           '/api/admin/cap',
           { action: 'install', name, entry },
         );
         if (!res?.ok) fail(`install ${name} failed: ${res?.error ?? 'unknown error'}`);
-        ok(`installed ${name} → ${res.symlink}${res.version ? ` (${res.version})` : ''}`);
+        // Name the helpers explicitly: they are what makes a multi-file tool
+        // work, and silence here is what hid the codex code-mode breakage.
+        const extra = res.sidecars?.length
+          ? color.dim(` + ${res.sidecars.length} helper${res.sidecars.length > 1 ? 's' : ''}: ${res.sidecars.join(', ')}`)
+          : '';
+        ok(`installed ${name} → ${res.symlink}${res.version ? ` (${res.version})` : ''}${extra}`);
+        // Same reasoning one level down: a dynamically-linked cap is only
+        // installed if its libraries came too.
+        if (res.libs?.length) {
+          info(color.dim(`  + ${res.libs.length} shared librar${res.libs.length > 1 ? 'ies' : 'y'} staged: ${res.libs.join(', ')}`));
+        }
+        if (res.libsMissing?.length) {
+          info(color.yellow(
+            `  ! ${res.libsMissing.length} librar${res.libsMissing.length > 1 ? 'ies' : 'y'} could not be resolved: ` +
+            `${res.libsMissing.join(', ')} — ${name} will fail at exec. Run \`aura cap doctor\`.`,
+          ));
+        }
+      }
+    });
+
+  cap
+    .command('doctor [name...]')
+    .option('--fix', 'Re-stage missing shared libraries, then hot-refresh running apps')
+    .option('--no-probe', 'Skip the app-image probe (use on a host with no docker socket)')
+    .option('--json', 'Machine-readable output')
+    .description(
+      'Check that every installed capability can actually RUN in each sandbox — ' +
+      'i.e. that its shared libraries travel with it. A cap that installs cleanly ' +
+      'and dies at exec with "cannot open shared object file" looks healthy to ' +
+      'every other command; this is what surfaces it.',
+    )
+    .action(async (names: string[], opts: { fix?: boolean; probe?: boolean; json?: boolean }) => {
+      if (opts.fix) {
+        // Scope the repair to what is actually broken unless the user named
+        // capabilities explicitly. Re-staging a healthy cap is not free: its
+        // libraries then shadow the sandbox image's own copies for every app
+        // that was granted it, which is a real change to make for no reason.
+        let targets = names;
+        if (targets.length === 0) {
+          const pre = await api.get<{ caps: CapDoctorRow[] }>('/api/admin/cap-doctor');
+          targets = pre.caps.filter((c) => c.proot.ok === false || c.container.ok === false).map((c) => c.name);
+          if (targets.length === 0) info('every capability resolves in both sandboxes — re-provisioning running instances only');
+        }
+        const r = await api.post<{ ok: boolean; repaired?: Array<{ name: string; staged: string[] }>; refreshed?: string[]; error?: string }>(
+          // Even with nothing to re-stage, still refresh: a live instance
+          // started before the libraries existed has no `.lib` of its own.
+          '/api/admin/cap-doctor', { names: targets, refreshOnly: targets.length === 0 },
+        );
+        if (!r?.ok) fail(`doctor --fix failed: ${r?.error ?? 'unknown error'}`);
+        const touched = (r.repaired ?? []).filter((x) => x.staged.length);
+        if (touched.length) for (const x of touched) ok(`re-staged ${x.name}: ${x.staged.join(', ')}`);
+        else info('nothing to re-stage');
+        if (r.refreshed?.length) info(`hot-refreshed ${r.refreshed.length} running instance(s)`);
+        info(color.dim('  open a NEW shell in a running app to pick up LD_LIBRARY_PATH'));
+      }
+
+      const res = await api.get<{ probed: boolean; caps: CapDoctorRow[] }>(
+        `/api/admin/cap-doctor${opts.probe === false ? '?probe=0' : ''}`,
+      );
+      const rows = res.caps.filter((c) => names.length === 0 || names.includes(c.name));
+      if (opts.json) { console.log(JSON.stringify(rows, null, 2)); return; }
+
+      console.log(table(rows.map((c) => ({
+        NAME: c.name,
+        PROOT: c.proot.ok === null ? color.dim('?') : (c.proot.ok ? color.green('✓') : color.red('✗')),
+        CONTAINER: c.container.ok === null ? color.dim('?') : (c.container.ok ? color.green('✓') : color.red('✗')),
+        NOTES: doctorNote(c),
+      })), ['NAME', 'PROOT', 'CONTAINER', 'NOTES']));
+
+      if (!res.probed) {
+        info(color.dim('  ? = not checked: the sandbox probe could not run here, so the answer is unknown rather than assumed'));
+      }
+      const broken = rows.filter((c) => c.proot.ok === false || c.container.ok === false);
+      if (broken.length) {
+        info(color.yellow(`  ${broken.length} capability(ies) would fail at exec — repair with \`aura cap doctor --fix\``));
+        process.exitCode = 1;
       }
     });
 

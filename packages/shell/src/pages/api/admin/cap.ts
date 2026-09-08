@@ -2,7 +2,11 @@ import type { APIRoute } from 'astro';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, lstatSync, chmodSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { execSync } from 'node:child_process';
-import { getAppManager } from '@aura/core';
+import {
+  getAppManager, detectSidecars, readSidecarMap, setSidecars,
+  readLinkage, stageLibs, stageIntoRootfs, setLibs, readLibMap, orphanedLibs, conflictingLibs,
+  toolchainLibFor, toolchainMirrorLib, type LibDep,
+} from '@aura/core';
 
 /**
  * Capability install/remove, server-side.
@@ -29,6 +33,13 @@ interface CapabilityEntry {
   extract?: 'tar' | 'zip';
   binary_in_archive?: string;
   install_cmd?: string;
+  /**
+   * Extra files this capability needs beside its main binary. Usually
+   * unnecessary — helpers named `<binary>-*` in the tool's own directory are
+   * detected automatically (see `detectSidecars`). Declare a name here only
+   * when the convention doesn't hold.
+   */
+  sidecars?: string[];
 }
 
 interface State {
@@ -68,58 +79,17 @@ function installBinary(src: string, dst: string): void {
     : [dst];
   for (const target of targets) {
     mkdirSync(dirname(target), { recursive: true });
-    try {
-      const st = lstatSync(target);
-      if (st.isSymbolicLink() || st.isFile()) unlinkSync(target);
-    } catch { /* not present */ }
+    // Unlink a SYMLINK only. A regular file is left in place for copyFileSync
+    // to truncate, which preserves the inode — unlinking first would give the
+    // mirror a new one and strand every existing per-instance hardlink on the
+    // OLD binary until something happened to refresh it. Same reasoning as
+    // AppManager.syncToolchainMirror.
+    try { if (lstatSync(target).isSymbolicLink()) unlinkSync(target); } catch { /* not present */ }
     copyFileSync(src, target);
     try { chmodSync(target, 0o755); } catch { /* best effort */ }
   }
 }
 
-/**
- * Walk the binary's dynamic-library dependency graph via ldd and copy every
- * shared object into the matching path inside the proot's base-rootfs.
- *
- * Why this is necessary: `apt-get install` runs in the CONTAINER, so libs
- * land in `/usr/lib/x86_64-linux-gnu/` on the container. The proot's `/` is
- * `/os/base-rootfs` — a SNAPSHOT of the container at image-build time. New
- * apt-installed libs never make it across. Without this copy, an
- * apt-installed binary is found on PATH inside the proot but exits with
- * "libfoo.so.N: cannot open shared object file: No such file or directory"
- * on the first dynamic link lookup.
- *
- * ldd already resolves transitively — one pass copies the whole graph.
- * `copyFileSync` dereferences symlinks, so the destination is always a
- * regular file (matters for PRoot, which has the readlink quirk on
- * bound symlinks — see installBinary above).
- *
- * Returns the list of libs that were newly added to base-rootfs.
- */
-function copyLibraryDeps(binary: string, baseRootfs: string): string[] {
-  const added: string[] = [];
-  let lddOut: string;
-  try { lddOut = sh(`ldd ${binary}`); } catch { return added; }
-  for (const line of lddOut.split('\n')) {
-    // ldd's "lib.so => /path/to/lib.so (0xaddress)" — capture the path. The
-    // "linux-vdso.so.1 (0x...)" and "ld-linux-x86-64.so.2 (0x...)" lines
-    // either have no `=>` or already point at base-rootfs paths; skip both.
-    const m = line.match(/=>\s+(\/\S+)\s/);
-    if (!m) continue;
-    const libPath = m[1]!;
-    if (libPath === 'not' || !existsSync(libPath)) continue; // "not found"
-    const dstLib = join(baseRootfs, libPath);
-    if (existsSync(dstLib)) continue;
-    try {
-      mkdirSync(dirname(dstLib), { recursive: true });
-      copyFileSync(libPath, dstLib);
-      added.push(libPath);
-    } catch (err) {
-      console.warn(`[cap-install] could not stage lib ${libPath} → ${dstLib}: ${(err as Error).message}`);
-    }
-  }
-  return added;
-}
 function loadState(): State {
   if (!existsSync(STATE_PATH)) return { capabilities: {}, services: {} };
   try {
@@ -132,30 +102,107 @@ function saveState(s: State): void {
   writeFileSync(STATE_PATH, JSON.stringify(s, null, 2));
 }
 
-async function installCapability(name: string, entry: CapabilityEntry): Promise<{ symlink: string; version: string | null; libsCopied: number }> {
+/** Both toolchain bin dirs, in the order writes should land. */
+const TOOLCHAIN_BIN_DIRS = [TOOLCHAIN_BIN, TOOLCHAIN_BIN_MIRROR] as const;
+// The library stores, one per bin store. Flat and keyed by SONAME — the string
+// the loader searches for — because the resolved file often has another name
+// (`libusb-1.0.so.0` is really `libusb-1.0.so.0.3.0`) and copying dereferences.
+const TOOLCHAIN_LIB_DIRS = [
+  toolchainLibFor(TOOLCHAIN_BIN),
+  toolchainMirrorLib(process.env['AURA_DATA_DIR'] ?? '/data'),
+] as const;
+
+/**
+ * Install the capability's main binary AND every file that has to travel with
+ * it, then record the relationship so `tools[]` can grant them as a unit.
+ *
+ * This is why it exists: a capability is not always one file. `codex` spawns
+ * `codex-code-mode-host` as a sibling of its own executable, so copying only
+ * the main binary produced a cap that installed cleanly and then reported
+ * "host executable was not found" forever. Detection is automatic, so the next
+ * multi-file tool needs no registry change.
+ */
+function installWithSidecars(
+  src: string,
+  binaryName: string,
+  entry: CapabilityEntry,
+  baseRootfs: string,
+): { libsCopied: number; libs: LibDep[]; sidecars: string[] } {
+  installBinary(src, join(TOOLCHAIN_BIN, binaryName));
+
+  const found = detectSidecars({ binaryPath: src, binaryName, declared: entry.sidecars });
+  for (const sc of found) installBinary(sc.src, join(TOOLCHAIN_BIN, sc.name));
+
+  // Libraries are resolved for the whole unit — the tool AND its helpers — and
+  // recorded under the owner, so a grant carries every file the tool needs.
+  const deps = new Map<string, LibDep>();
+  for (const file of [src, ...found.map((sc) => sc.src)]) {
+    for (const dep of readLinkage(file).deps) {
+      if (!deps.has(dep.soname)) deps.set(dep.soname, dep);
+    }
+  }
+  const all = [...deps.values()];
+
+  // Three destinations, on purpose:
+  //  - the two flat lib stores feed each instance's `.lib` (both sandboxes);
+  //  - base-rootfs takes them at their ORIGINAL paths, which is what still
+  //    works for an exec that scrubs the environment (sudo, env -i).
+  const conflicts = conflictingLibs(readLibMap(TOOLCHAIN_BIN), binaryName, all);
+  const { staged } = stageLibs(all, TOOLCHAIN_LIB_DIRS);
+  const intoRootfs = stageIntoRootfs(all, baseRootfs);
+  setLibs(TOOLCHAIN_BIN_DIRS, binaryName, all);
+
+  // Always write the map, even when empty: a tool that STOPPED shipping a
+  // helper must not keep a stale entry that then shows up as `missing`.
+  setSidecars(TOOLCHAIN_BIN_DIRS, binaryName, found.map((sc) => sc.name));
+  if (found.length) {
+    console.log(`[cap] ${binaryName}: +${found.length} sidecar(s) — ${found.map((sc) => sc.name).join(', ')}`);
+  }
+  if (staged.length) {
+    console.log(`[cap] ${binaryName}: +${staged.length} shared librar${staged.length === 1 ? 'y' : 'ies'} — ${staged.join(', ')}`);
+  }
+  // A dependency ldd cannot resolve even HERE means the cap is already broken
+  // and will fail at first run with a loader error that looks nothing like a
+  // bad grant. Say so now rather than let it install clean and die later.
+  const unresolved = all.filter((d) => d.kind === 'missing').map((d) => d.soname);
+  if (unresolved.length) {
+    console.warn(
+      `[cap] ${binaryName}: ${unresolved.length} shared librar${unresolved.length === 1 ? 'y' : 'ies'} ` +
+      `could NOT be resolved — ${unresolved.join(', ')}. The tool will fail at exec; ` +
+      `check the package's dependencies.`,
+    );
+  }
+  if (conflicts.length) {
+    console.warn(
+      `[cap] ${binaryName}: ${conflicts.join(', ')} already staged from a different path by another ` +
+      `capability. The store holds one file per soname, so the newest install wins.`,
+    );
+  }
+  return { libsCopied: staged.length + intoRootfs.length, libs: all, sidecars: found.map((sc) => sc.name) };
+}
+
+async function installCapability(name: string, entry: CapabilityEntry): Promise<{ symlink: string; version: string | null; libsCopied: number; libs: LibDep[]; sidecars: string[] }> {
   const binaryName = entry.binary ?? name;
   const link = join(TOOLCHAIN_BIN, binaryName);
   const baseRootfs = process.env['AURA_BASE_ROOTFS'] ?? '/os/base-rootfs';
-  let libsCopied = 0;
 
   switch (entry.source) {
     case 'builtin': {
-      if (entry.binary_path && existsSync(entry.binary_path)) {
-        installBinary(entry.binary_path, link);
-        libsCopied = copyLibraryDeps(entry.binary_path, baseRootfs).length;
+      if (!entry.binary_path || !existsSync(entry.binary_path)) {
+        return { symlink: link, version: null, libsCopied: 0, libs: [], sidecars: [] };
       }
-      return { symlink: link, version: null, libsCopied };
+      const res = installWithSidecars(entry.binary_path, binaryName, entry, baseRootfs);
+      return { symlink: link, version: null, ...res };
     }
     case 'apt': {
       if (!entry.package) throw new Error(`apt source requires 'package'`);
       sh(`apt-get update -qq && apt-get install -y -q ${entry.package}`);
       const found = which(binaryName);
       if (!found) throw new Error(`apt install succeeded but binary '${binaryName}' not on PATH`);
-      installBinary(found, link);
-      libsCopied = copyLibraryDeps(found, baseRootfs).length;
+      const res = installWithSidecars(found, binaryName, entry, baseRootfs);
       let version: string | null = null;
       try { version = sh(`dpkg-query -W -f='\${Version}' ${entry.package}`); } catch { /* ignore */ }
-      return { symlink: link, version, libsCopied };
+      return { symlink: link, version, ...res };
     }
     case 'npm': {
       if (!entry.package) throw new Error(`npm source requires 'package'`);
@@ -165,29 +212,46 @@ async function installCapability(name: string, entry: CapabilityEntry): Promise<
       // package tree, while the real executable lives in a platform dep.
       const found = entry.binary_path && existsSync(entry.binary_path) ? entry.binary_path : which(binaryName);
       if (!found) throw new Error(`npm install succeeded but binary '${binaryName}' not on PATH`);
-      installBinary(found, link);
-      libsCopied = copyLibraryDeps(found, baseRootfs).length;
+      const res = installWithSidecars(found, binaryName, entry, baseRootfs);
       let version: string | null = null;
       try { version = sh(`npm view ${entry.package} version`); } catch { /* ignore */ }
-      return { symlink: link, version, libsCopied };
+      return { symlink: link, version, ...res };
     }
     case 'curl': {
       if (!entry.install_cmd) throw new Error(`curl source requires 'install_cmd' (extract-from-archive not yet supported server-side)`);
       sh(entry.install_cmd);
       const binPath = entry.binary_path && existsSync(entry.binary_path) ? entry.binary_path : which(binaryName);
       if (!binPath) throw new Error(`curl install for ${name} finished but binary missing`);
-      installBinary(binPath, link);
-      libsCopied = copyLibraryDeps(binPath, baseRootfs).length;
-      return { symlink: link, version: null, libsCopied };
+      const res = installWithSidecars(binPath, binaryName, entry, baseRootfs);
+      return { symlink: link, version: null, ...res };
     }
   }
 }
 
 async function removeCapability(name: string, entry: CapabilityEntry): Promise<void> {
   const binaryName = entry.binary ?? name;
-  for (const link of [join(TOOLCHAIN_BIN, binaryName), join(TOOLCHAIN_BIN_MIRROR, binaryName)]) {
-    try { unlinkSync(link); } catch { /* not present */ }
+  // Take the helpers with it — an orphaned `codex-code-mode-host` in the store
+  // would keep showing up in wildcard grants long after codex was removed.
+  const doomed = [binaryName, ...(readSidecarMap(TOOLCHAIN_BIN)[binaryName] ?? [])];
+  for (const bin of doomed) {
+    for (const dir of TOOLCHAIN_BIN_DIRS) {
+      try { unlinkSync(join(dir, bin)); } catch { /* not present */ }
+    }
   }
+  // Libraries go too, but only the ones no other capability still references —
+  // several caps can share a soname, and the store holds one file per name.
+  // A cap with no `.libs.json` entry (installed before libs were tracked)
+  // contributes no references, so orphanedLibs deliberately frees nothing on
+  // its behalf; `aura cap doctor --fix` backfills the entry first.
+  for (const soname of orphanedLibs(readLibMap(TOOLCHAIN_BIN), binaryName)) {
+    for (const dir of TOOLCHAIN_LIB_DIRS) {
+      try { unlinkSync(join(dir, soname)); } catch { /* not present */ }
+    }
+  }
+  setLibs(TOOLCHAIN_BIN_DIRS, binaryName, []);
+  // Deliberately NOT un-staged from /os/base-rootfs: that tree has no
+  // ownership model, and a stale .so there is inert.
+  setSidecars(TOOLCHAIN_BIN_DIRS, binaryName, []);
   if (entry.source === 'apt' && entry.package) {
     try { sh(`apt-get remove -y -q ${entry.package}`); } catch { /* ignore */ }
   } else if (entry.source === 'npm' && entry.package) {
@@ -234,7 +298,19 @@ export const POST: APIRoute = async ({ request }) => {
     // new binary up without a respawn. Explicit-list apps don't get the new
     // cap until someone runs `aura cap grant <appId> <name>`.
     const refreshed = mgr.refreshWildcardApps();
-    return new Response(JSON.stringify({ ok: true, action, name, symlink: result.symlink, version: result.version, libsCopied: result.libsCopied, refreshed }), { status: 200 });
+    return new Response(JSON.stringify({
+      ok: true, action, name,
+      symlink: result.symlink,
+      version: result.version,
+      libsCopied: result.libsCopied,
+      // Named, not just counted: the CLI reports these the way it already
+      // reports sidecars, so a multi-file install is visible rather than
+      // implied. `libsMissing` is the loud case — installed but unrunnable.
+      libs: result.libs.filter((d) => d.kind === 'staged').map((d) => d.soname),
+      libsMissing: result.libs.filter((d) => d.kind === 'missing').map((d) => d.soname),
+      sidecars: result.sidecars,
+      refreshed,
+    }), { status: 200 });
   } catch (err) {
     return new Response(JSON.stringify({ error: (err as Error).message }), { status: 500 });
   }

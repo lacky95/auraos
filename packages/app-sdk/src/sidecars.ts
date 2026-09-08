@@ -523,6 +523,11 @@ export class SidecarHost {
       '-v', `${this.opts.workspaceRoot}/packages:/workspace/packages:ro`,
       '--mount', `type=volume,source=${this.opts.nodeModulesVolume},target=/workspace/node_modules,readonly`,
       '-e', `PATH=/aura/my-tools:${basePath}`,
+      // Granted tools' shared libraries, matching what ContainerRunner gives
+      // the controlling app. `.lib` rides in on the /aura/my-tools mount
+      // above, so a dynamically-linked cap works in a sibling too — without
+      // this line siblings regress to "cannot open shared object file".
+      '-e', 'LD_LIBRARY_PATH=/aura/my-tools/.lib',
       // The `-e PATH` above only covers processes that inherit the container's
       // env. A LOGIN shell doesn't: /etc/profile assigns PATH outright (both
       // its root and non-root branches), dropping /aura/my-tools, so anything

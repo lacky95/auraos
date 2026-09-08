@@ -2,6 +2,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, symlinkSync, unlink
 import { join, dirname } from 'node:path';
 import { execSync } from 'node:child_process';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import {
+  detectSidecars, readSidecarMap, setSidecars,
+  readLinkage, stageLibs, setLibs, readLibMap, orphanedLibs, toolchainLibFor,
+} from '@aura/core';
 // @ts-expect-error  bundled-as-text by esbuild (loader: { '.yaml': 'text' })
 import REGISTRY_DEFAULTS_YAML from '../registry-defaults.yaml';
 
@@ -16,6 +20,12 @@ export interface CapabilityEntry {
   extract?: 'tar' | 'zip';
   binary_in_archive?: string;
   install_cmd?: string;
+  /**
+   * Extra files this capability needs beside its main binary. Usually
+   * unnecessary — helpers named `<binary>-*` in the tool's own directory are
+   * detected automatically. Declare a name here only when that doesn't hold.
+   */
+  sidecars?: string[];
   description?: string;
 }
 
@@ -102,6 +112,35 @@ function ensureSymlink(target: string, link: string): void {
 export interface InstallResult {
   symlink: string;
   version: string | null;
+  /** Helper binaries linked alongside the main one. */
+  sidecars?: string[];
+}
+
+/**
+ * Link the main binary AND every file that has to travel with it, then record
+ * the relationship so `tools[]` grants them as a unit. Mirrors the shell's
+ * `installWithSidecars`; see @aura/core's `detectSidecars` for the rule.
+ */
+function linkWithSidecars(src: string, binaryName: string, entry: CapabilityEntry): string[] {
+  ensureSymlink(src, join(TOOLCHAIN_BIN, binaryName));
+  const found = detectSidecars({ binaryPath: src, binaryName, declared: entry.sidecars });
+  for (const sc of found) ensureSymlink(sc.src, join(TOOLCHAIN_BIN, sc.name));
+  setSidecars([TOOLCHAIN_BIN], binaryName, found.map((sc) => sc.name));
+
+  // Record and stage the shared libraries too. This path is the DEGRADED
+  // fallback (see the header comment on why installs normally route through
+  // the shell) — it can't reach the volume mirror or base-rootfs, so it does
+  // the part it can: a local lib store plus the `.libs.json` entry, without
+  // which `aura cap doctor` cannot see this capability at all.
+  const deps = new Map<string, ReturnType<typeof readLinkage>['deps'][number]>();
+  for (const file of [src, ...found.map((sc) => sc.src)]) {
+    for (const dep of readLinkage(file).deps) if (!deps.has(dep.soname)) deps.set(dep.soname, dep);
+  }
+  const libs = [...deps.values()];
+  stageLibs(libs, [toolchainLibFor(TOOLCHAIN_BIN)]);
+  setLibs([TOOLCHAIN_BIN], binaryName, libs);
+
+  return found.map((sc) => sc.name);
 }
 
 export async function installCapability(name: string, entry: CapabilityEntry): Promise<InstallResult> {
@@ -110,18 +149,20 @@ export async function installCapability(name: string, entry: CapabilityEntry): P
 
   switch (entry.source) {
     case 'builtin': {
-      if (entry.binary_path && existsSync(entry.binary_path)) ensureSymlink(entry.binary_path, link);
-      return { symlink: link, version: null };
+      const sidecars = entry.binary_path && existsSync(entry.binary_path)
+        ? linkWithSidecars(entry.binary_path, binaryName, entry)
+        : [];
+      return { symlink: link, version: null, sidecars };
     }
     case 'apt': {
       if (!entry.package) throw new Error(`Registry entry ${name}: apt source requires 'package'`);
       sh(`apt-get update -qq && apt-get install -y -q ${entry.package}`);
       const found = which(binaryName);
       if (!found) throw new Error(`apt install succeeded but binary '${binaryName}' not found on PATH`);
-      ensureSymlink(found, link);
+      const sidecars = linkWithSidecars(found, binaryName, entry);
       let version: string | null = null;
       try { version = sh(`dpkg-query -W -f='\${Version}' ${entry.package}`); } catch { /* ignore */ }
-      return { symlink: link, version };
+      return { symlink: link, version, sidecars };
     }
     case 'npm': {
       if (!entry.package) throw new Error(`Registry entry ${name}: npm source requires 'package'`);
@@ -129,18 +170,18 @@ export async function installCapability(name: string, entry: CapabilityEntry): P
       // Prefer an explicit binary_path (see the shell's /api/admin/cap for why).
       const found = entry.binary_path && existsSync(entry.binary_path) ? entry.binary_path : which(binaryName);
       if (!found) throw new Error(`npm install succeeded but binary '${binaryName}' not found on PATH`);
-      ensureSymlink(found, link);
+      const sidecars = linkWithSidecars(found, binaryName, entry);
       let version: string | null = null;
       try { version = sh(`npm view ${entry.package} version`); } catch { /* ignore */ }
-      return { symlink: link, version };
+      return { symlink: link, version, sidecars };
     }
     case 'curl': {
       if (entry.install_cmd) {
         sh(entry.install_cmd);
         const binPath = entry.binary_path && existsSync(entry.binary_path) ? entry.binary_path : which(binaryName);
         if (!binPath) throw new Error(`curl install for ${name} finished but binary missing (set binary_path in registry)`);
-        ensureSymlink(binPath, link);
-        return { symlink: link, version: null };
+        const sidecars = linkWithSidecars(binPath, binaryName, entry);
+        return { symlink: link, version: null, sidecars };
       }
       if (entry.url) {
         const tmp = `/tmp/aura-cap-${name}-${Date.now()}`;
@@ -166,8 +207,17 @@ export async function installCapability(name: string, entry: CapabilityEntry): P
 
 export async function removeCapability(name: string, entry: CapabilityEntry): Promise<void> {
   const binaryName = entry.binary ?? name;
-  const link = join(TOOLCHAIN_BIN, binaryName);
-  try { unlinkSync(link); } catch { /* not present */ }
+  // Helpers go with the owner — an orphan would keep appearing in wildcard
+  // grants long after the tool was removed.
+  for (const bin of [binaryName, ...(readSidecarMap(TOOLCHAIN_BIN)[binaryName] ?? [])]) {
+    try { unlinkSync(join(TOOLCHAIN_BIN, bin)); } catch { /* not present */ }
+  }
+  // Libraries no other capability still references go with it.
+  for (const soname of orphanedLibs(readLibMap(TOOLCHAIN_BIN), binaryName)) {
+    try { unlinkSync(join(toolchainLibFor(TOOLCHAIN_BIN), soname)); } catch { /* not present */ }
+  }
+  setLibs([TOOLCHAIN_BIN], binaryName, []);
+  setSidecars([TOOLCHAIN_BIN], binaryName, []);
 
   if (entry.source === 'apt' && entry.package) {
     try { sh(`apt-get remove -y -q ${entry.package}`); } catch { /* ignore */ }

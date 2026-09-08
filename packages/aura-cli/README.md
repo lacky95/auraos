@@ -34,7 +34,7 @@ aura status                summary of OS health
 aura app  …                manage apps        (list/info/start/stop/restart/install/remove)
 aura inst …                manage instances   (list/info/stop/kill/pause/resume/shell/logs)
 aura activity …            manage activities  (list/open/close)
-aura cap  …                manage capabilities (list/install/remove/grant/revoke/info/registry)
+aura cap  …                manage capabilities (list/install/remove/grant/revoke/info/doctor/registry)
 aura service …             manage daemons     (list/install/start/stop/status/logs/uninstall)
 aura dev  …                developer tools    (new/validate/standalone)
 aura theme …               OS theme           (list/get/set)
@@ -117,6 +117,26 @@ Sources:
 
 State for "which is installed" lives in `/data/aura/state/capabilities.json` so
 it survives container restarts.
+
+### Shared libraries
+
+A capability is not always one file, and not always self-contained. `apt-get
+install` runs in the shell container, so a dynamically-linked cap's `.so` files
+land in the *shell's* `/usr/lib` — an app sandbox has never seen them. Install
+therefore resolves the binary's `ldd` graph and stages every non-baseline
+library into a lib store beside the binaries (`/os/toolchain/lib` and its
+volume mirror), records them per owner in `.libs.json`, and copies them into
+`/os/base-rootfs` at their original paths for PRoot.
+
+Granting a tool then materialises just that tool's libraries into the
+instance's `/aura/my-tools/.lib`, which is on `LD_LIBRARY_PATH`. So libraries
+follow the grant, not the whole toolchain.
+
+`aura cap doctor` checks the result by running `ldd` inside a throwaway app
+container and a throwaway PRoot — the sandboxes apps really use — so a cap that
+installs cleanly and dies at exec with "cannot open shared object file" shows up
+as a row rather than as a bug report. `--fix` re-stages the broken ones without
+re-running apt.
 
 ## Services
 

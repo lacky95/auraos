@@ -305,6 +305,7 @@ aura inst shell   com.example.foo[-N]    # drop into the PRoot
 aura inst logs    com.example.foo[-N]    # tail logs
 aura cap install  <name>                 # add a tool to /os/toolchain/bin/
 aura cap grant    com.example.foo <cap>  # add to this manifest's tools[]
+aura cap doctor                          # do installed caps actually RUN in each sandbox?
 aura dev validate apps/com.example.foo   # schema-check the manifest
 aura dev clean-manifest <path>           # strip default-valued fields
 aura events       --filter "app:*"       # watch the event bus

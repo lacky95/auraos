@@ -20,6 +20,23 @@ if [ -d /aura/my-tools ]; then
   esac
 fi
 
+# Shared libraries of the granted tools. A cap installed via apt puts its .so
+# files in the SHELL container's /usr/lib; an app's own image has never seen
+# them, so without this a dynamically-linked cap is on PATH and still dies at
+# exec with "cannot open shared object file". `.lib` is a subdir of the
+# allowlist dir, so it arrives on the mount the grant already has.
+#
+# Above the non-interactive bail on purpose, like the PATH block, so exec
+# probes and child processes get it too — and because this file is bind-mounted
+# into running containers, a NEW SHELL picks up a newly staged library with no
+# respawn.
+if [ -d /aura/my-tools/.lib ]; then
+  case ":$LD_LIBRARY_PATH:" in
+    *":/aura/my-tools/.lib:"*) ;;
+    *) export LD_LIBRARY_PATH="/aura/my-tools/.lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+  esac
+fi
+
 # Don't run on non-interactive shells (scp, ssh exec, etc.).
 case $- in *i*) ;; *) return ;; esac
 

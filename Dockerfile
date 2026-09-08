@@ -275,7 +275,7 @@ EXPOSE 4001-4100
 # are still copied into /os/toolchain/bin/ for opt-in per-app bind-mounts, but the
 # base-rootfs below also has its own copies (apps default to those).
 RUN npm install -g @anthropic-ai/claude-code 2>/dev/null || true && \
-    mkdir -p /os/toolchain/bin && \
+    mkdir -p /os/toolchain/bin /os/toolchain/lib && \
     cp $(which git) /os/toolchain/bin/git && \
     cp $(which curl) /os/toolchain/bin/curl && \
     cp $(which bash) /os/toolchain/bin/bash && \
