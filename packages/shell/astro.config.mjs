@@ -203,8 +203,17 @@ function wsProxyPlugin() {
         const upstreamUrl = `ws://${host ?? 'localhost'}:${port}/${proxyPath}${upstreamQuery}`;
         const tUpstreamStart = Date.now();
         dbg('WS-PROXY', 'upstream-dial', upstreamUrl);
+        // Forward auth-bearing request headers so cookie/token-authenticated
+        // upstreams (e.g. Trilium's sync WS) accept the upgrade handshake.
+        // The `ws` client owns the Host + Sec-WebSocket-* handshake headers,
+        // so we pass only a safe allowlist and never hop-by-hop framing ones.
+        const upstreamHeaders = {};
+        for (const h of ['cookie', 'authorization']) {
+          if (req.headers[h] != null) upstreamHeaders[h] = req.headers[h];
+        }
+        if (activityId) upstreamHeaders['x-aura-activity-id'] = activityId;
         const upstream = new WebSocket(upstreamUrl, {
-          headers: activityId ? { 'x-aura-activity-id': activityId } : undefined,
+          headers: Object.keys(upstreamHeaders).length ? upstreamHeaders : undefined,
         });
 
         upstream.once('open', () => {

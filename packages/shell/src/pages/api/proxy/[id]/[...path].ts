@@ -555,6 +555,7 @@ window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod
       const outHeaders = new Headers(upstream.headers);
       outHeaders.delete('content-encoding');
       outHeaders.delete('content-length');
+      hardenDevCache(outHeaders);
       return new Response(rewritten, { status: upstream.status, headers: outHeaders });
     }
 
@@ -566,6 +567,7 @@ window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod
     const outHeaders = new Headers(upstream.headers);
     outHeaders.delete('content-encoding');
     outHeaders.delete('content-length');
+    hardenDevCache(outHeaders);
     return new Response(upstream.body ? wrapSafeStream(upstream.body) : null, {
       status:  upstream.status,
       headers: outHeaders,
@@ -576,6 +578,30 @@ window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod
     return notReadyResponse(id, path, 502);
   }
 };
+
+/**
+ * Turn a dev server's "revalidate before reuse" into "don't keep this at all".
+ *
+ * App HTML is already forced to `no-store` below, for a reason spelled out
+ * there: WebView hosts cache heuristically and strand a device on a stale page.
+ * Scripts have the same exposure and are worse when it happens — the HTML
+ * updates, the module doesn't, and the app runs new markup against old code,
+ * which looks like a dead control rather than a stale page. Observed with the
+ * Capacitor host, which serves the OS through its own local server at
+ * 127.0.0.1 and sits between the browser cache and this proxy.
+ *
+ * Deliberately narrow: only responses the upstream ALREADY said must be
+ * revalidated (`no-cache`) are downgraded. Vite marks its pre-bundled deps
+ * `max-age=31536000, immutable` — those are content-addressed and large
+ * (xterm and friends), and re-fetching them on every load would be a real cost
+ * for no benefit, so `immutable` is left alone.
+ */
+function hardenDevCache(headers: Headers): void {
+  const cc = headers.get('cache-control');
+  if (!cc) return;
+  if (/immutable/i.test(cc) || /max-age=(?!0\b)/i.test(cc)) return;
+  if (/no-cache/i.test(cc)) headers.set('cache-control', 'no-store');
+}
 
 /**
  * Wrap an upstream `ReadableStream` so that aborts / socket terminations
