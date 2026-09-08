@@ -231,7 +231,7 @@ test('an identical call within the window is answered from the first one, marked
   assert.equal(other.structuredContent.deduplicated, undefined);
 });
 
-test('get_datetime reports the browser clock when there is one, the server clock otherwise, never cached', async () => {
+test('get_datetime reports the browser clock when there is one, the server clock otherwise, and absorbs repeats', async () => {
   fakeOs({ uiMode: 'ok', uiResult: (body) => body.action === 'clock'
     ? { iso: '2026-09-08T21:00:00.000Z', epochMs: 1, local: 'Tuesday, 8 September 2026 at 23:00:00 CEST', timeZone: 'Europe/Berlin', utcOffsetMinutes: 120 }
     : {} });
@@ -239,8 +239,11 @@ test('get_datetime reports the browser clock when there is one, the server clock
   const r = await call(client, 'get_datetime');
   assert.equal(r.structuredContent.timeZone, 'Europe/Berlin');
   assert.match(r.structuredContent.source, /browser/);
+  // A repeat moments later is absorbed like any other tool: the reading is
+  // to the minute, so the same answer is still the right answer.
   const again = await call(client, 'get_datetime');
-  assert.equal(again.structuredContent.deduplicated, undefined, 'a clock is never served from the dedupe window');
+  assert.equal(again.structuredContent.deduplicated, true);
+  assert.equal(again.content[0].text, r.content[0].text);
 
   fakeOs();
   const s = (await call(await connect(), 'get_datetime')).structuredContent;

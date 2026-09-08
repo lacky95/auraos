@@ -77,19 +77,17 @@ interface OwnTool {
   description: string;
   inputSchema: Tool['inputSchema'];
   annotations: ToolAnnotations;
-  /** Answers change with every call (a clock): never serve a repeat from the dedupe window. */
-  noDedupe?: boolean;
   run: (raw: Record<string, unknown>) => CallToolResult | Promise<CallToolResult>;
 }
 
 function define<S extends z.ZodObject<z.ZodRawShape>>(opts: {
-  name: string; title: string; description: string; schema: S; annotations: ToolAnnotations; noDedupe?: boolean;
+  name: string; title: string; description: string; schema: S; annotations: ToolAnnotations;
   run: (args: z.infer<S>) => CallToolResult | Promise<CallToolResult>;
 }): OwnTool {
   const { $schema: _drop, ...json } = zodToJsonSchema(opts.schema, { $refStrategy: 'none' }) as Record<string, unknown>;
   return {
     name: opts.name, title: opts.title, description: opts.description,
-    inputSchema: json as Tool['inputSchema'], annotations: opts.annotations, noDedupe: opts.noDedupe,
+    inputSchema: json as Tool['inputSchema'], annotations: opts.annotations,
     run: (raw) => {
       const parsed = opts.schema.safeParse(raw);
       if (!parsed.success) {
@@ -224,10 +222,10 @@ const TOOLS: OwnTool[] = [
       + 'set, otherwise the browser device\'s zone — with date, time, time zone, UTC offset, ISO 8601 and epoch. '
       + 'Answer the user with the readable text (e.g. "Tuesday, 8 September 2026, 23:12") and do not mention the '
       + 'time zone unless asked; `timeZone` and `zoneSource` are there for your own reference. If the zone is wrong, '
-      + 'the user picks theirs in Settings → General. Never cached: every call is a fresh reading.',
+      + 'the user picks theirs in Settings → General. One call is enough: the answer is to the minute, and an '
+      + 'immediate repeat returns the same reading marked `deduplicated`.',
     schema: z.object({}),
     annotations: READ,
-    noDedupe: true,
     run: async () => {
       // Readable line first — a person's answer, no zone label — the fields behind it.
       const readable = (payload: Record<string, unknown>): CallToolResult => ({
@@ -733,8 +731,7 @@ export function buildShellServer(): Server {
     const tool = BY_NAME.get(req.params.name);
     if (!tool) return fail(`Unknown tool "${req.params.name}".`);
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
-    const exec = () => Promise.resolve(tool.run(args));
-    const { duplicate, result } = tool.noDedupe ? { duplicate: false, result: exec() } : dedupe(tool.name, args, exec);
+    const { duplicate, result } = dedupe(tool.name, args, () => Promise.resolve(tool.run(args)));
     let out: CallToolResult;
     try { out = await result; }
     catch (err) { return fail(`${tool.name} failed: ${(err as Error).message}`); }
