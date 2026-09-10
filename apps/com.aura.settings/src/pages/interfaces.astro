@@ -5,6 +5,11 @@ import '../styles/settings.css';
 // and whether those needs are actually met. Interfaces are app-DECLARED, which
 // is what makes this its own tile rather than part of Context (user-granted).
 const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
+// The shell as seen from an app's network position — the same prefix the SDK's
+// interfaces.urlFor() puts in front of a shell-relative url. Container apps get
+// http://aura-shell:3000, PRoot apps http://127.0.0.1:3000. Trailing slash
+// trimmed so `baseUrl + i.url` can never come out as `…3000//api/proxy/…`.
+const baseUrl = osBase.replace(/\/+$/, '');
 
 interface InterfaceView {
   id: string; appId: string; name: string; kind: string; version: string;
@@ -49,7 +54,9 @@ const unmetCount = consumers.filter((c) => c.status === 'unmet').length;
 // applies. Inline style= attributes always render.
 const S = {
   wrap:    'max-width:900px;margin:22px auto 0;font-family:monospace;',
-  counts:  'font-size:0.62rem;color:var(--aura-color-text-dim);letter-spacing:0.08em;margin-bottom:16px;',
+  counts:  'font-size:0.62rem;color:var(--aura-color-text-dim);letter-spacing:0.08em;margin-bottom:4px;',
+  base:    'font-size:0.62rem;color:var(--aura-color-text-dim);letter-spacing:0.08em;margin-bottom:16px;'
+         + 'word-break:break-all;',
   h2:      'font-size:0.68rem;letter-spacing:0.16em;text-transform:uppercase;color:var(--aura-color-primary);'
          + 'margin:22px 0 8px;',
   appHead: 'font-size:0.66rem;color:var(--aura-color-secondary);margin:14px 0 4px;letter-spacing:0.06em;',
@@ -62,6 +69,9 @@ const S = {
   dim:     'color:var(--aura-color-text-dim);',
   url:     'display:block;margin-top:2px;font-size:0.58rem;color:var(--aura-color-text-dim);word-break:break-all;',
   empty:   'padding:18px 0;color:var(--aura-color-text-dim);font-size:0.64rem;line-height:1.7;',
+  copy:    'background:transparent;border:1px solid var(--aura-color-border);color:var(--aura-color-text-dim);'
+         + 'font-family:inherit;font-size:0.55rem;letter-spacing:0.08em;padding:1px 6px;margin-left:6px;'
+         + 'cursor:pointer;text-transform:uppercase;',
 };
 
 /** Status → [label, colour var]. `catalog` is not a failure — it is "installed, not running". */
@@ -88,6 +98,10 @@ function statusStyle(s: string): [string, string] {
           ? `${interfaces.length} INTERFACE${interfaces.length === 1 ? '' : 'S'} · ${liveCount} LIVE · ${consumers.length} CONSUMER${consumers.length === 1 ? '' : 'S'}${unmetCount ? ` · ${unmetCount} UNMET` : ''}`
           : 'OS UNREACHABLE — IS THE SHELL UP?'}
       </div>
+      {/* Stated once, so the per-row → paths below can stay short. COPY buttons
+          put base + path on the clipboard, which is what a caller outside this
+          iframe (an MCP client, a sidecar, an agent in another app) needs. */}
+      <div style={S.base}>BASE <span style={S.mono}>{baseUrl}</span> · ROWS BELOW ARE RELATIVE TO IT</div>
 
       <h2 style={S.h2}>Provides</h2>
       {apps.length === 0 ? (
@@ -122,8 +136,15 @@ function statusStyle(s: string): [string, string] {
                     <td style={S.td}><span style={S.dim}>{i.kind}</span></td>
                     <td style={S.td}>
                       <span style={S.mono}>{i.address}</span>
-                      {/* The dialable form — the single most useful thing here. */}
-                      {i.url && <span style={S.url}>→ {i.url}</span>}
+                      {/* The dialable form — the single most useful thing here.
+                          Only live interfaces have one, so catalog/down rows get
+                          no button rather than one that copies a guess. */}
+                      {i.url && (
+                        <span style={S.url}>
+                          → {i.url}
+                          <button type="button" style={S.copy} data-copy={`${baseUrl}${i.url}`}>COPY</button>
+                        </span>
+                      )}
                     </td>
                     <td style={S.td}><span style={S.dim}>{i.version}</span></td>
                     <td style={S.td}><span style={S.dim}>{i.source}</span></td>
@@ -188,5 +209,41 @@ function statusStyle(s: string): [string, string] {
     </div>
   </main>
   <footer class="settings-foot">PROVIDER · /api/interfaces</footer>
+
+  <script is:inline>
+    // Absolute URLs are baked into data-copy server-side, so this never needs
+    // to know the OS base. Delegated from document: one listener covers every
+    // row, and there is nothing to rebind if the page ever re-renders rows.
+    const copyTimers = new WeakMap();
+
+    async function copyText(text) {
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+      } catch { /* insecure context or permission denied — fall through */ }
+      // Reaching the shell over http:// on anything but localhost leaves
+      // navigator.clipboard undefined entirely; execCommand still works there.
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:-1000px;opacity:0;';
+      document.body.appendChild(ta);
+      ta.select();
+      try { return document.execCommand('copy'); } finally { ta.remove(); }
+    }
+
+    document.addEventListener('click', async (e) => {
+      const btn = e.target.closest('button[data-copy]');
+      if (!btn) return;
+      const ok = await copyText(btn.dataset.copy);
+      // Re-clicking mid-flash must not let the earlier timer restore the label
+      // while the new one is still showing.
+      clearTimeout(copyTimers.get(btn));
+      btn.textContent = ok ? 'COPIED' : 'FAILED';
+      copyTimers.set(btn, setTimeout(() => { btn.textContent = 'COPY'; }, ok ? 1000 : 1500));
+    });
+  </script>
 </body>
 </html>
