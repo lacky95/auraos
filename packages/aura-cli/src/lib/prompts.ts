@@ -1,6 +1,7 @@
 import { stdin, stdout } from 'node:process';
 import { moveCursor, clearScreenDown } from 'node:readline';
 import { color } from './format.js';
+import { fuzzyScore, stripAnsi } from './fuzzy.js';
 
 /**
  * Sentinel returned by prompts when the user presses the back key (Esc on
@@ -33,6 +34,11 @@ const KEY_CTRLC = '\x03';
 // AuraOS terminal iframe: Esc exits browser fullscreen, Backspace navigates
 // browser history. Ctrl-B is a free byte (\x02) in browsers and shells.
 const KEY_CTRLB = '\x02';
+// Ctrl-F = "find", the conventional alias for the `s` search key. `s` is the
+// PRIMARY binding, not the fallback: in the AuraOS terminal iframe Ctrl-F is
+// the browser's own find and may never reach us — the same collision class as
+// the Esc/Backspace note above. ⌃F is the convenience for real terminals.
+const KEY_CTRLF = '\x06';
 void KEY_RIGHT; // exported alongside KEY_LEFT for symmetry; not currently consumed
 
 export class PromptCancelled extends Error {
@@ -223,7 +229,7 @@ export async function promptChoice<T>(
   });
 }
 
-// ─── Multi-select with mode switch + fuzzy filter ─────────────────────────────
+// ─── Multi-select with mode switch + fuzzy filter (see lib/fuzzy.ts) ─────────
 
 export interface MultiSelectMode<T> {
   /** Hint shown in the header (e.g. "enable only", "install + enable"). */
@@ -238,15 +244,30 @@ export interface MultiSelectMode<T> {
     /** Pre-checked at first paint. Honored only on the first mode that has it. */
     initiallyChecked?: boolean;
     /**
-     * Per-row toggles, keyed by the hotkey that flips them (e.g. `r` → rw,
-     * `d` → data). Pressing the key flips the flag on the HIGHLIGHTED row and
+     * Per-row toggles, keyed by the hotkey that flips them (e.g. `w` → wr,
+     * `d` → data). Pressing the key sets the flag on the HIGHLIGHTED row and
      * implicitly checks it — you don't set a mode on something you aren't
      * selecting. Flag state is shared across modes, like `checked`.
      *
      * The key must not collide with a built-in (see RESERVED_KEYS); a clash
      * throws at call time rather than silently shadowing navigation.
      */
-    flags?: Record<string, { label: string; initial?: boolean }>;
+    flags?: Record<string, {
+      label: string;
+      initial?: boolean;
+      /**
+       * Radio group. Keys sharing a group are mutually exclusive: pressing one
+       * turns it on and the others off, and pressing it again does NOT turn it
+       * off — "neither ro nor wr" is not a state a mount can be in. Exactly one
+       * member is true at all times, enforced after seeding regardless of what
+       * `initial` values the caller passed.
+       *
+       * Omit for an independent toggle (the historical behaviour).
+       */
+      group?: string;
+      /** Badge colour. Defaults to green, which is what every flag used to be. */
+      tone?: 'green' | 'yellow' | 'red' | 'cyan' | 'dim';
+    }>;
   }>;
 }
 
@@ -261,7 +282,7 @@ export interface MultiSelectResult<T> {
  * Keys promptMultiSelect handles itself. A row flag may not reuse one, or it
  * would shadow navigation in a way that's invisible until someone presses it.
  */
-const RESERVED_KEYS = new Set([' ', '/', 'm', '\t', 'a', 'j', 'k']);
+const RESERVED_KEYS = new Set([' ', 's', 'm', '\t', 'a', 'j', 'k', KEY_CTRLB, KEY_CTRLF]);
 
 /**
  * Checkbox picker with three super-powers compared to `promptChoice`:
@@ -269,8 +290,10 @@ const RESERVED_KEYS = new Set([' ', '/', 'm', '\t', 'a', 'j', 'k']);
  *   • Pressing 'm' (or Tab) cycles through `modes` — same `value` retains its
  *     check across modes, so e.g. "enable only" → "install + enable" still
  *     shows the user's prior toggles.
- *   • '/' opens a sub-input that filters the visible rows by substring match
- *     on label + tag + desc. Esc clears the filter; Backspace deletes a char.
+ *   • 's' (or ⌃F) opens a sub-input that ranks the visible rows by fuzzy
+ *     subsequence match on label + tag + desc. ⌃B clears the filter and exits
+ *     the sub-input; Backspace deletes a char; Enter leaves the sub-input but
+ *     KEEPS the query, so `s` re-enters to refine it.
  *
  * Returns the selected values + the mode the user was in when they confirmed
  * (so the caller can decide whether to install, just enable, etc.).
@@ -292,35 +315,100 @@ export async function promptMultiSelect<T>(
   const flagState = new Map<T, Record<string, boolean>>();
   /** flagKey → label, for the help line. */
   const flagLabels = new Map<string, string>();
+  /** flagKey → radio group name, for keys that declare one. */
+  const flagGroup = new Map<string, string>();
+  /** group name → its keys, in declaration order (the order decides defaults). */
+  const groupKeys = new Map<string, string[]>();
+  /**
+   * Search haystacks, ANSI-stripped once here rather than per keystroke. Keyed
+   * by option OBJECT identity, not `value`: callers build one option object per
+   * mode (mount.ts calls toOption() per mode), so the same app is two distinct
+   * objects with equal `value`. `checked`/`flagState` stay value-keyed — those
+   * are shared state, this is per-row text.
+   */
+  const haystacks = new Map<MultiSelectMode<T>['options'][number], { label: string; all: string }>();
   // Seed from initiallyChecked across all modes (first-occurrence wins so
   // identical values in multiple modes don't double-toggle).
   for (const mode of modes) {
     for (const opt of mode.options) {
       if (opt.initiallyChecked) checked.add(opt.value);
+      haystacks.set(opt, {
+        label: stripAnsi(opt.label),
+        all: stripAnsi(`${opt.label} ${opt.tag ?? ''} ${opt.desc ?? ''}`),
+      });
       if (!opt.flags) continue;
       for (const [key, spec] of Object.entries(opt.flags)) {
         if (RESERVED_KEYS.has(key) || key.length !== 1) {
           throw new Error(`promptMultiSelect: flag key '${key}' is reserved or not a single char`);
         }
+        // A key that means "set the mode" on one row and "toggle" on another is
+        // unfixable at press time, so reject it here like a reserved collision.
+        const prevGroup = flagGroup.get(key);
+        if (flagLabels.has(key) && prevGroup !== spec.group) {
+          throw new Error(
+            `promptMultiSelect: flag key '${key}' declared with inconsistent group ` +
+            `('${prevGroup ?? 'none'}' vs '${spec.group ?? 'none'}')`,
+          );
+        }
         flagLabels.set(key, spec.label);
+        if (spec.group) {
+          flagGroup.set(key, spec.group);
+          const keys = groupKeys.get(spec.group) ?? [];
+          if (!keys.includes(key)) keys.push(key);
+          groupKeys.set(spec.group, keys);
+        }
         if (!flagState.has(opt.value)) flagState.set(opt.value, {});
         const cur = flagState.get(opt.value)!;
         if (!(key in cur)) cur[key] = spec.initial ?? false;
       }
     }
   }
+  // Enforce the radio invariant AFTER the whole seeding loop. Doing it inline
+  // would fight itself: flagState is value-keyed and first-occurrence-wins, so
+  // a row present in two modes gets visited twice with the same record.
+  // Both members true → the first declared wins; none true → the first declared
+  // becomes the default, so a caller may omit `initial` entirely.
+  for (const [, state] of flagState) {
+    for (const [, keys] of groupKeys) {
+      const mine = keys.filter((k) => k in state);
+      if (mine.length === 0) continue;
+      const on = mine.filter((k) => state[k]);
+      const winner = on.length === 1 ? on[0]! : (on[0] ?? mine[0]!);
+      for (const k of mine) state[k] = k === winner;
+    }
+  }
   let cursor = 0;
   let filter = '';
+  // Declared out here, alongside `filter`, because draw() keys the help line on
+  // it: the sub-input being open is a different thing from the query being
+  // non-empty, and only draw() can tell the user which state they are in.
+  let filtering = false;
   let linesWritten = 0;
+
+  /** One-entry memo: draw() and each nav handler call this on the same keypress. */
+  let visibleCache: { key: string; rows: MultiSelectMode<T>['options'] } | undefined;
 
   function visibleOptions(): MultiSelectMode<T>['options'] {
     const all = modes[modeIdx]!.options;
     if (!filter) return all;
-    const needle = filter.toLowerCase();
-    return all.filter((o) => {
-      const hay = `${o.label} ${o.tag ?? ''} ${o.desc ?? ''}`.toLowerCase();
-      return hay.includes(needle);
+    const cacheKey = `${modeIdx} ${filter}`;
+    if (visibleCache?.key === cacheKey) return visibleCache.rows;
+    // Rank, don't just filter: subsequence matching admits far more rows than
+    // the old substring test, so without ordering the row you meant would be
+    // buried. Cursor already resets to 0 on every query keystroke, so nothing
+    // moves out from under the user.
+    const scored: Array<{ o: MultiSelectMode<T>['options'][number]; s: number; i: number }> = [];
+    all.forEach((o, i) => {
+      const hay = haystacks.get(o) ?? { label: o.label, all: o.label };
+      const labelScore = fuzzyScore(hay.label, filter);
+      // A hit on the app id always beats a hit buried in the description.
+      const s = labelScore !== null ? labelScore + 30 : fuzzyScore(hay.all, filter);
+      if (s !== null) scored.push({ o, s, i });
     });
+    scored.sort((a, b) => b.s - a.s || a.i - b.i);
+    const rows = scored.map((r) => r.o);
+    visibleCache = { key: cacheKey, rows };
+    return rows;
   }
 
   const draw = (firstTime: boolean) => {
@@ -365,13 +453,23 @@ export async function promptMultiSelect<T>(
         const name = isCursor ? color.bold(o.label.padEnd(widthLabel)) : o.label.padEnd(widthLabel);
         const tag  = o.tag ? color.dim(o.tag.padEnd(10)) : ' '.repeat(10);
         const desc = o.desc ? color.dim('— ' + o.desc) : '';
-        // Active per-row flags render as green badges after the tag, so the
-        // row shows its mode without the user having to remember what they set.
+        // Active per-row flags render as badges after the tag, so the row shows
+        // its mode without the user having to remember what they set.
+        // A grouped flag is a MODE, and an unchecked row has no mode — without
+        // this guard every row would carry a permanent `ro`, since the radio
+        // invariant keeps exactly one group member true at all times.
         const on = o.flags
-          ? Object.keys(o.flags).filter((k) => flagState.get(o.value)?.[k])
+          ? Object.keys(o.flags).filter((k) => {
+              if (!flagState.get(o.value)?.[k]) return false;
+              if (o.flags![k]!.group && !checked.has(o.value)) return false;
+              return true;
+            })
           : [];
         const flagBadges = on.length
-          ? ' ' + on.map((k) => color.green(o.flags![k]!.label)).join(' ')
+          ? ' ' + on.map((k) => {
+              const spec = o.flags![k]!;
+              return color[spec.tone ?? 'green'](spec.label);
+            }).join(' ')
           : '';
         lines.push(`  ${cur} ${box} ${name}  ${tag}${flagBadges} ${desc}`);
       }
@@ -386,9 +484,14 @@ export async function promptMultiSelect<T>(
     const flagHint = flagLabels.size
       ? '   ' + [...flagLabels].map(([k, l]) => `${k} ${l}`).join('  ')
       : '';
-    const help = filter
+    // Keyed on `filtering` (sub-input open), NOT `filter` (query non-empty).
+    // Enter leaves the sub-input keeping the query, so the two differ — and
+    // since `s` now preserves the query on re-entry, "normal mode with a live
+    // filter" is the common state, not a corner case.
+    const editHint = filter ? '   s edit filter' : '';
+    const help = filtering
       ? color.dim('  type to filter   ⌫ del   ⌃B clear filter   ↑↓ navigate   space toggle   ↵ apply')
-      : color.dim(`  ↑↓ navigate   space toggle${flagHint}   / search${modeHint}   ↵ done${backHint}   ^C cancel`);
+      : color.dim(`  ↑↓ navigate   space toggle${flagHint}   a all   s/⌃F search${editHint}${modeHint}   ↵ done${backHint}   ^C cancel`);
     lines.push(help);
 
     const text = lines.join('\n') + '\n';
@@ -400,7 +503,6 @@ export async function promptMultiSelect<T>(
     stdin.setRawMode(true);
     stdin.resume();
     stdin.setEncoding('utf8');
-    let filtering = false;
     const cleanup = () => {
       stdin.removeListener('data', onData);
       stdin.setRawMode(false);
@@ -468,7 +570,10 @@ export async function promptMultiSelect<T>(
         draw(false);
         return;
       }
-      if (data === '/') { filtering = true; filter = ''; cursor = 0; draw(false); return; }
+      // Deliberately does NOT reset `filter`: Enter leaves the sub-input with
+      // the query still applied, so without this you could never get back in to
+      // refine one — only wipe it and retype. ⌃B (inside) is the way to clear.
+      if (data === 's' || data === KEY_CTRLF) { filtering = true; cursor = 0; draw(false); return; }
       if ((data === 'm' || data === '\t') && modes.length > 1) {
         modeIdx = (modeIdx + 1) % modes.length;
         cursor = 0;
@@ -492,9 +597,18 @@ export async function promptMultiSelect<T>(
       // the row: you don't choose a mode for something you aren't selecting.
       if (flagLabels.has(data)) {
         const o = visibleOptions()[cursor];
-        if (o?.flags?.[data]) {
+        const spec = o?.flags?.[data];
+        if (o && spec) {
           const state = flagState.get(o.value) ?? {};
-          state[data] = !state[data];
+          if (spec.group) {
+            // Radio: set, never clear. Pressing `w` twice must not land the row
+            // in "neither ro nor wr", and pressing the mode it already has is
+            // still meaningful because it checks the row.
+            for (const k of groupKeys.get(spec.group) ?? []) state[k] = false;
+            state[data] = true;
+          } else {
+            state[data] = !state[data];
+          }
           flagState.set(o.value, state);
           checked.add(o.value);
           draw(false);

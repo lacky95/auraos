@@ -31,7 +31,7 @@ To actually edit it, ask for write access:
 
 ```bash
 aura mount rm  com.example.hello
-aura mount add com.example.hello --rw
+aura mount add com.example.hello --wr
 ```
 
 A mode change is detach + re-add — POSTing over a live mount returns
@@ -41,14 +41,14 @@ A mode change is detach + re-add — POSTing over a live mount returns
 
 | Command | What it does |
 |---|---|
-| `aura mount` | Interactive wizard: pick target app → instance → the set of apps to have mounted. Per row, `space` checks it, `r` toggles `rw`, `d` adds `+data`. Unchecking a row **detaches** it. |
+| `aura mount` | Interactive wizard: pick target app → instance → the set of apps to have mounted. Per row, `space` checks it, `r` selects it read-only (`ro`), `w` selects it writable (`wr`), `d` adds `+data`; `s` (or ⌃F) fuzzy-searches. Unchecking a row **detaches** it. |
 | `aura mount ls` | What is mounted into the instance. Use the `PATH` column — do not hardcode a root. |
-| `aura mount add <appId>…` | Attach one or more apps. With no appId, opens a multi-select over every installed app (`m`/Tab switches scope). |
+| `aura mount add <appId>…` | Attach one or more apps. With no appId, opens a multi-select over every installed app (`m`/Tab switches scope, `s` or ⌃F fuzzy-searches). |
 | `aura mount rm <appId>…` | Detach. A bare appId drops both its source and data mounts; `<appId>:data` drops just the data one. |
 
 | Flag | Applies to | Meaning |
 |---|---|---|
-| `--rw` | `add` | Mount read-**write**. Default is `ro`. |
+| `--wr` | `add` | Mount **writable**. Default is `ro`. (`--rw` still works as a deprecated alias.) |
 | `--data` | `add` | Mount the target's data dir **instead of** its source. |
 | `--all` | `rm` | Detach every mount from the instance. |
 | `--instance <id>` | all | Which instance to mount *into*. Defaults to `$APP_INSTANCE_ID`, which both runners set — so inside an app sandbox you never pass it. |
@@ -111,7 +111,7 @@ Read these before you rely on it.
   and makes the app-data volume unremovable). They *do* survive a shell
   restart — the `MountManager` reconciles against the kernel on boot,
   re-adopting live ones and reaping orphans.
-- **`--rw` writes the target app's real source.** Its dev server will
+- **`--wr` writes the target app's real source.** Its dev server will
   hot-reload — that's the point — but a careless write restarts someone
   else's app.
 

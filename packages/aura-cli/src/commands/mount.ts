@@ -10,9 +10,9 @@
  * Mounting itself is container-only — a PRoot instance has no `/data` volume
  * mount to receive propagation and the backend answers 409.
  */
-import type { Command } from 'commander';
+import { Option, type Command } from 'commander';
 import { stdin, stdout } from 'node:process';
-import type { AuraMount } from '@aura/core';
+import type { AuraMount, MountMode } from '@aura/core';
 import { api, type ShellError } from '../lib/client.js';
 import { color, fail, info, ok, table, warn } from '../lib/format.js';
 import {
@@ -151,6 +151,24 @@ function scopeColor(scope: string): string {
   return color.dim(scope);
 }
 
+/**
+ * DISPLAY ONLY — the sign a human reads, never a value that goes anywhere.
+ *
+ * `MountMode` in core, every request body, and the decl files under
+ * /data/aura/mounts/.state/ all stay `'rw'`; only these two letters flip,
+ * because "wr" reads as *write* on sight and "rw" is an abbreviation nobody
+ * expands the same way twice. Both signs are two chars in one colour, so
+ * table() column widths are unaffected.
+ */
+function modeSign(mode: MountMode): string {
+  return mode === 'rw' ? color.red('wr') : color.green('ro');
+}
+
+/** Same rename on the wizard's own palette (yellow write / dim read). */
+function modeSignSoft(rw: boolean): string {
+  return rw ? color.yellow('wr') : color.dim('ro');
+}
+
 function printMounts(instanceId: string, mounts: AuraMount[], apps: AppDto[]): void {
   info(`mounts in ${color.bold(instanceId)}`);
   if (mounts.length === 0) {
@@ -164,7 +182,7 @@ function printMounts(instanceId: string, mounts: AuraMount[], apps: AppDto[]): v
       TARGET: m.targetAppId,
       SCOPE:  scopeColor(scopeOf(apps, m.targetAppId)),
       KIND:   m.kind === 'data' ? color.yellow(m.kind) : m.kind,
-      MODE:   m.mode === 'rw' ? color.red(m.mode) : color.green(m.mode),
+      MODE:   modeSign(m.mode),
       PATH:   m.containerPath,
     }));
   console.log(table(rows, ['TARGET', 'SCOPE', 'KIND', 'MODE', 'PATH']));
@@ -267,7 +285,7 @@ async function addMounts(
       const m = res.mount;
       ok(
         `mounted ${color.bold(m.targetAppId)} ` +
-        `(${m.kind}, ${m.mode === 'rw' ? color.red(m.mode) : color.green(m.mode)}) → ${color.bold(m.containerPath)}`,
+        `(${m.kind}, ${modeSign(m.mode)}) → ${color.bold(m.containerPath)}`,
       );
     } catch (err) {
       failed++;
@@ -333,7 +351,7 @@ async function removeMounts(
         options: mounts.map((m) => ({
           value: m.id,
           label: m.id,
-          tag: m.mode === 'rw' ? color.red(m.mode) : color.green(m.mode),
+          tag: modeSign(m.mode),
           desc: m.containerPath,
         })),
       }],
@@ -499,7 +517,10 @@ async function runWizard(): Promise<void> {
             const sb = SCOPE_ORDER.indexOf(b.manifest.scopeId ?? '');
             return (sa < 0 ? 99 : sa) - (sb < 0 ? 99 : sb) || a.manifest.id.localeCompare(b.manifest.id);
           });
-        const toOption = (a: AppDto) => {
+        // Return type pinned to the picker's option shape so `tone` is checked
+        // against its union here, at the declaration, instead of widening to
+        // string and only failing where the array is passed in.
+        const toOption = (a: AppDto): MultiSelectMode<string>['options'][number] => {
           const id = a.manifest.id;
           const st = seed.get(id);
           const isSelf = id === draft.targetAppId;
@@ -509,9 +530,15 @@ async function runWizard(): Promise<void> {
             tag: current.has(id) ? color.yellow('mounted') : scopeColor(a.manifest.scopeId ?? '-'),
             desc: a.manifest.name ?? '',
             initiallyChecked: seed.has(id),
+            // `r` and `w` are one mode, not two toggles — see the `group`
+            // contract in prompts.ts. Tones follow the WIZARD's palette
+            // (yellow write / dim read), matching the `+` diff rows and the
+            // `after` line on the following screen, not the `ls` table's
+            // red/green.
             flags: {
-              r: { label: 'rw',   initial: st?.rw   ?? false },
-              d: { label: '+data', initial: st?.data ?? false },
+              r: { label: 'ro',    group: 'mode', tone: 'dim',    initial: !(st?.rw ?? false) },
+              w: { label: 'wr',    group: 'mode', tone: 'yellow', initial: st?.rw ?? false },
+              d: { label: '+data',                                initial: st?.data ?? false },
             },
           };
         };
@@ -531,7 +558,10 @@ async function runWizard(): Promise<void> {
         const picked = new Map<string, { rw: boolean; data: boolean }>();
         for (const id of res.selected) {
           const f = res.flags.get(id) ?? {};
-          picked.set(id, { rw: f['r'] === true, data: f['d'] === true });
+          // `w`, not `r` — the mode is now a radio pair and `w` is the writable
+          // member. Reading the wrong key here inverts every mount silently,
+          // since the flag record is an untyped Record<string, boolean>.
+          picked.set(id, { rw: f['w'] === true, data: f['d'] === true });
         }
         draft.picked = picked;
         return 'advance';
@@ -551,10 +581,11 @@ async function runWizard(): Promise<void> {
         console.log(`  ${color.bold('Changes')} for ${color.bold(draft.instanceId!)}`);
         divider();
         for (const a of plan.adds) {
-          console.log(`  ${color.green('+')} ${a.appId}${a.data ? color.dim(':data') : ''}  ${a.rw ? color.yellow('rw') : color.dim('ro')}`);
+          console.log(`  ${color.green('+')} ${a.appId}${a.data ? color.dim(':data') : ''}  ${modeSignSoft(a.rw)}`);
         }
         for (const r of plan.removes) console.log(`  ${color.red('-')} ${r}`);
         divider();
+        console.log(afterLine(existing.mounts, plan));
         const proceed = await promptConfirm('Apply?', true, { allowBack: true });
         if (proceed === BACK) return 'back';
         if (!proceed) return 'cancel';
@@ -632,6 +663,50 @@ function planChanges(
 }
 
 /**
+ * One line under the diff saying what the instance ENDS UP with, so `Apply?`
+ * can be answered without re-counting the +/- rows against what was already
+ * mounted. Shape:
+ *
+ *   after  7 mounts [4 ro · 3 wr · 1 data]   +2 -1
+ *
+ * Colours match the `+` rows directly above (wr yellow, ro dim) rather than
+ * the `ls` table's red/green: two differently-coloured `wr`s three lines apart
+ * read as two different things. `data` takes cyan so it stays distinct from
+ * wr's yellow. Zero buckets are dropped instead of printed as `0 wr` — this is
+ * a glanceable total, not a fixed-width report — and `data` is a subset of the
+ * ro/rw split rather than a fourth mode, so the total leads and the breakdown
+ * sits in brackets behind it.
+ */
+function afterLine(existing: AuraMount[], plan: ChangePlan): string {
+  const after = [
+    ...existing
+      .filter((m) => !plan.removes.includes(m.id))
+      .map((m) => ({ rw: m.mode === 'rw', data: m.kind === 'data' })),
+    ...plan.adds.map((a) => ({ rw: a.rw, data: a.data })),
+  ];
+  const delta = [
+    plan.adds.length    > 0 ? color.green(`+${plan.adds.length}`)  : '',
+    plan.removes.length > 0 ? color.red(`-${plan.removes.length}`) : '',
+  ].filter(Boolean).join(' ');
+
+  if (after.length === 0) {
+    return `  ${color.dim('after')}  ${color.dim('nothing mounted')}   ${delta}`;
+  }
+  const ro   = after.filter((m) => !m.rw).length;
+  const rw   = after.filter((m) => m.rw).length;
+  const data = after.filter((m) => m.data).length;
+  const parts = [
+    ro   > 0 ? color.dim(`${ro} ro`)        : '',
+    rw   > 0 ? color.yellow(`${rw} wr`)     : '',
+    data > 0 ? color.cyan(`${data} data`)   : '',
+  ].filter(Boolean).join(color.dim(' · '));
+
+  const noun = after.length === 1 ? 'mount' : 'mounts';
+  return `  ${color.dim('after')}  ${color.bold(String(after.length))} ${noun} ` +
+    `${color.dim('[')}${parts}${color.dim(']')}   ${delta}`;
+}
+
+/**
  * There is no bulk endpoint, so this is N requests and NOT atomic — a failure
  * partway leaves a partial set. Report each outcome rather than implying the
  * whole plan applied.
@@ -669,7 +744,7 @@ function guard<A extends unknown[]>(fn: (...args: A) => Promise<void>) {
   };
 }
 
-interface MountOpts { instance?: string; rw?: boolean; data?: boolean; all?: boolean }
+interface MountOpts { instance?: string; rw?: boolean; wr?: boolean; data?: boolean; all?: boolean }
 
 /**
  * Read the effective options for a subcommand.
@@ -682,7 +757,11 @@ interface MountOpts { instance?: string; rw?: boolean; data?: boolean; all?: boo
  * and is correct for both positions.
  */
 function effectiveOpts(cmd: Command): MountOpts {
-  return cmd.optsWithGlobals() as MountOpts;
+  const o = cmd.optsWithGlobals() as MountOpts;
+  // `--wr` is the documented spelling; `--rw` is the hidden legacy alias.
+  // Collapse them here, once, so no downstream site has to know there are two —
+  // and keep the field named `rw`, which is what the wire value is called.
+  return { ...o, rw: o.rw === true || o.wr === true };
 }
 
 export function registerMount(program: Command): void {
@@ -711,7 +790,11 @@ export function registerMount(program: Command): void {
       'Mount one or more apps into the target instance. With no appId, opens an ' +
       'interactive picker over every installed app (system/global/user — switch scope with m).',
     )
-    .option('--rw', 'Mount read-WRITE (default: read-only)')
+    // `.option()` cannot hide anything, so the legacy alias needs addOption().
+    // Both parse independently (commander camelCases them to `wr` and `rw`);
+    // effectiveOpts() collapses them.
+    .addOption(new Option('--wr', 'Mount WRITE (default: read-only)'))
+    .addOption(new Option('--rw', 'Deprecated alias for --wr').hideHelp())
     .option('--data', "Mount the target's data dir instead of its source")
     .option('--instance <id>', 'Target instance (default: $APP_INSTANCE_ID)')
     .action(guard(async (appIds: string[], _opts: MountOpts, cmd: Command) => {
