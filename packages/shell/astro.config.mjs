@@ -29,6 +29,7 @@ function dbg(tag, ...args) {
   if (!nsEnabled(WS_NS, process.env.AURA_LOG ?? '')) return;
   console.log(`[${WS_NS}]`, tag, ...args);
 }
+const MUX_NS = 'ssemux';
 const SIO_NS = 'sio';
 function sioDbg(tag, ...args) {
   if (!nsEnabled(SIO_NS, process.env.AURA_LOG ?? '')) return;
@@ -275,6 +276,32 @@ function wsProxyPlugin() {
  * resolves to the SAME emitter object the SSE endpoint subscribes to,
  * regardless of which module instance Vite hands us.
  */
+/**
+ * Vite plugin: attach the EventSource multiplexer to the Astro dev HTTP
+ * server (see packages/shell/server/sse-mux.mjs for the why and the wire
+ * protocol; the client half is injected by the proxy route).
+ *
+ * Path is `/_aura/sse-mux`, WS-only, so it lives on the upgrade pipe beside
+ * `wsProxyPlugin` (which ignores non-/api/proxy URLs) and socket.io's
+ * `/os-events`. Streams are re-fetched against our own HTTP origin, so they
+ * keep going through `/api/proxy/...` with the page's cookies.
+ */
+function sseMuxPlugin() {
+  return {
+    name: 'aura-sse-mux',
+    async configureServer(server) {
+      if (!server.httpServer) return;
+      const { attachSseMux, MUX_PATH } = await import('./server/sse-mux.mjs');
+      const shellPort = process.env.SHELL_PORT ?? process.env.AURA_SHELL_PORT ?? '3000';
+      await attachSseMux(server.httpServer, `http://127.0.0.1:${shellPort}`, (tag, ...args) => {
+        if (!nsEnabled(MUX_NS, process.env.AURA_LOG ?? '')) return;
+        console.log(`[${MUX_NS}]`, tag, ...args);
+      });
+      if (nsEnabled(MUX_NS, process.env.AURA_LOG ?? '')) console.log(`[${MUX_NS}]`, 'attached', MUX_PATH);
+    },
+  };
+}
+
 function sioPlugin() {
   return {
     name: 'aura-sio',
@@ -404,6 +431,6 @@ export default defineConfig({
     },
     // tailwindcss() must come before wsProxyPlugin so its content-scanning
     // hooks run on every transformed module.
-    plugins: [tailwindcss(), proxyViteQueryEscape(), wsProxyPlugin(), sioPlugin()],
+    plugins: [tailwindcss(), proxyViteQueryEscape(), wsProxyPlugin(), sseMuxPlugin(), sioPlugin()],
   },
 });

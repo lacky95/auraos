@@ -172,6 +172,12 @@ export const AppManifestSchema = z.object({
    *     basePath so the upstream sees the URL it expects without 308-redirect round-trips.
    * - `injectMeta`, `injectConsoleRelay`, `injectKeyForwarder`, `injectIdentityScript`: each toggles
    *     the named injection in the proxy's HTML response pass. Defaults on; opt out per app.
+   * - `injectInputCompat`: on touch-capable browsers (a phone in DeX, touchscreen laptops), replays
+   *     mouse gestures as touch events on elements that listen only for touch, so widgets whose
+   *     libraries pick touch *instead of* mouse still react to clicks. Defaults on; opt out per app.
+   * - `injectEventSourceMux`: routes the page's same-origin EventSource streams over one WebSocket
+   *     so they don't hold the browser's 6 HTTP/1.1 connections per host that all windows share.
+   *     Defaults on; opt out per app.
    */
   proxy: z.object({
     rewriteHtml:          z.enum(['astro', 'absolute', 'none']).optional(),
@@ -180,6 +186,8 @@ export const AppManifestSchema = z.object({
     injectConsoleRelay:   z.boolean().optional(),
     injectKeyForwarder:   z.boolean().optional(),
     injectIdentityScript: z.boolean().optional(),
+    injectInputCompat:    z.boolean().optional(),
+    injectEventSourceMux: z.boolean().optional(),
     /**
      * Service apps (componentType='service') are normally restricted to
      * /api/* and /_aura_* — the proxy 403s every other path with
@@ -498,6 +506,8 @@ export interface ProxyConfig {
   injectConsoleRelay:   boolean;
   injectKeyForwarder:   boolean;
   injectIdentityScript: boolean;
+  injectInputCompat:    boolean;
+  injectEventSourceMux: boolean;
   exposeAllPaths:       boolean;
 }
 
@@ -521,6 +531,8 @@ export function resolveProxyConfig(manifest: AppManifest): ProxyConfig {
     injectConsoleRelay:   p.injectConsoleRelay   ?? true,
     injectKeyForwarder:   p.injectKeyForwarder   ?? true,
     injectIdentityScript: p.injectIdentityScript ?? true,
+    injectInputCompat:    p.injectInputCompat    ?? true,
+    injectEventSourceMux: p.injectEventSourceMux ?? true,
     exposeAllPaths:       p.exposeAllPaths       ?? false,
   };
 }
