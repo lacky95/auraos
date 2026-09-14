@@ -530,6 +530,25 @@ window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod
         rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${keyForwarder}`);
       }
 
+      // Focus-on-click. Clicking anywhere in an app window must move keyboard
+      // focus to it. The browser normally focuses an iframe when you click into
+      // it, but an app that calls preventDefault() on mousedown — Guacamole's
+      // canvas does — suppresses that, so keyboard focus stays on whichever
+      // window held it before (e.g. a terminal) and typing goes to the wrong
+      // app. On pointerdown we focus our own window when it isn't already
+      // focused; capture phase so it runs even if the app stops propagation,
+      // and the document.hasFocus() guard makes it a no-op once we hold focus
+      // (so it never fights an app's own inner focus handling). Injected
+      // unconditionally: every windowed app needs this, including ones that opt
+      // out of the other injections, and it costs one guarded listener.
+      // Not behind injectInputCompat — the preventDefault focus trap is not
+      // specific to touch/DeX.
+      const focusOnClick = `<script>(function(){try{
+if(window.__auraFocusOnClick)return;window.__auraFocusOnClick=true;
+addEventListener('pointerdown',function(){try{if(!document.hasFocus())window.focus();}catch(_){}} ,true);
+}catch(_){}})();</script>`;
+      rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${focusOnClick}`);
+
       // Mouse → touch replay for touch-only widgets. Libraries such as
       // Unidragger (Trilium's tab row) bind *either* touch or mouse events,
       // choosing touch whenever `ontouchstart` exists. On a touch-capable
@@ -543,13 +562,56 @@ window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod
       // listeners don't count as mouse handling: Unidragger binds touchstart
       // and click on the same handle. Listeners dropped via `once`/`signal`
       // aren't untracked; that errs towards skipping the replay.
+      //
+      // NOTE: keep this logic in sync with INPUT_COMPAT_JS in the
+      // aura-native-wrapper (LocalProxyServer.java). Both inject it, guarded by
+      // one `__auraInputCompat` flag so whichever runs first wins and the other
+      // no-ops: the wrapper covers the top-level shell document and every page
+      // the WebView loads; this proxy covers app HTML when the shell runs
+      // outside the wrapper (a desktop browser tab, Electron). Two parts:
+      //
+      // 1. Hover / pointer-position catch-up. The Android WebView (a phone in
+      //    Samsung DeX, a touchscreen laptop) does not emit `mousemove` while
+      //    the mouse hovers with no button down, and delivers a button press
+      //    with no move in front of it. Libraries that read the cursor
+      //    position from the last move then act at a stale point — Guacamole's
+      //    Mouse sends every click to wherever the previous drag ended; drag
+      //    handles, tooltips and :hover UI misfire the same way. We mirror
+      //    trusted mouse pointer events to synthetic `mousemove` at the real
+      //    coordinates: before each press/release (so the click lands right)
+      //    and on hover moves/boundary crossings that carry no button (so
+      //    position-tracking keeps up as far as the platform reports it).
+      //    Drags already emit real `mousemove`, so those are left alone, and a
+      //    position guard drops any synthetic move the platform already sent —
+      //    on a real hover-capable browser the whole block gates off on the
+      //    `ontouchstart` check.
+      // 2. Mouse -> touch replay for touch-only widgets (below), unchanged.
+      //
       // Inserted last so it lands first in <head> and wraps addEventListener
       // before any app script runs.
       if (cfg.injectInputCompat) {
         const inputCompat = `<script>(function(){try{
-if(window.__auraInputCompat||!('ontouchstart' in window)||typeof Touch!=='function'||typeof TouchEvent!=='function')return;
+if(window.__auraInputCompat||!('ontouchstart' in window))return;
 window.__auraInputCompat=true;
 var ET=EventTarget.prototype,oAdd=ET.addEventListener,oRem=ET.removeEventListener;
+var hov=null;
+oAdd.call(window,'mousemove',function(e){if(e.isTrusted)hov={x:e.clientX,y:e.clientY};},true);
+function moveTo(e){
+  if(hov&&Math.abs(hov.x-e.clientX)<1.5&&Math.abs(hov.y-e.clientY)<1.5)return;
+  var init={bubbles:true,cancelable:true,composed:true,view:window,clientX:e.clientX,clientY:e.clientY,screenX:e.screenX,screenY:e.screenY,button:0,buttons:0,ctrlKey:e.ctrlKey,shiftKey:e.shiftKey,altKey:e.altKey,metaKey:e.metaKey};
+  try{
+    if(typeof PointerEvent==='function')e.target.dispatchEvent(new PointerEvent('pointermove',Object.assign({pointerId:e.pointerId,pointerType:'mouse',isPrimary:true},init)));
+    e.target.dispatchEvent(new MouseEvent('mousemove',init));
+  }catch(_){}
+  hov={x:e.clientX,y:e.clientY};
+}
+function onBtn(e){if(e.isTrusted&&e.pointerType==='mouse')moveTo(e);}
+function onHover(e){if(e.isTrusted&&e.pointerType==='mouse'&&e.buttons===0)moveTo(e);}
+oAdd.call(window,'pointerdown',onBtn,true);
+oAdd.call(window,'pointerup',onBtn,true);
+oAdd.call(window,'pointermove',onHover,true);
+oAdd.call(window,'pointerover',onHover,true);
+if(typeof Touch!=='function'||typeof TouchEvent!=='function')return;
 var WATCH={touchstart:1,mousedown:1,pointerdown:1};
 var reg=new WeakMap();
 function slot(el,t,o,make){var m=reg.get(el);if(!m){if(!make)return null;m=new Map();reg.set(el,m);}var k=t+((typeof o==='boolean'?o:!!(o&&o.capture))?'!':'');var s=m.get(k);if(!s&&make){s=new Set();m.set(k,s);}return s||null;}

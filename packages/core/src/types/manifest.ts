@@ -174,7 +174,10 @@ export const AppManifestSchema = z.object({
    *     the named injection in the proxy's HTML response pass. Defaults on; opt out per app.
    * - `injectInputCompat`: on touch-capable browsers (a phone in DeX, touchscreen laptops), replays
    *     mouse gestures as touch events on elements that listen only for touch, so widgets whose
-   *     libraries pick touch *instead of* mouse still react to clicks. Defaults on; opt out per app.
+   *     libraries pick touch *instead of* mouse still react to clicks; and, where the WebView drops
+   *     mouse hover (Aura EXP in DeX), dispatches a mousemove at a click's position before the
+   *     mousedown so position-tracking libraries (Guacamole's Mouse) don't act at the last hovered
+   *     point. Defaults on; opt out per app.
    * - `injectEventSourceMux`: routes the page's same-origin EventSource streams over one WebSocket
    *     so they don't hold the browser's 6 HTTP/1.1 connections per host that all windows share.
    *     Defaults on; opt out per app.
