@@ -1,6 +1,7 @@
 import type { APIRoute } from 'astro';
 import { nextSessionId, killSession } from '../../pty-server';
 import { errorResponse, listLocal } from '../../session-service';
+import { forgetSessionPicks, pickSession } from '../../window-session';
 
 /**
  * The shells this container can show.
@@ -33,5 +34,22 @@ export const POST: APIRoute = () => {
 export const DELETE: APIRoute = async ({ request }) => {
   const id = new URL(request.url).searchParams.get('id');
   if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400 });
-  return Response.json({ id, killed: killSession(id) });
+  const killed = killSession(id);
+  forgetSessionPicks(id);
+  return Response.json({ id, killed });
+};
+
+/**
+ * Record which session a window is showing, so a reload reopens it (see
+ * window-session.ts). Query params, not a body: the terminal page never
+ * depends on a POST/PUT body round-trip (see startNewInstance there).
+ */
+export const PUT: APIRoute = ({ request }) => {
+  const params = new URL(request.url).searchParams;
+  const windowId = params.get('window');
+  if (!windowId) return new Response(JSON.stringify({ error: 'window required' }), { status: 400 });
+  try {
+    pickSession(windowId, params.get('session'));
+    return new Response(null, { status: 204 });
+  } catch (err) { return errorResponse(err); }
 };

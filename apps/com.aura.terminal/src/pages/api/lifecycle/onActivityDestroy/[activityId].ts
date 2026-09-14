@@ -1,5 +1,6 @@
 import { createActivityDestroyHandler } from '@aura/app-sdk';
 import { killSession } from '../../../../pty-server.js';
+import { forgetWindow } from '../../../../window-session.js';
 
 /**
  * Called by the OS when the user closes the terminal activity. The PTY
@@ -9,4 +10,5 @@ import { killSession } from '../../../../pty-server.js';
  */
 export const POST = createActivityDestroyHandler((activityId) => {
   killSession(activityId);
+  forgetWindow(activityId);
 });
