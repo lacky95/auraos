@@ -182,7 +182,18 @@ export default {};
   // upstream. Needed by Next.js apps whose `basePath` config expects to see
   // the proxy prefix on every request — without it we'd lose a round-trip
   // to a 308 redirect chain back to the prefixed URL.
-  const upstreamPath = cfg.preservePrefix ? `api/proxy/${id}/${path}` : path;
+  // Astro's `[...path]` param drops a trailing page-format extension: a request
+  // for `.../blank.html` arrives with `params.path` === `.../blank`, so
+  // forwarding the param would strip the `.html` and upstream 404s. (This broke
+  // Guacamole's resize sensor — an `<object data=".../app/element/templates/blank.html">`
+  // whose load failure meant window resizes never reached the remote session.)
+  // `reqUrl.pathname` keeps the extension, so derive the forwarded path from it,
+  // falling back to the param if the expected prefix isn't present.
+  const upstreamPrefix = `/api/proxy/${id}/`;
+  const forwardPath = reqUrl.pathname.startsWith(upstreamPrefix)
+    ? reqUrl.pathname.slice(upstreamPrefix.length)
+    : path;
+  const upstreamPath = cfg.preservePrefix ? `api/proxy/${id}/${forwardPath}` : forwardPath;
   const targetUrl = `http://${upHost}:${upPort}/${upstreamPath}${search}`;
 
   try {
