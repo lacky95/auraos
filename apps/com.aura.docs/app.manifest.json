@@ -19,6 +19,15 @@
     "injectConsoleRelay": true,
     "injectKeyForwarder": true
   },
+  "provides": [
+    {
+      "name": "docs",
+      "kind": "mcp",
+      "address": "/mcp",
+      "version": "0.1.0",
+      "description": "Aura documentation for agents: list_docs (every page), search_docs (find pages by words, with matching lines), get_doc (one page as Markdown). Read-only, no auth."
+    }
+  ],
   "tools": [
     "bash",
     "git",

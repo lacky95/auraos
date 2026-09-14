@@ -286,6 +286,37 @@ main.settings-body {
   color: var(--aura-color-text-dim);
 }
 
+/* ── Interfaces filter ────────────────────────────────────────────────
+ * The page styles its tables inline, but the search box and the <mark>s the
+ * filter paints at runtime need real rules (focus state, placeholder,
+ * runtime markup), so they live here beside the combobox they match. */
+.iface-search {
+  display: block;
+  width: 100%;
+  margin-bottom: 6px;
+  background: var(--aura-color-bg);
+  border: 1px solid var(--aura-color-border);
+  color: var(--aura-color-text);
+  padding: 6px 10px;
+  font-family: 'Courier New', monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  outline: none;
+  appearance: none;
+  border-radius: 0;
+}
+.iface-search::placeholder { color: var(--aura-color-text-dim); letter-spacing: 0.08em; }
+.iface-search::-webkit-search-cancel-button { appearance: none; }
+.iface-search:focus {
+  border-color: var(--aura-color-primary);
+  box-shadow: var(--aura-glow-subtle);
+}
+.iface-hit {
+  background: transparent;
+  color: var(--aura-color-primary);
+  font-weight: bold;
+}
+
 /* The handwritten `.mode-row` / `.mode-btn` / `.mode-resolved` block that
  * lived here moved to <ColorModePicker />, a scificn Tabs-based React island.
  * See apps/com.aura.settings/src/components/ColorModePicker.tsx. */

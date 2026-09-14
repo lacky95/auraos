@@ -155,6 +155,14 @@ for (const v of initialViews) {
   // would clutter the user's app set.
   const m = mgr.getManifest(v.appId);
   if (m?.componentType === 'service') continue;
+  // Nor an app whose backend runs without a window (autoStart, or
+  // backgroundService — closing its window leaves it running). Without
+  // activities its view only says "the instance is up", not "a window was
+  // open", so adopting it popped Hermes onto the desktop at every boot and
+  // back open on every reload after the user closed it. Its window opens
+  // when the user launches it; activity views are still backfilled, since
+  // an activity exists only because a window was opened.
+  if (!v.activityId && (m?.autoStart || m?.backgroundService)) continue;
   if (!knownMembers.has(v.viewId)) {
     active.members.push(v.viewId);
     knownMembers.add(v.viewId);
