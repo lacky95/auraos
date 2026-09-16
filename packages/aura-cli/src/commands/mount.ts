@@ -188,6 +188,47 @@ function printMounts(instanceId: string, mounts: AuraMount[], apps: AppDto[]): v
   console.log(table(rows, ['TARGET', 'SCOPE', 'KIND', 'MODE', 'PATH']));
 }
 
+/**
+ * Closing summary after anything that CHANGED the set: the instance's whole
+ * mount table, re-read from the server.
+ *
+ * Deliberately a fresh GET rather than a render of the plan we just applied.
+ * Every mutation path here is N separate requests and not atomic, so the plan
+ * is what was *asked for*; only the server's answer says what is actually
+ * mounted. That distinction is the entire reason this prints on the partial-
+ * failure path too, so a re-read failure is a warning and not a `fail()` —
+ * losing the summary must not turn a successful set of changes into exit 1.
+ */
+async function printActiveMounts(instanceId: string, apps: AppDto[]): Promise<void> {
+  let res: MountsResponse;
+  try {
+    res = await fetchMounts(instanceId);
+  } catch (err) {
+    warn(`could not re-read mounts of ${instanceId}: ${apiError(err)}`);
+    return;
+  }
+  console.log('');
+  printMounts(instanceId, res.mounts ?? [], apps);
+}
+
+/**
+ * One achieved mount, in the shape the closing table uses:
+ *
+ *   ✓ mounted io.lakner.steelaibrowser  ro  at /mnt/aura/io.lakner.steelaibrowser
+ *
+ * Fields come from the server's echo of the mount, never from the request —
+ * the container path is chosen server-side, and reporting a requested mode next
+ * to a server-chosen path would be a line that is half wish and half fact.
+ * Uses `modeSign` (the ls/red-green palette), not `modeSignSoft`: soft tones
+ * mark the *plan* rows, these mark what is now true, matching the table below.
+ */
+function mountedLine(m: AuraMount): string {
+  return (
+    `mounted ${color.bold(m.targetAppId)}${m.kind === 'data' ? color.dim(':data') : ''} ` +
+    `${modeSign(m.mode)} at ${color.bold(m.containerPath)}`
+  );
+}
+
 // ─── ls ────────────────────────────────────────────────────────────────────
 
 async function listMounts(opts: { instance?: string }): Promise<void> {
@@ -282,16 +323,16 @@ async function addMounts(
         `/api/instances/${encodeURIComponent(instanceId)}/mounts`,
         { targetAppId, mode, data: opts.data === true },
       );
-      const m = res.mount;
-      ok(
-        `mounted ${color.bold(m.targetAppId)} ` +
-        `(${m.kind}, ${modeSign(m.mode)}) → ${color.bold(m.containerPath)}`,
-      );
+      ok(mountedLine(res.mount));
     } catch (err) {
       failed++;
       console.error(`${color.red('✗')} ${targetAppId}: ${apiError(err)}`);
     }
   }
+  // After the per-mount lines, not instead of them: the lines say what THIS run
+  // did, the table says what the instance now has — which differs whenever a
+  // mount was already there or one of the adds above failed.
+  await printActiveMounts(instanceId, apps);
   if (failed > 0) process.exitCode = 1;
 }
 
@@ -303,9 +344,15 @@ async function addMounts(
  * that one.
  */
 function resolveMountIds(token: string, mounts: AuraMount[]): string[] {
+  // Match by app FIRST. Testing `m.id === token` first defeated the bare-appId
+  // case entirely: a source mount's id *is* the bare appId (`<appId>:data` is
+  // the only qualified form), so the exact match always won and `rm <appId>`
+  // detached the source while silently leaving the data mount attached —
+  // against both this contract and `rm`'s help text.
+  const byApp = mounts.filter((m) => m.targetAppId === token);
+  if (byApp.length > 0) return byApp.map((m) => m.id);
   const exact = mounts.find((m) => m.id === token);
-  if (exact) return [exact.id];
-  return mounts.filter((m) => m.targetAppId === token).map((m) => m.id);
+  return exact ? [exact.id] : [];
 }
 
 async function removeMounts(
@@ -376,6 +423,7 @@ async function removeMounts(
       process.exitCode = 1;
     }
   }
+  await printActiveMounts(instanceId, apps);
 }
 
 // ─── Registration ──────────────────────────────────────────────────────────
@@ -589,7 +637,14 @@ async function runWizard(): Promise<void> {
         const proceed = await promptConfirm('Apply?', true, { allowBack: true });
         if (proceed === BACK) return 'back';
         if (!proceed) return 'cancel';
-        await applyChanges(draft.instanceId!, plan);
+        const failed = await applyChanges(draft.instanceId!, plan);
+        // Print the resulting set BEFORE bailing out on a partial apply — a
+        // half-applied plan is precisely when "what is mounted right now?" is
+        // the question, so the summary must not be skipped by the failure exit.
+        await printActiveMounts(draft.instanceId!, apps);
+        if (failed > 0) {
+          fail(`${failed} of ${plan.adds.length + plan.removes.length} change(s) failed — state is partial`);
+        }
         return 'advance';
       },
     },
@@ -710,8 +765,12 @@ function afterLine(existing: AuraMount[], plan: ChangePlan): string {
  * There is no bulk endpoint, so this is N requests and NOT atomic — a failure
  * partway leaves a partial set. Report each outcome rather than implying the
  * whole plan applied.
+ *
+ * Returns the number of failed changes instead of calling `fail()` itself: the
+ * caller still has to print the resulting mount table, and `fail()` exits the
+ * process, which would swallow exactly the summary a partial apply needs.
  */
-async function applyChanges(instanceId: string, plan: ChangePlan): Promise<void> {
+async function applyChanges(instanceId: string, plan: ChangePlan): Promise<number> {
   let failed = 0;
   // Removes first: a mode change is remove+add on the same path, and doing the
   // add first would collide with the live mount.
@@ -726,10 +785,10 @@ async function applyChanges(instanceId: string, plan: ChangePlan): Promise<void>
       const res = await api.post<AddResponse>(`/api/instances/${encodeURIComponent(instanceId)}/mounts`, {
         targetAppId: a.appId, mode: a.rw ? 'rw' : 'ro', data: a.data,
       });
-      ok(`mounted ${a.appId}${a.data ? ':data' : ''} at ${color.bold(res.mount.containerPath)}`);
+      ok(mountedLine(res.mount));
     } catch (err) { failed++; warn(`mount ${a.appId}: ${apiError(err)}`); }
   }
-  if (failed > 0) fail(`${failed} of ${plan.adds.length + plan.removes.length} change(s) failed — state is partial`);
+  return failed;
 }
 
 /** Turn a cancelled picker into a clean exit instead of a stack trace. */
