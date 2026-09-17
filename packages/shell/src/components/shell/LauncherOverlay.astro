@@ -25,7 +25,10 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
 <aside id="lo-panel" class="lo-panel" aria-hidden="true">
   <header class="lo-header">
     <span class="lo-title">▦ LAUNCH APP</span>
-    <button id="lo-close" class="lo-close" title="Close launcher (Esc)">✕</button>
+    <div class="lo-header-actions">
+      <button id="lo-reload" class="lo-reload" title="Reload the shell UI" aria-label="Reload the shell UI">⟳</button>
+      <button id="lo-close" class="lo-close" title="Close launcher (Esc)">✕</button>
+    </div>
   </header>
   <input id="lo-search" class="lo-search" type="text" placeholder="SEARCH APPS..." autocomplete="off" />
   <div id="lo-grid" class="lo-grid">
@@ -102,6 +105,35 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
     text-transform: uppercase;
     letter-spacing: 0.12em;
   }
+  /* The header is `justify-content: space-between`; without this wrapper a
+     third child would spread the three evenly instead of keeping the title
+     left and the buttons together on the right. */
+  .lo-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .lo-reload {
+    background: transparent;
+    border: var(--aura-border);
+    color: var(--aura-color-text-dim);
+    cursor: pointer;
+    font-family: var(--aura-font-mono);
+    font-size: var(--aura-font-size-xs);
+    padding: 2px 10px;
+    line-height: 1.4;
+  }
+  .lo-reload:hover,
+  .lo-reload:focus,
+  .lo-reload:focus-visible {
+    color: var(--aura-color-primary);
+    box-shadow: var(--aura-glow-primary);
+    outline: none;
+  }
+  .lo-reload:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--aura-color-primary), var(--aura-glow-primary);
+  }
+
   .lo-close {
     background: transparent;
     border: var(--aura-border);
@@ -315,6 +347,7 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
 
   const panel  = document.getElementById('lo-panel') as HTMLElement;
   const close  = document.getElementById('lo-close')  as HTMLButtonElement;
+  const reload = document.getElementById('lo-reload') as HTMLButtonElement;
   const search = document.getElementById('lo-search') as HTMLInputElement;
   const grid   = document.getElementById('lo-grid')   as HTMLElement;
 
@@ -344,6 +377,14 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
   (window as any).auraCloseLauncher = closePanel;
 
   close.addEventListener('click', closePanelAndReturnFocus);
+
+  // Reload the shell UI. The OS itself is server-side, so this only re-fetches
+  // the desktop document — running app instances are untouched and their
+  // iframes come back attached. Worth having in the panel because the shell
+  // often runs in a WebView (Aura EXP / DeX) with no browser chrome to reload
+  // from, and the launcher's app list is SSR'd at page load, so a newly
+  // installed app shows up only after the document is re-rendered.
+  reload.addEventListener('click', () => window.location.reload());
 
   // Dispatcher: Ctrl+Alt+Space (default) and Ctrl+Alt+C (alt) drop
   // keyboard focus on the FIRST item of the bottom bar — the narrow `◐`
