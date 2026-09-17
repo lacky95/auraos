@@ -26,7 +26,7 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
   <header class="lo-header">
     <span class="lo-title">▦ LAUNCH APP</span>
     <div class="lo-header-actions">
-      <button id="lo-reload" class="lo-reload" title="Reload the shell UI" aria-label="Reload the shell UI">⟳</button>
+      <button id="lo-reload" class="lo-reload" title="Reload the app list" aria-label="Reload the app list"><span class="lo-reload-icon">⟳</span></button>
       <button id="lo-close" class="lo-close" title="Close launcher (Esc)">✕</button>
     </div>
   </header>
@@ -132,6 +132,21 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
   }
   .lo-reload:focus-visible {
     box-shadow: inset 0 0 0 2px var(--aura-color-primary), var(--aura-glow-primary);
+  }
+  /* Spin the glyph, not the button — rotating the bordered box looks wrong.
+     inline-block because `transform` has no effect on an inline span. */
+  .lo-reload-icon {
+    display: inline-block;
+  }
+  .lo-reload[data-busy="true"] .lo-reload-icon {
+    animation: lo-reload-spin 0.6s linear infinite;
+  }
+  .lo-reload[data-error="true"] {
+    color: var(--aura-color-danger);
+    border-color: var(--aura-color-danger);
+  }
+  @keyframes lo-reload-spin {
+    to { transform: rotate(360deg); }
   }
 
   .lo-close {
@@ -378,13 +393,28 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
 
   close.addEventListener('click', closePanelAndReturnFocus);
 
-  // Reload the shell UI. The OS itself is server-side, so this only re-fetches
-  // the desktop document — running app instances are untouched and their
-  // iframes come back attached. Worth having in the panel because the shell
-  // often runs in a WebView (Aura EXP / DeX) with no browser chrome to reload
-  // from, and the launcher's app list is SSR'd at page load, so a newly
-  // installed app shows up only after the document is re-rendered.
-  reload.addEventListener('click', () => window.location.reload());
+  // Re-fetch the app list and rebuild the tiles. Deliberately NOT a document
+  // reload: the grid is SSR'd at page load, so an app installed since then is
+  // missing until something re-renders it — and this reaches the same
+  // rebuildGrid() the app:installed/app:removed SSE events use, without
+  // tearing down the desktop, its iframes or any in-page state.
+  const RELOAD_TITLE = reload.title;
+  reload.addEventListener('click', async () => {
+    if (reload.dataset['busy'] === 'true') return;   // ignore double-clicks mid-fetch
+    reload.dataset['busy'] = 'true';
+    delete reload.dataset['error'];
+    try {
+      await rebuildGrid();
+    } catch (err) {
+      // A silent return on a failed refresh is indistinguishable from "this
+      // button does nothing", so put the failure on the control itself.
+      reload.dataset['error'] = 'true';
+      reload.title = `Reload failed: ${(err as Error).message}`;
+      setTimeout(() => { delete reload.dataset['error']; reload.title = RELOAD_TITLE; }, 4000);
+    } finally {
+      delete reload.dataset['busy'];
+    }
+  });
 
   // Dispatcher: Ctrl+Alt+Space (default) and Ctrl+Alt+C (alt) drop
   // keyboard focus on the FIRST item of the bottom bar — the narrow `◐`
@@ -740,7 +770,9 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
         return;
       }
       if (ev.type === 'app:installed' || ev.type === 'app:removed') {
-        void rebuildGrid();
+        // Background refresh — a network blip just leaves the current grid
+        // alone; the next install/remove event retries.
+        void rebuildGrid().catch((err) => console.warn(`[launcher] grid rebuild failed: ${err.message}`));
       }
     });
   });
@@ -750,32 +782,32 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
    * (the much rarer event) — enable/disable just flips an attribute above.
    */
   async function rebuildGrid(): Promise<void> {
-    try {
-      const r = await fetch('/api/apps');
-      if (!r.ok) return;
-      const apps = (await r.json() as Array<{
-        manifest: { id: string; name: string; icon?: string; componentType?: 'activity' | 'service' };
-        enabled: boolean;
-      }>)
-        // Services are headless — see the SSR filter at the top of this
-        // file for the rationale.
-        .filter((a) => a.manifest.componentType !== 'service');
-      // Sort by name to match the SSR ordering (alphabetical via Object key
-      // iteration order; getManifests doesn't guarantee, but that's close).
-      apps.sort((a, b) => a.manifest.name.localeCompare(b.manifest.name));
-      grid.innerHTML = apps.map((a) => {
-        const m = a.manifest;
-        const glyph = (m.icon ?? m.name.charAt(0)).toUpperCase();
-        const safeId   = m.id.replace(/[<>&"']/g, '');
-        const safeName = m.name.replace(/[<>&]/g, '');
-        return `<button class="lo-app" data-app-id="${safeId}" data-enabled="${a.enabled}" title="${safeName}">
-          <span class="lo-app-initial" data-len="${glyph.length}">${glyph}</span>
-          <span class="lo-app-name">${safeName}</span>
-          <span class="lo-app-id">${safeId}</span>
-        </button>`;
-      }).join('');
-    } catch {
-      /* network blip — leave the current grid alone, the next SSE event triggers a retry */
-    }
+    const r = await fetch('/api/apps');
+    if (!r.ok) throw new Error(`/api/apps returned ${r.status}`);
+    const apps = (await r.json() as Array<{
+      manifest: { id: string; name: string; icon?: string; componentType?: 'activity' | 'service' };
+      enabled: boolean;
+    }>)
+      // Services are headless — see the SSR filter at the top of this
+      // file for the rationale.
+      .filter((a) => a.manifest.componentType !== 'service');
+    // Sort by name to match the SSR ordering (alphabetical via Object key
+    // iteration order; getManifests doesn't guarantee, but that's close).
+    apps.sort((a, b) => a.manifest.name.localeCompare(b.manifest.name));
+    grid.innerHTML = apps.map((a) => {
+      const m = a.manifest;
+      const glyph = (m.icon ?? m.name.charAt(0)).toUpperCase();
+      const safeId   = m.id.replace(/[<>&"']/g, '');
+      const safeName = m.name.replace(/[<>&]/g, '');
+      return `<button class="lo-app" data-app-id="${safeId}" data-enabled="${a.enabled}" title="${safeName}">
+        <span class="lo-app-initial" data-len="${glyph.length}">${glyph}</span>
+        <span class="lo-app-name">${safeName}</span>
+        <span class="lo-app-id">${safeId}</span>
+      </button>`;
+    }).join('');
+    // The rebuild replaces every tile, so the `hidden` flags the search box
+    // had set are gone — re-apply the current query or a filtered grid comes
+    // back showing everything.
+    if (search.value.trim() !== '') applyLauncherFilter(search.value);
   }
 </script>
