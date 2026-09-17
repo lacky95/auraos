@@ -760,6 +760,21 @@ async function removeContainer(name) {
   try { await dockerExec(['rm', '-f', name]); } catch { /* already gone */ }
 }
 
+/**
+ * The OS sidecar labels (same trio the app SDK's `createSidecars` stamps).
+ * They let AuraOS attribute these containers to this instance — shown in the
+ * Process Manager — and reap them when the instance stops, crashes, is
+ * force-killed or uninstalled. Without them `--restart unless-stopped` keeps
+ * the model server running forever after whisper itself is gone.
+ */
+function sidecarLabels(service) {
+  return [
+    '--label', `aura.parent=${INSTANCE_ID}`,
+    '--label', `aura.app=${APP_ID}`,
+    '--label', `aura.service=${service}`,
+  ];
+}
+
 async function ensureSidecarContainers() {
   const cfg = await kvGet();
 
@@ -776,6 +791,7 @@ async function ensureSidecarContainers() {
     '--name', ASR_NAME,
     '--network', NETWORK,
     '--restart', 'unless-stopped',
+    ...sidecarLabels('asr'),
     '-e', `WHISPER__MODEL=${cfg.whisperModel}`,
     '-e', `WHISPER__INFERENCE_DEVICE=${cfg.whisperDevice}`,
     '-e', `WHISPER__COMPUTE_TYPE=${cfg.whisperCompute}`,
@@ -807,6 +823,7 @@ async function ensureSidecarContainers() {
       '--name', LLM_NAME,
       '--network', NETWORK,
       '--restart', 'unless-stopped',
+      ...sidecarLabels('llm'),
       '-e', `OPENROUTER_API_KEY=${cfg.openrouterApiKey}`,
       'ghcr.io/berriai/litellm:main-stable',
       '--model', cfg.llmModel,

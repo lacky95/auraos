@@ -14,6 +14,8 @@ export interface EventFramework {
 export interface OsEvents {
   'app:stateChanged': { instanceId: string; appId: string; state: AppLifecycleState; port: number | null };
   'app:crashed': { instanceId: string; appId: string; error: string };
+  /** The set of sidecars attached to an instance changed (appeared, vanished, or changed state). */
+  'app:sidecarsChanged': { instanceId: string; appId: string; count: number };
   'app:installed': { appId: string };
   'app:removed': { appId: string };
   /** A user toggled an app's enable state (Settings → Apps or `aura app enable/disable`). */

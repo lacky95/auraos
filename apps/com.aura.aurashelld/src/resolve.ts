@@ -38,6 +38,8 @@ export interface ProcessSummary {
   label: string;
   pid: number | null;
   port: number | null;
+  /** Runtimes the process brought up next to itself (container, later VM…); details: GET /api/instances/<id>/sidecars. */
+  sidecars: number;
   activities: Array<{ activityId: string; title: string | null }>;
 }
 

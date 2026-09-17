@@ -62,6 +62,96 @@ capabilities:
     binary: gh
     description: "GitHub CLI"
 
+  linux-coreutils:
+    # One grant, a whole toolbox. A capability is a main binary plus the
+    # `sidecars:` that travel with it, so this entry's "binary" is a tiny shim
+    # (`linux-coreutils --help` lists the bundle, `--check` verifies every tool
+    # resolves on the sandbox's PATH) and the real tools ride along as its
+    # sidecars. Granting `linux-coreutils` to an app puts all of them in its
+    # /aura/my-tools; revoking takes them all away again.
+    #
+    # `source: curl` rather than `apt` on purpose: the apt source takes ONE
+    # package and would `apt-get remove` it on `cap remove` — and curl, wget
+    # and iproute2 are things the shell container itself relies on. The bundle
+    # therefore leaves the shell's packages alone on removal (only the
+    # toolchain copies go).
+    #
+    # Left out deliberately: `nmap` and `file` need data trees under
+    # /usr/share that the cap system does not carry (it stages binaries and
+    # their .so graph, nothing else), so they would install clean and fail at
+    # first use. `ps`/`top`/`less`/`lsof`/`git` are already in both sandbox
+    # baselines (see Dockerfile, base-rootfs stage).
+    #
+    # Keep the three lists in sync: apt packages here, `tools=` in the shim,
+    # and `sidecars:` below.
+    source: curl
+    install_cmd: |-
+      set -e
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y -q --no-install-recommends \
+        iputils-ping iputils-tracepath traceroute curl wget iproute2 dnsutils \
+        netcat-openbsd socat net-tools tcpdump mtr-tiny whois \
+        rsync tree psmisc strace unzip zip xz-utils
+      cat > /usr/local/bin/linux-coreutils <<'EOF'
+      #!/bin/sh
+      # linux-coreutils — AuraOS capability shim. The tools below are this
+      # capability's sidecars; granting `linux-coreutils` puts them on PATH.
+      tools="ping tracepath traceroute curl wget ip ss dig nslookup host nc socat netstat ifconfig route arp tcpdump mtr mtr-packet whois rsync tree killall pstree fuser strace unzip zip xz"
+      case "${1:---help}" in
+        -h|--help)
+          echo "linux-coreutils: network + core utilities bundled as one AuraOS capability."
+          echo "Run 'linux-coreutils --check' to verify each tool resolves on PATH."
+          echo "Tools:"
+          for t in $tools; do echo "  $t"; done ;;
+        --check)
+          rc=0
+          for t in $tools; do
+            if p=$(command -v "$t" 2>/dev/null); then printf 'ok       %-12s %s\n' "$t" "$p"
+            else printf 'MISSING  %s\n' "$t"; rc=1; fi
+          done
+          exit $rc ;;
+        *) echo "usage: linux-coreutils [--help|--check]" >&2; exit 2 ;;
+      esac
+      EOF
+      chmod 755 /usr/local/bin/linux-coreutils
+    binary_path: /usr/local/bin/linux-coreutils
+    binary: linux-coreutils
+    sidecars:
+      # network
+      - /usr/bin/ping
+      - /usr/bin/tracepath
+      - /usr/bin/traceroute
+      - /usr/bin/curl
+      - /usr/bin/wget
+      - /usr/bin/ip
+      - /usr/bin/ss
+      - /usr/bin/dig
+      - /usr/bin/nslookup
+      - /usr/bin/host
+      - /usr/bin/nc
+      - /usr/bin/socat
+      - /usr/bin/netstat
+      - /usr/sbin/ifconfig
+      - /usr/sbin/route
+      - /usr/sbin/arp
+      - /usr/bin/tcpdump
+      - /usr/bin/mtr
+      # mtr execs `mtr-packet` (found via PATH) to do the privileged probing
+      - /usr/bin/mtr-packet
+      - /usr/bin/whois
+      # core
+      - /usr/bin/rsync
+      - /usr/bin/tree
+      - /usr/bin/killall
+      - /usr/bin/pstree
+      - /usr/bin/fuser
+      - /usr/bin/strace
+      - /usr/bin/unzip
+      - /usr/bin/zip
+      - /usr/bin/xz
+    description: "Network + core utilities bundle — ping, traceroute, curl, wget, ip/ss, dig, nc, socat, tcpdump, mtr, whois, rsync, tree, psmisc, strace, zip/unzip, xz"
+
   adb:
     source: curl
     # Debian's `adb` package is platform-tools 29 (2019). It predates `adb
@@ -113,6 +203,35 @@ capabilities:
     binary_path: /usr/local/bin/zot
     binary: zot
     description: "OCI Distribution registry server — backs the com.aura.registry Nexus store"
+  code-server:
+    # VS Code in the browser (coder/code-server). The cap system stages single
+    # binaries + their .so graph, and code-server is a whole Node tree — so the
+    # standalone release (bundles its own node) lives in the SHARED home
+    # (/home/aura is mounted into every sandbox and the master), and the
+    # capability binary is a tiny shim that execs into it. Same model as the
+    # aura / linux-coreutils shims.
+    # NOTE: this entry is duplicated as CODE_SERVER_ENTRY in
+    # apps io.lakner.vscode src/capability.ts (the /api/admin/cap endpoint
+    # needs the parsed entry in the request body) — keep them in sync.
+    # PINNED version: the shim and tree must agree; upgrades are deliberate —
+    # bump VERSION and `aura cap install code-server` again (idempotent).
+    source: curl
+    install_cmd: |-
+      set -e
+      VERSION=4.137.0
+      DEST=/home/aura/.aura/code-server
+      if [ ! -x "$DEST/$VERSION/bin/code-server" ]; then
+        rm -rf "$DEST/$VERSION"; mkdir -p "$DEST/$VERSION"
+        curl -fsSL "https://github.com/coder/code-server/releases/download/v$VERSION/code-server-$VERSION-linux-amd64.tar.gz" | tar -xz -C "$DEST/$VERSION" --strip-components=1
+      fi
+      ln -sfn "$DEST/$VERSION" "$DEST/current"
+      mkdir -p "$DEST/data" "$DEST/extensions" "$DEST/run"
+      chmod -R a+rX "$DEST/$VERSION"
+      printf '#!/bin/sh\nexec /home/aura/.aura/code-server/current/bin/code-server "$@"\n' > /usr/local/bin/code-server
+      chmod 755 /usr/local/bin/code-server
+    binary_path: /usr/local/bin/code-server
+    binary: code-server
+    description: "VS Code in the browser — standalone release in the shared home; shim lands on PATH in granted sandboxes"
 
 services:
   sshd:
@@ -127,11 +246,3 @@ services:
       UsePAM no
     start_cmd: "mkdir -p /run/sshd && /usr/sbin/sshd -D -p 2222"
     description: "SSH server daemon (port 2222)"
-
-  code-server:
-    source: curl
-    install_cmd: "curl -fsSL https://code-server.dev/install.sh | sh"
-    binary: /usr/bin/code-server
-    port: 8443
-    start_cmd: "code-server --bind-addr 0.0.0.0:8443 --auth none"
-    description: "VS Code in the browser"

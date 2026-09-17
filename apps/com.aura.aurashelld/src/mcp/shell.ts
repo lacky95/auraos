@@ -627,7 +627,8 @@ const TOOLS: OwnTool[] = [
     title: 'List processes',
     description:
       'Running processes as the process manager shows them: app name, instance id, state (RUN, PSE, BOOT, STOP, '
-      + 'TERM, OFF, ERR), pid, port, whether it is an app or a service, and its open windows (activities).',
+      + 'TERM, OFF, ERR), pid, port, whether it is an app or a service, how many sidecars (runtimes such as a database '
+      + 'or headless browser the app runs next to itself) it has, and its open windows (activities).',
     schema: z.object({}),
     annotations: READ,
     run: async () => {

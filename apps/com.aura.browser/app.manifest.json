@@ -11,13 +11,19 @@
   "tools": [
     "bash",
     "git",
-    "claude"
+    "claude",
+    "code-server"
   ],
   "intentFilters": [
     {
       "action": "aura.intent.action.VIEW",
-      "category": ["aura.intent.category.DEFAULT"],
-      "dataScheme": ["http", "https"]
+      "category": [
+        "aura.intent.category.DEFAULT"
+      ],
+      "dataScheme": [
+        "http",
+        "https"
+      ]
     }
   ]
 }

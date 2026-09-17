@@ -51,6 +51,7 @@ export const GET: APIRoute = ({ url }) => {
 
       const onStateChanged  = (ev: unknown) => send('app:stateChanged', ev);
       const onCrashed       = (ev: unknown) => send('app:crashed',      ev);
+      const onSidecars      = (ev: unknown) => send('app:sidecarsChanged', ev);
       const onInstalled     = (ev: unknown) => send('app:installed',    ev);
       const onRemoved       = (ev: unknown) => send('app:removed',      ev);
       const onActOpened     = (ev: unknown) => send('activity:opened',  ev);
@@ -68,6 +69,7 @@ export const GET: APIRoute = ({ url }) => {
 
       OsEventBus.on('app:stateChanged',   onStateChanged);
       OsEventBus.on('app:crashed',        onCrashed);
+      OsEventBus.on('app:sidecarsChanged', onSidecars);
       OsEventBus.on('app:installed',      onInstalled);
       OsEventBus.on('app:removed',        onRemoved);
       OsEventBus.on('activity:opened',    onActOpened);
@@ -92,6 +94,7 @@ export const GET: APIRoute = ({ url }) => {
         clearInterval(heartbeat);
         OsEventBus.off('app:stateChanged',   onStateChanged);
         OsEventBus.off('app:crashed',        onCrashed);
+        OsEventBus.off('app:sidecarsChanged', onSidecars);
         OsEventBus.off('app:installed',      onInstalled);
         OsEventBus.off('app:removed',        onRemoved);
         OsEventBus.off('activity:opened',    onActOpened);

@@ -701,6 +701,124 @@
     padding: 10px;
     gap: 10px;
   }
+
+  /* ============ Sidecars: row chip + INSPECT expand ============ */
+  /* Rendered via innerHTML like every other row part — hence is:global. */
+  .pm-sidecar-chip {
+    font-size: 0.55rem;
+    color: var(--aura-color-text-dim);
+    border: 1px solid var(--aura-color-border);
+    padding: 1px 4px;
+    letter-spacing: 0.08em;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .pm-inspect-chev {
+    display: inline-block;
+    transition: transform 0.12s;
+  }
+  [aria-expanded="true"] > .pm-inspect-chev { transform: rotate(90deg); }
+  .pm-action-btn[data-action="inspect"][aria-expanded="true"] {
+    color: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+  }
+
+  .pm-inspect {
+    border-top: 1px dashed var(--aura-color-border);
+    padding: 8px 10px;
+  }
+  .pm-inspect-head {
+    font-size: 0.55rem;
+    color: var(--aura-color-text-dim);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .pm-inspect-head::before {
+    content: '';
+    flex: 0 0 10px;
+    height: 1px;
+    background: var(--aura-color-border);
+  }
+  .pm-inspect-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    font-family: var(--aura-font-mono);
+    font-size: 0.6rem;
+    color: var(--aura-color-text);
+  }
+  .pm-inspect-table th {
+    font-weight: normal;
+    font-size: 0.5rem;
+    color: var(--aura-color-text-dim);
+    letter-spacing: 0.14em;
+    text-align: left;
+    padding: 0 4px 4px;
+    border-bottom: 1px solid var(--aura-color-border);
+  }
+  .pm-inspect-table td {
+    padding: 4px;
+    vertical-align: top;
+    border-bottom: 1px solid color-mix(in srgb, var(--aura-color-border) 50%, transparent);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pm-inspect-table .pm-inspect-num { text-align: right; width: 58px; }
+  .pm-inspect-table .pm-inspect-kind { width: 64px; color: var(--aura-color-text-dim); }
+  .pm-inspect-table .pm-inspect-state { width: 52px; }
+  .pm-inspect-name { color: var(--aura-color-secondary); }
+  .pm-inspect-sub {
+    margin-top: 2px;
+    font-size: 0.5rem;
+    color: var(--aura-color-text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pm-inspect-state[data-state="running"] { color: var(--aura-color-success); }
+  .pm-inspect-state[data-state="starting"] { color: var(--aura-color-warning); }
+  .pm-inspect-state[data-state="stopped"] { color: var(--aura-color-text-dim); }
+  .pm-inspect-state[data-state="error"] { color: var(--aura-color-danger); }
+  .pm-inspect-table tfoot td {
+    border-bottom: none;
+    border-top: 1px solid var(--aura-color-border);
+    color: var(--aura-color-primary);
+    letter-spacing: 0.1em;
+  }
+  .pm-inspect-status {
+    font-size: 0.55rem;
+    color: var(--aura-color-text-dim);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .pm-inspect-status[data-kind="loading"] { animation: pm-pulse 1.2s ease-in-out infinite; }
+  .pm-inspect-status[data-kind="error"] {
+    color: var(--aura-color-danger);
+    animation: none;
+    text-transform: none;
+    letter-spacing: 0.04em;
+  }
+  .pm-inspect-note {
+    margin-top: 6px;
+    font-size: 0.5rem;
+    color: var(--aura-color-text-dim);
+    letter-spacing: 0.06em;
+  }
+  /* List view: the inspect block is its own indented row under the process. */
+  .pm-listrow-inspect {
+    list-style: none;
+    padding: 0 10px 0 32px;
+    border-bottom: 1px solid var(--aura-color-border);
+    background: color-mix(in srgb, var(--aura-color-bg) 60%, transparent);
+  }
+  .pm-listrow-inspect .pm-inspect { border-top: none; padding: 6px 0 8px; }
 </style>
 
 <script>
@@ -717,7 +835,28 @@
     port: number | null;
     /** True for AppManager warm-pool members; not shown in this panel. */
     inPool?: boolean;
+    sandbox?: 'proot' | 'container';
+    /** Sidecars attached to this instance (OS cache; details via /sidecars). */
+    sidecarCount?: number;
   }
+  interface ResourceUsage { memBytes: number | null; cpuPct: number | null }
+  interface SidecarDetail {
+    id: string;
+    service: string;
+    backend: string;
+    state: string;
+    image?: string;
+    usage: ResourceUsage | null;
+  }
+  interface InspectData {
+    instance: { usage: ResourceUsage | null };
+    sidecars: SidecarDetail[];
+    totalMemBytes: number | null;
+  }
+  type InspectState =
+    | { status: 'loading' }
+    | { status: 'ok'; data: InspectData }
+    | { status: 'error'; message: string };
   interface ActivityListItem {
     activityId: string;
     parentInstanceId: string;
@@ -836,6 +975,7 @@
     panel.setAttribute('aria-hidden', 'false');
     toggleBtn.setAttribute('aria-expanded', 'true');
     await refreshList();
+    syncInspectPoll();
     // Land focus on a useful starting point so arrows immediately work.
     // Prefer the first instance's FOCUS action (the user typically opens
     // the PM to act on a process); fall back to the close button so the
@@ -847,6 +987,7 @@
   function closePanel() {
     panel.setAttribute('aria-hidden', 'true');
     toggleBtn.setAttribute('aria-expanded', 'false');
+    syncInspectPoll();
   }
   // Variant used when the close came from the user dismissing the panel
   // (✕ button, Esc) — returns keyboard focus to the dock's chrome-nav
@@ -1123,6 +1264,7 @@
   }
 
   function render(instances: InstanceListItem[], activities: ActivityListItem[]) {
+    pruneInspect(instances);
     const snap = snapshotFocus();
     const totalInst = instances.length;
     const totalAct  = activities.length;
@@ -1227,6 +1369,7 @@
               <div class="pm-card-name">
                 <span>${escapeHtml(name)}</span>
                 ${isBg ? '<span class="pm-bg-badge" title="Background service">BG</span>' : ''}
+                ${sidecarChip(inst)}
               </div>
               <div class="pm-card-meta">${metaParts.join('')}</div>
             </div>
@@ -1236,9 +1379,11 @@
             </div>
           </div>
           ${activitiesBlock}
+          ${inspectBlock(inst)}
           <div class="pm-card-actions">
             <button class="pm-action-btn" data-action="focus" title="Open in fullscreen focus mode">◉ FOCUS</button>
             ${supportsActivities ? '<button class="pm-action-btn" data-action="new-activity" title="Open a new activity on this instance">+ ACTIVITY</button>' : ''}
+            ${inspectButton(inst, false)}
             <span class="pm-action-btn-spacer"></span>
             <button class="pm-action-btn" data-action="app-close" data-variant="warn" title="Standard close — runs full lifecycle: onPause → onStop → onDestroy → SIGTERM">■ STOP</button>
             <button class="pm-action-btn" data-action="task-kill" data-variant="danger" title="Force kill — immediate SIGKILL, no lifecycle hooks (only if app hangs)">⨂ KILL</button>
@@ -1279,6 +1424,7 @@
             <div class="pm-listrow-line1">
               <span>${escapeHtml(name)}</span>
               ${isBg ? '<span class="pm-bg-badge" title="Background service">BG</span>' : ''}
+              ${sidecarChip(inst)}
               <span class="pm-listrow-state-label">${stateLabel(inst.state)}</span>
             </div>
             <div class="pm-listrow-line2">${metaParts.join('')}</div>
@@ -1286,6 +1432,7 @@
           <div class="pm-listrow-actions">
             <button class="pm-action-btn pm-icon-btn" data-action="focus"        title="Focus">◉</button>
             ${supportsActivities ? '<button class="pm-action-btn pm-icon-btn" data-action="new-activity" title="+ Activity">+</button>' : ''}
+            ${inspectButton(inst, true)}
             <button class="pm-action-btn pm-icon-btn" data-action="app-close"   data-variant="warn"   title="Stop (graceful)">■</button>
             <button class="pm-action-btn pm-icon-btn" data-action="task-kill"   data-variant="danger" title="Kill (SIGKILL)">⨂</button>
           </div>
@@ -1308,7 +1455,13 @@
           </li>`;
       }).join('');
 
-      return instRow + actRows;
+      // The inspect block is its own row so it spans the full width under the
+      // process line; it keeps data-instance-id so its buttons (retry) route
+      // through the same delegated handler.
+      const inspectRow = expanded.has(inst.instanceId)
+        ? `<li class="pm-listrow-inspect" data-instance-id="${escapeHtml(inst.instanceId)}">${inspectBlock(inst)}</li>`
+        : '';
+      return instRow + inspectRow + actRows;
     };
     const sections: string[] = [];
     if (appInstances.length > 0) {
@@ -1322,10 +1475,173 @@
     list.innerHTML = sections.join('');
   }
 
+  // ─── Inspect: sidecars + resource usage per process ───────────────────
+  // A sidecar is an OS abstraction (container today, maybe a VM later), so
+  // the UI only speaks service / kind / state / usage — never docker terms.
+  // Rows show a cheap count from /api/apps; the detail (which queries live
+  // usage on the backend) is fetched only for expanded rows, and polled only
+  // while the panel is open. Expanded ids + last data survive re-renders so
+  // an app:* refresh never collapses or blanks an open inspector.
+  const INSPECT_POLL_MS = 5_000;
+  const expanded     = new Set<string>();
+  const inspectState = new Map<string, InspectState>();
+  const inspectInFlight = new Set<string>();
+  let inspectTimer: ReturnType<typeof setInterval> | null = null;
+
+  function inspectDomId(instanceId: string): string {
+    return 'pm-inspect-' + instanceId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  }
+
+  function sidecarChip(inst: InstanceListItem): string {
+    const n = inst.sidecarCount ?? 0;
+    if (n === 0) return '';
+    return `<span class="pm-sidecar-chip" title="${n} sidecar${n === 1 ? '' : 's'} running next to this process">⧉ ${n}</span>`;
+  }
+
+  function inspectButton(inst: InstanceListItem, compact: boolean): string {
+    const open = expanded.has(inst.instanceId);
+    const attrs = `data-action="inspect" aria-expanded="${open}" aria-controls="${inspectDomId(inst.instanceId)}" title="Inspect sidecars and resource usage"`;
+    return compact
+      ? `<button class="pm-action-btn pm-icon-btn" ${attrs}><span class="pm-inspect-chev">▸</span></button>`
+      : `<button class="pm-action-btn" ${attrs}><span class="pm-inspect-chev">▸</span>&nbsp;INSPECT</button>`;
+  }
+
+  function formatBytes(bytes: number | null | undefined): string {
+    if (bytes == null) return '—';
+    if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+    if (bytes >= 1024 ** 2) return `${Math.round(bytes / 1024 ** 2)} MB`;
+    return `${Math.round(bytes / 1024)} KB`;
+  }
+  function formatCpu(pct: number | null | undefined): string {
+    return pct == null ? '—' : `${pct < 10 ? pct.toFixed(1) : Math.round(pct)}%`;
+  }
+
+  function inspectRow(name: string, sub: string, kind: string, state: string, stateText: string, usage: ResourceUsage | null): string {
+    return `
+      <tr>
+        <td title="${escapeHtml(sub)}"><div class="pm-inspect-name">${escapeHtml(name)}</div>${sub ? `<div class="pm-inspect-sub">${escapeHtml(sub)}</div>` : ''}</td>
+        <td class="pm-inspect-kind">${escapeHtml(kind)}</td>
+        <td class="pm-inspect-state" data-state="${escapeHtml(state)}">${escapeHtml(stateText)}</td>
+        <td class="pm-inspect-num">${formatBytes(usage?.memBytes)}</td>
+        <td class="pm-inspect-num">${formatCpu(usage?.cpuPct)}</td>
+      </tr>`;
+  }
+
+  function inspectBlock(inst: InstanceListItem): string {
+    if (!expanded.has(inst.instanceId)) return '';
+    const st = inspectState.get(inst.instanceId) ?? { status: 'loading' as const };
+    let body: string;
+    if (st.status === 'loading') {
+      body = '<div class="pm-inspect-status" data-kind="loading">READING USAGE…</div>';
+    } else if (st.status === 'error') {
+      body = `<div class="pm-inspect-status" data-kind="error">
+          <span>${escapeHtml(st.message)}</span>
+          <button class="pm-action-btn" data-action="inspect-retry">RETRY</button>
+        </div>`;
+    } else {
+      const { data } = st;
+      const instState = inst.state === 'resumed' ? 'running'
+        : inst.state === 'error' || inst.state === 'crashed' ? 'error' : 'starting';
+      const rows = [
+        inspectRow('app', inst.instanceId, inst.sandbox ?? '—', instState, stateLabel(inst.state).toLowerCase(), data.instance.usage),
+        ...data.sidecars.map((s) => inspectRow(s.service, s.image ?? s.id, s.backend, s.state, s.state, s.usage)),
+      ].join('');
+      const note = data.instance.usage == null
+        ? `<div class="pm-inspect-note">Usage for ${escapeHtml(inst.sandbox ?? 'this')} sandboxes is not measured.</div>`
+        : '';
+      body = `
+        <table class="pm-inspect-table">
+          <thead><tr><th>SERVICE</th><th class="pm-inspect-kind">KIND</th><th class="pm-inspect-state">STATE</th><th class="pm-inspect-num">RAM</th><th class="pm-inspect-num">CPU</th></tr></thead>
+          <tbody>${rows}</tbody>
+          <tfoot><tr><td colspan="3">TOTAL</td><td class="pm-inspect-num">${formatBytes(data.totalMemBytes)}</td><td class="pm-inspect-num"></td></tr></tfoot>
+        </table>${note}`;
+    }
+    const n = inst.sidecarCount ?? 0;
+    return `
+      <div class="pm-inspect" id="${inspectDomId(inst.instanceId)}" data-inspect-for="${escapeHtml(inst.instanceId)}">
+        <div class="pm-inspect-head">INSPECT · ${n} SIDECAR${n === 1 ? '' : 'S'}</div>
+        ${body}
+      </div>`;
+  }
+
+  /** Swap one open inspector in place (poll tick) without a full list render. */
+  function patchInspect(instanceId: string): void {
+    const el = list.querySelector<HTMLElement>(`[data-inspect-for="${cssEsc(instanceId)}"]`);
+    const inst = lastInstances.find((i) => i.instanceId === instanceId);
+    if (!el || !inst) return;
+    const snap = snapshotFocus();
+    el.outerHTML = inspectBlock(inst);
+    restoreFocus(snap);
+  }
+
+  async function loadInspect(instanceId: string, showLoading = false): Promise<void> {
+    if (inspectInFlight.has(instanceId)) return;
+    inspectInFlight.add(instanceId);
+    if (showLoading) { inspectState.set(instanceId, { status: 'loading' }); patchInspect(instanceId); }
+    try {
+      const res = await fetch(`/api/instances/${encodeURIComponent(instanceId)}/sidecars`);
+      const body = await res.json().catch(() => null) as (InspectData & { error?: string }) | null;
+      if (!res.ok || !body) {
+        inspectState.set(instanceId, { status: 'error', message: body?.error ?? `Inspect failed (HTTP ${res.status})` });
+      } else {
+        inspectState.set(instanceId, { status: 'ok', data: body });
+      }
+    } catch (err) {
+      inspectState.set(instanceId, { status: 'error', message: `Inspect failed: ${(err as Error).message}` });
+    } finally {
+      inspectInFlight.delete(instanceId);
+    }
+    if (expanded.has(instanceId)) patchInspect(instanceId);
+  }
+
+  function toggleInspect(instanceId: string): void {
+    if (expanded.has(instanceId)) {
+      expanded.delete(instanceId);
+      inspectState.delete(instanceId);
+    } else {
+      expanded.add(instanceId);
+      inspectState.set(instanceId, { status: 'loading' });
+      void loadInspect(instanceId);
+    }
+    render(lastInstances, lastActivities);
+    syncInspectPoll();
+  }
+
+  /** Forget inspectors for processes that are gone; refetch when the sidecar set changed. */
+  function pruneInspect(instances: InstanceListItem[]): void {
+    const byId = new Map(instances.map((i) => [i.instanceId, i]));
+    for (const id of Array.from(expanded)) {
+      const inst = byId.get(id);
+      if (!inst) { expanded.delete(id); inspectState.delete(id); continue; }
+      const st = inspectState.get(id);
+      if (st?.status === 'ok' && st.data.sidecars.length !== (inst.sidecarCount ?? 0)) void loadInspect(id);
+    }
+    syncInspectPoll();
+  }
+
+  function syncInspectPoll(): void {
+    const want = isOpen() && expanded.size > 0;
+    if (want && !inspectTimer) {
+      inspectTimer = setInterval(() => { for (const id of expanded) void loadInspect(id); }, INSPECT_POLL_MS);
+    } else if (!want && inspectTimer) {
+      clearInterval(inspectTimer);
+      inspectTimer = null;
+    }
+  }
+
   list.addEventListener('click', async (e) => {
     const btn = (e.target as HTMLElement).closest('[data-action]') as HTMLButtonElement | null;
     if (!btn) return;
     const action = btn.dataset['action']!;
+    // Inspect is a pure view toggle — no request to guard, and disabling the
+    // button would drop keyboard focus across the re-render.
+    if (action === 'inspect' || action === 'inspect-retry') {
+      const instanceId = btn.closest<HTMLElement>('[data-instance-id]')?.dataset['instanceId'];
+      if (!instanceId) return;
+      if (action === 'inspect') toggleInspect(instanceId);
+      else void loadInspect(instanceId, true);
+      return;
+    }
     btn.disabled = true;
     try {
       // Activity-level actions: row carries data-activity-id

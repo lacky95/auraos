@@ -1,4 +1,5 @@
-import { spawn, spawnSync, execSync, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, execSync, execFile, type ChildProcess } from 'node:child_process';
+import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +12,8 @@ import { userHomeSubpath } from '../scopes/home.js';
 // is no runtime cycle.
 import { MOUNT_ROOT_PATH } from './MountManager.js';
 import type { SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
+import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
+import { SIDECAR_PS_FORMAT, USAGE_STATS_FORMAT, parseSidecarPs, parseUsageStats } from './sidecars.js';
 import type { SpawnContext } from '../scopes/types.js';
 import { ContextStore } from '../context/ContextStore.js';
 import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
@@ -23,6 +26,8 @@ const HEALTH_CHECK_TIMEOUT_MS = 60_000; // slightly higher than PRoot because co
 const LIFECYCLE_TIMEOUT_MS = 5_000;
 const SHARED_NETWORK = process.env['AURA_DOCKER_NETWORK'] ?? 'aura-net';
 const BASE_IMAGE     = process.env['AURA_BASE_IMAGE']     ?? 'aura-base';
+
+const execFileAsync = promisify(execFile);
 
 /** One entry of `docker inspect`'s `.Mounts` array (only the fields we read). */
 interface DockerMount {
@@ -485,6 +490,13 @@ export class ContainerRunner implements SandboxRunner {
       '-v', `${this.workspaceRoot}/package.json:/workspace/package.json:ro`,
       '-v', `${this.workspaceRoot}/pnpm-lock.yaml:/workspace/pnpm-lock.yaml:ro`,
       '-v', `${this.workspaceRoot}/pnpm-workspace.yaml:/workspace/pnpm-workspace.yaml:ro`,
+      // The capability registry. Without it the sandboxed `aura cap …` seeds
+      // a PRIVATE copy from the CLI bundle's built-in defaults and never sees
+      // entries added to the real file afterwards — `aura cap list` in a
+      // terminal then silently disagrees with the same command on the master.
+      // Read-only on purpose: the master owns registry edits (`cap registry
+      // add`), and a sandbox attempt should fail loudly, not fork the file.
+      '-v', `${this.workspaceRoot}/.aura:/workspace/.aura:ro`,
       // node_modules from the AuraOS named volume (so peer-dep variants
       // match what pnpm installed inside the shell). --mount syntax
       // (not -v) is needed because we want a NAMED volume, not a bind.
@@ -739,6 +751,56 @@ export class ContainerRunner implements SandboxRunner {
    *  AppManager can reap on graceful stop AND unexpected-exit (crash). */
   public reapSiblingsOf(instanceId: string): void {
     this.reapSiblings('aura.parent', instanceId);
+  }
+
+  // ─── Sidecars (OS abstraction; container encoding in ./sidecars.ts) ───
+  async listSidecars(): Promise<SidecarInfo[] | null> {
+    try {
+      const { stdout } = await execFileAsync(
+        'docker', ['ps', '-a', '--filter', 'label=aura.parent', '--format', SIDECAR_PS_FORMAT],
+        { timeout: 10_000, encoding: 'utf-8' },
+      );
+      return parseSidecarPs(stdout);
+    } catch (err) {
+      console.warn(`[ContainerRunner] listSidecars: docker ps failed: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
+  removeSidecars(ids: string[]): void {
+    for (const id of ids) {
+      try {
+        execSync(`docker rm -f ${JSON.stringify(id)}`, { stdio: 'ignore', timeout: 10_000 });
+        console.log(`[ContainerRunner] reaped orphan sidecar ${id}`);
+      } catch { /* already gone */ }
+    }
+  }
+
+  async usage(req: { instanceIds: string[]; sidecarIds: string[] }): Promise<Map<string, ResourceUsage>> {
+    const nameToKey = new Map<string, string>();
+    for (const id of req.instanceIds) {
+      if (this.containers.has(id)) nameToKey.set(this.containerName(id), id);
+    }
+    for (const id of req.sidecarIds) nameToKey.set(id, id);
+    const result = new Map<string, ResourceUsage>();
+    if (nameToKey.size === 0) return result;
+    let stdout = '';
+    try {
+      ({ stdout } = await execFileAsync(
+        'docker', ['stats', '--no-stream', '--format', USAGE_STATS_FORMAT, ...nameToKey.keys()],
+        { timeout: 15_000, encoding: 'utf-8' },
+      ));
+    } catch (err) {
+      // `docker stats` exits non-zero when ANY name is gone (a sidecar removed
+      // between list and stats) but still prints the rows it could read.
+      stdout = (err as { stdout?: string }).stdout ?? '';
+      if (!stdout) throw err;
+    }
+    for (const [name, u] of parseUsageStats(stdout)) {
+      const key = nameToKey.get(name);
+      if (key) result.set(key, u);
+    }
+    return result;
   }
 
   public async listOrphanRecords(): Promise<Array<{

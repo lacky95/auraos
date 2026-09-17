@@ -165,6 +165,7 @@ export function processes(state: Pick<ShellState, 'apps' | 'nameConflicts'>): Pr
         instanceId: inst.instanceId, app: appLabel(state, a.manifest.id), appId: a.manifest.id,
         kind: a.manifest.componentType === 'service' ? 'service' : 'app',
         state: inst.state, label: stateLabel(inst.state), pid: inst.pid, port: inst.port,
+        sidecars: inst.sidecarCount ?? 0,
         activities: a.activities.filter((x) => x.parentInstanceId === inst.instanceId)
           .map((x) => ({ activityId: x.activityId, title: x.title ?? null })),
       });

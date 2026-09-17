@@ -1,5 +1,6 @@
 import type { AppManifest } from '../types/manifest.js';
 import type { SpawnContext } from '../scopes/types.js';
+import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
 
 /**
  * Shared abstraction for "spawn an isolated bash process that runs an app".
@@ -93,6 +94,19 @@ export interface SandboxRunner {
    * siblings. Container-only; PRoot apps don't spawn siblings.
    */
   reapSiblingsOf?(instanceId: string): void;
+  /**
+   * Every sidecar this backend currently knows about, across all instances
+   * (see `SidecarInfo`). Resolves null when the backend could not be queried,
+   * so callers can tell "none" from "unknown" and never reap on a failed read.
+   */
+  listSidecars?(): Promise<SidecarInfo[] | null>;
+  /** Remove the given sidecars (e.g. orphans whose parent instance is gone). */
+  removeSidecars?(ids: string[]): void;
+  /**
+   * Live resource usage keyed by instanceId (for instance sandboxes) and by
+   * sidecar id. Keys the backend cannot measure are simply absent.
+   */
+  usage?(req: { instanceIds: string[]; sidecarIds: string[] }): Promise<Map<string, ResourceUsage>>;
   /**
    * Remove an instance's cross-app mount root. Container-only; PRoot instances
    * have no mount root because they get no volume mount to propagate into.

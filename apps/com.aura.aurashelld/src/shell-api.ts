@@ -51,7 +51,7 @@ export interface ManifestLite {
   backgroundService?: boolean;
   category?: string;
 }
-export interface InstanceLite { instanceId: string; appId: string; state: string; pid: number | null; port: number | null; inPool?: boolean }
+export interface InstanceLite { instanceId: string; appId: string; state: string; pid: number | null; port: number | null; inPool?: boolean; sidecarCount?: number }
 export interface ActivityLite { activityId: string; parentInstanceId: string; appId: string; path: string; title?: string }
 export interface AppRecord { manifest: ManifestLite; enabled: boolean; instances: InstanceLite[]; activities: ActivityLite[] }
 
