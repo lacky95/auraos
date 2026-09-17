@@ -7,8 +7,10 @@ import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
 
 /**
  * Delete an installed app. Two-phase:
- *   1. Stop every running instance (graceful onPause/onStop/onDestroy via
- *      AppManager.stopAll, which the CLI's `aura app stop` already calls).
+ *   1. Kill every instance via AppManager.killAllForApp — graceful
+ *      onPause/onStop/onDestroy first, then SIGKILL for survivors, then a
+ *      sweep of stray sibling containers, all under markUninstalling so the
+ *      warm pool can't refill mid-delete.
  *   2. `rm -rf <scopeAppsDir>/<id>` — the app's real directory is resolved via
  *      the registry (`getAppDir`), which spans all scopes (system/global/user).
  *      A hardcoded `/workspace/apps` would only find system-scope apps and
@@ -51,16 +53,32 @@ async function deleteApp(appId: string | undefined): Promise<Response> {
     return errorResponse(`Refusing to delete unexpected path: ${dest}`, 400);
   }
 
-  // Stop everything first. stopAll runs lifecycle hooks (onPause/onStop/
-  // onDestroy) which lets the app flush state to /data before its files
-  // disappear. Failures here are warnings — we still want to remove the
-  // directory so the user isn't stuck with a half-broken install.
+  // Kill everything first, the same way the Nexus uninstall path does.
+  // `stopAll` on its own is not enough for a delete: it leaves warm-pool
+  // refill armed (the reconciler can spawn a fresh instance while we rm),
+  // it doesn't force-kill instances whose graceful stop failed, and it
+  // doesn't sweep sibling containers. markUninstalling suppresses the refill
+  // for the duration; killAllForApp does the graceful stop, then SIGKILLs
+  // survivors, then sweeps stray containers. Failures are warnings — we
+  // still want the directory gone rather than a half-broken install.
+  mgr.markUninstalling(appId, true);
   try {
-    await mgr.stopAll(appId);
+    await mgr.killAllForApp(appId);
   } catch (err) {
-    console.warn(`[apps/remove] stopAll(${appId}) failed: ${(err as Error).message} — continuing with rm`);
+    console.warn(`[apps/remove] killAllForApp(${appId}) failed: ${(err as Error).message} — continuing with rm`);
   }
 
+  try {
+    return await removeFiles(appId, dest);
+  } finally {
+    // Always unmark, including on the early `did not exist` return — leaving
+    // an app marked uninstalling would silently suppress its warm pool for
+    // the rest of the process's life.
+    mgr.markUninstalling(appId, false);
+  }
+}
+
+async function removeFiles(appId: string, dest: string): Promise<Response> {
   if (!existsSync(dest)) {
     // Directory already gone (manual rm earlier?) — chokidar may or may not
     // have caught it. Tell the registry directly via a fresh scan so the
