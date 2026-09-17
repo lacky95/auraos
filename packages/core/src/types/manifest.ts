@@ -427,6 +427,13 @@ export const AppManifestSchema = z.object({
     screenshots:     z.array(z.string().url()).max(8).default([]),
   }).optional(),
   /**
+   * Free-form, app-defined metadata. The OS stores it and returns it verbatim
+   * via /api/apps, but never interprets it — for app-to-app markers/config that
+   * are NOT part of the platform contract. Values are `unknown`, so nothing
+   * inside is stripped on parse.
+   */
+  metadata: z.record(z.string(), z.unknown()).optional(),
+  /**
    * Cross-app dependencies. Declared by author, enforced at install time
    * (the Nexus installer warns / refuses if a required dep is missing).
    * v1: the installer warns + lists missing deps; v2 auto-installs them
