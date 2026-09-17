@@ -1,9 +1,6 @@
 # AuraOS
 
-> **AuraOS — the OS for everywhere.** Phone, desktop, TV, AR, VR — one
-> coherent surface, any device, any input. Apps live in their own Docker
-> sandboxes with activities, and every layer is open for builders to
-> extend, remix, and shape into whatever comes next.
+> A self-hosted WebOS where people and AI agents work side by side. Every tool and agent runs sandboxed in its own container, installs like an app, and snaps together like building blocks — visible in one transparent control plane.
 
 ![AuraOS](assets/aura-os.png)
 
