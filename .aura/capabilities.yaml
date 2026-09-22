@@ -2,102 +2,78 @@ capabilities:
   aura:
     source: builtin
     binary: aura
-    description: "AuraOS CLI itself (forward into PRoots)"
-
+    description: AuraOS CLI itself (forward into PRoots)
   claude:
     source: npm
     package: "@anthropic-ai/claude-code"
     binary: claude
-    description: "Claude Code CLI"
-
+    description: Claude Code CLI
   codex:
     source: npm
     package: "@openai/codex"
     binary: codex
-    # The npm bin is a JS launcher that resolves a platform package relative
-    # to itself, so copying it into the toolchain would break. Point at the
-    # statically linked native binary shipped in the optional platform dep.
     binary_path: /usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
-    description: "OpenAI Codex CLI"
-
+    description: OpenAI Codex CLI
   ssh:
     source: apt
     package: openssh-client
     binary: ssh
-    description: "SSH client for remote connections"
-
+    description: SSH client for remote connections
   rg:
     source: apt
     package: ripgrep
     binary: rg
-    description: "ripgrep — fast recursive grep"
-
+    description: ripgrep — fast recursive grep
   htop:
     source: apt
     package: htop
     binary: htop
-    description: "Interactive process viewer"
-
+    description: Interactive process viewer
   nano:
     source: apt
     package: nano
     binary: nano
-    description: "Nano — small terminal text editor"
-
+    description: Nano — small terminal text editor
   jq:
     source: apt
     package: jq
     binary: jq
-    description: "Command-line JSON processor"
-
+    description: Command-line JSON processor
   fzf:
     source: apt
     package: fzf
     binary: fzf
-    description: "Fuzzy finder"
-
+    description: Fuzzy finder
   gh:
     source: apt
     package: gh
     binary: gh
-    description: "GitHub CLI"
-
+    description: GitHub CLI
   linux-coreutils:
-    # One grant, a whole toolbox. A capability is a main binary plus the
-    # `sidecars:` that travel with it, so this entry's "binary" is a tiny shim
-    # (`linux-coreutils --help` lists the bundle, `--check` verifies every tool
-    # resolves on the sandbox's PATH) and the real tools ride along as its
-    # sidecars. Granting `linux-coreutils` to an app puts all of them in its
-    # /aura/my-tools; revoking takes them all away again.
-    #
-    # `source: curl` rather than `apt` on purpose: the apt source takes ONE
-    # package and would `apt-get remove` it on `cap remove` — and curl, wget
-    # and iproute2 are things the shell container itself relies on. The bundle
-    # therefore leaves the shell's packages alone on removal (only the
-    # toolchain copies go).
-    #
-    # Left out deliberately: `nmap` and `file` need data trees under
-    # /usr/share that the cap system does not carry (it stages binaries and
-    # their .so graph, nothing else), so they would install clean and fail at
-    # first use. `ps`/`top`/`less`/`lsof`/`git` are already in both sandbox
-    # baselines (see Dockerfile, base-rootfs stage).
-    #
-    # Keep the three lists in sync: apt packages here, `tools=` in the shim,
-    # and `sidecars:` below.
     source: curl
-    install_cmd: |-
+    install_cmd: >-
       set -e
+
       export DEBIAN_FRONTEND=noninteractive
+
       apt-get update -qq
+
       apt-get install -y -q --no-install-recommends \
         iputils-ping iputils-tracepath traceroute curl wget iproute2 dnsutils \
         netcat-openbsd socat net-tools tcpdump mtr-tiny whois \
         rsync tree psmisc strace unzip zip xz-utils
       cat > /usr/local/bin/linux-coreutils <<'EOF'
+
       #!/bin/sh
+
       # linux-coreutils — AuraOS capability shim. The tools below are this
+
       # capability's sidecars; granting `linux-coreutils` puts them on PATH.
-      tools="ping tracepath traceroute curl wget ip ss dig nslookup host nc socat netstat ifconfig route arp tcpdump mtr mtr-packet whois rsync tree killall pstree fuser strace unzip zip xz"
+
+      tools="ping tracepath traceroute curl wget ip ss dig nslookup host nc
+      socat netstat ifconfig route arp tcpdump mtr mtr-packet whois rsync tree
+      killall pstree fuser strace unzip zip xz"
+
       case "${1:---help}" in
         -h|--help)
           echo "linux-coreutils: network + core utilities bundled as one AuraOS capability."
@@ -113,12 +89,13 @@ capabilities:
           exit $rc ;;
         *) echo "usage: linux-coreutils [--help|--check]" >&2; exit 2 ;;
       esac
+
       EOF
+
       chmod 755 /usr/local/bin/linux-coreutils
     binary_path: /usr/local/bin/linux-coreutils
     binary: linux-coreutils
     sidecars:
-      # network
       - /usr/bin/ping
       - /usr/bin/tracepath
       - /usr/bin/traceroute
@@ -137,10 +114,8 @@ capabilities:
       - /usr/sbin/arp
       - /usr/bin/tcpdump
       - /usr/bin/mtr
-      # mtr execs `mtr-packet` (found via PATH) to do the privileged probing
       - /usr/bin/mtr-packet
       - /usr/bin/whois
-      # core
       - /usr/bin/rsync
       - /usr/bin/tree
       - /usr/bin/killall
@@ -150,89 +125,255 @@ capabilities:
       - /usr/bin/unzip
       - /usr/bin/zip
       - /usr/bin/xz
-    description: "Network + core utilities bundle — ping, traceroute, curl, wget, ip/ss, dig, nc, socat, tcpdump, mtr, whois, rsync, tree, psmisc, strace, zip/unzip, xz"
-
+    description: Network + core utilities bundle — ping, traceroute, curl, wget,
+      ip/ss, dig, nc, socat, tcpdump, mtr, whois, rsync, tree, psmisc, strace,
+      zip/unzip, xz
   adb:
     source: curl
-    # Debian's `adb` package is platform-tools 29 (2019). It predates `adb
-    # pair`, so wireless debugging against Android 11+ is simply impossible
-    # with it, and it lags the device protocol besides. Google's
-    # platform-tools is upstream — take it directly.
-    #
-    # `latest` rather than a pinned release, matching `bun` and `code-server`
-    # here: `cap install` is an explicit, on-demand action, and an adb that is
-    # a year stale is the exact problem this entry exists to avoid.
-    #
-    # unzip is not in the shell image (node:22-slim), hence the guarded apt
-    # install. Everything lands in ONE directory so `adb`, `fastboot` and the
-    # bundled lib64/ stay together the way the RUNPATH expects.
-    install_cmd: |-
+    install_cmd: >-
       set -e
-      command -v unzip >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -q unzip; }
+
+      command -v unzip >/dev/null 2>&1 || { apt-get update -qq && apt-get
+      install -y -q unzip; }
+
       t=$(mktemp -d)
-      curl -fsSL -o "$t/pt.zip" https://dl.google.com/android/repository/platform-tools-latest-linux.zip
+
+      curl -fsSL -o "$t/pt.zip"
+      https://dl.google.com/android/repository/platform-tools-latest-linux.zip
+
       unzip -q "$t/pt.zip" -d "$t"
+
       rm -rf /usr/local/lib/android-sdk-platform-tools
+
       mv "$t/platform-tools" /usr/local/lib/android-sdk-platform-tools
-      chmod +x /usr/local/lib/android-sdk-platform-tools/adb /usr/local/lib/android-sdk-platform-tools/fastboot
+
+      chmod +x /usr/local/lib/android-sdk-platform-tools/adb
+      /usr/local/lib/android-sdk-platform-tools/fastboot
+
       rm -rf "$t"
-    # Explicit, and load-bearing: `which adb` finds Debian's /usr/bin/adb
-    # whenever the apt package happens to be installed, and the cap would
-    # silently install THAT — the stale binary this entry replaces.
     binary_path: /usr/local/lib/android-sdk-platform-tools/adb
     binary: adb
-    description: "Android Debug Bridge — Google platform-tools (has `adb pair` for wireless debugging)"
-
+    description: Android Debug Bridge — Google platform-tools (has `adb pair` for
+      wireless debugging)
   bun:
     source: curl
-    install_cmd: "curl -fsSL https://bun.sh/install | bash"
+    install_cmd: curl -fsSL https://bun.sh/install | bash
     binary_path: /root/.bun/bin/bun
     binary: bun
-    description: "Bun JavaScript runtime"
-
+    description: Bun JavaScript runtime
   oras:
     source: curl
-    install_cmd: "curl -fsSL https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_linux_amd64.tar.gz | tar -xz -C /usr/local/bin oras"
+    install_cmd: curl -fsSL
+      https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_linux_amd64.tar.gz
+      | tar -xz -C /usr/local/bin oras
     binary_path: /usr/local/bin/oras
     binary: oras
-    description: "OCI Registry As Storage client — transport for Nexus app publish/install"
-
+    description: OCI Registry As Storage client — transport for Nexus app publish/install
   zot:
     source: curl
-    install_cmd: "curl -fsSL https://github.com/project-zot/zot/releases/download/v2.1.7/zot-linux-amd64-minimal -o /usr/local/bin/zot && chmod +x /usr/local/bin/zot"
+    install_cmd: curl -fsSL
+      https://github.com/project-zot/zot/releases/download/v2.1.7/zot-linux-amd64-minimal
+      -o /usr/local/bin/zot && chmod +x /usr/local/bin/zot
     binary_path: /usr/local/bin/zot
     binary: zot
-    description: "OCI Distribution registry server — backs the com.aura.registry Nexus store"
+    description: OCI Distribution registry server — backs the com.aura.registry Nexus store
   code-server:
-    # VS Code in the browser (coder/code-server). The cap system stages single
-    # binaries + their .so graph, and code-server is a whole Node tree — so the
-    # standalone release (bundles its own node) lives in the SHARED home
-    # (/home/aura is mounted into every sandbox and the master), and the
-    # capability binary is a tiny shim that execs into it. Same model as the
-    # aura / linux-coreutils shims.
-    # NOTE: this entry is duplicated as CODE_SERVER_ENTRY in
-    # apps io.lakner.vscode src/capability.ts (the /api/admin/cap endpoint
-    # needs the parsed entry in the request body) — keep them in sync.
-    # PINNED version: the shim and tree must agree; upgrades are deliberate —
-    # bump VERSION and `aura cap install code-server` again (idempotent).
     source: curl
-    install_cmd: |-
+    install_cmd: >-
       set -e
+
       VERSION=4.137.0
+
       DEST=/home/aura/.aura/code-server
+
       if [ ! -x "$DEST/$VERSION/bin/code-server" ]; then
         rm -rf "$DEST/$VERSION"; mkdir -p "$DEST/$VERSION"
         curl -fsSL "https://github.com/coder/code-server/releases/download/v$VERSION/code-server-$VERSION-linux-amd64.tar.gz" | tar -xz -C "$DEST/$VERSION" --strip-components=1
       fi
+
       ln -sfn "$DEST/$VERSION" "$DEST/current"
+
       mkdir -p "$DEST/data" "$DEST/extensions" "$DEST/run"
+
       chmod -R a+rX "$DEST/$VERSION"
-      printf '#!/bin/sh\nexec /home/aura/.aura/code-server/current/bin/code-server "$@"\n' > /usr/local/bin/code-server
+
+      printf '#!/bin/sh\nexec
+      /home/aura/.aura/code-server/current/bin/code-server "$@"\n' >
+      /usr/local/bin/code-server
+
       chmod 755 /usr/local/bin/code-server
     binary_path: /usr/local/bin/code-server
     binary: code-server
-    description: "VS Code in the browser — standalone release in the shared home; shim lands on PATH in granted sandboxes"
+    description: VS Code in the browser — standalone release in the shared home;
+      shim lands on PATH in granted sandboxes
+  nvm:
+    source: curl
+    install_cmd: >-
+      set -e
 
+      VERSION=v0.40.8
+
+      export NVM_DIR=/home/aura/.aura/nvm
+
+      # The installer appends a loader to a shell rc file it picks itself. The
+
+      # shim is the entrypoint here, so send that edit to /dev/null.
+
+      export PROFILE=/dev/null
+
+      mkdir -p "$NVM_DIR"
+
+      curl -fsSL
+      "https://raw.githubusercontent.com/nvm-sh/nvm/$VERSION/install.sh" | bash
+
+      chmod -R a+rX "$NVM_DIR"
+
+      cat > /usr/local/bin/nvm <<'EOF'
+
+      #!/bin/sh
+
+      # nvm — AuraOS capability shim. nvm is a shell function; this runs it in
+
+      # a subshell, which is fine for everything that mutates $NVM_DIR and
+
+      # impossible for anything that mutates the caller's environment.
+
+      NVM_DIR="${NVM_DIR:-/home/aura/.aura/nvm}"
+
+      export NVM_DIR
+
+      if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+        echo "nvm: $NVM_DIR/nvm.sh is missing — run 'aura cap install nvm' on the master." >&2
+        exit 1
+      fi
+
+      case "${1:-}" in
+        use|deactivate|unload)
+          echo "nvm: '$1' changes the calling shell, which a shim cannot do." >&2
+          echo "Run this instead:  eval \"\$(nvm-env)\" && nvm $*" >&2
+          echo "Or make it the default for new shells:  nvm alias default <version>" >&2
+          exit 2 ;;
+      esac
+
+      . "$NVM_DIR/nvm.sh" --no-use
+
+      # Without this guard a failed source falls through to a PATH lookup,
+
+      # which finds this shim again and forks until the sandbox gives up.
+
+      # POSIX `command -v` prints a bare name for a function, a path for a file.
+
+      if [ "$(command -v nvm)" != "nvm" ]; then
+        echo "nvm: sourcing $NVM_DIR/nvm.sh did not define the nvm function." >&2
+        exit 1
+      fi
+
+      nvm "$@"
+
+      EOF
+
+      chmod 755 /usr/local/bin/nvm
+
+      cat > /usr/local/bin/nvm-env <<'EOF'
+
+      #!/bin/sh
+
+      # nvm-env — AuraOS helper. Prints the lines that load the REAL nvm
+
+      # function into the CURRENT shell, so `nvm use` works there.
+
+      #   eval "$(nvm-env)"
+
+      cat <<'ENVEOF'
+
+      export NVM_DIR="/home/aura/.aura/nvm"
+
+      [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+      ENVEOF
+
+      EOF
+
+      chmod 755 /usr/local/bin/nvm-env
+    binary_path: /usr/local/bin/nvm
+    binary: nvm
+    sidecars:
+      - /usr/local/bin/nvm-env
+    description: Node Version Manager — node versions shared via
+      /home/aura/.aura/nvm; `eval "$(nvm-env)"` for a real `nvm use`
+  asdf:
+    source: curl
+    install_cmd: >-
+      set -e
+
+      VERSION=0.20.0
+
+      DEST=/home/aura/.aura/asdf
+
+      if [ ! -x "$DEST/$VERSION/asdf" ]; then
+        rm -rf "$DEST/$VERSION"; mkdir -p "$DEST/$VERSION"
+        curl -fsSL "https://github.com/asdf-vm/asdf/releases/download/v$VERSION/asdf-v$VERSION-linux-amd64.tar.gz" | tar -xz -C "$DEST/$VERSION"
+      fi
+
+      ln -sfn "$DEST/$VERSION" "$DEST/current"
+
+      mkdir -p "$DEST/data"
+
+      chmod -R a+rX "$DEST/$VERSION"
+
+      cat > /usr/local/bin/asdf <<'EOF'
+
+      #!/bin/sh
+
+      # asdf — AuraOS capability shim. Pins the data dir to the shared home so
+
+      # plugins and installed versions outlive the sandbox, then hands off to
+
+      # the real static binary.
+
+      ASDF_DATA_DIR="${ASDF_DATA_DIR:-/home/aura/.aura/asdf/data}"
+
+      export ASDF_DATA_DIR
+
+      exec /home/aura/.aura/asdf/current/asdf "$@"
+
+      EOF
+
+      chmod 755 /usr/local/bin/asdf
+
+      cat > /usr/local/bin/asdf-env <<'EOF'
+
+      #!/bin/sh
+
+      # asdf-env — AuraOS helper. Prints the lines that put asdf's shim dir on
+
+      # PATH in the CURRENT shell, which is what makes an installed `node` or
+
+      # `go` runnable. The asdf shim itself cannot do it.
+
+      #   eval "$(asdf-env)"
+
+      cat <<'ENVEOF'
+
+      export ASDF_DATA_DIR="/home/aura/.aura/asdf/data"
+
+      export PATH="$ASDF_DATA_DIR/shims:$PATH"
+
+      ENVEOF
+
+      EOF
+
+      chmod 755 /usr/local/bin/asdf-env
+    binary_path: /usr/local/bin/asdf
+    binary: asdf
+    sidecars:
+      - /usr/local/bin/asdf-env
+    description: asdf version manager (Go) — plugins/versions shared via
+      /home/aura/.aura/asdf; `eval "$(asdf-env)"` puts its shims on PATH
+  sshpass:
+    source: apt
+    binary: sshpass
+    package: sshpass
 services:
   sshd:
     source: apt
@@ -244,5 +385,5 @@ services:
       PermitRootLogin yes
       PasswordAuthentication yes
       UsePAM no
-    start_cmd: "mkdir -p /run/sshd && /usr/sbin/sshd -D -p 2222"
-    description: "SSH server daemon (port 2222)"
+    start_cmd: mkdir -p /run/sshd && /usr/sbin/sshd -D -p 2222
+    description: SSH server daemon (port 2222)

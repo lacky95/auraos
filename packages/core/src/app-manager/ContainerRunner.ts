@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
 import { toolsGrant } from './tool-allowlist.js';
-import { MY_TOOLS_LIB_PATH, MY_TOOLS_PATH, SHARED_HOME_PATH, currentToolsMode, provisionAllowlist, toolchainMirrorBin } from './tool-provision.js';
+import { MY_TOOLS_PATH, SHARED_HOME_PATH, currentToolsMode, provisionAllowlist, toolchainMirrorBin } from './tool-provision.js';
 import { userHomeSubpath } from '../scopes/home.js';
 // Value import, but MountManager imports ContainerRunner type-only, so there
 // is no runtime cycle.
@@ -589,14 +589,11 @@ export class ContainerRunner implements SandboxRunner {
       '-e', `LANG=C.UTF-8`,
       '-e', `LC_ALL=C.UTF-8`,
       '-e', `PATH=${MY_TOOLS_PATH}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
-      // Shared libraries of the granted tools. No extra mount: `.lib` is a
-      // subdir of the allowlist dir mounted above, so it arrives with the
-      // grant. A cap installed via apt lands its .so files in the SHELL's
-      // /usr/lib — this image has never seen them, which is why a
-      // dynamically-linked cap used to be on PATH and still die at exec with
-      // "cannot open shared object file". Also set by os/bashrc.aura.sh, which
-      // is what gets it into shells of ALREADY-RUNNING containers.
-      '-e', `LD_LIBRARY_PATH=${MY_TOOLS_LIB_PATH}`,
+      // No LD_LIBRARY_PATH: granted tools with staged libraries are wrapper
+      // scripts that scope it to their own process tree (provisionAllowlist).
+      // Exporting it container-wide made the staged Debian sonames shadow the
+      // image's own newer copies — any runtime linked against a newer
+      // libcrypto/libssl than the shell's broke at import time.
       // Which allowlist mode the OS provisioned this instance with. Read by
       // @aura/app-sdk's sidecar host (`inheritTools`) so a sibling runtime
       // mounts the same set the OS gave the controlling app — and, in

@@ -523,11 +523,13 @@ export class SidecarHost {
       '-v', `${this.opts.workspaceRoot}/packages:/workspace/packages:ro`,
       '--mount', `type=volume,source=${this.opts.nodeModulesVolume},target=/workspace/node_modules,readonly`,
       '-e', `PATH=/aura/my-tools:${basePath}`,
-      // Granted tools' shared libraries, matching what ContainerRunner gives
-      // the controlling app. `.lib` rides in on the /aura/my-tools mount
-      // above, so a dynamically-linked cap works in a sibling too — without
-      // this line siblings regress to "cannot open shared object file".
-      '-e', 'LD_LIBRARY_PATH=/aura/my-tools/.lib',
+      // No LD_LIBRARY_PATH: granted tools that need staged libraries are
+      // wrapper scripts that set it for their own process tree (see the OS's
+      // provisionAllowlist), matching what ContainerRunner gives the
+      // controlling app. Exporting it container-wide is what broke sibling
+      // runtimes built against newer libs than the shell's — the staged
+      // Debian libcrypto shadowed a runtime's own OpenSSL and killed its
+      // Python `ssl` module at import.
       // The `-e PATH` above only covers processes that inherit the container's
       // env. A LOGIN shell doesn't: /etc/profile assigns PATH outright (both
       // its root and non-root branches), dropping /aura/my-tools, so anything

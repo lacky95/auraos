@@ -237,6 +237,158 @@ capabilities:
     binary: code-server
     description: "VS Code in the browser — standalone release in the shared home; shim lands on PATH in granted sandboxes"
 
+
+  nvm:
+    # Node Version Manager. nvm is NOT a binary — it is a shell FUNCTION that
+    # edits the calling shell's PATH, so it can't be staged the way every
+    # other cap is. Two consequences, both handled here:
+    #
+    #   1. The tree lives in the SHARED home (/home/aura is mounted into every
+    #      sandbox and the master), so node versions installed from one app
+    #      are visible to all of them and survive a container recreate — same
+    #      model as `code-server`. The capability binary is a shim.
+    #   2. A shim runs in a SUBSHELL, so `nvm use` would exit 0 and change
+    #      nothing — the silent no-op this repo keeps warning about. The shim
+    #      refuses exactly those subcommands and prints the line that works:
+    #      `eval "$(nvm-env)"` loads the real function into the current shell,
+    #      after which plain `nvm use` behaves normally.
+    #
+    # Everything that writes to $NVM_DIR rather than to the shell — install,
+    # uninstall, alias, ls, ls-remote, exec, run, which — works via the shim.
+    #
+    # Fetching a node build needs curl (or wget) INSIDE the sandbox: the base
+    # rootfs ships curl, so a plain PRoot app is fine. It has no xz, so nvm
+    # falls back to the .tar.gz artifact; grant `linux-coreutils` for xz.
+    #
+    # PINNED version: bump VERSION and `aura cap install nvm` again. The
+    # installer is idempotent — it fetches and checks out in place.
+    source: curl
+    install_cmd: |-
+      set -e
+      VERSION=v0.40.8
+      export NVM_DIR=/home/aura/.aura/nvm
+      # The installer appends a loader to a shell rc file it picks itself. The
+      # shim is the entrypoint here, so send that edit to /dev/null.
+      export PROFILE=/dev/null
+      mkdir -p "$NVM_DIR"
+      curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/$VERSION/install.sh" | bash
+      chmod -R a+rX "$NVM_DIR"
+      cat > /usr/local/bin/nvm <<'EOF'
+      #!/bin/sh
+      # nvm — AuraOS capability shim. nvm is a shell function; this runs it in
+      # a subshell, which is fine for everything that mutates $NVM_DIR and
+      # impossible for anything that mutates the caller's environment.
+      NVM_DIR="${NVM_DIR:-/home/aura/.aura/nvm}"
+      export NVM_DIR
+      if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+        echo "nvm: $NVM_DIR/nvm.sh is missing — run 'aura cap install nvm' on the master." >&2
+        exit 1
+      fi
+      case "${1:-}" in
+        use|deactivate|unload)
+          echo "nvm: '$1' changes the calling shell, which a shim cannot do." >&2
+          echo "Run this instead:  eval \"\$(nvm-env)\" && nvm $*" >&2
+          echo "Or make it the default for new shells:  nvm alias default <version>" >&2
+          exit 2 ;;
+      esac
+      . "$NVM_DIR/nvm.sh" --no-use
+      # Without this guard a failed source falls through to a PATH lookup,
+      # which finds this shim again and forks until the sandbox gives up.
+      # POSIX `command -v` prints a bare name for a function, a path for a file.
+      if [ "$(command -v nvm)" != "nvm" ]; then
+        echo "nvm: sourcing $NVM_DIR/nvm.sh did not define the nvm function." >&2
+        exit 1
+      fi
+      nvm "$@"
+      EOF
+      chmod 755 /usr/local/bin/nvm
+      cat > /usr/local/bin/nvm-env <<'EOF'
+      #!/bin/sh
+      # nvm-env — AuraOS helper. Prints the lines that load the REAL nvm
+      # function into the CURRENT shell, so `nvm use` works there.
+      #   eval "$(nvm-env)"
+      cat <<'ENVEOF'
+      export NVM_DIR="/home/aura/.aura/nvm"
+      [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+      ENVEOF
+      EOF
+      chmod 755 /usr/local/bin/nvm-env
+    binary_path: /usr/local/bin/nvm
+    binary: nvm
+    # Declared, not detected: helper auto-adoption is off for /usr/local/bin
+    # and the other system bin dirs (see `detectSidecars`), so without this a
+    # grant would ship the shim and leave `nvm-env` — the only way to get a
+    # working `nvm use` — behind on the master.
+    sidecars:
+      - /usr/local/bin/nvm-env
+    description: "Node Version Manager — node versions shared via /home/aura/.aura/nvm; `eval \"$(nvm-env)\"` for a real `nvm use`"
+
+  asdf:
+    # asdf version manager, the Go rewrite (v0.16+): one static binary, no
+    # longer the shell script that had to be sourced. So unlike `nvm` above,
+    # `asdf use`-style commands are not a problem — asdf writes .tool-versions
+    # and dispatches through shims rather than editing the live shell.
+    #
+    # The binary is self-contained; its STATE is not. Plugins and every
+    # installed tool version live under $ASDF_DATA_DIR, which defaults to
+    # $HOME/.asdf — a path that differs per sandbox and, in a PRoot, is
+    # discarded with the rootfs. Binary and data therefore both live in the
+    # SHARED home (/home/aura, mounted into every sandbox and the master) and
+    # the capability binary is a shim that pins ASDF_DATA_DIR before exec'ing
+    # it — same model as `code-server`.
+    #
+    # asdf puts the tools it installs in $ASDF_DATA_DIR/shims, and a shim
+    # cannot prepend that to the caller's PATH. `eval "$(asdf-env)"` does.
+    #
+    # Plugins are git repos, and plugin scripts want git + curl: both are in
+    # the base rootfs, so `asdf plugin add` / `asdf install` work in a plain
+    # PRoot app. Plugins that COMPILE their tool from source (python, ruby)
+    # still need a C toolchain no sandbox has — the prebuilt-binary ones
+    # (nodejs, golang, deno, bun) are the ones that work out of the box.
+    #
+    # PINNED version: the shim and the tree must agree, so upgrades are
+    # deliberate — bump VERSION and `aura cap install asdf` again (idempotent).
+    source: curl
+    install_cmd: |-
+      set -e
+      VERSION=0.20.0
+      DEST=/home/aura/.aura/asdf
+      if [ ! -x "$DEST/$VERSION/asdf" ]; then
+        rm -rf "$DEST/$VERSION"; mkdir -p "$DEST/$VERSION"
+        curl -fsSL "https://github.com/asdf-vm/asdf/releases/download/v$VERSION/asdf-v$VERSION-linux-amd64.tar.gz" | tar -xz -C "$DEST/$VERSION"
+      fi
+      ln -sfn "$DEST/$VERSION" "$DEST/current"
+      mkdir -p "$DEST/data"
+      chmod -R a+rX "$DEST/$VERSION"
+      cat > /usr/local/bin/asdf <<'EOF'
+      #!/bin/sh
+      # asdf — AuraOS capability shim. Pins the data dir to the shared home so
+      # plugins and installed versions outlive the sandbox, then hands off to
+      # the real static binary.
+      ASDF_DATA_DIR="${ASDF_DATA_DIR:-/home/aura/.aura/asdf/data}"
+      export ASDF_DATA_DIR
+      exec /home/aura/.aura/asdf/current/asdf "$@"
+      EOF
+      chmod 755 /usr/local/bin/asdf
+      cat > /usr/local/bin/asdf-env <<'EOF'
+      #!/bin/sh
+      # asdf-env — AuraOS helper. Prints the lines that put asdf's shim dir on
+      # PATH in the CURRENT shell, which is what makes an installed `node` or
+      # `go` runnable. The asdf shim itself cannot do it.
+      #   eval "$(asdf-env)"
+      cat <<'ENVEOF'
+      export ASDF_DATA_DIR="/home/aura/.aura/asdf/data"
+      export PATH="$ASDF_DATA_DIR/shims:$PATH"
+      ENVEOF
+      EOF
+      chmod 755 /usr/local/bin/asdf-env
+    binary_path: /usr/local/bin/asdf
+    binary: asdf
+    # Declared for the same reason as nvm-env: /usr/local/bin is a system bin
+    # dir, where `<binary>-*` auto-adoption is deliberately off.
+    sidecars:
+      - /usr/local/bin/asdf-env
+    description: "asdf version manager (Go) — plugins/versions shared via /home/aura/.aura/asdf; `eval \"$(asdf-env)\"` puts its shims on PATH"
 services:
   sshd:
     source: apt

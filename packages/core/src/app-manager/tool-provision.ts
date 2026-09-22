@@ -42,14 +42,47 @@ export const ALL_TOOLS_PATH = '/aura/all-tools';
 export const MY_TOOLS_PATH = '/aura/my-tools';
 
 /**
- * Where a sandbox finds the shared libraries of the tools it was granted;
- * goes on `LD_LIBRARY_PATH`. It is a subdir of the allowlist dir on purpose —
- * that dir is already mounted into every sandbox, so libraries ride in on the
- * mount the grant already has and need no second one. A second mount would
- * have to expose the whole lib store, which is the same leak the 'hardlink'
- * mode exists to close.
+ * Where a sandbox finds the shared libraries of the tools it was granted.
+ * It is a subdir of the allowlist dir on purpose — that dir is already
+ * mounted into every sandbox, so libraries ride in on the mount the grant
+ * already has and need no second one. A second mount would have to expose
+ * the whole lib store, which is the same leak the 'hardlink' mode exists to
+ * close.
+ *
+ * Referenced ONLY by the generated wrapper scripts (see `wrapperScript`),
+ * never exported as a container-wide `LD_LIBRARY_PATH`: the staged libs are
+ * the shell's Debian builds, and a global override shadows the same sonames
+ * inside any image built against newer ones — a sidecar runtime shipping
+ * OpenSSL 3.5 lost its Python `ssl` module to the staged 3.0 libcrypto that
+ * way.
  */
 export const MY_TOOLS_LIB_PATH = `${MY_TOOLS_PATH}/${INSTANCE_LIB_DIR}`;
+
+/**
+ * Subdir of a per-instance allowlist dir holding the REAL granted binaries
+ * whenever the instance has staged libraries; the top-level entries are then
+ * wrapper scripts that scope `LD_LIBRARY_PATH` to the tool's own process
+ * tree. Dotted for the same reason as `.lib`: invisible to
+ * `listToolchainBinaries` and to tool pickers. EVERY granted binary is linked
+ * here, not just the owners with lib entries, so a tool that locates its
+ * helpers relative to /proc/self/exe still finds them as siblings.
+ */
+export const INSTANCE_BIN_DIR = '.bin';
+export const MY_TOOLS_BIN_PATH = `${MY_TOOLS_PATH}/${INSTANCE_BIN_DIR}`;
+
+/**
+ * The wrapper placed at `/aura/my-tools/<name>` when the instance's `.lib`
+ * is non-empty. Prepends rather than assigns so a caller-supplied
+ * LD_LIBRARY_PATH still wins for its own entries.
+ */
+export function wrapperScript(name: string): string {
+  return [
+    '#!/bin/sh',
+    `export LD_LIBRARY_PATH="${MY_TOOLS_LIB_PATH}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"`,
+    `exec "${MY_TOOLS_BIN_PATH}/${name}" "\$@"`,
+    '',
+  ].join('\n');
+}
 
 /**
  * Sidecar map filename inside a toolchain bin dir: `{ owner: [helper, ...] }`.
@@ -302,12 +335,12 @@ export function provisionAllowlist(opts: {
   mkdirSync(dir, { recursive: true });
   try {
     for (const name of readdirSync(dir)) {
-      // `.lib` is reconciled in place by materialiseLibs below, for the same
-      // mount-by-inode reason this loop exists. It must also be SKIPPED here:
-      // a non-recursive rmSync on a directory throws ERR_FS_EISDIR, and the
-      // catch that used to wrap this whole loop would have swallowed it and
-      // abandoned every entry after it.
-      if (name === INSTANCE_LIB_DIR) continue;
+      // `.lib` is reconciled in place by materialiseLibs below, and `.bin`
+      // by the loop after it, for the same mount-by-inode reason this loop
+      // exists. Both must also be SKIPPED here: a non-recursive rmSync on a
+      // directory throws ERR_FS_EISDIR, and the catch that used to wrap this
+      // whole loop would have swallowed it and abandoned every entry after it.
+      if (name === INSTANCE_LIB_DIR || name === INSTANCE_BIN_DIR) continue;
       try { rmSync(join(dir, name), { recursive: true, force: true }); } catch { /* ignore */ }
     }
   } catch { /* dir was already empty */ }
@@ -330,19 +363,58 @@ export function provisionAllowlist(opts: {
     mode,
   });
 
+  // Wrap whenever the instance carries staged libraries. Per-binary precision
+  // is possible (the lib map knows its owners) but buys nothing: a wrapper on
+  // a tool that needs no staged lib is a no-op, while a MISSED wrapper on one
+  // that does is exactly the loader error this module exists to prevent.
+  const wrap = libs.length > 0;
+
+  // Reconcile `.bin` in place (same mount-by-inode care as `.lib`): the real
+  // binaries live here and the top-level names become wrapper scripts. When
+  // nothing needs wrapping the whole subdir goes away — path resolution walks
+  // dirents per exec, so no running app holds a reference into it.
+  const binDir = join(dir, INSTANCE_BIN_DIR);
+  if (wrap) {
+    mkdirSync(binDir, { recursive: true });
+    const keep = new Set(wanted);
+    try {
+      for (const name of readdirSync(binDir)) {
+        if (keep.has(name)) continue;
+        try { rmSync(join(binDir, name), { recursive: true, force: true }); } catch { /* ignore */ }
+      }
+    } catch { /* already empty */ }
+  } else {
+    try { rmSync(binDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+
+  // EEXIST means a concurrent refresh already placed it — not a failure.
+  const place = (src: string, dst: string): boolean => {
+    try {
+      if (mode === 'hardlink') linkSync(src, dst);
+      else symlinkSync(src, dst);
+      return true;
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === 'EEXIST';
+    }
+  };
+
   const linked: string[] = [];
   const missing: string[] = [];
   for (const bin of wanted) {
-    const dst = join(dir, bin);
-    try {
-      if (mode === 'hardlink') linkSync(join(mirrorBin, bin), dst);
-      else symlinkSync(`${ALL_TOOLS_PATH}/${bin}`, dst);
-      linked.push(bin);
-    } catch (err) {
-      // EEXIST means a concurrent refresh already placed it — not a failure.
-      if ((err as NodeJS.ErrnoException).code === 'EEXIST') { linked.push(bin); continue; }
-      missing.push(bin);
+    const src = mode === 'hardlink' ? join(mirrorBin, bin) : `${ALL_TOOLS_PATH}/${bin}`;
+    let ok: boolean;
+    if (wrap) {
+      // Real binary first, wrapper second — a name must never be on PATH
+      // before the file it execs exists.
+      ok = place(src, join(binDir, bin));
+      if (ok) {
+        try { writeFileSync(join(dir, bin), wrapperScript(bin), { mode: 0o755 }); }
+        catch { ok = false; }
+      }
+    } else {
+      ok = place(src, join(dir, bin));
     }
+    (ok ? linked : missing).push(bin);
   }
   if (missing.length) {
     console.warn(
