@@ -33,7 +33,7 @@
  * container's own `/proc/self/mountinfo`, and rolled back if it doesn't match.
  */
 import { execFileSync, execSync } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { AppRegistry } from './AppRegistry.js';
 import type { ScopeRegistry } from '../scopes/ScopeRegistry.js';
@@ -128,15 +128,46 @@ export class MountManager {
   /** Persist the current mount set as declarations. Never throws: a failed
    *  write must not fail the mount the user just asked for. */
   private writeDecls(instanceId: string): void {
-    const specs: AddMountSpec[] = this.list(instanceId).map((m) => ({
+    this.writeDeclFile(instanceId, this.list(instanceId).map((m) => ({
       targetAppId: m.targetAppId, mode: m.mode, data: m.kind === 'data',
-    }));
+    })));
+  }
+
+  private writeDeclFile(instanceId: string, specs: AddMountSpec[]): void {
     try {
       mkdirSync(dirname(this.declFile(instanceId)), { recursive: true });
       if (specs.length === 0) rmSync(this.declFile(instanceId), { force: true });
       else writeFileSync(this.declFile(instanceId), JSON.stringify(specs, null, 2));
     } catch (err) {
       console.warn(`[MountManager] could not persist mounts for ${instanceId}: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Delete leftover mountpoint DIRECTORIES that no current mount owns.
+   *
+   * Two ways they arise: a bind that failed after its `mkdir -p`, and — the
+   * big one — instance ids are RECYCLED across AppManager generations, so
+   * `/data/aura/mounts/com.aura.terminal-2` accumulates dirs from every past
+   * life of that name. The result is `ls /mnt/aura` showing entries that
+   * `aura mount ls` (truthfully) doesn't list.
+   *
+   * Safety is structural: `rmdirSync` only removes an EMPTY directory, and a
+   * live bind at the path fails it with EBUSY — so real mounts and real data
+   * are unremovable by construction, and every failure is simply skipped.
+   */
+  private pruneStale(instanceId: string): void {
+    const current = new Set(this.list(instanceId).map((m) => this.dirName(m.targetAppId, m.kind)));
+    const roots = [this.opts.runner.mountRootDir(instanceId)];
+    const dataDir = this.opts.instanceDataDir(instanceId);
+    if (dataDir) roots.push(join(dataDir, MOUNT_DIR_NAME));
+    for (const root of roots) {
+      let names: string[];
+      try { names = readdirSync(root); } catch { continue; }   // root absent
+      for (const name of names) {
+        if (current.has(name)) continue;
+        try { rmdirSync(join(root, name)); } catch { /* mounted, non-empty, or gone */ }
+      }
     }
   }
 
@@ -150,22 +181,35 @@ export class MountManager {
    */
   async reapply(instanceId: string): Promise<{ restored: number; failed: number }> {
     const specs = this.readDecls(instanceId);
-    if (specs.length === 0) return { restored: 0, failed: 0 };
+    if (specs.length === 0) { this.pruneStale(instanceId); return { restored: 0, failed: 0 }; }
     if (!this.capable().ok) return { restored: 0, failed: specs.length };
 
     let restored = 0;
     let failed   = 0;
+    // Declarations whose target app is gone are DROPPED, not failed: instance
+    // ids recycle across generations, so a dead declaration would otherwise
+    // fail on every boot forever ("reapply: restored 0, failed N"). A
+    // transient failure for an app that still exists stays declared.
+    const kept: AddMountSpec[] = [];
     for (const spec of specs) {
       const id = this.mountId(spec.targetAppId, spec.data ? 'data' : 'source');
-      if (this.mounts.get(instanceId)?.has(id)) continue;   // already there (adopted)
+      if (this.mounts.get(instanceId)?.has(id)) { kept.push(spec); continue; }   // already there (adopted)
+      if (!this.opts.registry.getById(spec.targetAppId)) {
+        console.log(`[MountManager] dropping declared mount ${id} for ${instanceId} — target app is no longer installed`);
+        continue;
+      }
       try {
         await this.add(instanceId, spec, { persist: false });
         restored++;
+        kept.push(spec);
       } catch (err) {
         failed++;
+        kept.push(spec);
         console.warn(`[MountManager] could not restore ${id} into ${instanceId}: ${(err as Error).message}`);
       }
     }
+    if (kept.length !== specs.length) this.writeDeclFile(instanceId, kept);
+    this.pruneStale(instanceId);
     if (restored || failed) {
       console.log(`[MountManager] reapply ${instanceId}: restored ${restored}, failed ${failed}`);
     }
@@ -189,11 +233,16 @@ export class MountManager {
    * in the shell's mountinfo — no docker calls needed to enumerate.
    */
   liveMountPaths(): string[] {
+    // Both roots, or reconcile is blind: matching only `/.mnt/` left every
+    // canonical-root bind (`<dataDir>/aura/mounts/<id>/…`) unlisted AND
+    // unreaped — instance ids recycle, so the leaks accumulated forever.
+    const canonicalRoot = `${join(this.opts.dataDir, 'aura', 'mounts')}/`;
     try {
       return readFileSync('/proc/self/mountinfo', 'utf-8')
         .split('\n')
         .map((l) => l.split(' ')[4] ?? '')
-        .filter((p) => p.startsWith(`${this.opts.dataDir}/`) && p.includes(`/${MOUNT_DIR_NAME}/`));
+        .filter((p) => p.startsWith(`${this.opts.dataDir}/`)
+          && (p.includes(`/${MOUNT_DIR_NAME}/`) || (p.startsWith(canonicalRoot) && !p.includes('/.state/'))));
     } catch {
       return [];
     }
@@ -210,7 +259,15 @@ export class MountManager {
     // dataDir for all three scopes (system's SOURCE is a host bind, but its
     // DATA still lives on the volume).
     const scope = this.opts.scopeRegistry.getById(manifest.scopeId);
-    return join(scope.dataDir, 'apps', targetAppId);
+    const appLevel = join(scope.dataDir, 'apps', targetAppId);
+    if (appLevel !== manifest.appDir) return appLevel;
+    // USER-scoped apps live ON the volume: `manifest.appDir` IS the app-level
+    // dir, so instance data nests inside the source tree and a "data" mount
+    // of the app-level dir was just a second source mount. Mount the primary
+    // instance's data dir instead — instance ids are `<appId>` for a
+    // singleton (`<appId>-<n>` otherwise), so `apps/<id>/<id>` holds only
+    // data.
+    return join(appLevel, targetAppId);
   }
 
   private mountId(targetAppId: string, kind: MountKind): string {
@@ -262,6 +319,9 @@ export class MountManager {
     if (!consumerDataDir) throw new Error(`Instance not found: ${instanceId}`);
 
     const srcShell = this.resolveSource(spec.targetAppId, kind);
+    // A data dir only appears once the target has spawned — create it so a
+    // data mount of a fresh target binds an empty dir instead of failing.
+    if (kind === 'data') { try { mkdirSync(srcShell, { recursive: true }); } catch { /* mount will report */ } }
     const dirName  = this.dirName(spec.targetAppId, kind);
     const root     = this.rootFor(instanceId, consumerDataDir);
     const dstShell = join(root.shellDir, dirName);
@@ -276,16 +336,28 @@ export class MountManager {
     const hostDest   = this.opts.runner.toDaemonHostPath(dstShell);
     const containerPath = `${root.containerDir}/${dirName}`;
 
-    this.runHelper(instanceId, [
-      // The SOURCE carries the ro/rw decision — see the module header.
-      '-v', `${hostSource}:/src${mode === 'ro' ? ':ro' : ''}`,
-      // `/` is a shared mount, so binds made under /host propagate to the host
-      // peer group and thence into every slave (i.e. the app containers).
-      '-v', '/:/host:rshared',
-    ], 'mkdir -p "/host$1" && mount --bind /src "/host$1"', hostDest);
+    // A bind may already exist at the destination — a survivor from a previous
+    // shell generation (binds live in the host kernel, not in this process).
+    // Mounting again would STACK a second bind on top; one detach then peels a
+    // single layer and the mount "comes back". Adopt the survivor instead, with
+    // its ACTUAL mode — verify() below still enforces what was promised.
+    const preExisting = this.liveMountPaths().includes(dstShell);
+    if (!preExisting) {
+      this.runHelper(instanceId, [
+        // The SOURCE carries the ro/rw decision — see the module header.
+        '-v', `${hostSource}:/src${mode === 'ro' ? ':ro' : ''}`,
+        // `/` is a shared mount, so binds made under /host propagate to the host
+        // peer group and thence into every slave (i.e. the app containers).
+        '-v', '/:/host:rshared',
+        // On bind failure, remove the dir mkdir just made (rmdir: empty only,
+        // so a pre-existing dir with content survives) — a failed mount must
+        // not leave a phantom entry under the consumer's mount root.
+      ], 'mkdir -p "/host$1" && { mount --bind /src "/host$1" || { rmdir "/host$1" 2>/dev/null || true; exit 1; }; }', hostDest);
+    }
 
     const mount: AuraMount = {
-      id, instanceId, targetAppId: spec.targetAppId, kind, mode,
+      id, instanceId, targetAppId: spec.targetAppId, kind,
+      mode: preExisting ? this.readModeAt(dstShell) : mode,
       containerPath, hostSource, hostDest, createdAt: new Date().toISOString(),
     };
 
@@ -311,6 +383,7 @@ export class MountManager {
     this.mounts.get(instanceId)!.delete(mountId);
     this.writeDecls(instanceId);   // an explicit detach is a change of intent
     if (this.mounts.get(instanceId)!.size === 0) this.mounts.delete(instanceId);
+    this.pruneStale(instanceId);
   }
 
   /**
@@ -345,6 +418,22 @@ export class MountManager {
     let adopted = 0;
     let reaped  = 0;
 
+    // One mountinfo read per instance, cached across the loop. `null` marks a
+    // consumer we could not inspect — those mounts are left untouched rather
+    // than guessed at.
+    const containerInfo = new Map<string, string | null>();
+    const infoFor = (instanceId: string): string | null => {
+      if (!containerInfo.has(instanceId)) {
+        try {
+          containerInfo.set(instanceId, execSync(
+            `docker exec ${containerNameFor(instanceId)} cat /proc/self/mountinfo`,
+            { stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000, encoding: 'utf-8' },
+          ));
+        } catch { containerInfo.set(instanceId, null); }
+      }
+      return containerInfo.get(instanceId)!;
+    };
+
     for (const path of this.liveMountPaths()) {
       const parsed = this.parseMountPath(path);
       if (!parsed) continue;
@@ -355,6 +444,28 @@ export class MountManager {
           this.unmountHost(instanceId, this.opts.runner.toDaemonHostPath(path));
           reaped++;
           console.log(`[MountManager] reaped orphan mount ${dirName} (dead instance ${instanceId})`);
+        } catch (err) {
+          console.warn(`[MountManager] could not reap ${path}: ${(err as Error).message}`);
+        }
+        continue;
+      }
+
+      // Instance ids RECYCLE across AppManager generations, and docker's
+      // volume mount is non-recursive — so a bind made for a previous life of
+      // this id still exists host-side but is INVISIBLE inside the current
+      // container. Adopting it would list (and re-declare!) a mount nobody
+      // can see. Visible-inside is the discriminator: propagation delivers
+      // every legitimate bind into the running consumer.
+      const candidatePath = path.includes(`/${MOUNT_DIR_NAME}/`)
+        ? `/data/${MOUNT_DIR_NAME}/${dirName}`
+        : `${MOUNT_ROOT_PATH}/${dirName}`;
+      const info = infoFor(instanceId);
+      if (info === null) continue;   // can't inspect the consumer — leave it
+      if (!info.split('\n').some((l) => l.split(' ')[4] === candidatePath)) {
+        try {
+          this.unmountHost(instanceId, this.opts.runner.toDaemonHostPath(path));
+          reaped++;
+          console.log(`[MountManager] reaped leaked mount ${dirName} (previous life of ${instanceId})`);
         } catch (err) {
           console.warn(`[MountManager] could not reap ${path}: ${(err as Error).message}`);
         }
@@ -437,10 +548,12 @@ export class MountManager {
   }
 
   private unmountHost(instanceId: string, hostDest: string): void {
-    // Lazy fallback so a shell sitting inside the mount can't block detach;
+    // Loop: binds can be STACKED (one per shell generation, before add()
+    // learned to adopt survivors) and one umount peels one layer. Lazy
+    // fallback so a shell sitting inside the mount can't block detach;
     // a lazy detach still propagates.
     this.runHelper(instanceId, ['-v', '/:/host:rshared'],
-      'umount "/host$1" 2>/dev/null || umount -l "/host$1"; rmdir "/host$1" 2>/dev/null || true',
+      'while umount "/host$1" 2>/dev/null; do :; done; umount -l "/host$1" 2>/dev/null || true; rmdir "/host$1" 2>/dev/null || true',
       hostDest);
   }
 

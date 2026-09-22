@@ -16,7 +16,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, statSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -142,7 +142,30 @@ test('a staged lib is named by SONAME, not by the file it resolved to', () => {
   assert.ok(!existsSync(join(libDir, 'libusb-1.0.so.0.3.0')), 'not under the resolved filename');
 });
 
-test('re-staging truncates in place so instance hardlinks see the new content', () => {
+test('re-staging replaces by rename: the old inode is never truncated', () => {
+  // The regression this pins: an in-place truncating copy rewrote a `.so`
+  // that live processes had mmapped, SIGBUSing every tmux/pty on the OS
+  // during one `cap install`. The store must get a NEW inode; whatever still
+  // holds the old one keeps reading v1.
+  const src = store(), libDir = store(), inst = store();
+  const real = join(src, 'libz.so.1');
+  writeFileSync(real, 'v1');
+  const dep = [{ soname: 'libz.so.1', origin: real, kind: 'staged' }];
+  stageLibs(dep, [libDir]);
+  materialiseLibs({ toolsDir: inst, libStore: libDir, sonames: ['libz.so.1'], mode: 'hardlink' });
+  const instPath = join(inst, INSTANCE_LIB_DIR, 'libz.so.1');
+  const oldInode = statSync(instPath).ino;
+
+  writeFileSync(real, 'v2');
+  stageLibs(dep, [libDir]);
+  assert.notEqual(statSync(join(libDir, 'libz.so.1')).ino, oldInode, 'store must hold a fresh inode');
+  assert.equal(
+    readFileSync(instPath, 'utf-8'), 'v1',
+    'the mapped old inode must be untouched — truncating it is the SIGBUS bug',
+  );
+});
+
+test('a stale instance hardlink is re-linked to the store\'s new inode on refresh', () => {
   const src = store(), libDir = store(), inst = store();
   const real = join(src, 'libz.so.1');
   writeFileSync(real, 'v1');
@@ -152,10 +175,38 @@ test('re-staging truncates in place so instance hardlinks see the new content', 
 
   writeFileSync(real, 'v2');
   stageLibs(dep, [libDir]);
-  assert.equal(
-    readFileSync(join(inst, INSTANCE_LIB_DIR, 'libz.so.1'), 'utf-8'), 'v2',
-    'unlink-then-copy would have stranded the instance on v1',
-  );
+  const { linked } = materialiseLibs({ toolsDir: inst, libStore: libDir, sonames: ['libz.so.1'], mode: 'hardlink' });
+  assert.deepEqual(linked, ['libz.so.1']);
+  const instPath = join(inst, INSTANCE_LIB_DIR, 'libz.so.1');
+  assert.equal(readFileSync(instPath, 'utf-8'), 'v2', 'next exec must load the current library');
+  assert.equal(statSync(instPath).ino, statSync(join(libDir, 'libz.so.1')).ino, 'hardlinked to the store again');
+});
+
+test('symlink-mode copies are refreshed on size/mtime drift, kept when current', () => {
+  const src = store(), libDir = store(), inst = store();
+  const real = join(src, 'libz.so.1');
+  writeFileSync(real, 'v1');
+  const dep = [{ soname: 'libz.so.1', origin: real, kind: 'staged' }];
+  stageLibs(dep, [libDir]);
+  materialiseLibs({ toolsDir: inst, libStore: libDir, sonames: ['libz.so.1'], mode: 'symlink' });
+
+  writeFileSync(real, 'v2-longer');
+  stageLibs(dep, [libDir]);
+  materialiseLibs({ toolsDir: inst, libStore: libDir, sonames: ['libz.so.1'], mode: 'symlink' });
+  assert.equal(readFileSync(join(inst, INSTANCE_LIB_DIR, 'libz.so.1'), 'utf-8'), 'v2-longer');
+});
+
+test('a lib the store lost is kept in the instance, not reported missing', () => {
+  const src = store(), libDir = store(), inst = store();
+  const real = join(src, 'libz.so.1');
+  writeFileSync(real, 'v1');
+  stageLibs([{ soname: 'libz.so.1', origin: real, kind: 'staged' }], [libDir]);
+  materialiseLibs({ toolsDir: inst, libStore: libDir, sonames: ['libz.so.1'], mode: 'hardlink' });
+
+  rmSync(join(libDir, 'libz.so.1'));
+  const { linked, missing } = materialiseLibs({ toolsDir: inst, libStore: libDir, sonames: ['libz.so.1'], mode: 'hardlink' });
+  assert.deepEqual(linked, ['libz.so.1'], 'a working library is never taken away from a running app');
+  assert.deepEqual(missing, []);
 });
 
 test('baseline libs are never staged even when ldd resolved them', () => {

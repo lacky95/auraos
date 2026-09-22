@@ -24,8 +24,9 @@
  * be imported at all.
  */
 import {
-  copyFileSync, existsSync, mkdirSync, openSync, readSync, closeSync,
-  readFileSync, writeFileSync, readdirSync, lstatSync, unlinkSync, linkSync, rmSync,
+  chmodSync, copyFileSync, existsSync, mkdirSync, openSync, readSync, closeSync,
+  readFileSync, renameSync, statSync, writeFileSync, readdirSync, lstatSync,
+  unlinkSync, linkSync, rmSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { execSync } from 'node:child_process';
@@ -270,6 +271,41 @@ export function setLibs(binDirs: readonly string[], owner: string, deps: readonl
 
 // ── staging into the stores ──────────────────────────────────────────────────
 
+/**
+ * Replace `dst` with a copy of `src` without ever truncating an existing
+ * inode: write a temp file beside it, then `rename()` over the name.
+ *
+ * Why the ceremony: binaries in the stores may be updated with an in-place
+ * truncating copy, because the kernel refuses to open a RUNNING executable
+ * for writing (ETXTBSY) — the dangerous case cannot happen. Shared libraries
+ * have NO such protection: they are only mmapped, and truncating a mapped
+ * `.so` delivers SIGBUS to every process using it. One `cap install` whose
+ * mirror sync re-copied drifted libs killed every tmux server and pty shell
+ * on the OS at once. Rename swaps the DIRENT instead — live processes keep
+ * their mapped old inode and simply never notice.
+ *
+ * The trade: per-instance `.lib` hardlinks now point at the OLD inode after a
+ * replace, so `materialiseLibs` reconciles by inode and re-links stale
+ * entries on the next provision — new execs get the new library, running
+ * ones keep the one they loaded.
+ */
+export function replaceLibFile(src: string, dst: string, mode = 0o755): void {
+  if (!existsSync(dst)) {
+    copyFileSync(src, dst);
+    chmodSync(dst, mode);
+    return;
+  }
+  const tmp = join(dirname(dst), `.${basename(dst)}.${process.pid}.staging`);
+  try {
+    copyFileSync(src, tmp);
+    chmodSync(tmp, mode);
+    renameSync(tmp, dst);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* already renamed or never written */ }
+    throw err;
+  }
+}
+
 export interface StageResult {
   staged: string[];
   failed: string[];
@@ -278,11 +314,9 @@ export interface StageResult {
 /**
  * Copy every staged dep into each lib store, named by SONAME.
  *
- * Writes onto the existing path WITHOUT unlinking first: `copyFileSync`
- * truncates in place, preserving the inode, so per-instance `.lib` hardlinks
- * see the new content instead of being left on an orphaned old version. This is
- * the same reasoning `AppManager.syncToolchainMirror` documents for binaries —
- * and the trap `installBinary` fell into by unlinking first.
+ * Replaces an existing file via `replaceLibFile` (temp + rename), never by
+ * truncating in place — see that function for why a library must not share
+ * the binaries' truncate-in-place update path.
  */
 export function stageLibs(deps: readonly LibDep[], libDirs: readonly string[]): StageResult {
   const staged: string[] = [];
@@ -294,10 +328,10 @@ export function stageLibs(deps: readonly LibDep[], libDirs: readonly string[]): 
       const dst = join(dir, dep.soname);
       try {
         mkdirSync(dir, { recursive: true });
-        // A symlink would be followed by copyFileSync and clobber its target;
-        // a regular file is truncated in place on purpose (see above).
+        // A dangling symlink reads as "absent" to existsSync, and copyFileSync
+        // would then write THROUGH it into its target — drop it first.
         try { if (lstatSync(dst).isSymbolicLink()) unlinkSync(dst); } catch { /* absent */ }
-        copyFileSync(dep.origin, dst);
+        replaceLibFile(dep.origin, dst);
         ok = true;
       } catch (err) {
         console.warn(`[cap] could not stage ${dep.soname} → ${dst}: ${(err as Error).message}`);
@@ -446,6 +480,13 @@ export interface MaterialiseResult {
  * Hardlink mode links from the volume-backed store. Symlink mode COPIES: that
  * mode exists precisely because hardlinks don't work here, and a symlink into
  * the store would dangle inside the sandbox, where the store isn't mounted.
+ *
+ * An entry that already exists is checked for staleness, not just presence:
+ * `replaceLibFile` updates the store by rename, which gives the store a NEW
+ * inode and leaves every instance hardlink on the old one. Inode mismatch
+ * (hardlink mode) or size/mtime drift (symlink mode) → unlink + re-place, so
+ * the next exec in the sandbox loads the current library while anything still
+ * running keeps the inode it has mapped.
  */
 export function materialiseLibs(opts: {
   toolsDir: string;
@@ -466,11 +507,26 @@ export function materialiseLibs(opts: {
     try { rmSync(join(dir, name), { recursive: true, force: true }); } catch { /* ignore */ }
   }
 
+  const statOrNull = (p: string) => { try { return statSync(p); } catch { return null; } };
+
   for (const soname of wanted) {
     const src = join(libStore, soname);
     const dst = join(dir, soname);
-    if (existsSync(dst)) { linked.push(soname); continue; }
-    if (!existsSync(src)) { missing.push(soname); continue; }
+    const srcStat = statOrNull(src);
+    const dstStat = statOrNull(dst);
+    // Store lost the file: keep whatever the instance still has rather than
+    // taking a working library away from a running app.
+    if (!srcStat) { (dstStat ? linked : missing).push(soname); continue; }
+    if (dstStat) {
+      const fresh = mode === 'hardlink'
+        ? dstStat.ino === srcStat.ino
+        : (dstStat.size === srcStat.size && dstStat.mtimeMs >= srcStat.mtimeMs);
+      if (fresh) { linked.push(soname); continue; }
+      // Stale after a rename-replace in the store — drop the old dirent so the
+      // re-place below picks up the new inode. Unlink never disturbs processes
+      // that already have the old library mapped.
+      try { unlinkSync(dst); } catch { /* ignore */ }
+    }
     try {
       if (mode === 'hardlink') linkSync(src, dst);
       else copyFileSync(src, dst);

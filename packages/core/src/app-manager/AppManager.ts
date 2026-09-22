@@ -9,7 +9,7 @@ import { OsEventBus } from '../ipc/OsEventBus.js';
 import { AppRegistry } from './AppRegistry.js';
 import { toolsTrackInstalledCaps } from './tool-allowlist.js';
 import { SHARED_HOME_PATH, toolchainMirrorBin } from './tool-provision.js';
-import { readLibMap, restoreLibsFromStore, toolchainLibFor, toolchainMirrorLib } from './tool-libs.js';
+import { readLibMap, replaceLibFile, restoreLibsFromStore, toolchainLibFor, toolchainMirrorLib } from './tool-libs.js';
 import { legacySharedHomeDir, masterHomeDir, userHomeDir } from '../scopes/home.js';
 import { PortAllocator } from './PortAllocator.js';
 import { LifecycleStateMachine } from './LifecycleStateMachine.js';
@@ -490,9 +490,12 @@ export class AppManager {
       catch (err) { console.warn(`[AppManager] could not create ${srcLib}: ${(err as Error).message}`); }
 
       // Forward + restore, by soname. Same size+mtime idempotency as the bin
-      // pass, and the same in-place copyFileSync: truncating rather than
-      // replacing preserves the inode, so per-instance `.lib` hardlinks see
-      // the new content instead of being stranded on an orphaned old version.
+      // pass, but NOT the same in-place copy: the bin pass may truncate
+      // because ETXTBSY protects a running executable, while a mapped `.so`
+      // has no such guard and truncation SIGBUSes every process using it.
+      // `replaceLibFile` swaps the dirent by rename instead; the stale
+      // per-instance hardlinks this leaves behind are re-linked by
+      // `materialiseLibs` on the next provision.
       for (const [from, to] of [[srcLib, mirrorLib], [mirrorLib, srcLib]] as const) {
         for (const name of existsSync(from) ? readdirSync(from) : []) {
           const src = join(from, name);
@@ -503,8 +506,7 @@ export class AppManager {
               const dStat = lstatSync(dst);
               if (sStat.size === dStat.size && dStat.mtimeMs >= sStat.mtimeMs) continue;
             } catch { /* dst missing */ }
-            copyFileSync(src, dst);
-            chmodSync(dst, 0o755);
+            replaceLibFile(src, dst);
           } catch (err) {
             console.warn(`[AppManager] toolchain lib ${src} → ${dst} failed: ${(err as Error).message}`);
           }

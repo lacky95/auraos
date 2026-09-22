@@ -242,6 +242,36 @@ async function listMounts(opts: { instance?: string }): Promise<void> {
   }
   reportCapability(res!);
   printMounts(instanceId, res!.mounts ?? [], apps);
+  await printContextVolumes();
+}
+
+/**
+ * OS context volumes ride into EVERY instance at spawn time (`-v` mounts, see
+ * ContainerRunner), so they are part of "what is mounted here" even though the
+ * MountManager doesn't own them. Listed so the mount table accounts for every
+ * attachment an app actually sees. Best-effort: an old shell without the
+ * endpoint just omits the section.
+ */
+async function printContextVolumes(): Promise<void> {
+  let volumes: Array<{ name: string; mountPath: string; mode: string }>;
+  try {
+    volumes = (await api.get<{ volumes: Array<{ name: string; mountPath: string; mode: string }> }>(
+      '/api/os/volumes',
+    )).volumes ?? [];
+  } catch { return; }
+  if (volumes.length === 0) return;
+  info('context volumes (mounted into every instance)');
+  const rows = volumes
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((v) => ({
+      TARGET: v.name,
+      SCOPE:  color.dim('os'),
+      KIND:   color.cyan('volume'),
+      MODE:   modeSign(v.mode === 'rw' ? 'rw' : 'ro'),
+      PATH:   v.mountPath,
+    }));
+  console.log(table(rows, ['TARGET', 'SCOPE', 'KIND', 'MODE', 'PATH']));
 }
 
 // ─── add ───────────────────────────────────────────────────────────────────
