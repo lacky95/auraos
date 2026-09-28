@@ -584,7 +584,15 @@ function attachWs(sess: Session, ws: WebSocket, browserId: string, launchClaim: 
  * anything that didn't pong since the previous sweep. `ws` answers incoming
  * pings automatically, so browsers need no cooperation for this to work.
  */
-const alive = new WeakSet<WebSocket>();
+// Pinned on globalThis for the same reason as `sessions`: a second module
+// instance (in-process dev-server restart, or Vite re-evaluating this file)
+// would otherwise sweep the SHARED sessions map against its own empty set and
+// terminate every client on its first pass — a reconnect every 25s.
+const ALIVE_KEY = '__aura_pty_alive__';
+const alive: WeakSet<WebSocket> =
+  ((globalThis as Record<string, unknown>)[ALIVE_KEY] as WeakSet<WebSocket> | undefined)
+  ?? ((globalThis as Record<string, unknown>)[ALIVE_KEY] = new WeakSet<WebSocket>()) as WeakSet<WebSocket>;
+const KEEPALIVE_KEY = '__aura_pty_keepalive__';
 
 function markAlive(ws: WebSocket): void {
   alive.add(ws);
@@ -797,8 +805,13 @@ export function getPtyWss(): WebSocketServer {
 
   // Keepalive sweep — armed once with the server, unref'd so it never keeps
   // the process alive on its own.
+  // One sweep per process: a stale timer from an earlier module instance is
+  // cleared rather than left running beside this one.
+  const g = globalThis as Record<string, unknown>;
+  clearInterval(g[KEEPALIVE_KEY] as NodeJS.Timeout | undefined);
   const keepalive = setInterval(sweepKeepalive, PING_MS);
   if (typeof keepalive.unref === 'function') keepalive.unref();
+  g[KEEPALIVE_KEY] = keepalive;
   log('keepalive armed', `${PING_MS}ms`, GRACE_MS > 0 ? `grace=${GRACE_MS}ms` : 'grace=never');
 
   ptyWss.on('connection', (ws: WebSocket, req) => {
