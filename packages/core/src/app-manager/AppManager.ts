@@ -16,6 +16,7 @@ import { LifecycleStateMachine } from './LifecycleStateMachine.js';
 import { ProotRunner, killProcessGroup } from './ProotRunner.js';
 import { ContainerRunner } from './ContainerRunner.js';
 import { MountManager } from './MountManager.js';
+import { PortManager, type ExposeSpec } from './PortManager.js';
 import type { SandboxRunner } from './SandboxRunner.js';
 import { selectOrphanSidecars } from './sidecars.js';
 import { IntentResolver, type Intent, type IntentMatch } from './IntentResolver.js';
@@ -58,6 +59,7 @@ export class AppManager {
   readonly interfaces:  InterfaceRegistry;
   /** Cross-app filesystem mounts (container sandboxes only). */
   readonly mounts:      MountManager;
+  readonly portExpose:  PortManager;
   private dataDir: string;
   private toolchainDir: string;
   /** PRoot's `/`. Kept so the lib restore pass can re-stage into it. */
@@ -145,6 +147,17 @@ export class AppManager {
         return join(scope.dataDir, 'apps', inst.appId, instanceId);
       },
     });
+    this.portExpose  = new PortManager({
+      dataDir:  opts.dataDir,
+      registry: this.registry,
+      runner:   this.runners['container'] as ContainerRunner,
+      resolveRunningInstance: (appId) => {
+        const inst = this.getInstancesByApp(appId).find(
+          (i) => i.state === 'resumed' || i.state === 'resuming' || i.state === 'started',
+        );
+        return inst ? { instanceId: inst.instanceId } : null;
+      },
+    });
   }
 
   /**
@@ -160,6 +173,28 @@ export class AppManager {
     const m = this.registry.getById(inst?.appId ?? instanceIdOrAppId);
     if (m?.sandbox) return this.runners[m.sandbox];
     return this.runners['proot'];
+  }
+
+  /**
+   * Map an app manifest's always-on `ports` block to expose specs applied
+   * at every start. Gated by `apps.port`: without the grant we apply nothing
+   * and warn, rather than silently honouring a declaration the app can't make.
+   */
+  private manifestExposeSpecs(manifest: AppManifest): ExposeSpec[] {
+    const p = manifest.ports;
+    if (!p || (!p.exposes?.length && !p.hostPublish?.length)) return [];
+    if (!this.permissions.hasPermission(manifest.id, 'apps.port')) {
+      console.warn(`[AppManager] ${manifest.id} declares ports but lacks 'apps.port' — ignoring`);
+      return [];
+    }
+    const specs: ExposeSpec[] = [];
+    for (const e of p.exposes ?? []) {
+      specs.push({ kind: 'into', sourceAppId: e.sourceApp, sourcePort: e.sourcePort, port: e.port });
+    }
+    for (const h of p.hostPublish ?? []) {
+      specs.push({ kind: 'host', sourceAppId: manifest.id, sourcePort: h.port, port: h.hostPort, bindAddr: '127.0.0.1' });
+    }
+    return specs;
   }
 
   /**
@@ -716,6 +751,7 @@ export class AppManager {
     // orphaned and get reaped out from under it.
     try {
       this.mounts.reconcile(new Set(this.instances.keys()));
+      this.portExpose.reconcile(new Set(this.instances.keys()));
     } catch (err) {
       console.warn(`[AppManager] mount reconcile failed: ${(err as Error).message}`);
     }
@@ -1022,6 +1058,9 @@ export class AppManager {
       await this.mounts.reapply(instanceId).catch((err: unknown) => {
         console.warn(`[AppManager] mount reapply failed for ${instanceId}: ${(err as Error).message}`);
       });
+      await this.portExpose.reapply(instanceId, this.manifestExposeSpecs(manifest)).catch((err: unknown) => {
+        console.warn(`[AppManager] port reapply failed for ${instanceId}: ${(err as Error).message}`);
+      });
 
       await this.runnerOf(instanceId).callLifecycle(instanceId, 'onCreate');
       this.transition(instanceId, appId, 'starting', port);
@@ -1169,6 +1208,7 @@ export class AppManager {
     // Detach cross-app mounts BEFORE the container goes: a live bind under the
     // instance's data dir pins the source filesystem and would outlive it.
     this.mounts.removeAll(instanceId);
+    this.portExpose.removeAll(instanceId);
     await this.runnerOf(instanceId).kill(instanceId);
     if (port) this.ports.release(port);
     this.transition(instanceId, appId, 'destroyed', null);
@@ -1229,6 +1269,7 @@ export class AppManager {
     // A force-kill runs no lifecycle hooks, so this is the only chance to
     // detach mounts before the instance record is dropped.
     this.mounts.removeAll(instanceId);
+    this.portExpose.removeAll(instanceId);
     const killed = this.runnerOf(instanceId).forceKill(instanceId);
     if (port) this.ports.release(port);
     if (killed) {
@@ -2012,6 +2053,7 @@ export class AppManager {
     // Same reasoning for cross-app mounts: a crash skips onDestroy, and a bind
     // left under the dead instance's data dir pins the source filesystem.
     this.mounts.removeAll(instanceId);
+    this.portExpose.removeAll(instanceId);
     this.fsm.set(instanceId, 'error');
     if (inst) {
       inst.state = 'error';

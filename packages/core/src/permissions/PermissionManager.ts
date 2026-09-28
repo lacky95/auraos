@@ -11,7 +11,7 @@ import type { AppRegistry } from '../app-manager/AppRegistry.js';
  * hands one app read/write access to another app's source tree, so auto-granting
  * it is not defensible.
  */
-const ENFORCED = new Set<string>(['apps.mount']);
+const ENFORCED = new Set<string>(['apps.mount', 'apps.port']);
 
 /**
  * MVP permission gate. The full architecture is in place — manifest declarations,

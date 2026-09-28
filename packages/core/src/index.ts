@@ -10,6 +10,7 @@ export * from './app-manager/LifecycleStateMachine.js';
 export * from './app-manager/PortAllocator.js';
 export * from './app-manager/ProotRunner.js';
 export * from './app-manager/MountManager.js';
+export * from './app-manager/PortManager.js';
 export * from './app-manager/IntentResolver.js';
 export * from './permissions/index.js';
 export * from './content/index.js';

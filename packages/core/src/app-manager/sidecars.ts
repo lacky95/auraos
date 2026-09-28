@@ -15,7 +15,7 @@ import type { ResourceUsage, SidecarInfo, SidecarState } from '../types/instance
 /** `docker ps` Go template — tab-separated so label values can't break parsing. */
 export const SIDECAR_PS_FORMAT =
   '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.State}}\t{{.CreatedAt}}' +
-  '\t{{.Label "aura.parent"}}\t{{.Label "aura.app"}}\t{{.Label "aura.service"}}\t{{.Label "aura.mount"}}';
+  '\t{{.Label "aura.parent"}}\t{{.Label "aura.app"}}\t{{.Label "aura.service"}}\t{{.Label "aura.mount"}}\t{{.Label "aura.port"}}';
 
 /** `docker stats` Go template. */
 export const USAGE_STATS_FORMAT = '{{.Name}}\t{{.MemUsage}}\t{{.CPUPerc}}';
@@ -42,9 +42,9 @@ export function parseSidecarPs(out: string): SidecarInfo[] {
   const result: SidecarInfo[] = [];
   for (const line of out.split('\n')) {
     if (!line.trim()) continue;
-    const [id, name, image, state, createdAt, parent, appId, service, mount] = line.split('\t');
+    const [id, name, image, state, createdAt, parent, appId, service, mount, port] = line.split('\t');
     if (!id || !name || !parent) continue;
-    if (mount) continue;
+    if (mount || port) continue;
     result.push({
       id: name,
       service: service || name,

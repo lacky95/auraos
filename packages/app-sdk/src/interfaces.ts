@@ -19,7 +19,7 @@ import type { OsClient } from './OsClient.js';
 import { getAppContext } from './context.js';
 
 /** Transports the OS can describe today. */
-export type InterfaceKind = 'http' | 'rest' | 'mcp' | 'ws' | 'event' | 'kv';
+export type InterfaceKind = 'http' | 'rest' | 'mcp' | 'ws' | 'event' | 'kv' | 'acp';
 
 export interface InterfaceView {
   /** `<appId>/<name>` — globally unique. */

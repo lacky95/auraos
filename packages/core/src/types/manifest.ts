@@ -22,6 +22,12 @@ export const BUILTIN_PERMISSIONS = [
    * auto-granted like the other MVP permissions.
    */
   'apps.mount',
+  /**
+   * Expose another app's TCP port onto this app's loopback, or publish this
+   * app's port on the host, via `POST /api/instances/:id/ports`. ENFORCED —
+   * an app without it gets a 403.
+   */
+  'apps.port',
 ] as const;
 
 export const PermissionSchema = z.string();
@@ -52,14 +58,14 @@ export type DataProvider      = z.infer<typeof DataProviderSchema>;
  * a transport that already exists, so declaring one is never a promise the OS
  * can't keep. Adding a kind later is an additive change to this enum.
  */
-export const INTERFACE_KINDS = ['http', 'rest', 'mcp', 'ws', 'event', 'kv'] as const;
+export const INTERFACE_KINDS = ['http', 'rest', 'mcp', 'ws', 'event', 'kv', 'acp'] as const;
 export const InterfaceKindSchema = z.enum(INTERFACE_KINDS);
 
 /** Interface names are app-local; the globally unique ref is `<appId>/<name>`. */
 const INTERFACE_NAME_RE = /^[a-z][a-z0-9-]*$/;
 
 /** Kinds whose `address` is a path on the providing app's own server. */
-const INTERFACE_PATH_KINDS = new Set<string>(['http', 'rest', 'mcp', 'ws']);
+export const INTERFACE_PATH_KINDS = new Set<string>(['http', 'rest', 'mcp', 'ws', 'acp']);
 
 export const ProvidedInterfaceSchema = z.object({
   /** App-local, kebab-case. Unique within the app (enforced on the manifest). */
@@ -71,9 +77,11 @@ export const ProvidedInterfaceSchema = z.object({
    * Where it lives. Semantics are per-kind, and the OS NEVER rewrites this —
    * it only prefixes path kinds with the instance's proxy base when handing
    * out a live address:
-   *   http|rest|mcp|ws → path on the app's own server, must start with '/'
-   *   event            → OsEventBus topic (or glob), e.g. `whisper:transcript.*`
-   *   kv               → KV namespace/key prefix, e.g. `app/com.aura.whisper/jobs`
+   *   http|rest|mcp|ws|acp → path on the app's own server, must start with '/'
+   *   event                → OsEventBus topic (or glob), e.g. `whisper:transcript.*`
+   *   kv                   → KV namespace/key prefix, e.g. `app/com.aura.whisper/jobs`
+   *   acp                  → path on the app's own server (JSON-RPC Agent Client
+   *                          Protocol over WebSocket, NDJSON frames; proxied like `ws`)
    */
   address: z.string().min(1),
   /** Free-form contract version. Consumers may pin it; the OS never interprets it. */
@@ -138,6 +146,23 @@ export const AppManifestSchema = z.object({
   icon: z.string().min(1).max(3).optional(),
   entrypoint: z.string().default('entrypoint.sh'),
   serverPort: z.number().int().min(1024).max(65535).optional(),
+  /**
+   * Always-on port exposes, applied at instance start (gated by `apps.port`).
+   *   exposes:     pull a source app's port onto THIS app's loopback.
+   *   hostPublish: publish one of THIS app's ports on the host — 127.0.0.1
+   *                only (a manifest cannot open 0.0.0.0; that is CLI-only).
+   */
+  ports: z.object({
+    exposes: z.array(z.object({
+      sourceApp: z.string(),
+      sourcePort: z.number().int().min(1).max(65535),
+      port: z.number().int().min(1).max(65535).optional(),
+    })).optional(),
+    hostPublish: z.array(z.object({
+      port: z.number().int().min(1).max(65535),
+      hostPort: z.number().int().min(1).max(65535).optional(),
+    })).optional(),
+  }).optional(),
   /**
    * Which runtime the OS spawns this app under.
    *   'astro' (default) → the historical path. The OS synthesises an
