@@ -1,6 +1,7 @@
 ---
 import type { AppManifest } from '@aura/core';
 import AppIcon from './AppIcon.astro';
+import Icon from '../ui/Icon.astro';
 
 interface Props {
   apps: AppManifest[];
@@ -10,7 +11,7 @@ const { apps } = Astro.props;
 <div id="app-drawer">
   <div class="drawer-header">
     <span class="title">// ALL APPS</span>
-    <a href="/" class="close-btn">✕ CLOSE</a>
+    <a href="/" class="close-btn"><Icon name="x" /> CLOSE</a>
   </div>
   <input
     id="app-search"

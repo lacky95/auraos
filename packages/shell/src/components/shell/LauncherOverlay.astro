@@ -21,13 +21,14 @@ const mgr = getAppManager();
 // show up here — only the `componentType: 'service'` apps are filtered.
 const apps: AppManifest[] = mgr.getManifests().filter((m) => m.componentType !== 'service');
 const enabledMap: Record<string, boolean> = mgr.getEnabledState();
+import Icon from '../ui/Icon.astro';
 ---
 <aside id="lo-panel" class="lo-panel" aria-hidden="true">
   <header class="lo-header">
-    <span class="lo-title">▦ LAUNCH APP</span>
+    <span class="lo-title"><Icon name="layout-grid" /> LAUNCH APP</span>
     <div class="lo-header-actions">
-      <button id="lo-reload" class="lo-reload" title="Reload the app list" aria-label="Reload the app list"><span class="lo-reload-icon">⟳</span></button>
-      <button id="lo-close" class="lo-close" title="Close launcher (Esc)">✕</button>
+      <button id="lo-reload" class="lo-reload" title="Reload the app list" aria-label="Reload the app list"><span class="lo-reload-icon"><Icon name="rotate-cw" /></span></button>
+      <button id="lo-close" class="lo-close" title="Close launcher (Esc)"><Icon name="x" /></button>
     </div>
   </header>
   <input id="lo-search" class="lo-search" type="text" placeholder="SEARCH APPS..." autocomplete="off" />
@@ -56,7 +57,7 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
     <div class="lo-ctx-submenu-wrap">
       <button class="lo-ctx-item lo-ctx-has-sub" data-action="open-in-ws" role="menuitem" aria-haspopup="true" aria-expanded="false">
         <span>Open in workspace</span>
-        <span class="lo-ctx-chev">▸</span>
+        <span class="lo-ctx-chev"><Icon name="chevron-right" /></span>
       </button>
       <div id="lo-ctx-submenu" class="lo-ctx-submenu" role="menu" hidden></div>
     </div>
@@ -502,7 +503,7 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
                       title="Launch in ${escapeAttr(w.name)}">
         <span class="lo-ctx-ws-slot">${i + 1}</span>
         <span class="lo-ctx-ws-name">${escapeHtml(w.name)}</span>
-        <span class="lo-ctx-active-mark" aria-hidden="true">●</span>
+        <span class="lo-ctx-active-mark" aria-hidden="true"><svg class="aura-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="5" fill="currentColor"/></svg></span>
       </button>`;
     }).join('');
     ctxSubmenu.innerHTML = rows;

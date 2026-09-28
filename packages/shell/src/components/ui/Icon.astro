@@ -1,0 +1,32 @@
+---
+/**
+ * Shell chrome icon — renders a Lucide icon inline at SSR time from
+ * @aura/core's IconManager (no client JS, no sprite fetch). For icons built
+ * client-side (innerHTML templates), reference the OS sprite instead:
+ *
+ *   <svg class="aura-icon" aria-hidden="true">
+ *     <use href="/api/os/icons.svg#lucide-<name>"/>
+ *   </svg>
+ *
+ * Names are Lucide kebab-case ids — https://lucide.dev/icons
+ */
+import { IconManager } from '@aura/core';
+
+interface Props {
+  name: string;
+  /** Width/height; defaults to 1em so the icon tracks the surrounding font size. */
+  size?: number | string;
+  strokeWidth?: number;
+  class?: string;
+}
+
+const { name, size = '1em', strokeWidth = 2, class: cls } = Astro.props;
+const svg = IconManager.renderIconSvg(name, {
+  size,
+  strokeWidth,
+  ...(cls ? { class: cls } : {}),
+  attrs: { 'aria-hidden': 'true', style: 'vertical-align:-0.125em' },
+});
+if (!svg) throw new Error(`[Icon] unknown lucide icon: ${name}`);
+---
+<Fragment set:html={svg} />

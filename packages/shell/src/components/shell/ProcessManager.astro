@@ -8,15 +8,16 @@
  * The panel is empty in SSR — populated client-side from /api/apps and refreshed
  * via the SSE stream from /api/apps/events.
  */
+import Icon from '../ui/Icon.astro';
 ---
 <button id="pm-toggle" class="pm-toggle" title="Process Manager (running apps)" aria-expanded="false" aria-controls="pm-panel">
-  <span class="pm-toggle-icon">▦</span>
+  <span class="pm-toggle-icon"><Icon name="layout-grid" /></span>
 </button>
 
 <aside id="pm-panel" class="pm-panel" aria-hidden="true">
   <header class="pm-header">
     <div class="pm-header-title">
-      <span class="pm-icon">▦</span>
+      <span class="pm-icon"><Icon name="layout-grid" /></span>
       <div class="pm-filter-group" role="group" aria-label="Section filter">
         <button type="button" class="pm-filter-btn" data-filter="apps"     data-active="true"  title="Show user apps (foreground processes)">
           <span class="pm-filter-label">APPS</span>
@@ -30,22 +31,22 @@
     </div>
     <div class="pm-header-actions">
       <div class="pm-view-toggle" role="group" aria-label="View mode">
-        <button type="button" class="pm-view-btn" data-view="cards" data-active="true" title="Card view">▦</button>
-        <button type="button" class="pm-view-btn" data-view="list"  data-active="false" title="List view">☰</button>
+        <button type="button" class="pm-view-btn" data-view="cards" data-active="true" title="Card view"><Icon name="layout-grid" /></button>
+        <button type="button" class="pm-view-btn" data-view="list"  data-active="false" title="List view"><Icon name="list" /></button>
       </div>
-      <button id="pm-close" class="pm-close" title="Close (Esc)">✕</button>
+      <button id="pm-close" class="pm-close" title="Close (Esc)"><Icon name="x" /></button>
     </div>
   </header>
   <ul id="pm-list" class="pm-list">
     <li class="pm-empty">
-      <div class="pm-empty-icon">○</div>
+      <div class="pm-empty-icon"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle"/></svg></div>
       <div class="pm-empty-text">NO ACTIVE PROCESSES</div>
       <div class="pm-empty-hint">// LAUNCH AN APP TO BEGIN</div>
     </li>
   </ul>
   <footer class="pm-footer">
     <span id="pm-count" class="pm-stats">0 INST · 0 ACT</span>
-    <button id="pm-refresh" class="pm-foot-btn" title="Reload list">↻ REFRESH</button>
+    <button id="pm-refresh" class="pm-foot-btn" title="Reload list"><Icon name="rotate-cw" /> REFRESH</button>
   </footer>
 </aside>
 
@@ -1299,7 +1300,7 @@
       const allHidden = totalInst > 0 && !filters.apps && !filters.services;
       list.innerHTML = `
         <li class="pm-empty">
-          <div class="pm-empty-icon">○</div>
+          <div class="pm-empty-icon"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle"/></svg></div>
           <div class="pm-empty-text">${allHidden ? 'ALL SECTIONS HIDDEN' : 'NO ACTIVE PROCESSES'}</div>
           <div class="pm-empty-hint">${allHidden ? '// ENABLE APPS OR SVC ABOVE' : '// LAUNCH AN APP TO BEGIN'}</div>
         </li>`;
@@ -1347,8 +1348,8 @@
                     <div class="pm-activity-id">${sub}</div>
                   </div>
                   <div class="pm-activity-actions">
-                    <button class="pm-action-btn pm-icon-btn" data-action="focus-activity" title="Focus this activity">◉</button>
-                    <button class="pm-action-btn pm-icon-btn" data-action="close-activity" data-variant="warn" title="Close this activity">✕</button>
+                    <button class="pm-action-btn pm-icon-btn" data-action="focus-activity" title="Focus this activity"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-dot"/></svg></button>
+                    <button class="pm-action-btn pm-icon-btn" data-action="close-activity" data-variant="warn" title="Close this activity"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-x"/></svg></button>
                   </div>
                 </li>`;
             }).join('')}
@@ -1381,12 +1382,12 @@
           ${activitiesBlock}
           ${inspectBlock(inst)}
           <div class="pm-card-actions">
-            <button class="pm-action-btn" data-action="focus" title="Open in fullscreen focus mode">◉ FOCUS</button>
+            <button class="pm-action-btn" data-action="focus" title="Open in fullscreen focus mode"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-dot"/></svg> FOCUS</button>
             ${supportsActivities ? '<button class="pm-action-btn" data-action="new-activity" title="Open a new activity on this instance">+ ACTIVITY</button>' : ''}
             ${inspectButton(inst, false)}
             <span class="pm-action-btn-spacer"></span>
-            <button class="pm-action-btn" data-action="app-close" data-variant="warn" title="Standard close — runs full lifecycle: onPause → onStop → onDestroy → SIGTERM">■ STOP</button>
-            <button class="pm-action-btn" data-action="task-kill" data-variant="danger" title="Force kill — immediate SIGKILL, no lifecycle hooks (only if app hangs)">⨂ KILL</button>
+            <button class="pm-action-btn" data-action="app-close" data-variant="warn" title="Standard close — runs full lifecycle: onPause → onStop → onDestroy → SIGTERM"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-square"/></svg> STOP</button>
+            <button class="pm-action-btn" data-action="task-kill" data-variant="danger" title="Force kill — immediate SIGKILL, no lifecycle hooks (only if app hangs)"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-x"/></svg> KILL</button>
           </div>
         </li>`;
     };
@@ -1430,11 +1431,11 @@
             <div class="pm-listrow-line2">${metaParts.join('')}</div>
           </div>
           <div class="pm-listrow-actions">
-            <button class="pm-action-btn pm-icon-btn" data-action="focus"        title="Focus">◉</button>
+            <button class="pm-action-btn pm-icon-btn" data-action="focus"        title="Focus"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-dot"/></svg></button>
             ${supportsActivities ? '<button class="pm-action-btn pm-icon-btn" data-action="new-activity" title="+ Activity">+</button>' : ''}
             ${inspectButton(inst, true)}
-            <button class="pm-action-btn pm-icon-btn" data-action="app-close"   data-variant="warn"   title="Stop (graceful)">■</button>
-            <button class="pm-action-btn pm-icon-btn" data-action="task-kill"   data-variant="danger" title="Kill (SIGKILL)">⨂</button>
+            <button class="pm-action-btn pm-icon-btn" data-action="app-close"   data-variant="warn"   title="Stop (graceful)"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-square"/></svg></button>
+            <button class="pm-action-btn pm-icon-btn" data-action="task-kill"   data-variant="danger" title="Kill (SIGKILL)"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-x"/></svg></button>
           </div>
         </li>`;
 
@@ -1443,14 +1444,14 @@
         const sub = `${escapeHtml(act.activityId)}${act.path && act.path !== '/' ? ` · ${escapeHtml(act.path)}` : ''}`;
         return `
           <li class="pm-listrow pm-listrow-act" data-activity-id="${escapeHtml(act.activityId)}" data-parent-id="${escapeHtml(inst.instanceId)}">
-            <span class="pm-listrow-arrow">↳</span>
+            <span class="pm-listrow-arrow"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-corner-down-right"/></svg></span>
             <div class="pm-listrow-info">
               <div class="pm-listrow-line1">${escapeHtml(label)}</div>
               <div class="pm-listrow-line2">${sub}</div>
             </div>
             <div class="pm-listrow-actions">
-              <button class="pm-action-btn pm-icon-btn" data-action="focus-activity" title="Focus">◉</button>
-              <button class="pm-action-btn pm-icon-btn" data-action="close-activity" data-variant="warn" title="Close">✕</button>
+              <button class="pm-action-btn pm-icon-btn" data-action="focus-activity" title="Focus"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-dot"/></svg></button>
+              <button class="pm-action-btn pm-icon-btn" data-action="close-activity" data-variant="warn" title="Close"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-x"/></svg></button>
             </div>
           </li>`;
       }).join('');
@@ -1502,8 +1503,8 @@
     const open = expanded.has(inst.instanceId);
     const attrs = `data-action="inspect" aria-expanded="${open}" aria-controls="${inspectDomId(inst.instanceId)}" title="Inspect sidecars and resource usage"`;
     return compact
-      ? `<button class="pm-action-btn pm-icon-btn" ${attrs}><span class="pm-inspect-chev">▸</span></button>`
-      : `<button class="pm-action-btn" ${attrs}><span class="pm-inspect-chev">▸</span>&nbsp;INSPECT</button>`;
+      ? `<button class="pm-action-btn pm-icon-btn" ${attrs}><span class="pm-inspect-chev"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-chevron-right"/></svg></span></button>`
+      : `<button class="pm-action-btn" ${attrs}><span class="pm-inspect-chev"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-chevron-right"/></svg></span>&nbsp;INSPECT</button>`;
   }
 
   function formatBytes(bytes: number | null | undefined): string {
