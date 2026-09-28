@@ -866,7 +866,7 @@ window.EventSource=AuraEventSource;
     if (isJs && cfg.rewriteHtml !== 'none') {
       const js = await upstream.text();
       const rewritten = js.replace(
-        /(["'`])(\/(?:@fs|@vite|@id|node_modules)\/[^"'`\s]*)\1/g,
+        /(["'`])(\/(?:@fs|@vite|@id|node_modules|src)\/[^"'`\s]*)\1/g,
         (_full, q, url) => `${q}${prefixUrl(url)}${q}`,
       );
       const outHeaders = new Headers(upstream.headers);
