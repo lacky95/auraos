@@ -2990,7 +2990,111 @@ const ssrVisibleViews = initialViews
     renderLayout();
   }
 
+  // "Show" (Process Manager): reveal a window in its workspace WITHOUT going
+  // fullscreen — switch to the owning workspace, focus it in place, and flash
+  // the existing keyboard-select frame (border + ◉) on it for 1.5s.
+  async function revealInstance(instanceId: string, activityId?: string) {
+    const view = activityId
+      ? views.find((v) => v.activityId === activityId)
+      : (views.find((v) => v.instanceId === instanceId && !v.activityId)
+          ?? views.find((v) => v.instanceId === instanceId));
+    if (!view) return; // headless/no live window — nothing to show
+    const ws = workspaceClient.getCached();
+    const owner = ws?.workspaces.find((w) => w.members.includes(view.viewId)) ?? null;
+    if (ws && owner && owner.id !== ws.activeWorkspaceId) {
+      await workspaceClient.setActive(owner.id).catch((err) => console.warn('[shell] setActive failed', err));
+    }
+    // Never leave another window maximized over the one we're revealing.
+    if (maximizedViewId && maximizedViewId !== view.viewId) { maximizedViewId = null; maximizedFull = false; }
+    if (view.state === 'minimized') {
+      views = views.map((v) => v.viewId === view.viewId ? { ...v, state: 'normal' as const } : v);
+    }
+    focusView_(view.viewId); // focus (not maximize) + renderLayout
+    flashSelectFrame(view.activityId, view.instanceId);
+  }
+  function flashSelectFrame(activityId: string | undefined, instanceId: string, tries = 0): void {
+    let slot = activityId
+      ? document.querySelector<HTMLElement>(`.app-slot[data-activity-id="${CSS.escape(activityId)}"]`)
+      : null;
+    if (!slot && instanceId) slot = document.querySelector<HTMLElement>(`.app-slot[data-instance-id="${CSS.escape(instanceId)}"]`);
+    // The owning workspace may still be rendering after setActive — retry a few frames.
+    if ((!slot || slot.offsetParent === null) && tries < 30) {
+      requestAnimationFrame(() => flashSelectFrame(activityId, instanceId, tries + 1));
+      return;
+    }
+    if (!slot) return;
+    const target = slot;
+    // Same clear-then-set the keyboard window-nav uses.
+    document.querySelectorAll('.app-slot[data-aura-nav-focus]').forEach((el) => el.removeAttribute('data-aura-nav-focus'));
+    target.setAttribute('data-aura-nav-focus', 'true');
+    target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    window.setTimeout(() => {
+      if (target.getAttribute('data-aura-nav-focus') === 'true') target.removeAttribute('data-aura-nav-focus');
+    }, 1500);
+  }
+
+  // ── Process Manager "Show": tap = jump & stay; press-and-hold = peek while
+  // held, then jump back to where you were on release. The target is marked
+  // with the same keyboard-select frame while shown. ─────────────────────────
+  let peekReturnWorkspaceId: string | null = null;
+  function pmSetSelectFrame(activityId: string | undefined, instanceId: string, tries = 0): void {
+    let slot = activityId
+      ? document.querySelector<HTMLElement>(`.app-slot[data-activity-id="${CSS.escape(activityId)}"]`)
+      : null;
+    if (!slot && instanceId) slot = document.querySelector<HTMLElement>(`.app-slot[data-instance-id="${CSS.escape(instanceId)}"]`);
+    if ((!slot || slot.offsetParent === null) && tries < 30) {
+      requestAnimationFrame(() => pmSetSelectFrame(activityId, instanceId, tries + 1));
+      return;
+    }
+    if (!slot) return;
+    document.querySelectorAll('.app-slot[data-aura-nav-focus]').forEach((el) => el.removeAttribute('data-aura-nav-focus'));
+    slot.setAttribute('data-aura-nav-focus', 'true');
+    slot.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+  function pmClearSelectFrame(): void {
+    document.querySelectorAll('.app-slot[data-aura-nav-focus]').forEach((el) => el.removeAttribute('data-aura-nav-focus'));
+  }
+  async function peekStart(instanceId: string, activityId?: string): Promise<void> {
+    const view = activityId
+      ? views.find((v) => v.activityId === activityId)
+      : (views.find((v) => v.instanceId === instanceId && !v.activityId)
+          ?? views.find((v) => v.instanceId === instanceId));
+    if (!view) { peekReturnWorkspaceId = null; return; }
+    const ws = workspaceClient.getCached();
+    peekReturnWorkspaceId = ws?.activeWorkspaceId ?? null;
+    const owner = ws?.workspaces.find((w) => w.members.includes(view.viewId)) ?? null;
+    if (ws && owner && owner.id !== ws.activeWorkspaceId) {
+      await workspaceClient.setActive(owner.id).catch((err) => console.warn('[shell] setActive failed', err));
+    }
+    if (maximizedViewId && maximizedViewId !== view.viewId) { maximizedViewId = null; maximizedFull = false; }
+    if (view.state === 'minimized') views = views.map((v) => v.viewId === view.viewId ? { ...v, state: 'normal' as const } : v);
+    focusView_(view.viewId);
+    pmSetSelectFrame(view.activityId, view.instanceId);
+  }
+  async function peekEnd(commit: boolean): Promise<void> {
+    const back = peekReturnWorkspaceId;
+    peekReturnWorkspaceId = null;
+    if (commit) {
+      // tap: stay on the target; let the highlight linger ~1.5s then clear.
+      window.setTimeout(() => pmClearSelectFrame(), 1500);
+      return;
+    }
+    // hold release: jump back to where we were and drop the highlight.
+    if (back) await workspaceClient.setActive(back).catch((err) => console.warn('[shell] setActive failed', err));
+    pmClearSelectFrame();
+  }
+  (window as any).auraPeekStart = peekStart;
+  (window as any).auraPeekEnd   = peekEnd;
+  // Synchronous check: does this process/activity have a live window to show?
+  (window as any).auraHasWindow = (instanceId: string, activityId?: string) => {
+    const v = activityId
+      ? views.find((x) => x.activityId === activityId)
+      : (views.find((x) => x.instanceId === instanceId && !x.activityId) ?? views.find((x) => x.instanceId === instanceId));
+    return !!v;
+  };
+
   (window as any).auraFocusInstance        = focusInstance;
+  (window as any).auraRevealInstance       = revealInstance;
   (window as any).auraRemoveViewsByInstance = removeViewsByInstance;
   (window as any).auraRemoveViewByActivity  = removeViewByActivity;
 

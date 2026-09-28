@@ -37,6 +37,11 @@ import Icon from '../ui/Icon.astro';
       <button id="pm-close" class="pm-close" title="Close (Esc)"><Icon name="x" /></button>
     </div>
   </header>
+  <div class="pm-search">
+    <span class="pm-search-icon"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-search"/></svg></span>
+    <input id="pm-search-input" class="pm-search-input" type="text" placeholder="FILTER PROCESSES..." autocomplete="off" aria-label="Filter processes" />
+    <button id="pm-search-clear" class="pm-search-clear" title="Clear (Esc)" hidden><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-x"/></svg></button>
+  </div>
   <ul id="pm-list" class="pm-list">
     <li class="pm-empty">
       <div class="pm-empty-icon"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle"/></svg></div>
@@ -116,7 +121,17 @@ import Icon from '../ui/Icon.astro';
   .pm-panel[aria-hidden="false"] {
     transform: translateX(0);
     visibility: visible;
-    transition: transform 0.15s ease-out, visibility 0s;
+    transition: transform 0.15s ease-out, visibility 0s, opacity 0.2s ease;
+  }
+  /* "Show" flashes the panel see-through for ~1.5s so the revealed window
+     is visible behind it; pointer-events off so clicks reach the window. */
+  .pm-panel.pm-see-through { opacity: 0.4; }
+  /* Feedback when a "Show" target has no live window to reveal. */
+  @keyframes pm-noshow-shake { 0%,100%{transform:translateX(0);} 25%{transform:translateX(-3px);} 75%{transform:translateX(3px);} }
+  .pm-action-btn.pm-noshow {
+    color: var(--aura-color-danger) !important;
+    border-color: var(--aura-color-danger) !important;
+    animation: pm-noshow-shake 0.28s ease-in-out;
   }
 
   .pm-header {
@@ -139,16 +154,70 @@ import Icon from '../ui/Icon.astro';
     font-weight: 500;
   }
   .pm-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 24px;
+    box-sizing: border-box;
     background: transparent;
     border: var(--aura-border);
     color: var(--aura-color-text-dim);
     cursor: pointer;
     font-family: var(--aura-font-mono);
     font-size: var(--aura-font-size-xs);
-    padding: 3px 10px;
+    padding: 0 10px;
     transition: color 0.1s, box-shadow 0.1s;
   }
   .pm-close:hover { color: var(--aura-color-danger); box-shadow: var(--aura-glow-danger); }
+
+  /* ============ Fuzzy search row (top of panel) ============ */
+  .pm-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--aura-color-surface-2);
+    border-bottom: var(--aura-border);
+    flex-shrink: 0;
+    transition: box-shadow 0.1s;
+  }
+  .pm-search:focus-within { box-shadow: inset 0 -2px 0 var(--aura-color-primary); }
+  .pm-search-icon {
+    display: flex;
+    color: var(--aura-color-text-dim);
+    font-size: 0.9rem;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .pm-search:focus-within .pm-search-icon { color: var(--aura-color-primary); }
+  .pm-search-input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--aura-color-text);
+    font-family: var(--aura-font-mono);
+    font-size: var(--aura-font-size-sm);
+    letter-spacing: 0.04em;
+  }
+  .pm-search-input::placeholder { color: var(--aura-color-text-dim); letter-spacing: 0.1em; }
+  .pm-search-clear {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    color: var(--aura-color-text-dim);
+    cursor: pointer;
+    padding: 2px;
+    font-size: 0.8rem;
+    line-height: 1;
+    flex-shrink: 0;
+    transition: color 0.1s;
+  }
+  .pm-search-clear:hover { color: var(--aura-color-danger); }
+  .pm-search-clear[hidden] { display: none; }
 
   /* ============ List + cards ============ */
   .pm-list {
@@ -482,6 +551,8 @@ import Icon from '../ui/Icon.astro';
     line-height: 1;
     justify-content: center;
   }
+  /* Oversized "+" glyph on new-activity buttons — 1.5x the button text. */
+  .pm-plus { font-size: 1.5em; line-height: 1; }
 
   /* Footer */
   .pm-footer {
@@ -501,6 +572,10 @@ import Icon from '../ui/Icon.astro';
     text-transform: uppercase;
   }
   .pm-foot-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
     background: transparent;
     border: var(--aura-border);
     color: var(--aura-color-text-dim);
@@ -898,6 +973,8 @@ import Icon from '../ui/Icon.astro';
   const list        = document.getElementById('pm-list') as HTMLUListElement;
   const count       = document.getElementById('pm-count') as HTMLElement;
   const refresh     = document.getElementById('pm-refresh') as HTMLButtonElement;
+  const searchInput = document.getElementById('pm-search-input') as HTMLInputElement | null;
+  const searchClear = document.getElementById('pm-search-clear') as HTMLButtonElement | null;
   const viewBtns    = document.querySelectorAll<HTMLButtonElement>('.pm-view-btn');
   const filterBtns  = document.querySelectorAll<HTMLButtonElement>('.pm-filter-btn');
   // Lazy-getters: the panel HTML may not have been parsed yet at module
@@ -915,6 +992,32 @@ import Icon from '../ui/Icon.astro';
   // fresh /api/apps fetch.
   let lastInstances:  InstanceListItem[] = [];
   let lastActivities: ActivityListItem[] = [];
+
+  // ── Fuzzy filter (top-of-panel search) ─────────────────────
+  // Simple case-insensitive subsequence match: every whitespace-separated
+  // token in the query must appear, in order, somewhere in the instance's
+  // haystack (name + ids + state + its activities). Reset on each open.
+  let searchQuery = '';
+  function fuzzySub(q: string, text: string): boolean {
+    let i = 0;
+    for (let j = 0; j < text.length && i < q.length; j++) if (text[j] === q[i]) i++;
+    return i === q.length;
+  }
+  function matchesSearch(inst: InstanceListItem): boolean {
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return true;
+    const m = manifests.get(inst.appId);
+    const acts = lastActivities.filter(a => a.parentInstanceId === inst.instanceId);
+    // Match each token WITHIN a single field (name / id / activity) rather than
+    // across a concatenated blob — otherwise a short query borrows letters from
+    // the ubiquitous "com.aura." prefix and the "resumed" state and matches
+    // almost everything.
+    const fields = [m?.name, inst.appId, inst.instanceId,
+                    ...acts.flatMap(a => [a.title, a.path, a.activityId])]
+      .filter(Boolean).map(s => (s as string).toLowerCase());
+    return query.split(/\s+/).filter(Boolean)
+      .every(tok => fields.some(f => fuzzySub(tok, f)));
+  }
 
   type ViewMode = 'cards' | 'list';
   const VIEW_STORAGE_KEY = 'aura.pm.viewMode';
@@ -975,20 +1078,32 @@ import Icon from '../ui/Icon.astro';
   async function openPanel(): Promise<void> {
     panel.setAttribute('aria-hidden', 'false');
     toggleBtn.setAttribute('aria-expanded', 'true');
+    // Start each open with a clean filter so a stale query never hides rows.
+    searchQuery = '';
+    if (searchInput) searchInput.value = '';
+    if (searchClear) searchClear.hidden = true;
     await refreshList();
     syncInspectPoll();
-    // Land focus on a useful starting point so arrows immediately work.
-    // Prefer the first instance's FOCUS action (the user typically opens
-    // the PM to act on a process); fall back to the close button so the
-    // panel still has a focused element when the list is empty.
-    const firstAction = panel.querySelector<HTMLButtonElement>('.pm-card [data-action="focus"], .pm-listrow [data-action="focus"]');
-    if (firstAction) firstAction.focus({ preventScroll: true });
-    else closeBtn.focus({ preventScroll: true });
+    // Land focus on the search box for type-to-find. The panel's arrow-nav
+    // tracks only <button>s and its handler early-returns on non-button
+    // targets, so a focused text input doesn't disturb arrow navigation.
+    if (searchInput) searchInput.focus({ preventScroll: true });
+    else {
+      const firstAction = panel.querySelector<HTMLButtonElement>('.pm-card [data-action="focus"], .pm-listrow [data-action="focus"]');
+      if (firstAction) firstAction.focus({ preventScroll: true });
+      else closeBtn.focus({ preventScroll: true });
+    }
   }
   function closePanel() {
     panel.setAttribute('aria-hidden', 'true');
     toggleBtn.setAttribute('aria-expanded', 'false');
     syncInspectPoll();
+  }
+  // "Show" makes the panel briefly see-through so the revealed window is
+  // visible behind it, then restores. Click-through during the fade.
+  function flashTransparent(): void {
+    panel.classList.add('pm-see-through');
+    window.setTimeout(() => panel.classList.remove('pm-see-through'), 1500);
   }
   // Variant used when the close came from the user dismissing the panel
   // (✕ button, Esc) — returns keyboard focus to the dock's chrome-nav
@@ -1007,6 +1122,27 @@ import Icon from '../ui/Icon.astro';
   });
   closeBtn.addEventListener('click', closePanelAndReturnFocus);
   refresh.addEventListener('click', refreshList);
+
+  // Fuzzy search: filter live from the cached lists (no refetch).
+  function applySearch(q: string): void {
+    searchQuery = q;
+    if (searchClear) searchClear.hidden = q.trim() === '';
+    render(lastInstances, lastActivities);
+  }
+  searchInput?.addEventListener('input', () => applySearch(searchInput.value));
+  searchInput?.addEventListener('keydown', (e) => {
+    // Esc clears a non-empty query (and keeps the panel open); an empty query
+    // lets Esc bubble to the panel-close handler.
+    if (e.key === 'Escape' && searchInput.value !== '') {
+      e.stopPropagation();
+      searchInput.value = '';
+      applySearch('');
+    }
+  });
+  searchClear?.addEventListener('click', () => {
+    if (searchInput) { searchInput.value = ''; searchInput.focus(); }
+    applySearch('');
+  });
 
   // Toggle via dispatcher (default combo: Ctrl+Alt+M, remappable in Settings).
   keyDispatcher.bind('aura.processmanager.toggle', () => {
@@ -1275,8 +1411,12 @@ import Icon from '../ui/Icon.astro';
     // a `+ ACTIVITY` action, and visually distinguishing them keeps the user
     // from thinking they're stuck in an unusable BOOT state.
     const isService = (i: InstanceListItem) => manifests.get(i.appId)?.componentType === 'service';
-    const appInstances     = instances.filter(i => !isService(i));
-    const serviceInstances = instances.filter(isService);
+    const appInstancesAll     = instances.filter(i => !isService(i));
+    const serviceInstancesAll = instances.filter(isService);
+    // Fuzzy search narrows what's shown; the APPS/SVC pill counts below stay
+    // on the full on-disk sets so you still see how many exist while filtering.
+    const appInstances     = appInstancesAll.filter(matchesSearch);
+    const serviceInstances = serviceInstancesAll.filter(matchesSearch);
 
     // Pill counts: always reflect totals on disk, not what's currently
     // rendered, so the user sees `SVC 2` even when SVC is toggled off.
@@ -1285,8 +1425,8 @@ import Icon from '../ui/Icon.astro';
     // re-import where the panel hasn't re-rendered yet) the cached nodes
     // can be null. Without the guard, `refresh()` throws and the whole
     // ProcessManager is wedged.
-    if (filterCount.apps)     filterCount.apps.textContent     = String(appInstances.length);
-    if (filterCount.services) filterCount.services.textContent = String(serviceInstances.length);
+    if (filterCount.apps)     filterCount.apps.textContent     = String(appInstancesAll.length);
+    if (filterCount.services) filterCount.services.textContent = String(serviceInstancesAll.length);
 
     // Footer + toggle-button dot use the *visible* set so a hidden section's
     // running services don't make the badge pulse.
@@ -1298,11 +1438,14 @@ import Icon from '../ui/Icon.astro';
 
     if (visibleCount === 0) {
       const allHidden = totalInst > 0 && !filters.apps && !filters.services;
+      const searching = searchQuery.trim() !== '';
+      const emptyText = searching ? 'NO MATCHES' : allHidden ? 'ALL SECTIONS HIDDEN' : 'NO ACTIVE PROCESSES';
+      const emptyHint = searching ? '// ADJUST FILTER' : allHidden ? '// ENABLE APPS OR SVC ABOVE' : '// LAUNCH AN APP TO BEGIN';
       list.innerHTML = `
         <li class="pm-empty">
           <div class="pm-empty-icon"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle"/></svg></div>
-          <div class="pm-empty-text">${allHidden ? 'ALL SECTIONS HIDDEN' : 'NO ACTIVE PROCESSES'}</div>
-          <div class="pm-empty-hint">${allHidden ? '// ENABLE APPS OR SVC ABOVE' : '// LAUNCH AN APP TO BEGIN'}</div>
+          <div class="pm-empty-text">${emptyText}</div>
+          <div class="pm-empty-hint">${emptyHint}</div>
         </li>`;
       restoreFocus(snap);
       return;
@@ -1348,7 +1491,7 @@ import Icon from '../ui/Icon.astro';
                     <div class="pm-activity-id">${sub}</div>
                   </div>
                   <div class="pm-activity-actions">
-                    <button class="pm-action-btn pm-icon-btn" data-action="focus-activity" title="Focus this activity"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-dot"/></svg></button>
+                    <button class="pm-action-btn pm-icon-btn" data-action="focus-activity" title="Show this activity"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-dot"/></svg></button>
                     <button class="pm-action-btn pm-icon-btn" data-action="close-activity" data-variant="warn" title="Close this activity"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-x"/></svg></button>
                   </div>
                 </li>`;
@@ -1382,8 +1525,8 @@ import Icon from '../ui/Icon.astro';
           ${activitiesBlock}
           ${inspectBlock(inst)}
           <div class="pm-card-actions">
-            <button class="pm-action-btn" data-action="focus" title="Open in fullscreen focus mode"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-dot"/></svg> FOCUS</button>
-            ${supportsActivities ? '<button class="pm-action-btn" data-action="new-activity" title="Open a new activity on this instance">+ ACTIVITY</button>' : ''}
+            <button class="pm-action-btn" data-action="focus" title="Show — jump to its workspace and highlight it"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-dot"/></svg> Show</button>
+            ${supportsActivities ? '<button class="pm-action-btn" data-action="new-activity" title="Open a new activity on this instance"><span class="pm-plus">+</span> ACTIVITY</button>' : ''}
             ${inspectButton(inst, false)}
             <span class="pm-action-btn-spacer"></span>
             <button class="pm-action-btn" data-action="app-close" data-variant="warn" title="Standard close — runs full lifecycle: onPause → onStop → onDestroy → SIGTERM"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-square"/></svg> STOP</button>
@@ -1431,8 +1574,8 @@ import Icon from '../ui/Icon.astro';
             <div class="pm-listrow-line2">${metaParts.join('')}</div>
           </div>
           <div class="pm-listrow-actions">
-            <button class="pm-action-btn pm-icon-btn" data-action="focus"        title="Focus"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-dot"/></svg></button>
-            ${supportsActivities ? '<button class="pm-action-btn pm-icon-btn" data-action="new-activity" title="+ Activity">+</button>' : ''}
+            <button class="pm-action-btn pm-icon-btn" data-action="focus"        title="Show"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-dot"/></svg></button>
+            ${supportsActivities ? '<button class="pm-action-btn pm-icon-btn" data-action="new-activity" title="+ Activity"><span class="pm-plus">+</span></button>' : ''}
             ${inspectButton(inst, true)}
             <button class="pm-action-btn pm-icon-btn" data-action="app-close"   data-variant="warn"   title="Stop (graceful)"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-square"/></svg></button>
             <button class="pm-action-btn pm-icon-btn" data-action="task-kill"   data-variant="danger" title="Kill (SIGKILL)"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-x"/></svg></button>
@@ -1450,7 +1593,7 @@ import Icon from '../ui/Icon.astro';
               <div class="pm-listrow-line2">${sub}</div>
             </div>
             <div class="pm-listrow-actions">
-              <button class="pm-action-btn pm-icon-btn" data-action="focus-activity" title="Focus"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-dot"/></svg></button>
+              <button class="pm-action-btn pm-icon-btn" data-action="focus-activity" title="Show"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-dot"/></svg></button>
               <button class="pm-action-btn pm-icon-btn" data-action="close-activity" data-variant="warn" title="Close"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-x"/></svg></button>
             </div>
           </li>`;
@@ -1634,6 +1777,8 @@ import Icon from '../ui/Icon.astro';
     const btn = (e.target as HTMLElement).closest('[data-action]') as HTMLButtonElement | null;
     if (!btn) return;
     const action = btn.dataset['action']!;
+    // "Show" (focus / focus-activity) is driven by pointer hold/tap below.
+    if (action === 'focus' || action === 'focus-activity') return;
     // Inspect is a pure view toggle — no request to guard, and disabling the
     // button would drop keyboard focus across the re-render.
     if (action === 'inspect' || action === 'inspect-retry') {
@@ -1651,8 +1796,8 @@ import Icon from '../ui/Icon.astro';
         const activityId       = actRow.dataset['activityId']!;
         const parentInstanceId = actRow.dataset['parentId']!;
         if (action === 'focus-activity') {
-          (window as any).auraFocusInstance?.(parentInstanceId, activityId);
-          closePanel();
+          (window as any).auraRevealInstance?.(parentInstanceId, activityId);
+          flashTransparent();
         } else if (action === 'close-activity') {
           await fetch(`/api/activities/${encodeURIComponent(activityId)}/close`, { method: 'POST' });
           (window as any).auraRemoveViewByActivity?.(activityId);
@@ -1666,8 +1811,8 @@ import Icon from '../ui/Icon.astro';
       if (!row) return;
       const instanceId = row.dataset['instanceId']!;
       if (action === 'focus') {
-        (window as any).auraFocusInstance?.(instanceId);
-        closePanel();
+        (window as any).auraRevealInstance?.(instanceId);
+        flashTransparent();
       } else if (action === 'new-activity') {
         await (window as any).auraOpenActivityOnInstance?.(instanceId);
         await refreshList();
@@ -1699,6 +1844,59 @@ import Icon from '../ui/Icon.astro';
     if (refreshDebounce) return;
     refreshDebounce = setTimeout(() => { refreshDebounce = null; refreshList(); }, 80);
   }
+  // ── "Show" tap-vs-hold ─────────────────────────────────────────────────
+  // Tap = jump to the window's workspace and STAY (highlight lingers ~1.5s).
+  // Press-and-hold = peek while held, then jump back on release.
+  // The release is caught via a full-window overlay + a window listener: a bare
+  // window listener misses a mouseup that lands on an app iframe (the iframe
+  // swallows it), which previously left the peek stuck.
+  let peekHeld = false;
+  let peekDownTs = 0;
+  const PEEK_TAP_MS = 250;
+  function endPeek() {
+    if (!peekHeld) return;
+    peekHeld = false;
+    const commit = (Date.now() - peekDownTs) < PEEK_TAP_MS;   // tap = stay, hold = revert
+    (window as any).auraPeekEnd?.(commit);
+    if (commit) window.setTimeout(() => panel.classList.remove('pm-see-through'), 1500);
+    else panel.classList.remove('pm-see-through');
+  }
+  function noWindowFeedback(btn: HTMLElement) {
+    btn.classList.remove('pm-noshow'); void btn.offsetWidth; // restart the flash
+    btn.classList.add('pm-noshow');
+    window.setTimeout(() => btn.classList.remove('pm-noshow'), 900);
+  }
+  list.addEventListener('pointerdown', (e) => {
+    const btn = (e.target as HTMLElement).closest('[data-action="focus"], [data-action="focus-activity"]') as HTMLElement | null;
+    if (!btn) return;
+    e.preventDefault();
+    const actRow  = btn.closest('[data-activity-id]') as HTMLElement | null;
+    const instRow = btn.closest('[data-instance-id]') as HTMLElement | null;
+    const activityId = actRow?.dataset['activityId'];
+    const instanceId = actRow ? actRow.dataset['parentId'] : instRow?.dataset['instanceId'];
+    if (!instanceId) return;
+    // No live window for this process/activity → in-panel feedback, no peek.
+    if (!(window as any).auraHasWindow?.(instanceId, activityId)) { noWindowFeedback(btn); return; }
+    peekHeld = true;
+    peekDownTs = Date.now();
+    (window as any).auraPeekStart?.(instanceId, activityId);
+    panel.classList.add('pm-see-through');
+    // Transparent capture overlay so the release is never swallowed by an iframe.
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483646;cursor:pointer;background:transparent;';
+    document.body.appendChild(overlay);
+    let ended = false;
+    const done = () => {
+      if (ended) return; ended = true;
+      window.removeEventListener('pointerup', done);
+      window.removeEventListener('pointercancel', done);
+      overlay.remove();
+      endPeek();
+    };
+    window.addEventListener('pointerup', done);
+    window.addEventListener('pointercancel', done);
+  });
+
   osEvents.subscribe(['app:*', 'activity:*'], () => scheduleRefresh());
 
   // Initial load to populate the badge dot on the toggle button

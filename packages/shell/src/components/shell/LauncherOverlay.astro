@@ -101,6 +101,12 @@ import Icon from '../ui/Icon.astro';
     flex-shrink: 0;
   }
   .lo-title {
+    /* Keep the icon and label on one line (inline row) — as a plain span in the
+       space-between header the label could wrap under the icon when space is tight. */
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
     font-size: var(--aura-font-size-sm);
     color: var(--aura-color-primary);
     text-transform: uppercase;
@@ -115,14 +121,18 @@ import Icon from '../ui/Icon.astro';
     gap: 6px;
   }
   .lo-reload {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 24px;
+    box-sizing: border-box;
     background: transparent;
     border: var(--aura-border);
     color: var(--aura-color-text-dim);
     cursor: pointer;
     font-family: var(--aura-font-mono);
     font-size: var(--aura-font-size-xs);
-    padding: 2px 10px;
-    line-height: 1.4;
+    padding: 0 10px;
   }
   .lo-reload:hover,
   .lo-reload:focus,
@@ -151,13 +161,18 @@ import Icon from '../ui/Icon.astro';
   }
 
   .lo-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 24px;
+    box-sizing: border-box;
     background: transparent;
     border: var(--aura-border);
     color: var(--aura-color-text-dim);
     cursor: pointer;
     font-family: var(--aura-font-mono);
     font-size: var(--aura-font-size-xs);
-    padding: 2px 10px;
+    padding: 0 10px;
   }
   .lo-close:hover,
   .lo-close:focus,

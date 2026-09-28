@@ -1708,6 +1708,12 @@ let initialTimeZone: string = '';
     background: color-mix(in srgb, var(--aura-color-primary) 14%, transparent);
     box-shadow: none;
   }
+  /* Enlarge just the +/- stepper glyphs to 1.5x the status-btn size
+     (0.85rem -> 1.275rem); the 22px button box is unchanged. */
+  #zoom-out,
+  #zoom-in {
+    font-size: 1.275rem;
+  }
   /* The middle "value" button is wider and shows %, never gets the icon font */
   .status-btn-text {
     width: auto !important;
@@ -2131,6 +2137,8 @@ let initialTimeZone: string = '';
     color: var(--aura-color-text-dim);
     margin-left: 4px;
     padding: 0 12px;
+    /* 1.5x the .ws-pill glyph (0.7rem -> 1.05rem) to match the zoom stepper. */
+    font-size: 1.05rem;
   }
   .ws-pill-add:hover {
     color: var(--aura-color-secondary);
