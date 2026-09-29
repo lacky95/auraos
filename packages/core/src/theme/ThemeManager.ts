@@ -558,6 +558,9 @@ export class ThemeManager {
     lines.push('::-webkit-scrollbar-thumb { background: var(--aura-color-border); border: 2px solid transparent; background-clip: padding-box; }');
     lines.push('::-webkit-scrollbar-thumb:hover { background: var(--aura-color-primary); border: 2px solid transparent; background-clip: padding-box; }');
     lines.push('::-webkit-scrollbar-corner { background: transparent; }');
+    lines.push('');
+    lines.push('/* OS icons — default sizing for /api/os/icons.svg sprite references */');
+    lines.push('.aura-icon { width: 1em; height: 1em; vertical-align: -0.125em; }');
 
     return lines.join('\n') + '\n';
   }

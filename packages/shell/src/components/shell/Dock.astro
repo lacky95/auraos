@@ -1,6 +1,7 @@
 ---
 import type { AppManifest } from '@aura/core';
 import ProcessManager from './ProcessManager.astro';
+import Icon from '../ui/Icon.astro';
 
 interface Props {
   apps: AppManifest[];
@@ -23,14 +24,14 @@ const { apps, enabledMap = {} } = Astro.props;
     class="nav-entry-btn"
     aria-label="Lock screen"
     title="Lock screen (tap) · Window selection (Enter) · Ctrl+Alt+Space focuses this">
-    <span class="nav-entry-icon" aria-hidden="true">◐</span>
+    <span class="nav-entry-icon" aria-hidden="true"><Icon name="lock" /></span>
   </button>
   <button
     id="dock-launcher-btn"
     type="button"
     class="launcher-btn"
     title="All Apps">
-    <span class="grid-icon">⣿</span>
+    <span class="grid-icon"><Icon name="grip" /></span>
   </button>
   <ProcessManager />
   <div class="separator"></div>
@@ -71,7 +72,7 @@ const { apps, enabledMap = {} } = Astro.props;
     aria-expanded="false"
     hidden
   >
-    <span class="dock-overflow-icon" aria-hidden="true">⋯</span>
+    <span class="dock-overflow-icon" aria-hidden="true"><Icon name="ellipsis" /></span>
   </button>
   <div id="dock-overflow-menu" class="dock-overflow-menu" role="menu" hidden></div>
 </nav>

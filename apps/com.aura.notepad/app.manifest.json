@@ -20,7 +20,8 @@
   ],
   "tools": [
     "bash",
-    "node"
+    "node",
+    "code-server"
   ],
   "sandbox": "container",
   "instanceMode": "single",

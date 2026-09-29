@@ -1,5 +1,5 @@
 import type { APIRoute } from 'astro';
-import { getAppManager, ThemeManager, keymapRegistry, resolveProxyConfig } from '@aura/core';
+import { getAppManager, ThemeManager, keymapRegistry, resolveProxyConfig, INTERFACE_PATH_KINDS } from '@aura/core';
 import type { AppManifest, ColorMode, KeyAction, OsKeymapState, ProxyConfig } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
 
@@ -15,8 +15,35 @@ const DEFAULT_PROXY_CONFIG: ProxyConfig = {
   injectConsoleRelay:   true,
   injectKeyForwarder:   true,
   injectIdentityScript: true,
+  injectInputCompat:    true,
+  injectEventSourceMux: true,
   exposeAllPaths:       false,
 };
+
+/**
+ * appId → in-flight cold-start. Collapses concurrent cold calls (e.g. several
+ * MCP clients initializing at once) into a single AppManager.start(), which
+ * resolves only once the instance is resumed with a port — no state polling
+ * needed. Capped so a wedged start can't hold every later request hostage.
+ */
+const coldStarts = new Map<string, Promise<unknown>>();
+const COLD_START_TIMEOUT_MS = 30_000;
+
+function ensureInstance(mgr: ReturnType<typeof getAppManager>, appId: string): Promise<unknown> {
+  let p = coldStarts.get(appId);
+  if (!p) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const started = mgr.start(appId);
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`timed out after ${COLD_START_TIMEOUT_MS}ms`)), COLD_START_TIMEOUT_MS);
+    });
+    p = Promise.race([started, timeout])
+      .finally(() => { clearTimeout(timer); coldStarts.delete(appId); });
+    started.catch(() => {}); // the race surfaces the rejection; keep the loser from tripping unhandledRejection
+    coldStarts.set(appId, p);
+  }
+  return p;
+}
 
 /**
  * Reverse-proxy to a running app instance.
@@ -56,12 +83,35 @@ export const ALL: APIRoute = async ({ params, request }) => {
   //     the user's view pointing at an instance the AppManager doesn't think
   //     they own.
   const exact = mgr.getInstance(id);
-  const instance = exact && isLive(exact.state)
+  let instance = exact && isLive(exact.state)
     ? exact
     : mgr.getInstancesByApp(id).find((i) => !i.inPool && isLive(i.state) && i.port != null);
 
   if (!instance?.port) {
-    return notReadyResponse(id, path, 503);
+    // Cold-start: a bare-appId request for a path the app's manifest declares
+    // as a provided interface (e.g. the terminal's /mcp/terminal) starts an
+    // instance instead of 503ing — the app-level interface alias in the
+    // registry promises exactly this. The provides gate keeps stale iframes
+    // and asset probes from spawning containers, and an exact-instanceId
+    // request for a dead instance stays 503 (getManifest only resolves bare
+    // appIds) rather than silently becoming a different instance.
+    const coldManifest = mgr.getManifest(id);
+    const reqPath = '/' + path;
+    const servesPath = coldManifest?.provides.some((p) =>
+      INTERFACE_PATH_KINDS.has(p.kind)
+      && (reqPath === p.address || reqPath.startsWith(p.address + '/')));
+    if (servesPath) {
+      try {
+        await ensureInstance(mgr, id);
+        instance = mgr.getInstancesByApp(id)
+          .find((i) => !i.inPool && isLive(i.state) && i.port != null);
+      } catch (err) {
+        console.error(`[proxy] cold-start of ${id} failed: ${(err as Error).message}`);
+      }
+    }
+    if (!instance?.port) {
+      return notReadyResponse(id, path, 503);
+    }
   }
 
   // Architectural guard: services are headless by contract. The OS exposes
@@ -180,7 +230,26 @@ export default {};
   // upstream. Needed by Next.js apps whose `basePath` config expects to see
   // the proxy prefix on every request — without it we'd lose a round-trip
   // to a 308 redirect chain back to the prefixed URL.
-  const upstreamPath = cfg.preservePrefix ? `api/proxy/${id}/${path}` : path;
+  // Astro's `[...path]` param drops a trailing page-format extension: a request
+  // for `.../blank.html` arrives with `params.path` === `.../blank`, so
+  // forwarding the param would strip the `.html` and upstream 404s. (This broke
+  // Guacamole's resize sensor — an `<object data=".../app/element/templates/blank.html">`
+  // whose load failure meant window resizes never reached the remote session.)
+  // `reqUrl.pathname` keeps the extension, so derive the forwarded path from it,
+  // falling back to the param if the expected prefix isn't present.
+  const upstreamPrefix = `/api/proxy/${id}/`;
+  const forwardPath = reqUrl.pathname.startsWith(upstreamPrefix)
+    ? reqUrl.pathname.slice(upstreamPrefix.length)
+    : path;
+  // With preservePrefix the upstream wants the URL exactly as the browser
+  // asked for it — including whether it ended in a slash. Rebuilding it as
+  // `api/proxy/<id>/<forwardPath>` always reintroduces the slash, so an app
+  // that redirects `/api/proxy/<id>/` → `/api/proxy/<id>` (Astro's
+  // trailing-slash normalisation) never gets to serve the target: the shell
+  // re-adds the slash, the app redirects again, and the browser loops.
+  const upstreamPath = cfg.preservePrefix
+    ? reqUrl.pathname.replace(/^\//, '')
+    : forwardPath;
   const targetUrl = `http://${upHost}:${upPort}/${upstreamPath}${search}`;
 
   try {
@@ -188,17 +257,60 @@ export default {};
     headers.set('X-Aura-App-Id', instance.appId);
     headers.set('X-Aura-Instance-Id', instance.instanceId);
     if (activityId) headers.set('X-Aura-Activity-Id', activityId);
+
+    // Tell the app which origin the BROWSER actually used, before we drop the
+    // Host header. Without this an app sees only `aura-<instance>:<port>` and
+    // any absolute URL it builds points at a name that exists solely on
+    // aura-net — it leaks into `?next=`/`redirect_uri` style parameters and
+    // into anything the app emails, logs or hands to a client. Superset did
+    // exactly that: `?next=http://aura-at.oebb.opsconsole:4002/…`, which the
+    // browser then cannot follow.
+    //
+    // Standard names, so a framework behind a reverse proxy (Flask's ProxyFix,
+    // Django's USE_X_FORWARDED_HOST, …) picks them up with its normal config.
+    // X-Forwarded-Prefix is deliberately NOT set: apps already receive the
+    // prefix-stripped path, and a subpath-aware runtime told about the prefix
+    // a second time re-applies it and double-prefixes every URL.
+    const fwdHost  = request.headers.get('host') ?? reqUrl.host;
+    const fwdProto = reqUrl.protocol.replace(':', '');
+    if (fwdHost) headers.set('X-Forwarded-Host', fwdHost);
+    headers.set('X-Forwarded-Proto', fwdProto);
+    // Set the port explicitly too. ProxyFix-style middleware prefers
+    // X-Forwarded-Port over the port inside X-Forwarded-Host, and anything
+    // between us and the app that adds its own would otherwise contribute the
+    // APP's port — which is how `?next=http://127.0.0.1:4002/…` happens even
+    // once the host is right.
+    const fwdPort = fwdHost?.includes(':') ? fwdHost.split(':').pop() : (fwdProto === 'https' ? '443' : '80');
+    if (fwdPort) headers.set('X-Forwarded-Port', fwdPort);
     headers.delete('host');
 
     // Forward the browser's abort signal so streams (SSE, long-poll) live as
     // long as the iframe keeps the connection open and die cleanly when it
     // doesn't. No hard timeout: localhost-to-localhost won't hang, and a
     // timeout would kill `text/event-stream` after N seconds.
+    // Hand every 3xx back to the BROWSER instead of chasing it here. Following
+    // redirects inside the proxy breaks two things:
+    //
+    //   - POST + redirect dies outright. The body is a STREAM and undici
+    //     cannot replay a stream onto the redirect target, so the whole fetch
+    //     rejects with a bare `fetch failed` and the iframe gets a 502 — i.e.
+    //     every server-rendered form login was broken.
+    //   - The browser's URL stops matching the content. The proxy quietly
+    //     serves the redirect TARGET's html at the ORIGINAL url, so a
+    //     client-side router boots on a path that was never the one it was
+    //     given and renders the wrong view (or none). Superset lands on its
+    //     login page at the app root and the form posts without its CSRF
+    //     token, which surfaces as "the password doesn't work".
+    //
+    // The browser replays or downgrades the request per spec, exactly as it
+    // would on any other site, and its URL follows along.
+    const hasBody = !['GET', 'HEAD'].includes(request.method);
     const upstream = await fetch(targetUrl, {
       method:  request.method,
       headers,
-      body:    ['GET', 'HEAD'].includes(request.method) ? undefined : request.body,
+      body:    hasBody ? request.body : undefined,
       signal:  request.signal,
+      redirect: 'manual',
       // @ts-expect-error Node fetch supports this
       duplex: 'half',
     });
@@ -223,6 +335,40 @@ export default {};
 
     const contentType = upstream.headers.get('content-type') ?? '';
     const proxyPrefix = `/api/proxy/${id}`;
+
+    // The 3xx goes to the browser, so its Location has to be a URL the BROWSER
+    // can use. Upstream
+    // answers with its own origin (`http://aura-<instance>:4002/…`), which
+    // resolves to nothing out there, and with root-absolute paths that would
+    // escape this app's prefix. Rewrite both back into `/api/proxy/<id>/…`.
+    // An off-site absolute URL (an OAuth provider, say) is left exactly as is.
+    if (upstream.status >= 300 && upstream.status < 400) {
+      const loc = upstream.headers.get('location');
+      if (loc) {
+        let next: string | null = null;
+        if (loc.startsWith('/')) {
+          next = loc.startsWith('//') ? null : loc;
+        } else if (/^https?:\/\//i.test(loc)) {
+          try {
+            const u = new URL(loc);
+            // Only ours — anything else is a genuine off-site redirect.
+            if (u.host === `${upHost}:${upPort}`) next = `${u.pathname}${u.search}${u.hash}`;
+          } catch { /* malformed Location: leave it alone */ }
+        }
+        if (next !== null && !next.startsWith(`${proxyPrefix}/`) && next !== proxyPrefix) {
+          next = `${proxyPrefix}${next}`;
+        }
+        if (next !== null && next !== loc) {
+          const outHeaders = new Headers(upstream.headers);
+          outHeaders.set('location', next);
+          outHeaders.delete('content-encoding');
+          outHeaders.delete('content-length');
+          scopeCookies(upstream, outHeaders, proxyPrefix);
+          try { await upstream.body?.cancel(); } catch { /* ignore */ }
+          return new Response(null, { status: upstream.status, headers: outHeaders });
+        }
+      }
+    }
 
     // Vite virtual-module query markers (e.g. `?astro&type=style`) would be
     // matched by the SHELL's own Vite middleware before the proxy route runs.
@@ -528,6 +674,176 @@ window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod
         rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${keyForwarder}`);
       }
 
+      // Focus-on-click. Clicking anywhere in an app window must move keyboard
+      // focus to it. The browser normally focuses an iframe when you click into
+      // it, but an app that calls preventDefault() on mousedown — Guacamole's
+      // canvas does — suppresses that, so keyboard focus stays on whichever
+      // window held it before (e.g. a terminal) and typing goes to the wrong
+      // app. On pointerdown we focus our own window when it isn't already
+      // focused; capture phase so it runs even if the app stops propagation,
+      // and the document.hasFocus() guard makes it a no-op once we hold focus
+      // (so it never fights an app's own inner focus handling). Injected
+      // unconditionally: every windowed app needs this, including ones that opt
+      // out of the other injections, and it costs one guarded listener.
+      // Not behind injectInputCompat — the preventDefault focus trap is not
+      // specific to touch/DeX.
+      const focusOnClick = `<script>(function(){try{
+if(window.__auraFocusOnClick)return;window.__auraFocusOnClick=true;
+addEventListener('pointerdown',function(){try{if(!document.hasFocus())window.focus();}catch(_){}} ,true);
+}catch(_){}})();</script>`;
+      rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${focusOnClick}`);
+
+      // Mouse → touch replay for touch-only widgets. Libraries such as
+      // Unidragger (Trilium's tab row) bind *either* touch or mouse events,
+      // choosing touch whenever `ontouchstart` exists. On a touch-capable
+      // browser driven by a mouse — a phone in Samsung DeX, a touchscreen
+      // laptop — those widgets then ignore every click. The script records
+      // which elements get touchstart/mousedown/pointerdown listeners and,
+      // for a mouse gesture whose nearest touch listener has no mouse or
+      // pointer listener between it and the target, dispatches the matching
+      // touch events. Real touch input, browsers without touch support and
+      // widgets that already handle the mouse are left untouched. `click`
+      // listeners don't count as mouse handling: Unidragger binds touchstart
+      // and click on the same handle. Listeners dropped via `once`/`signal`
+      // aren't untracked; that errs towards skipping the replay.
+      //
+      // NOTE: keep this logic in sync with INPUT_COMPAT_JS in the
+      // aura-native-wrapper (LocalProxyServer.java). Both inject it, guarded by
+      // one `__auraInputCompat` flag so whichever runs first wins and the other
+      // no-ops: the wrapper covers the top-level shell document and every page
+      // the WebView loads; this proxy covers app HTML when the shell runs
+      // outside the wrapper (a desktop browser tab, Electron). Two parts:
+      //
+      // 1. Hover / pointer-position catch-up. The Android WebView (a phone in
+      //    Samsung DeX, a touchscreen laptop) does not emit `mousemove` while
+      //    the mouse hovers with no button down, and delivers a button press
+      //    with no move in front of it. Libraries that read the cursor
+      //    position from the last move then act at a stale point — Guacamole's
+      //    Mouse sends every click to wherever the previous drag ended; drag
+      //    handles, tooltips and :hover UI misfire the same way. We mirror
+      //    trusted mouse pointer events to synthetic `mousemove` at the real
+      //    coordinates: before each press/release (so the click lands right)
+      //    and on hover moves/boundary crossings that carry no button (so
+      //    position-tracking keeps up as far as the platform reports it).
+      //    Drags already emit real `mousemove`, so those are left alone, and a
+      //    position guard drops any synthetic move the platform already sent —
+      //    on a real hover-capable browser the whole block gates off on the
+      //    `ontouchstart` check.
+      // 2. Mouse -> touch replay for touch-only widgets (below), unchanged.
+      //
+      // Inserted last so it lands first in <head> and wraps addEventListener
+      // before any app script runs.
+      if (cfg.injectInputCompat) {
+        const inputCompat = `<script>(function(){try{
+if(window.__auraInputCompat||!('ontouchstart' in window))return;
+window.__auraInputCompat=true;
+var ET=EventTarget.prototype,oAdd=ET.addEventListener,oRem=ET.removeEventListener;
+var hov=null;
+oAdd.call(window,'mousemove',function(e){if(e.isTrusted)hov={x:e.clientX,y:e.clientY};},true);
+function moveTo(e){
+  if(hov&&Math.abs(hov.x-e.clientX)<1.5&&Math.abs(hov.y-e.clientY)<1.5)return;
+  var init={bubbles:true,cancelable:true,composed:true,view:window,clientX:e.clientX,clientY:e.clientY,screenX:e.screenX,screenY:e.screenY,button:0,buttons:0,ctrlKey:e.ctrlKey,shiftKey:e.shiftKey,altKey:e.altKey,metaKey:e.metaKey};
+  try{
+    if(typeof PointerEvent==='function')e.target.dispatchEvent(new PointerEvent('pointermove',Object.assign({pointerId:e.pointerId,pointerType:'mouse',isPrimary:true},init)));
+    e.target.dispatchEvent(new MouseEvent('mousemove',init));
+  }catch(_){}
+  hov={x:e.clientX,y:e.clientY};
+}
+function onBtn(e){if(e.isTrusted&&e.pointerType==='mouse')moveTo(e);}
+function onHover(e){if(e.isTrusted&&e.pointerType==='mouse'&&e.buttons===0)moveTo(e);}
+oAdd.call(window,'pointerdown',onBtn,true);
+oAdd.call(window,'pointerup',onBtn,true);
+oAdd.call(window,'pointermove',onHover,true);
+oAdd.call(window,'pointerover',onHover,true);
+if(typeof Touch!=='function'||typeof TouchEvent!=='function')return;
+var WATCH={touchstart:1,mousedown:1,pointerdown:1};
+var reg=new WeakMap();
+function slot(el,t,o,make){var m=reg.get(el);if(!m){if(!make)return null;m=new Map();reg.set(el,m);}var k=t+((typeof o==='boolean'?o:!!(o&&o.capture))?'!':'');var s=m.get(k);if(!s&&make){s=new Set();m.set(k,s);}return s||null;}
+ET.addEventListener=function(t,l,o){if(l&&WATCH[t]===1&&this instanceof Element)slot(this,t,o,true).add(l);return oAdd.apply(this,arguments);};
+ET.removeEventListener=function(t,l,o){if(l&&WATCH[t]===1&&this instanceof Element){var s=slot(this,t,o,false);if(s)s.delete(l);}return oRem.apply(this,arguments);};
+function has(el,t){var m=reg.get(el);if(!m)return false;var a=m.get(t),b=m.get(t+'!');return !!((a&&a.size)||(b&&b.size));}
+function handlesMouse(el){return has(el,'mousedown')||has(el,'pointerdown')||typeof el.onmousedown==='function'||typeof el.onpointerdown==='function';}
+var g=null;
+function fire(type,e){try{var t=new Touch({identifier:g.id,target:g.el,clientX:e.clientX,clientY:e.clientY,pageX:e.pageX,pageY:e.pageY,screenX:e.screenX,screenY:e.screenY});var end=type==='touchend'||type==='touchcancel';g.el.dispatchEvent(new TouchEvent(type,{bubbles:true,cancelable:true,composed:true,touches:end?[]:[t],targetTouches:end?[]:[t],changedTouches:[t]}));}catch(_){g=null;}}
+oAdd.call(document,'pointerdown',function(e){
+  if(g||e.pointerType!=='mouse'||e.button!==0)return;
+  var path=e.composedPath();
+  for(var i=0;i<path.length;i++){var el=path[i];if(el===document||el===window)return;if(!(el instanceof Element))continue;if(handlesMouse(el))return;if(has(el,'touchstart')){g={pointerId:e.pointerId,id:4155+(e.pointerId|0),el:el};fire('touchstart',e);return;}}
+},true);
+function follow(type,end){return function(e){if(!g||e.pointerId!==g.pointerId)return;fire(type,e);if(end)g=null;};}
+oAdd.call(window,'pointermove',follow('touchmove',false),true);
+oAdd.call(window,'pointerup',follow('touchend',true),true);
+oAdd.call(window,'pointercancel',follow('touchcancel',true),true);
+}catch(_){}})();</script>`;
+        rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${inputCompat}`);
+      }
+
+      // EventSource multiplexer (client half; server half in
+      // packages/shell/server/sse-mux.mjs). Every window shares the shell's
+      // host, and browsers cap HTTP/1.1 at 6 connections per host. Each
+      // EventSource pins one for the window's lifetime, so a few streaming
+      // windows exhaust the pool and every later request — a reloaded app's
+      // own scripts included — queues forever: the window never fires `load`
+      // and stays on its skeleton. This replaces `EventSource` for same-origin
+      // URLs with one that rides a WebSocket (not counted against the pool).
+      // It reproduces readyState, on* handlers, named events and reconnects
+      // with Last-Event-ID / `retry:`. If the socket never opens (endpoint
+      // missing), every stream falls back to the native EventSource.
+      // Inserted last so it lands first in <head>: the console relay wraps
+      // whatever `EventSource` it finds, and app scripts must see this one.
+      if (cfg.injectEventSourceMux) {
+        const sseMux = `<script>(function(){try{
+var NES=window.EventSource;if(!NES||window.__auraSseMux||typeof WebSocket!=='function'||typeof EventTarget!=='function')return;
+window.__auraSseMux=true;
+var PATH='/_aura/sse-mux';
+var ws=null,wsState=0,everOpened=false,nextId=1,streams=new Map(),queue=[];
+function wsSend(m){var s=JSON.stringify(m);if(wsState===2)ws.send(s);else queue.push(s);}
+function fallbackAll(){queue=[];streams.forEach(function(s){s._native();});}
+function connect(){
+  if(wsState!==0)return;wsState=1;
+  var sock;try{sock=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+PATH);}catch(_){wsState=3;fallbackAll();return;}
+  ws=sock;
+  sock.onopen=function(){wsState=2;everOpened=true;var q=queue;queue=[];q.forEach(function(s){sock.send(s);});};
+  sock.onmessage=function(e){var m;try{m=JSON.parse(e.data);}catch(_){return;}var s=streams.get(m.id);if(s)s._frame(m);};
+  sock.onclose=function(){if(ws!==sock)return;ws=null;queue=[];
+    if(!everOpened){wsState=3;fallbackAll();return;}
+    wsState=0;streams.forEach(function(s){s._drop();});};
+}
+class AuraEventSource extends EventTarget{
+  constructor(url,init){
+    super();
+    var abs=new URL(String(url),location.href);
+    if(abs.origin!==location.origin||abs.pathname===PATH||wsState===3)return new NES(url,init);
+    this.url=abs.href;this.withCredentials=!!(init&&init.withCredentials);
+    this.readyState=0;this.onopen=null;this.onmessage=null;this.onerror=null;
+    this._id=nextId++;this._path=abs.pathname+abs.search;this._last='';this._retry=3000;this._timer=0;this._types=new Set();this._nat=null;this._bound=null;
+    streams.set(this._id,this);
+    this._open();
+  }
+  _open(){this._timer=0;if(this.readyState===2||this._nat)return;connect();if(this._nat||wsState===3)return;wsSend({op:'open',id:this._id,url:this._path,lastEventId:this._last});}
+  _fire(type,init){var ev=init?new MessageEvent(type,init):new Event(type);this.dispatchEvent(ev);var h=type==='open'?this.onopen:type==='error'?this.onerror:type==='message'?this.onmessage:null;if(typeof h==='function'){try{h.call(this,ev);}catch(e){setTimeout(function(){throw e;});}}}
+  _frame(m){if(this.readyState===2||this._nat)return;
+    if(m.op==='open'){this.readyState=1;this._fire('open');}
+    else if(m.op==='event'){this._last=m.lastEventId||'';this._fire(m.type,{data:m.data,lastEventId:this._last,origin:location.origin});}
+    else if(m.op==='retry'){this._retry=m.ms;}
+    else if(m.op==='end'){this._drop();}
+    else if(m.op==='fail'){this.readyState=2;streams.delete(this._id);this._fire('error');}}
+  _drop(){if(this.readyState===2||this._nat||this._timer)return;this.readyState=0;this._fire('error');if(this.readyState===2)return;var self=this;this._timer=setTimeout(function(){self._open();},this._retry);}
+  _native(){if(this.readyState===2||this._nat)return;clearTimeout(this._timer);this._timer=0;var self=this,n=new NES(this.url,{withCredentials:this.withCredentials});this._nat=n;this._bound=new Set();
+    n.onopen=function(){self.readyState=n.readyState;self._fire('open');};
+    n.onerror=function(){self.readyState=n.readyState;self._fire('error');};
+    ['message'].concat(Array.from(this._types)).forEach(function(t){self._bind(t);});}
+  _bind(t){if(t==='open'||t==='error'||this._bound.has(t))return;this._bound.add(t);var self=this;this._nat.addEventListener(t,function(e){self._last=e.lastEventId;self._fire(t,{data:e.data,lastEventId:e.lastEventId,origin:e.origin});});}
+  addEventListener(t,l,o){this._types.add(t);if(this._nat)this._bind(t);return super.addEventListener(t,l,o);}
+  close(){if(this.readyState===2)return;this.readyState=2;clearTimeout(this._timer);this._timer=0;streams.delete(this._id);if(this._nat){this._nat.close();return;}if(wsState!==3)wsSend({op:'close',id:this._id});}
+}
+['CONNECTING','OPEN','CLOSED'].forEach(function(k,i){Object.defineProperty(AuraEventSource,k,{value:i});Object.defineProperty(AuraEventSource.prototype,k,{value:i});});
+Object.defineProperty(AuraEventSource,Symbol.hasInstance,{value:function(o){return o instanceof NES||Object.prototype.isPrototypeOf.call(AuraEventSource.prototype,o);}});
+window.EventSource=AuraEventSource;
+}catch(_){}})();</script>`;
+        rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${sseMux}`);
+      }
+
       const outHeaders = new Headers(upstream.headers);
       outHeaders.delete('content-encoding');
       outHeaders.delete('content-length');
@@ -535,6 +851,7 @@ window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod
       // no Cache-Control is present, leaving devices on stale app pages even
       // after a reload (scripts keep loading fine, so it looks half-updated).
       outHeaders.set('cache-control', 'no-store');
+      scopeCookies(upstream, outHeaders, proxyPrefix);
       return new Response(rewritten, { status: upstream.status, headers: outHeaders });
     }
 
@@ -549,13 +866,14 @@ window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod
     if (isJs && cfg.rewriteHtml !== 'none') {
       const js = await upstream.text();
       const rewritten = js.replace(
-        /(["'`])(\/(?:@fs|@vite|@id|node_modules)\/[^"'`\s]*)\1/g,
+        /(["'`])(\/(?:@fs|@vite|@id|node_modules|src)\/[^"'`\s]*)\1/g,
         (_full, q, url) => `${q}${prefixUrl(url)}${q}`,
       );
       const outHeaders = new Headers(upstream.headers);
       outHeaders.delete('content-encoding');
       outHeaders.delete('content-length');
       hardenDevCache(outHeaders);
+      scopeCookies(upstream, outHeaders, proxyPrefix);
       return new Response(rewritten, { status: upstream.status, headers: outHeaders });
     }
 
@@ -568,6 +886,7 @@ window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod
     outHeaders.delete('content-encoding');
     outHeaders.delete('content-length');
     hardenDevCache(outHeaders);
+    scopeCookies(upstream, outHeaders, proxyPrefix);
     return new Response(upstream.body ? wrapSafeStream(upstream.body) : null, {
       status:  upstream.status,
       headers: outHeaders,
@@ -596,6 +915,52 @@ window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod
  * (xterm and friends), and re-fetching them on every load would be a real cost
  * for no benefit, so `immutable` is left alone.
  */
+/**
+ * Confine an app's cookies to that app's proxy path.
+ *
+ * Every AuraOS app is served from the SHELL's single origin, so cookies are a
+ * shared namespace: an app that sets `session` at `Path=/` has that cookie
+ * sent to every OTHER app too. The receiving app reads a cookie it never set
+ * — for a Flask app, its own session cookie arrives alongside a stranger's of
+ * the same name and the wrong one wins, which surfaces as a login that
+ * "silently fails" with the right password.
+ *
+ * Rewriting `Path` so it lands inside `/api/proxy/<id>` makes the browser send
+ * each cookie back only to the app that set it. A `Path` the app chose is kept
+ * and mapped into the prefix (the app means a path in ITS OWN url-space), and
+ * one already inside the prefix is left alone — `preservePrefix` apps, and
+ * anything behind a subpath-aware runtime, already emit those.
+ *
+ * Not touched: name, value, Domain, Secure, HttpOnly, SameSite, Expires.
+ */
+function scopeCookiePath(cookie: string, proxyPrefix: string): string {
+  const parts = cookie.split(';');
+  let hadPath = false;
+  const rewritten = parts.map((part) => {
+    const m = /^(\s*)path\s*=\s*(.*)$/i.exec(part);
+    if (!m) return part;
+    hadPath = true;
+    const lead = m[1] ?? '';
+    const val  = (m[2] ?? '').trim() || '/';
+    if (val === proxyPrefix || val.startsWith(`${proxyPrefix}/`)) return part;
+    const abs = val.startsWith('/') ? val : `/${val}`;
+    return `${lead}Path=${abs === '/' ? proxyPrefix : `${proxyPrefix}${abs}`}`;
+  });
+  // No Path at all defaults to the request's directory, which for an app page
+  // is already under the prefix — but say it explicitly so the scope does not
+  // depend on which URL happened to set the cookie.
+  if (!hadPath) rewritten.push(` Path=${proxyPrefix}`);
+  return rewritten.join(';');
+}
+
+/** Apply scopeCookiePath to every Set-Cookie carried on `upstream`. */
+function scopeCookies(upstream: Response, outHeaders: Headers, proxyPrefix: string): void {
+  const cookies = upstream.headers.getSetCookie?.() ?? [];
+  if (cookies.length === 0) return;
+  outHeaders.delete('set-cookie');
+  for (const c of cookies) outHeaders.append('set-cookie', scopeCookiePath(c, proxyPrefix));
+}
+
 function hardenDevCache(headers: Headers): void {
   const cc = headers.get('cache-control');
   if (!cc) return;

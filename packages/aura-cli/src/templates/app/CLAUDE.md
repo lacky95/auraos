@@ -140,6 +140,33 @@ body { background: var(--aura-color-bg); color: var(--aura-color-text); }
 .primary { color: var(--aura-color-primary); }
 ```
 
+## Icons — Lucide is the OS default
+
+Do NOT bundle your own icon library. The shell serves Lucide (~2000 icons,
+https://lucide.dev/icons) OS-wide, themed via `currentColor`:
+
+- **Sprite (curated ~100 common icons)** — zero dependencies, works in plain
+  HTML/Astro/React alike:
+
+  ```html
+  <svg class="aura-icon"><use href="/api/os/icons.svg#lucide-settings"/></svg>
+  ```
+
+  `.aura-icon` (shipped in the injected theme.css) sizes the icon to `1em`
+  and aligns it with text; the stroke follows the element's `color`, so it
+  recolors with the theme automatically. Override size with your own
+  width/height. Unknown symbol ids render nothing — check the sprite
+  (`curl /api/os/icons.svg`) if an icon does not appear.
+
+- **Single icon (any Lucide name)** — `/api/os/icons/<name>.svg` (404 on
+  unknown names). Fine for `<img>` or CSS `mask-image`; note a standalone
+  SVG document cannot see the page's `color`, so prefer the sprite when the
+  icon must follow the theme.
+
+- **React + @aura/ui** — `import { Icon } from "@aura/ui"` then
+  `<Icon name="rotate-cw" />` (kebab-case Lucide names, `currentColor`,
+  defaults to `1em`).
+
 ## Styling rules that stop silent misses
 
 CSS that doesn't apply never errors — the element just falls back to the

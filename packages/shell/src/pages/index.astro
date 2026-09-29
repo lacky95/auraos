@@ -1,5 +1,6 @@
 ---
 import OSLayout from '../layouts/OSLayout.astro';
+import Icon from '../components/ui/Icon.astro';
 import LayoutManager from '../components/layout/LayoutManager.astro';
 import { getAppManager, DEFAULT_WORKSPACE_STATE, type WorkspaceState } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
@@ -155,6 +156,14 @@ for (const v of initialViews) {
   // would clutter the user's app set.
   const m = mgr.getManifest(v.appId);
   if (m?.componentType === 'service') continue;
+  // Nor an app whose backend runs without a window (autoStart, or
+  // backgroundService — closing its window leaves it running). Without
+  // activities its view only says "the instance is up", not "a window was
+  // open", so adopting it popped Hermes onto the desktop at every boot and
+  // back open on every reload after the user closed it. Its window opens
+  // when the user launches it; activity views are still backfilled, since
+  // an activity exists only because a window was opened.
+  if (!v.activityId && (m?.autoStart || m?.backgroundService)) continue;
   if (!knownMembers.has(v.viewId)) {
     active.members.push(v.viewId);
     knownMembers.add(v.viewId);
@@ -204,8 +213,8 @@ const ssrVisibleViews = initialViews
       <header id="focus-header">
         <span id="focus-title">FOCUS</span>
         <span id="focus-instance-id"></span>
-        <button id="focus-fullscreen" title="Toggle full size (overlay top + bottom bars)" aria-pressed="false">⛶ FULL SIZE</button>
-        <button id="focus-exit" title="Exit focus (Esc)">✕ EXIT FOCUS</button>
+        <button id="focus-fullscreen" title="Toggle full size (overlay top + bottom bars)" aria-pressed="false"><Icon name="maximize" /> FULL SIZE</button>
+        <button id="focus-exit" title="Exit focus (Esc)"><Icon name="x" /> EXIT FOCUS</button>
       </header>
       <!-- Positioned wrapper so #focus-frame can be absolutely sized and
            counter-scaled by --aura-iframe-scale (app zoom), exactly like a
@@ -2461,14 +2470,14 @@ const ssrVisibleViews = initialViews
     // bar + dock). Hidden until this window is the maximized one — updateSlot()
     // reveals it + swaps its glyph. This restores the old focus-overlay's
     // "⛶ FULL SIZE" button without the separate reloading iframe.
-    const fullSizeBtn = `<button data-action="maximize-full" class="slot-fullsize-btn" title="Full size (cover bars)" style="${btnStyle};display:none;">⛶</button>`;
+    const fullSizeBtn = `<button data-action="maximize-full" class="slot-fullsize-btn" title="Full size (cover bars)" style="${btnStyle};display:none;"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-maximize"/></svg></button>`;
     // Refresh = reload the iframe in place. Sits between maximize and close
     // so close stays the rightmost destructive action. ↻ glyph matches the
     // browser refresh affordance most users already know.
-    const refreshBtn  = `<button data-action="refresh" title="Reload window" style="${btnStyle}">↻</button>`;
+    const refreshBtn  = `<button data-action="refresh" title="Reload window" style="${btnStyle}"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-rotate-cw"/></svg></button>`;
     // Rename = set this window's ephemeral user label. Leftmost (least
     // destructive) control; ✎ matches the "edit/rename" affordance.
-    const renameBtn   = `<button data-action="rename" title="Name this window" style="${btnStyle}">✎</button>`;
+    const renameBtn   = `<button data-action="rename" title="Name this window" style="${btnStyle}"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-pencil"/></svg></button>`;
     slot.innerHTML = `
       <div class="slot-chrome" style="display:flex;align-items:center;justify-content:space-between;padding:0 8px;height:28px;background:var(--aura-color-surface-2);border-bottom:var(--aura-border);flex-shrink:0;gap:8px;min-width:0;">
         <div class="slot-title" title="Double-click to name this window" style="flex:1;min-width:0;display:flex;align-items:center;gap:6px;overflow:hidden;color:var(--aura-color-primary);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.08em;">
@@ -2477,13 +2486,13 @@ const ssrVisibleViews = initialViews
           <span class="slot-title-id" style="color:var(--aura-color-text-dim);font-size:0.6rem;flex-shrink:0;"></span>
         </div>
         <div class="slot-controls" style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
-          <span class="slot-focus-hint" style="display:none;align-items:center;gap:4px;margin-right:4px;padding:1px 6px;border:1px solid var(--aura-color-primary);color:var(--aura-color-primary);font-family:var(--aura-font-mono);font-size:0.55rem;letter-spacing:0.1em;white-space:nowrap;">◉ FOCUS · ESC</span>
+          <span class="slot-focus-hint" style="display:none;align-items:center;gap:4px;margin-right:4px;padding:1px 6px;border:1px solid var(--aura-color-primary);color:var(--aura-color-primary);font-family:var(--aura-font-mono);font-size:0.55rem;letter-spacing:0.1em;white-space:nowrap;"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-dot"/></svg> FOCUS · ESC</span>
           ${renameBtn}
           ${minimizeBtn}
           ${refreshBtn}
           ${fullSizeBtn}
           ${maximizeBtn}
-          <button data-action="close" class="slot-close-btn" title="Close" style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 10px;cursor:pointer;line-height:1;">✕</button>
+          <button data-action="close" class="slot-close-btn" title="Close" style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 10px;cursor:pointer;line-height:1;"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-x"/></svg></button>
         </div>
       </div>
       <div class="slot-body" style="flex:1;overflow:hidden;position:relative;"></div>`;
@@ -2520,11 +2529,11 @@ const ssrVisibleViews = initialViews
           entry.title ?? (entry.path === '/' ? '·' : entry.path.replace(/^\//, '').replace(/\/$/, '').split('/').slice(-1)[0] ?? '·');
         const crumbs = history.map((h, i) =>
           `<button class="crumb crumb-prev" data-action="back-to" data-index="${i}" title="${escHtml(h.path)}" style="${crumbPrev}">${escHtml(fallback(h))}</button>`
-        ).join(`<span class="crumb-sep" aria-hidden="true" style="${crumbSep}">›</span>`);
+        ).join(`<span class="crumb-sep" aria-hidden="true" style="${crumbSep}"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-chevron-right"/></svg></span>`);
         trail.innerHTML =
           `<button class="crumb-back" data-action="back" title="Back" style="${crumbBack}">&lt;</button>` +
           crumbs +
-          `<span class="crumb-sep" aria-hidden="true" style="${crumbSep}">›</span>` +
+          `<span class="crumb-sep" aria-hidden="true" style="${crumbSep}"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-chevron-right"/></svg></span>` +
           `<span class="crumb crumb-current" title="${escHtml(v.title)}" style="${crumbCurrent}">${escHtml(v.title)}</span>`;
       } else {
         // Plain title — current behaviour. The .crumb-current span keeps
@@ -2566,7 +2575,7 @@ const ssrVisibleViews = initialViews
     const fullBtn = slot.querySelector('.slot-fullsize-btn') as HTMLButtonElement | null;
     if (fullBtn) {
       fullBtn.style.display = isMax ? '' : 'none';
-      fullBtn.textContent = maximizedFull ? '⊠' : '⛶';
+      fullBtn.innerHTML = maximizedFull ? '<svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-minimize"/></svg>' : '<svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-maximize"/></svg>';
       fullBtn.title = maximizedFull ? 'Exit full size' : 'Full size (cover bars)';
     }
     // Hide the destructive close (✕) while focused — exiting focus is the
@@ -2937,7 +2946,7 @@ const ssrVisibleViews = initialViews
   function setFocusFullscreen(on: boolean) {
     focusView.setAttribute('data-fullscreen', on ? 'true' : 'false');
     focusFullscreenBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
-    focusFullscreenBtn.textContent = on ? '⛶ EXIT FULL SIZE' : '⛶ FULL SIZE';
+    focusFullscreenBtn.innerHTML = on ? '<svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-minimize"/></svg> EXIT FULL SIZE' : '<svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-maximize"/></svg> FULL SIZE';
   }
   focusFullscreenBtn.addEventListener('click', () => {
     setFocusFullscreen(focusView.getAttribute('data-fullscreen') !== 'true');
@@ -2981,7 +2990,111 @@ const ssrVisibleViews = initialViews
     renderLayout();
   }
 
+  // "Show" (Process Manager): reveal a window in its workspace WITHOUT going
+  // fullscreen — switch to the owning workspace, focus it in place, and flash
+  // the existing keyboard-select frame (border + ◉) on it for 1.5s.
+  async function revealInstance(instanceId: string, activityId?: string) {
+    const view = activityId
+      ? views.find((v) => v.activityId === activityId)
+      : (views.find((v) => v.instanceId === instanceId && !v.activityId)
+          ?? views.find((v) => v.instanceId === instanceId));
+    if (!view) return; // headless/no live window — nothing to show
+    const ws = workspaceClient.getCached();
+    const owner = ws?.workspaces.find((w) => w.members.includes(view.viewId)) ?? null;
+    if (ws && owner && owner.id !== ws.activeWorkspaceId) {
+      await workspaceClient.setActive(owner.id).catch((err) => console.warn('[shell] setActive failed', err));
+    }
+    // Never leave another window maximized over the one we're revealing.
+    if (maximizedViewId && maximizedViewId !== view.viewId) { maximizedViewId = null; maximizedFull = false; }
+    if (view.state === 'minimized') {
+      views = views.map((v) => v.viewId === view.viewId ? { ...v, state: 'normal' as const } : v);
+    }
+    focusView_(view.viewId); // focus (not maximize) + renderLayout
+    flashSelectFrame(view.activityId, view.instanceId);
+  }
+  function flashSelectFrame(activityId: string | undefined, instanceId: string, tries = 0): void {
+    let slot = activityId
+      ? document.querySelector<HTMLElement>(`.app-slot[data-activity-id="${CSS.escape(activityId)}"]`)
+      : null;
+    if (!slot && instanceId) slot = document.querySelector<HTMLElement>(`.app-slot[data-instance-id="${CSS.escape(instanceId)}"]`);
+    // The owning workspace may still be rendering after setActive — retry a few frames.
+    if ((!slot || slot.offsetParent === null) && tries < 30) {
+      requestAnimationFrame(() => flashSelectFrame(activityId, instanceId, tries + 1));
+      return;
+    }
+    if (!slot) return;
+    const target = slot;
+    // Same clear-then-set the keyboard window-nav uses.
+    document.querySelectorAll('.app-slot[data-aura-nav-focus]').forEach((el) => el.removeAttribute('data-aura-nav-focus'));
+    target.setAttribute('data-aura-nav-focus', 'true');
+    target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    window.setTimeout(() => {
+      if (target.getAttribute('data-aura-nav-focus') === 'true') target.removeAttribute('data-aura-nav-focus');
+    }, 1500);
+  }
+
+  // ── Process Manager "Show": tap = jump & stay; press-and-hold = peek while
+  // held, then jump back to where you were on release. The target is marked
+  // with the same keyboard-select frame while shown. ─────────────────────────
+  let peekReturnWorkspaceId: string | null = null;
+  function pmSetSelectFrame(activityId: string | undefined, instanceId: string, tries = 0): void {
+    let slot = activityId
+      ? document.querySelector<HTMLElement>(`.app-slot[data-activity-id="${CSS.escape(activityId)}"]`)
+      : null;
+    if (!slot && instanceId) slot = document.querySelector<HTMLElement>(`.app-slot[data-instance-id="${CSS.escape(instanceId)}"]`);
+    if ((!slot || slot.offsetParent === null) && tries < 30) {
+      requestAnimationFrame(() => pmSetSelectFrame(activityId, instanceId, tries + 1));
+      return;
+    }
+    if (!slot) return;
+    document.querySelectorAll('.app-slot[data-aura-nav-focus]').forEach((el) => el.removeAttribute('data-aura-nav-focus'));
+    slot.setAttribute('data-aura-nav-focus', 'true');
+    slot.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+  function pmClearSelectFrame(): void {
+    document.querySelectorAll('.app-slot[data-aura-nav-focus]').forEach((el) => el.removeAttribute('data-aura-nav-focus'));
+  }
+  async function peekStart(instanceId: string, activityId?: string): Promise<void> {
+    const view = activityId
+      ? views.find((v) => v.activityId === activityId)
+      : (views.find((v) => v.instanceId === instanceId && !v.activityId)
+          ?? views.find((v) => v.instanceId === instanceId));
+    if (!view) { peekReturnWorkspaceId = null; return; }
+    const ws = workspaceClient.getCached();
+    peekReturnWorkspaceId = ws?.activeWorkspaceId ?? null;
+    const owner = ws?.workspaces.find((w) => w.members.includes(view.viewId)) ?? null;
+    if (ws && owner && owner.id !== ws.activeWorkspaceId) {
+      await workspaceClient.setActive(owner.id).catch((err) => console.warn('[shell] setActive failed', err));
+    }
+    if (maximizedViewId && maximizedViewId !== view.viewId) { maximizedViewId = null; maximizedFull = false; }
+    if (view.state === 'minimized') views = views.map((v) => v.viewId === view.viewId ? { ...v, state: 'normal' as const } : v);
+    focusView_(view.viewId);
+    pmSetSelectFrame(view.activityId, view.instanceId);
+  }
+  async function peekEnd(commit: boolean): Promise<void> {
+    const back = peekReturnWorkspaceId;
+    peekReturnWorkspaceId = null;
+    if (commit) {
+      // tap: stay on the target; let the highlight linger ~1.5s then clear.
+      window.setTimeout(() => pmClearSelectFrame(), 1500);
+      return;
+    }
+    // hold release: jump back to where we were and drop the highlight.
+    if (back) await workspaceClient.setActive(back).catch((err) => console.warn('[shell] setActive failed', err));
+    pmClearSelectFrame();
+  }
+  (window as any).auraPeekStart = peekStart;
+  (window as any).auraPeekEnd   = peekEnd;
+  // Synchronous check: does this process/activity have a live window to show?
+  (window as any).auraHasWindow = (instanceId: string, activityId?: string) => {
+    const v = activityId
+      ? views.find((x) => x.activityId === activityId)
+      : (views.find((x) => x.instanceId === instanceId && !x.activityId) ?? views.find((x) => x.instanceId === instanceId));
+    return !!v;
+  };
+
   (window as any).auraFocusInstance        = focusInstance;
+  (window as any).auraRevealInstance       = revealInstance;
   (window as any).auraRemoveViewsByInstance = removeViewsByInstance;
   (window as any).auraRemoveViewByActivity  = removeViewByActivity;
 

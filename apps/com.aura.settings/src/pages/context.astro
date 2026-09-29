@@ -72,6 +72,26 @@ try {
        Attribute selector on purpose: the flag is JS state, not a style class. */
     .ctx-table tr[data-pending] { opacity: 0.55; }
     .ctx-del:disabled { cursor: default; opacity: 0.6; }
+    /* Inline confirm: DELETE swaps itself for SURE? YES / NO inside the same
+       cell, so the answer is given where the question was asked and the row
+       under discussion stays visible. The cell keeps the row's data hook
+       (data-key / data-vol) because its content is rebuilt both ways. */
+    .ctx-actions { white-space: nowrap; }
+    .ctx-confirm { display: inline-flex; gap: 6px; align-items: center; }
+    .ctx-confirm-q {
+      color: var(--aura-color-text-dim); font-size: 0.6rem; letter-spacing: 0.08em;
+    }
+    .ctx-confirm-yes, .ctx-confirm-no {
+      cursor: pointer; font-size: 0.62rem; padding: 3px 8px; letter-spacing: 0.08em;
+    }
+    /* Filled with danger, label on the page background — legible under light
+       and dark themes alike (see the note on .ctx-form button). */
+    .ctx-confirm-yes {
+      background: var(--aura-color-danger); color: var(--aura-color-bg); border: none;
+    }
+    .ctx-confirm-no {
+      background: none; border: 1px solid var(--aura-color-border); color: var(--aura-color-text);
+    }
     .ctx-form button:disabled { cursor: progress; opacity: 0.6; }
     .ctx-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
     .ctx-form label { display: block; font-size: 0.62rem; color: var(--aura-color-text-dim); margin-bottom: 4px; }
@@ -137,7 +157,7 @@ try {
               <td class={`ctx-val ${e.kind}`}>{e.kind === 'variable' ? e.value : '••••••••'}</td>
               <td class="ctx-inject">{e.inject.map((t) => t.toUpperCase()).join(' · ')}</td>
               <td>{e.updatedAt ? new Date(e.updatedAt).toLocaleString() : '—'}</td>
-              <td><button class="ctx-del" data-key={e.key}>DELETE</button></td>
+              <td class="ctx-actions" data-key={e.key}><button class="ctx-del" data-key={e.key}>DELETE</button></td>
             </tr>
           ))}
         </tbody>
@@ -190,7 +210,7 @@ try {
               <td class="ctx-val">{v.mountPath}</td>
               <td><span class={`ctx-badge ${v.mode}`}>{v.mode.toUpperCase()}</span></td>
               <td>{v.createdAt ? new Date(v.createdAt).toLocaleString() : '—'}</td>
-              <td><button class="ctx-del" data-vol={v.name}>DELETE</button></td>
+              <td class="ctx-actions" data-vol={v.name}><button class="ctx-del" data-vol={v.name}>DELETE</button></td>
             </tr>
           ))}
         </tbody>
@@ -379,7 +399,7 @@ try {
           <td class="ctx-val ${e.kind}">${val}</td>
           <td class="ctx-inject">${esc(inject)}</td>
           <td>${e.updatedAt ? new Date(e.updatedAt).toLocaleString() : '—'}</td>
-          <td><button class="ctx-del" data-key="${esc(e.key)}">DELETE</button></td>
+          <td class="ctx-actions" data-key="${esc(e.key)}"><button class="ctx-del" data-key="${esc(e.key)}">DELETE</button></td>
         </tr>`;
     }
 
@@ -553,20 +573,68 @@ try {
       }
     }
 
+    // ── Inline delete confirmation ────────────────────────────────────
+    // Deleting is irreversible (an entry's value is sealed and gone; a volume
+    // takes its data with it), so the button asks first. It asks in place
+    // rather than in the modal: the row stays visible, and the answer is one
+    // click away from the question.
+
+    /** The action cell's resting state — rebuilt from the cell's own hook. */
+    function actionCellHtml(cell) {
+      const attr = cell.dataset.key !== undefined ? 'data-key' : 'data-vol';
+      const value = cell.dataset.key !== undefined ? cell.dataset.key : cell.dataset.vol;
+      return `<button class="ctx-del" ${attr}="${esc(value)}">DELETE</button>`;
+    }
+
+    /** Put every open confirm back to its DELETE button. */
+    function closeConfirms(except) {
+      document.querySelectorAll('.ctx-actions[data-confirming]').forEach((cell) => {
+        if (cell === except) return;
+        delete cell.dataset.confirming;
+        cell.innerHTML = actionCellHtml(cell);
+      });
+    }
+
+    function openConfirm(cell) {
+      closeConfirms(cell);
+      cell.dataset.confirming = '1';
+      cell.innerHTML =
+        '<span class="ctx-confirm">'
+        + '<span class="ctx-confirm-q">SURE?</span>'
+        + '<button class="ctx-confirm-yes">YES</button>'
+        + '<button class="ctx-confirm-no">NO</button>'
+        + '</span>';
+      cell.querySelector('.ctx-confirm-yes').focus();
+    }
+
     /**
      * Delegated once per table, so rows can be re-rendered or inserted
      * individually without rebinding (and without stacking a second listener
-     * on rows that survived the update).
+     * on rows that survived the update). Covers the confirm buttons too —
+     * they live in the same cell and come and go with it.
      */
     function bindRowDeletes() {
-      document.getElementById('ctx-rows').addEventListener('click', (e) => {
-        const btn = e.target.closest('.ctx-del[data-key]');
-        if (btn && !btn.disabled) delVar(btn.dataset.key);
-      });
-      document.getElementById('vol-rows').addEventListener('click', (e) => {
-        const btn = e.target.closest('.ctx-del[data-vol]');
-        if (btn && !btn.disabled) delVol(btn.dataset.vol);
-      });
+      const wire = (tbodyId, hook, del, label) => {
+        document.getElementById(tbodyId).addEventListener('click', (e) => {
+          const cell = e.target.closest(`.ctx-actions[${hook}]`);
+          if (!cell) return;
+          const name = hook === 'data-key' ? cell.dataset.key : cell.dataset.vol;
+          if (e.target.closest('.ctx-del')) {
+            if (!e.target.closest('.ctx-del').disabled) openConfirm(cell);
+          } else if (e.target.closest('.ctx-confirm-yes')) {
+            delete cell.dataset.confirming;
+            cell.innerHTML = actionCellHtml(cell);   // restore before the write: markPending disables it
+            del(name);
+          } else if (e.target.closest('.ctx-confirm-no')) {
+            closeConfirms();
+            setStatus(`Cancelled — ${label}<b>${esc(name)}</b> kept`);
+          }
+        });
+      };
+      wire('ctx-rows', 'data-key', delVar, '');
+      wire('vol-rows', 'data-vol', delVol, 'volume ');
+      // Escape backs out of a confirm wherever focus happens to be.
+      document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeConfirms(); });
     }
 
     // ── Volumes ───────────────────────────────────────────────────────
@@ -583,7 +651,7 @@ try {
           <td class="ctx-val">${esc(v.mountPath)}</td>
           <td><span class="ctx-badge ${v.mode}">${esc(String(v.mode).toUpperCase())}</span></td>
           <td>${v.createdAt ? new Date(v.createdAt).toLocaleString() : '—'}</td>
-          <td><button class="ctx-del" data-vol="${esc(v.name)}">DELETE</button></td>
+          <td class="ctx-actions" data-vol="${esc(v.name)}"><button class="ctx-del" data-vol="${esc(v.name)}">DELETE</button></td>
         </tr>`;
     }
 
@@ -694,8 +762,6 @@ try {
     async function delVol(name) {
       const tr = volRow(name);
       if (tr && tr.dataset.pending) return;
-      const ok = await confirmDialog(`Delete volume <b>${esc(name)}</b>? This removes its data and unmounts it from apps.`, 'DELETE');
-      if (!ok) { setStatus(`Cancelled — volume <b>${esc(name)}</b> kept`); return; }
       markPending(volRow(name), true);
       setStatus(`DELETING volume <b>${esc(name)}</b>…`);
       let settled = false;
@@ -744,7 +810,7 @@ try {
   <script>
     import { OsClient } from '@aura/app-sdk';
     new OsClient().nav.installGridNav({
-      selector: '.ctx-tab, #ctx-kind, #ctx-key, #ctx-value, #ctx-inject-env, #ctx-inject-file, #ctx-add, .ctx-del, #vol-name, #vol-path, #vol-mode, #vol-add',
+      selector: '.ctx-tab, #ctx-kind, #ctx-key, #ctx-value, #ctx-inject-env, #ctx-inject-file, #ctx-add, .ctx-del, .ctx-confirm-yes, .ctx-confirm-no, #vol-name, #vol-path, #vol-mode, #vol-add',
     });
   </script>
 </body>

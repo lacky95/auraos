@@ -74,6 +74,28 @@ const S = {
          + 'cursor:pointer;text-transform:uppercase;',
 };
 
+/**
+ * What the filter box searches, stamped on each row as JSON. `app` fields rank
+ * highest (filtering by app is the main use), `short` fields are fuzzy-matched,
+ * `text` fields are long prose and only ever substring-matched — a scattered
+ * subsequence against a sentence matches nearly any query.
+ */
+function providerHay(i: InterfaceView): string {
+  return JSON.stringify({
+    app:   [i.appId],
+    short: [i.name, i.kind, i.address, i.version, i.source, statusStyle(i.status)[0]],
+    text:  [i.description ?? '', i.url ?? '', i.instanceId ?? ''],
+  });
+}
+function consumerHay(c: ConsumerView): string {
+  return JSON.stringify({
+    app:   [c.appId, c.need.appId ?? '', ...c.matches],
+    short: [c.need.name, c.need.kind, `${c.need.kind}:${c.need.name}`, statusStyle(c.status)[0],
+            c.need.required ? 'required' : 'optional'],
+    text:  [c.need.description ?? ''],
+  });
+}
+
 /** Status → [label, colour var]. `catalog` is not a failure — it is "installed, not running". */
 function statusStyle(s: string): [string, string] {
   if (s === 'live')      return ['LIVE',      'var(--aura-color-primary)'];
@@ -103,6 +125,15 @@ function statusStyle(s: string): [string, string] {
           iframe (an MCP client, a sidecar, an agent in another app) needs. */}
       <div style={S.base}>BASE <span style={S.mono}>{baseUrl}</span> · ROWS BELOW ARE RELATIVE TO IT</div>
 
+      {(interfaces.length > 0 || consumers.length > 0) && (
+        <>
+          <input class="iface-search" type="search" data-iface-search autocomplete="off" spellcheck="false"
+                 aria-label="Filter interfaces by app, name or kind"
+                 placeholder="FILTER BY APP, NAME, KIND…  ( / )" />
+          <div style={S.counts} data-iface-count hidden></div>
+        </>
+      )}
+
       <h2 style={S.h2}>Provides</h2>
       {apps.length === 0 ? (
         <div style={S.empty}>
@@ -110,9 +141,9 @@ function statusStyle(s: string): [string, string] {
           Add a <span style={S.mono}>provides</span> block to an app manifest — name, kind
           (http · rest · mcp · ws · event · kv) and an address — and it shows up here.
         </div>
-      ) : apps.map(([appId, list]) => (
-        <div>
-          <div style={S.appHead}>{appId}</div>
+      ) : apps.map(([appId, list], gi) => (
+        <div data-iface-group data-order={gi}>
+          <div style={S.appHead} data-hl={appId}>{appId}</div>
           <table style={S.table}>
             <thead>
               <tr>
@@ -124,13 +155,13 @@ function statusStyle(s: string): [string, string] {
                 <th style={S.th}>STATUS</th>
               </tr>
             </thead>
-            <tbody>
-              {list.map((i) => {
+            <tbody data-iface-body>
+              {list.map((i, ri) => {
                 const [label, colour] = statusStyle(i.status);
                 return (
-                  <tr>
+                  <tr data-iface-row data-order={ri} data-hay={providerHay(i)}>
                     <td style={S.td}>
-                      {i.name}
+                      <span data-hl={i.name}>{i.name}</span>
                       {i.description && <span style={S.url}>{i.description}</span>}
                     </td>
                     <td style={S.td}><span style={S.dim}>{i.kind}</span></td>
@@ -161,6 +192,7 @@ function statusStyle(s: string): [string, string] {
           </table>
         </div>
       ))}
+      <div style={S.empty} data-iface-none hidden>No interface matches.</div>
 
       <h2 style={S.h2}>Consumes</h2>
       {consumers.length === 0 ? (
@@ -176,15 +208,15 @@ function statusStyle(s: string): [string, string] {
               <th style={S.th}>RESOLVED BY</th>
             </tr>
           </thead>
-          <tbody>
-            {consumers.map((c) => {
+          <tbody data-consumer-body>
+            {consumers.map((c, ci) => {
               const [label, colourRaw] = statusStyle(c.status);
               // An unmet OPTIONAL dependency is not a problem — the app said so.
               const colour = c.status === 'unmet' && !c.need.required
                 ? 'var(--aura-color-text-dim)' : colourRaw;
               return (
-                <tr>
-                  <td style={S.td}>{c.appId}</td>
+                <tr data-consumer-row data-order={ci} data-hay={consumerHay(c)}>
+                  <td style={S.td}><span data-hl={c.appId}>{c.appId}</span></td>
                   <td style={S.td}>
                     <span style={S.mono}>{c.need.kind}:{c.need.name}</span>
                     {c.need.appId && <span style={S.dim}> @{c.need.appId}</span>}
@@ -206,6 +238,7 @@ function statusStyle(s: string): [string, string] {
           </tbody>
         </table>
       )}
+      <div style={S.empty} data-consumer-none hidden>No consumer matches.</div>
     </div>
   </main>
   <footer class="settings-foot">PROVIDER · /api/interfaces</footer>
@@ -244,6 +277,170 @@ function statusStyle(s: string): [string, string] {
       btn.textContent = ok ? 'COPIED' : 'FAILED';
       copyTimers.set(btn, setTimeout(() => { btn.textContent = 'COPY'; }, ok ? 1000 : 1500));
     });
+
+    // ── Filter ───────────────────────────────────────────────────────────
+    // Everything is already server-rendered, so filtering only hides and
+    // re-orders existing nodes — never rebuilds them, which keeps the COPY
+    // delegate above valid. Matching is ported from the CLI pickers
+    // (packages/aura-cli/src/lib/fuzzy.ts): a substring hit always outranks a
+    // scattered one, so the old "contains" behaviour still comes first.
+    (function () {
+      const input = document.querySelector('[data-iface-search]');
+      if (!input) return;                                   // both tables empty
+      const countEl   = document.querySelector('[data-iface-count]');
+      const ifaceNone = document.querySelector('[data-iface-none]');
+      const consNone  = document.querySelector('[data-consumer-none]');
+      const groups    = [...document.querySelectorAll('[data-iface-group]')];
+      const ifaceRows = [...document.querySelectorAll('[data-iface-row]')];
+      const consBody  = document.querySelector('[data-consumer-body]');
+      const consRows  = [...document.querySelectorAll('[data-consumer-row]')];
+      const groupParent = groups[0]?.parentElement;
+      const groupAnchor = groups.at(-1)?.nextSibling ?? null;   // keeps groups above the no-match line
+
+      const SEPARATORS = new Set(['.', '-', '_', '/', ':', ' ', '@']);
+      const APP_WEIGHT = 2;
+      const TEXT_SCORE = 10;                                // substring in prose: a weak but real hit
+
+      /**
+       * { score, hits } or null. Substring first; otherwise the tightest
+       * subsequence window, rejected when it sprawls — "mcp" must not match
+       * com.aura.whisPer just because c, m and p occur in that order.
+       */
+      function fuzzy(text, needle) {
+        const hay = text.toLowerCase();
+        const at = hay.indexOf(needle);
+        const edge = (i) => i === 0 || SEPARATORS.has(hay[i - 1]);
+        if (at !== -1) {
+          const hits = Array.from({ length: needle.length }, (_, k) => at + k);
+          return { score: 60 + needle.length * 9 + (edge(at) ? 20 : 0) - hay.length * 0.05, hits };
+        }
+        let best = null;
+        for (let start = hay.indexOf(needle[0]); start !== -1; start = hay.indexOf(needle[0], start + 1)) {
+          const hits = [start];
+          for (let k = 1, from = start + 1; k < needle.length; k++) {
+            const idx = hay.indexOf(needle[k], from);
+            if (idx === -1) break;
+            hits.push(idx); from = idx + 1;
+          }
+          if (hits.length < needle.length) break;           // later starts can only match less
+          const span = hits.at(-1) - start + 1;
+          if (span > needle.length * 3) continue;
+          let score = 0;
+          hits.forEach((idx, k) => {
+            score += 1;
+            if (k > 0 && idx === hits[k - 1] + 1) score += 8;
+            if (idx === 0) score += 12; else if (SEPARATORS.has(hay[idx - 1])) score += 6;
+            if (k > 0) score -= Math.min(idx - hits[k - 1] - 1, 10);
+          });
+          score -= hay.length * 0.05;
+          if (!best || score > best.score) best = { score, hits };
+        }
+        return best;
+      }
+
+      /** Row score for all terms, or null; `marks` maps highlighted field text → hit indices. */
+      function matchRow(hay, terms) {
+        let total = 0;
+        const marks = new Map();
+        for (const term of terms) {
+          const found = [];                                 // { text, score, hits }
+          const consider = (text, m, weight) => { if (m) found.push({ text, score: m.score * weight, hits: m.hits }); };
+          for (const t of hay.app)   if (t) consider(t, fuzzy(t, term), APP_WEIGHT);
+          for (const t of hay.short) if (t) consider(t, fuzzy(t, term), 1);
+          for (const t of hay.text)  if (t && t.toLowerCase().includes(term)) consider(t, { score: TEXT_SCORE, hits: [] }, 1);
+          if (found.length === 0) return null;
+          const best = Math.max(...found.map((f) => f.score));
+          total += best;
+          // Mark every near-best field, not only the winner: a consumer's own
+          // id and the id it needs often match equally well, and only one of
+          // them is on screen.
+          for (const f of found) {
+            if (f.score < best * 0.9) continue;
+            const set = marks.get(f.text) ?? new Set();
+            f.hits.forEach((h) => set.add(h));
+            marks.set(f.text, set);
+          }
+        }
+        return { score: total, marks };
+      }
+
+      const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+      /** Paints hits into every [data-hl] under `root`; an empty map restores plain text. */
+      function paint(root, marks) {
+        const els = [...root.querySelectorAll('[data-hl]')];
+        if (root.matches('[data-hl]')) els.push(root);
+        els.forEach((el) => {
+          const text = el.dataset.hl;
+          const set = marks.get(text);
+          if (!set || set.size === 0) { el.textContent = text; return; }
+          let out = '';
+          for (let i = 0; i < text.length; i++) out += set.has(i) ? `<mark class="iface-hit">${esc(text[i])}</mark>` : esc(text[i]);
+          el.innerHTML = out;
+        });
+      }
+
+      const hayOf = new Map([...ifaceRows, ...consRows].map((r) => [r, JSON.parse(r.dataset.hay)]));
+      const byOrder = (a, b) => Number(a.dataset.order) - Number(b.dataset.order);
+      const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 'S'}`;
+
+      function apply() {
+        const terms = input.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+        const empty = terms.length === 0;
+        const scoreOf = new Map();
+
+        for (const row of [...ifaceRows, ...consRows]) {
+          const m = empty ? null : matchRow(hayOf.get(row), terms);
+          row.hidden = !empty && !m;
+          scoreOf.set(row, m ? m.score : 0);
+          paint(row, m ? m.marks : new Map());
+        }
+        const rank = (a, b) => (empty ? byOrder(a, b) : scoreOf.get(b) - scoreOf.get(a) || byOrder(a, b));
+
+        let shownGroups = 0;
+        for (const g of groups) {
+          const rows = [...g.querySelectorAll('[data-iface-row]')];
+          const visible = rows.filter((r) => !r.hidden);
+          g.hidden = visible.length === 0;
+          if (!g.hidden) shownGroups++;
+          scoreOf.set(g, Math.max(0, ...visible.map((r) => scoreOf.get(r))));
+          const body = g.querySelector('[data-iface-body]');
+          rows.sort(rank).forEach((r) => body.appendChild(r));
+          // The app heading lights up with whatever its best row matched on.
+          const best = visible.sort(rank)[0];
+          paint(g.querySelector(':scope > [data-hl]'),
+            best && !empty ? matchRow(hayOf.get(best), terms).marks : new Map());
+        }
+        if (groupParent) groups.slice().sort(rank).forEach((g) => groupParent.insertBefore(g, groupAnchor));
+        if (consBody) consRows.slice().sort(rank).forEach((r) => consBody.appendChild(r));
+
+        const ifaceShown = ifaceRows.filter((r) => !r.hidden).length;
+        const consShown  = consRows.filter((r) => !r.hidden).length;
+        ifaceNone.hidden = empty || ifaceRows.length === 0 || shownGroups > 0;
+        consNone.hidden  = empty || consRows.length === 0 || consShown > 0;
+        const consTable = consBody?.closest('table');
+        if (consTable) consTable.hidden = !empty && consShown === 0;
+        countEl.hidden = empty;
+        countEl.textContent = empty ? '' :
+          `MATCHING ${ifaceShown} OF ${plural(ifaceRows.length, 'INTERFACE')} · ${consShown} OF ${plural(consRows.length, 'CONSUMER')}`;
+      }
+
+      input.addEventListener('input', apply);
+      input.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault(); e.stopPropagation();
+        if (input.value) { input.value = ''; apply(); } else input.blur();
+      });
+      // `/` rather than ^F: inside the OS iframe ^F is the browser's own find.
+      document.addEventListener('keydown', (e) => {
+        if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
+        const t = e.target;
+        if (t instanceof HTMLElement && (t.isContentEditable || t.closest('input, textarea, select'))) return;
+        e.preventDefault();
+        input.focus();
+        input.select();
+      });
+      if (input.value) apply();                             // browser restored a query on back/forward
+    })();
   </script>
 </body>
 </html>

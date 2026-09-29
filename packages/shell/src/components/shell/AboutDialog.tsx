@@ -95,7 +95,7 @@ export function AboutDialog(): React.JSX.Element {
       <DialogContent aria-describedby={undefined} className="max-w-md gap-0 p-0 flex flex-col">
         <DialogHeader className="shrink-0 border-b border-[var(--border)] px-4 py-3">
           <DialogTitle className="flex items-center gap-2 text-[var(--color-green)] text-sm tracking-widest uppercase">
-            <span aria-hidden="true">ⓘ</span> ABOUT
+            <span aria-hidden="true"><svg className="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-info"/></svg></span> ABOUT
           </DialogTitle>
         </DialogHeader>
 

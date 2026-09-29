@@ -60,18 +60,14 @@ middleware (it runs under `astro dev`), and everything in `apps/*` — those are
 bind-mounted and re-read on iframe reload. Their imports of `@aura/core` still
 come from `dist`.
 
-## Verifying UI changes
+## Verifying changes
 
-Playwright is installed at the repo root with browsers cached, so a script can
-drive the real UI:
-
-- Run the script **from `/workspace`** or `playwright` won't resolve.
-- Load app pages through the proxy (`http://localhost:3000/api/proxy/<appId>/<page>`).
-- To reproduce iframe conditions, serve a **same-origin** wrapper — embedding
-  the proxy URL in an iframe from another origin returns 403. Intercept a URL
-  on `localhost:3000` with `page.route(...)` and fulfil it with the iframe HTML.
-- Assert styling with `getComputedStyle`, not by eye. A control that got no
-  rule at all still renders as a normal-looking UA widget.
+There is no browser automation in this repo — UI changes are verified at the
+desktop by hand. Where a check can be made without a browser, prefer it:
+fetching a page through the proxy (`http://localhost:3000/api/proxy/<appId>/<page>`)
+and asserting on the HTML catches most of it, and cross-checking every
+`var(--aura-color-*)` name against `/api/os/theme.css` catches invented tokens
+and leftover hardcoded colours.
 
 Type checks and unit tests:
 

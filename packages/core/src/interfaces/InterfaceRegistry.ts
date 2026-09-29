@@ -44,6 +44,7 @@ import type {
   InterfaceKind,
   ProvidedInterface,
 } from '../types/manifest.js';
+import { INTERFACE_PATH_KINDS } from '../types/manifest.js';
 
 /** Where an entry came from — a manifest declaration, or opened at runtime. */
 export type InterfaceSource = 'manifest' | 'runtime';
@@ -74,8 +75,20 @@ export interface InterfaceView {
   /** Present when status is `live` or `down`. */
   instanceId?: string;
   state?: AppLifecycleState;
-  /** Dialable address — present only when `live`. Relative: same-origin in an app iframe. */
+  /**
+   * Dialable address. Present when `live` — and always on `scope: 'app'`
+   * entries, whose bare-appId proxy URL cold-starts an instance on demand.
+   * Relative: same-origin in an app iframe.
+   */
   url?: string;
+  /**
+   * Absent — served by one concrete instance (the default).
+   * `'app'` — stable app-scoped alias for a path-kind interface: `url` dials
+   * `/api/proxy/<appId><address>`, which the shell resolves to the best live
+   * instance (cold-starting one when none is running). One per declared
+   * interface, regardless of how many instances serve it.
+   */
+  scope?: 'app';
   /**
    * Direct host:port, filled in by AppManager (it owns the runners). Lets a
    * node-side consumer skip the shell proxy entirely — the OS is out of the
@@ -320,6 +333,28 @@ export class InterfaceRegistry {
       }
     }
 
+    // App-level aliases: one stable entry per declared path-kind interface,
+    // dialable via the bare-appId proxy URL. Listed even with zero live
+    // instances — the proxy cold-starts one on demand, so the url is always
+    // honest. Non-path kinds (event, kv) don't route through the proxy and
+    // keep the plain catalog fallback below.
+    const upApps = new Set<string>();
+    for (const [instanceId, rec] of this.live) {
+      const instance = this.lookupInstance?.(instanceId) ?? rec.instance;
+      if (isUp(instance)) upApps.add(instance.appId);
+    }
+    for (const { appId, iface } of this.provided) {
+      if (!INTERFACE_PATH_KINDS.has(iface.kind)) continue;
+      covered.add(`${appId}/${iface.name}`);
+      views.push({
+        ...toBase(appId, iface),
+        source: 'manifest',
+        scope: 'app',
+        status: upApps.has(appId) ? 'live' : 'catalog',
+        url: interfaceUrl(appId, iface.kind, iface.address),
+      });
+    }
+
     for (const { appId, iface } of this.provided) {
       if (covered.has(`${appId}/${iface.name}`)) continue;
       views.push({ ...toBase(appId, iface), source: 'manifest', status: 'catalog' });
@@ -399,8 +434,12 @@ function matches(v: InterfaceView, f: InterfaceFilter): boolean {
   return true;
 }
 
-/** Lower is better. */
+/** Lower is better. A concrete live instance beats the app-level alias, so
+ * `resolve()` keeps returning exactly what it did before aliases existed —
+ * but the alias beats `down` and plain `catalog`: it is always dialable
+ * (the proxy cold-starts an instance), which neither of those is. */
 function rank(v: InterfaceView): number {
+  if (v.scope === 'app') return v.status === 'live' ? 1.5 : 1.75;
   if (v.status === 'live') return v.state === 'resumed' ? 0 : 1;
   if (v.status === 'down') return 2;
   return 3;   // catalog

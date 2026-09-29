@@ -7,17 +7,91 @@ const instanceId = Astro.request.headers.get('x-aura-instance-id') ?? appId;
 <head>
   <meta charset="UTF-8" />
   <title>{{APP_NAME}} — AuraOS</title>
+  <!--
+    The OS palette. `themeStrategy` defaults to 'inherit', so the shell proxy
+    already injects this link for you — declaring it explicitly (as the
+    Settings app does) keeps the page themed when it's opened directly rather
+    than through the proxy, and makes the dependency visible to whoever edits
+    this file next. The proxy skips its own injection when it sees this tag.
+  -->
+  <link rel="stylesheet" href="/api/os/theme.css" />
   <style>
-    body { margin: 0; padding: 24px; background: #0a0a0a; color: #ccffcc;
-           font-family: 'Courier New', monospace; }
-    h1 { color: #00ff41; margin: 0 0 12px; }
-    pre { color: #557755; }
+    /*
+      Every colour below comes from /api/os/theme.css, so this page follows
+      whatever theme the user picked in Settings — light or dark, any accent.
+      The token set is closed:
+
+        --aura-color-{primary,secondary,danger,info,warning,success,
+                      bg,surface,surface-2,text,text-dim,border}
+        --aura-glow-{primary,secondary,danger,subtle}
+
+      Any other name is not an error — `var(--aura-color-bg-elev)` just
+      resolves to nothing — so an invented token tends to look fine under a
+      dark theme and break under a light one. Don't write literal fallbacks
+      (`var(--aura-color-bg, #111)`) either: if the token exists the fallback
+      is dead code, and if it doesn't, you want to see that.
+    */
+    body {
+      margin: 0;
+      padding: 24px;
+      background: var(--aura-color-bg);
+      color: var(--aura-color-text);
+      font-family: 'Courier New', monospace;
+    }
+    h1 {
+      margin: 0 0 16px;
+      color: var(--aura-color-primary);
+      text-shadow: var(--aura-glow-primary);
+    }
+    .card {
+      max-width: 46rem;
+      padding: 16px;
+      background: var(--aura-color-surface);
+      border: 1px solid var(--aura-color-border);
+      border-radius: 6px;
+    }
+    .ident {
+      margin: 0;
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 6px 16px;
+    }
+    .ident dt { color: var(--aura-color-text-dim); }
+    .ident dd { margin: 0; color: var(--aura-color-secondary); overflow-wrap: anywhere; }
+    .hint { color: var(--aura-color-text-dim); }
+    .hint code {
+      padding: 1px 5px;
+      background: var(--aura-color-surface-2);
+      border: 1px solid var(--aura-color-border);
+      border-radius: 3px;
+      color: var(--aura-color-text);
+    }
   </style>
 </head>
 <body>
   <h1>{{APP_NAME}}</h1>
-  <pre>app:      {appId}
-instance: {instanceId}</pre>
-  <p>Edit <code>src/pages/index.astro</code> to start building your app.</p>
+  <div class="card">
+    <dl class="ident">
+      <dt>app</dt><dd>{appId}</dd>
+      <dt>instance</dt><dd>{instanceId}</dd>
+    </dl>
+  </div>
+  <p class="hint">Edit <code>src/pages/index.astro</code> to start building your app.</p>
+
+  <script is:inline>
+    // The shell postMessages every iframe when the user switches theme or
+    // light/dark mode. The stylesheet above is already applied, so the browser
+    // has no reason to refetch it on its own — re-set the href with a
+    // cache-buster to pull the new palette in without reloading the app.
+    addEventListener('message', (ev) => {
+      const t = ev.data && ev.data.type;
+      if (t !== 'aura.theme.changed' && t !== 'aura.mode.changed') return;
+      document.querySelectorAll('link[rel="stylesheet"]').forEach((link) => {
+        const href = link.getAttribute('href') || '';
+        if (!href.startsWith('/api/os/theme.css')) return;
+        link.setAttribute('href', '/api/os/theme.css?t=' + Date.now());
+      });
+    });
+  </script>
 </body>
 </html>

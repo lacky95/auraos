@@ -214,6 +214,48 @@ apps.sort((a, b) => {
     }
     .cd-btn[data-variant="danger"]:hover { box-shadow: var(--aura-glow-danger); }
 
+    /* Filter bar. `inherit` for the font because inputs don't inherit it from
+       body on their own, and --aura-font-mono is not a token /api/os/theme.css
+       actually defines. */
+    .app-filter {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .app-filter-input {
+      flex: 1;
+      min-width: 0;
+      padding: 7px 10px;
+      background: var(--aura-color-bg);
+      border: 1px solid var(--aura-color-border);
+      color: var(--aura-color-text);
+      font-family: inherit;
+      font-size: 0.75rem;
+      letter-spacing: 0.05em;
+    }
+    .app-filter-input::placeholder { color: var(--aura-color-text-dim); }
+    .app-filter-input:focus {
+      outline: none;
+      border-color: var(--aura-color-primary);
+      box-shadow: var(--aura-glow-primary);
+    }
+    .app-filter-count {
+      font-size: 0.65rem;
+      letter-spacing: 0.08em;
+      color: var(--aura-color-text-dim);
+      white-space: nowrap;
+    }
+    /* `.app-row` sets `display: grid`, which outranks the UA stylesheet's
+       `[hidden] { display: none }` on specificity — without this rule the
+       filter would set the attribute and the row would stay visible. */
+    .app-row[hidden] { display: none; }
+    .apps-empty {
+      margin-top: 16px;
+      color: var(--aura-color-text-dim);
+      font-size: 0.75rem;
+    }
+
     #status {
       margin-top: 14px;
       font-size: 0.7rem;
@@ -229,6 +271,19 @@ apps.sort((a, b) => {
     <p style="font-size: 0.7rem; color: var(--aura-color-text-dim); letter-spacing: 0.06em;">
       Toggle apps off to hide them from the dock + launcher and stop their backends. Re-enable any time.
     </p>
+
+    <div class="app-filter">
+      <input
+        id="app-filter"
+        class="app-filter-input"
+        type="search"
+        placeholder="Filter apps…  (fuzzy: 'trm' → Terminal)"
+        autocomplete="off"
+        spellcheck="false"
+        aria-label="Filter apps"
+      />
+      <span class="app-filter-count" data-role="filter-count"></span>
+    </div>
 
     <div class="apps-list">
       {apps.length === 0 && (
@@ -274,6 +329,8 @@ apps.sort((a, b) => {
         );
       })}
     </div>
+
+    <p class="apps-empty" data-role="no-matches" hidden>No apps match that filter.</p>
 
     <p id="status"></p>
   </main>
@@ -336,6 +393,61 @@ apps.sort((a, b) => {
       });
     });
 
+    // ─── Fuzzy filter ──────────────────────────────────────────────────────
+    // Subsequence matching, the fzf rule: every character of a term has to
+    // appear in order but not adjacently, so `trm` finds Terminal and `ausett`
+    // finds com.aura.settings. Whitespace splits the query into terms that all
+    // have to match, which is what makes `set sys` (settings + system tag)
+    // work. The haystack is the row's name + id + tag text, so category and
+    // state words ("service", "autostart", "running") filter too.
+    const filterInput = document.getElementById('app-filter');
+    const filterCount = document.querySelector('[data-role="filter-count"]');
+    const noMatchesEl = document.querySelector('[data-role="no-matches"]');
+    const filterRows  = Array.from(document.querySelectorAll('.app-row'));
+
+    // One lowercase haystack per row, built once — otherwise every keystroke
+    // re-reads three nodes per app.
+    const haystacks = new Map(filterRows.map((row) => [row, [
+      row.querySelector('.app-name')?.textContent ?? '',
+      row.querySelector('.app-id')?.textContent ?? '',
+      row.querySelector('.app-tags')?.textContent ?? '',
+    ].join(' ').toLowerCase()]));
+
+    function isSubsequence(needle, hay) {
+      let i = 0;
+      for (let j = 0; j < hay.length && i < needle.length; j++) {
+        if (hay[j] === needle[i]) i++;
+      }
+      return i === needle.length;
+    }
+
+    function applyFilter() {
+      const terms = filterInput.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+      let shown = 0;
+      for (const row of filterRows) {
+        const hay = haystacks.get(row) ?? '';
+        const hit = terms.length === 0 || terms.every((t) => isSubsequence(t, hay));
+        row.hidden = !hit;
+        if (hit) shown++;
+      }
+      filterCount.textContent = terms.length === 0
+        ? `${filterRows.length} apps`
+        : `${shown} / ${filterRows.length}`;
+      noMatchesEl.hidden = shown > 0 || filterRows.length === 0;
+    }
+
+    filterInput.addEventListener('input', applyFilter);
+    filterInput.addEventListener('keydown', (e) => {
+      // Clear on Esc, and keep the keystroke here so the OS doesn't also read
+      // it as "close this window".
+      if (e.key === 'Escape' && filterInput.value !== '') {
+        e.stopPropagation();
+        filterInput.value = '';
+        applyFilter();
+      }
+    });
+    applyFilter();
+
     // ─── Delete-app flow ───────────────────────────────────────────────────
     // <dialog> gives us the modal + focus trap + backdrop for free. We
     // populate the app name + path each time so the user can't get confused
@@ -397,7 +509,12 @@ apps.sort((a, b) => {
        from jumping sideways into the trash button. -->
   <script>
     import { OsClient } from '@aura/app-sdk';
-    new OsClient().nav.installGridNav({ selector: '.app-row .toggle' });
+    // getElements (not `selector`) because it is re-resolved on every
+    // keypress: a row hidden by the filter must drop out of the arrow-walk,
+    // and a static selector would keep walking onto invisible rows.
+    new OsClient().nav.installGridNav({
+      getElements: () => Array.from(document.querySelectorAll('.app-row:not([hidden]) .toggle')),
+    });
   </script>
 </body>
 </html>

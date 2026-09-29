@@ -263,7 +263,7 @@ export function ViewportSettingsDialog(): React.JSX.Element {
       <DialogContent className="max-w-3xl h-[80%] gap-0 p-0 flex flex-col">
         <DialogHeader className="shrink-0 border-b border-[var(--border)] px-4 py-3">
           <DialogTitle className="flex items-center gap-2 text-[var(--color-green)] text-sm tracking-widest uppercase">
-            <span aria-hidden="true">▦</span> VIEWPORT
+            <span aria-hidden="true"><svg className="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-layout-grid"/></svg></span> VIEWPORT
           </DialogTitle>
         </DialogHeader>
 
@@ -282,12 +282,12 @@ export function ViewportSettingsDialog(): React.JSX.Element {
               <div className="text-[0.6rem] tracking-[0.18em] text-[var(--text-muted)] uppercase px-3 pt-2 pb-1">// Settings</div>
               <TabsTrigger value="profiles" className={RAIL_TRIGGER} title="Per-profile viewport settings">
                 <span className="flex items-center gap-2 truncate text-[0.7rem] tracking-wider">
-                  <span aria-hidden="true">▦</span> PROFILES
+                  <span aria-hidden="true"><svg className="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-layout-grid"/></svg></span> PROFILES
                 </span>
               </TabsTrigger>
               <TabsTrigger value="global" className={RAIL_TRIGGER} title="Device-wide settings (all profiles)">
                 <span className="flex items-center gap-2 truncate text-[0.7rem] tracking-wider">
-                  <span aria-hidden="true">⚙</span> GLOBAL
+                  <span aria-hidden="true"><svg className="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-settings"/></svg></span> GLOBAL
                 </span>
               </TabsTrigger>
             </TabsList>

@@ -1,6 +1,10 @@
 ---
 import manifest from '../../app.manifest.json';
+import { pickedSession } from '../window-session';
 const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
+// The session this window last picked, if that shell still exists — so a
+// reload of the OS UI reopens it instead of the window's default session.
+const windowSession = pickedSession(Astro.request.headers.get('x-aura-activity-id')) ?? '';
 // The instance cap the OS enforces (AppManager throws past it). Read from the
 // same manifest rather than hardcoded, so the switcher's "+ NEW INSTANCE" row
 // greys out for the real reason instead of guessing.
@@ -202,7 +206,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     <div data-ph-detail style="font-size:0.8rem;letter-spacing:.04em;color:var(--aura-color-text);">This window is not attached to a shell.</div>
     <div data-ph-hint style="font-size:0.7rem;color:var(--aura-color-text-dim);">Pick one from the <span style="color:var(--aura-color-primary);">session menu</span> in the bar, or start a new one.</div>
   </div>
-  <div id="terminal" data-app-id={appId} data-max-instances={String(maxInstances)}></div>
+  <div id="terminal" data-app-id={appId} data-max-instances={String(maxInstances)} data-window-session={windowSession}></div>
 
   <!-- Shown INSTEAD of the terminal while another browser view holds this
        session (driven by the server's control frames — see the ws.onmessage
@@ -537,7 +541,23 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       } catch { /* private mode — the move still happens, on the default session */ }
     }
     const pendingSession = takePendingSession();
-    let currentSessionId = pendingSession ?? activityId;
+
+    // The pick survives a reload through this container, not the browser: the
+    // page is server-rendered with the session this window last chose (see
+    // window-session.ts), which is empty when it never switched or that shell
+    // is gone. Tell the container on every switch; a failure only costs the
+    // restore, so it is logged, not surfaced.
+    function recordWindowSession(sessionId) {
+      const q = `window=${encodeURIComponent(activityId)}` + (sessionId ? `&session=${encodeURIComponent(sessionId)}` : '');
+      fetch(`/api/proxy/${encodeURIComponent(instanceId)}/api/sessions?${q}`, { method: 'PUT' })
+        .then((r) => { if (!r.ok) console.warn('[terminal] could not record the session pick →', r.status); })
+        .catch((err) => console.warn('[terminal] could not record the session pick →', err));
+    }
+    const restoredSession = document.getElementById('terminal')?.dataset.windowSession || null;
+    // A restored pick does not claim: a reload must never steal the shell back
+    // from wherever the user moved it since (same rule as launchedHere below).
+    let currentSessionId = pendingSession ?? restoredSession ?? activityId;
+    if (pendingSession) recordWindowSession(pendingSession);
     // A session handed over from another window was explicitly chosen, so take
     // it rather than politely losing the race to whoever holds it.
     let claimNextConnect = pendingSession !== null;
@@ -1379,6 +1399,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       const wasDetached = detached();
       currentSessionId = sessionId;
       claimNextConnect = true;
+      recordWindowSession(sessionId);
       if (wasDetached) setDetached(false);
       reflectInstance();
       const urlEl = document.getElementById('ws-url');
@@ -1813,6 +1834,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       if (isOurs) {
         console.debug('[terminal] closing session', sessionId);
         currentSessionId = null;
+        recordWindowSession(null);
         clearReconnectTimer();
         try { activeWs?.close(1000, 'session-closed'); } catch { /* already gone */ }
         activeWs = null;

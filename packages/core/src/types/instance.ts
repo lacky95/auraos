@@ -31,3 +31,31 @@ export interface AppInstance {
    */
   sandbox?: 'proot' | 'container';
 }
+
+export type SidecarState = 'running' | 'starting' | 'stopped' | 'error' | 'unknown';
+
+/**
+ * A runtime an app instance brings up next to itself (database, headless
+ * browser, model server, …). This is an OS concept, not a docker one: the
+ * `backend` says how the sidecar is realised — today only `'container'`
+ * (labelled sibling containers), later e.g. `'vm'`. Sidecars are NOT app
+ * instances: they have no lifecycle hooks and live and die with their parent.
+ */
+export interface SidecarInfo {
+  /** Backend-unique id (container backend: the container name). */
+  id: string;
+  /** Service name the app declared (`aura.service` / manifest `services[].name`). */
+  service: string;
+  parentInstanceId: string;
+  appId: string;
+  backend: 'container' | (string & {});
+  state: SidecarState;
+  image?: string;
+  createdAt?: string;
+}
+
+/** Point-in-time resource usage of an instance sandbox or sidecar. */
+export interface ResourceUsage {
+  memBytes: number | null;
+  cpuPct: number | null;
+}

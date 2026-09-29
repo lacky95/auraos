@@ -16,7 +16,12 @@ export const GET: APIRoute = () => {
     // to /api/admin/apps/enabled. Default is true for any app missing from
     // the KV state map.
     enabled:    mgr.isEnabled(manifest.id),
-    instances:  mgr.getInstancesByApp(manifest.id),
+    // `sidecarCount` comes from the reconciler's cache — no backend call, so
+    // this stays cheap. Details + usage: /api/instances/<id>/sidecars.
+    instances:  mgr.getInstancesByApp(manifest.id).map((inst) => ({
+      ...inst,
+      sidecarCount: mgr.getSidecars(inst.instanceId).length,
+    })),
     activities: mgr.getActivitiesByApp(manifest.id),
   }));
   return jsonResponse(apps);

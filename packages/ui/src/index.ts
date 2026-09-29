@@ -58,4 +58,7 @@ export {
   SelectSeparator,
 } from './components/ui/select/select.js';
 
+export { Icon }           from './components/ui/icon/icon.js';
+export type { IconProps } from './components/ui/icon/icon.js';
+
 export { cn } from './lib/utils.js';

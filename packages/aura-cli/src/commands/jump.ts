@@ -173,39 +173,85 @@ async function collectTargets(showApps: boolean, showServices: boolean): Promise
 // moving the cursor up by the number of lines previously written. Avoids
 // pulling in a 200KB-min picker library — the CLI is bundled with esbuild and
 // the user runs it from inside a small proot, so size matters.
+//
+// The frame is always sized to the terminal: at most rows-1 physical lines
+// (so the cursor-up redraw move can never run off the top of the screen) and
+// every line clipped to the terminal width (so nothing hard-wraps and breaks
+// the line count). When the list is taller than the window it scrolls behind
+// dim "↑/↓ N more" indicators, and on short terminals chrome (blank
+// separators, section headers, the hint line) is dropped progressively.
 
-const KEY_UP    = '[A';
-const KEY_DOWN  = '[B';
+const KEY_UP    = '\x1b[A';
+const KEY_DOWN  = '\x1b[B';
 const KEY_ENTER = '\r';
-const KEY_ESC   = '';
-const KEY_CTRLC = '';
+const KEY_ESC   = '\x1b';
+const KEY_CTRLC = '\x03';
 
-function renderRow(t: JumpTarget, selected: boolean, idx: number): string {
+const HIDE_CURSOR = '\x1b[?25l';
+const SHOW_CURSOR = '\x1b[?25h';
+const SGR_RESET   = '\x1b[0m';
+const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
+
+/** Printable width of a string, ignoring SGR color sequences. The picker
+ *  emits only ASCII plus a few single-cell symbols (▸ ● ◐ ◆ ─ ↑ ↓ ↵ ·), so
+ *  char-count equals column-count — no wcwidth table needed. */
+function visibleWidth(s: string): number {
+  return s.replace(ANSI_SGR_RE, '').length;
+}
+
+/** Clip a colored line to `maxCols` terminal cells without splitting SGR
+ *  sequences. Clipped lines end in '…' plus a reset so an open color never
+ *  bleeds into the next row. */
+function truncateAnsi(s: string, maxCols: number): string {
+  if (visibleWidth(s) <= maxCols) return s;
+  const keep = Math.max(0, maxCols - 1); // leave one cell for the ellipsis
+  let out = '';
+  let width = 0;
+  for (let i = 0; i < s.length; ) {
+    if (s[i] === '\x1b') {
+      const m = /^\x1b\[[0-9;]*m/.exec(s.slice(i));
+      if (m) { out += m[0]; i += m[0].length; continue; }
+    }
+    if (width >= keep) break;
+    out += s[i];
+    width++;
+    i++;
+  }
+  return out + '…' + SGR_RESET;
+}
+
+function renderRow(t: JumpTarget, selected: boolean, idx: number, nameWidth: number, showDetail: boolean): string {
   const cursor = selected ? color.green('▸') : ' ';
   const slot   = color.dim(`[${idx + 1}]`.padStart(4));
-  const name   = (selected ? color.bold : color.green)(t.appName.padEnd(14));
-  const state  = stateBadge(t.state);
+  const name   = (selected ? color.bold : color.green)(t.appName.slice(0, nameWidth).padEnd(nameWidth));
+  const badge  = typeBadge(t);
   if (t.kind === 'master') {
     // Master row: no instance id or port, just a fixed label so it stands
     // out from the app/service rows that follow.
-    const label = color.dim('· aura-shell (master container)');
-    return `  ${cursor} ${slot} ${name} ${state} ${label}`;
+    const label = showDetail ? ' ' + color.dim('· aura-shell (master container)') : '';
+    return `  ${cursor} ${slot} ${name} ${badge}${label}`;
   }
+  if (!showDetail) return `  ${cursor} ${slot} ${name} ${badge}`;
   const inst = color.dim(`· ${t.instanceId}`);
-  const port = t.port ? color.dim(`:${t.port}`) : '';
-  return `  ${cursor} ${slot} ${name} ${state} ${inst} ${port}`;
+  const port = t.port ? ' ' + color.dim(`:${t.port}`) : '';
+  return `  ${cursor} ${slot} ${name} ${badge} ${inst}${port}`;
 }
-function stateBadge(state: string): string {
-  if (state === 'resumed') return color.green('● RUN ');
-  if (state === 'paused')  return color.yellow('◐ PAUSE');
-  if (state === 'shell')   return color.green('◆ HOST');
-  return color.dim(state.padEnd(7));
+/** Badge says what the row IS (HOST / APP / SVC) — more useful at a glance
+ *  than the run-state, which is almost always 'resumed'. The state still
+ *  shows through glyph + color: green ● running, yellow ◐ paused. It also
+ *  keeps app/service rows distinguishable in compact mode when the section
+ *  headers are dropped. */
+function typeBadge(t: JumpTarget): string {
+  if (t.kind === 'master') return color.green('◆ HOST');
+  const label = (t.isService ? 'SVC' : 'APP').padEnd(4);
+  return t.state === 'paused' ? color.yellow('◐ ' + label) : color.green('● ' + label);
 }
 function sectionHeader(label: string): string {
-  return '\n  ' + color.dim(`── ${label} ${'─'.repeat(Math.max(0, 40 - label.length))}`);
+  return '  ' + color.dim(`── ${label} ${'─'.repeat(Math.max(0, 40 - label.length))}`);
 }
 
-async function pickInteractively(targets: JumpTarget[]): Promise<JumpTarget | null> {
+/** Exported for the pty test harness (test-tui/) — not part of the CLI API. */
+export async function pickInteractively(targets: JumpTarget[]): Promise<JumpTarget | null> {
   // Default selection: prefer the first app instance (most common case).
   // Fall back to whatever is first in the list — that's MASTER when nothing
   // is running, which is the only reachable target then anyway.
@@ -213,52 +259,108 @@ async function pickInteractively(targets: JumpTarget[]): Promise<JumpTarget | nu
   if (idx < 0) idx = 0;
 
   let linesWritten = 0;
+  let scrollTop = 0; // first visible body line when the list scrolls
 
   const draw = (firstTime: boolean) => {
+    const rows = stdout.rows || 24;
+    const cols = stdout.columns || 80;
     if (!firstTime) {
-      moveCursor(stdout, 0, -linesWritten);
+      // Frames are capped at rows-1 lines, so this normally moves exactly to
+      // the top of the previous frame. After a shrink-resize the old frame
+      // may be taller than the screen — clamp so we never ask the terminal
+      // to move above row 0 (it would silently undershoot and misalign).
+      moveCursor(stdout, 0, -Math.min(linesWritten, rows - 1));
       clearScreenDown(stdout);
     }
-    const lines: string[] = [];
-    lines.push('');
-    lines.push('  ' + color.bold('AURA  JUMP'));
-    lines.push(color.dim('  ↑↓ navigate   1–9 quick-pick   ↵ enter   q/^C cancel'));
-    let printedMasterHeader = false;
-    let printedAppHeader = false;
-    let printedSvcHeader = false;
-    for (let i = 0; i < targets.length; i++) {
-      const t = targets[i]!;
-      if (t.kind === 'master' && !printedMasterHeader) {
-        lines.push(sectionHeader('MASTER'));
-        printedMasterHeader = true;
+
+    // Narrow terminals: shrink the name column and drop the id/port detail
+    // before resorting to hard clipping.
+    const showDetail = cols >= 60;
+    const nameWidth  = Math.max(6, Math.min(14, cols - 22));
+
+    // Body = physical lines (no embedded newlines), each row tagged with its
+    // target index so the scroll window can follow the selection.
+    // The master row sits on top with no header of its own — the section
+    // headers act as separators before the APPS and SERVICES groups.
+    // Compactness levels: 0 = blank separators + section headers (the full
+    // layout), 1 = headers only, 2 = no headers (the APP/SVC badge keeps the
+    // groups distinguishable).
+    const buildBody = (level: number): { text: string; target?: number }[] => {
+      const body: { text: string; target?: number }[] = [];
+      let lastSection = '';
+      for (let i = 0; i < targets.length; i++) {
+        const t = targets[i]!;
+        const section = t.kind === 'master' ? 'MASTER' : t.isService ? 'SERVICES' : 'APPS';
+        if (level <= 1 && section !== lastSection) {
+          if (section !== 'MASTER') {
+            if (level === 0) body.push({ text: '' });
+            body.push({ text: sectionHeader(section) });
+          }
+          lastSection = section;
+        }
+        body.push({ text: renderRow(t, i === idx, i, nameWidth, showDetail), target: i });
       }
-      if (t.kind === 'instance' && !t.isService && !printedAppHeader) {
-        lines.push(sectionHeader('APPS'));
-        printedAppHeader = true;
+      return body;
+    };
+    const chromeFor = (level: number): { top: string[]; bottom: string[] } => {
+      const title = '  ' + color.bold('AURA  JUMP');
+      const hint  = color.dim('  ↑↓ navigate   1–9 quick-pick   ↵ enter   q/^C cancel');
+      if (level === 0) return { top: ['', title, hint], bottom: [''] };
+      if (level <= 2)  return { top: [title, hint], bottom: [] };
+      return { top: [title], bottom: [] }; // level 3: title only
+    };
+
+    // Cap every frame at rows-1 lines so the redraw cursor-up move is always
+    // valid. Pick the least-compact level whose full frame fits; if even the
+    // most compact one doesn't, scroll the body behind ↑/↓ indicators.
+    const budget = Math.max(3, rows - 1);
+    let lines: string[] | null = null;
+    for (let level = 0; level <= 3; level++) {
+      const { top, bottom } = chromeFor(level);
+      const body = buildBody(level);
+      if (top.length + body.length + bottom.length <= budget) {
+        lines = [...top, ...body.map((b) => b.text), ...bottom];
+        scrollTop = 0;
+        break;
       }
-      if (t.kind === 'instance' && t.isService && !printedSvcHeader) {
-        lines.push(sectionHeader('SERVICES'));
-        printedSvcHeader = true;
-      }
-      lines.push(renderRow(t, i === idx, i));
     }
-    lines.push('');
-    const text = lines.join('\n') + '\n';
+    if (!lines) {
+      const { top } = chromeFor(3);
+      const body = buildBody(3);
+      const window = Math.max(1, budget - top.length - 2); // 2 lines reserved for the ↑/↓ indicators
+      const selPos = body.findIndex((b) => b.target === idx);
+      if (selPos < scrollTop) scrollTop = selPos;
+      if (selPos >= scrollTop + window) scrollTop = selPos - window + 1;
+      scrollTop = Math.max(0, Math.min(scrollTop, body.length - window));
+      const above = scrollTop;
+      const below = body.length - (scrollTop + window);
+      lines = [
+        ...top,
+        above > 0 ? color.dim(`    ↑ ${above} more`) : '',
+        ...body.slice(scrollTop, scrollTop + window).map((b) => b.text),
+        below > 0 ? color.dim(`    ↓ ${below} more`) : '',
+      ];
+    }
+
+    // Clip to cols-1 so no line can hard-wrap (a wrapped line would occupy
+    // two rows and desync linesWritten from the real cursor position).
+    const text = lines.map((l) => truncateAnsi(l, Math.max(1, cols - 1))).join('\n') + '\n';
     stdout.write(text);
-    // Count newlines in the rendered text directly rather than `lines.length`:
-    // sectionHeader() embeds a leading '\n' (blank separator before the header),
-    // so each section adds two terminal rows but only one array slot. Counting
-    // newlines is sandbox-proof against any future embedded \n in row strings.
-    linesWritten = (text.match(/\n/g) ?? []).length;
+    linesWritten = lines.length;
   };
 
   return new Promise<JumpTarget | null>((resolve) => {
     stdin.setRawMode(true);
     stdin.resume();
     stdin.setEncoding('utf8');
+    stdout.write(HIDE_CURSOR);
+
+    const onResize = () => draw(false);
 
     const cleanup = () => {
       stdin.removeListener('data', onData);
+      stdout.removeListener('resize', onResize);
+      stdout.write(SHOW_CURSOR);
       stdin.setRawMode(false);
       stdin.pause();
     };
@@ -305,6 +407,7 @@ async function pickInteractively(targets: JumpTarget[]): Promise<JumpTarget | nu
     };
 
     stdin.on('data', onData);
+    stdout.on('resize', onResize);
     draw(true);
   });
 }

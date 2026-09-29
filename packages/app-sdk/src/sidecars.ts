@@ -245,6 +245,15 @@ export interface ServiceSpec {
   dns?: string[];
   restart?: 'no' | 'on-failure' | 'always' | 'unless-stopped';
   readiness?: { path?: string; timeoutMs?: number };
+
+  /**
+   * Host port publications (docker `-p host:container`) — for services a
+   * browser must reach directly, outside the shell proxy (e.g. a dashboard
+   * that cannot live behind a subpath). NOT part of the OS manifest schema:
+   * declare it in `services[]` of the raw manifest and pass that raw object
+   * here (the registry-parsed copy strips unknown fields). Default none.
+   */
+  publish?: Array<{ host: number; container: number }>;
 }
 
 /** Auth hook for the proxied dashboard (e.g. cookie/session injection). */
@@ -523,11 +532,13 @@ export class SidecarHost {
       '-v', `${this.opts.workspaceRoot}/packages:/workspace/packages:ro`,
       '--mount', `type=volume,source=${this.opts.nodeModulesVolume},target=/workspace/node_modules,readonly`,
       '-e', `PATH=/aura/my-tools:${basePath}`,
-      // Granted tools' shared libraries, matching what ContainerRunner gives
-      // the controlling app. `.lib` rides in on the /aura/my-tools mount
-      // above, so a dynamically-linked cap works in a sibling too — without
-      // this line siblings regress to "cannot open shared object file".
-      '-e', 'LD_LIBRARY_PATH=/aura/my-tools/.lib',
+      // No LD_LIBRARY_PATH: granted tools that need staged libraries are
+      // wrapper scripts that set it for their own process tree (see the OS's
+      // provisionAllowlist), matching what ContainerRunner gives the
+      // controlling app. Exporting it container-wide is what broke sibling
+      // runtimes built against newer libs than the shell's — the staged
+      // Debian libcrypto shadowed a runtime's own OpenSSL and killed its
+      // Python `ssl` module at import.
       // The `-e PATH` above only covers processes that inherit the container's
       // env. A LOGIN shell doesn't: /etc/profile assigns PATH outright (both
       // its root and non-root branches), dropping /aura/my-tools, so anything
@@ -717,6 +728,7 @@ export class SidecarHost {
       '--label', `aura.app=${this.opts.appId}`,
       '--label', `aura.service=${svc.name}`,
       ...(svc.dns ?? []).flatMap((d) => ['--dns', d]),
+      ...(svc.publish ?? []).flatMap((p) => ['-p', `${p.host}:${p.container}`]),
       ...(svc.volumes ?? []).flatMap((v) => {
         const loc = this.resolveVolume(svc.name, v);
         const subpath = loc.subpath ? `,volume-subpath=${loc.subpath}` : '';

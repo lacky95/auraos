@@ -2,6 +2,7 @@
 import ViewportSettingsDialog from './ViewportSettingsDialog.tsx';
 import AboutDialog from './AboutDialog.tsx';
 import { defaultKv } from '@aura/kv-store';
+import Icon from '../ui/Icon.astro';
 
 // SSR-resolve clock format + locale from the OS KV so the first paint matches
 // the user's preference (no flash of the default 24h/en-GB clock on reload).
@@ -76,13 +77,13 @@ let initialTimeZone: string = '';
         aria-expanded="false"
         aria-controls="ws-content"
       >
-        <span class="ws-collapse-icon" aria-hidden="true">▦</span>
+        <span class="ws-collapse-icon" aria-hidden="true"><Icon name="layout-grid" /></span>
       </button>
       <div id="ws-pills" class="ws-pills"></div>
       <button id="ws-layout-chip" class="layout-chip" title="Cycle workspace layout" aria-label="Layout strategy">
-        <span class="layout-chip-icon" aria-hidden="true">▦</span>
+        <span class="layout-chip-icon" aria-hidden="true"><Icon name="layout-grid" /></span>
         <span class="layout-chip-name">—</span>
-        <span class="layout-chip-cycle" aria-hidden="true">↻</span>
+        <span class="layout-chip-cycle" aria-hidden="true"><Icon name="rotate-cw" /></span>
       </button>
       <!-- Dropdown popover host: starts empty; fitWorkspaceUI() relocates the
            folded controls (chip, then pills) into it. Absolutely positioned,
@@ -108,19 +109,19 @@ let initialTimeZone: string = '';
 
         <button class="ws-ctx-item" data-ws-ctx="move" type="button" role="menuitem"
                 aria-haspopup="true" aria-expanded="false" aria-controls="ws-ctx-move-panel">
-          <span>Move</span><span class="ws-ctx-chev" aria-hidden="true">▸</span>
+          <span>Move</span><span class="ws-ctx-chev" aria-hidden="true"><Icon name="chevron-right" /></span>
         </button>
         <div id="ws-ctx-move-panel" class="ws-ctx-panel" hidden>
-          <button id="ws-ctx-dec" class="ws-ctx-step" data-ws-ctx="dec" type="button" aria-label="Previous slot">‹</button>
+          <button id="ws-ctx-dec" class="ws-ctx-step" data-ws-ctx="dec" type="button" aria-label="Previous slot"><Icon name="chevron-left" /></button>
           <input id="ws-ctx-slot" class="ws-ctx-slot" type="text" inputmode="numeric"
                  autocomplete="off" maxlength="3" aria-label="Target slot" />
-          <button id="ws-ctx-inc" class="ws-ctx-step" data-ws-ctx="inc" type="button" aria-label="Next slot">›</button>
+          <button id="ws-ctx-inc" class="ws-ctx-step" data-ws-ctx="inc" type="button" aria-label="Next slot"><Icon name="chevron-right" /></button>
           <button class="ws-ctx-ok" data-ws-ctx="move-ok" type="button">OK</button>
         </div>
 
         <button class="ws-ctx-item" data-ws-ctx="rename" type="button" role="menuitem"
                 aria-haspopup="true" aria-expanded="false" aria-controls="ws-ctx-rename-panel">
-          <span>Rename</span><span class="ws-ctx-chev" aria-hidden="true">▸</span>
+          <span>Rename</span><span class="ws-ctx-chev" aria-hidden="true"><Icon name="chevron-right" /></span>
         </button>
         <div id="ws-ctx-rename-panel" class="ws-ctx-panel" hidden>
           <input id="ws-ctx-name" class="ws-ctx-name" type="text" maxlength="40"
@@ -130,7 +131,7 @@ let initialTimeZone: string = '';
 
         <button id="ws-ctx-delete" class="ws-ctx-item ws-ctx-danger" data-ws-ctx="delete" type="button" role="menuitem"
                 aria-haspopup="true" aria-expanded="false" aria-controls="ws-ctx-delete-panel">
-          <span>Delete</span><span class="ws-ctx-chev" aria-hidden="true">▸</span>
+          <span>Delete</span><span class="ws-ctx-chev" aria-hidden="true"><Icon name="chevron-right" /></span>
         </button>
         <div id="ws-ctx-delete-panel" class="ws-ctx-panel" hidden>
           <span class="ws-ctx-confirm-q">Sure?</span>
@@ -146,7 +147,7 @@ let initialTimeZone: string = '';
         class="reload-pending-chip"
         title="Source changed while auto-reload is off — click to reload the shell"
         hidden
-      >↻ RELOAD</button>
+      ><Icon name="rotate-cw" /> RELOAD</button>
     )}
     <span id="clock" class="clock" data-clock-format={initialClockFormat} data-locale={initialLocale} data-time-zone={initialTimeZone}>--:--:--</span>
     <div class="status-zoom" role="group" aria-label="Page zoom">
@@ -154,7 +155,7 @@ let initialTimeZone: string = '';
       <button id="zoom-level" type="button" class="status-btn status-btn-text" title="Reset zoom to 100%">100%</button>
       <button id="zoom-in"    type="button" class="status-btn" title="Zoom in (Ctrl +)">+</button>
       <button id="settings-btn" type="button" class="status-btn" title="Settings" aria-haspopup="dialog">
-        <span class="status-btn-icon" aria-hidden="true">⚙</span>
+        <span class="status-btn-icon" aria-hidden="true"><Icon name="settings" /></span>
       </button>
     </div>
     <button
@@ -164,7 +165,7 @@ let initialTimeZone: string = '';
       title="Auto-hide bars: desktop fills the screen; top/bottom bars reveal on edge-hover"
       aria-pressed="false"
     >
-      <span id="autohide-icon" class="status-btn-icon" aria-hidden="true">⇕</span>
+      <span id="autohide-icon" class="status-btn-icon" aria-hidden="true"><Icon name="unfold-vertical" /></span>
     </button>
     <button
       id="fullscreen-btn"
@@ -173,7 +174,7 @@ let initialTimeZone: string = '';
       title="Toggle fullscreen (F11)"
       aria-pressed="false"
     >
-      <span id="fullscreen-icon" class="status-btn-icon" aria-hidden="true">⛶</span>
+      <span id="fullscreen-icon" class="status-btn-icon" aria-hidden="true"><Icon name="maximize" /></span>
     </button>
   </div>
 </header>
@@ -273,18 +274,16 @@ let initialTimeZone: string = '';
   const fsBtn  = document.getElementById('fullscreen-btn') as HTMLButtonElement | null;
   const fsIcon = document.getElementById('fullscreen-icon');
 
-  const ICON_ENTER = '⛶'; // four-corner expand (not fullscreen)
-  const ICON_EXIT  = '⛶'; // same glyph; we differentiate via the `data-state`
-                          // attribute + CSS to invert/dim. Most fonts don't ship
-                          // a "compress" twin to ⛶ at this size, so we lean on
-                          // the aria-pressed state for accessibility.
+  // Lucide sprite refs — swapped via innerHTML on fullscreen change.
+  const ICON_ENTER = '<svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-maximize"/></svg>';
+  const ICON_EXIT  = '<svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-minimize"/></svg>';
 
   function syncState() {
     const isFs = !!document.fullscreenElement;
     if (fsBtn)  fsBtn.setAttribute('aria-pressed', isFs ? 'true' : 'false');
     if (fsBtn)  fsBtn.dataset['fs'] = isFs ? 'on' : 'off';
     if (fsBtn)  fsBtn.title = isFs ? 'Exit fullscreen (F11)' : 'Enter fullscreen (F11)';
-    if (fsIcon) fsIcon.textContent = isFs ? ICON_EXIT : ICON_ENTER;
+    if (fsIcon) fsIcon.innerHTML = isFs ? ICON_EXIT : ICON_ENTER;
   }
 
   async function toggleFullscreen() {
@@ -831,10 +830,10 @@ let initialTimeZone: string = '';
     const atFirst = activeIdx <= 0;
     const atLast  = activeIdx === -1 || activeIdx >= total - 1;
     const prev = paginated
-      ? `<button class="ws-pill ws-pill-nav" data-ws-action="prev" ${atFirst ? 'disabled' : ''} title="Previous workspace">‹</button>`
+      ? `<button class="ws-pill ws-pill-nav" data-ws-action="prev" ${atFirst ? 'disabled' : ''} title="Previous workspace"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-chevron-left"/></svg></button>`
       : '';
     const next = paginated
-      ? `<button class="ws-pill ws-pill-nav" data-ws-action="next" ${atLast ? 'disabled' : ''} title="Next workspace">›</button>`
+      ? `<button class="ws-pill ws-pill-nav" data-ws-action="next" ${atLast ? 'disabled' : ''} title="Next workspace"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-chevron-right"/></svg></button>`
       : '';
 
     const numbered = state.workspaces.slice(start, end).map((w, i) => {
@@ -935,20 +934,31 @@ let initialTimeZone: string = '';
     bundleEl.dataset['nameHidden'] = rightOverflowing() ? 'true' : 'false';
   }
 
+  // Layout-strategy `icon` hints are legacy glyphs (LayoutStrategyRegistry);
+  // map the known ones onto the OS Lucide sprite, fall back to the raw text.
+  const LAYOUT_GLYPH_ICONS: Record<string, string> = {
+    '▦': 'layout-grid', '▣': 'square', '▥': 'layout-template', '▤': 'rows-3',
+  };
+  function layoutIconSvg(hint: string): string {
+    const name = LAYOUT_GLYPH_ICONS[hint];
+    if (name) return `<svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-${name}"/></svg>`;
+    return hint.replace(/[<>&]/g, (c) => (c === '<' ? '&lt;' : c === '>' ? '&gt;' : '&amp;'));
+  }
+
   function renderLayoutChip(state: workspaceClient.WorkspaceState) {
     if (!layoutChip) return;
     const iconEl = layoutChip.querySelector<HTMLElement>('.layout-chip-icon');
     const nameEl = layoutChip.querySelector<HTMLElement>('.layout-chip-name');
     const active = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
     if (!active) {
-      if (iconEl) iconEl.textContent = '▦';
+      if (iconEl) iconEl.innerHTML = layoutIconSvg('▦');
       if (nameEl) nameEl.textContent = '—';
       return;
     }
     const meta = availableLayouts.find((m) => m.id === active.layoutId);
     const icon = meta?.icon ?? '▦';
     const name = (meta?.name ?? active.layoutId).split('/')[0]!.trim().toUpperCase();
-    if (iconEl) iconEl.textContent = icon;
+    if (iconEl) iconEl.innerHTML = layoutIconSvg(icon);
     if (nameEl) nameEl.textContent = name;
     layoutChip.title = `Layout: ${meta?.name ?? active.layoutId} — click to cycle`;
   }
@@ -1698,6 +1708,12 @@ let initialTimeZone: string = '';
     background: color-mix(in srgb, var(--aura-color-primary) 14%, transparent);
     box-shadow: none;
   }
+  /* Enlarge just the +/- stepper glyphs to 1.5x the status-btn size
+     (0.85rem -> 1.275rem); the 22px button box is unchanged. */
+  #zoom-out,
+  #zoom-in {
+    font-size: 1.275rem;
+  }
   /* The middle "value" button is wider and shows %, never gets the icon font */
   .status-btn-text {
     width: auto !important;
@@ -2121,6 +2137,8 @@ let initialTimeZone: string = '';
     color: var(--aura-color-text-dim);
     margin-left: 4px;
     padding: 0 12px;
+    /* 1.5x the .ws-pill glyph (0.7rem -> 1.05rem) to match the zoom stepper. */
+    font-size: 1.05rem;
   }
   .ws-pill-add:hover {
     color: var(--aura-color-secondary);

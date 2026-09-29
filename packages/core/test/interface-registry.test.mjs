@@ -69,14 +69,31 @@ test('interface names must be kebab-case', () => {
 
 // ─────────────────────────────── catalog ──────────────────────────────────
 
-test('catalog: a declared-but-never-started app is discoverable, with no url', () => {
+test('catalog: a declared-but-never-started path-kind interface is discoverable as an app-level alias', () => {
   const reg = new InterfaceRegistry();
   reg.reload([manifest({ provides: [REST] })]);
   const [view] = reg.list();
+  assert.equal(reg.list().length, 1, 'the alias REPRESENTS the catalog entry, it does not duplicate it');
   assert.equal(view.id, 'com.acme.api/transcribe');
   assert.equal(view.status, 'catalog');
-  assert.equal(view.url, undefined);
+  assert.equal(view.scope, 'app');
+  // Dialable even with nothing running: the proxy cold-starts an instance.
+  assert.equal(view.url, '/api/proxy/com.acme.api/api/transcribe');
+  assert.equal(view.instanceId, undefined);
   assert.equal(view.version, '1');           // schema default
+});
+
+test('catalog: non-path kinds get no app-level alias and no url', () => {
+  const reg = new InterfaceRegistry();
+  reg.reload([manifest({ provides: [
+    { name: 'done', kind: 'event', address: 'api:done' },
+    { name: 'jobs', kind: 'kv',    address: 'app/com.acme.api/jobs' },
+  ] })]);
+  for (const view of reg.list()) {
+    assert.equal(view.status, 'catalog');
+    assert.equal(view.scope, undefined);
+    assert.equal(view.url, undefined);
+  }
 });
 
 test('catalog: reload replaces wholesale — an uninstalled app disappears', () => {
@@ -95,13 +112,19 @@ test('live: a running instance turns a catalog entry into a dialable address', (
   reg.reload([m]);
   reg.registerInstance(instance(), m);
 
-  const [view] = reg.list();
+  const [view, alias] = reg.list();
   assert.equal(view.status, 'live');
   assert.equal(view.source, 'manifest');
   assert.equal(view.instanceId, 'com.acme.api');
   assert.equal(view.url, '/api/proxy/com.acme.api/api/transcribe');
-  // One entry, not two — the live view represents the catalog entry.
-  assert.equal(reg.list().length, 1);
+  // Two entries: the live instance row plus the stable app-level alias —
+  // and no third plain-catalog row (the alias represents it).
+  assert.equal(reg.list().length, 2);
+  assert.equal(alias.scope, 'app');
+  assert.equal(alias.status, 'live');
+  assert.equal(alias.url, '/api/proxy/com.acme.api/api/transcribe');
+  // `live: true` surfaces both — the alias is dialable right now.
+  assert.equal(reg.list({ live: true }).length, 2);
 });
 
 test('live: warm-pool members register nothing', () => {
@@ -289,8 +312,56 @@ test('resolve prefers a resumed instance over any other live state', () => {
   reg.reload([m]);
   for (const inst of table.values()) reg.registerInstance(inst, m);
 
-  assert.equal(reg.list().length, 2, 'the phone book lists both numbers');
+  assert.equal(reg.list().length, 3, 'both instance numbers plus the app-level alias');
   assert.equal(reg.resolve('com.acme.api/transcribe').instanceId, 'com.acme.api-2');
+});
+
+// ───────────────────────── app-level aliases ──────────────────────────────
+
+test('alias ranking: a concrete live instance wins resolve; the alias wins once nothing concrete runs', () => {
+  const table = new Map([['com.acme.api', instance()]]);
+  const reg = new InterfaceRegistry((id) => table.get(id));
+  const m = manifest({ provides: [REST] });
+  reg.reload([m]);
+  reg.registerInstance(instance(), m);
+
+  let view = reg.resolve('com.acme.api/transcribe');
+  assert.equal(view.scope, undefined, 'the concrete instance outranks the alias');
+  assert.equal(view.instanceId, 'com.acme.api');
+
+  // The instance dies: its row goes `down`, but the alias (cold-startable,
+  // hence dialable) is what resolve should now hand out.
+  table.set('com.acme.api', instance({ port: null, state: 'stopped' }));
+  view = reg.resolve('com.acme.api/transcribe');
+  assert.equal(view.scope, 'app');
+  assert.equal(view.url, '/api/proxy/com.acme.api/api/transcribe');
+});
+
+test('alias survives unregisterInstance — it is a projection of the catalog, not live state', () => {
+  const reg = new InterfaceRegistry();
+  const m = manifest({ provides: [REST] });
+  reg.reload([m]);
+  const inst = instance();
+  reg.registerInstance(inst, m);
+  reg.unregisterInstance(inst);
+
+  const [view] = reg.list();
+  assert.equal(reg.list().length, 1);
+  assert.equal(view.scope, 'app');
+  assert.equal(view.status, 'catalog');
+  assert.equal(view.url, '/api/proxy/com.acme.api/api/transcribe');
+});
+
+test('runtime registrations get no app-level alias', () => {
+  const reg = new InterfaceRegistry();
+  const m = manifest();                       // declares nothing
+  reg.reload([m]);
+  reg.registerInstance(instance(), m);
+  reg.register('com.acme.api', { name: 'feed', kind: 'ws', address: '/ws', version: '1' });
+
+  const feeds = reg.list({ name: 'feed' });
+  assert.equal(feeds.length, 1, 'only the per-instance runtime row');
+  assert.equal(feeds[0].scope, undefined);
 });
 
 test('resolve falls back to the catalog entry so callers see it exists but is stopped', () => {

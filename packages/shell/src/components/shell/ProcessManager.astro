@@ -8,15 +8,16 @@
  * The panel is empty in SSR — populated client-side from /api/apps and refreshed
  * via the SSE stream from /api/apps/events.
  */
+import Icon from '../ui/Icon.astro';
 ---
 <button id="pm-toggle" class="pm-toggle" title="Process Manager (running apps)" aria-expanded="false" aria-controls="pm-panel">
-  <span class="pm-toggle-icon">▦</span>
+  <span class="pm-toggle-icon"><Icon name="layout-grid" /></span>
 </button>
 
 <aside id="pm-panel" class="pm-panel" aria-hidden="true">
   <header class="pm-header">
     <div class="pm-header-title">
-      <span class="pm-icon">▦</span>
+      <span class="pm-icon"><Icon name="layout-grid" /></span>
       <div class="pm-filter-group" role="group" aria-label="Section filter">
         <button type="button" class="pm-filter-btn" data-filter="apps"     data-active="true"  title="Show user apps (foreground processes)">
           <span class="pm-filter-label">APPS</span>
@@ -30,22 +31,27 @@
     </div>
     <div class="pm-header-actions">
       <div class="pm-view-toggle" role="group" aria-label="View mode">
-        <button type="button" class="pm-view-btn" data-view="cards" data-active="true" title="Card view">▦</button>
-        <button type="button" class="pm-view-btn" data-view="list"  data-active="false" title="List view">☰</button>
+        <button type="button" class="pm-view-btn" data-view="cards" data-active="true" title="Card view"><Icon name="layout-grid" /></button>
+        <button type="button" class="pm-view-btn" data-view="list"  data-active="false" title="List view"><Icon name="list" /></button>
       </div>
-      <button id="pm-close" class="pm-close" title="Close (Esc)">✕</button>
+      <button id="pm-close" class="pm-close" title="Close (Esc)"><Icon name="x" /></button>
     </div>
   </header>
+  <div class="pm-search">
+    <span class="pm-search-icon"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-search"/></svg></span>
+    <input id="pm-search-input" class="pm-search-input" type="text" placeholder="FILTER PROCESSES..." autocomplete="off" aria-label="Filter processes" />
+    <button id="pm-search-clear" class="pm-search-clear" title="Clear (Esc)" hidden><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-x"/></svg></button>
+  </div>
   <ul id="pm-list" class="pm-list">
     <li class="pm-empty">
-      <div class="pm-empty-icon">○</div>
+      <div class="pm-empty-icon"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle"/></svg></div>
       <div class="pm-empty-text">NO ACTIVE PROCESSES</div>
       <div class="pm-empty-hint">// LAUNCH AN APP TO BEGIN</div>
     </li>
   </ul>
   <footer class="pm-footer">
     <span id="pm-count" class="pm-stats">0 INST · 0 ACT</span>
-    <button id="pm-refresh" class="pm-foot-btn" title="Reload list">↻ REFRESH</button>
+    <button id="pm-refresh" class="pm-foot-btn" title="Reload list"><Icon name="rotate-cw" /> REFRESH</button>
   </footer>
 </aside>
 
@@ -115,7 +121,17 @@
   .pm-panel[aria-hidden="false"] {
     transform: translateX(0);
     visibility: visible;
-    transition: transform 0.15s ease-out, visibility 0s;
+    transition: transform 0.15s ease-out, visibility 0s, opacity 0.2s ease;
+  }
+  /* "Show" flashes the panel see-through for ~1.5s so the revealed window
+     is visible behind it; pointer-events off so clicks reach the window. */
+  .pm-panel.pm-see-through { opacity: 0.4; }
+  /* Feedback when a "Show" target has no live window to reveal. */
+  @keyframes pm-noshow-shake { 0%,100%{transform:translateX(0);} 25%{transform:translateX(-3px);} 75%{transform:translateX(3px);} }
+  .pm-action-btn.pm-noshow {
+    color: var(--aura-color-danger) !important;
+    border-color: var(--aura-color-danger) !important;
+    animation: pm-noshow-shake 0.28s ease-in-out;
   }
 
   .pm-header {
@@ -138,16 +154,70 @@
     font-weight: 500;
   }
   .pm-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 24px;
+    box-sizing: border-box;
     background: transparent;
     border: var(--aura-border);
     color: var(--aura-color-text-dim);
     cursor: pointer;
     font-family: var(--aura-font-mono);
     font-size: var(--aura-font-size-xs);
-    padding: 3px 10px;
+    padding: 0 10px;
     transition: color 0.1s, box-shadow 0.1s;
   }
   .pm-close:hover { color: var(--aura-color-danger); box-shadow: var(--aura-glow-danger); }
+
+  /* ============ Fuzzy search row (top of panel) ============ */
+  .pm-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--aura-color-surface-2);
+    border-bottom: var(--aura-border);
+    flex-shrink: 0;
+    transition: box-shadow 0.1s;
+  }
+  .pm-search:focus-within { box-shadow: inset 0 -2px 0 var(--aura-color-primary); }
+  .pm-search-icon {
+    display: flex;
+    color: var(--aura-color-text-dim);
+    font-size: 0.9rem;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .pm-search:focus-within .pm-search-icon { color: var(--aura-color-primary); }
+  .pm-search-input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--aura-color-text);
+    font-family: var(--aura-font-mono);
+    font-size: var(--aura-font-size-sm);
+    letter-spacing: 0.04em;
+  }
+  .pm-search-input::placeholder { color: var(--aura-color-text-dim); letter-spacing: 0.1em; }
+  .pm-search-clear {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    color: var(--aura-color-text-dim);
+    cursor: pointer;
+    padding: 2px;
+    font-size: 0.8rem;
+    line-height: 1;
+    flex-shrink: 0;
+    transition: color 0.1s;
+  }
+  .pm-search-clear:hover { color: var(--aura-color-danger); }
+  .pm-search-clear[hidden] { display: none; }
 
   /* ============ List + cards ============ */
   .pm-list {
@@ -481,6 +551,8 @@
     line-height: 1;
     justify-content: center;
   }
+  /* Oversized "+" glyph on new-activity buttons — 1.5x the button text. */
+  .pm-plus { font-size: 1.5em; line-height: 1; }
 
   /* Footer */
   .pm-footer {
@@ -500,6 +572,10 @@
     text-transform: uppercase;
   }
   .pm-foot-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
     background: transparent;
     border: var(--aura-border);
     color: var(--aura-color-text-dim);
@@ -701,10 +777,129 @@
     padding: 10px;
     gap: 10px;
   }
+
+  /* ============ Sidecars: row chip + INSPECT expand ============ */
+  /* Rendered via innerHTML like every other row part — hence is:global. */
+  .pm-sidecar-chip {
+    font-size: 0.55rem;
+    color: var(--aura-color-text-dim);
+    border: 1px solid var(--aura-color-border);
+    padding: 1px 4px;
+    letter-spacing: 0.08em;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .pm-inspect-chev {
+    display: inline-block;
+    transition: transform 0.12s;
+  }
+  [aria-expanded="true"] > .pm-inspect-chev { transform: rotate(90deg); }
+  .pm-action-btn[data-action="inspect"][aria-expanded="true"] {
+    color: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+  }
+
+  .pm-inspect {
+    border-top: 1px dashed var(--aura-color-border);
+    padding: 8px 10px;
+  }
+  .pm-inspect-head {
+    font-size: 0.55rem;
+    color: var(--aura-color-text-dim);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .pm-inspect-head::before {
+    content: '';
+    flex: 0 0 10px;
+    height: 1px;
+    background: var(--aura-color-border);
+  }
+  .pm-inspect-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    font-family: var(--aura-font-mono);
+    font-size: 0.6rem;
+    color: var(--aura-color-text);
+  }
+  .pm-inspect-table th {
+    font-weight: normal;
+    font-size: 0.5rem;
+    color: var(--aura-color-text-dim);
+    letter-spacing: 0.14em;
+    text-align: left;
+    padding: 0 4px 4px;
+    border-bottom: 1px solid var(--aura-color-border);
+  }
+  .pm-inspect-table td {
+    padding: 4px;
+    vertical-align: top;
+    border-bottom: 1px solid color-mix(in srgb, var(--aura-color-border) 50%, transparent);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pm-inspect-table .pm-inspect-num { text-align: right; width: 58px; }
+  .pm-inspect-table .pm-inspect-kind { width: 64px; color: var(--aura-color-text-dim); }
+  .pm-inspect-table .pm-inspect-state { width: 52px; }
+  .pm-inspect-name { color: var(--aura-color-secondary); }
+  .pm-inspect-sub {
+    margin-top: 2px;
+    font-size: 0.5rem;
+    color: var(--aura-color-text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pm-inspect-state[data-state="running"] { color: var(--aura-color-success); }
+  .pm-inspect-state[data-state="starting"] { color: var(--aura-color-warning); }
+  .pm-inspect-state[data-state="stopped"] { color: var(--aura-color-text-dim); }
+  .pm-inspect-state[data-state="error"] { color: var(--aura-color-danger); }
+  .pm-inspect-table tfoot td {
+    border-bottom: none;
+    border-top: 1px solid var(--aura-color-border);
+    color: var(--aura-color-primary);
+    letter-spacing: 0.1em;
+  }
+  .pm-inspect-status {
+    font-size: 0.55rem;
+    color: var(--aura-color-text-dim);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .pm-inspect-status[data-kind="loading"] { animation: pm-pulse 1.2s ease-in-out infinite; }
+  .pm-inspect-status[data-kind="error"] {
+    color: var(--aura-color-danger);
+    animation: none;
+    text-transform: none;
+    letter-spacing: 0.04em;
+  }
+  .pm-inspect-note {
+    margin-top: 6px;
+    font-size: 0.5rem;
+    color: var(--aura-color-text-dim);
+    letter-spacing: 0.06em;
+  }
+  /* List view: the inspect block is its own indented row under the process. */
+  .pm-listrow-inspect {
+    list-style: none;
+    padding: 0 10px 0 32px;
+    border-bottom: 1px solid var(--aura-color-border);
+    background: color-mix(in srgb, var(--aura-color-bg) 60%, transparent);
+  }
+  .pm-listrow-inspect .pm-inspect { border-top: none; padding: 6px 0 8px; }
 </style>
 
 <script>
   import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
+  import { fuzzyScore } from '../../lib/fuzzyMatch.ts';
   import { osEvents } from '../../lib/osEvents.ts';
   import { registerUiCommand, registerSnapshotPart } from '../../lib/uiCommands.ts';
   const keyDispatcher = getKeyDispatcher();
@@ -717,7 +912,28 @@
     port: number | null;
     /** True for AppManager warm-pool members; not shown in this panel. */
     inPool?: boolean;
+    sandbox?: 'proot' | 'container';
+    /** Sidecars attached to this instance (OS cache; details via /sidecars). */
+    sidecarCount?: number;
   }
+  interface ResourceUsage { memBytes: number | null; cpuPct: number | null }
+  interface SidecarDetail {
+    id: string;
+    service: string;
+    backend: string;
+    state: string;
+    image?: string;
+    usage: ResourceUsage | null;
+  }
+  interface InspectData {
+    instance: { usage: ResourceUsage | null };
+    sidecars: SidecarDetail[];
+    totalMemBytes: number | null;
+  }
+  type InspectState =
+    | { status: 'loading' }
+    | { status: 'ok'; data: InspectData }
+    | { status: 'error'; message: string };
   interface ActivityListItem {
     activityId: string;
     parentInstanceId: string;
@@ -758,6 +974,8 @@
   const list        = document.getElementById('pm-list') as HTMLUListElement;
   const count       = document.getElementById('pm-count') as HTMLElement;
   const refresh     = document.getElementById('pm-refresh') as HTMLButtonElement;
+  const searchInput = document.getElementById('pm-search-input') as HTMLInputElement | null;
+  const searchClear = document.getElementById('pm-search-clear') as HTMLButtonElement | null;
   const viewBtns    = document.querySelectorAll<HTMLButtonElement>('.pm-view-btn');
   const filterBtns  = document.querySelectorAll<HTMLButtonElement>('.pm-filter-btn');
   // Lazy-getters: the panel HTML may not have been parsed yet at module
@@ -775,6 +993,37 @@
   // fresh /api/apps fetch.
   let lastInstances:  InstanceListItem[] = [];
   let lastActivities: ActivityListItem[] = [];
+
+  // ── Fuzzy filter (top-of-panel search) ─────────────────────
+  // Scored matching via lib/fuzzyMatch (substring / word start / initials, no
+  // scattered subsequences — "term" used to match "te-l-e-g-r-a-m"). Scores
+  // rank the visible rows so the obvious hit is first. Reset on each open.
+  let searchQuery = '';
+
+  /** Total score for an instance, or null if some token matches nothing. */
+  function searchScore(inst: InstanceListItem): number | null {
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return 0;
+    const m = manifests.get(inst.appId);
+    const acts = lastActivities.filter(a => a.parentInstanceId === inst.instanceId);
+    // Per-field weight: what the user sees on the card (the name) beats ids,
+    // which beat a hit buried in an activity's title or path.
+    const fields: Array<[string | undefined, number]> = [
+      [m?.name, 10], [inst.appId, 0], [inst.instanceId, -5],
+      ...acts.flatMap(a => [[a.title, -15], [a.path, -20], [a.activityId, -20]] as Array<[string | undefined, number]>),
+    ];
+    return fuzzyScore(query, fields);
+  }
+
+  /** Matching instances, best match first while searching (stable otherwise). */
+  function applySearchFilter(list: InstanceListItem[]): InstanceListItem[] {
+    if (!searchQuery.trim()) return list;
+    return list
+      .map(inst => ({ inst, sc: searchScore(inst) }))
+      .filter((r): r is { inst: InstanceListItem; sc: number } => r.sc !== null)
+      .sort((a, b) => b.sc - a.sc)
+      .map(r => r.inst);
+  }
 
   type ViewMode = 'cards' | 'list';
   const VIEW_STORAGE_KEY = 'aura.pm.viewMode';
@@ -835,18 +1084,32 @@
   async function openPanel(): Promise<void> {
     panel.setAttribute('aria-hidden', 'false');
     toggleBtn.setAttribute('aria-expanded', 'true');
+    // Start each open with a clean filter so a stale query never hides rows.
+    searchQuery = '';
+    if (searchInput) searchInput.value = '';
+    if (searchClear) searchClear.hidden = true;
     await refreshList();
-    // Land focus on a useful starting point so arrows immediately work.
-    // Prefer the first instance's FOCUS action (the user typically opens
-    // the PM to act on a process); fall back to the close button so the
-    // panel still has a focused element when the list is empty.
-    const firstAction = panel.querySelector<HTMLButtonElement>('.pm-card [data-action="focus"], .pm-listrow [data-action="focus"]');
-    if (firstAction) firstAction.focus({ preventScroll: true });
-    else closeBtn.focus({ preventScroll: true });
+    syncInspectPoll();
+    // Land focus on the search box for type-to-find. The panel's arrow-nav
+    // tracks only <button>s and its handler early-returns on non-button
+    // targets, so a focused text input doesn't disturb arrow navigation.
+    if (searchInput) searchInput.focus({ preventScroll: true });
+    else {
+      const firstAction = panel.querySelector<HTMLButtonElement>('.pm-card [data-action="focus"], .pm-listrow [data-action="focus"]');
+      if (firstAction) firstAction.focus({ preventScroll: true });
+      else closeBtn.focus({ preventScroll: true });
+    }
   }
   function closePanel() {
     panel.setAttribute('aria-hidden', 'true');
     toggleBtn.setAttribute('aria-expanded', 'false');
+    syncInspectPoll();
+  }
+  // "Show" makes the panel briefly see-through so the revealed window is
+  // visible behind it, then restores. Click-through during the fade.
+  function flashTransparent(): void {
+    panel.classList.add('pm-see-through');
+    window.setTimeout(() => panel.classList.remove('pm-see-through'), 1500);
   }
   // Variant used when the close came from the user dismissing the panel
   // (✕ button, Esc) — returns keyboard focus to the dock's chrome-nav
@@ -865,6 +1128,27 @@
   });
   closeBtn.addEventListener('click', closePanelAndReturnFocus);
   refresh.addEventListener('click', refreshList);
+
+  // Fuzzy search: filter live from the cached lists (no refetch).
+  function applySearch(q: string): void {
+    searchQuery = q;
+    if (searchClear) searchClear.hidden = q.trim() === '';
+    render(lastInstances, lastActivities);
+  }
+  searchInput?.addEventListener('input', () => applySearch(searchInput.value));
+  searchInput?.addEventListener('keydown', (e) => {
+    // Esc clears a non-empty query (and keeps the panel open); an empty query
+    // lets Esc bubble to the panel-close handler.
+    if (e.key === 'Escape' && searchInput.value !== '') {
+      e.stopPropagation();
+      searchInput.value = '';
+      applySearch('');
+    }
+  });
+  searchClear?.addEventListener('click', () => {
+    if (searchInput) { searchInput.value = ''; searchInput.focus(); }
+    applySearch('');
+  });
 
   // Toggle via dispatcher (default combo: Ctrl+Alt+M, remappable in Settings).
   keyDispatcher.bind('aura.processmanager.toggle', () => {
@@ -1123,6 +1407,7 @@
   }
 
   function render(instances: InstanceListItem[], activities: ActivityListItem[]) {
+    pruneInspect(instances);
     const snap = snapshotFocus();
     const totalInst = instances.length;
     const totalAct  = activities.length;
@@ -1132,8 +1417,12 @@
     // a `+ ACTIVITY` action, and visually distinguishing them keeps the user
     // from thinking they're stuck in an unusable BOOT state.
     const isService = (i: InstanceListItem) => manifests.get(i.appId)?.componentType === 'service';
-    const appInstances     = instances.filter(i => !isService(i));
-    const serviceInstances = instances.filter(isService);
+    const appInstancesAll     = instances.filter(i => !isService(i));
+    const serviceInstancesAll = instances.filter(isService);
+    // Fuzzy search narrows and ranks what's shown; the APPS/SVC pill counts below stay
+    // on the full on-disk sets so you still see how many exist while filtering.
+    const appInstances     = applySearchFilter(appInstancesAll);
+    const serviceInstances = applySearchFilter(serviceInstancesAll);
 
     // Pill counts: always reflect totals on disk, not what's currently
     // rendered, so the user sees `SVC 2` even when SVC is toggled off.
@@ -1142,8 +1431,8 @@
     // re-import where the panel hasn't re-rendered yet) the cached nodes
     // can be null. Without the guard, `refresh()` throws and the whole
     // ProcessManager is wedged.
-    if (filterCount.apps)     filterCount.apps.textContent     = String(appInstances.length);
-    if (filterCount.services) filterCount.services.textContent = String(serviceInstances.length);
+    if (filterCount.apps)     filterCount.apps.textContent     = String(appInstancesAll.length);
+    if (filterCount.services) filterCount.services.textContent = String(serviceInstancesAll.length);
 
     // Footer + toggle-button dot use the *visible* set so a hidden section's
     // running services don't make the badge pulse.
@@ -1155,11 +1444,14 @@
 
     if (visibleCount === 0) {
       const allHidden = totalInst > 0 && !filters.apps && !filters.services;
+      const searching = searchQuery.trim() !== '';
+      const emptyText = searching ? 'NO MATCHES' : allHidden ? 'ALL SECTIONS HIDDEN' : 'NO ACTIVE PROCESSES';
+      const emptyHint = searching ? '// ADJUST FILTER' : allHidden ? '// ENABLE APPS OR SVC ABOVE' : '// LAUNCH AN APP TO BEGIN';
       list.innerHTML = `
         <li class="pm-empty">
-          <div class="pm-empty-icon">○</div>
-          <div class="pm-empty-text">${allHidden ? 'ALL SECTIONS HIDDEN' : 'NO ACTIVE PROCESSES'}</div>
-          <div class="pm-empty-hint">${allHidden ? '// ENABLE APPS OR SVC ABOVE' : '// LAUNCH AN APP TO BEGIN'}</div>
+          <div class="pm-empty-icon"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle"/></svg></div>
+          <div class="pm-empty-text">${emptyText}</div>
+          <div class="pm-empty-hint">${emptyHint}</div>
         </li>`;
       restoreFocus(snap);
       return;
@@ -1205,8 +1497,8 @@
                     <div class="pm-activity-id">${sub}</div>
                   </div>
                   <div class="pm-activity-actions">
-                    <button class="pm-action-btn pm-icon-btn" data-action="focus-activity" title="Focus this activity">◉</button>
-                    <button class="pm-action-btn pm-icon-btn" data-action="close-activity" data-variant="warn" title="Close this activity">✕</button>
+                    <button class="pm-action-btn pm-icon-btn" data-action="focus-activity" title="Show this activity"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-dot"/></svg></button>
+                    <button class="pm-action-btn pm-icon-btn" data-action="close-activity" data-variant="warn" title="Close this activity"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-x"/></svg></button>
                   </div>
                 </li>`;
             }).join('')}
@@ -1227,6 +1519,7 @@
               <div class="pm-card-name">
                 <span>${escapeHtml(name)}</span>
                 ${isBg ? '<span class="pm-bg-badge" title="Background service">BG</span>' : ''}
+                ${sidecarChip(inst)}
               </div>
               <div class="pm-card-meta">${metaParts.join('')}</div>
             </div>
@@ -1236,12 +1529,14 @@
             </div>
           </div>
           ${activitiesBlock}
+          ${inspectBlock(inst)}
           <div class="pm-card-actions">
-            <button class="pm-action-btn" data-action="focus" title="Open in fullscreen focus mode">◉ FOCUS</button>
-            ${supportsActivities ? '<button class="pm-action-btn" data-action="new-activity" title="Open a new activity on this instance">+ ACTIVITY</button>' : ''}
+            <button class="pm-action-btn" data-action="focus" title="Show — jump to its workspace and highlight it"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-dot"/></svg> Show</button>
+            ${supportsActivities ? '<button class="pm-action-btn" data-action="new-activity" title="Open a new activity on this instance"><span class="pm-plus">+</span> ACTIVITY</button>' : ''}
+            ${inspectButton(inst, false)}
             <span class="pm-action-btn-spacer"></span>
-            <button class="pm-action-btn" data-action="app-close" data-variant="warn" title="Standard close — runs full lifecycle: onPause → onStop → onDestroy → SIGTERM">■ STOP</button>
-            <button class="pm-action-btn" data-action="task-kill" data-variant="danger" title="Force kill — immediate SIGKILL, no lifecycle hooks (only if app hangs)">⨂ KILL</button>
+            <button class="pm-action-btn" data-action="app-close" data-variant="warn" title="Standard close — runs full lifecycle: onPause → onStop → onDestroy → SIGTERM"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-square"/></svg> STOP</button>
+            <button class="pm-action-btn" data-action="task-kill" data-variant="danger" title="Force kill — immediate SIGKILL, no lifecycle hooks (only if app hangs)"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-x"/></svg> KILL</button>
           </div>
         </li>`;
     };
@@ -1279,15 +1574,17 @@
             <div class="pm-listrow-line1">
               <span>${escapeHtml(name)}</span>
               ${isBg ? '<span class="pm-bg-badge" title="Background service">BG</span>' : ''}
+              ${sidecarChip(inst)}
               <span class="pm-listrow-state-label">${stateLabel(inst.state)}</span>
             </div>
             <div class="pm-listrow-line2">${metaParts.join('')}</div>
           </div>
           <div class="pm-listrow-actions">
-            <button class="pm-action-btn pm-icon-btn" data-action="focus"        title="Focus">◉</button>
-            ${supportsActivities ? '<button class="pm-action-btn pm-icon-btn" data-action="new-activity" title="+ Activity">+</button>' : ''}
-            <button class="pm-action-btn pm-icon-btn" data-action="app-close"   data-variant="warn"   title="Stop (graceful)">■</button>
-            <button class="pm-action-btn pm-icon-btn" data-action="task-kill"   data-variant="danger" title="Kill (SIGKILL)">⨂</button>
+            <button class="pm-action-btn pm-icon-btn" data-action="focus"        title="Show"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-dot"/></svg></button>
+            ${supportsActivities ? '<button class="pm-action-btn pm-icon-btn" data-action="new-activity" title="+ Activity"><span class="pm-plus">+</span></button>' : ''}
+            ${inspectButton(inst, true)}
+            <button class="pm-action-btn pm-icon-btn" data-action="app-close"   data-variant="warn"   title="Stop (graceful)"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-square"/></svg></button>
+            <button class="pm-action-btn pm-icon-btn" data-action="task-kill"   data-variant="danger" title="Kill (SIGKILL)"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-x"/></svg></button>
           </div>
         </li>`;
 
@@ -1296,19 +1593,25 @@
         const sub = `${escapeHtml(act.activityId)}${act.path && act.path !== '/' ? ` · ${escapeHtml(act.path)}` : ''}`;
         return `
           <li class="pm-listrow pm-listrow-act" data-activity-id="${escapeHtml(act.activityId)}" data-parent-id="${escapeHtml(inst.instanceId)}">
-            <span class="pm-listrow-arrow">↳</span>
+            <span class="pm-listrow-arrow"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-corner-down-right"/></svg></span>
             <div class="pm-listrow-info">
               <div class="pm-listrow-line1">${escapeHtml(label)}</div>
               <div class="pm-listrow-line2">${sub}</div>
             </div>
             <div class="pm-listrow-actions">
-              <button class="pm-action-btn pm-icon-btn" data-action="focus-activity" title="Focus">◉</button>
-              <button class="pm-action-btn pm-icon-btn" data-action="close-activity" data-variant="warn" title="Close">✕</button>
+              <button class="pm-action-btn pm-icon-btn" data-action="focus-activity" title="Show"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-dot"/></svg></button>
+              <button class="pm-action-btn pm-icon-btn" data-action="close-activity" data-variant="warn" title="Close"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-x"/></svg></button>
             </div>
           </li>`;
       }).join('');
 
-      return instRow + actRows;
+      // The inspect block is its own row so it spans the full width under the
+      // process line; it keeps data-instance-id so its buttons (retry) route
+      // through the same delegated handler.
+      const inspectRow = expanded.has(inst.instanceId)
+        ? `<li class="pm-listrow-inspect" data-instance-id="${escapeHtml(inst.instanceId)}">${inspectBlock(inst)}</li>`
+        : '';
+      return instRow + inspectRow + actRows;
     };
     const sections: string[] = [];
     if (appInstances.length > 0) {
@@ -1322,10 +1625,175 @@
     list.innerHTML = sections.join('');
   }
 
+  // ─── Inspect: sidecars + resource usage per process ───────────────────
+  // A sidecar is an OS abstraction (container today, maybe a VM later), so
+  // the UI only speaks service / kind / state / usage — never docker terms.
+  // Rows show a cheap count from /api/apps; the detail (which queries live
+  // usage on the backend) is fetched only for expanded rows, and polled only
+  // while the panel is open. Expanded ids + last data survive re-renders so
+  // an app:* refresh never collapses or blanks an open inspector.
+  const INSPECT_POLL_MS = 5_000;
+  const expanded     = new Set<string>();
+  const inspectState = new Map<string, InspectState>();
+  const inspectInFlight = new Set<string>();
+  let inspectTimer: ReturnType<typeof setInterval> | null = null;
+
+  function inspectDomId(instanceId: string): string {
+    return 'pm-inspect-' + instanceId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  }
+
+  function sidecarChip(inst: InstanceListItem): string {
+    const n = inst.sidecarCount ?? 0;
+    if (n === 0) return '';
+    return `<span class="pm-sidecar-chip" title="${n} sidecar${n === 1 ? '' : 's'} running next to this process">⧉ ${n}</span>`;
+  }
+
+  function inspectButton(inst: InstanceListItem, compact: boolean): string {
+    const open = expanded.has(inst.instanceId);
+    const attrs = `data-action="inspect" aria-expanded="${open}" aria-controls="${inspectDomId(inst.instanceId)}" title="Inspect sidecars and resource usage"`;
+    return compact
+      ? `<button class="pm-action-btn pm-icon-btn" ${attrs}><span class="pm-inspect-chev"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-chevron-right"/></svg></span></button>`
+      : `<button class="pm-action-btn" ${attrs}><span class="pm-inspect-chev"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-chevron-right"/></svg></span>&nbsp;INSPECT</button>`;
+  }
+
+  function formatBytes(bytes: number | null | undefined): string {
+    if (bytes == null) return '—';
+    if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+    if (bytes >= 1024 ** 2) return `${Math.round(bytes / 1024 ** 2)} MB`;
+    return `${Math.round(bytes / 1024)} KB`;
+  }
+  function formatCpu(pct: number | null | undefined): string {
+    return pct == null ? '—' : `${pct < 10 ? pct.toFixed(1) : Math.round(pct)}%`;
+  }
+
+  function inspectRow(name: string, sub: string, kind: string, state: string, stateText: string, usage: ResourceUsage | null): string {
+    return `
+      <tr>
+        <td title="${escapeHtml(sub)}"><div class="pm-inspect-name">${escapeHtml(name)}</div>${sub ? `<div class="pm-inspect-sub">${escapeHtml(sub)}</div>` : ''}</td>
+        <td class="pm-inspect-kind">${escapeHtml(kind)}</td>
+        <td class="pm-inspect-state" data-state="${escapeHtml(state)}">${escapeHtml(stateText)}</td>
+        <td class="pm-inspect-num">${formatBytes(usage?.memBytes)}</td>
+        <td class="pm-inspect-num">${formatCpu(usage?.cpuPct)}</td>
+      </tr>`;
+  }
+
+  function inspectBlock(inst: InstanceListItem): string {
+    if (!expanded.has(inst.instanceId)) return '';
+    const st = inspectState.get(inst.instanceId) ?? { status: 'loading' as const };
+    let body: string;
+    if (st.status === 'loading') {
+      body = '<div class="pm-inspect-status" data-kind="loading">READING USAGE…</div>';
+    } else if (st.status === 'error') {
+      body = `<div class="pm-inspect-status" data-kind="error">
+          <span>${escapeHtml(st.message)}</span>
+          <button class="pm-action-btn" data-action="inspect-retry">RETRY</button>
+        </div>`;
+    } else {
+      const { data } = st;
+      const instState = inst.state === 'resumed' ? 'running'
+        : inst.state === 'error' || inst.state === 'crashed' ? 'error' : 'starting';
+      const rows = [
+        inspectRow('app', inst.instanceId, inst.sandbox ?? '—', instState, stateLabel(inst.state).toLowerCase(), data.instance.usage),
+        ...data.sidecars.map((s) => inspectRow(s.service, s.image ?? s.id, s.backend, s.state, s.state, s.usage)),
+      ].join('');
+      const note = data.instance.usage == null
+        ? `<div class="pm-inspect-note">Usage for ${escapeHtml(inst.sandbox ?? 'this')} sandboxes is not measured.</div>`
+        : '';
+      body = `
+        <table class="pm-inspect-table">
+          <thead><tr><th>SERVICE</th><th class="pm-inspect-kind">KIND</th><th class="pm-inspect-state">STATE</th><th class="pm-inspect-num">RAM</th><th class="pm-inspect-num">CPU</th></tr></thead>
+          <tbody>${rows}</tbody>
+          <tfoot><tr><td colspan="3">TOTAL</td><td class="pm-inspect-num">${formatBytes(data.totalMemBytes)}</td><td class="pm-inspect-num"></td></tr></tfoot>
+        </table>${note}`;
+    }
+    const n = inst.sidecarCount ?? 0;
+    return `
+      <div class="pm-inspect" id="${inspectDomId(inst.instanceId)}" data-inspect-for="${escapeHtml(inst.instanceId)}">
+        <div class="pm-inspect-head">INSPECT · ${n} SIDECAR${n === 1 ? '' : 'S'}</div>
+        ${body}
+      </div>`;
+  }
+
+  /** Swap one open inspector in place (poll tick) without a full list render. */
+  function patchInspect(instanceId: string): void {
+    const el = list.querySelector<HTMLElement>(`[data-inspect-for="${cssEsc(instanceId)}"]`);
+    const inst = lastInstances.find((i) => i.instanceId === instanceId);
+    if (!el || !inst) return;
+    const snap = snapshotFocus();
+    el.outerHTML = inspectBlock(inst);
+    restoreFocus(snap);
+  }
+
+  async function loadInspect(instanceId: string, showLoading = false): Promise<void> {
+    if (inspectInFlight.has(instanceId)) return;
+    inspectInFlight.add(instanceId);
+    if (showLoading) { inspectState.set(instanceId, { status: 'loading' }); patchInspect(instanceId); }
+    try {
+      const res = await fetch(`/api/instances/${encodeURIComponent(instanceId)}/sidecars`);
+      const body = await res.json().catch(() => null) as (InspectData & { error?: string }) | null;
+      if (!res.ok || !body) {
+        inspectState.set(instanceId, { status: 'error', message: body?.error ?? `Inspect failed (HTTP ${res.status})` });
+      } else {
+        inspectState.set(instanceId, { status: 'ok', data: body });
+      }
+    } catch (err) {
+      inspectState.set(instanceId, { status: 'error', message: `Inspect failed: ${(err as Error).message}` });
+    } finally {
+      inspectInFlight.delete(instanceId);
+    }
+    if (expanded.has(instanceId)) patchInspect(instanceId);
+  }
+
+  function toggleInspect(instanceId: string): void {
+    if (expanded.has(instanceId)) {
+      expanded.delete(instanceId);
+      inspectState.delete(instanceId);
+    } else {
+      expanded.add(instanceId);
+      inspectState.set(instanceId, { status: 'loading' });
+      void loadInspect(instanceId);
+    }
+    render(lastInstances, lastActivities);
+    syncInspectPoll();
+  }
+
+  /** Forget inspectors for processes that are gone; refetch when the sidecar set changed. */
+  function pruneInspect(instances: InstanceListItem[]): void {
+    const byId = new Map(instances.map((i) => [i.instanceId, i]));
+    for (const id of Array.from(expanded)) {
+      const inst = byId.get(id);
+      if (!inst) { expanded.delete(id); inspectState.delete(id); continue; }
+      const st = inspectState.get(id);
+      if (st?.status === 'ok' && st.data.sidecars.length !== (inst.sidecarCount ?? 0)) void loadInspect(id);
+    }
+    syncInspectPoll();
+  }
+
+  function syncInspectPoll(): void {
+    const want = isOpen() && expanded.size > 0;
+    if (want && !inspectTimer) {
+      inspectTimer = setInterval(() => { for (const id of expanded) void loadInspect(id); }, INSPECT_POLL_MS);
+    } else if (!want && inspectTimer) {
+      clearInterval(inspectTimer);
+      inspectTimer = null;
+    }
+  }
+
   list.addEventListener('click', async (e) => {
     const btn = (e.target as HTMLElement).closest('[data-action]') as HTMLButtonElement | null;
     if (!btn) return;
     const action = btn.dataset['action']!;
+    // "Show" (focus / focus-activity) is driven by pointer hold/tap below.
+    if (action === 'focus' || action === 'focus-activity') return;
+    // Inspect is a pure view toggle — no request to guard, and disabling the
+    // button would drop keyboard focus across the re-render.
+    if (action === 'inspect' || action === 'inspect-retry') {
+      const instanceId = btn.closest<HTMLElement>('[data-instance-id]')?.dataset['instanceId'];
+      if (!instanceId) return;
+      if (action === 'inspect') toggleInspect(instanceId);
+      else void loadInspect(instanceId, true);
+      return;
+    }
     btn.disabled = true;
     try {
       // Activity-level actions: row carries data-activity-id
@@ -1334,8 +1802,8 @@
         const activityId       = actRow.dataset['activityId']!;
         const parentInstanceId = actRow.dataset['parentId']!;
         if (action === 'focus-activity') {
-          (window as any).auraFocusInstance?.(parentInstanceId, activityId);
-          closePanel();
+          (window as any).auraRevealInstance?.(parentInstanceId, activityId);
+          flashTransparent();
         } else if (action === 'close-activity') {
           await fetch(`/api/activities/${encodeURIComponent(activityId)}/close`, { method: 'POST' });
           (window as any).auraRemoveViewByActivity?.(activityId);
@@ -1349,8 +1817,8 @@
       if (!row) return;
       const instanceId = row.dataset['instanceId']!;
       if (action === 'focus') {
-        (window as any).auraFocusInstance?.(instanceId);
-        closePanel();
+        (window as any).auraRevealInstance?.(instanceId);
+        flashTransparent();
       } else if (action === 'new-activity') {
         await (window as any).auraOpenActivityOnInstance?.(instanceId);
         await refreshList();
@@ -1382,6 +1850,59 @@
     if (refreshDebounce) return;
     refreshDebounce = setTimeout(() => { refreshDebounce = null; refreshList(); }, 80);
   }
+  // ── "Show" tap-vs-hold ─────────────────────────────────────────────────
+  // Tap = jump to the window's workspace and STAY (highlight lingers ~1.5s).
+  // Press-and-hold = peek while held, then jump back on release.
+  // The release is caught via a full-window overlay + a window listener: a bare
+  // window listener misses a mouseup that lands on an app iframe (the iframe
+  // swallows it), which previously left the peek stuck.
+  let peekHeld = false;
+  let peekDownTs = 0;
+  const PEEK_TAP_MS = 250;
+  function endPeek() {
+    if (!peekHeld) return;
+    peekHeld = false;
+    const commit = (Date.now() - peekDownTs) < PEEK_TAP_MS;   // tap = stay, hold = revert
+    (window as any).auraPeekEnd?.(commit);
+    if (commit) window.setTimeout(() => panel.classList.remove('pm-see-through'), 1500);
+    else panel.classList.remove('pm-see-through');
+  }
+  function noWindowFeedback(btn: HTMLElement) {
+    btn.classList.remove('pm-noshow'); void btn.offsetWidth; // restart the flash
+    btn.classList.add('pm-noshow');
+    window.setTimeout(() => btn.classList.remove('pm-noshow'), 900);
+  }
+  list.addEventListener('pointerdown', (e) => {
+    const btn = (e.target as HTMLElement).closest('[data-action="focus"], [data-action="focus-activity"]') as HTMLElement | null;
+    if (!btn) return;
+    e.preventDefault();
+    const actRow  = btn.closest('[data-activity-id]') as HTMLElement | null;
+    const instRow = btn.closest('[data-instance-id]') as HTMLElement | null;
+    const activityId = actRow?.dataset['activityId'];
+    const instanceId = actRow ? actRow.dataset['parentId'] : instRow?.dataset['instanceId'];
+    if (!instanceId) return;
+    // No live window for this process/activity → in-panel feedback, no peek.
+    if (!(window as any).auraHasWindow?.(instanceId, activityId)) { noWindowFeedback(btn); return; }
+    peekHeld = true;
+    peekDownTs = Date.now();
+    (window as any).auraPeekStart?.(instanceId, activityId);
+    panel.classList.add('pm-see-through');
+    // Transparent capture overlay so the release is never swallowed by an iframe.
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483646;cursor:pointer;background:transparent;';
+    document.body.appendChild(overlay);
+    let ended = false;
+    const done = () => {
+      if (ended) return; ended = true;
+      window.removeEventListener('pointerup', done);
+      window.removeEventListener('pointercancel', done);
+      overlay.remove();
+      endPeek();
+    };
+    window.addEventListener('pointerup', done);
+    window.addEventListener('pointercancel', done);
+  });
+
   osEvents.subscribe(['app:*', 'activity:*'], () => scheduleRefresh());
 
   // Initial load to populate the badge dot on the toggle button

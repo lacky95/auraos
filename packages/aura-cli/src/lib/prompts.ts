@@ -262,6 +262,10 @@ export interface MultiSelectMode<T> {
        * member is true at all times, enforced after seeding regardless of what
        * `initial` values the caller passed.
        *
+       * Space on a row with a group cycles through it instead of just toggling
+       * the checkbox: unchecked → first member → … → last member → unchecked.
+       * For a mount that's ro → wr → off, one key for the whole choice.
+       *
        * Omit for an independent toggle (the historical behaviour).
        */
       group?: string;
@@ -286,7 +290,8 @@ const RESERVED_KEYS = new Set([' ', 's', 'm', '\t', 'a', 'j', 'k', KEY_CTRLB, KE
 
 /**
  * Checkbox picker with three super-powers compared to `promptChoice`:
- *   • Space toggles each row (Enter confirms the whole set).
+ *   • Space toggles each row (Enter confirms the whole set); on a row with a
+ *     radio group it cycles the group's members before deselecting.
  *   • Pressing 'm' (or Tab) cycles through `modes` — same `value` retains its
  *     check across modes, so e.g. "enable only" → "install + enable" still
  *     shows the user's prior toggles.
@@ -411,6 +416,39 @@ export async function promptMultiSelect<T>(
     return rows;
   }
 
+  /**
+   * Space on one row. A row with a radio group steps through it — unchecked →
+   * each member in declaration order → unchecked — so a mount goes ro → wr →
+   * off without leaving the space bar. Rows without a group just toggle.
+   */
+  function pressSpace(o: MultiSelectMode<T>['options'][number]): void {
+    const group = o.flags
+      ? Object.values(o.flags).map((spec) => spec.group).find(Boolean)
+      : undefined;
+    const keys = group ? (groupKeys.get(group) ?? []).filter((k) => k in (o.flags ?? {})) : [];
+    if (keys.length === 0) {
+      checked.has(o.value) ? checked.delete(o.value) : checked.add(o.value);
+      return;
+    }
+    const state = flagState.get(o.value) ?? {};
+    const setOnly = (key: string) => { for (const k of keys) state[k] = k === key; };
+    if (!checked.has(o.value)) {
+      setOnly(keys[0]!);
+      checked.add(o.value);
+    } else {
+      const i = keys.findIndex((k) => state[k]);
+      if (i >= 0 && i < keys.length - 1) {
+        setOnly(keys[i + 1]!);
+      } else {
+        // Past the last member: deselect, and park the mode on the first one
+        // so the next press starts the cycle over at ro, not wr.
+        setOnly(keys[0]!);
+        checked.delete(o.value);
+      }
+    }
+    flagState.set(o.value, state);
+  }
+
   const draw = (firstTime: boolean) => {
     if (!firstTime) {
       moveCursor(stdout, 0, -linesWritten);
@@ -489,9 +527,15 @@ export async function promptMultiSelect<T>(
     // since `s` now preserves the query on re-entry, "normal mode with a live
     // filter" is the common state, not a corner case.
     const editHint = filter ? '   s edit filter' : '';
+    // Name the cycle when the pickable rows have one, so space's extra stops
+    // aren't a surprise: "space ro/wr/off" rather than "space toggle".
+    const firstGroup = [...groupKeys.values()][0];
+    const spaceHint = firstGroup
+      ? `space ${firstGroup.map((k) => flagLabels.get(k)).join('/')}/off`
+      : 'space toggle';
     const help = filtering
-      ? color.dim('  type to filter   ⌫ del   ⌃B clear filter   ↑↓ navigate   space toggle   ↵ apply')
-      : color.dim(`  ↑↓ navigate   space toggle${flagHint}   a all   s/⌃F search${editHint}${modeHint}   ↵ done${backHint}   ^C cancel`);
+      ? color.dim(`  type to filter   ⌫ del   ⌃B clear filter   ↑↓ navigate   ${spaceHint}   ↵ apply`)
+      : color.dim(`  ↑↓ navigate   ${spaceHint}${flagHint}   a all   s/⌃F search${editHint}${modeHint}   ↵ done${backHint}   ^C cancel`);
     lines.push(help);
 
     const text = lines.join('\n') + '\n';
@@ -532,7 +576,7 @@ export async function promptMultiSelect<T>(
         if (data === ' ') {
           const v = visibleOptions();
           const o = v[cursor];
-          if (o) { checked.has(o.value) ? checked.delete(o.value) : checked.add(o.value); }
+          if (o) pressSpace(o);
           draw(false);
           return;
         }
@@ -566,7 +610,7 @@ export async function promptMultiSelect<T>(
       if (data === ' ') {
         const v = visibleOptions();
         const o = v[cursor];
-        if (o) { checked.has(o.value) ? checked.delete(o.value) : checked.add(o.value); }
+        if (o) pressSpace(o);
         draw(false);
         return;
       }

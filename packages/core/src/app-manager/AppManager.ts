@@ -3,20 +3,22 @@ import { join, dirname } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
 import type { AppLifecycleState } from '../types/lifecycle.js';
-import type { AppInstance } from '../types/instance.js';
+import type { AppInstance, ResourceUsage, SidecarInfo } from '../types/instance.js';
 import type { AppActivity } from '../types/activity.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
 import { AppRegistry } from './AppRegistry.js';
 import { toolsTrackInstalledCaps } from './tool-allowlist.js';
 import { SHARED_HOME_PATH, toolchainMirrorBin } from './tool-provision.js';
-import { readLibMap, restoreLibsFromStore, toolchainLibFor, toolchainMirrorLib } from './tool-libs.js';
+import { readLibMap, replaceLibFile, restoreLibsFromStore, toolchainLibFor, toolchainMirrorLib } from './tool-libs.js';
 import { legacySharedHomeDir, masterHomeDir, userHomeDir } from '../scopes/home.js';
 import { PortAllocator } from './PortAllocator.js';
 import { LifecycleStateMachine } from './LifecycleStateMachine.js';
 import { ProotRunner, killProcessGroup } from './ProotRunner.js';
 import { ContainerRunner } from './ContainerRunner.js';
 import { MountManager } from './MountManager.js';
+import { PortManager, type ExposeSpec } from './PortManager.js';
 import type { SandboxRunner } from './SandboxRunner.js';
+import { selectOrphanSidecars } from './sidecars.js';
 import { IntentResolver, type Intent, type IntentMatch } from './IntentResolver.js';
 import { PermissionManager } from '../permissions/PermissionManager.js';
 import { ContentProviderRegistry } from '../content/ContentProviderRegistry.js';
@@ -57,6 +59,7 @@ export class AppManager {
   readonly interfaces:  InterfaceRegistry;
   /** Cross-app filesystem mounts (container sandboxes only). */
   readonly mounts:      MountManager;
+  readonly portExpose:  PortManager;
   private dataDir: string;
   private toolchainDir: string;
   /** PRoot's `/`. Kept so the lib restore pass can re-stage into it. */
@@ -64,6 +67,10 @@ export class AppManager {
   private scopeRegistry: ScopeRegistry;
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
   private reconcileRunning = false;
+  /** Last known sidecars per backend, refreshed by `syncSidecars` (reconciler cadence). */
+  private sidecars: Array<{ runner: SandboxRunner; info: SidecarInfo }> = [];
+  /** Consecutive syncs each sidecar's parent was absent — see selectOrphanSidecars. */
+  private sidecarAbsence = new Map<string, number>();
   // Pool refills currently in flight per appId. The "pool" itself is just the
   // subset of `instances` with `inPool === true`; we don't keep a separate
   // queue (avoids stale instanceId references when a pool member dies). The
@@ -140,6 +147,17 @@ export class AppManager {
         return join(scope.dataDir, 'apps', inst.appId, instanceId);
       },
     });
+    this.portExpose  = new PortManager({
+      dataDir:  opts.dataDir,
+      registry: this.registry,
+      runner:   this.runners['container'] as ContainerRunner,
+      resolveRunningInstance: (appId) => {
+        const inst = this.getInstancesByApp(appId).find(
+          (i) => i.state === 'resumed' || i.state === 'resuming' || i.state === 'started',
+        );
+        return inst ? { instanceId: inst.instanceId } : null;
+      },
+    });
   }
 
   /**
@@ -155,6 +173,28 @@ export class AppManager {
     const m = this.registry.getById(inst?.appId ?? instanceIdOrAppId);
     if (m?.sandbox) return this.runners[m.sandbox];
     return this.runners['proot'];
+  }
+
+  /**
+   * Map an app manifest's always-on `ports` block to expose specs applied
+   * at every start. Gated by `apps.port`: without the grant we apply nothing
+   * and warn, rather than silently honouring a declaration the app can't make.
+   */
+  private manifestExposeSpecs(manifest: AppManifest): ExposeSpec[] {
+    const p = manifest.ports;
+    if (!p || (!p.exposes?.length && !p.hostPublish?.length)) return [];
+    if (!this.permissions.hasPermission(manifest.id, 'apps.port')) {
+      console.warn(`[AppManager] ${manifest.id} declares ports but lacks 'apps.port' — ignoring`);
+      return [];
+    }
+    const specs: ExposeSpec[] = [];
+    for (const e of p.exposes ?? []) {
+      specs.push({ kind: 'into', sourceAppId: e.sourceApp, sourcePort: e.sourcePort, port: e.port });
+    }
+    for (const h of p.hostPublish ?? []) {
+      specs.push({ kind: 'host', sourceAppId: manifest.id, sourcePort: h.port, port: h.hostPort, bindAddr: '127.0.0.1' });
+    }
+    return specs;
   }
 
   /**
@@ -485,9 +525,12 @@ export class AppManager {
       catch (err) { console.warn(`[AppManager] could not create ${srcLib}: ${(err as Error).message}`); }
 
       // Forward + restore, by soname. Same size+mtime idempotency as the bin
-      // pass, and the same in-place copyFileSync: truncating rather than
-      // replacing preserves the inode, so per-instance `.lib` hardlinks see
-      // the new content instead of being stranded on an orphaned old version.
+      // pass, but NOT the same in-place copy: the bin pass may truncate
+      // because ETXTBSY protects a running executable, while a mapped `.so`
+      // has no such guard and truncation SIGBUSes every process using it.
+      // `replaceLibFile` swaps the dirent by rename instead; the stale
+      // per-instance hardlinks this leaves behind are re-linked by
+      // `materialiseLibs` on the next provision.
       for (const [from, to] of [[srcLib, mirrorLib], [mirrorLib, srcLib]] as const) {
         for (const name of existsSync(from) ? readdirSync(from) : []) {
           const src = join(from, name);
@@ -498,8 +541,7 @@ export class AppManager {
               const dStat = lstatSync(dst);
               if (sStat.size === dStat.size && dStat.mtimeMs >= sStat.mtimeMs) continue;
             } catch { /* dst missing */ }
-            copyFileSync(src, dst);
-            chmodSync(dst, 0o755);
+            replaceLibFile(src, dst);
           } catch (err) {
             console.warn(`[AppManager] toolchain lib ${src} → ${dst} failed: ${(err as Error).message}`);
           }
@@ -709,9 +751,17 @@ export class AppManager {
     // orphaned and get reaped out from under it.
     try {
       this.mounts.reconcile(new Set(this.instances.keys()));
+      this.portExpose.reconcile(new Set(this.instances.keys()));
     } catch (err) {
       console.warn(`[AppManager] mount reconcile failed: ${(err as Error).message}`);
     }
+    // Sidecars likewise outlive this process: a docker daemon restart removes
+    // the `--rm` app containers but revives their `unless-stopped` sidecars,
+    // which nothing would ever reap. Same ordering constraint as mounts. At
+    // boot nothing can be mid-spawn, so no grace period (graceTicks = 1).
+    await this.syncSidecars(1).catch((err) => {
+      console.warn(`[AppManager] sidecar reconcile failed: ${(err as Error).message}`);
+    });
     this.startReconciler();
     // Kick off warm-pool fills for opted-in apps (non-blocking — init returns
     // immediately, pool members spawn in the background). The reconciler tops
@@ -1008,6 +1058,9 @@ export class AppManager {
       await this.mounts.reapply(instanceId).catch((err: unknown) => {
         console.warn(`[AppManager] mount reapply failed for ${instanceId}: ${(err as Error).message}`);
       });
+      await this.portExpose.reapply(instanceId, this.manifestExposeSpecs(manifest)).catch((err: unknown) => {
+        console.warn(`[AppManager] port reapply failed for ${instanceId}: ${(err as Error).message}`);
+      });
 
       await this.runnerOf(instanceId).callLifecycle(instanceId, 'onCreate');
       this.transition(instanceId, appId, 'starting', port);
@@ -1155,6 +1208,7 @@ export class AppManager {
     // Detach cross-app mounts BEFORE the container goes: a live bind under the
     // instance's data dir pins the source filesystem and would outlive it.
     this.mounts.removeAll(instanceId);
+    this.portExpose.removeAll(instanceId);
     await this.runnerOf(instanceId).kill(instanceId);
     if (port) this.ports.release(port);
     this.transition(instanceId, appId, 'destroyed', null);
@@ -1215,6 +1269,7 @@ export class AppManager {
     // A force-kill runs no lifecycle hooks, so this is the only chance to
     // detach mounts before the instance record is dropped.
     this.mounts.removeAll(instanceId);
+    this.portExpose.removeAll(instanceId);
     const killed = this.runnerOf(instanceId).forceKill(instanceId);
     if (port) this.ports.release(port);
     if (killed) {
@@ -1898,6 +1953,88 @@ export class AppManager {
         appId: act.appId,
       });
     }
+
+    // 6) Sidecars — refresh the cache the Process Manager reads, and reap
+    //    sidecars whose parent instance is gone. Two consecutive misses are
+    //    required so a sidecar is never reaped in the window between an
+    //    instance being dropped and re-adopted.
+    await this.syncSidecars(2);
+  }
+
+  /**
+   * Refresh the sidecar cache from every backend and remove orphans. If any
+   * backend can't be queried, the cache is left as-is and nothing is reaped:
+   * a failed read must never look like "all parents are gone".
+   */
+  private async syncSidecars(graceTicks: number): Promise<void> {
+    const fresh: Array<{ runner: SandboxRunner; info: SidecarInfo }> = [];
+    for (const runner of new Set(Object.values(this.runners))) {
+      if (!runner.listSidecars) continue;
+      const list = await runner.listSidecars();
+      if (!list) return;
+      for (const info of list) fresh.push({ runner, info });
+    }
+    // Snapshot live instances AFTER listing: an instance always exists before
+    // it can create a sidecar, so this order can't misclassify a new one.
+    const live = new Set(this.instances.keys());
+    const orphans = selectOrphanSidecars(fresh.map((s) => s.info), live, this.sidecarAbsence, graceTicks);
+    if (orphans.length > 0) {
+      const orphanIds = new Set(orphans.map((o) => o.id));
+      for (const runner of new Set(fresh.map((s) => s.runner))) {
+        const ids = fresh.filter((s) => s.runner === runner && orphanIds.has(s.info.id)).map((s) => s.info.id);
+        if (ids.length > 0) runner.removeSidecars?.(ids);
+      }
+      for (const o of orphans) {
+        console.warn(`[AppManager] reaped orphan sidecar ${o.id} (parent ${o.parentInstanceId} is gone)`);
+        this.sidecarAbsence.delete(o.id);
+      }
+    }
+    const kept = fresh.filter((s) => !orphans.some((o) => o.id === s.info.id));
+    const signature = (list: typeof kept, instanceId: string) => list
+      .filter((s) => s.info.parentInstanceId === instanceId)
+      .map((s) => `${s.info.id}:${s.info.state}`).sort().join(',');
+    const parents = new Set([...this.sidecars, ...kept].map((s) => s.info.parentInstanceId));
+    const previous = this.sidecars;
+    this.sidecars = kept;
+    for (const instanceId of parents) {
+      if (signature(previous, instanceId) === signature(kept, instanceId)) continue;
+      const inst = this.instances.get(instanceId);
+      if (!inst) continue;
+      OsEventBus.emit('app:sidecarsChanged', {
+        instanceId, appId: inst.appId,
+        count: kept.filter((s) => s.info.parentInstanceId === instanceId).length,
+      });
+    }
+  }
+
+  /** Sidecars attached to an instance, from the reconciler's cache (no backend call). */
+  getSidecars(instanceId: string): SidecarInfo[] {
+    return this.sidecars.filter((s) => s.info.parentInstanceId === instanceId).map((s) => s.info);
+  }
+
+  /**
+   * Live resource usage of an instance's own sandbox and each of its sidecars.
+   * Queries the backends on demand — call from an inspect view, not a list.
+   */
+  async getInstanceUsage(instanceId: string): Promise<{
+    instance: ResourceUsage | null;
+    sidecars: Array<SidecarInfo & { usage: ResourceUsage | null }>;
+  }> {
+    const own = this.runnerOf(instanceId);
+    const attached = this.sidecars.filter((s) => s.info.parentInstanceId === instanceId);
+    const byRunner = new Map<SandboxRunner, string[]>();
+    for (const s of attached) byRunner.set(s.runner, [...(byRunner.get(s.runner) ?? []), s.info.id]);
+    if (!byRunner.has(own)) byRunner.set(own, []);
+    const usage = new Map<string, ResourceUsage>();
+    for (const [runner, sidecarIds] of byRunner) {
+      if (!runner.usage) continue;
+      const res = await runner.usage({ instanceIds: runner === own ? [instanceId] : [], sidecarIds });
+      for (const [k, v] of res) usage.set(k, v);
+    }
+    return {
+      instance: usage.get(instanceId) ?? null,
+      sidecars: attached.map((s) => ({ ...s.info, usage: usage.get(s.info.id) ?? null })),
+    };
   }
 
   private handleUnexpectedExit(instanceId: string, appId: string, code: number | null): void {
@@ -1916,6 +2053,7 @@ export class AppManager {
     // Same reasoning for cross-app mounts: a crash skips onDestroy, and a bind
     // left under the dead instance's data dir pins the source filesystem.
     this.mounts.removeAll(instanceId);
+    this.portExpose.removeAll(instanceId);
     this.fsm.set(instanceId, 'error');
     if (inst) {
       inst.state = 'error';

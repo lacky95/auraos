@@ -21,11 +21,15 @@ const mgr = getAppManager();
 // show up here — only the `componentType: 'service'` apps are filtered.
 const apps: AppManifest[] = mgr.getManifests().filter((m) => m.componentType !== 'service');
 const enabledMap: Record<string, boolean> = mgr.getEnabledState();
+import Icon from '../ui/Icon.astro';
 ---
 <aside id="lo-panel" class="lo-panel" aria-hidden="true">
   <header class="lo-header">
-    <span class="lo-title">▦ LAUNCH APP</span>
-    <button id="lo-close" class="lo-close" title="Close launcher (Esc)">✕</button>
+    <span class="lo-title"><Icon name="layout-grid" /> LAUNCH APP</span>
+    <div class="lo-header-actions">
+      <button id="lo-reload" class="lo-reload" title="Reload the app list" aria-label="Reload the app list"><span class="lo-reload-icon"><Icon name="rotate-cw" /></span></button>
+      <button id="lo-close" class="lo-close" title="Close launcher (Esc)"><Icon name="x" /></button>
+    </div>
   </header>
   <input id="lo-search" class="lo-search" type="text" placeholder="SEARCH APPS..." autocomplete="off" />
   <div id="lo-grid" class="lo-grid">
@@ -53,7 +57,7 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
     <div class="lo-ctx-submenu-wrap">
       <button class="lo-ctx-item lo-ctx-has-sub" data-action="open-in-ws" role="menuitem" aria-haspopup="true" aria-expanded="false">
         <span>Open in workspace</span>
-        <span class="lo-ctx-chev">▸</span>
+        <span class="lo-ctx-chev"><Icon name="chevron-right" /></span>
       </button>
       <div id="lo-ctx-submenu" class="lo-ctx-submenu" role="menu" hidden></div>
     </div>
@@ -97,19 +101,78 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
     flex-shrink: 0;
   }
   .lo-title {
+    /* Keep the icon and label on one line (inline row) — as a plain span in the
+       space-between header the label could wrap under the icon when space is tight. */
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
     font-size: var(--aura-font-size-sm);
     color: var(--aura-color-primary);
     text-transform: uppercase;
     letter-spacing: 0.12em;
   }
-  .lo-close {
+  /* The header is `justify-content: space-between`; without this wrapper a
+     third child would spread the three evenly instead of keeping the title
+     left and the buttons together on the right. */
+  .lo-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .lo-reload {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 24px;
+    box-sizing: border-box;
     background: transparent;
     border: var(--aura-border);
     color: var(--aura-color-text-dim);
     cursor: pointer;
     font-family: var(--aura-font-mono);
     font-size: var(--aura-font-size-xs);
-    padding: 2px 10px;
+    padding: 0 10px;
+  }
+  .lo-reload:hover,
+  .lo-reload:focus,
+  .lo-reload:focus-visible {
+    color: var(--aura-color-primary);
+    box-shadow: var(--aura-glow-primary);
+    outline: none;
+  }
+  .lo-reload:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--aura-color-primary), var(--aura-glow-primary);
+  }
+  /* Spin the glyph, not the button — rotating the bordered box looks wrong.
+     inline-block because `transform` has no effect on an inline span. */
+  .lo-reload-icon {
+    display: inline-block;
+  }
+  .lo-reload[data-busy="true"] .lo-reload-icon {
+    animation: lo-reload-spin 0.6s linear infinite;
+  }
+  .lo-reload[data-error="true"] {
+    color: var(--aura-color-danger);
+    border-color: var(--aura-color-danger);
+  }
+  @keyframes lo-reload-spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .lo-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 24px;
+    box-sizing: border-box;
+    background: transparent;
+    border: var(--aura-border);
+    color: var(--aura-color-text-dim);
+    cursor: pointer;
+    font-family: var(--aura-font-mono);
+    font-size: var(--aura-font-size-xs);
+    padding: 0 10px;
   }
   .lo-close:hover,
   .lo-close:focus,
@@ -315,6 +378,7 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
 
   const panel  = document.getElementById('lo-panel') as HTMLElement;
   const close  = document.getElementById('lo-close')  as HTMLButtonElement;
+  const reload = document.getElementById('lo-reload') as HTMLButtonElement;
   const search = document.getElementById('lo-search') as HTMLInputElement;
   const grid   = document.getElementById('lo-grid')   as HTMLElement;
 
@@ -344,6 +408,29 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
   (window as any).auraCloseLauncher = closePanel;
 
   close.addEventListener('click', closePanelAndReturnFocus);
+
+  // Re-fetch the app list and rebuild the tiles. Deliberately NOT a document
+  // reload: the grid is SSR'd at page load, so an app installed since then is
+  // missing until something re-renders it — and this reaches the same
+  // rebuildGrid() the app:installed/app:removed SSE events use, without
+  // tearing down the desktop, its iframes or any in-page state.
+  const RELOAD_TITLE = reload.title;
+  reload.addEventListener('click', async () => {
+    if (reload.dataset['busy'] === 'true') return;   // ignore double-clicks mid-fetch
+    reload.dataset['busy'] = 'true';
+    delete reload.dataset['error'];
+    try {
+      await rebuildGrid();
+    } catch (err) {
+      // A silent return on a failed refresh is indistinguishable from "this
+      // button does nothing", so put the failure on the control itself.
+      reload.dataset['error'] = 'true';
+      reload.title = `Reload failed: ${(err as Error).message}`;
+      setTimeout(() => { delete reload.dataset['error']; reload.title = RELOAD_TITLE; }, 4000);
+    } finally {
+      delete reload.dataset['busy'];
+    }
+  });
 
   // Dispatcher: Ctrl+Alt+Space (default) and Ctrl+Alt+C (alt) drop
   // keyboard focus on the FIRST item of the bottom bar — the narrow `◐`
@@ -431,7 +518,7 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
                       title="Launch in ${escapeAttr(w.name)}">
         <span class="lo-ctx-ws-slot">${i + 1}</span>
         <span class="lo-ctx-ws-name">${escapeHtml(w.name)}</span>
-        <span class="lo-ctx-active-mark" aria-hidden="true">●</span>
+        <span class="lo-ctx-active-mark" aria-hidden="true"><svg class="aura-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="5" fill="currentColor"/></svg></span>
       </button>`;
     }).join('');
     ctxSubmenu.innerHTML = rows;
@@ -699,7 +786,9 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
         return;
       }
       if (ev.type === 'app:installed' || ev.type === 'app:removed') {
-        void rebuildGrid();
+        // Background refresh — a network blip just leaves the current grid
+        // alone; the next install/remove event retries.
+        void rebuildGrid().catch((err) => console.warn(`[launcher] grid rebuild failed: ${err.message}`));
       }
     });
   });
@@ -709,32 +798,32 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
    * (the much rarer event) — enable/disable just flips an attribute above.
    */
   async function rebuildGrid(): Promise<void> {
-    try {
-      const r = await fetch('/api/apps');
-      if (!r.ok) return;
-      const apps = (await r.json() as Array<{
-        manifest: { id: string; name: string; icon?: string; componentType?: 'activity' | 'service' };
-        enabled: boolean;
-      }>)
-        // Services are headless — see the SSR filter at the top of this
-        // file for the rationale.
-        .filter((a) => a.manifest.componentType !== 'service');
-      // Sort by name to match the SSR ordering (alphabetical via Object key
-      // iteration order; getManifests doesn't guarantee, but that's close).
-      apps.sort((a, b) => a.manifest.name.localeCompare(b.manifest.name));
-      grid.innerHTML = apps.map((a) => {
-        const m = a.manifest;
-        const glyph = (m.icon ?? m.name.charAt(0)).toUpperCase();
-        const safeId   = m.id.replace(/[<>&"']/g, '');
-        const safeName = m.name.replace(/[<>&]/g, '');
-        return `<button class="lo-app" data-app-id="${safeId}" data-enabled="${a.enabled}" title="${safeName}">
-          <span class="lo-app-initial" data-len="${glyph.length}">${glyph}</span>
-          <span class="lo-app-name">${safeName}</span>
-          <span class="lo-app-id">${safeId}</span>
-        </button>`;
-      }).join('');
-    } catch {
-      /* network blip — leave the current grid alone, the next SSE event triggers a retry */
-    }
+    const r = await fetch('/api/apps');
+    if (!r.ok) throw new Error(`/api/apps returned ${r.status}`);
+    const apps = (await r.json() as Array<{
+      manifest: { id: string; name: string; icon?: string; componentType?: 'activity' | 'service' };
+      enabled: boolean;
+    }>)
+      // Services are headless — see the SSR filter at the top of this
+      // file for the rationale.
+      .filter((a) => a.manifest.componentType !== 'service');
+    // Sort by name to match the SSR ordering (alphabetical via Object key
+    // iteration order; getManifests doesn't guarantee, but that's close).
+    apps.sort((a, b) => a.manifest.name.localeCompare(b.manifest.name));
+    grid.innerHTML = apps.map((a) => {
+      const m = a.manifest;
+      const glyph = (m.icon ?? m.name.charAt(0)).toUpperCase();
+      const safeId   = m.id.replace(/[<>&"']/g, '');
+      const safeName = m.name.replace(/[<>&]/g, '');
+      return `<button class="lo-app" data-app-id="${safeId}" data-enabled="${a.enabled}" title="${safeName}">
+        <span class="lo-app-initial" data-len="${glyph.length}">${glyph}</span>
+        <span class="lo-app-name">${safeName}</span>
+        <span class="lo-app-id">${safeId}</span>
+      </button>`;
+    }).join('');
+    // The rebuild replaces every tile, so the `hidden` flags the search box
+    // had set are gone — re-apply the current query or a filtered grid comes
+    // back showing everything.
+    if (search.value.trim() !== '') applyLauncherFilter(search.value);
   }
 </script>
