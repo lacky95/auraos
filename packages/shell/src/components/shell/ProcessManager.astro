@@ -899,6 +899,7 @@ import Icon from '../ui/Icon.astro';
 
 <script>
   import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
+  import { fuzzyScore } from '../../lib/fuzzyMatch.ts';
   import { osEvents } from '../../lib/osEvents.ts';
   import { registerUiCommand, registerSnapshotPart } from '../../lib/uiCommands.ts';
   const keyDispatcher = getKeyDispatcher();
@@ -994,29 +995,34 @@ import Icon from '../ui/Icon.astro';
   let lastActivities: ActivityListItem[] = [];
 
   // ── Fuzzy filter (top-of-panel search) ─────────────────────
-  // Simple case-insensitive subsequence match: every whitespace-separated
-  // token in the query must appear, in order, somewhere in the instance's
-  // haystack (name + ids + state + its activities). Reset on each open.
+  // Scored matching via lib/fuzzyMatch (substring / word start / initials, no
+  // scattered subsequences — "term" used to match "te-l-e-g-r-a-m"). Scores
+  // rank the visible rows so the obvious hit is first. Reset on each open.
   let searchQuery = '';
-  function fuzzySub(q: string, text: string): boolean {
-    let i = 0;
-    for (let j = 0; j < text.length && i < q.length; j++) if (text[j] === q[i]) i++;
-    return i === q.length;
-  }
-  function matchesSearch(inst: InstanceListItem): boolean {
+
+  /** Total score for an instance, or null if some token matches nothing. */
+  function searchScore(inst: InstanceListItem): number | null {
     const query = searchQuery.trim().toLowerCase();
-    if (!query) return true;
+    if (!query) return 0;
     const m = manifests.get(inst.appId);
     const acts = lastActivities.filter(a => a.parentInstanceId === inst.instanceId);
-    // Match each token WITHIN a single field (name / id / activity) rather than
-    // across a concatenated blob — otherwise a short query borrows letters from
-    // the ubiquitous "com.aura." prefix and the "resumed" state and matches
-    // almost everything.
-    const fields = [m?.name, inst.appId, inst.instanceId,
-                    ...acts.flatMap(a => [a.title, a.path, a.activityId])]
-      .filter(Boolean).map(s => (s as string).toLowerCase());
-    return query.split(/\s+/).filter(Boolean)
-      .every(tok => fields.some(f => fuzzySub(tok, f)));
+    // Per-field weight: what the user sees on the card (the name) beats ids,
+    // which beat a hit buried in an activity's title or path.
+    const fields: Array<[string | undefined, number]> = [
+      [m?.name, 10], [inst.appId, 0], [inst.instanceId, -5],
+      ...acts.flatMap(a => [[a.title, -15], [a.path, -20], [a.activityId, -20]] as Array<[string | undefined, number]>),
+    ];
+    return fuzzyScore(query, fields);
+  }
+
+  /** Matching instances, best match first while searching (stable otherwise). */
+  function applySearchFilter(list: InstanceListItem[]): InstanceListItem[] {
+    if (!searchQuery.trim()) return list;
+    return list
+      .map(inst => ({ inst, sc: searchScore(inst) }))
+      .filter((r): r is { inst: InstanceListItem; sc: number } => r.sc !== null)
+      .sort((a, b) => b.sc - a.sc)
+      .map(r => r.inst);
   }
 
   type ViewMode = 'cards' | 'list';
@@ -1413,10 +1419,10 @@ import Icon from '../ui/Icon.astro';
     const isService = (i: InstanceListItem) => manifests.get(i.appId)?.componentType === 'service';
     const appInstancesAll     = instances.filter(i => !isService(i));
     const serviceInstancesAll = instances.filter(isService);
-    // Fuzzy search narrows what's shown; the APPS/SVC pill counts below stay
+    // Fuzzy search narrows and ranks what's shown; the APPS/SVC pill counts below stay
     // on the full on-disk sets so you still see how many exist while filtering.
-    const appInstances     = appInstancesAll.filter(matchesSearch);
-    const serviceInstances = serviceInstancesAll.filter(matchesSearch);
+    const appInstances     = applySearchFilter(appInstancesAll);
+    const serviceInstances = applySearchFilter(serviceInstancesAll);
 
     // Pill counts: always reflect totals on disk, not what's currently
     // rendered, so the user sees `SVC 2` even when SVC is toggled off.
