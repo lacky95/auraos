@@ -40,6 +40,7 @@ export interface InstanceDTO {
 export interface AppDTO {
   manifest: AppManifest;
   instances: InstanceDTO[];
+  preparation: import('@aura/core').PreparationStatus | null;
 }
 
 const HEALTH_TIMEOUT_MS = 1000;
@@ -126,7 +127,7 @@ export async function buildAppDTO(appId: string): Promise<AppDTO | null> {
   const instances = await Promise.all(
     mgr.getInstancesByApp(appId).map((inst) => probeHealth(inst).then((health) => ({ instance: inst, health }))),
   );
-  return { manifest, instances };
+  return { manifest, instances, preparation: mgr.getPreparationStatus(appId) };
 }
 
 export function jsonResponse(data: unknown, status = 200) {

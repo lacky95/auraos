@@ -125,3 +125,38 @@ export function subscribeEvents(
 
   return () => controller.abort();
 }
+
+/** POST with preparation progress. Older servers can still return plain JSON. */
+export async function preparationPost<T>(path: string, body: unknown, onLine?: (line: string) => void): Promise<T> {
+  const response = await fetch(`${shellUrl()}${path}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' }, body: JSON.stringify(body),
+  });
+  const finish = (status: number, value: unknown): T => {
+    if (status >= 400) {
+      const error = new Error(`${path} failed: ${JSON.stringify(value)}`) as ShellError;
+      error.status = status; error.body = JSON.stringify(value); throw error;
+    }
+    return value as T;
+  };
+  if (!response.headers.get('content-type')?.includes('text/event-stream')) return finish(response.status, await response.json());
+  if (!response.body) throw new Error('Preparation stream has no body');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder(); let buffer = '';
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error('Preparation connection closed before the result; check app status or run aura app prepare again');
+      buffer += decoder.decode(value, { stream: true });
+      let end: number;
+      while ((end = buffer.indexOf('\n\n')) !== -1) {
+        const frame = buffer.slice(0, end); buffer = buffer.slice(end + 2);
+        for (const line of frame.split('\n')) {
+          if (!line.startsWith('data: ')) continue;
+          const event = JSON.parse(line.slice(6));
+          if (event.type === 'progress') onLine?.(event.line);
+          if (event.type === 'result') return finish(event.status, event.body);
+        }
+      }
+    }
+  } finally { await reader.cancel(); }
+}

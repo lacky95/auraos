@@ -1,7 +1,8 @@
+import { AppPreparation, EXTERNAL_PREPARATION, PreparationError, preparationStateDir, readPreparationStatus, writePreparationStatus, type PreparationResult, type PreparationStatus } from './preparation.js';
 import { mkdirSync, readdirSync, readFileSync, lstatSync, writeFileSync, chmodSync, copyFileSync, renameSync, unlinkSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
-import { lifecyclePath } from '../types/manifest.js';
+import { AppManifestSchema, lifecyclePath } from '../types/manifest.js';
 import type { AppLifecycleState } from '../types/lifecycle.js';
 import type { AppInstance, ResourceUsage, SidecarInfo } from '../types/instance.js';
 import type { AppActivity } from '../types/activity.js';
@@ -26,12 +27,14 @@ import { InterfaceRegistry } from '../interfaces/InterfaceRegistry.js';
 import type { InterfaceView } from '../interfaces/InterfaceRegistry.js';
 import { keymapRegistry } from '../keymap/KeymapRegistry.js';
 import { ScopeRegistry } from '../scopes/ScopeRegistry.js';
-import type { ScopeDefinition } from '../scopes/types.js';
+import type { ScopeDefinition, ScopeId } from '../scopes/types.js';
 
 const RECONCILE_INTERVAL_MS = 5_000;
 const ERROR_GRACE_MS        = 30_000;
 
 export class AppManager {
+  private preparation = new AppPreparation();
+
   // Public so the manifest-edit endpoint can call reloadFromDisk(appId)
   // after writing — chokidar's lag would otherwise let refreshInstanceTools
   // see a stale in-memory tools[] right after a `cap grant`.
@@ -1020,6 +1023,47 @@ export class AppManager {
     await this.stop(instanceId);
   }
 
+  getPreparationStatus(appId: string): PreparationStatus | null {
+    const manifest = this.registry.getById(appId);
+    if (!manifest) return null;
+    try {
+      const status = readPreparationStatus(preparationStateDir(this.dataDir, manifest.appDir));
+      if (status?.status === 'preparing' && !this.preparation.isActive(manifest.appDir)) return { status: 'failed', error: 'Preparation was interrupted; retry aura app prepare' };
+      return status;
+    } catch { return null; }
+  }
+
+  async prepareApp(appId: string, onLine?: (line: string) => void, scopeId?: ScopeId): Promise<PreparationResult> {
+    const scope = scopeId ? this.scopeRegistry.getById(scopeId) : undefined;
+    const appDir = scope ? join(scope.appsDir, appId) : this.registry.getAppDir(appId);
+    const manifest = scope ? { ...AppManifestSchema.parse(JSON.parse(readFileSync(join(appDir, 'app.manifest.json'), 'utf8'))), appDir, scopeId: scope.id }
+      : this.registry.getById(appId);
+    if (!manifest) throw new Error(`App not found: ${appId}`);
+    return this.preparation.prepare(appDir, () => this.prepareManifest(manifest, onLine));
+  }
+
+  private async prepareManifest(manifest: AppManifest & { appDir: string; scopeId: ScopeId }, onLine?: (line: string) => void): Promise<PreparationResult> {
+    const stateDir = preparationStateDir(this.dataDir, manifest.appDir);
+    const update = (status: PreparationStatus) => {
+      writePreparationStatus(stateDir, status);
+      OsEventBus.emit('app:preparation', { appId: manifest.id, scopeId: manifest.scopeId, ...status });
+    };
+    if (manifest.runtime === 'raw') { update({ status: 'externally-managed', result: EXTERNAL_PREPARATION }); return EXTERNAL_PREPARATION; }
+    update({ status: 'preparing' });
+    const runner = this.runners[manifest.sandbox] ?? this.runners.proot;
+    const active = this.getInstancesByApp(manifest.id).some(i => !['destroyed', 'error'].includes(i.state));
+    try {
+      const result = await runner.prepare(manifest.id, manifest, manifest.appDir, {
+        stateDir, mutable: !this.scopeRegistry.getById(manifest.scopeId).immutable, allowChanges: !active,
+        onLine: line => { onLine?.(line); OsEventBus.emit('app:preparation.progress', { appId: manifest.id, scopeId: manifest.scopeId, line }); },
+      });
+      update({ status: result.status, result }); return result;
+    } catch (error) {
+      update({ status: 'failed', error: String(error), ...(error instanceof PreparationError ? { phase: error.phase, logPath: error.logPath } : {}) });
+      throw error;
+    }
+  }
+
   /**
    * Spawn a fresh app instance and run the full lifecycle chain
    * (creating → created → starting → started → resuming → resumed).
@@ -1028,6 +1072,19 @@ export class AppManager {
    * (pool members don't claim them — see comment below).
    */
   private async spawnInstance(appId: string, opts: { inPool: boolean }): Promise<string> {
+    const manifest = this.registry.getById(appId);
+    if (!manifest) throw new Error(`App not found: ${appId}`);
+    return this.preparation.exclusive(manifest.appDir, async () => {
+      if (!opts.inPool && manifest.instanceMode === 'single') {
+        const existing = this.getInstancesByApp(appId).find(i => !i.inPool && ['started', 'resuming', 'resumed'].includes(i.state));
+        if (existing) return existing.instanceId;
+      }
+      await this.prepareManifest(manifest);
+      return this.spawnPreparedInstance(appId, opts);
+    });
+  }
+
+  private async spawnPreparedInstance(appId: string, opts: { inPool: boolean }): Promise<string> {
     const manifest = this.registry.getById(appId);
     if (!manifest) throw new Error(`App not found: ${appId}`);
 

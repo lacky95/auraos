@@ -17,7 +17,7 @@
 import type { Command } from 'commander';
 import { stdin, stdout } from 'node:process';
 import { join } from 'node:path';
-import { api, type ShellError } from '../lib/client.js';
+import { api, preparationPost, type ShellError } from '../lib/client.js';
 import { color, fail, info, ok, warn } from '../lib/format.js';
 import {
   promptChoice, promptConfirm, promptMultiSelect, promptText,
@@ -44,6 +44,7 @@ interface AppDto {
 }
 
 interface CloneResponse {
+  preparation?: { status: string; action: string };
   ok: boolean;
   dryRun?: boolean;
   sourceAppId: string;
@@ -380,7 +381,7 @@ function describeOptions(cfg: CloneConfig): string {
 async function cloneFromConfig(cfg: CloneConfig, asJson: boolean): Promise<void> {
   let res: CloneResponse;
   try {
-    res = await api.post<CloneResponse>('/api/admin/clone-app', {
+    res = await preparationPost<CloneResponse>('/api/admin/clone-app', {
       sourceAppId:  cfg.sourceAppId,
       sourceScope:  cfg.sourceScope,
       targetAppId:  cfg.targetAppId,
@@ -398,8 +399,13 @@ async function cloneFromConfig(cfg: CloneConfig, asJson: boolean): Promise<void>
       withData:     cfg.withData,
       force:        cfg.force,
       dryRun:       cfg.dryRun,
-    });
+    }, asJson ? undefined : line => info(line));
   } catch (err) {
+    if (asJson) {
+      const body = (err as ShellError).body;
+      console.log(body ?? JSON.stringify({ ok: false, error: String(err) }));
+      process.exitCode = 1; return;
+    }
     fail(apiError(err));
   }
 
@@ -423,12 +429,13 @@ async function cloneFromConfig(cfg: CloneConfig, asJson: boolean): Promise<void>
     info(`stripped manifest field(s): ${color.dim(r.strippedFields.join(', '))}`);
   }
   if (r.ported) {
-    info(`ported @aura/* deps to ${color.dim('auraDependencies')} — they resolve on first launch via ${color.dim('aura sdk install')}.`);
+    info(`ported @aura/* deps to ${color.dim('auraDependencies')}.`);
   }
   if (r.shadows) {
     warn(`${r.targetAppId} now SHADOWS the ${r.shadows}-scope app of the same id. Removing the clone unmasks the original.`);
   }
   for (const w of r.warnings) warn(w);
+  if (!r.dryRun) info(r.preparation?.status === 'ready' ? 'Dependencies verified.' : 'Dependencies are managed by the app entrypoint.');
   if (!r.dryRun) info(`Run \`aura app start ${r.targetAppId}\` to launch it.`);
 }
 

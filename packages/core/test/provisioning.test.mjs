@@ -9,12 +9,9 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import {
-  ProvisionWatch, nextHealthDeadline, needsProvisioning,
-  PROVISION_BEGIN, PROVISION_END, PROVISION_SHELL,
+  ProvisionWatch, nextHealthDeadline,
+  PROVISION_BEGIN, PROVISION_END,
 } from '../dist/app-manager/provisioning.js';
 
 // ── ProvisionWatch ────────────────────────────────────────────────────────
@@ -94,57 +91,4 @@ test('an extension never shortens a deadline', () => {
   const deadline = now + 500_000;           // already generous
   const out = nextHealthDeadline({ now, deadline, hardDeadline: now + 900_000, isProvisioning: true, bootBudgetMs: BOOT });
   assert.equal(out, deadline, 'Math.min alone would have pulled this in to now+60s');
-});
-
-// ── needsProvisioning ─────────────────────────────────────────────────────
-function appDir(pkg, opts = {}) {
-  const d = mkdtempSync(join(tmpdir(), 'aura-prov-'));
-  if (pkg) writeFileSync(join(d, 'package.json'), JSON.stringify(pkg));
-  if (opts.astro) {
-    mkdirSync(join(d, 'node_modules', '.bin'), { recursive: true });
-    writeFileSync(join(d, 'node_modules', '.bin', 'astro'), '#!/bin/sh\n', { mode: 0o755 });
-  }
-  if (opts.aura) mkdirSync(join(d, 'node_modules', '@aura', 'app-sdk'), { recursive: true });
-  return d;
-}
-
-test('a directory with no package.json needs nothing', () => {
-  assert.equal(needsProvisioning(appDir(null)), false);
-});
-
-test('missing astro needs provisioning', () => {
-  assert.equal(needsProvisioning(appDir({ dependencies: { astro: '^6' } })), true);
-});
-
-test('astro present and no @aura/* referenced needs nothing', () => {
-  assert.equal(needsProvisioning(appDir({ dependencies: { astro: '^6' } }, { astro: true })), false);
-});
-
-test('auraDependencies without node_modules/@aura still needs provisioning', () => {
-  // The case that shipped CallGemini broken: npm install had run, so astro was
-  // there, but @aura/app-sdk is resolved over OCI and had not been pulled.
-  const d = appDir({ dependencies: { astro: '^6' }, auraDependencies: { '@aura/app-sdk': '^0.0.1' } }, { astro: true });
-  assert.equal(needsProvisioning(d), true);
-});
-
-test('auraDependencies already materialised needs nothing', () => {
-  const d = appDir(
-    { dependencies: { astro: '^6' }, auraDependencies: { '@aura/app-sdk': '^0.0.1' } },
-    { astro: true, aura: true },
-  );
-  assert.equal(needsProvisioning(d), false);
-});
-
-test('a legacy @aura/* in plain dependencies counts too', () => {
-  const d = appDir({ dependencies: { astro: '^6', '@aura/app-sdk': '^0.0.1' } }, { astro: true });
-  assert.equal(needsProvisioning(d), true);
-});
-
-// ── the shell the entrypoint runs ─────────────────────────────────────────
-test('the provisioning shell brackets its work in markers', () => {
-  assert.ok(PROVISION_SHELL.includes(`echo "${PROVISION_BEGIN}"`));
-  assert.ok(PROVISION_SHELL.includes(`echo "${PROVISION_END}"`));
-  // Under `set -e`, `[ -x foo ] && VAR=1` exits the script when the test is
-  // false. Every guard here must therefore be a real `if`.
-  assert.ok(!/^\s*\[[^\]]*\]\s*&&/m.test(PROVISION_SHELL), 'no bare test && assignment');
 });

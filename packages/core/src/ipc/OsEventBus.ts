@@ -12,6 +12,8 @@ export interface EventFramework {
 }
 
 export interface OsEvents {
+  'app:preparation': { appId: string; scopeId: string } & import('../app-manager/preparation.js').PreparationStatus;
+  'app:preparation.progress': { appId: string; scopeId: string; line: string };
   'app:stateChanged': { instanceId: string; appId: string; state: AppLifecycleState; port: number | null };
   'app:crashed': { instanceId: string; appId: string; error: string };
   /** The set of sidecars attached to an instance changed (appeared, vanished, or changed state). */

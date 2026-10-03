@@ -1,7 +1,7 @@
 import type { Command } from 'commander';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { api } from '../lib/client.js';
+import { api, preparationPost, type ShellError } from '../lib/client.js';
 import { color, fail, info, ok, table, warn } from '../lib/format.js';
 import { promptChoice, promptConfirm, promptMultiSelect, BACK, PromptCancelled } from '../lib/prompts.js';
 import { BUILTIN_PERMISSIONS } from '@aura/core';
@@ -60,15 +60,32 @@ export function registerApp(program: Command): void {
     .command('info <appId>')
     .description('Print full manifest + instances + activities for an app.')
     .action(async (appId: string) => {
-      const dto = await api.get<{ manifest: unknown; instances: unknown[]; activities: unknown[] }>(
+      const dto = await api.get<{ manifest: unknown; instances: unknown[]; activities: unknown[]; preparation?: unknown }>(
         `/api/apps/${encodeURIComponent(appId)}/status`,
       );
+      console.log(color.bold('Preparation:'));
+      console.log(JSON.stringify(dto.preparation ?? null, null, 2));
       console.log(color.bold('Manifest:'));
       console.log(JSON.stringify(dto.manifest, null, 2));
       console.log(color.bold('\nInstances:'));
       console.log(JSON.stringify(dto.instances, null, 2));
       console.log(color.bold('\nActivities:'));
       console.log(JSON.stringify(dto.activities, null, 2));
+    });
+
+  app
+    .command('prepare <appId>')
+    .option('--json', 'Emit one structured result.')
+    .description('Verify or repair dependencies without launching the app.')
+    .action(async (appId: string, opts: { json?: boolean }) => {
+      try {
+        const result = await preparationPost<{ preparation: { status: string } }>(`/api/apps/${encodeURIComponent(appId)}/prepare`, {}, opts.json ? undefined : line => info(line));
+        if (opts.json) console.log(JSON.stringify(result));
+        else ok(result.preparation.status === 'ready' ? `dependencies verified for ${appId}` : `${appId} manages its own dependencies`);
+      } catch (error) {
+        if (opts.json) { console.log((error as ShellError).body ?? JSON.stringify({ ok: false, error: String(error) })); process.exitCode = 1; }
+        else fail(String(error));
+      }
     });
 
   app

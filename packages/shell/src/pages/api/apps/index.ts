@@ -11,6 +11,7 @@ export const GET: APIRoute = () => {
   const mgr = getAppManager();
   const apps = mgr.getManifests().map((manifest) => ({
     manifest,
+    preparation: mgr.getPreparationStatus(manifest.id),
     // Surface the enable flag alongside the manifest so the shell + CLI can
     // filter (Dock, Launcher, `aura app list`) without a second round-trip
     // to /api/admin/apps/enabled. Default is true for any app missing from

@@ -1,4 +1,5 @@
-import type { APIRoute } from 'astro';
+import { withPreparationProgress } from '../../../lib/preparationProgress.js';
+import type { APIRoute, APIContext } from 'astro';
 import { execFileSync } from 'node:child_process';
 import {
   cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync,
@@ -36,7 +37,7 @@ const APP_ID_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
 const SEMVER_RE  = /^\d+\.\d+\.\d+$/;
 
 /** Build artefacts + dep trees that must never follow an app to a new id. */
-const COPY_EXCLUDES = ['node_modules', '.next', 'dist', '.astro', '.turbo', '.cache'];
+const COPY_EXCLUDES = ['.aura-preparation-node_modules', 'node_modules', '.next', 'dist', '.astro', '.turbo', '.cache'];
 
 /** Id-rewrite guards: skip anything big or binary rather than corrupting it. */
 const REWRITE_MAX_BYTES = 512 * 1024;
@@ -68,7 +69,9 @@ interface CloneRequest {
   dryRun?:       boolean;
 }
 
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = context => withPreparationProgress(context.request, onLine => cloneApp(context, onLine));
+
+async function cloneApp({ request }: APIContext, onLine: (line: string) => void): Promise<Response> {
   let body: CloneRequest;
   try { body = await request.json() as CloneRequest; }
   catch { return json({ error: 'invalid-json' }, 400); }
@@ -336,9 +339,17 @@ export const POST: APIRoute = async ({ request }) => {
     // keymaps, interfaces); reloadFromDisk alone would leave them stale.
     try { mgr.reloadManifest(targetAppId); } catch { /* watcher will reconcile */ }
 
+    onLine('Files copied; verifying dependencies in the target runtime');
+    let preparation;
+    try { preparation = await mgr.prepareApp(targetAppId, onLine, targetScopeId); }
+    catch (error) {
+      return json({ ok: false, error: `Files copied to ${dest}, but dependency preparation failed: ${String(error)}`,
+        targetAppId, scope: targetScopeId, dest, filesCopied: true,
+        retry: `aura app prepare ${targetAppId}`, preparation: { status: 'failed' } }, 500);
+    }
     return json({
       ok: true, sourceAppId, sourceScope, targetAppId, scope: targetScopeId,
-      dest, fileCount, bytes, ported, rewrittenFiles, strippedFields, shadows, warnings,
+      dest, fileCount, bytes, ported, rewrittenFiles, strippedFields, shadows, warnings, preparation,
     });
   } finally {
     rmSync(staging, { recursive: true, force: true });

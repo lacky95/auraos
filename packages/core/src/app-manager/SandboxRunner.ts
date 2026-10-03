@@ -1,3 +1,4 @@
+import type { PreparationRequest, PreparationResult } from './preparation.js';
 import type { AppManifest } from '../types/manifest.js';
 import type { SpawnContext } from '../scopes/types.js';
 import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
@@ -20,6 +21,9 @@ import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
  * concrete runner backs an instance — it just calls SandboxRunner methods.
  */
 export interface SandboxRunner {
+  /** Validate/install dependencies in the same runtime used by spawn. */
+  prepare(appId: string, manifest: AppManifest, appDir: string, request: PreparationRequest): Promise<PreparationResult>;
+
   /** Resolve the per-instance toolchain allowlist directory on the host. */
   toolsDir(instanceId: string): string;
   /**

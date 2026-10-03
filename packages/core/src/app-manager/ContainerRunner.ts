@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto';
+import { StartupWatch } from './startup-watch.js';
+import { preparationCommand, runPreparationCommand, type PreparationRequest, type PreparationResult } from './preparation.js';
 import { spawn, spawnSync, execSync, execFile, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
@@ -18,7 +21,7 @@ import type { SpawnContext } from '../scopes/types.js';
 import { ContextStore } from '../context/ContextStore.js';
 import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
 import {
-  PROVISION_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
+  PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
 } from './provisioning.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
@@ -50,7 +53,6 @@ export function pickVolumeByDestination(mounts: DockerMount[], destination: stri
 
 const SYNTHESISED_ENTRYPOINT = `set -e
 export PORT="\${APP_PORT:-4001}"
-${PROVISION_SHELL}
 ASTRO="node_modules/.bin/astro"
 [ -x "\$ASTRO" ] || ASTRO="/workspace/node_modules/.bin/astro"
 echo "[\${APP_ID:-app}] Starting Astro server on port \$PORT via \$ASTRO"
@@ -105,8 +107,7 @@ interface TrackedContainer {
  *    needed, which would have to dance around port collisions across
  *    long-lived AuraOS sessions).
  *
- * Cleanup is automatic — every container is started with `--rm`, so when the
- * astro process inside exits (or we `docker kill`), the container disappears.
+ * Containers are explicitly removed after their exit diagnostics are captured.
  */
 export class ContainerRunner implements SandboxRunner {
   private containers = new Map<string, TrackedContainer>();
@@ -196,14 +197,35 @@ export class ContainerRunner implements SandboxRunner {
     try { rmSync(this.mountRootDir(instanceId), { recursive: true, force: true }); } catch { /* ignore */ }
   }
 
+  async prepare(appId: string, manifest: AppManifest, appDir: string, request: PreparationRequest): Promise<PreparationResult> {
+    const id = `prepare-${createHash('sha256').update(request.stateDir).digest('hex').slice(0, 24)}`;
+    const name = `aura-${id}`;
+    try {
+      mkdirSync(request.stateDir, { recursive: true });
+      this.provisionToolsDir(id, manifest);
+      this.contextStore.ensureDir();
+      await this.volumeStore.ensureAll();
+      const image = (await execFileAsync('docker', ['image', 'inspect', '--format', '{{.Id}}', BASE_IMAGE])).stdout.trim();
+      const command = preparationCommand(request, '/data', image);
+      const args = this.buildDockerArgs(id, appId, 0, manifest, name,
+        { appDir, instanceDataDir: request.stateDir }, await this.contextStore.resolveEnv(), await this.volumeStore.resolveMounts(), command);
+      args.splice(args.indexOf('-d'), 1);
+      // Pin the image that was fingerprinted, even if its tag moves meanwhile.
+      args[args.length - command.length - 1] = image;
+      return await runPreparationCommand('docker', args, request);
+    } finally {
+      await execFileAsync('docker', ['rm', '-f', name]).catch(() => undefined);
+      this.clearToolsDir(id); this.clearMountRoot(id);
+    }
+  }
+
   // ─── Spawn ────────────────────────────────────────────────────────────
   async spawn(instanceId: string, appId: string, port: number, manifest: AppManifest, ctx: SpawnContext): Promise<number> {
     this.provisionToolsDir(instanceId, manifest);
 
     const hostname = this.containerName(instanceId);
     // Remove any stale container with the same name (orphaned by a previous
-    // crash); --rm would have cleaned a normal exit, but `kill -9` of the
-    // shell can leave them behind.
+    // crash). Normal exits are removed after their logs are captured.
     try { execSync(`docker rm -f ${hostname}`, { stdio: 'ignore', timeout: 5_000 }); } catch { /* didn't exist */ }
 
     // Resolve OS Context (env/secret) LIVE from Valkey on every spawn so a
@@ -234,14 +256,17 @@ export class ContainerRunner implements SandboxRunner {
     // Fan-out container stdout/stderr into the shell's log so `docker logs`
     // isn't the only place to see app output. Survives until the container
     // exits or we kill it.
+    const startup = new StartupWatch(appId, join(this.dataDir, 'aura', 'startup', `${instanceId}.log`), Object.entries(contextEnv).filter(([key]) => /token|secret|password|api.?key/i.test(key)).map(([, value]) => value));
     const provision = new ProvisionWatch();
     const logTail = spawn('docker', ['logs', '-f', containerId], { stdio: ['ignore', 'pipe', 'pipe'] });
     logTail.stdout?.on('data', (d: Buffer) => {
       provision.observe(d.toString());
+      startup.observe(d.toString());
       process.stdout.write(`[${instanceId}] ${d}`);
     });
     logTail.stderr?.on('data', (d: Buffer) => {
       provision.observe(d.toString());
+      startup.observe(d.toString());
       process.stderr.write(`[${instanceId}] ${d}`);
     });
 
@@ -259,12 +284,15 @@ export class ContainerRunner implements SandboxRunner {
     const watcher = spawn('docker', ['wait', containerId], { stdio: ['ignore', 'pipe', 'ignore'] });
     watcher.stdout?.on('data', (d: Buffer) => {
       const code = parseInt(d.toString().trim(), 10);
+      const captured = spawnSync('docker', ['logs', '--tail', '100', containerId], { encoding: 'utf8', timeout: 5000 });
+      startup.observe((captured.stdout ?? '') + (captured.stderr ?? ''));
+      startup.exit(isNaN(code) ? null : code);
       this.handleExit(instanceId, isNaN(code) ? null : code, containerId);
     });
-    watcher.on('error', () => this.handleExit(instanceId, null, containerId));
+    watcher.on('error', error => { startup.observe(error.message); startup.exit(null); this.handleExit(instanceId, null, containerId); });
 
     try {
-      await this.waitHealthy(instanceId, appId, hostname, port, manifest);
+      await startup.race(this.waitHealthy(instanceId, appId, hostname, port, manifest, startup.signal));
     } catch (err) {
       console.error(`[ContainerRunner] ${instanceId} health-check failed: ${(err as Error).message}`);
       this.forceKill(instanceId);
@@ -375,6 +403,7 @@ export class ContainerRunner implements SandboxRunner {
     ctx: SpawnContext,
     contextEnv: Record<string, string>,
     contextVolumes: VolumeEntry[],
+    commandOverride?: string[],
   ): string[] {
     // myTools is only used to provision the per-instance symlinks before
     // docker run — the bind itself goes through aura-app-data's volume-subpath.
@@ -384,7 +413,7 @@ export class ContainerRunner implements SandboxRunner {
     const instDataDir = ctx.instanceDataDir;
     mkdirSync(instDataDir, { recursive: true });
 
-    const entrypoint = this.resolveEntrypoint(ctx.appDir, appId, manifest);
+    const entrypoint = commandOverride ?? this.resolveEntrypoint(ctx.appDir, appId, manifest);
 
     // node_modules + per-instance data live in the AuraOS named volumes,
     // not on the host bind (the AuraOS container's pnpm install populates
@@ -463,7 +492,7 @@ export class ContainerRunner implements SandboxRunner {
       '--mount', `type=volume,source=${appDataVolume},target=${MOUNT_ROOT_PATH},volume-subpath=${this.mountRootSubpath(instanceId)}`,
     );
     const a: string[] = [
-      'run', '--rm', '-d',
+      'run', '-d',
       '--name', hostname,
       // Docker DNS uses --name for cross-container resolution (the proxy at
       // /api/proxy/<id> resolves to the aura-<instanceId> name), so --name
@@ -923,7 +952,7 @@ export class ContainerRunner implements SandboxRunner {
   }
 
   /** Probe the app's health endpoint until ready or timeout. */
-  private async waitHealthy(instanceId: string, appId: string, hostname: string, port: number, manifest: AppManifest): Promise<void> {
+  private async waitHealthy(instanceId: string, appId: string, hostname: string, port: number, manifest: AppManifest, signal: AbortSignal): Promise<void> {
     // Two clocks, because "not answering yet" has two very different causes.
     //
     // A cold user/global-scope app installs its whole dependency tree in the
@@ -939,9 +968,9 @@ export class ContainerRunner implements SandboxRunner {
     let   deadline    = startedAt + HEALTH_CHECK_TIMEOUT_MS;
     const healthUrl = `http://${hostname}:${port}${lifecyclePath(manifest, instanceId, 'health')}`;
     let lastBody: string | null = null;
-    while (Date.now() < deadline) {
+    while (Date.now() < deadline && !signal.aborted) {
       try {
-        const res = await fetch(healthUrl);
+        const res = await fetch(healthUrl, { signal: AbortSignal.any([signal, AbortSignal.timeout(1000)]) });
         // Capture body regardless of status so the timeout error message
         // surfaces what the app actually said (403 = host gate, etc.).
         const body = await res.text();
@@ -964,7 +993,7 @@ export class ContainerRunner implements SandboxRunner {
         }
       } catch (e) {
         // Network refused / not ready yet — retry until deadline.
-        void e;
+        if (e instanceof Error && e.message.startsWith('identity mismatch')) throw e;
       }
       // Re-arm only while provisioning is actually in flight, so the boot
       // budget starts counting from the moment dependencies are ready.
@@ -1057,6 +1086,11 @@ export class ContainerRunner implements SandboxRunner {
     const cb = tracked.exitCb;
     const wasExpected = tracked.expectingKill;
     this.containers.delete(instanceId);
+    // Adopted legacy containers are tracked by name and already use --rm.
+    // Never asynchronously remove by name: it may now belong to a new spawn.
+    if (/^[a-f0-9]{64}$/.test(tracked.containerId)) {
+      void execFileAsync('docker', ['rm', '-f', tracked.containerId]).catch(() => undefined);
+    }
     // Only notify on UNEXPECTED exits. AppManager.stop() is mid-cleanup
     // and doesn't want a stray "crashed" event flipping the instance to
     // 'error' state — that breaks the subsequent FSM transition to

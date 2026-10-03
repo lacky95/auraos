@@ -20,6 +20,7 @@ interface AppDto {
     autoStart?: boolean;
   };
   enabled: boolean;
+  preparation?: { status: 'preparing' | 'ready' | 'failed' | 'externally-managed'; error?: string } | null;
   instances: Array<{ instanceId: string; state: string }>;
 }
 
@@ -303,6 +304,13 @@ apps.sort((a, b) => {
               <div class="app-name">{m.name}</div>
               <div class="app-id">{m.id} · v{m.version}</div>
               <div class="app-tags">
+                <span class="app-tag" title={app.preparation?.error}>
+                  {app.preparation?.status === 'ready' ? 'dependencies verified'
+                    : app.preparation?.status === 'preparing' ? 'preparing dependencies'
+                    : app.preparation?.status === 'failed' ? 'dependencies need repair'
+                    : app.preparation?.status === 'externally-managed' ? 'app-managed dependencies'
+                    : 'dependencies not yet verified'}
+                </span>
                 {running > 0 && <span class="app-tag" data-kind="running">{running} running</span>}
                 {isService && <span class="app-tag" data-kind="service">service</span>}
                 {m.backgroundService && <span class="app-tag" data-kind="bg">background</span>}

@@ -1,3 +1,7 @@
+import { createHash } from 'node:crypto';
+import { StartupWatch } from './startup-watch.js';
+import { preparationCommand, runPreparationCommand, type PreparationRequest, type PreparationResult } from './preparation.js';
+import { readFileSync } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -11,7 +15,7 @@ import type { SpawnContext } from '../scopes/types.js';
 import { ContextStore } from '../context/ContextStore.js';
 import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
 import {
-  PROVISION_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
+  PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
 } from './provisioning.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
@@ -32,7 +36,6 @@ const LIFECYCLE_TIMEOUT_MS = 5_000;
  */
 const SYNTHESISED_ENTRYPOINT = `set -e
 export PORT="\${APP_PORT:-4001}"
-${PROVISION_SHELL}
 ASTRO="node_modules/.bin/astro"
 [ -x "\$ASTRO" ] || ASTRO="/workspace/node_modules/.bin/astro"
 echo "[\${APP_ID:-app}] Starting Astro server on port \$PORT via \$ASTRO"
@@ -116,7 +119,7 @@ export class ProotRunner implements SandboxRunner {
     try { rmSync(this.toolsDir(instanceId), { recursive: true, force: true }); } catch { /* ignore */ }
   }
 
-  async spawn(instanceId: string, appId: string, port: number, manifest: AppManifest, ctx: SpawnContext): Promise<number> {
+  private async runtimeSpec(instanceId: string, appId: string, port: number, manifest: AppManifest, ctx: SpawnContext, commandOverride?: string[]) {
     const appDir = ctx.appDir;
     const dataDir = ctx.instanceDataDir;
 
@@ -129,7 +132,7 @@ export class ProotRunner implements SandboxRunner {
                  && existsSync(this.baseRootfs);
     // Resolve once — used by the proot-args builder AND (when not prooted) as
     // the direct spawn argv.
-    const entrypointArgv = this.resolveEntrypoint(appDir, manifest);
+    const entrypointArgv = commandOverride ?? this.resolveEntrypoint(appDir, manifest);
     // Materialise the per-instance tool allowlist BEFORE building the args
     // (the args reference the dir). Wildcard apps get the whole store mirrored;
     // explicit apps get just their declared tools.
@@ -182,6 +185,25 @@ export class ProotRunner implements SandboxRunner {
       AURA_LAYER_TAG: prooted ? '[proot+ctnr]' : '[ctnr]',
     };
 
+    return { command: prooted ? 'proot' : entrypointArgv[0]!, args: prooted ? args : entrypointArgv.slice(1), env };
+  }
+
+  async prepare(appId: string, manifest: AppManifest, appDir: string, request: PreparationRequest): Promise<PreparationResult> {
+    const id = `prepare-${createHash('sha256').update(request.stateDir).digest('hex').slice(0, 24)}`;
+    mkdirSync(request.stateDir, { recursive: true });
+    const prooted = process.env['AURA_USE_PROOT'] === 'true' && manifest.useProot !== false && existsSync(this.baseRootfs);
+    const release = join(this.baseRootfs, 'etc', 'os-release');
+    const rootfsIdentity = createHash('sha256').update(existsSync(release) ? readFileSync(release) : this.baseRootfs).digest('hex');
+    const identity = prooted ? `proot:${this.baseRootfs}:${rootfsIdentity}` : `direct:${process.execPath}`;
+    const command = preparationCommand(request, prooted ? '/data' : request.stateDir, identity);
+    try {
+      const spec = await this.runtimeSpec(id, appId, 0, manifest, { appDir, instanceDataDir: request.stateDir }, command);
+      return await runPreparationCommand(spec.command, spec.args, request, { cwd: appDir, env: spec.env });
+    } finally { this.clearToolsDir(id); }
+  }
+
+  async spawn(instanceId: string, appId: string, port: number, manifest: AppManifest, ctx: SpawnContext): Promise<number> {
+    const runtime = await this.runtimeSpec(instanceId, appId, port, manifest, ctx);
     console.log(`[ProotRunner] Spawning ${instanceId} (app=${appId}) on port ${port}`);
 
     // detached: true makes proot a process-group leader so we can SIGKILL the
@@ -189,25 +211,29 @@ export class ProotRunner implements SandboxRunner {
     // it, kill() only signals the proot pid and orphan astros survive on the
     // bound port — that's the squatter that caused the wrong-content bug.
     const child = spawn(
-      prooted ? 'proot'          : entrypointArgv[0]!,
-      prooted ? args             : entrypointArgv.slice(1),
-      { cwd: appDir, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true },
+      runtime.command, runtime.args,
+      { cwd: ctx.appDir, env: runtime.env, stdio: ['ignore', 'pipe', 'pipe'], detached: true },
     );
 
+    const startup = new StartupWatch(appId, join(this.dataDir, 'aura', 'startup', `${instanceId}.log`), Object.entries(runtime.env).filter(([key]) => /token|secret|password|api.?key/i.test(key)).map(([, value]) => value));
+    child.once('close', code => startup.exit(code));
+    child.once('error', error => { startup.observe(error.message); startup.exit(null); });
     const provision = new ProvisionWatch();
     child.stdout?.on('data', (d) => {
       provision.observe(d.toString());
+      startup.observe(d.toString());
       process.stdout.write(`[${instanceId}] ${d}`);
     });
     child.stderr?.on('data', (d) => {
       provision.observe(d.toString());
+      startup.observe(d.toString());
       process.stderr.write(`[${instanceId}] ${d}`);
     });
 
     this.processes.set(instanceId, { process: child, port, appId, manifest, provision });
 
     try {
-      await this.waitHealthy(instanceId, appId, port, manifest);
+      await startup.race(this.waitHealthy(instanceId, appId, port, manifest, startup.signal));
     } catch (err) {
       // Either timeout or identity mismatch — clean up the partial spawn so we
       // don't leak an orphan process or a stale instance entry. Caller is
@@ -356,7 +382,7 @@ export class ProotRunner implements SandboxRunner {
    * "another app squatting our port" failure mode that caused the wrong-
    * content bug — a bare 200 is no longer enough.
    */
-  private async waitHealthy(instanceId: string, appId: string, port: number, manifest: AppManifest): Promise<void> {
+  private async waitHealthy(instanceId: string, appId: string, port: number, manifest: AppManifest, signal: AbortSignal): Promise<void> {
     // See ContainerRunner.waitHealthy — a cold app installs its dependency
     // tree in the entrypoint, which must not be timed with the boot budget.
     const startedAt    = Date.now();
@@ -365,9 +391,9 @@ export class ProotRunner implements SandboxRunner {
     let   deadline     = startedAt + HEALTH_CHECK_TIMEOUT_MS;
     const healthUrl = `http://localhost:${port}${lifecyclePath(manifest, instanceId, 'health')}`;
     let lastBody: string | null = null;
-    while (Date.now() < deadline) {
+    while (Date.now() < deadline && !signal.aborted) {
       try {
-        const res = await fetch(healthUrl, { signal: AbortSignal.timeout(1000) });
+        const res = await fetch(healthUrl, { signal: AbortSignal.any([signal, AbortSignal.timeout(1000)]) });
         if (res.ok) {
           const text = await res.text();
           lastBody = text;

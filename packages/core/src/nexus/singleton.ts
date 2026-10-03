@@ -27,6 +27,7 @@ export function getNexusManager(): NexusManager {
     sourcesConfig: DEFAULT_SOURCES_CONFIG,
     // Deterministically (re)register scoped apps after install/uninstall —
     // the fs-watch on scope dirs is unreliable (see AppManager.reloadScopedApp).
+    prepareApp: (id, onLine, scope) => mgr.prepareApp(id, onLine, scope),
     onAppChanged:  (id) => { try { getAppManager().reloadScopedApp(id); } catch { /* pre-init */ } },
   });
   (globalThis as GlobalWithNexus)[GLOBAL_KEY] = instance;

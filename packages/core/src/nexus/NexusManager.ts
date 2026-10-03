@@ -32,7 +32,7 @@ import type { RegistryConfig } from './RegistryConfig.js';
 import { resolveByName, urlForHost } from './RegistryConfig.js';
 import type { SourcesConfig } from './SourcesConfig.js';
 import { DEFAULT_SOURCES_CONFIG, loadSourcesConfig, ociRegistryView } from './SourcesConfig.js';
-import { needsProvisioning, provisionApp } from '../app-manager/provisioning.js';
+import type { PreparationResult } from '../app-manager/preparation.js';
 
 export interface NexusManagerOpts {
   scopes:  ScopeDefinition[];
@@ -48,6 +48,7 @@ export interface NexusManagerOpts {
    *  unreliable. Injected by the singleton (which owns the AppManager ref) to
    *  avoid a NexusManager→AppManager import cycle. */
   onAppChanged?: (appId: string) => void;
+  prepareApp?: (appId: string, onLine: (line: string) => void, scope: ScopeId) => Promise<PreparationResult>;
 }
 
 export class NexusManager {
@@ -65,6 +66,7 @@ export class NexusManager {
   private sourcesLoaded = false;
   /** Deterministic AppRegistry (re)registration hook. */
   private readonly onAppChanged?: (appId: string) => void;
+  private readonly prepareApp?: NexusManagerOpts['prepareApp'];
   /** App ids (and raw refs) currently mid-install. Exposed so the store UI can
    *  render/persist an "installing…" state that survives a page reload. */
   private readonly installing = new Set<string>();
@@ -78,6 +80,7 @@ export class NexusManager {
     this.rootDataDir   = opts.rootDataDir;
     this.bus           = opts.bus;
     this.onAppChanged  = opts.onAppChanged;
+    this.prepareApp = opts.prepareApp;
     this.sourcesConfig = opts.sourcesConfig ?? cloneDefaultSources();
     this.catalog       = new CatalogAggregator({
       rootDataDir: opts.rootDataDir,
@@ -265,37 +268,14 @@ export class NexusManager {
       //    entrypoint provisions it and the runner now waits for that.
       this.onAppChanged?.(manifest.id);
 
-      // Install the app's dependencies HERE, not on the launch path.
-      //
-      // A store app arrives as source. Something has to npm-install its tree
-      // and pull its @aura/* packages before astro can start, and the only
-      // place that used to happen was inside the entrypoint — where the
-      // runner's health deadline was already ticking. A heavy app could not
-      // finish in time, so its first launch was killed mid-install and it
-      // appeared broken until a second try found a warm node_modules. Doing it
-      // at install time is both the honest place for it (this is what
-      // "installing" means) and the only one where taking two minutes is fine.
-      //
-      // Never fatal, and safe to abandon: the files, the record and the
-      // registration are already in place, so a throw here — or a client that
-      // hangs up mid-install — costs a slow first launch, not a broken app.
-      // The entrypoint still provisions as a fallback and the runners wait.
-      const appDir = join(installer.appsDir, manifest.id);
-      if (needsProvisioning(appDir)) {
-        yield { type: 'install.provision', message: 'installing dependencies…' };
-        try {
-          const prov = await provisionApp(appDir, (line) => {
-            this.bus?.emit('nexus:install.progress', { id: manifest.id, line });
-          });
-          for (const w of prov.warnings) yield { type: 'install.provision', message: w };
-          if (prov.ran.length) {
-            yield { type: 'install.provision', message: `dependencies ready (${prov.ran.join(', ')})` };
-          }
-        } catch (err) {
-          yield { type: 'install.provision',
-                  message: `dependency install failed (${(err as Error).message}) — will retry at first launch` };
-        }
+      // A landed install is retained on failure, but must not be advertised as ready.
+      yield { type: 'install.provision', message: 'verifying dependencies…' };
+      if (!this.prepareApp && manifest.runtime !== 'raw') {
+        throw new Error(`App ${manifest.id} was copied, but no preparation runtime is configured`);
       }
+      await this.prepareApp?.(manifest.id, line => {
+        this.bus?.emit('nexus:install.progress', { id: manifest.id, line });
+      }, targetScope);
       unmark();
       this.bus?.emit('nexus:install.complete', { id: manifest.id, record });
       yield { type: 'install.done', record };
