@@ -55,6 +55,13 @@ export const MOUNT_DIR_NAME = '.mnt';
 
 export type MountMode = 'ro' | 'rw';
 export type MountKind = 'source' | 'data';
+/**
+ * How a mount came to exist in this shell generation:
+ *  - `added`    — attached via the API (`aura mount add`) in this life of the instance
+ *  - `restored` — re-applied from a persisted declaration after a (re)spawn
+ *  - `adopted`  — found live in the kernel after a shell restart
+ */
+export type MountOrigin = 'added' | 'restored' | 'adopted';
 
 /** Mirrors ContainerRunner.containerName — same sanitisation rule. */
 function containerNameFor(instanceId: string): string {
@@ -76,6 +83,10 @@ export interface AuraMount {
   /** Daemon-visible destination path. */
   hostDest: string;
   createdAt: string;
+  origin: MountOrigin;
+  /** When the user first ASKED for this mount — survives restores, so a
+   *  restored mount dated long before the instance started stands out. */
+  declaredAt: string;
 }
 
 export interface AddMountSpec {
@@ -83,6 +94,8 @@ export interface AddMountSpec {
   mode?: MountMode;
   /** Mount the target's DATA dir instead of its source. */
   data?: boolean;
+  /** Persisted with the declaration; absent on API requests and old files. */
+  declaredAt?: string;
 }
 
 interface MountManagerOpts {
@@ -129,7 +142,7 @@ export class MountManager {
    *  write must not fail the mount the user just asked for. */
   private writeDecls(instanceId: string): void {
     this.writeDeclFile(instanceId, this.list(instanceId).map((m) => ({
-      targetAppId: m.targetAppId, mode: m.mode, data: m.kind === 'data',
+      targetAppId: m.targetAppId, mode: m.mode, data: m.kind === 'data', declaredAt: m.declaredAt,
     })));
   }
 
@@ -199,7 +212,7 @@ export class MountManager {
         continue;
       }
       try {
-        await this.add(instanceId, spec, { persist: false });
+        await this.add(instanceId, spec, { persist: false, origin: 'restored' });
         restored++;
         kept.push(spec);
       } catch (err) {
@@ -303,7 +316,11 @@ export class MountManager {
 
   // ─── Mutations ─────────────────────────────────────────────────────────
 
-  async add(instanceId: string, spec: AddMountSpec, opts: { persist?: boolean } = {}): Promise<AuraMount> {
+  async add(
+    instanceId: string,
+    spec: AddMountSpec,
+    opts: { persist?: boolean; origin?: MountOrigin } = {},
+  ): Promise<AuraMount> {
     const cap = this.capable();
     if (!cap.ok) throw new Error(`mount propagation unavailable: ${cap.reason}`);
 
@@ -359,6 +376,8 @@ export class MountManager {
       id, instanceId, targetAppId: spec.targetAppId, kind,
       mode: preExisting ? this.readModeAt(dstShell) : mode,
       containerPath, hostSource, hostDest, createdAt: new Date().toISOString(),
+      origin: opts.origin ?? 'added',
+      declaredAt: spec.declaredAt ?? new Date().toISOString(),
     };
 
     try {
@@ -397,6 +416,18 @@ export class MountManager {
       catch (err) { console.warn(`[MountManager] unmount ${mount.id} failed: ${(err as Error).message}`); }
     }
     this.mounts.delete(instanceId);
+  }
+
+  /**
+   * Forget an instance's mount DECLARATIONS — for a deliberate stop/kill, where
+   * the instance is gone for good. Instance ids are recycled, so a leftover
+   * declaration file would re-apply a dead instance's mounts to the next
+   * instance that happens to get the same id. (A crash keeps them: the respawn
+   * is the same instance and should get its mounts back.)
+   */
+  forget(instanceId: string): void {
+    this.removeAll(instanceId);
+    this.writeDeclFile(instanceId, []);
   }
 
   // ─── Reconciliation ────────────────────────────────────────────────────
@@ -488,6 +519,9 @@ export class MountManager {
         hostSource: '(adopted — source unknown)',
         hostDest: this.opts.runner.toDaemonHostPath(path),
         createdAt: new Date().toISOString(),
+        origin: 'adopted',
+        declaredAt: this.readDecls(instanceId).find((d) => d.targetAppId === targetAppId && !!d.data === isData)?.declaredAt
+          ?? new Date().toISOString(),
       };
       if (!this.mounts.has(instanceId)) this.mounts.set(instanceId, new Map());
       this.mounts.get(instanceId)!.set(mount.id, mount);
@@ -499,8 +533,36 @@ export class MountManager {
     // adopt-or-lose. Pre-existing mounts thus become durable on first contact.
     for (const instanceId of this.mounts.keys()) this.writeDecls(instanceId);
 
-    if (adopted || reaped) console.log(`[MountManager] reconcile: adopted ${adopted}, reaped ${reaped}`);
+    const swept = this.sweepDeclarations(liveInstanceIds);
+
+    if (adopted || reaped || swept) {
+      console.log(`[MountManager] reconcile: adopted ${adopted}, reaped ${reaped}, swept ${swept} stale declaration(s)`);
+    }
     return { adopted, reaped };
+  }
+
+  /**
+   * Delete declaration files of NUMBERED instances (`<appId>-<n>`) that aren't
+   * live. Those ids are recycled, so a leftover file would hand a dead
+   * instance's mounts to whichever new instance next gets the id — `forget()`
+   * covers a clean stop, this covers a shell that died mid-stop.
+   *
+   * Bare-appId instances (single-instance apps) are left alone: their id is
+   * never handed to a different instance, and they may simply not be spawned
+   * yet at startup — sweeping them would drop mounts the user still wants.
+   */
+  private sweepDeclarations(liveInstanceIds: Set<string>): number {
+    const dir = dirname(this.declFile('x'));
+    let names: string[];
+    try { names = readdirSync(dir); } catch { return 0; }
+    let swept = 0;
+    for (const name of names) {
+      if (!name.endsWith('.json')) continue;
+      const instanceId = name.slice(0, -'.json'.length);
+      if (!/-\d+$/.test(instanceId) || liveInstanceIds.has(instanceId)) continue;
+      try { rmSync(join(dir, name), { force: true }); swept++; } catch { /* next boot */ }
+    }
+    return swept;
   }
 
   /**

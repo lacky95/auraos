@@ -1207,7 +1207,7 @@ export class AppManager {
     await this.runnerOf(instanceId).callLifecycle(instanceId, 'onDestroy').catch(() => undefined);
     // Detach cross-app mounts BEFORE the container goes: a live bind under the
     // instance's data dir pins the source filesystem and would outlive it.
-    this.mounts.removeAll(instanceId);
+    this.mounts.forget(instanceId);
     this.portExpose.removeAll(instanceId);
     await this.runnerOf(instanceId).kill(instanceId);
     if (port) this.ports.release(port);
@@ -1268,7 +1268,7 @@ export class AppManager {
     this.purgeActivitiesOfInstance(instanceId);
     // A force-kill runs no lifecycle hooks, so this is the only chance to
     // detach mounts before the instance record is dropped.
-    this.mounts.removeAll(instanceId);
+    this.mounts.forget(instanceId);
     this.portExpose.removeAll(instanceId);
     const killed = this.runnerOf(instanceId).forceKill(instanceId);
     if (port) this.ports.release(port);

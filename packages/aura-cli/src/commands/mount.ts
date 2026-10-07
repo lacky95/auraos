@@ -184,8 +184,22 @@ function printMounts(instanceId: string, mounts: AuraMount[], apps: AppDto[]): v
       KIND:   m.kind === 'data' ? color.yellow(m.kind) : m.kind,
       MODE:   modeSign(m.mode),
       PATH:   m.containerPath,
+      ORIGIN: originLabel(m),
     }));
-  console.log(table(rows, ['TARGET', 'SCOPE', 'KIND', 'MODE', 'PATH']));
+  console.log(table(rows, ['TARGET', 'SCOPE', 'KIND', 'MODE', 'PATH', 'ORIGIN']));
+}
+
+/**
+ * Where a mount came from. `added` is this session's own doing; `restored` and
+ * `adopted` carry the date the mount was originally asked for, so a mount
+ * inherited from a long-gone instance is obvious at a glance. Tolerates an
+ * older shell that sends neither field.
+ */
+function originLabel(m: AuraMount): string {
+  if (!m.origin) return color.dim('-');
+  if (m.origin === 'added') return m.origin;
+  const when = m.declaredAt ? ` ${m.declaredAt.slice(0, 10)}` : '';
+  return color.yellow(`${m.origin}${when}`);
 }
 
 /**
