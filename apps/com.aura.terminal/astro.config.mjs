@@ -43,6 +43,8 @@ export default defineConfig({
     // Disable HMR: the app is loaded inside the shell's iframe and its dev
     // port (e.g. 4001) is not reachable from the browser. Iframe reload picks
     // up code changes; we accept that over a broken WebSocket reconnect loop.
+    // If a reload still shows STALE inline CSS, a content edit to this file
+    // restarts the dev server and recompiles it (same for new src/pages routes).
     // The terminal's own PTY WebSocket on `/ws` is unaffected (handled in the
     // ptyWsIntegration above, with its own upgrade hook).
     server: { hmr: false },

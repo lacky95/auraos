@@ -75,6 +75,10 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
        slot's bottom edge (it was occasionally clipped there). chromeInset()
        measures this padding, so the row count adjusts automatically. */
     #terminal { flex: 1; padding: 4px 4px 7px; overflow: hidden; visibility: hidden; }
+    /* All touch scrolling goes through touch-scroll.ts: no native pan or
+       rubber-band, so iOS never sends the uncancelable touchmoves that let
+       the viewport pan by pixels and snap back row by row. */
+    #terminal { touch-action: none; overscroll-behavior: none; }
     .xterm { height: 100%; }
     .xterm-viewport { background: var(--aura-color-bg) !important; }
     /* xterm flips `.xterm-screen` to `cursor: crosshair` whenever Alt is
@@ -292,6 +296,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         selectionBackground: 'rgba(0,255,65,.3)',
         black:   readVar('--aura-color-bg')           || '#0a0a0a',
         brightBlack: readVar('--aura-color-text-dim') || '#557755',
+    import { attachTouchScroll } from '../touch-scroll';
         red:     readVar('--aura-color-danger')       || '#ff2020',
         brightRed: '#ff4444',
         green:   readVar('--aura-color-primary')      || '#00ff41',
@@ -506,6 +511,28 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // The iframe path is `/api/proxy/<instanceId>/...`, so the first
     // segment after `/api/proxy/` is our backend identity.
     const pathParts  = location.pathname.split('/').filter(Boolean);
+    // One- and two-finger drags scroll the scrollback (see touch-scroll.ts).
+    // cellH is the live row height applyFit measures; 17 covers the boot gap.
+    // While the program has mouse tracking on, a drag becomes one line-wheel
+    // event per row, which xterm reports to the program so IT scrolls.
+    // touch-action:none (here inline — xterm's elements are out of reach of the
+    // scoped <style>) keeps iOS from ever panning .xterm-viewport natively.
+    for (const el of [term.element, term.element?.querySelector('.xterm-viewport')]) {
+      if (el) { el.style.touchAction = 'none'; el.style.overscrollBehavior = 'none'; }
+    }
+    attachTouchScroll(document.getElementById('terminal'), term, {
+      rowHeight: () => cellH || 17,
+      wheel: (rows, clientX, clientY) => {
+        const el = term.element?.querySelector('.xterm-screen') ?? term.element;
+        if (!el) return;
+        for (let i = 0; i < Math.abs(rows); i++) {
+          el.dispatchEvent(new WheelEvent('wheel', {
+            deltaY: Math.sign(rows), deltaMode: WheelEvent.DOM_DELTA_LINE,
+            clientX, clientY, bubbles: true, cancelable: true,
+          }));
+        }
+      },
+    });
     const instanceId = pathParts[0] === 'api' && pathParts[1] === 'proxy' && pathParts[2] ? pathParts[2] : appId;
     // The OS activity id — this WINDOW's handle. Not the session: a session is
     // a shell, and any window may take one over (that is what the "in use
