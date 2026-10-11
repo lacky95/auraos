@@ -186,11 +186,17 @@ export class OsClient {
   // -------- Intent dispatch (Android `startActivity(intent)` equivalent) --------
 
   /**
-   * Resolve + start an intent. The OS picks the highest-scored handler from
-   * declared `intentFilters` across all installed apps. Returns the OS's
+   * Resolve + start an intent. Implicit (no `appId`): the OS picks the
+   * highest-scored handler from declared `intentFilters` across all installed
+   * apps. Explicit (`appId` set): that app gets the intent directly. Returns the OS's
    * verdict — a single chosen handler, a disambiguation list, or `noHandler`.
    * Apps use this instead of hand-coding `start()` + `openActivity()` so the
    * routing logic stays in one place.
+   *
+   * The handler receives the whole intent: multi-activity apps in
+   * `onActivityCreate` (`data` = extras), everything else in `onIntent` (see
+   * `createIntentHandler`). `intentDelivered` is false when the handler has no
+   * such hook — it was started anyway.
    *
    * Throws on transport errors or non-JSON responses; HTTP 404 (no handler)
    * is returned as `{ kind: 'noHandler' }` so the caller doesn't have to
@@ -198,12 +204,14 @@ export class OsClient {
    */
   async startIntent(intent: {
     action:    string;
+    /** Explicit target app (Android `setPackage`): skips resolution + chooser; no filter needed. */
+    appId?:    string;
     category?: string[];
     type?:     string;
     uri?:      string;
     extras?:   Record<string, unknown>;
   }): Promise<
-    | { kind: 'started'; appId: string; instanceId: string; activityId?: string }
+    | { kind: 'started'; appId: string; instanceId: string; activityId?: string; intentDelivered?: boolean }
     | { kind: 'disambiguation'; candidates: Array<{ appId: string; score: number }> }
     | { kind: 'noHandler' }
   > {

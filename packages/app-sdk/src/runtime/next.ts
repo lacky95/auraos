@@ -6,6 +6,7 @@
  *   • GET  /api/lifecycle/health           (with identity in the body)
  *   • POST /api/lifecycle/onActivityCreate (activity-mode apps only)
  *   • POST /api/lifecycle/onActivityDestroy/[activityId]
+ *   • POST /api/lifecycle/onIntent         (non-multi-activity apps + services)
  *
  * Astro apps get this for free via `auraAppIntegration()` + the `createLifecycleHandler`
  * factories in `../lifecycle.ts`. Next.js apps don't have an integration, so this
@@ -37,6 +38,9 @@
  * web-standard; the middleware helper returns plain header pairs the caller stamps
  * onto whichever NextResponse they construct.
  */
+
+import { parseIntentPayload, type IntentPayload } from '../intent.js';
+export type { IntentPayload } from '../intent.js';
 
 const APP_ID = () => process.env['APP_ID'] ?? 'unknown';
 const INSTANCE_ID = () => process.env['APP_INSTANCE_ID'] ?? null;
@@ -84,6 +88,12 @@ export type LifecycleHookName =
 export interface ActivityCreateRequest {
   activityId: string;
   data?: Record<string, unknown>;
+  intent?: IntentPayload;
+}
+
+export interface IntentRequest {
+  intent: IntentPayload;
+  newInstance: boolean;
 }
 
 export interface ActivityCreateResult {
@@ -103,6 +113,8 @@ export interface NextLifecycleImpl {
   onActivityCreate?: (req: ActivityCreateRequest) => ActivityCreateResult | Promise<ActivityCreateResult>;
   /** Optional handler for `onActivityDestroy/[activityId]`. */
   onActivityDestroy?: (activityId: string) => void | Promise<void>;
+  /** Optional handler for `onIntent` (Android onNewIntent / onStartCommand). */
+  onIntent?: (req: IntentRequest) => void | Promise<void>;
 }
 
 /**
@@ -150,9 +162,10 @@ export function createNextLifecycleRoutes(impl: NextLifecycleImpl = {}) {
         const activityId = typeof body.activityId === 'string' ? body.activityId : '';
         if (!activityId) return json({ ok: false, error: 'missing activityId' }, 400);
         const data = body.data ?? undefined;
+        const intent = parseIntentPayload(body.intent);
         try {
           const result = impl.onActivityCreate
-            ? await impl.onActivityCreate({ activityId, ...(data ? { data } : {}) })
+            ? await impl.onActivityCreate({ activityId, ...(data ? { data } : {}), ...(intent ? { intent } : {}) })
             : {};
           console.log(`[${APP_ID()}] onActivityCreate ${activityId}`);
           return json({ ok: true, ...result });
@@ -172,6 +185,22 @@ export function createNextLifecycleRoutes(impl: NextLifecycleImpl = {}) {
           return json({ ok: true });
         } catch (err) {
           console.error(`[${APP_ID()}] onActivityDestroy ${activityId} failed:`, err);
+          return json({ ok: false, error: String(err) }, 500);
+        }
+      }
+
+      // onIntent — POST body { intent, newInstance } → { ok }. Without an impl
+      // the hook is "not implemented" (404) so the OS reports intentDelivered=false.
+      if (hook === 'onIntent' && impl.onIntent) {
+        const body = await request.json().catch(() => ({})) as { intent?: unknown; newInstance?: unknown };
+        const intent = parseIntentPayload(body.intent);
+        if (!intent) return json({ ok: false, error: 'missing intent.action' }, 400);
+        try {
+          await impl.onIntent({ intent, newInstance: body.newInstance === true });
+          console.log(`[${APP_ID()}] onIntent ${intent.action}`);
+          return json({ ok: true });
+        } catch (err) {
+          console.error(`[${APP_ID()}] onIntent ${intent.action} failed:`, err);
           return json({ ok: false, error: String(err) }, 500);
         }
       }

@@ -6,12 +6,23 @@
  * it via the `X-Aura-Activity-Id` header on every proxied request.
  *
  * Apps MAY implement these optional lifecycle hooks:
- *   POST /api/lifecycle/onActivityCreate                 — body: { activityId, data? }
+ *   POST /api/lifecycle/onActivityCreate                 — body: { activityId, data?, intent? }
  *                                                          may return { path, title, metadata }
  *   POST /api/lifecycle/onActivityDestroy/[activityId]
+ *   POST /api/lifecycle/onIntent                         — body: { intent, newInstance }
  *
  * If the hook returns a `path`, the OS opens the iframe at that path inside the proxy.
  * Apps without the hook get activities transparently — iframe defaults to `/`.
+ *
+ * Intent delivery (`AppManager.startIntent`) — every handler gets the whole
+ * intent object, whether implicit (resolved via intentFilters) or explicit
+ * (`intent.appId` names the target, no filter needed):
+ *   • activityMode='multi' → a new activity; `data` = intent.extras (as before),
+ *     `intent` = the full `{ action, appId?, category?, type?, uri?, extras? }`.
+ *   • activityMode='none' apps and services → `onIntent { intent, newInstance }`
+ *     on the started-or-reused instance (Android onNewIntent / onStartCommand).
+ *     `newInstance` is false when the instance was already running. The reply
+ *     body is ignored; a 404 just means the app doesn't consume intents.
  */
 export interface AppActivity {
   /** Format: `${parentInstanceId}#a${counter}`, e.g. "com.aura.notepad#a3". */

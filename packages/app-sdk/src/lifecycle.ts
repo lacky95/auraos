@@ -18,6 +18,7 @@
  */
 
 import type { APIRoute } from 'astro';
+import { parseIntentPayload, type IntentPayload } from './intent.js';
 
 const APP_ID = () => process.env['APP_ID'] ?? 'unknown';
 const INSTANCE_ID = () => process.env['APP_INSTANCE_ID'] ?? null;
@@ -84,7 +85,10 @@ export function createLifecycleHandler(
 
 export interface ActivityCreateRequest {
   activityId: string;
+  /** Launch data — for intent launches this is `intent.extras`. */
   data?: Record<string, unknown>;
+  /** Set when the activity was opened by `startIntent`. */
+  intent?: IntentPayload;
 }
 
 export interface ActivityCreateResult {
@@ -112,8 +116,9 @@ export function createActivityCreateHandler(
       return json({ ok: false, error: 'missing activityId' }, 400);
     }
     const data = body.data ?? undefined;
+    const intent = parseIntentPayload(body.intent);
     try {
-      const result = impl ? await impl({ activityId, ...(data ? { data } : {}) }) : {};
+      const result = impl ? await impl({ activityId, ...(data ? { data } : {}), ...(intent ? { intent } : {}) }) : {};
       const out: ActivityCreateResult & { ok: boolean } = { ok: true, ...result };
       console.log(`[${APP_ID()}] onActivityCreate ${activityId}`);
       return json(out);
@@ -148,6 +153,44 @@ export function createActivityDestroyHandler(
       return json({ ok: true });
     } catch (err) {
       console.error(`[${APP_ID()}] onActivityDestroy ${activityId} failed:`, err);
+      return json({ ok: false, error: String(err) }, 500);
+    }
+  };
+}
+
+// =========================================================================
+//  onIntent — body { intent, newInstance }  (Android onNewIntent / onStartCommand)
+// =========================================================================
+
+export interface IntentRequest {
+  intent: IntentPayload;
+  /** True when this instance was spawned for this intent; false = it was already running. */
+  newInstance: boolean;
+}
+
+/**
+ * Factory for `src/pages/api/lifecycle/onIntent.ts`. The OS posts it on every
+ * `startIntent` that resolves to this app when the app is NOT a multi-activity
+ * app (activityMode='none' apps and services) — including when the instance
+ * was already running. Multi-activity apps get intents in `onActivityCreate`.
+ *
+ *   export const POST = createIntentHandler(async ({ intent }) => {
+ *     if (intent.action === 'aura.intent.action.VIEW') openUrl(String(intent.extras?.url));
+ *   });
+ */
+export function createIntentHandler(
+  impl?: (req: IntentRequest) => void | Promise<void>,
+): APIRoute {
+  return async ({ request }) => {
+    const body = await request.json().catch(() => ({})) as { intent?: unknown; newInstance?: unknown };
+    const intent = parseIntentPayload(body.intent);
+    if (!intent) return json({ ok: false, error: 'missing intent.action' }, 400);
+    try {
+      if (impl) await impl({ intent, newInstance: body.newInstance === true });
+      console.log(`[${APP_ID()}] onIntent ${intent.action}`);
+      return json({ ok: true });
+    } catch (err) {
+      console.error(`[${APP_ID()}] onIntent ${intent.action} failed:`, err);
       return json({ ok: false, error: String(err) }, 500);
     }
   };

@@ -39,11 +39,15 @@ export {
   createLifecycleHandler,
   createActivityCreateHandler,
   createActivityDestroyHandler,
+  createIntentHandler,
 } from './lifecycle.js';
+export { parseIntentPayload } from './intent.js';
+export type { IntentPayload } from './intent.js';
 export type {
   LifecycleHookName,
   ActivityCreateRequest,
   ActivityCreateResult,
+  IntentRequest,
 } from './lifecycle.js';
 
 // Android-`Context`-equivalent: env-var + header readers. See ./context.ts.

@@ -19,7 +19,7 @@ import { MountManager } from './MountManager.js';
 import { PortManager, type ExposeSpec } from './PortManager.js';
 import type { SandboxRunner } from './SandboxRunner.js';
 import { selectOrphanSidecars } from './sidecars.js';
-import { IntentResolver, type Intent, type IntentMatch } from './IntentResolver.js';
+import { IntentResolver, intentPayload, type Intent, type IntentMatch } from './IntentResolver.js';
 import { PermissionManager } from '../permissions/PermissionManager.js';
 import { ContentProviderRegistry } from '../content/ContentProviderRegistry.js';
 import { InterfaceRegistry } from '../interfaces/InterfaceRegistry.js';
@@ -938,44 +938,65 @@ export class AppManager {
   // -------- Intent dispatch (Android startActivity(intent) equivalent) --------
 
   /**
-   * Resolve and start an intent. When exactly one handler scores highest, it
-   * is auto-started + an activity is opened on it (if the handler supports
-   * activities). When multiple top-tied handlers exist, returns a
-   * `disambiguation` result so the shell can present a chooser. When no
-   * handler matches, returns `noHandler`.
+   * Resolve and start an intent. An explicit intent (`intent.appId` set)
+   * goes straight to that app — no filter match needed, `noHandler` only when
+   * the app isn't installed. An implicit intent is resolved against the
+   * `intentFilters`: exactly one top-scored handler is auto-started; several
+   * top-tied ones return `disambiguation` so the shell can present a chooser
+   * (re-send with `appId` set to the pick); none returns `noHandler`.
    *
-   * `extras` from the intent are forwarded as the activity's `data` payload —
-   * the receiving app reads them in `onActivityCreate`.
+   * Every handler receives the intent; how depends on its shape:
+   *   • `activityMode: 'multi'` — a new activity is opened; `extras` arrive as
+   *     `onActivityCreate`'s `data` (unchanged contract) and the full intent
+   *     rides along as the additive `intent` field.
+   *   • everything else (`activityMode: 'none'` apps, `componentType:
+   *     'service'`) — the instance is started (services via `startService`)
+   *     or reused when already running, then `onIntent { intent, newInstance }`
+   *     is posted to it. Android's `onNewIntent` / `onStartCommand`: a
+   *     running single instance receives every later intent the same way.
+   *
+   * `intentDelivered` reports whether the app answered that lifecycle call
+   * (false = hook not implemented or it failed; the app is still started).
    */
   async startIntent(intent: Intent): Promise<
-    | { kind: 'started'; appId: string; instanceId: string; activityId?: string }
+    | { kind: 'started'; appId: string; instanceId: string; activityId?: string; intentDelivered: boolean }
     | { kind: 'disambiguation'; candidates: IntentMatch[] }
     | { kind: 'noHandler' }
   > {
-    const ranked = this.intents.resolve(intent);
-    if (ranked.length === 0) return { kind: 'noHandler' };
+    let chosen: { appId: string };
+    if (intent.appId !== undefined) {
+      chosen = { appId: intent.appId };
+    } else {
+      const ranked = this.intents.resolve(intent);
+      if (ranked.length === 0) return { kind: 'noHandler' };
 
-    // Multiple equally-scored top candidates → ask the user.
-    const topScore = ranked[0]!.score;
-    const top = ranked.filter((m) => m.score === topScore);
-    if (top.length > 1) {
-      return { kind: 'disambiguation', candidates: top };
+      // Multiple equally-scored top candidates → ask the user.
+      const topScore = ranked[0]!.score;
+      const top = ranked.filter((m) => m.score === topScore);
+      if (top.length > 1) {
+        return { kind: 'disambiguation', candidates: top };
+      }
+      chosen = top[0]!;
     }
-
-    const chosen = top[0]!;
     const manifest = this.registry.getById(chosen.appId);
     if (!manifest) return { kind: 'noHandler' };
 
-    const instanceId = await this.start(chosen.appId);
+    // Snapshot the app's instances first so the handler can tell a cold
+    // start (Android onCreate + intent) from a re-delivery (onNewIntent).
+    const before = new Set(this.getInstancesByApp(chosen.appId).map((i) => i.instanceId));
+    const instanceId = manifest.componentType === 'service'
+      ? await this.startService(chosen.appId)
+      : await this.start(chosen.appId);
 
-    // If the chosen handler supports activities, open one with the intent's
-    // extras. Services have activityMode='none' (Zod refinement); for those
-    // we just hand back the running instance.
     if (manifest.activityMode === 'multi') {
-      const activity = await this.openActivity(instanceId, intent.extras);
-      return { kind: 'started', appId: chosen.appId, instanceId, activityId: activity.activityId };
+      const { activity, hookAnswered } = await this.openActivityAndReport(instanceId, intent.extras, { intent });
+      return { kind: 'started', appId: chosen.appId, instanceId, activityId: activity.activityId, intentDelivered: hookAnswered };
     }
-    return { kind: 'started', appId: chosen.appId, instanceId };
+    const result = await this.runnerOf(instanceId).callOptionalLifecycle(instanceId, 'onIntent', {
+      intent: intentPayload(intent),
+      newInstance: !before.has(instanceId),
+    });
+    return { kind: 'started', appId: chosen.appId, instanceId, intentDelivered: result !== null && result !== undefined };
   }
 
   // -------- Service component (Android Service equivalent) --------
@@ -1388,6 +1409,19 @@ export class AppManager {
     data?: Record<string, unknown>,
     opts?: { stackParent?: string },
   ): Promise<AppActivity> {
+    return (await this.openActivityAndReport(instanceId, data, opts)).activity;
+  }
+
+  /**
+   * `openActivity` plus whether the app answered `onActivityCreate`
+   * (`startIntent` reports that as `intentDelivered`). `opts.intent` is set
+   * only for intent launches and is forwarded as the additive `intent` field.
+   */
+  private async openActivityAndReport(
+    instanceId: string,
+    data?: Record<string, unknown>,
+    opts?: { stackParent?: string; intent?: Intent },
+  ): Promise<{ activity: AppActivity; hookAnswered: boolean }> {
     const inst = this.instances.get(instanceId);
     if (!inst) throw new Error(`Instance not found: ${instanceId}`);
     const manifest = this.registry.getById(inst.appId);
@@ -1427,7 +1461,11 @@ export class AppManager {
     const now = new Date();
 
     // Optional notification to the app. 404 / errors are silently ignored.
-    const result = await this.runnerOf(instanceId).callOptionalLifecycle(instanceId, 'onActivityCreate', { activityId, data });
+    const result = await this.runnerOf(instanceId).callOptionalLifecycle(instanceId, 'onActivityCreate', {
+      activityId,
+      data,
+      ...(opts?.intent ? { intent: intentPayload(opts.intent) } : {}),
+    });
     let path = '/';
     let title: string | undefined;
     let metadata: Record<string, unknown> | undefined;
@@ -1487,7 +1525,7 @@ export class AppManager {
       ...(minimizable ?         { minimizable: true } : {}),
       ...(stackParent ?         { stackParentId: stackParent } : {}),
     });
-    return activity;
+    return { activity, hookAnswered: result !== null && result !== undefined };
   }
 
   /**

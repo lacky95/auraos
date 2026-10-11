@@ -4,6 +4,7 @@ import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
 
 interface IntentBody {
   action?:   unknown;
+  appId?:    unknown;
   category?: unknown;
   type?:     unknown;
   uri?:      unknown;
@@ -12,10 +13,14 @@ interface IntentBody {
 
 /**
  * Resolve + start an intent. Body shape mirrors `Intent` from @aura/core
- * (action required; category/type/uri/extras optional). Returns either:
- *   { kind: 'started', appId, instanceId, activityId? }   — single handler picked
+ * (action required; appId/category/type/uri/extras optional — `appId` makes
+ * it an explicit intent that skips resolution). Returns either:
+ *   { kind: 'started', appId, instanceId, activityId?, intentDelivered }
+ *                                                         — single handler picked; the intent
+ *                                                           went to onActivityCreate (multi) or
+ *                                                           onIntent (everything else)
  *   { kind: 'disambiguation', candidates: [...] }         — shell should pick one
- *   { kind: 'noHandler' }                                 — 404
+ *   { kind: 'noHandler' }                                 — 404 (or explicit appId not installed)
  */
 export const POST: APIRoute = async ({ request }) => {
   const body = await request.json().catch(() => null) as IntentBody | null;
@@ -24,6 +29,7 @@ export const POST: APIRoute = async ({ request }) => {
   }
   const intent = {
     action: body.action,
+    ...(typeof body.appId === 'string' && body.appId.length > 0 ? { appId: body.appId } : {}),
     ...(Array.isArray(body.category) ? { category: body.category.filter((c): c is string => typeof c === 'string') } : {}),
     ...(typeof body.type === 'string' ? { type: body.type } : {}),
     ...(typeof body.uri  === 'string' ? { uri:  body.uri  } : {}),

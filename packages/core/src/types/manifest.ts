@@ -381,7 +381,13 @@ export const AppManifestSchema = z.object({
    * makes this app a candidate handler for matching intents. The OS picks
    * the highest-scored candidate (mime specificity beats wildcard; priority
    * breaks ties) and routes via `startIntent`. Apps without filters can
-   * still be launched directly via `start()` + `openActivity()`.
+   * still be launched directly via `start()` + `openActivity()`, or receive
+   * an explicit intent (`intent.appId` set), which bypasses filters.
+   *
+   * The intent (incl. `extras`) reaches every handler: activityMode='multi'
+   * apps via `onActivityCreate` (`data` = extras, plus `intent`), all others
+   * — activityMode='none' apps and services — via the `onIntent` lifecycle
+   * hook, also when already running. See `types/activity.ts`.
    */
   intentFilters: z.array(z.object({
     /** Canonical action, namespaced. e.g. `aura.intent.action.VIEW`. */

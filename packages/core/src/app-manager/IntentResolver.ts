@@ -32,13 +32,50 @@ import type { AppManifest } from '../types/manifest.js';
 
 export interface Intent {
   action:   string;
+  /**
+   * Explicit target (Android `Intent.setPackage`). When set, resolution and
+   * the chooser are skipped and this app receives the intent directly — it
+   * needs no matching `intentFilters` entry, same as Android explicit intents.
+   * Unset = implicit intent, resolved against every app's filters.
+   */
+  appId?:   string | undefined;
   category?: string[] | undefined;
   /** Media type, e.g. `text/plain`, `image/png`. */
   type?:    string | undefined;
   /** Resource URI; the scheme is what's actually compared. */
   uri?:     string | undefined;
-  /** Arbitrary extras forwarded to the handler's `onActivityCreate`. */
+  /**
+   * Arbitrary extras for the handler. Multi-activity handlers read them as
+   * `onActivityCreate`'s `data`; every other handler (activityMode 'none',
+   * services) gets them inside `onIntent`'s `intent.extras`.
+   */
   extras?:  Record<string, unknown> | undefined;
+}
+
+/**
+ * Wire shape of an intent as the OS posts it to a handler app — the `intent`
+ * field of `onIntent` and `onActivityCreate`. Absent fields are omitted, never
+ * sent as `null`, so handlers can test with `'uri' in intent` / `intent.uri`.
+ */
+export interface IntentPayload {
+  action:    string;
+  appId?:    string;
+  category?: string[];
+  type?:     string;
+  uri?:      string;
+  extras?:   Record<string, unknown>;
+}
+
+/** Strip an `Intent` down to its JSON wire shape (see `IntentPayload`). */
+export function intentPayload(intent: Intent): IntentPayload {
+  return {
+    action: intent.action,
+    ...(intent.appId !== undefined ? { appId: intent.appId } : {}),
+    ...(intent.category && intent.category.length > 0 ? { category: [...intent.category] } : {}),
+    ...(intent.type   !== undefined ? { type:   intent.type }   : {}),
+    ...(intent.uri    !== undefined ? { uri:    intent.uri }    : {}),
+    ...(intent.extras !== undefined ? { extras: intent.extras } : {}),
+  };
 }
 
 export interface IntentFilterDecl {
