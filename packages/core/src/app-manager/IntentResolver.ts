@@ -50,6 +50,71 @@ export interface Intent {
    * services) gets them inside `onIntent`'s `intent.extras`.
    */
   extras?:  Record<string, unknown> | undefined;
+  /**
+   * Target one running instance of the handler app. The handler opens its
+   * activity / receives `onIntent` on exactly that instance. Unknown, dead,
+   * or another app's instance → `IntentError` (never a silent fallback to a
+   * new instance). Mutually exclusive with the `NEW_INSTANCE` flag.
+   */
+  instanceId?: string | undefined;
+  /**
+   * Launch flags, Android `FLAG_ACTIVITY_*` style. Unknown flags are refused
+   * (`IntentError`) rather than ignored, so a typo can't silently degrade.
+   *   • `NEW_INSTANCE` — start a fresh instance instead of reusing one
+   *     (Android `FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_MULTIPLE_TASK`).
+   *     Only for `instanceMode: 'multi'` apps.
+   */
+  flags?: string[] | undefined;
+}
+
+/** Every launch flag the OS understands (see `Intent.flags`). */
+export const INTENT_FLAGS = ['NEW_INSTANCE'] as const;
+export type IntentFlag = (typeof INTENT_FLAGS)[number];
+
+/**
+ * An intent the OS refuses before dispatching it: an unknown flag, an unknown
+ * or dead target instance, a flag the app's manifest can't honour. `status`
+ * is the HTTP status the shell API answers with.
+ */
+export class IntentError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly hint: string | undefined;
+  constructor(status: number, code: string, message: string, hint?: string) {
+    super(message);
+    this.name = 'IntentError';
+    this.status = status;
+    this.code = code;
+    this.hint = hint;
+  }
+}
+
+/**
+ * What a handler app answers instead of handling an intent — its hook replies
+ * `{ rejected: { code, message, hint?, status? } }` (the extras don't make
+ * sense, or the thing they name doesn't exist). The OS then opens no activity.
+ */
+export interface IntentRejection {
+  code:    string;
+  message: string;
+  hint?:   string;
+  /** HTTP status for the shell API; 400–499, default 422. */
+  status:  number;
+}
+
+/** Read a hook reply's `rejected` field; null when the app accepted. */
+export function parseIntentRejection(reply: unknown): IntentRejection | null {
+  if (!reply || typeof reply !== 'object' || Array.isArray(reply)) return null;
+  const r = (reply as { rejected?: unknown }).rejected;
+  if (!r || typeof r !== 'object' || Array.isArray(r)) return null;
+  const o = r as Record<string, unknown>;
+  const st = o['status'];
+  return {
+    code:    typeof o['code'] === 'string' && o['code'] ? o['code'] : 'rejected',
+    message: typeof o['message'] === 'string' && o['message'] ? o['message'] : 'The app rejected the intent.',
+    ...(typeof o['hint'] === 'string' && o['hint'] ? { hint: o['hint'] } : {}),
+    status:  typeof st === 'number' && Number.isInteger(st) && st >= 400 && st <= 499 ? st : 422,
+  };
 }
 
 /**
@@ -64,6 +129,8 @@ export interface IntentPayload {
   type?:     string;
   uri?:      string;
   extras?:   Record<string, unknown>;
+  instanceId?: string;
+  flags?:    string[];
 }
 
 /** Strip an `Intent` down to its JSON wire shape (see `IntentPayload`). */
@@ -75,6 +142,8 @@ export function intentPayload(intent: Intent): IntentPayload {
     ...(intent.type   !== undefined ? { type:   intent.type }   : {}),
     ...(intent.uri    !== undefined ? { uri:    intent.uri }    : {}),
     ...(intent.extras !== undefined ? { extras: intent.extras } : {}),
+    ...(intent.instanceId !== undefined ? { instanceId: intent.instanceId } : {}),
+    ...(intent.flags && intent.flags.length > 0 ? { flags: [...intent.flags] } : {}),
   };
 }
 

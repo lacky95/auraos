@@ -1,10 +1,14 @@
 ---
 import manifest from '../../app.manifest.json';
 import { pickedSession } from '../window-session';
+import { hasLaunchCommand } from '../launch-commands';
 const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
 // The session this window last picked, if that shell still exists — so a
 // reload of the OS UI reopens it instead of the window's default session.
 const windowSession = pickedSession(Astro.request.headers.get('x-aura-activity-id')) ?? '';
+// An OPEN_TERMINAL intent left a command for this window (launch-commands.ts):
+// the page reports when its terminal is live so the container can type it.
+const launchPending = hasLaunchCommand(Astro.request.headers.get('x-aura-activity-id'));
 // The instance cap the OS enforces (AppManager throws past it). Read from the
 // same manifest rather than hardcoded, so the switcher's "+ NEW INSTANCE" row
 // greys out for the real reason instead of guessing.
@@ -210,7 +214,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     <div data-ph-detail style="font-size:0.8rem;letter-spacing:.04em;color:var(--aura-color-text);">This window is not attached to a shell.</div>
     <div data-ph-hint style="font-size:0.7rem;color:var(--aura-color-text-dim);">Pick one from the <span style="color:var(--aura-color-primary);">session menu</span> in the bar, or start a new one.</div>
   </div>
-  <div id="terminal" data-app-id={appId} data-max-instances={String(maxInstances)} data-window-session={windowSession}></div>
+  <div id="terminal" data-app-id={appId} data-max-instances={String(maxInstances)} data-window-session={windowSession} data-launch-pending={launchPending ? '1' : ''}></div>
 
   <!-- Shown INSTEAD of the terminal while another browser view holds this
        session (driven by the server's control frames — see the ws.onmessage
@@ -274,6 +278,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     import { Terminal } from '@xterm/xterm';
     import { FitAddon } from '@xterm/addon-fit';
     import '@xterm/xterm/css/xterm.css';
+    import { createLaunchGate } from '../launch-gate';
 
     // appId is server-rendered onto #terminal's data-app-id. A bundled module
     // script can't use Astro's define:vars (that requires is:inline), so we read
@@ -630,6 +635,29 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // Keep the server-rendered session host as the visible label; surface
     // the WS endpoint on hover for debugging.
     document.getElementById('ws-url').title = wsUrlFor(currentSessionId, false);
+
+    // ─── Intent `command` (OPEN_TERMINAL) ────────────────────────────────
+    // Only a window opened by an intent with a `command` has one pending
+    // (server-rendered flag). Each `granted` frame re-arms the gate; the first
+    // fire makes the container type the command into the session, server-side
+    // and exactly once, so reconnects, reloads and a second browser on this
+    // window are all harmless. See launch-gate.ts / launch-commands.ts.
+    const launchGate = document.getElementById('terminal')?.dataset.launchPending === '1'
+      ? createLaunchGate({
+          fire: async () => {
+            let r;
+            try {
+              r = await fetch(`/api/proxy/${encodeURIComponent(instanceId)}/api/sessions/launch?window=${encodeURIComponent(activityId)}`,
+                { method: 'POST', cache: 'no-store' });
+            } catch { return 'retry'; }                          // network blip — try again while live
+            if (r.ok) return 'done';
+            if (r.status === 502 || r.status === 503) return 'retry';  // instance still booting
+            const body = await r.json().catch(() => null);
+            term.writeln(`\r\n${ORG}  [intent command not run: ${body?.message ?? `HTTP ${r.status}`}]${RST}`);
+            return 'done';
+          },
+        })
+      : null;
 
     // ANSI color helpers — xterm.js parses these inline.
     const GRN  = '\x1b[38;5;82m';  // bright green
@@ -1014,7 +1042,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         if (typeof e.data === 'string') { term.write(e.data); return; }
         let msg;
         try { msg = JSON.parse(ctlDecoder.decode(e.data)); } catch { return; }
-        if (msg?.type === 'granted')   setLocked(false);
+        if (msg?.type === 'granted')   { setLocked(false); launchGate?.live(); }
         else if (msg?.type === 'busy') setLocked(true);
       };
 
@@ -1024,6 +1052,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         // socket's handler overwrites "SWITCHING…" with a reconnect warning and
         // the transition looks like a fault.
         if (activeWs !== ws) return;
+        launchGate?.lost();
         // A close we asked for. The window is showing the no-session
         // placeholder; announcing a reconnect would contradict it, and the
         // reconnect is never coming — scheduleReconnect no-ops while detached.
@@ -1110,6 +1139,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     const terminalEl  = document.getElementById('terminal');
 
     function setLocked(next) {
+      if (next) launchGate?.lost();     // another browser has it: not live here
       const changed = next !== locked;
       locked = next;
       // Swap terminal ↔ panel. `display:none` (not visibility) so the hidden

@@ -19,7 +19,10 @@ import { MountManager } from './MountManager.js';
 import { PortManager, type ExposeSpec } from './PortManager.js';
 import type { SandboxRunner } from './SandboxRunner.js';
 import { selectOrphanSidecars } from './sidecars.js';
-import { IntentResolver, intentPayload, type Intent, type IntentMatch } from './IntentResolver.js';
+import {
+  INTENT_FLAGS, IntentError, IntentResolver, intentPayload, parseIntentRejection,
+  type Intent, type IntentMatch, type IntentRejection,
+} from './IntentResolver.js';
 import { PermissionManager } from '../permissions/PermissionManager.js';
 import { ContentProviderRegistry } from '../content/ContentProviderRegistry.js';
 import { InterfaceRegistry } from '../interfaces/InterfaceRegistry.js';
@@ -945,6 +948,14 @@ export class AppManager {
    * top-tied ones return `disambiguation` so the shell can present a chooser
    * (re-send with `appId` set to the pick); none returns `noHandler`.
    *
+   * Which instance receives it (`pickIntentInstance`):
+   *   • `intent.instanceId` — exactly that running instance of the app;
+   *   • `flags: ['NEW_INSTANCE']` — a fresh one (`instanceMode: 'multi'` only);
+   *   • otherwise what the launcher does on an icon click: a running instance
+   *     is reused when the app reuses instances (single-instance apps, and
+   *     multi/multi apps with `defaultLaunch: 'new-activity'`), else `start()`.
+   * A bad combination or an unknown instance throws `IntentError`.
+   *
    * Every handler receives the intent; how depends on its shape:
    *   • `activityMode: 'multi'` — a new activity is opened; `extras` arrive as
    *     `onActivityCreate`'s `data` (unchanged contract) and the full intent
@@ -955,11 +966,23 @@ export class AppManager {
    *     is posted to it. Android's `onNewIntent` / `onStartCommand`: a
    *     running single instance receives every later intent the same way.
    *
+   * The handler's reply may also carry
+   *   • `rejected: { code, message, hint?, status? }` — it declines the intent
+   *     (bad extras, a thing they name doesn't exist): no activity is opened,
+   *     an instance started only for this intent is stopped again, and the
+   *     result is `{ kind: 'rejected' }`;
+   *   • `noActivity: true` (onActivityCreate only) — it handled the intent
+   *     without a window (Android's `Theme.NoDisplay` trampoline): the
+   *     activity is not registered and the result has no `activityId`;
+   *   • `result: {…}` — returned to the caller as `result` (e.g. the id of
+   *     what the handler created, so a later intent can address it).
+   *
    * `intentDelivered` reports whether the app answered that lifecycle call
    * (false = hook not implemented or it failed; the app is still started).
    */
   async startIntent(intent: Intent): Promise<
-    | { kind: 'started'; appId: string; instanceId: string; activityId?: string; intentDelivered: boolean }
+    | { kind: 'started'; appId: string; instanceId: string; activityId?: string; intentDelivered: boolean; result?: Record<string, unknown> }
+    | { kind: 'rejected'; appId: string; instanceId: string; code: string; message: string; hint?: string; status: number }
     | { kind: 'disambiguation'; candidates: IntentMatch[] }
     | { kind: 'noHandler' }
   > {
@@ -984,19 +1007,111 @@ export class AppManager {
     // Snapshot the app's instances first so the handler can tell a cold
     // start (Android onCreate + intent) from a re-delivery (onNewIntent).
     const before = new Set(this.getInstancesByApp(chosen.appId).map((i) => i.instanceId));
-    const instanceId = manifest.componentType === 'service'
-      ? await this.startService(chosen.appId)
-      : await this.start(chosen.appId);
+    // …and the user-owned ones: a warm-pool member claimed for this intent is
+    // as new to the user as a fresh spawn, so a rejection hands it back too.
+    const beforeOwned = new Set(this.getInstancesByApp(chosen.appId).filter((i) => !i.inPool).map((i) => i.instanceId));
+    const instanceId = await this.pickIntentInstance(manifest, intent);
+
+    const rejected = async (r: IntentRejection) => {
+      // An instance that exists only because of this intent must not outlive
+      // its refusal — it would sit there with no window and no purpose.
+      if (!beforeOwned.has(instanceId) && this.getActivitiesByInstance(instanceId).length === 0) {
+        await this.stop(instanceId).catch((err: unknown) => {
+          console.warn(`[AppManager] intent rejected; stopping ${instanceId} failed: ${(err as Error).message}`);
+        });
+      }
+      return { kind: 'rejected' as const, appId: chosen.appId, instanceId, ...r };
+    };
 
     if (manifest.activityMode === 'multi') {
-      const { activity, hookAnswered } = await this.openActivityAndReport(instanceId, intent.extras, { intent });
-      return { kind: 'started', appId: chosen.appId, instanceId, activityId: activity.activityId, intentDelivered: hookAnswered };
+      const opened = await this.openActivityAndReport(instanceId, intent.extras, { intent });
+      if (opened.rejected) return rejected(opened.rejected);
+      return {
+        kind: 'started', appId: chosen.appId, instanceId,
+        ...(opened.activity ? { activityId: opened.activity.activityId } : {}),
+        intentDelivered: opened.hookAnswered,
+        ...(opened.result ? { result: opened.result } : {}),
+      };
     }
-    const result = await this.runnerOf(instanceId).callOptionalLifecycle(instanceId, 'onIntent', {
+    const reply = await this.runnerOf(instanceId).callOptionalLifecycle(instanceId, 'onIntent', {
       intent: intentPayload(intent),
       newInstance: !before.has(instanceId),
     });
-    return { kind: 'started', appId: chosen.appId, instanceId, intentDelivered: result !== null && result !== undefined };
+    const rejection = parseIntentRejection(reply);
+    if (rejection) return rejected(rejection);
+    const result = replyResult(reply);
+    return {
+      kind: 'started', appId: chosen.appId, instanceId,
+      intentDelivered: reply !== null && reply !== undefined,
+      ...(result ? { result } : {}),
+    };
+  }
+
+  /**
+   * The instance an intent lands on — see `startIntent`. Validates the
+   * intent-level launch fields first so a bad intent never starts anything.
+   */
+  private async pickIntentInstance(manifest: AppManifest, intent: Intent): Promise<string> {
+    const appId = manifest.id;
+    const flags = intent.flags ?? [];
+    const unknown = flags.filter((f) => !(INTENT_FLAGS as readonly string[]).includes(f));
+    if (unknown.length > 0) {
+      throw new IntentError(400, 'unknown-flag', `Unknown intent flag(s): ${unknown.join(', ')}`,
+        `Known flags: ${INTENT_FLAGS.join(', ')}.`);
+    }
+    const newInstance = flags.includes('NEW_INSTANCE');
+    if (newInstance && intent.instanceId !== undefined) {
+      throw new IntentError(400, 'conflicting-target',
+        'An intent cannot both target instanceId and ask for NEW_INSTANCE.',
+        'Drop one: instanceId reuses that instance, NEW_INSTANCE starts a fresh one.');
+    }
+
+    if (intent.instanceId !== undefined) {
+      const inst = this.instances.get(intent.instanceId);
+      if (!inst || inst.appId !== appId) {
+        throw new IntentError(404, 'no-such-instance',
+          `No instance "${intent.instanceId}" of ${appId}.`,
+          `List running instances with GET /api/apps/${appId}, or omit instanceId to let the OS pick.`);
+      }
+      if (inst.state === 'destroyed' || inst.state === 'error' || inst.state === 'destroying') {
+        throw new IntentError(409, 'instance-not-running',
+          `Instance "${intent.instanceId}" is ${inst.state}.`,
+          'Omit instanceId to let the OS pick, or send NEW_INSTANCE.');
+      }
+      if (!this.isEnabled(appId)) throw new Error(`App ${appId} is disabled. Enable it from Settings → Apps or run \`aura app enable ${appId}\`.`);
+      if (inst.state === 'paused' || inst.state === 'stopped') await this.resume(inst.instanceId);
+      return inst.instanceId;
+    }
+
+    if (manifest.componentType === 'service') {
+      if (newInstance) {
+        throw new IntentError(409, 'single-instance',
+          `${appId} is a service; services run one instance, so NEW_INSTANCE cannot be honoured.`);
+      }
+      return this.startService(appId);
+    }
+    if (newInstance) {
+      if (manifest.instanceMode !== 'multi') {
+        throw new IntentError(409, 'single-instance',
+          `${appId} is single-instance (instanceMode='${manifest.instanceMode}'); NEW_INSTANCE cannot be honoured.`);
+      }
+      return this.start(appId);   // multi: always a fresh instance (warm-pool claim or spawn)
+    }
+    // Default: what the launcher does on an icon click (shell auraLaunchApp).
+    // A multi/multi app that launches into new activities reuses the first
+    // user-owned instance; warm-pool members are skipped (start() claims them
+    // properly). Single-instance reuse is start()'s own rule.
+    if (manifest.activityMode === 'multi' && manifest.instanceMode === 'multi' && manifest.defaultLaunch === 'new-activity') {
+      const reuse = this.getInstancesByApp(appId).find(
+        (i) => !i.inPool && i.state !== 'destroyed' && i.state !== 'error' && i.state !== 'destroying',
+      );
+      if (reuse) {
+        if (!this.isEnabled(appId)) throw new Error(`App ${appId} is disabled. Enable it from Settings → Apps or run \`aura app enable ${appId}\`.`);
+        if (reuse.state === 'paused' || reuse.state === 'stopped') await this.resume(reuse.instanceId);
+        return reuse.instanceId;
+      }
+    }
+    return this.start(appId);
   }
 
   // -------- Service component (Android Service equivalent) --------
@@ -1409,7 +1524,8 @@ export class AppManager {
     data?: Record<string, unknown>,
     opts?: { stackParent?: string },
   ): Promise<AppActivity> {
-    return (await this.openActivityAndReport(instanceId, data, opts)).activity;
+    // No `intent` in opts ⇒ never declined/window-less, so always an activity.
+    return (await this.openActivityAndReport(instanceId, data, opts)).activity as AppActivity;
   }
 
   /**
@@ -1421,7 +1537,8 @@ export class AppManager {
     instanceId: string,
     data?: Record<string, unknown>,
     opts?: { stackParent?: string; intent?: Intent },
-  ): Promise<{ activity: AppActivity; hookAnswered: boolean }> {
+  ): Promise<{ activity: AppActivity; hookAnswered: boolean; rejected?: undefined; result?: Record<string, unknown> }
+    | { activity: null; hookAnswered: true; rejected?: IntentRejection; result?: Record<string, unknown> }> {
     const inst = this.instances.get(instanceId);
     if (!inst) throw new Error(`Instance not found: ${instanceId}`);
     const manifest = this.registry.getById(inst.appId);
@@ -1466,6 +1583,17 @@ export class AppManager {
       data,
       ...(opts?.intent ? { intent: intentPayload(opts.intent) } : {}),
     });
+    // Only an INTENT launch may be declined or handled window-less: a plain
+    // openActivity (launcher, "+ new window") always gets its window.
+    if (opts?.intent) {
+      const rejection = parseIntentRejection(result);
+      if (rejection) return { activity: null, hookAnswered: true, rejected: rejection };
+      if (result && typeof result === 'object' && (result as { noActivity?: unknown }).noActivity === true) {
+        const handled = replyResult(result);
+        return { activity: null, hookAnswered: true, ...(handled ? { result: handled } : {}) };
+      }
+    }
+    const handled = opts?.intent ? replyResult(result) : null;
     let path = '/';
     let title: string | undefined;
     let metadata: Record<string, unknown> | undefined;
@@ -1525,7 +1653,7 @@ export class AppManager {
       ...(minimizable ?         { minimizable: true } : {}),
       ...(stackParent ?         { stackParentId: stackParent } : {}),
     });
-    return { activity, hookAnswered: result !== null && result !== undefined };
+    return { activity, hookAnswered: result !== null && result !== undefined, ...(handled ? { result: handled } : {}) };
   }
 
   /**
@@ -2173,4 +2301,11 @@ export function initAppManager(opts: ConstructorParameters<typeof AppManager>[0]
   const instance = new AppManager(opts);
   (globalThis as GlobalWithAura)[GLOBAL_KEY] = instance;
   return instance;
+}
+
+/** A hook reply's `result` object (handed back to the intent's caller), or null. */
+function replyResult(reply: unknown): Record<string, unknown> | null {
+  if (!reply || typeof reply !== 'object' || Array.isArray(reply)) return null;
+  const r = (reply as { result?: unknown }).result;
+  return r && typeof r === 'object' && !Array.isArray(r) ? r as Record<string, unknown> : null;
 }

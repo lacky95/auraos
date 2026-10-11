@@ -33,6 +33,12 @@
   "maxInstances": 4,
   "activityMode": "multi",
   "defaultLaunch": "new-activity",
+  "intentFilters": [
+    {
+      "action": "aura.intent.action.OPEN_TERMINAL",
+      "category": ["aura.intent.category.DEFAULT"]
+    }
+  ],
   "warmPool": 1,
   "backgroundService": true,
   "sandbox": "container",

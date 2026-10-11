@@ -210,8 +210,13 @@ export class OsClient {
     type?:     string;
     uri?:      string;
     extras?:   Record<string, unknown>;
+    /** Deliver to exactly this running instance of the app (unknown/dead → error). */
+    instanceId?: string;
+    /** Launch flags: `NEW_INSTANCE` starts a fresh instance (multi-instance apps only). */
+    flags?:    string[];
   }): Promise<
-    | { kind: 'started'; appId: string; instanceId: string; activityId?: string; intentDelivered?: boolean }
+    | { kind: 'started'; appId: string; instanceId: string; activityId?: string; intentDelivered?: boolean; result?: Record<string, unknown> }
+    | { kind: 'rejected'; appId: string; instanceId: string; code: string; message: string; hint?: string; status: number }
     | { kind: 'disambiguation'; candidates: Array<{ appId: string; score: number }> }
     | { kind: 'noHandler' }
   > {
@@ -220,9 +225,15 @@ export class OsClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(intent),
     });
-    if (res.status === 404) return { kind: 'noHandler' };
-    if (!res.ok) throw new Error(`startIntent: HTTP ${res.status}`);
-    return (await res.json()) as Awaited<ReturnType<OsClient['startIntent']>>;
+    const body = await res.json().catch(() => null) as { kind?: string; error?: string; code?: string; hint?: string } | null;
+    // The handler declining is an answer, not a failure — whatever status it chose.
+    if (body?.kind === 'rejected') return body as Awaited<ReturnType<OsClient['startIntent']>>;
+    if (res.status === 404 && body?.kind !== 'error') return { kind: 'noHandler' };
+    if (!res.ok) {
+      const detail = body?.error ? `: ${body.code ? `${body.code} — ` : ''}${body.error}${body.hint ? ` (${body.hint})` : ''}` : '';
+      throw new Error(`startIntent: HTTP ${res.status}${detail}`);
+    }
+    return body as Awaited<ReturnType<OsClient['startIntent']>>;
   }
 
   // -------- BackStack (Android-`Activity.finish()`-equivalent) --------

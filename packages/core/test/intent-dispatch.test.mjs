@@ -13,7 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { AppManager } from '../dist/app-manager/AppManager.js';
-import { IntentResolver, intentPayload } from '../dist/app-manager/IntentResolver.js';
+import { IntentError, IntentResolver, intentPayload, parseIntentRejection } from '../dist/app-manager/IntentResolver.js';
 
 const VIEW = 'aura.intent.action.VIEW';
 const filter = (over = {}) => ({ action: VIEW, category: [], dataMime: [], dataScheme: [], priority: 0, ...over });
@@ -27,45 +27,62 @@ function manifest(id, over = {}) {
 
 /**
  * Fake AppManager. `running` = app ids that already have a live instance
- * (instance id = app id, like single-instance apps). `hookReplies` maps a
- * lifecycle hook to what the app answers (default `{ ok: true }`; null = 404).
+ * (instance id = app id, like single-instance apps); `instances` seeds extra
+ * ones verbatim ({ instanceId, appId, state, inPool }). `hookReplies` maps a
+ * lifecycle hook to what the app answers (default `{ ok: true }`; null =
+ * 404). A later start() of an app that already has instance `<appId>` mints
+ * `<appId>-2`, `-3`, … like multi-instance apps do.
  */
-function fakeManager(manifests, { running = [], hookReplies = {} } = {}) {
+function fakeManager(manifests, { running = [], instances = [], hookReplies = {} } = {}) {
   const byId = new Map(manifests.map((m) => [m.id, m]));
   const intents = new IntentResolver();
   intents.reload(manifests);
-  const live = new Set(running);
   const calls = [];
+  const spawn = (appId) => {
+    let id = appId;
+    for (let n = 2; fake.instances.has(id); n++) id = `${appId}-${n}`;
+    fake.instances.set(id, { instanceId: id, appId, inPool: false, state: 'resumed' });
+    return id;
+  };
   const fake = {
     calls,
     starts: [],
+    stops: [],
+    resumes: [],
     intents,
     registry: { getById: (id) => byId.get(id) },
     instances: new Map(),
     activities: new Map(),
     nextActivityNum: new Map(),
-    getInstancesByApp: (appId) => (live.has(appId) ? [{ instanceId: appId, appId, state: 'resumed' }] : []),
-    getActivitiesByInstance: () => [],
+    isEnabled: () => true,
+    getInstancesByApp: (appId) => [...fake.instances.values()].filter((i) => i.appId === appId),
+    getActivitiesByInstance: (id) => [...fake.activities.values()].filter((a) => a.parentInstanceId === id),
     async start(appId) {
       fake.starts.push(['start', appId]);
-      live.add(appId);
-      fake.instances.set(appId, { instanceId: appId, appId, inPool: false, state: 'resumed' });
-      return appId;
+      const m = byId.get(appId);
+      if (m?.instanceMode === 'single') {
+        const live = fake.getInstancesByApp(appId)[0];
+        if (live) return live.instanceId;
+      }
+      return spawn(appId);
     },
     async startService(appId) {
       fake.starts.push(['startService', appId]);
-      live.add(appId);
-      fake.instances.set(appId, { instanceId: appId, appId, inPool: false, state: 'resumed' });
-      return appId;
+      return fake.getInstancesByApp(appId)[0]?.instanceId ?? spawn(appId);
     },
+    async stop(id) { fake.stops.push(id); fake.instances.delete(id); },
+    async resume(id) { fake.resumes.push(id); fake.instances.get(id).state = 'resumed'; },
     runnerOf: () => ({
       async callOptionalLifecycle(instanceId, hook, body) {
         calls.push({ instanceId, hook, body });
-        return hook in hookReplies ? hookReplies[hook] : { ok: true };
+        const reply = hook in hookReplies ? hookReplies[hook] : { ok: true };
+        return typeof reply === 'function' ? reply(body) : reply;
       },
     }),
   };
-  for (const name of ['startIntent', 'openActivity', 'openActivityAndReport']) {
+  for (const id of running) fake.instances.set(id, { instanceId: id, appId: id, inPool: false, state: 'resumed' });
+  for (const i of instances) fake.instances.set(i.instanceId, { inPool: false, state: 'resumed', ...i });
+  for (const name of ['startIntent', 'pickIntentInstance', 'openActivity', 'openActivityAndReport']) {
     fake[name] = AppManager.prototype[name].bind(fake);
   }
   return fake;
@@ -161,4 +178,167 @@ test('explicit intent for an uninstalled app → noHandler', async () => {
   const m = fakeManager([manifest('a.one', { intentFilters: [filter()] })]);
   assert.deepEqual(await m.startIntent({ action: VIEW, appId: 'a.missing' }), { kind: 'noHandler' });
   assert.equal(m.starts.length, 0);
+});
+
+// ── Instance targeting + launch flags ────────────────────────────────────────
+
+const OPEN = 'x.action.OPEN';
+const multiApp = (over = {}) => manifest('a.term', {
+  activityMode: 'multi', instanceMode: 'multi', defaultLaunch: 'new-activity', ...over,
+});
+
+test('intentPayload carries instanceId and flags when set', () => {
+  assert.deepEqual(
+    intentPayload({ action: OPEN, instanceId: 'a.term-2', flags: ['NEW_INSTANCE'] }),
+    { action: OPEN, instanceId: 'a.term-2', flags: ['NEW_INSTANCE'] },
+  );
+  assert.deepEqual(intentPayload({ action: OPEN, flags: [] }), { action: OPEN });
+});
+
+test("default launch mirrors the launcher: defaultLaunch 'new-activity' reuses the first user-owned instance", async () => {
+  const m = fakeManager([multiApp()], { instances: [
+    { instanceId: 'a.term-9', appId: 'a.term', inPool: true },     // warm-pool member: never reused
+    { instanceId: 'a.term-3', appId: 'a.term' },
+  ] });
+  const res = await m.startIntent({ action: OPEN, appId: 'a.term' });
+  assert.equal(res.instanceId, 'a.term-3');
+  assert.equal(res.activityId, 'a.term-3#a1');
+  assert.deepEqual(m.starts, []);
+});
+
+test("default launch with no user-owned instance → start() (pool claim / spawn)", async () => {
+  const m = fakeManager([multiApp()]);
+  const res = await m.startIntent({ action: OPEN, appId: 'a.term' });
+  assert.equal(res.kind, 'started');
+  assert.deepEqual(m.starts, [['start', 'a.term']]);
+});
+
+test("defaultLaunch 'new-instance' keeps start() semantics (a fresh instance each time)", async () => {
+  const m = fakeManager([multiApp({ defaultLaunch: 'new-instance' })], { running: ['a.term'] });
+  const res = await m.startIntent({ action: OPEN, appId: 'a.term' });
+  assert.equal(res.instanceId, 'a.term-2');
+});
+
+test('instanceId targets exactly that instance and resumes it when paused', async () => {
+  const m = fakeManager([multiApp()], { instances: [
+    { instanceId: 'a.term', appId: 'a.term' },
+    { instanceId: 'a.term-2', appId: 'a.term', state: 'paused' },
+  ] });
+  const res = await m.startIntent({ action: OPEN, appId: 'a.term', instanceId: 'a.term-2' });
+  assert.equal(res.instanceId, 'a.term-2');
+  assert.deepEqual(m.resumes, ['a.term-2']);
+  assert.deepEqual(m.starts, []);
+  assert.equal(m.calls[0].body.intent.instanceId, 'a.term-2');
+});
+
+test('unknown / foreign / dead instanceId → IntentError, nothing started', async () => {
+  const m = fakeManager([multiApp(), manifest('a.other')], { instances: [
+    { instanceId: 'a.other', appId: 'a.other' },
+    { instanceId: 'a.term-4', appId: 'a.term', state: 'error' },
+  ] });
+  for (const [instanceId, status, code] of [['a.term-77', 404, 'no-such-instance'], ['a.other', 404, 'no-such-instance'], ['a.term-4', 409, 'instance-not-running']]) {
+    await assert.rejects(m.startIntent({ action: OPEN, appId: 'a.term', instanceId }), (err) => {
+      assert.ok(err instanceof IntentError);
+      assert.equal(err.status, status);
+      assert.equal(err.code, code);
+      return true;
+    });
+  }
+  assert.deepEqual(m.starts, []);
+  assert.equal(m.calls.length, 0);
+});
+
+test('NEW_INSTANCE starts a fresh instance even when one could be reused', async () => {
+  const m = fakeManager([multiApp()], { running: ['a.term'] });
+  const res = await m.startIntent({ action: OPEN, appId: 'a.term', flags: ['NEW_INSTANCE'] });
+  assert.equal(res.instanceId, 'a.term-2');
+  assert.deepEqual(m.calls[0].body.intent.flags, ['NEW_INSTANCE']);
+});
+
+test('NEW_INSTANCE + instanceId, unknown flags, NEW_INSTANCE on single-instance apps → IntentError', async () => {
+  const m = fakeManager([multiApp(), manifest('a.single'), manifest('a.svc', { componentType: 'service' })], { running: ['a.term'] });
+  const cases = [
+    [{ appId: 'a.term', instanceId: 'a.term', flags: ['NEW_INSTANCE'] }, 400, 'conflicting-target'],
+    [{ appId: 'a.term', flags: ['NEW_TASKK'] }, 400, 'unknown-flag'],
+    [{ appId: 'a.single', flags: ['NEW_INSTANCE'] }, 409, 'single-instance'],
+    [{ appId: 'a.svc', flags: ['NEW_INSTANCE'] }, 409, 'single-instance'],
+  ];
+  for (const [over, status, code] of cases) {
+    await assert.rejects(m.startIntent({ action: OPEN, ...over }), (err) => err instanceof IntentError && err.status === status && err.code === code);
+  }
+  assert.deepEqual(m.starts, []);
+});
+
+// ── Handler replies: rejected / noActivity / result ─────────────────────────
+
+test('parseIntentRejection: defaults and status clamping', () => {
+  assert.equal(parseIntentRejection({ ok: true }), null);
+  assert.equal(parseIntentRejection(null), null);
+  assert.deepEqual(parseIntentRejection({ rejected: {} }), { code: 'rejected', message: 'The app rejected the intent.', status: 422 });
+  assert.deepEqual(
+    parseIntentRejection({ rejected: { code: 'no-such-session', message: 'gone', hint: 'list', status: 404 } }),
+    { code: 'no-such-session', message: 'gone', hint: 'list', status: 404 },
+  );
+  assert.equal(parseIntentRejection({ rejected: { status: 500 } }).status, 422);
+});
+
+test('onActivityCreate rejection → no activity, kind rejected, existing instance kept', async () => {
+  const m = fakeManager([multiApp()], {
+    running: ['a.term'],
+    hookReplies: { onActivityCreate: { ok: false, rejected: { code: 'bad-extras', message: 'nope', status: 400 } } },
+  });
+  const res = await m.startIntent({ action: OPEN, appId: 'a.term', extras: { bogus: 1 } });
+  assert.deepEqual(res, { kind: 'rejected', appId: 'a.term', instanceId: 'a.term', code: 'bad-extras', message: 'nope', status: 400 });
+  assert.equal(m.activities.size, 0);
+  assert.deepEqual(m.stops, []);
+});
+
+test('rejection on an instance started only for this intent stops it again', async () => {
+  const m = fakeManager([multiApp()], {
+    running: ['a.term'],
+    hookReplies: { onActivityCreate: { rejected: { code: 'x', message: 'y' } } },
+  });
+  const res = await m.startIntent({ action: OPEN, appId: 'a.term', flags: ['NEW_INSTANCE'] });
+  assert.equal(res.kind, 'rejected');
+  assert.equal(res.instanceId, 'a.term-2');
+  assert.deepEqual(m.stops, ['a.term-2']);
+});
+
+test('noActivity reply → handled window-less: no activity registered, result handed back', async () => {
+  const m = fakeManager([multiApp()], {
+    running: ['a.term'],
+    hookReplies: { onActivityCreate: (body) => (body.data?.background
+      ? { ok: true, noActivity: true, result: { sessionId: body.activityId } }
+      : { ok: true }) },
+  });
+  const res = await m.startIntent({ action: OPEN, appId: 'a.term', extras: { background: true } });
+  assert.deepEqual(res, { kind: 'started', appId: 'a.term', instanceId: 'a.term', intentDelivered: true, result: { sessionId: 'a.term#a1' } });
+  assert.equal(m.activities.size, 0);
+  // The activity number is spent, so the next window can never reuse that id.
+  const next = await m.startIntent({ action: OPEN, appId: 'a.term' });
+  assert.equal(next.activityId, 'a.term#a2');
+});
+
+test('result from a window-opening onActivityCreate is returned alongside activityId', async () => {
+  const m = fakeManager([multiApp()], { hookReplies: { onActivityCreate: { ok: true, result: { k: 1 } } } });
+  const res = await m.startIntent({ action: OPEN, appId: 'a.term' });
+  assert.equal(res.activityId, 'a.term#a1');
+  assert.deepEqual(res.result, { k: 1 });
+});
+
+test('plain openActivity ignores rejected/noActivity (only intent launches may decline a window)', async () => {
+  const m = fakeManager([multiApp()], { running: ['a.term'], hookReplies: { onActivityCreate: { noActivity: true, rejected: { code: 'x', message: 'y' } } } });
+  const act = await m.openActivity('a.term');
+  assert.equal(act.activityId, 'a.term#a1');
+  assert.equal(m.activities.size, 1);
+});
+
+test('onIntent handlers can reject and return a result too', async () => {
+  const rej = fakeManager([manifest('a.viewer')], { hookReplies: { onIntent: { rejected: { code: 'bad', message: 'm' } } } });
+  const r1 = await rej.startIntent({ action: VIEW, appId: 'a.viewer' });
+  assert.equal(r1.kind, 'rejected');
+  assert.deepEqual(rej.stops, ['a.viewer']);   // cold-started for the intent → stopped again
+  const ok = fakeManager([manifest('a.viewer')], { running: ['a.viewer'], hookReplies: { onIntent: { ok: true, result: { id: 7 } } } });
+  const r2 = await ok.startIntent({ action: VIEW, appId: 'a.viewer' });
+  assert.deepEqual(r2.result, { id: 7 });
 });

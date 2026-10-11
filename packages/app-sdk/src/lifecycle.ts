@@ -18,7 +18,7 @@
  */
 
 import type { APIRoute } from 'astro';
-import { parseIntentPayload, type IntentPayload } from './intent.js';
+import { IntentRejectedError, parseIntentPayload, type IntentPayload } from './intent.js';
 
 const APP_ID = () => process.env['APP_ID'] ?? 'unknown';
 const INSTANCE_ID = () => process.env['APP_INSTANCE_ID'] ?? null;
@@ -98,6 +98,14 @@ export interface ActivityCreateResult {
   title?: string;
   /** Free-form bag returned to the OS (currently observational only). */
   metadata?: Record<string, unknown>;
+  /**
+   * Intent launches only: the intent was handled without a window (Android
+   * `Theme.NoDisplay`) — the OS registers no activity. Ignored for plain
+   * openActivity calls, which always get their window.
+   */
+  noActivity?: boolean;
+  /** Intent launches only: handed back to the caller as `startIntent(...).result`. */
+  result?: Record<string, unknown>;
 }
 
 /**
@@ -123,6 +131,10 @@ export function createActivityCreateHandler(
       console.log(`[${APP_ID()}] onActivityCreate ${activityId}`);
       return json(out);
     } catch (err) {
+      if (err instanceof IntentRejectedError) {
+        console.warn(`[${APP_ID()}] onActivityCreate ${activityId} rejected the intent: ${err.code} — ${err.message}`);
+        return json({ ok: false, rejected: err.toReply() });
+      }
       console.error(`[${APP_ID()}] onActivityCreate ${activityId} failed:`, err);
       return json({ ok: false, error: String(err) }, 500);
     }
@@ -179,17 +191,21 @@ export interface IntentRequest {
  *   });
  */
 export function createIntentHandler(
-  impl?: (req: IntentRequest) => void | Promise<void>,
+  impl?: (req: IntentRequest) => void | { result?: Record<string, unknown> } | Promise<void | { result?: Record<string, unknown> }>,
 ): APIRoute {
   return async ({ request }) => {
     const body = await request.json().catch(() => ({})) as { intent?: unknown; newInstance?: unknown };
     const intent = parseIntentPayload(body.intent);
     if (!intent) return json({ ok: false, error: 'missing intent.action' }, 400);
     try {
-      if (impl) await impl({ intent, newInstance: body.newInstance === true });
+      const out = impl ? await impl({ intent, newInstance: body.newInstance === true }) : undefined;
       console.log(`[${APP_ID()}] onIntent ${intent.action}`);
-      return json({ ok: true });
+      return json({ ok: true, ...(out && out.result ? { result: out.result } : {}) });
     } catch (err) {
+      if (err instanceof IntentRejectedError) {
+        console.warn(`[${APP_ID()}] onIntent ${intent.action} rejected: ${err.code} — ${err.message}`);
+        return json({ ok: false, rejected: err.toReply() });
+      }
       console.error(`[${APP_ID()}] onIntent ${intent.action} failed:`, err);
       return json({ ok: false, error: String(err) }, 500);
     }

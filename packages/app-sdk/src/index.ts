@@ -41,7 +41,7 @@ export {
   createActivityDestroyHandler,
   createIntentHandler,
 } from './lifecycle.js';
-export { parseIntentPayload } from './intent.js';
+export { parseIntentPayload, IntentRejectedError } from './intent.js';
 export type { IntentPayload } from './intent.js';
 export type {
   LifecycleHookName,
