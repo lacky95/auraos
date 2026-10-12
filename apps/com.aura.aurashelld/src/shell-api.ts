@@ -104,11 +104,30 @@ export async function getLockscreen(): Promise<{ lockAt?: number; unlockAt?: num
   catch { return null; }
 }
 
+export type ColorMode = 'light' | 'dark' | 'auto';
+/** KV `os/theme` — the OS-wide theme picks and light/dark mode (packages/core ThemeManager). */
+export interface ThemeKv { themeIdDark?: string; themeIdLight?: string; colorMode?: ColorMode; [k: string]: unknown }
+
+export async function getTheme(): Promise<ThemeKv> {
+  try { return (await call<{ value?: ThemeKv | null }>('/api/kv/os/theme')).value ?? {}; }
+  catch (err) {
+    if (err instanceof ShellApiError && err.status === 404) return {};
+    throw err;
+  }
+}
+
 // ── Writes ──────────────────────────────────────────────────────────────────
 
 /** Whole-blob write; the route emits workspaces:changed for every browser.
  *  Only used when no browser is connected — otherwise the page is the writer. */
 export const putWorkspaces = (s: WorkspaceState) => call<unknown>('/api/kv/os/workspaces', jsonInit('PUT', { value: s }));
+/** Set the light/dark mode. PUT replaces the whole value, so read-modify-write
+ *  keeps the theme picks; the route emits kv:changed and every open shell re-themes. */
+export async function setColorMode(mode: ColorMode): Promise<{ from: ColorMode; to: ColorMode }> {
+  const previous = await getTheme();
+  await call<unknown>('/api/kv/os/theme', jsonInit('PUT', { value: { ...previous, colorMode: mode } }));
+  return { from: previous.colorMode ?? 'dark', to: mode };
+}
 export const lock   = () => call<unknown>('/api/os/lock',   { method: 'POST' });
 export const unlock = () => call<unknown>('/api/os/unlock', { method: 'POST' });
 export const startApp = (appId: string) =>

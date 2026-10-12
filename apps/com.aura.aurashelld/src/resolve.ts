@@ -122,3 +122,18 @@ export function resolveProcess(procs: readonly ProcessSummary[], ref: string): M
     (p) => norm(p.app).includes(q) || p.instanceId.toLowerCase().includes(q),
   ], `no running process matches "${raw}"`);
 }
+
+/** A viewport profile as the shell's browser reports it (getViewportInfo). */
+export interface ViewportProfileSummary { id: string; name: string }
+
+export function resolveViewport(profiles: readonly ViewportProfileSummary[], ref: string): Match<ViewportProfileSummary> {
+  const raw = String(ref ?? '').trim();
+  const q = norm(raw);
+  if (!q) return { kind: 'none', message: 'give a viewport profile name' };
+  return byTiers(profiles, [
+    (p) => p.id === raw,
+    (p) => norm(p.name) === q,
+    (p) => norm(p.name).startsWith(q),
+    (p) => norm(p.name).includes(q) || p.id.toLowerCase().includes(q),
+  ], `no viewport profile called "${raw}"; available: ${profiles.map((p) => p.name).join(', ')}`);
+}

@@ -27,12 +27,12 @@ import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import {
   NO_UI_MESSAGE, closeActivity, getLockscreen, getMru, getRegion, getWorkspaces, lock, noUi, putWorkspaces,
-  startApp, stopInstance, ui, unlock,
-  type WorkspaceState,
+  getTheme, setColorMode, startApp, stopInstance, ui, unlock,
+  type ColorMode, type WorkspaceState,
 } from '../shell-api.ts';
 import {
-  nextLayout, resolveApp, resolveLayout, resolveProcess, resolveWindow, resolveWorkspace,
-  type Match, type WorkspaceSummary,
+  nextLayout, resolveApp, resolveLayout, resolveProcess, resolveViewport, resolveWindow, resolveWorkspace,
+  type Match, type ViewportProfileSummary, type WorkspaceSummary,
 } from '../resolve.ts';
 import {
   activeOf, appLabel, loadState, processes, summariseWorkspaces, windowView, workspaceLine,
@@ -49,6 +49,9 @@ const INSTRUCTIONS =
   + 'result lists candidates — pick one and call again. Results that change something carry `workspace`, the '
   + 'workspace that is current afterwards. Stopping or killing a process is a two-step call with a challenge '
   + 'code: put the returned question to the user and only call again with the code once they agree. '
+  + 'Viewport profiles (named zoom/margin/theme presets) belong to the browser that has the shell open: '
+  + 'get_viewport_info shows them, set_viewport switches by name. set_light_mode / set_dark_mode switch the '
+  + 'whole OS and work without a browser. '
   + 'Anything marked "no shell UI is connected" needs the shell open in a browser. '
   + 'Call each tool ONCE per turn: an identical call within a few seconds returns the same answer marked '
   + '`deduplicated: true` — you already have it, do not repeat it. Reading the same thing over and over without '
@@ -176,6 +179,34 @@ function needUi(o: { ok: false; message: string }): CallToolResult {
   return fail(o.message);
 }
 
+/** What the browser answers to `getViewportInfo` (StatusBar.astro). */
+interface ViewportInfo {
+  active: ViewportProfileSummary & {
+    zoomPercent: number; shellZoomPercent: number; appZoomPercent: number;
+    margins: { top: number; right: number; bottom: number; left: number };
+    themeIdLight: string; themeIdDark: string;
+  };
+  profiles: ViewportProfileSummary[];
+}
+
+/** set_light_mode / set_dark_mode — one KV write, so no browser needed. */
+function colorModeTool(mode: Exclude<ColorMode, 'auto'>): OwnTool {
+  return define({
+    name: `set_${mode}_mode`,
+    title: `${mode === 'light' ? 'Light' : 'Dark'} mode`,
+    description:
+      `Switch the whole AuraOS shell, and every app in it, to ${mode} mode. Keeps the chosen light and dark `
+      + 'themes; every open shell re-themes at once. Works without a browser. The result says the mode before '
+      + 'and after.',
+    schema: z.object({}),
+    annotations: WRITE,
+    run: async () => {
+      const { from, to } = await setColorMode(mode);
+      return ok({ colorMode: to, from, ...(from === to ? { note: `already in ${to} mode` } : {}) });
+    },
+  });
+}
+
 // ── Tools ───────────────────────────────────────────────────────────────────
 
 const TOOLS: OwnTool[] = [
@@ -185,14 +216,16 @@ const TOOLS: OwnTool[] = [
     description:
       'The cockpit view of the desktop, in one call. Answer the user from `summary`, `workspace` (the current one '
       + 'with its windows), `focusedWindow`, `attention` and `runningApps`; `otherWorkspaces` says what is elsewhere; '
-      + '`lastUsedApps` are the dock\'s recent apps. `details` (zoom, layout, fullscreen, launcher and process-manager '
+      + '`lastUsedApps` are the dock\'s recent apps. `details` (zoom, viewport profile, light/dark mode, layout, fullscreen, launcher and process-manager '
       + 'state) is there for completeness — mention it only when asked or when `attention` flags it. '
       + '`ui: "not connected"` (in details) means no browser has the shell open: window names, zoom and panel state '
       + 'are then unavailable. Call this once per turn; the answer stays valid until you change something.',
     schema: z.object({}),
     annotations: READ,
     run: async () => {
-      const [state, mru, lockKv] = await Promise.all([loadState({ snapshot: true }), getMru(), getLockscreen()]);
+      const [state, mru, lockKv, theme] = await Promise.all([
+        loadState({ snapshot: true }), getMru(), getLockscreen(), getTheme().catch(() => null),
+      ]);
       const snap: UiSnapshot | null = state.ui;
       const lastUsed = Object.entries(mru).sort((a, b) => b[1] - a[1]).map(([id]) => appLabel(state, id))
         .filter((n, i, arr) => arr.indexOf(n) === i).slice(0, 5);
@@ -240,6 +273,8 @@ const TOOLS: OwnTool[] = [
           layout: line.layout,
           layouts: state.layouts.map((l) => l.name),
           zoom: zoom === null ? null : `${zoom}%`,
+          viewport: snap?.viewport?.activeProfile ?? null,
+          colorMode: theme ? theme.colorMode ?? 'dark' : null,
           fullscreen: snap?.statusBar?.fullscreen ?? null,
           lockScreen: locked,
           launcher: snap?.launcher ?? null,
@@ -549,6 +584,69 @@ const TOOLS: OwnTool[] = [
       return ok({ fullscreen: r.result.fullscreen });
     },
   }),
+
+  define({
+    name: 'get_viewport_info',
+    title: 'Viewport info',
+    description:
+      'The viewport in one call: `colorMode` (light, dark or auto = follows the device), the active viewport '
+      + 'profile with its zoom, margins and light/dark theme ids, and the names of all profiles to pass to '
+      + 'set_viewport. Profiles are stored in the browser that has the shell open, so without one `profiles` is '
+      + 'null and only the color mode is known.',
+    schema: z.object({}),
+    annotations: READ,
+    run: async () => {
+      const [theme, r] = await Promise.all([getTheme(), ui<ViewportInfo>('getViewportInfo')]);
+      const colorMode = theme.colorMode ?? 'dark';
+      if (!r.ok) {
+        return ok({ summary: `Color mode is ${colorMode}. Viewport profiles unknown: ${r.message}.`, colorMode, active: null, profiles: null });
+      }
+      const { active, profiles } = r.result;
+      return ok({
+        summary: `Viewport profile "${active.name}" at ${active.zoomPercent}% zoom, color mode ${colorMode}. `
+          + `${profiles.length} profile${profiles.length === 1 ? '' : 's'}: ${profiles.map((p) => p.name).join(', ')}.`,
+        colorMode,
+        active: {
+          name: active.name,
+          zoom: `${active.zoomPercent}%`, shellZoom: `${active.shellZoomPercent}%`, appZoom: `${active.appZoomPercent}%`,
+          margins: active.margins,
+          themeLight: active.themeIdLight, themeDark: active.themeIdDark,
+        },
+        profiles: profiles.map((p) => p.name),
+      });
+    },
+  }),
+
+  define({
+    name: 'set_viewport',
+    title: 'Switch viewport profile',
+    description:
+      'Switch to a saved viewport profile by name — "set viewport default", "set viewport hello world". The '
+      + 'profile brings its zoom, margins and themes along. A unique start of the name is enough; when several '
+      + 'match, the result lists them. Profiles are stored in the browser that has the shell open, so this needs '
+      + 'the shell open in a browser.',
+    schema: z.object({ viewport: z.string().min(1).describe('The profile name, as listed by get_viewport_info.') }),
+    annotations: WRITE,
+    run: async ({ viewport }) => {
+      const info = await ui<ViewportInfo>('getViewportInfo');
+      if (!info.ok) return needUi(info);
+      const m = resolveViewport(info.result.profiles, viewport);
+      const bad = unresolved(m, 'viewport profiles', 'give the full name', (p: ViewportProfileSummary) => p.name);
+      if (bad) return bad;
+      const target = (m as { value: ViewportProfileSummary }).value;
+      const r = await ui<{ from: ViewportProfileSummary | null; to: ViewportProfileSummary }>('setViewport', { id: target.id });
+      if (!r.ok) return needUi(r);
+      const { from, to } = r.result;
+      return ok({
+        viewport: to.name,
+        ...(from ? { from: from.name } : {}),
+        ...(from?.id === to.id ? { note: `"${to.name}" was already the active viewport` } : {}),
+      });
+    },
+  }),
+
+  colorModeTool('light'),
+  colorModeTool('dark'),
 
   define({
     name: 'lock_screen',

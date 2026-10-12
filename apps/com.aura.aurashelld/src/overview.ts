@@ -32,6 +32,7 @@ export interface UiSnapshot {
   launcher?: { open: boolean; query: string };
   processManager?: { open: boolean; filters: { apps: boolean; services: boolean } };
   lockScreen?: { active: boolean | null };
+  viewport?: { activeProfile: string | null; profileCount: number };
 }
 
 export interface WorkspaceLine { number: number; name: string; layout: string }

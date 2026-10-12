@@ -34,10 +34,10 @@ const workspaces = {
 const layouts = [{ id: 'tiling', name: 'Tiling' }, { id: 'stack', name: 'Free Window' }];
 
 /** Script the OS. `uiMode` decides what /api/os/ui/command answers. */
-function fakeOs({ uiMode = 'no-ui', uiResult = {}, region = {} } = {}) {
+function fakeOs({ uiMode = 'no-ui', uiResult = {}, region = {}, theme = null } = {}) {
   resetDedupe();
   const calls = [];
-  const state = { workspaces: JSON.parse(JSON.stringify(workspaces)) };
+  const state = { workspaces: JSON.parse(JSON.stringify(workspaces)), theme };
   setFetch(async (input, init = {}) => {
     const url = new URL(String(input));
     const method = init.method ?? 'GET';
@@ -48,6 +48,8 @@ function fakeOs({ uiMode = 'no-ui', uiResult = {}, region = {} } = {}) {
       case 'GET /api/apps':              return json(apps);
       case 'GET /api/kv/os/workspaces':  return json({ value: state.workspaces });
       case 'PUT /api/kv/os/workspaces':  state.workspaces = body.value; return json({ ok: true });
+      case 'GET /api/kv/os/theme':       return state.theme ? json({ value: state.theme }) : json({ error: 'not found' }, 404);
+      case 'PUT /api/kv/os/theme':       state.theme = body.value; return json({ ok: true });
       case 'GET /api/os/layouts':        return json(layouts);
       case 'GET /api/admin/apps/mru':    return json({ mru: { 'com.aura.terminal': 2, 'io.x.notes': 1 } });
       case 'GET /api/kv/os/lockscreen':  return json({ value: { lockAt: 5, unlockAt: 9 } });
@@ -76,10 +78,10 @@ async function connect() {
 }
 const call = (client, name, args = {}) => client.callTool({ name, arguments: args });
 
-test('the tool list is the documented 25, all with object schemas', async () => {
+test('the tool list is the documented 29, all with object schemas', async () => {
   fakeOs();
   const { tools } = await (await connect()).listTools();
-  assert.equal(tools.length, 25);
+  assert.equal(tools.length, 29);
   assert.deepEqual(tools.map((t) => t.name).sort(), [...TOOL_NAMES].sort());
   assert.ok(tools.every((t) => t.inputSchema.type === 'object'));
   assert.equal(tools.find((t) => t.name === 'stop_process').annotations.destructiveHint, true);
@@ -369,4 +371,94 @@ test('a repeated COMMAND runs again — only questions are absorbed', async () =
   const b = await call(client, 'list_apps');
   assert.equal(a.structuredContent.deduplicated, undefined);
   assert.equal(b.structuredContent.deduplicated, true);
+});
+
+// ── Viewport profiles and light/dark mode ──────────────────────────────────
+
+const viewportInfo = {
+  active: { id: 'default', name: 'Default', zoomPercent: 100, shellZoomPercent: 100, appZoomPercent: 100,
+    margins: { top: 0, right: 0, bottom: 0, left: 0 }, themeIdLight: 'mist', themeIdDark: 'cyan' },
+  profiles: [
+    { id: 'default', name: 'Default' },
+    { id: 'profile-2', name: 'hello world' },
+    { id: 'profile-3', name: 'TV big' },
+    { id: 'profile-4', name: 'TV small' },
+  ],
+};
+/** A browser that answers getViewportInfo and setViewport like StatusBar.astro does. */
+const viewportUi = (body) => {
+  if (body.action === 'getViewportInfo') return viewportInfo;
+  if (body.action === 'setViewport') {
+    const to = viewportInfo.profiles.find((p) => p.id === body.params.id);
+    return { from: { id: 'default', name: 'Default' }, to };
+  }
+  return {};
+};
+const uiCalls = (calls) => calls.filter((c) => c.path === '/api/os/ui/command').map((c) => c.body);
+
+test('set_viewport switches by exact name, by a unique start, and says when it was already active', async () => {
+  const { calls } = fakeOs({ uiMode: 'ok', uiResult: viewportUi });
+  const client = await connect();
+  let r = await call(client, 'set_viewport', { viewport: 'Hello World' });
+  assert.ok(!r.isError, r.content[0].text);
+  assert.deepEqual(r.structuredContent, { viewport: 'hello world', from: 'Default' });
+  assert.deepEqual(uiCalls(calls).at(-1), { action: 'setViewport', params: { id: 'profile-2' }, timeoutMs: 8000 });
+  r = await call(client, 'set_viewport', { viewport: 'hello' });
+  assert.equal(r.structuredContent.viewport, 'hello world');
+  r = await call(client, 'set_viewport', { viewport: 'default' });
+  assert.match(r.structuredContent.note, /already the active viewport/);
+});
+
+test('set_viewport: several matches give candidates, an unknown name lists what exists, and neither switches', async () => {
+  const { calls } = fakeOs({ uiMode: 'ok', uiResult: viewportUi });
+  const client = await connect();
+  let r = await call(client, 'set_viewport', { viewport: 'tv' });
+  assert.equal(r.structuredContent.ambiguous, true);
+  assert.deepEqual(r.structuredContent.candidates, ['TV big', 'TV small']);
+  r = await call(client, 'set_viewport', { viewport: 'phone' });
+  assert.equal(r.isError, true);
+  assert.match(r.content[0].text, /no viewport profile called "phone"; available: Default, hello world, TV big, TV small/);
+  assert.ok(!uiCalls(calls).some((b) => b.action === 'setViewport'));
+});
+
+test('set_viewport without a browser says so', async () => {
+  fakeOs();
+  const r = await call(await connect(), 'set_viewport', { viewport: 'default' });
+  assert.equal(r.isError, true);
+  assert.match(r.content[0].text, /no shell UI is connected/);
+});
+
+test('get_viewport_info: the active profile, all names and the color mode; without a browser only the mode', async () => {
+  fakeOs({ uiMode: 'ok', uiResult: viewportUi, theme: { colorMode: 'light' } });
+  let o = (await call(await connect(), 'get_viewport_info')).structuredContent;
+  assert.equal(o.colorMode, 'light');
+  assert.equal(o.active.name, 'Default');
+  assert.equal(o.active.zoom, '100%');
+  assert.deepEqual(o.profiles, ['Default', 'hello world', 'TV big', 'TV small']);
+  fakeOs();
+  o = (await call(await connect(), 'get_viewport_info')).structuredContent;
+  assert.equal(o.colorMode, 'dark', 'an unset theme is dark, the OS default');
+  assert.equal(o.profiles, null);
+  assert.match(o.summary, /Viewport profiles unknown: no shell UI is connected/);
+});
+
+test('set_dark_mode / set_light_mode write the KV without a browser and keep the theme picks', async () => {
+  const { state } = fakeOs({ theme: { themeIdDark: 'cyan', themeIdLight: 'mist', colorMode: 'light' } });
+  const client = await connect();
+  let r = await call(client, 'set_dark_mode');
+  assert.ok(!r.isError, r.content[0].text);
+  assert.deepEqual(r.structuredContent, { colorMode: 'dark', from: 'light' });
+  assert.deepEqual(state.theme, { themeIdDark: 'cyan', themeIdLight: 'mist', colorMode: 'dark' });
+  r = await call(client, 'set_dark_mode');
+  assert.equal(r.structuredContent.note, 'already in dark mode');
+  r = await call(client, 'set_light_mode');
+  assert.deepEqual(r.structuredContent, { colorMode: 'light', from: 'dark' });
+  assert.equal(state.theme.themeIdDark, 'cyan');
+});
+
+test('overview details carry the viewport profile and the color mode', async () => {
+  fakeOs({ uiMode: 'ok', uiResult: { viewport: { activeProfile: 'hello world', profileCount: 2 } }, theme: { colorMode: 'auto' } });
+  const o = (await call(await connect(), 'get_shell_overview')).structuredContent;
+  assert.equal(o.details.viewport, 'hello world');
+  assert.equal(o.details.colorMode, 'auto');
 });

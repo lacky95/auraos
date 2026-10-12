@@ -1586,6 +1586,38 @@ let initialTimeZone: string = '';
     layouts: availableLayouts,
   }));
 
+  // Viewport profiles live in THIS browser's localStorage, so the daemon can
+  // only reach them through here. setActive ignores an unknown id, so the
+  // handler checks first and says so instead of reporting a switch.
+  const viewportState = async () => viewportClient.getCached() ?? await viewportClient.refresh();
+  registerUiCommand('getViewportInfo', async () => {
+    const s = await viewportState();
+    const p = s.profiles.find((x) => x.id === s.activeProfileId) ?? s.profiles[0]!;
+    return {
+      active: {
+        id: p.id, name: p.name,
+        zoomPercent: Math.round(p.zoom * 100),
+        shellZoomPercent: Math.round(p.shellZoom * 100),
+        appZoomPercent: Math.round(p.appZoom * 100),
+        margins: p.margins,
+        themeIdLight: p.themeIdLight, themeIdDark: p.themeIdDark,
+      },
+      profiles: s.profiles.map((x) => ({ id: x.id, name: x.name })),
+    };
+  });
+  registerUiCommand('setViewport', async ({ id }) => {
+    const s = await viewportState();
+    const to = s.profiles.find((x) => x.id === id);
+    if (!to) throw new Error(`no viewport profile with id "${String(id)}"`);
+    const from = s.profiles.find((x) => x.id === s.activeProfileId) ?? null;
+    viewportClient.setActive(to.id);
+    return { from: from ? { id: from.id, name: from.name } : null, to: { id: to.id, name: to.name } };
+  });
+  registerSnapshotPart('viewport', () => {
+    const s = viewportClient.getCached();
+    return { activeProfile: viewportClient.activeProfile()?.name ?? null, profileCount: s?.profiles.length ?? 0 };
+  });
+
   // ─── Chrome arrow-key navigation ───────────────────────────────────────
   // Mirror of the Dock handler — same rules but inverted:
   //   • ArrowLeft / ArrowRight — prev/next button in this bar.

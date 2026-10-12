@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { resolveApp, resolveWorkspace, resolveLayout, resolveWindow, resolveProcess, nextLayout } = await import('../src/resolve.ts');
+const { resolveApp, resolveWorkspace, resolveLayout, resolveWindow, resolveProcess, resolveViewport, nextLayout } = await import('../src/resolve.ts');
 
 const apps = [
   { id: 'com.aura.terminal', name: 'Terminal', service: false, enabled: true },
@@ -82,4 +82,20 @@ test('processes: instance id, app name, app id', () => {
   assert.equal(resolveProcess(procs, 'Terminal').value.instanceId, 'com.aura.terminal-2');
   assert.equal(resolveProcess(procs, 'com.aura.registry').value.kind, 'service');
   assert.equal(resolveProcess(procs, 'terminal-2').value.appId, 'com.aura.terminal');
+});
+
+test('viewport profiles: exact name, then a unique start, then substring; ties give candidates', () => {
+  const profiles = [
+    { id: 'default', name: 'Default' }, { id: 'profile-2', name: 'hello world' },
+    { id: 'profile-3', name: 'TV big' }, { id: 'profile-4', name: 'TV small' }, { id: 'profile-5', name: 'small desk' },
+  ];
+  assert.equal(resolveViewport(profiles, 'HELLO  WORLD').value.id, 'profile-2');
+  assert.equal(resolveViewport(profiles, 'profile-3').value.name, 'TV big');
+  assert.equal(resolveViewport(profiles, 'hel').value.name, 'hello world');
+  // "small" starts only "small desk", so the start tier decides before the substring tier sees "TV small".
+  assert.equal(resolveViewport(profiles, 'small').value.name, 'small desk');
+  assert.deepEqual(resolveViewport(profiles, 'tv').candidates.map((p) => p.name), ['TV big', 'TV small']);
+  assert.equal(resolveViewport(profiles, 'world').value.name, 'hello world');
+  assert.match(resolveViewport(profiles, 'phone').message, /available: Default, hello world/);
+  assert.equal(resolveViewport(profiles, '  ').kind, 'none');
 });
