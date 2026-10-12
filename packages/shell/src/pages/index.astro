@@ -2191,7 +2191,7 @@ const ssrVisibleViews = initialViews
     } else if (layoutId === 'columns') {
       Object.assign(dynamicLayout.style, {
         display: 'grid',
-        gridTemplateColumns: `repeat(${visible.length}, 1fr)`,
+        gridTemplateColumns: `repeat(${visible.length}, minmax(0, 1fr))`,
         gridTemplateRows: minimized.length > 0 ? 'auto 1fr' : '1fr',
         gap: '2px',
         background: 'var(--aura-color-bg)',
@@ -2228,7 +2228,7 @@ const ssrVisibleViews = initialViews
       const rows = Math.ceil(visible.length / cols);
       Object.assign(dynamicLayout.style, {
         display: 'grid',
-        gridTemplateColumns: `repeat(${cols}, 1fr)`,
+        gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
         gridTemplateRows: minimized.length > 0
           ? `auto repeat(${rows}, 1fr)`
           : `repeat(${rows}, 1fr)`,
@@ -2292,11 +2292,18 @@ const ssrVisibleViews = initialViews
     // focused one ends up on top via DOM order); columns / rows / stack
     // lay slots out in a single row / column respectively.
     const tilingCols = Math.max(1, Math.ceil(Math.sqrt(visible.length)));
-    function placement(i: number): { col: number; row: number } {
-      if (layoutId === 'fullscreen') return { col: 1, row: baseRow };
-      if (layoutId === 'columns')    return { col: i + 1, row: baseRow };
-      if (layoutId === 'rows')       return { col: 1, row: i + baseRow };
-      return { col: (i % tilingCols) + 1, row: Math.floor(i / tilingCols) + baseRow };
+    const tilingRows = Math.max(1, Math.ceil(visible.length / tilingCols));
+    function placement(i: number): { col: number; row: number; span: number } {
+      if (layoutId === 'fullscreen') return { col: 1, row: baseRow, span: 1 };
+      if (layoutId === 'columns')    return { col: i + 1, row: baseRow, span: 1 };
+      if (layoutId === 'rows')       return { col: 1, row: i + baseRow, span: 1 };
+      // Tiling: a slot expands vertically over every empty cell below it, so
+      // e.g. 3 windows in a 2×2 grid give the right-hand one full height.
+      const c = i % tilingCols;
+      const r = Math.floor(i / tilingCols);
+      let span = 1;
+      while (r + span < tilingRows && (r + span) * tilingCols + c >= visible.length) span++;
+      return { col: c + 1, row: r + baseRow, span };
     }
 
     // Visible-in-active-workspace slots: place into the grid OR the
@@ -2365,7 +2372,7 @@ const ssrVisibleViews = initialViews
         teardownStackHandlers(el);
         const p = placement(i);
         el.style.gridColumn = String(p.col);
-        el.style.gridRow    = String(p.row);
+        el.style.gridRow    = p.span > 1 ? `${p.row} / span ${p.span}` : String(p.row);
       }
     });
 
