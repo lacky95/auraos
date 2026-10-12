@@ -1,0 +1,603 @@
+import { execFile } from 'node:child_process';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { connect } from 'node:net';
+import { dirname, join } from 'node:path';
+import type { AppRegistry } from './AppRegistry.js';
+import type { ContainerRunner } from './ContainerRunner.js';
+import type { InstanceTokens } from './InstanceTokens.js';
+import type { FanoutTarget, MountManager } from './MountManager.js';
+import { MOUNT_ROOT_PATH } from './MountManager.js';
+import type { PermissionManager } from '../permissions/PermissionManager.js';
+import { toolsGrant } from './tool-allowlist.js';
+import { MY_TOOLS_PATH } from './tool-provision.js';
+import {
+  SpecError, resolveSidecarSpec, specHash,
+  type ResolvedSidecarSpec, type SidecarSpawnRequest,
+} from './sidecar-spec.js';
+
+/**
+ * OS-managed sidecars: the official way for an app to run a foreign image
+ * next to itself. The app asks (`POST /api/instances/:id/sidecars`, or
+ * `osSidecars()` in the SDK); the OS validates the request against the app's
+ * `services[]` templates and permissions (sidecar-spec.ts) and does the
+ * `docker run` — the app needs no docker tool and never touches the socket.
+ *
+ * Built like PortManager: docker is the source of truth. Every OS sidecar
+ * carries its full record in labels, so a shell restart re-learns everything
+ * from `docker ps` (reconcile). `aura.parent` makes the existing reaper treat
+ * it like any sidecar — removed on stop and crash, skipped by orphan adoption.
+ *
+ *   aura.parent=<instanceId>  aura.app=<appId>  aura.service=<name>
+ *   aura.managed=os           aura.sidecar.template=<template>
+ *   aura.sidecar.owner=<sidecar that spawned it, or ->
+ *   aura.sidecar.spec=<json SpecRecord>
+ *
+ * Apps that run docker themselves (SDK docker mode, raw `docker run`) keep
+ * working unchanged; their containers lack `aura.managed=os`, and this
+ * manager never touches them (a name collision is a 409, unless the caller
+ * asks to take over its own app-managed container).
+ *
+ * Every docker call is async: dynamic sidecars come in bursts, and the shell's
+ * event loop serves every app at once.
+ */
+
+export interface SidecarMountsView { own: boolean; inherit: boolean; exclude: string[]; forceRo: boolean }
+
+/** JSON stored in the `aura.sidecar.spec` label. */
+interface SpecRecord {
+  name: string;
+  template: string;
+  image: string;
+  specHash: string;
+  nonce?: string;
+  port?: number;
+  mounts: SidecarMountsView;
+  owner?: string;
+  createdAt: string;
+}
+
+/** What the API returns for an OS sidecar. */
+export interface OsSidecar {
+  name: string;
+  template: string;
+  image: string;
+  /** Docker container name — also its DNS name on aura-net. */
+  containerName: string;
+  /** Where the app reaches it (== containerName). */
+  host: string;
+  port?: number;
+  state: string;
+  createdAt: string;
+  /** Sidecar that spawned this one (grandchild), if any. */
+  owner?: string;
+  managedBy: 'os';
+  mounts: SidecarMountsView;
+  specHash: string;
+}
+
+export interface ExecRequest {
+  cmd: string[];
+  user?: string;
+  workdir?: string;
+  env?: Record<string, string>;
+  /** Small stdin payload (≤ 64 KiB). */
+  stdin?: string;
+  /** Default 30 s, max 10 min. */
+  timeoutMs?: number;
+}
+
+export interface ExecResult {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  truncated: boolean;
+  timedOut: boolean;
+}
+
+export interface Caller {
+  instanceId: string;
+  /** Set when an OS sidecar (with its own token) is calling — a grandchild spawn. */
+  sidecar?: string;
+}
+
+interface SidecarManagerOpts {
+  runner: ContainerRunner;
+  registry: AppRegistry;
+  permissions: PermissionManager;
+  tokens: InstanceTokens;
+  mounts: MountManager;
+  /** Live instance → app + its shell-side data dir. */
+  instance(instanceId: string): { appId: string; instanceDataDir: string } | null;
+}
+
+const MAX_PER_INSTANCE = Number(process.env['AURA_SIDECAR_MAX_PER_INSTANCE'] ?? 32);
+const MAX_STDIN = 64 * 1024;
+const MAX_OUTPUT = 4 * 1024 * 1024;
+const PULL_TIMEOUT_MS = 10 * 60_000;
+const DOCKER_SOCK = '/var/run/docker.sock';
+
+interface DockerResult { code: number | null; stdout: string; stderr: string; timedOut: boolean; truncated: boolean }
+
+/** Run docker; never rejects — the caller decides what a non-zero exit means. */
+function docker(args: string[], opts: { timeoutMs?: number; input?: string; maxBuffer?: number } = {}): Promise<DockerResult> {
+  return new Promise((resolve) => {
+    // Own timer instead of execFile's `timeout`: the docker CLI forwards the
+    // SIGTERM to the exec'd process and then exits CLEANLY, so execFile
+    // reports no error at all and a timeout would read as success.
+    let timedOut = false;
+    const child = execFile('docker', args, {
+      maxBuffer: opts.maxBuffer ?? MAX_OUTPUT,
+      encoding: 'utf-8',
+    }, (err, stdout, stderr) => {
+      clearTimeout(timer);
+      clearTimeout(hardKill);
+      const e = err as (NodeJS.ErrnoException & { code?: number | string }) | null;
+      resolve({
+        code: timedOut ? null : e ? (typeof e.code === 'number' ? e.code : null) : 0,
+        stdout: String(stdout ?? ''),
+        stderr: String(stderr ?? '') || (e && typeof e.code !== 'number' ? e.message : ''),
+        timedOut,
+        truncated: e?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+      });
+    });
+    let hardKill: NodeJS.Timeout | undefined;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+      hardKill = setTimeout(() => child.kill('SIGKILL'), 2_000);
+    }, opts.timeoutMs ?? 60_000);
+    if (opts.input !== undefined) child.stdin?.end(opts.input);
+  });
+}
+
+async function dockerOk(args: string[], what: string, timeoutMs?: number): Promise<string> {
+  const r = await docker(args, { timeoutMs });
+  if (r.code !== 0) throw new Error(`${what}: ${r.stderr.trim() || `docker exited ${r.code}`}`);
+  return r.stdout;
+}
+
+export function sidecarContainerName(instanceId: string, name: string): string {
+  return `aura-${instanceId}--${name}`;
+}
+
+export class SidecarManager {
+  /** consumerKey → what fan-out needs about each live OS sidecar. */
+  private live = new Map<string, { instanceId: string; name: string; mounts: SidecarMountsView }>();
+  private locks = new Map<string, Promise<unknown>>();
+  private pulls = new Map<string, Promise<void>>();
+
+  constructor(private readonly opts: SidecarManagerOpts) {}
+
+  /** Serialise work on one container name (concurrent spawn/delete of the same sidecar). */
+  private async locked<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.locks.get(key) ?? Promise.resolve();
+    const run = prev.catch(() => undefined).then(fn);
+    this.locks.set(key, run);
+    try { return await run; } finally { if (this.locks.get(key) === run) this.locks.delete(key); }
+  }
+
+  // ─── Queries ───────────────────────────────────────────────────────────
+
+  /** OS sidecars of an instance, straight from docker. */
+  async list(instanceId: string): Promise<OsSidecar[]> {
+    const out = await dockerOk(['ps', '-a',
+      '--filter', 'label=aura.managed=os', '--filter', `label=aura.parent=${instanceId}`,
+      '--format', '{{.Names}}\t{{.State}}\t{{.Label "aura.sidecar.spec"}}'], 'docker ps');
+    return out.split('\n').filter(Boolean).flatMap((line) => {
+      const [name, state, spec] = line.split('\t');
+      const rec = parseRecord(spec);
+      return rec ? [toView(name!, state ?? 'unknown', rec)] : [];
+    });
+  }
+
+  async get(instanceId: string, name: string): Promise<OsSidecar | null> {
+    const found = await this.inspect(sidecarContainerName(instanceId, name));
+    if (!found || found.labels['aura.managed'] !== 'os' || found.labels['aura.parent'] !== instanceId) return null;
+    const rec = parseRecord(found.labels['aura.sidecar.spec']);
+    return rec ? toView(found.name, found.state, rec) : null;
+  }
+
+  /** Inheriting OS sidecars of an instance — MountManager's fan-out targets. */
+  fanoutTargets(instanceId: string): FanoutTarget[] {
+    return [...this.live.entries()]
+      .filter(([, v]) => v.instanceId === instanceId && v.mounts.inherit)
+      .map(([consumer, v]) => ({ consumer, exclude: v.mounts.exclude, forceRo: v.mounts.forceRo }));
+  }
+
+  /** `<instanceId>--<name>` of every live OS sidecar (mount reconcile needs them). */
+  liveConsumerKeys(): string[] {
+    return [...this.live.keys()];
+  }
+
+  // ─── Spawn ─────────────────────────────────────────────────────────────
+
+  async spawn(instanceId: string, req: SidecarSpawnRequest, caller: Caller): Promise<{ created: boolean; sidecar: OsSidecar }> {
+    const inst = this.opts.instance(instanceId);
+    if (!inst) throw new SpecError(404, `Instance not found: ${instanceId}`);
+    const manifest = this.opts.registry.getById(inst.appId);
+    if (!manifest) throw new SpecError(404, `App not found: ${inst.appId}`);
+    const rt = this.opts.runner.sidecarRuntime();
+    const appDataSubpath = dirname(inst.instanceDataDir).slice(rt.dataDir.length).replace(/^\/+/, '');
+
+    // Legacy per-app volumes only matter for templates the SDK ran before.
+    const legacy = new Set<string>();
+    for (const v of (manifest.services ?? []).flatMap((s) => s.volumes ?? [])) {
+      const name = `aura-${inst.appId}-${v.name}`;
+      if ((await docker(['volume', 'inspect', name])).code === 0) legacy.add(name);
+    }
+    const spec = resolveSidecarSpec(req, {
+      appId: inst.appId,
+      instanceId,
+      manifest,
+      can: (p) => this.opts.permissions.hasPermission(inst.appId, p),
+      appDataSubpath,
+      appDataVolume: rt.appDataVolume,
+      legacyVolumeExists: (n) => legacy.has(n),
+      hasDockerTool: toolsGrant(manifest.tools ?? [], 'docker'),
+    });
+    const hash = specHash(spec);
+    const container = sidecarContainerName(instanceId, spec.name);
+
+    return this.locked(container, async () => {
+      const existing = await this.inspect(container);
+      if (existing) {
+        const managed = existing.labels['aura.managed'] === 'os';
+        if (!managed) {
+          if (!(req.takeover && existing.labels['aura.parent'] === instanceId)) {
+            throw new SpecError(409, `${container} exists but is not OS-managed (the app runs it itself) — pass takeover: true to replace your own app-managed container`);
+          }
+        } else {
+          const rec = parseRecord(existing.labels['aura.sidecar.spec']);
+          if (rec && rec.specHash === hash && existing.state === 'running') {
+            // Same spec, already up: adopt. Re-learn its nonce and make sure its
+            // mounts are there (idempotent — present ones are skipped).
+            if (rec.nonce) this.opts.tokens.register(instanceId, rec.nonce, spec.name);
+            this.track(instanceId, spec.name, rec.mounts);
+            if (rec.mounts.own || rec.mounts.inherit) {
+              await this.opts.mounts.reapplyConsumer(`${instanceId}--${spec.name}`, rec.mounts);
+            }
+            return { created: false, sidecar: toView(container, existing.state, rec) };
+          }
+          if (rec && rec.specHash !== hash && req.replace === false) {
+            throw new SpecError(409, `${container} runs a different spec — pass replace: true (the default) to recreate it`);
+          }
+        }
+        // Recreate. Own mount declarations stay; the binds go with the container.
+        this.opts.mounts.removeAll(`${instanceId}--${spec.name}`);
+        await dockerOk(['rm', '-f', container], `docker rm ${container}`);
+        this.untrack(instanceId, spec.name);
+      } else {
+        const count = (await this.list(instanceId)).length;
+        if (count >= MAX_PER_INSTANCE) {
+          throw new SpecError(429, `${instanceId} already runs ${count} OS sidecars (limit ${MAX_PER_INSTANCE}, AURA_SIDECAR_MAX_PER_INSTANCE)`);
+        }
+      }
+
+      await this.ensureImage(spec.image);
+      for (const v of spec.volumes) if (v.subpath) mkdirSync(join(rt.dataDir, v.subpath), { recursive: true });
+      const wantsMountRoot = spec.mounts.own || spec.mounts.inherit;
+      const consumer = `${instanceId}--${spec.name}`;
+      if (wantsMountRoot) mkdirSync(this.opts.runner.mountRootDir(consumer), { recursive: true });
+
+      const env = await this.environment(instanceId, inst.appId, spec);
+      if (spec.seed) await this.seed(instanceId, spec, appDataSubpath, env);
+
+      const token = spec.inheritIdentity ? this.opts.tokens.mint(instanceId, spec.name) : null;
+      const record: SpecRecord = {
+        name: spec.name, template: spec.template, image: spec.image, specHash: hash,
+        ...(token ? { nonce: token.nonce } : {}),
+        ...(spec.port !== undefined ? { port: spec.port } : {}),
+        mounts: spec.mounts,
+        ...(caller.sidecar ? { owner: caller.sidecar } : {}),
+        createdAt: new Date().toISOString(),
+      };
+      const args = await this.createArgs(instanceId, inst.appId, container, spec, record, env, token?.token ?? null);
+      const id = (await dockerOk(args, `docker create ${container}`)).trim();
+      const started = await docker(['start', id]);
+      if (started.code !== 0) {
+        await docker(['rm', '-f', id]);
+        if (token) this.opts.tokens.forget(instanceId, spec.name);
+        throw new Error(`docker start ${container}: ${started.stderr.trim()}`);
+      }
+
+      // A runtime that dies on boot (bad command, missing config) should fail
+      // the spawn with its own words, not leave a corpse behind.
+      await new Promise((r) => setTimeout(r, 400));
+      const after = await this.inspect(container);
+      if (!after || after.state !== 'running') {
+        const logs = await docker(['logs', '--tail', '20', container]);
+        await docker(['rm', '-f', container]);
+        if (token) this.opts.tokens.forget(instanceId, spec.name);
+        throw new Error(`${container} exited right after start:\n${(logs.stdout + logs.stderr).trim() || '(no output)'}`);
+      }
+
+      this.track(instanceId, spec.name, spec.mounts);
+      if (wantsMountRoot) await this.opts.mounts.reapplyConsumer(consumer, spec.mounts);
+      if (req.wait?.port && spec.port) await waitForPort(container, spec.port, req.wait.timeoutMs ?? 60_000);
+      return { created: true, sidecar: toView(container, 'running', record) };
+    });
+  }
+
+  private async ensureImage(image: string): Promise<void> {
+    if ((await docker(['image', 'inspect', '--format', '{{.Id}}', image])).code === 0) return;
+    let pull = this.pulls.get(image);
+    if (!pull) {
+      pull = dockerOk(['pull', image], `docker pull ${image}`, PULL_TIMEOUT_MS).then(() => undefined);
+      this.pulls.set(image, pull);
+      void pull.finally(() => this.pulls.delete(image)).catch(() => undefined);
+    }
+    await pull;
+  }
+
+  /** Env from envInherit (OS Context, then the app container's env), then the spec's own. */
+  private async environment(instanceId: string, appId: string, spec: ResolvedSidecarSpec): Promise<Record<string, string>> {
+    const env: Record<string, string> = {};
+    if (spec.envInherit.length) {
+      const ctx = await this.opts.runner.resolveContextEnv().catch(() => ({} as Record<string, string>));
+      let parentEnv: Record<string, string> | null = null;
+      for (const name of spec.envInherit) {
+        if (ctx[name] !== undefined) { env[name] = ctx[name]; continue; }
+        parentEnv ??= await this.containerEnv(`aura-${instanceId}`);
+        if (parentEnv[name] !== undefined) env[name] = parentEnv[name];
+      }
+    }
+    void appId;
+    return { ...env, ...spec.env };
+  }
+
+  private async containerEnv(container: string): Promise<Record<string, string>> {
+    const r = await docker(['inspect', '--format', '{{range .Config.Env}}{{println .}}{{end}}', container]);
+    const env: Record<string, string> = {};
+    for (const line of r.stdout.split('\n')) {
+      const i = line.indexOf('=');
+      if (i > 0) env[line.slice(0, i)] = line.slice(i + 1);
+    }
+    return env;
+  }
+
+  private volumeArgs(spec: ResolvedSidecarSpec): string[] {
+    return spec.volumes.flatMap((v) => ['--mount',
+      `type=volume,source=${v.source},target=${v.target}${v.subpath ? `,volume-subpath=${v.subpath}` : ''}`]);
+  }
+
+  /**
+   * One-shot init run before the first start, through the image's own
+   * entrypoint (like `command`); a marker file makes it run once per sidecar
+   * data dir.
+   */
+  private async seed(instanceId: string, spec: ResolvedSidecarSpec, appDataSubpath: string, env: Record<string, string>): Promise<void> {
+    const rt = this.opts.runner.sidecarRuntime();
+    const marker = join(rt.dataDir, appDataSubpath, '.sidecars', spec.name, '.aura-seeded');
+    if (existsSync(marker)) return;
+    // aura.mount=1 keeps the throwaway out of sidecar listings; aura.parent
+    // lets the reaper remove it if the instance dies mid-seed.
+    const args = ['run', '--rm', '--network', rt.network, '--label', 'aura.mount=1', '--label', `aura.parent=${instanceId}`,
+      ...this.volumeArgs(spec),
+      ...Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+      ...(spec.user ? ['--user', spec.user] : []),
+      ...(spec.workdir ? ['--workdir', spec.workdir] : []),
+      spec.image, ...spec.seed!.command];
+    const r = await docker(args, { timeoutMs: 10 * 60_000 });
+    if (r.code !== 0) throw new Error(`seed for ${spec.name} failed: ${(r.stderr || r.stdout).trim().slice(-2000)}`);
+    mkdirSync(dirname(marker), { recursive: true });
+    writeFileSync(marker, new Date().toISOString());
+  }
+
+  private async createArgs(
+    instanceId: string, appId: string, container: string, spec: ResolvedSidecarSpec,
+    record: SpecRecord, env: Record<string, string>, token: string | null,
+  ): Promise<string[]> {
+    const rt = this.opts.runner.sidecarRuntime();
+    const consumer = `${instanceId}--${spec.name}`;
+    const identity: Record<string, string> = spec.inheritIdentity ? {
+      AURA_APP_ID: appId,
+      AURA_INSTANCE_ID: instanceId,
+      AURA_SIDECAR_NAME: spec.name,
+      AURA_OS_URL: rt.osApiBase,
+      OS_API_BASE: rt.osApiBase,
+      AURA_SHELL_HOSTNAME: rt.shellHostname,
+      ...(token ? { AURA_INSTANCE_TOKEN: token } : {}),
+    } : {};
+    const manifest = this.opts.registry.getById(appId);
+    const a: string[] = [
+      'create', '--name', container, '--network', rt.network, '--restart', spec.restart,
+      '--label', `aura.parent=${instanceId}`,
+      '--label', `aura.app=${appId}`,
+      '--label', `aura.service=${spec.name}`,
+      '--label', 'aura.managed=os',
+      '--label', `aura.sidecar.template=${spec.template}`,
+      '--label', `aura.sidecar.owner=${record.owner ?? '-'}`,
+      '--label', `aura.sidecar.spec=${JSON.stringify(record)}`,
+      ...spec.dns.flatMap((d) => ['--dns', d]),
+      ...spec.publish.flatMap((p) => ['-p', `${p.host}:${p.container}`]),
+      ...this.volumeArgs(spec),
+      // Identity last: a template env key can't replace the OS's own values.
+      ...Object.entries({ ...env, ...identity }).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+      ...spec.capabilities.flatMap((c) => ['--cap-add', c]),
+      ...spec.devices.flatMap((d) => ['--device', d]),
+      ...(spec.privileged ? ['--privileged'] : []),
+      ...(spec.limits?.memory ? ['--memory', spec.limits.memory] : []),
+      ...(spec.limits?.cpus ? ['--cpus', String(spec.limits.cpus)] : []),
+      ...(spec.user ? ['--user', spec.user] : []),
+      ...(spec.workdir ? ['--workdir', spec.workdir] : []),
+      ...(spec.inheritPermissions && manifest?.permissions?.length ? ['-e', `AURA_PERMISSIONS=${manifest.permissions.join(',')}`] : []),
+    ];
+    if (spec.inheritTools) a.push(...await this.toolArgs(instanceId, spec.image));
+    if (spec.mounts.own || spec.mounts.inherit) {
+      a.push('--mount', `type=volume,source=${rt.appDataVolume},target=${MOUNT_ROOT_PATH},volume-subpath=${this.opts.runner.mountRootSubpath(consumer)}`,
+        '-e', `AURA_MOUNT_ROOT=${MOUNT_ROOT_PATH}`);
+    }
+    // resolveSidecarSpec already refused this unless the app holds docker itself.
+    if (spec.inheritDockerSocket) a.push('-v', `${DOCKER_SOCK}:${DOCKER_SOCK}`);
+    a.push(spec.image, ...spec.command);
+    return a;
+  }
+
+  /** The app's granted tools, mounted the way ContainerRunner mounts them (port of the SDK's `inheritTools`). */
+  private async toolArgs(instanceId: string, image: string): Promise<string[]> {
+    const rt = this.opts.runner.sidecarRuntime();
+    const r = await docker(['image', 'inspect', image, '--format', '{{range .Config.Env}}{{println .}}{{end}}']);
+    const basePath = r.stdout.split('\n').find((l) => l.startsWith('PATH='))?.slice('PATH='.length)
+      ?? '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+    return [
+      ...(rt.toolsMode === 'symlink'
+        ? ['--mount', `type=volume,source=${rt.appDataVolume},target=/aura/all-tools,volume-subpath=aura/toolchain/bin,readonly`]
+        : []),
+      '--mount', `type=volume,source=${rt.appDataVolume},target=${MY_TOOLS_PATH},volume-subpath=aura/runtime/${instanceId}/tools,readonly`,
+      '-v', `${rt.workspaceRoot}/packages:/workspace/packages:ro`,
+      '--mount', `type=volume,source=${rt.nodeModulesVolume},target=/workspace/node_modules,readonly`,
+      '-e', `PATH=${MY_TOOLS_PATH}:${basePath}`,
+      '-v', `${rt.workspaceRoot}/os/bashrc.aura.sh:/etc/profile.d/aura-prompt.sh:ro`,
+    ];
+  }
+
+  // ─── Remove / exec / logs ──────────────────────────────────────────────
+
+  /** Delete an OS sidecar and every sidecar it spawned (grandchildren). */
+  async remove(instanceId: string, name: string): Promise<void> {
+    const container = sidecarContainerName(instanceId, name);
+    await this.locked(container, async () => {
+      const found = await this.inspect(container);
+      if (!found || found.labels['aura.managed'] !== 'os' || found.labels['aura.parent'] !== instanceId) {
+        throw new SpecError(404, `no OS sidecar '${name}' in ${instanceId}`);
+      }
+      const children = await dockerOk(['ps', '-aq', '--filter', 'label=aura.managed=os',
+        '--filter', `label=aura.parent=${instanceId}`, '--filter', `label=aura.sidecar.owner=${name}`], 'docker ps');
+      for (const child of children.split('\n').filter(Boolean)) {
+        const c = await this.inspect(child);
+        const childName = c?.labels['aura.service'];
+        if (childName && childName !== name) await this.remove(instanceId, childName).catch(() => undefined);
+      }
+      this.opts.mounts.forgetConsumer(`${instanceId}--${name}`);
+      await dockerOk(['rm', '-f', container], `docker rm ${container}`);
+      this.opts.tokens.forget(instanceId, name);
+      this.untrack(instanceId, name);
+    });
+  }
+
+  async exec(instanceId: string, name: string, req: ExecRequest): Promise<ExecResult> {
+    if (!Array.isArray(req.cmd) || req.cmd.length === 0 || !req.cmd.every((c) => typeof c === 'string')) {
+      throw new SpecError(400, 'cmd must be a non-empty array of strings');
+    }
+    if (req.stdin !== undefined && Buffer.byteLength(req.stdin) > MAX_STDIN) throw new SpecError(413, 'stdin is limited to 64 KiB');
+    const timeoutMs = Math.min(Math.max(req.timeoutMs ?? 30_000, 1_000), 10 * 60_000);
+    const sc = await this.get(instanceId, name);
+    if (!sc) throw new SpecError(404, `no OS sidecar '${name}' in ${instanceId}`);
+    if (sc.state !== 'running') throw new SpecError(409, `${sc.containerName} is ${sc.state}`);
+    const r = await docker(['exec',
+      ...(req.stdin !== undefined ? ['-i'] : []),
+      ...(req.user ? ['--user', req.user] : []),
+      ...(req.workdir ? ['--workdir', req.workdir] : []),
+      ...Object.entries(req.env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+      sc.containerName, ...req.cmd], { timeoutMs, input: req.stdin });
+    return { exitCode: r.timedOut ? null : r.code, stdout: r.stdout, stderr: r.stderr, truncated: r.truncated, timedOut: r.timedOut };
+  }
+
+  async logs(instanceId: string, name: string, opts: { tail?: number; since?: string; timestamps?: boolean } = {}): Promise<{ stdout: string; stderr: string }> {
+    const sc = await this.get(instanceId, name);
+    if (!sc) throw new SpecError(404, `no OS sidecar '${name}' in ${instanceId}`);
+    const tail = Math.min(Math.max(Math.floor(opts.tail ?? 200), 1), 5000);
+    const r = await docker(['logs', '--tail', String(tail),
+      ...(opts.since ? ['--since', opts.since] : []),
+      ...(opts.timestamps ? ['--timestamps'] : []),
+      sc.containerName]);
+    if (r.code !== 0) throw new Error(`docker logs ${sc.containerName}: ${r.stderr.trim()}`);
+    return { stdout: r.stdout, stderr: r.stderr };
+  }
+
+  // ─── Lifecycle ─────────────────────────────────────────────────────────
+
+  /**
+   * The instance stopped or crashed. Its containers go with `reapSiblingsOf`
+   * and their binds with MountManager; only the in-memory view is ours.
+   */
+  removeAll(instanceId: string): void {
+    for (const [key, v] of this.live) if (v.instanceId === instanceId) this.live.delete(key);
+  }
+
+  /**
+   * After a shell restart: re-learn every OS sidecar from docker — nonces back
+   * into InstanceTokens, inheritance back into the fan-out view — and remove
+   * the ones whose instance no longer exists. Run after orphan adoption and
+   * BEFORE mount reconcile (which needs `liveConsumerKeys()`).
+   */
+  async reconcile(liveInstanceIds: Set<string>): Promise<{ adopted: number; reaped: number }> {
+    let adopted = 0, reaped = 0;
+    const r = await docker(['ps', '-a', '--filter', 'label=aura.managed=os',
+      '--format', '{{.Names}}\t{{.Label "aura.parent"}}\t{{.Label "aura.sidecar.spec"}}']);
+    if (r.code !== 0) return { adopted, reaped };
+    for (const line of r.stdout.split('\n').filter(Boolean)) {
+      const [container, parent, spec] = line.split('\t') as [string, string, string];
+      const rec = parseRecord(spec);
+      if (!rec || !parent) continue;
+      if (!liveInstanceIds.has(parent)) {
+        await docker(['rm', '-f', container]);
+        reaped++;
+        continue;
+      }
+      if (rec.nonce) this.opts.tokens.register(parent, rec.nonce, rec.name);
+      this.track(parent, rec.name, rec.mounts);
+      adopted++;
+    }
+    if (adopted || reaped) console.log(`[SidecarManager] reconcile: adopted ${adopted}, reaped ${reaped}`);
+    return { adopted, reaped };
+  }
+
+  private track(instanceId: string, name: string, mounts: SidecarMountsView): void {
+    this.live.set(`${instanceId}--${name}`, { instanceId, name, mounts });
+  }
+
+  private untrack(instanceId: string, name: string): void {
+    this.live.delete(`${instanceId}--${name}`);
+  }
+
+  private async inspect(container: string): Promise<{ name: string; state: string; labels: Record<string, string> } | null> {
+    const r = await docker(['inspect', '--format', '{{.Name}}\t{{.State.Status}}\t{{json .Config.Labels}}', container]);
+    if (r.code !== 0) return null;
+    const [name, state, labels] = r.stdout.trim().split('\t');
+    let parsed: Record<string, string> = {};
+    try { parsed = (JSON.parse(labels ?? '{}') ?? {}) as Record<string, string>; } catch { /* no labels */ }
+    return { name: (name ?? container).replace(/^\//, ''), state: state ?? 'unknown', labels: parsed };
+  }
+}
+
+function parseRecord(json: string | undefined): SpecRecord | null {
+  if (!json) return null;
+  try {
+    const r = JSON.parse(json) as SpecRecord;
+    return typeof r.name === 'string' && typeof r.specHash === 'string' ? r : null;
+  } catch { return null; }
+}
+
+function toView(containerName: string, state: string, rec: SpecRecord): OsSidecar {
+  return {
+    name: rec.name,
+    template: rec.template,
+    image: rec.image,
+    containerName,
+    host: containerName,
+    ...(rec.port !== undefined ? { port: rec.port } : {}),
+    state,
+    createdAt: rec.createdAt,
+    ...(rec.owner ? { owner: rec.owner } : {}),
+    managedBy: 'os',
+    mounts: rec.mounts,
+    specHash: rec.specHash,
+  };
+}
+
+async function waitForPort(host: string, port: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const ok = await new Promise<boolean>((resolve) => {
+      const s = connect({ host, port });
+      const done = (v: boolean) => { s.destroy(); resolve(v); };
+      s.once('connect', () => done(true));
+      s.once('error', () => done(false));
+      s.setTimeout(2000, () => done(false));
+    });
+    if (ok) return;
+    if (Date.now() > deadline) throw new Error(`${host}:${port} did not accept connections within ${timeoutMs} ms`);
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}

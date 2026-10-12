@@ -196,6 +196,32 @@ export class ContainerRunner implements SandboxRunner {
     try { rmSync(this.mountRootDir(instanceId), { recursive: true, force: true }); } catch { /* ignore */ }
   }
 
+  /**
+   * What SidecarManager needs to start a container the way this runner starts
+   * app containers: the shared volumes, network and OS coordinates.
+   */
+  public sidecarRuntime(): {
+    dataDir: string; appDataVolume: string; nodeModulesVolume: string; network: string;
+    osApiBase: string; shellHostname: string; workspaceRoot: string; toolsMode: string;
+  } {
+    return {
+      dataDir: this.dataDir,
+      appDataVolume: this.appDataVolume,
+      nodeModulesVolume: this.nodeModulesVolume,
+      network: SHARED_NETWORK,
+      osApiBase: this.osApiBase,
+      shellHostname: this.shellHostname,
+      workspaceRoot: this.workspaceRoot,
+      toolsMode: currentToolsMode(this.dataDir),
+    };
+  }
+
+  /** OS Context env, resolved live (same source every app container gets). */
+  public async resolveContextEnv(): Promise<Record<string, string>> {
+    this.contextStore.ensureDir();
+    return this.contextStore.resolveEnv();
+  }
+
   // ─── Spawn ────────────────────────────────────────────────────────────
   async spawn(instanceId: string, appId: string, port: number, manifest: AppManifest, ctx: SpawnContext): Promise<number> {
     this.provisionToolsDir(instanceId, manifest);
@@ -475,6 +501,10 @@ export class ContainerRunner implements SandboxRunner {
       // even when something resets `hostname`.
       '--hostname', appId,
       '--network', SHARED_NETWORK,
+      // Lets InstanceTokens re-learn the nonce of a container adopted after a
+      // shell restart. Not `aura.parent`: that label marks sidecars, which
+      // orphan adoption must skip.
+      ...(ctx.instanceToken ? ['--label', `aura.token.nonce=${ctx.instanceToken.nonce}`] : []),
       '--workdir', `/workspace/apps/${appId}`,
       // Per-app slice of /workspace. Sibling apps in apps/<other> are not
       // visible — the individual app folder is bound directly, with no parent
@@ -603,6 +633,9 @@ export class ContainerRunner implements SandboxRunner {
       // Where cross-app mounts appear, so apps and the CLI can find them
       // without hardcoding a path the OS may move.
       '-e', `AURA_MOUNT_ROOT=${MOUNT_ROOT_PATH}`,
+      // Bearer for the token-gated OS routes (sidecars). After contextEnv so a
+      // context key of the same name can't replace it.
+      ...(ctx.instanceToken ? ['-e', `AURA_INSTANCE_TOKEN=${ctx.instanceToken.token}`] : []),
       BASE_IMAGE,
     );
     a.push(...entrypoint);
@@ -806,6 +839,7 @@ export class ContainerRunner implements SandboxRunner {
     port:       number;
     hostname:   string;
     pid:        number;
+    tokenNonce?: string;
   }>> {
     type DockerPsRow = { Names: string };
     type DockerInspect = { Config: { Env: string[]; Labels?: Record<string, string> }; State: { Pid: number } };
@@ -820,7 +854,7 @@ export class ContainerRunner implements SandboxRunner {
       return [];
     }
     const lines = psOut.split('\n').map((l) => l.trim()).filter(Boolean);
-    const out: Array<{ instanceId: string; appId: string; port: number; hostname: string; pid: number }> = [];
+    const out: Array<{ instanceId: string; appId: string; port: number; hostname: string; pid: number; tokenNonce?: string }> = [];
     for (const line of lines) {
       let row: DockerPsRow;
       try { row = JSON.parse(line) as DockerPsRow; }
@@ -861,6 +895,7 @@ export class ContainerRunner implements SandboxRunner {
         port,
         hostname: row.Names,
         pid: inspect.State?.Pid ?? 0,
+        tokenNonce: inspect.Config?.Labels?.['aura.token.nonce'],
       });
     }
     return out;

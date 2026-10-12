@@ -52,6 +52,15 @@ export interface SidecarInfo {
   state: SidecarState;
   image?: string;
   createdAt?: string;
+  /**
+   * `os` — started by the OS on the app's request (SidecarManager);
+   * `app` — started by the app itself (SDK docker mode or raw docker).
+   */
+  managedBy?: 'os' | 'app';
+  /** OS sidecars: the `services[]` template it was spawned from. */
+  template?: string;
+  /** OS sidecars: the sidecar that spawned this one (grandchild). */
+  owner?: string;
 }
 
 /** Point-in-time resource usage of an instance sandbox or sidecar. */

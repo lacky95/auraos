@@ -28,6 +28,26 @@ export const BUILTIN_PERMISSIONS = [
    * an app without it gets a 403.
    */
   'apps.port',
+  /**
+   * Have the OS start sidecar containers for this app from its `services[]`
+   * templates (`POST /api/instances/:id/sidecars`, `osSidecars()` in the
+   * SDK), plus list / delete / exec / logs on them. No docker tool needed.
+   * ENFORCED.
+   */
+  'sidecars.spawn',
+  /** Spawn an OS sidecar from an image that is NOT a `services[]` template. ENFORCED. */
+  'sidecars.anyImage',
+  /**
+   * OS sidecars with `privileged`, `capabilities`, `devices` or `publish` —
+   * also when the template declares them. ENFORCED.
+   */
+  'sidecars.privileged',
+  /**
+   * Manage cross-app mounts of this app's OWN sidecars at runtime
+   * (`/api/instances/:id/sidecars/:name/mounts`). Needs `apps.mount` too: a
+   * sidecar can never see an app its app couldn't. ENFORCED.
+   */
+  'sidecars.mounts',
 ] as const;
 
 export const PermissionSchema = z.string();
@@ -266,7 +286,7 @@ export const AppManifestSchema = z.object({
   autoStart: z.boolean().default(false),
   /**
    * Mark an app as critical OS infrastructure (e.g. the local OCI registry).
-   * Critical apps cannot be disabled via Settings / `aura app disable` —
+   * Critical apps cannot be disabled via Settings / `aura disable app` —
    * AppManager.setEnabled(id, false) throws — because disabling them would
    * break dependent functionality (Nexus install/publish, in the registry
    * case). They're still subject to normal lifecycle / stop / restart;
@@ -485,10 +505,17 @@ export const AppManifestSchema = z.object({
    * one of them as the app's UI — so a bring-your-own-runtime app no longer
    * hand-rolls `docker run`, naming, DNS, volumes, health, and teardown.
    *
-   * Requires `sandbox: 'container'` and `tools` including `"docker"` (the
-   * OS only bind-mounts the host docker socket for those apps). Sibling
-   * containers are named `aura-<instanceId>--<service.name>` and labelled
-   * `aura.parent=<instanceId>` so the OS can reap them (see AppManager).
+   * Two ways to run them, both `sandbox: 'container'`:
+   *   • OS-managed (official): entries are TEMPLATES the OS starts on request
+   *     (`osSidecars().spawn({ template })`, permission `sidecars.spawn`) —
+   *     no docker tool in the app. See SidecarManager / sidecar-spec.ts.
+   *   • App-managed: the SDK runs docker itself, which needs `tools`
+   *     including `"docker"` (the OS only binds the socket for those apps).
+   * Either way sibling containers are named `aura-<instanceId>--<name>` and
+   * labelled `aura.parent=<instanceId>` so the OS can reap them.
+   *
+   * All fields beyond the original set are optional, so manifests written for
+   * the SDK path parse unchanged.
    */
   services: z.array(z.object({
     /** Service id; becomes the container suffix `aura-<instanceId>--<name>`. */
@@ -509,7 +536,47 @@ export const AppManifestSchema = z.object({
     volumes: z.array(z.object({
       name:   z.string().regex(/^[a-z][a-z0-9-]*$/),
       target: z.string().min(1),
+      /** OS sidecars: one dir per TEMPLATE shared by every sidecar spawned from it (default: per sidecar). */
+      shared: z.boolean().optional(),
+      /** SDK path only: explicit external volume. The OS refuses it (it would escape the app's area). */
+      volume: z.string().optional(),
+      /** SDK path only: explicit volume subpath. The OS refuses it, as above. */
+      subpath: z.string().optional(),
     })).default([]),
+    /** Names of env vars the sidecar inherits (from OS Context for OS sidecars). Missing names are skipped. */
+    envInherit: z.array(z.string()).optional(),
+    /** Sidecar gets the app's identity + OS URL (+ its own token for OS sidecars). */
+    inheritIdentity: z.boolean().optional(),
+    /** `AURA_PERMISSIONS` = the app's permissions[]. */
+    inheritPermissions: z.boolean().optional(),
+    /** The app's granted tools at /aura/my-tools. */
+    inheritTools: z.boolean().optional(),
+    /** The app's cross-app mounts at /mnt/aura (live). */
+    inheritMounts: z.boolean().optional(),
+    /** The host docker socket — host root. Only if the app itself holds the docker tool. */
+    inheritDockerSocket: z.boolean().optional(),
+    /** `--cap-add` (OS sidecars: needs `sidecars.privileged`). */
+    capabilities: z.array(z.string()).optional(),
+    /** `--device` (OS sidecars: needs `sidecars.privileged`). */
+    devices: z.array(z.string()).optional(),
+    /** `--privileged` (OS sidecars: needs `sidecars.privileged`). */
+    privileged: z.boolean().optional(),
+    /** Host port publishing `-p host:container` (OS sidecars: needs `sidecars.privileged`). */
+    publish: z.array(z.object({
+      host:      z.number().int().min(1).max(65535),
+      container: z.number().int().min(1).max(65535),
+    })).optional(),
+    /** `--user`. */
+    user: z.string().optional(),
+    /** `--workdir`. */
+    workdir: z.string().optional(),
+    /** Resource limits (`--memory`, `--cpus`). */
+    limits: z.object({
+      memory: z.string().regex(/^\d+[bkmg]?$/i).optional(),
+      cpus:   z.number().positive().optional(),
+    }).optional(),
+    /** OS sidecars: one-shot init run (same image, volumes, env) before the first start; replaces the SDK's `onSeed`. */
+    seed: z.object({ command: z.array(z.string()).min(1) }).optional(),
     /** DNS servers for the service container (app containers get none by default). */
     dns: z.array(z.string()).default([]),
     /** Docker restart policy for the service. */

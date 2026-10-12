@@ -31,6 +31,18 @@
  * Because a silent ro→rw downgrade would hand out a filesystem boundary that
  * doesn't exist, every mount is VERIFIED after the fact against the target
  * container's own `/proc/self/mountinfo`, and rolled back if it doesn't match.
+ *
+ * ## Sidecars as consumers
+ *
+ * An OS-managed sidecar (SidecarManager) is a consumer too, keyed
+ * `<instanceId>--<sidecar>`. App ids carry no `-` and sidecar names are
+ * kebab-case, so the key is unambiguous, and every path rule falls out of it:
+ * container `aura-<inst>--<sc>`, mount root `aura/mounts/<inst>--<sc>`.
+ * A sidecar has two kinds of mounts:
+ *  - its OWN, added through the API — declared and persisted like an app's;
+ *  - INHERITED from its app (`inheritMounts`), mirrored by fan-out whenever
+ *    the app's set changes — never persisted, always derived from the app's.
+ * Sidecars never use the legacy `/data/.mnt` root.
  */
 import { execFileSync, execSync } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -60,8 +72,33 @@ export type MountKind = 'source' | 'data';
  *  - `added`    — attached via the API (`aura mount add`) in this life of the instance
  *  - `restored` — re-applied from a persisted declaration after a (re)spawn
  *  - `adopted`  — found live in the kernel after a shell restart
+ *  - `inherited` — mirrored from the parent app into an OS sidecar (fan-out)
  */
-export type MountOrigin = 'added' | 'restored' | 'adopted';
+export type MountOrigin = 'added' | 'restored' | 'adopted' | 'inherited';
+
+/** Separator of a sidecar consumer key: `<instanceId>--<sidecar>`. */
+const SIDECAR_SEP = '--';
+
+/** Is this consumer key an OS sidecar (`<instanceId>--<sidecar>`)? */
+export function isSidecarConsumer(key: string): boolean {
+  return key.includes(SIDECAR_SEP);
+}
+
+/** The instance a consumer key belongs to (itself for an app instance). */
+export function parentOfConsumer(key: string): string {
+  const i = key.indexOf(SIDECAR_SEP);
+  return i === -1 ? key : key.slice(0, i);
+}
+
+/** How a sidecar consumer mirrors its app's mounts. */
+export interface FanoutTarget {
+  /** `<instanceId>--<sidecar>`. */
+  consumer: string;
+  /** Parent mount ids NOT mirrored. */
+  exclude: string[];
+  /** Mirror every mount read-only, whatever the parent has. */
+  forceRo: boolean;
+}
 
 /** Mirrors ContainerRunner.containerName — same sanitisation rule. */
 function containerNameFor(instanceId: string): string {
@@ -87,6 +124,8 @@ export interface AuraMount {
   /** When the user first ASKED for this mount — survives restores, so a
    *  restored mount dated long before the instance started stands out. */
   declaredAt: string;
+  /** Set on `inherited` mounts: the instance the mount was mirrored from. */
+  inheritedFrom?: string;
 }
 
 export interface AddMountSpec {
@@ -105,11 +144,18 @@ interface MountManagerOpts {
   runner: ContainerRunner;
   /** Resolve a consumer instanceId → its shell-side data dir. */
   instanceDataDir(instanceId: string): string | null;
+  /**
+   * Live OS sidecars of an instance that mirror its mounts. Supplied by
+   * SidecarManager; absent → no fan-out.
+   */
+  fanoutTargets?(instanceId: string): FanoutTarget[];
 }
 
 export class MountManager {
   /** instanceId → mountId → mount. Authoritative state is the kernel; this is a cache. */
   private mounts = new Map<string, Map<string, AuraMount>>();
+  /** Background fan-out work, awaited by `settled()` (tests, e2e). */
+  private fanout: Promise<void> = Promise.resolve();
 
   constructor(private readonly opts: MountManagerOpts) {}
 
@@ -141,7 +187,8 @@ export class MountManager {
   /** Persist the current mount set as declarations. Never throws: a failed
    *  write must not fail the mount the user just asked for. */
   private writeDecls(instanceId: string): void {
-    this.writeDeclFile(instanceId, this.list(instanceId).map((m) => ({
+    // Inherited mounts are derived from the parent's set, never declared.
+    this.writeDeclFile(instanceId, this.list(instanceId).filter((m) => m.origin !== 'inherited').map((m) => ({
       targetAppId: m.targetAppId, mode: m.mode, data: m.kind === 'data', declaredAt: m.declaredAt,
     })));
   }
@@ -172,7 +219,9 @@ export class MountManager {
   private pruneStale(instanceId: string): void {
     const current = new Set(this.list(instanceId).map((m) => this.dirName(m.targetAppId, m.kind)));
     const roots = [this.opts.runner.mountRootDir(instanceId)];
-    const dataDir = this.opts.instanceDataDir(instanceId);
+    // A sidecar key resolves to its PARENT's data dir — whose legacy root
+    // holds the parent's mounts, not the sidecar's. Never prune it from here.
+    const dataDir = isSidecarConsumer(instanceId) ? null : this.opts.instanceDataDir(instanceId);
     if (dataDir) roots.push(join(dataDir, MOUNT_DIR_NAME));
     for (const root of roots) {
       let names: string[];
@@ -304,6 +353,9 @@ export class MountManager {
         return { shellDir: this.opts.runner.mountRootDir(instanceId), containerDir: MOUNT_ROOT_PATH };
       }
     } catch { /* not inspectable — fall through to the legacy root */ }
+    if (isSidecarConsumer(instanceId)) {
+      throw new Error(`sidecar ${instanceId} has no mount root at ${MOUNT_ROOT_PATH} — spawn it with mounts.own or inheritMounts`);
+    }
     return {
       shellDir: join(consumerDataDir, MOUNT_DIR_NAME),
       containerDir: `/data/${MOUNT_DIR_NAME}`,
@@ -388,21 +440,27 @@ export class MountManager {
       throw err;
     }
 
+    if (opts.origin === 'inherited') mount.inheritedFrom = parentOfConsumer(instanceId);
     if (!this.mounts.has(instanceId)) this.mounts.set(instanceId, new Map());
     this.mounts.get(instanceId)!.set(id, mount);
     // `persist: false` while reapply() is replaying what is already on disk.
     if (opts.persist !== false) this.writeDecls(instanceId);
+    if (!isSidecarConsumer(instanceId)) this.queueFanout(() => this.fanoutAdd(instanceId, mount));
     return mount;
   }
 
   async remove(instanceId: string, mountId: string): Promise<void> {
     const mount = this.mounts.get(instanceId)?.get(mountId);
     if (!mount) throw new Error(`${mountId} is not mounted into ${instanceId}`);
+    if (mount.origin === 'inherited') {
+      throw new Error(`${mountId} is inherited from ${mount.inheritedFrom ?? parentOfConsumer(instanceId)} — detach it there, or respawn the sidecar with it in mounts.inherit.exclude`);
+    }
     this.unmountHost(instanceId, mount.hostDest);
     this.mounts.get(instanceId)!.delete(mountId);
     this.writeDecls(instanceId);   // an explicit detach is a change of intent
     if (this.mounts.get(instanceId)!.size === 0) this.mounts.delete(instanceId);
     this.pruneStale(instanceId);
+    if (!isSidecarConsumer(instanceId)) this.queueFanout(() => this.fanoutRemove(instanceId, mountId));
   }
 
   /**
@@ -416,6 +474,12 @@ export class MountManager {
       catch (err) { console.warn(`[MountManager] unmount ${mount.id} failed: ${(err as Error).message}`); }
     }
     this.mounts.delete(instanceId);
+    // The instance's OS sidecars die with it (reapSiblingsOf), but their binds
+    // live in the host kernel and would pin the sources — drop them too.
+    // Their declarations stay, exactly like the instance's own on a crash.
+    if (!isSidecarConsumer(instanceId)) {
+      for (const key of this.sidecarKeysOf(instanceId)) this.removeAll(key);
+    }
   }
 
   /**
@@ -426,8 +490,130 @@ export class MountManager {
    * is the same instance and should get its mounts back.)
    */
   forget(instanceId: string): void {
+    const sidecars = isSidecarConsumer(instanceId) ? [] : this.sidecarKeysOf(instanceId);
     this.removeAll(instanceId);
     this.writeDeclFile(instanceId, []);
+    // A deliberate stop ends the sidecars' lives too (they are reaped with
+    // the instance): drop their declarations and empty roots as well.
+    for (const key of sidecars) this.forgetConsumer(key);
+  }
+
+  // ─── Sidecar consumers ─────────────────────────────────────────────────
+
+  /**
+   * Sidecar consumer keys of an instance: cached mounts, declaration files,
+   * and mount-root dirs — a sidecar whose mounts were all detached has
+   * neither of the first two but still owns an (empty) root.
+   */
+  private sidecarKeysOf(instanceId: string): string[] {
+    const prefix = `${instanceId}${SIDECAR_SEP}`;
+    const keys = new Set([...this.mounts.keys()].filter((k) => k.startsWith(prefix)));
+    try {
+      for (const n of readdirSync(dirname(this.declFile('x')))) {
+        if (n.startsWith(prefix) && n.endsWith('.json')) keys.add(n.slice(0, -'.json'.length));
+      }
+    } catch { /* no declarations dir */ }
+    try {
+      for (const n of readdirSync(dirname(this.opts.runner.mountRootDir(prefix)))) {
+        if (n.startsWith(prefix)) keys.add(n);
+      }
+    } catch { /* no mounts dir */ }
+    return [...keys];
+  }
+
+  /**
+   * Bring a freshly started OS sidecar's mounts up: its own declarations, then
+   * (with `inherit`) the parent's current mounts minus `exclude`, capped at
+   * read-only with `forceRo`. Called by SidecarManager after `docker start` —
+   * a container created later never sees binds that already existed.
+   * Best-effort per mount; never throws.
+   */
+  async reapplyConsumer(
+    consumer: string,
+    opts: { inherit: boolean; exclude: string[]; forceRo: boolean },
+  ): Promise<{ restored: number; inherited: number; failed: number }> {
+    let restored = 0, inherited = 0, failed = 0;
+    if (!this.capable().ok) return { restored, inherited, failed };
+    const have = () => this.mounts.get(consumer) ?? new Map<string, AuraMount>();
+    for (const spec of this.readDecls(consumer)) {
+      const id = this.mountId(spec.targetAppId, spec.data ? 'data' : 'source');
+      if (have().has(id)) continue;
+      if (!this.opts.registry.getById(spec.targetAppId)) continue;
+      try { await this.add(consumer, spec, { persist: false, origin: 'restored' }); restored++; }
+      catch (err) { failed++; console.warn(`[MountManager] could not restore ${id} into ${consumer}: ${(err as Error).message}`); }
+    }
+    if (opts.inherit) {
+      for (const m of this.list(parentOfConsumer(consumer))) {
+        if (opts.exclude.includes(m.id) || have().has(m.id)) continue;
+        try {
+          await this.add(consumer, {
+            targetAppId: m.targetAppId, data: m.kind === 'data', declaredAt: m.declaredAt,
+            mode: opts.forceRo ? 'ro' : m.mode,
+          }, { persist: false, origin: 'inherited' });
+          inherited++;
+        } catch (err) { failed++; console.warn(`[MountManager] could not mirror ${m.id} into ${consumer}: ${(err as Error).message}`); }
+      }
+    }
+    this.pruneStale(consumer);
+    if (restored || inherited || failed) {
+      console.log(`[MountManager] reapply ${consumer}: restored ${restored}, inherited ${inherited}, failed ${failed}`);
+    }
+    return { restored, inherited, failed };
+  }
+
+  /**
+   * A sidecar is gone for good (deleted, or its instance stopped): unmount,
+   * drop its declarations, and remove its now-empty mount root. rmdir only —
+   * never a recursive delete under a path that may still hold a bind.
+   */
+  forgetConsumer(consumer: string): void {
+    this.removeAll(consumer);
+    this.writeDeclFile(consumer, []);
+    this.pruneStale(consumer);
+    try { rmdirSync(this.opts.runner.mountRootDir(consumer)); } catch { /* busy, non-empty or absent */ }
+  }
+
+  /** Resolves once all queued fan-out work has finished. */
+  settled(): Promise<void> {
+    return this.fanout;
+  }
+
+  private queueFanout(job: () => Promise<void>): void {
+    if (!this.opts.fanoutTargets) return;
+    this.fanout = this.fanout.then(job).catch((err: unknown) => {
+      console.warn(`[MountManager] fan-out failed: ${(err as Error).message}`);
+    });
+  }
+
+  /** Mirror a parent's new mount into each inheriting sidecar. */
+  private async fanoutAdd(parent: string, mount: AuraMount): Promise<void> {
+    for (const t of this.opts.fanoutTargets?.(parent) ?? []) {
+      if (t.exclude.includes(mount.id) || this.mounts.get(t.consumer)?.has(mount.id)) continue;
+      try {
+        await this.add(t.consumer, {
+          targetAppId: mount.targetAppId, data: mount.kind === 'data', declaredAt: mount.declaredAt,
+          mode: t.forceRo ? 'ro' : mount.mode,
+        }, { persist: false, origin: 'inherited' });
+      } catch (err) {
+        console.warn(`[MountManager] could not mirror ${mount.id} into ${t.consumer}: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  /** Drop a parent's detached mount from each sidecar that inherited it. */
+  private async fanoutRemove(parent: string, mountId: string): Promise<void> {
+    for (const t of this.opts.fanoutTargets?.(parent) ?? []) {
+      const m = this.mounts.get(t.consumer)?.get(mountId);
+      if (!m || m.origin !== 'inherited') continue;
+      try {
+        this.unmountHost(t.consumer, m.hostDest);
+        this.mounts.get(t.consumer)!.delete(mountId);
+        if (this.mounts.get(t.consumer)!.size === 0) this.mounts.delete(t.consumer);
+        this.pruneStale(t.consumer);
+      } catch (err) {
+        console.warn(`[MountManager] could not detach ${mountId} from ${t.consumer}: ${(err as Error).message}`);
+      }
+    }
   }
 
   // ─── Reconciliation ────────────────────────────────────────────────────
@@ -455,12 +641,7 @@ export class MountManager {
     const containerInfo = new Map<string, string | null>();
     const infoFor = (instanceId: string): string | null => {
       if (!containerInfo.has(instanceId)) {
-        try {
-          containerInfo.set(instanceId, execSync(
-            `docker exec ${containerNameFor(instanceId)} cat /proc/self/mountinfo`,
-            { stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000, encoding: 'utf-8' },
-          ));
-        } catch { containerInfo.set(instanceId, null); }
+        containerInfo.set(instanceId, this.readMountinfo(instanceId));
       }
       return containerInfo.get(instanceId)!;
     };
@@ -528,6 +709,16 @@ export class MountManager {
       adopted++;
     }
 
+    // On a sidecar, a mount it never declared itself can only have come from
+    // its app — mark it inherited so it stays derived (and unpersisted).
+    for (const [key, set] of this.mounts) {
+      if (!isSidecarConsumer(key)) continue;
+      const own = new Set(this.readDecls(key).map((d) => this.mountId(d.targetAppId, d.data ? 'data' : 'source')));
+      for (const m of set.values()) {
+        if (m.origin === 'adopted' && !own.has(m.id)) { m.origin = 'inherited'; m.inheritedFrom = parentOfConsumer(key); }
+      }
+    }
+
     // An adopted mount was declared by someone, even if the shell that recorded
     // it is gone — persist it so the next restart can re-apply rather than
     // adopt-or-lose. Pre-existing mounts thus become durable on first contact.
@@ -559,6 +750,12 @@ export class MountManager {
     for (const name of names) {
       if (!name.endsWith('.json')) continue;
       const instanceId = name.slice(0, -'.json'.length);
+      // A sidecar's declarations never outlive its instance.
+      if (isSidecarConsumer(instanceId)) {
+        if (liveInstanceIds.has(parentOfConsumer(instanceId))) continue;
+        try { rmSync(join(dir, name), { force: true }); swept++; } catch { /* next boot */ }
+        continue;
+      }
       if (!/-\d+$/.test(instanceId) || liveInstanceIds.has(instanceId)) continue;
       try { rmSync(join(dir, name), { force: true }); swept++; } catch { /* next boot */ }
     }
@@ -602,7 +799,7 @@ export class MountManager {
     execFileSync('docker', [
       'run', '--rm', '--privileged',
       '--label', 'aura.mount=1',
-      '--label', `aura.parent=${instanceId}`,
+      '--label', `aura.parent=${parentOfConsumer(instanceId)}`,
       ...mounts,
       HELPER_IMAGE,
       '/bin/sh', '-euc', script, '_', ...args,
@@ -622,18 +819,39 @@ export class MountManager {
   // ─── Verification ──────────────────────────────────────────────────────
 
   /**
+   * The consumer container's own mount table, or null when it can't be read.
+   * App containers run aura-base (has `cat`). A sidecar may run an image
+   * without one (distroless, scratch), so for sidecars fall back to a helper
+   * that joins its PID namespace and reads PID 1's view — unprivileged.
+   */
+  private readMountinfo(consumer: string): string | null {
+    const container = containerNameFor(consumer);
+    try {
+      return execFileSync('docker', ['exec', container, 'cat', '/proc/self/mountinfo'],
+        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000, encoding: 'utf-8' });
+    } catch { /* no container, or no `cat` in it */ }
+    if (!isSidecarConsumer(consumer)) return null;
+    try {
+      return execFileSync('docker', ['run', '--rm', '--label', 'aura.mount=1', '--label', `aura.parent=${parentOfConsumer(consumer)}`,
+        `--pid=container:${container}`, HELPER_IMAGE, 'cat', '/proc/1/mountinfo'],
+        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, encoding: 'utf-8' });
+    } catch { return null; }
+  }
+
+  /**
    * Confirm the mount actually landed in the target container with the mode we
    * promised. Reading the container's own mountinfo needs no privileges.
    * Guards against the two silent failures: propagation not arriving at all,
    * and a "read-only" mount that is really read-write.
    */
   private verify(instanceId: string, mount: AuraMount): void {
-    const container = containerNameFor(instanceId);
-    let info = '';
-    try {
-      info = execSync(`docker exec ${container} cat /proc/self/mountinfo`,
-        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000, encoding: 'utf-8' });
-    } catch {
+    const info = this.readMountinfo(instanceId);
+    if (info === null) {
+      // A sidecar runs a foreign image: an unverifiable read-only promise is
+      // exactly the silent downgrade this check exists to prevent.
+      if (isSidecarConsumer(instanceId) && mount.mode === 'ro') {
+        throw new Error(`could not verify read-only ${mount.id} in sidecar ${instanceId} — refusing an unverified ro mount`);
+      }
       // Consumer isn't a running container (proot, or already gone). We can't
       // verify, so don't claim we did.
       console.warn(`[MountManager] could not verify ${mount.id} in ${instanceId} (not a running container)`);

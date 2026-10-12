@@ -15,7 +15,10 @@ import type { ResourceUsage, SidecarInfo, SidecarState } from '../types/instance
 /** `docker ps` Go template — tab-separated so label values can't break parsing. */
 export const SIDECAR_PS_FORMAT =
   '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.State}}\t{{.CreatedAt}}' +
-  '\t{{.Label "aura.parent"}}\t{{.Label "aura.app"}}\t{{.Label "aura.service"}}\t{{.Label "aura.mount"}}\t{{.Label "aura.port"}}';
+  '\t{{.Label "aura.parent"}}\t{{.Label "aura.app"}}\t{{.Label "aura.service"}}\t{{.Label "aura.mount"}}\t{{.Label "aura.port"}}' +
+  // Appended (older rows simply lack them): who manages it, and for OS
+  // sidecars their template and the sidecar that spawned them.
+  '\t{{.Label "aura.managed"}}\t{{.Label "aura.sidecar.template"}}\t{{.Label "aura.sidecar.owner"}}';
 
 /** `docker stats` Go template. */
 export const USAGE_STATS_FORMAT = '{{.Name}}\t{{.MemUsage}}\t{{.CPUPerc}}';
@@ -42,7 +45,7 @@ export function parseSidecarPs(out: string): SidecarInfo[] {
   const result: SidecarInfo[] = [];
   for (const line of out.split('\n')) {
     if (!line.trim()) continue;
-    const [id, name, image, state, createdAt, parent, appId, service, mount, port] = line.split('\t');
+    const [id, name, image, state, createdAt, parent, appId, service, mount, port, managed, template, owner] = line.split('\t');
     if (!id || !name || !parent) continue;
     if (mount || port) continue;
     result.push({
@@ -54,6 +57,9 @@ export function parseSidecarPs(out: string): SidecarInfo[] {
       state: mapDockerState(state ?? ''),
       image: image || undefined,
       createdAt: createdAt || undefined,
+      managedBy: managed === 'os' ? 'os' : 'app',
+      ...(template ? { template } : {}),
+      ...(owner && owner !== '-' ? { owner } : {}),
     });
   }
   return result;

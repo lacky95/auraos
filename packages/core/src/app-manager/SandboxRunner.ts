@@ -72,6 +72,8 @@ export interface SandboxRunner {
     port:       number;
     hostname:   string;
     pid:        number;
+    /** `aura.token.nonce` label — absent on containers spawned before tokens. */
+    tokenNonce?: string;
   }>>;
   registerAdopted?(rec: {
     instanceId: string;

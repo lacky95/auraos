@@ -17,6 +17,9 @@ import { ProotRunner, killProcessGroup } from './ProotRunner.js';
 import { ContainerRunner } from './ContainerRunner.js';
 import { MountManager } from './MountManager.js';
 import { PortManager, type ExposeSpec } from './PortManager.js';
+import { InstanceTokens } from './InstanceTokens.js';
+import { SidecarManager } from './SidecarManager.js';
+import { parentOfConsumer } from './MountManager.js';
 import type { SandboxRunner } from './SandboxRunner.js';
 import { selectOrphanSidecars } from './sidecars.js';
 import {
@@ -63,6 +66,10 @@ export class AppManager {
   /** Cross-app filesystem mounts (container sandboxes only). */
   readonly mounts:      MountManager;
   readonly portExpose:  PortManager;
+  /** Bearer tokens for the token-gated routes (OS-managed sidecars). */
+  readonly tokens:      InstanceTokens;
+  /** Sidecars the OS starts on an app's request (the official sidecar path). */
+  readonly osSidecars:  SidecarManager;
   private dataDir: string;
   private toolchainDir: string;
   /** PRoot's `/`. Kept so the lib restore pass can re-stage into it. */
@@ -128,6 +135,7 @@ export class AppManager {
     // Default runner for utility calls; per-app spawn routes via runnerOf().
     this.runner = this.runners['proot'];
     this.permissions = new PermissionManager(this.registry);
+    this.tokens      = new InstanceTokens(join(opts.dataDir, 'aura', 'secrets', 'instance-token.key'));
     this.providers   = new ContentProviderRegistry();
     this.intents     = new IntentResolver();
     // Reads liveness through the CURRENT instance record: upsertInstance
@@ -140,8 +148,10 @@ export class AppManager {
       scopeRegistry: this.scopeRegistry,
       runner:        this.runners['container'] as ContainerRunner,
       // Mirrors spawnInstance's own derivation so a mount lands in exactly the
-      // dir the instance has bound at /data.
-      instanceDataDir: (instanceId) => {
+      // dir the instance has bound at /data. A sidecar consumer key
+      // (`<inst>--<sc>`) resolves to its instance's dir.
+      instanceDataDir: (consumer) => {
+        const instanceId = parentOfConsumer(consumer);
         const inst = this.instances.get(instanceId);
         if (!inst) return null;
         const manifest = this.registry.getById(inst.appId);
@@ -149,6 +159,9 @@ export class AppManager {
         const scope = this.scopeRegistry.getById(manifest.scopeId);
         return join(scope.dataDir, 'apps', inst.appId, instanceId);
       },
+      // Live OS sidecars that inherit the app's mounts (set below; the
+      // callback only runs after construction).
+      fanoutTargets: (instanceId) => this.osSidecars.fanoutTargets(instanceId),
     });
     this.portExpose  = new PortManager({
       dataDir:  opts.dataDir,
@@ -159,6 +172,20 @@ export class AppManager {
           (i) => i.state === 'resumed' || i.state === 'resuming' || i.state === 'started',
         );
         return inst ? { instanceId: inst.instanceId } : null;
+      },
+    });
+    this.osSidecars  = new SidecarManager({
+      runner:      this.runners['container'] as ContainerRunner,
+      registry:    this.registry,
+      permissions: this.permissions,
+      tokens:      this.tokens,
+      mounts:      this.mounts,
+      instance: (instanceId) => {
+        const inst = this.instances.get(instanceId);
+        const manifest = inst ? this.registry.getById(inst.appId) : undefined;
+        if (!inst || !manifest) return null;
+        const scope = this.scopeRegistry.getById(manifest.scopeId);
+        return { appId: inst.appId, instanceDataDir: join(scope.dataDir, 'apps', inst.appId, instanceId) };
       },
     });
   }
@@ -719,6 +746,13 @@ export class AppManager {
           sandbox:           'container',
         };
         this.instances.set(o.instanceId, inst);
+        // The FSM must agree with the record: left at its default
+        // ('installed'), every lifecycle call on an adopted instance failed —
+        // `stop` answered "Invalid lifecycle transition: installed → pausing".
+        this.fsm.set(o.instanceId, 'resumed');
+        // Containers from before instance tokens carry no nonce: they keep
+        // working, but the token-gated routes answer 401 until they restart.
+        if (o.tokenNonce) this.tokens.register(o.instanceId, o.tokenNonce);
         // Bump nextInstanceNum so future spawns don't collide with this
         // adopted name. Instance IDs are "<appId>-<n>" or "<appId>" (single).
         const m = o.instanceId.match(/-(\d+)$/);
@@ -752,8 +786,14 @@ export class AppManager {
     // entirely. Run AFTER orphan adoption so the live-instance set is complete
     // — otherwise every mount belonging to a surviving container would look
     // orphaned and get reaped out from under it.
+    // OS sidecars first: their tokens and fan-out view come back from docker
+    // labels, and mount reconcile needs their consumer keys to tell a live
+    // sidecar's binds from a dead one's.
+    await this.osSidecars.reconcile(new Set(this.instances.keys())).catch((err: unknown) => {
+      console.warn(`[AppManager] OS sidecar reconcile failed: ${(err as Error).message}`);
+    });
     try {
-      this.mounts.reconcile(new Set(this.instances.keys()));
+      this.mounts.reconcile(new Set([...this.instances.keys(), ...this.osSidecars.liveConsumerKeys()]));
       this.portExpose.reconcile(new Set(this.instances.keys()));
     } catch (err) {
       console.warn(`[AppManager] mount reconcile failed: ${(err as Error).message}`);
@@ -1182,6 +1222,9 @@ export class AppManager {
       const pid = await runner.spawn(instanceId, appId, port, manifest, {
         appDir:          manifest.appDir,
         instanceDataDir,
+        // Fresh nonce per spawn: tokens of a previous life of a recycled
+        // instance id stop verifying the moment this one is minted.
+        instanceToken:   this.tokens.mint(instanceId),
       });
       this.upsertInstance(instanceId, appId, { pid, port, startedAt: new Date(), inPool: opts.inPool, sandbox: manifest.sandbox });
       this.transition(instanceId, appId, 'created', port);
@@ -1344,6 +1387,8 @@ export class AppManager {
     // Detach cross-app mounts BEFORE the container goes: a live bind under the
     // instance's data dir pins the source filesystem and would outlive it.
     this.mounts.forget(instanceId);
+    this.tokens.forgetInstance(instanceId);
+    this.osSidecars.removeAll(instanceId);
     this.portExpose.removeAll(instanceId);
     await this.runnerOf(instanceId).kill(instanceId);
     if (port) this.ports.release(port);
@@ -1405,6 +1450,8 @@ export class AppManager {
     // A force-kill runs no lifecycle hooks, so this is the only chance to
     // detach mounts before the instance record is dropped.
     this.mounts.forget(instanceId);
+    this.tokens.forgetInstance(instanceId);
+    this.osSidecars.removeAll(instanceId);
     this.portExpose.removeAll(instanceId);
     const killed = this.runnerOf(instanceId).forceKill(instanceId);
     if (port) this.ports.release(port);
@@ -2219,6 +2266,8 @@ export class AppManager {
     // Same reasoning for cross-app mounts: a crash skips onDestroy, and a bind
     // left under the dead instance's data dir pins the source filesystem.
     this.mounts.removeAll(instanceId);
+    this.tokens.forgetInstance(instanceId);
+    this.osSidecars.removeAll(instanceId);
     this.portExpose.removeAll(instanceId);
     this.fsm.set(instanceId, 'error');
     if (inst) {

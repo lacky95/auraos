@@ -180,6 +180,10 @@ export class ProotRunner implements SandboxRunner {
       // PRoot (the prompt should reflect the actual sandbox state, not the
       // OS-wide intent). Bash startup .bashrc reads $AURA_LAYER_TAG verbatim.
       AURA_LAYER_TAG: prooted ? '[proot+ctnr]' : '[ctnr]',
+      // Same bearer ContainerRunner injects. The token-gated sidecar routes
+      // still answer 409 for proot sandboxes; carrying it keeps identity
+      // uniform across runners.
+      ...(ctx.instanceToken ? { AURA_INSTANCE_TOKEN: ctx.instanceToken.token } : {}),
     };
 
     console.log(`[ProotRunner] Spawning ${instanceId} (app=${appId}) on port ${port}`);

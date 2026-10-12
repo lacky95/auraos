@@ -29,9 +29,24 @@ test('parses labelled containers and skips mount helpers', () => {
   assert.deepEqual(list[0], {
     id: 'aura-io.lakner.teams--steel', service: 'steel', parentInstanceId: 'io.lakner.teams',
     appId: 'io.lakner.teams', backend: 'container', state: 'running',
-    image: 'steel:latest', createdAt: '2026-09-17 12:22:40 +0000 UTC',
+    image: 'steel:latest', createdAt: '2026-09-17 12:22:40 +0000 UTC', managedBy: 'app',
   });
   assert.equal(list[1].state, 'stopped');
+});
+
+test('OS-managed sidecars carry managedBy/template/owner; older rows read as app-managed', () => {
+  const out = [
+    row('c1', 'aura-io.test.app-2--box-a1', 'alpine:3', 'running', '', 'io.test.app-2', 'io.test.app', 'box-a1', '', '', 'os', 'box', 'box'),
+    row('c2', 'aura-io.test.app-2--box', 'alpine:3', 'running', '', 'io.test.app-2', 'io.test.app', 'box', '', '', 'os', 'box', '-'),
+    row('c3', 'aura-io.test.app-2--db', 'pg', 'running', '', 'io.test.app-2', 'io.test.app', 'db', ''),
+  ].join('\n');
+  const [kid, box, db] = parseSidecarPs(out);
+  assert.equal(kid.managedBy, 'os');
+  assert.equal(kid.template, 'box');
+  assert.equal(kid.owner, 'box');
+  assert.equal(box.owner, undefined, "'-' means no owner");
+  assert.equal(db.managedBy, 'app');
+  assert.equal(db.template, undefined);
 });
 
 const sidecar = (id, parent) => ({ id, service: id, parentInstanceId: parent, appId: parent, backend: 'container', state: 'running' });

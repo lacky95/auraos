@@ -23,4 +23,10 @@ export interface SpawnContext {
   appDir:          string;
   /** Absolute path: <scope.dataDir>/apps/<appId>/<instanceId> */
   instanceDataDir: string;
+  /**
+   * Bearer token for the token-gated OS routes (see InstanceTokens), injected
+   * as AURA_INSTANCE_TOKEN; its nonce is recorded on the container
+   * (`aura.token.nonce`) so it survives a shell restart.
+   */
+  instanceToken?: { token: string; nonce: string };
 }

@@ -5,13 +5,13 @@ import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
 /**
  * Cross-app mounts for one instance.
  *
- *   GET  → { capable, reason?, mounts[] }
+ *   GET  → { capable, reason?, mounts[] }      (?includeSidecars=1 → + sidecarMounts[])
  *   POST → { targetAppId, mode?: 'ro'|'rw', data?: boolean } → { ok, mount }
  *
  * `capable` reports whether this host can propagate mounts at all, so a client
  * can explain WHY mounting is unavailable instead of just failing.
  */
-export const GET: APIRoute = ({ params }) => {
+export const GET: APIRoute = ({ params, url }) => {
   const instanceId = params['instanceId'];
   if (!instanceId) return errorResponse('Missing instance id', 400);
 
@@ -19,7 +19,14 @@ export const GET: APIRoute = ({ params }) => {
   if (!mgr.getInstance(instanceId)) return errorResponse(`Instance not found: ${instanceId}`, 404);
 
   const cap = mgr.mounts.capable();
-  return jsonResponse({ capable: cap.ok, reason: cap.reason, mounts: mgr.mounts.list(instanceId) });
+  // ?includeSidecars=1 adds the mounts of the instance's OS-managed sidecars
+  // (own + inherited) — read-only, like the rest of this GET.
+  const sidecarMounts = url.searchParams.get('includeSidecars') === '1'
+    ? mgr.osSidecars.liveConsumerKeys()
+      .filter((k) => k.startsWith(`${instanceId}--`))
+      .map((k) => ({ sidecar: k.slice(instanceId.length + 2), mounts: mgr.mounts.list(k) }))
+    : undefined;
+  return jsonResponse({ capable: cap.ok, reason: cap.reason, mounts: mgr.mounts.list(instanceId), ...(sidecarMounts ? { sidecarMounts } : {}) });
 };
 
 export const POST: APIRoute = async ({ params, request }) => {
