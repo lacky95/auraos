@@ -48,7 +48,7 @@ async function editManifest(appId: string, action: 'add-tool' | 'remove-tool', t
   return api.post<ManifestEditResult>('/api/admin/manifest-edit', { appId, action, tool });
 }
 
-interface ServiceToolResult extends ManifestEditResult { tools?: string[]; created?: boolean; appHolds?: boolean }
+interface ServiceToolResult extends ManifestEditResult { tools?: string[]; created?: boolean; appHolds?: boolean; needsPermission?: string }
 
 /**
  * `--template <tpl>`: the tools of a services[] template (its OS sidecars'
@@ -56,6 +56,7 @@ interface ServiceToolResult extends ManifestEditResult { tools?: string[]; creat
  * Running sidecars of the template pick the change up live.
  */
 async function editTemplateTools(appId: string, template: string, verb: 'grant' | 'revoke', names: string[]): Promise<void> {
+  let hinted = false;
   for (const name of names) {
     let r: ServiceToolResult;
     try {
@@ -75,6 +76,10 @@ async function editTemplateTools(appId: string, template: string, verb: 'grant' 
     if (!r.changed) info(`${name} ${verb === 'grant' ? 'already in' : 'not in'} ${appId} template ${template}`);
     else ok(`${verb === 'grant' ? 'granted' : 'revoked'} ${name} ${verb === 'grant' ? '→' : 'from'} ${appId} template ${template}${tag}`);
     if (verb === 'grant' && r.created) info(`template ${template} now has tools of its own — its running sidecars get them on their next spawn (the spec changed)`);
+    if (verb === 'grant' && r.needsPermission && !hinted) {
+      hinted = true;
+      info(color.yellow(`${appId} lacks the permission ${r.needsPermission} — its sidecars get no tools of their own (spawning ${template} answers 403) until: aura grant perms ${appId} ${r.needsPermission}`));
+    }
     if (verb === 'grant' && r.appHolds === false) {
       info(color.yellow(`${appId} itself does not hold ${name} — sidecars get it once the app does: aura grant caps ${appId} ${name}`));
     }

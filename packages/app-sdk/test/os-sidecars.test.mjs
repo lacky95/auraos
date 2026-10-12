@@ -178,3 +178,34 @@ test('tools(name): a 409 (no own tools dir) surfaces as OsSidecarError', async (
   const sc = osSidecars({ base: os.base, instanceId: 'a.b-2', token: 'tok' });
   await assert.rejects(sc.tools('box').grant('jq'), (e) => e instanceof OsSidecarError && e.status === 409 && /no tools of its own/.test(e.message));
 });
+
+test('spawn({ tools }): sent as-is, the answer carries tools; a missing permission is named on the error', async (t) => {
+  let deny = false;
+  const os = await fakeOs(t, () => (deny
+    ? [403, { error: "template 'worker' declares tools — a.b needs 'sidecars.tools' to grant tools to its sidecars (aura grant perms a.b sidecars.tools)" }]
+    : [201, { ok: true, created: true, sidecar: sidecar('worker'), tools: { effective: ['git', 'jq'], ignored: ['rg'] } }]));
+  const sc = osSidecars({ base: os.base, instanceId: 'a.b-2', token: 'tok' });
+  const r = await sc.spawn({ template: 'worker', tools: ['git', 'rg'] });
+  assert.deepEqual(os.seen[0].body, { template: 'worker', tools: ['git', 'rg'] });
+  assert.deepEqual(r.tools, { effective: ['git', 'jq'], ignored: ['rg'] });
+  assert.equal(r.created, true);
+  deny = true;
+  await assert.rejects(sc.spawn({ template: 'worker' }), (e) => e instanceof OsSidecarError && e.status === 403 && e.permission === 'sidecars.tools' && /aura grant perms/.test(e.message));
+  // The shell gate's wording names it too.
+  assert.equal(new OsSidecarError(403, "a.b is not granted 'sidecars.spawn'. Add it to the app's manifest permissions[].").permission, 'sidecars.spawn');
+  assert.equal(new OsSidecarError(409, "needs 'x.y'").permission, undefined);
+});
+
+test("createSidecars mode 'os' passes services[].tools as spawn tools; an empty list sends none", async (t) => {
+  const os = await fakeOs(t, () => [201, { ok: true, created: true, sidecar: sidecar('worker') }]);
+  const saved = { ...process.env };
+  t.after(() => { process.env = saved; });
+  process.env.OS_API_BASE = os.base;
+  process.env.AURA_INSTANCE_TOKEN = 'tok';
+  const host = createSidecars({ appId: 'a.b', instanceId: 'a.b-2', appPort: 1, mode: 'os', log: () => {},
+    services: [{ name: 'worker', image: 'alpine:3', tools: ['jq', 'git'] }, { name: 'plain', image: 'alpine:3', tools: [] }] });
+  await host.ensureAll();
+  const bodies = os.seen.filter((r) => r.method === 'POST').map((r) => r.body);
+  assert.deepEqual(bodies.find((b) => b.template === 'worker'), { template: 'worker', takeover: true, tools: ['jq', 'git'] });
+  assert.deepEqual(bodies.find((b) => b.template === 'plain'), { template: 'plain', takeover: true }, 'an empty list sends nothing');
+});

@@ -226,9 +226,11 @@ export interface ServiceSpec {
    * allowlist dir instead of the app's. A subset of the app's `tools[]`
    * (`*` / `#` allowed); the OS intersects the list with the app's grant, so
    * a sidecar never holds a tool its app doesn't. `[]` = own dir, filled at
-   * runtime with `osSidecars().tools(name).grant(…)` (permission
-   * `sidecars.tools`). Exclusive with `inheritTools`. The docker path does
-   * not support it (logged and ignored — use `inheritTools` there).
+   * runtime with `osSidecars().tools(name).grant(…)`. Needs the permission
+   * `sidecars.tools` (the OS answers 403 without it; `inheritTools` needs
+   * none). Exclusive with `inheritTools`. Modes 'os' / 'auto' also pass the
+   * list as the spawn's `tools`. The docker path does not support it
+   * (logged and ignored — use `inheritTools` there).
    */
   tools?: string[];
 
@@ -914,6 +916,8 @@ export class SidecarHost {
     const { created, sidecar } = await this.osClient().spawn({
       template: svc.name,
       takeover: true,
+      // The OS caps them at the app's tools[] and needs sidecars.tools.
+      ...(svc.tools?.length ? { tools: svc.tools } : {}),
       ...(svc.readiness ? { wait: { ready: true } } : {}),
     });
     this.setPhase(svc.readiness ? 'ready' : 'starting', `${svc.name} ${created ? 'started' : 'already running'}`);

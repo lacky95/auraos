@@ -79,6 +79,8 @@ export interface SidecarToolsView {
   effective: string[];
   /** Named tools the app itself does not hold — not provisioned. */
   ignored: string[];
+  /** Set when the app lacks `sidecars.tools`: nothing is provisioned. */
+  needsPermission?: 'sidecars.tools';
 }
 
 /** What the API returns for an OS sidecar. */
@@ -298,7 +300,7 @@ export class SidecarManager {
 
   // ─── Spawn ─────────────────────────────────────────────────────────────
 
-  async spawn(instanceId: string, req: SidecarSpawnRequest, caller: Caller): Promise<{ created: boolean; sidecar: OsSidecar }> {
+  async spawn(instanceId: string, req: SidecarSpawnRequest, caller: Caller): Promise<{ created: boolean; sidecar: OsSidecar; tools?: { effective: string[]; ignored: string[] } }> {
     const inst = this.opts.instance(instanceId);
     if (!inst) throw new SpecError(404, `Instance not found: ${instanceId}`);
     const manifest = this.opts.registry.getById(inst.appId);
@@ -324,6 +326,20 @@ export class SidecarManager {
     });
     const hash = specHash(spec);
     const container = sidecarContainerName(instanceId, spec.name);
+    // Spawn-time tools = initial runtime grants (resolveSidecarSpec already
+    // required sidecars.tools and a template with `tools`).
+    const spawnTools = req.tools?.length ? SidecarManager.checkToolNames(req.tools) : [];
+    const consumerKey = `${instanceId}--${spec.name}`;
+    const templateTools = (manifest.services ?? []).find((s) => s.name === spec.template)?.tools ?? [];
+    /** Merge the spawn-time tools into the runtime grants; returns an undo. */
+    const grantSpawnTools = (): (() => void) => {
+      const add = spawnTools.filter((t) => !templateTools.includes(t));   // the template already grants those
+      if (!add.length) return () => undefined;
+      const before = this.readGrants(consumerKey);
+      this.writeGrants(consumerKey, [...before, ...add.filter((t) => !before.includes(t))]);
+      return () => this.writeGrants(consumerKey, before);
+    };
+    const toolsOut = (v: SidecarToolsView) => ({ tools: { effective: v.effective, ignored: v.ignored } });
 
     return this.locked(container, async () => {
       const existing = await this.inspect(container);
@@ -346,11 +362,15 @@ export class SidecarManager {
             // mounts are there (idempotent — present ones are skipped).
             if (rec.nonce) this.opts.tokens.register(instanceId, rec.nonce, spec.name);
             this.track(instanceId, spec.name, rec.mounts, rec);
-            if (rec.ownTools) this.provisionTools(instanceId, spec.name, inst.appId, spec.template);
+            let tools: SidecarToolsView | null = null;
+            if (rec.ownTools) {
+              grantSpawnTools();   // merged into what the running sidecar already has
+              tools = this.provisionTools(instanceId, spec.name, inst.appId, spec.template);
+            }
             if (rec.mounts.own || rec.mounts.inherit) {
               await this.opts.mounts.reapplyConsumer(`${instanceId}--${spec.name}`, rec.mounts);
             }
-            return { created: false, sidecar: toView(container, existing.state, rec) };
+            return { created: false, sidecar: toView(container, existing.state, rec), ...(tools ? toolsOut(tools) : {}) };
           }
           if (rec && rec.specHash !== hash && req.replace === false) {
             throw new SpecError(409, `${container} runs a different spec — pass replace: true (the default) to recreate it`);
@@ -376,7 +396,8 @@ export class SidecarManager {
       if (wantsMountRoot) mkdirSync(this.opts.runner.mountRootDir(consumer), { recursive: true });
       // Own tools are in place before the container starts (the dir is
       // mounted by inode — it must exist, and the first exec must find them).
-      if (spec.ownTools) this.provisionTools(instanceId, spec.name, inst.appId, spec.template);
+      const undoTools = spec.ownTools ? grantSpawnTools() : () => undefined;
+      const tools = spec.ownTools ? this.provisionTools(instanceId, spec.name, inst.appId, spec.template) : null;
 
       const env = await this.environment(instanceId, inst.appId, spec);
       if (spec.seed) await this.seed(instanceId, spec, appDataSubpath, env);
@@ -397,6 +418,7 @@ export class SidecarManager {
       if (started.code !== 0) {
         await docker(['rm', '-f', id]);
         if (token) this.opts.tokens.forget(instanceId, spec.name);
+        undoTools();
         throw new Error(`docker start ${container}: ${started.stderr.trim()}`);
       }
 
@@ -408,6 +430,7 @@ export class SidecarManager {
         const logs = await docker(['logs', '--tail', '20', container]);
         await docker(['rm', '-f', container]);
         if (token) this.opts.tokens.forget(instanceId, spec.name);
+        undoTools();
         throw new Error(`${container} exited right after start:\n${(logs.stdout + logs.stderr).trim() || '(no output)'}`);
       }
 
@@ -419,7 +442,7 @@ export class SidecarManager {
       } else if ((req.wait?.port || req.wait?.ready) && spec.port) {
         await waitForPort(container, spec.port, req.wait.timeoutMs ?? 60_000);
       }
-      return { created: true, sidecar: toView(container, 'running', record) };
+      return { created: true, sidecar: toView(container, 'running', record), ...(tools ? toolsOut(tools) : {}) };
     });
   }
 
@@ -655,10 +678,15 @@ export class SidecarManager {
     const runtime = this.readGrants(consumer);
     const r = effectiveSidecarTools(manifest?.tools ?? [], templateTools, runtime,
       listToolchainBinaries(store), readSidecarMap(store));
+    // Never hand tools to a sidecar of an app without sidecars.tools — also
+    // not on adopt / reconcile / refresh after the permission was revoked:
+    // the dir is emptied (in place) instead.
+    const permitted = this.opts.permissions.hasPermission(appId, 'sidecars.tools');
+    if (!permitted) r.effective = [];
     if (apply) {
       provisionAllowlist({ dataDir, dir: this.opts.runner.toolsDir(consumer), tools: r.effective, legacyStoreBin: store });
     }
-    return { own: true, inherited: false, template: templateTools, runtime, ...r };
+    return { own: true, inherited: false, template: templateTools, runtime, ...r, ...(permitted ? {} : { needsPermission: 'sidecars.tools' as const }) };
   }
 
   private provisionTools(instanceId: string, name: string, appId: string, template: string): SidecarToolsView {
@@ -694,6 +722,9 @@ export class SidecarManager {
     const list = SidecarManager.checkToolNames(tools);
     return this.locked(sidecarContainerName(instanceId, name), async () => {
       const { appId, sc, own } = await this.toolsTarget(instanceId, name);
+      if (!this.opts.permissions.hasPermission(appId, 'sidecars.tools')) {
+        throw new SpecError(403, `${appId} is not granted 'sidecars.tools' (aura grant perms ${appId} sidecars.tools)`);
+      }
       if (!own) throw SidecarManager.noOwnTools(sc);
       const consumer = `${instanceId}--${name}`;
       const before = this.readGrants(consumer);

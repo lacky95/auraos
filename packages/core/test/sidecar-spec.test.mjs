@@ -149,7 +149,7 @@ test('inheritHome: resolves when set; absent otherwise, so existing spec hashes 
 
 test('tools: ownTools only when the template declares them; the list is not in the hash', () => {
   const tpl = { name: 'worker', image: 'alpine:3', command: ['sleep', 'infinity'], env: {}, volumes: [], inheritIdentity: true, inheritMounts: true, inheritHome: true };
-  const c = (svc) => ctx({ manifest: { services: [svc], tools: ['jq'] } });
+  const c = (svc) => ctx({ manifest: { services: [svc], tools: ['jq'] }, can: (p) => p === 'sidecars.tools' });
   const plain = resolveSidecarSpec({ template: 'worker' }, c(tpl));
   assert.equal('ownTools' in plain, false);
   // Snapshot taken with the code BEFORE `tools` existed: templates without
@@ -162,5 +162,23 @@ test('tools: ownTools only when the template declares them; the list is not in t
   assert.equal(specHash(resolveSidecarSpec({ template: 'worker' }, c({ ...tpl, tools: [] }))), specHash(own));
   assert.equal(specHash(resolveSidecarSpec({ template: 'worker' }, c({ ...tpl, tools: ['jq', 'git', '*'] }))), specHash(own));
   rejects(() => resolveSidecarSpec({ template: 'worker' }, c({ ...tpl, tools: [], inheritTools: true })), 400, /both tools and inheritTools/);
-  rejects(() => parseSpawnRequest({ template: 'worker', tools: ['jq'] }), 400, /'tools' cannot be set per request/);
+});
+
+test('tools: own tools need sidecars.tools; spawn-time tools are validated, need a template with tools, and stay out of the hash', () => {
+  const tpl = { name: 'worker', image: 'alpine:3', command: ['sleep', 'infinity'], env: {}, volumes: [], inheritIdentity: true, inheritMounts: true, inheritHome: true };
+  const c = (svc, can = () => false) => ctx({ manifest: { services: [svc], tools: ['jq'] }, can });
+  const yes = (p) => p === 'sidecars.tools';
+  rejects(() => resolveSidecarSpec({ template: 'worker' }, c({ ...tpl, tools: [] })), 403, /needs 'sidecars\.tools'/);
+  rejects(() => resolveSidecarSpec({ template: 'worker' }, c({ ...tpl, tools: ['jq'] })), 403, /aura grant perms io\.test\.app sidecars\.tools/);
+  // inheritTools is unchanged: no permission needed.
+  assert.equal(resolveSidecarSpec({ template: 'worker' }, c({ ...tpl, inheritTools: true })).inheritTools, true);
+  // A plain template keeps working without the permission — and keeps its hash.
+  assert.equal(specHash(resolveSidecarSpec({ template: 'worker' }, c(tpl))), '181fb1c6937b8d58');
+
+  assert.deepEqual(parseSpawnRequest({ template: 'worker', tools: ['git', '*'] }).tools, ['git', '*']);
+  rejects(() => parseSpawnRequest({ template: 'worker', tools: 'git' }), 400, /tools must be an array of strings/);
+  rejects(() => resolveSidecarSpec({ template: 'worker', tools: ['git'] }, c(tpl, yes)), 409, /declares no tools.*"tools": \[\]/);
+  const own = { ...tpl, tools: ['jq'] };
+  assert.equal(specHash(resolveSidecarSpec({ template: 'worker', tools: ['git', 'node'] }, c(own, yes))),
+    specHash(resolveSidecarSpec({ template: 'worker' }, c(own, yes))), 'spawn-time tools are not part of the spec');
 });

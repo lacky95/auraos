@@ -10,11 +10,17 @@
  *   const r = await sc.exec(box.sidecar.name, ['sh', '-c', 'echo hi']);
  *   await sc.mounts(box.sidecar.name).add('com.example.docs');   // needs sidecars.mounts + apps.mount
  *   await sc.tools(box.sidecar.name).grant('git');                // needs sidecars.tools; template declares `tools`
+ *
+ * Tools: a template with `tools` gives each of its sidecars its own
+ * /aura/my-tools — (template ∪ grants) ∩ the app's tools[]. That needs the
+ * permission `sidecars.tools` (spawn answers 403 without it; `err.permission`
+ * names it). Grant more at spawn (`spawn({ template, tools: ['git'] })`) or
+ * later (`sc.tools(name).grant(…)`); both are live, never part of the spec.
  *   await sc.remove(box.sidecar.name);
  *
  * Every sidecar is a `services[]` TEMPLATE of the calling app (permission
  * `sidecars.spawn`); the request may only override name/suffix, env,
- * envInherit, command and mounts. See core's sidecar-spec.ts.
+ * envInherit, command and mounts, and add tools. See core's sidecar-spec.ts.
  *
  * Server-side only: the token lives in the app's env (`AURA_INSTANCE_TOKEN`)
  * and must never reach a browser. Uses `fetch` only — no child_process — and
@@ -36,6 +42,15 @@ export interface OsSpawnRequest {
   envInherit?: string[];
   command?: string[];
   mounts?: SidecarMountsRequest;
+  /**
+   * Initial tool grants for this sidecar (plain names or `'*'`): added to its
+   * runtime grants, capped at the app's tools[] (`result.tools.ignored` lists
+   * what the app lacks). Not part of the spec — spawning the same sidecar
+   * again with other tools adopts it and merges them in. Needs
+   * `sidecars.tools` and a template that declares `tools` (`[]` will do;
+   * 409 otherwise).
+   */
+  tools?: string[];
   replace?: boolean;
   takeover?: boolean;
   /** `port`: TCP accepts; `ready`: the template's readiness path answers HTTP. */
@@ -113,18 +128,34 @@ export interface OsSidecarsOptions {
   fetch?: typeof fetch;
 }
 
-/** A failed OS call — `status` is the HTTP status (0 = no response). */
+/**
+ * A failed OS call — `status` is the HTTP status (0 = no response). On a 403
+ * for a missing permission, `permission` names it (e.g. `'sidecars.tools'`):
+ * grant it with `aura grant perms <appId> <permission>` or declare it in the
+ * manifest's permissions[].
+ */
 export class OsSidecarError extends Error {
+  readonly permission?: string;
   constructor(readonly status: number, message: string) {
     super(message);
     this.name = 'OsSidecarError';
+    const perm = status === 403 ? /(?:not granted|needs) '([\w.]+)'/.exec(message)?.[1] : undefined;
+    if (perm) this.permission = perm;
   }
+}
+
+/** What a spawn answers. `tools` only for a template with tools of its own. */
+export interface OsSpawnResult {
+  created: boolean;
+  sidecar: OsSidecar;
+  /** The sidecar's tools after this spawn: provisioned, and named ones the app lacks. */
+  tools?: { effective: string[]; ignored: string[] };
 }
 
 export interface OsSidecarsClient {
   readonly instanceId: string;
   /** Start (or adopt, when the same spec already runs) a sidecar. */
-  spawn(req: OsSpawnRequest): Promise<{ created: boolean; sidecar: OsSidecar }>;
+  spawn(req: OsSpawnRequest): Promise<OsSpawnResult>;
   list(): Promise<OsSidecar[]>;
   /** null when no OS sidecar of that name exists. */
   get(name: string): Promise<OsSidecar | null>;
@@ -191,8 +222,8 @@ export function osSidecars(options: OsSidecarsOptions = {}): OsSidecarsClient {
   return {
     instanceId,
     async spawn(req) {
-      const r = await call<{ created: boolean; sidecar: OsSidecar }>('POST', root, req);
-      return { created: r.created, sidecar: r.sidecar };
+      const r = await call<OsSpawnResult>('POST', root, req);
+      return { created: r.created, sidecar: r.sidecar, ...(r.tools ? { tools: r.tools } : {}) };
     },
     async list() {
       return (await call<{ sidecars: OsSidecar[] }>('GET', `${root}?view=managed`)).sidecars;

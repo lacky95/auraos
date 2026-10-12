@@ -19,8 +19,10 @@ import { jsonBody, sidecarError, sidecarGate } from '../../../../lib/instanceAut
  * sidecar (app- and OS-managed) and need no token.
  *
  *   GET ?view=managed   (token, sidecars.spawn) → { sidecars: OsSidecar[] }
- *   POST {template, name?|suffix?, env?, envInherit?, command?, mounts?, image?, replace?, takeover?, wait?}
- *                       (token, sidecars.spawn) → 201 { ok, created: true, sidecar } | 200 adopted
+ *   POST {template, name?|suffix?, env?, envInherit?, command?, mounts?, tools?, image?, replace?, takeover?, wait?}
+ *                       (token, sidecars.spawn) → 201 { ok, created: true, sidecar, tools? } | 200 adopted
+ *                       A template with `tools` (and spawn-time `tools`) also
+ *                       needs sidecars.tools — 403 otherwise (sidecar-spec.ts).
  *
  * OS-managed sidecars: the OS does the `docker run` (SidecarManager), so the
  * app needs no docker tool. See core's sidecar-spec.ts for what may be asked.

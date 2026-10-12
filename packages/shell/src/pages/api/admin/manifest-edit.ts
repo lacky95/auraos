@@ -171,12 +171,16 @@ export const POST: APIRoute = async ({ request }) => {
       try { writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n'); }
       catch (err) { return json({ error: 'write-failed', message: (err as Error).message }, 500); }
     }
+    // Editing the manifest stays an admin action, but its sidecars only get
+    // own tools when the app holds sidecars.tools (spawn 403s otherwise).
+    const needs = (): { needsPermission?: 'sidecars.tools' } =>
+      (mgr.permissions.hasPermission(appId, 'sidecars.tools') ? {} : { needsPermission: 'sidecars.tools' });
     try {
       mgr.reloadManifest(appId);
       const refreshed = changed ? mgr.refreshInstanceTools(appId) : [];
-      return json({ ok: true, appId, action, service: body.service, tool, changed, tools: next, created: !had, appHolds, refreshed });
+      return json({ ok: true, appId, action, service: body.service, tool, changed, tools: next, created: !had, appHolds, refreshed, ...needs() });
     } catch (err) {
-      return json({ ok: true, appId, action, service: body.service, tool, changed, tools: next, created: !had, appHolds, refreshed: [], refreshError: (err as Error).message });
+      return json({ ok: true, appId, action, service: body.service, tool, changed, tools: next, created: !had, appHolds, refreshed: [], refreshError: (err as Error).message, ...needs() });
     }
   }
 

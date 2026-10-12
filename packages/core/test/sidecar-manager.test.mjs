@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SidecarManager } from '../dist/app-manager/SidecarManager.js';
@@ -353,6 +353,7 @@ function toolsFixture(t, over = {}) {
       { name: 'inh', image: 'alpine:3', command: [], volumes: [], inheritTools: true }, ...(over.services ?? [])],
     mirror: ['bash', 'node', 'jq', 'git', 'rg'],
     appTools: () => appTools,
+    perms: over.perms ?? ['sidecars.tools'],
   });
   return { ...f, setAppTools: (v) => { appTools = v; } };
 }
@@ -452,4 +453,68 @@ test('tools: cleanup on remove, on instance stop (not on a crash), and when reco
   await f.mgr.reconcile(new Set());
   assert.equal(toolsOf(f.dataDir, 'w3'), null);
   assert.equal(d.containers.size, 0);
+});
+
+test('tools: own tools need sidecars.tools — spawn 403s, inheritTools does not; a revoked permission empties the dir', async (t) => {
+  const d = fakeDocker(t);
+  const f = toolsFixture(t, { perms: [], services: [{ name: 'empty', image: 'alpine:3', command: [], volumes: [], tools: [] }] });
+  for (const template of ['worker', 'empty']) {
+    await assert.rejects(f.mgr.spawn(INST, { template }, { instanceId: INST }),
+      (e) => e.status === 403 && /needs 'sidecars\.tools'.*aura grant perms io\.test\.app sidecars\.tools/.test(e.message), template);
+  }
+  assert.equal(d.calls.filter((a) => a[0] === 'create').length, 0);
+  assert.equal((await f.mgr.spawn(INST, { template: 'inh' }, { instanceId: INST })).created, true, 'inheritTools is unchanged');
+
+  f.perms.push('sidecars.tools');
+  await f.mgr.spawn(INST, { template: 'worker' }, { instanceId: INST });
+  assert.deepEqual(toolsOf(f.dataDir, 'worker'), ['jq']);
+  f.perms.length = 0;                                  // permission revoked
+  f.mgr.refreshTools(INST);
+  assert.deepEqual(toolsOf(f.dataDir, 'worker'), [], 'nothing provisioned without the permission');
+  const view = await f.mgr.listTools(INST, 'worker');
+  assert.equal(view.needsPermission, 'sidecars.tools');
+  assert.deepEqual(view.effective, []);
+  await assert.rejects(f.mgr.grantTools(INST, 'worker', ['git']), (e) => e.status === 403);
+  // Adopt re-checks it too (the spec resolves again).
+  await assert.rejects(f.mgr.spawn(INST, { template: 'worker' }, { instanceId: INST }), (e) => e.status === 403);
+  // …and so does reconcile after a shell restart.
+  writeFileSync(join(f.dataDir, 'aura', 'runtime', `${INST}--worker`, 'tools', 'stale'), '');
+  await f.mgr.reconcile(new Set([INST]));
+  assert.deepEqual(toolsOf(f.dataDir, 'worker'), []);
+});
+
+test('tools at spawn: initial runtime grants, not in the hash, merged on adopt, undone when the spawn fails', async (t) => {
+  const d = fakeDocker(t);
+  const f = toolsFixture(t);
+  const state = join(f.dataDir, 'aura', 'runtime', '.state', `${INST}--worker.tools.json`);
+  const grants = () => (existsSync(state) ? JSON.parse(readFileSync(state, 'utf-8')) : []);
+
+  const r = await f.mgr.spawn(INST, { template: 'worker', tools: ['git', 'jq', 'rg'] }, { instanceId: INST });
+  assert.equal(r.created, true);
+  assert.deepEqual(r.tools, { effective: ['git', 'jq'], ignored: ['rg'] });
+  assert.deepEqual(grants(), ['git', 'rg'], "the template's own jq is not copied into the runtime grants");
+  assert.deepEqual(toolsOf(f.dataDir, 'worker'), ['git', 'jq'], 'in place before the container starts');
+  const hash = r.sidecar.specHash;
+
+  // Same spec + other tools → adopted (tools are not part of the spec), merged.
+  const again = await f.mgr.spawn(INST, { template: 'worker', tools: ['node'] }, { instanceId: INST });
+  assert.equal(again.created, false);
+  assert.equal(again.sidecar.specHash, hash);
+  assert.deepEqual(again.tools, { effective: ['git', 'jq', 'node'], ignored: ['rg'] });
+  assert.deepEqual(grants(), ['git', 'rg', 'node']);
+  assert.equal(d.calls.filter((a) => a[0] === 'create').length, 1);
+  // Without tools: adopt keeps what it has.
+  assert.deepEqual((await f.mgr.spawn(INST, { template: 'worker' }, { instanceId: INST })).tools.effective, ['git', 'jq', 'node']);
+
+  await assert.rejects(f.mgr.spawn(INST, { template: 'plain', tools: ['jq'] }, { instanceId: INST }),
+    (e) => e.status === 409 && /declares no tools.*"tools": \[\]/.test(e.message));
+  await assert.rejects(f.mgr.spawn(INST, { template: 'worker', tools: ['#'] }, { instanceId: INST }), (e) => e.status === 400);
+  assert.equal((await f.mgr.spawn(INST, { template: 'plain' }, { instanceId: INST })).tools, undefined);
+});
+
+test('tools at spawn: a failed start leaves no grants behind', async (t) => {
+  fakeDocker(t, { failStart: true });
+  const f = toolsFixture(t);
+  await assert.rejects(f.mgr.spawn(INST, { template: 'worker', tools: ['git'] }, { instanceId: INST }));
+  assert.equal(existsSync(join(f.dataDir, 'aura', 'runtime', '.state', `${INST}--worker.tools.json`)), false);
 });

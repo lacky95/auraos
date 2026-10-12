@@ -51,6 +51,13 @@ export interface SidecarSpawnRequest {
   /** Replaces the template's command. */
   command?: string[];
   mounts?: SidecarMountsRequest;
+  /**
+   * Initial runtime tool grants (plain names or `'*'`, no `'#'`): added to
+   * the sidecar's runtime grants, intersected with the app's tools[] like
+   * every grant, NOT part of the spec (adopting merges them in). Needs
+   * `sidecars.tools` and a template that declares `tools` (409 otherwise).
+   */
+  tools?: string[];
   /** When a sidecar of that name runs with a DIFFERENT spec: recreate it (default true) or 409. */
   replace?: boolean;
   /**
@@ -135,7 +142,7 @@ export class SpecError extends Error {
 }
 
 export const SIDECAR_NAME_RE = /^[a-z][a-z0-9-]{0,47}$/;
-const ALLOWED_KEYS = new Set(['template', 'name', 'suffix', 'image', 'env', 'envInherit', 'command', 'mounts', 'replace', 'takeover', 'wait']);
+const ALLOWED_KEYS = new Set(['template', 'name', 'suffix', 'image', 'env', 'envInherit', 'command', 'mounts', 'tools', 'replace', 'takeover', 'wait']);
 
 /** Validate the request shape (it arrives as untrusted JSON). */
 export function parseSpawnRequest(body: unknown): SidecarSpawnRequest {
@@ -153,7 +160,7 @@ export function parseSpawnRequest(body: unknown): SidecarSpawnRequest {
     }
   };
   if (typeof b['template'] !== 'string' || !b['template']) throw new SpecError(400, 'template is required');
-  str('name'); str('suffix'); str('image'); strArr('envInherit'); strArr('command');
+  str('name'); str('suffix'); str('image'); strArr('envInherit'); strArr('command'); strArr('tools');
   if (b['env'] !== undefined) {
     const env = b['env'];
     if (!env || typeof env !== 'object' || Array.isArray(env) || !Object.values(env).every((v) => typeof v === 'string')) {
@@ -210,8 +217,17 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
     throw new SpecError(403, `template '${tpl.name}' sets inheritDockerSocket, but ${ctx.appId}'s tools[] does not grant docker — a sidecar never exceeds its app`);
   }
 
+  if (req.tools?.length && !tpl.tools) {
+    throw new SpecError(409, `template '${tpl.name}' declares no tools — a sidecar of it has no tools dir of its own to grant into. Declare \`"tools": []\` (or a list) in that services[] entry`);
+  }
   if (tpl.tools && tpl.inheritTools) {
     throw new SpecError(400, `template '${tpl.name}' sets both tools and inheritTools — use tools (its own subset of the app's tools) or inheritTools (the app's whole set), not both`);
+  }
+  // Own tools are a tool grant to the sidecar — template-declared or not, the
+  // app must hold the permission. (inheritTools shares the app's own dir and
+  // needs nothing extra.)
+  if (tpl.tools && !ctx.can('sidecars.tools')) {
+    throw new SpecError(403, `template '${tpl.name}' declares tools — ${ctx.appId} needs 'sidecars.tools' to grant tools to its sidecars (aura grant perms ${ctx.appId} sidecars.tools)`);
   }
   if (tpl.inheritHome && (tpl.volumes ?? []).some((v) => v.target.replace(/\/+$/, '') === SHARED_HOME_PATH)) {
     throw new SpecError(400, `template '${tpl.name}' sets inheritHome and also mounts a volume at ${SHARED_HOME_PATH} — drop one of them`);
