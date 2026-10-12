@@ -641,7 +641,10 @@ let initialTimeZone: string = '';
   //   3. `data-fold="all"` — when even a SINGLE pill won't fit, the pills fold
   //      into the dropdown too (it now hosts pills + chip), but the name field
   //      stays beside the ▦ button so the active workspace name stays visible;
-  //   4. last resort, if button + name field still won't fit, drop the name
+  //   4. hide the AURAOS logo (`data-logo-hidden` on #statusbar) — the
+  //      workspace name matters more than branding;
+  //   5. hide the clock (`data-clock-hidden`), also below the name;
+  //   6. last resort, if button + name field still won't fit, drop the name
   //      field too (`data-name-hidden`) and show only the icon button.
   //
   // Overflow is measured in LAYOUT pixels, which is what makes this honest
@@ -899,6 +902,8 @@ let initialTimeZone: string = '';
     // LAYOUT pixels (the popover is out of flow and never "overflows").
     setFold('none');
     bundleEl.dataset['nameHidden'] = 'false';
+    statusBar.dataset['logoHidden'] = 'false';
+    statusBar.dataset['clockHidden'] = 'false';
     pillWindow = MAX_PILL_WINDOW;
     if (state) renderPills(state);
     if (!rightOverflowing()) {
@@ -929,7 +934,17 @@ let initialTimeZone: string = '';
     pillWindow = MAX_PILL_WINDOW;
     if (state) renderPills(state);
 
-    // Tier 3 (last resort): if button + name field still overflow (very narrow
+    // Tier 3: the workspace name outranks branding — hide the AURAOS logo
+    // before touching the name field. rightOverflowing() reads the logo's
+    // offsetWidth, which is 0 once hidden, so the freed space counts.
+    if (!rightOverflowing()) return;
+    statusBar.dataset['logoHidden'] = 'true';
+
+    // Tier 4: the clock is also less important than the workspace name.
+    if (!rightOverflowing()) return;
+    statusBar.dataset['clockHidden'] = 'true';
+
+    // Tier 5 (last resort): if button + name field still overflow (very narrow
     // bar / heavy zoom), drop the name field too and show just the ▦ button.
     bundleEl.dataset['nameHidden'] = rightOverflowing() ? 'true' : 'false';
   }
@@ -1611,12 +1626,16 @@ let initialTimeZone: string = '';
     cursor: pointer;
     user-select: none;
   }
+  #statusbar[data-logo-hidden="true"] .os-name { display: none; }
+  #statusbar[data-clock-hidden="true"] .clock { display: none; }
   .os-name:hover { filter: brightness(1.25); }
   .os-name:focus-visible { outline: 1px solid var(--aura-color-primary); outline-offset: 2px; }
 
   .os-ver { color: var(--aura-color-text-dim); }
 
-  .right { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+  /* margin-left:auto keeps the group right-aligned even when the logo is
+     hidden (space-between alone would pack a lone child to the left). */
+  .right { display: flex; align-items: center; gap: 12px; flex-shrink: 0; margin-left: auto; }
 
   .clock { color: var(--aura-color-text); font-family: var(--aura-font-mono); }
 
