@@ -293,13 +293,13 @@ request fields and return types: [HTTP API & SDK](/docs/sidecars/api).
 | Symbol | Purpose |
 |---|---|
 | `osSidecars(opts?)` | Client for the calling instance. `opts`: `base` (default `OS_API_BASE` → `AURA_OS_URL`), `instanceId` (`APP_INSTANCE_ID` → `AURA_INSTANCE_ID`), `token` (`AURA_INSTANCE_TOKEN`), `timeoutMs` (15 min: a spawn may pull an image). |
-| `.spawn(req)` | `{ template, name?/suffix?, env?, envInherit?, command?, mounts?, image?, replace?, takeover?, wait? }` → `{ created, sidecar }`. Same spec again → adopted (`created: false`); changed spec → recreated. |
+| `.spawn(req)` | `{ template, name?/suffix?, env?, envInherit?, command?, mounts?, tools?, image?, replace?, takeover?, wait? }` → `{ created, sidecar, tools? }`. Same spec again → adopted (`created: false`); changed spec → recreated. `tools` = initial grants (needs `sidecars.tools`, a template with `tools`; merged on adopt, not part of the spec). |
 | `.list()` / `.get(name)` / `.remove(name)` | The instance's OS sidecars; `get` → `null` if there is no such sidecar (a missing instance throws); `remove` also removes the sidecars it spawned. |
 | `.exec(name, cmd[], { stdin?, timeoutMs?, user?, workdir?, env? })` | → `{ exitCode, stdout, stderr, truncated, timedOut }`. argv, no shell; default timeout 30 s, max 10 min. |
 | `.logs(name, { tail?, since?, timestamps? })` | → `{ stdout, stderr }`. |
 | `.mounts(name).list()` / `.add(appId, { mode?, data? })` / `.remove(mountId)` | The sidecar's cross-app mounts (own + inherited). Changing them needs `sidecars.mounts` + `apps.mount` and a sidecar spawned with `mounts: { own: true }`. |
-| `.tools(name).list()` / `.grant(...tools)` / `.revoke(...tools)` | The sidecar's own tools at `/aura/my-tools`: `{ own, inherited, template, runtime, effective, ignored }`. Its template must declare `tools`; grant/revoke need `sidecars.tools`; always capped at the app's `tools[]`. See [Tools of a sidecar](/docs/sidecars/tools). |
-| `OsSidecarError` | Thrown on failure; `.status` is the HTTP status (0 = no response). |
+| `.tools(name).list()` / `.grant(...tools)` / `.revoke(...tools)` | The sidecar's own tools at `/aura/my-tools`: `{ own, inherited, template, runtime, effective, ignored }`. Its template must declare `tools`, which needs `sidecars.tools`; always capped at the app's `tools[]`. See [Tools of a sidecar](/docs/sidecars/tools). |
+| `OsSidecarError` | Thrown on failure; `.status` is the HTTP status (0 = no response); `.permission` names a missing permission on a 403. |
 
 Inside an OS sidecar spawned with `inheritIdentity`, `osSidecars()` works
 unchanged, with that sidecar's own token, so what it spawns becomes its child.

@@ -11,10 +11,22 @@ two ways:
 |---|---|---|
 | What | the app's whole set, the app's own dir | a set of its own, in a dir of its own |
 | Per sidecar | no, every sidecar sees the same dir | yes, each sidecar has its dir (`aura/runtime/<instanceId>--<name>/tools`) |
-| Grant at runtime | no (grant to the app) | yes, to one running sidecar (`sidecars.tools`) |
+| Permission | none beyond `sidecars.spawn` | **`sidecars.tools`**, for the template list too |
+| Grant at spawn / at runtime | no (grant to the app) | yes, to one sidecar |
 | Upper bound | the app's `tools[]` | the app's `tools[]`: the OS intersects |
 
 A template uses one of the two; both together are a 400.
+
+**Every tool grant to a sidecar needs `sidecars.tools`**, whether it comes
+from the template, the spawn request or a runtime grant. Spawning a template
+that declares `tools` (even `tools: []`) without it answers 403, and the OS
+never fills a sidecar's own dir for an app that lacks it: if the permission
+is revoked later, the next refresh, adopt or shell restart empties the dir.
+`inheritTools` is unchanged and needs nothing extra.
+
+```bash
+aura grant perms com.example.app sidecars.tools
+```
 
 **A sidecar never holds a tool its app doesn't.** What it gets is
 
@@ -38,7 +50,7 @@ the spec hash (only *whether* the template has `tools` is).
 // app.manifest.json
 {
   "tools": ["bash", "node", "jq", "git"],
-  "permissions": ["sidecars.spawn"],
+  "permissions": ["sidecars.spawn", "sidecars.tools"],
   "services": [
     { "name": "worker", "image": "node:22-slim", "command": ["sleep", "infinity"],
       "tools": ["jq"] }
@@ -47,8 +59,8 @@ the spec hash (only *whether* the template has `tools` is).
 ```
 
 Every `worker` sidecar has `jq` at `/aura/my-tools` (on its `PATH`), and not
-`git`. Template tools need no permission beyond `sidecars.spawn`: the
-manifest is the app's, and the list is capped at the app's own tools.
+`git`. The list is capped at the app's own tools, and the app needs
+`sidecars.tools`.
 
 Change the list from anywhere, without editing the file:
 
@@ -57,10 +69,33 @@ aura grant caps com.example.app git --template worker    # every worker sidecar,
 aura revoke caps com.example.app git --template worker
 ```
 
-`aura cap grant <app> <tool> --template worker` is the same. Giving a template
+`aura cap grant <app> <tool> --template worker` is the same. Editing the
+manifest this way works even when the app lacks `sidecars.tools` (it is an
+admin action); the CLI then prints the `aura grant perms … sidecars.tools`
+command, because without it the sidecars get nothing. Giving a template
 `tools` for the first time changes its spec, so its running sidecars get
 their own dir on their next spawn (they are recreated then); after that,
 edits to the list apply live.
+
+## At spawn
+
+A spawn request can carry `tools`: initial grants for that sidecar, on top
+of the template's list.
+
+```ts
+const r = await sc.spawn({ template: 'worker', suffix: 'job7', tools: ['git', 'rg'] });
+r.tools;   // { effective: ['git', 'jq'], ignored: ['rg'] }  (the app lacks rg)
+```
+
+- Same rules as a runtime grant: plain names or `*`, no `#`, capped at the
+  app's tools, `sidecars.tools` required. The template must declare `tools`
+  (`[]` will do), else 409.
+- They are runtime grants, so they are **not** part of the spec: spawning
+  the same sidecar again with other `tools` adopts it and merges them in
+  (nothing is recreated). Names the template already grants are not copied,
+  so revoking them from the template still works.
+- `createSidecars({ mode: 'os' | 'auto' })` sends each service's `tools` this
+  way. The docker path ignores them.
 
 ## At runtime, for one sidecar
 

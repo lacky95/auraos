@@ -342,6 +342,14 @@ A template with `tools` instead gives each sidecar a dir of its own,
 `/aura/my-tools` with the same PATH / packages / profile.d args
 (`toolArgs(dirKey)`). The spec only carries `ownTools: true` (present only
 when set, so older specs keep their hash); the list is applied live.
+`resolveSidecarSpec` refuses a template with `tools` unless the app holds
+`sidecars.tools` (403), and spawn-time `tools` on a template without them
+(409). Spawn-time `tools` are not in the spec: they are merged into the
+runtime grants (minus names the template already has) before provisioning,
+on create and on adopt, and rolled back if the start fails.
+`computeTools` re-checks the permission every time and provisions nothing
+without it, so a revoked permission empties the dir on the next refresh,
+adopt or reconcile.
 
 `effectiveSidecarTools` (`sidecar-tools.ts`, pure) resolves the template
 list and the runtime grants **separately** with `resolveToolBinaries`

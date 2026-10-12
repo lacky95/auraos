@@ -275,7 +275,7 @@ The ones in `ENFORCED_PERMISSIONS` really answer 403 when undeclared:
 | `sidecars.anyImage` | …from an image that isn't a template's |
 | `sidecars.privileged` | …from a template with `privileged`, `capabilities`, `devices` or `publish` |
 | `sidecars.mounts` | Managing the own mounts of the app's sidecars (together with `apps.mount`) |
-| `sidecars.tools` | Granting tools to one running sidecar of the app (never more than the app's own `tools[]`) |
+| `sidecars.tools` | Granting tools to the app's sidecars: templates with `tools`, spawn-time and runtime grants (never more than the app's own `tools[]`) |
 | `sidecars.manageAll` | Letting the app's sidecars manage all its OS sidecars, not only the ones they spawned |
 
 The sidecar routes check them against the app the **instance** belongs to,

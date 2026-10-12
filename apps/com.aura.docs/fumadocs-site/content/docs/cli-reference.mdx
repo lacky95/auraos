@@ -228,7 +228,7 @@ aura port expose at.oebb.opsconsole:5173 --host --sticky
 | `aura grant caps <app> [names...]` | Add capabilities to the app's `tools[]` and hot-refresh running instances (no respawn). `'*'` grants all, `'#'` all-except. No names → picker showing what is already granted. | `-i, --interactive` (picker even when names are given) |
 | `aura revoke perms <app> <names...>` | Remove manifest permissions. | — |
 | `aura revoke caps <app> <names...>` | Remove capabilities from the app's manifest and restart its running instances. Also gone from every OS sidecar of the app. | — |
-| `aura grant\|revoke caps <app> <caps...> --template <tpl>` | Tools of a `services[]` template: every OS sidecar of it holds them at `/aura/my-tools`, capped at the app's own `tools[]`. Persistent (the manifest), works from anywhere, applied live. | `--template <tpl>` |
+| `aura grant\|revoke caps <app> <caps...> --template <tpl>` | Tools of a `services[]` template: every OS sidecar of it holds them at `/aura/my-tools`, capped at the app's own `tools[]`. Persistent (the manifest), works from anywhere, applied live. The app also needs the permission `sidecars.tools`; the CLI prints the `aura grant perms <app> sidecars.tools` command when it lacks it. | `--template <tpl>` |
 | `aura grant\|revoke caps <inst\|app> <caps...> --sidecar <name>` | Tools of one running OS sidecar (runtime; its template must declare `tools`). Needs the app's token: run it inside the app. Revoke removes runtime grants only. | `--sidecar <name>` |
 | `aura cap ...` | Manage the capability registry (below). | — |
 

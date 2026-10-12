@@ -19,7 +19,7 @@ auto-grant most other permissions still get.
 | `sidecars.anyImage` | A spawn request with an `image` other than the template's. |
 | `sidecars.privileged` | Templates with `privileged`, `capabilities`, `devices` or `publish`, **even though the template declares them**: the manifest is written by the app, and the OS path must not turn into a privilege route for an app without a docker socket. |
 | `sidecars.mounts` | Adding and removing the own mounts of the app's sidecars. Also needs `apps.mount`: a sidecar never sees an app its app couldn't mount. |
-| `sidecars.tools` | Granting and revoking tools of one running sidecar at runtime ([Tools of a sidecar](/docs/sidecars/tools)). The sidecar still gets at most the app's own `tools[]`. Tools in the template (`services[].tools`) need no extra permission. |
+| `sidecars.tools` | Any tool grant to a sidecar ([Tools of a sidecar](/docs/sidecars/tools)): spawning a template that declares `tools` (even `[]`), `tools` in a spawn request, and runtime grants. The sidecar still gets at most the app's own `tools[]`. `inheritTools` does not need it. |
 | `sidecars.manageAll` | Lets the app's sidecars (calling with their own token) manage **every** OS sidecar of the instance. Without it a sidecar manages only the sidecars it spawned itself, and theirs. |
 
 Two more rules come from the template, not a permission:
@@ -113,7 +113,7 @@ Then the request itself:
 | Status | Meaning |
 |---|---|
 | 400 | A field that can't be set per request, a malformed field, an invalid name, `name` and `suffix` together, a template with `volume`/`subpath`, a template with both `tools` and `inheritTools`, an invalid tool name or `#` in a runtime grant |
-| 403 | `image` without `sidecars.anyImage`, a privileged template without `sidecars.privileged`, `inheritDockerSocket` without the docker tool, a sidecar acting outside its own subtree without `sidecars.manageAll` |
+| 403 | `image` without `sidecars.anyImage`, a privileged template without `sidecars.privileged`, a template with `tools` without `sidecars.tools`, `inheritDockerSocket` without the docker tool, a sidecar acting outside its own subtree without `sidecars.manageAll` |
 | 404 | No such template (the message lists yours), no such sidecar |
 | 409 | Name taken by an app-managed container (use `takeover`), spec changed with `replace: false`, sidecar not running (exec), own mount on a sidecar without `mounts.own`, removing an inherited mount, mount already there, a tool grant to a sidecar whose template has no `tools`, revoking a template tool at runtime |
 | 413 | exec stdin over 64 KiB |

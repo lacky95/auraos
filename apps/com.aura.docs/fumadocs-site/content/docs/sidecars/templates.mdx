@@ -26,7 +26,7 @@ app-managed path; the notes below say where the two differ.
 | `user`, `workdir` | `--user`, `--workdir`. |
 | `limits` | `{ memory: "512m", cpus: 1.5 }`. |
 | `inheritIdentity`, `inheritPermissions`, `inheritTools`, `inheritHome`, `inheritMounts`, `inheritDockerSocket` | Opt-in, default off. See [Inheritance](#inheritance). |
-| `tools` | OS path only: the sidecar's **own** tools at `/aura/my-tools`, a subset of the app's `tools[]` (`*` / `#` allowed; intersected with the app's). `[]` = own dir, granted at runtime. Not together with `inheritTools` (400). See [Tools of a sidecar](/docs/sidecars/tools). |
+| `tools` | OS path only: the sidecar's **own** tools at `/aura/my-tools`, a subset of the app's `tools[]` (`*` / `#` allowed; intersected with the app's). `[]` = own dir, granted at spawn or runtime. Needs `sidecars.tools` (403 at spawn otherwise). Not together with `inheritTools` (400). See [Tools of a sidecar](/docs/sidecars/tools). |
 | `capabilities`, `devices`, `privileged`, `publish` | Kernel and host grants. OS path: the app needs `sidecars.privileged`. Prefer the narrow ones over `privileged`. |
 | `readiness` | `{ path?, timeoutMs? }` (default `/`, 10 min). The sidecar is ready when `path` answers HTTP below 500. `wait: { ready: true }` waits for it; `createSidecars` does so for every service that declares it. |
 | `prePull` | Pull the image when the app is installed (and at shell start), not at its first spawn. Background, missing images only. |
@@ -42,7 +42,7 @@ purpose.
 | `inheritIdentity` | `AURA_APP_ID`, `AURA_INSTANCE_ID`, `AURA_SIDECAR_NAME`, `AURA_OS_URL` / `OS_API_BASE`, `AURA_SHELL_HOSTNAME`, and **its own** `AURA_INSTANCE_TOKEN` | the app's identity vars and the app's token (it acts as the app) |
 | `inheritPermissions` | `AURA_PERMISSIONS=<the app's permissions>` | same |
 | `inheritTools` | the app's granted tools at `/aura/my-tools` (plus PATH, the workspace packages and the login-shell PATH drop-in) | same |
-| `tools: [...]` | its **own** tools dir at `/aura/my-tools` instead: (the list ∪ runtime grants) ∩ the app's `tools[]`, updated live ([Tools of a sidecar](/docs/sidecars/tools)) | not supported (ignored with a log line) |
+| `tools: [...]` | its **own** tools dir at `/aura/my-tools` instead: (the list ∪ spawn-time and runtime grants) ∩ the app's `tools[]`, updated live; needs `sidecars.tools` ([Tools of a sidecar](/docs/sidecars/tools)) | not supported (ignored with a log line) |
 | `inheritHome` | the user's shared HOME at `/home/aura` (the logins of claude, codex, gh, …) and `HOME=/home/aura`, set after the template's env. Every container app has this home, so no extra permission; a template can't also mount a volume at `/home/aura` (400). | the same volume + subpath the app's own `/home/aura` comes from (found via `docker inspect`; skipped with a log line if it can't be told) |
 | `inheritMounts` | the app's cross-app mounts at `/mnt/aura`, mirrored **live** into its own mount root ([Mounts](/docs/sidecars/mounts)) | the app's mount root, shared; mounts that existed before the sidecar started show up empty |
 | `inheritDockerSocket` | the host docker socket, only if the app itself has the `docker` tool (403 otherwise) | the socket, if the app has one |

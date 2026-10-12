@@ -16,7 +16,7 @@ Server-side only (it sends the instance token). Uses `fetch`, no
 | Call | Returns |
 |---|---|
 | `osSidecars(opts?)` | A client for the calling instance. `opts.base` (default `OS_API_BASE`, then `AURA_OS_URL`), `opts.instanceId` (`APP_INSTANCE_ID`, then `AURA_INSTANCE_ID`), `opts.token` (`AURA_INSTANCE_TOKEN`), `opts.timeoutMs` (per request, default 15 min: a spawn may pull an image). Throws if base or instance id are missing. |
-| `.spawn(req)` | `{ created, sidecar }`, see [Spawn request](#spawn-request) |
+| `.spawn(req)` | `{ created, sidecar, tools? }`, see [Spawn request](#spawn-request). `tools: { effective, ignored }` for a template with tools of its own |
 | `.list()` | `OsSidecar[]`, the instance's OS sidecars (running or not) |
 | `.get(name)` | `OsSidecar`, or `null` when the instance has no such sidecar. A missing instance throws. |
 | `.remove(name)` | Deletes it and every sidecar it spawned |
@@ -28,7 +28,7 @@ Server-side only (it sends the instance token). Uses `fetch`, no
 | `.tools(name).list()` | `OsSidecarTools`, see [Objects](#objects) |
 | `.tools(name).grant(...tools)` | `OsSidecarTools & { granted }`: runtime grants added, applied live. Needs `sidecars.tools` |
 | `.tools(name).revoke(...tools)` | `OsSidecarTools & { revoked }`: runtime grants only (a template tool is a 409). Needs `sidecars.tools` |
-| `OsSidecarError` | Thrown on failure. `.status` is the HTTP status (0 = no response, or no token in the env) |
+| `OsSidecarError` | Thrown on failure. `.status` is the HTTP status (0 = no response, or no token in the env). On a 403 for a missing permission, `.permission` names it (e.g. `'sidecars.tools'`) |
 
 Inside an OS sidecar spawned with `inheritIdentity`, `osSidecars()` works
 unchanged, with that sidecar's own token.
@@ -99,6 +99,7 @@ are accepted; any other key is a 400 that names the allowed ones.
 | `envInherit` | Extra names to inherit, added to the template's list. |
 | `command` | Replaces the template's command. |
 | `mounts` | `{ own?: boolean, inherit?: boolean \| { exclude?: string[], mode?: 'ro' } }`, see [Mounts](/docs/sidecars/mounts). |
+| `tools` | Initial tool grants (names or `*`), added to the sidecar's runtime grants and capped at the app's tools. Needs `sidecars.tools` and a template that declares `tools` (409 otherwise). Not part of the spec: on adopt they are merged in. See [Tools of a sidecar](/docs/sidecars/tools#at-spawn). |
 | `image` | Another image. Needs `sidecars.anyImage`. |
 | `replace` | Default `true`: a running sidecar with a different spec is recreated. `false`: 409 instead. |
 | `takeover` | Remove an app-managed container of the same name that belongs to this instance, then spawn (migration). Default `false`: 409. |
@@ -106,7 +107,7 @@ are accepted; any other key is a 400 that names the allowed ones.
 
 Everything that ends up in the resolved spec (template fields, `env`,
 `envInherit`, `command`, `image`, `mounts`) is part of the spec hash. The
-switches `replace`, `takeover` and `wait` are not, and neither is a
+switches `replace`, `takeover` and `wait` are not, nor are spawn-time `tools`, and neither is a
 template's `tools` list: only *whether* it has one counts, the list itself
 is applied live ([Tools of a sidecar](/docs/sidecars/tools)).
 
