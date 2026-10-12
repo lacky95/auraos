@@ -103,6 +103,14 @@ export interface ResolvedSidecarSpec {
    * hash of every existing sidecar unchanged (no recreate on its next spawn).
    */
   inheritHome?: true;
+  /**
+   * The template declares `tools`: the sidecar gets its OWN allowlist dir at
+   * /aura/my-tools (SidecarManager provisions it — template list ∪ runtime
+   * grants, ∩ the app's tools[]). Only the flag is part of the spec: the list
+   * is applied live into the mounted dir, so changing it never recreates the
+   * container. Present only when set, like `inheritHome`.
+   */
+  ownTools?: true;
   inheritDockerSocket: boolean;
   mounts: { own: boolean; inherit: boolean; exclude: string[]; forceRo: boolean };
 }
@@ -202,6 +210,9 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
     throw new SpecError(403, `template '${tpl.name}' sets inheritDockerSocket, but ${ctx.appId}'s tools[] does not grant docker — a sidecar never exceeds its app`);
   }
 
+  if (tpl.tools && tpl.inheritTools) {
+    throw new SpecError(400, `template '${tpl.name}' sets both tools and inheritTools — use tools (its own subset of the app's tools) or inheritTools (the app's whole set), not both`);
+  }
   if (tpl.inheritHome && (tpl.volumes ?? []).some((v) => v.target.replace(/\/+$/, '') === SHARED_HOME_PATH)) {
     throw new SpecError(400, `template '${tpl.name}' sets inheritHome and also mounts a volume at ${SHARED_HOME_PATH} — drop one of them`);
   }
@@ -251,6 +262,7 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
     inheritPermissions: tpl.inheritPermissions === true,
     inheritTools: tpl.inheritTools === true,
     ...(tpl.inheritHome ? { inheritHome: true as const } : {}),
+    ...(tpl.tools ? { ownTools: true as const } : {}),
     inheritDockerSocket: tpl.inheritDockerSocket === true,
     mounts,
   };

@@ -49,6 +49,13 @@ export const BUILTIN_PERMISSIONS = [
    */
   'sidecars.mounts',
   /**
+   * Grant / revoke tools of this app's OWN sidecars at runtime
+   * (`/api/instances/:id/sidecars/:name/tools`). A sidecar still gets at most
+   * the app's own `tools[]`. Template `services[].tools` need nothing extra.
+   * ENFORCED.
+   */
+  'sidecars.tools',
+  /**
    * Let this app's OS sidecars (those with `inheritIdentity`) manage EVERY OS
    * sidecar of their instance. Without it a sidecar may only manage the
    * sidecars it spawned itself (and theirs). The app itself is never limited.
@@ -613,6 +620,16 @@ export const AppManifestSchema = z.object({
     inheritPermissions: z.boolean().optional(),
     /** The app's granted tools at /aura/my-tools. */
     inheritTools: z.boolean().optional(),
+    /**
+     * OS sidecars: tools of THIS sidecar at /aura/my-tools (its own allowlist
+     * dir, not the app's). A subset of the app's `tools[]` — `*` / `#` are
+     * allowed and the OS intersects the list with the app's grant, so a
+     * sidecar never holds a tool its app doesn't. `[]` = own dir, filled at
+     * runtime (`osSidecars().tools(name).grant(…)`, permission
+     * `sidecars.tools`). Exclusive with `inheritTools`. The SDK docker path
+     * ignores it.
+     */
+    tools: z.array(z.string()).optional(),
     /**
      * The user's shared HOME at /home/aura (logins of claude / codex / gh, …)
      * plus `HOME=/home/aura`. Every container app already has it, so a sidecar

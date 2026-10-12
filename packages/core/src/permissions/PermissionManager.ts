@@ -18,6 +18,7 @@ export const ENFORCED_PERMISSIONS: readonly string[] = [
   'sidecars.anyImage',
   'sidecars.privileged',
   'sidecars.mounts',
+  'sidecars.tools',
   'sidecars.manageAll',
 ];
 const ENFORCED = new Set<string>(ENFORCED_PERMISSIONS);

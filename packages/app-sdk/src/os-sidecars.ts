@@ -9,6 +9,7 @@
  *   await fetch(`http://${box.sidecar.host}:8080/run`);
  *   const r = await sc.exec(box.sidecar.name, ['sh', '-c', 'echo hi']);
  *   await sc.mounts(box.sidecar.name).add('com.example.docs');   // needs sidecars.mounts + apps.mount
+ *   await sc.tools(box.sidecar.name).grant('git');                // needs sidecars.tools; template declares `tools`
  *   await sc.remove(box.sidecar.name);
  *
  * Every sidecar is a `services[]` TEMPLATE of the calling app (permission
@@ -83,6 +84,22 @@ export interface OsSidecarMount {
   inheritedFrom?: string;
 }
 
+/** Tools of one OS sidecar — what it holds at /aura/my-tools. */
+export interface OsSidecarTools {
+  /** Own tools dir (its template declares `tools`). */
+  own: boolean;
+  /** Shares the app's whole set instead (`inheritTools`). */
+  inherited: boolean;
+  /** The template's `tools` (persistent — edit the manifest). */
+  template: string[];
+  /** Granted at runtime (kept across a recreate, dropped with the sidecar or instance). */
+  runtime: string[];
+  /** Binaries at /aura/my-tools: (template ∪ runtime) ∩ the app's tools[]. */
+  effective: string[];
+  /** Named tools the app itself does not hold — not provisioned. */
+  ignored: string[];
+}
+
 export interface OsSidecarsOptions {
   /** OS API base. Default `OS_API_BASE` → `AURA_OS_URL`. */
   base?: string;
@@ -120,6 +137,18 @@ export interface OsSidecarsClient {
     list(): Promise<OsSidecarMount[]>;
     add(targetAppId: string, opts?: { mode?: 'ro' | 'rw'; data?: boolean }): Promise<OsSidecarMount>;
     remove(mountId: string): Promise<void>;
+  };
+  /**
+   * The sidecar's own tools (its template must declare `tools`, even `[]`).
+   * A sidecar never holds a tool its app doesn't: grants the app lacks come
+   * back in `ignored`. Live — no recreate. Granting/revoking needs
+   * `sidecars.tools`.
+   */
+  tools(name: string): {
+    list(): Promise<OsSidecarTools>;
+    grant(...tools: string[]): Promise<OsSidecarTools & { granted: string[] }>;
+    /** Runtime grants only — template tools are revoked in the template (409). */
+    revoke(...tools: string[]): Promise<OsSidecarTools & { revoked: string[] }>;
   };
 }
 
@@ -195,6 +224,20 @@ export function osSidecars(options: OsSidecarsOptions = {}): OsSidecarsClient {
           return (await call<{ mount: OsSidecarMount }>('POST', m, { targetAppId, ...opts })).mount;
         },
         async remove(mountId) { await call('DELETE', `${m}/${enc(mountId)}`); },
+      };
+    },
+    tools(name) {
+      const u = `${root}/${enc(name)}/tools`;
+      const strip = <T extends { ok?: boolean }>(r: T): Omit<T, 'ok'> => { const { ok: _ok, ...rest } = r; return rest; };
+      return {
+        async list() { return call<OsSidecarTools>('GET', u); },
+        async grant(...tools) {
+          return strip(await call<OsSidecarTools & { granted: string[]; ok?: boolean }>('POST', u, { tools }));
+        },
+        async revoke(...tools) {
+          const q = new URLSearchParams(tools.map((t) => ['tool', t])).toString();
+          return strip(await call<OsSidecarTools & { revoked: string[]; ok?: boolean }>('DELETE', `${u}?${q}`));
+        },
       };
     },
   };

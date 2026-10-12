@@ -617,6 +617,9 @@ export class AppManager {
     for (const inst of this.getInstancesByApp(appId)) {
       try {
         this.runnerOf(inst.instanceId).provisionToolsDir(inst.instanceId, manifest);
+        // OS sidecars with tools of their own hold (theirs ∩ the app's): a
+        // grant/revoke on the app, or a template edit, changes them too.
+        this.osSidecars.refreshTools(inst.instanceId);
         refreshed.push(inst.instanceId);
       } catch (err) {
         console.warn(`[AppManager] refresh tools failed for ${inst.instanceId}: ${(err as Error).message}`);
@@ -1399,7 +1402,7 @@ export class AppManager {
     // instance's data dir pins the source filesystem and would outlive it.
     this.mounts.forget(instanceId);
     this.tokens.forgetInstance(instanceId);
-    this.osSidecars.removeAll(instanceId);
+    this.osSidecars.forget(instanceId);
     this.portExpose.removeAll(instanceId);
     await this.runnerOf(instanceId).kill(instanceId);
     if (port) this.ports.release(port);
@@ -1462,7 +1465,7 @@ export class AppManager {
     // detach mounts before the instance record is dropped.
     this.mounts.forget(instanceId);
     this.tokens.forgetInstance(instanceId);
-    this.osSidecars.removeAll(instanceId);
+    this.osSidecars.forget(instanceId);
     this.portExpose.removeAll(instanceId);
     const killed = this.runnerOf(instanceId).forceKill(instanceId);
     if (port) this.ports.release(port);

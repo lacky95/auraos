@@ -48,6 +48,39 @@ async function editManifest(appId: string, action: 'add-tool' | 'remove-tool', t
   return api.post<ManifestEditResult>('/api/admin/manifest-edit', { appId, action, tool });
 }
 
+interface ServiceToolResult extends ManifestEditResult { tools?: string[]; created?: boolean; appHolds?: boolean }
+
+/**
+ * `--template <tpl>`: the tools of a services[] template (its OS sidecars'
+ * own /aura/my-tools), through the shell like every other manifest edit.
+ * Running sidecars of the template pick the change up live.
+ */
+async function editTemplateTools(appId: string, template: string, verb: 'grant' | 'revoke', names: string[]): Promise<void> {
+  for (const name of names) {
+    let r: ServiceToolResult;
+    try {
+      r = await api.post<ServiceToolResult>('/api/admin/manifest-edit', {
+        appId, action: verb === 'grant' ? 'add-service-tool' : 'remove-service-tool', service: template, tool: name,
+      });
+    } catch (err) {
+      let msg = (err as Error).message;
+      try {
+        const body = JSON.parse((err as { body?: string }).body ?? '') as { message?: string; error?: string };
+        msg = body.message ?? body.error ?? msg;
+      } catch { /* not JSON */ }
+      fail(`${verb} ${name} ${verb === 'grant' ? '→' : 'from'} ${appId} template ${template} failed: ${msg}`);
+    }
+    if (!r.ok) fail(`${verb} ${name} → ${appId} template ${template} failed: ${r.error ?? 'unknown'} ${r.message ?? ''}`.trim());
+    const tag = r.refreshError ? color.yellow(` (refresh: ${r.refreshError})`) : '';
+    if (!r.changed) info(`${name} ${verb === 'grant' ? 'already in' : 'not in'} ${appId} template ${template}`);
+    else ok(`${verb === 'grant' ? 'granted' : 'revoked'} ${name} ${verb === 'grant' ? '→' : 'from'} ${appId} template ${template}${tag}`);
+    if (verb === 'grant' && r.created) info(`template ${template} now has tools of its own — its running sidecars get them on their next spawn (the spec changed)`);
+    if (verb === 'grant' && r.appHolds === false) {
+      info(color.yellow(`${appId} itself does not hold ${name} — sidecars get it once the app does: aura grant caps ${appId} ${name}`));
+    }
+  }
+}
+
 /** Replace an app's whole tools[] atomically (used by the interactive picker). */
 async function setToolsManifest(appId: string, tools: string[]): Promise<ManifestEditResult> {
   return api.post<ManifestEditResult>('/api/admin/manifest-edit', { appId, action: 'set-tools', tools });
@@ -389,13 +422,18 @@ export function registerCap(program: Command): void {
   cap
     .command('grant [appId] [name...]')
     .option('-i, --interactive', 'Open the interactive tool picker (TUI)')
+    .option('--template <tpl>', "Grant to a services[] template instead: tools of its OS sidecars (capped at the app's tools)")
     .description(
       "Grant capabilities to an app. With tool names: adds them (use '*' for all, " +
       "'#' for all-except). With no names (or -i): opens an interactive picker to " +
       'check/uncheck tools, showing what is already granted. Hot-refreshes running ' +
       'instances — no respawn.',
     )
-    .action(async (appId: string | undefined, names: string[], opts: { interactive?: boolean }) => {
+    .action(async (appId: string | undefined, names: string[], opts: { interactive?: boolean; template?: string }) => {
+      if (opts.template) {
+        if (!appId || names.length === 0) fail('aura cap grant <appId> <name...> --template <template>');
+        return editTemplateTools(appId!, opts.template, 'grant', names);
+      }
       // Interactive when explicitly asked, or when no tool names were given
       // (with or without an appId — a bare appId opens the picker for that app).
       if (opts.interactive || names.length === 0) {
@@ -423,7 +461,9 @@ export function registerCap(program: Command): void {
   cap
     .command('revoke <appId> <name...>')
     .description('Remove a capability from an app manifest and restart running instances.')
-    .action(async (appId: string, names: string[]) => {
+    .option('--template <tpl>', 'Revoke from a services[] template instead')
+    .action(async (appId: string, names: string[], opts: { template?: string }) => {
+      if (opts.template) return editTemplateTools(appId, opts.template, 'revoke', names);
       for (const name of names) {
         const r = await editManifest(appId, 'remove-tool', name);
         if (!r.ok)            fail(`revoke ${name} from ${appId} failed: ${r.error ?? 'unknown'} ${r.message ?? ''}`.trim());

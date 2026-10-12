@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { BUILTIN_PERMISSIONS } from '@aura/core';
+import { BUILTIN_PERMISSIONS, toolsGrant } from '@aura/core';
 
 /**
  * Server-side manifest mutation. Required because container-sandbox apps
@@ -25,7 +25,8 @@ import { BUILTIN_PERMISSIONS } from '@aura/core';
 
 const APP_ID_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
 
-type Action = 'add-tool' | 'remove-tool' | 'set-tools' | 'add-permission' | 'remove-permission';
+type Action = 'add-tool' | 'remove-tool' | 'set-tools' | 'add-permission' | 'remove-permission'
+  | 'add-service-tool' | 'remove-service-tool';
 
 interface Body {
   appId?: string;
@@ -36,9 +37,12 @@ interface Body {
   tools?: string[];
   /** For add-permission / remove-permission. */
   permission?: string;
+  /** For add-service-tool / remove-service-tool: the services[] template name. */
+  service?: string;
 }
 
 const PERMISSION_ACTIONS = new Set<Action>(['add-permission', 'remove-permission']);
+const SERVICE_ACTIONS = new Set<Action>(['add-service-tool', 'remove-service-tool']);
 
 export const POST: APIRoute = async ({ request }) => {
   let body: Body;
@@ -49,7 +53,7 @@ export const POST: APIRoute = async ({ request }) => {
   if (typeof appId !== 'string' || !APP_ID_RE.test(appId)) {
     return json({ error: 'invalid-app-id', message: `appId must be reverse-domain (got ${JSON.stringify(appId)}).` }, 400);
   }
-  const VALID: Action[] = ['add-tool', 'remove-tool', 'set-tools', 'add-permission', 'remove-permission'];
+  const VALID: Action[] = ['add-tool', 'remove-tool', 'set-tools', 'add-permission', 'remove-permission', 'add-service-tool', 'remove-service-tool'];
   if (!action || !VALID.includes(action)) {
     return json({ error: 'invalid-action', message: `action must be one of ${VALID.join(', ')} (got ${JSON.stringify(action)}).` }, 400);
   }
@@ -58,6 +62,9 @@ export const POST: APIRoute = async ({ request }) => {
   }
   // Validate the payload shape per action.
   let setTools: string[] | null = null;
+  if (SERVICE_ACTIONS.has(action) && (typeof body.service !== 'string' || body.service.length === 0)) {
+    return json({ error: 'invalid-service', message: `${action} requires the services[] template name as \`service\`.` }, 400);
+  }
   if (PERMISSION_ACTIONS.has(action)) {
     // no tools payload to validate
   } else if (action === 'set-tools') {
@@ -127,6 +134,49 @@ export const POST: APIRoute = async ({ request }) => {
       // so the grant won't take effect until a restart. Say so rather than
       // reporting a success the caller can't actually use.
       return json({ ok: true, appId, action, permission: perm, changed, permissions: next, unknown, reloaded: false, reloadError: (err as Error).message });
+    }
+  }
+
+  // ─── tools of a services[] template (OS sidecars) ───────────────────────
+  // `services[].tools`: what every sidecar of that template holds at
+  // /aura/my-tools, intersected with the app's tools[] by the OS. Live:
+  // refreshInstanceTools refills the own dir of every running sidecar.
+  if (SERVICE_ACTIONS.has(action)) {
+    const services = Array.isArray(manifest['services']) ? (manifest['services'] as Array<Record<string, unknown>>) : [];
+    const svc = services.find((s) => s?.['name'] === body.service);
+    if (!svc) {
+      const names = services.map((s) => String(s?.['name']));
+      return json({ error: 'service-not-found', message: `${appId} has no services[] template '${body.service}'${names.length ? ` — templates: ${names.join(', ')}` : ' (it declares none)'}.` }, 404);
+    }
+    if (action === 'add-service-tool' && svc['inheritTools'] === true) {
+      return json({ error: 'inherit-tools', message: `template '${body.service}' sets inheritTools (the app's whole set) — drop it from the manifest before giving the template tools of its own.` }, 409);
+    }
+    const had = Array.isArray(svc['tools']);
+    const current = had ? (svc['tools'] as string[]) : [];
+    let next = current;
+    if (action === 'add-service-tool') {
+      // A template without `tools` gains its own list (and its sidecars their
+      // own dir on their next spawn — the spec changes, so they are recreated).
+      if (!had || !current.includes(tool!)) next = [...current, tool!];
+    } else if (current.includes(tool!)) {
+      // Never drop the key: `tools: []` keeps the own dir (runtime grants).
+      next = current.filter((t) => t !== tool!);
+    }
+    const changed = next !== current;
+    const appTools = Array.isArray(manifest['tools']) ? (manifest['tools'] as string[]) : [];
+    // A tool the app lacks is kept but not provisioned — tell the caller.
+    const appHolds = tool === '*' || tool === '#' || toolsGrant(appTools, tool!);
+    if (changed) {
+      svc['tools'] = next;
+      try { writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n'); }
+      catch (err) { return json({ error: 'write-failed', message: (err as Error).message }, 500); }
+    }
+    try {
+      mgr.reloadManifest(appId);
+      const refreshed = changed ? mgr.refreshInstanceTools(appId) : [];
+      return json({ ok: true, appId, action, service: body.service, tool, changed, tools: next, created: !had, appHolds, refreshed });
+    } catch (err) {
+      return json({ ok: true, appId, action, service: body.service, tool, changed, tools: next, created: !had, appHolds, refreshed: [], refreshError: (err as Error).message });
     }
   }
 

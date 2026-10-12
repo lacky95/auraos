@@ -220,3 +220,14 @@ test('completion: commands, resources per verb, subresource, classic subcommands
   assert.deepEqual(await completions(program, ['mount']), ['ls', 'add', 'rm']);
   assert.deepEqual(await completions(program, ['get', '-o', 'wide']), forGet, 'option values are skipped');
 });
+
+test('sidecar tools: grant/revoke take --template and --sidecar; cap grant/revoke take --template', () => {
+  const program = buildProgram();
+  const cmd = (...path: string[]) => path.reduce<Command | undefined>((c, n) => c?.commands.find((x) => x.name() === n), program);
+  const flags = (c: Command | undefined) => (c?.options ?? []).map((o) => o.long);
+  for (const v of ['grant', 'revoke']) {
+    assert.ok(flags(cmd(v)).includes('--template'), `${v} --template`);
+    assert.ok(flags(cmd(v)).includes('--sidecar'), `${v} --sidecar`);
+    assert.ok(flags(cmd('cap', v)).includes('--template'), `cap ${v} --template`);
+  }
+});

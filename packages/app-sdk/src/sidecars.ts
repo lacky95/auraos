@@ -222,6 +222,17 @@ export interface ServiceSpec {
   inheritTools?: boolean;
 
   /**
+   * OS mode only: tools of THIS sidecar at `/aura/my-tools` — its own
+   * allowlist dir instead of the app's. A subset of the app's `tools[]`
+   * (`*` / `#` allowed); the OS intersects the list with the app's grant, so
+   * a sidecar never holds a tool its app doesn't. `[]` = own dir, filled at
+   * runtime with `osSidecars().tools(name).grant(…)` (permission
+   * `sidecars.tools`). Exclusive with `inheritTools`. The docker path does
+   * not support it (logged and ignored — use `inheritTools` there).
+   */
+  tools?: string[];
+
+  /**
    * The user's shared HOME at `/home/aura` (logins of claude / codex / gh, …)
    * plus `HOME=/home/aura` — the same home every AuraOS container app gets, so
    * no extra permission. OS path: the OS mounts it. Docker path: the SDK
@@ -809,6 +820,7 @@ export class SidecarHost {
     await this.remove(svc.name);                 // clear exited/zombie so `run --name` won't 409
     // Toolchain mounts are computed async (image PATH lookup) before the arg
     // list so the rest stays a flat literal.
+    if (svc.tools) this.log(`${svc.name}: services[].tools is an OS-sidecar feature — ignored on the docker path (use inheritTools, or mode: 'os')`);
     const toolArgs = svc.inheritTools ? await this.toolInheritArgs(svc.image) : [];
     const mountArgs = svc.inheritMounts ? this.mountInheritArgs() : [];
     const sockArgs  = svc.inheritDockerSocket ? this.dockerSocketArgs() : [];

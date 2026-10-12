@@ -146,3 +146,21 @@ test('inheritHome: resolves when set; absent otherwise, so existing spec hashes 
   rejects(() => resolveSidecarSpec({ template: 'box' }, c({ ...tpl, inheritHome: true, volumes: [{ name: 'h', target: '/home/aura/' }] })),
     400, /inheritHome and also mounts a volume at \/home\/aura/);
 });
+
+test('tools: ownTools only when the template declares them; the list is not in the hash', () => {
+  const tpl = { name: 'worker', image: 'alpine:3', command: ['sleep', 'infinity'], env: {}, volumes: [], inheritIdentity: true, inheritMounts: true, inheritHome: true };
+  const c = (svc) => ctx({ manifest: { services: [svc], tools: ['jq'] } });
+  const plain = resolveSidecarSpec({ template: 'worker' }, c(tpl));
+  assert.equal('ownTools' in plain, false);
+  // Snapshot taken with the code BEFORE `tools` existed: templates without
+  // it keep their hash, so no running OS sidecar is recreated.
+  assert.equal(specHash(plain), '181fb1c6937b8d58');
+  const own = resolveSidecarSpec({ template: 'worker' }, c({ ...tpl, tools: ['jq'] }));
+  assert.equal(own.ownTools, true);
+  assert.notEqual(specHash(own), '181fb1c6937b8d58');
+  // Changing the list never changes the spec (it is applied live, in place).
+  assert.equal(specHash(resolveSidecarSpec({ template: 'worker' }, c({ ...tpl, tools: [] }))), specHash(own));
+  assert.equal(specHash(resolveSidecarSpec({ template: 'worker' }, c({ ...tpl, tools: ['jq', 'git', '*'] }))), specHash(own));
+  rejects(() => resolveSidecarSpec({ template: 'worker' }, c({ ...tpl, tools: [], inheritTools: true })), 400, /both tools and inheritTools/);
+  rejects(() => parseSpawnRequest({ template: 'worker', tools: ['jq'] }), 400, /'tools' cannot be set per request/);
+});

@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
-import { mkdtempSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SidecarManager } from '../dist/app-manager/SidecarManager.js';
@@ -20,7 +20,7 @@ const APP = 'io.test.app';
 const INST = 'io.test.app-2';
 
 /** In-memory docker: just enough of the CLI for SidecarManager. */
-function fakeDocker(t, { failStart = false, dieOnBoot = false, missingImages = [] } = {}) {
+function fakeDocker(t, { failStart = false, dieOnBoot = false, missingImages = [], onCreate } = {}) {
   const containers = new Map();   // name → { id, state, labels, args }
   const calls = [];
   let nextId = 1;
@@ -60,6 +60,7 @@ function fakeDocker(t, { failStart = false, dieOnBoot = false, missingImages = [
       const labels = {};
       args.forEach((a, i) => { if (args[i - 1] === '--label') { const j = a.indexOf('='); labels[a.slice(0, j)] = a.slice(j + 1); } });
       const id = `id${nextId++}`;
+      onCreate?.(name, args);
       containers.set(name, { id, name, state: 'created', labels, args });
       reply(cb, 0, `${id}\n`);
     } else if (verb === 'start') {
@@ -90,15 +91,22 @@ function fixture(t, opts = {}) {
     ...(opts.services ?? []),
   ];
   const perms = opts.perms ?? [];
+  // A toolchain mirror to hardlink from (tools tests).
+  if (opts.mirror) {
+    mkdirSync(join(dataDir, 'aura', 'toolchain', 'bin'), { recursive: true });
+    for (const b of opts.mirror) writeFileSync(join(dataDir, 'aura', 'toolchain', 'bin', b), `#!/bin/sh\necho ${b}\n`);
+  }
   const mgr = new SidecarManager({
     runner: {
       sidecarRuntime: () => ({ dataDir, appDataVolume: 'appvol', nodeModulesVolume: 'nm', network: 'aura-net',
         osApiBase: 'http://aura-shell:3000', shellHostname: 'aura-shell', workspaceRoot: '/ws', toolsMode: 'hardlink' }),
       mountRootDir: (k) => join(dataDir, 'aura', 'mounts', k),
       mountRootSubpath: (k) => `aura/mounts/${k}`,
+      toolsDir: (k) => join(dataDir, 'aura', 'runtime', k, 'tools'),
+      clearToolsDir: (k) => rmSync(join(dataDir, 'aura', 'runtime', k, 'tools'), { recursive: true, force: true }),
       resolveContextEnv: async () => ({ CTX_KEY: 'ctx-value' }),
     },
-    registry: { getById: (id) => (id === APP ? { id: APP, services, tools: opts.tools ?? [], permissions: ['sidecars.spawn'] } : undefined) },
+    registry: { getById: (id) => (id === APP ? { id: APP, services, tools: opts.appTools?.() ?? opts.tools ?? [], permissions: ['sidecars.spawn'] } : undefined) },
     permissions: { hasPermission: (_app, p) => perms.includes(p) },
     tokens,
     mounts: {
@@ -328,4 +336,120 @@ test('inheritHome mounts the shared user home and sets HOME after the template e
   assert.equal(plain, undefined);
   await fixture(t).mgr.spawn(INST, { template: 'box' }, { instanceId: INST });
   assert.ok(!flag(d.containers.get(`aura-${INST}--box`).args, '--mount').some((m) => m.includes('target=/home/aura')), 'no home without the flag');
+});
+
+// ─── Tools of a sidecar ──────────────────────────────────────────────────
+
+const WORKER = { name: 'worker', image: 'alpine:3', command: ['sleep', 'infinity'], volumes: [], inheritIdentity: true, tools: ['jq'] };
+const toolsOf = (dataDir, name) => {
+  const dir = join(dataDir, 'aura', 'runtime', `${INST}--${name}`, 'tools');
+  return existsSync(dir) ? readdirSync(dir).filter((n) => !n.startsWith('.')).sort() : null;
+};
+
+function toolsFixture(t, over = {}) {
+  let appTools = over.appTools ?? ['bash', 'node', 'jq', 'git'];
+  const f = fixture(t, {
+    services: [WORKER, { name: 'plain', image: 'alpine:3', command: [], volumes: [] },
+      { name: 'inh', image: 'alpine:3', command: [], volumes: [], inheritTools: true }, ...(over.services ?? [])],
+    mirror: ['bash', 'node', 'jq', 'git', 'rg'],
+    appTools: () => appTools,
+  });
+  return { ...f, setAppTools: (v) => { appTools = v; } };
+}
+
+test('tools: own dir at /aura/my-tools (consumer key), provisioned before create', async (t) => {
+  let atCreate = null;
+  const d = fakeDocker(t, { onCreate: (name) => { if (name.endsWith('--worker')) atCreate = toolsOf(f.dataDir, 'worker'); } });
+  const f = toolsFixture(t);
+  await f.mgr.spawn(INST, { template: 'worker' }, { instanceId: INST });
+  assert.deepEqual(atCreate, ['jq'], 'dir filled before docker create');
+  const c = d.containers.get(`aura-${INST}--worker`);
+  const mounts = flag(c.args, '--mount');
+  assert.ok(mounts.includes(`type=volume,source=appvol,target=/aura/my-tools,volume-subpath=aura/runtime/${INST}--worker/tools,readonly`), mounts.join(' | '));
+  assert.ok(flag(c.args, '-e').includes('PATH=/aura/my-tools:/usr/bin:/bin'));
+  assert.equal(JSON.parse(c.labels['aura.sidecar.spec']).ownTools, true);
+  // inheritTools keeps the app's dir; a plain template gets none.
+  await f.mgr.spawn(INST, { template: 'inh' }, { instanceId: INST });
+  assert.ok(flag(d.containers.get(`aura-${INST}--inh`).args, '--mount').some((m) => m.includes(`volume-subpath=aura/runtime/${INST}/tools,`)));
+  await f.mgr.spawn(INST, { template: 'plain' }, { instanceId: INST });
+  assert.ok(!flag(d.containers.get(`aura-${INST}--plain`).args, '--mount').some((m) => m.includes('/aura/my-tools')));
+  assert.equal(toolsOf(f.dataDir, 'plain'), null);
+});
+
+test('tools: adopt re-provisions; runtime grants persist across a recreate; revoke and the template rule', async (t) => {
+  const d = fakeDocker(t);
+  const f = toolsFixture(t);
+  await f.mgr.spawn(INST, { template: 'worker' }, { instanceId: INST });
+  unlinkSync(join(f.dataDir, 'aura', 'runtime', `${INST}--worker`, 'tools', 'jq'));
+  assert.equal((await f.mgr.spawn(INST, { template: 'worker' }, { instanceId: INST })).created, false);
+  assert.deepEqual(toolsOf(f.dataDir, 'worker'), ['jq'], 'adopt refills the dir');
+
+  const g = await f.mgr.grantTools(INST, 'worker', ['git', 'rg']);
+  assert.deepEqual(g.granted, ['git', 'rg']);
+  assert.deepEqual(g.effective, ['git', 'jq']);
+  assert.deepEqual(g.ignored, ['rg'], 'the app does not hold rg');
+  assert.deepEqual(toolsOf(f.dataDir, 'worker'), ['git', 'jq'], 'live, no recreate');
+  assert.equal(d.calls.filter((a) => a[0] === 'create').length, 1);
+
+  // Recreate (changed spec): the grants come back.
+  assert.equal((await f.mgr.spawn(INST, { template: 'worker', env: { X: '1' } }, { instanceId: INST })).created, true);
+  assert.deepEqual(toolsOf(f.dataDir, 'worker'), ['git', 'jq']);
+  assert.deepEqual((await f.mgr.listTools(INST, 'worker')).runtime, ['git', 'rg']);
+
+  const r = await f.mgr.revokeTools(INST, 'worker', ['git']);
+  assert.deepEqual(r.revoked, ['git']);
+  assert.deepEqual(toolsOf(f.dataDir, 'worker'), ['jq']);
+  await assert.rejects(f.mgr.revokeTools(INST, 'worker', ['jq']), (e) => e.status === 409 && /from template 'worker'.*--template worker/.test(e.message));
+  await assert.rejects(f.mgr.grantTools(INST, 'worker', ['#']), (e) => e.status === 400);
+  await assert.rejects(f.mgr.grantTools(INST, 'worker', ['../x']), (e) => e.status === 400);
+
+  await f.mgr.spawn(INST, { template: 'plain' }, { instanceId: INST });
+  await assert.rejects(f.mgr.grantTools(INST, 'plain', ['jq']), (e) => e.status === 409 && /tools: \[\]/.test(e.message));
+  assert.deepEqual(await f.mgr.listTools(INST, 'plain'), { own: false, inherited: false, template: [], runtime: [], effective: [], ignored: [] });
+  await assert.rejects(f.mgr.listTools(INST, 'nope'), (e) => e.status === 404);
+});
+
+test('tools: the app revoking a tool takes it from the sidecar (refreshTools)', async (t) => {
+  fakeDocker(t);
+  const f = toolsFixture(t);
+  await f.mgr.spawn(INST, { template: 'worker' }, { instanceId: INST });
+  await f.mgr.grantTools(INST, 'worker', ['git']);
+  f.setAppTools(['bash', 'git']);
+  assert.deepEqual(f.mgr.refreshTools(INST), ['worker']);
+  assert.deepEqual(toolsOf(f.dataDir, 'worker'), ['git']);
+  f.setAppTools(['bash', 'git', 'jq']);
+  f.mgr.refreshTools(INST);
+  assert.deepEqual(toolsOf(f.dataDir, 'worker'), ['git', 'jq'], 'and gives it back when the app holds it again');
+});
+
+test('tools: cleanup on remove, on instance stop (not on a crash), and when reconcile reaps', async (t) => {
+  const d = fakeDocker(t);
+  const f = toolsFixture(t);
+  const state = (n) => join(f.dataDir, 'aura', 'runtime', '.state', `${INST}--${n}.tools.json`);
+  await f.mgr.spawn(INST, { template: 'worker' }, { instanceId: INST });
+  await f.mgr.grantTools(INST, 'worker', ['git']);
+  assert.ok(existsSync(state('worker')));
+  await f.mgr.remove(INST, 'worker');
+  assert.equal(toolsOf(f.dataDir, 'worker'), null);
+  assert.equal(existsSync(state('worker')), false);
+
+  await f.mgr.spawn(INST, { template: 'worker', name: 'w2' }, { instanceId: INST });
+  await f.mgr.grantTools(INST, 'w2', ['git']);
+  // A crash (removeAll) keeps the grants for the respawn; a stop (forget) drops them.
+  f.mgr.removeAll(INST);
+  assert.ok(existsSync(state('w2')));
+  f.mgr.forget(INST);
+  d.containers.delete(`aura-${INST}--w2`);   // the reaper's part (reapSiblingsOf)
+  assert.equal(toolsOf(f.dataDir, 'w2'), null);
+  assert.equal(existsSync(state('w2')), false);
+
+  // Shell restart: a live parent re-provisions, a dead one is reaped with its tools.
+  await f.mgr.spawn(INST, { template: 'worker', name: 'w3' }, { instanceId: INST });
+  unlinkSync(join(f.dataDir, 'aura', 'runtime', `${INST}--w3`, 'tools', 'jq'));
+  await f.mgr.reconcile(new Set([INST]));
+  assert.deepEqual(toolsOf(f.dataDir, 'w3'), ['jq']);
+  assert.deepEqual(f.mgr.refreshTools(INST), ['w3'], 'reconcile tracks own-tools sidecars for refresh');
+  await f.mgr.reconcile(new Set());
+  assert.equal(toolsOf(f.dataDir, 'w3'), null);
+  assert.equal(d.containers.size, 0);
 });

@@ -149,3 +149,32 @@ test("mode 'os' waits for a template's readiness", async (t) => {
   assert.deepEqual(os.seen[0].body, { template: 'web', takeover: true, wait: { ready: true } });
   assert.equal(host.phase, 'ready');
 });
+
+test('tools(name): list / grant / revoke hit the tools route; ok is stripped', async (t) => {
+  const view = { own: true, inherited: false, template: ['jq'], runtime: ['git'], effective: ['git', 'jq'], ignored: [] };
+  const os = await fakeOs(t, ({ method }) => {
+    if (method === 'GET') return [200, view];
+    if (method === 'POST') return [200, { ok: true, ...view, granted: ['git'] }];
+    return [200, { ok: true, ...view, runtime: [], effective: ['jq'], revoked: ['git'] }];
+  });
+  const sc = osSidecars({ base: os.base, instanceId: 'a.b-2', token: 'tok' });
+  assert.deepEqual(await sc.tools('w 1').list(), view);
+  const g = await sc.tools('w 1').grant('git', 'rg');
+  assert.deepEqual(g.granted, ['git']);
+  assert.equal('ok' in g, false);
+  const r = await sc.tools('w 1').revoke('git', 'node');
+  assert.deepEqual(r.revoked, ['git']);
+  assert.deepEqual(os.seen.map((x) => `${x.method} ${x.url}`), [
+    'GET /api/instances/a.b-2/sidecars/w%201/tools',
+    'POST /api/instances/a.b-2/sidecars/w%201/tools',
+    'DELETE /api/instances/a.b-2/sidecars/w%201/tools?tool=git&tool=node',
+  ]);
+  assert.deepEqual(os.seen[1].body, { tools: ['git', 'rg'] });
+  assert.ok(os.seen.every((x) => x.auth === 'Bearer tok'));
+});
+
+test('tools(name): a 409 (no own tools dir) surfaces as OsSidecarError', async (t) => {
+  const os = await fakeOs(t, () => [409, { error: 'aura-a.b-2--box has no tools of its own' }]);
+  const sc = osSidecars({ base: os.base, instanceId: 'a.b-2', token: 'tok' });
+  await assert.rejects(sc.tools('box').grant('jq'), (e) => e instanceof OsSidecarError && e.status === 409 && /no tools of its own/.test(e.message));
+});

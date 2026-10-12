@@ -105,6 +105,8 @@ export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]
     ['aura grant caps <app> [names...]', 'Grant capabilities (picker if empty)'],
     ['aura revoke perms <app> <names...>', 'Revoke permissions'],
     ['aura revoke caps <app> <names...>', 'Revoke capabilities'],
+    ['aura grant|revoke caps … --template <t>', 'Caps of a sidecar template (persistent)'],
+    ['aura grant|revoke caps … --sidecar <n>', 'Caps of one running OS sidecar (inside its app)'],
     ['aura cap ...', 'Manage the capability registry'],
   ] },
   { title: 'Ecosystem & dev', lines: [

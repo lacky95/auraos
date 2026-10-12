@@ -167,7 +167,8 @@ async function describeCmd(resource: string, name: string, opts: { output?: stri
       if (!instToken) fail('aura describe sc <id> -i <instance> — which instance does the sidecar belong to?');
       const inst = await resolveInstance(instToken);
       const sc = await resolveSidecar(inst.instanceId, name);
-      console.log(renderDocument({ ...sc, id: sidecarId(sc), container: sc.id }, output));
+      const tools = sc.managedBy === 'os' ? await sidecarTools(inst.instanceId, sc.service) : null;
+      console.log(renderDocument({ ...sc, id: sidecarId(sc), container: sc.id, ...(tools ? { tools } : {}) }, output));
       return;
     }
     case 'capabilities': return dispatch(['cap', 'info', name]);
@@ -189,15 +190,71 @@ function ownToken(instanceId: string): string | null {
   return token && self === instanceId ? token : null;
 }
 
-async function sidecarApi<T>(method: string, instanceId: string, path: string, token: string): Promise<T> {
+async function sidecarApi<T>(method: string, instanceId: string, path: string, token: string, body?: unknown): Promise<T> {
   const res = await fetch(`${shellUrl()}/api/instances/${encodeURIComponent(instanceId)}/sidecars${path}`, {
-    method, headers: { Authorization: `Bearer ${token}` },
+    method,
+    headers: { Authorization: `Bearer ${token}`, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
   const text = await res.text();
   let data: unknown;
   try { data = text ? JSON.parse(text) : undefined; } catch { data = text; }
   if (!res.ok) fail((data as { error?: string } | undefined)?.error ?? `${method} failed with ${res.status}`);
   return data as T;
+}
+
+// ─── Tools of an OS sidecar ─────────────────────────────────────────────────
+
+interface SidecarToolsDto {
+  own: boolean; inherited: boolean;
+  template: string[]; runtime: string[]; effective: string[]; ignored: string[];
+}
+
+/** `describe sc`: what the sidecar holds at /aura/my-tools (null when unknown / none). */
+async function sidecarTools(instanceId: string, service: string): Promise<Record<string, unknown> | string | null> {
+  const path = `/${encodeURIComponent(service)}/tools`;
+  const t = await api.get<SidecarToolsDto>(`/api/instances/${encodeURIComponent(instanceId)}/sidecars${path}`).catch(() => null);
+  if (!t) return null;
+  if (t.inherited) return "inherited (the app's whole set)";
+  if (!t.own) return null;
+  return { template: t.template, runtime: t.runtime, effective: t.effective, ...(t.ignored.length ? { ignored: t.ignored } : {}) };
+}
+
+/**
+ * `aura grant|revoke caps <inst|app> <caps…> --sidecar <name>`: runtime tools
+ * of ONE running OS sidecar. Token route — only inside the app (like `rm sc`).
+ */
+async function sidecarToolsCmd(verb: 'grant' | 'revoke', target: string, sidecar: string, names: string[]): Promise<void> {
+  const inst = await resolveInstance(target);
+  const sc = await resolveSidecar(inst.instanceId, sidecar);
+  if (sc.managedBy !== 'os') fail(`${sidecarId(sc)} is app-managed — only OS sidecars have tools of their own (use inheritTools there)`);
+  const token = ownToken(inst.instanceId);
+  if (!token) {
+    fail(`${verb === 'grant' ? 'granting tools to' : 'revoking tools from'} a running OS sidecar needs ${inst.instanceId}'s token — run this inside the app (aura jump ${inst.instanceId}),`
+      + ` or change the template instead (persistent): aura ${verb} caps ${inst.appId} ${names.join(' ')} --template ${sc.template ?? '<template>'}`);
+  }
+  const path = `/${encodeURIComponent(sc.service)}/tools`;
+  const r = verb === 'grant'
+    ? await sidecarApi<SidecarToolsDto & { granted: string[] }>('POST', inst.instanceId, path, token, { tools: names })
+    : await sidecarApi<SidecarToolsDto & { revoked: string[] }>('DELETE', inst.instanceId,
+      `${path}?${new URLSearchParams(names.map((n): [string, string] => ['tool', n])).toString()}`, token);
+  const changed = verb === 'grant' ? (r as { granted: string[] }).granted : (r as { revoked: string[] }).revoked;
+  const where = `${inst.instanceId}/${sidecarId(sc)}`;
+  if (changed.length) console.log(`${color.green('✓')} ${verb === 'grant' ? 'granted' : 'revoked'} ${changed.join(', ')} ${verb === 'grant' ? '→' : 'from'} ${where}`);
+  else console.log(`no change — ${where} ${verb === 'grant' ? 'already has' : 'has no runtime grant of'} ${names.join(', ')}`);
+  console.log(`effective: ${r.effective.length ? r.effective.join(', ') : color.dim('(none)')}`);
+  if (r.ignored.length) console.log(color.yellow(`not held by ${inst.appId} (kept, not provisioned): ${r.ignored.join(', ')}`));
+}
+
+/** Validate --template / --sidecar on grant|revoke; null when neither is set. */
+function targetedCaps(def: ResourceDef, verb: string, app: string | undefined, names: string[], opts: { template?: string; sidecar?: string }): 'template' | 'sidecar' | null {
+  if (!opts.template && !opts.sidecar) return null;
+  if (def.name !== 'capabilities') fail('--template / --sidecar only apply to caps');
+  if (opts.template && opts.sidecar) fail('pass either --template (persistent, the manifest) or --sidecar (one running sidecar), not both');
+  if (!app || names.length === 0) {
+    fail(opts.template ? `aura ${verb} caps <app> <caps…> --template <template>` : `aura ${verb} caps <inst|app> <caps…> --sidecar <name>`);
+  }
+  return opts.template ? 'template' : 'sidecar';
 }
 
 // ─── exec / logs ────────────────────────────────────────────────────────────
@@ -586,15 +643,22 @@ export function registerVerbs(program: Command): void {
 
   program
     .command('grant <resource> [app] [names...]')
-    .description('Grant permissions or capabilities to an app (picker when names are omitted).')
+    .description('Grant permissions or capabilities to an app (picker when names are omitted), a sidecar template or one running sidecar.')
     .option('-i, --interactive', 'caps: open the picker even when names are given')
+    .option('--template <tpl>', "caps: to a services[] template of the app (persistent; capped at the app's tools)")
+    .option('--sidecar <name>', 'caps: to one running OS sidecar of <inst|app> (runtime; inside the app)')
     .addHelpText('after', resourcesLine('grant') + examples([
       'aura grant perms com.aura.terminal apps.mount',
       'aura grant caps com.example.hello ripgrep jq',
+      'aura grant caps com.example.hello git --template worker    # every worker sidecar',
+      'aura grant caps com.example.hello git --sidecar worker-7   # one running sidecar',
       'aura grant perms                                 # interactive',
     ]))
-    .action(async (resource: string, app: string | undefined, names: string[], opts: { interactive?: boolean }) => {
+    .action(async (resource: string, app: string | undefined, names: string[], opts: { interactive?: boolean; template?: string; sidecar?: string }) => {
       const def = resourceOrFail(resource, 'grant');
+      const target = targetedCaps(def, 'grant', app, names, opts);
+      if (target === 'template') return dispatch(['cap', 'grant', app!, ...names, '--template', opts.template!]);
+      if (target === 'sidecar') return sidecarToolsCmd('grant', app!, opts.sidecar!, names);
       const rest = [...(app ? [app] : []), ...names];
       if (def.name === 'permissions') return dispatch(['app', 'perm', 'grant', ...rest]);
       if (def.name === 'capabilities') return dispatch(['cap', 'grant', ...rest, ...(opts.interactive ? ['-i'] : [])]);
@@ -603,10 +667,20 @@ export function registerVerbs(program: Command): void {
 
   program
     .command('revoke <resource> <app> <names...>')
-    .description('Revoke permissions or capabilities from an app.')
-    .addHelpText('after', resourcesLine('revoke') + examples(['aura revoke perms com.aura.terminal apps.mount', 'aura revoke caps com.example.hello jq']))
-    .action(async (resource: string, app: string, names: string[]) => {
+    .description('Revoke permissions or capabilities from an app, a sidecar template or one running sidecar.')
+    .option('--template <tpl>', 'caps: from a services[] template of the app (persistent)')
+    .option('--sidecar <name>', 'caps: runtime grants of one running OS sidecar of <inst|app> (inside the app)')
+    .addHelpText('after', resourcesLine('revoke') + examples([
+      'aura revoke perms com.aura.terminal apps.mount',
+      'aura revoke caps com.example.hello jq            # also gone from every sidecar of the app',
+      'aura revoke caps com.example.hello git --template worker',
+      'aura revoke caps com.example.hello git --sidecar worker-7',
+    ]))
+    .action(async (resource: string, app: string, names: string[], opts: { template?: string; sidecar?: string }) => {
       const def = resourceOrFail(resource, 'revoke');
+      const target = targetedCaps(def, 'revoke', app, names, opts);
+      if (target === 'template') return dispatch(['cap', 'revoke', app, ...names, '--template', opts.template!]);
+      if (target === 'sidecar') return sidecarToolsCmd('revoke', app, opts.sidecar!, names);
       if (def.name === 'permissions') return dispatch(['app', 'perm', 'revoke', app, ...names]);
       if (def.name === 'capabilities') return dispatch(['cap', 'revoke', app, ...names]);
       unsupported('revoke', def);

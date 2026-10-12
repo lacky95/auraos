@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { defaultKv } from '@aura/kv-store';
 import { connect } from 'node:net';
 import { dirname, join } from 'node:path';
@@ -12,7 +12,10 @@ import { MOUNT_ROOT_PATH } from './MountManager.js';
 import type { PermissionManager } from '../permissions/PermissionManager.js';
 import type { AppManifest } from '../types/manifest.js';
 import { toolsGrant } from './tool-allowlist.js';
-import { MY_TOOLS_PATH, SHARED_HOME_PATH } from './tool-provision.js';
+import {
+  MY_TOOLS_PATH, SHARED_HOME_PATH, listToolchainBinaries, provisionAllowlist, readSidecarMap, toolchainMirrorBin,
+} from './tool-provision.js';
+import { SIDECAR_TOOL_RE, effectiveSidecarTools } from './sidecar-tools.js';
 import { userHomeSubpath } from '../scopes/home.js';
 import {
   SpecError, resolveSidecarSpec, specHash,
@@ -57,7 +60,25 @@ interface SpecRecord {
   port?: number;
   mounts: SidecarMountsView;
   owner?: string;
+  /** Has its own tools dir (template `tools`); absent otherwise. */
+  ownTools?: true;
   createdAt: string;
+}
+
+/** Tools of one OS sidecar (`GET …/sidecars/:name/tools`). */
+export interface SidecarToolsView {
+  /** Own tools dir at /aura/my-tools (template declares `tools`). */
+  own: boolean;
+  /** Shares the app's whole set instead (`inheritTools`). */
+  inherited: boolean;
+  /** The template's `tools` (persistent; edit the manifest). */
+  template: string[];
+  /** Granted at runtime to this running sidecar (survives a recreate, not the instance). */
+  runtime: string[];
+  /** Binaries actually at /aura/my-tools: (template ∪ runtime) ∩ the app's tools[]. */
+  effective: string[];
+  /** Named tools the app itself does not hold — not provisioned. */
+  ignored: string[];
 }
 
 /** What the API returns for an OS sidecar. */
@@ -185,8 +206,8 @@ export function sidecarContainerName(instanceId: string, name: string): string {
 }
 
 export class SidecarManager {
-  /** consumerKey → what fan-out needs about each live OS sidecar. */
-  private live = new Map<string, { instanceId: string; name: string; mounts: SidecarMountsView }>();
+  /** consumerKey → what fan-out (and tool refresh) needs about each live OS sidecar. */
+  private live = new Map<string, { instanceId: string; name: string; mounts: SidecarMountsView; template?: string; ownTools?: boolean }>();
   private locks = new Map<string, Promise<unknown>>();
   private pulls = new Map<string, Promise<void>>();
 
@@ -324,7 +345,8 @@ export class SidecarManager {
             // Same spec, already up: adopt. Re-learn its nonce and make sure its
             // mounts are there (idempotent — present ones are skipped).
             if (rec.nonce) this.opts.tokens.register(instanceId, rec.nonce, spec.name);
-            this.track(instanceId, spec.name, rec.mounts);
+            this.track(instanceId, spec.name, rec.mounts, rec);
+            if (rec.ownTools) this.provisionTools(instanceId, spec.name, inst.appId, spec.template);
             if (rec.mounts.own || rec.mounts.inherit) {
               await this.opts.mounts.reapplyConsumer(`${instanceId}--${spec.name}`, rec.mounts);
             }
@@ -352,6 +374,9 @@ export class SidecarManager {
       const wantsMountRoot = spec.mounts.own || spec.mounts.inherit;
       const consumer = `${instanceId}--${spec.name}`;
       if (wantsMountRoot) mkdirSync(this.opts.runner.mountRootDir(consumer), { recursive: true });
+      // Own tools are in place before the container starts (the dir is
+      // mounted by inode — it must exist, and the first exec must find them).
+      if (spec.ownTools) this.provisionTools(instanceId, spec.name, inst.appId, spec.template);
 
       const env = await this.environment(instanceId, inst.appId, spec);
       if (spec.seed) await this.seed(instanceId, spec, appDataSubpath, env);
@@ -363,6 +388,7 @@ export class SidecarManager {
         ...(spec.port !== undefined ? { port: spec.port } : {}),
         mounts: spec.mounts,
         ...(caller.sidecar ? { owner: caller.sidecar } : {}),
+        ...(spec.ownTools ? { ownTools: true as const } : {}),
         createdAt: new Date().toISOString(),
       };
       const args = await this.createArgs(instanceId, inst.appId, container, spec, record, env, token?.token ?? null);
@@ -385,7 +411,7 @@ export class SidecarManager {
         throw new Error(`${container} exited right after start:\n${(logs.stdout + logs.stderr).trim() || '(no output)'}`);
       }
 
-      this.track(instanceId, spec.name, spec.mounts);
+      this.track(instanceId, spec.name, spec.mounts, record);
       this.opts.changed?.();
       if (wantsMountRoot) await this.opts.mounts.reapplyConsumer(consumer, spec.mounts);
       if (req.wait?.ready && spec.readiness && spec.port) {
@@ -546,7 +572,9 @@ export class SidecarManager {
       ...(spec.workdir ? ['--workdir', spec.workdir] : []),
       ...(spec.inheritPermissions && manifest?.permissions?.length ? ['-e', `AURA_PERMISSIONS=${manifest.permissions.join(',')}`] : []),
     ];
+    // inheritTools: the app's own dir (whole set); ownTools: the sidecar's dir.
     if (spec.inheritTools) a.push(...await this.toolArgs(instanceId, spec.image));
+    else if (spec.ownTools) a.push(...await this.toolArgs(consumer, spec.image));
     if (spec.mounts.own || spec.mounts.inherit) {
       a.push('--mount', `type=volume,source=${rt.appDataVolume},target=${MOUNT_ROOT_PATH},volume-subpath=${this.opts.runner.mountRootSubpath(consumer)}`,
         '-e', `AURA_MOUNT_ROOT=${MOUNT_ROOT_PATH}`);
@@ -557,8 +585,12 @@ export class SidecarManager {
     return a;
   }
 
-  /** The app's granted tools, mounted the way ContainerRunner mounts them (port of the SDK's `inheritTools`). */
-  private async toolArgs(instanceId: string, image: string): Promise<string[]> {
+  /**
+   * A tools allowlist dir, mounted the way ContainerRunner mounts the app's
+   * (port of the SDK's `inheritTools`). `dirKey` is the instance id for the
+   * app's own set, or the consumer key `<inst>--<name>` for a sidecar's own.
+   */
+  private async toolArgs(dirKey: string, image: string): Promise<string[]> {
     const rt = this.opts.runner.sidecarRuntime();
     const r = await docker(['image', 'inspect', image, '--format', '{{range .Config.Env}}{{println .}}{{end}}']);
     const basePath = r.stdout.split('\n').find((l) => l.startsWith('PATH='))?.slice('PATH='.length)
@@ -567,12 +599,162 @@ export class SidecarManager {
       ...(rt.toolsMode === 'symlink'
         ? ['--mount', `type=volume,source=${rt.appDataVolume},target=/aura/all-tools,volume-subpath=aura/toolchain/bin,readonly`]
         : []),
-      '--mount', `type=volume,source=${rt.appDataVolume},target=${MY_TOOLS_PATH},volume-subpath=aura/runtime/${instanceId}/tools,readonly`,
+      '--mount', `type=volume,source=${rt.appDataVolume},target=${MY_TOOLS_PATH},volume-subpath=aura/runtime/${dirKey}/tools,readonly`,
       '-v', `${rt.workspaceRoot}/packages:/workspace/packages:ro`,
       '--mount', `type=volume,source=${rt.nodeModulesVolume},target=/workspace/node_modules,readonly`,
       '-e', `PATH=${MY_TOOLS_PATH}:${basePath}`,
       '-v', `${rt.workspaceRoot}/os/bashrc.aura.sh:/etc/profile.d/aura-prompt.sh:ro`,
     ];
+  }
+
+  // ─── Tools of a sidecar ─────────────────────────────────────────────────
+  //
+  // A template with `tools` gives each of its sidecars its own allowlist dir
+  // (`aura/runtime/<inst>--<name>/tools`, mounted at /aura/my-tools). What is
+  // in it = (template tools ∪ runtime grants) ∩ the app's tools[]. The dir is
+  // refilled IN PLACE (provisionAllowlist keeps its inode), so every change is
+  // live in the running container — no recreate. Runtime grants are persisted
+  // next to the mount declarations' kind of state, so a recreated sidecar gets
+  // them back; they go when the sidecar is deleted or its instance stops.
+
+  private toolsDeclFile(consumer: string): string {
+    return join(this.opts.runner.sidecarRuntime().dataDir, 'aura', 'runtime', '.state', `${consumer}.tools.json`);
+  }
+
+  private readGrants(consumer: string): string[] {
+    try {
+      const raw = JSON.parse(readFileSync(this.toolsDeclFile(consumer), 'utf-8')) as unknown;
+      return Array.isArray(raw) ? raw.filter((t): t is string => typeof t === 'string') : [];
+    } catch { return []; }   // absent or corrupt — nothing granted
+  }
+
+  private writeGrants(consumer: string, grants: string[]): void {
+    const file = this.toolsDeclFile(consumer);
+    mkdirSync(dirname(file), { recursive: true });
+    if (grants.length === 0) rmSync(file, { force: true });
+    else writeFileSync(file, JSON.stringify(grants, null, 2));
+  }
+
+  /** Drop a sidecar's own tools dir and its runtime grants. */
+  private forgetTools(consumer: string): void {
+    try { this.opts.runner.clearToolsDir(consumer); } catch { /* ignore */ }
+    try { rmdirSync(dirname(this.opts.runner.toolsDir(consumer))); } catch { /* busy or absent */ }
+    try { rmSync(this.toolsDeclFile(consumer), { force: true }); } catch { /* ignore */ }
+  }
+
+  /** Compute the sidecar's tool set; with `apply`, (re)fill its dir. */
+  private computeTools(instanceId: string, name: string, appId: string, template: string, apply: boolean): SidecarToolsView {
+    const consumer = `${instanceId}--${name}`;
+    const manifest = this.opts.registry.getById(appId);
+    const tpl = (manifest?.services ?? []).find((s) => s.name === template);
+    const dataDir = this.opts.runner.sidecarRuntime().dataDir;
+    // Containers enumerate the in-volume mirror in both modes (see
+    // ContainerRunner.provisionToolsDir).
+    const store = toolchainMirrorBin(dataDir);
+    const templateTools = tpl?.tools ?? [];
+    const runtime = this.readGrants(consumer);
+    const r = effectiveSidecarTools(manifest?.tools ?? [], templateTools, runtime,
+      listToolchainBinaries(store), readSidecarMap(store));
+    if (apply) {
+      provisionAllowlist({ dataDir, dir: this.opts.runner.toolsDir(consumer), tools: r.effective, legacyStoreBin: store });
+    }
+    return { own: true, inherited: false, template: templateTools, runtime, ...r };
+  }
+
+  private provisionTools(instanceId: string, name: string, appId: string, template: string): SidecarToolsView {
+    return this.computeTools(instanceId, name, appId, template, true);
+  }
+
+  /** The sidecar and its app, or 404. */
+  private async toolsTarget(instanceId: string, name: string): Promise<{ appId: string; sc: OsSidecar; own: boolean }> {
+    const appId = this.opts.instance(instanceId)?.appId;
+    if (!appId) throw new SpecError(404, `Instance not found: ${instanceId}`);
+    const found = await this.inspect(sidecarContainerName(instanceId, name));
+    const rec = found && found.labels['aura.managed'] === 'os' && found.labels['aura.parent'] === instanceId
+      ? parseRecord(found.labels['aura.sidecar.spec']) : null;
+    if (!found || !rec) throw new SpecError(404, `no OS sidecar '${name}' in ${instanceId}`);
+    return { appId, sc: toView(found.name, found.state, rec), own: rec.ownTools === true };
+  }
+
+  /** What `name` holds at /aura/my-tools, and why. */
+  async listTools(instanceId: string, name: string): Promise<SidecarToolsView> {
+    const { appId, sc, own } = await this.toolsTarget(instanceId, name);
+    if (own) return this.computeTools(instanceId, name, appId, sc.template, false);
+    const tpl = (this.opts.registry.getById(appId)?.services ?? []).find((s) => s.name === sc.template);
+    return { own: false, inherited: tpl?.inheritTools === true, template: [], runtime: [], effective: [], ignored: [] };
+  }
+
+  /**
+   * Grant tools to one running sidecar (additive, persisted until it is
+   * deleted or its instance stops). Applied live. Tools the app lacks are
+   * kept as grants but reported in `ignored` — they appear once the app
+   * holds them.
+   */
+  async grantTools(instanceId: string, name: string, tools: string[]): Promise<SidecarToolsView & { granted: string[] }> {
+    const list = SidecarManager.checkToolNames(tools);
+    return this.locked(sidecarContainerName(instanceId, name), async () => {
+      const { appId, sc, own } = await this.toolsTarget(instanceId, name);
+      if (!own) throw SidecarManager.noOwnTools(sc);
+      const consumer = `${instanceId}--${name}`;
+      const before = this.readGrants(consumer);
+      const granted = list.filter((t) => !before.includes(t));
+      this.writeGrants(consumer, [...before, ...granted]);
+      return { ...this.provisionTools(instanceId, name, appId, sc.template), granted };
+    });
+  }
+
+  /** Revoke runtime grants (template tools go through the template). */
+  async revokeTools(instanceId: string, name: string, tools: string[]): Promise<SidecarToolsView & { revoked: string[] }> {
+    const list = SidecarManager.checkToolNames(tools);
+    return this.locked(sidecarContainerName(instanceId, name), async () => {
+      const { appId, sc, own } = await this.toolsTarget(instanceId, name);
+      if (!own) throw SidecarManager.noOwnTools(sc);
+      const consumer = `${instanceId}--${name}`;
+      const before = this.readGrants(consumer);
+      const templateTools = (this.opts.registry.getById(appId)?.services ?? []).find((s) => s.name === sc.template)?.tools ?? [];
+      const fromTemplate = list.filter((t) => !before.includes(t) && templateTools.includes(t));
+      if (fromTemplate.length) {
+        throw new SpecError(409, `${fromTemplate.join(', ')} ${fromTemplate.length === 1 ? 'comes' : 'come'} from template '${sc.template}', not a runtime grant — revoke it there: aura revoke caps ${appId} ${fromTemplate.join(' ')} --template ${sc.template}`);
+      }
+      const revoked = before.filter((t) => list.includes(t));
+      this.writeGrants(consumer, before.filter((t) => !list.includes(t)));
+      return { ...this.provisionTools(instanceId, name, appId, sc.template), revoked };
+    });
+  }
+
+  /**
+   * Refill the own tools dir of every live OS sidecar of `instanceId` — after
+   * the app's tools[] or a template's `tools` changed (the intersection may
+   * have, too). Returns the sidecar names refreshed.
+   */
+  refreshTools(instanceId: string): string[] {
+    const appId = this.opts.instance(instanceId)?.appId;
+    if (!appId) return [];
+    const done: string[] = [];
+    for (const v of this.live.values()) {
+      if (v.instanceId !== instanceId || !v.ownTools || !v.template) continue;
+      try {
+        this.provisionTools(instanceId, v.name, appId, v.template);
+        done.push(v.name);
+      } catch (err) {
+        console.warn(`[SidecarManager] refresh tools of ${instanceId}--${v.name} failed: ${(err as Error).message}`);
+      }
+    }
+    return done;
+  }
+
+  private static checkToolNames(tools: unknown): string[] {
+    if (!Array.isArray(tools) || tools.length === 0 || !tools.every((t) => typeof t === 'string' && SIDECAR_TOOL_RE.test(t))) {
+      throw new SpecError(400, 'tools must be a non-empty array of tool names (or \'*\')');
+    }
+    if (tools.includes('#')) {
+      throw new SpecError(400, "'#' (all-except) is a template rule — runtime grants are plain names or '*'");
+    }
+    return [...new Set(tools as string[])];
+  }
+
+  private static noOwnTools(sc: OsSidecar): SpecError {
+    return new SpecError(409, `${sc.containerName} has no tools of its own — declare \`tools: []\` (or a list) in its services[] template '${sc.template}' and respawn it, then grant into it`);
   }
 
   // ─── Remove / exec / logs ──────────────────────────────────────────────
@@ -594,6 +776,7 @@ export class SidecarManager {
       }
       this.opts.mounts.forgetConsumer(`${instanceId}--${name}`);
       await dockerOk(['rm', '-f', container], `docker rm ${container}`);
+      this.forgetTools(`${instanceId}--${name}`);
       this.opts.tokens.forget(instanceId, name);
       this.untrack(instanceId, name);
       this.opts.changed?.();
@@ -641,6 +824,27 @@ export class SidecarManager {
   }
 
   /**
+   * A deliberate stop / kill: `removeAll`, plus the own tools dirs and
+   * runtime tool grants of every sidecar of the instance — also the ones not
+   * tracked (stopped, or never adopted). A crash only runs `removeAll`, so
+   * the respawned app's sidecars get their grants back (like mount
+   * declarations, see MountManager.forget vs removeAll).
+   */
+  forget(instanceId: string): void {
+    this.removeAll(instanceId);
+    const prefix = `${instanceId}--`;
+    const consumers = new Set<string>();
+    try {
+      const runtime = dirname(dirname(this.opts.runner.toolsDir(`${prefix}x`)));
+      for (const n of readdirSync(runtime)) if (n.startsWith(prefix)) consumers.add(n);
+      for (const n of readdirSync(join(runtime, '.state'))) {
+        if (n.startsWith(prefix) && n.endsWith('.tools.json')) consumers.add(n.slice(0, -'.tools.json'.length));
+      }
+    } catch { /* no runtime dir yet */ }
+    for (const c of consumers) this.forgetTools(c);
+  }
+
+  /**
    * After a shell restart: re-learn every OS sidecar from docker — nonces back
    * into InstanceTokens, inheritance back into the fan-out view — and remove
    * the ones whose instance no longer exists. Run after orphan adoption and
@@ -657,19 +861,30 @@ export class SidecarManager {
       if (!rec || !parent) continue;
       if (!liveInstanceIds.has(parent)) {
         await docker(['rm', '-f', container]);
+        this.forgetTools(`${parent}--${rec.name}`);
         reaped++;
         continue;
       }
       if (rec.nonce) this.opts.tokens.register(parent, rec.nonce, rec.name);
-      this.track(parent, rec.name, rec.mounts);
+      this.track(parent, rec.name, rec.mounts, rec);
+      if (rec.ownTools) {
+        // Re-provision: the app's tools[] or the template may have changed
+        // while the shell was down.
+        const appId = this.opts.instance(parent)?.appId;
+        try { if (appId) this.provisionTools(parent, rec.name, appId, rec.template); }
+        catch (err) { console.warn(`[SidecarManager] tools of ${container}: ${(err as Error).message}`); }
+      }
       adopted++;
     }
     if (adopted || reaped) console.log(`[SidecarManager] reconcile: adopted ${adopted}, reaped ${reaped}`);
     return { adopted, reaped };
   }
 
-  private track(instanceId: string, name: string, mounts: SidecarMountsView): void {
-    this.live.set(`${instanceId}--${name}`, { instanceId, name, mounts });
+  private track(instanceId: string, name: string, mounts: SidecarMountsView, rec?: Pick<SpecRecord, 'template' | 'ownTools'>): void {
+    this.live.set(`${instanceId}--${name}`, {
+      instanceId, name, mounts,
+      ...(rec ? { template: rec.template, ownTools: rec.ownTools === true } : {}),
+    });
   }
 
   private untrack(instanceId: string, name: string): void {
