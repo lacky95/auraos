@@ -37,13 +37,17 @@ export const VERSION = '0.1.0';
  */
 export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]>; note?: string }> = [
   { title: 'Basics', lines: [
+    ['aura jump', 'Pick a running app or service and shell into it'],
+    ['aura jump <app|inst>', 'Shell into an app sandbox'],
+    ['aura jump <app> --sidecar <name>', 'Shell into a sidecar'],
+    ['aura mount', 'Pick apps to mount into a container, live (wizard)'],
+    ['aura mount add <app...>', 'Mount apps into this app (--wr writable, --instance <inst>)'],
+    ['aura cap grant', 'Pick the CLI tools an app may use'],
+    ['aura dev new', 'Start the create-new-app wizard'],
     ['aura ps', 'Running instances (= aura get inst)'],
     ['aura run <app>', 'Start an app, print instance id'],
-    ['aura jump [app|inst]', 'Shell into an app sandbox (picker if empty)'],
-    ['aura jump <app> --sidecar <name>', 'Shell into a sidecar'],
     ['aura status', 'Health: shell, apps, capabilities, services'],
     ['aura info', 'Execution context: layers, OS, env, mounts'],
-    ['aura dev new', 'Start the create-new-app wizard'],
   ] },
   { title: 'Inspect', note: 'Output for get: -o wide | json | yaml | name', lines: [
     ['aura get apps [name]', 'Installed apps + instance count'],
