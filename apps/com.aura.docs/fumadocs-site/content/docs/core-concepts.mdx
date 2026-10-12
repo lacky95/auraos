@@ -256,6 +256,7 @@ ipc.broadcast
 apps.mount             apps.port
 sidecars.spawn         sidecars.anyImage
 sidecars.privileged    sidecars.mounts
+sidecars.manageAll
 ```
 
 Plus dynamic content-provider perms in the form
@@ -274,6 +275,7 @@ The ones in `ENFORCED_PERMISSIONS` really answer 403 when undeclared:
 | `sidecars.anyImage` | …from an image that isn't a template's |
 | `sidecars.privileged` | …from a template with `privileged`, `capabilities`, `devices` or `publish` |
 | `sidecars.mounts` | Managing the own mounts of the app's sidecars (together with `apps.mount`) |
+| `sidecars.manageAll` | Letting the app's sidecars manage all its OS sidecars, not only the ones they spawned |
 
 The sidecar routes check them against the app the **instance** belongs to,
 never an app id taken from the request. Manage them live, no restart:

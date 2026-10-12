@@ -87,11 +87,12 @@ Volumes are not removed with the container: the data in
 | Symptom | Cause, fix |
 |---|---|
 | spawn fails with `exited right after start` and log lines | The image's command is wrong or it needs config. Many images need an explicit subcommand in `command`. |
-| 409 `exists but is not OS-managed` | Your app still runs an app-managed container of that name. Pass `takeover: true` once, or restart the instance. |
+| 409 `exists but is not OS-managed` | Your app still runs an app-managed container of that name. Pass `takeover: true` (`createSidecars` in `mode: 'os'` does), or restart the instance. |
+| 403 `may only manage the sidecars it spawned` | A sidecar acted on a sibling or its parent. Grant the app `sidecars.manageAll` if that's intended. |
 | 409 `runs a different spec` | You passed `replace: false` and the spec changed. Drop it to recreate. |
 | 409 `spawned without mounts.own` | Respawn with `mounts: { own: true }` before adding own mounts. |
 | 401 `has no current token` | The instance started before instance tokens existed. Restart it once. |
 | 403 `is not granted 'sidecars.…'` | Add the permission to the manifest, or `aura grant perm <app> sidecars.spawn`. |
-| 429 | 32 sidecars per instance, stopped ones included. Remove some. |
+| 429 | The instance runs the maximum of OS sidecars (32 running by default). Remove some, or raise the OS setting `os:sidecars.maxPerInstance`. |
 | A seed keeps failing | It runs through the image's entrypoint; check that `seed.command` makes sense as arguments to it. |
 | Changes to `services[]` don't show | Call `spawn` again; the next spawn recreates a sidecar whose spec changed. |

@@ -62,7 +62,8 @@ minutes, the SDK waits up to 15); volume directories are created; `seed`
 runs if the template has one and it never ran; the container is created and
 started; if it exits within 400 ms the spawn fails with its last log lines;
 its mounts are applied; with `wait: { port: true }` the call returns only once
-the port accepts TCP (default 60 s, `wait.timeoutMs` to change).
+the port accepts TCP (default 60 s), with `wait: { ready: true }` once the
+template's `readiness.path` answers HTTP (`wait.timeoutMs` changes either).
 
 A request may change only a few things per call: `name` / `suffix`, `env`,
 `envInherit`, `command`, `mounts`, `image` (with `sidecars.anyImage`) and
@@ -159,8 +160,11 @@ await sc.remove(sidecar.name);
 - Volumes are per sidecar (`.sidecars/<name>/<volume>`), unless the template
   marks a volume `"shared": true`, then every sidecar of that template uses
   one directory.
-- Limit: 32 OS sidecars per instance (`AURA_SIDECAR_MAX_PER_INSTANCE`),
-  stopped ones included; the 33rd spawn answers 429.
+- Limit: 32 running OS sidecars per instance by default; stopped ones don't
+  count. It is an OS setting in Valkey, `os:sidecars` →
+  `{ "maxPerInstance": 64 }` (`PUT /api/kv/os/sidecars` with
+  `{"value":{"maxPerInstance":64}}`); without it
+  `AURA_SIDECAR_MAX_PER_INSTANCE`, then 32. One more answers 429.
 - `sc.list()` shows them all, `sc.get(name)` one (or `null`).
 
 ## Sidecars that spawn sidecars

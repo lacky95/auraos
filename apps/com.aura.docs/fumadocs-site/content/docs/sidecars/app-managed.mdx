@@ -122,9 +122,10 @@ with a command in the template:
 "seed": { "command": ["sh", "-c", "test -f /vol/config.yaml || cp /defaults/config.yaml /vol/"] }
 ```
 
-It runs once, in the service's own image, with its volumes and env. Make it
-idempotent: a sidecar that keeps an old `aura-<appId>-<volume>` volume runs
-it once against the existing data. More: [Seeding](/docs/sidecars/templates#seeding).
+It runs once, in the service's own image, with its volumes and env. A
+sidecar that keeps its old `aura-<appId>-<volume>` volume counts as already
+seeded (that volume holds what `onSeed` put there), so migrating doesn't
+re-seed. More: [Seeding](/docs/sidecars/templates#seeding).
 
 **4. Code.** One line:
 
@@ -140,18 +141,16 @@ it once against the existing data. More: [Seeding](/docs/sidecars/templates#seed
 `osSidecars().spawn({ template })` yourself for per-spawn options.
 
 **5. Switch over.** The app-managed container from before still runs under
-the same name, and the OS won't touch it: a spawn answers 409. Either
-restart the instance (`aura restart inst <id>`; stopping removes the old
-container, the restarted app spawns the OS one), or, from your own code,
-spawn once with `takeover: true`:
+the same name. `createSidecars` in `mode: 'os'` handles that: it spawns with
+`takeover: true`, so the OS replaces your own old container on the first
+`ensureAll`. With `osSidecars()` directly, pass it yourself once:
 
 ```ts
 await osSidecars().spawn({ template: 'runtime', takeover: true });
 ```
 
-`takeover` only removes a container of your own instance. `createSidecars`
-in `mode: 'os'` doesn't pass it, so with `createSidecars` restart the
-instance.
+`takeover` only ever removes a container of your own instance; without it a
+spawn onto an app-managed name answers 409.
 
 **6. Check.** `aura get sc -a <appId>` shows `MANAGED os` and the
 `TEMPLATE` column, and `aura exec inst <appId> -c <name> -- …` works.

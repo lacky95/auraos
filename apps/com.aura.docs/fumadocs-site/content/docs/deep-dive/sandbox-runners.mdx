@@ -253,22 +253,29 @@ what may be asked live, pure and docker-free, in `sidecar-spec.ts`:
 
 `spawn(instanceId, req, caller)` then, serialised per container name:
 
+0. A sidecar caller (its own token) without the app's `sidecars.manageAll`
+   may only touch names in its own subtree (owner chain via
+   `aura.sidecar.owner`) → 403; the same check runs before get, exec, logs,
+   delete and mounts (`authorize`), and `list` filters by it.
 1. `docker inspect` the name. App-managed container (no `aura.managed=os`)
    → 409, unless `takeover` and its `aura.parent` is this instance. OS
    sidecar with an equal hash and `running` → **adopt**: re-register its
    nonce, track it, re-apply its mounts (idempotent), return `created: false`.
    A different hash with `replace: false` → 409. Otherwise remove it (own
    mount declarations stay) and continue.
-2. New name: count the instance's OS sidecars (stopped ones too) against
-   `AURA_SIDECAR_MAX_PER_INSTANCE` (32) → 429.
+2. New name: count the instance's **running** OS sidecars against the limit
+   → 429. The limit is the OS setting `os:sidecars.maxPerInstance` in
+   Valkey, else `AURA_SIDECAR_MAX_PER_INSTANCE`, else 32.
 3. `ensureImage`: `docker pull` if missing, 10 min timeout, concurrent pulls
    of one image share one promise.
 4. Create the volume subpath dirs and, with `mounts.own` or inheritance,
    the mount root `aura/mounts/<instance>--<name>`.
 5. Env: `envInherit` from OS Context, falling back to the app container's
    env (`docker inspect aura-<instanceId>`), then the spec's `env`.
-6. `seed`, if declared and the marker `.sidecars/<name>/.aura-seeded` is
-   absent: a `docker run --rm` of the image with the volumes and env,
+6. `seed`, if declared and not seeded yet. The marker is keyed by the data:
+   `.sidecars/.seeded/<sha of the resolved volume subpaths>` (`name-<name>`
+   without volumes); a legacy per-app docker volume counts as seeded; spawns
+   sharing a marker are serialised. Otherwise: a `docker run --rm` of the image with the volumes and env,
    labelled `aura.mount=1` (hidden from listings) and `aura.parent` (reaped
    if the instance dies mid-seed). Marker written on success.
 7. With `inheritIdentity`, mint a token for `<instance>--<name>`.
@@ -278,7 +285,12 @@ what may be asked live, pure and docker-free, in `sidecar-spec.ts`:
    lines.
 9. Track it for fan-out, `MountManager.reapplyConsumer` (own declarations
    restored, then the parent's mounts minus `exclude`, `forceRo` applied),
-   and with `wait.port` poll TCP until the port answers (default 60 s).
+   and with `wait.port` poll TCP until the port answers (default 60 s), with
+   `wait.ready` poll `readiness.path` until it answers HTTP below 500.
+10. Notify AppManager (`changed`), which refreshes its sidecar cache at once.
+
+`prePull` templates are pulled on `app:installed` and once at shell start
+(background, missing images only).
 
 Docker is the source of truth; the in-memory state is only the fan-out map
 and token nonces, both rebuilt by `reconcile`. Every sidecar carries its

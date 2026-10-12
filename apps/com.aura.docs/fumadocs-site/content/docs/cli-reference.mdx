@@ -44,13 +44,17 @@ and asks you to pick one.
 
 | Command | What it does | Key flags |
 |---|---|---|
+| `aura jump` (alias `j`) | **Picker:** choose a running app or service and shell into its sandbox (proot or container) in this terminal. | `--no-services`, `--no-apps` (picker filters), `-m, --master` (the `aura-shell` master container) |
+| `aura jump <app\|inst>` | Straight into that sandbox — an app id (one running instance) or an instance id. | — |
+| `aura jump <app> --sidecar <name>` | Shell into a sidecar of the target (bash if the image has it, else sh). Without a target, `--sidecar` means a sidecar of the app you are in (`$APP_INSTANCE_ID`). | `-s, --sidecar <id>` (IDs from `aura get inst <id> sidecars`) |
+| `aura mount` | **Wizard:** pick a target app → instance → the set of apps mounted into it; unchecking detaches. Live, no restart. | — |
+| `aura mount add <app...>` | Mount apps into an instance (read-only by default). Default instance: `$APP_INSTANCE_ID`. More in [Connect](#connect). | `--wr`, `--data`, `--instance <id>` |
+| `aura cap grant` | **Picker:** choose an app, then check/uncheck the CLI tools (`tools[]`) it may use; running instances are refreshed. Named form: `aura grant caps <app> <cap…>`. | `-i` |
+| `aura dev new` | Start the create-new-app wizard (see [Ecosystem & dev](#ecosystem--dev) for its flags). | — |
 | `aura ps` | Running instances, docker-ps-style (INSTANCE, APP, STATE, PORT, ACTIVITIES, UPTIME). Same data as `aura get inst`. | `-w, --watch` (re-render live on state changes) |
 | `aura run <app>` | Start an app; prints the new instance id. | — |
-| `aura jump [app\|inst]` (alias `j`) | Shell into an app or service sandbox (proot or container) in this terminal. **Without a target: interactive picker.** With an app id (one running instance) or instance id: straight in. | `--no-services`, `--no-apps` (picker filters), `-m, --master` (the `aura-shell` master container) |
-| `aura jump <app> --sidecar <name>` | Shell into a sidecar of the target (bash if the image has it, else sh). Without a target, `--sidecar` means a sidecar of the app you are in (`$APP_INSTANCE_ID`). | `-s, --sidecar <id>` (IDs from `aura get inst <id> sidecars`) |
 | `aura status` | Health summary: shell, apps, capabilities, services, paths. | — |
 | `aura info` | Where am I? Execution context: layers (host / aura-shell / proot / container), OS, CPU, memory, namespaces, AuraOS env, mounts, tools. | `--json` |
-| `aura dev new` | Start the create-new-app wizard (see [Ecosystem & dev](#ecosystem--dev) for its flags). | — |
 
 Jumping into a container sandbox or sidecar needs the docker CLI and socket in
 the calling sandbox — the Terminal app and the master shell have both.

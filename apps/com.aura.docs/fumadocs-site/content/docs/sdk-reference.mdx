@@ -294,7 +294,7 @@ request fields and return types: [HTTP API & SDK](/docs/sidecars/api).
 |---|---|
 | `osSidecars(opts?)` | Client for the calling instance. `opts`: `base` (default `OS_API_BASE` → `AURA_OS_URL`), `instanceId` (`APP_INSTANCE_ID` → `AURA_INSTANCE_ID`), `token` (`AURA_INSTANCE_TOKEN`), `timeoutMs` (15 min: a spawn may pull an image). |
 | `.spawn(req)` | `{ template, name?/suffix?, env?, envInherit?, command?, mounts?, image?, replace?, takeover?, wait? }` → `{ created, sidecar }`. Same spec again → adopted (`created: false`); changed spec → recreated. |
-| `.list()` / `.get(name)` / `.remove(name)` | The instance's OS sidecars; `get` → `null` if absent; `remove` also removes the sidecars it spawned. |
+| `.list()` / `.get(name)` / `.remove(name)` | The instance's OS sidecars; `get` → `null` if there is no such sidecar (a missing instance throws); `remove` also removes the sidecars it spawned. |
 | `.exec(name, cmd[], { stdin?, timeoutMs?, user?, workdir?, env? })` | → `{ exitCode, stdout, stderr, truncated, timedOut }`. argv, no shell; default timeout 30 s, max 10 min. |
 | `.logs(name, { tail?, since?, timestamps? })` | → `{ stdout, stderr }`. |
 | `.mounts(name).list()` / `.add(appId, { mode?, data? })` / `.remove(mountId)` | The sidecar's cross-app mounts (own + inherited). Changing them needs `sidecars.mounts` + `apps.mount` and a sidecar spawned with `mounts: { own: true }`. |
@@ -316,7 +316,7 @@ manages every `services[]` entry as a sidecar and reverse-proxies the
 
 | `mode` | Who runs them | Needs |
 |---|---|---|
-| `'os'` (recommended) | the OS, via `osSidecars()`; each service spawned as `{ template: service.name }`. `onSeed` throws, use `services[].seed`. | `sidecars.spawn` |
+| `'os'` (recommended) | the OS, via `osSidecars()`; each service spawned as `{ template: service.name, takeover: true }`, waiting for its `readiness` when declared. `onSeed` throws, use `services[].seed`. | `sidecars.spawn` |
 | `'docker'` (default) | the SDK, over the docker socket ([app-managed](/docs/sidecars/app-managed)) | the `docker` tool |
 | `'auto'` | `'os'` when there is no docker socket but a token, else `'docker'` | either |
 

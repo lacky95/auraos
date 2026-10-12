@@ -83,6 +83,7 @@ Four permissions, all enforced: an app without them gets a 403.
 | `sidecars.anyImage` | A spawn request with an `image` other than the template's. |
 | `sidecars.privileged` | Templates with `privileged`, `capabilities`, `devices` or `publish`, even though the template declares them. |
 | `sidecars.mounts` | Adding and removing the own mounts of the app's sidecars. Also needs `apps.mount`. |
+| `sidecars.manageAll` | Lets a sidecar manage all OS sidecars of its instance, not just the ones it spawned. |
 
 Details, the instance token every call carries, and the error codes:
 [Permissions & tokens](/docs/sidecars/permissions).

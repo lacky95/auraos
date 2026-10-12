@@ -27,7 +27,8 @@ app-managed path; the notes below say where the two differ.
 | `limits` | `{ memory: "512m", cpus: 1.5 }`. |
 | `inheritIdentity`, `inheritPermissions`, `inheritTools`, `inheritMounts`, `inheritDockerSocket` | Opt-in, default off. See [Inheritance](#inheritance). |
 | `capabilities`, `devices`, `privileged`, `publish` | Kernel and host grants. OS path: the app needs `sidecars.privileged`. Prefer the narrow ones over `privileged`. |
-| `prePull`, `readiness` | Accepted by the schema, not acted on yet. |
+| `readiness` | `{ path?, timeoutMs? }` (default `/`, 10 min). The sidecar is ready when `path` answers HTTP below 500. `wait: { ready: true }` waits for it; `createSidecars` does so for every service that declares it. |
+| `prePull` | Pull the image when the app is installed (and at shell start), not at its first spawn. Background, missing images only. |
 
 ## Inheritance
 
@@ -91,11 +92,18 @@ The command goes through the image's entrypoint, like `command`; if the
 entrypoint is a server binary rather than a shell, the seed arguments go to
 that binary. A failing seed fails the spawn.
 
-A marker file, `.sidecars/<sidecar-name>/.aura-seeded` in your app's data
-dir, keeps it from running again. Recreating the sidecar does not re-run it;
-deleting the marker does. Write seed commands idempotently anyway (check
-before you write): a sidecar that keeps an older `aura-<appId>-<volume>`
-volume has no marker yet, so its seed runs once against the existing data.
+"Already seeded" belongs to the **data**, not to a sidecar name. A marker
+in your app's data dir (`.sidecars/.seeded/<key>`) is keyed by the set of
+volume directories the seed writes to:
+
+- several sidecars on the same `shared: true` directory are seeded **once**,
+  together (concurrent spawns wait for each other);
+- a sidecar that keeps an older `aura-<appId>-<volume>` docker volume (the
+  app-managed path's) counts as seeded: that volume already holds its data;
+- a template without volumes is seeded once per sidecar name.
+
+Recreating a sidecar does not re-run its seed; deleting the marker does.
+Writing seeds idempotently (check before you write) still costs nothing.
 
 `seed` replaces the SDK's `onSeed` callback, which needs the docker socket.
 

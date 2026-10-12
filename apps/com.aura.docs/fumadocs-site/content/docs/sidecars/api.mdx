@@ -18,7 +18,7 @@ Server-side only (it sends the instance token). Uses `fetch`, no
 | `osSidecars(opts?)` | A client for the calling instance. `opts.base` (default `OS_API_BASE`, then `AURA_OS_URL`), `opts.instanceId` (`APP_INSTANCE_ID`, then `AURA_INSTANCE_ID`), `opts.token` (`AURA_INSTANCE_TOKEN`), `opts.timeoutMs` (per request, default 15 min: a spawn may pull an image). Throws if base or instance id are missing. |
 | `.spawn(req)` | `{ created, sidecar }`, see [Spawn request](#spawn-request) |
 | `.list()` | `OsSidecar[]`, the instance's OS sidecars (running or not) |
-| `.get(name)` | `OsSidecar`, or `null` when there is none |
+| `.get(name)` | `OsSidecar`, or `null` when the instance has no such sidecar. A missing instance throws. |
 | `.remove(name)` | Deletes it and every sidecar it spawned |
 | `.exec(name, cmd, opts?)` | `{ exitCode, stdout, stderr, truncated, timedOut }`. `opts`: `stdin`, `timeoutMs`, `user`, `workdir`, `env` |
 | `.logs(name, opts?)` | `{ stdout, stderr }`. `opts`: `tail`, `since`, `timestamps` |
@@ -39,13 +39,15 @@ entries at once and can reverse-proxy one of them as the app window. Its
 | `mode` | Containers run by | App needs | Notes |
 |---|---|---|---|
 | `'docker'` (default) | the SDK, over the docker socket | the `docker` tool | [App-managed](/docs/sidecars/app-managed) |
-| `'os'` | the OS, through `osSidecars()` | `sidecars.spawn` | Each service is spawned as `{ template: service.name }`. `onSeed` throws; use `services[].seed`. |
+| `'os'` | the OS, through `osSidecars()` | `sidecars.spawn` | Each service is spawned as `{ template: service.name, takeover: true }`, plus `wait: { ready: true }` when it declares `readiness`. `onSeed` throws; use `services[].seed`. |
 | `'auto'` | `'os'` when the container has no docker socket but has a token, else `'docker'` | either | `host.mode` tells you what was picked |
 
 `host.ensureAll()`, `host.isRunning(name)`, `host.teardownAll()`,
 `host.containerName(name)` and `host.listen()` work in every mode. In
-`'os'` mode `ensureAll` sends only the template name, so per-spawn options
-(`suffix`, `env`, `mounts`, `takeover`, `wait`) need `osSidecars()` directly.
+`'os'` mode `ensureAll` sends the template name with `takeover: true` (so an
+app switching from `'docker'` replaces its own old container instead of
+getting a 409) and waits for `readiness`; other per-spawn options (`suffix`,
+`env`, `mounts`) need `osSidecars()` directly.
 Full options: [SDK reference](/docs/sdk-reference) and [Bring-your-own-runtime apps](/docs/bring-your-own-runtime).
 
 ## HTTP routes
@@ -93,7 +95,7 @@ are accepted; any other key is a 400 that names the allowed ones.
 | `image` | Another image. Needs `sidecars.anyImage`. |
 | `replace` | Default `true`: a running sidecar with a different spec is recreated. `false`: 409 instead. |
 | `takeover` | Remove an app-managed container of the same name that belongs to this instance, then spawn (migration). Default `false`: 409. |
-| `wait` | `{ port?: true, timeoutMs? }`: answer only once the template's `port` accepts TCP (default 60 s). |
+| `wait` | `{ port?: true, ready?: true, timeoutMs? }`: answer only once the template's `port` accepts TCP (default 60 s), or with `ready` once its `readiness.path` answers HTTP below 500 (default: the template's `readiness.timeoutMs`; without `readiness` it waits for the port). |
 
 Everything that ends up in the resolved spec (template fields, `env`,
 `envInherit`, `command`, `image`, `mounts`) is part of the spec hash. The
