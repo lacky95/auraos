@@ -1,10 +1,13 @@
 /**
  * PocketBase sibling-container control for this project.
  *
- * The manifest's `services[]` block declares the PocketBase image; the SDK's
- * SidecarHost does the actual `docker run` / teardown / naming / labelling.
- * We use only its container-management half (`ensureAll` / `teardownAll` /
- * `isRunning`) — NOT `listen()`, because Astro already owns $APP_PORT here.
+ * The manifest's `services[]` block declares the PocketBase image as a
+ * TEMPLATE; the OS starts it on our request (`mode: 'os'` → osSidecars()),
+ * so this app needs no docker tool — only the `sidecars.spawn` permission.
+ * We use only SidecarHost's container-management half (`ensureAll` /
+ * `teardownAll` / `isRunning`) — NOT `listen()`, because Astro already owns
+ * $APP_PORT here. An edited services[] entry takes effect on the next
+ * ensureAll: the OS recreates a sidecar whose spec changed.
  *
  * Imported from the `@aura/app-sdk/sidecars` subpath on purpose: the SDK
  * barrel deliberately does not re-export it, since sidecars.ts pulls in
@@ -41,6 +44,7 @@ export function sidecars(): SidecarHost {
     instanceId: INSTANCE_ID,
     appPort:    APP_PORT,
     services:   services(),
+    mode:       'os',
   });
   return host;
 }

@@ -8,12 +8,13 @@
   "sandbox": "container",
   "instanceMode": "single",
   "activityMode": "none",
-  "tools": ["bash", "node", "git", "docker", "aura"],
+  "tools": ["bash", "node", "git", "aura"],
   "permissions": [
     "storage.read",
     "storage.write",
     "network.local",
-    "network.internet"
+    "network.internet",
+    "sidecars.spawn"
   ],
   "services": [
     {
