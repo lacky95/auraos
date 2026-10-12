@@ -280,7 +280,10 @@ what may be asked live, pure and docker-free, in `sidecar-spec.ts`:
    if the instance dies mid-seed). Marker written on success.
 7. With `inheritIdentity`, mint a token for `<instance>--<name>`.
 8. `docker create` + `docker start`. Identity env is appended last so a
-   template key can't overwrite it. Then a 400 ms still-alive check: a
+   template key can't overwrite it. With `inheritHome` the user home volume
+   subpath is mounted at `/home/aura` and `HOME=/home/aura` set after the
+   template env (the flag is absent from the spec otherwise, so existing
+   spec hashes don't change). Then a 400 ms still-alive check: a
    container that died is removed and the spawn fails with its last 20 log
    lines.
 9. Track it for fan-out, `MountManager.reapplyConsumer` (own declarations

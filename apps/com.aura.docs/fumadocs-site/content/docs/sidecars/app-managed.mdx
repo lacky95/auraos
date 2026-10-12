@@ -114,6 +114,8 @@ to do. The OS uses the same precedence as the SDK: an existing
 else `<app data>/.sidecars/<service>/<volume>`, which is where the SDK put
 new ones too. Volumes with `volume` or `subpath` are refused (400): copy the
 data into `<app data>/.sidecars/<service>/<volume>` and remove the two fields.
+A volume that only existed to give the sidecar the user's HOME (`/home/aura`
+via `volume` + `subpath`) becomes `"inheritHome": true` instead.
 
 **3. Seeding.** Replace the `onSeed` callback (it throws in `mode: 'os'`)
 with a command in the template:
