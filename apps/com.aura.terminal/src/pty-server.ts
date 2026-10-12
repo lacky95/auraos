@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { HOST_LABEL, TMUX_CONF, TMUX_SOCKET, liveTmuxSessions, respawnIfDead, shellArgv, shellCwd, tmuxBin, tmuxKill, tmuxName } from './tmux-control.ts';
 import { dialogAction, getDialog, installDialogHooks, setDialogText } from './input-dialog.ts';
 import { openPaneTap, paneRepaint, tmuxHasSession, type PaneTap } from './pane-tap.ts';
+import { forgetSessionPicks } from './window-session.ts';
 
 /**
  * PTY session registry — one live VIEW at a time, survives browser reload.
@@ -110,6 +111,9 @@ interface Session {
   // arriving inside the open window gets coalesced.
   outBuf:     string;                  // not-yet-sent PTY output
   outTimer:   NodeJS.Timeout | null;   // frame-window timer (null ⇒ idle)
+  /** The tmux session is gone for good (root `exit`): its sockets' `close`
+   *  must not persist the scrollback again. */
+  ended?:     boolean;
 }
 
 const SCROLLBACK_BYTES = 256 * 1024;
@@ -280,7 +284,7 @@ function spawnPty(sessionId: string | null, cols: number, rows: number): IPty {
     '-f', TMUX_CONF,
     '-u',
     'new-session', '-A', '-s', tmuxName(sessionId),
-    ...shellArgv(shell),   // `exit` restarts the shell, the session stays
+    ...shellArgv(shell),   // root `exit` ends the session, a crash restarts the shell
   ], opts);
 }
 
@@ -489,6 +493,19 @@ function attachPtyOutput(sess: Session): void {
     emitOut(sess);
     if (sess.outTimer) { clearTimeout(sess.outTimer); sess.outTimer = null; }
     if (sess.reconcileTimer) { clearInterval(sess.reconcileTimer); sess.reconcileTimer = null; }
+    // The tmux SESSION is gone, not just this client: the root shell was
+    // exited (SHELL_LOOP kills its own session). Tell every window first, so it
+    // moves on instead of reconnecting — `new-session -A` would bring the
+    // session back under the same name — and clean up like the DELETE route.
+    // `sessions.get(...) === sess` skips a killSession() that already did all
+    // this (and a newer session reusing the id).
+    if (tmuxBin && sessions.get(sess.id) === sess && !tmuxHasSession(sess.id)) {
+      log('session ended', sess.id);
+      sess.ended = true;
+      for (const ws of sess.clients.keys()) sendCtl(ws, { type: 'session-ended', id: sess.id });
+      deleteScrollback(sess.id);
+      forgetSessionPicks(sess.id);
+    }
     for (const ws of sess.clients.keys()) { try { ws.close(); } catch { /* ignore */ } }
     sess.clients.clear();
     sessions.delete(sess.id);
@@ -618,7 +635,7 @@ function attachWs(sess: Session, ws: WebSocket, browserId: string, launchClaim: 
     // pty-server restart, then hold the PTY: with GRACE_MS=0 (the default) the
     // shell waits indefinitely for the user to come back. A finite grace is
     // opt-in via AURA_PTY_GRACE_MS.
-    if (sess.clients.size === 0) {
+    if (sess.clients.size === 0 && !sess.ended) {
       emitOut(sess);                 // fold any buffered tail into the ring before we persist it
       saveScrollback(sess);
       if (GRACE_MS > 0) {

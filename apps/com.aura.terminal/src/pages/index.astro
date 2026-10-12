@@ -296,12 +296,21 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     </div>
   </div>
 
+  <!-- Short notice when `exit` in the root shell ended this window's session
+       (see onSessionEnded). Centered, no backdrop, never takes a click; inline
+       styles for the same reason as the lock panel above. -->
+  <div id="session-ended-toast" role="status" aria-live="polite"
+       style="display:none;position:fixed;inset:0;z-index:50;align-items:center;justify-content:center;padding:16px;pointer-events:none;opacity:0;transition:opacity .25s ease;">
+    <div data-toast-text style="max-width:100%;box-sizing:border-box;padding:12px 20px;border:1px solid var(--aura-color-primary,#00ff41);background:var(--aura-color-surface,#0f0f0f);box-shadow:0 8px 32px rgba(0,0,0,0.5);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.75rem;letter-spacing:.1em;text-transform:uppercase;color:var(--aura-color-primary,#00ff41);text-align:center;"></div>
+  </div>
+
   <script>
     import { Terminal } from '@xterm/xterm';
     import { FitAddon } from '@xterm/addon-fit';
     import '@xterm/xterm/css/xterm.css';
     import { createLaunchGate } from '../launch-gate';
     import { attachTouchScroll } from '../touch-scroll';
+    import { pickNextSession } from '../next-session';
 
     // appId is server-rendered onto #terminal's data-app-id. A bundled module
     // script can't use Astro's define:vars (that requires is:inline), so we read
@@ -1071,6 +1080,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         else if (msg?.type === 'busy') { setLocked(true); hideInputDialog(); }
         else if (msg?.type === 'dialog') showInputDialog(msg.dialog);
         else if (msg?.type === 'dialog-copy') agentCopyInputDialog(msg.id);
+        else if (msg?.type === 'session-ended') onSessionEnded(msg.id);
       };
 
       ws.onclose = () => {
@@ -1562,7 +1572,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
      * flips to the take-over panel, the same hand-off the app already does
      * between browsers.
      */
-    function switchSession(sessionId) {
+    function switchSession(sessionId, claim = true) {
       if (!sessionId) { reportSwitchError('no session to switch to', 'empty id'); return; }
       if (sessionId === currentSessionId) {
         // Not an error, but silence here is indistinguishable from a broken
@@ -1575,7 +1585,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       console.debug('[terminal] switching session', currentSessionId, '→', sessionId);
       const wasDetached = detached();
       currentSessionId = sessionId;
-      claimNextConnect = true;
+      claimNextConnect = claim;
       recordWindowSession(sessionId);
       if (wasDetached) setDetached(false);
       reflectInstance();
@@ -2023,6 +2033,59 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         { method: 'DELETE' })
         .then((r) => { if (!r.ok) console.debug('[terminal] session kill unavailable →', r.status); })
         .catch(() => { /* older instance, or offline — the detach already happened */ });
+    }
+
+    /**
+     * `exit` in the root shell ended this window's session for good (the
+     * server's `session-ended` frame, sent just before it closes the socket).
+     *
+     * Detach FIRST: the close that follows must not reconnect, since
+     * `new-session -A` would recreate the session under the same name. Then
+     * move on to the next session of this instance (pickNextSession), or show
+     * the "No session" placeholder when none is left. A session another window
+     * is rendering is only joined, not taken: that window keeps it and this one
+     * shows the take-over panel.
+     */
+    async function onSessionEnded(sessionId) {
+      if (!sessionId || sessionId !== currentSessionId) return;
+      console.debug('[terminal] session ended', sessionId);
+      currentSessionId = null;
+      clearReconnectTimer();
+      hideInputDialog();
+      forgetSession(instanceId, sessionId);
+      stopDots();
+      statusEl.textContent = 'SESSION ENDED';
+      statusEl.style.color = 'var(--aura-color-text-dim)';
+      const rows = await sessionsFor(instanceId).catch(() => []);
+      // The user picked something else meanwhile (menu, new session).
+      if (currentSessionId !== null) return;
+      const next = pickNextSession(rows, sessionId);
+      if (next) {
+        showSessionEndedToast('Exit — moving to next session…');
+        switchSession(next.id, !next.inUse);
+      } else {
+        showSessionEndedToast('Exit — session closed');
+        recordWindowSession(null);
+        try { activeWs?.close(1000, 'session-ended'); } catch { /* already gone */ }
+        activeWs = null;
+        term.reset();
+        setDetached(true);
+      }
+    }
+
+    let toastTimer = null;
+    function showSessionEndedToast(text) {
+      const el = document.getElementById('session-ended-toast');
+      if (!el) return;
+      const box = el.querySelector('[data-toast-text]');
+      if (box) box.textContent = text;
+      if (toastTimer) clearTimeout(toastTimer);
+      el.style.display = 'flex';
+      requestAnimationFrame(() => { el.style.opacity = '1'; });
+      toastTimer = setTimeout(() => {
+        el.style.opacity = '0';
+        toastTimer = setTimeout(() => { el.style.display = 'none'; toastTimer = null; }, 300);
+      }, 1400);
     }
 
     async function newSessionOn(targetInstanceId) {

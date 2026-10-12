@@ -240,27 +240,47 @@ export async function inspectPanes(): Promise<Map<string, PaneState>> {
 // ── Shell lifetime ──────────────────────────────────────────────────────────
 
 /**
- * A shell that exits must not end its session. `exit` or Ctrl+D used to be
- * the end of the tmux session — the window went blank and the MCP answered
- * `no-such-session` for a session that had existed a second earlier.
+ * The pane runs the shell under this loop, which tells a deliberate `exit`
+ * from a crash:
  *
- * So the pane runs the shell under this restart loop instead: when the shell
- * ends, a line says so and a fresh one starts in the same pane, same session
- * id. A shell that dies at once (broken rc file) is restarted at most once a
- * second. tmux's `pane-died` hook would be the obvious tool, but tmux 3.3a
- * fires it for only some exits (pass 1 measured ~1 in 3; with a client
- * attached it never fired here), so the loop does the job and `remain-on-exit`
- * (tmux.conf) plus `respawnIfDead` cover a pane that dies anyway.
+ * - `exit` / Ctrl+D in the ROOT shell ends the session for real: the loop runs
+ *   `tmux kill-session` on its own pane's session (`$TMUX` / `$TMUX_PANE` are
+ *   set inside every pane, so it hits the right socket and session) and stops.
+ *   The window then moves on to the next session (pty-server sends
+ *   `session-ended`). An `exit` inside an `aura jump` hop only ends the hop —
+ *   `"$@"` below returns only when the root shell itself is gone.
+ * - A shell that died by a signal (status > 128) or lived under ~2 s (broken
+ *   rc file) is NOT a deliberate exit: a line says so and a fresh shell starts
+ *   in the same pane, same session id (TM-4), at most once a second. 130 is
+ *   the exception: an interactive shell ignores SIGINT, so 130 only means the
+ *   last command was Ctrl+C'd before the user typed `exit`.
+ *   If `tmux kill-session` fails, the loop also falls back to a restart.
+ *   `set -m` (job control) makes the loop take the terminal back when a shell
+ *   dies without handing it back itself (SIGKILL): otherwise the next shell
+ *   starts outside the tty's foreground process group ("no job control in
+ *   background"), dies on its first read, and that exit would end the session.
+ *
+ * The argv is baked into a session when it is created: sessions from before
+ * this loop keep restarting until they are recreated.
+ *
+ * tmux's `pane-died` hook would be the obvious tool, but tmux 3.3a fires it
+ * for only some exits (pass 1 measured ~1 in 3; with a client attached it
+ * never fired here), so the loop does the job and `remain-on-exit` (tmux.conf)
+ * plus `respawnIfDead` cover a pane that dies anyway.
  *
  * No `;` at the end of an argument (tmux would end its command there) and no
  * `#` (format expansion): the loop uses newlines.
  */
 const SHELL_LOOP = [
+  'set -m',
   'while :',
   'do',
   '  t=$(date +%s)',
   '  "$@"',
   '  s=$?',
+  '  if [ $(( $(date +%s) - t )) -ge 2 ] && { [ "$s" -le 128 ] || [ "$s" -eq 130 ]; } && [ -n "$TMUX_PANE" ]',
+  '  then tmux kill-session -t "$TMUX_PANE" && exit 0',
+  '  fi',
   "  printf '\\r\\n[shell exited (status %s), starting a new shell]\\r\\n' \"$s\"",
   '  if [ $(( $(date +%s) - t )) -lt 2 ]',
   '  then sleep 1',
@@ -268,7 +288,7 @@ const SHELL_LOOP = [
   'done',
 ].join('\n');
 
-/** argv for a pane: the shell under the restart loop (see SHELL_LOOP). */
+/** argv for a pane: the shell under the exit/restart loop (see SHELL_LOOP). */
 export function shellArgv(shell: string): string[] {
   return ['/bin/sh', '-c', SHELL_LOOP, 'aura-shell', shell];
 }

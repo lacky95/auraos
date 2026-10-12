@@ -1,5 +1,6 @@
-// TM-4: a shell that exits must not take its session with it. New sessions run
-// the shell under a restart loop (the pane never dies); a pane that does die
+// TM-4 + root exit: new sessions run the shell under a loop that ends the
+// session on a deliberate `exit` in the root shell, but restarts a shell that
+// crashed (killed by a signal, or dead within ~2 s) in place; a pane that does die
 // (a session created before the loop existed, or the loop itself killed) is
 // kept by tmux's `remain-on-exit`, reported as `exited`, and respawned in place
 // instead of the session vanishing into `no-such-session`.
@@ -45,7 +46,7 @@ test('tmux.conf keeps a pane whose program exited', () => {
   assert.match(conf, /^set -g remain-on-exit on$/m);
 });
 
-test('shellArgv wraps the shell in a restart loop tmux passes through untouched', async () => {
+test('shellArgv wraps the shell in an exit/restart loop tmux passes through untouched', async () => {
   const { shellArgv } = await import('../src/tmux-control.ts');
   const argv = shellArgv('/bin/bash');
   assert.equal(argv[argv.length - 1], '/bin/bash', 'the real shell is the last argument');
@@ -68,14 +69,20 @@ test('shellCwd: HOME unless it is inside the app tree', async () => {
   assert.equal(shellCwd({ HOME: '/workspace/apps/com.aura.terminal2' }, '/workspace/apps/com.aura.terminal'), '/workspace/apps/com.aura.terminal2');
 });
 
-test('exit in a new session starts a fresh shell in the same session', { skip }, async () => {
-  const { newSession, paneState, captureScreen, sendLiteral, sendKeys, liveTmuxSessions, tmuxName, tmuxKill } = await import('../src/tmux-control.ts');
-  const id = 'com.aura.terminal-0#a7';
+/** A new session whose shell is up, and the time it started. */
+async function freshSession(id) {
+  const { newSession, paneState } = await import('../src/tmux-control.ts');
   await newSession(id, 80, 24);
   await waitFor(async () => (await paneState(id)).command === 'bash');
-  await sendLiteral(id, 'export MARK=old; exit 3'); await sendKeys(id, ['Enter']);
-  const screen = await waitFor(async () => { const l = await captureScreen(id); return l.some((x) => /shell exited \(status 3\)/.test(x)) ? l : null; });
-  assert.ok(screen.length > 0);
+  return Date.now();
+}
+
+/** Wait until the root shell has lived long enough to count as deliberate. */
+const pastCrashWindow = (startedAt) => sleep(Math.max(0, startedAt + 2300 - Date.now()));
+
+async function expectRestartedInPlace(id, status) {
+  const { paneState, captureScreen, sendLiteral, sendKeys, liveTmuxSessions, tmuxName, tmuxKill } = await import('../src/tmux-control.ts');
+  await waitFor(async () => (await captureScreen(id)).some((x) => x.includes(`shell exited (status ${status})`)));
   assert.ok(liveTmuxSessions().has(tmuxName(id)), 'session still exists');
   await waitFor(async () => { const s = await paneState(id); return !s.dead && s.command === 'bash'; });
   // A NEW shell: the old one's variables are gone.
@@ -83,6 +90,52 @@ test('exit in a new session starts a fresh shell in the same session', { skip },
   await waitFor(async () => (await captureScreen(id)).some((x) => x.includes('MARK=[]')));
   assert.equal(tmuxKill(id), true, 'kill_session still ends it for good');
   assert.equal(liveTmuxSessions().has(tmuxName(id)), false);
+}
+
+test('exit in the root shell ends the session for real', { skip }, async () => {
+  const { sendLiteral, sendKeys, liveTmuxSessions, tmuxName } = await import('../src/tmux-control.ts');
+  const id = 'com.aura.terminal-0#a7';
+  await pastCrashWindow(await freshSession(id));
+  await sendLiteral(id, 'exit 3'); await sendKeys(id, ['Enter']);
+  await waitFor(() => !liveTmuxSessions().has(tmuxName(id)));
+});
+
+test('exit inside a nested shell only ends the hop', { skip }, async () => {
+  const { sendLiteral, sendKeys, paneState, liveTmuxSessions, tmuxName } = await import('../src/tmux-control.ts');
+  const id = 'com.aura.terminal-0#a12';
+  await pastCrashWindow(await freshSession(id));
+  await sendLiteral(id, 'bash --norc'); await sendKeys(id, ['Enter']);
+  await sleep(500);
+  await sendLiteral(id, 'exit'); await sendKeys(id, ['Enter']);
+  await sleep(800);
+  assert.ok(liveTmuxSessions().has(tmuxName(id)), 'the session survives the hop exit');
+  assert.equal((await paneState(id)).command, 'bash');
+  await sendLiteral(id, 'exit'); await sendKeys(id, ['Enter']);
+  await waitFor(() => !liveTmuxSessions().has(tmuxName(id)));
+});
+
+test('exit after a Ctrl+C\'d command (status 130) still ends the session', { skip }, async () => {
+  const { sendLiteral, sendKeys, liveTmuxSessions, tmuxName } = await import('../src/tmux-control.ts');
+  const id = 'com.aura.terminal-0#a13';
+  await pastCrashWindow(await freshSession(id));
+  await sendLiteral(id, 'exit 130'); await sendKeys(id, ['Enter']);
+  await waitFor(() => !liveTmuxSessions().has(tmuxName(id)));
+});
+
+test('a shell that exits within 2 s is restarted in place (broken rc guard)', { skip }, async () => {
+  const { sendLiteral, sendKeys } = await import('../src/tmux-control.ts');
+  const id = 'com.aura.terminal-0#a14';
+  await freshSession(id);
+  await sendLiteral(id, 'exit 4'); await sendKeys(id, ['Enter']);
+  await expectRestartedInPlace(id, 4);
+});
+
+test('a shell killed by a signal is restarted in place', { skip }, async () => {
+  const { sendLiteral, sendKeys } = await import('../src/tmux-control.ts');
+  const id = 'com.aura.terminal-0#a15';
+  await pastCrashWindow(await freshSession(id));
+  await sendLiteral(id, 'export MARK=old; kill -9 $$'); await sendKeys(id, ['Enter']);
+  await expectRestartedInPlace(id, 137);
 });
 
 /** A session the old way (bare shell, no loop) whose shell has exited. */
