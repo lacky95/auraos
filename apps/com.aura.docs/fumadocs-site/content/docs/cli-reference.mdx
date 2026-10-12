@@ -8,8 +8,10 @@ capabilities, mounts, ports, the event bus, sandbox shells. Source:
 `packages/aura-cli/src/` (`program.ts` builds the command tree,
 `commands/verbs.ts` the kubectl verbs, `lib/resources.ts` the resource types).
 
-`aura --help` prints the grouped overview; `aura <command> --help` shows the
-resources a verb accepts plus examples.
+`aura --help` prints one task-oriented list (Basics, Inspect, Lifecycle,
+Install & remove, Connect, Access, Ecosystem & dev, Settings) — every line is
+checked against the command tree by the CLI's tests. `aura <command> --help`
+shows the resources a verb accepts plus examples.
 
 ## The grammar in one minute
 
@@ -52,12 +54,12 @@ Terminal and the master shell have both.
 
 | Resource | Short names | Verbs |
 |---|---|---|
-| `apps` | `app` | get, describe, run, stop, restart, delete, install, enable, disable, grant, revoke |
-| `instances` | `instance`, `inst` | get, describe, stop, kill, pause, resume, exec, logs |
+| `apps` | `app` | get, describe, run, start, stop, restart, delete, install, enable, disable, grant, revoke |
+| `instances` | `instance`, `inst` | get, describe, start, stop, restart, kill, pause, resume, open, exec, logs |
 | `sidecars` | `sidecar`, `sc` | get, describe, exec, logs, delete |
 | `activities` | `activity`, `act` | get, open, delete |
 | `capabilities` | `capability`, `caps`, `cap` | get, describe, install, delete, grant, revoke |
-| `services` | `service`, `svc` | get, describe, start, stop, install, delete, logs |
+| `services` | `service`, `svc` | get, describe, start, stop, restart, install, delete, logs |
 | `mounts` | `mount` | get, delete |
 | `ports` | `port` | get, delete |
 | `scopes` | `scope` | get |
@@ -73,20 +75,26 @@ Terminal and the master shell have both.
 | `aura get <res> [name]` | List as a table. A name narrows to one object. | `-o table\|wide\|json\|yaml\|name`, `-a, --app <appId>`, `-i, --instance <id>`, `-w, --watch`, `--no-headers` |
 | `aura get inst <id> sidecars` | The sidecars of one instance — the **ID** column is what `--sidecar` / `-c` take. | same as `get` |
 | `aura describe <res> <name>` | Everything about one object, as YAML (`-o json` for JSON). `describe inst` includes its sidecars and mounts. | `-o json`, `-i <instance>` (sidecars) |
+| `aura start app <appId…>` | Start a new instance of each app (same as `aura run`). | — |
+| `aura start inst <id…>` | Resume a paused instance; the id of a stopped single-instance app starts the app. | — |
+| `aura start svc <name…>` | Start a service detached; its output goes to `/data/aura/state/services/<name>.log`. | — |
 | `aura stop app\|inst\|svc <name…>` | Stop all instances of an app, one instance (graceful: `onPause` → `onStop` → `onDestroy`), or a service. | — |
-| `aura start svc <name…>` | Start a service detached. (Apps start with `aura run`.) | — |
 | `aura restart app <appId…>` | Stop all instances, start one fresh. | — |
+| `aura restart inst <id…>` | Stop the instance, start a fresh one of its app (a multi-instance app gets a new id). | — |
+| `aura restart svc <name…>` | Stop + start the service. | — |
 | `aura kill inst <id…>` | SIGKILL the sandbox; no lifecycle hooks. | — |
 | `aura pause\|resume inst <id…>` | Fire `onPause` / `onResume`. | — |
-| `aura delete <res> <name…>` (alias `rm`) | Remove an app from disk, close an activity, uninstall a service or capability, detach a mount, remove a port expose, delete an OS sidecar. | `-y` (apps), `-i <instance>` (mounts, sidecars) |
+| `aura delete <res> <name…>` (alias `rm`) | Remove an app from disk, close an activity, uninstall a service or capability, detach a mount, remove a port expose, delete an OS sidecar. | `-y`, `-i <instance>` (mounts, sidecars) |
+| `aura rm mount <id…>` | Without `-i` (and outside an app): finds the instance that has the mount; several → asks for `-i`; one → confirms first (`-y` skips, required without a TTY). | `-i`, `-y` |
+| `aura rm port <id…>` | Port ids from `aura get ports`; the owning instance is found the same way. The pair form `<ownerApp> <id>` still works. | `-y` |
 | `aura install app <path>` | Install an app from a local directory (`app.manifest.json` inside). | — |
-| `aura install cap <name…>` / `svc <name>` | Install capabilities into the shared toolchain / a service. | — |
+| `aura install cap [name…]` / `svc <name>` | Install capabilities into the shared toolchain (no names → picker of what isn't installed yet) / a service. | — |
 | `aura install sdk` | Pull every `@aura/*` package the cwd's `package.json` declares (in `auraDependencies`) from the local OCI registry. | `--quiet`, `--registry <url>`, `--cwd <path>` |
 | `aura enable\|disable app <appId…>` | Re-arm `autoStart`/`warmPool` and show in dock + launcher / stop every instance and hide it. | — |
-| `aura open act <instance>` | Open a new activity (window) on a running instance. | `-d, --data '<json>'` |
+| `aura open inst <instance>` | Open a new window (activity) on a running instance. (`open act` works too.) | `-d, --data '<json>'` |
 | `aura exec inst <id> [-- cmd…]` | Interactive shell in the sandbox, or run one command after `--`. Exit codes pass through. | `-c, --container <sidecar>` — a sidecar of the instance instead |
 | `aura logs inst <id> -c <sidecar>` | A sidecar's logs. Inside the app that owns an OS sidecar the OS serves them; elsewhere `docker logs`. | `-f, --follow`, `--tail <n>` |
-| `aura logs svc <name>` | Service logs (not implemented yet). | — |
+| `aura logs svc <name>` | A service's output since its last start. | `-f, --follow`, `--tail <n>` |
 | `aura grant perm <appId> [permission…]` | Add manifest permissions; takes effect immediately. No permissions → picker (unchecking revokes). | — |
 | `aura grant cap <appId> [cap…]` | Add to the app's `tools[]` and hot-refresh running instances. `'*'` grants all, `'#'` all-except. No names → picker. | `-i, --interactive` |
 | `aura revoke perm\|cap <appId> <name…>` | The opposite of `grant`. | — |
@@ -102,8 +110,10 @@ aura get sc -a io.lakner.hermes -o wide        # + CONTAINER, TEMPLATE
 aura get mounts -i com.aura.terminal           # app + its OS sidecars' mounts
 aura describe sc runtime -i io.lakner.hermes
 aura exec inst io.lakner.hermes -c runtime -- hermes --version
-aura delete mount com.example.hello -i com.aura.terminal
-aura delete port com.aura.browser into-5173    # <ownerApp> <portId>
+aura rm mount com.example.hello -i com.aura.terminal
+aura rm port into-5173                         # ids from: aura get ports
+aura restart inst com.aura.terminal-13
+aura logs svc sshd -f
 aura grant perm com.example.app sidecars.spawn
 ```
 
@@ -221,8 +231,8 @@ prints a hint.
 | `aura app perm ls` / `grant` / `revoke` | `aura get perms` / `grant perm` / `revoke perm` |
 | `aura inst list` / `info` / `stop` / `kill` / `pause` / `resume` | `aura get inst` / `describe inst` / `stop inst` / `kill inst` / `pause inst` / `resume inst` |
 | `aura inst shell <id> [-c cmd]` | `aura exec inst <id> [-- cmd]` or `aura jump <id>` |
-| `aura activity list` / `open` / `close` | `aura get act` / `open act` / `delete act` |
-| `aura service list` / `install` / `start` / `stop` / `status` / `uninstall` | `aura get svc` / `install svc` / `start svc` / `stop svc` / `describe svc` / `delete svc` |
+| `aura activity list` / `open` / `close` | `aura get act` / `open inst` / `rm act` |
+| `aura service list` / `install` / `start` / `stop` / `status` / `logs` / `uninstall` | `aura get svc` / `install svc` / `start svc` / `stop svc` / `describe svc` / `logs svc` / `rm svc` |
 | `aura theme list` / `get` / `set` | `aura get themes` / `set theme` |
 | `aura scope list` | `aura get scopes` |
 | `aura sdk install` | `aura install sdk` |
