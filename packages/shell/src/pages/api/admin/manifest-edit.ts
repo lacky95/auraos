@@ -128,6 +128,10 @@ export const POST: APIRoute = async ({ request }) => {
       // but leaves every projection derived from it (intents, keymaps,
       // interfaces) stale until a restart.
       mgr.reloadManifest(appId);
+      // sidecars.tools gates the own tool dirs of the app's OS sidecars:
+      // refill (grant) or empty (revoke) the running ones now, not at their
+      // next spawn.
+      if (changed && perm === 'sidecars.tools') mgr.refreshInstanceTools(appId);
       return json({ ok: true, appId, action, permission: perm, changed, permissions: next, unknown, reloaded: true });
     } catch (err) {
       // The file is written but the running registry still has the old value,
