@@ -1,0 +1,116 @@
+---
+title: Sidecars
+description: Run a database, an agent or any foreign image next to your app. What a sidecar is, the two ways to get one, and which to pick.
+---
+
+**TL;DR.** A **sidecar** is a container that runs next to your app instance
+on `aura-net`: a database, a model server, an agent, any image. Declare it
+as a **template** in your manifest's `services[]`, add the `sidecars.spawn`
+permission, and ask the OS to start it with `osSidecars().spawn(...)`. The OS
+does the `docker run`, so **your app needs no docker tool** and never holds
+host root.
+
+## What you get
+
+- A container named `aura-<instanceId>--<name>`, reachable at that name on
+  `aura-net` (from your app: `http://aura-<instanceId>--db:5432`).
+- Persistent volumes inside your app's own data dir.
+- As many sidecars as you like, started and removed at runtime
+  ([dynamic sidecars](/docs/sidecars/os-managed#dynamic-sidecars)).
+- `exec` and `logs` through the OS API, without a docker socket.
+- Cross-app mounts of its own, or inherited from your app.
+- Cleanup for free: stop, kill or crash of your instance removes its
+  sidecars, their mounts and their tokens.
+
+## Choose a path
+
+There are two ways to run a sidecar. Use the **OS-managed** one unless you
+have a reason not to.
+
+| | OS-managed (recommended) | App-managed |
+|---|---|---|
+| Who runs `docker run` | the OS, on your request | your app (SDK `mode: 'docker'`, or raw docker) |
+| Your app needs | the `sidecars.spawn` permission | the `docker` tool, i.e. host root |
+| What can run | your `services[]` templates (any image with `sidecars.anyImage`) | anything |
+| An edited template | recreates the sidecar on the next spawn | does nothing until you `docker rm` the container |
+| Mounts of its own | yes, at runtime (`sidecars.mounts`) | no; `inheritMounts` shares the app's root |
+| exec / logs | OS API (`sc.exec`, `sc.logs`) | your own `docker exec` |
+| Seeding | `services[].seed` | SDK `onSeed` callback |
+| `aura get sc` shows | `MANAGED os` | `MANAGED app` |
+
+Stay on the app-managed path only if the sidecar needs things the OS path
+won't grant: volumes outside your app's data (`volume` / `subpath`), or an
+app that has to run docker anyway (for example an agent that spawns its own
+sandboxes). Moving an existing app over is a small change:
+[Migrate to OS-managed](/docs/sidecars/app-managed#migrate-to-os-managed).
+
+## The short version
+
+```jsonc
+// app.manifest.json
+{
+  "sandbox": "container",
+  "tools": ["bash", "node"],                 // no "docker"
+  "permissions": ["sidecars.spawn"],
+  "services": [
+    { "name": "db", "image": "postgres:17", "port": 5432,
+      "env": { "POSTGRES_PASSWORD": "dev" },
+      "volumes": [{ "name": "data", "target": "/var/lib/postgresql/data" }] }
+  ]
+}
+```
+
+```ts
+// server side, e.g. in your onStart lifecycle handler
+import { osSidecars } from '@aura/app-sdk/os-sidecars';
+
+const sc = osSidecars();                     // instance id + token come from the env
+const { sidecar } = await sc.spawn({ template: 'db', wait: { port: true } });
+// postgres is now at `${sidecar.host}:5432`
+```
+
+Calling `spawn` again with the same request is cheap: the running sidecar is
+adopted, not restarted. The full walkthrough is
+[OS-managed sidecars](/docs/sidecars/os-managed).
+
+## Permissions
+
+Four permissions, all enforced: an app without them gets a 403.
+
+| Permission | Allows |
+|---|---|
+| `sidecars.spawn` | Spawn, list, get, delete, exec and logs of the app's own OS sidecars, from its `services[]` templates. |
+| `sidecars.anyImage` | A spawn request with an `image` other than the template's. |
+| `sidecars.privileged` | Templates with `privileged`, `capabilities`, `devices` or `publish`, even though the template declares them. |
+| `sidecars.mounts` | Adding and removing the own mounts of the app's sidecars. Also needs `apps.mount`. |
+
+Details, the instance token every call carries, and the error codes:
+[Permissions & tokens](/docs/sidecars/permissions).
+
+## Mounts of a sidecar
+
+An OS sidecar can get cross-app mounts at `/mnt/aura`, in two ways:
+**own** mounts that your app adds at runtime
+(`sc.mounts(name).add(appId)`, needs `sidecars.mounts` + `apps.mount`), and
+**inherited** mounts, where your app's own mounts are mirrored in live
+(`inheritMounts`, optionally minus some and capped at read-only). See
+[Mounts of a sidecar](/docs/sidecars/mounts).
+
+## In this section
+
+| Page | Read it when |
+|---|---|
+| [OS-managed sidecars](/docs/sidecars/os-managed) | You are adding a sidecar to an app. Start here. |
+| [Templates](/docs/sidecars/templates) | You need a `services[]` field, inheritance, volumes or seeding. |
+| [Mounts of a sidecar](/docs/sidecars/mounts) | The sidecar needs another app's files. |
+| [Exec, logs & lifecycle](/docs/sidecars/operate) | You run commands in it, debug it, or wonder what happens on stop and restart. Includes the CLI. |
+| [Permissions & tokens](/docs/sidecars/permissions) | You get a 401, 403 or 409, or want to know what an app can and cannot do. |
+| [HTTP API & SDK](/docs/sidecars/api) | You need exact routes, request fields and return shapes. |
+| [App-managed sidecars](/docs/sidecars/app-managed) | You maintain an app that runs docker itself, or want to migrate it. |
+
+Related: [Bring-your-own-runtime apps](/docs/bring-your-own-runtime) (an app
+whose window is a foreign image's UI), [Cross-App Mounts](/docs/cross-app-mounts).
+
+Source of truth: `packages/core/src/app-manager/SidecarManager.ts` (the OS
+side), `sidecar-spec.ts` (what may be asked), `packages/app-sdk/src/os-sidecars.ts`
+(the client).

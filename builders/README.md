@@ -12,7 +12,7 @@ scope (`user` or `global`) instead.
 
 ```
 builders/io.lakner.pocketbuilder/     git source — not auto-registered
-        ↓  scaffold API / nexus publish
+        ↓  scaffold API / aura nexus app publish
 /data/scopes/users/default/apps/io.lakner.pocketbuilder     the running app
 ```
 

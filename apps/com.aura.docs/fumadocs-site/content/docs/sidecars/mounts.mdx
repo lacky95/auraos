@@ -1,0 +1,106 @@
+---
+title: Mounts of a sidecar
+description: Give an OS-managed sidecar another app's files — its own mounts added at runtime, or your app's mounts mirrored in live.
+---
+
+An OS sidecar can see other apps' files the same way an app does
+([Cross-App Mounts](/docs/cross-app-mounts)): live binds under `/mnt/aura`,
+read-only by default, no restart. It gets them in two ways, and you can
+combine both.
+
+| | Own mounts | Inherited mounts |
+|---|---|---|
+| What | Mounts you add to this one sidecar at runtime | Your app's own mounts, mirrored in |
+| Spawn with | `mounts: { own: true }` | `inheritMounts: true` in the template, or `mounts: { inherit: … }` |
+| Permissions to change them | `sidecars.mounts` + `apps.mount` | none beyond `sidecars.spawn` (you change your app's mounts) |
+| Follow changes | when you add / remove them | live: when your app mounts or detaches something, every inheriting sidecar follows |
+| Survive a recreate of the sidecar | yes (declared, restored on the next spawn) | rebuilt from the app's set |
+| Detach | `sc.mounts(name).remove(id)` | on the app; the sidecar route answers 409 |
+
+A sidecar spawned with either option gets **its own** mount root at
+`/mnt/aura` (`aura/mounts/<instanceId>--<name>` on the app-data volume) and
+`AURA_MOUNT_ROOT=/mnt/aura` in its env. Unlike an
+[app-managed sidecar](/docs/sidecars/app-managed#differences-from-the-os-path),
+it sees every mount, including ones that existed before it started: the OS
+applies them after the container is up.
+
+## Own mounts
+
+```ts
+import { osSidecars } from '@aura/app-sdk/os-sidecars';
+const sc = osSidecars();
+
+await sc.spawn({ template: 'agent', suffix: 'a1', mounts: { own: true } });
+
+await sc.mounts('agent-a1').add('com.example.docs');                   // read-only source
+await sc.mounts('agent-a1').add('com.example.notes', { mode: 'rw' });  // writable
+await sc.mounts('agent-a1').add('com.example.notes', { data: true });  // its data dir
+await sc.mounts('agent-a1').list();    // own + inherited, each with `origin`
+await sc.mounts('agent-a1').remove('com.example.docs');                // or 'com.example.notes:data'
+```
+
+- Needs `sidecars.mounts` **and** `apps.mount`: a sidecar never sees an app
+  its app couldn't mount itself.
+- Only for a sidecar spawned with `mounts: { own: true }`; otherwise the add
+  answers 409 (respawn it with `own`, which recreates it).
+- Mount ids are `<appId>` for the source and `<appId>:data` for the data dir.
+  Files land at `/mnt/aura/<appId>` and `/mnt/aura/<appId>.data`.
+- Own mounts are declared like an app's: recreating the sidecar (a changed
+  spec) restores them, and so does a respawn after an instance crash, when
+  your app spawns the sidecar again. Removing the sidecar or stopping the
+  instance drops the declarations.
+
+## Inherited mounts
+
+Set `inheritMounts: true` on the template and every sidecar of it mirrors
+your app's mounts. Narrow it per spawn:
+
+```ts
+// everything the app has mounted, except one, and all of it read-only
+await sc.spawn({ template: 'agent', suffix: 'a2',
+  mounts: { inherit: { exclude: ['com.example.secret'], mode: 'ro' } } });
+
+// this sidecar inherits nothing, although the template says inheritMounts
+await sc.spawn({ template: 'agent', suffix: 'a3', mounts: { inherit: false } });
+```
+
+- `inherit: true` or an object switches inheritance on, `false` off; left
+  out, the template's `inheritMounts` decides.
+- `exclude` takes mount ids (`com.example.secret`, `com.example.secret:data`).
+- `mode: 'ro'` caps every inherited mount at read-only. Without it a
+  sidecar gets each mount in the mode the app has it.
+- Both are fixed at spawn time. Spawning again with other values changes
+  the spec, so the sidecar is recreated.
+- Inherited mounts are never declared on the sidecar. To drop one, detach it
+  from the app, or respawn with it in `exclude`.
+
+## Read-only is verified
+
+After every bind the OS reads the sidecar's own mount table and rolls the
+mount back if the mode isn't what was promised. That also works for images
+without `cat` (a helper reads it through the sidecar's PID namespace). A
+read-only mount that can't be verified at all is refused, not silently
+handed out.
+
+## Inspect
+
+```bash
+aura mount ls --instance com.example.app      # "sidecar mounts" section, ORIGIN inherited for mirrored ones
+aura get mounts -i com.example.app            # INSTANCE column reads <instance>--<sidecar>
+```
+
+Over HTTP: `GET /api/instances/:id/mounts?includeSidecars=1` (no token), or
+`GET /api/instances/:id/sidecars/:name/mounts` (token).
+
+Detach a sidecar's own mounts through the app (SDK or API). `aura rm mount`
+does not detach them.
+
+## When things go away
+
+| Event | Mounts |
+|---|---|
+| Sidecar recreated (spec changed) | binds go with the old container; own mounts are restored, inherited ones rebuilt |
+| `sc.remove(name)` | binds, declarations and mount root removed |
+| Instance stop or kill | all its sidecars' binds, declarations and mount roots removed |
+| Instance crash | binds removed, own declarations kept; restored when the app spawns the sidecar again |
+| Shell restart | nothing changes; the OS re-learns which sidecars inherit what and adopts the live binds |

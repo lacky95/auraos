@@ -1,0 +1,100 @@
+---
+title: Permissions & tokens
+description: What an app may ask the OS to run, how the OS knows who is asking, and what every 401, 403 and 409 means.
+---
+
+The OS path exists so that an app can run containers **without** holding the
+docker socket, which is host root. That only holds if the OS refuses
+everything the app's manifest doesn't allow. Three things decide: the
+permissions, the template, and the caller's token.
+
+## Permissions
+
+All four are in `ENFORCED_PERMISSIONS`: undeclared means 403, not the
+auto-grant most other permissions still get.
+
+| Permission | Allows |
+|---|---|
+| `sidecars.spawn` | Spawn, list, get, delete, exec and logs of the app's own OS sidecars, from its `services[]` templates. Every sidecar route needs it. |
+| `sidecars.anyImage` | A spawn request with an `image` other than the template's. |
+| `sidecars.privileged` | Templates with `privileged`, `capabilities`, `devices` or `publish`, **even though the template declares them**: the manifest is written by the app, and the OS path must not turn into a privilege route for an app without a docker socket. |
+| `sidecars.mounts` | Adding and removing the own mounts of the app's sidecars. Also needs `apps.mount`: a sidecar never sees an app its app couldn't mount. |
+
+Two more rules come from the template, not a permission:
+
+- `inheritDockerSocket` needs the `docker` tool in the app's own `tools[]`.
+  A sidecar never exceeds its app.
+- `volumes[].volume` / `subpath` are refused on the OS path (400): they can
+  point outside the app's data.
+
+Declare them in the manifest:
+
+```jsonc
+{ "permissions": ["sidecars.spawn", "sidecars.mounts", "apps.mount"] }
+```
+
+or grant them live, without a restart:
+
+```bash
+aura get perms com.example.app
+aura grant perm com.example.app sidecars.spawn
+aura revoke perm com.example.app sidecars.anyImage
+```
+
+The permissions checked are always those of the instance's **app**, also
+when one of its sidecars calls with its own token.
+
+## Instance tokens
+
+The older `/api/instances/:id/*` routes (mounts, ports, …) trust the instance
+id in the URL. Routes that start containers can't, so every sidecar route
+requires a bearer:
+
+```http
+POST /api/instances/com.example.app/sidecars
+Authorization: Bearer $AURA_INSTANCE_TOKEN
+```
+
+- The OS gives every instance a token at spawn, in `AURA_INSTANCE_TOKEN`.
+  `osSidecars()` reads it from the env; you never handle it yourself.
+- The token must belong to the instance in the URL, or the call is a 403.
+- An OS sidecar with `inheritIdentity` gets a token of its own. With it, the
+  sidecar can call the same API for its instance; what it spawns becomes its
+  child.
+- A token lives as long as the container it was minted for. It survives a
+  shell restart; it dies when the instance stops or crashes, or when the
+  sidecar is removed. A recycled instance id gets a new token, and the old
+  one stops working.
+- **Server-side only.** The token is in your app's env and must never reach
+  a browser. Anyone with it can start containers as your app.
+- An instance started before tokens existed has none (401
+  `has no current token`). Restart it once.
+
+How tokens are built and verified: [Sandbox runners → Instance tokens](/docs/deep-dive/sandbox-runners#instance-tokens).
+
+## Order of checks and status codes
+
+Every sidecar route runs the same gate, in this order:
+
+| Check | Fails with |
+|---|---|
+| instance exists | 404 `Instance not found` |
+| bearer present and valid | 401 `missing bearer token` / `invalid or expired token` / `has no current token` |
+| token belongs to this instance | 403 `token belongs to …` |
+| the app holds the route's permission(s) | 403 `… is not granted '<permission>'` |
+| the instance is a container sandbox | 409 (PRoot apps can't have OS sidecars) |
+
+Then the request itself:
+
+| Status | Meaning |
+|---|---|
+| 400 | A field that can't be set per request, a malformed field, an invalid name, `name` and `suffix` together, a template with `volume`/`subpath` |
+| 403 | `image` without `sidecars.anyImage`, a privileged template without `sidecars.privileged`, `inheritDockerSocket` without the docker tool |
+| 404 | No such template (the message lists yours), no such sidecar |
+| 409 | Name taken by an app-managed container (use `takeover`), spec changed with `replace: false`, sidecar not running (exec), own mount on a sidecar without `mounts.own`, removing an inherited mount, mount already there |
+| 413 | exec stdin over 64 KiB |
+| 429 | 32 sidecars per instance |
+| 500 | docker failed: pull, start, a container that exited right after start (with its logs), seed |
+
+In the SDK these arrive as `OsSidecarError` with `.status` (0 when the shell
+didn't answer at all).

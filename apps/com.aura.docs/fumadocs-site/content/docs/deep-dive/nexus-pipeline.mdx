@@ -214,10 +214,10 @@ Both stream `publish.progress` events that wrap underlying tool output
 and yield `publish.done` with the install command to share:
 
 ```
-$ aura nexus publish ./apps/com.example.foo --to oci://ghcr.io/u/foo --tag 0.1.0
+$ aura nexus app publish ./apps/com.example.foo --kind oci --to ghcr.io/u/foo --tag 0.1.0
 nexus:publish.progress  Building artifact…
 nexus:publish.progress  Pushing to ghcr.io/u/foo:0.1.0…
-nexus:publish.done      Install with: aura nexus install ghcr.io/u/foo:0.1.0
+nexus:publish.done      Install with: aura nexus app install ghcr.io/u/foo:0.1.0
 ```
 
 The publish flow doesn't go through the permission gate — you're
@@ -239,7 +239,7 @@ GET    /api/nexus/installed            list of InstallRecord
 The Nexus GUI (`apps/com.aura.nexus/`) is a thin client over these
 endpoints — its 4 pages (BROWSE / INSTALLED / INSTALL / PUBLISH) all
 proxy through `osClient.fetch('/api/nexus/...')`. The CLI's `aura nexus
-*` commands are equally thin.
+app *` commands are equally thin.
 
 ## Reading the source
 

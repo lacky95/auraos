@@ -28,25 +28,29 @@ pnpm --filter @aura/cli dev -- <args>
 
 ## Overview
 
-Short forms for everyday work, kubectl-style verbs for everything else
-(`aura <verb> <resource> [name…]`). `aura --help` prints the grouped
-overview; the full reference is the docs page *CLI Reference*.
+Short forms for everyday work, kubectl-style verbs for everything else:
+`aura <command> [resource] [name...] [flags]`. `aura --help` prints the same
+sections as below (each line is checked against the command tree by the
+tests); `aura <command> --help` shows one command's resources, flags and
+examples. The full reference is the docs page *CLI Reference*.
 
 ```
-aura ps                         running instances           (= aura get inst)
-aura run <appId>                start an app
-aura jump [target] [-s <sc>]    shell into an app / one of its sidecars (no target: picker)
-aura info                       where am I (layers, env, mounts, tools)
-aura status                     OS health summary
+Basics           aura ps · run <app> · jump [app|inst] [--sidecar <name>] · status · info · dev new
+Inspect          aura get apps|inst|sidecars|act|caps|svc|mounts|ports|scopes|themes|perms [name]
+                 aura get inst <name> sidecars · describe <resource> <name>
+                 aura logs inst <name> -c <sidecar> · logs svc <name> · events
+                 (get: -o wide|json|yaml|name  -a <app>  -i <inst>  -w  --no-headers)
+Lifecycle        aura start|stop|restart app|inst|svc <names...>
+                 aura pause|resume|kill inst <inst...> · enable|disable app <app...>
+Install & remove aura install app <dir> | cap [names...] | svc <name> | sdk
+                 aura rm app|act|svc|cap|mount|port <names...>   (rm = delete)
+Connect          aura exec inst <name> [-c <sidecar>] [-- <cmd...>] · open inst <name>
+                 aura mount ... · port ... · data ...
+Access           aura grant|revoke perms|caps <app> [names...] · cap ...
+Ecosystem & dev  aura nexus ... · dev ...
+Settings         aura set theme <name> · completion bash|zsh · api-resources
 
-aura get <res> [name]           list: apps inst sc act caps svc mounts ports scopes themes perms
-                                  -o wide|json|yaml|name  -a <app>  -i <instance>  -w
-aura get inst <id> sidecars     the sidecars of an instance, with their IDs
-aura describe <res> <name>      everything about one object (YAML)
-aura stop|restart|kill|pause|resume|delete|install|enable|disable|open|exec|logs|grant|revoke|set …
-aura api-resources              resource types, short names, verbs
-
-aura mount | port | cap | nexus | dev | events | data | completion   (tools, own subcommands)
+Short names: app inst sc act cap svc mount port scope theme perm
 ```
 
 The previous groups (`aura app …`, `aura inst …`, `aura activity …`,
@@ -84,12 +88,12 @@ test/                   `pnpm --filter @aura/cli test` (unit), `sh test/smoke.sh
 ### Capabilities
 
 7. `aura get caps` — entries from the built-in registry; only `aura` and `claude` start out as installed.
-8. `aura cap install ripgrep` — `apt-get install ripgrep` → symlinks `/os/toolchain/bin/rg`. `aura get caps` now shows `rg` installed=`✓`.
-9. `aura grant cap com.aura.terminal ripgrep` — adds `"rg"` to the terminal manifest's `tools` array; running instances are restarted automatically.
+8. `aura install cap ripgrep` — `apt-get install ripgrep` → symlinks `/os/toolchain/bin/rg`. `aura get caps` now shows `rg` installed=`✓`.
+9. `aura grant cap com.aura.terminal ripgrep` — adds `"rg"` to the terminal manifest's `tools` array; running instances are hot-refreshed (no respawn).
 10. `aura run com.aura.terminal` — `terminal-1` running.
 11. `aura jump com.aura.terminal-1` — drops you into that instance's sandbox. `which rg` → `/usr/local/bin/rg`, `rg --version` works.
 12. `exit` — back on the master.
-13. `aura revoke cap com.aura.terminal ripgrep` — removed from the manifest.
+13. `aura revoke cap com.aura.terminal ripgrep` — removed from the manifest; running instances restart.
 
 ### Services
 
@@ -109,9 +113,9 @@ test/                   `pnpm --filter @aura/cli test` (unit), `sh test/smoke.sh
 
 ### OS Wrapper
 
-24. `aura get themes` → `scificn` marked active.
+24. `aura get themes` → the ACTIVE column marks the theme in use per tone slot.
 25. `aura set theme amber` → 200; the browser shell switches to amber live (SSE-driven).
-26. `aura get themes` → `amber` marked active.
+26. `aura get themes` → `amber` marked ACTIVE (`dark`).
 27. `aura data query com.aura.settings/api/data/settings` → settings JSON.
 28. In a second terminal: `aura events` → live timeline.
 29. In the first terminal: `aura run com.aura.counter` → the event stream shows `app:stateChanged` events.
@@ -123,7 +127,7 @@ test/                   `pnpm --filter @aura/cli test` (unit), `sh test/smoke.sh
 
 ### Cleanup & Resilience
 
-32. `aura cap remove ripgrep` — uninstall + cleanup symlinks.
+32. `aura rm cap ripgrep` — uninstall + cleanup symlinks.
 33. Container restart → `aura get caps` still shows installed capabilities (state persisted to `/data/aura/state/capabilities.json`).
 
 ## Capabilities — `/workspace/.aura/capabilities.yaml`

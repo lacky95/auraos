@@ -39,7 +39,7 @@ change a system app is to modify the monorepo source and redeploy.
 The default install target. When you run:
 
 ```sh
-aura nexus install com.example.foo
+aura nexus app install com.example.foo
 ```
 
 the app lands in `/data/scopes/global/apps/com.example.foo/`. That path
@@ -51,7 +51,7 @@ On the first install into the global scope, AuraOS initialises
 independent from the AuraOS monorepo. A `.aura-scope` marker file is
 committed so the repo always has a clean baseline.
 
-**Update path:** `aura nexus update com.example.foo` re-resolves the
+**Update path:** `aura nexus app update com.example.foo` re-resolves the
 original ref and reinstalls if the source has changed.
 
 ### Optional remote
@@ -79,7 +79,7 @@ Identical to global in behaviour, but sits at
 install shadows the global one for the same app id.
 
 ```sh
-aura nexus install com.example.foo --scope user
+aura nexus app install com.example.foo --scope user
 ```
 
 The `default` user id is a placeholder for the single-user model. When
@@ -111,17 +111,20 @@ app's code never needs to know which scope it came from.
 aura get scopes
 
 # install into global (default)
-aura nexus install <ref>
+aura nexus app install <ref>
 
 # install into user scope
-aura nexus install <ref> --scope user
+aura nexus app install <ref> --scope user
 
-# list shows SCOPE column
-aura nexus list
+# list shows a SCOPE column
+aura nexus app list
+
+# scaffold a new app straight into a scope (default: user)
+aura dev new com.example.foo --scope global
 ```
 
-See [CLI Reference](./cli-reference) for the full `aura nexus` and
-`aura scope` command set.
+See [CLI Reference](./cli-reference) for the full `aura nexus` command
+set and the other `aura get` resources.
 
 ---
 
@@ -135,8 +138,8 @@ scopes.
 
 ## What is NOT scoped
 
-- **Installed toolchain capabilities** (`aura cap install`) — these land
+- **Installed toolchain capabilities** (`aura install cap`) — these land
   in `/os/toolchain/bin/` and are shared across all scopes.
-- **Services** (`aura service`) — system-wide, not per-scope.
+- **Services** (`aura get svc`, `aura install svc`) — system-wide, not per-scope.
 - **OS settings** (theme, keymap, workspaces) — stored in the OS KV
   store, not tied to any scope.

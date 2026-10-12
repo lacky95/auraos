@@ -21,16 +21,16 @@ aura grant perm com.aura.terminal apps.mount
 
 # inside the terminal app's sandbox
 aura mount add com.example.hello     # read-only
-aura mount ls                        # TARGET SCOPE KIND MODE PATH
+aura get mounts -i $APP_INSTANCE_ID  # INSTANCE TARGET KIND MODE PATH ORIGIN
 ls /mnt/aura/com.example.hello       # …its source, right there
 
-aura mount rm com.example.hello      # detach
+aura rm mount com.example.hello      # detach
 ```
 
 To actually edit it, ask for write access:
 
 ```bash
-aura mount rm  com.example.hello
+aura rm mount  com.example.hello
 aura mount add com.example.hello --wr
 ```
 
@@ -42,21 +42,23 @@ A mode change is detach + re-add — POSTing over a live mount returns
 | Command | What it does |
 |---|---|
 | `aura mount` | Interactive wizard: pick target app → instance → the set of apps to have mounted. Per row, `space` checks it, `r` selects it read-only (`ro`), `w` selects it writable (`wr`), `d` adds `+data`; `s` (or ⌃F) fuzzy-searches. Unchecking a row **detaches** it. |
-| `aura mount ls` | What is mounted into the instance — plus the mounts of its OS-managed sidecars and the OS context volumes. Use the `PATH` column — do not hardcode a root. (`aura get mounts -i <instance>` lists the same as a resource.) |
 | `aura mount add <appId>…` | Attach one or more apps. With no appId, opens a multi-select over every installed app (`m`/Tab switches scope, `s` or ⌃F fuzzy-searches). |
-| `aura mount rm <appId>…` | Detach. A bare appId drops both its source and data mounts; `<appId>:data` drops just the data one. |
+| `aura get mounts [-i <instance>] [-a <app>]` | What is mounted, one row per mount, across all running container instances unless narrowed. Includes the mounts of OS-managed sidecars (`INSTANCE` reads `<instance>--<sidecar>`). Use the `PATH` column, don't hardcode a root. |
+| `aura rm mount <id>… [-i <instance>]` | Detach. `<id>` is `<appId>` (source and data mounts) or `<appId>:data` (just the data one). Without `-i` it finds the one instance that has it and asks first (`-y` skips the question); pass `-i` when several have it. |
+| `aura mount ls` | The same list for one instance (default: the one you are in), plus a *sidecar mounts* section and the OS context volumes. |
+| `aura mount rm <appId>… [--all]` | Detach from one instance (default: the one you are in); `--all` empties it. |
 
 | Flag | Applies to | Meaning |
 |---|---|---|
-| `--wr` | `add` | Mount **writable**. Default is `ro`. (`--rw` still works as a deprecated alias.) |
-| `--data` | `add` | Mount the target's data dir **instead of** its source. |
-| `--all` | `rm` | Detach every mount from the instance. |
-| `--instance <id>` | all | Which instance to mount *into*. Defaults to `$APP_INSTANCE_ID`, which both runners set — so inside an app sandbox you never pass it. |
+| `--wr` | `mount add` | Mount **writable**. Default is `ro`. (`--rw` still works as a deprecated alias.) |
+| `--data` | `mount add` | Mount the target's data dir **instead of** its source. |
+| `--instance <id>` | `aura mount …` | Which instance to mount *into*. Defaults to `$APP_INSTANCE_ID`, which both runners set, so inside an app sandbox you never pass it. |
+| `-i <id>` | `get mounts`, `rm mount` | The instance (or an app id with one running instance). |
 
 ## Where the files land
 
 Two roots. Which one you get depends on when the *consumer* container
-was started, so always read the `PATH` column from `aura mount ls`
+was started, so always read the `PATH` column from `aura get mounts`
 rather than hardcoding either.
 
 | Root | When |
@@ -75,7 +77,7 @@ being mounted. Without it, `POST`/`DELETE` on the mounts API return
 Most permissions are still auto-granted by the `PermissionManager`'s MVP
 path; only the names in its `ENFORCED_PERMISSIONS` list really 403 —
 `apps.mount`, `apps.port` and the four `sidecars.*` permissions (see
-[Sidecars](/docs/sidecars#permissions)). Handing one app read/write access
+[Sidecars → Permissions](/docs/sidecars/permissions)). Handing one app read/write access
 to another app's source tree is not defensible to auto-grant.
 
 Declare it in the manifest:
@@ -88,9 +90,10 @@ Declare it in the manifest:
 Or manage it live:
 
 ```bash
-aura get perms [appId]                          # who declares what
-aura grant perm [appId] [permissions...]        # bare = interactive picker
-aura revoke perm <appId> <permissions...>
+aura get perms [appId]                     # who declares what
+aura grant perm com.aura.terminal apps.mount
+aura grant perm                            # interactive picker
+aura revoke perm com.aura.terminal apps.mount
 ```
 
 Grants take effect **immediately** — the endpoint reloads the app
@@ -120,24 +123,28 @@ Read these before you rely on it.
 
 ## Mounts in sidecars
 
-An app's [OS-managed sidecars](/docs/sidecars#mounts-of-a-sidecar) are mount
-consumers too, keyed `<instanceId>--<sidecar>`, each with its own
-`/mnt/aura`. They get mounts two ways:
+An app's [OS-managed sidecars](/docs/sidecars/mounts) are mount consumers
+too, keyed `<instanceId>--<sidecar>`, each with its own `/mnt/aura`. They get
+mounts two ways:
 
-- **Own** — the app adds them at runtime through the SDK
+- **Own:** the app adds them at runtime through the SDK
   (`osSidecars().mounts(name).add(appId)`), with `sidecars.mounts` +
-  `apps.mount`. Declared and restored like an app's own mounts.
-- **Inherited** — with `inheritMounts`, every mount of the app is mirrored
-  into the sidecar and follows the app's changes live (`exclude` and a
-  read-only cap are set at spawn). Never declared on the sidecar; detach
+  `apps.mount`, on a sidecar spawned with `mounts: { own: true }`. Declared
+  and restored like an app's own mounts.
+- **Inherited:** with `inheritMounts`, every mount of the app is mirrored
+  into the sidecar and follows the app's changes live. `exclude` and a
+  read-only cap are set at spawn. Never declared on the sidecar; detach
   them on the app.
 
-`aura mount ls` shows both under *sidecar mounts*, with `ORIGIN inherited`
-for the mirrored ones. When the instance stops, its sidecars' mounts,
-declarations and mount roots go with it.
+`aura get mounts` lists them with `INSTANCE <instance>--<sidecar>` and
+`ORIGIN inherited` for the mirrored ones; `aura mount ls` shows them under
+*sidecar mounts*. `aura rm mount` doesn't detach them: the app does, through
+the SDK. When the instance stops, its sidecars' mounts, declarations and
+mount roots go with it.
 
 App-managed sidecars (the SDK's docker mode) don't get their own root: with
 `inheritMounts` they share the app's, and only see binds made while they run.
+Full guide: [Mounts of a sidecar](/docs/sidecars/mounts).
 
 ## How it works
 

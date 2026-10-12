@@ -1,32 +1,31 @@
 ---
 title: Bring-your-own-runtime apps
-description: Run a foreign Docker image (a whole app/agent/service) as your app's own isolated environment, and surface its UI as an AuraOS window.
+description: Wrap a foreign Docker image (an agent, a model server, a dashboard) as an AuraOS app whose window is that image's own UI.
 ---
 
-Some apps aren't a single web server — they wrap a whole external runtime: an
-agent, a model server, a registry, a database. AuraOS runs every app container
-from the shared `aura-base` image, so an app **can't be** a foreign image
-directly. Instead it acts as a thin **controller**: the foreign image runs as a
-**sibling container** (a [sidecar](/docs/sidecars)) on the `aura-net` network,
-and the controller reverse-proxies it.
+Some apps aren't a web server of their own. They wrap a whole external
+runtime: an agent, a model server, a registry, a database with an admin UI.
+AuraOS runs every app container from the shared `aura-base` image, so an app
+**can't be** a foreign image directly. Instead it is a thin **controller**:
+the foreign image runs as a [sidecar](/docs/sidecars) next to it on
+`aura-net`, and the controller reverse-proxies the sidecar's UI into the app
+window.
 
-**Recommended:** let the OS start the sidecar (`mode: 'os'`). The controller
-then needs only the `sidecars.spawn` permission — no `docker` tool, no host
-root. The alternative, `mode: 'docker'` (the default), has the controller run
-docker itself through the bind-mounted socket.
+The SDK does all of it: `createSidecars(...).listen()` starts the sidecar,
+answers the lifecycle contract on `$APP_PORT`, and proxies the dashboard,
+in about a dozen lines. Let the **OS** start the sidecar (`mode: 'os'`):
+the controller then needs only the `sidecars.spawn` permission, no docker
+tool and no host root.
 
-This used to be ~200 lines of hand-rolled `docker run` per app (see
-`com.aura.whisper`, `com.aura.registry`). Now you **declare** the runtime in the
-manifest and wire it up with `@aura/app-sdk/sidecars` in about a dozen lines.
+This page covers what is specific to wrapping a runtime: the controller, the
+proxy, auth and rendering. Everything about the sidecar itself (template
+fields, volumes, seeding, inheritance, exec, logs, lifecycle) is in
+[Sidecars](/docs/sidecars).
 
 ## 1. Declare the runtime in the manifest
 
-Add a `services` array to `app.manifest.json`. Each entry is one sibling image.
-The app must be `sandbox: "container"`. With the OS running the sidecars, add
-the `sidecars.spawn` permission; with `mode: 'docker'`, list `"docker"` in
-`tools` instead (only then does the OS bind-mount the host Docker socket). The
-example shows the docker variant — for the OS variant drop `"docker"` and add
-`"permissions": ["sidecars.spawn"]`.
+The app is a `raw` runtime in a container sandbox; the foreign image is a
+`services[]` template marked `proxyDashboard`.
 
 ```jsonc
 {
@@ -34,50 +33,33 @@ example shows the docker variant — for the OS variant drop `"docker"` and add
   "componentType": "activity",
   "runtime": "raw",
   "sandbox": "container",
-  "tools": ["bash", "node", "docker"],
+  "tools": ["bash", "node"],
+  "permissions": ["sidecars.spawn"],
   "serverPort": 4110,
   "proxy": { "rewriteHtml": "astro" },
   "services": [
     {
-      "name": "runtime",                 // container = aura-<instanceId>--runtime
+      "name": "runtime",                       // container aura-<instanceId>--runtime
       "image": "vendor/their-image:tag",
-      "command": ["serve", "--port", "8080"],  // args appended after the image
-      "port": 8080,                       // port to proxy / health-check
-      "proxyDashboard": true,             // this service's UI becomes the app window
+      "command": ["serve", "--port", "8080"],  // many images exit without a subcommand
+      "port": 8080,                            // what the proxy forwards to
+      "proxyDashboard": true,                  // this service's UI is the app window
       "env": { "SOME_FLAG": "1" },
-      "volumes": [{ "name": "data", "target": "/var/lib/app" }], // vol = aura-<appId>-data
-      "dns": ["8.8.8.8", "1.1.1.1"],      // app containers get no DNS by default
-      "prePull": true,                    // pull at install (Nexus) instead of first boot
-      "restart": "unless-stopped"
+      "volumes": [{ "name": "data", "target": "/var/lib/app" }],
+      "dns": ["8.8.8.8", "1.1.1.1"]            // sidecars get no DNS by default
     }
   ]
 }
 ```
 
-Field notes:
+`proxyDashboard` may be set on one service. Volumes land in the app's data
+dir and survive restarts and updates. All other fields:
+[Templates](/docs/sidecars/templates).
 
-- **`name`** → the sibling container is named `aura-<instanceId>--<name>` and
-  labelled `aura.parent=<instanceId>` / `aura.app=<appId>` so the OS can reap it.
-- **`command`** → appended after the image (sets the container's CMD). Many
-  images need an explicit run subcommand — without it they exit and crash-loop.
-- **`proxyDashboard`** → the SDK reverse-proxies this service's `port` through
-  your `$APP_PORT`, so it renders in the app window. At most one per app.
-- **`volumes`** → named Docker volumes (`aura-<appId>-<name>`), the durable
-  home for the runtime's state. They survive restarts and app updates.
-- **`dns`** → sibling containers get outbound DNS via these; the app's own
-  container gets none, so set this if the runtime reaches the internet.
-- **`prePull`** → hint that Nexus should pull the image at install time.
-
-## 2. Wire it up with `@aura/app-sdk/sidecars`
-
-`createSidecars(...)` owns all the boilerplate: idempotent `docker run`, naming,
-DNS, volumes, labels, the AuraOS lifecycle contract on `$APP_PORT` (health
-answers **immediately** so a slow first-run image pull can't blow the 60 s
-health window), teardown on `onDestroy`, and a streaming reverse proxy
-(HTTP + WebSocket) with a "starting…" interstitial.
+## 2. Wire it up
 
 ```js
-// server.mjs — runtime: "raw", entrypoint execs `node server.mjs`
+// server.mjs (runtime: "raw", the entrypoint runs `node server.mjs`)
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createSidecars } from '@aura/app-sdk/sidecars';
@@ -90,28 +72,37 @@ createSidecars({
   instanceId: process.env.APP_INSTANCE_ID,
   appPort:    Number(process.env.APP_PORT),
   services:   manifest.services,
-  mode:       'os',          // the OS runs the image; omit for the docker path
+  mode:       'os',
 }).listen();
 ```
 
-In `mode: 'os'` the proxy, health and interstitial work the same; container
-management goes through [`osSidecars()`](/docs/sidecars), which also gives
-you `exec` / `logs` without a docker socket. `onSeed` is docker-path only —
-on the OS path declare `services[].seed` instead.
+That is a complete bring-your-own-runtime app. `listen()` serves on
+`$APP_PORT`:
 
-That's a complete bring-your-own-runtime app. `@aura/app-sdk` resolves from the
-workspace `node_modules` mounted into every container — no `aura install sdk`
-needed for the sidecar module.
+- the lifecycle contract. Health answers **immediately**, so a slow first
+  image pull can't blow the OS's 60 s health window; `onStart` asks the OS
+  for the sidecars (idempotent), `onDestroy` removes them;
+- a streaming reverse proxy (HTTP and WebSocket) to the `proxyDashboard`
+  service, with a "starting…" page until it answers;
+- `/api/status` with the current phase.
+
+`@aura/app-sdk` resolves from the workspace `node_modules` mounted into every
+container; no `aura install sdk` needed.
+
+Need first-run config in the runtime's volume? Use `services[].seed`
+([Seeding](/docs/sidecars/templates#seeding)). An existing app on the
+default `mode: 'docker'` path:
+[migrate it](/docs/sidecars/app-managed#migrate-to-os-managed).
 
 ### Auth injection (optional)
 
 If the runtime's UI is behind a login, pass an `auth` hook so the user isn't
-prompted twice. The SDK injects the returned headers on every proxied request
-(HTTP + WS) and re-authenticates on an auth bounce:
+prompted twice. The SDK adds the returned headers to every proxied request
+(HTTP and WS) and re-authenticates on an auth bounce:
 
 ```js
 createSidecars({
-  /* …ctx, services… */
+  /* …ctx, services, mode… */
   auth: {
     async headers() { if (!session) await login(); return { cookie: session }; },
     isAuthBounce: (status, loc) => status >= 300 && status < 400 && /\/login/.test(loc),
@@ -120,78 +111,48 @@ createSidecars({
 });
 ```
 
-### First-run seeding (optional)
+## 3. Rendering fidelity
 
-`onSeed` runs once per volume before the service starts — drop default config in
-without clobbering user edits:
+A third-party dashboard ships its own complete styling, and you usually want
+it to look exactly like it does natively. Two manifest settings control what
+the shell proxy injects into the app document:
 
-```js
-createSidecars({
-  /* … */
-  async onSeed({ run }) {
-    try { await run(['test', '-f', '/vol/config.yaml']); return; } catch { /* absent */ }
-    await run(['sh', '-c', 'cat > /vol/config.yaml'], readFileSync(HERE + 'seed/config.yaml'));
-  },
-});
-```
-`run(args, stdin?)` executes a throwaway helper container with the target volume
-mounted at `/vol`, so you never need a host-path bind of your source tree.
+- **`themeStrategy: "override"`** (top-level) stops the proxy injecting
+  `<link rel="stylesheet" href="/api/os/theme.css">`. That stylesheet is
+  mostly harmless `:root { --aura-* }` variables, but it also carries global
+  `*` and `::-webkit-scrollbar` rules that restyle the app's scrollbars.
+  (The Process Manager shows an `OVERRIDE` chip so users know why it looks
+  different.)
+- **`proxy.injectMeta: false`** drops the non-rendering `aura-*` meta tags
+  (design framework, theme, keymap). Optional; the identity meta
+  `aura-app-id` / `aura-instance-id` always stay, so the iframe identity
+  gate is unaffected.
 
-## 3. The OS owns sibling lifecycle
-
-With `mode: 'os'` the OS starts the siblings itself, adopts them across shell
-restarts, and recreates one whose `services[]` entry changed. On the docker
-path it didn't start them, but because siblings are labelled `aura.parent` /
-`aura.app` it tracks them all the same:
-
-- **Stop** → the instance's siblings are reaped (`aura.parent=<instanceId>`).
-- **Crash** → a crashed app never runs `onDestroy`, so the OS reaps its siblings
-  by label (a respawn re-creates fresh ones) — no orphans with `--restart`.
-- **Uninstall** → every sibling of the app is reaped (`aura.app=<appId>`).
-- **Adoption** → the orphan scanner skips `aura.parent`-labelled containers;
-  they belong to an app, not to the AppManager.
+Keep `rewriteHtml: "astro"` even so: it rewrites the runtime's root-absolute
+`/assets/*` tags to `/api/proxy/<id>/assets/*` and doesn't touch appearance.
+SPAs that emit root-absolute URLs from script may need
+`rewriteHtml: "absolute"` plus `preservePrefix`. `com.aura.hermes` uses
+`themeStrategy: "override"` + `injectMeta: false` to render the Hermes
+dashboard natively.
 
 ## Requirements & caveats
 
-- Needs `sandbox: "container"`. On the docker path also `tools: ["docker"]`,
-  which grants host Docker access (effectively root on the host) — prefer
-  `mode: 'os'` + `sidecars.spawn`, where the app can only run its own
-  templates. Don't publish host ports (on the OS path `publish` needs
-  `sidecars.privileged`).
-- The host Docker daemon must be able to pull the image. If it can't, the app
-  still boots and shows an interstitial telling the operator to `docker pull` it;
-  it starts automatically once the image is present.
-- The dashboard's assets should resolve under the proxy — set
-  `proxy.rewriteHtml: "astro"` so the shell injects `<base href>` and rewrites
-  relative URLs. SPAs that emit root-absolute (`/assets`) URLs may need
-  `rewriteHtml: "absolute"` + `preservePrefix`.
-
-## Rendering fidelity — let the runtime render as-is
-
-A third-party dashboard ships its own complete styling; you usually want it to
-look exactly like it does natively, not adopt the AuraOS theme. Two manifest
-settings control what the shell proxy injects into the app document:
-
-- **`themeStrategy: "override"`** (top-level) — stops the proxy injecting
-  `<link rel="stylesheet" href="/api/os/theme.css">`. That OS stylesheet is
-  mostly harmless `:root { --aura-* }` variables, but it also carries global
-  `*`/`::-webkit-scrollbar` rules that restyle the app's scrollbars — `override`
-  keeps them out so the runtime renders in its own skin. (The Process Manager
-  shows an `OVERRIDE` chip so users know why it looks different.)
-- **`proxy.injectMeta: false`** — drops the non-rendering `aura-*` meta tags
-  (design-framework, theme, keymap blobs). Optional/cosmetic; the always-injected
-  `aura-app-id`/`aura-instance-id` identity meta stay, so the iframe identity gate
-  is unaffected.
-
-Keep `rewriteHtml: "astro"` even so — it's what rewrites the runtime's
-root-absolute `/assets/*` tags to `/api/proxy/<id>/assets/*`; it doesn't touch
-appearance. `com.aura.hermes` uses exactly this combination
-(`themeStrategy: "override"` + `injectMeta: false`) to render the Hermes
-dashboard natively.
+- `sandbox: "container"` and `sidecars.spawn`. The docker path instead needs
+  `tools: ["docker"]`, which is host root; see
+  [App-managed sidecars](/docs/sidecars/app-managed) for when that is still
+  the right call.
+- Don't publish host ports. On the OS path `publish` needs
+  `sidecars.privileged`.
+- The host docker daemon must be able to pull the image. A failed pull
+  fails the spawn; the app itself still boots and its window shows the
+  error.
 
 ## Reference apps
 
-- `com.aura.hermes` — runs the Nous Research Hermes Agent (`services` +
-  `createSidecars` + auto-login + SOUL.md seeding + native rendering).
-- `com.aura.whisper` — the original hand-rolled pattern (two sibling images).
-- `com.aura.registry` — wraps a third-party binary behind a lifecycle/proxy shim.
+- `builders/io.lakner.pocketbuilder/templates/pocketbase-react`: PocketBase
+  as an OS-managed sidecar of an Astro app (`mode: 'os'`, lifecycle hooks,
+  its own proxy route instead of `listen()`).
+- `com.aura.hermes`: the Nous Research Hermes Agent, app-managed
+  (`services` + `createSidecars` + auto-login + seeding + native rendering).
+- `com.aura.whisper`: the original hand-rolled pattern (two sibling images).
+- `com.aura.registry`: a third-party binary behind a lifecycle/proxy shim.

@@ -184,11 +184,18 @@ running terminal/console — the containers outlive the shell.
 PRoot apps don't survive: they're direct children of the shell node and
 die with it. Only `sandbox: 'container'` apps adopt.
 
-After adoption, in this order: `SidecarManager.reconcile` re-learns every
-OS-managed sidecar from its labels (token nonce, mount inheritance) and
-removes those whose instance is gone; then `MountManager.reconcile` adopts or
-reaps binds — it needs the sidecars' consumer keys (`<instance>--<sidecar>`)
-to tell a live sidecar's binds from a dead one's.
+After adoption, in this order (`AppManager`):
+
+1. `SidecarManager.reconcile(liveInstanceIds)` walks
+   `docker ps -a --filter label=aura.managed=os`. A sidecar whose
+   `aura.parent` instance is gone is removed; every other one has its token
+   nonce re-registered and its mount inheritance put back into the fan-out
+   view. Nothing is recreated.
+2. `MountManager.reconcile(instances + liveConsumerKeys())` adopts or reaps
+   binds. It needs the sidecars' consumer keys (`<instance>--<sidecar>`) to
+   tell a live sidecar's binds from a dead one's; a bind on a sidecar that it
+   never declared itself is re-marked `inherited`.
+3. `PortExpose.reconcile`.
 
 ### Instance tokens
 
@@ -211,29 +218,103 @@ aura1.<base64url {i: instanceId, s?: sidecar, n: nonce}>.<base64url HMAC-SHA256>
   can't replace it. Instances started before tokens existed have none until
   their next start.
 
-Only the sidecar routes require it today (`packages/shell/src/lib/instanceAuth.ts`).
+Both runners inject it (PRoot instances get one too, though the sidecar
+routes then answer 409: OS sidecars need a container sandbox).
+
+Only the sidecar routes require it today. `sidecarGate` in
+`packages/shell/src/lib/instanceAuth.ts` runs the same prelude for each:
+instance exists (404) → bearer present and `verify()`-able (401) → claims
+belong to the URL's instance (403) → the instance's **app** holds the
+route's permissions (403) → container sandbox (409). A sidecar calling with
+its own token passes as `caller.sidecar`, which becomes the `owner` of what
+it spawns.
+
 Anything holding the docker socket can read another container's env and with
 it the token — the socket is host root anyway, so that adds no exposure.
 
 ### OS-managed sidecars
 
 `SidecarManager` (`packages/core/src/app-manager/SidecarManager.ts`) starts
-containers on an app's request ([Sidecars](/docs/sidecars)): it resolves the
-request against the app's `services[]` template (`sidecar-spec.ts`), then
-`docker create` + `start`, a 400 ms still-alive check (the logs go into the
-error if not), the sidecar's own mounts, and an optional TCP wait. Docker is
-the source of truth — every sidecar carries its record in labels:
+containers on an app's request ([Sidecars](/docs/sidecars)). The rules of
+what may be asked live, pure and docker-free, in `sidecar-spec.ts`:
+
+- `parseSpawnRequest` whitelists the request keys (`template`, `name`,
+  `suffix`, `image`, `env`, `envInherit`, `command`, `mounts`, `replace`,
+  `takeover`, `wait`); anything else is a 400 naming the allowed ones.
+- `resolveSidecarSpec` merges request over template and applies the gates:
+  `image` ≠ template → `sidecars.anyImage`; `privileged` / `capabilities` /
+  `devices` / `publish` → `sidecars.privileged`; `inheritDockerSocket` →
+  the app's own `tools[]` must grant docker; `volume` / `subpath` → 400.
+  Volumes resolve to `aura-<appId>-<vol>` if that legacy volume exists (only
+  for the template-named sidecar), else a volume-subpath of the app-data
+  volume at `<app data>/.sidecars/<sidecar or template if shared>/<vol>`.
+- `specHash` is a sha256 over the canonical JSON (keys sorted at every
+  level) of the resolved spec, first 16 hex chars.
+
+`spawn(instanceId, req, caller)` then, serialised per container name:
+
+1. `docker inspect` the name. App-managed container (no `aura.managed=os`)
+   → 409, unless `takeover` and its `aura.parent` is this instance. OS
+   sidecar with an equal hash and `running` → **adopt**: re-register its
+   nonce, track it, re-apply its mounts (idempotent), return `created: false`.
+   A different hash with `replace: false` → 409. Otherwise remove it (own
+   mount declarations stay) and continue.
+2. New name: count the instance's OS sidecars (stopped ones too) against
+   `AURA_SIDECAR_MAX_PER_INSTANCE` (32) → 429.
+3. `ensureImage`: `docker pull` if missing, 10 min timeout, concurrent pulls
+   of one image share one promise.
+4. Create the volume subpath dirs and, with `mounts.own` or inheritance,
+   the mount root `aura/mounts/<instance>--<name>`.
+5. Env: `envInherit` from OS Context, falling back to the app container's
+   env (`docker inspect aura-<instanceId>`), then the spec's `env`.
+6. `seed`, if declared and the marker `.sidecars/<name>/.aura-seeded` is
+   absent: a `docker run --rm` of the image with the volumes and env,
+   labelled `aura.mount=1` (hidden from listings) and `aura.parent` (reaped
+   if the instance dies mid-seed). Marker written on success.
+7. With `inheritIdentity`, mint a token for `<instance>--<name>`.
+8. `docker create` + `docker start`. Identity env is appended last so a
+   template key can't overwrite it. Then a 400 ms still-alive check: a
+   container that died is removed and the spawn fails with its last 20 log
+   lines.
+9. Track it for fan-out, `MountManager.reapplyConsumer` (own declarations
+   restored, then the parent's mounts minus `exclude`, `forceRo` applied),
+   and with `wait.port` poll TCP until the port answers (default 60 s).
+
+Docker is the source of truth; the in-memory state is only the fan-out map
+and token nonces, both rebuilt by `reconcile`. Every sidecar carries its
+record in labels:
 
 | Label | Value |
 |---|---|
-| `aura.parent` / `aura.app` / `aura.service` | instance, app, sidecar name — same as app-managed sidecars, so the existing reaper removes them on stop and crash |
+| `aura.parent` / `aura.app` / `aura.service` | instance, app, sidecar name; the same as app-managed sidecars, so the existing reaper removes them on stop and crash and orphan adoption skips them |
 | `aura.managed` | `os` |
 | `aura.sidecar.template` / `aura.sidecar.owner` | template, and the sidecar that spawned it (or `-`) |
-| `aura.sidecar.spec` | JSON: spec hash, token nonce, mount inheritance, created-at |
+| `aura.sidecar.spec` | JSON: name, template, image, spec hash, token nonce, port, mount view (`own`, `inherit`, `exclude`, `forceRo`), owner, created-at |
 
-Equal spec hash + running → the container is adopted instead of recreated.
-All docker calls are async and serialised per container name, so bursts of
-dynamic spawns don't block the shell's event loop.
+`remove(instanceId, name)` deletes the owned children first (recursively,
+by `aura.sidecar.owner`), then `MountManager.forgetConsumer` (binds,
+declarations, mount root), `docker rm -f`, and the token nonce.
+
+All docker calls are async `execFile`s with their own timer (the docker CLI
+forwards SIGTERM to an exec'd process and then exits cleanly, so execFile's
+own `timeout` would report a timed-out exec as success); that is where
+`timedOut` comes from.
+
+#### Sidecars as mount consumers
+
+`MountManager` treats `<instanceId>--<sidecar>` as a consumer like any
+instance: container `aura-<inst>--<sc>`, mount root `aura/mounts/<inst>--<sc>`,
+never the legacy `/data/.mnt` root (a sidecar without a root gets a 409).
+Own mounts are declared and persisted like an app's. Inherited ones are
+derived: a mount added to or removed from the instance is queued onto a
+serial fan-out chain that mirrors it into every `fanoutTargets(instance)`
+entry (live OS sidecars with `inherit`), honouring `exclude` and `forceRo`.
+
+`verify()` reads the consumer's `/proc/self/mountinfo` with `docker exec cat`.
+A sidecar image without `cat` is read by a helper container in its PID
+namespace (`--pid=container:<sidecar>`, `cat /proc/1/mountinfo`). If neither
+works, a read-only mount into a sidecar is refused and rolled back rather
+than handed out unverified.
 
 ## Tools allowlist mechanics
 
@@ -287,12 +368,21 @@ exit code; the runner parses + reports. `expectingKill: true` on the
 tracked record suppresses the callback (the AppManager just did
 `docker kill` itself).
 
-On stop, kill and crash the instance's siblings are reaped by their
-`aura.parent` label (app- and OS-managed alike), `MountManager` unmounts the
-instance's binds **and** its sidecars' binds, and the tokens of the instance
-and its sidecars are dropped. A deliberate stop/kill also forgets the mount
-declarations and empties the sidecars' mount roots; a crash keeps the
-declarations so the respawn gets its mounts back.
+On stop, kill and crash:
+
+- the instance's siblings are reaped by their `aura.parent` label (app- and
+  OS-managed alike, `reapSiblingsOf`);
+- `MountManager` unmounts the instance's binds **and** its sidecars' binds
+  (a leaked bind pins the source filesystem and the app-data volume);
+- `InstanceTokens.forgetInstance` drops the nonces of the instance and every
+  `<instance>--*` sidecar, so their tokens stop verifying;
+- `SidecarManager.removeAll` clears the fan-out view.
+
+A deliberate stop/kill also forgets the mount declarations of the instance
+and its sidecars and removes the sidecars' mount roots (`MountManager.forget`);
+a crash keeps the declarations so the respawn gets its mounts back. OS
+sidecars are **not** respawned by the OS: the respawned app spawns them again,
+and their own mounts are restored from the kept declarations.
 
 ## Where to read more
 

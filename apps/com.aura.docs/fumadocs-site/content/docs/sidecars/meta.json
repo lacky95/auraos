@@ -1,0 +1,14 @@
+{
+  "title": "Sidecars",
+  "description": "Run a database, an agent or any foreign image next to your app.",
+  "pages": [
+    "index",
+    "os-managed",
+    "templates",
+    "mounts",
+    "operate",
+    "permissions",
+    "api",
+    "app-managed"
+  ]
+}

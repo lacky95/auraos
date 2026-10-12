@@ -1,0 +1,163 @@
+---
+title: App-managed sidecars
+description: The original path, where your app runs docker itself through the SDK's docker mode, how it differs from the OS path, and how to migrate to mode 'os'.
+---
+
+Before the OS could start sidecars, apps ran them themselves: the SDK's
+`createSidecars` in `mode: 'docker'` (the default), or a hand-rolled
+`docker run`. That keeps working unchanged. It needs `sandbox: "container"`
+and `"docker"` in `tools[]`; only then does the OS bind the host docker
+socket into the app, which makes the app **host root**.
+
+Use it only when the OS path can't do what you need: volumes outside your
+app's data (`volume` / `subpath`), or an app that runs docker anyway.
+Otherwise [migrate](#migrate-to-os-managed).
+
+## Setup
+
+```js
+import { readFileSync } from 'node:fs';
+import { createSidecars } from '@aura/app-sdk/sidecars';
+
+const manifest = JSON.parse(readFileSync('./app.manifest.json', 'utf8'));
+const host = createSidecars({
+  appId:      process.env.APP_ID,
+  instanceId: process.env.APP_INSTANCE_ID,
+  appPort:    Number(process.env.APP_PORT),
+  services:   manifest.services,          // mode defaults to 'docker'
+});
+await host.ensureAll();                   // idempotent
+// host.teardownAll() from onDestroy
+```
+
+The containers carry the same name (`aura-<instanceId>--<name>`) and the
+`aura.parent` label as OS sidecars, so the OS still removes them on stop,
+crash and uninstall, and `aura get sc` lists them as `MANAGED app`. The OS
+API does not manage them: no `exec`/`logs`/`mounts` routes, and `aura rm sc`
+refuses them.
+
+Read the **raw** manifest (`JSON.parse(readFileSync(...))`), not a parsed
+one: the SDK accepts fields the OS has no use for (`volume`, `subpath`).
+
+## Differences from the OS path
+
+- **`ensure()` skips a running container.** Editing `services[]` does
+  nothing until the container is gone: `docker rm -f aura-<instanceId>--<service>`.
+  (The OS path compares a spec hash and recreates by itself.)
+- **`inheritMounts` shares the app's mount root.** A sidecar started
+  *after* the app already has mounts sees those directories **empty**:
+  docker's volume mount is non-recursive, so only binds made while the
+  sidecar runs propagate in. OS sidecars get their own root and their mounts
+  applied after start, so they see everything.
+- **No mounts of its own.** Only the shared root.
+- **`volumes[]` can use `volume` / `subpath`** to put state anywhere on a
+  docker volume. Without them the SDK uses an existing `aura-<appId>-<name>`
+  volume, else `<app data>/.sidecars/<service>/<name>`, the same place the
+  OS path uses.
+- **`onSeed`** seeds a volume through a helper container instead of
+  `services[].seed`.
+- **`inheritIdentity` forwards the app's own token**, so the sidecar acts as
+  the app. On the OS path it gets a token of its own.
+- **`envInherit`** reads the controller's `process.env`. The OS path reads
+  OS Context, then the app container's env.
+- **Privileged fields** (`privileged`, `capabilities`, `devices`, `publish`)
+  need no extra permission: the app is host root already.
+
+## Example: Hermes
+
+A foreign agent image with every flag on, including the docker socket (it
+spawns its own sandboxes), and its home on a `subpath`. Both are reasons to
+stay app-managed:
+
+```jsonc
+"tools": ["bash", "node", "docker", "*"],
+"permissions": ["storage.read", "storage.write", "network.internet", "apps.mount"],
+"services": [{
+  "name": "runtime",
+  "image": "nousresearch/hermes-agent:latest",
+  "command": ["gateway", "run"],
+  "port": 9119,
+  "proxyDashboard": true,
+  "env": { "HERMES_DASHBOARD": "1", "HERMES_DASHBOARD_PORT": "9119" },
+  "envInherit": ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+  "inheritIdentity": true,
+  "inheritPermissions": true,
+  "inheritTools": true,
+  "inheritMounts": true,
+  "inheritDockerSocket": true,
+  "volumes": [{ "name": "data", "target": "/opt/data",
+                "volume": "aura_aura-app-data", "subpath": "aura/runtime/com.aura.hermes/hermes-home" }],
+  "dns": ["8.8.8.8", "1.1.1.1"]
+}]
+```
+
+## Migrate to OS-managed
+
+Going from `mode: 'docker'` to `mode: 'os'` is mostly a manifest change.
+
+**1. Manifest.** Add the permission, drop the docker tool:
+
+```diff
+- "tools": ["bash", "node", "docker"],
++ "tools": ["bash", "node"],
++ "permissions": ["sidecars.spawn"],
+```
+
+Keep `"docker"` only if the app still needs it for something else, or a
+template sets `inheritDockerSocket` (refused without it). A template with
+`privileged`, `capabilities`, `devices` or `publish` also needs
+`sidecars.privileged`.
+
+**2. Volumes.** Plain volumes (`{ name, target }`) keep their data, nothing
+to do. The OS uses the same precedence as the SDK: an existing
+`aura-<appId>-<volume>` docker volume wins for the template-named sidecar,
+else `<app data>/.sidecars/<service>/<volume>`, which is where the SDK put
+new ones too. Volumes with `volume` or `subpath` are refused (400): copy the
+data into `<app data>/.sidecars/<service>/<volume>` and remove the two fields.
+
+**3. Seeding.** Replace the `onSeed` callback (it throws in `mode: 'os'`)
+with a command in the template:
+
+```jsonc
+"seed": { "command": ["sh", "-c", "test -f /vol/config.yaml || cp /defaults/config.yaml /vol/"] }
+```
+
+It runs once, in the service's own image, with its volumes and env. Make it
+idempotent: a sidecar that keeps an old `aura-<appId>-<volume>` volume runs
+it once against the existing data. More: [Seeding](/docs/sidecars/templates#seeding).
+
+**4. Code.** One line:
+
+```diff
+  createSidecars({
+    appId, instanceId, appPort,
+    services: manifest.services,
++   mode: 'os',
+  });
+```
+
+`'auto'` works too, and picks `'os'` once the docker socket is gone. Or call
+`osSidecars().spawn({ template })` yourself for per-spawn options.
+
+**5. Switch over.** The app-managed container from before still runs under
+the same name, and the OS won't touch it: a spawn answers 409. Either
+restart the instance (`aura restart inst <id>`; stopping removes the old
+container, the restarted app spawns the OS one), or, from your own code,
+spawn once with `takeover: true`:
+
+```ts
+await osSidecars().spawn({ template: 'runtime', takeover: true });
+```
+
+`takeover` only removes a container of your own instance. `createSidecars`
+in `mode: 'os'` doesn't pass it, so with `createSidecars` restart the
+instance.
+
+**6. Check.** `aura get sc -a <appId>` shows `MANAGED os` and the
+`TEMPLATE` column, and `aura exec inst <appId> -c <name> -- …` works.
+
+What changes for the sidecar itself: with `inheritIdentity` it now has its
+own token (not the app's) plus `AURA_SIDECAR_NAME`; `envInherit` comes from
+OS Context first, then the app container's env, not from values your
+controller set in `process.env` at runtime; and `inheritMounts` now sees
+every mount, also those made before it started.

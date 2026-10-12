@@ -53,15 +53,21 @@ the real content as soon as health is green.
 **Nothing in the launcher.** Check `docker logs aura-shell` for
 `[AppRegistry] Loaded: <id>` lines — if your app isn't in the list,
 its manifest probably failed schema validation. Run
-`aura dev validate apps/<id>` from inside the master container.
+`aura dev validate --all` from inside the master container
+(`aura jump --master` from the Terminal app); `aura get apps` lists what
+did load.
 
 **Apps stuck in `error` state.** The Process Manager (`Ctrl+Alt+M`)
 shows lifecycle state per instance. Hit the **Kill** button to
-SIGKILL, then **Launch** to respawn cold.
+SIGKILL, then **Launch** to respawn cold. From the Terminal app:
+`aura ps` shows the same states, `aura kill inst <instanceId>` then
+`aura run <appId>` does the same reset.
 
 **Port in use.** The shell binds `:3000` on the host. Edit
 `docker-compose.yml` to map a different host port if needed; the
 shell's internal port stays 3000 either way.
 
 See [Core Concepts → Proxy + iframe](/docs/core-concepts#proxy-and-iframe)
-if you want the gory details of how requests flow.
+if you want the gory details of how requests flow, and
+`aura status` (or [Troubleshooting](/docs/troubleshooting)) for a quick
+health check.

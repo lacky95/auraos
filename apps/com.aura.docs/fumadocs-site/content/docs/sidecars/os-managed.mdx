@@ -1,0 +1,172 @@
+---
+title: OS-managed sidecars
+description: Add a sidecar to your app step by step — declare a template, ask the OS to start it, keep it in step with your app's lifecycle, and spawn more at runtime.
+---
+
+This is the guide for app developers. You put a template in your manifest,
+your server asks the OS to start it, and the OS does the rest: pulls the
+image, creates the container, mounts its volumes, waits for its port and
+removes it when your instance goes away.
+
+**Requirements:** `"sandbox": "container"` and the `sidecars.spawn`
+permission. No `docker` tool. The calls are server-side only (they carry a
+secret token).
+
+Reference app: `builders/io.lakner.pocketbuilder/templates/pocketbase-react`
+runs PocketBase this way (manifest `services[]`, `createSidecars` in
+`mode: 'os'`, lifecycle hooks, a reverse proxy route).
+
+## 1. Declare a template
+
+Every OS sidecar is started from a `services[]` entry of **your** app. The
+entry is a template: the reviewed, install-time description of what may run.
+
+```jsonc
+// app.manifest.json
+{
+  "id": "com.example.notes",
+  "sandbox": "container",
+  "tools": ["bash", "node"],
+  "permissions": ["sidecars.spawn"],
+  "services": [
+    {
+      "name": "db",                          // template id, kebab-case
+      "image": "postgres:17",
+      "port": 5432,                          // what wait.port and you connect to
+      "env": { "POSTGRES_PASSWORD": "dev" },
+      "volumes": [{ "name": "data", "target": "/var/lib/postgresql/data" }]
+    }
+  ]
+}
+```
+
+Every field, inheritance, volumes and seeding: [Templates](/docs/sidecars/templates).
+
+## 2. Ask the OS to start it
+
+```ts
+import { osSidecars } from '@aura/app-sdk/os-sidecars';
+
+const sc = osSidecars();   // reads OS_API_BASE, APP_INSTANCE_ID, AURA_INSTANCE_TOKEN
+const { created, sidecar } = await sc.spawn({ template: 'db', wait: { port: true } });
+
+sidecar.host;     // 'aura-com.example.notes--db', its DNS name on aura-net
+sidecar.port;     // 5432, from the template
+sidecar.state;    // 'running'
+created;          // true = started now, false = it was already running
+```
+
+What happens on the OS side, in order: the request is checked against the
+template and your permissions; the image is pulled if missing (up to 10
+minutes, the SDK waits up to 15); volume directories are created; `seed`
+runs if the template has one and it never ran; the container is created and
+started; if it exits within 400 ms the spawn fails with its last log lines;
+its mounts are applied; with `wait: { port: true }` the call returns only once
+the port accepts TCP (default 60 s, `wait.timeoutMs` to change).
+
+A request may change only a few things per call: `name` / `suffix`, `env`,
+`envInherit`, `command`, `mounts`, `image` (with `sidecars.anyImage`) and
+the `replace` / `takeover` / `wait` switches. Anything else answers 400.
+Change the template instead. Full list: [HTTP API & SDK](/docs/sidecars/api#spawn-request).
+
+## 3. Start it with your app
+
+The OS does **not** start sidecars by itself. A stopped, killed or crashed
+instance loses its sidecars, and the respawned instance starts with none. So
+ask for them every time your app starts. That is safe: a sidecar that already
+runs with the same spec is adopted, not restarted.
+
+In an Astro app, from the lifecycle hooks:
+
+```ts
+// src/pages/api/lifecycle/onStart.ts  (same in onCreate.ts)
+import { createLifecycleHandler } from '@aura/app-sdk';
+import { osSidecars } from '@aura/app-sdk/os-sidecars';
+
+export const POST = createLifecycleHandler('onStart', () => {
+  // Fire and forget: the first start may pull a big image, and the OS
+  // gives your app 60 s to become healthy.
+  void osSidecars().spawn({ template: 'db' }).catch((err) => console.error(err));
+});
+```
+
+Don't await the spawn in the hook. Let the code that uses the sidecar cope
+with "not up yet" (a 503, a retry, a status page).
+
+Prefer one object that knows all your services? `createSidecars` with
+`mode: 'os'` spawns every `services[]` entry by its name:
+
+```ts
+import { readFileSync } from 'node:fs';
+import { createSidecars } from '@aura/app-sdk/sidecars';
+
+const manifest = JSON.parse(readFileSync('app.manifest.json', 'utf8'));
+const host = createSidecars({
+  appId:      process.env.APP_ID,
+  instanceId: process.env.APP_INSTANCE_ID,
+  appPort:    Number(process.env.APP_PORT),
+  services:   manifest.services,
+  mode:       'os',
+});
+void host.ensureAll();          // in onCreate / onStart; idempotent
+await host.isRunning('db');     // for a status route
+await host.teardownAll();       // in onDestroy (optional, the OS reaps anyway)
+```
+
+For a raw runtime whose window *is* the sidecar's UI, `host.listen()` also
+serves the lifecycle contract and reverse-proxies the dashboard service. See
+[Bring-your-own-runtime apps](/docs/bring-your-own-runtime).
+
+## 4. Reach it
+
+From your app's server: `http://${sidecar.host}:${port}`. The browser cannot
+reach `aura-net`, so anything the frontend needs goes through a route of your
+app that forwards to the sidecar. The PocketBase template does exactly that
+in `src/pages/api/pb/[...path].ts`, and the frontend talks to the relative
+base `/api/pb`.
+
+## Adopt or recreate
+
+`spawn` compares a hash of the **resolved** spec (template plus everything
+the request changed) with the hash stored on the running container:
+
+| Situation | Result |
+|---|---|
+| Nothing of that name runs | created: 201, `created: true` |
+| Same spec, running | adopted: 200, `created: false`, nothing restarts |
+| Same spec, but exited | recreated |
+| Different spec (you edited the template, or passed other `env`/`command`/`mounts`) | recreated; with `replace: false` a 409 instead |
+| A container of that name your app runs itself (app-managed) | 409; `takeover: true` replaces it (only your own instance's) |
+
+The OS watches manifests, so an edited `services[]` entry takes effect on
+your next `spawn`. Recreating keeps volumes and the sidecar's own mount
+declarations; it does not re-run `seed`.
+
+## Dynamic sidecars
+
+One template can back any number of sidecars. Give each a different name:
+
+```ts
+// aura-<instanceId>--worker-<jobId>
+const { sidecar } = await sc.spawn({ template: 'worker', suffix: jobId, env: { JOB_ID: jobId } });
+
+const out = await sc.exec(sidecar.name, ['sh', '-c', 'run-job']);
+await sc.remove(sidecar.name);
+```
+
+- `suffix` gives `<template>-<suffix>`; `name` sets the full name. Pass one,
+  not both. Names match `^[a-z][a-z0-9-]{0,47}$`.
+- Volumes are per sidecar (`.sidecars/<name>/<volume>`), unless the template
+  marks a volume `"shared": true`, then every sidecar of that template uses
+  one directory.
+- Limit: 32 OS sidecars per instance (`AURA_SIDECAR_MAX_PER_INSTANCE`),
+  stopped ones included; the 33rd spawn answers 429.
+- `sc.list()` shows them all, `sc.get(name)` one (or `null`).
+
+## Sidecars that spawn sidecars
+
+A template with `inheritIdentity: true` gives its sidecar the OS URL, the
+ids and **its own** `AURA_INSTANCE_TOKEN`. Inside it, `osSidecars()` works
+unchanged. What it spawns comes from the same app's templates, is labelled
+with it as owner, and is deleted together with it (`sc.remove(parent)`
+removes the children first).

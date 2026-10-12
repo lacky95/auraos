@@ -5,18 +5,24 @@ description: Every aura command — the kubectl-style grammar, the short forms, 
 
 The `aura` CLI drives AuraOS from a terminal: apps, instances, sidecars,
 capabilities, mounts, ports, the event bus, sandbox shells. Source:
-`packages/aura-cli/src/` (`program.ts` builds the command tree,
-`commands/verbs.ts` the kubectl verbs, `lib/resources.ts` the resource types).
+`packages/aura-cli/src/` (`program.ts` builds the command tree and the main
+help, `commands/verbs.ts` the kubectl verbs, `lib/resources.ts` the resource
+types).
 
-`aura --help` prints one task-oriented list (Basics, Inspect, Lifecycle,
-Install & remove, Connect, Access, Ecosystem & dev, Settings) — every line is
-checked against the command tree by the CLI's tests. `aura <command> --help`
-shows the resources a verb accepts plus examples.
+This page follows `aura --help` section by section: **Basics, Inspect,
+Lifecycle, Install & remove, Connect, Access, Ecosystem & dev, Settings**.
+Every line of the main help is checked against the command tree by the CLI's
+tests, so it cannot drift. `aura <command> --help` shows the resources a verb
+accepts plus examples.
 
 ## The grammar in one minute
 
-Everyday work has **short forms**; everything else reads like kubectl —
-**`aura <verb> <resource> [name…]`**:
+```
+aura <command> [resource] [name...] [flags]
+```
+
+Everyday work has **short forms** (`ps`, `run`, `jump`, `status`, `info`);
+everything else reads like kubectl — **`aura <verb> <resource> [name…]`**:
 
 ```bash
 aura ps                                    # running instances
@@ -24,166 +30,246 @@ aura run com.aura.notepad                  # start an app
 aura jump com.aura.terminal                # shell into its sandbox
 aura get apps -o wide                      # any resource as a table, json, yaml or names
 aura get inst io.lakner.hermes sidecars    # the sidecars of one instance, with their IDs
-aura jump io.lakner.hermes --sidecar runtime
 aura describe inst com.aura.terminal       # everything about one object
 aura stop app com.aura.notepad
 aura api-resources                         # every resource type + its verbs
 ```
 
-Short names work wherever a resource is expected (`inst`, `sc`, `act`, …),
-and an instance can be named by its app id when exactly one instance of it is
-running.
+Short names work wherever a resource is expected (`app inst sc act cap svc
+mount port scope theme perm`). An instance can be named by its app id when
+exactly one instance of that app is running; with several, the CLI lists them
+and asks you to pick one.
 
-## Short forms
+## Basics
 
-| Command | Description | Key flags |
+| Command | What it does | Key flags |
 |---|---|---|
-| `aura ps` | docker-ps-style table of instances (INSTANCE, APP, STATE, PORT, ACTIVITIES, UPTIME). Same data as `aura get inst`. | `-w, --watch` |
-| `aura run <appId>` | Start an app; prints the new instance id. | — |
-| `aura jump [target]` (alias `j`) | Without a target: interactive picker. With an app id or instance id: straight into that sandbox. | `-s, --sidecar <id>`, `-m, --master`, `--no-apps`, `--no-services` |
-| `aura info` | Where am I? Layers (host / aura-shell / proot / container), OS, CPU, memory, namespaces, AuraOS env, mounts, tools. | `--json` |
-| `aura status` | AuraOS health summary: shell, apps, capabilities, services, paths. | — |
+| `aura ps` | Running instances, docker-ps-style (INSTANCE, APP, STATE, PORT, ACTIVITIES, UPTIME). Same data as `aura get inst`. | `-w, --watch` (re-render live on state changes) |
+| `aura run <app>` | Start an app; prints the new instance id. | — |
+| `aura jump [app\|inst]` (alias `j`) | Shell into an app or service sandbox (proot or container) in this terminal. **Without a target: interactive picker.** With an app id (one running instance) or instance id: straight in. | `--no-services`, `--no-apps` (picker filters), `-m, --master` (the `aura-shell` master container) |
+| `aura jump <app> --sidecar <name>` | Shell into a sidecar of the target (bash if the image has it, else sh). Without a target, `--sidecar` means a sidecar of the app you are in (`$APP_INSTANCE_ID`). | `-s, --sidecar <id>` (IDs from `aura get inst <id> sidecars`) |
+| `aura status` | Health summary: shell, apps, capabilities, services, paths. | — |
+| `aura info` | Where am I? Execution context: layers (host / aura-shell / proot / container), OS, CPU, memory, namespaces, AuraOS env, mounts, tools. | `--json` |
+| `aura dev new` | Start the create-new-app wizard (see [Ecosystem & dev](#ecosystem--dev) for its flags). | — |
 
-`aura jump --sidecar <id>` enters a sidecar of the target (bash if the image
-has it, else sh); without a target it means a sidecar of the app you are in.
-`aura jump -m` drops into the `aura-shell` master container. Jumping into a
-container needs the docker CLI and socket in the calling sandbox — the
-Terminal and the master shell have both.
-
-## Resource types
-
-| Resource | Short names | Verbs |
-|---|---|---|
-| `apps` | `app` | get, describe, run, start, stop, restart, delete, install, enable, disable, grant, revoke |
-| `instances` | `instance`, `inst` | get, describe, start, stop, restart, kill, pause, resume, open, exec, logs |
-| `sidecars` | `sidecar`, `sc` | get, describe, exec, logs, delete |
-| `activities` | `activity`, `act` | get, open, delete |
-| `capabilities` | `capability`, `caps`, `cap` | get, describe, install, delete, grant, revoke |
-| `services` | `service`, `svc` | get, describe, start, stop, restart, install, delete, logs |
-| `mounts` | `mount` | get, delete |
-| `ports` | `port` | get, delete |
-| `scopes` | `scope` | get |
-| `themes` | `theme` | get, set |
-| `permissions` | `permission`, `perms`, `perm` | get, grant, revoke |
-
-`aura api-resources` prints the same table from the CLI itself.
-
-## Resource verbs
-
-| Command | Description | Key flags |
-|---|---|---|
-| `aura get <res> [name]` | List as a table. A name narrows to one object. | `-o table\|wide\|json\|yaml\|name`, `-a, --app <appId>`, `-i, --instance <id>`, `-w, --watch`, `--no-headers` |
-| `aura get inst <id> sidecars` | The sidecars of one instance — the **ID** column is what `--sidecar` / `-c` take. | same as `get` |
-| `aura describe <res> <name>` | Everything about one object, as YAML (`-o json` for JSON). `describe inst` includes its sidecars and mounts. | `-o json`, `-i <instance>` (sidecars) |
-| `aura start app <appId…>` | Start a new instance of each app (same as `aura run`). | — |
-| `aura start inst <id…>` | Resume a paused instance; the id of a stopped single-instance app starts the app. | — |
-| `aura start svc <name…>` | Start a service detached; its output goes to `/data/aura/state/services/<name>.log`. | — |
-| `aura stop app\|inst\|svc <name…>` | Stop all instances of an app, one instance (graceful: `onPause` → `onStop` → `onDestroy`), or a service. | — |
-| `aura restart app <appId…>` | Stop all instances, start one fresh. | — |
-| `aura restart inst <id…>` | Stop the instance, start a fresh one of its app (a multi-instance app gets a new id). | — |
-| `aura restart svc <name…>` | Stop + start the service. | — |
-| `aura kill inst <id…>` | SIGKILL the sandbox; no lifecycle hooks. | — |
-| `aura pause\|resume inst <id…>` | Fire `onPause` / `onResume`. | — |
-| `aura delete <res> <name…>` (alias `rm`) | Remove an app from disk, close an activity, uninstall a service or capability, detach a mount, remove a port expose, delete an OS sidecar. | `-y`, `-i <instance>` (mounts, sidecars) |
-| `aura rm mount <id…>` | Without `-i` (and outside an app): finds the instance that has the mount; several → asks for `-i`; one → confirms first (`-y` skips, required without a TTY). | `-i`, `-y` |
-| `aura rm port <id…>` | Port ids from `aura get ports`; the owning instance is found the same way. The pair form `<ownerApp> <id>` still works. | `-y` |
-| `aura install app <path>` | Install an app from a local directory (`app.manifest.json` inside). | — |
-| `aura install cap [name…]` / `svc <name>` | Install capabilities into the shared toolchain (no names → picker of what isn't installed yet) / a service. | — |
-| `aura install sdk` | Pull every `@aura/*` package the cwd's `package.json` declares (in `auraDependencies`) from the local OCI registry. | `--quiet`, `--registry <url>`, `--cwd <path>` |
-| `aura enable\|disable app <appId…>` | Re-arm `autoStart`/`warmPool` and show in dock + launcher / stop every instance and hide it. | — |
-| `aura open inst <instance>` | Open a new window (activity) on a running instance. (`open act` works too.) | `-d, --data '<json>'` |
-| `aura exec inst <id> [-- cmd…]` | Interactive shell in the sandbox, or run one command after `--`. Exit codes pass through. | `-c, --container <sidecar>` — a sidecar of the instance instead |
-| `aura logs inst <id> -c <sidecar>` | A sidecar's logs. Inside the app that owns an OS sidecar the OS serves them; elsewhere `docker logs`. | `-f, --follow`, `--tail <n>` |
-| `aura logs svc <name>` | A service's output since its last start. | `-f, --follow`, `--tail <n>` |
-| `aura grant perm <appId> [permission…]` | Add manifest permissions; takes effect immediately. No permissions → picker (unchecking revokes). | — |
-| `aura grant cap <appId> [cap…]` | Add to the app's `tools[]` and hot-refresh running instances. `'*'` grants all, `'#'` all-except. No names → picker. | `-i, --interactive` |
-| `aura revoke perm\|cap <appId> <name…>` | The opposite of `grant`. | — |
-| `aura get perms [appId]` | Declared permissions per app. | — |
-| `aura set theme <id>` | Set the active theme for a tone slot; live update across the shell and apps. | `--tone dark\|light` |
-| `aura api-resources` | Resource types, short names, verbs. | — |
-
-Examples:
+Jumping into a container sandbox or sidecar needs the docker CLI and socket in
+the calling sandbox — the Terminal app and the master shell have both.
 
 ```bash
-aura get inst -a com.aura.terminal -o name     # inst/com.aura.terminal-13 …
-aura get sc -a io.lakner.hermes -o wide        # + CONTAINER, TEMPLATE
-aura get mounts -i com.aura.terminal           # app + its OS sidecars' mounts
-aura describe sc runtime -i io.lakner.hermes
-aura exec inst io.lakner.hermes -c runtime -- hermes --version
-aura rm mount com.example.hello -i com.aura.terminal
-aura rm port into-5173                         # ids from: aura get ports
-aura restart inst com.aura.terminal-13
-aura logs svc sshd -f
-aura grant perm com.example.app sidecars.spawn
+aura jump                                     # picker over running apps + services
+aura jump io.lakner.hermes --sidecar runtime  # a sidecar of hermes
+aura jump --sidecar db                        # a sidecar of the app you are in
+aura jump -m                                  # the aura-shell master container
 ```
+
+## Inspect
+
+| Command | What it does | Key flags |
+|---|---|---|
+| `aura get apps [name]` | Installed apps + instance count. | `-o`, `-w`, `--no-headers` |
+| `aura get inst [name]` | Running instances. | `-a, --app <appId>`, `-o`, `-w` |
+| `aura get inst <name> sidecars` | Sidecars of one instance — the **ID** column is what `--sidecar` / `-c` take. | `-o` |
+| `aura get sidecars [name]` | All sidecars, with MANAGED `os` or `app` (see below). | `-a <appId>`, `-i <instance>`, `-o wide` (+ CONTAINER, TEMPLATE), `-w` |
+| `aura get act [name]` | Open windows (activities) of running instances. | `-a`, `-i`, `-w` |
+| `aura get caps [name]` | Shareable CLI capabilities: source, installed, how many apps declare them. | `-o` |
+| `aura get svc [name]` | Services on the master (sshd, code-server …). | `-o` |
+| `aura get mounts [name]` | Cross-app mounts (INSTANCE, TARGET, KIND, MODE, PATH, ORIGIN). | `-a`, `-i <instance>` |
+| `aura get ports [name]` | Port exposes, app-to-app or host (OWNER, ID, KIND, SOURCE, LISTEN, STICKY). | `-a`, `-i` |
+| `aura get scopes [name]` | Install scopes (system / global / user). | `-o` |
+| `aura get themes [name]` | Theme presets; ACTIVE marks the dark/light slot in use. | `-o` |
+| `aura get perms [app]` | Declared manifest permissions per app. | `-o` |
+| `aura describe <resource> <name>` | Full YAML of one resource (`app`, `inst`, `sc`, `cap`, `svc`). `describe inst` includes its sidecars and mounts. | `-o json`, `-i, --instance <id>` (the instance a sidecar belongs to; default `$APP_INSTANCE_ID`) |
+| `aura logs inst <name>` | Output of the instance itself (`docker logs` of its container; a PRoot instance's output is only in the shell log). | `-f, --follow`, `--tail <n>` |
+| `aura logs inst <name> -c <sidecar>` | Logs of an instance sidecar. Inside the app that owns an OS sidecar the CLI reads them through the OS API (no docker needed); everywhere else it runs `docker logs`. | `-c, --container <sidecar>`, `-f, --follow`, `--tail <n>` |
+| `aura logs svc <name>` | Logs of a service — reads `/data/aura/state/services/<name>.log` (default: last 100 lines). | `-f, --follow`, `--tail <n>` |
+| `aura events` | Live stream of OS state changes (the OsEventBus SSE stream). | `-f, --filter <pattern>` — an exact type or a trailing `*`: `app:*`, `theme:*`, `activity:opened` |
+
+Output for `get`: `-o wide | json | yaml | name` (see [Output formats](#output-formats)).
 
 ### Sidecars from the CLI
 
 `aura get sc` lists both kinds: **MANAGED `os`** sidecars the OS started for
-an app ([Sidecars](/docs/sidecars)) and **`app`** sidecars an app runs itself.
-The ID is the sidecar name (or the container name for raw containers without
-an `aura.service` label). `aura delete sc <id>` only applies to OS sidecars
-and needs that app's token — run it inside the app (`aura jump <app>` first);
-app-managed sidecars belong to their app.
+an app from its manifest (see [Sidecars](/docs/sidecars)) and **`app`**
+sidecars an app runs itself. The ID is the sidecar name (or the container name
+for raw containers without an `aura.service` label).
 
-## Tools
+```bash
+aura get inst -a com.aura.terminal -o name     # inst/com.aura.terminal-13 …
+aura get inst io.lakner.hermes sidecars        # IDs for --sidecar / -c
+aura describe sc runtime -i io.lakner.hermes
+aura logs inst io.lakner.hermes -c runtime --tail 100 -f
+aura events -f 'app:*'
+```
 
-These keep their own subcommands.
+## Lifecycle
+
+| Command | What it does | Key flags |
+|---|---|---|
+| `aura start app <app...>` | Start a new instance of each app (same as `aura run`). | — |
+| `aura start inst <inst...>` | **Resumes a paused instance.** An already running one is left alone; the id of a stopped single-instance app (whose instance id is the app id) starts the app. Stopped instances of multi-instance apps are gone — use `aura run <app>`. | — |
+| `aura start svc <svc...>` | Start a service detached; its output goes to `/data/aura/state/services/<name>.log`. | — |
+| `aura stop app <app...>` | Stop all instances of an app. | — |
+| `aura stop inst <inst...>` | Stop single instances (graceful: `onPause` → `onStop` → `onDestroy`). | — |
+| `aura stop svc <svc...>` | Stop services. | — |
+| `aura restart app <app...>` | Stop all instances, start one fresh. | — |
+| `aura restart inst <inst...>` | Stop the instance and start a fresh one of its app — **a multi-instance app gets a new instance id**. | — |
+| `aura restart svc <svc...>` | Stop + start the service. | — |
+| `aura pause inst <inst...>` | Pause instances (fires `onPause`). | — |
+| `aura resume inst <inst...>` | Resume paused instances (fires `onResume`). | — |
+| `aura kill inst <inst...>` | Force-kill: SIGKILL the sandbox, no lifecycle hooks. | — |
+| `aura enable app <app...>` | Re-arm `autoStart`/`warmPool`, show in dock + launcher. | — |
+| `aura disable app <app...>` | Stop all instances, hide from dock + launcher. | — |
+
+```bash
+aura restart inst com.aura.terminal-13    # stop it, start a fresh instance of its app
+aura pause inst com.aura.browser-2
+aura start inst com.aura.browser-2        # resumes it (same as aura resume inst)
+aura restart svc sshd
+```
+
+## Install & remove
+
+| Command | What it does | Key flags |
+|---|---|---|
+| `aura install app <dir>` | Install an app from a local directory (`app.manifest.json` inside). From a registry or git: `aura nexus app install`. | — |
+| `aura install cap [names...]` | Install capabilities into the shared toolchain (apt/npm/curl per registry entry). **No names → picker** of what is not installed yet (needs a TTY). | — |
+| `aura install svc <name>` | Install a service. | — |
+| `aura install sdk` | Pull every `@aura/*` package the cwd's `package.json` declares (in `auraDependencies`) from the local OCI registry. | `--quiet`, `--registry <url>`, `--cwd <path>` |
+| `aura rm app <app...>` | Delete apps (asks first). | `-y, --yes` |
+| `aura rm act <act...>` | Close windows (activity ids from `aura get act`). | — |
+| `aura rm svc <svc...>` | Uninstall services. | — |
+| `aura rm cap <cap...>` | Uninstall capabilities and strip them from every manifest that declares them. | — |
+| `aura rm mount <mount...>` | Detach mounts (a mount id or the mounted app id; `<appId>:data` for just the data mount). Inside an app it targets that app. Elsewhere, without `-i`, it **finds the instance that has the mount**: several → asks you for `-i <inst>`; exactly one → confirms first (`-y` skips the prompt and is required without a TTY). | `-i, --instance <id>`, `-y` |
+| `aura rm port <port...>` | Remove port exposes (ids from `aura get ports`). The owning instance is found the same way as for mounts (several → name the owner: `aura rm port <ownerApp> <id>`; one → confirm, or `-y`). The pair form `<ownerApp> <portId>` still works. | `-y` |
+| `aura rm sc <sidecar...>` | Delete OS-managed sidecars (and the sidecars they spawned). Needs the app's token — run it inside the app. | `-i <instance>` |
+
+`delete` is the long form of `rm` (`aura delete app …` = `aura rm app …`). It
+also removes an **OS sidecar**: `aura rm sc <id>` applies only to sidecars
+with MANAGED `os` and needs that app's token, so it only works **inside the
+app** (`aura jump <app>` first; `-i <instance>` defaults to
+`$APP_INSTANCE_ID`). App-managed sidecars belong to their app — stop them
+there, or stop the instance.
+
+```bash
+aura install cap ripgrep jq
+aura install cap                                  # picker: what is not installed yet
+aura rm mount com.example.hello                   # the instance that has it (-i when several do)
+aura rm mount com.example.hello -i com.aura.terminal
+aura rm port into-5173 -y                         # ids from: aura get ports
+```
+
+## Connect
+
+| Command | What it does | Key flags |
+|---|---|---|
+| `aura exec inst <name>` | Interactive shell in the instance's sandbox. | — |
+| `aura exec inst <name> -c <sidecar>` | Shell into a sidecar of the instance. | `-c, --container <sidecar>` |
+| `aura exec inst <name> -- <cmd...>` | Run one command (in the sandbox, or in the sidecar with `-c`). Exit codes pass through. | `-c` |
+| `aura open inst <name>` | Open a new window (activity) on a running instance. (`open act` works too.) | `-d, --data '<json>'` — passed to the app's `onActivityCreate` hook |
+| `aura mount ...` | Mount another app's files into this app's container, live and without a restart. Read-only by default. Container sandboxes only. | see below |
+| `aura port ...` | Expose an app's TCP port onto another app's loopback, or publish it on the host. | see below |
+| `aura data ...` | Query / write / watch app content providers via the OS data router. | see below |
+
+```bash
+aura exec inst com.aura.terminal -- ls -la
+aura exec inst io.lakner.hermes -c runtime -- hermes --version
+aura open inst com.aura.notepad -d '{"view":"x"}'
+```
 
 ### Mounts — `aura mount …`
 
-| Command | Description | Key flags |
+See [Cross-App Mounts](/docs/cross-app-mounts). `--instance` defaults to
+`$APP_INSTANCE_ID`.
+
+| Command | What it does | Key flags |
 |---|---|---|
 | `aura mount` | Wizard: target app → instance → the set of apps mounted into it. | — |
-| `aura mount ls` | What is mounted into an instance, its OS sidecars' mounts, and the OS context volumes. | `--instance <id>` |
-| `aura mount add [appId…]` | Mount apps (read-only by default). No ids → picker. | `--wr`, `--data`, `--instance <id>` |
-| `aura mount rm [appId…]` | Detach; `<appId>:data` drops just the data mount. | `--all`, `--instance <id>` |
+| `aura mount ls` | What is mounted into an instance (incl. its OS sidecars' mounts and the OS context volumes). | `--instance <id>` |
+| `aura mount add [appId...]` | Mount one or more apps into the target instance. No ids → picker over every installed app (system/global/user — switch scope with `m`). | `--wr` (write), `--data` (the target's data dir instead of its source), `--instance <id>` |
+| `aura mount rm [appId...]` | Detach. A bare app id detaches both its source and data mounts; `<appId>:data` just the data one. No args → picker. | `--all`, `--instance <id>` |
 
-`--instance` defaults to `$APP_INSTANCE_ID`. See [Cross-App Mounts](/docs/cross-app-mounts).
+```bash
+aura mount add com.aura.docs                   # read-only, at /mnt/aura/com.aura.docs
+aura mount add com.example.notes --data --wr   # its data dir, writable
+aura mount ls --instance io.lakner.hermes
+```
 
 ### Ports — `aura port …`
 
-| Command | Description | Key flags |
+| Command | What it does | Key flags |
 |---|---|---|
-| `aura port ls [app]` | Port exposes (OWNER, ID, KIND, SOURCE, LISTEN, STICKY). | — |
-| `aura port expose <srcApp:port> --into <targetApp>` | Make a port appear on another app's `127.0.0.1`. | `--port <n>`, `--sticky` |
-| `aura port expose <srcApp:port> --host [addr]` | Publish on the host (default bind `127.0.0.1`). | `--host-port <n>`, `--sticky` |
-| `aura port rm <ownerApp> <portId>` | Remove an expose. | — |
+| `aura port ls [app]` | Port exposes, optionally filtered to one app (same table as `aura get ports`). | — |
+| `aura port expose <sourceApp:port> --into <targetApp>` | Make the port appear on the target app's `127.0.0.1`. | `--port <n>` (listen port inside the target; default = source port), `--sticky` |
+| `aura port expose <sourceApp:port> --host [addr]` | Publish on the host (default bind `127.0.0.1`). | `--host-port <n>` (default = source port), `--sticky` (re-established when the owner restarts) |
+| `aura port rm <ownerApp> <portId>` | Remove an expose (portId from `aura port ls`, e.g. `into-5173`). | — |
+
+```bash
+aura port expose com.example.api:5173 --into com.aura.browser
+aura port expose at.oebb.opsconsole:5173 --host --sticky
+```
+
+### Content providers — `aura data …`
+
+| Command | What it does | Key flags |
+|---|---|---|
+| `aura data query <authority>/<path>` | GET from a provider; print the JSON response. | — |
+| `aura data write <authority>/<path> [body]` | Write to a provider; body `-` reads stdin. | `-m, --method PUT\|POST\|PATCH\|DELETE` (default PUT) |
+| `aura data watch <authority>/<path>` | Follow an SSE-capable provider endpoint (adds `?watch=1` if missing). | — |
+
+## Access
+
+| Command | What it does | Key flags |
+|---|---|---|
+| `aura grant perms <app> [names...]` | Add manifest permissions; takes effect immediately. No names → picker (unchecking revokes). No app either → picks the app too. | — |
+| `aura grant caps <app> [names...]` | Add capabilities to the app's `tools[]` and hot-refresh running instances (no respawn). `'*'` grants all, `'#'` all-except. No names → picker showing what is already granted. | `-i, --interactive` (picker even when names are given) |
+| `aura revoke perms <app> <names...>` | Remove manifest permissions. | — |
+| `aura revoke caps <app> <names...>` | Remove capabilities from the app's manifest and restart its running instances. | — |
+| `aura cap ...` | Manage the capability registry (below). | — |
+
+`install cap` adds a tool to the OS-wide toolchain; `grant cap` exposes it
+inside one app's sandbox.
 
 ### Capabilities — `aura cap …`
 
-`cap install` adds a tool to the OS-wide toolchain; `grant cap` exposes it
-inside one app's sandbox (`/aura/my-tools`).
-
-| Command | Description | Key flags |
+| Command | What it does | Key flags |
 |---|---|---|
-| `aura cap list` | Registry inventory (same as `aura get caps`). | `--installed`, `--available` |
-| `aura cap info <name>` | Registry entry + install status + declaring apps. | — |
-| `aura cap install <name…>` | Install (apt/npm/curl per registry entry). | — |
-| `aura cap remove <name>` | Uninstall and strip from every manifest. | — |
-| `aura cap grant [appId] [name…]` / `revoke <appId> <name…>` | Same as `aura grant/revoke cap`. | `-i` |
-| `aura cap doctor [name…]` | Can each installed capability actually RUN in each sandbox? | `--fix`, `--no-probe`, `--json` |
-| `aura cap registry show\|add\|remove` | Inspect or edit the capability registry YAML. | `--source`, `--package`, `--binary`, `--url` |
+| `aura cap list` (`ls`) | Registry inventory with install status and declaring apps (same as `aura get caps`). | `--installed`, `--available` |
+| `aura cap info <name>` | Registry entry + install status + declaring apps (same as `aura describe cap`). | — |
+| `aura cap install <name...>` | Install into the shared toolchain (same as `aura install cap`). | — |
+| `aura cap remove <name>` | Uninstall and strip from every manifest (same as `aura rm cap`). | — |
+| `aura cap grant [appId] [name...]` | Same as `aura grant cap`. | `-i, --interactive` |
+| `aura cap revoke <appId> <name...>` | Same as `aura revoke cap`. | — |
+| `aura cap doctor [name...]` | Can each installed capability actually RUN in each sandbox (do its shared libraries travel with it)? | `--fix` (re-stage missing libs, hot-refresh apps), `--no-probe`, `--json` |
+| `aura cap registry show\|add\|remove` | Inspect or edit the capability registry YAML. | `add`: `--source apt\|npm\|curl\|builtin`, `--package`, `--binary`, `--url` |
+
+```bash
+aura grant perms com.example.app sidecars.spawn
+aura grant caps com.example.hello ripgrep jq
+aura revoke caps com.example.hello jq
+aura cap doctor --fix
+```
+
+## Ecosystem & dev
 
 ### App store — `aura nexus …`
 
-Publish, install, update apps and manage registries; every command posts to
-the shell's `/api/nexus/*` endpoints. See [Nexus](./nexus) and
-[Publish an App](./publish-an-app). (The old flat spellings —
+Find, install, update and publish apps; every command posts to the shell's
+`/api/nexus/*` endpoints. See [Nexus](/docs/nexus) and
+[Publish an App](/docs/publish-an-app). (The old flat spellings —
 `aura nexus install`, `aura nexus publish`, … — still work, hidden.)
 
-| Command | Description | Key flags |
+| Command | What it does | Key flags |
 |---|---|---|
-| `aura nexus app publish [<path>]` | Push the app to a registry (OCI) or git repo. Bare + TTY = wizard. | `--to`, `--kind oci\|git`, `--tag`, `--channel`, `--branch`, `-y`, `--submit` |
-| `aura nexus app submit [<path>]` | Open a store PR for a published app. | `--from`, `--tag`, `--channel`, `--store-repo`, `--dry-run` |
-| `aura nexus app install <ref>` | Resolve, fetch, validate, install. Pauses on new-permission diffs unless `-y`. | `-y`, `--channel`, `--scope global\|user` |
-| `aura nexus app update [<id>\|--all]` | Reinstall if the stored ref moved. | `-y`, `--all` |
-| `aura nexus app uninstall <id>` | Remove; `--purge` also wipes its data. | `--purge` |
-| `aura nexus app list` / `info <ref>` | Installed apps / dry-run preview of a ref. | `--source` |
-| `aura nexus app screenshots list\|add\|replace\|remove` | Manage store screenshots. | `--store-repo`, `--dry-run` |
-| `aura nexus store login\|status` | Store GitHub token / show the store target. | — |
-| `aura nexus registry add\|list\|remove` | Manage sources. | `--kind`, `--priority`, `--mirror`, `--ref` |
-| `aura nexus search [<q>]` | Search the aggregated catalog. | `--category`, `--refresh` |
+| `aura nexus search [query]` | Search the aggregated catalog by id, name, description or tag. | `--category <slug>`, `--refresh` |
+| `aura nexus app install <ref>` | Resolve, fetch, validate, install. Pauses on new-permission diffs unless `-y`. | `-y`, `--channel <name>`, `--scope global\|user` |
+| `aura nexus app update [id]` | Re-resolve an installed app and reinstall if it moved. | `-y`, `--all` |
+| `aura nexus app uninstall <id>` | Remove; per-app data is kept unless `--purge`. | `--purge` |
+| `aura nexus app list` / `info <ref>` | Installed apps + their Nexus source / dry-run preview of a ref (manifest + permission diff). | `--source git\|oci\|index\|local` |
+| `aura nexus app publish [path]` | Push the app to an OCI registry or git repo. Bare + TTY = wizard. | `--to`, `--kind oci\|git`, `--tag`, `--channel`, `--branch`, `-y`, `--submit` |
+| `aura nexus app submit [path]` | Open a store PR for an already-published app. | `--from`, `--kind`, `--tag`, `--channel`, `--store-repo`, `--dry-run` |
+| `aura nexus app screenshots list\|add\|replace\|remove` | Manage the screenshots of a store listing. | — |
+| `aura nexus store login\|status` | Store a GitHub token for submissions / show the store target. | — |
+| `aura nexus registry list\|add\|remove` | Manage the sources Nexus aggregates (OCI registries + git catalogs). | `add`: `--kind oci\|git-index\|git-app`, `--priority`, `--mirror`, `--ref` |
 
 Ref shapes `install` / `info` accept:
 
@@ -196,64 +282,126 @@ Ref shapes `install` / `info` accept:
 
 ### Dev tools — `aura dev …`
 
-| Command | Description | Key flags |
+| Command | What it does | Key flags |
 |---|---|---|
-| `aura dev new [appId]` | Scaffold a new app. Wizard if `appId` is omitted. | `--name`, `--icon`, `--description`, `--shape`, `--instance-mode`, `--sandbox`, `--tools`, `--scope`, `--force`, `--non-interactive` |
-| `aura dev clone [source] [target]` | Clone an app (any scope) into `user` or `global`. | `--scope`, `--name`, `--no-rewrite-ids`, `--with-data`, `--dry-run`, `--json`, … |
-| `aura dev validate [path]` | Zod-validate one manifest, or all with `--all`. | `--all` |
-| `aura dev clean-manifest [path]` | Strip fields equal to schema defaults. | `--all`, `--dry-run` |
-| `aura dev standalone <appId>` | Run an app with `astro dev`, outside the shell. | — |
+| `aura dev new [appId]` | Scaffold a new app. Wizard if `appId` is omitted. | `--name`, `--icon`, `--description`, `--shape activity\|activity-bg\|service`, `--instance-mode single\|multi`, `--sandbox proot\|container`, `--tools`, `--scope user\|global`, `--force`, `--non-interactive` |
+| `aura dev clone [source] [target]` | Clone any app (incl. system apps) into `user` or `global` scope. Wizard if ids are omitted. | `--scope`, `--source-scope`, `--name`, `--no-rewrite-ids`, `--exclude-git`, `--with-data`, `--force`, `--dry-run`, `--json`, … |
+| `aura dev validate [path]` | Validate one manifest against the schema, or all with `--all`. | `--all` |
+| `aura dev clean-manifest [path]` | Strip manifest fields equal to the schema default. | `--all`, `--dry-run` |
+| `aura dev standalone <appId>` | Run an app directly with `astro dev` (no sandbox, no shell wrapper) for fast UI iteration. | — |
 
-### Event bus — `aura events`
+```bash
+aura nexus search notes
+aura nexus app install github.com/u/notes#v1.2.0 --scope user
+aura dev new com.example.hello --name Hello --sandbox container --non-interactive
+aura dev validate --all
+```
 
-`aura events [-f <pattern>]` follows the OS event bus. The filter takes an
-exact type or a trailing `*` (`app:*`).
+## Settings
 
-### Content providers — `aura data …`
-
-| Command | Description | Key flags |
+| Command | What it does | Key flags |
 |---|---|---|
-| `aura data query <authority>/<path>` | GET from a provider; print JSON. | — |
-| `aura data write <authority>/<path> [body]` | Write; body `-` reads stdin. | `-m, --method PUT\|POST\|DELETE` |
-| `aura data watch <authority>/<path>` | Follow an SSE provider. | — |
+| `aura set theme <name>` | Switch the active theme for a tone slot; updates the shell and apps live. Theme ids from `aura get themes`. | `--tone dark\|light` (default `dark`) |
+| `aura completion bash\|zsh` | Print a completion script: commands, resource types, and live names (apps, instances). | — |
+| `aura api-resources` | All resource types, short names, verbs. | — |
+
+```bash
+aura set theme paper --tone light
+eval "$(aura completion bash)"        # add to ~/.bashrc
+```
+
+## Resource types
+
+`aura api-resources` prints this table from the CLI itself:
+
+| Resource | Short names | Verbs | What it is |
+|---|---|---|---|
+| `apps` | `app` | get, describe, run, start, stop, restart, delete, install, enable, disable | Installed apps (manifest + instance count) |
+| `instances` | `instance`, `inst` | get, describe, start, stop, restart, kill, pause, resume, open, exec, logs | Running app instances (sandboxes); subresource: sidecars |
+| `sidecars` | `sidecar`, `sc` | get, describe, delete | Containers an instance runs next to itself (databases, agents, …) |
+| `activities` | `activity`, `act` | get, open, delete | Open UI screens (windows) of running instances |
+| `capabilities` | `capability`, `caps`, `cap` | get, describe, install, delete, grant, revoke | Shareable CLI tools from the registry (granted per app via `tools[]`) |
+| `services` | `service`, `svc` | get, describe, start, stop, restart, install, delete, logs | Long-running daemons on the master (sshd, code-server, …) |
+| `mounts` | `mount` | get, delete | Cross-app mounts into a container instance (`aura mount`) |
+| `ports` | `port` | get, delete | Port exposes into another app or onto the host (`aura port`) |
+| `scopes` | `scope` | get | App installation scopes (system / global / user) |
+| `themes` | `theme` | get, set | Theme presets; ACTIVE marks the dark/light slot in use |
+| `permissions` | `permission`, `perms`, `perm` | get, grant, revoke | Apps' declared manifest permissions |
+
+Sidecars are reached through their instance: `aura exec inst <id> -c <sc>`
+and `aura logs inst <id> -c <sc>`.
+
+## Output formats
+
+`aura get` prints a table by default; `-o` changes that:
+
+| `-o` | Output |
+|---|---|
+| `table` (default) | Aligned columns; `--no-headers` drops the header row. |
+| `wide` | The table plus extra columns (e.g. CONTAINER, TEMPLATE for sidecars). |
+| `json` / `yaml` | The full objects, for scripts. |
+| `name` | One `<type>/<name>` per line (`inst/com.aura.terminal-13`). |
+
+`-w, --watch` re-renders the table on every state change (apps, inst, act,
+sc; table/wide only). `aura describe` prints YAML, or JSON with `-o json`.
+
+## Flags and global options
+
+| Option | Effect |
+|---|---|
+| `--shell-url <url>` | Override the shell URL (default `$OS_API_BASE`, else `http://127.0.0.1:3000`). |
+| `-V, --version` | CLI version. |
+| `-h, --help` | The main help, or one command's usage with `aura <command> --help`. |
+
+Extra positional arguments are an error, not silently ignored.
+
+## Completion
+
+```bash
+eval "$(aura completion bash)"     # or: eval "$(aura completion zsh)"
+```
+
+Completes commands, resource types per verb, `sidecars` after
+`aura get inst <id>`, the subcommands of the tool groups, and live names —
+apps and instances are fetched from the shell (2 s timeout).
 
 ## The previous grammar
 
-Before the kubectl grammar, resources had command groups. They **still work**
-— hidden from `--help`, and a human (TTY) gets a one-line hint naming the new
-form. Scripts are unaffected; `aura sdk install` (run on every app boot) never
-prints a hint.
+Before the kubectl grammar, resources had their own command groups. They
+**still work** — hidden from `--help`. When a human runs one (stderr is a
+TTY), a single dim line names the new form:
+
+```
+deprecated: `aura app list` → use `aura get apps`
+```
+
+Scripts (no TTY) never see the hint, and `aura sdk install` (run on every app
+boot) never prints one. Set `AURA_DEPRECATION_HINTS=0` to silence the hints
+everywhere.
 
 | Before | Now |
 |---|---|
-| `aura app list` / `info` / `start` / `stop` / `restart` | `aura get apps` / `describe app` / `run` / `stop app` / `restart app` |
-| `aura app install` / `remove` / `enable` / `disable` | `aura install app` / `delete app` / `enable app` / `disable app` |
-| `aura app perm ls` / `grant` / `revoke` | `aura get perms` / `grant perm` / `revoke perm` |
-| `aura inst list` / `info` / `stop` / `kill` / `pause` / `resume` | `aura get inst` / `describe inst` / `stop inst` / `kill inst` / `pause inst` / `resume inst` |
+| `aura app list` / `info` | `aura get apps` / `aura describe app <appId>` |
+| `aura app start` / `stop` / `restart` | `aura run <appId>` / `aura stop app` / `aura restart app` |
+| `aura app install` / `remove` | `aura install app <path>` / `aura rm app` |
+| `aura app enable` / `disable` | `aura enable app` / `aura disable app` |
+| `aura app perm ls` / `grant` / `revoke` | `aura get perms` / `aura grant perm` / `aura revoke perm` |
+| `aura inst list` / `info` | `aura get inst [-a <appId>]` / `aura describe inst` |
+| `aura inst stop` / `kill` / `pause` / `resume` | `aura stop inst` / `kill inst` / `pause inst` / `resume inst` |
 | `aura inst shell <id> [-c cmd]` | `aura exec inst <id> [-- cmd]` or `aura jump <id>` |
-| `aura activity list` / `open` / `close` | `aura get act` / `open inst` / `rm act` |
-| `aura service list` / `install` / `start` / `stop` / `status` / `logs` / `uninstall` | `aura get svc` / `install svc` / `start svc` / `stop svc` / `describe svc` / `logs svc` / `rm svc` |
-| `aura theme list` / `get` / `set` | `aura get themes` / `set theme` |
+| `aura inst logs` | `aura logs inst <id> [-f]` |
+| `aura activity list` / `open` / `close` | `aura get act` / `aura open inst` / `aura rm act` |
+| `aura service list` / `install` / `uninstall` | `aura get svc` / `aura install svc` / `aura rm svc` |
+| `aura service start` / `stop` / `status` / `logs` | `aura start svc` / `stop svc` / `describe svc` / `logs svc` |
+| `aura theme list` / `get` / `set` | `aura get themes` / `aura set theme <id> [--tone light\|dark]` |
 | `aura scope list` | `aura get scopes` |
 | `aura sdk install` | `aura install sdk` |
 | `aura whereami` | `aura info` |
-
-Set `AURA_DEPRECATION_HINTS=0` to silence the hints.
-
-## Built-in and global options
-
-| Command / option | Effect |
-|---|---|
-| `aura completion bash\|zsh` | Completion script: commands, resource types, and live names (apps, instances). `eval "$(aura completion bash)"`. |
-| `--shell-url <url>` | Override the shell URL (default `$OS_API_BASE`, else `http://127.0.0.1:3000`). |
-| `-V, --version` | CLI version. |
-| `-h, --help` | Overview, or one command's usage with `aura <command> --help`. |
-
-Extra positional arguments are an error, not silently ignored.
 
 ## Where to read next
 
 - [Develop an App](/docs/develop-an-app) — `aura dev new` walkthrough.
 - [Develop in the App Sandbox](/docs/develop-in-sandbox) — the `aura jump` + Claude Code workflow.
 - [Sidecars](/docs/sidecars) — what `aura get sc` lists and how apps start them.
+- [Cross-App Mounts](/docs/cross-app-mounts) — what `aura mount` does under the hood.
 - [SDK Reference](/docs/sdk-reference) — the runtime APIs the CLI drives from the outside.

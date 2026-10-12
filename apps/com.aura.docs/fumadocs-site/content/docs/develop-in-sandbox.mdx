@@ -33,6 +33,10 @@ aura jump com.example.hello --sidecar db   # into one of its sidecars
 aura jump --master           # straight into the aura-shell master container
 ```
 
+Sidecar ids come from `aura get inst com.example.hello sidecars` (more in
+[Sidecars](/docs/sidecars)). For a one-off command without an interactive
+shell, use `aura exec inst com.example.hello -- <cmd>`.
+
 Inside the sandbox:
 
 ```
@@ -57,7 +61,7 @@ the manifest, grant it without a respawn:
 
 ```bash
 # from outside the sandbox, or from another terminal:
-aura cap grant com.example.hello claude
+aura grant caps com.example.hello claude
 ```
 
 The AppManager re-provisions the allowlist dir live; back inside the
@@ -95,24 +99,27 @@ aura restart app com.example.hello
 
 ## Tail logs without leaving
 
-The app's stdout/stderr are mirrored into the shell's log with an
-`[<instanceId>]` prefix; for a container app, docker has them too:
+From another terminal (or a second Terminal window), read the app's
+stdout/stderr by instance id:
 
 ```bash
-docker logs -f aura-com.example.hello            # follow live
-docker logs aura-com.example.hello-2 2>&1 | grep ERR
-aura logs inst com.example.hello -c db --tail 100  # one of its sidecars
+aura logs inst com.example.hello -f                    # follow live
+aura logs inst com.example.hello-2 --tail 200 | grep ERR   # instance 2 of a multi app
+aura logs inst com.example.hello -c db --tail 100 -f   # one of its sidecars
 ```
 
-(`aura logs inst <id>` without `-c` is not implemented yet.)
+For a container-sandbox app that is the container's output; for a PRoot
+app it is the shell log's lines prefixed with `[<instanceId>]`. Sidecars
+are covered in [Sidecars](/docs/sidecars).
 
 ## Validate manifest changes
 
 After editing `app.manifest.json`:
 
 ```bash
-aura dev validate apps/com.example.hello       # schema check
-aura dev clean-manifest apps/com.example.hello # strip default-valued fields
+aura dev validate .                            # schema check (in the sandbox, . is the app dir)
+aura dev clean-manifest .                      # strip default-valued fields
+aura dev validate --all                        # every app, from anywhere
 ```
 
 `validate` runs the Zod schema — same checks the AppRegistry uses at
@@ -122,15 +129,22 @@ actually differs.
 
 ## Where to look when stuck
 
-- **App not loaded after a manifest edit?** Restart the shell — the
-  AppRegistry reads manifests once at boot. `docker restart aura-shell`.
+- **Manifest edit not taking effect?** The AppRegistry watches
+  `app.manifest.json` and reloads it on save, but a manifest that fails
+  the schema is skipped — run `aura dev validate <path>` (or `--all`).
+  Most fields only apply at spawn, so restart running instances with
+  `aura restart app <id>`.
 - **`aura jump` says "no running instances"?** Start the app first
-  (`aura run <id>`). `aura jump` only lists live sandboxes.
-- **Tools missing inside the sandbox?** Confirm they're in
-  `manifest.tools` AND installed in `/aura/all-tools` on the host
-  (`aura cap install <tool>` adds new ones to the registry).
+  (`aura run <id>`). `aura jump` only lists live sandboxes; `aura ps`
+  shows what's running.
+- **Tools missing inside the sandbox?** `aura get caps` shows which
+  capabilities are installed and how many apps use them.
+  `aura install cap <tool>` installs one into the shared toolchain;
+  `aura grant caps <id> <tool>` adds it to the app's `manifest.tools`.
 
 ## What to read next
 
 - [Core Concepts](/docs/core-concepts) — how the sandbox + proxy +
   lifecycle fit together.
+- [CLI Reference](/docs/cli-reference) — `jump`, `exec`, `logs`,
+  `grant` and the rest, with every flag.

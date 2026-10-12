@@ -16,14 +16,15 @@ same backend.
 
 - A runnable app with a valid `app.manifest.json`. Sanity-check it first:
   ```bash
-  aura dev validate apps/com.example.hello
+  aura dev validate /data/scopes/users/default/apps/com.example.hello   # where user-scope apps live
+  aura dev validate --all                                               # or every app
   ```
 - The transport tool for how you publish:
   - **OCI registry** (recommended) needs `oras`:
     ```bash
-    aura cap install oras
+    aura install cap oras
     ```
-  - **Git repo** needs `git` (`aura cap install git`).
+  - **Git repo** needs `git` (`aura install cap git`).
 
 The OS already ships a local registry — `com.aura.registry`, a zot instance
 at `http://aura-com.aura.registry:4090`, registered as the source named
@@ -69,10 +70,11 @@ fields just render as "—".
 
 ## 2. Publish
 
-Run it from the app directory (or pass the path):
+Run it from the app directory (or pass the path) — on the master
+(`aura jump --master`) a user-scope app lives under `/data/scopes/users/default/apps/<id>`:
 
 ```bash
-cd apps/com.example.hello
+cd /data/scopes/users/default/apps/com.example.hello
 aura nexus app publish
 ```
 
@@ -204,7 +206,7 @@ or catalog.
 ```bash
 aura dev new com.example.hello           # scaffold (adds a runnable app)
 # …edit app.manifest.json: add the store + publish blocks…
-cd apps/com.example.hello
+cd /data/scopes/users/default/apps/com.example.hello
 aura nexus app publish --to local --kind oci -y   # push
 aura nexus search --refresh                        # it's in the catalog
 aura nexus app install com.example.hello           # install into global scope

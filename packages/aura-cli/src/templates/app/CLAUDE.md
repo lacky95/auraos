@@ -340,23 +340,35 @@ spawn with `mounts: { own: true }`, then `sc.mounts(name).add(appId)`.
 ## CLI cheatsheet
 
 ```sh
-# from inside the container or any shell with `aura` on PATH:
-aura run          com.example.foo        # start it (prints the instance id)
-aura ps                                  # who's running (= aura get inst)
-aura jump         com.example.foo        # shell into its sandbox (no target: picker)
-aura exec inst    com.example.foo -- ls  # one-off command in the sandbox
-aura get inst     com.example.foo sidecars      # its sidecars + their IDs
-aura jump         com.example.foo --sidecar <id> # shell inside a sidecar
-aura logs inst    com.example.foo -c <id>       # a sidecar's logs
-aura get apps -o wide                    # any resource: get / describe / -o json|yaml
-aura cap install  <name>                 # add a tool to /os/toolchain/bin/
-aura grant cap    com.example.foo <cap>  # add to this manifest's tools[]
-aura cap doctor                          # do installed caps actually RUN in each sandbox?
-aura dev validate apps/com.example.foo   # schema-check the manifest
-aura dev clean-manifest <path>           # strip default-valued fields
-aura events       --filter "app:*"       # watch the event bus
-aura info                                # what layer am I in (proot/ctnr/host)
-aura --help                              # every command + resource type
+# from inside the container or any shell with `aura` on PATH
+# Basics
+aura ps                                       # running instances (= aura get inst)
+aura run      com.example.foo                 # start it (prints the instance id)
+aura jump     com.example.foo                 # shell into its sandbox (no target: picker)
+aura jump     com.example.foo --sidecar <id>  # shell into one of its sidecars
+aura info                                     # where am I: layers, OS, env, mounts
+# Inspect
+aura get apps -o wide                         # any resource: -o wide|json|yaml|name
+aura describe app com.example.foo             # full YAML of one resource
+aura get inst com.example.foo sidecars        # its sidecars + their IDs
+aura logs inst com.example.foo -c <id> -f     # a sidecar's logs
+aura events -f 'app:*'                        # live OS state changes
+# Lifecycle
+aura restart app com.example.foo              # all instances -> one fresh
+aura stop inst   <instanceId>                 # one instance
+# Connect
+aura exec inst com.example.foo -- ls          # one-off command in the sandbox
+aura exec inst com.example.foo -c <id> -- sh  # ... or in a sidecar
+aura mount add <otherAppId>                   # mount another app's files (read-only)
+aura port expose com.example.foo:5173 --into <appId>   # share a TCP port
+# Access
+aura install cap <name>                       # add a tool to /os/toolchain/bin/
+aura grant cap   com.example.foo <cap>        # add to this manifest's tools[]
+aura grant perm  com.example.foo <perm>       # add a manifest permission
+# Dev
+aura dev validate apps/com.example.foo        # schema-check the manifest
+aura dev clean-manifest <path>                # strip default-valued fields
+aura --help                                   # every command, by task
 ```
 
 The terminal apps' bash also annotates the prompt with the detected layer

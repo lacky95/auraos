@@ -115,6 +115,10 @@ From `error` you can recover three ways:
 - `error → destroying` — fully tear down
 - `error → installed` — force back to zero without running destroy hooks (used by `AppManager.forceReset()`)
 
+To watch the machine live, `aura describe inst <instanceId>` shows an
+instance's current state and `aura events -f 'app:*'` streams the
+transitions as they happen.
+
 `error` is **not** a runtime crash state. If the child crashes from
 `resumed`, the runner's `onExit` fires, `AppManager` calls
 `set(instanceId, 'error')` directly (bypassing `transition()` because no

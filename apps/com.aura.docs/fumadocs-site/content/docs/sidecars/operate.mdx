@@ -1,0 +1,97 @@
+---
+title: Exec, logs & lifecycle
+description: Run commands in a sidecar, read its logs, inspect it from the CLI, and know what happens to it on stop, crash and shell restart.
+---
+
+## Run a command: exec
+
+```ts
+import { osSidecars } from '@aura/app-sdk/os-sidecars';
+const sc = osSidecars();
+
+const r = await sc.exec('db', ['pg_isready'], { timeoutMs: 5000 });
+// → { exitCode, stdout, stderr, truncated, timedOut }
+
+await sc.exec('db', ['psql', '-U', 'postgres'], { stdin: 'select 1;' });
+await sc.exec('db', ['sh', '-c', 'ls /var/lib/postgresql/data | wc -l'], { user: 'postgres', env: { LC_ALL: 'C' } });
+```
+
+- `cmd` is an argv, not a shell string. Want a shell? Pass `['sh', '-c', '…']`.
+- A non-zero exit is a normal result (`exitCode`), not an exception. The
+  call throws (`OsSidecarError`) only when the OS refuses: no such sidecar
+  (404), not running (409), stdin too big (413), missing permission (403).
+- Timeout: default 30 s, at least 1 s, at most 10 minutes. A timed-out
+  command reports `timedOut: true` and `exitCode: null`.
+- Limits: 64 KiB stdin, 4 MiB per output stream (`truncated: true` beyond).
+- Interactive sessions are out of scope for the API. For those, jump in
+  from a terminal: `aura jump <app> --sidecar <name>`.
+
+## Read the logs
+
+```ts
+const { stdout, stderr } = await sc.logs('db', { tail: 100, since: '10m', timestamps: true });
+```
+
+`tail` defaults to 200 lines, at most 5000; `since` takes docker's format
+(`10m`, `2h`, an RFC 3339 time). The two streams stay apart.
+
+## From the CLI
+
+For operators and for debugging your own app. The commands list app- and
+OS-managed sidecars alike; the `MANAGED` column tells them apart.
+
+```bash
+aura get inst com.example.app sidecars        # ID, STATE, MANAGED, IMAGE of one instance
+aura get sc -a com.example.app -o wide        # all sidecars of an app, with CONTAINER and TEMPLATE
+aura describe sc db -i com.example.app        # everything about one sidecar (-o json)
+aura describe inst com.example.app            # the instance, incl. its sidecars and mounts
+
+aura jump com.example.app --sidecar db        # interactive shell inside it
+aura exec inst com.example.app -c db          # same
+aura exec inst com.example.app -c db -- pg_isready
+aura logs inst com.example.app -c db --tail 50 -f
+
+aura mount ls --instance com.example.app      # incl. the sidecars' mounts
+aura get mounts -i com.example.app
+
+aura rm sc worker-7                           # delete an OS sidecar (see below)
+```
+
+`<app>` accepts an app id (when one instance runs) or an instance id. The
+sidecar ID is the name the app gave it (`db`, `worker-7`).
+
+`aura rm sc` deletes an **OS-managed** sidecar and the sidecars it spawned.
+It needs the instance's token, so it works only inside the app (`aura jump
+com.example.app`, then `aura rm sc worker-7`, `-i` to name the instance).
+App-managed sidecars are refused: the app runs those itself. From outside,
+stop the instance instead. Inside the app, `aura logs` also goes through
+the OS API, so it needs no docker socket there.
+
+## Lifecycle
+
+| Event | What happens to the instance's OS sidecars |
+|---|---|
+| Instance **stop** or **kill** | removed, with their binds, mount declarations, mount roots and tokens |
+| Instance **crash** | removed, with their binds and tokens; own-mount declarations stay so the respawn gets them back |
+| Instance **start / respawn** | nothing by itself: your app spawns its sidecars again ([how](/docs/sidecars/os-managed#3-start-it-with-your-app)) |
+| Sidecar process **crashes** | docker restarts it per the template's `restart` (default `unless-stopped`) |
+| `sc.remove(name)` | removed, its children first, with its binds, declarations, mount root and token |
+| **Shell restart** | keep running; the OS re-learns them from their labels (tokens, mounts, fan-out) without recreating anything |
+| App **uninstall** | removed with every other container of the app |
+
+Volumes are not removed with the container: the data in
+`<app data>/.sidecars/…` survives stop, crash and recreate.
+
+## Troubleshooting
+
+| Symptom | Cause, fix |
+|---|---|
+| spawn fails with `exited right after start` and log lines | The image's command is wrong or it needs config. Many images need an explicit subcommand in `command`. |
+| 409 `exists but is not OS-managed` | Your app still runs an app-managed container of that name. Pass `takeover: true` once, or restart the instance. |
+| 409 `runs a different spec` | You passed `replace: false` and the spec changed. Drop it to recreate. |
+| 409 `spawned without mounts.own` | Respawn with `mounts: { own: true }` before adding own mounts. |
+| 401 `has no current token` | The instance started before instance tokens existed. Restart it once. |
+| 403 `is not granted 'sidecars.…'` | Add the permission to the manifest, or `aura grant perm <app> sidecars.spawn`. |
+| 429 | 32 sidecars per instance, stopped ones included. Remove some. |
+| A seed keeps failing | It runs through the image's entrypoint; check that `seed.command` makes sense as arguments to it. |
+| Changes to `services[]` don't show | Call `spawn` again; the next spawn recreates a sidecar whose spec changed. |

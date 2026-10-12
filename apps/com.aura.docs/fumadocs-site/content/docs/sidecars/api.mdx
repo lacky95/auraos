@@ -1,0 +1,129 @@
+---
+title: HTTP API & SDK
+description: Reference for the OS-managed sidecar routes, the spawn request, the returned objects, and the osSidecars / createSidecars clients.
+---
+
+## SDK: `osSidecars()`
+
+```ts
+import { osSidecars, OsSidecarError } from '@aura/app-sdk/os-sidecars';
+// also re-exported by '@aura/app-sdk/sidecars'
+```
+
+Server-side only (it sends the instance token). Uses `fetch`, no
+`child_process`.
+
+| Call | Returns |
+|---|---|
+| `osSidecars(opts?)` | A client for the calling instance. `opts.base` (default `OS_API_BASE`, then `AURA_OS_URL`), `opts.instanceId` (`APP_INSTANCE_ID`, then `AURA_INSTANCE_ID`), `opts.token` (`AURA_INSTANCE_TOKEN`), `opts.timeoutMs` (per request, default 15 min: a spawn may pull an image). Throws if base or instance id are missing. |
+| `.spawn(req)` | `{ created, sidecar }`, see [Spawn request](#spawn-request) |
+| `.list()` | `OsSidecar[]`, the instance's OS sidecars (running or not) |
+| `.get(name)` | `OsSidecar`, or `null` when there is none |
+| `.remove(name)` | Deletes it and every sidecar it spawned |
+| `.exec(name, cmd, opts?)` | `{ exitCode, stdout, stderr, truncated, timedOut }`. `opts`: `stdin`, `timeoutMs`, `user`, `workdir`, `env` |
+| `.logs(name, opts?)` | `{ stdout, stderr }`. `opts`: `tail`, `since`, `timestamps` |
+| `.mounts(name).list()` | `OsSidecarMount[]`, own and inherited |
+| `.mounts(name).add(appId, opts?)` | `OsSidecarMount`. `opts`: `mode: 'ro' \| 'rw'`, `data: boolean` |
+| `.mounts(name).remove(mountId)` | `<appId>` or `<appId>:data` |
+| `OsSidecarError` | Thrown on failure. `.status` is the HTTP status (0 = no response, or no token in the env) |
+
+Inside an OS sidecar spawned with `inheritIdentity`, `osSidecars()` works
+unchanged, with that sidecar's own token.
+
+## SDK: `createSidecars({ mode })`
+
+`createSidecars` (from `@aura/app-sdk/sidecars`) manages all `services[]`
+entries at once and can reverse-proxy one of them as the app window. Its
+`mode` decides who runs the containers:
+
+| `mode` | Containers run by | App needs | Notes |
+|---|---|---|---|
+| `'docker'` (default) | the SDK, over the docker socket | the `docker` tool | [App-managed](/docs/sidecars/app-managed) |
+| `'os'` | the OS, through `osSidecars()` | `sidecars.spawn` | Each service is spawned as `{ template: service.name }`. `onSeed` throws; use `services[].seed`. |
+| `'auto'` | `'os'` when the container has no docker socket but has a token, else `'docker'` | either | `host.mode` tells you what was picked |
+
+`host.ensureAll()`, `host.isRunning(name)`, `host.teardownAll()`,
+`host.containerName(name)` and `host.listen()` work in every mode. In
+`'os'` mode `ensureAll` sends only the template name, so per-spawn options
+(`suffix`, `env`, `mounts`, `takeover`, `wait`) need `osSidecars()` directly.
+Full options: [SDK reference](/docs/sdk-reference) and [Bring-your-own-runtime apps](/docs/bring-your-own-runtime).
+
+## HTTP routes
+
+All under `/api/instances/:instanceId/`, for container sandboxes. Every route
+here needs `Authorization: Bearer $AURA_INSTANCE_TOKEN`
+([why](/docs/sidecars/permissions#instance-tokens)).
+
+| Route | Permission | Result |
+|---|---|---|
+| `POST sidecars` | `sidecars.spawn` | 201 `{ ok, created: true, sidecar }`, or 200 `{ ok, created: false, sidecar }` when adopted |
+| `GET sidecars?view=managed` | `sidecars.spawn` | `{ sidecars: OsSidecar[] }` |
+| `GET sidecars/:name` | `sidecars.spawn` | `{ sidecar }` |
+| `DELETE sidecars/:name` | `sidecars.spawn` | `{ ok, removed }`, children removed too |
+| `POST sidecars/:name/exec` | `sidecars.spawn` | `{ exitCode, stdout, stderr, truncated, timedOut }`. Body `{ cmd, stdin?, timeoutMs?, user?, workdir?, env? }` |
+| `GET sidecars/:name/logs?tail=&since=&timestamps=1` | `sidecars.spawn` | `{ stdout, stderr }` |
+| `GET sidecars/:name/mounts` | `sidecars.spawn` | `{ capable, reason?, mounts }`, own and inherited |
+| `POST sidecars/:name/mounts` | `sidecars.mounts` + `apps.mount` | `{ ok, mount }`. Body `{ targetAppId, mode?: 'ro' \| 'rw', data? }` |
+| `DELETE sidecars/:name/mounts/:mountId` | `sidecars.mounts` + `apps.mount` | `{ ok, removed }`; 409 for an inherited mount |
+
+Without a token (read-only views for the shell and the CLI):
+
+| Route | Result |
+|---|---|
+| `GET sidecars` | every sidecar of the instance, app- and OS-managed, with live resource usage (`docker stats`) |
+| `GET sidecars?usage=0` | the same list without usage, cheap |
+| `GET mounts?includeSidecars=1` | the instance's mounts plus `sidecarMounts: [{ sidecar, mounts }]` |
+
+Errors are `{ error: "…" }` with the status codes listed in
+[Permissions & tokens](/docs/sidecars/permissions#order-of-checks-and-status-codes).
+
+## Spawn request
+
+The body of `POST sidecars` and the argument of `.spawn()`. Only these keys
+are accepted; any other key is a 400 that names the allowed ones.
+
+| Field | Meaning |
+|---|---|
+| `template` | Required. A `services[].name` of the calling app. |
+| `name` / `suffix` | The sidecar name (default: the template name), or `<template>-<suffix>`. One or neither. `^[a-z][a-z0-9-]{0,47}$`. |
+| `env` | Merged over the template's `env` (request wins). |
+| `envInherit` | Extra names to inherit, added to the template's list. |
+| `command` | Replaces the template's command. |
+| `mounts` | `{ own?: boolean, inherit?: boolean \| { exclude?: string[], mode?: 'ro' } }`, see [Mounts](/docs/sidecars/mounts). |
+| `image` | Another image. Needs `sidecars.anyImage`. |
+| `replace` | Default `true`: a running sidecar with a different spec is recreated. `false`: 409 instead. |
+| `takeover` | Remove an app-managed container of the same name that belongs to this instance, then spawn (migration). Default `false`: 409. |
+| `wait` | `{ port?: true, timeoutMs? }`: answer only once the template's `port` accepts TCP (default 60 s). |
+
+Everything that ends up in the resolved spec (template fields, `env`,
+`envInherit`, `command`, `image`, `mounts`) is part of the spec hash. The
+switches `replace`, `takeover` and `wait` are not.
+
+## Objects
+
+```ts
+interface OsSidecar {
+  name: string;            // 'db', 'worker-7'
+  template: string;
+  image: string;
+  containerName: string;   // 'aura-<instanceId>--<name>'
+  host: string;            // == containerName, its DNS name on aura-net
+  port?: number;           // from the template
+  state: string;           // docker state: 'running', 'exited', …
+  createdAt: string;
+  owner?: string;          // the sidecar that spawned it, if any
+  managedBy: 'os';
+  mounts: { own: boolean; inherit: boolean; exclude: string[]; forceRo: boolean };
+  specHash: string;
+}
+
+interface OsSidecarMount {
+  id: string;              // '<appId>' or '<appId>:data'
+  targetAppId: string;
+  kind: 'source' | 'data';
+  mode: 'ro' | 'rw';
+  containerPath: string;   // '/mnt/aura/<appId>' or '/mnt/aura/<appId>.data'
+  origin: 'added' | 'restored' | 'adopted' | 'inherited';
+  inheritedFrom?: string;  // set on inherited mounts: the instance
+}
+```

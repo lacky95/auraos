@@ -1,10 +1,10 @@
 ---
 title: Quick Start
-description: First moves inside AuraOS — launcher, window selection, workspaces, Process Manager.
+description: First moves inside AuraOS — launcher, window selection, workspaces, Process Manager, the aura CLI.
 ---
 
 Once `docker compose up` is running and `http://localhost:3000` shows
-the desktop, you're in. Five things to know before you go further.
+the desktop, you're in. Six things to know before you go further.
 
 ## 1. The launcher
 
@@ -90,8 +90,29 @@ workspace honours it when no user override is set.
 
 `Esc` closes the panel.
 
+## 6. The same from the terminal
+
+Open the **Terminal** app — the `aura` CLI drives everything above, and
+`aura --help` lists every command by task. A first run, end to end:
+
+```bash
+aura dev new                          # wizard: app id, name, shape, sandbox, tools
+aura run com.example.hello            # start it — prints the instance id
+aura open inst com.example.hello      # open a window (or click its launcher icon)
+aura ps                               # running instances + lifecycle state
+aura describe inst com.example.hello  # one instance in full: state, port, sidecars, mounts
+aura jump com.example.hello           # shell inside its sandbox (exit to come back)
+aura logs inst com.example.hello -f   # the app's own output, followed live
+aura restart app com.example.hello    # fresh start after a change
+aura kill inst com.example.hello      # the Process Manager's ⨂, from the CLI
+```
+
+For a single-instance app the instance id is the app id; multi-instance
+apps get `<appId>-<n>` (see `aura ps`).
+
 ## What to read next
 
 - [Develop an App](/docs/develop-an-app) — scaffold one in 30 s.
+- [CLI Reference](/docs/cli-reference) — every `aura` command and flag.
 - [Core Concepts](/docs/core-concepts) — instance vs activity,
   runtime modes, sandbox modes, the rest of the mental model.

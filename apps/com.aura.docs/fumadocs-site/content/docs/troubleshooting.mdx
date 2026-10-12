@@ -30,30 +30,36 @@ The slot shows the loading pattern but the app never paints. Check
 the lifecycle state:
 
 ```sh
-curl -s http://localhost:3000/api/apps | jq '.[] | select(.manifest.id=="com.example.foo")'
+aura ps                                # STATE column, every instance
+aura describe inst com.example.foo     # full detail for one instance
 ```
 
-If `state` is `'starting'` for more than ~10 s, the app's dev server
-didn't bind in time. Jump in and check the log:
+If the state is `starting` for more than ~10 s, the app's dev server
+didn't bind in time. Read its output, then jump in to look around:
 
 ```sh
-aura jump com.example.foo
-# inside the sandbox:
-ls /workspace/apps/com.example.foo
-tail -f /data/logs/com.example.foo.log
+aura logs inst com.example.foo --tail 100   # the app's own stdout/stderr
+aura jump com.example.foo                   # then look around inside the sandbox
 ```
 
-If `state` is `'error'` or `'crashed'`, force-kill from the Process
-Manager (✕ button) and relaunch; the crash reason is in the same log.
+If the state is `error`, force-kill and relaunch — from the Process
+Manager (⨂ button) or the CLI; the crash reason is in the same log:
+
+```sh
+aura kill inst com.example.foo
+aura run com.example.foo
+```
 
 ## New page in an app returns 404
 
 Astro builds its route manifest at server start. A `pages/foo.astro`
 added while the container is running may not be picked up until the
-app process restarts. Bounce just that container:
+app process restarts. Restart just that app through the OS (don't
+`docker restart` the container — the AppManager loses track of the
+instance):
 
 ```sh
-docker restart aura-com.example.foo
+aura restart app com.example.foo
 ```
 
 Wait ~5 s for the dev server to come back up, then refresh the iframe.
@@ -69,9 +75,10 @@ replays the last ~256 KiB of scrollback.
 
 Two reasons you might still see a fresh prompt:
 
-- The terminal container was restarted (`docker restart
-  aura-com.aura.terminal-3`). Restart wipes PTY state — code changes
-  to `pty-server.ts` require this, so it's intentional.
+- The terminal instance was restarted (`aura restart inst
+  com.aura.terminal-3` stops it and starts a fresh instance). Restart
+  wipes PTY state — code changes to `pty-server.ts` require this, so
+  it's intentional.
 - You opened a different instance (`com.aura.terminal-4`) in the new
   tab. Each instance has its own PTY.
 
@@ -115,15 +122,17 @@ limits to warn-and-up; `-noisy` excludes one.
 ## App doesn't appear in the launcher after install
 
 The launcher reads from the in-memory manifest cache. If you `aura
-nexus install` an app and the launcher still doesn't list it, the
+nexus app install` an app and the launcher still doesn't list it, the
 AppManager hasn't reloaded its manifest list.
 
 ```sh
-aura get apps
+aura nexus app list     # the install record (id, version, scope, source)
+aura get apps           # what the AppManager actually loaded
 ```
 
-If the install record exists but the entry is missing, restart the
-shell container:
+A disabled app is hidden from dock + launcher: `aura enable app <id>`.
+If the install record exists but the entry is missing from `aura get
+apps`, restart the shell container:
 
 ```sh
 docker restart aura-shell
@@ -131,3 +140,5 @@ docker restart aura-shell
 
 Shell-side caches re-seed from disk on boot; the app shows up
 immediately after.
+
+For the full command set, see the [CLI Reference](/docs/cli-reference).

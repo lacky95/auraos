@@ -1,0 +1,133 @@
+---
+title: Templates
+description: The services[] entry in full — every field, what a sidecar inherits from its app, where its volumes live and how seeding works.
+---
+
+A `services[]` entry in `app.manifest.json` describes one sidecar image.
+On the OS path it is a **template**: a spawn request picks it by `name` and
+may change only a few fields. Everything else is fixed here, which is what
+gets reviewed at install time. The same entries also drive the SDK's
+app-managed path; the notes below say where the two differ.
+
+## All fields
+
+| Field | Notes |
+|---|---|
+| `name` | Template id, kebab-case. The sidecar spawned with no `name`/`suffix` gets this name: `aura-<instanceId>--<name>`. |
+| `image`, `command` | Image and CMD (appended after the image, through its entrypoint). Many images exit without an explicit subcommand. |
+| `port` | The port you connect to; what `wait: { port: true }` waits for. |
+| `proxyDashboard` | Which service the SDK's `listen()` reverse-proxies as the app window ([Bring-your-own-runtime](/docs/bring-your-own-runtime)). At most one. |
+| `env` | Fixed env. A request's `env` is merged over it (request wins). |
+| `envInherit` | Names of env vars to copy in, see [Inheritance](#inheritance). |
+| `volumes[]` | `{ name, target, shared? }`, see [Volumes](#volumes). `volume` / `subpath` are app-managed only. |
+| `seed` | `{ command: [...] }`, a one-shot init, see [Seeding](#seeding). OS path only. |
+| `dns` | DNS servers. Sidecars get none by default; set this if the runtime reaches the internet. |
+| `restart` | Docker restart policy, default `unless-stopped`: a sidecar that crashes on its own is restarted by docker. |
+| `user`, `workdir` | `--user`, `--workdir`. |
+| `limits` | `{ memory: "512m", cpus: 1.5 }`. |
+| `inheritIdentity`, `inheritPermissions`, `inheritTools`, `inheritMounts`, `inheritDockerSocket` | Opt-in, default off. See [Inheritance](#inheritance). |
+| `capabilities`, `devices`, `privileged`, `publish` | Kernel and host grants. OS path: the app needs `sidecars.privileged`. Prefer the narrow ones over `privileged`. |
+| `prePull`, `readiness` | Accepted by the schema, not acted on yet. |
+
+## Inheritance
+
+A sidecar is isolated by default: its own env, volumes and network, none of
+the app's identity, tools or mounts. Each flag crosses one boundary on
+purpose.
+
+| Template field | OS-managed sidecar gets | App-managed sidecar gets |
+|---|---|---|
+| `inheritIdentity` | `AURA_APP_ID`, `AURA_INSTANCE_ID`, `AURA_SIDECAR_NAME`, `AURA_OS_URL` / `OS_API_BASE`, `AURA_SHELL_HOSTNAME`, and **its own** `AURA_INSTANCE_TOKEN` | the app's identity vars and the app's token (it acts as the app) |
+| `inheritPermissions` | `AURA_PERMISSIONS=<the app's permissions>` | same |
+| `inheritTools` | the app's granted tools at `/aura/my-tools` (plus PATH, the workspace packages and the login-shell PATH drop-in) | same |
+| `inheritMounts` | the app's cross-app mounts at `/mnt/aura`, mirrored **live** into its own mount root ([Mounts](/docs/sidecars/mounts)) | the app's mount root, shared; mounts that existed before the sidecar started show up empty |
+| `inheritDockerSocket` | the host docker socket, only if the app itself has the `docker` tool (403 otherwise) | the socket, if the app has one |
+| `envInherit: [...]` | values from OS Context, falling back to the app container's env | values from the controller's `process.env` |
+
+Missing `envInherit` names are skipped, and an explicit `env` entry wins
+over an inherited one. The identity vars are set last, so a template `env`
+cannot overwrite them.
+
+A database template sets **no** inheritance flags: it needs neither your
+identity, your tools nor your mounts. That is the right default. An agent
+that calls back into the OS sets `inheritIdentity`; one that works on your
+files sets `inheritMounts`.
+
+## Volumes
+
+```jsonc
+"volumes": [
+  { "name": "data",  "target": "/var/lib/postgresql/data" },
+  { "name": "cache", "target": "/cache", "shared": true }
+]
+```
+
+On the OS path a volume lives in your app's own data dir:
+
+| Volume | Location on the app-data volume |
+|---|---|
+| default | `<app data>/.sidecars/<sidecar-name>/<volume>`, one dir per sidecar |
+| `"shared": true` | `<app data>/.sidecars/<template-name>/<volume>`, one dir for every sidecar of the template |
+| an existing `aura-<appId>-<volume>` docker volume | used instead, for the sidecar named like its template |
+
+The last row is for migration: a service that the SDK's docker path ran
+before keeps its data when it moves to the OS path. Because everything else
+lives in the app's data dir, `aura mount add <appId> --data` reaches the
+sidecar's state, and backup, move and uninstall take it along.
+
+`volume` and `subpath` (an explicit docker volume or volume subpath) can
+point anywhere, so the OS refuses them with a 400. They work only on the
+[app-managed path](/docs/sidecars/app-managed).
+
+## Seeding
+
+```jsonc
+"seed": { "command": ["sh", "-c", "test -f /data/config.yaml || cp /defaults/config.yaml /data/"] }
+```
+
+`seed` runs once, before the sidecar's first start: the same image, the same
+volumes, the same env (without the identity vars), as a throwaway container.
+The command goes through the image's entrypoint, like `command`; if the
+entrypoint is a server binary rather than a shell, the seed arguments go to
+that binary. A failing seed fails the spawn.
+
+A marker file, `.sidecars/<sidecar-name>/.aura-seeded` in your app's data
+dir, keeps it from running again. Recreating the sidecar does not re-run it;
+deleting the marker does. Write seed commands idempotently anyway (check
+before you write): a sidecar that keeps an older `aura-<appId>-<volume>`
+volume has no marker yet, so its seed runs once against the existing data.
+
+`seed` replaces the SDK's `onSeed` callback, which needs the docker socket.
+
+## Privileged templates
+
+`privileged`, `capabilities`, `devices` and `publish` need
+`sidecars.privileged`, **even though your own template declares them**: the
+manifest is written by the app, and the OS path must not become a route to
+privilege for an app that has no docker socket. `inheritDockerSocket`
+additionally needs the `docker` tool in the app's own `tools[]`: a sidecar
+never exceeds its app.
+
+## Example: an agent runtime
+
+A foreign agent image that calls back into the OS, uses the user's API keys
+from OS Context and works on the app's mounts, read-only:
+
+```jsonc
+"permissions": ["sidecars.spawn", "apps.mount"],
+"services": [{
+  "name": "agent",
+  "image": "vendor/agent:latest",
+  "command": ["serve"],
+  "port": 9119,
+  "envInherit": ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"],
+  "inheritIdentity": true,
+  "inheritMounts": true,
+  "volumes": [{ "name": "home", "target": "/home/agent" }],
+  "dns": ["8.8.8.8", "1.1.1.1"]
+}]
+```
+
+```ts
+await osSidecars().spawn({ template: 'agent', mounts: { inherit: { mode: 'ro' } } });
+```
