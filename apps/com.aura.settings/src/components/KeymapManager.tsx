@@ -194,8 +194,8 @@ export default function KeymapManager({ initialActions, initialState }: Props) {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
           <span>// KEYBOARD SHORTCUTS</span>
           <div style={{ display: 'flex', gap: 8 }}>
-            <Button size="sm" variant="outline" onClick={resetAll}>RESET ALL</Button>
-            <Button size="sm" variant="outline" onClick={exportJson}>EXPORT</Button>
+            <Button size="SM" variant="OUTLINE" onClick={resetAll}>RESET ALL</Button>
+            <Button size="SM" variant="OUTLINE" onClick={exportJson}>EXPORT</Button>
             <label className="keymap-import-btn">
               <span style={{ cursor: 'pointer' }}>IMPORT</span>
               <input
@@ -272,19 +272,19 @@ export default function KeymapManager({ initialActions, initialState }: Props) {
                 </td>
                 <td>
                   <Button
-                    size="sm"
-                    variant="outline"
+                    size="SM"
+                    variant="OUTLINE"
                     onClick={() => setCapturingFor(a)}
                     className="keymap-binding-btn"
                   >
                     {combo ?? '(unbound)'}
                   </Button>
-                  {conflict && <Badge variant="destructive" style={{ marginLeft: 8 }}>!</Badge>}
+                  {conflict && <Badge variant="CRITICAL" style={{ marginLeft: 8 }}>!</Badge>}
                 </td>
                 <td>
                   <Button
-                    size="sm"
-                    variant="ghost"
+                    size="SM"
+                    variant="GHOST"
                     onClick={() => resetAction(a)}
                     title="Reset to default"
                   >↺</Button>
@@ -363,9 +363,10 @@ function ComboCaptureDialog(props: {
           )}
         </DialogBody>
         <DialogFooter>
-          <Button variant="outline" onClick={props.onClear}>UNBIND</Button>
-          <Button variant="outline" onClick={props.onCancel}>CANCEL</Button>
+          <Button variant="ABORT" onClick={props.onClear}>UNBIND</Button>
+          <Button variant="OUTLINE" onClick={props.onCancel}>CANCEL</Button>
           <Button
+            variant="EXEC"
             disabled={!captured}
             onClick={() => captured && props.onCommit(captured)}
           >SAVE</Button>
