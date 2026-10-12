@@ -429,7 +429,7 @@ async function cloneFromConfig(cfg: CloneConfig, asJson: boolean): Promise<void>
     warn(`${r.targetAppId} now SHADOWS the ${r.shadows}-scope app of the same id. Removing the clone unmasks the original.`);
   }
   for (const w of r.warnings) warn(w);
-  if (!r.dryRun) info(`Run \`aura app start ${r.targetAppId}\` to launch it.`);
+  if (!r.dryRun) info(`Run \`aura run ${r.targetAppId}\` to launch it.`);
 }
 
 // ─── Registration ──────────────────────────────────────────────────────────

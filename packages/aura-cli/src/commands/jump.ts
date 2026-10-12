@@ -4,7 +4,9 @@ import { spawn } from 'node:child_process';
 import { moveCursor, clearScreenDown } from 'node:readline';
 import { api } from '../lib/client.js';
 import { color, fail, info, ok, warn } from '../lib/format.js';
-import { enterSandbox, syncDockerExecWinsize, setTerminalHost, callerHostLabel } from '../lib/enter-sandbox.js';
+import { enterSandbox, enterSidecar, syncDockerExecWinsize, setTerminalHost, callerHostLabel } from '../lib/enter-sandbox.js';
+import { resolveInstance, resolveSidecar } from '../lib/resolve.js';
+import { sidecarId } from '../lib/resources.js';
 
 interface InstanceLite {
   instanceId: string;
@@ -56,17 +58,28 @@ function isInsideMaster(): boolean {
  */
 export function registerJump(program: Command): void {
   program
-    .command('jump')
+    .command('jump [target]')
     .alias('j')
-    .description('Interactive picker: jump into a running app/service sandbox (proot or container) in this terminal. Pass --master to skip the picker and drop into the aura-shell master container.')
-    .option('--no-services', 'Hide services, show only user apps')
-    .option('--no-apps',     'Hide apps, show only services')
+    .summary('Jump into an app sandbox or one of its sidecars (picker without a target).')
+    .description('Jump into a running app/service sandbox (proot or container) in this terminal. Without a target: interactive picker. With a target (app id or instance id): straight in; add --sidecar to enter one of its sidecars.')
+    .option('-s, --sidecar <id>', 'Enter this sidecar of the target instead (IDs: aura get inst <id> sidecars)')
+    .option('--no-services', 'Picker: hide services, show only user apps')
+    .option('--no-apps',     'Picker: hide apps, show only services')
     .option('-m, --master',  'Skip the picker and jump straight into the aura-shell master container')
-    .action(async (opts: { services?: boolean; apps?: boolean; master?: boolean }) => {
+    .addHelpText('after', `
+Examples:
+  aura jump                                   # picker
+  aura jump com.aura.terminal                 # app id (one running instance) or instance id
+  aura jump io.lakner.hermes --sidecar runtime
+  aura jump --sidecar db                      # a sidecar of the app you are in ($APP_INSTANCE_ID)
+  aura jump -m                                # master container
+`)
+    .action(async (target: string | undefined, opts: { services?: boolean; apps?: boolean; master?: boolean; sidecar?: string }) => {
       if (!stdin.isTTY || !stdout.isTTY) {
-        fail('aura jump needs a TTY (you piped/redirected stdio). Use `aura inst shell <id>` for non-interactive.');
+        fail('aura jump needs a TTY (you piped/redirected stdio). For a one-off command use `aura exec inst <id> [-c <sidecar>] -- <cmd>`.');
       }
       if (opts.master) { enterMasterContainer(); return; }
+      if (target || opts.sidecar) { await jumpDirect(target, opts.sidecar); return; }
       const instanceTargets = await collectTargets(opts.apps !== false, opts.services !== false);
       // Master is always offered (unless we're already inside it) — it's a
       // useful escape hatch even when no apps are running, so we don't
@@ -89,6 +102,26 @@ export function registerJump(program: Command): void {
       }>(`/api/instances/${encodeURIComponent(pick.instanceId)}/status`);
       enterSandbox(pick.instanceId, pick.appId, pick.port, dto.launch?.tools ?? [], pick.sandbox, undefined, dto.launch);
     });
+}
+
+/**
+ * `aura jump <target> [--sidecar <id>]` — no picker. The target is an instance
+ * id, or an app id with exactly one running instance (lib/resolve.ts). With
+ * only --sidecar, the sidecar belongs to the app the caller is in.
+ */
+async function jumpDirect(target: string | undefined, sidecar: string | undefined): Promise<void> {
+  const token = target ?? procEnv['APP_INSTANCE_ID'];
+  if (!token) fail('aura jump --sidecar <id> needs a target outside an app: aura jump <app|instance> --sidecar <id>');
+  const inst = await resolveInstance(token);
+  if (sidecar) {
+    const sc = await resolveSidecar(inst.instanceId, sidecar);
+    enterSidecar(sc.id, `${inst.instanceId}/${sidecarId(sc)}`);
+    return;
+  }
+  const dto = await api.get<{
+    launch?: { appDir?: string; instanceDataDir?: string; tools?: string[] };
+  }>(`/api/instances/${encodeURIComponent(inst.instanceId)}/status`);
+  enterSandbox(inst.instanceId, inst.appId, inst.port, dto.launch?.tools ?? [], inst.sandbox, undefined, dto.launch);
 }
 
 /** `docker exec -it aura-shell bash` — same TUI env passthrough we use for

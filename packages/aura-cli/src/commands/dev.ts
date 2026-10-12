@@ -517,7 +517,7 @@ function buildScaffoldFiles(cfg: ScaffoldConfig): PayloadFile[] {
   // `service`-shape apps don't have activities, so omit the activity
   // lifecycle handlers — they'd be dead files in the scaffold. Other
   // shapes (default + activity-bg) keep activityMode='multi' and need
-  // both handlers so `aura app start` doesn't 404 on the OS-side
+  // both handlers so `aura run` doesn't 404 on the OS-side
   // `onActivityCreate` POST.
   const includeActivityFiles = cfg.shape !== 'service';
   const walk = (srcDir: string, relPrefix: string): void => {
@@ -674,13 +674,13 @@ async function scaffoldFromConfig(cfg: ScaffoldConfig): Promise<void> {
     if (installed) {
       info(`deps installed: ${color.dim('astro + @aura/* ok')}`);
     } else {
-      warn(`dep install did not complete (${installError ? installError.split('\n')[0] : 'unknown'}). It will be retried on first launch (may exceed the health window; re-run \`aura app start\` if so).`);
+      warn(`dep install did not complete (${installError ? installError.split('\n')[0] : 'unknown'}). It will be retried on first launch (may exceed the health window; re-run \`aura run <appId>\` if so).`);
     }
   } else {
     // Local-write fallback (shell unreachable): deps resolve on first launch.
     info(`@aura/* deps resolve on first launch via ${color.dim('aura sdk install')}.`);
   }
-  info(`Run \`aura app start ${cfg.appId}\` to launch it.`);
+  info(`Run \`aura run ${cfg.appId}\` to launch it.`);
 }
 
 /**

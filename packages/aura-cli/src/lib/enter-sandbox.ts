@@ -145,7 +145,9 @@ function enterContainer(instanceId: string, appId: string, cmd?: string): void {
   };
   for (const [k, v] of Object.entries(passthrough)) termEnv.push('-e', `${k}=${v}`);
   const execArgs = [
-    'exec', '-it',
+    // A one-off `cmd` may be piped (`aura exec … -- cmd | grep`): -t there
+    // makes docker refuse with "the input device is not a TTY".
+    'exec', cmd && !(process.stdin.isTTY && stdout.isTTY) ? '-i' : '-it',
     '--workdir', appDir,
     '-e', `AURA_HOSTNAME=${appId}`,
     ...termEnv,
@@ -153,7 +155,8 @@ function enterContainer(instanceId: string, appId: string, cmd?: string): void {
   ];
   const shellArgs = cmd ? ['bash', '-lc', cmd] : ['bash', '-i'];
   const args = [...execArgs, ...shellArgs];
-  info(`entering container ${color.bold(containerName)} (sandbox=container, cwd=${appDir})`);
+  // One-off `cmd` runs print only the command's own output, like docker exec.
+  if (!cmd) info(`entering container ${color.bold(containerName)} (sandbox=container, cwd=${appDir})`);
   // Interactive jumps update the Terminal's host indicator; one-off `cmd` runs
   // don't (they return immediately and shouldn't flicker the bar).
   const restoreHost = cmd ? null : callerHostLabel();
@@ -162,13 +165,57 @@ function enterContainer(instanceId: string, appId: string, cmd?: string): void {
   syncDockerExecWinsize(child);
   child.on('exit', (code) => {
     if (restoreHost) setTerminalHost(restoreHost);
-    ok(`shell exited (code ${code ?? 0})`); process.exit(code ?? 0);
+    if (!cmd) ok(`shell exited (code ${code ?? 0})`);
+    process.exit(code ?? 0);
   });
   child.on('error', (err) => fail(
     `docker exec failed: ${err.message}\n` +
     `  Hint: the calling sandbox needs both the docker CLI on PATH and a bound /var/run/docker.sock.\n` +
     `  Terminal-proot apps get this automatically when their manifest tools[] include '*' (the wildcard\n` +
     `  cap allowlist now ships docker, and ProotRunner binds the host docker socket).`
+  ));
+}
+
+/**
+ * Enter (or run a command in) a SIDECAR container of an instance.
+ *
+ * Sidecars run foreign images, so nothing about them is known: no bash, no
+ * /workspace. An interactive entry prefers bash and falls back to sh; a `cmd`
+ * is exec'd as given (argv, no shell), so `aura exec … -- ls -la` behaves the
+ * way `docker exec` does. Same caller prerequisite as every container jump:
+ * the docker CLI plus a bound socket.
+ */
+export function enterSidecar(container: string, label: string, cmd?: string[]): void {
+  const termEnv: string[] = [];
+  const passthrough: Record<string, string> = {
+    TERM:      process.env['TERM']      ?? 'xterm-256color',
+    COLORTERM: process.env['COLORTERM'] ?? 'truecolor',
+    LANG:      process.env['LANG']      ?? 'C.UTF-8',
+    LC_ALL:    process.env['LC_ALL']    ?? 'C.UTF-8',
+  };
+  for (const [k, v] of Object.entries(passthrough)) termEnv.push('-e', `${k}=${v}`);
+  const interactive = !cmd || cmd.length === 0;
+  // -t only with a real terminal on both ends, or docker refuses ("the input
+  // device is not a TTY") when the command is piped.
+  const tty = process.stdin.isTTY && stdout.isTTY ? ['-it'] : ['-i'];
+  const shellArgs = interactive
+    ? ['sh', '-c', 'command -v bash >/dev/null 2>&1 && exec bash -i || exec sh -i']
+    : cmd!;
+  const args = ['exec', ...tty, ...termEnv, container, ...shellArgs];
+  if (interactive) info(`entering sidecar ${color.bold(container)}`);
+  const restoreHost = interactive ? callerHostLabel() : null;
+  if (interactive) setTerminalHost(label);
+  const child = spawn('docker', args, { stdio: 'inherit' });
+  syncDockerExecWinsize(child);
+  child.on('exit', (code) => {
+    if (restoreHost) setTerminalHost(restoreHost);
+    if (interactive) ok(`shell exited (code ${code ?? 0})`);
+    process.exit(code ?? 0);
+  });
+  child.on('error', (err) => fail(
+    `docker exec failed: ${err.message}\n` +
+    `  Hint: entering a sidecar needs the docker CLI on PATH and a bound /var/run/docker.sock\n` +
+    `  (the AuraOS Terminal and the master shell have both).`
   ));
 }
 

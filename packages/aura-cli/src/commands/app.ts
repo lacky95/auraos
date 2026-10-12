@@ -13,7 +13,7 @@ const BUILTIN_PERMISSIONS_LIST: string[] = [...BUILTIN_PERMISSIONS];
  * core's PermissionManager — everything else is auto-granted by the MVP path,
  * so the picker should not imply otherwise.
  */
-const ENFORCED_PERMISSIONS: string[] = ['apps.mount'];
+const ENFORCED_PERMISSIONS: string[] = ['apps.mount', 'apps.port'];
 
 interface ManifestLite {
   id: string;
@@ -218,7 +218,7 @@ function registerPerm(app: Command): void {
     .description(
       'Manage an app\'s manifest permissions[]. Note most permissions are still ' +
       'auto-granted by the MVP PermissionManager — only those in its ENFORCED set ' +
-      '(currently apps.mount) actually deny.',
+      '(currently apps.mount, apps.port) actually deny.',
     );
 
   perm

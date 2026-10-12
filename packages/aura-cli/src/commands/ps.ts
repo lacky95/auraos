@@ -43,7 +43,7 @@ async function renderPs(): Promise<void> {
 export function registerPs(program: Command): void {
   program
     .command('ps')
-    .description('List all running app instances (docker-ps-style table).')
+    .description('List all app instances (docker-ps-style; = aura get inst).')
     .option('-w, --watch', 'Re-render live on state changes (SSE-driven)')
     .action(async (opts: { watch?: boolean }) => {
       await renderPs();

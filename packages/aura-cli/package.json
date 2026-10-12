@@ -11,7 +11,8 @@
     "build:watch": "node esbuild.config.mjs --watch",
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node test/run.mjs"
   },
   "dependencies": {
     "@aura/core": "workspace:*",

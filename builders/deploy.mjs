@@ -69,4 +69,4 @@ if (!res.ok) {
 }
 console.log(`\ndeployed to ${body.dest}`);
 console.log('The app registry picks up the manifest automatically; restart a running');
-console.log(`instance to apply manifest changes:  aura app restart ${id}`);
+console.log(`instance to apply manifest changes:  aura restart app ${id}`);

@@ -10,13 +10,22 @@ import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
  *
  * Usage is measured on demand (a backend call per request), so poll this only
  * while an inspect view is open.
+ *
+ *   GET ?usage=0 → { instanceId, sidecars: [...SidecarInfo] }
+ *
+ * The cheap form for lists (`aura get sidecars`): straight from the
+ * reconciler's cache, no `docker stats` round-trip.
  */
-export const GET: APIRoute = async ({ params }) => {
+export const GET: APIRoute = async ({ params, url }) => {
   const instanceId = params['instanceId'];
   if (!instanceId) return errorResponse('Missing instance id', 400);
 
   const mgr = getAppManager();
   if (!mgr.getInstance(instanceId)) return errorResponse(`Instance not found: ${instanceId}`, 404);
+
+  if (url.searchParams.get('usage') === '0') {
+    return jsonResponse({ instanceId, sidecars: mgr.getSidecars(instanceId) });
+  }
 
   try {
     const { instance, sidecars } = await mgr.getInstanceUsage(instanceId);

@@ -650,7 +650,7 @@ export class AppManager {
       if (m?.critical) {
         throw new Error(
           `App ${appId} is marked critical: true in its manifest and cannot be disabled. ` +
-          `Use \`aura inst stop ${appId}\` for a one-shot stop instead.`,
+          `Use \`aura stop app ${appId}\` for a one-shot stop instead.`,
         );
       }
     }
@@ -886,7 +886,7 @@ export class AppManager {
     if (!manifest) throw new Error(`App not found: ${appId}`);
     // Disabled apps refuse launches. Same error class as a missing manifest
     // so callers (HTTP layer, intent dispatcher) translate it uniformly.
-    if (!this.isEnabled(appId)) throw new Error(`App ${appId} is disabled. Enable it from Settings → Apps or run \`aura app enable ${appId}\`.`);
+    if (!this.isEnabled(appId)) throw new Error(`App ${appId} is disabled. Enable it from Settings → Apps or run \`aura enable app ${appId}\`.`);
 
     if (manifest.instanceMode === 'single') {
       // Filter out inPool members from existing-instance reuse — pool members
@@ -1078,7 +1078,7 @@ export class AppManager {
           `Instance "${intent.instanceId}" is ${inst.state}.`,
           'Omit instanceId to let the OS pick, or send NEW_INSTANCE.');
       }
-      if (!this.isEnabled(appId)) throw new Error(`App ${appId} is disabled. Enable it from Settings → Apps or run \`aura app enable ${appId}\`.`);
+      if (!this.isEnabled(appId)) throw new Error(`App ${appId} is disabled. Enable it from Settings → Apps or run \`aura enable app ${appId}\`.`);
       if (inst.state === 'paused' || inst.state === 'stopped') await this.resume(inst.instanceId);
       return inst.instanceId;
     }
@@ -1106,7 +1106,7 @@ export class AppManager {
         (i) => !i.inPool && i.state !== 'destroyed' && i.state !== 'error' && i.state !== 'destroying',
       );
       if (reuse) {
-        if (!this.isEnabled(appId)) throw new Error(`App ${appId} is disabled. Enable it from Settings → Apps or run \`aura app enable ${appId}\`.`);
+        if (!this.isEnabled(appId)) throw new Error(`App ${appId} is disabled. Enable it from Settings → Apps or run \`aura enable app ${appId}\`.`);
         if (reuse.state === 'paused' || reuse.state === 'stopped') await this.resume(reuse.instanceId);
         return reuse.instanceId;
       }
@@ -2037,7 +2037,7 @@ export class AppManager {
     //    squatter — SIGKILL it. Runs unconditionally (including when trackedPids
     //    is empty) so a fresh AppManager wipes any zombies from a previous
     //    generation. Only cmdlines matching apps/com.aura.* qualify, so a user
-    //    debugging inside `aura inst shell` won't be killed.
+    //    debugging inside `aura exec inst` won't be killed.
     //
     //    IMPORTANT: include ProotRunner's in-flight PIDs too. During spawn(),
     //    waitHealthy can poll for up to 30s before the instance entry's `pid`

@@ -235,12 +235,24 @@ function section(title: string, body: Record<string, string>): void {
   console.log();
 }
 
+/**
+ * `aura info` — and its old name `aura whereami`, kept as a hidden alias
+ * (see lib/deprecate.ts). Both run the same report.
+ */
 export function registerWhereami(program: Command): void {
-  program
-    .command('whereami')
-    .description('Detailed snapshot of the current execution context: layers, OS, CPU, memory, namespaces, AuraOS env, mounts, tools.')
-    .option('--json', 'Emit raw JSON instead of the formatted report')
-    .action((opts: { json?: boolean }) => {
+  for (const name of ['info', 'whereami']) {
+    program
+      .command(name)
+      .summary('Where am I? Snapshot of the execution context (layers, OS, env, mounts, tools).')
+      .description('Where am I? Snapshot of the current execution context: layers, OS, CPU, memory, namespaces, AuraOS env, mounts, tools.')
+      .option('--json', 'Emit raw JSON instead of the formatted report')
+      .action((opts: { json?: boolean }) => { whereami(opts); });
+  }
+}
+
+function whereami(opts: { json?: boolean }): void {
+  {
+    {
       const proot     = detectProot();
       const container = detectContainer();
       const virt      = detectVirt();
@@ -266,7 +278,7 @@ export function registerWhereami(program: Command): void {
         return;
       }
 
-      console.log(color.bold('AuraOS — whereami'));
+      console.log(color.bold('AuraOS — info'));
       console.log(color.dim('  snapshot at ' + data.time['now']));
       console.log();
 
@@ -298,5 +310,6 @@ export function registerWhereami(program: Command): void {
       section('Mounts of interest', data.mounts);
       section('Paths', data.paths);
       section('Capabilities on PATH', data.capabilities);
-    });
+    }
+  }
 }

@@ -1,3 +1,10 @@
+const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
+
+/** Printable width of a string, ignoring SGR color sequences. */
+export function visibleWidth(s: string): number {
+  return s.replace(ANSI_SGR_RE, '').length;
+}
+
 const useColor = process.stdout.isTTY && process.env['NO_COLOR'] !== '1';
 
 function ansi(code: string): (s: string) => string {
@@ -19,11 +26,16 @@ export const color = {
 export function table(rows: Array<Record<string, string | number>>, columns?: string[]): string {
   if (rows.length === 0) return color.dim('(no rows)');
   const cols = columns ?? Object.keys(rows[0] ?? {});
+  // Pad by VISIBLE width: a colored cell (STATE, EN, INSTALLED…) carries SGR
+  // bytes that String.length counts but the terminal doesn't, which pushed
+  // every following column out of line on a TTY. The last column is not
+  // padded, so rows carry no trailing blanks.
   const widths = cols.map((c) =>
-    Math.max(c.length, ...rows.map((r) => String(r[c] ?? '').length)),
+    Math.max(c.length, ...rows.map((r) => visibleWidth(String(r[c] ?? '')))),
   );
+  const pad = (cell: string, w: number) => cell + ' '.repeat(Math.max(0, w - visibleWidth(cell)));
   const fmtRow = (cells: string[]) =>
-    cells.map((cell, i) => cell.padEnd(widths[i] ?? 0)).join('  ');
+    cells.map((cell, i) => (i === cells.length - 1 ? cell : pad(cell, widths[i] ?? 0))).join('  ');
   const header = color.bold(fmtRow(cols));
   const body = rows.map((r) => fmtRow(cols.map((c) => String(r[c] ?? ''))));
   return [header, ...body].join('\n');
