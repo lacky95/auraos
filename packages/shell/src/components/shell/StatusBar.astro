@@ -200,6 +200,7 @@ let initialTimeZone: string = '';
 
 <script>
   import * as workspaceClient from '../../lib/workspaceClient';
+  import { registerDropTarget } from '../../lib/windowDrag';
   import * as viewportClient from '../../lib/viewportClient';
   import { queueViewportBroadcast } from '../../lib/viewportBroadcaster.ts';
   import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
@@ -715,6 +716,47 @@ let initialTimeZone: string = '';
     bundleEl.dataset['open'] = String(next);
     collapseBtn.setAttribute('aria-expanded', String(next));
   });
+  // Window drag & drop (lib/windowDrag.ts): dropping a window on a numbered
+  // pill moves it to that workspace. Pills are re-rendered constantly, so the
+  // target resolves by `data-ws-id` from the element under the pointer.
+  registerDropTarget({
+    id: 'workspace-pill',
+    resolve(el, src) {
+      const pill = el.closest<HTMLElement>('.ws-pill[data-ws-id]');
+      const wsId = pill?.dataset['wsId'];
+      if (!pill || !wsId) return null;
+      if (workspaceClient.findOwner(src.viewId)?.id === wsId) return null;
+      return { el: pill, data: wsId };
+    },
+    drop(src, data) {
+      return workspaceClient.addMemberToWorkspace(data as string, src.viewId);
+    },
+  });
+  // Folded bar: the pills live in the dropdown. Hovering the ▦ button for a
+  // moment during a drag opens it so the pills become reachable drop targets.
+  let dragOpenTimer: ReturnType<typeof setTimeout> | null = null;
+  registerDropTarget({
+    id: 'workspace-dropdown-open',
+    resolve(el) {
+      if (!collapseBtn || !bundleEl || bundleEl.dataset['fold'] !== 'all') return null;
+      return el.closest('#ws-collapse-btn') ? { el: collapseBtn, data: null } : null;
+    },
+    enter() {
+      if (dragOpenTimer) clearTimeout(dragOpenTimer);
+      dragOpenTimer = setTimeout(() => {
+        dragOpenTimer = null;
+        if (!bundleEl || bundleEl.dataset['open'] === 'true') return;
+        pickAnchor();
+        bundleEl.dataset['open'] = 'true';
+        collapseBtn?.setAttribute('aria-expanded', 'true');
+      }, 500);
+    },
+    leave() {
+      if (dragOpenTimer) { clearTimeout(dragOpenTimer); dragOpenTimer = null; }
+    },
+    drop() { /* opening the dropdown is the whole effect */ },
+  });
+
   // Re-pick anchor if the viewport changes while the popover is open
   // (responsive resize, zoom changes, etc.).
   window.addEventListener('resize', () => {

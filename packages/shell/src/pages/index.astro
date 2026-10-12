@@ -235,6 +235,8 @@ const ssrVisibleViews = initialViews
   import { osEvents } from '../lib/osEvents.ts';
   import { registerUiCommand, registerSnapshotPart, invokeLocal, startUiCommandListener } from '../lib/uiCommands.ts';
   import { markLaunchedHere } from '../lib/launchOrigin.ts';
+  import { beginWindowDrag, registerDropTarget, setLayoutDragPolicy, getLayoutDragPolicy } from '../lib/windowDrag.ts';
+  import { dragPolicyFor } from '../lib/layoutDragPolicies.ts';
   import {
     queueViewportBroadcast,
     observeIframe,
@@ -1406,6 +1408,37 @@ const ssrVisibleViews = initialViews
 
   const staticLayout  = document.getElementById('static-layout')!;
   const dynamicLayout = document.getElementById('dynamic-layout')!;
+
+  // ---- Window drag & drop (lib/windowDrag.ts) ----
+  // Title-bar drag shows a small ghost; the active layout's policy decides
+  // whether drags are allowed at all and what dropping on another window
+  // does. Workspace pills register their own drop target in StatusBar.astro.
+  dynamicLayout.addEventListener('pointerdown', (e) => {
+    const t = e.target as HTMLElement | null;
+    const chrome = t?.closest<HTMLElement>('.slot-chrome');
+    if (!chrome || t!.closest('button, input, textarea, select')) return;
+    const slot = chrome.closest<HTMLElement>('.app-slot[data-view-id]');
+    const viewId = slot?.dataset['viewId'];
+    if (!slot || !viewId || slot.dataset['maximized'] === 'true') return;
+    const title = (slot.querySelector('.slot-window-name')?.textContent?.trim()
+      || slot.querySelector('.slot-title-trail')?.textContent?.trim()
+      || slot.querySelector('.slot-title-id')?.textContent?.trim()
+      || viewId);
+    beginWindowDrag(e, { viewId, title }, slot);
+  });
+  registerDropTarget({
+    id: 'slot',
+    resolve(el, src) {
+      if (!getLayoutDragPolicy()?.slotDrop) return null;
+      const slot = el.closest<HTMLElement>('#dynamic-layout > .app-slot[data-view-id]');
+      const viewId = slot?.dataset['viewId'];
+      if (!slot || !viewId || viewId === src.viewId) return null;
+      return { el: slot, data: viewId };
+    },
+    drop(src, data) {
+      return getLayoutDragPolicy()?.slotDrop?.(src, data as string);
+    },
+  });
   const focusView     = document.getElementById('focus-view')!;
   const focusFrame    = document.getElementById('focus-frame') as HTMLIFrameElement;
   // Persistent (never torn down) — observe it once so a focused/nav app refits
@@ -2164,6 +2197,7 @@ const ssrVisibleViews = initialViews
     //   columns    — one row, one column per view (horizontal strip)
     // Unknown ids fall back to `tiling`.
     const layoutId = wsState?.workspaces.find(w => w.id === wsState.activeWorkspaceId)?.layoutId ?? 'tiling';
+    setLayoutDragPolicy(dragPolicyFor(layoutId));
 
     // Reset stack-mode container override before each layout-strategy
     // branch; only the stack branch sets it back. Without this, switching
@@ -3449,6 +3483,52 @@ const ssrVisibleViews = initialViews
   }
   body.aura-stack-dragging .app-slot iframe {
     pointer-events: none;
+  }
+
+  /* Generic window drag (lib/windowDrag.ts): small fixed-size ghost that
+     follows the cursor. --aura-color-text gives a white border on dark
+     themes and a dark, contrasting one on light themes. */
+  body.aura-window-dragging {
+    cursor: grabbing;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  body.aura-window-dragging .app-slot iframe { pointer-events: none; }
+  .aura-drag-ghost {
+    position: fixed;
+    left: 0;
+    top: 0;
+    width: 160px;
+    height: 96px;
+    z-index: 2000;
+    pointer-events: none;
+    border: 2px solid var(--aura-color-text);
+    background: color-mix(in srgb, var(--aura-color-surface) 85%, transparent);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  }
+  .aura-drag-ghost-title {
+    height: 20px;
+    padding: 0 6px;
+    display: flex;
+    align-items: center;
+    background: var(--aura-color-surface-2);
+    border-bottom: 1px solid var(--aura-color-text);
+    color: var(--aura-color-text);
+    font-family: var(--aura-font-mono);
+    font-size: 0.65rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .app-slot[data-drag-source="true"] { opacity: 0.5; }
+  .app-slot[data-drop-hover="true"],
+  .ws-pill[data-drop-hover="true"],
+  .ws-collapse-btn[data-drop-hover="true"] {
+    outline: 2px solid var(--aura-color-primary);
+    outline-offset: -2px;
+    box-shadow: var(--aura-glow-primary);
   }
 
   /* Free-Window cursor affordance. The chrome (title bar) shows an open
