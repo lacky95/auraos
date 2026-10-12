@@ -1,6 +1,8 @@
 import { defineConfig } from 'astro/config';
 import node from '@astrojs/node';
 import { auraAppIntegration , resolveAppPort } from '@aura/app-sdk/integration';
+import { fileURLToPath } from 'node:url';
+import { shellWriteIgnore } from './watch-ignore.mjs';
 
 // APP_PORT when the OS assigned one, otherwise a free port picked at
 // startup — so running this app by hand (or `astro check`) never fights
@@ -47,7 +49,14 @@ export default defineConfig({
     // restarts the dev server and recompiles it (same for new src/pages routes).
     // The terminal's own PTY WebSocket on `/ws` is unaffected (handled in the
     // ptyWsIntegration above, with its own upgrade hook).
-    server: { hmr: false },
+    // watch.ignored: programs run from the shells hosted here write into this
+    // tree (dotfiles, dot-dirs, logs, tmux socket dirs); none of that may
+    // reload or restart the dev server under the live sessions — see
+    // watch-ignore.mjs.
+    server: {
+      hmr: false,
+      watch: { ignored: [shellWriteIgnore(fileURLToPath(new URL('.', import.meta.url)))] },
+    },
     // Force pre-bundle for the xterm packages. Vite's dep scanner picks them
     // up from the `<script>` block in index.astro on FIRST server start, but
     // subsequent re-scans (triggered by the "optimized dependencies changed
