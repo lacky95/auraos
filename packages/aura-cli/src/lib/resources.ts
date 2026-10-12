@@ -165,7 +165,7 @@ const apps: ResourceDef<AppDto> = {
   name: 'apps',
   aliases: ['app'],
   description: 'Installed apps (manifest + instance count)',
-  verbs: ['get', 'describe', 'run', 'stop', 'restart', 'delete', 'install', 'enable', 'disable', 'grant', 'revoke'],
+  verbs: ['get', 'describe', 'run', 'start', 'stop', 'restart', 'delete', 'install', 'enable', 'disable', 'grant', 'revoke'],
   nameOf: (a) => a.manifest.id,
   list: async () => fetchApps(),
   watchable: true,
@@ -187,7 +187,7 @@ const instances: ResourceDef<InstanceRow> = {
   name: 'instances',
   aliases: ['instance', 'inst'],
   description: 'Running app instances (sandboxes); subresource: sidecars',
-  verbs: ['get', 'describe', 'stop', 'kill', 'pause', 'resume', 'exec', 'logs'],
+  verbs: ['get', 'describe', 'start', 'stop', 'restart', 'kill', 'pause', 'resume', 'open', 'exec', 'logs'],
   scopes: ['app'],
   nameOf: (i) => i.instanceId,
   watchable: true,
@@ -320,7 +320,7 @@ const services: ResourceDef<ServiceRow> = {
   name: 'services',
   aliases: ['service', 'svc'],
   description: 'Long-running daemons on the master (sshd, code-server, …)',
-  verbs: ['get', 'describe', 'start', 'stop', 'install', 'delete', 'logs'],
+  verbs: ['get', 'describe', 'start', 'stop', 'restart', 'install', 'delete', 'logs'],
   nameOf: (s) => s.name,
   list: async () => {
     ensureRegistry();

@@ -9,9 +9,9 @@ import type { Command } from 'commander';
 import { RESOURCES, findResource, resourcesFor, shortName, sidecarId, sidecarMatches, type AppDto, type SidecarDto } from '../src/lib/resources.js';
 import { renderObjects, parseOutput } from '../src/lib/output.js';
 import { table, visibleWidth } from '../src/lib/format.js';
-import { matchInstance } from '../src/lib/resolve.js';
+import { matchInstance, ownersOf } from '../src/lib/resolve.js';
 import { LEGACY_GROUPS, LEGACY_HINTS } from '../src/lib/deprecate.js';
-import { buildProgram, completions, HELP_GROUPS } from '../src/program.js';
+import { buildProgram, completions, HELP_SECTIONS, RESOURCE_VERBS } from '../src/program.js';
 
 const hidden = (c: Command) => Boolean((c as unknown as { _hidden?: boolean })._hidden);
 
@@ -147,17 +147,65 @@ test('legacy groups stay registered but hidden; every legacy subcommand has a hi
   }
 });
 
-test('main help lists every grouped command, every resource type and no legacy group', () => {
+test('every command in the main help exists in exactly that constellation', () => {
   const program = buildProgram();
-  const help = program.helpInformation();
-  for (const g of HELP_GROUPS) {
-    for (const n of g.commands) {
-      assert.ok(program.commands.some((c) => c.name() === n), `help group lists unknown command '${n}'`);
-      assert.match(help, new RegExp(`^  ${n}\\b`, 'm'), `help misses '${n}'`);
+  const find = (c: Command, name: string) => c.commands.find((x) => x.name() === name || x.aliases().includes(name));
+  const hasFlag = (c: Command, flag: string) => c.options.some((o) => o.long === flag || o.short === flag);
+  for (const { lines } of HELP_SECTIONS) {
+    for (const [usage] of lines) {
+      const [aura, verbTok, ...rest] = usage.split(' ');
+      assert.equal(aura, 'aura', usage);
+      for (const verb of verbTok!.split('|')) {
+        const cmd = find(program, verb);
+        assert.ok(cmd, `${usage}: no command '${verb}'`);
+        assert.ok(!hidden(cmd!), `${usage}: '${verb}' is hidden`);
+        for (const t of rest.filter((x) => x.startsWith('-') && x !== '--')) {
+          assert.ok(hasFlag(cmd!, t), `${usage}: '${verb}' has no flag ${t}`);
+        }
+        if (RESOURCE_VERBS.includes(cmd!.name())) {
+          const res = rest[0]!;
+          if (res.startsWith('<')) continue;                  // describe <resource> <name>
+          for (const alt of res.split('|')) {
+            if (cmd!.name() === 'install' && alt === 'sdk') continue;
+            const def = findResource(alt);
+            assert.ok(def, `${usage}: unknown resource '${alt}'`);
+            assert.ok(def!.verbs.includes(cmd!.name()), `${usage}: ${def!.name} does not accept '${cmd!.name()}'`);
+          }
+          if (rest[2] === 'sidecars') assert.equal(findResource(rest[0]!)?.name, 'instances', usage);
+        } else if (cmd!.commands.length && rest[0] && /^[a-z]/.test(rest[0])) {
+          assert.ok(find(cmd!, rest[0]), `${usage}: '${verb}' has no subcommand '${rest[0]}'`);
+        }
+      }
     }
   }
-  for (const r of RESOURCES) assert.match(help, new RegExp(`^  ${r.name}\\s`, 'm'), `help misses resource ${r.name}`);
-  for (const g of LEGACY_GROUPS.filter((x) => x !== 'whereami')) assert.doesNotMatch(help, new RegExp(`^  ${g}\\b`, 'm'));
+});
+
+test('main help: every visible command is listed, plus every resource short name; no legacy group', () => {
+  const program = buildProgram();
+  const help = program.helpInformation();
+  const listed = new Set(HELP_SECTIONS.flatMap((s) => s.lines.flatMap(([u]) => u.split(' ')[1]!.split('|'))));
+  for (const c of program.commands) {
+    if (hidden(c) || c.name() === 'help') continue;
+    const names = [c.name(), ...c.aliases()];
+    assert.ok(names.some((n) => listed.has(n)), `visible command '${c.name()}' is missing from the main help`);
+  }
+  assert.match(help, new RegExp(`Short names: ${RESOURCES.map((r) => shortName(r)).join(' ')}`));
+  for (const g of LEGACY_GROUPS.filter((x) => x !== 'whereami')) assert.doesNotMatch(help, new RegExp(`^  aura ${g} `, 'm'));
+  assert.match(help, /^Usage: aura <command> \[resource\] \[name\.\.\.\] \[flags\]$/m);
+});
+
+test('ownersOf: unique, ambiguous, none', () => {
+  const mounts = [
+    { instanceId: 'a.a', id: 'x.x', targetAppId: 'x.x' },
+    { instanceId: 'a.a', id: 'x.x:data', targetAppId: 'x.x' },
+    { instanceId: 'b.b-2', id: 'y.y', targetAppId: 'y.y' },
+    { instanceId: 'c.c', id: 'y.y', targetAppId: 'y.y' },
+  ];
+  const by = (id: string) => ownersOf(mounts, id, (m) => m.instanceId, (m, w) => m.id === w || m.targetAppId === w);
+  assert.deepEqual(by('x.x'), ['a.a'], 'source + data of one instance count once');
+  assert.deepEqual(by('x.x:data'), ['a.a']);
+  assert.deepEqual(by('y.y'), ['b.b-2', 'c.c']);
+  assert.deepEqual(by('z.z'), []);
 });
 
 test('completion: commands, resources per verb, subresource, classic subcommands', async () => {

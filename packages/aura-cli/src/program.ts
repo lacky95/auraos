@@ -26,76 +26,121 @@ import { registerSdk } from './commands/sdk.js';
 import { registerVerbs, setProgramFactory } from './commands/verbs.js';
 import { LEGACY_GROUPS, markLegacy } from './lib/deprecate.js';
 import { color, visibleWidth } from './lib/format.js';
-import { RESOURCES, fetchApps, findResource, liveInstances } from './lib/resources.js';
+import { RESOURCES, fetchApps, findResource, liveInstances, shortName } from './lib/resources.js';
 
 export const VERSION = '0.1.0';
 
-/** Main-help sections, in display order. Visible commands not listed land in "Other". */
-export const HELP_GROUPS: Array<{ title: string; commands: string[] }> = [
-  { title: 'Basic commands', commands: ['ps', 'run', 'jump', 'info', 'status'] },
-  {
-    title: 'Resource commands (kubectl-style: aura <verb> <resource> [name])',
-    commands: ['get', 'describe', 'stop', 'start', 'restart', 'kill', 'pause', 'resume', 'delete',
-      'install', 'enable', 'disable', 'open', 'exec', 'logs', 'grant', 'revoke', 'set', 'api-resources'],
-  },
-  { title: 'Tools', commands: ['mount', 'port', 'cap', 'nexus', 'dev', 'events', 'data', 'completion'] },
+/**
+ * The main help page: one task-oriented list. Every line is a command that
+ * exists in exactly that form — test/kubectl.test.ts checks each one against
+ * the command tree and the resource registry, so this can't silently drift.
+ */
+export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]>; note?: string }> = [
+  { title: 'Basics', lines: [
+    ['aura ps', 'Running instances (= aura get inst)'],
+    ['aura run <app>', 'Start an app, print instance id'],
+    ['aura jump [app|inst]', 'Shell into an app sandbox (picker if empty)'],
+    ['aura jump <app> --sidecar <name>', 'Shell into a sidecar'],
+    ['aura status', 'Health: shell, apps, capabilities, services'],
+    ['aura info', 'Execution context: layers, OS, env, mounts'],
+    ['aura dev new', 'Start the create-new-app wizard'],
+  ] },
+  { title: 'Inspect', note: 'Output for get: -o wide | json | yaml | name', lines: [
+    ['aura get apps [name]', 'Installed apps + instance count'],
+    ['aura get inst [name]', 'Running instances'],
+    ['aura get inst <name> sidecars', 'Sidecars of one instance + their IDs'],
+    ['aura get sidecars [name]', 'All sidecars'],
+    ['aura get act [name]', 'Open windows of running instances'],
+    ['aura get caps [name]', 'Shareable CLI capabilities'],
+    ['aura get svc [name]', 'Services on the master (sshd, code-server …)'],
+    ['aura get mounts [name]', 'Cross-app mounts'],
+    ['aura get ports [name]', 'Port exposes (app-to-app or host)'],
+    ['aura get scopes [name]', 'Install scopes (system / global / user)'],
+    ['aura get themes [name]', 'Theme presets, ACTIVE marks the one in use'],
+    ['aura get perms [app]', 'Declared manifest permissions'],
+    ['aura describe <resource> <name>', 'Full YAML of one resource (-o json)'],
+    ['aura logs inst <name> -c <sidecar>', 'Logs of an instance sidecar'],
+    ['aura logs svc <name>', 'Logs of a service'],
+    ['aura events', 'Live stream of OS state changes'],
+  ] },
+  { title: 'Lifecycle', lines: [
+    ['aura start|stop|restart app <app...>', 'Start, stop or restart an app (all its instances)'],
+    ['aura start|stop|restart inst <inst...>', 'Start (resume), stop or restart single instances'],
+    ['aura start|stop|restart svc <svc...>', 'Start, stop or restart services'],
+    ['aura pause inst <inst...>', 'Pause instances (onPause)'],
+    ['aura resume inst <inst...>', 'Resume paused instances (onResume)'],
+    ['aura kill inst <inst...>', 'Force-kill (SIGKILL, no hooks)'],
+    ['aura enable app <app...>', 'Re-arm autoStart/warmPool, show in dock + launcher'],
+    ['aura disable app <app...>', 'Stop all instances, hide from dock + launcher'],
+  ] },
+  { title: 'Install & remove', lines: [
+    ['aura install app <dir>', 'Install an app from a directory'],
+    ['aura install cap [names...]', 'Install capabilities (picker if empty)'],
+    ['aura install svc <name>', 'Install a service'],
+    ['aura install sdk', 'Install the @aura/* SDK packages'],
+    ['aura rm app <app...>', 'Delete apps'],
+    ['aura rm act <act...>', 'Close windows'],
+    ['aura rm svc <svc...>', 'Uninstall services'],
+    ['aura rm cap <cap...>', 'Uninstall capabilities'],
+    ['aura rm mount <mount...>', 'Detach mounts (-i <inst> if several have it)'],
+    ['aura rm port <port...>', 'Remove port exposes (ids from aura get ports)'],
+  ] },
+  { title: 'Connect', lines: [
+    ['aura exec inst <name>', 'Shell into an instance'],
+    ['aura exec inst <name> -c <sidecar>', 'Shell into a sidecar'],
+    ['aura exec inst <name> -- <cmd...>', 'Run a command'],
+    ['aura open inst <name>', 'Open a new window on an instance'],
+    ['aura mount ...', "Mount another app's files, live"],
+    ['aura port ...', 'Expose a TCP port to an app or the host'],
+    ['aura data ...', 'Query / write / watch content providers'],
+  ] },
+  { title: 'Access', lines: [
+    ['aura grant perms <app> [names...]', 'Grant permissions (picker if empty)'],
+    ['aura grant caps <app> [names...]', 'Grant capabilities (picker if empty)'],
+    ['aura revoke perms <app> <names...>', 'Revoke permissions'],
+    ['aura revoke caps <app> <names...>', 'Revoke capabilities'],
+    ['aura cap ...', 'Manage the capability registry'],
+  ] },
+  { title: 'Ecosystem & dev', lines: [
+    ['aura nexus ...', 'Find, install, update, publish apps'],
+    ['aura dev ...', 'Scaffold, validate, run apps standalone'],
+  ] },
+  { title: 'Settings', lines: [
+    ['aura set theme <name>', 'Switch the active theme'],
+    ['aura completion bash|zsh', 'eval "$(aura completion bash)"'],
+    ['aura api-resources', 'All resource types, short names, verbs'],
+  ] },
 ];
 
-const EXAMPLES = [
-  'aura ps                                       # running instances',
-  'aura run com.aura.notepad                     # start an app',
-  'aura get apps                                 # installed apps (-o wide|json|yaml)',
-  'aura get inst com.aura.browser-2 sidecars     # sidecars of an instance + their IDs',
-  'aura jump io.lakner.hermes --sidecar runtime  # shell inside that sidecar',
-  'aura describe inst com.aura.terminal',
-  'aura stop app com.aura.notepad',
-];
+/** Verbs that take `<resource>` as their first argument (completion, tests). */
+export const RESOURCE_VERBS = ['get', 'describe', 'start', 'stop', 'restart', 'kill', 'pause', 'resume', 'delete',
+  'install', 'enable', 'disable', 'open', 'exec', 'logs', 'grant', 'revoke', 'set'];
+
+const HELP_COL = 41;
 
 function rootHelp(program: Command, helper: Help): string {
-  const visible = program.commands.filter((c) => !(c as unknown as { _hidden?: boolean })._hidden);
-  const byName = new Map(visible.map((c) => [c.name(), c]));
-  const term = (c: Command) => helper.subcommandTerm(c).replace(' [options]', '');
-  const width = Math.max(...visible.map((c) => visibleWidth(term(c)))) + 2;
-  const line = (left: string, right: string) => `  ${left.padEnd(width)}${right}`;
-
-  // One line per command: the explicit summary, else the description's first sentence.
-  const blurb = (c: Command) => (c.summary() || c.description()).split(/(?<=\.)\s/)[0]!;
-
+  const line = (left: string, right: string) => `  ${left}${' '.repeat(Math.max(2, HELP_COL - visibleWidth(left)))}${right}`;
   const out: string[] = [
-    `${color.bold('aura')} — AuraOS control CLI`,
+    `${color.bold('aura')} — control AuraOS from the terminal`,
     '',
-    `Usage: aura <command> [options]`,
+    'Usage: aura <command> [resource] [name...] [flags]',
+    '       aura <command> --help',
     '',
   ];
-  const listed = new Set<string>();
-  for (const g of HELP_GROUPS) {
-    const cmds = g.commands.map((n) => byName.get(n)).filter((c): c is Command => Boolean(c));
-    if (cmds.length === 0) continue;
-    out.push(color.bold(`${g.title}:`));
-    for (const c of cmds) { out.push(line(term(c), blurb(c))); listed.add(c.name()); }
-    out.push('');
+  for (const s of HELP_SECTIONS) {
+    out.push('', color.bold(s.title));
+    for (const [usage, desc] of s.lines) out.push(line(usage, desc));
+    if (s.note) out.push(`  ${color.dim(s.note)}`);
   }
-  const rest = visible.filter((c) => !listed.has(c.name()) && c.name() !== 'help');
-  if (rest.length) {
-    out.push(color.bold('Other:'));
-    for (const c of rest) out.push(line(term(c), blurb(c)));
-    out.push('');
+  // From the registry, so a new resource type shows up here by itself.
+  out.push('', `${color.bold('Short names:')} ${RESOURCES.map((r) => shortName(r)).join(' ')}`);
+  out.push('', color.bold('Flags'));
+  for (const o of program.options.filter((x) => x.long !== '--version')) {
+    const desc = o.long === '--shell-url' ? 'Default: $OS_API_BASE or http://127.0.0.1:3000' : o.description;
+    out.push(line(helper.optionTerm(o), desc));
   }
-
-  out.push(color.bold('Resource types') + color.dim('  (aura api-resources — short names work everywhere):'));
-  const rw = Math.max(...RESOURCES.map((r) => r.name.length)) + 2;
-  for (const r of RESOURCES) out.push(`  ${r.name.padEnd(rw)}${color.dim(r.aliases.join(', ').padEnd(28))}${r.description}`);
-  out.push('');
-
-  out.push(color.bold('Examples:'));
-  for (const e of EXAMPLES) out.push(`  ${e}`);
-  out.push('');
-
-  out.push(color.bold('Global options:'));
-  for (const o of program.options) out.push(line(helper.optionTerm(o), o.description));
-  out.push(line('-h, --help', 'Show help; `aura <command> --help` for one command'));
-  out.push('');
-  out.push(color.dim('The pre-kubectl groups (aura app/inst/activity/service/theme/scope/whereami) still work, hidden.'));
+  out.push(line('-V, --version', 'Print version'));
+  out.push(line('-h, --help', 'Show help'));
   return out.join('\n') + '\n';
 }
 
@@ -124,7 +169,7 @@ export async function completions(program: Command, rawWords: string[]): Promise
   const verbCmd = program.commands.find((c) => c.name() === verb || c.aliases().includes(verb));
   if (!verbCmd) return [];
 
-  if (HELP_GROUPS[1]!.commands.includes(verbCmd.name()) && verbCmd.name() !== 'api-resources' && verbCmd.name() !== 'run') {
+  if (RESOURCE_VERBS.includes(verbCmd.name())) {
     if (words.length === 1) {
       const names = RESOURCES.filter((r) => r.verbs.includes(verbCmd.name())).flatMap((r) => [r.name, ...r.aliases]);
       return verbCmd.name() === 'install' ? [...names, 'sdk'] : names;

@@ -39,6 +39,11 @@ check "status"                     $AURA status
 check "mount ls --help"            $AURA mount ls --help
 check "completion bash"            $AURA completion bash
 check "__complete get inst"        $AURA __complete get inst
+check "get sidecars"               $AURA get sidecars
+check "get perms"                  $AURA get perms
+for v in "start app" "start inst" "restart inst" "restart svc" "open inst" "logs svc" "rm mount" "rm port" "install cap"; do
+  check "$v --help" $AURA $v --help
+done
 # Expected failures must fail.
 if $AURA get nosuch >/dev/null 2>&1; then fail=$((fail+1)); echo "FAIL: get nosuch should exit non-zero"; else pass=$((pass+1)); fi
 if $AURA stop sc x >/dev/null 2>&1; then fail=$((fail+1)); echo "FAIL: stop sc should exit non-zero"; else pass=$((pass+1)); fi

@@ -14,11 +14,12 @@ import { spawn } from 'node:child_process';
 import { api, shellUrl, subscribeEvents } from '../lib/client.js';
 import { color, fail, table } from '../lib/format.js';
 import { enterSidecar } from '../lib/enter-sandbox.js';
+import { BACK, PromptCancelled, promptConfirm, promptMultiSelect } from '../lib/prompts.js';
 import { parseOutput, renderDocument, renderObjects, type OutputFormat } from '../lib/output.js';
-import { resolveInstance, resolveSidecar } from '../lib/resolve.js';
+import { ownersOf, resolveInstance, resolveSidecar } from '../lib/resolve.js';
 import {
-  RESOURCES, findResource, fetchSidecars, resourcesFor, shortName, sidecarId, sidecarMatches,
-  type Ctx, type ResourceDef,
+  RESOURCES, fetchApps, findResource, fetchSidecars, liveInstances, resourcesFor, shortName, sidecarId, sidecarMatches,
+  type Ctx, type MountDto, type PortDto, type ResourceDef,
 } from '../lib/resources.js';
 
 // ─── Delegation ─────────────────────────────────────────────────────────────
@@ -215,7 +216,9 @@ async function execCmd(resource: string, name: string, cmd: string[], opts: { co
 
 async function logsCmd(resource: string, name: string, opts: { container?: string; follow?: boolean; tail?: string }): Promise<void> {
   const def = resourceOrFail(resource, 'logs');
-  if (def.name === 'services') return dispatch(['service', 'logs', name, ...(opts.follow ? ['-f'] : [])]);
+  if (def.name === 'services') {
+    return dispatch(['service', 'logs', name, ...(opts.follow ? ['-f'] : []), ...(opts.tail ? ['--tail', opts.tail] : [])]);
+  }
   if (def.name === 'sidecars') fail('use: aura logs inst <instanceId> -c <sidecar>');
   const inst = await resolveInstance(name);
   if (!opts.container) return dispatch(['inst', 'logs', inst.instanceId, ...(opts.follow ? ['-f'] : [])]);
@@ -237,6 +240,102 @@ async function logsCmd(resource: string, name: string, opts: { container?: strin
       `docker logs failed: ${err.message}\n  Hint: reading sidecar logs needs the docker CLI and a bound /var/run/docker.sock.`,
     ));
   });
+}
+
+// ─── start / restart / rm by id ─────────────────────────────────────────────
+
+/**
+ * `aura start inst <id>`: a paused instance is resumed; the id of a stopped
+ * single-instance app (whose instance id IS the app id) starts the app.
+ * Anything else has no "start" — stopped instances are gone, not parked.
+ */
+async function startInstance(token: string): Promise<void> {
+  const apps = await fetchApps();
+  const inst = apps.flatMap((a) => a.instances).find((i) => i.instanceId === token);
+  if (inst) {
+    if (inst.state === 'paused') return dispatch(['inst', 'resume', inst.instanceId]);
+    if (['resumed', 'started', 'created', 'resuming', 'starting', 'creating'].includes(inst.state)) {
+      console.log(`${color.dim('•')} ${inst.instanceId} is already running (${inst.state})`);
+      return;
+    }
+    fail(`${inst.instanceId} is ${inst.state} — use: aura restart inst ${inst.instanceId}`);
+  }
+  const app = apps.find((a) => a.manifest.id === token);
+  if (app && (app.manifest.instanceMode ?? 'single') === 'single') return dispatch(['app', 'start', token]);
+  if (app) fail(`${token} is a multi-instance app — start a new instance with: aura run ${token}`);
+  fail(`no instance '${token}' — stopped instances are gone; start the app again with: aura run <app>`);
+}
+
+/** Stop an instance and start a fresh one of its app (a multi-instance app gets a new id). */
+async function restartInstance(token: string): Promise<void> {
+  const inst = await resolveInstance(token);
+  await dispatch(['inst', 'stop', inst.instanceId]);
+  await dispatch(['app', 'start', inst.appId]);
+}
+
+/**
+ * The instance was inferred, not named — say which one before removing
+ * anything there: a confirm on a TTY, `-y` (or naming it with -i) otherwise.
+ */
+async function confirmInferred(what: string, owner: string, yes: boolean | undefined, nameIt: string): Promise<boolean> {
+  if (yes) return true;
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    fail(`${what} ${owner}? Confirm with -y, or name it: ${nameIt}`);
+  }
+  try {
+    const ok = await promptConfirm(`${what} ${color.bold(owner)}?`, false);
+    if (ok !== true) console.log(`${color.dim('•')} aborted`);
+    return ok === true;
+  } catch (err) {
+    if (err instanceof PromptCancelled) { console.log(`${color.dim('•')} aborted`); return false; }
+    throw err;
+  }
+}
+
+/** `aura rm mount <id>` without -i: the one instance that has it, else ask. */
+async function deleteMountById(id: string, yes: boolean | undefined): Promise<void> {
+  const all = (await findResource('mounts')!.list({})) as MountDto[];
+  // Sidecar consumers (`<inst>--<sc>`) are listed too, but detached through their app.
+  const owners = ownersOf(all.filter((m) => !m.instanceId.includes('--')), id, (m) => m.instanceId,
+    (m, want) => m.id === want || m.targetAppId === want);
+  if (owners.length === 0) fail(`no mount '${id}' in any running instance (see: aura get mounts)`);
+  if (owners.length > 1) fail(`'${id}' is mounted into ${owners.length} instances — pick one with -i:\n  ${owners.join('\n  ')}`);
+  if (!await confirmInferred(`Detach ${id} from`, owners[0]!, yes, `aura rm mount ${id} -i ${owners[0]}`)) return;
+  await dispatch(['mount', 'rm', id, '--instance', owners[0]!]);
+}
+
+/** `aura rm port <id>` without the owner: the one instance that has it, else ask. */
+async function deletePortById(id: string, yes: boolean | undefined): Promise<void> {
+  const all = (await findResource('ports')!.list({})) as PortDto[];
+  const owners = ownersOf(all, id, (p) => p.ownerInstanceId, (p, want) => p.id === want);
+  if (owners.length === 0) fail(`no port expose '${id}' (see: aura get ports)`);
+  if (owners.length > 1) fail(`'${id}' exists on ${owners.length} instances — use: aura rm port <ownerApp> ${id}\n  ${owners.join('\n  ')}`);
+  // The pair form names the owner by APP id (port rm resolves it to its instance).
+  const ownerApp = (await fetchApps()).flatMap((a) => a.instances).find((i) => i.instanceId === owners[0])?.appId ?? owners[0]!;
+  if (!await confirmInferred(`Remove port expose ${id} from`, owners[0]!, yes, `aura rm port ${ownerApp} ${id}`)) return;
+  try {
+    await api.del(`/api/instances/${encodeURIComponent(owners[0]!)}/ports/${encodeURIComponent(id)}`);
+  } catch (err) { fail((err as Error).message); }
+  console.log(`${color.green('✓')} removed ${id} from ${owners[0]}`);
+}
+
+/** `aura install cap` without names: pick from the registry's not-yet-installed capabilities. */
+async function installCapsInteractive(def: ResourceDef): Promise<void> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) fail('aura install cap <name…>  (no TTY for the picker)');
+  const caps = (await def.list({})) as Array<{ name: string; source: string; installed: boolean }>;
+  const available = caps.filter((c) => !c.installed);
+  if (available.length === 0) { console.log(`${color.dim('•')} every capability in the registry is already installed`); return; }
+  try {
+    const res = await promptMultiSelect<string>('Install which capabilities?', [{
+      label: 'capabilities',
+      options: available.map((c) => ({ value: c.name, label: c.name, tag: color.dim(c.source) })),
+    }], 0, { allowBack: true });
+    if (res === BACK || res.selected.length === 0) { console.log(`${color.dim('•')} nothing selected`); return; }
+    await dispatch(['cap', 'install', ...res.selected]);
+  } catch (err) {
+    if (err instanceof PromptCancelled) { console.log(`${color.dim('•')} cancelled`); return; }
+    throw err;
+  }
 }
 
 // ─── Registration ───────────────────────────────────────────────────────────
@@ -289,21 +388,32 @@ export function registerVerbs(program: Command): void {
 
   program
     .command('start <resource> <names...>')
-    .description('Start services. (Apps: aura run <appId>.)')
-    .addHelpText('after', resourcesLine('start') + examples(['aura start svc code-server']))
+    .description('Start apps (a new instance each), paused instances, or services.')
+    .addHelpText('after', resourcesLine('start') + examples([
+      'aura start app com.aura.notepad          # = aura run',
+      'aura start inst com.aura.browser-2       # resumes it if paused',
+      'aura start svc code-server',
+    ]))
     .action(async (resource: string, names: string[]) => {
-      if (findResource(resource)?.name === 'apps') fail('apps start with: aura run <appId>');
-      resourceOrFail(resource, 'start');
-      await dispatchEach(names.map((n) => ['service', 'start', n]));
+      const def = resourceOrFail(resource, 'start');
+      if (def.name === 'apps') return dispatchEach(names.map((n) => ['app', 'start', n]));
+      if (def.name === 'services') return dispatchEach(names.map((n) => ['service', 'start', n]));
+      for (const n of names) await startInstance(n);
     });
 
   program
     .command('restart <resource> <names...>')
-    .description('Stop all instances of an app and start a fresh one.')
-    .addHelpText('after', resourcesLine('restart') + examples(['aura restart app com.aura.notepad']))
+    .description('Restart apps (all instances → one fresh), single instances, or services.')
+    .addHelpText('after', resourcesLine('restart') + examples([
+      'aura restart app com.aura.notepad',
+      'aura restart inst com.aura.terminal-13   # stop it, start a fresh instance of its app',
+      'aura restart svc sshd',
+    ]))
     .action(async (resource: string, names: string[]) => {
-      resourceOrFail(resource, 'restart');
-      await dispatchEach(names.map((n) => ['app', 'restart', n]));
+      const def = resourceOrFail(resource, 'restart');
+      if (def.name === 'apps') return dispatchEach(names.map((n) => ['app', 'restart', n]));
+      if (def.name === 'services') return dispatchEach(names.flatMap((n) => [['service', 'stop', n], ['service', 'start', n]]));
+      for (const n of names) await restartInstance(n);
     });
 
   for (const [verb, desc] of [
@@ -325,13 +435,13 @@ export function registerVerbs(program: Command): void {
     .command('delete <resource> <names...>')
     .alias('rm')
     .description('Delete apps, close activities, uninstall services/capabilities, detach mounts, remove port exposes.')
-    .option('-y, --yes', 'apps: skip the confirmation prompt')
+    .option('-y, --yes', 'skip the confirmation (apps; mounts/ports whose instance was inferred)')
     .option('-i, --instance <id>', 'mounts, sc: instance (default: $APP_INSTANCE_ID)')
     .addHelpText('after', resourcesLine('delete') + examples([
       'aura delete app com.example.hello',
       'aura delete act act-12',
-      'aura delete mount com.example.hello -i com.aura.terminal',
-      'aura delete port com.aura.browser into-5173      # <ownerApp> <portId>',
+      'aura rm mount com.example.hello                  # the instance that has it (-i when several do)',
+      'aura rm port into-5173                           # ids from: aura get ports',
       'aura delete sc worker-7                          # an OS sidecar of the app you are in',
     ]))
     .action(async (resource: string, names: string[], opts: { yes?: boolean; instance?: string }) => {
@@ -342,12 +452,22 @@ export function registerVerbs(program: Command): void {
         case 'services':     return dispatchEach(names.map((n) => ['service', 'uninstall', n]));
         case 'capabilities': return dispatchEach(names.map((n) => ['cap', 'remove', n]));
         case 'mounts': {
-          const inst = await instanceScope(opts.instance);
-          return dispatch(['mount', 'rm', ...names, ...(inst ? ['--instance', inst] : [])]);
+          const scope = opts.instance ?? process.env['APP_INSTANCE_ID'];
+          if (scope) {
+            const inst = await instanceScope(scope);
+            return dispatch(['mount', 'rm', ...names, '--instance', inst!]);
+          }
+          for (const n of names) await deleteMountById(n, opts.yes);
+          return;
         }
-        case 'ports':
-          if (names.length !== 2) fail('aura delete port <ownerApp> <portId>  (ids from: aura get ports)');
-          return dispatch(['port', 'rm', names[0]!, names[1]!]);
+        case 'ports': {
+          // Old pair form `<ownerApp> <portId>` still works.
+          if (names.length === 2 && (await fetchApps()).some((a) => a.manifest.id === names[0])) {
+            return dispatch(['port', 'rm', names[0]!, names[1]!]);
+          }
+          for (const n of names) await deletePortById(n, opts.yes);
+          return;
+        }
         case 'sidecars': {
           const instToken = opts.instance ?? process.env['APP_INSTANCE_ID'];
           if (!instToken) fail('aura delete sc <id> -i <instance>');
@@ -375,6 +495,7 @@ export function registerVerbs(program: Command): void {
     .addHelpText('after', `\nResources: ${[...resourcesFor('install'), 'sdk'].join(', ')}\n` + examples([
       'aura install app ./my-app',
       'aura install cap ripgrep jq',
+      'aura install cap                         # picker: what is not installed yet',
       'aura install svc code-server',
       'aura install sdk --quiet',
     ]))
@@ -386,6 +507,7 @@ export function registerVerbs(program: Command): void {
           ...(opts.cwd ? ['--cwd', opts.cwd] : [])]);
       }
       const def = resourceOrFail(resource, 'install');
+      if (names.length === 0 && def.name === 'capabilities') return installCapsInteractive(def);
       if (names.length === 0) fail(`aura install ${shortName(def)} <name…>`);
       switch (def.name) {
         case 'apps':         return dispatchEach(names.map((n) => ['app', 'install', n]));
@@ -411,9 +533,9 @@ export function registerVerbs(program: Command): void {
 
   program
     .command('open <resource> <instance>')
-    .description('Open a new activity (window) on a running instance.')
+    .description('Open a new window (activity) on a running instance.')
     .option('-d, --data <json>', "JSON passed to the app's onActivityCreate hook")
-    .addHelpText('after', resourcesLine('open') + examples(['aura open act com.aura.notepad', `aura open act com.aura.notepad -d '{"view":"x"}'`]))
+    .addHelpText('after', resourcesLine('open') + examples(['aura open inst com.aura.notepad', `aura open inst com.aura.notepad -d '{"view":"x"}'`]))
     .action(async (resource: string, instance: string, opts: { data?: string }) => {
       resourceOrFail(resource, 'open');
       const inst = await resolveInstance(instance);

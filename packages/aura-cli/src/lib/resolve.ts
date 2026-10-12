@@ -60,3 +60,12 @@ export async function resolveSidecar(instanceId: string, token: string): Promise
   if (list.length === 0) fail(`${instanceId} has no sidecars.`);
   fail(`no sidecar '${token}' in ${instanceId} — available: ${list.map(sidecarId).join(', ')}`);
 }
+
+/**
+ * Which owners hold an object with this id — for `aura rm mount|port <id>`
+ * without `-i`. `matches` decides what counts as the same id (a bare app id
+ * names both its source and its `:data` mount). Pure, so it is testable.
+ */
+export function ownersOf<T>(items: T[], id: string, ownerOf: (t: T) => string, matches: (t: T, id: string) => boolean): string[] {
+  return [...new Set(items.filter((t) => matches(t, id)).map(ownerOf))];
+}
