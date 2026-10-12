@@ -30,7 +30,7 @@
     }
   ],
   "instanceMode": "multi",
-  "maxInstances": 4,
+  "maxInstances": 100,
   "activityMode": "multi",
   "defaultLaunch": "new-activity",
   "intentFilters": [
