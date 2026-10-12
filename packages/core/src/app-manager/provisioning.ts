@@ -87,11 +87,31 @@ if [ "$PROVISION" = 1 ]; then
   # "failing to boot" and hold its health budget open. See provisioning.ts.
   echo "${PROVISION_BEGIN}"
   if [ ! -x "node_modules/.bin/astro" ] && [ ! -x "/workspace/node_modules/.bin/astro" ]; then
-    echo "[\${APP_ID:-app}] npm install (astro not yet present)..."
-    npm install --prefer-offline 2>&1 || npm install
+    # Install with the package manager the lockfile belongs to. A pnpm
+    # project installed by npm resolves from scratch and can miss
+    # platform-specific optional deps (npm/cli#4828, e.g. rollup's native
+    # binary). pnpm isn't in the base image, so fall back to npx, pinned
+    # to package.json's "packageManager" when it names pnpm.
+    if [ -f pnpm-lock.yaml ]; then
+      PNPM_SPEC=$(sed -n 's/.*"packageManager": *"\\(pnpm@[^"+]*\\).*/\\1/p' package.json 2>/dev/null | head -n1)
+      if command -v pnpm >/dev/null; then PNPM="pnpm"; else PNPM="npx --yes \${PNPM_SPEC:-pnpm@latest}"; fi
+      echo "[\${APP_ID:-app}] pnpm install via '\$PNPM' (astro not yet present)..."
+      \$PNPM install --frozen-lockfile 2>&1 || \$PNPM install 2>&1 \\
+        || echo "[\${APP_ID:-app}] WARNING: pnpm install exited non-zero (often just ignored build scripts) — trying to boot anyway"
+    else
+      echo "[\${APP_ID:-app}] npm install (astro not yet present)..."
+      npm install --prefer-offline 2>&1 || npm install
+    fi
   fi
   if [ ! -d node_modules/@aura ] && grep -qE '"(aura)?[dD]ependencies"|"@aura/' package.json 2>/dev/null; then
-    command -v aura >/dev/null && aura sdk install --quiet || true
+    # Never fatal (the app may still boot), but never silent either: a
+    # missing @aura/app-sdk otherwise surfaces only as "Unable to load
+    # your Astro config".
+    if ! command -v aura >/dev/null; then
+      echo "[\${APP_ID:-app}] WARNING: aura CLI not on PATH — @aura/* deps not installed"
+    elif ! aura sdk install --quiet; then
+      echo "[\${APP_ID:-app}] WARNING: aura sdk install failed — @aura/* deps missing"
+    fi
   fi
   echo "${PROVISION_END}"
 fi`;
