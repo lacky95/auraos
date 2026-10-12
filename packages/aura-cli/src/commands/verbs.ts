@@ -11,7 +11,7 @@
  */
 import type { Command } from 'commander';
 import { spawn } from 'node:child_process';
-import { api, subscribeEvents } from '../lib/client.js';
+import { api, shellUrl, subscribeEvents } from '../lib/client.js';
 import { color, fail, table } from '../lib/format.js';
 import { enterSidecar } from '../lib/enter-sandbox.js';
 import { parseOutput, renderDocument, renderObjects, type OutputFormat } from '../lib/output.js';
@@ -175,6 +175,30 @@ async function describeCmd(resource: string, name: string, opts: { output?: stri
   }
 }
 
+// ─── OS-sidecar API (token) ─────────────────────────────────────────────────
+
+/**
+ * The bearer for the token-gated sidecar routes — only when the CLI runs
+ * inside that very instance (or one of its OS sidecars), where the OS put
+ * AURA_INSTANCE_TOKEN in the env. Everywhere else there is no token, by design.
+ */
+function ownToken(instanceId: string): string | null {
+  const token = process.env['AURA_INSTANCE_TOKEN'];
+  const self = process.env['APP_INSTANCE_ID'] ?? process.env['AURA_INSTANCE_ID'];
+  return token && self === instanceId ? token : null;
+}
+
+async function sidecarApi<T>(method: string, instanceId: string, path: string, token: string): Promise<T> {
+  const res = await fetch(`${shellUrl()}/api/instances/${encodeURIComponent(instanceId)}/sidecars${path}`, {
+    method, headers: { Authorization: `Bearer ${token}` },
+  });
+  const text = await res.text();
+  let data: unknown;
+  try { data = text ? JSON.parse(text) : undefined; } catch { data = text; }
+  if (!res.ok) fail((data as { error?: string } | undefined)?.error ?? `${method} failed with ${res.status}`);
+  return data as T;
+}
+
 // ─── exec / logs ────────────────────────────────────────────────────────────
 
 async function execCmd(resource: string, name: string, cmd: string[], opts: { container?: string }): Promise<void> {
@@ -196,6 +220,15 @@ async function logsCmd(resource: string, name: string, opts: { container?: strin
   const inst = await resolveInstance(name);
   if (!opts.container) return dispatch(['inst', 'logs', inst.instanceId, ...(opts.follow ? ['-f'] : [])]);
   const sc = await resolveSidecar(inst.instanceId, opts.container);
+  // Inside the app that owns an OS sidecar: the OS reads the logs, no docker needed.
+  const token = sc.managedBy === 'os' && !opts.follow ? ownToken(inst.instanceId) : null;
+  if (token) {
+    const q = opts.tail ? `?tail=${encodeURIComponent(opts.tail)}` : '';
+    const out = await sidecarApi<{ stdout: string; stderr: string }>('GET', inst.instanceId, `/${encodeURIComponent(sc.service)}/logs${q}`, token);
+    process.stdout.write(out.stdout);
+    process.stderr.write(out.stderr);
+    return;
+  }
   const args = ['logs', ...(opts.tail ? ['--tail', opts.tail] : []), ...(opts.follow ? ['-f'] : []), sc.id];
   const child = spawn('docker', args, { stdio: 'inherit' });
   await new Promise<void>((resolveP) => {
@@ -293,12 +326,13 @@ export function registerVerbs(program: Command): void {
     .alias('rm')
     .description('Delete apps, close activities, uninstall services/capabilities, detach mounts, remove port exposes.')
     .option('-y, --yes', 'apps: skip the confirmation prompt')
-    .option('-i, --instance <id>', 'mounts: instance to detach from (default: $APP_INSTANCE_ID)')
+    .option('-i, --instance <id>', 'mounts, sc: instance (default: $APP_INSTANCE_ID)')
     .addHelpText('after', resourcesLine('delete') + examples([
       'aura delete app com.example.hello',
       'aura delete act act-12',
       'aura delete mount com.example.hello -i com.aura.terminal',
       'aura delete port com.aura.browser into-5173      # <ownerApp> <portId>',
+      'aura delete sc worker-7                          # an OS sidecar of the app you are in',
     ]))
     .action(async (resource: string, names: string[], opts: { yes?: boolean; instance?: string }) => {
       const def = resourceOrFail(resource, 'delete');
@@ -314,6 +348,20 @@ export function registerVerbs(program: Command): void {
         case 'ports':
           if (names.length !== 2) fail('aura delete port <ownerApp> <portId>  (ids from: aura get ports)');
           return dispatch(['port', 'rm', names[0]!, names[1]!]);
+        case 'sidecars': {
+          const instToken = opts.instance ?? process.env['APP_INSTANCE_ID'];
+          if (!instToken) fail('aura delete sc <id> -i <instance>');
+          const inst = await resolveInstance(instToken);
+          for (const n of names) {
+            const sc = await resolveSidecar(inst.instanceId, n);
+            if (sc.managedBy !== 'os') fail(`${sidecarId(sc)} is app-managed — ${inst.appId} runs it itself; stop it there (or stop the instance)`);
+            const token = ownToken(inst.instanceId);
+            if (!token) fail(`deleting an OS sidecar needs ${inst.instanceId}'s token — run this inside the app (aura jump ${inst.instanceId}), or stop the instance`);
+            await sidecarApi('DELETE', inst.instanceId, `/${encodeURIComponent(sc.service)}`, token);
+            console.log(`${color.green('✓')} deleted sidecar ${sidecarId(sc)} of ${inst.instanceId}`);
+          }
+          return;
+        }
         default: unsupported('delete', def);
       }
     });

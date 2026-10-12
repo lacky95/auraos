@@ -217,7 +217,7 @@ const sidecars: ResourceDef<SidecarDto> = {
   name: 'sidecars',
   aliases: ['sidecar', 'sc'],
   description: 'Containers an instance runs next to itself (databases, agents, …)',
-  verbs: ['get', 'describe', 'exec', 'logs'],
+  verbs: ['get', 'describe', 'exec', 'logs', 'delete'],
   scopes: ['app', 'instance'],
   nameOf: (s) => sidecarId(s),
   watchable: true,
@@ -374,8 +374,12 @@ const mounts: ResourceDef<MountDto> = {
     const out: MountDto[] = [];
     for (const id of ids) {
       try {
-        const res = await api.get<{ mounts: MountDto[] }>(`/api/instances/${encodeURIComponent(id)}/mounts`);
-        out.push(...(res.mounts ?? []));
+        // includeSidecars: the instance's OS sidecars' mounts too — their
+        // INSTANCE column reads `<instance>--<sidecar>`. Older shells ignore it.
+        const res = await api.get<{ mounts: MountDto[]; sidecarMounts?: Array<{ mounts: MountDto[] }> }>(
+          `/api/instances/${encodeURIComponent(id)}/mounts?includeSidecars=1`,
+        );
+        out.push(...(res.mounts ?? []), ...(res.sidecarMounts ?? []).flatMap((g) => g.mounts));
       } catch (err) { if (ctx.instance) throw err; }
     }
     return out;
@@ -386,7 +390,7 @@ const mounts: ResourceDef<MountDto> = {
     { header: 'KIND', value: (m) => m.kind },
     { header: 'MODE', value: (m) => (m.mode === 'rw' ? color.yellow('rw') : 'ro') },
     { header: 'PATH', value: (m) => m.containerPath },
-    { header: 'ORIGIN', value: (m) => m.origin ?? '-', wide: true },
+    { header: 'ORIGIN', value: (m) => (m.origin === 'inherited' ? color.dim('inherited') : m.origin ?? '-') },
   ],
 };
 

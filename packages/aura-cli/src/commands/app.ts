@@ -4,16 +4,16 @@ import { resolve } from 'node:path';
 import { api } from '../lib/client.js';
 import { color, fail, info, ok, table, warn } from '../lib/format.js';
 import { promptChoice, promptConfirm, promptMultiSelect, BACK, PromptCancelled } from '../lib/prompts.js';
-import { BUILTIN_PERMISSIONS } from '@aura/core';
+import { BUILTIN_PERMISSIONS, ENFORCED_PERMISSIONS as CORE_ENFORCED } from '@aura/core';
 
 /** Concrete array form of the core const (typed as a readonly tuple there). */
 const BUILTIN_PERMISSIONS_LIST: string[] = [...BUILTIN_PERMISSIONS];
 /**
- * Permissions that actually deny today. Mirrors `ENFORCED` in
- * core's PermissionManager — everything else is auto-granted by the MVP path,
- * so the picker should not imply otherwise.
+ * Permissions that actually deny today — core's PermissionManager list, so
+ * the picker can't drift from what the OS enforces. Everything else is
+ * auto-granted by the MVP path.
  */
-const ENFORCED_PERMISSIONS: string[] = ['apps.mount', 'apps.port'];
+const ENFORCED_PERMISSIONS: string[] = [...CORE_ENFORCED];
 
 interface ManifestLite {
   id: string;
@@ -218,7 +218,7 @@ function registerPerm(app: Command): void {
     .description(
       'Manage an app\'s manifest permissions[]. Note most permissions are still ' +
       'auto-granted by the MVP PermissionManager — only those in its ENFORCED set ' +
-      '(currently apps.mount, apps.port) actually deny.',
+      `(currently ${CORE_ENFORCED.join(', ')}) actually deny.`,
     );
 
   perm

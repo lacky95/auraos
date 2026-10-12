@@ -256,7 +256,32 @@ async function listMounts(opts: { instance?: string }): Promise<void> {
   }
   reportCapability(res!);
   printMounts(instanceId, res!.mounts ?? [], apps);
+  await printSidecarMounts(instanceId);
   await printContextVolumes();
+}
+
+/**
+ * Mounts of the instance's OS-managed sidecars — their own plus those they
+ * inherit from the app. Best-effort: an older shell without
+ * `?includeSidecars=1` just omits the section.
+ */
+async function printSidecarMounts(instanceId: string): Promise<void> {
+  let groups: Array<{ sidecar: string; mounts: AuraMount[] }>;
+  try {
+    groups = (await api.get<{ sidecarMounts?: Array<{ sidecar: string; mounts: AuraMount[] }> }>(
+      `/api/instances/${encodeURIComponent(instanceId)}/mounts?includeSidecars=1`,
+    )).sidecarMounts ?? [];
+  } catch { return; }
+  const rows = groups.flatMap((g) => g.mounts.map((m) => ({
+    SIDECAR: g.sidecar,
+    TARGET:  m.id,
+    MODE:    modeSign(m.mode),
+    PATH:    m.containerPath,
+    ORIGIN:  m.origin === 'inherited' ? color.dim('inherited') : m.origin,
+  })));
+  if (rows.length === 0) return;
+  info('sidecar mounts (OS-managed sidecars of this instance)');
+  console.log(table(rows, ['SIDECAR', 'TARGET', 'MODE', 'PATH', 'ORIGIN']));
 }
 
 /**
