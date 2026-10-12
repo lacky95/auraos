@@ -21,6 +21,10 @@
       "import": "./dist/sidecars.js",
       "types": "./dist/sidecars.d.ts"
     },
+    "./os-sidecars": {
+      "import": "./dist/os-sidecars.js",
+      "types": "./dist/os-sidecars.d.ts"
+    },
     "./runtime/next": {
       "import": "./dist/runtime/next.js",
       "types": "./dist/runtime/next.d.ts"
@@ -29,7 +33,8 @@
   "scripts": {
     "build": "tsc && node -e \"require('node:fs').cpSync('src/integration.mjs','dist/integration.mjs')\"",
     "dev": "tsc --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsc && node --test test/*.test.mjs"
   },
   "files": [
     "dist",

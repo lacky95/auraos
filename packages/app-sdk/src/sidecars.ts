@@ -26,6 +26,11 @@ import http from 'node:http';
 import net from 'node:net';
 import { existsSync } from 'node:fs';
 import { execFile, execFileSync, spawn } from 'node:child_process';
+import { osSidecars, OsSidecarError, type OsSidecarsClient } from './os-sidecars.js';
+
+// The OS-managed client lives in its own child_process-free module; re-export
+// it so `@aura/app-sdk/sidecars` is the one import for both paths.
+export * from './os-sidecars.js';
 
 const DOCKER_SOCK = '/var/run/docker.sock';
 
@@ -266,9 +271,24 @@ export interface SidecarAuth {
   reauth?(): Promise<void>;
 }
 
+/**
+ * Who runs the containers:
+ *   'docker' (default) — this SDK, through the docker socket (needs the
+ *                        `docker` tool). Full control, the original path.
+ *   'os'               — the OS (`osSidecars()`): no docker tool needed; each
+ *                        service is spawned as a `services[]` TEMPLATE
+ *                        (permission `sidecars.spawn`). `onSeed` is not
+ *                        available — use `services[].seed` instead.
+ *   'auto'             — 'os' when this container has no docker socket and
+ *                        the OS gave it a token, else 'docker'.
+ */
+export type SidecarMode = 'docker' | 'os' | 'auto';
+
 export interface SidecarOptions {
   appId: string;
   instanceId: string;
+  /** Default 'docker'. See SidecarMode. */
+  mode?: SidecarMode;
   /** Port the controller listens on ($APP_PORT). */
   appPort: number;
   services: ServiceSpec[];
@@ -348,7 +368,10 @@ export class SidecarHost {
   readonly opts: Required<Pick<SidecarOptions, 'network' | 'volumePrefix' | 'helperImage' | 'appDataVolume' | 'workspaceRoot' | 'nodeModulesVolume'>> & SidecarOptions;
   phase: SidecarPhase = 'init';
   detail = '';
+  /** The resolved mode ('auto' already decided). */
+  readonly mode: 'docker' | 'os';
   private ensuring: Promise<void> | null = null;
+  private os: OsSidecarsClient | null = null;
 
   constructor(options: SidecarOptions) {
     this.opts = {
@@ -365,6 +388,19 @@ export class SidecarHost {
     // subpath-aware dashboard emits prefixed URLs. `?? ` (not `||`) so callers
     // can pass '' to opt out.
     this.forwardedPrefix = options.forwardedPrefix ?? `/api/proxy/${options.instanceId}`;
+    const wanted = options.mode ?? 'docker';
+    this.mode = wanted === 'auto'
+      ? (!existsSync(DOCKER_SOCK) && process.env['AURA_INSTANCE_TOKEN'] ? 'os' : 'docker')
+      : wanted;
+    if (this.mode === 'os' && options.onSeed) {
+      throw new Error("createSidecars: onSeed is not available in mode 'os' — the OS seeds from services[].seed (a one-shot command in the service image)");
+    }
+  }
+
+  /** The OS client, created on first use (mode 'os'). */
+  private osClient(): OsSidecarsClient {
+    this.os ??= osSidecars({ instanceId: this.opts.instanceId });
+    return this.os;
   }
   private readonly forwardedPrefix: string;
 
@@ -440,6 +476,7 @@ export class SidecarHost {
   dashboard(): ServiceSpec | undefined { return this.opts.services.find((s) => s.proxyDashboard); }
 
   async isRunning(name: string): Promise<boolean> {
+    if (this.mode === 'os') return (await this.osClient().get(name))?.state === 'running';
     const cn = this.containerName(name);
     try {
       const out = await execDocker(['ps', '--filter', `name=^${cn}$`, '--format', '{{.Names}}']);
@@ -447,6 +484,11 @@ export class SidecarHost {
     } catch { return false; }
   }
   private async remove(name: string): Promise<void> {
+    if (this.mode === 'os') {
+      try { await this.osClient().remove(name); }
+      catch (e) { if (!(e instanceof OsSidecarError && e.status === 404)) throw e; }
+      return;
+    }
     try { await execDocker(['rm', '-f', this.containerName(name)]); } catch { /* already gone */ }
   }
   private async imageExists(image: string): Promise<boolean> {
@@ -669,6 +711,10 @@ export class SidecarHost {
     push('AURA_OS_URL',      process.env['OS_API_BASE']);
     push('OS_API_BASE',      process.env['OS_API_BASE']);
     push('AURA_SHELL_HOSTNAME', process.env['AURA_SHELL_HOSTNAME']);
+    // The controller's bearer for the OS's token-gated routes. Forwarded as
+    // is: an app-managed sibling acts AS the app (that is what
+    // inheritIdentity means). Only OS-managed sidecars get their own token.
+    push('AURA_INSTANCE_TOKEN', process.env['AURA_INSTANCE_TOKEN']);
     return out;
   }
 
@@ -684,6 +730,7 @@ export class SidecarHost {
   }
 
   private async ensure(svc: ServiceSpec): Promise<void> {
+    if (this.mode === 'os') return this.ensureViaOs(svc);
     if (await this.isRunning(svc.name)) { this.setPhase('ready', `${svc.name} already running`); return; }
 
     if (!(await this.imageExists(svc.image))) {
@@ -786,6 +833,19 @@ export class SidecarHost {
     await execDocker(args, 5 * 60_000);
     this.setPhase('starting', `${svc.name} up`);
     this.log(`${this.containerName(svc.name)} started (image=${svc.image})`);
+  }
+
+  /**
+   * Mode 'os': ask the OS to run the service as a template. The OS adopts a
+   * sidecar whose spec is unchanged and recreates one whose spec changed, so
+   * — unlike the docker path — an edited services[] entry takes effect on the
+   * next ensure without a manual `docker rm`.
+   */
+  private async ensureViaOs(svc: ServiceSpec): Promise<void> {
+    this.setPhase('starting', `${svc.name} (OS-managed)`);
+    const { created, sidecar } = await this.osClient().spawn({ template: svc.name });
+    this.setPhase('starting', `${svc.name} ${created ? 'started' : 'already running'}`);
+    this.log(`${sidecar.containerName} ${created ? 'started' : 'adopted'} by the OS (image=${sidecar.image})`);
   }
 
   /** Remove every sibling this app spawned. Call on onDestroy. */
