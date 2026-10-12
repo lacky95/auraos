@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { AppManifest } from '../types/manifest.js';
+import { SHARED_HOME_PATH } from './tool-provision.js';
 
 /**
  * What an app may ask the OS to start, and what it gets. Pure — every rule
@@ -97,6 +98,11 @@ export interface ResolvedSidecarSpec {
   inheritIdentity: boolean;
   inheritPermissions: boolean;
   inheritTools: boolean;
+  /**
+   * Present only when the template asks for it — an absent key keeps the spec
+   * hash of every existing sidecar unchanged (no recreate on its next spawn).
+   */
+  inheritHome?: true;
   inheritDockerSocket: boolean;
   mounts: { own: boolean; inherit: boolean; exclude: string[]; forceRo: boolean };
 }
@@ -196,6 +202,9 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
     throw new SpecError(403, `template '${tpl.name}' sets inheritDockerSocket, but ${ctx.appId}'s tools[] does not grant docker — a sidecar never exceeds its app`);
   }
 
+  if (tpl.inheritHome && (tpl.volumes ?? []).some((v) => v.target.replace(/\/+$/, '') === SHARED_HOME_PATH)) {
+    throw new SpecError(400, `template '${tpl.name}' sets inheritHome and also mounts a volume at ${SHARED_HOME_PATH} — drop one of them`);
+  }
   const volumes: ResolvedVolume[] = (tpl.volumes ?? []).map((v) => {
     if (v.volume || v.subpath) {
       throw new SpecError(400, `template '${tpl.name}' volume '${v.name}' sets volume/subpath — only the SDK docker path supports those (they can point outside the app's data)`);
@@ -241,6 +250,7 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
     inheritIdentity: tpl.inheritIdentity === true,
     inheritPermissions: tpl.inheritPermissions === true,
     inheritTools: tpl.inheritTools === true,
+    ...(tpl.inheritHome ? { inheritHome: true as const } : {}),
     inheritDockerSocket: tpl.inheritDockerSocket === true,
     mounts,
   };

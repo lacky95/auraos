@@ -613,6 +613,12 @@ export const AppManifestSchema = z.object({
     inheritPermissions: z.boolean().optional(),
     /** The app's granted tools at /aura/my-tools. */
     inheritTools: z.boolean().optional(),
+    /**
+     * The user's shared HOME at /home/aura (logins of claude / codex / gh, …)
+     * plus `HOME=/home/aura`. Every container app already has it, so a sidecar
+     * inheriting it doesn't exceed its app — no extra permission.
+     */
+    inheritHome: z.boolean().optional(),
     /** The app's cross-app mounts at /mnt/aura (live). */
     inheritMounts: z.boolean().optional(),
     /** The host docker socket — host root. Only if the app itself holds the docker tool. */

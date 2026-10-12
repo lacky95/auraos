@@ -129,3 +129,20 @@ test('readiness passes through with defaults; wait is validated', () => {
   rejects(() => parseSpawnRequest({ template: 'web', wait: { ready: 'yes' } }), 400, /wait\.ready must be a boolean/);
   rejects(() => parseSpawnRequest({ template: 'web', wait: { timeoutMs: -1 } }), 400, /positive number/);
 });
+
+test('inheritHome: resolves when set; absent otherwise, so existing spec hashes stay the same', () => {
+  const tpl = { name: 'box', image: 'alpine:3', command: ['sleep', 'infinity'], env: { A: '1' }, volumes: [{ name: 'data', target: '/data' }], inheritTools: true };
+  const c = (svc) => ctx({ manifest: { services: [svc], tools: [] } });
+  const plain = resolveSidecarSpec({ template: 'box' }, c(tpl));
+  assert.equal('inheritHome' in plain, false);
+  // Snapshot taken with the code BEFORE inheritHome existed: a template that
+  // doesn't use the flag must keep its hash, or every running OS sidecar would
+  // be recreated on its next spawn.
+  assert.equal(specHash(plain), 'c1fad8f5982c7e60');
+  assert.equal(specHash(resolveSidecarSpec({ template: 'box' }, c({ ...tpl, inheritHome: false }))), 'c1fad8f5982c7e60');
+  const home = resolveSidecarSpec({ template: 'box' }, c({ ...tpl, inheritHome: true }));
+  assert.equal(home.inheritHome, true);
+  assert.notEqual(specHash(home), 'c1fad8f5982c7e60');
+  rejects(() => resolveSidecarSpec({ template: 'box' }, c({ ...tpl, inheritHome: true, volumes: [{ name: 'h', target: '/home/aura/' }] })),
+    400, /inheritHome and also mounts a volume at \/home\/aura/);
+});

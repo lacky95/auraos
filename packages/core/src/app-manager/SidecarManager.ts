@@ -12,7 +12,8 @@ import { MOUNT_ROOT_PATH } from './MountManager.js';
 import type { PermissionManager } from '../permissions/PermissionManager.js';
 import type { AppManifest } from '../types/manifest.js';
 import { toolsGrant } from './tool-allowlist.js';
-import { MY_TOOLS_PATH } from './tool-provision.js';
+import { MY_TOOLS_PATH, SHARED_HOME_PATH } from './tool-provision.js';
+import { userHomeSubpath } from '../scopes/home.js';
 import {
   SpecError, resolveSidecarSpec, specHash,
   type ResolvedSidecarSpec, type SidecarSpawnRequest,
@@ -526,8 +527,16 @@ export class SidecarManager {
       ...spec.dns.flatMap((d) => ['--dns', d]),
       ...spec.publish.flatMap((p) => ['-p', `${p.host}:${p.container}`]),
       ...this.volumeArgs(spec),
-      // Identity last: a template env key can't replace the OS's own values.
-      ...Object.entries({ ...env, ...identity }).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+      // inheritHome: the user's shared HOME, the same mount every container
+      // app gets (ContainerRunner) — the sidecar doesn't exceed its app.
+      ...(spec.inheritHome
+        ? ['--mount', `type=volume,source=${rt.appDataVolume},target=${SHARED_HOME_PATH},volume-subpath=${userHomeSubpath()}`]
+        : []),
+      // HOME after the template env (a template can't point it elsewhere while
+      // the mount is there); identity last: a template env key can't replace
+      // the OS's own values.
+      ...Object.entries({ ...env, ...(spec.inheritHome ? { HOME: SHARED_HOME_PATH } : {}), ...identity })
+        .flatMap(([k, v]) => ['-e', `${k}=${v}`]),
       ...spec.capabilities.flatMap((c) => ['--cap-add', c]),
       ...spec.devices.flatMap((d) => ['--device', d]),
       ...(spec.privileged ? ['--privileged'] : []),

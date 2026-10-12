@@ -33,6 +33,8 @@ import { osSidecars, OsSidecarError, type OsSidecarsClient } from './os-sidecars
 export * from './os-sidecars.js';
 
 const DOCKER_SOCK = '/var/run/docker.sock';
+/** The user's shared home in every AuraOS app container (core's SHARED_HOME_PATH). */
+const HOME_PATH = '/home/aura';
 
 /**
  * Where a sidecar volume lands by default, as a path inside the app-data
@@ -43,6 +45,28 @@ const DOCKER_SOCK = '/var/run/docker.sock';
  */
 export function defaultSidecarSubpath(appDataSubpath: string, service: string, volume: string): string {
   return `${appDataSubpath}/.sidecars/${service}/${volume}`;
+}
+
+/**
+ * The volume + subpath behind this app's own `/home/aura` — what a sidecar
+ * with `inheritHome` mounts on the docker path. Read from the daemon like
+ * discoverAppDataSubpath; undefined when it can't be told (no socket, no such
+ * mount).
+ */
+export function discoverHomeMount(instanceId: string): { volume: string; subpath?: string } | undefined {
+  if (!existsSync(DOCKER_SOCK)) return undefined;
+  try {
+    const out = execFileSync('docker',
+      ['inspect', '--format', '{{json .HostConfig.Mounts}}', `aura-${instanceId}`],
+      { stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000, encoding: 'utf-8' });
+    const mounts = JSON.parse(out || '[]') as Array<{
+      Type?: string; Source?: string; Target?: string; VolumeOptions?: { Subpath?: string };
+    }>;
+    const m = mounts.find((x) => x.Target === HOME_PATH && x.Type === 'volume' && x.Source);
+    return m ? { volume: m.Source!, ...(m.VolumeOptions?.Subpath ? { subpath: m.VolumeOptions.Subpath } : {}) } : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -196,6 +220,15 @@ export interface ServiceSpec {
    * provisions it into `/aura/my-tools`. Default false (no toolchain).
    */
   inheritTools?: boolean;
+
+  /**
+   * The user's shared HOME at `/home/aura` (logins of claude / codex / gh, …)
+   * plus `HOME=/home/aura` — the same home every AuraOS container app gets, so
+   * no extra permission. OS path: the OS mounts it. Docker path: the SDK
+   * mounts whatever volume + subpath its own container has at `/home/aura`
+   * (skipped with a warning when it can't tell). Default false.
+   */
+  inheritHome?: boolean;
 
   /**
    * Share the controlling app's cross-app mount root (`aura mount`) with the
@@ -552,6 +585,19 @@ export class SidecarHost {
     return ['-v', `${DOCKER_SOCK}:${DOCKER_SOCK}`];
   }
 
+  /** Docker path of `inheritHome`: the same volume + subpath as our own /home/aura. */
+  private homeInheritArgs(): string[] {
+    const home = discoverHomeMount(this.opts.instanceId);
+    if (!home) {
+      this.log(`inheritHome: can't tell where this app's ${HOME_PATH} comes from (no docker socket or no such mount) — skipping`);
+      return [];
+    }
+    return [
+      '--mount', `type=volume,source=${home.volume},target=${HOME_PATH}${home.subpath ? `,volume-subpath=${home.subpath}` : ''}`,
+      '-e', `HOME=${HOME_PATH}`,
+    ];
+  }
+
   private mountInheritArgs(): string[] {
     return [
       '--mount', `type=volume,source=${this.opts.appDataVolume},target=/mnt/aura,volume-subpath=aura/mounts/${this.opts.instanceId}`,
@@ -766,6 +812,7 @@ export class SidecarHost {
     const toolArgs = svc.inheritTools ? await this.toolInheritArgs(svc.image) : [];
     const mountArgs = svc.inheritMounts ? this.mountInheritArgs() : [];
     const sockArgs  = svc.inheritDockerSocket ? this.dockerSocketArgs() : [];
+    const homeArgs  = svc.inheritHome ? this.homeInheritArgs() : [];
     const args = [
       'run', '-d',
       '--name', this.containerName(svc.name),
@@ -827,6 +874,8 @@ export class SidecarHost {
       ...toolArgs,
       ...mountArgs,
       ...sockArgs,
+      // After svc.env: HOME can't be pointed elsewhere while the home is mounted.
+      ...homeArgs,
       svc.image,
       ...(svc.command ?? []),
     ];
