@@ -36,7 +36,7 @@ const APP_ID_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
 const SEMVER_RE  = /^\d+\.\d+\.\d+$/;
 
 /** Build artefacts + dep trees that must never follow an app to a new id. */
-const COPY_EXCLUDES = ['node_modules', '.next', 'dist', '.astro', '.turbo', '.cache'];
+const COPY_EXCLUDES = ['node_modules', '.pnpm-store', '.next', 'dist', '.astro', '.turbo', '.cache'];
 
 /** Id-rewrite guards: skip anything big or binary rather than corrupting it. */
 const REWRITE_MAX_BYTES = 512 * 1024;
@@ -172,10 +172,17 @@ export const POST: APIRoute = async ({ request }) => {
   const ts = Date.now();
   const staging = join(targetDef.dataDir, 'clone-staging', `${targetAppId}.${ts}`);
   const excludes = body.excludeGit ? [...COPY_EXCLUDES, '.git'] : COPY_EXCLUDES;
+  // Instances keep their data in `<appDir>/<instanceId>` (instance ids start
+  // with the app id), so the source dir carries live per-instance state —
+  // conversations, caches, settings. That is runtime data, not source: it
+  // follows only via withData, never inside the app tree.
+  const rootExcludes = readdirSync(srcDir, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && e.name.startsWith(sourceAppId))
+    .map((e) => e.name);
 
   try {
     mkdirSync(join(targetDef.dataDir, 'clone-staging'), { recursive: true });
-    try { copyTree(srcDir, staging, excludes); }
+    try { copyTree(srcDir, staging, excludes, rootExcludes); }
     catch (err) { return json({ error: 'copy-failed', message: (err as Error).message }, 500); }
 
     // ─── Rewrite the manifest ──────────────────────────────────────────────
@@ -252,6 +259,7 @@ export const POST: APIRoute = async ({ request }) => {
     // header fallbacks, api paths, and anywhere else the id is hardcoded.
     // app.manifest.json is excluded — the structured rewrite above owns it.
     const rewrittenFiles: string[] = [];
+    const idPattern = idRegex(sourceAppId);
     let fileCount = 0;
     let bytes = 0;
     for (const rel of walkFiles(staging, excludes)) {
@@ -262,13 +270,18 @@ export const POST: APIRoute = async ({ request }) => {
       // A same-id cross-scope clone (the "fork an OS app to shadow it" flow)
       // has nothing to substitute — skip so the report doesn't claim rewrites
       // that replaced the id with itself.
-      if (!rewriteIds || sourceAppId === targetAppId || rel === 'app.manifest.json') continue;
+      // app.manifest.json and package.json are excluded — the structured
+      // rewrites above own them, and sweeping them again would turn the
+      // already-written target id into `<target>.copy` when the target id
+      // extends the source id (the default `<source>.copy` suggestion).
+      if (!rewriteIds || sourceAppId === targetAppId || rel === 'app.manifest.json' || rel === 'package.json') continue;
       if (size > REWRITE_MAX_BYTES) continue;
       const buf = readFileSync(abs);
       if (buf.subarray(0, BINARY_SNIFF_BYTES).includes(0)) continue;
       const before = buf.toString('utf-8');
-      if (!before.includes(sourceAppId)) continue;
-      writeFileSync(abs, before.replaceAll(sourceAppId, targetAppId));
+      const after = before.replace(idPattern, targetAppId);
+      if (after === before) continue;
+      writeFileSync(abs, after);
       rewrittenFiles.push(rel);
     }
 
@@ -380,18 +393,34 @@ function readSdkVersion(scopes: ScopeDefinition[]): string {
 /** rsync -a with excludes, falling back to cpSync. rsync is preferred because
  *  it handles symlinks, sparse files and large trees more gracefully — and
  *  preserves the 0755 on entrypoint.sh, which a files[]-payload API can't. */
-function copyTree(src: string, dst: string, excludes: string[]): void {
+function copyTree(src: string, dst: string, excludes: string[], rootExcludes: string[] = []): void {
   mkdirSync(dst, { recursive: true });
   try {
-    execFileSync('rsync', ['-a', ...excludes.map((e) => `--exclude=${e}`), `${src}/`, `${dst}/`],
-      { stdio: ['ignore', 'ignore', 'pipe'] });
+    execFileSync('rsync', [
+      '-a',
+      ...excludes.map((e) => `--exclude=${e}`),
+      // Leading slash anchors the pattern to the transfer root.
+      ...rootExcludes.map((e) => `--exclude=/${e}`),
+      `${src}/`, `${dst}/`,
+    ], { stdio: ['ignore', 'ignore', 'pipe'] });
   } catch {
     const skip = new Set(excludes);
+    const skipRoot = new Set(rootExcludes.map((e) => join(src, e)));
     cpSync(src, dst, {
       recursive: true,
-      filter: (from) => !skip.has(from.slice(from.lastIndexOf('/') + 1)),
+      filter: (from) => !skip.has(from.slice(from.lastIndexOf('/') + 1)) && !skipRoot.has(from),
     });
   }
+}
+
+/**
+ * Matches the app id as a whole id only: `com.a.b` but not the prefix of
+ * `com.a.b.copy` or `com.a.bc`. Without the boundary a rewrite to an id that
+ * extends the source would also hit ids that already name other apps.
+ */
+function idRegex(id: string): RegExp {
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![A-Za-z0-9_.-])${escaped}(?![A-Za-z0-9_-]|\\.[A-Za-z0-9])`, 'g');
 }
 
 /** Move a directory, falling back to copy+delete when rename(2) can't (cross
