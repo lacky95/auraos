@@ -258,7 +258,7 @@ export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }>
   try {
     execFileSync('oras', ['version'], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 5_000 });
   } catch {
-    throw new Error("[NexusPublish] OCI publish needs `oras` on PATH. Install via `aura cap install oras` or use git source for v1.");
+    throw new Error("[NexusPublish] OCI publish needs `oras` on PATH. Install via `aura install cap oras` or use git source for v1.");
   }
   log('validating manifest...');
   const manifest = validateStagedDir(opts.appPath);

@@ -143,7 +143,7 @@ test('legacy groups stay registered but hidden; every legacy subcommand has a hi
   }
   for (const hint of Object.values(LEGACY_HINTS)) {
     const verb = hint.split(' ')[1]!;
-    assert.ok(program.commands.some((c) => c.name() === verb && !hidden(c)), `hint points at '${verb}', which is not a visible command`);
+    assert.ok(program.commands.some((c) => (c.name() === verb || c.aliases().includes(verb)) && !hidden(c)), `hint points at '${verb}', which is not a visible command`);
   }
 });
 

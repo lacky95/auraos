@@ -419,7 +419,7 @@ export function provisionAllowlist(opts: {
   if (missing.length) {
     console.warn(
       `[tools] ${dir}: granted but unavailable in the toolchain — ${missing.join(', ')}. ` +
-      `Install with \`aura cap install <name>\`.`,
+      `Install with \`aura install cap <name>\`.`,
     );
   }
   if (missingLibs.length) {

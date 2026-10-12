@@ -423,7 +423,7 @@ async function cloneFromConfig(cfg: CloneConfig, asJson: boolean): Promise<void>
     info(`stripped manifest field(s): ${color.dim(r.strippedFields.join(', '))}`);
   }
   if (r.ported) {
-    info(`ported @aura/* deps to ${color.dim('auraDependencies')} — they resolve on first launch via ${color.dim('aura sdk install')}.`);
+    info(`ported @aura/* deps to ${color.dim('auraDependencies')} — they resolve on first launch via ${color.dim('aura install sdk')}.`);
   }
   if (r.shadows) {
     warn(`${r.targetAppId} now SHADOWS the ${r.shadows}-scope app of the same id. Removing the clone unmasks the original.`);

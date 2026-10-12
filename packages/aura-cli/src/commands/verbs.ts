@@ -451,11 +451,11 @@ export function registerVerbs(program: Command): void {
     .option('-y, --yes', 'skip the confirmation (apps; mounts/ports whose instance was inferred)')
     .option('-i, --instance <id>', 'mounts, sc: instance (default: $APP_INSTANCE_ID)')
     .addHelpText('after', resourcesLine('delete') + examples([
-      'aura delete app com.example.hello',
-      'aura delete act act-12',
+      'aura rm app com.example.hello',
+      'aura rm act act-12',
       'aura rm mount com.example.hello                  # the instance that has it (-i when several do)',
       'aura rm port into-5173                           # ids from: aura get ports',
-      'aura delete sc worker-7                          # an OS sidecar of the app you are in',
+      'aura rm sc worker-7                              # an OS sidecar of the app you are in',
     ]))
     .action(async (resource: string, names: string[], opts: { yes?: boolean; instance?: string }) => {
       const def = resourceOrFail(resource, 'delete');
@@ -483,7 +483,7 @@ export function registerVerbs(program: Command): void {
         }
         case 'sidecars': {
           const instToken = opts.instance ?? process.env['APP_INSTANCE_ID'];
-          if (!instToken) fail('aura delete sc <id> -i <instance>');
+          if (!instToken) fail('aura rm sc <id> -i <instance>');
           const inst = await resolveInstance(instToken);
           for (const n of names) {
             const sc = await resolveSidecar(inst.instanceId, n);
@@ -589,9 +589,9 @@ export function registerVerbs(program: Command): void {
     .description('Grant permissions or capabilities to an app (picker when names are omitted).')
     .option('-i, --interactive', 'caps: open the picker even when names are given')
     .addHelpText('after', resourcesLine('grant') + examples([
-      'aura grant perm com.aura.terminal apps.mount',
-      'aura grant cap com.example.hello ripgrep jq',
-      'aura grant perm                                  # interactive',
+      'aura grant perms com.aura.terminal apps.mount',
+      'aura grant caps com.example.hello ripgrep jq',
+      'aura grant perms                                 # interactive',
     ]))
     .action(async (resource: string, app: string | undefined, names: string[], opts: { interactive?: boolean }) => {
       const def = resourceOrFail(resource, 'grant');
@@ -604,7 +604,7 @@ export function registerVerbs(program: Command): void {
   program
     .command('revoke <resource> <app> <names...>')
     .description('Revoke permissions or capabilities from an app.')
-    .addHelpText('after', resourcesLine('revoke') + examples(['aura revoke perm com.aura.terminal apps.mount', 'aura revoke cap com.example.hello jq']))
+    .addHelpText('after', resourcesLine('revoke') + examples(['aura revoke perms com.aura.terminal apps.mount', 'aura revoke caps com.example.hello jq']))
     .action(async (resource: string, app: string, names: string[]) => {
       const def = resourceOrFail(resource, 'revoke');
       if (def.name === 'permissions') return dispatch(['app', 'perm', 'revoke', app, ...names]);

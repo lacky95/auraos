@@ -39,7 +39,7 @@ export const AURA_RUNTIME_TOOLS = ['bash', 'node', 'aura', 'oras'] as const;
  */
 export const AURA_NPMRC =
   '# AuraOS user-scope apps: @aura/* packages live in `auraDependencies`,\n' +
-  '# not `dependencies` (npm/pnpm ignore it; `aura sdk install` reads it).\n' +
+  '# not `dependencies` (npm/pnpm ignore it; `aura install sdk` reads it).\n' +
   '# The registry below is documentation; resolution happens via OCI.\n' +
   '@aura:registry=http://aura-com.aura.registry:4090/\n';
 
