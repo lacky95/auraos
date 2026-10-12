@@ -105,10 +105,12 @@ The full path of a single user click from the launcher to "iframe paints":
        └─► AppManager.start(appId)
 4.  AppManager:
      ─ allocates a port (PortAllocator)
+     ─ mints the instance token (InstanceTokens → AURA_INSTANCE_TOKEN)
      ─ picks a runner (sandbox: 'proot' | 'container')
      ─ calls runner.spawn(instanceId, appId, port, manifest)
         ProotRunner       → bash entrypoint inside PRoot
         ContainerRunner   → docker run aura-base + entrypoint
+     ─ re-applies declared cross-app mounts and port exposes
 5.  Runner waits for /api/lifecycle/health
        └─► verifyHealthIdentity() — the X-Aura-* echo gate
 6.  AppManager calls onCreate, onStart, onResume in sequence
@@ -128,6 +130,13 @@ The full path of a single user click from the launcher to "iframe paints":
 Every step is a reachable function with a real source location. The
 rest of this section walks each box.
 
+Sidecars hang off step 6 onwards: the app asks the OS to start one
+(`POST /api/instances/<id>/sidecars` with its token), `SidecarManager`
+resolves the request against the app's `services[]` templates and runs the
+container next to the instance on `aura-net`, then `MountManager` applies the
+sidecar's own and inherited mounts. On stop or crash the instance's sidecars
+are reaped with it. See [Sidecars](/docs/sidecars).
+
 ## Read the source
 
 For when this page is out of date:
@@ -138,6 +147,11 @@ aura jump --master
 
 # AppManager FSM and start path
 $ less packages/core/src/app-manager/AppManager.ts
+
+# OS-managed sidecars, their mounts, instance tokens
+$ less packages/core/src/app-manager/SidecarManager.ts
+$ less packages/core/src/app-manager/MountManager.ts
+$ less packages/core/src/app-manager/InstanceTokens.ts
 
 # Reverse proxy + HTML rewriter
 $ less packages/shell/src/pages/api/proxy/\[id\]/\[...path\].ts

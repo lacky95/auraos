@@ -203,7 +203,7 @@ $ grep -rn "themeStrategy" apps/*/app.manifest.json   # who declares what
 ```
 
 When a colour "looks wrong" the diagnostic order is:
-1. **Which theme is active?** `aura data os.theme` reads the KV.
+1. **Which theme is active?** `aura get themes` marks the active dark/light slot (it reads the KV).
 2. **Did the iframe get the CSS?** DevTools → Network → `/api/os/theme.css`.
 3. **Is the CSS var defined?** Inspect `<html>` in DevTools — the
    `--aura-color-*` custom properties should be on `:root`.

@@ -37,9 +37,11 @@ import type { AppInstance, AppManager } from '@aura/core';
  * reconcile tick. So the blast radius of a forged registration is one
  * advertised address until that app next stops, never a persistent lie.
  *
- * Real instance identity (a per-instance token minted at spawn) would fix
- * this route, /api/kv and /api/data together. It is a whole-OS change and
- * deliberately not invented here.
+ * Real instance identity now exists: every instance gets a per-instance
+ * token at spawn (`AURA_INSTANCE_TOKEN`, core's InstanceTokens), and the
+ * OS-sidecar routes require it (lib/instanceAuth.ts `requireInstanceToken`).
+ * Moving this route, /api/kv and /api/data onto it is the remaining step —
+ * it needs every caller (SDK, apps) to send the token first.
  */
 export function identifyInstance(request: Request, mgr: AppManager): AppInstance | null {
   const referer = request.headers.get('referer');

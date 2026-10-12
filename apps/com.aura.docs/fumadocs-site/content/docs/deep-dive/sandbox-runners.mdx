@@ -75,9 +75,10 @@ For `runtime: 'raw'` apps (Next, SvelteKit, Go, anything), the runner
 | `OS_API_BASE` | runner | usually `http://localhost:3000` |
 | `AURA_LAYER_TAG` | runner | `[proot+ctnr]` for PRoot, `[ctnr]` for container, `[host]` for outside |
 | `PATH` | runner | prepends `/aura/my-tools` so the manifest's `tools[]` allowlist wins |
+| `AURA_INSTANCE_TOKEN` | runner | bearer for the token-gated routes — see [Instance tokens](#instance-tokens) |
 
 The bashrc snippet at `/os/bashrc.aura.sh` annotates the interactive prompt
-with `$AURA_LAYER_TAG`, which is how `aura whereami` and the terminal
+with `$AURA_LAYER_TAG`, which is how `aura info` and the terminal
 prompt know which layer they're in.
 
 ## ProotRunner — the cheap one
@@ -173,13 +174,66 @@ hostname. The shell joins the same network at compose time.
 init. For each surviving container it:
 - parses `APP_ID` / `APP_INSTANCE_ID` from env
 - inspects the container's pid + port
-- re-registers as state `resumed` without re-running `onCreate/onStart/onResume`
+- re-registers as state `resumed` (record and lifecycle FSM) without
+  re-running `onCreate/onStart/onResume`
+- re-learns the instance's token nonce from its `aura.token.nonce` label
 
 This is why `docker compose restart aura-shell` doesn't kill your
 running terminal/console — the containers outlive the shell.
 
 PRoot apps don't survive: they're direct children of the shell node and
 die with it. Only `sandbox: 'container'` apps adopt.
+
+After adoption, in this order: `SidecarManager.reconcile` re-learns every
+OS-managed sidecar from its labels (token nonce, mount inheritance) and
+removes those whose instance is gone; then `MountManager.reconcile` adopts or
+reaps binds — it needs the sidecars' consumer keys (`<instance>--<sidecar>`)
+to tell a live sidecar's binds from a dead one's.
+
+### Instance tokens
+
+`InstanceTokens` (`packages/core/src/app-manager/InstanceTokens.ts`) gives each
+instance — and each OS sidecar with `inheritIdentity` — a bearer:
+
+```
+aura1.<base64url {i: instanceId, s?: sidecar, n: nonce}>.<base64url HMAC-SHA256>
+```
+
+- The HMAC key is 32 random bytes in `<data>/aura/secrets/instance-token.key`
+  (0600, created on first use). Rotating it revokes every token.
+- The **nonce** is fresh per spawn and stored where the container lives: the
+  `aura.token.nonce` label on an app container, the spec label on an OS
+  sidecar. Nothing to persist; a shell restart re-learns nonces from
+  `docker inspect`.
+- A token verifies only while its nonce is current — a recycled instance id
+  or a deleted sidecar invalidates every older token.
+- Injected as `AURA_INSTANCE_TOKEN`, after OS Context env so a context key
+  can't replace it. Instances started before tokens existed have none until
+  their next start.
+
+Only the sidecar routes require it today (`packages/shell/src/lib/instanceAuth.ts`).
+Anything holding the docker socket can read another container's env and with
+it the token — the socket is host root anyway, so that adds no exposure.
+
+### OS-managed sidecars
+
+`SidecarManager` (`packages/core/src/app-manager/SidecarManager.ts`) starts
+containers on an app's request ([Sidecars](/docs/sidecars)): it resolves the
+request against the app's `services[]` template (`sidecar-spec.ts`), then
+`docker create` + `start`, a 400 ms still-alive check (the logs go into the
+error if not), the sidecar's own mounts, and an optional TCP wait. Docker is
+the source of truth — every sidecar carries its record in labels:
+
+| Label | Value |
+|---|---|
+| `aura.parent` / `aura.app` / `aura.service` | instance, app, sidecar name — same as app-managed sidecars, so the existing reaper removes them on stop and crash |
+| `aura.managed` | `os` |
+| `aura.sidecar.template` / `aura.sidecar.owner` | template, and the sidecar that spawned it (or `-`) |
+| `aura.sidecar.spec` | JSON: spec hash, token nonce, mount inheritance, created-at |
+
+Equal spec hash + running → the container is adopted instead of recreated.
+All docker calls are async and serialised per container name, so bursts of
+dynamic spawns don't block the shell's event loop.
 
 ## Tools allowlist mechanics
 
@@ -233,6 +287,13 @@ exit code; the runner parses + reports. `expectingKill: true` on the
 tracked record suppresses the callback (the AppManager just did
 `docker kill` itself).
 
+On stop, kill and crash the instance's siblings are reaped by their
+`aura.parent` label (app- and OS-managed alike), `MountManager` unmounts the
+instance's binds **and** its sidecars' binds, and the tokens of the instance
+and its sidecars are dropped. A deliberate stop/kill also forgets the mount
+declarations and empties the sidecars' mount roots; a crash keeps the
+declarations so the respawn gets its mounts back.
+
 ## Where to read more
 
 ```sh
@@ -241,4 +302,6 @@ $ less packages/core/src/app-manager/ProotRunner.ts        # ~700 lines, well-co
 $ less packages/core/src/app-manager/ContainerRunner.ts    # ~600 lines
 $ less packages/core/src/app-manager/SandboxRunner.ts      # the interface
 $ less packages/core/src/app-manager/PortAllocator.ts      # /proc/net/tcp drift heal
+$ less packages/core/src/app-manager/SidecarManager.ts     # OS-managed sidecars
+$ less packages/core/src/app-manager/InstanceTokens.ts     # per-instance bearer
 ```

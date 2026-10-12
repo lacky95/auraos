@@ -17,7 +17,7 @@ You are inside `com.aura.terminal` and want to read (then edit)
 
 ```bash
 # once, from anywhere: the CONSUMER app needs the permission
-aura app perm grant com.aura.terminal apps.mount
+aura grant perm com.aura.terminal apps.mount
 
 # inside the terminal app's sandbox
 aura mount add com.example.hello     # read-only
@@ -42,7 +42,7 @@ A mode change is detach + re-add — POSTing over a live mount returns
 | Command | What it does |
 |---|---|
 | `aura mount` | Interactive wizard: pick target app → instance → the set of apps to have mounted. Per row, `space` checks it, `r` selects it read-only (`ro`), `w` selects it writable (`wr`), `d` adds `+data`; `s` (or ⌃F) fuzzy-searches. Unchecking a row **detaches** it. |
-| `aura mount ls` | What is mounted into the instance. Use the `PATH` column — do not hardcode a root. |
+| `aura mount ls` | What is mounted into the instance — plus the mounts of its OS-managed sidecars and the OS context volumes. Use the `PATH` column — do not hardcode a root. (`aura get mounts -i <instance>` lists the same as a resource.) |
 | `aura mount add <appId>…` | Attach one or more apps. With no appId, opens a multi-select over every installed app (`m`/Tab switches scope, `s` or ⌃F fuzzy-searches). |
 | `aura mount rm <appId>…` | Detach. A bare appId drops both its source and data mounts; `<appId>:data` drops just the data one. |
 
@@ -72,10 +72,11 @@ Required by the **consumer** — the app being mounted *into*, not the app
 being mounted. Without it, `POST`/`DELETE` on the mounts API return
 **403** (listing still works).
 
-This is the first permission in AuraOS that actually denies. Every other
-permission is still auto-granted by the `PermissionManager`'s MVP path;
-only names in its `ENFORCED` set really 403. Handing one app read/write
-access to another app's source tree is not defensible to auto-grant.
+Most permissions are still auto-granted by the `PermissionManager`'s MVP
+path; only the names in its `ENFORCED_PERMISSIONS` list really 403 —
+`apps.mount`, `apps.port` and the four `sidecars.*` permissions (see
+[Sidecars](/docs/sidecars#permissions)). Handing one app read/write access
+to another app's source tree is not defensible to auto-grant.
 
 Declare it in the manifest:
 
@@ -87,9 +88,9 @@ Declare it in the manifest:
 Or manage it live:
 
 ```bash
-aura app perm ls [appId]                        # who declares what
-aura app perm grant [appId] [permissions...]    # bare = interactive picker
-aura app perm revoke <appId> <permissions...>
+aura get perms [appId]                          # who declares what
+aura grant perm [appId] [permissions...]        # bare = interactive picker
+aura revoke perm <appId> <permissions...>
 ```
 
 Grants take effect **immediately** — the endpoint reloads the app
@@ -106,14 +107,37 @@ Read these before you rely on it.
 - **Not atomic.** There is no bulk endpoint, so the wizard issues one
   request per change. A failure partway leaves a *partial* set — the CLI
   reports each outcome rather than implying the whole plan applied.
-- **Mounts don't survive an instance restart.** Stop, force-kill and
-  crash all detach every mount (a leaked bind pins the source filesystem
-  and makes the app-data volume unremovable). They *do* survive a shell
-  restart — the `MountManager` reconciles against the kernel on boot,
-  re-adopting live ones and reaping orphans.
+- **Mounts follow the instance's life.** Stop, force-kill and crash all
+  detach every bind (a leaked bind pins the source filesystem and makes
+  the app-data volume unremovable). A deliberate stop or kill also drops
+  the *declarations*; after a crash they stay, and the respawned instance
+  gets its mounts back. A shell restart keeps everything — the
+  `MountManager` reconciles against the kernel on boot, re-adopting live
+  binds and reaping orphans.
 - **`--wr` writes the target app's real source.** Its dev server will
   hot-reload — that's the point — but a careless write restarts someone
   else's app.
+
+## Mounts in sidecars
+
+An app's [OS-managed sidecars](/docs/sidecars#mounts-of-a-sidecar) are mount
+consumers too, keyed `<instanceId>--<sidecar>`, each with its own
+`/mnt/aura`. They get mounts two ways:
+
+- **Own** — the app adds them at runtime through the SDK
+  (`osSidecars().mounts(name).add(appId)`), with `sidecars.mounts` +
+  `apps.mount`. Declared and restored like an app's own mounts.
+- **Inherited** — with `inheritMounts`, every mount of the app is mirrored
+  into the sidecar and follows the app's changes live (`exclude` and a
+  read-only cap are set at spawn). Never declared on the sidecar; detach
+  them on the app.
+
+`aura mount ls` shows both under *sidecar mounts*, with `ORIGIN inherited`
+for the mirrored ones. When the instance stops, its sidecars' mounts,
+declarations and mount roots go with it.
+
+App-managed sidecars (the SDK's docker mode) don't get their own root: with
+`inheritMounts` they share the app's, and only see binds made while they run.
 
 ## How it works
 
@@ -129,6 +153,12 @@ to slaves, so a "read-only" remount would leave the container writable.
 Instead the helper binds from a source that is *already* read-only, and
 every mount is then verified against the target container's own
 `/proc/self/mountinfo` — if the mode doesn't match what was promised,
-the mount is rolled back and the command fails.
+the mount is rolled back and the command fails. A sidecar image without
+`cat` is read through its PID namespace by a helper instead; a read-only
+mount that can't be verified is refused.
+
+Because docker's volume mount is non-recursive, a container started *after*
+a bind was made never sees it. That is why mounts are re-applied after every
+(re)spawn rather than made once.
 
 Source: `packages/core/src/app-manager/MountManager.ts`.

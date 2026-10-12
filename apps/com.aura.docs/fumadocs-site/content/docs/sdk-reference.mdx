@@ -282,15 +282,39 @@ export const ALL: APIRoute = ({ request, params }) =>
   proxyFetch(`http://localhost:8080/${params['path']}`, request);
 ```
 
+### OS-managed sidecars (`packages/app-sdk/src/os-sidecars.ts`)
+
+**(S)** server-only. Import from `@aura/app-sdk/os-sidecars` (also re-exported
+by `@aura/app-sdk/sidecars`). The OS runs the containers; the app needs the
+`sidecars.spawn` permission, not the docker tool. Guide: [Sidecars](/docs/sidecars).
+
+| Symbol | Purpose |
+|---|---|
+| `osSidecars(opts?)` | Client for the calling instance. `opts`: `base` (default `OS_API_BASE` → `AURA_OS_URL`), `instanceId` (`APP_INSTANCE_ID` → `AURA_INSTANCE_ID`), `token` (`AURA_INSTANCE_TOKEN`), `timeoutMs` (15 min — a spawn may pull an image). |
+| `.spawn(req)` | `{ template, name?/suffix?, env?, envInherit?, command?, mounts?, image?, replace?, takeover?, wait? }` → `{ created, sidecar }`. Same spec again → adopted. |
+| `.list()` / `.get(name)` / `.remove(name)` | Own OS sidecars; `get` → `null` if absent; `remove` also removes the sidecars it spawned. |
+| `.exec(name, cmd[], { stdin?, timeoutMs?, user?, workdir?, env? })` | → `{ exitCode, stdout, stderr, truncated, timedOut }`. |
+| `.logs(name, { tail?, since?, timestamps? })` | → `{ stdout, stderr }`. |
+| `.mounts(name).list()` / `.add(appId, { mode?, data? })` / `.remove(mountId)` | The sidecar's cross-app mounts (own + inherited). Needs `sidecars.mounts` + `apps.mount` to change them. |
+| `OsSidecarError` | Thrown on failure; `.status` is the HTTP status (0 = no response). |
+
+Inside an OS sidecar spawned with `inheritIdentity`, `osSidecars()` works
+unchanged — with that sidecar's own token, so what it spawns becomes its child.
+
 ### Sidecars — bring-your-own-runtime (`packages/app-sdk/src/sidecars.ts`)
 
-`createSidecars({ appId, instanceId, appPort, services, auth?, onSeed? })` runs
-foreign Docker images as sibling containers and reverse-proxies one of them as
-the app's UI. It owns `docker run`/naming/DNS/volumes/labels/teardown, the
-lifecycle contract on `$APP_PORT`, and an auth-injecting HTTP+WS proxy. Declare
-the runtime in the manifest `services` block; see the dedicated guide:
-[Bring-your-own-runtime apps](/docs/bring-your-own-runtime). Also importable as
-`@aura/app-sdk/sidecars`.
+`createSidecars({ appId, instanceId, appPort, services, mode?, auth?, onSeed? })`
+runs foreign Docker images as sibling containers and reverse-proxies one of
+them as the app's UI: naming/DNS/volumes/labels/teardown, the lifecycle
+contract on `$APP_PORT`, and an auth-injecting HTTP+WS proxy. Declare the
+runtime in the manifest `services` block; see
+[Bring-your-own-runtime apps](/docs/bring-your-own-runtime). Also importable
+as `@aura/app-sdk/sidecars`.
+
+`mode` decides who runs the containers: `'docker'` (default — the SDK, via the
+docker socket; needs the `docker` tool), `'os'` (the OS, via `osSidecars()`;
+`onSeed` is refused, use `services[].seed`), or `'auto'` (`'os'` when there is
+no docker socket but a token).
 
 ### Next.js raw-runtime (`packages/app-sdk/src/runtime/next.ts`)
 

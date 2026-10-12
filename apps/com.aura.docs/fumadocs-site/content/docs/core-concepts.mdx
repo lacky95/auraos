@@ -253,12 +253,38 @@ network.internet       network.local
 system.notifications   system.clipboard
 system.overlay         system.theme.broadcast
 ipc.broadcast
+apps.mount             apps.port
+sidecars.spawn         sidecars.anyImage
+sidecars.privileged    sidecars.mounts
 ```
 
 Plus dynamic content-provider perms in the form
 `data:<authority>:<perm-name>`. Declare what you need in
 `manifest.permissions`; the `PermissionManager` checks them at the
 call site (provider router, theme broadcaster, etc.).
+
+Most permissions are still **auto-granted** (logged as "would deny in v2").
+The ones in `ENFORCED_PERMISSIONS` really answer 403 when undeclared:
+
+| Permission | Guards |
+|---|---|
+| `apps.mount` | Mounting another app's files into this one — [Cross-App Mounts](/docs/cross-app-mounts) |
+| `apps.port` | Exposing ports into another app or onto the host |
+| `sidecars.spawn` | Having the OS start sidecars from `services[]` templates — [Sidecars](/docs/sidecars) |
+| `sidecars.anyImage` | …from an image that isn't a template's |
+| `sidecars.privileged` | …with `privileged`, `capabilities`, `devices` or `publish` |
+| `sidecars.mounts` | Managing the mounts of the app's own sidecars (with `apps.mount`) |
+
+`aura get perms`, `aura grant perm <app> <perm>` and `aura revoke perm`
+manage them live — no restart.
+
+### Instance tokens
+
+Routes that act on an app's behalf in a stronger way (today: OS-managed
+sidecars) need to know the caller really *is* that instance. The OS hands
+every instance a bearer at spawn, `AURA_INSTANCE_TOKEN`, and those routes
+require `Authorization: Bearer $AURA_INSTANCE_TOKEN`. Older routes still take
+the instance id in the URL on trust.
 
 ## Workspaces and layouts
 

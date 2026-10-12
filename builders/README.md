@@ -18,13 +18,13 @@ builders/io.lakner.pocketbuilder/     git source — not auto-registered
 
 Because a builder is deployed outside the pnpm workspace, it follows the same
 dependency convention as any user-scope app: `@aura/*` goes in
-`auraDependencies` (not `dependencies`), and `aura sdk install` pulls it from
+`auraDependencies` (not `dependencies`), and `aura install sdk` pulls it from
 the local OCI registry at first boot — wired into the sandbox's synthesised
 entrypoint.
 
 > If the registry copy of an `@aura/*` package is behind the working tree, run
 > `pnpm publish:local:fresh` from the repo root. It builds the libs and pushes
-> them to the local Zot registry, which is what `aura sdk install` reads.
+> them to the local Zot registry, which is what `aura install sdk` reads.
 
 ## Deploying a builder
 

@@ -11,7 +11,7 @@ inside the OS — open a Terminal, scaffold, launch, jump in to edit.
 ```
 1. Open the Terminal app (launcher → Terminal, or Ctrl+Alt+Space)
 2. aura dev new com.example.hello       → wizard scaffolds the app
-3. aura app start com.example.hello     → backend boots
+3. aura run com.example.hello          → backend boots
 4. Click the new icon in the launcher   → iframe loads
 5. aura jump com.example.hello          → drop into the sandbox to edit
                                           → run `claude` for Claude Code
@@ -72,7 +72,7 @@ health route. Both can still be overridden by shipping your own files.
 ## Launch the new app
 
 ```bash
-aura app start com.example.hello
+aura run com.example.hello
 ```
 
 The AppManager allocates a port, spawns the sandbox, runs
@@ -108,6 +108,11 @@ schema defaults.
 
 See [Core Concepts](/docs/core-concepts) for what each policy does at
 runtime.
+
+Need a database, an agent or any other foreign image next to your app? Use
+`"sandbox": "container"`, declare it as a template in `services[]`, add the
+`sidecars.spawn` permission, and let the OS start it with `osSidecars()` —
+no docker tool in your app. See [Sidecars](/docs/sidecars).
 
 ## Lifecycle hooks
 
@@ -229,7 +234,7 @@ environment variables and secrets injected by [Aura Context](./context) and is
 
 If your app holds user-facing state in a `globalThis` singleton without
 writing it to `/data`, that data is lost every time the container
-restarts — either from a crash, an `aura app restart`, or a code
+restarts — either from a crash, an `aura restart app`, or a code
 change. The reference apps Notepad, Counter, and Terminal all persist
 their state to `/data` as working examples of this pattern.
 

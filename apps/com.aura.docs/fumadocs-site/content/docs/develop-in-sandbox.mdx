@@ -23,12 +23,13 @@ app sees the system at runtime.
 ## The workflow
 
 Assuming you've already scaffolded with `aura dev new` and started
-with `aura app start <id>`:
+with `aura run <id>`:
 
 ```bash
 # From any Aura terminal (the Terminal app's TTY is the easiest):
 aura jump                    # interactive picker — lists running apps
-aura jump com.example.hello  # direct jump by id
+aura jump com.example.hello  # direct jump by app id (or instance id)
+aura jump com.example.hello --sidecar db   # into one of its sidecars
 aura jump --master           # straight into the aura-shell master container
 ```
 
@@ -89,21 +90,21 @@ recompiles on save; reload the iframe.
 Full restart from another terminal:
 
 ```bash
-aura app stop  com.example.hello
-aura app start com.example.hello
+aura restart app com.example.hello
 ```
 
 ## Tail logs without leaving
 
-From any shell — host, master, another app sandbox:
+The app's stdout/stderr are mirrored into the shell's log with an
+`[<instanceId>]` prefix; for a container app, docker has them too:
 
 ```bash
-aura inst logs com.example.hello              # follow live
-aura inst logs com.example.hello-2            # by instance (multi-instance apps)
-aura inst logs com.example.hello | grep ERR
+docker logs -f aura-com.example.hello            # follow live
+docker logs aura-com.example.hello-2 2>&1 | grep ERR
+aura logs inst com.example.hello -c db --tail 100  # one of its sidecars
 ```
 
-stdout/stderr of the app's entrypoint stream straight through.
+(`aura logs inst <id>` without `-c` is not implemented yet.)
 
 ## Validate manifest changes
 
@@ -124,7 +125,7 @@ actually differs.
 - **App not loaded after a manifest edit?** Restart the shell — the
   AppRegistry reads manifests once at boot. `docker restart aura-shell`.
 - **`aura jump` says "no running instances"?** Start the app first
-  (`aura app start <id>`). `aura jump` only lists live sandboxes.
+  (`aura run <id>`). `aura jump` only lists live sandboxes.
 - **Tools missing inside the sandbox?** Confirm they're in
   `manifest.tools` AND installed in `/aura/all-tools` on the host
   (`aura cap install <tool>` adds new ones to the registry).

@@ -111,7 +111,7 @@ doesn't change.
 - Bind-mount failure (PRoot couldn't access the rootfs)
 
 From `error` you can recover three ways:
-- `error → creating` — try the spawn again (what `aura app start` does)
+- `error → creating` — try the spawn again (what `aura run` does)
 - `error → destroying` — fully tear down
 - `error → installed` — force back to zero without running destroy hooks (used by `AppManager.forceReset()`)
 

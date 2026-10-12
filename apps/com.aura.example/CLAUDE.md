@@ -295,6 +295,21 @@ under the new combo without code changes. Action ids are namespaced
 `app.<appId>.<short>` automatically — pass either the short id (`save`) or
 the fully qualified id; the SDK handles both.
 
+**Sidecars (a database, an agent, any foreign image)**: don't add `docker`
+to `tools[]`. Use `"sandbox": "container"`, declare the image as a template
+in `services[]`, add the `sidecars.spawn` permission, and let the OS start it:
+
+```ts
+import { osSidecars } from '@aura/app-sdk/os-sidecars';   // server-side only
+const sc = osSidecars();
+const { sidecar } = await sc.spawn({ template: 'db', wait: { port: true } });
+// reach it at http://${sidecar.host}:<port>; sc.exec / sc.logs / sc.remove
+```
+
+Same name + same spec is adopted, a changed spec recreated — calling `spawn`
+on every start is fine. Mounts of its own: `sidecars.mounts` + `apps.mount`,
+spawn with `mounts: { own: true }`, then `sc.mounts(name).add(appId)`.
+
 ## CLI cheatsheet
 
 ```sh
