@@ -1,0 +1,137 @@
+/* Settings › Interfaces › Add / Edit — same design language as the Layout
+ * Managers page: bordered cards on surface-2, primary titles, body text at
+ * full --aura-color-text; dim is reserved for labels and hints. */
+
+.if-form { display: flex; flex-direction: column; gap: 12px; max-width: 900px; margin: 0 auto; }
+
+.if-card {
+  background: var(--aura-color-surface-2);
+  border: 1px solid var(--aura-color-border);
+}
+.if-card-head {
+  display: grid;
+  grid-template-columns: 32px 1fr;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px;
+}
+.if-step {
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.9rem;
+  color: var(--aura-color-primary);
+  border: 1px solid var(--aura-color-border);
+}
+.if-card-title {
+  font-size: 0.9rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--aura-color-primary);
+}
+.if-card-id {
+  margin-left: 6px;
+  font-size: 0.65rem;
+  text-transform: none;
+  color: var(--aura-color-text-dim);
+  letter-spacing: 0.06em;
+}
+.if-card-desc {
+  margin: 4px 0 0;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  letter-spacing: 0.04em;
+  color: var(--aura-color-text);
+}
+.if-card-body {
+  border-top: 1px dashed var(--aura-color-border);
+  padding: 10px 12px 12px;
+}
+.if-card-foot {
+  border-top: 1px dashed var(--aura-color-border);
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.if-group + .if-group { margin-top: 12px; }
+.if-label {
+  display: block;
+  font-size: 0.6rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--aura-color-text-dim);
+  margin-bottom: 6px;
+}
+.if-kinds {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 8px;
+}
+.if-kind {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 10px;
+  text-align: left;
+  font-family: inherit;
+  cursor: pointer;
+  background: var(--aura-color-surface);
+  border: 1px solid var(--aura-color-border);
+  color: var(--aura-color-text);
+  transition: border-color 0.12s, background 0.12s;
+}
+.if-kind:hover, .if-kind:focus-visible {
+  border-color: var(--aura-color-primary);
+  outline: none;
+}
+.if-kind[aria-pressed="true"] {
+  border-color: var(--aura-color-primary);
+  background: color-mix(in srgb, var(--aura-color-primary) 14%, var(--aura-color-surface));
+}
+.if-kind-name {
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.if-kind[aria-pressed="true"] .if-kind-name { color: var(--aura-color-primary); }
+.if-kind-id { font-size: 0.62rem; color: var(--aura-color-text-dim); letter-spacing: 0.04em; }
+
+.if-fields { display: flex; flex-direction: column; gap: 12px; }
+.if-field { display: flex; flex-direction: column; }
+.if-input {
+  font-family: inherit;
+  font-size: 0.75rem;
+  letter-spacing: 0.03em;
+  padding: 7px 9px;
+  color: var(--aura-color-text);
+  background: var(--aura-color-surface);
+  border: 1px solid var(--aura-color-border);
+  outline: none;
+}
+.if-input::placeholder { color: var(--aura-color-text-dim); opacity: 0.7; }
+.if-input:focus { border-color: var(--aura-color-primary); }
+.if-hint { margin-top: 4px; font-size: 0.6rem; color: var(--aura-color-text-dim); letter-spacing: 0.04em; }
+
+.if-btn {
+  font-family: inherit;
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 7px 14px;
+  cursor: pointer;
+  background: var(--aura-color-surface);
+  border: 1px solid var(--aura-color-border);
+  color: var(--aura-color-text);
+}
+.if-btn:hover, .if-btn:focus-visible { border-color: var(--aura-color-primary); color: var(--aura-color-primary); outline: none; }
+.if-btn-primary {
+  background: var(--aura-color-primary);
+  border-color: var(--aura-color-primary);
+  color: var(--aura-color-bg, var(--aura-color-surface));
+}
+.if-btn-primary:hover, .if-btn-primary:focus-visible { color: var(--aura-color-bg, var(--aura-color-surface)); filter: brightness(1.12); }
+.if-btn:disabled { opacity: 0.5; cursor: default; }
+.if-error { font-size: 0.7rem; color: var(--aura-color-danger); }

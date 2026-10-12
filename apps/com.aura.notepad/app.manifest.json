@@ -12,7 +12,7 @@
   "provides": [
     {
       "name": "notes",
-      "kind": "mcp",
+      "kind": "http/mcp",
       "address": "/mcp/notes",
       "version": "1",
       "description": "MCP over the notepad: open tabs (incl. unsaved 'new N' buffers, edited live in every window) and the saved-notes tree under /data/files (filesystem tools)."

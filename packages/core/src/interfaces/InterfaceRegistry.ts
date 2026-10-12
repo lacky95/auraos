@@ -41,20 +41,28 @@ import type { AppLifecycleState } from '../types/lifecycle.js';
 import type {
   AppManifest,
   ConsumedInterface,
+  CustomInterface,
   InterfaceKind,
   ProvidedInterface,
 } from '../types/manifest.js';
-import { INTERFACE_PATH_KINDS } from '../types/manifest.js';
+import { INTERFACE_PATH_KINDS, normalizeKind } from '../types/manifest.js';
 
-/** Where an entry came from — a manifest declaration, or opened at runtime. */
-export type InterfaceSource = 'manifest' | 'runtime';
+/** Pseudo app id that owns every user-registered (custom) interface. */
+export const CUSTOM_INTERFACE_APP_ID = 'custom';
+
+/**
+ * Where an entry came from — a manifest declaration, opened at runtime, or
+ * registered by the user for an endpoint outside AuraOS.
+ */
+export type InterfaceSource = 'manifest' | 'runtime' | 'custom';
 
 /**
  * `catalog` — installed and declared, nothing running.
  * `live`    — a running instance serves it; `url` is dialable.
  * `down`    — an instance holds the entry but has no port (or is dying).
+ * `external` — a custom entry outside AuraOS; never probed, so neither up nor down.
  */
-export type InterfaceStatus = 'catalog' | 'live' | 'down';
+export type InterfaceStatus = 'catalog' | 'live' | 'down' | 'external';
 
 /** The single wire shape shared by core, the API route, the SDK and the UI. */
 export interface InterfaceView {
@@ -112,7 +120,8 @@ export interface ConsumerView {
 }
 
 export interface InterfaceFilter {
-  kind?: InterfaceKind;
+  /** Canonical or legacy name (`mcp` matches `http/mcp`). */
+  kind?: InterfaceKind | string;
   appId?: string;
   name?: string;
   /** Only entries currently served by a running instance. */
@@ -123,7 +132,7 @@ export interface InterfaceFilter {
 export interface InterfaceRef {
   appId?: string;
   name: string;
-  kind?: InterfaceKind;
+  kind?: InterfaceKind | string;
   version?: string;
 }
 
@@ -158,8 +167,8 @@ interface LiveRecord {
  * the shell entirely).
  */
 export function interfaceUrl(instanceId: string, kind: InterfaceKind, address: string): string {
-  if (kind === 'kv')    return `/api/kv/${address.replace(/^\/+/, '')}`;
-  if (kind === 'event') return `/api/apps/events?topics=${encodeURIComponent(address)}`;
+  if (kind === 'os/kv')    return `/api/kv/${address.replace(/^\/+/, '')}`;
+  if (kind === 'os/event') return `/api/apps/events?topics=${encodeURIComponent(address)}`;
   return `/api/proxy/${instanceId}${address}`;
 }
 
@@ -175,6 +184,9 @@ export class InterfaceRegistry {
   // ── catalog layer — rebuilt wholesale from manifests (cf. IntentResolver) ──
   private provided: Array<{ appId: string; iface: ProvidedInterface }> = [];
   private consumed: Array<{ appId: string; need: ConsumedInterface }> = [];
+
+  // ── custom layer — user-registered external endpoints, owned by the shell ──
+  private custom: CustomInterface[] = [];
 
   // ── live layer — instanceId → what that instance currently serves ─────────
   private live = new Map<string, LiveRecord>();
@@ -200,6 +212,15 @@ export class InterfaceRegistry {
     }
     this.provided = provided;
     this.consumed = consumed;
+  }
+
+  /**
+   * Replace the custom layer. The shell persists these (KV) and hands the
+   * whole list over on boot and after every edit — the registry still stores
+   * nothing of its own.
+   */
+  setCustom(entries: readonly CustomInterface[]): void {
+    this.custom = [...entries];
   }
 
   // ─────────────────────────────── live ────────────────────────────────────
@@ -360,7 +381,16 @@ export class InterfaceRegistry {
       views.push({ ...toBase(appId, iface), source: 'manifest', status: 'catalog' });
     }
 
-    return views.filter((v) => matches(v, filter));
+    for (const iface of this.custom) {
+      views.push({
+        ...toBase(CUSTOM_INTERFACE_APP_ID, iface),
+        source: 'custom',
+        status: 'external',
+        url: iface.address,
+      });
+    }
+
+    return collapse(views).filter((v) => matches(v, filter));
   }
 
   /**
@@ -392,7 +422,7 @@ export class InterfaceRegistry {
       const matched = all
         .filter((v) =>
           v.name === need.name
-          && v.kind === need.kind
+          && v.kind === normalizeKind(need.kind)
           && (!need.appId || v.appId === need.appId)
           && (!need.version || v.version === need.version))
         .sort((a, b) => rank(a) - rank(b));
@@ -412,7 +442,7 @@ export class InterfaceRegistry {
 
 // ────────────────────────────── helpers ────────────────────────────────────
 
-function toBase(appId: string, iface: ProvidedInterface): Omit<InterfaceView, 'source' | 'status'> {
+function toBase(appId: string, iface: ProvidedInterface | (CustomInterface & { permission?: undefined })): Omit<InterfaceView, 'source' | 'status'> {
   return {
     id: `${appId}/${iface.name}`,
     appId,
@@ -426,8 +456,36 @@ function toBase(appId: string, iface: ProvidedInterface): Omit<InterfaceView, 's
   };
 }
 
+/**
+ * One view per id. `id` is the globally unique ref, so the same interface
+ * served by an instance AND exposed as an app-level alias (or served by
+ * several instances) must surface as a single entry — otherwise every running
+ * path-kind interface is listed twice.
+ *
+ * The alias wins when present (its url is stable and cold-starts), carrying
+ * the best concrete instance's instanceId/state so `upstream` still resolves.
+ * Otherwise the best-ranked view wins.
+ */
+function collapse(views: InterfaceView[]): InterfaceView[] {
+  const groups = new Map<string, InterfaceView[]>();
+  for (const v of views) {
+    const g = groups.get(v.id);
+    if (g) g.push(v); else groups.set(v.id, [v]);
+  }
+  const out: InterfaceView[] = [];
+  for (const g of groups.values()) {
+    const alias = g.find((v) => v.scope === 'app');
+    const best = g.filter((v) => v.scope !== 'app').sort((a, b) => rank(a) - rank(b))[0];
+    if (!alias) { out.push(best!); continue; }
+    out.push(best?.instanceId
+      ? { ...alias, instanceId: best.instanceId, ...(best.state ? { state: best.state } : {}) }
+      : alias);
+  }
+  return out;
+}
+
 function matches(v: InterfaceView, f: InterfaceFilter): boolean {
-  if (f.kind  && v.kind  !== f.kind)  return false;
+  if (f.kind  && v.kind  !== normalizeKind(f.kind)) return false;
   if (f.appId && v.appId !== f.appId) return false;
   if (f.name  && v.name  !== f.name)  return false;
   if (f.live  && v.status !== 'live') return false;
@@ -442,6 +500,7 @@ function rank(v: InterfaceView): number {
   if (v.scope === 'app') return v.status === 'live' ? 1.5 : 1.75;
   if (v.status === 'live') return v.state === 'resumed' ? 0 : 1;
   if (v.status === 'down') return 2;
+  if (v.status === 'external') return 2.5;
   return 3;   // catalog
 }
 

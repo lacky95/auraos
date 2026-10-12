@@ -81,18 +81,47 @@ export type DataProvider      = z.infer<typeof DataProviderSchema>;
 /**
  * Interface Registry — the transports the OS can currently describe.
  *
+ * A kind is `transport/protocol`: the transport says how to dial it, the
+ * protocol what you speak once connected. `http/mcp` is streamable-HTTP MCP,
+ * `http/mcp-sse` the legacy SSE flavour; `os/*` kinds ride OS services rather
+ * than a socket of their own.
+ *
  * `stream` (Valkey streams) is deliberately absent: every kind listed here has
  * a transport that already exists, so declaring one is never a promise the OS
  * can't keep. Adding a kind later is an additive change to this enum.
  */
-export const INTERFACE_KINDS = ['http', 'rest', 'mcp', 'ws', 'event', 'kv', 'acp'] as const;
-export const InterfaceKindSchema = z.enum(INTERFACE_KINDS);
+export const INTERFACE_KINDS = [
+  'http/rest', 'http/raw', 'http/mcp', 'http/mcp-sse',
+  'ws/raw', 'ws/acp', 'ws/cdp',
+  'os/event', 'os/kv',
+] as const;
+
+/** Pre-`transport/protocol` names. Still accepted everywhere a kind is read. */
+export const LEGACY_KIND_ALIASES: Readonly<Record<string, (typeof INTERFACE_KINDS)[number]>> = {
+  rest: 'http/rest', http: 'http/raw', mcp: 'http/mcp', ws: 'ws/raw',
+  acp: 'ws/acp', event: 'os/event', kv: 'os/kv',
+};
+
+/** Map a legacy kind name to its canonical form; anything else passes through. */
+export function normalizeKind<T>(kind: T): T | (typeof INTERFACE_KINDS)[number] {
+  return typeof kind === 'string' && kind in LEGACY_KIND_ALIASES ? LEGACY_KIND_ALIASES[kind]! : kind;
+}
+
+export const InterfaceKindSchema = z.preprocess(normalizeKind, z.enum(INTERFACE_KINDS));
+
+export function kindTransport(kind: string): 'http' | 'ws' | 'os' {
+  return String(normalizeKind(kind)).split('/')[0] as 'http' | 'ws' | 'os';
+}
+
+export function kindProtocol(kind: string): string {
+  return String(normalizeKind(kind)).split('/')[1] ?? '';
+}
 
 /** Interface names are app-local; the globally unique ref is `<appId>/<name>`. */
 const INTERFACE_NAME_RE = /^[a-z][a-z0-9-]*$/;
 
-/** Kinds whose `address` is a path on the providing app's own server. */
-export const INTERFACE_PATH_KINDS = new Set<string>(['http', 'rest', 'mcp', 'ws', 'acp']);
+/** Kinds whose `address` is a path on the providing app's own server: every http and ws kind. */
+export const INTERFACE_PATH_KINDS = new Set<string>(INTERFACE_KINDS.filter((k) => kindTransport(k) !== 'os'));
 
 export const ProvidedInterfaceSchema = z.object({
   /** App-local, kebab-case. Unique within the app (enforced on the manifest). */
@@ -104,11 +133,11 @@ export const ProvidedInterfaceSchema = z.object({
    * Where it lives. Semantics are per-kind, and the OS NEVER rewrites this —
    * it only prefixes path kinds with the instance's proxy base when handing
    * out a live address:
-   *   http|rest|mcp|ws|acp → path on the app's own server, must start with '/'
-   *   event                → OsEventBus topic (or glob), e.g. `whisper:transcript.*`
-   *   kv                   → KV namespace/key prefix, e.g. `app/com.aura.whisper/jobs`
-   *   acp                  → path on the app's own server (JSON-RPC Agent Client
-   *                          Protocol over WebSocket, NDJSON frames; proxied like `ws`)
+   *   http/* | ws/* → path on the app's own server, must start with '/'
+   *                   (`ws/acp` is JSON-RPC Agent Client Protocol over
+   *                   WebSocket, NDJSON frames; proxied like any ws)
+   *   os/event      → OsEventBus topic (or glob), e.g. `whisper:transcript.*`
+   *   os/kv         → KV namespace/key prefix, e.g. `app/com.aura.whisper/jobs`
    */
   address: z.string().min(1),
   /** Free-form contract version. Consumers may pin it; the OS never interprets it. */
@@ -124,10 +153,36 @@ export const ProvidedInterfaceSchema = z.object({
 }).refine(
   (i) => (INTERFACE_PATH_KINDS.has(i.kind) ? i.address.startsWith('/') : !i.address.startsWith('/')),
   {
-    message: "http/rest/mcp/ws addresses must start with '/' (a path on the app's server); event/kv addresses must not",
+    message: "http/* and ws/* addresses must start with '/' (a path on the app's server); os/event and os/kv addresses must not",
     path: ['address'],
   },
 );
+
+/**
+ * A user-registered interface that lives outside AuraOS — e.g. a remote MCP
+ * server. Unlike app interfaces its address is a full URL, dialed as-is.
+ * `os/*` kinds are excluded: they only exist inside the OS.
+ */
+export const CustomInterfaceSchema = z.object({
+  name: z.string().regex(INTERFACE_NAME_RE, {
+    message: 'Interface name must be kebab-case: e.g. remote-mcp',
+  }),
+  kind: InterfaceKindSchema,
+  address: z.string().url(),
+  version: z.string().default('1'),
+  description: z.string().optional(),
+  schema: z.string().optional(),
+}).refine(
+  (i) => {
+    const t = kindTransport(i.kind);
+    if (t === 'http') return /^https?:\/\//.test(i.address);
+    if (t === 'ws')   return /^wss?:\/\//.test(i.address);
+    return false;
+  },
+  { message: 'http/* kinds need an http(s):// URL, ws/* kinds a ws(s):// URL; os/* kinds cannot be custom', path: ['address'] },
+);
+
+export type CustomInterface = z.infer<typeof CustomInterfaceSchema>;
 
 const ConsumedInterfaceSchema = z.object({
   /** Name of the interface this app wants, matched against providers' `name`. */

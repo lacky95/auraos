@@ -3,6 +3,7 @@ import { getAppManager, initAppManager, ContextStore, VolumeStore } from '@aura/
 import { kvServer, defaultKv } from '@aura/kv-store';
 import { bootstrapKv } from './lib/kvBootstrap.js';
 import { ensureSdkPublished } from './lib/sdkBootstrap.js';
+import { loadCustomInterfaces } from './lib/customInterfaces.js';
 
 // Source of truth is the singleton on globalThis — NOT a module-scoped flag.
 // The soft-restart endpoint deletes that singleton; if we tracked init state
@@ -67,6 +68,13 @@ async function ensureAppManager() {
       }
     } catch (err) {
       console.warn(`[middleware] could not hydrate app-enabled state: ${(err as Error).message}`);
+    }
+    // User-registered external interfaces live in KV; the registry only
+    // projects them (see lib/customInterfaces.ts).
+    try {
+      mgr.interfaces.setCustom(await loadCustomInterfaces());
+    } catch (err) {
+      console.warn(`[middleware] could not hydrate custom interfaces: ${(err as Error).message}`);
     }
     await mgr.init();
 

@@ -1,0 +1,30 @@
+---
+import '@aura/ui/styles/scificn-bridge.css';
+import '../../styles/settings.css';
+import '../../components/interface-form.css';
+import InterfaceForm from '../../components/InterfaceForm';
+
+// Add a custom (external) interface. The island does the work; see InterfaceForm.
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Settings · Add interface — AuraOS</title>
+  <link rel="stylesheet" href="/api/os/theme.css" />
+</head>
+<body>
+  <main class="settings-body">
+    <p class="theme-intro">ADD INTERFACE · REGISTER AN ENDPOINT OUTSIDE AURAOS</p>
+    <InterfaceForm client:load initial={null} />
+  </main>
+  <footer class="settings-foot">PROVIDER · /api/interfaces/custom</footer>
+
+  <script>
+    import { OsClient } from '@aura/app-sdk';
+    new OsClient().nav.installGridNav({
+      selector: '.settings-body button, .settings-body input[type="text"]',
+    });
+  </script>
+</body>
+</html>

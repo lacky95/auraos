@@ -22,17 +22,21 @@
  * other server-side call this app makes.
  *
  * This server is itself an entry in the registry: `app.manifest.json`
- * declares it under `provides` (kind `mcp`, address `/mcp/interfaces`), and
+ * declares it under `provides` (kind `http/mcp`, address `/mcp/interfaces`), and
  * the OS materialises that declaration as a live address whenever an instance
  * of Settings is up. No runtime registration call is needed.
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { OsClient } from '@aura/app-sdk';
-import type { ConsumerView, InterfaceKind, InterfaceView } from '@aura/app-sdk';
+import type { ConsumerView, InterfaceKind, InterfaceView, LegacyInterfaceKind } from '@aura/app-sdk';
 import { z } from 'zod';
 
-const KINDS = ['http', 'rest', 'mcp', 'ws', 'event', 'kv'] as const satisfies readonly InterfaceKind[];
+const KINDS = [
+  'http/rest', 'http/raw', 'http/mcp', 'http/mcp-sse', 'ws/raw', 'ws/acp', 'ws/cdp', 'os/event', 'os/kv',
+  // Legacy names — the shell maps them to the canonical kind.
+  'http', 'rest', 'mcp', 'ws', 'event', 'kv', 'acp',
+] as const satisfies readonly (InterfaceKind | LegacyInterfaceKind)[];
 
 const APP_ID_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
 
@@ -46,7 +50,9 @@ const APP_ID_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
 const OS_BASE = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
 
 const KIND_DESC =
-  'Transport kind: http, rest, mcp, ws (paths on the providing app), event (an OS event topic) or kv (a KV prefix).';
+  'Kind as transport/protocol: http/rest, http/raw, http/mcp (streamable HTTP), http/mcp-sse, ws/raw, ws/acp, ws/cdp '
+  + '(paths on the providing app, or full URLs for custom entries), os/event (an OS event topic) or os/kv (a KV prefix). '
+  + 'Legacy short names (mcp, rest, ws, …) are accepted.';
 const STATUS_DESC =
   'Status meanings — live: a running instance serves it and `url` is dialable; '
   + 'down: an instance holds it but has no port; '
@@ -376,5 +382,6 @@ export function buildInterfacesServer(): McpServer {
 function rank(v: InterfaceView): number {
   if (v.status === 'live') return v.state === 'resumed' ? 0 : 1;
   if (v.status === 'down') return 2;
+  if (v.status === 'external') return 2.5;
   return 3;
 }

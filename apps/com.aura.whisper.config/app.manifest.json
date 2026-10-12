@@ -40,7 +40,7 @@
   "consumes": [
     {
       "name": "config",
-      "kind": "rest",
+      "kind": "http/rest",
       "appId": "com.aura.whisper",
       "description": "The service's configuration API \u2014 this app is its UI."
     }

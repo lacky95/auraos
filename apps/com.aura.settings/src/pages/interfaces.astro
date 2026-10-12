@@ -1,8 +1,9 @@
 ---
 import '../styles/settings.css';
 
-// Read-only view of the Interface Registry: what apps offer, what they need,
-// and whether those needs are actually met. Interfaces are app-DECLARED, which
+// View of the Interface Registry: what apps offer, what they need, and whether
+// those needs are actually met. The only writable rows are custom ones —
+// external endpoints the user registered (Add / Edit / Delete). Interfaces are app-DECLARED, which
 // is what makes this its own tile rather than part of Context (user-granted).
 const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
 // The shell as seen from an app's network position — the same prefix the SDK's
@@ -14,8 +15,8 @@ const baseUrl = osBase.replace(/\/+$/, '');
 interface InterfaceView {
   id: string; appId: string; name: string; kind: string; version: string;
   address: string; description?: string; permission?: string;
-  source: 'manifest' | 'runtime';
-  status: 'catalog' | 'live' | 'down';
+  source: 'manifest' | 'runtime' | 'custom';
+  status: 'catalog' | 'live' | 'down' | 'external';
   instanceId?: string; state?: string; url?: string;
 }
 interface ConsumerView {
@@ -69,6 +70,12 @@ const S = {
   dim:     'color:var(--aura-color-text-dim);',
   url:     'display:block;margin-top:2px;font-size:0.58rem;color:var(--aura-color-text-dim);word-break:break-all;',
   empty:   'padding:18px 0;color:var(--aura-color-text-dim);font-size:0.64rem;line-height:1.7;',
+  action:  'background:transparent;border:1px solid var(--aura-color-border);color:var(--aura-color-primary);'
+         + 'font-family:inherit;font-size:0.6rem;letter-spacing:0.12em;padding:3px 10px;cursor:pointer;'
+         + 'text-transform:uppercase;text-decoration:none;display:inline-block;',
+  rowBtn:  'background:transparent;border:1px solid var(--aura-color-border);color:var(--aura-color-text-dim);'
+         + 'font-family:inherit;font-size:0.55rem;letter-spacing:0.08em;padding:1px 6px;margin:2px 4px 0 0;'
+         + 'cursor:pointer;text-transform:uppercase;text-decoration:none;display:inline-block;',
   copy:    'background:transparent;border:1px solid var(--aura-color-border);color:var(--aura-color-text-dim);'
          + 'font-family:inherit;font-size:0.55rem;letter-spacing:0.08em;padding:1px 6px;margin-left:6px;'
          + 'cursor:pointer;text-transform:uppercase;',
@@ -102,6 +109,7 @@ function statusStyle(s: string): [string, string] {
   if (s === 'down')      return ['DOWN',      'var(--aura-color-warning)'];
   if (s === 'installed') return ['INSTALLED', 'var(--aura-color-text-dim)'];
   if (s === 'unmet')     return ['UNMET',     'var(--aura-color-danger)'];
+  if (s === 'external')  return ['EXTERNAL',  'var(--aura-color-secondary)'];
   return ['CATALOG', 'var(--aura-color-text-dim)'];
 }
 ---
@@ -123,7 +131,12 @@ function statusStyle(s: string): [string, string] {
       {/* Stated once, so the per-row → paths below can stay short. COPY buttons
           put base + path on the clipboard, which is what a caller outside this
           iframe (an MCP client, a sidecar, an agent in another app) needs. */}
-      <div style={S.base}>BASE <span style={S.mono}>{baseUrl}</span> · ROWS BELOW ARE RELATIVE TO IT</div>
+      <div style={S.base}>BASE <span style={S.mono}>{baseUrl}</span> · ROWS BELOW ARE RELATIVE TO IT (EXCEPT CUSTOM)</div>
+      {/* href is filled in by the script: the page lives under the proxy
+          prefix, so the target is only known from location.pathname. */}
+      <div style="margin-bottom:14px;">
+        <a style={S.action} data-nav="new" href="#">+ ADD INTERFACE</a>
+      </div>
 
       {(interfaces.length > 0 || consumers.length > 0) && (
         <>
@@ -139,7 +152,8 @@ function statusStyle(s: string): [string, string] {
         <div style={S.empty}>
           No app declares an interface yet.<br />
           Add a <span style={S.mono}>provides</span> block to an app manifest — name, kind
-          (http · rest · mcp · ws · event · kv) and an address — and it shows up here.
+          (http/rest · http/mcp · http/mcp-sse · ws/raw · ws/acp · os/event · os/kv …) and an address —
+          and it shows up here. Or add an external endpoint with + ADD INTERFACE.
         </div>
       ) : apps.map(([appId, list], gi) => (
         <div data-iface-group data-order={gi}>
@@ -173,12 +187,21 @@ function statusStyle(s: string): [string, string] {
                       {i.url && (
                         <span style={S.url}>
                           → {i.url}
-                          <button type="button" style={S.copy} data-copy={`${baseUrl}${i.url}`}>COPY</button>
+                          <button type="button" style={S.copy}
+                                  data-copy={i.source === 'custom' ? i.url : `${baseUrl}${i.url}`}>COPY</button>
                         </span>
                       )}
                     </td>
                     <td style={S.td}><span style={S.dim}>{i.version}</span></td>
-                    <td style={S.td}><span style={S.dim}>{i.source}</span></td>
+                    <td style={S.td}>
+                      <span style={S.dim}>{i.source}</span>
+                      {i.source === 'custom' && (
+                        <span style="display:block;">
+                          <a style={S.rowBtn} data-nav={`edit/${encodeURIComponent(i.name)}`} href="#">EDIT</a>
+                          <button type="button" style={S.rowBtn} data-delete={i.name}>DELETE</button>
+                        </span>
+                      )}
+                    </td>
                     <td style={S.td}>
                       <span style={`color:${colour};`}>{label}</span>
                       {i.instanceId && i.status !== 'catalog' && (
@@ -266,6 +289,24 @@ function statusStyle(s: string): [string, string] {
       ta.select();
       try { return document.execCommand('copy'); } finally { ta.remove(); }
     }
+
+    // Add / Edit links: resolved against this page's own (proxy-prefixed) path.
+    const pagePath = location.pathname.replace(/\/+$/, '');
+    for (const a of document.querySelectorAll('a[data-nav]')) {
+      a.setAttribute('href', `${pagePath}/${a.getAttribute('data-nav')}`);
+    }
+
+    document.addEventListener('click', async (e) => {
+      const del = e.target.closest('button[data-delete]');
+      if (del) {
+        const name = del.getAttribute('data-delete');
+        if (!confirm(`Delete custom interface '${name}'?`)) return;
+        const r = await fetch(`/api/interfaces/custom/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        if (r.ok) location.reload();
+        else alert((await r.json().catch(() => ({}))).error ?? `HTTP ${r.status}`);
+        return;
+      }
+    });
 
     document.addEventListener('click', async (e) => {
       const btn = e.target.closest('button[data-copy]');

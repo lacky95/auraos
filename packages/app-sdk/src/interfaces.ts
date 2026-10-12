@@ -18,8 +18,17 @@
 import type { OsClient } from './OsClient.js';
 import { getAppContext } from './context.js';
 
-/** Transports the OS can describe today. */
-export type InterfaceKind = 'http' | 'rest' | 'mcp' | 'ws' | 'event' | 'kv' | 'acp';
+/**
+ * `transport/protocol` — mirrors INTERFACE_KINDS in @aura/core. `http/mcp` is
+ * streamable-HTTP MCP, `http/mcp-sse` the legacy SSE flavour.
+ */
+export type InterfaceKind =
+  | 'http/rest' | 'http/raw' | 'http/mcp' | 'http/mcp-sse'
+  | 'ws/raw' | 'ws/acp' | 'ws/cdp'
+  | 'os/event' | 'os/kv';
+
+/** Pre-`transport/protocol` names; still accepted as input, never returned. */
+export type LegacyInterfaceKind = 'http' | 'rest' | 'mcp' | 'ws' | 'event' | 'kv' | 'acp';
 
 export interface InterfaceView {
   /** `<appId>/<name>` — globally unique. */
@@ -32,9 +41,13 @@ export interface InterfaceView {
   description?: string;
   schema?: string;
   permission?: string;
-  source: 'manifest' | 'runtime';
-  /** `live` is dialable; `catalog` means installed but nothing running. */
-  status: 'catalog' | 'live' | 'down';
+  /** `custom` — a user-registered endpoint outside AuraOS (appId `custom`). */
+  source: 'manifest' | 'runtime' | 'custom';
+  /**
+   * `live` is dialable; `catalog` means installed but nothing running;
+   * `external` is a custom entry whose `url` is its full address (never probed).
+   */
+  status: 'catalog' | 'live' | 'down' | 'external';
   instanceId?: string;
   state?: string;
   /** Shell-relative; use `urlFor()` to get something fetchable from anywhere. */
@@ -50,7 +63,7 @@ export interface ConsumerView {
 }
 
 export interface InterfaceFilter {
-  kind?: InterfaceKind;
+  kind?: InterfaceKind | LegacyInterfaceKind;
   appId?: string;
   name?: string;
   /** Only entries a running instance currently serves. */
@@ -60,7 +73,7 @@ export interface InterfaceFilter {
 /** What an app publishes at runtime. `version` defaults to '1' server-side. */
 export interface InterfaceSpec {
   name: string;
-  kind: InterfaceKind;
+  kind: InterfaceKind | LegacyInterfaceKind;
   address: string;
   version?: string;
   description?: string;

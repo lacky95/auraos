@@ -11,6 +11,7 @@
     "system.theme.broadcast",
     "system.kv.os.theme.write",
     "system.kv.os.workspaces.write",
+    "system.kv.os.interfaces.write",
     "system.kv.os.clockFormat.write",
     "system.kv.os.locale.write",
     "system.kv.os.keymap.write",
@@ -19,7 +20,7 @@
   "provides": [
     {
       "name": "interfaces",
-      "kind": "mcp",
+      "kind": "http/mcp",
       "address": "/mcp/interfaces",
       "version": "1",
       "description": "MCP server over the OS Interface Registry: list providers, resolve a ref, read the consumer report."
