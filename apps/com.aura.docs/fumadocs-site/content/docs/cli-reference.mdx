@@ -82,7 +82,7 @@ aura jump -m                                  # the aura-shell master container
 | `aura get scopes [name]` | Install scopes (system / global / user). | `-o` |
 | `aura get themes [name]` | Theme presets; ACTIVE marks the dark/light slot in use. | `-o` |
 | `aura get perms [app]` | Declared manifest permissions per app. | `-o` |
-| `aura describe <resource> <name>` | Full YAML of one resource (`app`, `inst`, `sc`, `cap`, `svc`). `describe inst` includes its sidecars and mounts. | `-o json`, `-i, --instance <id>` (the instance a sidecar belongs to; default `$APP_INSTANCE_ID`) |
+| `aura describe <resource> <name>` | Full YAML of one resource (`app`, `inst`, `sc`, `cap`, `svc`). `describe inst` includes its sidecars and mounts; `describe sc` the tools of an OS sidecar (`template`, `runtime`, `effective`). | `-o json`, `-i, --instance <id>` (the instance a sidecar belongs to; default `$APP_INSTANCE_ID`) |
 | `aura logs inst <name>` | Output of the instance itself (`docker logs` of its container; a PRoot instance's output is only in the shell log). | `-f, --follow`, `--tail <n>` |
 | `aura logs inst <name> -c <sidecar>` | Logs of an instance sidecar. Inside the app that owns an OS sidecar the CLI reads them through the OS API (no docker needed); everywhere else it runs `docker logs`. | `-c, --container <sidecar>`, `-f, --follow`, `--tail <n>` |
 | `aura logs svc <name>` | Logs of a service — reads `/data/aura/state/services/<name>.log` (default: last 100 lines). | `-f, --follow`, `--tail <n>` |
@@ -227,7 +227,9 @@ aura port expose at.oebb.opsconsole:5173 --host --sticky
 | `aura grant perms <app> [names...]` | Add manifest permissions; takes effect immediately. No names → picker (unchecking revokes). No app either → picks the app too. | — |
 | `aura grant caps <app> [names...]` | Add capabilities to the app's `tools[]` and hot-refresh running instances (no respawn). `'*'` grants all, `'#'` all-except. No names → picker showing what is already granted. | `-i, --interactive` (picker even when names are given) |
 | `aura revoke perms <app> <names...>` | Remove manifest permissions. | — |
-| `aura revoke caps <app> <names...>` | Remove capabilities from the app's manifest and restart its running instances. | — |
+| `aura revoke caps <app> <names...>` | Remove capabilities from the app's manifest and restart its running instances. Also gone from every OS sidecar of the app. | — |
+| `aura grant\|revoke caps <app> <caps...> --template <tpl>` | Tools of a `services[]` template: every OS sidecar of it holds them at `/aura/my-tools`, capped at the app's own `tools[]`. Persistent (the manifest), works from anywhere, applied live. | `--template <tpl>` |
+| `aura grant\|revoke caps <inst\|app> <caps...> --sidecar <name>` | Tools of one running OS sidecar (runtime; its template must declare `tools`). Needs the app's token: run it inside the app. Revoke removes runtime grants only. | `--sidecar <name>` |
 | `aura cap ...` | Manage the capability registry (below). | — |
 
 `install cap` adds a tool to the OS-wide toolchain; `grant cap` exposes it
@@ -241,8 +243,8 @@ inside one app's sandbox.
 | `aura cap info <name>` | Registry entry + install status + declaring apps (same as `aura describe cap`). | — |
 | `aura cap install <name...>` | Install into the shared toolchain (same as `aura install cap`). | — |
 | `aura cap remove <name>` | Uninstall and strip from every manifest (same as `aura rm cap`). | — |
-| `aura cap grant [appId] [name...]` | Same as `aura grant cap`. | `-i, --interactive` |
-| `aura cap revoke <appId> <name...>` | Same as `aura revoke cap`. | — |
+| `aura cap grant [appId] [name...]` | Same as `aura grant cap`. | `-i, --interactive`, `--template <tpl>` |
+| `aura cap revoke <appId> <name...>` | Same as `aura revoke cap`. | `--template <tpl>` |
 | `aura cap doctor [name...]` | Can each installed capability actually RUN in each sandbox (do its shared libraries travel with it)? | `--fix` (re-stage missing libs, hot-refresh apps), `--no-probe`, `--json` |
 | `aura cap registry show\|add\|remove` | Inspect or edit the capability registry YAML. | `add`: `--source apt\|npm\|curl\|builtin`, `--package`, `--binary`, `--url` |
 
@@ -250,6 +252,8 @@ inside one app's sandbox.
 aura grant perms com.example.app sidecars.spawn
 aura grant caps com.example.hello ripgrep jq
 aura revoke caps com.example.hello jq
+aura grant caps com.example.hello git --template worker     # tools of the worker sidecars
+aura grant caps com.example.hello-2 git --sidecar worker-7  # one running sidecar (inside the app)
 aura cap doctor --fix
 ```
 

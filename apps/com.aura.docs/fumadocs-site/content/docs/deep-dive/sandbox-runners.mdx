@@ -269,7 +269,9 @@ what may be asked live, pure and docker-free, in `sidecar-spec.ts`:
 3. `ensureImage`: `docker pull` if missing, 10 min timeout, concurrent pulls
    of one image share one promise.
 4. Create the volume subpath dirs and, with `mounts.own` or inheritance,
-   the mount root `aura/mounts/<instance>--<name>`.
+   the mount root `aura/mounts/<instance>--<name>`. A template with `tools`
+   gets its own tools dir filled now, before `docker create` (see
+   [Tools of an OS sidecar](#tools-of-an-os-sidecar)).
 5. Env: `envInherit` from OS Context, falling back to the app container's
    env (`docker inspect aura-<instanceId>`), then the spec's `env`.
 6. `seed`, if declared and not seeded yet. The marker is keyed by the data:
@@ -304,11 +306,12 @@ record in labels:
 | `aura.parent` / `aura.app` / `aura.service` | instance, app, sidecar name; the same as app-managed sidecars, so the existing reaper removes them on stop and crash and orphan adoption skips them |
 | `aura.managed` | `os` |
 | `aura.sidecar.template` / `aura.sidecar.owner` | template, and the sidecar that spawned it (or `-`) |
-| `aura.sidecar.spec` | JSON: name, template, image, spec hash, token nonce, port, mount view (`own`, `inherit`, `exclude`, `forceRo`), owner, created-at |
+| `aura.sidecar.spec` | JSON: name, template, image, spec hash, token nonce, port, mount view (`own`, `inherit`, `exclude`, `forceRo`), owner, `ownTools` (only when set), created-at |
 
 `remove(instanceId, name)` deletes the owned children first (recursively,
 by `aura.sidecar.owner`), then `MountManager.forgetConsumer` (binds,
-declarations, mount root), `docker rm -f`, and the token nonce.
+declarations, mount root), `docker rm -f`, its own tools dir and runtime
+tool grants, and the token nonce.
 
 All docker calls are async `execFile`s with their own timer (the docker CLI
 forwards SIGTERM to an exec'd process and then exits cleanly, so execFile's
@@ -330,6 +333,32 @@ A sidecar image without `cat` is read by a helper container in its PID
 namespace (`--pid=container:<sidecar>`, `cat /proc/1/mountinfo`). If neither
 works, a read-only mount into a sidecar is refused and rolled back rather
 than handed out unverified.
+
+#### Tools of an OS sidecar
+
+`inheritTools` mounts the app's own dir (`aura/runtime/<instance>/tools`).
+A template with `tools` instead gives each sidecar a dir of its own,
+`aura/runtime/<instance>--<sidecar>/tools`, mounted read-only at
+`/aura/my-tools` with the same PATH / packages / profile.d args
+(`toolArgs(dirKey)`). The spec only carries `ownTools: true` (present only
+when set, so older specs keep their hash); the list is applied live.
+
+`effectiveSidecarTools` (`sidecar-tools.ts`, pure) resolves the template
+list and the runtime grants **separately** with `resolveToolBinaries`
+(markers, helper binaries), unions them and intersects with the app's
+resolved `tools[]`; named tools the app lacks come back as `ignored`.
+`provisionAllowlist` then refills the dir with the effective names, in
+place (docker binds the dir by inode), so a running sidecar sees changes
+without a recreate. It runs before `docker create`, on adopt, in
+`reconcile` for live parents, on `grantTools` / `revokeTools`, and from
+`AppManager.refreshInstanceTools` (`osSidecars.refreshTools(instance)`)
+after an app's `tools[]` or a template's `tools` changed.
+
+Runtime grants are persisted in `aura/runtime/.state/<instance>--<sidecar>.tools.json`,
+so a recreated sidecar gets them back. `remove`, `reconcile` reaping and a
+deliberate stop / kill (`SidecarManager.forget`) delete the dir and the
+file; a crash (`removeAll`) keeps them for the respawn, like mount
+declarations.
 
 ## Tools allowlist mechanics
 
@@ -391,7 +420,9 @@ On stop, kill and crash:
   (a leaked bind pins the source filesystem and the app-data volume);
 - `InstanceTokens.forgetInstance` drops the nonces of the instance and every
   `<instance>--*` sidecar, so their tokens stop verifying;
-- `SidecarManager.removeAll` clears the fan-out view.
+- `SidecarManager.removeAll` clears the fan-out view; on a deliberate
+  stop / kill `SidecarManager.forget` also drops the sidecars' own tools
+  dirs and runtime tool grants.
 
 A deliberate stop/kill also forgets the mount declarations of the instance
 and its sidecars and removes the sidecars' mount roots (`MountManager.forget`);

@@ -298,6 +298,7 @@ request fields and return types: [HTTP API & SDK](/docs/sidecars/api).
 | `.exec(name, cmd[], { stdin?, timeoutMs?, user?, workdir?, env? })` | → `{ exitCode, stdout, stderr, truncated, timedOut }`. argv, no shell; default timeout 30 s, max 10 min. |
 | `.logs(name, { tail?, since?, timestamps? })` | → `{ stdout, stderr }`. |
 | `.mounts(name).list()` / `.add(appId, { mode?, data? })` / `.remove(mountId)` | The sidecar's cross-app mounts (own + inherited). Changing them needs `sidecars.mounts` + `apps.mount` and a sidecar spawned with `mounts: { own: true }`. |
+| `.tools(name).list()` / `.grant(...tools)` / `.revoke(...tools)` | The sidecar's own tools at `/aura/my-tools`: `{ own, inherited, template, runtime, effective, ignored }`. Its template must declare `tools`; grant/revoke need `sidecars.tools`; always capped at the app's `tools[]`. See [Tools of a sidecar](/docs/sidecars/tools). |
 | `OsSidecarError` | Thrown on failure; `.status` is the HTTP status (0 = no response). |
 
 Inside an OS sidecar spawned with `inheritIdentity`, `osSidecars()` works

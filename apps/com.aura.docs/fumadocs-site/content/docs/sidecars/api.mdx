@@ -25,6 +25,9 @@ Server-side only (it sends the instance token). Uses `fetch`, no
 | `.mounts(name).list()` | `OsSidecarMount[]`, own and inherited |
 | `.mounts(name).add(appId, opts?)` | `OsSidecarMount`. `opts`: `mode: 'ro' \| 'rw'`, `data: boolean` |
 | `.mounts(name).remove(mountId)` | `<appId>` or `<appId>:data` |
+| `.tools(name).list()` | `OsSidecarTools`, see [Objects](#objects) |
+| `.tools(name).grant(...tools)` | `OsSidecarTools & { granted }`: runtime grants added, applied live. Needs `sidecars.tools` |
+| `.tools(name).revoke(...tools)` | `OsSidecarTools & { revoked }`: runtime grants only (a template tool is a 409). Needs `sidecars.tools` |
 | `OsSidecarError` | Thrown on failure. `.status` is the HTTP status (0 = no response, or no token in the env) |
 
 Inside an OS sidecar spawned with `inheritIdentity`, `osSidecars()` works
@@ -54,7 +57,8 @@ Full options: [SDK reference](/docs/sdk-reference) and [Bring-your-own-runtime a
 
 All under `/api/instances/:instanceId/`, for container sandboxes. Every route
 here needs `Authorization: Bearer $AURA_INSTANCE_TOKEN`
-([why](/docs/sidecars/permissions#instance-tokens)).
+([why](/docs/sidecars/permissions#instance-tokens)), except reading a
+sidecar's tools.
 
 | Route | Permission | Result |
 |---|---|---|
@@ -67,6 +71,9 @@ here needs `Authorization: Bearer $AURA_INSTANCE_TOKEN`
 | `GET sidecars/:name/mounts` | `sidecars.spawn` | `{ capable, reason?, mounts }`, own and inherited |
 | `POST sidecars/:name/mounts` | `sidecars.mounts` + `apps.mount` | `{ ok, mount }`. Body `{ targetAppId, mode?: 'ro' \| 'rw', data? }` |
 | `DELETE sidecars/:name/mounts/:mountId` | `sidecars.mounts` + `apps.mount` | `{ ok, removed }`; 409 for an inherited mount |
+| `GET sidecars/:name/tools` | `sidecars.spawn` with a token; also readable **without** one (read-only, like `GET sidecars?usage=0`) | `OsSidecarTools` |
+| `POST sidecars/:name/tools` | `sidecars.tools` | `{ ok, granted, …OsSidecarTools }`. Body `{ tools: string[] }` (names or `*`). 409 when the template has no `tools` |
+| `DELETE sidecars/:name/tools?tool=<name>[&tool=…]` | `sidecars.tools` | `{ ok, revoked, …OsSidecarTools }`. 409 for a tool that comes from the template |
 
 Without a token (read-only views for the shell and the CLI):
 
@@ -99,7 +106,9 @@ are accepted; any other key is a 400 that names the allowed ones.
 
 Everything that ends up in the resolved spec (template fields, `env`,
 `envInherit`, `command`, `image`, `mounts`) is part of the spec hash. The
-switches `replace`, `takeover` and `wait` are not.
+switches `replace`, `takeover` and `wait` are not, and neither is a
+template's `tools` list: only *whether* it has one counts, the list itself
+is applied live ([Tools of a sidecar](/docs/sidecars/tools)).
 
 ## Objects
 
@@ -127,5 +136,14 @@ interface OsSidecarMount {
   containerPath: string;   // '/mnt/aura/<appId>' or '/mnt/aura/<appId>.data'
   origin: 'added' | 'restored' | 'adopted' | 'inherited';
   inheritedFrom?: string;  // set on inherited mounts: the instance
+}
+
+interface OsSidecarTools {
+  own: boolean;            // template declares `tools`: a dir of its own
+  inherited: boolean;      // `inheritTools`: the app's whole set instead
+  template: string[];      // services[].tools
+  runtime: string[];       // runtime grants of this sidecar
+  effective: string[];     // binaries at /aura/my-tools: (template ∪ runtime) ∩ the app's tools[]
+  ignored: string[];       // named tools the app doesn't hold (kept, not provisioned)
 }
 ```

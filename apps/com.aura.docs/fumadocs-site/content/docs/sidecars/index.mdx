@@ -34,6 +34,7 @@ have a reason not to.
 | What can run | your `services[]` templates (any image with `sidecars.anyImage`) | anything |
 | An edited template | recreates the sidecar on the next spawn | does nothing until you `docker rm` the container |
 | Mounts of its own | yes, at runtime (`sidecars.mounts`) | no; `inheritMounts` shares the app's root |
+| Tools of its own | yes, a subset of the app's (`services[].tools`, runtime grants with `sidecars.tools`) | no; `inheritTools` shares the app's set |
 | exec / logs | OS API (`sc.exec`, `sc.logs`) | your own `docker exec` |
 | Seeding | `services[].seed` | SDK `onSeed` callback |
 | `aura get sc` shows | `MANAGED os` | `MANAGED app` |
@@ -75,7 +76,7 @@ adopted, not restarted. The full walkthrough is
 
 ## Permissions
 
-Four permissions, all enforced: an app without them gets a 403.
+Six permissions, all enforced: an app without them gets a 403.
 
 | Permission | Allows |
 |---|---|
@@ -83,6 +84,7 @@ Four permissions, all enforced: an app without them gets a 403.
 | `sidecars.anyImage` | A spawn request with an `image` other than the template's. |
 | `sidecars.privileged` | Templates with `privileged`, `capabilities`, `devices` or `publish`, even though the template declares them. |
 | `sidecars.mounts` | Adding and removing the own mounts of the app's sidecars. Also needs `apps.mount`. |
+| `sidecars.tools` | Granting and revoking tools of one running sidecar. It still gets at most the app's own tools. |
 | `sidecars.manageAll` | Lets a sidecar manage all OS sidecars of its instance, not just the ones it spawned. |
 
 Details, the instance token every call carries, and the error codes:
@@ -104,6 +106,7 @@ An OS sidecar can get cross-app mounts at `/mnt/aura`, in two ways:
 | [OS-managed sidecars](/docs/sidecars/os-managed) | You are adding a sidecar to an app. Start here. |
 | [Templates](/docs/sidecars/templates) | You need a `services[]` field, inheritance, volumes or seeding. |
 | [Mounts of a sidecar](/docs/sidecars/mounts) | The sidecar needs another app's files. |
+| [Tools of a sidecar](/docs/sidecars/tools) | The sidecar needs CLI tools (`jq`, `git`, …), but not all of the app's. |
 | [Exec, logs & lifecycle](/docs/sidecars/operate) | You run commands in it, debug it, or wonder what happens on stop and restart. Includes the CLI. |
 | [Permissions & tokens](/docs/sidecars/permissions) | You get a 401, 403 or 409, or want to know what an app can and cannot do. |
 | [HTTP API & SDK](/docs/sidecars/api) | You need exact routes, request fields and return shapes. |

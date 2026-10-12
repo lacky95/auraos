@@ -6,6 +6,7 @@
     "os-managed",
     "templates",
     "mounts",
+    "tools",
     "operate",
     "permissions",
     "api",

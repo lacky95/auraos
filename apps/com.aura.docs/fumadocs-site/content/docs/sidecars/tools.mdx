@@ -1,0 +1,106 @@
+---
+title: Tools of a sidecar
+description: Give an OS-managed sidecar its own CLI tools — a subset of your app's, declared in the template or granted to one running sidecar, applied live.
+---
+
+An app's CLI tools (`tools[]`, see [Access](/docs/cli-reference#access))
+sit in its allowlist dir at `/aura/my-tools`. An OS sidecar can get tools in
+two ways:
+
+| | `inheritTools: true` | `tools: [...]` |
+|---|---|---|
+| What | the app's whole set, the app's own dir | a set of its own, in a dir of its own |
+| Per sidecar | no, every sidecar sees the same dir | yes, each sidecar has its dir (`aura/runtime/<instanceId>--<name>/tools`) |
+| Grant at runtime | no (grant to the app) | yes, to one running sidecar (`sidecars.tools`) |
+| Upper bound | the app's `tools[]` | the app's `tools[]`: the OS intersects |
+
+A template uses one of the two; both together are a 400.
+
+**A sidecar never holds a tool its app doesn't.** What it gets is
+
+```
+effective = (template tools ∪ runtime grants) ∩ the app's tools[]
+```
+
+resolved to binaries on both sides: `*` and `#` work in both lists, and a
+tool's helper binaries travel with it. Revoke a tool from the app and it
+disappears from every sidecar too; grant it back and it returns. A tool the
+app lacks is not an error: it is kept in the list, reported as `ignored`,
+and shows up once the app holds it.
+
+Every change is **live**. The OS refills the sidecar's dir in place and the
+container sees it at once. Nothing is recreated, and the list is not part of
+the spec hash (only *whether* the template has `tools` is).
+
+## In the template (persistent)
+
+```jsonc
+// app.manifest.json
+{
+  "tools": ["bash", "node", "jq", "git"],
+  "permissions": ["sidecars.spawn"],
+  "services": [
+    { "name": "worker", "image": "node:22-slim", "command": ["sleep", "infinity"],
+      "tools": ["jq"] }
+  ]
+}
+```
+
+Every `worker` sidecar has `jq` at `/aura/my-tools` (on its `PATH`), and not
+`git`. Template tools need no permission beyond `sidecars.spawn`: the
+manifest is the app's, and the list is capped at the app's own tools.
+
+Change the list from anywhere, without editing the file:
+
+```bash
+aura grant caps com.example.app git --template worker    # every worker sidecar, live
+aura revoke caps com.example.app git --template worker
+```
+
+`aura cap grant <app> <tool> --template worker` is the same. Giving a template
+`tools` for the first time changes its spec, so its running sidecars get
+their own dir on their next spawn (they are recreated then); after that,
+edits to the list apply live.
+
+## At runtime, for one sidecar
+
+Declare `tools: []` (or any list) so the template's sidecars have a dir of
+their own, add `sidecars.tools` to the app's permissions, then:
+
+```ts
+import { osSidecars } from '@aura/app-sdk/os-sidecars';
+const sc = osSidecars();
+
+await sc.spawn({ template: 'worker', suffix: 'job7' });
+await sc.tools('worker-job7').grant('git', 'node');
+// → { granted: ['git', 'node'], effective: ['git', 'jq', 'node'], ignored: [], template: ['jq'], runtime: ['git', 'node'], … }
+await sc.tools('worker-job7').list();
+await sc.tools('worker-job7').revoke('git');
+```
+
+From the CLI, inside the app (the call needs the app's token, like `rm sc`):
+
+```bash
+aura grant caps com.example.app-2 git --sidecar worker-job7
+aura revoke caps com.example.app-2 git --sidecar worker-job7
+aura describe sc worker-job7 -i com.example.app-2     # tools: { template, runtime, effective }
+```
+
+- Runtime grants are additive. `revoke` removes runtime grants only; a tool
+  that comes from the template answers 409 with the `--template` command to
+  use instead.
+- Plain names or `*` (= everything the app has). `#` belongs in the template.
+- They survive a recreate of the sidecar (a changed spec) and a crash of the
+  instance (the respawned app's sidecar gets them back). Deleting the
+  sidecar, or stopping the instance, drops them.
+- A sidecar whose template has no `tools` answers 409: there is no dir of its
+  own to grant into.
+- A sidecar calling with its own token may grant only to sidecars in its
+  subtree, like every other sidecar call
+  ([What a sidecar may manage](/docs/sidecars/permissions#what-a-sidecar-may-manage)).
+
+## App-managed sidecars
+
+The SDK's docker path (`createSidecars`, `mode: 'docker'`) has no tool dirs
+of its own: it ignores `tools` (with a log line). Use `inheritTools` there,
+or move the sidecar to the OS path.
