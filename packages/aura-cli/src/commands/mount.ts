@@ -15,6 +15,7 @@ import { stdin, stdout } from 'node:process';
 import type { AuraMount, MountMode } from '@aura/core';
 import { api, type ShellError } from '../lib/client.js';
 import { color, fail, info, ok, table, warn } from '../lib/format.js';
+import { termSize, truncateAnsi } from '../lib/tui.js';
 import {
   promptChoice,
   promptConfirm,
@@ -516,8 +517,16 @@ interface WizardDraft {
   picked?: Map<string, { rw: boolean; data: boolean }>;
 }
 
+/**
+ * Short terminals (fewer than SHORT_ROWS) drop the wizard's decorative
+ * dividers, the same way `aura jump` sheds chrome before content: every row
+ * spent on a rule is a row the picker below can't use for the list.
+ */
+const SHORT_ROWS = 20;
 function divider(): void {
-  stdout.write(color.dim('  ────────────────────────────────────────────────────\n'));
+  if (termSize().rows < SHORT_ROWS) return;
+  const width = Math.max(10, Math.min(52, termSize().cols - 3));
+  stdout.write(color.dim('  ' + '─'.repeat(width) + '\n'));
 }
 
 /** Live, mountable (container) instances of one app. */
@@ -535,7 +544,8 @@ async function runWizard(): Promise<void> {
   const currentInstanceId = process.env['APP_INSTANCE_ID'];
 
   divider();
-  console.log(`  ${color.bold('aura')} · mount apps into a container   ${color.dim('— ⌃B back, ^C cancel')}`);
+  console.log(truncateAnsi(`  ${color.bold('aura')} · mount apps into a container   ${color.dim('— ⌃B back, ^C cancel')}`,
+    termSize().cols - 1));
   divider();
 
   type StepResult = 'advance' | 'back' | 'cancel';

@@ -1,7 +1,7 @@
 import { stdin, stdout } from 'node:process';
-import { moveCursor, clearScreenDown } from 'node:readline';
 import { color } from './format.js';
 import { fuzzyScore, stripAnsi } from './fuzzy.js';
+import { fitAnsi, fitHints, rewind, scrollWindow, termSize, truncateAnsi, visibleWidth, writeFrame } from './tui.js';
 
 /**
  * Sentinel returned by prompts when the user presses the back key (Esc on
@@ -160,6 +160,35 @@ export interface ChoiceOption<T> {
   desc?: string;
 }
 
+/**
+ * Sizing shared by the pickers, after `aura jump` (see lib/tui.ts): a frame
+ * never exceeds rows-1 lines or cols-1 columns. When space runs short the
+ * least essential parts go first — blank spacers, then the help line's minor
+ * keys, then the description column — and only then does the list itself
+ * shrink into a scroll window behind dim "↑/↓ N more" lines.
+ *
+ * A finished prompt collapses to one summary line (`✔ question › answer`), so
+ * a multi-step wizard keeps the screen for the step being answered instead of
+ * stacking every list it has shown. Going BACK erases the frame entirely.
+ */
+/** Fewest list rows worth keeping the help line for — below this the keys
+ *  hint gives way to the list itself. */
+const MIN_WINDOW = 3;
+
+/** Replace a picker's frame with its one-line outcome ('' erases it). */
+function collapse(linesWritten: number, summary: string): void {
+  rewind(linesWritten);
+  if (summary) writeFrame([summary]);
+}
+function answered(question: string, answer: string): string {
+  return `${color.green('✔')} ${question} ${color.dim('›')} ${answer}`;
+}
+
+/** The ↑/↓ lines around a scrolled list. Blank when nothing is hidden on that
+ *  side, so the frame keeps its height while the user scrolls. */
+function moreAbove(n: number): string { return n > 0 ? color.dim(`    ↑ ${n} more`) : ''; }
+function moreBelow(n: number): string { return n > 0 ? color.dim(`    ↓ ${n} more`) : ''; }
+
 export async function promptChoice<T>(
   question: string,
   options: ChoiceOption<T>[],
@@ -171,61 +200,86 @@ export async function promptChoice<T>(
   }
   let idx = Math.max(0, Math.min(defaultIdx, options.length - 1));
   let linesWritten = 0;
+  let scrollTop = 0;
 
-  const draw = (firstTime: boolean) => {
-    if (!firstTime) {
-      moveCursor(stdout, 0, -linesWritten);
-      clearScreenDown(stdout);
-    }
-    const lines: string[] = [];
-    lines.push(`${color.cyan('?')} ${question}`);
-    for (let i = 0; i < options.length; i++) {
+  const draw = () => {
+    rewind(linesWritten);
+    const { rows, cols } = termSize();
+    const budget = Math.max(3, rows - 1);
+    // Narrow: the description goes first — the label is what you pick by.
+    const showDesc = cols >= 50;
+    const row = (i: number) => {
       const o = options[i]!;
       const cursor = i === idx ? color.green('▸') : ' ';
       const label  = i === idx ? color.bold(o.label) : o.label;
-      const desc   = o.desc ? color.dim(`  — ${o.desc}`) : '';
-      lines.push(`  ${cursor} ${label}${desc}`);
+      const desc   = showDesc && o.desc ? color.dim(`  — ${o.desc}`) : '';
+      return `  ${cursor} ${label}${desc}`;
+    };
+    const head = `${color.cyan('?')} ${question}`;
+    const hint = color.dim('  ' + fitHints([
+      { text: '↑↓ navigate', prio: 1 },
+      { text: '↵ enter',     prio: 0 },
+      ...(opts.allowBack ? [{ text: '⌃B/← back', prio: 2 }] : []),
+      { text: '^C cancel',   prio: 3 },
+    ], cols - 3));
+    const all = options.map((_, i) => row(i));
+
+    let lines: string[];
+    if (all.length + 2 <= budget) {
+      lines = [head, ...all, hint];
+    } else if (all.length + 1 <= budget) {
+      lines = [head, ...all];                       // drop the hint before scrolling
+    } else {
+      const indicators = budget >= 4 ? 2 : 0;
+      const size = Math.max(1, budget - 1 - indicators);
+      scrollTop = scrollWindow(all.length, idx, size, scrollTop);
+      const win = all.slice(scrollTop, scrollTop + size);
+      lines = indicators
+        ? [head, moreAbove(scrollTop), ...win, moreBelow(all.length - scrollTop - size)]
+        : [head, ...win];
     }
-    const back = opts.allowBack ? '   ⌃B/← back' : '';
-    lines.push(color.dim(`  ↑↓ navigate   ↵ enter${back}   ^C cancel`));
-    const text = lines.join('\n') + '\n';
-    stdout.write(text);
-    // Count actual newlines so the rewind matches what we just wrote
-    // (the picker stops drifting even if a label embeds a newline later).
-    linesWritten = (text.match(/\n/g) ?? []).length;
+    linesWritten = writeFrame(lines);
   };
 
   return new Promise<T | BackSignal>((resolve, reject) => {
     stdin.setRawMode(true);
     stdin.resume();
     stdin.setEncoding('utf8');
+    const onResize = () => draw();
     const cleanup = () => {
       stdin.removeListener('data', onData);
+      stdout.removeListener('resize', onResize);
       stdin.setRawMode(false);
       stdin.pause();
     };
+    const finish = (i: number) => {
+      cleanup();
+      collapse(linesWritten, answered(question, options[i]!.label));
+      resolve(options[i]!.value);
+    };
     const onData = (data: string) => {
-      if (data === KEY_CTRLC) { cleanup(); reject(new PromptCancelled()); return; }
+      if (data === KEY_CTRLC) { cleanup(); collapse(linesWritten, `${color.red('✖')} ${question}`); reject(new PromptCancelled()); return; }
       // Esc + Backspace are silently swallowed — Esc would exit browser
       // fullscreen, Backspace would navigate the iframe's history.
       if (data === KEY_ESC) return;
       if (data === '\x7f' || data === '\b') return;
       // Back keys: Ctrl-B (universal), Left-arrow, or vim 'h'.
       if (data === KEY_CTRLB || data === KEY_LEFT || data === 'h') {
-        if (opts.allowBack) { cleanup(); resolve(BACK); return; }
+        if (opts.allowBack) { cleanup(); collapse(linesWritten, ''); resolve(BACK); return; }
         return;
       }
-      if (data === KEY_ENTER) { cleanup(); resolve(options[idx]!.value); return; }
-      if (data === KEY_UP   || data === 'k') { idx = (idx - 1 + options.length) % options.length; draw(false); return; }
-      if (data === KEY_DOWN || data === 'j') { idx = (idx + 1) % options.length; draw(false); return; }
+      if (data === KEY_ENTER) { finish(idx); return; }
+      if (data === KEY_UP   || data === 'k') { idx = (idx - 1 + options.length) % options.length; draw(); return; }
+      if (data === KEY_DOWN || data === 'j') { idx = (idx + 1) % options.length; draw(); return; }
       // Digit quick-pick: 1..9 maps to the matching option index.
       if (data >= '1' && data <= '9') {
         const n = parseInt(data, 10) - 1;
-        if (n < options.length) { cleanup(); resolve(options[n]!.value); }
+        if (n < options.length) finish(n);
       }
     };
     stdin.on('data', onData);
-    draw(true);
+    stdout.on('resize', onResize);
+    draw();
   });
 }
 
@@ -449,108 +503,159 @@ export async function promptMultiSelect<T>(
     flagState.set(o.value, state);
   }
 
-  const draw = (firstTime: boolean) => {
-    if (!firstTime) {
-      moveCursor(stdout, 0, -linesWritten);
-      clearScreenDown(stdout);
-    }
+  let scrollTop = 0;
+  /** Most rows shown at once, however tall the terminal: a big registry
+   *  shouldn't turn every keypress into a full-screen repaint. */
+  const MAX_WINDOW = 12;
+
+  const draw = () => {
+    rewind(linesWritten);
     const visible = visibleOptions();
     if (cursor >= visible.length) cursor = Math.max(0, visible.length - 1);
+    const { rows, cols } = termSize();
+    const budget = Math.max(3, rows - 1);
+    const width = cols - 1;
 
-    const lines: string[] = [];
-    lines.push(`${color.cyan('?')} ${question}`);
+    const head = `${color.cyan('?')} ${question}`;
     const modeLabel = modes.length > 1
       ? `mode ${color.green('[' + modes[modeIdx]!.label + ']')}`
       : '';
-    const checkedCount = checked.size;
-    const filterStatus = filter
-      ? `${color.cyan('filter:')} "${filter}"`
-      : '';
-    const meta = [modeLabel, `${color.dim(visible.length + ' shown')}`, color.dim(checkedCount + ' selected'), filterStatus]
+    const filterStatus = filter ? `${color.cyan('filter:')} "${filter}"` : '';
+    const meta = [modeLabel, color.dim(visible.length + ' shown'), color.dim(checked.size + ' selected'), filterStatus]
       .filter(Boolean).join('  ');
-    lines.push(`  ${meta}`);
-    lines.push('');
 
-    if (visible.length === 0) {
-      lines.push(`  ${color.dim('(no matches)')}`);
-    } else {
-      // Max ~12 rows at a time so a big registry doesn't blow out the redraw.
-      const WINDOW = 12;
-      const start = Math.max(0, Math.min(cursor - 5, visible.length - WINDOW));
-      const end   = Math.min(visible.length, start + WINDOW);
-      const widthLabel = Math.min(
-        24,
-        Math.max(...visible.slice(start, end).map((o) => o.label.length), 8),
-      );
-      for (let i = start; i < end; i++) {
-        const o = visible[i]!;
-        const isCursor = i === cursor;
-        const isChecked = checked.has(o.value);
-        const cur  = isCursor ? color.green('▸') : ' ';
-        const box  = isChecked ? color.green('[✓]') : color.dim('[ ]');
-        const name = isCursor ? color.bold(o.label.padEnd(widthLabel)) : o.label.padEnd(widthLabel);
-        const tag  = o.tag ? color.dim(o.tag.padEnd(10)) : ' '.repeat(10);
-        const desc = o.desc ? color.dim('— ' + o.desc) : '';
-        // Active per-row flags render as badges after the tag, so the row shows
-        // its mode without the user having to remember what they set.
-        // A grouped flag is a MODE, and an unchecked row has no mode — without
-        // this guard every row would carry a permanent `ro`, since the radio
-        // invariant keeps exactly one group member true at all times.
-        const on = o.flags
-          ? Object.keys(o.flags).filter((k) => {
-              if (!flagState.get(o.value)?.[k]) return false;
-              if (o.flags![k]!.group && !checked.has(o.value)) return false;
-              return true;
-            })
-          : [];
-        const flagBadges = on.length
-          ? ' ' + on.map((k) => {
-              const spec = o.flags![k]!;
-              return color[spec.tone ?? 'green'](spec.label);
-            }).join(' ')
-          : '';
-        lines.push(`  ${cur} ${box} ${name}  ${tag}${flagBadges} ${desc}`);
-      }
-      if (end < visible.length) {
-        lines.push(color.dim(`  … ${visible.length - end} more below`));
-      }
-    }
-
-    lines.push('');
-    const backHint = opts.allowBack ? '   ⌃B/← back' : '';
-    const modeHint = modes.length > 1 ? '   m/⇥ switch mode' : '';
-    const flagHint = flagLabels.size
-      ? '   ' + [...flagLabels].map(([k, l]) => `${k} ${l}`).join('  ')
-      : '';
-    // Keyed on `filtering` (sub-input open), NOT `filter` (query non-empty).
-    // Enter leaves the sub-input keeping the query, so the two differ — and
-    // since `s` now preserves the query on re-entry, "normal mode with a live
-    // filter" is the common state, not a corner case.
-    const editHint = filter ? '   s edit filter' : '';
+    // ── Help line: essentials first, the rest as width allows ──
     // Name the cycle when the pickable rows have one, so space's extra stops
     // aren't a surprise: "space ro/wr/off" rather than "space toggle".
     const firstGroup = [...groupKeys.values()][0];
     const spaceHint = firstGroup
       ? `space ${firstGroup.map((k) => flagLabels.get(k)).join('/')}/off`
       : 'space toggle';
-    const help = filtering
-      ? color.dim(`  type to filter   ⌫ del   ⌃B clear filter   ↑↓ navigate   ${spaceHint}   ↵ apply`)
-      : color.dim(`  ↑↓ navigate   ${spaceHint}${flagHint}   a all   s/⌃F search${editHint}${modeHint}   ↵ done${backHint}   ^C cancel`);
-    lines.push(help);
+    // Grouped flags are already named by the space hint; list the rest.
+    const flagHints = [...flagLabels].map(([k, l]) => ({ text: `${k} ${l}`, prio: flagGroup.has(k) ? 6 : 2 }));
+    // Keyed on `filtering` (sub-input open), NOT `filter` (query non-empty).
+    // Enter leaves the sub-input keeping the query, so the two differ — and
+    // since `s` preserves the query on re-entry, "normal mode with a live
+    // filter" is the common state, not a corner case.
+    const help = color.dim('  ' + fitHints(filtering
+      ? [
+          { text: `${color.cyan('/')}${filter}▏`, prio: 0 },   // what you are typing, always shown
+          { text: 'type to filter',  prio: 5 },
+          { text: '⌫ del',           prio: 6 },
+          { text: '⌃B clear filter', prio: 2 },
+          { text: '↑↓ navigate',     prio: 4 },
+          { text: spaceHint,         prio: 3 },
+          { text: '↵ apply',         prio: 1 },
+        ]
+      : [
+          { text: '↑↓ navigate', prio: 3 },
+          { text: spaceHint,     prio: 0 },
+          ...flagHints,
+          { text: 'a all',       prio: 7 },
+          { text: 's/⌃F search', prio: 4 },
+          ...(filter ? [{ text: 's edit filter', prio: 5 }] : []),
+          ...(modes.length > 1 ? [{ text: 'm/⇥ switch mode', prio: 6 }] : []),
+          { text: '↵ done',      prio: 1 },
+          ...(opts.allowBack ? [{ text: '⌃B/← back', prio: 5 }] : []),
+          { text: '^C cancel',   prio: 8 },
+        ], width - 2));
 
-    const text = lines.join('\n') + '\n';
-    stdout.write(text);
-    linesWritten = (text.match(/\n/g) ?? []).length;
+    // ── Row columns: cursor + box + name + mode badges are the essentials;
+    //    the scope/state tag and the description go as the width shrinks ──
+    const showTag  = width >= 48;
+    const showDesc = width >= 72;
+    const natural  = Math.min(24, Math.max(8, ...visible.map((o) => visibleWidth(o.label))));
+    const reserve  = 8 /* "  ▸ [✓] " */ + 10 /* badges: " wr +data" */ + (showTag ? 12 : 0);
+    const labelW   = Math.max(6, Math.min(natural, width - reserve));
+    const renderRow = (i: number): string => {
+      const o = visible[i]!;
+      const isCursor = i === cursor;
+      const cur  = isCursor ? color.green('▸') : ' ';
+      const box  = checked.has(o.value) ? color.green('[✓]') : color.dim('[ ]');
+      const name = fitAnsi(isCursor ? color.bold(o.label) : o.label, labelW);
+      const tag  = showTag ? '  ' + fitAnsi(o.tag ? color.dim(o.tag) : '', 10) : '';
+      // Active per-row flags render as badges after the tag, so the row shows
+      // its mode without the user having to remember what they set.
+      // A grouped flag is a MODE, and an unchecked row has no mode — without
+      // this guard every row would carry a permanent `ro`, since the radio
+      // invariant keeps exactly one group member true at all times.
+      const on = o.flags
+        ? Object.keys(o.flags).filter((k) => {
+            if (!flagState.get(o.value)?.[k]) return false;
+            if (o.flags![k]!.group && !checked.has(o.value)) return false;
+            return true;
+          })
+        : [];
+      const badges = on.length
+        ? ' ' + on.map((k) => color[o.flags![k]!.tone ?? 'green'](o.flags![k]!.label)).join(' ')
+        : '';
+      const desc = showDesc && o.desc ? ' ' + color.dim('— ' + o.desc) : '';
+      return `  ${cur} ${box} ${name}${tag}${badges}${desc}`;
+    };
+
+    // ── Layout: least-compact level that shows the full window, else shrink ──
+    //   0 = question, meta, spacers, rows, help   (the roomy layout)
+    //   1 = spacers dropped
+    //   2 = meta folded onto the question line
+    //   3 = help dropped too (only when even a MIN_WINDOW list wouldn't fit)
+    // Folded, the QUESTION gives way rather than the meta: the selection count
+    // and filter are live state, the question is the same every keypress.
+    const folded = `${truncateAnsi(head, Math.max(12, width - visibleWidth(meta) - 2))}  ${meta}`;
+    const chrome = (level: number): { top: string[]; bottom: string[] } => {
+      if (level === 0) return { top: [head, `  ${meta}`, ''], bottom: ['', help] };
+      if (level === 1) return { top: [head, `  ${meta}`], bottom: [help] };
+      if (level === 2) return { top: [folded], bottom: [help] };
+      return { top: [folded], bottom: [] };
+    };
+    const total = visible.length;
+    const want = Math.min(MAX_WINDOW, Math.max(1, total));
+    const room = (level: number, size: number) => {
+      const { top, bottom } = chrome(level);
+      return top.length + bottom.length + size + (total > size ? 2 : 0) <= budget;
+    };
+    let level = [0, 1, 2].find((l) => room(l, want));
+    let size = want;
+    if (level === undefined) {
+      const { top, bottom } = chrome(2);
+      const fit = budget - top.length - bottom.length - 2;
+      if (fit >= Math.min(MIN_WINDOW, total)) { level = 2; size = fit; }
+      else {
+        level = 3;
+        const left = budget - 1;
+        size = total <= left ? total : Math.max(1, left - 2);
+      }
+    }
+    const { top, bottom } = chrome(level);
+    let body: string[];
+    if (total === 0) {
+      body = [`  ${color.dim('(no matches)')}`];
+    } else if (total <= size) {
+      scrollTop = 0;
+      body = visible.map((_, i) => renderRow(i));
+    } else {
+      scrollTop = scrollWindow(total, cursor, size, scrollTop);
+      body = [moreAbove(scrollTop)];
+      for (let i = scrollTop; i < scrollTop + size; i++) body.push(renderRow(i));
+      body.push(moreBelow(total - scrollTop - size));
+    }
+    linesWritten = writeFrame([...top, ...body, ...bottom]);
   };
 
   return new Promise<MultiSelectResult<T> | BackSignal>((resolve, reject) => {
     stdin.setRawMode(true);
     stdin.resume();
     stdin.setEncoding('utf8');
+    const onResize = () => draw();
     const cleanup = () => {
       stdin.removeListener('data', onData);
+      stdout.removeListener('resize', onResize);
       stdin.setRawMode(false);
       stdin.pause();
+    };
+    const cancel = () => {
+      cleanup();
+      collapse(linesWritten, `${color.red('✖')} ${question}`);
+      reject(new PromptCancelled());
     };
     const onData = (data: string) => {
       // Filter-mode key handling: any character extends the filter; Backspace
@@ -560,68 +665,69 @@ export async function promptMultiSelect<T>(
       // history navigation if it leaks past the iframe.
       if (filtering) {
         if (data === KEY_ESC) return;
-        if (data === KEY_ENTER) { filtering = false; draw(false); return; }
-        if (data === KEY_CTRLC) { cleanup(); reject(new PromptCancelled()); return; }
-        if (data === KEY_CTRLB) { filtering = false; filter = ''; cursor = 0; draw(false); return; }
+        if (data === KEY_ENTER) { filtering = false; draw(); return; }
+        if (data === KEY_CTRLC) { cancel(); return; }
+        if (data === KEY_CTRLB) { filtering = false; filter = ''; cursor = 0; draw(); return; }
         if (data === '\x7f' || data === '\b') {
           filter = filter.slice(0, -1);
           cursor = 0;
-          draw(false);
+          draw();
           return;
         }
         // Arrow keys still navigate while filtering.
-        if (data === KEY_UP)   { const v = visibleOptions(); if (v.length) cursor = (cursor - 1 + v.length) % v.length; draw(false); return; }
-        if (data === KEY_DOWN) { const v = visibleOptions(); if (v.length) cursor = (cursor + 1) % v.length; draw(false); return; }
+        if (data === KEY_UP)   { const v = visibleOptions(); if (v.length) cursor = (cursor - 1 + v.length) % v.length; draw(); return; }
+        if (data === KEY_DOWN) { const v = visibleOptions(); if (v.length) cursor = (cursor + 1) % v.length; draw(); return; }
         // Space toggles while filtering too.
         if (data === ' ') {
           const v = visibleOptions();
           const o = v[cursor];
           if (o) pressSpace(o);
-          draw(false);
+          draw();
           return;
         }
         // Printable char → extend filter.
         if (data.length === 1 && data >= ' ' && data <= '~') {
           filter += data;
           cursor = 0;
-          draw(false);
+          draw();
           return;
         }
         return;
       }
 
       // Normal-mode keys.
-      if (data === KEY_CTRLC) { cleanup(); reject(new PromptCancelled()); return; }
+      if (data === KEY_CTRLC) { cancel(); return; }
       // Esc + Backspace are silently swallowed — browser collisions (Esc =
       // exit fullscreen, Backspace = history back). Back = Ctrl-B or ←.
       if (data === KEY_ESC) return;
       if (data === '\x7f' || data === '\b') return;
       if (data === KEY_CTRLB || data === KEY_LEFT) {
-        if (opts.allowBack) { cleanup(); resolve(BACK); return; }
+        if (opts.allowBack) { cleanup(); collapse(linesWritten, ''); resolve(BACK); return; }
         return;
       }
       if (data === KEY_ENTER) {
         cleanup();
+        collapse(linesWritten, answered(question, color.dim(`${checked.size} selected`)));
         resolve({ modeIdx, selected: Array.from(checked), flags: flagState });
         return;
       }
-      if (data === KEY_UP   || data === 'k') { const v = visibleOptions(); if (v.length) cursor = (cursor - 1 + v.length) % v.length; draw(false); return; }
-      if (data === KEY_DOWN || data === 'j') { const v = visibleOptions(); if (v.length) cursor = (cursor + 1) % v.length; draw(false); return; }
+      if (data === KEY_UP   || data === 'k') { const v = visibleOptions(); if (v.length) cursor = (cursor - 1 + v.length) % v.length; draw(); return; }
+      if (data === KEY_DOWN || data === 'j') { const v = visibleOptions(); if (v.length) cursor = (cursor + 1) % v.length; draw(); return; }
       if (data === ' ') {
         const v = visibleOptions();
         const o = v[cursor];
         if (o) pressSpace(o);
-        draw(false);
+        draw();
         return;
       }
       // Deliberately does NOT reset `filter`: Enter leaves the sub-input with
       // the query still applied, so without this you could never get back in to
       // refine one — only wipe it and retype. ⌃B (inside) is the way to clear.
-      if (data === 's' || data === KEY_CTRLF) { filtering = true; cursor = 0; draw(false); return; }
+      if (data === 's' || data === KEY_CTRLF) { filtering = true; cursor = 0; draw(); return; }
       if ((data === 'm' || data === '\t') && modes.length > 1) {
         modeIdx = (modeIdx + 1) % modes.length;
         cursor = 0;
-        draw(false);
+        draw();
         return;
       }
       // 'a' toggles all visible (handy on a filtered list).
@@ -632,7 +738,7 @@ export async function promptMultiSelect<T>(
           if (anyUnchecked) checked.add(o.value);
           else              checked.delete(o.value);
         }
-        draw(false);
+        draw();
         return;
       }
       // Per-row flag hotkeys. Checked LAST so a built-in key can never be
@@ -655,12 +761,13 @@ export async function promptMultiSelect<T>(
           }
           flagState.set(o.value, state);
           checked.add(o.value);
-          draw(false);
+          draw();
         }
         return;
       }
     };
     stdin.on('data', onData);
-    draw(true);
+    stdout.on('resize', onResize);
+    draw();
   });
 }

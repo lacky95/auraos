@@ -7,6 +7,7 @@ import { color, fail, info, ok, warn } from '../lib/format.js';
 import { enterSandbox, enterSidecar, syncDockerExecWinsize, setTerminalHost, callerHostLabel } from '../lib/enter-sandbox.js';
 import { resolveInstance, resolveSidecar } from '../lib/resolve.js';
 import { sidecarId } from '../lib/resources.js';
+import { truncateAnsi } from '../lib/tui.js';
 
 interface InstanceLite {
   instanceId: string;
@@ -222,37 +223,6 @@ const KEY_CTRLC = '\x03';
 
 const HIDE_CURSOR = '\x1b[?25l';
 const SHOW_CURSOR = '\x1b[?25h';
-const SGR_RESET   = '\x1b[0m';
-const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
-
-/** Printable width of a string, ignoring SGR color sequences. The picker
- *  emits only ASCII plus a few single-cell symbols (▸ ● ◐ ◆ ─ ↑ ↓ ↵ ·), so
- *  char-count equals column-count — no wcwidth table needed. */
-function visibleWidth(s: string): number {
-  return s.replace(ANSI_SGR_RE, '').length;
-}
-
-/** Clip a colored line to `maxCols` terminal cells without splitting SGR
- *  sequences. Clipped lines end in '…' plus a reset so an open color never
- *  bleeds into the next row. */
-function truncateAnsi(s: string, maxCols: number): string {
-  if (visibleWidth(s) <= maxCols) return s;
-  const keep = Math.max(0, maxCols - 1); // leave one cell for the ellipsis
-  let out = '';
-  let width = 0;
-  for (let i = 0; i < s.length; ) {
-    if (s[i] === '\x1b') {
-      const m = /^\x1b\[[0-9;]*m/.exec(s.slice(i));
-      if (m) { out += m[0]; i += m[0].length; continue; }
-    }
-    if (width >= keep) break;
-    out += s[i];
-    width++;
-    i++;
-  }
-  return out + '…' + SGR_RESET;
-}
-
 function renderRow(t: JumpTarget, selected: boolean, idx: number, nameWidth: number, showDetail: boolean): string {
   const cursor = selected ? color.green('▸') : ' ';
   const slot   = color.dim(`[${idx + 1}]`.padStart(4));
