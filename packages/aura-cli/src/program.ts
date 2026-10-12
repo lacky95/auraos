@@ -59,6 +59,7 @@ export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]
     ['aura get themes [name]', 'Theme presets, ACTIVE marks the one in use'],
     ['aura get perms [app]', 'Declared manifest permissions'],
     ['aura describe <resource> <name>', 'Full YAML of one resource (-o json)'],
+    ['aura logs inst <name>', 'Output of an instance (-f to follow)'],
     ['aura logs inst <name> -c <sidecar>', 'Logs of an instance sidecar'],
     ['aura logs svc <name>', 'Logs of a service'],
     ['aura events', 'Live stream of OS state changes'],
@@ -84,6 +85,7 @@ export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]
     ['aura rm cap <cap...>', 'Uninstall capabilities'],
     ['aura rm mount <mount...>', 'Detach mounts (-i <inst> if several have it)'],
     ['aura rm port <port...>', 'Remove port exposes (ids from aura get ports)'],
+    ['aura rm sc <sidecar...>', 'Delete OS-managed sidecars (inside their app)'],
   ] },
   { title: 'Connect', lines: [
     ['aura exec inst <name>', 'Shell into an instance'],

@@ -221,7 +221,15 @@ async function logsCmd(resource: string, name: string, opts: { container?: strin
   }
   if (def.name === 'sidecars') fail('use: aura logs inst <instanceId> -c <sidecar>');
   const inst = await resolveInstance(name);
-  if (!opts.container) return dispatch(['inst', 'logs', inst.instanceId, ...(opts.follow ? ['-f'] : [])]);
+  if (!opts.container) {
+    // The app's own output. A container instance's stdout/stderr are what
+    // `docker logs` holds; a PRoot instance has no container — its output
+    // only goes into the shell's log, prefixed with [<instanceId>].
+    if (inst.sandbox !== 'container') {
+      fail(`${inst.instanceId} runs in a PRoot sandbox — its output is in the shell log: docker logs aura-shell 2>&1 | grep '\\[${inst.instanceId}\\]'`);
+    }
+    return dockerLogs(`aura-${inst.instanceId}`, opts);
+  }
   const sc = await resolveSidecar(inst.instanceId, opts.container);
   // Inside the app that owns an OS sidecar: the OS reads the logs, no docker needed.
   const token = sc.managedBy === 'os' && !opts.follow ? ownToken(inst.instanceId) : null;
@@ -232,12 +240,17 @@ async function logsCmd(resource: string, name: string, opts: { container?: strin
     process.stderr.write(out.stderr);
     return;
   }
-  const args = ['logs', ...(opts.tail ? ['--tail', opts.tail] : []), ...(opts.follow ? ['-f'] : []), sc.id];
+  return dockerLogs(sc.id, opts);
+}
+
+/** `docker logs` passthrough (needs the docker CLI + socket in the caller). */
+async function dockerLogs(container: string, opts: { follow?: boolean; tail?: string }): Promise<void> {
+  const args = ['logs', ...(opts.tail ? ['--tail', opts.tail] : []), ...(opts.follow ? ['-f'] : []), container];
   const child = spawn('docker', args, { stdio: 'inherit' });
   await new Promise<void>((resolveP) => {
     child.on('exit', (code) => { process.exitCode = code ?? 0; resolveP(); });
     child.on('error', (err) => fail(
-      `docker logs failed: ${err.message}\n  Hint: reading sidecar logs needs the docker CLI and a bound /var/run/docker.sock.`,
+      `docker logs failed: ${err.message}\n  Hint: reading container logs needs the docker CLI and a bound /var/run/docker.sock.`,
     ));
   });
 }
@@ -558,11 +571,15 @@ export function registerVerbs(program: Command): void {
 
   program
     .command('logs <resource> <name>')
-    .description('Print logs of an instance sidecar (-c) or a service.')
+    .description('Print the output of an instance (container sandbox), one of its sidecars (-c), or a service.')
     .option('-c, --container <sidecar>', 'Sidecar of the instance')
     .option('-f, --follow', 'Follow new output')
-    .option('--tail <n>', 'Only the last n lines (sidecars)')
-    .addHelpText('after', resourcesLine('logs') + examples(['aura logs inst io.lakner.hermes -c runtime --tail 100 -f']))
+    .option('--tail <n>', 'Only the last n lines')
+    .addHelpText('after', resourcesLine('logs') + examples([
+      'aura logs inst com.aura.terminal --tail 50',
+      'aura logs inst io.lakner.hermes -c runtime --tail 100 -f',
+      'aura logs svc sshd -f',
+    ]))
     .action(async (resource: string, name: string, opts: { container?: string; follow?: boolean; tail?: string }) => {
       await logsCmd(resource, name, opts);
     });
