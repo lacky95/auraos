@@ -18,14 +18,26 @@ const { apps, enabledMap = {} } = Astro.props;
     "half-width" pill before the main app launcher — narrow on purpose so
     it doesn't fight the launcher for prominence.
   -->
-  <button
-    id="dock-nav-entry"
-    type="button"
-    class="nav-entry-btn"
-    aria-label="Lock screen"
-    title="Lock screen (tap) · Window selection (Enter) · Ctrl+Alt+Space focuses this">
-    <span class="nav-entry-icon" aria-hidden="true"><Icon name="lock" /></span>
-  </button>
+  <div class="nav-entry-stack">
+    <!-- Void button: keyboard/joystick entry point (top half). -->
+    <button
+      id="dock-nav-entry"
+      type="button"
+      class="nav-entry-btn"
+      aria-label="Void"
+      title="Void · Window selection (Enter) · Ctrl+Alt+Space focuses this">
+      <span class="nav-entry-icon" aria-hidden="true"><Icon name="circle-dot" /></span>
+    </button>
+    <!-- Lock button (bottom half). -->
+    <button
+      id="dock-lock-btn"
+      type="button"
+      class="nav-entry-btn"
+      aria-label="Lock screen"
+      title="Lock screen">
+      <span class="nav-entry-icon" aria-hidden="true"><Icon name="lock" /></span>
+    </button>
+  </div>
   <button
     id="dock-launcher-btn"
     type="button"
@@ -100,14 +112,22 @@ const { apps, enabledMap = {} } = Astro.props;
     overflow: hidden;
   }
 
+  /* Void + Lock stacked vertically: together they fill the old 22×44 chip. */
+  .nav-entry-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: 22px;
+    height: 44px;
+    flex-shrink: 0;
+  }
   .nav-entry-btn {
     display: flex;
     align-items: center;
     justify-content: center;
-    /* Half the launcher-btn width (44 / 2). Same height so the dock row
-       stays visually aligned. */
+    /* Half the launcher-btn width (44 / 2); each half of the stack. */
     width: 22px;
-    height: 44px;
+    height: 21px;
     color: var(--aura-color-text-dim);
     font-size: 0.9rem;
     border: var(--aura-border);
@@ -396,13 +416,10 @@ const { apps, enabledMap = {} } = Astro.props;
     document.dispatchEvent(new CustomEvent('aura:window-select.toggle'));
   });
 
-  // Mouse / touch click on the chip triggers the lock screen — this uses the
-  // click affordance the keydown handler above deliberately left free (it
-  // preventDefaults plain Enter/Space, so keyboard activation never
-  // synthesises a click here; window-select stays keyboard-only). Direct
-  // in-window call: the LockScreenOverlay defines `auraLockScreen` on this
-  // same top window, so there's no cross-frame messaging to fail.
-  navEntry?.addEventListener('click', () => {
+  // Lock lives on its own button now (the Void button above is keyboard/
+  // joystick only). Direct in-window call: the LockScreenOverlay defines
+  // `auraLockScreen` on this same top window.
+  document.getElementById('dock-lock-btn')?.addEventListener('click', () => {
     const lock = (window as any).auraLockScreen;
     if (typeof lock === 'function') lock();
     else console.warn('[Dock] auraLockScreen not available — LockScreenOverlay missing?');
