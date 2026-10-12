@@ -36,7 +36,8 @@ function instance(over = {}) {
   };
 }
 
-const REST = { name: 'transcribe', kind: 'rest', address: '/api/transcribe' };
+const REST  = { name: 'transcribe', kind: 'rest',  address: '/api/transcribe' };
+const EVENT = { name: 'done',       kind: 'event', address: 'api:done' };
 
 // ─────────────────────────────── schema ───────────────────────────────────
 
@@ -112,19 +113,17 @@ test('live: a running instance turns a catalog entry into a dialable address', (
   reg.reload([m]);
   reg.registerInstance(instance(), m);
 
-  const [view, alias] = reg.list();
+  // One entry per id: the instance row and the app-level alias collapse
+  // into the alias, which carries the serving instance's id and state.
+  assert.equal(reg.list().length, 1);
+  const [view] = reg.list();
+  assert.equal(view.scope, 'app');
   assert.equal(view.status, 'live');
   assert.equal(view.source, 'manifest');
   assert.equal(view.instanceId, 'com.acme.api');
+  assert.equal(view.state, 'resumed');
   assert.equal(view.url, '/api/proxy/com.acme.api/api/transcribe');
-  // Two entries: the live instance row plus the stable app-level alias —
-  // and no third plain-catalog row (the alias represents it).
-  assert.equal(reg.list().length, 2);
-  assert.equal(alias.scope, 'app');
-  assert.equal(alias.status, 'live');
-  assert.equal(alias.url, '/api/proxy/com.acme.api/api/transcribe');
-  // `live: true` surfaces both — the alias is dialable right now.
-  assert.equal(reg.list({ live: true }).length, 2);
+  assert.equal(reg.list({ live: true }).length, 1);
 });
 
 test('live: warm-pool members register nothing', () => {
@@ -140,8 +139,9 @@ test('live: warm-pool members register nothing', () => {
 });
 
 test('live: a portless or dying instance is down, not live', () => {
+  // A non-path kind has no app-level alias, so the instance row itself shows.
   const reg = new InterfaceRegistry();
-  const m = manifest({ provides: [REST] });
+  const m = manifest({ provides: [EVENT] });
   reg.reload([m]);
 
   reg.registerInstance(instance({ port: null }), m);
@@ -152,6 +152,20 @@ test('live: a portless or dying instance is down, not live', () => {
   reg.registerInstance(instance({ state: 'error' }), m);
   [view] = reg.list();
   assert.equal(view.status, 'down');
+});
+
+test('live: a path kind with only a dead instance falls back to the cold-startable alias', () => {
+  const reg = new InterfaceRegistry();
+  const m = manifest({ provides: [REST] });
+  reg.reload([m]);
+
+  reg.registerInstance(instance({ state: 'error' }), m);
+  const [view] = reg.list();
+  assert.equal(reg.list().length, 1);
+  assert.equal(view.scope, 'app');
+  assert.equal(view.status, 'catalog', 'not live: nothing serves it right now');
+  assert.equal(view.state, 'error', 'the alias still reports the instance state');
+  assert.equal(view.url, '/api/proxy/com.acme.api/api/transcribe');
 });
 
 test('live: a paused instance stays live — the port is still bound', () => {
@@ -170,7 +184,7 @@ test('live: liveness is read fresh, not from the snapshot taken at register time
   // holding a reference would report a stale port forever.
   const table = new Map([['com.acme.api', instance()]]);
   const reg = new InterfaceRegistry((id) => table.get(id));
-  const m = manifest({ provides: [REST] });
+  const m = manifest({ provides: [EVENT] });
   reg.reload([m]);
   reg.registerInstance(instance(), m);
   assert.equal(reg.list()[0].status, 'live');
@@ -312,13 +326,14 @@ test('resolve prefers a resumed instance over any other live state', () => {
   reg.reload([m]);
   for (const inst of table.values()) reg.registerInstance(inst, m);
 
-  assert.equal(reg.list().length, 3, 'both instance numbers plus the app-level alias');
+  assert.equal(reg.list().length, 1, 'both instances and the alias collapse into one entry');
+  assert.equal(reg.list()[0].instanceId, 'com.acme.api-2', 'the alias carries the resumed instance');
   assert.equal(reg.resolve('com.acme.api/transcribe').instanceId, 'com.acme.api-2');
 });
 
 // ───────────────────────── app-level aliases ──────────────────────────────
 
-test('alias ranking: a concrete live instance wins resolve; the alias wins once nothing concrete runs', () => {
+test('resolve: the alias carries the live instance; once it dies the alias stays dialable', () => {
   const table = new Map([['com.acme.api', instance()]]);
   const reg = new InterfaceRegistry((id) => table.get(id));
   const m = manifest({ provides: [REST] });
@@ -326,8 +341,9 @@ test('alias ranking: a concrete live instance wins resolve; the alias wins once 
   reg.registerInstance(instance(), m);
 
   let view = reg.resolve('com.acme.api/transcribe');
-  assert.equal(view.scope, undefined, 'the concrete instance outranks the alias');
-  assert.equal(view.instanceId, 'com.acme.api');
+  assert.equal(view.scope, 'app', 'resolve sees the collapsed entry');
+  assert.equal(view.status, 'live');
+  assert.equal(view.instanceId, 'com.acme.api', 'the concrete instance still rides along');
 
   // The instance dies: its row goes `down`, but the alias (cold-startable,
   // hence dialable) is what resolve should now hand out.
@@ -414,8 +430,9 @@ test('a consumer pinned to an appId ignores a same-name provider from another ap
 // ────────────────────────────── addresses ─────────────────────────────────
 
 test('interfaceUrl routes each kind to the transport that already exists', () => {
-  assert.equal(interfaceUrl('inst-1', 'mcp',   '/mcp'),        '/api/proxy/inst-1/mcp');
-  assert.equal(interfaceUrl('inst-1', 'ws',    '/ws'),         '/api/proxy/inst-1/ws');
-  assert.equal(interfaceUrl('inst-1', 'kv',    'app/x/jobs'),  '/api/kv/app/x/jobs');
-  assert.equal(interfaceUrl('inst-1', 'event', 'api:done'),    '/api/apps/events?topics=api%3Adone');
+  // Takes canonical kinds only — manifests normalise legacy names at parse time.
+  assert.equal(interfaceUrl('inst-1', 'http/mcp', '/mcp'),       '/api/proxy/inst-1/mcp');
+  assert.equal(interfaceUrl('inst-1', 'ws/raw',   '/ws'),        '/api/proxy/inst-1/ws');
+  assert.equal(interfaceUrl('inst-1', 'os/kv',    'app/x/jobs'), '/api/kv/app/x/jobs');
+  assert.equal(interfaceUrl('inst-1', 'os/event', 'api:done'),   '/api/apps/events?topics=api%3Adone');
 });
