@@ -19,6 +19,7 @@
  * `--experimental-strip-types`, where a bare package import would not resolve.
  */
 import { execFile, spawnSync } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -64,6 +65,15 @@ export function liveTmuxSessions(): Set<string> {
     if (r.status !== 0 || !r.stdout) return new Set();   // no server running ⇒ no sessions
     return new Set(r.stdout.split('\n').map((l) => l.trim()).filter(Boolean));
   } catch { return new Set(); }
+}
+
+/** `liveTmuxSessions()` without blocking the event loop — for request paths. */
+export async function liveTmuxSessionsAsync(): Promise<Set<string>> {
+  if (!tmuxBin) return new Set();
+  try {
+    const out = await tmux(['list-sessions', '-F', '#{session_name}']);
+    return new Set(out.split('\n').map((l) => l.trim()).filter(Boolean));
+  } catch { return new Set(); }  // no server running ⇒ no sessions
 }
 
 /** Kill the backing tmux session. Returns true if one actually existed. */
@@ -135,6 +145,10 @@ export function tmux(
     );
     // Always end stdin: with nothing to read tmux would otherwise wait on it
     // for `load-buffer -`, and a closed empty stdin is harmless for the rest.
+    // tmux can exit before reading it (a dead session fails at once), and the
+    // write then raises EPIPE on stdin. Unhandled, that crashes the whole
+    // instance; the exit callback above already reports the real failure.
+    child.stdin?.on('error', () => {});
     child.stdin?.end(opts.input ?? '');
   });
 }
@@ -157,6 +171,10 @@ export interface PaneState {
   historySize: number;
   /** tmux clients attached (the pty-server's PTY counts as one). */
   attachedClients: number;
+  /** The pane's process has exited (only possible with `remain-on-exit`). */
+  dead: boolean;
+  /** Exit status of a dead pane; null while alive or unknown. */
+  deadStatus: number | null;
 }
 
 /** Tab-separated so a title with spaces survives; a title with a TAB does not,
@@ -164,6 +182,7 @@ export interface PaneState {
 const PANE_FORMAT = [
   '#{pane_width}', '#{pane_height}', '#{cursor_x}', '#{cursor_y}', '#{alternate_on}',
   '#{pane_current_command}', '#{pane_title}', '#{history_size}', '#{session_attached}',
+  '#{pane_dead}', '#{pane_dead_status}',
 ].join('\t');
 
 /** Parse one `PANE_FORMAT` line. Exported for the tests. */
@@ -175,6 +194,8 @@ export function parsePaneState(line: string): PaneState {
     alternate: f[4] === '1',
     command: f[5] ?? '', title: f[6] ?? '',
     historySize: num(7), attachedClients: num(8),
+    dead: f[9] === '1',
+    deadStatus: f[10] !== undefined && f[10] !== '' && Number.isFinite(Number(f[10])) ? Number(f[10]) : null,
   };
 }
 
@@ -184,6 +205,20 @@ export async function paneState(sessionId: string): Promise<PaneState> {
 
 /** Every pane on our socket in one call, keyed by tmux session name. Empty
  *  when no server is running. */
+/**
+ * Pane state and the visible grid in ONE tmux invocation (`display-message`
+ * `;` `capture-pane`) — the settle loop of get_screen polls this, so halving
+ * the process spawns per poll matters.
+ */
+export async function snapshot(sessionId: string): Promise<{ state: PaneState; lines: string[] }> {
+  const t = tmuxName(sessionId);
+  const out = await tmux(['display-message', '-p', '-t', t, PANE_FORMAT, ';', 'capture-pane', '-p', '-N', '-t', t]);
+  const nl = out.indexOf('\n');
+  const state = parsePaneState(nl < 0 ? out : out.slice(0, nl));
+  const lines = nl < 0 ? [] : out.slice(nl + 1).replace(/\n$/, '').split('\n');
+  return { state, lines };
+}
+
 export async function inspectPanes(): Promise<Map<string, PaneState>> {
   const out = new Map<string, PaneState>();
   if (!tmuxBin) return out;
@@ -200,6 +235,74 @@ export async function inspectPanes(): Promise<Map<string, PaneState>> {
     out.set(line.slice(0, tab), parsePaneState(line.slice(tab + 1)));
   }
   return out;
+}
+
+// ── Shell lifetime ──────────────────────────────────────────────────────────
+
+/**
+ * A shell that exits must not end its session. `exit` or Ctrl+D used to be
+ * the end of the tmux session — the window went blank and the MCP answered
+ * `no-such-session` for a session that had existed a second earlier.
+ *
+ * So the pane runs the shell under this restart loop instead: when the shell
+ * ends, a line says so and a fresh one starts in the same pane, same session
+ * id. A shell that dies at once (broken rc file) is restarted at most once a
+ * second. tmux's `pane-died` hook would be the obvious tool, but tmux 3.3a
+ * fires it for only some exits (pass 1 measured ~1 in 3; with a client
+ * attached it never fired here), so the loop does the job and `remain-on-exit`
+ * (tmux.conf) plus `respawnIfDead` cover a pane that dies anyway.
+ *
+ * No `;` at the end of an argument (tmux would end its command there) and no
+ * `#` (format expansion): the loop uses newlines.
+ */
+const SHELL_LOOP = [
+  'while :',
+  'do',
+  '  t=$(date +%s)',
+  '  "$@"',
+  '  s=$?',
+  "  printf '\\r\\n[shell exited (status %s), starting a new shell]\\r\\n' \"$s\"",
+  '  if [ $(( $(date +%s) - t )) -lt 2 ]',
+  '  then sleep 1',
+  '  fi',
+  'done',
+].join('\n');
+
+/** argv for a pane: the shell under the restart loop (see SHELL_LOOP). */
+export function shellArgv(shell: string): string[] {
+  return ['/bin/sh', '-c', SHELL_LOOP, 'aura-shell', shell];
+}
+
+/**
+ * Where a new shell starts: `$HOME`, unless that is unset or inside the app's
+ * own tree (the dev server watches it — files a shell writes there would
+ * reload it), then `$AURA_TERM_HOME` or `/data/home`. Existing sessions keep
+ * their cwd: attach never re-applies it.
+ */
+export function shellCwd(env: NodeJS.ProcessEnv = process.env, appRoot: string = process.cwd()): string {
+  const home = env['HOME'];
+  const root = appRoot.replace(/\/+$/, '');
+  if (home && home !== root && !home.startsWith(`${root}/`)) return home;
+  const alt = env['AURA_TERM_HOME'] ?? '/data/home';
+  try { mkdirSync(alt, { recursive: true }); } catch { /* read-only: the shell falls back to / */ }
+  return alt;
+}
+
+/**
+ * If the pane's program has exited (kept by `remain-on-exit`), start its
+ * command again in the same pane. Returns whether it did, with the exit status.
+ */
+export async function respawnIfDead(sessionId: string): Promise<{ respawned: boolean; deadStatus: number | null }> {
+  const t = tmuxName(sessionId);
+  const st = parsePaneState(await tmux(['display-message', '-p', '-t', t, PANE_FORMAT]));
+  if (!st.dead) return { respawned: false, deadStatus: null };
+  try {
+    await tmux(['respawn-pane', '-t', t]);
+  } catch (err) {
+    // Someone else (a window's heartbeat, a parallel read) respawned it first.
+    if (!(err instanceof TmuxError && /still active/i.test(err.message))) throw err;
+  }
+  return { respawned: true, deadStatus: st.deadStatus };
 }
 
 // ── Sessions, screen, input ─────────────────────────────────────────────────
@@ -219,9 +322,9 @@ export async function newSession(sessionId: string, cols: number, rows: number):
     '-f', TMUX_CONF, '-u',
     'new-session', '-d', '-s', tmuxName(sessionId),
     '-x', String(cols), '-y', String(rows),
-    '-c', process.env['HOME'] ?? '/app',
+    '-c', shellCwd(),
     '-e', `AURA_TERM_LABEL=${HOST_LABEL}`,
-    shell,
+    ...shellArgv(shell),
   ], { env: { ...process.env, AURA_TERM_LABEL: HOST_LABEL } });
 }
 

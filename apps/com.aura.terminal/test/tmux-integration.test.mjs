@@ -30,10 +30,11 @@ async function waitFor(pred, ms = 5000) {
 after(() => { if (haveTmux) spawnSync('tmux', ['-L', process.env.AURA_TERM_TMUX_SOCKET, 'kill-server'], { stdio: 'ignore' }); });
 
 test('headless session: create, type, read the grid, keys, kill', { skip: !haveTmux && 'tmux not installed' }, async () => {
-  const { newSession, paneState, captureScreen, captureScrollback, sendLiteral, sendKeys, padScreen, tmuxKill, liveTmuxSessions, tmuxName, pasteText } = tc;
+  const { newSession, paneState, captureScreen, captureScrollback, sendLiteral, sendKeys, padScreen, tmuxKill, liveTmuxSessions, liveTmuxSessionsAsync, tmuxName, pasteText } = tc;
 
   await newSession(SESSION, 80, 24);
   assert.ok(liveTmuxSessions().has(tmuxName(SESSION)), 'session is on our socket');
+  assert.ok((await liveTmuxSessionsAsync()).has(tmuxName(SESSION)), 'async listing sees it too');
   const st0 = await paneState(SESSION);
   assert.equal(st0.cols, 80); assert.equal(st0.rows, 24); assert.equal(st0.alternate, false);
 
@@ -68,9 +69,24 @@ test('headless session: create, type, read the grid, keys, kill', { skip: !haveT
 
   assert.equal(tmuxKill(SESSION), true);
   assert.equal(liveTmuxSessions().has(tmuxName(SESSION)), false);
+  assert.equal((await liveTmuxSessionsAsync()).has(tmuxName(SESSION)), false);
 });
 
 test('errors: missing session and disabled tmux are typed', { skip: !haveTmux && 'tmux not installed' }, async () => {
   const { captureScreen, TmuxError } = tc;
   await assert.rejects(captureScreen('com.aura.terminal-0#nope'), (err) => err instanceof TmuxError && err.code === 'no-such-session');
+});
+
+test('snapshot: pane state and grid in one tmux call', { skip: !haveTmux && 'tmux not installed' }, async () => {
+  const { newSession, snapshot, sendLiteral, sendKeys, tmuxKill } = tc;
+  const id = 'com.aura.terminal-0#a2';
+  await newSession(id, 80, 24);
+  try {
+    await sendLiteral(id, 'echo SNAP_OK'); await sendKeys(id, ['Enter']);
+    const snap = await waitFor(async () => { const s = await snapshot(id); return s.lines.some((l) => l.includes('SNAP_OK')) ? s : null; });
+    assert.equal(snap.state.cols, 80);
+    assert.equal(snap.state.rows, 24);
+    assert.equal(snap.state.dead, false);
+    assert.equal(snap.state.command, 'bash');
+  } finally { tmuxKill(id); }
 });

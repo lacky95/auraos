@@ -2,8 +2,11 @@ import { WebSocketServer, WebSocket } from 'ws';
 import pty, { type IPty } from 'node-pty';
 import { parse as parseUrl } from 'node:url';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { HOST_LABEL, TMUX_CONF, TMUX_SOCKET, liveTmuxSessions, tmuxBin, tmuxKill, tmuxName } from './tmux-control.ts';
+import { HOST_LABEL, TMUX_CONF, TMUX_SOCKET, liveTmuxSessions, respawnIfDead, shellArgv, shellCwd, tmuxBin, tmuxKill, tmuxName } from './tmux-control.ts';
+import { dialogAction, getDialog, installDialogHooks, setDialogText } from './input-dialog.ts';
+import { openPaneTap, paneRepaint, tmuxHasSession, type PaneTap } from './pane-tap.ts';
 
 /**
  * PTY session registry — one live VIEW at a time, survives browser reload.
@@ -84,6 +87,10 @@ interface ClientState {
 interface Session {
   id:         string;
   pty:        IPty;
+  /** Raw pane output (see pane-tap.ts). When set, it is what viewers see and
+   *  the tmux client's rendered output is only drained; null ⇒ no tmux, or
+   *  the tap failed, and the client's output is shown as before. */
+  tap:        PaneTap | null;
   clients:    Map<WebSocket, ClientState>;
   /** Browser id currently rendering this session; null ⇒ up for grabs. */
   owner:      string | null;
@@ -245,14 +252,21 @@ function bufferPush(sess: Session, chunk: string): void {
  * shell — which behaves exactly like before — so an app running on an older
  * base image, or with AURA_TERM_TMUX=0, is never left broken.
  */
-function spawnPty(sessionId: string | null, cols: number, rows: number): IPty {
-  const shell = process.env['SHELL'] ?? '/bin/bash';
+function shellSpec(): { shell: string; cwd: string; env: Record<string, string> } {
   // AURA_TERM_LABEL marks this as the base/host shell so bashrc.aura.sh's
   // window-title shows the host ("aura-shell") rather than this app's id.
   // `aura jump` shells run in a different sandbox where it's absent (or
   // explicitly blanked, see enter-sandbox.ts), so they show the app instead.
-  const env = { ...process.env, AURA_TERM_LABEL: HOST_LABEL } as Record<string, string>;
-  const opts = { name: 'xterm-256color', cols, rows, cwd: process.env['HOME'] ?? '/app', env };
+  return {
+    shell: process.env['SHELL'] ?? '/bin/bash',
+    cwd:   shellCwd(),   // never inside the dev server's watched tree
+    env:   { ...process.env, AURA_TERM_LABEL: HOST_LABEL } as Record<string, string>,
+  };
+}
+
+function spawnPty(sessionId: string | null, cols: number, rows: number): IPty {
+  const { shell, cwd, env } = shellSpec();
+  const opts = { name: 'xterm-256color', cols, rows, cwd, env };
 
   // Anonymous connections (sessionId === null) are explicitly ephemeral —
   // they die with their socket by design, so persistence would only leak
@@ -266,7 +280,7 @@ function spawnPty(sessionId: string | null, cols: number, rows: number): IPty {
     '-f', TMUX_CONF,
     '-u',
     'new-session', '-A', '-s', tmuxName(sessionId),
-    shell,
+    ...shellArgv(shell),   // `exit` restarts the shell, the session stays
   ], opts);
 }
 
@@ -294,6 +308,21 @@ function broadcastLive(sess: Session, data: string): void {
   for (const ws of liveSockets(sess)) ws.send(data);
 }
 
+// The review-before-insert dialog (input-dialog.ts) reaches the live windows
+// through these hooks, so that module never has to import this one.
+installDialogHooks({
+  push(sessionId, msg) {
+    const sess = sessions.get(sessionId);
+    if (sess) for (const ws of liveSockets(sess)) sendCtl(ws, msg);
+  },
+  write(sessionId, text) {
+    const sess = sessions.get(sessionId);
+    if (!sess) return false;
+    sess.pty.write(text);
+    return true;
+  },
+});
+
 /**
  * Escape sequences that make a terminal ANSWER.
  *
@@ -303,9 +332,10 @@ function broadcastLive(sess: Session, data: string): void {
  * on the shell's command line as literal `0;276;0c`. Two viewers attached, or
  * two queries in the buffer, and you get it twice.
  *
- * Stripped from the REPLAY only. Live output keeps them: answering a query the
- * running program just asked is the terminal doing its job. The dead copy in
- * the scrollback is the only one that has no listener left.
+ * Stripped from the replay, and from the live pane tap too: tmux is the
+ * pane's terminal and has already answered every query the program asked, so
+ * a second answer from xterm would only arrive as stray input. (Without a tap
+ * the client's live output keeps them — those are tmux asking the browser.)
  *
  * Covers: DA1/DA2/DA3 (`CSI c`), DSR incl. cursor-position (`CSI n`), DECRQM
  * (`CSI ? … $p`), XTVERSION (`CSI > … q`) and the OSC colour/palette queries
@@ -340,6 +370,9 @@ function grant(sess: Session, ws: WebSocket): void {
   emitOut(sess);
   c.granted = true;
   sendCtl(ws, { type: 'granted' });
+  // A dialog opened while no window was live (or before a reload) shows now.
+  const dlg = getDialog(sess.id);
+  if (dlg?.status === 'open') sendCtl(ws, { type: 'dialog', dialog: dlg });
   if (sess.buffer.length > 0) {
     // Joined first, then stripped: a query can straddle two chunks, and half a
     // sequence is exactly the case a per-chunk filter would miss.
@@ -430,21 +463,29 @@ function answerLocally(sess: Session, data: string): string {
   return out;
 }
 
+/** Queue output for the live view (coalesced into ~60Hz frames). */
+function pushOutput(sess: Session, visible: string): void {
+  if (!visible) return;
+  sess.outBuf += visible;
+  if (sess.outTimer) return;                   // window open → coalesce; it will flush at window end
+  emitOut(sess);                               // leading edge: idle → send now (0ms added for echo)
+  sess.outTimer = setTimeout(() => { sess.outTimer = null; emitOut(sess); }, OUTPUT_FRAME_MS);
+  if (typeof sess.outTimer.unref === 'function') sess.outTimer.unref();
+}
+
 function attachPtyOutput(sess: Session): void {
   sess.pty.onData((data) => {
     const visible = answerLocally(sess, data);
-    if (!visible) return;                          // the whole read was a query
-    sess.outBuf += visible;
-    if (sess.outTimer) return;                   // window open → coalesce; it will flush at window end
-    emitOut(sess);                               // leading edge: idle → send now (0ms added for echo)
-    sess.outTimer = setTimeout(() => { sess.outTimer = null; emitOut(sess); }, OUTPUT_FRAME_MS);
-    if (typeof sess.outTimer.unref === 'function') sess.outTimer.unref();
+    // With a tap the client's rendering is only drained: the tap already
+    // carried the same output, losslessly.
+    if (!sess.tap) pushOutput(sess, visible);
   });
   sess.pty.onExit(() => {
     log('pty exit', sess.id);
     // PTY exited (user typed `exit`, signal, etc.). Flush the tail first so the
     // final output (logout banner, last program frame) isn't lost, then drop
     // the session entirely — no point holding scrollback for a dead shell.
+    sess.tap?.close();
     emitOut(sess);
     if (sess.outTimer) { clearTimeout(sess.outTimer); sess.outTimer = null; }
     if (sess.reconcileTimer) { clearInterval(sess.reconcileTimer); sess.reconcileTimer = null; }
@@ -478,6 +519,9 @@ function startReconcile(sess: Session): void {
     if (liveSockets(sess).length === 0) return;   // no live view → nothing to keep in sync
     if (sess.cols <= 0 || sess.rows <= 0) return;
     try { sess.pty.resize(sess.cols, sess.rows); } catch { /* pty gone */ }
+    // A pane that died anyway (no restart loop: a session older than it) is
+    // kept by remain-on-exit; give the person watching it a fresh shell.
+    if (tmuxBin) respawnIfDead(sess.id).catch(() => { /* session gone */ });
   }, RECONCILE_MS);
   // Never hold the process open just for the heartbeat.
   if (typeof sess.reconcileTimer.unref === 'function') sess.reconcileTimer.unref();
@@ -516,7 +560,7 @@ function attachWs(sess: Session, ws: WebSocket, browserId: string, launchClaim: 
     const c = sess.clients.get(ws);
     const raw = msg.toString();
     try {
-      const parsed = JSON.parse(raw) as { type: string; cols?: number; rows?: number; data?: string };
+      const parsed = JSON.parse(raw) as { type: string; cols?: number; rows?: number; data?: string; id?: string; text?: string; action?: string };
       if (parsed.type === 'claim') {
         // "Use terminal here" — move the live view to this browser. The
         // previous owner is revoked (its page hides its terminal, nothing is
@@ -540,6 +584,17 @@ function attachWs(sess: Session, ws: WebSocket, browserId: string, launchClaim: 
         }
       } else if (parsed.type === 'data') {
         sess.pty.write(parsed.data ?? '');
+      } else if (parsed.type === 'dialog-update' || parsed.type === 'dialog-action') {
+        // Only act on the dialog the window is looking at — a stale edit for a
+        // dialog the agent already replaced must not overwrite the new one.
+        if (getDialog(sess.id)?.id !== parsed.id) return;
+        const run = parsed.type === 'dialog-update'
+          ? async () => { setDialogText(sess.id, parsed.text ?? '', 'user'); }
+          : async () => {
+              const a = parsed.action;
+              if (a === 'insert' || a === 'copy' || a === 'close') await dialogAction(sess.id, a, 'user');
+            };
+        run().catch((err) => log('dialog', sess.id, (err as Error).message));
       }
     } catch {
       if (c?.granted) sess.pty.write(raw);
@@ -667,6 +722,31 @@ export interface SessionInfo {
  * `/data` is per-instance, so this never has to filter by instance id.
  */
 export function listSessions(): SessionInfo[] {
+  return sessionRows(liveTmuxSessions()).map(({ info, file }) => {
+    if (file) { try { info.bytes = statSync(file).size; } catch { info.bytes = 0; } }
+    return info;
+  });
+}
+
+/** `listSessions()` for request paths: `alive` comes from the caller (who
+ *  already asked tmux, e.g. via inspectPanes), and the scrollback sizes are
+ *  read without blocking the event loop. */
+export async function listSessionsAsync(alive: Set<string>): Promise<SessionInfo[]> {
+  const rows = sessionRows(alive);
+  await Promise.all(rows.map(async ({ info, file }) => {
+    if (file) { try { info.bytes = (await stat(file)).size; } catch { info.bytes = 0; } }
+  }));
+  return rows.map((r) => r.info);
+}
+
+/** A window is rendering this session right now (no tmux or disk access). */
+export function sessionInUse(id: string): boolean {
+  const sess = sessions.get(id);
+  return !!sess && [...sess.clients.values()].some((c) => c.granted);
+}
+
+/** The rows of `listSessions`; `file` is the scrollback whose size is still to be read. */
+function sessionRows(alive: Set<string>): { info: SessionInfo; file: string | null }[] {
   const ids = new Set<string>(sessions.keys());
   try { for (const f of readdirSync(SCROLLBACK_DIR)) ids.add(f); } catch { /* no dir yet */ }
 
@@ -681,16 +761,11 @@ export function listSessions(): SessionInfo[] {
   // outlives an app restart, which is the case worth keeping). The files stay
   // where they are — attaching to one of those names still replays its history
   // — they just aren't advertised as something you can pick.
-  const alive = liveTmuxSessions();
-  const out: SessionInfo[] = [];
+  const out: { info: SessionInfo; file: string | null }[] = [];
   for (const id of ids) {
     const sess = sessions.get(id);
     if (!sess && !alive.has(tmuxName(id))) continue;
-    let bytes = sess?.bufferSize ?? 0;
-    if (!sess) {
-      try { bytes = statSync(join(SCROLLBACK_DIR, id)).size; } catch { bytes = 0; }
-    }
-    out.push({
+    out.push({ file: sess ? null : join(SCROLLBACK_DIR, id), info: {
       id,
       label: id.includes('#') ? `#${id.split('#').slice(1).join('#')}` : id,
       live: !!sess,
@@ -698,10 +773,10 @@ export function listSessions(): SessionInfo[] {
       // sockets have all gone is NOT in use — that session is free to pick up,
       // which is the common case after closing a window.
       inUse: !!sess && [...sess.clients.values()].some((c) => c.granted),
-      bytes,
-    });
+      bytes: sess?.bufferSize ?? 0,
+    } });
   }
-  return out.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+  return out.sort((a, b) => a.info.id.localeCompare(b.info.id, undefined, { numeric: true }));
 }
 
 /**
@@ -785,6 +860,7 @@ export function killSession(sessionId: string): boolean {
   // running detached forever — and the next activity to reuse this id would
   // silently attach to that stale shell instead of getting a fresh one.
   tmuxKill(sessionId);
+  sess.tap?.close();
   try { sess.pty.kill(); } catch { /* already gone */ }
   for (const ws of sess.clients.keys()) { try { ws.close(); } catch { /* ignore */ } }
   sess.clients.clear();
@@ -867,19 +943,31 @@ export function getPtyWss(): WebSocketServer {
     if (!sess) {
       log('new session', sessionId);
       const saved = loadScrollback(sessionId);
-      sess = {
-        id: sessionId, pty: spawnPty(sessionId, 80, 24),
+      const s: Session = {
+        id: sessionId, pty: null as unknown as IPty, tap: null,
         clients: new Map(), owner: null, ownerLeftAt: 0, ...saved,
         killTimer: null, reconcileTimer: null, cols: 80, rows: 24,
         outBuf: '', outTimer: null,
       };
-      sessions.set(sessionId, sess);
-      attachPtyOutput(sess);
-      startReconcile(sess);
       // Seed the host indicator before the shell's first prompt renders. It
       // sits first in the scrollback, so any later prompt title (incl. an
       // `aura jump` target) naturally overrides it on replay.
-      if (saved.buffer.length === 0) bufferPush(sess, oscTitle(HOST_LABEL));
+      if (saved.buffer.length === 0) bufferPush(s, oscTitle(HOST_LABEL));
+      // Tap the pane BEFORE attaching the client (creating the session if
+      // needed), so the first prompt is already in the raw stream. A session
+      // that was running before we tapped it gets one repaint of its current
+      // screen — plus its history if we have no saved replay for it.
+      const existed = tmuxBin ? tmuxHasSession(sessionId) : false;
+      s.tap = tmuxBin
+        ? openPaneTap(sessionId, (d) => pushOutput(s, stripTerminalQueries(d)), { cols: 80, rows: 24, ...shellSpec() })
+        : null;
+      if (s.tap && existed) bufferPush(s, paneRepaint(sessionId, saved.buffer.length === 0));
+      if (tmuxBin && !s.tap) log('pane tap unavailable', sessionId, '— showing tmux client output');
+      s.pty = spawnPty(sessionId, 80, 24);
+      sess = s;
+      sessions.set(sessionId, sess);
+      attachPtyOutput(sess);
+      startReconcile(sess);
     }
     attachWs(sess, ws, browserId, launchClaim);
   });

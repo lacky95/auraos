@@ -274,11 +274,34 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     </form>
   </aside>
 
+
+  <!-- Review-before-insert dialog (input-dialog.ts). Opened by the MCP's
+       type_text; the agent can also edit / insert / copy / close it. Inline
+       styles for the same reason as the lock panel above. -->
+  <div id="input-dialog" role="dialog" aria-modal="true" aria-labelledby="input-dialog-title"
+       style="display:none;position:fixed;inset:0;z-index:50;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,0.45);">
+    <div style="display:flex;flex-direction:column;gap:10px;width:min(720px,100%);max-height:100%;box-sizing:border-box;padding:14px;border:1px solid var(--aura-color-primary,#00ff41);background:var(--aura-color-surface,#0f0f0f);box-shadow:0 8px 32px rgba(0,0,0,0.5);font-family:var(--aura-font-mono,'Courier New',monospace);">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span id="input-dialog-title" style="font-size:0.7rem;letter-spacing:.14em;text-transform:uppercase;color:var(--aura-color-primary,#00ff41);">Agent text — review before inserting</span>
+        <span id="input-dialog-note" style="margin-left:auto;font-size:0.6rem;letter-spacing:.06em;color:var(--aura-color-secondary,#ffb000);"></span>
+      </div>
+      <textarea id="input-dialog-text" spellcheck="false" autocomplete="off"
+                style="flex:1;min-height:140px;height:40vh;box-sizing:border-box;resize:vertical;padding:8px;border:1px solid var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:var(--aura-color-bg,#0a0a0a);color:var(--aura-color-text,#ccffcc);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.8rem;line-height:1.4;outline:none;"></textarea>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-size:0.58rem;color:var(--aura-color-text-dim,#557755);">Ctrl+Enter insert · Esc close</span>
+        <button id="input-dialog-close" type="button" style="appearance:none;-webkit-appearance:none;box-sizing:border-box;padding:6px 14px;border-radius:0;font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.65rem;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;outline:none;margin-left:auto;border:1px solid var(--aura-color-border,rgba(0,255,65,0.2));background:transparent;color:var(--aura-color-text-dim,#557755);">Close</button>
+        <button id="input-dialog-copy" type="button" style="appearance:none;-webkit-appearance:none;box-sizing:border-box;padding:6px 14px;border-radius:0;font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.65rem;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;outline:none;border:1px solid var(--aura-color-primary,#00ff41);background:transparent;color:var(--aura-color-primary,#00ff41);">Copy</button>
+        <button id="input-dialog-insert" type="button" style="appearance:none;-webkit-appearance:none;box-sizing:border-box;padding:6px 14px;border-radius:0;font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.65rem;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;outline:none;border:1px solid var(--aura-color-primary,#00ff41);background:var(--aura-color-primary,#00ff41);color:var(--aura-color-bg,#0a0a0a);">Insert</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     import { Terminal } from '@xterm/xterm';
     import { FitAddon } from '@xterm/addon-fit';
     import '@xterm/xterm/css/xterm.css';
     import { createLaunchGate } from '../launch-gate';
+    import { attachTouchScroll } from '../touch-scroll';
 
     // appId is server-rendered onto #terminal's data-app-id. A bundled module
     // script can't use Astro's define:vars (that requires is:inline), so we read
@@ -301,7 +324,6 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         selectionBackground: 'rgba(0,255,65,.3)',
         black:   readVar('--aura-color-bg')           || '#0a0a0a',
         brightBlack: readVar('--aura-color-text-dim') || '#557755',
-    import { attachTouchScroll } from '../touch-scroll';
         red:     readVar('--aura-color-danger')       || '#ff2020',
         brightRed: '#ff4444',
         green:   readVar('--aura-color-primary')      || '#00ff41',
@@ -494,28 +516,6 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(document.getElementById('terminal'));
-
-    // Once fonts settle the mono cell can change, so invalidate the cached cell
-    // (next applyFit re-reads xterm's real metrics) and refit. Resolves
-    // immediately for cached fonts, so it's safe on every reload; if it lands
-    // before the first box it just primes the metrics for the first real fit.
-    if (document.fonts && typeof document.fonts.ready?.then === 'function') {
-      document.fonts.ready.then(() => { cellW = 0; cellH = 0; applyFit(); });
-    }
-
-    const statusEl = document.getElementById('conn-status');
-    const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // Route the WS to OUR OWN backend instance (the one this iframe was
-    // loaded from), NOT the app id. The shell's WS proxy resolves
-    // `/api/proxy/<instanceId>/...` directly to that instance (Pass 1 in
-    // wsProxyPlugin); routing by app id falls into Pass 2's "pick first
-    // matching instance" which lands EVERY terminal tab on the same
-    // backend container — they then fight over a single PTY session
-    // every 2 s.
-    //
-    // The iframe path is `/api/proxy/<instanceId>/...`, so the first
-    // segment after `/api/proxy/` is our backend identity.
-    const pathParts  = location.pathname.split('/').filter(Boolean);
     // One- and two-finger drags scroll the scrollback (see touch-scroll.ts).
     // cellH is the live row height applyFit measures; 17 covers the boot gap.
     // While the program has mouse tracking on, a drag becomes one line-wheel
@@ -538,6 +538,28 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         }
       },
     });
+
+    // Once fonts settle the mono cell can change, so invalidate the cached cell
+    // (next applyFit re-reads xterm's real metrics) and refit. Resolves
+    // immediately for cached fonts, so it's safe on every reload; if it lands
+    // before the first box it just primes the metrics for the first real fit.
+    if (document.fonts && typeof document.fonts.ready?.then === 'function') {
+      document.fonts.ready.then(() => { cellW = 0; cellH = 0; applyFit(); });
+    }
+
+    const statusEl = document.getElementById('conn-status');
+    const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    // Route the WS to OUR OWN backend instance (the one this iframe was
+    // loaded from), NOT the app id. The shell's WS proxy resolves
+    // `/api/proxy/<instanceId>/...` directly to that instance (Pass 1 in
+    // wsProxyPlugin); routing by app id falls into Pass 2's "pick first
+    // matching instance" which lands EVERY terminal tab on the same
+    // backend container — they then fight over a single PTY session
+    // every 2 s.
+    //
+    // The iframe path is `/api/proxy/<instanceId>/...`, so the first
+    // segment after `/api/proxy/` is our backend identity.
+    const pathParts  = location.pathname.split('/').filter(Boolean);
     const instanceId = pathParts[0] === 'api' && pathParts[1] === 'proxy' && pathParts[2] ? pathParts[2] : appId;
     // The OS activity id — this WINDOW's handle. Not the session: a session is
     // a shell, and any window may take one over (that is what the "in use
@@ -1003,6 +1025,9 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       // reply arrives at the shell as a second `0;276;0c` on the command line.
       // onclose ignores superseded sockets, so this cannot trigger a reconnect.
       if (activeWs) { try { activeWs.close(1000, 'superseded'); } catch { /* already gone */ } }
+      // The dialog belongs to the session being left; the server re-sends the
+      // (new) session's open dialog as soon as this socket is granted.
+      hideInputDialog();
       attempt++;
       const ws = new WebSocket(wsUrlFor(currentSessionId, claimOnConnect || claimNextConnect));
       // Control frames arrive as binary (see pty-server sendCtl); read them
@@ -1043,7 +1068,9 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         let msg;
         try { msg = JSON.parse(ctlDecoder.decode(e.data)); } catch { return; }
         if (msg?.type === 'granted')   { setLocked(false); launchGate?.live(); }
-        else if (msg?.type === 'busy') setLocked(true);
+        else if (msg?.type === 'busy') { setLocked(true); hideInputDialog(); }
+        else if (msg?.type === 'dialog') showInputDialog(msg.dialog);
+        else if (msg?.type === 'dialog-copy') agentCopyInputDialog(msg.id);
       };
 
       ws.onclose = () => {
@@ -1092,6 +1119,99 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       if (activeWs && activeWs.readyState === 1) {
         activeWs.send(JSON.stringify({ type: 'data', data }));
       }
+    });
+
+    // ─── Review-before-insert dialog ─────────────────────────────────────
+    // The server (input-dialog.ts) owns the text and status; this window
+    // renders it and reports the human's edits and clicks. Agent edits arrive
+    // as `dialog` frames; our own edits echo back with by:'user', which we
+    // ignore while the textarea is focused so the caret never jumps.
+    const dlgEl     = document.getElementById('input-dialog');
+    const dlgText   = document.getElementById('input-dialog-text') as HTMLTextAreaElement;
+    const dlgNote   = document.getElementById('input-dialog-note');
+    const dlgInsert = document.getElementById('input-dialog-insert');
+    const dlgCopy   = document.getElementById('input-dialog-copy');
+    const dlgClose  = document.getElementById('input-dialog-close');
+    let dlgId = null;
+    let dlgEditTimer = null;
+    let dlgNoteTimer = null;
+
+    function dlgSend(msg) {
+      if (activeWs && activeWs.readyState === 1) activeWs.send(JSON.stringify(msg));
+    }
+    function flashDialogNote(text) {
+      dlgNote.textContent = text;
+      clearTimeout(dlgNoteTimer);
+      dlgNoteTimer = setTimeout(() => { dlgNote.textContent = ''; }, 3000);
+    }
+    function hideInputDialog() {
+      dlgId = null;
+      clearTimeout(dlgEditTimer); dlgEditTimer = null;
+      if (dlgEl.style.display !== 'none') {
+        dlgEl.style.display = 'none';
+        try { term.focus(); } catch { /* not ready */ }
+      }
+    }
+    function showInputDialog(d) {
+      if (!d || d.status !== 'open') { hideInputDialog(); return; }
+      const fresh = d.id !== dlgId;
+      const typing = document.activeElement === dlgText;
+      if (fresh || d.by === 'agent' || !typing) {
+        if (dlgText.value !== d.text) {
+          const { selectionStart, selectionEnd } = dlgText;
+          dlgText.value = d.text;
+          if (typing) dlgText.setSelectionRange(Math.min(selectionStart, d.text.length), Math.min(selectionEnd, d.text.length));
+          if (!fresh && d.by === 'agent') flashDialogNote('edited by agent');
+        }
+      }
+      dlgId = d.id;
+      if (dlgEl.style.display === 'none' || fresh) {
+        dlgEl.style.display = 'flex';
+        dlgText.focus();
+        dlgText.setSelectionRange(dlgText.value.length, dlgText.value.length);
+      }
+    }
+    function flushDialogEdit() {
+      if (!dlgEditTimer) return;
+      clearTimeout(dlgEditTimer); dlgEditTimer = null;
+      if (dlgId) dlgSend({ type: 'dialog-update', id: dlgId, text: dlgText.value });
+    }
+    function dialogAct(action) {
+      if (!dlgId) return;
+      flushDialogEdit();
+      dlgSend({ type: 'dialog-action', id: dlgId, action });
+      hideInputDialog();
+    }
+    async function copyDialogText() {
+      try { await navigator.clipboard.writeText(dlgText.value); return true; }
+      catch {
+        // Fallback for contexts without the async clipboard (non-secure origin).
+        dlgText.select();
+        try { return document.execCommand('copy'); } catch { return false; }
+      }
+    }
+    // The agent asked for a copy. Without a user gesture the browser usually
+    // refuses, so keep the dialog open and ask the human to click.
+    async function agentCopyInputDialog(id) {
+      if (!dlgId || id !== dlgId) return;
+      if (await copyDialogText()) dialogAct('copy');
+      else flashDialogNote('click Copy to copy');
+    }
+
+    dlgText.addEventListener('input', () => {
+      clearTimeout(dlgEditTimer);
+      dlgEditTimer = setTimeout(flushDialogEdit, 250);
+    });
+    dlgText.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Escape') { e.preventDefault(); dialogAct('close'); }
+      else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); dialogAct('insert'); }
+    });
+    dlgInsert.addEventListener('click', () => dialogAct('insert'));
+    dlgClose.addEventListener('click', () => dialogAct('close'));
+    dlgCopy.addEventListener('click', async () => {
+      if (await copyDialogText()) dialogAct('copy');
+      else flashDialogNote('copy failed — select and copy manually');
     });
 
     connect();

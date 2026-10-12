@@ -50,9 +50,13 @@ test('parsePaneState: tab-separated fields, tolerant of a trailing newline', () 
   const st = parsePaneState('120\t40\t7\t3\t1\tvim\tmy title\t512\t2\n');
   assert.deepEqual(st, {
     cols: 120, rows: 40, cursorX: 7, cursorY: 3, alternate: true,
-    command: 'vim', title: 'my title', historySize: 512, attachedClients: 2,
+    command: 'vim', title: 'my title', historySize: 512, attachedClients: 2, dead: false, deadStatus: null,
   });
   assert.equal(parsePaneState('80\t24\t0\t0\t0\tbash\t\t0\t0').alternate, false);
+  // pane_dead / pane_dead_status (remain-on-exit) are the trailing fields.
+  const dead = parsePaneState('80\t24\t0\t0\t0\tbash\t\t0\t0\t1\t3');
+  assert.equal(dead.dead, true);
+  assert.equal(dead.deadStatus, 3);
 });
 
 test('tmuxName folds everything tmux would parse as addressing', () => {

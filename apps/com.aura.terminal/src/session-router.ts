@@ -13,9 +13,11 @@
  * and `fetch` would drop everything after it as a fragment.
  */
 import {
-  SessionError, inputLocal, killLocal, listLocal, localInstanceId, openLocal, screenLocal,
+  SessionError, dialogGetLocal, dialogOpLocal, inputLocal, killLocal, listLocal, localInstanceId, openLocal, screenLocal,
 } from './session-service.ts';
-import type { InputBody, InputResult, ScreenOptions, ScreenView, SessionView } from './session-service.ts';
+import type {
+  DialogOpBody, DialogView, InputBody, InputResult, ScreenOptions, ScreenView, SessionView,
+} from './session-service.ts';
 
 export const APP_ID  = 'com.aura.terminal';
 /** The OS shell as reachable from inside the sandbox; same fallback the SDK uses. */
@@ -49,20 +51,34 @@ export async function remoteJson<T>(instanceId: string, path: string, init: Requ
   try {
     res = await fetch(proxyUrl(instanceId, path), { ...rest, signal: AbortSignal.timeout(timeoutMs) });
   } catch (err) {
-    throw new SessionError(502, 'unreachable', `${instanceId}: ${(err as Error).message}`);
+    throw new SessionError(502, 'unreachable', `${instanceId}: ${(err as Error).message}`,
+      'The instance did not answer — it may be restarting. Retry in ~3 s; do NOT open a new instance.', 3_000);
   }
   const text = await res.text();
-  let body: { error?: string; message?: string } | null = null;
+  let body: { error?: string; message?: string; hint?: string } | null = null;
   try { body = JSON.parse(text) as typeof body; } catch { /* not JSON — a proxy stub or an Astro 404 page */ }
   if (res.ok) return (body ?? {}) as T;
 
   let message = body?.message ?? text.slice(0, 200);
-  // The proxy answers 503 while an instance boots and 499 when the upstream
-  // connection itself failed (the container is gone or not listening).
-  if (res.status === 503) message = 'instance is starting or not reachable';
-  else if (res.status === 499) message = 'instance is not reachable (its container may be gone)';
-  else if (res.status === 404 && !body) message = 'instance runs an older build without the /api/sessions/* routes; restart it';
-  throw new SessionError(res.status, body?.error ?? 'proxy-error', `${instanceId}: HTTP ${res.status} ${message}`);
+  let hint = body?.hint;
+  let retryAfterMs: number | undefined;
+  // The proxy answers 503 while an instance boots (or its dev server reloads)
+  // and 499 when the upstream connection itself failed. Keep the upstream
+  // text: "the instance died" is an inference the agent must not be pushed to.
+  if (res.status === 503) {
+    const upstream = (body?.message ?? text).replace(/\s+/g, ' ').trim().slice(0, 160);
+    message = `instance is starting or not reachable${upstream ? ` (upstream: ${upstream})` : ''}`;
+    hint = 'Most likely restarting or reloading — retry in ~3 s. Do NOT open a new session or a new instance; the sessions come back with it.';
+    retryAfterMs = 3_000;
+  } else if (res.status === 499) {
+    message = 'instance is not reachable (its container may be gone)';
+    hint = 'Call list_sessions to see the instance state. Do NOT open a new instance unless the user asked.';
+    retryAfterMs = 3_000;
+  } else if (res.status === 404 && !body) {
+    message = 'instance runs an older build without the /api/sessions/* routes; restart it';
+  }
+  const code = res.status === 503 ? 'instance-unavailable' : res.status === 499 ? 'instance-gone' : body?.error ?? 'proxy-error';
+  throw new SessionError(res.status, code, `${instanceId}: HTTP ${res.status} ${message}`, hint, retryAfterMs);
 }
 
 async function withSession<T>(
@@ -94,6 +110,18 @@ export function inputFor(id: string, body: InputBody): Promise<InputResult> {
     }));
 }
 
+export function dialogGetFor(id: string): Promise<DialogView> {
+  return withSession(id, (s) => dialogGetLocal(s), (inst, s) =>
+    remoteJson<DialogView>(inst, `/api/sessions/dialog${q(s)}`));
+}
+
+export function dialogOpFor(id: string, body: DialogOpBody): Promise<DialogView> {
+  return withSession(id, (s) => dialogOpLocal(s, body), (inst, s) =>
+    remoteJson<DialogView>(inst, `/api/sessions/dialog${q(s)}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }));
+}
+
 export function killFor(id: string): Promise<{ id: string; killed: boolean }> {
   return withSession(id, (s) => killLocal(s), (inst, s) =>
     remoteJson(inst, `/api/sessions${q(s)}`, { method: 'DELETE' }));
@@ -102,10 +130,19 @@ export function killFor(id: string): Promise<{ id: string; killed: boolean }> {
 export interface InstanceSummary {
   instanceId: string;
   state: string;
-  /** Its session list answered; when false `error` says why and `sessions` is empty. */
+  /** Its session list answered; when false `error` says why and `sessions` is empty (or `stale`). */
   reachable: boolean;
   error?: string;
+  /** The instance did not answer in time; `sessions` is its last known list. */
+  stale?: boolean;
   sessions: SessionView[];
+}
+
+export interface Listing {
+  instances: InstanceSummary[];
+  /** The OS API did not answer: only this instance is listed, others may exist. */
+  degraded?: boolean;
+  degradedReason?: string;
 }
 
 interface AppInstanceDto { instanceId: string; state: string; inPool?: boolean }
@@ -113,33 +150,75 @@ interface AppInstanceDto { instanceId: string; state: string; inPool?: boolean }
 /** States in which an instance can answer for its sessions. */
 const SERVING = new Set(['started', 'resuming', 'resumed', 'paused']);
 
-/** The terminal instances the OS knows, minus the warm pool. Falls back to
- *  just this instance when the OS API is not reachable (standalone runs, tests). */
-async function osInstances(): Promise<AppInstanceDto[]> {
+/** States in which asking an instance for its sessions would wake it: the
+ *  proxy resumes a paused instance on the first request (the 3.1 s list). */
+const DORMANT = new Set(['paused']);
+
+const OS_CACHE_MS = 3_000;
+/** Per-instance budget; a slower instance is reported with its last known sessions (`stale`). */
+const LIST_TIMEOUT_MS = 1_200;
+let osCache: { at: number; value: { instances: AppInstanceDto[]; degraded?: string } } | null = null;
+const lastGood = new Map<string, SessionView[]>();
+
+/** Forget the cached instance list (after open/kill or a new instance). */
+export function invalidateListing(): void { osCache = null; }
+
+/**
+ * The terminal instances the OS knows, minus the warm pool — INCLUDING ones
+ * that are not serving (starting, stopping …), so nothing silently vanishes
+ * from the agent's view. Cached for 3 s. Falls back to just this instance,
+ * flagged `degraded`, when the OS API is not reachable (standalone runs, tests).
+ */
+async function osInstances(): Promise<{ instances: AppInstanceDto[]; degraded?: string }> {
+  if (osCache && Date.now() - osCache.at < OS_CACHE_MS) return osCache.value;
+  let value: { instances: AppInstanceDto[]; degraded?: string };
   try {
-    const res = await fetch(`${OS_BASE}/api/apps/${APP_ID}/instances`, { signal: AbortSignal.timeout(5_000) });
+    const res = await fetch(`${OS_BASE}/api/apps/${APP_ID}/instances`, { signal: AbortSignal.timeout(3_000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const all = await res.json() as AppInstanceDto[];
-    return all.filter((i) => !i.inPool && SERVING.has(i.state));
-  } catch {
-    return [{ instanceId: localInstanceId(), state: 'resumed' }];
+    value = { instances: all.filter((i) => !i.inPool) };
+  } catch (err) {
+    value = { instances: [{ instanceId: localInstanceId(), state: 'resumed' }], degraded: `OS API unreachable (${(err as Error).message}); only this instance is listed` };
   }
+  osCache = { at: Date.now(), value };
+  return value;
 }
 
-/** Sessions on every instance. One unreachable container is reported as such
- *  in its own row — it never hides the others. */
-export async function listInstances(): Promise<InstanceSummary[]> {
-  const instances = await osInstances();
-  return Promise.all(instances.map(async ({ instanceId, state }): Promise<InstanceSummary> => {
+/** Sessions on every instance. One unreachable or slow container is reported
+ *  as such in its own row (with its last known sessions, `stale: true`) — it
+ *  never hides or delays the others for long. A paused instance is not asked
+ *  (that would resume it) unless `includePaused`; its row carries the last
+ *  known sessions, if any, as `stale`. */
+export async function listAll(opts: { includePaused?: boolean } = {}): Promise<Listing> {
+  const { instances, degraded } = await osInstances();
+  const rows = await Promise.all(instances.map(async ({ instanceId, state }): Promise<InstanceSummary> => {
+    if (!SERVING.has(state)) {
+      return { instanceId, state, reachable: false, error: `instance is ${state} — not serving right now`, sessions: [] };
+    }
+    if (DORMANT.has(state) && !opts.includePaused && !isLocal(instanceId)) {
+      const prev = lastGood.get(instanceId);
+      return {
+        instanceId, state, reachable: false, error: `instance is ${state} — not queried; pass include_paused:true to list it (wakes it)`,
+        ...(prev ? { stale: true } : {}), sessions: prev ?? [],
+      };
+    }
     try {
       const { sessions } = isLocal(instanceId)
         ? await listLocal()
-        : await remoteJson<{ sessions: SessionView[] }>(instanceId, '/api/sessions');
+        : await remoteJson<{ sessions: SessionView[] }>(instanceId, '/api/sessions', { timeoutMs: LIST_TIMEOUT_MS });
+      lastGood.set(instanceId, sessions);
       return { instanceId, state, reachable: true, sessions };
     } catch (err) {
-      return { instanceId, state, reachable: false, error: (err as Error).message, sessions: [] };
+      const prev = lastGood.get(instanceId);
+      return { instanceId, state, reachable: false, error: (err as Error).message, ...(prev ? { stale: true } : {}), sessions: prev ?? [] };
     }
   }));
+  return { instances: rows, ...(degraded ? { degraded: true, degradedReason: degraded } : {}) };
+}
+
+/** Back-compat: the rows of `listAll()`. */
+export async function listInstances(): Promise<InstanceSummary[]> {
+  return (await listAll()).instances;
 }
 
 /**
@@ -171,7 +250,7 @@ export async function startInstance(): Promise<string> {
 /** Open a session on `instance` — this one by default, `"new"` for a fresh container. */
 export async function openOn(instance: string | undefined, opts: { cols?: number; rows?: number }): Promise<{ instanceId: string; session: SessionView }> {
   let instanceId = instance ?? localInstanceId();
-  if (instance === 'new') instanceId = await startInstance();
+  if (instance === 'new') { instanceId = await startInstance(); invalidateListing(); }
   else if (!instanceId.startsWith(APP_ID)) {
     throw new SessionError(400, 'bad-instance', `"${instance}" is not a terminal instance id (expected ${APP_ID}-<n>, or "new")`);
   }
