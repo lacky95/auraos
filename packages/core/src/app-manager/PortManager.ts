@@ -260,7 +260,7 @@ export class PortManager {
         throw new Error(`target instance ${ownerInstanceId} is not running`);
       }
       args = [
-        'run', '-d', '--name', containerName,
+        'create', '--name', containerName,
         '--network', `container:${containerNameFor(ownerInstanceId)}`,
         '--restart', 'unless-stopped',
         ...labels,
@@ -270,13 +270,12 @@ export class PortManager {
         HELPER_IMAGE, 'node', '-e', PROXY_JS,
       ];
     } else {
-      // host: fail fast if the host port is already taken, with a clear message
-      // rather than a docker "port is already allocated".
-      if (!(await isHostPortFree(bindAddr, port))) {
-        throw new Error(`host ${bindAddr}:${port} is already in use`);
-      }
+      // Docker publishes in the daemon host's network namespace. A Node bind
+      // probe here would test the shell container instead, falsely rejecting
+      // host NIC addresses with EADDRNOTAVAIL (and missing real host conflicts).
+      // Let Docker's atomic bind operation be the authority.
       args = [
-        'run', '-d', '--name', containerName,
+        'create', '--name', containerName,
         '--network', SHARED_NETWORK,
         '-p', `${bindAddr}:${port}:5000`,
         '--restart', 'unless-stopped',
@@ -288,15 +287,25 @@ export class PortManager {
       ];
     }
 
+    let createdId: string | undefined;
     try {
-      execFileSync('docker', args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
+      // Separate create/start so a failed host bind can be cleaned up by its
+      // exact new ID. Never delete a pre-existing container on a name conflict.
+      createdId = execFileSync('docker', args,
+        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, encoding: 'utf-8' }).toString().trim();
+      execFileSync('docker', ['start', createdId],
+        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
     } catch (err) {
-      const msg = stderrOf(err);
+      let msg = stderrOf(err);
+      if (createdId) {
+        try { this.forceRemove(createdId); }
+        catch (cleanupError) { msg += `; forwarder cleanup failed: ${stderrOf(cleanupError)}`; }
+      }
       throw new Error(/already in use|already allocated|Conflict/i.test(msg) ? `${id} conflicts: ${msg}` : `could not start forwarder: ${msg}`);
     }
 
     // The proxy can bind-fail INSIDE the netns (e.g. the port is already taken
-    // there) and exit after `docker run` has already returned success. Confirm
+    // there) and exit after `docker start` has already returned success. Confirm
     // it is still up; if not, surface its logs and clean up.
     await sleep(400);
     if (!this.isContainerRunning(containerName)) {
@@ -419,16 +428,3 @@ function stderrOf(err: unknown): string {
   return (s || e?.message || String(err)).trim();
 }
 
-/** Probe whether a host address:port can be bound right now. */
-function isHostPortFree(host: string, port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    import('node:net').then(({ createServer }) => {
-      const srv = createServer();
-      let settled = false;
-      const done = (v: boolean) => { if (!settled) { settled = true; resolve(v); } };
-      srv.once('error', () => { try { srv.close(); } catch { /* ignore */ } done(false); });
-      srv.listen({ port, host, exclusive: true }, () => { srv.close(() => done(true)); });
-      setTimeout(() => done(false), 500);
-    }).catch(() => resolve(false));
-  });
-}
