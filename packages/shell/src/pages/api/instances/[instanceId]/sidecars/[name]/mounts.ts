@@ -21,6 +21,7 @@ export const GET: APIRoute = async ({ params, request }) => {
   const name = params['name'];
   if (!name) return errorResponse('Missing sidecar name', 400);
   try {
+    await gate.mgr.osSidecars.authorize(gate.instance.instanceId, name, gate.caller);
     const sc = await gate.mgr.osSidecars.get(gate.instance.instanceId, name);
     if (!sc) return errorResponse(`no OS sidecar '${name}' in ${gate.instance.instanceId}`, 404);
     const cap = gate.mgr.mounts.capable();
@@ -41,6 +42,7 @@ export const POST: APIRoute = async ({ params, request }) => {
   if (!gate.mgr.getManifest(body.targetAppId)) return errorResponse(`App not found: ${body.targetAppId}`, 400);
   if (body.mode && body.mode !== 'ro' && body.mode !== 'rw') return errorResponse(`mode must be 'ro' or 'rw'`, 400);
   try {
+    await gate.mgr.osSidecars.authorize(gate.instance.instanceId, name, gate.caller);
     const sc = await gate.mgr.osSidecars.get(gate.instance.instanceId, name);
     if (!sc) return errorResponse(`no OS sidecar '${name}' in ${gate.instance.instanceId}`, 404);
     if (!sc.mounts.own) {

@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { defaultKv } from '@aura/kv-store';
 import { connect } from 'node:net';
 import { dirname, join } from 'node:path';
 import type { AppRegistry } from './AppRegistry.js';
@@ -8,6 +10,7 @@ import type { InstanceTokens } from './InstanceTokens.js';
 import type { FanoutTarget, MountManager } from './MountManager.js';
 import { MOUNT_ROOT_PATH } from './MountManager.js';
 import type { PermissionManager } from '../permissions/PermissionManager.js';
+import type { AppManifest } from '../types/manifest.js';
 import { toolsGrant } from './tool-allowlist.js';
 import { MY_TOOLS_PATH } from './tool-provision.js';
 import {
@@ -108,9 +111,29 @@ interface SidecarManagerOpts {
   mounts: MountManager;
   /** Live instance → app + its shell-side data dir. */
   instance(instanceId: string): { appId: string; instanceDataDir: string } | null;
+  /**
+   * A sidecar was created or removed — lets AppManager refresh its sidecar
+   * cache now instead of at the next reconciler tick (else `GET sidecars`
+   * and `aura get sc` show the old state for up to a tick).
+   */
+  changed?(): void;
 }
 
-const MAX_PER_INSTANCE = Number(process.env['AURA_SIDECAR_MAX_PER_INSTANCE'] ?? 32);
+/**
+ * Running OS sidecars allowed per instance. An OS setting: Valkey key
+ * `os:sidecars` → `{ "maxPerInstance": n }` (editable through
+ * `/api/kv/os/sidecars`), else $AURA_SIDECAR_MAX_PER_INSTANCE, else 32.
+ */
+const DEFAULT_MAX_PER_INSTANCE = 32;
+export async function sidecarLimit(): Promise<number> {
+  try {
+    const v = await defaultKv().getValue<{ maxPerInstance?: unknown }>('os', 'sidecars');
+    const n = Number(v?.maxPerInstance);
+    if (Number.isInteger(n) && n > 0) return n;
+  } catch { /* KV not running (tests, early boot) — fall through */ }
+  const env = Number(process.env['AURA_SIDECAR_MAX_PER_INSTANCE']);
+  return Number.isInteger(env) && env > 0 ? env : DEFAULT_MAX_PER_INSTANCE;
+}
 const MAX_STDIN = 64 * 1024;
 const MAX_OUTPUT = 4 * 1024 * 1024;
 const PULL_TIMEOUT_MS = 10 * 60_000;
@@ -176,10 +199,52 @@ export class SidecarManager {
     try { return await run; } finally { if (this.locks.get(key) === run) this.locks.delete(key); }
   }
 
+  // ─── Who may act on which sidecar ──────────────────────────────────────
+
+  /**
+   * An app acts on all its sidecars. A SIDECAR (calling with its own token)
+   * acts only on the sidecars it spawned — and theirs, down the owner chain —
+   * unless the app holds `sidecars.manageAll`. So by default an agent in a
+   * sidecar can't exec into, read or delete its siblings or its parent.
+   */
+  private mayManageAll(instanceId: string, caller: Caller | undefined): boolean {
+    if (!caller?.sidecar) return true;
+    const appId = this.opts.instance(instanceId)?.appId;
+    return Boolean(appId && this.opts.permissions.hasPermission(appId, 'sidecars.manageAll'));
+  }
+
+  /** Is `name` spawned (directly or further down) by `ancestor`? */
+  private static descends(all: OsSidecar[], name: string, ancestor: string): boolean {
+    const byName = new Map(all.map((s) => [s.name, s]));
+    const seen = new Set<string>();
+    for (let cur = byName.get(name); cur?.owner && !seen.has(cur.name); cur = byName.get(cur.owner)) {
+      seen.add(cur.name);
+      if (cur.owner === ancestor) return true;
+    }
+    return false;
+  }
+
+  /** Throws 403 unless `caller` may act on sidecar `name` (see mayManageAll). */
+  async authorize(instanceId: string, name: string, caller: Caller | undefined): Promise<void> {
+    if (this.mayManageAll(instanceId, caller)) return;
+    if (!SidecarManager.descends(await this.list(instanceId), name, caller!.sidecar!)) {
+      throw new SpecError(403, `sidecar '${caller!.sidecar}' may only manage the sidecars it spawned — '${name}' is not one of them (the app's permission sidecars.manageAll lifts this)`);
+    }
+  }
+
   // ─── Queries ───────────────────────────────────────────────────────────
 
-  /** OS sidecars of an instance, straight from docker. */
-  async list(instanceId: string): Promise<OsSidecar[]> {
+  /**
+   * OS sidecars of an instance, straight from docker. With a sidecar `caller`
+   * only what it may manage (see authorize).
+   */
+  async list(instanceId: string, caller?: Caller): Promise<OsSidecar[]> {
+    const all = await this.listAll(instanceId);
+    if (this.mayManageAll(instanceId, caller)) return all;
+    return all.filter((s) => SidecarManager.descends(all, s.name, caller!.sidecar!));
+  }
+
+  private async listAll(instanceId: string): Promise<OsSidecar[]> {
     const out = await dockerOk(['ps', '-a',
       '--filter', 'label=aura.managed=os', '--filter', `label=aura.parent=${instanceId}`,
       '--format', '{{.Names}}\t{{.State}}\t{{.Label "aura.sidecar.spec"}}'], 'docker ps');
@@ -240,6 +305,12 @@ export class SidecarManager {
 
     return this.locked(container, async () => {
       const existing = await this.inspect(container);
+      // A sidecar may (re)spawn only within its own subtree: a name that is
+      // already someone else's is not its to replace.
+      if (existing && !this.mayManageAll(instanceId, caller)
+        && !(existing.labels['aura.managed'] === 'os' && SidecarManager.descends(await this.listAll(instanceId), spec.name, caller.sidecar!))) {
+        throw new SpecError(403, `sidecar '${caller.sidecar}' may not replace '${spec.name}' — it did not spawn it (the app's permission sidecars.manageAll lifts this)`);
+      }
       if (existing) {
         const managed = existing.labels['aura.managed'] === 'os';
         if (!managed) {
@@ -267,9 +338,11 @@ export class SidecarManager {
         await dockerOk(['rm', '-f', container], `docker rm ${container}`);
         this.untrack(instanceId, spec.name);
       } else {
-        const count = (await this.list(instanceId)).length;
-        if (count >= MAX_PER_INSTANCE) {
-          throw new SpecError(429, `${instanceId} already runs ${count} OS sidecars (limit ${MAX_PER_INSTANCE}, AURA_SIDECAR_MAX_PER_INSTANCE)`);
+        // Running ones only — a stopped sidecar holds a name, not resources.
+        const running = (await this.listAll(instanceId)).filter((x) => x.state === 'running').length;
+        const limit = await sidecarLimit();
+        if (running >= limit) {
+          throw new SpecError(429, `${instanceId} already runs ${running} OS sidecars (limit ${limit} — OS setting os:sidecars.maxPerInstance)`);
         }
       }
 
@@ -312,8 +385,13 @@ export class SidecarManager {
       }
 
       this.track(instanceId, spec.name, spec.mounts);
+      this.opts.changed?.();
       if (wantsMountRoot) await this.opts.mounts.reapplyConsumer(consumer, spec.mounts);
-      if (req.wait?.port && spec.port) await waitForPort(container, spec.port, req.wait.timeoutMs ?? 60_000);
+      if (req.wait?.ready && spec.readiness && spec.port) {
+        await waitForHttp(container, spec.port, spec.readiness.path, req.wait.timeoutMs ?? spec.readiness.timeoutMs);
+      } else if ((req.wait?.port || req.wait?.ready) && spec.port) {
+        await waitForPort(container, spec.port, req.wait.timeoutMs ?? 60_000);
+      }
       return { created: true, sidecar: toView(container, 'running', record) };
     });
   }
@@ -361,14 +439,35 @@ export class SidecarManager {
   }
 
   /**
+   * Where "this data was already seeded" is recorded. The marker belongs to
+   * the DATA the seed writes, not to a sidecar name:
+   *   • volumes → one marker per set of resolved volume dirs, so shared
+   *     (`shared: true`) dirs are seeded exactly once, whoever uses them;
+   *   • a legacy per-app docker volume (the SDK path's) → already seeded: it
+   *     holds the data the SDK's onSeed put there (null = never seed);
+   *   • no volumes → one marker per sidecar name.
+   */
+  static seedMarker(dataDir: string, appDataSubpath: string, spec: ResolvedSidecarSpec): string | null {
+    if (spec.volumes.some((v) => !v.subpath)) return null;
+    const key = spec.volumes.length
+      ? createHash('sha256').update(spec.volumes.map((v) => v.subpath!).sort().join('\n')).digest('hex').slice(0, 16)
+      : `name-${spec.name}`;
+    return join(dataDir, appDataSubpath, '.sidecars', '.seeded', key);
+  }
+
+  /**
    * One-shot init run before the first start, through the image's own
-   * entrypoint (like `command`); a marker file makes it run once per sidecar
-   * data dir.
+   * entrypoint (like `command`); see seedMarker for when it counts as done.
    */
   private async seed(instanceId: string, spec: ResolvedSidecarSpec, appDataSubpath: string, env: Record<string, string>): Promise<void> {
     const rt = this.opts.runner.sidecarRuntime();
-    const marker = join(rt.dataDir, appDataSubpath, '.sidecars', spec.name, '.aura-seeded');
-    if (existsSync(marker)) return;
+    const marker = SidecarManager.seedMarker(rt.dataDir, appDataSubpath, spec);
+    if (marker === null) return;
+    // Markers written before markers were keyed by data (per sidecar name).
+    const before = join(rt.dataDir, appDataSubpath, '.sidecars', spec.name, '.aura-seeded');
+    // Serialised per marker: two sidecars on the same shared data seed once.
+    return this.locked(`seed:${marker}`, async () => {
+    if (existsSync(marker) || existsSync(before)) return;
     // aura.mount=1 keeps the throwaway out of sidecar listings; aura.parent
     // lets the reaper remove it if the instance dies mid-seed.
     const args = ['run', '--rm', '--network', rt.network, '--label', 'aura.mount=1', '--label', `aura.parent=${instanceId}`,
@@ -381,6 +480,22 @@ export class SidecarManager {
     if (r.code !== 0) throw new Error(`seed for ${spec.name} failed: ${(r.stderr || r.stdout).trim().slice(-2000)}`);
     mkdirSync(dirname(marker), { recursive: true });
     writeFileSync(marker, new Date().toISOString());
+    });
+  }
+
+  /**
+   * `services[].prePull`: fetch the images of an app's templates ahead of the
+   * first spawn (called when an app is installed or loaded). Background, best
+   * effort, missing images only — a failed pull just means the spawn pulls.
+   */
+  async prePull(manifest: Pick<AppManifest, 'id' | 'services'>): Promise<void> {
+    for (const svc of (manifest.services ?? []).filter((x) => x.prePull)) {
+      try {
+        await this.ensureImage(svc.image);
+      } catch (err) {
+        console.warn(`[SidecarManager] prePull ${svc.image} for ${manifest.id} failed: ${(err as Error).message}`);
+      }
+    }
   }
 
   private async createArgs(
@@ -472,6 +587,7 @@ export class SidecarManager {
       await dockerOk(['rm', '-f', container], `docker rm ${container}`);
       this.opts.tokens.forget(instanceId, name);
       this.untrack(instanceId, name);
+      this.opts.changed?.();
     });
   }
 
@@ -584,6 +700,25 @@ function toView(containerName: string, state: string, rec: SpecRecord): OsSideca
     mounts: rec.mounts,
     specHash: rec.specHash,
   };
+}
+
+/**
+ * `readiness`: the sidecar is ready once `path` answers HTTP below 500 — any
+ * real answer means the server is up and routing (a 401/404 on a health path
+ * is still an answer); refused connections and 5xx mean not yet.
+ */
+async function waitForHttp(host: string, port: number, path: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const url = `http://${host}:${port}${path.startsWith('/') ? path : `/${path}`}`;
+  for (;;) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(3000), redirect: 'manual' });
+      await res.body?.cancel();
+      if (res.status < 500) return;
+    } catch { /* not up yet */ }
+    if (Date.now() > deadline) throw new Error(`${url} did not become ready within ${timeoutMs} ms`);
+    await new Promise((r) => setTimeout(r, 500));
+  }
 }
 
 async function waitForPort(host: string, port: number, timeoutMs: number): Promise<void> {

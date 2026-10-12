@@ -187,6 +187,13 @@ export class AppManager {
         const scope = this.scopeRegistry.getById(manifest.scopeId);
         return { appId: inst.appId, instanceDataDir: join(scope.dataDir, 'apps', inst.appId, instanceId) };
       },
+      changed: () => { void this.syncSidecars(2).catch(() => undefined); },
+    });
+    // services[].prePull: fetch template images as soon as an app is
+    // installed (init() covers the apps already loaded at boot).
+    OsEventBus.on('app:installed', ({ appId }) => {
+      const m = this.registry.getById(appId);
+      if (m?.services?.some((x) => x.prePull)) void this.osSidecars.prePull(m);
     });
   }
 
@@ -806,6 +813,10 @@ export class AppManager {
       console.warn(`[AppManager] sidecar reconcile failed: ${(err as Error).message}`);
     });
     this.startReconciler();
+    // Background, missing images only — never delays boot.
+    for (const m of this.registry.getAll()) {
+      if (m.services?.some((x) => x.prePull)) void this.osSidecars.prePull(m);
+    }
     // Kick off warm-pool fills for opted-in apps (non-blocking — init returns
     // immediately, pool members spawn in the background). The reconciler tops
     // up later if any of these fail or die.

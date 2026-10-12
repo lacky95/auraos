@@ -48,6 +48,13 @@ export const BUILTIN_PERMISSIONS = [
    * sidecar can never see an app its app couldn't. ENFORCED.
    */
   'sidecars.mounts',
+  /**
+   * Let this app's OS sidecars (those with `inheritIdentity`) manage EVERY OS
+   * sidecar of their instance. Without it a sidecar may only manage the
+   * sidecars it spawned itself (and theirs). The app itself is never limited.
+   * ENFORCED.
+   */
+  'sidecars.manageAll',
 ] as const;
 
 export const PermissionSchema = z.string();

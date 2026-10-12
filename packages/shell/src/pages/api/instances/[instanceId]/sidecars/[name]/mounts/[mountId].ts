@@ -17,6 +17,7 @@ export const DELETE: APIRoute = async ({ params, request }) => {
   if (!name) return errorResponse('Missing sidecar name', 400);
   if (!mountId) return errorResponse('Missing mount id', 400);
   try {
+    await gate.mgr.osSidecars.authorize(gate.instance.instanceId, name, gate.caller);
     await gate.mgr.mounts.remove(`${gate.instance.instanceId}--${name}`, decodeURIComponent(mountId));
     return jsonResponse({ ok: true, removed: mountId });
   } catch (err) {

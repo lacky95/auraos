@@ -70,9 +70,12 @@ test('every call carries the bearer and hits the instance route', async (t) => {
 });
 
 test('errors carry the HTTP status and the OS message; get() maps 404 to null', async (t) => {
-  const os = await fakeOs(t, ({ url }) => (url.endsWith('/nope') ? [404, { error: 'no OS sidecar' }] : [403, { error: "io.x is not granted 'sidecars.spawn'" }]));
+  const os = await fakeOs(t, ({ url }) => (url.endsWith('/nope') ? [404, { error: "no OS sidecar 'nope' in a.b-2" }]
+    : url.includes('/gone.app/') ? [404, { error: 'Instance not found: gone.app' }]
+    : [403, { error: "io.x is not granted 'sidecars.spawn'" }]));
   const sc = osSidecars({ base: os.base, instanceId: 'a.b-2', token: 'tok' });
   assert.equal(await sc.get('nope'), null);
+  await assert.rejects(osSidecars({ base: os.base, instanceId: 'gone.app', token: 'tok' }).get('x'), /Instance not found/, 'a missing instance is an error, not absence');
   await assert.rejects(sc.spawn({ template: 'box' }), (e) => e instanceof OsSidecarError && e.status === 403 && /sidecars\.spawn/.test(e.message));
 });
 
@@ -117,7 +120,7 @@ test("createSidecars({ mode: 'os' }) spawns templates through the OS, never dock
     'GET /api/instances/a.b-2/sidecars/db',
     'DELETE /api/instances/a.b-2/sidecars/db',
   ]);
-  assert.deepEqual(os.seen[0].body, { template: 'db' });
+  assert.deepEqual(os.seen[0].body, { template: 'db', takeover: true }, 'takes over its own docker-mode container');
   assert.throws(() => createSidecars({ appId: 'a.b', instanceId: 'a.b-2', appPort: 1, mode: 'os', services: [], onSeed() {} }), /onSeed is not available/);
 });
 
@@ -132,4 +135,17 @@ test("mode 'auto' picks os only without a docker socket and with a token", (t) =
   delete process.env.AURA_INSTANCE_TOKEN;
   assert.equal(createSidecars({ appId: 'a.b', instanceId: 'a.b-2', appPort: 1, mode: 'auto', services: [] }).mode, 'docker');
   assert.equal(createSidecars({ appId: 'a.b', instanceId: 'a.b-2', appPort: 1, services: [] }).mode, 'docker', 'default stays docker');
+});
+
+test("mode 'os' waits for a template's readiness", async (t) => {
+  const os = await fakeOs(t, () => [201, { ok: true, created: true, sidecar: sidecar('web') }]);
+  const saved = { ...process.env };
+  t.after(() => { process.env = saved; });
+  process.env.OS_API_BASE = os.base;
+  process.env.AURA_INSTANCE_TOKEN = 'tok';
+  const host = createSidecars({ appId: 'a.b', instanceId: 'a.b-2', appPort: 1, mode: 'os', log: () => {},
+    services: [{ name: 'web', image: 'nginx', port: 80, readiness: { path: '/health' } }] });
+  await host.ensureAll();
+  assert.deepEqual(os.seen[0].body, { template: 'web', takeover: true, wait: { ready: true } });
+  assert.equal(host.phase, 'ready');
 });

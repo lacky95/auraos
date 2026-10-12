@@ -35,7 +35,8 @@ export const GET: APIRoute = async ({ params, url, request }) => {
   if (url.searchParams.get('view') === 'managed') {
     const gate = sidecarGate(params, request, ['sidecars.spawn']);
     if (gate instanceof Response) return gate;
-    try { return jsonResponse({ sidecars: await gate.mgr.osSidecars.list(instanceId) }); }
+    // A sidecar caller sees only what it may manage (its own subtree, unless sidecars.manageAll).
+    try { return jsonResponse({ sidecars: await gate.mgr.osSidecars.list(instanceId, gate.caller) }); }
     catch (err) { return sidecarError(err); }
   }
 

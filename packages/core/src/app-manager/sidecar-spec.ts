@@ -57,8 +57,12 @@ export interface SidecarSpawnRequest {
    * the same instance (migrating from the SDK docker path). Default false → 409.
    */
   takeover?: boolean;
-  /** Wait until the template's port accepts TCP before answering. */
-  wait?: { port?: boolean; timeoutMs?: number };
+  /**
+   * Answer only once the sidecar is up: `port` — its port accepts TCP;
+   * `ready` — the template's `readiness.path` answers HTTP (falls back to the
+   * port when the template declares no readiness).
+   */
+  wait?: { port?: boolean; ready?: boolean; timeoutMs?: number };
 }
 
 export interface ResolvedVolume {
@@ -88,6 +92,7 @@ export interface ResolvedSidecarSpec {
   publish: Array<{ host: number; container: number }>;
   limits?: { memory?: string; cpus?: number };
   seed?: { command: string[] };
+  readiness?: { path: string; timeoutMs: number };
   volumes: ResolvedVolume[];
   inheritIdentity: boolean;
   inheritPermissions: boolean;
@@ -154,6 +159,12 @@ export function parseSpawnRequest(body: unknown): SidecarSpawnRequest {
       }
       if (o['mode'] !== undefined && o['mode'] !== 'ro') throw new SpecError(400, "mounts.inherit.mode can only be 'ro'");
     }
+  }
+  if (b['wait'] !== undefined) {
+    const w = b['wait'] as Record<string, unknown>;
+    if (!w || typeof w !== 'object' || Array.isArray(w)) throw new SpecError(400, 'wait must be an object');
+    for (const k of ['port', 'ready']) if (w[k] !== undefined && typeof w[k] !== 'boolean') throw new SpecError(400, `wait.${k} must be a boolean`);
+    if (w['timeoutMs'] !== undefined && (typeof w['timeoutMs'] !== 'number' || w['timeoutMs'] <= 0)) throw new SpecError(400, 'wait.timeoutMs must be a positive number');
   }
   return b as unknown as SidecarSpawnRequest;
 }
@@ -225,6 +236,7 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
     publish,
     ...(tpl.limits ? { limits: tpl.limits } : {}),
     ...(tpl.seed ? { seed: tpl.seed } : {}),
+    ...(tpl.readiness ? { readiness: { path: tpl.readiness.path ?? '/', timeoutMs: tpl.readiness.timeoutMs ?? 600_000 } } : {}),
     volumes,
     inheritIdentity: tpl.inheritIdentity === true,
     inheritPermissions: tpl.inheritPermissions === true,

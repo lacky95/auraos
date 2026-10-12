@@ -22,6 +22,7 @@ export const POST: APIRoute = async ({ params, request }) => {
   const body = await jsonBody<ExecRequest>(request);
   if (body instanceof Response) return body;
   try {
+    await gate.mgr.osSidecars.authorize(gate.instance.instanceId, name, gate.caller);
     return jsonResponse(await gate.mgr.osSidecars.exec(gate.instance.instanceId, name, body));
   } catch (err) {
     return sidecarError(err);

@@ -9,7 +9,8 @@ import { sidecarError, sidecarGate } from '../../../../../lib/instanceAuth.js';
  *   DELETE (token, sidecars.spawn) → { ok }   — also removes sidecars it spawned
  *
  * App-managed sidecars (the app's own `docker run`) are not reachable here:
- * the app owns them.
+ * the app owns them. A sidecar calling with its own token reaches only the
+ * sidecars it spawned, unless the app holds `sidecars.manageAll`.
  */
 export const GET: APIRoute = async ({ params, request }) => {
   const gate = sidecarGate(params, request, ['sidecars.spawn']);
@@ -17,6 +18,7 @@ export const GET: APIRoute = async ({ params, request }) => {
   const name = params['name'];
   if (!name) return errorResponse('Missing sidecar name', 400);
   try {
+    await gate.mgr.osSidecars.authorize(gate.instance.instanceId, name, gate.caller);
     const sidecar = await gate.mgr.osSidecars.get(gate.instance.instanceId, name);
     if (!sidecar) return errorResponse(`no OS sidecar '${name}' in ${gate.instance.instanceId}`, 404);
     return jsonResponse({ sidecar });
@@ -31,6 +33,7 @@ export const DELETE: APIRoute = async ({ params, request }) => {
   const name = params['name'];
   if (!name) return errorResponse('Missing sidecar name', 400);
   try {
+    await gate.mgr.osSidecars.authorize(gate.instance.instanceId, name, gate.caller);
     await gate.mgr.osSidecars.remove(gate.instance.instanceId, name);
     return jsonResponse({ ok: true, removed: name });
   } catch (err) {

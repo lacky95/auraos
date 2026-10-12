@@ -19,7 +19,7 @@ const APP = 'io.test.app';
 const INST = 'io.test.app-2';
 
 /** In-memory docker: just enough of the CLI for SidecarManager. */
-function fakeDocker(t, { failStart = false, dieOnBoot = false } = {}) {
+function fakeDocker(t, { failStart = false, dieOnBoot = false, missingImages = [] } = {}) {
   const containers = new Map();   // name → { id, state, labels, args }
   const calls = [];
   let nextId = 1;
@@ -33,7 +33,11 @@ function fakeDocker(t, { failStart = false, dieOnBoot = false } = {}) {
     calls.push(args);
     const [verb] = args;
     if (verb === 'volume') reply(cb, 1, '', 'no such volume');
-    else if (verb === 'image') reply(cb, 0, args.includes('{{.Id}}') ? 'sha256:x' : 'PATH=/usr/bin:/bin\n');
+    else if (verb === 'image') {
+      if (args.includes('{{.Id}}') && missingImages.includes(args.at(-1))) reply(cb, 1, '', 'No such image');
+      else reply(cb, 0, args.includes('{{.Id}}') ? 'sha256:x' : 'PATH=/usr/bin:/bin\n');
+    }
+    else if (verb === 'pull') { missingImages.splice(missingImages.indexOf(args[1]), 1); reply(cb, 0); }
     else if (verb === 'inspect') {
       const ref = args[args.length - 1];
       if (args[2]?.startsWith('{{range .Config.Env}}')) { reply(cb, 0, 'PARENT_ONLY=yes\nK1=from-parent\n'); return { stdin: { end() {} } }; }
@@ -84,6 +88,7 @@ function fixture(t, opts = {}) {
       volumes: [{ name: 'data', target: '/data' }], inheritIdentity: true, inheritMounts: true },
     ...(opts.services ?? []),
   ];
+  const perms = opts.perms ?? [];
   const mgr = new SidecarManager({
     runner: {
       sidecarRuntime: () => ({ dataDir, appDataVolume: 'appvol', nodeModulesVolume: 'nm', network: 'aura-net',
@@ -93,7 +98,7 @@ function fixture(t, opts = {}) {
       resolveContextEnv: async () => ({ CTX_KEY: 'ctx-value' }),
     },
     registry: { getById: (id) => (id === APP ? { id: APP, services, tools: opts.tools ?? [], permissions: ['sidecars.spawn'] } : undefined) },
-    permissions: { hasPermission: (_app, p) => (opts.perms ?? []).includes(p) },
+    permissions: { hasPermission: (_app, p) => perms.includes(p) },
     tokens,
     mounts: {
       reapplyConsumer: async (k, o) => { mountCalls.push(['reapply', k, o]); return { restored: 0, inherited: 0, failed: 0 }; },
@@ -102,7 +107,7 @@ function fixture(t, opts = {}) {
     },
     instance: (id) => (id === INST ? { appId: APP, instanceDataDir: join(dataDir, 'scopes/users/default/apps', APP, INST) } : null),
   });
-  return { mgr, tokens, mountCalls, dataDir };
+  return { mgr, tokens, mountCalls, dataDir, perms };
 }
 
 const flag = (args, name) => args.flatMap((a, i) => (args[i - 1] === name ? [a] : []));
@@ -233,4 +238,78 @@ test('the docker socket is forwarded only with the docker tool', async (t) => {
   await assert.rejects(fixture(t, { services: svc }).mgr.spawn(INST, { template: 'sock' }, { instanceId: INST }), /does not grant docker/);
   await fixture(t, { services: svc, tools: ['docker'] }).mgr.spawn(INST, { template: 'sock' }, { instanceId: INST });
   assert.ok(d.containers.get(`aura-${INST}--sock`).args.includes('/var/run/docker.sock:/var/run/docker.sock'));
+});
+
+test('a sidecar caller manages only its own subtree; sidecars.manageAll lifts that', async (t) => {
+  fakeDocker(t);
+  const { mgr, perms } = fixture(t);
+  const app = { instanceId: INST };
+  const agent = { instanceId: INST, sidecar: 'agent' };
+  await mgr.spawn(INST, { template: 'box', name: 'agent' }, app);
+  await mgr.spawn(INST, { template: 'box', name: 'sibling' }, app);
+  await mgr.spawn(INST, { template: 'box', name: 'kid' }, agent);
+  await mgr.spawn(INST, { template: 'box', name: 'grandkid' }, { instanceId: INST, sidecar: 'kid' });
+
+  assert.deepEqual((await mgr.list(INST, agent)).map((s) => s.name).sort(), ['grandkid', 'kid']);
+  assert.equal((await mgr.list(INST, app)).length, 4, 'the app sees everything');
+  await mgr.authorize(INST, 'kid', agent);
+  await mgr.authorize(INST, 'grandkid', agent);
+  for (const other of ['sibling', 'agent']) {
+    await assert.rejects(mgr.authorize(INST, other, agent), (e) => e.status === 403 && /only manage the sidecars it spawned/.test(e.message));
+  }
+  await assert.rejects(mgr.spawn(INST, { template: 'box', name: 'sibling', env: { X: '1' } }, agent),
+    (e) => e.status === 403 && /may not replace 'sibling'/.test(e.message));
+  await mgr.spawn(INST, { template: 'box', name: 'kid', env: { X: '1' } }, agent);   // its own: recreate is fine
+
+  perms.push('sidecars.manageAll');
+  await mgr.authorize(INST, 'sibling', agent);
+  assert.equal((await mgr.list(INST, agent)).length, 4);
+});
+
+test('the limit counts running sidecars only (default 32 without the OS setting)', async (t) => {
+  const d = fakeDocker(t);
+  const saved = process.env.AURA_SIDECAR_MAX_PER_INSTANCE;
+  process.env.AURA_SIDECAR_MAX_PER_INSTANCE = '2';
+  t.after(() => { if (saved === undefined) delete process.env.AURA_SIDECAR_MAX_PER_INSTANCE; else process.env.AURA_SIDECAR_MAX_PER_INSTANCE = saved; });
+  const { mgr } = fixture(t);
+  await mgr.spawn(INST, { template: 'box', suffix: '1' }, { instanceId: INST });
+  await mgr.spawn(INST, { template: 'box', suffix: '2' }, { instanceId: INST });
+  await assert.rejects(mgr.spawn(INST, { template: 'box', suffix: '3' }, { instanceId: INST }), (e) => e.status === 429 && /limit 2/.test(e.message));
+  d.containers.get(`aura-${INST}--box-1`).state = 'exited';
+  await mgr.spawn(INST, { template: 'box', suffix: '3' }, { instanceId: INST });
+});
+
+test('seed markers follow the data: shared dirs seed once, legacy volumes never, no volumes per name', async (t) => {
+  const { dataDir } = fixture(t);
+  const vol = (name, subpath) => ({ name, target: '/d', source: 'appvol', ...(subpath ? { subpath } : {}) });
+  const spec = (name, volumes) => ({ name, volumes });
+  const a = SidecarManager.seedMarker(dataDir, 'apps/x', spec('w-1', [vol('cache', 'apps/x/.sidecars/w/cache')]));
+  const b = SidecarManager.seedMarker(dataDir, 'apps/x', spec('w-2', [vol('cache', 'apps/x/.sidecars/w/cache')]));
+  const c = SidecarManager.seedMarker(dataDir, 'apps/x', spec('w-3', [vol('cache', 'apps/x/.sidecars/w-3/cache')]));
+  assert.equal(a, b, 'two sidecars on the same shared dir share one marker');
+  assert.notEqual(a, c);
+  assert.equal(SidecarManager.seedMarker(dataDir, 'apps/x', spec('db', [{ name: 'data', target: '/d', source: 'aura-x-data' }])), null, 'legacy volume: already seeded');
+  assert.match(SidecarManager.seedMarker(dataDir, 'apps/x', spec('plain', [])), /\.seeded\/name-plain$/);
+});
+
+test('prePull pulls only missing images of prePull templates', async (t) => {
+  const d = fakeDocker(t, { missingImages: ['big:1', 'other:1'] });
+  const { mgr } = fixture(t);
+  await mgr.prePull({ id: APP, services: [
+    { name: 'a', image: 'big:1', prePull: true }, { name: 'b', image: 'other:1' }, { name: 'c', image: 'alpine:3', prePull: true },
+  ] });
+  assert.deepEqual(d.calls.filter((a) => a[0] === 'pull').map((a) => a[1]), ['big:1']);
+});
+
+test('spawn and remove notify `changed` (AppManager refreshes its sidecar cache at once)', async (t) => {
+  fakeDocker(t);
+  const f = fixture(t);
+  let n = 0;
+  f.mgr.opts.changed = () => { n++; };
+  await f.mgr.spawn(INST, { template: 'box' }, { instanceId: INST });
+  assert.equal(n, 1);
+  await f.mgr.spawn(INST, { template: 'box' }, { instanceId: INST });   // adopted: nothing changed
+  assert.equal(n, 1);
+  await f.mgr.remove(INST, 'box');
+  assert.equal(n, 2);
 });

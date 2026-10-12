@@ -37,7 +37,8 @@ export interface OsSpawnRequest {
   mounts?: SidecarMountsRequest;
   replace?: boolean;
   takeover?: boolean;
-  wait?: { port?: boolean; timeoutMs?: number };
+  /** `port`: TCP accepts; `ready`: the template's readiness path answers HTTP. */
+  wait?: { port?: boolean; ready?: boolean; timeoutMs?: number };
 }
 
 export interface OsSidecar {
@@ -169,7 +170,8 @@ export function osSidecars(options: OsSidecarsOptions = {}): OsSidecarsClient {
     },
     async get(name) {
       try { return (await call<{ sidecar: OsSidecar }>('GET', `${root}/${enc(name)}`)).sidecar; }
-      catch (err) { if (err instanceof OsSidecarError && err.status === 404) return null; throw err; }
+      // null only for "no such sidecar" — a missing INSTANCE is an error, not absence.
+      catch (err) { if (err instanceof OsSidecarError && err.status === 404 && /^no OS sidecar/.test(err.message)) return null; throw err; }
     },
     async remove(name) {
       await call('DELETE', `${root}/${enc(name)}`);

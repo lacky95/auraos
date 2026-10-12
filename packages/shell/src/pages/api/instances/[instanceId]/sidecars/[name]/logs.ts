@@ -16,6 +16,7 @@ export const GET: APIRoute = async ({ params, request, url }) => {
   if (!name) return errorResponse('Missing sidecar name', 400);
   const tail = url.searchParams.get('tail');
   try {
+    await gate.mgr.osSidecars.authorize(gate.instance.instanceId, name, gate.caller);
     return jsonResponse(await gate.mgr.osSidecars.logs(gate.instance.instanceId, name, {
       ...(tail ? { tail: Number(tail) } : {}),
       ...(url.searchParams.get('since') ? { since: url.searchParams.get('since')! } : {}),

@@ -833,6 +833,9 @@ export class SidecarHost {
     await execDocker(args, 5 * 60_000);
     this.setPhase('starting', `${svc.name} up`);
     this.log(`${this.containerName(svc.name)} started (image=${svc.image})`);
+    // readiness: flip the phase to `ready` once the service answers (in the
+    // background — a slow service must not hold up the ones after it).
+    if (svc.readiness && svc.port) void this.watchReadiness(svc);
   }
 
   /**
@@ -843,9 +846,33 @@ export class SidecarHost {
    */
   private async ensureViaOs(svc: ServiceSpec): Promise<void> {
     this.setPhase('starting', `${svc.name} (OS-managed)`);
-    const { created, sidecar } = await this.osClient().spawn({ template: svc.name });
-    this.setPhase('starting', `${svc.name} ${created ? 'started' : 'already running'}`);
+    // takeover: a same-name container this app ran itself on the docker path
+    // (before switching to mode 'os') is replaced instead of answering 409 —
+    // the OS only ever takes over containers of this very instance.
+    // readiness: the OS answers once the service answers.
+    const { created, sidecar } = await this.osClient().spawn({
+      template: svc.name,
+      takeover: true,
+      ...(svc.readiness ? { wait: { ready: true } } : {}),
+    });
+    this.setPhase(svc.readiness ? 'ready' : 'starting', `${svc.name} ${created ? 'started' : 'already running'}`);
     this.log(`${sidecar.containerName} ${created ? 'started' : 'adopted'} by the OS (image=${sidecar.image})`);
+  }
+
+  /** Docker path: poll `readiness.path` until it answers below 500, then phase `ready`. */
+  private async watchReadiness(svc: ServiceSpec): Promise<void> {
+    const path = svc.readiness?.path ?? '/';
+    const url = `http://${this.containerName(svc.name)}:${svc.port}${path.startsWith('/') ? path : `/${path}`}`;
+    const deadline = Date.now() + (svc.readiness?.timeoutMs ?? 600_000);
+    while (Date.now() < deadline) {
+      try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(3000), redirect: 'manual' });
+        await res.body?.cancel();
+        if (res.status < 500) { this.setPhase('ready', `${svc.name} ready`); return; }
+      } catch { /* not up yet */ }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    this.log(`${svc.name}: readiness ${url} did not answer within the timeout`);
   }
 
   /** Remove every sibling this app spawned. Call on onDestroy. */

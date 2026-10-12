@@ -118,3 +118,14 @@ test('specHash: stable across key order, changes with the spec', () => {
   assert.notEqual(h1, h3);
   assert.match(h1, /^[0-9a-f]{16}$/);
 });
+
+test('readiness passes through with defaults; wait is validated', () => {
+  const svc = [{ name: 'web', image: 'nginx', port: 80, readiness: { path: '/health', timeoutMs: 5000 }, command: [], env: {}, volumes: [] },
+    { name: 'raw', image: 'nginx', port: 80, command: [], env: {}, volumes: [] }];
+  const c = ctx({ manifest: { services: svc, tools: [] } });
+  assert.deepEqual(resolveSidecarSpec({ template: 'web' }, c).readiness, { path: '/health', timeoutMs: 5000 });
+  assert.equal(resolveSidecarSpec({ template: 'raw' }, c).readiness, undefined);
+  assert.deepEqual(parseSpawnRequest({ template: 'web', wait: { ready: true, timeoutMs: 100 } }).wait, { ready: true, timeoutMs: 100 });
+  rejects(() => parseSpawnRequest({ template: 'web', wait: { ready: 'yes' } }), 400, /wait\.ready must be a boolean/);
+  rejects(() => parseSpawnRequest({ template: 'web', wait: { timeoutMs: -1 } }), 400, /positive number/);
+});
