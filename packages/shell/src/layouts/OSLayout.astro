@@ -69,6 +69,28 @@ const activeThemeId   = activeTheme.id;
     Placed in <head> as inline so it captures from the very first frame.
   -->
   <script is:inline>
+    // Pin the viewport: html/body are overflow:hidden(clip) but the viewport
+    // can still be scrolled by focus()/scrollIntoView() from inside an app
+    // iframe (same origin), which slides the whole shell left/up.
+    (function () {
+      const pin = () => {
+        if (window.scrollX || window.scrollY) window.scrollTo(0, 0);
+        const se = document.scrollingElement;
+        if (se && (se.scrollLeft || se.scrollTop)) { se.scrollLeft = 0; se.scrollTop = 0; }
+      };
+      window.addEventListener('scroll', pin, { passive: true });
+      // Hidden ancestors that can't use clip (or that a future change makes
+      // hidden again) get the same treatment; scroll doesn't bubble, so capture.
+      document.addEventListener('scroll', (e) => {
+        const el = e.target;
+        if (!(el instanceof Element)) return;
+        const ox = getComputedStyle(el).overflowX, oy = getComputedStyle(el).overflowY;
+        if (ox === 'hidden' && el.scrollLeft) el.scrollLeft = 0;
+        if (oy === 'hidden' && el.scrollTop) el.scrollTop = 0;
+      }, { capture: true, passive: true });
+    })();
+  </script>
+  <script is:inline>
   (() => {
     const MAX = 1000;
     const buffer = [];
@@ -716,12 +738,18 @@ const activeThemeId   = activeTheme.id;
        shrunken body at zoom > 1. */
     height: 100%;
     width: 100%;
-    overflow: hidden;
+    /* clip, not hidden: an overflow:hidden box can still be scrolled by
+       focus()/scrollIntoView() inside a same-origin app iframe, which shifts
+       the whole shell sideways. clip is never scrollable. */
+    overflow: clip;
     position: relative; /* anchor for fixed-style overlay bars in autohide mode */
   }
 
   #desktop {
-    overflow: hidden;
+    /* clip, not hidden: an overflow:hidden box can still be scrolled by
+       focus()/scrollIntoView() inside a same-origin app iframe, which shifts
+       the whole shell sideways. clip is never scrollable. */
+    overflow: clip;
     position: relative;
     background: var(--aura-color-bg);
   }

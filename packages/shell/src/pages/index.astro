@@ -2448,7 +2448,7 @@ const ssrVisibleViews = initialViews
     slot.dataset['viewId']     = v.viewId;
     slot.dataset['instanceId'] = v.instanceId;
     if (v.activityId) slot.dataset['activityId'] = v.activityId;
-    slot.style.cssText = 'display:flex;flex-direction:column;background:var(--aura-color-surface);border:var(--aura-border);overflow:hidden;';
+    slot.style.cssText = 'display:flex;flex-direction:column;background:var(--aura-color-surface);border:var(--aura-border);overflow:clip;';
     // Minimize is opt-in per view (set by activity / non-activity manifest
     // gating in buildView). Without it the slot only offers close — pressing
     // X tears the activity down; there's no "hide for later" affordance for
@@ -2495,7 +2495,7 @@ const ssrVisibleViews = initialViews
           <button data-action="close" class="slot-close-btn" title="Close" style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 10px;cursor:pointer;line-height:1;"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-x"/></svg></button>
         </div>
       </div>
-      <div class="slot-body" style="flex:1;overflow:hidden;position:relative;"></div>`;
+      <div class="slot-body" style="flex:1;overflow:clip;position:relative;"></div>`;
     updateSlot(slot, v);
     return slot;
   }
@@ -3649,7 +3649,7 @@ const ssrVisibleViews = initialViews
   #focus-body {
     flex: 1;
     position: relative;
-    overflow: hidden;
+    overflow: clip; /* not hidden: see #desktop in OSLayout.astro */
   }
   #focus-frame {
     position: absolute;

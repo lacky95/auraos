@@ -28,6 +28,12 @@ html, body {
   -webkit-font-smoothing: none;
 }
 
+/* body never scrolls — not even programmatically. A focus() or
+ * scrollIntoView() inside a same-origin app iframe scrolls every hidden
+ * ancestor, shifting the whole shell sideways. html can't take `clip` (it
+ * propagates to the viewport), so OSLayout resets the viewport scroll too. */
+body { overflow: clip; }
+
 a { color: var(--aura-color-primary); text-decoration: none; }
 a:hover { text-shadow: var(--aura-glow-primary); }
 

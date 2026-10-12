@@ -40,7 +40,7 @@ const isLoading = view.lifecycleState !== 'resumed';
     flex-direction: column;
     background: var(--aura-color-surface);
     border: var(--aura-border);
-    overflow: hidden;
+    overflow: clip; /* not hidden: see #desktop in OSLayout.astro */
     height: 100%;
   }
 
@@ -81,7 +81,7 @@ const isLoading = view.lifecycleState !== 'resumed';
   .slot-btn:hover { color: var(--aura-color-primary); box-shadow: var(--aura-glow-subtle); }
   .slot-btn.danger:hover { color: var(--aura-color-danger); box-shadow: var(--aura-glow-danger); }
 
-  .slot-body { flex: 1; overflow: hidden; position: relative; }
+  .slot-body { flex: 1; overflow: clip; position: relative; }
 
   iframe {
     width: 100%;
