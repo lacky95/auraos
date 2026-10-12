@@ -374,6 +374,14 @@ capabilities:
     source: apt
     binary: sshpass
     package: sshpass
+  argocd:
+    source: curl
+    install_cmd: curl -fsSL
+      https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+      -o /usr/local/bin/argocd && chmod +x /usr/local/bin/argocd
+    binary_path: /usr/local/bin/argocd
+    binary: argocd
+    description: Argo CD CLI — manage Argo CD apps, clusters and repos (GitOps)
 services:
   sshd:
     source: apt
