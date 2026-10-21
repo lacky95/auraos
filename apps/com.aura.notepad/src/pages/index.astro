@@ -186,7 +186,7 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
 </head>
 <body>
   <header>
-    <span class="name">▤ NOTEPAD</span>
+    <span class="name"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-file-text"/></svg> NOTEPAD</span>
     <div class="meta">
       <span>INST <b id="m-instance">{instanceId}</b></span>
       <span>ACTIVITIES <b id="m-count">…</b></span>
@@ -194,13 +194,13 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
   </header>
 
   <div id="tab-bar">
-    <div id="tab-scroll-left" class="tab-scroll" title="Scroll tabs left" hidden>◀</div>
+    <div id="tab-scroll-left" class="tab-scroll" title="Scroll tabs left" hidden><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-chevron-left"/></svg></div>
     <div id="tab-list"></div>
-    <div id="tab-scroll-right" class="tab-scroll" title="Scroll tabs right" hidden>▶</div>
-    <div id="tab-new" title="New tab (Ctrl+T)">+</div>
+    <div id="tab-scroll-right" class="tab-scroll" title="Scroll tabs right" hidden><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-chevron-right"/></svg></div>
+    <div id="tab-new" title="New tab (Ctrl+T)"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-plus"/></svg></div>
     <div id="tab-actions">
-      <button class="tab-btn" id="btn-open" title="Open file (Ctrl+O)">OPEN</button>
-      <button class="tab-btn" id="btn-save" title="Save file (Ctrl+S)">SAVE</button>
+      <button class="tab-btn" id="btn-open" title="Open file (Ctrl+O)"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-folder-open"/></svg><span>OPEN</span></button>
+      <button class="tab-btn" id="btn-save" title="Save file (Ctrl+S)"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-save"/></svg><span>SAVE</span></button>
     </div>
   </div>
 
@@ -219,12 +219,12 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
     <div id="dialog-box">
       <div id="dialog-title-row">
         <span id="dialog-title">OPEN FILE</span>
-        <span id="dialog-close-btn" title="Cancel">✕</span>
+        <span id="dialog-close-btn" title="Cancel"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-x"/></svg></span>
       </div>
       <div id="dialog-breadcrumb"></div>
       <div id="dialog-toolbar">
-        <button class="dialog-tool-btn" id="dialog-mkdir" title="Create folder here">＋ FOLDER</button>
-        <button class="dialog-tool-btn" id="dialog-refresh" title="Refresh">↻</button>
+        <button class="dialog-tool-btn" id="dialog-mkdir" title="Create folder here"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-plus"/></svg> FOLDER</button>
+        <button class="dialog-tool-btn" id="dialog-refresh" title="Refresh"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-refresh-cw"/></svg></button>
       </div>
       <div id="dialog-list"></div>
       <div id="dialog-filename-row">
@@ -277,10 +277,9 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
       .tab-close{
         display:flex;align-items:center;justify-content:center;
         width:16px;height:16px;font-size:.75rem;line-height:1;
-        color:transparent;border-radius:2px;cursor:pointer;flex-shrink:0;
+        color:var(--aura-color-text-dim,#557755);border-radius:2px;cursor:pointer;flex-shrink:0;
         transition:background .1s,color .1s;
       }
-      .tab:hover .tab-close,.tab.active .tab-close{color:var(--aura-color-text-dim,#557755)}
       .tab-close:hover{background:rgba(255,74,74,.25)!important;color:#ff6060!important}
       #tab-new{
         display:flex;align-items:center;justify-content:center;width:36px;
@@ -305,15 +304,40 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
         display:flex;align-items:center;gap:4px;padding:0 10px;flex-shrink:0;
         border-left:1px solid var(--aura-color-border,rgba(0,255,65,.15));
       }
+      #tab-actions{gap:6px;padding-top:3px;padding-bottom:3px}
+      /* Flat but unmistakably clickable: solid fill, rounded, raised on hover,
+         pressed on click, visible keyboard focus. Colors come from theme tokens. */
       .tab-btn{
-        display:flex;align-items:center;padding:3px 10px;
+        display:inline-flex;flex-direction:column;align-items:center;justify-content:center;
+        gap:3px;min-width:46px;padding:4px 8px;
         font-family:var(--aura-font-mono,'Courier New',monospace);
-        font-size:.6rem;letter-spacing:.1em;text-transform:uppercase;
-        color:var(--aura-color-text-dim,#557755);
-        border:1px solid var(--aura-color-border,rgba(0,255,65,.2));
-        background:transparent;cursor:pointer;transition:color .1s,border-color .1s;
+        font-size:.55rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;line-height:1;
+        color:var(--aura-color-text,#ccffcc);
+        background:var(--aura-color-surface-2,#191919);
+        border:1px solid color-mix(in srgb,var(--aura-color-text-dim,#557755) 45%,transparent);
+        border-radius:5px;
+        box-shadow:0 1px 0 color-mix(in srgb,#000 35%,transparent);
+        cursor:pointer;user-select:none;
+        transition:background .12s,border-color .12s,color .12s,box-shadow .12s,transform .06s;
       }
-      .tab-btn:hover{color:var(--aura-color-primary,#00ff41);border-color:var(--aura-color-primary,#00ff41)}
+      .tab-btn .aura-icon{font-size:1.15rem;vertical-align:0;color:var(--aura-color-primary,#00ff41)}
+      .tab-btn:hover{
+        background:color-mix(in srgb,var(--aura-color-primary,#00ff41) 12%,var(--aura-color-surface-2,#191919));
+        border-color:var(--aura-color-primary,#00ff41);
+        box-shadow:0 2px 6px color-mix(in srgb,var(--aura-color-primary,#00ff41) 18%,transparent);
+      }
+      .tab-btn:active{
+        transform:translateY(1px);box-shadow:none;
+        background:color-mix(in srgb,var(--aura-color-primary,#00ff41) 20%,var(--aura-color-surface-2,#191919));
+      }
+      .tab-btn:focus-visible{outline:2px solid var(--aura-color-primary,#00ff41);outline-offset:2px}
+      /* SAVE is the primary action: accent-tinted at rest. */
+      #btn-save{
+        color:var(--aura-color-primary,#00ff41);
+        background:color-mix(in srgb,var(--aura-color-primary,#00ff41) 14%,var(--aura-color-surface-2,#191919));
+        border-color:color-mix(in srgb,var(--aura-color-primary,#00ff41) 60%,transparent);
+      }
+      #btn-save:hover{background:color-mix(in srgb,var(--aura-color-primary,#00ff41) 24%,var(--aura-color-surface-2,#191919))}
 
       /* ── File dialog (entries/breadcrumb created in JS) ─────────────── */
       .dialog-tool-btn{
@@ -342,7 +366,7 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
         border-left-color:var(--aura-color-primary,#00ff41);
         color:var(--aura-color-primary,#00ff41);
       }
-      .dialog-entry .icon{font-size:.85rem;flex-shrink:0;width:14px;text-align:center;color:var(--aura-color-secondary,#ff9900)}
+      .dialog-entry .icon{display:inline-flex;justify-content:center;font-size:.85rem;flex-shrink:0;width:14px;color:var(--aura-color-secondary,#ff9900)}
       .dialog-entry.is-dir .icon{color:var(--aura-color-primary,#00ff41)}
       .dialog-entry.is-parent .entry-name{color:var(--aura-color-text-dim,#557755);letter-spacing:.15em}
       .dialog-entry.dragging{opacity:.4}
@@ -382,6 +406,10 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
   })();
 
   (() => {
+    // Lucide icon from the OS sprite (follows the theme via currentColor).
+    const icon = (name) =>
+      `<svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-${name}"/></svg>`;
+
     // ── State ──────────────────────────────────────────────────────────────
     let tabs       = [];      // [{ id, name, path, revision }]
     let activeId   = '';      // PER-WINDOW selected tab (local only)
@@ -411,15 +439,22 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
         nameSpan.textContent = t.name;
         el.appendChild(nameSpan);
 
-        const closeBtn = document.createElement('span');
-        closeBtn.className = 'tab-close';
-        closeBtn.textContent = '×';
-        closeBtn.title = 'Close tab';
-        closeBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          closeTab(t.id);
-        });
-        el.appendChild(closeBtn);
+        // Only the active tab gets a close button, so a click meant to select
+        // an inactive tab can never close it. A click that is part of a
+        // double-click (the tab was just selected, then re-rendered with its
+        // close button under the cursor) is ignored too.
+        if (t.id === activeId) {
+          const closeBtn = document.createElement('span');
+          closeBtn.className = 'tab-close';
+          closeBtn.innerHTML = icon('x');
+          closeBtn.title = 'Close tab';
+          closeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (e.detail > 1) return;
+            closeTab(t.id);
+          });
+          el.appendChild(closeBtn);
+        }
 
         el.addEventListener('click', () => switchTab(t.id));
         tabList.appendChild(el);
@@ -739,13 +774,13 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
       if (dialogCurDir) {
         const up = document.createElement('div');
         up.className = 'dialog-entry is-dir is-parent';
-        const icon = document.createElement('span');
-        icon.className = 'icon';
-        icon.textContent = '↰';
+        const upIcon = document.createElement('span');
+        upIcon.className = 'icon';
+        upIcon.innerHTML = icon('arrow-up');
         const name = document.createElement('span');
         name.className = 'entry-name';
         name.textContent = '..';
-        up.appendChild(icon);
+        up.appendChild(upIcon);
         up.appendChild(name);
         up.addEventListener('click', () => navigateDialog(parentDir()));
         makeDropTarget(up, parentDir);
@@ -755,7 +790,7 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
       if (!entries || entries.length === 0) {
         const empty = document.createElement('div');
         empty.id = 'dialog-empty';
-        empty.textContent = '(empty — use ＋ FOLDER or type a filename to save)';
+        empty.textContent = '(empty — use + FOLDER or type a filename to save)';
         dialogList.appendChild(empty);
         return;
       }
@@ -765,9 +800,9 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
         el.className = 'dialog-entry' + (entry.isDir ? ' is-dir' : '');
         if (!entry.isDir && entry.name === dialogSelected) el.classList.add('selected');
 
-        const icon = document.createElement('span');
-        icon.className = 'icon';
-        icon.textContent = entry.isDir ? '▸' : '▤';
+        const entryIcon = document.createElement('span');
+        entryIcon.className = 'icon';
+        entryIcon.innerHTML = icon(entry.isDir ? 'folder' : 'file-text');
 
         const name = document.createElement('span');
         name.className = 'entry-name';
@@ -778,20 +813,20 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
 
         const renameBtn = document.createElement('span');
         renameBtn.className = 'entry-action';
-        renameBtn.textContent = '✎';
+        renameBtn.innerHTML = icon('pencil');
         renameBtn.title = 'Rename';
         renameBtn.addEventListener('click', (e) => { e.stopPropagation(); beginRename(el, entry); });
 
         const delBtn = document.createElement('span');
         delBtn.className = 'entry-action danger';
-        delBtn.textContent = '✕';
+        delBtn.innerHTML = icon('trash-2');
         delBtn.title = 'Delete';
         delBtn.addEventListener('click', (e) => { e.stopPropagation(); confirmDelete(delBtn, entry); });
 
         actions.appendChild(renameBtn);
         actions.appendChild(delBtn);
 
-        el.appendChild(icon);
+        el.appendChild(entryIcon);
         el.appendChild(name);
         el.appendChild(actions);
 
@@ -871,13 +906,13 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
         return;
       }
       btn.dataset.confirming = '1';
-      btn.textContent = '✓';
+      btn.innerHTML = icon('check');
       btn.classList.add('confirm');
       btn.title = 'Click again to confirm delete';
       setTimeout(() => {
         if (btn.dataset.confirming === '1') {
           btn.dataset.confirming = '';
-          btn.textContent = '✕';
+          btn.innerHTML = icon('trash-2');
           btn.classList.remove('confirm');
           btn.title = 'Delete';
         }
@@ -889,14 +924,14 @@ const activityId = Astro.request.headers.get('x-aura-activity-id') ?? '(none)';
       if (dialogList.querySelector('.dialog-newfolder')) return;
       const row = document.createElement('div');
       row.className = 'dialog-newfolder';
-      const icon = document.createElement('span');
-      icon.className = 'icon';
-      icon.textContent = '▸';
+      const folderIcon = document.createElement('span');
+      folderIcon.className = 'icon';
+      folderIcon.innerHTML = icon('folder');
       const input = document.createElement('input');
       input.type = 'text';
       input.placeholder = 'folder name…';
       input.spellcheck = false;
-      row.appendChild(icon);
+      row.appendChild(folderIcon);
       row.appendChild(input);
       dialogList.insertBefore(row, dialogList.firstChild);
       input.focus();
