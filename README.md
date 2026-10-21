@@ -1,69 +1,106 @@
 # AuraOS
 
-> A self-hosted WebOS where people and AI agents work side by side. Every tool and agent runs sandboxed in its own container, installs like an app, and snaps together like building blocks — visible in one transparent control plane.
+> **The WebOS for humans and their agents.**
+> Created with agents, curated by humans.
+
+A self-hosted WebOS where people and AI agents work side by side. Every tool
+and agent runs sandboxed in its own container, installs like an app, and snaps
+together like building blocks — visible in one transparent control plane.
+
+**Start with one container — and let it grow from inside.**
+
+**Self-hosted · Sandboxed · Open source (Apache 2.0)** —
+[aura.lakner.io](https://aura.lakner.io) ·
+[Docs](https://docs.aura.lakner.io) ·
+[Store](https://github.com/lacky95/auraos-store)
 
 ![AuraOS](assets/aura-os.png)
 
 > [!WARNING]
 > **Pre-alpha — not for production use.**
-> Every service runs in dev mode by default: no authentication, no TLS,
-> no hardened sandbox, APIs fully exposed on localhost. This is intentional
-> for the current development stage. Do **not** expose port 3000 to a public
-> network or run untrusted apps inside the OS yet.
+> Every service runs in dev mode by default: no authentication, no TLS, APIs
+> fully exposed on localhost. Do **not** expose port 3000 to a public network
+> or run untrusted apps inside the OS yet.
 
 ---
 
-## What it is
+## What AuraOS is
 
-A browser-based WebOS that runs inside one Docker container. The shell
-draws the desktop — status bar, dock, launcher, layout manager, process
-manager — and every app you launch boots inside its own sandbox (PRoot
-or full container) and is rendered in an iframe.
+AuraOS is one Docker container that becomes your whole workspace. You open it
+in the browser and get a desktop — launcher, dock, windows, workspaces, a
+process manager — where every window is an app running in its own sandbox.
 
-The shell talks to apps only through the reverse proxy at
-`/api/proxy/<id>/<path>`. Apps never reach the browser directly; the
-proxy injects identity headers, theme tokens, a console relay, and a
-keystroke forwarder on the way in.
+Anything can become an app: a classic tool (Trilium, VS Code, Guacamole, a
+browser), a service (Whisper, LiteLLM, Postgres, an OCI registry), or an
+AI agent (Claude Code, Codex, Hermes). A thin adapter wraps the upstream image
+unchanged, the OS gives it scoped capabilities and a place in the UI, and from
+then on humans and agents use it side by side.
 
-```
-                       ┌──────────────────────────┐
-                       │       Browser            │
-                       │  ┌────────────────────┐  │
-                       │  │  iframe per app    │  │
-                       │  └────────────────────┘  │
-                       └────────────┬─────────────┘
-                                    │ http://shell:3000
-                                    ▼
-   ┌──────────────────────────────────────────────────────────┐
-   │  aura-shell  (Astro SSR + AppManager + event bus)        │
-   │                                                          │
-   │  /api/proxy/<id>/<path>  ──────► HTML rewrites, meta,    │
-   │                                  console relay, keys      │
-   │  /api/data/<authority>/* ──────► content-provider router  │
-   │  /api/apps, /api/nexus/* ──────► lifecycle, install       │
-   └────────────┬────────────────────────────┬────────────────┘
-                │                            │
-                ▼                            ▼
-   ┌────────────────────────┐    ┌───────────────────────────┐
-   │  PRoot sandbox         │    │  Docker sibling container │
-   │  apps/<id>             │    │  aura-<id>                │
-   │  Astro / raw runtime   │    │  full kernel namespaces   │
-   └────────────────────────┘    └───────────────────────────┘
-```
+The OS doesn't sit in the middle of that traffic. It is the **phone book**:
+apps declare what they *provide* and *consume* — REST, MCP, WebSocket, events,
+KV — in the Interface Registry. Agents look them up and connect directly. Add a
+note-taking app that serves an MCP, and every agent on the desk can read and
+write the same notes you do.
 
-The shell is one process. Apps are many — each one its own dev server
-listening on its own port, reached only through the proxy.
+### Why it exists
 
-## Why
+Tools, models and agents each live in their own silo, and connecting them
+means custom glue: auth, ports and YAML. Capable agents now exist, but they
+either run with full access to everything or stay inside one vendor's cloud.
+AuraOS is a self-hosted, sandboxed and supervised home for both people and
+agents. Every piece of it is replaceable.
 
-- **Per-app isolation without per-app VMs.** PRoot keeps the spawn cost
-  at a few ms; container mode adds real kernel namespaces when you need
-  them. One manifest field flips between the two.
-- **One SDK across every app.** Lifecycle hooks, content providers,
-  keymap actions, intents, themes — all the same surface, whether the
-  app is Astro, Next.js, or anything else that speaks HTTP.
-- **Open at every layer.** Shell, SDK, apps, CLI, distribution layer —
-  all in this repo, all changeable, all documented.
+> Don't like an app? Rebuild it. Don't trust a model? Swap it. Outgrew an
+> agent? Replace it.
+
+## What works today
+
+- **Isolation by default.** Each app runs in its own container (or a
+  lightweight PRoot sandbox) and sees only its own slice of the filesystem and
+  the tools it was granted.
+- **Capabilities.** Host tools — `claude`, `codex`, `docker`, `git`, `node`, … —
+  are installed once and granted per app. Your AI coding agent is just another
+  capability.
+- **Wrap any container image.** Apps declare sidecars; the upstream image
+  stays untouched, so upgrades are still `docker pull`.
+- **Interface Registry.** Apps register REST / MCP / WebSocket / event / KV
+  interfaces; agents discover them through the registry (itself served as an
+  MCP).
+- **Built-in MCP servers.** Agents can drive the shell UI (`aurashelld`),
+  every terminal session, Notepad, the docs and the Interface Registry.
+- **Aura Context.** One OS-wide store for env vars, secrets and shared volumes,
+  injected into the apps that need them.
+- **Nexus, the app store.** Install, update and publish from Git, an OCI
+  registry, the [official catalogue](https://github.com/lacky95/auraos-store)
+  or a local path — into system, global or user scope.
+- **One CLI, inside and out.** The same `aura` runs on the host and inside
+  every sandbox: `aura dev new` scaffolds an app, `aura jump` drops you into a
+  running one, `aura mount` attaches another app's files live.
+- **Self-update.** Settings → About pulls, rebuilds and restarts the OS.
+
+## Built with agents, curated by humans
+
+AuraOS is developed inside AuraOS. Claude Code runs as a capability in a
+terminal or app sandbox, mounts the app it's working on with `aura mount`,
+reads the Aura docs MCP before touching anything, and commits back to this
+repo. Plans and tasks live in a wrapped Trilium app that serves as shared
+memory for the human and several agents. Agents check UI changes through a
+wrapped browser (Steel) over MCP.
+
+The same desk also runs real day-to-day work: a remote desktop exposed over
+MCP, and a voice agent that hands tasks to a long-running Hermes agent. Each
+of these started as a real need, and each one hardened the OS.
+
+The agents do the work; a human reviews and keeps the leash.
+
+## Principles
+
+- **Registry, not bus.** The OS connects things, then gets out of the data path.
+- **Sandbox everything.** Isolation and scoped capabilities are the default.
+- **Extend, never fork.** Thin adapters over unchanged upstream tools.
+- **Legibility over gloss.** The UI is the system's X-ray — show the machine.
+- **Depth first.** Real apps harden the OS; breadth waits for a real need.
+- **Human in the loop.** Agents do the work; humans keep the leash.
 
 ## Quick start
 
@@ -73,80 +110,70 @@ cd auraos
 docker compose up
 ```
 
-Open `http://localhost:3000` — the desktop comes up in a few seconds
-after the first build (which itself takes a couple of minutes). The
-launcher (`Ctrl+Alt+Space`) lists the bundled apps; the Terminal,
-Console, Notepad, Counter, Settings, Nexus and Docs apps are working
-references for every pattern in the OS.
+Docker is the only dependency. Open `http://localhost:3000`. The first build
+takes a few minutes; after that the desktop comes up in seconds. Press
+`Ctrl+Alt+Space` for the launcher.
+
+## How it fits together
+
+```
+   Browser ── one iframe per app window
+      │
+      ▼  http://localhost:3000
+   ┌──────────────────────────────────────────────────────────────┐
+   │ aura-shell  (Astro SSR · AppManager · event bus · KV)        │
+   │                                                              │
+   │  /api/proxy/<id>/*   reverse proxy: identity, theme, console │
+   │  /api/interfaces     Interface Registry (provides/consumes)  │
+   │  /api/apps, /nexus   lifecycle, install, update, publish     │
+   │  Context             env · secrets · volumes                 │
+   └──────────────┬───────────────────────────────┬───────────────┘
+                  ▼                               ▼
+   ┌──────────────────────────┐    ┌──────────────────────────────┐
+   │ app container  aura-<id> │    │ sidecars  aura-<id>--<svc>   │
+   │ granted tools + /data    │    │ upstream images, unchanged   │
+   └──────────────────────────┘    └──────────────────────────────┘
+```
+
+The browser never talks to an app directly: every request goes through the
+shell's proxy. Agents look up interfaces in the registry and then connect
+straight to the app.
 
 ## Documentation
 
-The full docs live in the **Docs** app inside the OS itself
-(`apps/com.aura.docs/`). Open it from the launcher once AuraOS is
-running. Or browse the markdown source under
-`apps/com.aura.docs/fumadocs-site/content/docs/`:
-
-- **Introduction** — what AuraOS is, the architecture diagram, the
-  shapes of the system.
-- **Installation** & **Quick Start** — get running; the first 90
-  seconds inside the OS.
-- **Develop an App** — `aura dev new`, manifest fields, lifecycle
-  hooks, activity mode.
-- **Develop in the Sandbox** — `aura jump` + Claude Code from inside a
-  running app.
-- **Core Concepts** — instance vs activity, runtime modes, sandbox
-  modes, proxy, theme, keymap, intents.
-- **SDK Reference** — every namespace on `osClient`.
-- **CLI Reference** — every `aura …` command.
-- **Nexus** — the distribution layer (install / update / publish from
-  Git, OCI, curated index, or local paths).
-- **Troubleshooting** — common dev issues with concrete fixes.
+Full docs at **[docs.aura.lakner.io](https://docs.aura.lakner.io)**. They
+also ship inside the OS as the Docs app, and agents can read them over MCP.
+They cover installation, developing and publishing apps, the sandbox
+workflow, core concepts, Context, Interfaces, sidecars, cross-app mounts,
+Nexus, and the SDK and CLI references.
 
 ## Repo layout
 
 ```
-packages/core         AppManager, ProotRunner, ContainerRunner,
-                      OsEventBus, PermissionManager, ThemeManager,
-                      Nexus pipeline, manifest schema.
-packages/shell        Astro SSR shell — /api/proxy, /api/data,
-                      /api/apps, /api/nexus, status bar, dock,
-                      launcher, layout manager, process manager.
-packages/app-sdk      OsClient, lifecycle factories, runtime adapters
-                      (Astro + Next.js), proxy helpers.
-packages/aura-cli     The `aura` CLI used inside and outside the OS.
-packages/ui           Shared UI primitives (@aura/ui).
-apps/<id>             Reference apps:
-                      • com.aura.terminal  WS + PTY, multicast sessions
-                      • com.aura.notepad   multi-activity shared state
-                      • com.aura.counter   multi-instance × multi-activity
-                      • com.aura.settings  KV-backed prefs UI
-                      • com.aura.console   WS persistence + log feed
-                      • com.aura.nexus     install / publish GUI
-                      • com.aura.docs      Next.js raw runtime — this site
+packages/core       AppManager, container/PRoot runners, Interface Registry,
+                    Context, Nexus, permissions, scopes, updater
+packages/shell      the desktop and every /api route
+packages/app-sdk    OsClient, lifecycle handlers, runtime adapters
+packages/aura-cli   the `aura` CLI (host + inside every sandbox)
+packages/ui         shared UI components (@aura/ui)
+packages/kv-store   OS key-value store (Valkey)
+apps/               system and reference apps — Terminal, Console, Notepad,
+                    Settings, Nexus, Docs, Browser, Whisper, registry,
+                    aurashelld, Counter, Example
+landing/            aura.lakner.io
 ```
+
+## Where we're going
+
+- **Agents as first-class objects:** task agents and long-running resident
+  agents, each with its own identity, grants, audit trail and take-over.
+- **On-demand activation:** start a provider when someone connects to it.
+- **Permission enforcement** between interface consumers and providers.
+- **Ambient, adaptive UI:** an interface that adapts to your attention —
+  minimal on AR glasses while you walk, a full desktop when you sit down.
+- **A central station for shipping software:** build once, ship as a
+  sandboxed app, install anywhere with one command.
 
 ## License
 
 [Apache License 2.0](LICENSE) — Copyright 2026 Lukas Lakner.
-
-## Updating
-
-AuraOS updates itself. In **Settings → About**, `Update AuraOS` first runs a
-quick check in the running shell — is there a newer commit on `main`, and is
-the working tree clean — and only then, on confirmation, hands the work to a
-detached updater container that rebases, rebuilds the image and recreates the
-shell.
-
-The updater is a separate container by necessity: the rebuild recreates
-`aura-shell`, so anything running inside it would be killed mid-update. It
-writes progress to a job file on the app-data volume, which is how the new
-shell reports on work its predecessor started — including the full build
-transcript behind *Show full log*.
-
-A first boot after a rebuild installs dependencies and builds every package,
-so several minutes is normal. The updater treats a container that is still
-producing output as progress and keeps waiting; a rollback needs the new
-shell to go silent and unresponsive, not merely to be slow.
-
-Nothing has to be installed for this to work: the compose plugin ships in the
-image, and an older image downloads it on the fly.
