@@ -20,6 +20,7 @@ AuraOS is a WebOS for humans and their agents. It is a desktop that runs in the 
    - `aura get apps`: installed apps
    - `aura ps`: what is running
    - `aura get caps`: tools that can be shared
+   - `curl -s "$OS_API_BASE/api/interfaces?kind=mcp&consumers=0"`: MCP servers apps provide
 3. Offer next steps from **Things you can do** below. Building their first app with `aura dev new` is the usual favourite.
 
 ## Concepts
@@ -34,6 +35,7 @@ AuraOS is a WebOS for humans and their agents. It is a desktop that runs in the 
 | **Capability (cap)** | A shared CLI tool (`git`, `claude`, `ripgrep` …) from the capability registry. Apps only see the caps they were granted, at `/aura/my-tools`. |
 | **Permission (perm)** | A manifest permission, e.g. `apps.mount`. Manage them with `aura get perms`, `aura grant perms` and `aura revoke perms`. |
 | **Nexus** | The app store. It aggregates OCI registries and git catalogs. |
+| **Interface** | Something an app provides to others, such as an MCP server, a REST/HTTP endpoint or a WebSocket. The Interface Registry lists all of them (see "Finding out more"). |
 
 ## The `aura` CLI
 
@@ -82,12 +84,26 @@ The grammar is kubectl-style: `aura <verb> <resource> [name]`. Short resource na
 - Store: `aura nexus search <q>`, `aura nexus app …` to install, update and publish.
 - Themes: `aura get themes`, `aura set theme <name>`.
 
-## Deeper questions: the docs
+## Finding out more: docs and interfaces
 
-AuraOS has a Docs app with full guides: core concepts, developing an app, sidecars, mounts, scopes, the CLI reference and deep dives. Agents can reach it through an MCP server with the tools `list_docs`, `search_docs` and `get_doc`. If those tools are available, search them before answering anything this file doesn't cover. If they aren't, offer to register the server:
+**The Aura Docs app** (`com.aura.docs`) has the full guides: core concepts, developing an app, sidecars, mounts, scopes, interfaces, the CLI reference and deep dives. Users open it from the launcher. Agents use its MCP server, which has the tools `list_docs`, `search_docs` and `get_doc`. Search the docs before answering anything this file doesn't cover.
 
+**The Interface Registry** is the OS's phone book. Apps declare what they **provide** in their manifest (`provides[]`): MCP servers, REST/HTTP endpoints and WebSockets. It reflects the system as it is right now, so look there instead of guessing which MCP servers or APIs exist. Each entry has:
+- **`status`:** `live` (running, the URL works), `catalog` (installed but not running) or `down` (starting or dying).
+- **`url`:** relative to `$OS_API_BASE`.
+- **`description`:** what it offers.
+
+You can read it two ways:
+- **Over HTTP.** Every MCP server: `curl -s "$OS_API_BASE/api/interfaces?kind=mcp&consumers=0"`. Everything: drop `kind`. Filters are `kind`, `appId`, `name` and `live=1`. Leave out `consumers=0` to also get the dependency report (`live` / `installed` / `unmet`).
+- **Over MCP.** `com.aura.settings` provides an MCP server for the registry itself at `$OS_API_BASE/api/proxy/com.aura.settings/mcp/interfaces`. Its tools are `list_interfaces`, `resolve_interface`, `get_interface` and `list_consumers`.
+
+Humans browse the same registry in Settings → Interfaces.
+
+**Connect an MCP server you found.** The full address is `$OS_API_BASE` + the entry's `url`. Check the tool list first; if a server isn't connected, offer to add it, e.g. the docs server:
 - Claude Code: `claude mcp add --scope user --transport http aura-docs "$OS_API_BASE/api/proxy/com.aura.docs/mcp"`
 - Codex: `codex mcp add aura-docs --url "$OS_API_BASE/api/proxy/com.aura.docs/mcp"`
+
+Good first adds are the docs and the interface registry. Your own app can show up here too: add `provides[]` to its manifest (see the docs page "Interfaces").
 
 ## Working safely
 
