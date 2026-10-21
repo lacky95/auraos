@@ -232,6 +232,8 @@ ENV AURA_APP_PORT_END=4999
 # a container recreate.
 ENV PATH=$PATH:/data/aura/toolchain/bin
 COPY os/toolchain-path.sh /etc/profile.d/aura-toolchain.sh
+# Onboarding files seeded into the user home (AppManager.seedUserHome).
+COPY os/home-seed/ /os/home-seed/
 
 # See the development stage: one persistent home per identity — the master's
 # own (system scope) here, the user's at /home/aura for the apps it spawns.

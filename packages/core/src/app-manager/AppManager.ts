@@ -362,6 +362,7 @@ export class AppManager {
       }
     }
     this.migrateLegacySharedHome();
+    this.seedUserHome();
 
     // Pre-create /aura/{all-tools,my-tools} as empty directories in the
     // base-rootfs so PRoot's --bind has guaranteed mount points. PRoot can
@@ -430,6 +431,34 @@ export class AppManager {
         `them (${kept.join(', ')})`,
       );
     }
+  }
+
+  /**
+   * Copy the onboarding files AuraOS ships for the user home (os/home-seed:
+   * AGENTS.md + CLAUDE.md, so `claude` / `codex` started in a fresh terminal
+   * know what AuraOS is) into /home/aura.
+   *
+   * Only-if-missing, per file: once seeded the files are the user's, and an
+   * edited or deliberately deleted-and-recreated copy is never overwritten.
+   * The master home is left alone — it is the OS's own.
+   */
+  private seedUserHome(): void {
+    const seedDir = [process.env.AURA_HOME_SEED_DIR, '/os/home-seed', '/workspace/os/home-seed']
+      .find((dir): dir is string => !!dir && existsSync(dir));
+    if (!seedDir) return;
+    const target = userHomeDir(this.dataDir);
+    const seeded: string[] = [];
+    for (const name of readdirSync(seedDir)) {
+      const dst = join(target, name);
+      if (existsSync(dst)) continue;
+      try {
+        copyFileSync(join(seedDir, name), dst);
+        seeded.push(name);
+      } catch (err) {
+        console.warn(`[AppManager] could not seed ${name} into ${target}: ${(err as Error).message}`);
+      }
+    }
+    if (seeded.length) console.log(`[AppManager] seeded user home ${target} (${seeded.join(', ')})`);
   }
 
   /**
