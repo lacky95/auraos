@@ -26,3 +26,5 @@ export * from './logger.js';
 export * from './scopes/index.js';
 export * from './context/index.js';
 export * from './updater/SelfUpdater.js';
+export * from './notifications/index.js';
+export * from './auth/index.js';

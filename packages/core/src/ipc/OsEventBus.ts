@@ -11,6 +11,23 @@ export interface EventFramework {
   version: string;
 }
 
+/** Payload of every `notification:*` bus event. */
+export interface NotificationBusEvent {
+  /** `notif:events` stream id (`<ms>-<seq>`) — the SSE `id` / Last-Event-ID. */
+  eventId: string;
+  /** Notification id (`ntf_…`). */
+  id: string;
+  state: 'active' | 'resolved' | 'removed';
+}
+
+/** Every `notification:*` bus event name, in lifecycle order. */
+export const NOTIFICATION_BUS_EVENTS = [
+  'notification:created', 'notification:updated', 'notification:displayed',
+  'notification:seen', 'notification:resolved', 'notification:removed',
+  'notification:interacted',
+] as const;
+export type NotificationBusEventName = typeof NOTIFICATION_BUS_EVENTS[number];
+
 export interface OsEvents {
   'app:stateChanged': { instanceId: string; appId: string; state: AppLifecycleState; port: number | null };
   'app:crashed': { instanceId: string; appId: string; error: string };
@@ -103,7 +120,37 @@ export interface OsEvents {
     activeTone:    'light' | 'dark';
     framework:     EventFramework;
   };
-  'notification': { appId: string; title: string; body: string };
+  // (Phase 5: the LEGACY content-carrying `'notification'` broadcast is gone —
+  //  apps read only their own items, or what a `notifications.read` grant allows.)
+  /**
+   * Notification store lifecycle (core `NotificationService`). Deliberately
+   * lightweight — NO content: the id, the new state and the `notif:events`
+   * stream id. Consumers fetch the item (GET /api/notifications/<id>) or use
+   * the dedicated SSE `/api/notifications/stream`, which sends full items.
+   * Relayed on the shell Socket.IO channel only — NOT on the app firehose
+   * (`/api/apps/events`), so other apps can't read notifications. For a
+   * locked shell client the shell also drops events of items that would be
+   * hidden (secret) on its lock screen (per-socket filter).
+   */
+  'notification:created':   NotificationBusEvent;
+  'notification:updated':   NotificationBusEvent;
+  'notification:displayed': NotificationBusEvent;
+  'notification:seen':      NotificationBusEvent;
+  'notification:resolved':  NotificationBusEvent;
+  'notification:removed':   NotificationBusEvent;
+  /** The user used a component (button without action, input, options) — still active. Phase 3. */
+  'notification:interacted': NotificationBusEvent;
+  /**
+   * An admin granted or revoked a privileged permission (core auth
+   * `GrantStore`). No secrets; takes effect on the very next check. Relayed on
+   * the shell Socket.IO channel (Settings refreshes live).
+   */
+  'permissions:changed': {
+    subjectKind: 'app' | 'apiKey';
+    subjectId: string;
+    permission: string;
+    change: 'granted' | 'revoked';
+  };
   /**
    * A command for the shell's browser UI from a server-side caller — the Aura
    * Shell Daemon's MCP, through the shell's uiCommandBroker. Imperative,
