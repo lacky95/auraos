@@ -2,7 +2,7 @@
   "id": "com.aura.aurashelld",
   "name": "Aura Shell Daemon",
   "version": "0.1.0",
-  "description": "Headless service hosting the `shell` MCP — an agent's remote control for the AuraOS shell UI: overview, apps, workspaces, layouts, windows, zoom, viewport profiles, light/dark mode, fullscreen, lock screen, launcher, process manager.",
+  "description": "Headless service hosting the `shell` MCP — an agent's remote control for the AuraOS shell UI: overview, apps, workspaces, layouts, windows, zoom, viewport profiles, light/dark mode, fullscreen, lock screen, launcher, process manager, notifications.",
   "icon": "SHD",
   "category": "system",
   "componentType": "service",
@@ -11,14 +11,14 @@
   "sandbox": "container",
   "autoStart": true,
   "tools": ["node"],
-  "permissions": ["network.local"],
+  "permissions": ["network.local", "system.notifications", "notifications.popup", "notifications.locked"],
   "provides": [
     {
       "name": "shell",
       "kind": "http/mcp",
       "address": "/api/mcp/shell",
       "version": "1",
-      "description": "MCP that drives the AuraOS shell UI: one-call overview, apps by name, workspaces (list/switch/rename/new), layouts, windows (focus/rename/close/reload), zoom, viewport profiles (info/switch by name), light/dark mode, fullscreen, lock screen, launcher search, process manager, stop/kill with a confirmation challenge."
+      "description": "MCP that drives the AuraOS shell UI: one-call overview, apps by name, workspaces (list/switch/rename/new), layouts, windows (focus/rename/close/reload), zoom, viewport profiles (info/switch by name), light/dark mode, fullscreen, lock screen, launcher search, process manager, stop/kill with a confirmation challenge. Notifications as the agent: create/update/remove/list/get, and wait_for_answer for dialogue answers (bounded wait), with a target context; pop-ups and Locked need admin-granted permissions."
     }
   ]
 }

@@ -28,7 +28,9 @@ import { zodToJsonSchema } from 'zod-to-json-schema';
 import {
   NO_UI_MESSAGE, closeActivity, getLockscreen, getMru, getRegion, getWorkspaces, lock, noUi, putWorkspaces,
   getTheme, setColorMode, startApp, stopInstance, ui, unlock,
-  type ColorMode, type WorkspaceState,
+  createNotification, updateNotification, removeNotification, getNotification, listNotifications,
+  waitForNotification, ShellApiError, WAIT_MAX_S,
+  type ColorMode, type WorkspaceState, type NotificationWire, type NotificationWarningWire,
 } from '../shell-api.ts';
 import {
   nextLayout, resolveApp, resolveLayout, resolveProcess, resolveViewport, resolveWindow, resolveWorkspace,
@@ -53,6 +55,13 @@ const INSTRUCTIONS =
   + 'get_viewport_info shows them, set_viewport switches by name. set_light_mode / set_dark_mode switch the '
   + 'whole OS and work without a browser. '
   + 'Anything marked "no shell UI is connected" needs the shell open in a browser. '
+  + 'Notifications: asking is not interrupting. To ask the user something, create_notification with type '
+  + '"dialogue" (buttons / options / an input) and a `context` (the task, activity or installation it is '
+  + 'about), then KEEP WORKING and check back with wait_for_answer (a bounded wait, ≤ 25 s per call; '
+  + '"pending" means call it again later; interactions: true also returns button clicks / input submits while it stays open) or get_notification. Prefer normal dialogues: pop-ups (`popup`) '
+  + 'and Locked notifications need permissions an admin granted to this service — without them they are '
+  + 'downgraded and the result says so in `warnings`. Pass your name as `agent` so the user sees who asks '
+  + '(display only, never a permission). Remove your notification with remove_notification when the task is done. '
   + 'Call each tool ONCE per turn: an identical call within a few seconds returns the same answer marked '
   + '`deduplicated: true` — you already have it, do not repeat it. Reading the same thing over and over without '
   + 'changing anything is a loop: after a few repeats the tool stops returning data and tells you to answer.';
@@ -75,30 +84,39 @@ function unresolved<T>(m: Match<T>, what: string, hint: string, view: (t: T) => 
   return null;
 }
 
+/** Per-call context from the transport. */
+export interface CallCtx {
+  /** Self-declared caller name (x-aura-agent / user-agent header). Display + audit only. */
+  agentHeader?: string;
+}
+
 interface OwnTool {
   name: string;
   title: string;
   description: string;
   inputSchema: Tool['inputSchema'];
   annotations: ToolAnnotations;
-  run: (raw: Record<string, unknown>) => CallToolResult | Promise<CallToolResult>;
+  /** false: skip duplicate absorption and the read-loop brake (waiting tools are MEANT to be repeated). */
+  guard?: boolean;
+  run: (raw: Record<string, unknown>, ctx: CallCtx) => CallToolResult | Promise<CallToolResult>;
 }
 
 function define<S extends z.ZodObject<z.ZodRawShape>>(opts: {
-  name: string; title: string; description: string; schema: S; annotations: ToolAnnotations;
-  run: (args: z.infer<S>) => CallToolResult | Promise<CallToolResult>;
+  name: string; title: string; description: string; schema: S; annotations: ToolAnnotations; guard?: boolean;
+  run: (args: z.infer<S>, ctx: CallCtx) => CallToolResult | Promise<CallToolResult>;
 }): OwnTool {
   const { $schema: _drop, ...json } = zodToJsonSchema(opts.schema, { $refStrategy: 'none' }) as Record<string, unknown>;
   return {
     name: opts.name, title: opts.title, description: opts.description,
     inputSchema: json as Tool['inputSchema'], annotations: opts.annotations,
-    run: (raw) => {
+    ...(opts.guard === false ? { guard: false } : {}),
+    run: (raw, ctx) => {
       const parsed = opts.schema.safeParse(raw);
       if (!parsed.success) {
         const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
         return fail(`Invalid arguments for ${opts.name}: ${issues}`);
       }
-      return opts.run(parsed.data);
+      return opts.run(parsed.data, ctx);
     },
   };
 }
@@ -208,6 +226,273 @@ function colorModeTool(mode: Exclude<ColorMode, 'auto'>): OwnTool {
 }
 
 // ── Tools ───────────────────────────────────────────────────────────────────
+
+// ── Notifications ───────────────────────────────────────────────────────────
+//
+// Sent as THIS service (Bearer $AURA_INSTANCE_TOKEN → sender kind `agent`,
+// verified). The calling agent's name is display metadata only
+// (`sender.actor`, unverified): it never changes what is allowed — that is
+// decided by this service's own manifest permissions and admin grants.
+
+const NOTIF_ID = z.string().regex(/^ntf_[a-z0-9]{9,20}$/, 'a notification id (ntf_…) from create_notification / list_notifications');
+const AGENT = z.string().min(1).max(100).optional()
+  .describe('Your name as the user should see it (e.g. "Claude Code"). Display only — never a permission.');
+const COMPONENT = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('button'), id: z.string().optional(), label: z.string().optional(), variant: z.enum(['primary', 'secondary', 'tertiary']).optional(),
+    action: z.enum(['resolve', 'dismiss', 'link']).optional(),
+    role: z.enum(['submit', 'cancel', 'later']).optional().describe('Standard dialogue button: submit (answer outcome "submitted"), cancel ("cancelled"), later (user postpones; nothing is sent). Label / id optional for these; the shell adds missing ones.'),
+    href: z.string().optional() }),
+  z.object({ kind: z.literal('options'), id: z.string(), label: z.string().optional(), multiple: z.boolean().optional(),
+    options: z.array(z.object({ id: z.string(), label: z.string() })).min(1).max(4) }),
+  z.object({ kind: z.literal('input'), id: z.string(), label: z.string().optional(), placeholder: z.string().optional(),
+    multiline: z.boolean().optional(), required: z.boolean().optional() }),
+  z.object({ kind: z.literal('select'), id: z.string(), label: z.string().optional(), placeholder: z.string().optional(),
+    required: z.boolean().optional(), default: z.string().optional().describe('Preselected option id.'),
+    options: z.array(z.object({ id: z.string(), label: z.string() })).min(1).max(50) })
+    .describe('Dropdown: one choice out of up to 50 options. The answer value is the option id.'),
+  z.object({ kind: z.literal('combobox'), id: z.string(), label: z.string().optional(), placeholder: z.string().optional(),
+    required: z.boolean().optional(), allowCustom: z.boolean().optional().describe('Also accept the typed text itself (≤ 200 chars) as the answer.'),
+    default: z.string().optional(), options: z.array(z.object({ id: z.string(), label: z.string() })).max(50) })
+    .describe('Searchable select: the user types to filter up to 50 options. The answer value is an option id, or the free text with allowCustom.'),
+  z.object({ kind: z.literal('progress'), id: z.string().optional(), value: z.number().min(0).max(1).nullable(), label: z.string().optional() }),
+]);
+const CONTEXT = z.object({
+  kind: z.enum(['activity', 'instance', 'task', 'installation', 'app', 'custom']),
+  id: z.string().min(1).max(200),
+  appId: z.string().max(200).optional(),
+  label: z.string().max(200).optional(),
+}).describe('What the notification is about (separate from you, the sender), so the shell can offer "Go to task".');
+const CONTENT = {
+  title: z.string().min(1).max(200),
+  text: z.string().max(4000).optional().describe('Short description; links allowed.'),
+  priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
+  visibility: z.enum(['public', 'private', 'secret']).optional().describe('Lock-screen visibility; default private.'),
+  publicTitle: z.string().max(200).optional(),
+  publicText: z.string().max(4000).optional(),
+  icon: z.string().max(2048).optional(),
+  image: z.string().max(2048).optional(),
+  pinned: z.boolean().optional(),
+  popup: z.boolean().optional().describe('Dialogue only: open as a pop-up. Needs an admin grant (max 3 per 10 minutes); otherwise turned off with a warning.'),
+  blocking: z.boolean().optional().describe('Dialogue only: make the sender\'s OWN window inert until answered. Works only on a window of the sending app — agents have none, so it is always turned off with a warning.'),
+  scope: z.enum(['auto', 'desktop']).optional().describe('Dialogue only: "desktop" (a desktop-wide modal) is reserved for AuraOS system decisions — always downgraded to "auto" with a warning.'),
+  timeoutMs: z.number().int().positive().optional().describe('Remove automatically after this many ms. Default: stays until handled.'),
+  popupDurationMs: z.number().int().max(86_400_000).optional().describe('How long the pop-up shows, in ms (not the lifetime — that is timeoutMs). > 0: hide after that long, the item stays in the list. 0 or -1: the pop-up stays until the user handles it. Default: 8 s (high / urgent stay).'),
+  components: z.array(COMPONENT).max(8).optional().describe('Buttons (≤ 3 shown), options (≤ 4 radio / checkbox choices), select (dropdown, ≤ 50), combobox (searchable, ≤ 50, optional free text), an input, or progress.'),
+  context: CONTEXT.optional(),
+};
+
+/** What an agent needs of a notification — not the full history. */
+function notifView(n: NotificationWire) {
+  return {
+    id: n.id, type: n.type, title: n.title, state: n.state, priority: n.priority, popup: n.popup,
+    ...(n.blocking ? { blocking: true } : {}),
+    ...(n.scope && n.scope !== 'auto' ? { scope: n.scope } : {}),
+    ...(n.context ? { context: n.context } : {}),
+    ...(n.state === 'resolved' ? { answer: n.answer ?? null, outcome: n.outcome ?? 'submitted' } : {}),
+    ...(n.removedReason ? { removedReason: n.removedReason } : {}),
+    ...(n.lastInteraction ? { lastInteraction: interactionView(n.lastInteraction) } : {}),
+    sender: { kind: n.sender.kind, id: n.sender.id, attribution: n.sender.attribution, ...(n.sender.actor ? { actor: n.sender.actor } : {}) },
+    createdAt: new Date(n.createdAt).toISOString(),
+  };
+}
+
+function interactionView(li: NonNullable<NotificationWire['lastInteraction']>) {
+  return {
+    componentId: li.componentId, kind: li.kind,
+    ...(li.value !== undefined ? { value: li.value } : {}),
+    ...(li.values ? { values: li.values } : {}),
+    at: li.at,
+  };
+}
+
+function warningsView(ws: NotificationWarningWire[]) {
+  return ws.map((w) => ({ code: w.code, field: w.field, message: w.message }));
+}
+
+function headline(verb: string, n: NotificationWire, ws: NotificationWarningWire[]): string {
+  const down = ws.filter((w) => w.code === 'downgraded');
+  const extra = down.length ? ` — DOWNGRADED (${down.map((w) => `${w.field}: ${String(w.from)} → ${String(w.to)}`).join(', ')}); see warnings` : '';
+  return `${verb} ${n.type} notification ${n.id} "${n.title}"${extra}`;
+}
+
+/** The declared actor: the tool argument wins, then the header. Never verified. */
+function actorOf(arg: string | undefined, ctx: CallCtx) {
+  const name = (arg ?? ctx.agentHeader)?.trim();
+  return name ? { actor: { name: name.slice(0, 100) } } : {};
+}
+
+function notifError(err: unknown): CallToolResult {
+  if (err instanceof ShellApiError) {
+    if (err.status === 404) return fail('No such notification (or it was not sent by this service). Use list_notifications.');
+    if (err.status === 403) return fail(`Refused: ${err.message}`);
+    if (err.status === 409) return fail(`Not possible in its current state: ${err.message}`);
+    if (err.status === 429) return fail(`${err.message}. Slow down — reuse or update an existing notification instead of creating new ones.`);
+    return fail(err.message);
+  }
+  return fail((err as Error).message);
+}
+
+const NOTIFICATION_TOOLS: OwnTool[] = [
+  define({
+    name: 'create_notification',
+    title: 'Create a notification',
+    description: 'Show the user a notification, sent as the Shell Daemon (verified) with you as the display actor. '
+      + 'type "dialogue" asks something (buttons / options / input) — it stays in the notification list until answered, '
+      + 'so keep working and check back with wait_for_answer. Set `context` to what it is about. '
+      + '"locked" (cannot be dismissed) and `popup` need admin-granted permissions; without them they are downgraded and '
+      + '`warnings` explains it. `blocking` only works on the sender\'s own window and `scope:"desktop"` is AuraOS-only, '
+      + 'so for agents both are downgraded. If the user force-removes a Locked notification, wait_for_answer / '
+      + 'get_notification report removedReason "force-removed". Returns the id.',
+    schema: z.object({ type: z.enum(['simple', 'dialogue', 'locked']).default('simple'), ...CONTENT, agent: AGENT }),
+    annotations: WRITE,
+    run: async ({ agent, ...input }, ctx) => {
+      try {
+        const r = await createNotification({ ...input, sender: actorOf(agent, ctx) });
+        const n = r.notification;
+        return ok({
+          summary: headline('Created', n, r.warnings),
+          notification: notifView(n),
+          warnings: warningsView(r.warnings),
+          ...(n.type === 'dialogue' ? { next: `Keep working; call wait_for_answer with id ${n.id} to collect the answer.` } : {}),
+        });
+      } catch (err) { return notifError(err); }
+    },
+  }),
+
+  define({
+    name: 'update_notification',
+    title: 'Update a notification',
+    description: 'Change one of YOUR notifications (title, text, progress component, context, priority, …). '
+      + '`null` clears an optional field. Its type cannot change. Only notifications this service created can be updated.',
+    schema: z.object({
+      id: NOTIF_ID,
+      title: CONTENT.title.optional(),
+      text: z.string().max(4000).optional(),
+      priority: CONTENT.priority,
+      visibility: CONTENT.visibility,
+      pinned: CONTENT.pinned,
+      popup: CONTENT.popup,
+      blocking: CONTENT.blocking,
+      scope: CONTENT.scope,
+      icon: z.string().max(2048).nullable().optional(),
+      image: z.string().max(2048).nullable().optional(),
+      timeoutMs: z.number().int().positive().nullable().optional(),
+      popupDurationMs: z.number().int().max(86_400_000).nullable().optional().describe('Pop-up display time (see create_notification); null = default.'),
+      components: z.array(COMPONENT).max(8).nullable().optional(),
+      context: CONTEXT.nullable().optional(),
+      agent: AGENT,
+    }),
+    annotations: WRITE,
+    run: async ({ id, agent, ...patch }, ctx) => {
+      try {
+        const actor = actorOf(agent, ctx);
+        const r = await updateNotification(id, { ...patch, ...(actor.actor ? { sender: actor } : {}) });
+        return ok({ summary: headline('Updated', r.notification, r.warnings), notification: notifView(r.notification), warnings: warningsView(r.warnings) });
+      } catch (err) { return notifError(err); }
+    },
+  }),
+
+  define({
+    name: 'remove_notification',
+    title: 'Remove a notification',
+    description: 'Take one of YOUR notifications away because it is no longer needed (task done, question obsolete). '
+      + 'Recorded as removed by the sender (reason "completed").',
+    schema: z.object({ id: NOTIF_ID }),
+    annotations: WRITE,
+    run: async ({ id }) => {
+      try {
+        const n = await removeNotification(id);
+        return ok({ summary: `Removed notification ${n.id} "${n.title}"`, notification: notifView(n) });
+      } catch (err) { return notifError(err); }
+    },
+  }),
+
+  define({
+    name: 'list_notifications',
+    title: 'List my notifications',
+    description: 'The notifications this service sent (newest first): id, type, state, context and — for answered dialogues — the answer. '
+      + 'state: active (default), resolved, removed or all.',
+    schema: z.object({
+      state: z.enum(['active', 'resolved', 'removed', 'all']).default('active'),
+      limit: z.number().int().min(1).max(100).default(20),
+    }),
+    annotations: READ,
+    run: async ({ state, limit }) => {
+      try {
+        const r = await listNotifications({ state, limit });
+        return ok({ summary: `${r.items.length} ${state === 'all' ? '' : `${state} `}notification(s)`, notifications: r.items.map(notifView), ...(r.nextCursor ? { more: true } : {}) });
+      } catch (err) { return notifError(err); }
+    },
+  }),
+
+  define({
+    name: 'get_notification',
+    title: 'Get a notification',
+    description: 'One of YOUR notifications by id: its state, and the answer once the user resolved the dialogue. '
+      + 'To wait for an answer use wait_for_answer instead of calling this repeatedly.',
+    schema: z.object({ id: NOTIF_ID }),
+    annotations: READ,
+    run: async ({ id }) => {
+      try {
+        const n = await getNotification(id);
+        return ok({ summary: `Notification ${n.id} is ${n.state}`, notification: notifView(n) });
+      } catch (err) { return notifError(err); }
+    },
+  }),
+
+  define({
+    name: 'wait_for_answer',
+    title: 'Wait for an answer',
+    description: `Wait (at most timeoutSeconds, ≤ ${WAIT_MAX_S}, default 20) until the user answers one of YOUR dialogue notifications. `
+      + 'Returns status "resolved" with the answer and outcome ("submitted" / "cancelled"), "removed" (dismissed / expired), or "pending" — then do other work and call again later. '
+      + 'With interactions: true it also returns status "interaction" as soon as the user clicks a button without an action, submits an input or picks an option '
+      + 'while the notification stays open (`interaction` = {componentId, kind, value?, values?, at}); pass that `at` as `after` on the next call so none is missed '
+      + '(default: only interactions after this call starts). It never blocks longer than the timeout.',
+    schema: z.object({
+      id: NOTIF_ID,
+      timeoutSeconds: z.number().int().min(0).max(WAIT_MAX_S).default(20),
+      interactions: z.boolean().optional().describe('Also return on the next user interaction (button / input / option) — not only on the final answer.'),
+      after: z.number().int().min(0).optional().describe('With interactions: only interactions newer than this `at` (ms) count — use the `at` of the last one you handled.'),
+    }),
+    annotations: READ,
+    guard: false,
+    run: async ({ id, timeoutSeconds, interactions, after }) => {
+      try {
+        let baseline: number | undefined;
+        if (interactions) {
+          baseline = after ?? (await getNotification(id)).lastInteraction?.at ?? 0;
+        } else if (after !== undefined) {
+          return fail('`after` only applies with interactions: true');
+        }
+        const n = await waitForNotification(id, timeoutSeconds, baseline !== undefined ? { interactionAfter: baseline } : {});
+        if (n.state === 'resolved') {
+          const outcome = n.outcome ?? 'submitted';
+          return ok({ summary: `${outcome === 'cancelled' ? 'Cancelled by the user' : 'Answered'}: ${n.id} "${n.title}"`, status: 'resolved', outcome, answer: n.answer ?? null, notification: notifView(n) });
+        }
+        if (n.state === 'removed') {
+          return ok({ summary: `No answer: ${n.id} was removed (${n.removedReason ?? 'removed'})`, status: 'removed', removedReason: n.removedReason ?? null, notification: notifView(n) });
+        }
+        const li = n.lastInteraction;
+        if (baseline !== undefined && li && li.at > baseline) {
+          return ok({
+            summary: `The user used "${li.componentId}" (${li.kind}) on ${n.id} "${n.title}" — still open`,
+            status: 'interaction',
+            interaction: interactionView(li),
+            notification: notifView(n),
+            next: `Handle it, then call wait_for_answer for ${n.id} with interactions: true and after: ${li.at} for the next one.`,
+          });
+        }
+        return ok({
+          summary: `Still pending after ${timeoutSeconds}s: ${n.id} "${n.title}"`,
+          status: 'pending',
+          notification: notifView(n),
+          next: `Not answered yet. Continue with other work and call wait_for_answer for ${n.id} again later`
+            + (baseline !== undefined ? ` (interactions: true, after: ${baseline}).` : '.'),
+        });
+      } catch (err) { return notifError(err); }
+    },
+  }),
+];
 
 const TOOLS: OwnTool[] = [
   define({
@@ -876,9 +1161,22 @@ const TOOLS: OwnTool[] = [
       return ok({ reloaded: windowView(w), workspace: await currentWorkspace(state) });
     },
   }),
+
+  ...NOTIFICATION_TOOLS,
 ];
 
 const BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
+
+/** `x-aura-agent`, else the `user-agent` of the MCP client. Display only. */
+export function agentFromHeaders(headers: Record<string, string | string[] | undefined> | undefined): string | undefined {
+  if (!headers) return undefined;
+  const pick = (k: string) => {
+    const v = headers[k] ?? headers[k.toLowerCase()];
+    const s = Array.isArray(v) ? v[0] : v;
+    return typeof s === 'string' && s.trim() ? s.trim().slice(0, 100) : undefined;
+  };
+  return pick('x-aura-agent') ?? pick('user-agent');
+}
 
 // ── Server ──────────────────────────────────────────────────────────────────
 
@@ -893,10 +1191,15 @@ export function buildShellServer(): Server {
       ({ name, title, description, inputSchema, annotations })),
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const tool = BY_NAME.get(req.params.name);
     if (!tool) return fail(`Unknown tool "${req.params.name}".`);
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
+    const ctx: CallCtx = { ...(agentFromHeaders(extra?.requestInfo?.headers) ? { agentHeader: agentFromHeaders(extra?.requestInfo?.headers) } : {}) };
+    if (tool.guard === false) {
+      try { return await tool.run(args, ctx); }
+      catch (err) { return fail(`${tool.name} failed: ${(err as Error).message}`); }
+    }
     // Reading the same thing again and again, with nothing changed in
     // between, is a loop the answers themselves cannot break — so stop
     // answering with data and say so. A mutating call clears the count.
@@ -917,7 +1220,7 @@ export function buildShellServer(): Server {
     // is not the same: `zoom set 150` then `zoom reset` then `zoom reset`
     // would hand back the first reset's answer and never zoom — the shell
     // stayed at 150 % while the result said 100 %. Commands always run.
-    const exec = () => Promise.resolve(tool.run(args));
+    const exec = () => Promise.resolve(tool.run(args, ctx));
     const { duplicate, result } = readOnly ? dedupe(tool.name, args, exec) : { duplicate: false, result: exec() };
     let out: CallToolResult;
     try { out = await result; }
