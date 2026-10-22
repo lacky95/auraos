@@ -77,6 +77,12 @@ let initial: LockScreenConfig = DEFAULT_CONFIG;
   <div id="lockscreen-clock" data-show={String(initial.showClock)}>--:--:--</div>
   <div id="lockscreen-text">{initial.text}</div>
   <div id="lockscreen-hint">CLICK OR PRESS ANY KEY TO UNLOCK</div>
+  <!--
+    Notifications phase 5: the redacted lock-screen list renders into this
+    slot (LockScreenNotifications.astro, a separate bundled module). If that
+    module fails, only the list is missing — the lock screen still arms.
+  -->
+  <div id="lockscreen-notifications" aria-live="off"></div>
 </div>
 
 <script type="application/json" id="aura-initial-lockscreen" set:html={JSON.stringify(initial)}></script>
@@ -203,6 +209,22 @@ let initial: LockScreenConfig = DEFAULT_CONFIG;
       if (overlay.focus) overlay.focus();
     }
 
+    // ── Notifications phase 5: server-side lock state ──────────────────────
+    // Every lock path ends in activate(), every unlock in deactivate(). Before
+    // telling the server, the notification UI drops everything sensitive it
+    // holds ('aura:notifications:wipe'); it reloads in the redacted view once
+    // the server acked the lock. Both calls are guarded: a missing or broken
+    // client session must never stop the overlay from arming or dismissing.
+    function reportLock(state) {
+      try {
+        var cs = window.__auraClientSession;
+        if (cs && typeof cs.report === 'function') cs.report(state);
+      } catch (_) { /* never block the overlay */ }
+    }
+    function wipeNotifications() {
+      try { window.dispatchEvent(new Event('aura:notifications:wipe')); } catch (_) { /* ignore */ }
+    }
+
     function activate() {
       // Re-read the latest saved config so the overlay always reflects current
       // Settings — including a draft the Settings page just PUT before asking
@@ -210,6 +232,8 @@ let initial: LockScreenConfig = DEFAULT_CONFIG;
       // so we show immediately with what we have and refine if the fetch wins.
       if (active) return;
       show();
+      wipeNotifications();
+      reportLock('locked');
       try {
         fetch('/api/kv/os/lockscreen', { headers: { 'accept': 'application/json' } })
           .then(function (r) { return r.ok ? r.json() : null; })
@@ -228,6 +252,8 @@ let initial: LockScreenConfig = DEFAULT_CONFIG;
       window.removeEventListener('keydown',    dismiss, { capture: true });
       window.removeEventListener('mousedown',  dismiss, { capture: true });
       window.removeEventListener('touchstart', dismiss, { capture: true });
+      // Not an authentication boundary: there is no PIN (see ClientSession.astro).
+      reportLock('unlocked');
     }
 
     // ── Triggers (registered synchronously, before anything that could throw) ──
@@ -330,6 +356,8 @@ let initial: LockScreenConfig = DEFAULT_CONFIG;
     white-space: pre-wrap;
     max-width: 80ch;
   }
+
+  #lockscreen-notifications:empty { display: none; }
 
   #lockscreen-hint {
     margin-top: calc(24px * var(--ls-zoom, 1));

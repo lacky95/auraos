@@ -1,0 +1,724 @@
+---
+/**
+ * NotificationCenter — the notification list.
+ *
+ *   desktop  a drop-up panel above the Dock, right-aligned to the
+ *            'notifications' anchor (the Dock bell), z-index 1060
+ *   phone    (< 640 px body width) a nearly full-width bottom sheet
+ *
+ * Opens on `aura:notifications.toggle` / `aura:notifications.open`
+ * ({detail:{id?}} focuses that item). Renders from the shared store
+ * (`lib/notifications/shared.ts`); every card is NotificationCard.ts.
+ *
+ * Keyboard: Escape closes (document keydown, capture phase), focus moves to
+ * the first item on open and back to the bell on close; ArrowUp / ArrowDown
+ * / Home / End rove between items; Tab moves inside an item. Closed, the
+ * panel is `hidden` + `aria-hidden` so the chrome arrow navigation skips it.
+ * Outside clicks (composedPath) and focusing an app iframe close it.
+ * While open it pins the auto-hidden Dock visible. While the screen is
+ * locked it is closed and hidden.
+ *
+ * Seen / displayed: visible cards are marked seen while the panel is open
+ * (IntersectionObserver); the unseen highlight stays until the panel
+ * closes so the user still sees what was new.
+ *
+ * Phase 5: the ⋯ menu offers "Clear from <sender>" per sender in the list
+ * (locked ones kept) and "Clear history now" (deletes resolved / removed
+ * items and their history; with an inline confirm). On a lock the list DOM
+ * is emptied at once, even while the panel is closed.
+ */
+import NotificationStyles from './NotificationStyles.astro';
+import Icon from '../../ui/Icon.astro';
+---
+<NotificationStyles />
+<section
+  id="notif-center"
+  class="notif-center"
+  role="dialog"
+  aria-modal="false"
+  aria-labelledby="notif-center-title"
+  data-layout="desktop"
+  hidden
+  aria-hidden="true"
+>
+  <header class="notif-center-head">
+    <h2 id="notif-center-title" class="notif-center-title">
+      Notifications <span class="notif-center-count" aria-live="off"></span>
+    </h2>
+    <button type="button" class="notif-center-clear" data-focus-key="clear" aria-haspopup="menu" aria-expanded="false" aria-controls="notif-center-menu">Clear all<span class="notif-center-clear-chev" aria-hidden="true"></span></button>
+    <button type="button" class="notif-center-more" aria-haspopup="menu" aria-expanded="false" aria-controls="notif-center-menu" title="More: clear by sender, clear history">⋯</button>
+    <button type="button" class="notif-center-close" aria-label="Close notifications" title="Close (Esc)">
+      <Icon name="x" />
+    </button>
+  </header>
+  <div id="notif-center-menu" class="notif-center-menu" role="menu" aria-label="Clear notifications" data-own-escape hidden></div>
+  <div class="notif-center-list" role="list" aria-labelledby="notif-center-title"></div>
+  <p class="notif-center-empty" hidden>No notifications</p>
+  <p class="notif-center-error" role="status" hidden></p>
+</section>
+
+<style is:global>
+  .notif-center {
+    position: fixed;
+    z-index: 1060;
+    right: var(--notif-right, 16px);
+    bottom: calc(var(--aura-dock-height) + 6px + env(safe-area-inset-bottom, 0px));
+    width: 380px;
+    max-width: calc(100% - 16px);
+    max-height: 60%;
+    display: flex;
+    flex-direction: column;
+    background: var(--aura-color-surface);
+    color: var(--aura-color-text);
+    border: var(--aura-border);
+    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.45);
+    font-family: var(--aura-font-mono);
+    box-sizing: border-box;
+  }
+  .notif-center[hidden] { display: none; }
+  .notif-center[data-layout="phone"] {
+    left: 8px;
+    right: 8px;
+    width: auto;
+    max-width: none;
+    max-height: 80%;
+    border-top: 2px solid var(--aura-color-primary);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .notif-center-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 8px 8px 12px;
+    border-bottom: 1px solid var(--aura-color-border);
+    flex-shrink: 0;
+  }
+  .notif-center-title {
+    flex: 1;
+    margin: 0;
+    font-size: var(--aura-font-size-xs, 0.75rem);
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .notif-center-count { color: var(--aura-color-text-dim); font-weight: 400; }
+  .notif-center-clear,
+  .notif-center-more,
+  .notif-center-close {
+    display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+    height: 26px; padding: 0 8px; cursor: pointer;
+    font: inherit; font-size: 0.66rem; letter-spacing: 0.06em; text-transform: uppercase;
+    background: transparent; color: var(--aura-color-text-dim);
+    border: 1px solid var(--aura-color-border); border-radius: 0;
+  }
+  .notif-center-close { width: 26px; padding: 0; font-size: 0.9rem; }
+  .notif-center-more { width: 26px; padding: 0; font-size: 0.9rem; }
+  .notif-center-more:hover, .notif-center-more:focus-visible, .notif-center-more[aria-expanded="true"] {
+    color: var(--aura-color-primary); border-color: var(--aura-color-primary); outline: none;
+  }
+  .notif-center-menu {
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 6px 8px; border-bottom: 1px solid var(--aura-color-border);
+    flex-shrink: 0; max-height: 40%; overflow-y: auto;
+  }
+  .notif-center-menu[hidden] { display: none; }
+  .notif-center-menu-item {
+    text-align: left; font: inherit; font-size: 0.68rem; letter-spacing: 0.04em;
+    padding: 5px 8px; cursor: pointer; background: transparent;
+    color: var(--aura-color-text); border: 1px solid transparent; border-radius: 0;
+  }
+  .notif-center-menu-item:hover, .notif-center-menu-item:focus-visible {
+    color: var(--aura-color-primary); border-color: var(--aura-color-primary); outline: none;
+  }
+  .notif-center-menu-item[data-variant="danger"] { color: var(--aura-color-danger); }
+  .notif-center-menu-sep { height: 1px; background: var(--aura-color-border); margin: 3px 0; }
+  .notif-center-menu-note { font-size: 0.62rem; color: var(--aura-color-text-dim); padding: 2px 8px; }
+  /* Smart Clear all menu: anchored to its button with a caret, opens from the button edge. */
+  .notif-center-menu[data-kind="clear"] {
+    position: absolute; z-index: 5; max-height: 60%;
+    background: var(--aura-color-surface-2); border: 1px solid var(--aura-color-primary);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    transform-origin: top left; animation: notif-clear-in 120ms ease-out;
+    overflow: visible;
+  }
+  .notif-center-menu[data-kind="clear"]::before,
+  .notif-center-menu[data-kind="clear"]::after {
+    content: ''; position: absolute; left: calc(var(--caret-x, 24px) - 6px); width: 0; height: 0;
+    border: 6px solid transparent; border-top: 0;
+  }
+  .notif-center-menu[data-kind="clear"]::before { top: -7px; border-bottom: 7px solid var(--aura-color-primary); }
+  .notif-center-menu[data-kind="clear"]::after { top: -6px; border-bottom: 6px solid var(--aura-color-surface-2); }
+  @keyframes notif-clear-in { from { opacity: 0; transform: scaleY(0.92); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { .notif-center-menu[data-kind="clear"] { animation: none; } }
+  .notif-center-clear-head {
+    display: flex; justify-content: space-between; padding: 2px 8px 4px;
+    font-size: 0.6rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--aura-color-primary);
+    border-bottom: 1px solid var(--aura-color-border); margin-bottom: 2px;
+  }
+  .notif-center-clear-chev::before { content: '▾'; margin-left: 4px; font-size: 0.7em; }
+  .notif-center-clear[aria-expanded="true"] {
+    color: var(--aura-color-primary); border-color: var(--aura-color-primary);
+    background: color-mix(in srgb, var(--aura-color-primary) 14%, transparent); box-shadow: var(--aura-glow-primary);
+  }
+  .notif-center-clear[aria-expanded="true"] .notif-center-clear-chev::before { content: '▴'; }
+  /* Smart Clear all: one row per group with a count and the group colour. */
+  .notif-center-group { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-left: 3px solid var(--grp, var(--aura-color-border)); }
+  .notif-center-group[data-group="info"] { --grp: var(--aura-color-text-dim); }
+  .notif-center-group[data-group="questions"] { --grp: var(--aura-color-primary); }
+  .notif-center-group[data-group="urgent"] { --grp: var(--aura-color-danger); }
+  .notif-center-group[data-group="high"] { --grp: var(--aura-color-warning); }
+  .notif-center-group[data-group="pinned"] { --grp: var(--aura-color-secondary); }
+  .notif-center-group[data-group="all"] { --grp: var(--aura-color-danger); }
+  .notif-center-group[data-group="locked"], .notif-center-group[data-group="decisions"] { opacity: 0.6; cursor: default; justify-content: flex-start; gap: 4px; }
+  .notif-center-group-count { font-variant-numeric: tabular-nums; color: var(--grp, var(--aura-color-text-dim)); border: 1px solid currentColor; padding: 0 5px; min-width: 1.5em; text-align: center; }
+  .notif-center[data-layout="phone"] .notif-center-menu-item { min-height: 40px; }
+  .notif-center-clear:hover:not(:disabled), .notif-center-clear:focus-visible,
+  .notif-center-close:hover, .notif-center-close:focus-visible {
+    color: var(--aura-color-primary); border-color: var(--aura-color-primary); box-shadow: var(--aura-glow-primary); outline: none;
+  }
+  .notif-center-clear:disabled { opacity: 0.4; cursor: default; }
+  .notif-center-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+  }
+  .notif-center-list:empty { display: none; }
+  .notif-center-list > [role="listitem"] { display: block; }
+  .notif-center-empty,
+  .notif-center-error {
+    margin: 0;
+    padding: 18px 12px;
+    text-align: center;
+    color: var(--aura-color-text-dim);
+    font-size: var(--aura-font-size-xs, 0.75rem);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .notif-center-error { color: var(--aura-color-danger); text-transform: none; letter-spacing: 0; padding: 6px 12px; }
+  .notif-center-empty[hidden], .notif-center-error[hidden] { display: none; }
+  .notif-center svg { width: 1em; height: 1em; }
+</style>
+
+<script>
+  import { getNotifications, type NotificationsRuntime } from '../../../lib/notifications/shared.ts';
+  import { getAnchor, NOTIFICATIONS_ANCHOR } from '../../../lib/notifications/anchor.ts';
+  import { isUnseen } from '../../../lib/notifications/store.ts';
+  import { senderLabel } from '../../../lib/notifications/format.ts';
+  import { createConfirmInline } from './ConfirmInline.ts';
+  import {
+    GROUP_LABEL, GROUP_ORDER, NEVER_BULK, clearPlan, confirmFor, groupItems, idsFor, inBatches, resultText,
+    type ClearGroupId, type Groups,
+  } from '../../../lib/notifications/clearGroups.ts';
+  import type { Notification } from '../../../lib/notifications/api.ts';
+  import { renderNotificationCard, updateNotificationCard, type CardOptions } from './NotificationCard.ts';
+  import { Disposer, pinDock, watchLock, watchPlacement } from './placement.ts';
+
+  const panel = document.getElementById('notif-center') as HTMLElement | null;
+  if (panel) mount(panel);
+
+  function mount(panel: HTMLElement) {
+    const d = new Disposer();
+    const list = panel.querySelector<HTMLElement>('.notif-center-list')!;
+    const empty = panel.querySelector<HTMLElement>('.notif-center-empty')!;
+    const errorEl = panel.querySelector<HTMLElement>('.notif-center-error')!;
+    const countEl = panel.querySelector<HTMLElement>('.notif-center-count')!;
+    const clearBtn = panel.querySelector<HTMLButtonElement>('.notif-center-clear')!;
+    const closeBtn = panel.querySelector<HTMLButtonElement>('.notif-center-close')!;
+    const moreBtn = panel.querySelector<HTMLButtonElement>('.notif-center-more')!;
+    const menu = panel.querySelector<HTMLElement>('.notif-center-menu')!;
+
+    let rt: NotificationsRuntime | null = null;
+    let open = false;
+    let locked = false;
+    let dirty = true;
+    /** id → { item rendered, card element, list item wrapper } */
+    const rendered = new Map<string, { n: Notification; card: HTMLElement; li: HTMLElement }>();
+    /** Unseen when the panel opened: keeps the highlight until it closes. */
+    let unseenAtOpen = new Set<string>();
+    let returnFocus: HTMLElement | null = null;
+
+    const anchor = () => getAnchor<HTMLElement>(NOTIFICATIONS_ANCHOR);
+
+    // ── seen / displayed while visible ──
+    const io = new IntersectionObserver((entries) => {
+      if (!open || !rt) return;
+      const ids: string[] = [];
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        const id = (e.target as HTMLElement).dataset['id'];
+        if (id) ids.push(id);
+      }
+      if (ids.length) rt.actions.markSeen(ids);
+    }, { root: list, threshold: 0.5 });
+    d.add(() => io.disconnect());
+
+    function cardOptions(_n: Notification): CardOptions {
+      return {
+        mode: 'list',
+        actions: rt!.actions,
+        appLookup: rt!.appLookup,
+        onNavigated: () => setOpen(false, { restoreFocus: false }),
+        // Phase 4: Answer opens the dialogue (over its window / floating);
+        // without the dialogue layer the card falls back to its inline form.
+        onAnswer: (n) => {
+          const dlg = window.__auraDialogs;
+          if (!dlg) return false;
+          rt?.actions.markSeen([n.id]);
+          setOpen(false, { restoreFocus: false });
+          void dlg.answer(n.id);
+          return true;
+        },
+        expanded: false,
+      };
+    }
+
+    function decorate(card: HTMLElement, n: Notification) {
+      card.dataset['unseen'] = String(unseenAtOpen.has(n.id) || isUnseen(n));
+    }
+
+    function render() {
+      if (!rt) return;
+      const snap = rt.store.snapshot();
+      const items = snap.items;
+      const active = document.activeElement as HTMLElement | null;
+      const focusedId = active && list.contains(active) ? active.closest<HTMLElement>('.aura-ntf')?.dataset['id'] : undefined;
+      const focusedIdx = focusedId ? [...rendered.keys()].indexOf(focusedId) : -1;
+      const wanted = new Set(items.map((n) => n.id));
+
+      // Remove gone items.
+      for (const [id, r] of [...rendered]) {
+        if (wanted.has(id)) continue;
+        io.unobserve(r.card);
+        r.li.remove();
+        rendered.delete(id);
+      }
+      // Add / update, then order.
+      let prev: HTMLElement | null = null;
+      for (const n of items) {
+        let r = rendered.get(n.id);
+        if (!r) {
+          const card = renderNotificationCard(n, cardOptions(n));
+          const li = document.createElement('div');
+          li.setAttribute('role', 'listitem');
+          li.appendChild(card);
+          r = { n, card, li };
+          rendered.set(n.id, r);
+          io.observe(card);
+        } else if (r.n !== n) {
+          io.unobserve(r.card);
+          r.card = updateNotificationCard(r.card, n, cardOptions(n));
+          r.n = n;
+          io.observe(r.card);
+        }
+        decorate(r.card, n);
+        const expectedNext: ChildNode | null = prev ? prev.nextSibling : list.firstChild;
+        if (expectedNext !== r.li) list.insertBefore(r.li, expectedNext);
+        prev = r.li;
+        if (open) rt.actions.markDisplayed(n.id);
+      }
+
+      // Focus fell out with a removed card → the next item, else the close button.
+      if (open && focusedId && !wanted.has(focusedId)) {
+        const cards = [...rendered.values()].map((r) => r.card);
+        const next = cards[Math.min(Math.max(focusedIdx, 0), cards.length - 1)];
+        (next ?? closeBtn).focus({ preventScroll: false });
+      }
+
+      const total = items.length;
+      countEl.textContent = total ? `· ${total}` : '';
+      empty.hidden = total > 0 || !snap.ready;
+      clearBtn.disabled = clearPlan(groupItems(items)).kind === 'nothing';
+      refreshClearMenu();
+      if (snap.error) {
+        errorEl.hidden = false;
+        errorEl.style.color = '';
+        errorEl.textContent = snap.error.status === 401 || snap.error.status === 403
+          ? `Not allowed to read notifications (${snap.error.status}).`
+          : `Could not load notifications: ${snap.error.message}`;
+      } else {
+        errorEl.hidden = true;
+      }
+      dirty = false;
+    }
+
+    /** Closed panel: drop cards of items that are gone (e.g. wiped on lock) right away. */
+    function purge() {
+      if (!rt) return;
+      const wanted = new Set(rt.store.sorted.map((n) => n.id));
+      for (const [id, r] of [...rendered]) {
+        if (wanted.has(id)) continue;
+        io.unobserve(r.card);
+        r.li.remove();
+        rendered.delete(id);
+      }
+    }
+
+    // ── ⋯ menu: clear from one sender, clear history (phase 5) ──
+    let menuConfirm: { dispose(): void } | null = null;
+    /** Which button opened the shared menu (focus returns there). */
+    let menuOwner: 'more' | 'clear' = 'more';
+    function closeMenu(focusBack = false) {
+      if (menu.hidden) return;
+      menuConfirm?.dispose();
+      menuConfirm = null;
+      menu.hidden = true;
+      menu.replaceChildren();
+      delete menu.dataset['kind'];
+      menu.style.removeProperty('top'); menu.style.removeProperty('left'); menu.style.removeProperty('width'); menu.style.removeProperty('--caret-x');
+      moreBtn.setAttribute('aria-expanded', 'false');
+      clearBtn.setAttribute('aria-expanded', 'false');
+      if (focusBack) (menuOwner === 'clear' ? clearBtn : moreBtn).focus({ preventScroll: true });
+    }
+    function menuItem(label: string, onClick: () => void, variant?: string): HTMLButtonElement {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'notif-center-menu-item';
+      b.setAttribute('role', 'menuitem');
+      if (variant) b.dataset['variant'] = variant;
+      b.textContent = label;
+      b.addEventListener('click', onClick);
+      return b;
+    }
+    function showResult(msg: string, isError = false) {
+      errorEl.hidden = false;
+      errorEl.textContent = msg;
+      errorEl.style.color = isError ? '' : 'var(--aura-color-text-dim)';
+    }
+    function openMenu() {
+      if (!rt) return;
+      menuOwner = 'more';
+      menu.dataset['kind'] = 'more';
+      menu.setAttribute('aria-label', 'Clear notifications');
+      const groups = new Map<string, { label: string; n: number; locked: number }>();
+      for (const n of rt.store.sorted) {
+        const g = groups.get(n.senderKey) ?? { label: senderLabel(n, rt.appLookup).label, n: 0, locked: 0 };
+        if (n.type === 'locked') g.locked++; else g.n++;
+        groups.set(n.senderKey, g);
+      }
+      const nodes: HTMLElement[] = [];
+      for (const [key, g] of groups) {
+        if (g.n === 0) continue;
+        nodes.push(menuItem(`Clear from ${g.label} (${g.n})`, async () => {
+          closeMenu(true);
+          const r = await rt!.actions.clearSender(key);
+          if (!r.ok) showResult(r.error, true);
+          else if (r.skippedLocked) showResult(`${r.skippedLocked} locked notification${r.skippedLocked === 1 ? '' : 's'} kept.`);
+        }));
+      }
+      if (nodes.length === 0) {
+        const note = document.createElement('div');
+        note.className = 'notif-center-menu-note';
+        note.textContent = 'Nothing to clear by sender.';
+        nodes.push(note);
+      }
+      const sep = document.createElement('div');
+      sep.className = 'notif-center-menu-sep';
+      nodes.push(sep);
+      const hist = menuItem('Clear history now…', () => {
+        const c = createConfirmInline({
+          message: 'Delete all answered and removed notifications and their history now?',
+          confirmLabel: 'Delete', danger: true,
+          onConfirm: async () => {
+            const r = await rt!.actions.clearHistory();
+            if (!r.ok) return false;
+            closeMenu(true);
+            showResult(`History cleared (${r.deleted ?? 0} deleted).`);
+            return true;
+          },
+          onCancel: () => closeMenu(true),
+        });
+        menuConfirm = c;
+        hist.replaceWith(c.el);
+        c.focus();
+      }, 'danger');
+      nodes.push(hist);
+      menu.replaceChildren(...nodes);
+      menu.hidden = false;
+      moreBtn.setAttribute('aria-expanded', 'true');
+      (menu.querySelector<HTMLElement>('.notif-center-menu-item') ?? moreBtn).focus({ preventScroll: true });
+    }
+    moreBtn.addEventListener('click', () => { if (!menu.hidden && menuOwner === 'more') closeMenu(); else { closeMenu(); openMenu(); } });
+
+    // ── Smart Clear all (phase 4): groups, see lib/notifications/clearGroups.ts ──
+    async function clearIds(ids: string[], g: Groups) {
+      if (!rt || !ids.length) return;
+      clearBtn.disabled = true;
+      const res = await inBatches(ids, 4, (id) => rt!.actions.dismiss(id));   // drafts go with the removal
+      const failed = res.filter((r) => !r.ok).length;
+      showResult(resultText(ids.length - failed, g, failed), failed > 0);
+      render();
+      if (open) (cards()[0] ?? clearBtn).focus({ preventScroll: true });
+    }
+    function clearEntry(g: Groups, entry: ClearGroupId | 'all', row: HTMLElement) {
+      const ids = idsFor(g, entry);
+      const ask = confirmFor(g, entry);
+      if (!ask) { closeMenu(true); void clearIds(ids, g); return; }
+      const c = createConfirmInline({
+        message: ask, confirmLabel: 'Dismiss', danger: true,
+        onConfirm: async () => { closeMenu(true); await clearIds(ids, g); return true; },
+        onCancel: () => closeMenu(true),
+      });
+      menuConfirm = c;
+      row.replaceWith(c.el);
+      c.focus();
+    }
+    function groupIcon(name: string): SVGSVGElement {
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('class', 'aura-icon'); svg.setAttribute('aria-hidden', 'true');
+      const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+      use.setAttribute('href', `/api/os/icons.svg#${name}`);
+      svg.appendChild(use);
+      return svg;
+    }
+    function groupRow(onClick: () => void, entry: string, colour: string, text: string, count: number, variant?: string): HTMLButtonElement {
+      const b = menuItem('', onClick, variant);
+      b.classList.add('notif-center-group');
+      b.dataset['group'] = colour;
+      b.dataset['entry'] = entry;
+      const name = document.createElement('span'); name.textContent = text;
+      const c = document.createElement('span'); c.className = 'notif-center-group-count'; c.textContent = String(count);
+      b.append(name, c);
+      b.setAttribute('aria-label', `${text}: ${count}`);
+      return b;
+    }
+    function renderClearMenu(keepFocus = false) {
+      if (!rt) return;
+      const g = groupItems(rt.store.sorted);
+      const focusedKey = keepFocus ? (document.activeElement as HTMLElement | null)?.dataset['entry'] : undefined;
+      const nodes: HTMLElement[] = [];
+      for (const k of GROUP_ORDER) {
+        const n = g[k].length;
+        if (!n) continue;
+        if (NEVER_BULK.includes(k)) {
+          const row = document.createElement('div');
+          row.className = 'notif-center-menu-note notif-center-group';
+          row.dataset['group'] = k;
+          row.setAttribute('aria-disabled', 'true');
+          row.append(groupIcon('lucide-lock'), document.createTextNode(` ${GROUP_LABEL[k]} · ${n} — remove individually`));
+          nodes.push(row);
+          continue;
+        }
+        const colour = k === 'urgent' ? (g.urgent.some((x) => x.priority === 'urgent') ? 'urgent' : 'high') : k;
+        let row: HTMLButtonElement;
+        row = groupRow(() => clearEntry(g, k, row), k, colour, `Clear ${GROUP_LABEL[k].toLowerCase()}`, n);
+        nodes.push(row);
+      }
+      const all = idsFor(g, 'all').length;
+      if (all) {
+        const sep = document.createElement('div'); sep.className = 'notif-center-menu-sep'; nodes.push(sep);
+        let row: HTMLButtonElement;
+        row = groupRow(() => clearEntry(g, 'all', row), 'all', 'all', 'Clear all (except locked, pinned and decisions)', all, 'danger');
+        nodes.push(row);
+      }
+      // Header: names the menu's origin (the Clear all button) + the total.
+      const head = document.createElement('div');
+      head.className = 'notif-center-clear-head';
+      const total = Object.values(g).reduce((a, x) => a + x.length, 0);
+      head.textContent = `Clear all · ${total}`;
+      menu.replaceChildren(head, ...nodes);
+      anchorClearMenu();
+      const target = (focusedKey && menu.querySelector<HTMLElement>(`[data-entry="${CSS.escape(focusedKey)}"]`))
+        || menu.querySelector<HTMLElement>('.notif-center-menu-item');
+      (target ?? clearBtn).focus({ preventScroll: true });
+    }
+    /**
+     * Anchor the Clear menu to its button: directly below it (6px gap),
+     * aligned to the button's left edge, with a caret pointing at it. Body
+     * px (the shell zooms with transform: scale).
+     */
+    function anchorClearMenu() {
+      const scale = panel.getBoundingClientRect().width / Math.max(1, panel.offsetWidth) || 1;
+      const pr = panel.getBoundingClientRect();
+      const br = clearBtn.getBoundingClientRect();
+      const phone = panel.dataset['layout'] === 'phone';
+      const width = phone ? Math.round((pr.width / scale) - 16) : Math.min(300, Math.round(pr.width / scale) - 16);
+      let left = phone ? 8 : Math.round((br.left - pr.left) / scale);
+      left = Math.max(8, Math.min(left, Math.round(pr.width / scale) - width - 8));
+      menu.style.top = `${Math.round((br.bottom - pr.top) / scale) + 6}px`;
+      menu.style.left = `${left}px`;
+      menu.style.width = `${width}px`;
+      menu.style.setProperty('--caret-x', `${Math.round((br.left - pr.left) / scale + (br.width / scale) / 2) - left}px`);
+    }
+    /** Live counts while the Clear menu is open (not while a confirm is up). */
+    function refreshClearMenu() {
+      if (menu.hidden || menuOwner !== 'clear' || menuConfirm || !rt) return;
+      if (clearPlan(groupItems(rt.store.sorted)).kind === 'nothing') { closeMenu(true); return; }
+      renderClearMenu(true);
+    }
+    menu.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeMenu(true); return; }
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+      const items = [...menu.querySelectorAll<HTMLElement>('.notif-center-menu-item')];
+      const i = items.indexOf(document.activeElement as HTMLElement);
+      const next = items[(i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length];
+      next?.focus();
+      e.preventDefault();
+      e.stopPropagation();
+    });
+
+    function cards(): HTMLElement[] {
+      return [...list.querySelectorAll<HTMLElement>(':scope > [role="listitem"] > .aura-ntf')];
+    }
+
+    function setOpen(next: boolean, opts: { focusId?: string; restoreFocus?: boolean } = {}) {
+      if (next && locked) return;
+      if (next === open) {
+        if (next && opts.focusId) focusItem(opts.focusId);
+        return;
+      }
+      open = next;
+      const a = anchor();
+      if (open) {
+        returnFocus = (document.activeElement as HTMLElement | null) ?? null;
+        unseenAtOpen = new Set((rt?.store.sorted ?? []).filter(isUnseen).map((n) => n.id));
+        panel.hidden = false;
+        panel.setAttribute('aria-hidden', 'false');
+        a?.setAttribute('aria-expanded', 'true');
+        pinDock('notifications', true);
+        document.dispatchEvent(new CustomEvent('aura:notifications.center', { detail: { open: true } }));
+        render();
+        // Visible cards get marked seen by the IntersectionObserver.
+        requestAnimationFrame(() => {
+          if (!open) return;
+          if (opts.focusId) focusItem(opts.focusId);
+          else (cards()[0] ?? closeBtn).focus({ preventScroll: true });
+        });
+      } else {
+        const hadFocus = panel.contains(document.activeElement);
+        closeMenu();
+        panel.hidden = true;
+        panel.setAttribute('aria-hidden', 'true');
+        a?.setAttribute('aria-expanded', 'false');
+        pinDock('notifications', false);
+        unseenAtOpen = new Set();
+        document.dispatchEvent(new CustomEvent('aura:notifications.center', { detail: { open: false } }));
+        // Highlights drop on the next render (items are seen now).
+        dirty = true;
+        if (hadFocus && opts.restoreFocus !== false) {
+          const target = a ?? (returnFocus?.isConnected ? returnFocus : null);
+          target?.focus({ preventScroll: true });
+        }
+        returnFocus = null;
+      }
+    }
+
+    function focusItem(id: string) {
+      const r = rendered.get(id);
+      if (!r) return;
+      r.card.scrollIntoView({ block: 'nearest' });
+      r.card.focus({ preventScroll: true });
+    }
+
+    // ── events ──
+    d.listen(document, 'aura:notifications.toggle', () => setOpen(!open));
+    d.listen(document, 'aura:notifications.open', (e: Event) => {
+      const id = (e as CustomEvent<{ id?: string }>).detail?.id;
+      setOpen(true, id ? { focusId: id } : {});
+    });
+    d.listen(document, 'aura:notifications.close', () => setOpen(false));
+    closeBtn.addEventListener('click', () => setOpen(false));
+    clearBtn.addEventListener('click', () => {
+      if (!rt || locked) return;   // phase 5: no bulk clear in the locked view
+      if (!menu.hidden && menuOwner === 'clear') { closeMenu(true); return; }
+      closeMenu();
+      const g = groupItems(rt.store.sorted);
+      const plan = clearPlan(g);
+      if (plan.kind === 'nothing') return;
+      if (plan.kind === 'fast') { void clearIds(plan.ids, g); return; }   // only info: no menu
+      menuOwner = 'clear';
+      menu.dataset['kind'] = 'clear';
+      menu.setAttribute('aria-label', 'Clear notifications by group');
+      menu.hidden = false;
+      clearBtn.setAttribute('aria-expanded', 'true');
+      renderClearMenu();
+    });
+
+    // Escape — capture phase, like #ws-ctx, so apps / dispatcher don't eat it.
+    d.listen(document, 'keydown', (e: KeyboardEvent) => {
+      if (!open || e.key !== 'Escape') return;
+      // A ⋯ menu / inline confirm inside the panel closes itself first.
+      const t = e.target as HTMLElement | null;
+      if (t && panel.contains(t) && t.closest('[data-own-escape]')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setOpen(false);
+    }, true);
+
+    // Roving between items.
+    panel.addEventListener('keydown', (e) => {
+      if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
+      const t = e.target as HTMLElement;
+      // Inside text fields and option groups the arrows stay native.
+      if (t.closest('input, textarea, select, fieldset')) return;
+      const all = cards();
+      if (!all.length) return;
+      const cur = t.closest<HTMLElement>('.aura-ntf');
+      let idx = cur ? all.indexOf(cur) : -1;
+      if (e.key === 'Home') idx = 0;
+      else if (e.key === 'End') idx = all.length - 1;
+      else if (e.key === 'ArrowDown') idx = Math.min(all.length - 1, idx + 1);
+      else idx = idx <= 0 ? 0 : idx - 1;
+      all[idx]?.focus();
+      all[idx]?.scrollIntoView({ block: 'nearest' });
+      e.preventDefault();
+      e.stopPropagation();   // the Dock's chrome navigation must not see it
+    });
+
+    // Outside click closes (composedPath survives DOM changes during the click).
+    d.listen(document, 'click', (e: MouseEvent) => {
+      if (!open) return;
+      const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+      const a = anchor();
+      if (path.includes(panel)) return;
+      if (a && path.includes(a)) return;
+      setOpen(false, { restoreFocus: false });
+    });
+    // Clicking into an app iframe does not reach the document: window blur.
+    d.listen(window, 'blur', () => {
+      if (!open) return;
+      setTimeout(() => {
+        if (open && document.activeElement instanceof HTMLIFrameElement) setOpen(false, { restoreFocus: false });
+      }, 0);
+    });
+
+    d.add(watchPlacement((p) => {
+      panel.dataset['layout'] = p.phone ? 'phone' : 'desktop';
+      panel.style.setProperty('--notif-right', `${p.right}px`);
+    }));
+    d.add(watchLock((isLocked) => {
+      locked = isLocked;
+      if (locked) { setOpen(false, { restoreFocus: false }); purge(); }
+    }));
+    // Phase 5: the lock screen wipes the store before it reports the lock —
+    // drop the (hidden) cards right away, not on the next open.
+    d.listen(window, 'aura:notifications:wipe', () => { closeMenu(); purge(); errorEl.hidden = true; });
+
+    let disposed = false;
+    getNotifications().then((runtime) => {
+      if (disposed) return;
+      rt = runtime;
+      d.add(runtime.store.subscribe(() => { if (open) render(); else { dirty = true; purge(); } }));
+      d.add(runtime.onAppsChanged(() => {
+        // Sender labels changed: rebuild every card.
+        for (const r of rendered.values()) { io.unobserve(r.card); r.li.remove(); }
+        rendered.clear();
+        if (open) render(); else dirty = true;
+      }));
+      if (open && dirty) render();
+    }).catch((err) => console.warn('[notifications] runtime failed', err));
+
+    const dispose = () => {
+      if (disposed) return;
+      disposed = true;
+      if (open) setOpen(false, { restoreFocus: false });
+      d.dispose();
+    };
+    if (import.meta.hot) import.meta.hot.dispose(dispose);
+    document.addEventListener('aura:notifications.teardown', dispose, { once: true });
+  }
+</script>

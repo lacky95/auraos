@@ -62,13 +62,21 @@ interface ActiveSurface {
  * into <body>, so any future dialog built on @aura/ui's Dialog is covered
  * without touching this list.
  */
-const OVERLAY_SELECTORS: ReadonlyArray<{ name: string; selector: string }> = [
+export const OVERLAY_SELECTORS: ReadonlyArray<{ name: string; selector: string }> = [
   { name: 'launcher',       selector: '#lo-panel[aria-hidden="false"]' },
   { name: 'processManager', selector: '#pm-panel[aria-hidden="false"]' },
   { name: 'lockscreen',     selector: '#lockscreen[aria-hidden="false"]' },
   { name: 'dialog',         selector: '[role="dialog"][data-state="open"]' },
   { name: 'workspaces',     selector: '#ws-bundle[data-open="true"] #ws-content' },
   { name: 'workspaceMenu',  selector: '#ws-ctx:not([hidden])' },
+  // Notification dialogues (phase 4): window overlay panel / blocking cover,
+  // floating panel / phone sheet / full view, AuraOS desktop decision.
+  { name: 'notificationDialog', selector: '.aura-dlg[data-open="true"]' },
+  // Notification list (drop-up panel / phone sheet) and the visible pop-up
+  // cards (phase 3). Per card, not the region: the region spans the whole
+  // stack column and would blank a surface beside a single short pop-up.
+  { name: 'notificationCenter', selector: '#notif-center:not([hidden])' },
+  { name: 'notificationToast',  selector: '#notif-toasts:not([hidden]) > .aura-ntf' },
 ];
 
 /** True when the element is actually painted — not display:none/visibility:hidden. */
@@ -90,7 +98,7 @@ function intersects(a: SurfaceRect, b: DOMRect): boolean {
  * no business blanking the page. Modal dialogs carry a full-screen dimming
  * backdrop, so they intersect by construction and always win.
  */
-function occluderOf(rect: SurfaceRect): string | null {
+export function occluderOf(rect: SurfaceRect): string | null {
   for (const { name, selector } of OVERLAY_SELECTORS) {
     for (const el of document.querySelectorAll(selector)) {
       if (!isPainted(el)) continue;

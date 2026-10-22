@@ -2579,6 +2579,9 @@ const ssrVisibleViews = initialViews
     // route through renderLayout. Both are idempotent at the app (the terminal
     // only resizes when cols/rows actually change), so the overlap is a no-op.
     queueViewportBroadcast('layout');
+    // Phase 4: window-bound UI (notification dialogues) re-checks where its
+    // windows are — a minimized slot was just destroyed, a restored one re-created.
+    document.dispatchEvent(new CustomEvent('aura:views.changed'));
   }
 
   function createSlot(v: AppView): HTMLElement {
@@ -3231,6 +3234,27 @@ const ssrVisibleViews = initialViews
       : (views.find((x) => x.instanceId === instanceId && !x.activityId) ?? views.find((x) => x.instanceId === instanceId));
     return !!v;
   };
+  // Phase 4 (notification dialogues): where is this window? Never changes anything.
+  //   visible          in the active workspace, not minimized, slot on screen
+  //   other-workspace  held by another workspace (also when minimized there)
+  //   minimized        minimized in the active workspace (strip chip)
+  //   none             no such window
+  const viewDetail = (instanceId: string, activityId?: string) => {
+    const v = activityId
+      ? views.find((x) => x.activityId === activityId)
+      : (views.find((x) => x.instanceId === instanceId && !x.activityId) ?? views.find((x) => x.instanceId === instanceId));
+    if (!v) return null;
+    const ws = workspaceClient.getCached();
+    const owner = ws?.workspaces.find((w) => w.members.includes(v.viewId)) ?? null;
+    const base = { viewId: v.viewId, appId: v.appId, instanceId: v.instanceId, ...(v.activityId ? { activityId: v.activityId } : {}), ...(owner ? { workspaceId: owner.id } : {}) };
+    if (ws && owner && owner.id !== ws.activeWorkspaceId) return { ...base, state: 'other-workspace' as const };
+    if (v.state === 'minimized') return { ...base, state: 'minimized' as const };
+    const slot = dynamicLayout.querySelector<HTMLElement>(`:scope > .app-slot[data-view-id="${CSS.escape(v.viewId)}"]`);
+    if (slot && slot.style.display !== 'none') return { ...base, state: 'visible' as const };
+    return { ...base, state: 'other-workspace' as const };
+  };
+  (window as any).auraViewDetail = viewDetail;
+  (window as any).auraViewState = (instanceId: string, activityId?: string) => viewDetail(instanceId, activityId)?.state ?? 'none';
 
   (window as any).auraFocusInstance        = focusInstance;
   (window as any).auraRevealInstance       = revealInstance;

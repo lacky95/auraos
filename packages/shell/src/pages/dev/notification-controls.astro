@@ -1,0 +1,278 @@
+---
+/**
+ * DEV ONLY — preview of every notification control in every state, in the
+ * dark and the light theme side by side (phase 4 review / Steel check).
+ *   http://<shell>/dev/notification-controls
+ * 404 outside the dev server. Cards are built by the real NotificationCard /
+ * DialogFrame with fake actions (resolve / interact take 1.5 s, so the
+ * loading state is visible).
+ */
+import NotificationStyles from '../../components/shell/notifications/NotificationStyles.astro';
+if (!import.meta.env.DEV) return new Response('Not found', { status: 404 });
+const TOKENS = ['primary', 'secondary', 'danger', 'info', 'warning', 'success', 'bg', 'surface', 'surface-2', 'text', 'text-dim', 'border'];
+const GLOWS = ['primary', 'secondary', 'danger', 'subtle'];
+const remap = (mode: 'light' | 'dark') => [
+  ...TOKENS.map((t) => `--aura-color-${t}: var(--aura-${mode}-color-${t});`),
+  ...GLOWS.map((g) => `--aura-glow-${g}: var(--aura-${mode}-glow-${g});`),
+].join(' ');
+const themeCss = `.pv-dark { ${remap('dark')} } .pv-light { ${remap('light')} }`;
+---
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Notification controls — preview (dev)</title>
+  <link rel="stylesheet" href="/api/os/theme.css" />
+  <style set:html={themeCss}></style>
+  <NotificationStyles />
+  <style is:global>
+    :root { --aura-font-mono: 'Courier New', Courier, monospace; --aura-border: 1px solid var(--aura-color-border); --aura-dock-height: 44px; }
+    body { margin: 0; font-family: var(--aura-font-mono); }
+    .pv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); }
+    .pv-theme { background: var(--aura-color-bg); color: var(--aura-color-text); padding: 16px; display: flex; flex-direction: column; gap: 16px; }
+    .pv-theme h2 { margin: 0; font-size: 0.8rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--aura-color-primary); }
+    .pv-theme h3 { margin: 8px 0 0; font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--aura-color-text-dim); }
+    .pv-box { max-width: 400px; }
+    .pv-phone { width: 360px; max-width: 100%; }
+    .pv-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+    .pv-dlg { position: relative; max-width: 440px; }
+    .pv-clear { position: relative; width: 380px; max-width: 100%; height: 300px; background: var(--aura-color-surface); border: 1px solid var(--aura-color-border); font-size: 0.7rem; }
+    .pv-clear-head { display: flex; gap: 8px; align-items: center; padding: 8px; border-bottom: 1px solid var(--aura-color-border); letter-spacing: 0.08em; }
+    .pv-clear-btn { font: inherit; text-transform: uppercase; padding: 3px 8px; background: transparent; color: var(--aura-color-text-dim); border: 1px solid var(--aura-color-border); }
+    .pv-clear-btn:first-of-type { margin-left: auto; }
+    .pv-clear-btn[aria-expanded="true"] { color: var(--aura-color-primary); border-color: var(--aura-color-primary); background: color-mix(in srgb, var(--aura-color-primary) 14%, transparent); box-shadow: var(--aura-glow-primary); }
+    .pv-clear-menu { position: absolute; top: 40px; left: 150px; width: 220px; display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; background: var(--aura-color-surface-2); border: 1px solid var(--aura-color-primary); box-shadow: 0 8px 24px rgba(0,0,0,.45); }
+    .pv-clear-menu::before, .pv-clear-menu::after { content: ''; position: absolute; left: 30px; border: 6px solid transparent; border-top: 0; }
+    .pv-clear-menu::before { top: -7px; border-bottom: 7px solid var(--aura-color-primary); }
+    .pv-clear-menu::after { top: -6px; border-bottom: 6px solid var(--aura-color-surface-2); }
+    .pv-clear-title { font-size: 0.6rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--aura-color-primary); border-bottom: 1px solid var(--aura-color-border); padding-bottom: 4px; }
+    .pv-row { display: flex; justify-content: space-between; text-align: left; font: inherit; padding: 5px 8px; background: transparent; color: var(--aura-color-text); border: 1px solid transparent; border-left: 3px solid var(--grp, var(--aura-color-border)); }
+    .pv-row b { color: var(--grp); border: 1px solid currentColor; padding: 0 5px; font-weight: 400; }
+    .pv-dis { opacity: 0.6; }
+    .pv-clear-menu hr { border: 0; border-top: 1px solid var(--aura-color-border); margin: 3px 0; width: 100%; }
+    /* Pop-up demo: same motion as NotificationToasts.astro. */
+    .pv-toasts { display: flex; flex-direction: column; gap: 6px; max-width: 340px; }
+    .pv-toasts > .aura-ntf { animation: pv-toast-in 150ms ease-out; }
+    .pv-toasts > .aura-ntf[data-active="true"] { border-color: var(--aura-color-primary); box-shadow: var(--aura-glow-primary); }
+    .pv-toasts > .aura-ntf[data-exit="true"] { animation: pv-toast-out 200ms ease-in forwards; pointer-events: none; }
+    @keyframes pv-toast-in { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: none; } }
+    @keyframes pv-toast-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(28px); } }
+  </style>
+</head>
+<body>
+  <div class="pv-grid">
+    <section class="pv-theme pv-dark" data-pv="dark"><h2>Dark</h2></section>
+    <section class="pv-theme pv-light" data-pv="light"><h2>Light</h2></section>
+  </div>
+  <template id="pv-clear">
+    <h3>Smart Clear all · open state (anchored to its button)</h3>
+    <div class="pv-clear">
+      <div class="pv-clear-head">NOTIFICATIONS · 9 <button class="pv-clear-btn" aria-expanded="true">Clear all ▴</button><button class="pv-clear-btn">⋯</button></div>
+      <div class="pv-clear-menu" role="menu">
+        <div class="pv-clear-title">Clear all · 9</div>
+        <button class="pv-row" style="--grp: var(--aura-color-primary)">Clear questions <b>2</b></button>
+        <button class="pv-row" style="--grp: var(--aura-color-danger)">Clear urgent &amp; high <b>1</b></button>
+        <button class="pv-row" style="--grp: var(--aura-color-text-dim)">Clear info <b>3</b></button>
+        <button class="pv-row" style="--grp: var(--aura-color-secondary)">Clear pinned <b>1</b></button>
+        <div class="pv-row pv-dis">🔒 Locked · 2 — remove individually</div>
+        <hr />
+        <button class="pv-row" style="--grp: var(--aura-color-danger); color: var(--aura-color-danger)">Clear all (except locked, pinned and decisions) <b>6</b></button>
+      </div>
+    </div>
+  </template>
+  <template id="pv-static">
+    <h3>Raw controls · states</h3>
+    <div class="aura-ntf" style="gap:12px">
+      <div class="pv-row">
+        <label class="aura-ctl-choice"><input class="aura-ctl-check" type="checkbox" /><span class="aura-ctl-choice-text">Unchecked</span></label>
+        <label class="aura-ctl-choice"><input class="aura-ctl-check" type="checkbox" checked /><span class="aura-ctl-choice-text">Checked</span></label>
+        <label class="aura-ctl-choice"><input class="aura-ctl-check" type="checkbox" disabled /><span class="aura-ctl-choice-text">Disabled</span></label>
+        <label class="aura-ctl-choice"><input class="aura-ctl-check" type="checkbox" checked disabled /><span class="aura-ctl-choice-text">Checked + disabled</span></label>
+      </div>
+      <div class="pv-row">
+        <label class="aura-ctl-choice"><input class="aura-ctl-radio" type="radio" name="r" /><span class="aura-ctl-choice-text">Radio</span></label>
+        <label class="aura-ctl-choice"><input class="aura-ctl-radio" type="radio" name="r" checked /><span class="aura-ctl-choice-text">Radio checked</span></label>
+        <label class="aura-ctl-choice"><input class="aura-ctl-radio" type="radio" disabled /><span class="aura-ctl-choice-text">Disabled</span></label>
+      </div>
+      <fieldset class="aura-ctl-group" aria-invalid="true"><legend class="aura-ctl-label">Error group</legend><div class="aura-ctl-choices">
+        <label class="aura-ctl-choice"><input class="aura-ctl-check" type="checkbox" /><span class="aura-ctl-choice-text">Pick at least one</span></label></div>
+        <p class="aura-ctl-error">Choose at least one option</p></fieldset>
+      <fieldset class="aura-ctl-group" data-style="segmented"><legend class="aura-ctl-label">Segmented (single choice)</legend><div class="aura-ctl-choices">
+        <label class="aura-ctl-seg"><input class="aura-ctl-radio" type="radio" name="s" /><span class="aura-ctl-choice-text">Dev</span></label>
+        <label class="aura-ctl-seg"><input class="aura-ctl-radio" type="radio" name="s" checked /><span class="aura-ctl-choice-text">Staging</span></label>
+        <label class="aura-ctl-seg"><input class="aura-ctl-radio" type="radio" name="s" /><span class="aura-ctl-choice-text">Prod</span></label>
+        <label class="aura-ctl-seg"><input class="aura-ctl-radio" type="radio" name="s" disabled /><span class="aura-ctl-choice-text">Disabled</span></label></div></fieldset>
+      <div class="aura-ctl-field"><label class="aura-ctl-label">Text input</label><input class="aura-ctl-input" placeholder="Placeholder" /></div>
+      <div class="aura-ctl-field"><label class="aura-ctl-label">Error <span class="aura-ctl-req">*</span></label><input class="aura-ctl-input" aria-invalid="true" /><div class="aura-ctl-field-foot"><p class="aura-ctl-error">Required</p></div></div>
+      <div class="aura-ctl-field"><label class="aura-ctl-label">Near the limit</label><input class="aura-ctl-input" value="…" /><div class="aura-ctl-field-foot"><p class="aura-ctl-error" hidden></p><span class="aura-ctl-count">3712 / 4000</span></div></div>
+      <div class="aura-ctl-field"><label class="aura-ctl-label">Disabled</label><input class="aura-ctl-input" disabled value="Read only" /></div>
+      <div class="aura-ctl-actions">
+        <button class="aura-ctl-btn" data-variant="tertiary"><span class="aura-ctl-btn-label">Tertiary</span></button>
+        <button class="aura-ctl-btn" data-variant="secondary"><span class="aura-ctl-btn-label">Secondary</span></button>
+        <button class="aura-ctl-btn" data-variant="primary"><span class="aura-ctl-btn-label">Primary</span></button>
+        <button class="aura-ctl-btn" data-variant="primary" disabled><span class="aura-ctl-btn-label">Disabled</span></button>
+        <button class="aura-ctl-btn" data-variant="primary" data-loading="true" disabled><span class="aura-ctl-btn-label">Loading</span></button>
+      </div>
+      <div class="aura-ntf-progress"><div class="aura-ntf-progress-row"><span class="aura-ntf-progress-label">Determinate</span><span class="aura-ntf-progress-pct">42%</span></div><div class="aura-ntf-progress-track" role="progressbar" aria-valuenow="42"><div class="aura-ntf-progress-fill" style="width:42%"></div></div></div>
+      <div class="aura-ntf-progress" data-indeterminate="true"><div class="aura-ntf-progress-row"><span class="aura-ntf-progress-label">Indeterminate</span></div><div class="aura-ntf-progress-track" role="progressbar"><div class="aura-ntf-progress-fill"></div></div></div>
+    </div>
+  </template>
+  <script>
+    import { renderNotificationCard, type CardActions } from '../../components/shell/notifications/NotificationCard.ts';
+    import { buildDialogFrame, playExit } from '../../components/shell/notifications/DialogFrame.ts';
+    import { GROUP_LABEL, GROUP_ORDER, NEVER_BULK, clearPlan, confirmFor, groupItems, idsFor } from '../../lib/notifications/clearGroups.ts';
+    import { SwipeTracker, startsSwipe } from '../../lib/notifications/swipe.ts';
+    import type { Notification } from '../../lib/notifications/api.ts';
+
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const actions: CardActions = {
+      resolve: async () => { await wait(1500); return { ok: true }; },
+      dismiss: async () => ({ ok: true }),
+      interact: async () => { await wait(1500); return { ok: true }; },
+      forceRemove: async () => { await wait(800); return { ok: true }; },
+    };
+    let seq = 0;
+    const base = (over: Partial<Notification>): Notification => ({
+      id: `ntf_preview${(seq++).toString().padStart(9, '0')}`, type: 'dialogue', title: 'Deploy release 1.4 to production?',
+      text: 'The build passed. See [the changelog](https://example.com) before you decide.',
+      priority: 'medium', visibility: 'private', pinned: false, popup: false, blocking: false, scope: 'auto',
+      caller: { kind: 'anonymous', verification: 'unverified' }, sender: { kind: 'app', id: 'com.example.notifp4', name: 'Notif P4 Test', attribution: 'verified' },
+      senderKey: 'app:com.example.notifp4', state: 'active', createdAt: Date.now() - 120_000, updatedAt: Date.now(), history: [],
+      ...over,
+    } as Notification);
+    const full = (): Notification['components'] => [
+      { kind: 'progress', value: 0.42, label: 'Upload' },
+      { kind: 'options', id: 'env', label: 'Environment', options: [{ id: 'dev', label: 'Dev' }, { id: 'stg', label: 'Staging' }, { id: 'prod', label: 'Prod' }] },
+      { kind: 'options', id: 'notify', label: 'Notify', multiple: true, options: [{ id: 'team', label: 'Team channel' }, { id: 'oncall', label: 'On-call' }] },
+      { kind: 'input', id: 'name', label: 'Release name', placeholder: 'e.g. Autumn', required: true },
+      { kind: 'input', id: 'why', label: 'Notes', multiline: true, placeholder: 'Optional' },
+      // Standard role buttons: submit with its own label, cancel with the default text
+      // (Later is added by the shell where the dialogue can be put off).
+      { kind: 'button', role: 'submit', label: 'Deploy' },
+      { kind: 'button', role: 'cancel' },
+      { kind: 'button', id: 'docs', label: 'Runbook', variant: 'tertiary', action: 'link', href: 'https://example.com' },
+    ] as Notification['components'];
+
+    function section(root: HTMLElement, title: string, cls = 'pv-box'): HTMLElement {
+      const h = document.createElement('h3'); h.textContent = title; root.appendChild(h);
+      const box = document.createElement('div'); box.className = cls; root.appendChild(box);
+      return box;
+    }
+    for (const root of document.querySelectorAll<HTMLElement>('[data-pv]')) {
+      root.appendChild((document.getElementById('pv-static') as HTMLTemplateElement).content.cloneNode(true));
+      root.appendChild((document.getElementById('pv-clear') as HTMLTemplateElement).content.cloneNode(true));
+      section(root, 'List card · dialogue (expanded)').appendChild(renderNotificationCard(base({ components: full() }), { mode: 'list', actions, expanded: true }));
+      section(root, 'Dialogue frame · defaults only (no sender buttons → Later · Cancel · OK)', 'pv-dlg')
+        .appendChild(buildDialogFrame(base({ title: 'Restart the build agent now?', text: 'Nothing is lost.' }), { actions, takeFocus: false, onLater: () => {} }).root);
+      section(root, 'Dialogue frame · fields, label-only roles ("No thanks" / "Send")', 'pv-dlg')
+        .appendChild(buildDialogFrame(base({ title: 'Why did the deploy fail?', components: [
+          { kind: 'input', id: 'why', label: 'Reason', required: true },
+          { kind: 'button', role: 'cancel', label: 'No thanks' },
+          { kind: 'button', role: 'submit', label: 'Send' },
+        ] as Notification['components'] }), { actions, takeFocus: false, onLater: () => {} }).root);
+      // Phase 6: select (dropdown) + combobox (searchable). The list pops up inside this
+      // theme section (data-ntf-popup-host), so it shows the section's tokens.
+      root.dataset['ntfPopupHost'] = 'true';
+      const cities = ['Vienna', 'Berlin', 'Bern', 'Zürich', 'Budapest', 'Linz', 'Graz', 'Salzburg', 'Innsbruck', 'Munich', 'Prague', 'Bratislava', 'Ljubljana', 'Milan', 'Paris']
+        .map((l) => ({ id: l.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(), label: l }));
+      section(root, 'Dialogue · select + combobox').appendChild(renderNotificationCard(base({ title: 'Where should the release go?', text: 'Dropdown, searchable with free text, and search only.', components: [
+        { kind: 'select', id: 'region', label: 'Region', placeholder: 'Choose a city…', required: true, options: cities },
+        { kind: 'combobox', id: 'owner', label: 'Owner', allowCustom: true, options: [{ id: 'ada', label: 'Ada Lovelace' }, { id: 'grace', label: 'Grace Hopper' }, { id: 'linus', label: 'Linus Torvalds' }] },
+        { kind: 'combobox', id: 'team', label: 'Team', default: 'shell', options: [{ id: 'core', label: 'Core' }, { id: 'shell', label: 'Shell' }, { id: 'apps', label: 'Apps' }] },
+        { kind: 'button', role: 'cancel' }, { kind: 'button', role: 'submit', label: 'Ship it' },
+      ] as Notification['components'] }), { mode: 'dialog', actions }));
+      section(root, 'List card · locked + progress').appendChild(renderNotificationCard(base({ type: 'locked', title: 'Backup running', text: 'Do not shut down.', components: [{ kind: 'progress', value: null, label: 'Copying' }] as Notification['components'] }), { mode: 'list', actions }));
+      section(root, 'Pop-up · simple, high').appendChild(renderNotificationCard(base({ type: 'simple', priority: 'high', components: [{ kind: 'button', id: 'open', label: 'Open', variant: 'primary' }] as Notification['components'] }), { mode: 'toast', actions }));
+      const dlg = section(root, 'Dialogue frame (window / floating)', 'pv-dlg');
+      dlg.appendChild(buildDialogFrame(base({ components: full() }), { actions, takeFocus: false, collapsible: true, onLater: () => {} }).root);
+      // Hide demo: Later / ✕ / Escape / a resolve slide the dialogue out to the right.
+      const hideBox = section(root, 'Hide animation (Later / ✕ / Esc / resolved)', 'pv-dlg');
+      const again = document.createElement('button');
+      again.className = 'aura-ctl-btn'; again.dataset['variant'] = 'secondary'; again.textContent = 'Show again';
+      const mountDemo = () => {
+        const f = buildDialogFrame(base({ title: 'Press Later, ✕ or Esc', text: 'It slides out to the right and fades.' }), {
+          actions, takeFocus: false, collapsible: true, onLater: () => playExit(f.root, () => f.root.remove()),
+        });
+        hideBox.prepend(f.root);
+      };
+      again.addEventListener('click', () => { if (!hideBox.querySelector('section.aura-dlg')) mountDemo(); });
+      hideBox.appendChild(again);
+      mountDemo();
+      // Pop-up stack demo: ✕ slides a pop-up out to the right; the rest glide up.
+      const toastBox = section(root, 'Pop-up exit (✕ / click / timeout / swipe right on touch) + reflow', 'pv-toasts');
+      const refill = () => {
+        while (toastBox.querySelectorAll(':scope > .aura-ntf:not([data-exit])').length < 3) {
+          const card = renderNotificationCard(base({ type: 'simple', title: `Pop-up ${seq}`, text: 'Press ✕ to hide it.', components: [] }), {
+            mode: 'toast', actions,
+            onClose: () => {
+              card.dataset['exit'] = 'true';
+              const before = new Map([...toastBox.querySelectorAll<HTMLElement>(':scope > .aura-ntf')].filter((x) => x !== card).map((x) => [x, x.getBoundingClientRect().top]));
+              const done = () => {
+                card.remove();
+                for (const [x, top] of before) {
+                  const dy = top - x.getBoundingClientRect().top;
+                  if (!dy) continue;
+                  x.style.transition = 'none'; x.style.transform = `translateY(${dy}px)`;
+                  requestAnimationFrame(() => { x.style.transition = 'transform 150ms ease-out'; x.style.transform = ''; });
+                }
+                setTimeout(refill, 250);
+              };
+              card.addEventListener('animationend', done, { once: true });
+            },
+          });
+          toastBox.appendChild(card);
+          // Touch: swipe right to hide (same helper as the real pop-ups).
+          card.style.touchAction = 'pan-y';
+          let tr: SwipeTracker | null = null;
+          card.addEventListener('pointerdown', (e) => { if (startsSwipe(e.pointerType, !!(e.target as HTMLElement).closest('button, a, input'))) { tr = new SwipeTracker(card.offsetWidth); tr.start(e.clientX, e.clientY, e.timeStamp); } });
+          card.addEventListener('pointermove', (e) => { if (!tr) return; const m = tr.move(e.clientX, e.clientY, e.timeStamp); if (m.axis === 'horizontal') { card.style.transform = `translateX(${m.offset}px)`; card.style.opacity = String(m.opacity); } });
+          card.addEventListener('pointerup', (e) => {
+            if (!tr) return; const r = tr.end(e.clientX, e.timeStamp); tr = null;
+            card.style.transition = 'transform 150ms ease-out, opacity 150ms ease-out';
+            if (r === 'hide') { card.style.transform = 'translateX(120%)'; card.style.opacity = '0'; setTimeout(() => { card.remove(); setTimeout(refill, 250); }, 160); }
+            else { card.style.transform = ''; card.style.opacity = ''; }
+          });
+        }
+      };
+      refill();
+      // Smart Clear all: how a sample list is grouped (the real menu lives in the notification list).
+      const cg = section(root, 'Smart Clear all — groups of a sample list');
+      const sample = [
+        base({ type: 'simple', title: 'Build done', components: [] }), base({ type: 'simple', title: 'Backup ok', components: [] }),
+        base({ type: 'dialogue', title: 'Deploy?' }), base({ type: 'simple', priority: 'urgent', title: 'Disk full', components: [] }),
+        base({ type: 'locked', title: 'Upload running', components: [] }), base({ type: 'simple', pinned: true, title: 'Read me', components: [] }),
+      ];
+      const g = groupItems(sample);
+      const pre = document.createElement('pre');
+      pre.style.cssText = 'margin:0;font-size:0.72rem;color:var(--aura-color-text);white-space:pre-wrap';
+      pre.textContent = GROUP_ORDER.filter((k) => g[k].length).map((k) => `${GROUP_LABEL[k].padEnd(14)} ${g[k].length}${NEVER_BULK.includes(k) ? '  (remove individually)' : ''}`).join('\n')
+        + `\n\nClear all → ${clearPlan(g).kind}` + `\n"Clear all (except locked, pinned and decisions)" → ${idsFor(g, 'all').length}`
+        + `\nconfirm: ${confirmFor(g, 'all') ?? '—'}`;
+      cg.appendChild(pre);
+      // Active pop-up (a clicked dialogue / form pop-up, in place) + validation failures.
+      const act = section(root, 'Active pop-up · Submit with the empty field → inline error, no request; "Server 400" → mapped field error', 'pv-toasts');
+      const failing: CardActions = { ...actions, resolve: async () => { await wait(600); return { ok: false, status: 400, error: 'invalid answer', details: [{ path: 'answer.values.why', message: 'The server says: too short' }] }; } };
+      const ac = renderNotificationCard(base({ title: 'Why did the deploy fail?', components: [
+        { kind: 'input', id: 'why', label: 'Reason', required: true },
+        { kind: 'button', role: 'cancel' }, { kind: 'button', role: 'submit', label: 'Send' },
+      ] as Notification['components'] }), { mode: 'toast', actions });
+      ac.dataset['active'] = 'true';
+      const ac400 = renderNotificationCard(base({ title: 'Server 400 demo', components: [
+        { kind: 'input', id: 'why', label: 'Reason' }, { kind: 'button', role: 'submit', label: 'Send' },
+      ] as Notification['components'] }), { mode: 'toast', actions: failing });
+      ac400.dataset['active'] = 'true';
+      act.append(ac, ac400);
+      const blk = section(root, 'Blocking dialogue frame (no ✕)', 'pv-dlg');
+      blk.appendChild(buildDialogFrame(base({ components: full(), blocking: true }), { actions, takeFocus: false, modal: true, kicker: 'Answer to continue' }).root);
+      const sheet = section(root, 'Phone sheet frame (✕ 40px)', 'pv-phone aura-dlg-float');
+      sheet.dataset['layout'] = 'phone';
+      sheet.style.position = 'static';
+      sheet.appendChild(buildDialogFrame(base({ components: full() }), { actions, takeFocus: false, onLater: () => {} }).root);
+      const phone = section(root, 'Phone width (sheet rules)', 'pv-phone notif-center');
+      phone.dataset['layout'] = 'phone';
+      phone.appendChild(renderNotificationCard(base({ components: full() }), { mode: 'dialog', actions }));
+    }
+  </script>
+</body>
+</html>

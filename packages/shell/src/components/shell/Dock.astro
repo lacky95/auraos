@@ -2,6 +2,7 @@
 import type { AppManifest } from '@aura/core';
 import ProcessManager from './ProcessManager.astro';
 import Icon from '../ui/Icon.astro';
+import NotificationButton from './notifications/NotificationButton.astro';
 
 interface Props {
   apps: AppManifest[];
@@ -87,6 +88,15 @@ const { apps, enabledMap = {} } = Astro.props;
     <span class="dock-overflow-icon" aria-hidden="true"><Icon name="ellipsis" /></span>
   </button>
   <div id="dock-overflow-menu" class="dock-overflow-menu" role="menu" hidden></div>
+  <!--
+    Notification bell, far right (margin-left: auto). Not a .dock-item, so
+    fitDockItems never folds it into the overflow menu; it only steps its
+    size tier down (wide → compact, data-dock-tiers) before any
+    app tile is folded. It registers the
+    'notifications' shell anchor; the list and pop-ups live in
+    notifications/NotificationCenter + NotificationToasts (OSLayout).
+  -->
+  <NotificationButton />
 </nav>
 
 <style is:global>
@@ -612,18 +622,42 @@ const { apps, enabledMap = {} } = Astro.props;
      *  single awkward visible tile. */
     const MIN_VISIBLE_TILES = 2;
 
+    /** Size-tiered chrome (e.g. the notification bell): `data-dock-tiers`
+     *  lists its tiers widest first ("wide,medium,compact"), `data-tier-max`
+     *  is the widest one it wants right now, `data-tier` is what we pick.
+     *  Tiers step down BEFORE any app tile is folded; the last tier stays. */
+    const tieredEls = () => Array.from(dockFit.querySelectorAll<HTMLElement>('[data-dock-tiers]'));
+    const tiersOf = (el: HTMLElement) => (el.dataset['dockTiers'] ?? '').split(',').map((t) => t.trim()).filter(Boolean);
+    const overflowing = () => dockFit.scrollWidth > dockFit.clientWidth + 1;
+
     const fitDockItems = () => {
       const items = Array.from(dockFit.querySelectorAll<HTMLElement>('.dock-items > .dock-item'));
       // Reset state first so we measure natural width on every pass.
       for (const el of items) delete el.dataset['hidden'];
       if (overflowBtn) overflowBtn.hidden = true;
+      const tiered = tieredEls();
+      for (const el of tiered) {
+        const tiers = tiersOf(el);
+        const max = el.dataset['tierMax'];
+        el.dataset['tier'] = max && tiers.includes(max) ? max : (tiers[0] ?? '');
+      }
+      // 0) Degrade tiered chrome first (all of them one step, repeatedly).
+      let stepped = true;
+      while (stepped && overflowing()) {
+        stepped = false;
+        for (const el of tiered) {
+          const tiers = tiersOf(el);
+          const i = tiers.indexOf(el.dataset['tier'] ?? '');
+          if (i >= 0 && i < tiers.length - 1) { el.dataset['tier'] = tiers[i + 1]!; stepped = true; }
+        }
+      }
 
       // Disabled tiles stay hidden by the data-enabled rule.
       const visible = items.filter((el) => el.dataset['enabled'] !== 'false');
 
       // 1) Trim from the right while overflowing.
       let trimIdx = visible.length;
-      while (trimIdx > 0 && dockFit.scrollWidth > dockFit.clientWidth + 1) {
+      while (trimIdx > 0 && overflowing()) {
         // First overflow → reveal the overflow button so subsequent
         // measurements account for its width.
         if (overflowBtn && overflowBtn.hidden) {
@@ -693,6 +727,11 @@ const { apps, enabledMap = {} } = Astro.props;
 
     const ro = new ResizeObserver(fitDockItems);
     ro.observe(dockFit);
+    // Tiered chrome asks for a refit when its content width may change.
+    let refitRaf = 0;
+    document.addEventListener('aura:dock.refit', () => {
+      if (!refitRaf) refitRaf = requestAnimationFrame(() => { refitRaf = 0; fitDockItems(); });
+    });
 
     // Watch the wrapper directly. MRU rebuilds replace its children, and
     // SSE-driven data-enabled flips toggle attributes on the tile children
