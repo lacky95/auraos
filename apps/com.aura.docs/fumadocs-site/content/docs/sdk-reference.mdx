@@ -36,8 +36,10 @@ const stop = os.subscribeOsEvents(['app:*'], (ev) => console.log(ev.type));
 
 | Method | Signature | Note |
 |---|---|---|
-| `sendNotification` | `(title: string, body?: string) => Promise<void>` | **(B+S)** Reads `APP_ID` from env on the server. |
+| `sendNotification` | `(title: string, body?: string) => Promise<CreateResult>` | **(B+S)** Shortcut for `notifications.create({ type: 'simple', title, text: body })`. |
 | `getState` | `() => Promise<string>` | **(B+S)** Returns `'creating' \| 'started' \| 'resumed' \| 'paused' \| 'stopped' \| 'destroyed' \| 'error'`. |
+
+The full notification API is [`os.notifications`](#osclientnotifications).
 
 ### Intents
 
@@ -111,6 +113,242 @@ const stop = os.onModeChange(({ resolvedMode }) => {
   document.body.dataset.mode = resolvedMode;  // 'light' or 'dark'
 });
 ```
+
+## osClient.notifications
+
+Create, change and remove your own notifications, read them, wait for a
+dialogue answer, and follow their lifecycle live. Source:
+`packages/app-sdk/src/notifications.ts`. REST:
+`/api/notifications`. The full guide (types, components, permissions, lock
+screen, retention, MCP) is [Notifications](/docs/notifications).
+
+**Who you are.** On the server (Node: lifecycle endpoints, Astro
+frontmatter, backends) every call sends
+`Authorization: Bearer $AURA_INSTANCE_TOKEN`, so the shell attributes the
+notification to your app as **verified**. In the browser no token is ever
+sent, so the caller is **unverified**. The browser client remembers the
+`senderToken` it got from `create`, so the same page can still update or
+remove its own notifications.
+
+**Permissions** (in `app.manifest.json` `permissions[]`):
+
+- `system.notifications` lets an app send. A verified app without it gets
+  **403**.
+- `notifications.locked` (Locked: the user can't dismiss it) and
+  `notifications.popup` (a dialogue opens as a pop-up) are privileged. The
+  manifest only **requests** them; an admin grants them with
+  `aura grant nperm <app> locked|popup` or in Settings → Notifications &
+  access.
+  - Without the grant the request is **downgraded**: locked becomes simple,
+    and the pop-up is turned off. A `warnings[]` entry says why.
+  - Grants and revokes take effect at once, without a restart.
+  - Even with the grant, a sender gets at most **3 forced pop-ups per 10
+    minutes**. After that `popup` is turned off with a warning, and the
+    dialogue waits in the list.
+
+**Dialogue placement** (`type: 'dialogue'`):
+
+- `context` decides where the dialogue opens. With
+  `{ kind: 'activity' | 'instance', id }` of your own window, it opens over
+  that window. The window stays usable: the dialogue is a collapsible panel
+  at the bottom.
+- `blocking: true` makes **only your own window** inert until the user
+  answers. Its title bar and the rest of the desktop stay usable. The shell
+  checks that the activity or instance belongs to the calling app; it never
+  trusts `context.appId`. Agents, API keys, browser (unverified) callers and
+  contexts of another app get `blocking: false` and a warning.
+- A dialogue never fetches a minimized window or one on another workspace.
+  It waits in the list with **Answer**, and the window's chip or workspace
+  pill gets a marker. Pressing Answer reveals the window.
+- Without a window (a background app or an agent) the dialogue floats over
+  the desktop when the user presses Answer, or at once with an allowed
+  pop-up. It never blocks the desktop.
+- `scope: 'desktop'` is a desktop-wide modal reserved for AuraOS system
+  decisions. Everyone else is downgraded to `scope: 'auto'` with a warning.
+
+**Locked** (`type: 'locked'`): the user can't dismiss it, and Clear all
+skips it. The user can still force-remove it from the card's ⋯ menu after a
+confirmation. The sender then sees `state: 'removed'` with
+`removedReason: 'force-removed'` in `get`, `subscribe` and
+`waitForAnswer` (`r.removedReason`).
+
+**Rules for verified apps:**
+
+- An app changes only its own notifications.
+- An app reads its own notifications in `get`, `list` and `subscribe`,
+  including their answers and interaction results.
+- An app can create at most 30 notifications per minute. Beyond that it
+  gets 429.
+
+**Reading other senders' notifications** needs the privileged
+`notifications.read`: the manifest requests it, and an admin grants it
+with an explicit scope:
+
+```sh
+aura grant nperm com.example.dash read --scope app:com.example.notes
+aura grant nperm com.example.dash read --scope sender:auraos,app:com.example.ci --include-secret
+aura grant nperm com.example.dash read --scope all
+aura revoke nperm com.example.dash read
+```
+
+- The scope lists apps (their verified items), sender keys (`app:<id>`,
+  `auraos`, `key:<keyId>`, `anon:rest`, …) or `all`. Secret items are left
+  out unless the grant has `--include-secret`. The same grant works for API
+  keys (Settings → Notifications & access, or `POST /api/admin/grants` with
+  `readScope`).
+- Read access is the same in `get`, `list`, `waitForAnswer` and
+  `subscribe`. A read grant does not let an app change, dismiss or answer
+  someone else's notification (403).
+- Lock-screen visibility is not read access: `public` never makes an item
+  readable for other apps.
+- The browser (unverified) reads nothing, except its own items by id:
+  `get` and `waitForAnswer` send the `senderToken` remembered from
+  `create`. A caller with neither credentials nor a shell client session
+  gets an empty list, 404 and an empty stream.
+
+**Pop-up duration** (`popupDurationMs`, optional) is how long the shell
+shows the pop-up. It is separate from `timeoutMs`, which is how long the
+notification lives.
+
+- Absent: the default. Low and medium pop-ups hide after 8 s, high and
+  urgent ones stay until handled.
+- `> 0`: the pop-up hides after that many ms; the item stays in the list.
+- `0` or `-1` (any negative is stored as `-1`): a sticky pop-up. It stays
+  until the user dismisses, opens or answers it, or the item is removed or
+  expires. A sticky pop-up holds one of the 3 pop-up slots and is never
+  pushed out; with three sticky ones, new items go to the list only.
+- An integer up to 24 h. In `update`, `null` goes back to the default.
+- Hovering or focusing a timed pop-up pauses it.
+
+**Lock screen** (`visibility`, default `private`): while AuraOS is locked,
+
+- `public` shows the title and text, but no buttons, inputs or answer;
+- `private` shows only the sender and `publicTitle` / `publicText` (or
+  "New notification");
+- `secret` is not shown at all.
+
+The user can make a sender stricter (never less strict), hide everything on
+the lock screen, and set how long ended notifications are kept (Settings →
+Notifications & access → Lock screen & history). The shell enforces this on
+the server for each browser tab (a *client session*, see the privacy note
+below), not only in the UI.
+
+**Retention.** Ended notifications (resolved, dismissed, cleared, expired,
+removed) are kept as history for 7 days by default (1, 7, 30 or 90 days,
+or forever, also per sender), then deleted together with their history.
+Active notifications are never deleted automatically; only their
+`timeoutMs` ends them. `DELETE /api/notifications/history[?sender=]`
+("Clear history now" in the list's ⋯ menu) deletes ended items at once.
+
+| Method | Signature | Note |
+|---|---|---|
+| `create` | `(input: NotificationInput) => Promise<{ notification, senderToken?, warnings }>` | **(B+S)** `type: 'simple' \| 'locked' \| 'dialogue'`, `title`, `text`, `priority`, `visibility`, `publicTitle`, `publicText`, `timeoutMs`, `popupDurationMs`, `pinned`, `popup`, `blocking`, `scope: 'auto' \| 'desktop'`, `components[]` (input, options, select, combobox, button, progress), `context {kind, id, label?}`. `priority` is `low`, `medium`, `high` or `urgent`. |
+| `update` | `(id, patch, { senderToken? }?) => Promise<{ notification, warnings }>` | **(B+S)** Your own only. `null` clears a field. `type` is fixed. |
+| `remove` | `(id, { senderToken? }?) => Promise<Notification>` | **(B+S)** You are done with it (reason `completed`). Dismissing is the user's action. |
+| `get` | `(id) => Promise<Notification \| null>` | **(B+S)** `null` when not found, or not readable for you (not yours and not covered by a read grant). |
+| `list` | `(filter?: { state?, sender?, priority?, limit?, cursor? }) => Promise<{ items, nextCursor? }>` | **(B+S)** `state` defaults to `active`. |
+| `waitForAnswer` | `(id, { timeoutMs?, signal? }?) => Promise<{ status: 'resolved' \| 'removed' \| 'pending', notification, answer?, outcome?, removedReason? }>` | **(B+S)** Bounded long-poll (≤ 25 s per request) until the notification is answered or removed. `pending` after `timeoutMs` (default 60 s). `outcome` is `submitted` or `cancelled` once resolved. `removedReason` says why it was removed, e.g. `force-removed`. |
+| `waitForInteraction` | `(id, { after?, timeoutMs?, signal? }?) => Promise<{ status: 'interaction' \| 'resolved' \| 'removed' \| 'pending', notification, interaction?, outcome?, answer?, removedReason? }>` | **(B+S)** Like `waitForAnswer`, but also returns on the next user interaction (a button without `action`, an input submit, an options / select / combobox choice): `interaction = { componentId, kind, value?, values?, at }`. `after` (ms): only newer interactions count; default the current `lastInteraction.at`. Pass the last `interaction.at` back so none is missed. Long-poll `?waitFor=interaction&after=`. |
+| `subscribe` | `(handler: (ev) => void, { since?, onError? }?) => () => void` | **(B+S)** Live feed (SSE `/api/notifications/stream`). Browser: `EventSource`. Node: a stream parser that sends the Bearer. Both resume with `Last-Event-ID` after a drop. |
+| `simple` | `(title, text?) => Promise<CreateResult>` | **(B+S)** Same as `sendNotification`. |
+
+Each `subscribe` event has the shape
+`{ type: 'notification:<event>', eventId, event, id, state, notification }`.
+`notification` is the item's current full state, including `answer` once it
+is resolved. A `{ type: 'reset' }` event means: reload with `list()`. Treat
+unknown `type`s as forward-compatible; ignore them, or refetch the item.
+
+**Standard dialogue buttons** (`role`). Every dialogue gets three special
+buttons. The shell adds any you leave out, in the order: your custom
+buttons, then Later, Cancel, Submit (the primary one on the right; stacked on
+a phone).
+
+| `role` | Default text | What it does |
+|---|---|---|
+| `submit` | "Submit" (with inputs or options), else "OK" | Always primary. Checks required fields, then resolves with `answer: { outcome: 'submitted', buttonId, values }`. |
+| `cancel` | "Cancel" | No validation, no values. Resolves with `answer: { outcome: 'cancelled', buttonId }`, so you learn the user said no. |
+| `later` | "Later" | Local only: hides the dialogue; nothing is sent, and it stays in the list with Answer. Not on blocking dialogues or desktop decisions. The dialogue header's ✕ does the same. |
+
+- A role button may give only its text, e.g. `{ kind: 'button', role: 'cancel', label: 'No thanks' }`.
+  `id` defaults to the role, and `label` to the default text. There can be
+  at most one button per role. Custom buttons (no `role`) need `id` and `label`.
+- A resolved item has a top-level `outcome: 'submitted' | 'cancelled'` next to
+  `answer`. A resolve without one counts as `submitted`.
+  `waitForAnswer` returns it as `r.outcome`.
+- What the user types is kept as a draft in the browser (localStorage) until
+  the dialogue is answered or removed, so a reload doesn't lose it.
+
+How the shell answers other buttons:
+
+- A button with `action: 'resolve'` acts like a submit: it resolves the notification with the answer
+  `{ outcome: 'submitted', buttonId, values }`. `values` holds the current input and options
+  values by component id: a string, or an array of option ids when
+  `multiple` is set.
+- **select** (`options` 1–50, `default?`) is a dropdown; its value is an
+  option id. **combobox** (`options` 0–50, `allowCustom?`, `default?`) is
+  searchable; its value is an option id or, with `allowCustom`, the typed
+  text (≤ 200). The server checks these values in interactions and in
+  `answer.values` (400 for an unknown option).
+- A button **without** `action`, an input submit (Enter) and an options,
+  select or combobox choice keep the notification active. Each one sends a
+  `notification:interacted` event, and the item's `lastInteraction` is
+  `{ componentId, kind, value?, values?, at, actor }`.
+- `action: 'dismiss'` dismisses the notification, and `action: 'link'`
+  opens `href` (http(s) only).
+
+```ts
+const { notification, warnings } = await os.notifications.create({
+  type: 'dialogue',
+  title: 'Deploy release 1.4 to production?',
+  components: [
+    { kind: 'button', role: 'submit', label: 'Deploy' },
+    { kind: 'button', role: 'cancel', label: 'Not now' },   // Later is added by the shell
+  ],
+  context: { kind: 'task', id: 'deploy-42', label: 'Release 1.4' },
+});
+if (warnings.length) console.warn(warnings);          // e.g. a pop-up without the grant
+
+// Keep working; check back for the answer.
+const r = await os.notifications.waitForAnswer(notification.id, { timeoutMs: 120_000 });
+if (r.status === 'resolved') console.log(r.outcome, r.answer);   // 'submitted' | 'cancelled'
+
+// Progress on a running job, then done:
+await os.notifications.update(notification.id, { components: [{ kind: 'progress', value: 0.5 }] });
+await os.notifications.remove(notification.id);
+
+// Live:
+const stop = os.notifications.subscribe((ev) => {
+  if (ev.type === 'notification:resolved') console.log(ev.notification?.answer);
+  if (ev.type === 'notification:interacted') console.log(ev.notification?.lastInteraction);
+});
+```
+
+API keys (`Authorization: Bearer aura_k1_…`, created by an admin with
+`aura apikey create`) let external REST callers send verified
+notifications too. They don't use the SDK.
+
+### Privacy note: lock screen and client sessions
+
+- **The lock screen has no PIN.** A click or a key unlocks it. Redaction on
+  the lock screen protects against glances at an unattended screen, not
+  against someone who sits down at it.
+- Each shell browser tab registers a **client session**
+  (`POST /api/os/clients`) and reports when it locks and unlocks. The
+  notification API redacts for that tab on the server: list, get, the
+  long-poll, the SSE stream (including its catch-up), the replies of user
+  actions and the counts. A missing, unknown or expired session counts as
+  locked. Another tab keeps its own state.
+- A client session is **not a credential**. It grants no permission; it
+  only picks the lock-screen view. A client-reported unlock is not an
+  authentication boundary. The server has an `UnlockVerifier` hook where an
+  authenticated unlock (PIN or user login) will plug in later.
+- On lock the shell clears the notification list, pop-ups and open
+  dialogues at once, and reloads only after the server confirmed the lock.
+  After a reconnect it re-syncs the lock state before it loads anything.
+- Known gap: app frontends share the shell's origin, so an app's browser
+  code could register a client session of its own and read what an
+  unlocked screen sees. This is closed only with per-app origins and user
+  accounts.
 
 ## osClient.keymap
 
