@@ -650,20 +650,26 @@ export function registerVerbs(program: Command): void {
     .option('-i, --interactive', 'caps: open the picker even when names are given')
     .option('--template <tpl>', "caps: to a services[] template of the app (persistent; capped at the app's tools)")
     .option('--sidecar <name>', 'caps: to one running OS sidecar of <inst|app> (runtime; inside the app)')
+    .option('--scope <scope>', "nperm read: which senders — app:<appId>, sender:<senderKey> (comma-separated) or all")
+    .option('--include-secret', 'nperm read: secret notifications too')
     .addHelpText('after', resourcesLine('grant') + examples([
       'aura grant perms com.aura.terminal apps.mount',
+      'aura grant nperm com.example.dash read --scope app:com.example.notes   # read another app\'s notifications',
       'aura grant caps com.example.hello ripgrep jq',
       'aura grant caps com.example.hello git --template worker    # every worker sidecar',
       'aura grant caps com.example.hello git --sidecar worker-7   # one running sidecar',
       'aura grant perms                                 # interactive',
     ]))
-    .action(async (resource: string, app: string | undefined, names: string[], opts: { interactive?: boolean; template?: string; sidecar?: string }) => {
+    .action(async (resource: string, app: string | undefined, names: string[], opts: { interactive?: boolean; template?: string; sidecar?: string; scope?: string; includeSecret?: boolean }) => {
       const def = resourceOrFail(resource, 'grant');
       const target = targetedCaps(def, 'grant', app, names, opts);
       if (target === 'template') return dispatch(['cap', 'grant', app!, ...names, '--template', opts.template!]);
       if (target === 'sidecar') return sidecarToolsCmd('grant', app!, opts.sidecar!, names);
       const rest = [...(app ? [app] : []), ...names];
       if (def.name === 'permissions') return dispatch(['app', 'perm', 'grant', ...rest]);
+      if (def.name === 'notif-perms') {
+        return dispatch(['admin', 'grant', ...rest, ...(opts.scope ? ['--scope', opts.scope] : []), ...(opts.includeSecret ? ['--include-secret'] : [])]);
+      }
       if (def.name === 'capabilities') return dispatch(['cap', 'grant', ...rest, ...(opts.interactive ? ['-i'] : [])]);
       unsupported('grant', def);
     });
@@ -685,6 +691,7 @@ export function registerVerbs(program: Command): void {
       if (target === 'template') return dispatch(['cap', 'revoke', app, ...names, '--template', opts.template!]);
       if (target === 'sidecar') return sidecarToolsCmd('revoke', app, opts.sidecar!, names);
       if (def.name === 'permissions') return dispatch(['app', 'perm', 'revoke', app, ...names]);
+      if (def.name === 'notif-perms') return dispatch(['admin', 'revoke', app, ...names]);
       if (def.name === 'capabilities') return dispatch(['cap', 'revoke', app, ...names]);
       unsupported('revoke', def);
     });

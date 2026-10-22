@@ -489,9 +489,41 @@ const permissions: ResourceDef<PermRow> = {
   ],
 };
 
+interface NotifPermRow { app: string; scope: string | null; sends: boolean; requested: string[]; granted: string[]; effective: string[]; reads?: string }
+
+const short = (ps: string[]) => (ps.length ? ps.map((p) => p.replace('notifications.', '')).join(',') : color.dim('-'));
+
+/**
+ * Privileged notification permissions (locked, popup, read): the manifest
+ * requests, an admin grants. Reading needs an admin session too.
+ */
+const notifPerms: ResourceDef<NotifPermRow> = {
+  name: 'notif-perms',
+  aliases: ['notif-perm', 'nperm'],
+  description: 'Privileged notification permissions: requested (manifest) vs granted (admin)',
+  verbs: ['get', 'grant', 'revoke'],
+  scopes: ['app'],
+  nameOf: (p) => p.app,
+  list: async (ctx) => {
+    const d = await api.get<{ apps: Array<{ appId: string; scope: string | null; sends: boolean; requested: string[]; granted: string[]; effective: string[]; read?: { label: string } }> }>('/api/admin/grants');
+    return d.apps
+      .filter((a) => !ctx.app || a.appId === ctx.app)
+      .map((a) => ({ app: a.appId, scope: a.scope, sends: a.sends, requested: a.requested, granted: a.granted, effective: a.effective, ...(a.read ? { reads: a.read.label } : {}) }));
+  },
+  columns: [
+    { header: 'APP', value: (p) => p.app },
+    { header: 'SENDS', value: (p) => (p.sends ? 'yes' : color.dim('no')) },
+    { header: 'REQUESTED', value: (p) => short(p.requested) },
+    { header: 'GRANTED', value: (p) => short(p.granted) },
+    { header: 'EFFECTIVE', value: (p) => short(p.effective) },
+    { header: 'READS', value: (p) => p.reads ?? color.dim('-') },
+    { header: 'SCOPE', value: (p) => p.scope ?? '-', wide: true },
+  ],
+};
+
 /** Display order for help, api-resources and completion. */
 export const RESOURCES: ResourceDef[] = [
-  apps, instances, sidecars, activities, capabilities, services, mounts, ports, scopes, themes, permissions,
+  apps, instances, sidecars, activities, capabilities, services, mounts, ports, scopes, themes, permissions, notifPerms,
 ];
 
 /** Look a resource up by any of its names (`inst`, `instance`, `instances`). */

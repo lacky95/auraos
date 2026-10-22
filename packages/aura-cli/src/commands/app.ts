@@ -213,6 +213,9 @@ function reportPerm(res: PermEditResult, verb: string): void {
   if (res.unknown) {
     warn(`'${res.permission}' is not a built-in permission — it will grant nothing unless an app defines it.`);
   }
+  if (verb === 'granted' && res.changed && (res.permission === 'notifications.locked' || res.permission === 'notifications.popup')) {
+    info(`'${res.permission}' is privileged: the manifest now REQUESTS it — an admin must also grant it: aura grant notif-perms ${res.appId} ${res.permission.split('.')[1]}`);
+  }
   if (res.reloaded === false) {
     warn(`manifest written but the running registry did NOT reload${res.reloadError ? ` (${res.reloadError})` : ''} — restart the shell for it to take effect.`);
   }
