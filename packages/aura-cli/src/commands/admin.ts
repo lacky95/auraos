@@ -2,10 +2,11 @@ import type { Command } from 'commander';
 import { existsSync } from 'node:fs';
 import { defaultAdminKeyFile, readAdminCredential, rotateAdminCredential } from '@aura/core';
 import { api, shellUrl } from '../lib/client.js';
+import { buildSystemDecisionPayload, describeDecision } from '../lib/system-decision.js';
 import { color, fail, info, ok, table, warn } from '../lib/format.js';
 import { promptConfirm } from '../lib/prompts.js';
 import {
-  ADMIN_SESSION_FILE, adminLogin, clearSavedSession, currentAdminSession, forgetInProcessSession,
+  ADMIN_SESSION_FILE, adminHeaders, adminLogin, clearSavedSession, currentAdminSession, forgetInProcessSession,
   obtainCredential, saveSession, savedSession,
 } from '../lib/admin-session.js';
 
@@ -199,6 +200,8 @@ export function registerAdmin(program: Command): void {
     .description('Revoke privileged notification features (locked | popup | read). Takes effect at once.')
     .action((app: string, features: string[]) => grantNotif('revoke', app, features));
 
+  registerAdminDev(admin);
+
   admin
     .command('audit')
     .description('The admin audit trail, newest first.')
@@ -215,6 +218,71 @@ export function registerAdmin(program: Command): void {
         OUTCOME: e.outcome === 'ok' ? e.outcome : color.yellow(e.outcome),
         DETAIL: e.detail ? JSON.stringify(e.detail) : '',
       }))));
+    });
+}
+
+// ─── aura admin dev … (DEV-only test hooks) ─────────────────────────────────
+
+export function registerAdminDev(admin: Command): void {
+  const dev = admin
+    .command('dev')
+    .description('DEV-only test hooks (dev shell only, admin session, audited).');
+  dev
+    .command('system-decision')
+    .description('Show an AuraOS system decision: a desktop-wide modal (scope desktop) that BLOCKS THE WHOLE DESKTOP until answered. Dev shell only; created as AuraOS, audited as dev.systemDecision.')
+    .option('--title <t>', 'title')
+    .option('--text <x>', 'text')
+    .option('--priority <p>', 'low | medium | high (default) | urgent')
+    .option('--inputs [labels]', 'add inputs: comma-separated labels (default: one "Reason")')
+    .option('--options [labels]', 'add a choice: comma-separated labels (default: Allow, Deny, Ask me later); > 4 → a radio list')
+    .option('--cancel-label <l>', 'text of the Cancel button')
+    .option('--submit-label <l>', 'text of the Submit button')
+    .option('--json <payload>', 'a full notification input as JSON (the flags above override it); type / scope are forced')
+    .option('--wait [seconds]', 'wait for the answer and print it (default 300 s)')
+    .option('-o, --output <fmt>', 'json: print the raw responses')
+    .action(async (opts: {
+      title?: string; text?: string; priority?: string; inputs?: boolean | string; options?: boolean | string;
+      cancelLabel?: string; submitLabel?: string; json?: string; wait?: boolean | string; output?: string;
+    }) => {
+      let payload: Record<string, unknown>;
+      try { payload = buildSystemDecisionPayload(opts); } catch (err) { fail((err as Error).message); return; }
+      let r: { notification: { id: string; title: string }; warnings?: Array<{ message: string }> };
+      try {
+        r = await api.post('/api/admin/dev/system-decision', { payload });
+      } catch (err) {
+        const e = err as Error & { status?: number };
+        if (e.status === 404 || /404/.test(e.message)) {
+          fail('refused: the system-decision hook exists only on the DEV shell (astro dev). Production shells have no way to create a desktop decision from outside AuraOS.');
+        }
+        fail(e.message);
+        return;
+      }
+      if (opts.output === 'json') console.log(JSON.stringify(r, null, 2));
+      else {
+        ok(`system decision ${color.bold(r.notification.id)} "${r.notification.title}" — it blocks the desktop until answered`);
+        for (const w of r.warnings ?? []) warn(w.message);
+      }
+      process.stdout.write(`${r.notification.id}\n`);
+      if (opts.wait === undefined || opts.wait === false) return;
+      const total = opts.wait === true ? 300 : Number(opts.wait);
+      if (!Number.isFinite(total) || total <= 0) fail('--wait takes a number of seconds');
+      const deadline = Date.now() + total * 1000;
+      info(`waiting up to ${total} s for the answer…`);
+      for (;;) {
+        const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+        const t = Math.min(25, left);
+        // The admin session reads every notification (GET is not an /api/admin route, so attach it here).
+        const res = await fetch(`${shellUrl()}/api/notifications/${encodeURIComponent(r.notification.id)}?waitFor=resolved&timeout=${t}`, { headers: adminHeaders() })
+          .catch((err: Error) => fail(`cannot reach the shell: ${err.message}`));
+        const n = await (res as Response).json() as { state: string; outcome?: string; answer?: unknown; removedReason?: string; error?: string };
+        if (!(res as Response).ok) fail(`waiting failed: ${(res as Response).status} ${n.error ?? ''}`);
+        if (n.state !== 'active') {
+          if (opts.output === 'json') console.log(JSON.stringify(n, null, 2));
+          ok(`answer: ${describeDecision(n)}`);
+          return;
+        }
+        if (Date.now() >= deadline) { warn(`still pending after ${total} s (${r.notification.id})`); return; }
+      }
     });
 }
 

@@ -524,6 +524,32 @@ verified app:
 
 ---
 
+## Testing system decisions
+
+A desktop-wide modal (`scope: 'desktop'`) is reserved for AuraOS: only the
+in-process system caller can create one, and every app, agent or API key is
+downgraded to `scope: 'auto'` (with a warning). To see one on a **dev** shell,
+use the admin CLI. It calls a DEV-only hook that needs an admin session and is
+audited as `dev.systemDecision`:
+
+```sh
+# master container (auto-login with the master key file)
+docker exec aura-shell aura admin dev system-decision \
+  --title "Install the update now?" --options "Now,Tonight" --inputs "Reason" \
+  --cancel-label "Not now" --submit-label "Install" --wait
+
+# or a full notification input; type and scope are forced by the hook
+docker exec aura-shell aura admin dev system-decision --json '{"title":"Allow?","components":[{"kind":"button","role":"submit"}]}' --wait
+```
+
+- It **blocks the whole desktop** until it is answered (no Later, no ✕).
+- It prints the notification id. `--wait [seconds]` waits for the answer and prints the outcome (`submitted` / `cancelled`) and the values.
+- Outside the dev server the hook does not exist, and the CLI refuses with a clear message.
+- In the Notification Tester:
+  - The preset "System modal (desktop) — via CLI" builds this command from the composer instead of sending.
+  - "Desktop scope from app (expect downgrade)" shows the policy from the app's side.
+  - App pages never hold an admin session.
+
 ## Privacy note
 
 - **The lock screen has no PIN.** A click or a key unlocks it. Lock-screen
