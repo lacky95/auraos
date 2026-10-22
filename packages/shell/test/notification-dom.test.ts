@@ -468,3 +468,76 @@ test('pop-up stack: never more than 3; high evicts the oldest non-sticky; sticky
   queue.clear();                                              // the list opened
   assert.equal(queue.next(), undefined);
 });
+
+// ── options display (phase 6): segmented | radio | checkbox ─────────────────
+
+test('options display: radio list (round radios, one per line, descriptions), checkbox list, segmented chips (description = tooltip)', async () => {
+  resetDom();
+  const { optionsDisplay } = await import('../src/lib/notifications/choices.ts');
+  assert.equal(optionsDisplay({}), 'segmented');
+  assert.equal(optionsDisplay({ multiple: true }), 'checkbox');
+  assert.equal(optionsDisplay({ display: 'radio' }), 'radio');
+  const comps = [
+    { kind: 'options', id: 'when', label: 'When', display: 'radio', options: [
+      { id: 'now', label: 'Deploy now', description: 'Starts within a minute' },
+      { id: 'tonight', label: 'Tonight', description: 'In the 22:00 window' },
+      { id: 'cancel', label: 'Not at all' },
+    ] },
+    { kind: 'options', id: 'notify', label: 'Notify', multiple: true, options: [{ id: 'team', label: 'Team', description: 'The team channel' }, { id: 'oncall', label: 'On-call' }] },
+    { kind: 'options', id: 'env', options: [{ id: 'dev', label: 'Dev', description: 'Development' }, { id: 'prod', label: 'Prod' }] },
+  ] as Notification['components'];
+  const n = item({ type: 'dialogue', components: comps });
+  const card = renderNotificationCard(n, { mode: 'dialog', actions: recorder().actions });
+  doc.body.appendChild(card);
+  const radio = card.querySelector<HTMLFieldSetElement>('fieldset[data-display="radio"]')!;
+  assert.equal(radio.dataset['style'], 'radio');
+  assert.equal(radio.querySelector('legend')!.textContent, 'When');
+  const radios = [...radio.querySelectorAll<HTMLInputElement>('input[type="radio"]')];
+  assert.equal(radios.length, 3);
+  assert.ok(radios.every((r) => r.classList.contains('aura-ctl-radio') && r.name === radios[0]!.name), 'one native radio group (arrow keys move within it)');
+  assert.ok([...radio.querySelectorAll('label')].every((l) => l.classList.contains('aura-ctl-choice')), 'whole row is the label');
+  const d0 = doc.getElementById(radios[0]!.getAttribute('aria-describedby')!)!;
+  assert.equal(d0.textContent, 'Starts within a minute');
+  assert.ok(d0.classList.contains('aura-ctl-choice-desc'));
+  assert.equal(radios[2]!.getAttribute('aria-describedby'), null, 'no description → no describedby');
+  const cb = card.querySelector<HTMLFieldSetElement>('fieldset[data-display="checkbox"]')!;
+  assert.equal(cb.dataset['style'], 'list');
+  assert.equal(cb.querySelector('.aura-ctl-choice-desc')!.textContent, 'The team channel');
+  const seg = card.querySelector<HTMLFieldSetElement>('fieldset[data-display="segmented"]')!;
+  assert.equal(seg.querySelector('.aura-ctl-choice-desc'), null, 'chips show no description…');
+  assert.equal(seg.querySelector<HTMLElement>('label')!.title, 'Development', '…but use it as the tooltip');
+  // Values, Submit labelling.
+  radios[1]!.click();
+  assert.deepEqual(collectValues(card, n), { when: 'tonight', notify: [] });
+  assert.equal(card.querySelector('[data-behaviour="submit"]')!.textContent, 'Submit');
+});
+
+test('options display radio: drafts restore, patch keeps the rows, list cards interact, dialogue stays local', async () => {
+  resetDom();
+  const comps = [{ kind: 'options', id: 'when', display: 'radio', options: [{ id: 'now', label: 'Now', description: 'd' }, { id: 'later', label: 'Later' }] }] as Notification['components'];
+  const n = item({ type: 'dialogue', components: comps });
+  const r = recorder();
+  const card = renderNotificationCard(n, { mode: 'dialog', actions: r.actions });
+  doc.body.appendChild(card);
+  const later = card.querySelector<HTMLInputElement>('input[value="later"]')!;
+  later.focus();
+  later.click();
+  await flush();
+  assert.equal(r.calls.length, 0, 'dialogue: local');
+  const again = renderNotificationCard(n, { mode: 'dialog', actions: recorder().actions });
+  assert.equal(again.querySelector<HTMLInputElement>('input[value="later"]')!.checked, true, 'draft restored');
+  const patched = updateNotificationCard(card, { ...n, text: 'changed', updatedAt: 2 }, { mode: 'dialog', actions: r.actions });
+  assert.ok(patched === card && card.querySelector('input[value="later"]') === later && doc.activeElement === later, 'patched in place, focus kept');
+  const r2 = recorder();
+  const ln = item({ components: comps });
+  const list = renderNotificationCard(ln, { mode: 'list', actions: r2.actions });
+  doc.body.appendChild(list);
+  list.querySelector<HTMLInputElement>('input[value="now"]')!.click();
+  await flush();
+  assert.deepEqual(JSON.parse(JSON.stringify(r2.calls)), [['interact', ln.id, { componentId: 'when', value: 'now', values: { when: 'now' } }]]);
+  const { hasFormFields } = await import('../src/lib/notifications/dialogs.ts');
+  assert.equal(hasFormFields(ln), true, 'a radio list is a form (pop-up click opens it)');
+  // A locked view carries no components: nothing to render.
+  const red = renderNotificationCard(item({ components: undefined, lockscreen: true } as Partial<Notification>), { mode: 'list', actions: recorder().actions });
+  assert.equal(red.querySelector('fieldset'), null);
+});

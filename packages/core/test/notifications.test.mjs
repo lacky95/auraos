@@ -483,6 +483,35 @@ test('select / combobox (phase 6): schema limits, defaults, interact + resolve v
   assert.deepEqual((await svc.resolve(q.id, { choice: 'yes' })).answer, { choice: 'yes' });
 });
 
+test('options display (phase 6): segmented ≤ 4, radio / checkbox ≤ 8, display vs multiple, descriptions; values validated', async () => {
+  const opts = (n, desc = false) => Array.from({ length: n }, (_, i) => ({ id: `o${i}`, label: `Option ${i}`, ...(desc ? { description: `About ${i}` } : {}) }));
+  const make = (c) => svc.create({ type: 'dialogue', title: 'Pick', components: [{ kind: 'options', id: 'p', ...c }] }, APP);
+  // Defaults and limits.
+  await make({ options: opts(4) });                                     // segmented by default
+  await rejectsStatus(make({ options: opts(5) }), 400);                  // segmented > 4
+  await rejectsStatus(make({ display: 'segmented', options: opts(5) }), 400);
+  const { notification: radio } = await make({ display: 'radio', options: opts(8, true) });
+  assert.equal(radio.components[0].display, 'radio');
+  assert.equal(radio.components[0].options[7].description, 'About 7');
+  await rejectsStatus(make({ display: 'radio', options: opts(9) }), 400);
+  const { notification: multi } = await make({ multiple: true, options: opts(8) });   // checkbox by default
+  await rejectsStatus(make({ multiple: true, options: opts(9) }), 400);
+  await make({ multiple: true, display: 'checkbox', options: opts(2) });
+  // display / multiple mismatches.
+  for (const bad of [{ multiple: true, display: 'radio' }, { multiple: true, display: 'segmented' }, { display: 'checkbox' }, { multiple: false, display: 'checkbox' }]) {
+    await assert.rejects(make({ ...bad, options: opts(2) }), (err) => err.status === 400 && /display/.test(JSON.stringify(err.details ?? err.message)));
+  }
+  await rejectsStatus(make({ display: 'list', options: opts(2) }), 400);
+  await rejectsStatus(make({ display: 'radio', options: [{ id: 'a', label: 'A', description: 'x'.repeat(201) }] }), 400);
+  // interact / resolve values per display.
+  assert.equal((await svc.interact(radio.id, { componentId: 'p', value: 'o7' })).lastInteraction.value, 'o7');
+  await rejectsStatus(svc.interact(radio.id, { componentId: 'p', value: 'o8' }), 400);
+  await rejectsStatus(svc.interact(radio.id, { componentId: 'p', value: ['o1', 'o2'] }), 400);
+  assert.deepEqual((await svc.interact(multi.id, { componentId: 'p', value: ['o0', 'o5', 'o7'] })).lastInteraction.value, ['o0', 'o5', 'o7']);
+  await rejectsStatus(svc.resolve(radio.id, { outcome: 'submitted', values: { p: 'zzz' } }), 400);
+  assert.deepEqual((await svc.resolve(multi.id, { outcome: 'submitted', values: { p: ['o6'] } })).answer.values, { p: ['o6'] });
+});
+
 const APIKEY = { kind: 'apiKey', keyId: 'key1', name: 'ci', verification: 'verified' };
 const ALLOW_ALL = { authorize: async () => ({ allow: true, reason: 'test' }) };
 // Fake AppManager view: activities / instances and the app that owns them.

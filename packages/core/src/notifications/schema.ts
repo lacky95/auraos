@@ -23,13 +23,31 @@ export const InputComponentSchema = z.object({
   required: z.boolean().optional(),
 });
 
+/**
+ * How an `options` component is shown (phase 6):
+ *   segmented  single choice as a row of chips (the default) — at most 4
+ *   radio      single choice as a vertical radio list — at most 8
+ *   checkbox   `multiple: true` (its default and only display) — at most 8
+ * Each option may carry a short `description` (≤ 200), shown under its label
+ * in the radio / checkbox lists (a tooltip on chips).
+ */
+export const OPTIONS_DISPLAYS = ['segmented', 'radio', 'checkbox'] as const;
+export const MAX_SEGMENTED_OPTIONS = 4;
+export const MAX_LIST_OPTIONS = 8;
 export const OptionsComponentSchema = z.object({
   kind: z.literal('options'),
   id: ComponentId,
   label: ShortText.optional(),
   multiple: z.boolean().optional(),
-  options: z.array(z.object({ id: ComponentId, label: ShortText.min(1) })).min(1).max(4),
+  display: z.enum(OPTIONS_DISPLAYS).optional(),
+  options: z.array(z.object({ id: ComponentId, label: ShortText.min(1), description: ShortText.optional() })).min(1).max(MAX_LIST_OPTIONS),
 });
+
+/** The effective display of an options component (defaults by `multiple`). */
+export function optionsDisplay(c: { multiple?: boolean | undefined; display?: string | undefined }): 'segmented' | 'radio' | 'checkbox' {
+  if (c.display === 'segmented' || c.display === 'radio' || c.display === 'checkbox') return c.display;
+  return c.multiple ? 'checkbox' : 'segmented';
+}
 
 /** A choice of a select / combobox (phase 6). */
 const ChoiceSchema = z.object({ id: ComponentId, label: ShortText.min(1) });
@@ -120,6 +138,18 @@ const ComponentsSchema = z.array(ComponentSchema).max(8).superRefine((list, ctx)
         roles.add(c.role);
       }
       id ??= c.role;
+    }
+    if (c.kind === 'options') {
+      if (c.multiple && c.display !== undefined && c.display !== 'checkbox') {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [i, 'display'], message: `display '${c.display}' is for single choice — with multiple: true use display 'checkbox' (or leave it out)` });
+      } else if (!c.multiple && c.display === 'checkbox') {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [i, 'display'], message: "display 'checkbox' needs multiple: true — for a single choice use 'segmented' or 'radio'" });
+      }
+      const d = optionsDisplay(c);
+      const max = d === 'segmented' ? MAX_SEGMENTED_OPTIONS : MAX_LIST_OPTIONS;
+      if (c.options.length > max) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [i, 'options'], message: `display '${d}' allows at most ${max} options (radio / checkbox lists allow ${MAX_LIST_OPTIONS})` });
+      }
     }
     if (c.kind === 'options' || c.kind === 'select' || c.kind === 'combobox') {
       const ids = new Set<string>();
@@ -261,7 +291,7 @@ export function outcomeOf(answer: unknown): 'submitted' | 'cancelled' {
 }
 
 /** Body of `POST …/<id>/interact` (validated further against the item's components). */
-const InteractionValueSchema = z.union([z.string().max(4000), z.array(ComponentId).max(4)]);
+const InteractionValueSchema = z.union([z.string().max(4000), z.array(ComponentId).max(8)]);
 export const InteractionInputSchema = z.object({
   componentId: ComponentId,
   value: InteractionValueSchema.optional(),

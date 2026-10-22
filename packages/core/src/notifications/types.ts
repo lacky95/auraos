@@ -157,13 +157,20 @@ export interface InputComponent {
   multiline?: boolean;
   required?: boolean;
 }
+export type OptionsDisplay = 'segmented' | 'radio' | 'checkbox';
 export interface OptionsComponent {
   kind: 'options';
   id: string;
   label?: string;
   multiple?: boolean;
-  /** 1–4 options. */
-  options: Array<{ id: string; label: string }>;
+  /**
+   * Phase 6: 'segmented' (single choice, default, ≤ 4 options), 'radio'
+   * (single choice, vertical list, ≤ 8), 'checkbox' (multiple: true —
+   * its default and only display, ≤ 8).
+   */
+  display?: OptionsDisplay;
+  /** 1–4 options (segmented), 1–8 (radio / checkbox); `description` ≤ 200. */
+  options: Array<{ id: string; label: string; description?: string }>;
 }
 /** Phase 6: a dropdown, one choice out of 1–50 options; the value is the option id. */
 export interface SelectComponent {

@@ -243,7 +243,8 @@ const COMPONENT = z.discriminatedUnion('kind', [
     role: z.enum(['submit', 'cancel', 'later']).optional().describe('Standard dialogue button: submit (answer outcome "submitted"), cancel ("cancelled"), later (user postpones; nothing is sent). Label / id optional for these; the shell adds missing ones.'),
     href: z.string().optional() }),
   z.object({ kind: z.literal('options'), id: z.string(), label: z.string().optional(), multiple: z.boolean().optional(),
-    options: z.array(z.object({ id: z.string(), label: z.string() })).min(1).max(4) }),
+    display: z.enum(['segmented', 'radio', 'checkbox']).optional().describe('segmented (single choice chips, default, ≤ 4 options) · radio (single choice vertical list, ≤ 8) · checkbox (multiple: true — its only display, ≤ 8).'),
+    options: z.array(z.object({ id: z.string(), label: z.string(), description: z.string().max(200).optional().describe('Shown under the label in radio / checkbox lists.') })).min(1).max(8) }),
   z.object({ kind: z.literal('input'), id: z.string(), label: z.string().optional(), placeholder: z.string().optional(),
     multiline: z.boolean().optional(), required: z.boolean().optional() }),
   z.object({ kind: z.literal('select'), id: z.string(), label: z.string().optional(), placeholder: z.string().optional(),
@@ -256,6 +257,16 @@ const COMPONENT = z.discriminatedUnion('kind', [
     .describe('Searchable select: the user types to filter up to 50 options. The answer value is an option id, or the free text with allowCustom.'),
   z.object({ kind: z.literal('progress'), id: z.string().optional(), value: z.number().min(0).max(1).nullable(), label: z.string().optional() }),
 ]);
+/** Options display rules (checked here so the agent gets the reason before sending). */
+function refineComponents(list: Array<z.infer<typeof COMPONENT>>, ctx: z.RefinementCtx): void {
+  list.forEach((c, i) => {
+    if (c.kind !== 'options') return;
+    const d = c.display ?? (c.multiple ? 'checkbox' : 'segmented');
+    if (c.multiple && d !== 'checkbox') ctx.addIssue({ code: z.ZodIssueCode.custom, path: [i, 'display'], message: "with multiple: true the display is 'checkbox'" });
+    if (!c.multiple && d === 'checkbox') ctx.addIssue({ code: z.ZodIssueCode.custom, path: [i, 'display'], message: "display 'checkbox' needs multiple: true" });
+    if (d === 'segmented' && c.options.length > 4) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [i, 'options'], message: "segmented allows at most 4 options — use display 'radio' for up to 8" });
+  });
+}
 const CONTEXT = z.object({
   kind: z.enum(['activity', 'instance', 'task', 'installation', 'app', 'custom']),
   id: z.string().min(1).max(200),
@@ -277,7 +288,7 @@ const CONTENT = {
   scope: z.enum(['auto', 'desktop']).optional().describe('Dialogue only: "desktop" (a desktop-wide modal) is reserved for AuraOS system decisions — always downgraded to "auto" with a warning.'),
   timeoutMs: z.number().int().positive().optional().describe('Remove automatically after this many ms. Default: stays until handled.'),
   popupDurationMs: z.number().int().max(86_400_000).optional().describe('How long the pop-up shows, in ms (not the lifetime — that is timeoutMs). > 0: hide after that long, the item stays in the list. 0 or -1: the pop-up stays until the user handles it. Default: 8 s (high / urgent stay).'),
-  components: z.array(COMPONENT).max(8).optional().describe('Buttons (≤ 3 shown), options (≤ 4 radio / checkbox choices), select (dropdown, ≤ 50), combobox (searchable, ≤ 50, optional free text), an input, or progress.'),
+  components: z.array(COMPONENT).max(8).superRefine(refineComponents).optional().describe('Buttons (≤ 3 shown), options (chips ≤ 4, or display radio / checkbox lists ≤ 8, with descriptions), select (dropdown, ≤ 50), combobox (searchable, ≤ 50, optional free text), an input, or progress.'),
   context: CONTEXT.optional(),
 };
 
@@ -378,7 +389,7 @@ const NOTIFICATION_TOOLS: OwnTool[] = [
       image: z.string().max(2048).nullable().optional(),
       timeoutMs: z.number().int().positive().nullable().optional(),
       popupDurationMs: z.number().int().max(86_400_000).nullable().optional().describe('Pop-up display time (see create_notification); null = default.'),
-      components: z.array(COMPONENT).max(8).nullable().optional(),
+      components: z.array(COMPONENT).max(8).superRefine(refineComponents).nullable().optional(),
       context: CONTEXT.nullable().optional(),
       agent: AGENT,
     }),

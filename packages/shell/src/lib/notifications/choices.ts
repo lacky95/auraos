@@ -10,6 +10,17 @@
  */
 export interface Choice { id: string; label: string }
 
+export type OptionsDisplay = 'segmented' | 'radio' | 'checkbox';
+/**
+ * Effective display of an `options` component (mirrors core
+ * `optionsDisplay`): explicit `display`, else checkbox with `multiple`,
+ * else segmented chips.
+ */
+export function optionsDisplay(c: { multiple?: boolean | undefined; display?: string | undefined }): OptionsDisplay {
+  if (c.display === 'segmented' || c.display === 'radio' || c.display === 'checkbox') return c.display;
+  return c.multiple ? 'checkbox' : 'segmented';
+}
+
 /** Lower-case, accents stripped, whitespace collapsed. */
 export function fold(s: string): string {
   return s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();

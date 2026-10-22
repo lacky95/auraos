@@ -44,7 +44,13 @@ export type NotificationContextKind = 'activity' | 'instance' | 'task' | 'instal
 
 export type NotificationComponent =
   | { kind: 'input'; id: string; label?: string; placeholder?: string; multiline?: boolean; required?: boolean }
-  | { kind: 'options'; id: string; label?: string; multiple?: boolean; options: Array<{ id: string; label: string }> }
+  /**
+   * `display` (phase 6): 'segmented' (single choice chips, the default, ≤ 4
+   * options), 'radio' (single choice vertical list, ≤ 8) or 'checkbox'
+   * (`multiple: true` — its default and only display, ≤ 8). An option's
+   * `description` (≤ 200) shows under its label in the lists (a tooltip on chips).
+   */
+  | { kind: 'options'; id: string; label?: string; multiple?: boolean; display?: 'segmented' | 'radio' | 'checkbox'; options: Array<{ id: string; label: string; description?: string }> }
   /** Phase 6: a dropdown — one option id out of 1–50; `default` preselects one. */
   | { kind: 'select'; id: string; label?: string; placeholder?: string; required?: boolean; default?: string; options: Array<{ id: string; label: string }> }
   /**

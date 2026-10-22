@@ -46,6 +46,7 @@ import { answerFor, behaviourValidates, planButtons, type PlannedButton } from '
 import { draftValuesFor, getDrafts } from '../../../lib/notifications/drafts.ts';
 import { isLocked } from './placement.ts';
 import { choiceValue, renderComboboxField, renderSelectField, setChoiceValue } from './ChoiceField.ts';
+import { optionsDisplay } from '../../../lib/notifications/choices.ts';
 
 /** The item each rendered card currently shows (for patch-in-place). */
 const shown = new WeakMap<HTMLElement, Notification>();
@@ -352,17 +353,22 @@ function renderComponent(card: HTMLElement, n: Notification, c: Component, opts:
       return wrap;
     }
     case 'options': {
-      // Single choice → a segmented row of chips (native radios, visually
-      // hidden); multiple choice → checkbox rows. Both keep native semantics.
+      // display (phase 6): 'segmented' — single choice as a row of chips
+      // (native radios, visually hidden; description = tooltip); 'radio' — a
+      // vertical list of round radios; 'checkbox' (multiple) — checkbox rows.
+      // Lists show each option's description under its label. All of them
+      // keep native semantics (arrow keys move within a radio group).
+      const display = optionsDisplay(c);
       const fs = el('fieldset', 'aura-ntf-options aura-ctl-group');
       fs.dataset['multiple'] = String(!!c.multiple);
-      fs.dataset['style'] = c.multiple ? 'list' : 'segmented';
+      fs.dataset['style'] = display === 'checkbox' ? 'list' : display;
+      fs.dataset['display'] = display;
       fs.appendChild(el('legend', `aura-ntf-label aura-ctl-label${c.label ? '' : ' aura-sr-only'}`, c.label ?? (c.multiple ? 'Choose any' : 'Choose one')));
       const row = el('div', 'aura-ctl-choices');
       fs.appendChild(row);
       const name = `${base}-opt-${c.id}`;
       for (const o of c.options) {
-        const lab = el('label', `aura-ntf-option ${c.multiple ? 'aura-ctl-choice' : 'aura-ctl-seg'}`);
+        const lab = el('label', `aura-ntf-option ${display === 'segmented' ? 'aura-ctl-seg' : 'aura-ctl-choice'}`);
         const inp = el('input', c.multiple ? 'aura-ctl-check' : 'aura-ctl-radio');
         inp.type = c.multiple ? 'checkbox' : 'radio';
         inp.name = name;
@@ -377,7 +383,21 @@ function renderComponent(card: HTMLElement, n: Notification, c: Component, opts:
           if (value === undefined) return;
           void runAction(card, opts.actions.interact(n.id, { componentId: c.id, value, values: v }));
         });
-        lab.append(inp, el('span', 'aura-ctl-choice-text', o.label));
+        const desc = (o as { description?: string }).description;
+        if (display === 'segmented') {
+          lab.append(inp, el('span', 'aura-ctl-choice-text', o.label));
+          if (desc) lab.title = desc;
+        } else {
+          const body = el('span', 'aura-ctl-choice-body');
+          body.appendChild(el('span', 'aura-ctl-choice-text', o.label));
+          if (desc) {
+            const d = el('span', 'aura-ctl-choice-desc', desc);
+            d.id = `${name}-${o.id}-desc`;
+            inp.setAttribute('aria-describedby', d.id);
+            body.appendChild(d);
+          }
+          lab.append(inp, body);
+        }
         row.appendChild(lab);
       }
       return fs;

@@ -89,7 +89,7 @@ export interface WaitForResult {
 }
 
 /** Bump when the class changes incompatibly: `getNotificationService()` replaces older singletons. */
-export const NOTIFICATION_SERVICE_VERSION = 9;
+export const NOTIFICATION_SERVICE_VERSION = 10;
 
 /** Phase 5: how often the sweeper runs the retention pass. */
 export const DEFAULT_RETENTION_INTERVAL_MS = 60_000;

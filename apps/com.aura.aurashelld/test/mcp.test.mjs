@@ -646,6 +646,27 @@ test('notification tools: select / combobox components are forwarded; > 50 optio
   } finally { delete process.env.AURA_INSTANCE_TOKEN; }
 });
 
+test('notification tools: options display + descriptions are forwarded; mismatches refused before sending', async () => {
+  process.env.AURA_INSTANCE_TOKEN = 'tok';
+  try {
+    const calls = fakeNotifOs(({ method, path }) => {
+      if (method === 'POST' && path === '/api/notifications') return [201, { ok: true, notification: notif({ type: 'dialogue' }), warnings: [] }];
+      return [404, {}];
+    });
+    const client = await connect();
+    const radio = { kind: 'options', id: 'when', display: 'radio', options: Array.from({ length: 8 }, (_, i) => ({ id: `o${i}`, label: `O${i}`, description: `about ${i}` })) };
+    const r = await call(client, 'create_notification', { type: 'dialogue', title: 'When?', components: [radio] });
+    assert.equal(r.isError, undefined);
+    assert.deepEqual(calls[0].body.components, [radio]);
+    for (const bad of [
+      { kind: 'options', id: 'x', options: radio.options.slice(0, 5) },                         // segmented > 4
+      { kind: 'options', id: 'x', multiple: true, display: 'radio', options: radio.options.slice(0, 2) },
+      { kind: 'options', id: 'x', display: 'checkbox', options: radio.options.slice(0, 2) },
+    ]) assert.equal((await call(client, 'create_notification', { type: 'dialogue', title: 'x', components: [bad] })).isError, true);
+    assert.equal(calls.length, 1);
+  } finally { delete process.env.AURA_INSTANCE_TOKEN; }
+});
+
 test('notification tools: role buttons are forwarded; wait_for_answer / get_notification report the outcome', async () => {
   process.env.AURA_INSTANCE_TOKEN = 'tok';
   try {

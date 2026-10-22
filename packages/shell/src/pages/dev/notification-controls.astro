@@ -182,6 +182,23 @@ const themeCss = `.pv-dark { ${remap('dark')} } .pv-light { ${remap('light')} }`
         { kind: 'combobox', id: 'team', label: 'Team', default: 'shell', options: [{ id: 'core', label: 'Core' }, { id: 'shell', label: 'Shell' }, { id: 'apps', label: 'Apps' }] },
         { kind: 'button', role: 'cancel' }, { kind: 'button', role: 'submit', label: 'Ship it' },
       ] as Notification['components'] }), { mode: 'dialog', actions }));
+      // Phase 6: options display — segmented chips, radio list, checkbox list (with descriptions).
+      const disp = renderNotificationCard(base({ title: 'Deploy release 1.4', text: 'Three displays of the options component.', components: [
+        { kind: 'options', id: 'env', label: 'Segmented (default)', options: [{ id: 'dev', label: 'Dev', description: 'Development' }, { id: 'stg', label: 'Staging' }, { id: 'prod', label: 'Prod' }] },
+        { kind: 'options', id: 'when', label: 'Radio list', display: 'radio', options: [
+          { id: 'now', label: 'Deploy now', description: 'Starts within a minute; users may see a short reload.' },
+          { id: 'tonight', label: 'Tonight', description: 'In the 22:00 maintenance window.' },
+          { id: 'weekend', label: 'At the weekend', description: 'Disabled here to show the state.' },
+          { id: 'cancel', label: 'Cancel the release' },
+        ] },
+        { kind: 'options', id: 'notify', label: 'Checkbox list (multiple)', multiple: true, options: [{ id: 'team', label: 'Team channel', description: 'Posts in #release' }, { id: 'oncall', label: 'On-call', description: 'Pages the on-call engineer' }, { id: 'mail', label: 'E-mail' }] },
+        { kind: 'button', role: 'cancel' }, { kind: 'button', role: 'submit', label: 'Schedule' },
+      ] as Notification['components'] }), { mode: 'dialog', actions });
+      // States: tonight checked, weekend disabled, the checkbox group in its error state.
+      const tonight = disp.querySelector<HTMLInputElement>('input[value="tonight"]'); if (tonight) tonight.checked = true;
+      const weekend = disp.querySelector<HTMLInputElement>('input[value="weekend"]'); if (weekend) weekend.disabled = true;
+      disp.querySelector<HTMLElement>('fieldset[data-display="checkbox"]')?.setAttribute('aria-invalid', 'true');
+      section(root, 'Dialogue · options display: segmented / radio / checkbox').appendChild(disp);
       section(root, 'List card · locked + progress').appendChild(renderNotificationCard(base({ type: 'locked', title: 'Backup running', text: 'Do not shut down.', components: [{ kind: 'progress', value: null, label: 'Copying' }] as Notification['components'] }), { mode: 'list', actions }));
       section(root, 'Pop-up · simple, high').appendChild(renderNotificationCard(base({ type: 'simple', priority: 'high', components: [{ kind: 'button', id: 'open', label: 'Open', variant: 'primary' }] as Notification['components'] }), { mode: 'toast', actions }));
       const dlg = section(root, 'Dialogue frame (window / floating)', 'pv-dlg');
