@@ -1704,6 +1704,104 @@ const ssrVisibleViews = initialViews
   // add the view via pending.replaceWith(); the SSE event is just a duplicate.
   const pendingActivityOpens = new Map<string, number>();
 
+  // ── Restart that keeps windows (server: lib/appRestart.ts) ──────────────
+  // `app:restarting` names the instances about to go down. Their windows stay
+  // as loading placeholders — the teardown events that follow (destroyed,
+  // activity:closed, …) are expected and must not close them or strip them
+  // from their workspace. `app:restarted` maps every old viewId to the new
+  // one; the server has already remapped `os:workspaces` the same way.
+  const restartingInstances = new Set<string>();
+  const restartingApps = new Map<string, ReturnType<typeof setTimeout>>();
+  // A restart that never reports back (shell crash) must not pin dead
+  // windows forever — after this, fall back to the normal teardown.
+  const RESTART_GIVE_UP_MS = 10 * 60_000;
+
+  function slotIframe(viewId: string): HTMLIFrameElement | null {
+    return document.querySelector<HTMLIFrameElement>(`.app-slot[data-view-id="${CSS.escape(viewId)}"] iframe`);
+  }
+
+  function beginRestart(ev: { appId: string; instanceIds?: string[] }) {
+    const ids = ev.instanceIds ?? [];
+    for (const id of ids) restartingInstances.add(id);
+    clearTimeout(restartingApps.get(ev.appId));
+    restartingApps.set(ev.appId, setTimeout(() => failRestart(ev.appId, ids), RESTART_GIVE_UP_MS));
+    if (focusedInstanceId && restartingInstances.has(focusedInstanceId)) exitFocus();
+    views = views.map((v) => restartingInstances.has(v.instanceId)
+      ? { ...v, isLoading: true, lifecycleState: 'restarting' }
+      : v);
+    // Drop the old iframes now so each slot shows the boot skeleton, not a
+    // backend that is going away.
+    for (const v of views) if (restartingInstances.has(v.instanceId)) slotIframe(v.viewId)?.remove();
+    renderLayout();
+  }
+
+  async function finishRestart(ev: {
+    appId: string;
+    oldInstanceIds?: string[];
+    restored?: Array<{
+      from: string; to: string; instanceId: string; activityId?: string; path: string; title?: string;
+      minimizable?: boolean; history?: Array<{ path: string; title?: string }>; breadcrumb?: 'os' | 'off';
+    }>;
+  }) {
+    clearTimeout(restartingApps.get(ev.appId));
+    restartingApps.delete(ev.appId);
+    const oldIds = new Set(ev.oldInstanceIds ?? []);
+    // Load the remapped workspaces BEFORE the new views exist, so nothing
+    // adopts them onto the active workspace in between.
+    await workspaceClient.refresh().catch(() => undefined);
+    for (const id of oldIds) restartingInstances.delete(id);
+
+    const restored = ev.restored ?? [];
+    const byFrom = new Map(restored.map((r) => [r.from, r]));
+    const name = manifestCache.get(ev.appId)?.name ?? ev.appId;
+    const bg = manifestCache.get(ev.appId)?.backgroundService === true;
+    const toView = (r: (typeof restored)[number]): AppView => {
+      const nv = buildView(ev.appId, r.title ?? name, r.instanceId, r.activityId, r.path, 'resumed',
+        r.activityId ? !!r.minimizable && bg : bg);
+      return {
+        ...nv,
+        ...(r.history ? { history: r.history } : {}),
+        ...(r.breadcrumb ? { breadcrumb: r.breadcrumb } : {}),
+      } as AppView;
+    };
+
+    const placed = new Set<string>();
+    const next: AppView[] = [];
+    for (const v of views) {
+      if (!oldIds.has(v.instanceId)) { next.push(v); continue; }
+      // New ids can equal old ones (`#a1` → `#a1`): clear the slot's iframe
+      // so updateSlot mounts a fresh one on the new backend.
+      slotIframe(v.viewId)?.remove();
+      const r = byFrom.get(v.viewId);
+      if (!r || placed.has(r.to)) continue;
+      placed.add(r.to);
+      if (maximizedViewId === v.viewId) maximizedViewId = r.to;
+      next.push({ ...toView(r), zIndex: v.zIndex, state: v.state, isFocused: v.isFocused });
+    }
+    // Windows this tab never showed (opened from another browser) still come
+    // back; their workspace membership decides where.
+    for (const r of restored) {
+      if (placed.has(r.to) || next.some((v) => v.viewId === r.to)) continue;
+      placed.add(r.to);
+      next.push(toView(r));
+    }
+    views = next;
+    renderLayout();
+  }
+
+  /** Restart failed or never reported back: tear the windows down like a stop. */
+  function failRestart(appId: string, instanceIds: string[]) {
+    clearTimeout(restartingApps.get(appId));
+    restartingApps.delete(appId);
+    const ids = new Set(instanceIds);
+    for (const id of ids) restartingInstances.delete(id);
+    const dead = views.filter((v) => ids.has(v.instanceId));
+    if (dead.some((v) => v.viewId === maximizedViewId)) maximizedViewId = null;
+    views = views.filter((v) => !ids.has(v.instanceId));
+    for (const v of dead) workspaceClient.removeMember(v.viewId).catch(() => undefined);
+    renderLayout();
+  }
+
   // ViewIds of windows the user *just launched*. Every site that arms this set
   // also calls `markLaunchedHere` (lib/launchOrigin.ts): both answer the same
   // question — "did THIS browser start this window?" — one for focus, one so an
@@ -3237,6 +3335,14 @@ const ssrVisibleViews = initialViews
   // update pushed by Settings when the user (or any other tab) edits the
   // list.
   osEvents.subscribe(['app:*', 'activity:*', 'workspaces:*', 'workspace:*'], (ev: any) => {
+    if (ev.type === 'app:restarting')    { beginRestart(ev); return; }
+    if (ev.type === 'app:restarted')     { void finishRestart(ev); return; }
+    if (ev.type === 'app:restartFailed') { failRestart(ev.appId, ev.instanceIds ?? []); return; }
+    // Teardown of an instance that is restarting: keep its windows (above).
+    if ((ev.type === 'app:stateChanged' || ev.type === 'app:crashed') && restartingInstances.has(ev.instanceId)) return;
+    if (ev.type === 'activity:closed' && restartingInstances.has(ev.parentInstanceId)) return;
+    // The restart re-opens activities itself; app:restarted places them.
+    if (ev.type === 'activity:opened' && restartingApps.has(ev.appId)) return;
     if (ev.type === 'app:stateChanged') {
       // Terminal lifecycle states ⇒ the backing process is gone (forceKilled
       // from process manager, reconciler force-kill on identity drift, or a

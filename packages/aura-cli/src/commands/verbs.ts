@@ -17,6 +17,7 @@ import { enterSidecar } from '../lib/enter-sandbox.js';
 import { BACK, PromptCancelled, promptConfirm, promptMultiSelect } from '../lib/prompts.js';
 import { parseOutput, renderDocument, renderObjects, type OutputFormat } from '../lib/output.js';
 import { ownersOf, resolveInstance, resolveSidecar } from '../lib/resolve.js';
+import { reportRestart, type RestartResult } from './app.js';
 import {
   RESOURCES, fetchApps, findResource, fetchSidecars, liveInstances, resourcesFor, shortName, sidecarId, sidecarMatches,
   type Ctx, type MountDto, type PortDto, type ResourceDef,
@@ -336,11 +337,13 @@ async function startInstance(token: string): Promise<void> {
   fail(`no instance '${token}' — stopped instances are gone; start the app again with: aura run <app>`);
 }
 
-/** Stop an instance and start a fresh one of its app (a multi-instance app gets a new id). */
+/**
+ * Stop an instance, start a fresh one of its app (a multi-instance app gets a
+ * new id) and reopen the instance's windows on it where they were.
+ */
 async function restartInstance(token: string): Promise<void> {
   const inst = await resolveInstance(token);
-  await dispatch(['inst', 'stop', inst.instanceId]);
-  await dispatch(['app', 'start', inst.appId]);
+  reportRestart(await api.post<RestartResult>(`/api/instances/${encodeURIComponent(inst.instanceId)}/restart`));
 }
 
 /**
@@ -473,7 +476,7 @@ export function registerVerbs(program: Command): void {
 
   program
     .command('restart <resource> <names...>')
-    .description('Restart apps (all instances → one fresh), single instances, or services.')
+    .description('Restart apps (all instances → one fresh), single instances, or services. Open windows come back on the same workspace, slot and path.')
     .addHelpText('after', resourcesLine('restart') + examples([
       'aura restart app com.aura.notepad',
       'aura restart inst com.aura.terminal-13   # stop it, start a fresh instance of its app',

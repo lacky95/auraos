@@ -66,6 +66,9 @@ export const GET: APIRoute = ({ url }) => {
       const onWsChanged     = (ev: unknown) => send('workspaces:changed',  ev);
       const onWsActivated   = (ev: unknown) => send('workspace:activated', ev);
       const onKvChanged     = (ev: unknown) => send('kv:changed',          ev);
+      const onRestarting    = (ev: unknown) => send('app:restarting',      ev);
+      const onRestarted     = (ev: unknown) => send('app:restarted',       ev);
+      const onRestartFailed = (ev: unknown) => send('app:restartFailed',   ev);
 
       OsEventBus.on('app:stateChanged',   onStateChanged);
       OsEventBus.on('app:crashed',        onCrashed);
@@ -84,6 +87,9 @@ export const GET: APIRoute = ({ url }) => {
       OsEventBus.on('workspaces:changed',  onWsChanged);
       OsEventBus.on('workspace:activated', onWsActivated);
       OsEventBus.on('kv:changed',          onKvChanged);
+      OsEventBus.on('app:restarting',      onRestarting);
+      OsEventBus.on('app:restarted',       onRestarted);
+      OsEventBus.on('app:restartFailed',   onRestartFailed);
 
       // 10s keeps idle connections from being killed by reverse proxies
       // (Nginx default 60s, Cloudflare 100s) without flooding the wire.
@@ -109,6 +115,9 @@ export const GET: APIRoute = ({ url }) => {
         OsEventBus.off('workspaces:changed',  onWsChanged);
         OsEventBus.off('workspace:activated', onWsActivated);
         OsEventBus.off('kv:changed',          onKvChanged);
+        OsEventBus.off('app:restarting',      onRestarting);
+        OsEventBus.off('app:restarted',       onRestarted);
+        OsEventBus.off('app:restartFailed',   onRestartFailed);
       };
 
       (this as unknown as { _cleanup: () => void })._cleanup = cleanup;

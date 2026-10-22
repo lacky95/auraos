@@ -16,6 +16,31 @@ export interface OsEvents {
   'app:crashed': { instanceId: string; appId: string; error: string };
   /** The set of sidecars attached to an instance changed (appeared, vanished, or changed state). */
   'app:sidecarsChanged': { instanceId: string; appId: string; count: number };
+  /**
+   * Restart that keeps windows (shell lib/appRestart.ts). `restarting` comes
+   * before the old instances go down, so the desktop keeps their windows as
+   * placeholders; `restarted` maps each old viewId to the new one.
+   */
+  'app:restarting': { appId: string; instanceIds: string[]; viewIds: string[] };
+  'app:restarted': {
+    appId: string;
+    oldInstanceIds: string[];
+    instanceId: string;
+    restored: Array<{
+      from: string;
+      to: string;
+      instanceId: string;
+      activityId?: string;
+      path: string;
+      title?: string;
+      minimizable?: boolean;
+      history?: Array<{ path: string; title?: string }>;
+      breadcrumb?: 'os' | 'off';
+    }>;
+    failed: Array<{ from: string; error: string }>;
+    workspacesUpdated: boolean;
+  };
+  'app:restartFailed': { appId: string; instanceIds: string[]; error: string };
   'app:installed': { appId: string };
   'app:removed': { appId: string };
   /** A user toggled an app's enable state (Settings → Apps or `aura enable/disable app`). */

@@ -15,6 +15,21 @@ const BUILTIN_PERMISSIONS_LIST: string[] = [...BUILTIN_PERMISSIONS];
  */
 const ENFORCED_PERMISSIONS: string[] = [...CORE_ENFORCED];
 
+/** POST /api/apps/<id>/restart and /api/instances/<id>/restart (shell lib/appRestart.ts). */
+export interface RestartResult {
+  instanceId: string;
+  restored: Array<{ from: string; to: string; path: string }>;
+  failed: Array<{ from: string; error: string }>;
+}
+
+export function reportRestart(res: RestartResult): void {
+  const n = res.restored.length;
+  const windows = n === 0 ? '' : ` · reopened ${n} window${n === 1 ? '' : 's'}`;
+  ok(`restarted, new instance: ${color.bold(res.instanceId)}${windows}`);
+  for (const r of res.restored) console.log(`  ${color.dim(r.from)} → ${r.to}  ${color.dim(r.path)}`);
+  for (const f of res.failed) warn(`could not reopen ${f.from}: ${f.error}`);
+}
+
 interface ManifestLite {
   id: string;
   name: string;
@@ -89,11 +104,9 @@ export function registerApp(program: Command): void {
 
   app
     .command('restart <appId>')
-    .description('Stop all instances and start one new instance.')
+    .description('Stop all instances, start one new instance and reopen their windows where they were.')
     .action(async (appId: string) => {
-      await api.post(`/api/apps/${encodeURIComponent(appId)}/stop`);
-      const res = await api.post<{ instanceId: string }>(`/api/apps/${encodeURIComponent(appId)}/start`);
-      ok(`restarted, new instance: ${color.bold(res.instanceId)}`);
+      reportRestart(await api.post<RestartResult>(`/api/apps/${encodeURIComponent(appId)}/restart`));
     });
 
   app
