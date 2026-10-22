@@ -287,7 +287,7 @@ const CONTENT = {
   blocking: z.boolean().optional().describe('Dialogue only: make the sender\'s OWN window inert until answered. Works only on a window of the sending app — agents have none, so it is always turned off with a warning.'),
   scope: z.enum(['auto', 'desktop']).optional().describe('Dialogue only: "desktop" (a desktop-wide modal) is reserved for AuraOS system decisions — always downgraded to "auto" with a warning.'),
   timeoutMs: z.number().int().positive().optional().describe('Remove automatically after this many ms. Default: stays until handled.'),
-  popupDurationMs: z.number().int().max(86_400_000).optional().describe('How long the pop-up shows, in ms (not the lifetime — that is timeoutMs). > 0: hide after that long, the item stays in the list. 0 or -1: the pop-up stays until the user handles it. Default: 8 s (high / urgent stay).'),
+  popupDurationMs: z.number().int().max(86_400_000).optional().describe('How long the pop-up shows, in ms (not the lifetime — that is timeoutMs). > 0: hide after that long, the item stays in the list. 0 or -1: the pop-up stays until the user handles it. Default: 8 s (high / urgent stay). Ignored for activity-linked items (context = the sender\'s own window): those pop-ups are sticky.'),
   components: z.array(COMPONENT).max(8).superRefine(refineComponents).optional().describe('Buttons (≤ 3 shown), options (chips ≤ 4, or display radio / checkbox lists ≤ 8, with descriptions), select (dropdown, ≤ 50), combobox (searchable, ≤ 50, optional free text), an input, or progress.'),
   context: CONTEXT.optional(),
 };

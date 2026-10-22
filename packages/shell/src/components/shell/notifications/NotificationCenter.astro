@@ -172,6 +172,8 @@ import Icon from '../../ui/Icon.astro';
   .notif-center-group[data-group="locked"], .notif-center-group[data-group="decisions"] { opacity: 0.6; cursor: default; justify-content: flex-start; gap: 4px; }
   .notif-center-group-count { font-variant-numeric: tabular-nums; color: var(--grp, var(--aura-color-text-dim)); border: 1px solid currentColor; padding: 0 5px; min-width: 1.5em; text-align: center; }
   .notif-center[data-layout="phone"] .notif-center-menu-item { min-height: 40px; }
+  .notif-center-linked-note { color: var(--aura-color-warning); }
+  .notif-center-linked-note::before { content: ''; display: inline-block; width: 5px; height: 5px; margin-right: 5px; transform: rotate(45deg); background: var(--aura-color-warning); }
   .notif-center-clear:hover:not(:disabled), .notif-center-clear:focus-visible,
   .notif-center-close:hover, .notif-center-close:focus-visible {
     color: var(--aura-color-primary); border-color: var(--aura-color-primary); box-shadow: var(--aura-glow-primary); outline: none;
@@ -214,6 +216,7 @@ import Icon from '../../ui/Icon.astro';
     GROUP_LABEL, GROUP_ORDER, NEVER_BULK, clearPlan, confirmFor, groupItems, idsFor, inBatches, resultText,
     type ClearGroupId, type Groups,
   } from '../../../lib/notifications/clearGroups.ts';
+  import { isActivityLinked } from '../../../lib/notifications/activityLinks.ts';
   import type { Notification } from '../../../lib/notifications/api.ts';
   import { renderNotificationCard, updateNotificationCard, type CardOptions } from './NotificationCard.ts';
   import { Disposer, pinDock, watchLock, watchPlacement } from './placement.ts';
@@ -520,6 +523,15 @@ import Icon from '../../ui/Icon.astro';
       head.className = 'notif-center-clear-head';
       const total = Object.values(g).reduce((a, x) => a + x.length, 0);
       head.textContent = `Clear all · ${total}`;
+      // Activity-linked items keep their group; a note says how many are tied to windows.
+      const vd = (window as unknown as { auraViewDetail?: (i: string, a?: string) => import('../../../lib/notifications/dialogs.ts').ViewDetail | null }).auraViewDetail;
+      const linkedN = rt.store.sorted.filter((x) => isActivityLinked(x, (c) => vd?.(c.instanceId, c.activityId) ?? null)).length;
+      if (linkedN) {
+        const note = document.createElement('div');
+        note.className = 'notif-center-menu-note notif-center-linked-note';
+        note.textContent = `${linkedN} linked to windows`;
+        nodes.push(note);
+      }
       menu.replaceChildren(head, ...nodes);
       anchorClearMenu();
       const target = (focusedKey && menu.querySelector<HTMLElement>(`[data-entry="${CSS.escape(focusedKey)}"]`))

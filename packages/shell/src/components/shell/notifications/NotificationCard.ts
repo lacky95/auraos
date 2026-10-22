@@ -41,6 +41,7 @@ import {
 import { contextTarget, goToContext, type WindowHost } from '../../../lib/notifications/context.ts';
 import { createConfirmInline, type ConfirmInline } from './ConfirmInline.ts';
 import { CARD_CONTROL_SELECTOR, opensDialogOnActivate } from '../../../lib/notifications/dialogs.ts';
+import { linkPresentation, linkedView } from '../../../lib/notifications/activityLinks.ts';
 import { fieldErrorsFrom, missingRequired, planCardUpdate, sendsOnFieldChange } from '../../../lib/notifications/cardPatch.ts';
 import { answerFor, behaviourValidates, planButtons, type PlannedButton } from '../../../lib/notifications/buttons.ts';
 import { draftValuesFor, getDrafts } from '../../../lib/notifications/drafts.ts';
@@ -808,14 +809,35 @@ export function renderNotificationCard(n: Notification, opts: CardOptions): HTML
     });
     foot.appendChild(ans);
   }
-  if (target?.actionable && !dialogMode) {
+  // Phase 4: an activity-linked item (its window exists, sender owns it):
+  // "Go to activity" in warning yellow + the yellow accent on the card.
+  const host = opts.host ?? (window as unknown as WindowHost);
+  const lv = linkedView(n, (c) => host.auraViewDetail?.(c.instanceId, c.activityId) ?? null);
+  const link = linkPresentation(n, lv, lv ? opts.appLookup?.(lv.appId)?.name : undefined);
+  if (link) card.dataset['linked'] = 'true';
+  if (link && !dialogMode) {
+    const go = el('button', 'aura-ntf-link-btn aura-ntf-goto-activity');
+    go.type = 'button';
+    go.dataset['focusKey'] = 'act:goto';
+    go.append(el('span', 'aura-ntf-goto-label', link.buttonLabel));
+    if (link.detail) go.append(el('span', 'aura-ntf-goto-detail', link.detail));
+    go.title = link.detail ? `${link.buttonLabel} · ${link.detail}` : link.buttonLabel;
+    go.setAttribute('aria-label', link.ariaLabel);
+    go.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const dlg = (window as unknown as { __auraDialogs?: { goToActivity?: (id: string) => Promise<boolean> } }).__auraDialogs;
+      const ok = dlg?.goToActivity ? await dlg.goToActivity(n.id) : (await goToContext(n.context, host)) !== 'none';
+      if (!ok) setStatus(card, 'That window is not open any more');
+      else opts.onNavigated?.(n);
+    });
+    foot.appendChild(go);
+  } else if (target?.actionable && !dialogMode) {
     const go = el('button', 'aura-ntf-link-btn', 'Go to task');
     go.type = 'button';
     go.dataset['focusKey'] = 'act:goto';
     go.title = `Go to ${target.label}`;
     go.addEventListener('click', async (e) => {
       e.stopPropagation();
-      const host = opts.host ?? (window as unknown as WindowHost);
       const r = await goToContext(n.context, host);
       if (r === 'none') setStatus(card, 'That window is not open any more');
       else opts.onNavigated?.(n);

@@ -116,6 +116,8 @@ export interface NotificationInput {
    * removed or expired; it holds one of the 3 pop-up slots and is never
    * pushed out. Absent: the default (8 s for low / medium; high / urgent
    * stay until handled). `null` in an update goes back to the default.
+   * Activity-linked items (context = your own window) ignore it: their
+   * pop-up is always sticky.
    */
   popupDurationMs?: number;
   /**

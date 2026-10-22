@@ -98,7 +98,50 @@ export function coverWindow(slot: HTMLElement): () => void {
   };
 }
 
+/**
+ * The yellow title-bar badge of a window with activity-linked items
+ * (count; `unseen` adds a glow, a rise in count pulses once). Created at
+ * runtime in `.slot-controls`; styled by NotificationStyles (is:global) with
+ * a selector that outranks the chrome's `.app-slot .slot-controls button`.
+ */
+export function syncWindowBadge(slot: HTMLElement, count: number, opts: { unseen?: boolean; hint?: string; onClick?: () => void } = {}): HTMLButtonElement | null {
+  const controls = slot.querySelector<HTMLElement>(':scope > .slot-chrome .slot-controls');
+  let badge = controls?.querySelector<HTMLButtonElement>(':scope > .aura-ntf-win-badge') ?? null;
+  if (count <= 0) {
+    delete slot.dataset['ntfLinked'];
+    badge?.remove();
+    return null;
+  }
+  slot.dataset['ntfLinked'] = String(count);
+  if (!controls) return null;
+  if (!badge) {
+    badge = document.createElement('button');
+    badge.type = 'button';
+    badge.className = 'aura-ntf-win-badge';
+    badge.dataset['tone'] = 'warning';
+    badge.addEventListener('click', (e) => { e.stopPropagation(); (badge as HTMLButtonElement & { __onClick?: () => void }).__onClick?.(); });
+    controls.prepend(badge);
+  }
+  (badge as HTMLButtonElement & { __onClick?: () => void }).__onClick = opts.onClick;
+  const prev = Number(badge.textContent || '0');
+  badge.textContent = String(count);
+  if (opts.hint) { badge.title = opts.hint; badge.setAttribute('aria-label', opts.hint); }
+  if (opts.unseen) badge.dataset['unseen'] = 'true'; else delete badge.dataset['unseen'];
+  if (count > prev) {
+    // One gentle pulse on arrival (CSS; none under reduced motion).
+    delete badge.dataset['pulse'];
+    void badge.offsetWidth;
+    badge.dataset['pulse'] = 'true';
+    badge.addEventListener('animationend', () => { delete badge!.dataset['pulse']; }, { once: true });
+  }
+  return badge;
+}
+
 export interface WindowDialogOptions {
+  /** Activity-linked: start as the compact yellow bar (phase 4). */
+  collapsed?: boolean;
+  onAnswer?: () => void;
+  onCollapseChange?: (collapsed: boolean) => void;
   blocking: boolean;
   takeFocus: boolean;
   actions: CardActions;
@@ -116,8 +159,13 @@ export function mountWindowDialog(slot: HTMLElement, n: Notification, opts: Wind
     modal: opts.blocking,
     collapsible: !opts.blocking,
     ...(opts.blocking ? {} : { onLater: opts.onLater }),
-    kicker: opts.blocking ? 'Answer to continue' : 'Question',
+    ...(opts.onAnswer ? { onAnswer: opts.onAnswer } : {}),
+    ...(opts.onCollapseChange ? { onCollapseChange: opts.onCollapseChange } : {}),
+    // A panel inside its own window is always activity-linked: yellow accent.
+    linked: true,
+    kicker: opts.blocking ? 'Answer to continue' : n.type === 'dialogue' ? 'Question' : 'Notification',
   });
+  if (opts.collapsed) frame.setCollapsed(true);
   frame.root.classList.add('aura-dlg-window');
   frame.root.dataset['blocking'] = String(opts.blocking);
   host.appendChild(frame.root);
@@ -129,6 +177,7 @@ export function mountWindowDialog(slot: HTMLElement, n: Notification, opts: Wind
   return {
     update: (next) => frame.update(next),
     focus: () => frame.focus(),
+    setCollapsed: (c) => { frame.setCollapsed(c); if (!c) focusFirst(frame.root); },
     dispose: (o) => {
       if (disposed) return;
       disposed = true;

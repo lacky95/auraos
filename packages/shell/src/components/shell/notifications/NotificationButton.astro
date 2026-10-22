@@ -49,6 +49,7 @@ import Icon from '../../ui/Icon.astro';
   <span class="dock-notif-counts" aria-hidden="true"><span class="dock-notif-new-n">0</span><span class="dock-notif-total">/0</span></span>
   <span class="dock-notif-latest" aria-hidden="true" data-unseen="false">
     <span class="dock-notif-dot"></span>
+    <span class="dock-notif-linked" aria-hidden="true" title="Linked to a window"></span>
     <span class="dock-notif-glyph" data-glyph="lock"><Icon name="lock" /></span>
     <span class="dock-notif-glyph" data-glyph="pin"><Icon name="pin" /></span>
     <span class="dock-notif-latest-text"></span>
@@ -137,6 +138,9 @@ import Icon from '../../ui/Icon.astro';
   .dock-notif-btn[data-screen-locked="true"] .dock-notif-latest { visibility: hidden; }
   .dock-notif-latest-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dock-notif-dot { width: 7px; height: 7px; flex-shrink: 0; border-radius: 50%; background: var(--aura-color-primary); }
+  /* Activity-linked snippet: a small yellow diamond (same warning yellow as the window hint). */
+  .dock-notif-linked { display: none; width: 6px; height: 6px; flex-shrink: 0; transform: rotate(45deg); background: var(--aura-color-warning); box-shadow: 0 0 4px var(--aura-color-warning); }
+  .dock-notif-latest[data-linked="true"] .dock-notif-linked { display: inline-block; }
   .dock-notif-latest[data-prio="low"] .dock-notif-dot { background: var(--aura-color-text-dim); }
   .dock-notif-latest[data-prio="high"] .dock-notif-dot { background: var(--aura-color-warning); }
   .dock-notif-latest[data-prio="urgent"] .dock-notif-dot { background: var(--aura-color-danger); }
@@ -162,7 +166,8 @@ import Icon from '../../ui/Icon.astro';
   import { senderLabel } from '../../../lib/notifications/format.ts';
   import type { StoreSnapshot } from '../../../lib/notifications/store.ts';
   import { buttonTierMax, buttonView } from '../../../lib/notifications/buttonView.ts';
-  import { opensDialogOnActivate } from '../../../lib/notifications/dialogs.ts';
+  import { opensDialogOnActivate, type ViewDetail } from '../../../lib/notifications/dialogs.ts';
+  import { isActivityLinked } from '../../../lib/notifications/activityLinks.ts';
   import { isLocked, watchLock } from './placement.ts';
   const btn = document.getElementById('dock-notif-btn') as HTMLButtonElement | null;
   if (btn) {
@@ -228,7 +233,12 @@ import Icon from '../../ui/Icon.astro';
         latest.dataset['unseen'] = String(v.latest.unseen);
         latest.dataset['locked'] = String(v.latest.locked);
         latest.dataset['pinned'] = String(v.latest.pinned);
+        // Phase 4: a yellow diamond when that item is activity-linked.
+        const it = snap.mostImportant;
+        const vd = (window as unknown as { auraViewDetail?: (i: string, a?: string) => ViewDetail | null }).auraViewDetail;
+        latest.dataset['linked'] = String(!!it && !isLocked() && isActivityLinked(it, (c) => vd?.(c.instanceId, c.activityId) ?? null));
       } else {
+        latest.dataset['linked'] = 'false';
         latestText.textContent = '';
         delete latest.dataset['prio'];
         latest.dataset['unseen'] = 'false';

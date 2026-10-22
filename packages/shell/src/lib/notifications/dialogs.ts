@@ -37,6 +37,7 @@
  */
 import type { Notification } from './api.ts';
 import type { StoreChange, StoreSnapshot } from './store.ts';
+import { CollapseMemory, isActivityLinked, linkCounts, linkedView } from './activityLinks.ts';
 
 export type ViewState = 'visible' | 'other-workspace' | 'minimized' | 'none';
 
@@ -208,6 +209,12 @@ export interface MountOptions {
   takeFocus: boolean;
   /** The user put it off ("Later" / Escape) — it stays in the list. */
   onLater: () => void;
+  /** Activity-linked dock (phase 4): start as the compact yellow bar. */
+  collapsed?: boolean;
+  /** The collapsed bar's Answer / a click on it (the controller decides how to open). */
+  onAnswer?: () => void;
+  /** The user collapsed / expanded the panel (its chevron) — the controller remembers it. */
+  onCollapseChange?: (collapsed: boolean) => void;
 }
 
 export interface MountedDialog {
@@ -219,6 +226,8 @@ export interface MountedDialog {
    * wipe / detach (privacy, or the slot is gone anyway).
    */
   dispose(opts?: { instant?: boolean }): void;
+  /** Collapse to / expand from the compact bar (activity-linked panels). */
+  setCollapsed?(c: boolean): void;
 }
 
 export interface DialogHost {
@@ -231,6 +240,8 @@ export interface DialogHost {
   /** True when focus is inside that window's iframe (or nowhere in particular). */
   focusInWindowOrNowhere(viewId: string): boolean;
   mount(n: Notification, placement: Exclude<Placement, { kind: 'wait' } | { kind: 'none' }>, opts: MountOptions): MountedDialog | null;
+  /** Where the collapsed state of in-window panels is kept (per tab). Optional. */
+  collapseMemory?: CollapseMemory;
   /** Pending-dialogue markers: count per minimized view / per workspace. */
   setMarkers(byView: ReadonlyMap<string, number>, byWorkspace: ReadonlyMap<string, number>): void;
 }
@@ -240,6 +251,8 @@ interface OpenDialog {
   intent: DialogIntent;
   placement: Placement;
   mounted: MountedDialog;
+  /** The activity-linked compact bar (auto-mounted, collapsed, never blocking). */
+  docked?: boolean;
 }
 
 interface Waiting {
@@ -294,10 +307,24 @@ export class DialogController {
   /** The user pressed "Answer" (list, pop-up). */
   async answer(id: string): Promise<boolean> {
     const n = this.items.get(id);
-    if (!n || n.state !== 'active' || !(n.type === 'dialogue' || hasFormFields(n))) return false;
+    if (!n || n.state !== 'active') return false;
+    // An activity-linked banner (any type) expands in place.
+    if (!(n.type === 'dialogue' || hasFormFields(n)) && !this.open.get(id)?.docked) return false;
     this.later.delete(id);
     const o = this.open.get(id);
-    if (o) { o.mounted.focus(); return true; }
+    if (o) {
+      // The docked bar of a BLOCKING dialogue becomes the real (blocking) one.
+      if (o.docked && n.blocking && n.type === 'dialogue') {
+        o.mounted.dispose({ instant: true });
+        this.open.delete(id);
+      } else {
+        o.docked = false;
+        this.memory.set(id, false);
+        o.mounted.setCollapsed?.(false);
+        o.mounted.focus();
+        return true;
+      }
+    }
     const ctx = windowContext(n);
     const view = ctx ? this.host.viewDetail(ctx) : null;
     const p = decidePlacement(n, { intent: 'user', view, phone: this.host.phone() });
@@ -310,6 +337,30 @@ export class DialogController {
       return true;
     }
     return this.mountFor(n, 'user', p);
+  }
+
+  /**
+   * "Go to activity" (list / pop-up): reveal the linked window (the user
+   * asked), then open its in-window panel expanded. False when not linked.
+   */
+  async goToActivity(id: string): Promise<boolean> {
+    const n = this.items.get(id);
+    if (!n) return false;
+    const ctx = windowContext(n);
+    if (!ctx || !isActivityLinked(n, (c) => this.host.viewDetail(c))) return false;
+    await this.host.reveal(ctx);
+    this.onViewsChanged();
+    const o = this.open.get(id);
+    if (o) {
+      if (o.docked && n.blocking && n.type === 'dialogue') return this.answer(id);
+      o.docked = false;
+      this.memory.set(id, false);
+      o.mounted.setCollapsed?.(false);
+      o.mounted.focus();
+      return true;
+    }
+    if (n.type === 'dialogue' || hasFormFields(n)) return this.answer(id);
+    return true;
   }
 
   /** Window layout changed (slot added / removed, workspace switch, restore). */
@@ -327,7 +378,8 @@ export class DialogController {
       if (v && v.state === 'visible' && v.viewId === viewId && shapeOk) continue;
       o.mounted.dispose({ instant: true });
       this.open.delete(id);
-      if (v && v.state !== 'none') this.waiting.set(id, { n: o.n, intent: o.intent });
+      // A docked bar comes back by itself (ensureDocked); an opened panel re-attaches.
+      if (!o.docked && v && v.state !== 'none') this.waiting.set(id, { n: o.n, intent: o.intent });
     }
     for (const [id, w] of [...this.waiting]) {
       const n = this.items.get(id) ?? w.n;
@@ -349,7 +401,7 @@ export class DialogController {
       for (const [id, o] of [...this.open]) {
         o.mounted.dispose({ instant: true });   // privacy: never animate under a lock
         this.open.delete(id);
-        this.waiting.set(id, { n: o.n, intent: o.intent });
+        if (!o.docked) this.waiting.set(id, { n: o.n, intent: o.intent });
       }
       this.refreshMarkers();
       return;
@@ -414,12 +466,18 @@ export class DialogController {
     const viewId = p.kind === 'window' ? p.viewId : p.kind === 'floating' ? p.blockViewId : undefined;
     const takeFocus = intent === 'user' || p.kind === 'desktop'
       || (blocks && !!viewId && this.host.focusInWindowOrNowhere(viewId));
+    // A re-attached (not user-opened) window panel keeps the collapsed state the user left it in.
+    const remembered = p.kind === 'window' && intent !== 'user' && !p.blocking ? this.memory.get(n.id) === true : false;
+    if (intent === 'user') this.memory.set(n.id, false);
     const mounted = this.host.mount(n, p, {
-      takeFocus,
+      takeFocus: takeFocus && !remembered,
       onLater: () => this.putOff(n.id),
+      onAnswer: () => { void this.answer(n.id); },
+      onCollapseChange: (c) => this.collapseChanged(n.id, c),
+      ...(remembered ? { collapsed: true } : {}),
     });
     if (!mounted) return false;
-    this.open.set(n.id, { n, intent, placement: p, mounted });
+    this.open.set(n.id, { n, intent, placement: p, mounted, ...(remembered ? { docked: true } : {}) });
     this.waiting.delete(n.id);
     this.refreshMarkers();
     return true;
@@ -429,30 +487,80 @@ export class DialogController {
     const o = this.open.get(id);
     if (!o) return;
     if (!canPutOff(o.placement)) return;   // blocking / desktop decision: only resolving closes it
+    // Activity-linked window panel: Later / ✕ collapse it to the yellow bar —
+    // it stays until the item is handled.
+    if (o.placement.kind === 'window' && o.mounted.setCollapsed && isActivityLinked(o.n, (c) => this.host.viewDetail(c))) {
+      o.mounted.setCollapsed(true);
+      o.docked = true;
+      this.memory.set(id, true);
+      return;
+    }
     o.mounted.dispose();
     this.open.delete(id);
     this.later.add(id);
     this.refreshMarkers();
   }
 
+  /** The user toggled the panel's chevron: remember it; a collapsed one is the docked bar. */
+  private collapseChanged(id: string, collapsed: boolean): void {
+    this.memory.set(id, collapsed);
+    const o = this.open.get(id);
+    if (o) o.docked = collapsed;
+  }
+
+  private get memory(): CollapseMemory {
+    return (this.host.collapseMemory ??= new CollapseMemory());
+  }
+
   private close(id: string, instant = false): void {
+    this.memory.clear(id);
     const o = this.open.get(id);
     if (o) { try { o.mounted.dispose({ instant }); } catch { /* ignore */ } this.open.delete(id); }
     this.waiting.delete(id);
     this.later.delete(id);
   }
 
+  /**
+   * Markers: every activity-linked item counts for its window (title-bar
+   * badge, minimized-strip chip) and, when the window is on another
+   * workspace, for that workspace (pill / ‹ › arrows). Also docks the
+   * compact bars into visible windows.
+   */
   private refreshMarkers(): void {
-    const byView = new Map<string, number>();
-    const byWs = new Map<string, number>();
-    for (const [id, w] of this.waiting) {
-      const n = this.items.get(id) ?? w.n;
-      const ctx = windowContext(n);
-      const v = ctx ? this.host.viewDetail(ctx) : null;
-      if (!v || v.state === 'visible' || v.state === 'none') continue;
-      if (v.state === 'minimized') byView.set(v.viewId, (byView.get(v.viewId) ?? 0) + 1);
-      if (v.state === 'other-workspace' && v.workspaceId) byWs.set(v.workspaceId, (byWs.get(v.workspaceId) ?? 0) + 1);
-    }
-    this.host.setMarkers(byView, byWs);
+    const lc = linkCounts([...this.items.values()], (c) => this.host.viewDetail(c));
+    this.linkedIds = lc.idsByView;
+    this.host.setMarkers(lc.byView, lc.byWorkspace);
+    this.ensureDocked();
   }
+
+  private linkedIds = new Map<string, string[]>();
+  /** Linked item ids of a window (badge click). */
+  linkedFor(viewId: string): string[] { return [...(this.linkedIds.get(viewId) ?? [])]; }
+
+  /**
+   * Activity-linked items always have a panel in their visible window
+   * (desktop): the compact yellow bar unless opened. Never while locked.
+   */
+  private ensureDocked(): void {
+    if (this.docking || this.disposed || this.host.locked() || this.host.phone()) return;
+    this.docking = true;
+    try {
+      for (const n of this.items.values()) {
+        if (this.open.has(n.id) || this.waiting.has(n.id)) continue;
+        const v = linkedView(n, (c) => this.host.viewDetail(c));
+        if (!v || v.state !== 'visible') continue;
+        // Collapsed unless the user expanded it before (remembered per tab).
+        // (A blocking dialogue always docks as the bar: blocking starts with Answer.)
+        const asBar = (this.memory.get(n.id) ?? true) || (n.blocking && n.type === 'dialogue');
+        const mounted = this.host.mount(n, { kind: 'window', viewId: v.viewId, blocking: false, layout: 'panel' }, {
+          takeFocus: false, collapsed: asBar,
+          onLater: () => this.putOff(n.id),
+          onAnswer: () => { void this.answer(n.id); },
+          onCollapseChange: (c) => this.collapseChanged(n.id, c),
+        });
+        if (mounted) this.open.set(n.id, { n, intent: 'auto', placement: { kind: 'window', viewId: v.viewId, blocking: false, layout: 'panel' }, mounted, docked: asBar });
+      }
+    } finally { this.docking = false; }
+  }
+  private docking = false;
 }

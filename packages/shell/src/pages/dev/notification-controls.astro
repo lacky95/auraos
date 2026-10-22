@@ -37,6 +37,13 @@ const themeCss = `.pv-dark { ${remap('dark')} } .pv-light { ${remap('light')} }`
     .pv-phone { width: 360px; max-width: 100%; }
     .pv-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
     .pv-dlg { position: relative; max-width: 440px; }
+    .pv-win { display: flex; flex-direction: column; width: 440px; max-width: 100%; height: 300px; background: var(--aura-color-surface); border: 1px solid var(--aura-color-border); }
+    .pv-win .slot-chrome { display: flex; align-items: center; justify-content: space-between; height: 28px; padding: 0 8px; background: var(--aura-color-surface-2); border-bottom: 1px solid var(--aura-color-border); }
+    .pv-win .slot-title { color: var(--aura-color-primary); font-size: 0.75rem; letter-spacing: 0.08em; }
+    .pv-win .slot-controls { display: flex; align-items: center; gap: 4px; }
+    .pv-win .pv-x { font: inherit; background: transparent; color: var(--aura-color-text-dim); border: 1px solid var(--aura-color-border); }
+    .pv-win .slot-body { flex: 1; position: relative; overflow: clip; }
+    .pv-app { padding: 12px; color: var(--aura-color-text-dim); font-size: 0.75rem; }
     .pv-clear { position: relative; width: 380px; max-width: 100%; height: 300px; background: var(--aura-color-surface); border: 1px solid var(--aura-color-border); font-size: 0.7rem; }
     .pv-clear-head { display: flex; gap: 8px; align-items: center; padding: 8px; border-bottom: 1px solid var(--aura-color-border); letter-spacing: 0.08em; }
     .pv-clear-btn { font: inherit; text-transform: uppercase; padding: 3px 8px; background: transparent; color: var(--aura-color-text-dim); border: 1px solid var(--aura-color-border); }
@@ -121,6 +128,7 @@ const themeCss = `.pv-dark { ${remap('dark')} } .pv-light { ${remap('light')} }`
   <script>
     import { renderNotificationCard, type CardActions } from '../../components/shell/notifications/NotificationCard.ts';
     import { buildDialogFrame, playExit } from '../../components/shell/notifications/DialogFrame.ts';
+    import { mountWindowDialog } from '../../components/shell/notifications/WindowDialog.ts';
     import { GROUP_LABEL, GROUP_ORDER, NEVER_BULK, clearPlan, confirmFor, groupItems, idsFor } from '../../lib/notifications/clearGroups.ts';
     import { SwipeTracker, startsSwipe } from '../../lib/notifications/swipe.ts';
     import type { Notification } from '../../lib/notifications/api.ts';
@@ -280,6 +288,23 @@ const themeCss = `.pv-dark { ${remap('dark')} } .pv-light { ${remap('light')} }`
       ] as Notification['components'] }), { mode: 'toast', actions: failing });
       ac400.dataset['active'] = 'true';
       act.append(ac, ac400);
+      // Activity-linked window: yellow title-bar badge + edge, a docked (collapsed) banner and an open panel.
+      const win = section(root, 'Activity-linked window · yellow badge, edge, docked bar + open panel', 'pv-win-wrap');
+      const slot = document.createElement('div');
+      slot.className = 'app-slot pv-win';
+      slot.dataset['ntfLinked'] = '2';
+      slot.innerHTML = '<div class="slot-chrome"><div class="slot-title">NOTES · WINDOW</div><div class="slot-controls"><button class="aura-ntf-win-badge" title="2 notifications for this window" aria-label="2 notifications for this window">2</button><button class="pv-x">✕</button></div></div><div class="slot-body"><div class="pv-app">App content stays usable above the panels.</div></div>';
+      win.appendChild(slot);
+      mountWindowDialog(slot, base({ type: 'simple', title: 'Sync finished with 2 warnings', text: 'Open the log to review.', components: [] }), { actions, blocking: false, takeFocus: false, collapsed: true, onLater: () => {} });
+      const live = mountWindowDialog(slot, base({ title: 'Overwrite the remote copy?' }), { actions, blocking: false, takeFocus: false, onLater: () => live?.setCollapsed?.(true) });
+      // Activity-linked list card + pop-up: yellow accent and "Go to activity".
+      const lk = section(root, 'Activity-linked list card + pop-up · yellow accent, "Go to activity"', 'pv-toasts');
+      const lkHost = { auraViewDetail: () => ({ state: 'visible', viewId: 'pv', appId: 'com.example.notifp4', instanceId: 'com.example.notifp4', activityId: 'pv#a1' }) };
+      const lkItem = base({ type: 'simple', title: 'Sync finished', text: 'Review the two warnings.', components: [], context: { kind: 'activity', id: 'pv#a1', label: 'Window 2' } });
+      lk.append(
+        renderNotificationCard(lkItem, { mode: 'list', actions, host: lkHost, appLookup: () => ({ name: 'Notif P4 Test', glyph: 'N' }) } as never),
+        renderNotificationCard({ ...lkItem, id: lkItem.id + 'p' }, { mode: 'toast', actions, host: lkHost, appLookup: () => ({ name: 'Notif P4 Test', glyph: 'N' }) } as never),
+      );
       const blk = section(root, 'Blocking dialogue frame (no ✕)', 'pv-dlg');
       blk.appendChild(buildDialogFrame(base({ components: full(), blocking: true }), { actions, takeFocus: false, modal: true, kicker: 'Answer to continue' }).root);
       const sheet = section(root, 'Phone sheet frame (✕ 40px)', 'pv-phone aura-dlg-float');

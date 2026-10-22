@@ -38,6 +38,12 @@ export interface FrameOptions {
   appLookup?: AppLookup;
   /** Shows the header ✕ "Close (answer later)" (Escape does the same). Absent: no ✕. */
   onLater?: () => void;
+  /** Collapsed bar's "Answer" / bar click (default: expand in place). */
+  onAnswer?: () => void;
+  /** Activity-linked panel: yellow accent + badge (phase 4). */
+  linked?: boolean;
+  /** The USER collapsed / expanded it (chevron, bar, Answer) — not programmatic changes. */
+  onCollapseChange?: (collapsed: boolean) => void;
   /** Adds a collapse-to-bar toggle (non-blocking window panel). */
   collapsible?: boolean;
   /** aria-modal (blocking / desktop / full view). */
@@ -91,14 +97,26 @@ export function buildDialogFrame(n: Notification, opts: FrameOptions): DialogFra
 
   let collapsed = false;
   let toggle: HTMLButtonElement | null = null;
+  // Compact bar (collapsed): an explicit "Answer" that re-expands it.
+  const answerBtn = el('button', 'aura-dlg-btn aura-dlg-answer', 'Answer');
+  answerBtn.type = 'button';
+  answerBtn.addEventListener('click', (e) => { e.stopPropagation(); expand(); });
+  bar.appendChild(answerBtn);
+  if (opts.linked) root.dataset['linked'] = 'true';
   if (opts.collapsible) {
-    toggle = el('button', 'aura-dlg-btn');
+    toggle = el('button', 'aura-dlg-btn aura-dlg-toggle');
     toggle.type = 'button';
     toggle.setAttribute('aria-expanded', 'true');
     toggle.title = 'Collapse';
     toggle.setAttribute('aria-label', 'Collapse the question');
     toggle.appendChild(spriteIcon('lucide-chevron-down'));
-    toggle.addEventListener('click', () => setCollapsed(!collapsed));
+    // The chevron owns its click: nothing above (slot bring-to-front, card
+    // activation) may also act on it.
+    toggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (collapsed) expand();
+      else { setCollapsed(true); opts.onCollapseChange?.(true); }
+    });
     bar.appendChild(toggle);
   }
   if (opts.onLater) {
@@ -140,10 +158,17 @@ export function buildDialogFrame(n: Notification, opts: FrameOptions): DialogFra
       toggle.replaceChildren(spriteIcon(c ? 'lucide-chevron-up' : 'lucide-chevron-down'));
     }
   }
+  function expand() {
+    // With a controller (onAnswer) it decides — and remembers — how to open.
+    if (opts.onAnswer) { opts.onAnswer(); return; }
+    setCollapsed(false);
+    opts.onCollapseChange?.(false);
+    focusFirst(root);
+  }
   // Clicking the collapsed bar expands it.
   bar.addEventListener('click', (e) => {
     if (!collapsed || (e.target as HTMLElement).closest('button')) return;
-    setCollapsed(false);
+    expand();
   });
 
   const onKey = (e: KeyboardEvent) => {

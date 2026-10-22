@@ -13,6 +13,8 @@ import type { Notification } from './api.ts';
 type Context = NonNullable<Notification['context']>;
 
 export interface WindowHost {
+  /** Phase 4: where a window is (activity-linked "Go to activity"). */
+  auraViewDetail?: (instanceId: string, activityId?: string) => import('./dialogs.ts').ViewDetail | null;
   auraRevealInstance?: (instanceId: string, activityId?: string) => unknown;
   auraHasWindow?: (instanceId: string, activityId?: string) => boolean;
   auraLaunchApp?: (appId: string) => unknown;

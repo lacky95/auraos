@@ -9,6 +9,13 @@ import { ExitMachine } from '../../../lib/notifications/exit.ts';
 import { SPRING_MS, SwipeTracker, startsSwipe } from '../../../lib/notifications/swipe.ts';
 import { CARD_CONTROL_SELECTOR } from '../../../lib/notifications/dialogs.ts';
 import { focusFirst } from './DialogFrame.ts';
+import { isActivityLinked, stickyPopupView } from '../../../lib/notifications/activityLinks.ts';
+
+/** Activity-linked = context window exists and belongs to the sender (sticky pop-up). */
+function linkedNow(n: Notification): boolean {
+  const w = window as unknown as { auraViewDetail?: (i: string, a?: string) => import('../../../lib/notifications/dialogs.ts').ViewDetail | null };
+  return isActivityLinked(n, (c) => w.auraViewDetail?.(c.instanceId, c.activityId) ?? null);
+}
 import {
   MAX_TOASTS, QUEUE_MAX_AGE_ON_UNLOCK_MS, QUEUE_STAGGER_MS, ToastQueue, admissionItem, admissionList, hidesOnSeen, slotsUsed, toastHideAnimates,
   type ToastHideReason,
@@ -42,6 +49,8 @@ export function mountToasts(region: HTMLElement, getRuntime: () => Promise<Notif
     active: boolean;
     /** This tab marked it seen (its own click) — a 'seen' update must not hide it. */
     seenHere: boolean;
+    /** Activity-linked (its window exists): sticky until a user action. */
+    linked: boolean;
   }
   /** A show / update for an item whose pop-up is still leaving: runs once it is gone. */
   const afterExit = new Map<string, Notification>();
@@ -274,7 +283,8 @@ export function mountToasts(region: HTMLElement, getRuntime: () => Promise<Notif
       const kind = window.__auraDialogs?.autoPlacement(n);
       if (kind === 'window' || kind === 'floating' || kind === 'desktop') return false;
     }
-    const adm = admitToast(admissionList(toasts).map((t) => admissionItem(t.n, t.active)), n);
+    const linked = linkedNow(n);
+    const adm = admitToast(admissionList(toasts).map((t) => stickyPopupView(admissionItem(t.n, t.active), t.linked)), stickyPopupView(n, linked));
     if (!adm.admit) {
       // Full: wait for a slot (it is in the list anyway).
       if (n.seenAt === undefined) queue.enqueue(n);
@@ -286,7 +296,8 @@ export function mountToasts(region: HTMLElement, getRuntime: () => Promise<Notif
     queue.remove(n.id);
     const card = renderNotificationCard(n, cardOptions());
     card.removeAttribute('tabindex');   // never a focus target of its own
-    const t: Toast = { n, card, timer: null, remaining: toastDuration(n), startedAt: Date.now(), paused: false, exiting: false, exit: new ExitMachine(), active: false, seenHere: false };
+    // Activity-linked: sticky — the sender's popupDurationMs is ignored.
+    const t: Toast = { n, card, timer: null, remaining: toastDuration(stickyPopupView(n, linked)), startedAt: Date.now(), paused: false, exiting: false, exit: new ExitMachine(), active: false, seenHere: false, linked };
     wire(t);
     toasts.push(t);
     region.appendChild(card);
@@ -303,7 +314,7 @@ export function mountToasts(region: HTMLElement, getRuntime: () => Promise<Notif
     if (!t || !rt) return;
     if (t.exiting) return;   // leaving: no updates
     // Seen elsewhere (another tab / surface): it has been acknowledged.
-    if (n.seenAt !== undefined && t.n.seenAt === undefined && hidesOnSeen(t)) { t.n = n; hide(n.id, 'seen'); return; }
+    if (n.seenAt !== undefined && t.n.seenAt === undefined && !t.linked && hidesOnSeen(t)) { t.n = n; hide(n.id, 'seen'); return; }
     const next = updateNotificationCard(t.card, n, cardOptions());
     t.n = n;
     // Patched in place (same element): its listeners are already wired.
@@ -316,7 +327,8 @@ export function mountToasts(region: HTMLElement, getRuntime: () => Promise<Notif
       wire(t);
     }
     // A new expiry from an update restarts the clock (never for an active pop-up).
-    if (!t.paused && !t.active) { t.remaining = toastDuration(n); startTimer(t); }
+    t.linked = linkedNow(n);
+    if (!t.paused && !t.active) { t.remaining = toastDuration(stickyPopupView(n, t.linked)); startTimer(t); }
   }
 
   /**

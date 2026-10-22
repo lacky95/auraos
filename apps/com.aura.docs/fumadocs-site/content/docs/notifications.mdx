@@ -81,7 +81,7 @@ Every notification has:
 | `timeoutMs` | Lifetime: removed automatically (`removedReason: 'expired'`) after this many ms. Default: never. |
 | `popupDurationMs` | How long the **pop-up** shows (not the lifetime). See [Pop-ups](#pop-ups). |
 | `components[]` | Up to 8: inputs, choices, selects, buttons, progress. See [Components](#components). |
-| `context` | What it is about: `{ kind: 'activity' \| 'instance' \| 'task' \| 'installation' \| 'app' \| 'custom', id, appId?, label? }`. Separate from the sender. Activities and instances give the user **Go to task** and decide where a dialogue opens. |
+| `context` | What it is about: `{ kind: 'activity' \| 'instance' \| 'task' \| 'installation' \| 'app' \| 'custom', id, appId?, label? }`. Separate from the sender. Activities and instances of your own app's windows give the user **Go to activity** (other contexts: **Go to task**) and decide where a dialogue opens. |
 | `popup`, `blocking`, `scope` | Dialogue placement, see [Dialogues](#dialogues). |
 | `sender` | Set by the **server** from the caller's identity: `{ kind: 'app' \| 'agent' \| 'rest' \| 'auraos' \| 'unknown', id?, name?, attribution }`. A client can only add display hints (`sender.name`, `sender.icon`, `sender.actor.name`), which are marked *declared* / *unverified*. Identity fields in the body are ignored, and a warning says so. |
 
@@ -244,7 +244,7 @@ across a lock (see the [privacy note](#privacy-note)).
   - On a phone it is always the compact form.
 - **List.** Opens upward from the button; on a phone it is a bottom sheet.
   - Unseen items are highlighted; pinned items come first, then priority, then newest.
-  - Each item shows its sender (with an *unverified* marker where it applies), **Go to task** for a context, and **Answer** for a pending dialogue.
+  - Each item shows its sender (with an *unverified* marker where it applies), **Go to activity** for its own window or **Go to task** for another context, and **Answer** for a pending dialogue.
   - **Clear all** skips Locked items. The ⋯ menu has "Clear from (sender)" and "Clear history now".
   - Keyboard: arrows, Home and End move between items; Delete dismisses; Escape closes.
 - **Pop-ups.** At most three at the bottom right, above the Dock (on a phone, above the Dock or the on-screen keyboard). They never take keyboard focus. More arrive while all three slots are taken → they queue and pop up when a slot frees (opening the list clears the queue).
@@ -290,6 +290,37 @@ A dialogue is never placed over **another** app's window: a sender can only
 cover a window it owns, so no app can phish over another.
 
 ---
+
+### Activity-linked notifications are sticky
+
+A notification whose `context` is an `activity` or `instance` of **your own**
+app's window is *activity-linked*:
+
+- The window shows a **yellow hint**: a badge with the count in its title bar
+  ("2 notifications for this window") and a warning-coloured edge. The
+  minimized-window chip and the workspace pill (or the ‹ › arrows) carry the
+  same marker. Clicking the badge opens the item, or the list when there are
+  several.
+- Inside the window it sits as a compact **yellow bar** with Answer (any
+  type, including Simple ones), unless the user opened it or you forced it
+  with `popup`. Later / ✕ collapse it back to the bar — it never disappears
+  on its own.
+- It **ends only on a user action** (submit, cancel, dismiss, clear — in the
+  panel or the list), when **you** remove or resolve it, or when it expires
+  by its own `timeoutMs` (its lifetime).
+- Its corner pop-up is **sticky** too: it stays until the user handles it
+  (✕, click, swipe), counts as sticky for the three pop-up slots, and
+  `popupDurationMs` > 0 is **ignored** for activity-linked items.
+- In the notification list and the pop-ups it has the same yellow accent,
+  and its button reads **Go to activity** (with the app and window, e.g.
+  "Go to activity · Notepad · Window 2") instead of "Go to task": it reveals
+  the window and opens its panel. The Dock's wide snippet shows a small
+  yellow diamond for it.
+- While the screen is locked nothing shows, as for every notification. Lock-screen views
+  never name the window.
+
+Only verified senders link to their own windows; a context that points at
+another app's window gets no badge and no in-window panel.
 
 ## Permissions
 

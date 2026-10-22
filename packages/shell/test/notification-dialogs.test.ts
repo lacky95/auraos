@@ -76,7 +76,7 @@ class FakeHost implements DialogHost {
   isPhone = false;
   isLocked = false;
   focusOk = true;
-  mounted: Array<{ id: string; p: Placement; takeFocus: boolean; disposed: boolean; later: () => void; updates: number; focused: number }> = [];
+  mounted: Array<{ id: string; p: Placement; takeFocus: boolean; disposed: boolean; later: () => void; updates: number; focused: number; collapsed: boolean; instant?: boolean }> = [];
   revealed: string[] = [];
   markers: { view: Map<string, number>; ws: Map<string, number> } = { view: new Map(), ws: new Map() };
   viewDetail(ctx: { instanceId: string; activityId?: string }) { return this.views.get(ctx.activityId ?? ctx.instanceId) ?? null; }
@@ -89,10 +89,14 @@ class FakeHost implements DialogHost {
   phone() { return this.isPhone; }
   locked() { return this.isLocked; }
   focusInWindowOrNowhere() { return this.focusOk; }
-  mount(n: Notification, p: Placement, opts: { takeFocus: boolean; onLater: () => void }): MountedDialog {
-    const rec = { id: n.id, p, takeFocus: opts.takeFocus, disposed: false, later: opts.onLater, updates: 0, focused: 0 };
+  mount(n: Notification, p: Placement, opts: { takeFocus: boolean; onLater: () => void; collapsed?: boolean }): MountedDialog {
+    const rec: FakeHost['mounted'][number] = { id: n.id, p, takeFocus: opts.takeFocus, disposed: false, later: opts.onLater, updates: 0, focused: 0, collapsed: !!opts.collapsed };
     this.mounted.push(rec);
-    return { update: () => { rec.updates++; }, focus: () => { rec.focused++; }, dispose: () => { rec.disposed = true; } };
+    return {
+      update: () => { rec.updates++; }, focus: () => { rec.focused++; },
+      dispose: (o) => { rec.disposed = true; rec.instant = !!o?.instant; },
+      setCollapsed: (c) => { rec.collapsed = c; },
+    };
   }
   setMarkers(v: ReadonlyMap<string, number>, w: ReadonlyMap<string, number>) { this.markers = { view: new Map(v), ws: new Map(w) }; }
   live(id: string) { return this.mounted.filter((m) => m.id === id && !m.disposed); }
@@ -117,12 +121,15 @@ test('controller: forced pop-up over the visible own window, without focus; bloc
   const b = ntf({ id: 'b1', context: ACT, popup: true, blocking: true });
   c.onStore(snap([pop, b]), [added('b1')]);
   assert.equal(h.live('b1')[0]!.takeFocus, false);
-  // Non-popup: nothing opens; initial (reload) arrivals never pop.
+  // Non-popup: nothing opens — an activity-linked item only docks as the compact
+  // (collapsed) yellow bar in its window; initial (reload) arrivals never pop.
   const q = ntf({ id: 'q1', context: ACT });
   const old = ntf({ id: 'o1', context: ACT, popup: true });
   c.onStore(snap([pop, b, q, old]), [added('q1'), added('o1', 'initial')]);
-  assert.equal(h.live('q1').length, 0);
-  assert.equal(h.live('o1').length, 0);
+  assert.equal(h.live('q1').length, 1);
+  assert.equal(h.live('q1')[0]!.collapsed, true, 'docked bar, not opened');
+  assert.equal(h.live('q1')[0]!.takeFocus, false);
+  assert.equal(h.live('o1')[0]!.collapsed, true, 'a reload re-docks, never re-pops');
 });
 
 test('controller: hidden window → wait + marker (never fetched); restore re-attaches; Answer reveals', async () => {
@@ -139,7 +146,7 @@ test('controller: hidden window → wait + marker (never fetched); restore re-at
   h.views.set(ACT.id, view('visible'));
   c.onViewsChanged();
   assert.equal(h.live('p1').length, 1);
-  assert.equal(h.markers.view.size, 0);
+  assert.equal(h.markers.view.get('v1'), 1, 'the title-bar badge stays while the item is active');
   // Minimize again (slot destroyed) → detached, waits; restore → re-attached.
   h.views.set(ACT.id, view('minimized'));
   c.onViewsChanged();
@@ -153,7 +160,7 @@ test('controller: hidden window → wait + marker (never fetched); restore re-at
   const q = ntf({ id: 'q1', context: { kind: 'activity', id: 'other#a1' } });
   h.views.set('other#a1', view('other-workspace', { viewId: 'v2', activityId: 'other#a1', workspaceId: 'ws3' }));
   c.onStore(snap([pop, q]), [added('q1')]);
-  assert.equal(h.markers.ws.size, 0, 'a plain question (no popup) does not mark');
+  assert.equal(h.markers.ws.get('ws3'), 1, 'an activity-linked item marks its workspace');
   assert.equal(await c.answer('q1'), true);
   assert.deepEqual(h.revealed, ['other#a1']);
   assert.equal(h.live('q1').length, 1);
@@ -345,4 +352,62 @@ test('exit animation state machine: double hide ignored, reopen mid-exit cancels
   fire();
   assert.equal(y.state, 'gone');
   assert.equal(gone, 4);
+});
+
+test('activity-linked: badge counts per window / workspace; Later collapses (not gone); re-dock after re-mount; removal only via store', async () => {
+  const { linkCounts, badgeAction, badgeHint, stickyPopupView, isActivityLinked } = await import('../src/lib/notifications/activityLinks.ts');
+  const h = new FakeHost();
+  h.views.set(ACT.id, view('visible'));
+  h.views.set('o#a1', view('other-workspace', { viewId: 'v2', activityId: 'o#a1', workspaceId: 'ws9' }));
+  const lookup = (c: { instanceId: string; activityId?: string }) => h.viewDetail(c);
+  const a = ntf({ id: 'a', context: ACT, type: 'simple' });
+  const b = ntf({ id: 'b', context: ACT });
+  const o = ntf({ id: 'o', context: { kind: 'activity', id: 'o#a1' } });
+  const foreign = ntf({ id: 'f', context: ACT, sender: { kind: 'app', id: 'com.evil', attribution: 'verified' } });
+  const agent = ntf({ id: 'g', sender: AGENT });
+  const lc = linkCounts([a, b, o, foreign, agent, ntf({ id: 'r', context: ACT, state: 'resolved' })], lookup);
+  assert.deepEqual([...lc.byView], [['v1', 2], ['v2', 1]], 'foreign senders / agents / ended items do not count');
+  assert.deepEqual([...lc.byWorkspace], [['ws9', 1]]);
+  assert.equal(badgeHint(2), '2 notifications for this window');
+  assert.deepEqual(badgeAction(['a']), { kind: 'open', id: 'a' });
+  assert.deepEqual(badgeAction(['a', 'b']), { kind: 'list', id: 'a' });
+  // Sticky pop-up: popupDurationMs from the sender is ignored.
+  assert.equal(isActivityLinked(a, lookup), true);
+  assert.equal(stickyPopupView({ id: 'a', priority: 'low', popupDurationMs: 5000 }, true).popupDurationMs, 0);
+  assert.equal(stickyPopupView({ id: 'x', priority: 'low', popupDurationMs: 5000 }, false).popupDurationMs, 5000);
+
+  const c = new DialogController(h);
+  c.onStore(snap([a, b, o]), [added('a'), added('b'), added('o')]);
+  assert.equal(h.live('a')[0]!.collapsed, true, 'even a Simple item docks as a banner');
+  assert.equal(h.live('b')[0]!.collapsed, true);
+  assert.equal(h.live('o').length, 0, 'not visible: no bar (badge / pill only)');
+  assert.deepEqual(c.linkedFor('v1'), ['a', 'b']);
+  // Answer expands in place; Later collapses again — it never goes away.
+  assert.equal(await c.answer('b'), true);
+  assert.equal(h.live('b')[0]!.collapsed, false);
+  h.live('b')[0]!.later();
+  assert.equal(h.live('b').length, 1);
+  assert.equal(h.live('b')[0]!.collapsed, true);
+  // No timeout / seen / update makes it go: only store removal.
+  c.onStore(snap([a, { ...b, seenAt: 5, updatedAt: 9 }, o]), [{ kind: 'updated', id: 'b', source: 'live' }]);
+  assert.equal(h.live('b').length, 1);
+  // Re-mount (minimize → restore): re-docked.
+  h.views.set(ACT.id, view('minimized'));
+  c.onViewsChanged();
+  assert.equal(h.live('a').length, 0);
+  assert.equal(h.markers.view.get('v1'), 2, 'strip chip keeps the count');
+  h.views.set(ACT.id, view('visible'));
+  c.onViewsChanged();
+  assert.equal(h.live('a').length, 1);
+  assert.equal(h.live('a')[0]!.collapsed, true);
+  // The user / sender handles it → gone.
+  c.onStore(snap([b, o]), [{ kind: 'removed', id: 'a', source: 'live', reason: 'removed' }]);
+  assert.equal(h.live('a').length, 0);
+  assert.equal(h.markers.view.get('v1'), 1);
+  // Lock: everything hidden at once; unlock re-docks.
+  h.isLocked = true; c.onLock(true);
+  assert.equal(h.live('b').length, 0);
+  assert.equal(h.mounted.filter((m) => m.id === 'b').every((m) => m.instant || !m.disposed || m.collapsed !== undefined), true);
+  h.isLocked = false; c.onLock(false);
+  assert.equal(h.live('b').length, 1);
 });

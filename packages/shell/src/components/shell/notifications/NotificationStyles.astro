@@ -493,6 +493,54 @@
   .aura-dlg-decision { width: min(520px, 100%); max-height: 90%; border-color: var(--aura-color-warning); box-shadow: 0 0 0 1px var(--aura-color-warning), 0 12px 48px rgba(0, 0, 0, 0.6); }
   .aura-dlg-decision .aura-dlg-kicker { color: var(--aura-color-warning); }
 
+  /* Activity-linked items in the list / pop-ups: yellow accent + "Go to activity". */
+  .aura-ntf[data-linked="true"] { border-left-color: var(--aura-color-warning); }
+  .aura-ntf-link-btn.aura-ntf-goto-activity {
+    display: inline-flex; align-items: baseline; gap: 6px; max-width: 100%;
+    color: var(--aura-color-warning); border-color: color-mix(in srgb, var(--aura-color-warning) 60%, transparent);
+    background: color-mix(in srgb, var(--aura-color-warning) 10%, transparent);
+  }
+  .aura-ntf-link-btn.aura-ntf-goto-activity:hover, .aura-ntf-link-btn.aura-ntf-goto-activity:focus-visible {
+    border-color: var(--aura-color-warning); box-shadow: 0 0 6px var(--aura-color-warning); outline: none;
+  }
+  .aura-ntf-goto-detail { color: var(--aura-color-text-dim); text-transform: none; letter-spacing: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .aura-ntf-goto-detail::before { content: '· '; }
+
+  /* Activity-linked (phase 4): yellow hint on the window + its in-window panel. */
+  .app-slot[data-ntf-linked] { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--aura-color-warning) 70%, transparent), 0 0 8px color-mix(in srgb, var(--aura-color-warning) 25%, transparent); }
+  /* The badge sits among the window's chrome buttons: `.app-slot .slot-controls
+     button` (index.astro: transparent background, dim text) outranked the plain
+     class and painted it black — this selector outranks it. Yellow = the same
+     --aura-color-warning as the pill marker and the panel accent. */
+  .app-slot .slot-controls > button.aura-ntf-win-badge,
+  .aura-ntf-win-badge {
+    display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+    min-width: 22px; height: 18px; padding: 0 6px; margin-right: 2px; cursor: pointer; line-height: 1;
+    font-family: var(--aura-font-mono); font-size: 0.62rem; font-variant-numeric: tabular-nums; font-weight: 700;
+    background: var(--aura-color-warning); color: var(--aura-color-bg);
+    border: 1px solid var(--aura-color-warning); border-radius: 0;
+    box-shadow: 0 0 4px color-mix(in srgb, var(--aura-color-warning) 45%, transparent);
+  }
+  .app-slot .slot-controls > button.aura-ntf-win-badge::before,
+  .aura-ntf-win-badge::before { content: ''; width: 5px; height: 5px; background: currentColor; }
+  .app-slot .slot-controls > button.aura-ntf-win-badge[data-unseen="true"] { box-shadow: 0 0 6px var(--aura-color-warning), 0 0 12px color-mix(in srgb, var(--aura-color-warning) 40%, transparent); }
+  .app-slot .slot-controls > button.aura-ntf-win-badge:hover,
+  .app-slot .slot-controls > button.aura-ntf-win-badge:focus-visible {
+    outline: none; color: var(--aura-color-bg); border-color: var(--aura-color-warning);
+    box-shadow: 0 0 0 2px var(--aura-color-bg), 0 0 8px var(--aura-color-warning);
+  }
+  .app-slot .slot-controls > button.aura-ntf-win-badge[data-pulse="true"] { animation: aura-ntf-badge-pulse 0.9s ease-out 1; }
+  @keyframes aura-ntf-badge-pulse { 0% { transform: scale(1); } 35% { transform: scale(1.18); box-shadow: 0 0 12px var(--aura-color-warning); } 100% { transform: scale(1); } }
+  @media (prefers-reduced-motion: reduce) { .app-slot .slot-controls > button.aura-ntf-win-badge[data-pulse="true"] { animation: none; } }
+  section.aura-dlg[data-linked="true"] { border-color: color-mix(in srgb, var(--aura-color-warning) 70%, var(--aura-color-border)); border-left: 3px solid var(--aura-color-warning); }
+  section.aura-dlg[data-linked="true"] .aura-dlg-kicker { color: var(--aura-color-warning); }
+  section.aura-dlg[data-linked="true"] .aura-dlg-kicker::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 5px; background: var(--aura-color-warning); vertical-align: 1px; }
+  /* The panel's collapse / expand chevron: a real hit area (32px; 40px on the phone). */
+  .aura-dlg-toggle { width: 32px; height: 32px; padding: 0; }
+  :is(.aura-dlg-float[data-layout="phone"], .aura-dlg-full) .aura-dlg-toggle { width: 40px; height: 40px; }
+  .aura-dlg-answer { display: none; color: var(--aura-color-warning); border-color: color-mix(in srgb, var(--aura-color-warning) 60%, transparent); }
+  section.aura-dlg[data-collapsed="true"] .aura-dlg-answer { display: inline-flex; }
+
   /* Pending-question markers: minimized-strip chip + workspace pill. */
   [data-ntf-pending] { position: relative; }
   [data-ntf-pending]::after {

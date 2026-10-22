@@ -21,11 +21,12 @@ import {
 } from '../../../lib/notifications/dialogs.ts';
 import * as workspaceClient from '../../../lib/workspaceClient';
 import type { Notification } from '../../../lib/notifications/api.ts';
-import { mountWindowDialog } from './WindowDialog.ts';
+import { mountWindowDialog, syncWindowBadge } from './WindowDialog.ts';
 import { mountFloatingDialog } from './FloatingDialog.ts';
 import { mountDesktopDecision } from './DesktopDecision.ts';
 import { Disposer, PHONE_MAX_WIDTH, isLocked, watchLock } from './placement.ts';
 import { getDrafts } from '../../../lib/notifications/drafts.ts';
+import { CollapseMemory, badgeAction, badgeHint, type StorageLike as CollapseStorage } from '../../../lib/notifications/activityLinks.ts';
 
 /** Draft garbage collection: on start (once the store is loaded) and every 30 min. */
 const DRAFT_GC_INTERVAL_MS = 30 * 60_000;
@@ -33,6 +34,8 @@ const DRAFT_GC_INTERVAL_MS = 30 * 60_000;
 export interface DialogsApi {
   /** "Answer": open the dialogue (reveals its window if needed). */
   answer(id: string): Promise<boolean>;
+  /** "Go to activity": reveal the linked window and expand its panel. */
+  goToActivity(id: string): Promise<boolean>;
   /** What the item would do on its own ('window' | 'floating' | 'desktop' | 'wait' | 'none'). */
   autoPlacement(n: Notification): string;
   isOpen(id: string): boolean;
@@ -60,10 +63,30 @@ export function mountDialogLayer(): () => void {
 
   const applyMarkers = () => {
     const chips = document.querySelectorAll<HTMLElement>('[data-aura-strip] [data-action="restore"][data-view-id]');
-    chips.forEach((c) => setMark(c, markView.get(c.dataset['viewId'] ?? '') ?? 0));
+    chips.forEach((c) => { const n = markView.get(c.dataset['viewId'] ?? '') ?? 0; setMark(c, n, badgeHint(n)); });
+    applyWindowBadges();
     document.querySelectorAll<HTMLElement>('.ws-pill[data-ws-id]').forEach((p) => setMark(p, markWs.get(p.dataset['wsId'] ?? '') ?? 0));
     applyNavMarkers();
   };
+  // Activity-linked items: a yellow badge with the count in the window's
+  // title bar + a warning edge on the slot (lib/notifications/activityLinks.ts).
+  function applyWindowBadges() {
+    document.querySelectorAll<HTMLElement>('#dynamic-layout > .app-slot[data-view-id]').forEach((slot) => {
+      const viewId = slot.dataset['viewId'] ?? '';
+      const n = markView.get(viewId) ?? 0;
+      const ids = n ? ctl.linkedFor(viewId) : [];
+      const unseen = ids.some((id) => rt?.store.get(id)?.seenAt === undefined);
+      syncWindowBadge(slot, n, {
+        unseen, hint: badgeHint(n),
+        onClick: () => {
+          const act = badgeAction(ctl.linkedFor(viewId));
+          if (!act) return;
+          if (act.kind === 'open') { void ctl.answer(act.id).then((ok) => { if (!ok) document.dispatchEvent(new CustomEvent('aura:notifications.open', { detail: { id: act.id } })); }); }
+          else document.dispatchEvent(new CustomEvent('aura:notifications.open', { detail: { id: act.id } }));
+        },
+      });
+    });
+  }
   // Marked workspaces whose pill is not shown: mark the ‹ / › arrow or the
   // ▦ trigger that leads there. StatusBar re-renders its pills on every
   // scrub / fit / workspace change, which the #ws-pills observer catches.
@@ -124,7 +147,11 @@ export function mountDialogLayer(): () => void {
       if (p.kind === 'window') {
         const slot = slotOf(p.viewId);
         if (!slot) return null;
-        return mountWindowDialog(slot, n, { ...common, blocking: p.blocking, takeFocus: opts.takeFocus, onLater: opts.onLater });
+        return mountWindowDialog(slot, n, {
+          ...common, blocking: p.blocking, takeFocus: opts.takeFocus, onLater: opts.onLater,
+          ...(opts.collapsed ? { collapsed: true } : {}), ...(opts.onAnswer ? { onAnswer: opts.onAnswer } : {}),
+          ...(opts.onCollapseChange ? { onCollapseChange: opts.onCollapseChange } : {}),
+        });
       }
       return mountFloatingDialog(n, {
         ...common, layout: p.layout, takeFocus: opts.takeFocus, onLater: opts.onLater,
@@ -137,6 +164,10 @@ export function mountDialogLayer(): () => void {
       applyMarkers();
     },
   };
+  // Collapsed in-window panels survive re-mounts and reloads (per tab).
+  let session: CollapseStorage | null = null;
+  try { session = window.sessionStorage; } catch { session = null; }
+  host.collapseMemory = new CollapseMemory(session);
   const ctl = new DialogController(host);
 
   let raf = 0;
@@ -180,6 +211,7 @@ export function mountDialogLayer(): () => void {
 
   const api: DialogsApi = {
     answer: (id) => ctl.answer(id),
+    goToActivity: (id) => ctl.goToActivity(id),
     autoPlacement: (n) => ctl.autoPlacement(n),
     isOpen: (id) => ctl.isOpen(id),
   };
