@@ -21,6 +21,7 @@
  * `pnpm build:libs` if unsure). `oras` and `npm` must be on PATH.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -69,10 +70,27 @@ function isOrasAvailable() {
   catch { return false; }
 }
 
-function tagExists(ref) {
-  const out = spawnSync('oras', ['resolve', ref, ...ORAS_FLAGS],
+/**
+ * Digests of the tarball layer(s) currently at `ref`, or null when the tag
+ * does not exist (or its manifest can't be read).
+ *
+ * The version never changes in this monorepo (0.0.1), so "the tag exists"
+ * says nothing about whether it holds the CURRENT build — comparing the
+ * layer digest with the freshly packed tarball does. (`npm pack` writes
+ * fixed mtimes, so an unchanged package packs to the same digest.)
+ */
+function layerDigests(ref) {
+  const out = spawnSync('oras', ['manifest', 'fetch', ref, ...ORAS_FLAGS],
     { stdio: 'pipe', encoding: 'utf8', timeout: 15_000 });
-  return out.status === 0 && (out.stdout ?? '').trim().startsWith('sha256:');
+  if (out.status !== 0) return null;
+  try {
+    const m = JSON.parse(out.stdout ?? '');
+    return Array.isArray(m.layers) ? m.layers.map((l) => l.digest).filter((d) => typeof d === 'string') : null;
+  } catch { return null; }
+}
+
+function sha256File(path) {
+  return `sha256:${createHash('sha256').update(readFileSync(path)).digest('hex')}`;
 }
 
 /** Return value: 'pushed' | 'skipped' | 'missing'. Used to count summary
@@ -93,13 +111,7 @@ function publish(pkgName) {
   const basename = fullName.replace(/^@aura\//, '');   // 'app-sdk'
   const ref = `${REGISTRY_HOST}/aura/${basename}:${version}`;
 
-  // 1. Idempotency check — already pushed at this tag?
-  if (!FORCE && tagExists(ref)) {
-    console.log(`[publish] ${fullName}@${version} already at ${ref} — skipped`);
-    return 'skipped';
-  }
-
-  // 2. npm pack into a temp dir (cleaner than the package dir).
+  // 1. npm pack into a temp dir (cleaner than the package dir).
   const tmp = mkdtempSync(join(tmpdir(), `aura-publish-${basename}-`));
   try {
     const packOut = run('npm', ['pack', '--silent', '--pack-destination', tmp, pkgDir], { cwd: tmp });
@@ -108,6 +120,15 @@ function publish(pkgName) {
     const tgz = readdirSync(tmp).find((f) => f.endsWith('.tgz'));
     if (!tgz) throw new Error(`no .tgz produced (npm pack output: ${packOut})`);
     const tgzPath = join(tmp, tgz);
+
+    // 2. Idempotency check — the tag already holds exactly this tarball?
+    const digest = sha256File(tgzPath);
+    const current = FORCE ? null : layerDigests(ref);
+    if (current && current.includes(digest)) {
+      console.log(`[publish] ${fullName}@${version} unchanged at ${ref} — skipped`);
+      return 'skipped';
+    }
+    if (current) console.log(`[publish] ${fullName}@${version} changed (${current[0]?.slice(0, 19) ?? 'no layer'} → ${digest.slice(0, 19)})`);
 
     // 3. oras push <ref> <tgz>:<layer-mediatype> --artifact-type <artifact-mediatype>
     // --disable-path-validation: the layer's file is in /tmp (absolute); oras
