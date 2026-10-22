@@ -495,16 +495,16 @@
 
   /* Activity-linked items in the list / pop-ups: yellow accent + "Go to activity". */
   .aura-ntf[data-linked="true"] { border-left-color: var(--aura-color-warning); }
+  /* Same size as Answer (.aura-ntf-link-btn): inline, auto width, never full width. */
   .aura-ntf-link-btn.aura-ntf-goto-activity {
-    display: inline-flex; align-items: baseline; gap: 6px; max-width: 100%;
+    display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; width: auto; max-width: max-content; white-space: nowrap;
     color: var(--aura-color-warning); border-color: color-mix(in srgb, var(--aura-color-warning) 60%, transparent);
     background: color-mix(in srgb, var(--aura-color-warning) 10%, transparent);
   }
+  .aura-ntf-link-btn.aura-ntf-goto-activity svg.aura-icon { width: 0.9em; height: 0.9em; }
   .aura-ntf-link-btn.aura-ntf-goto-activity:hover, .aura-ntf-link-btn.aura-ntf-goto-activity:focus-visible {
     border-color: var(--aura-color-warning); box-shadow: 0 0 6px var(--aura-color-warning); outline: none;
   }
-  .aura-ntf-goto-detail { color: var(--aura-color-text-dim); text-transform: none; letter-spacing: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .aura-ntf-goto-detail::before { content: '· '; }
 
   /* Activity-linked (phase 4): yellow hint on the window + its in-window panel. */
   .app-slot[data-ntf-linked] { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--aura-color-warning) 70%, transparent), 0 0 8px color-mix(in srgb, var(--aura-color-warning) 25%, transparent); }

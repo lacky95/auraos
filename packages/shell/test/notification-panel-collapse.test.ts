@@ -169,7 +169,9 @@ test('global surfaces: linked → yellow accent + "Go to activity · <app · win
   assert.equal(card.dataset['linked'], 'true', 'yellow accent');
   const go = card.querySelector<HTMLButtonElement>('.aura-ntf-goto-activity')!;
   assert.ok(go, 'the Go-to button is the yellow element');
-  assert.equal(go.textContent, 'Go to activityNotepad · Window 2');
+  assert.equal(go.textContent, 'Go to activity', 'compact: the label only');
+  assert.equal(go.title, 'Go to activity · Notepad · Window 2', 'app · window in the tooltip');
+  assert.ok(go.classList.contains('aura-ntf-link-btn'), 'same size class as Answer');
   assert.match(go.getAttribute('aria-label')!, /linked to that window/);
   for (const mode of ['toast'] as const) {
     const t = renderNotificationCard(linked, { mode, actions, host, appLookup } as never);

@@ -819,8 +819,8 @@ export function renderNotificationCard(n: Notification, opts: CardOptions): HTML
     const go = el('button', 'aura-ntf-link-btn aura-ntf-goto-activity');
     go.type = 'button';
     go.dataset['focusKey'] = 'act:goto';
-    go.append(el('span', 'aura-ntf-goto-label', link.buttonLabel));
-    if (link.detail) go.append(el('span', 'aura-ntf-goto-detail', link.detail));
+    // Compact like Answer: the app · window goes into the tooltip / aria-label.
+    go.append(el('span', 'aura-ntf-goto-label', link.buttonLabel), spriteIcon('lucide-arrow-right'));
     go.title = link.detail ? `${link.buttonLabel} · ${link.detail}` : link.buttonLabel;
     go.setAttribute('aria-label', link.ariaLabel);
     go.addEventListener('click', async (e) => {
