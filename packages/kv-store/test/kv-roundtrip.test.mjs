@@ -13,7 +13,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { KvServer, KvClient, isValidNamespace, isValidKey } from '../dist/index.js';
+import { KvServer, KvClient, isValidNamespace, isValidKey, createRedis } from '../dist/index.js';
 
 // One server shared across the value-round-trip tests; each test uses its
 // own dataDir + namespace so writes can't bleed across.
@@ -190,4 +190,30 @@ test('RDB file appears under dataDir within the save window', async () => {
   await c.close();
   await s.stop();
   rmSync(dataDir, { recursive: true, force: true });
+});
+
+test('notif: prefix is unreachable through KvClient / the /api/kv namespace rule', async () => {
+  // The notification store (core) keys everything under `notif:`; the
+  // public /api/kv proxy only accepts isValidNamespace namespaces.
+  assert.equal(isValidNamespace('notif'),        false);
+  assert.equal(isValidNamespace('notif:item'),   false);
+  assert.equal(isValidNamespace('notif:events'), false);
+  const c = await getSharedClient();
+  await assert.rejects(() => c.get('notif', 'item'), /invalid namespace/);
+  await assert.rejects(() => c.set('notif:idx', 'all', 1), /invalid namespace/);
+});
+
+test('createRedis() gives a dedicated raw connection (ZSET + stream round-trip)', async () => {
+  await getSharedClient();
+  const r = createRedis(sharedServer.getUri());
+  try {
+    await r.zadd('notif:test:z', 1, 'a', 2, 'b');
+    assert.deepEqual(await r.zrange('notif:test:z', 0, -1), ['a', 'b']);
+    const id = await r.xadd('notif:test:s', '*', 'k', 'v');
+    const entries = await r.xrange('notif:test:s', '-', '+');
+    assert.equal(entries[0][0], id);
+    assert.deepEqual(entries[0][1], ['k', 'v']);
+  } finally {
+    r.disconnect();
+  }
 });
