@@ -10,7 +10,30 @@ export const BUILTIN_PERMISSIONS = [
   'storage.write',
   'network.internet',
   'network.local',
+  /**
+   * Send notifications (POST /api/notifications with the instance token).
+   * ENFORCED: declaring it is enough.
+   */
   'system.notifications',
+  /**
+   * Request Locked notifications (the user can't dismiss them). Privileged:
+   * takes effect only once an admin grants it (`aura grant notif-perms <app> locked`
+   * or Settings → Notifications & access). Without the grant a Locked request
+   * is downgraded to Simple with a warning.
+   */
+  'notifications.locked',
+  /**
+   * Request dialogue pop-ups. Privileged like `notifications.locked`; without
+   * the grant `popup` is turned off with a warning.
+   */
+  'notifications.popup',
+  /**
+   * Request read access to OTHER senders' notifications (phase 5). Every app
+   * reads its own anyway. Privileged: an admin grants it with an explicit
+   * scope (apps / senders / all; secret items only with includeSecret) —
+   * `aura grant nperm <app> read --scope app:<id>|sender:<key>|all`.
+   */
+  'notifications.read',
   'system.clipboard',
   'system.overlay',
   'system.theme.broadcast',

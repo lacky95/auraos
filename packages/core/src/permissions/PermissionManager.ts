@@ -20,6 +20,16 @@ export const ENFORCED_PERMISSIONS: readonly string[] = [
   'sidecars.mounts',
   'sidecars.tools',
   'sidecars.manageAll',
+  // Basic notification sending (POST /api/notifications with a verified
+  // instance token). Declaring it is enough.
+  'system.notifications',
+  // Privileged notification features: declaring them only REQUESTS them —
+  // they take effect once an admin grants them (core auth `Authorizer` +
+  // `GrantStore`). Listed here so this gate never auto-grants them.
+  'notifications.locked',
+  'notifications.popup',
+  // Phase 5: reading OTHER senders' notifications (scoped by the admin grant).
+  'notifications.read',
 ];
 const ENFORCED = new Set<string>(ENFORCED_PERMISSIONS);
 
