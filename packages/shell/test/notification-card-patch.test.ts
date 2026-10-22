@@ -51,7 +51,7 @@ test('a structural change (components, labels, options, type, priority, state) r
 test('dialogue mode: option / input changes send no interact (values go with a button); list + pop-up keep phase-3 interact', () => {
   assert.equal(sendsOnFieldChange('dialog'), false);
   assert.equal(sendsOnFieldChange('list'), true);
-  assert.equal(sendsOnFieldChange('toast'), true);
+  assert.equal(sendsOnFieldChange('toast'), false, 'pop-up forms are local state too (phase 6 fix)');
 });
 
 test('required fields: only submitting buttons validate; cancel / link / ✕ / Escape never do', () => {

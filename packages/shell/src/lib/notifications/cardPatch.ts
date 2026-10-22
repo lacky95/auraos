@@ -92,7 +92,12 @@ export function fieldErrorsFrom(details: unknown, components: Notification['comp
   return out;
 }
 
-/** Do field / option changes send an `interact`? Not in a dialogue. */
+/**
+ * Do field / option changes send an `interact`? Only in the LIST. In a
+ * dialogue and in a pop-up (phase 6 fix) fields are local form state: every
+ * change used to send an interact, whose busy state dimmed and whose echo
+ * touched the whole pop-up — the values now go only with a button.
+ */
 export function sendsOnFieldChange(mode: CardMode): boolean {
-  return mode !== 'dialog';
+  return mode === 'list';
 }

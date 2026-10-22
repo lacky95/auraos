@@ -1,0 +1,424 @@
+/**
+ * The pop-up (toast) stack — the runtime of NotificationToasts.astro, as a
+ * module so it can be mounted and tested on its own (phase 6). Policy in
+ * lib/notifications/toasts.ts; see NotificationToasts.astro for the rules.
+ */
+import { getNotifications, type NotificationsRuntime } from '../../../lib/notifications/shared.ts';
+import { senderLabel } from '../../../lib/notifications/format.ts';
+import { ExitMachine } from '../../../lib/notifications/exit.ts';
+import { SPRING_MS, SwipeTracker, startsSwipe } from '../../../lib/notifications/swipe.ts';
+import { CARD_CONTROL_SELECTOR } from '../../../lib/notifications/dialogs.ts';
+import { focusFirst } from './DialogFrame.ts';
+import {
+  MAX_TOASTS, QUEUE_MAX_AGE_ON_UNLOCK_MS, QUEUE_STAGGER_MS, ToastQueue, admissionItem, admissionList, hidesOnSeen, slotsUsed, toastHideAnimates,
+  type ToastHideReason,
+  admitToast, announcement, isSticky, mayReshowHidden, toastClickEffect, toastDuration, type ToastClickTarget,
+} from '../../../lib/notifications/toasts.ts';
+import type { Notification } from '../../../lib/notifications/api.ts';
+import { renderNotificationCard, updateNotificationCard, type CardOptions } from './NotificationCard.ts';
+import { Disposer, isLocked, watchLock, watchPlacement } from './placement.ts';
+
+/**
+ * Mount the pop-up stack on `region` (#notif-toasts). Returns the dispose.
+ * `getRuntime` is injectable for tests (default: the shared runtime).
+ */
+export function mountToasts(region: HTMLElement, getRuntime: () => Promise<NotificationsRuntime> = getNotifications): () => void {
+  const d = new Disposer();
+  const polite = document.getElementById('notif-announce-polite');
+  const assertive = document.getElementById('notif-announce-assertive');
+
+  interface Toast {
+    n: Notification;
+    card: HTMLElement;
+    timer: ReturnType<typeof setTimeout> | null;
+    /** ms left when paused; null = sticky. */
+    remaining: number | null;
+    startedAt: number;
+    paused: boolean;
+    /** In its exit animation: holds its slot, ignores clicks / updates. */
+    exiting: boolean;
+    exit: ExitMachine;
+    /** Active surface (a clicked dialogue / form pop-up): in place, focused, no timer, never evicted. */
+    active: boolean;
+    /** This tab marked it seen (its own click) — a 'seen' update must not hide it. */
+    seenHere: boolean;
+  }
+  /** A show / update for an item whose pop-up is still leaving: runs once it is gone. */
+  const afterExit = new Map<string, Notification>();
+  /** Oldest first. */
+  const toasts: Toast[] = [];
+  /** Pop-ups the user hid with ✕ (this tab): item → the state it had then. */
+  const userHidden = new Map<string, Notification>();
+  /** Overflow waiting for a free slot (phase 4). */
+  const queue = new ToastQueue();
+  let pumpTimer: ReturnType<typeof setTimeout> | null = null;
+  let more: HTMLButtonElement | null = null;
+
+  /** Pop the next queued item into a free slot; staggered when several free. */
+  function pump(delay = 0) {
+    if (pumpTimer || !queue.size) { syncMore(); return; }
+    pumpTimer = setTimeout(() => {
+      pumpTimer = null;
+      while (queue.size && !locked && !centerOpen && slotsUsed(toasts) < MAX_TOASTS && rt) {
+        const id = queue.next()!;
+        const n = rt.store.get(id);
+        if (!n || n.state !== 'active' || n.seenAt !== undefined || userHidden.has(id)) continue;
+        if (show(n)) { if (queue.size && slotsUsed(toasts) < MAX_TOASTS) pump(QUEUE_STAGGER_MS); break; }
+      }
+      syncMore();
+    }, delay);
+  }
+  /** Subtle "+N more" under the stack while items wait; opens the list. */
+  function syncMore() {
+    const n = locked || centerOpen ? 0 : queue.size;
+    if (!n) { more?.remove(); more = null; return; }
+    if (!more) {
+      more = document.createElement('button');
+      more.type = 'button';
+      more.className = 'notif-toasts-more';
+      more.addEventListener('click', () => document.dispatchEvent(new CustomEvent('aura:notifications.open', { detail: {} })));
+    }
+    more.textContent = `+${n} more`;
+    more.setAttribute('aria-label', `${n} more notification${n === 1 ? '' : 's'} — open the list`);
+    region.appendChild(more);
+  }
+  let rt: NotificationsRuntime | null = null;
+  let centerOpen = false;
+  let locked = isLocked();
+
+  function syncHidden() {
+    const empty = toasts.length === 0;
+    region.hidden = empty;
+    region.setAttribute('aria-hidden', String(empty));
+  }
+
+  function announce(n: Notification) {
+    const el = isSticky(n) ? assertive : polite;
+    if (!el || !rt) return;
+    el.textContent = '';
+    // New text node after a tick so repeated titles are announced again.
+    setTimeout(() => { el.textContent = announcement(n, senderLabel(n, rt!.appLookup).label); }, 30);
+  }
+
+  function startTimer(t: Toast) {
+    if (t.timer) clearTimeout(t.timer);
+    t.timer = null;
+    if (t.remaining === null || t.paused) return;
+    t.startedAt = Date.now();
+    t.timer = setTimeout(() => hide(t.n.id, 'timeout'), t.remaining);
+  }
+
+  function pause(t: Toast) {
+    if (t.paused) return;
+    t.paused = true;
+    if (t.timer) {
+      clearTimeout(t.timer);
+      t.timer = null;
+      if (t.remaining !== null) t.remaining = Math.max(1000, t.remaining - (Date.now() - t.startedAt));
+    }
+  }
+
+  function resume(t: Toast) {
+    if (!t.paused || t.active) return;
+    t.paused = false;
+    startTimer(t);
+  }
+
+  function cardOptions(): CardOptions {
+    return {
+      mode: 'toast',
+      actions: rt!.actions,
+      appLookup: rt!.appLookup,
+      // ✕: hide only (keep unread); remembered for this tab.
+      onClose: (n) => { userHidden.set(n.id, toasts.find((x) => x.n.id === n.id)?.n ?? n); queue.remove(n.id); hide(n.id, 'close'); },
+      onOpen: (n) => openInList(n.id),
+      // Phase 4: Answer opens the dialogue itself (DialogLayer).
+      // Answer / a click on a dialogue pop-up: it becomes the active surface IN PLACE
+      // (no exit, no separate dialogue — only the list's Answer opens one).
+      onAnswer: (n) => activate(n.id),
+      onNavigated: (n) => hide(n.id, 'click'),
+    };
+  }
+
+  function wire(t: Toast) {
+    const c = t.card;
+    c.addEventListener('mouseenter', () => pause(t));
+    c.addEventListener('mouseleave', () => { if (!c.contains(document.activeElement)) resume(t); });
+    c.addEventListener('focusin', () => pause(t));
+    c.addEventListener('focusout', (e) => {
+      const to = (e as FocusEvent).relatedTarget as Node | null;
+      if (!to || !c.contains(to)) resume(t);
+    });
+    // Swipe right (touch / pen) = the ✕: hide only, keep unread (lib/notifications/swipe.ts).
+    let swipe: SwipeTracker | null = null;
+    let swallowClick = false;
+    const reduced = () => !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    const setPos = (x: number, o: number, ms = 0) => {
+      c.style.transition = ms ? `transform ${ms}ms ease-out, opacity ${ms}ms ease-out` : 'none';
+      c.style.transform = x ? `translateX(${x}px)` : '';
+      c.style.opacity = o < 1 ? String(o) : '';
+    };
+    c.addEventListener('pointerdown', (e) => {
+      if (t.exiting || !startsSwipe(e.pointerType, !!(e.target as HTMLElement).closest(CARD_CONTROL_SELECTOR))) return;
+      swipe = new SwipeTracker(c.getBoundingClientRect().width || 300);
+      swipe.start(e.clientX, e.clientY, e.timeStamp);
+    });
+    c.addEventListener('pointermove', (e) => {
+      if (!swipe || t.exiting) return;
+      const m = swipe.move(e.clientX, e.clientY, e.timeStamp);
+      if (m.axis !== 'horizontal') return;
+      try { c.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+      pause(t);
+      if (!reduced()) setPos(m.offset, m.opacity);
+    });
+    const release = (e: PointerEvent) => {
+      if (!swipe) return;
+      const s = swipe;
+      swipe = null;
+      const r = e.type === 'pointercancel' ? (s.axis === 'horizontal' ? 'spring' : 'none') : s.end(e.clientX, e.timeStamp);
+      if (s.suppressesClick) swallowClick = true;
+      if (r === 'hide') {
+        // Same as ✕: remembered for the tab, out of the queue, slot freed after the exit.
+        userHidden.set(t.n.id, t.n);
+        queue.remove(t.n.id);
+        if (!reduced()) {
+          c.dataset['swiped'] = 'true';   // finish the slide from here (transition, not the keyframes)
+          setPos(c.getBoundingClientRect().width + 32, 0, 200);
+          c.addEventListener('transitionend', () => t.exit.end(), { once: true });
+        }
+        hide(t.n.id, 'close');
+      } else if (r === 'spring') {
+        setPos(0, 1, reduced() ? 0 : SPRING_MS);
+        if (!c.contains(document.activeElement)) resume(t);
+      }
+    };
+    c.addEventListener('pointerup', release);
+    c.addEventListener('pointercancel', release);
+    // A swipe is never a click (capture: before the card's own activation).
+    c.addEventListener('click', (e) => {
+      if (!swallowClick) return;
+      swallowClick = false;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }, true);
+    // A click acknowledges the pop-up: marked seen at once (toastClickEffect).
+    // Dialogue cards open their dialogue themselves (NotificationCard).
+    c.addEventListener('click', (e) => {
+      if (t.exiting) return;   // leaving: clicks are ignored
+      // Already the active surface: a click inside only does what its control
+      // does — never a second activation, focus jump or hide (phase 6 fix).
+      if (t.active) return;
+      const target = e.target as HTMLElement;
+      const where: ToastClickTarget = target.closest('a') ? 'link'
+        : target.closest('input, textarea, select, label, fieldset, [role="combobox"], [role="listbox"]') ? 'field'
+        : target.closest('[role="menu"], [data-own-escape]') ? 'menu'
+        : target.closest('button') ? 'button' : 'body';
+      const fx = toastClickEffect(t.n, where);
+      if (fx.markSeen) { t.seenHere = true; rt?.actions.markSeen([t.n.id]); }
+      // Dialogue cards already activated themselves on a body click (NotificationCard's
+      // activation); a control click activates here, and the control keeps the focus.
+      if (fx.activate && (where !== 'body' || c.dataset['activatable'] !== 'true')) activate(t.n.id, where === 'body');
+      if (fx.hide) hide(t.n.id, 'click');
+    });
+    // Escape on the active pop-up = Later (hide; the draft stays).
+    c.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || !t.active || t.exiting) return;
+      if ((e.target as HTMLElement | null)?.closest('[data-own-escape]')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      userHidden.set(t.n.id, t.n);
+      queue.remove(t.n.id);
+      hide(t.n.id, 'close');
+    });
+  }
+
+  /** Make a dialogue / form pop-up the active, focused surface — in place. */
+  function activate(id: string, takeFocus = true): boolean {
+    const t = toasts.find((x) => x.n.id === id);
+    if (!t || t.exiting) return false;
+    t.seenHere = true;
+    rt?.actions.markSeen([id]);
+    if (!t.active) {
+      t.active = true;
+      if (t.timer) clearTimeout(t.timer);
+      t.timer = null;
+      t.remaining = null;   // stays until answered / closed
+      t.card.dataset['active'] = 'true';
+      // Expand in place: the list-style collapse never applies to pop-ups,
+      // but a collapsed body (if any) opens.
+      const body = t.card.querySelector<HTMLElement>(':scope > .aura-ntf-body');
+      if (body) body.hidden = false;
+    }
+    // The user clicked: focus may move into it now (never on arrival).
+    if (takeFocus && !t.card.contains(document.activeElement)) focusFirst(t.card);
+    return true;
+  }
+
+  function openInList(id: string) {
+    document.dispatchEvent(new CustomEvent('aura:notifications.open', { detail: { id } }));
+  }
+
+  /** Returns true when it popped up. A live arrival that finds the stack full is queued. */
+  function show(n: Notification): boolean {
+    if (!rt || centerOpen || locked) return false;
+    // Its pop-up is still leaving: show it again only once it is gone.
+    if (toasts.some((x) => x.n.id === n.id && x.exiting)) { afterExit.set(n.id, n); return false; }
+    const was = userHidden.get(n.id);
+    if (was) {
+      if (!mayReshowHidden(was, n)) return false;
+      userHidden.delete(n.id);
+    }
+    // Phase 4: a forced dialogue / desktop decision opens as a dialogue — no
+    // second pop-up for it. (One that waits for its hidden window still pops up.)
+    if (n.type === 'dialogue') {
+      const kind = window.__auraDialogs?.autoPlacement(n);
+      if (kind === 'window' || kind === 'floating' || kind === 'desktop') return false;
+    }
+    const adm = admitToast(admissionList(toasts).map((t) => admissionItem(t.n, t.active)), n);
+    if (!adm.admit) {
+      // Full: wait for a slot (it is in the list anyway).
+      if (n.seenAt === undefined) queue.enqueue(n);
+      syncMore();
+      return false;
+    }
+    // An evicted pop-up is NOT re-queued (it is in the list); its slot goes to `n`.
+    if (adm.evict) hide(adm.evict, 'evicted', false);
+    queue.remove(n.id);
+    const card = renderNotificationCard(n, cardOptions());
+    card.removeAttribute('tabindex');   // never a focus target of its own
+    const t: Toast = { n, card, timer: null, remaining: toastDuration(n), startedAt: Date.now(), paused: false, exiting: false, exit: new ExitMachine(), active: false, seenHere: false };
+    wire(t);
+    toasts.push(t);
+    region.appendChild(card);
+    syncHidden();
+    startTimer(t);
+    announce(n);
+    rt.actions.markDisplayed(n.id);
+    syncMore();
+    return true;
+  }
+
+  function update(n: Notification) {
+    const t = toasts.find((x) => x.n.id === n.id);
+    if (!t || !rt) return;
+    if (t.exiting) return;   // leaving: no updates
+    // Seen elsewhere (another tab / surface): it has been acknowledged.
+    if (n.seenAt !== undefined && t.n.seenAt === undefined && hidesOnSeen(t)) { t.n = n; hide(n.id, 'seen'); return; }
+    const next = updateNotificationCard(t.card, n, cardOptions());
+    t.n = n;
+    // Patched in place (same element): its listeners are already wired.
+    if (next !== t.card) {
+      // Structure changed (rare): a new element — no entrance animation on updates.
+      next.style.animation = 'none';
+      if (t.active) next.dataset['active'] = 'true';
+      t.card = next;
+      t.card.removeAttribute('tabindex');
+      wire(t);
+    }
+    // A new expiry from an update restarts the clock (never for an active pop-up).
+    if (!t.paused && !t.active) { t.remaining = toastDuration(n); startTimer(t); }
+  }
+
+  /**
+   * Hide one pop-up: slide right + fade (exit.ts timing), then it leaves the
+   * stack, the rest move up (FLIP) and the slot goes to the next queued item
+   * (unless `refill` is false). Lock / wipe / list / teardown are instant.
+   */
+  function hide(id: string, reason: ToastHideReason, refill = true) {
+    const t = toasts.find((x) => x.n.id === id);
+    if (!t) return;
+    if (t.timer) clearTimeout(t.timer);
+    t.timer = null;
+    const instant = !toastHideAnimates(reason);
+    if (t.exiting && !instant) return;   // a second hide is ignored
+    t.exiting = true;
+    const onEnd = (e: AnimationEvent) => { if (e.target === t.card) t.exit.end(); };
+    t.exit.hide(() => {
+      t.card.removeEventListener('animationend', onEnd);
+      const before = new Map(toasts.filter((x) => x !== t).map((x) => [x.card, x.card.getBoundingClientRect().top]));
+      const i = toasts.indexOf(t);
+      if (i >= 0) toasts.splice(i, 1);
+      t.card.remove();
+      syncHidden();
+      if (!instant) reflow(before);
+      const again = afterExit.get(id);
+      afterExit.delete(id);
+      if (again && !instant) show(again);
+      if (refill) pump();
+    }, { instant });
+    if (!instant) {
+      t.card.dataset['exit'] = 'true';
+      t.card.addEventListener('animationend', onEnd);
+    }
+  }
+
+  /** FLIP: the remaining pop-ups glide into the freed space (~150 ms). */
+  function reflow(before: Map<HTMLElement, number>) {
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+    for (const [card, top] of before) {
+      if (!card.isConnected) continue;
+      const dy = top - card.getBoundingClientRect().top;
+      if (!dy) continue;
+      card.style.transition = 'none';
+      card.style.transform = `translateY(${dy}px)`;
+      requestAnimationFrame(() => {
+        card.style.transition = 'transform 150ms ease-out';
+        card.style.transform = '';
+        const clear = () => { card.style.transition = ''; card.removeEventListener('transitionend', clear); };
+        card.addEventListener('transitionend', clear);
+      });
+    }
+  }
+
+  function hideAll(reason: ToastHideReason) {
+    afterExit.clear();
+    for (const t of [...toasts]) hide(t.n.id, reason);
+  }
+
+  d.listen(document, 'aura:notifications.center', (e: Event) => {
+    centerOpen = !!(e as CustomEvent<{ open: boolean }>).detail?.open;
+    // The list shows everything: the queue is cleared and never restored.
+    if (centerOpen) { queue.clear(); hideAll('list'); syncMore(); }
+  });
+  d.add(watchLock((isNowLocked) => {
+    locked = isNowLocked;
+    // Locked: frozen (nothing pops up). Unlock: drop stale items, then resume.
+    if (locked) { hideAll('lock'); syncMore(); }
+    else { queue.dropOlderThan(QUEUE_MAX_AGE_ON_UNLOCK_MS); pump(); }
+  }));
+  d.add(watchPlacement((p) => {
+    region.dataset['layout'] = p.phone ? 'phone' : 'desktop';
+    region.style.setProperty('--notif-right', `${p.right}px`);
+    region.dataset['keyboard'] = String(p.keyboard > 0);
+    region.style.setProperty('--notif-kb', `${p.keyboard}px`);
+  }));
+  d.add(() => { for (const t of toasts) if (t.timer) clearTimeout(t.timer); if (pumpTimer) clearTimeout(pumpTimer); queue.clear(); more?.remove(); });
+
+  let disposed = false;
+  getRuntime().then((runtime) => {
+    if (disposed) return;
+    rt = runtime;
+    d.add(runtime.store.subscribe((_snap, changes) => {
+      for (const c of changes) {
+        if (c.kind === 'removed') { queue.remove(c.id); hide(c.id, c.reason === 'gone' ? 'wipe' : 'ended'); if (c.reason !== 'gone') userHidden.delete(c.id); continue; }
+        const n = runtime.store.get(c.id);
+        if (!n) continue;
+        if (n.seenAt !== undefined && queue.has(n.id)) { queue.remove(n.id); syncMore(); }
+        if (c.kind === 'added' && c.source === 'live') show(n);
+        else if (c.kind === 'updated') {
+          if (toasts.some((x) => x.n.id === n.id)) update(n);
+          else if (userHidden.has(n.id) && c.source === 'live') show(n);   // only a qualifying sender update
+        }
+      }
+    }));
+  }).catch((err) => console.warn('[notifications] runtime failed', err));
+
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    hideAll('teardown');
+    d.dispose();
+  };
+  document.addEventListener('aura:notifications.teardown', dispose, { once: true });
+  return dispose;
+}

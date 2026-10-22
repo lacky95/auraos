@@ -89,9 +89,15 @@ export type ToastClickTarget = 'body' | 'button' | 'link' | 'field' | 'menu';
  */
 export interface ToastClickEffect { markSeen: boolean; activate: boolean; hide: boolean }
 export function toastClickEffect(n: Pick<Notification, 'type' | 'components'>, target: ToastClickTarget): ToastClickEffect {
+  const form = n.type === 'dialogue' || hasFormFields(n);
+  // Phase 6 fix: the FIRST click on any control of a dialogue / form pop-up
+  // (chip, radio, checkbox, select, combobox, input, button, menu) activates
+  // it too — timer stopped, marked seen, never evicted — without moving focus
+  // (the control keeps it). Before, a field click left the timer running, so
+  // the pop-up could time out while the user was still picking.
+  if (form && target !== 'link') return { markSeen: true, activate: true, hide: false };
   if (target === 'button') return { markSeen: true, activate: false, hide: false };
   if (target !== 'body') return { markSeen: false, activate: false, hide: false };
-  if (n.type === 'dialogue' || hasFormFields(n)) return { markSeen: true, activate: true, hide: false };
   return { markSeen: true, activate: false, hide: true };
 }
 

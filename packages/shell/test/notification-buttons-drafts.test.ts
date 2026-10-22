@@ -113,8 +113,14 @@ test('pop-up click: no form → seen + hide; dialogue or form → seen + ACTIVE 
   assert.deepEqual(toastClickEffect({ type: 'simple', components: form }, 'body'), { markSeen: true, activate: true, hide: false });
   assert.deepEqual(toastClickEffect({ type: 'simple', components: sel }, 'body'), { markSeen: true, activate: true, hide: false }, 'phase-6 select counts as a form');
   assert.deepEqual(toastClickEffect({ type: 'dialogue' }, 'body'), { markSeen: true, activate: true, hide: false });
-  for (const type of ['simple', 'dialogue'] as const) assert.deepEqual(toastClickEffect({ type }, 'button'), { markSeen: true, activate: false, hide: false });
-  for (const where of ['link', 'field', 'menu'] as const) assert.deepEqual(toastClickEffect({ type: 'simple', components: form }, where), { markSeen: false, activate: false, hide: false });
+  assert.deepEqual(toastClickEffect({ type: 'simple' }, 'button'), { markSeen: true, activate: false, hide: false });
+  // Phase 6 fix: any control of a dialogue / form pop-up activates it (no hide); links stay links.
+  for (const where of ['button', 'field', 'menu'] as const) {
+    assert.deepEqual(toastClickEffect({ type: 'dialogue' }, where), { markSeen: true, activate: true, hide: false });
+    assert.deepEqual(toastClickEffect({ type: 'simple', components: form }, where), { markSeen: true, activate: true, hide: false });
+  }
+  assert.deepEqual(toastClickEffect({ type: 'simple', components: form }, 'link'), { markSeen: false, activate: false, hide: false });
+  assert.deepEqual(toastClickEffect({ type: 'simple' }, 'field'), { markSeen: false, activate: false, hide: false });
 });
 
 test('an active pop-up is never evicted by a new arrival; a seen update from this tab / while active never hides it', () => {
