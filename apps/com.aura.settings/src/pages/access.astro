@@ -1,0 +1,597 @@
+---
+import '../styles/settings.css';
+
+/**
+ * Settings → Notifications & access.
+ *
+ * Per app: which notification permissions it REQUESTS (manifest) and which
+ * an admin GRANTED (locked, pop-up, and — phase 5 — scoped read access to
+ * other senders); API keys for external REST callers; the admin audit.
+ *
+ * Phase 5, "Lock screen & history": per-sender lock-screen visibility
+ * overrides, "hide all on the lock screen" and the retention period. These
+ * are the user's preferences (no admin unlock): written to `os/notifications`
+ * through /api/kv (manifest permission `system.kv.os.notifications.write`).
+ *
+ * Reading the requested permissions needs nothing. Everything else needs an
+ * explicit "Unlock admin" with the shared operator credential: the session
+ * token lives in this page's memory only (never storage, never a cookie) and
+ * the page locks itself after 15 minutes. Changes are audited by the shell as
+ * "admin (shared credential)".
+ */
+const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
+
+interface AppRow { id: string; name: string; permissions: string[] }
+let apps: AppRow[] = [];
+try {
+  const r = await fetch(`${osBase}/api/apps`, { signal: AbortSignal.timeout(2500) });
+  if (r.ok) {
+    const list = await r.json() as Array<{ manifest: { id: string; name?: string; permissions?: string[] } }>;
+    apps = list
+      .map((a) => ({ id: a.manifest.id, name: a.manifest.name ?? a.manifest.id, permissions: a.manifest.permissions ?? [] }))
+      .filter((a) => a.permissions.some((p) => p === 'system.notifications' || p.startsWith('notifications.')))
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }
+} catch { /* shell booting — the table stays empty */ }
+const PRIV = ['notifications.locked', 'notifications.popup'];
+const READ = 'notifications.read';
+// Senders for the lock-screen / retention table: AuraOS itself + every app that sends.
+const senders = [
+  { key: 'auraos', name: 'AuraOS', id: 'auraos' },
+  ...apps.filter((a) => a.permissions.includes('system.notifications')).map((a) => ({ key: `app:${a.id}`, name: a.name, id: a.id })),
+];
+const label = (p: string) => p.replace('notifications.', '');
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Settings · Notifications &amp; access — AuraOS</title>
+  <link rel="stylesheet" href="/api/os/theme.css" />
+  <style>
+    .acc-section { border: var(--aura-border); padding: 14px 16px; margin-bottom: 14px; display: flex; flex-direction: column; gap: 10px; }
+    .acc-head { display: flex; align-items: center; gap: 10px; }
+    .acc-title { flex: 1; font-size: var(--aura-font-size-sm); letter-spacing: 0.1em; text-transform: uppercase; color: var(--aura-color-primary); }
+    .acc-note { font-size: 0.65rem; color: var(--aura-color-text-dim); letter-spacing: 0.04em; line-height: 1.5; }
+    .acc-table { width: 100%; border-collapse: collapse; font-size: 0.7rem; }
+    .acc-table th { text-align: left; font-weight: normal; color: var(--aura-color-text-dim); letter-spacing: 0.1em; font-size: 0.6rem; padding: 4px 6px; border-bottom: var(--aura-border); }
+    .acc-table td { padding: 5px 6px; border-bottom: 1px solid var(--aura-color-border, rgba(0,255,65,0.12)); vertical-align: middle; }
+    .acc-table code { font-family: var(--aura-font-mono, monospace); font-size: 0.65rem; }
+    .pill { display: inline-block; padding: 1px 6px; border: var(--aura-border); font-size: 0.6rem; letter-spacing: 0.08em; margin-right: 4px; }
+    .pill.on { color: var(--aura-color-primary); }
+    .pill.off { color: var(--aura-color-text-dim); }
+    .btn { font: inherit; font-size: 0.65rem; letter-spacing: 0.08em; padding: 3px 9px; background: var(--aura-color-surface, #111); color: var(--aura-color-text); border: var(--aura-border); cursor: pointer; }
+    .btn:hover:not(:disabled) { color: var(--aura-color-primary); }
+    .btn:disabled { opacity: 0.4; cursor: default; }
+    .btn[data-variant="danger"] { color: var(--aura-color-danger, #ff4a4a); }
+    .lock-state { font-size: 0.65rem; letter-spacing: 0.08em; }
+    .lock-state[data-unlocked="true"] { color: var(--aura-color-primary); }
+    .locked-only[hidden], .unlocked-only[hidden] { display: none !important; }
+    .secret-box { font-family: var(--aura-font-mono, monospace); font-size: 0.7rem; padding: 8px; border: var(--aura-border); word-break: break-all; user-select: all; }
+    .row-inline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .row-inline input[type="text"], .row-inline input[type="password"] { flex: 1; min-width: 12ch; font: inherit; font-size: 0.7rem; padding: 4px 6px; background: var(--aura-color-bg); color: var(--aura-color-text); border: var(--aura-border); }
+    .row-inline label { font-size: 0.65rem; letter-spacing: 0.06em; }
+    .acc-table select, .row-inline select { font: inherit; font-size: 0.65rem; padding: 2px 4px; background: var(--aura-color-bg); color: var(--aura-color-text); border: var(--aura-border); }
+    dialog { background: var(--aura-color-surface, #111); color: var(--aura-color-text); border: var(--aura-border); padding: 16px; min-width: 340px; max-width: 520px; }
+    dialog::backdrop { background: rgba(0,0,0,0.6); }
+    dialog .dlg-title { color: var(--aura-color-primary); letter-spacing: 0.1em; font-size: 0.75rem; margin-bottom: 10px; }
+    dialog .dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+    #status { font-size: 0.65rem; letter-spacing: 0.06em; color: var(--aura-color-text-dim); }
+    #status[data-tone="error"] { color: var(--aura-color-danger, #ff4a4a); }
+  </style>
+</head>
+<body>
+  <main class="settings-body">
+    <section class="acc-section">
+      <div class="acc-head">
+        <span class="acc-title">⚿ Admin</span>
+        <span class="lock-state" id="lock-state" data-unlocked="false">LOCKED</span>
+        <button class="btn locked-only" id="btn-unlock" type="button">UNLOCK ADMIN</button>
+        <button class="btn unlocked-only" id="btn-lock" type="button" hidden>LOCK</button>
+      </div>
+      <p class="acc-note">
+        Grants and API keys need the shared admin credential. It lives in the master container only:
+        run <code>aura jump -m</code>, then <code>aura admin credential</code>. The unlock lasts 15 minutes,
+        stays in this page's memory only, and every change is audited as "admin (shared credential)".
+      </p>
+    </section>
+
+    <section class="acc-section">
+      <div class="acc-head"><span class="acc-title">▤ Apps · notification permissions</span></div>
+      <p class="acc-note">
+        An app sends notifications when its manifest declares <code>system.notifications</code>.
+        <b>Locked</b> notifications and dialogue <b>pop-ups</b> are privileged: the manifest only requests them,
+        and they take effect once an admin grants them here. Without a grant they are downgraded (locked → simple,
+        pop-up → off). Grants and revokes apply at once, without a restart.
+        Every app reads its <b>own</b> notifications. Reading <b>other senders'</b> ones needs
+        <code>notifications.read</code> in the manifest plus a scoped grant here (apps, sender keys or all;
+        secret items only if you include them). Lock-screen visibility never grants read access.
+      </p>
+      <table class="acc-table">
+        <thead><tr><th>APP</th><th>SENDS</th><th>REQUESTED</th><th>GRANTED</th><th></th><th>READS OTHERS</th></tr></thead>
+        <tbody id="apps-body">
+          {apps.length === 0 && (<tr><td colspan="6" class="acc-note">No app declares notification permissions.</td></tr>)}
+          {apps.map((a) => (
+            <tr data-app-id={a.id}>
+              <td><code>{a.id}</code><br /><span class="acc-note">{a.name}</span></td>
+              <td>{a.permissions.includes('system.notifications') ? <span class="pill on">YES</span> : <span class="pill off">NO</span>}</td>
+              <td>{PRIV.filter((p) => a.permissions.includes(p)).map((p) => <span class="pill on">{label(p)}</span>)}{PRIV.every((p) => !a.permissions.includes(p)) && <span class="acc-note">—</span>}</td>
+              <td class="granted-cell"><span class="acc-note locked-only">unlock to see</span></td>
+              <td class="actions-cell">
+                {PRIV.map((p) => (
+                  <button class="btn unlocked-only grant-toggle" type="button" data-perm={p} data-requested={String(a.permissions.includes(p))} hidden>
+                    {label(p)}
+                  </button>
+                ))}
+              </td>
+              <td class="read-cell" data-requested={String(a.permissions.includes(READ))}>
+                {a.permissions.includes(READ)
+                  ? <span class="acc-note locked-only">requested · unlock to see</span>
+                  : <span class="acc-note">—</span>}
+                <span class="read-grant unlocked-only" hidden></span>
+                {a.permissions.includes(READ) && (
+                  <span class="unlocked-only" hidden>
+                    <button class="btn read-grant-btn" type="button">GRANT READ…</button>
+                    <button class="btn read-revoke-btn" type="button" data-variant="danger" hidden>REVOKE READ</button>
+                  </span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
+
+    <section class="acc-section" id="ls-section">
+      <div class="acc-head"><span class="acc-title">◐ Lock screen &amp; history</span><span class="acc-note" id="ls-saved"></span></div>
+      <p class="acc-note">
+        While AuraOS is locked, <b>public</b> notifications show in full (without buttons or inputs), <b>private</b> ones
+        (the default) only with their sender and a generic text, and <b>secret</b> ones not at all. A sender sets the level;
+        here you can make it <b>stricter</b> per sender, never less strict. The lock screen has no PIN: this protects
+        against glances, it is not access control. Ended notifications (answered, dismissed, cleared, expired) are kept
+        as history for the retention period, then deleted; active ones are never deleted automatically.
+      </p>
+      <div class="row-inline">
+        <label><input type="checkbox" id="ls-hide-all" /> Hide all notifications on the lock screen</label>
+      </div>
+      <div class="row-inline">
+        <label for="rt-days">Keep history for</label>
+        <select id="rt-days" class="rt-select">
+          <option value="1">1 day</option><option value="7">7 days</option><option value="30">30 days</option>
+          <option value="90">90 days</option><option value="forever">forever</option>
+        </select>
+      </div>
+      <table class="acc-table">
+        <thead><tr><th>SENDER</th><th>LOCK SCREEN</th><th>HISTORY</th></tr></thead>
+        <tbody id="ls-body">
+          {senders.map((x) => (
+            <tr data-sender={x.key}>
+              <td><code>{x.id}</code><br /><span class="acc-note">{x.name}</span></td>
+              <td>
+                <select class="ls-vis" aria-label={`Lock-screen visibility for ${x.name}`}>
+                  <option value="">as sent</option><option value="public">public (no stricter)</option>
+                  <option value="private">at least private</option><option value="secret">secret (hide)</option>
+                </select>
+              </td>
+              <td>
+                <select class="rt-app" aria-label={`History retention for ${x.name}`}>
+                  <option value="">default</option><option value="1">1 day</option><option value="7">7 days</option>
+                  <option value="30">30 days</option><option value="90">90 days</option><option value="forever">forever</option>
+                </select>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
+
+    <dialog id="read-dialog" aria-labelledby="read-title">
+      <form method="dialog" id="read-form">
+        <div class="dlg-title" id="read-title">GRANT READ ACCESS</div>
+        <p class="acc-note">Which senders may <code id="read-app"></code> read? Comma-separated:
+          <code>app:&lt;appId&gt;</code>, <code>sender:&lt;senderKey&gt;</code> (e.g. <code>sender:auraos</code>), or <code>all</code>.</p>
+        <div class="row-inline" style="margin-top: 8px;">
+          <input type="text" id="read-scope" autocomplete="off" spellcheck="false" placeholder="app:com.example.notes" />
+        </div>
+        <div class="row-inline" style="margin-top: 6px;">
+          <label><input type="checkbox" id="read-secret" /> include secret notifications</label>
+        </div>
+        <p class="acc-note" id="read-error" style="color: var(--aura-color-danger, #ff4a4a);" hidden></p>
+        <div class="dlg-actions">
+          <button class="btn" type="submit" value="cancel" formnovalidate>CANCEL</button>
+          <button class="btn" type="submit" value="grant">GRANT</button>
+        </div>
+      </form>
+    </dialog>
+
+    <section class="acc-section">
+      <div class="acc-head"><span class="acc-title">⚷ API keys</span></div>
+      <p class="acc-note">
+        For external REST callers: <code>Authorization: Bearer aura_k1_…</code> makes a verified sender
+        (kind <code>rest</code>). The key is shown once, only its hash is stored, and revoking takes effect at once.
+      </p>
+      <div class="unlocked-only" hidden>
+        <div class="row-inline">
+          <input type="text" id="key-name" placeholder="name, e.g. CI bot" maxlength="100" />
+          <label><input type="checkbox" class="key-scope" value="system.notifications" checked /> send</label>
+          <label><input type="checkbox" class="key-scope" value="notifications.locked" /> locked</label>
+          <label><input type="checkbox" class="key-scope" value="notifications.popup" /> pop-up</label>
+          <button class="btn" id="btn-key-create" type="button">CREATE KEY</button>
+        </div>
+        <div id="key-secret" hidden style="margin-top: 10px;">
+          <p class="acc-note"><b>Copy this key now — it is not shown again.</b></p>
+          <div class="secret-box" id="key-secret-value"></div>
+          <div class="row-inline" style="margin-top: 6px;"><button class="btn" id="btn-key-hide" type="button">DONE, HIDE IT</button></div>
+        </div>
+        <table class="acc-table" style="margin-top: 10px;">
+          <thead><tr><th>ID</th><th>NAME</th><th>SCOPES</th><th>LAST USED</th><th>STATE</th><th></th></tr></thead>
+          <tbody id="keys-body"></tbody>
+        </table>
+      </div>
+      <p class="acc-note locked-only">Unlock admin to list and manage API keys.</p>
+    </section>
+
+    <section class="acc-section">
+      <div class="acc-head">
+        <span class="acc-title">☰ Audit</span>
+        <button class="btn unlocked-only" id="btn-audit-refresh" type="button" hidden>REFRESH</button>
+      </div>
+      <table class="acc-table unlocked-only" hidden>
+        <thead><tr><th>TIME</th><th>ACTOR</th><th>ACTION</th><th>TARGET</th><th>OUTCOME</th></tr></thead>
+        <tbody id="audit-body"></tbody>
+      </table>
+      <p class="acc-note locked-only">Unlock admin to see who changed what (always "admin (shared credential)" — AuraOS has no user accounts yet).</p>
+    </section>
+
+    <p id="status"></p>
+  </main>
+
+  <dialog id="unlock-dialog" aria-labelledby="unlock-title">
+    <form method="dialog" id="unlock-form">
+      <div class="dlg-title" id="unlock-title">⚿ UNLOCK ADMIN</div>
+      <p class="acc-note">Enter the shared admin credential (<code>aura admin credential</code> in the master container).</p>
+      <div class="row-inline" style="margin-top: 8px;">
+        <input type="password" id="unlock-credential" autocomplete="off" spellcheck="false" placeholder="aura_admin_…" />
+      </div>
+      <p class="acc-note" id="unlock-error" style="color: var(--aura-color-danger, #ff4a4a);" hidden></p>
+      <div class="dlg-actions">
+        <button class="btn" type="submit" value="cancel" formnovalidate>CANCEL</button>
+        <button class="btn" type="submit" value="unlock" id="btn-unlock-submit">UNLOCK</button>
+      </div>
+    </form>
+  </dialog>
+
+  <footer class="settings-foot">PROVIDER · /api/admin/session · /api/admin/grants · /api/admin/api-keys · /api/admin/audit · /api/kv/os/notifications</footer>
+
+  <script is:inline>
+    (() => {
+      // The admin session: in this closure only — never localStorage, never a cookie.
+      let session = null; // { token, expiresAt }
+      let lockTimer = null;
+
+      const $ = (id) => document.getElementById(id);
+      const statusEl = $('status');
+      const setStatus = (msg, tone) => {
+        statusEl.textContent = msg || '';
+        if (tone) statusEl.dataset.tone = tone; else delete statusEl.dataset.tone;
+      };
+      const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+      const fmt = (ms) => (ms ? new Date(ms).toLocaleString() : '—');
+      const label = (p) => p.replace('notifications.', '');
+
+      function render() {
+        const on = !!session;
+        document.querySelectorAll('.unlocked-only').forEach((el) => { el.hidden = !on; });
+        document.querySelectorAll('.locked-only').forEach((el) => { el.hidden = on; });
+        const st = $('lock-state');
+        st.dataset.unlocked = String(on);
+        st.textContent = on ? `UNLOCKED · UNTIL ${new Date(session.expiresAt).toLocaleTimeString()}` : 'LOCKED';
+      }
+
+      function lockLocal(reason) {
+        session = null;
+        if (lockTimer) clearTimeout(lockTimer);
+        lockTimer = null;
+        $('key-secret').hidden = true;
+        $('key-secret-value').textContent = '';
+        document.querySelectorAll('.granted-cell').forEach((td) => { td.innerHTML = '<span class="acc-note locked-only">unlock to see</span>'; });
+        document.querySelectorAll('.read-grant').forEach((el) => { el.innerHTML = ''; });
+        $('keys-body').innerHTML = '';
+        $('audit-body').innerHTML = '';
+        render();
+        if (reason) setStatus(reason);
+      }
+
+      async function admin(method, path, body) {
+        if (!session) throw new Error('locked');
+        const r = await fetch(path, {
+          method,
+          headers: { Authorization: `Bearer ${session.token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        const data = await r.json().catch(() => ({}));
+        if (r.status === 401) { lockLocal('Admin session expired — unlock again.'); throw new Error('locked'); }
+        if (!r.ok) throw new Error(data.error || data.message || `HTTP ${r.status}`);
+        return data;
+      }
+
+      async function loadGrants() {
+        const d = await admin('GET', '/api/admin/grants');
+        const byApp = new Map(d.apps.map((a) => [a.appId, a]));
+        document.querySelectorAll('#apps-body tr[data-app-id]').forEach((tr) => {
+          const a = byApp.get(tr.dataset.appId);
+          const granted = a ? a.granted : [];
+          const effective = a ? a.effective : [];
+          tr.querySelector('.granted-cell').innerHTML = granted.length
+            ? granted.map((p) => `<span class="pill ${effective.includes(p) ? 'on' : 'off'}" title="${effective.includes(p) ? 'in effect' : 'granted, but not requested by the manifest (or granted for another install scope)'}">${esc(label(p))}</span>`).join('')
+            : '<span class="acc-note">—</span>';
+          const rc = tr.querySelector('.read-cell');
+          if (rc) {
+            const read = a && a.read;
+            const g = rc.querySelector('.read-grant');
+            g.innerHTML = read
+              ? `<span class="pill ${effective.includes('notifications.read') ? 'on' : 'off'}">${esc(read.label)}</span>`
+              : (rc.dataset.requested === 'true' ? '<span class="acc-note">not granted</span>' : '');
+            const rb = rc.querySelector('.read-revoke-btn');
+            if (rb) rb.hidden = !read;
+            const gb = rc.querySelector('.read-grant-btn');
+            if (gb) gb.textContent = read ? 'CHANGE…' : 'GRANT READ…';
+          }
+          tr.querySelectorAll('.grant-toggle').forEach((btn) => {
+            const has = granted.includes(btn.dataset.perm);
+            btn.dataset.granted = String(has);
+            btn.textContent = `${has ? 'REVOKE' : 'GRANT'} ${label(btn.dataset.perm).toUpperCase()}`;
+            btn.dataset.variant = has ? 'danger' : '';
+            btn.title = btn.dataset.requested === 'true' ? '' : 'The manifest does not request this — a grant has no effect until it does.';
+          });
+        });
+      }
+
+      async function loadKeys() {
+        const d = await admin('GET', '/api/admin/api-keys');
+        $('keys-body').innerHTML = d.keys.length ? d.keys.map((k) => `
+          <tr>
+            <td><code>${esc(k.id)}</code></td>
+            <td>${esc(k.name)}</td>
+            <td>${k.scopes.map((s) => `<span class="pill on">${esc(s === 'system.notifications' ? 'send' : label(s))}</span>`).join('')}</td>
+            <td class="acc-note">${esc(fmt(k.lastUsedAt))}</td>
+            <td>${k.revokedAt ? '<span class="pill off">REVOKED</span>' : '<span class="pill on">ACTIVE</span>'}</td>
+            <td>${k.revokedAt ? '' : `<button class="btn key-revoke" type="button" data-variant="danger" data-id="${esc(k.id)}">REVOKE</button>`}</td>
+          </tr>`).join('') : '<tr><td colspan="6" class="acc-note">No API keys.</td></tr>';
+      }
+
+      async function loadAudit() {
+        const d = await admin('GET', '/api/admin/audit?limit=50');
+        $('audit-body').innerHTML = d.entries.length ? d.entries.map((e) => `
+          <tr>
+            <td class="acc-note">${esc(fmt(e.at))}</td>
+            <td>${esc(e.actor)}</td>
+            <td><code>${esc(e.action)}</code></td>
+            <td><code>${esc(e.target ?? '')}</code></td>
+            <td>${esc(e.outcome)}</td>
+          </tr>`).join('') : '<tr><td colspan="5" class="acc-note">No entries.</td></tr>';
+      }
+
+      async function loadAll() {
+        try {
+          await Promise.all([loadGrants(), loadKeys(), loadAudit()]);
+        } catch (err) {
+          if (err.message !== 'locked') setStatus(`ERROR — ${err.message}`, 'error');
+        }
+      }
+
+      // ---- unlock / lock -------------------------------------------------
+      const dlg = $('unlock-dialog');
+      $('btn-unlock').addEventListener('click', () => {
+        $('unlock-credential').value = '';
+        $('unlock-error').hidden = true;
+        dlg.showModal();
+        $('unlock-credential').focus();
+      });
+      $('unlock-form').addEventListener('submit', async (ev) => {
+        const submitter = ev.submitter;
+        if (!submitter || submitter.value !== 'unlock') { $('unlock-credential').value = ''; return; }
+        ev.preventDefault();
+        const credential = $('unlock-credential').value.trim();
+        $('unlock-credential').value = '';
+        if (!credential) return;
+        const r = await fetch('/api/admin/session', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credential }),
+        }).catch(() => null);
+        const data = r ? await r.json().catch(() => ({})) : {};
+        if (!r || !r.ok || !data.token) {
+          $('unlock-error').textContent = (data && data.message) || 'Unlock failed.';
+          $('unlock-error').hidden = false;
+          return;
+        }
+        session = { token: data.token, expiresAt: data.expiresAt };
+        dlg.close();
+        const ms = Math.max(0, data.expiresAt - Date.now());
+        lockTimer = setTimeout(() => lockLocal('Admin locked automatically after 15 minutes.'), ms);
+        render();
+        setStatus('Admin unlocked.');
+        await loadAll();
+      });
+      $('btn-lock').addEventListener('click', async () => {
+        const token = session && session.token;
+        lockLocal('Admin locked.');
+        if (token) await fetch('/api/admin/session', { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+      });
+      // Leaving the page drops the session from memory; also revoke it server-side.
+      window.addEventListener('pagehide', () => {
+        if (session) {
+          fetch('/api/admin/session', { method: 'DELETE', headers: { Authorization: `Bearer ${session.token}` }, keepalive: true }).catch(() => {});
+          session = null;
+        }
+      });
+
+      // ---- grants ----------------------------------------------------------
+      document.querySelectorAll('.grant-toggle').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const appId = btn.closest('tr').dataset.appId;
+          const permission = btn.dataset.perm;
+          const revoke = btn.dataset.granted === 'true';
+          btn.disabled = true;
+          try {
+            if (revoke) {
+              await admin('DELETE', `/api/admin/grants?subjectKind=app&subjectId=${encodeURIComponent(appId)}&permission=${encodeURIComponent(permission)}`);
+              setStatus(`Revoked ${permission} from ${appId}.`);
+            } else {
+              const r = await admin('POST', '/api/admin/grants', { subjectKind: 'app', subjectId: appId, permission });
+              setStatus(`Granted ${permission} to ${appId}.${(r.warnings || []).length ? ' ' + r.warnings.join(' ') : ''}`);
+            }
+            await Promise.all([loadGrants(), loadAudit()]);
+          } catch (err) {
+            if (err.message !== 'locked') setStatus(`ERROR — ${err.message}`, 'error');
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      });
+
+      // ---- API keys --------------------------------------------------------
+      $('btn-key-create').addEventListener('click', async () => {
+        const name = $('key-name').value.trim();
+        const scopes = [...document.querySelectorAll('.key-scope:checked')].map((c) => c.value);
+        if (!name) { setStatus('Give the key a name.', 'error'); return; }
+        try {
+          const r = await admin('POST', '/api/admin/api-keys', { name, scopes });
+          $('key-secret-value').textContent = r.key;
+          $('key-secret').hidden = false;
+          $('key-name').value = '';
+          setStatus(`Created API key ${r.apiKey.id}.`);
+          await Promise.all([loadKeys(), loadAudit()]);
+        } catch (err) {
+          if (err.message !== 'locked') setStatus(`ERROR — ${err.message}`, 'error');
+        }
+      });
+      $('btn-key-hide').addEventListener('click', () => {
+        $('key-secret').hidden = true;
+        $('key-secret-value').textContent = '';
+      });
+      $('keys-body').addEventListener('click', async (ev) => {
+        const btn = ev.target.closest('.key-revoke');
+        if (!btn) return;
+        if (!confirm(`Revoke API key ${btn.dataset.id}? Callers using it get 401 at once.`)) return;
+        try {
+          await admin('DELETE', `/api/admin/api-keys?id=${encodeURIComponent(btn.dataset.id)}`);
+          setStatus(`Revoked API key ${btn.dataset.id}.`);
+          await Promise.all([loadKeys(), loadAudit()]);
+        } catch (err) {
+          if (err.message !== 'locked') setStatus(`ERROR — ${err.message}`, 'error');
+        }
+      });
+      $('btn-audit-refresh').addEventListener('click', () => { loadAudit().catch(() => {}); });
+
+      // ---- notifications.read grants (phase 5) ----------------------------
+      let readApp = null;
+      document.querySelectorAll('.read-grant-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          readApp = btn.closest('tr').dataset.appId;
+          $('read-app').textContent = readApp;
+          $('read-scope').value = '';
+          $('read-secret').checked = false;
+          $('read-error').hidden = true;
+          $('read-dialog').showModal();
+          $('read-scope').focus();
+        });
+      });
+      $('read-form').addEventListener('submit', async (ev) => {
+        const submitter = ev.submitter;
+        if (!submitter || submitter.value !== 'grant') return;
+        ev.preventDefault();
+        const scope = $('read-scope').value.trim();
+        if (!scope) { $('read-error').textContent = 'Name at least one sender, or all.'; $('read-error').hidden = false; return; }
+        try {
+          const r = await admin('POST', '/api/admin/grants', {
+            subjectKind: 'app', subjectId: readApp, permission: 'notifications.read',
+            readScope: scope, includeSecret: $('read-secret').checked,
+          });
+          $('read-dialog').close();
+          setStatus(`Granted notifications.read to ${readApp}.${(r.warnings || []).length ? ' ' + r.warnings.join(' ') : ''}`);
+          await Promise.all([loadGrants(), loadAudit()]);
+        } catch (err) {
+          if (err.message === 'locked') { $('read-dialog').close(); return; }
+          $('read-error').textContent = err.message;
+          $('read-error').hidden = false;
+        }
+      });
+      document.querySelectorAll('.read-revoke-btn').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const appId = btn.closest('tr').dataset.appId;
+          btn.disabled = true;
+          try {
+            await admin('DELETE', `/api/admin/grants?subjectKind=app&subjectId=${encodeURIComponent(appId)}&permission=notifications.read`);
+            setStatus(`Revoked notifications.read from ${appId}.`);
+            await Promise.all([loadGrants(), loadAudit()]);
+          } catch (err) {
+            if (err.message !== 'locked') setStatus(`ERROR — ${err.message}`, 'error');
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      });
+
+      // ---- lock screen & history: os/notifications (user preference) -------
+      // Read-modify-write of the whole value; unknown fields are kept.
+      let nset = {};
+      const lsSaved = $('ls-saved');
+      async function loadNotifSettings() {
+        try {
+          const r = await fetch('/api/kv/os/notifications', { headers: { accept: 'application/json' } });
+          nset = r.ok ? ((await r.json()).value || {}) : {};
+        } catch { nset = {}; }
+        const ls = nset.lockscreen || {};
+        const rt = nset.retention || {};
+        $('ls-hide-all').checked = ls.hideAll === true;
+        const days = rt.days === undefined ? '7' : String(rt.days === 0 || rt.days === null ? 'forever' : rt.days);
+        $('rt-days').value = ['1', '7', '30', '90', 'forever'].includes(days) ? days : '7';
+        document.querySelectorAll('#ls-body tr[data-sender]').forEach((tr) => {
+          const k = tr.dataset.sender;
+          const bare = k.startsWith('app:') ? k.slice(4) : k;
+          tr.querySelector('.ls-vis').value = (ls.apps && (ls.apps[k] || ls.apps[bare])) || '';
+          const ra = rt.apps && (rt.apps[k] ?? rt.apps[bare]);
+          tr.querySelector('.rt-app').value = ra === undefined ? '' : String(ra);
+        });
+      }
+      async function saveNotifSettings() {
+        const lsApps = {};
+        const rtApps = {};
+        document.querySelectorAll('#ls-body tr[data-sender]').forEach((tr) => {
+          const k = tr.dataset.sender;
+          const v = tr.querySelector('.ls-vis').value;
+          if (v) lsApps[k] = v;
+          const r = tr.querySelector('.rt-app').value;
+          if (r) rtApps[k] = r === 'forever' ? 'forever' : Number(r);
+        });
+        const d = $('rt-days').value;
+        const value = {
+          ...nset,
+          lockscreen: { ...(nset.lockscreen || {}), hideAll: $('ls-hide-all').checked, apps: lsApps },
+          retention: { ...(nset.retention || {}), days: d === 'forever' ? 'forever' : Number(d), apps: rtApps },
+        };
+        try {
+          const r = await fetch('/api/kv/os/notifications', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value }),
+          });
+          if (!r.ok) {
+            const e = await r.json().catch(() => ({}));
+            throw new Error(e.error || `HTTP ${r.status}`);
+          }
+          nset = value;
+          lsSaved.textContent = `SAVED ${new Date().toLocaleTimeString()}`;
+        } catch (err) {
+          setStatus(`Could not save the lock-screen settings — ${err.message}`, 'error');
+          await loadNotifSettings();
+        }
+      }
+      $('ls-hide-all').addEventListener('change', saveNotifSettings);
+      $('rt-days').addEventListener('change', saveNotifSettings);
+      document.querySelectorAll('#ls-body select').forEach((sel) => sel.addEventListener('change', saveNotifSettings));
+      void loadNotifSettings();
+
+      render();
+    })();
+  </script>
+</body>
+</html>
