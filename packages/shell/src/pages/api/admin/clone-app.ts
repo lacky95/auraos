@@ -10,6 +10,7 @@ import {
   portPackageJsonForScope, portToolsForScope,
   type ScopeDefinition, type ScopeId,
 } from '@aura/core';
+import { auditAdmin, requireAdmin } from '../../../lib/auth.js';
 
 /**
  * Server-side app cloning — the engine behind `aura dev clone`.
@@ -146,6 +147,14 @@ export const POST: APIRoute = async ({ request }) => {
   const destExists = existsSync(dest);
   if (destExists && !body.force) {
     return json({ error: 'exists', message: `${dest} already exists. Pass force=true to overwrite.` }, 409);
+  }
+  // Overwriting an EXISTING app replaces the code that runs under its id (and
+  // inherits its grants): admin only. New clones — including same-id shadows
+  // in another scope, which don't inherit scope-pinned grants — need nothing.
+  if (destExists && body.force) {
+    const admin = await requireAdmin(request);
+    if (admin instanceof Response) return admin;
+    await auditAdmin(admin, 'app.clone-overwrite', { target: `app:${targetAppId}`, detail: { sourceAppId, scope: targetScopeId } });
   }
 
   // A clone that lands on an id already present in a LOWER-priority scope

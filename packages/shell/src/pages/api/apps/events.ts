@@ -61,7 +61,9 @@ export const GET: APIRoute = ({ url }) => {
       const onActBreadcrumb = (ev: unknown) => send('activity:breadcrumbChanged', ev);
       const onThemeChanged  = (ev: unknown) => send('theme:changed',    ev);
       const onModeChanged   = (ev: unknown) => send('mode:changed',     ev);
-      const onNotification  = (ev: unknown) => send('notification',     ev);
+      // Phase 5: the legacy content-carrying 'notification' relay is gone (it leaked
+      // every notification, secret ones included, to every app). Notifications are
+      // read through /api/notifications (own items, or a notifications.read grant).
       const onUiCommand     = (ev: unknown) => send('ui:command',       ev);
       const onWsChanged     = (ev: unknown) => send('workspaces:changed',  ev);
       const onWsActivated   = (ev: unknown) => send('workspace:activated', ev);
@@ -82,7 +84,6 @@ export const GET: APIRoute = ({ url }) => {
       OsEventBus.on('activity:breadcrumbChanged', onActBreadcrumb);
       OsEventBus.on('theme:changed',      onThemeChanged);
       OsEventBus.on('mode:changed',       onModeChanged);
-      OsEventBus.on('notification',       onNotification);
       OsEventBus.on('ui:command',         onUiCommand);
       OsEventBus.on('workspaces:changed',  onWsChanged);
       OsEventBus.on('workspace:activated', onWsActivated);
@@ -110,7 +111,6 @@ export const GET: APIRoute = ({ url }) => {
         OsEventBus.off('activity:breadcrumbChanged', onActBreadcrumb);
         OsEventBus.off('theme:changed',      onThemeChanged);
         OsEventBus.off('mode:changed',       onModeChanged);
-        OsEventBus.off('notification',       onNotification);
         OsEventBus.off('ui:command',         onUiCommand);
         OsEventBus.off('workspaces:changed',  onWsChanged);
         OsEventBus.off('workspace:activated', onWsActivated);

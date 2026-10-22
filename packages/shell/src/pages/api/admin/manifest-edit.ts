@@ -2,6 +2,7 @@ import type { APIRoute } from 'astro';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BUILTIN_PERMISSIONS, toolsGrant } from '@aura/core';
+import { auditAdmin, requireAdmin } from '../../../lib/auth.js';
 
 /**
  * Server-side manifest mutation. Required because container-sandbox apps
@@ -21,6 +22,13 @@ import { BUILTIN_PERMISSIONS, toolsGrant } from '@aura/core';
  * app's real install directory across ALL scopes (system `/workspace/apps`,
  * global + user `/data/scopes/…/apps`). A hardcoded `/workspace/apps` only
  * covers system-scope apps and 404s on user/global installs.
+ *
+ * ADMIN ONLY (phase 2): it changes what an app may do (permissions[], tools[],
+ * services[].tools), so it needs `Authorization: Bearer <admin session>`
+ * (`aura admin login`); otherwise 401 `{error:'admin-required'}`. Every change
+ * is audited as "admin (shared credential)". Declaring a privileged
+ * permission here (notifications.locked / popup) only REQUESTS it — the grant
+ * is separate (POST /api/admin/grants).
  */
 
 const APP_ID_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
@@ -45,6 +53,8 @@ const PERMISSION_ACTIONS = new Set<Action>(['add-permission', 'remove-permission
 const SERVICE_ACTIONS = new Set<Action>(['add-service-tool', 'remove-service-tool']);
 
 export const POST: APIRoute = async ({ request }) => {
+  const admin = await requireAdmin(request);
+  if (admin instanceof Response) return admin;
   let body: Body;
   try { body = await request.json() as Body; }
   catch { return json({ error: 'invalid-json' }, 400); }
@@ -116,6 +126,7 @@ export const POST: APIRoute = async ({ request }) => {
       manifest['permissions'] = next;
       try { writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n'); }
       catch (err) { return json({ error: 'write-failed', message: (err as Error).message }, 500); }
+      await auditAdmin(admin, `manifest.${action}`, { target: `app:${appId}`, detail: { permission: perm } });
     }
 
     // Reload even on a no-op. The in-memory registry can drift from disk (a
@@ -174,6 +185,7 @@ export const POST: APIRoute = async ({ request }) => {
       svc['tools'] = next;
       try { writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n'); }
       catch (err) { return json({ error: 'write-failed', message: (err as Error).message }, 500); }
+      await auditAdmin(admin, `manifest.${action}`, { target: `app:${appId}`, detail: { service: body.service, tool } });
     }
     // Editing the manifest stays an admin action, but its sidecars only get
     // own tools when the app holds sidecars.tools (spawn 403s otherwise).
@@ -206,6 +218,7 @@ export const POST: APIRoute = async ({ request }) => {
     manifest['tools'] = nextTools;
     try { writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n'); }
     catch (err) { return json({ error: 'write-failed', message: (err as Error).message }, 500); }
+    await auditAdmin(admin, `manifest.${action}`, { target: `app:${appId}`, detail: action === 'set-tools' ? { tools: nextTools } : { tool } });
 
     // Hot-refresh running instances of this app so their /aura/my-tools
     // allowlist picks up the change without a backend respawn. AppManager

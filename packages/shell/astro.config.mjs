@@ -308,7 +308,36 @@ function sioPlugin() {
     async configureServer(server) {
       if (!server.httpServer) return;
       const { Server } = await import('socket.io');
-      const { OsEventBus, compileTopicMatcher, parseTopicsParam } = await import('@aura/core');
+      const core = await import('@aura/core');
+      const { OsEventBus, compileTopicMatcher, parseTopicsParam } = core;
+
+      // Phase 5: is a notification hidden on a LOCKED screen (secret by its
+      // label or the user's override, or gone)? Memoised per event id, so N
+      // sockets cost one lookup. Fails open to "hidden" (privacy first).
+      const lockHidden = new Map();
+      const hiddenWhenLocked = (ev) => {
+        const key = ev && ev.eventId ? String(ev.eventId) : '';
+        if (key && lockHidden.has(key)) return lockHidden.get(key);
+        const p = (async () => {
+          try {
+            const svc = core.getNotificationService();
+            if (typeof svc.viewById !== 'function' || typeof svc.accessFor !== 'function') return false;
+            const access = await svc.accessFor({ principal: { kind: 'anonymous', verification: 'unverified' }, screen: { sid: '', lock: 'locked' } });
+            return (await svc.viewById(String(ev.id ?? ''), access)) === null;
+          } catch { return true; }
+        })();
+        if (key) {
+          lockHidden.set(key, p);
+          if (lockHidden.size > 500) lockHidden.delete(lockHidden.keys().next().value);
+        }
+        return p;
+      };
+      const socketLocked = async (sid) => {
+        try {
+          const cs = core.getAuthServices().clientSessions;
+          return cs ? (await cs.effectiveLock(sid || null)) !== 'unlocked' : true;
+        } catch { return true; }
+      };
 
       const io = new Server(server.httpServer, {
         path: '/os-events',
@@ -326,17 +355,45 @@ function sioPlugin() {
         'app:enabledChanged', 'app:mruChanged',
         'activity:opened', 'activity:closed', 'activity:focus',
         'activity:navigated', 'activity:breadcrumbChanged',
-        'theme:changed', 'mode:changed', 'notification', 'ui:command',
+        // (Phase 5: the legacy content-carrying 'notification' event is gone.)
+        'theme:changed', 'mode:changed', 'ui:command',
         'workspaces:changed', 'workspace:activated', 'kv:changed',
+        // Notification store lifecycle — content-free {eventId,id,state}.
+        // Shell UI only: deliberately NOT relayed on api/apps/events.ts.
+        // Phase 5: a socket whose client session is locked / unknown does
+        // not get events of items hidden on the lock screen (secret).
+        'notification:created', 'notification:updated', 'notification:displayed',
+        'notification:seen', 'notification:resolved', 'notification:removed',
+        // Phase 3: the user used a component (button without action, input,
+        // options) — still content-free; the item keeps lastInteraction.
+        'notification:interacted',
+        // Admin grant / revoke of a privileged permission — {subjectKind,
+        // subjectId, permission, change}, no secrets (core auth GrantStore).
+        'permissions:changed',
       ];
 
       io.on('connection', (socket) => {
         sioDbg('connect', socket.id);
         let accepts = null;  // null = firehose; otherwise topic matcher
+        // Phase 5: the tab's shell client session (handshake auth, then 'cs'
+        // updates). Not a credential — it only selects the lock-screen filter.
+        const hs = socket.handshake && socket.handshake.auth ? socket.handshake.auth.cs : '';
+        let sid = typeof hs === 'string' ? hs.slice(0, 200) : '';
+        socket.on('cs', (v) => { sid = typeof v === 'string' ? v.slice(0, 200) : ''; });
+        // Notification events go through one chain per socket, so the async
+        // filter never reorders them.
+        let notifChain = Promise.resolve();
 
         const handlers = EVENT_TYPES.map((type) => {
           const fn = (ev) => {
             if (accepts && !accepts(type)) return;
+            if (type.startsWith('notification:')) {
+              notifChain = notifChain.then(async () => {
+                if (await socketLocked(sid) && await hiddenWhenLocked(ev)) return;
+                socket.emit('event', { type, ...ev });
+              }).catch(() => {});
+              return;
+            }
             socket.emit('event', { type, ...ev });
           };
           OsEventBus.on(type, fn);

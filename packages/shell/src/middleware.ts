@@ -1,5 +1,8 @@
 import { defineMiddleware } from 'astro:middleware';
 import { getAppManager, initAppManager, ContextStore, VolumeStore } from '@aura/core';
+// Namespace import: a live reload of this file must not 500 every request
+// when the running shell still caches a core build without the export.
+import * as core from '@aura/core';
 import { kvServer, defaultKv } from '@aura/kv-store';
 import { bootstrapKv } from './lib/kvBootstrap.js';
 import { ensureSdkPublished } from './lib/sdkBootstrap.js';
@@ -28,6 +31,27 @@ async function ensureAppManager() {
     // first boot; subsequent boots see `os/theme` already in Valkey and
     // skip this entirely. Idempotent.
     await bootstrapKv({ dataDir });
+
+    // Minimal admin auth: make sure the shared operator credential exists
+    // (<dataDir>/aura/secrets/admin.key, 0600, master container only). The
+    // secret itself is NEVER logged — only where to read it.
+    try {
+      const auth = core.getAuthServices?.();
+      const r = auth?.admin.ensure();
+      if (r?.created) {
+        console.log(`[auth] created the AuraOS admin credential at ${r.keyFile} — read it in the master container: \`aura jump -m\`, then \`aura admin credential\``);
+      }
+    } catch (err) {
+      console.warn(`[middleware] admin credential setup failed: ${(err as Error).message}`);
+    }
+
+    // Notifications (store in the same Valkey): start the expiry sweeper.
+    // Idempotent; a failure must never block boot.
+    try {
+      core.getNotificationService?.().start();
+    } catch (err) {
+      console.warn(`[middleware] notification service start failed: ${(err as Error).message}`);
+    }
 
     // Materialise Aura Context (env/secret) files from Valkey BEFORE apps start,
     // so the /run/context volume-subpath mount source exists and holds current
