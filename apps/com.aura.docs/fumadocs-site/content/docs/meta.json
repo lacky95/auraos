@@ -8,6 +8,7 @@
     "develop-in-sandbox",
     "cross-app-mounts",
     "interfaces",
+    "onboard-existing-apps",
     "bring-your-own-runtime",
     "sidecars",
     "sdk-reference",
