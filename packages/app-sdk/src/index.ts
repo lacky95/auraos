@@ -12,6 +12,31 @@ export type {
 export { ActivityApi } from './activity.js';
 // Interface Registry — `osClient.interfaces`. Discovery + runtime registration.
 export { InterfacesApi } from './interfaces.js';
+// Notifications — `osClient.notifications`. create / update / remove / get /
+// list / waitForAnswer / waitForInteraction / subscribe.
+export { NotificationsApi, NotificationsError, parseSse } from './notifications.js';
+export type {
+  Notification,
+  NotificationInput,
+  NotificationPatch,
+  NotificationEvent,
+  NotificationWarning,
+  NotificationComponent,
+  NotificationContext,
+  NotificationContextKind,
+  NotificationType,
+  NotificationPriority,
+  NotificationVisibility,
+  NotificationState,
+  ListFilter as NotificationListFilter,
+  WaitResult,
+  SubscribeOptions,
+  NotificationsOptions,
+  CreateResult as NotificationCreateResult,
+  NotificationInteraction,
+  NotificationInteractionValue,
+  InteractionWaitResult as NotificationInteractionWaitResult,
+} from './notifications.js';
 export type {
   InterfaceView,
   ConsumerView,

@@ -49,10 +49,15 @@ import { SystemApi } from './system.js';
 import { SurfaceApi } from './surface.js';
 import { ActivityApi } from './activity.js';
 import { InterfacesApi } from './interfaces.js';
+import { NotificationsApi, type CreateResult } from './notifications.js';
 export type { KeymapHandler, KeymapHandlerCtx, KeymapChangeInfo } from './keymap.js';
 export type { BackEvent, BackHandler } from './nav.js';
 export type { NavigateOptions } from './activity.js';
 export type { InterfaceView, ConsumerView, InterfaceFilter, InterfaceSpec, InterfaceKind } from './interfaces.js';
+export type {
+  Notification, NotificationInput, NotificationPatch, NotificationEvent, NotificationWarning,
+  NotificationComponent, NotificationContext, ListFilter as NotificationListFilter, WaitResult,
+} from './notifications.js';
 
 export class OsClient {
   private base: string;
@@ -86,6 +91,12 @@ export class OsClient {
    * this window, for sites that refuse to run in an iframe. See ./surface.ts.
    */
   readonly surface: SurfaceApi;
+  /**
+   * Notifications — create / update / remove your own, read them, wait for a
+   * dialogue answer, or subscribe to their lifecycle. Verified (instance
+   * token) on the server, unverified in the browser. See ./notifications.ts.
+   */
+  readonly notifications: NotificationsApi;
 
   constructor() {
     // Bare `process.env.X` throws `ReferenceError: process is not defined`
@@ -105,6 +116,7 @@ export class OsClient {
     this.surface  = new SurfaceApi(this);
     this.activity = new ActivityApi(this);
     this.interfaces = new InterfacesApi(this);
+    this.notifications = new NotificationsApi();
   }
 
   // -------- OS event subscription (BroadcastReceiver-equivalent) --------
@@ -166,18 +178,22 @@ export class OsClient {
 
   // -------- Notifications + lifecycle --------
 
-  async sendNotification(title: string, body = ''): Promise<void> {
-    const appId = process.env['APP_ID'] ?? 'unknown';
-    await fetch(`${this.base}/api/notifications`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appId, title, body }),
-    });
+  /**
+   * Shortcut for a Simple notification: `notifications.create({type:'simple',
+   * title, text: body})`. Server-side the instance token (`AURA_INSTANCE_TOKEN`)
+   * is sent as a Bearer, so the shell attributes it to this app as *verified*
+   * (needs `system.notifications` in the manifest). In the browser no token is
+   * sent (unverified) — it works there too now.
+   */
+  async sendNotification(title: string, body = ''): Promise<CreateResult> {
+    return this.notifications.create({ type: 'simple', title, text: body });
   }
 
   /** Returns this instance's lifecycle state via the OS status endpoint. */
   async getState(): Promise<string> {
-    const instanceId = process.env['APP_INSTANCE_ID'] ?? process.env['APP_ID'] ?? 'unknown';
+    // Bare `process.env` throws in the browser (see the constructor).
+    const env = (typeof process !== 'undefined' && process.env) ? process.env : {};
+    const instanceId = env['APP_INSTANCE_ID'] ?? env['APP_ID'] ?? 'unknown';
     const res = await fetch(`${this.base}/api/instances/${encodeURIComponent(instanceId)}/status`);
     const data = await res.json() as { instance: { state: string } };
     return data.instance.state;
