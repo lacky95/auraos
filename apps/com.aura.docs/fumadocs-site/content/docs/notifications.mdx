@@ -152,11 +152,23 @@ the sender. Clicking the card (or Answer) opens it as a dialogue.
 | `kind` | Fields | Value / behaviour |
 |---|---|---|
 | `input` | `id`, `label?`, `placeholder?`, `multiline?`, `required?` | A string (≤ 4000). |
-| `options` | `id`, `label?`, `multiple?`, `options: [{id, label}]` (1–4) | Radio chips (a single option id) or checkboxes (an array of ids with `multiple`). |
+| `options` | `id`, `label?`, `multiple?`, `display?`, `options: [{id, label, description?}]` | A single option id, or an array of ids with `multiple`. `display` (see below): `segmented` chips (default, 1–4 options), `radio` list (1–8) or `checkbox` list (`multiple`, 1–8). |
 | `select` | `id`, `label?`, `placeholder?`, `required?`, `default?`, `options` (1–50) | A dropdown. The value is one option id. `default` preselects one (it must be an option id). |
 | `combobox` | `id`, `label?`, `placeholder?`, `required?`, `allowCustom?`, `default?`, `options` (0–50) | Searchable: the user types to filter the options. The value is an option id or, **only with `allowCustom`**, the typed text itself (trimmed, ≤ 200). A value equal to an option id always means that option. Without `allowCustom` it needs at least one option, and `default` must be an option id. |
 | `button` | `id`, `label`, `variant?` (`primary` \| `secondary` \| `tertiary`), `action?` (`resolve` \| `dismiss` \| `link`), `href?`, or `role` | See below. |
 | `progress` | `id?`, `value` (0..1, or `null` for indeterminate), `label?` | Status, updated by the sender with `update`. Always visible, also on a collapsed card. |
+
+**Options display.** How an `options` component looks:
+
+| `display` | For | Options | Looks like |
+|---|---|---|---|
+| `segmented` (default for a single choice) | single choice | 1–4 | A row of chips. A `description` becomes the chip's tooltip. |
+| `radio` | single choice | 1–8 | A vertical list of round radio buttons, one option per line, each with its `description` (dim, smaller) under the label. Arrow keys move within the group. |
+| `checkbox` (the default and only display with `multiple: true`) | multiple choice | 1–8 | A checkbox list, with descriptions. |
+
+`display: 'radio'` or `'segmented'` together with `multiple: true`, and
+`display: 'checkbox'` without it, are refused with 400; so are more options
+than the display allows. An option's `description` is at most 200 characters.
 
 Component ids are 1–64 characters of `[A-Za-z0-9_.-]` and unique within a
 notification. Option ids follow the same rule and must be unique within
@@ -193,17 +205,19 @@ buttons stack).
 
 ### Interactions
 
-In the **list** and in **pop-ups**, choosing an option or a select entry,
-submitting an input (Enter) and clicking a button without `action` keep the
-notification active and send an **interaction**:
+In the **list**, choosing an option or a select entry and submitting an
+input (Enter) keep the notification active and send an **interaction**; so
+does a button without `action`, everywhere:
 
 - `POST /api/notifications/<id>/interact {componentId, value?, values?}` (a user op);
 - the item's `lastInteraction` becomes `{ componentId, kind, value?, values?, at, actor }`;
 - the event `notification:interacted` fires.
 
-Inside an open **dialogue**, fields are local form state. Values go with a
-button (Submit, or a button without `action`), so typing never re-renders or
-"reloads" the form.
+Inside an open **dialogue** and in a **pop-up**, fields are local form state.
+Values go with a button (Submit, or a button without `action`), so choosing,
+typing or opening a select never re-renders or "reloads" the form. The first
+click on any control of a dialogue or form pop-up makes it the active surface
+(timer stopped, marked read); later clicks only change that control.
 
 The sender sees interactions without polling:
 - SDK `waitForInteraction`;

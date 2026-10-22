@@ -284,6 +284,12 @@ How the shell answers other buttons:
   `{ outcome: 'submitted', buttonId, values }`. `values` holds the current input and options
   values by component id: a string, or an array of option ids when
   `multiple` is set.
+- **options** take `display: 'segmented' | 'radio' | 'checkbox'`:
+  segmented chips (single choice, the default, ≤ 4 options), a radio list
+  (single choice, ≤ 8) or a checkbox list (`multiple: true` — its default
+  and only display, ≤ 8). Each option may have a `description` (≤ 200),
+  shown under its label in the lists (the tooltip on a chip). A mismatch
+  (`radio` / `segmented` with `multiple`, `checkbox` without) → 400.
 - **select** (`options` 1–50, `default?`) is a dropdown; its value is an
   option id. **combobox** (`options` 0–50, `allowCustom?`, `default?`) is
   searchable; its value is an option id or, with `allowCustom`, the typed
