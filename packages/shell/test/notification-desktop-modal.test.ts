@@ -36,7 +36,7 @@ test('placement: app modal opens by itself only with popup; waits otherwise; sup
   assert.equal(auto(ntf()).kind, 'none', 'without popup it waits in the list / pop-up');
   assert.equal(user(ntf()).kind, 'appModal', 'Answer takes over the desktop');
   assert.equal(auto(ntf({ popup: true }), true).kind, 'none', 'suppressed after a force-hide');
-  assert.deepEqual(user(ntf(), true), { kind: 'floating', layout: 'panel', centred: true }, 'suppressed: a normal dialogue when asked');
+  assert.equal(user(ntf(), true).kind, 'appModal', 'suppressed: only auto-open is held back; the user opening it gets the modal');
   assert.equal(auto(ntf({ sender: AURAOS, senderKey: 'auraos' })).kind, 'desktop');
   assert.equal(canPutOff({ kind: 'appModal' }), false);
   // Non-blocking desktop: a centred floating dialogue (no grant needed server-side).
@@ -88,11 +88,11 @@ test('controller: force-hide releases the blocking at once, tells the server, su
     c.onStore(snap([again]), [added(again.id)]);
     assert.equal(h.live(again.id).length, 0, `re-request ${i + 1} does not block`);
   }
-  // The user can still open one — as a normal, non-blocking dialogue.
+  // The user can still open one on purpose.
   const b = ntf();
   c.onStore(snap([b]), [added(b.id)]);
   await c.answer(b.id);
-  assert.equal(h.live(b.id)[0]!.p.kind, 'floating');
+  assert.equal(h.live(b.id)[0]!.p.kind, 'appModal');
   // Another sender is not suppressed.
   const other = ntf({ popup: true, senderKey: 'app:com.example.other', sender: { kind: 'app', id: 'com.example.other', attribution: 'verified' } as never });
   c.onStore(snap([other]), [added(other.id)]);

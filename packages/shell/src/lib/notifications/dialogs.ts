@@ -152,10 +152,10 @@ export function decidePlacement(n: Notification, inp: PlacementInput): Placement
   if (isDesktopDecision(n)) return { kind: 'desktop' };
   if (isAppDesktopModal(n)) {
     // Opening by itself needs the (server-gated) popup; else it waits in the list / pop-up.
+    // After a force-hide the sender may not take over by itself for a while
+    // (suppressed); the user opening it on purpose still gets the real modal.
     if (inp.intent === 'auto' && (!n.popup || inp.suppressed)) return { kind: 'none', reason: inp.suppressed ? 'suppressed after a force-hide' : 'waits for Answer' };
-    if (!inp.suppressed) return { kind: 'appModal' };
-    // Suppressed but the user asked: a normal, non-blocking dialogue.
-    return { kind: 'floating', layout: inp.phone ? (isComplex(n) ? 'full' : 'sheet') : 'panel', centred: !inp.phone };
+    return { kind: 'appModal' };
   }
   if (inp.intent === 'auto' && !n.popup) return { kind: 'none', reason: 'waits for Answer' };
   if (isCentredDesktop(n)) return { kind: 'floating', layout: inp.phone ? (isComplex(n) ? 'full' : 'sheet') : 'panel', centred: !inp.phone };
@@ -544,7 +544,8 @@ export class DialogController {
    * the protected shortcut). The blocking goes away at once, whatever the
    * server says; the server releases it (reason force-hidden, the app is
    * told) and it stays a normal dialogue in the list. That sender's modals
-   * are suppressed in this tab for FORCE_HIDE_SUPPRESS_MS.
+   * may not open by themselves in this tab for FORCE_HIDE_SUPPRESS_MS (they
+ * wait as pop-ups / in the list; the user opening one still gets the modal).
    */
   async forceHide(id: string): Promise<boolean> {
     const o = this.open.get(id);

@@ -314,8 +314,9 @@ Placement, blocking and opening by itself are separate permissions:
     "Hide this dialogue from &lt;App&gt;? The app will be told."
   - Force hide releases the blocking and turns the item into a normal dialogue in the list (scope auto, not resolved, not
     dismissed). The sender sees a history entry `updated` with reason `force-hidden`.
-  - After a force-hide, that sender's desktop modals are suppressed in that tab for about 10 minutes, even if it asks again
-    in a loop (they wait in the list; opened by the user they are normal, non-blocking dialogues).
+  - After a force-hide, that sender's desktop modals may not open **by themselves** in that tab for about 10 minutes, even
+    if it asks again in a loop: they wait as a pop-up / in the list. Opening one on purpose (Answer, a click) still shows
+    the modal. Reloading the shell tab ends the suppression.
   - **Only AuraOS's own decisions cannot be hidden** — answer them.
 - **Revocation releases blocking:** revoking `desktopModal`, disabling or uninstalling the app releases each of its active
   desktop modals at once (blocking off, scope auto, reason `permission-revoked`); every client lets go immediately. A
