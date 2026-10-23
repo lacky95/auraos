@@ -163,8 +163,15 @@ remove its own notifications.
 - Without a window (a background app or an agent) the dialogue floats over
   the desktop when the user presses Answer, or at once with an allowed
   pop-up. It never blocks the desktop.
-- `scope: 'desktop'` is a desktop-wide modal reserved for AuraOS system
-  decisions. Everyone else is downgraded to `scope: 'auto'` with a warning.
+- `scope: 'desktop'` + `blocking: true` is a **desktop modal** that blocks the
+  whole shell. It needs the admin-granted `notifications.desktopModal`
+  (manifest request + `aura grant nperm <app> desktopModal`); auto-opening
+  it also needs `notifications.popup`. The app stays the sender
+  ("Requested by &lt;App&gt;"), and the user can always force-hide it (link or
+  Ctrl+Alt+Shift+Esc; reason `force-hidden` in its history). Revoking the
+  grant releases it (`permission-revoked`). Without the grant: downgraded to
+  `scope: 'auto'` with a warning. `scope: 'desktop'` without blocking is a
+  centred, non-blocking dialogue (no grant).
 
 **Locked** (`type: 'locked'`): the user can't dismiss it, and Clear all
 skips it. The user can still force-remove it from the card's ⋯ menu after a
