@@ -19,7 +19,8 @@ import { auditAdmin, requireAdmin } from '../../../lib/auth.js';
  *
  * Takes effect on the very next request (no restart); emits
  * `permissions:changed`; audited as "admin (shared credential)".
- * Grantable: notifications.locked, notifications.popup, notifications.read.
+ * Grantable: notifications.locked, notifications.popup, notifications.read,
+ * notifications.desktopModal (phase 6; revoking it releases that sender's modals).
  * An app must also REQUEST the permission in its manifest for the grant to count.
  */
 function fail(err: unknown): Response {

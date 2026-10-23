@@ -30,6 +30,8 @@ export const ENFORCED_PERMISSIONS: readonly string[] = [
   'notifications.popup',
   // Phase 5: reading OTHER senders' notifications (scoped by the admin grant).
   'notifications.read',
+  // Phase 6: a dialogue that blocks the whole Aura shell (scope desktop + blocking).
+  'notifications.desktopModal',
 ];
 const ENFORCED = new Set<string>(ENFORCED_PERMISSIONS);
 

@@ -33,7 +33,8 @@ try {
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 } catch { /* shell booting — the table stays empty */ }
-const PRIV = ['notifications.locked', 'notifications.popup'];
+// Phase 6: desktopModal = a dialogue that blocks the whole shell (scope desktop + blocking).
+const PRIV = ['notifications.locked', 'notifications.popup', 'notifications.desktopModal'];
 const READ = 'notifications.read';
 // Senders for the lock-screen / retention table: AuraOS itself + every app that sends.
 const senders = [
@@ -102,7 +103,9 @@ const label = (p: string) => p.replace('notifications.', '');
         An app sends notifications when its manifest declares <code>system.notifications</code>.
         <b>Locked</b> notifications and dialogue <b>pop-ups</b> are privileged: the manifest only requests them,
         and they take effect once an admin grants them here. Without a grant they are downgraded (locked → simple,
-        pop-up → off). Grants and revokes apply at once, without a restart.
+        pop-up → off). <b>desktopModal</b> lets an app request a dialogue that blocks the <b>whole desktop</b>
+        (still shown as "Requested by &lt;app&gt;", always force-hideable by the user); revoking it releases any
+        such modal at once. Grants and revokes apply at once, without a restart.
         Every app reads its <b>own</b> notifications. Reading <b>other senders'</b> ones needs
         <code>notifications.read</code> in the manifest plus a scoped grant here (apps, sender keys or all;
         secret items only if you include them). Lock-screen visibility never grants read access.

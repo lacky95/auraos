@@ -19,6 +19,10 @@ import { viewerFor } from '../../../../lib/clientSession.js';
  *                           choice. Stays active; stored as `lastInteraction`,
  *                           published as event `interacted` (phase 3).
  *   force-remove  user op   removes even locked ones (reason `force-removed`)
+ *   force-hide    user op   phase 6: an APP desktop modal stops blocking — it
+ *                           stays an active, normal dialogue (scope auto,
+ *                           blocking off); the sender sees history `updated`
+ *                           with reason `force-hidden`. AuraOS decisions → 409.
  *   remove        sender op the sender is done (e.g. task complete; reason
  *                           `completed`). Same verified app, or senderToken
  *                           (`X-Aura-Sender-Token` / body `senderToken`).
@@ -59,13 +63,18 @@ export const POST: APIRoute = async ({ params, request, url }) => {
       }
       case 'force-remove':
         return jsonResponse(await svc.forceRemove(id, undefined, viewer));
+      case 'force-hide':
+        if (typeof (svc as { releaseDesktopModal?: unknown }).releaseDesktopModal !== 'function') {
+          return errorResponse('force-hide is not available in the running core yet (restart pending)', 501);
+        }
+        return jsonResponse(await svc.releaseDesktopModal(id, 'force-hidden', undefined, viewer));
       case 'remove': {
         const body = await readJson(request);
         if (body instanceof Response) return body;
         return jsonResponse(await svc.removeBySender(id, principal, senderTokenFrom(request, body)));
       }
       default:
-        return errorResponse(`unknown action '${action}' — use displayed | seen | resolve | interact | force-remove | remove`, 404);
+        return errorResponse(`unknown action '${action}' — use displayed | seen | resolve | interact | force-remove | force-hide | remove`, 404);
     }
   } catch (err) {
     return notificationErrorResponse(err);

@@ -10,7 +10,7 @@
  *   instance   the app's manifest-declared permissions (strict for
  *              ENFORCED ones, MVP auto-grant for the rest, as PermissionManager),
  *              PLUS an admin grant (GrantStore) for privileged ones
- *              (notifications.locked / .popup / .read). A grant only counts
+ *              (notifications.locked / .popup / .read / .desktopModal). A grant only counts
  *              while the app still resolves to the install scope it was given for.
  *              `readGrant()` returns the SCOPE of a `notifications.read` grant.
  *   apiKey     its scopes (fixed by the admin at creation) or a GrantStore

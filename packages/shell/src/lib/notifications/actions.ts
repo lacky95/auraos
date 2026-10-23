@@ -17,7 +17,7 @@ export type ActionResult =
   | { ok: false; status: number; error: string; details?: unknown };
 
 type Api = Pick<NotificationApiClient,
-  'markDisplayed' | 'markSeen' | 'dismiss' | 'resolve' | 'interact' | 'forceRemove' | 'clear' | 'clearHistory'>;
+  'markDisplayed' | 'markSeen' | 'dismiss' | 'resolve' | 'interact' | 'forceRemove' | 'forceHide' | 'clear' | 'clearHistory'>;
 type Store = Pick<NotificationClientStore, 'apply' | 'drop' | 'get' | 'refetch'>;
 
 function fail(err: unknown): ActionResult {
@@ -69,6 +69,11 @@ export class NotificationActions {
     const r = await this.run(id, this.api.dismiss(id));
     if (r.ok) this.store.drop(id, 'removed');
     return r;
+  }
+
+  /** Phase 6: force-hide an app desktop modal (the result is applied like any reply). */
+  async forceHide(id: string): Promise<ActionResult> {
+    return this.run(id, this.api.forceHide(id));
   }
 
   async forceRemove(id: string): Promise<ActionResult> {

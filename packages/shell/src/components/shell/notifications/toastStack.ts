@@ -7,7 +7,7 @@ import { getNotifications, type NotificationsRuntime } from '../../../lib/notifi
 import { senderLabel } from '../../../lib/notifications/format.ts';
 import { ExitMachine } from '../../../lib/notifications/exit.ts';
 import { SPRING_MS, SwipeTracker, startsSwipe } from '../../../lib/notifications/swipe.ts';
-import { CARD_CONTROL_SELECTOR } from '../../../lib/notifications/dialogs.ts';
+import { CARD_CONTROL_SELECTOR, isAppDesktopModal } from '../../../lib/notifications/dialogs.ts';
 import { focusFirst } from './DialogFrame.ts';
 import { isActivityLinked, stickyPopupView } from '../../../lib/notifications/activityLinks.ts';
 
@@ -144,7 +144,8 @@ export function mountToasts(region: HTMLElement, getRuntime: () => Promise<Notif
       // Phase 4: Answer opens the dialogue itself (DialogLayer).
       // Answer / a click on a dialogue pop-up: it becomes the active surface IN PLACE
       // (no exit, no separate dialogue — only the list's Answer opens one).
-      onAnswer: (n) => activate(n.id),
+      // Phase 6: an app desktop modal takes over the desktop only when the user opens it.
+      onAnswer: (n) => (isAppDesktopModal(n) && openAsDialog(n.id)) || activate(n.id),
       onNavigated: (n) => hide(n.id, 'click'),
     };
   }
@@ -241,6 +242,16 @@ export function mountToasts(region: HTMLElement, getRuntime: () => Promise<Notif
     });
   }
 
+  /** Phase 6: hand an app desktop modal to the dialogue layer (it blocks the desktop); the pop-up goes. */
+  function openAsDialog(id: string): boolean {
+    const dlg = window.__auraDialogs;
+    if (!dlg) return false;
+    rt?.actions.markSeen([id]);
+    void dlg.answer(id);
+    hide(id, 'dialog');
+    return true;
+  }
+
   /** Make a dialogue / form pop-up the active, focused surface — in place. */
   function activate(id: string, takeFocus = true): boolean {
     const t = toasts.find((x) => x.n.id === id);
@@ -281,7 +292,7 @@ export function mountToasts(region: HTMLElement, getRuntime: () => Promise<Notif
     // second pop-up for it. (One that waits for its hidden window still pops up.)
     if (n.type === 'dialogue') {
       const kind = window.__auraDialogs?.autoPlacement(n);
-      if (kind === 'window' || kind === 'floating' || kind === 'desktop') return false;
+      if (kind === 'window' || kind === 'floating' || kind === 'desktop' || kind === 'appModal') return false;
     }
     const linked = linkedNow(n);
     const adm = admitToast(admissionList(toasts).map((t) => stickyPopupView(admissionItem(t.n, t.active), t.linked)), stickyPopupView(n, linked));

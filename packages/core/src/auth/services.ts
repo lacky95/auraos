@@ -16,7 +16,7 @@ import { Authorizer } from './Authorizer.js';
 import { GrantStore } from './GrantStore.js';
 
 /** Bump when the shape changes, so a singleton made by an older module copy is replaced. */
-export const AUTH_SERVICES_VERSION = 2;
+export const AUTH_SERVICES_VERSION = 3;
 
 export interface AuthServices {
   version: number;

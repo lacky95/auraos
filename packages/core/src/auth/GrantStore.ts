@@ -31,7 +31,7 @@ export const grantKey = (s: GrantSubject) => `grant:${s.kind}:${s.id}`;
  * `notifications.read` (phase 5) additionally carries a read scope
  * (`GrantRecord.read`): which senders, and whether secret items count.
  */
-export const PRIVILEGED_PERMISSIONS = ['notifications.locked', 'notifications.popup', 'notifications.read'] as const;
+export const PRIVILEGED_PERMISSIONS = ['notifications.locked', 'notifications.popup', 'notifications.read', 'notifications.desktopModal'] as const;
 export const NOTIFICATIONS_READ_PERMISSION = 'notifications.read';
 export type PrivilegedPermission = typeof PRIVILEGED_PERMISSIONS[number];
 /** What GrantStore accepts. Deliberately not "any permission": no generic bypass. */

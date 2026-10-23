@@ -2,7 +2,7 @@ import type { Command } from 'commander';
 import { existsSync } from 'node:fs';
 import { defaultAdminKeyFile, readAdminCredential, rotateAdminCredential } from '@aura/core';
 import { api, shellUrl } from '../lib/client.js';
-import { buildSystemDecisionPayload, describeDecision } from '../lib/system-decision.js';
+import { buildSystemDecisionPayload, describeDecision, releaseBody } from '../lib/system-decision.js';
 import { color, fail, info, ok, table, warn } from '../lib/format.js';
 import { promptConfirm } from '../lib/prompts.js';
 import {
@@ -21,6 +21,9 @@ const FEATURES: Record<string, string> = {
   locked: 'notifications.locked',
   popup: 'notifications.popup',
   read: 'notifications.read',
+  desktopModal: 'notifications.desktopModal',
+  desktopmodal: 'notifications.desktopModal',
+  'notifications.desktopModal': 'notifications.desktopModal',
   'notifications.locked': 'notifications.locked',
   'notifications.popup': 'notifications.popup',
   'notifications.read': 'notifications.read',
@@ -28,7 +31,7 @@ const FEATURES: Record<string, string> = {
 
 export function notifPermission(name: string): string {
   const p = FEATURES[name];
-  if (!p) fail(`unknown notification permission '${name}' — use locked | popup | read`);
+  if (!p) fail(`unknown notification permission '${name}' — use locked | popup | read | desktopModal`);
   return p!;
 }
 
@@ -190,17 +193,18 @@ export function registerAdmin(program: Command): void {
 
   admin
     .command('grant <app> <features...>')
-    .description("Grant privileged notification features (locked | popup | read) to an app. The app must also request them in its manifest. read = other senders' notifications, scoped with --scope.")
+    .description("Grant privileged notification features (locked | popup | read | desktopModal) to an app. The app must also request them in its manifest. read = other senders' notifications, scoped with --scope.")
     .option('--scope <scope>', 'read: app:<appId>, sender:<senderKey> (comma-separated) or all')
     .option('--include-secret', 'read: secret notifications too (default: not)')
     .action((app: string, features: string[], opts: { scope?: string; includeSecret?: boolean }) => grantNotif('grant', app, features, opts));
 
   admin
     .command('revoke <app> <features...>')
-    .description('Revoke privileged notification features (locked | popup | read). Takes effect at once.')
+    .description('Revoke privileged notification features (locked | popup | read | desktopModal). Takes effect at once; revoking desktopModal releases that app\'s blocking modals.')
     .action((app: string, features: string[]) => grantNotif('revoke', app, features));
 
   registerAdminDev(admin);
+  registerAdminNotif(admin);
 
   admin
     .command('audit')
@@ -218,6 +222,23 @@ export function registerAdmin(program: Command): void {
         OUTCOME: e.outcome === 'ok' ? e.outcome : color.yellow(e.outcome),
         DETAIL: e.detail ? JSON.stringify(e.detail) : '',
       }))));
+    });
+}
+
+// ─── aura admin notif … ─────────────────────────────────────────────────────
+
+export function registerAdminNotif(admin: Command): void {
+  const notif = admin.command('notif').description('Admin actions on notifications.');
+  notif
+    .command('release [id]')
+    .description("Stop app desktop modals from blocking the shell (escape hatch): one by id, or every active one of --app. They stay as normal dialogues; the sender sees reason 'admin-released'. AuraOS decisions cannot be released.")
+    .option('--app <appId>', 'every active desktop modal of this app')
+    .action(async (id: string | undefined, opts: { app?: string }) => {
+      let body: { id: string } | { appId: string };
+      try { body = releaseBody(id, opts); } catch (err) { fail((err as Error).message); return; }
+      const r = await api.post<{ released: string[] }>('/api/admin/notifications/release', body);
+      if (r.released.length) ok(`released ${r.released.length} desktop modal(s): ${r.released.join(', ')}`);
+      else info('nothing was blocking');
     });
 }
 

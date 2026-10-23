@@ -127,15 +127,21 @@ export interface NotificationInput {
    */
   popup?: boolean;
   /**
-   * Dialogue only: make the sender's OWN window inert until answered. Kept
-   * only when `context` is an activity / instance of the calling app (checked
-   * server-side); otherwise turned off with a warning. Default false.
+   * Dialogue only: make the sender's OWN window inert until answered (kept
+   * only when `context` is an activity / instance of the calling app, else
+   * turned off with a warning) — or, with `scope: 'desktop'`, the whole shell
+   * (see `scope`). Default false.
    */
   blocking?: boolean;
   /**
-   * Dialogue only: `'auto'` (default; placed by `context`) or `'desktop'` — a
-   * desktop-wide modal reserved for AuraOS system decisions. Apps, agents and
-   * API keys are always downgraded to `'auto'` with a warning.
+   * Dialogue only: `'auto'` (default; placed by `context`) or `'desktop'`.
+   * Phase 6: `'desktop'` + `blocking: true` is a desktop modal that blocks the
+   * whole shell — it needs the admin-granted `notifications.desktopModal`
+   * (else downgraded to `'auto'` with a warning; ≤ 2 per 10 min); opening it
+   * by itself also needs `notifications.popup`. The user sees "Requested by
+   * <your app>" and can always force-hide it (history reason `force-hidden`);
+   * a revoke releases it (`permission-revoked`). `'desktop'` without blocking
+   * is a centred, non-blocking dialogue (no grant).
    */
   scope?: 'auto' | 'desktop';
   components?: NotificationComponent[];

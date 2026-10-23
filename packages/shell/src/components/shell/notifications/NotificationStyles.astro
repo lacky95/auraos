@@ -491,6 +491,36 @@
     backdrop-filter: blur(6px);
   }
   .aura-dlg-decision { width: min(520px, 100%); max-height: 90%; border-color: var(--aura-color-warning); box-shadow: 0 0 0 1px var(--aura-color-warning), 0 12px 48px rgba(0, 0, 0, 0.6); }
+  /* Phase 6: APP desktop modals — same blocking shell, visibly not AuraOS:
+     primary (not warning) frame, an identity bar with the app and the Force
+     hide link (Ctrl+Alt+Shift+Esc). */
+  .aura-dlg-appmodal { width: min(520px, 100%); max-height: 90%; border-color: var(--aura-color-primary); box-shadow: 0 0 0 1px var(--aura-color-primary), 0 12px 48px rgba(0, 0, 0, 0.6); }
+  .aura-dlg-appbar {
+    display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+    border-bottom: 1px solid var(--aura-color-border); background: var(--aura-color-surface-2);
+    font-size: 0.78rem; color: var(--aura-color-text-dim);
+  }
+  .aura-dlg-appbar-glyph {
+    flex: none; min-width: 22px; height: 22px; padding: 0 4px; display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid var(--aura-color-border); font-family: var(--aura-font-mono); font-size: 0.66rem; color: var(--aura-color-text);
+  }
+  .aura-dlg-appbar-who b { color: var(--aura-color-text); font-weight: 600; }
+  .aura-dlg-appbar-att { font-family: var(--aura-font-mono); font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.06em; padding: 1px 4px; border: 1px solid var(--aura-color-border); }
+  .aura-dlg-appbar-att[data-verified="false"] { color: var(--aura-color-warning); border-color: var(--aura-color-warning); }
+  .aura-dlg-forcehide {
+    margin-left: auto; padding: 2px 4px; background: none; border: 0; cursor: pointer;
+    color: var(--aura-color-text-dim); font: inherit; font-size: 0.74rem; text-decoration: underline; text-underline-offset: 2px;
+  }
+  .aura-dlg-forcehide:hover, .aura-dlg-forcehide:focus-visible { color: var(--aura-color-primary); outline: none; }
+  .aura-dlg-forcehide:focus-visible { box-shadow: var(--aura-glow-primary); }
+  .aura-dlg-forcehide-confirm { padding: 6px 10px; border-bottom: 1px solid var(--aura-color-border); }
+  @media (pointer: coarse), (max-width: 640px) { .aura-dlg-forcehide { min-height: 40px; } }
+  /* Phase 6: a non-blocking desktop dialogue of an app — centred, floating (z 1080). */
+  .aura-dlg-centred-host {
+    position: fixed; inset: 0; z-index: 1080; display: flex; align-items: center; justify-content: center;
+    padding: 16px; pointer-events: none;
+  }
+  .aura-dlg-centred { pointer-events: auto; width: min(480px, 100%); max-height: 80%; }
   .aura-dlg-decision .aura-dlg-kicker { color: var(--aura-color-warning); }
 
   /* Activity-linked items in the list / pop-ups: yellow accent + "Go to activity". */

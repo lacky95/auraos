@@ -59,8 +59,10 @@ export type DialogLayout = 'panel' | 'sheet' | 'full';
 
 export type Placement =
   | { kind: 'desktop' }
+  /** Phase 6: an APP-requested desktop modal (granted desktopModal): blocks the shell, force-hideable. */
+  | { kind: 'appModal' }
   | { kind: 'window'; viewId: string; blocking: boolean; layout: DialogLayout }
-  | { kind: 'floating'; layout: DialogLayout; blockViewId?: string }
+  | { kind: 'floating'; layout: DialogLayout; blockViewId?: string; centred?: boolean }
   | { kind: 'wait'; viewId: string; reason: 'minimized' | 'other-workspace'; workspaceId?: string }
   | { kind: 'none'; reason: string };
 
@@ -69,6 +71,8 @@ export interface PlacementInput {
   /** The context window, if the context names one and it exists. */
   view: ViewDetail | null;
   phone: boolean;
+  /** Phase 6: the user force-hid a modal of this sender recently (this tab) — no more blocking from it. */
+  suppressed?: boolean;
 }
 
 /** Window contexts (activity / instance). */
@@ -90,6 +94,29 @@ export function ownsWindow(n: Pick<Notification, 'sender'>, view: Pick<ViewDetai
 /** AuraOS desktop decision (scope is only ever kept for SYSTEM_CALLER server-side). */
 export function isDesktopDecision(n: Pick<Notification, 'scope' | 'sender' | 'type'>): boolean {
   return n.type === 'dialogue' && n.scope === 'desktop' && n.sender.kind === 'auraos' && n.sender.attribution === 'internal';
+}
+
+/**
+ * Phase 6: an APP (or agent / API key) dialogue that blocks the whole shell —
+ * the server keeps scope desktop + blocking only with the desktopModal grant.
+ * AuraOS's own decisions are `isDesktopDecision` instead.
+ */
+export function isAppDesktopModal(n: Pick<Notification, 'scope' | 'sender' | 'type' | 'blocking' | 'state'>): boolean {
+  return n.type === 'dialogue' && n.state === 'active' && n.scope === 'desktop' && !!n.blocking
+    && !(n.sender.kind === 'auraos' && n.sender.attribution === 'internal');
+}
+
+/** Phase 6: a non-blocking desktop dialogue of an app — a centred floating dialogue. */
+export function isCentredDesktop(n: Pick<Notification, 'scope' | 'sender' | 'type' | 'blocking'>): boolean {
+  return n.type === 'dialogue' && n.scope === 'desktop' && !n.blocking && !(n.sender.kind === 'auraos' && n.sender.attribution === 'internal');
+}
+
+/** How long one force-hide suppresses that sender's desktop modals in this tab. */
+export const FORCE_HIDE_SUPPRESS_MS = 10 * 60_000;
+
+/** The protected shortcut that force-hides an app desktop modal (shell capture phase). */
+export function isForceHideShortcut(e: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey'>): boolean {
+  return e.key === 'Escape' && e.ctrlKey && e.altKey && e.shiftKey;
 }
 
 /** Inputs, options, selects or comboboxes (buttons alone are not a form). */
@@ -123,7 +150,15 @@ export function decidePlacement(n: Notification, inp: PlacementInput): Placement
     return { kind: 'none', reason: 'not a dialogue' };
   }
   if (isDesktopDecision(n)) return { kind: 'desktop' };
+  if (isAppDesktopModal(n)) {
+    // Opening by itself needs the (server-gated) popup; else it waits in the list / pop-up.
+    if (inp.intent === 'auto' && (!n.popup || inp.suppressed)) return { kind: 'none', reason: inp.suppressed ? 'suppressed after a force-hide' : 'waits for Answer' };
+    if (!inp.suppressed) return { kind: 'appModal' };
+    // Suppressed but the user asked: a normal, non-blocking dialogue.
+    return { kind: 'floating', layout: inp.phone ? (isComplex(n) ? 'full' : 'sheet') : 'panel', centred: !inp.phone };
+  }
   if (inp.intent === 'auto' && !n.popup) return { kind: 'none', reason: 'waits for Answer' };
+  if (isCentredDesktop(n)) return { kind: 'floating', layout: inp.phone ? (isComplex(n) ? 'full' : 'sheet') : 'panel', centred: !inp.phone };
   const layout: DialogLayout = inp.phone ? (isComplex(n) ? 'full' : 'sheet') : 'panel';
   const v = inp.view;
   if (v && v.state !== 'none' && ownsWindow(n, v)) {
@@ -146,7 +181,7 @@ export function decidePlacement(n: Notification, inp: PlacementInput): Placement
  * window) and not an AuraOS desktop decision (only resolving closes it).
  */
 export function canPutOff(p: Placement): boolean {
-  if (p.kind === 'desktop') return false;
+  if (p.kind === 'desktop' || p.kind === 'appModal') return false;   // appModal: only Force hide
   if (p.kind === 'window') return !p.blocking;
   if (p.kind === 'floating') return !p.blockViewId;
   return false;
@@ -215,6 +250,8 @@ export interface MountOptions {
   onAnswer?: () => void;
   /** The user collapsed / expanded the panel (its chevron) — the controller remembers it. */
   onCollapseChange?: (collapsed: boolean) => void;
+  /** Phase 6 (appModal): the user confirmed Force hide. Resolves true when the server released it. */
+  onForceHide?: () => Promise<boolean>;
 }
 
 export interface MountedDialog {
@@ -242,6 +279,10 @@ export interface DialogHost {
   mount(n: Notification, placement: Exclude<Placement, { kind: 'wait' } | { kind: 'none' }>, opts: MountOptions): MountedDialog | null;
   /** Where the collapsed state of in-window panels is kept (per tab). Optional. */
   collapseMemory?: CollapseMemory;
+  /** Phase 6: ask the server to release an app desktop modal (force-hidden). */
+  forceHide?(id: string): Promise<boolean>;
+  /** Clock (tests). */
+  now?(): number;
   /** Pending-dialogue markers: count per minimized view / per workspace. */
   setMarkers(byView: ReadonlyMap<string, number>, byWorkspace: ReadonlyMap<string, number>): void;
 }
@@ -267,6 +308,8 @@ export class DialogController {
   /** The user put these off; nothing re-opens them on its own. */
   private readonly later = new Set<string>();
   private readonly items = new Map<string, Notification>();
+  /** Phase 6: sender key → suppressed until (ms), after a force-hide in this tab. */
+  private readonly suppressedUntil = new Map<string, number>();
   private disposed = false;
   private primed = false;
 
@@ -293,6 +336,8 @@ export class DialogController {
         if (ch.source === 'live' || isDesktopDecision(n)) this.consider(n, 'auto');
       } else {
         const o = this.open.get(n.id);
+        // Phase 6: released server-side (revoked / force-hidden / admin): stop blocking NOW.
+        if (o && o.placement.kind === 'appModal' && !isAppDesktopModal(n)) { this.close(n.id, true); this.later.add(n.id); continue; }
         if (o) { o.n = n; o.mounted.update(n); }
         const w = this.waiting.get(n.id);
         if (w) w.n = n;
@@ -327,7 +372,7 @@ export class DialogController {
     }
     const ctx = windowContext(n);
     const view = ctx ? this.host.viewDetail(ctx) : null;
-    const p = decidePlacement(n, { intent: 'user', view, phone: this.host.phone() });
+    const p = decidePlacement(n, { intent: 'user', view, phone: this.host.phone(), suppressed: this.isSuppressed(n) });
     if (p.kind === 'wait' && ctx) {
       // The user asked: reveal the window, then attach when it is visible.
       this.waiting.set(id, { n, intent: 'user' });
@@ -433,7 +478,7 @@ export class DialogController {
   autoPlacement(n: Notification): Placement['kind'] {
     const ctx = windowContext(n);
     const view = ctx ? this.host.viewDetail(ctx) : null;
-    return decidePlacement(n, { intent: 'auto', view, phone: this.host.phone() }).kind;
+    return decidePlacement(n, { intent: 'auto', view, phone: this.host.phone(), suppressed: this.isSuppressed(n) }).kind;
   }
 
   dispose(): void {
@@ -453,7 +498,7 @@ export class DialogController {
     const ctx = windowContext(n);
     const view = ctx ? this.host.viewDetail(ctx) : null;
     // A re-attach (opened before / forced, now visible again) counts as allowed.
-    const p = decidePlacement(reattach ? { ...n, popup: true } : n, { intent, view, phone: this.host.phone() });
+    const p = decidePlacement(reattach ? { ...n, popup: true } : n, { intent, view, phone: this.host.phone(), suppressed: this.isSuppressed(n) });
     if (p.kind === 'none') return;
     if (p.kind === 'wait') { this.waiting.set(n.id, { n, intent }); return; }
     this.mountFor(n, intent, p);
@@ -464,7 +509,7 @@ export class DialogController {
     if (this.host.locked()) { this.waiting.set(n.id, { n, intent }); return false; }
     const blocks = (p.kind === 'window' && p.blocking) || (p.kind === 'floating' && !!p.blockViewId);
     const viewId = p.kind === 'window' ? p.viewId : p.kind === 'floating' ? p.blockViewId : undefined;
-    const takeFocus = intent === 'user' || p.kind === 'desktop'
+    const takeFocus = intent === 'user' || p.kind === 'desktop' || p.kind === 'appModal'
       || (blocks && !!viewId && this.host.focusInWindowOrNowhere(viewId));
     // A re-attached (not user-opened) window panel keeps the collapsed state the user left it in.
     const remembered = p.kind === 'window' && intent !== 'user' && !p.blocking ? this.memory.get(n.id) === true : false;
@@ -475,12 +520,45 @@ export class DialogController {
       onAnswer: () => { void this.answer(n.id); },
       onCollapseChange: (c) => this.collapseChanged(n.id, c),
       ...(remembered ? { collapsed: true } : {}),
+      ...(p.kind === 'appModal' ? { onForceHide: () => this.forceHide(n.id) } : {}),
     });
     if (!mounted) return false;
     this.open.set(n.id, { n, intent, placement: p, mounted, ...(remembered ? { docked: true } : {}) });
     this.waiting.delete(n.id);
     this.refreshMarkers();
     return true;
+  }
+
+  private clock(): number { return this.host.now?.() ?? Date.now(); }
+
+  /** Phase 6: is this sender's blocking suppressed in this tab (after a force-hide)? */
+  isSuppressed(n: Pick<Notification, 'senderKey'>): boolean {
+    const until = this.suppressedUntil.get(n.senderKey);
+    if (until === undefined) return false;
+    if (until <= this.clock()) { this.suppressedUntil.delete(n.senderKey); return false; }
+    return true;
+  }
+
+  /**
+   * Phase 6: the user confirmed "Force hide" on an app desktop modal (link or
+   * the protected shortcut). The blocking goes away at once, whatever the
+   * server says; the server releases it (reason force-hidden, the app is
+   * told) and it stays a normal dialogue in the list. That sender's modals
+   * are suppressed in this tab for FORCE_HIDE_SUPPRESS_MS.
+   */
+  async forceHide(id: string): Promise<boolean> {
+    const o = this.open.get(id);
+    const n = o?.n ?? this.items.get(id);
+    if (!n || !isAppDesktopModal(n)) return false;
+    this.suppressedUntil.set(n.senderKey, this.clock() + FORCE_HIDE_SUPPRESS_MS);
+    this.close(id, false);
+    this.later.add(id);
+    // Any other blocking modal of the same sender goes too.
+    for (const [oid, other] of [...this.open]) {
+      if (other.placement.kind === 'appModal' && other.n.senderKey === n.senderKey) { this.close(oid, true); this.later.add(oid); }
+    }
+    this.refreshMarkers();
+    try { return (await this.host.forceHide?.(id)) ?? false; } catch { return false; }
   }
 
   private putOff(id: string): void {

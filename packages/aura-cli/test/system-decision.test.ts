@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Command } from 'commander';
-import { buildSystemDecisionPayload, describeDecision } from '../src/lib/system-decision.js';
+import { buildSystemDecisionPayload, describeDecision, releaseBody } from '../src/lib/system-decision.js';
 import { buildProgram } from '../src/program.js';
 
 test('payload: flags build title / text / priority / options / inputs / role buttons', () => {
@@ -58,4 +58,15 @@ test('the command is registered: aura admin dev system-decision with its flags',
   assert.ok(sd, 'registered');
   const flags = sd.options.map((o) => o.long);
   for (const f of ['--title', '--text', '--priority', '--inputs', '--options', '--cancel-label', '--submit-label', '--json', '--wait']) assert.ok(flags.includes(f), f);
+});
+
+test('admin notif release: one id or --app, never both; registered', () => {
+  assert.deepEqual(releaseBody('ntf_0mvk1abcdef12345', {}), { id: 'ntf_0mvk1abcdef12345' });
+  assert.deepEqual(releaseBody(undefined, { app: 'com.example.x' }), { appId: 'com.example.x' });
+  assert.throws(() => releaseBody('ntf_0mvk1abcdef12345', { app: 'x' }), /not both/);
+  assert.throws(() => releaseBody('nope', {}), /not a notification id/);
+  assert.throws(() => releaseBody(undefined, {}), /release <id>/);
+  const admin = buildProgram().commands.find((c: Command) => c.name() === 'admin')!;
+  const rel = admin.commands.find((c: Command) => c.name() === 'notif')!.commands.find((c: Command) => c.name() === 'release')!;
+  assert.ok(rel.options.some((o) => o.long === '--app'));
 });

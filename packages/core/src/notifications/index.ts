@@ -12,8 +12,9 @@ export {
   NOTIFICATION_ID_PATTERN, HISTORY_LIMIT, DEFAULT_SWEEP_INTERVAL_MS, DEFAULT_RETENTION_INTERVAL_MS, kvNotificationSettings, DEFAULT_CREATES_PER_MINUTE, MAX_WAIT_MS,
   NOTIFICATION_SERVICE_VERSION, SEND_PERMISSION, LOCKED_PERMISSION, POPUP_PERMISSION,
   DEFAULT_POPUPS_PER_WINDOW, DEFAULT_POPUP_WINDOW_MS, DESKTOP_SCOPE_MESSAGE, appManagerWindowOwner,
+  DESKTOP_MODAL_PERMISSION, DEFAULT_DESKTOP_MODALS_PER_WINDOW, DEFAULT_DESKTOP_MODAL_WINDOW_MS, isAppDesktopModal,
 } from './NotificationService.js';
 export type {
   NotificationServiceOptions, CreateResult, UpdateResult, ListResult, NotificationAuthorizer, WindowOwnerResolver,
-  WaitForOptions, WaitForResult, WaitForUntil,
+  WaitForOptions, WaitForResult, WaitForUntil, DesktopModalRelease,
 } from './NotificationService.js';

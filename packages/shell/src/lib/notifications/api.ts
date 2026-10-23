@@ -175,6 +175,11 @@ export class NotificationApiClient {
     return this.call('POST', `/${NotificationApiClient.enc(id)}/force-remove`);
   }
 
+  /** Phase 6: an app desktop modal stops blocking (stays a normal dialogue; reason force-hidden). */
+  forceHide(id: string): Promise<Notification> {
+    return this.call('POST', `/${NotificationApiClient.enc(id)}/force-hide`);
+  }
+
   /** Phase 5: delete ended (resolved / removed) items and their history now, optionally of one sender. */
   clearHistory(sender?: string): Promise<{ deleted: number }> {
     return this.call('DELETE', `/history${sender ? `?sender=${encodeURIComponent(sender)}` : ''}`);

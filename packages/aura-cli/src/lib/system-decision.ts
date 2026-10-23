@@ -82,3 +82,14 @@ export function describeDecision(n: { state: string; outcome?: string; answer?: 
   if (n.state === 'removed') return `removed (${n.removedReason ?? 'removed'})`;
   return 'pending';
 }
+
+/** `aura admin notif release <id> | --app <appId>` → the route body (exactly one target). */
+export function releaseBody(id: string | undefined, opts: { app?: string }): { id: string } | { appId: string } {
+  if (id && opts.app) throw new Error('give a notification id OR --app <appId>, not both');
+  if (id) {
+    if (!/^ntf_[a-z0-9]{9,20}$/.test(id)) throw new Error(`'${id}' is not a notification id (ntf_…)`);
+    return { id };
+  }
+  if (opts.app) return { appId: opts.app };
+  throw new Error('aura admin notif release <id> | --app <appId>');
+}

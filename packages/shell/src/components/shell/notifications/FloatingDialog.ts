@@ -56,10 +56,13 @@ export interface FloatingDialogOptions {
   onLater: () => void;
   /** Phone stand-in for a blocking window dialogue: cover + inert that slot. */
   blockSlot?: HTMLElement | null;
+  /** Phase 6: a non-blocking desktop dialogue (scope desktop) — centred on the screen. */
+  centred?: boolean;
 }
 
 export function mountFloatingDialog(n: Notification, opts: FloatingDialogOptions): MountedDialog {
   const blocking = !!opts.blockSlot;
+  let centredHost: HTMLElement | null = null;
   const frame = buildDialogFrame(n, {
     actions: opts.actions,
     ...(opts.appLookup ? { appLookup: opts.appLookup } : {}),
@@ -73,6 +76,14 @@ export function mountFloatingDialog(n: Notification, opts: FloatingDialogOptions
   if (opts.layout === 'full') {
     frame.root.classList.add('aura-dlg-full');
     document.body.appendChild(frame.root);
+  } else if (opts.centred) {
+    // A full-screen, click-through host centres it (the dialogue's own
+    // enter / exit animations keep their transform).
+    centredHost = document.createElement('div');
+    centredHost.className = 'aura-dlg-centred-host';
+    frame.root.classList.add('aura-dlg-centred');
+    centredHost.appendChild(frame.root);
+    document.body.appendChild(centredHost);
   } else {
     stack().appendChild(frame.root);
   }
@@ -89,7 +100,7 @@ export function mountFloatingDialog(n: Notification, opts: FloatingDialogOptions
       // Focus and the phone cover / inert come back right away; then the exit.
       frame.dispose();
       uncover();
-      playExit(frame.root, () => { frame.root.remove(); releaseStack(); }, o);
+      playExit(frame.root, () => { frame.root.remove(); centredHost?.remove(); releaseStack(); }, o);
     },
   };
 }

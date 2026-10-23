@@ -144,6 +144,8 @@ export function mountDialogLayer(): () => void {
         .forEach((el) => el.__exit?.hide(() => el.remove(), { instant: true }));
       const common = { actions: rt.actions, appLookup: rt.appLookup };
       if (p.kind === 'desktop') return mountDesktopDecision(n, common);
+      // Phase 6: an app desktop modal — the same blocking shell, app-identified, force-hideable.
+      if (p.kind === 'appModal') return mountDesktopDecision(n, { ...common, appModal: { onForceHide: opts.onForceHide ?? (async () => false) } });
       if (p.kind === 'window') {
         const slot = slotOf(p.viewId);
         if (!slot) return null;
@@ -156,7 +158,14 @@ export function mountDialogLayer(): () => void {
       return mountFloatingDialog(n, {
         ...common, layout: p.layout, takeFocus: opts.takeFocus, onLater: opts.onLater,
         ...(p.blockViewId ? { blockSlot: slotOf(p.blockViewId) } : {}),
+        ...(p.centred ? { centred: true } : {}),
       });
+    },
+    forceHide: async (id) => {
+      if (!rt) return false;
+      const r = await rt.actions.forceHide(id);
+      if (!r.ok) console.warn('[notifications] force-hide failed', r.error);
+      return r.ok;
     },
     setMarkers: (byView, byWs) => {
       markView = byView;

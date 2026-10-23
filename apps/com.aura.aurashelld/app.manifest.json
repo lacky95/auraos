@@ -11,7 +11,7 @@
   "sandbox": "container",
   "autoStart": true,
   "tools": ["node"],
-  "permissions": ["network.local", "system.notifications", "notifications.popup", "notifications.locked"],
+  "permissions": ["network.local", "system.notifications", "notifications.popup", "notifications.locked", "notifications.desktopModal"],
   "provides": [
     {
       "name": "shell",
