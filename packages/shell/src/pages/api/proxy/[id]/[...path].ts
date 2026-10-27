@@ -687,9 +687,14 @@ window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod
       // out of the other injections, and it costs one guarded listener.
       // Not behind injectInputCompat — the preventDefault focus trap is not
       // specific to touch/DeX.
+      // The same listener tells the shell the window was clicked
+      // (`aura.pointerdown`): a click inside an iframe never reaches the
+      // shell's DOM, so without it overlapping free windows only rose on a
+      // title-bar click.
       const focusOnClick = `<script>(function(){try{
 if(window.__auraFocusOnClick)return;window.__auraFocusOnClick=true;
-addEventListener('pointerdown',function(){try{if(!document.hasFocus())window.focus();}catch(_){}} ,true);
+addEventListener('pointerdown',function(){try{if(!document.hasFocus())window.focus();}catch(_){}
+try{if(parent!==window)parent.postMessage({type:'aura.pointerdown'},'*');}catch(_){}} ,true);
 }catch(_){}})();</script>`;
       rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${focusOnClick}`);
 
