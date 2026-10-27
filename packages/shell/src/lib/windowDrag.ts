@@ -66,14 +66,20 @@ export function isWindowDragging(): boolean {
   return dragging;
 }
 
-/**
- * Arm a potential drag from a title-bar `pointerdown`. Nothing visible
- * happens until the pointer travels past the threshold, so clicks and
- * double-click rename keep working.
- */
-export function beginWindowDrag(ev: PointerEvent, src: DragSource, sourceEl: HTMLElement): void {
-  if (!policy?.enabled || dragging || ev.button !== 0) return;
-  const handle = ev.currentTarget as HTMLElement | null;
+interface GhostSessionOptions {
+  /** Ghost already visible at the first event (hand-off); no threshold. */
+  immediate: boolean;
+  /** Element holding pointer capture for the drag, if any. */
+  handle: HTMLElement | null;
+  shouldReturn?(e: PointerEvent): boolean;
+  onReturn?(e: PointerEvent): void;
+  onEnd?(result: { dropped: boolean }): void;
+}
+
+/** One ghost drag: threshold (unless immediate), ghost, drop-target hover,
+ *  drop or cancel. Shared by `beginWindowDrag` and `handOffWindowDrag`. */
+function runGhostSession(ev: PointerEvent, src: DragSource, sourceEl: HTMLElement, opts: GhostSessionOptions): void {
+  const { handle } = opts;
   const startX = ev.clientX;
   const startY = ev.clientY;
   const pointerId = ev.pointerId;
@@ -110,13 +116,7 @@ export function beginWindowDrag(ev: PointerEvent, src: DragSource, sourceEl: HTM
     document.body.appendChild(ghost);
   };
 
-  const move = (e: PointerEvent) => {
-    if (e.pointerId !== pointerId) return;
-    if (!started) {
-      if (Math.hypot(e.clientX - startX, e.clientY - startY) < DRAG_THRESHOLD_PX) return;
-      start();
-    }
-    e.preventDefault();
+  const track = (e: PointerEvent) => {
     // The shell zooms via `body { transform: scale(...) }` plus margins, and a
     // transformed ancestor makes `position:fixed` relative to <body> in its
     // own (unscaled) units — so map viewport coords into body coords.
@@ -137,29 +137,57 @@ export function beginWindowDrag(ev: PointerEvent, src: DragSource, sourceEl: HTM
     setCurrent(next);
   };
 
-  const finish = (commit: boolean) => {
+  const move = (e: PointerEvent) => {
+    if (e.pointerId !== pointerId) return;
+    if (!started) {
+      if (Math.hypot(e.clientX - startX, e.clientY - startY) < DRAG_THRESHOLD_PX) return;
+      start();
+    }
+    e.preventDefault();
+    if (opts.shouldReturn?.(e)) {
+      // Back to the caller's own drag: tear the ghost down, pointer still down.
+      teardown();
+      opts.onReturn?.(e);
+      return;
+    }
+    track(e);
+  };
+
+  const removeListeners = () => {
     window.removeEventListener('pointermove', move, true);
     window.removeEventListener('pointerup', up, true);
     window.removeEventListener('pointercancel', cancel, true);
     window.removeEventListener('keydown', key, true);
-    if (!started) return;
+  };
+  /** Ghost + hover state off; listeners off. Returns the hovered target. */
+  const teardown = () => {
+    removeListeners();
     const hit = current;
     setCurrent(null);
-    try { handle?.releasePointerCapture(pointerId); } catch { /* already released */ }
     ghost?.remove();
+    ghost = null;
     sourceEl.removeAttribute('data-drag-source');
     document.body.classList.remove('aura-window-dragging');
     dragging = false;
+    return hit;
+  };
+
+  const finish = (commit: boolean) => {
+    if (!started) { removeListeners(); return; }
+    const hit = teardown();
+    try { handle?.releasePointerCapture(pointerId); } catch { /* already released */ }
     // Swallow the click that follows a real drag so title-bar handlers don't fire.
     // The click (if any) is dispatched right after pointerup, so a 0ms
     // timeout removes the swallower before any later, genuine click.
     const swallow = (e: MouseEvent) => { e.stopPropagation(); e.preventDefault(); };
     window.addEventListener('click', swallow, true);
     setTimeout(() => window.removeEventListener('click', swallow, true), 0);
-    if (commit && hit) {
-      Promise.resolve(hit.target.drop(src, hit.match.data)).catch((err) =>
+    const dropped = commit && !!hit;
+    if (dropped) {
+      Promise.resolve(hit!.target.drop(src, hit!.match.data)).catch((err) =>
         console.warn('[windowDrag] drop failed', err));
     }
+    opts.onEnd?.({ dropped });
   };
   const up = (e: PointerEvent) => { if (e.pointerId === pointerId) finish(true); };
   const cancel = (e: PointerEvent) => { if (e.pointerId === pointerId) finish(false); };
@@ -171,4 +199,43 @@ export function beginWindowDrag(ev: PointerEvent, src: DragSource, sourceEl: HTM
   window.addEventListener('pointerup', up, true);
   window.addEventListener('pointercancel', cancel, true);
   window.addEventListener('keydown', key, true);
+  if (opts.immediate) {
+    start();
+    track(ev);
+  }
+}
+
+/**
+ * Arm a potential drag from a title-bar `pointerdown`. Nothing visible
+ * happens until the pointer travels past the threshold, so clicks and
+ * double-click rename keep working.
+ */
+export function beginWindowDrag(ev: PointerEvent, src: DragSource, sourceEl: HTMLElement): void {
+  if (!policy?.enabled || dragging || ev.button !== 0) return;
+  runGhostSession(ev, src, sourceEl, { immediate: false, handle: ev.currentTarget as HTMLElement | null });
+}
+
+export interface HandOffOptions {
+  /** Checked on every move: true hands the pointer back to the caller
+   *  (e.g. it left the shell bar again). */
+  shouldReturn?(e: PointerEvent): boolean;
+  /** The ghost is gone and the caller's own drag continues from `e`. */
+  onReturn?(e: PointerEvent): void;
+  /** The pointer was released (or the drag cancelled) in ghost mode.
+   *  `dropped` = a drop target accepted the window. */
+  onEnd?(result: { dropped: boolean }): void;
+}
+
+/**
+ * Switch a drag a layout runs itself (e.g. Free Window moving a window) into
+ * this ghost mode mid-gesture, from the current pointer event — so drops on
+ * workspace pills etc. work in every layout. Ignores the layout drag policy
+ * (the caller decided); the ghost appears at once, no threshold.
+ */
+export function handOffWindowDrag(
+  ev: PointerEvent, src: DragSource, sourceEl: HTMLElement, handle: HTMLElement | null, opts: HandOffOptions = {},
+): boolean {
+  if (dragging) return false;
+  runGhostSession(ev, src, sourceEl, { immediate: true, handle, ...opts });
+  return true;
 }

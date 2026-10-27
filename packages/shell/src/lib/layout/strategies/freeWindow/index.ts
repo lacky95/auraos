@@ -11,6 +11,9 @@
  *     neighbours is a splitter that resizes all of them together
  *   • `minimize: 'hide'` (every window, app stays alive) + a taskbar in the
  *     content space's top region
+ *   • dragging a window up onto the shell bar hands the drag to the generic
+ *     ghost drag (host.handOffWindowDrag): drop it on a workspace pill to
+ *     move it there; back down over the desktop it is a normal move again
  *
  * Persisted per workspace in layoutState:
  *   rects[viewId] = { x, y, w, h, z, snap?: { zone, restore: { w, h } } }
@@ -126,7 +129,7 @@ export function createFreeWindow(): ShellLayoutStrategy {
     el: HTMLElement | null,
     captureEl: HTMLElement,
     ev: PointerEvent,
-    onMove: (p: { x: number; y: number }) => void,
+    onMove: (p: { x: number; y: number }, e: PointerEvent) => void,
     onEnd: (p: { x: number; y: number }) => void,
   ): void {
     ev.preventDefault();
@@ -137,12 +140,14 @@ export function createFreeWindow(): ShellLayoutStrategy {
     gestureEl = el;
 
     let last = H().toLocal(ev.clientX, ev.clientY);
+    let lastEv = ev;
     let pending = false;
     let raf = 0;
-    const flush = () => { raf = 0; if (pending) { pending = false; onMove(last); } };
+    const flush = () => { raf = 0; if (pending) { pending = false; onMove(last, lastEv); } };
     const move = (mv: PointerEvent) => {
       if (mv.pointerId !== ev.pointerId) return;
       last = H().toLocal(mv.clientX, mv.clientY);
+      lastEv = mv;
       pending = true;
       if (!raf) raf = requestAnimationFrame(flush);
     };
@@ -187,8 +192,27 @@ export function createFreeWindow(): ShellLayoutStrategy {
     let baseP: { x: number; y: number } = startP;
     let free = !docked;
     let zone: Zone | null = null;
+    // 'ghost' while the pointer is over the shell bar: the generic window drag
+    // (small ghost, workspace pills as drop targets) owns the gesture; 'done'
+    // once that ended — the rest of this gesture is ignored.
+    let mode: 'move' | 'ghost' | 'done' = 'move';
 
-    runGesture(el, chrome, ev, (p) => {
+    runGesture(el, chrome, ev, (p, e) => {
+      if (mode !== 'move') return;
+      if (H().isOverShellBar(e.clientX, e.clientY)) {
+        const ok = H().handOffWindowDrag(e, viewId, chrome, {
+          shouldReturn: (m) => !H().isOverShellBar(m.clientX, m.clientY),
+          onReturn: () => { mode = 'move'; },
+          onEnd: () => {
+            // Dropped on a workspace → the window moved there (its slot is
+            // hidden here); otherwise it goes back where it was. Either way
+            // nothing of this drag is stored — re-place from saved state.
+            mode = 'done';
+            H().requestRender();
+          },
+        });
+        if (ok) { mode = 'ghost'; zone = null; showPreview(null); return; }
+      }
       const A = area();
       if (!free) {
         if (Math.hypot(p.x - startP.x, p.y - startP.y) < UNDOCK_THRESHOLD) return;
@@ -206,6 +230,11 @@ export function createFreeWindow(): ShellLayoutStrategy {
       showPreview(zone ? rectForZone(zone, gridForNewSnap(zone, dockedZones(viewId), grid()), A) : null);
     }, () => {
       showPreview(null);
+      // Ghost drag still running: it owns the outcome (its onEnd re-renders).
+      // Already ended (Esc while the button was held): re-place now — the
+      // render it asked for skipped this slot while the gesture was live.
+      if (mode === 'done') { H().requestRender(); return; }
+      if (mode !== 'move') return;
       if (!free) return; // a click on a docked window's title: nothing moved
       const z = zOf(el);
       const cur = clampRect(readRect(el), area());
