@@ -129,6 +129,7 @@ const themeCss = `.pv-dark { ${remap('dark')} } .pv-light { ${remap('light')} }`
     import { renderNotificationCard, type CardActions } from '../../components/shell/notifications/NotificationCard.ts';
     import { buildDialogFrame, playExit } from '../../components/shell/notifications/DialogFrame.ts';
     import { mountWindowDialog } from '../../components/shell/notifications/WindowDialog.ts';
+    import { mountFloatingDialog } from '../../components/shell/notifications/FloatingDialog.ts';
     import { GROUP_LABEL, GROUP_ORDER, NEVER_BULK, clearPlan, confirmFor, groupItems, idsFor } from '../../lib/notifications/clearGroups.ts';
     import { SwipeTracker, startsSwipe } from '../../lib/notifications/swipe.ts';
     import type { Notification } from '../../lib/notifications/api.ts';
@@ -161,6 +162,20 @@ const themeCss = `.pv-dark { ${remap('dark')} } .pv-light { ${remap('light')} }`
       { kind: 'button', role: 'cancel' },
       { kind: 'button', id: 'docs', label: 'Runbook', variant: 'tertiary', action: 'link', href: 'https://example.com' },
     ] as Notification['components'];
+
+    const MD_SAMPLE = [
+      '# Weekly build report', '', 'All **green** except one *flaky* test (~~fixed~~ re-run). See [the dashboard](https://example.com/ci) or https://example.com/runs.', '',
+      '## Summary', '', '| Job | Result | Time |', '|:--|:-:|--:|', '| build | ✓ | 2m 10s |', '| test | ✓ | 5m 02s |', '| deploy | ⚠ retried | 1m 44s |', '',
+      '## Tasks', '', '- [x] Upgrade the toolchain', '- [ ] Remove the old cache', '  - nested detail with `inline code`', '', '> Note: the deploy retried once because the registry was slow.', '',
+      '```sh', 'pnpm --filter "./packages/*" build && pnpm test -- --reporter=dot --some-very-long-flag-to-show-horizontal-scrolling', '```', '', '---', '',
+      // (split so the page's own <script> element is not closed by the sample)
+      'Raw HTML stays text: <' + 'script>alert(1)<' + '/script> and [a js link](javascript:alert(1)) are inert.',
+    ].join('\n');
+    let floating: { dispose: (o?: { instant?: boolean }) => void } | null = null;
+    function openFloating(n: Notification) {
+      floating?.dispose({ instant: true });
+      floating = mountFloatingDialog(n, { layout: 'panel', takeFocus: true, actions, onLater: () => { floating?.dispose(); floating = null; } });
+    }
 
     function section(root: HTMLElement, title: string, cls = 'pv-box'): HTMLElement {
       const h = document.createElement('h3'); h.textContent = title; root.appendChild(h);
@@ -207,6 +222,29 @@ const themeCss = `.pv-dark { ${remap('dark')} } .pv-light { ${remap('light')} }`
       const weekend = disp.querySelector<HTMLInputElement>('input[value="weekend"]'); if (weekend) weekend.disabled = true;
       disp.querySelector<HTMLElement>('fieldset[data-display="checkbox"]')?.setAttribute('aria-invalid', 'true');
       section(root, 'Dialogue · options display: segmented / radio / checkbox').appendChild(disp);
+      // Phase 6: markdown — rendered / Source / Copy, editable, the pop-up preview, maximize.
+      section(root, 'Dialogue · markdown (rendered · Source · Copy; links / code / table / tasks)').appendChild(renderNotificationCard(base({
+        title: 'Weekly build report', text: '', components: [
+          { kind: 'markdown', id: 'report', label: 'Report', text: MD_SAMPLE },
+          { kind: 'button', role: 'submit', label: 'Acknowledge' },
+        ] as Notification['components'] }), { mode: 'dialog', actions }));
+      section(root, 'Dialogue · editable markdown (starts in the source)').appendChild(renderNotificationCard(base({
+        title: 'Edit the release notes', text: 'Your edit is sent back as the answer.', components: [
+          { kind: 'markdown', id: 'notes', label: 'Release notes', text: '## 1.4\n\n- Faster builds\n- [ ] Write the blog post', editable: true, required: true, view: 'source', maxHeight: 180 },
+          { kind: 'button', role: 'cancel' }, { kind: 'button', role: 'submit', label: 'Publish' },
+        ] as Notification['components'] }), { mode: 'dialog', actions }));
+      section(root, 'Pop-up · markdown preview + Show').appendChild(renderNotificationCard(base({
+        type: 'simple', title: 'Nightly report ready', text: '', components: [{ kind: 'markdown', id: 'r', label: 'Report', text: MD_SAMPLE }] as Notification['components'] }),
+        { mode: 'toast', actions, onShowFull: (n) => { openFloating(n); return true; } }));
+      // Maximize: in-window (fills the window) and floating (fills the app area; ⤢ or Alt+Shift+Enter).
+      const mxWin = section(root, 'Maximize · in-window panel (⤢ fills the window)', 'pv-win');
+      mxWin.innerHTML = '<div class="slot-chrome"><span class="slot-title">NOTIF P4 TEST</span><span class="slot-controls"></span></div><div class="slot-body"><div class="pv-app">App content…</div></div>';
+      mountWindowDialog(mxWin, base({ title: 'Release report', text: '', components: [{ kind: 'markdown', id: 'r', text: MD_SAMPLE, maxHeight: 120 }] as Notification['components'] }),
+        { blocking: false, takeFocus: false, actions, onLater: () => {} });
+      const mxBtn = document.createElement('button');
+      mxBtn.className = 'pv-x'; mxBtn.type = 'button'; mxBtn.textContent = 'Open a floating markdown dialogue (try ⤢)';
+      mxBtn.addEventListener('click', () => openFloating(base({ title: 'Weekly build report', text: '', components: [{ kind: 'markdown', id: 'r', label: 'Report', text: MD_SAMPLE }] as Notification['components'] })));
+      section(root, 'Maximize · floating dialogue').appendChild(mxBtn);
       section(root, 'List card · locked + progress').appendChild(renderNotificationCard(base({ type: 'locked', title: 'Backup running', text: 'Do not shut down.', components: [{ kind: 'progress', value: null, label: 'Copying' }] as Notification['components'] }), { mode: 'list', actions }));
       section(root, 'Pop-up · simple, high').appendChild(renderNotificationCard(base({ type: 'simple', priority: 'high', components: [{ kind: 'button', id: 'open', label: 'Open', variant: 'primary' }] as Notification['components'] }), { mode: 'toast', actions }));
       const dlg = section(root, 'Dialogue frame (window / floating)', 'pv-dlg');

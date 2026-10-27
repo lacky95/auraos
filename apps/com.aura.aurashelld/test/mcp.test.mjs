@@ -646,6 +646,36 @@ test('notification tools: select / combobox components are forwarded; > 50 optio
   } finally { delete process.env.AURA_INSTANCE_TOKEN; }
 });
 
+test('notification tools: markdown components (reports) are forwarded; > 2, > 64 KB or a bad maxHeight are refused before sending', async () => {
+  process.env.AURA_INSTANCE_TOKEN = 'tok';
+  try {
+    const calls = fakeNotifOs(({ method, path }) => {
+      if (method === 'POST' && path === '/api/notifications') return [201, { ok: true, notification: notif({ type: 'dialogue' }), warnings: [] }];
+      return [404, {}];
+    });
+    const client = await connect();
+    const tools = (await client.listTools()).tools;
+    const create = tools.find((t) => t.name === 'create_notification');
+    assert.match(create.description, /markdown/);
+    assert.match(JSON.stringify(create.inputSchema), /"markdown"/);
+    assert.match(JSON.stringify(tools.find((t) => t.name === 'update_notification').inputSchema), /"markdown"/);
+    const components = [
+      { kind: 'markdown', id: 'report', label: 'Report', text: '# Done\n\n' + 'x'.repeat(60_000), view: 'rendered', maxHeight: 'auto' },
+      { kind: 'markdown', id: 'notes', text: '- a', editable: true, required: true, maxHeight: 400 },
+    ];
+    const r = await call(client, 'create_notification', { type: 'dialogue', title: 'Report', components });
+    assert.equal(r.isError, undefined);
+    assert.deepEqual(calls[0].body.components, components);
+    for (const bad of [
+      ['a', 'b', 'c'].map((id) => ({ kind: 'markdown', id, text: 't' })),
+      [{ kind: 'markdown', id: 'm', text: 'x'.repeat(65_537) }],
+      [{ kind: 'markdown', id: 'm', text: 't', maxHeight: 20 }],
+      [{ kind: 'markdown', id: 'm', text: 't', view: 'html' }],
+    ]) assert.equal((await call(client, 'create_notification', { type: 'dialogue', title: 'x', components: bad })).isError, true);
+    assert.equal(calls.length, 1, 'refused before sending');
+  } finally { delete process.env.AURA_INSTANCE_TOKEN; }
+});
+
 test('notification tools: options display + descriptions are forwarded; mismatches refused before sending', async () => {
   process.env.AURA_INSTANCE_TOKEN = 'tok';
   try {

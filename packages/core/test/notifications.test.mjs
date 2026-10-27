@@ -512,6 +512,30 @@ test('options display (phase 6): segmented ≤ 4, radio / checkbox ≤ 8, displa
   assert.deepEqual((await svc.resolve(multi.id, { outcome: 'submitted', values: { p: ['o6'] } })).answer.values, { p: ['o6'] });
 });
 
+test('markdown component (phase 6): ≤ 64 KB text, ≤ 2 per item, editable value validated in interact + resolve', async () => {
+  const big = '# Report\n\n' + 'x'.repeat(60_000);
+  const { notification: n } = await svc.create({ type: 'dialogue', title: 'Report', components: [
+    { kind: 'markdown', id: 'report', text: big, view: 'rendered', maxHeight: 400 },
+    { kind: 'markdown', id: 'notes', text: '- a', editable: true, required: true },
+  ] }, APP);
+  assert.equal(n.components[0].text.length, big.length);
+  await rejectsStatus(svc.create({ title: 'x', components: [{ kind: 'markdown', id: 'm', text: 'x'.repeat(65_537) }] }, APP), 400);
+  await rejectsStatus(svc.create({ title: 'x', components: ['a', 'b', 'c'].map((id) => ({ kind: 'markdown', id, text: 't' })) }, APP), 400);
+  await rejectsStatus(svc.create({ title: 'x', components: [{ kind: 'markdown', id: 'm', text: 't', view: 'html' }] }, APP), 400);
+  await rejectsStatus(svc.create({ title: 'x', components: [{ kind: 'markdown', id: 'm' }] }, APP), 400);
+  // interact: editable only, ≤ 64 KB.
+  assert.equal((await svc.interact(n.id, { componentId: 'notes', value: '- b\n- c' })).lastInteraction.value, '- b\n- c');
+  await rejectsStatus(svc.interact(n.id, { componentId: 'report', value: 'edited' }), 400);
+  await rejectsStatus(svc.interact(n.id, { componentId: 'notes', value: 'y'.repeat(65_537) }), 400);
+  // Inputs keep their own 4000-char limit even though the interaction schema allows 64 KB strings.
+  const { notification: q } = await svc.create({ type: 'dialogue', title: 'q', components: [{ kind: 'input', id: 'i' }] }, APP);
+  await rejectsStatus(svc.interact(q.id, { componentId: 'i', value: 'z'.repeat(4001) }), 400);
+  // resolve: an edited 64 KB value fits the answer; a read-only one is refused.
+  await rejectsStatus(svc.resolve(n.id, { outcome: 'submitted', values: { report: 'nope' } }), 400);
+  const r = await svc.resolve(n.id, { outcome: 'submitted', buttonId: 'submit', values: { notes: 'n'.repeat(65_000) } });
+  assert.equal(r.answer.values.notes.length, 65_000);
+});
+
 const APIKEY = { kind: 'apiKey', keyId: 'key1', name: 'ci', verification: 'verified' };
 const ALLOW_ALL = { authorize: async () => ({ allow: true, reason: 'test' }) };
 // Fake AppManager view: activities / instances and the app that owns them.

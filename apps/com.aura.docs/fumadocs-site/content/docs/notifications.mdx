@@ -155,6 +155,7 @@ the sender. Clicking the card (or Answer) opens it as a dialogue.
 | `options` | `id`, `label?`, `multiple?`, `display?`, `options: [{id, label, description?}]` | A single option id, or an array of ids with `multiple`. `display` (see below): `segmented` chips (default, 1–4 options), `radio` list (1–8) or `checkbox` list (`multiple`, 1–8). |
 | `select` | `id`, `label?`, `placeholder?`, `required?`, `default?`, `options` (1–50) | A dropdown. The value is one option id. `default` preselects one (it must be an option id). |
 | `combobox` | `id`, `label?`, `placeholder?`, `required?`, `allowCustom?`, `default?`, `options` (0–50) | Searchable: the user types to filter the options. The value is an option id or, **only with `allowCustom`**, the typed text itself (trimmed, ≤ 200). A value equal to an option id always means that option. Without `allowCustom` it needs at least one option, and `default` must be an option id. |
+| `markdown` | `id`, `label?`, `text` (≤ 64 KB), `view?` (`rendered` \| `source`), `editable?`, `required?`, `maxHeight?` (`'auto'` or 80–4000 px; default 320) | A document — a report, summary or log. At most **2** per notification (within the 8 components). Read-only by default and sends no value. With `editable: true` it is a form field: the edited text is the value (`answer.values[id]`, ≤ 64 KB, checked in interact and resolve), drafts and `required` work like an input. See [Markdown](#markdown). |
 | `button` | `id`, `label`, `variant?` (`primary` \| `secondary` \| `tertiary`), `action?` (`resolve` \| `dismiss` \| `link`), `href?`, or `role` | See below. |
 | `progress` | `id?`, `value` (0..1, or `null` for indeterminate), `label?` | Status, updated by the sender with `update`. Always visible, also on a collapsed card. |
 
@@ -169,6 +170,39 @@ the sender. Clicking the card (or Answer) opens it as a dialogue.
 `display: 'radio'` or `'segmented'` together with `multiple: true`, and
 `display: 'checkbox'` without it, are refused with 400; so are more options
 than the display allows. An option's `description` is at most 200 characters.
+
+### Markdown
+
+The `markdown` component shows a document in the dialogue: headings,
+paragraphs, **bold** / *italic* / ~~strike~~, inline code, fenced code blocks
+(monospace, scrolling sideways, with their own Copy), nested lists, task lists
+(read-only checkboxes), blockquotes, tables (scrolling sideways), rules and
+links. It scrolls inside its area (`maxHeight`) and follows the theme in light
+and dark mode.
+
+- **Toolbar:** *Source* (*Edit* when editable) switches between the rendered
+  view and the raw markdown (a monospace text area, read-only unless
+  `editable`); *Copy* copies the raw markdown ("Copied ✓"). Both are
+  keyboard-accessible buttons; the toggle has `aria-pressed`. Switching back
+  to the rendered view renders the edited text.
+- **Where:** the full area only renders in a **dialogue** (floating, centred,
+  in-window, desktop modal, phone sheet / full view). The list and pop-ups
+  show a short preview (cut with "…") and **Show**, which opens the
+  dialogue — for a Simple notification too.
+- **Updates:** a new `text` from `update` is patched in place: the view mode
+  and the scroll position stay, and an editable field keeps what the user
+  typed.
+- **Safety:** the shell uses its own small parser that has no HTML node at
+  all, and builds the DOM with `textContent` only:
+  - raw HTML (`<script>`, `<img onerror>`, `<iframe>`, comments) shows as
+    plain text;
+  - only absolute `http(s)` and `mailto` links become links, and they open
+    in a new tab with `noopener noreferrer` (like text links); `javascript:`,
+    `data:`, `vbscript:` and relative links show as struck-through text;
+  - images are **never loaded** (a remote image in a notification is a
+    tracking pixel): an http(s) image becomes a link with its alt text.
+- On the lock screen markdown is never shown (components are not part of
+  the lock-screen view).
 
 Component ids are 1–64 characters of `[A-Za-z0-9_.-]` and unique within a
 notification. Option ids follow the same rule and must be unique within
@@ -251,6 +285,12 @@ across a lock (see the [privacy note](#privacy-note)).
   - A click marks the item seen. It opens a dialogue (or a form) as a dialogue, and otherwise only hides that pop-up.
   - The pop-up's ✕ hides it and keeps the item **unread**.
 - **Dialogues** open over their own window, float, or open as a sheet on a phone; see [Dialogues](#dialogues).
+- **Maximize.** Every dialogue on the desktop has a ⤢ button next to its ✕ (tooltip *Maximize* / *Restore*,
+  `aria-pressed`) and the shortcut **Alt+Shift+Enter** while focus is inside it. A desktop modal, a centred
+  or a floating dialogue then fills the app area between the top bar and the Dock (14 px margin); an
+  in-window panel fills its window. The state is kept per notification for the browser tab (also across
+  updates and reloads) and forgotten when the item ends. A markdown area grows with the dialogue. Dialogues
+  with markdown also start larger. Not on the phone.
 - **Select and combobox** render as ARIA comboboxes with a listbox, keyboard included:
   - **select:** ↓ ↑ Enter or Space open the list. Then ↑ ↓ Home End PageUp PageDown move, typing jumps to a matching option, Enter, Space or Tab choose, and Escape closes the list.
   - **combobox:** type to filter, ↑ ↓ choose, Enter takes the active option, Escape closes the list (a second Escape clears the text).
@@ -285,7 +325,7 @@ allowed to do:
 | `popup: true` (needs `notifications.popup`) | Opens at once, without a click, but never takes focus. At most 3 forced pop-ups per sender per 10 minutes; beyond that `popup` is turned off with a warning. |
 | `scope: 'desktop'` + `blocking: true` | A **desktop modal**: it opens **at once** and blocks the whole Aura shell (`popup` is irrelevant). AuraOS's own system decisions, or an app (agent, API key) with the admin-granted `notifications.desktopModal` — see [Desktop modals](#desktop-modals). Without the grant, or over the limit: `scope: 'auto'` with a warning. |
 | `scope: 'desktop'` without blocking | A centred dialogue that also opens **at once** and blocks nothing. Because it interrupts, it needs `notifications.popup` (or `desktopModal`) and counts against the forced pop-up limit; without it: `scope: 'auto'` with a warning. |
-| Phone | A sheet, or a full view for complex content (more than 3 fields, or a multiline input). |
+| Phone | A sheet, or a full view for complex content (more than 3 fields, a multiline input, or markdown). |
 
 A dialogue is never placed over **another** app's window: a sender can only
 cover a window it owns, so no app can phish over another.
@@ -545,7 +585,7 @@ display only.
 
 | Tool | What |
 |---|---|
-| `create_notification` | Every field above, including components (select, combobox, role buttons), `context`, `popupDurationMs`, and `agent`. |
+| `create_notification` | Every field above, including components (select, combobox, markdown, role buttons), `context`, `popupDurationMs`, and `agent`. |
 | `update_notification` / `remove_notification` | Your own. |
 | `list_notifications` / `get_notification` | Your own, with `outcome`, `answer` and `lastInteraction`. |
 | `wait_for_answer` | A bounded wait (≤ 25 s per call) → `resolved` (with `outcome`, `answer`), `removed` or `pending`. With `interactions: true` it also returns `status: 'interaction'` with the interaction, and `next` says which `after` to pass on the next call. |
@@ -570,8 +610,8 @@ Connect it: `claude mcp add --scope user --transport http aura-shell "$OS_API_BA
 
 The **Notification Tester** app (`com.example.notifp4`, user scope) sends as a
 verified app:
-- a composer for every field and component (select and combobox included);
-- presets: sticky pop-up, role buttons, a dropdown + combobox form, a live dropdown, Locked, a forced pop-up, blocking, progress, and more;
+- a composer for every field and component (select, combobox and markdown included, with a markdown sample picker);
+- presets: sticky pop-up, role buttons, a dropdown + combobox form, a live dropdown, Locked, a forced pop-up, blocking, progress, a **Markdown** group (one per surface: desktop modal, centred, floating, in-window, Simple preview, editable, source view first, an XSS check), and more;
 - the server's real errors and warnings, explained;
 - a live view with Wait for answer and Wait for interaction;
 - a burst test for the rate and pop-up limits;

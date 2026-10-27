@@ -578,6 +578,117 @@
   .aura-dlg-answer { display: none; color: var(--aura-color-warning); border-color: color-mix(in srgb, var(--aura-color-warning) 60%, transparent); }
   section.aura-dlg[data-collapsed="true"] .aura-dlg-answer { display: inline-flex; }
 
+  /* ── Markdown component (phase 6, MarkdownField.ts) ───────────────────── */
+  .aura-ntf-md { display: flex; flex-direction: column; gap: 4px; min-width: 0; --md-max: 320px; }
+  .aura-ntf-md-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .aura-ntf-md-head > .aura-ctl-label { flex: 1; min-width: 0; }
+  .aura-ntf-md-head > .aura-ctl-label.aura-sr-only { flex: 0; }
+  .aura-ntf-md-tools { display: inline-flex; gap: 4px; margin-left: auto; flex-shrink: 0; }
+  .aura-ntf-md-btn {
+    display: inline-flex; align-items: center; justify-content: center; height: 22px; padding: 0 8px; cursor: pointer;
+    font-family: var(--aura-font-mono); font-size: 0.62rem; letter-spacing: 0.06em; text-transform: uppercase;
+    background: transparent; color: var(--aura-color-text-dim); border: 1px solid var(--aura-color-border); border-radius: 0;
+  }
+  .aura-ntf-md-btn:hover, .aura-ntf-md-btn:focus-visible { color: var(--aura-color-primary); border-color: var(--aura-color-primary); outline: none; box-shadow: var(--aura-glow-primary); }
+  .aura-ntf-md-btn[aria-pressed="true"] { color: var(--aura-color-bg); background: var(--aura-color-primary); border-color: var(--aura-color-primary); }
+  .aura-ntf-md-btn[data-copied="true"] { color: var(--aura-color-success, var(--aura-color-primary)); border-color: currentColor; }
+  .aura-ntf-md-btn[data-copied="false"] { color: var(--aura-color-danger); border-color: currentColor; }
+  .aura-ntf-md-area, .aura-ntf-md-source {
+    max-height: var(--md-max); min-height: 48px; overflow: auto; overscroll-behavior: contain; box-sizing: border-box;
+    border: 1px solid var(--aura-color-border); background: var(--aura-color-bg);
+  }
+  .aura-ntf-md[data-max="auto"] .aura-ntf-md-area { max-height: none; }
+  .aura-ntf-md[data-max="auto"] .aura-ntf-md-source { max-height: none; min-height: 12rem; }
+  .aura-ntf-md-area[hidden], .aura-ntf-md-source[hidden] { display: none; }
+  .aura-ntf-md-area { padding: 8px 12px; color: var(--aura-color-text); font-size: 0.82rem; line-height: 1.5; overflow-wrap: anywhere; }
+  .aura-ntf-md-area:focus-visible { outline: none; border-color: var(--aura-color-primary); box-shadow: var(--aura-glow-primary); }
+  textarea.aura-ntf-md-source {
+    width: 100%; height: var(--md-max); resize: vertical; padding: 8px; margin: 0;
+    font-family: var(--aura-font-mono); font-size: 0.78rem; line-height: 1.45; color: var(--aura-color-text); white-space: pre; tab-size: 2;
+  }
+  textarea.aura-ntf-md-source[readonly] { color: var(--aura-color-text-dim); }
+  .aura-ntf-md-area > :first-child { margin-top: 0; }
+  .aura-ntf-md-area > :last-child { margin-bottom: 0; }
+  .aura-ntf-md-area :is(p, ul, ol, blockquote, .aura-ntf-md-code, .aura-ntf-md-table, hr) { margin: 0 0 0.7em; }
+  .aura-ntf-md-h { margin: 0.9em 0 0.4em; font-family: var(--aura-font-mono); line-height: 1.25; color: var(--aura-color-text); font-weight: 700; }
+  .aura-ntf-md-h1 { font-size: 1.3rem; border-bottom: 1px solid var(--aura-color-border); padding-bottom: 0.2em; }
+  .aura-ntf-md-h2 { font-size: 1.12rem; border-bottom: 1px solid var(--aura-color-border); padding-bottom: 0.15em; }
+  .aura-ntf-md-h3 { font-size: 1rem; }
+  .aura-ntf-md-h4, .aura-ntf-md-h5, .aura-ntf-md-h6 { font-size: 0.88rem; color: var(--aura-color-text-dim); }
+  .aura-ntf-md-area :is(ul, ol) { padding-left: 1.4em; }
+  .aura-ntf-md-area li > :is(ul, ol) { margin: 0.2em 0 0; }
+  .aura-ntf-md-area li + li { margin-top: 0.15em; }
+  .aura-ntf-md-area ul.aura-ntf-md-tasks { list-style: none; padding-left: 0.4em; }
+  .aura-ntf-md-area li[data-task] > .aura-ntf-md-check { margin: 0 6px 0 0; vertical-align: -2px; accent-color: var(--aura-color-primary); }
+  .aura-ntf-md-area li[data-task="done"] { color: var(--aura-color-text-dim); }
+  .aura-ntf-md-area blockquote { padding: 2px 0 2px 10px; border-left: 3px solid var(--aura-color-primary); color: var(--aura-color-text-dim); }
+  .aura-ntf-md-area hr { border: 0; border-top: 1px solid var(--aura-color-border); }
+  .aura-ntf-md-area a.aura-ntf-md-link { color: var(--aura-color-primary); text-decoration: underline; text-underline-offset: 2px; }
+  .aura-ntf-md-area a.aura-ntf-md-link:focus-visible { outline: 1px solid var(--aura-color-primary); outline-offset: 1px; }
+  .aura-ntf-md-badlink { color: var(--aura-color-text-dim); text-decoration: line-through dotted; cursor: help; }
+  .aura-ntf-md-icode { font-family: var(--aura-font-mono); font-size: 0.9em; padding: 0 3px; background: var(--aura-color-surface-2); border: 1px solid var(--aura-color-border); }
+  .aura-ntf-md-code { position: relative; }
+  .aura-ntf-md-code > pre {
+    margin: 0; padding: 8px 10px; overflow-x: auto; background: var(--aura-color-surface-2); border: 1px solid var(--aura-color-border);
+    font-family: var(--aura-font-mono); font-size: 0.78rem; line-height: 1.45; white-space: pre; tab-size: 2;
+  }
+  .aura-ntf-md-code > pre:focus-visible { outline: none; border-color: var(--aura-color-primary); }
+  .aura-ntf-md-code[data-lang]::before {
+    content: attr(data-lang); position: absolute; top: 3px; left: 8px; font-family: var(--aura-font-mono); font-size: 0.58rem;
+    text-transform: uppercase; letter-spacing: 0.06em; color: var(--aura-color-text-dim); pointer-events: none;
+  }
+  .aura-ntf-md-code[data-lang] > pre { padding-top: 18px; }
+  .aura-ntf-md-copy-code { position: absolute; top: 3px; right: 3px; height: 18px; padding: 0 6px; background: var(--aura-color-surface); opacity: 0.75; }
+  .aura-ntf-md-code:hover .aura-ntf-md-copy-code, .aura-ntf-md-copy-code:focus-visible, .aura-ntf-md-copy-code[data-copied] { opacity: 1; }
+  .aura-ntf-md-table { overflow-x: auto; max-width: 100%; }
+  .aura-ntf-md-table:focus-visible { outline: 1px solid var(--aura-color-primary); }
+  .aura-ntf-md-table table { border-collapse: collapse; font-size: 0.78rem; min-width: 100%; }
+  .aura-ntf-md-table :is(th, td) { padding: 4px 8px; border: 1px solid var(--aura-color-border); text-align: left; vertical-align: top; white-space: nowrap; }
+  .aura-ntf-md-table th { background: var(--aura-color-surface-2); font-family: var(--aura-font-mono); font-weight: 700; }
+  .aura-ntf-md-table tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--aura-color-surface-2) 45%, transparent); }
+  /* Preview in the list / pop-ups: clamped, "…", with "Show". */
+  .aura-ntf-md-preview { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; padding: 6px 8px; border: 1px solid var(--aura-color-border); background: var(--aura-color-bg); }
+  .aura-ntf-md-preview-label { font-family: var(--aura-font-mono); font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--aura-color-text-dim); }
+  .aura-ntf-md-preview-text {
+    margin: 0; font-size: 0.78rem; line-height: 1.4; color: var(--aura-color-text); overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden;
+  }
+  .aura-ntf[data-mode="toast"] .aura-ntf-md-preview-text { -webkit-line-clamp: 2; line-clamp: 2; }
+
+  /* ── Maximize (phase 6, DialogFrame) ─────────────────────────────────── */
+  .aura-dlg-max { width: 32px; height: 32px; padding: 0; margin-left: auto; border-color: transparent; }
+  .aura-dlg-max + .aura-dlg-close { margin-left: 0; }
+  .aura-dlg-max svg.aura-icon { width: 14px; height: 14px; }
+  .aura-dlg-max[aria-pressed="true"] { color: var(--aura-color-primary); }
+  .aura-dlg-max[hidden], section.aura-dlg[data-collapsed="true"] .aura-dlg-max { display: none; }
+  /* Larger defaults when a dialogue carries markdown. */
+  .aura-dlg-decision[data-has-markdown="true"], .aura-dlg-appmodal[data-has-markdown="true"] { width: min(760px, 100%); }
+  .aura-dlg-centred[data-has-markdown="true"] { width: min(720px, 100%); max-height: 85%; }
+  .aura-dlg-float:not([data-layout="phone"]) { width: auto; align-items: flex-end; }
+  .aura-dlg-float:not([data-layout="phone"]) > .aura-dlg { width: 380px; max-width: 100%; }
+  .aura-dlg-float:not([data-layout="phone"]) > .aura-dlg[data-has-markdown="true"] { width: 560px; }
+  .aura-dlg-float[data-layout="phone"] > .aura-dlg { width: 100%; }
+  .aura-dlg-host:not([data-blocking="true"]) .aura-dlg-window[data-has-markdown="true"] { max-height: 85%; }
+  .aura-dlg-host[data-blocking="true"] .aura-dlg-window[data-has-markdown="true"] { width: min(640px, 100%); }
+  /* Maximized desktop modal / centred / floating: the app area between the
+     top bar and the Dock, 14px margin. (Fixed to the body, which the shell
+     zooms with a transform — so these are body px, like everything else.) */
+  section.aura-dlg[data-maximized="true"]:not(.aura-dlg-window):not([data-collapsed="true"]) {
+    position: fixed; z-index: 1;
+    top: calc(var(--aura-statusbar-height, 0px) + 14px);
+    bottom: calc(var(--aura-dock-height, 0px) + 14px + env(safe-area-inset-bottom, 0px));
+    left: 14px; right: 14px; width: auto; max-width: none; height: auto; max-height: none;
+  }
+  /* In-window panel: its own window body (the host's padding is the margin). */
+  section.aura-dlg-window[data-maximized="true"]:not([data-collapsed="true"]) { flex: 1 1 auto; width: 100%; height: 100%; max-height: 100%; }
+  .aura-dlg-host[data-blocking="true"] section.aura-dlg-window[data-maximized="true"] { width: 100%; max-height: 100%; }
+  /* The markdown area grows with a maximized dialogue (and scrolls inside). */
+  section.aura-dlg[data-maximized="true"] > .aura-dlg-body { flex: 1 1 auto; display: flex; flex-direction: column; }
+  section.aura-dlg[data-maximized="true"] > .aura-dlg-body > .aura-ntf { flex: 1 1 auto; min-height: 0; }
+  section.aura-dlg[data-maximized="true"] .aura-ntf-body { flex: 1 1 auto; min-height: 0; }
+  section.aura-dlg[data-maximized="true"] .aura-ntf-md { flex: 1 1 0; min-height: 180px; }
+  section.aura-dlg[data-maximized="true"] .aura-ntf-md > :is(.aura-ntf-md-area, .aura-ntf-md-source) { flex: 1 1 0; max-height: none; height: auto; min-height: 120px; }
+
   /* Pending-question markers: minimized-strip chip + workspace pill. */
   [data-ntf-pending] { position: relative; }
   [data-ntf-pending]::after {

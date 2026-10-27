@@ -36,7 +36,7 @@ export interface PlannedButton {
 }
 
 export function hasFields(n: Pick<Notification, 'components'>): boolean {
-  return (n.components ?? []).some((c) => c.kind === 'input' || c.kind === 'options' || c.kind === 'select' || c.kind === 'combobox');
+  return (n.components ?? []).some((c) => c.kind === 'input' || c.kind === 'options' || c.kind === 'select' || c.kind === 'combobox' || (c.kind === 'markdown' && !!c.editable));
 }
 
 export function defaultLabel(role: 'submit' | 'cancel' | 'later', n: Pick<Notification, 'components'>): string {

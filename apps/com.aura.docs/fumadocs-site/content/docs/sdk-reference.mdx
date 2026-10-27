@@ -255,7 +255,7 @@ Active notifications are never deleted automatically; only their
 
 | Method | Signature | Note |
 |---|---|---|
-| `create` | `(input: NotificationInput) => Promise<{ notification, senderToken?, warnings }>` | **(B+S)** `type: 'simple' \| 'locked' \| 'dialogue'`, `title`, `text`, `priority`, `visibility`, `publicTitle`, `publicText`, `timeoutMs`, `popupDurationMs`, `pinned`, `popup`, `blocking`, `scope: 'auto' \| 'desktop'`, `components[]` (input, options, select, combobox, button, progress), `context {kind, id, label?}`. `priority` is `low`, `medium`, `high` or `urgent`. |
+| `create` | `(input: NotificationInput) => Promise<{ notification, senderToken?, warnings }>` | **(B+S)** `type: 'simple' \| 'locked' \| 'dialogue'`, `title`, `text`, `priority`, `visibility`, `publicTitle`, `publicText`, `timeoutMs`, `popupDurationMs`, `pinned`, `popup`, `blocking`, `scope: 'auto' \| 'desktop'`, `components[]` (input, options, select, combobox, markdown, button, progress), `context {kind, id, label?}`. `priority` is `low`, `medium`, `high` or `urgent`. |
 | `update` | `(id, patch, { senderToken? }?) => Promise<{ notification, warnings }>` | **(B+S)** Your own only. `null` clears a field. `type` is fixed. |
 | `remove` | `(id, { senderToken? }?) => Promise<Notification>` | **(B+S)** You are done with it (reason `completed`). Dismissing is the user's action. |
 | `get` | `(id) => Promise<Notification \| null>` | **(B+S)** `null` when not found, or not readable for you (not yours and not covered by a read grant). |
@@ -308,6 +308,12 @@ How the shell answers other buttons:
   searchable; its value is an option id or, with `allowCustom`, the typed
   text (≤ 200). The server checks these values in interactions and in
   `answer.values` (400 for an unknown option).
+- **markdown** (`text` ≤ 64 KB, at most 2 per notification, `view?`,
+  `editable?`, `required?`, `maxHeight?`) shows a report in the dialogue
+  (rendered safely: no raw HTML, http(s) / mailto links only, images not
+  loaded; Source and Copy in its toolbar). With `editable: true` the edited
+  text is the value in `answer.values[id]`; a value for a read-only one is
+  refused (400).
 - A button **without** `action`, an input submit (Enter) and an options,
   select or combobox choice keep the notification active. Each one sends a
   `notification:interacted` event, and the item's `lastInteraction` is

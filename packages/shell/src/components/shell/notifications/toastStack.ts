@@ -146,6 +146,8 @@ export function mountToasts(region: HTMLElement, getRuntime: () => Promise<Notif
       // (no exit, no separate dialogue — only the list's Answer opens one).
       // Phase 6: an app desktop modal takes over the desktop only when the user opens it.
       onAnswer: (n) => (isAppDesktopModal(n) && openAsDialog(n.id)) || activate(n.id),
+      // Phase 6: "Show" on a markdown preview opens the full dialogue; the pop-up goes.
+      onShowFull: (n) => openAsDialog(n.id),
       onNavigated: (n) => hide(n.id, 'click'),
     };
   }

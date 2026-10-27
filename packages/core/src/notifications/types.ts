@@ -197,6 +197,17 @@ export interface ComboboxComponent {
   default?: string;
   options: Array<{ id: string; label: string }>;
 }
+/** Phase 6: markdown text (≤ 64 KB), rendered safely; `editable` makes it an input. */
+export interface MarkdownComponent {
+  kind: 'markdown';
+  id: string;
+  label?: string;
+  text: string;
+  view?: 'rendered' | 'source';
+  editable?: boolean;
+  required?: boolean;
+  maxHeight?: 'auto' | number;
+}
 export type ButtonRole = 'submit' | 'cancel' | 'later';
 export interface ButtonComponent {
   kind: 'button';
@@ -222,9 +233,9 @@ export interface ProgressComponent {
   value: number | null;
   label?: string;
 }
-export type NotificationComponent = InputComponent | OptionsComponent | SelectComponent | ComboboxComponent | ButtonComponent | ProgressComponent;
+export type NotificationComponent = InputComponent | OptionsComponent | SelectComponent | ComboboxComponent | MarkdownComponent | ButtonComponent | ProgressComponent;
 /** Components that hold a value (inputs, choices, selects). */
-export type FieldComponent = InputComponent | OptionsComponent | SelectComponent | ComboboxComponent;
+export type FieldComponent = InputComponent | OptionsComponent | SelectComponent | ComboboxComponent | MarkdownComponent;
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -247,7 +258,7 @@ export type InteractionValue = string | string[];
 export interface Interaction {
   componentId: string;
   /** Kind of the used component. */
-  kind: 'button' | 'input' | 'options' | 'select' | 'combobox';
+  kind: 'button' | 'input' | 'options' | 'select' | 'combobox' | 'markdown';
   value?: InteractionValue;
   values?: Record<string, InteractionValue>;
   at: number;

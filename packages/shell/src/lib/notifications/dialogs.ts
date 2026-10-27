@@ -119,16 +119,21 @@ export function isForceHideShortcut(e: Pick<KeyboardEvent, 'key' | 'ctrlKey' | '
   return e.key === 'Escape' && e.ctrlKey && e.altKey && e.shiftKey;
 }
 
-/** Inputs, options, selects or comboboxes (buttons alone are not a form). */
+/** Inputs, options, selects, comboboxes or editable markdown (buttons alone are not a form). */
 export function hasFormFields(n: Pick<Notification, 'components'>): boolean {
-  return (n.components ?? []).some((c) => c.kind === 'input' || c.kind === 'options' || c.kind === 'select' || c.kind === 'combobox');
+  return (n.components ?? []).some((c) => c.kind === 'input' || c.kind === 'options' || c.kind === 'select' || c.kind === 'combobox' || (c.kind === 'markdown' && !!c.editable));
 }
 
-/** Complex content gets a dedicated full view on the phone. */
+/** Phase 6: markdown components (the full area renders only in a dialogue). */
+export function hasMarkdown(n: Pick<Notification, 'components'>): boolean {
+  return (n.components ?? []).some((c) => c.kind === 'markdown');
+}
+
+/** Complex content gets a dedicated full view on the phone (markdown too). */
 export function isComplex(n: Pick<Notification, 'components'>): boolean {
   const comps = n.components ?? [];
   const fields = comps.filter((c) => c.kind === 'input' || c.kind === 'options' || c.kind === 'select' || c.kind === 'combobox').length;
-  return fields > 3 || comps.some((c) => c.kind === 'input' && !!c.multiline);
+  return fields > 3 || comps.some((c) => (c.kind === 'input' && !!c.multiline) || c.kind === 'markdown');
 }
 
 /**
@@ -136,7 +141,7 @@ export function isComplex(n: Pick<Notification, 'components'>): boolean {
  * "Answer" — except clicks on its own controls (links, buttons, fields,
  * the ⋯ menu). Simple and Locked cards never do this.
  */
-export const CARD_CONTROL_SELECTOR = 'button, a, input, textarea, select, label, fieldset, [role="menu"], [data-own-escape]';
+export const CARD_CONTROL_SELECTOR = 'button, a, input, textarea, select, label, fieldset, [role="menu"], [role="toolbar"], [data-own-escape]';
 export function opensDialogOnActivate(n: Pick<Notification, 'type' | 'state'>): boolean {
   return n.type === 'dialogue' && n.state === 'active';
 }
@@ -144,9 +149,9 @@ export function opensDialogOnActivate(n: Pick<Notification, 'type' | 'state'>): 
 export function decidePlacement(n: Notification, inp: PlacementInput): Placement {
   if (n.state !== 'active') return { kind: 'none', reason: n.state };
   if (n.type !== 'dialogue') {
-    // A Simple item with a form opens as a floating dialogue / sheet — only
-    // because the user asked (pop-up click); never on its own.
-    if (inp.intent === 'user' && hasFormFields(n)) return { kind: 'floating', layout: inp.phone ? (isComplex(n) ? 'full' : 'sheet') : 'panel' };
+    // A Simple item with a form (or markdown, phase 6: "Show") opens as a
+    // floating dialogue / sheet — only because the user asked; never on its own.
+    if (inp.intent === 'user' && (hasFormFields(n) || hasMarkdown(n))) return { kind: 'floating', layout: inp.phone ? (isComplex(n) ? 'full' : 'sheet') : 'panel' };
     return { kind: 'none', reason: 'not a dialogue' };
   }
   if (isDesktopDecision(n)) return { kind: 'desktop' };

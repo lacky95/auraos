@@ -69,7 +69,9 @@ export function mountFloatingDialog(n: Notification, opts: FloatingDialogOptions
     takeFocus: opts.takeFocus,
     modal: opts.layout === 'full' || blocking,
     ...(blocking ? {} : { onLater: opts.onLater }),
-    kicker: blocking ? 'Answer to continue' : 'Question',
+    kicker: blocking ? 'Answer to continue' : n.type === 'dialogue' ? 'Question' : 'Notification',
+    // Phase 6: maximize on the desktop (panel / centred); phone sheets and full views never.
+    maximizable: opts.layout === 'panel',
   });
   frame.root.classList.add('aura-dlg-floating');
   frame.root.dataset['layout'] = opts.layout;

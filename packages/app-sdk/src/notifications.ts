@@ -59,6 +59,16 @@ export type NotificationComponent =
    */
   | { kind: 'combobox'; id: string; label?: string; placeholder?: string; required?: boolean; allowCustom?: boolean; default?: string; options: Array<{ id: string; label: string }> }
   /**
+   * Phase 6: a markdown document (≤ 64 KB, at most 2 per notification) —
+   * reports, summaries, logs. Rendered safely (no raw HTML; only http(s) /
+   * mailto links; images are not loaded) with a Rendered ⇄ Source toggle and
+   * Copy. The full area shows in the dialogue; the list and pop-ups show a
+   * short preview with "Show". `editable: true` makes it a form field: the
+   * edited text comes back in `answer.values[id]` (drafts and `required`
+   * work like an input). `maxHeight`: px (80–4000) or 'auto' (default 320).
+   */
+  | { kind: 'markdown'; id: string; label?: string; text: string; view?: 'rendered' | 'source'; editable?: boolean; required?: boolean; maxHeight?: 'auto' | number }
+  /**
    * `role` (phase 4) marks the standard dialogue buttons: 'submit' (validates,
    * resolves outcome 'submitted'), 'cancel' (resolves outcome 'cancelled'),
    * 'later' (local; hides the dialogue). Role buttons may leave out `label`
@@ -68,7 +78,7 @@ export type NotificationComponent =
   | { kind: 'button'; id?: string; label?: string; variant?: 'primary' | 'secondary' | 'tertiary'; action?: 'resolve' | 'dismiss' | 'link'; role?: NotificationButtonRole; href?: string }
   | { kind: 'progress'; id?: string; value: number | null; label?: string };
 
-/** A value from an input (string), a select / combobox (option id or free text) or options (id, or ids when `multiple`). */
+/** A value from an input or editable markdown (string), a select / combobox (option id or free text) or options (id, or ids when `multiple`). */
 export type NotificationInteractionValue = string | string[];
 
 /**
@@ -78,7 +88,7 @@ export type NotificationInteractionValue = string | string[];
  */
 export interface NotificationInteraction {
   componentId: string;
-  kind: 'button' | 'input' | 'options' | 'select' | 'combobox' | string;
+  kind: 'button' | 'input' | 'options' | 'select' | 'combobox' | 'markdown' | string;
   /** The component's own value (inputs / options). */
   value?: NotificationInteractionValue;
   /** The other fields' values sent along with a button. */

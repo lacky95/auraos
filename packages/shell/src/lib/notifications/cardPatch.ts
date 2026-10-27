@@ -4,7 +4,7 @@
  *   'none'     nothing visible changed (e.g. only the echo of this client's
  *              own interaction: lastInteraction / updatedAt / history /
  *              displayedAt). The card is left alone.
- *   'patch'    only title, text, progress values or the seen state changed:
+ *   'patch'    only title, text, progress values, markdown text or the seen state changed:
  *              those nodes are patched in place; inputs, options and buttons
  *              are never replaced, so typed values, the selection, focus,
  *              caret and scroll stay.
@@ -26,14 +26,21 @@ type Comp = NonNullable<Notification['components']>[number];
 
 /** Everything whose change needs a full re-render. */
 export function structureKey(n: Notification): string {
-  const comps = (n.components ?? []).map((c: Comp) => (c.kind === 'progress'
-    ? { kind: 'progress', id: c.id ?? null }   // value / label are patched
-    : c));
+  const comps = (n.components ?? []).map((c: Comp) => {
+    if (c.kind === 'progress') return { kind: 'progress', id: c.id ?? null };   // value / label are patched
+    // Markdown text is patched (the view mode is the user's once shown).
+    if (c.kind === 'markdown') { const { text: _t, view: _v, ...rest } = c; return rest; }
+    return c;
+  });
   return JSON.stringify({
     type: n.type, state: n.state, priority: n.priority, pinned: !!n.pinned,
     icon: n.icon ?? null, image: n.image ?? null, context: n.context ?? null,
     sender: n.sender, comps,
   });
+}
+
+function markdownKey(n: Notification): string {
+  return JSON.stringify((n.components ?? []).map((c) => (c.kind === 'markdown' ? c.text : null)));
 }
 
 function progressKey(n: Notification): string {
@@ -47,6 +54,7 @@ export function planCardUpdate(prev: Notification | undefined, next: Notificatio
   const patch = prev.title !== next.title
     || prev.text !== next.text
     || progressKey(prev) !== progressKey(next)
+    || markdownKey(prev) !== markdownKey(next)
     || (prev.seenAt === undefined) !== (next.seenAt === undefined)
     || prev.createdAt !== next.createdAt;
   return patch ? 'patch' : 'none';
@@ -64,14 +72,20 @@ export function buttonValidates(b: { action?: 'resolve' | 'dismiss' | 'link' | u
   return b.action === 'resolve' || b.action === undefined;
 }
 
-type RequiredField = Extract<Comp, { kind: 'input' | 'select' | 'combobox' }>;
+type RequiredField = Extract<Comp, { kind: 'input' | 'select' | 'combobox' | 'markdown' }>;
 
-/** Required inputs / selects / comboboxes that are empty (whitespace counts as empty). */
+/** A component that holds a user value: inputs, options, selects, comboboxes and editable markdown. */
+export function isFormComponent(c: Comp): boolean {
+  return c.kind === 'input' || c.kind === 'options' || c.kind === 'select' || c.kind === 'combobox' || (c.kind === 'markdown' && !!c.editable);
+}
+
+/** Required inputs / selects / comboboxes / editable markdown that are empty (whitespace counts as empty). */
 export function missingRequired(
   components: Notification['components'], values: Record<string, string | string[]>,
 ): RequiredField[] {
   return (components ?? []).filter((x): x is RequiredField =>
-    (x.kind === 'input' || x.kind === 'select' || x.kind === 'combobox') && !!x.required && !String(values[x.id] ?? '').trim());
+    (x.kind === 'input' || x.kind === 'select' || x.kind === 'combobox' || (x.kind === 'markdown' && !!x.editable))
+    && !!x.required && !String(values[x.id] ?? '').trim());
 }
 
 /**
@@ -102,7 +116,7 @@ export function fieldErrorsFrom(details: unknown, components: Notification['comp
 export function needsDismissConfirm(
   n: Pick<Notification, 'type' | 'state' | 'components'>, draft: Record<string, string | string[]> | null,
 ): { confirm: boolean; draftLost: boolean } {
-  const form = (n.components ?? []).some((c) => c.kind === 'input' || c.kind === 'options' || c.kind === 'select' || c.kind === 'combobox');
+  const form = (n.components ?? []).some(isFormComponent);
   const confirm = n.state === 'active' && n.type !== 'locked' && (n.type === 'dialogue' || form);
   const draftLost = confirm && !!draft && Object.values(draft).some((v) => (Array.isArray(v) ? v.length > 0 : String(v).trim() !== ''));
   return { confirm, draftLost };

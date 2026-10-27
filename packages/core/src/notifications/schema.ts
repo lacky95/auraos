@@ -90,6 +90,26 @@ export const ComboboxComponentSchema = z.object({
 });
 
 /**
+ * Phase 6: longer formatted text — reports, summaries, logs, generated docs.
+ * `text` is markdown source (≤ 64 KB). The shell renders a safe subset (no
+ * raw HTML) with a Rendered ⇄ Source toggle and Copy. `editable` makes the
+ * source an input (its value goes in answer.values[id], ≤ 64 KB; `required`
+ * like an input). At most 2 per notification.
+ */
+export const MAX_MARKDOWN_CHARS = 65_536;
+export const MAX_MARKDOWN_COMPONENTS = 2;
+export const MarkdownComponentSchema = z.object({
+  kind: z.literal('markdown'),
+  id: ComponentId,
+  label: ShortText.optional(),
+  text: z.string().max(MAX_MARKDOWN_CHARS),
+  view: z.enum(['rendered', 'source']).optional(),
+  editable: z.boolean().optional(),
+  required: z.boolean().optional(),
+  maxHeight: z.union([z.literal('auto'), z.number().int().min(80).max(4000)]).optional(),
+});
+
+/**
  * A button. Phase 4: `role` marks the standard dialogue buttons —
  *   submit  validates required fields, resolves `{outcome:'submitted', buttonId, values}`
  *   cancel  no validation / values, resolves `{outcome:'cancelled', buttonId}`
@@ -121,11 +141,15 @@ export const ComponentSchema = z.discriminatedUnion('kind', [
   OptionsComponentSchema,
   SelectComponentSchema,
   ComboboxComponentSchema,
+  MarkdownComponentSchema,
   ButtonComponentSchema,
   ProgressComponentSchema,
 ]);
 
 const ComponentsSchema = z.array(ComponentSchema).max(8).superRefine((list, ctx) => {
+  if (list.filter((c) => c.kind === 'markdown').length > MAX_MARKDOWN_COMPONENTS) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: `at most ${MAX_MARKDOWN_COMPONENTS} markdown components per notification` });
+  }
   const seen = new Set<string>();
   const roles = new Set<string>();
   list.forEach((c, i) => {
@@ -271,11 +295,15 @@ export const UpdatePatchSchema = z.object({
 export type UpdatePatch = z.input<typeof UpdatePatchSchema>;
 export type ParsedUpdatePatch = z.output<typeof UpdatePatchSchema>;
 
+/** Phase 6: room for two editable markdown values plus the rest. */
+export const MAX_ANSWER_BYTES = 2 * 65_536 + 16_384;
+
 /** Answer of a dialogue (button / options / input values). Any JSON, ≤ 16 KB. */
 export const AnswerSchema = z.unknown().superRefine((v, ctx) => {
   let size = 0;
   try { size = JSON.stringify(v ?? null).length; } catch { size = Infinity; }
-  if (size > 16_384) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'answer exceeds 16 KB of JSON' });
+  // Phase 6: editable markdown values are up to 64 KB each (2 per notification).
+  if (size > MAX_ANSWER_BYTES) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `answer exceeds ${Math.round(MAX_ANSWER_BYTES / 1024)} KB of JSON` });
   // Phase 4: `answer.outcome` (when given) must be a known outcome.
   if (v && typeof v === 'object' && !Array.isArray(v) && 'outcome' in v) {
     const o = (v as Record<string, unknown>)['outcome'];
@@ -291,7 +319,7 @@ export function outcomeOf(answer: unknown): 'submitted' | 'cancelled' {
 }
 
 /** Body of `POST …/<id>/interact` (validated further against the item's components). */
-const InteractionValueSchema = z.union([z.string().max(4000), z.array(ComponentId).max(8)]);
+const InteractionValueSchema = z.union([z.string().max(MAX_MARKDOWN_CHARS), z.array(ComponentId).max(8)]);
 export const InteractionInputSchema = z.object({
   componentId: ComponentId,
   value: InteractionValueSchema.optional(),

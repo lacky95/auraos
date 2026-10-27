@@ -60,7 +60,7 @@ import { getAuthServices } from '../auth/services.js';
 import type { ZodError } from 'zod';
 import {
   AnswerSchema, ClearFilterSchema, CreateInputSchema, InteractionInputSchema, ListQuerySchema, UpdatePatchSchema,
-  identityOverrideWarnings, outcomeOf, MAX_COMBOBOX_CUSTOM,
+  identityOverrideWarnings, outcomeOf, MAX_COMBOBOX_CUSTOM, MAX_MARKDOWN_CHARS,
   type ClearFilter, type CreateInput, type InteractionInput, type ListQuery, type UpdatePatch,
 } from './schema.js';
 import {
@@ -102,7 +102,7 @@ export interface WaitForResult {
 }
 
 /** Bump when the class changes incompatibly: `getNotificationService()` replaces older singletons. */
-export const NOTIFICATION_SERVICE_VERSION = 13;
+export const NOTIFICATION_SERVICE_VERSION = 14;
 
 /** Phase 5: how often the sweeper runs the retention pass. */
 export const DEFAULT_RETENTION_INTERVAL_MS = 60_000;
@@ -354,6 +354,13 @@ function normalizeValue(c: NotificationComponent, v: InteractionValue | undefine
   if (v === undefined) return undefined;
   if (c.kind === 'input') {
     if (typeof v !== 'string') throw new NotificationError(400, `${where}: input '${c.id}' takes a string`);
+    if (v.length > 4000) throw new NotificationError(400, `${where}: input '${c.id}' is longer than 4000 chars`);
+    return v;
+  }
+  if (c.kind === 'markdown') {
+    if (!c.editable) throw new NotificationError(400, `${where}: markdown '${c.id}' is read-only`);
+    if (typeof v !== 'string') throw new NotificationError(400, `${where}: markdown '${c.id}' takes a string`);
+    if (v.length > MAX_MARKDOWN_CHARS) throw new NotificationError(400, `${where}: markdown '${c.id}' is longer than 64 KB`);
     return v;
   }
   if (c.kind === 'options') {
@@ -385,7 +392,7 @@ function normalizeValue(c: NotificationComponent, v: InteractionValue | undefine
 }
 
 function isFieldComponent(c: NotificationComponent): boolean {
-  return c.kind === 'input' || c.kind === 'options' || c.kind === 'select' || c.kind === 'combobox';
+  return c.kind === 'input' || c.kind === 'options' || c.kind === 'select' || c.kind === 'combobox' || (c.kind === 'markdown' && !!c.editable);
 }
 
 /**
@@ -394,14 +401,15 @@ function isFieldComponent(c: NotificationComponent): boolean {
  * `interact` values — an unknown option, a non-option select value or free
  * text in a combobox without `allowCustom` is a 400. Keys that are not
  * field components are left alone (older senders' own answer shapes), and
- * an answer without a `values` object is not touched. Returns the answer
+ * an answer without a `values` object is not touched. A value for a
+ * read-only markdown component is refused (400). Returns the answer
  * with normalised values (e.g. trimmed combobox text).
  */
 function normalizeAnswerValues(rec: StoredNotification, answer: unknown): unknown {
   if (!answer || typeof answer !== 'object' || Array.isArray(answer)) return answer;
   const vals = (answer as Record<string, unknown>)['values'];
   if (!vals || typeof vals !== 'object' || Array.isArray(vals)) return answer;
-  const byId = new Map((rec.components ?? []).filter((c) => c.id && isFieldComponent(c)).map((c) => [c.id as string, c]));
+  const byId = new Map((rec.components ?? []).filter((c) => c.id && (isFieldComponent(c) || c.kind === 'markdown')).map((c) => [c.id as string, c]));
   let out: Record<string, unknown> | null = null;
   for (const [k, v] of Object.entries(vals as Record<string, unknown>)) {
     const c = byId.get(k);
@@ -409,7 +417,7 @@ function normalizeAnswerValues(rec: StoredNotification, answer: unknown): unknow
     if (typeof v !== 'string' && !(Array.isArray(v) && v.every((x) => typeof x === 'string'))) {
       throw new NotificationError(400, `answer.values: '${k}' must be a string or a list of option ids`);
     }
-    if (typeof v === 'string' && v === '' && c.kind !== 'input') continue;   // nothing chosen
+    if (typeof v === 'string' && v === '' && c.kind !== 'input' && c.kind !== 'markdown') continue;   // nothing chosen
     const n = normalizeValue(c, v as InteractionValue, 'answer.values');
     if (n !== v) { out ??= { ...(vals as Record<string, unknown>) }; out[k] = n; }
   }

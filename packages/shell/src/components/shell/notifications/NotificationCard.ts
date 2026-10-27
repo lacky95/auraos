@@ -17,6 +17,10 @@
  *                      (required inputs checked first); 'dismiss' → dismiss;
  *                      'link' → open href (http(s) only); none → interact
  *   progress         — determinate (0..1) or indeterminate (null)
+ *   markdown         — phase 6 (MarkdownField.ts): the full area in a
+ *                      dialogue; a clamped preview + "Show" (opens the
+ *                      dialogue) in the list and pop-ups. `editable` makes
+ *                      it a form field (value = the source text)
  *
  * Locked (phase 4): no dismiss (no ✕, no Delete key, no 'dismiss' buttons),
  * a lock tag, and in the list a secondary ⋯ menu with "Force remove…" that
@@ -48,6 +52,10 @@ import { draftValuesFor, getDrafts } from '../../../lib/notifications/drafts.ts'
 import { isLocked } from './placement.ts';
 import { choiceValue, renderComboboxField, renderSelectField, setChoiceValue } from './ChoiceField.ts';
 import { optionsDisplay } from '../../../lib/notifications/choices.ts';
+import {
+  applyMarkdownFieldState, markdownFieldState, markdownFieldValue, patchMarkdownField, patchMarkdownPreview,
+  renderMarkdownField, renderMarkdownPreview, setMarkdownFieldValue, type MarkdownFieldState,
+} from './MarkdownField.ts';
 
 /** The item each rendered card currently shows (for patch-in-place). */
 const shown = new WeakMap<HTMLElement, Notification>();
@@ -79,6 +87,11 @@ export interface CardOptions {
    * answer form (list) / `onOpen` (pop-up).
    */
   onAnswer?: (n: Notification) => boolean;
+  /**
+   * Phase 6: "Show" on a markdown preview (list / pop-up) opens the item as a
+   * dialogue. Default: `onAnswer`, else the dialogue layer directly.
+   */
+  onShowFull?: (n: Notification) => boolean;
   /** Called after Go to task ran (e.g. to close the panel). */
   onNavigated?: (n: Notification) => void;
   /**
@@ -129,7 +142,7 @@ function saveDraft(card: HTMLElement, n: Notification, componentId: string): voi
   if (syncing) return;
   const v = collectValues(card, n)[componentId];
   const c = (n.components ?? []).find((x) => x.id === componentId);
-  const value = v ?? (c?.kind === 'options' && c.multiple ? [] : c?.kind === 'select' || c?.kind === 'combobox' ? '' : undefined);
+  const value = v ?? (c?.kind === 'options' && c.multiple ? [] : c?.kind === 'select' || c?.kind === 'combobox' || c?.kind === 'markdown' ? '' : undefined);
   if (value === undefined) return;
   getDrafts().set(n.id, componentId, value);
   syncing = true;
@@ -160,6 +173,10 @@ function applyValues(card: HTMLElement, n: Notification, values: Record<string, 
         const w = card.querySelector<HTMLElement>(`[data-ntf-choice="${CSS.escape(c.id)}"]`);
         if (!w || w.contains(document.activeElement)) continue;
         setChoiceValue(w, v || undefined);
+      } else if (c.kind === 'markdown' && c.editable && typeof v === 'string') {
+        const w = card.querySelector<HTMLElement>(`[data-ntf-md="${CSS.escape(c.id)}"]`);
+        if (!w || w.contains(document.activeElement)) continue;
+        setMarkdownFieldValue(w, v);
       }
     }
   } finally { syncing = was; }
@@ -181,6 +198,15 @@ export function collectValues(card: HTMLElement, n: Notification): Record<string
       const w = card.querySelector<HTMLElement>(`[data-ntf-choice="${CSS.escape(c.id)}"]`);
       const v = w ? choiceValue(w) : undefined;
       if (v !== undefined) out[c.id] = v;
+    } else if (c.kind === 'markdown' && c.editable) {
+      // The full field only renders in a dialogue; elsewhere (preview) the
+      // value is the draft, else the sender's text.
+      const w = card.querySelector<HTMLElement>(`[data-ntf-md="${CSS.escape(c.id)}"]`);
+      if (w) out[c.id] = markdownFieldValue(w);
+      else {
+        const d = isLocked() ? undefined : getDrafts().get(n.id)?.[c.id];
+        out[c.id] = typeof d === 'string' ? d : c.text;
+      }
     }
   }
   return out;
@@ -310,7 +336,7 @@ function renderComponent(card: HTMLElement, n: Notification, c: Component, opts:
       const live = sendsOnFieldChange(opts.mode);
       field.addEventListener('keydown', (e) => {
         const ke = e as KeyboardEvent;
-        if (ke.key !== 'Enter' || ke.isComposing) return;
+        if (ke.key !== 'Enter' || ke.isComposing || ke.altKey) return;
         if (!live) {
           // Enter in a single-line field presses the primary resolve button.
           if (c.multiline && !(ke.ctrlKey || ke.metaKey)) return;
@@ -414,6 +440,10 @@ function renderComponent(card: HTMLElement, n: Notification, c: Component, opts:
         ? renderSelectField(c, { base, onChange })
         : renderComboboxField(c, { base, onChange });
     }
+    case 'markdown': {
+      if (opts.mode === 'dialog') return renderMarkdownField(c, { base, onInput: () => saveDraft(card, n, c.id) });
+      return renderMarkdownPreview(c, () => showFull(n, opts));
+    }
     case 'progress': {
       const wrap = el('div', 'aura-ntf-progress');
       const bar = el('div', 'aura-ntf-progress-track');
@@ -441,6 +471,14 @@ function renderComponent(card: HTMLElement, n: Notification, c: Component, opts:
     default:
       return null;
   }
+}
+
+/** "Show" on a markdown preview: open the item as a dialogue. */
+function showFull(n: Notification, opts: CardOptions): void {
+  if (opts.onShowFull?.(n)) return;
+  if (opts.onAnswer?.(n)) return;
+  const dlg = (window as unknown as { __auraDialogs?: { answer(id: string): unknown } }).__auraDialogs;
+  void dlg?.answer(n.id);
 }
 
 function renderButton(card: HTMLElement, n: Notification, c: PlannedButton, opts: CardOptions): HTMLButtonElement {
@@ -790,8 +828,17 @@ export function renderNotificationCard(n: Notification, opts: CardOptions): HTML
       if (node) card.appendChild(node);
     }
   }
+  // Markdown outside a dialogue: a preview that is always visible (it is content, not a question).
+  if (!dialogMode) {
+    for (const c of comps) {
+      if (c.kind === 'markdown') {
+        const node = renderComponent(card, n, c, opts, base);
+        if (node) card.appendChild(node);
+      }
+    }
+  }
   for (const c of comps) {
-    if (c.kind === 'input' || c.kind === 'options' || c.kind === 'select' || c.kind === 'combobox') {
+    if (c.kind === 'input' || c.kind === 'options' || c.kind === 'select' || c.kind === 'combobox' || (c.kind === 'markdown' && dialogMode)) {
       const node = renderComponent(card, n, c, opts, base);
       if (node) body.appendChild(node);
     }
@@ -813,7 +860,7 @@ export function renderNotificationCard(n: Notification, opts: CardOptions): HTML
     ctx.title = `About: ${target.label}`;
     foot.appendChild(ctx);
   }
-  const hasQuestion = isDialogue || comps.some((c) => c.kind === 'input' || c.kind === 'options' || c.kind === 'select' || c.kind === 'combobox');
+  const hasQuestion = isDialogue || comps.some((c) => c.kind === 'input' || c.kind === 'options' || c.kind === 'select' || c.kind === 'combobox' || (c.kind === 'markdown' && !!c.editable));
   if (opts.mode === 'toast' && hasQuestion && (comps.length || isDialogue)) {
     const ans = el('button', 'aura-ntf-link-btn', 'Answer');
     ans.type = 'button';
@@ -966,6 +1013,14 @@ function patchCard(card: HTMLElement, n: Notification, opts: CardOptions): void 
     }
     wrap.replaceWith(fresh);   // progress holds no user state
   });
+  // Markdown text (phase 6): patched in place — view mode, scroll and edits stay.
+  for (const c of n.components ?? []) {
+    if (c.kind !== 'markdown') continue;
+    const w = card.querySelector<HTMLElement>(`[data-ntf-md="${CSS.escape(c.id)}"]`);
+    if (w) patchMarkdownField(w, c);
+    const pv = card.querySelector<HTMLElement>(`[data-ntf-md-preview="${CSS.escape(c.id)}"]`);
+    if (pv) patchMarkdownPreview(pv, c);
+  }
   const time = card.querySelector<HTMLTimeElement>('.aura-ntf-time');
   if (time) time.textContent = relativeTime(n.createdAt, opts.now ?? Date.now());
   if (n.seenAt !== undefined) {
@@ -991,7 +1046,7 @@ export function updateNotificationCard(old: HTMLElement, n: Notification, opts: 
   const plan = planCardUpdate(shown.get(old), n);
   if (plan === 'none') { shown.set(old, n); return old; }
   if (plan === 'patch') { patchCard(old, n, opts); shown.set(old, n); return old; }
-  const prevN = { components: n.components } as Notification;
+  const prevN = { id: n.id, components: n.components } as Notification;
   const values = collectValues(old, prevN);
   const expanded = old.dataset['expanded'] === 'true';
   const active = document.activeElement as HTMLElement | null;
@@ -1004,9 +1059,20 @@ export function updateNotificationCard(old: HTMLElement, n: Notification, opts: 
     if (f.dataset['lastSent'] !== undefined) lastSent.set(f.dataset['ntfInput']!, f.dataset['lastSent']);
   });
   const status = old.querySelector<HTMLElement>('.aura-ntf-status');
+  const mdStates = new Map<string, MarkdownFieldState>();
+  old.querySelectorAll<HTMLElement>('[data-ntf-md]').forEach((w) => {
+    const st = markdownFieldState(w);
+    if (st) mdStates.set(w.dataset['ntfMd']!, st);
+  });
 
   const next = renderNotificationCard(n, { ...opts, expanded: expanded || opts.expanded });
   for (const c of n.components ?? []) {
+    if (c.kind === 'markdown') {
+      const w = next.querySelector<HTMLElement>(`[data-ntf-md="${CSS.escape(c.id)}"]`);
+      const st = mdStates.get(c.id);
+      if (w && st) applyMarkdownFieldState(w, st);
+      continue;
+    }
     if (c.kind !== 'input' && c.kind !== 'options' && c.kind !== 'select' && c.kind !== 'combobox') continue;
     const v = values[c.id];
     if (v === undefined) continue;

@@ -56,7 +56,7 @@ const INSTRUCTIONS =
   + 'whole OS and work without a browser. '
   + 'Anything marked "no shell UI is connected" needs the shell open in a browser. '
   + 'Notifications: asking is not interrupting. To ask the user something, create_notification with type '
-  + '"dialogue" (buttons / options / an input) and a `context` (the task, activity or installation it is '
+  + '"dialogue" (buttons / options / an input; a `markdown` component shows a report) and a `context` (the task, activity or installation it is '
   + 'about), then KEEP WORKING and check back with wait_for_answer (a bounded wait, ≤ 25 s per call; '
   + '"pending" means call it again later; interactions: true also returns button clicks / input submits while it stays open) or get_notification. Prefer normal dialogues: pop-ups (`popup`) '
   + 'and Locked notifications need permissions an admin granted to this service — without them they are '
@@ -255,10 +255,15 @@ const COMPONENT = z.discriminatedUnion('kind', [
     required: z.boolean().optional(), allowCustom: z.boolean().optional().describe('Also accept the typed text itself (≤ 200 chars) as the answer.'),
     default: z.string().optional(), options: z.array(z.object({ id: z.string(), label: z.string() })).max(50) })
     .describe('Searchable select: the user types to filter up to 50 options. The answer value is an option id, or the free text with allowCustom.'),
+  z.object({ kind: z.literal('markdown'), id: z.string(), label: z.string().optional(), text: z.string().max(65_536),
+    view: z.enum(['rendered', 'source']).optional(), editable: z.boolean().optional().describe('Let the user edit it; the text comes back in answer.values[id].'),
+    required: z.boolean().optional(), maxHeight: z.union([z.literal('auto'), z.number().int().min(80).max(4000)]).optional() })
+    .describe('A markdown document (≤ 64 KB, ≤ 2 per notification): show the user a report / summary / log. Rendered safely (no HTML, http(s) links only) with Source + Copy.'),
   z.object({ kind: z.literal('progress'), id: z.string().optional(), value: z.number().min(0).max(1).nullable(), label: z.string().optional() }),
 ]);
 /** Options display rules (checked here so the agent gets the reason before sending). */
 function refineComponents(list: Array<z.infer<typeof COMPONENT>>, ctx: z.RefinementCtx): void {
+  if (list.filter((c) => c.kind === 'markdown').length > 2) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'at most 2 markdown components per notification' });
   list.forEach((c, i) => {
     if (c.kind !== 'options') return;
     const d = c.display ?? (c.multiple ? 'checkbox' : 'segmented');
@@ -288,7 +293,7 @@ const CONTENT = {
   scope: z.enum(['auto', 'desktop']).optional().describe('Dialogue only: "desktop" opens at once — with blocking: true as a desktop-wide modal that needs the notifications.desktopModal grant (shown as "Requested by <this service>", never as AuraOS; popup is irrelevant); without blocking as a centred dialogue that needs the popup (or desktopModal) grant.'),
   timeoutMs: z.number().int().positive().optional().describe('Remove automatically after this many ms. Default: stays until handled.'),
   popupDurationMs: z.number().int().max(86_400_000).optional().describe('How long the pop-up shows, in ms (not the lifetime — that is timeoutMs). > 0: hide after that long, the item stays in the list. 0 or -1: the pop-up stays until the user handles it. Default: 8 s (high / urgent stay). Ignored for activity-linked items (context = the sender\'s own window): those pop-ups are sticky.'),
-  components: z.array(COMPONENT).max(8).superRefine(refineComponents).optional().describe('Buttons (≤ 3 shown), options (chips ≤ 4, or display radio / checkbox lists ≤ 8, with descriptions), select (dropdown, ≤ 50), combobox (searchable, ≤ 50, optional free text), an input, or progress.'),
+  components: z.array(COMPONENT).max(8).superRefine(refineComponents).optional().describe('Buttons (≤ 3 shown), options (chips ≤ 4, or display radio / checkbox lists ≤ 8, with descriptions), select (dropdown, ≤ 50), combobox (searchable, ≤ 50, optional free text), an input, markdown (a report up to 64 KB, ≤ 2), or progress.'),
   context: CONTEXT.optional(),
 };
 
@@ -349,6 +354,7 @@ const NOTIFICATION_TOOLS: OwnTool[] = [
     title: 'Create a notification',
     description: 'Show the user a notification, sent as the Shell Daemon (verified) with you as the display actor. '
       + 'type "dialogue" asks something (buttons / options / input) — it stays in the notification list until answered, '
+      + 'To show a report / summary / log, add a `markdown` component (≤ 64 KB; rendered safely, the user can view the source, copy it and maximize the dialogue). '
       + 'so keep working and check back with wait_for_answer. Set `context` to what it is about. '
       + '"locked" (cannot be dismissed) and `popup` need admin-granted permissions; without them they are downgraded and '
       + '`warnings` explains it. Agents have no window, so plain `blocking` is downgraded; a desktop-wide modal '

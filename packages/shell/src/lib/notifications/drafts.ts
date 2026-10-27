@@ -121,6 +121,7 @@ export function draftValuesFor(n: Pick<Notification, 'components'>, values: Reco
     const v = values[c.id];
     if (!isValue(v)) continue;
     if (c.kind === 'input' && typeof v === 'string') out[c.id] = v;
+    else if (c.kind === 'markdown' && c.editable && typeof v === 'string') out[c.id] = v;
     else if (c.kind === 'select' && typeof v === 'string') {
       if (v === '' || c.options.some((o) => o.id === v)) out[c.id] = v;
     } else if (c.kind === 'combobox' && typeof v === 'string') {

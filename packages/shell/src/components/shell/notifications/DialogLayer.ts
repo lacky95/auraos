@@ -26,6 +26,7 @@ import { mountFloatingDialog } from './FloatingDialog.ts';
 import { mountDesktopDecision } from './DesktopDecision.ts';
 import { Disposer, PHONE_MAX_WIDTH, isLocked, watchLock } from './placement.ts';
 import { getDrafts } from '../../../lib/notifications/drafts.ts';
+import { getMaximizeMemory } from '../../../lib/notifications/maximize.ts';
 import { CollapseMemory, badgeAction, badgeHint, type StorageLike as CollapseStorage } from '../../../lib/notifications/activityLinks.ts';
 
 /** Draft garbage collection: on start (once the store is loaded) and every 30 min. */
@@ -235,7 +236,10 @@ export function mountDialogLayer(): () => void {
       ctl.onStore(snap, changes);
       // Drafts: resolved / removed by anyone → gone. NOT on 'gone' — that is
       // a lock wipe or an item hidden from a locked view, not an ending.
-      for (const ch of changes) if (ch.kind === 'removed' && ch.reason !== 'gone') getDrafts().clear(ch.id);
+      // Phase 6: the per-tab maximize memory goes with the item too.
+      for (const ch of changes) {
+        if (ch.kind === 'removed' && ch.reason !== 'gone') { getDrafts().clear(ch.id); getMaximizeMemory().clear(ch.id); }
+      }
       // GC once loaded — never from a locked view (it lists fewer items).
       if (snap.ready && !gcDone && !snap.error && !isLocked()) {
         gcDone = true;
