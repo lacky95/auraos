@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 process.env.OS_API_BASE = 'http://os.test';
 
 const { setFetch } = await import('../src/shell-api.ts');
-const { buildShellServer, TOOL_NAMES } = await import('../src/mcp/shell.ts');
+const { buildShellServer, TOOL_NAMES, agentFromHeaders } = await import('../src/mcp/shell.ts');
 const { _resetForTests } = await import('../src/challenges.ts');
 const { _resetForTests: resetDedupe, LOOP_LIMIT } = await import('../src/dedupe.ts');
 const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
@@ -78,10 +78,10 @@ async function connect() {
 }
 const call = (client, name, args = {}) => client.callTool({ name, arguments: args });
 
-test('the tool list is the documented 29, all with object schemas', async () => {
+test('the tool list is the documented 35, all with object schemas', async () => {
   fakeOs();
   const { tools } = await (await connect()).listTools();
-  assert.equal(tools.length, 29);
+  assert.equal(tools.length, 35);
   assert.deepEqual(tools.map((t) => t.name).sort(), [...TOOL_NAMES].sort());
   assert.ok(tools.every((t) => t.inputSchema.type === 'object'));
   assert.equal(tools.find((t) => t.name === 'stop_process').annotations.destructiveHint, true);
@@ -461,4 +461,366 @@ test('overview details carry the viewport profile and the color mode', async () 
   const o = (await call(await connect(), 'get_shell_overview')).structuredContent;
   assert.equal(o.details.viewport, 'hello world');
   assert.equal(o.details.colorMode, 'auto');
+});
+
+// ── Notifications ───────────────────────────────────────────────────────────
+
+const NID = 'ntf_0mvjsabcd12345678';
+function notif(over = {}) {
+  return {
+    id: NID, type: 'dialogue', title: 'Deploy?', text: '', priority: 'medium', visibility: 'private', pinned: false, popup: false,
+    state: 'active', senderKey: 'app:com.aura.aurashelld', createdAt: 1_800_000_000_000, updatedAt: 1_800_000_000_000,
+    sender: { kind: 'agent', id: 'com.aura.aurashelld', attribution: 'verified' }, history: [], ...over,
+  };
+}
+
+/** Script the notification routes; records method, path, query, headers and body. */
+function fakeNotifOs(handler) {
+  resetDedupe();
+  const calls = [];
+  setFetch(async (input, init = {}) => {
+    const url = new URL(String(input));
+    const method = init.method ?? 'GET';
+    const body = init.body ? JSON.parse(init.body) : null;
+    const headers = Object.fromEntries(Object.entries(init.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]));
+    const rec = { method, path: url.pathname, query: Object.fromEntries(url.searchParams), headers, body };
+    calls.push(rec);
+    const [status, data] = await handler(rec);
+    return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
+  });
+  return calls;
+}
+
+test('notification tools: Bearer only on notification calls; agent name forwarded as sender.actor; downgrade warnings reach the agent', async () => {
+  process.env.AURA_INSTANCE_TOKEN = 'aura1.test.token';
+  try {
+    const calls = fakeNotifOs(({ method, path }) => {
+      if (method === 'POST' && path === '/api/notifications') {
+        return [201, { ok: true, notification: notif({ sender: { kind: 'agent', id: 'com.aura.aurashelld', attribution: 'verified', actor: { name: 'tester', attribution: 'declared' } } }),
+          warnings: [{ code: 'downgraded', field: 'popup', from: true, to: false, message: "popup requires the 'notifications.popup' permission … not granted" }] }];
+      }
+      if (path === '/api/apps') return [200, apps];
+      return [404, { error: 'unscripted' }];
+    });
+    const client = await connect();
+    const r = await call(client, 'create_notification', {
+      type: 'dialogue', title: 'Deploy?', popup: true, agent: 'tester',
+      components: [{ kind: 'button', id: 'yes', label: 'Deploy', variant: 'primary', action: 'resolve' }],
+      context: { kind: 'task', id: 'deploy-42', label: 'Release' },
+    });
+    assert.equal(r.isError, undefined);
+    const sc = r.structuredContent;
+    assert.match(sc.summary, /DOWNGRADED \(popup: true → false\)/);
+    assert.equal(sc.warnings[0].code, 'downgraded');
+    assert.equal(sc.notification.sender.attribution, 'verified');
+    assert.deepEqual(sc.notification.sender.actor, { name: 'tester', attribution: 'declared' });
+    assert.match(sc.next, /wait_for_answer/);
+    const post = calls.find((c) => c.method === 'POST');
+    assert.equal(post.headers.authorization, 'Bearer aura1.test.token');
+    assert.deepEqual(post.body.sender, { actor: { name: 'tester' } });
+    assert.deepEqual(post.body.context, { kind: 'task', id: 'deploy-42', label: 'Release' });
+    assert.equal('agent' in post.body, false, 'agent is not a notification field');
+    // other routes stay token-less
+    await call(client, 'list_apps');
+    assert.ok(calls.filter((c) => c.path === '/api/apps').every((c) => c.headers.authorization === undefined));
+  } finally { delete process.env.AURA_INSTANCE_TOKEN; }
+});
+
+test('notification tools: no instance token → a clear refusal, nothing sent anonymously', async () => {
+  delete process.env.AURA_INSTANCE_TOKEN;
+  const calls = fakeNotifOs(() => [201, { notification: notif(), warnings: [] }]);
+  const r = await call(await connect(), 'create_notification', { title: 'x' });
+  assert.equal(r.isError, true);
+  assert.match(r.content[0].text, /AURA_INSTANCE_TOKEN/);
+  assert.equal(calls.length, 0);
+});
+
+test('wait_for_answer: bounded long-poll; pending → call again; resolved carries the answer; never deduplicated', async () => {
+  process.env.AURA_INSTANCE_TOKEN = 'tok';
+  try {
+    let resolved = false;
+    const calls = fakeNotifOs(({ path, query }) => {
+      if (path === `/api/notifications/${NID}`) return [200, resolved ? notif({ state: 'resolved', answer: { button: 'yes' } }) : notif()];
+      return [404, {}];
+    });
+    const client = await connect();
+    const p = await call(client, 'wait_for_answer', { id: NID, timeoutSeconds: 3 });
+    assert.equal(p.structuredContent.status, 'pending');
+    assert.match(p.structuredContent.next, /call wait_for_answer/);
+    assert.deepEqual(calls[0].query, { waitFor: 'resolved', timeout: '3' });
+    assert.equal(calls[0].headers.authorization, 'Bearer tok');
+    resolved = true;
+    // the same call right away must NOT be absorbed — it is a new wait
+    const r = await call(client, 'wait_for_answer', { id: NID, timeoutSeconds: 3 });
+    assert.equal(r.structuredContent.status, 'resolved');
+    assert.deepEqual(r.structuredContent.answer, { button: 'yes' });
+    assert.equal(r.structuredContent.deduplicated, undefined);
+    // default 20 s, capped at 25
+    await call(client, 'wait_for_answer', { id: NID });
+    assert.equal(calls.at(-1).query.timeout, '20');
+    const tooLong = await call(client, 'wait_for_answer', { id: NID, timeoutSeconds: 60 });
+    assert.equal(tooLong.isError, true);
+    // repeated waits never trip the read-loop brake
+    for (let i = 0; i < 6; i++) assert.equal((await call(client, 'wait_for_answer', { id: NID, timeoutSeconds: 0 })).structuredContent.status, 'resolved');
+  } finally { delete process.env.AURA_INSTANCE_TOKEN; }
+});
+
+test('wait_for_answer interactions: returns a click while open, pins the baseline, and next carries after', async () => {
+  process.env.AURA_INSTANCE_TOKEN = 'tok';
+  try {
+    let li = { componentId: 'ping', kind: 'button', at: 1000, actor: {} };
+    const calls = fakeNotifOs(({ path, query }) => {
+      if (path !== `/api/notifications/${NID}`) return [404, {}];
+      if (query.waitFor === 'interaction' && Number(query.after) < 2000) li = { componentId: 'note', kind: 'input', value: 'hi', at: 2000, actor: {} };
+      return [200, notif({ lastInteraction: li })];
+    });
+    const client = await connect();
+    const r = await call(client, 'wait_for_answer', { id: NID, timeoutSeconds: 3, interactions: true });
+    assert.equal(calls[0].query.waitFor, undefined, 'a plain get first fixes the baseline');
+    assert.deepEqual(calls[1].query, { waitFor: 'interaction', after: '1000', timeout: '3' });
+    const sc = r.structuredContent;
+    assert.equal(sc.status, 'interaction');
+    assert.deepEqual(sc.interaction, { componentId: 'note', kind: 'input', value: 'hi', at: 2000 });
+    assert.match(sc.next, /after: 2000/);
+    assert.equal(sc.notification.lastInteraction.at, 2000);
+    const p = await call(client, 'wait_for_answer', { id: NID, timeoutSeconds: 0, interactions: true, after: 2000 });
+    assert.equal(p.structuredContent.status, 'pending');
+    assert.match(p.structuredContent.next, /interactions: true, after: 2000/);
+    assert.equal(calls.at(-1).query.after, '2000');
+    const bad = await call(client, 'wait_for_answer', { id: NID, after: 5 });
+    assert.equal(bad.isError, true);
+  } finally { delete process.env.AURA_INSTANCE_TOKEN; }
+});
+
+test('notification tools: blocking / scope are forwarded; their downgrade reaches the agent; force-removed is reported', async () => {
+  process.env.AURA_INSTANCE_TOKEN = 'tok';
+  try {
+    const calls = fakeNotifOs(({ method, path }) => {
+      if (method === 'POST' && path === '/api/notifications') {
+        return [201, { ok: true, notification: notif({ blocking: false, scope: 'auto' }), warnings: [
+          { code: 'downgraded', field: 'blocking', from: true, to: false, message: "blocking only applies to the sender's own window: agents cannot block a window" },
+          { code: 'downgraded', field: 'scope', from: 'system', to: 'auto', message: 'desktop-wide dialogues are reserved for AuraOS system decisions' },
+        ] }];
+      }
+      if (path === `/api/notifications/${NID}`) return [200, notif({ type: 'locked', state: 'removed', removedReason: 'force-removed' })];
+      return [404, {}];
+    });
+    const client = await connect();
+    const r = await call(client, 'create_notification', {
+      type: 'dialogue', title: 'Deploy?', blocking: true, scope: 'system', context: { kind: 'activity', id: 'x#a1' },
+    });
+    assert.equal(calls[0].body.blocking, true);
+    assert.equal(calls[0].body.scope, 'system');
+    const sc = r.structuredContent;
+    assert.match(sc.summary, /blocking: true → false/);
+    assert.match(sc.summary, /scope: system → auto/);
+    assert.ok(sc.warnings.some((w) => /reserved for AuraOS/.test(w.message)));
+    assert.equal(sc.notification.blocking, undefined, 'not blocking → omitted from the view');
+    const w = await call(client, 'wait_for_answer', { id: NID, timeoutSeconds: 0 });
+    assert.equal(w.structuredContent.status, 'removed');
+    assert.equal(w.structuredContent.removedReason, 'force-removed');
+    const g = await call(client, 'get_notification', { id: NID });
+    assert.equal(g.structuredContent.notification.removedReason, 'force-removed');
+  } finally { delete process.env.AURA_INSTANCE_TOKEN; }
+});
+
+test('notification tools: select / combobox components are forwarded; > 50 options refused', async () => {
+  process.env.AURA_INSTANCE_TOKEN = 'tok';
+  try {
+    const calls = fakeNotifOs(({ method, path }) => {
+      if (method === 'POST' && path === '/api/notifications') return [201, { ok: true, notification: notif({ type: 'dialogue' }), warnings: [] }];
+      return [404, {}];
+    });
+    const client = await connect();
+    const opts = Array.from({ length: 50 }, (_, i) => ({ id: `o${i}`, label: `O ${i}` }));
+    const components = [
+      { kind: 'select', id: 'region', label: 'Region', required: true, default: 'o1', options: opts },
+      { kind: 'combobox', id: 'owner', allowCustom: true, options: [] },
+    ];
+    const r = await call(client, 'create_notification', { type: 'dialogue', title: 'Where?', components });
+    assert.equal(r.isError, undefined);
+    assert.deepEqual(calls[0].body.components, components);
+    const tooMany = await call(client, 'create_notification', { type: 'dialogue', title: 'x', components: [{ kind: 'select', id: 's', options: [...opts, { id: 'z', label: 'Z' }] }] });
+    assert.equal(tooMany.isError, true);
+    assert.equal(calls.length, 1, 'refused before sending');
+  } finally { delete process.env.AURA_INSTANCE_TOKEN; }
+});
+
+test('notification tools: markdown components (reports) are forwarded; > 2, > 64 KB or a bad maxHeight are refused before sending', async () => {
+  process.env.AURA_INSTANCE_TOKEN = 'tok';
+  try {
+    const calls = fakeNotifOs(({ method, path }) => {
+      if (method === 'POST' && path === '/api/notifications') return [201, { ok: true, notification: notif({ type: 'dialogue' }), warnings: [] }];
+      return [404, {}];
+    });
+    const client = await connect();
+    const tools = (await client.listTools()).tools;
+    const create = tools.find((t) => t.name === 'create_notification');
+    assert.match(create.description, /markdown/);
+    assert.match(JSON.stringify(create.inputSchema), /"markdown"/);
+    assert.match(JSON.stringify(tools.find((t) => t.name === 'update_notification').inputSchema), /"markdown"/);
+    const components = [
+      { kind: 'markdown', id: 'report', label: 'Report', text: '# Done\n\n' + 'x'.repeat(60_000), view: 'rendered', maxHeight: 'auto' },
+      { kind: 'markdown', id: 'notes', text: '- a', editable: true, required: true, maxHeight: 400 },
+    ];
+    const r = await call(client, 'create_notification', { type: 'dialogue', title: 'Report', components });
+    assert.equal(r.isError, undefined);
+    assert.deepEqual(calls[0].body.components, components);
+    for (const bad of [
+      ['a', 'b', 'c'].map((id) => ({ kind: 'markdown', id, text: 't' })),
+      [{ kind: 'markdown', id: 'm', text: 'x'.repeat(65_537) }],
+      [{ kind: 'markdown', id: 'm', text: 't', maxHeight: 20 }],
+      [{ kind: 'markdown', id: 'm', text: 't', view: 'html' }],
+    ]) assert.equal((await call(client, 'create_notification', { type: 'dialogue', title: 'x', components: bad })).isError, true);
+    assert.equal(calls.length, 1, 'refused before sending');
+  } finally { delete process.env.AURA_INSTANCE_TOKEN; }
+});
+
+test('notification tools: maximized is forwarded on create and update', async () => {
+  process.env.AURA_INSTANCE_TOKEN = 'tok';
+  try {
+    const calls = fakeNotifOs(({ method, path }) => {
+      if (method === 'POST' && path === '/api/notifications') return [201, { ok: true, notification: notif({ type: 'dialogue', maximized: true }), warnings: [] }];
+      if (method === 'PATCH') return [200, { ok: true, notification: notif({ type: 'dialogue' }), warnings: [] }];
+      return [404, {}];
+    });
+    const client = await connect();
+    const tools = (await client.listTools()).tools;
+    for (const name of ['create_notification', 'update_notification']) {
+      assert.match(JSON.stringify(tools.find((t) => t.name === name).inputSchema.properties.maximized), /maximized \(e\.g\. long markdown reports\)/);
+    }
+    const r = await call(client, 'create_notification', { type: 'dialogue', title: 'Report', maximized: true, components: [{ kind: 'markdown', id: 'r', text: '# x' }] });
+    assert.equal(calls[0].body.maximized, true);
+    assert.equal(r.structuredContent.notification.maximized, true);
+    await call(client, 'update_notification', { id: NID, maximized: false });
+    assert.equal(calls[1].body.maximized, false);
+  } finally { delete process.env.AURA_INSTANCE_TOKEN; }
+});
+
+test('notification tools: options display + descriptions are forwarded; mismatches refused before sending', async () => {
+  process.env.AURA_INSTANCE_TOKEN = 'tok';
+  try {
+    const calls = fakeNotifOs(({ method, path }) => {
+      if (method === 'POST' && path === '/api/notifications') return [201, { ok: true, notification: notif({ type: 'dialogue' }), warnings: [] }];
+      return [404, {}];
+    });
+    const client = await connect();
+    const radio = { kind: 'options', id: 'when', display: 'radio', options: Array.from({ length: 8 }, (_, i) => ({ id: `o${i}`, label: `O${i}`, description: `about ${i}` })) };
+    const r = await call(client, 'create_notification', { type: 'dialogue', title: 'When?', components: [radio] });
+    assert.equal(r.isError, undefined);
+    assert.deepEqual(calls[0].body.components, [radio]);
+    for (const bad of [
+      { kind: 'options', id: 'x', options: radio.options.slice(0, 5) },                         // segmented > 4
+      { kind: 'options', id: 'x', multiple: true, display: 'radio', options: radio.options.slice(0, 2) },
+      { kind: 'options', id: 'x', display: 'checkbox', options: radio.options.slice(0, 2) },
+    ]) assert.equal((await call(client, 'create_notification', { type: 'dialogue', title: 'x', components: [bad] })).isError, true);
+    assert.equal(calls.length, 1);
+  } finally { delete process.env.AURA_INSTANCE_TOKEN; }
+});
+
+test('notification tools: role buttons are forwarded; wait_for_answer / get_notification report the outcome', async () => {
+  process.env.AURA_INSTANCE_TOKEN = 'tok';
+  try {
+    let cancelled = true;
+    const calls = fakeNotifOs(({ method, path }) => {
+      if (method === 'POST' && path === '/api/notifications') return [201, { ok: true, notification: notif(), warnings: [] }];
+      if (path === `/api/notifications/${NID}`) {
+        return [200, cancelled
+          ? notif({ state: 'resolved', outcome: 'cancelled', answer: { outcome: 'cancelled', buttonId: 'cancel' } })
+          : notif({ state: 'resolved', answer: { buttonId: 'yes' } })];
+      }
+      return [404, {}];
+    });
+    const client = await connect();
+    await call(client, 'create_notification', { type: 'dialogue', title: 'Deploy?', components: [{ kind: 'button', role: 'cancel', label: 'No thanks' }, { kind: 'button', role: 'submit' }] });
+    assert.deepEqual(calls[0].body.components, [{ kind: 'button', role: 'cancel', label: 'No thanks' }, { kind: 'button', role: 'submit' }]);
+    const w = await call(client, 'wait_for_answer', { id: NID, timeoutSeconds: 0 });
+    assert.equal(w.structuredContent.status, 'resolved');
+    assert.equal(w.structuredContent.outcome, 'cancelled');
+    assert.match(w.structuredContent.summary, /Cancelled by the user/);
+    cancelled = false;
+    const g = await call(client, 'get_notification', { id: NID });
+    assert.equal(g.structuredContent.notification.outcome, 'submitted');
+  } finally { delete process.env.AURA_INSTANCE_TOKEN; }
+});
+
+test('notification tools: update / remove / list / get; 403 + 404 come back readable', async () => {
+  process.env.AURA_INSTANCE_TOKEN = 'tok';
+  try {
+    const calls = fakeNotifOs(({ method, path }) => {
+      if (path === '/api/notifications/ntf_0mvjsforbidden000') return [403, { error: 'a verified sender may only change its own notifications' }];
+      if (method === 'PATCH') return [200, { notification: notif({ title: 'Deploy 1.4?' }), warnings: [] }];
+      if (method === 'POST' && path.endsWith('/remove')) return [200, notif({ state: 'removed', removedReason: 'completed' })];
+      if (method === 'GET' && path === '/api/notifications') return [200, { items: [notif(), notif({ id: 'ntf_0mvjsabcd99999999', state: 'resolved', answer: 'ok' })] }];
+      if (path === '/api/notifications/ntf_0mvjsmissing00000') return [404, { error: 'notification not found' }];
+      return [200, notif()];
+    });
+    const client = await connect();
+    const u = await call(client, 'update_notification', { id: NID, title: 'Deploy 1.4?', components: [{ kind: 'progress', value: 0.5 }], agent: 'tester' });
+    assert.equal(u.structuredContent.notification.title, 'Deploy 1.4?');
+    assert.deepEqual(calls[0].body, { title: 'Deploy 1.4?', components: [{ kind: 'progress', value: 0.5 }], sender: { actor: { name: 'tester' } } });
+    const l = await call(client, 'list_notifications', { state: 'all' });
+    assert.equal(l.structuredContent.notifications.length, 2);
+    assert.equal(l.structuredContent.notifications[1].answer, 'ok');
+    assert.equal((await call(client, 'get_notification', { id: NID })).structuredContent.notification.state, 'active');
+    const rm = await call(client, 'remove_notification', { id: NID });
+    assert.equal(rm.structuredContent.notification.removedReason, 'completed');
+    assert.ok(calls.every((c) => c.headers.authorization === 'Bearer tok'));
+    const missing = await call(client, 'get_notification', { id: 'ntf_0mvjsmissing00000' });
+    assert.equal(missing.isError, true);
+    assert.match(missing.content[0].text, /No such notification/);
+    const forbidden = await call(client, 'update_notification', { id: 'ntf_0mvjsforbidden000', title: 'x' });
+    assert.equal(forbidden.isError, true);
+    assert.match(forbidden.content[0].text, /Refused: a verified sender may only change its own/);
+    const bad = await call(client, 'get_notification', { id: 'not-an-id' });
+    assert.equal(bad.isError, true);
+  } finally { delete process.env.AURA_INSTANCE_TOKEN; }
+});
+
+test('the display actor falls back to x-aura-agent, then user-agent; the argument wins', async () => {
+  assert.equal(agentFromHeaders({ 'x-aura-agent': 'Claude Code', 'user-agent': 'node' }), 'Claude Code');
+  assert.equal(agentFromHeaders({ 'user-agent': 'codex/1.0' }), 'codex/1.0');
+  assert.equal(agentFromHeaders({}), undefined);
+  assert.equal(agentFromHeaders(undefined), undefined);
+
+  // Through the real HTTP route: the header reaches sender.actor.
+  process.env.AURA_INSTANCE_TOKEN = 'tok';
+  try {
+    const calls = fakeNotifOs(() => [201, { notification: notif(), warnings: [] }]);
+    const { createMcpRoute } = await import('../src/mcp/serve.ts');
+    const route = createMcpRoute(buildShellServer);
+    const rpc = (body) => route({ request: new Request('http://svc/api/mcp/shell', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'x-aura-agent': 'header-agent' },
+      body: JSON.stringify(body),
+    }) });
+    const init = await rpc({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } } });
+    assert.equal(init.status, 200);
+    const res = await rpc({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'create_notification', arguments: { title: 'via http' } } });
+    assert.equal(res.status, 200);
+    assert.deepEqual(calls.at(-1).body.sender, { actor: { name: 'header-agent' } });
+    await rpc({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'create_notification', arguments: { title: 'arg wins', agent: 'arg-agent' } } });
+    assert.deepEqual(calls.at(-1).body.sender, { actor: { name: 'arg-agent' } });
+  } finally { delete process.env.AURA_INSTANCE_TOKEN; }
+});
+
+test('notification tools: popupDurationMs is forwarded on create and update (null = default)', async () => {
+  process.env.AURA_INSTANCE_TOKEN = 'tok';
+  try {
+    const calls = fakeNotifOs(({ method, path }) => {
+      if (method === 'POST' && path === '/api/notifications') return [201, { ok: true, notification: notif({ popupDurationMs: -1 }), warnings: [] }];
+      if (method === 'PATCH' && path === `/api/notifications/${NID}`) return [200, { notification: notif({}), warnings: [] }];
+      return [404, {}];
+    });
+    const client = await connect();
+    const r = await call(client, 'create_notification', { title: 'Sticky', popupDurationMs: -1 });
+    assert.equal(r.isError, undefined);
+    assert.equal(calls[0].body.popupDurationMs, -1);
+    await call(client, 'update_notification', { id: NID, popupDurationMs: 5000 });
+    assert.equal(calls.at(-1).body.popupDurationMs, 5000);
+    await call(client, 'update_notification', { id: NID, popupDurationMs: null });
+    assert.equal(calls.at(-1).body.popupDurationMs, null);
+    const bad = await call(client, 'create_notification', { title: 'x', popupDurationMs: 90_000_000 });
+    assert.equal(bad.isError, true, 'over 24 h is refused by the tool schema');
+  } finally { delete process.env.AURA_INSTANCE_TOKEN; }
 });

@@ -17,6 +17,7 @@ import { enterSidecar } from '../lib/enter-sandbox.js';
 import { BACK, PromptCancelled, promptConfirm, promptMultiSelect } from '../lib/prompts.js';
 import { parseOutput, renderDocument, renderObjects, type OutputFormat } from '../lib/output.js';
 import { ownersOf, resolveInstance, resolveSidecar } from '../lib/resolve.js';
+import { reportRestart, type RestartResult } from './app.js';
 import {
   RESOURCES, fetchApps, findResource, fetchSidecars, liveInstances, resourcesFor, shortName, sidecarId, sidecarMatches,
   type Ctx, type MountDto, type PortDto, type ResourceDef,
@@ -336,11 +337,13 @@ async function startInstance(token: string): Promise<void> {
   fail(`no instance '${token}' — stopped instances are gone; start the app again with: aura run <app>`);
 }
 
-/** Stop an instance and start a fresh one of its app (a multi-instance app gets a new id). */
+/**
+ * Stop an instance, start a fresh one of its app (a multi-instance app gets a
+ * new id) and reopen the instance's windows on it where they were.
+ */
 async function restartInstance(token: string): Promise<void> {
   const inst = await resolveInstance(token);
-  await dispatch(['inst', 'stop', inst.instanceId]);
-  await dispatch(['app', 'start', inst.appId]);
+  reportRestart(await api.post<RestartResult>(`/api/instances/${encodeURIComponent(inst.instanceId)}/restart`));
 }
 
 /**
@@ -473,7 +476,7 @@ export function registerVerbs(program: Command): void {
 
   program
     .command('restart <resource> <names...>')
-    .description('Restart apps (all instances → one fresh), single instances, or services.')
+    .description('Restart apps (all instances → one fresh), single instances, or services. Open windows come back on the same workspace, slot and path.')
     .addHelpText('after', resourcesLine('restart') + examples([
       'aura restart app com.aura.notepad',
       'aura restart inst com.aura.terminal-13   # stop it, start a fresh instance of its app',
@@ -647,20 +650,26 @@ export function registerVerbs(program: Command): void {
     .option('-i, --interactive', 'caps: open the picker even when names are given')
     .option('--template <tpl>', "caps: to a services[] template of the app (persistent; capped at the app's tools)")
     .option('--sidecar <name>', 'caps: to one running OS sidecar of <inst|app> (runtime; inside the app)')
+    .option('--scope <scope>', "nperm read: which senders — app:<appId>, sender:<senderKey> (comma-separated) or all")
+    .option('--include-secret', 'nperm read: secret notifications too')
     .addHelpText('after', resourcesLine('grant') + examples([
       'aura grant perms com.aura.terminal apps.mount',
+      'aura grant nperm com.example.dash read --scope app:com.example.notes   # read another app\'s notifications',
       'aura grant caps com.example.hello ripgrep jq',
       'aura grant caps com.example.hello git --template worker    # every worker sidecar',
       'aura grant caps com.example.hello git --sidecar worker-7   # one running sidecar',
       'aura grant perms                                 # interactive',
     ]))
-    .action(async (resource: string, app: string | undefined, names: string[], opts: { interactive?: boolean; template?: string; sidecar?: string }) => {
+    .action(async (resource: string, app: string | undefined, names: string[], opts: { interactive?: boolean; template?: string; sidecar?: string; scope?: string; includeSecret?: boolean }) => {
       const def = resourceOrFail(resource, 'grant');
       const target = targetedCaps(def, 'grant', app, names, opts);
       if (target === 'template') return dispatch(['cap', 'grant', app!, ...names, '--template', opts.template!]);
       if (target === 'sidecar') return sidecarToolsCmd('grant', app!, opts.sidecar!, names);
       const rest = [...(app ? [app] : []), ...names];
       if (def.name === 'permissions') return dispatch(['app', 'perm', 'grant', ...rest]);
+      if (def.name === 'notif-perms') {
+        return dispatch(['admin', 'grant', ...rest, ...(opts.scope ? ['--scope', opts.scope] : []), ...(opts.includeSecret ? ['--include-secret'] : [])]);
+      }
       if (def.name === 'capabilities') return dispatch(['cap', 'grant', ...rest, ...(opts.interactive ? ['-i'] : [])]);
       unsupported('grant', def);
     });
@@ -682,6 +691,7 @@ export function registerVerbs(program: Command): void {
       if (target === 'template') return dispatch(['cap', 'revoke', app, ...names, '--template', opts.template!]);
       if (target === 'sidecar') return sidecarToolsCmd('revoke', app, opts.sidecar!, names);
       if (def.name === 'permissions') return dispatch(['app', 'perm', 'revoke', app, ...names]);
+      if (def.name === 'notif-perms') return dispatch(['admin', 'revoke', app, ...names]);
       if (def.name === 'capabilities') return dispatch(['cap', 'revoke', app, ...names]);
       unsupported('revoke', def);
     });

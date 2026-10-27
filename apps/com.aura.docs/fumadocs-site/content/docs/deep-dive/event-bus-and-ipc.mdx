@@ -18,7 +18,7 @@ Source of truth:
 - postMessage protocol: read each `type` constant; canonical senders
   are the proxy inject scripts in `packages/shell/src/pages/api/proxy/[id]/[...path].ts`.
 
-## The 20 events
+## The events
 
 ```
 app:stateChanged           { instanceId, appId, state, port|null }
@@ -38,7 +38,14 @@ theme:changed              { themeId, themeName, themeIdDark, themeIdLight,
                               colorMode, resolvedMode, activeTone, framework }
 mode:changed               { themeId, themeIdDark, themeIdLight, colorMode,
                               resolvedMode, activeTone, framework }
-notification               { appId, title, body }
+notification:created       { eventId, id, state }
+notification:updated       { eventId, id, state }
+notification:displayed     { eventId, id, state }
+notification:seen          { eventId, id, state }
+notification:resolved      { eventId, id, state }
+notification:removed       { eventId, id, state }
+notification:interacted    { eventId, id, state }
+permissions:changed        { subjectKind, subjectId, permission, change }
 workspaces:changed         { workspaces[], activeWorkspaceId }
 workspace:activated        { workspaceId }
 kv:changed                 { namespace, key, value|null }
@@ -51,6 +58,76 @@ nexus:publish.complete     { id?, ref }
 The shape is exhaustively typed via the `OsEvents` interface; emitting
 a payload that doesn't match the declared shape fails at TypeScript
 compile time.
+
+### Notification events
+
+The `notification:*` events come from the notification store
+(`packages/core/src/notifications/`). They carry **no content**: only the
+notification `id`, its new `state` (`active` | `resolved` | `removed`) and
+`eventId`, the id of the matching entry in the Valkey stream
+`notif:events`.
+
+- They are relayed on the shell's Socket.IO channel (`lib/osEvents.ts`)
+  for the shell UI. A socket tells the shell its tab's client session
+  (handshake `auth.cs`, then `cs` messages); while that session is locked
+  or unknown, events of items that are hidden on the lock screen (secret)
+  are left out for that socket.
+- They are **not** on the app firehose `/api/apps/events`, so other apps
+  can't follow notifications.
+- To get full items, use `GET /api/notifications/<id>`, or the dedicated
+  SSE feed `GET /api/notifications/stream`:
+  - Each frame is `id: <eventId>` plus
+    `data: {type:"notification:<event>", eventId, event, id, state, notification}`.
+    `notification` is the item's current state.
+  - Send `Last-Event-ID` (or `?since=<eventId>`) to replay every event after
+    that id, then the feed continues live.
+  - If the id is unknown or older than the trimmed stream (about 10 000
+    entries are kept), the feed sends `{type:"reset", eventId}`. Reload with
+    `GET /api/notifications` and continue from that `eventId`.
+  - Heartbeat every 10 s.
+  - The feed follows the same read rules as `GET /api/notifications`, for
+    the catch-up and for live events:
+    - an app backend (`Authorization: Bearer $AURA_INSTANCE_TOKEN`) or an
+      API key gets its own notifications, plus other senders' only with an
+      admin-granted, scoped `notifications.read`;
+    - a shell screen (`?cs=<client session>`, since EventSource can't send
+      headers) gets every item in the view of its lock state, re-checked per
+      event: while locked, private items arrive redacted and secret ones are
+      skipped;
+    - a caller without credentials and without a client session gets
+      nothing (only heartbeats).
+
+`notification:interacted` fires when the user uses a component without
+ending the notification: a button that has no `action`, an input submit, or
+an options choice (`POST /api/notifications/<id>/interact` with
+`{componentId, value?, values?}`). The notification stays `active`. The
+item then carries `lastInteraction {componentId, kind, value?, values?, at,
+actor}`, and its history gets an `interacted` entry (`{componentId, kind}`
+only). Buttons with `action: 'resolve'` resolve the notification instead,
+with the answer `{buttonId, values}`.
+
+The shell UI (`lib/notifications/store.ts`) reloads the active list after
+every reconnect of the Socket.IO channel (`osEvents.onReconnect`), because
+events emitted while it was disconnected are not replayed. Before it
+reloads, it re-syncs its client session's lock state, so the reload comes
+back in the right view.
+
+The legacy `notification` event (`{appId, title, body}`) has been removed
+(no compatibility layer): it sent every notification's title and text,
+secret ones included, to every app. Apps read their own notifications
+through `/api/notifications`, or other senders' with a scoped
+`notifications.read` grant.
+
+### Permission events
+
+`permissions:changed` fires when an admin grants or revokes a privileged
+permission (`notifications.locked`, `notifications.popup` and
+`notifications.read`), for
+an app (`subjectKind: "app"`, `subjectId: <appId>`) or an API key
+(`subjectKind: "apiKey"`). `change` is `granted` or `revoked`. It carries
+no secrets. The change takes effect on the very next request; nothing has
+to restart. The event is relayed on the shell's Socket.IO channel, not on
+the app firehose.
 
 ## Why globalThis pinning
 
@@ -81,8 +158,8 @@ Rules:
 - `[]` empty list → matches nothing.
 - absent param → "firehose" (no filter, every event).
 
-Why this matters: a noisy subscriber that filters `notification` only
-should pass `?topics=notification` — the SSE endpoint never serialises
+Why this matters: a noisy subscriber that filters `app:*` only
+should pass `?topics=app:*` — the SSE endpoint never serialises
 events that don't match, so per-event cost is one regex test, not a
 JSON encode.
 

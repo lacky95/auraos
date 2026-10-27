@@ -24,6 +24,25 @@ Then `docker compose up -d` and open `http://localhost:3030`. App
 instances bind container-internal ports (4000+) only, so no other
 ports need changing.
 
+## `pull access denied for aura-base`
+
+Container apps fail to start with `docker run failed … pull access
+denied for aura-base, repository does not exist or may require 'docker
+login'`. It isn't a login problem: `aura-base` is never published, it is
+built locally from the `aura-base` stage of the `Dockerfile`, and Docker
+tried to pull it because it was missing.
+
+`docker compose up` builds it, and a running shell builds it by itself
+when it is missing (the **Setting up AuraOS** notification). To check or
+build it by hand:
+
+```sh
+curl -s localhost:3000/api/admin/first-boot          # phase, progress, error
+curl -s 'localhost:3000/api/admin/first-boot?log=1'  # build log
+curl -s -X POST localhost:3000/api/admin/first-boot  # retry a failed build
+docker compose build aura-base                       # on the host
+```
+
 ## App's iframe stuck on the boot skeleton
 
 The slot shows the loading pattern but the app never paints. Check

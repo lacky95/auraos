@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync, chmodSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, normalize, dirname, resolve } from 'node:path';
 import { getAppManager } from '@aura/core';
+import { auditAdmin, requireAdmin } from '../../../lib/auth.js';
 
 /**
  * Server-side app scaffolding.
@@ -102,6 +103,14 @@ export const POST: APIRoute = async ({ request }) => {
   const dest = join(appsDir, appId);
   if (existsSync(dest) && !force) {
     return json({ error: 'exists', message: `${dest} already exists. Pass force=true to overwrite.` }, 409);
+  }
+  // Overwriting an EXISTING app replaces the code that runs under its id —
+  // and with it whatever was granted to that id. That needs an admin session.
+  // Creating a new app does not.
+  if (existsSync(dest) && force) {
+    const admin = await requireAdmin(request);
+    if (admin instanceof Response) return admin;
+    await auditAdmin(admin, 'app.scaffold-overwrite', { target: `app:${appId}`, detail: { scope } });
   }
 
   // Path traversal guard: every file's resolved path must stay under the

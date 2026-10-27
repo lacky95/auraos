@@ -11,11 +11,53 @@ export interface EventFramework {
   version: string;
 }
 
+/** Payload of every `notification:*` bus event. */
+export interface NotificationBusEvent {
+  /** `notif:events` stream id (`<ms>-<seq>`) — the SSE `id` / Last-Event-ID. */
+  eventId: string;
+  /** Notification id (`ntf_…`). */
+  id: string;
+  state: 'active' | 'resolved' | 'removed';
+}
+
+/** Every `notification:*` bus event name, in lifecycle order. */
+export const NOTIFICATION_BUS_EVENTS = [
+  'notification:created', 'notification:updated', 'notification:displayed',
+  'notification:seen', 'notification:resolved', 'notification:removed',
+  'notification:interacted',
+] as const;
+export type NotificationBusEventName = typeof NOTIFICATION_BUS_EVENTS[number];
+
 export interface OsEvents {
   'app:stateChanged': { instanceId: string; appId: string; state: AppLifecycleState; port: number | null };
   'app:crashed': { instanceId: string; appId: string; error: string };
   /** The set of sidecars attached to an instance changed (appeared, vanished, or changed state). */
   'app:sidecarsChanged': { instanceId: string; appId: string; count: number };
+  /**
+   * Restart that keeps windows (shell lib/appRestart.ts). `restarting` comes
+   * before the old instances go down, so the desktop keeps their windows as
+   * placeholders; `restarted` maps each old viewId to the new one.
+   */
+  'app:restarting': { appId: string; instanceIds: string[]; viewIds: string[] };
+  'app:restarted': {
+    appId: string;
+    oldInstanceIds: string[];
+    instanceId: string;
+    restored: Array<{
+      from: string;
+      to: string;
+      instanceId: string;
+      activityId?: string;
+      path: string;
+      title?: string;
+      minimizable?: boolean;
+      history?: Array<{ path: string; title?: string }>;
+      breadcrumb?: 'os' | 'off';
+    }>;
+    failed: Array<{ from: string; error: string }>;
+    workspacesUpdated: boolean;
+  };
+  'app:restartFailed': { appId: string; instanceIds: string[]; error: string };
   'app:installed': { appId: string };
   'app:removed': { appId: string };
   /** A user toggled an app's enable state (Settings → Apps or `aura enable/disable app`). */
@@ -78,7 +120,37 @@ export interface OsEvents {
     activeTone:    'light' | 'dark';
     framework:     EventFramework;
   };
-  'notification': { appId: string; title: string; body: string };
+  // (Phase 5: the LEGACY content-carrying `'notification'` broadcast is gone —
+  //  apps read only their own items, or what a `notifications.read` grant allows.)
+  /**
+   * Notification store lifecycle (core `NotificationService`). Deliberately
+   * lightweight — NO content: the id, the new state and the `notif:events`
+   * stream id. Consumers fetch the item (GET /api/notifications/<id>) or use
+   * the dedicated SSE `/api/notifications/stream`, which sends full items.
+   * Relayed on the shell Socket.IO channel only — NOT on the app firehose
+   * (`/api/apps/events`), so other apps can't read notifications. For a
+   * locked shell client the shell also drops events of items that would be
+   * hidden (secret) on its lock screen (per-socket filter).
+   */
+  'notification:created':   NotificationBusEvent;
+  'notification:updated':   NotificationBusEvent;
+  'notification:displayed': NotificationBusEvent;
+  'notification:seen':      NotificationBusEvent;
+  'notification:resolved':  NotificationBusEvent;
+  'notification:removed':   NotificationBusEvent;
+  /** The user used a component (button without action, input, options) — still active. Phase 3. */
+  'notification:interacted': NotificationBusEvent;
+  /**
+   * An admin granted or revoked a privileged permission (core auth
+   * `GrantStore`). No secrets; takes effect on the very next check. Relayed on
+   * the shell Socket.IO channel (Settings refreshes live).
+   */
+  'permissions:changed': {
+    subjectKind: 'app' | 'apiKey';
+    subjectId: string;
+    permission: string;
+    change: 'granted' | 'revoked';
+  };
   /**
    * A command for the shell's browser UI from a server-side caller — the Aura
    * Shell Daemon's MCP, through the shell's uiCommandBroker. Imperative,

@@ -24,6 +24,7 @@ import { registerNexus } from './commands/nexus.js';
 import { registerScope } from './commands/scope.js';
 import { registerSdk } from './commands/sdk.js';
 import { registerVerbs, setProgramFactory } from './commands/verbs.js';
+import { registerAdmin, registerApiKey } from './commands/admin.js';
 import { LEGACY_GROUPS, markLegacy } from './lib/deprecate.js';
 import { color, visibleWidth } from './lib/format.js';
 import { RESOURCES, fetchApps, findResource, liveInstances, shortName } from './lib/resources.js';
@@ -108,6 +109,13 @@ export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]
     ['aura grant|revoke caps … --template <t>', 'Caps of a sidecar template (persistent)'],
     ['aura grant|revoke caps … --sidecar <n>', 'Caps of one running OS sidecar (inside its app)'],
     ['aura cap ...', 'Manage the capability registry'],
+    ['aura grant nperm <app> <locked|popup>', 'Grant Locked / pop-up notifications (admin)'],
+    ['aura grant nperm <app> read --scope app:<id>|sender:<key>|all', "Let an app read other senders' notifications (--include-secret)"],
+    ['aura revoke nperm <app> <locked|popup|read>', 'Revoke them again, takes effect at once'],
+    ['aura get nperm [app]', 'Requested vs granted notification features'],
+    ['aura admin login', 'Unlock admin with the shared credential (--save: 15 min)'],
+    ['aura admin ...', 'logout · status · audit · credential · rotate (master)'],
+    ['aura apikey ...', 'API keys for REST callers: create · ls · revoke (admin)'],
   ] },
   { title: 'Ecosystem & dev', lines: [
     ['aura nexus ...', 'Find, install, update, publish apps'],
@@ -255,6 +263,8 @@ export function buildProgram(): Command {
   registerDev(program);
   registerEvents(program);
   registerData(program);
+  registerAdmin(program);
+  registerApiKey(program);
   // Pre-kubectl groups: registered so they keep working, then hidden.
   registerApp(program);
   registerInst(program);

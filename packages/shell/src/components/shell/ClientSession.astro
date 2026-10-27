@@ -1,0 +1,124 @@
+---
+/**
+ * Shell client session bootstrap (notifications phase 5).
+ *
+ * Registers THIS TAB as a shell client (`POST /api/os/clients`) and keeps
+ * its lock state in sync with the server, so the notification API can
+ * redact for a locked screen on the server, not only in the UI.
+ *
+ *   window.__auraClientSession = {
+ *     sid, lock, desired,         session id, the state the server acked, the state this tab wants
+ *     ready,                      Promise: resolves once registered (or failed)
+ *     headers(),                  {'X-Aura-Client-Session': sid} or {}
+ *     report(lock) → Promise<bool>  'locked' | 'unlocked'; true once the server acked
+ *     sync()   → Promise<bool>    heartbeat with the current state; re-registers
+ *                                 when the server forgot the session
+ *     onChange(fn) → off          fn({sid, lock}) after every acked change
+ *   }
+ *
+ * The sid is kept in sessionStorage (per tab) for diagnostics, but every
+ * page load registers a NEW one, so a duplicated tab (which copies
+ * sessionStorage) never shares its lock state. The sid is NOT a credential:
+ * it only selects the lock-screen view. Unknown / expired sessions read as
+ * locked on the server.
+ *
+ * Deliberately `is:inline` and import-free (like LockScreenOverlay): it must
+ * work in every host even if bundled modules fail to load.
+ */
+---
+<script is:inline>
+  (function () {
+    if (window.__auraClientSession) return;
+    var KEY = 'aura.clientSession';
+    var HEARTBEAT_MS = 25000;
+    var sid = null;
+    var acked = 'locked';         // what the server last confirmed
+    var desired = 'unlocked';     // a fresh page is not locked
+    var listeners = [];
+    var chain = Promise.resolve();
+    var readyResolve;
+    var ready = new Promise(function (r) { readyResolve = r; });
+
+    function store(v) {
+      try { if (v) sessionStorage.setItem(KEY, v); else sessionStorage.removeItem(KEY); } catch (_) { /* private mode */ }
+    }
+    function emit() {
+      for (var i = 0; i < listeners.length; i++) {
+        try { listeners[i]({ sid: sid, lock: acked }); } catch (_) { /* ignore */ }
+      }
+    }
+    function post(path, body, keepalive) {
+      return fetch(path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body || {}),
+        credentials: 'same-origin',
+        keepalive: !!keepalive,
+      });
+    }
+    function apply(res) {
+      return res.json().then(function (j) {
+        if (j && typeof j.sid === 'string') { sid = j.sid; store(sid); }
+        if (j && (j.lock === 'locked' || j.lock === 'unlocked')) acked = j.lock;
+        emit();
+        return true;
+      });
+    }
+    function register() {
+      return post('/api/os/clients', { lock: desired }).then(function (res) {
+        if (!res.ok) throw new Error('register ' + res.status);
+        return apply(res);
+      });
+    }
+    // Send `desired` to the server (re-register when the session is unknown).
+    function push(keepalive) {
+      if (!sid) return register();
+      var path = '/api/os/clients/' + encodeURIComponent(sid) + '/' + (desired === 'locked' ? 'lock' : 'unlock');
+      return post(path, {}, keepalive).then(function (res) {
+        if (res.status === 404) { sid = null; return register(); }
+        if (!res.ok) throw new Error('report ' + res.status);
+        return apply(res);
+      });
+    }
+    function queue(fn) {
+      var p = chain.then(fn).then(function () { return acked === desired; }, function () { return false; });
+      chain = p.then(function () {}, function () {});
+      return p;
+    }
+
+    var api = {
+      get sid() { return sid; },
+      get lock() { return acked; },
+      get desired() { return desired; },
+      ready: ready,
+      headers: function () { return sid ? { 'X-Aura-Client-Session': sid } : {}; },
+      report: function (lock) {
+        desired = lock === 'locked' ? 'locked' : 'unlocked';
+        return queue(function () { return push(desired === 'unlocked'); });
+      },
+      sync: function () {
+        return queue(function () {
+          if (!sid) return register();
+          return post('/api/os/clients/' + encodeURIComponent(sid) + '/heartbeat', { lock: desired }).then(function (res) {
+            if (res.status === 404) { sid = null; return register(); }
+            if (!res.ok) throw new Error('heartbeat ' + res.status);
+            return apply(res);
+          });
+        });
+      },
+      onChange: function (fn) {
+        listeners.push(fn);
+        return function () { listeners = listeners.filter(function (f) { return f !== fn; }); };
+      },
+    };
+    window.__auraClientSession = api;
+
+    // A lock that happens before the bundled modules load still reports.
+    queue(register).then(function () { readyResolve(); }, function () { readyResolve(); });
+    setInterval(function () { api.sync(); }, HEARTBEAT_MS);
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') api.sync();
+    });
+    window.addEventListener('pageshow', function (ev) { if (ev.persisted) api.sync(); });
+  })();
+</script>

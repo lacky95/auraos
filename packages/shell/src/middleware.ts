@@ -1,8 +1,12 @@
 import { defineMiddleware } from 'astro:middleware';
 import { getAppManager, initAppManager, ContextStore, VolumeStore } from '@aura/core';
+// Namespace import: a live reload of this file must not 500 every request
+// when the running shell still caches a core build without the export.
+import * as core from '@aura/core';
 import { kvServer, defaultKv } from '@aura/kv-store';
 import { bootstrapKv } from './lib/kvBootstrap.js';
 import { ensureSdkPublished } from './lib/sdkBootstrap.js';
+import { ensureBaseImageWithNotification } from './lib/baseImageBootstrap.js';
 import { loadCustomInterfaces } from './lib/customInterfaces.js';
 
 // Source of truth is the singleton on globalThis — NOT a module-scoped flag.
@@ -28,6 +32,37 @@ async function ensureAppManager() {
     // first boot; subsequent boots see `os/theme` already in Valkey and
     // skip this entirely. Idempotent.
     await bootstrapKv({ dataDir });
+
+    // Minimal admin auth: make sure the shared operator credential exists
+    // (<dataDir>/aura/secrets/admin.key, 0600, master container only). The
+    // secret itself is NEVER logged — only where to read it.
+    try {
+      const auth = core.getAuthServices?.();
+      const r = auth?.admin.ensure();
+      if (r?.created) {
+        console.log(`[auth] created the AuraOS admin credential at ${r.keyFile} — read it in the master container: \`aura jump -m\`, then \`aura admin credential\``);
+      }
+    } catch (err) {
+      console.warn(`[middleware] admin credential setup failed: ${(err as Error).message}`);
+    }
+
+    // Notifications (store in the same Valkey): start the expiry sweeper.
+    // Idempotent; a failure must never block boot.
+    try {
+      core.getNotificationService?.().start();
+    } catch (err) {
+      console.warn(`[middleware] notification service start failed: ${(err as Error).message}`);
+    }
+
+    // The `aura-base` image every container app runs from. `docker compose up`
+    // builds it; when it is missing anyway, build it in the background with a
+    // progress notification (needs the notification service above). Detached:
+    // the desktop must come up to show it, and container spawns wait for it.
+    try {
+      ensureBaseImageWithNotification(dataDir);
+    } catch (err) {
+      console.warn(`[middleware] base image check failed: ${(err as Error).message}`);
+    }
 
     // Materialise Aura Context (env/secret) files from Valkey BEFORE apps start,
     // so the /run/context volume-subpath mount source exists and holds current

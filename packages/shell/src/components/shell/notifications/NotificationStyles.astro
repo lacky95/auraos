@@ -1,0 +1,703 @@
+---
+/**
+ * Global styles for every notification surface (cards in the list, the
+ * phone sheet and the pop-ups). `is:global` because the cards are built at
+ * runtime by NotificationCard.ts and carry no Astro scope attribute.
+ * House style: square corners, 1px borders, mono font, theme tokens only.
+ */
+---
+<style is:global>
+  .aura-sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  .aura-ntf svg.aura-icon,
+  .notif-center svg.aura-icon {
+    width: 1em; height: 1em; flex-shrink: 0;
+    stroke: currentColor; fill: none; stroke-width: 2;
+    stroke-linecap: round; stroke-linejoin: round;
+    vertical-align: -0.125em;
+  }
+
+  /* ── Card ─────────────────────────────────────────────────────────── */
+  .aura-ntf {
+    --ntf-accent: var(--aura-color-border);
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 10px 10px 12px;
+    background: var(--aura-color-surface);
+    color: var(--aura-color-text);
+    border: 1px solid var(--aura-color-border);
+    border-left: 3px solid var(--ntf-accent);
+    font-family: var(--aura-font-mono);
+    font-size: var(--aura-font-size-xs, 0.75rem);
+    line-height: 1.45;
+    text-align: left;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .aura-ntf[data-priority="high"]   { --ntf-accent: var(--aura-color-warning); }
+  .aura-ntf[data-priority="urgent"] { --ntf-accent: var(--aura-color-danger); }
+  .aura-ntf[data-priority="low"]    { --ntf-accent: color-mix(in srgb, var(--aura-color-border) 60%, transparent); }
+  .aura-ntf[data-unseen="true"] {
+    background: color-mix(in srgb, var(--aura-color-primary) 8%, var(--aura-color-surface));
+    border-color: color-mix(in srgb, var(--aura-color-primary) 55%, var(--aura-color-border));
+    border-left-color: var(--ntf-accent);
+  }
+  .aura-ntf[data-unseen="true"][data-priority="medium"],
+  .aura-ntf[data-unseen="true"][data-priority="low"] { --ntf-accent: var(--aura-color-primary); }
+  .aura-ntf:focus { outline: none; }
+  .aura-ntf:focus-visible { box-shadow: inset 0 0 0 1px var(--aura-color-primary), var(--aura-glow-primary); }
+  .aura-ntf[aria-busy="true"] { opacity: 0.7; }
+
+  .aura-ntf-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .aura-ntf-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; flex-shrink: 0;
+    border: 1px solid var(--aura-color-border);
+    color: var(--aura-color-primary);
+    font-size: 0.7rem; letter-spacing: 0.04em; font-weight: 500;
+    overflow: hidden;
+  }
+  .aura-ntf-icon img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .aura-ntf-icon svg.aura-icon { width: 16px; height: 16px; }
+  .aura-ntf-meta {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px;
+    min-width: 0; flex: 1;
+    color: var(--aura-color-text-dim);
+    text-transform: uppercase; letter-spacing: 0.05em; font-size: 0.68rem;
+  }
+  .aura-ntf-sender { color: var(--aura-color-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .aura-ntf-sender-detail { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-transform: none; letter-spacing: 0; }
+  .aura-ntf-time { white-space: nowrap; }
+  .aura-ntf-tags { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+  .aura-ntf-tag {
+    padding: 0 4px;
+    border: 1px solid var(--aura-color-border);
+    color: var(--aura-color-text-dim);
+    font-size: 0.62rem; letter-spacing: 0.06em; text-transform: uppercase;
+    line-height: 1.5;
+  }
+  .aura-ntf-tag[data-tag="unverified"] { color: var(--aura-color-warning); border-color: color-mix(in srgb, var(--aura-color-warning) 60%, transparent); }
+  .aura-ntf-tag[data-tag="high"]   { color: var(--aura-color-warning); border-color: var(--aura-color-warning); }
+  .aura-ntf-tag[data-tag="urgent"] { color: var(--aura-color-bg); background: var(--aura-color-danger); border-color: var(--aura-color-danger); }
+  .aura-ntf-tag[data-tag="pinned"], .aura-ntf-tag[data-tag="question"] { color: var(--aura-color-primary); border-color: color-mix(in srgb, var(--aura-color-primary) 60%, transparent); }
+  .aura-ntf-unseen-dot { width: 7px; height: 7px; background: var(--aura-color-primary); box-shadow: var(--aura-glow-primary); }
+
+  .aura-ntf-icon-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; flex-shrink: 0; padding: 0;
+    background: transparent; color: var(--aura-color-text-dim);
+    border: 1px solid transparent; cursor: pointer; font: inherit;
+  }
+  .aura-ntf-icon-btn:hover, .aura-ntf-icon-btn:focus-visible {
+    color: var(--aura-color-primary); border-color: var(--aura-color-primary); outline: none;
+  }
+
+  .aura-ntf-title {
+    margin: 0; font-size: 0.8rem; font-weight: 600; letter-spacing: 0.02em;
+    color: var(--aura-color-text);
+  }
+  .aura-ntf-text { margin: 0; color: var(--aura-color-text); white-space: pre-wrap; }
+  .aura-ntf[data-mode="toast"] .aura-ntf-text {
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .aura-ntf-link { color: var(--aura-color-primary); text-decoration: underline; text-underline-offset: 2px; }
+  .aura-ntf-link:focus-visible { outline: 1px solid var(--aura-color-primary); outline-offset: 1px; }
+  .aura-ntf-image {
+    display: block; max-width: 100%; max-height: 180px; object-fit: contain;
+    border: 1px solid var(--aura-color-border); background: var(--aura-color-bg);
+  }
+
+  /* ── Controls: the shared aura-ctl family (phase 4) ──────────────────────
+     One look for every surface: list, pop-ups, window / floating dialogues,
+     system decisions, phone sheet and full view. Native inputs restyled
+     (appearance:none) so keyboard + screen readers keep working. Theme
+     tokens only; square corners, 1px borders. Spacing scale 4 / 6 / 8 / 12. */
+  .aura-ntf-body { display: flex; flex-direction: column; gap: 12px; }
+  .aura-ntf-body[hidden] { display: none; }
+  .aura-ntf-title, .aura-ntf-text, .aura-ctl-input, .aura-ctl-choice-text {
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  }
+  .aura-ntf-title { font-size: 0.9rem; line-height: 1.3; }
+  .aura-ntf-text { font-size: 0.82rem; line-height: 1.45; }
+
+  .aura-ctl-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .aura-ctl-label {
+    color: var(--aura-color-text-dim); font-family: var(--aura-font-mono);
+    text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.68rem; line-height: 1.3;
+  }
+  .aura-ctl-req { color: var(--aura-color-danger); }
+  .aura-ctl-input {
+    display: block; width: 100%; box-sizing: border-box; min-height: 32px;
+    padding: 6px 8px; margin: 0;
+    background: var(--aura-color-bg); color: var(--aura-color-text);
+    border: 1px solid var(--aura-color-border); border-radius: 0;
+    font-size: 0.85rem; line-height: 1.4;
+    transition: border-color 0.12s, box-shadow 0.12s;
+  }
+  textarea.aura-ctl-input { resize: none; min-height: 64px; max-height: 220px; overflow-y: auto; }
+  .aura-ctl-input::placeholder { color: var(--aura-color-text-dim); opacity: 1; }
+  .aura-ctl-input:hover:not(:disabled) { border-color: color-mix(in srgb, var(--aura-color-primary) 55%, var(--aura-color-border)); }
+  .aura-ctl-input:focus { outline: none; border-color: var(--aura-color-primary); box-shadow: var(--aura-glow-primary); }
+  .aura-ctl-input[aria-invalid="true"] { border-color: var(--aura-color-danger); box-shadow: var(--aura-glow-danger); }
+  .aura-ctl-input:disabled { opacity: 0.5; cursor: not-allowed; }
+  .aura-ctl-field-foot { display: flex; justify-content: space-between; gap: 8px; min-height: 0; }
+  .aura-ctl-field-foot:has(> :not([hidden])) { min-height: 1em; }
+  .aura-ctl-error { margin: 0; color: var(--aura-color-danger); font-size: 0.72rem; }
+  .aura-ctl-error[hidden], .aura-ctl-count[hidden] { display: none; }
+  .aura-ctl-count { margin-left: auto; color: var(--aura-color-text-dim); font-family: var(--aura-font-mono); font-size: 0.66rem; font-variant-numeric: tabular-nums; }
+
+  /* Select (dropdown) + combobox (searchable), phase 6 — ChoiceField.ts.
+     The trigger / text box look like .aura-ctl-input; the list is a fixed
+     popup at body level (never clipped by a slot, sheet or dialogue). */
+  .aura-ctl-select {
+    display: flex; align-items: center; gap: 8px; width: 100%; box-sizing: border-box; min-height: 32px;
+    padding: 6px 8px; margin: 0; text-align: left; cursor: pointer;
+    background: var(--aura-color-bg); color: var(--aura-color-text);
+    border: 1px solid var(--aura-color-border); border-radius: 0;
+    font: inherit; font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; font-size: 0.85rem; line-height: 1.4;
+    transition: border-color 0.12s, box-shadow 0.12s;
+  }
+  .aura-ctl-select-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .aura-ctl-select[data-empty="true"] .aura-ctl-select-value { color: var(--aura-color-text-dim); }
+  .aura-ctl-select-chev, .aura-ctl-combo-toggle::before {
+    flex: none; width: 7px; height: 7px; margin: 0 2px 3px;
+    border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+    transform: rotate(45deg); color: var(--aura-color-text-dim); transition: transform 0.12s;
+  }
+  .aura-ctl-select[aria-expanded="true"] .aura-ctl-select-chev,
+  .aura-ctl-combo-toggle[aria-expanded="true"]::before { transform: rotate(-135deg); margin-bottom: -3px; }
+  .aura-ctl-select:hover:not(:disabled) { border-color: color-mix(in srgb, var(--aura-color-primary) 55%, var(--aura-color-border)); }
+  .aura-ctl-select:focus-visible, .aura-ctl-select[aria-expanded="true"] { outline: none; border-color: var(--aura-color-primary); box-shadow: var(--aura-glow-primary); }
+  .aura-ctl-select[aria-invalid="true"] { border-color: var(--aura-color-danger); box-shadow: var(--aura-glow-danger); }
+  .aura-ctl-select:disabled { opacity: 0.5; cursor: not-allowed; }
+  .aura-ctl-combo { position: relative; display: flex; }
+  .aura-ctl-combo-input { padding-right: 30px; }
+  .aura-ctl-combo-toggle {
+    position: absolute; top: 1px; right: 1px; bottom: 1px; width: 28px; padding: 0; margin: 0;
+    display: flex; align-items: center; justify-content: center; cursor: pointer;
+    background: transparent; border: 0; border-left: 1px solid var(--aura-color-border); border-radius: 0; color: var(--aura-color-text-dim);
+  }
+  .aura-ctl-combo-toggle::before { content: ''; display: block; }
+  .aura-ctl-combo-toggle:hover { color: var(--aura-color-primary); }
+  .aura-ctl-listbox {
+    position: fixed; z-index: 2000; box-sizing: border-box; margin: 0; padding: 2px 0; list-style: none;
+    overflow-y: auto; overscroll-behavior: contain;
+    background: var(--aura-color-surface); color: var(--aura-color-text);
+    border: 1px solid var(--aura-color-primary); border-radius: 0; box-shadow: var(--aura-glow-subtle);
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; font-size: 0.85rem;
+  }
+  .aura-ctl-option {
+    display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 4px 10px 4px 22px;
+    cursor: pointer; position: relative; line-height: 1.3; user-select: none;
+  }
+  .aura-ctl-option-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .aura-ctl-option[aria-selected="true"] { color: var(--aura-color-primary); font-weight: 600; }
+  .aura-ctl-option[aria-selected="true"]::before {
+    content: ''; position: absolute; left: 8px; top: 50%; width: 4px; height: 8px; margin-top: -6px;
+    border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(45deg);
+  }
+  .aura-ctl-option[data-active="true"] { background: color-mix(in srgb, var(--aura-color-primary) 16%, transparent); outline: 1px solid var(--aura-color-primary); outline-offset: -1px; }
+  .aura-ctl-option[data-custom="true"] { font-style: italic; color: var(--aura-color-text-dim); }
+  .aura-ctl-listbox-empty { padding: 6px 10px; color: var(--aura-color-text-dim); font-size: 0.8rem; }
+  @media (pointer: coarse), (max-width: 640px) {
+    .aura-ctl-option { min-height: 40px; }
+    .aura-ctl-select, .aura-ctl-combo-input { min-height: 40px; }
+    .aura-ctl-combo-toggle { width: 40px; }
+    .aura-ctl-combo-input { padding-right: 44px; }
+  }
+  @media (prefers-reduced-motion: reduce) { .aura-ctl-select-chev, .aura-ctl-combo-toggle::before { transition: none; } }
+
+  /* Groups */
+  .aura-ctl-group { margin: 0; padding: 0; border: 0; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+  .aura-ctl-group > legend:not(.aura-sr-only) { padding: 0; margin: 0 0 6px; float: left; width: 100%; }
+  .aura-ctl-group > legend + * { clear: both; }
+  .aura-ctl-choices { display: flex; flex-direction: column; gap: 2px; }
+  .aura-ctl-group[data-style="segmented"] .aura-ctl-choices { flex-direction: row; flex-wrap: wrap; gap: 0; }
+
+  /* Checkbox rows (multiple choice): the whole row is the label. */
+  .aura-ctl-choice {
+    display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 2px 6px; margin: 0 -6px;
+    cursor: pointer; color: var(--aura-color-text);
+  }
+  .aura-ctl-choice:hover { background: color-mix(in srgb, var(--aura-color-primary) 8%, transparent); }
+  .aura-ctl-choice-text { font-size: 0.84rem; line-height: 1.3; }
+  /* Radio / checkbox lists (phase 6 display): label + optional description. */
+  .aura-ctl-choice-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .aura-ctl-choice-desc { color: var(--aura-color-text-dim); font-size: 0.74rem; line-height: 1.3; }
+  .aura-ctl-group:is([data-style="radio"], [data-style="list"]) .aura-ctl-choice:has(.aura-ctl-choice-desc) { align-items: flex-start; padding-top: 5px; padding-bottom: 5px; }
+  .aura-ctl-group:is([data-style="radio"], [data-style="list"]) .aura-ctl-choice:has(.aura-ctl-choice-desc) :is(.aura-ctl-radio, .aura-ctl-check) { margin-top: 1px; }
+  .aura-ctl-group[data-style="radio"] .aura-ctl-choice-text,
+  .aura-ctl-group[data-style="list"] .aura-ctl-choice:has(.aura-ctl-choice-desc) .aura-ctl-choice-text { font-weight: 550; }
+  .aura-ctl-group[data-style="radio"] .aura-ctl-choice:has(.aura-ctl-radio:checked) { background: color-mix(in srgb, var(--aura-color-primary) 10%, transparent); }
+  .aura-ctl-group[data-style="radio"] .aura-ctl-choice:has(.aura-ctl-radio:checked) .aura-ctl-choice-text { color: var(--aura-color-primary); }
+  .aura-ctl-choice:has(:disabled) { cursor: not-allowed; opacity: 0.6; }
+  .aura-ctl-choice:has(:disabled):hover { background: transparent; }
+  @media (pointer: coarse), (max-width: 640px) { .aura-ctl-group:is([data-style="radio"], [data-style="list"]) .aura-ctl-choice { min-height: 40px; } }
+  .aura-ctl-check, .aura-ctl-radio {
+    appearance: none; -webkit-appearance: none; margin: 0; flex-shrink: 0;
+    width: 16px; height: 16px; position: relative; cursor: pointer;
+    background: var(--aura-color-bg); border: 1px solid var(--aura-color-text-dim);
+    transition: background-color 0.12s, border-color 0.12s, box-shadow 0.12s;
+  }
+  .aura-ctl-radio { border-radius: 50%; }
+  .aura-ctl-check:checked { background: var(--aura-color-primary); border-color: var(--aura-color-primary); }
+  .aura-ctl-check:checked::after {
+    content: ''; position: absolute; left: 4px; top: 1px; width: 5px; height: 9px;
+    border: solid var(--aura-color-bg); border-width: 0 2px 2px 0; transform: rotate(45deg);
+  }
+  .aura-ctl-radio:checked { border-color: var(--aura-color-primary); }
+  .aura-ctl-radio:checked::after {
+    content: ''; position: absolute; inset: 3px; border-radius: 50%; background: var(--aura-color-primary);
+  }
+  .aura-ctl-choice:hover .aura-ctl-check:not(:checked):not(:disabled),
+  .aura-ctl-choice:hover .aura-ctl-radio:not(:checked):not(:disabled) { border-color: var(--aura-color-primary); }
+  .aura-ctl-check:focus-visible, .aura-ctl-radio:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--aura-color-bg), var(--aura-glow-primary); border-color: var(--aura-color-primary); }
+  .aura-ctl-check:disabled, .aura-ctl-radio:disabled { opacity: 0.45; cursor: not-allowed; }
+  .aura-ctl-group[aria-invalid="true"] .aura-ctl-check, .aura-ctl-group[aria-invalid="true"] .aura-ctl-radio { border-color: var(--aura-color-danger); }
+
+  /* Segmented control (single choice ≤ 4): square chips, the chosen one filled. */
+  .aura-ctl-seg {
+    position: relative; display: inline-flex; align-items: center; justify-content: center;
+    min-height: 30px; padding: 4px 12px; cursor: pointer; flex: 1 1 auto;
+    border: 1px solid var(--aura-color-border); margin: 0 -1px -1px 0;
+    background: transparent; color: var(--aura-color-text);
+    transition: background-color 0.12s, color 0.12s, box-shadow 0.12s;
+  }
+  .aura-ctl-seg .aura-ctl-radio { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; margin: 0; border: 0; border-radius: 0; cursor: pointer; }
+  .aura-ctl-seg .aura-ctl-radio::after { content: none; }
+  .aura-ctl-seg .aura-ctl-choice-text { position: relative; pointer-events: none; text-align: center; }
+  .aura-ctl-seg:hover { background: color-mix(in srgb, var(--aura-color-primary) 10%, transparent); border-color: color-mix(in srgb, var(--aura-color-primary) 55%, var(--aura-color-border)); z-index: 1; }
+  .aura-ctl-seg:has(.aura-ctl-radio:checked) { background: var(--aura-color-primary); color: var(--aura-color-bg); border-color: var(--aura-color-primary); z-index: 2; }
+  .aura-ctl-seg:has(.aura-ctl-radio:focus-visible) { box-shadow: var(--aura-glow-primary); border-color: var(--aura-color-primary); z-index: 3; }
+  .aura-ctl-seg:has(.aura-ctl-radio:disabled) { opacity: 0.45; cursor: not-allowed; }
+
+  /* Progress */
+  .aura-ntf-progress { display: flex; flex-direction: column; gap: 4px; }
+  .aura-ntf-progress-row { display: flex; justify-content: space-between; gap: 8px; color: var(--aura-color-text-dim); font-size: 0.7rem; }
+  .aura-ntf-progress-label { font-family: var(--aura-font-mono); text-transform: uppercase; letter-spacing: 0.05em; }
+  .aura-ntf-progress-pct { font-family: var(--aura-font-mono); font-variant-numeric: tabular-nums; color: var(--aura-color-text); }
+  .aura-ntf-progress-track { position: relative; height: 6px; border: 1px solid var(--aura-color-border); background: var(--aura-color-bg); overflow: hidden; }
+  .aura-ntf-progress-fill { height: 100%; background: var(--aura-color-primary); box-shadow: var(--aura-glow-subtle); transition: width 0.35s ease-out; }
+  .aura-ntf-progress[data-indeterminate="true"] .aura-ntf-progress-fill {
+    width: 100%;
+    background: repeating-linear-gradient(-45deg,
+      var(--aura-color-primary) 0 8px,
+      color-mix(in srgb, var(--aura-color-primary) 35%, transparent) 8px 16px);
+    background-size: 22.6px 22.6px;
+    animation: aura-ntf-stripe 0.8s linear infinite;
+  }
+  @keyframes aura-ntf-stripe { to { background-position: 22.6px 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .aura-ntf-progress[data-indeterminate="true"] .aura-ntf-progress-fill { animation: none; }
+    .aura-ntf-progress-fill { transition: none; }
+  }
+
+  /* Buttons: primary filled, secondary outlined, tertiary text-only. */
+  .aura-ctl-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+  .aura-ctl-btn {
+    position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    min-height: 32px; padding: 6px 14px; cursor: pointer;
+    font: inherit; font-family: var(--aura-font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em;
+    border: 1px solid var(--aura-color-border); border-radius: 0;
+    background: transparent; color: var(--aura-color-text);
+    transition: background-color 0.12s, border-color 0.12s, box-shadow 0.12s, transform 0.05s;
+  }
+  .aura-ctl-btn[data-variant="secondary"] { border-color: color-mix(in srgb, var(--aura-color-primary) 60%, var(--aura-color-border)); color: var(--aura-color-primary); }
+  .aura-ctl-btn[data-variant="primary"] { background: var(--aura-color-primary); border-color: var(--aura-color-primary); color: var(--aura-color-bg); font-weight: 600; }
+  .aura-ctl-btn[data-variant="tertiary"] { border-color: transparent; color: var(--aura-color-text-dim); text-decoration: underline; text-underline-offset: 3px; padding-inline: 6px; }
+  .aura-ctl-btn:hover:not(:disabled) { border-color: var(--aura-color-primary); box-shadow: var(--aura-glow-primary); }
+  .aura-ctl-btn[data-variant="secondary"]:hover:not(:disabled) { background: color-mix(in srgb, var(--aura-color-primary) 10%, transparent); }
+  .aura-ctl-btn[data-variant="tertiary"]:hover:not(:disabled) { color: var(--aura-color-primary); box-shadow: none; border-color: transparent; }
+  .aura-ctl-btn:active:not(:disabled) { transform: translateY(1px); }
+  .aura-ctl-btn:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--aura-color-bg), var(--aura-glow-primary); border-color: var(--aura-color-primary); }
+  .aura-ctl-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .aura-ctl-btn[data-loading="true"] { opacity: 1; cursor: progress; }
+  .aura-ctl-btn[data-loading="true"] .aura-ctl-btn-label { visibility: hidden; }
+  .aura-ctl-btn[data-loading="true"]::after {
+    content: ''; position: absolute; left: 50%; top: 50%; width: 12px; height: 12px; margin: -7px 0 0 -7px;
+    border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+    animation: aura-ctl-spin 0.7s linear infinite;
+  }
+  @keyframes aura-ctl-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .aura-ctl-btn[data-loading="true"]::after { animation-duration: 2s; } }
+  /* While one action is in flight, no second submit. */
+  .aura-ntf[aria-busy="true"] .aura-ctl-btn { pointer-events: none; }
+  .aura-ctl-btn svg.aura-icon { width: 0.95em; height: 0.95em; }
+
+  /* Phone width: full-width stacked buttons, ≥ 40px touch targets. */
+  :is(.notif-center, .notif-toasts, .aura-dlg-float)[data-layout="phone"] .aura-ctl-actions,
+  .aura-dlg-full .aura-ctl-actions { flex-direction: column-reverse; align-items: stretch; }
+  :is(.notif-center, .notif-toasts, .aura-dlg-float)[data-layout="phone"] :is(.aura-ctl-btn, .aura-ctl-seg, .aura-ctl-choice, .aura-ctl-input:not(textarea), .aura-ntf-link-btn, .aura-ntf-icon-btn, .aura-dlg-btn),
+  .aura-dlg-full :is(.aura-ctl-btn, .aura-ctl-seg, .aura-ctl-choice, .aura-ctl-input:not(textarea), .aura-dlg-btn) { min-height: 40px; }
+  :is(.notif-center, .notif-toasts, .aura-dlg-float)[data-layout="phone"] .aura-ntf-icon-btn { min-width: 40px; }
+
+  .aura-ntf-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; color: var(--aura-color-text-dim); }
+  .aura-ntf-context { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.66rem; }
+  .aura-ntf-context::before { content: '↳ '; }
+  .aura-ntf-link-btn {
+    padding: 2px 6px; cursor: pointer; font: inherit; font-size: 0.66rem;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    background: transparent; color: var(--aura-color-primary);
+    border: 1px solid color-mix(in srgb, var(--aura-color-primary) 50%, transparent); border-radius: 0;
+  }
+  .aura-ntf-link-btn:hover, .aura-ntf-link-btn:focus-visible { border-color: var(--aura-color-primary); box-shadow: var(--aura-glow-primary); outline: none; }
+  .aura-ntf-status { margin: 0; font-size: 0.68rem; color: var(--aura-color-danger); }
+  .aura-ntf-status[data-kind="info"] { color: var(--aura-color-text-dim); }
+  .aura-ntf-status[hidden] { display: none; }
+
+  /* ── Locked (phase 4): lock tag, ⋯ menu, inline confirm ──────────────── */
+  .aura-ntf-tag[data-tag="locked"] {
+    display: inline-flex; align-items: center; gap: 3px;
+    color: var(--aura-color-secondary); border-color: color-mix(in srgb, var(--aura-color-secondary) 60%, transparent);
+  }
+  .aura-ntf-tag[data-tag="locked"] svg.aura-icon { width: 0.9em; height: 0.9em; }
+  .aura-ntf[data-type="locked"] { border-left-style: double; }
+  .aura-ntf-more { position: relative; flex-shrink: 0; }
+  .aura-ntf-menu {
+    position: absolute; z-index: 5; top: calc(100% + 4px); right: 0;
+    min-width: 200px; max-width: 280px;
+    display: flex; flex-direction: column;
+    background: var(--aura-color-surface-2);
+    border: 1px solid var(--aura-color-border);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  }
+  .aura-ntf-menu[hidden] { display: none; }
+  .aura-ntf-menu-item {
+    padding: 7px 10px; text-align: left; cursor: pointer;
+    font: inherit; font-size: 0.7rem; letter-spacing: 0.04em;
+    background: transparent; color: var(--aura-color-danger); border: 0;
+  }
+  .aura-ntf-menu-item:hover, .aura-ntf-menu-item:focus-visible {
+    outline: none; background: color-mix(in srgb, var(--aura-color-danger) 12%, transparent);
+  }
+  .aura-confirm { display: flex; flex-direction: column; gap: 8px; padding: 10px; font-family: var(--aura-font-mono); font-size: 0.7rem; }
+  .aura-confirm-msg { margin: 0; color: var(--aura-color-text); text-transform: none; letter-spacing: 0; }
+  .aura-confirm-row { display: flex; gap: 6px; }
+  .aura-confirm-btn {
+    padding: 4px 10px; cursor: pointer; font: inherit; text-transform: uppercase; letter-spacing: 0.05em;
+    background: transparent; color: var(--aura-color-text);
+    border: 1px solid var(--aura-color-border); border-radius: 0;
+  }
+  .aura-confirm-btn[data-danger="true"] { background: var(--aura-color-danger); border-color: var(--aura-color-danger); color: var(--aura-color-bg); }
+  .aura-confirm-btn:hover:not(:disabled), .aura-confirm-btn:focus-visible { outline: none; box-shadow: var(--aura-glow-primary); border-color: var(--aura-color-primary); }
+  .aura-confirm-btn[data-danger="true"]:hover:not(:disabled), .aura-confirm-btn[data-danger="true"]:focus-visible { box-shadow: inset 0 0 0 1px var(--aura-color-bg), var(--aura-glow-danger); }
+  .aura-confirm-btn:disabled { opacity: 0.5; cursor: progress; }
+  .aura-confirm-error { margin: 0; color: var(--aura-color-danger); }
+  .aura-confirm-note { margin: 0; color: var(--aura-color-warning); font-size: 0.7rem; }
+  .aura-confirm-btn[data-role="primary"] { background: var(--aura-color-primary); border-color: var(--aura-color-primary); color: var(--aura-color-bg); }
+  .aura-confirm-btn[data-role="cancel"] { border-color: transparent; color: var(--aura-color-text-dim); text-decoration: underline; text-underline-offset: 3px; }
+  /* Dismiss confirm inside a list card (the same component as the Locked force-remove confirm). */
+  .aura-ntf > .aura-ntf-dismiss-confirm { padding: 8px; border: 1px solid var(--aura-color-warning); background: color-mix(in srgb, var(--aura-color-warning) 8%, var(--aura-color-surface)); }
+  .aura-ntf > .aura-ntf-dismiss-confirm .aura-confirm-row { flex-wrap: wrap; }
+  .notif-center[data-layout="phone"] .aura-confirm-btn { min-height: 40px; }
+  .aura-confirm-error[hidden] { display: none; }
+
+  /* Dialogue cards open their dialogue on click / Enter / Space. */
+  .aura-ntf[data-activatable="true"] { cursor: pointer; }
+  .aura-ntf[data-activatable="true"]:hover { border-color: var(--aura-color-primary); box-shadow: var(--aura-glow-subtle); }
+  .aura-ntf[data-activatable="true"]:focus-visible { box-shadow: inset 0 0 0 1px var(--aura-color-primary), var(--aura-glow-primary); }
+
+  /* ── Dialogues (phase 4) ─────────────────────────────────────────────── */
+  .aura-dlg svg.aura-icon, .aura-dlg-host svg.aura-icon {
+    width: 1em; height: 1em; flex-shrink: 0;
+    stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+  }
+  section.aura-dlg {
+    display: flex; flex-direction: column; min-width: 0; min-height: 0;
+    background: var(--aura-color-surface); color: var(--aura-color-text);
+    border: 1px solid var(--aura-color-primary);
+    box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.45), var(--aura-glow-subtle);
+    font-family: var(--aura-font-mono); font-size: var(--aura-font-size-xs, 0.75rem);
+    pointer-events: auto; box-sizing: border-box;
+  }
+  section.aura-dlg:focus { outline: none; }
+  .aura-dlg-bar {
+    display: flex; align-items: center; gap: 8px; min-width: 0;
+    padding: 4px 6px 4px 10px; flex-shrink: 0;
+    background: var(--aura-color-surface-2); border-bottom: 1px solid var(--aura-color-border);
+  }
+  .aura-dlg[data-collapsed="true"] .aura-dlg-bar { border-bottom: 0; cursor: pointer; }
+  .aura-dlg-kicker { color: var(--aura-color-primary); text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.62rem; white-space: nowrap; }
+  .aura-dlg-bar-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--aura-color-text-dim); }
+  .aura-dlg:not([data-collapsed="true"]) .aura-dlg-bar-title { visibility: hidden; }
+  .aura-dlg-btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+    height: 22px; padding: 0 8px; cursor: pointer; flex-shrink: 0;
+    font: inherit; font-size: 0.62rem; letter-spacing: 0.06em; text-transform: uppercase;
+    background: transparent; color: var(--aura-color-text-dim);
+    border: 1px solid var(--aura-color-border); border-radius: 0;
+  }
+  /* Enter / exit (phase 4): a subtle slide from / to the right with a fade.
+     Lock / wipe hides skip the exit (instant). */
+  section.aura-dlg { animation: aura-dlg-in 150ms ease-out; }
+  section.aura-dlg[data-exit="true"] { animation: aura-dlg-out 200ms ease-in forwards; pointer-events: none; }
+  @keyframes aura-dlg-in { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: none; } }
+  @keyframes aura-dlg-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(28px); } }
+  @media (prefers-reduced-motion: reduce) {
+    section.aura-dlg { animation: aura-dlg-fade-in 80ms linear; }
+    section.aura-dlg[data-exit="true"] { animation: aura-dlg-fade-out 90ms linear forwards; }
+    @keyframes aura-dlg-fade-in { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes aura-dlg-fade-out { from { opacity: 1; } to { opacity: 0; } }
+  }
+
+  /* Header ✕ (answer later): square icon button, top-right. */
+  .aura-dlg-close { width: 32px; height: 32px; padding: 0; margin-left: auto; border-color: transparent; font-size: 0.9rem; }
+  .aura-dlg-close svg.aura-icon { width: 15px; height: 15px; }
+  .aura-dlg-close:hover { border-color: var(--aura-color-primary); }
+  .aura-dlg-close:focus-visible { box-shadow: 0 0 0 2px var(--aura-color-bg), var(--aura-glow-primary); }
+  :is(.aura-dlg-float[data-layout="phone"], .aura-dlg-full) .aura-dlg-close { width: 40px; height: 40px; }
+  .aura-dlg-btn:hover, .aura-dlg-btn:focus-visible { color: var(--aura-color-primary); border-color: var(--aura-color-primary); outline: none; box-shadow: var(--aura-glow-primary); }
+  .aura-dlg-body { overflow-y: auto; overscroll-behavior: contain; min-height: 0; }
+  .aura-dlg-body[hidden] { display: none; }
+  .aura-dlg-body > .aura-ntf { border: 0; border-left: 3px solid var(--ntf-accent); }
+
+  /* Window overlay: host in .slot-body, above the skeleton (z 5). */
+  .aura-dlg-host {
+    position: absolute; inset: 0; z-index: 10;
+    display: flex; flex-direction: column; justify-content: flex-end; align-items: stretch; gap: 6px;
+    padding: 8px; box-sizing: border-box;
+    pointer-events: none;
+  }
+  .aura-dlg-host[data-blocking="true"] {
+    pointer-events: auto; justify-content: center; align-items: center;
+    background: color-mix(in srgb, var(--aura-color-bg) 72%, transparent);
+    backdrop-filter: blur(2px);
+  }
+  .aura-dlg-window { width: 100%; max-height: 70%; }
+  .aura-dlg-host[data-blocking="true"] .aura-dlg-window { width: min(440px, 100%); max-height: 90%; }
+  .aura-dlg-window[data-blocking="true"] { border-color: var(--aura-color-warning); }
+
+  /* Floating (desktop panel / phone sheet), z 1080: above list 1060 + pop-ups 1070. */
+  .aura-dlg-float {
+    position: fixed; z-index: 1080;
+    right: var(--dlg-right, 16px);
+    bottom: calc(var(--aura-dock-height) + 8px + var(--dlg-keyboard, 0px) + env(safe-area-inset-bottom, 0px));
+    width: 380px; max-width: calc(100% - 16px); max-height: 70%;
+    display: flex; flex-direction: column-reverse; gap: 6px;
+    pointer-events: none;
+  }
+  .aura-dlg-float[data-layout="phone"] { left: 8px; right: 8px; width: auto; max-width: none; max-height: 80%; }
+  .aura-dlg-float > .aura-dlg { max-height: 100%; }
+  .aura-dlg-float[data-layout="phone"] > .aura-dlg { border-top-width: 2px; }
+  .aura-dlg-full {
+    position: fixed; inset: 0; z-index: 1085;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    border: 0; border-top: 2px solid var(--aura-color-primary);
+  }
+  .aura-dlg-full .aura-dlg-body { flex: 1; }
+
+  /* AuraOS system decision: lock-screen-like, z 1900 (lock screen 2000). */
+  .aura-dlg-system {
+    position: fixed; inset: 0; z-index: 1900;
+    display: flex; align-items: center; justify-content: center; padding: 16px;
+    background: color-mix(in srgb, var(--aura-color-bg) 88%, transparent);
+    backdrop-filter: blur(6px);
+  }
+  .aura-dlg-decision { width: min(520px, 100%); max-height: 90%; border-color: var(--aura-color-warning); box-shadow: 0 0 0 1px var(--aura-color-warning), 0 12px 48px rgba(0, 0, 0, 0.6); }
+  /* Phase 6: APP system modals — same blocking shell, visibly not AuraOS:
+     primary (not warning) frame, an identity bar with the app and the Force
+     hide link (Ctrl+Alt+Shift+Esc). */
+  .aura-dlg-systemmodal { width: min(520px, 100%); max-height: 90%; border-color: var(--aura-color-primary); box-shadow: 0 0 0 1px var(--aura-color-primary), 0 12px 48px rgba(0, 0, 0, 0.6); }
+  .aura-dlg-appbar {
+    display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+    border-bottom: 1px solid var(--aura-color-border); background: var(--aura-color-surface-2);
+    font-size: 0.78rem; color: var(--aura-color-text-dim);
+  }
+  .aura-dlg-appbar-glyph {
+    flex: none; min-width: 22px; height: 22px; padding: 0 4px; display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid var(--aura-color-border); font-family: var(--aura-font-mono); font-size: 0.66rem; color: var(--aura-color-text);
+  }
+  .aura-dlg-appbar-who b { color: var(--aura-color-text); font-weight: 600; }
+  .aura-dlg-appbar-att { font-family: var(--aura-font-mono); font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.06em; padding: 1px 4px; border: 1px solid var(--aura-color-border); }
+  .aura-dlg-appbar-att[data-verified="false"] { color: var(--aura-color-warning); border-color: var(--aura-color-warning); }
+  .aura-dlg-forcehide {
+    margin-left: auto; padding: 2px 4px; background: none; border: 0; cursor: pointer;
+    color: var(--aura-color-text-dim); font: inherit; font-size: 0.74rem; text-decoration: underline; text-underline-offset: 2px;
+  }
+  .aura-dlg-forcehide:hover, .aura-dlg-forcehide:focus-visible { color: var(--aura-color-primary); outline: none; }
+  .aura-dlg-forcehide:focus-visible { box-shadow: var(--aura-glow-primary); }
+  .aura-dlg-forcehide-confirm { padding: 6px 10px; border-bottom: 1px solid var(--aura-color-border); }
+  @media (pointer: coarse), (max-width: 640px) { .aura-dlg-forcehide { min-height: 40px; } }
+  /* Phase 6: a non-blocking system dialog of an app — centred, floating (z 1080). */
+  .aura-dlg-centred-host {
+    position: fixed; inset: 0; z-index: 1080; display: flex; align-items: center; justify-content: center;
+    padding: 16px; pointer-events: none;
+  }
+  .aura-dlg-centred { pointer-events: auto; width: min(480px, 100%); max-height: 80%; }
+  .aura-dlg-decision .aura-dlg-kicker { color: var(--aura-color-warning); }
+
+  /* Activity-linked items in the list / pop-ups: yellow accent + "Go to activity". */
+  .aura-ntf[data-linked="true"] { border-left-color: var(--aura-color-warning); }
+  /* Same size as Answer (.aura-ntf-link-btn): inline, auto width, never full width. */
+  .aura-ntf-link-btn.aura-ntf-goto-activity {
+    display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; width: auto; max-width: max-content; white-space: nowrap;
+    color: var(--aura-color-warning); border-color: color-mix(in srgb, var(--aura-color-warning) 60%, transparent);
+    background: color-mix(in srgb, var(--aura-color-warning) 10%, transparent);
+  }
+  .aura-ntf-link-btn.aura-ntf-goto-activity svg.aura-icon { width: 0.9em; height: 0.9em; }
+  .aura-ntf-link-btn.aura-ntf-goto-activity:hover, .aura-ntf-link-btn.aura-ntf-goto-activity:focus-visible {
+    border-color: var(--aura-color-warning); box-shadow: 0 0 6px var(--aura-color-warning); outline: none;
+  }
+
+  /* Activity-linked (phase 4): yellow hint on the window + its in-window panel. */
+  .app-slot[data-ntf-linked] { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--aura-color-warning) 70%, transparent), 0 0 8px color-mix(in srgb, var(--aura-color-warning) 25%, transparent); }
+  /* The badge sits among the window's chrome buttons: `.app-slot .slot-controls
+     button` (index.astro: transparent background, dim text) outranked the plain
+     class and painted it black — this selector outranks it. Yellow = the same
+     --aura-color-warning as the pill marker and the panel accent. */
+  .app-slot .slot-controls > button.aura-ntf-win-badge,
+  .aura-ntf-win-badge {
+    display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+    min-width: 22px; height: 18px; padding: 0 6px; margin-right: 2px; cursor: pointer; line-height: 1;
+    font-family: var(--aura-font-mono); font-size: 0.62rem; font-variant-numeric: tabular-nums; font-weight: 700;
+    background: var(--aura-color-warning); color: var(--aura-color-bg);
+    border: 1px solid var(--aura-color-warning); border-radius: 0;
+    box-shadow: 0 0 4px color-mix(in srgb, var(--aura-color-warning) 45%, transparent);
+  }
+  .app-slot .slot-controls > button.aura-ntf-win-badge::before,
+  .aura-ntf-win-badge::before { content: ''; width: 5px; height: 5px; background: currentColor; }
+  .app-slot .slot-controls > button.aura-ntf-win-badge[data-unseen="true"] { box-shadow: 0 0 6px var(--aura-color-warning), 0 0 12px color-mix(in srgb, var(--aura-color-warning) 40%, transparent); }
+  .app-slot .slot-controls > button.aura-ntf-win-badge:hover,
+  .app-slot .slot-controls > button.aura-ntf-win-badge:focus-visible {
+    outline: none; color: var(--aura-color-bg); border-color: var(--aura-color-warning);
+    box-shadow: 0 0 0 2px var(--aura-color-bg), 0 0 8px var(--aura-color-warning);
+  }
+  .app-slot .slot-controls > button.aura-ntf-win-badge[data-pulse="true"] { animation: aura-ntf-badge-pulse 0.9s ease-out 1; }
+  @keyframes aura-ntf-badge-pulse { 0% { transform: scale(1); } 35% { transform: scale(1.18); box-shadow: 0 0 12px var(--aura-color-warning); } 100% { transform: scale(1); } }
+  @media (prefers-reduced-motion: reduce) { .app-slot .slot-controls > button.aura-ntf-win-badge[data-pulse="true"] { animation: none; } }
+  section.aura-dlg[data-linked="true"] { border-color: color-mix(in srgb, var(--aura-color-warning) 70%, var(--aura-color-border)); border-left: 3px solid var(--aura-color-warning); }
+  section.aura-dlg[data-linked="true"] .aura-dlg-kicker { color: var(--aura-color-warning); }
+  section.aura-dlg[data-linked="true"] .aura-dlg-kicker::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 5px; background: var(--aura-color-warning); vertical-align: 1px; }
+  /* The panel's collapse / expand chevron: a real hit area (32px; 40px on the phone). */
+  .aura-dlg-toggle { width: 32px; height: 32px; padding: 0; }
+  :is(.aura-dlg-float[data-layout="phone"], .aura-dlg-full) .aura-dlg-toggle { width: 40px; height: 40px; }
+  .aura-dlg-answer { display: none; color: var(--aura-color-warning); border-color: color-mix(in srgb, var(--aura-color-warning) 60%, transparent); }
+  section.aura-dlg[data-collapsed="true"] .aura-dlg-answer { display: inline-flex; }
+
+  /* ── Markdown component (phase 6, MarkdownField.ts) ───────────────────── */
+  .aura-ntf-md { display: flex; flex-direction: column; gap: 4px; min-width: 0; --md-max: 320px; }
+  .aura-ntf-md-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .aura-ntf-md-head > .aura-ctl-label { flex: 1; min-width: 0; }
+  .aura-ntf-md-head > .aura-ctl-label.aura-sr-only { flex: 0; }
+  .aura-ntf-md-tools { display: inline-flex; gap: 4px; margin-left: auto; flex-shrink: 0; }
+  .aura-ntf-md-btn {
+    display: inline-flex; align-items: center; justify-content: center; height: 22px; padding: 0 8px; cursor: pointer;
+    font-family: var(--aura-font-mono); font-size: 0.62rem; letter-spacing: 0.06em; text-transform: uppercase;
+    background: transparent; color: var(--aura-color-text-dim); border: 1px solid var(--aura-color-border); border-radius: 0;
+  }
+  .aura-ntf-md-btn:hover, .aura-ntf-md-btn:focus-visible { color: var(--aura-color-primary); border-color: var(--aura-color-primary); outline: none; box-shadow: var(--aura-glow-primary); }
+  .aura-ntf-md-btn[aria-pressed="true"] { color: var(--aura-color-bg); background: var(--aura-color-primary); border-color: var(--aura-color-primary); }
+  .aura-ntf-md-btn[data-copied="true"] { color: var(--aura-color-success, var(--aura-color-primary)); border-color: currentColor; }
+  .aura-ntf-md-btn[data-copied="false"] { color: var(--aura-color-danger); border-color: currentColor; }
+  .aura-ntf-md-area, .aura-ntf-md-source {
+    max-height: var(--md-max); min-height: 48px; overflow: auto; overscroll-behavior: contain; box-sizing: border-box;
+    border: 1px solid var(--aura-color-border); background: var(--aura-color-bg);
+  }
+  .aura-ntf-md[data-max="auto"] .aura-ntf-md-area { max-height: none; }
+  .aura-ntf-md[data-max="auto"] .aura-ntf-md-source { max-height: none; min-height: 12rem; }
+  .aura-ntf-md-area[hidden], .aura-ntf-md-source[hidden] { display: none; }
+  .aura-ntf-md-area { padding: 8px 12px; color: var(--aura-color-text); font-size: 0.82rem; line-height: 1.5; overflow-wrap: anywhere; }
+  .aura-ntf-md-area:focus-visible { outline: none; border-color: var(--aura-color-primary); box-shadow: var(--aura-glow-primary); }
+  textarea.aura-ntf-md-source {
+    width: 100%; height: var(--md-max); resize: vertical; padding: 8px; margin: 0;
+    font-family: var(--aura-font-mono); font-size: 0.78rem; line-height: 1.45; color: var(--aura-color-text); white-space: pre; tab-size: 2;
+  }
+  textarea.aura-ntf-md-source[readonly] { color: var(--aura-color-text-dim); }
+  .aura-ntf-md-area > :first-child { margin-top: 0; }
+  .aura-ntf-md-area > :last-child { margin-bottom: 0; }
+  .aura-ntf-md-area :is(p, ul, ol, blockquote, .aura-ntf-md-code, .aura-ntf-md-table, hr) { margin: 0 0 0.7em; }
+  .aura-ntf-md-h { margin: 0.9em 0 0.4em; font-family: var(--aura-font-mono); line-height: 1.25; color: var(--aura-color-text); font-weight: 700; }
+  .aura-ntf-md-h1 { font-size: 1.3rem; border-bottom: 1px solid var(--aura-color-border); padding-bottom: 0.2em; }
+  .aura-ntf-md-h2 { font-size: 1.12rem; border-bottom: 1px solid var(--aura-color-border); padding-bottom: 0.15em; }
+  .aura-ntf-md-h3 { font-size: 1rem; }
+  .aura-ntf-md-h4, .aura-ntf-md-h5, .aura-ntf-md-h6 { font-size: 0.88rem; color: var(--aura-color-text-dim); }
+  .aura-ntf-md-area :is(ul, ol) { padding-left: 1.4em; }
+  .aura-ntf-md-area li > :is(ul, ol) { margin: 0.2em 0 0; }
+  .aura-ntf-md-area li + li { margin-top: 0.15em; }
+  .aura-ntf-md-area ul.aura-ntf-md-tasks { list-style: none; padding-left: 0.4em; }
+  .aura-ntf-md-area li[data-task] > .aura-ntf-md-check { margin: 0 6px 0 0; vertical-align: -2px; accent-color: var(--aura-color-primary); }
+  .aura-ntf-md-area li[data-task="done"] { color: var(--aura-color-text-dim); }
+  .aura-ntf-md-area blockquote { padding: 2px 0 2px 10px; border-left: 3px solid var(--aura-color-primary); color: var(--aura-color-text-dim); }
+  .aura-ntf-md-area hr { border: 0; border-top: 1px solid var(--aura-color-border); }
+  .aura-ntf-md-area a.aura-ntf-md-link { color: var(--aura-color-primary); text-decoration: underline; text-underline-offset: 2px; }
+  .aura-ntf-md-area a.aura-ntf-md-link:focus-visible { outline: 1px solid var(--aura-color-primary); outline-offset: 1px; }
+  .aura-ntf-md-badlink { color: var(--aura-color-text-dim); text-decoration: line-through dotted; cursor: help; }
+  .aura-ntf-md-icode { font-family: var(--aura-font-mono); font-size: 0.9em; padding: 0 3px; background: var(--aura-color-surface-2); border: 1px solid var(--aura-color-border); }
+  .aura-ntf-md-code { position: relative; }
+  .aura-ntf-md-code > pre {
+    margin: 0; padding: 8px 10px; overflow-x: auto; background: var(--aura-color-surface-2); border: 1px solid var(--aura-color-border);
+    font-family: var(--aura-font-mono); font-size: 0.78rem; line-height: 1.45; white-space: pre; tab-size: 2;
+  }
+  .aura-ntf-md-code > pre:focus-visible { outline: none; border-color: var(--aura-color-primary); }
+  .aura-ntf-md-code[data-lang]::before {
+    content: attr(data-lang); position: absolute; top: 3px; left: 8px; font-family: var(--aura-font-mono); font-size: 0.58rem;
+    text-transform: uppercase; letter-spacing: 0.06em; color: var(--aura-color-text-dim); pointer-events: none;
+  }
+  .aura-ntf-md-code[data-lang] > pre { padding-top: 18px; }
+  .aura-ntf-md-copy-code { position: absolute; top: 3px; right: 3px; height: 18px; padding: 0 6px; background: var(--aura-color-surface); opacity: 0.75; }
+  .aura-ntf-md-code:hover .aura-ntf-md-copy-code, .aura-ntf-md-copy-code:focus-visible, .aura-ntf-md-copy-code[data-copied] { opacity: 1; }
+  .aura-ntf-md-table { overflow-x: auto; max-width: 100%; }
+  .aura-ntf-md-table:focus-visible { outline: 1px solid var(--aura-color-primary); }
+  .aura-ntf-md-table table { border-collapse: collapse; font-size: 0.78rem; min-width: 100%; }
+  .aura-ntf-md-table :is(th, td) { padding: 4px 8px; border: 1px solid var(--aura-color-border); text-align: left; vertical-align: top; white-space: nowrap; }
+  .aura-ntf-md-table th { background: var(--aura-color-surface-2); font-family: var(--aura-font-mono); font-weight: 700; }
+  .aura-ntf-md-table tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--aura-color-surface-2) 45%, transparent); }
+  /* Preview in the list / pop-ups: clamped, "…", with "Show". */
+  .aura-ntf-md-preview { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; padding: 6px 8px; border: 1px solid var(--aura-color-border); background: var(--aura-color-bg); }
+  .aura-ntf-md-preview-label { font-family: var(--aura-font-mono); font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--aura-color-text-dim); }
+  .aura-ntf-md-preview-text {
+    margin: 0; font-size: 0.78rem; line-height: 1.4; color: var(--aura-color-text); overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden;
+  }
+  .aura-ntf[data-mode="toast"] .aura-ntf-md-preview-text { -webkit-line-clamp: 2; line-clamp: 2; }
+
+  /* ── Maximize (phase 6, DialogFrame) ─────────────────────────────────── */
+  .aura-dlg-max { width: 32px; height: 32px; padding: 0; margin-left: auto; border-color: transparent; }
+  .aura-dlg-max + .aura-dlg-close { margin-left: 0; }
+  .aura-dlg-max svg.aura-icon { width: 14px; height: 14px; }
+  .aura-dlg-max[aria-pressed="true"] { color: var(--aura-color-primary); }
+  .aura-dlg-max[hidden], section.aura-dlg[data-collapsed="true"] .aura-dlg-max { display: none; }
+  /* Larger defaults when a dialogue carries markdown. */
+  .aura-dlg-decision[data-has-markdown="true"], .aura-dlg-systemmodal[data-has-markdown="true"] { width: min(760px, 100%); }
+  .aura-dlg-centred[data-has-markdown="true"] { width: min(720px, 100%); max-height: 85%; }
+  .aura-dlg-float:not([data-layout="phone"]) { width: auto; align-items: flex-end; }
+  .aura-dlg-float:not([data-layout="phone"]) > .aura-dlg { width: 380px; max-width: 100%; }
+  .aura-dlg-float:not([data-layout="phone"]) > .aura-dlg[data-has-markdown="true"] { width: 560px; }
+  .aura-dlg-float[data-layout="phone"] > .aura-dlg { width: 100%; }
+  .aura-dlg-host:not([data-blocking="true"]) .aura-dlg-window[data-has-markdown="true"] { max-height: 85%; }
+  .aura-dlg-host[data-blocking="true"] .aura-dlg-window[data-has-markdown="true"] { width: min(640px, 100%); }
+  /* Maximized system modal / centred / floating: the app area between the
+     top bar and the Dock, 14px margin. (Fixed to the body, which the shell
+     zooms with a transform — so these are body px, like everything else.) */
+  section.aura-dlg[data-maximized="true"]:not(.aura-dlg-window):not([data-collapsed="true"]) {
+    position: fixed; z-index: 1;
+    top: calc(var(--aura-statusbar-height, 0px) + 14px);
+    bottom: calc(var(--aura-dock-height, 0px) + 14px + env(safe-area-inset-bottom, 0px));
+    left: 14px; right: 14px; width: auto; max-width: none; height: auto; max-height: none;
+  }
+  /* In-window panel: its own window body (the host's padding is the margin). */
+  section.aura-dlg-window[data-maximized="true"]:not([data-collapsed="true"]) { flex: 1 1 auto; width: 100%; height: 100%; max-height: 100%; }
+  .aura-dlg-host[data-blocking="true"] section.aura-dlg-window[data-maximized="true"] { width: 100%; max-height: 100%; }
+  /* The markdown area grows with a maximized dialogue (and scrolls inside). */
+  section.aura-dlg[data-maximized="true"] > .aura-dlg-body { flex: 1 1 auto; display: flex; flex-direction: column; }
+  section.aura-dlg[data-maximized="true"] > .aura-dlg-body > .aura-ntf { flex: 1 1 auto; min-height: 0; }
+  section.aura-dlg[data-maximized="true"] .aura-ntf-body { flex: 1 1 auto; min-height: 0; }
+  section.aura-dlg[data-maximized="true"] .aura-ntf-md { flex: 1 1 0; min-height: 180px; }
+  section.aura-dlg[data-maximized="true"] .aura-ntf-md > :is(.aura-ntf-md-area, .aura-ntf-md-source) { flex: 1 1 0; max-height: none; height: auto; min-height: 120px; }
+
+  /* Pending-question markers: minimized-strip chip + workspace pill. */
+  [data-ntf-pending] { position: relative; }
+  [data-ntf-pending]::after {
+    content: ''; position: absolute; top: -3px; right: -3px; width: 7px; height: 7px;
+    background: var(--aura-color-warning); box-shadow: var(--aura-glow-subtle);
+    pointer-events: none;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    [data-ntf-pending]::after { animation: aura-ntf-pending 1.6s ease-in-out 3; }
+  }
+  @keyframes aura-ntf-pending { 50% { transform: scale(1.6); } }
+</style>

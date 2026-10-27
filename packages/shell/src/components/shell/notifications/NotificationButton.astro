@@ -1,0 +1,311 @@
+---
+/**
+ * Dock bell. Registers the shell's 'notifications' anchor (the list and the
+ * pop-ups attach to the anchor, not to the Dock) and ALWAYS shows the
+ * counter `new/total` (unseen / active, locked included), e.g. 0/0, 1/4.
+ * Clicking toggles NotificationCenter via `aura:notifications.toggle`.
+ *
+ * Design (plan addendum 2): just the bell and text on the button, no inner
+ * boxes. The new number is larger than the dim `/total`. While new > 0 the
+ * new number glows (warning / danger tint for high / urgent unseen) and the
+ * bell keeps a soft steady glow; on arrival both blink ~3 times (~1.8 s).
+ * Reduced motion: static glow only.
+ *
+ * Two size tiers (`data-tier`), chosen by the Dock's `fitDockItems`:
+ *   compact  bell + new/total — always fits, never folded, used on phone
+ *   wide     compact + the MOST IMPORTANT active item (store `mostImportant`:
+ *            unseen, then pinned, then priority, then newest) as
+ *            "sender: title" with a priority dot and a lock / pin glyph.
+ *            Unseen: emphasised (glow like the new count); seen: dim.
+ *            Clicking the snippet opens that item (a dialogue opens its
+ *            dialogue, else the list focused on it); the bell / counter
+ *            open the list as before.
+ * The Dock steps the bell down wide → compact BEFORE folding any app tile
+ * (generic `[data-dock-tiers]` protocol, see Dock.astro). This script only
+ * sets the ceiling `data-tier-max`: compact on phone width (< 640 px body
+ * width) or with no active notification, else wide — and asks the Dock to refit
+ * (`aura:dock.refit`) when the content width may have changed.
+ *
+ * It is NOT a `.dock-item`, so it is never moved into the overflow menu.
+ */
+import Icon from '../../ui/Icon.astro';
+---
+<button
+  id="dock-notif-btn"
+  type="button"
+  class="dock-notif-btn"
+  aria-haspopup="dialog"
+  aria-expanded="false"
+  aria-controls="notif-center"
+  aria-label="Notifications: 0 new, 0 total"
+  title="0 new · 0 total"
+  data-dock-tiers="wide,compact"
+  data-tier="compact"
+  data-tier-max="compact"
+  data-new="0"
+  data-prio="none"
+>
+  <span class="dock-notif-icon" aria-hidden="true"><Icon name="bell" /></span>
+  <span class="dock-notif-counts" aria-hidden="true"><span class="dock-notif-new-n">0</span><span class="dock-notif-total">/0</span></span>
+  <span class="dock-notif-latest" aria-hidden="true" data-unseen="false">
+    <span class="dock-notif-dot"></span>
+    <span class="dock-notif-linked" aria-hidden="true" title="Linked to a window"></span>
+    <span class="dock-notif-glyph" data-glyph="lock"><Icon name="lock" /></span>
+    <span class="dock-notif-glyph" data-glyph="pin"><Icon name="pin" /></span>
+    <span class="dock-notif-latest-text"></span>
+  </span>
+</button>
+<span id="dock-notif-live" class="dock-notif-sr" aria-live="polite" aria-atomic="true"></span>
+
+<style is:global>
+  .dock-notif-sr {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  .dock-notif-btn {
+    --dn-accent: var(--aura-color-primary);
+    --dn-glow: var(--aura-glow-primary);
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    height: 44px;
+    min-width: 44px;
+    /* Rightmost in the Dock: the auto margin pushes it to the far edge. */
+    margin-left: auto;
+    flex-shrink: 0;
+    padding: 0 10px;
+    box-sizing: border-box;
+    color: var(--aura-color-text-dim);
+    font-family: var(--aura-font-mono);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    border: var(--aura-border);
+    background: transparent;
+    cursor: pointer;
+    transition: box-shadow 0.1s, color 0.1s;
+  }
+  .dock-notif-btn[data-prio="high"]   { --dn-accent: var(--aura-color-warning); --dn-glow: 0 0 8px var(--aura-color-warning); }
+  .dock-notif-btn[data-prio="urgent"] { --dn-accent: var(--aura-color-danger);  --dn-glow: var(--aura-glow-danger, 0 0 8px var(--aura-color-danger)); }
+  .dock-notif-btn:hover,
+  .dock-notif-btn:focus,
+  .dock-notif-btn:focus-visible { color: var(--aura-color-primary); box-shadow: var(--aura-glow-primary); outline: none; }
+  .dock-notif-btn:focus-visible { box-shadow: inset 0 0 0 2px var(--aura-color-primary), var(--aura-glow-primary); }
+  .dock-notif-btn[aria-expanded="true"] {
+    color: var(--aura-color-bg);
+    background: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+  }
+
+  .dock-notif-icon { line-height: 1; display: inline-flex; font-size: 1.2rem; }
+  .dock-notif-counts { display: inline-flex; align-items: baseline; line-height: 1; }
+  .dock-notif-new-n { font-size: 1.05rem; font-weight: 600; color: var(--aura-color-text-dim); }
+  .dock-notif-total { font-size: 0.72rem; color: var(--aura-color-text-dim); opacity: 0.8; }
+
+  /* Something new: accent + glow on the number, soft steady glow on the bell. */
+  .dock-notif-btn:not([data-new="0"]) .dock-notif-new-n {
+    color: var(--dn-accent);
+    text-shadow: 0 0 6px var(--dn-accent), 0 0 12px color-mix(in srgb, var(--dn-accent) 50%, transparent);
+  }
+  .dock-notif-btn:not([data-new="0"]) .dock-notif-icon {
+    color: var(--dn-accent);
+    filter: drop-shadow(0 0 3px color-mix(in srgb, var(--dn-accent) 70%, transparent));
+  }
+  .dock-notif-btn[aria-expanded="true"] .dock-notif-icon,
+  .dock-notif-btn[aria-expanded="true"] .dock-notif-new-n,
+  .dock-notif-btn[aria-expanded="true"] .dock-notif-total { color: inherit; text-shadow: none; filter: none; }
+
+  /* Wide: + newest unseen item, same plain style (no boxes). */
+  .dock-notif-latest {
+    display: inline-flex; align-items: center; gap: 6px;
+    min-width: 0; max-width: 240px;
+    margin-left: 4px;
+    color: var(--aura-color-text);
+    font-size: var(--aura-font-size-xs, 0.75rem);
+  }
+  .dock-notif-btn[data-tier="compact"] .dock-notif-latest { display: none; }
+  /* Seen: calmer but readable. Unseen: emphasised with the new-count glow. */
+  .dock-notif-latest[data-unseen="false"] { color: var(--aura-color-text-dim); }
+  .dock-notif-latest[data-unseen="true"] .dock-notif-latest-text {
+    text-shadow: 0 0 6px color-mix(in srgb, var(--dn-accent) 55%, transparent);
+  }
+  .dock-notif-latest[data-unseen="false"] .dock-notif-dot { opacity: 0.6; }
+  .dock-notif-latest:hover .dock-notif-latest-text { text-decoration: underline; text-underline-offset: 2px; }
+  .dock-notif-glyph { display: none; line-height: 1; font-size: 0.8rem; }
+  .dock-notif-latest[data-locked="true"] .dock-notif-glyph[data-glyph="lock"],
+  .dock-notif-latest[data-pinned="true"]:not([data-locked="true"]) .dock-notif-glyph[data-glyph="pin"] { display: inline-flex; }
+  /* Locked screen: never show the snippet (phase 5 redacts the store too). */
+  .dock-notif-btn[data-screen-locked="true"] .dock-notif-latest { visibility: hidden; }
+  .dock-notif-latest-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dock-notif-dot { width: 7px; height: 7px; flex-shrink: 0; border-radius: 50%; background: var(--aura-color-primary); }
+  /* Activity-linked snippet: a small yellow diamond (same warning yellow as the window hint). */
+  .dock-notif-linked { display: none; width: 6px; height: 6px; flex-shrink: 0; transform: rotate(45deg); background: var(--aura-color-warning); box-shadow: 0 0 4px var(--aura-color-warning); }
+  .dock-notif-latest[data-linked="true"] .dock-notif-linked { display: inline-block; }
+  .dock-notif-latest[data-prio="low"] .dock-notif-dot { background: var(--aura-color-text-dim); }
+  .dock-notif-latest[data-prio="high"] .dock-notif-dot { background: var(--aura-color-warning); }
+  .dock-notif-latest[data-prio="urgent"] .dock-notif-dot { background: var(--aura-color-danger); }
+  .dock-notif-btn[aria-expanded="true"] .dock-notif-latest { color: inherit; }
+  .dock-notif-btn[aria-expanded="true"] .dock-notif-latest-text { text-shadow: none; }
+
+  /* Arrival: the number and the bell blink + glow 3× (~1.8 s). */
+  .dock-notif-btn[data-pulse="true"] .dock-notif-new-n,
+  .dock-notif-btn[data-pulse="true"] .dock-notif-icon { animation: aura-dock-notif-blink 0.6s ease-in-out 3; }
+  @keyframes aura-dock-notif-blink {
+    0%, 100% { opacity: 1; filter: drop-shadow(0 0 2px var(--dn-accent)); }
+    50%      { opacity: 0.35; filter: drop-shadow(0 0 10px var(--dn-accent)); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .dock-notif-btn[data-pulse="true"] .dock-notif-new-n,
+    .dock-notif-btn[data-pulse="true"] .dock-notif-icon { animation: none; }
+  }
+</style>
+
+<script>
+  import { registerAnchor, NOTIFICATIONS_ANCHOR } from '../../../lib/notifications/anchor.ts';
+  import { getNotifications, type NotificationsRuntime } from '../../../lib/notifications/shared.ts';
+  import { senderLabel } from '../../../lib/notifications/format.ts';
+  import type { StoreSnapshot } from '../../../lib/notifications/store.ts';
+  import { buttonTierMax, buttonView } from '../../../lib/notifications/buttonView.ts';
+  import { opensDialogOnActivate, type ViewDetail } from '../../../lib/notifications/dialogs.ts';
+  import { isActivityLinked } from '../../../lib/notifications/activityLinks.ts';
+  import { isLocked, watchLock } from './placement.ts';
+  const btn = document.getElementById('dock-notif-btn') as HTMLButtonElement | null;
+  if (btn) {
+    const q = <T extends HTMLElement>(sel: string) => btn.querySelector<T>(sel)!;
+    const newN = q('.dock-notif-new-n');
+    const total = q('.dock-notif-total');   // renders "/12"
+    const latest = q('.dock-notif-latest');
+    const latestText = q('.dock-notif-latest-text');
+    const live = document.getElementById('dock-notif-live');
+    const offs: Array<() => void> = [];
+    offs.push(registerAnchor(NOTIFICATIONS_ANCHOR, btn));
+
+    const onClick = (e: MouseEvent) => {
+      e.stopPropagation();
+      // The snippet (wide tier) opens ITS item; the bell / counter toggle the list.
+      const onSnippet = !!(e.target as HTMLElement | null)?.closest('.dock-notif-latest');
+      const item = onSnippet && btn.dataset['tier'] === 'wide' && !isLocked() ? last?.mostImportant ?? null : null;
+      if (item) {
+        const dlg = (window as unknown as { __auraDialogs?: { answer(id: string): unknown } }).__auraDialogs;
+        if (opensDialogOnActivate(item) && dlg) {
+          rt?.actions.markSeen([item.id]);
+          void dlg.answer(item.id);
+        } else {
+          document.dispatchEvent(new CustomEvent('aura:notifications.open', { detail: { id: item.id } }));
+        }
+        return;
+      }
+      document.dispatchEvent(new CustomEvent('aura:notifications.toggle', { detail: { source: 'button' } }));
+    };
+    btn.addEventListener('click', onClick);
+    offs.push(() => btn.removeEventListener('click', onClick));
+
+    let rt: NotificationsRuntime | null = null;
+    let last: StoreSnapshot | null = null;
+    let prevNew: number | null = null;
+    let pulseTimer: ReturnType<typeof setTimeout> | null = null;
+    let liveTimer: ReturnType<typeof setTimeout> | null = null;
+    let fitKey = '';
+
+    const requestFit = () => document.dispatchEvent(new CustomEvent('aura:dock.refit'));
+
+    function tierMax(snap: StoreSnapshot | null): 'compact' | 'wide' {
+      return buttonTierMax(snap, document.body.clientWidth);
+    }
+
+    function apply(snap: StoreSnapshot) {
+      last = snap;
+      // The view itself is DOM-free (lib/notifications/buttonView.ts, unit tested).
+      const v = buttonView(snap, {
+        bodyWidth: document.body.clientWidth,
+        locked: isLocked(),
+        senderOf: (it) => senderLabel(it, rt?.appLookup).label,
+      });
+      const n = v.newCount;
+      btn!.dataset['new'] = String(n);
+      btn!.dataset['prio'] = v.prio;
+      newN.textContent = v.newText;
+      total.textContent = v.totalText;
+      // Whatever the store holds (redacted / empty while locked, phase 5).
+      if (v.latest) {
+        latestText.textContent = v.latest.text;
+        latest.dataset['prio'] = v.latest.prio;
+        latest.dataset['unseen'] = String(v.latest.unseen);
+        latest.dataset['locked'] = String(v.latest.locked);
+        latest.dataset['pinned'] = String(v.latest.pinned);
+        // Phase 4: a yellow diamond when that item is activity-linked.
+        const it = snap.mostImportant;
+        const vd = (window as unknown as { auraViewDetail?: (i: string, a?: string) => ViewDetail | null }).auraViewDetail;
+        latest.dataset['linked'] = String(!!it && !isLocked() && isActivityLinked(it, (c) => vd?.(c.instanceId, c.activityId) ?? null));
+      } else {
+        latest.dataset['linked'] = 'false';
+        latestText.textContent = '';
+        delete latest.dataset['prio'];
+        latest.dataset['unseen'] = 'false';
+        latest.dataset['locked'] = 'false';
+        latest.dataset['pinned'] = 'false';
+      }
+      btn!.setAttribute('aria-label', v.ariaLabel);
+      btn!.title = v.title;
+
+      // Pulse + announce only when the new count goes UP after the first load.
+      if (prevNew !== null && snap.ready && n > prevNew) {
+        btn!.dataset['pulse'] = 'false';
+        void btn!.offsetWidth;               // restart the animation
+        btn!.dataset['pulse'] = 'true';
+        if (pulseTimer) clearTimeout(pulseTimer);
+        pulseTimer = setTimeout(() => { btn!.dataset['pulse'] = 'false'; }, 1900);
+      }
+      if (prevNew !== null && snap.ready && n !== prevNew && live) {
+        // Debounced: a burst of arrivals is one announcement.
+        if (liveTimer) clearTimeout(liveTimer);
+        liveTimer = setTimeout(() => {
+          const cur = last?.unseenCount ?? 0;
+          live.textContent = cur === 0 ? 'No new notifications' : `${cur} new notification${cur === 1 ? '' : 's'}`;
+        }, 800);
+      }
+      if (snap.ready) prevNew = n;
+      refit();
+    }
+
+    /** Set the tier ceiling; ask the Dock to refit when the width may change. */
+    function refit() {
+      const max = tierMax(last);
+      btn!.dataset['tierMax'] = max;
+      const key = `${max}|${newN.textContent}|${total.textContent}|${latestText.textContent}`;
+      if (key === fitKey) return;
+      fitKey = key;
+      requestFit();
+    }
+
+    // Lock screen: hide the snippet and drop it from the label.
+    offs.push(watchLock((locked) => {
+      btn.dataset['screenLocked'] = String(locked);
+      if (last) apply(last);
+    }));
+
+    // Phone ↔ desktop switches (body width, not vw: the shell zooms <body>).
+    const ro = new ResizeObserver(() => refit());
+    ro.observe(document.body);
+    offs.push(() => ro.disconnect());
+    refit();
+
+    let disposed = false;
+    getNotifications().then((runtime) => {
+      if (disposed) return;
+      rt = runtime;
+      offs.push(runtime.store.subscribe(apply));
+      offs.push(runtime.onAppsChanged(() => { if (last) apply(last); }));
+    }).catch((err) => console.warn('[notifications] runtime failed', err));
+
+    const dispose = () => {
+      disposed = true;
+      if (pulseTimer) clearTimeout(pulseTimer);
+      if (liveTimer) clearTimeout(liveTimer);
+      for (const off of offs.splice(0)) { try { off(); } catch { /* ignore */ } }
+    };
+    if (import.meta.hot) import.meta.hot.dispose(dispose);
+    // Explicit teardown (e.g. a future layout swapping the chrome).
+    document.addEventListener('aura:notifications.teardown', dispose, { once: true });
+  }
+</script>

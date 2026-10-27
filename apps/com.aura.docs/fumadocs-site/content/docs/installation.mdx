@@ -25,7 +25,19 @@ cd aura
 docker compose up
 ```
 
-The first build takes a few minutes. Subsequent boots are seconds.
+That one command is the whole installation. The first run builds two
+images and takes a few minutes; later boots take seconds:
+
+- **`aura-shell`** — the desktop, AppManager and reverse proxy.
+- **`aura-base`** — the image every `sandbox: "container"` app (and the
+  OS's helper containers) runs from. Compose builds it first; the shell
+  starts once it is there.
+
+If the shell ever comes up without `aura-base` (for example after a
+`docker image prune`), it builds it by itself: a pinned **Setting up
+AuraOS** notification shows the progress, and container apps start
+when it is done. If that build fails, the notification shows the last
+log lines and a **Retry** button.
 
 Open `http://localhost:3000` in your browser. The desktop comes up
 with the launcher, dock, and a clock in the status bar.
@@ -44,6 +56,14 @@ sandbox spawns, the iframe loads. First-spawn cold start is ~1-3 s;
 subsequent launches hit the warm pool when present.
 
 ## Troubleshooting
+
+**`pull access denied for aura-base, repository does not exist`.**
+`aura-base` isn't on any registry — it is built locally from the
+`Dockerfile`, and Docker tried to download it because it wasn't there.
+`docker compose up` builds it; to build it by hand run
+`docker compose build aura-base`. A running shell also builds it on its
+own (see above); `GET /api/admin/first-boot` shows that build's state
+and `?log=1` its log.
 
 **`GET /api/proxy/com.aura.foo/ → 503`.** The app is mid-spawn. The
 proxy returns 503 until the AppManager's health probe passes. Wait

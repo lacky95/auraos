@@ -44,6 +44,9 @@ class OsEventClient {
   /** Ref-counted topic-pattern union: pattern → number of active subs. */
   private topicRefs = new Map<TopicPattern, number>();
   private lastTopicsSent: string[] = [];
+  /** Reconnect hooks (not fired on the first connect). */
+  private reconnectFns = new Set<() => void>();
+  private connectedOnce = false;
 
   /**
    * Subscribe to one or more topic patterns. Returns an unsubscribe
@@ -63,6 +66,38 @@ class OsEventClient {
     this.ensureConnected();
     this.maybeResubscribe();
     return () => this.unsubscribe(sub);
+  }
+
+  /**
+   * Run `fn` after every RE-connect of the socket (not the first connect).
+   * Subscriptions are re-sent automatically, but events emitted while the
+   * socket was down are not replayed — consumers that keep state (e.g. the
+   * notification store) refetch here. Returns an unsubscribe function.
+   */
+  onReconnect(fn: () => void): () => void {
+    this.reconnectFns.add(fn);
+    this.ensureConnected();
+    return () => { this.reconnectFns.delete(fn); };
+  }
+
+  private lastSidSent: string | null = null;
+  private sessionHooked = false;
+
+  /**
+   * Phase 5: tell the server this tab's client session (also after it
+   * changes), so it can filter lock-screen-hidden notification events for
+   * this socket. Old servers ignore the message.
+   */
+  private sendClientSession(): void {
+    let cs: { sid: string | null; onChange?: (fn: () => void) => () => void } | undefined;
+    try { cs = (window as { __auraClientSession?: typeof cs }).__auraClientSession; } catch { cs = undefined; }
+    if (cs && !this.sessionHooked && typeof cs.onChange === 'function') {
+      this.sessionHooked = true;
+      cs.onChange(() => { if (cs!.sid !== this.lastSidSent) this.sendClientSession(); });
+    }
+    if (!this.sock?.connected) return;
+    this.lastSidSent = cs?.sid ?? null;
+    this.sock.emit('cs', this.lastSidSent ?? '');
   }
 
   /** Force open the socket without subscribing — useful for warming the connection at boot. */
@@ -92,8 +127,24 @@ class OsEventClient {
       reconnectionDelay:    500,
       reconnectionDelayMax: 4000,
       // Heartbeat-ish: socket.io has its own ping/pong, no work needed.
+      // Phase 5: the tab's shell client session (evaluated on every
+      // (re)connect), so the server can leave out `notification:*` events of
+      // items that are hidden on this tab's lock screen. Not a credential.
+      auth: (cb: (data: Record<string, unknown>) => void) => {
+        let cs = '';
+        try { cs = (window as { __auraClientSession?: { sid: string | null } }).__auraClientSession?.sid ?? ''; } catch { /* none */ }
+        cb({ cs });
+      },
     });
-    this.sock.on('connect',    () => { log.info('open', this.sock?.id); this.maybeResubscribe(true); });
+    this.sock.on('connect',    () => {
+      log.info('open', this.sock?.id);
+      this.sendClientSession();
+      this.maybeResubscribe(true);
+      if (this.connectedOnce) {
+        for (const fn of [...this.reconnectFns]) { try { fn(); } catch (err) { log.warn('reconnect hook threw', err); } }
+      }
+      this.connectedOnce = true;
+    });
     this.sock.on('disconnect', (r) => log.info('close', r));
     this.sock.on('connect_error', (e) => log.warn('connect-error', e?.message ?? String(e)));
     this.sock.on('event', (ev: OsEvent) => this.dispatch(ev));

@@ -5,6 +5,11 @@ import StatusBar from '../components/shell/StatusBar.astro';
 import Dock from '../components/shell/Dock.astro';
 import LauncherOverlay from '../components/shell/LauncherOverlay.astro';
 import LockScreenOverlay from '../components/shell/LockScreenOverlay.astro';
+import NotificationCenter from '../components/shell/notifications/NotificationCenter.astro';
+import NotificationToasts from '../components/shell/notifications/NotificationToasts.astro';
+import NotificationDialogs from '../components/shell/notifications/NotificationDialogs.astro';
+import LockScreenNotifications from '../components/shell/notifications/LockScreenNotifications.astro';
+import ClientSession from '../components/shell/ClientSession.astro';
 import { ThemeManager } from '@aura/core';
 import type { AppManifest, ColorMode } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
@@ -58,6 +63,10 @@ const activeThemeId   = activeTheme.id;
   <meta name="aura-color-mode" content={activeColorMode} />
   <meta name="aura-resolved-mode" content={resolvedMode} />
   <style id="aura-theme" set:html={activeThemeCss}></style>
+  <!-- Notifications phase 5: register this tab as a shell client (lock state
+       for server-side redaction) before any notification request. Inline,
+       import-free. -->
+  <ClientSession />
 
   <!--
     Console bridge: wraps console.*, captures uncaught errors + promise
@@ -434,12 +443,24 @@ const activeThemeId   = activeTheme.id;
   -->
   <LauncherOverlay />
   <!--
+    Notification list (drop-up / phone sheet, z 1060) and pop-ups (z 1070),
+    at body root like the launcher — outside #os-root's grid. Both attach to
+    the 'notifications' anchor (the Dock bell). Below the lock screen (2000).
+  -->
+  <NotificationCenter />
+  <NotificationToasts />
+  <!-- Phase 4: notification dialogues (window overlays, floating z 1080, desktop decision z 1900). -->
+  <NotificationDialogs />
+  <!--
     LockScreenOverlay mounted last so its z-index 2000 sits above every
     other shell surface (launcher 1000, focus-view 50, dock, statusbar,
     app iframes). Activated via window.auraLockScreen() or the
     `aura.lockscreen.activate` key binding.
   -->
   <LockScreenOverlay />
+  <!-- Phase 5: the redacted list inside #lockscreen (separate module; if it
+       fails only the list is missing, the lock screen still arms). -->
+  <LockScreenNotifications />
 
   <!--
     Iframe identity guard: on every iframe load, read the <meta name="aura-app-id">

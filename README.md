@@ -111,7 +111,8 @@ docker compose up
 ```
 
 Docker is the only dependency. Open `http://localhost:3000`. The first build
-takes a few minutes; after that the desktop comes up in seconds. Press
+takes a few minutes (compose builds the shell and `aura-base`, the image
+container apps run from); after that the desktop comes up in seconds. Press
 `Ctrl+Alt+Space` for the launcher.
 
 ## How it fits together

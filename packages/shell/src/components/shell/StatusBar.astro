@@ -330,6 +330,22 @@ let initialTimeZone: string = '';
   // focused, that bar stays revealed — no dwell-hide timer. Set/cleared
   // by the focusin/focusout listeners installed further down.
   let topPinned = false, bottomPinned = false;
+  // External pins: floating surfaces OUTSIDE the bars that belong to a bar
+  // (e.g. the notification list above the Dock) keep it revealed while open.
+  // Keyed so several surfaces can pin independently.
+  const extPins = { top: new Set<string>(), bottom: new Set<string>() };
+  (window as any).auraPinBar = (which: 'top' | 'bottom', key: string, pinned: boolean) => {
+    if (which !== 'top' && which !== 'bottom') return;
+    const set = extPins[which];
+    if (pinned) {
+      set.add(key);
+      if (which === 'top' && topTimer)       { clearTimeout(topTimer);    topTimer    = null; }
+      if (which === 'bottom' && bottomTimer) { clearTimeout(bottomTimer); bottomTimer = null; }
+      if (autohideEnabled) setBarVisible(which, true);
+    } else if (set.delete(key) && autohideEnabled) {
+      bumpReveal(which);   // resume the normal dwell-hide from now
+    }
+  };
 
   function setBarVisible(which: 'top' | 'bottom', visible: boolean) {
     if (!root) return;
@@ -340,8 +356,8 @@ let initialTimeZone: string = '';
     // Pinned bars never auto-hide. The pin is owned by the focus
     // listeners — when focus leaves the bar they call bumpReveal again
     // without the pin and the dwell timer is allowed to run.
-    if (which === 'top' && topPinned)    { if (topTimer)    { clearTimeout(topTimer);    topTimer    = null; } return; }
-    if (which === 'bottom' && bottomPinned) { if (bottomTimer) { clearTimeout(bottomTimer); bottomTimer = null; } return; }
+    if (which === 'top' && (topPinned || extPins.top.size > 0))       { if (topTimer)    { clearTimeout(topTimer);    topTimer    = null; } return; }
+    if (which === 'bottom' && (bottomPinned || extPins.bottom.size > 0)) { if (bottomTimer) { clearTimeout(bottomTimer); bottomTimer = null; } return; }
     if (which === 'top') {
       if (topTimer) clearTimeout(topTimer);
       topTimer = setTimeout(() => setBarVisible('top', false), AUTOHIDE_DWELL_MS);
@@ -1739,7 +1755,7 @@ let initialTimeZone: string = '';
     50%      { opacity: 1; }
   }
 
-  /* Right-side status-bar buttons (fullscreen, future: notifications, etc.) */
+  /* Right-side status-bar buttons (fullscreen, etc.). Notifications live in the Dock (bottom bar). */
   .status-btn {
     display: inline-flex;
     align-items: center;

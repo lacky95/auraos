@@ -1,14 +1,14 @@
 .PHONY: aura-base up down restart logs ps
 
 ## aura-base — build the sibling-container image that ContainerRunner spawns
-## from. We reuse the existing `base-rootfs` stage from the main Dockerfile
-## so there's exactly one definition of "what's in a fresh AuraOS sandbox".
-## Re-run this whenever you change the base-rootfs apt list.
+## from (the `aura-base` stage of the Dockerfile). `docker compose up` builds
+## it too (build-only `aura-base` service), so this target is only a shortcut.
+## Re-run it whenever you change that stage.
 aura-base:
-	docker build -t aura-base -f Dockerfile --target aura-base .
+	docker compose build aura-base
 
-## up — bring AuraOS up (depends on aura-base for sandbox: 'container' apps).
-up: aura-base
+## up — bring AuraOS up; compose builds aura-base first (depends_on).
+up:
 	docker compose up -d --build aura-os
 
 down:

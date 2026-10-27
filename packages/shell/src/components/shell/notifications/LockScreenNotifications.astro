@@ -1,0 +1,147 @@
+---
+/**
+ * LockScreenNotifications — the read-only notification list ON the lock
+ * screen (notifications phase 5).
+ *
+ * Renders into `#lockscreen-notifications`, a slot inside LockScreenOverlay
+ * (which stays an import-free inline script). This is a separate bundled
+ * module: if it fails to load, only the list is missing — the lock screen
+ * still arms and dismisses.
+ *
+ * What it shows comes from the SERVER's locked view of this tab's client
+ * session (the shared store reloads it after the lock was acked):
+ *   public  → title + text, no components
+ *   private → sender + publicTitle / publicText (or "New notification")
+ *   secret  → not delivered at all
+ * As a second line of defence it renders ONLY items the server marked
+ * `lockscreen: true`, and nothing while the screen is unlocked (the DOM is
+ * emptied on unlock). No buttons, no inputs: a click or key dismisses the
+ * lock screen as before. Sorted pinned → priority → newest, with a count.
+ * Phone: a compact list under the clock.
+ */
+---
+<style is:global>
+  #lockscreen-notifications {
+    margin-top: calc(28px * var(--ls-zoom, 1));
+    width: min(420px, 100%);
+    max-height: 45%;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    text-align: left;
+    font-family: var(--aura-font-mono, monospace);
+  }
+  #lockscreen-notifications .ls-ntf-count {
+    font-size: calc(0.7rem * var(--ls-zoom, 1));
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--aura-color-text-dim, #557755);
+  }
+  #lockscreen-notifications .ls-ntf {
+    --ls-ntf-accent: var(--aura-color-border, #224422);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px 8px 6px 10px;
+    border: 1px solid var(--aura-color-border, #224422);
+    border-left: 3px solid var(--ls-ntf-accent);
+    background: rgba(255, 255, 255, 0.03);
+    font-size: calc(0.75rem * var(--ls-zoom, 1));
+    color: var(--aura-color-text, #ccffcc);
+    min-width: 0;
+  }
+  #lockscreen-notifications .ls-ntf[data-priority="high"]   { --ls-ntf-accent: var(--aura-color-warning, #ffb000); }
+  #lockscreen-notifications .ls-ntf[data-priority="urgent"] { --ls-ntf-accent: var(--aura-color-danger, #ff4a4a); }
+  #lockscreen-notifications .ls-ntf-head {
+    display: flex; gap: 6px; align-items: baseline; min-width: 0;
+    color: var(--aura-color-text-dim, #557755);
+    font-size: 0.85em; letter-spacing: 0.06em;
+  }
+  #lockscreen-notifications .ls-ntf-sender { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  #lockscreen-notifications .ls-ntf-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #lockscreen-notifications .ls-ntf-text {
+    color: var(--aura-color-text-dim, #557755);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #lockscreen-notifications .ls-ntf-more {
+    font-size: calc(0.65rem * var(--ls-zoom, 1));
+    color: var(--aura-color-text-dim, #557755);
+    letter-spacing: 0.1em;
+  }
+  @media (max-width: 640px) {
+    #lockscreen-notifications { width: 100%; margin-top: 16px; }
+    #lockscreen-notifications .ls-ntf-text { display: none; }
+  }
+</style>
+
+<script>
+  import { getNotifications } from '../../../lib/notifications/shared.ts';
+  import { senderLabel, relativeTime } from '../../../lib/notifications/format.ts';
+  import type { Notification } from '../../../lib/notifications/api.ts';
+  import { Disposer, isLocked, watchLock } from './placement.ts';
+
+  const MAX_SHOWN = 6;
+  const slot = document.getElementById('lockscreen-notifications');
+  if (slot) mount(slot);
+
+  function mount(slot: HTMLElement) {
+    const d = new Disposer();
+    let locked = isLocked();
+    let items: readonly Notification[] = [];
+    let lookup: Parameters<typeof senderLabel>[1];
+
+    function el(tag: string, cls: string, text?: string): HTMLElement {
+      const e = document.createElement(tag);
+      e.className = cls;
+      if (text !== undefined) e.textContent = text;
+      return e;
+    }
+
+    function render() {
+      if (!locked) { slot.replaceChildren(); return; }
+      // Only the server's lock-screen view, never a full item.
+      const shown = items.filter((n) => n.lockscreen === true && n.state === 'active');
+      if (shown.length === 0) { slot.replaceChildren(); return; }
+      const nodes: HTMLElement[] = [];
+      nodes.push(el('div', 'ls-ntf-count', `${shown.length} notification${shown.length === 1 ? '' : 's'}`));
+      for (const n of shown.slice(0, MAX_SHOWN)) {
+        const card = el('div', 'ls-ntf');
+        card.dataset['priority'] = n.priority;
+        const head = el('div', 'ls-ntf-head');
+        const who = senderLabel(n, lookup);
+        head.append(el('span', 'ls-ntf-sender', `${n.pinned ? '⌖ ' : ''}${who.label}${who.unverified ? ' (unverified)' : ''}`));
+        head.append(el('span', 'ls-ntf-time', relativeTime(n.createdAt)));
+        card.append(head, el('div', 'ls-ntf-title', n.title));
+        if (n.text) card.append(el('div', 'ls-ntf-text', n.text));
+        nodes.push(card);
+      }
+      if (shown.length > MAX_SHOWN) nodes.push(el('div', 'ls-ntf-more', `+ ${shown.length - MAX_SHOWN} more`));
+      slot.replaceChildren(...nodes);
+    }
+
+    d.add(watchLock((now) => { locked = now; render(); }));
+    // The lock screen dispatches this before it reports the lock: empty at once.
+    d.listen(window, 'aura:notifications:wipe', () => { items = []; slot.replaceChildren(); });
+
+    let disposed = false;
+    getNotifications().then((rt) => {
+      if (disposed) return;
+      lookup = rt.appLookup;
+      d.add(rt.store.subscribe((snap) => { items = snap.items; render(); }));
+      d.add(rt.onAppsChanged(() => render()));
+    }).catch((err) => console.warn('[notifications] lock-screen list unavailable', err));
+
+    const tick = window.setInterval(() => { if (locked) render(); }, 30_000);
+    d.add(() => clearInterval(tick));
+
+    const dispose = () => {
+      if (disposed) return;
+      disposed = true;
+      slot.replaceChildren();
+      d.dispose();
+    };
+    if (import.meta.hot) import.meta.hot.dispose(dispose);
+    document.addEventListener('aura:notifications.teardown', dispose, { once: true });
+  }
+</script>

@@ -1,0 +1,676 @@
+---
+title: Notifications
+description: One notification service for apps, agents, REST callers and AuraOS — types, components, permissions, the lock screen, read access, retention, SDK and MCP.
+---
+
+AuraOS has **one notification service**. Apps, AuraOS itself, agents (through
+the Shell Daemon MCP) and external REST callers all use it. Notifications are
+stored in Valkey and survive a shell restart. They reach every open shell
+window and phone live, and their whole lifecycle is recorded.
+
+Two principles shape the design:
+
+- **The core stores, the interface presents.** The service keeps the
+  message, its question (components) and its context. How it is shown is up
+  to each interface: the desktop shell, the phone layout, and later voice or AR.
+- **Asking is not interrupting.** Having a question does not give a sender
+  the right to interrupt the user. A dialogue waits in the list with
+  **Answer** until the user picks it up. Interrupting (pop-up dialogues,
+  Locked notifications, blocking a window) needs extra permissions or is
+  reserved for AuraOS itself.
+
+Reference pages: the SDK in [`osClient.notifications`](/docs/sdk-reference#osclientnotifications),
+and the event catalogue in [Event bus & IPC](/docs/deep-dive/event-bus-and-ipc).
+
+---
+
+## Quick start
+
+From an app backend (Node: `Authorization: Bearer $AURA_INSTANCE_TOKEN` is sent
+for you, so you are a **verified** sender):
+
+```ts
+import { OsClient } from '@aura/app-sdk';
+const os = new OsClient();
+
+const { notification, warnings } = await os.notifications.create({
+  type: 'dialogue',
+  title: 'Deploy release 1.4?',
+  text: 'Pick the target. Logs: https://ci.example.com/run/42',
+  priority: 'high',
+  components: [
+    { kind: 'select', id: 'region', label: 'Region', required: true,
+      options: [{ id: 'eu', label: 'Europe' }, { id: 'us', label: 'United States' }] },
+    { kind: 'button', role: 'submit', label: 'Deploy' },
+    { kind: 'button', role: 'cancel', label: 'Not now' },
+  ],
+  context: { kind: 'task', id: 'deploy-42', label: 'Release 1.4' },
+});
+
+// Keep working, then collect the answer (bounded long-poll).
+const r = await os.notifications.waitForAnswer(notification.id, { timeoutMs: 120_000 });
+if (r.status === 'resolved' && r.outcome === 'submitted') deploy(r.answer);
+```
+
+The manifest needs `"permissions": ["system.notifications"]`.
+
+From the shell with curl (an API key, see [Admin](#admin-login-grants-and-api-keys)):
+
+```sh
+curl -s -X POST "$OS_API_BASE/api/notifications" \
+  -H "Authorization: Bearer $AURA_API_KEY" -H 'content-type: application/json' \
+  -d '{"title":"Backup finished","text":"312 GB in 41 min","priority":"low"}'
+```
+
+From an agent: the Shell Daemon MCP tool `create_notification` (see [MCP](#agents-the-shell-daemon-mcp)).
+
+---
+
+## The data model
+
+Every notification has:
+
+| Field | Meaning |
+|---|---|
+| `type` | `simple` (default), `locked` or `dialogue`. Fixed at create. |
+| `title`, `text` | Title (≤ 200) and short text (≤ 4000). `http(s)` URLs in the text become links; nothing else is interpreted (no HTML, no markdown). |
+| `icon`, `image` | Icon: a Lucide sprite name (`lucide-bell`), a short glyph (≤ 3 chars) or an image URL. `image`: an optional larger image (shown in the list). |
+| `priority` | `low`, `medium` (default), `high` or `urgent` — see [Priorities](#priorities). |
+| `visibility` | `public`, `private` (default) or `secret` on the lock screen, plus optional `publicTitle` / `publicText`. See [Lock screen](#lock-screen-visibility). |
+| `pinned` | Stays on top of the list. Independent of `locked`. |
+| `timeoutMs` | Lifetime: removed automatically (`removedReason: 'expired'`) after this many ms. Default: never. |
+| `popupDurationMs` | How long the **pop-up** shows (not the lifetime). See [Pop-ups](#pop-ups). |
+| `components[]` | Up to 8: inputs, choices, selects, buttons, progress. See [Components](#components). |
+| `context` | What it is about: `{ kind: 'activity' \| 'instance' \| 'task' \| 'installation' \| 'app' \| 'custom', id, appId?, label? }`. Separate from the sender. Activities and instances of your own app's windows give the user **Go to activity** (other contexts: **Go to task**) and decide where a dialogue opens. |
+| `popup`, `blocking`, `scope` | Dialogue placement, see [Dialogues](#dialogues). |
+| `sender` | Set by the **server** from the caller's identity: `{ kind: 'app' \| 'agent' \| 'rest' \| 'auraos' \| 'unknown', id?, name?, attribution }`. A client can only add display hints (`sender.name`, `sender.icon`, `sender.actor.name`), which are marked *declared* / *unverified*. Identity fields in the body are ignored, and a warning says so. |
+
+Server-set fields: `id` (`ntf_…`), `state`, `createdAt` / `updatedAt` /
+`displayedAt` / `seenAt` / `resolvedAt` / `removedAt`, `removedReason`,
+`answer`, `outcome`, `lastInteraction`, `history[]` (every transition with
+its time and actor), and `senderKey` (`app:<id>`, `auraos`, `key:<keyId>`,
+`anon:rest`, …).
+
+### Lifecycle
+
+```
+created ──► displayed ──► seen ──► (updated …) ──► resolved   (dialogue answered)
+                                               └─► removed    (dismissed · expired · completed · force-removed · cleared)
+```
+
+- `displayed` and `seen` are recorded once. Opening the list marks
+  notifications seen. Clicking a pop-up marks it seen at once.
+- `resolved` is final for answers (a second resolve → 409). The item can
+  still be dismissed from the list afterwards.
+- The **sender** ends its own item with `remove` (`removedReason: 'completed'`).
+  Dismissing is a **user** action.
+
+### Priorities
+
+| Priority | In the shell |
+|---|---|
+| `low` | Sorted last. The pop-up hides after 8 s. |
+| `medium` (default) | The pop-up hides after 8 s. |
+| `high` | Warning tint. The pop-up stays until handled, and it may push out a low / medium pop-up when all three slots are taken. |
+| `urgent` | The highest level, for time-critical problems (a failed deploy, a security alert). Danger tint, sorted first, the pop-up stays until handled, and screen readers announce it **assertively** (it interrupts what they are reading). Use it sparingly. |
+
+The list is sorted pinned first, then by priority, then newest first. The
+Dock button's counter takes the tint of the highest unseen priority.
+
+---
+
+## Types
+
+### Simple
+
+The base type: title, text, icon, time, optional image and components. The
+user can dismiss it from the list (✕, or Delete on a focused card), and
+**Clear all** removes it.
+
+### Locked
+
+Inherits everything from Simple, but the user cannot dismiss it the normal
+way: no ✕, Clear all skips it, and a `dismiss` button is disabled. The sender
+removes it when its task is done. The user still has a secondary way out: the
+card's **⋯ → Force remove…** menu, after a confirmation. The sender then sees
+`state: 'removed'` with `removedReason: 'force-removed'`.
+
+Locked needs the privileged permission `notifications.locked` (see
+[Permissions](#permissions)). Without it, the notification is created as
+Simple, and `warnings[]` says so.
+
+### Dialogue
+
+A question built from the same components. It stays in the list with
+**Answer** until it is resolved, and its answer is stored and sent back to
+the sender. Clicking the card (or Answer) opens it as a dialogue.
+
+---
+
+## Components
+
+| `kind` | Fields | Value / behaviour |
+|---|---|---|
+| `input` | `id`, `label?`, `placeholder?`, `multiline?`, `required?` | A string (≤ 4000). |
+| `options` | `id`, `label?`, `multiple?`, `display?`, `options: [{id, label, description?}]` | A single option id, or an array of ids with `multiple`. `display` (see below): `segmented` chips (default, 1–4 options), `radio` list (1–8) or `checkbox` list (`multiple`, 1–8). |
+| `select` | `id`, `label?`, `placeholder?`, `required?`, `default?`, `options` (1–50) | A dropdown. The value is one option id. `default` preselects one (it must be an option id). |
+| `combobox` | `id`, `label?`, `placeholder?`, `required?`, `allowCustom?`, `default?`, `options` (0–50) | Searchable: the user types to filter the options. The value is an option id or, **only with `allowCustom`**, the typed text itself (trimmed, ≤ 200). A value equal to an option id always means that option. Without `allowCustom` it needs at least one option, and `default` must be an option id. |
+| `markdown` | `id`, `label?`, `text` (≤ 64 KB), `view?` (`rendered` \| `source`), `editable?`, `required?`, `maxHeight?` (`'auto'` or 80–4000 px; default 320) | A document — a report, summary or log. At most **2** per notification (within the 8 components). Read-only by default and sends no value. With `editable: true` it is a form field: the edited text is the value (`answer.values[id]`, ≤ 64 KB, checked in interact and resolve), drafts and `required` work like an input. See [Markdown](#markdown). |
+| `button` | `id`, `label`, `variant?` (`primary` \| `secondary` \| `tertiary`), `action?` (`resolve` \| `dismiss` \| `link`), `href?`, or `role` | See below. |
+| `progress` | `id?`, `value` (0..1, or `null` for indeterminate), `label?` | Status, updated by the sender with `update`. Always visible, also on a collapsed card. |
+
+**Options display.** How an `options` component looks:
+
+| `display` | For | Options | Looks like |
+|---|---|---|---|
+| `segmented` (default for a single choice) | single choice | 1–4 | A row of chips. A `description` becomes the chip's tooltip. |
+| `radio` | single choice | 1–8 | A vertical list of round radio buttons, one option per line, each with its `description` (dim, smaller) under the label. Arrow keys move within the group. |
+| `checkbox` (the default and only display with `multiple: true`) | multiple choice | 1–8 | A checkbox list, with descriptions. |
+
+`display: 'radio'` or `'segmented'` together with `multiple: true`, and
+`display: 'checkbox'` without it, are refused with 400; so are more options
+than the display allows. An option's `description` is at most 200 characters.
+
+### Markdown
+
+The `markdown` component shows a document in the dialogue: headings,
+paragraphs, **bold** / *italic* / ~~strike~~, inline code, fenced code blocks
+(monospace, scrolling sideways, with their own Copy), nested lists, task lists
+(read-only checkboxes), blockquotes, tables (scrolling sideways), rules and
+links. It scrolls inside its area (`maxHeight`) and follows the theme in light
+and dark mode.
+
+- **Toolbar:** *Source* (*Edit* when editable) switches between the rendered
+  view and the raw markdown (a monospace text area, read-only unless
+  `editable`); *Copy* copies the raw markdown ("Copied ✓"). Both are
+  keyboard-accessible buttons; the toggle has `aria-pressed`. Switching back
+  to the rendered view renders the edited text.
+- **Where:** the full area only renders in a **dialogue** (floating, centred,
+  in-window, system modal, phone sheet / full view). The list and pop-ups
+  show a short preview (cut with "…") and **Show**, which opens the
+  dialogue — for a Simple notification too.
+- **Updates:** a new `text` from `update` is patched in place: the view mode
+  and the scroll position stay, and an editable field keeps what the user
+  typed.
+- **Safety:** the shell uses its own small parser that has no HTML node at
+  all, and builds the DOM with `textContent` only:
+  - raw HTML (`<script>`, `<img onerror>`, `<iframe>`, comments) shows as
+    plain text;
+  - only absolute `http(s)` and `mailto` links become links, and they open
+    in a new tab with `noopener noreferrer` (like text links); `javascript:`,
+    `data:`, `vbscript:` and relative links show as struck-through text;
+  - images are **never loaded** (a remote image in a notification is a
+    tracking pixel): an http(s) image becomes a link with its alt text.
+- On the lock screen markdown is never shown (components are not part of
+  the lock-screen view).
+
+Component ids are 1–64 characters of `[A-Za-z0-9_.-]` and unique within a
+notification. Option ids follow the same rule and must be unique within
+their component.
+
+### Buttons, roles and the outcome
+
+Every dialogue has three **standard buttons**, set with `role`. The shell adds
+the ones you leave out. The order is: your custom buttons, then Later,
+Cancel, Submit (Submit is the primary one, on the right; on a phone the
+buttons stack).
+
+| `role` | Default text | What it does |
+|---|---|---|
+| `submit` | "Submit" when there are fields, else "OK" | Checks required fields, then resolves with `answer: { outcome: 'submitted', buttonId, values }`. |
+| `cancel` | "Cancel" | No validation and no values: resolves with `answer: { outcome: 'cancelled', buttonId }`. |
+| `later` | "Later" | Local only: hides the dialogue; it stays in the list. Not on blocking dialogues or system decisions. The dialogue's header ✕ and Escape do the same. |
+
+- A role button may give only a `label` (`{ kind: 'button', role: 'cancel', label: 'No thanks' }`).
+  Its `id` defaults to the role. There is at most one button per role.
+- Custom buttons (no `role`) need `id` and `label`:
+  - `action: 'resolve'` resolves like a submit;
+  - `action: 'dismiss'` dismisses the notification (disabled on Locked);
+  - `action: 'link'` opens `href` (`http(s)` only);
+  - no `action`: an **interaction** (see below), and the notification stays open.
+- A resolved item carries a top-level `outcome: 'submitted' | 'cancelled'`.
+  A resolve without one counts as `submitted`. `values` maps component ids
+  to their values: a string, an option id, or an array of option ids.
+- The server validates `answer.values` against the components:
+  - an unknown option id is refused with 400;
+  - a select value that is not an option is refused;
+  - free text in a combobox without `allowCustom` is refused.
+  Keys that are not field components are left alone.
+
+### Interactions
+
+In the **list**, choosing an option or a select entry and submitting an
+input (Enter) keep the notification active and send an **interaction**; so
+does a button without `action`, everywhere:
+
+- `POST /api/notifications/<id>/interact {componentId, value?, values?}` (a user op);
+- the item's `lastInteraction` becomes `{ componentId, kind, value?, values?, at, actor }`;
+- the event `notification:interacted` fires.
+
+Inside an open **dialogue** and in a **pop-up**, fields are local form state.
+Values go with a button (Submit, or a button without `action`), so choosing,
+typing or opening a select never re-renders or "reloads" the form. The first
+click on any control of a dialogue or form pop-up makes it the active surface
+(timer stopped, marked read); later clicks only change that control.
+
+The sender sees interactions without polling:
+- SDK `waitForInteraction`;
+- MCP `wait_for_answer` with `interactions: true`;
+- REST `?waitFor=interaction` (see [REST API](#rest-api)).
+
+### Drafts
+
+What the user types or picks in a notification is saved in that browser
+(localStorage, key `aura.notif.draft.<id>`) on every change. It is restored
+when the card or dialogue is shown again, also after a reload. The draft is
+removed when the dialogue is submitted or cancelled, or when the
+notification is resolved or removed. Drafts older than 7 days are cleaned up.
+Drafts are never restored into a locked screen. They do stay in the browser
+across a lock (see the [privacy note](#privacy-note)).
+
+---
+
+## The shell UI
+
+- **Dock button** (bottom bar, right). Bell plus the counter `new/total`.
+  - The new number glows in the tint of the highest unseen priority, and the bell blinks briefly when something new arrives.
+  - When there is room, the wide form also shows the most important item as "sender: title".
+  - On a phone it is always the compact form.
+- **List.** Opens upward from the button; on a phone it is a bottom sheet.
+  - Unseen items are highlighted; pinned items come first, then priority, then newest.
+  - Each item shows its sender (with an *unverified* marker where it applies), **Go to activity** for its own window or **Go to task** for another context, and **Answer** for a pending dialogue.
+  - **Clear all** skips Locked items. The ⋯ menu has "Clear from (sender)" and "Clear history now".
+  - Keyboard: arrows, Home and End move between items; Delete dismisses; Escape closes.
+- **Pop-ups.** At most three at the bottom right, above the Dock (on a phone, above the Dock or the on-screen keyboard). They never take keyboard focus. More arrive while all three slots are taken → they queue and pop up when a slot frees (opening the list clears the queue).
+  - A click marks the item seen. It opens a dialogue (or a form) as a dialogue, and otherwise only hides that pop-up.
+  - The pop-up's ✕ hides it and keeps the item **unread**.
+- **Dialogues** open over their own window, float, or open as a sheet on a phone; see [Dialogues](#dialogues).
+- **Maximize.** Every dialogue on the desktop has a ⤢ button next to its ✕ (tooltip *Maximize* / *Restore*,
+  `aria-pressed`) and the shortcut **Alt+Shift+Enter** while focus is inside it. A system modal, a centred
+  or a floating dialogue then fills the app area between the top bar and the Dock (14 px margin); an
+  in-window panel fills its window. The state is kept per notification for the browser tab (also across
+  updates and reloads) and forgotten when the item ends. A markdown area grows with the dialogue. Dialogues
+  with markdown also start larger. Not on the phone.
+  - **`maximized: true`** (create / update, any sender, no grant) makes the dialogue *start* maximized — e.g.
+    for a long markdown report. The user's own maximize / restore for that item in the tab wins; a sender update
+    of `maximized` applies only while the user has not toggled it. Without a dialogue (not type dialogue and no
+    form or markdown) it is dropped with an `ignored-field` warning. Ignored on the phone.
+- **Select and combobox** render as ARIA comboboxes with a listbox, keyboard included:
+  - **select:** ↓ ↑ Enter or Space open the list. Then ↑ ↓ Home End PageUp PageDown move, typing jumps to a matching option, Enter, Space or Tab choose, and Escape closes the list.
+  - **combobox:** type to filter, ↑ ↓ choose, Enter takes the active option, Escape closes the list (a second Escape clears the text).
+  - The list pops up above everything, so a window, sheet or dialogue never clips it.
+
+### Pop-ups
+
+`popupDurationMs` (optional, an integer up to 24 h) sets how long the pop-up
+shows. `timeoutMs` is the notification's lifetime and is a different thing.
+
+- **Absent:** the default. Low and medium pop-ups hide after 8 s; high and urgent ones stay until handled.
+- **`> 0`:** the pop-up hides after that many ms; the notification stays in the list.
+- **`0` or `-1`** (any negative is stored as `-1`): a **sticky** pop-up. It stays until the user dismisses, opens or answers it, or the item is removed or expires.
+  - It holds one of the three slots and is never pushed out.
+  - With three sticky pop-ups, new items queue.
+- In `update`, `null` goes back to the default.
+- Hovering or focusing a timed pop-up pauses it.
+
+---
+
+## Dialogues
+
+Where a dialogue opens depends on its `context` and on what the sender is
+allowed to do:
+
+| Situation | Where it opens |
+|---|---|
+| `context` is an activity / instance of the **sender's own visible window** | A panel docked at the bottom of that window. It can be collapsed, the window stays usable, and Later / ✕ / Escape hide it. |
+| …with `blocking: true` | A dimmed cover over **only that window**, which is inert until answered (its title bar and the rest of the desktop still work). No Later. |
+| The window is minimized or on another workspace | Nothing is pulled forward. The item waits in the list with **Answer**, and the window chip or workspace pill (or the ‹ › ▦ switcher) gets a marker. Answer reveals the window first. |
+| No window of the sender (a background app, an agent, REST) | A notification with **Answer**. The dialogue floats over the desktop only when the user answers. |
+| `popup: true` (needs `notifications.popup`) | Opens at once, without a click, but never takes focus. At most 3 forced pop-ups per sender per 10 minutes; beyond that `popup` is turned off with a warning. |
+| `scope: 'system'` + `blocking: true` | A **system modal**: it opens **at once** and blocks the whole Aura shell (`popup` is irrelevant). AuraOS's own system decisions, or an app (agent, API key) with the admin-granted `notifications.systemModal` — see [System modals](#system-modals). Without the grant, or over the limit: `scope: 'auto'` with a warning. |
+| `scope: 'system'` without blocking | A centred dialogue that also opens **at once** and blocks nothing. Because it interrupts, it needs `notifications.popup` (or `systemModal`) and counts against the forced pop-up limit; without it: `scope: 'auto'` with a warning. |
+| Phone | A sheet, or a full view for complex content (more than 3 fields, a multiline input, or markdown). |
+
+A dialogue is never placed over **another** app's window: a sender can only
+cover a window it owns, so no app can phish over another.
+
+### System modals
+
+Placement, blocking and opening by itself are separate permissions:
+
+| Permission | Allows |
+|---|---|
+| `system.notifications` | ordinary notifications and questions |
+| `notifications.popup` | open a dialogue by itself (`popup: true`), at most 3 per sender per 10 min |
+| `notifications.systemModal` | a dialogue that **opens at once and blocks the whole Aura shell** (`scope: 'system'` + `blocking: true`; `notifications.popup` is not needed), at most 5 per sender per 10 min by default ([configurable](#system-modal-limit)) |
+
+- `systemModal` is privileged like `locked` / `popup`: the manifest requests it, it is **off** until an admin grants it
+  (`aura grant nperm <app> systemModal`, or Settings → Notifications & access), pinned to the install scope, and revocable.
+  Without it the request is downgraded to `scope: 'auto'` with a warning.
+- A system dialog **always opens at once** — there is no "waits in the list" mode. A blocking one counts only against
+  the system-modal limit (not the forced pop-up limit); a centred, non-blocking one needs `notifications.popup` (or
+  `systemModal`) and counts against the pop-up limit. A `scope: 'system'` request ends up as a normal dialogue / pop-up only when
+  the sender has no grant or is over its limit (with a warning) — or after a force-hide (below).
+- **The app stays the sender.** It never gets AuraOS identity or styling: the modal shows **"Requested by &lt;App&gt;"** with
+  its glyph and verified / unverified attribution, in an app-coloured frame. AuraOS's own decisions keep their system look.
+  Agents get it only if the Shell Daemon (`com.aura.aurashelld`) itself is granted; agent names never matter.
+- **Force hide** — a malfunctioning app can never lock the shell:
+  - every app system modal has a **"Hide this dialogue"** link in its corner, and the protected shortcut
+    **Ctrl+Alt+Shift+Esc** (handled by the shell in the capture phase; apps never see it). Both ask first:
+    "Hide this dialogue from &lt;App&gt;? The app will be told."
+  - Force hide releases the blocking and turns the item into a normal dialogue in the list (scope auto, not resolved, not
+    dismissed). The sender sees a history entry `updated` with reason `force-hidden`.
+  - After a force-hide, that sender's system modals may not open **by themselves** in that tab for about 10 minutes, even
+    if it asks again in a loop: they wait as a pop-up / in the list. Opening one on purpose (Answer, a click) still shows
+    the modal. Reloading the shell tab ends the suppression.
+  - **Only AuraOS's own decisions cannot be hidden** — answer them.
+- **Revocation releases blocking:** revoking `systemModal`, disabling or uninstalling the app releases each of its active
+  system modals at once (blocking off, scope auto, reason `permission-revoked`); every client lets go immediately. A
+  startup / periodic sweep does the same for modals whose grant went away while the shell was down.
+- **Admin escape hatch:** `aura admin notif release <id>` or `aura admin notif release --app <appId>` (reason
+  `admin-released`). The user op is `POST /api/notifications/<id>/force-hide`.
+
+#### Desktop-modal limit
+
+Each sender may keep at most **5 blocking system modals per 10 minutes** by default; beyond that the request is
+downgraded to a normal dialogue. The user changes it in **Settings → Notifications & access → System modals** (no
+admin unlock — it is a preference, stored in `os/notifications`):
+
+```json
+{ "systemModal": { "limit": 5, "windowMinutes": 10, "perSender": { "app:com.example.ops": "unlimited", "app:com.example.chatty": 1 } } }
+```
+
+- `"unlimited"` (or `0`) turns the limit off — globally or for one sender. Changes apply to the next request.
+- A hit returns the warning code **`system-modal-rate-limited`** with `{ limit, windowMinutes, retryAfterMs, remaining: 0 }`.
+  A kept system modal's create response carries `systemModal: { remaining, limit, windowMinutes }` (`remaining` null =
+  unlimited), so a sender can show its budget.
+- Whatever the limit, force-hide and its per-tab suppression remain the protection against a request loop.
+
+---
+
+### Activity-linked notifications are sticky
+
+A notification whose `context` is an `activity` or `instance` of **your own**
+app's window is *activity-linked*:
+
+- The window shows a **yellow hint**: a badge with the count in its title bar
+  ("2 notifications for this window") and a warning-coloured edge. The
+  minimized-window chip and the workspace pill (or the ‹ › arrows) carry the
+  same marker. Clicking the badge opens the item, or the list when there are
+  several.
+- Inside the window it sits as a compact **yellow bar** with Answer (any
+  type, including Simple ones), unless the user opened it or you forced it
+  with `popup`. Later / ✕ collapse it back to the bar — it never disappears
+  on its own.
+- It **ends only on a user action** (submit, cancel, dismiss, clear — in the
+  panel or the list), when **you** remove or resolve it, or when it expires
+  by its own `timeoutMs` (its lifetime).
+- Its corner pop-up is **sticky** too: it stays until the user handles it
+  (✕, click, swipe), counts as sticky for the three pop-up slots, and
+  `popupDurationMs` > 0 is **ignored** for activity-linked items.
+- In the notification list and the pop-ups it has the same yellow accent,
+  and its button reads **Go to activity** (with the app and window, e.g.
+  "Go to activity · Notepad · Window 2") instead of "Go to task": it reveals
+  the window and opens its panel. The Dock's wide snippet shows a small
+  yellow diamond for it.
+- While the screen is locked nothing shows, as for every notification. Lock-screen views
+  never name the window.
+
+Only verified senders link to their own windows; a context that points at
+another app's window gets no badge and no in-window panel.
+
+## Permissions
+
+> **Renamed in phase 6 (deprecated names still work for now):** the placement `scope: 'desktop'` is now
+> `scope: 'system'` (`desktop` is accepted and mapped, with a `deprecated-field` warning; stored items are migrated),
+> the permission `notifications.desktopModal` is now `notifications.systemModal` (existing grants were migrated —
+> audit "migrated grant desktopModal → systemModal"; the old name is accepted in `aura grant/revoke nperm`, in
+> manifest `permissions[]` and by the grants API), the setting `os/notifications.desktopModal` is now `systemModal`, the
+> warning `desktop-modal-rate-limited` is now `system-modal-rate-limited` and the create-response field `desktopModal`
+> is now `systemModal`. *System modal* = `scope: 'system'` + `blocking`; *system dialog* = `scope: 'system'` without it.
+
+| Permission | Who grants it | Without it |
+|---|---|---|
+| `system.notifications` | Manifest permission (`aura grant perms <app> system.notifications`) | 403 on create. |
+| `notifications.locked` | Requested in the manifest **and** granted by an admin | `type: 'locked'` is downgraded to `simple`, with a warning. |
+| `notifications.popup` | Requested in the manifest **and** granted by an admin | `popup` is turned off, with a warning. The dialogue waits in the list. |
+| `notifications.read` | Requested in the manifest **and** granted by an admin with a scope | The app reads only its own notifications. |
+
+- `blocking` needs no grant, but only works on the sender's **own** window. The server checks
+  that the activity or instance belongs to the calling app; it never trusts `context.appId`.
+- Downgrades never fail the request. The response's `warnings[]` lists each
+  one (`{code: 'downgraded' | 'ignored-field', field, from, to, message}`).
+- Grants and revokes take effect at once, without a restart.
+- A sender changes and removes only its **own** notifications. Every sender
+  is limited to 30 creates per minute (429 beyond).
+
+### Admin login, grants and API keys
+
+Privileged grants and API keys need an **admin session**. There is one shared
+operator credential, kept in the master container at
+`/data/aura/secrets/admin.key`. It is never logged.
+
+```sh
+aura admin login              # credential from AURA_ADMIN_CREDENTIAL, the master key file, or a prompt
+aura admin status
+aura get nperm                # requested vs granted vs effective, per app
+aura grant nperm com.example.app locked popup
+aura grant nperm com.example.dash read --scope app:com.example.notes
+aura grant nperm com.example.dash read --scope sender:auraos,app:com.example.ci --include-secret
+aura revoke nperm com.example.app popup
+aura apikey create ci-bot     # Bearer aura_k1_… — the secret is shown once
+aura apikey ls
+aura apikey revoke <id>
+aura admin audit              # every admin action, with its actor
+aura admin logout
+```
+
+- Admin sessions last 15 minutes. `aura admin credential` prints the credential and
+  `aura admin rotate` replaces it; both work only in the master container (`aura jump -m`).
+- In the UI: **Settings → Notifications & access**. It is unlocked with the credential; the
+  session is kept in memory only and locks itself after 15 minutes. It has the grant toggles,
+  the READS OTHERS column, API keys, the audit log, and lock-screen and history settings.
+- An **API key** authenticates an external caller as a verified sender of kind `rest`.
+  A key can get the locked / popup / read features by a grant to the key.
+
+---
+
+## Lock screen visibility
+
+While AuraOS is locked:
+
+| `visibility` | On the lock screen |
+|---|---|
+| `public` | Title and text, but no buttons, inputs, answers or history. |
+| `private` (default) | Only the sender, plus `publicTitle` / `publicText` (or "New notification"). |
+| `secret` | Not shown at all. |
+
+- The user can make a sender **stricter** (never less strict) or hide everything on the lock
+  screen: Settings → Notifications & access → Lock screen & history.
+- Interactions (buttons, dialogues, dismiss, clear) need an unlock first. A locked screen gets
+  403 "unlock first" for them.
+- The rules are enforced **on the server**, for each browser tab. Each shell tab registers a
+  *client session* (`POST /api/os/clients`) and reports when it locks and unlocks.
+  - List, get, the long-poll, the SSE stream (including its catch-up), the replies of user
+    actions and the Socket.IO events are all filtered for that tab.
+  - A missing, unknown or expired session counts as locked.
+- On lock the shell clears the list, pop-ups and open dialogues at once.
+
+---
+
+## Read access
+
+Who can read a notification:
+
+- **An app or API key** reads its own notifications (get, list, waitFor, stream), plus what an
+  admin-granted `notifications.read` covers. The scope lists apps (`app:<id>`), sender keys
+  (`sender:<key>`) or `all`. Secret items are left out unless the grant has `--include-secret`.
+- A read grant is **not** a write grant: answering, dismissing or changing someone else's
+  notification is still 403.
+- A **shell screen** (a browser tab with a client session) sees everything its lock state allows.
+- **Anonymous** callers without a client session read nothing: an empty list, 404 and an empty stream.
+- `public` lock-screen visibility never makes an item readable for other apps.
+- A browser page that created an item reads that one item back with the `senderToken` from `create`.
+
+---
+
+## Retention and clearing
+
+- The user clears a single item (✕), everything (**Clear all**) or one sender (⋯ → Clear from
+  (sender)). Locked items are always kept.
+- **Ended** notifications (resolved, dismissed, cleared, expired, removed) stay in the history
+  for the retention period, then they are deleted together with their history.
+  - The default is 7 days. It can be 1, 7, 30 or 90 days, or forever, also per sender
+    (Settings → Notifications & access → Lock screen & history).
+  - A pass runs every minute.
+- **Active** notifications are never deleted automatically; only their own `timeoutMs` ends them.
+- `DELETE /api/notifications/history[?sender=]` (⋯ → Clear history now) deletes ended items at
+  once. It needs an unlocked screen.
+
+---
+
+## REST API
+
+Base: `$OS_API_BASE/api/notifications`. Identity:
+- `Authorization: Bearer $AURA_INSTANCE_TOKEN` (an app) or `Bearer aura_k1_…` (an API key);
+- shell tabs add `X-Aura-Client-Session`;
+- unverified browser senders pass `X-Aura-Sender-Token` for their own items.
+
+| Method + path | Who | What |
+|---|---|---|
+| `POST /api/notifications` | sender | Create → 201 `{ok, notification, senderToken?, warnings}`. |
+| `GET /api/notifications?state=active\|resolved\|removed\|all&sender=&priority=&limit=&cursor=` | reader | List (read-scoped). |
+| `GET /api/notifications/<id>` | reader | One item, or 404. |
+| `GET /api/notifications/<id>?waitFor=resolved&timeout=<s ≤ 25>` | reader | Long-poll until resolved or removed. Header `X-Aura-Wait: done \| timeout`. |
+| `GET /api/notifications/<id>?waitFor=interaction&after=<ms>&timeout=<s>` | reader | Like `resolved`, but also returns on the next interaction (`lastInteraction.at > after`; `after` defaults to the current one). Header `X-Aura-Wait-Reason: interaction \| resolved \| removed \| timeout`. |
+| `PATCH /api/notifications/<id>` | own sender | Update (`null` clears a field; `type` is fixed) → `{notification, warnings}`. |
+| `POST /api/notifications/<id>/remove` | own sender | Done with it (`completed`). |
+| `DELETE /api/notifications/<id>` | user | Dismiss (409 for Locked). |
+| `POST /api/notifications/<id>/{displayed,seen}` | user | Mark displayed / seen. |
+| `POST /api/notifications/<id>/resolve` `{answer}` | user | Answer a dialogue. `answer.outcome` is `submitted` or `cancelled`. |
+| `POST /api/notifications/<id>/interact` `{componentId, value?, values?}` | user | An interaction (validated against the components). |
+| `POST /api/notifications/<id>/force-remove` | user | Remove, also Locked (`force-removed`). |
+| `DELETE /api/notifications?sender=&priority=` | user | Clear (skips Locked) → `{cleared, skippedLocked}`. |
+| `DELETE /api/notifications/history[?sender=]` | user | Delete ended items now. |
+| `GET /api/notifications/stream[?since=<eventId>]` | reader | SSE: `{type: 'notification:<event>', eventId, event, id, state, notification}`, resumable with `Last-Event-ID`; `{type: 'reset'}` = reload. |
+
+User ops come from a shell screen. They need an unlocked client session and
+the item must be readable for it.
+
+---
+
+## Apps: the SDK
+
+`os.notifications` in `@aura/app-sdk` (details in the [SDK reference](/docs/sdk-reference#osclientnotifications)):
+
+| Method | What |
+|---|---|
+| `create(input)` / `update(id, patch)` / `remove(id)` | Your own notifications. Check `warnings` for downgrades. |
+| `get(id)` / `list(filter)` | Read-scoped reads. |
+| `waitForAnswer(id, {timeoutMs})` | → `{status: 'resolved' \| 'removed' \| 'pending', outcome?, answer?, removedReason?}`. |
+| `waitForInteraction(id, {after?, timeoutMs})` | → `{status: 'interaction' \| 'resolved' \| 'removed' \| 'pending', interaction?, …}`. Pass the last `interaction.at` as `after`, so none is missed. |
+| `subscribe(handler, {since?})` | Live events with full items. |
+| `sendNotification(title, body)` / `simple(title, text)` | A Simple notification in one call. |
+
+```ts
+// Follow a live form: every choice in a Simple item's select, until it ends.
+let after = 0;
+for (;;) {
+  const r = await os.notifications.waitForInteraction(id, { after, timeoutMs: 60_000 });
+  if (r.status === 'interaction') { apply(r.interaction!); after = r.interaction!.at; }
+  else if (r.status !== 'pending') break;
+}
+```
+
+User-scope apps get the SDK from the local registry (`aura sdk install` on
+boot). The shell republishes `@aura/*` there at boot whenever a package's
+build changed.
+
+---
+
+## Agents: the Shell Daemon MCP
+
+The Shell Daemon (`com.aura.aurashelld`) MCP server sends as the daemon
+itself: the sender is of kind `agent`, verified. An agent's name (the `agent`
+argument, or the `x-aura-agent` header) is shown as the sender's actor, for
+display only.
+
+| Tool | What |
+|---|---|
+| `create_notification` | Every field above, including components (select, combobox, markdown, role buttons), `context`, `popupDurationMs`, and `agent`. |
+| `update_notification` / `remove_notification` | Your own. |
+| `list_notifications` / `get_notification` | Your own, with `outcome`, `answer` and `lastInteraction`. |
+| `wait_for_answer` | A bounded wait (≤ 25 s per call) → `resolved` (with `outcome`, `answer`), `removed` or `pending`. With `interactions: true` it also returns `status: 'interaction'` with the interaction, and `next` says which `after` to pass on the next call. |
+
+Ask, then keep working:
+
+1. `create_notification` with `type: 'dialogue'` and a `context`.
+2. Keep working.
+3. Call `wait_for_answer` now and then until it is no longer `pending`.
+4. `remove_notification` when the task is done.
+
+For agents, `popup`, `locked` and `systemModal` need admin grants for the
+daemon. Window `blocking` is always downgraded (agents have no window); a
+system modal needs `systemModal` for the daemon and shows "Requested by
+Aura Shell Daemon".
+
+Connect it: `claude mcp add --scope user --transport http aura-shell "$OS_API_BASE/api/proxy/com.aura.aurashelld/api/mcp/shell"`.
+
+---
+
+## Testing: the Notification Tester
+
+The **Notification Tester** app (`com.example.notifp4`, user scope) sends as a
+verified app:
+- a composer for every field and component (select, combobox and markdown included, with a markdown sample picker);
+- presets: sticky pop-up, role buttons, a dropdown + combobox form, a live dropdown, Locked, a forced pop-up, blocking, progress, a **Markdown** group (one per surface: system modal, centred, floating, in-window, Simple preview, editable, source view first, an XSS check), and more;
+- the server's real errors and warnings, explained;
+- a live view with Wait for answer and Wait for interaction;
+- a burst test for the rate and pop-up limits;
+- curl equivalents.
+
+---
+
+## Testing system decisions
+
+AuraOS's own system decisions (the system look, never hideable) are created
+only by the in-process system caller; apps request *app* system modals with
+the `systemModal` grant instead (see [System modals](#system-modals)). To
+see a real AuraOS decision on a **dev** shell, use the admin CLI. It calls a DEV-only hook that needs an admin session and is
+audited as `dev.systemDecision`:
+
+```sh
+# master container (auto-login with the master key file)
+docker exec aura-shell aura admin dev system-decision \
+  --title "Install the update now?" --options "Now,Tonight" --inputs "Reason" \
+  --cancel-label "Not now" --submit-label "Install" --wait
+
+# or a full notification input; type and scope are forced by the hook
+docker exec aura-shell aura admin dev system-decision --json '{"title":"Allow?","components":[{"kind":"button","role":"submit"}]}' --wait
+```
+
+- It **blocks the whole desktop** until it is answered (no Later, no ✕).
+- It prints the notification id. `--wait [seconds]` waits for the answer and prints the outcome (`submitted` / `cancelled`) and the values.
+- Outside the dev server the hook does not exist, and the CLI refuses with a clear message.
+- In the Notification Tester:
+  - The preset "AuraOS system decision — via CLI" builds this command from the composer instead of sending.
+  - The group "System modal (app)" tests app modals: opens automatically, waits in list, form, non-blocking (centred), force-hide (with repeated requests) and revocation.
+  - App pages never hold an admin session.
+
+## Privacy note
+
+- **The lock screen has no PIN.** A click or a key unlocks it. Lock-screen
+  redaction protects against glances at an unattended screen, not against
+  someone who sits down at it.
+- A client session is **not a credential**. It only selects the lock-screen
+  view; a client-reported unlock is not an authentication boundary. The
+  server has an `UnlockVerifier` hook for a PIN or user login later.
+- App frontends share the shell's origin. An app's browser code could
+  register a client session of its own and read what an unlocked screen
+  sees. Only per-app origins and user accounts will close this.
+- Drafts stay in this browser's localStorage across a lock until the
+  dialogue ends or they are 7 days old. Anyone at the unlocked browser can
+  see them.
+- Notification events on the general event bus carry no content (only
+  `id` and `state`). Full items travel only on the read-scoped API and
+  stream.

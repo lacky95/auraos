@@ -1,0 +1,106 @@
+---
+/**
+ * NotificationToasts — short pop-ups for NEW notifications, bottom-right
+ * above the Dock, right-aligned to the 'notifications' anchor, z-index 1070.
+ *
+ *   - only live additions pop up (not the initial load or a refetch), and
+ *     none while the list is open or the screen is locked;
+ *   - at most three (policy in lib/notifications/toasts.ts); more go to the
+ *     list only;
+ *   - they NEVER take focus: rendering never calls focus(); the cards are
+ *     reachable with the mouse / touch, and keyboard users get them in the
+ *     list. Screen readers hear a short announcement in a polite (or, for
+ *     high / urgent, assertive) live region;
+ *   - duration: the notification's own expiry, else 8 s for low / medium;
+ *     high / urgent stay. Hover / focus inside pauses the timer. Hiding a
+ *     pop-up keeps the notification in the list;
+ *   - phone: full width (8 px margins), above the Dock or above the
+ *     on-screen keyboard (visualViewport); at the screen edge while the
+ *     auto-hidden Dock is out of view.
+ * Empty, the region is `hidden` + `aria-hidden`.
+ */
+---
+<div
+  id="notif-toasts"
+  class="notif-toasts"
+  role="region"
+  aria-label="Notification pop-ups"
+  data-layout="desktop"
+  hidden
+  aria-hidden="true"
+></div>
+<div id="notif-announce-polite" class="aura-sr-only" aria-live="polite" aria-atomic="true"></div>
+<div id="notif-announce-assertive" class="aura-sr-only" aria-live="assertive" aria-atomic="true"></div>
+
+<style is:global>
+  .notif-toasts {
+    position: fixed;
+    z-index: 1070;
+    right: var(--notif-right, 16px);
+    bottom: calc(var(--aura-dock-height) + 6px + env(safe-area-inset-bottom, 0px));
+    width: 340px;
+    max-width: calc(100% - 16px);
+    display: flex;
+    flex-direction: column-reverse;   /* newest closest to the bell */
+    gap: 6px;
+    pointer-events: none;             /* only the cards take clicks */
+  }
+  .notif-toasts[hidden] { display: none; }
+  /* "+N more" while pop-ups wait for a slot (phase 4 queue). Subtle; opens the list. */
+  .notif-toasts > .notif-toasts-more {
+    align-self: flex-end; pointer-events: auto; cursor: pointer;
+    padding: 2px 8px; font: inherit; font-family: var(--aura-font-mono); font-size: 0.66rem;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    background: var(--aura-color-surface); color: var(--aura-color-text-dim);
+    border: 1px solid var(--aura-color-border); border-radius: 0;
+  }
+  .notif-toasts > .notif-toasts-more:hover,
+  .notif-toasts > .notif-toasts-more:focus-visible { color: var(--aura-color-primary); border-color: var(--aura-color-primary); outline: none; }
+  .notif-toasts > .aura-ntf {
+    pointer-events: auto;
+    box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.45);
+    animation: aura-ntf-toast-in 150ms ease-out;
+    cursor: default;
+  }
+  /* Same motion as the dialogues: in from / out to the right (exit.ts: 200 ms + 320 ms fallback). */
+  .notif-toasts > .aura-ntf[data-exit="true"] { animation: aura-ntf-toast-out 200ms ease-in forwards; pointer-events: none; }
+  /* Swipe-to-hide: vertical panning stays native; a swiped pop-up finishes with a transition. */
+  .notif-toasts > .aura-ntf { touch-action: pan-y; }
+  /* Active surface: a clicked dialogue / form pop-up, in place and expanded. */
+  .notif-toasts > .aura-ntf[data-active="true"] { border-color: var(--aura-color-primary); box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.45), var(--aura-glow-primary); max-height: 70vh; overflow-y: auto; }
+  .notif-toasts > .aura-ntf[data-active="true"] .aura-ntf-text { display: block; -webkit-line-clamp: unset; overflow: visible; }
+  .notif-toasts > .aura-ntf[data-swiped="true"][data-exit="true"] { animation: none; }
+  @keyframes aura-ntf-toast-in { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: none; } }
+  @keyframes aura-ntf-toast-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(28px); } }
+  @media (prefers-reduced-motion: reduce) {
+    .notif-toasts > .aura-ntf { animation: aura-ntf-toast-fade-in 80ms linear; }
+    .notif-toasts > .aura-ntf[data-exit="true"] { animation: aura-ntf-toast-fade-out 90ms linear forwards; }
+    @keyframes aura-ntf-toast-fade-in { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes aura-ntf-toast-fade-out { from { opacity: 1; } to { opacity: 0; } }
+  }
+  /* Auto-hidden Dock out of view → sit at the screen edge. */
+  body[data-autohide-bars="on"]:not([data-show-bottom="true"]) .notif-toasts {
+    bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+  }
+  .notif-toasts[data-layout="phone"] {
+    left: 8px;
+    right: 8px;
+    width: auto;
+    max-width: none;
+  }
+  /* On-screen keyboard open: above it (it covers the Dock anyway). */
+  .notif-toasts[data-keyboard="true"],
+  body[data-autohide-bars="on"]:not([data-show-bottom="true"]) .notif-toasts[data-keyboard="true"] {
+    bottom: calc(var(--notif-kb, 0px) + 8px);
+  }
+</style>
+
+<script>
+  // The stack itself lives in toastStack.ts (mountable + unit tested).
+  import { mountToasts } from './toastStack.ts';
+  const region = document.getElementById('notif-toasts') as HTMLElement | null;
+  if (region) {
+    const dispose = mountToasts(region);
+    if (import.meta.hot) import.meta.hot.dispose(dispose);
+  }
+</script>

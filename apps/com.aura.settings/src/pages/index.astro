@@ -47,6 +47,10 @@ import '../styles/settings.css';
         <h3>⊞ CONTEXT</h3>
         <p>Env vars · tokens · secrets · injected into apps</p>
       </button>
+      <button class="tile" data-section="access">
+        <h3>⚿ NOTIFICATIONS &amp; ACCESS</h3>
+        <p>Notification permissions · API keys · admin audit</p>
+      </button>
       <button class="tile" data-section="interfaces">
         <h3>⇄ INTERFACES</h3>
         <p>What apps provide · what they need · live addresses</p>
@@ -87,6 +91,7 @@ import '../styles/settings.css';
         case 'scopes':     return ['/scopes',     'Settings · Scopes'];
         case 'context':    return ['/context',    'Settings · Context'];
         case 'interfaces': return ['/interfaces', 'Settings · Interfaces'];
+        case 'access':     return ['/access',     'Settings · Notifications & access'];
         case 'about':      return ['/about',      'Settings · About'];
         default:           return ['/',           'Settings'];
       }
