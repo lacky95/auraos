@@ -28,6 +28,13 @@ export interface ConfirmInlineOptions {
   /** Return false (or a rejected promise) to keep the confirm open. */
   onConfirm: () => boolean | void | Promise<boolean | void>;
   onCancel?: () => void;
+  /** Extra lines under the message (e.g. "Your entered answers will be lost."). */
+  notes?: string[];
+  /**
+   * An extra, preferred action shown FIRST and focused (e.g. "Answer").
+   * Enter on it runs it; the confirm button becomes the second choice.
+   */
+  primary?: { label: string; onClick: () => void };
 }
 
 export interface ConfirmInline {
@@ -51,6 +58,12 @@ export function createConfirmInline(opts: ConfirmInlineOptions): ConfirmInline {
   msg.className = 'aura-confirm-msg';
   msg.id = `${id}-msg`;
   msg.textContent = opts.message;
+  const notes = (opts.notes ?? []).map((t) => {
+    const p = document.createElement('p');
+    p.className = 'aura-confirm-note';
+    p.textContent = t;
+    return p;
+  });
 
   const row = document.createElement('div');
   row.className = 'aura-confirm-row';
@@ -65,6 +78,17 @@ export function createConfirmInline(opts: ConfirmInlineOptions): ConfirmInline {
   no.className = 'aura-confirm-btn';
   no.dataset['role'] = 'cancel';
   no.textContent = opts.cancelLabel ?? 'Cancel';
+  let first: HTMLButtonElement | null = null;
+  if (opts.primary) {
+    first = document.createElement('button');
+    first.type = 'button';
+    first.className = 'aura-confirm-btn';
+    first.dataset['role'] = 'primary';
+    first.textContent = opts.primary.label;
+    const run = opts.primary.onClick;
+    first.addEventListener('click', () => { if (!busy && !disposed) run(); });
+    row.append(first);
+  }
   row.append(yes, no);
 
   const err = document.createElement('p');
@@ -72,7 +96,7 @@ export function createConfirmInline(opts: ConfirmInlineOptions): ConfirmInline {
   err.setAttribute('role', 'alert');
   err.hidden = true;
 
-  root.append(msg, row, err);
+  root.append(msg, ...notes, row, err);
 
   let busy = false;
   let disposed = false;
@@ -115,7 +139,7 @@ export function createConfirmInline(opts: ConfirmInlineOptions): ConfirmInline {
       cancel();
     } else if (e.key === 'Tab') {
       // Two buttons: keep Tab inside the confirm.
-      const order = [yes, no];
+      const order = first ? [first, yes, no] : [yes, no];
       const i = order.indexOf(document.activeElement as HTMLButtonElement);
       if (i === -1) return;
       e.preventDefault();
@@ -131,7 +155,7 @@ export function createConfirmInline(opts: ConfirmInlineOptions): ConfirmInline {
 
   return {
     el: root,
-    focus: () => yes.focus({ preventScroll: true }),
+    focus: () => (first ?? yes).focus({ preventScroll: true }),
     setError,
     dispose: () => {
       disposed = true;

@@ -387,6 +387,13 @@
   .aura-confirm-btn[data-danger="true"]:hover:not(:disabled), .aura-confirm-btn[data-danger="true"]:focus-visible { box-shadow: inset 0 0 0 1px var(--aura-color-bg), var(--aura-glow-danger); }
   .aura-confirm-btn:disabled { opacity: 0.5; cursor: progress; }
   .aura-confirm-error { margin: 0; color: var(--aura-color-danger); }
+  .aura-confirm-note { margin: 0; color: var(--aura-color-warning); font-size: 0.7rem; }
+  .aura-confirm-btn[data-role="primary"] { background: var(--aura-color-primary); border-color: var(--aura-color-primary); color: var(--aura-color-bg); }
+  .aura-confirm-btn[data-role="cancel"] { border-color: transparent; color: var(--aura-color-text-dim); text-decoration: underline; text-underline-offset: 3px; }
+  /* Dismiss confirm inside a list card (the same component as the Locked force-remove confirm). */
+  .aura-ntf > .aura-ntf-dismiss-confirm { padding: 8px; border: 1px solid var(--aura-color-warning); background: color-mix(in srgb, var(--aura-color-warning) 8%, var(--aura-color-surface)); }
+  .aura-ntf > .aura-ntf-dismiss-confirm .aura-confirm-row { flex-wrap: wrap; }
+  .notif-center[data-layout="phone"] .aura-confirm-btn { min-height: 40px; }
   .aura-confirm-error[hidden] { display: none; }
 
   /* Dialogue cards open their dialogue on click / Enter / Space. */

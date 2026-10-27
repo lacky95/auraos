@@ -305,6 +305,13 @@ const themeCss = `.pv-dark { ${remap('dark')} } .pv-light { ${remap('light')} }`
         renderNotificationCard(lkItem, { mode: 'list', actions, host: lkHost, appLookup: () => ({ name: 'Notif P4 Test', glyph: 'N' }) } as never),
         renderNotificationCard({ ...lkItem, id: lkItem.id + 'p' }, { mode: 'toast', actions, host: lkHost, appLookup: () => ({ name: 'Notif P4 Test', glyph: 'N' }) } as never),
       );
+      // Dismissing an unanswered question asks first: press ✕ (or Delete on the card).
+      const dc = section(root, 'Dismiss an unanswered question · press ✕ → [Answer] [Dismiss anyway] [Cancel]');
+      const dq = renderNotificationCard(base({ title: 'Which environment?', components: [
+        { kind: 'input', id: 'why', label: 'Reason' }, { kind: 'button', role: 'submit' },
+      ] as Notification['components'] }), { mode: 'list', actions, expanded: true });
+      dc.appendChild(dq);
+      (dq.querySelector('[data-ntf-action="dismiss"]') as HTMLButtonElement | null)?.click();
       const blk = section(root, 'Blocking dialogue frame (no ✕)', 'pv-dlg');
       blk.appendChild(buildDialogFrame(base({ components: full(), blocking: true }), { actions, takeFocus: false, modal: true, kicker: 'Answer to continue' }).root);
       const sheet = section(root, 'Phone sheet frame (✕ 40px)', 'pv-phone aura-dlg-float');

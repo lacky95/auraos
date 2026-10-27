@@ -42,7 +42,7 @@ import { contextTarget, goToContext, type WindowHost } from '../../../lib/notifi
 import { createConfirmInline, type ConfirmInline } from './ConfirmInline.ts';
 import { CARD_CONTROL_SELECTOR, opensDialogOnActivate } from '../../../lib/notifications/dialogs.ts';
 import { linkPresentation, linkedView } from '../../../lib/notifications/activityLinks.ts';
-import { fieldErrorsFrom, missingRequired, planCardUpdate, sendsOnFieldChange } from '../../../lib/notifications/cardPatch.ts';
+import { dismissConfirmText, fieldErrorsFrom, missingRequired, needsDismissConfirm, planCardUpdate, sendsOnFieldChange } from '../../../lib/notifications/cardPatch.ts';
 import { answerFor, behaviourValidates, planButtons, type PlannedButton } from '../../../lib/notifications/buttons.ts';
 import { draftValuesFor, getDrafts } from '../../../lib/notifications/drafts.ts';
 import { isLocked } from './placement.ts';
@@ -526,6 +526,54 @@ function laterFor(card: HTMLElement, n: Notification, opts: CardOptions): void {
 }
 
 /**
+ * Dismiss from a list card (✕ / Delete). An unanswered question asks first
+ * (ConfirmInline, the same component and look as the Locked force-remove
+ * confirm): [Answer] (opens it) · [Dismiss anyway] · [Cancel] (Esc; focus
+ * back to the ✕). A typed draft adds "Your entered answers will be lost." and
+ * is cleared only on Dismiss anyway.
+ */
+function requestDismiss(card: HTMLElement, n: Notification, opts: CardOptions, returnTo: HTMLElement): void {
+  const rule = needsDismissConfirm(n, getDrafts().get(n.id));
+  const doDismiss = async (): Promise<boolean> => {
+    const ok = await runAction(card, opts.actions.dismiss(n.id), returnTo instanceof HTMLButtonElement ? returnTo : undefined);
+    if (ok) getDrafts().clear(n.id);
+    return ok;
+  };
+  if (!rule.confirm) { void doDismiss(); return; }
+  if (card.querySelector(':scope > .aura-ntf-dismiss-confirm')) return;   // already asking
+  card.dataset['menuOpen'] = 'true';   // keep it in place against background updates
+  let c: ConfirmInline | null = null;
+  const close = (refocus: boolean) => {
+    c?.dispose();
+    c = null;
+    delete card.dataset['menuOpen'];
+    if (refocus && returnTo.isConnected) returnTo.focus({ preventScroll: true });
+  };
+  c = createConfirmInline({
+    message: dismissConfirmText(senderLabel(n, opts.appLookup).label),
+    ...(rule.draftLost ? { notes: ['Your entered answers will be lost.'] } : {}),
+    primary: {
+      label: 'Answer',
+      onClick: () => {
+        close(false);
+        if (opts.onAnswer?.(n)) return;
+        // No dialogue layer: the inline form, first field focused.
+        const body = card.querySelector<HTMLElement>(':scope > .aura-ntf-body');
+        if (body) { body.hidden = false; card.dataset['collapsed'] = 'false'; card.dataset['expanded'] = 'true'; }
+        card.querySelector<HTMLElement>('.aura-ntf-body input, .aura-ntf-body textarea, .aura-ntf-body button')?.focus();
+      },
+    },
+    confirmLabel: 'Dismiss anyway',
+    danger: true,
+    onConfirm: async () => { const ok = await doDismiss(); if (ok) close(false); return ok; },
+    onCancel: () => close(true),
+  });
+  c.el.classList.add('aura-ntf-dismiss-confirm');
+  card.querySelector(':scope > .aura-ntf-head')?.after(c.el);
+  c.focus();
+}
+
+/**
  * The secondary ⋯ menu of a Locked card: one item, "Force remove…", which
  * turns into an inline confirm. Escape / Cancel / an outside click close it
  * and focus returns to ⋯. The menu carries `data-own-escape`, so an
@@ -700,7 +748,7 @@ export function renderNotificationCard(n: Notification, opts: CardOptions): HTML
     dismiss.setAttribute('aria-label', `Dismiss ${n.title}`);
     dismiss.title = 'Dismiss';
     dismiss.appendChild(spriteIcon('lucide-x'));
-    dismiss.addEventListener('click', () => { void runAction(card, opts.actions.dismiss(n.id), dismiss); });
+    dismiss.addEventListener('click', () => { requestDismiss(card, n, opts, dismiss); });
     head.appendChild(dismiss);
   }
   if (opts.mode === 'list' && n.type === 'locked') head.appendChild(renderOverflowMenu(card, n, opts));
@@ -711,7 +759,7 @@ export function renderNotificationCard(n: Notification, opts: CardOptions): HTML
       if ((e.key !== 'Delete' && e.key !== 'Backspace') || e.target !== card) return;
       e.preventDefault();
       if (n.type === 'locked') { setStatus(card, 'Locked: use ⋯ → Force remove…', 'info'); return; }
-      void runAction(card, opts.actions.dismiss(n.id));
+      requestDismiss(card, n, opts, card.querySelector<HTMLElement>('[data-ntf-action="dismiss"]') ?? card);
     });
   }
 

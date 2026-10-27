@@ -93,6 +93,27 @@ export function fieldErrorsFrom(details: unknown, components: Notification['comp
 }
 
 /**
+ * Dismissing an unanswered question needs a double check (phase 4): an
+ * active Dialogue, or any active item with form components (inputs /
+ * options / select / combobox). `draftLost` adds "Your entered answers will
+ * be lost." when the user typed something. Answered (no longer active) and
+ * plain Simple items are dismissed without asking.
+ */
+export function needsDismissConfirm(
+  n: Pick<Notification, 'type' | 'state' | 'components'>, draft: Record<string, string | string[]> | null,
+): { confirm: boolean; draftLost: boolean } {
+  const form = (n.components ?? []).some((c) => c.kind === 'input' || c.kind === 'options' || c.kind === 'select' || c.kind === 'combobox');
+  const confirm = n.state === 'active' && n.type !== 'locked' && (n.type === 'dialogue' || form);
+  const draftLost = confirm && !!draft && Object.values(draft).some((v) => (Array.isArray(v) ? v.length > 0 : String(v).trim() !== ''));
+  return { confirm, draftLost };
+}
+
+/** "You haven't answered this yet. <Sender> is waiting for a reply and will be told you dismissed it." */
+export function dismissConfirmText(sender: string): string {
+  return `You haven't answered this yet. ${sender} is waiting for a reply and will be told you dismissed it.`;
+}
+
+/**
  * Do field / option changes send an `interact`? Only in the LIST. In a
  * dialogue and in a pop-up (phase 6 fix) fields are local form state: every
  * change used to send an interact, whose busy state dimmed and whose echo
