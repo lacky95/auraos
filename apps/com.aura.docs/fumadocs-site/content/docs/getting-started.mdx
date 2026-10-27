@@ -1,0 +1,83 @@
+---
+title: Getting started
+description: The first steps after installing AuraOS — the Welcome checklist, step by step.
+---
+
+On a new install the desktop shows a pinned **Welcome to AuraOS**
+notification once setup has finished. It lists the steps below; each
+open step has a button that opens the right app, and steps tick
+themselves off as AuraOS notices them. You can do them in any order,
+and **Hide checklist** puts it away for good.
+
+## 1. Unlock admin
+
+Admin settings (API keys, permissions, notification limits) need the
+AuraOS admin credential. It is created on first boot and lives only in
+the master container. In the **Terminal**:
+
+```sh
+aura jump -m             # a shell in the master container (aura-shell)
+aura admin credential    # print the credential
+```
+
+Then **Settings → Notifications & access → Unlock admin** and paste
+it (or `aura admin login` in the Terminal). The step is done after the
+first successful unlock.
+
+## 2. Install an AI agent
+
+Agents are capabilities — shared CLI tools apps can be granted. In the
+Terminal:
+
+```sh
+aura cap install claude   # or: codex
+```
+
+Done when `claude` or `codex` is in the toolchain.
+
+## 3. Log in to your agent
+
+Run `claude` (or `codex`) in the Terminal and sign in. `~` is one home
+shared by every app, so the login follows you into every sandbox you
+`aura jump` into. Done when the agent's login file exists in that home.
+
+## 4. Pick a theme
+
+**Settings → Theme**, or `aura set theme <name>` (`aura get themes`
+lists them). Done once the theme differs from the default.
+
+## 5. Build your first app
+
+```sh
+aura dev new
+```
+
+The wizard scaffolds an app in the `user` scope. Every new
+app gets its own `CLAUDE.md` — read it before changing the app. See
+[Develop an App](/docs/develop-an-app). Done as soon as a user-scope app
+exists.
+
+## 6. Read the docs
+
+Open **Aura Docs** — this site. For agents, the docs also have an MCP
+server:
+
+```sh
+claude mcp add --scope user --transport http aura-docs "$OS_API_BASE/api/proxy/com.aura.docs/mcp"
+```
+
+## Start over
+
+The checklist's progress is in the KV store under `os/onboarding`.
+With an admin session you can bring it back:
+
+```sh
+export AURA_ADMIN_SESSION=$(aura admin login --print)
+curl -X POST -H "Authorization: Bearer $AURA_ADMIN_SESSION" \
+  localhost:3000/api/admin/onboarding                  # checklist again, now
+curl -X POST -H "Authorization: Bearer $AURA_ADMIN_SESSION" \
+  -H 'Content-Type: application/json' -d '{"setup":true}' \
+  localhost:3000/api/admin/onboarding                  # also the setup card, next boot
+```
+
+`GET /api/admin/onboarding` shows the current state.

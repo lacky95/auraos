@@ -69,12 +69,15 @@ async function waitForRegistry(deadline: number): Promise<boolean> {
   return false;
 }
 
+export type SdkPhase = 'waiting' | 'publishing' | 'done' | 'failed' | 'skipped';
+
 /**
  * Publish every `@aura/*` package to the local registry if they aren't already
- * there. Never throws and never blocks the caller for longer than it takes to
- * find the script.
+ * there. Never throws; the caller doesn't await it (boot continues while it
+ * runs). `onPhase` follows it for the first-boot setup card
+ * (lib/onboarding/setupCard.ts); the promise settles when it is finished.
  */
-export function ensureSdkPublished(): void {
+export function ensureSdkPublished(onPhase: (phase: SdkPhase, detail?: string) => void = () => undefined): Promise<void> {
   const script = join(WORKSPACE, 'os', 'publish-aura-packages.mjs');
   if (!existsSync(script)) {
     // A packaged (non-monorepo) deployment won't ship os/. Not an error, but
@@ -82,19 +85,22 @@ export function ensureSdkPublished(): void {
     // breadcrumb pointing here.
     console.warn(`[sdk-bootstrap] ${script} not found — skipping @aura/* registry seed. ` +
       'User/global-scope apps depending on @aura/* will not be able to resolve them.');
-    return;
+    onPhase('skipped', 'no publish script in this deployment');
+    return Promise.resolve();
   }
 
-  // Detached on purpose: boot continues while this runs.
-  void (async () => {
+  return (async () => {
+    onPhase('waiting', 'waiting for the registry to start');
     const up = await waitForRegistry(Date.now() + REGISTRY_WAIT_MS);
     if (!up) {
       console.warn('[sdk-bootstrap] registry did not come up within ' +
         `${REGISTRY_WAIT_MS / 1000}s at ${REGISTRY_URL} — @aura/* not seeded. ` +
         'Run `pnpm publish:local` once it is running.');
+      onPhase('failed', `the registry did not answer within ${REGISTRY_WAIT_MS / 1000} s`);
       return;
     }
 
+    onPhase('publishing', 'publishing the @aura/* packages');
     await new Promise<void>((resolve) => {
       const child = spawn(process.execPath, [script, '--registry', REGISTRY_URL], {
         cwd: WORKSPACE,
@@ -110,20 +116,27 @@ export function ensureSdkPublished(): void {
 
       child.on('error', (err) => {
         console.warn(`[sdk-bootstrap] could not run the publisher: ${err.message}`);
+        onPhase('failed', `could not run the publisher: ${err.message}`);
         resolve();
       });
       child.on('close', (code) => {
         const summary = tail.split('\n').filter((l) => l.includes('summary:')).pop();
         if (code === 0) {
           console.log(`[sdk-bootstrap] @aura/* registry seed ok${summary ? ` — ${summary.trim()}` : ''}`);
+          onPhase('done', summary?.trim());
         } else {
           // Loud, but still not fatal — see the header.
           console.warn(`[sdk-bootstrap] @aura/* registry seed exited ${code}. ` +
             'User/global-scope apps depending on @aura/* may fail to launch.');
           if (tail.trim()) console.warn(tail.trim());
+          const last = tail.trim().split('\n').pop();
+          onPhase('failed', `publishing exited ${code}${last ? `: ${last}` : ''}`);
         }
         resolve();
       });
     });
-  })();
+  })().catch((err: unknown) => {
+    console.warn(`[sdk-bootstrap] ${(err as Error).message}`);
+    onPhase('failed', (err as Error).message);
+  });
 }
