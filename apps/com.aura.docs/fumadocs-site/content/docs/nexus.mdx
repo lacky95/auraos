@@ -61,6 +61,19 @@ Run your own store by standing up any OCI registry (or hosting an
 `index.yaml` in a repo) and registering it here — no AuraOS-specific server
 needed.
 
+A **private** registry takes a login, and a store can describe itself so
+customers only type its address:
+
+```bash
+aura nexus registry add apps.acme.com             # by address (/.well-known/aura-store.json)
+aura nexus registry add acme https://registry.acme.com --username me   # asks for the password
+aura nexus registry login acme                    # change the login later
+```
+
+The password is stored encrypted and is never shown again. See
+**[Private stores](./private-stores)** for both sides: adding one, and
+running one for your customers.
+
 ## Installing
 
 ```bash

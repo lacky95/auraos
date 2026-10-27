@@ -27,6 +27,7 @@ import type { IndexDocument, IndexEntry } from './types.js';
 import { seedIndex } from './defaultIndex.js';
 import { parseStoreAnnotations } from './ociMetadata.js';
 import { orasFlagsForUrl, orasHostFromUrl } from './RegistryConfig.js';
+import { orasSync } from './RegistryAuth.js';
 import {
   DEFAULT_APP_REPO_PREFIX, sortedSources,
   type GitIndexSource, type OciSource, type SourceEntry, type SourcesConfig,
@@ -93,6 +94,8 @@ export class CatalogAggregator {
    *  app added afterwards. It looked like a caching policy and behaved like a
    *  snapshot. */
   private memo: Catalog | null = null;
+  /** Each source's own entries from the last aggregation (see lookupIn). */
+  private bySource = new Map<string, Map<string, CatalogEntry>>();
   private memoAt = 0;
 
   constructor(opts: CatalogAggregatorOpts) {
@@ -138,6 +141,14 @@ export class CatalogAggregator {
     return cat.apps.find((a) => a.id === id) ?? null;
   }
 
+  /** An app as one particular source lists it — even when a higher-priority
+   *  source shadows that id in the merged catalog. Used by updates, so an app
+   *  installed from a private store keeps updating from it. */
+  async lookupIn(id: string, sourceName: string): Promise<CatalogEntry | null> {
+    await this.get();
+    return this.bySource.get(sourceName)?.get(id) ?? null;
+  }
+
   async search(query: string): Promise<CatalogEntry[]> {
     const cat = await this.get();
     const q = query.toLowerCase().trim();
@@ -164,9 +175,11 @@ export class CatalogAggregator {
     const featured: string[] = [];
     const statuses: SourceStatus[] = [];
 
+    const bySource = new Map<string, Map<string, CatalogEntry>>();
     for (const src of ordered) {
       const res = await this.fetchSource(src, force);
       statuses.push({ name: src.name, kind: src.kind, ok: res.ok, apps: res.entries.length, error: res.error });
+      bySource.set(src.name, new Map(res.entries.map((e) => [e.id, e])));
       for (const e of res.entries) {
         if (!byId.has(e.id)) byId.set(e.id, e);   // first (highest-priority) wins
       }
@@ -174,6 +187,8 @@ export class CatalogAggregator {
         if (!featured.includes(f)) featured.push(f);
       }
     }
+
+    this.bySource = bySource;
 
     // Merge the bundled seed LAST: only its categories (always) and any apps/
     // featured it declares that no live source already provided.
@@ -235,8 +250,8 @@ export class CatalogAggregator {
     const prefix = (src.appRepoPrefix ?? DEFAULT_APP_REPO_PREFIX).replace(/\/+$/, '');
 
     // List repos. `oras repo ls <host>` prints one repo path per line.
-    const listOut = execFileSync('oras', ['repo', 'ls', host, ...flags],
-      { stdio: ['ignore', 'pipe', 'pipe'], timeout: ORAS_TIMEOUT_MS }).toString();
+    // orasSync adds the source's login (private registries) — RegistryAuth.ts.
+    const listOut = orasSync(['repo', 'ls', host, ...flags], { timeout: ORAS_TIMEOUT_MS }).toString();
     const repos = listOut.split('\n').map((s) => s.trim()).filter(Boolean)
       .filter((r) => r === prefix || r.startsWith(`${prefix}/`))
       .slice(0, MAX_REPOS_PER_OCI);
@@ -244,8 +259,8 @@ export class CatalogAggregator {
     const entries: CatalogEntry[] = [];
     for (const repo of repos) {
       try {
-        const raw = execFileSync('oras', ['manifest', 'fetch', `${host}/${repo}:latest`, ...flags],
-          { stdio: ['ignore', 'pipe', 'pipe'], timeout: ORAS_TIMEOUT_MS }).toString();
+        const raw = orasSync(['manifest', 'fetch', `${host}/${repo}:latest`, ...flags],
+          { timeout: ORAS_TIMEOUT_MS }).toString();
         const manifest = JSON.parse(raw) as { artifactType?: string; annotations?: Record<string, string> };
         // Only surface artifacts published as Aura apps.
         if (manifest.artifactType && !manifest.artifactType.startsWith('application/vnd.aura.app')) continue;

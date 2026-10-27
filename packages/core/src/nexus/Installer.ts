@@ -168,5 +168,6 @@ function buildInstallRecord(m: AppManifest, r: ResolvedRef, ts: number, scope: S
     installedAt: iso,
     updatedAt:   iso,
     scope,
+    ...(r.sourceName ? { sourceName: r.sourceName } : {}),
   };
 }

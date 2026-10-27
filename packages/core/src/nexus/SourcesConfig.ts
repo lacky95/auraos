@@ -25,6 +25,7 @@ import {
   DEFAULT_REGISTRY_CONFIG, LOCAL_REGISTRY_DEFAULT_URL,
   type RegistryConfig, type RegistryEntry,
 } from './RegistryConfig.js';
+import type { SourceAuth } from './RegistryAuth.js';
 
 // ─── Shape ──────────────────────────────────────────────────────────────
 export type SourceKind = 'oci' | 'git-index' | 'git-app';
@@ -44,6 +45,12 @@ export interface OciSource extends SourceCommon {
   mirror?: boolean;
   /** OCI repo prefix the store lists apps under. Default 'aura-apps'. */
   appRepoPrefix?: string;
+  /**
+   * Login for a private registry. Only the username and the Aura Context key
+   * of the password — this config is readable by every app, the password is
+   * sealed as an OS-only secret (RegistryAuth.ts).
+   */
+  auth?: SourceAuth;
 }
 
 export interface GitIndexSource extends SourceCommon {
@@ -203,9 +210,19 @@ export function isSourceEntry(x: unknown): x is SourceEntry {
   if (typeof e['name'] !== 'string' || !e['name']) return false;
   if (typeof e['priority'] !== 'number') return false;
   if (e['kind'] === 'oci' || e['kind'] === 'git-index' || e['kind'] === 'git-app') {
-    return typeof e['url'] === 'string' && !!e['url'];
+    if (typeof e['url'] !== 'string' || !e['url']) return false;
+    return e['auth'] === undefined || (e['kind'] === 'oci' && isSourceAuth(e['auth']));
   }
   return false;
+}
+
+/** `{type:'basic', username, secret}` and nothing that could be a password. */
+export function isSourceAuth(x: unknown): x is SourceAuth {
+  if (!x || typeof x !== 'object') return false;
+  const a = x as Record<string, unknown>;
+  return a['type'] === 'basic' && typeof a['username'] === 'string' && !!a['username']
+    && typeof a['secret'] === 'string' && /^NEXUS_SRC_[A-Z0-9_]+_PASSWORD$/.test(a['secret'])
+    && Object.keys(a).every((k) => k === 'type' || k === 'username' || k === 'secret');
 }
 
 function normaliseConfig(value: unknown): SourcesConfig | null {

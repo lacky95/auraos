@@ -1,0 +1,141 @@
+---
+title: Private stores
+description: Ship apps to your customers from your own password-protected registry — and add such a store as a customer.
+---
+
+A **private store** is an OCI registry with a login. You publish your apps
+to it; each customer gets their own username and password and adds the
+store to Nexus. Their apps then show up in **Browse** next to everything
+else, labelled with your store's name, and install and update like any other
+app.
+
+Nothing AuraOS-specific runs on your side: any OCI registry with a login
+works — your own [zot](https://zotregistry.dev), Harbor, GitHub or GitLab
+Container Registry, …
+
+## As a customer: add a store
+
+**By address** — the easiest way, when the publisher gave you one:
+
+- **Nexus → Sources → Add a store by address**: type `apps.acme.com`,
+  press **LOOK UP**, enter your username and password, **ADD SOURCE**.
+- Or in the Terminal:
+
+```bash
+aura nexus registry add apps.acme.com
+# found ACME Apps → https://registry.acme.com (needs a login)
+# Username for acme: …
+# Password for …@acme (hidden): …
+# ✓ added oci source acme → https://registry.acme.com (login saved) — 3 apps
+```
+
+**By registry URL** — when you only have the registry address:
+
+```bash
+aura nexus registry add acme https://registry.acme.com --username you
+echo "$PASSWORD" | aura nexus registry add acme https://registry.acme.com --username you --password-stdin
+```
+
+Nexus checks the login right away: a wrong password is reported at once,
+not later as an empty store. Change it with `aura nexus registry login acme`
+(or **EDIT LOGIN** on the source), forget it with
+`aura nexus registry logout acme`. Removing the source removes its login.
+
+Then install as usual — into your own scope if you like:
+
+```bash
+aura nexus app install com.acme.dashboard --scope user
+aura nexus app update com.acme.dashboard     # asks the same store again
+```
+
+### Where the password goes
+
+- It is stored as an **Aura Context secret** (`NEXUS_SRC_<NAME>_PASSWORD`),
+  encrypted, and **injected into no app**. The source entry
+  (`os/nexus/sources`, readable by apps) keeps only the username and the
+  name of that secret.
+- It is **bound to the registry host** you entered it for. Changing a
+  source's URL does not send the password to the new host — enter the
+  login again instead.
+- Every `oras` call gets it as a short-lived auth file (`--registry-config`,
+  mode 0600, deleted afterwards) — never on the command line.
+
+## As a publisher: run a store
+
+### 1. A registry with users
+
+Here with zot behind HTTPS. Customers may only **read** your apps; only you
+may **write**:
+
+```json title="zot config.json"
+{
+  "distSpecVersion": "1.1.0",
+  "storage": { "rootDirectory": "/var/lib/zot" },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000",
+    "auth": { "htpasswd": { "path": "/etc/zot/htpasswd" } },
+    "accessControl": {
+      "repositories": {
+        "aura-apps/**": {
+          "policies": [
+            { "users": ["publisher"], "actions": ["read", "create", "update", "delete"] },
+            { "users": ["customer-a", "customer-b"], "actions": ["read"] }
+          ],
+          "defaultPolicy": []
+        }
+      },
+      "adminPolicy": { "users": ["publisher"], "actions": ["read", "create", "update", "delete"] }
+    }
+  }
+}
+```
+
+Users live in an `htpasswd` file (bcrypt) — one line per customer, delete
+the line (and the name in the policy) to revoke access:
+
+```bash
+htpasswd -nbB customer-a 'their-password' >> /etc/zot/htpasswd
+```
+
+Put TLS in front (a reverse proxy such as Caddy or nginx) — AuraOS only
+accepts `https` for stores added by address.
+
+### 2. Publish to it
+
+On your own AuraOS, add the registry with **your** (publisher) login, then
+publish to it:
+
+```bash
+aura nexus registry add acme https://registry.acme.com --username publisher
+aura nexus app publish ./my-app --to acme --tag 1.0.0 --channel stable
+```
+
+The app lands under `aura-apps/<id>` with its store metadata as
+annotations — the registry *is* the catalog, there is no index to maintain.
+
+### 3. Let customers find it by address (optional)
+
+Serve one small file at
+`https://<your-address>/.well-known/aura-store.json`:
+
+```json
+{
+  "name": "acme",
+  "title": "ACME Apps",
+  "kind": "oci",
+  "url": "https://registry.acme.com",
+  "auth": "basic"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `name` | Suggested source name (lowercase, `a-z 0-9 . _ -`) |
+| `title` | Shown to the customer while adding |
+| `kind` | `oci` (the only kind for now) |
+| `url` | The registry, `https` only, no login in it |
+| `auth` | `basic` (ask for username + password) or `none` |
+| `appRepoPrefix` | Optional, when apps aren't under `aura-apps/` |
+
+Customers then only need the address and their login.

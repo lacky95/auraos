@@ -32,6 +32,7 @@ import type { RegistryConfig } from './RegistryConfig.js';
 import { resolveByName, urlForHost } from './RegistryConfig.js';
 import type { SourcesConfig } from './SourcesConfig.js';
 import { DEFAULT_SOURCES_CONFIG, loadSourcesConfig, ociRegistryView } from './SourcesConfig.js';
+import { loadRegistryCredentials } from './RegistryAuth.js';
 import { needsProvisioning, provisionApp } from '../app-manager/provisioning.js';
 
 export interface NexusManagerOpts {
@@ -107,7 +108,14 @@ export class NexusManager {
     this.sourcesLoaded = true;
     this.resolver.setRegistryConfig(ociRegistryView(cfg));
     this.catalog.invalidate();   // next get() re-aggregates against the new set
+    this.credentialsReady = loadRegistryCredentials(this.rootDataDir, cfg)
+      .catch((err: unknown) => console.warn(`[nexus] loading source logins failed: ${(err as Error).message}`));
   }
+
+  /** Logins of private sources (RegistryAuth.ts) are loaded asynchronously
+   *  whenever the sources change; routes await this before using a source. */
+  private credentialsReady: Promise<void> = Promise.resolve();
+  whenCredentialsReady(): Promise<void> { return this.credentialsReady; }
 
   /**
    * One-time lazy load of the persisted sources config from the shell KV
@@ -124,6 +132,9 @@ export class NexusManager {
       this.sourcesConfig = cfg;
       this.resolver.setRegistryConfig(ociRegistryView(cfg));
       this.catalog.invalidate();
+      this.credentialsReady = loadRegistryCredentials(this.rootDataDir, cfg)
+        .catch((err: unknown) => console.warn(`[nexus] loading source logins failed: ${(err as Error).message}`));
+      await this.credentialsReady;
     } catch { /* keep defaults */ }
   }
 
@@ -197,6 +208,8 @@ export class NexusManager {
     ref:         string;
     scope?:      'global' | 'user';
     autoApprove?: boolean;
+    /** Updates: ask this source first (see Resolver.resolve). */
+    sourceName?: string;
   }): AsyncGenerator<NexusProgressEvent, InstallRecord, { approve: boolean } | void> {
     const targetScope = opts.scope ?? 'global';
     const installer   = this.installerFor(targetScope);
@@ -215,7 +228,8 @@ export class NexusManager {
 
     try {
       yield { type: 'resolve.start', ref: opts.ref };
-      const resolved = await this.resolver.resolve(opts.ref);
+      await this.credentialsReady;   // private sources need their logins
+      const resolved = await this.resolver.resolve(opts.ref, { sourceName: opts.sourceName });
       yield { type: 'resolve.done', resolved };
 
       yield { type: 'fetch.start' };
@@ -315,7 +329,7 @@ export class NexusManager {
       return null;
     }
     const scope = (current.scope === 'system' ? 'global' : current.scope) ?? 'global';
-    const result = yield* this.install({ ref: current.ref, scope, autoApprove: opts.autoApprove });
+    const result = yield* this.install({ ref: current.ref, scope, autoApprove: opts.autoApprove, sourceName: current.sourceName });
     this.bus?.emit('nexus:update.complete', { id: appId, record: result });
     return result;
   }

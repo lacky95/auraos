@@ -14,6 +14,13 @@ export { NexusManager } from './NexusManager.js';
 export { publishGit, publishOci } from './Publisher.js';
 export { isOrasAvailable } from './Fetchers/OciFetcher.js';
 export { getNexusManager, initNexusManager, refreshNexusSources } from './singleton.js';
+export {
+  secretKeyFor, sealedLoginValue, passwordForHost, SOURCE_SECRET_PATTERN, saveRegistryLogin, deleteRegistryLogin, loadRegistryCredentials, hasRegistryLogin,
+  orasSync, orasTargetHost, authFileContent, isAuthFailure, authFailureReason, OrasAuthError,
+} from './RegistryAuth.js';
+export type { RegistryLogin, SourceAuth } from './RegistryAuth.js';
+export { discoverStore, parseStoreDescriptor, wellKnownUrl, StoreDiscoveryError } from './StoreDiscovery.js';
+export type { StoreDescriptor } from './StoreDiscovery.js';
 export { CatalogAggregator, loadGitIndexDoc } from './CatalogAggregator.js';
 export type { Catalog, CatalogEntry, SourceStatus } from './CatalogAggregator.js';
 export {
@@ -23,7 +30,7 @@ export {
 export type { StoreMetadata } from './ociMetadata.js';
 export {
   loadSourcesConfig, saveSourcesConfig, seedSourcesConfigIfMissing,
-  sortedSources, ociSources, findSource, ociRegistryView, isSourceEntry,
+  sortedSources, ociSources, findSource, ociRegistryView, isSourceEntry, isSourceAuth,
   DEFAULT_SOURCES_CONFIG, DEFAULT_APP_REPO_PREFIX, OFFICIAL_INDEX_URL,
   OFFICIAL_STORE_REPO,
 } from './SourcesConfig.js';
