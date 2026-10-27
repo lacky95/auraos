@@ -102,7 +102,7 @@ export interface WaitForResult {
 }
 
 /** Bump when the class changes incompatibly: `getNotificationService()` replaces older singletons. */
-export const NOTIFICATION_SERVICE_VERSION = 14;
+export const NOTIFICATION_SERVICE_VERSION = 15;
 
 /** Phase 5: how often the sweeper runs the retention pass. */
 export const DEFAULT_RETENTION_INTERVAL_MS = 60_000;
@@ -389,6 +389,15 @@ function normalizeValue(c: NotificationComponent, v: InteractionValue | undefine
     return text;
   }
   throw new NotificationError(400, `${where}: component '${(c as { id?: string }).id ?? '?'}' (${c.kind}) takes no value`);
+}
+
+/**
+ * Phase 6: does the item open a dialogue surface (so `maximized` means
+ * something)? A dialogue, or a Simple / Locked item with a form or markdown
+ * (the user opens those as a floating dialogue).
+ */
+function hasDialogueSurface(type: string, components: readonly NotificationComponent[] | undefined): boolean {
+  return type === 'dialogue' || (components ?? []).some((c) => isFieldComponent(c) || c.kind === 'markdown');
 }
 
 function isFieldComponent(c: NotificationComponent): boolean {
@@ -866,6 +875,12 @@ export class NotificationService {
       await this.gatePopupRate(caller, fields, warnings);
     }
 
+    // Phase 6: a presentation hint; meaningless without a dialogue surface.
+    let maximized = p.maximized === true;
+    if (maximized && !hasDialogueSurface(fields.type, p.components)) {
+      maximized = false;
+      warnings.push({ code: 'ignored-field', field: 'maximized', message: 'maximized only applies to dialogues (or items with a form / markdown)' });
+    }
     const now = this.now();
     const senderToken = isSystemCaller(caller) ? undefined : `nst_${randomBytes(24).toString('base64url')}`;
     const rec: StoredNotification = {
@@ -885,6 +900,7 @@ export class NotificationService {
       popup: fields.popup,
       blocking: fields.blocking,
       scope: fields.scope,
+      ...(maximized ? { maximized: true } : {}),
       ...(p.components ? { components: p.components } : {}),
       ...(p.context ? { context: p.context } : {}),
       caller: storedCallerOf(caller),
@@ -972,6 +988,15 @@ export class NotificationService {
         const b = { blocking: true };
         await this.gateBlocking(caller, b, rec.context, warnings);
         if (!b.blocking) setOpt('blocking', false);
+      }
+      // Phase 6: judged on the resulting components (the patch may change them).
+      if (p.maximized !== undefined) {
+        if (p.maximized && !hasDialogueSurface(rec.type, rec.components)) {
+          warnings.push({ code: 'ignored-field', field: 'maximized', message: 'maximized only applies to dialogues (or items with a form / markdown)' });
+          if (rec.maximized) setOpt('maximized', null);
+        } else setOpt('maximized', p.maximized ? true : null);
+      } else if (rec.maximized && p.components !== undefined && !hasDialogueSurface(rec.type, rec.components)) {
+        setOpt('maximized', null);
       }
       if (p.timeoutMs !== undefined) {
         touched.push('timeoutMs');

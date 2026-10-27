@@ -291,6 +291,10 @@ across a lock (see the [privacy note](#privacy-note)).
   in-window panel fills its window. The state is kept per notification for the browser tab (also across
   updates and reloads) and forgotten when the item ends. A markdown area grows with the dialogue. Dialogues
   with markdown also start larger. Not on the phone.
+  - **`maximized: true`** (create / update, any sender, no grant) makes the dialogue *start* maximized — e.g.
+    for a long markdown report. The user's own maximize / restore for that item in the tab wins; a sender update
+    of `maximized` applies only while the user has not toggled it. Without a dialogue (not type dialogue and no
+    form or markdown) it is dropped with an `ignored-field` warning. Ignored on the phone.
 - **Select and combobox** render as ARIA comboboxes with a listbox, keyboard included:
   - **select:** ↓ ↑ Enter or Space open the list. Then ↑ ↓ Home End PageUp PageDown move, typing jumps to a matching option, Enter, Space or Tab choose, and Escape closes the list.
   - **combobox:** type to filter, ↑ ↓ choose, Enter takes the active option, Escape closes the list (a second Escape clears the text).

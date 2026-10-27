@@ -157,6 +157,13 @@ export interface NotificationInput {
    * `notifications.popup` (or desktopModal).
    */
   scope?: 'auto' | 'desktop';
+  /**
+   * Phase 6: start the dialogue maximized (e.g. a long markdown report) — a
+   * presentation hint, no grant. The user's own maximize / restore in a tab
+   * wins. Ignored (warning `ignored-field`) when nothing opens a dialogue
+   * (not a dialogue and no form / markdown); ignored on the phone.
+   */
+  maximized?: boolean;
   components?: NotificationComponent[];
   /** What it is about (an activity, a task, …) — separate from who sent it. */
   context?: NotificationContext;
@@ -187,6 +194,8 @@ export interface Notification {
   /** Dialogue blocks its own window (see `NotificationInput.blocking`). */
   blocking: boolean;
   scope: 'auto' | 'desktop';
+  /** Phase 6: the dialogue starts maximized (see `NotificationInput.maximized`). */
+  maximized?: boolean;
   state: NotificationState;
   removedReason?: 'dismissed' | 'expired' | 'completed' | 'force-removed' | 'cleared';
   answer?: unknown;

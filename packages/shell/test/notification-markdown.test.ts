@@ -14,7 +14,7 @@ import { markdownPreview, parseMarkdown, safeLinkHref } from '../src/lib/notific
 import { missingRequired, needsDismissConfirm, planCardUpdate } from '../src/lib/notifications/cardPatch.ts';
 import { draftValuesFor, getDrafts } from '../src/lib/notifications/drafts.ts';
 import { CARD_CONTROL_SELECTOR, decidePlacement, hasFormFields, hasMarkdown, isComplex } from '../src/lib/notifications/dialogs.ts';
-import { MAX_PREFIX, MaximizeMemory, getMaximizeMemory, isMaximizeShortcut } from '../src/lib/notifications/maximize.ts';
+import { MAX_PREFIX, MaximizeMemory, getMaximizeMemory, initialMaximized, isMaximizeShortcut } from '../src/lib/notifications/maximize.ts';
 
 const { renderNotificationCard, updateNotificationCard, collectValues } = await import('../src/components/shell/notifications/NotificationCard.ts');
 const { renderMarkdown, copyText } = await import('../src/components/shell/notifications/MarkdownField.ts');
@@ -374,7 +374,7 @@ test('maximize: header button (aria-pressed, tooltip), Alt+Shift+Enter, remember
   assert.equal(f.root.dataset['maximized'], 'true');
   key(field, 'Enter', { altKey: true, shiftKey: true });
   assert.equal(f.root.dataset['maximized'], undefined);
-  assert.equal(dom.sessionStorage.getItem(`${MAX_PREFIX}${n.id}`), null);
+  assert.equal(dom.sessionStorage.getItem(`${MAX_PREFIX}${n.id}`), '0', 'the restore is remembered too');
   assert.equal(isMaximizeShortcut({ key: 'Enter', altKey: true, shiftKey: true, ctrlKey: false, metaKey: false }), true);
   assert.equal(isMaximizeShortcut({ key: 'Enter', altKey: true, shiftKey: true, ctrlKey: true, metaKey: false }), false);
   f.dispose();
@@ -428,9 +428,12 @@ test('maximize: memory is per id, survives a storage error, and clears; a select
   const m = new MaximizeMemory({ getItem: (k) => store.get(k) ?? null, setItem: (k, v) => { store.set(k, v); }, removeItem: (k) => { store.delete(k); } });
   m.set('a', true);
   assert.equal(m.get('a'), true);
-  assert.equal(m.get('b'), false);
+  assert.equal(m.get('b'), null, 'no choice');
+  m.set('b', false);
+  assert.equal(m.get('b'), false, 'a restore is a choice');
+  m.clear('b');
   m.clear('a');
-  assert.equal(m.get('a'), false);
+  assert.equal(m.get('a'), null);
   assert.equal(store.size, 0);
   const broken = new MaximizeMemory({ getItem: () => { throw new Error('x'); }, setItem: () => { throw new Error('x'); }, removeItem: () => { throw new Error('x'); } });
   broken.set('a', true);
@@ -456,4 +459,52 @@ test('maximize: memory is per id, survives a storage error, and clears; a select
   assert.equal(lb.style.left, '40px');
   f.setMaximized(false);
   f.dispose();
+});
+
+test('sender hint maximized: starts maximized; the user restore wins across re-mounts and sender updates; phone ignores it', () => {
+  resetDom();
+  assert.equal(initialMaximized(null, true), true);
+  assert.equal(initialMaximized(false, true), false, 'the user choice wins');
+  assert.equal(initialMaximized(null, undefined), false);
+  const n = item([md('# Long report')], { maximized: true } as Partial<Notification>);
+  const f = buildDialogFrame(n, { actions: recorder().actions, takeFocus: false, onLater: () => {} });
+  doc.body.appendChild(f.root);
+  assert.equal(f.root.dataset['maximized'], 'true', 'starts maximized');
+  assert.equal(dom.sessionStorage.getItem(`${MAX_PREFIX}${n.id}`), null, 'the hint is not a user choice');
+  const btn = f.root.querySelector<HTMLButtonElement>('.aura-dlg-max')!;
+  assert.equal(btn.getAttribute('aria-pressed'), 'true');
+  btn.click();
+  assert.equal(f.root.dataset['maximized'], undefined, 'the user restores it');
+  // A sender update (hint still / again true) does not override the user.
+  f.update({ ...n, title: 'Changed', maximized: true } as Notification);
+  assert.equal(f.root.dataset['maximized'], undefined);
+  f.dispose();
+  // A re-mount stays restored.
+  const g = buildDialogFrame(n, { actions: recorder().actions, takeFocus: false });
+  assert.equal(g.root.dataset['maximized'], undefined);
+  g.dispose();
+
+  // Without a user choice, a sender update of the hint applies.
+  const m = item([md('x')]);
+  const h = buildDialogFrame(m, { actions: recorder().actions, takeFocus: false });
+  doc.body.appendChild(h.root);
+  assert.equal(h.root.dataset['maximized'], undefined, 'no hint: normal size (markdown only makes it larger)');
+  assert.equal(h.root.dataset['hasMarkdown'], 'true');
+  h.update({ ...m, maximized: true } as Notification);
+  assert.equal(h.root.dataset['maximized'], 'true', 'sender turned it on');
+  h.update({ ...m } as Notification);
+  assert.equal(h.root.dataset['maximized'], undefined, 'sender turned it off');
+  assert.equal(dom.sessionStorage.getItem(`${MAX_PREFIX}${m.id}`), null);
+  h.dispose();
+  getMaximizeMemory().clear(n.id);
+
+  // Phone: the hint is ignored (the full view is full screen already).
+  desktopWidth(390);
+  try {
+    const p = item([md('x')], { maximized: true } as Partial<Notification>);
+    const ph = buildDialogFrame(p, { actions: recorder().actions, takeFocus: false });
+    assert.equal(ph.root.dataset['maximized'], undefined);
+    assert.equal(ph.root.querySelector<HTMLButtonElement>('.aura-dlg-max')!.hidden, true);
+    ph.dispose();
+  } finally { desktopWidth(1280); }
 });

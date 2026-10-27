@@ -245,6 +245,12 @@ const themeCss = `.pv-dark { ${remap('dark')} } .pv-light { ${remap('light')} }`
       mxBtn.className = 'pv-x'; mxBtn.type = 'button'; mxBtn.textContent = 'Open a floating markdown dialogue (try ⤢)';
       mxBtn.addEventListener('click', () => openFloating(base({ title: 'Weekly build report', text: '', components: [{ kind: 'markdown', id: 'r', label: 'Report', text: MD_SAMPLE }] as Notification['components'] })));
       section(root, 'Maximize · floating dialogue').appendChild(mxBtn);
+      // Sender hint maximized: true — starts maximized; ⤡ restores and that choice is remembered for this item.
+      const mxHint = document.createElement('button');
+      mxHint.className = 'pv-x'; mxHint.type = 'button'; mxHint.textContent = 'Open one with maximized: true (starts maximized)';
+      const hintItem = base({ title: 'Long report (maximized: true)', text: '', maximized: true, components: [{ kind: 'markdown', id: 'r', label: 'Report', text: MD_SAMPLE }] as Notification['components'] } as Partial<Notification>);
+      mxHint.addEventListener('click', () => openFloating(hintItem));
+      section(root, 'Maximize · sender hint maximized: true').appendChild(mxHint);
       section(root, 'List card · locked + progress').appendChild(renderNotificationCard(base({ type: 'locked', title: 'Backup running', text: 'Do not shut down.', components: [{ kind: 'progress', value: null, label: 'Copying' }] as Notification['components'] }), { mode: 'list', actions }));
       section(root, 'Pop-up · simple, high').appendChild(renderNotificationCard(base({ type: 'simple', priority: 'high', components: [{ kind: 'button', id: 'open', label: 'Open', variant: 'primary' }] as Notification['components'] }), { mode: 'toast', actions }));
       const dlg = section(root, 'Dialogue frame (window / floating)', 'pv-dlg');

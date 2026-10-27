@@ -243,6 +243,8 @@ const ContentFields = {
   blocking: z.boolean(),
   /** Dialogue only (phase 4): `desktop` is reserved for SYSTEM_CALLER. */
   scope: z.enum(['auto', 'desktop']),
+  /** Phase 6: start the dialogue maximized (presentation hint, no grant). */
+  maximized: z.boolean(),
   components: ComponentsSchema,
   context: ContextSchema,
 };
@@ -263,6 +265,7 @@ export const CreateInputSchema = z.object({
   popup: ContentFields.popup.default(false),
   blocking: ContentFields.blocking.default(false),
   scope: ContentFields.scope.default('auto'),
+  maximized: ContentFields.maximized.optional(),
   components: ContentFields.components.optional(),
   context: ContentFields.context.optional(),
   sender: SenderInputSchema.optional(),
@@ -288,6 +291,7 @@ export const UpdatePatchSchema = z.object({
   popup: ContentFields.popup.optional(),
   blocking: ContentFields.blocking.optional(),
   scope: ContentFields.scope.optional(),
+  maximized: ContentFields.maximized.optional(),
   components: ContentFields.components.nullable().optional(),
   context: ContentFields.context.nullable().optional(),
   sender: SenderInputSchema.optional(),

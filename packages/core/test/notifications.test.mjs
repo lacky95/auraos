@@ -536,6 +536,31 @@ test('markdown component (phase 6): ≤ 64 KB text, ≤ 2 per item, editable val
   assert.equal(r.answer.values.notes.length, 65_000);
 });
 
+test('maximized (phase 6): a presentation hint for any sender — round-trip on create / update, ignored-field without a dialogue surface', async () => {
+  const { notification: d, warnings: w0 } = await svc.create({ type: 'dialogue', title: 'Report', maximized: true, components: [{ kind: 'markdown', id: 'r', text: '# x' }] }, APP);
+  assert.equal(d.maximized, true);
+  assert.deepEqual(w0, []);
+  assert.equal((await svc.get(d.id)).maximized, true);
+  const { notification: d2 } = await svc.update(d.id, { maximized: false }, APP);
+  assert.equal(d2.maximized, undefined, 'false is the default and not stored');
+  assert.equal((await svc.update(d.id, { maximized: true }, APP)).notification.maximized, true);
+  // Default: absent.
+  assert.equal((await svc.create({ type: 'dialogue', title: 'q' }, APP)).notification.maximized, undefined);
+  // A Simple item with markdown or a form opens a dialogue too: kept.
+  assert.equal((await svc.create({ title: 's', maximized: true, components: [{ kind: 'markdown', id: 'r', text: 't' }] }, APP)).notification.maximized, true);
+  // No dialogue surface: ignored with a warning (create and update).
+  const plain = await svc.create({ title: 'plain', maximized: true }, APP);
+  assert.equal(plain.notification.maximized, undefined);
+  assert.deepEqual(plain.warnings.map((w) => [w.code, w.field]), [['ignored-field', 'maximized']]);
+  const up = await svc.update(plain.notification.id, { maximized: true }, APP);
+  assert.equal(up.notification.maximized, undefined);
+  assert.deepEqual(up.warnings.map((w) => [w.code, w.field]), [['ignored-field', 'maximized']]);
+  // Removing the last markdown of a Simple item drops the hint.
+  const s2 = await svc.create({ title: 's2', maximized: true, components: [{ kind: 'markdown', id: 'r', text: 't' }] }, APP);
+  assert.equal((await svc.update(s2.notification.id, { components: null }, APP)).notification.maximized, undefined);
+  await rejectsStatus(svc.create({ type: 'dialogue', title: 'x', maximized: 'yes' }, APP), 400);
+});
+
 const APIKEY = { kind: 'apiKey', keyId: 'key1', name: 'ci', verification: 'verified' };
 const ALLOW_ALL = { authorize: async () => ({ allow: true, reason: 'test' }) };
 // Fake AppManager view: activities / instances and the app that owns them.

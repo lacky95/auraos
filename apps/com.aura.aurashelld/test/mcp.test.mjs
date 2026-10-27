@@ -676,6 +676,27 @@ test('notification tools: markdown components (reports) are forwarded; > 2, > 64
   } finally { delete process.env.AURA_INSTANCE_TOKEN; }
 });
 
+test('notification tools: maximized is forwarded on create and update', async () => {
+  process.env.AURA_INSTANCE_TOKEN = 'tok';
+  try {
+    const calls = fakeNotifOs(({ method, path }) => {
+      if (method === 'POST' && path === '/api/notifications') return [201, { ok: true, notification: notif({ type: 'dialogue', maximized: true }), warnings: [] }];
+      if (method === 'PATCH') return [200, { ok: true, notification: notif({ type: 'dialogue' }), warnings: [] }];
+      return [404, {}];
+    });
+    const client = await connect();
+    const tools = (await client.listTools()).tools;
+    for (const name of ['create_notification', 'update_notification']) {
+      assert.match(JSON.stringify(tools.find((t) => t.name === name).inputSchema.properties.maximized), /maximized \(e\.g\. long markdown reports\)/);
+    }
+    const r = await call(client, 'create_notification', { type: 'dialogue', title: 'Report', maximized: true, components: [{ kind: 'markdown', id: 'r', text: '# x' }] });
+    assert.equal(calls[0].body.maximized, true);
+    assert.equal(r.structuredContent.notification.maximized, true);
+    await call(client, 'update_notification', { id: NID, maximized: false });
+    assert.equal(calls[1].body.maximized, false);
+  } finally { delete process.env.AURA_INSTANCE_TOKEN; }
+});
+
 test('notification tools: options display + descriptions are forwarded; mismatches refused before sending', async () => {
   process.env.AURA_INSTANCE_TOKEN = 'tok';
   try {

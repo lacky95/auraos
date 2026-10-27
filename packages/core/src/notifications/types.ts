@@ -323,6 +323,13 @@ export interface Notification {
    * for `SYSTEM_CALLER`. Pre-phase-4 records read as `'auto'` (`toPublic`).
    */
   scope: NotificationScope;
+  /**
+   * Phase 6: a presentation hint — the dialogue starts maximized (e.g. a long
+   * markdown report). Any sender, no grant. Only stored (as true) for items
+   * that open a dialogue surface (type dialogue, or a form / markdown); the
+   * user's own maximize / restore in a tab wins over it.
+   */
+  maximized?: boolean;
   components?: NotificationComponent[];
   context?: NotificationContext;
 

@@ -16,8 +16,11 @@
  * Alt+Shift+Enter (focus inside) toggle `data-maximized` — the styles
  * stretch the dialogue over the app area between the top bar and the Dock
  * (desktop modal, centred and floating dialogues) or over its window body
- * (in-window panel). Remembered per notification for the tab
- * (lib/notifications/maximize.ts). Hidden on the phone (`data-phone`).
+ * (in-window panel). It starts maximized when the sender set
+ * `maximized: true`, unless the user already chose otherwise for that item
+ * in this tab (lib/notifications/maximize.ts: the user's choice wins and is
+ * remembered; a sender update of the hint applies only without a choice).
+ * Hidden and ignored on the phone (`data-phone`).
  * A 150 ms size transition (FLIP), none under reduced motion. Select /
  * combobox popups re-place themselves every frame, so they follow.
  */
@@ -26,7 +29,7 @@ import { senderLabel, type AppLookup } from '../../../lib/notifications/format.t
 import { renderNotificationCard, updateNotificationCard, spriteIcon, type CardActions } from './NotificationCard.ts';
 import { CLOSE_LATER } from '../../../lib/notifications/dialogs.ts';
 import { ExitMachine } from '../../../lib/notifications/exit.ts';
-import { getMaximizeMemory, isMaximizeShortcut, MAXIMIZE_ARIA_KEYS, MAXIMIZE_SHORTCUT_LABEL } from '../../../lib/notifications/maximize.ts';
+import { getMaximizeMemory, initialMaximized, isMaximizeShortcut, MAXIMIZE_ARIA_KEYS, MAXIMIZE_SHORTCUT_LABEL } from '../../../lib/notifications/maximize.ts';
 import { PHONE_MAX_WIDTH } from './placement.ts';
 
 /**
@@ -71,8 +74,11 @@ export interface DialogFrame {
   update(n: Notification): void;
   focus(): void;
   setCollapsed(c: boolean): void;
-  /** Phase 6: maximized state (no-op on the phone / when not maximizable). */
-  setMaximized(on: boolean, opts?: { animate?: boolean }): void;
+  /**
+   * Phase 6: maximized state (no-op on the phone / when not maximizable).
+   * `user` (default true) records it as the user's choice for this item.
+   */
+  setMaximized(on: boolean, opts?: { animate?: boolean; user?: boolean }): void;
   isMaximized(): boolean;
   /** Remove listeners; restore focus if it was inside. Does not detach `root`. */
   dispose(): void;
@@ -190,14 +196,14 @@ export function buildDialogFrame(n: Notification, opts: FrameOptions): DialogFra
     maxBtn.setAttribute('aria-label', tip);
     maxBtn.replaceChildren(spriteIcon(on ? 'lucide-minimize' : 'lucide-maximize'));
   }
-  function setMaximized(on: boolean, o: { animate?: boolean } = {}) {
+  function setMaximized(on: boolean, o: { animate?: boolean; user?: boolean } = {}) {
     if (!maxBtn || isPhone()) return;
+    if (o.user !== false) maxMemory.set(n.id, on);
     if (on === maximized) return;
     // FLIP: measure, switch, then animate from the old box (150 ms).
     const animate = o.animate !== false && !reducedMotion() && typeof root.animate === 'function' && root.isConnected;
     const before = animate ? root.getBoundingClientRect() : null;
     maximized = on;
-    maxMemory.set(n.id, on);
     paintMax();
     if (before && before.width > 0 && before.height > 0) {
       const after = root.getBoundingClientRect();
@@ -218,7 +224,8 @@ export function buildDialogFrame(n: Notification, opts: FrameOptions): DialogFra
     root.dispatchEvent(new CustomEvent('aura:dialog-resize', { bubbles: true, detail: { id: n.id, maximized: on } }));
   }
   function toggleMax() { setMaximized(!maximized); }
-  maximized = !!maxBtn && maxMemory.get(n.id);
+  // The user's choice in this tab, else the sender's hint (phase 6).
+  maximized = !!maxBtn && initialMaximized(maxMemory.get(n.id), n.maximized);
   paintMax();
   const onResize = () => paintMax();
   if (maxBtn) window.addEventListener('resize', onResize);
@@ -283,6 +290,14 @@ export function buildDialogFrame(n: Notification, opts: FrameOptions): DialogFra
       card = updateNotificationCard(card, next, cardOpts);
       linkTitle();
       markMarkdown();
+      // A changed sender hint applies only while the user has not chosen.
+      if (maxBtn && maxMemory.get(next.id) === null) {
+        const want = !!next.maximized;
+        if (want !== maximized) {
+          if (isPhone()) { maximized = want; paintMax(); }
+          else setMaximized(want, { user: false });
+        }
+      }
     },
     focus() {
       if (collapsed) setCollapsed(false);
