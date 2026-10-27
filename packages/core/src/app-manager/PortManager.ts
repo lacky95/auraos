@@ -49,8 +49,9 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { AppRegistry } from './AppRegistry.js';
 import type { ContainerRunner } from './ContainerRunner.js';
+import { BASE_IMAGE } from './BaseImage.js';
 
-const HELPER_IMAGE = process.env['AURA_BASE_IMAGE'] ?? 'aura-base';
+const HELPER_IMAGE = BASE_IMAGE;
 const SHARED_NETWORK = process.env['AURA_DOCKER_NETWORK'] ?? 'aura-net';
 
 /**

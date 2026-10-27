@@ -74,7 +74,8 @@ docker compose up
 ```
 
 Open `http://localhost:3000` — the desktop comes up in a few seconds
-after the first build (which itself takes a couple of minutes). The
+after the first build (which itself takes a couple of minutes: compose
+builds the shell and `aura-base`, the image container apps run from). The
 launcher (`Ctrl+Alt+Space`) lists the bundled apps; the Terminal,
 Console, Notepad, Counter, Settings, Nexus and Docs apps are working
 references for every pattern in the OS.

@@ -50,8 +50,9 @@ import { dirname, join } from 'node:path';
 import type { AppRegistry } from './AppRegistry.js';
 import type { ScopeRegistry } from '../scopes/ScopeRegistry.js';
 import type { ContainerRunner } from './ContainerRunner.js';
+import { BASE_IMAGE } from './BaseImage.js';
 
-const HELPER_IMAGE = process.env['AURA_BASE_IMAGE'] ?? 'aura-base';
+const HELPER_IMAGE = BASE_IMAGE;
 /**
  * Canonical mount root inside a consumer container. Provisioned at spawn by
  * `ContainerRunner`, so only containers started since that change have it.

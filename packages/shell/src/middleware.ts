@@ -6,6 +6,7 @@ import * as core from '@aura/core';
 import { kvServer, defaultKv } from '@aura/kv-store';
 import { bootstrapKv } from './lib/kvBootstrap.js';
 import { ensureSdkPublished } from './lib/sdkBootstrap.js';
+import { ensureBaseImageWithNotification } from './lib/baseImageBootstrap.js';
 import { loadCustomInterfaces } from './lib/customInterfaces.js';
 
 // Source of truth is the singleton on globalThis — NOT a module-scoped flag.
@@ -51,6 +52,16 @@ async function ensureAppManager() {
       core.getNotificationService?.().start();
     } catch (err) {
       console.warn(`[middleware] notification service start failed: ${(err as Error).message}`);
+    }
+
+    // The `aura-base` image every container app runs from. `docker compose up`
+    // builds it; when it is missing anyway, build it in the background with a
+    // progress notification (needs the notification service above). Detached:
+    // the desktop must come up to show it, and container spawns wait for it.
+    try {
+      ensureBaseImageWithNotification(dataDir);
+    } catch (err) {
+      console.warn(`[middleware] base image check failed: ${(err as Error).message}`);
     }
 
     // Materialise Aura Context (env/secret) files from Valkey BEFORE apps start,

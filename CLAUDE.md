@@ -12,7 +12,7 @@ the file `aura dev new` copies into every scaffolded app. Edit it there;
 ## Running it
 
 ```sh
-make up          # build aura-base + compose up (service aura-os → container aura-shell)
+make up          # compose up: builds aura-base, then the shell (service aura-os → container aura-shell)
 make restart     # restart the shell container
 make logs        # follow shell logs (app logs are prefixed [<appId>])
 make ps          # running aura-* containers

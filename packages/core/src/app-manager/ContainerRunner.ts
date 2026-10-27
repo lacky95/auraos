@@ -20,12 +20,12 @@ import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
 import {
   PROVISION_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
 } from './provisioning.js';
+import { BASE_IMAGE, whenBaseImageReady } from './BaseImage.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
 const HEALTH_CHECK_TIMEOUT_MS = 60_000; // slightly higher than PRoot because container spawn adds ~100 ms
 const LIFECYCLE_TIMEOUT_MS = 5_000;
 const SHARED_NETWORK = process.env['AURA_DOCKER_NETWORK'] ?? 'aura-net';
-const BASE_IMAGE     = process.env['AURA_BASE_IMAGE']     ?? 'aura-base';
 
 const execFileAsync = promisify(execFile);
 
@@ -224,6 +224,9 @@ export class ContainerRunner implements SandboxRunner {
 
   // ─── Spawn ────────────────────────────────────────────────────────────
   async spawn(instanceId: string, appId: string, port: number, manifest: AppManifest, ctx: SpawnContext): Promise<number> {
+    // On a first boot without the base image the shell builds it in the
+    // background; the spawn waits for it instead of failing on a docker pull.
+    await whenBaseImageReady();
     this.provisionToolsDir(instanceId, manifest);
 
     const hostname = this.containerName(instanceId);

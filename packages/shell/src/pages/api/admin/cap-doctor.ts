@@ -57,6 +57,11 @@ function run(cmd: string, args: string[]): string {
   return execFileSync(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] }).toString();
 }
 
+function imageExists(image: string): boolean {
+  try { execFileSync('docker', ['image', 'inspect', '--format', '{{.Id}}', image], { stdio: 'ignore', timeout: 15_000 }); return true; }
+  catch { return false; }
+}
+
 /** `{ binary: [unresolvable soname, …] }` from a probe's stdout. */
 function parseProbe(out: string): Record<string, string[]> {
   const found: Record<string, string[]> = {};
@@ -130,8 +135,13 @@ export const GET: APIRoute = async ({ url }) => {
   // they are fine.
   let inContainer: Record<string, string[]> | null = null;
   let inProot: Record<string, string[]> | null = null;
+  // Without the base image the container probe can't run — say so instead of
+  // a generic "probe unavailable" (it is also why container apps won't start).
+  const baseImageMissing = wantProbe && !imageExists(BASE_IMAGE);
   if (wantProbe) {
-    try {
+    if (baseImageMissing) {
+      console.warn(`[cap-doctor] container probe skipped: the ${BASE_IMAGE} image is missing — see GET /api/admin/first-boot, or run \`docker compose build aura-base\` on the host`);
+    } else try {
       inContainer = parseProbe(run('docker', [
         'run', '--rm',
         '--mount', `type=volume,source=${APP_DATA_VOLUME},target=/probe/bin,volume-subpath=aura/toolchain/bin,readonly`,
@@ -192,6 +202,7 @@ export const GET: APIRoute = async ({ url }) => {
     ok: true,
     probed: inContainer !== null && inProot !== null,
     probes: { container: inContainer !== null, proot: inProot !== null },
+    ...(baseImageMissing ? { baseImageMissing: BASE_IMAGE } : {}),
     mirrorBin, mirrorLib, caps,
   }, null, 2), {
     status: 200, headers: { 'Content-Type': 'application/json' },

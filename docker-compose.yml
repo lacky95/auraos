@@ -1,9 +1,27 @@
 services:
+  # Build-only: the image every `sandbox: "container"` app and every helper
+  # container runs from (AURA_BASE_IMAGE below). Listing it here makes a plain
+  # `docker compose up` build it before the shell starts, and the self-updater's
+  # `up --build aura-os` rebuild it with the shell. The container itself just
+  # exits. If the shell still comes up without the image, it builds it on its
+  # own and shows the progress as a notification (lib/baseImageBootstrap.ts).
+  aura-base:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: aura-base
+    image: aura-base
+    command: ["true"]
+    restart: "no"
+
   aura-os:
     build:
       context: .
       dockerfile: Dockerfile
       target: development
+    depends_on:
+      aura-base:
+        condition: service_completed_successfully
     container_name: aura-shell
     hostname: aura-shell
     # Auto-recover after a host reboot or docker daemon restart. Without

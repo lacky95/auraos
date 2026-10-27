@@ -13,6 +13,7 @@ export * from './app-manager/MountManager.js';
 export * from './app-manager/PortManager.js';
 export * from './app-manager/InstanceTokens.js';
 export * from './app-manager/SidecarManager.js';
+export * from './app-manager/BaseImage.js';
 export * from './app-manager/sidecar-spec.js';
 export * from './app-manager/IntentResolver.js';
 export * from './permissions/index.js';
