@@ -3,9 +3,13 @@
  * place — the setup card and the welcome checklist are both one of these.
  *
  *   • Every call is queued, so the create always lands before its updates.
- *   • The id is kept in `<dataDir>/aura/onboarding/<key>.id`: a shell that
- *     dies leaves its card behind (a locked one can't even be dismissed), and
- *     the next boot removes it before showing a fresh one.
+ *   • The id is kept in `<dataDir>/aura/onboarding/<key>.id`, because the
+ *     card outlives the shell process. The next boot either removes it
+ *     (`cleanupStale` — a locked one can't even be dismissed) or keeps using
+ *     it (`adoptStale`), which updates it in place: no second pop-up for a
+ *     card the user has already seen.
+ *   • An update with unchanged content is not sent — nothing for the shell
+ *     to patch or pop up again.
  *   • Creation waits for the first shell tab (`whenClientConnected`): the
  *     shell only pops up notifications that arrive while a tab is listening,
  *     and boot runs on the very first request, before the desktop's script
@@ -54,6 +58,8 @@ export function whenClientConnected(): Promise<void> {
 
 export class SystemCard {
   private id: string | null = null;
+  /** JSON of the last content sent for `id`, to skip unchanged updates. */
+  private lastSent: string | null = null;
   private removing = false;
   private chain: Promise<unknown> = Promise.resolve();
   private readonly idFile: string;
@@ -74,6 +80,7 @@ export class SystemCard {
       // Not ours to report when we removed it ourselves.
       if (!this.id || ev.id !== this.id || this.removing) return;
       this.id = null;
+      this.lastSent = null;
       rmSync(this.idFile, { force: true });
       this.removedHandler?.();
     });
@@ -102,12 +109,29 @@ export class SystemCard {
     if (stale) void this.queue(() => svc().removeBySender(stale, core.SYSTEM_CALLER));
   }
 
+  /**
+   * Keep using the card a previous shell left behind, when it is still
+   * active; otherwise forget it. Queued, so a following `show()` updates it.
+   */
+  adoptStale(): Promise<unknown> {
+    return this.queue(async () => {
+      if (!existsSync(this.idFile)) return;
+      const stale = readFileSync(this.idFile, 'utf-8').trim();
+      const n = stale ? await svc().get(stale).catch(() => null) : null;
+      if (n && n.state === 'active') { this.id = stale; return; }
+      rmSync(this.idFile, { force: true });
+    });
+  }
+
   /** Create (after the first shell tab) or update in place. */
   show(content: CardContent): Promise<unknown> {
     return this.queue(async () => {
+      const json = JSON.stringify(content);
+      if (this.id && json === this.lastSent) return;
       if (this.id) {
         try {
           await svc().update(this.id, { ...content }, core.SYSTEM_CALLER);
+          this.lastSent = json;
           return;
         } catch (err) {
           // Gone (dismissed, expired, force-removed): fall through and recreate.
@@ -118,6 +142,7 @@ export class SystemCard {
       await whenClientConnected();
       const r = await svc().create({ ...this.createFields, ...content } as CreateInput, core.SYSTEM_CALLER);
       this.id = r.notification.id;
+      this.lastSent = json;
       try { mkdirSync(join(this.idFile, '..'), { recursive: true }); writeFileSync(this.idFile, this.id); } catch { /* best effort */ }
     });
   }
@@ -131,6 +156,7 @@ export class SystemCard {
       finally {
         this.removing = false;
         this.id = null;
+        this.lastSent = null;
         rmSync(this.idFile, { force: true });
       }
     });

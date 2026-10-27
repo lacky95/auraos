@@ -3,19 +3,28 @@
  * first boot, step by step, with Retry when a step fails.
  *
  *   App image             aura-base (core BaseImage). Compose normally built
- *                         it already, then this is done at once.
+ *                         it already, then this is done at once. The only
+ *                         REQUIRED step: no app container starts without it.
  *   App registry and SDK  com.aura.registry up + @aura/* published
  *                         (lib/sdkBootstrap.ts).
  *   Aura Docs             com.aura.docs running (autoStart).
  *   Speech model          com.aura.whisper's speech container answering —
- *                         it downloads ~500 MB on a first start. Optional:
- *                         a slow download never holds up "ready".
+ *                         it downloads ~500 MB on a first start.
+ *
+ * The last three are optional: they run again on every boot anyway, so a
+ * failure (or a start that takes too long) shows as a warning and never keeps
+ * the locked card around. Only a failed app image turns the card into the
+ * urgent error view with Retry.
+ *
+ * Priority stays `medium` while it runs: the shell keeps high / urgent
+ * pop-ups open and re-shows them on every change after the user closed them
+ * — right for a failure, not for a progress bar (steps.ts setupHeadline).
  *
  * On a first boot (no `os/onboarding.setupDoneAt`) all four are tracked and
  * the card shows from the first shell tab on. When everything is settled it
  * says "AuraOS is ready", records `setupDoneAt` and hands over to the welcome
  * checklist. Later boots track only the app image and show the card only
- * while it has to be (re)built — the safety net from baseImageBootstrap.
+ * while it has to be (re)built (the aura-base safety net).
  *
  * Status and the image build log: GET /api/admin/first-boot (`?log=1`).
  */
@@ -25,7 +34,7 @@ import * as core from '@aura/core';
 import { ensureSdkPublished, type SdkPhase } from '../sdkBootstrap.js';
 import { SystemCard } from './card.js';
 import {
-  SETUP_LABELS, failedSteps, isSettled, renderSetupChecklist, setupProgress,
+  SETUP_LABELS, failedSteps, isSettled, renderSetupChecklist, setupHeadline, setupProgress,
   type SetupStep, type SetupStepId,
 } from './steps.js';
 
@@ -36,6 +45,7 @@ const RENDER_EVERY_MS = 1_000;
 const READY_LINGER_MS = 6_000;
 const SPEECH_POLL_MS = 10_000;
 const SPEECH_MAX_MS = 20 * 60_000;
+const DOCS_MAX_MS = 5 * 60_000;
 const IMAGE_LOG_LINES = 30;
 
 export interface SetupCardOpts {
@@ -109,7 +119,7 @@ export class SetupCard {
     const label: Record<SdkPhase, SetupStep['status']> = {
       waiting: 'running', publishing: 'running', done: 'done', failed: 'failed', skipped: 'warn',
     };
-    this.set('sdk', { status: 'pending' });
+    this.set('sdk', { status: 'pending', optional: true });
     void ensureSdkPublished((phase, detail) => this.set('sdk', { status: label[phase], detail }));
   }
 
@@ -117,7 +127,10 @@ export class SetupCard {
     const mgr = core.getAppManager();
     if (!mgr.registry.has(DOCS_APP) || !mgr.isEnabled(DOCS_APP)) return;
     const running = () => mgr.getInstancesByApp(DOCS_APP).some((i) => i.state === 'resumed');
-    this.set('docs', running() ? { status: 'done' } : { status: 'running', detail: 'starting' });
+    this.set('docs', running() ? { status: 'done', optional: true } : { status: 'running', optional: true, detail: 'starting' });
+    setTimeout(() => {
+      if (this.steps.get('docs')?.status === 'running') this.set('docs', { status: 'warn', detail: 'still starting — see the Process Manager' });
+    }, DOCS_MAX_MS);
     core.OsEventBus.on('app:stateChanged', (ev) => {
       if (ev.appId !== DOCS_APP) return;
       if (ev.state === 'resumed') this.set('docs', { status: 'done', detail: undefined });
@@ -149,17 +162,11 @@ export class SetupCard {
     void poll();
   }
 
+  /** Retry the failed required steps — today only the app image is required. */
   private retry(): void {
     for (const s of failedSteps([...this.steps.values()])) {
       console.log(`[onboarding] retrying setup step ${s.id}`);
       if (s.id === 'image') void this.base.ensure().catch(() => undefined);
-      else if (s.id === 'sdk') this.trackSdk();
-      else if (s.id === 'docs') {
-        this.set('docs', { status: 'running', detail: 'starting' });
-        core.getAppManager().start(DOCS_APP).catch((err: unknown) => {
-          this.set('docs', { status: 'failed', detail: (err as Error).message });
-        });
-      }
     }
   }
 
@@ -179,41 +186,33 @@ export class SetupCard {
   private render(): void {
     this.lastRender = Date.now();
     const steps = [...this.steps.values()];
-    const failed = failedSteps(steps);
-    const allSettled = this.tracking && steps.length > 0 && steps.every(isSettled);
+    const settled = this.tracking && steps.length > 0 && steps.every(isSettled);
     const image = this.steps.get('image');
+    const head = setupHeadline(steps, { firstBoot: this.opts.firstBoot, settled });
 
     // Not a first boot: only show while the image is being (re)built or broken.
-    if (!this.opts.firstBoot && !this.card.shown && image?.status !== 'running' && image?.status !== 'failed') return;
-    if (!this.opts.firstBoot && !this.card.shown && image?.status === 'running' && image.detail === 'checking') return;
+    if (!this.opts.firstBoot && !this.card.shown && image?.status !== 'failed'
+      && !(image?.status === 'running' && image.detail !== 'checking')) return;
 
-    if (failed.length) {
-      const components: unknown[] = [{ kind: 'markdown', id: 'steps', text: renderSetupChecklist(steps) }];
-      if (failed.some((s) => s.id === 'image')) {
+    const checklist = { kind: 'markdown', id: 'steps', text: renderSetupChecklist(steps) };
+
+    if (head.phase === 'failed') {
+      const components: unknown[] = [checklist];
+      if (failedSteps(steps).some((s) => s.id === 'image')) {
         components.push({ kind: 'markdown', id: 'log', label: 'Last lines of the image build', text: '```\n' + this.imageLogTail() + '\n```', maxHeight: 320 });
       }
       components.push({ kind: 'button', id: RETRY_ID, label: 'Retry', variant: 'primary' });
-      void this.card.show({
-        title: 'AuraOS setup needs attention',
-        text: `${failed.map((s) => s.label).join(', ')} failed. Retry, or see the shell log (\`docker logs aura-shell\`). Image build log: /api/admin/first-boot?log=1`,
-        priority: 'urgent',
-        components,
-      });
+      void this.card.show({ title: head.title, text: head.text, priority: head.priority, components });
       return;
     }
 
-    if (allSettled) {
+    if (head.phase === 'ready') {
       if (this.finished) return;
       this.finished = true;
       if (!this.card.shown) { this.done(); return; } // nothing was ever shown
       void this.card.show({
-        title: 'AuraOS is ready',
-        text: 'Setup is finished.',
-        priority: 'medium',
-        components: [
-          { kind: 'markdown', id: 'steps', text: renderSetupChecklist(steps) },
-          { kind: 'progress', id: 'progress', value: 1, label: 'Done' },
-        ],
+        title: head.title, text: head.text, priority: head.priority,
+        components: [checklist, { kind: 'progress', id: 'progress', value: 1, label: 'Done' }],
       });
       this.card.remove(READY_LINGER_MS);
       this.done();
@@ -222,13 +221,9 @@ export class SetupCard {
 
     this.finished = false;
     void this.card.show({
-      title: 'Setting up AuraOS',
-      text: this.opts.firstBoot
-        ? 'AuraOS is getting ready in the background. You can already look around; apps start as soon as what they need is there.'
-        : 'AuraOS is rebuilding the image every app container runs from. Apps start when it is ready.',
-      priority: 'high',
+      title: head.title, text: head.text, priority: head.priority,
       components: [
-        { kind: 'markdown', id: 'steps', text: renderSetupChecklist(steps) },
+        checklist,
         { kind: 'progress', id: 'progress', value: setupProgress(steps), label: steps.find((s) => s.status === 'running')?.label ?? 'Starting' },
       ],
     });

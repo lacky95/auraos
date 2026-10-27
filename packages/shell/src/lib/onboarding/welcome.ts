@@ -13,7 +13,8 @@
  *
  * Done steps are recorded in `os/onboarding` (state.ts) and stay done. The
  * card goes away when everything is done, or for good when the user hides or
- * dismisses it.
+ * dismisses it. It is created once: later boots keep updating the same card
+ * (`adoptStale`), so a shell restart never pops it up again.
  */
 
 import { existsSync } from 'node:fs';
@@ -70,6 +71,7 @@ export class Welcome {
   private running = false;
   private closing = false;
   private checking: Promise<void> | null = null;
+  private readonly adopted: Promise<unknown>;
 
   constructor(private readonly opts: WelcomeOpts) {
     this.card = new SystemCard('welcome', opts.dataDir, {
@@ -78,7 +80,7 @@ export class Welcome {
       visibility: 'public',
       context: { kind: 'task', id: 'onboarding', label: 'Getting started' },
     });
-    this.card.cleanupStale();
+    this.adopted = this.card.adoptStale();
     this.card.onInteract((cid) => this.onButton(cid));
     this.card.onRemoved(() => {
       if (this.closing) return;
@@ -94,9 +96,14 @@ export class Welcome {
 
   /** Show the checklist unless it is hidden or complete. Idempotent. */
   async start(): Promise<void> {
+    await this.adopted;
     this.state = await readOnboarding();
-    if (!this.state || this.state.welcome.hidden) return;
-    if (WELCOME_STEPS.every((s) => this.state!.welcome.done[s.id])) return;
+    const over = !this.state || this.state.welcome.hidden || WELCOME_STEPS.every((s) => this.state!.welcome.done[s.id]);
+    if (over) {
+      // A card from an earlier boot that is no longer wanted.
+      if (this.card.shown) { this.closing = true; this.card.remove(); setTimeout(() => { this.closing = false; }, 5_000); }
+      return;
+    }
     if (this.running) { await this.check(); return; }
     this.running = true;
     this.timer = setInterval(() => { void this.check(); }, RECHECK_MS);

@@ -58,6 +58,50 @@ const oneLine = (s: string, max = 160) => {
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 };
 
+export interface SetupHeadline {
+  phase: 'running' | 'failed' | 'ready';
+  title: string;
+  text: string;
+  /**
+   * `medium` unless something needs the user: the shell keeps high / urgent
+   * pop-ups open and shows them again on every content change after the user
+   * closed them — fine for a failure, annoying for a progress bar.
+   */
+  priority: 'medium' | 'urgent';
+}
+
+/** Title, text and priority of the setup card for these steps. */
+export function setupHeadline(steps: SetupStep[], opts: { firstBoot: boolean; settled: boolean }): SetupHeadline {
+  const failed = failedSteps(steps);
+  if (failed.length) {
+    return {
+      phase: 'failed',
+      title: 'AuraOS setup needs attention',
+      text: `${failed.map((s) => s.label).join(', ')} failed. Retry, or see the shell log (\`docker logs aura-shell\`). Image build log: /api/admin/first-boot?log=1`,
+      priority: 'urgent',
+    };
+  }
+  if (opts.settled) {
+    const problems = steps.filter((s) => s.optional && (s.status === 'failed' || s.status === 'warn'));
+    return {
+      phase: 'ready',
+      title: 'AuraOS is ready',
+      text: problems.length
+        ? `Setup is finished. Not everything worked yet — ${problems.map((s) => s.label).join(', ')}; AuraOS tries again on its next start.`
+        : 'Setup is finished.',
+      priority: 'medium',
+    };
+  }
+  return {
+    phase: 'running',
+    title: 'Setting up AuraOS',
+    text: opts.firstBoot
+      ? 'AuraOS is getting ready in the background. You can already look around; apps start as soon as what they need is there.'
+      : 'AuraOS is rebuilding the image every app container runs from. Apps start when it is ready.',
+    priority: 'medium',
+  };
+}
+
 export function renderSetupChecklist(steps: SetupStep[]): string {
   return steps.map((s) => {
     const detail = s.detail ? ` — ${oneLine(s.detail)}` : '';

@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { CreateInputSchema } from '@aura/core';
 import {
   HIDE_BUTTON_ID, WELCOME_STEPS, appForButton, failedSteps, isSettled, openButtonId,
-  renderSetupChecklist, renderWelcome, setupProgress,
+  renderSetupChecklist, renderWelcome, setupHeadline, setupProgress,
   type SetupStep, type WelcomeStepId, type WelcomeTarget,
 } from '../src/lib/onboarding/steps.ts';
 
@@ -97,4 +97,32 @@ test('the cards are valid notifications for core’s schema', () => {
       { kind: 'progress', id: 'progress', value: setupProgress(steps), label: 'App image' },
     ],
   }));
+});
+
+test('setup card: medium priority while running, urgent only when the app image fails', () => {
+  const running = [step({ id: 'image', status: 'running', progress: 0.5 }), step({ id: 'sdk', status: 'pending', optional: true })];
+  const h = setupHeadline(running, { firstBoot: true, settled: false });
+  assert.equal(h.phase, 'running');
+  assert.equal(h.priority, 'medium');
+  assert.match(setupHeadline(running, { firstBoot: false, settled: false }).text, /rebuilding the image/);
+
+  const imageFailed = [step({ id: 'image', label: 'App image', status: 'failed' })];
+  const f = setupHeadline(imageFailed, { firstBoot: true, settled: false });
+  assert.equal(f.phase, 'failed');
+  assert.equal(f.priority, 'urgent');
+  assert.match(f.text, /App image failed/);
+});
+
+test('setup card: failed optional steps (SDK, docs) still end in "ready", with a warning', () => {
+  const steps = [
+    step({ id: 'image', label: 'App image', status: 'done' }),
+    step({ id: 'sdk', label: 'App registry and SDK', status: 'failed', optional: true }),
+    step({ id: 'docs', label: 'Aura Docs', status: 'warn', optional: true }),
+  ];
+  assert.ok(steps.every(isSettled));
+  const h = setupHeadline(steps, { firstBoot: true, settled: true });
+  assert.equal(h.phase, 'ready');
+  assert.equal(h.priority, 'medium');
+  assert.match(h.text, /App registry and SDK, Aura Docs/);
+  assert.equal(setupHeadline([step({ id: 'image', status: 'done' })], { firstBoot: true, settled: true }).text, 'Setup is finished.');
 });
