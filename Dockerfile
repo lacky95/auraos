@@ -29,10 +29,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Zot — OCI Distribution registry, baked in so com.aura.registry doesn't
 # pay a first-boot download tax (decision in plan: bake-in over fetch).
-# Static linux-amd64 binary from the GitHub releases. Bump ZOT_VERSION to
-# pull in upstream fixes — no source changes needed; just rebuild aura-base.
+# Static binary from the GitHub releases, for the build's architecture
+# (`dpkg --print-architecture` gives zot's names: amd64, arm64). Bump
+# ZOT_VERSION to pull in upstream fixes — no source changes needed; just
+# rebuild aura-base.
 ARG ZOT_VERSION=v2.1.7
-RUN curl -fsSL "https://github.com/project-zot/zot/releases/download/${ZOT_VERSION}/zot-linux-amd64-minimal" -o /usr/local/bin/zot \
+RUN ARCH=$(dpkg --print-architecture) \
+ && curl -fsSL "https://github.com/project-zot/zot/releases/download/${ZOT_VERSION}/zot-linux-${ARCH}-minimal" -o /usr/local/bin/zot \
  && chmod +x /usr/local/bin/zot \
  && zot --version
 
@@ -114,10 +117,12 @@ RUN ARCH=$(uname -m) \
 
 # oras — OCI Registry Access tool. Nexus uses it to push/pull both apps
 # (oras push <ref> bundle.tar.gz) and @aura/* SDK packages. Static binary
-# from the GitHub releases. ORAS_VERSION is build-arg-bumpable; the artifact
+# from the GitHub releases, for the build's architecture (oras names them
+# like dpkg: amd64, arm64). ORAS_VERSION is build-arg-bumpable; the artifact
 # format is OCI Distribution v1.1 which has been stable since 2023.
 ARG ORAS_VERSION=1.2.0
-RUN curl -fsSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" -o /tmp/oras.tgz \
+RUN ARCH=$(dpkg --print-architecture) \
+ && curl -fsSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${ARCH}.tar.gz" -o /tmp/oras.tgz \
  && tar -xzf /tmp/oras.tgz -C /tmp oras \
  && install -m 0755 /tmp/oras /usr/local/bin/oras \
  && rm -f /tmp/oras.tgz /tmp/oras \
