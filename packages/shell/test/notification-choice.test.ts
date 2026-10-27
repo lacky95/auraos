@@ -288,8 +288,8 @@ test('select / combobox in a dialogue: required validation, Submit carries the v
   assert.deepEqual(plain(r.calls), [['resolve', n.id, { outcome: 'submitted', buttonId: 'submit', values: { city: 'vie' } }]]);
 });
 
-test('popup list follows its field and goes away with it; a desktop decision hosts it inside its overlay', () => {
-  resetDom('<div class="aura-dlg-desktop" data-ntf-popup-host="true" id="dec"></div>');
+test('popup list follows its field and goes away with it; a system decision hosts it inside its overlay', () => {
+  resetDom('<div class="aura-dlg-system" data-ntf-popup-host="true" id="dec"></div>');
   const n = item([{ kind: 'select', id: 'city', options: CITIES }]);
   const card = renderNotificationCard(n, { mode: 'dialog', actions: recorder().actions });
   doc.getElementById('dec')!.appendChild(card);

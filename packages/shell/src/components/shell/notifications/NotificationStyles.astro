@@ -113,7 +113,7 @@
 
   /* ── Controls: the shared aura-ctl family (phase 4) ──────────────────────
      One look for every surface: list, pop-ups, window / floating dialogues,
-     desktop decisions, phone sheet and full view. Native inputs restyled
+     system decisions, phone sheet and full view. Native inputs restyled
      (appearance:none) so keyboard + screen readers keep working. Theme
      tokens only; square corners, 1px borders. Spacing scale 4 / 6 / 8 / 12. */
   .aura-ntf-body { display: flex; flex-direction: column; gap: 12px; }
@@ -490,18 +490,18 @@
   }
   .aura-dlg-full .aura-dlg-body { flex: 1; }
 
-  /* AuraOS desktop decision: lock-screen-like, z 1900 (lock screen 2000). */
-  .aura-dlg-desktop {
+  /* AuraOS system decision: lock-screen-like, z 1900 (lock screen 2000). */
+  .aura-dlg-system {
     position: fixed; inset: 0; z-index: 1900;
     display: flex; align-items: center; justify-content: center; padding: 16px;
     background: color-mix(in srgb, var(--aura-color-bg) 88%, transparent);
     backdrop-filter: blur(6px);
   }
   .aura-dlg-decision { width: min(520px, 100%); max-height: 90%; border-color: var(--aura-color-warning); box-shadow: 0 0 0 1px var(--aura-color-warning), 0 12px 48px rgba(0, 0, 0, 0.6); }
-  /* Phase 6: APP desktop modals — same blocking shell, visibly not AuraOS:
+  /* Phase 6: APP system modals — same blocking shell, visibly not AuraOS:
      primary (not warning) frame, an identity bar with the app and the Force
      hide link (Ctrl+Alt+Shift+Esc). */
-  .aura-dlg-appmodal { width: min(520px, 100%); max-height: 90%; border-color: var(--aura-color-primary); box-shadow: 0 0 0 1px var(--aura-color-primary), 0 12px 48px rgba(0, 0, 0, 0.6); }
+  .aura-dlg-systemmodal { width: min(520px, 100%); max-height: 90%; border-color: var(--aura-color-primary); box-shadow: 0 0 0 1px var(--aura-color-primary), 0 12px 48px rgba(0, 0, 0, 0.6); }
   .aura-dlg-appbar {
     display: flex; align-items: center; gap: 8px; padding: 6px 10px;
     border-bottom: 1px solid var(--aura-color-border); background: var(--aura-color-surface-2);
@@ -522,7 +522,7 @@
   .aura-dlg-forcehide:focus-visible { box-shadow: var(--aura-glow-primary); }
   .aura-dlg-forcehide-confirm { padding: 6px 10px; border-bottom: 1px solid var(--aura-color-border); }
   @media (pointer: coarse), (max-width: 640px) { .aura-dlg-forcehide { min-height: 40px; } }
-  /* Phase 6: a non-blocking desktop dialogue of an app — centred, floating (z 1080). */
+  /* Phase 6: a non-blocking system dialog of an app — centred, floating (z 1080). */
   .aura-dlg-centred-host {
     position: fixed; inset: 0; z-index: 1080; display: flex; align-items: center; justify-content: center;
     padding: 16px; pointer-events: none;
@@ -662,7 +662,7 @@
   .aura-dlg-max[aria-pressed="true"] { color: var(--aura-color-primary); }
   .aura-dlg-max[hidden], section.aura-dlg[data-collapsed="true"] .aura-dlg-max { display: none; }
   /* Larger defaults when a dialogue carries markdown. */
-  .aura-dlg-decision[data-has-markdown="true"], .aura-dlg-appmodal[data-has-markdown="true"] { width: min(760px, 100%); }
+  .aura-dlg-decision[data-has-markdown="true"], .aura-dlg-systemmodal[data-has-markdown="true"] { width: min(760px, 100%); }
   .aura-dlg-centred[data-has-markdown="true"] { width: min(720px, 100%); max-height: 85%; }
   .aura-dlg-float:not([data-layout="phone"]) { width: auto; align-items: flex-end; }
   .aura-dlg-float:not([data-layout="phone"]) > .aura-dlg { width: 380px; max-width: 100%; }
@@ -670,7 +670,7 @@
   .aura-dlg-float[data-layout="phone"] > .aura-dlg { width: 100%; }
   .aura-dlg-host:not([data-blocking="true"]) .aura-dlg-window[data-has-markdown="true"] { max-height: 85%; }
   .aura-dlg-host[data-blocking="true"] .aura-dlg-window[data-has-markdown="true"] { width: min(640px, 100%); }
-  /* Maximized desktop modal / centred / floating: the app area between the
+  /* Maximized system modal / centred / floating: the app area between the
      top bar and the Dock, 14px margin. (Fixed to the body, which the shell
      zooms with a transform — so these are body px, like everything else.) */
   section.aura-dlg[data-maximized="true"]:not(.aura-dlg-window):not([data-collapsed="true"]) {

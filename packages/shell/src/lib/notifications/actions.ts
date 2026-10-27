@@ -71,7 +71,7 @@ export class NotificationActions {
     return r;
   }
 
-  /** Phase 6: force-hide an app desktop modal (the result is applied like any reply). */
+  /** Phase 6: force-hide an app system modal (the result is applied like any reply). */
   async forceHide(id: string): Promise<ActionResult> {
     return this.run(id, this.api.forceHide(id));
   }

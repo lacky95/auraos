@@ -146,8 +146,13 @@ export interface NotificationContext {
 export type NotificationType = 'simple' | 'locked' | 'dialogue';
 export type NotificationPriority = 'low' | 'medium' | 'high' | 'urgent';
 export type NotificationVisibility = 'public' | 'private' | 'secret';
-/** Placement scope of a dialogue (phase 4). `desktop` is SYSTEM_CALLER only. */
-export type NotificationScope = 'auto' | 'desktop';
+/**
+ * Placement scope of a dialogue. `system` (phase 6 rename of `desktop`):
+ * with `blocking` a system modal (needs notifications.systemModal; AuraOS's
+ * own decisions too), without it a system dialog (needs popup or
+ * systemModal). Input may still say `desktop` (deprecated alias).
+ */
+export type NotificationScope = 'auto' | 'system';
 
 export interface InputComponent {
   kind: 'input';
@@ -378,13 +383,14 @@ export interface LifecycleEvent {
 
 /** A non-fatal note in a create/update response (downgrades, ignored fields). */
 export interface NotificationWarning {
-  /** Phase 6: 'desktop-modal-rate-limited' = a desktop modal downgraded by the per-sender limit (scope → auto). */
-  code: 'downgraded' | 'ignored-field' | 'desktop-modal-rate-limited';
+  /** Phase 6: 'system-modal-rate-limited' = a system modal downgraded by the per-sender limit (scope → auto). */
+  /** 'deprecated-field' (phase 6): an old name was accepted and mapped (e.g. scope 'desktop' → 'system'). */
+  code: 'downgraded' | 'ignored-field' | 'system-modal-rate-limited' | 'deprecated-field';
   field: string;
   message: string;
   from?: unknown;
   to?: unknown;
-  /** desktop-modal-rate-limited: the limit, its window, when the next one is possible, and 0 left. */
+  /** system-modal-rate-limited: the limit, its window, when the next one is possible, and 0 left. */
   limit?: number;
   windowMinutes?: number;
   retryAfterMs?: number;

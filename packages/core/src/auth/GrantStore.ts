@@ -31,7 +31,19 @@ export const grantKey = (s: GrantSubject) => `grant:${s.kind}:${s.id}`;
  * `notifications.read` (phase 5) additionally carries a read scope
  * (`GrantRecord.read`): which senders, and whether secret items count.
  */
-export const PRIVILEGED_PERMISSIONS = ['notifications.locked', 'notifications.popup', 'notifications.read', 'notifications.desktopModal'] as const;
+export const PRIVILEGED_PERMISSIONS = ['notifications.locked', 'notifications.popup', 'notifications.read', 'notifications.systemModal'] as const;
+/**
+ * Deprecated permission names → their current name. Accepted by grant /
+ * revoke / get (and the Authorizer for manifest permissions[]) so nothing
+ * breaks mid-migration; `migrateLegacy()` rewrites stored grants once.
+ */
+export const LEGACY_PERMISSION_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  'notifications.desktopModal': 'notifications.systemModal',
+});
+/** The current name of a (possibly deprecated) permission. */
+export function canonicalPermission(p: string): string {
+  return LEGACY_PERMISSION_ALIASES[p] ?? p;
+}
 export const NOTIFICATIONS_READ_PERMISSION = 'notifications.read';
 export type PrivilegedPermission = typeof PRIVILEGED_PERMISSIONS[number];
 /** What GrantStore accepts. Deliberately not "any permission": no generic bypass. */
@@ -84,6 +96,7 @@ export class GrantStore {
   constructor(private readonly redis: () => Redis, private readonly now: () => number = Date.now) {}
 
   private validate(subject: GrantSubject, permission: string): void {
+    permission = canonicalPermission(permission);
     if (!SUBJECT_KINDS.includes(subject.kind)) throw new GrantError(400, `subject kind must be one of ${SUBJECT_KINDS.join(', ')}`);
     if (typeof subject.id !== 'string' || !SUBJECT_ID.test(subject.id)) throw new GrantError(400, 'invalid subject id');
     if (!GRANTABLE_PERMISSIONS.includes(permission)) {
@@ -100,6 +113,7 @@ export class GrantStore {
     subject: GrantSubject, permission: string,
     opts: { by: GrantedBy; appScope?: string; scope?: GrantScope; read?: { scope: unknown; includeSecret?: boolean } },
   ): Promise<{ record: GrantRecord; changed: boolean }> {
+    permission = canonicalPermission(permission);
     this.validate(subject, permission);
     const scope = opts.scope ?? OS_SCOPE;
     let read: ReadGrant | undefined;
@@ -130,6 +144,7 @@ export class GrantStore {
 
   /** Revoke. Returns the removed record, or null when there was none. */
   async revoke(subject: GrantSubject, permission: string, scope: GrantScope = OS_SCOPE): Promise<GrantRecord | null> {
+    permission = canonicalPermission(permission);
     this.validate(subject, permission);
     const r = this.redis();
     const key = grantKey(subject);
@@ -143,6 +158,7 @@ export class GrantStore {
 
   /** The grant record of one permission, or null. Read live on every check (no cache). */
   async get(subject: GrantSubject, permission: string, scope: GrantScope = OS_SCOPE): Promise<GrantRecord | null> {
+    permission = canonicalPermission(permission);
     const raw = await this.redis().hget(grantKey(subject), field(permission, scope));
     return raw ? (JSON.parse(raw) as GrantRecord) : null;
   }
@@ -170,6 +186,35 @@ export class GrantStore {
     const recs = await this.listFor(subject);
     for (const rec of recs) await this.revoke(subject, rec.permission, rec.scope);
     return recs.length;
+  }
+
+  /**
+   * One-time migration (idempotent): stored grants of a deprecated permission
+   * name (`notifications.desktopModal`) become the current name
+   * (`notifications.systemModal`) — same subject, scope, appScope pinning,
+   * attribution and grant time. Returns what was migrated (for the audit).
+   * No `permissions:changed` event: the effective rights do not change.
+   */
+  async migrateLegacy(): Promise<Array<{ subject: GrantSubject; from: string; to: string }>> {
+    const r = this.redis();
+    const out: Array<{ subject: GrantSubject; from: string; to: string }> = [];
+    for (const key of await r.smembers(GRANT_INDEX_KEY)) {
+      const all = await r.hgetall(key);
+      for (const [f, raw] of Object.entries(all)) {
+        let rec: GrantRecord;
+        try { rec = JSON.parse(raw) as GrantRecord; } catch { continue; }
+        const to = LEGACY_PERMISSION_ALIASES[rec.permission];
+        if (!to) continue;
+        const next: GrantRecord = { ...rec, permission: to };
+        const nf = field(to, rec.scope ?? OS_SCOPE);
+        const m = r.multi();
+        if (!all[nf]) m.hset(key, nf, JSON.stringify(next));
+        m.hdel(key, f);
+        await m.exec();
+        out.push({ subject: rec.subject, from: rec.permission, to });
+      }
+    }
+    return out;
   }
 
   /** Human form of a grant's read scope (`all`, `app:x,sender:y`), for lists and the CLI. */

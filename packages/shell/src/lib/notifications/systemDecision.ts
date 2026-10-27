@@ -1,5 +1,5 @@
 /**
- * DEV test hook for AuraOS desktop decisions (`scope:'desktop'`) — the logic
+ * DEV test hook for AuraOS system decisions (`scope:'system'`) — the logic
  * of `POST /api/admin/dev/system-decision`, injectable so it is unit tested.
  *
  * The policy is not weakened: only the in-process SYSTEM_CALLER may create a
@@ -7,7 +7,7 @@
  * session (the CLI's `aura admin dev system-decision`, never an app page), and
  * every call is audited. The payload is validated by the normal notification
  * schema (in `create`); whatever it says, the result is a `type:'dialogue'`
- * with `scope:'desktop'`.
+ * with `scope:'system'`.
  */
 export const DEFAULT_DECISION_COMPONENTS = [
   { kind: 'button', id: 'allow', label: 'Allow', variant: 'primary', action: 'resolve' },
@@ -36,7 +36,7 @@ export function buildSystemDecisionInput(body: Record<string, unknown>): Record<
     components: DEFAULT_DECISION_COMPONENTS,
     ...p,
     type: 'dialogue',
-    scope: 'desktop',
+    scope: 'system',
   };
 }
 

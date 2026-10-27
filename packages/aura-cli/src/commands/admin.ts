@@ -21,17 +21,29 @@ const FEATURES: Record<string, string> = {
   locked: 'notifications.locked',
   popup: 'notifications.popup',
   read: 'notifications.read',
-  desktopModal: 'notifications.desktopModal',
-  desktopmodal: 'notifications.desktopModal',
-  'notifications.desktopModal': 'notifications.desktopModal',
+  systemModal: 'notifications.systemModal',
+  systemmodal: 'notifications.systemModal',
+  'notifications.systemModal': 'notifications.systemModal',
   'notifications.locked': 'notifications.locked',
   'notifications.popup': 'notifications.popup',
   'notifications.read': 'notifications.read',
 };
 
+/** Deprecated names (phase 6 rename desktopModal → systemModal): still accepted, with a warning. */
+const DEPRECATED_FEATURES: Record<string, string> = {
+  desktopModal: 'notifications.systemModal',
+  desktopmodal: 'notifications.systemModal',
+  'notifications.desktopModal': 'notifications.systemModal',
+};
+
 export function notifPermission(name: string): string {
+  const old = DEPRECATED_FEATURES[name];
+  if (old) {
+    process.stderr.write(`warning: '${name}' is deprecated — use 'systemModal' (notifications.systemModal)\n`);
+    return old;
+  }
   const p = FEATURES[name];
-  if (!p) fail(`unknown notification permission '${name}' — use locked | popup | read | desktopModal`);
+  if (!p) fail(`unknown notification permission '${name}' — use locked | popup | read | systemModal`);
   return p!;
 }
 
@@ -193,14 +205,14 @@ export function registerAdmin(program: Command): void {
 
   admin
     .command('grant <app> <features...>')
-    .description("Grant privileged notification features (locked | popup | read | desktopModal) to an app. The app must also request them in its manifest. read = other senders' notifications, scoped with --scope.")
+    .description("Grant privileged notification features (locked | popup | read | systemModal) to an app. The app must also request them in its manifest. read = other senders' notifications, scoped with --scope.")
     .option('--scope <scope>', 'read: app:<appId>, sender:<senderKey> (comma-separated) or all')
     .option('--include-secret', 'read: secret notifications too (default: not)')
     .action((app: string, features: string[], opts: { scope?: string; includeSecret?: boolean }) => grantNotif('grant', app, features, opts));
 
   admin
     .command('revoke <app> <features...>')
-    .description('Revoke privileged notification features (locked | popup | read | desktopModal). Takes effect at once; revoking desktopModal releases that app\'s blocking modals.')
+    .description('Revoke privileged notification features (locked | popup | read | systemModal). Takes effect at once; revoking systemModal releases that app\'s blocking modals.')
     .action((app: string, features: string[]) => grantNotif('revoke', app, features));
 
   registerAdminDev(admin);
@@ -231,13 +243,13 @@ export function registerAdminNotif(admin: Command): void {
   const notif = admin.command('notif').description('Admin actions on notifications.');
   notif
     .command('release [id]')
-    .description("Stop app desktop modals from blocking the shell (escape hatch): one by id, or every active one of --app. They stay as normal dialogues; the sender sees reason 'admin-released'. AuraOS decisions cannot be released.")
-    .option('--app <appId>', 'every active desktop modal of this app')
+    .description("Stop app system modals from blocking the shell (escape hatch): one by id, or every active one of --app. They stay as normal dialogues; the sender sees reason 'admin-released'. AuraOS decisions cannot be released.")
+    .option('--app <appId>', 'every active system modal of this app')
     .action(async (id: string | undefined, opts: { app?: string }) => {
       let body: { id: string } | { appId: string };
       try { body = releaseBody(id, opts); } catch (err) { fail((err as Error).message); return; }
       const r = await api.post<{ released: string[] }>('/api/admin/notifications/release', body);
-      if (r.released.length) ok(`released ${r.released.length} desktop modal(s): ${r.released.join(', ')}`);
+      if (r.released.length) ok(`released ${r.released.length} system modal(s): ${r.released.join(', ')}`);
       else info('nothing was blocking');
     });
 }
@@ -250,7 +262,7 @@ export function registerAdminDev(admin: Command): void {
     .description('DEV-only test hooks (dev shell only, admin session, audited).');
   dev
     .command('system-decision')
-    .description('Show an AuraOS system decision: a desktop-wide modal (scope desktop) that BLOCKS THE WHOLE DESKTOP until answered. Dev shell only; created as AuraOS, audited as dev.systemDecision.')
+    .description('Show an AuraOS system decision: a desktop-wide modal (scope system) that BLOCKS THE WHOLE DESKTOP until answered. Dev shell only; created as AuraOS, audited as dev.systemDecision.')
     .option('--title <t>', 'title')
     .option('--text <x>', 'text')
     .option('--priority <p>', 'low | medium | high (default) | urgent')
@@ -273,7 +285,7 @@ export function registerAdminDev(admin: Command): void {
       } catch (err) {
         const e = err as Error & { status?: number };
         if (e.status === 404 || /404/.test(e.message)) {
-          fail('refused: the system-decision hook exists only on the DEV shell (astro dev). Production shells have no way to create a desktop decision from outside AuraOS.');
+          fail('refused: the system-decision hook exists only on the DEV shell (astro dev). Production shells have no way to create a system decision from outside AuraOS.');
         }
         fail(e.message);
         return;

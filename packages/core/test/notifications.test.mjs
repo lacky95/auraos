@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { KvServer, KvClient, createRedis } from '@aura/kv-store';
 import {
   NotificationService, NotificationError, SYSTEM_CALLER, isSystemCaller, KEY_EVENTS, itemKey,
-  emitNotificationBusEvent,
+  emitNotificationBusEvent, parseNotificationSettings, normalizeStored,
 } from '../dist/notifications/index.js';
 import { OsEventBus, NOTIFICATION_BUS_EVENTS } from '../dist/ipc/OsEventBus.js';
 
@@ -561,6 +561,22 @@ test('maximized (phase 6): a presentation hint for any sender — round-trip on 
   await rejectsStatus(svc.create({ type: 'dialogue', title: 'x', maximized: 'yes' }, APP), 400);
 });
 
+test("rename (phase 6): scope 'desktop' is a deprecated alias of 'system'; old settings key maps; stored items normalise", async () => {
+  const { notification: n, warnings } = await svc.create({ type: 'dialogue', title: 'old scope', scope: 'desktop' }, SYSTEM_CALLER);
+  assert.equal(n.scope, 'system');
+  assert.deepEqual(warnings.map((w) => [w.code, w.field, w.from, w.to]), [['deprecated-field', 'scope', 'desktop', 'system']]);
+  const u = await svc.update(n.id, { scope: 'desktop' }, SYSTEM_CALLER);
+  assert.equal(u.notification.scope, 'system');
+  assert.ok(u.warnings.some((w) => w.code === 'deprecated-field'));
+  // settings: the old key still configures the limit
+  const parsed = parseNotificationSettings({ desktopModal: { limit: 2, windowMinutes: 3 } });
+  assert.equal(parsed.systemModal.limit, 2);
+  assert.equal(parsed.systemModal.windowMinutes, 3);
+  assert.equal(parseNotificationSettings({ desktopModal: { limit: 2 }, systemModal: { limit: 7 } }).systemModal.limit, 7, 'the new key wins');
+  // a record stored before the rename reads as 'system'
+  assert.equal(normalizeStored({ id: 'x', scope: 'desktop' }).scope, 'system');
+});
+
 const APIKEY = { kind: 'apiKey', keyId: 'key1', name: 'ci', verification: 'verified' };
 const ALLOW_ALL = { authorize: async () => ({ allow: true, reason: 'test' }) };
 // Fake AppManager view: activities / instances and the app that owns them.
@@ -588,15 +604,15 @@ test('phase 4: defaults — blocking false, scope auto; pre-phase-4 records read
   assert.equal(got.scope, 'auto');
 });
 
-test('phase 6: desktop modal = scope desktop + blocking — needs notifications.desktopModal; identity stays the app', async () => {
-  const NO_MODAL = { authorize: async (_p, a) => ({ allow: a !== 'notifications.desktopModal', reason: 'not granted' }) };
+test('phase 6: system modal = scope system + blocking — needs notifications.systemModal; identity stays the app', async () => {
+  const NO_MODAL = { authorize: async (_p, a) => ({ allow: a !== 'notifications.systemModal', reason: 'not granted' }) };
   const granted = new NotificationService({ redis, now, authorizer: ALLOW_ALL, windowOwner });
   const denied = new NotificationService({ redis, now, authorizer: NO_MODAL, windowOwner });
   // Granted: kept for verified apps / API keys / the daemon (its own grant), with or without popup.
   for (const caller of [APP, DAEMON, APIKEY]) {
     for (const popup of [false, true]) {
-      const { notification: n, warnings } = await granted.create({ title: 'Approve?', type: 'dialogue', scope: 'desktop', blocking: true, popup }, caller);
-      assert.equal(n.scope, 'desktop', `${caller.kind} kept`);
+      const { notification: n, warnings } = await granted.create({ title: 'Approve?', type: 'dialogue', scope: 'system', blocking: true, popup }, caller);
+      assert.equal(n.scope, 'system', `${caller.kind} kept`);
       assert.equal(n.blocking, true);
       assert.equal(n.popup, true, 'it always opens at once — popup is irrelevant (stored true)');
       assert.ok(!warnings.some((w) => w.field === 'scope' || w.field === 'blocking' || w.field === 'popup'), JSON.stringify(warnings));
@@ -606,126 +622,126 @@ test('phase 6: desktop modal = scope desktop + blocking — needs notifications.
   }
   // Not granted / anonymous: scope → auto with a clear warning; blocking is then an own-window question.
   for (const [s, caller] of [[denied, APP], [denied, DAEMON], [granted, ANON], [granted, HINTED]]) {
-    const { notification: n, warnings } = await s.create({ title: 'x', type: 'dialogue', scope: 'desktop', blocking: true }, caller);
+    const { notification: n, warnings } = await s.create({ title: 'x', type: 'dialogue', scope: 'system', blocking: true }, caller);
     assert.equal(n.scope, 'auto');
     assert.equal(n.blocking, false, 'no own window in the context');
     const w = warnings.find((x) => x.field === 'scope');
     assert.equal(w?.code, 'downgraded');
-    assert.match(w.message, caller.kind === 'anonymous' ? /verified sender/ : /notifications\.desktopModal/);
+    assert.match(w.message, caller.kind === 'anonymous' ? /verified sender/ : /notifications\.systemModal/);
   }
-  // notifications.popup is NOT needed for a desktop modal (it opens at once anyway).
+  // notifications.popup is NOT needed for a system modal (it opens at once anyway).
   const POPUP_ONLY_DENIED = { authorize: async (_p, a) => ({ allow: a !== 'notifications.popup', reason: 'popup not granted' }) };
   const popupDenied = new NotificationService({ redis, now, authorizer: POPUP_ONLY_DENIED, windowOwner });
-  const m = await popupDenied.create({ title: 'm', type: 'dialogue', scope: 'desktop', blocking: true, popup: false }, APP);
-  assert.deepEqual([m.notification.scope, m.notification.blocking, m.notification.popup], ['desktop', true, true]);
+  const m = await popupDenied.create({ title: 'm', type: 'dialogue', scope: 'system', blocking: true, popup: false }, APP);
+  assert.deepEqual([m.notification.scope, m.notification.blocking, m.notification.popup], ['system', true, true]);
   assert.deepEqual(m.warnings, []);
-  // Non-blocking desktop (centred, also opens at once): needs popup OR desktopModal.
+  // Non-blocking desktop (centred, also opens at once): needs popup OR systemModal.
   for (const s of [denied, granted, popupDenied]) {
-    const r = await s.create({ title: 'centred', type: 'dialogue', scope: 'desktop' }, APP);
-    assert.deepEqual([r.notification.scope, r.notification.blocking, r.notification.popup], ['desktop', false, true]);
+    const r = await s.create({ title: 'centred', type: 'dialogue', scope: 'system' }, APP);
+    assert.deepEqual([r.notification.scope, r.notification.blocking, r.notification.popup], ['system', false, true]);
     assert.deepEqual(r.warnings, []);
   }
   const NOTHING = { authorize: async (_p, a) => ({ allow: a === 'system.notifications', reason: 'not granted' }) };
-  const none = await new NotificationService({ redis, now, authorizer: NOTHING, windowOwner }).create({ title: 'centred', type: 'dialogue', scope: 'desktop' }, APP);
+  const none = await new NotificationService({ redis, now, authorizer: NOTHING, windowOwner }).create({ title: 'centred', type: 'dialogue', scope: 'system' }, APP);
   assert.equal(none.notification.scope, 'auto');
   assert.match(none.warnings.find((w) => w.field === 'scope').message, /notifications\.popup/);
   // A JSON copy of SYSTEM_CALLER is not system at all; the real one keeps everything.
-  await rejectsStatus(granted.create({ title: 'x', type: 'dialogue', scope: 'desktop' }, JSON.parse(JSON.stringify(SYSTEM_CALLER))), 403);
-  const sys = await denied.create({ title: 'Decide', type: 'dialogue', scope: 'desktop', blocking: true }, SYSTEM_CALLER);
-  assert.deepEqual([sys.notification.scope, sys.notification.blocking, sys.notification.sender.kind], ['desktop', true, 'auraos']);
+  await rejectsStatus(granted.create({ title: 'x', type: 'dialogue', scope: 'system' }, JSON.parse(JSON.stringify(SYSTEM_CALLER))), 403);
+  const sys = await denied.create({ title: 'Decide', type: 'dialogue', scope: 'system', blocking: true }, SYSTEM_CALLER);
+  assert.deepEqual([sys.notification.scope, sys.notification.blocking, sys.notification.sender.kind], ['system', true, 'auraos']);
   assert.deepEqual(sys.warnings, []);
 });
 
-test('phase 6: at most 2 blocking desktop modals per sender per 10 minutes (the pop-up limit applies on top)', async () => {
-  const s = new NotificationService({ redis, now, authorizer: ALLOW_ALL, windowOwner, desktopModalLimit: { max: 2, windowMs: 600_000 }, popupLimit: { max: 3, windowMs: 600_000 } });
+test('phase 6: at most 2 blocking system modals per sender per 10 minutes (the pop-up limit applies on top)', async () => {
+  const s = new NotificationService({ redis, now, authorizer: ALLOW_ALL, windowOwner, systemModalLimit: { max: 2, windowMs: 600_000 }, popupLimit: { max: 3, windowMs: 600_000 } });
   const who = { ...APP, appId: 'com.example.modalrate', instanceId: 'com.example.modalrate-1' };
   const start = clock;
   try {
-    for (let i = 0; i < 2; i++) { clock += 1000; assert.equal((await s.create({ title: `m${i}`, type: 'dialogue', scope: 'desktop', blocking: true }, who)).notification.scope, 'desktop'); }
-    const third = await s.create({ title: 'm3', type: 'dialogue', scope: 'desktop', blocking: true }, who);
+    for (let i = 0; i < 2; i++) { clock += 1000; assert.equal((await s.create({ title: `m${i}`, type: 'dialogue', scope: 'system', blocking: true }, who)).notification.scope, 'system'); }
+    const third = await s.create({ title: 'm3', type: 'dialogue', scope: 'system', blocking: true }, who);
     assert.equal(third.notification.scope, 'auto');
-    assert.ok(third.warnings.some((w) => w.field === 'scope' && w.code === 'desktop-modal-rate-limited' && /limited to 2/.test(w.message)));
-    // Blocking modals do not use the pop-up budget (3): a centred desktop dialogue + 2 pop-ups still fit, then it is full.
-    assert.equal((await s.create({ title: 'c', type: 'dialogue', scope: 'desktop' }, who)).notification.scope, 'desktop');
+    assert.ok(third.warnings.some((w) => w.field === 'scope' && w.code === 'system-modal-rate-limited' && /limited to 2/.test(w.message)));
+    // Blocking modals do not use the pop-up budget (3): a system dialog + 2 pop-ups still fit, then it is full.
+    assert.equal((await s.create({ title: 'c', type: 'dialogue', scope: 'system' }, who)).notification.scope, 'system');
     assert.equal((await s.create({ title: 'p', type: 'dialogue', popup: true }, who)).notification.popup, true);
     assert.equal((await s.create({ title: 'p2', type: 'dialogue', popup: true }, who)).notification.popup, true);
-    const c2 = await s.create({ title: 'c2', type: 'dialogue', scope: 'desktop' }, who);
+    const c2 = await s.create({ title: 'c2', type: 'dialogue', scope: 'system' }, who);
     assert.equal(c2.notification.scope, 'auto', 'a centred one over the pop-up limit becomes a normal dialogue');
     clock = start + 1000 + 600_000 + 1;
-    assert.equal((await s.create({ title: 'm4', type: 'dialogue', scope: 'desktop', blocking: true }, who)).notification.scope, 'desktop');
+    assert.equal((await s.create({ title: 'm4', type: 'dialogue', scope: 'system', blocking: true }, who)).notification.scope, 'system');
   } finally { clock = start + 700_000; }
 });
 
-test('phase 6: desktop-modal limit from os/notifications — default 5/10 min, global, per sender, unlimited, live change; warning code + retryAfter; remaining', async () => {
+test('phase 6: system-modal limit from os/notifications — default 5/10 min, global, per sender, unlimited, live change; warning code + retryAfter; remaining', async () => {
   let settings = {};
   const s = new NotificationService({ redis, now, authorizer: ALLOW_ALL, windowOwner, settings: () => settings });
   const who = (id) => ({ ...APP, appId: id, instanceId: `${id}-1` });
-  const modal = (caller) => s.create({ title: 'm', type: 'dialogue', scope: 'desktop', blocking: true }, caller);
+  const modal = (caller) => s.create({ title: 'm', type: 'dialogue', scope: 'system', blocking: true }, caller);
   const start = clock;
   try {
     // Default: 5 per sender per 10 min, with the remaining budget on each kept one.
     const a = who('com.example.lim.default');
     const left = [];
-    for (let i = 0; i < 5; i++) { clock += 1000; const r = await modal(a); assert.equal(r.notification.scope, 'desktop'); left.push(r.desktopModal.remaining); }
+    for (let i = 0; i < 5; i++) { clock += 1000; const r = await modal(a); assert.equal(r.notification.scope, 'system'); left.push(r.systemModal.remaining); }
     assert.deepEqual(left, [4, 3, 2, 1, 0]);
     clock += 1000;
     const over = await modal(a);
     assert.equal(over.notification.scope, 'auto');
-    const w = over.warnings.find((x) => x.code === 'desktop-modal-rate-limited');
+    const w = over.warnings.find((x) => x.code === 'system-modal-rate-limited');
     assert.ok(w, JSON.stringify(over.warnings));
     assert.deepEqual([w.field, w.limit, w.windowMinutes, w.remaining], ['scope', 5, 10, 0]);
     assert.ok(w.retryAfterMs > 0 && w.retryAfterMs <= 600_000);
-    assert.equal(over.desktopModal, undefined, 'no budget on a downgraded one');
+    assert.equal(over.systemModal, undefined, 'no budget on a downgraded one');
     // Global setting: 2 per 1 minute.
-    settings = { desktopModal: { limit: 2, windowMinutes: 1 } };
+    settings = { systemModal: { limit: 2, windowMinutes: 1 } };
     const b = who('com.example.lim.global');
-    assert.equal((await modal(b)).desktopModal.limit, 2);
+    assert.equal((await modal(b)).systemModal.limit, 2);
     await modal(b);
     assert.equal((await modal(b)).notification.scope, 'auto');
     clock += 61_000;
-    assert.equal((await modal(b)).notification.scope, 'desktop', 'the 1-minute window slid');
+    assert.equal((await modal(b)).notification.scope, 'system', 'the 1-minute window slid');
     // Per sender: 'unlimited' (and 0) for one app; another stays at the global limit.
     const c = who('com.example.lim.free');
-    settings = { desktopModal: { limit: 1, windowMinutes: 10, perSender: { 'com.example.lim.free': 'unlimited' } } };
-    for (let i = 0; i < 4; i++) { const r = await modal(c); assert.equal(r.notification.scope, 'desktop'); assert.equal(r.desktopModal.remaining, null); }
+    settings = { systemModal: { limit: 1, windowMinutes: 10, perSender: { 'com.example.lim.free': 'unlimited' } } };
+    for (let i = 0; i < 4; i++) { const r = await modal(c); assert.equal(r.notification.scope, 'system'); assert.equal(r.systemModal.remaining, null); }
     const d = who('com.example.lim.one');
     await modal(d);
     assert.equal((await modal(d)).notification.scope, 'auto');
     // Globally unlimited.
-    settings = { desktopModal: { limit: 0 } };
-    for (let i = 0; i < 3; i++) assert.equal((await modal(d)).notification.scope, 'desktop');
+    settings = { systemModal: { limit: 0 } };
+    for (let i = 0; i < 3; i++) assert.equal((await modal(d)).notification.scope, 'system');
     // Garbage → defaults.
-    settings = { desktopModal: { limit: 'lots', windowMinutes: -3 } };
+    settings = { systemModal: { limit: 'lots', windowMinutes: -3 } };
     const e = who('com.example.lim.garbage');
-    assert.equal((await modal(e)).desktopModal.limit, 5);
-    assert.equal((await modal(e)).desktopModal.windowMinutes, 10);
+    assert.equal((await modal(e)).systemModal.limit, 5);
+    assert.equal((await modal(e)).systemModal.windowMinutes, 10);
   } finally { clock = start + 700_000; }
 });
 
 test('phase 6: release — force-hide / admin release / revoke turn a modal into a normal dialogue; AuraOS decisions refuse', async () => {
   let grantedNow = true;
-  const auth = { authorize: async (_p, a) => ({ allow: a !== 'notifications.desktopModal' || grantedNow, reason: 'revoked' }) };
+  const auth = { authorize: async (_p, a) => ({ allow: a !== 'notifications.systemModal' || grantedNow, reason: 'revoked' }) };
   const s = new NotificationService({ redis, now, authorizer: auth, windowOwner });
-  const make = async (caller = APP) => (await s.create({ title: 'Block?', type: 'dialogue', scope: 'desktop', blocking: true, popup: true }, caller)).notification;
+  const make = async (caller = APP) => (await s.create({ title: 'Block?', type: 'dialogue', scope: 'system', blocking: true, popup: true }, caller)).notification;
   const a = await make();
-  const r = await s.releaseDesktopModal(a.id, 'force-hidden');
+  const r = await s.releaseSystemModal(a.id, 'force-hidden');
   assert.deepEqual([r.state, r.scope, r.blocking, r.popup], ['active', 'auto', false, false]);
   const h = r.history.at(-1);
   assert.equal(h.event, 'updated');
   assert.equal(h.detail.reason, 'force-hidden');
-  await rejectsStatus(s.releaseDesktopModal(a.id, 'force-hidden'), 409);       // no longer blocking
-  const sys = await s.create({ title: 'AuraOS', type: 'dialogue', scope: 'desktop', blocking: true }, SYSTEM_CALLER);
-  await rejectsStatus(s.releaseDesktopModal(sys.notification.id, 'force-hidden'), 409);
+  await rejectsStatus(s.releaseSystemModal(a.id, 'force-hidden'), 409);       // no longer blocking
+  const sys = await s.create({ title: 'AuraOS', type: 'dialogue', scope: 'system', blocking: true }, SYSTEM_CALLER);
+  await rejectsStatus(s.releaseSystemModal(sys.notification.id, 'force-hidden'), 409);
   // Releasing one sender's modals (revoke hook) — other senders untouched.
   const b1 = await make(); const b2 = await make();
   const other = await make({ ...OTHER_APP });
-  const ids = await s.releaseDesktopModalsOf('app:com.example.notes', 'permission-revoked');
+  const ids = await s.releaseSystemModalsOf('app:com.example.notes', 'permission-revoked');
   assert.ok(ids.includes(b1.id) && ids.includes(b2.id) && !ids.includes(other.id), 'only that sender (the store is shared with earlier tests)');
   assert.equal((await s.get(b1.id)).history.at(-1).detail.reason, 'permission-revoked');
   assert.equal((await s.get(other.id)).blocking, true);
   // The sweep releases modals whose grant is gone (start-up / periodic).
   grantedNow = false;
-  const swept = await s.sweepDesktopModals();
+  const swept = await s.sweepSystemModals();
   assert.ok(swept.includes(other.id));
   assert.equal((await s.get(other.id)).scope, 'auto');
   assert.equal((await s.get(sys.notification.id)).blocking, true, 'AuraOS decisions are never swept');
@@ -764,12 +780,12 @@ test('phase 4: blocking only on the sender\'s OWN window (resolved via the AppMa
 
 test('phase 4: blocking / scope are ignored (with a warning) outside dialogues', async () => {
   const s = new NotificationService({ redis, now, authorizer: ALLOW_ALL, windowOwner });
-  const r = await s.create({ title: 'n', type: 'simple', blocking: true, scope: 'desktop', context: OWN_ACT }, APP);
+  const r = await s.create({ title: 'n', type: 'simple', blocking: true, scope: 'system', context: OWN_ACT }, APP);
   assert.equal(r.notification.blocking, false);
   assert.equal(r.notification.scope, 'auto');
   assert.ok(r.warnings.some((w) => w.code === 'ignored-field' && w.field === 'blocking'));
   assert.ok(r.warnings.some((w) => w.code === 'ignored-field' && w.field === 'scope'));
-  const sys = await s.create({ title: 'n', type: 'locked', scope: 'desktop' }, SYSTEM_CALLER);
+  const sys = await s.create({ title: 'n', type: 'locked', scope: 'system' }, SYSTEM_CALLER);
   assert.equal(sys.notification.scope, 'auto');
 });
 
@@ -809,8 +825,8 @@ test('phase 4: at most 3 forced pop-ups per sender per 10 minutes; the 4th stays
 test('phase 4: update re-gates scope and blocking (and a context change re-checks blocking)', async () => {
   const s = new NotificationService({ redis, now, authorizer: ALLOW_ALL, windowOwner });
   const { notification: n } = await s.create({ title: 'q', type: 'dialogue', context: OWN_ACT }, APP);
-  let u = await s.update(n.id, { scope: 'desktop' }, APP);
-  assert.equal(u.notification.scope, 'desktop', 'phase 6: non-blocking desktop needs no grant');
+  let u = await s.update(n.id, { scope: 'system' }, APP);
+  assert.equal(u.notification.scope, 'system', 'phase 6: non-blocking desktop needs no grant');
   u = await s.update(n.id, { scope: 'auto' }, APP);
   u = await s.update(n.id, { blocking: true }, APP);
   assert.equal(u.notification.blocking, true, 'own window: allowed on update too');
@@ -822,7 +838,7 @@ test('phase 4: update re-gates scope and blocking (and a context change re-check
   assert.equal(u.notification.blocking, false);
   // The senderToken holder (anonymous) can never turn blocking on.
   const anon = await s.create({ title: 'a', type: 'dialogue', context: OWN_ACT }, ANON);
-  const ua = await s.update(anon.notification.id, { blocking: true, scope: 'desktop' }, ANON, anon.senderToken);
+  const ua = await s.update(anon.notification.id, { blocking: true, scope: 'system' }, ANON, anon.senderToken);
   assert.equal(ua.notification.blocking, false);
   assert.equal(ua.notification.scope, 'auto');
   // Non-dialogues ignore both on update.
@@ -832,7 +848,7 @@ test('phase 4: update re-gates scope and blocking (and a context change re-check
   assert.ok(us.warnings.some((w) => w.field === 'blocking' && w.code === 'ignored-field'));
   // System may set desktop on update.
   const sys = await s.create({ title: 'sys', type: 'dialogue' }, SYSTEM_CALLER);
-  assert.equal((await s.update(sys.notification.id, { scope: 'desktop' }, SYSTEM_CALLER)).notification.scope, 'desktop');
+  assert.equal((await s.update(sys.notification.id, { scope: 'system' }, SYSTEM_CALLER)).notification.scope, 'system');
 });
 
 test('phase 4: appManagerWindowOwner reads the AppManager singleton', async () => {

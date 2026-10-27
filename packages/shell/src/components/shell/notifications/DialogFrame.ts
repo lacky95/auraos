@@ -1,6 +1,6 @@
 /**
  * The frame every notification dialogue shares (window overlay, floating,
- * phone sheet / full view, desktop decision): a bar with the sender, an
+ * phone sheet / full view, system decision): a bar with the sender, an
  * optional collapse toggle and a ✕ close ("answer later"), and the NotificationCard in
  * 'dialog' mode as its body.
  *
@@ -15,7 +15,7 @@
  * Maximize (phase 6): a ⤢ / ⤡ header button next to the ✕ and
  * Alt+Shift+Enter (focus inside) toggle `data-maximized` — the styles
  * stretch the dialogue over the app area between the top bar and the Dock
- * (desktop modal, centred and floating dialogues) or over its window body
+ * (system modal, centred and floating dialogues) or over its window body
  * (in-window panel). It starts maximized when the sender set
  * `maximized: true`, unless the user already chose otherwise for that item
  * in this tab (lib/notifications/maximize.ts: the user's choice wins and is

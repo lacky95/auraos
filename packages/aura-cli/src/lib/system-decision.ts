@@ -1,7 +1,7 @@
 /**
  * `aura admin dev system-decision` — build the payload for the DEV-only
  * AuraOS desktop-decision hook (POST /api/admin/dev/system-decision). Pure,
- * unit tested. The shell forces `type:'dialogue', scope:'desktop'` and
+ * unit tested. The shell forces `type:'dialogue', scope:'system'` and
  * validates the rest with the normal notification schema.
  */
 export interface SystemDecisionOpts {

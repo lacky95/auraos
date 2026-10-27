@@ -18,8 +18,8 @@ const form = [{ kind: 'input', id: 'x' }] as Notification['components'];
 test('grouping: order and exclusivity (locked > pinned > decisions > questions > urgent > info)', () => {
   assert.equal(groupOf(n('l', { type: 'locked', pinned: true, priority: 'urgent' })), 'locked');
   assert.equal(groupOf(n('p', { type: 'dialogue', pinned: true, priority: 'urgent' })), 'pinned', 'a pinned urgent dialogue → Pinned');
-  assert.equal(groupOf(n('d', { type: 'dialogue', scope: 'desktop', sender: OS as never })), 'decisions');
-  assert.equal(groupOf(n('d2', { type: 'dialogue', scope: 'desktop' })), 'questions', 'a forged desktop scope from an app is a normal question');
+  assert.equal(groupOf(n('d', { type: 'dialogue', scope: 'system', sender: OS as never })), 'decisions');
+  assert.equal(groupOf(n('d2', { type: 'dialogue', scope: 'system' })), 'questions', 'a forged system scope from an app is a normal question');
   assert.equal(groupOf(n('q', { type: 'dialogue', priority: 'urgent' })), 'questions');
   assert.equal(groupOf(n('f', { components: form, priority: 'high' })), 'questions', 'a Simple item with a form is a question');
   assert.equal(groupOf(n('u', { priority: 'urgent' })), 'urgent');
@@ -39,7 +39,7 @@ test('info-only fast path: no menu (locked / pinned / decisions never block it)'
 
 test('"Clear all (except …)" covers questions, urgent and info — never locked, pinned or decisions', () => {
   const g = groupItems([n('i'), n('q', { type: 'dialogue' }), n('u', { priority: 'urgent' }), n('p', { pinned: true }), n('l', { type: 'locked' }),
-    n('d', { type: 'dialogue', scope: 'desktop', sender: OS as never })]);
+    n('d', { type: 'dialogue', scope: 'system', sender: OS as never })]);
   assert.deepEqual(idsFor(g, 'all').sort(), ['i', 'q', 'u']);
   assert.deepEqual(idsFor(g, 'pinned'), ['p'], 'pinned clears through its own entry');
   assert.deepEqual(idsFor(g, 'locked'), []);

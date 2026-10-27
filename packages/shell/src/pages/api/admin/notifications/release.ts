@@ -6,7 +6,7 @@ import { notificationErrorResponse, readJson } from '../../../../lib/notificatio
 import { auditAdmin, requireAdmin } from '../../../../lib/auth.js';
 
 /**
- * Admin escape hatch (phase 6): stop app desktop modals from blocking the
+ * Admin escape hatch (phase 6): stop app system modals from blocking the
  * shell — `aura admin notif release <id>` / `--app <appId>`.
  *
  *   POST /api/admin/notifications/release   Authorization: Bearer <admin session>
@@ -26,16 +26,16 @@ export const POST: APIRoute = async ({ request }) => {
   const body = await readJson(request);
   if (body instanceof Response) return body;
   const svc = core.getNotificationService();
-  if (typeof (svc as { releaseDesktopModal?: unknown }).releaseDesktopModal !== 'function') return errorResponse('release is not available in the running core yet (restart pending)', 501);
+  if (typeof (svc as { releaseSystemModal?: unknown }).releaseSystemModal !== 'function') return errorResponse('release is not available in the running core yet (restart pending)', 501);
   const actor = { kind: 'system' as const, verification: 'internal' as const, reason: 'admin-released' };
   try {
     if (typeof body['id'] === 'string' && body['id']) {
-      const n = await svc.releaseDesktopModal(body['id'], 'admin-released', actor);
+      const n = await svc.releaseSystemModal(body['id'], 'admin-released', actor);
       await auditAdmin(admin, 'notifications.release', { target: n.id, outcome: 'ok' });
       return jsonResponse({ released: [n.id] });
     }
     if (typeof body['appId'] === 'string' && body['appId']) {
-      const ids = await svc.releaseDesktopModalsOf(`app:${body['appId']}`, 'admin-released', actor);
+      const ids = await svc.releaseSystemModalsOf(`app:${body['appId']}`, 'admin-released', actor);
       await auditAdmin(admin, 'notifications.release', { target: `app:${body['appId']}`, outcome: 'ok', detail: { released: ids.length } });
       return jsonResponse({ released: ids });
     }

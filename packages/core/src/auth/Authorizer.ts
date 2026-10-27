@@ -10,7 +10,7 @@
  *   instance   the app's manifest-declared permissions (strict for
  *              ENFORCED ones, MVP auto-grant for the rest, as PermissionManager),
  *              PLUS an admin grant (GrantStore) for privileged ones
- *              (notifications.locked / .popup / .read / .desktopModal). A grant only counts
+ *              (notifications.locked / .popup / .read / .systemModal). A grant only counts
  *              while the app still resolves to the install scope it was given for.
  *              `readGrant()` returns the SCOPE of a `notifications.read` grant.
  *   apiKey     its scopes (fixed by the admin at creation) or a GrantStore
@@ -25,7 +25,15 @@
  * verified agent identities exist, `actorScopeAllows` intersects for real.
  */
 import { ENFORCED_PERMISSIONS } from '../permissions/PermissionManager.js';
-import { GrantStore, NOTIFICATIONS_READ_PERMISSION, isPrivilegedPermission } from './GrantStore.js';
+
+const warnedLegacy = new Set<string>();
+function warnLegacy(appId: string, legacy: string, current: string): void {
+  const k = `${appId}|${legacy}`;
+  if (warnedLegacy.has(k)) return;
+  warnedLegacy.add(k);
+  console.warn(`[auth] ${appId} requests the deprecated permission '${legacy}' — treated as '${current}'; rename it in app.manifest.json`);
+}
+import { GrantStore, NOTIFICATIONS_READ_PERMISSION, isPrivilegedPermission, canonicalPermission } from './GrantStore.js';
 import type { ReadGrant } from '../notifications/access.js';
 import {
   isSystemPrincipal, type DeclaredActor, type GrantSubject, type Principal,
@@ -126,7 +134,10 @@ export class Authorizer {
         const appId = principal.appId;
         const declared = this.deps.declared(appId);
         if (!declared) return deny(`unknown app ${appId}`);
-        const has = declared.includes(action);
+        // Deprecated names in permissions[] still count (phase 6: desktopModal → systemModal).
+        const legacy = declared.find((p) => p !== action && canonicalPermission(p) === action);
+        if (legacy) warnLegacy(appId, legacy, action);
+        const has = declared.includes(action) || !!legacy;
         if (isPrivilegedPermission(action)) {
           if (!has) return deny(`${appId} does not request '${action}' in app.manifest.json permissions[]`);
           const subject: GrantSubject = { kind: 'app', id: appId };

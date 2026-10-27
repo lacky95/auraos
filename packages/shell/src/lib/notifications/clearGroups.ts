@@ -4,7 +4,7 @@
  * Every item is in exactly ONE group, checked in this order:
  *   locked     type locked — never bulk-cleared (⋯ → Force remove)
  *   pinned     pinned — "keep this": not in Clear all, own entry only
- *   decisions  AuraOS desktop decisions — never bulk-cleared (answer them)
+ *   decisions  AuraOS system decisions — never bulk-cleared (answer them)
  *   questions  dialogues, or items with inputs / options — dismissing tells
  *              the sender (`dismissed`)
  *   urgent     priority urgent / high
@@ -15,7 +15,7 @@
  * pinned and decisions)". Questions / urgent need a confirm.
  */
 import type { Notification } from './api.ts';
-import { hasFormFields, isDesktopDecision } from './dialogs.ts';
+import { hasFormFields, isAuraosDecision } from './dialogs.ts';
 
 export type ClearGroupId = 'locked' | 'pinned' | 'decisions' | 'questions' | 'urgent' | 'info';
 export const GROUP_ORDER: readonly ClearGroupId[] = ['questions', 'urgent', 'info', 'pinned', 'decisions', 'locked'];
@@ -31,7 +31,7 @@ export const GROUP_LABEL: Record<ClearGroupId, string> = {
 export function groupOf(n: Notification): ClearGroupId {
   if (n.type === 'locked') return 'locked';
   if (n.pinned) return 'pinned';
-  if (isDesktopDecision(n)) return 'decisions';
+  if (isAuraosDecision(n)) return 'decisions';
   if (n.type === 'dialogue' || hasFormFields(n)) return 'questions';
   if (n.priority === 'urgent' || n.priority === 'high') return 'urgent';
   return 'info';

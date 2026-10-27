@@ -35,12 +35,14 @@ export const BUILTIN_PERMISSIONS = [
    */
   'notifications.read',
   /**
-   * Request desktop-wide modal dialogues (phase 6): `scope:'desktop'` +
+   * Request system modals (phase 6): `scope:'system'` +
    * `blocking:true` blocks the whole Aura shell until answered. Privileged:
-   * off until an admin grants it (`aura grant nperm <app> desktopModal`);
+   * off until an admin grants it (`aura grant nperm <app> systemModal`);
    * without it the request is downgraded with a warning. The app stays the
    * sender ("Requested by <App>"), and the user can always force-hide it.
    */
+  'notifications.systemModal',
+  /** Deprecated (phase 6 rename): the old name of `notifications.systemModal`; still accepted. */
   'notifications.desktopModal',
   'system.clipboard',
   'system.overlay',

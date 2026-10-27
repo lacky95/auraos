@@ -494,7 +494,7 @@ interface NotifPermRow { app: string; scope: string | null; sends: boolean; requ
 const short = (ps: string[]) => (ps.length ? ps.map((p) => p.replace('notifications.', '')).join(',') : color.dim('-'));
 
 /**
- * Privileged notification permissions (locked, popup, read, desktopModal): the manifest
+ * Privileged notification permissions (locked, popup, read, systemModal): the manifest
  * requests, an admin grants. Reading needs an admin session too.
  */
 const notifPerms: ResourceDef<NotifPermRow> = {

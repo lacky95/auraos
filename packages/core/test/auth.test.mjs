@@ -35,6 +35,8 @@ const apps = new Map([
   ['com.example.priv', { permissions: ['system.notifications', 'notifications.locked', 'notifications.popup'], scope: 'user' }],
   ['com.example.mute', { permissions: [], scope: 'user' }],
   ['com.example.other', { permissions: ['system.notifications'], scope: 'user' }],
+  // Phase 6 rename: a manifest that still requests the deprecated name.
+  ['com.example.legacy', { permissions: ['system.notifications', 'notifications.desktopModal'], scope: 'user' }],
 ]);
 const inst = (appId, n = 1) => ({ kind: 'instance', appId, instanceId: `${appId}-${n}`, verification: 'verified' });
 const ANON = { kind: 'anonymous', verification: 'unverified' };
@@ -439,4 +441,36 @@ test('waitFor until interaction: wakes on the next interact, honours after, stil
   const r = await w2;
   assert.equal(r.reason, 'resolved');
   assert.equal(r.notification.state, 'resolved');
+});
+
+
+// ---------------------------------------------------------------------------
+// Phase 6 rename: notifications.desktopModal → notifications.systemModal
+// ---------------------------------------------------------------------------
+
+test('rename: stored desktopModal grants migrate to systemModal (subject, scope, pinning kept); old names are aliases', async () => {
+  const subject = { kind: 'app', id: 'com.example.legacy' };
+  const old = { subject, permission: 'notifications.desktopModal', scope: { kind: 'os' }, appScope: 'user', grantedAt: 1234, grantedBy: { kind: 'system' } };
+  await redis.multi().hset('grant:app:com.example.legacy', 'os|notifications.desktopModal', JSON.stringify(old)).sadd('grant:idx', 'grant:app:com.example.legacy').exec();
+  // Even before the migration the alias resolves on read.
+  assert.equal((await grants.get(subject, 'notifications.systemModal')), null, 'stored under the old field until migrated');
+  const moved = await grants.migrateLegacy();
+  assert.deepEqual(moved, [{ subject, from: 'notifications.desktopModal', to: 'notifications.systemModal' }]);
+  assert.deepEqual(await grants.migrateLegacy(), [], 'idempotent');
+  const rec = await grants.get(subject, 'notifications.systemModal');
+  assert.equal(rec.permission, 'notifications.systemModal');
+  assert.equal(rec.appScope, 'user');
+  assert.equal(rec.grantedAt, 1234);
+  assert.equal(await redis.hget('grant:app:com.example.legacy', 'os|notifications.desktopModal'), null, 'old field gone');
+  assert.equal((await grants.get(subject, 'notifications.desktopModal')).permission, 'notifications.systemModal', 'get() takes the old name too');
+  // The manifest still says desktopModal: it counts as systemModal.
+  assert.equal((await authz.authorize(inst('com.example.legacy'), 'notifications.systemModal')).allow, true);
+  // grant / revoke with the old name act on the new one.
+  await grants.revoke(subject, 'notifications.desktopModal');
+  assert.equal(await grants.get(subject, 'notifications.systemModal'), null);
+  const g = await grants.grant(subject, 'notifications.desktopModal', { by, appScope: 'user' });
+  assert.equal(g.record.permission, 'notifications.systemModal');
+  assert.ok(PRIVILEGED_PERMISSIONS.includes('notifications.systemModal') && !PRIVILEGED_PERMISSIONS.includes('notifications.desktopModal'));
+  assert.ok(ENFORCED_PERMISSIONS.includes('notifications.systemModal') && ENFORCED_PERMISSIONS.includes('notifications.desktopModal'));
+  await grants.revoke(subject, 'notifications.systemModal');
 });

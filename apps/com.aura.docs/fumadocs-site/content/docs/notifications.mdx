@@ -186,7 +186,7 @@ and dark mode.
   keyboard-accessible buttons; the toggle has `aria-pressed`. Switching back
   to the rendered view renders the edited text.
 - **Where:** the full area only renders in a **dialogue** (floating, centred,
-  in-window, desktop modal, phone sheet / full view). The list and pop-ups
+  in-window, system modal, phone sheet / full view). The list and pop-ups
   show a short preview (cut with "…") and **Show**, which opens the
   dialogue — for a Simple notification too.
 - **Updates:** a new `text` from `update` is patched in place: the view mode
@@ -219,7 +219,7 @@ buttons stack).
 |---|---|---|
 | `submit` | "Submit" when there are fields, else "OK" | Checks required fields, then resolves with `answer: { outcome: 'submitted', buttonId, values }`. |
 | `cancel` | "Cancel" | No validation and no values: resolves with `answer: { outcome: 'cancelled', buttonId }`. |
-| `later` | "Later" | Local only: hides the dialogue; it stays in the list. Not on blocking dialogues or desktop decisions. The dialogue's header ✕ and Escape do the same. |
+| `later` | "Later" | Local only: hides the dialogue; it stays in the list. Not on blocking dialogues or system decisions. The dialogue's header ✕ and Escape do the same. |
 
 - A role button may give only a `label` (`{ kind: 'button', role: 'cancel', label: 'No thanks' }`).
   Its `id` defaults to the role. There is at most one button per role.
@@ -286,7 +286,7 @@ across a lock (see the [privacy note](#privacy-note)).
   - The pop-up's ✕ hides it and keeps the item **unread**.
 - **Dialogues** open over their own window, float, or open as a sheet on a phone; see [Dialogues](#dialogues).
 - **Maximize.** Every dialogue on the desktop has a ⤢ button next to its ✕ (tooltip *Maximize* / *Restore*,
-  `aria-pressed`) and the shortcut **Alt+Shift+Enter** while focus is inside it. A desktop modal, a centred
+  `aria-pressed`) and the shortcut **Alt+Shift+Enter** while focus is inside it. A system modal, a centred
   or a floating dialogue then fills the app area between the top bar and the Dock (14 px margin); an
   in-window panel fills its window. The state is kept per notification for the browser tab (also across
   updates and reloads) and forgotten when the item ends. A markdown area grows with the dialogue. Dialogues
@@ -327,14 +327,14 @@ allowed to do:
 | The window is minimized or on another workspace | Nothing is pulled forward. The item waits in the list with **Answer**, and the window chip or workspace pill (or the ‹ › ▦ switcher) gets a marker. Answer reveals the window first. |
 | No window of the sender (a background app, an agent, REST) | A notification with **Answer**. The dialogue floats over the desktop only when the user answers. |
 | `popup: true` (needs `notifications.popup`) | Opens at once, without a click, but never takes focus. At most 3 forced pop-ups per sender per 10 minutes; beyond that `popup` is turned off with a warning. |
-| `scope: 'desktop'` + `blocking: true` | A **desktop modal**: it opens **at once** and blocks the whole Aura shell (`popup` is irrelevant). AuraOS's own system decisions, or an app (agent, API key) with the admin-granted `notifications.desktopModal` — see [Desktop modals](#desktop-modals). Without the grant, or over the limit: `scope: 'auto'` with a warning. |
-| `scope: 'desktop'` without blocking | A centred dialogue that also opens **at once** and blocks nothing. Because it interrupts, it needs `notifications.popup` (or `desktopModal`) and counts against the forced pop-up limit; without it: `scope: 'auto'` with a warning. |
+| `scope: 'system'` + `blocking: true` | A **system modal**: it opens **at once** and blocks the whole Aura shell (`popup` is irrelevant). AuraOS's own system decisions, or an app (agent, API key) with the admin-granted `notifications.systemModal` — see [System modals](#system-modals). Without the grant, or over the limit: `scope: 'auto'` with a warning. |
+| `scope: 'system'` without blocking | A centred dialogue that also opens **at once** and blocks nothing. Because it interrupts, it needs `notifications.popup` (or `systemModal`) and counts against the forced pop-up limit; without it: `scope: 'auto'` with a warning. |
 | Phone | A sheet, or a full view for complex content (more than 3 fields, a multiline input, or markdown). |
 
 A dialogue is never placed over **another** app's window: a sender can only
 cover a window it owns, so no app can phish over another.
 
-### Desktop modals
+### System modals
 
 Placement, blocking and opening by itself are separate permissions:
 
@@ -342,47 +342,47 @@ Placement, blocking and opening by itself are separate permissions:
 |---|---|
 | `system.notifications` | ordinary notifications and questions |
 | `notifications.popup` | open a dialogue by itself (`popup: true`), at most 3 per sender per 10 min |
-| `notifications.desktopModal` | a dialogue that **opens at once and blocks the whole Aura shell** (`scope: 'desktop'` + `blocking: true`; `notifications.popup` is not needed), at most 5 per sender per 10 min by default ([configurable](#desktop-modal-limit)) |
+| `notifications.systemModal` | a dialogue that **opens at once and blocks the whole Aura shell** (`scope: 'system'` + `blocking: true`; `notifications.popup` is not needed), at most 5 per sender per 10 min by default ([configurable](#system-modal-limit)) |
 
-- `desktopModal` is privileged like `locked` / `popup`: the manifest requests it, it is **off** until an admin grants it
-  (`aura grant nperm <app> desktopModal`, or Settings → Notifications & access), pinned to the install scope, and revocable.
+- `systemModal` is privileged like `locked` / `popup`: the manifest requests it, it is **off** until an admin grants it
+  (`aura grant nperm <app> systemModal`, or Settings → Notifications & access), pinned to the install scope, and revocable.
   Without it the request is downgraded to `scope: 'auto'` with a warning.
-- A desktop dialogue **always opens at once** — there is no "waits in the list" mode. A blocking one counts only against
-  the desktop-modal limit (not the forced pop-up limit); a centred, non-blocking one needs `notifications.popup` (or
-  `desktopModal`) and counts against the pop-up limit. A desktop request ends up as a normal dialogue / pop-up only when
+- A system dialog **always opens at once** — there is no "waits in the list" mode. A blocking one counts only against
+  the system-modal limit (not the forced pop-up limit); a centred, non-blocking one needs `notifications.popup` (or
+  `systemModal`) and counts against the pop-up limit. A `scope: 'system'` request ends up as a normal dialogue / pop-up only when
   the sender has no grant or is over its limit (with a warning) — or after a force-hide (below).
 - **The app stays the sender.** It never gets AuraOS identity or styling: the modal shows **"Requested by &lt;App&gt;"** with
   its glyph and verified / unverified attribution, in an app-coloured frame. AuraOS's own decisions keep their system look.
   Agents get it only if the Shell Daemon (`com.aura.aurashelld`) itself is granted; agent names never matter.
 - **Force hide** — a malfunctioning app can never lock the shell:
-  - every app desktop modal has a **"Hide this dialogue"** link in its corner, and the protected shortcut
+  - every app system modal has a **"Hide this dialogue"** link in its corner, and the protected shortcut
     **Ctrl+Alt+Shift+Esc** (handled by the shell in the capture phase; apps never see it). Both ask first:
     "Hide this dialogue from &lt;App&gt;? The app will be told."
   - Force hide releases the blocking and turns the item into a normal dialogue in the list (scope auto, not resolved, not
     dismissed). The sender sees a history entry `updated` with reason `force-hidden`.
-  - After a force-hide, that sender's desktop modals may not open **by themselves** in that tab for about 10 minutes, even
+  - After a force-hide, that sender's system modals may not open **by themselves** in that tab for about 10 minutes, even
     if it asks again in a loop: they wait as a pop-up / in the list. Opening one on purpose (Answer, a click) still shows
     the modal. Reloading the shell tab ends the suppression.
   - **Only AuraOS's own decisions cannot be hidden** — answer them.
-- **Revocation releases blocking:** revoking `desktopModal`, disabling or uninstalling the app releases each of its active
-  desktop modals at once (blocking off, scope auto, reason `permission-revoked`); every client lets go immediately. A
+- **Revocation releases blocking:** revoking `systemModal`, disabling or uninstalling the app releases each of its active
+  system modals at once (blocking off, scope auto, reason `permission-revoked`); every client lets go immediately. A
   startup / periodic sweep does the same for modals whose grant went away while the shell was down.
 - **Admin escape hatch:** `aura admin notif release <id>` or `aura admin notif release --app <appId>` (reason
   `admin-released`). The user op is `POST /api/notifications/<id>/force-hide`.
 
 #### Desktop-modal limit
 
-Each sender may keep at most **5 blocking desktop modals per 10 minutes** by default; beyond that the request is
-downgraded to a normal dialogue. The user changes it in **Settings → Notifications & access → Desktop modals** (no
+Each sender may keep at most **5 blocking system modals per 10 minutes** by default; beyond that the request is
+downgraded to a normal dialogue. The user changes it in **Settings → Notifications & access → System modals** (no
 admin unlock — it is a preference, stored in `os/notifications`):
 
 ```json
-{ "desktopModal": { "limit": 5, "windowMinutes": 10, "perSender": { "app:com.example.ops": "unlimited", "app:com.example.chatty": 1 } } }
+{ "systemModal": { "limit": 5, "windowMinutes": 10, "perSender": { "app:com.example.ops": "unlimited", "app:com.example.chatty": 1 } } }
 ```
 
 - `"unlimited"` (or `0`) turns the limit off — globally or for one sender. Changes apply to the next request.
-- A hit returns the warning code **`desktop-modal-rate-limited`** with `{ limit, windowMinutes, retryAfterMs, remaining: 0 }`.
-  A kept desktop modal's create response carries `desktopModal: { remaining, limit, windowMinutes }` (`remaining` null =
+- A hit returns the warning code **`system-modal-rate-limited`** with `{ limit, windowMinutes, retryAfterMs, remaining: 0 }`.
+  A kept system modal's create response carries `systemModal: { remaining, limit, windowMinutes }` (`remaining` null =
   unlimited), so a sender can show its budget.
 - Whatever the limit, force-hide and its per-tab suppression remain the protection against a request loop.
 
@@ -420,6 +420,14 @@ Only verified senders link to their own windows; a context that points at
 another app's window gets no badge and no in-window panel.
 
 ## Permissions
+
+> **Renamed in phase 6 (deprecated names still work for now):** the placement `scope: 'desktop'` is now
+> `scope: 'system'` (`desktop` is accepted and mapped, with a `deprecated-field` warning; stored items are migrated),
+> the permission `notifications.desktopModal` is now `notifications.systemModal` (existing grants were migrated —
+> audit "migrated grant desktopModal → systemModal"; the old name is accepted in `aura grant/revoke nperm`, in
+> manifest `permissions[]` and by the grants API), the setting `os/notifications.desktopModal` is now `systemModal`, the
+> warning `desktop-modal-rate-limited` is now `system-modal-rate-limited` and the create-response field `desktopModal`
+> is now `systemModal`. *System modal* = `scope: 'system'` + `blocking`; *system dialog* = `scope: 'system'` without it.
 
 | Permission | Who grants it | Without it |
 |---|---|---|
@@ -601,9 +609,9 @@ Ask, then keep working:
 3. Call `wait_for_answer` now and then until it is no longer `pending`.
 4. `remove_notification` when the task is done.
 
-For agents, `popup`, `locked` and `desktopModal` need admin grants for the
+For agents, `popup`, `locked` and `systemModal` need admin grants for the
 daemon. Window `blocking` is always downgraded (agents have no window); a
-desktop modal needs `desktopModal` for the daemon and shows "Requested by
+system modal needs `systemModal` for the daemon and shows "Requested by
 Aura Shell Daemon".
 
 Connect it: `claude mcp add --scope user --transport http aura-shell "$OS_API_BASE/api/proxy/com.aura.aurashelld/api/mcp/shell"`.
@@ -615,7 +623,7 @@ Connect it: `claude mcp add --scope user --transport http aura-shell "$OS_API_BA
 The **Notification Tester** app (`com.example.notifp4`, user scope) sends as a
 verified app:
 - a composer for every field and component (select, combobox and markdown included, with a markdown sample picker);
-- presets: sticky pop-up, role buttons, a dropdown + combobox form, a live dropdown, Locked, a forced pop-up, blocking, progress, a **Markdown** group (one per surface: desktop modal, centred, floating, in-window, Simple preview, editable, source view first, an XSS check), and more;
+- presets: sticky pop-up, role buttons, a dropdown + combobox form, a live dropdown, Locked, a forced pop-up, blocking, progress, a **Markdown** group (one per surface: system modal, centred, floating, in-window, Simple preview, editable, source view first, an XSS check), and more;
 - the server's real errors and warnings, explained;
 - a live view with Wait for answer and Wait for interaction;
 - a burst test for the rate and pop-up limits;
@@ -626,8 +634,8 @@ verified app:
 ## Testing system decisions
 
 AuraOS's own system decisions (the system look, never hideable) are created
-only by the in-process system caller; apps request *app* desktop modals with
-the `desktopModal` grant instead (see [Desktop modals](#desktop-modals)). To
+only by the in-process system caller; apps request *app* system modals with
+the `systemModal` grant instead (see [System modals](#system-modals)). To
 see a real AuraOS decision on a **dev** shell, use the admin CLI. It calls a DEV-only hook that needs an admin session and is
 audited as `dev.systemDecision`:
 
@@ -645,8 +653,8 @@ docker exec aura-shell aura admin dev system-decision --json '{"title":"Allow?",
 - It prints the notification id. `--wait [seconds]` waits for the answer and prints the outcome (`submitted` / `cancelled`) and the values.
 - Outside the dev server the hook does not exist, and the CLI refuses with a clear message.
 - In the Notification Tester:
-  - The preset "System modal (desktop) — via CLI" builds this command from the composer instead of sending.
-  - The group "Desktop modal (app)" tests app modals: opens automatically, waits in list, form, non-blocking (centred), force-hide (with repeated requests) and revocation.
+  - The preset "AuraOS system decision — via CLI" builds this command from the composer instead of sending.
+  - The group "System modal (app)" tests app modals: opens automatically, waits in list, form, non-blocking (centred), force-hide (with repeated requests) and revocation.
   - App pages never hold an admin session.
 
 ## Privacy note

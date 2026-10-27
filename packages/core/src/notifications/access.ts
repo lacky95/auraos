@@ -119,11 +119,11 @@ export interface NotificationSettings {
     apps: Record<string, RetentionDays>;
   };
   /**
-   * Phase 6: blocking desktop modals per sender (sliding window). `limit`
+   * Phase 6: blocking system modals per sender (sliding window). `limit`
    * 'unlimited' disables it (globally, or for one sender in `perSender`).
    * Force-hide + its per-tab suppression stay the loop protection either way.
    */
-  desktopModal: {
+  systemModal: {
     limit: number | 'unlimited';
     windowMinutes: number;
     /** senderKey → its own limit. */
@@ -131,10 +131,10 @@ export interface NotificationSettings {
   };
 }
 
-export const DEFAULT_DESKTOP_MODAL_LIMIT = 5;
-export const DEFAULT_DESKTOP_MODAL_WINDOW_MINUTES = 10;
-export const MAX_DESKTOP_MODAL_LIMIT = 1000;
-export const MAX_DESKTOP_MODAL_WINDOW_MINUTES = 24 * 60;
+export const DEFAULT_SYSTEM_MODAL_LIMIT = 5;
+export const DEFAULT_SYSTEM_MODAL_WINDOW_MINUTES = 10;
+export const MAX_SYSTEM_MODAL_LIMIT = 1000;
+export const MAX_SYSTEM_MODAL_WINDOW_MINUTES = 24 * 60;
 
 export const DEFAULT_RETENTION_DAYS = 7;
 export const MIN_RETENTION_DAYS = 1;
@@ -143,7 +143,7 @@ export const MAX_RETENTION_DAYS = 90;
 export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = Object.freeze({
   lockscreen: Object.freeze({ hideAll: false, apps: Object.freeze({}) }),
   retention: Object.freeze({ days: DEFAULT_RETENTION_DAYS, apps: Object.freeze({}) }),
-  desktopModal: Object.freeze({ limit: DEFAULT_DESKTOP_MODAL_LIMIT, windowMinutes: DEFAULT_DESKTOP_MODAL_WINDOW_MINUTES, perSender: Object.freeze({}) }),
+  systemModal: Object.freeze({ limit: DEFAULT_SYSTEM_MODAL_LIMIT, windowMinutes: DEFAULT_SYSTEM_MODAL_WINDOW_MINUTES, perSender: Object.freeze({}) }),
 }) as NotificationSettings;
 
 /** 'unlimited' / 0 / null → unlimited; a number → 1..1000; anything else → undefined. */
@@ -151,7 +151,7 @@ function modalLimit(v: unknown): number | 'unlimited' | undefined {
   if (v === 'unlimited' || v === 0 || v === null || v === '0') return 'unlimited';
   const n = typeof v === 'string' ? Number(v) : v;
   if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) return undefined;
-  return Math.min(MAX_DESKTOP_MODAL_LIMIT, Math.max(1, Math.round(n)));
+  return Math.min(MAX_SYSTEM_MODAL_LIMIT, Math.max(1, Math.round(n)));
 }
 
 const VIS: readonly NotificationVisibility[] = ['public', 'private', 'secret'];
@@ -170,7 +170,9 @@ function retention(v: unknown): RetentionDays | undefined {
 
 /** Parse the stored `os/notifications` value leniently: garbage → defaults, never a throw. */
 export function parseNotificationSettings(raw: unknown): NotificationSettings {
-  const o = (raw && typeof raw === 'object' ? raw : {}) as { lockscreen?: unknown; retention?: unknown; desktopModal?: unknown };
+  const o0 = (raw && typeof raw === 'object' ? raw : {}) as { lockscreen?: unknown; retention?: unknown; systemModal?: unknown; desktopModal?: unknown };
+  // `desktopModal` is the deprecated name of `systemModal` (phase 6 rename).
+  const o = o0.systemModal === undefined && o0.desktopModal !== undefined ? { ...o0, systemModal: o0.desktopModal } : o0;
   const ls = (o.lockscreen && typeof o.lockscreen === 'object' ? o.lockscreen : {}) as { hideAll?: unknown; apps?: unknown };
   const rt = (o.retention && typeof o.retention === 'object' ? o.retention : {}) as { days?: unknown; apps?: unknown };
   const lsApps: Record<string, NotificationVisibility> = {};
@@ -186,7 +188,7 @@ export function parseNotificationSettings(raw: unknown): NotificationSettings {
       if (d !== undefined) rtApps[settingsSenderKey(k)] = d;
     }
   }
-  const dm = (o.desktopModal && typeof o.desktopModal === 'object' ? o.desktopModal : {}) as { limit?: unknown; windowMinutes?: unknown; perSender?: unknown };
+  const dm = (o.systemModal && typeof o.systemModal === 'object' ? o.systemModal : {}) as { limit?: unknown; windowMinutes?: unknown; perSender?: unknown };
   const dmPer: Record<string, number | 'unlimited'> = {};
   if (dm.perSender && typeof dm.perSender === 'object') {
     for (const [k, v] of Object.entries(dm.perSender as Record<string, unknown>)) {
@@ -198,18 +200,18 @@ export function parseNotificationSettings(raw: unknown): NotificationSettings {
   return {
     lockscreen: { hideAll: ls.hideAll === true, apps: lsApps },
     retention: { days: retention(rt.days) ?? DEFAULT_RETENTION_DAYS, apps: rtApps },
-    desktopModal: {
-      limit: modalLimit(dm.limit) ?? DEFAULT_DESKTOP_MODAL_LIMIT,
+    systemModal: {
+      limit: modalLimit(dm.limit) ?? DEFAULT_SYSTEM_MODAL_LIMIT,
       windowMinutes: typeof win === 'number' && Number.isFinite(win) && win > 0
-        ? Math.min(MAX_DESKTOP_MODAL_WINDOW_MINUTES, Math.max(1, Math.round(win))) : DEFAULT_DESKTOP_MODAL_WINDOW_MINUTES,
+        ? Math.min(MAX_SYSTEM_MODAL_WINDOW_MINUTES, Math.max(1, Math.round(win))) : DEFAULT_SYSTEM_MODAL_WINDOW_MINUTES,
       perSender: dmPer,
     },
   };
 }
 
 /** Phase 6: one sender's blocking-modal limit — `max` null = unlimited. */
-export function desktopModalLimitFor(settings: NotificationSettings, senderKey: string): { max: number | null; windowMs: number; windowMinutes: number } {
-  const dm = settings.desktopModal ?? DEFAULT_NOTIFICATION_SETTINGS.desktopModal;
+export function systemModalLimitFor(settings: NotificationSettings, senderKey: string): { max: number | null; windowMs: number; windowMinutes: number } {
+  const dm = settings.systemModal ?? DEFAULT_NOTIFICATION_SETTINGS.systemModal;
   const l = dm.perSender[senderKey] ?? dm.limit;
   return { max: l === 'unlimited' ? null : l, windowMs: dm.windowMinutes * 60_000, windowMinutes: dm.windowMinutes };
 }

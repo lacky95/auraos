@@ -20,7 +20,7 @@ import { auditAdmin, requireAdmin } from '../../../lib/auth.js';
  * Takes effect on the very next request (no restart); emits
  * `permissions:changed`; audited as "admin (shared credential)".
  * Grantable: notifications.locked, notifications.popup, notifications.read,
- * notifications.desktopModal (phase 6; revoking it releases that sender's modals).
+ * notifications.systemModal (phase 6; revoking it releases that sender's modals).
  * An app must also REQUEST the permission in its manifest for the grant to count.
  */
 function fail(err: unknown): Response {
@@ -38,7 +38,8 @@ async function subjectArgs(request: Request, url: URL): Promise<{ kind: string; 
   }
   const kind = String(src['subjectKind'] ?? 'app');
   const id = String(src['subjectId'] ?? src['appId'] ?? '');
-  const permission = String(src['permission'] ?? '');
+  // Phase 6 rename: the deprecated name maps to the current one (GrantStore does the same).
+  const permission = core.canonicalPermission(String(src['permission'] ?? ''));
   if (!id || !permission) return jsonResponse({ error: 'subjectId (or appId) and permission are required' }, 400);
   return { kind, id, permission, src };
 }
@@ -51,7 +52,8 @@ export const GET: APIRoute = async ({ request }) => {
   const mgr = core.getAppManager();
   const apps = [];
   for (const m of mgr.registry.getAll()) {
-    const requested = (m.permissions ?? []).filter((x: string) => core.isPrivilegedPermission(x));
+    // Deprecated names in permissions[] count as their current name (desktopModal → systemModal).
+    const requested = [...new Set((m.permissions ?? []).map((x: string) => core.canonicalPermission(x)).filter((x: string) => core.isPrivilegedPermission(x)))];
     const mine = all.filter((g) => g.subject.kind === 'app' && g.subject.id === m.id);
     const granted = mine.map((g) => g.permission);
     const readRec = mine.find((g) => g.permission === 'notifications.read');
@@ -86,7 +88,7 @@ export const POST: APIRoute = async ({ request, url }) => {
     const m = mgr.registry.getById(a.id);
     if (!m) return jsonResponse({ error: `unknown app ${a.id}` }, 404);
     appScope = mgr.registry.getScopeId(a.id);
-    if (!(m.permissions ?? []).includes(a.permission)) {
+    if (!(m.permissions ?? []).some((x: string) => core.canonicalPermission(x) === a.permission)) {
       warnings.push(`${a.id} does not request '${a.permission}' in its manifest — the grant has no effect until it does`);
     }
   } else if (a.kind === 'apiKey') {

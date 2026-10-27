@@ -7,7 +7,7 @@
  *     changes from `aura:views.changed` (end of every renderLayout) plus a
  *     MutationObserver on `.app-slot` additions as a safety net;
  *   - "Answer" reveals through `window.auraRevealInstance`;
- *   - mounts WindowDialog / FloatingDialog / DesktopDecision;
+ *   - mounts WindowDialog / FloatingDialog / SystemModal;
  *   - markers: `data-ntf-pending` on the minimized-strip chip
  *     (`[data-aura-strip] [data-action="restore"][data-view-id]`) and on the
  *     workspace pill (`.ws-pill[data-ws-id]`), re-applied after re-renders;
@@ -23,7 +23,7 @@ import * as workspaceClient from '../../../lib/workspaceClient';
 import type { Notification } from '../../../lib/notifications/api.ts';
 import { mountWindowDialog, syncWindowBadge } from './WindowDialog.ts';
 import { mountFloatingDialog } from './FloatingDialog.ts';
-import { mountDesktopDecision } from './DesktopDecision.ts';
+import { mountSystemModal } from './SystemModal.ts';
 import { Disposer, PHONE_MAX_WIDTH, isLocked, watchLock } from './placement.ts';
 import { getDrafts } from '../../../lib/notifications/drafts.ts';
 import { getMaximizeMemory } from '../../../lib/notifications/maximize.ts';
@@ -37,7 +37,7 @@ export interface DialogsApi {
   answer(id: string): Promise<boolean>;
   /** "Go to activity": reveal the linked window and expand its panel. */
   goToActivity(id: string): Promise<boolean>;
-  /** What the item would do on its own ('window' | 'floating' | 'desktop' | 'wait' | 'none'). */
+  /** What the item would do on its own ('window' | 'floating' | 'decision' | 'systemModal' | 'wait' | 'none'). */
   autoPlacement(n: Notification): string;
   isOpen(id: string): boolean;
 }
@@ -144,9 +144,9 @@ export function mountDialogLayer(): () => void {
       document.querySelectorAll<HTMLElement & { __exit?: { hide(fn: () => void, o: { instant: boolean }): boolean } }>(`section.aura-dlg[data-exit="true"][data-id="${CSS.escape(n.id)}"]`)
         .forEach((el) => el.__exit?.hide(() => el.remove(), { instant: true }));
       const common = { actions: rt.actions, appLookup: rt.appLookup };
-      if (p.kind === 'desktop') return mountDesktopDecision(n, common);
-      // Phase 6: an app desktop modal — the same blocking shell, app-identified, force-hideable.
-      if (p.kind === 'appModal') return mountDesktopDecision(n, { ...common, appModal: { onForceHide: opts.onForceHide ?? (async () => false) } });
+      if (p.kind === 'decision') return mountSystemModal(n, common);
+      // Phase 6: an app system modal — the same blocking shell, app-identified, force-hideable.
+      if (p.kind === 'systemModal') return mountSystemModal(n, { ...common, systemModal: { onForceHide: opts.onForceHide ?? (async () => false) } });
       if (p.kind === 'window') {
         const slot = slotOf(p.viewId);
         if (!slot) return null;

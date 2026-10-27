@@ -16,7 +16,7 @@ import { Authorizer } from './Authorizer.js';
 import { GrantStore } from './GrantStore.js';
 
 /** Bump when the shape changes, so a singleton made by an older module copy is replaced. */
-export const AUTH_SERVICES_VERSION = 3;
+export const AUTH_SERVICES_VERSION = 4;
 
 export interface AuthServices {
   version: number;
@@ -62,6 +62,17 @@ export function getAuthServices(): AuthServices {
     clientSessions: new ClientSessionStore({ redis }),
   };
   g[GLOBAL_KEY] = svc;
+  // Phase 6 rename: grants of notifications.desktopModal → notifications.systemModal (once, idempotent).
+  void grants.migrateLegacy().then(async (moved) => {
+    for (const m of moved) {
+      const short = (p: string) => p.replace(/^notifications\./, '');
+      console.log(`[auth] migrated grant ${short(m.from)} → ${short(m.to)} for ${m.subject.kind}:${m.subject.id}`);
+      await audit.record({ by: { kind: 'system' }, action: 'grant.migrated', detail: {
+        subject: `${m.subject.kind}:${m.subject.id}`, from: m.from, to: m.to,
+        message: `migrated grant ${short(m.from)} → ${short(m.to)}`,
+      } }).catch(() => undefined);
+    }
+  }).catch((err) => console.warn(`[auth] grant migration failed: ${(err as Error).message}`));
   return svc;
 }
 

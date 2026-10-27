@@ -26,15 +26,15 @@
  * Phase 4 (dialogues): `blocking:true` only for a verified app on an activity /
  * instance the AppManager says is its own; at most 3 forced pop-ups per
  * sender per 10 minutes. Anything else is downgraded with a warning.
- * Phase 6 (desktop modals, supersedes "desktop = AuraOS only"):
- *   scope desktop + blocking  blocks the whole shell and ALWAYS opens at once
+ * Phase 6 (system modals, supersedes "desktop = AuraOS only"):
+ *   scope system + blocking  blocks the whole shell and ALWAYS opens at once
  *                             (popup is irrelevant, stored true) — needs the
- *                             privileged `notifications.desktopModal` (or
+ *                             privileged `notifications.systemModal` (or
  *                             SYSTEM_CALLER), a verified sender, and a free slot
- *                             of the desktop-modal limit (os/notifications,
+ *                             of the system-modal limit (os/notifications,
  *                             default 5 per sender per 10 min).
- *   scope desktop, no blocking  a centred dialogue that also opens at once:
- *                             needs `notifications.popup` (or desktopModal)
+ *   scope system, no blocking  a centred dialogue that also opens at once:
+ *                             needs `notifications.popup` (or systemModal)
  *                             and counts against the forced pop-up limit.
  * The app stays the sender. A revoke / disable / uninstall releases its
  * active modals (blocking off, scope auto, history `updated`, reason
@@ -68,7 +68,7 @@ import {
 } from './NotificationStore.js';
 import {
   DEFAULT_NOTIFICATION_SETTINGS, accessCanRead, accessSeesFull, isViewer, parseNotificationSettings,
-  retentionMsFor, viewFor, desktopModalLimitFor,
+  retentionMsFor, viewFor, systemModalLimitFor,
   type Access, type NotificationSettings, type NotificationViewer, type ReadGrant, type ViewerInput,
 } from './access.js';
 import {
@@ -102,7 +102,7 @@ export interface WaitForResult {
 }
 
 /** Bump when the class changes incompatibly: `getNotificationService()` replaces older singletons. */
-export const NOTIFICATION_SERVICE_VERSION = 15;
+export const NOTIFICATION_SERVICE_VERSION = 16;
 
 /** Phase 5: how often the sweeper runs the retention pass. */
 export const DEFAULT_RETENTION_INTERVAL_MS = 60_000;
@@ -118,12 +118,12 @@ export const DEFAULT_POPUP_WINDOW_MS = 10 * 60_000;
  */
 export type WindowOwnerResolver = (context: { kind: 'activity' | 'instance'; id: string }) => string | null | Promise<string | null>;
 
-export const DESKTOP_SCOPE_MESSAGE = 'desktop-wide dialogues are reserved for AuraOS system decisions';
-/** Phase 6: blocking desktop modals per sender (sliding window), on top of the pop-up limit. */
-export const DEFAULT_DESKTOP_MODALS_PER_WINDOW = 5;
-export const DEFAULT_DESKTOP_MODAL_WINDOW_MS = 10 * 60_000;
-/** Why an app desktop modal stopped blocking. */
-export type DesktopModalRelease = 'force-hidden' | 'permission-revoked' | 'admin-released';
+export const SYSTEM_SCOPE_MESSAGE = 'desktop-wide dialogues are reserved for AuraOS system decisions';
+/** Phase 6: blocking system modals per sender (sliding window), on top of the pop-up limit. */
+export const DEFAULT_SYSTEM_MODALS_PER_WINDOW = 5;
+export const DEFAULT_SYSTEM_MODAL_WINDOW_MS = 10 * 60_000;
+/** Why an app system modal stopped blocking. */
+export type SystemModalRelease = 'force-hidden' | 'permission-revoked' | 'admin-released';
 
 /**
  * The permission check the service needs (structural, so tests can fake it;
@@ -141,12 +141,12 @@ export interface NotificationAuthorizer {
 export const SEND_PERMISSION = 'system.notifications';
 export const LOCKED_PERMISSION = 'notifications.locked';
 export const POPUP_PERMISSION = 'notifications.popup';
-/** Phase 6: block the whole shell (scope desktop + blocking). */
-export const DESKTOP_MODAL_PERMISSION = 'notifications.desktopModal';
+/** Phase 6: block the whole shell (scope system + blocking). */
+export const SYSTEM_MODAL_PERMISSION = 'notifications.systemModal';
 
 /** An app (not AuraOS) dialogue that blocks the whole shell. */
-export function isAppDesktopModal(n: Pick<Notification, 'type' | 'scope' | 'blocking' | 'state'> & { caller?: NotificationCaller }): boolean {
-  return n.type === 'dialogue' && n.state === 'active' && n.scope === 'desktop' && n.blocking === true
+export function isAppSystemModal(n: Pick<Notification, 'type' | 'scope' | 'blocking' | 'state'> & { caller?: NotificationCaller }): boolean {
+  return n.type === 'dialogue' && n.state === 'active' && n.scope === 'system' && n.blocking === true
     && !(n.caller && isSystemCaller(n.caller)) && (n as { senderKey?: string }).senderKey !== 'auraos';
 }
 
@@ -172,8 +172,8 @@ export interface NotificationServiceOptions {
   createsPerMinute?: number;
   /** Phase 4: forced pop-up limit per sender (sliding window). Absent: unlimited. */
   popupLimit?: { max: number; windowMs: number };
-  /** Phase 6: blocking desktop modals per sender (default: unlimited). */
-  desktopModalLimit?: { max: number; windowMs: number };
+  /** Phase 6: blocking system modals per sender (default: unlimited). */
+  systemModalLimit?: { max: number; windowMs: number };
   /** Phase 4: window ownership for `blocking`. Absent: blocking is always downgraded. */
   windowOwner?: WindowOwnerResolver;
   /** Phase 5: the user's `os/notifications` settings. Absent: defaults (7-day retention, no overrides). */
@@ -187,11 +187,11 @@ export interface CreateResult {
   /** Returned ONCE; lets the creator update/remove later without a verified identity. */
   senderToken?: string;
   warnings: NotificationWarning[];
-  /** Phase 6: a kept desktop modal's budget (remaining null = unlimited). */
-  desktopModal?: DesktopModalBudget;
+  /** Phase 6: a kept system modal's budget (remaining null = unlimited). */
+  systemModal?: SystemModalBudget;
 }
 
-export interface DesktopModalBudget { remaining: number | null; limit: number | null; windowMinutes: number }
+export interface SystemModalBudget { remaining: number | null; limit: number | null; windowMinutes: number }
 
 export interface UpdateResult {
   notification: Notification;
@@ -400,6 +400,14 @@ function hasDialogueSurface(type: string, components: readonly NotificationCompo
   return type === 'dialogue' || (components ?? []).some((c) => isFieldComponent(c) || c.kind === 'markdown');
 }
 
+/** Phase 6 rename: `scope:'desktop'` in the raw input → a deprecation warning (the schema maps it to 'system'). */
+function deprecatedScopeWarning(input: unknown, warnings: NotificationWarning[]): void {
+  if (input && typeof input === 'object' && (input as { scope?: unknown }).scope === 'desktop') {
+    warnings.push({ code: 'deprecated-field', field: 'scope', from: 'desktop', to: 'system',
+      message: "scope 'desktop' is deprecated — use 'system' (same meaning: a system modal with blocking, a system dialog without)" });
+  }
+}
+
 function isFieldComponent(c: NotificationComponent): boolean {
   return c.kind === 'input' || c.kind === 'options' || c.kind === 'select' || c.kind === 'combobox' || (c.kind === 'markdown' && !!c.editable);
 }
@@ -450,7 +458,7 @@ export class NotificationService {
   private authorizer: NotificationAuthorizer | undefined;
   private createsPerMinute: number;
   private popupLimit: { max: number; windowMs: number } | undefined;
-  private desktopModalLimit: { max: number; windowMs: number } | undefined;
+  private systemModalLimit: { max: number; windowMs: number } | undefined;
   private windowOwner: WindowOwnerResolver | undefined;
   private settingsProvider: (() => NotificationSettings | Promise<NotificationSettings>) | undefined;
   private readonly retentionIntervalMs: number;
@@ -476,7 +484,7 @@ export class NotificationService {
     this.authorizer = opts.authorizer;
     this.createsPerMinute = opts.createsPerMinute ?? 0;
     this.popupLimit = opts.popupLimit;
-    this.desktopModalLimit = opts.desktopModalLimit;
+    this.systemModalLimit = opts.systemModalLimit;
     this.windowOwner = opts.windowOwner;
     this.settingsProvider = opts.settings;
     this.retentionIntervalMs = opts.retentionIntervalMs ?? DEFAULT_RETENTION_INTERVAL_MS;
@@ -523,9 +531,9 @@ export class NotificationService {
   }
 
   /** Phase 4: forced pop-up limit per sender; `undefined` = unlimited. */
-  /** Phase 6: blocking desktop modals per sender (undefined = unlimited). */
-  setDesktopModalLimit(limit: { max: number; windowMs: number } | undefined): void {
-    this.desktopModalLimit = limit;
+  /** Phase 6: blocking system modals per sender (undefined = unlimited). */
+  setSystemModalLimit(limit: { max: number; windowMs: number } | undefined): void {
+    this.systemModalLimit = limit;
   }
 
   setPopupLimit(limit: { max: number; windowMs: number } | undefined): void {
@@ -560,10 +568,14 @@ export class NotificationService {
   /** Start the expiry sweeper. Idempotent. */
   start(): void {
     if (this.sweeper) return;
+    // Phase 6 rename: stored active items with scope 'desktop' → 'system' (once; reads normalise too).
+    void this.store.migrateLegacyScope().then((n) => {
+      if (n) console.log(`[notifications] migrated ${n} active item(s) from scope 'desktop' to 'system'`);
+    }).catch((err) => console.warn(`[notifications] scope migration failed: ${(err as Error).message}`));
     // Phase 6: modals whose grant went away while the shell was down stop blocking.
-    void this.sweepDesktopModals().then((ids) => {
-      if (ids.length) console.log(`[notifications] released ${ids.length} desktop modal(s) without a grant`);
-    }).catch((err) => console.warn(`[notifications] desktop-modal sweep failed: ${(err as Error).message}`));
+    void this.sweepSystemModals().then((ids) => {
+      if (ids.length) console.log(`[notifications] released ${ids.length} system modal(s) without a grant`);
+    }).catch((err) => console.warn(`[notifications] system-modal sweep failed: ${(err as Error).message}`));
     this.sweeper = setInterval(() => { void this.sweep().catch((err) => {
       console.warn(`[notifications] sweep failed: ${(err as Error).message}`);
     }); }, this.sweepIntervalMs);
@@ -671,42 +683,42 @@ export class NotificationService {
   }
 
   /**
-   * Phase 6: a desktop modal (scope desktop + blocking) needs a verified
-   * sender with `notifications.desktopModal` and a free slot of the
+   * Phase 6: a system modal (scope system + blocking) needs a verified
+   * sender with `notifications.systemModal` and a free slot of the
    * per-sender limit; else scope → auto with a warning (blocking is then
    * judged as an own-window block by `gateBlocking`). Non-blocking desktop
    * dialogues need nothing. SYSTEM_CALLER: always. Mutates `fields`.
    */
-  private async gateDesktop(caller: NotificationCaller, fields: { scope?: string; blocking?: boolean }, warnings: NotificationWarning[], actorName?: string, countIt = true, budget: { value?: DesktopModalBudget } = {}): Promise<void> {
-    if (fields.scope !== 'desktop' || isSystemCaller(caller)) return;
+  private async gateSystem(caller: NotificationCaller, fields: { scope?: string; blocking?: boolean }, warnings: NotificationWarning[], actorName?: string, countIt = true, budget: { value?: SystemModalBudget } = {}): Promise<void> {
+    if (fields.scope !== 'system' || isSystemCaller(caller)) return;
     if (!fields.blocking) {
-      // A centred desktop dialogue opens by itself: popup (or desktopModal) is required.
+      // A system dialog opens by itself: popup (or systemModal) is required.
       const ask = async (perm: string) => (this.authorizer
         ? await this.authorizer.authorize(this.withActor(caller, actorName), perm)
         : { allow: false, reason: 'phase 1: AuraOS core only' });
       const pd = await ask(POPUP_PERMISSION);
-      if (pd.allow || (await ask(DESKTOP_MODAL_PERMISSION)).allow) return;
+      if (pd.allow || (await ask(SYSTEM_MODAL_PERMISSION)).allow) return;
       fields.scope = 'auto';
-      warnings.push({ code: 'downgraded', field: 'scope', from: 'desktop', to: 'auto',
-        message: `a desktop dialogue opens by itself, so it requires the '${POPUP_PERMISSION}' (or '${DESKTOP_MODAL_PERMISSION}') permission (requested in the manifest and granted by an admin): ${pd.reason}` });
+      warnings.push({ code: 'downgraded', field: 'scope', from: 'system', to: 'auto',
+        message: `a system dialog opens by itself, so it requires the '${POPUP_PERMISSION}' (or '${SYSTEM_MODAL_PERMISSION}') permission (requested in the manifest and granted by an admin): ${pd.reason}` });
       return;
     }
     const downgrade = (why: string) => {
       fields.scope = 'auto';
-      warnings.push({ code: 'downgraded', field: 'scope', from: 'desktop', to: 'auto',
-        message: `a desktop-wide modal (scope desktop + blocking) ${why}` });
+      warnings.push({ code: 'downgraded', field: 'scope', from: 'system', to: 'auto',
+        message: `a desktop-wide modal (scope system + blocking) ${why}` });
     };
     if (caller.kind !== 'instance' && caller.kind !== 'apiKey') { downgrade('needs a verified sender (an app or API key) with an admin grant'); return; }
     const d = this.authorizer
-      ? await this.authorizer.authorize(this.withActor(caller, actorName), DESKTOP_MODAL_PERMISSION)
+      ? await this.authorizer.authorize(this.withActor(caller, actorName), SYSTEM_MODAL_PERMISSION)
       : { allow: false, reason: 'phase 1: AuraOS core only' };
-    if (!d.allow) { downgrade(`requires the '${DESKTOP_MODAL_PERMISSION}' permission (requested in the manifest and granted by an admin): ${d.reason}`); return; }
+    if (!d.allow) { downgrade(`requires the '${SYSTEM_MODAL_PERMISSION}' permission (requested in the manifest and granted by an admin): ${d.reason}`); return; }
     // The limit: an explicit override (tests / embedders), else the user's
-    // `os/notifications.desktopModal` (default 5 per sender per 10 min).
+    // `os/notifications.systemModal` (default 5 per sender per 10 min).
     const sk = senderKeyFor(caller);
-    const lim = this.desktopModalLimit
-      ? { max: this.desktopModalLimit.max > 0 ? this.desktopModalLimit.max : null, windowMs: this.desktopModalLimit.windowMs, windowMinutes: Math.round(this.desktopModalLimit.windowMs / 60_000) }
-      : desktopModalLimitFor(await this.settings(), sk);
+    const lim = this.systemModalLimit
+      ? { max: this.systemModalLimit.max > 0 ? this.systemModalLimit.max : null, windowMs: this.systemModalLimit.windowMs, windowMinutes: Math.round(this.systemModalLimit.windowMs / 60_000) }
+      : systemModalLimitFor(await this.settings(), sk);
     if (!countIt) return;
     if (lim.max === null) { budget.value = { remaining: null, limit: null, windowMinutes: lim.windowMinutes }; return; }
     const key = `ratelimit:notifdesktop:${sk}`;
@@ -718,7 +730,7 @@ export class NotificationService {
       const oldest = await r.zrange(key, 0, 0, 'WITHSCORES');
       const retryAfterMs = Math.max(0, (oldest[1] !== undefined ? Number(oldest[1]) : now) + lim.windowMs - now);
       fields.scope = 'auto';
-      warnings.push({ code: 'desktop-modal-rate-limited', field: 'scope', from: 'desktop', to: 'auto',
+      warnings.push({ code: 'system-modal-rate-limited', field: 'scope', from: 'system', to: 'auto',
         message: `a desktop-wide modal is limited to ${lim.max} per sender per ${lim.windowMinutes} minutes — it waits as a normal dialogue (next one possible in ${Math.ceil(retryAfterMs / 1000)} s; the user can change the limit in Settings → Notifications & access)`,
         limit: lim.max, windowMinutes: lim.windowMinutes, retryAfterMs, remaining: 0 });
       return;
@@ -751,8 +763,8 @@ export class NotificationService {
 
   /** Phase 4: downgrade `fields.blocking` unless allowed (see `blockingRefusal`). */
   private async gateBlocking(caller: NotificationCaller, fields: { blocking: boolean; scope?: string }, context: Notification['context'], warnings: NotificationWarning[]): Promise<void> {
-    // A kept desktop modal blocks the shell, not a window (gateDesktop decided).
-    if (!fields.blocking || fields.scope === 'desktop') return;
+    // A kept system modal blocks the shell, not a window (gateSystem decided).
+    if (!fields.blocking || fields.scope === 'system') return;
     const why = await this.blockingRefusal(caller, context);
     if (why) {
       fields.blocking = false;
@@ -790,7 +802,7 @@ export class NotificationService {
     if (given.blocking === true) {
       warnings.push({ code: 'ignored-field', field: 'blocking', message: 'blocking only applies to type dialogue' });
     }
-    if (given.scope === 'desktop') {
+    if (given.scope === 'system') {
       warnings.push({ code: 'ignored-field', field: 'scope', message: 'scope only applies to type dialogue' });
     }
     if (fields.blocking !== undefined) fields.blocking = false;
@@ -840,26 +852,27 @@ export class NotificationService {
     const parsed = CreateInputSchema.safeParse(input);
     if (!parsed.success) throw new NotificationError(400, 'invalid notification', zodDetails(parsed.error));
     const p = parsed.data;
+    deprecatedScopeWarning(input, warnings);
     const actorName = p.sender?.actor?.name;
     await this.assertMaySend(caller, actorName);
     await this.rateLimit(caller);
-    const fields: { type: string; popup: boolean; blocking: boolean; scope: 'auto' | 'desktop' } = {
+    const fields: { type: string; popup: boolean; blocking: boolean; scope: 'auto' | 'system' } = {
       type: p.type, popup: p.popup, blocking: p.blocking, scope: p.scope,
     };
     if (fields.type !== 'dialogue') {
       // Not gated at all: these fields mean nothing outside dialogues.
       this.dialogueOnly(fields.type, fields, warnings, { blocking: p.blocking, scope: p.scope });
     }
-    // Phase 6: an app desktop dialogue ALWAYS opens at once — there is no
-    // "waits in the list" variant. Blocking: needs desktopModal, counts only
-    // against the desktop-modal limit, `popup` is irrelevant (stored true).
+    // Phase 6: an app system dialog ALWAYS opens at once — there is no
+    // "waits in the list" variant. Blocking: needs systemModal, counts only
+    // against the system-modal limit, `popup` is irrelevant (stored true).
     // Non-blocking (centred): auto-interrupts, so it needs popup (or
-    // desktopModal) and counts against the forced pop-up limit.
-    const budget: { value?: DesktopModalBudget } = {};
-    if (fields.type === 'dialogue' && fields.scope === 'desktop' && !isSystemCaller(caller)) {
-      await this.gateDesktop(caller, fields, warnings, actorName, true, budget);
+    // systemModal) and counts against the forced pop-up limit.
+    const budget: { value?: SystemModalBudget } = {};
+    if (fields.type === 'dialogue' && fields.scope === 'system' && !isSystemCaller(caller)) {
+      await this.gateSystem(caller, fields, warnings, actorName, true, budget);
     }
-    if (fields.type === 'dialogue' && fields.scope === 'desktop' && !isSystemCaller(caller)) {
+    if (fields.type === 'dialogue' && fields.scope === 'system' && !isSystemCaller(caller)) {
       fields.popup = true;
       if (!fields.blocking) {
         await this.gatePopupRate(caller, fields, warnings);
@@ -913,7 +926,7 @@ export class NotificationService {
       ...(senderToken ? { senderTokenHash: hashToken(senderToken) } : {}),
     };
     await this.commit(rec, 'created', now);
-    return { notification: toPublic(rec), ...(senderToken ? { senderToken } : {}), warnings, ...(budget.value && fields.scope === 'desktop' ? { desktopModal: budget.value } : {}) };
+    return { notification: toPublic(rec), ...(senderToken ? { senderToken } : {}), warnings, ...(budget.value && fields.scope === 'system' ? { systemModal: budget.value } : {}) };
   }
 
   async update(id: string, patch: UpdatePatch | unknown, caller: NotificationPrincipal, senderToken?: string): Promise<UpdateResult> {
@@ -925,6 +938,7 @@ export class NotificationService {
     const parsed = UpdatePatchSchema.safeParse(patch);
     if (!parsed.success) throw new NotificationError(400, 'invalid update', zodDetails(parsed.error));
     const p = parsed.data;
+    deprecatedScopeWarning(patch, warnings);
     const actorName = p.sender?.actor?.name;
     await this.assertMaySend(caller, actorName);
 
@@ -953,8 +967,8 @@ export class NotificationService {
       setOpt('popupDurationMs', p.popupDurationMs);
       setOpt('components', p.components);
       setOpt('context', p.context);
-      // (A kept app desktop dialogue keeps popup true: it always opens at once.)
-      if (p.popup !== undefined && !(rec.type === 'dialogue' && rec.scope === 'desktop' && !isSystemCaller(caller))) {
+      // (A kept app system dialog keeps popup true: it always opens at once.)
+      if (p.popup !== undefined && !(rec.type === 'dialogue' && rec.scope === 'system' && !isSystemCaller(caller))) {
         const f = { popup: p.popup };
         await this.gate(caller, f, warnings, actorName);
         if (f.popup && rec.type !== 'dialogue') {
@@ -974,17 +988,17 @@ export class NotificationService {
         this.dialogueOnly(rec.type, f, warnings, { ...(p.blocking !== undefined ? { blocking: p.blocking } : {}), ...(p.scope !== undefined ? { scope: p.scope } : {}) });
         // Phase 6: judged on the RESULTING scope + blocking (one may be unchanged).
         const eff = { scope: f.scope ?? rec.scope ?? 'auto', blocking: f.blocking ?? rec.blocking ?? false };
-        const wasModal = rec.scope === 'desktop' && rec.blocking === true;
-        if (rec.type === 'dialogue') await this.gateDesktop(caller, eff, warnings, actorName, !wasModal);
-        // A kept app desktop dialogue always opens at once (popup is irrelevant).
-        if (rec.type === 'dialogue' && eff.scope === 'desktop' && !isSystemCaller(caller)) setOpt('popup', true);
+        const wasModal = rec.scope === 'system' && rec.blocking === true;
+        if (rec.type === 'dialogue') await this.gateSystem(caller, eff, warnings, actorName, !wasModal);
+        // A kept app system dialog always opens at once (popup is irrelevant).
+        if (rec.type === 'dialogue' && eff.scope === 'system' && !isSystemCaller(caller)) setOpt('popup', true);
         if (f.scope !== undefined || eff.scope !== (rec.scope ?? 'auto')) setOpt('scope', (rec.type === 'dialogue' ? eff.scope : f.scope) as StoredNotification['scope']);
-        if (f.blocking !== undefined || (eff.scope !== 'desktop' && rec.blocking)) {
+        if (f.blocking !== undefined || (eff.scope !== 'system' && rec.blocking)) {
           const b = { blocking: rec.type === 'dialogue' ? eff.blocking : (f.blocking ?? false), scope: rec.type === 'dialogue' ? eff.scope : 'auto' };
           await this.gateBlocking(caller, b, rec.context, warnings);
           setOpt('blocking', b.blocking);
         }
-      } else if (p.context !== undefined && rec.blocking && rec.scope !== 'desktop') {
+      } else if (p.context !== undefined && rec.blocking && rec.scope !== 'system') {
         const b = { blocking: true };
         await this.gateBlocking(caller, b, rec.context, warnings);
         if (!b.blocking) setOpt('blocking', false);
@@ -1304,23 +1318,23 @@ export class NotificationService {
   }
 
   /**
-   * Phase 6: stop an APP desktop modal from blocking — it stays an active,
+   * Phase 6: stop an APP system modal from blocking — it stays an active,
    * normal dialogue (scope auto, blocking off, no auto-open) and the sender
    * sees an `updated` history entry with `detail.reason`:
    *   force-hidden        the user (an unlocked shell screen) hid it
-   *   permission-revoked  its sender lost `notifications.desktopModal` / was disabled
+   *   permission-revoked  its sender lost `notifications.systemModal` / was disabled
    *   admin-released      `aura admin notif release`
    * It is not resolved or dismissed. AuraOS's own decisions cannot be
    * released (409). Without a viewer (in-process / admin) no read check.
    */
-  async releaseDesktopModal(id: string, reason: DesktopModalRelease, actor: Actor = UNVERIFIED_USER, viewer?: ViewerInput): Promise<Notification> {
+  async releaseSystemModal(id: string, reason: SystemModalRelease, actor: Actor = UNVERIFIED_USER, viewer?: ViewerInput): Promise<Notification> {
     const access = await this.userAccess(viewer);
     return this.withLock(id, async () => {
       const rec = await this.mustLoad(id);
       if (access) this.gateUserOp(rec, access, 'release', true);
       if (rec.state !== 'active') throw new NotificationError(409, `notification is ${rec.state}`);
       if (isSystemCaller(rec.caller) || rec.senderKey === 'auraos') throw new NotificationError(409, 'AuraOS decisions cannot be hidden or released — answer them');
-      if (!(rec.scope === 'desktop' && rec.blocking)) throw new NotificationError(409, 'not a blocking desktop modal');
+      if (!(rec.scope === 'system' && rec.blocking)) throw new NotificationError(409, 'not a blocking system modal');
       this.releaseRec(rec, reason, actor);
       await this.commit(rec, 'updated', rec.updatedAt);
       return this.out(rec, access);
@@ -1328,7 +1342,7 @@ export class NotificationService {
   }
 
   /** Mutates `rec` (lock held): blocking off, scope auto, no auto-open, history. */
-  private releaseRec(rec: StoredNotification, reason: DesktopModalRelease, actor: Actor): void {
+  private releaseRec(rec: StoredNotification, reason: SystemModalRelease, actor: Actor): void {
     const now = this.now();
     rec.blocking = false;
     rec.scope = 'auto';
@@ -1338,19 +1352,19 @@ export class NotificationService {
   }
 
   /**
-   * Phase 6: release every active desktop modal of one sender (`app:<id>`,
+   * Phase 6: release every active system modal of one sender (`app:<id>`,
    * `key:<id>`) — after a revoke, a disable or an uninstall. Returns the ids.
    */
-  async releaseDesktopModalsOf(senderKey: string, reason: DesktopModalRelease, actor: Actor = { kind: 'system', verification: 'internal', reason }): Promise<string[]> {
+  async releaseSystemModalsOf(senderKey: string, reason: SystemModalRelease, actor: Actor = { kind: 'system', verification: 'internal', reason }): Promise<string[]> {
     const out: string[] = [];
     let cursor: string | undefined;
     do {
       const page = await this.list({ state: 'active', sender: senderKey, limit: 200, ...(cursor ? { cursor } : {}) });
       for (const n of page.items) {
-        if (!(n.type === 'dialogue' && n.scope === 'desktop' && n.blocking)) continue;
+        if (!(n.type === 'dialogue' && n.scope === 'system' && n.blocking)) continue;
         await this.withLock(n.id, async () => {
           const rec = await this.store.load(n.id);
-          if (!rec || rec.state !== 'active' || !(rec.scope === 'desktop' && rec.blocking) || isSystemCaller(rec.caller)) return;
+          if (!rec || rec.state !== 'active' || !(rec.scope === 'system' && rec.blocking) || isSystemCaller(rec.caller)) return;
           this.releaseRec(rec, reason, actor);
           await this.commit(rec, 'updated', rec.updatedAt);
           out.push(rec.id);
@@ -1362,27 +1376,27 @@ export class NotificationService {
   }
 
   /**
-   * Phase 6: release every active app desktop modal whose sender may no
+   * Phase 6: release every active app system modal whose sender may no
    * longer block the desktop (grant revoked, app disabled / uninstalled,
    * scope changed). Runs at start and with every retention pass. Returns ids.
    */
-  async sweepDesktopModals(): Promise<string[]> {
+  async sweepSystemModals(): Promise<string[]> {
     if (!this.authorizer) return [];
     const out: string[] = [];
     let cursor: string | undefined;
     do {
       const page = await this.list({ state: 'active', limit: 200, ...(cursor ? { cursor } : {}) });
       for (const n of page.items) {
-        if (!(n.type === 'dialogue' && n.scope === 'desktop' && n.blocking) || n.senderKey === 'auraos') continue;
+        if (!(n.type === 'dialogue' && n.scope === 'system' && n.blocking) || n.senderKey === 'auraos') continue;
         const rec = await this.store.load(n.id);
         if (!rec || isSystemCaller(rec.caller)) continue;
         const c = rec.caller;
         const allowed = (c.kind === 'instance' || c.kind === 'apiKey')
-          && (await this.authorizer.authorize(c, DESKTOP_MODAL_PERMISSION).catch(() => ({ allow: false }))).allow;
+          && (await this.authorizer.authorize(c, SYSTEM_MODAL_PERMISSION).catch(() => ({ allow: false }))).allow;
         if (allowed) continue;
         await this.withLock(n.id, async () => {
           const cur = await this.store.load(n.id);
-          if (!cur || cur.state !== 'active' || !(cur.scope === 'desktop' && cur.blocking)) return;
+          if (!cur || cur.state !== 'active' || !(cur.scope === 'system' && cur.blocking)) return;
           this.releaseRec(cur, 'permission-revoked', { kind: 'system', verification: 'internal', reason: 'permission-revoked' });
           await this.commit(cur, 'updated', cur.updatedAt);
           out.push(cur.id);
@@ -1538,10 +1552,10 @@ export class NotificationService {
       if (now - this.lastRetentionAt >= this.retentionIntervalMs) {
         this.lastRetentionAt = now;
         try {
-          const released = await this.sweepDesktopModals();
-          if (released.length) console.log(`[notifications] released ${released.length} desktop modal(s) without a grant`);
+          const released = await this.sweepSystemModals();
+          if (released.length) console.log(`[notifications] released ${released.length} system modal(s) without a grant`);
         } catch (err) {
-          console.warn(`[notifications] desktop-modal sweep failed: ${(err as Error).message}`);
+          console.warn(`[notifications] system-modal sweep failed: ${(err as Error).message}`);
         }
         try {
           const r = await this.sweepRetention();
@@ -1619,33 +1633,33 @@ export function getNotificationService(): NotificationService {
   if (!svc.rateLimitConfigured) svc.setCreateRateLimit(DEFAULT_CREATES_PER_MINUTE);
   // Phase 4: forced pop-up limit + window ownership through the AppManager.
   svc.setPopupLimit({ max: DEFAULT_POPUPS_PER_WINDOW, windowMs: DEFAULT_POPUP_WINDOW_MS });
-  // Phase 6: blocking desktop modals per sender, and releasing them on revoke / disable / uninstall.
-  // (the blocking desktop-modal limit comes from `os/notifications.desktopModal`, default 5 / 10 min)
-  attachDesktopModalRelease();
+  // Phase 6: blocking system modals per sender, and releasing them on revoke / disable / uninstall.
+  // (the blocking system-modal limit comes from `os/notifications.systemModal`, default 5 / 10 min)
+  attachSystemModalRelease();
   svc.setWindowOwnerResolver(appManagerWindowOwner);
   // Phase 5: the user's lock-screen + retention settings from the OS KV.
   svc.setSettingsProvider(kvNotificationSettings);
   return svc;
 }
 
-const RELEASE_HOOK_KEY = '__auraNotifDesktopModalReleaseHook';
+const RELEASE_HOOK_KEY = '__auraNotifSystemModalReleaseHook';
 /**
- * Phase 6: on `permissions:changed` (desktopModal revoked), `app:removed` and
- * `app:enabledChanged` (disabled), release that sender's desktop modals at
+ * Phase 6: on `permissions:changed` (systemModal revoked), `app:removed` and
+ * `app:enabledChanged` (disabled), release that sender's system modals at
  * once. Attached once per process; always uses the CURRENT singleton.
  */
-function attachDesktopModalRelease(): void {
+function attachSystemModalRelease(): void {
   const g = globalThis as Record<string, unknown>;
   if (g[RELEASE_HOOK_KEY]) return;
   g[RELEASE_HOOK_KEY] = true;
   const bus = OsEventBus as unknown as { on(t: string, fn: (ev: Record<string, unknown>) => void): void };
   const release = (senderKey: string, why: string) => {
-    void getNotificationService().releaseDesktopModalsOf(senderKey, 'permission-revoked', { kind: 'system', verification: 'internal', reason: why })
-      .then((ids) => { if (ids.length) console.log(`[notifications] ${why}: released ${ids.length} desktop modal(s) of ${senderKey}`); })
-      .catch((err) => console.warn(`[notifications] desktop-modal release failed: ${(err as Error).message}`));
+    void getNotificationService().releaseSystemModalsOf(senderKey, 'permission-revoked', { kind: 'system', verification: 'internal', reason: why })
+      .then((ids) => { if (ids.length) console.log(`[notifications] ${why}: released ${ids.length} system modal(s) of ${senderKey}`); })
+      .catch((err) => console.warn(`[notifications] system-modal release failed: ${(err as Error).message}`));
   };
   bus.on('permissions:changed', (ev) => {
-    if (ev['permission'] !== DESKTOP_MODAL_PERMISSION || ev['change'] !== 'revoked') return;
+    if (ev['permission'] !== SYSTEM_MODAL_PERMISSION || ev['change'] !== 'revoked') return;
     const id = String(ev['subjectId'] ?? '');
     if (!id) return;
     release(ev['subjectKind'] === 'apiKey' ? `key:${id}` : `app:${id}`, 'permission-revoked');
@@ -1679,6 +1693,16 @@ export async function kvNotificationSettings(): Promise<NotificationSettings> {
   try {
     const raw = await defaultRedis().get(SETTINGS_KV_KEY);
     const entry = raw ? JSON.parse(raw) as { value?: unknown } : null;
+    // Phase 6 rename: the limit settings move from `desktopModal` to `systemModal` (once).
+    const v = entry?.value as Record<string, unknown> | undefined;
+    if (v && typeof v === 'object' && 'desktopModal' in v) {
+      if (!('systemModal' in v)) v['systemModal'] = v['desktopModal'];
+      delete v['desktopModal'];
+      try {
+        await defaultRedis().set(SETTINGS_KV_KEY, JSON.stringify(entry));
+        console.log('[notifications] migrated settings os/notifications.desktopModal → systemModal');
+      } catch { /* parse below still maps the alias */ }
+    }
     cache.value = parseNotificationSettings(entry?.value);
   } catch {
     // Keep the last known settings (defaults on a cold start).

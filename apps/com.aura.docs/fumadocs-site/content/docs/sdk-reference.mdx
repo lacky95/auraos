@@ -163,17 +163,17 @@ remove its own notifications.
 - Without a window (a background app or an agent) the dialogue floats over
   the desktop when the user presses Answer, or at once with an allowed
   pop-up. It never blocks the desktop.
-- `scope: 'desktop'` + `blocking: true` is a **desktop modal** that blocks the
-  whole shell. It needs the admin-granted `notifications.desktopModal`
-  (manifest request + `aura grant nperm <app> desktopModal`) and always
+- `scope: 'system'` + `blocking: true` is a **system modal** that blocks the
+  whole shell. It needs the admin-granted `notifications.systemModal`
+  (manifest request + `aura grant nperm <app> systemModal`) and always
   opens at once — `popup` is irrelevant and `notifications.popup` not
   needed. The app stays the sender
   ("Requested by &lt;App&gt;"), and the user can always force-hide it (link or
   Ctrl+Alt+Shift+Esc; reason `force-hidden` in its history). Revoking the
   grant releases it (`permission-revoked`). Without the grant: downgraded to
-  `scope: 'auto'` with a warning. `scope: 'desktop'` without blocking is a
+  `scope: 'auto'` with a warning. `scope: 'system'` without blocking is a
   centred, non-blocking dialogue that also opens at once — it needs
-  `notifications.popup` (or `desktopModal`).
+  `notifications.popup` (or `systemModal`).
 
 **Locked** (`type: 'locked'`): the user can't dismiss it, and Clear all
 skips it. The user can still force-remove it from the card's ⋯ menu after a
@@ -280,7 +280,7 @@ a phone).
 |---|---|---|
 | `submit` | "Submit" (with inputs or options), else "OK" | Always primary. Checks required fields, then resolves with `answer: { outcome: 'submitted', buttonId, values }`. |
 | `cancel` | "Cancel" | No validation, no values. Resolves with `answer: { outcome: 'cancelled', buttonId }`, so you learn the user said no. |
-| `later` | "Later" | Local only: hides the dialogue; nothing is sent, and it stays in the list with Answer. Not on blocking dialogues or desktop decisions. The dialogue header's ✕ does the same. |
+| `later` | "Later" | Local only: hides the dialogue; nothing is sent, and it stays in the list with Answer. Not on blocking dialogues or system decisions. The dialogue header's ✕ does the same. |
 
 - A role button may give only its text, e.g. `{ kind: 'button', role: 'cancel', label: 'No thanks' }`.
   `id` defaults to the role, and `label` to the default text. There can be

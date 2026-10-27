@@ -6,7 +6,7 @@ import { auditAdmin, requireAdmin } from '../../../../lib/auth.js';
 import { handleSystemDecision } from '../../../../lib/notifications/systemDecision.js';
 
 /**
- * DEV ONLY — trigger an AuraOS desktop decision (phase-4 test hook; phase 6:
+ * DEV ONLY — trigger an AuraOS system decision (phase-4 test hook; phase 6:
  * any payload, used by `aura admin dev system-decision`).
  *
  *   POST /api/admin/dev/system-decision
@@ -14,7 +14,7 @@ import { handleSystemDecision } from '../../../../lib/notifications/systemDecisi
  *        { payload?: <notification input> }  or legacy { title?, text?, components?, priority? }
  *     → 201 { ok, notification, warnings }
  *
- * Creates a `type:'dialogue', scope:'desktop'` notification as the in-process
+ * Creates a `type:'dialogue', scope:'system'` notification as the in-process
  * SYSTEM_CALLER — the only way a desktop-wide modal can exist. `type` and
  * `scope` are forced; the payload is validated by the normal schema. The
  * route answers 404 unless the shell runs the dev server

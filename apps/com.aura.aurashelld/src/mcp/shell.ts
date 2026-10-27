@@ -289,8 +289,8 @@ const CONTENT = {
   image: z.string().max(2048).optional(),
   pinned: z.boolean().optional(),
   popup: z.boolean().optional().describe('Dialogue only: open as a pop-up. Needs an admin grant (max 3 per 10 minutes); otherwise turned off with a warning.'),
-  blocking: z.boolean().optional().describe('Dialogue only. With scope "auto": make the sender\'s OWN window inert (agents have none → turned off). With scope "desktop": block the WHOLE shell — only if an admin granted notifications.desktopModal to this service; else downgraded with a warning. The user can always force-hide it.'),
-  scope: z.enum(['auto', 'desktop']).optional().describe('Dialogue only: "desktop" opens at once — with blocking: true as a desktop-wide modal that needs the notifications.desktopModal grant (shown as "Requested by <this service>", never as AuraOS; popup is irrelevant); without blocking as a centred dialogue that needs the popup (or desktopModal) grant.'),
+  blocking: z.boolean().optional().describe('Dialogue only. With scope "auto": make the sender\'s OWN window inert (agents have none → turned off). With scope "system": a system modal that blocks the WHOLE shell — only if an admin granted notifications.systemModal to this service; else downgraded with a warning. The user can always force-hide it.'),
+  scope: z.enum(['auto', 'system', 'desktop']).optional().describe('Dialogue only: "system" opens at once — with blocking: true as a system modal that needs the notifications.systemModal grant (shown as "Requested by <this service>", never as AuraOS; popup is irrelevant); without blocking as a system dialog (centred) that needs the popup (or systemModal) grant. "desktop" is the deprecated old name of "system".'),
   maximized: z.boolean().optional().describe('Start the dialogue maximized (e.g. long markdown reports). A hint: the user can restore it; ignored on the phone.'),
   timeoutMs: z.number().int().positive().optional().describe('Remove automatically after this many ms. Default: stays until handled.'),
   popupDurationMs: z.number().int().max(86_400_000).optional().describe('How long the pop-up shows, in ms (not the lifetime — that is timeoutMs). > 0: hide after that long, the item stays in the list. 0 or -1: the pop-up stays until the user handles it. Default: 8 s (high / urgent stay). Ignored for activity-linked items (context = the sender\'s own window): those pop-ups are sticky.'),
@@ -360,7 +360,7 @@ const NOTIFICATION_TOOLS: OwnTool[] = [
       + 'so keep working and check back with wait_for_answer. Set `context` to what it is about. '
       + '"locked" (cannot be dismissed) and `popup` need admin-granted permissions; without them they are downgraded and '
       + '`warnings` explains it. Agents have no window, so plain `blocking` is downgraded; a desktop-wide modal '
-      + '(`scope:"desktop"` + `blocking:true`) needs the admin-granted notifications.desktopModal for this service, is shown '
+      + '(`scope:"system"` + `blocking:true`) needs the admin-granted notifications.systemModal for this service, is shown '
       + 'as requested by the Shell Daemon (never as AuraOS) and can always be force-hidden by the user. If the user force-removes a Locked notification, wait_for_answer / '
       + 'get_notification report removedReason "force-removed". Returns the id.',
     schema: z.object({ type: z.enum(['simple', 'dialogue', 'locked']).default('simple'), ...CONTENT, agent: AGENT }),

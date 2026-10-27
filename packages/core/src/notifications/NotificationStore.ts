@@ -67,13 +67,43 @@ export function endedAtOf(rec: Pick<StoredNotification, 'state' | 'removedAt' | 
   return rec.resolvedAt ?? rec.updatedAt;
 }
 
+/** Read-time normalisation of older records (phase 6: scope 'desktop' → 'system'). */
+export function normalizeStored(rec: StoredNotification): StoredNotification {
+  if ((rec.scope as string) === 'desktop') rec.scope = 'system';
+  return rec;
+}
+
 export class NotificationStore {
   constructor(private readonly redis: RedisProvider) {}
 
   async load(id: string): Promise<StoredNotification | null> {
     const raw = await this.redis().get(itemKey(id));
     if (!raw) return null;
-    try { return JSON.parse(raw) as StoredNotification; } catch { return null; }
+    try { return normalizeStored(JSON.parse(raw) as StoredNotification); } catch { return null; }
+  }
+
+  /**
+   * Phase 6 rename (once, idempotent): active items stored with
+   * `scope:'desktop'` are rewritten as `scope:'system'` (the item only —
+   * indexes and history are unchanged). Returns how many.
+   */
+  async migrateLegacyScope(): Promise<number> {
+    const r = this.redis();
+    const ids = await r.zrange(KEY_ACTIVE, 0, -1);
+    let n = 0;
+    for (let i = 0; i < ids.length; i += 200) {
+      const batch = ids.slice(i, i + 200);
+      const raws = await r.mget(...batch.map(itemKey));
+      for (const raw of raws) {
+        if (!raw) continue;
+        let rec: StoredNotification;
+        try { rec = JSON.parse(raw) as StoredNotification; } catch { continue; }
+        if ((rec.scope as string) !== 'desktop') continue;
+        await r.set(itemKey(rec.id), JSON.stringify(normalizeStored(rec)));
+        n++;
+      }
+    }
+    return n;
   }
 
   async loadMany(ids: string[]): Promise<StoredNotification[]> {
@@ -82,7 +112,7 @@ export class NotificationStore {
     const out: StoredNotification[] = [];
     for (const raw of raws) {
       if (!raw) continue;
-      try { out.push(JSON.parse(raw) as StoredNotification); } catch { /* skip corrupt */ }
+      try { out.push(normalizeStored(JSON.parse(raw) as StoredNotification)); } catch { /* skip corrupt */ }
     }
     return out;
   }

@@ -139,24 +139,25 @@ export interface NotificationInput {
   /**
    * Dialogue only: make the sender's OWN window inert until answered (kept
    * only when `context` is an activity / instance of the calling app, else
-   * turned off with a warning) — or, with `scope: 'desktop'`, the whole shell
+   * turned off with a warning) — or, with `scope: 'system'`, the whole shell
    * (see `scope`). Default false.
    */
   blocking?: boolean;
   /**
-   * Dialogue only: `'auto'` (default; placed by `context`) or `'desktop'`.
-   * Phase 6: `'desktop'` + `blocking: true` is a desktop modal that blocks the
-   * whole shell — it needs the admin-granted `notifications.desktopModal`
+   * Dialogue only: `'auto'` (default; placed by `context`) or `'system'`
+   * (`'desktop'` is the deprecated old name — accepted, with a warning).
+   * Phase 6: `'system'` + `blocking: true` is a system modal that blocks the
+   * whole shell — it needs the admin-granted `notifications.systemModal`
    * (else downgraded to `'auto'` with a warning; by default ≤ 5 per sender per
    * 10 min, configurable by the user — a hit is the warning code
-   * `desktop-modal-rate-limited` with `retryAfterMs`). It always opens at
+   * `system-modal-rate-limited` with `retryAfterMs`). It always opens at
    * once — `popup` is irrelevant. The user sees "Requested by <your app>" and
    * can always force-hide it (history reason `force-hidden`); a revoke
-   * releases it (`permission-revoked`). `'desktop'` without blocking is a
+   * releases it (`permission-revoked`). `'system'` without blocking is a
    * centred, non-blocking dialogue that also opens at once — it needs
-   * `notifications.popup` (or desktopModal).
+   * `notifications.popup` (or systemModal).
    */
-  scope?: 'auto' | 'desktop';
+  scope?: 'auto' | 'system' | /** @deprecated use 'system' */ 'desktop';
   /**
    * Phase 6: start the dialogue maximized (e.g. a long markdown report) — a
    * presentation hint, no grant. The user's own maximize / restore in a tab
@@ -193,7 +194,7 @@ export interface Notification {
   redacted?: true;
   /** Dialogue blocks its own window (see `NotificationInput.blocking`). */
   blocking: boolean;
-  scope: 'auto' | 'desktop';
+  scope: 'auto' | 'system';
   /** Phase 6: the dialogue starts maximized (see `NotificationInput.maximized`). */
   maximized?: boolean;
   state: NotificationState;
@@ -216,8 +217,8 @@ export interface Notification {
 }
 
 export interface NotificationWarning {
-  /** 'desktop-modal-rate-limited' (phase 6) carries limit / windowMinutes / retryAfterMs / remaining. */
-  code: 'downgraded' | 'ignored-field' | 'desktop-modal-rate-limited' | string;
+  /** 'system-modal-rate-limited' (phase 6) carries limit / windowMinutes / retryAfterMs / remaining. */
+  code: 'downgraded' | 'ignored-field' | 'system-modal-rate-limited' | string;
   field: string;
   message: string;
   from?: unknown;
@@ -233,8 +234,8 @@ export interface CreateResult {
   /** Lets an unverified creator update / remove later. Remembered by this client. */
   senderToken?: string;
   warnings: NotificationWarning[];
-  /** Phase 6: a kept desktop modal's budget (`remaining` null = unlimited). */
-  desktopModal?: { remaining: number | null; limit: number | null; windowMinutes: number };
+  /** Phase 6: a kept system modal's budget (`remaining` null = unlimited). */
+  systemModal?: { remaining: number | null; limit: number | null; windowMinutes: number };
 }
 
 export interface ListFilter {

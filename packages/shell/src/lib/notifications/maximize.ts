@@ -1,7 +1,7 @@
 /**
  * Maximize for notification dialogues (phase 6) — DOM-free.
  *
- * Every dialogue frame (desktop modal, centred desktop dialogue, floating
+ * Every dialogue frame (system modal, system dialog, floating
  * panel, in-window panel; not the phone) has a ⤢ / ⤡ header button and the
  * shortcut Alt+Shift+Enter (while focus is inside the dialogue). The
  * USER's choice is remembered per notification for this tab in

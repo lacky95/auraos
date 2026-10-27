@@ -33,17 +33,20 @@ try {
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 } catch { /* shell booting — the table stays empty */ }
-// Phase 6: desktopModal = a dialogue that blocks the whole shell (scope desktop + blocking).
-const PRIV = ['notifications.locked', 'notifications.popup', 'notifications.desktopModal'];
+// Phase 6: systemModal = a dialogue that blocks the whole shell (scope system + blocking).
+const PRIV = ['notifications.locked', 'notifications.popup', 'notifications.systemModal'];
 const READ = 'notifications.read';
 // Senders for the lock-screen / retention table: AuraOS itself + every app that sends.
 const senders = [
   { key: 'auraos', name: 'AuraOS', id: 'auraos' },
   ...apps.filter((a) => a.permissions.includes('system.notifications')).map((a) => ({ key: `app:${a.id}`, name: a.name, id: a.id })),
 ];
-const label = (p: string) => p.replace('notifications.', '');
-// Phase 6: apps that request a blocking desktop modal (per-app limit overrides).
-const modalApps = apps.filter((a) => a.permissions.includes('notifications.desktopModal'));
+const LABELS: Record<string, string> = { 'notifications.systemModal': 'System modal' };
+const label = (p: string) => LABELS[p] ?? p.replace('notifications.', '');
+// Phase 6 rename: a manifest may still request the deprecated name.
+const requests = (a: { permissions: string[] }, p: string) => a.permissions.includes(p) || (p === 'notifications.systemModal' && a.permissions.includes('notifications.desktopModal'));
+// Phase 6: apps that request a blocking system modal (per-app limit overrides).
+const modalApps = apps.filter((a) => requests(a, 'notifications.systemModal'));
 ---
 <!DOCTYPE html>
 <html lang="en">
@@ -105,7 +108,7 @@ const modalApps = apps.filter((a) => a.permissions.includes('notifications.deskt
         An app sends notifications when its manifest declares <code>system.notifications</code>.
         <b>Locked</b> notifications and dialogue <b>pop-ups</b> are privileged: the manifest only requests them,
         and they take effect once an admin grants them here. Without a grant they are downgraded (locked → simple,
-        pop-up → off). <b>desktopModal</b> lets an app request a dialogue that blocks the <b>whole desktop</b>
+        pop-up → off). <b>systemModal</b> lets an app request a dialogue that blocks the <b>whole desktop</b>
         (still shown as "Requested by &lt;app&gt;", always force-hideable by the user); revoking it releases any
         such modal at once. Grants and revokes apply at once, without a restart.
         Every app reads its <b>own</b> notifications. Reading <b>other senders'</b> ones needs
@@ -120,11 +123,11 @@ const modalApps = apps.filter((a) => a.permissions.includes('notifications.deskt
             <tr data-app-id={a.id}>
               <td><code>{a.id}</code><br /><span class="acc-note">{a.name}</span></td>
               <td>{a.permissions.includes('system.notifications') ? <span class="pill on">YES</span> : <span class="pill off">NO</span>}</td>
-              <td>{PRIV.filter((p) => a.permissions.includes(p)).map((p) => <span class="pill on">{label(p)}</span>)}{PRIV.every((p) => !a.permissions.includes(p)) && <span class="acc-note">—</span>}</td>
+              <td>{PRIV.filter((p) => requests(a, p)).map((p) => <span class="pill on">{label(p)}</span>)}{PRIV.every((p) => !requests(a, p)) && <span class="acc-note">—</span>}</td>
               <td class="granted-cell"><span class="acc-note locked-only">unlock to see</span></td>
               <td class="actions-cell">
                 {PRIV.map((p) => (
-                  <button class="btn unlocked-only grant-toggle" type="button" data-perm={p} data-requested={String(a.permissions.includes(p))} hidden>
+                  <button class="btn unlocked-only grant-toggle" type="button" data-perm={p} data-requested={String(requests(a, p))} hidden>
                     {label(p)}
                   </button>
                 ))}
@@ -191,9 +194,9 @@ const modalApps = apps.filter((a) => a.permissions.includes('notifications.deskt
     </section>
 
     <section class="acc-section" id="dm-section">
-      <div class="acc-head"><span class="acc-title">▣ Desktop modals</span><span class="acc-note" id="dm-saved"></span></div>
+      <div class="acc-head"><span class="acc-title">▣ System modals</span><span class="acc-note" id="dm-saved"></span></div>
       <p class="acc-note">
-        An app with the <b>desktopModal</b> grant (above) can show a dialogue that blocks the whole desktop. To stop a
+        An app with the <b>systemModal</b> grant (above) can show a dialogue that blocks the whole desktop. To stop a
         noisy app, each sender may do that at most this often; beyond it the dialogue waits as a normal one. You can
         always force-hide such a dialogue ("Hide this dialogue" or <code>Ctrl+Alt+Shift+Esc</code>). This is your
         preference — no admin unlock needed.
@@ -317,7 +320,7 @@ const modalApps = apps.filter((a) => a.permissions.includes('notifications.deskt
       };
       const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
       const fmt = (ms) => (ms ? new Date(ms).toLocaleString() : '—');
-      const label = (p) => p.replace('notifications.', '');
+      const label = (p) => (p === 'notifications.systemModal' ? 'System modal' : p.replace('notifications.', ''));
 
       function render() {
         const on = !!session;
@@ -586,8 +589,8 @@ const modalApps = apps.filter((a) => a.permissions.includes('notifications.deskt
         $('ls-hide-all').checked = ls.hideAll === true;
         const days = rt.days === undefined ? '7' : String(rt.days === 0 || rt.days === null ? 'forever' : rt.days);
         $('rt-days').value = ['1', '7', '30', '90', 'forever'].includes(days) ? days : '7';
-        // Phase 6: desktop-modal limit (default 5 per 10 min; 'unlimited' / 0 = off).
-        const dm = nset.desktopModal || {};
+        // Phase 6: system-modal limit (default 5 per 10 min; 'unlimited' / 0 = off).
+        const dm = nset.systemModal || nset.desktopModal || {};   // desktopModal: the deprecated key
         const unlimited = dm.limit === 'unlimited' || dm.limit === 0;
         $('dm-unlimited').checked = unlimited;
         $('dm-limit').value = unlimited || dm.limit === undefined ? '5' : String(dm.limit);
@@ -628,13 +631,14 @@ const modalApps = apps.filter((a) => a.permissions.includes('notifications.deskt
           if (Number.isInteger(n) && n >= 1 && n <= 1000) perSender[tr.dataset.sender] = n;
           else bad = `"${raw}" is not a limit (a number 1–1000 or unlimited)`;
         });
-        if (bad) { setStatus(`Desktop modals: ${bad}`, 'error'); return; }
+        if (bad) { setStatus(`System modals: ${bad}`, 'error'); return; }
         const lim = Number($('dm-limit').value);
         const win = Number($('dm-window').value);
+        const { desktopModal: _legacy, ...rest } = nset;   // the deprecated key goes on save
         const value = {
-          ...nset,
-          desktopModal: {
-            ...(nset.desktopModal || {}),
+          ...rest,
+          systemModal: {
+            ...(nset.systemModal || nset.desktopModal || {}),
             limit: $('dm-unlimited').checked ? 'unlimited' : (Number.isInteger(lim) && lim >= 1 ? Math.min(1000, lim) : 5),
             windowMinutes: Number.isInteger(win) && win >= 1 ? Math.min(1440, win) : 10,
             perSender,

@@ -241,8 +241,13 @@ const ContentFields = {
   popup: z.boolean(),
   /** Dialogue only (phase 4): block only the sender's own window. */
   blocking: z.boolean(),
-  /** Dialogue only (phase 4): `desktop` is reserved for SYSTEM_CALLER. */
-  scope: z.enum(['auto', 'desktop']),
+  /**
+   * Dialogue only: `system` = a system modal (with blocking) or a system
+   * dialog (without). `desktop` is the deprecated name (phase 6 rename),
+   * accepted and normalised to `system` (the service adds a
+   * `deprecated-field` warning).
+   */
+  scope: z.enum(['auto', 'system', 'desktop']).transform((v): 'auto' | 'system' => (v === 'desktop' ? 'system' : v)),
   /** Phase 6: start the dialogue maximized (presentation hint, no grant). */
   maximized: z.boolean(),
   components: ComponentsSchema,

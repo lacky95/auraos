@@ -19,7 +19,7 @@ import { viewerFor } from '../../../../lib/clientSession.js';
  *                           choice. Stays active; stored as `lastInteraction`,
  *                           published as event `interacted` (phase 3).
  *   force-remove  user op   removes even locked ones (reason `force-removed`)
- *   force-hide    user op   phase 6: an APP desktop modal stops blocking — it
+ *   force-hide    user op   phase 6: an APP system modal stops blocking — it
  *                           stays an active, normal dialogue (scope auto,
  *                           blocking off); the sender sees history `updated`
  *                           with reason `force-hidden`. AuraOS decisions → 409.
@@ -64,10 +64,10 @@ export const POST: APIRoute = async ({ params, request, url }) => {
       case 'force-remove':
         return jsonResponse(await svc.forceRemove(id, undefined, viewer));
       case 'force-hide':
-        if (typeof (svc as { releaseDesktopModal?: unknown }).releaseDesktopModal !== 'function') {
+        if (typeof (svc as { releaseSystemModal?: unknown }).releaseSystemModal !== 'function') {
           return errorResponse('force-hide is not available in the running core yet (restart pending)', 501);
         }
-        return jsonResponse(await svc.releaseDesktopModal(id, 'force-hidden', undefined, viewer));
+        return jsonResponse(await svc.releaseSystemModal(id, 'force-hidden', undefined, viewer));
       case 'remove': {
         const body = await readJson(request);
         if (body instanceof Response) return body;

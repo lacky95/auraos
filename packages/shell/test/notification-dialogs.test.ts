@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DialogController, decidePlacement, isComplex, ownsWindow, isDesktopDecision,
+  DialogController, decidePlacement, isComplex, ownsWindow, isAuraosDecision,
   CARD_CONTROL_SELECTOR, opensDialogOnActivate, workspaceNavMarkers, workspaceMarkerHint, canPutOff, CLOSE_LATER,
   type DialogHost, type MountedDialog, type Placement, type ViewDetail,
 } from '../src/lib/notifications/dialogs.ts';
@@ -36,9 +36,9 @@ test('decidePlacement: the rules table', () => {
   const user = (n: Notification, v: ViewDetail | null, phone = false) => decidePlacement(n, { intent: 'user', view: v, phone });
   // Asking is not interrupting: without popup nothing opens on its own.
   assert.equal(auto(ntf({ id: 'a', context: ACT }), view('visible')).kind, 'none');
-  // Desktop decision (AuraOS only).
-  assert.equal(auto(ntf({ id: 'd', scope: 'desktop', sender: AURAOS }), null).kind, 'desktop');
-  assert.notEqual(auto(ntf({ id: 'd2', scope: 'desktop', sender: APP, popup: true }), null).kind, 'desktop', 'a forged scope from an app is not a desktop decision');
+  // System decision (AuraOS only).
+  assert.equal(auto(ntf({ id: 'd', scope: 'system', sender: AURAOS }), null).kind, 'decision');
+  assert.notEqual(auto(ntf({ id: 'd2', scope: 'system', sender: APP, popup: true }), null).kind, 'decision', 'a forged scope from an app is not a system decision');
   // Own visible window: overlay (Answer or popup); blocking carried.
   assert.deepEqual(user(ntf({ id: 'w', context: ACT }), view('visible')), { kind: 'window', viewId: 'v1', blocking: false, layout: 'panel' });
   assert.deepEqual(auto(ntf({ id: 'w2', context: ACT, popup: true, blocking: true }), view('visible')), { kind: 'window', viewId: 'v1', blocking: true, layout: 'panel' });
@@ -60,13 +60,13 @@ test('decidePlacement: the rules table', () => {
   assert.equal(user(ntf({ id: 'r', state: 'resolved' }), null).kind, 'none');
 });
 
-test('isComplex / ownsWindow / isDesktopDecision', () => {
+test('isComplex / ownsWindow / isAuraosDecision', () => {
   const inputs = (k: number) => Array.from({ length: k }, (_, i) => ({ kind: 'input', id: `i${i}` })) as Notification['components'];
   assert.equal(isComplex({ components: inputs(3) }), false);
   assert.equal(isComplex({ components: inputs(4) }), true);
   assert.equal(ownsWindow({ sender: AURAOS } as Notification, { appId: 'anything' }), true);
   assert.equal(ownsWindow({ sender: AGENT } as Notification, { appId: 'com.aura.aurashelld' }), false, 'agents have no window');
-  assert.equal(isDesktopDecision(ntf({ id: 'q', scope: 'desktop', sender: { kind: 'auraos', id: 'auraos', attribution: 'unverified' as never } })), false);
+  assert.equal(isAuraosDecision(ntf({ id: 'q', scope: 'system', sender: { kind: 'auraos', id: 'auraos', attribution: 'unverified' as never } })), false);
 });
 
 // ---------------------------------------------------------------------------
@@ -189,17 +189,17 @@ test('controller: Later keeps it in the list; blocking and desktop cannot be put
   const c = new DialogController(h);
   const a = ntf({ id: 'a', sender: AGENT, popup: true });
   const b = ntf({ id: 'b', context: ACT, popup: true, blocking: true });
-  const d = ntf({ id: 'd', sender: AURAOS, scope: 'desktop' });
+  const d = ntf({ id: 'd', sender: AURAOS, scope: 'system' });
   c.onStore(snap([a, b, d]), [added('a'), added('b'), added('d')]);
   assert.equal(h.live('a')[0]!.p.kind, 'floating');
-  assert.equal(h.live('d')[0]!.p.kind, 'desktop');
+  assert.equal(h.live('d')[0]!.p.kind, 'decision');
   assert.equal(h.live('d')[0]!.takeFocus, true);
   h.live('a')[0]!.later();
   h.live('b')[0]!.later();
   h.live('d')[0]!.later();
   assert.equal(h.live('a').length, 0, 'Later hides it');
   assert.equal(h.live('b').length, 1, 'blocking has no Later');
-  assert.equal(h.live('d').length, 1, 'desktop decisions only close by being resolved');
+  assert.equal(h.live('d').length, 1, 'system decisions only close by being resolved');
   // An update does not re-open a put-off one; an update to an open one re-renders.
   c.onStore(snap([{ ...a, title: 'x' }, { ...b, title: 'y' }, d]), [{ kind: 'updated', id: 'a', source: 'live' }, { kind: 'updated', id: 'b', source: 'live' }]);
   assert.equal(h.live('a').length, 0);
@@ -211,7 +211,7 @@ test('controller: Later keeps it in the list; blocking and desktop cannot be put
   assert.equal(h.live('d').length, 0, 'missing from the snapshot → closed');
 });
 
-test('controller: lock screen hides everything; desktop decisions wait for the unlock; reload re-shows a pending decision', () => {
+test('controller: lock screen hides everything; system decisions wait for the unlock; reload re-shows a pending decision', () => {
   const h = new FakeHost();
   h.views.set(ACT.id, view('visible'));
   const c = new DialogController(h);
@@ -220,7 +220,7 @@ test('controller: lock screen hides everything; desktop decisions wait for the u
   c.onLock(true);
   h.isLocked = true;
   assert.equal(h.live('w').length, 0);
-  const d = ntf({ id: 'd', sender: AURAOS, scope: 'desktop' });
+  const d = ntf({ id: 'd', sender: AURAOS, scope: 'system' });
   c.onStore(snap([w, d]), [added('d')]);
   assert.equal(h.live('d').length, 0, 'waits while locked');
   h.isLocked = false;
@@ -295,7 +295,7 @@ test('header ✕ (answer later): only on dialogues that can be put off', () => {
   assert.equal(canPutOff({ kind: 'floating', layout: 'full' }), true);
   assert.equal(canPutOff({ kind: 'window', viewId: 'v', blocking: true, layout: 'panel' }), false);
   assert.equal(canPutOff({ kind: 'floating', layout: 'sheet', blockViewId: 'v' }), false);
-  assert.equal(canPutOff({ kind: 'desktop' }), false);
+  assert.equal(canPutOff({ kind: 'decision' }), false);
   assert.deepEqual(CLOSE_LATER, { label: 'Close (answer later)', title: 'Close — answer later' });
 });
 

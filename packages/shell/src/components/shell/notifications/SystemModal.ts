@@ -1,6 +1,6 @@
 /**
- * DesktopDecision — the desktop-wide modal for AuraOS system decisions
- * (phase 4; `scope:'desktop'`, which the core keeps only for SYSTEM_CALLER).
+ * SystemModal — the desktop-wide modal for AuraOS system decisions
+ * (phase 4; `scope:'system'`, which the core keeps only for SYSTEM_CALLER).
  *
  * Built on the lock-screen template (LockScreenOverlay.astro): body root,
  * z-index 1900 — above every shell surface, below the lock screen (2000).
@@ -13,7 +13,7 @@
  * It closes only by being resolved (or removed by AuraOS) — no Later, no
  * Escape. The controller suspends it while the screen is locked.
  *
- * Phase 6 — APP desktop modals (`appModal`, granted notifications.desktopModal)
+ * Phase 6 — APP system modals (`systemModal`, granted notifications.systemModal)
  * use the same blocking shell, but are visibly NOT AuraOS: an identity bar
  * "Requested by <App>" with its glyph and verified / unverified attribution,
  * a different frame colour, and an always-available "Hide this dialogue"
@@ -32,11 +32,11 @@ import { createConfirmInline, type ConfirmInline } from './ConfirmInline.ts';
 import { senderLabel } from '../../../lib/notifications/format.ts';
 import { isForceHideShortcut } from '../../../lib/notifications/dialogs.ts';
 
-export interface DesktopDecisionOptions {
+export interface SystemModalOptions {
   actions: CardActions;
   appLookup?: AppLookup;
   /** Phase 6: an app-requested modal — identity bar + Force hide (resolves true when released). */
-  appModal?: { onForceHide: () => Promise<boolean> };
+  systemModal?: { onForceHide: () => Promise<boolean> };
 }
 
 export const FORCE_HIDE_SHORTCUT_LABEL = 'Ctrl+Alt+Shift+Esc';
@@ -59,13 +59,13 @@ function inertSiblings(keep: Element[]): () => void {
   };
 }
 
-export function mountDesktopDecision(n: Notification, opts: DesktopDecisionOptions): MountedDialog {
+export function mountSystemModal(n: Notification, opts: SystemModalOptions): MountedDialog {
   const overlay = document.createElement('div');
-  overlay.className = 'aura-dlg-desktop';
+  overlay.className = 'aura-dlg-system';
   overlay.setAttribute('data-ntf-decision', n.id);
   // Select / combobox lists open inside the overlay: its siblings are inert.
   overlay.dataset['ntfPopupHost'] = 'true';
-  const app = opts.appModal;
+  const app = opts.systemModal;
   const frame = buildDialogFrame(n, {
     actions: opts.actions,
     ...(opts.appLookup ? { appLookup: opts.appLookup } : {}),
@@ -73,7 +73,7 @@ export function mountDesktopDecision(n: Notification, opts: DesktopDecisionOptio
     modal: true,
     kicker: app ? 'Requested by' : 'AuraOS decision',
   });
-  frame.root.classList.add(app ? 'aura-dlg-appmodal' : 'aura-dlg-decision');
+  frame.root.classList.add(app ? 'aura-dlg-systemmodal' : 'aura-dlg-decision');
   overlay.dataset['kind'] = app ? 'app' : 'auraos';
   let confirm: ConfirmInline | null = null;
   let hideLink: HTMLButtonElement | null = null;
@@ -129,7 +129,7 @@ export function mountDesktopDecision(n: Notification, opts: DesktopDecisionOptio
   document.body.appendChild(overlay);
 
   const lock = document.getElementById('lockscreen');
-  const restoreInert = inertSiblings([overlay, ...(lock ? [lock] : []), ...Array.from(document.querySelectorAll('.aura-dlg-desktop')).filter((e) => e !== overlay)]);
+  const restoreInert = inertSiblings([overlay, ...(lock ? [lock] : []), ...Array.from(document.querySelectorAll('.aura-dlg-system')).filter((e) => e !== overlay)]);
 
   const inside = (e: Event) => {
     const path = typeof e.composedPath === 'function' ? e.composedPath() : [];

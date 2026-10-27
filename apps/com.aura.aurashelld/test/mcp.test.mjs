@@ -599,7 +599,7 @@ test('notification tools: blocking / scope are forwarded; their downgrade reache
       if (method === 'POST' && path === '/api/notifications') {
         return [201, { ok: true, notification: notif({ blocking: false, scope: 'auto' }), warnings: [
           { code: 'downgraded', field: 'blocking', from: true, to: false, message: "blocking only applies to the sender's own window: agents cannot block a window" },
-          { code: 'downgraded', field: 'scope', from: 'desktop', to: 'auto', message: 'desktop-wide dialogues are reserved for AuraOS system decisions' },
+          { code: 'downgraded', field: 'scope', from: 'system', to: 'auto', message: 'desktop-wide dialogues are reserved for AuraOS system decisions' },
         ] }];
       }
       if (path === `/api/notifications/${NID}`) return [200, notif({ type: 'locked', state: 'removed', removedReason: 'force-removed' })];
@@ -607,13 +607,13 @@ test('notification tools: blocking / scope are forwarded; their downgrade reache
     });
     const client = await connect();
     const r = await call(client, 'create_notification', {
-      type: 'dialogue', title: 'Deploy?', blocking: true, scope: 'desktop', context: { kind: 'activity', id: 'x#a1' },
+      type: 'dialogue', title: 'Deploy?', blocking: true, scope: 'system', context: { kind: 'activity', id: 'x#a1' },
     });
     assert.equal(calls[0].body.blocking, true);
-    assert.equal(calls[0].body.scope, 'desktop');
+    assert.equal(calls[0].body.scope, 'system');
     const sc = r.structuredContent;
     assert.match(sc.summary, /blocking: true → false/);
-    assert.match(sc.summary, /scope: desktop → auto/);
+    assert.match(sc.summary, /scope: system → auto/);
     assert.ok(sc.warnings.some((w) => /reserved for AuraOS/.test(w.message)));
     assert.equal(sc.notification.blocking, undefined, 'not blocking → omitted from the view');
     const w = await call(client, 'wait_for_answer', { id: NID, timeoutSeconds: 0 });

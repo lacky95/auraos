@@ -213,7 +213,7 @@ function reportPerm(res: PermEditResult, verb: string): void {
   if (res.unknown) {
     warn(`'${res.permission}' is not a built-in permission — it will grant nothing unless an app defines it.`);
   }
-  if (verb === 'granted' && res.changed && (res.permission === 'notifications.locked' || res.permission === 'notifications.popup' || res.permission === 'notifications.desktopModal')) {
+  if (verb === 'granted' && res.changed && (res.permission === 'notifications.locked' || res.permission === 'notifications.popup' || res.permission === 'notifications.systemModal')) {
     info(`'${res.permission}' is privileged: the manifest now REQUESTS it — an admin must also grant it: aura grant notif-perms ${res.appId} ${res.permission.split('.')[1]}`);
   }
   if (res.reloaded === false) {

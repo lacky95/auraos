@@ -56,7 +56,7 @@ export interface FloatingDialogOptions {
   onLater: () => void;
   /** Phone stand-in for a blocking window dialogue: cover + inert that slot. */
   blockSlot?: HTMLElement | null;
-  /** Phase 6: a non-blocking desktop dialogue (scope desktop) — centred on the screen. */
+  /** Phase 6: a non-blocking system dialog (scope system) — centred on the screen. */
   centred?: boolean;
 }
 

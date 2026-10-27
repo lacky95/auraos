@@ -137,11 +137,11 @@ test('waitForInteraction: returns the next interaction, keeps the baseline acros
 
 test('waitForAnswer: a force-removed Locked notification reports removedReason; blocking/scope pass through on create', async (t) => {
   const os = await fakeOs(t, ({ method }) => (method === 'POST'
-    ? [201, { ok: true, notification: item({ type: 'dialogue', blocking: false, scope: 'auto' }), warnings: [{ code: 'downgraded', field: 'scope', from: 'desktop', to: 'auto', message: 'desktop-wide dialogues are reserved for AuraOS system decisions' }] }]
+    ? [201, { ok: true, notification: item({ type: 'dialogue', blocking: false, scope: 'auto' }), warnings: [{ code: 'downgraded', field: 'scope', from: 'system', to: 'auto', message: 'desktop-wide dialogues are reserved for AuraOS system decisions' }] }]
     : [200, item({ type: 'locked', state: 'removed', removedReason: 'force-removed' })]));
   const n = new NotificationsApi({ base: os.base, token: 'tok' });
-  const c = await n.create({ type: 'dialogue', title: 'q', blocking: true, scope: 'desktop', context: { kind: 'activity', id: 'a.b-1#a1' } });
-  assert.deepEqual(os.seen[0].body, { type: 'dialogue', title: 'q', blocking: true, scope: 'desktop', context: { kind: 'activity', id: 'a.b-1#a1' } });
+  const c = await n.create({ type: 'dialogue', title: 'q', blocking: true, scope: 'system', context: { kind: 'activity', id: 'a.b-1#a1' } });
+  assert.deepEqual(os.seen[0].body, { type: 'dialogue', title: 'q', blocking: true, scope: 'system', context: { kind: 'activity', id: 'a.b-1#a1' } });
   assert.equal(c.warnings[0].field, 'scope');
   const r = await n.waitForAnswer('ntf_000000001abcd1234', { timeoutMs: 1000 });
   assert.equal(r.status, 'removed');

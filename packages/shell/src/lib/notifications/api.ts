@@ -175,7 +175,7 @@ export class NotificationApiClient {
     return this.call('POST', `/${NotificationApiClient.enc(id)}/force-remove`);
   }
 
-  /** Phase 6: an app desktop modal stops blocking (stays a normal dialogue; reason force-hidden). */
+  /** Phase 6: an app system modal stops blocking (stays a normal dialogue; reason force-hidden). */
   forceHide(id: string): Promise<Notification> {
     return this.call('POST', `/${NotificationApiClient.enc(id)}/force-hide`);
   }

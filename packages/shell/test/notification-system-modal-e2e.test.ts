@@ -1,10 +1,10 @@
 // End to end in the DOM (phase 6 bug): a store item → the REAL dialogue layer
-// (DialogLayer: controller + DesktopDecision) and the REAL pop-up stack
-// (toastStack) on one shared runtime. An app desktop modal must open as the
+// (DialogLayer: controller + SystemModal) and the REAL pop-up stack
+// (toastStack) on one shared runtime. An app system modal must open as the
 // desktop-wide modal (no corner pop-up) when it may open by itself, and
-// otherwise wait as a pop-up whose click opens the desktop modal.
+// otherwise wait as a pop-up whose click opens the system modal.
 //
-//   cd packages/shell && npx tsx --test test/notification-desktop-modal-e2e.test.ts
+//   cd packages/shell && npx tsx --test test/notification-system-modal-e2e.test.ts
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dom, flush, resetDom } from './dom.ts';
@@ -43,7 +43,7 @@ function runtime() {
 let seq = 0;
 const modal = (over: Partial<Notification> = {}): Notification => ({
   id: `ntf_00000000e2e${String(++seq).padStart(6, '0')}`, type: 'dialogue', title: 'Confirm the database migration', text: 'Run migration 42 now?',
-  priority: 'high', visibility: 'private', pinned: false, popup: true, blocking: true, scope: 'desktop',
+  priority: 'high', visibility: 'private', pinned: false, popup: true, blocking: true, scope: 'system',
   caller: { kind: 'instance', appId: 'com.example.notifp4', instanceId: 'com.example.notifp4', verification: 'verified' },
   sender: { kind: 'app', id: 'com.example.notifp4', attribution: 'verified' }, senderKey: 'app:com.example.notifp4',
   state: 'active', createdAt: 1, updatedAt: 1, history: [],
@@ -65,15 +65,15 @@ async function setup(t: { after(fn: () => void): void }) {
   t.after(cleanup);   // also when an assertion fails (the layer's timers would keep the process alive)
   return { ...f, done: cleanup };
 }
-const desktop = () => doc.querySelector<HTMLElement>('.aura-dlg-desktop');
+const desktop = () => doc.querySelector<HTMLElement>('.aura-dlg-system');
 const toastCards = () => doc.querySelectorAll('#notif-toasts > .aura-ntf');
 
-test('e2e: scope desktop + blocking + popup → the desktop-wide app modal opens at once, app-identified; NO corner pop-up', async (t) => {
+test('e2e: scope system + blocking + popup → the desktop-wide app modal opens at once, app-identified; NO corner pop-up', async (t) => {
   const s = await setup(t);
   s.put(modal());
   await flush(); await flush();
   const o = desktop();
-  assert.ok(o, 'desktop modal mounted');
+  assert.ok(o, 'system modal mounted');
   assert.equal(o!.dataset['kind'], 'app');
   assert.match(o!.querySelector('.aura-dlg-appbar')!.textContent!, /Requested by\s*Notification Tester/);
   assert.equal((doc.getElementById('dock') as HTMLElement).inert, true, 'the shell is blocked');
@@ -81,7 +81,7 @@ test('e2e: scope desktop + blocking + popup → the desktop-wide app modal opens
   s.done();
 });
 
-test('e2e: popup:false is irrelevant — the desktop modal still opens at once (no waits-in-the-list mode), no corner pop-up', async (t) => {
+test('e2e: popup:false is irrelevant — the system modal still opens at once (no waits-in-the-list mode), no corner pop-up', async (t) => {
   const s = await setup(t);
   s.put(modal({ popup: false }));
   await flush(); await flush();
@@ -109,11 +109,11 @@ test('e2e: after a force-hide the sender is held back — its next modal waits a
   assert.ok(card, 'it waits as a pop-up');
   card.querySelector<HTMLElement>('.aura-ntf-title')!.click();
   await flush(); await flush();
-  assert.ok(desktop(), 'the user opening it gets the desktop modal');
+  assert.ok(desktop(), 'the user opening it gets the system modal');
   s.done();
 });
 
-test('e2e: scope desktop without blocking → the centred dialogue opens at once on arrival; nothing blocked; no corner pop-up', async (t) => {
+test('e2e: scope system without blocking → the centred dialogue opens at once on arrival; nothing blocked; no corner pop-up', async (t) => {
   const s = await setup(t);
   s.put(modal({ blocking: false, popup: false, title: 'A centred question' }));
   await flush(); await flush();

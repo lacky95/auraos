@@ -1,4 +1,4 @@
-// DEV hook POST /api/admin/dev/system-decision (phase 6): scope desktop is
+// DEV hook POST /api/admin/dev/system-decision (phase 6): scope system is
 // forced, the payload goes through the normal create (schema), and the hook
 // is refused without an admin session and outside the dev server.
 //
@@ -23,17 +23,17 @@ function deps(over: Partial<SystemDecisionDeps> = {}) {
 }
 const req = (body: unknown) => new Request('http://shell/api/admin/dev/system-decision', { method: 'POST', body: JSON.stringify(body) });
 
-test('input: type dialogue + scope desktop are forced over any payload; defaults; legacy flat fields', () => {
+test('input: type dialogue + scope system are forced over any payload; defaults; legacy flat fields', () => {
   const forced = buildSystemDecisionInput({ payload: { type: 'simple', scope: 'auto', title: 'T', components: [{ kind: 'button', role: 'submit' }] } });
   assert.equal(forced['type'], 'dialogue');
-  assert.equal(forced['scope'], 'desktop');
+  assert.equal(forced['scope'], 'system');
   assert.equal(forced['title'], 'T');
   assert.deepEqual(forced['components'], [{ kind: 'button', role: 'submit' }]);
   const defaults = buildSystemDecisionInput({});
   assert.equal(defaults['priority'], 'high');
   assert.deepEqual(defaults['components'], DEFAULT_DECISION_COMPONENTS);
   const legacy = buildSystemDecisionInput({ title: 'Old', text: 'x', priority: 'urgent', scope: 'auto' });
-  assert.deepEqual([legacy['title'], legacy['text'], legacy['priority'], legacy['scope']], ['Old', 'x', 'urgent', 'desktop']);
+  assert.deepEqual([legacy['title'], legacy['text'], legacy['priority'], legacy['scope']], ['Old', 'x', 'urgent', 'system']);
 });
 
 test('route: 404 outside DEV (no admin check, nothing created)', async () => {
@@ -51,11 +51,11 @@ test('route: refused without an admin session — and the denial is audited', as
   assert.deepEqual(audits.map((a) => [a[0], a[1], a[2]['outcome']]), [[null, 'dev.systemDecision', 'denied']]);
 });
 
-test('route: admin + DEV → 201, created with scope desktop, audited ok; schema errors pass through (400) and are audited', async () => {
+test('route: admin + DEV → 201, created with scope system, audited ok; schema errors pass through (400) and are audited', async () => {
   const { d, created, audits } = deps();
   const r = await handleSystemDecision(req({ payload: { title: 'Allow?', scope: 'auto' } }), d);
   assert.equal(r.status, 201);
-  assert.equal(created[0]!['scope'], 'desktop');
+  assert.equal(created[0]!['scope'], 'system');
   assert.equal(audits.at(-1)![2]['outcome'], 'ok');
   const bad = deps({ create: async () => { throw Object.assign(new Error('invalid notification'), { status: 400 }); } });
   const r2 = await handleSystemDecision(req({ payload: { title: '' } }), bad.d);
