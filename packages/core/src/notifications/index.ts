@@ -16,5 +16,5 @@ export {
 } from './NotificationService.js';
 export type {
   NotificationServiceOptions, CreateResult, UpdateResult, ListResult, NotificationAuthorizer, WindowOwnerResolver,
-  WaitForOptions, WaitForResult, WaitForUntil, DesktopModalRelease,
+  WaitForOptions, WaitForResult, WaitForUntil, DesktopModalRelease, DesktopModalBudget,
 } from './NotificationService.js';

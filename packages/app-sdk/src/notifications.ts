@@ -137,7 +137,9 @@ export interface NotificationInput {
    * Dialogue only: `'auto'` (default; placed by `context`) or `'desktop'`.
    * Phase 6: `'desktop'` + `blocking: true` is a desktop modal that blocks the
    * whole shell — it needs the admin-granted `notifications.desktopModal`
-   * (else downgraded to `'auto'` with a warning; ≤ 2 per 10 min); opening it
+   * (else downgraded to `'auto'` with a warning; by default ≤ 5 per sender per
+   * 10 min, configurable by the user — a hit is the warning code
+   * `desktop-modal-rate-limited` with `retryAfterMs`); opening it
    * by itself also needs `notifications.popup`. The user sees "Requested by
    * <your app>" and can always force-hide it (history reason `force-hidden`);
    * a revoke releases it (`permission-revoked`). `'desktop'` without blocking
@@ -194,11 +196,16 @@ export interface Notification {
 }
 
 export interface NotificationWarning {
-  code: 'downgraded' | 'ignored-field' | string;
+  /** 'desktop-modal-rate-limited' (phase 6) carries limit / windowMinutes / retryAfterMs / remaining. */
+  code: 'downgraded' | 'ignored-field' | 'desktop-modal-rate-limited' | string;
   field: string;
   message: string;
   from?: unknown;
   to?: unknown;
+  limit?: number;
+  windowMinutes?: number;
+  retryAfterMs?: number;
+  remaining?: number;
 }
 
 export interface CreateResult {
@@ -206,6 +213,8 @@ export interface CreateResult {
   /** Lets an unverified creator update / remove later. Remembered by this client. */
   senderToken?: string;
   warnings: NotificationWarning[];
+  /** Phase 6: a kept desktop modal's budget (`remaining` null = unlimited). */
+  desktopModal?: { remaining: number | null; limit: number | null; windowMinutes: number };
 }
 
 export interface ListFilter {

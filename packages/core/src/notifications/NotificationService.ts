@@ -66,7 +66,7 @@ import {
 } from './NotificationStore.js';
 import {
   DEFAULT_NOTIFICATION_SETTINGS, accessCanRead, accessSeesFull, isViewer, parseNotificationSettings,
-  retentionMsFor, viewFor,
+  retentionMsFor, viewFor, desktopModalLimitFor,
   type Access, type NotificationSettings, type NotificationViewer, type ReadGrant, type ViewerInput,
 } from './access.js';
 import {
@@ -100,7 +100,7 @@ export interface WaitForResult {
 }
 
 /** Bump when the class changes incompatibly: `getNotificationService()` replaces older singletons. */
-export const NOTIFICATION_SERVICE_VERSION = 11;
+export const NOTIFICATION_SERVICE_VERSION = 12;
 
 /** Phase 5: how often the sweeper runs the retention pass. */
 export const DEFAULT_RETENTION_INTERVAL_MS = 60_000;
@@ -118,7 +118,7 @@ export type WindowOwnerResolver = (context: { kind: 'activity' | 'instance'; id:
 
 export const DESKTOP_SCOPE_MESSAGE = 'desktop-wide dialogues are reserved for AuraOS system decisions';
 /** Phase 6: blocking desktop modals per sender (sliding window), on top of the pop-up limit. */
-export const DEFAULT_DESKTOP_MODALS_PER_WINDOW = 2;
+export const DEFAULT_DESKTOP_MODALS_PER_WINDOW = 5;
 export const DEFAULT_DESKTOP_MODAL_WINDOW_MS = 10 * 60_000;
 /** Why an app desktop modal stopped blocking. */
 export type DesktopModalRelease = 'force-hidden' | 'permission-revoked' | 'admin-released';
@@ -185,7 +185,11 @@ export interface CreateResult {
   /** Returned ONCE; lets the creator update/remove later without a verified identity. */
   senderToken?: string;
   warnings: NotificationWarning[];
+  /** Phase 6: a kept desktop modal's budget (remaining null = unlimited). */
+  desktopModal?: DesktopModalBudget;
 }
+
+export interface DesktopModalBudget { remaining: number | null; limit: number | null; windowMinutes: number }
 
 export interface UpdateResult {
   notification: Notification;
@@ -654,7 +658,7 @@ export class NotificationService {
    * judged as an own-window block by `gateBlocking`). Non-blocking desktop
    * dialogues need nothing. SYSTEM_CALLER: always. Mutates `fields`.
    */
-  private async gateDesktop(caller: NotificationCaller, fields: { scope?: string; blocking?: boolean }, warnings: NotificationWarning[], actorName?: string, countIt = true): Promise<void> {
+  private async gateDesktop(caller: NotificationCaller, fields: { scope?: string; blocking?: boolean }, warnings: NotificationWarning[], actorName?: string, countIt = true, budget: { value?: DesktopModalBudget } = {}): Promise<void> {
     if (fields.scope !== 'desktop' || !fields.blocking || isSystemCaller(caller)) return;
     const downgrade = (why: string) => {
       fields.scope = 'auto';
@@ -666,18 +670,31 @@ export class NotificationService {
       ? await this.authorizer.authorize(this.withActor(caller, actorName), DESKTOP_MODAL_PERMISSION)
       : { allow: false, reason: 'phase 1: AuraOS core only' };
     if (!d.allow) { downgrade(`requires the '${DESKTOP_MODAL_PERMISSION}' permission (requested in the manifest and granted by an admin): ${d.reason}`); return; }
-    const lim = this.desktopModalLimit;
-    if (!countIt || !lim || lim.max <= 0) return;
-    const key = `ratelimit:notifdesktop:${senderKeyFor(caller)}`;
+    // The limit: an explicit override (tests / embedders), else the user's
+    // `os/notifications.desktopModal` (default 5 per sender per 10 min).
+    const sk = senderKeyFor(caller);
+    const lim = this.desktopModalLimit
+      ? { max: this.desktopModalLimit.max > 0 ? this.desktopModalLimit.max : null, windowMs: this.desktopModalLimit.windowMs, windowMinutes: Math.round(this.desktopModalLimit.windowMs / 60_000) }
+      : desktopModalLimitFor(await this.settings(), sk);
+    if (!countIt) return;
+    if (lim.max === null) { budget.value = { remaining: null, limit: null, windowMinutes: lim.windowMinutes }; return; }
+    const key = `ratelimit:notifdesktop:${sk}`;
     const r = this.redisProvider();
     const now = this.now();
     await r.zremrangebyscore(key, '-inf', now - lim.windowMs);
-    if (await r.zcard(key) >= lim.max) {
-      downgrade(`is limited to ${lim.max} per sender per ${Math.round(lim.windowMs / 60_000)} minutes — it waits as a normal dialogue`);
+    const n = await r.zcard(key);
+    if (n >= lim.max) {
+      const oldest = await r.zrange(key, 0, 0, 'WITHSCORES');
+      const retryAfterMs = Math.max(0, (oldest[1] !== undefined ? Number(oldest[1]) : now) + lim.windowMs - now);
+      fields.scope = 'auto';
+      warnings.push({ code: 'desktop-modal-rate-limited', field: 'scope', from: 'desktop', to: 'auto',
+        message: `a desktop-wide modal is limited to ${lim.max} per sender per ${lim.windowMinutes} minutes — it waits as a normal dialogue (next one possible in ${Math.ceil(retryAfterMs / 1000)} s; the user can change the limit in Settings → Notifications & access)`,
+        limit: lim.max, windowMinutes: lim.windowMinutes, retryAfterMs, remaining: 0 });
       return;
     }
     await r.zadd(key, now, `${now}-${randomBytes(4).toString('hex')}`);
     await r.pexpire(key, lim.windowMs);
+    budget.value = { remaining: Math.max(0, lim.max - n - 1), limit: lim.max, windowMinutes: lim.windowMinutes };
   }
 
   /**
@@ -807,7 +824,8 @@ export class NotificationService {
       fields.popup = false;
       warnings.push({ code: 'ignored-field', field: 'popup', message: 'popup only applies to type dialogue' });
     }
-    await this.gateDesktop(caller, fields, warnings, actorName);
+    const budget: { value?: DesktopModalBudget } = {};
+    await this.gateDesktop(caller, fields, warnings, actorName, true, budget);
     await this.gateBlocking(caller, fields, p.context, warnings);
     await this.gatePopupRate(caller, fields, warnings);
 
@@ -842,7 +860,7 @@ export class NotificationService {
       ...(senderToken ? { senderTokenHash: hashToken(senderToken) } : {}),
     };
     await this.commit(rec, 'created', now);
-    return { notification: toPublic(rec), ...(senderToken ? { senderToken } : {}), warnings };
+    return { notification: toPublic(rec), ...(senderToken ? { senderToken } : {}), warnings, ...(budget.value && fields.scope === 'desktop' ? { desktopModal: budget.value } : {}) };
   }
 
   async update(id: string, patch: UpdatePatch | unknown, caller: NotificationPrincipal, senderToken?: string): Promise<UpdateResult> {
@@ -1537,7 +1555,7 @@ export function getNotificationService(): NotificationService {
   // Phase 4: forced pop-up limit + window ownership through the AppManager.
   svc.setPopupLimit({ max: DEFAULT_POPUPS_PER_WINDOW, windowMs: DEFAULT_POPUP_WINDOW_MS });
   // Phase 6: blocking desktop modals per sender, and releasing them on revoke / disable / uninstall.
-  svc.setDesktopModalLimit({ max: DEFAULT_DESKTOP_MODALS_PER_WINDOW, windowMs: DEFAULT_DESKTOP_MODAL_WINDOW_MS });
+  // (the blocking desktop-modal limit comes from `os/notifications.desktopModal`, default 5 / 10 min)
   attachDesktopModalRelease();
   svc.setWindowOwnerResolver(appManagerWindowOwner);
   // Phase 5: the user's lock-screen + retention settings from the OS KV.

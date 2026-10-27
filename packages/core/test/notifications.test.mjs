@@ -591,7 +591,7 @@ test('phase 6: at most 2 blocking desktop modals per sender per 10 minutes (the 
     for (let i = 0; i < 2; i++) { clock += 1000; assert.equal((await s.create({ title: `m${i}`, type: 'dialogue', scope: 'desktop', blocking: true, popup: true }, who)).notification.scope, 'desktop'); }
     const third = await s.create({ title: 'm3', type: 'dialogue', scope: 'desktop', blocking: true }, who);
     assert.equal(third.notification.scope, 'auto');
-    assert.ok(third.warnings.some((w) => w.field === 'scope' && /at most|limited to 2/.test(w.message)));
+    assert.ok(third.warnings.some((w) => w.field === 'scope' && w.code === 'desktop-modal-rate-limited' && /limited to 2/.test(w.message)));
     // Non-blocking desktop dialogues don't count.
     assert.equal((await s.create({ title: 'c', type: 'dialogue', scope: 'desktop' }, who)).notification.scope, 'desktop');
     // Pop-ups: 2 used by the modals, 1 left.
@@ -599,6 +599,52 @@ test('phase 6: at most 2 blocking desktop modals per sender per 10 minutes (the 
     assert.equal((await s.create({ title: 'p2', type: 'dialogue', popup: true }, who)).notification.popup, false);
     clock = start + 1000 + 600_000 + 1;
     assert.equal((await s.create({ title: 'm4', type: 'dialogue', scope: 'desktop', blocking: true }, who)).notification.scope, 'desktop');
+  } finally { clock = start + 700_000; }
+});
+
+test('phase 6: desktop-modal limit from os/notifications — default 5/10 min, global, per sender, unlimited, live change; warning code + retryAfter; remaining', async () => {
+  let settings = {};
+  const s = new NotificationService({ redis, now, authorizer: ALLOW_ALL, windowOwner, settings: () => settings });
+  const who = (id) => ({ ...APP, appId: id, instanceId: `${id}-1` });
+  const modal = (caller) => s.create({ title: 'm', type: 'dialogue', scope: 'desktop', blocking: true }, caller);
+  const start = clock;
+  try {
+    // Default: 5 per sender per 10 min, with the remaining budget on each kept one.
+    const a = who('com.example.lim.default');
+    const left = [];
+    for (let i = 0; i < 5; i++) { clock += 1000; const r = await modal(a); assert.equal(r.notification.scope, 'desktop'); left.push(r.desktopModal.remaining); }
+    assert.deepEqual(left, [4, 3, 2, 1, 0]);
+    clock += 1000;
+    const over = await modal(a);
+    assert.equal(over.notification.scope, 'auto');
+    const w = over.warnings.find((x) => x.code === 'desktop-modal-rate-limited');
+    assert.ok(w, JSON.stringify(over.warnings));
+    assert.deepEqual([w.field, w.limit, w.windowMinutes, w.remaining], ['scope', 5, 10, 0]);
+    assert.ok(w.retryAfterMs > 0 && w.retryAfterMs <= 600_000);
+    assert.equal(over.desktopModal, undefined, 'no budget on a downgraded one');
+    // Global setting: 2 per 1 minute.
+    settings = { desktopModal: { limit: 2, windowMinutes: 1 } };
+    const b = who('com.example.lim.global');
+    assert.equal((await modal(b)).desktopModal.limit, 2);
+    await modal(b);
+    assert.equal((await modal(b)).notification.scope, 'auto');
+    clock += 61_000;
+    assert.equal((await modal(b)).notification.scope, 'desktop', 'the 1-minute window slid');
+    // Per sender: 'unlimited' (and 0) for one app; another stays at the global limit.
+    const c = who('com.example.lim.free');
+    settings = { desktopModal: { limit: 1, windowMinutes: 10, perSender: { 'com.example.lim.free': 'unlimited' } } };
+    for (let i = 0; i < 4; i++) { const r = await modal(c); assert.equal(r.notification.scope, 'desktop'); assert.equal(r.desktopModal.remaining, null); }
+    const d = who('com.example.lim.one');
+    await modal(d);
+    assert.equal((await modal(d)).notification.scope, 'auto');
+    // Globally unlimited.
+    settings = { desktopModal: { limit: 0 } };
+    for (let i = 0; i < 3; i++) assert.equal((await modal(d)).notification.scope, 'desktop');
+    // Garbage → defaults.
+    settings = { desktopModal: { limit: 'lots', windowMinutes: -3 } };
+    const e = who('com.example.lim.garbage');
+    assert.equal((await modal(e)).desktopModal.limit, 5);
+    assert.equal((await modal(e)).desktopModal.windowMinutes, 10);
   } finally { clock = start + 700_000; }
 });
 

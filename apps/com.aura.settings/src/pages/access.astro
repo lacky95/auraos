@@ -42,6 +42,8 @@ const senders = [
   ...apps.filter((a) => a.permissions.includes('system.notifications')).map((a) => ({ key: `app:${a.id}`, name: a.name, id: a.id })),
 ];
 const label = (p: string) => p.replace('notifications.', '');
+// Phase 6: apps that request a blocking desktop modal (per-app limit overrides).
+const modalApps = apps.filter((a) => a.permissions.includes('notifications.desktopModal'));
 ---
 <!DOCTYPE html>
 <html lang="en">
@@ -186,6 +188,41 @@ const label = (p: string) => p.replace('notifications.', '');
           ))}
         </tbody>
       </table>
+    </section>
+
+    <section class="acc-section" id="dm-section">
+      <div class="acc-head"><span class="acc-title">▣ Desktop modals</span><span class="acc-note" id="dm-saved"></span></div>
+      <p class="acc-note">
+        An app with the <b>desktopModal</b> grant (above) can show a dialogue that blocks the whole desktop. To stop a
+        noisy app, each sender may do that at most this often; beyond it the dialogue waits as a normal one. You can
+        always force-hide such a dialogue ("Hide this dialogue" or <code>Ctrl+Alt+Shift+Esc</code>). This is your
+        preference — no admin unlock needed.
+      </p>
+      <div class="row-inline">
+        <label for="dm-limit">At most</label>
+        <input type="number" id="dm-limit" min="1" max="1000" step="1" style="width: 5em;" />
+        <label for="dm-window">blocking dialogues per sender per</label>
+        <input type="number" id="dm-window" min="1" max="1440" step="1" style="width: 5em;" />
+        <span>minutes</span>
+        <label><input type="checkbox" id="dm-unlimited" /> unlimited</label>
+      </div>
+      {modalApps.length > 0 && (
+        <table class="acc-table">
+          <thead><tr><th>APP</th><th>LIMIT (blank = default)</th></tr></thead>
+          <tbody id="dm-body">
+            {modalApps.map((a) => (
+              <tr data-sender={`app:${a.id}`}>
+                <td><code>{a.id}</code><br /><span class="acc-note">{a.name}</span></td>
+                <td>
+                  <input type="text" class="dm-app" inputmode="numeric" placeholder="default" style="width: 7em;"
+                    aria-label={`Desktop-modal limit for ${a.name} (a number, unlimited, or blank for the default)`} />
+                  <span class="acc-note">a number, or <code>unlimited</code></span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </section>
 
     <dialog id="read-dialog" aria-labelledby="read-title">
@@ -549,6 +586,19 @@ const label = (p: string) => p.replace('notifications.', '');
         $('ls-hide-all').checked = ls.hideAll === true;
         const days = rt.days === undefined ? '7' : String(rt.days === 0 || rt.days === null ? 'forever' : rt.days);
         $('rt-days').value = ['1', '7', '30', '90', 'forever'].includes(days) ? days : '7';
+        // Phase 6: desktop-modal limit (default 5 per 10 min; 'unlimited' / 0 = off).
+        const dm = nset.desktopModal || {};
+        const unlimited = dm.limit === 'unlimited' || dm.limit === 0;
+        $('dm-unlimited').checked = unlimited;
+        $('dm-limit').value = unlimited || dm.limit === undefined ? '5' : String(dm.limit);
+        $('dm-limit').disabled = unlimited;
+        $('dm-window').value = dm.windowMinutes === undefined ? '10' : String(dm.windowMinutes);
+        document.querySelectorAll('#dm-body tr[data-sender]').forEach((tr) => {
+          const k = tr.dataset.sender;
+          const bare = k.startsWith('app:') ? k.slice(4) : k;
+          const v = dm.perSender && (dm.perSender[k] ?? dm.perSender[bare]);
+          tr.querySelector('.dm-app').value = v === undefined ? '' : (v === 0 ? 'unlimited' : String(v));
+        });
         document.querySelectorAll('#ls-body tr[data-sender]').forEach((tr) => {
           const k = tr.dataset.sender;
           const bare = k.startsWith('app:') ? k.slice(4) : k;
@@ -568,8 +618,27 @@ const label = (p: string) => p.replace('notifications.', '');
           if (r) rtApps[k] = r === 'forever' ? 'forever' : Number(r);
         });
         const d = $('rt-days').value;
+        const perSender = {};
+        let bad = '';
+        document.querySelectorAll('#dm-body tr[data-sender]').forEach((tr) => {
+          const raw = tr.querySelector('.dm-app').value.trim().toLowerCase();
+          if (!raw) return;
+          if (raw === 'unlimited' || raw === '0') { perSender[tr.dataset.sender] = 'unlimited'; return; }
+          const n = Number(raw);
+          if (Number.isInteger(n) && n >= 1 && n <= 1000) perSender[tr.dataset.sender] = n;
+          else bad = `"${raw}" is not a limit (a number 1–1000 or unlimited)`;
+        });
+        if (bad) { setStatus(`Desktop modals: ${bad}`, 'error'); return; }
+        const lim = Number($('dm-limit').value);
+        const win = Number($('dm-window').value);
         const value = {
           ...nset,
+          desktopModal: {
+            ...(nset.desktopModal || {}),
+            limit: $('dm-unlimited').checked ? 'unlimited' : (Number.isInteger(lim) && lim >= 1 ? Math.min(1000, lim) : 5),
+            windowMinutes: Number.isInteger(win) && win >= 1 ? Math.min(1440, win) : 10,
+            perSender,
+          },
           lockscreen: { ...(nset.lockscreen || {}), hideAll: $('ls-hide-all').checked, apps: lsApps },
           retention: { ...(nset.retention || {}), days: d === 'forever' ? 'forever' : Number(d), apps: rtApps },
         };
@@ -583,6 +652,7 @@ const label = (p: string) => p.replace('notifications.', '');
           }
           nset = value;
           lsSaved.textContent = `SAVED ${new Date().toLocaleTimeString()}`;
+          $('dm-saved').textContent = lsSaved.textContent;
         } catch (err) {
           setStatus(`Could not save the lock-screen settings — ${err.message}`, 'error');
           await loadNotifSettings();
@@ -591,6 +661,10 @@ const label = (p: string) => p.replace('notifications.', '');
       $('ls-hide-all').addEventListener('change', saveNotifSettings);
       $('rt-days').addEventListener('change', saveNotifSettings);
       document.querySelectorAll('#ls-body select').forEach((sel) => sel.addEventListener('change', saveNotifSettings));
+      $('dm-unlimited').addEventListener('change', () => { $('dm-limit').disabled = $('dm-unlimited').checked; void saveNotifSettings(); });
+      $('dm-limit').addEventListener('change', saveNotifSettings);
+      $('dm-window').addEventListener('change', saveNotifSettings);
+      document.querySelectorAll('#dm-body .dm-app').forEach((inp) => inp.addEventListener('change', saveNotifSettings));
       void loadNotifSettings();
 
       render();
