@@ -21,6 +21,7 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { validateStagedDir } from './Validator.js';
+import { orasSync } from './RegistryAuth.js';
 import { APP_ARTIFACT_TYPE, APP_REPO_PREFIX, buildStoreAnnotations } from './ociMetadata.js';
 import type { AppManifest } from '../types/manifest.js';
 
@@ -316,13 +317,14 @@ export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }>
   // Push as a single layer with the app config blob inline.
   log('pushing oci artifact...');
   const ref = `${registryPath}:${opts.tag}`;
-  execFileSync('oras', [
+  // orasSync adds the registry's login when the target is a private source.
+  orasSync([
     'push', ref,
     `${tarName}:application/vnd.aura.app.bundle.v1.tar+gzip`,
     '--artifact-type', APP_ARTIFACT_TYPE,
     ...annotationFlags,
     ...extraFlags,
-  ], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 180_000, cwd: stagingDir });
+  ], { timeout: 180_000, cwd: stagingDir });
 
   // Tag additional refs. `latest` is what the catalog aggregator anchors on
   // when listing a repo; the channel label (e.g. `stable`) lets installs pin
@@ -333,15 +335,13 @@ export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }>
   for (const t of extraTags) {
     log(`tagging '${t}'...`);
     try {
-      execFileSync('oras', ['tag', ref, t, ...extraFlags],
-        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
+      orasSync(['tag', ref, t, ...extraFlags], { timeout: 30_000 });
     } catch { /* tag is best-effort */ }
   }
 
   // Verify the just-pushed ref exists.
   log('verifying...');
-  execFileSync('oras', ['manifest', 'fetch', ref, ...extraFlags],
-    { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
+  orasSync(['manifest', 'fetch', ref, ...extraFlags], { timeout: 30_000 });
 
   // Clean up the staging dir.
   try { rmSync(stagingDir, { recursive: true, force: true }); }

@@ -356,14 +356,7 @@ WORKDIR /workspace
 # packages/* via a single recursive, dependency-ordered pnpm run so this never
 # drifts again when a package is added or flips to dist exports — an earlier
 # hardcoded core/kv-store/cli list silently missed @aura/ui and @aura/app-sdk.
-CMD ["sh", "-c", "mkdir -p /data/aura/home/master /data/aura/home/default && rm -f /home/master /home/aura && ln -s /data/aura/home/master /home/master && ln -s /data/aura/home/default /home/aura \
- && { pnpm install || echo '[aura] pnpm install exited non-zero (likely ERR_PNPM_IGNORED_BUILDS) — continuing'; } \
- && pnpm --filter \"./packages/*\" build \
- && install -D -m 0755 /workspace/os/aura-cli-shim.sh /usr/local/bin/aura \
- && install -D -m 0755 /workspace/os/aura-cli-shim.sh /os/toolchain/bin/aura \
- && install -D -m 0644 /workspace/os/bashrc.aura.sh /os/base-rootfs/root/.bashrc \
- && install -D -m 0644 /workspace/os/bashrc.aura.sh /os/base-rootfs/etc/profile.d/aura-prompt.sh \
- && install -D -m 0644 /workspace/os/bashrc.aura.sh /os/base-rootfs/etc/bash.bashrc \
- && install -D -m 0644 /workspace/os/toolchain-path.sh /etc/profile.d/aura-toolchain.sh \
- && (pnpm --filter @aura/cli build:watch &) \
- && pnpm --filter @aura/shell dev --host 0.0.0.0"]
+# The steps live in os/boot.sh (from the checkout), which also serves the
+# "AuraOS is starting" splash on :3000 while they run (os/boot-splash.mjs)
+# and logs every step to /data/aura/boot/boot.log.
+CMD ["sh", "/workspace/os/boot.sh"]

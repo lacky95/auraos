@@ -51,7 +51,17 @@ export class Resolver {
     return urlForHost(cfg, host) ?? undefined;
   }
 
-  async resolve(rawRef: string): Promise<ResolvedRef> {
+  /** The configured OCI source name hosting this registry path, if any. */
+  private sourceForOciHost(registry: string): string | undefined {
+    const host = registry.split('/')[0] ?? registry;
+    return this.opts.registryConfig?.registries.find((e) => urlForHost({ registries: [e] }, host))?.name;
+  }
+
+  /**
+   * `opts.sourceName` (updates): look a bare id up in that source first, so an
+   * app installed from a private store keeps coming from it.
+   */
+  async resolve(rawRef: string, opts: { sourceName?: string } = {}): Promise<ResolvedRef> {
     const ref = rawRef.trim();
     if (!ref) throw new Error('[NexusResolver] empty ref');
 
@@ -75,7 +85,7 @@ export class Resolver {
     }
     // Otherwise treat as a bare reverse-domain id, optionally with @channel.
     if (/^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+(@[a-zA-Z0-9._-]+)?$/.test(ref)) {
-      return this.resolveIndex(ref, rawRef);
+      return this.resolveIndex(ref, rawRef, opts.sourceName);
     }
     throw new Error(`[NexusResolver] could not parse ref: '${rawRef}'`);
   }
@@ -125,7 +135,11 @@ export class Resolver {
     if (tag.startsWith('sha256:')) {
       digest = tag;
     } else if (mirror) {
-      digest = resolveOciDigest({ registry, tag }, mirror.url)
+      // A mirror is a best-effort shortcut: one that wants a login we don't
+      // have must not stop the canonical registry from being asked.
+      let fromMirror: string | null = null;
+      try { fromMirror = resolveOciDigest({ registry, tag }, mirror.url); } catch { /* fall through */ }
+      digest = fromMirror
             ?? resolveOciDigest({ registry, tag }, hostUrl)
             ?? '';
     } else {
@@ -136,13 +150,15 @@ export class Resolver {
       rawRef,
       address: `${registry}:${tag}`,
       digest,
+      ...(this.sourceForOciHost(registry) ? { sourceName: this.sourceForOciHost(registry) } : {}),
       manifestPreview: null,
     };
   }
 
-  private async resolveIndex(bareRef: string, rawRef: string): Promise<ResolvedRef> {
+  private async resolveIndex(bareRef: string, rawRef: string, sourceName?: string): Promise<ResolvedRef> {
     const [id, channel = 'stable'] = bareRef.split('@');
-    const entry = await this.opts.catalog.lookup(id!);
+    const entry = (sourceName ? await this.opts.catalog.lookupIn(id!, sourceName) : null)
+      ?? await this.opts.catalog.lookup(id!);
     if (!entry) {
       throw new Error(`[NexusResolver] '${id}' not found in any registered source`);
     }
@@ -173,6 +189,7 @@ export class Resolver {
           address: url + (ref ? `#${ref}` : ''),
           digest,
           channel,
+          ...(entry.sourceName && entry.sourceName !== 'seed' ? { sourceName: entry.sourceName } : {}),
           manifestPreview: null,
         };
       }
@@ -189,6 +206,7 @@ export class Resolver {
           address: `oci://${registry}:${tag}`,
           digest,
           channel,
+          ...(entry.sourceName && entry.sourceName !== 'seed' ? { sourceName: entry.sourceName } : {}),
           manifestPreview: null,
         };
       }

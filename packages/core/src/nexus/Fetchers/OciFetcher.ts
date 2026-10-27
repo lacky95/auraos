@@ -15,6 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { orasHostFromUrl, orasFlagsForUrl } from '../RegistryConfig.js';
+import { OrasAuthError, orasSync } from '../RegistryAuth.js';
 
 export interface OciRef {
   /** Full registry path, e.g. 'ghcr.io/user/aura-foo'. */
@@ -74,12 +75,10 @@ export async function fetchOci(ref: OciRef, stagingDir: string, registryUrl?: st
     // <dir>. Our publish format (Publisher.publishOci) is a single layer whose
     // file is `bundle.tar.gz` — a gzip tar of the app source — so the pull
     // leaves `<dir>/bundle.tar.gz`, NOT the unpacked source. Unpack it below.
-    execFileSync(
-      'oras',
-      ['pull', fullRef, '-o', stagingDir, ...extraFlags],
-      { stdio: ['ignore', 'pipe', 'pipe'], timeout: 180_000 },
-    );
+    // orasSync adds the registry's login when it is a private source.
+    orasSync(['pull', fullRef, '-o', stagingDir, ...extraFlags], { timeout: 180_000 });
   } catch (err) {
+    if (err instanceof OrasAuthError) throw err;
     throw new Error(`[NexusOciFetcher] pull failed for ${fullRef}: ${(err as Error).message}`);
   }
 
@@ -99,20 +98,18 @@ export async function fetchOci(ref: OciRef, stagingDir: string, registryUrl?: st
 
 /**
  * Resolve an OCI tag to a sha256 digest by HEADing the manifest endpoint.
- * Returns null when the registry is unreachable or anonymous auth fails.
+ * Returns null when the registry is unreachable or the tag is missing; a
+ * rejected login throws OrasAuthError (it used to look like "no digest").
  */
 export function resolveOciDigest(ref: OciRef, registryUrl?: string): string | null {
   if (!isOrasAvailable()) return null;
   const { fullRef, extraFlags } = buildRef(ref, registryUrl);
   try {
     // `oras resolve <ref>` prints the digest.
-    const out = execFileSync(
-      'oras',
-      ['resolve', fullRef, ...extraFlags],
-      { stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000 },
-    ).toString().trim();
+    const out = orasSync(['resolve', fullRef, ...extraFlags], { timeout: 15_000 }).toString().trim();
     return out.startsWith('sha256:') ? out : null;
-  } catch {
+  } catch (err) {
+    if (err instanceof OrasAuthError) throw err;
     return null;
   }
 }

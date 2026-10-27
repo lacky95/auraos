@@ -26,7 +26,8 @@ import type { Command } from 'commander';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { api } from '../lib/client.js';
+import { api, type ShellError } from '../lib/client.js';
+import { promptSecret } from '../lib/admin-session.js';
 import { color, fail, info, ok, table, warn } from '../lib/format.js';
 import {
   BACK, promptChoice, promptConfirm, promptText, PromptCancelled,
@@ -90,6 +91,49 @@ interface SourceEntry {
   priority: number;
   mirror?:  boolean;
   ref?:     string;
+  /** Private oci registry: only the username — the password is sealed. */
+  auth?:    { type: 'basic'; username: string; secret: string };
+}
+
+/** What a store's /.well-known/aura-store.json says (see api/nexus/sources/discover). */
+interface StoreDescriptor {
+  name:  string;
+  title?: string;
+  kind:  'oci';
+  url:   string;
+  auth:  'basic' | 'none';
+  appRepoPrefix?: string;
+}
+
+/** `{error, detail}` of a failed shell call as one readable line. */
+function shellErrorText(err: unknown): string {
+  const e = err as ShellError;
+  try {
+    const b = JSON.parse(e.body ?? '') as { error?: string; detail?: string };
+    if (b.error) return b.detail ? `${b.detail} (${b.error})` : b.error;
+  } catch { /* not JSON */ }
+  return e.message;
+}
+
+/** The username: the flag, or a prompt on a TTY. */
+async function readRegistryUsername(flag: string | undefined, sourceName: string): Promise<string> {
+  if (flag) return flag;
+  if (!process.stdin.isTTY) fail('a login needs --username');
+  const u = await promptText(`Username for ${sourceName}`);
+  if (typeof u !== 'string' || !u.trim()) fail('cancelled');
+  return u.trim();
+}
+
+/** The password for a registry login: piped in, or a hidden prompt. Never argv. */
+async function readRegistryPassword(fromStdin: boolean | undefined, label: string): Promise<string> {
+  if (fromStdin || !process.stdin.isTTY) {
+    const p = await readStdin();
+    if (!p) fail('no password on stdin');
+    return p;
+  }
+  const p = await promptSecret(`Password for ${label} (hidden): `);
+  if (!p) fail('cancelled');
+  return p;
 }
 
 /** Minimal shape of a local app.manifest.json we read for publish. */
@@ -877,36 +921,93 @@ function wireRegistry(registry: Command): void {
           KIND:     e.kind,
           URL:      e.url,
           PRIORITY: String(e.priority),
-          EXTRA:    e.kind === 'oci' ? (e.mirror ? 'mirror' : '') : (e.ref ? `ref:${e.ref}` : ''),
+          EXTRA:    e.kind === 'oci'
+            ? [e.mirror ? 'mirror' : '', e.auth ? `login:${e.auth.username}` : ''].filter(Boolean).join(' ')
+            : (e.ref ? `ref:${e.ref}` : ''),
         }));
       console.log(table(rows));
     });
 
   registry
-    .command('add <name> <url>')
-    .description('Add a source. Declare its kind explicitly — a git repo is either a catalog (git-index) or a single app (git-app).')
-    .option('--kind <kind>',   'oci | git-index | git-app (default: oci)', 'oci')
-    .option('--priority <n>',  'lower = checked first', '10')
-    .option('--mirror',        '[oci] probe this registry for ANY ref before the canonical host')
-    .option('--ref <ref>',     '[git-*] branch/tag/commit (default remote HEAD)')
-    .action(async (name: string, url: string, o: { kind?: string; priority?: string; mirror?: boolean; ref?: string }) => {
-      const kind = (o.kind ?? 'oci') as SourceEntry['kind'];
+    .command('add <name-or-address> [url]')
+    .description('Add a source. With ONE argument (a store address like apps.acme.com) the store describes itself via /.well-known/aura-store.json. Otherwise declare its kind — a git repo is either a catalog (git-index) or a single app (git-app).')
+    .option('--kind <kind>',     'oci | git-index | git-app (default: oci)', 'oci')
+    .option('--priority <n>',    'lower = checked first', '10')
+    .option('--mirror',          '[oci] probe this registry for ANY ref before the canonical host')
+    .option('--ref <ref>',       '[git-*] branch/tag/commit (default remote HEAD)')
+    .option('--name <name>',     '[by address] use this source name instead of the one the store suggests')
+    .option('--username <user>', '[oci] login for a private registry (the password is asked for, or piped in)')
+    .option('--password-stdin',  '[oci] read the password from stdin: echo "$PW" | aura nexus registry add … --username me --password-stdin')
+    .action(async (first: string, url: string | undefined, o: {
+      kind?: string; priority?: string; mirror?: boolean; ref?: string; name?: string;
+      username?: string; passwordStdin?: boolean;
+    }) => {
+      let name = first;
+      let kind = (o.kind ?? 'oci') as SourceEntry['kind'];
+      let appRepoPrefix: string | undefined;
+      let needsLogin = !!o.username;
+      if (url === undefined) {
+        // One argument: a store address — ask the store what it is.
+        info(`looking up the store at ${first}…`);
+        let store: StoreDescriptor;
+        try {
+          store = (await api.post<{ store: StoreDescriptor }>('/api/nexus/sources/discover', { address: first })).store;
+        } catch (err) { fail(shellErrorText(err)); }
+        name = o.name ?? store!.name;
+        url = store!.url;
+        kind = 'oci';
+        appRepoPrefix = store!.appRepoPrefix;
+        needsLogin ||= store!.auth === 'basic';
+        info(`found ${color.cyan(store!.title ?? store!.name)} → ${url}${store!.auth === 'basic' ? ' (needs a login)' : ''}`);
+      }
       if (!['oci', 'git-index', 'git-app'].includes(kind)) {
         fail(`invalid --kind '${kind}' (expected oci | git-index | git-app)`);
       }
       if (kind === 'oci' && !/^https?:\/\//.test(url)) {
         fail('oci url must start with http:// or https://');
       }
-      const entry: SourceEntry = { kind, name, url, priority: Number(o.priority ?? 10) };
-      if (kind === 'oci' && o.mirror) entry.mirror = true;
-      if (kind !== 'oci' && o.ref)    entry.ref = o.ref;
+      if (needsLogin && kind !== 'oci') fail('--username is only supported for oci registries');
 
-      info(kind === 'oci' ? 'registering registry…' : 'validating source (cloning/fetching)…');
-      const res = await api.post<{ ok?: boolean; error?: string; detail?: string; kind?: string }>(
-        '/api/nexus/sources', entry,
-      );
-      if (!res.ok) fail(`${res.error}${res.detail ? ` — ${res.detail}` : ''}`);
-      ok(`added ${kind} source ${color.cyan(name)} → ${url}`);
+      const body: Record<string, unknown> = { kind, name, url, priority: Number(o.priority ?? 10) };
+      if (kind === 'oci' && o.mirror) body['mirror'] = true;
+      if (kind !== 'oci' && o.ref)    body['ref'] = o.ref;
+      if (appRepoPrefix)              body['appRepoPrefix'] = appRepoPrefix;
+      if (needsLogin) {
+        const username = await readRegistryUsername(o.username, name);
+        body['username'] = username;
+        body['password'] = await readRegistryPassword(o.passwordStdin, `${username}@${name}`);
+      }
+
+      info(kind === 'oci' ? 'checking the registry…' : 'validating source (cloning/fetching)…');
+      let res: { apps?: number };
+      try {
+        res = await api.post<{ ok?: boolean; apps?: number }>('/api/nexus/sources', body);
+      } catch (err) { fail(shellErrorText(err)); }
+      const found = res!.apps !== undefined ? ` — ${res!.apps} app${res!.apps === 1 ? '' : 's'}` : '';
+      ok(`added ${kind} source ${color.cyan(name)} → ${url}${needsLogin ? ' (login saved)' : ''}${found}`);
+    });
+
+  registry
+    .command('login <name>')
+    .description('Set or change the login of a private oci source (checked against the registry, sealed as an OS-only secret).')
+    .option('--username <user>', 'username (asked for when omitted)')
+    .option('--password-stdin',  'read the password from stdin')
+    .action(async (name: string, o: { username?: string; passwordStdin?: boolean }) => {
+      const username = await readRegistryUsername(o.username, name);
+      const password = await readRegistryPassword(o.passwordStdin, `${username}@${name}`);
+      try {
+        const res = await api.put<{ apps?: number }>(`/api/nexus/sources/${encodeURIComponent(name)}/credentials`, { username, password });
+        ok(`login for ${color.cyan(name)} saved${res.apps !== undefined ? ` — ${res.apps} app${res.apps === 1 ? '' : 's'}` : ''}`);
+      } catch (err) { fail(shellErrorText(err)); }
+    });
+
+  registry
+    .command('logout <name>')
+    .description('Forget the login of an oci source (the source stays).')
+    .action(async (name: string) => {
+      try { await api.del(`/api/nexus/sources/${encodeURIComponent(name)}/credentials`); }
+      catch (err) { fail(shellErrorText(err)); }
+      ok(`login for ${color.cyan(name)} removed`);
     });
 
   registry

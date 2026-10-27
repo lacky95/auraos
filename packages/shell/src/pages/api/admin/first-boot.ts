@@ -4,7 +4,7 @@ import * as core from '@aura/core';
 
 /**
  * First-boot setup status — today that is the `aura-base` image build
- * (lib/baseImageBootstrap.ts), which the "Setting up AuraOS" notification
+ * (lib/onboarding/setupCard.ts), which the "Setting up AuraOS" notification
  * follows.
  *
  * GET         → { image, phase, progress, step, startedAt, finishedAt, error }

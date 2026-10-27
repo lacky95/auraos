@@ -33,27 +33,41 @@ images and takes a few minutes; later boots take seconds:
   OS's helper containers) runs from. Compose builds it first; the shell
   starts once it is there.
 
-If the shell ever comes up without `aura-base` (for example after a
-`docker image prune`), it builds it by itself: a pinned **Setting up
-AuraOS** notification shows the progress, and container apps start
-when it is done. If that build fails, the notification shows the last
-log lines and a **Retry** button.
-
-Open `http://localhost:3000` in your browser. The desktop comes up
-with the launcher, dock, and a clock in the status bar.
+Open `http://localhost:3000` in your browser as soon as the containers
+are up — you don't have to wait for the build to finish.
 
 ## First boot
 
-`autoStart` apps spawn before you click anything:
+A first start walks you through three stages, all in the browser:
 
-- **Settings** — theme, keyboard remap, apps registry.
-- **Console** — relayed `console.*` + uncaught errors from every iframe.
-- **Aura Docs** — this site.
+1. **AuraOS is starting** — while the shell container installs its
+   dependencies and builds every package, `:3000` serves a small page
+   with the current step and the live log (`os/boot.sh`,
+   `os/boot-splash.mjs`). It switches to the desktop by itself. If the
+   build fails, the page shows the error; the container retries after a
+   few minutes. The same log is in `/data/aura/boot/boot.log`.
+2. **Setting up AuraOS** — on the desktop, a pinned notification
+   follows the background work step by step: the app image, the app
+   registry and SDK, and Aura Docs.
+   A failed step shows its error and a **Retry** button. You can
+   already look around while it runs.
+3. **Welcome to AuraOS** — a getting-started checklist: unlock admin,
+   install and log in to an AI agent, pick a theme, build your first
+   app, read the docs. Its buttons open the right app, and the steps
+   tick themselves off. Hide it whenever you like. See
+   [Getting started](/docs/getting-started).
 
-Open the launcher (`⣿` in the dock, or `Ctrl+Alt+Space → Enter →
-launcher icon`) to see every installed app. Click an icon, the
-sandbox spawns, the iframe loads. First-spawn cold start is ~1-3 s;
-subsequent launches hit the warm pool when present.
+If the shell ever comes up without `aura-base` later (for example
+after a `docker image prune`), the **Setting up AuraOS** notification
+comes back while it rebuilds it, and container apps start when it is
+done.
+
+`autoStart` apps spawn before you click anything — today **Aura
+Docs** (this site), plus the services: the app registry and the Shell
+Daemon. Open the launcher (`⣿` in the dock, or
+`Ctrl+Alt+Space → Enter → launcher icon`) to see every installed app.
+Click an icon, the sandbox spawns, the iframe loads. First-spawn cold
+start is ~1-3 s; subsequent launches hit the warm pool when present.
 
 ## Troubleshooting
 

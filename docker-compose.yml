@@ -4,7 +4,7 @@ services:
   # `docker compose up` build it before the shell starts, and the self-updater's
   # `up --build aura-os` rebuild it with the shell. The container itself just
   # exits. If the shell still comes up without the image, it builds it on its
-  # own and shows the progress as a notification (lib/baseImageBootstrap.ts).
+  # own and shows the progress as a notification (lib/onboarding/setupCard.ts).
   aura-base:
     build:
       context: .

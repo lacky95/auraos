@@ -24,6 +24,8 @@ export interface ResolvedRef {
   digest:    string;
   /** Optional channel label, populated when ref came through an index entry. */
   channel?:  string;
+  /** The registered source that provided it (catalog entry or OCI host). */
+  sourceName?: string;
   /**
    * Best-effort manifest preview. Populated from OCI annotations or a
    * shallow git ls-tree where cheap; otherwise null and the validator
@@ -48,6 +50,9 @@ export interface InstallRecord {
   updatedAt:   string;   // ISO-8601
   /** Which scope this app is installed in. Absent in pre-scope records → treat as 'system'. */
   scope?:      ScopeId;
+  /** The source it came from, so an update asks the same (possibly private)
+   *  source again. Absent in older records → resolved as at install time. */
+  sourceName?: string;
 }
 
 /**

@@ -3,6 +3,7 @@ import * as core from '@aura/core';
 import { jsonResponse } from '../../../lib/appResponse.js';
 import { readJson } from '../../../lib/notificationCaller.js';
 import { auditAdmin, requireAdmin } from '../../../lib/auth.js';
+import { markWelcomeStep } from '../../../lib/onboarding/index.js';
 
 /**
  * Admin unlock / lock (minimal admin auth — ONE shared operator credential,
@@ -36,6 +37,8 @@ export const POST: APIRoute = async ({ request }) => {
   }
   const principal = { kind: 'admin', credential: 'shared', sessionId: r.sessionId, verification: 'verified' } as const;
   await auditAdmin(principal, 'session.unlock', { detail: { expiresAt: r.expiresAt } });
+  // Getting-started checklist: "Unlock admin" is done.
+  void markWelcomeStep('admin').catch(() => undefined);
   return jsonResponse({ ok: true, token: r.token, expiresAt: r.expiresAt, ttlMs: admin.ttlMs });
 };
 

@@ -3,6 +3,7 @@
   "pages": [
     "introduction",
     "installation",
+    "getting-started",
     "quick-start",
     "develop-an-app",
     "develop-in-sandbox",
@@ -16,6 +17,7 @@
     "cli-reference",
     "core-concepts",
     "nexus",
+    "private-stores",
     "publish-an-app",
     "scopes",
     "context",

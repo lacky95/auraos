@@ -6,7 +6,7 @@ import * as core from '@aura/core';
 import { kvServer, defaultKv } from '@aura/kv-store';
 import { bootstrapKv } from './lib/kvBootstrap.js';
 import { ensureSdkPublished } from './lib/sdkBootstrap.js';
-import { ensureBaseImageWithNotification } from './lib/baseImageBootstrap.js';
+import { startOnboarding, noteClientConnected, type OnboardingHandle } from './lib/onboarding/index.js';
 import { loadCustomInterfaces } from './lib/customInterfaces.js';
 
 // Source of truth is the singleton on globalThis — NOT a module-scoped flag.
@@ -28,6 +28,13 @@ async function ensureAppManager() {
     // so a stale singleton across soft-restarts is a no-op.
     const dataDir = process.env['AURA_DATA_DIR'] ?? '/data';
     await kvServer.start({ dataDir: `${dataDir}/kv` });
+    // A fresh install has no OS state yet — onboarding welcomes only those.
+    let freshInstall = false;
+    try {
+      const kv = defaultKv();
+      try { freshInstall = !(await kv.exists('os', 'theme')); }
+      finally { await kv.close().catch(() => undefined); }
+    } catch { /* treat as an existing install */ }
     // Migrate /data/settings.json (legacy Settings storage) into Valkey on
     // first boot; subsequent boots see `os/theme` already in Valkey and
     // skip this entirely. Idempotent.
@@ -54,14 +61,20 @@ async function ensureAppManager() {
       console.warn(`[middleware] notification service start failed: ${(err as Error).message}`);
     }
 
-    // The `aura-base` image every container app runs from. `docker compose up`
-    // builds it; when it is missing anyway, build it in the background with a
-    // progress notification (needs the notification service above). Detached:
-    // the desktop must come up to show it, and container spawns wait for it.
+    // Onboarding (lib/onboarding): the "Setting up AuraOS" card and the
+    // welcome checklist. Starts BEFORE init(): it checks the `aura-base`
+    // image every container app runs from and builds it in the background
+    // when missing (container spawns wait for it). Needs the notification
+    // service above. Never blocks boot beyond one KV read.
+    let onboarding: OnboardingHandle | null = null;
     try {
-      ensureBaseImageWithNotification(dataDir);
+      onboarding = await startOnboarding({
+        dataDir,
+        toolchainDir: process.env['AURA_TOOLCHAIN_DIR'] ?? '/os/toolchain',
+        freshInstall,
+      });
     } catch (err) {
-      console.warn(`[middleware] base image check failed: ${(err as Error).message}`);
+      console.warn(`[middleware] onboarding start failed: ${(err as Error).message}`);
     }
 
     // Materialise Aura Context (env/secret) files from Valkey BEFORE apps start,
@@ -117,14 +130,20 @@ async function ensureAppManager() {
     // what starts com.aura.registry (autoStart + critical) — before this point
     // nothing is listening on 4090. Detached and non-fatal: user/global-scope
     // apps need these packages to resolve `auraDependencies` at first launch,
-    // but an OS that can't reach its registry should still boot.
-    ensureSdkPublished();
+    // but an OS that can't reach its registry should still boot. Onboarding
+    // runs it (lib/sdkBootstrap.ts) so a first boot can show its progress.
+    if (onboarding) onboarding.afterInit();
+    else void ensureSdkPublished();
   })();
   try { await initPromise; }
   finally { initPromise = null; }  // future soft-restart can trigger another cycle
 }
 
-export const onRequest = defineMiddleware(async (_ctx, next) => {
+export const onRequest = defineMiddleware(async (ctx, next) => {
   await ensureAppManager();
-  return next();
+  const res = await next();
+  // A shell tab registering itself: onboarding cards wait for the first one,
+  // because only notifications that arrive while a tab listens pop up.
+  if (ctx.request.method === 'POST' && ctx.url.pathname === '/api/os/clients' && res.ok) noteClientConnected();
+  return res;
 });

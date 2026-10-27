@@ -9,6 +9,8 @@ interface SourceEntry {
   priority: number;
   mirror?:  boolean;
   ref?:     string;
+  /** Private registry: the username only — the password is sealed in the OS. */
+  auth?:    { type: 'basic'; username: string; secret: string };
 }
 interface SourcesConfig { schema: number; sources: SourceEntry[]; }
 interface SourceStatus { name: string; kind: string; ok: boolean; apps: number; error?: string; }
@@ -34,7 +36,9 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
       <a href="/">Browse</a> tab. A source is either an <b>OCI registry</b>
       (self-describing — publish apps to it and they appear automatically), a
       <b>git-index</b> catalog (a repo hosting an <code>index.yaml</code> of many
-      apps), or a <b>git-app</b> (a repo that is a single app).
+      apps), or a <b>git-app</b> (a repo that is a single app). A private
+      registry carries a login; its password is stored encrypted and never
+      shown again.
     </p>
 
     {sorted.length === 0 ? (
@@ -51,6 +55,7 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
               </div>
               <div class="nexus-card-desc"><code>{s.url}</code></div>
               <div class="nexus-card-meta">
+                {s.kind === 'oci' && s.auth && <span class="badge" style="margin-right:6px" title="private registry — login saved">🔒 {s.auth.username}</span>}
                 {s.kind === 'oci' && s.mirror && <span class="badge" style="margin-right:6px">mirror</span>}
                 {s.ref && <span class="badge" style="margin-right:6px">ref: {s.ref}</span>}
                 {status[s.name]
@@ -61,12 +66,46 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
               </div>
             </div>
             <div class="nexus-card-actions">
+              {s.kind === 'oci' && <button class="edit-login" data-name={s.name}>{s.auth ? 'EDIT LOGIN' : 'ADD LOGIN'}</button>}
               <button class="remove-src" data-name={s.name} data-kind={s.kind}>REMOVE</button>
             </div>
           </div>
+          {s.kind === 'oci' && (
+            <div class="nexus-form login-form" data-name={s.name} style="display:none;margin-top:10px">
+              <div class="nexus-form-grid">
+                <div>
+                  <label>Username</label>
+                  <input class="login-user" type="text" autocomplete="username" value={s.auth?.username ?? ''} />
+                </div>
+                <div>
+                  <label>Password</label>
+                  <input class="login-pass" type="password" autocomplete="current-password" placeholder={s.auth ? 'enter a new password' : ''} />
+                </div>
+              </div>
+              <div class="nexus-form-row">
+                <button class="login-save" data-name={s.name}>SAVE LOGIN</button>
+                {s.auth && <button class="login-remove" data-name={s.name}>REMOVE LOGIN</button>}
+              </div>
+            </div>
+          )}
         </div>
       ))
     )}
+  </section>
+
+  <section class="nexus-section">
+    <h2>// Add a store by address</h2>
+    <p style="color:var(--aura-color-text-dim);font-size:0.8rem">
+      Got an address from an app publisher, like <code>apps.example.com</code>?
+      Enter it here — the store describes itself and only the login is left to
+      fill in.
+    </p>
+    <div class="nexus-form">
+      <div class="nexus-form-row">
+        <input id="store-address" type="text" placeholder="apps.example.com" style="flex:1" />
+        <button id="lookup-btn">LOOK UP</button>
+      </div>
+    </div>
   </section>
 
   <section class="nexus-section">
@@ -100,6 +139,18 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
         </div>
       </div>
 
+      <div class="nexus-form-grid" id="login-cell">
+        <div>
+          <label for="src-user">Username (private registry only)</label>
+          <input id="src-user" type="text" autocomplete="username" />
+        </div>
+        <div>
+          <label for="src-pass">Password</label>
+          <input id="src-pass" type="password" autocomplete="current-password" />
+        </div>
+      </div>
+      <input id="src-prefix" type="hidden" value="" />
+
       <div class="nexus-form-row">
         <button id="add-btn">ADD SOURCE</button>
         <button id="refresh-btn">REFRESH CATALOG</button>
@@ -123,6 +174,7 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
       const kind = kindSel.value;
       const isOci = kind === 'oci';
       $('mirror-cell').style.display = isOci ? '' : 'none';
+      $('login-cell').style.display  = isOci ? '' : 'none';
       $('ref-cell').style.display    = isOci ? 'none' : '';
       $('src-url-label').textContent = isOci
         ? 'Registry URL (http(s)://host:port)'
@@ -147,12 +199,21 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
         setLog('oci url must start with http:// or https://'); return;
       }
       const entry = { kind, name, url, priority };
-      if (kind === 'oci') { if ($('src-mirror').value === 'true') entry.mirror = true; }
+      if (kind === 'oci') {
+        if ($('src-mirror').value === 'true') entry.mirror = true;
+        if ($('src-prefix').value) entry.appRepoPrefix = $('src-prefix').value;
+        const user = $('src-user').value.trim();
+        const pass = $('src-pass').value;
+        if (user || pass) {
+          if (!user || !pass) { setLog('a login needs both a username and a password'); return; }
+          entry.username = user; entry.password = pass;
+        }
+      }
       else { const ref = $('src-ref').value.trim(); if (ref) entry.ref = ref; }
 
       const btn = $('add-btn');
       btn.disabled = true; btn.textContent = kind === 'oci' ? 'ADDING…' : 'VALIDATING…';
-      setLog(kind === 'oci' ? 'registering registry…' : 'validating source (cloning/fetching)…');
+      setLog(kind === 'oci' ? 'checking the registry…' : 'validating source (cloning/fetching)…');
       try {
         const res  = await fetch('/api/nexus/sources', {
           method: 'POST',
@@ -164,13 +225,92 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
           setLog('ERROR: ' + (json.error || res.status) + (json.detail ? ' — ' + json.detail : ''));
           return;
         }
-        setLog('added ' + kind + ' source "' + name + '" ✓  reloading…');
+        $('src-pass').value = '';
+        setLog('added ' + kind + ' source "' + name + '" ✓' + (json.apps !== undefined ? '  ' + json.apps + ' app(s) found' : '') + '  reloading…');
         setTimeout(() => location.reload(), 600);
       } catch (err) {
         setLog('ERROR: ' + (err && err.message ? err.message : err));
       } finally {
         btn.disabled = false; btn.textContent = 'ADD SOURCE';
       }
+    });
+
+    // Store by address: read its /.well-known/aura-store.json and fill the form.
+    $('lookup-btn').addEventListener('click', async () => {
+      const address = $('store-address').value.trim();
+      if (!address) { setLog('enter the store address'); return; }
+      const btn = $('lookup-btn');
+      btn.disabled = true; btn.textContent = 'LOOKING UP…';
+      setLog('looking up ' + address + '…');
+      try {
+        const res = await fetch('/api/nexus/sources/discover', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ address }),
+        });
+        const json = await res.json();
+        if (!res.ok || json.error) { setLog('ERROR: ' + (json.detail || json.error || res.status)); return; }
+        const st = json.store;
+        kindSel.value = 'oci'; syncFields();
+        $('src-name').value = st.name;
+        $('src-url').value = st.url;
+        $('src-prefix').value = st.appRepoPrefix || '';
+        setLog('found ' + (st.title || st.name) + ' → ' + st.url +
+          (st.auth === 'basic' ? '\nenter your username and password, then ADD SOURCE' : '\nno login needed — ADD SOURCE'));
+        (st.auth === 'basic' ? $('src-user') : $('add-btn')).focus();
+      } catch (err) {
+        setLog('ERROR: ' + (err && err.message ? err.message : err));
+      } finally {
+        btn.disabled = false; btn.textContent = 'LOOK UP';
+      }
+    });
+
+    // Per-source login: show the inline form, save (checked by the shell), remove.
+    document.querySelectorAll('.edit-login').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const form = document.querySelector('.login-form[data-name="' + CSS.escape(btn.getAttribute('data-name')) + '"]');
+        if (form) { form.style.display = form.style.display === 'none' ? '' : 'none'; form.querySelector('.login-pass').focus(); }
+      });
+    });
+    document.querySelectorAll('.login-save').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const name = btn.getAttribute('data-name');
+        const form = btn.closest('.login-form');
+        const username = form.querySelector('.login-user').value.trim();
+        const password = form.querySelector('.login-pass').value;
+        if (!username || !password) { setLog('a login needs both a username and a password'); return; }
+        btn.disabled = true; btn.textContent = 'CHECKING…';
+        setLog('checking the login for "' + name + '"…');
+        try {
+          const res = await fetch('/api/nexus/sources/' + encodeURIComponent(name) + '/credentials', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password }),
+          });
+          const json = await res.json();
+          if (!res.ok || json.error) { setLog('ERROR: ' + (json.detail || json.error || res.status)); return; }
+          form.querySelector('.login-pass').value = '';
+          setLog('login for "' + name + '" saved ✓  ' + (json.apps !== undefined ? json.apps + ' app(s) found  ' : '') + 'reloading…');
+          setTimeout(() => location.reload(), 600);
+        } catch (err) {
+          setLog('ERROR: ' + (err && err.message ? err.message : err));
+        } finally {
+          btn.disabled = false; btn.textContent = 'SAVE LOGIN';
+        }
+      });
+    });
+    document.querySelectorAll('.login-remove').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const name = btn.getAttribute('data-name');
+        if (!confirm('Remove the login of "' + name + '"? Its apps will not load until you add it again.')) return;
+        try {
+          const res = await fetch('/api/nexus/sources/' + encodeURIComponent(name) + '/credentials', { method: 'DELETE' });
+          const json = await res.json();
+          if (!res.ok || json.error) { setLog('ERROR: ' + (json.detail || json.error || res.status)); return; }
+          setLog('login for "' + name + '" removed ✓  reloading…');
+          setTimeout(() => location.reload(), 500);
+        } catch (err) {
+          setLog('ERROR: ' + (err && err.message ? err.message : err));
+        }
+      });
     });
 
     $('refresh-btn').addEventListener('click', async () => {

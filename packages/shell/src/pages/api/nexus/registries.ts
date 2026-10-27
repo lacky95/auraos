@@ -54,7 +54,18 @@ export const PUT: APIRoute = async ({ request }) => {
   // Replace all OCI sources; preserve any git-index / git-app sources.
   const cfg = await loadSourcesConfig(OS_API_BASE);
   const kept = cfg.sources.filter((s) => s.kind !== 'oci');
-  cfg.sources = [...reg.registries.map(toOciSource), ...kept];
+  // This legacy shape knows nothing of logins / repo prefixes: keep them for a
+  // registry whose name and URL are unchanged instead of silently dropping them.
+  const previous = new Map(cfg.sources.flatMap((s) => (s.kind === 'oci' ? [[s.name, s] as const] : [])));
+  cfg.sources = [...reg.registries.map((e) => {
+    const next = toOciSource(e);
+    const old = previous.get(e.name);
+    if (old && next.kind === 'oci' && old.url === next.url) {
+      if (old.auth) next.auth = old.auth;
+      if (old.appRepoPrefix) next.appRepoPrefix = old.appRepoPrefix;
+    }
+    return next;
+  }), ...kept];
   await saveSourcesConfig(OS_API_BASE, cfg);
   refreshNexusSources(cfg);
   return jsonResponse(ociRegistryView(cfg));
