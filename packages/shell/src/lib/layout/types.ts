@@ -27,8 +27,12 @@
  *                      even a click inside the app iframe).
  *   • `dragPolicy`   — title-bar drag & drop between windows / workspaces
  *                      (lib/windowDrag.ts).
+ *   • `host.handOffWindowDrag` — a layout that drags windows itself can hand
+ *                      the gesture to that same ghost drag mid-way (e.g. when
+ *                      the pointer reaches the shell bar with its workspace
+ *                      pills) and get it back.
  */
-import type { LayoutDragPolicy } from '../windowDrag.ts';
+import type { HandOffOptions, LayoutDragPolicy } from '../windowDrag.ts';
 
 /** What a strategy knows about one window. */
 export interface LayoutViewInfo {
@@ -139,4 +143,10 @@ export interface LayoutHost {
   /** Convert a pointer event's client coordinates into `container`-local
    *  CSS pixels (accounts for the shell's zoom transform). */
   toLocal(clientX: number, clientY: number): { x: number; y: number; scale: number };
+  /** Pointer is over the shell's top bar (workspace pills, folded dropdown)
+   *  or above the desktop. */
+  isOverShellBar(clientX: number, clientY: number): boolean;
+  /** Switch an ongoing window drag into the generic ghost drag (drop on a
+   *  workspace pill moves the window there). False if one is running. */
+  handOffWindowDrag(ev: PointerEvent, viewId: string, handle: HTMLElement | null, opts?: HandOffOptions): boolean;
 }

@@ -245,7 +245,7 @@ const ssrVisibleViews = initialViews
   import { osEvents } from '../lib/osEvents.ts';
   import { registerUiCommand, registerSnapshotPart, invokeLocal, startUiCommandListener } from '../lib/uiCommands.ts';
   import { markLaunchedHere } from '../lib/launchOrigin.ts';
-  import { beginWindowDrag, registerDropTarget, setLayoutDragPolicy, getLayoutDragPolicy } from '../lib/windowDrag.ts';
+  import { beginWindowDrag, handOffWindowDrag, registerDropTarget, setLayoutDragPolicy, getLayoutDragPolicy } from '../lib/windowDrag.ts';
   import { dragPolicyFor } from '../lib/layoutDragPolicies.ts';
   import { shellLayoutFor } from '../lib/layout/registry.ts';
   import type { LayoutHost, LayoutRenderContext, LayoutViewInfo, RegionSide, ShellLayoutStrategy } from '../lib/layout/types.ts';
@@ -1232,7 +1232,27 @@ const ssrVisibleViews = initialViews
       const scale = dynamicLayout.clientWidth > 0 ? r.width / dynamicLayout.clientWidth : 1;
       return { x: (clientX - r.left) / scale, y: (clientY - r.top) / scale, scale };
     },
+    isOverShellBar(clientX, clientY) {
+      const desktop = document.getElementById('desktop');
+      if (desktop && clientY < desktop.getBoundingClientRect().top) return true;
+      // Autohide bars overlay the desktop; the folded workspace dropdown hangs
+      // below the bar — both are inside #statusbar.
+      return !!document.elementFromPoint(clientX, clientY)?.closest('#statusbar');
+    },
+    handOffWindowDrag(ev, viewId, handle, opts) {
+      const slot = layoutHost.slotOf(viewId);
+      if (!slot) return false;
+      return handOffWindowDrag(ev, { viewId, title: slotDragTitle(slot, viewId) }, slot, handle, opts);
+    },
   };
+
+  /** Label for the drag ghost: window name › breadcrumb › id. */
+  function slotDragTitle(slot: HTMLElement, viewId: string): string {
+    return slot.querySelector('.slot-window-name')?.textContent?.trim()
+      || slot.querySelector('.slot-title-trail')?.textContent?.trim()
+      || slot.querySelector('.slot-title-id')?.textContent?.trim()
+      || viewId;
+  }
 
   // A click INSIDE an app window never reaches the shell's DOM (the iframe is
   // its own document), so the active layout learns about it from:
@@ -1269,11 +1289,7 @@ const ssrVisibleViews = initialViews
     const slot = chrome.closest<HTMLElement>('.app-slot[data-view-id]');
     const viewId = slot?.dataset['viewId'];
     if (!slot || !viewId || slot.dataset['maximized'] === 'true') return;
-    const title = (slot.querySelector('.slot-window-name')?.textContent?.trim()
-      || slot.querySelector('.slot-title-trail')?.textContent?.trim()
-      || slot.querySelector('.slot-title-id')?.textContent?.trim()
-      || viewId);
-    beginWindowDrag(e, { viewId, title }, slot);
+    beginWindowDrag(e, { viewId, title: slotDragTitle(slot, viewId) }, slot);
   });
   registerDropTarget({
     id: 'slot',
