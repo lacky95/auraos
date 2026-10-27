@@ -800,7 +800,7 @@ let initialTimeZone: string = '';
   let availableLayouts: Array<{ id: string; name: string; icon?: string }> =
     [{ id: 'tiling', name: 'Tiling', icon: '▦' },
      { id: 'fullscreen', name: 'Fullscreen', icon: '▣' },
-     { id: 'stack', name: 'Stack / Float', icon: '▥' }];
+     { id: 'stack', name: 'Free Window', icon: '▥' }];
   // Retry on the boot-race 404: Settings autoStarts in parallel with the
   // shell's first paint, so this fetch can land before the providers are
   // registered. Five short tries cover the ~3s cold-start window.

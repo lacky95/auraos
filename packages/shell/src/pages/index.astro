@@ -205,6 +205,16 @@ const ssrVisibleViews = initialViews
       <LayoutManager views={ssrVisibleViews} strategyId={active.layoutId} layoutState={active.layoutState} />
     </div>
     <div id="dynamic-layout" style="display:none; position:absolute; inset:0;"></div>
+    <!-- Layout-manager extension points (lib/layout/types.ts): the active
+         strategy may mount bars into these regions (e.g. Free Window's
+         taskbar on top); #dynamic-layout is inset by their measured size, so
+         windows, maximize and the viewport broadcast get the remaining box.
+         #layout-overlay sits above the windows for previews / splitters. -->
+    <div id="layout-region-top"    class="layout-region" data-side="top"></div>
+    <div id="layout-region-bottom" class="layout-region" data-side="bottom"></div>
+    <div id="layout-region-left"   class="layout-region" data-side="left"></div>
+    <div id="layout-region-right"  class="layout-region" data-side="right"></div>
+    <div id="layout-overlay" aria-hidden="true"></div>
     <script type="application/json" id="aura-initial-views" set:html={JSON.stringify(initialViews)}></script>
     <script type="application/json" id="aura-initial-workspaces" set:html={JSON.stringify(workspaceState)}></script>
 
@@ -237,6 +247,8 @@ const ssrVisibleViews = initialViews
   import { markLaunchedHere } from '../lib/launchOrigin.ts';
   import { beginWindowDrag, registerDropTarget, setLayoutDragPolicy, getLayoutDragPolicy } from '../lib/windowDrag.ts';
   import { dragPolicyFor } from '../lib/layoutDragPolicies.ts';
+  import { shellLayoutFor } from '../lib/layout/registry.ts';
+  import type { LayoutHost, LayoutRenderContext, LayoutViewInfo, RegionSide, ShellLayoutStrategy } from '../lib/layout/types.ts';
   import {
     queueViewportBroadcast,
     observeIframe,
@@ -1091,323 +1103,160 @@ const ssrVisibleViews = initialViews
   // prunes entries whose window has gone away.
   const windowNames = new Map<string, string>();
 
-  // ---- Stack-layout drag/resize ------------------------------------------
-  //
-  // Free-floating windows ("Free Window" mode). Per-window geometry persists
-  // to `workspace.layoutState.rects[viewId]` so positions survive browser
-  // reload and workspace switch. The dispatch in `renderLayout()` calls
-  // `applyStackPos` + `ensureStackHandlers` only when layoutId === 'stack'.
-  //
-  // Implementation notes:
-  //   • Drag + resize use POINTER events (not mouse) with
-  //     `setPointerCapture` so events keep flowing when the cursor crosses
-  //     into an app iframe. Without capture the iframe is a separate
-  //     browsing context and "steals" the move events — drag freezes mid-
-  //     motion. setPointerCapture makes the captured element the only
-  //     receiver until pointerup, which fixes drag-over-iframe AND wires
-  //     touch + stylus for free.
-  //   • A `.aura-stack-dragging` class on <body> disables iframe pointer
-  //     events as a belt-and-suspenders safety net (CSS at the end of
-  //     this file's <style> block, see global rule near `iframe`).
-  //   • Geometry is clamped so chrome always has a grab-handle visible:
-  //     even after a viewport rotation or window-resize, no slot can end
-  //     up entirely off-screen. A ResizeObserver on the layout container
-  //     re-clamps on viewport changes.
-  //   • Handlers are attached lazily and tracked on the element itself
-  //     (`dataset.stackHandlersBound`) so re-render passes don't double-
-  //     bind listeners.
-  type SavedRect = { x: number; y: number; w: number; h: number; z: number };
-
-  /** Minimum strip of chrome that must remain visible on every edge so the
-   *  user can always grab a slot to drag it back. Matches the chrome
-   *  height (28 px) with a tiny visual buffer. */
-  const STACK_EDGE_MARGIN = 32;
-  /** Smallest sensible window. Below this the chrome buttons start to
-   *  overlap and the iframe content stops being useful. */
-  const STACK_MIN_W = 240;
-  const STACK_MIN_H = 140;
-  /** Width threshold below which the layout treats itself as "mobile":
-   *  new windows default to filling the viewport instead of a 560×400
-   *  cascade, and the resize grip grows into a larger touch target. */
-  const STACK_MOBILE_BP = 640;
-
-  function stackDefaults(): { w: number; h: number; cascade: number } {
-    // Viewport-aware defaults. On desktop a 560×400 cascade is fine;
-    // on mobile we expand to nearly fill the viewport so a freshly
-    // launched app is usable without a manual resize.
-    const w = dynamicLayout.clientWidth  || window.innerWidth;
-    const h = dynamicLayout.clientHeight || window.innerHeight;
-    if (w < STACK_MOBILE_BP) {
-      return {
-        w: Math.max(STACK_MIN_W, w - 16),
-        h: Math.max(STACK_MIN_H, h - 16),
-        cascade: 0,
-      };
-    }
-    return { w: 560, h: 400, cascade: 40 };
-  }
-
-  function clampStackRect(rect: SavedRect): SavedRect {
-    // Confine the rect to the layout container so the slot is always at
-    // least partially reachable. We allow x/y to go slightly negative
-    // (so an off-axis edge can hide) but require STACK_EDGE_MARGIN px
-    // of chrome to remain inside the layout bounds on every side.
-    const W = dynamicLayout.clientWidth  || window.innerWidth;
-    const H = dynamicLayout.clientHeight || window.innerHeight;
-    const w = Math.max(STACK_MIN_W, Math.min(rect.w, W));
-    const h = Math.max(STACK_MIN_H, Math.min(rect.h, H));
-    const minX = STACK_EDGE_MARGIN - w; // leave EDGE_MARGIN px on the left
-    const maxX = W - STACK_EDGE_MARGIN;
-    const minY = 0;                     // top chrome must stay visible
-    const maxY = H - STACK_EDGE_MARGIN;
-    const x = Math.max(minX, Math.min(rect.x, maxX));
-    const y = Math.max(minY, Math.min(rect.y, maxY));
-    return { x, y, w, h, z: rect.z };
-  }
-
-  function applyStackPos(el: HTMLElement, viewId: string, rect: SavedRect | undefined, fallbackIndex: number): void {
-    const d = stackDefaults();
-    const initial: SavedRect = rect ?? {
-      x: 24 + fallbackIndex * d.cascade,
-      y: 24 + fallbackIndex * d.cascade,
-      w: d.w,
-      h: d.h,
-      z: 10 + fallbackIndex,
-    };
-    const r = clampStackRect(initial);
-    el.style.position = 'absolute';
-    el.style.left   = r.x + 'px';
-    el.style.top    = r.y + 'px';
-    el.style.width  = r.w + 'px';
-    el.style.height = r.h + 'px';
-    el.style.zIndex = String(r.z);
-    el.dataset['viewId'] = viewId;
-  }
-  function clearStackPos(el: HTMLElement): void {
-    el.style.removeProperty('position');
-    el.style.removeProperty('left');
-    el.style.removeProperty('top');
-    el.style.removeProperty('width');
-    el.style.removeProperty('height');
-    el.style.removeProperty('z-index');
-  }
-
-  function readStackRect(el: HTMLElement): SavedRect {
-    const d = stackDefaults();
-    return {
-      x: parseFloat(el.style.left)   || 0,
-      y: parseFloat(el.style.top)    || 0,
-      w: parseFloat(el.style.width)  || d.w,
-      h: parseFloat(el.style.height) || d.h,
-      z: parseInt(el.style.zIndex, 10) || 10,
-    };
-  }
-  function persistStackRect(viewId: string, rect: SavedRect): void {
-    const ws = workspaceClient.getCached();
-    if (!ws) return;
-    const active = ws.workspaces.find((w) => w.id === ws.activeWorkspaceId);
-    if (!active) return;
-    const rects = { ...(active.layoutState?.rects ?? {}), [viewId]: rect };
-    workspaceClient.patchWorkspaceDebounced(active.id, {
-      layoutState: { ...(active.layoutState ?? {}), rects },
-    });
-  }
-  function bringToFrontStack(el: HTMLElement, viewId: string): void {
-    const peers = dynamicLayout.querySelectorAll<HTMLElement>(':scope > .app-slot');
-    let maxZ = 10;
-    peers.forEach((p) => { maxZ = Math.max(maxZ, parseInt(p.style.zIndex, 10) || 10); });
-    const nextZ = maxZ + 1;
-    el.style.zIndex = String(nextZ);
-    const r = readStackRect(el); r.z = nextZ;
-    persistStackRect(viewId, r);
-  }
-
-  /** Walk every slot in stack mode and re-clamp its position into the
-   *  current layout bounds. Called by a ResizeObserver on the layout
-   *  container so a phone rotation or window-resize never leaves a slot
-   *  off-screen and unreachable. */
-  function reclampAllStackSlots(): void {
-    const slots = dynamicLayout.querySelectorAll<HTMLElement>(':scope > .app-slot[data-view-id]');
-    slots.forEach((el) => {
-      // Only touch slots that are participating in stack layout — grid
-      // modes leave inline left/top empty and we'd accidentally pin them.
-      if (el.style.position !== 'absolute') return;
-      const viewId = el.dataset['viewId'];
-      if (!viewId) return;
-      const before = readStackRect(el);
-      const after  = clampStackRect(before);
-      if (after.x !== before.x || after.y !== before.y || after.w !== before.w || after.h !== before.h) {
-        el.style.left   = after.x + 'px';
-        el.style.top    = after.y + 'px';
-        el.style.width  = after.w + 'px';
-        el.style.height = after.h + 'px';
-        persistStackRect(viewId, after);
-      }
-    });
-  }
-  // The `new ResizeObserver(...).observe(dynamicLayout)` registration is
-  // deferred until after `dynamicLayout` is declared (a few dozen lines
-  // below this block). Placing it here would hit the TDZ on the const.
-
-  /** Begin a pointer-driven drag or resize. The caller computes a delta
-   *  from `(dx, dy)` and we apply it via `apply(dx, dy)`. We capture the
-   *  pointer to `el` so the iframe can't steal `pointermove` mid-gesture,
-   *  add the `aura-stack-dragging` body class for the CSS safety net, and
-   *  persist on release. Returns nothing — fully managed inside. */
-  function startStackGesture(
-    el: HTMLElement,
-    captureEl: HTMLElement,
-    viewId: string,
-    ev: PointerEvent,
-    apply: (dx: number, dy: number) => void,
-  ): void {
-    ev.preventDefault();
-    const startX = ev.clientX;
-    const startY = ev.clientY;
-    try { captureEl.setPointerCapture(ev.pointerId); } catch { /* unsupported, fall through */ }
-    document.body.classList.add('aura-stack-dragging');
-    // Live drag mutates el's box every frame; mute the per-iframe observer so
-    // it doesn't broadcast (and refit the app) on every move — we fire once on
-    // release below.
-    setROSuppressed(true);
-
-    const onMove = (mv: PointerEvent) => {
-      if (mv.pointerId !== ev.pointerId) return;
-      apply(mv.clientX - startX, mv.clientY - startY);
-    };
-    const onEnd = (up: PointerEvent) => {
-      if (up.pointerId !== ev.pointerId) return;
-      captureEl.removeEventListener('pointermove',  onMove);
-      captureEl.removeEventListener('pointerup',    onEnd);
-      captureEl.removeEventListener('pointercancel', onEnd);
-      document.body.classList.remove('aura-stack-dragging');
-      // Re-clamp the final position so a fast drag that flew off-screen
-      // gets snapped back, then persist the clamped result.
-      const final = clampStackRect(readStackRect(el));
-      el.style.left   = final.x + 'px';
-      el.style.top    = final.y + 'px';
-      el.style.width  = final.w + 'px';
-      el.style.height = final.h + 'px';
-      persistStackRect(viewId, final);
-      // Live drag stayed CSS-only (smooth, no per-frame postMessage); re-arm the
-      // observer and fire the authoritative size signal once on release so the
-      // app re-fits to the final box.
-      setROSuppressed(false);
-      queueViewportBroadcast('layout');
-    };
-    captureEl.addEventListener('pointermove',  onMove);
-    captureEl.addEventListener('pointerup',    onEnd);
-    captureEl.addEventListener('pointercancel', onEnd);
-  }
-
-  function ensureStackHandlers(el: HTMLElement, viewId: string): void {
-    if (el.dataset['stackHandlersBound'] === '1') return;
-    el.dataset['stackHandlersBound'] = '1';
-
-    const chrome = el.querySelector<HTMLElement>('.slot-chrome');
-    if (chrome) {
-      // Cursor states (`grab` idle / `grabbing` active) are handled by CSS
-      // keyed off the `data-stack-handlers-bound="1"` attribute on the slot
-      // and the `body.aura-stack-dragging` flag toggled by
-      // `startStackGesture`. See the rules in the <style is:global> block
-      // below. Doing it in CSS keeps non-stack layouts free of stray
-      // cursor inline styles after teardown.
-      //
-      // touch-action: none stops the browser from interpreting a touch
-      // drag on the chrome as a scroll/pinch, which would preempt our
-      // pointermove handlers on mobile.
-      chrome.style.touchAction = 'none';
-      const onDown = (ev: PointerEvent) => {
-        // Don't start a drag from controls (close/min/max) or the trail
-        // breadcrumb buttons — those have their own actions.
-        const target = ev.target as HTMLElement | null;
-        if (target?.closest('button')) return;
-        bringToFrontStack(el, viewId);
-        const startLeft = parseFloat(el.style.left) || 0;
-        const startTop  = parseFloat(el.style.top)  || 0;
-        startStackGesture(el, chrome, viewId, ev, (dx, dy) => {
-          // Live-clamp so the slot can't be flung past the layout edge.
-          // We clamp on each frame instead of only on release so the
-          // chrome stays under the pointer through the whole drag.
-          const next = clampStackRect({
-            x: startLeft + dx,
-            y: startTop  + dy,
-            w: parseFloat(el.style.width)  || STACK_MIN_W,
-            h: parseFloat(el.style.height) || STACK_MIN_H,
-            z: parseInt(el.style.zIndex, 10) || 10,
-          });
-          el.style.left = next.x + 'px';
-          el.style.top  = next.y + 'px';
-        });
-      };
-      chrome.addEventListener('pointerdown', onDown);
-      (el as any).__stackChromeDown = onDown;
-    }
-
-    // Bottom-right resize grip — appended once. Sized + styled inline so
-    // it doesn't depend on stylesheet load order. Hit target grows on
-    // pointer-coarse devices (touch) where 14px is below Apple's 44pt
-    // and Google's 48dp minimums.
-    let grip = el.querySelector<HTMLElement>(':scope > .stack-resize-grip');
-    if (!grip) {
-      grip = document.createElement('div');
-      grip.className = 'stack-resize-grip';
-      const coarse = window.matchMedia('(pointer: coarse)').matches;
-      const size = coarse ? 28 : 16;
-      grip.style.cssText =
-        `position:absolute;right:0;bottom:0;width:${size}px;height:${size}px;`
-        + `cursor:nwse-resize;touch-action:none;z-index:2;`
-        + `background:linear-gradient(135deg,transparent 50%,var(--aura-color-text-dim) 50%);opacity:0.6;`;
-      el.appendChild(grip);
-    }
-    const onGripDown = (ev: PointerEvent) => {
-      ev.stopPropagation();
-      const startW = parseFloat(el.style.width)  || stackDefaults().w;
-      const startH = parseFloat(el.style.height) || stackDefaults().h;
-      startStackGesture(el, grip!, viewId, ev, (dx, dy) => {
-        const next = clampStackRect({
-          x: parseFloat(el.style.left) || 0,
-          y: parseFloat(el.style.top)  || 0,
-          w: startW + dx,
-          h: startH + dy,
-          z: parseInt(el.style.zIndex, 10) || 10,
-        });
-        el.style.width  = next.w + 'px';
-        el.style.height = next.h + 'px';
-      });
-    };
-    grip.addEventListener('pointerdown', onGripDown);
-    (el as any).__stackGripDown = onGripDown;
-
-    // Z-order: any pointerdown in the slot brings it forward. Listens on
-    // the bubbling phase so it doesn't fight the chrome/grip handlers.
-    const onClickIn = () => bringToFrontStack(el, viewId);
-    el.addEventListener('pointerdown', onClickIn);
-    (el as any).__stackClickIn = onClickIn;
-  }
-
-  function teardownStackHandlers(el: HTMLElement): void {
-    if (el.dataset['stackHandlersBound'] !== '1') return;
-    delete el.dataset['stackHandlersBound'];
-    const chrome = el.querySelector<HTMLElement>('.slot-chrome');
-    if (chrome && (el as any).__stackChromeDown) {
-      chrome.removeEventListener('pointerdown', (el as any).__stackChromeDown);
-      // No `removeProperty('cursor')` — the cursor is CSS-driven via the
-      // `data-stack-handlers-bound` selector, which we already cleared
-      // a few lines above. Wiping cursor here would only matter if some
-      // older code path had set it inline, which no longer happens.
-      chrome.style.removeProperty('touch-action');
-    }
-    if ((el as any).__stackClickIn) el.removeEventListener('pointerdown', (el as any).__stackClickIn);
-    const grip = el.querySelector<HTMLElement>(':scope > .stack-resize-grip');
-    if (grip) grip.remove();
-    delete (el as any).__stackChromeDown;
-    delete (el as any).__stackGripDown;
-    delete (el as any).__stackClickIn;
-  }
-
   const staticLayout  = document.getElementById('static-layout')!;
   const dynamicLayout = document.getElementById('dynamic-layout')!;
+
+  // ---- Layout-manager host (lib/layout/types.ts) ----------------------------
+  //
+  // renderLayout() delegates window placement to the active workspace's
+  // ShellLayoutStrategy and gives it this host: regions in the content space,
+  // an overlay layer, layoutState access and the window actions. Nothing here
+  // knows a specific layout.
+  const layoutOverlay = document.getElementById('layout-overlay')!;
+  const layoutRegions: Record<RegionSide, HTMLElement> = {
+    top:    document.getElementById('layout-region-top')!,
+    bottom: document.getElementById('layout-region-bottom')!,
+    left:   document.getElementById('layout-region-left')!,
+    right:  document.getElementById('layout-region-right')!,
+  };
+  let currentStrategy: ShellLayoutStrategy | null = null;
+  /** Every window of the active workspace as of the last render (taskbar etc.). */
+  let lastLayoutViews: LayoutViewInfo[] = [];
+
+  /** Inset the windows area (and the overlay) by the regions' measured size. */
+  function syncLayoutRegions(): void {
+    const t = layoutRegions.top.offsetHeight;
+    const b = layoutRegions.bottom.offsetHeight;
+    for (const side of ['left', 'right'] as const) {
+      layoutRegions[side].style.top = t + 'px';
+      layoutRegions[side].style.bottom = b + 'px';
+    }
+    const l = layoutRegions.left.offsetWidth;
+    const r = layoutRegions.right.offsetWidth;
+    const inset = `${t}px ${r}px ${b}px ${l}px`;
+    if (dynamicLayout.style.inset !== inset) {
+      dynamicLayout.style.inset = inset;
+      layoutOverlay.style.inset = inset;
+    }
+  }
+  if (typeof ResizeObserver !== 'undefined') {
+    const regionRo = new ResizeObserver(() => syncLayoutRegions());
+    for (const el of Object.values(layoutRegions)) regionRo.observe(el);
+  }
+
+  function activeWorkspaceOf(): workspaceClient.Workspace | null {
+    const ws = workspaceClient.getCached();
+    return ws?.workspaces.find((w) => w.id === ws.activeWorkspaceId) ?? null;
+  }
+  function patchActiveLayoutState(patch: Record<string, unknown>): void {
+    const active = activeWorkspaceOf();
+    if (!active) return;
+    const next: Record<string, unknown> = { ...(active.layoutState ?? {}) };
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === undefined) delete next[k]; else next[k] = v;
+    }
+    workspaceClient.patchWorkspaceDebounced(active.id, { layoutState: next });
+  }
+  /** Windows hidden by a `minimize: 'hide'` layout, for the active workspace. */
+  function parkedViewIds(): string[] {
+    const m = activeWorkspaceOf()?.layoutState?.minimized;
+    return Array.isArray(m) ? m.filter((x): x is string => typeof x === 'string') : [];
+  }
+  function setParked(viewId: string, on: boolean): void {
+    const cur = parkedViewIds();
+    const has = cur.includes(viewId);
+    if (on === has) return;
+    const next = on ? [...cur, viewId] : cur.filter((x) => x !== viewId);
+    patchActiveLayoutState({ minimized: next.length ? next : undefined });
+  }
+
+  /** Release a slot from the strategy that last placed it (layout switch,
+   *  maximize, hide). Strategies tag nothing themselves — the host tracks it. */
+  function releaseSlot(el: HTMLElement): void {
+    const owner = el.dataset['layoutOwner'];
+    if (!owner) return;
+    shellLayoutFor(owner).release?.(el);
+    delete el.dataset['layoutOwner'];
+  }
+
+  /** Swap the active strategy: tear down the old one's regions + overlay,
+   *  mount the new one's. */
+  function switchStrategy(next: ShellLayoutStrategy): void {
+    if (currentStrategy === next) return;
+    const prev = currentStrategy;
+    if (prev) {
+      for (const side of Object.keys(prev.regions ?? {}) as RegionSide[]) {
+        prev.regions![side]!.unmount?.();
+        layoutRegions[side].replaceChildren();
+      }
+      prev.deactivate?.(layoutHost);
+      layoutOverlay.replaceChildren();
+    }
+    currentStrategy = next;
+    next.activate?.(layoutHost);
+    for (const side of Object.keys(next.regions ?? {}) as RegionSide[]) {
+      next.regions![side]!.mount(layoutRegions[side], layoutHost);
+    }
+    syncLayoutRegions();
+  }
+
+  function toLayoutViewInfo(v: AppView): LayoutViewInfo {
+    return {
+      viewId: v.viewId, appId: v.appId, title: v.title,
+      windowName: windowNames.get(v.viewId),
+      minimized: v.state === 'minimized' || parkedViewIds().includes(v.viewId),
+      isFocused: v.isFocused,
+    };
+  }
+
+  const layoutHost: LayoutHost = {
+    container: dynamicLayout,
+    overlay: () => layoutOverlay,
+    views: () => lastLayoutViews,
+    slotOf: (viewId) => dynamicLayout.querySelector<HTMLElement>(`:scope > .app-slot[data-view-id="${CSS.escape(viewId)}"]`),
+    maximizedViewId: () => maximizedViewId,
+    layoutState: () => (activeWorkspaceOf()?.layoutState ?? {}) as Record<string, unknown>,
+    patchLayoutState: patchActiveLayoutState,
+    focus: (viewId) => focusView_(viewId),
+    minimize: (viewId) => minimizeView_(viewId),
+    restore: (viewId) => restoreView_(viewId),
+    close: (viewId) => closeView_(viewId),
+    toggleMaximize: (viewId) => toggleMaximizeView_(viewId),
+    requestRender: () => renderLayout(),
+    broadcastViewport: () => queueViewportBroadcast('layout'),
+    setGestureActive: (on) => setROSuppressed(on),
+    toLocal(clientX, clientY) {
+      // The shell zooms <body> with a transform; client coords are post-
+      // transform, layout px are pre-transform.
+      const r = dynamicLayout.getBoundingClientRect();
+      const scale = dynamicLayout.clientWidth > 0 ? r.width / dynamicLayout.clientWidth : 1;
+      return { x: (clientX - r.left) / scale, y: (clientY - r.top) / scale, scale };
+    },
+  };
+
+  // A click INSIDE an app window never reaches the shell's DOM (the iframe is
+  // its own document), so the active layout learns about it from:
+  //   • the proxy-injected focus-on-click script, which posts
+  //     `aura.pointerdown` from every app page (covers iframe → iframe), and
+  //   • as a fallback for frames without the injection, the shell window's
+  //     blur — focus just moved into an iframe.
+  // Both end in the strategy's `onActivate` (Free Window raises the window).
+  function activateViewOfFrame(frame: HTMLIFrameElement | null): void {
+    const slot = frame?.closest<HTMLElement>('#dynamic-layout > .app-slot[data-view-id]');
+    const viewId = slot?.dataset['viewId'];
+    if (viewId && currentStrategy) currentStrategy.onActivate?.(viewId, layoutHost);
+  }
+  window.addEventListener('message', (ev: MessageEvent) => {
+    if ((ev.data as { type?: unknown } | null)?.type !== 'aura.pointerdown') return;
+    activateViewOfFrame(ownerFrameOf(ev.source as Window | null));
+  });
+  window.addEventListener('blur', () => {
+    // activeElement is updated to the iframe right after blur fires.
+    setTimeout(() => {
+      const a = document.activeElement;
+      if (a instanceof HTMLIFrameElement) activateViewOfFrame(a);
+    }, 0);
+  });
 
   // ---- Window drag & drop (lib/windowDrag.ts) ----
   // Title-bar drag shows a small ghost; the active layout's policy decides
@@ -1448,21 +1297,6 @@ const ssrVisibleViews = initialViews
   const focusTitleEl  = document.getElementById('focus-title')!;
   const focusExitBtn  = document.getElementById('focus-exit')!;
   const focusFullscreenBtn = document.getElementById('focus-fullscreen') as HTMLButtonElement;
-
-  // Stack-layout viewport reclamp. Runs whenever `dynamicLayout` resizes
-  // (window resize, mobile rotation, devtools open) so a slot saved at a
-  // wider geometry doesn't end up off-screen and unreachable. ResizeObserver
-  // fires on initial observe too, catching the laptop-stack-on-phone case.
-  // Defined here (not next to `reclampAllStackSlots`) because that function
-  // captures `dynamicLayout` lexically, and the const isn't initialised
-  // when this script first evaluates — TDZ-error if we observe earlier.
-  if (typeof ResizeObserver !== 'undefined') {
-    new ResizeObserver(() => {
-      const wsState = workspaceClient.getCached();
-      const active = wsState?.workspaces.find((w) => w.id === wsState.activeWorkspaceId);
-      if (active?.layoutId === 'stack') reclampAllStackSlots();
-    }).observe(dynamicLayout);
-  }
 
   // Hydrate from SSR initial views so the JS-side state matches what's already on screen.
   // Once we have data, switch to the JS-managed dynamicLayout immediately so close/minimize
@@ -2008,6 +1842,9 @@ const ssrVisibleViews = initialViews
   };
 
   function focusView_(viewId: string) {
+    // Focusing a window hidden by the layout's minimize brings it back too
+    // (dock click, keyboard nav, workspace jump…).
+    setParked(viewId, false);
     views = views.map((v) =>
       v.viewId === viewId
         // un-minimize when focused, so clicking the app icon brings it back
@@ -2102,7 +1939,13 @@ const ssrVisibleViews = initialViews
   function minimizeView_(viewId: string) {
     // Minimizing the maximized window cancels the maximize so the desktop
     // returns to its normal layout instead of promoting an off-screen slot.
-    if (maximizedViewId === viewId) maximizedViewId = null;
+    if (maximizedViewId === viewId) { maximizedViewId = null; maximizedFull = false; }
+    if (currentStrategy?.minimize === 'hide') {
+      // Layout-owned minimize: hide the slot, keep the app running.
+      setParked(viewId, true); // patches layoutState → re-renders
+      renderLayout();
+      return;
+    }
     views = views.map((v) => v.viewId === viewId ? { ...v, state: 'minimized' as const } : v);
     renderLayout();
   }
@@ -2242,6 +2085,23 @@ const ssrVisibleViews = initialViews
       return workspaceMembers.has(v.viewId);
     };
 
+    // ---- Layout strategy (lib/layout) ----
+    // The active workspace's layoutId picks a ShellLayoutStrategy; unknown ids
+    // fall back to tiling. The strategy decides the container shape, places
+    // each window, and may own regions / overlay / minimize behaviour.
+    const activeWs = wsState?.workspaces.find((w) => w.id === wsState.activeWorkspaceId);
+    const layoutId = activeWs?.layoutId ?? 'tiling';
+    const strategy = shellLayoutFor(layoutId);
+    switchStrategy(strategy);
+    setLayoutDragPolicy(strategy.dragPolicy ?? dragPolicyFor(layoutId));
+    const layoutState = (activeWs?.layoutState ?? {}) as Record<string, unknown>;
+    // Windows a `minimize: 'hide'` layout hid (app alive, slot kept). Under a
+    // layout without that policy they show again and the stale list goes.
+    const parkedIds = new Set(strategy.minimize === 'hide' ? parkedViewIds() : []);
+    if (strategy.minimize !== 'hide' && Array.isArray(layoutState['minimized'])) {
+      queueMicrotask(() => patchActiveLayoutState({ minimized: undefined }));
+    }
+
     const nonMinimized = views.filter((v) => v.state !== 'minimized');
     // Sort by the active workspace's `members[]` order so the placement
     // pass below assigns cell N to the same viewId on every render.
@@ -2253,17 +2113,28 @@ const ssrVisibleViews = initialViews
       ? new Map<string, number>([...workspaceMembers].map((id, i) => [id, i] as [string, number]))
       : null;
     const orderKey = (v: AppView): number =>
-      memberOrder ? (memberOrder.get(v.viewId) ?? 1e9) : nonMinimized.indexOf(v);
-    const visible      = nonMinimized.filter(inActiveWorkspace).sort((a, b) => orderKey(a) - orderKey(b));
+      memberOrder ? (memberOrder.get(v.viewId) ?? 1e9) : views.indexOf(v);
+    const inWorkspace  = nonMinimized.filter(inActiveWorkspace).sort((a, b) => orderKey(a) - orderKey(b));
+    const visible      = inWorkspace.filter((v) => !parkedIds.has(v.viewId));
+    const parked       = inWorkspace.filter((v) => parkedIds.has(v.viewId));
     const hidden       = nonMinimized.filter((v) => !inActiveWorkspace(v));
     const minimized    = views.filter((v) => v.state === 'minimized' && inActiveWorkspace(v));
+
+    const toLayoutView = (v: AppView, isMin: boolean): LayoutViewInfo => ({
+      viewId: v.viewId, appId: v.appId, title: v.title,
+      windowName: windowNames.get(v.viewId), minimized: isMin, isFocused: v.isFocused,
+    });
+    const visibleInfo = visible.map((v) => toLayoutView(v, false));
+    lastLayoutViews = views.filter(inActiveWorkspace)
+      .sort((a, b) => orderKey(a) - orderKey(b))
+      .map((v) => toLayoutView(v, v.state === 'minimized' || parkedIds.has(v.viewId)));
 
     // ---- 1) Empty-state overlay ----
     // Use a separate <div data-aura-empty> child instead of overwriting
     // dynamicLayout.innerHTML — that would nuke any hidden-other-workspace
     // slot iframes we're holding alive across workspace switches.
     let emptyEl = dynamicLayout.querySelector(':scope > [data-aura-empty]') as HTMLElement | null;
-    const desktopIsEmpty = visible.length === 0 && minimized.length === 0;
+    const desktopIsEmpty = visible.length === 0 && minimized.length === 0 && parked.length === 0;
     if (desktopIsEmpty) {
       if (!emptyEl) {
         emptyEl = document.createElement('div');
@@ -2285,89 +2156,18 @@ const ssrVisibleViews = initialViews
       emptyEl.remove();
     }
 
-    // ---- 2) Grid container ----
-    // The active workspace's layoutId picks the grid shape. Without this the
-    // chip-driven layout switch in StatusBar would update state but never
-    // touch the actual DOM. Supported strategies:
-    //   tiling     — square-ish grid (sqrt rounding); current default
-    //   fullscreen — only the focused view, occupying the whole canvas
-    //   stack/rows — one column, one row per view (vertical strip)
-    //   columns    — one row, one column per view (horizontal strip)
-    // Unknown ids fall back to `tiling`.
-    const layoutId = wsState?.workspaces.find(w => w.id === wsState.activeWorkspaceId)?.layoutId ?? 'tiling';
-    setLayoutDragPolicy(dragPolicyFor(layoutId));
-
-    // Reset stack-mode container override before each layout-strategy
-    // branch; only the stack branch sets it back. Without this, switching
-    // away from stack leaves `position: relative` on the container and
-    // the new grid never lays out.
-    dynamicLayout.style.position = '';
+    // ---- 2) Container ----
+    const stripShown = minimized.length > 0 && strategy.showsMinimizedStrip !== false;
+    const layoutCtx: LayoutRenderContext = {
+      visible: visibleInfo, baseRow: stripShown ? 2 : 1, stripShown, layoutState,
+    };
     if (visible.length === 0) {
       Object.assign(dynamicLayout.style, {
         display: 'block', gridTemplateColumns: '', gridTemplateRows: '',
         gap: '', background: 'transparent',
       });
-    } else if (layoutId === 'fullscreen') {
-      // 1×1 grid — every visible view is placed at the same cell. The
-      // focused one wins via z-index in step 4; siblings sit underneath
-      // and stay warm (their iframes don't reload when the user switches
-      // focus). The minimized strip still gets its own row if present.
-      Object.assign(dynamicLayout.style, {
-        display: 'grid',
-        gridTemplateColumns: '1fr',
-        gridTemplateRows: minimized.length > 0 ? 'auto 1fr' : '1fr',
-        gap: '0',
-        background: 'var(--aura-color-bg)',
-        alignItems: '', justifyContent: '', flexDirection: '',
-      });
-    } else if (layoutId === 'columns') {
-      Object.assign(dynamicLayout.style, {
-        display: 'grid',
-        gridTemplateColumns: `repeat(${visible.length}, minmax(0, 1fr))`,
-        gridTemplateRows: minimized.length > 0 ? 'auto 1fr' : '1fr',
-        gap: '2px',
-        background: 'var(--aura-color-bg)',
-        alignItems: '', justifyContent: '', flexDirection: '',
-      });
-    } else if (layoutId === 'rows') {
-      Object.assign(dynamicLayout.style, {
-        display: 'grid',
-        gridTemplateColumns: '1fr',
-        gridTemplateRows: minimized.length > 0
-          ? `auto repeat(${visible.length}, 1fr)`
-          : `repeat(${visible.length}, 1fr)`,
-        gap: '2px',
-        background: 'var(--aura-color-bg)',
-        alignItems: '', justifyContent: '', flexDirection: '',
-        position: '',
-      });
-    } else if (layoutId === 'stack') {
-      // Stack = free-floating windows with absolute positioning.
-      // Per-window rects live in workspace.layoutState.rects and survive
-      // browser reload + workspace switch. Drag + resize are attached
-      // per-slot below (`ensureStackHandlers`).
-      Object.assign(dynamicLayout.style, {
-        display: 'block',
-        position: 'relative',
-        gridTemplateColumns: '', gridTemplateRows: '',
-        gap: '',
-        background: 'var(--aura-color-bg)',
-        alignItems: '', justifyContent: '', flexDirection: '',
-      });
     } else {
-      // tiling (default + fallback)
-      const cols = Math.ceil(Math.sqrt(visible.length));
-      const rows = Math.ceil(visible.length / cols);
-      Object.assign(dynamicLayout.style, {
-        display: 'grid',
-        gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-        gridTemplateRows: minimized.length > 0
-          ? `auto repeat(${rows}, 1fr)`
-          : `repeat(${rows}, 1fr)`,
-        gap: '2px',
-        background: 'var(--aura-color-bg)',
-        alignItems: '', justifyContent: '', flexDirection: '',
-      });
+      Object.assign(dynamicLayout.style, strategy.containerStyle(layoutCtx));
     }
 
     // ---- 3) Minimized strip ----
@@ -2376,8 +2176,9 @@ const ssrVisibleViews = initialViews
     // (instead of relying on auto-flow + DOM order + `order` property) so
     // it cannot end up below an app slot — which is exactly the "header on
     // the bottom" bug that auto-placement caused when DOM order drifted.
+    // A strategy that lists minimized windows itself (taskbar) turns it off.
     let strip = dynamicLayout.querySelector(':scope > [data-aura-strip]') as HTMLElement | null;
-    if (minimized.length === 0) {
+    if (!stripShown) {
       strip?.remove();
       strip = null;
     } else {
@@ -2401,48 +2202,16 @@ const ssrVisibleViews = initialViews
     // (this is the HTML spec: moving an iframe element invalidates its
     // browsing context). We therefore must NOT call `appendChild` on a slot
     // that's already in `dynamicLayout` — even just to "move it to the end"
-    // counts as a re-attach and would reload the iframe inside it.
-    //
-    // To avoid that AND still get deterministic visual ordering, we pin each
-    // slot to an explicit `(grid-row, grid-column)` based on its index in
-    // `visible`. This is independent of DOM order, so slots never collide
-    // with the strip and never end up in the wrong cell after minimize /
-    // restore churn. (`order` alone wasn't enough — auto-placement still
-    // walked DOM order for tie-breaking, which led to "window in wrong
-    // cell" / "header on the bottom" reports.)
+    // counts as a re-attach and would reload the iframe inside it. The
+    // strategy positions each slot explicitly (grid cell / absolute rect),
+    // independent of DOM order.
     const existing = new Map<string, HTMLElement>();
     dynamicLayout.querySelectorAll(':scope > .app-slot[data-view-id]').forEach((el) => {
       const id = (el as HTMLElement).dataset['viewId'];
       if (id) existing.set(id, el as HTMLElement);
     });
-
-    const baseRow = minimized.length > 0 ? 2 : 1;
     const keep = new Set<string>();
 
-    // Per-layout slot placement. tiling reproduces the previous sqrt grid;
-    // fullscreen drops every slot into the same cell (the most recently-
-    // focused one ends up on top via DOM order); columns / rows / stack
-    // lay slots out in a single row / column respectively.
-    const tilingCols = Math.max(1, Math.ceil(Math.sqrt(visible.length)));
-    const tilingRows = Math.max(1, Math.ceil(visible.length / tilingCols));
-    function placement(i: number): { col: number; row: number; span: number } {
-      if (layoutId === 'fullscreen') return { col: 1, row: baseRow, span: 1 };
-      if (layoutId === 'columns')    return { col: i + 1, row: baseRow, span: 1 };
-      if (layoutId === 'rows')       return { col: 1, row: i + baseRow, span: 1 };
-      // Tiling: a slot expands vertically over every empty cell below it, so
-      // e.g. 3 windows in a 2×2 grid give the right-hand one full height.
-      const c = i % tilingCols;
-      const r = Math.floor(i / tilingCols);
-      let span = 1;
-      while (r + span < tilingRows && (r + span) * tilingCols + c >= visible.length) span++;
-      return { col: c + 1, row: r + baseRow, span };
-    }
-
-    // Visible-in-active-workspace slots: place into the grid OR the
-    // stack-mode absolute-positioning space, ensure display style is set
-    // to flex (in case they were previously hidden).
-    const wsActiveForStack = wsState?.workspaces.find((w) => w.id === wsState.activeWorkspaceId);
-    const stackRects = (layoutId === 'stack' ? (wsActiveForStack?.layoutState?.rects ?? {}) : null) as Record<string, SavedRect> | null;
     visible.forEach((v, i) => {
       keep.add(v.viewId);
       let el = existing.get(v.viewId);
@@ -2456,17 +2225,14 @@ const ssrVisibleViews = initialViews
       el.style.removeProperty('order');
 
       // Maximized (in-place focus): promote this slot to cover the whole
-      // desktop area, on top of its siblings, WITHOUT moving its iframe — so
-      // the app keeps its state (no reload). It's taken out of the grid/stack
-      // flow via absolute positioning relative to #dynamic-layout (which is
-      // `position:absolute; inset:0`). The properties used here (position /
-      // top / left / width / height / z-index) are exactly the ones
-      // clearStackPos() strips, so the grid branch below cleans them up once
-      // the window is un-maximized. Siblings stay mounted underneath, warm.
+      // windows area, on top of its siblings, WITHOUT moving its iframe — so
+      // the app keeps its state (no reload). The strategy releases it first
+      // (no drag/resize while maximized); the inline geometry set here is
+      // cleared again when the window is un-maximized, below.
       if (v.viewId === maximizedViewId) {
+        releaseSlot(el);
         el.dataset['maximized'] = 'true';
         el.dataset['maximizedFull'] = maximizedFull ? 'true' : 'false';
-        teardownStackHandlers(el); // no dragging while maximized
         if (maximizedFull) {
           // Full size: cover the WHOLE shell (over the bars). `fixed` anchors
           // to the zoom-transformed <body>, so it respects page zoom + margins
@@ -2474,8 +2240,8 @@ const ssrVisibleViews = initialViews
           // above the autohide bars (900), below launcher/PM panels (1000).
           el.style.position = 'fixed';
         } else {
-          // Windowed: fill just the desktop area, on top of sibling slots,
-          // below the bars.
+          // Windowed: fill just the windows area, on top of sibling slots,
+          // below the bars and the layout's regions.
           el.style.position = 'absolute';
         }
         el.style.left   = '0';
@@ -2487,26 +2253,31 @@ const ssrVisibleViews = initialViews
         el.style.removeProperty('grid-row');
         return;
       }
-      if (el.dataset['maximized']) { delete el.dataset['maximized']; delete el.dataset['maximizedFull']; }
-
-      if (stackRects) {
-        // Stack mode — absolute-positioned slot. Persisted rect wins;
-        // fall back to a 40px cascade so the first paint isn't an exact
-        // overlap. Handlers attached idempotently.
-        applyStackPos(el, v.viewId, stackRects[v.viewId], i);
-        ensureStackHandlers(el, v.viewId);
-        el.style.removeProperty('grid-column');
-        el.style.removeProperty('grid-row');
-      } else {
-        // Grid modes — clear stack overrides from any prior switch, then
-        // place into the explicit grid cell.
-        clearStackPos(el);
-        teardownStackHandlers(el);
-        const p = placement(i);
-        el.style.gridColumn = String(p.col);
-        el.style.gridRow    = p.span > 1 ? `${p.row} / span ${p.span}` : String(p.row);
+      if (el.dataset['maximized']) {
+        delete el.dataset['maximized'];
+        delete el.dataset['maximizedFull'];
+        for (const p of ['position', 'left', 'top', 'width', 'height', 'z-index']) el.style.removeProperty(p);
       }
+
+      if (el.dataset['layoutOwner'] && el.dataset['layoutOwner'] !== strategy.id) releaseSlot(el);
+      strategy.place(el, visibleInfo[i]!, i, layoutCtx, layoutHost);
+      el.dataset['layoutOwner'] = strategy.id;
     });
+
+    // Hidden by the layout's minimize ('hide' policy): keep the slot and its
+    // iframe — the app keeps running — just take it off screen.
+    for (const v of parked) {
+      keep.add(v.viewId);
+      let el = existing.get(v.viewId);
+      if (!el) {
+        el = createSlot(v);
+        dynamicLayout.appendChild(el);
+      } else {
+        updateSlot(el, v);
+      }
+      releaseSlot(el);
+      el.style.display = 'none';
+    }
 
     // SSR iframes have to go now that the dynamic ones are mounted. They
     // were rendered by Astro into #static-layout and would otherwise keep
@@ -2571,6 +2342,10 @@ const ssrVisibleViews = initialViews
       }
     }
 
+    // Strategy post-pass (splitters, …) + its regions (taskbar, …).
+    strategy.afterRender?.(layoutCtx, layoutHost);
+    for (const region of Object.values(strategy.regions ?? {})) region?.update?.(layoutHost);
+
     // The grid just reflowed (open/close/minimize/workspace switch/focus toggle
     // / maximize all funnel through here): broadcast every iframe its (possibly
     // new) box. This explicit pass is the PRIMARY, proven driver — it reaches
@@ -2596,9 +2371,13 @@ const ssrVisibleViews = initialViews
     // X tears the activity down; there's no "hide for later" affordance for
     // apps whose backend can't survive without a visible window.
     const btnStyle = 'background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 10px;cursor:pointer;line-height:1;';
-    const minimizeBtn = v.minimizable
-      ? `<button data-action="minimize" title="Minimize" style="${btnStyle}">_</button>`
-      : '';
+    // Rendered for every window; updateSlot() shows it when the view is
+    // minimizable OR the active layout minimizes by hiding (keeps the app
+    // alive, so any window can be minimized there).
+    const minimizeBtn = `<button data-action="minimize" class="slot-minimize-btn" title="Minimize" style="${btnStyle}${v.minimizable ? '' : ';display:none;'}">_</button>`;
+    // Title-bar buttons contributed by the active layout strategy
+    // (ShellLayoutStrategy.chromeButtons) — filled by updateSlot().
+    const layoutBtns = `<span class="slot-layout-btns" style="display:contents;"></span>`;
     // Maximize == in-place focus: promote this slot to fill the desktop
     // WITHOUT reloading its iframe (renderLayout restyles the existing slot;
     // see maximizeView_). Sibling of close so the user can promote any tiled
@@ -2612,9 +2391,10 @@ const ssrVisibleViews = initialViews
     // bar + dock). Hidden until this window is the maximized one — updateSlot()
     // reveals it + swaps its glyph. This restores the old focus-overlay's
     // "⛶ FULL SIZE" button without the separate reloading iframe.
+    // Sits right of maximize (the exit-focus ⊟ while focused).
     const fullSizeBtn = `<button data-action="maximize-full" class="slot-fullsize-btn" title="Full size (cover bars)" style="${btnStyle};display:none;"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-maximize"/></svg></button>`;
-    // Refresh = reload the iframe in place. Sits between maximize and close
-    // so close stays the rightmost destructive action. ↻ glyph matches the
+    // Refresh = reload the iframe in place. Sits left of minimize, away from
+    // close, which stays the rightmost destructive action. ↻ glyph matches the
     // browser refresh affordance most users already know.
     const refreshBtn  = `<button data-action="refresh" title="Reload window" style="${btnStyle}"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-rotate-cw"/></svg></button>`;
     // Rename = set this window's ephemeral user label. Leftmost (least
@@ -2630,10 +2410,11 @@ const ssrVisibleViews = initialViews
         <div class="slot-controls" style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
           <span class="slot-focus-hint" style="display:none;align-items:center;gap:4px;margin-right:4px;padding:1px 6px;border:1px solid var(--aura-color-primary);color:var(--aura-color-primary);font-family:var(--aura-font-mono);font-size:0.55rem;letter-spacing:0.1em;white-space:nowrap;"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-dot"/></svg> FOCUS · ESC</span>
           ${renameBtn}
-          ${minimizeBtn}
+          ${layoutBtns}
           ${refreshBtn}
-          ${fullSizeBtn}
+          ${minimizeBtn}
           ${maximizeBtn}
+          ${fullSizeBtn}
           <button data-action="close" class="slot-close-btn" title="Close" style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 10px;cursor:pointer;line-height:1;"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-x"/></svg></button>
         </div>
       </div>
@@ -2701,6 +2482,23 @@ const ssrVisibleViews = initialViews
         nameEl.textContent = '';
         nameEl.style.display = 'none';
         nameEl.removeAttribute('title');
+      }
+    }
+
+    // Layout-driven controls: minimize for every window under a 'hide'
+    // minimize policy, plus the strategy's own title-bar buttons.
+    const minBtn = slot.querySelector('.slot-minimize-btn') as HTMLElement | null;
+    if (minBtn) minBtn.style.display = (v.minimizable || currentStrategy?.minimize === 'hide') ? '' : 'none';
+    const layoutBtnHost = slot.querySelector('.slot-layout-btns') as HTMLElement | null;
+    if (layoutBtnHost) {
+      const btns = currentStrategy?.chromeButtons?.(toLayoutViewInfo(v), layoutHost) ?? [];
+      const sig = (currentStrategy?.id ?? '') + JSON.stringify(btns);
+      if (layoutBtnHost.dataset['sig'] !== sig) {
+        layoutBtnHost.dataset['sig'] = sig;
+        const style = 'background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 10px;cursor:pointer;line-height:1;';
+        layoutBtnHost.innerHTML = btns.map((b) =>
+          `<button data-action="layout:${escapeAttr(b.action)}" title="${escapeAttr(b.title)}"`
+          + ` aria-pressed="${b.pressed ? 'true' : 'false'}" style="${style}">${b.html}</button>`).join('');
       }
     }
 
@@ -2863,6 +2661,11 @@ const ssrVisibleViews = initialViews
     if (!slot) return;
     const viewId = slot.dataset['viewId'];
     if (!viewId) return;
+    if (action?.startsWith('layout:')) {
+      e.preventDefault();
+      currentStrategy?.onChromeAction?.(action.slice('layout:'.length), viewId, layoutHost);
+      return;
+    }
     if (action === 'close')    { e.preventDefault(); closeView_(viewId); }
     if (action === 'minimize') { e.preventDefault(); minimizeView_(viewId); }
     if (action === 'refresh')  { e.preventDefault(); refreshView_(viewId); }
@@ -2990,12 +2793,14 @@ const ssrVisibleViews = initialViews
   }
 
   function restoreView_(viewId: string) {
+    setParked(viewId, false);
     views = views.map((v) =>
       v.viewId === viewId
         ? { ...v, state: 'normal' as const, isFocused: true }
         : { ...v, isFocused: false },
     );
     renderLayout();
+    currentStrategy?.onActivate?.(viewId, layoutHost);
   }
 
   // After hydration, if the SSR layout was non-empty, push it through the JS
@@ -3497,9 +3302,32 @@ const ssrVisibleViews = initialViews
     height: 100%;
     position: relative;
   }
-  #static-layout, #dynamic-layout {
+  /* #dynamic-layout is NOT sized here: it is `position:absolute` and inset
+     by the layout regions (syncLayoutRegions in the script above). */
+  #static-layout {
     width: 100%;
     height: 100%;
+  }
+  .layout-region {
+    position: absolute;
+    z-index: 40; /* above windows' area, below #focus-view (50) */
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+  .layout-region:empty { display: none; }
+  .layout-region[data-side="top"]    { top: 0;    left: 0; right: 0; }
+  .layout-region[data-side="bottom"] { bottom: 0; left: 0; right: 0; }
+  .layout-region[data-side="left"]   { left: 0;  top: 0; bottom: 0; flex-direction: row; }
+  .layout-region[data-side="right"]  { right: 0; top: 0; bottom: 0; flex-direction: row; }
+  /* Above every stacked window (they renormalize below 500) and the in-place
+     maximized one (60); below the full-size window (950) and shell panels. */
+  #layout-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 800;
+    pointer-events: none;
   }
 
   /* Focus view: covers the entire desktop area above layouts */
@@ -3560,7 +3388,7 @@ const ssrVisibleViews = initialViews
 
      `position: relative` is added so the watermark `::after` below has a
      positioned containing block in grid layouts. In stack mode the
-     inline `position: absolute` set by `applyStackPos` already provides
+     inline `position: absolute` set by the Free Window strategy already provides
      that and beats this rule's specificity. */
   .app-slot[data-aura-nav-focus="true"] {
     border-color: var(--aura-color-text) !important;
@@ -3605,7 +3433,7 @@ const ssrVisibleViews = initialViews
      this rule is the redundant CSS guard for browsers/edge cases where
      capture isn't honoured (and to suppress text-selection across the
      whole desktop while a drag is in flight). The body class is toggled
-     by `startStackGesture()` near the top of the inline script above. */
+     by the Free Window strategy's gestures (lib/layout/strategies/freeWindow). */
   body.aura-stack-dragging {
     cursor: grabbing;
     user-select: none;
@@ -3664,7 +3492,7 @@ const ssrVisibleViews = initialViews
   /* Free-Window cursor affordance. The chrome (title bar) shows an open
      hand when the slot is drag-enabled (stack mode), and a closed hand
      while a drag/resize is actually in flight. The data attribute is
-     set by `ensureStackHandlers()` only in stack mode, so chromes in
+     set by the Free Window strategy on the slots it places, so chromes in
      tiling/rows/columns/fullscreen stay with the default arrow cursor.
      `!important` overrides the in-drag body-level `grabbing` cursor with
      a more specific feedback (still grabbing — same shape, but the rule

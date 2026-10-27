@@ -20,19 +20,28 @@
  * matching `members.includes(view.viewId)` is the natural filter.
  */
 
-/** Per-window geometry persisted for `stack` layout. */
-export interface SavedRect { x: number; y: number; w: number; h: number; z: number }
+/** Per-window geometry persisted for `stack` layout. `snap` = docked into a
+ *  zone of the workspace's snap grid (lib/layout/strategies/freeWindow). */
+export interface SavedRect {
+  x: number; y: number; w: number; h: number; z: number;
+  snap?: { zone: string; restore: { w: number; h: number } };
+}
 
 /**
  * Per-workspace layout state. Empty / partial by design — different
  * layout strategies use different fields:
- *   • `stack`        → `rects[viewId]` (drag + resize persistence)
+ *   • `stack`        → `rects[viewId]` (drag + resize persistence),
+ *                      `snapGrid` (shared dock split fractions)
  *   • `fullscreen`   → `focusedViewId` (which view fills the screen)
+ *   • any layout with `minimize: 'hide'` → `minimized` (hidden viewIds)
  *   • tiling / etc.  → ordering comes from `members`, no extra state
+ * Open-ended: a layout strategy may keep its own keys here (JSON values).
  */
 export interface LayoutState {
   rects?:         Record<string, SavedRect>;
   focusedViewId?: string;
+  minimized?:     string[];
+  [key: string]:  unknown;
 }
 
 export interface Workspace {
@@ -80,16 +89,21 @@ type Listener = (state: WorkspaceState) => void;
 let cached: WorkspaceState | null = null;
 const listeners = new Set<Listener>();
 
+/**
+ * Local-write bookkeeping for refresh(). `writeGen` bumps on every PUT and
+ * `writesInFlight` counts unanswered ones. A GET that overlaps a local
+ * write (or runs while a debounced patch is still queued) returns a state
+ * OLDER than the cache — applying it rolls fresh edits back until the next
+ * echo, which is how a just-dropped free window jumped to its old spot.
+ */
+let writeGen = 0;
+let writesInFlight = 0;
+
+/** Deep copy of every key — strategies keep their own (JSON) fields here,
+ *  and a field dropped by the clone would be lost on the next PUT. */
 function cloneLayoutState(ls: LayoutState | undefined): LayoutState | undefined {
   if (!ls) return undefined;
-  const out: LayoutState = {};
-  if (ls.rects) {
-    const r: Record<string, SavedRect> = {};
-    for (const [k, v] of Object.entries(ls.rects)) r[k] = { ...v };
-    out.rects = r;
-  }
-  if (ls.focusedViewId) out.focusedViewId = ls.focusedViewId;
-  return out;
+  return JSON.parse(JSON.stringify(ls)) as LayoutState;
 }
 function clone(s: WorkspaceState): WorkspaceState {
   return {
@@ -153,11 +167,17 @@ export function getCached(): WorkspaceState | null {
 }
 
 export async function refresh(): Promise<WorkspaceState> {
+  const gen = writeGen;
   const res = await fetchWithBootRetry(ENDPOINT);
   if (!res.ok) throw new Error(`[workspaceClient] GET → HTTP ${res.status}`);
   // KV API wraps values: `{ value: WorkspaceState, updatedAt: number }`.
   // Unwrap before notifying subscribers; they speak `WorkspaceState`.
   const body = await res.json() as { value: WorkspaceState };
+  // Local edits newer than this response: keep them. Their own PUT fires
+  // `workspaces:changed`, whose refresh brings the converged state.
+  if (cached && (gen !== writeGen || writesInFlight > 0 || pendingPatch.size > 0)) {
+    return clone(cached);
+  }
   cached = clone(body.value);
   notify(cached);
   return cached;
@@ -173,6 +193,8 @@ async function pushState(next: WorkspaceState): Promise<void> {
   cached = clone(next);
   notify(cached);
 
+  writeGen++;
+  writesInFlight++;
   try {
     const res = await fetchWithBootRetry(ENDPOINT, {
       method:  'PUT',
@@ -188,6 +210,8 @@ async function pushState(next: WorkspaceState): Promise<void> {
   } catch (err) {
     console.error('[workspaceClient] PUT errored:', err);
     if (previous) { cached = previous; notify(previous); }
+  } finally {
+    writesInFlight--;
   }
 }
 
