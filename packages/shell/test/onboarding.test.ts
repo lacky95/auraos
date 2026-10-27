@@ -19,18 +19,18 @@ test('setup progress counts settled steps and a running step’s own fraction', 
     step({ id: 'image', status: 'running', progress: 0.5 }),
     step({ id: 'sdk', status: 'done' }),
     step({ id: 'docs', status: 'pending' }),
-    step({ id: 'speech', status: 'warn', optional: true }),
+    step({ id: 'docs', status: 'warn', optional: true }),
   ];
   assert.equal(setupProgress(steps), (0.5 + 1 + 0 + 1) / 4);
   assert.equal(setupProgress([]), null);
 });
 
 test('an optional step that fails does not block "ready", a required one does', () => {
-  const speech = step({ id: 'speech', status: 'failed', optional: true });
+  const sdk = step({ id: 'sdk', status: 'failed', optional: true });
   const docs = step({ id: 'docs', status: 'failed' });
-  assert.equal(isSettled(speech), true);
+  assert.equal(isSettled(sdk), true);
   assert.equal(isSettled(docs), false);
-  assert.deepEqual(failedSteps([speech, docs]).map((s) => s.id), ['docs']);
+  assert.deepEqual(failedSteps([sdk, docs]).map((s) => s.id), ['docs']);
 });
 
 test('the setup checklist shows one line per step with status and detail', () => {

@@ -8,10 +8,8 @@
  *   App registry and SDK  com.aura.registry up + @aura/* published
  *                         (lib/sdkBootstrap.ts).
  *   Aura Docs             com.aura.docs running (autoStart).
- *   Speech model          com.aura.whisper's speech container answering —
- *                         it downloads ~500 MB on a first start.
  *
- * The last three are optional: they run again on every boot anyway, so a
+ * The last two are optional: they run again on every boot anyway, so a
  * failure (or a start that takes too long) shows as a warning and never keeps
  * the locked card around. Only a failed app image turns the card into the
  * urgent error view with Retry.
@@ -20,7 +18,7 @@
  * pop-ups open and re-shows them on every change after the user closed them
  * — right for a failure, not for a progress bar (steps.ts setupHeadline).
  *
- * On a first boot (no `os/onboarding.setupDoneAt`) all four are tracked and
+ * On a first boot (no `os/onboarding.setupDoneAt`) all three are tracked and
  * the card shows from the first shell tab on. When everything is settled it
  * says "AuraOS is ready", records `setupDoneAt` and hands over to the welcome
  * checklist. Later boots track only the app image and show the card only
@@ -39,18 +37,14 @@ import {
 } from './steps.js';
 
 const DOCS_APP = 'com.aura.docs';
-const SPEECH_APP = 'com.aura.whisper';
 const RETRY_ID = 'retry';
 const RENDER_EVERY_MS = 1_000;
 const READY_LINGER_MS = 6_000;
-const SPEECH_POLL_MS = 10_000;
-const SPEECH_MAX_MS = 20 * 60_000;
 const DOCS_MAX_MS = 5 * 60_000;
 const IMAGE_LOG_LINES = 30;
 
 export interface SetupCardOpts {
   dataDir: string;
-  shellPort: number;
   /** True on a first boot: track every step. False: the app image only. */
   firstBoot: boolean;
   /** Called once when a first-boot setup has finished. */
@@ -87,12 +81,11 @@ export class SetupCard {
     void this.base.ensure().catch(() => undefined);
   }
 
-  /** After AppManager.init(): registry/SDK, docs and speech (first boot only). */
+  /** After AppManager.init(): registry/SDK and docs (first boot only). */
   afterInit(): void {
     if (this.opts.firstBoot) {
       this.trackSdk();
       this.trackDocs();
-      this.trackSpeech();
       this.tracking = true;
       this.scheduleRender();
     } else {
@@ -139,27 +132,6 @@ export class SetupCard {
     core.OsEventBus.on('app:crashed', (ev) => {
       if (ev.appId === DOCS_APP && this.steps.get('docs')?.status !== 'done') this.set('docs', { status: 'failed', detail: ev.error });
     });
-  }
-
-  private trackSpeech(): void {
-    const mgr = core.getAppManager();
-    if (!mgr.registry.has(SPEECH_APP) || !mgr.isEnabled(SPEECH_APP)) return;
-    this.set('speech', { status: 'running', optional: true, detail: 'downloading the speech model (~500 MB)' });
-    const deadline = Date.now() + SPEECH_MAX_MS;
-    const url = `http://127.0.0.1:${this.opts.shellPort}/api/proxy/${SPEECH_APP}/api/status`;
-    const poll = async () => {
-      try {
-        const r = await fetch(url, { signal: AbortSignal.timeout(5_000) });
-        const body = await r.json() as { whisper?: { http?: { ok?: boolean } } };
-        if (body.whisper?.http?.ok) { this.set('speech', { status: 'done', detail: undefined }); return; }
-      } catch { /* not up yet */ }
-      if (Date.now() > deadline) {
-        this.set('speech', { status: 'warn', detail: 'still downloading — it finishes in the background' });
-        return;
-      }
-      setTimeout(() => { void poll(); }, SPEECH_POLL_MS);
-    };
-    void poll();
   }
 
   /** Retry the failed required steps — today only the app image is required. */

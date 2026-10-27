@@ -70,7 +70,6 @@ async function ensureAppManager() {
     try {
       onboarding = await startOnboarding({
         dataDir,
-        shellPort:    Number(process.env['AURA_SHELL_PORT'] ?? 3000),
         toolchainDir: process.env['AURA_TOOLCHAIN_DIR'] ?? '/os/toolchain',
         freshInstall,
       });

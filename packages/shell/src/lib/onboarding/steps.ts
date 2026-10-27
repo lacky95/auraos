@@ -6,7 +6,7 @@
 
 // ─── Setup card ──────────────────────────────────────────────────────────
 
-export type SetupStepId = 'image' | 'sdk' | 'docs' | 'speech';
+export type SetupStepId = 'image' | 'sdk' | 'docs';
 export type SetupStatus = 'pending' | 'running' | 'done' | 'failed' | 'warn';
 
 export interface SetupStep {
@@ -25,7 +25,6 @@ export const SETUP_LABELS: Record<SetupStepId, string> = {
   image:  'App image',
   sdk:    'App registry and SDK',
   docs:   'Aura Docs',
-  speech: 'Speech model',
 };
 
 const MARK: Record<SetupStatus, string> = {

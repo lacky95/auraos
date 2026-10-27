@@ -24,7 +24,6 @@ export { noteClientConnected } from './card.js';
 
 export interface OnboardingOpts {
   dataDir: string;
-  shellPort: number;
   toolchainDir: string;
   /** No OS state existed before this boot (bootstrapKv seeded the defaults). */
   freshInstall: boolean;
@@ -57,7 +56,6 @@ export async function startOnboarding(opts: OnboardingOpts): Promise<OnboardingH
   const welcome = new Welcome({ dataDir: opts.dataDir, toolchainDir: opts.toolchainDir });
   const setup = new SetupCard({
     dataDir: opts.dataDir,
-    shellPort: opts.shellPort,
     firstBoot,
     onReady: () => {
       void updateOnboarding((s) => ({ ...s, setupDoneAt: s.setupDoneAt ?? Date.now() }))
