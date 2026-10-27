@@ -165,13 +165,15 @@ remove its own notifications.
   pop-up. It never blocks the desktop.
 - `scope: 'desktop'` + `blocking: true` is a **desktop modal** that blocks the
   whole shell. It needs the admin-granted `notifications.desktopModal`
-  (manifest request + `aura grant nperm <app> desktopModal`); auto-opening
-  it also needs `notifications.popup`. The app stays the sender
+  (manifest request + `aura grant nperm <app> desktopModal`) and always
+  opens at once — `popup` is irrelevant and `notifications.popup` not
+  needed. The app stays the sender
   ("Requested by &lt;App&gt;"), and the user can always force-hide it (link or
   Ctrl+Alt+Shift+Esc; reason `force-hidden` in its history). Revoking the
   grant releases it (`permission-revoked`). Without the grant: downgraded to
   `scope: 'auto'` with a warning. `scope: 'desktop'` without blocking is a
-  centred, non-blocking dialogue (no grant).
+  centred, non-blocking dialogue that also opens at once — it needs
+  `notifications.popup` (or `desktopModal`).
 
 **Locked** (`type: 'locked'`): the user can't dismiss it, and Clear all
 skips it. The user can still force-remove it from the card's ⋯ menu after a

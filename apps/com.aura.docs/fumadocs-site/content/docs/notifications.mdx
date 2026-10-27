@@ -283,8 +283,8 @@ allowed to do:
 | The window is minimized or on another workspace | Nothing is pulled forward. The item waits in the list with **Answer**, and the window chip or workspace pill (or the ‹ › ▦ switcher) gets a marker. Answer reveals the window first. |
 | No window of the sender (a background app, an agent, REST) | A notification with **Answer**. The dialogue floats over the desktop only when the user answers. |
 | `popup: true` (needs `notifications.popup`) | Opens at once, without a click, but never takes focus. At most 3 forced pop-ups per sender per 10 minutes; beyond that `popup` is turned off with a warning. |
-| `scope: 'desktop'` + `blocking: true` | A **desktop modal**: it blocks the whole Aura shell. AuraOS's own system decisions, or an app (agent, API key) with the admin-granted `notifications.desktopModal` — see [Desktop modals](#desktop-modals). Without the grant: `scope: 'auto'` with a warning. |
-| `scope: 'desktop'` without blocking | A centred dialogue that blocks nothing (no grant needed — as strict as a floating dialogue). It opens on Answer, or at once with an allowed pop-up. |
+| `scope: 'desktop'` + `blocking: true` | A **desktop modal**: it opens **at once** and blocks the whole Aura shell (`popup` is irrelevant). AuraOS's own system decisions, or an app (agent, API key) with the admin-granted `notifications.desktopModal` — see [Desktop modals](#desktop-modals). Without the grant, or over the limit: `scope: 'auto'` with a warning. |
+| `scope: 'desktop'` without blocking | A centred dialogue that also opens **at once** and blocks nothing. Because it interrupts, it needs `notifications.popup` (or `desktopModal`) and counts against the forced pop-up limit; without it: `scope: 'auto'` with a warning. |
 | Phone | A sheet, or a full view for complex content (more than 3 fields, or a multiline input). |
 
 A dialogue is never placed over **another** app's window: a sender can only
@@ -298,13 +298,15 @@ Placement, blocking and opening by itself are separate permissions:
 |---|---|
 | `system.notifications` | ordinary notifications and questions |
 | `notifications.popup` | open a dialogue by itself (`popup: true`), at most 3 per sender per 10 min |
-| `notifications.desktopModal` | request a dialogue that **blocks the whole Aura shell** (`scope: 'desktop'` + `blocking: true`), at most 5 per sender per 10 min by default ([configurable](#desktop-modal-limit)) |
+| `notifications.desktopModal` | a dialogue that **opens at once and blocks the whole Aura shell** (`scope: 'desktop'` + `blocking: true`; `notifications.popup` is not needed), at most 5 per sender per 10 min by default ([configurable](#desktop-modal-limit)) |
 
 - `desktopModal` is privileged like `locked` / `popup`: the manifest requests it, it is **off** until an admin grants it
   (`aura grant nperm <app> desktopModal`, or Settings → Notifications & access), pinned to the install scope, and revocable.
   Without it the request is downgraded to `scope: 'auto'` with a warning.
-- Opening it **by itself** also needs `notifications.popup` (and its limit). Without that, a granted desktop modal waits in
-  the list / pop-up and takes over the desktop only when the user opens it (Answer, or a click on the pop-up).
+- A desktop dialogue **always opens at once** — there is no "waits in the list" mode. A blocking one counts only against
+  the desktop-modal limit (not the forced pop-up limit); a centred, non-blocking one needs `notifications.popup` (or
+  `desktopModal`) and counts against the pop-up limit. A desktop request ends up as a normal dialogue / pop-up only when
+  the sender has no grant or is over its limit (with a warning) — or after a force-hide (below).
 - **The app stays the sender.** It never gets AuraOS identity or styling: the modal shows **"Requested by &lt;App&gt;"** with
   its glyph and verified / unverified attribution, in an app-coloured frame. AuraOS's own decisions keep their system look.
   Agents get it only if the Shell Daemon (`com.aura.aurashelld`) itself is granted; agent names never matter.

@@ -27,14 +27,14 @@ const ntf = (p: Partial<Notification> = {}): Notification => ({
   sender: APP, senderKey: 'app:com.example.notes', state: 'active', createdAt: 1, updatedAt: 1, history: [], ...p,
 } as Notification);
 
-test('placement: app modal opens by itself only with popup; waits otherwise; suppressed → never blocks; AuraOS stays desktop', () => {
+test('placement: an app modal always opens at once (popup irrelevant); suppressed → only when the user opens it; AuraOS stays desktop', () => {
   const auto = (n: Notification, suppressed = false) => decidePlacement(n, { intent: 'auto', view: null, phone: false, suppressed });
   const user = (n: Notification, suppressed = false) => decidePlacement(n, { intent: 'user', view: null, phone: false, suppressed });
   assert.equal(isAppDesktopModal(ntf()), true);
   assert.equal(isAppDesktopModal(ntf({ sender: AURAOS, senderKey: 'auraos' })), false);
   assert.equal(auto(ntf({ popup: true })).kind, 'appModal');
-  assert.equal(auto(ntf()).kind, 'none', 'without popup it waits in the list / pop-up');
-  assert.equal(user(ntf()).kind, 'appModal', 'Answer takes over the desktop');
+  assert.equal(auto(ntf({ popup: false })).kind, 'appModal', 'no waits-in-the-list mode');
+  assert.equal(user(ntf()).kind, 'appModal');
   assert.equal(auto(ntf({ popup: true }), true).kind, 'none', 'suppressed after a force-hide');
   assert.equal(user(ntf(), true).kind, 'appModal', 'suppressed: only auto-open is held back; the user opening it gets the modal');
   assert.equal(auto(ntf({ sender: AURAOS, senderKey: 'auraos' })).kind, 'desktop');
@@ -43,7 +43,7 @@ test('placement: app modal opens by itself only with popup; waits otherwise; sup
   const c = ntf({ blocking: false });
   assert.equal(isCentredDesktop(c), true);
   assert.deepEqual(user(c), { kind: 'floating', layout: 'panel', centred: true });
-  assert.equal(auto(c).kind, 'none', 'and it waits for Answer like any dialogue');
+  assert.deepEqual(auto(c), { kind: 'floating', layout: 'panel', centred: true }, 'it also opens at once');
   assert.equal(isForceHideShortcut({ key: 'Escape', ctrlKey: true, altKey: true, shiftKey: true, metaKey: false }), true);
   assert.equal(isForceHideShortcut({ key: 'Escape', ctrlKey: true, altKey: false, shiftKey: true, metaKey: false }), false);
 });

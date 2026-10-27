@@ -549,8 +549,8 @@ test('phase 6: desktop modal = scope desktop + blocking — needs notifications.
       const { notification: n, warnings } = await granted.create({ title: 'Approve?', type: 'dialogue', scope: 'desktop', blocking: true, popup }, caller);
       assert.equal(n.scope, 'desktop', `${caller.kind} kept`);
       assert.equal(n.blocking, true);
-      assert.equal(n.popup, popup);
-      assert.ok(!warnings.some((w) => w.field === 'scope' || w.field === 'blocking'), JSON.stringify(warnings));
+      assert.equal(n.popup, true, 'it always opens at once — popup is irrelevant (stored true)');
+      assert.ok(!warnings.some((w) => w.field === 'scope' || w.field === 'blocking' || w.field === 'popup'), JSON.stringify(warnings));
       assert.notEqual(n.sender.kind, 'auraos', 'the app stays the sender');
       assert.notEqual(n.senderKey, 'auraos');
     }
@@ -564,18 +564,22 @@ test('phase 6: desktop modal = scope desktop + blocking — needs notifications.
     assert.equal(w?.code, 'downgraded');
     assert.match(w.message, caller.kind === 'anonymous' ? /verified sender/ : /notifications\.desktopModal/);
   }
-  // popup needs its own permission: desktopModal granted, popup not → modal kept, popup off.
+  // notifications.popup is NOT needed for a desktop modal (it opens at once anyway).
   const POPUP_ONLY_DENIED = { authorize: async (_p, a) => ({ allow: a !== 'notifications.popup', reason: 'popup not granted' }) };
-  const m = await new NotificationService({ redis, now, authorizer: POPUP_ONLY_DENIED, windowOwner }).create({ title: 'm', type: 'dialogue', scope: 'desktop', blocking: true, popup: true }, APP);
-  assert.deepEqual([m.notification.scope, m.notification.blocking, m.notification.popup], ['desktop', true, false]);
-  assert.ok(m.warnings.some((w) => w.field === 'popup' && w.code === 'downgraded'));
-  // Non-blocking desktop: no grant needed (as strict as a floating dialogue).
-  for (const s of [denied, granted]) {
+  const popupDenied = new NotificationService({ redis, now, authorizer: POPUP_ONLY_DENIED, windowOwner });
+  const m = await popupDenied.create({ title: 'm', type: 'dialogue', scope: 'desktop', blocking: true, popup: false }, APP);
+  assert.deepEqual([m.notification.scope, m.notification.blocking, m.notification.popup], ['desktop', true, true]);
+  assert.deepEqual(m.warnings, []);
+  // Non-blocking desktop (centred, also opens at once): needs popup OR desktopModal.
+  for (const s of [denied, granted, popupDenied]) {
     const r = await s.create({ title: 'centred', type: 'dialogue', scope: 'desktop' }, APP);
-    assert.equal(r.notification.scope, 'desktop');
-    assert.equal(r.notification.blocking, false);
+    assert.deepEqual([r.notification.scope, r.notification.blocking, r.notification.popup], ['desktop', false, true]);
     assert.deepEqual(r.warnings, []);
   }
+  const NOTHING = { authorize: async (_p, a) => ({ allow: a === 'system.notifications', reason: 'not granted' }) };
+  const none = await new NotificationService({ redis, now, authorizer: NOTHING, windowOwner }).create({ title: 'centred', type: 'dialogue', scope: 'desktop' }, APP);
+  assert.equal(none.notification.scope, 'auto');
+  assert.match(none.warnings.find((w) => w.field === 'scope').message, /notifications\.popup/);
   // A JSON copy of SYSTEM_CALLER is not system at all; the real one keeps everything.
   await rejectsStatus(granted.create({ title: 'x', type: 'dialogue', scope: 'desktop' }, JSON.parse(JSON.stringify(SYSTEM_CALLER))), 403);
   const sys = await denied.create({ title: 'Decide', type: 'dialogue', scope: 'desktop', blocking: true }, SYSTEM_CALLER);
@@ -588,15 +592,16 @@ test('phase 6: at most 2 blocking desktop modals per sender per 10 minutes (the 
   const who = { ...APP, appId: 'com.example.modalrate', instanceId: 'com.example.modalrate-1' };
   const start = clock;
   try {
-    for (let i = 0; i < 2; i++) { clock += 1000; assert.equal((await s.create({ title: `m${i}`, type: 'dialogue', scope: 'desktop', blocking: true, popup: true }, who)).notification.scope, 'desktop'); }
+    for (let i = 0; i < 2; i++) { clock += 1000; assert.equal((await s.create({ title: `m${i}`, type: 'dialogue', scope: 'desktop', blocking: true }, who)).notification.scope, 'desktop'); }
     const third = await s.create({ title: 'm3', type: 'dialogue', scope: 'desktop', blocking: true }, who);
     assert.equal(third.notification.scope, 'auto');
     assert.ok(third.warnings.some((w) => w.field === 'scope' && w.code === 'desktop-modal-rate-limited' && /limited to 2/.test(w.message)));
-    // Non-blocking desktop dialogues don't count.
+    // Blocking modals do not use the pop-up budget (3): a centred desktop dialogue + 2 pop-ups still fit, then it is full.
     assert.equal((await s.create({ title: 'c', type: 'dialogue', scope: 'desktop' }, who)).notification.scope, 'desktop');
-    // Pop-ups: 2 used by the modals, 1 left.
     assert.equal((await s.create({ title: 'p', type: 'dialogue', popup: true }, who)).notification.popup, true);
-    assert.equal((await s.create({ title: 'p2', type: 'dialogue', popup: true }, who)).notification.popup, false);
+    assert.equal((await s.create({ title: 'p2', type: 'dialogue', popup: true }, who)).notification.popup, true);
+    const c2 = await s.create({ title: 'c2', type: 'dialogue', scope: 'desktop' }, who);
+    assert.equal(c2.notification.scope, 'auto', 'a centred one over the pop-up limit becomes a normal dialogue');
     clock = start + 1000 + 600_000 + 1;
     assert.equal((await s.create({ title: 'm4', type: 'dialogue', scope: 'desktop', blocking: true }, who)).notification.scope, 'desktop');
   } finally { clock = start + 700_000; }

@@ -81,18 +81,13 @@ test('e2e: scope desktop + blocking + popup → the desktop-wide app modal opens
   s.done();
 });
 
-test('e2e: popup:false → a corner pop-up first; clicking it opens the desktop modal (not the in-place pop-up)', async (t) => {
+test('e2e: popup:false is irrelevant — the desktop modal still opens at once (no waits-in-the-list mode), no corner pop-up', async (t) => {
   const s = await setup(t);
-  const n = modal({ popup: false });
-  s.put(n);
+  s.put(modal({ popup: false }));
   await flush(); await flush();
-  assert.equal(desktop(), null, 'does not take over by itself');
-  const card = doc.querySelector<HTMLElement>('#notif-toasts > .aura-ntf')!;
-  assert.ok(card, 'waits as a pop-up');
-  card.querySelector<HTMLElement>('.aura-ntf-title')!.click();
-  await flush(); await flush();
-  assert.ok(desktop(), 'the click opened the desktop modal');
+  assert.ok(desktop(), 'opened immediately');
   assert.equal(desktop()!.dataset['kind'], 'app');
+  assert.equal(toastCards().length, 0);
   s.done();
 });
 
@@ -118,15 +113,13 @@ test('e2e: after a force-hide the sender is held back — its next modal waits a
   s.done();
 });
 
-test('e2e: scope desktop without blocking → a centred dialogue when opened (Answer), not the corner panel', async (t) => {
+test('e2e: scope desktop without blocking → the centred dialogue opens at once on arrival; nothing blocked; no corner pop-up', async (t) => {
   const s = await setup(t);
-  const n = modal({ blocking: false, popup: false, title: 'A centred question' });
-  s.put(n);
+  s.put(modal({ blocking: false, popup: false, title: 'A centred question' }));
   await flush(); await flush();
   assert.equal(desktop(), null);
-  await (dom as unknown as { __auraDialogs: { answer(id: string): Promise<boolean> } }).__auraDialogs.answer(n.id);
-  await flush();
-  assert.ok(doc.querySelector('.aura-dlg-centred-host > .aura-dlg-centred'), 'centred');
+  assert.ok(doc.querySelector('.aura-dlg-centred-host > .aura-dlg-centred'), 'centred, opened by itself');
   assert.equal((doc.getElementById('dock') as HTMLElement).inert, false, 'nothing blocked');
+  assert.equal(toastCards().length, 0);
   s.done();
 });

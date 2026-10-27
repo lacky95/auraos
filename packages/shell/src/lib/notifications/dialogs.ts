@@ -151,14 +151,16 @@ export function decidePlacement(n: Notification, inp: PlacementInput): Placement
   }
   if (isDesktopDecision(n)) return { kind: 'desktop' };
   if (isAppDesktopModal(n)) {
-    // Opening by itself needs the (server-gated) popup; else it waits in the list / pop-up.
-    // After a force-hide the sender may not take over by itself for a while
-    // (suppressed); the user opening it on purpose still gets the real modal.
-    if (inp.intent === 'auto' && (!n.popup || inp.suppressed)) return { kind: 'none', reason: inp.suppressed ? 'suppressed after a force-hide' : 'waits for Answer' };
+    // A desktop modal ALWAYS opens at once (popup is irrelevant). The one
+    // exception: after a force-hide the sender may not take over by itself in
+    // this tab for a while (suppressed) — it shows as a pop-up, and the user
+    // opening it on purpose still gets the real modal.
+    if (inp.intent === 'auto' && inp.suppressed) return { kind: 'none', reason: 'suppressed after a force-hide' };
     return { kind: 'appModal' };
   }
-  if (inp.intent === 'auto' && !n.popup) return { kind: 'none', reason: 'waits for Answer' };
+  // A centred (non-blocking) desktop dialogue also always opens at once.
   if (isCentredDesktop(n)) return { kind: 'floating', layout: inp.phone ? (isComplex(n) ? 'full' : 'sheet') : 'panel', centred: !inp.phone };
+  if (inp.intent === 'auto' && !n.popup) return { kind: 'none', reason: 'waits for Answer' };
   const layout: DialogLayout = inp.phone ? (isComplex(n) ? 'full' : 'sheet') : 'panel';
   const v = inp.view;
   if (v && v.state !== 'none' && ownsWindow(n, v)) {
@@ -324,7 +326,7 @@ export class DialogController {
       // First look at an already-loaded store (e.g. after a hot reload): a
       // pending desktop decision must be answered.
       this.primed = true;
-      for (const n of snap.items) if (isDesktopDecision(n)) this.consider(n, 'auto');
+      for (const n of snap.items) if (isDesktopDecision(n) || isAppDesktopModal(n)) this.consider(n, 'auto');
     }
     for (const ch of changes) {
       const n = this.items.get(ch.id);
@@ -333,7 +335,7 @@ export class DialogController {
       if (ch.kind === 'added') {
         // Forced dialogues open on arrival; a desktop decision also after a
         // reload (it must be answered).
-        if (ch.source === 'live' || isDesktopDecision(n)) this.consider(n, 'auto');
+        if (ch.source === 'live' || isDesktopDecision(n) || isAppDesktopModal(n)) this.consider(n, 'auto');
       } else {
         const o = this.open.get(n.id);
         // Phase 6: released server-side (revoked / force-hidden / admin): stop blocking NOW.
@@ -463,7 +465,7 @@ export class DialogController {
     }
     // Desktop decisions that arrived while locked.
     for (const n of this.items.values()) {
-      if (isDesktopDecision(n) && !this.open.has(n.id)) this.consider(n, 'auto');
+      if ((isDesktopDecision(n) || isAppDesktopModal(n)) && !this.open.has(n.id)) this.consider(n, 'auto');
     }
     this.refreshMarkers();
   }

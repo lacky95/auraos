@@ -27,13 +27,15 @@
  * instance the AppManager says is its own; at most 3 forced pop-ups per
  * sender per 10 minutes. Anything else is downgraded with a warning.
  * Phase 6 (desktop modals, supersedes "desktop = AuraOS only"):
- *   scope desktop + blocking  blocks the whole shell — needs the privileged
- *                             `notifications.desktopModal` (or SYSTEM_CALLER),
- *                             a verified sender, and ≤ 2 per sender per 10 min;
- *                             opening it by itself (popup) ALSO needs
- *                             `notifications.popup` and its rate limit.
- *   scope desktop, no blocking  a centred, non-blocking dialogue: no grant
- *                             (as strict as a floating dialogue).
+ *   scope desktop + blocking  blocks the whole shell and ALWAYS opens at once
+ *                             (popup is irrelevant, stored true) — needs the
+ *                             privileged `notifications.desktopModal` (or
+ *                             SYSTEM_CALLER), a verified sender, and a free slot
+ *                             of the desktop-modal limit (os/notifications,
+ *                             default 5 per sender per 10 min).
+ *   scope desktop, no blocking  a centred dialogue that also opens at once:
+ *                             needs `notifications.popup` (or desktopModal)
+ *                             and counts against the forced pop-up limit.
  * The app stays the sender. A revoke / disable / uninstall releases its
  * active modals (blocking off, scope auto, history `updated`, reason
  * `permission-revoked`); the user can force-hide one (`force-hidden`), an
@@ -100,7 +102,7 @@ export interface WaitForResult {
 }
 
 /** Bump when the class changes incompatibly: `getNotificationService()` replaces older singletons. */
-export const NOTIFICATION_SERVICE_VERSION = 12;
+export const NOTIFICATION_SERVICE_VERSION = 13;
 
 /** Phase 5: how often the sweeper runs the retention pass. */
 export const DEFAULT_RETENTION_INTERVAL_MS = 60_000;
@@ -659,7 +661,19 @@ export class NotificationService {
    * dialogues need nothing. SYSTEM_CALLER: always. Mutates `fields`.
    */
   private async gateDesktop(caller: NotificationCaller, fields: { scope?: string; blocking?: boolean }, warnings: NotificationWarning[], actorName?: string, countIt = true, budget: { value?: DesktopModalBudget } = {}): Promise<void> {
-    if (fields.scope !== 'desktop' || !fields.blocking || isSystemCaller(caller)) return;
+    if (fields.scope !== 'desktop' || isSystemCaller(caller)) return;
+    if (!fields.blocking) {
+      // A centred desktop dialogue opens by itself: popup (or desktopModal) is required.
+      const ask = async (perm: string) => (this.authorizer
+        ? await this.authorizer.authorize(this.withActor(caller, actorName), perm)
+        : { allow: false, reason: 'phase 1: AuraOS core only' });
+      const pd = await ask(POPUP_PERMISSION);
+      if (pd.allow || (await ask(DESKTOP_MODAL_PERMISSION)).allow) return;
+      fields.scope = 'auto';
+      warnings.push({ code: 'downgraded', field: 'scope', from: 'desktop', to: 'auto',
+        message: `a desktop dialogue opens by itself, so it requires the '${POPUP_PERMISSION}' (or '${DESKTOP_MODAL_PERMISSION}') permission (requested in the manifest and granted by an admin): ${pd.reason}` });
+      return;
+    }
     const downgrade = (why: string) => {
       fields.scope = 'auto';
       warnings.push({ code: 'downgraded', field: 'scope', from: 'desktop', to: 'auto',
@@ -819,15 +833,30 @@ export class NotificationService {
       // Not gated at all: these fields mean nothing outside dialogues.
       this.dialogueOnly(fields.type, fields, warnings, { blocking: p.blocking, scope: p.scope });
     }
-    await this.gate(caller, fields, warnings, actorName);
-    if (fields.popup && fields.type !== 'dialogue') {
-      fields.popup = false;
-      warnings.push({ code: 'ignored-field', field: 'popup', message: 'popup only applies to type dialogue' });
-    }
+    // Phase 6: an app desktop dialogue ALWAYS opens at once — there is no
+    // "waits in the list" variant. Blocking: needs desktopModal, counts only
+    // against the desktop-modal limit, `popup` is irrelevant (stored true).
+    // Non-blocking (centred): auto-interrupts, so it needs popup (or
+    // desktopModal) and counts against the forced pop-up limit.
     const budget: { value?: DesktopModalBudget } = {};
-    await this.gateDesktop(caller, fields, warnings, actorName, true, budget);
-    await this.gateBlocking(caller, fields, p.context, warnings);
-    await this.gatePopupRate(caller, fields, warnings);
+    if (fields.type === 'dialogue' && fields.scope === 'desktop' && !isSystemCaller(caller)) {
+      await this.gateDesktop(caller, fields, warnings, actorName, true, budget);
+    }
+    if (fields.type === 'dialogue' && fields.scope === 'desktop' && !isSystemCaller(caller)) {
+      fields.popup = true;
+      if (!fields.blocking) {
+        await this.gatePopupRate(caller, fields, warnings);
+        if (!fields.popup) fields.scope = 'auto';   // over the pop-up limit: a normal dialogue
+      }
+    } else {
+      await this.gate(caller, fields, warnings, actorName);
+      if (fields.popup && fields.type !== 'dialogue') {
+        fields.popup = false;
+        warnings.push({ code: 'ignored-field', field: 'popup', message: 'popup only applies to type dialogue' });
+      }
+      await this.gateBlocking(caller, fields, p.context, warnings);
+      await this.gatePopupRate(caller, fields, warnings);
+    }
 
     const now = this.now();
     const senderToken = isSystemCaller(caller) ? undefined : `nst_${randomBytes(24).toString('base64url')}`;
@@ -900,7 +929,8 @@ export class NotificationService {
       setOpt('popupDurationMs', p.popupDurationMs);
       setOpt('components', p.components);
       setOpt('context', p.context);
-      if (p.popup !== undefined) {
+      // (A kept app desktop dialogue keeps popup true: it always opens at once.)
+      if (p.popup !== undefined && !(rec.type === 'dialogue' && rec.scope === 'desktop' && !isSystemCaller(caller))) {
         const f = { popup: p.popup };
         await this.gate(caller, f, warnings, actorName);
         if (f.popup && rec.type !== 'dialogue') {
@@ -922,6 +952,8 @@ export class NotificationService {
         const eff = { scope: f.scope ?? rec.scope ?? 'auto', blocking: f.blocking ?? rec.blocking ?? false };
         const wasModal = rec.scope === 'desktop' && rec.blocking === true;
         if (rec.type === 'dialogue') await this.gateDesktop(caller, eff, warnings, actorName, !wasModal);
+        // A kept app desktop dialogue always opens at once (popup is irrelevant).
+        if (rec.type === 'dialogue' && eff.scope === 'desktop' && !isSystemCaller(caller)) setOpt('popup', true);
         if (f.scope !== undefined || eff.scope !== (rec.scope ?? 'auto')) setOpt('scope', (rec.type === 'dialogue' ? eff.scope : f.scope) as StoredNotification['scope']);
         if (f.blocking !== undefined || (eff.scope !== 'desktop' && rec.blocking)) {
           const b = { blocking: rec.type === 'dialogue' ? eff.blocking : (f.blocking ?? false), scope: rec.type === 'dialogue' ? eff.scope : 'auto' };

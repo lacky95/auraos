@@ -139,11 +139,12 @@ export interface NotificationInput {
    * whole shell — it needs the admin-granted `notifications.desktopModal`
    * (else downgraded to `'auto'` with a warning; by default ≤ 5 per sender per
    * 10 min, configurable by the user — a hit is the warning code
-   * `desktop-modal-rate-limited` with `retryAfterMs`); opening it
-   * by itself also needs `notifications.popup`. The user sees "Requested by
-   * <your app>" and can always force-hide it (history reason `force-hidden`);
-   * a revoke releases it (`permission-revoked`). `'desktop'` without blocking
-   * is a centred, non-blocking dialogue (no grant).
+   * `desktop-modal-rate-limited` with `retryAfterMs`). It always opens at
+   * once — `popup` is irrelevant. The user sees "Requested by <your app>" and
+   * can always force-hide it (history reason `force-hidden`); a revoke
+   * releases it (`permission-revoked`). `'desktop'` without blocking is a
+   * centred, non-blocking dialogue that also opens at once — it needs
+   * `notifications.popup` (or desktopModal).
    */
   scope?: 'auto' | 'desktop';
   components?: NotificationComponent[];
