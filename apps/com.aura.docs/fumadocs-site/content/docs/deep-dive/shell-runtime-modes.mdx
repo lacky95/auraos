@@ -14,8 +14,9 @@ container boots (`aura shell mode`, see [Switch modes](#switch-modes)):
 | Boot | builds the other packages only when asked (below) | builds only when asked: what changed (~20–30 s for the shell) |
 
 Use `dev` while you work on the shell itself; use `prod` for everyday use.
-Apps are not affected by the mode: each app runs its own server and the
-shell proxies it either way.
+Apps are not affected by the shell's mode: each app runs its own server and
+the shell proxies it either way. Apps have their own production builds with an
+automatic dev fallback — see [App serve modes](/docs/deep-dive/app-serve-modes).
 
 ## What is the same in both modes
 

@@ -50,6 +50,8 @@ export interface AppDto {
   enabled?: boolean;
   instances: InstanceDto[];
   activities: ActivityDto[];
+  /** How the app starts next time (`prod` / `dev: changed` …) — `GET /api/apps/serve`; only on `get apps`. */
+  serve?: string;
 }
 
 /** `GET /api/instances/:id/sidecars` items (core `SidecarInfo` + usage). */
@@ -165,15 +167,24 @@ const apps: ResourceDef<AppDto> = {
   name: 'apps',
   aliases: ['app'],
   description: 'Installed apps (manifest + instance count)',
-  verbs: ['get', 'describe', 'run', 'start', 'stop', 'restart', 'delete', 'install', 'enable', 'disable'],
+  verbs: ['get', 'describe', 'run', 'start', 'stop', 'restart', 'build', 'delete', 'install', 'enable', 'disable'],
   nameOf: (a) => a.manifest.id,
-  list: async () => fetchApps(),
+  list: async () => {
+    const [all, serve] = await Promise.all([
+      fetchApps(),
+      // Older shells have no serve endpoint: the column then shows '?'.
+      api.get<{ apps: Array<{ appId: string; label: string }> }>('/api/apps/serve').catch(() => null),
+    ]);
+    const labels = new Map(serve?.apps.map((s) => [s.appId, s.label]) ?? []);
+    return all.map((a) => ({ ...a, serve: labels.get(a.manifest.id) ?? '?' }));
+  },
   watchable: true,
   columns: [
     { header: 'ID', value: (a) => a.manifest.id },
     { header: 'NAME', value: (a) => a.manifest.name },
     { header: 'VERSION', value: (a) => a.manifest.version },
     { header: 'INSTANCES', value: (a) => String(a.instances.length) },
+    { header: 'SERVE', value: (a) => (a.serve === 'prod' ? color.green('prod') : a.serve ?? '?') },
     { header: 'MODE', value: (a) => `${a.manifest.instanceMode ?? '-'}/${a.manifest.activityMode ?? '-'}`, wide: true },
     { header: 'SANDBOX', value: (a) => a.manifest.sandbox ?? 'proot', wide: true },
     { header: 'BG', value: (a) => (a.manifest.backgroundService ? 'yes' : '-'), wide: true },

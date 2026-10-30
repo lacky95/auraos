@@ -303,6 +303,19 @@ export const AppManifestSchema = z.object({
    */
   runtime: z.enum(['astro', 'raw']).default('astro'),
   /**
+   * How an Astro app without its own entrypoint is served (app-manager
+   * appBuild.ts). Unset: from its production build when the build matches
+   * the sources, else `astro dev` — except apps whose astro.config hooks into
+   * the dev server (WebSockets, proxies), which stay on dev.
+   *   'auto' → also for such apps: the app ships a `server.mjs` that does the
+   *            same in production (started instead of dist/server/entry.mjs).
+   *   'dev'  → always `astro dev`.
+   */
+  serve: z.enum(['auto', 'dev']).optional(),
+  /** Build settings: `ignore` = globs (relative to the app dir) that are not
+   *  sources, so changing them does not mark the build stale. */
+  build: z.object({ ignore: z.array(z.string()).optional() }).optional(),
+  /**
    * Per-app overrides for the shell proxy's HTML/JS rewriting and injection
    * behaviour. Defaults are resolved at proxy-read time via
    * `resolveProxyConfig(manifest)` and vary by `runtime` (Astro apps default

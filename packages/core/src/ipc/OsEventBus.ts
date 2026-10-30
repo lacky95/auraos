@@ -131,6 +131,11 @@ export interface OsEvents {
     durationMs: number;
     changed:    string[];
   };
+  /** An app's production build started / finished (AppManager.buildApp). */
+  'app:build': {
+    appId: string;
+    phase: 'start' | 'done' | 'failed';
+  };
   'theme:changed': {
     themeId:       string;                     // the ACTIVE (resolved) theme id
     themeName:     string;
