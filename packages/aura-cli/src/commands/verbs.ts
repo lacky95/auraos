@@ -518,6 +518,55 @@ export function registerVerbs(program: Command): void {
       for (const n of names) await restartInstance(n);
     });
 
+  program
+    .command('build <resource> [names...]')
+    .description('Build apps for production (`astro build`, in a throwaway container). An app runs from its build while the build matches its sources, and with `astro dev` again as soon as you edit it — so building never costs you hot editing. Running instances switch on their next start, or now with --restart.')
+    .option('--all', 'every enabled app whose sources changed since its last build (or that was never built)')
+    .option('--force', 'build even when the build is current')
+    .option('--restart', 'restart running instances onto the new build now (windows come back; Terminal and OpsConsole always switch on their next start)')
+    .addHelpText('after', resourcesLine('build') + examples([
+      'aura build app com.aura.notepad             # build; switches on its next start',
+      'aura build app com.aura.notepad --restart   # build and switch now',
+      'aura build app --all --restart              # everything that changed',
+      'aura get apps                               # SERVE: prod / dev: changed / dev: no build / dev: dev only',
+    ]))
+    .action(async (resource: string, names: string[], opts: { all?: boolean; force?: boolean; restart?: boolean }) => {
+      const def = resourceOrFail(resource, 'build');
+      if (def.name !== 'apps') fail(`\`aura build\` builds apps, not ${def.name}`);
+      let ids = names;
+      if (opts.all) {
+        const serve = await api.get<{ apps: Array<{ appId: string; mode: string; reason: string }> }>('/api/apps/serve');
+        ids = [...new Set([...names, ...serve.apps.filter((s) => s.mode === 'dev' && (s.reason === 'changed' || s.reason === 'no-build')).map((s) => s.appId)])];
+        if (!ids.length) { console.log('Every app is built and current.'); return; }
+      }
+      if (!ids.length) fail('`aura build app` needs an app id (or --all)');
+      let failed = 0;
+      for (const id of ids) {
+        process.stdout.write(`${id}: building… `);
+        const res = await api.post<{
+          ok: boolean; built: boolean; skipped?: string; output?: string; ms: number;
+          state?: { mode: string; reason: string; detail?: string }; restarted?: boolean; restartNote?: string;
+        }>(`/api/apps/${encodeURIComponent(id)}/build`, { force: opts.force === true, restart: opts.restart === true })
+          .catch((err: { body?: string; message?: string }) => {
+            // A failed build answers 500 with the build result (its output) as the body.
+            let body: { output?: string; error?: string } = {};
+            try { body = JSON.parse(err.body ?? '') as typeof body; } catch { /* not JSON */ }
+            return { ok: false, built: false, ms: 0, output: body.output ?? body.error ?? err.message, state: undefined, skipped: undefined, restarted: undefined, restartNote: undefined };
+          });
+        if (!res.ok) {
+          failed++;
+          console.log(color.red('failed'));
+          if (res.output) console.log(res.output.trimEnd().split('\n').slice(-25).map((l) => `  ${l}`).join('\n'));
+          continue;
+        }
+        const mode = res.state ? (res.state.mode === 'prod' ? color.green('prod') : `dev: ${res.state.reason}`) : '?';
+        const what = res.built ? `built in ${(res.ms / 1000).toFixed(1)} s` : `skipped (${res.skipped ?? 'current'})`;
+        const after = res.restarted ? ' — restarted' : res.restartNote ? ` — ${res.restartNote}` : '';
+        console.log(`${what} → ${mode}${after}`);
+      }
+      if (failed) process.exitCode = 1;
+    });
+
   for (const [verb, desc] of [
     ['kill', 'Force-kill instances (SIGKILL, no lifecycle hooks).'],
     ['pause', 'Pause instances (calls onPause).'],

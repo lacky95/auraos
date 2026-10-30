@@ -1,0 +1,80 @@
+---
+title: App serve modes (prod build, dev fallback)
+description: Astro apps run from their production build while it matches their sources and fall back to `astro dev` automatically when you edit them. How builds happen, what makes an app prod-capable, and how to check which mode an app uses.
+---
+
+**TL;DR.** An Astro app the runner starts itself (no `entrypoint.sh`) runs
+from its `astro build` output when that build matches its current sources —
+bundled, hashed, cached scripts, one Node process. As soon as you change a
+source file, its **next start** uses `astro dev` again, so editing stays as
+quick as before: edit, reload the window. Build it again and it is fast again.
+
+```sh
+aura get apps                              # SERVE column: prod / dev: changed / dev: no build / dev: dev only
+aura build app com.example.notes           # build; switches on its next start
+aura build app com.example.notes --restart # build and switch the running app now
+aura build app --all --restart             # every app that changed
+```
+
+## When builds run
+
+Never when an app starts — a build takes 10–60 s and would break the start and
+health budgets. Builds run:
+
+- **Settings → About → Update / Rebuild.** After the OS is back, a background
+  pass builds every enabled app whose sources changed (or that was never
+  built) and restarts it with its windows restored.
+- **`aura build app`** (`POST /api/apps/<id>/build`), on demand.
+
+Builds run one at a time in a throwaway container (`aura-base`, capped at
+512 pids, 3 GB, 2 CPUs) — never inside the shell's container.
+
+**Terminal** and **OpsConsole** are never restarted automatically (they hold
+live shell / agent sessions); they switch to a new build on their next start.
+
+## How the decision is made
+
+At every start the runner computes the app's serve state (core
+`app-manager/appBuild.ts`) and passes it as `AURA_SERVE=prod|dev`:
+
+| SERVE | Meaning |
+|---|---|
+| `prod` | `dist/server/entry.mjs` exists and `dist/.aura-build` holds the fingerprint of the current sources. |
+| `dev: changed` | Sources changed since the last build. |
+| `dev: no build` | Never built. |
+| `dev: dev only` | The app can't run from a build (below), or its manifest says `"serve": "dev"`. |
+| `-` | The app starts itself (`entrypoint.sh`, `runtime: raw`) — not managed. |
+
+The **fingerprint** covers the app's sources: `src/**`, `public/**`,
+`astro.config.*`, `package.json`, `tsconfig*.json`, the lockfile and root
+`*.mjs` files (e.g. `server.mjs`). Not sources: `dist*`, `node_modules`,
+`.astro`, instance data dirs, backups (`*.bak*`), logs, plus the manifest's
+`build.ignore` globs (paths relative to the app dir):
+
+```json
+{ "build": { "ignore": ["public/generated/**"] } }
+```
+
+In prod the start command runs `node server.mjs` if the app has one, else
+`node dist/server/entry.mjs`, with `HOST=0.0.0.0` and `NODE_ENV=production`.
+
+## Prod-capable apps
+
+A build loses everything that only exists in the dev server. An app whose
+`astro.config.*` uses `astro:server:setup`, `configureServer`,
+`ssrLoadModule` or a Vite `proxy` stays on dev until it:
+
+1. adds a `server.mjs` that does the same in production (e.g. attach its
+   WebSocket to the adapter's `http.Server`), and
+2. opts in with `"serve": "auto"` in its manifest.
+
+`"serve": "dev"` keeps any app on dev.
+
+Other things to check when an app moves to prod:
+
+- Resolve files from `process.cwd()` (the app dir), not `import.meta.url` —
+  in a build that points into `dist/`.
+- The SDK stamps `X-Aura-App-Id` / `X-Aura-Instance-Id` in both modes (an
+  Astro middleware).
+- Absolute `/_astro/…` URLs built at runtime (Vite's preload helper) are
+  redirected by the shell to the app's proxy prefix, so dynamic imports work.

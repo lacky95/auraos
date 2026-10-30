@@ -117,6 +117,33 @@ if [ "$PROVISION" = 1 ]; then
 fi`;
 
 /**
+ * The start command of an Astro app that ships no entrypoint of its own —
+ * shared by ContainerRunner and ProotRunner (they used to carry a copy each).
+ *
+ * `AURA_SERVE=prod` (set by the runner when the app's build matches its
+ * sources, see appBuild.ts) starts the production server: the app's own
+ * `server.mjs` when it has one (apps with WebSockets etc.), else the adapter's
+ * standalone entry. Anything else — or a build that vanished — runs
+ * `astro dev`, exactly as before.
+ */
+export const ASTRO_START_SHELL = `set -e
+export PORT="\${APP_PORT:-4001}"
+${PROVISION_SHELL}
+if [ "\${AURA_SERVE:-dev}" = prod ] && [ -f dist/server/entry.mjs ]; then
+  export HOST=0.0.0.0 NODE_ENV=production
+  if [ -f server.mjs ]; then
+    echo "[\${APP_ID:-app}] Starting production server (server.mjs) on port \$PORT"
+    exec node server.mjs
+  fi
+  echo "[\${APP_ID:-app}] Starting production server (dist) on port \$PORT"
+  exec node dist/server/entry.mjs
+fi
+ASTRO="node_modules/.bin/astro"
+[ -x "\$ASTRO" ] || ASTRO="/workspace/node_modules/.bin/astro"
+echo "[\${APP_ID:-app}] Starting Astro server on port \$PORT via \$ASTRO"
+exec "\$ASTRO" dev --host 0.0.0.0 --port "\$PORT"`;
+
+/**
  * The health-wait deadline for the next poll.
  *
  * Extracted from both runners so the rule is stated once and can be tested

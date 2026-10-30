@@ -32,6 +32,14 @@ try {
   console.warn(`[settings/apps] could not load apps: ${(err as Error).message}`);
 }
 
+// How each app starts next time: from its production build or astro dev
+// (core app-manager/appBuild.ts). Read-only — `aura build app` builds.
+const serve = new Map<string, { mode: string; label: string; detail?: string }>();
+try {
+  const r = await fetch(`${osBase}/api/apps/serve`, { signal: AbortSignal.timeout(2000) });
+  if (r.ok) for (const s of (await r.json() as { apps: Array<{ appId: string; mode: string; label: string; detail?: string }> }).apps) serve.set(s.appId, s);
+} catch { /* older shell: no label */ }
+
 // Stable ordering: system apps last (they're the OS components — Console,
 // Terminal, Settings — and the user rarely needs to disable them).
 apps.sort((a, b) => {
@@ -302,7 +310,7 @@ apps.sort((a, b) => {
             <div class="app-glyph">{glyph}</div>
             <div class="app-meta">
               <div class="app-name">{m.name}</div>
-              <div class="app-id">{m.id} · v{m.version}</div>
+              <div class="app-id">{m.id} · v{m.version}{serve.get(m.id) && serve.get(m.id)!.label !== '-' && <span title={serve.get(m.id)!.detail ?? (serve.get(m.id)!.mode === 'prod' ? 'Runs from its production build' : 'Runs with astro dev — `aura build app` builds it')}> · {serve.get(m.id)!.label}</span>}</div>
               <div class="app-tags">
                 {running > 0 && <span class="app-tag" data-kind="running">{running} running</span>}
                 {isService && <span class="app-tag" data-kind="service">service</span>}

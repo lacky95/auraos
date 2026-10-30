@@ -18,8 +18,9 @@ import type { SpawnContext } from '../scopes/types.js';
 import { ContextStore } from '../context/ContextStore.js';
 import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
 import {
-  PROVISION_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
+  ASTRO_START_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
 } from './provisioning.js';
+import { serveState } from './appBuild.js';
 import { BASE_IMAGE, whenBaseImageReady } from './BaseImage.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
@@ -91,13 +92,10 @@ export function pickVolumeByDestination(mounts: DockerMount[], destination: stri
   return m?.Name;
 }
 
-const SYNTHESISED_ENTRYPOINT = `set -e
-export PORT="\${APP_PORT:-4001}"
-${PROVISION_SHELL}
-ASTRO="node_modules/.bin/astro"
-[ -x "\$ASTRO" ] || ASTRO="/workspace/node_modules/.bin/astro"
-echo "[\${APP_ID:-app}] Starting Astro server on port \$PORT via \$ASTRO"
-exec "\$ASTRO" dev --host 0.0.0.0 --port "\$PORT"`;
+// The synthesised start command (astro dev, or the production build when it
+// matches the sources) is shared with ProotRunner: provisioning.ts
+// ASTRO_START_SHELL, chosen per start via AURA_SERVE (appBuild.ts serveState).
+const SYNTHESISED_ENTRYPOINT = ASTRO_START_SHELL;
 
 interface TrackedContainer {
   /** Watches the app's log to tell "installing dependencies" from "failing
@@ -638,6 +636,10 @@ export class ContainerRunner implements SandboxRunner {
       '-e', `APP_PORT=${port}`,
       '-e', `OS_API_BASE=${this.osApiBase}`,
       '-e', `AURA_LAYER_TAG=[ctnr]`,
+      // prod = start from the app's build (it matches the sources), dev =
+      // astro dev. Read by ASTRO_START_SHELL; also tells an adopted container
+      // apart. Apps with their own entrypoint ignore it.
+      '-e', `AURA_SERVE=${serveState(ctx.appDir, manifest).mode}`,
       // Hostname override read by bashrc.aura.sh's PS1. We also set the
       // kernel hostname via --hostname above, but a process can sethostname()
       // away from that; the env stays put across `docker exec` invocations
@@ -1160,6 +1162,54 @@ export class ContainerRunner implements SandboxRunner {
   getHost(instanceId: string): string | null {
     return this.containers.get(instanceId)?.hostname ?? null;
   }
+  /**
+   * `astro build` an app in a throwaway container — never in aura-shell
+   * (its pids budget) and never on the launch path. Same app-dir /
+   * node_modules / packages mounts as an app container, so the build sees
+   * exactly what the running app sees; capped (pids, memory, cpus) so a build
+   * can't starve the running apps. The caller writes the build stamp.
+   */
+  /** Shell-side pids of the `docker run` clients of running builds (getActivePids). */
+  private readonly buildPids = new Set<number>();
+
+  async buildApp(appId: string, appDir: string, opts: { timeoutMs?: number } = {}): Promise<{ ok: boolean; output: string }> {
+    await whenBaseImageReady();
+    const name = `aura-build-${appId.replace(/[^a-zA-Z0-9_.-]/g, '_')}`;
+    const args = [
+      'run', '--rm', '--name', name,
+      '--pids-limit', '512', '--memory', '3g', '--cpus', '2',
+      '--workdir', `/workspace/apps/${appId}`,
+      ...this.buildAppDirMount(appDir, appId, this.appDataVolume),
+      '-v', `${this.workspaceRoot}/packages:/workspace/packages:ro`,
+      '-v', `${this.workspaceRoot}/package.json:/workspace/package.json:ro`,
+      '-v', `${this.workspaceRoot}/pnpm-lock.yaml:/workspace/pnpm-lock.yaml:ro`,
+      '-v', `${this.workspaceRoot}/pnpm-workspace.yaml:/workspace/pnpm-workspace.yaml:ro`,
+      '--mount', `type=volume,source=${this.nodeModulesVolume},target=/workspace/node_modules,readonly`,
+      '-e', 'NODE_ENV=production', '-e', 'GOMAXPROCS=2', '-e', `APP_ID=${appId}`,
+      '-e', 'ASTRO_TELEMETRY_DISABLED=1',
+      BASE_IMAGE,
+      'bash', '-c',
+      'set -e; ASTRO=node_modules/.bin/astro; [ -x "$ASTRO" ] || ASTRO=/workspace/node_modules/.bin/astro; exec "$ASTRO" build',
+    ];
+    const timeoutMs = opts.timeoutMs ?? 10 * 60_000;
+    return await new Promise((resolve) => {
+      let output = '';
+      const keep = (d: Buffer) => { output = (output + d.toString()).slice(-16_000); };
+      const child = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'], env: WATCHER_ENV });
+      const pid = child.pid;
+      if (pid) this.buildPids.add(pid);
+      const untrack = () => { if (pid) this.buildPids.delete(pid); };
+      child.stdout?.on('data', keep);
+      child.stderr?.on('data', keep);
+      const timer = setTimeout(() => {
+        keep(Buffer.from(`\n[build] timed out after ${Math.round(timeoutMs / 1000)} s\n`));
+        try { spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore', timeout: 20_000 }); } catch { /* gone */ }
+      }, timeoutMs);
+      child.on('error', (err) => { clearTimeout(timer); untrack(); resolve({ ok: false, output: `${output}\n${err.message}` }); });
+      child.on('close', (code) => { clearTimeout(timer); untrack(); resolve({ ok: code === 0, output }); });
+    });
+  }
+
   isRunning(instanceId: string): boolean {
     return this.containers.has(instanceId);
   }
@@ -1170,7 +1220,10 @@ export class ContainerRunner implements SandboxRunner {
     // PRoot squatters). Pretend container processes don't exist as far as
     // pid-based tracking is concerned; we manage their lifecycle via
     // `docker wait` / `docker kill` instead.
-    return [];
+    // The exception: the `docker run` clients of running app builds live in
+    // the shell's namespace and their cmdline names the app dir — without
+    // this the reaper takes them for squatters.
+    return [...this.buildPids];
   }
   onExit(instanceId: string, cb: (code: number | null) => void): void {
     const tracked = this.containers.get(instanceId);

@@ -136,6 +136,8 @@ CHANGED=""
 if [ -f "$BUILD_REQUEST" ] || [ "${AURA_FORCE_BUILD:-0}" = 1 ] || [ -n "$MISSING" ]; then
   if [ -f "$BUILD_REQUEST" ]; then
     echo "[aura] boot: build requested ($(cat "$BUILD_REQUEST" 2>/dev/null))" | tee -a "$LOG"
+    # Apps are built after the shell is up (shell lib/appBuilds.ts reads this).
+    touch "$BOOT_DIR/apps-build-requested"
   elif [ -n "$MISSING" ]; then
     echo "[aura] boot: first build — no output yet for:$MISSING" | tee -a "$LOG"
   fi

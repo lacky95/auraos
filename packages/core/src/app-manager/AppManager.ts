@@ -16,6 +16,7 @@ import { PortAllocator } from './PortAllocator.js';
 import { LifecycleStateMachine } from './LifecycleStateMachine.js';
 import { ProotRunner, killProcessGroup } from './ProotRunner.js';
 import { ContainerRunner } from './ContainerRunner.js';
+import { appFingerprint, prodCapability, serveState, writeBuildStamp, type ServeState } from './appBuild.js';
 import { MountManager } from './MountManager.js';
 import { PortManager, type ExposeSpec } from './PortManager.js';
 import { InstanceTokens } from './InstanceTokens.js';
@@ -683,6 +684,56 @@ export class AppManager {
   // migration. The shell hydrates this from KV (`os/app-enabled`) before
   // calling `init()` and persists every mutation through the corresponding
   // /api/admin/apps/enabled endpoint.
+
+  // ── Production builds (appBuild.ts) ──────────────────────────────────────
+
+  /** How `appId` starts next time (prod build or astro dev) and why; null if unknown. */
+  serveStateOf(appId: string): ServeState | null {
+    const manifest = this.registry.getById(appId);
+    return manifest ? serveState(manifest.appDir, manifest) : null;
+  }
+
+  /** One app build at a time (each is a capped container, still heavy). */
+  private buildChain: Promise<unknown> = Promise.resolve();
+
+  /**
+   * `astro build` an app (ContainerRunner.buildApp — a throwaway container)
+   * and stamp the build with the fingerprint of the sources it was made from.
+   * Skips apps that can't run from a build, and — unless `force` — apps whose
+   * build is current. Running instances keep their mode until they restart.
+   */
+  async buildApp(appId: string, opts: { force?: boolean } = {}): Promise<{
+    appId: string; ok: boolean; built: boolean; skipped?: string; output?: string; ms: number; state: ServeState | null;
+  }> {
+    const manifest = this.registry.getById(appId);
+    if (!manifest) throw new Error(`App not found: ${appId}`);
+    const t0 = Date.now();
+    const done = (r: { ok: boolean; built: boolean; skipped?: string; output?: string }) =>
+      ({ appId, ...r, ms: Date.now() - t0, state: serveState(manifest.appDir, manifest) });
+    const cap = prodCapability(manifest.appDir, manifest);
+    if (!cap.capable) return done({ ok: true, built: false, skipped: `${cap.reason}${cap.detail ? `: ${cap.detail}` : ''}` });
+    if (!opts.force && serveState(manifest.appDir, manifest).mode === 'prod') return done({ ok: true, built: false, skipped: 'build is current' });
+    if (!existsSync(join(manifest.appDir, 'node_modules'))) {
+      return done({ ok: false, built: false, skipped: 'dependencies not installed yet — start the app once' });
+    }
+    const run = async () => {
+      const fingerprint = appFingerprint(manifest.appDir, manifest.build?.ignore ?? []);
+      console.log(`[AppManager] build: ${appId} …`);
+      OsEventBus.emit('app:build', { appId, phase: 'start' });
+      const res = await (this.runners.container as ContainerRunner).buildApp(appId, manifest.appDir);
+      if (res.ok) {
+        try { writeBuildStamp(manifest.appDir, fingerprint); } catch (err) {
+          return done({ ok: false, built: false, output: `${res.output}\ncannot write the build stamp: ${(err as Error).message}` });
+        }
+      }
+      console.log(`[AppManager] build: ${appId} ${res.ok ? 'ok' : 'FAILED'} (${Math.round((Date.now() - t0) / 1000)} s)`);
+      OsEventBus.emit('app:build', { appId, phase: res.ok ? 'done' : 'failed' });
+      return done({ ok: res.ok, built: res.ok, ...(res.ok ? {} : { output: res.output }) });
+    };
+    const next = this.buildChain.then(run, run);
+    this.buildChain = next.catch(() => undefined);
+    return next;
+  }
 
   isEnabled(appId: string): boolean {
     return !this.disabled.has(appId);

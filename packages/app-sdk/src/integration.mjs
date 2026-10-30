@@ -3,9 +3,9 @@
  * app needs to wire up at startup:
  *
  *   • Stamps `X-Aura-App-Id` / `X-Aura-Instance-Id` response headers — the
- *     shell's reverse proxy refuses to forward responses without these,
- *     because they're the identity contract that prevents port-squatter
- *     bugs.
+ *     identity contract the shell's reverse proxy checks to catch port
+ *     squatters. A middleware (runtime/identity-middleware) does it, so a
+ *     production build sends them too.
  *   • Injects a default `/api/lifecycle/health` route (opt-out) — the OS
  *     polls this during `waitHealthy` and the reconciler. Apps that need
  *     custom health logic can still ship their own `src/pages/api/lifecycle/
@@ -31,7 +31,13 @@ export function auraAppIntegration(opts = {}) {
   return {
     name: 'aura-app',
     hooks: {
-      'astro:config:setup': ({ injectRoute, updateConfig }) => {
+      'astro:config:setup': ({ injectRoute, updateConfig, addMiddleware }) => {
+        // Identity headers on every rendered response, in dev AND in a
+        // production build (the astro:server:setup hook below is dev-only).
+        addMiddleware({
+          entrypoint: new URL('./runtime/identity-middleware.js', import.meta.url),
+          order: 'pre',
+        });
         // Vite's dev server in Astro 6 / Vite 5+ ships a `server.allowedHosts`
         // safelist that rejects requests with a Host header not in the list
         // (returns 403). PRoot apps are reached via 127.0.0.1 (auto-allowed)
@@ -54,6 +60,8 @@ export function auraAppIntegration(opts = {}) {
           entrypoint: routeUrl,
         });
       },
+      // Dev only: also stamp what Vite serves outside Astro's middleware
+      // (modules, assets). Rendered pages get it from the middleware above.
       'astro:server:setup': ({ server }) => {
         server.middlewares.use((_req, res, next) => {
           const appId      = process.env['APP_ID'];

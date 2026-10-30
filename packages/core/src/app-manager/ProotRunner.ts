@@ -11,8 +11,9 @@ import type { SpawnContext } from '../scopes/types.js';
 import { ContextStore } from '../context/ContextStore.js';
 import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
 import {
-  PROVISION_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
+  ASTRO_START_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
 } from './provisioning.js';
+import { serveState } from './appBuild.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
 const HEALTH_CHECK_TIMEOUT_MS = 30_000;
@@ -30,13 +31,9 @@ const LIFECYCLE_TIMEOUT_MS = 5_000;
  * fallback still works when a freshly scaffolded app doesn't yet have a
  * populated `node_modules` (e.g. before the workspace `pnpm install` ran).
  */
-const SYNTHESISED_ENTRYPOINT = `set -e
-export PORT="\${APP_PORT:-4001}"
-${PROVISION_SHELL}
-ASTRO="node_modules/.bin/astro"
-[ -x "\$ASTRO" ] || ASTRO="/workspace/node_modules/.bin/astro"
-echo "[\${APP_ID:-app}] Starting Astro server on port \$PORT via \$ASTRO"
-exec "\$ASTRO" dev --host 0.0.0.0 --port "\$PORT"`;
+// Shared with ContainerRunner (provisioning.ts ASTRO_START_SHELL): astro
+// dev, or the production build when it matches the sources (AURA_SERVE).
+const SYNTHESISED_ENTRYPOINT = ASTRO_START_SHELL;
 
 interface SpawnedApp {
   process: ChildProcess;
@@ -170,6 +167,9 @@ export class ProotRunner implements SandboxRunner {
       APP_INSTANCE_ID: instanceId,
       APP_PORT: String(port),
       OS_API_BASE: this.osApiBase,
+      // prod = start from the app's build (matches its sources), dev = astro
+      // dev; read by ASTRO_START_SHELL (appBuild.ts serveState).
+      AURA_SERVE: serveState(ctx.appDir, manifest).mode,
       // Statically known: AppManager runs inside the Docker container and
       // every spawn we do is wrapped in PRoot. Baking the tag here means the
       // /root/.bashrc snippet that renders the prompt never has to shell out

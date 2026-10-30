@@ -42,6 +42,7 @@
   "warmPool": 1,
   "backgroundService": true,
   "sandbox": "container",
+  "serve": "auto",
   "viewConfig": {
     "defaultWidth": 800,
     "defaultHeight": 500,

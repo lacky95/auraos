@@ -118,6 +118,7 @@ aura events -f 'app:*'
 | `aura restart app <app...>` | Stop all instances, start one fresh. | — |
 | `aura restart inst <inst...>` | Stop the instance and start a fresh one of its app — **a multi-instance app gets a new instance id**. | — |
 | `aura restart svc <svc...>` | Stop + start the service. | — |
+| `aura build app <app...>` | Production-build apps (`astro build` in a throwaway container). An app runs from its build while it matches its sources, and with `astro dev` as soon as you edit it. See [App serve modes](/docs/deep-dive/app-serve-modes). | `--all` (every changed app), `--force`, `--restart` (switch running instances now) |
 | `aura pause inst <inst...>` | Pause instances (fires `onPause`). | — |
 | `aura resume inst <inst...>` | Resume paused instances (fires `onResume`). | — |
 | `aura kill inst <inst...>` | Force-kill: SIGKILL the sandbox, no lifecycle hooks. | — |
@@ -129,6 +130,8 @@ aura restart inst com.aura.terminal-13    # stop it, start a fresh instance of i
 aura pause inst com.aura.browser-2
 aura start inst com.aura.browser-2        # resumes it (same as aura resume inst)
 aura restart svc sshd
+aura build app com.aura.notepad --restart # build, switch the running app to it
+aura build app --all                      # build every app that changed
 ```
 
 ## Install & remove

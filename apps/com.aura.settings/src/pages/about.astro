@@ -507,7 +507,7 @@ const S = {
     }
 
     rebuildBtn?.addEventListener('click', () => launch('rebuild',
-      'Rebuild the image?\n\nRebuilds from the checkout as it is right now — no git pull, so any uncommitted changes are baked in. The OS restarts when the build finishes. There is nothing to roll back to if it fails, because the checkout is not changed.',
+      'Rebuild the image?\n\nRebuilds from the checkout as it is right now — no git pull, so any uncommitted changes are baked in. The OS restarts when the build finishes; apps whose sources changed are built afterwards in the background. There is nothing to roll back to if it fails, because the checkout is not changed.',
       'the rebuild'));
 
     restartBtn?.addEventListener('click', () => launch('restart',
@@ -523,7 +523,7 @@ const S = {
         + `${(pre.currentRev || '').slice(0, 12)} → ${(pre.latestRev || '').slice(0, 12)}\n`
         + (pre.latestSubject ? `\nLatest: ${pre.latestSubject}\n` : '')
         + (pre.ahead ? `\n${pre.ahead} local commit(s) will be rebased on top.\n` : '');
-      if (!(await showConfirm(`Update AuraOS?\n\n${summary}\nThis rebuilds the container image and restarts the OS. Running apps keep running; the desktop reconnects when the shell is back. If the new build does not come up, it rolls back automatically.`))) return;
+      if (!(await showConfirm(`Update AuraOS?\n\n${summary}\nThis rebuilds the container image and restarts the OS. Afterwards, apps whose sources changed are built in the background and switch to their new build (Terminal and OpsConsole on their next start). Running apps keep running; the desktop reconnects when the shell is back. If the new build does not come up, it rolls back automatically.`))) return;
       btn.disabled = true;
       btn.textContent = 'Starting…';
       try {

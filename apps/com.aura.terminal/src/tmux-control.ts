@@ -19,7 +19,7 @@
  * `--experimental-strip-types`, where a bare package import would not resolve.
  */
 import { execFile, spawnSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -33,7 +33,10 @@ export const HOST_LABEL = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
 /** Private -L namespace, never collides with a user's own tmux. Overridable so
  *  tests can run against a throwaway server instead of the real one. */
 export const TMUX_SOCKET = process.env['AURA_TERM_TMUX_SOCKET'] ?? 'aura';
-export const TMUX_CONF   = join(dirname(fileURLToPath(import.meta.url)), '..', 'tmux.conf');
+// Next to src/ when run from source (dev, tests); from a production build this
+// module sits in dist/server/chunks/, so fall back to the app dir (the cwd).
+const CONF_FROM_SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'tmux.conf');
+export const TMUX_CONF   = existsSync(CONF_FROM_SRC) ? CONF_FROM_SRC : join(process.cwd(), 'tmux.conf');
 
 export const tmuxBin: string | null = (() => {
   if (process.env['AURA_TERM_TMUX'] === '0') return null;

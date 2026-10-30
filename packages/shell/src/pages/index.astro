@@ -3588,7 +3588,12 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
       views = [...views, buildView(ev.appId, title, ev.parentInstanceId, ev.activityId, ev.path ?? '/', 'resumed', minimizable)];
       // The activity was opened externally (another iframe, an intent, etc.)
       // — claim it on the active workspace so the user can actually see it.
-      workspaceClient.addMemberToActive(ev.activityId).catch(() => undefined);
+      // Not when a workspace already owns it: a desktop restore re-opens every
+      // saved activity under its old id while this page is still open, and
+      // claiming those would pile every window onto the active workspace.
+      if (!workspaceClient.findOwner(ev.activityId)) {
+        workspaceClient.addMemberToActive(ev.activityId).catch(() => undefined);
+      }
       renderLayout();
     }
     if (ev.type === 'activity:closed') {

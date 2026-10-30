@@ -6,6 +6,7 @@
     "architecture",
     "proxy-and-iframe",
     "shell-runtime-modes",
+    "app-serve-modes",
     "sandbox-runners",
     "lifecycle-fsm",
     "event-bus-and-ipc",

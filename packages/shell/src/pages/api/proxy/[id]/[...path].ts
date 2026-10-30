@@ -888,7 +888,7 @@ window.EventSource=AuraEventSource;
       const outHeaders = new Headers(upstream.headers);
       outHeaders.delete('content-encoding');
       outHeaders.delete('content-length');
-      hardenDevCache(outHeaders);
+      hardenDevCache(outHeaders, request);
       scopeCookies(upstream, outHeaders, proxyPrefix);
       const etag = upstream.headers.get('etag');
       if (request.method === 'GET' && upstream.status === 200 && etag && !outHeaders.has('set-cookie')) {
@@ -905,7 +905,7 @@ window.EventSource=AuraEventSource;
     const outHeaders = new Headers(upstream.headers);
     outHeaders.delete('content-encoding');
     outHeaders.delete('content-length');
-    hardenDevCache(outHeaders);
+    hardenDevCache(outHeaders, request);
     scopeCookies(upstream, outHeaders, proxyPrefix);
     return new Response(upstream.body ? wrapSafeStream(upstream.body) : null, {
       status:  upstream.status,
@@ -1015,11 +1015,26 @@ function jsModuleCache() {
   };
 }
 
-function hardenDevCache(headers: Headers): void {
+function hardenDevCache(headers: Headers, request: Request): void {
   const cc = headers.get('cache-control');
   if (!cc) return;
   if (/immutable/i.test(cc) || /max-age=(?!0\b)/i.test(cc)) return;
-  if (/no-cache/i.test(cc)) headers.set('cache-control', 'no-store');
+  if (/no-cache/i.test(cc) && cachesHeuristically(request)) headers.set('cache-control', 'no-store');
+}
+
+/**
+ * Hosts that do not honour `no-cache` (see hardenDevCache): Android WebViews
+ * (User-Agent `; wv)`) and requests that came through the Capacitor host's
+ * local server, which rewrites Host to the shell's address
+ * (AURA_NO_STORE_HOSTS, comma-separated; default 10.201.1.2:3000). Desktop
+ * browsers revalidate a `no-cache` response properly (ETag → 304), so they
+ * keep it: a repeat load of an app re-downloads nothing that did not change.
+ */
+const NO_STORE_HOSTS = new Set((process.env['AURA_NO_STORE_HOSTS'] ?? '10.201.1.2:3000').split(',').map((h) => h.trim()).filter(Boolean));
+function cachesHeuristically(request: Request): boolean {
+  if (/;\s*wv\)/.test(request.headers.get('user-agent') ?? '')) return true;
+  const host = request.headers.get('host') ?? '';
+  return NO_STORE_HOSTS.has(host);
 }
 
 /**

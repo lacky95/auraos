@@ -188,6 +188,7 @@ export function sendReport(): void {
   }
   const body = JSON.stringify({
     url: location.pathname + location.search,
+    host: location.host,
     ua: navigator.userAgent,
     stages: Object.fromEntries([...state().stages].map(([k, v]) => [k, v.done ? Math.round(v.t ?? 0) : null])),
     rows: summaryRows(),

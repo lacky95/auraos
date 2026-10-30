@@ -149,6 +149,12 @@ async function ensureAppManager() {
         .catch((err) => console.warn(`[middleware] desktop session restore failed: ${(err as Error).message}`));
     }, 0);
 
+    // After Settings → About → Update / Rebuild: build the apps that changed
+    // and switch them to their builds (lib/appBuilds.ts), in the background.
+    import('./lib/appBuilds.js')
+      .then((m) => m.scheduleAppBuildPass())
+      .catch((err) => console.warn(`[middleware] app build pass not scheduled: ${(err as Error).message}`));
+
     setTimeout(() => {
       import('./lib/nexusSeedsApply.js')
         .then((m) => m.applySourceSeeds())
@@ -159,7 +165,28 @@ async function ensureAppManager() {
   finally { initPromise = null; }  // future soft-restart can trigger another cycle
 }
 
+/**
+ * An app built for production loads some chunks through Vite's preload helper,
+ * which builds root-absolute `/_astro/…` URLs at runtime — past the proxy's
+ * HTML/JS rewriting, so they reach the SHELL instead of the app. The shell's
+ * own assets are served before this middleware (prod) or don't live there
+ * (dev), so a `/_astro/` request that gets here from a proxied app page is
+ * that app's: send it to `/api/proxy/<id>/_astro/…`.
+ */
+function appAssetRedirect(request: Request, url: URL): Response | null {
+  if (!url.pathname.startsWith('/_astro/')) return null;
+  const ref = request.headers.get('referer');
+  if (!ref) return null;
+  let refPath: string;
+  try { refPath = new URL(ref).pathname; } catch { return null; }
+  const m = refPath.match(/^\/api\/proxy\/([^/]+)\//);
+  if (!m) return null;
+  return new Response(null, { status: 307, headers: { Location: `/api/proxy/${m[1]}${url.pathname}${url.search}` } });
+}
+
 export const onRequest = defineMiddleware(async (ctx, next) => {
+  const assetRedirect = appAssetRedirect(ctx.request, ctx.url);
+  if (assetRedirect) return assetRedirect;
   await ensureAppManager();
   const res = await next();
   // A shell tab registering itself: onboarding cards wait for the first one,
