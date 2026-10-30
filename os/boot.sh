@@ -75,14 +75,33 @@ run pnpm install \
   || echo '[aura] pnpm install exited non-zero (likely ERR_PNPM_IGNORED_BUILDS) — continuing' | tee -a "$LOG"
 
 phase building
-if [ "$SHELL_MODE" = prod ]; then
+# Skip the build when nothing under packages/ changed since the last one:
+# the fingerprint is the commit plus every uncommitted change and untracked
+# file there, stored next to the output per mode. No git (or any error) →
+# empty fingerprint → always build. AURA_FORCE_BUILD=1 forces it.
+build_fingerprint() {
+  ( cd /workspace && {
+      git rev-parse HEAD &&
+      git diff HEAD -- packages &&
+      git ls-files -z -o --exclude-standard -- packages | xargs -0 -r sha1sum
+    } 2>/dev/null | sha1sum | cut -d' ' -f1 ) || true
+}
+BUILD_STAMP="/workspace/packages/.aura-build-$SHELL_MODE"
+FP="$(build_fingerprint)"
+if [ -n "$FP" ] && [ "${AURA_FORCE_BUILD:-0}" != 1 ] && [ "$(cat "$BUILD_STAMP" 2>/dev/null)" = "$FP" ] \
+   && [ -f /workspace/packages/core/dist/index.js ] \
+   && { [ "$SHELL_MODE" != prod ] || [ -f /workspace/packages/shell/dist/server/entry.mjs ]; }; then
+  echo "[aura] boot: packages unchanged since the last build — build skipped" | tee -a "$LOG"
+elif [ "$SHELL_MODE" = prod ]; then
   # The container runs with NODE_ENV=development (dev tooling, app sandboxes);
   # the shell's own bundle must be a production build — without this Vite
   # bundles React's development code into the desktop.
   run pnpm --filter "./packages/*" --filter '!@aura/shell' build || fail building
   run env NODE_ENV=production pnpm --filter @aura/shell build || fail building
+  [ -n "$FP" ] && echo "$FP" > "$BUILD_STAMP"
 else
   run pnpm --filter "./packages/*" --filter '!@aura/shell' build || fail building
+  [ -n "$FP" ] && echo "$FP" > "$BUILD_STAMP"
 fi
 
 install -D -m 0755 /workspace/os/aura-cli-shim.sh /usr/local/bin/aura \

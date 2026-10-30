@@ -37,3 +37,5 @@ apps/*.tmp.*/
 .idea/
 *.log
 **/.bash_history
+# boot.sh build fingerprints (skip an unchanged build on boot)
+/packages/.aura-build-*
