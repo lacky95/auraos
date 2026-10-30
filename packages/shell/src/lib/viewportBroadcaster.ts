@@ -19,7 +19,10 @@
  * island. Apps consume via `osClient.onViewportChange`.
  */
 
+import { createLogger } from '@aura/core/logger';
 import { detachIfOwnedBy } from './nativeSurface.js';
+
+const log = createLogger('shell:iframe');
 
 export type ViewportReason = 'layout' | 'zoom' | 'mount';
 
@@ -60,8 +63,12 @@ function measureFrame(frame: HTMLIFrameElement): { contentW: number; contentH: n
 }
 
 /** Post the current viewport (with THIS frame's box) to one iframe. */
-export function postViewportTo(frame: HTMLIFrameElement, reason: ViewportReason): void {
-  const { shellZoom, iframeScale } = readScales();
+export function postViewportTo(
+  frame: HTMLIFrameElement,
+  reason: ViewportReason,
+  scales: { shellZoom: number; iframeScale: number } = readScales(),
+): void {
+  const { shellZoom, iframeScale } = scales;
   const { contentW, contentH } = measureFrame(frame);
   const msg: ViewportMessage = {
     type: 'aura.viewport.changed',
@@ -69,13 +76,24 @@ export function postViewportTo(frame: HTMLIFrameElement, reason: ViewportReason)
   };
   try { frame.contentWindow?.postMessage(msg, '*'); }
   catch { /* cross-origin or torn-down frame */ }
-  console.debug('[viewport] post', reason, contentW, '×', contentH, frame.id || ''); // TEMP: post-count instrumentation
+  if (log.isEnabled()) log.debug('viewport post', reason, contentW, '×', contentH, frame.id || frame.closest<HTMLElement>('[data-view-id]')?.dataset['viewId'] || '');
 }
 
-/** Post to every app iframe (each gets its own measured box). */
+/**
+ * Post to every app iframe that can use it (each gets its own measured box).
+ * Skipped: frames without a src (a cold activity, lib/iframeWarmer.ts) and
+ * frames with no box (display:none — another workspace, a parked window).
+ * Both get their size when they show: renderLayout broadcasts again and a
+ * frame's `load` posts its mount viewport.
+ */
 export function broadcastViewportChanged(reason: ViewportReason): void {
-  document.querySelectorAll('iframe').forEach((f) =>
-    postViewportTo(f as HTMLIFrameElement, reason));
+  const scales = readScales();
+  document.querySelectorAll('iframe').forEach((node) => {
+    const f = node as HTMLIFrameElement;
+    if (!f.getAttribute('src')) return;
+    if (f.clientWidth === 0 && f.clientHeight === 0) return;
+    postViewportTo(f, reason, scales);
+  });
 }
 
 // Coalesce bursts (a zoom-slider drag) into one broadcast per frame, fired

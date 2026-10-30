@@ -3,7 +3,9 @@ import OSLayout from '../layouts/OSLayout.astro';
 import Icon from '../components/ui/Icon.astro';
 import LayoutManager from '../components/layout/LayoutManager.astro';
 import { getAppManager, DEFAULT_WORKSPACE_STATE, type WorkspaceState } from '@aura/core';
-import { defaultKv } from '@aura/kv-store';
+import { sharedKv } from '../lib/sharedKv';
+import { slotInnerHtml, iframeHtml, SLOT_STYLE } from '../lib/desktop/slotMarkup';
+import { ssrGridLayout } from '../lib/layout/gridShape';
 
 // The shell page must never be served stale: WebView hosts (Android) cache
 // heuristically when no Cache-Control is present, which leaves devices
@@ -23,12 +25,12 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
 // apps the user has never touched fall through to alphabetical order so the
 // dock never looks empty on a first boot. Disabled apps are filtered out so
 // a hidden app can't squat a dock slot.
-const mruMap: Record<string, number> = await (async () => {
-  const kv = defaultKv();
-  try { return (await kv.getValue<Record<string, number>>('os', 'app-mru')) ?? {}; }
-  catch { return {}; }
-  finally { await kv.close().catch(() => undefined); }
-})();
+// Both SSR reads in one round of the shared KV connection (lib/sharedKv.ts).
+const kv = sharedKv();
+const [mruMap, storedWorkspaces] = await Promise.all([
+  kv.getValue<Record<string, number>>('os', 'app-mru').then((v) => v ?? {}).catch(() => ({} as Record<string, number>)),
+  kv.getValue<WorkspaceState>('os', 'workspaces').catch(() => null),
+]);
 const pinnedApps = [...allApps]
   .filter((m) => enabledMap[m.id] !== false)
   // Services are headless by design — they have no UI and clicking their
@@ -48,18 +50,8 @@ const pinnedApps = [...allApps]
 // by bootstrapKv() before any request hits this route. Defaults are used
 // only if Redis is unhealthy (shouldn't happen in steady state).
 let workspaceState: WorkspaceState = DEFAULT_WORKSPACE_STATE;
-{
-  const kv = defaultKv();
-  try {
-    const stored = await kv.getValue<WorkspaceState>('os', 'workspaces');
-    if (stored && Array.isArray(stored.workspaces) && stored.workspaces.length > 0) {
-      workspaceState = stored;
-    }
-  } catch {
-    // fall back to DEFAULT_WORKSPACE_STATE
-  } finally {
-    await kv.close().catch(() => undefined);
-  }
+if (storedWorkspaces && Array.isArray(storedWorkspaces.workspaces) && storedWorkspaces.workspaces.length > 0) {
+  workspaceState = storedWorkspaces;
 }
 
 /**
@@ -198,13 +190,39 @@ const ssrVisibleViews = initialViews
   for (const v of ssrVisibleViews) v.isFocused = focusedId ? v.viewId === focusedId : false;
   if (!ssrVisibleViews.some((v) => v.isFocused) && ssrVisibleViews[0]) ssrVisibleViews[0].isFocused = true;
 }
+
+// The active workspace's slots are rendered straight into #dynamic-layout,
+// with the same markup the desktop script builds (lib/desktop/slotMarkup), so
+// the script ADOPTS them in place: each iframe starts loading while the page
+// is still parsing and loads exactly once (moving or recreating an iframe
+// reloads it). Activities a hide-minimize layout parked stay in the DOM,
+// hidden. Grid cells match the client strategy; Free Window starts as tiling
+// and is re-placed once the script runs (restyling never reloads).
+const parkedIds = new Set<string>(
+  Array.isArray(active.layoutState?.['minimized']) ? (active.layoutState!['minimized'] as string[]) : [],
+);
+const ssrPlaced = ssrVisibleViews.filter((v) => !parkedIds.has(v.viewId));
+const ssrGrid = ssrGridLayout(active.layoutId ?? 'tiling', ssrPlaced.length);
+const ssrSlots = ssrVisibleViews.map((v) => {
+  const i = ssrPlaced.indexOf(v);
+  return {
+    viewId: v.viewId, instanceId: v.instanceId, activityId: v.activityId,
+    style: SLOT_STYLE + (i >= 0 ? (ssrGrid.slots[i] ?? '') : 'display:none;'),
+    html: slotInnerHtml({ minimizable: v.minimizable, bodyHtml: iframeHtml(v.iframeUrl, v.title) }),
+  };
+});
+const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:none; position:absolute; inset:0;';
 ---
 <OSLayout pinnedApps={pinnedApps}>
   <div id="desktop-content">
     <div id="static-layout">
-      <LayoutManager views={ssrVisibleViews} strategyId={active.layoutId} layoutState={active.layoutState} />
+      {ssrPlaced.length === 0 && <LayoutManager views={[]} strategyId={active.layoutId} layoutState={active.layoutState} />}
     </div>
-    <div id="dynamic-layout" style="display:none; position:absolute; inset:0;"></div>
+    <div id="dynamic-layout" style={dynamicLayoutStyle}>
+      {ssrSlots.map((sl) => (
+        <div class="app-slot" data-view-id={sl.viewId} data-instance-id={sl.instanceId} data-activity-id={sl.activityId} data-ssr="1" style={sl.style} set:html={sl.html}></div>
+      ))}
+    </div>
     <!-- Layout-manager extension points (lib/layout/types.ts): the active
          strategy may mount bars into these regions (e.g. Free Window's
          taskbar on top); #dynamic-layout is inset by their measured size, so
@@ -256,6 +274,19 @@ const ssrVisibleViews = initialViews
     postViewportMount,
     setROSuppressed,
   } from '../lib/viewportBroadcaster.ts';
+  import { createLogger } from '@aura/core/logger';
+  import { mark, markTime, onStage, resolveStage, isStageDone, idle, addReportField } from '../lib/bootTimeline.ts';
+  import {
+    createIframeWarmer, parsePolicy, warmOrder, rememberRecentWorkspace, recentWorkspaces,
+    LAZY_KV_KEY, LAZY_STORAGE_KEY,
+  } from '../lib/iframeWarmer.ts';
+  import { subscribeKv } from '../lib/kvClient.ts';
+  import { appsSnapshotStats } from '../lib/appsSnapshot.ts';
+  import { slotInnerHtml, SLOT_STYLE, IFRAME_STYLE } from '../lib/desktop/slotMarkup.ts';
+
+  const layoutLog = createLogger('shell:layout');
+  const iframeLog = createLogger('shell:iframe');
+  resolveStage('chrome-ready');
 
   const keyDispatcher = getKeyDispatcher();
 
@@ -324,8 +355,12 @@ const ssrVisibleViews = initialViews
       const v = views[idx]!;
       const next = typeof text === 'string' && text ? text : undefined;
       if (v.sessionLabel === next) return;
-      views = [...views.slice(0, idx), { ...v, sessionLabel: next }, ...views.slice(idx + 1)];
-      renderLayout();
+      const updated = { ...v, sessionLabel: next };
+      views = [...views.slice(0, idx), updated, ...views.slice(idx + 1)];
+      // Only this window's title text changes — repaint its slot, not the
+      // whole desktop (every terminal reports its label as it loads).
+      const slot = frame?.closest<HTMLElement>('.app-slot');
+      if (slot) updateSlot(slot, updated); else renderLayout();
       return;
     }
 
@@ -609,7 +644,10 @@ const ssrVisibleViews = initialViews
   }
 
   function broadcastClaims(): void {
-    document.querySelectorAll('iframe').forEach((f) => sendClaimList(f as HTMLIFrameElement));
+    // Cold iframes (no src yet) get their list on their first `load`.
+    document.querySelectorAll('iframe').forEach((f) => {
+      if ((f as HTMLIFrameElement).getAttribute('src')) sendClaimList(f as HTMLIFrameElement);
+    });
   }
 
   // Tell app iframes their usable size / scale changed, carrying that iframe's
@@ -1161,6 +1199,100 @@ const ssrVisibleViews = initialViews
   const staticLayout  = document.getElementById('static-layout')!;
   const dynamicLayout = document.getElementById('dynamic-layout')!;
 
+  // ---- Lazy activities (lib/iframeWarmer.ts) --------------------------------
+  // Only the active workspace loads at boot; the others warm in idle time
+  // after it ('warm-idle'), load when opened ('on-demand'), or all at once
+  // ('eager'). Policy: KV os/lazyActivities, localStorage override.
+  const iframeWarmer = createIframeWarmer({
+    load(viewId, reason) {
+      const ifr = dynamicLayout.querySelector<HTMLIFrameElement>(`.app-slot[data-view-id="${CSS.escape(viewId)}"] iframe`);
+      if (!ifr || ifr.dataset['src'] === undefined) return false;
+      loadDeferredIframe(ifr, viewId, reason);
+      return true;
+    },
+    idle: (fn) => idle(fn, { timeout: 3000 }),
+    isHidden: () => document.visibilityState === 'hidden',
+    onVisible: (fn) => {
+      const h = () => { if (document.visibilityState !== 'hidden') { document.removeEventListener('visibilitychange', h); fn(); } };
+      document.addEventListener('visibilitychange', h);
+    },
+    mark: (name, detail) => {
+      mark(name, detail);
+      if (name === 'warm:end') resolveStage('warm:end', detail);
+    },
+  });
+  {
+    let local: string | null = null;
+    try { local = localStorage.getItem(LAZY_STORAGE_KEY); } catch { /* blocked */ }
+    const p = parsePolicy(local);
+    if (p) iframeWarmer.setPolicy(p);
+  }
+
+  /** After the active workspace loaded: read the policy, then warm the rest. */
+  function startWarming(): void {
+    let localOverride = false;
+    try { localOverride = parsePolicy(localStorage.getItem(LAZY_STORAGE_KEY)) !== null; } catch { /* blocked */ }
+    const begin = () => {
+      const st = workspaceClient.getCached();
+      if (!st) return;
+      const active = st.workspaces.find((w) => w.id === st.activeWorkspaceId);
+      const parked = (active?.layoutState as { minimized?: unknown } | undefined)?.minimized;
+      const live = new Set(views.map((v) => v.viewId));
+      const order = warmOrder({
+        workspaces: st.workspaces, activeWorkspaceId: st.activeWorkspaceId,
+        recent: recentWorkspaces(),
+        parked: Array.isArray(parked) ? parked.filter((x): x is string => typeof x === 'string') : [],
+      }).filter((id) => live.has(id));
+      layoutLog.debug('warm order', iframeWarmer.policy(), order);
+      iframeWarmer.start(order);
+      if (iframeWarmer.policy() !== 'warm-idle') resolveStage('warm:end', { policy: iframeWarmer.policy() });
+    };
+    if (localOverride) { begin(); return; }
+    fetch(`/api/kv/os/${LAZY_KV_KEY}`)
+      .then((r) => (r.ok ? r.json() as Promise<{ value?: unknown }> : null))
+      .then((body) => { const p = parsePolicy(body?.value); if (p) iframeWarmer.setPolicy(p); })
+      .catch(() => { /* default policy */ })
+      .finally(begin);
+    subscribeKv({ namespace: 'os', key: LAZY_KV_KEY }, (ev) => {
+      let override = false;
+      try { override = parsePolicy(localStorage.getItem(LAZY_STORAGE_KEY)) !== null; } catch { /* blocked */ }
+      if (override) return;
+      iframeWarmer.setPolicy(parsePolicy(ev.value) ?? 'warm-idle');
+    });
+  }
+
+  /** Stage 1 is done when every visible activity of the active workspace loaded. */
+  function trackActiveWorkspaceLoad(slots: HTMLElement[]): void {
+    const frames = slots
+      .map((el) => el.querySelector<HTMLIFrameElement>('iframe'))
+      .filter((f): f is HTMLIFrameElement => !!f && !!f.getAttribute('src'));
+    if (frames.length === 0) { resolveStage('ws:active-loaded', { frames: 0 }); return; }
+    let left = frames.length;
+    const one = () => { if (--left === 0) resolveStage('ws:active-loaded', { frames: frames.length }); };
+    for (const f of frames) {
+      if (isIframeLoaded(f)) one();
+      else f.addEventListener('load', one, { once: true });
+    }
+    // An app that never fires `load` must not hold the rest of the boot back.
+    setTimeout(() => {
+      if (!isStageDone('ws:active-loaded')) resolveStage('ws:active-loaded', { frames: frames.length, pending: left, timeout: true });
+    }, 8000);
+  }
+  let bootRendered = false;
+  /** Other workspaces' slots are built only after boot stage 1. */
+  let hiddenSlotsReady = false;
+  let lastActiveWsId: string | null = null;
+  let renderCount = 0;
+  addReportField('desktop', () => ({
+    lazyPolicy: iframeWarmer.policy(),
+    renders: renderCount,
+    renderCallers: Object.fromEntries(renderCallers),
+    iframes: document.querySelectorAll('#dynamic-layout iframe').length,
+    iframesWithSrc: iframeSrcCount,
+    warmPending: iframeWarmer.pending().length,
+    appsSnapshot: appsSnapshotStats(),
+  }));
+
   // ---- Layout-manager host (lib/layout/types.ts) ----------------------------
   //
   // renderLayout() delegates activity placement to the active workspace's
@@ -1270,7 +1402,12 @@ const ssrVisibleViews = initialViews
     views: () => lastLayoutViews,
     slotOf: (viewId) => dynamicLayout.querySelector<HTMLElement>(`:scope > .app-slot[data-view-id="${CSS.escape(viewId)}"]`),
     maximizedViewId: () => maximizedViewId,
-    layoutState: () => (activeWorkspaceOf()?.layoutState ?? {}) as Record<string, unknown>,
+    // Read-only (LayoutHost contract): served from the cache without a copy —
+    // layouts read it per activity, per render.
+    layoutState: () => {
+      const st = workspaceClient.peekCached();
+      return (st?.workspaces.find((w) => w.id === st.activeWorkspaceId)?.layoutState ?? {}) as Record<string, unknown>;
+    },
     patchLayoutState: patchActiveLayoutState,
     focus: (viewId) => focusView_(viewId),
     minimize: (viewId) => minimizeView_(viewId),
@@ -1902,7 +2039,7 @@ const ssrVisibleViews = initialViews
       slot.dataset['instanceId'] = next.instanceId;
       slot.dataset['activityId'] = next.activityId ?? '';
       const iframe = slot.querySelector<HTMLIFrameElement>('iframe');
-      if (iframe && iframe.getAttribute('src') !== next.iframeUrl) iframe.src = next.iframeUrl;
+      if (iframe) setIframeUrl(iframe, next.iframeUrl);
     }
     markLaunchedHere(next.viewId);
     renderLayout();
@@ -2039,6 +2176,12 @@ const ssrVisibleViews = initialViews
     const body = slot.querySelector<HTMLElement>('.slot-body');
     const ifr  = slot.querySelector<HTMLIFrameElement>('iframe');
     if (!body || !ifr) return;
+    // Never loaded yet (cold): reloading it means loading it.
+    if (ifr.dataset['src'] !== undefined) {
+      iframeWarmer.allow([viewId]);
+      loadDeferredIframe(ifr, viewId, 'refresh');
+      return;
+    }
     // Re-arm the skeleton overlay — the initial load listener installed in
     // updateSlot is `{ once: true }` and has already been consumed.
     if (!body.querySelector('[data-aura-skeleton]')) {
@@ -2115,7 +2258,15 @@ const ssrVisibleViews = initialViews
    *   4. App slots — diff by viewId: keep, create, or remove. Reorder via
    *      `appendChild` (which moves an existing node, no re-mount).
    */
+  /** Who asked for renders (only tracked while shell:layout logging is on). */
+  const renderCallers = new Map<string, number>();
   function renderLayout() {
+    const t0 = performance.now();
+    renderCount++;
+    if (layoutLog.isEnabled()) {
+      const caller = (new Error().stack ?? '').split('\n')[2]?.trim().replace(/https?:\/\/[^/]+/, '').replace(/\?[^:]*/, '') ?? '?';
+      renderCallers.set(caller, (renderCallers.get(caller) ?? 0) + 1);
+    }
     // Once JS is in charge, never fall back to the SSR static layout — its
     // buttons are bound to a snapshot and would show stale content after close.
     staticLayout.style.display = 'none';
@@ -2138,13 +2289,17 @@ const ssrVisibleViews = initialViews
     //     instant + state-preserving instead of reloading the app.
     //   • Views removed from `views` entirely (close, crash) get pruned
     //     from the DOM later in this function.
-    const wsState = workspaceClient.getCached();
+    const wsState = workspaceClient.peekCached();   // read-only: no deep copy per render
     let workspaceMembers: Set<string> | null = null;
     if (wsState) {
       const ws = wsState.workspaces.find(w => w.id === wsState.activeWorkspaceId);
       if (ws) workspaceMembers = new Set(ws.members);
     }
     const activeWsId = wsState?.activeWorkspaceId ?? null;
+    if (activeWsId && activeWsId !== lastActiveWsId) {
+      lastActiveWsId = activeWsId;
+      rememberRecentWorkspace(activeWsId);
+    }
     const inActiveWorkspace = (v: AppView) => {
       // Placeholders (instanceId === '') are pinned to the workspace that
       // was active at the moment of launch — see `pendingWorkspace` map.
@@ -2289,6 +2444,17 @@ const ssrVisibleViews = initialViews
     });
     const keep = new Set<string>();
 
+    // The active workspace's activities may load now. Those that were cold
+    // (a switch onto a workspace the warmer had not reached) load right here.
+    const coldNow = iframeWarmer.allow(visible.map((v) => v.viewId)).filter((id) => existing.has(id));
+    if (bootRendered && coldNow.length) mark('ws:switch-cold', { ws: activeWsId, views: coldNow.length });
+    // Views no workspace owns (services, background apps without a window)
+    // keep loading at once, as before: only other workspaces' activities wait.
+    if (wsState) {
+      const owned = new Set(wsState.workspaces.flatMap((w) => w.members));
+      iframeWarmer.allow(hidden.filter((v) => !owned.has(v.viewId)).map((v) => v.viewId));
+    }
+
     visible.forEach((v, i) => {
       keep.add(v.viewId);
       let el = existing.get(v.viewId);
@@ -2356,14 +2522,9 @@ const ssrVisibleViews = initialViews
       el.style.display = 'none';
     }
 
-    // SSR iframes have to go now that the dynamic ones are mounted. They
-    // were rendered by Astro into #static-layout and would otherwise keep
-    // running their scripts (terminal WS connectors, polling fetches…) in
-    // the background — `display:none` doesn't unload an iframe's
-    // browsing context. With per-instance session keys in pty-server, the
-    // SSR + dynamic iframes for the same view both connect with the same
-    // sessionId and bounce each other every ~2 s. Tear down here, AFTER
-    // the dynamic replacements are in place, to avoid any visible gap.
+    // #static-layout only holds the server-rendered empty-desktop hint; the
+    // server-rendered activity slots live in #dynamicLayout and were adopted
+    // above (an iframe moved or recreated would load its app a second time).
     if (staticLayout.firstChild) staticLayout.replaceChildren();
 
     // Hidden-in-other-workspace slots: keep DOM + iframe alive but make
@@ -2373,6 +2534,10 @@ const ssrVisibleViews = initialViews
     for (const v of hidden) {
       keep.add(v.viewId);
       let el = existing.get(v.viewId);
+      // Until the active workspace has loaded, other workspaces' slots are
+      // not built at all (boot stage 1 stays short); the idle pass after it
+      // builds them, then the warmer fills them.
+      if (!el && !hiddenSlotsReady) continue;
       if (!el) {
         // First time we're seeing this view AND it's not in the active
         // workspace — still create the slot (otherwise switching to its
@@ -2398,9 +2563,12 @@ const ssrVisibleViews = initialViews
     // hanging app can't block the shell.
     for (const [viewId, el] of existing) {
       if (keep.has(viewId)) continue;
+      iframeWarmer.forget(viewId);
       const ifr = el.querySelector('iframe') as HTMLIFrameElement | null;
       if (ifr) unobserveIframe(ifr); // stop the RO before the element is torn down
-      if (ifr?.contentWindow) {
+      if (ifr && !ifr.getAttribute('src')) {
+        el.remove(); // never loaded: no app to shut down
+      } else if (ifr?.contentWindow) {
         try { ifr.contentWindow.postMessage({ type: 'aura.shutdown' }, '*'); } catch (_) { /* ignore */ }
         // Race the ack against a hard timeout. Either way el.remove() runs.
         const done = new Promise<void>((resolve) => {
@@ -2435,6 +2603,25 @@ const ssrVisibleViews = initialViews
     // Phase 4: window-bound UI (notification dialogues) re-checks where its
     // windows are — a minimized slot was just destroyed, a restored one re-created.
     document.dispatchEvent(new CustomEvent('aura:views.changed'));
+
+    const ms = performance.now() - t0;
+    if (layoutLog.isEnabled()) {
+      layoutLog.debug(`render #${renderCount}`, `${ms.toFixed(1)}ms`, { visible: visible.length, parked: parked.length, hidden: hidden.length, layout: layoutId });
+    }
+    if (!bootRendered) {
+      bootRendered = true;
+      mark('layout:first-render', { visible: visible.length, hidden: hidden.length, ms: Math.round(ms) });
+      const visibleSlots = visible
+        .map((v) => dynamicLayout.querySelector<HTMLElement>(`:scope > .app-slot[data-view-id="${CSS.escape(v.viewId)}"]`))
+        .filter((el): el is HTMLElement => !!el);
+      trackActiveWorkspaceLoad(visibleSlots);
+      onStage('ws:active-loaded', () => idle(() => {
+        hiddenSlotsReady = true;
+        renderLayout();
+        mark('layout:hidden-slots', { slots: dynamicLayout.querySelectorAll(':scope > .app-slot').length });
+        startWarming();
+      }, { timeout: 1500 }));
+    }
   }
 
   function createSlot(v: AppView): HTMLElement {
@@ -2443,60 +2630,11 @@ const ssrVisibleViews = initialViews
     slot.dataset['viewId']     = v.viewId;
     slot.dataset['instanceId'] = v.instanceId;
     if (v.activityId) slot.dataset['activityId'] = v.activityId;
-    slot.style.cssText = 'display:flex;flex-direction:column;background:var(--aura-color-surface);border:var(--aura-border);overflow:clip;';
-    // Minimize is opt-in per view (set by activity / non-activity manifest
-    // gating in buildView). Without it the slot only offers close — pressing
-    // X tears the activity down; there's no "hide for later" affordance for
-    // apps whose backend can't survive without a visible window.
-    const btnStyle = 'background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 10px;cursor:pointer;line-height:1;';
-    // Rendered for every activity; updateSlot() shows it when the view is
-    // minimizable OR the active layout minimizes by hiding (keeps the app
-    // alive, so any activity can be minimized there).
-    const minimizeBtn = `<button data-action="minimize" class="slot-minimize-btn" title="Minimize" style="${btnStyle}${v.minimizable ? '' : ';display:none;'}">_</button>`;
-    // Title-bar buttons contributed by the active layout strategy
-    // (ShellLayoutStrategy.chromeButtons) — filled by updateSlot().
-    const layoutBtns = `<span class="slot-layout-btns" style="display:contents;"></span>`;
-    // Maximize == in-place focus: promote this slot to fill the desktop
-    // WITHOUT reloading its iframe (renderLayout restyles the existing slot;
-    // see maximizeView_). Sibling of close so the user can promote any tiled
-    // slot into single-window mode with one click — the [ ] glyph matches the
-    // "expand window" affordance used by most desktop chrome. updateSlot()
-    // swaps the glyph/title to a restore affordance while this view is the
-    // maximized one.
-    const maximizeBtn = `<button data-action="maximize" class="slot-maximize-btn" title="Focus this window (maximize)" style="${btnStyle}">[ ]</button>`;
-    // Full-size (focus mode only): toggles the maximized window between
-    // filling the DESKTOP area and covering the ENTIRE shell (over the status
-    // bar + dock). Hidden until this window is the maximized one — updateSlot()
-    // reveals it + swaps its glyph. This restores the old focus-overlay's
-    // "⛶ FULL SIZE" button without the separate reloading iframe.
-    // Sits right of maximize (the exit-focus ⊟ while focused).
-    const fullSizeBtn = `<button data-action="maximize-full" class="slot-fullsize-btn" title="Full size (cover bars)" style="${btnStyle};display:none;"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-maximize"/></svg></button>`;
-    // Refresh = reload the iframe in place. Sits left of minimize, away from
-    // close, which stays the rightmost destructive action. ↻ glyph matches the
-    // browser refresh affordance most users already know.
-    const refreshBtn  = `<button data-action="refresh" title="Reload window" style="${btnStyle}"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-rotate-cw"/></svg></button>`;
-    // Rename = set this window's ephemeral user label. Leftmost (least
-    // destructive) control; ✎ matches the "edit/rename" affordance.
-    const renameBtn   = `<button data-action="rename" title="Name this window" style="${btnStyle}"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-pencil"/></svg></button>`;
-    slot.innerHTML = `
-      <div class="slot-chrome" style="display:flex;align-items:center;justify-content:space-between;padding:0 8px;height:28px;background:var(--aura-color-surface-2);border-bottom:var(--aura-border);flex-shrink:0;gap:8px;min-width:0;">
-        <div class="slot-title" title="Double-click to name this window" style="flex:1;min-width:0;display:flex;align-items:center;gap:6px;overflow:hidden;color:var(--aura-color-primary);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.08em;">
-          <span class="slot-window-name" style="display:none;flex-shrink:0;max-width:24ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:1px 6px;background:var(--aura-color-surface);border:var(--aura-border);color:var(--aura-color-primary);text-transform:none;letter-spacing:0.04em;"></span>
-          <span class="slot-title-trail" style="display:flex;align-items:center;gap:4px;flex:1;min-width:0;overflow:hidden;"></span>
-          <span class="slot-title-id" style="color:var(--aura-color-text-dim);font-size:0.6rem;flex-shrink:0;"></span>
-        </div>
-        <div class="slot-controls" style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
-          <span class="slot-focus-hint" style="display:none;align-items:center;gap:4px;margin-right:4px;padding:1px 6px;border:1px solid var(--aura-color-primary);color:var(--aura-color-primary);font-family:var(--aura-font-mono);font-size:0.55rem;letter-spacing:0.1em;white-space:nowrap;"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-circle-dot"/></svg> FOCUS · ESC</span>
-          ${renameBtn}
-          ${layoutBtns}
-          ${refreshBtn}
-          ${minimizeBtn}
-          ${maximizeBtn}
-          ${fullSizeBtn}
-          <button data-action="close" class="slot-close-btn" title="Close" style="background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 10px;cursor:pointer;line-height:1;"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-x"/></svg></button>
-        </div>
-      </div>
-      <div class="slot-body" style="flex:1;overflow:clip;position:relative;"></div>`;
+    slot.style.cssText = SLOT_STYLE;
+    // Same markup the server renders for the active workspace
+    // (lib/desktop/slotMarkup.ts): minimize is opt-in per view, the rest of
+    // the title bar is filled by updateSlot().
+    slot.innerHTML = slotInnerHtml({ minimizable: v.minimizable });
     updateSlot(slot, v);
     return slot;
   }
@@ -2627,11 +2765,22 @@ const ssrVisibleViews = initialViews
     // iframe element until we have a real URL.
     if (v.isLoading) return;
 
-    // Transition: backend says resumed → mount iframe ONCE under the
-    // skeleton overlay. Skeleton stays visible until the iframe's `load`
-    // event fires, which is when the embedded app's document has finished
-    // loading (scripts have run, splash is painted). Then we remove it.
-    if (!hasIframe && v.iframeUrl) {
+    const existing = body.querySelector('iframe') as HTMLIFrameElement | null;
+    if (existing) {
+      // A server-rendered iframe (adopted in place, already loading or done)
+      // gets the same listeners as one we create. A cold iframe (other
+      // workspace, src still in data-src) loads once the warmer allows it.
+      if (!existing.dataset['wired']) wireIframe(existing, body, v);
+      if (existing.dataset['src'] !== undefined && iframeWarmer.isWarm(v.viewId)) {
+        loadDeferredIframe(existing, v.viewId, 'active');
+      }
+      return;
+    }
+
+    // Transition: backend says resumed → mount the iframe ONCE under the
+    // skeleton overlay. The skeleton stays until the iframe's `load` (the
+    // embedded app's document has loaded, splash painted).
+    if (v.iframeUrl) {
       const iframe = document.createElement('iframe');
       iframe.title = v.title;
       // No `allow=` attribute: our iframes are same-origin (proxied through
@@ -2639,45 +2788,16 @@ const ssrVisibleViews = initialViews
       // are inherited from the parent. Firefox warns ("unsupported feature
       // name") on Chrome-specific Permissions Policy strings like
       // `clipboard-read`/`clipboard-write`, which we don't need anyway.
-      iframe.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border:none;background:transparent;';
-      iframe.addEventListener('load', () => {
-        // Two RAFs = "wait until the browser has actually painted the iframe
-        // contents, then remove the overlay". Without this, fast-loading
-        // iframes flash black for one frame between onload and first paint.
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          const sk = body.querySelector('[data-aura-skeleton]');
-          if (sk) sk.remove();
-        }));
-      }, { once: true });
-      // Send the current claim list once the iframe's window object is
-      // ready to receive messages. Hooks every iframe (not { once: true })
-      // because each navigation inside the iframe re-emits `load`.
-      iframe.addEventListener('load', () => sendClaimList(iframe));
-      // Hand the freshly-loaded iframe the current viewport scale so an app
-      // opened INTO an already-zoomed/tiled shell fits on first paint
-      // (no layout/zoom change will fire afterwards to trigger a re-fit).
-      // Seeds the observer's dedupe so its initial fire for the same box is a
-      // no-op (no double mount fit).
-      iframe.addEventListener('load', () => postViewportMount(iframe));
-      // Auto-enter newly-launched windows: same end-state as Enter on a
-      // highlighted slot in window-select mode — focus the iframe + post
-      // `aura.window.focus` so the app's SDK helper (installGridNav)
-      // routes focus to its first interactive element (e.g. Settings'
-      // first tile, terminal's xterm textarea). One-shot per view: the
-      // `pendingAutoFocusViewIds` membership is consumed here.
-      const viewId = v.viewId;
-      iframe.addEventListener('load', () => {
-        if (!pendingAutoFocusViewIds.has(viewId)) return;
-        pendingAutoFocusViewIds.delete(viewId);
-        // rAF defer past the browser's iframe-focus-transfer microtask
-        // (same race the terminal's `term.focus()` hit on Enter).
-        requestAnimationFrame(() => {
-          iframe.focus();
-          try { iframe.contentWindow?.postMessage({ type: 'aura.window.focus' }, '*'); }
-          catch { /* iframe gone or cross-origin */ }
-        });
-      }, { once: true });
-      iframe.src = v.iframeUrl;
+      iframe.style.cssText = IFRAME_STYLE;
+      wireIframe(iframe, body, v);
+      // Only activities that may load now get a src (lib/iframeWarmer.ts):
+      // the active workspace at once, the others when warmed or opened.
+      if (iframeWarmer.isWarm(v.viewId)) {
+        iframe.src = v.iframeUrl;
+        noteIframeSrc(v.viewId, 'active');
+      } else {
+        iframe.dataset['src'] = v.iframeUrl;
+      }
       // Insert as the FIRST child so the skeleton (appended above) stays on top.
       body.insertBefore(iframe, body.firstChild);
       // Geometry-driven refit hook — a SUPPLEMENT to the explicit broadcasts in
@@ -2687,6 +2807,88 @@ const ssrVisibleViews = initialViews
       // renderLayout; deduped + idempotent at the app, so it never double-fits.
       observeIframe(iframe);
     }
+  }
+
+  /** True once `iframe` shows its app's document (not the initial about:blank). */
+  function isIframeLoaded(iframe: HTMLIFrameElement): boolean {
+    if (!iframe.getAttribute('src')) return false;
+    try {
+      const doc = iframe.contentDocument;
+      return !!doc && doc.readyState === 'complete' && doc.URL !== 'about:blank';
+    } catch { return true; /* not same-origin: it navigated, so it loaded */ }
+  }
+
+  /**
+   * Hook an activity iframe's lifecycle: skeleton removal, the key-claim list
+   * and viewport on every load, the one-shot auto-focus of a just-launched
+   * window. For an adopted server-rendered iframe that already finished
+   * loading, the per-load work runs right away (its `load` came before this
+   * script).
+   */
+  function wireIframe(iframe: HTMLIFrameElement, body: HTMLElement, v: AppView): void {
+    iframe.dataset['wired'] = '1';
+    const viewId = v.viewId;
+    let firstLoadDone = false;
+    const onLoad = (adopted: boolean) => {
+      // A src-less (cold) iframe fires `load` for its initial about:blank.
+      if (!iframe.getAttribute('src')) return;
+      if (!firstLoadDone) {
+        firstLoadDone = true;
+        if (markTime('iframe:first-load') === null) mark('iframe:first-load', viewId);
+        iframeLog.debug('load', viewId, adopted ? '(adopted, already loaded)' : '');
+        // Two RAFs = "wait until the browser has actually painted the iframe
+        // contents, then remove the overlay". Without this, fast-loading
+        // iframes flash black for one frame between onload and first paint.
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const sk = body.querySelector('[data-aura-skeleton]');
+          if (sk) sk.remove();
+        }));
+        // Auto-enter newly-launched windows: same end-state as Enter on a
+        // highlighted slot in window-select mode — focus the iframe + post
+        // `aura.window.focus` so the app's SDK helper (installGridNav)
+        // routes focus to its first interactive element. One-shot per view.
+        if (pendingAutoFocusViewIds.has(viewId)) {
+          pendingAutoFocusViewIds.delete(viewId);
+          // rAF defer past the browser's iframe-focus-transfer microtask
+          // (same race the terminal's `term.focus()` hit on Enter).
+          requestAnimationFrame(() => {
+            iframe.focus();
+            try { iframe.contentWindow?.postMessage({ type: 'aura.window.focus' }, '*'); }
+            catch { /* iframe gone or cross-origin */ }
+          });
+        }
+      }
+      // Every load (each in-iframe navigation re-emits it): the current claim
+      // list, and the viewport scale so an app opened INTO an already-zoomed
+      // shell fits on first paint (seeds the observer's dedupe too).
+      sendClaimList(iframe);
+      postViewportMount(iframe);
+    };
+    iframe.addEventListener('load', () => onLoad(false));
+    if (iframe.isConnected && isIframeLoaded(iframe)) onLoad(true);
+    if (iframe.isConnected) observeIframe(iframe);
+  }
+
+  /** Give a cold iframe its src (lib/iframeWarmer.ts decided it may load). */
+  function loadDeferredIframe(iframe: HTMLIFrameElement, viewId: string, reason: string): void {
+    const src = iframe.dataset['src'];
+    delete iframe.dataset['src'];
+    if (!src) return;
+    iframe.src = src;
+    noteIframeSrc(viewId, reason);
+  }
+
+  /** Point an iframe at `url` — a cold one just keeps the new url for later. */
+  function setIframeUrl(iframe: HTMLIFrameElement, url: string): void {
+    if (iframe.dataset['src'] !== undefined) { iframe.dataset['src'] = url; return; }
+    if (iframe.getAttribute('src') !== url) iframe.src = url;
+  }
+
+  let iframeSrcCount = 0;
+  function noteIframeSrc(viewId: string, reason: string): void {
+    iframeSrcCount++;
+    if (iframeSrcCount === 1) mark('iframe:first-src', viewId);
+    iframeLog.debug('src', viewId, reason, `#${iframeSrcCount}`);
   }
 
   function escapeHtml(s: string): string {
@@ -2884,15 +3086,19 @@ const ssrVisibleViews = initialViews
     currentStrategy?.onActivate?.(viewId, layoutHost);
   }
 
-  // After hydration, if the SSR layout was non-empty, push it through the JS
-  // pipeline so close/minimize/SSE updates are wired up uniformly. The SSR DOM
-  // is replaced with the JS-managed dynamicLayout — same content, live handlers.
-  if (views.length > 0) renderLayout();
-
+  // After hydration, push the views through the JS pipeline so close/minimize/
+  // SSE updates are wired up uniformly. The server-rendered slots of the active
+  // workspace are adopted in place (same markup, lib/desktop/slotMarkup.ts) —
+  // their iframes keep loading, nothing is rendered twice.
+  //
   // Workspace state mutations (active switch, member edits made from another
   // tab / the Settings page, etc.) re-render the desktop — `inActiveWorkspace`
-  // picks up the new filter via `workspaceClient.getCached()`.
+  // picks up the new filter via `workspaceClient.getCached()`. subscribe()
+  // replays the hydrated state at once, which IS the boot render; render
+  // explicitly only when there was nothing to replay.
+  const hadWorkspaceState = workspaceClient.getCached() !== null;
   workspaceClient.subscribe(() => renderLayout());
+  if (!hadWorkspaceState && views.length > 0) renderLayout();
 
   // Browser window resize changes every iframe's content box without a
   // renderLayout (the CSS Grid just reflows). Rebroadcast centrally so apps
@@ -3398,7 +3604,7 @@ const ssrVisibleViews = initialViews
         ];
         const slot = document.querySelector<HTMLElement>(`.app-slot[data-view-id="${CSS.escape(v.viewId)}"]`);
         const iframe = slot?.querySelector<HTMLIFrameElement>('iframe');
-        if (iframe && iframe.getAttribute('src') !== nextUrl) iframe.src = nextUrl;
+        if (iframe) setIframeUrl(iframe, nextUrl);
         renderLayout(); // refresh title chrome (breadcrumb trail + title)
       }
     }

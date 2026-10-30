@@ -212,6 +212,15 @@ export function getCached(): WorkspaceState | null {
   return cached ? clone(cached) : null;
 }
 
+/**
+ * The cached state itself, without the deep copy getCached() makes. For hot
+ * read-only paths (every desktop render, a layout's per-activity reads): the
+ * copy cost grows with every workspace's layoutState. Never mutate the result.
+ */
+export function peekCached(): Readonly<WorkspaceState> | null {
+  return cached;
+}
+
 export async function refresh(): Promise<WorkspaceState> {
   const gen = writeGen;
   const res = await fetchWithBootRetry(ENDPOINT);

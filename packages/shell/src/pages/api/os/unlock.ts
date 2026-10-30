@@ -1,5 +1,6 @@
 import type { APIRoute } from 'astro';
 import { defaultKv } from '@aura/kv-store';
+import { OsEventBus } from '@aura/core';
 
 /**
  * POST /api/os/unlock — dismiss the lock screen. No body.
@@ -14,6 +15,8 @@ export const POST: APIRoute = async () => {
     const current = (await kv.getValue<Record<string, unknown>>('os', 'lockscreen')) ?? {};
     const value = { ...current, unlockAt: Date.now() };
     await kv.set('os', 'lockscreen', value);
+    // Live path for open desktops (LockScreenOverlay listens; it also polls).
+    OsEventBus.emit('kv:changed', { namespace: 'os', key: 'lockscreen', value });
     return json({ locked: false, at: value.unlockAt });
   } catch (err) {
     return json({ error: (err as Error).message }, 500);

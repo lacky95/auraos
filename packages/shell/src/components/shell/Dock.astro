@@ -42,6 +42,7 @@ const { apps, enabledMap = {} } = Astro.props;
   <button
     id="dock-launcher-btn"
     type="button"
+    data-early-click="launcher"
     class="launcher-btn"
     title="All Apps">
     <span class="grid-icon"><Icon name="grip" /></span>
@@ -380,6 +381,7 @@ const { apps, enabledMap = {} } = Astro.props;
 </style>
 
 <script>
+  import { markBarReady } from '../../lib/bootTimeline.ts';
   import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
   const keyDispatcher = getKeyDispatcher();
 
@@ -747,4 +749,7 @@ const { apps, enabledMap = {} } = Astro.props;
       });
     }
   }
+
+  // Boot stage 2: this bar's triggers work from here on.
+  markBarReady('dock');
 </script>

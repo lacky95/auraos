@@ -26,7 +26,12 @@ const colorMode   = theme.colorMode ?? 'dark';
 // Desktop session (shell lib/desktopSession.ts): bring the activities back
 // after an OS restart. Unset = on.
 const restoreSession = await readKv<boolean>('restoreSession', true);
-const state = { clockFormat, locale, timeZone, colorMode, restoreSession };
+// Desktop loading (shell lib/iframeWarmer.ts): when activities of the other
+// workspaces load after a reload. Unset = warm-idle.
+const lazyActivities = await readKv<string>('lazyActivities', 'warm-idle');
+// Desktop log filter (shell lib/logControl.ts) — '' = off.
+const frontendLog = await readKv<string>('frontendLog', '');
+const state = { clockFormat, locale, timeZone, colorMode, restoreSession, lazyActivities, frontendLog };
 ---
 <!DOCTYPE html>
 <html lang="en">
@@ -88,11 +93,41 @@ const state = { clockFormat, locale, timeZone, colorMode, restoreSession };
         </p>
       </div>
     </div>
+    <div class="form-row" style="align-items: flex-start;">
+      <label for="lazy-activities">LOAD OTHER WORKSPACES</label>
+      <div>
+        <select id="lazy-activities">
+          <option value="warm-idle" selected={state.lazyActivities === 'warm-idle'}>In the background, after the current one</option>
+          <option value="on-demand" selected={state.lazyActivities === 'on-demand'}>Only when I open them</option>
+          <option value="eager" selected={state.lazyActivities === 'eager'}>All at once (slowest start)</option>
+        </select>
+        <p style="margin-top: 6px; font-size: 0.6rem; color: var(--aura-color-text-dim); letter-spacing: 0.06em;">
+          AFTER A RELOAD THE CURRENT WORKSPACE ALWAYS LOADS FIRST · OPEN DESKTOPS FOLLOW AT ONCE
+        </p>
+      </div>
+    </div>
+    <div class="form-row" style="align-items: flex-start;">
+      <label for="frontend-log">FRONTEND LOGGING</label>
+      <div>
+        <input id="frontend-log" type="text" list="frontend-log-presets" autocomplete="off" spellcheck="false"
+               placeholder="OFF" value={state.frontendLog} />
+        <datalist id="frontend-log-presets">
+          <option value="shell:*">desktop boot, layout, iframes, fetches, events</option>
+          <option value="shell:boot">boot timeline only</option>
+          <option value="shell:boot,shell:iframe">boot timeline + activity loading</option>
+          <option value="*">everything (noisy)</option>
+        </datalist>
+        <p style="margin-top: 6px; font-size: 0.6rem; color: var(--aura-color-text-dim); letter-spacing: 0.06em;">
+          LOG FILTER FOR THE DESKTOP'S BROWSER CONSOLE · EMPTY = OFF · WITH shell:boot EVERY LOAD ALSO
+          POSTS ITS TIMELINE TO /api/os/boot-report · PER TAB: ?log=&lt;filter&gt; ON THE DESKTOP URL
+        </p>
+      </div>
+    </div>
     <p id="status" style="margin-top: 14px; font-size: 0.7rem; color: var(--aura-color-text-dim); letter-spacing: 0.08em;">
       CHANGES PERSIST IMMEDIATELY · PUT /api/kv/os/&lt;field&gt;
     </p>
   </main>
-  <footer class="settings-foot">PROVIDER · /api/kv/os/clockFormat + /api/kv/os/locale + /api/kv/os/timeZone + /api/kv/os/restoreSession + /api/kv/os/theme (mode)</footer>
+  <footer class="settings-foot">PROVIDER · /api/kv/os/clockFormat + /api/kv/os/locale + /api/kv/os/timeZone + /api/kv/os/restoreSession + /api/kv/os/lazyActivities + /api/kv/os/frontendLog + /api/kv/os/theme (mode)</footer>
 
   <script is:inline>
     const statusEl = document.getElementById('status');
@@ -116,6 +151,8 @@ const state = { clockFormat, locale, timeZone, colorMode, restoreSession };
 
     document.getElementById('clock-format').addEventListener('change', (e) => patch('clockFormat', e.target.value));
     document.getElementById('restore-session').addEventListener('change', (e) => patch('restoreSession', e.target.checked));
+    document.getElementById('lazy-activities').addEventListener('change', (e) => patch('lazyActivities', e.target.value));
+    document.getElementById('frontend-log').addEventListener('input', (e) => patch('frontendLog', e.target.value.trim()));
     document.getElementById('locale').addEventListener('input', (e) => patch('locale', e.target.value));
     // ── Time-zone combobox ─────────────────────────────────────────────
     // Fuzzy search over the IANA list: every typed character must appear in

@@ -6,6 +6,8 @@
  * rendering: surfaces render from `store` and act through `actions`.
  */
 import { NotificationApiClient } from './api.ts';
+import { getAppsSnapshot } from '../appsSnapshot.ts';
+import { mark, onStage, resolveStage } from '../bootTimeline.ts';
 import { NotificationClientStore, type StoreEvents } from './store.ts';
 import { NotificationActions } from './actions.ts';
 import type { AppInfo, AppLookup } from './format.ts';
@@ -89,9 +91,7 @@ async function createRuntime(): Promise<NotificationsRuntime> {
   const loadApps = async () => {
     lastLoad = Date.now();
     try {
-      const res = await fetch('/api/apps');
-      if (!res.ok) return;
-      const list = await res.json() as Array<{ manifest?: { id?: string; name?: string; icon?: string } }>;
+      const list = await getAppsSnapshot({ maxAgeMs: 30_000 });
       apps.clear();
       for (const a of list) {
         const m = a.manifest;
@@ -109,7 +109,7 @@ async function createRuntime(): Promise<NotificationsRuntime> {
     return hit;
   };
 
-  void store.start();
+  void store.start().finally(() => resolveStage('notif:ready'));
   return {
     api, store, actions, appLookup,
     onAppsChanged(fn) { appListeners.add(fn); return () => { appListeners.delete(fn); }; },
@@ -124,6 +124,18 @@ export function getNotifications(): Promise<NotificationsRuntime> {
   if (typeof window === 'undefined') return Promise.reject(new Error('notifications runtime is browser-only'));
   const existing = window.__auraNotifications;
   if (existing && !existing.store.isDisposed) return Promise.resolve(existing);
-  pending ??= createRuntime().then((rt) => { window.__auraNotifications = rt; pending = null; return rt; });
+  pending ??= bootGate().then(createRuntime).then((rt) => { window.__auraNotifications = rt; pending = null; return rt; });
   return pending;
+}
+
+/**
+ * Notifications are the desktop's lowest boot priority: on the desktop page
+ * (where the boot timeline runs) the runtime — its fetches and socket
+ * subscriptions — starts once the active workspace has loaded (boot stage 1),
+ * or after 5 s at the latest. Elsewhere (tests, other pages) at once.
+ * Notifications that arrive meanwhile are in the first list fetch.
+ */
+function bootGate(): Promise<void> {
+  if (!(window as unknown as { __auraBoot?: unknown }).__auraBoot) return Promise.resolve();
+  return new Promise((resolve) => onStage('ws:active-loaded', () => { mark('notif:start'); resolve(); }, { timeoutMs: 5000 }));
 }

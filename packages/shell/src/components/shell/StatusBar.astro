@@ -1,7 +1,7 @@
 ---
 import ViewportSettingsDialog from './ViewportSettingsDialog.tsx';
 import AboutDialog from './AboutDialog.tsx';
-import { defaultKv } from '@aura/kv-store';
+import { sharedKv } from '../../lib/sharedKv';
 import Icon from '../ui/Icon.astro';
 
 // SSR-resolve clock format + locale from the OS KV so the first paint matches
@@ -14,20 +14,21 @@ let initialLocale: string = 'en-GB';
 // IANA zone from Settings → General; '' = the device's own zone.
 let initialTimeZone: string = '';
 {
-  const kv = defaultKv();
+  const kv = sharedKv();
   try {
-    const cf = await kv.getValue<'12h' | '24h'>('os', 'clockFormat');
+    const [cf, lc, tz] = await Promise.all([
+      kv.getValue<'12h' | '24h'>('os', 'clockFormat'),
+      kv.getValue<string>('os', 'locale'),
+      kv.getValue<string>('os', 'timeZone'),
+    ]);
     if (cf === '12h' || cf === '24h') initialClockFormat = cf;
-    const lc = await kv.getValue<string>('os', 'locale');
     if (typeof lc === 'string' && lc) initialLocale = lc;
-    const tz = await kv.getValue<string>('os', 'timeZone');
     if (typeof tz === 'string') initialTimeZone = tz;
   } catch { /* fall back to defaults */ }
-  finally { await kv.close().catch(() => undefined); }
 }
 ---
 <header id="statusbar">
-  <span id="os-about-btn" class="os-name" role="button" tabindex="0" aria-haspopup="dialog" title="About AuraOS">AURA<span class="os-ver">OS</span></span>
+  <span id="os-about-btn" class="os-name" role="button" tabindex="0" aria-haspopup="dialog" title="About AuraOS" data-early-click="about">AURA<span class="os-ver">OS</span></span>
   <div class="right">
     <!--
       Workspace switcher: a row of numbered pills (1..N) plus a [+] add-new
@@ -140,21 +141,19 @@ let initialTimeZone: string = '';
         </div>
       </div>
     </div>
-    {import.meta.env.DEV && (
-      <button
-        id="shell-reload-pending"
-        type="button"
-        class="reload-pending-chip"
-        title="Source changed while auto-reload is off — click to reload the shell"
-        hidden
-      ><Icon name="rotate-cw" /> RELOAD</button>
-    )}
+    <button
+      id="shell-reload-pending"
+      type="button"
+      class="reload-pending-chip"
+      title="The shell changed while auto-reload is off — click to reload"
+      hidden
+    ><Icon name="rotate-cw" /> RELOAD</button>
     <span id="clock" class="clock" data-clock-format={initialClockFormat} data-locale={initialLocale} data-time-zone={initialTimeZone}>--:--:--</span>
     <div class="status-zoom" role="group" aria-label="Page zoom">
       <button id="zoom-out"   type="button" class="status-btn" title="Zoom out (Ctrl -)">-</button>
       <button id="zoom-level" type="button" class="status-btn status-btn-text" title="Reset zoom to 100%">100%</button>
       <button id="zoom-in"    type="button" class="status-btn" title="Zoom in (Ctrl +)">+</button>
-      <button id="settings-btn" type="button" class="status-btn" title="Settings" aria-haspopup="dialog">
+      <button id="settings-btn" type="button" class="status-btn" title="Settings" aria-haspopup="dialog" data-early-click="viewport">
         <span class="status-btn-icon" aria-hidden="true"><Icon name="settings" /></span>
       </button>
     </div>
@@ -195,10 +194,15 @@ let initialTimeZone: string = '';
   Viewport profiles live in device localStorage — viewportClient.refresh()
   reads them on boot. No SSR hydration: the server can't see localStorage.
 -->
-<ViewportSettingsDialog client:load />
-<AboutDialog client:load />
+<!-- Hydrated when the browser is idle, so React is not on the boot path; a
+     click before that is kept (lib/openRequest.ts) and opens on mount. -->
+<ViewportSettingsDialog client:idle={{ timeout: 3000 }} />
+<AboutDialog client:idle={{ timeout: 3000 }} />
 
 <script>
+  import { markBarReady } from '../../lib/bootTimeline.ts';
+  import { requestOpen } from '../../lib/openRequest.ts';
+  import { claimEarlyClicks } from '../../lib/earlyClicks.ts';
   import * as workspaceClient from '../../lib/workspaceClient';
   import { registerDropTarget } from '../../lib/windowDrag';
   import * as viewportClient from '../../lib/viewportClient';
@@ -206,15 +210,16 @@ let initialTimeZone: string = '';
   import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
   import { registerUiCommand, registerSnapshotPart } from '../../lib/uiCommands.ts';
   import { osEvents } from '../../lib/osEvents.ts';
-  import { installShellReloadGuard, RELOAD_PENDING_EVENT } from '../../lib/devReload';
+  import { installShellReloadGuard, installRebuildListener, RELOAD_PENDING_EVENT } from '../../lib/devReload';
 
   const keyDispatcher = getKeyDispatcher();
 
-  // Dev-only: when the user turns OFF "auto-reload on source change" in the
-  // Viewport dialog, this intercepts Vite's full reload and instead reveals a
-  // "reload pending" chip. No-op in production (no HMR). The chip element only
-  // renders under import.meta.env.DEV, so the listener wiring is dev-only too.
+  // When the user turns OFF "auto-reload on source change" in the Viewport
+  // dialog, a shell change reveals a "reload pending" chip instead of
+  // reloading: in dev by vetoing Vite's full reload, in production on the
+  // `shell:rebuilt` OS event of a self-rebuilding shell (lib/devReload.ts).
   installShellReloadGuard();
+  installRebuildListener(osEvents);
   const reloadChip = document.getElementById('shell-reload-pending');
   if (reloadChip) {
     window.addEventListener(RELOAD_PENDING_EVENT, () => reloadChip.removeAttribute('hidden'));
@@ -595,20 +600,22 @@ let initialTimeZone: string = '';
   // exposed above — the React side reads localStorage on each open to seed
   // its initial state.
   const settingsBtn = document.getElementById('settings-btn') as HTMLButtonElement | null;
-  function openSettings()  { window.dispatchEvent(new CustomEvent('aura.viewport.open')); }
+  function openSettings()  { requestOpen('aura.viewport.open'); }
   settingsBtn?.addEventListener('click', openSettings);
   (window as any).auraOpenSettings = openSettings;
+  claimEarlyClicks('viewport', openSettings);
 
   // ---- About dialog ----------------------------------------------------
   // The AURAOS logo opens the About panel (React island <AboutDialog/> above),
   // same event-dispatch pattern as the gear button. Keyboard-accessible since
   // the logo is role="button" tabindex="0".
   const aboutBtn = document.getElementById('os-about-btn');
-  function openAbout() { window.dispatchEvent(new CustomEvent('aura.about.open')); }
+  function openAbout() { requestOpen('aura.about.open'); }
   aboutBtn?.addEventListener('click', openAbout);
   aboutBtn?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openAbout(); }
   });
+  claimEarlyClicks('about', openAbout);
 
   // ---- Workspace switcher ----------------------------------------------
   // Pill row + layout chip wired against workspaceClient (which the
@@ -1698,6 +1705,9 @@ let initialTimeZone: string = '';
       if (pick) { pick.focus(); e.preventDefault(); e.stopPropagation(); }
     }
   });
+
+  // Boot stage 2: this bar's triggers work from here on.
+  markBarReady('statusbar');
 </script>
 
 <style>

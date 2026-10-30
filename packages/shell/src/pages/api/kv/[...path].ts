@@ -1,6 +1,8 @@
 import type { APIRoute } from 'astro';
 import { getAppManager, OsEventBus, ThemeManager, type ColorMode } from '@aura/core';
-import { defaultKv, isValidKey, isValidNamespace, type KvNamespace } from '@aura/kv-store';
+import { isValidKey, isValidNamespace, type KvNamespace } from '@aura/kv-store';
+import { sharedKv } from '../../../lib/sharedKv.js';
+import { withEtag } from '../../../lib/etag.js';
 
 /**
  * OS-wide key-value store proxy.
@@ -62,13 +64,14 @@ export const ALL: APIRoute = async ({ params, request }) => {
     if (gate) return gate;
   }
 
-  const kv = defaultKv();
+  const kv = sharedKv();
 
   try {
     if (method === 'GET' || method === 'HEAD') {
       const entry = await kv.get(namespace, key);
       if (entry === null) return jsonError(`No value at ${namespace}:${key}`, 404);
-      return jsonResponse(entry);
+      // ETag: unchanged values (polled config, keymap, workspaces) answer 304.
+      return withEtag(request, JSON.stringify(entry), 'application/json');
     }
 
     if (method === 'PUT' || method === 'POST') {
@@ -108,10 +111,6 @@ export const ALL: APIRoute = async ({ params, request }) => {
     return jsonError(`Method ${method} not supported`, 405);
   } catch (err) {
     return jsonError(`KV error: ${(err as Error).message}`, 500);
-  } finally {
-    // Each handler holds its own connection; close it after the request so
-    // we don't leak sockets when the shell handles thousands of requests.
-    kv.close().catch(() => undefined);
   }
 };
 

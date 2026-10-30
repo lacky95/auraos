@@ -46,6 +46,7 @@ class OsEventClient {
   private lastTopicsSent: string[] = [];
   /** Reconnect hooks (not fired on the first connect). */
   private reconnectFns = new Set<() => void>();
+  private statusFns = new Set<(connected: boolean) => void>();
   private connectedOnce = false;
 
   /**
@@ -78,6 +79,21 @@ class OsEventClient {
     this.reconnectFns.add(fn);
     this.ensureConnected();
     return () => { this.reconnectFns.delete(fn); };
+  }
+
+  /**
+   * Run `fn(connected)` whenever the socket connects or drops — at once with
+   * the current state. Returns an unsubscribe function.
+   */
+  onStatus(fn: (connected: boolean) => void): () => void {
+    this.statusFns.add(fn);
+    this.ensureConnected();
+    try { fn(!!this.sock?.connected); } catch (err) { log.warn('status hook threw', err); }
+    return () => { this.statusFns.delete(fn); };
+  }
+
+  private emitStatus(connected: boolean): void {
+    for (const fn of [...this.statusFns]) { try { fn(connected); } catch (err) { log.warn('status hook threw', err); } }
   }
 
   private lastSidSent: string | null = null;
@@ -144,8 +160,9 @@ class OsEventClient {
         for (const fn of [...this.reconnectFns]) { try { fn(); } catch (err) { log.warn('reconnect hook threw', err); } }
       }
       this.connectedOnce = true;
+      this.emitStatus(true);
     });
-    this.sock.on('disconnect', (r) => log.info('close', r));
+    this.sock.on('disconnect', (r) => { log.info('close', r); this.emitStatus(false); });
     this.sock.on('connect_error', (e) => log.warn('connect-error', e?.message ?? String(e)));
     this.sock.on('event', (ev: OsEvent) => this.dispatch(ev));
   }

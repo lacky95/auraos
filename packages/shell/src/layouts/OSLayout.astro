@@ -12,7 +12,7 @@ import LockScreenNotifications from '../components/shell/notifications/LockScree
 import ClientSession from '../components/shell/ClientSession.astro';
 import { ThemeManager } from '@aura/core';
 import type { AppManifest, ColorMode } from '@aura/core';
-import { defaultKv } from '@aura/kv-store';
+import { sharedKv } from '../lib/sharedKv';
 
 interface Props {
   pinnedApps?: AppManifest[];
@@ -29,7 +29,7 @@ let themeIdDark:     string    = ThemeManager.DEFAULT_THEME_ID_DARK;
 let themeIdLight:    string    = ThemeManager.DEFAULT_THEME_ID_LIGHT;
 let activeColorMode: ColorMode = ThemeManager.DEFAULT_COLOR_MODE;
 {
-  const kv = defaultKv();
+  const kv = sharedKv();
   try {
     const theme = await kv.getValue<{
       themeIdDark?: string; themeIdLight?: string; colorMode?: ColorMode;
@@ -39,8 +39,6 @@ let activeColorMode: ColorMode = ThemeManager.DEFAULT_COLOR_MODE;
     if (theme?.colorMode)    activeColorMode = theme.colorMode;
   } catch (err) {
     console.warn(`[OSLayout/SSR] theme fetch threw — falling back to defaults`, err instanceof Error ? err.message : err);
-  } finally {
-    await kv.close().catch(() => undefined);
   }
 }
 const { theme: activeTheme, resolvedMode } = ThemeManager.resolveActiveTheme(themeIdLight, themeIdDark, activeColorMode);
@@ -53,6 +51,34 @@ const activeThemeId   = activeTheme.id;
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AuraOS</title>
+  <!-- Boot timeline origin + the `?log=<filter>` switch. Must run before any
+       module logs, so it is inline and import-free; the module side is
+       lib/bootTimeline.ts (marks/stages) and lib/logControl.ts (KV mirror). -->
+  <script is:inline>
+  (function () {
+    var b = window.__auraBoot = window.__auraBoot || { marks: [], stages: null, summaryPrinted: false };
+    b.marks.push({ name: 'html-head', t: performance.now() });
+    try { performance.mark('aura:html-head'); } catch (_) {}
+    try {
+      var v = new URLSearchParams(location.search).get('log');
+      if (v !== null) {
+        window.__auraLogFromUrl = true;
+        v = v.trim();
+        if (!v || /^(off|0|none|false)$/i.test(v)) localStorage.removeItem('aura.log');
+        else localStorage.setItem('aura.log', v);
+      }
+    } catch (_) {}
+    // Bar buttons are visible before their scripts run: keep a click on any
+    // [data-early-click] until its component claims it (lib/earlyClicks.ts).
+    document.addEventListener('click', function (e) {
+      var t = e.target && e.target.closest ? e.target.closest('[data-early-click]') : null;
+      if (!t) return;
+      var name = t.getAttribute('data-early-click');
+      if ((window.__auraEarlyReady || {})[name]) return;
+      (window.__auraEarlyClicks = window.__auraEarlyClicks || []).push(name);
+    }, true);
+  })();
+  </script>
   <!-- Design-framework + mode metadata. Apps in the shell read these the same
        way iframes read the proxy-injected versions, so the API is uniform. -->
   <meta name="aura-design-framework" content={activeFramework.id} />
@@ -214,8 +240,12 @@ const activeThemeId   = activeTheme.id;
     // Probe initial state. If the console app isn't running at boot we
     // skip the first connect attempt entirely (no error in the console).
     // Falls back to an optimistic attempt if /api/apps is unreachable.
-    fetch('/api/apps', { signal: AbortSignal.timeout(2000) })
-      .then((r) => r.ok ? r.json() : null)
+    // The response is shared: lib/appsSnapshot.ts adopts this promise as the
+    // desktop's first /api/apps read instead of asking again.
+    const appsBoot = fetch('/api/apps', { signal: AbortSignal.timeout(2000) })
+      .then((r) => r.ok ? r.json() : null);
+    window.__auraAppsBoot = appsBoot.catch(() => null);
+    appsBoot
       .then((apps) => {
         if (!Array.isArray(apps)) { connectConsoleWs(); return; }
         const app = apps.find((a) => a?.manifest?.id === 'com.aura.console');
@@ -241,12 +271,27 @@ const activeThemeId   = activeTheme.id;
       return false;
     }
 
+    // Only frames that listen get the live stream: the Console app's frames
+    // (matched by src) and any frame that asked for the backlog
+    // (`aura.console.requestBacklog`). Posting every shell console line to
+    // every app iframe cost N posts per line for nothing — and N² when the
+    // line itself was logged per iframe.
+    const consoleSubscribers = new Set();
+    function consoleTargets() {
+      const out = [];
+      document.querySelectorAll('iframe').forEach((f) => {
+        const w = f.contentWindow;
+        if (!w) return;
+        if (consoleSubscribers.has(w) || (f.getAttribute('src') || '').indexOf('/api/proxy/com.aura.console') === 0) out.push(w);
+      });
+      return out;
+    }
+
     function broadcast(entry) {
       if (isNoisyDev(entry.args)) return;
       buffer.push(entry);
       if (buffer.length > MAX) buffer.shift();
-      const iframes = document.querySelectorAll('iframe');
-      iframes.forEach((f) => { try { f.contentWindow && f.contentWindow.postMessage(entry, '*'); } catch (_) {} });
+      consoleTargets().forEach((w) => { try { w.postMessage(entry, '*'); } catch (_) {} });
       sendToConsoleWs(entry);
     }
 
@@ -419,6 +464,7 @@ const activeThemeId   = activeTheme.id;
       }
       // Console app asking for backlog on mount
       if (d.type === 'aura.console.requestBacklog') {
+        if (e.source) consoleSubscribers.add(e.source);
         try { e.source && e.source.postMessage({ type: 'aura.console.backlog', entries: buffer.slice() }, '*'); } catch (_) {}
       }
     });
@@ -556,6 +602,14 @@ const activeThemeId   = activeTheme.id;
     // socket.io lives on its own WS pool. See packages/shell/src/lib/
     // osEvents.ts and the sioPlugin in astro.config.mjs.
     import { osEvents as _osEvents } from '../lib/osEvents.ts';
+    import { createLogger } from '@aura/core/logger';
+    import { installSummaryTrigger, mark } from '../lib/bootTimeline.ts';
+    import { startLogControl } from '../lib/logControl.ts';
+
+    const themeLog = createLogger('shell:theme');
+    mark('first-module');
+    startLogControl();
+    installSummaryTrigger();
 
     // Live-update CSS-Vars when the OS broadcasts a theme OR mode change.
     // Both events trigger a fresh /api/os/theme.css fetch (the endpoint
@@ -584,7 +638,7 @@ const activeThemeId   = activeTheme.id;
     };
 
     const onThemeEvent = async (ev: ThemeEvt | ModeEvt) => {
-      console.log('[Theme] received', ev.type, ev);
+      themeLog.debug('received', ev.type, ev);
 
       // Refresh the shell-side <style id="aura-theme"> block.
       try {
@@ -646,6 +700,22 @@ const activeThemeId   = activeTheme.id;
 
     _osEvents.subscribe(['theme:changed', 'mode:changed'], (ev) => onThemeEvent(ev as ThemeEvt | ModeEvt));
 
+    // Lock screen (LockScreenOverlay's inline script): hand it `os/lockscreen`
+    // changes as they happen, and tell it whether the socket is up so it can
+    // drop its fallback poll from 1 s to 15 s.
+    _osEvents.subscribe('kv:changed', (ev) => {
+      const k = ev as { namespace?: string; key?: string; value?: unknown };
+      if (k.namespace !== 'os' || k.key !== 'lockscreen') return;
+      (window as { __auraLockscreenSignal?: (v: unknown) => void }).__auraLockscreenSignal?.(k.value);
+    });
+    let socketUp: boolean | null = null;
+    _osEvents.onStatus((connected) => {
+      (window as { __auraLockEvents?: boolean }).__auraLockEvents = connected;
+      if (connected) mark('socket:connected');
+      else if (socketUp) mark('socket:disconnected');   // a drop, not the initial "not yet"
+      socketUp = connected;
+    });
+
     // Console-bridge gating. The inline console-WS code at the top of this
     // file exposes `window.__auraConsoleBridge.setRunning(bool)`. Flip it
     // from app lifecycle events: when console is killed we stop hammering
@@ -679,6 +749,7 @@ const activeThemeId   = activeTheme.id;
     // Subpath import — the bare `@aura/core` barrel pulls server-only deps
     // (chokidar, node:fs via AppManager) into the browser bundle.
     import type { KeyAction, OsKeymapState } from '@aura/core/keymap';
+    import { mark as keymapMark } from '../lib/bootTimeline.ts';
 
     type CatalogueResponse = { actions: KeyAction[] };
 
@@ -708,6 +779,7 @@ const activeThemeId   = activeTheme.id;
 
     void (async () => {
       await Promise.all([loadCatalogue(), loadState()]);
+      keymapMark('keymap:ready');
     })();
 
     // OS-wide keydown listener. Iframes that own focus consume their own
@@ -743,8 +815,6 @@ const activeThemeId   = activeTheme.id;
       if (k.namespace !== 'os' || k.key !== 'keymap') return;
       void loadState();
     });
-    // Surface the dispatcher in dev consoles for ad-hoc testing.
-    console.debug('[KeyDispatcher] ready (mode =', dispatcher.getMode(), ')');
   </script>
 </body>
 </html>
