@@ -7,7 +7,7 @@
  * `os/lockscreen` KV key. Activation is via `window.auraLockScreen()` or the
  * `aura.lockscreen.activate` key binding (default: Ctrl+Alt+L).
  */
-import { defaultKv } from '@aura/kv-store';
+import { sharedKv } from '../../lib/sharedKv';
 
 type LockPosition =
   | 'top-left'    | 'top-center'    | 'top-right'
@@ -58,12 +58,11 @@ function normalize(raw: unknown): LockScreenConfig {
 
 let initial: LockScreenConfig = DEFAULT_CONFIG;
 {
-  const kv = defaultKv();
+  const kv = sharedKv();
   try {
     const v = await kv.getValue('os', 'lockscreen');
     if (v) initial = normalize(v);
   } catch { /* fall back to defaults */ }
-  finally { await kv.close().catch(() => undefined); }
 }
 ---
 <div
@@ -284,23 +283,37 @@ let initial: LockScreenConfig = DEFAULT_CONFIG;
     // baseline; any later increase in either fires its action.
     var lastLockAt = null;
     var lastUnlockAt = null;
+    function applySignal(v) {
+      if (!v || typeof v !== 'object') return;
+      applyConfig(normalize(v));  // the signal doubles as live config refresh
+      var la = typeof v.lockAt   === 'number' ? v.lockAt   : 0;
+      var ua = typeof v.unlockAt === 'number' ? v.unlockAt : 0;
+      if (lastLockAt === null) { lastLockAt = la; lastUnlockAt = ua; return; }  // baseline
+      if (la > lastLockAt)   { lastLockAt = la;   activate();   }
+      if (ua > lastUnlockAt) { lastUnlockAt = ua; deactivate(); }
+    }
     function pollLockSignal() {
       fetch('/api/kv/os/lockscreen', { headers: { 'accept': 'application/json' } })
         .then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (body) {
-          var v = body && body.value;
-          if (!v || typeof v !== 'object') return;
-          applyConfig(normalize(v));  // poll doubles as live config refresh
-          var la = typeof v.lockAt   === 'number' ? v.lockAt   : 0;
-          var ua = typeof v.unlockAt === 'number' ? v.unlockAt : 0;
-          if (lastLockAt === null) { lastLockAt = la; lastUnlockAt = ua; return; }  // baseline
-          if (la > lastLockAt)   { lastLockAt = la;   activate();   }
-          if (ua > lastUnlockAt) { lastUnlockAt = ua; deactivate(); }
-        })
+        .then(function (body) { applySignal(body && body.value); })
         .catch(function () { /* offline / not set yet — try again next tick */ });
     }
+    // Fast path: OSLayout's module script forwards `kv:changed os/lockscreen`
+    // from the OS socket here and sets __auraLockEvents while that socket is
+    // connected. The poll stays as the fallback that needs no socket: once a
+    // second while the socket is not confirmed, every 15 s while it is, and
+    // not at all while the tab is hidden (it re-polls the moment it shows).
+    window.__auraLockscreenSignal = applySignal;
     pollLockSignal();                       // establish baseline immediately
-    setInterval(pollLockSignal, 1000);      // then watch once a second
+    (function schedule() {
+      setTimeout(function () {
+        if (document.visibilityState !== 'hidden') pollLockSignal();
+        schedule();
+      }, window.__auraLockEvents ? 15000 : 1000);
+    })();
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') pollLockSignal();
+    });
   })();
 </script>
 

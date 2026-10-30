@@ -5,6 +5,7 @@
  */
 import { LAYOUT_DRAG_POLICIES } from '../../layoutDragPolicies.ts';
 import type { LayoutRenderContext, ShellLayoutStrategy } from '../types.ts';
+import { tilingShape, tilingCell } from '../gridShape.ts';
 
 const BASE_STYLE = {
   display: 'grid',
@@ -26,11 +27,6 @@ function unpin(el: HTMLElement): void {
   el.style.removeProperty('grid-row');
 }
 
-function tilingShape(n: number): { cols: number; rows: number } {
-  const cols = Math.max(1, Math.ceil(Math.sqrt(n)));
-  return { cols, rows: Math.max(1, Math.ceil(n / cols)) };
-}
-
 /** Square-ish grid; an activity expands down over empty cells below it, so
  *  e.g. 3 activities in a 2×2 grid give the right-hand one full height. */
 export const tiling: ShellLayoutStrategy = {
@@ -45,13 +41,8 @@ export const tiling: ShellLayoutStrategy = {
     };
   },
   place(el, _v, i, ctx) {
-    const n = ctx.visible.length;
-    const { cols, rows } = tilingShape(n);
-    const c = i % cols;
-    const r = Math.floor(i / cols);
-    let span = 1;
-    while (r + span < rows && (r + span) * cols + c >= n) span++;
-    pin(el, c + 1, r + ctx.baseRow, span);
+    const { col, row, span } = tilingCell(i, ctx.visible.length, ctx.baseRow);
+    pin(el, col, row, span);
   },
   release: unpin,
 };

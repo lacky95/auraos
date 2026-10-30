@@ -902,6 +902,8 @@ import Icon from '../ui/Icon.astro';
   import { fuzzyScore } from '../../lib/fuzzyMatch.ts';
   import { osEvents } from '../../lib/osEvents.ts';
   import { registerUiCommand, registerSnapshotPart } from '../../lib/uiCommands.ts';
+  import { getAppsSnapshot } from '../../lib/appsSnapshot.ts';
+  import { onStage, markBarReady } from '../../lib/bootTimeline.ts';
   const keyDispatcher = getKeyDispatcher();
 
   interface InstanceListItem {
@@ -1088,7 +1090,7 @@ import Icon from '../ui/Icon.astro';
     searchQuery = '';
     if (searchInput) searchInput.value = '';
     if (searchClear) searchClear.hidden = true;
-    await refreshList();
+    await refreshList({ fresh: true });
     syncInspectPoll();
     // Land focus on the search box for type-to-find. The panel's arrow-nav
     // tracks only <button>s and its handler early-returns on non-button
@@ -1127,7 +1129,7 @@ import Icon from '../ui/Icon.astro';
     else openPanel();
   });
   closeBtn.addEventListener('click', closePanelAndReturnFocus);
-  refresh.addEventListener('click', refreshList);
+  refresh.addEventListener('click', () => { void refreshList({ fresh: true }); });
 
   // Fuzzy search: filter live from the cached lists (no refetch).
   function applySearch(q: string): void {
@@ -1268,10 +1270,11 @@ import Icon from '../ui/Icon.astro';
     }
   });
 
-  async function refreshList() {
+  // The list is only rendered while the panel is open; closed, a refresh
+  // just updates the toggle's badge dot and leaves the list for the next open.
+  async function refreshList(opts: { fresh?: boolean } = {}) {
     try {
-      const res = await fetch('/api/apps');
-      const apps = await res.json() as Array<{
+      const apps = await getAppsSnapshot({ fresh: opts.fresh ?? isOpen() }) as unknown as Array<{
         manifest: ManifestLite;
         instances: InstanceListItem[];
         activities: ActivityListItem[];
@@ -1282,7 +1285,8 @@ import Icon from '../ui/Icon.astro';
       // endpoint still surfaces them for diagnostics.
       lastInstances  = apps.flatMap(a => a.instances).filter(i => !i.inPool);
       lastActivities = apps.flatMap(a => a.activities);
-      render(lastInstances, lastActivities);
+      if (isOpen()) render(lastInstances, lastActivities);
+      else toggleBtn.dataset['hasInstances'] = lastInstances.length > 0 ? 'true' : 'false';
     } catch (err) {
       console.error('[ProcessManager] refresh failed', err);
     }
@@ -1905,6 +1909,8 @@ import Icon from '../ui/Icon.astro';
 
   osEvents.subscribe(['app:*', 'activity:*'], () => scheduleRefresh());
 
-  // Initial load to populate the badge dot on the toggle button
-  refreshList();
+  // Initial load to populate the badge dot on the toggle button — after the
+  // active workspace has loaded (boot stage 1), it is not urgent.
+  onStage('ws:active-loaded', () => { void refreshList(); }, { timeoutMs: 6000 });
+  markBarReady('procman');
 </script>

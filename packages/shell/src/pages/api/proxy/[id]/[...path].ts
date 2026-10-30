@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getAppManager, ThemeManager, keymapRegistry, resolveProxyConfig, INTERFACE_PATH_KINDS } from '@aura/core';
 import type { AppManifest, ColorMode, KeyAction, OsKeymapState, ProxyConfig } from '@aura/core';
-import { defaultKv } from '@aura/kv-store';
+import { sharedKv } from '../../../../lib/sharedKv.js';
 
 /**
  * Fallback proxy config for the corner case where the AppManager can't
@@ -1048,7 +1048,7 @@ function notReadyResponse(id: string, path: string, status: number): Response {
 async function readShellThemeSelection(): Promise<{ themeIdDark: string; themeIdLight: string; colorMode: ColorMode } | null> {
   // Read directly from the OS KV — no app dependency. The bootstrap step
   // ensures `os/theme` is populated before any proxy request lands.
-  const kv = defaultKv();
+  const kv = sharedKv();
   try {
     const stored = await kv.getValue<{ themeIdDark?: string; themeIdLight?: string; colorMode?: ColorMode }>('os', 'theme');
     if (!stored) return null;
@@ -1058,7 +1058,6 @@ async function readShellThemeSelection(): Promise<{ themeIdDark: string; themeId
       colorMode:    stored.colorMode    ?? ThemeManager.DEFAULT_COLOR_MODE,
     };
   } catch { return null; }
-  finally { await kv.close().catch(() => undefined); }
 }
 
 /**
@@ -1067,7 +1066,7 @@ async function readShellThemeSelection(): Promise<{ themeIdDark: string; themeId
  * which is what `resolveBindings` does anyway.
  */
 async function readShellKeymapState(): Promise<OsKeymapState> {
-  const kv = defaultKv();
+  const kv = sharedKv();
   try {
     const stored = await kv.getValue<OsKeymapState>('os', 'keymap');
     if (!stored) return { bindings: {}, appOverlays: {} };
@@ -1076,7 +1075,6 @@ async function readShellKeymapState(): Promise<OsKeymapState> {
       appOverlays: stored.appOverlays ?? {},
     };
   } catch { return { bindings: {}, appOverlays: {} }; }
-  finally { await kv.close().catch(() => undefined); }
 }
 
 /**

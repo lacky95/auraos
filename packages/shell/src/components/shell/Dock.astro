@@ -380,6 +380,7 @@ const { apps, enabledMap = {} } = Astro.props;
 </style>
 
 <script>
+  import { markBarReady } from '../../lib/bootTimeline.ts';
   import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
   const keyDispatcher = getKeyDispatcher();
 
@@ -747,4 +748,7 @@ const { apps, enabledMap = {} } = Astro.props;
       });
     }
   }
+
+  // Boot stage 2: this bar's triggers work from here on.
+  markBarReady('dock');
 </script>

@@ -1,7 +1,8 @@
 import type { APIRoute } from 'astro';
 import { ThemeManager } from '@aura/core';
 import type { ColorMode } from '@aura/core';
-import { defaultKv } from '@aura/kv-store';
+import { sharedKv } from '../../../lib/sharedKv.js';
+import { withEtag } from '../../../lib/etag.js';
 
 /**
  * Returns the currently active OS theme as a CSS document. Apps with
@@ -14,16 +15,12 @@ import { defaultKv } from '@aura/kv-store';
  * defaults if the key is somehow missing (the bootstrap should have written
  * it, but defence-in-depth keeps the desktop usable on a corrupted RDB).
  */
-export const GET: APIRoute = async () => {
+export const GET: APIRoute = async ({ request }) => {
   const sel = await readSelection();
   const css = ThemeManager.toCss(sel.themeIdLight, sel.themeIdDark, sel.colorMode);
-  return new Response(css, {
-    status: 200,
-    headers: {
-      'Content-Type':  'text/css; charset=utf-8',
-      'Cache-Control': 'no-cache',
-    },
-  });
+  // no-cache + ETag: every app iframe links this sheet, so a reload of the
+  // desktop asks for it once per app — those repeats are 304s now.
+  return withEtag(request, css, 'text/css; charset=utf-8');
 };
 
 async function readSelection(): Promise<{ themeIdDark: string; themeIdLight: string; colorMode: ColorMode }> {
@@ -32,7 +29,7 @@ async function readSelection(): Promise<{ themeIdDark: string; themeIdLight: str
     themeIdLight: ThemeManager.DEFAULT_THEME_ID_LIGHT,
     colorMode:    ThemeManager.DEFAULT_COLOR_MODE,
   };
-  const kv = defaultKv();
+  const kv = sharedKv();
   try {
     const stored = await kv.getValue<{
       themeIdDark?: string; themeIdLight?: string; colorMode?: ColorMode;
@@ -45,7 +42,5 @@ async function readSelection(): Promise<{ themeIdDark: string; themeIdLight: str
     };
   } catch {
     return fallback;
-  } finally {
-    await kv.close().catch(() => undefined);
   }
 }

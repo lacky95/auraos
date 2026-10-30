@@ -52,6 +52,7 @@ import {
 // so a barrel import would bundle the Node-only app-manager into the browser
 // and crash the dialog. See the same note in lib/viewport.ts.
 import { ThemeManager } from '@aura/core/theme';
+import { onOpenRequest } from '../../lib/openRequest';
 
 type ColorMode = 'light' | 'dark' | 'auto';
 
@@ -157,8 +158,7 @@ export function ViewportSettingsDialog(): React.JSX.Element {
       setSection('profiles');
       setOpen(true);
     };
-    window.addEventListener('aura.viewport.open', onOpen);
-    return () => window.removeEventListener('aura.viewport.open', onOpen);
+    return onOpenRequest('aura.viewport.open', onOpen);
   }, []);
 
   // Track fullscreen + prefers-color-scheme externally so the dialog is honest

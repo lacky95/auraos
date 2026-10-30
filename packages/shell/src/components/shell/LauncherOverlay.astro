@@ -372,6 +372,7 @@ import Icon from '../ui/Icon.astro';
 </style>
 
 <script>
+  import { markBarReady } from '../../lib/bootTimeline.ts';
   import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
   import { registerUiCommand, registerSnapshotPart } from '../../lib/uiCommands.ts';
   const keyDispatcher = getKeyDispatcher();
@@ -826,4 +827,7 @@ import Icon from '../ui/Icon.astro';
     // back showing everything.
     if (search.value.trim() !== '') applyLauncherFilter(search.value);
   }
+
+  // Boot stage 2: this bar's triggers work from here on.
+  markBarReady('launcher');
 </script>

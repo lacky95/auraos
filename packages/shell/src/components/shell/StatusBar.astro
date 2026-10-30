@@ -1,7 +1,7 @@
 ---
 import ViewportSettingsDialog from './ViewportSettingsDialog.tsx';
 import AboutDialog from './AboutDialog.tsx';
-import { defaultKv } from '@aura/kv-store';
+import { sharedKv } from '../../lib/sharedKv';
 import Icon from '../ui/Icon.astro';
 
 // SSR-resolve clock format + locale from the OS KV so the first paint matches
@@ -14,16 +14,17 @@ let initialLocale: string = 'en-GB';
 // IANA zone from Settings → General; '' = the device's own zone.
 let initialTimeZone: string = '';
 {
-  const kv = defaultKv();
+  const kv = sharedKv();
   try {
-    const cf = await kv.getValue<'12h' | '24h'>('os', 'clockFormat');
+    const [cf, lc, tz] = await Promise.all([
+      kv.getValue<'12h' | '24h'>('os', 'clockFormat'),
+      kv.getValue<string>('os', 'locale'),
+      kv.getValue<string>('os', 'timeZone'),
+    ]);
     if (cf === '12h' || cf === '24h') initialClockFormat = cf;
-    const lc = await kv.getValue<string>('os', 'locale');
     if (typeof lc === 'string' && lc) initialLocale = lc;
-    const tz = await kv.getValue<string>('os', 'timeZone');
     if (typeof tz === 'string') initialTimeZone = tz;
   } catch { /* fall back to defaults */ }
-  finally { await kv.close().catch(() => undefined); }
 }
 ---
 <header id="statusbar">
@@ -195,10 +196,14 @@ let initialTimeZone: string = '';
   Viewport profiles live in device localStorage — viewportClient.refresh()
   reads them on boot. No SSR hydration: the server can't see localStorage.
 -->
-<ViewportSettingsDialog client:load />
-<AboutDialog client:load />
+<!-- Hydrated when the browser is idle, so React is not on the boot path; a
+     click before that is kept (lib/openRequest.ts) and opens on mount. -->
+<ViewportSettingsDialog client:idle={{ timeout: 3000 }} />
+<AboutDialog client:idle={{ timeout: 3000 }} />
 
 <script>
+  import { markBarReady } from '../../lib/bootTimeline.ts';
+  import { requestOpen } from '../../lib/openRequest.ts';
   import * as workspaceClient from '../../lib/workspaceClient';
   import { registerDropTarget } from '../../lib/windowDrag';
   import * as viewportClient from '../../lib/viewportClient';
@@ -595,7 +600,7 @@ let initialTimeZone: string = '';
   // exposed above — the React side reads localStorage on each open to seed
   // its initial state.
   const settingsBtn = document.getElementById('settings-btn') as HTMLButtonElement | null;
-  function openSettings()  { window.dispatchEvent(new CustomEvent('aura.viewport.open')); }
+  function openSettings()  { requestOpen('aura.viewport.open'); }
   settingsBtn?.addEventListener('click', openSettings);
   (window as any).auraOpenSettings = openSettings;
 
@@ -604,7 +609,7 @@ let initialTimeZone: string = '';
   // same event-dispatch pattern as the gear button. Keyboard-accessible since
   // the logo is role="button" tabindex="0".
   const aboutBtn = document.getElementById('os-about-btn');
-  function openAbout() { window.dispatchEvent(new CustomEvent('aura.about.open')); }
+  function openAbout() { requestOpen('aura.about.open'); }
   aboutBtn?.addEventListener('click', openAbout);
   aboutBtn?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openAbout(); }
@@ -1698,6 +1703,9 @@ let initialTimeZone: string = '';
       if (pick) { pick.focus(); e.preventDefault(); e.stopPropagation(); }
     }
   });
+
+  // Boot stage 2: this bar's triggers work from here on.
+  markBarReady('statusbar');
 </script>
 
 <style>

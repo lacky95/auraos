@@ -118,7 +118,13 @@ Or live for a running container:
 docker exec aura-shell sh -c 'export AURA_LOG=ws-proxy; …'
 ```
 
-Browser-side:
+Browser-side, three ways (first one wins):
+
+- **`?log=<filter>`** on the desktop URL, e.g. `http://<host>/?log=shell:*`.
+  Applies to this page load and is remembered in the tab; `?log=off` clears it.
+- **Settings → General → Frontend logging** (KV `os/frontendLog`). Every
+  open desktop follows at once.
+- From DevTools:
 
 ```js
 localStorage.setItem('aura.log', 'os-events,keymap');
@@ -137,6 +143,38 @@ limits to warn-and-up; `-noisy` excludes one.
 | `keymap`       | KeyDispatcher (browser)              | keybinding doesn't fire                    |
 | `app-manager`  | core AppManager                      | spawn/lifecycle/port issues                |
 | `pty`          | `apps/com.aura.terminal`             | PTY session attach/detach                  |
+| `shell:boot`   | desktop boot timeline (browser)      | the desktop is slow to become usable       |
+| `shell:layout` | desktop renders (browser)            | windows flicker, re-render too often       |
+| `shell:iframe` | activity iframes: src, load, viewport| an app loads late, twice, or not at all    |
+| `shell:fetch`  | shared desktop requests (`/api/apps`)| too many requests at boot                  |
+| `shell:theme`  | theme/mode live updates (browser)    | theme change not applied                   |
+| `sse-client`   | the desktop's EventSource wrapper    | an SSE stream drops                        |
+
+## The desktop is slow to load
+
+The desktop loads in stages; each one is a mark on the boot timeline:
+
+1. **chrome** — the page, status bar, dock and theme (`chrome-ready`).
+2. **the current workspace** — its activities load first, straight from the
+   server-rendered page (`ws:active-loaded`).
+3. **the bars** — launcher, process manager, viewport settings
+   (`bars-ready`).
+4. **the other workspaces** — loaded in the background, a few at a time
+   (`warm:start` … `warm:end`), or only when opened; see Settings → General →
+   *Load other workspaces*.
+5. **notifications** (`notif:ready`).
+
+Turn on `shell:boot` (e.g. reload with `?log=shell:*`) and the browser console
+prints the timeline as a table. The same timeline is posted to the shell, so
+you can read it without DevTools — handy for a phone or a test browser:
+
+```sh
+curl -s $OS_API_BASE/api/os/boot-report | jq '.reports[0] | {stages, desktop, rows}'
+```
+
+`stages` gives each stage's time in ms after navigation; `desktop` counts
+renders, iframes and the lazy-load policy. In DevTools,
+`__auraBootTimeline.print()` shows the table at any time.
 
 ## App doesn't appear in the launcher after install
 

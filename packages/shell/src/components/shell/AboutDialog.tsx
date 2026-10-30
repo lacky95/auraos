@@ -20,6 +20,7 @@ import {
   DialogClose,
   Button,
 } from '@aura/ui';
+import { onOpenRequest } from '../../lib/openRequest';
 
 interface AboutData {
   name: string;
@@ -83,8 +84,7 @@ export function AboutDialog(): React.JSX.Element {
         .then((d: AboutData) => setData(d))
         .catch(() => setError(true));
     };
-    window.addEventListener('aura.about.open', onOpen);
-    return () => window.removeEventListener('aura.about.open', onOpen);
+    return onOpenRequest('aura.about.open', onOpen);
   }, []);
 
   const git = data?.git;
