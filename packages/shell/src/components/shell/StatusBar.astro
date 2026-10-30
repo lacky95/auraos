@@ -141,15 +141,13 @@ let initialTimeZone: string = '';
         </div>
       </div>
     </div>
-    {import.meta.env.DEV && (
-      <button
-        id="shell-reload-pending"
-        type="button"
-        class="reload-pending-chip"
-        title="Source changed while auto-reload is off — click to reload the shell"
-        hidden
-      ><Icon name="rotate-cw" /> RELOAD</button>
-    )}
+    <button
+      id="shell-reload-pending"
+      type="button"
+      class="reload-pending-chip"
+      title="The shell changed while auto-reload is off — click to reload"
+      hidden
+    ><Icon name="rotate-cw" /> RELOAD</button>
     <span id="clock" class="clock" data-clock-format={initialClockFormat} data-locale={initialLocale} data-time-zone={initialTimeZone}>--:--:--</span>
     <div class="status-zoom" role="group" aria-label="Page zoom">
       <button id="zoom-out"   type="button" class="status-btn" title="Zoom out (Ctrl -)">-</button>
@@ -211,15 +209,16 @@ let initialTimeZone: string = '';
   import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
   import { registerUiCommand, registerSnapshotPart } from '../../lib/uiCommands.ts';
   import { osEvents } from '../../lib/osEvents.ts';
-  import { installShellReloadGuard, RELOAD_PENDING_EVENT } from '../../lib/devReload';
+  import { installShellReloadGuard, installRebuildListener, RELOAD_PENDING_EVENT } from '../../lib/devReload';
 
   const keyDispatcher = getKeyDispatcher();
 
-  // Dev-only: when the user turns OFF "auto-reload on source change" in the
-  // Viewport dialog, this intercepts Vite's full reload and instead reveals a
-  // "reload pending" chip. No-op in production (no HMR). The chip element only
-  // renders under import.meta.env.DEV, so the listener wiring is dev-only too.
+  // When the user turns OFF "auto-reload on source change" in the Viewport
+  // dialog, a shell change reveals a "reload pending" chip instead of
+  // reloading: in dev by vetoing Vite's full reload, in production on the
+  // `shell:rebuilt` OS event of a self-rebuilding shell (lib/devReload.ts).
   installShellReloadGuard();
+  installRebuildListener(osEvents);
   const reloadChip = document.getElementById('shell-reload-pending');
   if (reloadChip) {
     window.addEventListener(RELOAD_PENDING_EVENT, () => reloadChip.removeAttribute('hidden'));

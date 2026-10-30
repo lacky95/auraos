@@ -28,6 +28,25 @@ declare global {
 /** Custom event the status bar listens for to reveal its "reload pending" chip. */
 export const RELOAD_PENDING_EVENT = 'aura.shell.reload-pending';
 
+/** OS event the production shell emits after it rebuilt itself (server/watchRebuild). */
+export const SHELL_REBUILT_EVENT = 'shell:rebuilt';
+
+/**
+ * Production counterpart of the guard below: a production shell has no HMR,
+ * but it can rebuild itself (AURA_SHELL_WATCH=1) and announce the new build
+ * as the `shell:rebuilt` OS event. Same rule as in dev: auto-reload on →
+ * reload now; off → show the "reload pending" chip.
+ */
+export function installRebuildListener(
+  osEvents: { subscribe(p: string, h: (ev: { type: string }) => void): () => void } | null,
+): void {
+  if (typeof window === 'undefined' || !osEvents) return;
+  osEvents.subscribe(SHELL_REBUILT_EVENT, () => {
+    if (isAutoReloadEnabled()) location.reload();
+    else window.dispatchEvent(new CustomEvent(RELOAD_PENDING_EVENT));
+  });
+}
+
 export function installShellReloadGuard(): void {
   if (typeof window === 'undefined') return;     // SSR no-op
   if (window.__auraReloadGuard) return;          // idempotent across HMR re-eval
