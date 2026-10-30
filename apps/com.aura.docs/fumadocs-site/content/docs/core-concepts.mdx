@@ -167,6 +167,10 @@ straight from `ColorPalette` in `packages/core/src/theme/ThemeManager.ts`):
 --aura-color-mode       /* values: 'light' | 'dark' */
 ```
 
+Icons belong with the theme. Lucide is the OS default icon set, served at
+`/api/os/icons.svg` and drawn with `currentColor`, so icons recolor with the
+palette. Apps are encouraged, not required, to use it: see [Icons](/docs/icons).
+
 ## Keymap
 
 Declare actions in the manifest:
