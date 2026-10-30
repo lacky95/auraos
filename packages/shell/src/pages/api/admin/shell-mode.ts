@@ -16,6 +16,8 @@ import { dirname } from 'node:path';
  * CLI: `aura shell mode [dev|prod]`.
  */
 const MODE_FILE = '/data/aura/shell-mode';
+/** Read by os/boot.sh: build what changed on the next boot. */
+const BUILD_REQUEST = '/data/aura/boot/build-requested';
 type Mode = 'dev' | 'prod';
 
 function readConfigured(): Mode | null {
@@ -46,8 +48,15 @@ export const PUT: APIRoute = async ({ request }) => {
   try { body = await request.json() as { mode?: unknown }; } catch { return json({ error: 'body must be JSON: { mode }' }, 400); }
   if (body.mode !== 'dev' && body.mode !== 'prod') return json({ error: "mode must be 'dev' or 'prod'" }, 400);
   try {
+    const before = readConfigured();
     mkdirSync(dirname(MODE_FILE), { recursive: true });
     writeFileSync(MODE_FILE, `${body.mode}\n`, 'utf8');
+    // A mode switch must build on the next boot (a plain restart does not):
+    // the other mode's build may be stale or missing.
+    if (before !== body.mode) {
+      mkdirSync(dirname(BUILD_REQUEST), { recursive: true });
+      writeFileSync(BUILD_REQUEST, `shell-mode ${body.mode} ${new Date().toISOString()}\n`, 'utf8');
+    }
   } catch (err) {
     return json({ error: `cannot write ${MODE_FILE}: ${(err as Error).message}` }, 500);
   }

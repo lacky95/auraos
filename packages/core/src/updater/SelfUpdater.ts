@@ -151,6 +151,17 @@ export class SelfUpdater {
   constructor(private readonly dataDir: string) {}
 
   jobsDir(): string { return join(this.dataDir, 'aura', 'update'); }
+
+  /** The marker os/boot.sh looks for (BUILD_REQUEST there); removed after the build. */
+  bootBuildRequestFile(): string { return join(this.dataDir, 'aura', 'boot', 'build-requested'); }
+  private requestBootBuild(reason: string): void {
+    try {
+      mkdirSync(join(this.dataDir, 'aura', 'boot'), { recursive: true });
+      writeFileSync(this.bootBuildRequestFile(), `${reason} ${new Date().toISOString()}\n`);
+    } catch (err) {
+      console.warn(`[SelfUpdater] cannot request a build for the next boot: ${(err as Error).message}`);
+    }
+  }
   private jobFile(id: string): string { return join(this.jobsDir(), `${id}.json`); }
 
   /** Read one job, or the most recent one when no id is given. */
@@ -411,6 +422,10 @@ export class SelfUpdater {
     };
     mkdirSync(this.jobsDir(), { recursive: true });
     writeFileSync(this.jobFile(id), JSON.stringify(job, null, 2));
+    // Update and Rebuild are where packages get built: ask the next boot
+    // (os/boot.sh) to build what changed. A plain restart never builds —
+    // except a first boot without any build output.
+    if (!dryRun && (mode === 'update' || mode === 'rebuild')) this.requestBootBuild(mode);
 
     // Same remote resolution the pre-flight used: the remote is often not
     // called "origin" and is usually SSH, which no sandbox can authenticate.

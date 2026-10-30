@@ -10,8 +10,8 @@ container boots (`aura shell mode`, see [Switch modes](#switch-modes)):
 |---|---|---|
 | Server | `astro dev` (Vite) | `node packages/shell/server.mjs` on the `astro build` output |
 | Desktop JS | ~300 unbundled modules per load | ~34 hashed chunks, cached `immutable` |
-| Shell code change | HMR / automatic page reload | `aura restart os`, or in-process rebuild with `AURA_SHELL_WATCH=1` |
-| Boot | skips the shell's own build | builds the shell (~20–25 s) |
+| Shell code change | HMR / automatic page reload | Settings → About → **Rebuild** (or `aura restart os --rebuild`), or in-process rebuild with `AURA_SHELL_WATCH=1` |
+| Boot | builds the other packages only when asked (below) | builds only when asked: what changed (~20–30 s for the shell) |
 
 Use `dev` while you work on the shell itself; use `prod` for everyday use.
 Apps are not affected by the mode: each app runs its own server and the
@@ -56,12 +56,30 @@ does not read the mode.
 viewport settings dialog (status bar) decides whether a full reload happens
 on its own or waits behind the "reload" chip in the status bar.
 
-**Prod, the simple way.** `aura restart os` saves the desktop, restarts the
-master container — which rebuilds every package on boot — and brings the
-desktop back (see [Restarts and restore](/docs/restarts)).
-`aura restart os --rebuild` rebuilds the container **image** from the
-current checkout first; you need that only after changing the `Dockerfile`
-or system packages.
+**Prod, the simple way.** Settings → About → **Rebuild** (CLI:
+`aura restart os --rebuild`) saves the desktop, rebuilds the container image
+from the checkout as it is, builds what changed on the next boot and brings
+the desktop back (see [Restarts and restore](/docs/restarts)). **Update
+AuraOS** does the same after pulling the newest commit. A plain **Restart**
+(`aura restart os`) builds nothing.
+
+### When the boot builds
+
+`os/boot.sh` builds packages only when asked to:
+
+- **Update** or **Rebuild** (Settings → About, `aura restart os --rebuild`) —
+  the updater leaves `/data/aura/boot/build-requested` for the next boot;
+- **switching the mode** (`aura shell mode …`) — same request;
+- **a first boot** — a package without build output (e.g. no
+  `packages/shell/dist-prod` yet) is built;
+- `AURA_FORCE_BUILD=1` on the container.
+
+It then builds only the packages whose sources changed since their last build
+— their git tree, uncommitted changes and new files, fingerprinted in
+`packages/.aura-build-<mode>` — plus the packages that depend on them. A commit
+that only touches apps or docs builds nothing; a changed lockfile or root
+config builds everything. A plain restart with changed sources builds nothing
+and says so in the boot log (`/data/aura/boot/boot.log`).
 
 **Prod, on save.** With `AURA_SHELL_WATCH=1` (plus `AURA_SHELL_MODE=prod`)
 `server/watchRebuild.mjs` watches `packages/{shell,core,ui,kv-store,app-sdk}/src`:
@@ -83,7 +101,7 @@ rebuilds, `aura restart os`. Code that keeps state in a module (not pinned on
 ## Run it by hand
 
 ```bash
-pnpm --filter @aura/shell build        # astro build → packages/shell/dist
+NODE_ENV=production pnpm --filter @aura/shell exec astro build --outDir dist-prod   # what boot.sh builds
 pnpm --filter @aura/shell start:check  # load the build, attach servers, exit
 pnpm --filter @aura/shell start        # HOST/PORT, default 0.0.0.0:3000
 ```

@@ -75,37 +75,109 @@ run pnpm install \
   || echo '[aura] pnpm install exited non-zero (likely ERR_PNPM_IGNORED_BUILDS) — continuing' | tee -a "$LOG"
 
 phase building
-# Skip the build when nothing under packages/ changed since the last one:
-# the fingerprint is the commit plus every uncommitted change and untracked
-# file there, stored next to the output per mode. No git (or any error) →
-# empty fingerprint → always build. AURA_FORCE_BUILD=1 forces it.
-build_fingerprint() {
-  ( cd /workspace && {
-      git rev-parse HEAD &&
-      git diff HEAD -- packages &&
-      git ls-files -z -o --exclude-standard -- packages | xargs -0 -r sha1sum
-    } 2>/dev/null | sha1sum | cut -d' ' -f1 ) || true
+# When to build: Settings → About → Update / Rebuild (and `aura restart os
+# --rebuild`) are the real build — the updater leaves BUILD_REQUEST for this
+# boot. A plain restart builds nothing, except a first boot whose build
+# output is missing. AURA_FORCE_BUILD=1 forces a build.
+#
+# What to build: each package is fingerprinted (its git tree, uncommitted
+# changes and untracked files under packages/<name>) and compared with the
+# fingerprint of its last build (packages/.aura-build-<mode>, one
+# "<name> <fp>" line each). A changed package is rebuilt together with the
+# packages that depend on it (pnpm's "...{dir}" filter); a commit that only
+# touches apps/ or docs builds nothing. Root inputs (lockfile, root package
+# and tsconfig) changing — or no git — build everything. A package whose
+# output is missing counts as changed.
+build_fingerprint() {   # $1 = package dir under packages/, or "_root"
+  ( cd /workspace || exit 0
+    if [ "$1" = _root ]; then
+      git rev-parse HEAD:pnpm-lock.yaml HEAD:package.json HEAD:tsconfig.base.json HEAD:pnpm-workspace.yaml
+      git diff HEAD -- pnpm-lock.yaml package.json tsconfig.base.json pnpm-workspace.yaml
+    else
+      git rev-parse "HEAD:packages/$1"
+      git diff HEAD -- "packages/$1"
+      git ls-files -z -o --exclude-standard -- "packages/$1" | xargs -0 -r sha1sum
+    fi 2>/dev/null | sha1sum | cut -d' ' -f1 )
 }
 BUILD_STAMP="/workspace/packages/.aura-build-$SHELL_MODE"
+BUILD_REQUEST="$BOOT_DIR/build-requested"
 # The prod shell is built into its own folder: anything else that runs the
 # usual `pnpm --filter ./packages/* build` (it writes packages/shell/dist) can
 # no longer delete the build the running/booting server serves.
 SHELL_PROD_DIST=dist-prod
-FP="$(build_fingerprint)"
-if [ -n "$FP" ] && [ "${AURA_FORCE_BUILD:-0}" != 1 ] && [ "$(cat "$BUILD_STAMP" 2>/dev/null)" = "$FP" ] \
-   && [ -f /workspace/packages/core/dist/index.js ] \
-   && { [ "$SHELL_MODE" != prod ] || [ -f "/workspace/packages/shell/$SHELL_PROD_DIST/server/entry.mjs" ]; }; then
-  echo "[aura] boot: packages unchanged since the last build — build skipped" | tee -a "$LOG"
-elif [ "$SHELL_MODE" = prod ]; then
-  # The container runs with NODE_ENV=development (dev tooling, app sandboxes);
-  # the shell's own bundle must be a production build — without this Vite
-  # bundles React's development code into the desktop.
-  run pnpm --filter "./packages/*" --filter '!@aura/shell' build || fail building
-  run env NODE_ENV=production pnpm --filter @aura/shell exec astro build --outDir "$SHELL_PROD_DIST" || fail building
-  [ -n "$FP" ] && echo "$FP" > "$BUILD_STAMP"
+# Packages the shell bundle is built from (it aliases them to their sources).
+SHELL_INPUTS=" shell core kv-store ui "
+
+stamp_of() { grep "^$1 " "$BUILD_STAMP" 2>/dev/null | cut -d' ' -f2; }
+output_ok() {
+  if [ "$1" = shell ]; then [ -f "/workspace/packages/shell/$SHELL_PROD_DIST/server/entry.mjs" ]
+  else [ -d "/workspace/packages/$1/dist" ]; fi
+}
+
+PKGS=""
+for d in /workspace/packages/*/; do
+  [ -f "${d}package.json" ] && PKGS="$PKGS $(basename "$d")"
+done
+# Current fingerprints, "<name> <fp>" per line (POSIX sh: no arrays).
+FPS_FILE="$BOOT_DIR/.fingerprints"
+: > "$FPS_FILE"
+for p in _root $PKGS; do echo "$p $(build_fingerprint "$p")" >> "$FPS_FILE"; done
+fp_of() { grep "^$1 " "$FPS_FILE" | cut -d' ' -f2; }
+
+# Which packages differ from their last build, and which have no output yet.
+DIFF=""; MISSING=""
+for p in $PKGS; do
+  if [ "$p" = shell ] && [ "$SHELL_MODE" != prod ]; then continue; fi   # dev: astro dev builds nothing
+  output_ok "$p" || MISSING="$MISSING $p"
+  [ "$(fp_of "$p")" = "$(stamp_of "$p")" ] || DIFF="$DIFF $p"
+done
+
+CHANGED=""
+if [ -f "$BUILD_REQUEST" ] || [ "${AURA_FORCE_BUILD:-0}" = 1 ] || [ -n "$MISSING" ]; then
+  if [ -f "$BUILD_REQUEST" ]; then
+    echo "[aura] boot: build requested ($(cat "$BUILD_REQUEST" 2>/dev/null))" | tee -a "$LOG"
+  elif [ -n "$MISSING" ]; then
+    echo "[aura] boot: first build — no output yet for:$MISSING" | tee -a "$LOG"
+  fi
+  if ! git -C /workspace rev-parse -q --verify HEAD >/dev/null 2>&1 \
+     || [ "$(fp_of _root)" != "$(stamp_of _root)" ]; then
+    CHANGED="$PKGS"
+  else
+    for p in $PKGS; do
+      case " $DIFF $MISSING " in *" $p "*) CHANGED="$CHANGED $p" ;; esac
+    done
+  fi
+  [ -n "$CHANGED" ] || rm -f "$BUILD_REQUEST"   # requested, but nothing to do
+elif [ -n "$DIFF" ]; then
+  echo "[aura] boot: sources changed since the last build:$DIFF — not built on a plain restart (Settings → About → Rebuild, or aura restart os --rebuild)" | tee -a "$LOG"
+fi
+
+if [ -z "$CHANGED" ]; then
+  [ -n "$DIFF" ] || echo "[aura] boot: packages unchanged since the last build — build skipped" | tee -a "$LOG"
 else
-  run pnpm --filter "./packages/*" --filter '!@aura/shell' build || fail building
-  [ -n "$FP" ] && echo "$FP" > "$BUILD_STAMP"
+  echo "[aura] boot: changed:$CHANGED — building those and their dependents" | tee -a "$LOG"
+  LIB_FILTERS=""
+  BUILD_SHELL=0
+  for p in $CHANGED; do
+    [ "$p" = shell ] || LIB_FILTERS="$LIB_FILTERS --filter ...{./packages/$p}"
+    case "$SHELL_INPUTS" in *" $p "*) BUILD_SHELL=1 ;; esac
+  done
+  if [ -n "$LIB_FILTERS" ]; then
+    # Unquoted on purpose: each "--filter ...{dir}" pair splits into two words.
+    # shellcheck disable=SC2086
+    # "...{dir}" also selects dependents outside packages/ (apps depend on
+    # @aura/core) — only packages/ is the boot's to build.
+    run pnpm $LIB_FILTERS --filter '!@aura/shell' --filter '!./apps/**' build || fail building
+  fi
+  if [ "$SHELL_MODE" = prod ] && [ "$BUILD_SHELL" = 1 ]; then
+    # The container runs with NODE_ENV=development (dev tooling, app sandboxes);
+    # the shell's own bundle must be a production build — without this Vite
+    # bundles React's development code into the desktop.
+    run env NODE_ENV=production pnpm --filter @aura/shell exec astro build --outDir "$SHELL_PROD_DIST" || fail building
+  fi
+  # Everything built (or unchanged): this state is the new baseline.
+  cp "$FPS_FILE" "$BUILD_STAMP"
+  rm -f "$BUILD_REQUEST"
 fi
 
 install -D -m 0755 /workspace/os/aura-cli-shim.sh /usr/local/bin/aura \
