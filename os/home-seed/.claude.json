@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "aura-docs": {
+      "type": "http",
+      "url": "${OS_API_BASE:-http://aura-shell:3000}/api/proxy/com.aura.docs/mcp"
+    },
+    "aura-interfaces": {
+      "type": "http",
+      "url": "${OS_API_BASE:-http://aura-shell:3000}/api/proxy/com.aura.settings/mcp/interfaces"
+    }
+  }
+}

@@ -99,11 +99,13 @@ You can read it two ways:
 
 Humans browse the same registry in Settings → Interfaces.
 
-**Connect an MCP server you found.** The full address is `$OS_API_BASE` + the entry's `url`. Check the tool list first; if a server isn't connected, offer to add it, e.g. the docs server:
+**These two come preconfigured.** New installs register both, as `aura-docs` and `aura-interfaces`, for Claude Code (`~/.claude.json`) and Codex (`~/.codex/config.toml`). On an older install, or if they're missing, add them the same way you would any other server.
+
+**Connect an MCP server you found.** The full address is `$OS_API_BASE` + the entry's `url`. Offer to add it, e.g. the docs server:
 - Claude Code: `claude mcp add --scope user --transport http aura-docs "$OS_API_BASE/api/proxy/com.aura.docs/mcp"`
 - Codex: `codex mcp add aura-docs --url "$OS_API_BASE/api/proxy/com.aura.docs/mcp"`
 
-Good first adds are the docs and the interface registry. Your own app can show up here too: add `provides[]` to its manifest (see the docs page "Interfaces").
+Your own app can show up in the registry too: add `provides[]` to its manifest (see the docs page "Interfaces").
 
 ## Working safely
 

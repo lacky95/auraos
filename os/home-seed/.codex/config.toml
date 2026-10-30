@@ -1,0 +1,10 @@
+# Seeded by AuraOS on first boot (os/home-seed); yours to edit.
+# MCP servers of the Aura Docs app and the OS Interface Registry.
+# Codex takes the URL literally: aura-shell:3000 is the shell as seen from
+# container apps (this terminal). PRoot apps reach it at 127.0.0.1:3000.
+
+[mcp_servers.aura-docs]
+url = "http://aura-shell:3000/api/proxy/com.aura.docs/mcp"
+
+[mcp_servers.aura-interfaces]
+url = "http://aura-shell:3000/api/proxy/com.aura.settings/mcp/interfaces"

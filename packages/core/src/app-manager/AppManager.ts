@@ -436,13 +436,16 @@ export class AppManager {
   }
 
   /**
-   * Copy the onboarding files AuraOS ships for the user home (os/home-seed:
-   * AGENTS.md + CLAUDE.md, so `claude` / `codex` started in a fresh terminal
-   * know what AuraOS is) into /home/aura.
+   * Copy the onboarding files AuraOS ships for the user home (os/home-seed)
+   * into /home/aura: AGENTS.md + CLAUDE.md, so `claude` / `codex` started in
+   * a fresh terminal know what AuraOS is, and ~/.claude.json +
+   * ~/.codex/config.toml, which preconfigure the docs and interface-registry
+   * MCP servers. Subdirectories are mirrored.
    *
    * Only-if-missing, per file: once seeded the files are the user's, and an
-   * edited or deliberately deleted-and-recreated copy is never overwritten.
-   * The master home is left alone — it is the OS's own.
+   * edited copy is never overwritten. In practice the tool configs therefore
+   * only land on fresh installs — an existing ~/.claude.json is never merged
+   * into. The master home is left alone — it is the OS's own.
    */
   private seedUserHome(): void {
     const seedDir = [process.env.AURA_HOME_SEED_DIR, '/os/home-seed', '/workspace/os/home-seed']
@@ -450,11 +453,13 @@ export class AppManager {
     if (!seedDir) return;
     const target = userHomeDir(this.dataDir);
     const seeded: string[] = [];
-    for (const name of readdirSync(seedDir)) {
+    for (const name of readdirSync(seedDir, { recursive: true }) as string[]) {
+      const src = join(seedDir, name);
       const dst = join(target, name);
-      if (existsSync(dst)) continue;
+      if (!lstatSync(src).isFile() || existsSync(dst)) continue;
       try {
-        copyFileSync(join(seedDir, name), dst);
+        mkdirSync(dirname(dst), { recursive: true });
+        copyFileSync(src, dst);
         seeded.push(name);
       } catch (err) {
         console.warn(`[AppManager] could not seed ${name} into ${target}: ${(err as Error).message}`);
