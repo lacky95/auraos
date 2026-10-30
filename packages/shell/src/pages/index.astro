@@ -256,6 +256,18 @@ const ssrVisibleViews = initialViews
     postViewportMount,
     setROSuppressed,
   } from '../lib/viewportBroadcaster.ts';
+  // [DEBUG-rl7] temporary: tag every activity-creating POST with its caller.
+  { const _f = window.fetch.bind(window);
+    window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : (input as Request).url ?? String(input);
+      if ((init?.method ?? 'GET').toUpperCase() === 'POST' && /\/api\/instances\/[^/]+\/activities$/.test(url.split('?')[0]!)) {
+        const why = (new Error().stack ?? '').split('\n').slice(2, 7).map((l) => l.trim().replace(/https?:\/\/[^/]+/g, '')).join(' < ').slice(0, 600);
+        const h = new Headers(init?.headers); h.set('x-aura-debug-why', why);
+        init = { ...init, headers: h };
+      }
+      return _f(input, init);
+    };
+  }
 
   const keyDispatcher = getKeyDispatcher();
 

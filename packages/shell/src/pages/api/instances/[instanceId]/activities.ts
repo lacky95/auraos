@@ -7,6 +7,8 @@ import { bumpMru } from '../../../../lib/appMru.js';
 export const POST: APIRoute = async ({ params, request }) => {
   const instanceId = params['instanceId'];
   if (!instanceId) return errorResponse('Missing instance id', 400);
+  // [DEBUG-rl7] temporary: who opens activities (reload bug)
+  console.log('[DEBUG-rl7] POST activities', instanceId, '| ua:', (request.headers.get('user-agent') ?? '').slice(0, 90), '| cs:', request.headers.get('x-aura-client-session') ?? '-', '| why:', request.headers.get('x-aura-debug-why') ?? '-');
 
   // Pre-flight guard: refuse to open an activity on a service instance BEFORE
   // touching openActivity. The same invariant is enforced at the manifest
