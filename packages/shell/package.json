@@ -35,6 +35,7 @@
     "@types/react":     "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "happy-dom":       "^20.14.6",
+    "tsx":             "^4.19.0",
     "typescript":      "^5.5.0"
   }
 }
