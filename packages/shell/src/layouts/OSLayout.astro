@@ -95,6 +95,35 @@ const activeThemeId   = activeTheme.id;
   <ClientSession />
 
   <!--
+    Reload once when a module import fails. On a Linux host every container
+    the OS spawns adds a network interface, and Chrome aborts in-flight
+    requests on a network change (ERR_NETWORK_CHANGED). A first boot spawns
+    the services while the first desktop loads, so one aborted
+    `astro:scripts/before-hydration.js` import left the desktop dead (clock
+    "--:--:--", no notifications) until the user reloaded by hand. A Vite
+    dep re-optimize mid-load fails the same way. Bounded: at most 3 reloads a
+    minute, so a real build error still shows instead of looping.
+  -->
+  <script is:inline>
+    (function () {
+      const RE = /dynamically imported module|Importing a module script failed|error loading dynamically imported module/i;
+      const KEY = 'aura.importReloads';
+      const recover = (msg) => {
+        if (!RE.test(String(msg || ''))) return;
+        let n = [];
+        try { n = JSON.parse(sessionStorage.getItem(KEY) || '[]').filter((t) => Date.now() - t < 60_000); } catch {}
+        if (n.length >= 3) return;
+        try { sessionStorage.setItem(KEY, JSON.stringify([...n, Date.now()])); } catch {}
+        console.warn('[shell] a module failed to load, reloading:', msg);
+        setTimeout(() => location.reload(), 500);
+      };
+      window.addEventListener('vite:preloadError', (e) => { e.preventDefault(); recover('dynamically imported module (vite:preloadError)'); });
+      window.addEventListener('unhandledrejection', (e) => recover(e.reason && (e.reason.message || e.reason)));
+      window.addEventListener('error', (e) => recover(e.message));
+    })();
+  </script>
+
+  <!--
     Console bridge: wraps console.*, captures uncaught errors + promise
     rejections, buffers entries, and broadcasts them via postMessage to every
     iframe. App iframes can either:
