@@ -1793,6 +1793,7 @@ export class AppManager {
       ...(title !== undefined ? { title } : {}),
       ...(minimizable ?         { minimizable: true } : {}),
       ...(stackParent ?         { stackParentId: stackParent } : {}),
+      ...(restore ?             { restored: true } : {}),
     });
     return { activity, hookAnswered: result !== null && result !== undefined, ...(handled ? { result: handled } : {}) };
   }

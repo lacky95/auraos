@@ -64,7 +64,8 @@ export interface OsEvents {
   'app:enabledChanged': { appId: string; enabled: boolean };
   /** A user launched an app — dock uses this to re-order its MRU tiles live. */
   'app:mruChanged': { appId: string; at: number };
-  'activity:opened': { activityId: string; parentInstanceId: string; appId: string; path: string; title?: string; minimizable?: boolean; stackParentId?: string };
+  /** restored: reopened by the desktop-session restore after an OS restart, not by a user or an app. */
+  'activity:opened': { activityId: string; parentInstanceId: string; appId: string; path: string; title?: string; minimizable?: boolean; stackParentId?: string; restored?: boolean };
   'activity:closed': { activityId: string; parentInstanceId: string; appId: string };
   /**
    * Emitted by `goBack` after the popped activity is closed: the shell should
