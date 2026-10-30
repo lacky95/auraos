@@ -201,6 +201,10 @@ stop_splash
   echo '[aura] boot: shell warmed up' ) &
 if [ "$SHELL_MODE" = prod ]; then
   echo "[aura] boot: shell mode prod (packages/shell/server.mjs)" | tee -a "$LOG"
-  exec pnpm --filter @aura/shell start
+  # node itself is PID 1: SIGTERM to a PID 1 without a handler is dropped,
+  # and the pnpm launcher has none — docker stop then killed the shell after
+  # 10 s without the desktop save of server.mjs (lib/desktopSession.ts).
+  cd /workspace/packages/shell || fail starting
+  PATH="/workspace/packages/shell/node_modules/.bin:$PATH" exec node server.mjs
 fi
 exec pnpm --filter @aura/shell dev --host 0.0.0.0
