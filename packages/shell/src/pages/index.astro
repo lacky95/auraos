@@ -3487,7 +3487,17 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     el.setAttribute('role', 'status');
     el.style.cssText = 'position:fixed;inset:0;z-index:3000;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;background:color-mix(in srgb, var(--aura-color-bg) 88%, transparent);color:var(--aura-color-primary);font-family:var(--aura-font-mono);letter-spacing:0.12em;font-size:0.8rem;text-align:center;';
     el.innerHTML = '<div>// AURAOS IS RESTARTING</div><div style="color:var(--aura-color-text-dim);font-size:0.65rem;letter-spacing:0.08em">'
-      + (restore ? 'your work comes back in a moment' : 'starting with an empty desktop') + '</div>';
+      + (restore ? 'your work comes back in a moment' : 'starting with an empty desktop') + '</div>'
+      + '<div style="color:var(--aura-color-text-dim);font-size:0.6rem;letter-spacing:0.08em;opacity:0.7;margin-top:12px">double-click / double-tap to hide</div>';
+    // Double-click / double-tap hides it: the desktop stays usable while the
+    // OS restarts (the page still reloads by itself once the shell is back).
+    el.addEventListener('dblclick', () => el.remove());
+    let lastTap = 0;
+    el.addEventListener('touchend', (e) => {
+      const now = Date.now();
+      if (now - lastTap < 350) { e.preventDefault(); el.remove(); }
+      lastTap = now;
+    });
     document.body.appendChild(el);
     // Never leave the desktop covered if the restart did not happen.
     setTimeout(() => { if (!restartPending) el.remove(); }, 5_000);
