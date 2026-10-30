@@ -1169,6 +1169,9 @@ export class ContainerRunner implements SandboxRunner {
    * exactly what the running app sees; capped (pids, memory, cpus) so a build
    * can't starve the running apps. The caller writes the build stamp.
    */
+  /** Shell-side pids of the `docker run` clients of running builds (getActivePids). */
+  private readonly buildPids = new Set<number>();
+
   async buildApp(appId: string, appDir: string, opts: { timeoutMs?: number } = {}): Promise<{ ok: boolean; output: string }> {
     await whenBaseImageReady();
     const name = `aura-build-${appId.replace(/[^a-zA-Z0-9_.-]/g, '_')}`;
@@ -1193,14 +1196,17 @@ export class ContainerRunner implements SandboxRunner {
       let output = '';
       const keep = (d: Buffer) => { output = (output + d.toString()).slice(-16_000); };
       const child = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'], env: WATCHER_ENV });
+      const pid = child.pid;
+      if (pid) this.buildPids.add(pid);
+      const untrack = () => { if (pid) this.buildPids.delete(pid); };
       child.stdout?.on('data', keep);
       child.stderr?.on('data', keep);
       const timer = setTimeout(() => {
         keep(Buffer.from(`\n[build] timed out after ${Math.round(timeoutMs / 1000)} s\n`));
         try { spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore', timeout: 20_000 }); } catch { /* gone */ }
       }, timeoutMs);
-      child.on('error', (err) => { clearTimeout(timer); resolve({ ok: false, output: `${output}\n${err.message}` }); });
-      child.on('close', (code) => { clearTimeout(timer); resolve({ ok: code === 0, output }); });
+      child.on('error', (err) => { clearTimeout(timer); untrack(); resolve({ ok: false, output: `${output}\n${err.message}` }); });
+      child.on('close', (code) => { clearTimeout(timer); untrack(); resolve({ ok: code === 0, output }); });
     });
   }
 
@@ -1214,7 +1220,10 @@ export class ContainerRunner implements SandboxRunner {
     // PRoot squatters). Pretend container processes don't exist as far as
     // pid-based tracking is concerned; we manage their lifecycle via
     // `docker wait` / `docker kill` instead.
-    return [];
+    // The exception: the `docker run` clients of running app builds live in
+    // the shell's namespace and their cmdline names the app dir — without
+    // this the reaper takes them for squatters.
+    return [...this.buildPids];
   }
   onExit(instanceId: string, cb: (code: number | null) => void): void {
     const tracked = this.containers.get(instanceId);
