@@ -867,6 +867,10 @@ let initialTimeZone: string = '';
     return Math.min(Math.max(0, pillOffset), max);
   }
 
+  // Lucide `fold-horizontal`, inlined: it is not in the curated sprite (which
+  // comes from @aura/core's built dist), and inlining keeps currentColor.
+  const COMPACT_ICON = '<svg class="aura-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h6"/><path d="M22 12h-6"/><path d="M12 2v2"/><path d="M12 8v2"/><path d="M12 14v2"/><path d="M12 20v2"/><path d="m19 9-3 3 3 3"/><path d="m5 15 3-3-3-3"/></svg>';
+
   function renderPills(state: workspaceClient.WorkspaceState) {
     if (!pillsEl) return;
     const total = state.workspaces.length;
@@ -904,8 +908,11 @@ let initialTimeZone: string = '';
       return `<button class="ws-pill" data-ws-id="${w.id}" data-active="${active}" ${pending ? 'data-pending="true"' : ''} title="${escapeAttr(w.name)} (${w.members.length} window${w.members.length === 1 ? '' : 's'})">${slot}</button>`;
     }).join('');
 
+    // Compact: drop empty workspaces + renumber default `WS <n>` names.
+    // Disabled when it would change nothing.
+    const compact = `<button class="ws-pill ws-pill-compact" data-ws-action="compact" ${workspaceClient.canCompact(state) ? '' : 'disabled'} title="Compact workspaces (remove empty ones, renumber WS names)">${COMPACT_ICON}</button>`;
     const add = `<button class="ws-pill ws-pill-add" data-ws-action="new" title="New workspace (Ctrl+Shift+N)">+</button>`;
-    pillsEl.innerHTML = prev + numbered + next + add;
+    pillsEl.innerHTML = prev + numbered + next + compact + add;
   }
 
   // Relocate the pills + layout chip between their inline home (as direct
@@ -1140,6 +1147,13 @@ let initialTimeZone: string = '';
     if (action === 'new') {
       clearPending();
       workspaceClient.createWorkspace().catch((err) => console.warn('[StatusBar] createWorkspace failed', err));
+      return;
+    }
+
+    // Compact — cancel any pending scrub (its target may be removed), then fire.
+    if (action === 'compact') {
+      clearPending();
+      workspaceClient.compactWorkspaces().catch((err) => console.warn('[StatusBar] compactWorkspaces failed', err));
       return;
     }
 
@@ -2239,6 +2253,18 @@ let initialTimeZone: string = '';
     color: var(--aura-color-text-dim);
     font-size: 0.85rem;
     padding: 0 8px;
+  }
+  /* Compact button: icon pill sized like the chevrons, secondary on hover
+   * like "+" (it is a workspace-list action, not a workspace). */
+  .ws-pill-compact {
+    color: var(--aura-color-text-dim);
+    margin-left: 4px;
+    padding: 0 8px;
+    font-size: 0.85rem;
+  }
+  .ws-pill-compact:hover {
+    color: var(--aura-color-secondary);
+    border-color: var(--aura-color-secondary);
   }
   /* "+" add-workspace button: secondary color on hover so it reads as a
    * distinct creation affordance, not just another workspace number. */
