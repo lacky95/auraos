@@ -22,9 +22,18 @@
  *   • Auto-save starts only after the restore: the empty desktop of a fresh
  *     boot must never overwrite the snapshot it is about to restore.
  *
+ *   • Signal shutdown — SIGTERM / SIGINT (docker stop, a container recreate,
+ *     the host health guard) runs `shutdownForSignal` from server.mjs: tabs
+ *     get `os:shuttingDown`, the snapshot is flushed and frozen like a
+ *     planned restart. Never before the restore has finished.
+ *   • Boot id — `sessionBootInfo()` (in /api/os/about) tells a reconnecting
+ *     tab that the shell it talked to is gone and whether the restore of the
+ *     new one is done, so it reloads onto the restored desktop exactly once.
+ *
  * Settings: `os/restoreSession` (false = off; default on). A planned restart
  * "without restoring activities" sets the one-shot `os/sessionRestoreSkip`.
  */
+import { randomUUID } from 'node:crypto';
 // Namespace import: the running shell may cache a core build without newer exports.
 import * as core from '@aura/core';
 import type { AppActivity } from '@aura/core';
@@ -53,7 +62,7 @@ export interface SessionInstance {
 export interface DesktopSnapshot {
   schema:     1;
   savedAt:    string;
-  reason:     'auto' | 'planned';
+  reason:     'auto' | 'planned' | 'signal';
   instances:  SessionInstance[];
   activities: SessionActivity[];
 }
@@ -75,10 +84,16 @@ interface SessionGlobal {
   writing:  Promise<void> | null;
   bound:    boolean;
   restore:  Promise<RestoreReport> | null;
+  restored: boolean;
+  bootId:   string;
 }
 const g = (): SessionGlobal => ((globalThis as { [G_KEY]?: SessionGlobal })[G_KEY] ??= {
   autosave: false, frozen: false, timer: null, writing: null, bound: false, restore: null,
+  restored: false, bootId: randomUUID(),
 });
+// server.mjs reaches the signal shutdown through this (it loads the build, not this module).
+const SHUTDOWN_HOOK = Symbol.for('aura.shellShutdown');
+(globalThis as { [SHUTDOWN_HOOK]?: () => Promise<void> })[SHUTDOWN_HOOK] = () => shutdownForSignal();
 
 async function withKv<T>(fn: (kv: ReturnType<typeof defaultKv>) => Promise<T>): Promise<T> {
   const kv = defaultKv();
@@ -170,14 +185,32 @@ export function startAutosave(): void {
  * Write the snapshot now and stop further writes — the planned-restart path.
  * Anything the shutdown does to activities afterwards is not recorded.
  */
-export async function flushAndFreeze(): Promise<DesktopSnapshot> {
+export async function flushAndFreeze(reason: DesktopSnapshot['reason'] = 'planned'): Promise<DesktopSnapshot> {
   const st = g();
   st.frozen = true;
   if (st.timer) { clearTimeout(st.timer); st.timer = null; }
   if (st.writing) await st.writing.catch(() => undefined);
-  const snap = await buildSnapshot('planned');
+  const snap = await buildSnapshot(reason);
   await withKv((kv) => kv.set('os', SESSION_KEY, snap));
   return snap;
+}
+
+const SIGNAL_GRACE_MS = 300;
+
+/**
+ * SIGTERM / SIGINT: the same save as a planned restart, for a stop nobody
+ * announced. Skipped when a planned restart already froze the snapshot, and
+ * before the restore has finished — the half-restored desktop of a boot must
+ * never overwrite the snapshot it is restoring.
+ */
+export async function shutdownForSignal(): Promise<void> {
+  const st = g();
+  if (st.frozen) return;
+  if (!st.restored) { st.frozen = true; return; }
+  core.OsEventBus.emit('os:shuttingDown', { restore: true, graceMs: SIGNAL_GRACE_MS });
+  await new Promise((r) => setTimeout(r, SIGNAL_GRACE_MS));
+  const snap = await flushAndFreeze('signal');
+  console.log(`[desktop-session] shutdown: saved ${snap.activities.length} activities`);
 }
 
 /** Undo `flushAndFreeze` when a planned restart could not start. */
@@ -199,8 +232,30 @@ export interface RestoreReport {
 /** Restore once per boot (serialised; later calls get the same report). */
 export function restoreDesktopSession(): Promise<RestoreReport> {
   const st = g();
-  st.restore ??= doRestore().finally(() => startAutosave());
+  st.restore ??= doRestore().finally(() => { st.restored = true; startAutosave(); });
   return st.restore;
+}
+
+/** This process's boot id and whether its restore is done (GET /api/os/about). */
+export function sessionBootInfo(): { bootId: string; restore: 'pending' | 'done' } {
+  const st = g();
+  return { bootId: st.bootId, restore: st.restored ? 'done' : 'pending' };
+}
+
+/**
+ * Resolves when the boot restore is done, or after `timeoutMs`. The desktop
+ * page waits on it, so a page served mid-boot already shows the windows.
+ */
+export async function waitForRestore(timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!g().restored && Date.now() < deadline) {
+    const st = g();
+    if (st.restore) {
+      await Promise.race([st.restore.catch(() => undefined), new Promise((r) => setTimeout(r, deadline - Date.now()))]);
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 100));  // init has not started the restore yet
+  }
 }
 
 async function doRestore(): Promise<RestoreReport> {
@@ -232,7 +287,7 @@ async function doRestore(): Promise<RestoreReport> {
     ? `skipped (${report.skipped})`
     : `${report.restored} activities restored${report.failed.length ? `, ${report.failed.length} failed` : ''}`;
   console.log(`[desktop-session] restore: ${summary}${report.pruned ? `, ${report.pruned} stale member(s) pruned` : ''}`);
-  core.OsEventBus.emit('session:restored', { restored: report.restored, failed: report.failed, idMap: report.idMap });
+  core.OsEventBus.emit('session:restored', { restored: report.restored, failed: report.failed, idMap: report.idMap, bootId: g().bootId });
   if (report.failed.length) await notifyFailures(report.failed);
   return report;
 }

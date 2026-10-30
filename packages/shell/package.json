@@ -7,7 +7,7 @@
     "dev": "astro dev --host 0.0.0.0",
     "build": "astro build",
     "preview": "astro preview",
-    "start": "node server.mjs",
+    "start": "exec node server.mjs",
     "start:check": "node server.mjs --check",
     "typecheck": "astro check",
     "test":      "tsx --test test/*.test.ts"

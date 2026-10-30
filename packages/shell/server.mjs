@@ -110,6 +110,23 @@ if (process.env.AURA_SHELL_WATCH === '1') {
   });
 }
 
+// Save the desktop before going down (lib/desktopSession.ts): a docker stop or
+// recreate is a restart nobody announced. Bounded, well under docker's 10 s.
+const SHUTDOWN_HOOK = Symbol.for('aura.shellShutdown');
+const SHUTDOWN_MAX_MS = 3_000;
+let stopping = false;
 for (const sig of ['SIGTERM', 'SIGINT']) {
-  process.on(sig, () => { server.close(); process.exit(0); });
+  process.on(sig, async () => {
+    if (stopping) return;
+    stopping = true;
+    const hook = globalThis[SHUTDOWN_HOOK];
+    if (typeof hook === 'function') {
+      await Promise.race([
+        hook().catch((err) => console.warn(`[shell] shutdown save failed: ${err?.message ?? err}`)),
+        new Promise((r) => setTimeout(r, SHUTDOWN_MAX_MS)),
+      ]);
+    }
+    server.close();
+    process.exit(0);
+  });
 }

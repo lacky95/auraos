@@ -4,6 +4,7 @@ import Icon from '../components/ui/Icon.astro';
 import LayoutManager from '../components/layout/LayoutManager.astro';
 import { getAppManager, DEFAULT_WORKSPACE_STATE, type WorkspaceState } from '@aura/core';
 import { sharedKv } from '../lib/sharedKv';
+import { sessionBootInfo, waitForRestore } from '../lib/desktopSession';
 import { slotInnerHtml, iframeHtml, SLOT_STYLE } from '../lib/desktop/slotMarkup';
 import { ssrGridLayout } from '../lib/layout/gridShape';
 
@@ -25,6 +26,11 @@ const enabledMap: Record<string, boolean> = mgr.getEnabledState();
 // apps the user has never touched fall through to alphabetical order so the
 // dock never looks empty on a first boot. Disabled apps are filtered out so
 // a hidden app can't squat a dock slot.
+// A page served while the boot restore is still reopening the windows would
+// render a half-empty desktop (lib/desktopSession.ts): wait for it, bounded.
+await waitForRestore(15_000);
+const session = sessionBootInfo();
+
 // Both SSR reads in one round of the shared KV connection (lib/sharedKv.ts).
 const kv = sharedKv();
 const [mruMap, storedWorkspaces] = await Promise.all([
@@ -132,17 +138,21 @@ for (const inst of mgr.getAllInstances()) {
   }
 }
 
-// Backfill orphans. Running views that no workspace claims (e.g. existed
-// before workspaces shipped, OR Settings briefly lost track) join the
-// active workspace. Avoids the "empty desktop despite running apps" trap
-// on first boot after upgrade. Service components (componentType=service)
-// are deliberately hidden from workspace membership — they have no UI.
+// Backfill orphans — only while no workspaces are stored yet (first boot, or
+// the first boot after workspaces shipped): running views then join the
+// active workspace instead of leaving an empty desktop. Once workspaces exist
+// a reload never changes membership: a view no workspace owns is hidden (a
+// closed window whose handle lived on, a restored one that was hidden before
+// the restart), and the backfill — persisted with the next workspace write —
+// piled those onto the active workspace on every reload (seen 2026-10-30).
+// Service components (componentType=service) are deliberately hidden from
+// workspace membership — they have no UI.
 const knownMembers = new Set<string>(
   workspaceState.workspaces.flatMap((w) => w.members),
 );
 const active = workspaceState.workspaces.find(w => w.id === workspaceState.activeWorkspaceId)
             ?? workspaceState.workspaces[0]!;
-for (const v of initialViews) {
+for (const v of workspaceState === DEFAULT_WORKSPACE_STATE ? initialViews : []) {
   // Services don't get added to any workspace — their presence in `views`
   // is incidental (they don't render UI in the desktop), and adding them
   // would clutter the user's app set.
@@ -235,6 +245,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     <div id="layout-overlay" aria-hidden="true"></div>
     <script type="application/json" id="aura-initial-views" set:html={JSON.stringify(initialViews)}></script>
     <script type="application/json" id="aura-initial-workspaces" set:html={JSON.stringify(workspaceState)}></script>
+    <script type="application/json" id="aura-boot" set:html={JSON.stringify(session)}></script>
 
     <!-- Focus mode: covers the entire viewport when activated from Process Manager -->
     <div id="focus-view" aria-hidden="true">
@@ -3500,8 +3511,10 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
   // Before a planned restart every tab flushes what it has not written yet
   // (a live layout gesture, debounced workspace patches) and shows that the
   // OS is restarting; when the shell is back the page reloads onto the
-  // restored desktop. A page that rendered before a restore finished (crash
-  // restart: no warning) reloads when restored activities are missing from it.
+  // restored desktop. A stop nobody announced (docker stop, a recreate) sends
+  // the same warning from server.mjs; a crash sends none, so every reconnect
+  // compares the boot id the page was served with (/api/os/about → session):
+  // a new boot reloads once its restore is done, at most once per boot.
   function flushDesktopState(): void {
     try { currentStrategy?.saveState?.(layoutHost); } catch { /* best-effort */ }
   }
@@ -3533,16 +3546,44 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     setTimeout(() => { if (!restartPending) el.remove(); }, 5_000);
     setTimeout(() => el.remove(), 180_000);
   }
-  async function reloadWhenBack(): Promise<void> {
-    for (let i = 0; i < 120; i++) {
-      try {
-        const r = await fetch('/api/os/about', { cache: 'no-store' });
-        if (r.ok) { location.reload(); return; }
-      } catch { /* still down */ }
-      await new Promise((res) => setTimeout(res, 1_000));
-    }
+  let pageBootId: string | null = null;
+  try { pageBootId = JSON.parse(document.getElementById('aura-boot')?.textContent ?? 'null')?.bootId ?? null; } catch { /* old page */ }
+  const RELOADED_FOR_KEY = 'aura.reloadedForBoot';
+  /** Reload onto boot `bootId` — once: a reload loop never starts. */
+  function reloadForBoot(bootId: string): boolean {
+    let done: string | null = null;
+    try { done = sessionStorage.getItem(RELOADED_FOR_KEY); } catch { /* no storage */ }
+    if (done === bootId) return false;
+    try { sessionStorage.setItem(RELOADED_FOR_KEY, bootId); } catch { /* no storage */ }
+    location.reload();
+    return true;
   }
-  osEvents.onReconnect(() => { if (restartPending) void reloadWhenBack(); });
+  let checkingBoot = false;
+  async function reloadWhenBack(): Promise<void> {
+    if (checkingBoot) return;
+    checkingBoot = true;
+    try {
+      for (let i = 0; i < 120; i++) {
+        try {
+          const r = await fetch('/api/os/about', { cache: 'no-store' });
+          if (r.ok) {
+            const session = ((await r.json()) as { session?: { bootId?: string; restore?: string } }).session;
+            // The same shell: a dropped connection only — unless a restart
+            // was announced, then the shell is about to go down: keep waiting.
+            if (session?.bootId && session.bootId === pageBootId) {
+              if (!restartPending) return;
+            } else if (!session?.bootId || session.restore === 'done') {
+              reloadForBoot(session?.bootId ?? `t${Date.now()}`);
+              return;
+            }
+          }
+        } catch { /* still down */ }
+        await new Promise((res) => setTimeout(res, 1_000));
+      }
+      restartPending = false;  // the announced restart never happened
+    } finally { checkingBoot = false; }
+  }
+  osEvents.onReconnect(() => { void reloadWhenBack(); });
   osEvents.subscribe(['os:*', 'session:*'], (ev: any) => {
     if (ev.type === 'os:shuttingDown') {
       restartPending = true;
@@ -3558,17 +3599,19 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
         try { currentStrategy?.onRestored?.(layoutHost, ev.idMap ?? {}); } catch { /* best-effort */ }
         return;
       }
-      // Guard against a reload loop (one reload per 30 s at most).
-      let last = 0;
-      try { last = Number(sessionStorage.getItem('aura.sessionReloadAt') ?? '0'); } catch { /* no storage */ }
-      if (Date.now() - last < 30_000) return;
-      try { sessionStorage.setItem('aura.sessionReloadAt', String(Date.now())); } catch { /* no storage */ }
-      location.reload();
+      // One reload per boot: never a loop, and never blocked by the reload
+      // of an earlier restart (restarts in quick succession).
+      reloadForBoot(String(ev.bootId ?? pageBootId ?? 'unknown'));
     }
   });
 
   osEvents.subscribe(['app:*', 'activity:*', 'workspaces:*', 'workspace:*'], (ev: any) => onOsEvent(ev));
   function onOsEvent(ev: any): void {
+    // The OS is going down: its instances stopping and activities closing are
+    // the shutdown, not the user. Keep the windows and their workspace
+    // membership — the page reloads onto the restored desktop.
+    if (restartPending && (ev.type === 'activity:closed' || ev.type === 'app:crashed'
+      || (ev.type === 'app:stateChanged' && (ev.state === 'destroyed' || ev.state === 'error')))) return;
     if (ev.type === 'app:restarting')    { beginRestart(ev); return; }
     if (ev.type === 'app:restarted')     { void finishRestart(ev); return; }
     if (ev.type === 'app:restartFailed') { failRestart(ev.appId, ev.instanceIds ?? []); return; }

@@ -3,6 +3,7 @@ import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { sessionBootInfo } from '../../../lib/desktopSession';
 
 /**
  * GET /api/os/about — the single source of truth for the About panel.
@@ -12,6 +13,8 @@ import { join } from 'node:path';
  *   • version — repo root package.json
  *   • git     — current HEAD commit / branch of the AuraOS checkout at /workspace
  *   • host    — OS / hostname / IPs / node / uptime via node:os
+ *   • session — boot id + desktop restore state (lib/desktopSession.ts): a
+ *               reconnecting shell tab reloads once the new boot has restored
  *
  * Consumed by BOTH the shell's About dialog (logo click) and the Settings app's
  * About page, so the two never drift.
@@ -92,6 +95,7 @@ export const GET: APIRoute = () => {
     version: resolveVersion(),
     git: resolveGit(),
     host: resolveHost(),
+    session: sessionBootInfo(),
   };
   return new Response(JSON.stringify(body), {
     status: 200,
