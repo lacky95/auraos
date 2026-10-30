@@ -89,6 +89,18 @@ export interface ActivityCreateRequest {
   data?: Record<string, unknown>;
   /** Set when the activity was opened by `startIntent`. */
   intent?: IntentPayload;
+  /**
+   * Set when the OS recreates an activity after a restart (desktop session
+   * restore): the id the activity had before, and the state the app saved for
+   * it (`osClient.activity.saveState()` / `onSaveState`). `activityId` is the
+   * same as `previousActivityId` when the OS could keep it.
+   */
+  restore?: ActivityRestore;
+}
+
+export interface ActivityRestore {
+  previousActivityId: string;
+  state: unknown;
 }
 
 export interface ActivityCreateResult {
@@ -125,8 +137,12 @@ export function createActivityCreateHandler(
     }
     const data = body.data ?? undefined;
     const intent = parseIntentPayload(body.intent);
+    const r = body.restore as Partial<ActivityRestore> | undefined;
+    const restore = r && typeof r.previousActivityId === 'string'
+      ? { previousActivityId: r.previousActivityId, state: r.state ?? null }
+      : undefined;
     try {
-      const result = impl ? await impl({ activityId, ...(data ? { data } : {}), ...(intent ? { intent } : {}) }) : {};
+      const result = impl ? await impl({ activityId, ...(data ? { data } : {}), ...(intent ? { intent } : {}), ...(restore ? { restore } : {}) }) : {};
       const out: ActivityCreateResult & { ok: boolean } = { ok: true, ...result };
       console.log(`[${APP_ID()}] onActivityCreate ${activityId}`);
       return json(out);
@@ -136,6 +152,42 @@ export function createActivityCreateHandler(
         return json({ ok: false, rejected: err.toReply() });
       }
       console.error(`[${APP_ID()}] onActivityCreate ${activityId} failed:`, err);
+      return json({ ok: false, error: String(err) }, 500);
+    }
+  };
+}
+
+// =========================================================================
+//  onSaveState — before a planned OS restart: hand the OS each activity's state
+// =========================================================================
+
+export interface SaveStateRequest {
+  /** This instance's activities the OS is about to recreate after the restart. */
+  activityIds: string[];
+}
+export interface SaveStateResult {
+  /** activityId → JSON state (≤ 64 KB each), returned as `restore.state`. */
+  states: Record<string, unknown>;
+}
+
+/**
+ * Factory for the optional `onSaveState` hook (POST /api/lifecycle/onSaveState).
+ * Called once before a planned restart, with a short deadline (~2 s). Apps
+ * that save their activity state as it changes (`osClient.activity.saveState`)
+ * do not need it; it is the catch-up for state that is expensive to push on
+ * every change.
+ */
+export function createSaveStateHandler(
+  impl: (req: SaveStateRequest) => SaveStateResult | Promise<SaveStateResult>,
+): APIRoute {
+  return async ({ request }) => {
+    const body = await request.json().catch(() => ({})) as Partial<SaveStateRequest>;
+    const activityIds = Array.isArray(body.activityIds) ? body.activityIds.filter((x): x is string => typeof x === 'string') : [];
+    try {
+      const res = await impl({ activityIds });
+      return json({ ok: true, states: res?.states ?? {} });
+    } catch (err) {
+      console.error(`[${APP_ID()}] onSaveState failed:`, err);
       return json({ ok: false, error: String(err) }, 500);
     }
   };

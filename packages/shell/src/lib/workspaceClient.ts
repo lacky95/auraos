@@ -44,12 +44,23 @@ export interface LayoutState {
   [key: string]:  unknown;
 }
 
+/** Shell-owned state of one activity, kept across reloads and OS restarts
+ *  (lib/desktopSession.ts remaps it with the activity's id). */
+export interface ActivityViewState {
+  /** The user's label for the activity (rename). */
+  name?:      string;
+  /** Maximized in place: 'area' = the activities area, 'full' = over the bars. */
+  maximized?: 'area' | 'full';
+}
+
 export interface Workspace {
   id:        string;
   name:      string;
   layoutId:  string;
   members:   string[];
   layoutState?: LayoutState;
+  /** viewId → shell state of that activity (name, maximized). */
+  activities?: Record<string, ActivityViewState>;
 }
 
 export interface WorkspaceState {
@@ -112,6 +123,7 @@ function clone(s: WorkspaceState): WorkspaceState {
       id: w.id, name: w.name, layoutId: w.layoutId,
       members: [...w.members],
       ...(w.layoutState ? { layoutState: cloneLayoutState(w.layoutState)! } : {}),
+      ...(w.activities ? { activities: JSON.parse(JSON.stringify(w.activities)) as Record<string, ActivityViewState> } : {}),
     })),
   };
 }
@@ -142,6 +154,40 @@ export function patchWorkspaceDebounced(id: string, patch: Partial<Omit<Workspac
       notify(cached);
     }
   }
+}
+
+/**
+ * Send every debounced patch NOW — before the page unloads or the OS goes
+ * down for a planned restart, so the last drag / rename is not lost.
+ */
+export async function flushPending(): Promise<void> {
+  const jobs: Promise<void>[] = [];
+  for (const [id, p] of pendingPatch) {
+    clearTimeout(p.timer);
+    pendingPatch.delete(id);
+    jobs.push(patchWorkspace(id, p.patch));
+  }
+  await Promise.all(jobs);
+}
+
+/** Like `flushPending`, for `beforeunload` — a fetch with keepalive survives
+ *  the page going away, a plain one may not. */
+export function flushPendingOnUnload(): void {
+  if (!pendingPatch.size || !cached) return;
+  const s = clone(cached);
+  for (const [id, p] of pendingPatch) {
+    clearTimeout(p.timer);
+    const idx = s.workspaces.findIndex((w) => w.id === id);
+    if (idx >= 0) s.workspaces[idx] = { ...s.workspaces[idx]!, ...p.patch };
+  }
+  pendingPatch.clear();
+  try {
+    void fetch(ENDPOINT, {
+      method: 'PUT', keepalive: true,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: s }),
+    });
+  } catch { /* page is going away */ }
 }
 
 function notify(state: WorkspaceState): void {

@@ -74,6 +74,66 @@ The password is stored encrypted and is never shown again. See
 **[Private stores](./private-stores)** for both sides: adding one, and
 running one for your customers.
 
+The **Sources** tab of the Nexus app does the same: add, **edit** (alias,
+URL, priority, mirror, git ref) and remove sources, and add or change a
+login. Renaming a source changes its alias — publish targets that use the
+old name (`--to`, a manifest's `publish.registry`) must follow.
+
+## Pre-registered sources
+
+An install can ship sources that exist from its first boot — say, your
+company registry under the alias `acme`, so `aura nexus app publish --to acme`
+works right away. Nexus reads seeds from, in rising precedence:
+
+| Where | Meant for |
+|---|---|
+| `/etc/aura/nexus/sources.d/*.json` | shipped with the install or image (read-only) |
+| `/data/nexus/sources.d/*.json` | the admin of this machine (persists) |
+| `AURA_NEXUS_SOURCES` | the environment: JSON, or a path to a JSON file |
+
+Files apply in name order; for the same alias the later one wins. Each holds
+a list (or `{ "sources": [ … ] }`) of entries:
+
+```json
+[
+  { "name": "acme", "url": "https://registry.acme.com", "priority": 5,
+    "username": "ci", "passwordFile": "/run/secrets/acme-registry" },
+  { "name": "corp-catalog", "kind": "git-index", "url": "github.com/acme/aura-catalog",
+    "policy": "managed" }
+]
+```
+
+| Field | |
+|---|---|
+| `name` | the alias — required |
+| `kind` | `oci` (default), `git-index` or `git-app` |
+| `url` | required |
+| `priority` | lower is checked first (default 10) |
+| `mirror`, `appRepoPrefix` | oci only |
+| `ref`, `repo` | git sources: branch/tag, and the submission repo of an index |
+| `policy` | `seed` (default) or `managed` |
+| `username` + `password` / `passwordEnv` / `passwordFile` | login of a private oci registry |
+
+The two policies:
+
+- **`seed`** — the source is added once and then belongs to the user: edits
+  and removal in Nexus stick. Only a change of that entry in the seed applies
+  it again. Nexus shows it as *pre-registered*.
+- **`managed`** — the seed owns it: it is enforced on every boot, shown
+  🔒 locked in Nexus (no edit, remove or login change there), and removed
+  when it disappears from the seeds.
+
+A login is sealed into the OS-only secret store like one entered by hand; the
+sources config keeps only the username. `passwordEnv` (the name of an
+environment variable) or `passwordFile` (e.g. a Docker secret) keep the
+password out of the JSON; an inline `password` works too, but then the file
+holds a secret in plain text — keep its permissions tight.
+
+Seeds are applied after each shell boot. After editing a file, press
+**RE-APPLY SEEDS** on the Sources tab (or `POST /api/nexus/sources/seeds`) —
+no restart needed. The same tab lists the files found, what they declare and
+any problems; `GET /api/nexus/sources/seeds` returns it as JSON.
+
 ## Installing
 
 ```bash

@@ -568,8 +568,11 @@ export const AppManifestSchema = z.object({
    *   • `license`         — SPDX id or short label ("MIT", "Proprietary").
    *   • `tags`            — free-form search keywords.
    *   • `longDescription` — multi-paragraph body for the detail page. Plain text.
-   *   • `screenshots`     — ABSOLUTE https URLs only (v1 does not host images;
-   *                          point at git-raw URLs or a CDN).
+   *   • `screenshots`     — https URLs, or image files relative to the app
+   *                          directory (`store/shot1.png`). On OCI publish files
+   *                          are uploaded into the registry (the app's listing,
+   *                          nexus/OciListing.ts); the git store takes URLs or
+   *                          `aura nexus app screenshots add`.
    */
   store: z.object({
     publisher:       z.string().max(64).optional(),
@@ -577,7 +580,10 @@ export const AppManifestSchema = z.object({
     license:         z.string().max(32).optional(),
     tags:            z.array(z.string().max(24)).max(16).default([]),
     longDescription: z.string().max(4096).optional(),
-    screenshots:     z.array(z.string().url()).max(8).default([]),
+    screenshots:     z.array(z.string().min(1).refine(
+      (s) => /^https:\/\//i.test(s) || (!/^[a-z][a-z0-9+.-]*:/i.test(s) && !s.startsWith('/') && !s.split(/[\\/]/).includes('..')),
+      { message: 'screenshot must be an https URL or an image path inside the app (no leading /, no ..)' },
+    )).max(8).default([]),
   }).optional(),
   /**
    * Free-form, app-defined metadata. The OS stores it and returns it verbatim

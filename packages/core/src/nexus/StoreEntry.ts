@@ -229,11 +229,14 @@ export function buildStoreEntry(
 
   const screenshots: string[] = [];
   for (const url of m.store?.screenshots ?? []) {
-    if (!url.startsWith('https://')) {
-      err('store.screenshots', `'${url}' must be an absolute https:// URL (AuraOS hosts no images)`);
+    if (url.startsWith('https://')) { screenshots.push(url); continue; }
+    if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) {
+      // An image file in the app: OCI publish uploads it into the registry,
+      // but this store's index holds URLs — the file goes in separately.
+      warn('store.screenshots', `'${url}' is a file — not listed here; upload it with \`aura nexus app screenshots add <id> ${url}\``);
       continue;
     }
-    screenshots.push(url);
+    err('store.screenshots', `'${url}' must be an absolute https:// URL or an image file in the app`);
   }
   if (screenshots.length > MAX_SCREENSHOTS) {
     err('store.screenshots', `${screenshots.length} screenshots, store maximum is ${MAX_SCREENSHOTS}`);

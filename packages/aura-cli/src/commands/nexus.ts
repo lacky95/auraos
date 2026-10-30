@@ -619,15 +619,15 @@ function wireScreenshots(parent: Command): void {
   const shots = parent
     .command('screenshots')
     .alias('shots')
-    .description('Add, replace, remove or list the screenshots on a store listing.');
+    .description('Add, replace, remove or list the screenshots on a store listing (the git store, or an OCI registry with --registry).');
 
   const call = async (
     appId: string,
     action: 'list' | 'add' | 'remove' | 'replace',
-    o: { source?: string; index?: number; storeRepo?: string; dryRun?: boolean; force?: boolean },
+    o: { source?: string; index?: number; storeRepo?: string; registry?: string; dryRun?: boolean; force?: boolean },
   ) => {
     const res = await postStore<{
-      ok: boolean; storeRepo: string; error?: string; hint?: string; messages?: string[];
+      ok: boolean; storeRepo: string; kind?: 'oci'; error?: string; hint?: string; messages?: string[];
       result?: {
         appId: string; screenshots: string[];
         uploaded?: { path: string; url: string; bytes: number };
@@ -635,7 +635,7 @@ function wireScreenshots(parent: Command): void {
       };
     }>('/api/nexus/screenshots', {
       appId, action, source: o.source, index: o.index,
-      storeRepo: o.storeRepo, dryRun: o.dryRun, force: o.force,
+      storeRepo: o.storeRepo, registry: o.registry, dryRun: o.dryRun, force: o.force,
     });
 
     for (const m of res.messages ?? []) info(`  ${m}`);
@@ -652,36 +652,38 @@ function wireScreenshots(parent: Command): void {
     if (action === 'list') return;
     if (r.unchanged) { ok('nothing to change'); return; }
     if (o.dryRun)    { ok('dry run — nothing was pushed'); return; }
+    if (res.kind === 'oci') { ok(`${color.cyan(res.storeRepo)} — listing updated`); return; }
     ok(`${color.cyan(res.storeRepo)} — ${r.prUrl}`);
     info('  a maintainer reviews and merges it; the listing updates on merge.');
   };
 
   const common = (c: Command) => c
+    .option('--registry <alias>',  'an OCI source: edit the listing in that registry instead of the git store')
     .option('--store-repo <slug>', 'store index repo (owner/repo)')
     .option('--dry-run',           'show the change without touching GitHub')
     .option('--force',             'overwrite a screenshot branch someone has edited');
 
   common(shots.command('list <appId>')
     .description('Show the screenshots currently listed, numbered.'))
-    .action(async (appId: string, o: { storeRepo?: string }) => {
+    .action(async (appId: string, o: { storeRepo?: string; registry?: string }) => {
       await call(appId, 'list', o);
     });
 
   common(shots.command('add <appId> <image>')
     .description('Add a screenshot. <image> is a local file (uploaded to the store) or an https URL.'))
-    .action(async (appId: string, image: string, o: { storeRepo?: string; dryRun?: boolean; force?: boolean }) => {
+    .action(async (appId: string, image: string, o: { storeRepo?: string; registry?: string; dryRun?: boolean; force?: boolean }) => {
       await call(appId, 'add', { ...o, source: image });
     });
 
   common(shots.command('replace <appId> <n> <image>')
     .description('Replace screenshot <n> (as printed by `list`).'))
-    .action(async (appId: string, n: string, image: string, o: { storeRepo?: string; dryRun?: boolean; force?: boolean }) => {
+    .action(async (appId: string, n: string, image: string, o: { storeRepo?: string; registry?: string; dryRun?: boolean; force?: boolean }) => {
       await call(appId, 'replace', { ...o, index: Number(n), source: image });
     });
 
   common(shots.command('remove <appId> <n>')
     .description('Remove screenshot <n>. An image this store hosts is deleted with it.'))
-    .action(async (appId: string, n: string, o: { storeRepo?: string; dryRun?: boolean; force?: boolean }) => {
+    .action(async (appId: string, n: string, o: { storeRepo?: string; registry?: string; dryRun?: boolean; force?: boolean }) => {
       await call(appId, 'remove', { ...o, index: Number(n) });
     });
 }

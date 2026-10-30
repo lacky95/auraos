@@ -26,6 +26,7 @@ import * as YAML from 'yaml';
 import type { IndexDocument, IndexEntry } from './types.js';
 import { seedIndex } from './defaultIndex.js';
 import { parseStoreAnnotations } from './ociMetadata.js';
+import { listingScreenshotUrls, readListing, type Listing } from './OciListing.js';
 import { orasFlagsForUrl, orasHostFromUrl } from './RegistryConfig.js';
 import { orasSync } from './RegistryAuth.js';
 import {
@@ -56,6 +57,48 @@ export interface CatalogEntry extends IndexEntry {
   sourceKind: SourceEntry['kind'] | 'seed';
   /** Latest known version (OCI: from the artifact's version annotation). */
   version?: string;
+  /** Detail-page body (OCI: release annotation, overridden by the listing). */
+  longDescription?: string;
+  license?: string;
+  /** What the app asks for, from the manifest a release carries (OCI). */
+  requires?: AppRequirements;
+}
+
+/** The parts of a manifest a user weighs before installing. */
+export interface AppRequirements {
+  sandbox?:      string;
+  componentType?: string;
+  permissions:   string[];
+  tools:         string[];
+  services:      Array<{ name: string; image: string }>;
+  provides:      Array<{ name: string; kind: string }>;
+  dependencies:  Array<{ appId: string; required: boolean }>;
+}
+
+/** Summarise a (possibly partial, older-schema) manifest. */
+export function manifestRequirements(m: unknown): AppRequirements | undefined {
+  if (!m || typeof m !== 'object') return undefined;
+  const r = m as Record<string, unknown>;
+  const arr = (k: string): unknown[] => (Array.isArray(r[k]) ? r[k] as unknown[] : []);
+  const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
+  return {
+    sandbox: str(r['sandbox']),
+    componentType: str(r['componentType']),
+    permissions: arr('permissions').map((p) => (typeof p === 'string' ? p : str((p as { name?: unknown })?.name) ?? '')).filter(Boolean),
+    tools: arr('tools').filter((t): t is string => typeof t === 'string'),
+    services: arr('services').flatMap((sv) => {
+      const o = sv as { name?: unknown; image?: unknown };
+      return typeof o?.name === 'string' && typeof o?.image === 'string' ? [{ name: o.name, image: o.image }] : [];
+    }),
+    provides: arr('provides').flatMap((pv) => {
+      const o = pv as { name?: unknown; kind?: unknown };
+      return typeof o?.name === 'string' ? [{ name: o.name, kind: str(o.kind) ?? '' }] : [];
+    }),
+    dependencies: arr('dependencies').flatMap((d) => {
+      const o = d as { appId?: unknown; required?: unknown };
+      return typeof o?.appId === 'string' ? [{ appId: o.appId, required: o.required !== false }] : [];
+    }),
+  };
 }
 
 /** Per-source fetch outcome, surfaced so the UI can flag degraded sources. */
@@ -267,20 +310,31 @@ export class CatalogAggregator {
         const meta = parseStoreAnnotations(manifest.annotations);
         const id = meta.id ?? repo.slice(prefix.length + 1);
         if (!id) continue;
+        // The listing (OciListing.ts) holds screenshots + edited texts apart
+        // from releases; it wins over the release annotations when present.
+        let listing: Listing | null = null;
+        try { listing = readListing({ host, repo, flags }); } catch { /* unreadable: release data only */ }
+        const lm = listing?.meta ?? {};
+        const shots = listing && listing.screenshots.length
+          ? listingScreenshotUrls(listing, src.name, id)
+          : (meta.screenshots ?? []);
         entries.push({
           id,
           name:        meta.name ?? id,
-          description: meta.description,
+          description: lm.description ?? meta.description,
+          longDescription: lm.longDescription ?? meta.longDescription,
           icon:        meta.icon,
-          publisher:   meta.publisher,
-          homepage:    meta.homepage,
+          publisher:   lm.publisher ?? meta.publisher,
+          homepage:    lm.homepage ?? meta.homepage,
+          license:     meta.license,
           categories:  meta.category ? [meta.category] : [],
-          tags:        meta.tags ?? [],
-          screenshots: meta.screenshots ?? [],
+          tags:        lm.tags ?? meta.tags ?? [],
+          screenshots: shots,
           sources:     { oci: { ref: `${host}/${repo}` } },
           sourceName:  src.name,
           sourceKind:  'oci',
           version:     meta.version,
+          requires:    manifestRequirements(meta.manifest),
         });
       } catch { /* skip repos that don't resolve a :latest manifest */ }
     }

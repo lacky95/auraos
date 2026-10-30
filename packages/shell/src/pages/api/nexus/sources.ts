@@ -1,17 +1,16 @@
 import type { APIRoute } from 'astro';
-import { execFileSync } from 'node:child_process';
-import { existsSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
 import {
   loadSourcesConfig, saveSourcesConfig, isSourceEntry, refreshNexusSources,
-  loadGitIndexDoc, validateStagedDir,
-  type SourcesConfig, type SourceEntry, type GitAppMeta,
+  loadGitIndexDoc,
+  type SourcesConfig, type SourceEntry,
 } from '@aura/core';
 // Namespace import for the private-source helpers: the running shell may cache
 // a core build without them.
 import * as core from '@aura/core';
 import { jsonResponse } from '../../../lib/appResponse.js';
 import { credentialsLoaded, loginFromBody, probeError, probeOciSource } from '../../../lib/nexusSourceLogin.js';
+import { probeGitApp } from '../../../lib/nexusGitApp.js';
+import { managedMarker } from '../../../lib/nexusSeeds.js';
 
 /**
  * Nexus sources config — the catalogs/registries the store aggregates and
@@ -22,7 +21,9 @@ import { credentialsLoaded, loginFromBody, probeError, probeOciSource } from '..
  *   PUT  /api/nexus/sources   → replace the whole config
  *   POST /api/nexus/sources   → add one source, validated by kind
  *
- * Per-source DELETE lives in ./sources/[name].ts.
+ * Per-source PATCH / DELETE live in ./sources/[name].ts; pre-registered
+ * sources (seed files + AURA_NEXUS_SOURCES) in ./sources/seeds.ts. A source a
+ * seed marks `managed` is locked: PUT must keep it exactly as it is.
  *
  * POST content validation is STRICT per kind (the whole point of the source
  * model — the store never guesses what a git URL is):
@@ -64,6 +65,14 @@ export const PUT: APIRoute = async ({ request }) => {
   }
   const normalised: SourcesConfig = { schema: 1, sources: cfg.sources };
   const before = await loadSourcesConfig(OS_API_BASE);
+  for (const s of before.sources) {
+    const m = managedMarker(s);
+    if (!m) continue;
+    const after = normalised.sources.find((x) => x.name === s.name);
+    if (!after || JSON.stringify(after) !== JSON.stringify(s)) {
+      return jsonResponse({ error: 'managed-source', detail: `${s.name} is managed by ${m.origin} and cannot be changed here` }, 409);
+    }
+  }
   await saveSourcesConfig(OS_API_BASE, normalised);
   refreshNexusSources(normalised);
   // Logins of sources that are gone (or no longer reference them) go too.
@@ -84,6 +93,7 @@ export const POST: APIRoute = async ({ request }) => {
   const login = loginFromBody(raw);
   if (login instanceof Response) return login;
   delete raw['username']; delete raw['password']; delete raw['auth'];
+  delete raw['seed']; // only seeds mark a source (lib/nexusSeeds.ts)
   if (!isSourceEntry(raw)) {
     return jsonResponse({ error: 'invalid-entry', detail: 'expected { kind, name, url, priority }' }, 400);
   }
@@ -126,28 +136,3 @@ export const POST: APIRoute = async ({ request }) => {
   await credentialsLoaded();
   return jsonResponse({ ok: true, config: cfg, ...(apps !== undefined ? { apps } : {}) });
 };
-
-/** Shallow-clone a git-app repo and read its root manifest into a snapshot. */
-function probeGitApp(url: string, ref?: string): GitAppMeta {
-  const tmp = join('/tmp', `aura-gitapp-${Date.now()}`);
-  const args = ['clone', '--depth', '1'];
-  if (ref) args.push('--branch', ref);
-  args.push(url, tmp);
-  try {
-    execFileSync('git', args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 });
-    if (!existsSync(join(tmp, 'app.manifest.json'))) {
-      throw new Error('no app.manifest.json at repo root — is this a single-app repo?');
-    }
-    const manifest = validateStagedDir(tmp);
-    return {
-      id:          manifest.id,
-      name:        manifest.name,
-      version:     manifest.version,
-      description: manifest.description,
-      icon:        manifest.icon,
-      category:    manifest.category,
-    };
-  } finally {
-    try { rmSync(tmp, { recursive: true, force: true }); } catch { /* best-effort */ }
-  }
-}

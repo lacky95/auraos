@@ -358,6 +358,9 @@ function sioPlugin() {
         // (Phase 5: the legacy content-carrying 'notification' event is gone.)
         'theme:changed', 'mode:changed', 'ui:command',
         'workspaces:changed', 'workspace:activated', 'kv:changed',
+        // OS restarts: a planned restart is starting (tabs flush + show it) /
+        // the desktop session was restored after boot (lib/desktopSession.ts).
+        'os:shuttingDown', 'session:restored',
         // Notification store lifecycle — content-free {eventId,id,state}.
         // Shell UI only: deliberately NOT relayed on api/apps/events.ts.
         // Phase 5: a socket whose client session is locked / unknown does

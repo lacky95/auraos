@@ -22,12 +22,20 @@ export type { RegistryLogin, SourceAuth } from './RegistryAuth.js';
 export { discoverStore, parseStoreDescriptor, wellKnownUrl, StoreDiscoveryError } from './StoreDiscovery.js';
 export type { StoreDescriptor } from './StoreDiscovery.js';
 export { CatalogAggregator, loadGitIndexDoc } from './CatalogAggregator.js';
-export type { Catalog, CatalogEntry, SourceStatus } from './CatalogAggregator.js';
+export { manifestRequirements } from './CatalogAggregator.js';
+export type { Catalog, CatalogEntry, SourceStatus, AppRequirements } from './CatalogAggregator.js';
 export {
   buildStoreAnnotations, parseStoreAnnotations,
   APP_REPO_PREFIX, APP_ARTIFACT_TYPE, ANNOTATION_KEYS,
 } from './ociMetadata.js';
 export type { StoreMetadata } from './ociMetadata.js';
+export {
+  LISTING_TAG, LISTING_ARTIFACT_TYPE, LISTING_ORDER_ANNOTATION, LISTING_META_ANNOTATION,
+  ociAppTarget, isDigest, listingAssetPath, listingScreenshotUrls, readListing, fetchListingBlob,
+  writeListing, listingInputs, screenshotInput, manageOciScreenshots, reorderOciScreenshots,
+  updateListingMeta, assertPublished, canWriteListing, normaliseListingMeta,
+} from './OciListing.js';
+export type { Listing, ListingShot, ListingMeta, ListingInput, OciAppTarget, OciScreenshotOpts, OciScreenshotResult } from './OciListing.js';
 export {
   loadSourcesConfig, saveSourcesConfig, seedSourcesConfigIfMissing,
   sortedSources, ociSources, findSource, ociRegistryView, isSourceEntry, isSourceAuth,

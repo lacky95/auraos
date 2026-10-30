@@ -52,7 +52,7 @@ where it publishes. Add them to `app.manifest.json`:
     "license": "MIT",
     "tags": ["demo", "hello"],
     "longDescription": "A longer description for the app's detail page.",
-    "screenshots": ["https://example.com/hello/shot1.png"]
+    "screenshots": ["store/shot1.png", "https://example.com/hello/shot2.png"]
   },
 
   // Publish defaults — used when you run `aura nexus app publish` with no flags.
@@ -64,9 +64,12 @@ where it publishes. Add them to `app.manifest.json`:
 }
 ```
 
-`screenshots` must be **absolute https URLs** (AuraOS doesn't host images —
-point at git-raw URLs or a CDN). Everything in `store` is optional; missing
-fields just render as "—".
+`screenshots` are **https URLs** or **image files inside the app**
+(`store/shot1.png` — PNG, JPEG, GIF or WebP, up to 2 MB, at most 8). On an
+OCI publish, files are uploaded into the registry itself, next to the app
+(see [Edit the store listing](#edit-the-store-listing)); the git store lists
+URLs only, so add files there with `aura nexus app screenshots add`.
+Everything in `store` is optional; missing fields just render as "—".
 
 ## 2. Publish
 
@@ -122,6 +125,37 @@ aura nexus app info com.example.hello  # resolved source + address + permission 
 
 It also appears in the Nexus app's **Browse** tab (open Nexus from the
 launcher) — same data, rendered.
+
+## Edit the store listing
+
+An app in an **OCI registry** has a *listing* next to its releases:
+`aura-apps/<id>:listing` holds its screenshots (as images in the registry)
+and store texts that override the release's — short and long description,
+tags, homepage, publisher. Edit it any time, without a new version:
+
+- **In the Nexus app:** open the app's page. When your login may write to
+  that registry, an **Edit listing** panel appears: change the texts, upload
+  screenshots (file or https URL), reorder or remove them. A read-only
+  (customer) login never sees it.
+- **From the CLI:**
+  ```bash
+  aura nexus app screenshots list    com.example.hello --registry local
+  aura nexus app screenshots add     com.example.hello ./store/shot3.png --registry local
+  aura nexus app screenshots replace com.example.hello 2 https://cdn.example.com/b.png --registry local
+  aura nexus app screenshots remove  com.example.hello 1 --registry local
+  ```
+  Without `--registry` the commands edit the git store (a pull request).
+
+Publishing an app whose manifest lists `store.screenshots` replaces the
+listing's screenshots with that list; a manifest without screenshots leaves
+the listing alone, so pictures managed here survive a release. The texts
+edited in Nexus are never touched by a publish.
+
+The registry's images are served to the store through the shell
+(`/api/nexus/assets/<source>/<id>/<digest>`), so a private or internal
+registry needs no public web host. The app page also shows what an app needs —
+sandbox, permissions, tools, sidecars and their images, interfaces and app
+dependencies — read from the manifest each OCI release carries.
 
 ## 4. Install it
 

@@ -8,6 +8,7 @@ import { HOST_LABEL, TMUX_CONF, TMUX_SOCKET, liveTmuxSessions, respawnIfDead, sh
 import { dialogAction, getDialog, installDialogHooks, setDialogText } from './input-dialog.ts';
 import { openPaneTap, paneRepaint, tmuxHasSession, type PaneTap } from './pane-tap.ts';
 import { forgetSessionPicks } from './window-session.ts';
+import { forgetCwd, hasSavedCwd, savedCwd, startCwdRecorder } from './session-cwd.ts';
 
 /**
  * PTY session registry — one live VIEW at a time, survives browser reload.
@@ -223,6 +224,16 @@ function deleteScrollback(sessionId: string): void {
   try { rmSync(join(SCROLLBACK_DIR, sessionId), { force: true }); } catch { /* ignore */ }
 }
 
+/**
+ * The session left something to come back to — saved scrollback or a saved
+ * directory — even if no shell runs it now (its container ended). An OS
+ * restore reopens an activity onto such a session: same name, history replayed,
+ * old directory.
+ */
+export function sessionHasHistory(sessionId: string): boolean {
+  return existsSync(join(SCROLLBACK_DIR, sessionId)) || hasSavedCwd(sessionId);
+}
+
 function log(...args: unknown[]): void {
   console.log('[pty]', ...args);
 }
@@ -279,11 +290,16 @@ function spawnPty(sessionId: string | null, cols: number, rows: number): IPty {
 
   // attach-or-create. `-u` forces UTF-8 regardless of the container's locale
   // (node:22 images ship POSIX, which would otherwise mangle box-drawing).
+  // A session recreated after its container ended starts in its old
+  // directory (session-cwd.ts). `-c` only applies when the session is
+  // created; attaching to a live one ignores it.
+  const dir = savedCwd(sessionId);
   return pty.spawn(tmuxBin, [
     '-L', TMUX_SOCKET,
     '-f', TMUX_CONF,
     '-u',
     'new-session', '-A', '-s', tmuxName(sessionId),
+    ...(dir ? ['-c', dir] : []),
     ...shellArgv(shell),   // root `exit` ends the session, a crash restarts the shell
   ], opts);
 }
@@ -864,6 +880,7 @@ export function killSession(sessionId: string): boolean {
   // reuse the id would attach to a stale one.
   const killedTmux = tmuxKill(sessionId);
   deleteScrollback(sessionId);
+  forgetCwd(sessionId);
 
   if (!sess) {
     if (killedTmux) log('killSession', sessionId, 'detached tmux session reaped (no in-memory session)');
@@ -906,6 +923,8 @@ export function getPtyWss(): WebSocketServer {
   if (typeof keepalive.unref === 'function') keepalive.unref();
   g[KEEPALIVE_KEY] = keepalive;
   log('keepalive armed', `${PING_MS}ms`, GRACE_MS > 0 ? `grace=${GRACE_MS}ms` : 'grace=never');
+  // Where every live session is, for recreating it later (session-cwd.ts).
+  startCwdRecorder(() => listSessions().map((s) => s.id));
 
   ptyWss.on('connection', (ws: WebSocket, req) => {
     // `req` is the upgrade request — the WS server's `connection` event

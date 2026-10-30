@@ -530,6 +530,7 @@ function buildScaffoldFiles(cfg: ScaffoldConfig): PayloadFile[] {
       // Conditionally skip activity-lifecycle files for service shapes.
       if (!includeActivityFiles && (
         rel === 'src/pages/api/lifecycle/onActivityCreate.ts' ||
+        rel === 'src/pages/api/lifecycle/onSaveState.ts' ||
         rel.startsWith('src/pages/api/lifecycle/onActivityDestroy/')
       )) continue;
       const st = statSync(src);

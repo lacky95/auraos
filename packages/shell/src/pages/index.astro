@@ -208,8 +208,8 @@ const ssrVisibleViews = initialViews
     <!-- Layout-manager extension points (lib/layout/types.ts): the active
          strategy may mount bars into these regions (e.g. Free Window's
          taskbar on top); #dynamic-layout is inset by their measured size, so
-         windows, maximize and the viewport broadcast get the remaining box.
-         #layout-overlay sits above the windows for previews / splitters. -->
+         activities, maximize and the viewport broadcast get the remaining box.
+         #layout-overlay sits above the activities for previews / splitters. -->
     <div id="layout-region-top"    class="layout-region" data-side="top"></div>
     <div id="layout-region-bottom" class="layout-region" data-side="bottom"></div>
     <div id="layout-region-left"   class="layout-region" data-side="left"></div>
@@ -245,7 +245,7 @@ const ssrVisibleViews = initialViews
   import { osEvents } from '../lib/osEvents.ts';
   import { registerUiCommand, registerSnapshotPart, invokeLocal, startUiCommandListener } from '../lib/uiCommands.ts';
   import { markLaunchedHere } from '../lib/launchOrigin.ts';
-  import { beginWindowDrag, handOffWindowDrag, registerDropTarget, setLayoutDragPolicy, getLayoutDragPolicy } from '../lib/windowDrag.ts';
+  import { beginWindowDrag, handOffActivityDrag, registerDropTarget, setLayoutDragPolicy, getLayoutDragPolicy } from '../lib/windowDrag.ts';
   import { dragPolicyFor } from '../lib/layoutDragPolicies.ts';
   import { shellLayoutFor } from '../lib/layout/registry.ts';
   import type { LayoutHost, LayoutRenderContext, LayoutViewInfo, RegionSide, ShellLayoutStrategy } from '../lib/layout/types.ts';
@@ -1103,14 +1103,69 @@ const ssrVisibleViews = initialViews
   // prunes entries whose window has gone away.
   const windowNames = new Map<string, string>();
 
+  // ---- Persisted per-activity shell state (workspace `activities`) ---------
+  // Activity names and the maximized state live in the workspace that owns
+  // the activity, so they survive reloads and OS restarts. ` 0 ` /
+  // `maximizedViewId` stay the in-memory view of it.
+  type PersistedActivity = { name?: string; maximized?: 'area' | 'full' };
+  function patchActivityState(viewId: string, patch: PersistedActivity): void {
+    const st = workspaceClient.getCached();
+    if (!st) return;
+    const ws = st.workspaces.find((w) => w.members.includes(viewId))
+      ?? st.workspaces.find((w) => w.id === st.activeWorkspaceId);
+    if (!ws) return;
+    const activities: Record<string, PersistedActivity> = { ...((ws as { activities?: Record<string, PersistedActivity> }).activities ?? {}) };
+    const entry: PersistedActivity = { ...(activities[viewId] ?? {}) };
+    for (const [k, v] of Object.entries(patch) as Array<[keyof PersistedActivity, string | undefined]>) {
+      if (v === undefined) delete entry[k]; else (entry as Record<string, string>)[k] = v;
+    }
+    if (JSON.stringify(entry) === JSON.stringify(activities[viewId] ?? {})) return;
+    if (Object.keys(entry).length) activities[viewId] = entry; else delete activities[viewId];
+    workspaceClient.patchWorkspaceDebounced(ws.id, { activities } as never);
+  }
+  /** Names saved for activities of any workspace → the in-memory map. */
+  function hydrateActivityNames(): void {
+    const st = workspaceClient.getCached();
+    for (const w of st?.workspaces ?? []) {
+      for (const [id, e] of Object.entries((w as { activities?: Record<string, PersistedActivity> }).activities ?? {})) {
+        if (e?.name && !windowNames.has(id)) windowNames.set(id, e.name);
+      }
+    }
+  }
+  // Maximized state: restored once on load, written whenever it changes.
+  let maximizeRestored = false;
+  let persistedMax: { viewId: string | null; full: boolean } = { viewId: null, full: false };
+  function restoreMaximized(visibleIds: Set<string>): void {
+    if (maximizeRestored) return;
+    const st = workspaceClient.getCached();
+    const active = st?.workspaces.find((w) => w.id === st.activeWorkspaceId);
+    if (!active) return;
+    maximizeRestored = true;
+    for (const [id, e] of Object.entries((active as { activities?: Record<string, PersistedActivity> }).activities ?? {})) {
+      if (e?.maximized && visibleIds.has(id)) {
+        maximizedViewId = id;
+        maximizedFull = e.maximized === 'full';
+        persistedMax = { viewId: id, full: maximizedFull };
+        return;
+      }
+    }
+  }
+  function persistMaximized(): void {
+    if (!maximizeRestored) return;
+    if (persistedMax.viewId === maximizedViewId && persistedMax.full === maximizedFull) return;
+    if (persistedMax.viewId && persistedMax.viewId !== maximizedViewId) patchActivityState(persistedMax.viewId, { maximized: undefined });
+    if (maximizedViewId) patchActivityState(maximizedViewId, { maximized: maximizedFull ? 'full' : 'area' });
+    persistedMax = { viewId: maximizedViewId, full: maximizedFull };
+  }
+
   const staticLayout  = document.getElementById('static-layout')!;
   const dynamicLayout = document.getElementById('dynamic-layout')!;
 
   // ---- Layout-manager host (lib/layout/types.ts) ----------------------------
   //
-  // renderLayout() delegates window placement to the active workspace's
+  // renderLayout() delegates activity placement to the active workspace's
   // ShellLayoutStrategy and gives it this host: regions in the content space,
-  // an overlay layer, layoutState access and the window actions. Nothing here
+  // an overlay layer, layoutState access and the activity actions. Nothing here
   // knows a specific layout.
   const layoutOverlay = document.getElementById('layout-overlay')!;
   const layoutRegions: Record<RegionSide, HTMLElement> = {
@@ -1120,10 +1175,10 @@ const ssrVisibleViews = initialViews
     right:  document.getElementById('layout-region-right')!,
   };
   let currentStrategy: ShellLayoutStrategy | null = null;
-  /** Every window of the active workspace as of the last render (taskbar etc.). */
+  /** Every activity of the active workspace as of the last render (taskbar etc.). */
   let lastLayoutViews: LayoutViewInfo[] = [];
 
-  /** Inset the windows area (and the overlay) by the regions' measured size. */
+  /** Inset the activities area (and the overlay) by the regions' measured size. */
   function syncLayoutRegions(): void {
     const t = layoutRegions.top.offsetHeight;
     const b = layoutRegions.bottom.offsetHeight;
@@ -1157,7 +1212,7 @@ const ssrVisibleViews = initialViews
     }
     workspaceClient.patchWorkspaceDebounced(active.id, { layoutState: next });
   }
-  /** Windows hidden by a `minimize: 'hide'` layout, for the active workspace. */
+  /** Activities hidden by a `minimize: 'hide'` layout, for the active workspace. */
   function parkedViewIds(): string[] {
     const m = activeWorkspaceOf()?.layoutState?.minimized;
     return Array.isArray(m) ? m.filter((x): x is string => typeof x === 'string') : [];
@@ -1203,7 +1258,7 @@ const ssrVisibleViews = initialViews
   function toLayoutViewInfo(v: AppView): LayoutViewInfo {
     return {
       viewId: v.viewId, appId: v.appId, title: v.title,
-      windowName: windowNames.get(v.viewId),
+      userLabel: windowNames.get(v.viewId),
       minimized: v.state === 'minimized' || parkedViewIds().includes(v.viewId),
       isFocused: v.isFocused,
     };
@@ -1239,14 +1294,14 @@ const ssrVisibleViews = initialViews
       // below the bar — both are inside #statusbar.
       return !!document.elementFromPoint(clientX, clientY)?.closest('#statusbar');
     },
-    handOffWindowDrag(ev, viewId, handle, opts) {
+    handOffActivityDrag(ev, viewId, handle, opts) {
       const slot = layoutHost.slotOf(viewId);
       if (!slot) return false;
-      return handOffWindowDrag(ev, { viewId, title: slotDragTitle(slot, viewId) }, slot, handle, opts);
+      return handOffActivityDrag(ev, { viewId, title: slotDragTitle(slot, viewId) }, slot, handle, opts);
     },
   };
 
-  /** Label for the drag ghost: window name › breadcrumb › id. */
+  /** Label for the drag ghost: activity name › breadcrumb › id. */
   function slotDragTitle(slot: HTMLElement, viewId: string): string {
     return slot.querySelector('.slot-window-name')?.textContent?.trim()
       || slot.querySelector('.slot-title-trail')?.textContent?.trim()
@@ -1254,13 +1309,13 @@ const ssrVisibleViews = initialViews
       || viewId;
   }
 
-  // A click INSIDE an app window never reaches the shell's DOM (the iframe is
+  // A click INSIDE an app activity never reaches the shell's DOM (the iframe is
   // its own document), so the active layout learns about it from:
   //   • the proxy-injected focus-on-click script, which posts
   //     `aura.pointerdown` from every app page (covers iframe → iframe), and
-  //   • as a fallback for frames without the injection, the shell window's
+  //   • as a fallback for frames without the injection, the shell activity's
   //     blur — focus just moved into an iframe.
-  // Both end in the strategy's `onActivate` (Free Window raises the window).
+  // Both end in the strategy's `onActivate` (Free Window raises the activity).
   function activateViewOfFrame(frame: HTMLIFrameElement | null): void {
     const slot = frame?.closest<HTMLElement>('#dynamic-layout > .app-slot[data-view-id]');
     const viewId = slot?.dataset['viewId'];
@@ -1803,7 +1858,11 @@ const ssrVisibleViews = initialViews
     ];
 
     const customName = windowNames.get(viewId);
-    if (customName) { windowNames.delete(viewId); windowNames.set(next.viewId, customName); }
+    if (customName) {
+      windowNames.delete(viewId); windowNames.set(next.viewId, customName);
+      patchActivityState(viewId, { name: undefined });
+      patchActivityState(next.viewId, { name: customName });
+    }
     if (maximizedViewId === viewId) maximizedViewId = next.viewId;
 
     // Move workspace membership from the old view id to the new one, as ONE
@@ -1858,7 +1917,7 @@ const ssrVisibleViews = initialViews
   };
 
   function focusView_(viewId: string) {
-    // Focusing a window hidden by the layout's minimize brings it back too
+    // Focusing an activity hidden by the layout's minimize brings it back too
     // (dock click, keyboard nav, workspace jump…).
     setParked(viewId, false);
     views = views.map((v) =>
@@ -2066,6 +2125,7 @@ const ssrVisibleViews = initialViews
     // missing from it means the window no longer exists, so the label dies with
     // it. (Minimized + other-workspace views remain in `views`, so their labels
     // survive, as intended.)
+    hydrateActivityNames();
     if (windowNames.size > 0) {
       const live = new Set(views.map((v) => v.viewId));
       for (const id of windowNames.keys()) if (!live.has(id)) windowNames.delete(id);
@@ -2104,14 +2164,14 @@ const ssrVisibleViews = initialViews
     // ---- Layout strategy (lib/layout) ----
     // The active workspace's layoutId picks a ShellLayoutStrategy; unknown ids
     // fall back to tiling. The strategy decides the container shape, places
-    // each window, and may own regions / overlay / minimize behaviour.
+    // each activity, and may own regions / overlay / minimize behaviour.
     const activeWs = wsState?.workspaces.find((w) => w.id === wsState.activeWorkspaceId);
     const layoutId = activeWs?.layoutId ?? 'tiling';
     const strategy = shellLayoutFor(layoutId);
     switchStrategy(strategy);
     setLayoutDragPolicy(strategy.dragPolicy ?? dragPolicyFor(layoutId));
     const layoutState = (activeWs?.layoutState ?? {}) as Record<string, unknown>;
-    // Windows a `minimize: 'hide'` layout hid (app alive, slot kept). Under a
+    // Activities a `minimize: 'hide'` layout hid (app alive, slot kept). Under a
     // layout without that policy they show again and the stale list goes.
     const parkedIds = new Set(strategy.minimize === 'hide' ? parkedViewIds() : []);
     if (strategy.minimize !== 'hide' && Array.isArray(layoutState['minimized'])) {
@@ -2138,9 +2198,10 @@ const ssrVisibleViews = initialViews
 
     const toLayoutView = (v: AppView, isMin: boolean): LayoutViewInfo => ({
       viewId: v.viewId, appId: v.appId, title: v.title,
-      windowName: windowNames.get(v.viewId), minimized: isMin, isFocused: v.isFocused,
+      userLabel: windowNames.get(v.viewId), minimized: isMin, isFocused: v.isFocused,
     });
     const visibleInfo = visible.map((v) => toLayoutView(v, false));
+    restoreMaximized(new Set(visible.map((v) => v.viewId)));
     lastLayoutViews = views.filter(inActiveWorkspace)
       .sort((a, b) => orderKey(a) - orderKey(b))
       .map((v) => toLayoutView(v, v.state === 'minimized' || parkedIds.has(v.viewId)));
@@ -2192,7 +2253,7 @@ const ssrVisibleViews = initialViews
     // (instead of relying on auto-flow + DOM order + `order` property) so
     // it cannot end up below an app slot — which is exactly the "header on
     // the bottom" bug that auto-placement caused when DOM order drifted.
-    // A strategy that lists minimized windows itself (taskbar) turns it off.
+    // A strategy that lists minimized activities itself (taskbar) turns it off.
     let strip = dynamicLayout.querySelector(':scope > [data-aura-strip]') as HTMLElement | null;
     if (!stripShown) {
       strip?.remove();
@@ -2241,10 +2302,10 @@ const ssrVisibleViews = initialViews
       el.style.removeProperty('order');
 
       // Maximized (in-place focus): promote this slot to cover the whole
-      // windows area, on top of its siblings, WITHOUT moving its iframe — so
+      // activities area, on top of its siblings, WITHOUT moving its iframe — so
       // the app keeps its state (no reload). The strategy releases it first
       // (no drag/resize while maximized); the inline geometry set here is
-      // cleared again when the window is un-maximized, below.
+      // cleared again when the activity is un-maximized, below.
       if (v.viewId === maximizedViewId) {
         releaseSlot(el);
         el.dataset['maximized'] = 'true';
@@ -2256,7 +2317,7 @@ const ssrVisibleViews = initialViews
           // above the autohide bars (900), below launcher/PM panels (1000).
           el.style.position = 'fixed';
         } else {
-          // Windowed: fill just the windows area, on top of sibling slots,
+          // Maximized: fill just the activities area, on top of sibling slots,
           // below the bars and the layout's regions.
           el.style.position = 'absolute';
         }
@@ -2358,6 +2419,7 @@ const ssrVisibleViews = initialViews
       }
     }
 
+    persistMaximized();
     // Strategy post-pass (splitters, …) + its regions (taskbar, …).
     strategy.afterRender?.(layoutCtx, layoutHost);
     for (const region of Object.values(strategy.regions ?? {})) region?.update?.(layoutHost);
@@ -2387,9 +2449,9 @@ const ssrVisibleViews = initialViews
     // X tears the activity down; there's no "hide for later" affordance for
     // apps whose backend can't survive without a visible window.
     const btnStyle = 'background:transparent;border:var(--aura-border);color:var(--aura-color-text-dim);font-family:var(--aura-font-mono);font-size:0.65rem;padding:2px 10px;cursor:pointer;line-height:1;';
-    // Rendered for every window; updateSlot() shows it when the view is
+    // Rendered for every activity; updateSlot() shows it when the view is
     // minimizable OR the active layout minimizes by hiding (keeps the app
-    // alive, so any window can be minimized there).
+    // alive, so any activity can be minimized there).
     const minimizeBtn = `<button data-action="minimize" class="slot-minimize-btn" title="Minimize" style="${btnStyle}${v.minimizable ? '' : ';display:none;'}">_</button>`;
     // Title-bar buttons contributed by the active layout strategy
     // (ShellLayoutStrategy.chromeButtons) — filled by updateSlot().
@@ -2501,7 +2563,7 @@ const ssrVisibleViews = initialViews
       }
     }
 
-    // Layout-driven controls: minimize for every window under a 'hide'
+    // Layout-driven controls: minimize for every activity under a 'hide'
     // minimize policy, plus the strategy's own title-bar buttons.
     const minBtn = slot.querySelector('.slot-minimize-btn') as HTMLElement | null;
     if (minBtn) minBtn.style.display = (v.minimizable || currentStrategy?.minimize === 'hide') ? '' : 'none';
@@ -2759,6 +2821,9 @@ const ssrVisibleViews = initialViews
     const name = raw.trim().slice(0, 60);
     if (name) windowNames.set(viewId, name);
     else      windowNames.delete(viewId);
+    // Kept in the owning workspace (`activities`) so the name survives a
+    // reload and an OS restart (lib/desktopSession.ts remaps it with the activity).
+    patchActivityState(viewId, { name: name || undefined });
     repaintSlot(viewId);
     return windowNames.get(viewId) ?? null;
   }
@@ -3179,6 +3244,67 @@ const ssrVisibleViews = initialViews
   // the back-stack `activity:focus` event; `workspaces:*` is the bulk
   // update pushed by Settings when the user (or any other tab) edits the
   // list.
+  // ---- OS restarts (lib/plannedRestart.ts, lib/desktopSession.ts) ----------
+  // Before a planned restart every tab flushes what it has not written yet
+  // (a live layout gesture, debounced workspace patches) and shows that the
+  // OS is restarting; when the shell is back the page reloads onto the
+  // restored desktop. A page that rendered before a restore finished (crash
+  // restart: no warning) reloads when restored activities are missing from it.
+  function flushDesktopState(): void {
+    try { currentStrategy?.saveState?.(layoutHost); } catch { /* best-effort */ }
+  }
+  window.addEventListener('beforeunload', () => {
+    flushDesktopState();
+    workspaceClient.flushPendingOnUnload();
+  });
+  let restartPending = false;
+  function showRestartOverlay(restore: boolean): void {
+    if (document.getElementById('aura-restart-overlay')) return;
+    const el = document.createElement('div');
+    el.id = 'aura-restart-overlay';
+    el.setAttribute('role', 'status');
+    el.style.cssText = 'position:fixed;inset:0;z-index:3000;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;background:color-mix(in srgb, var(--aura-color-bg) 88%, transparent);color:var(--aura-color-primary);font-family:var(--aura-font-mono);letter-spacing:0.12em;font-size:0.8rem;text-align:center;';
+    el.innerHTML = '<div>// AURAOS IS RESTARTING</div><div style="color:var(--aura-color-text-dim);font-size:0.65rem;letter-spacing:0.08em">'
+      + (restore ? 'your work comes back in a moment' : 'starting with an empty desktop') + '</div>';
+    document.body.appendChild(el);
+    // Never leave the desktop covered if the restart did not happen.
+    setTimeout(() => { if (!restartPending) el.remove(); }, 5_000);
+    setTimeout(() => el.remove(), 180_000);
+  }
+  async function reloadWhenBack(): Promise<void> {
+    for (let i = 0; i < 120; i++) {
+      try {
+        const r = await fetch('/api/os/about', { cache: 'no-store' });
+        if (r.ok) { location.reload(); return; }
+      } catch { /* still down */ }
+      await new Promise((res) => setTimeout(res, 1_000));
+    }
+  }
+  osEvents.onReconnect(() => { if (restartPending) void reloadWhenBack(); });
+  osEvents.subscribe(['os:*', 'session:*'], (ev: any) => {
+    if (ev.type === 'os:shuttingDown') {
+      restartPending = true;
+      flushDesktopState();
+      void workspaceClient.flushPending();
+      showRestartOverlay(ev.restore !== false);
+      return;
+    }
+    if (ev.type === 'session:restored') {
+      const restoredIds = Object.values((ev.idMap ?? {}) as Record<string, string>);
+      const missing = restoredIds.filter((id) => !views.some((v) => v.viewId === id));
+      if (!missing.length) {
+        try { currentStrategy?.onRestored?.(layoutHost, ev.idMap ?? {}); } catch { /* best-effort */ }
+        return;
+      }
+      // Guard against a reload loop (one reload per 30 s at most).
+      let last = 0;
+      try { last = Number(sessionStorage.getItem('aura.sessionReloadAt') ?? '0'); } catch { /* no storage */ }
+      if (Date.now() - last < 30_000) return;
+      try { sessionStorage.setItem('aura.sessionReloadAt', String(Date.now())); } catch { /* no storage */ }
+      location.reload();
+    }
+  });
+
   osEvents.subscribe(['app:*', 'activity:*', 'workspaces:*', 'workspace:*'], (ev: any) => {
     if (ev.type === 'app:restarting')    { beginRestart(ev); return; }
     if (ev.type === 'app:restarted')     { void finishRestart(ev); return; }
@@ -3337,7 +3463,7 @@ const ssrVisibleViews = initialViews
   .layout-region[data-side="bottom"] { bottom: 0; left: 0; right: 0; }
   .layout-region[data-side="left"]   { left: 0;  top: 0; bottom: 0; flex-direction: row; }
   .layout-region[data-side="right"]  { right: 0; top: 0; bottom: 0; flex-direction: row; }
-  /* Above every stacked window (they renormalize below 500) and the in-place
+  /* Above every stacked activity (they renormalize below 500) and the in-place
      maximized one (60); below the full-size window (950) and shell panels. */
   #layout-overlay {
     position: absolute;

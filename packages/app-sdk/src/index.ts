@@ -65,6 +65,7 @@ export {
   createActivityCreateHandler,
   createActivityDestroyHandler,
   createIntentHandler,
+  createSaveStateHandler,
 } from './lifecycle.js';
 export { parseIntentPayload, IntentRejectedError } from './intent.js';
 export type { IntentPayload } from './intent.js';
@@ -72,6 +73,9 @@ export type {
   LifecycleHookName,
   ActivityCreateRequest,
   ActivityCreateResult,
+  ActivityRestore,
+  SaveStateRequest,
+  SaveStateResult,
   IntentRequest,
 } from './lifecycle.js';
 

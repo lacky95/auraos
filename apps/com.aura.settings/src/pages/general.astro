@@ -23,7 +23,10 @@ const timeZone    = await readKv<string>('timeZone', '');
 const zones: string[] = (() => { try { return Intl.supportedValuesOf('timeZone'); } catch { return []; } })();
 const theme       = await readKv<{ colorMode?: 'light' | 'dark' | 'auto' }>('theme', {});
 const colorMode   = theme.colorMode ?? 'dark';
-const state = { clockFormat, locale, timeZone, colorMode };
+// Desktop session (shell lib/desktopSession.ts): bring the activities back
+// after an OS restart. Unset = on.
+const restoreSession = await readKv<boolean>('restoreSession', true);
+const state = { clockFormat, locale, timeZone, colorMode, restoreSession };
 ---
 <!DOCTYPE html>
 <html lang="en">
@@ -73,11 +76,23 @@ const state = { clockFormat, locale, timeZone, colorMode };
         </p>
       </div>
     </div>
+    <div class="form-row" style="align-items: flex-start;">
+      <label>RESTORE AFTER RESTART</label>
+      <div>
+        <label style="display:flex;align-items:center;gap:8px;">
+          <input id="restore-session" type="checkbox" checked={state.restoreSession !== false} />
+          <span>Bring my work back after AuraOS restarts</span>
+        </label>
+        <p style="margin-top: 6px; font-size: 0.6rem; color: var(--aura-color-text-dim); letter-spacing: 0.06em;">
+          WORKSPACES, ACTIVITIES AND THEIR LAYOUT ARE SAVED AS YOU WORK · ALSO AFTER A CRASH
+        </p>
+      </div>
+    </div>
     <p id="status" style="margin-top: 14px; font-size: 0.7rem; color: var(--aura-color-text-dim); letter-spacing: 0.08em;">
       CHANGES PERSIST IMMEDIATELY · PUT /api/kv/os/&lt;field&gt;
     </p>
   </main>
-  <footer class="settings-foot">PROVIDER · /api/kv/os/clockFormat + /api/kv/os/locale + /api/kv/os/timeZone + /api/kv/os/theme (mode)</footer>
+  <footer class="settings-foot">PROVIDER · /api/kv/os/clockFormat + /api/kv/os/locale + /api/kv/os/timeZone + /api/kv/os/restoreSession + /api/kv/os/theme (mode)</footer>
 
   <script is:inline>
     const statusEl = document.getElementById('status');
@@ -100,6 +115,7 @@ const state = { clockFormat, locale, timeZone, colorMode };
     }
 
     document.getElementById('clock-format').addEventListener('change', (e) => patch('clockFormat', e.target.value));
+    document.getElementById('restore-session').addEventListener('change', (e) => patch('restoreSession', e.target.checked));
     document.getElementById('locale').addEventListener('input', (e) => patch('locale', e.target.value));
     // ── Time-zone combobox ─────────────────────────────────────────────
     // Fuzzy search over the IANA list: every typed character must appear in
