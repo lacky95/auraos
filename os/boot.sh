@@ -76,7 +76,11 @@ run pnpm install \
 
 phase building
 if [ "$SHELL_MODE" = prod ]; then
-  run pnpm --filter "./packages/*" build || fail building
+  # The container runs with NODE_ENV=development (dev tooling, app sandboxes);
+  # the shell's own bundle must be a production build — without this Vite
+  # bundles React's development code into the desktop.
+  run pnpm --filter "./packages/*" --filter '!@aura/shell' build || fail building
+  run env NODE_ENV=production pnpm --filter @aura/shell build || fail building
 else
   run pnpm --filter "./packages/*" --filter '!@aura/shell' build || fail building
 fi

@@ -32,7 +32,8 @@ function json(body: unknown, status = 200): Response {
 function state() {
   const env = process.env['AURA_SHELL_MODE'] ?? null;
   return {
-    running: (import.meta.env.DEV ? 'dev' : 'prod') as Mode,
+    // server.mjs (prod) sets AURA_SHELL_RUNTIME; `astro dev` never runs it.
+    running: (process.env['AURA_SHELL_RUNTIME'] === 'prod' ? 'prod' : 'dev') as Mode,
     configured: readConfigured(),
     env,
   };

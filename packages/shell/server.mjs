@@ -31,6 +31,8 @@ const host = process.env.HOST ?? '0.0.0.0';
 const port = Number(process.env.PORT ?? 3000);
 
 process.env.ASTRO_NODE_AUTOSTART = 'disabled';
+// Tells GET /api/admin/shell-mode which mode this process is (`astro dev` never runs this file).
+process.env.AURA_SHELL_RUNTIME = 'prod';
 // attach.mjs reaches our own /api/apps (WS proxy) and origin (SSE mux) on it.
 process.env.SHELL_PORT ??= String(port);
 
