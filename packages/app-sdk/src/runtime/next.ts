@@ -126,7 +126,7 @@ export interface NextLifecycleImpl {
  * them — Next's filesystem routes win over the catch-all on path collision.
  */
 export function createNextLifecycleRoutes(impl: NextLifecycleImpl = {}) {
-  type NextCtx = { params: Promise<{ hook?: string | string[] }> | { hook?: string | string[] } };
+  type NextCtx = { params: Promise<{ hook?: string | string[] }> };
 
   return {
     POST: async (request: Request, ctx: NextCtx): Promise<Response> => {
