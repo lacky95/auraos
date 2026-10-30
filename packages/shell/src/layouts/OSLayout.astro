@@ -68,6 +68,15 @@ const activeThemeId   = activeTheme.id;
         else localStorage.setItem('aura.log', v);
       }
     } catch (_) {}
+    // Bar buttons are visible before their scripts run: keep a click on any
+    // [data-early-click] until its component claims it (lib/earlyClicks.ts).
+    document.addEventListener('click', function (e) {
+      var t = e.target && e.target.closest ? e.target.closest('[data-early-click]') : null;
+      if (!t) return;
+      var name = t.getAttribute('data-early-click');
+      if ((window.__auraEarlyReady || {})[name]) return;
+      (window.__auraEarlyClicks = window.__auraEarlyClicks || []).push(name);
+    }, true);
   })();
   </script>
   <!-- Design-framework + mode metadata. Apps in the shell read these the same

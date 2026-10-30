@@ -281,6 +281,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     LAZY_KV_KEY, LAZY_STORAGE_KEY,
   } from '../lib/iframeWarmer.ts';
   import { subscribeKv } from '../lib/kvClient.ts';
+  import { appsSnapshotStats } from '../lib/appsSnapshot.ts';
   import { slotInnerHtml, SLOT_STYLE, IFRAME_STYLE } from '../lib/desktop/slotMarkup.ts';
 
   const layoutLog = createLogger('shell:layout');
@@ -1289,6 +1290,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     iframes: document.querySelectorAll('#dynamic-layout iframe').length,
     iframesWithSrc: iframeSrcCount,
     warmPending: iframeWarmer.pending().length,
+    appsSnapshot: appsSnapshotStats(),
   }));
 
   // ---- Layout-manager host (lib/layout/types.ts) ----------------------------

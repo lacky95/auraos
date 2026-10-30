@@ -10,7 +10,7 @@
  */
 import Icon from '../ui/Icon.astro';
 ---
-<button id="pm-toggle" class="pm-toggle" title="Process Manager (running apps)" aria-expanded="false" aria-controls="pm-panel">
+<button id="pm-toggle" class="pm-toggle" title="Process Manager (running apps)" aria-expanded="false" aria-controls="pm-panel" data-early-click="procman">
   <span class="pm-toggle-icon"><Icon name="layout-grid" /></span>
 </button>
 
@@ -903,7 +903,8 @@ import Icon from '../ui/Icon.astro';
   import { osEvents } from '../../lib/osEvents.ts';
   import { registerUiCommand, registerSnapshotPart } from '../../lib/uiCommands.ts';
   import { getAppsSnapshot } from '../../lib/appsSnapshot.ts';
-  import { onStage, markBarReady } from '../../lib/bootTimeline.ts';
+  import { onStage, markBarReady, mark } from '../../lib/bootTimeline.ts';
+  import { claimEarlyClicks } from '../../lib/earlyClicks.ts';
   const keyDispatcher = getKeyDispatcher();
 
   interface InstanceListItem {
@@ -1272,7 +1273,7 @@ import Icon from '../ui/Icon.astro';
 
   // The list is only rendered while the panel is open; closed, a refresh
   // just updates the toggle's badge dot and leaves the list for the next open.
-  async function refreshList(opts: { fresh?: boolean } = {}) {
+  async function refreshList(opts: { fresh?: boolean; retry?: boolean } = {}) {
     try {
       const apps = await getAppsSnapshot({ fresh: opts.fresh ?? isOpen() }) as unknown as Array<{
         manifest: ManifestLite;
@@ -1285,10 +1286,14 @@ import Icon from '../ui/Icon.astro';
       // endpoint still surfaces them for diagnostics.
       lastInstances  = apps.flatMap(a => a.instances).filter(i => !i.inPool);
       lastActivities = apps.flatMap(a => a.activities);
+      mark('procman:list', { apps: apps.length, instances: lastInstances.length, open: isOpen() });
       if (isOpen()) render(lastInstances, lastActivities);
       else toggleBtn.dataset['hasInstances'] = lastInstances.length > 0 ? 'true' : 'false';
     } catch (err) {
       console.error('[ProcessManager] refresh failed', err);
+      // An open panel must not stay on its empty placeholder because one read
+      // failed (e.g. while the shell restarts): try once more.
+      if (isOpen() && !opts.retry) setTimeout(() => { void refreshList({ fresh: true, retry: true }); }, 1000);
     }
   }
 
@@ -1913,4 +1918,5 @@ import Icon from '../ui/Icon.astro';
   // active workspace has loaded (boot stage 1), it is not urgent.
   onStage('ws:active-loaded', () => { void refreshList(); }, { timeoutMs: 6000 });
   markBarReady('procman');
+  claimEarlyClicks('procman', () => { if (!isOpen()) void openPanel(); });
 </script>

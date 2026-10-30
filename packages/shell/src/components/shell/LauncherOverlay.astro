@@ -373,6 +373,7 @@ import Icon from '../ui/Icon.astro';
 
 <script>
   import { markBarReady } from '../../lib/bootTimeline.ts';
+  import { claimEarlyClicks } from '../../lib/earlyClicks.ts';
   import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
   import { registerUiCommand, registerSnapshotPart } from '../../lib/uiCommands.ts';
   const keyDispatcher = getKeyDispatcher();
@@ -406,6 +407,7 @@ import Icon from '../ui/Icon.astro';
     if (panel.getAttribute('aria-hidden') === 'false') closePanel(); else openPanel();
   };
   (window as any).auraOpenLauncher  = openPanel;
+  claimEarlyClicks('launcher', () => openPanel());
   (window as any).auraCloseLauncher = closePanel;
 
   close.addEventListener('click', closePanelAndReturnFocus);

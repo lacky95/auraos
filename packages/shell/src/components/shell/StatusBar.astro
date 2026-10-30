@@ -28,7 +28,7 @@ let initialTimeZone: string = '';
 }
 ---
 <header id="statusbar">
-  <span id="os-about-btn" class="os-name" role="button" tabindex="0" aria-haspopup="dialog" title="About AuraOS">AURA<span class="os-ver">OS</span></span>
+  <span id="os-about-btn" class="os-name" role="button" tabindex="0" aria-haspopup="dialog" title="About AuraOS" data-early-click="about">AURA<span class="os-ver">OS</span></span>
   <div class="right">
     <!--
       Workspace switcher: a row of numbered pills (1..N) plus a [+] add-new
@@ -153,7 +153,7 @@ let initialTimeZone: string = '';
       <button id="zoom-out"   type="button" class="status-btn" title="Zoom out (Ctrl -)">-</button>
       <button id="zoom-level" type="button" class="status-btn status-btn-text" title="Reset zoom to 100%">100%</button>
       <button id="zoom-in"    type="button" class="status-btn" title="Zoom in (Ctrl +)">+</button>
-      <button id="settings-btn" type="button" class="status-btn" title="Settings" aria-haspopup="dialog">
+      <button id="settings-btn" type="button" class="status-btn" title="Settings" aria-haspopup="dialog" data-early-click="viewport">
         <span class="status-btn-icon" aria-hidden="true"><Icon name="settings" /></span>
       </button>
     </div>
@@ -202,6 +202,7 @@ let initialTimeZone: string = '';
 <script>
   import { markBarReady } from '../../lib/bootTimeline.ts';
   import { requestOpen } from '../../lib/openRequest.ts';
+  import { claimEarlyClicks } from '../../lib/earlyClicks.ts';
   import * as workspaceClient from '../../lib/workspaceClient';
   import { registerDropTarget } from '../../lib/windowDrag';
   import * as viewportClient from '../../lib/viewportClient';
@@ -602,6 +603,7 @@ let initialTimeZone: string = '';
   function openSettings()  { requestOpen('aura.viewport.open'); }
   settingsBtn?.addEventListener('click', openSettings);
   (window as any).auraOpenSettings = openSettings;
+  claimEarlyClicks('viewport', openSettings);
 
   // ---- About dialog ----------------------------------------------------
   // The AURAOS logo opens the About panel (React island <AboutDialog/> above),
@@ -613,6 +615,7 @@ let initialTimeZone: string = '';
   aboutBtn?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openAbout(); }
   });
+  claimEarlyClicks('about', openAbout);
 
   // ---- Workspace switcher ----------------------------------------------
   // Pill row + layout chip wired against workspaceClient (which the
