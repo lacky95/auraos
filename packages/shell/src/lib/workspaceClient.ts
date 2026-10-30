@@ -299,6 +299,8 @@ export async function createWorkspace(name?: string): Promise<Workspace> {
   // Pick the next free `ws-<n>`. Numbers can have gaps if the user deleted
   // workspaces — we always pick (max + 1) so renumbering never disturbs an
   // existing id (members reference them and we don't want broken pointers).
+  // The default NAME follows the pill number instead (count + 1), so it stays
+  // in step with `compactWorkspaces()` renumbering.
   let maxN = 0;
   for (const w of s.workspaces) {
     const m = /^ws-(\d+)$/.exec(w.id);
@@ -307,7 +309,7 @@ export async function createWorkspace(name?: string): Promise<Workspace> {
   const id = `ws-${maxN + 1}`;
   const ws: Workspace = {
     id,
-    name: name ?? `WS ${maxN + 1}`,
+    name: name ?? `WS ${s.workspaces.length + 1}`,
     layoutId: 'tiling',
     members: [],
   };
@@ -329,6 +331,54 @@ export async function deleteWorkspace(id: string): Promise<void> {
   s.workspaces = s.workspaces.filter((w) => w.id !== id);
   if (s.activeWorkspaceId === id) s.activeWorkspaceId = fallback.id;
   await pushState(s);
+}
+
+/** Default names (`WS <n>`) are renumbered by compaction; anything else is the user's. */
+const DEFAULT_NAME_RE = /^WS \d+$/;
+
+/**
+ * Pure compaction: drop every workspace with no members, then rename each
+ * surviving default-named `WS <n>` to `WS <slot>`. Ids, members, layout and
+ * custom names are untouched. Never leaves zero workspaces — if all are empty
+ * the active one survives. An empty active workspace is dropped like any
+ * other; the nearest survivor before it (else the first) becomes active.
+ */
+export function compactState(state: WorkspaceState): WorkspaceState {
+  const s = clone(state);
+  let kept = s.workspaces.filter((w) => w.members.length > 0);
+  if (kept.length === 0) {
+    const active = s.workspaces.find((w) => w.id === s.activeWorkspaceId) ?? s.workspaces[0];
+    kept = active ? [active] : [];
+  }
+  kept.forEach((w, i) => {
+    if (DEFAULT_NAME_RE.test(w.name)) w.name = `WS ${i + 1}`;
+  });
+
+  let activeId = s.activeWorkspaceId;
+  if (!kept.some((w) => w.id === activeId)) {
+    const keptIds = new Set(kept.map((w) => w.id));
+    const activeIdx = s.workspaces.findIndex((w) => w.id === activeId);
+    const before = s.workspaces.slice(0, Math.max(0, activeIdx)).reverse().find((w) => keptIds.has(w.id));
+    activeId = (before ?? kept[0])?.id ?? activeId;
+  }
+  return { ...s, workspaces: kept, activeWorkspaceId: activeId };
+}
+
+/** True when `compactWorkspaces()` would change anything. */
+export function canCompact(state: WorkspaceState): boolean {
+  // Compaction only ever drops workspaces, renames them, or moves the active
+  // id — comparing those is enough (and immune to key order in the state).
+  const next = compactState(state);
+  return next.activeWorkspaceId !== state.activeWorkspaceId
+    || next.workspaces.length !== state.workspaces.length
+    || next.workspaces.some((w, i) => w.name !== state.workspaces[i]!.name);
+}
+
+/** Remove empty workspaces and renumber default `WS <n>` names, in one write. */
+export async function compactWorkspaces(): Promise<void> {
+  const s = require_();
+  if (!canCompact(s)) return;
+  await pushState(compactState(s));
 }
 
 /**
