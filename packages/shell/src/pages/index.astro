@@ -341,6 +341,20 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
       return;
     }
 
+    // App startup marks (e.g. the Terminal's script → socket → replay): into
+    // the boot timeline as `app:<window>:<name>`, next to the window's own
+    // `src` / `load` marks. `appT` is the app page's own clock.
+    if (d.type === 'aura.perf.mark') {
+      const name = (d as { name?: unknown }).name;
+      if (typeof name !== 'string' || !name || name.length > 64) return;
+      const frame = appFrameFor(ev.source as Window | null);
+      const viewId = frame?.closest<HTMLElement>('.app-slot')?.dataset['viewId'];
+      if (!viewId) return;
+      const extra = (d as { detail?: unknown }).detail;
+      mark(`app:${viewId}:${name}`, { appT: (d as { t?: unknown }).t, ...(extra && typeof extra === 'object' ? extra as Record<string, unknown> : {}) });
+      return;
+    }
+
     // App reporting what its window should be called. Same trust model as
     // rebind: resolved from the sender's frame, so an app can only rename the
     // window it is running in, and the text is only ever set as textContent.
@@ -2835,6 +2849,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
       if (!firstLoadDone) {
         firstLoadDone = true;
         if (markTime('iframe:first-load') === null) mark('iframe:first-load', viewId);
+        mark(`app:${viewId}:load`, adopted ? 'adopted' : undefined);
         iframeLog.debug('load', viewId, adopted ? '(adopted, already loaded)' : '');
         // Two RAFs = "wait until the browser has actually painted the iframe
         // contents, then remove the overlay". Without this, fast-loading
@@ -2887,6 +2902,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
   let iframeSrcCount = 0;
   function noteIframeSrc(viewId: string, reason: string): void {
     iframeSrcCount++;
+    mark(`app:${viewId}:src`, reason);
     if (iframeSrcCount === 1) mark('iframe:first-src', viewId);
     iframeLog.debug('src', viewId, reason, `#${iframeSrcCount}`);
   }

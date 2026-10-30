@@ -312,6 +312,15 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     import { attachTouchScroll } from '../touch-scroll';
     import { pickNextSession } from '../next-session';
 
+    // Startup timeline for the desktop's boot report (shell lib/bootTimeline:
+    // `app:<window>:<stage>`, with `shell:boot` logging on). `t` is ms since
+    // this page's own navigation start; the desktop also stamps its own clock.
+    const perfMark = (name: string, detail?: unknown) => {
+      try { window.parent?.postMessage({ type: 'aura.perf.mark', name, t: Math.round(performance.now()), detail }, '*'); }
+      catch { /* not embedded */ }
+    };
+    perfMark('script');
+
     // appId is server-rendered onto #terminal's data-app-id. A bundled module
     // script can't use Astro's define:vars (that requires is:inline), so we read
     // it from the DOM instead — same pattern as the aura-activity-id meta tag.
@@ -525,6 +534,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(document.getElementById('terminal'));
+    perfMark('xterm-open');
     // One- and two-finger drags scroll the scrollback (see touch-scroll.ts).
     // cellH is the live row height applyFit measures; 17 covers the boot gap.
     // While the program has mouse tracking on, a drag becomes one line-wheel
@@ -1026,6 +1036,27 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     }
 
     let attempt = 0;
+    // First output after page load = the scrollback replay; it is "done" once
+    // the socket has been quiet for 150 ms and xterm has parsed what it got
+    // (term.write's callback), so the mark includes the parse cost.
+    let replayBytes = 0;
+    let replayTimer: ReturnType<typeof setTimeout> | null = null;
+    let replayReported = false;
+    let lastChunkAt = 0;
+    function noteOutput(n: number) {
+      if (replayReported) return;
+      if (replayBytes === 0) perfMark('first-output');
+      replayBytes += n;
+      lastChunkAt = Math.round(performance.now());
+      if (replayTimer) clearTimeout(replayTimer);
+      replayTimer = setTimeout(() => {
+        replayReported = true;
+        // lastChunkAt: when the replay finished arriving (the mark itself
+        // comes ≥150 ms later, after xterm parsed everything).
+        term.write('', () => perfMark('replay-done', { bytes: replayBytes, lastChunkAt }));
+      }, 150);
+    }
+
     function connect() {
       if (detached()) return;
       // Never leave two sockets running. A previous one that is merely CLOSING
@@ -1046,6 +1077,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       let opened = false;
 
       ws.onopen = () => {
+        perfMark('ws-open', { attempt });
         opened = true;
         claimOnConnect = false;      // the launch claim is spent once it lands
         claimNextConnect = false;    // …and so is an explicit session take-over
@@ -1073,11 +1105,11 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       // to escape and no way for shell output that happens to look like JSON to
       // be mistaken for a control message.
       ws.onmessage = (e) => {
-        if (typeof e.data === 'string') { term.write(e.data); return; }
+        if (typeof e.data === 'string') { noteOutput(e.data.length); term.write(e.data); return; }
         let msg;
         try { msg = JSON.parse(ctlDecoder.decode(e.data)); } catch { return; }
-        if (msg?.type === 'granted')   { setLocked(false); launchGate?.live(); }
-        else if (msg?.type === 'busy') { setLocked(true); hideInputDialog(); }
+        if (msg?.type === 'granted')   { perfMark('granted'); setLocked(false); launchGate?.live(); }
+        else if (msg?.type === 'busy') { perfMark('busy'); setLocked(true); hideInputDialog(); }
         else if (msg?.type === 'dialog') showInputDialog(msg.dialog);
         else if (msg?.type === 'dialog-copy') agentCopyInputDialog(msg.id);
         else if (msg?.type === 'session-ended') onSessionEnded(msg.id);
