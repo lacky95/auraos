@@ -11,7 +11,16 @@
 # the splash up with the error for AURA_BOOT_FAIL_HOLD_S seconds, then exits
 # so the container restart policy retries. AURA_BOOT_SPLASH=0 turns the splash
 # off.
+#
+# AURA_SHELL_MODE picks how the shell runs (docs: deep-dive/shell-runtime-modes):
+#   dev  (default) `astro dev`: Vite serves the shell from source with HMR.
+#                  The shell's own production build is skipped (unused).
+#   prod           the `astro build` output via packages/shell/server.mjs:
+#                  bundled, cached assets, faster loads; no HMR (rebuild with
+#                  `aura restart os`, or AURA_SHELL_WATCH=1 for an in-process
+#                  rebuild on save).
 set -u
+SHELL_MODE="${AURA_SHELL_MODE:-dev}"
 
 BOOT_DIR=/data/aura/boot
 LOG="$BOOT_DIR/boot.log"
@@ -61,7 +70,11 @@ run pnpm install \
   || echo '[aura] pnpm install exited non-zero (likely ERR_PNPM_IGNORED_BUILDS) — continuing' | tee -a "$LOG"
 
 phase building
-run pnpm --filter "./packages/*" build || fail building
+if [ "$SHELL_MODE" = prod ]; then
+  run pnpm --filter "./packages/*" build || fail building
+else
+  run pnpm --filter "./packages/*" --filter '!@aura/shell' build || fail building
+fi
 
 install -D -m 0755 /workspace/os/aura-cli-shim.sh /usr/local/bin/aura \
   && install -D -m 0755 /workspace/os/aura-cli-shim.sh /os/toolchain/bin/aura \
@@ -74,4 +87,8 @@ install -D -m 0755 /workspace/os/aura-cli-shim.sh /usr/local/bin/aura \
 phase starting
 (pnpm --filter @aura/cli build:watch &)
 stop_splash
+if [ "$SHELL_MODE" = prod ]; then
+  echo "[aura] boot: shell mode prod (packages/shell/server.mjs)" | tee -a "$LOG"
+  exec pnpm --filter @aura/shell start
+fi
 exec pnpm --filter @aura/shell dev --host 0.0.0.0
