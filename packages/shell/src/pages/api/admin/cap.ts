@@ -62,7 +62,7 @@ function sh(cmd: string): string {
 function which(name: string): string | null {
   try { return sh(`which ${name}`); } catch { return null; }
 }
-function installBinary(src: string, dst: string): void {
+function installBinary(src: string, dst: string, force = false): void {
   // Copy, don't symlink. PRoot's --bind on a symlink fails with EINVAL on
   // readlink (the ptrace translation can't follow bind-target symlinks),
   // which manifests as "command not found" inside proots even when the
@@ -84,7 +84,16 @@ function installBinary(src: string, dst: string): void {
     // mirror a new one and strand every existing per-instance hardlink on the
     // OLD binary until something happened to refresh it. Same reasoning as
     // AppManager.syncToolchainMirror.
-    try { if (lstatSync(target).isSymbolicLink()) unlinkSync(target); } catch { /* not present */ }
+    // Normally only symlinks are unlinked; a regular file is truncated so
+    // per-instance hardlinks still resolve to the same inode. With force=true
+    // we unlink regardless: that bypasses ETXTBSY when the binary is currently
+    // being executed somewhere. The old inode stays alive for processes that
+    // already have it open; refreshWildcardApps() below re-hardlinks the new
+    // one into every running sandbox.
+    try {
+      const st = lstatSync(target);
+      if (st.isSymbolicLink() || force) unlinkSync(target);
+    } catch { /* not present */ }
     copyFileSync(src, target);
     try { chmodSync(target, 0o755); } catch { /* best effort */ }
   }
@@ -127,11 +136,12 @@ function installWithSidecars(
   binaryName: string,
   entry: CapabilityEntry,
   baseRootfs: string,
+  force = false,
 ): { libsCopied: number; libs: LibDep[]; sidecars: string[] } {
-  installBinary(src, join(TOOLCHAIN_BIN, binaryName));
+  installBinary(src, join(TOOLCHAIN_BIN, binaryName), force);
 
   const found = detectSidecars({ binaryPath: src, binaryName, declared: entry.sidecars });
-  for (const sc of found) installBinary(sc.src, join(TOOLCHAIN_BIN, sc.name));
+  for (const sc of found) installBinary(sc.src, join(TOOLCHAIN_BIN, sc.name), force);
 
   // Libraries are resolved for the whole unit — the tool AND its helpers — and
   // recorded under the owner, so a grant carries every file the tool needs.
@@ -181,7 +191,7 @@ function installWithSidecars(
   return { libsCopied: staged.length + intoRootfs.length, libs: all, sidecars: found.map((sc) => sc.name) };
 }
 
-async function installCapability(name: string, entry: CapabilityEntry): Promise<{ symlink: string; version: string | null; libsCopied: number; libs: LibDep[]; sidecars: string[] }> {
+async function installCapability(name: string, entry: CapabilityEntry, force = false): Promise<{ symlink: string; version: string | null; libsCopied: number; libs: LibDep[]; sidecars: string[] }> {
   const binaryName = entry.binary ?? name;
   const link = join(TOOLCHAIN_BIN, binaryName);
   const baseRootfs = process.env['AURA_BASE_ROOTFS'] ?? '/os/base-rootfs';
@@ -191,7 +201,7 @@ async function installCapability(name: string, entry: CapabilityEntry): Promise<
       if (!entry.binary_path || !existsSync(entry.binary_path)) {
         return { symlink: link, version: null, libsCopied: 0, libs: [], sidecars: [] };
       }
-      const res = installWithSidecars(entry.binary_path, binaryName, entry, baseRootfs);
+      const res = installWithSidecars(entry.binary_path, binaryName, entry, baseRootfs, force);
       return { symlink: link, version: null, ...res };
     }
     case 'apt': {
@@ -199,7 +209,7 @@ async function installCapability(name: string, entry: CapabilityEntry): Promise<
       sh(`apt-get update -qq && apt-get install -y -q ${entry.package}`);
       const found = which(binaryName);
       if (!found) throw new Error(`apt install succeeded but binary '${binaryName}' not on PATH`);
-      const res = installWithSidecars(found, binaryName, entry, baseRootfs);
+      const res = installWithSidecars(found, binaryName, entry, baseRootfs, force);
       let version: string | null = null;
       try { version = sh(`dpkg-query -W -f='\${Version}' ${entry.package}`); } catch { /* ignore */ }
       return { symlink: link, version, ...res };
@@ -212,7 +222,7 @@ async function installCapability(name: string, entry: CapabilityEntry): Promise<
       // package tree, while the real executable lives in a platform dep.
       const found = entry.binary_path && existsSync(entry.binary_path) ? entry.binary_path : which(binaryName);
       if (!found) throw new Error(`npm install succeeded but binary '${binaryName}' not on PATH`);
-      const res = installWithSidecars(found, binaryName, entry, baseRootfs);
+      const res = installWithSidecars(found, binaryName, entry, baseRootfs, force);
       let version: string | null = null;
       try { version = sh(`npm view ${entry.package} version`); } catch { /* ignore */ }
       return { symlink: link, version, ...res };
@@ -222,7 +232,7 @@ async function installCapability(name: string, entry: CapabilityEntry): Promise<
       sh(entry.install_cmd);
       const binPath = entry.binary_path && existsSync(entry.binary_path) ? entry.binary_path : which(binaryName);
       if (!binPath) throw new Error(`curl install for ${name} finished but binary missing`);
-      const res = installWithSidecars(binPath, binaryName, entry, baseRootfs);
+      const res = installWithSidecars(binPath, binaryName, entry, baseRootfs, force);
       return { symlink: link, version: null, ...res };
     }
   }
@@ -268,7 +278,7 @@ export const GET: APIRoute = () => {
 };
 
 export const POST: APIRoute = async ({ request }) => {
-  let body: { name?: string; action?: 'install' | 'remove'; entry?: CapabilityEntry };
+  let body: { name?: string; action?: 'install' | 'remove'; entry?: CapabilityEntry; force?: boolean };
   try { body = await request.json(); } catch { body = {}; }
   const action = body.action ?? 'install';
   const name   = body.name;
@@ -284,7 +294,7 @@ export const POST: APIRoute = async ({ request }) => {
       saveState(state);
       return new Response(JSON.stringify({ ok: true, action, name }), { status: 200 });
     }
-    const result = await installCapability(name, entry);
+    const result = await installCapability(name, entry, body.force === true);
     state.capabilities[name] = { installed: true, installedAt: new Date().toISOString(), version: result.version };
     saveState(state);
     const mgr = getAppManager();

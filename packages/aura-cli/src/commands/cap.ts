@@ -1,5 +1,5 @@
 import type { Command } from 'commander';
-import { color, fail, info, ok, table } from '../lib/format.js';
+import { color, fail, info, ok, table, warn } from '../lib/format.js';
 import {
   ensureRegistry,
   loadRegistry,
@@ -11,6 +11,7 @@ import {
 import { api } from '../lib/client.js';
 import {
   promptChoice,
+  promptConfirm,
   promptMultiSelect,
   BACK,
   PromptCancelled,
@@ -339,6 +340,102 @@ export function registerCap(program: Command): void {
           ));
         }
       }
+    });
+
+  cap
+    .command('update [name...]')
+    .option('-y, --yes', 'Skip the confirmation prompt')
+    .option('-n, --dry-run', 'Print what would be updated and exit')
+    .option('-f, --force', 'Replace the toolchain binary even if it is in use (unlink-then-write; running processes keep the old inode, new launches get the new file)')
+    .description(
+      'Re-pull installed capabilities from their source (npm/apt/curl) so the ' +
+      'toolchain copy matches upstream. With no names, updates every installed ' +
+      'non-builtin cap. Routes through the same shell endpoint as install, so ' +
+      'running apps see the new binaries without a respawn.',
+    )
+    .action(async (names: string[], opts: { yes?: boolean; dryRun?: boolean; force?: boolean }) => {
+      ensureRegistry();
+      const reg = loadRegistry();
+      // Trust the shell for install state — same reasoning as `cap list`:
+      // when the CLI runs inside a sliced-bind sandbox the local /data read
+      // can lag the actual toolchain.
+      let state: State;
+      try {
+        state = (await api.get<{ state: State }>('/api/admin/cap')).state;
+      } catch {
+        state = loadState();
+      }
+
+      const isUpdatable = (n: string): boolean => {
+        const e = reg.capabilities[n];
+        return !!e && e.source !== 'builtin' && state.capabilities[n]?.installed === true;
+      };
+
+      let targets: string[];
+      if (names.length === 0) {
+        targets = Object.keys(reg.capabilities).filter(isUpdatable).sort();
+      } else {
+        targets = [];
+        for (const n of names) {
+          const e = reg.capabilities[n];
+          if (!e)                                        info(`skip ${n}: not in capability registry`);
+          else if (e.source === 'builtin')               info(`skip ${n}: builtin — no upstream source to pull from`);
+          else if (!state.capabilities[n]?.installed)    info(`skip ${n}: not installed — \`aura cap install ${n}\``);
+          else                                           targets.push(n);
+        }
+      }
+
+      if (targets.length === 0) { info('nothing to update.'); return; }
+
+      console.log(table(targets.map((n) => ({
+        NAME: n,
+        SOURCE: reg.capabilities[n]!.source,
+      })), ['NAME', 'SOURCE']));
+
+      if (opts.dryRun) { info('dry run — no changes made'); return; }
+
+      if (!opts.yes) {
+        const go = await promptConfirm(
+          `Update ${targets.length} capabilit${targets.length > 1 ? 'ies' : 'y'}?`,
+          false,
+        );
+        if (go === BACK || !go) { info('cancelled'); return; }
+      }
+
+      // Per-cap errors must not abort the batch — `fail()` would exit the
+      // whole command on the first ETXTBSY / network blip. Track failures
+      // and set process.exitCode at the end instead.
+      let failed = 0;
+      for (const name of targets) {
+        const entry = reg.capabilities[name]!;
+        info(`updating ${color.bold(name)} (source=${entry.source}) …`);
+        try {
+          const res = await api.post<{ ok: boolean; symlink?: string; version?: string | null; sidecars?: string[]; libs?: string[]; libsMissing?: string[]; error?: string }>(
+            '/api/admin/cap',
+            { action: 'install', name, entry, force: opts.force === true },
+          );
+          if (!res?.ok) {
+            failed++;
+            warn(`${name}: ${res?.error ?? 'unknown error'}`);
+            continue;
+          }
+          const extra = res.sidecars?.length
+            ? color.dim(` + ${res.sidecars.length} helper${res.sidecars.length > 1 ? 's' : ''}: ${res.sidecars.join(', ')}`)
+            : '';
+          ok(`updated ${name}${res.version ? ` → ${res.version}` : ''}${extra}`);
+          if (res.libsMissing?.length) {
+            info(color.yellow(
+              `  ! ${res.libsMissing.length} librar${res.libsMissing.length > 1 ? 'ies' : 'y'} could not be resolved: ` +
+              `${res.libsMissing.join(', ')} — run \`aura cap doctor\``,
+            ));
+          }
+        } catch (err) {
+          failed++;
+          warn(`${name}: ${(err as Error).message}`);
+        }
+      }
+
+      if (failed > 0) process.exitCode = 1;
     });
 
   cap
