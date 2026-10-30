@@ -193,6 +193,12 @@ install -D -m 0755 /workspace/os/aura-cli-shim.sh /usr/local/bin/aura \
 phase starting
 (pnpm --filter @aura/cli build:watch &)
 stop_splash
+# The OS boots (Valkey, AppManager, services, onboarding) on the shell's first
+# request (packages/shell/src/middleware.ts). Send that request ourselves, so
+# `compose up` alone brings everything up — not only once a browser or the
+# CLI happens to call in. Both shell modes serve :3000.
+( until curl -sf -o /dev/null --max-time 60 http://127.0.0.1:3000/api/apps; do sleep 2; done
+  echo '[aura] boot: shell warmed up' ) &
 if [ "$SHELL_MODE" = prod ]; then
   echo "[aura] boot: shell mode prod (packages/shell/server.mjs)" | tee -a "$LOG"
   exec pnpm --filter @aura/shell start

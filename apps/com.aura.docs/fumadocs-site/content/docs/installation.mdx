@@ -12,7 +12,10 @@ on demand. You don't install per-app dependencies on the host.
 - **Docker** + **docker compose** (Compose v2 syntax).
 - A modern browser (anything with WebGL2 + ES2022 support; we test
   Firefox + Chromium).
-- ~2 GB free disk space for the base image + workspace caches.
+- About 10 GB free disk space for the first build. Once it is running,
+  AuraOS uses about 5.5 GB: the shell image (~2.5 GB), `aura-base`
+  (~1.7 GB) and its volumes (~1.1 GB). The rest is Docker's build cache;
+  `docker builder prune` frees it.
 - (Optional, host-side dev) `pnpm` ≥ 9, Node ≥ 22 — only needed if
   you want to edit OS internals from the host instead of from inside
   an app sandbox.
@@ -20,8 +23,8 @@ on demand. You don't install per-app dependencies on the host.
 ## Run AuraOS
 
 ```bash
-git clone https://github.com/<org>/aura.git
-cd aura
+git clone https://github.com/lacky95/auraos.git
+cd auraos
 docker compose up
 ```
 
@@ -74,6 +77,8 @@ start is ~1-3 s; subsequent launches hit the warm pool when present.
 **`pull access denied for aura-base, repository does not exist`.**
 `aura-base` isn't on any registry — it is built locally from the
 `Dockerfile`, and Docker tried to download it because it wasn't there.
+Current checkouts set `pull_policy: build` on it, so you only see this
+with an older `docker-compose.yml`.
 `docker compose up` builds it; to build it by hand run
 `docker compose build aura-base`. A running shell also builds it on its
 own (see above); `GET /api/admin/first-boot` shows that build's state

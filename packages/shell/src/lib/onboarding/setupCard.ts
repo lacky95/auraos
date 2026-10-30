@@ -163,7 +163,7 @@ export class SetupCard {
     const head = setupHeadline(steps, { firstBoot: this.opts.firstBoot, settled });
 
     // Not a first boot: only show while the image is being (re)built or broken.
-    if (!this.opts.firstBoot && !this.card.shown && image?.status !== 'failed'
+    if (!this.opts.firstBoot && !this.card.pending && image?.status !== 'failed'
       && !(image?.status === 'running' && image.detail !== 'checking')) return;
 
     const checklist = { kind: 'markdown', id: 'steps', text: renderSetupChecklist(steps) };
@@ -181,7 +181,7 @@ export class SetupCard {
     if (head.phase === 'ready') {
       if (this.finished) return;
       this.finished = true;
-      if (!this.card.shown) { this.done(); return; } // nothing was ever shown
+      if (!this.card.pending) { this.done(); return; } // nothing was ever shown or queued
       void this.card.show({
         title: head.title, text: head.text, priority: head.priority,
         components: [checklist, { kind: 'progress', id: 'progress', value: 1, label: 'Done' }],

@@ -11,6 +11,10 @@ services:
       dockerfile: Dockerfile
       target: aura-base
     image: aura-base
+    # Local-only image: build it, never try to pull it. Without this a fresh
+    # `compose up` starts with "pull access denied for aura-base", which reads
+    # like a failure although compose then builds it fine.
+    pull_policy: build
     command: ["true"]
     restart: "no"
 

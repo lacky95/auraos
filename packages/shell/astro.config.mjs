@@ -104,7 +104,14 @@ export default defineConfig({
       // named-export interop (Vite can't surface `createRoot` from
       // react-dom/client otherwise — hydration explodes).
       exclude: ['@aura/core'],
-      include: ['react-dom/client', 'react/jsx-runtime', 'react/jsx-dev-runtime'],
+      // socket.io-client (lib/osEvents.ts) and lucide (via @aura/core) are only reached from
+      // the desktop's client scripts. Left out, Vite discovers them on the
+      // very first page load, re-optimizes and invalidates the modules that
+      // page is still importing — on a fresh install the first desktop then
+      // dies with "Failed to fetch dynamically imported module
+      // .../astro:scripts/before-hydration.js" (dead clock, no notifications)
+      // until the user reloads. Pre-bundling them at server start avoids it.
+      include: ['react-dom/client', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'socket.io-client', '@aura/core > lucide'],
     },
     // SSR-process @aura/ui through Vite (it ships .css + .tsx). Vite would
     // otherwise treat workspace packages as external and Node's native

@@ -110,10 +110,19 @@ cd auraos
 docker compose up
 ```
 
-Docker is the only dependency. Open `http://localhost:3000`. The first build
-takes a few minutes (compose builds the shell and `aura-base`, the image
-container apps run from); after that the desktop comes up in seconds. Press
-`Ctrl+Alt+Space` for the launcher.
+Docker is the only dependency. Leave about **10 GB** of free disk for the
+first build; once it is up, AuraOS uses about 5.5 GB and `docker builder prune`
+frees the rest (the build cache).
+
+Open `http://localhost:3000` right away — you don't have to wait. An
+*AuraOS is starting* page shows the progress and switches to the desktop by
+itself. The first build takes a few minutes (compose builds the shell and
+`aura-base`, the image container apps run from); after that the desktop comes
+up in seconds.
+
+On the desktop, the bell at the bottom right holds a *Welcome to AuraOS*
+checklist with the next steps. Open the launcher with the `⣿` button in the
+dock or `Ctrl+Alt+Space`.
 
 ## How it fits together
 
