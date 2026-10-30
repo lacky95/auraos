@@ -21,8 +21,9 @@ make ps          # running aura-* containers
 The shell serves `http://localhost:3000`. Each app is its own Astro dev server
 on a port in 4001–4999, reached through `/api/proxy/<appId>/<path>`.
 
-Compose project name is **not** always the directory name — `docker-compose.override.yml`
-pins the volume names for it. Prefer `docker restart aura-shell` /
+The compose project name defaults to the checkout's folder name, and the
+volumes are named after it (`<project>_aura-app-data`), so they differ between
+checkouts. Prefer `docker restart aura-shell` /
 `docker exec aura-shell …` over `docker compose …` when acting on the shell
 container specifically.
 
