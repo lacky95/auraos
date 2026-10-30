@@ -3,6 +3,7 @@ import type { AppManifest } from '@aura/core';
 import ProcessManager from './ProcessManager.astro';
 import Icon from '../ui/Icon.astro';
 import NotificationButton from './notifications/NotificationButton.astro';
+import KeyboardButton from './keyboard/KeyboardButton.astro';
 
 interface Props {
   apps: AppManifest[];
@@ -98,6 +99,8 @@ const { apps, enabledMap = {} } = Astro.props;
     notifications/NotificationCenter + NotificationToasts (OSLayout).
   -->
   <NotificationButton />
+  <!-- Virtual keyboard toggle: rightmost, just right of the bell. -->
+  <KeyboardButton />
 </nav>
 
 <style is:global>
