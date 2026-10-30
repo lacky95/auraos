@@ -293,24 +293,38 @@ let initial: LockScreenConfig = DEFAULT_CONFIG;
       if (ua > lastUnlockAt) { lastUnlockAt = ua; deactivate(); }
     }
     function pollLockSignal() {
-      fetch('/api/kv/os/lockscreen', { headers: { 'accept': 'application/json' } })
+      // `?via=` only labels the request in the shell's log; the route ignores it.
+      fetch('/api/kv/os/lockscreen?via=lockscreen-fallback', { headers: { 'accept': 'application/json' } })
         .then(function (r) { return r.ok ? r.json() : null; })
         .then(function (body) { applySignal(body && body.value); })
         .catch(function () { /* offline / not set yet — try again next tick */ });
     }
-    // Fast path: OSLayout's module script forwards `kv:changed os/lockscreen`
-    // from the OS socket here and sets __auraLockEvents while that socket is
-    // connected. The poll stays as the fallback that needs no socket: once a
-    // second while the socket is not confirmed, every 15 s while it is, and
-    // not at all while the tab is hidden (it re-polls the moment it shows).
+    // Live path: OSLayout's module script forwards `kv:changed os/lockscreen`
+    // from the OS socket (the lock/unlock routes and Settings' PUT emit it) to
+    // __auraLockscreenSignal, and reports the socket's state to
+    // __auraLockscreenSocket. While the socket is up nothing is polled; on
+    // every (re)connect one read catches up on what a dropped socket missed.
+    // The poll that needs no socket runs every 3 s only while it is down
+    // (also before the module script has started) and never in a hidden tab,
+    // which reads once when it shows again.
+    var POLL_MS = 3000;
+    var socketUp = false;
+    var timer = null;
+    function fallbackLoop() {
+      timer = null;
+      if (socketUp) return;
+      if (document.visibilityState !== 'hidden') pollLockSignal();
+      timer = setTimeout(fallbackLoop, POLL_MS);
+    }
     window.__auraLockscreenSignal = applySignal;
+    window.__auraLockscreenSocket = function (up) {
+      var was = socketUp;
+      socketUp = !!up;
+      if (socketUp && !was) pollLockSignal();
+      if (!socketUp && timer === null) timer = setTimeout(fallbackLoop, POLL_MS);
+    };
     pollLockSignal();                       // establish baseline immediately
-    (function schedule() {
-      setTimeout(function () {
-        if (document.visibilityState !== 'hidden') pollLockSignal();
-        schedule();
-      }, window.__auraLockEvents ? 15000 : 1000);
-    })();
+    timer = setTimeout(fallbackLoop, POLL_MS);
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState === 'visible') pollLockSignal();
     });

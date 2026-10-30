@@ -701,8 +701,8 @@ const activeThemeId   = activeTheme.id;
     _osEvents.subscribe(['theme:changed', 'mode:changed'], (ev) => onThemeEvent(ev as ThemeEvt | ModeEvt));
 
     // Lock screen (LockScreenOverlay's inline script): hand it `os/lockscreen`
-    // changes as they happen, and tell it whether the socket is up so it can
-    // drop its fallback poll from 1 s to 15 s.
+    // changes as they happen, and tell it whether the socket is up — it only
+    // polls while the socket is down.
     _osEvents.subscribe('kv:changed', (ev) => {
       const k = ev as { namespace?: string; key?: string; value?: unknown };
       if (k.namespace !== 'os' || k.key !== 'lockscreen') return;
@@ -710,7 +710,7 @@ const activeThemeId   = activeTheme.id;
     });
     let socketUp: boolean | null = null;
     _osEvents.onStatus((connected) => {
-      (window as { __auraLockEvents?: boolean }).__auraLockEvents = connected;
+      (window as { __auraLockscreenSocket?: (up: boolean) => void }).__auraLockscreenSocket?.(connected);
       if (connected) mark('socket:connected');
       else if (socketUp) mark('socket:disconnected');   // a drop, not the initial "not yet"
       socketUp = connected;
