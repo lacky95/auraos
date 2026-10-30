@@ -1,5 +1,6 @@
 ---
 import '../styles/settings.css';
+import Icon from '../components/Icon.astro';
 
 // About data comes from the OS — the SAME /api/os/about endpoint the shell's
 // About dialog uses, so the two never drift. Read dynamically at SSR time.
@@ -115,6 +116,21 @@ const S = {
          so this page WILL lose its backend for a minute or two mid-update —
          the poller below treats that as normal and waits it out. -->
     <div style={S.upd}>
+      <!-- Shown only when the on-load check finds a newer commit. Sits right
+           above the buttons so the version numbers are impossible to miss. -->
+      <div id="upd-banner" hidden
+           style="margin-bottom:10px;padding:10px 12px;border:1px solid var(--aura-color-primary);background:rgba(0,255,65,0.06);box-shadow:var(--aura-glow-primary);">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <span style="color:var(--aura-color-primary);font-weight:bold;letter-spacing:0.14em;text-transform:uppercase;font-size:0.66rem;display:inline-flex;align-items:center;gap:6px;"><Icon name="arrow-up" /> Update available</span>
+          <span id="upd-banner-count" style="color:var(--aura-color-text-dim);font-size:0.58rem;letter-spacing:0.06em;text-transform:uppercase;"></span>
+        </div>
+        <div style="margin-top:8px;display:flex;align-items:center;gap:10px;font-size:0.7rem;font-family:monospace;">
+          <span id="upd-banner-from" style="color:var(--aura-color-text-dim);"></span>
+          <span style="color:var(--aura-color-primary);">→</span>
+          <span id="upd-banner-to" style="color:var(--aura-color-primary);text-shadow:var(--aura-glow-primary);"></span>
+        </div>
+        <div id="upd-banner-subject" style="margin-top:6px;font-size:0.62rem;color:var(--aura-color-secondary);line-height:1.5;"></div>
+      </div>
       <!-- Three ways to act on the master container, in descending order of
            how much they change: pull + rebuild, rebuild what is on disk,
            or just bounce it. All three run in the same detached updater and
@@ -128,8 +144,10 @@ const S = {
       </div>
       <!-- Every run takes the desktop down: it is saved first and comes back
            after (lib/plannedRestart.ts in the shell) unless unticked. -->
-      <label style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:0.62rem;letter-spacing:0.08em;color:var(--aura-color-text-dim);">
-        <input id="upd-restore" type="checkbox" checked /> BRING MY WORK BACK AFTERWARDS
+      <label class="aura-check" style="margin-top:6px;font-size:0.62rem;letter-spacing:0.08em;color:var(--aura-color-text-dim);">
+        <input id="upd-restore" type="checkbox" checked />
+        <span class="aura-check-box" aria-hidden="true"><Icon name="check" /></span>
+        <span>BRING MY WORK BACK AFTERWARDS</span>
       </label>
       <div id="upd-note" style={S.note}>Checking…</div>
       <!-- Only shown once a run exists: loads that run's full transcript
@@ -137,11 +155,28 @@ const S = {
       <!-- What actually happened, step by step. Filled from the job's steps[]
            so a finished update can be audited without reading the transcript. -->
       <ul id="upd-steps" style={S.steps} hidden></ul>
-      <button id="upd-logs-btn" type="button" style={S.link} hidden>▸ Show full log</button>
+      <button id="upd-logs-btn" type="button" style={S.link} hidden><span style="display:inline-flex;align-items:center;gap:4px;"><Icon name="chevron-right" /> Show full log</span></button>
       <div id="upd-log" style={S.logbox}></div>
     </div>
   </main>
   <footer class="settings-foot">{about ? `AURAOS V${about.version}` : 'ABOUT'}</footer>
+
+  <!-- Themed replacement for window.confirm(). The native one ignores the
+       page theme, and on Chromium it also pins the dialog to the browser's
+       top-left — far from where the user clicked inside a windowed app. -->
+  <div id="cx-modal" role="dialog" aria-modal="true" aria-labelledby="cx-text"
+       style="display:none;position:fixed;inset:0;z-index:9999;align-items:center;justify-content:center;background:rgba(0,0,0,0.72);font-family:monospace;">
+    <div style="min-width:320px;max-width:460px;margin:0 16px;padding:20px;background:var(--aura-color-background,#000);border:1px solid var(--aura-color-primary);box-shadow:var(--aura-glow-primary);">
+      <div id="cx-text" style="color:var(--aura-color-secondary);font-size:0.72rem;line-height:1.65;white-space:pre-wrap;"></div>
+      <div style="display:flex;gap:8px;margin-top:16px;">
+        <button id="cx-cancel" type="button"
+          style="appearance:none;box-sizing:border-box;flex:1;padding:9px;border:1px solid var(--aura-color-border,#333);background:transparent;color:var(--aura-color-text-dim,#557755);font-family:monospace;font-size:0.66rem;letter-spacing:.14em;text-transform:uppercase;cursor:pointer;outline:none;">Cancel</button>
+        <button id="cx-ok" type="button"
+          style="appearance:none;box-sizing:border-box;flex:1;padding:9px;border:1px solid var(--aura-color-primary);background:transparent;color:var(--aura-color-primary);font-family:monospace;font-size:0.66rem;letter-spacing:.14em;text-transform:uppercase;cursor:pointer;outline:none;">Confirm</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     // The shell's own endpoint, called with an ABSOLUTE path on purpose: this
     // page is served through the OS proxy, so its origin already IS the shell
@@ -159,11 +194,51 @@ const S = {
     let lastJobId = null;
     let fullLogOpen = false;
 
+
+    const cxModal  = document.getElementById('cx-modal');
+    const cxText   = document.getElementById('cx-text');
+    const cxOk     = document.getElementById('cx-ok');
+    const cxCancel = document.getElementById('cx-cancel');
+    // Themed confirm. Enter accepts, Esc or backdrop cancels. Returns a
+    // Promise<boolean> so callers can `await` it exactly like window.confirm().
+    function showConfirm(message) {
+      return new Promise((resolve) => {
+        cxText.textContent = message;
+        cxModal.style.display = 'flex';
+        const done = (result) => {
+          cxModal.style.display = 'none';
+          cxOk.removeEventListener('click', onOk);
+          cxCancel.removeEventListener('click', onCancel);
+          cxModal.removeEventListener('mousedown', onBackdrop);
+          document.removeEventListener('keydown', onKey);
+          resolve(result);
+        };
+        const onOk       = () => done(true);
+        const onCancel   = () => done(false);
+        const onBackdrop = (e) => { if (e.target === cxModal) done(false); };
+        const onKey      = (e) => {
+          if (e.key === 'Escape') { e.preventDefault(); done(false); }
+          else if (e.key === 'Enter') { e.preventDefault(); done(true); }
+        };
+        cxOk.addEventListener('click', onOk);
+        cxCancel.addEventListener('click', onCancel);
+        cxModal.addEventListener('mousedown', onBackdrop);
+        document.addEventListener('keydown', onKey);
+        cxOk.focus();
+      });
+    }
+
     // The transcript is fetched only when asked for: a failed build can print
     // megabytes, and nobody wants that arriving with every 3s status poll.
+    // Chevron icons from the OS sprite — same mechanism as the step glyphs.
+    const chevron = (name) =>
+      `<svg aria-hidden="true" style="width:1em;height:1em;vertical-align:-0.125em;"><use href="/api/os/icons.svg#lucide-${name}"/></svg>`;
+    const logsLabel = (icon, text) =>
+      `<span style="display:inline-flex;align-items:center;gap:4px;">${chevron(icon)} ${text}</span>`;
+
     async function showFullLog() {
       if (!lastJobId) return;
-      logsBtn.textContent = '… loading log';
+      logsBtn.innerHTML = logsLabel('loader-2', 'loading log');
       try {
         const r = await fetch(`${api}?logs=${encodeURIComponent(lastJobId)}`, { cache: 'no-store' });
         const text = await r.text();
@@ -171,15 +246,15 @@ const S = {
         log.textContent = text;
         log.scrollTop = log.scrollHeight;
         fullLogOpen = true;
-        logsBtn.textContent = '▾ Hide full log';
+        logsBtn.innerHTML = logsLabel('chevron-down', 'Hide full log');
       } catch {
-        logsBtn.textContent = '▸ Show full log (could not load — retry)';
+        logsBtn.innerHTML = logsLabel('chevron-right', 'Show full log (could not load — retry)');
       }
     }
     logsBtn?.addEventListener('click', () => {
       if (fullLogOpen) {
         fullLogOpen = false;
-        logsBtn.textContent = '▸ Show full log';
+        logsBtn.innerHTML = logsLabel('chevron-right', 'Show full log');
         log.textContent = '';
         log.style.display = 'none';
         return;
@@ -190,14 +265,17 @@ const S = {
     const TERMINAL = ['done', 'failed', 'rolled-back'];
     const stepsEl = document.getElementById('upd-steps');
 
-    // One glyph + colour per state. `skipped` is deliberately neutral: a dry
-    // run never building is a correct outcome, not a half-failure.
+    // Lucide icon + colour per state. `skipped` is deliberately neutral: a
+    // dry run never building is a correct outcome, not a half-failure.
+    // Icons come from the OS sprite — same source as the rest of the app.
+    const stepIcon = (name) =>
+      `<svg aria-hidden="true" style="width:1em;height:1em;vertical-align:-0.125em;"><use href="/api/os/icons.svg#lucide-${name}"/></svg>`;
     const STEP_UI = {
-      done:    ['✓', 'var(--aura-color-primary,#00ff41)'],
-      failed:  ['✗', 'var(--aura-color-danger,#ff2020)'],
-      running: ['◌', 'var(--aura-color-secondary,#ff9900)'],
-      skipped: ['–', 'var(--aura-color-text-dim,#557755)'],
-      pending: ['·', 'var(--aura-color-text-dim,#557755)'],
+      done:    [stepIcon('check'),    'var(--aura-color-primary,#00ff41)'],
+      failed:  [stepIcon('x'),        'var(--aura-color-danger,#ff2020)'],
+      running: [stepIcon('loader-2'), 'var(--aura-color-secondary,#ff9900)'],
+      skipped: [stepIcon('minus'),    'var(--aura-color-text-dim,#557755)'],
+      pending: [stepIcon('circle'),   'var(--aura-color-text-dim,#557755)'],
     };
     function renderSteps(job) {
       if (!stepsEl) return;
@@ -297,6 +375,77 @@ const S = {
       polling = false;
     }
 
+    // Shared preflight. Used by both the on-load auto-check and the Update
+    // button, so what the page tells you up front is the same thing a click
+    // would have told you — no second round-trip, no divergent wording.
+    let checkInFlight = null;
+    async function runCheck({ silent } = {}) {
+      if (checkInFlight) return checkInFlight;
+      checkInFlight = (async () => {
+        note.textContent = silent
+          ? 'Checking for updates…'
+          : 'Fetching the latest commit from the remote…';
+        if (!silent) { btn.disabled = true; btn.textContent = 'Checking…'; }
+        let pre = null;
+        try {
+          const r = await fetch(api + '?check=1', { cache: 'no-store' });
+          const state = await r.json();
+          pre = state.preflight;
+        } catch { /* handled in renderCheck */ }
+        if (!silent) { btn.disabled = false; btn.textContent = 'Update AuraOS'; }
+        renderCheck(pre);
+        return pre;
+      })();
+      try { return await checkInFlight; } finally { checkInFlight = null; }
+    }
+
+    const uBanner        = document.getElementById('upd-banner');
+    const uBannerCount   = document.getElementById('upd-banner-count');
+    const uBannerFrom    = document.getElementById('upd-banner-from');
+    const uBannerTo      = document.getElementById('upd-banner-to');
+    const uBannerSubject = document.getElementById('upd-banner-subject');
+
+    function renderCheck(pre) {
+      // Reset to the idle visuals; each branch re-raises what it needs.
+      note.style.color = '';
+      btn.style.boxShadow = '';
+      if (uBanner) uBanner.hidden = true;
+      log.style.display = 'none';
+      if (!pre) {
+        note.textContent = 'Could not reach the backend to run the check.';
+        return;
+      }
+      // The banner is the "there IS an update" indicator — it surfaces whether
+      // or not we can apply it right now. Blockers (dirty tree etc.) still get
+      // reported below, but they don't hide the fact that a new version exists.
+      if (pre.updateAvailable && uBanner) {
+        const cur = (pre.currentRev || '').slice(0, 12);
+        const nxt = (pre.latestRev  || '').slice(0, 12);
+        uBannerCount.textContent   = `${pre.behind} new commit${pre.behind === 1 ? '' : 's'} · ${pre.branch}`;
+        uBannerFrom.textContent    = cur ? `current ${cur}` : 'current —';
+        uBannerTo.textContent      = nxt ? `new ${nxt}`     : 'new —';
+        uBannerSubject.textContent = pre.latestSubject || '';
+        uBannerSubject.hidden      = !pre.latestSubject;
+        uBanner.hidden             = false;
+        btn.style.boxShadow        = 'var(--aura-glow-primary)';
+      }
+      if (pre.blockers && pre.blockers.length) {
+        log.style.display = 'block';
+        log.textContent = pre.blockers.join('\n') + (pre.dirtyFiles && pre.dirtyFiles.length
+          ? '\n\nUncommitted:\n  ' + pre.dirtyFiles.join('\n  ') : '');
+        note.textContent = pre.updateAvailable
+          ? 'A new version is ready — but something below is blocking the update.'
+          : 'Cannot update yet — see below.';
+        return;
+      }
+      if (!pre.updateAvailable) {
+        note.textContent = `Already up to date — ${(pre.currentRev || '').slice(0, 12)} on ${pre.branch}`
+          + (pre.ahead ? ` (${pre.ahead} local commit(s) not pushed)` : '');
+        return;
+      }
+      note.textContent = 'A new version is ready — click Update AuraOS to apply.';
+    }
+
     // Click = CHECK first, in the shell process: a couple of seconds, no
     // container, no changes to the checkout. Only once we know there is
     // something to update AND the tree is clean do we ask to launch the
@@ -304,7 +453,7 @@ const S = {
     // Rebuild and Restart skip the "is there a newer commit?" check — neither
     // consults git at all — so they go straight to confirm-and-launch.
     async function launch(mode, confirmText, label) {
-      if (!confirm(confirmText)) return;
+      if (!(await showConfirm(confirmText))) return;
       for (const b of [btn, rebuildBtn, restartBtn]) b.disabled = true;
       note.textContent = `Starting ${label}…`;
       try {
@@ -336,36 +485,15 @@ const S = {
       'the restart'));
 
     btn?.addEventListener('click', async () => {
-      btn.disabled = true;
-      btn.textContent = 'Checking…';
-      note.textContent = 'Fetching the latest commit from the remote…';
-      let pre = null;
-      try {
-        const r = await fetch(api + '?check=1', { cache: 'no-store' });
-        const state = await r.json();
-        pre = state.preflight;
-      } catch { /* handled below */ }
-      btn.disabled = false;
-      btn.textContent = 'Update AuraOS';
-      if (!pre) { note.textContent = 'Could not reach the backend to run the check.'; return; }
-      if (pre.blockers && pre.blockers.length) {
-        log.style.display = 'block';
-        log.textContent = pre.blockers.join('\n') + (pre.dirtyFiles && pre.dirtyFiles.length
-          ? '\n\nUncommitted:\n  ' + pre.dirtyFiles.join('\n  ') : '');
-        note.textContent = 'Cannot update yet — see below.';
-        return;
-      }
-      if (!pre.updateAvailable) {
-        log.style.display = 'none';
-        note.textContent = `Already up to date — ${(pre.currentRev || '').slice(0, 12)} on ${pre.branch}`
-          + (pre.ahead ? ` (${pre.ahead} local commit(s) not pushed)` : '');
-        return;
-      }
+      const pre = await runCheck({ silent: false });
+      if (!pre) return;
+      if (pre.blockers && pre.blockers.length) return;
+      if (!pre.updateAvailable) return;
       const summary = `${pre.behind} new commit(s) on ${pre.branch}\n`
         + `${(pre.currentRev || '').slice(0, 12)} → ${(pre.latestRev || '').slice(0, 12)}\n`
         + (pre.latestSubject ? `\nLatest: ${pre.latestSubject}\n` : '')
         + (pre.ahead ? `\n${pre.ahead} local commit(s) will be rebased on top.\n` : '');
-      if (!confirm(`Update AuraOS?\n\n${summary}\nThis rebuilds the container image and restarts the OS. Running apps keep running; the desktop reconnects when the shell is back. If the new build does not come up, it rolls back automatically.`)) return;
+      if (!(await showConfirm(`Update AuraOS?\n\n${summary}\nThis rebuilds the container image and restarts the OS. Running apps keep running; the desktop reconnects when the shell is back. If the new build does not come up, it rolls back automatically.`))) return;
       btn.disabled = true;
       btn.textContent = 'Starting…';
       try {
@@ -390,7 +518,14 @@ const S = {
       poll();
     });
 
-    refresh().then((s) => { paint(s || {}); if (s && (s.running || (s.job && !TERMINAL.includes(s.job.phase)))) poll(); });
+    refresh().then((s) => {
+      paint(s || {});
+      // Mid-update: let the poller drive the UI. Otherwise, if self-update is
+      // supported here, run a check in the background so the page shows up
+      // front whether a newer commit is waiting.
+      if (s && (s.running || (s.job && !TERMINAL.includes(s.job.phase)))) { poll(); return; }
+      if (s && s.supported !== false) runCheck({ silent: true });
+    });
   </script>
 </body>
 </html>

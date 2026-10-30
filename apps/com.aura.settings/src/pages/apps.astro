@@ -1,6 +1,7 @@
 ---
 import '@aura/ui/styles/scificn-bridge.css';
 import '../styles/settings.css';
+import Icon from '../components/Icon.astro';
 
 // SSR-fetch the apps list + enable state from the shell. /api/apps already
 // includes `enabled` per app since the route was extended to surface it for
@@ -267,7 +268,7 @@ apps.sort((a, b) => {
 </head>
 <body>
   <main class="settings-body">
-    <h2 style="font-size: 0.95rem; letter-spacing: 0.1em; color: var(--aura-color-primary); margin-bottom: 4px;">▦ APPS</h2>
+    <h2 style="font-size: 0.95rem; letter-spacing: 0.1em; color: var(--aura-color-primary); margin-bottom: 4px; display:flex; align-items:center; gap:8px;"><Icon name="rows-3" /> APPS</h2>
     <p style="font-size: 0.7rem; color: var(--aura-color-text-dim); letter-spacing: 0.06em;">
       Toggle apps off to hide them from the dock + launcher and stop their backends. Re-enable any time.
     </p>
@@ -337,7 +338,7 @@ apps.sort((a, b) => {
 
   <dialog id="confirm-dialog" aria-labelledby="cd-title">
     <div class="cd-body">
-      <div class="cd-title" id="cd-title">⚠ DELETE APP</div>
+      <div class="cd-title" id="cd-title" style="display:flex; align-items:center; gap:8px;"><Icon name="alert-triangle" /> DELETE APP</div>
       <p class="cd-message">
         Do you want to delete <strong id="cd-app-name">this app</strong>?
       </p>

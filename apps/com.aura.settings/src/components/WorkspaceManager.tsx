@@ -21,6 +21,7 @@ import {
   SelectContent,
   SelectItem,
   SelectValue,
+  Icon,
 } from '@aura/ui';
 
 export interface Workspace {
@@ -53,17 +54,11 @@ function nextWorkspaceId(existing: Workspace[]): { id: string; name: string } {
   return { id: `ws-${maxN + 1}`, name: `WS ${maxN + 1}` };
 }
 
-function layoutGlyph(id: string, icon?: string): string {
-  if (icon) return icon;
-  switch (id) {
-    case 'tiling':     return '▦';
-    case 'fullscreen': return '▣';
-    case 'cascade':    return '▤';
-    case 'columns':    return '▥';
-    case 'rows':       return '▤';
-    case 'stack':      return '▧';
-    default:           return '▦';
-  }
+/** Lucide name for a layout strategy. `/api/os/layouts` resolves the icon
+ *  once (packages/shell/src/pages/api/os/layouts.ts), so this is just a
+ *  defensive fallback for a layout the API doesn't know about. */
+function layoutIcon(_id: string, icon?: string): string {
+  return icon ?? 'layout-template';
 }
 
 export function WorkspaceManager({ initialState }: WorkspaceManagerProps): React.JSX.Element {
@@ -222,7 +217,7 @@ export function WorkspaceManager({ initialState }: WorkspaceManagerProps): React
                 <div
                   className="w-11 h-11 flex items-center justify-center border border-[var(--border)] bg-[var(--color-bg)] text-[1.15rem] text-[var(--color-green)]"
                   aria-hidden="true"
-                >{layoutGlyph(L.id, L.icon)}</div>
+                ><Icon name={layoutIcon(L.id, L.icon)} size={20} /></div>
                 <div className="min-w-0">
                   <div className="text-[0.8rem] tracking-widest uppercase text-[var(--color-green)] font-mono">{L.name}</div>
                   <div className="text-[0.55rem] tracking-[0.14em] uppercase text-[var(--text-muted)] mt-0.5 font-mono">{L.id}</div>
@@ -309,17 +304,16 @@ function WorkspaceCard({
           <Select value={ws.layoutId} onValueChange={onPickLayout}>
             <SelectTrigger className="h-7 text-[0.65rem] shadow-none focus:shadow-none">
               <SelectValue>
-                <span className="font-mono uppercase tracking-wider">
-                  {layoutGlyph(ws.layoutId, layouts.find((L) => L.id === ws.layoutId)?.icon)}
-                  {' '}
+                <span className="font-mono uppercase tracking-wider inline-flex items-center gap-1.5">
+                  <Icon name={layoutIcon(ws.layoutId, layouts.find((L) => L.id === ws.layoutId)?.icon)} />
                   {(layouts.find((L) => L.id === ws.layoutId)?.name ?? ws.layoutId).toUpperCase()}
                 </span>
               </SelectValue>
             </SelectTrigger>
             <SelectContent>
-              {(layouts.length > 0 ? layouts : [{ id: ws.layoutId, name: ws.layoutId, description: '', icon: '▦' } as LayoutMeta]).map((L) => (
+              {(layouts.length > 0 ? layouts : [{ id: ws.layoutId, name: ws.layoutId, description: '' } as LayoutMeta]).map((L) => (
                 <SelectItem key={L.id} value={L.id}>
-                  <span className="font-mono uppercase tracking-wider">{layoutGlyph(L.id, L.icon)} {L.name.toUpperCase()}</span>
+                  <span className="font-mono uppercase tracking-wider inline-flex items-center gap-1.5"><Icon name={layoutIcon(L.id, L.icon)} /> {L.name.toUpperCase()}</span>
                 </SelectItem>
               ))}
             </SelectContent>
@@ -335,7 +329,7 @@ function WorkspaceCard({
           onClick={onActivate}
           className="flex-1 shadow-none hover:shadow-none focus-visible:shadow-none"
         >
-          {isActive ? 'ACTIVE' : '◉ ACTIVATE'}
+          {isActive ? 'ACTIVE' : (<span className="inline-flex items-center gap-1.5"><Icon name="circle-dot" /> ACTIVATE</span>)}
         </Button>
         <Button
           variant="ABORT"
@@ -345,7 +339,7 @@ function WorkspaceCard({
           title={onlyOne ? 'At least one workspace must exist' : 'Delete this workspace'}
           className="flex-1 shadow-none hover:shadow-none focus-visible:shadow-none"
         >
-          ✕ DELETE
+          <span className="inline-flex items-center gap-1.5"><Icon name="trash-2" /> DELETE</span>
         </Button>
       </PanelFooter>
     </Panel>

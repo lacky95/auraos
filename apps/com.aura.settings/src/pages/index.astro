@@ -1,5 +1,6 @@
 ---
 import '../styles/settings.css';
+import Icon from '../components/Icon.astro';
 ---
 <!DOCTYPE html>
 <html lang="en">
@@ -12,51 +13,51 @@ import '../styles/settings.css';
   <main class="settings-body">
     <div class="tile-grid">
       <button class="tile" data-section="theme">
-        <h3>▦ THEME</h3>
+        <h3><Icon name="sliders-horizontal" /> THEME</h3>
         <p>Phosphor color · live preview · 4 presets</p>
       </button>
       <button class="tile" data-section="workspaces">
-        <h3>▥ WORKSPACES</h3>
+        <h3><Icon name="layout-grid" /> WORKSPACES</h3>
         <p>Virtual desktops · layouts · rename + delete</p>
       </button>
       <button class="tile" data-section="layouts">
-        <h3>▦ LAYOUT MANAGERS</h3>
+        <h3><Icon name="layout-template" /> LAYOUT MANAGERS</h3>
         <p>Window strategies · parameters · per-strategy settings</p>
       </button>
       <button class="tile" data-section="keyboard">
-        <h3>⌨ KEYBOARD</h3>
+        <h3><Icon name="keyboard" /> KEYBOARD</h3>
         <p>Hotkeys · per-app actions · user shortcuts</p>
       </button>
       <button class="tile" data-section="general">
-        <h3>⏱ GENERAL</h3>
+        <h3><Icon name="clock" /> GENERAL</h3>
         <p>Clock format · locale</p>
       </button>
       <button class="tile" data-section="lockscreen">
-        <h3>⊞ LOCK SCREEN</h3>
+        <h3><Icon name="lock" /> LOCK SCREEN</h3>
         <p>Blackout overlay · text · placement · clock</p>
       </button>
       <button class="tile" data-section="apps">
-        <h3>▦ APPS</h3>
+        <h3><Icon name="rows-3" /> APPS</h3>
         <p>Enable · disable · force-stop installed apps</p>
       </button>
       <button class="tile" data-section="scopes">
-        <h3>⊕ SCOPES</h3>
+        <h3><Icon name="folder" /> SCOPES</h3>
         <p>System · global · user · git repos</p>
       </button>
       <button class="tile" data-section="context">
-        <h3>⊞ CONTEXT</h3>
+        <h3><Icon name="key" /> CONTEXT</h3>
         <p>Env vars · tokens · secrets · injected into apps</p>
       </button>
       <button class="tile" data-section="access">
-        <h3>⚿ NOTIFICATIONS &amp; ACCESS</h3>
+        <h3><Icon name="shield" /> NOTIFICATIONS &amp; ACCESS</h3>
         <p>Notification permissions · API keys · admin audit</p>
       </button>
       <button class="tile" data-section="interfaces">
-        <h3>⇄ INTERFACES</h3>
+        <h3><Icon name="plug" /> INTERFACES</h3>
         <p>What apps provide · what they need · live addresses</p>
       </button>
       <button class="tile" data-section="about">
-        <h3>ℹ ABOUT</h3>
+        <h3><Icon name="info" /> ABOUT</h3>
         <p>AuraOS · versions</p>
       </button>
     </div>
