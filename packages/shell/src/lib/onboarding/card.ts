@@ -61,6 +61,8 @@ export class SystemCard {
   /** JSON of the last content sent for `id`, to skip unchanged updates. */
   private lastSent: string | null = null;
   private removing = false;
+  /** A create is queued (maybe still waiting for the first tab) or done. */
+  private requested = false;
   private chain: Promise<unknown> = Promise.resolve();
   private readonly idFile: string;
   private interactHandler: ((componentId: string) => void) | null = null;
@@ -81,12 +83,20 @@ export class SystemCard {
       if (!this.id || ev.id !== this.id || this.removing) return;
       this.id = null;
       this.lastSent = null;
+      this.requested = false;
       rmSync(this.idFile, { force: true });
       this.removedHandler?.();
     });
   }
 
   get shown(): boolean { return this.id !== null; }
+  /**
+   * `shown`, or a `show()` is queued that will create it — e.g. boot ran on a
+   * headless request and the create still waits for the first shell tab.
+   * Callers that decide "nothing was ever shown, skip the final update" must
+   * check this, or the queued create lands later with stale content.
+   */
+  get pending(): boolean { return this.requested || this.id !== null; }
 
   onInteract(fn: (componentId: string) => void): void { this.interactHandler = fn; }
   /** The user dismissed it (or it expired) — not called for `remove()`. */
@@ -125,6 +135,7 @@ export class SystemCard {
 
   /** Create (after the first shell tab) or update in place. */
   show(content: CardContent): Promise<unknown> {
+    this.requested = true;
     return this.queue(async () => {
       const json = JSON.stringify(content);
       if (this.id && json === this.lastSent) return;
@@ -157,6 +168,7 @@ export class SystemCard {
         this.removing = false;
         this.id = null;
         this.lastSent = null;
+        this.requested = false;
         rmSync(this.idFile, { force: true });
       }
     });
