@@ -305,6 +305,12 @@ export default {};
     // The browser replays or downgrades the request per spec, exactly as it
     // would on any other site, and its URL follows along.
     const hasBody = !['GET', 'HEAD'].includes(request.method);
+    // Rewritten-module cache (see jsModuleCache below): ask the app whether
+    // our rewritten copy is still current; a 304 is answered from memory.
+    const jsKey = `/api/proxy/${id}|${targetUrl}`;
+    const jsCached = request.method === 'GET' && !request.headers.get('if-none-match')
+      ? jsModuleCache().get(jsKey) : undefined;
+    if (jsCached) headers.set('if-none-match', jsCached.etag);
     const upstream = await fetch(targetUrl, {
       method:  request.method,
       headers,
@@ -867,6 +873,11 @@ window.EventSource=AuraEventSource;
     // Only fires when the manifest opts in to URL rewriting (cfg.rewriteHtml !== 'none')
     // — raw apps that don't run Vite don't emit these patterns and don't need the
     // body buffered/rewritten on every JS module fetch.
+    // Our copy of this module is still current (we asked with its ETag above).
+    if (jsCached && upstream.status === 304) {
+      try { upstream.body?.cancel(); } catch { /* ignore */ }
+      return new Response(jsCached.body, { status: 200, headers: new Headers(jsCached.headers) });
+    }
     const isJs = /\b(javascript|typescript|ecmascript)\b/.test(contentType);
     if (isJs && cfg.rewriteHtml !== 'none') {
       const js = await upstream.text();
@@ -879,6 +890,10 @@ window.EventSource=AuraEventSource;
       outHeaders.delete('content-length');
       hardenDevCache(outHeaders);
       scopeCookies(upstream, outHeaders, proxyPrefix);
+      const etag = upstream.headers.get('etag');
+      if (request.method === 'GET' && upstream.status === 200 && etag && !outHeaders.has('set-cookie')) {
+        jsModuleCache().set(jsKey, { etag, body: rewritten, headers: [...outHeaders] });
+      }
       return new Response(rewritten, { status: upstream.status, headers: outHeaders });
     }
 
@@ -964,6 +979,40 @@ function scopeCookies(upstream: Response, outHeaders: Headers, proxyPrefix: stri
   if (cookies.length === 0) return;
   outHeaders.delete('set-cookie');
   for (const c of cookies) outHeaders.append('set-cookie', scopeCookiePath(c, proxyPrefix));
+}
+
+/**
+ * App JS modules after the URL rewrite, keyed by proxy prefix + upstream URL
+ * and validated by the app's ETag. Every Terminal window of an instance loads
+ * the same ~700 KB of modules, and the browser may not cache them
+ * (hardenDevCache: no-store, for WebView hosts) — without this each copy was
+ * downloaded from the app and regex-rewritten again on the shell's event
+ * loop, which also slowed every WebSocket handshake behind it. Bounded LRU
+ * (by bytes), pinned on globalThis.
+ */
+interface CachedModule { etag: string; body: string; headers: Array<[string, string]> }
+const JS_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+function jsModuleCache() {
+  const g = globalThis as unknown as { __auraProxyJsCache?: { map: Map<string, CachedModule>; bytes: number } };
+  const c = (g.__auraProxyJsCache ??= { map: new Map(), bytes: 0 });
+  return {
+    get(key: string): CachedModule | undefined {
+      const hit = c.map.get(key);
+      if (hit) { c.map.delete(key); c.map.set(key, hit); }   // most recently used last
+      return hit;
+    },
+    set(key: string, entry: CachedModule): void {
+      const old = c.map.get(key);
+      if (old) { c.bytes -= old.body.length; c.map.delete(key); }
+      if (entry.body.length > JS_CACHE_MAX_BYTES / 4) return;
+      c.map.set(key, entry);
+      c.bytes += entry.body.length;
+      for (const [k, v] of c.map) {
+        if (c.bytes <= JS_CACHE_MAX_BYTES) break;
+        c.map.delete(k); c.bytes -= v.body.length;
+      }
+    },
+  };
 }
 
 function hardenDevCache(headers: Headers): void {

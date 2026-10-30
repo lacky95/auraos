@@ -1,6 +1,9 @@
 node_modules/
 **/node_modules/
 dist/
+# shell production builds (os/boot.sh) and in-place rebuild generations
+dist-prod/
+dist-g*/
 .env
 .env.local
 *.tsbuildinfo

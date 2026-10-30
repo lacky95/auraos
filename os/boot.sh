@@ -87,17 +87,21 @@ build_fingerprint() {
     } 2>/dev/null | sha1sum | cut -d' ' -f1 ) || true
 }
 BUILD_STAMP="/workspace/packages/.aura-build-$SHELL_MODE"
+# The prod shell is built into its own folder: anything else that runs the
+# usual `pnpm --filter ./packages/* build` (it writes packages/shell/dist) can
+# no longer delete the build the running/booting server serves.
+SHELL_PROD_DIST=dist-prod
 FP="$(build_fingerprint)"
 if [ -n "$FP" ] && [ "${AURA_FORCE_BUILD:-0}" != 1 ] && [ "$(cat "$BUILD_STAMP" 2>/dev/null)" = "$FP" ] \
    && [ -f /workspace/packages/core/dist/index.js ] \
-   && { [ "$SHELL_MODE" != prod ] || [ -f /workspace/packages/shell/dist/server/entry.mjs ]; }; then
+   && { [ "$SHELL_MODE" != prod ] || [ -f "/workspace/packages/shell/$SHELL_PROD_DIST/server/entry.mjs" ]; }; then
   echo "[aura] boot: packages unchanged since the last build — build skipped" | tee -a "$LOG"
 elif [ "$SHELL_MODE" = prod ]; then
   # The container runs with NODE_ENV=development (dev tooling, app sandboxes);
   # the shell's own bundle must be a production build — without this Vite
   # bundles React's development code into the desktop.
   run pnpm --filter "./packages/*" --filter '!@aura/shell' build || fail building
-  run env NODE_ENV=production pnpm --filter @aura/shell build || fail building
+  run env NODE_ENV=production pnpm --filter @aura/shell exec astro build --outDir "$SHELL_PROD_DIST" || fail building
   [ -n "$FP" ] && echo "$FP" > "$BUILD_STAMP"
 else
   run pnpm --filter "./packages/*" --filter '!@aura/shell' build || fail building

@@ -47,7 +47,28 @@ async function loadBuild(outDir) {
   return { outDir, handler: mod.handler };
 }
 
-let current = await loadBuild(join(here, 'dist'));
+/**
+ * The build to serve: AURA_SHELL_DIST, else dist-prod (what os/boot.sh
+ * builds in prod mode, out of reach of a plain `pnpm build`), else dist.
+ * A build still being written (an entry that appears within BUILD_WAIT_MS)
+ * is waited for instead of exiting at once.
+ */
+const BUILD_WAIT_MS = 120_000;
+async function initialBuildDir() {
+  const candidates = process.env.AURA_SHELL_DIST
+    ? [join(here, process.env.AURA_SHELL_DIST)]
+    : [join(here, 'dist-prod'), join(here, 'dist')];
+  const deadline = Date.now() + BUILD_WAIT_MS;
+  for (;;) {
+    const found = candidates.find((d) => existsSync(join(d, 'server', 'entry.mjs')));
+    if (found) return found;
+    if (Date.now() > deadline) return candidates[0];   // loadBuild reports it
+    console.warn(`[shell] no build yet in ${candidates.join(' or ')} — waiting`);
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+
+let current = await loadBuild(await initialBuildDir());
 let previous = null;
 
 const server = http.createServer((req, res) => {

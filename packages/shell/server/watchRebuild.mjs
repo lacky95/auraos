@@ -42,9 +42,9 @@ export function watchedDirs(shellDir) {
   ].filter((d) => existsSync(d));
 }
 
-/** Output directory of generation `n` (0 = the boot build in dist/). */
+/** Output directory of generation `n` (0 = the boot build, dist-prod/ — see os/boot.sh). */
 export function generationDir(shellDir, n) {
-  return n === 0 ? join(shellDir, 'dist') : join(shellDir, `dist-g${n}`);
+  return n === 0 ? join(shellDir, 'dist-prod') : join(shellDir, `dist-g${n}`);
 }
 
 /** Remove generation dirs left by an earlier process (they are not served). */

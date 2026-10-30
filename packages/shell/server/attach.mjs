@@ -65,6 +65,24 @@ export async function fetchAppsList() {
 }
 
 /**
+ * The app list for WS-upgrade routing, shared for APPS_TTL_MS. Browsers open
+ * WebSockets one handshake at a time per host, and a reloaded desktop opens
+ * one per Terminal window (plus app sockets): fetching and parsing the whole
+ * ~90 KB list for every handshake made each one wait behind the last. Callers
+ * that find no live instance in a cached list ask again with `fresh`.
+ */
+const APPS_TTL_MS = 2000;
+let appsCache = null;   // { at, promise }
+export function appsListCached({ fresh = false } = {}) {
+  const now = Date.now();
+  if (!fresh && appsCache && now - appsCache.at < APPS_TTL_MS) return appsCache.promise;
+  const promise = fetchAppsList();
+  appsCache = { at: now, promise };
+  promise.catch(() => { if (appsCache?.promise === promise) appsCache = null; });
+  return promise;
+}
+
+/**
  * Escape `?astro|?vue|?svelte` on /api/proxy/<id>/<path> so the shell's own
  * Vite (vite-plugin-astro) never claims an app's module URL; the proxy route
  * turns them back before forwarding upstream. Applied in prod too, so the
@@ -151,10 +169,8 @@ export function attachWsProxy(httpServer) {
     let host = null;
     let port = null;
     let chosenInstanceId = null;
-    try {
-      const tLoadStart = Date.now();
-      const apps = await fetchAppsList();
-      dbg('WS-PROXY', 'fetchAppsList', `${Date.now() - tLoadStart}ms apps=${apps.length}`);
+    // Pick the live instance for `instanceId` (an instance id, or an app id).
+    const resolve = (apps) => {
       let chosen = null;
       // Pass 1: direct instanceId match.
       for (const a of apps) {
@@ -170,7 +186,15 @@ export function attachWsProxy(httpServer) {
               ?? candidates.find((i) => i.state === 'resumed' || i.state === 'started')
               ?? null;
       }
-      if (chosen?.port != null) {
+      return chosen?.port != null ? chosen : null;
+    };
+    try {
+      const tLoadStart = Date.now();
+      // The shared list first; a miss may just be an instance newer than it.
+      let chosen = resolve(await appsListCached());
+      if (!chosen) chosen = resolve(await appsListCached({ fresh: true }));
+      dbg('WS-PROXY', 'resolve', `${Date.now() - tLoadStart}ms`);
+      if (chosen) {
         // PRoot instances use 127.0.0.1; container-mode instances
         // expose a docker hostname like 'aura-com.aura.terminal-3'.
         // Mirror the AppManager.getUpstreamUrl rule inline here so the
