@@ -8,6 +8,8 @@
  *
  * All content is fetched live from `/api/os/about` — the single source shared
  * with the Settings app's About page, so version / git / host never drift.
+ * On open we also quietly poll `/api/admin/self-update?check=1` so the dialog
+ * can surface a compact "update available" chip when a newer commit exists.
  */
 import * as React from 'react';
 import {
@@ -19,6 +21,7 @@ import {
   DialogFooter,
   DialogClose,
   Button,
+  Checkbox,
 } from '@aura/ui';
 
 interface AboutData {
@@ -41,6 +44,19 @@ interface AboutData {
     memTotalBytes: number;
     ips: Array<{ iface: string; address: string; family: string }>;
   };
+}
+
+interface Preflight {
+  updateAvailable: boolean;
+  clean: boolean;
+  branch: string;
+  behind: number;
+  ahead: number;
+  currentRev: string | null;
+  latestRev: string | null;
+  latestSubject: string | null;
+  blockers?: string[];
+  dirtyFiles?: string[];
 }
 
 function fmtUptime(sec: number): string {
@@ -73,15 +89,23 @@ export function AboutDialog(): React.JSX.Element {
   const [open, setOpen] = React.useState(false);
   const [data, setData] = React.useState<AboutData | null>(null);
   const [error, setError] = React.useState(false);
+  const [preflight, setPreflight] = React.useState<Preflight | null>(null);
 
   React.useEffect(() => {
     const onOpen = () => {
       setOpen(true);
       setError(false);
+      setPreflight(null);
       fetch('/api/os/about')
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
         .then((d: AboutData) => setData(d))
         .catch(() => setError(true));
+      // Preflight runs in parallel. Failures are silent — if the shell can't
+      // talk to its own self-update endpoint, we just don't show the chip.
+      fetch('/api/admin/self-update?check=1', { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+        .then((s: { preflight?: Preflight }) => setPreflight(s.preflight ?? null))
+        .catch(() => setPreflight(null));
     };
     window.addEventListener('aura.about.open', onOpen);
     return () => window.removeEventListener('aura.about.open', onOpen);
@@ -122,6 +146,82 @@ export function AboutDialog(): React.JSX.Element {
     }
   };
 
+  // Clicking the chip opens Settings → About (where the actual update happens)
+  // and closes this dialog. Two-step so we work whether or not Settings is
+  // already running: /start is idempotent — it returns the existing instance
+  // if one is up — and /activities uses the Settings app's onActivityCreate
+  // dispatcher (section:'about' → /about) to land on the right page.
+  const openSettingsAbout = async () => {
+    try {
+      const r1 = await fetch('/api/apps/com.aura.settings/start', { method: 'POST' });
+      const j = await r1.json().catch(() => ({})) as { instanceId?: string };
+      if (!r1.ok || !j.instanceId) return;
+      await fetch(`/api/instances/${encodeURIComponent(j.instanceId)}/activities`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: { section: 'about' } }),
+      });
+    } finally {
+      setOpen(false);
+    }
+  };
+
+  // Compact "update available" chip. Deliberately smaller than the Settings
+  // page banner — this dialog has less room and the Settings page is where
+  // the actual update happens. The chip is a button: clicking it takes the
+  // user straight there (and closes this dialog).
+  const updateChip = preflight?.updateAvailable ? (
+    <button
+      type="button"
+      onClick={() => { void openSettingsAbout(); }}
+      title="Open Settings → About to apply this update"
+      style={{
+        display: 'block',
+        width: 'calc(100% - 32px)',
+        textAlign: 'left',
+        margin: '12px 16px 0',
+        padding: '6px 10px',
+        border: '1px solid var(--color-green)',
+        boxShadow: 'var(--glow-green)',
+        background: 'rgba(0, 255, 65, 0.06)',
+        fontFamily: 'var(--font-mono)',
+        cursor: 'pointer',
+        appearance: 'none',
+        outline: 'none',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+        <span style={{ color: 'var(--color-green)', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', fontSize: '0.6rem' }}>
+          ▲ Update available
+        </span>
+        <span style={{ color: 'var(--text-muted)', fontSize: '0.56rem', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+          {preflight.behind} new · {preflight.branch}
+        </span>
+      </div>
+      <div style={{ marginTop: '3px', display: 'flex', alignItems: 'baseline', gap: '6px', fontSize: '0.62rem' }}>
+        <span style={{ color: 'var(--text-muted)' }}>{(preflight.currentRev ?? '').slice(0, 7)}</span>
+        <span style={{ color: 'var(--color-green)' }}>→</span>
+        <span style={{ color: 'var(--color-green)' }}>{(preflight.latestRev ?? '').slice(0, 7)}</span>
+        {preflight.latestSubject ? (
+          <span
+            style={{
+              color: 'var(--text-secondary)',
+              opacity: 0.75,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              flex: 1,
+              minWidth: 0,
+            }}
+            title={preflight.latestSubject}
+          >
+            · {preflight.latestSubject}
+          </span>
+        ) : null}
+      </div>
+    </button>
+  ) : null;
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent aria-describedby={undefined} className="max-w-md gap-0 p-0 flex flex-col">
@@ -161,8 +261,10 @@ export function AboutDialog(): React.JSX.Element {
             </div>
           </div>
 
+          {updateChip}
+
           {/* Details */}
-          <div style={{ padding: '0 16px 12px', fontFamily: 'var(--font-mono)' }}>
+          <div style={{ padding: '12px 16px 12px', fontFamily: 'var(--font-mono)' }}>
             <Row label="OS">{host ? `${host.os} · ${host.arch}` : '—'}</Row>
             <Row label="HOSTNAME">{host?.hostname ?? '—'}</Row>
             <Row label="IP">
@@ -199,10 +301,15 @@ export function AboutDialog(): React.JSX.Element {
         </DialogBody>
 
         <DialogFooter className="shrink-0 border-t border-[var(--border)] px-4 py-3" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px' }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.64rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', marginRight: 'auto' }}>
-            <input type="checkbox" checked={restore} disabled={restarting} onChange={(e) => setRestore(e.target.checked)} />
-            BRING MY WORK BACK
-          </label>
+          <div style={{ marginRight: 'auto', fontFamily: 'var(--font-mono)' }}>
+            <Checkbox
+              id="about-restore"
+              checked={restore}
+              disabled={restarting}
+              onCheckedChange={(v) => setRestore(v === true)}
+              label="BRING MY WORK BACK"
+            />
+          </div>
           <Button variant="EXEC" size="SM" disabled={restarting} onClick={() => { void restartOs(); }}
             title="Save the desktop, restart AuraOS and the Shell Daemon, restore the desktop">
             {restarting ? 'RESTARTING…' : armed ? 'CONFIRM RESTART' : 'RESTART AURAOS'}

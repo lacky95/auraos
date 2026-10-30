@@ -388,3 +388,171 @@ footer.settings-foot {
   color: var(--aura-color-text-dim);
 }
 .keymap-import-btn:hover { color: var(--aura-color-text); }
+
+/* ── Themed form controls ────────────────────────────────────────────
+ * One place for the three widgets we hand-paint instead of letting the
+ * browser render its own chrome: checkbox, select-dropdown, range slider.
+ * All three keep a native `<input>`/`<select>` under the hood for keyboard
+ * + a11y + form submission; the browser's own look is suppressed and we
+ * put the Phosphor skin on top.
+ */
+
+/* Checkbox: hidden <input> + visible <span> that tracks :checked via a
+ * sibling selector, so no JS is needed for the swap-in icon. */
+.aura-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  font-family: var(--aura-font-mono, 'Courier New', monospace);
+}
+.aura-check > input[type="checkbox"] {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  border: 0;
+}
+.aura-check-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 14px; height: 14px;
+  border: 1px solid var(--aura-color-border, #333);
+  background: transparent;
+  color: var(--aura-color-text-dim, #557755);
+  transition: border-color 120ms, color 120ms, box-shadow 120ms;
+}
+.aura-check-box > svg { width: 10px; height: 10px; display: none; }
+.aura-check > input[type="checkbox"]:checked ~ .aura-check-box {
+  border-color: var(--aura-color-primary);
+  color: var(--aura-color-primary);
+  box-shadow: var(--aura-glow-primary);
+}
+.aura-check > input[type="checkbox"]:checked ~ .aura-check-box > svg { display: block; }
+.aura-check > input[type="checkbox"]:focus-visible ~ .aura-check-box {
+  outline: 1px dashed var(--aura-color-primary);
+  outline-offset: 2px;
+}
+.aura-check > input[type="checkbox"]:disabled ~ .aura-check-box { opacity: 0.4; }
+.aura-check > input[type="checkbox"]:disabled ~ * { opacity: 0.6; cursor: not-allowed; }
+
+/* Select: a styled trigger + a custom <ul> listbox. forms.ts drives the
+ * open/close + keyboard navigation; the hidden <input type="hidden"> keeps
+ * the current value so submit-style forms see the same shape as a <select>. */
+.aura-select {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  min-width: 160px;
+  font-family: var(--aura-font-mono, 'Courier New', monospace);
+}
+.aura-select-trigger {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--aura-color-bg, #0a0a0a);
+  border: 1px solid var(--aura-color-border, rgba(0,255,65,0.2));
+  color: var(--aura-color-text, #ccffcc);
+  font-family: inherit;
+  font-size: 0.75rem;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.aura-select-trigger > svg { width: 12px; height: 12px; flex: 0 0 auto; opacity: 0.7; }
+.aura-select[data-open="true"] .aura-select-trigger,
+.aura-select-trigger:focus-visible {
+  border-color: var(--aura-color-primary);
+  box-shadow: var(--aura-glow-primary);
+}
+.aura-select[data-open="true"] .aura-select-trigger > svg { transform: rotate(180deg); }
+.aura-select-list {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 2px);
+  left: 0; right: 0;
+  margin: 0;
+  padding: 2px;
+  list-style: none;
+  background: var(--aura-color-bg, #0a0a0a);
+  border: 1px solid var(--aura-color-primary);
+  box-shadow: var(--aura-glow-primary);
+  max-height: 240px;
+  overflow-y: auto;
+}
+.aura-select-item {
+  padding: 5px 10px;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--aura-color-text, #ccffcc);
+  cursor: pointer;
+}
+.aura-select-item[aria-selected="true"]::before {
+  content: '▸ ';
+  color: var(--aura-color-primary);
+}
+.aura-select-item[data-active="true"] {
+  background: var(--aura-color-primary);
+  color: var(--aura-color-bg, #0a0a0a);
+}
+.aura-select-item[data-active="true"]::before { color: var(--aura-color-bg); }
+.aura-select-item[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
+
+/* Range: strip the browser's chrome and paint a mono-coloured track with
+ * a square phosphor-glow thumb. Vendor-specific thumb/track pseudo-elements
+ * only match when written separately — can't be grouped. */
+input[type="range"].aura-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 20px;
+  background: transparent;
+  outline: none;
+  padding: 0;
+  margin: 0;
+}
+input[type="range"].aura-range::-webkit-slider-runnable-track {
+  height: 2px;
+  background: var(--aura-color-border, rgba(0,255,65,0.3));
+  border: none;
+}
+input[type="range"].aura-range::-moz-range-track {
+  height: 2px;
+  background: var(--aura-color-border, rgba(0,255,65,0.3));
+  border: none;
+}
+input[type="range"].aura-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px; height: 12px;
+  margin-top: -5px;
+  background: var(--aura-color-primary);
+  border: 1px solid var(--aura-color-primary);
+  box-shadow: var(--aura-glow-primary);
+  cursor: pointer;
+}
+input[type="range"].aura-range::-moz-range-thumb {
+  width: 12px; height: 12px;
+  background: var(--aura-color-primary);
+  border: 1px solid var(--aura-color-primary);
+  box-shadow: var(--aura-glow-primary);
+  cursor: pointer;
+}
+input[type="range"].aura-range:focus-visible::-webkit-slider-runnable-track {
+  background: var(--aura-color-primary);
+  opacity: 0.6;
+}
+input[type="range"].aura-range:focus-visible::-moz-range-track {
+  background: var(--aura-color-primary);
+  opacity: 0.6;
+}

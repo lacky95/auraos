@@ -1,0 +1,46 @@
+---
+/**
+ * Lucide icon wrapper for Settings. References the OS sprite served at
+ * `/api/os/icons.svg` so every app gets the same icon set with zero bundle
+ * cost (the sprite is cached once, then every `<use>` is free).
+ *
+ * Names are kebab-case Lucide ids — https://lucide.dev/icons. The sprite
+ * only carries @aura/core's curated subset (packages/core/src/theme/
+ * IconManager.ts CURATED_ICONS); anything outside that set still renders
+ * from `/api/os/icons/<name>.svg` via a CSS mask fallback.
+ */
+interface Props {
+  name: string;
+  /** Width/height. 1em tracks the surrounding font size. */
+  size?: number | string;
+  /** Extra classes forwarded to the outer element. */
+  class?: string;
+  /** Extra inline styles forwarded to the outer element. */
+  style?: string;
+}
+
+const { name, size = '1em', class: cls, style } = Astro.props;
+
+// A tiny set of names that are NOT in CURATED_ICONS but we need in
+// Settings. For these we render a <span> styled as a CSS mask so the
+// icon still picks up `currentColor`.
+const nonSprite = new Set([
+  'keyboard',
+  'arrow-up-left', 'arrow-up-right', 'arrow-down-left', 'arrow-down-right',
+]);
+const mask = nonSprite.has(name);
+
+const baseStyle = `display:inline-block;width:${typeof size === 'number' ? `${size}px` : size};height:${typeof size === 'number' ? `${size}px` : size};vertical-align:-0.125em;`;
+const extra = style ? `${baseStyle}${style}` : baseStyle;
+---
+{mask ? (
+  <span
+    aria-hidden="true"
+    class={cls}
+    style={`${extra}background-color:currentColor;-webkit-mask:url(/api/os/icons/${name}.svg) no-repeat center / contain;mask:url(/api/os/icons/${name}.svg) no-repeat center / contain;`}
+  />
+) : (
+  <svg aria-hidden="true" class={cls} style={extra}>
+    <use href={`/api/os/icons.svg#lucide-${name}`} />
+  </svg>
+)}

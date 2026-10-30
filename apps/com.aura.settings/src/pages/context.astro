@@ -1,5 +1,6 @@
 ---
 import '../styles/settings.css';
+import Icon from '../components/Icon.astro';
 
 // SSR-read the current context entries + volumes from the OS.
 const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
@@ -166,10 +167,17 @@ try {
       <div class="ctx-form">
         <div>
           <label for="ctx-kind">TYPE</label>
-          <select id="ctx-kind">
-            <option value="secret">Secret (masked)</option>
-            <option value="variable">Variable (visible)</option>
-          </select>
+          <div class="aura-select" data-select id="ctx-kind" data-value="secret">
+            <input type="hidden" value="secret" />
+            <button type="button" class="aura-select-trigger" aria-haspopup="listbox" aria-expanded="false">
+              <span class="aura-select-value">Secret (masked)</span>
+              <Icon name="chevron-down" />
+            </button>
+            <ul class="aura-select-list" role="listbox" hidden>
+              <li class="aura-select-item" role="option" data-value="secret" aria-selected="true">Secret (masked)</li>
+              <li class="aura-select-item" role="option" data-value="variable" aria-selected="false">Variable (visible)</li>
+            </ul>
+          </div>
         </div>
         <div>
           <label for="ctx-key">KEY</label>
@@ -182,8 +190,8 @@ try {
         <div>
           <label>INJECT AS</label>
           <div class="ctx-checks">
-            <label><input type="checkbox" id="ctx-inject-env" checked /> Env var</label>
-            <label><input type="checkbox" id="ctx-inject-file" checked /> File</label>
+            <label class="aura-check"><input type="checkbox" id="ctx-inject-env" checked /><span class="aura-check-box" aria-hidden="true"><Icon name="check" /></span><span>Env var</span></label>
+            <label class="aura-check"><input type="checkbox" id="ctx-inject-file" checked /><span class="aura-check-box" aria-hidden="true"><Icon name="check" /></span><span>File</span></label>
           </div>
         </div>
         <button id="ctx-add">SET</button>
@@ -227,10 +235,17 @@ try {
         </div>
         <div>
           <label for="vol-mode">MODE</label>
-          <select id="vol-mode">
-            <option value="rw">Read-write</option>
-            <option value="ro">Read-only</option>
-          </select>
+          <div class="aura-select" data-select id="vol-mode" data-value="rw">
+            <input type="hidden" value="rw" />
+            <button type="button" class="aura-select-trigger" aria-haspopup="listbox" aria-expanded="false">
+              <span class="aura-select-value">Read-write</span>
+              <Icon name="chevron-down" />
+            </button>
+            <ul class="aura-select-list" role="listbox" hidden>
+              <li class="aura-select-item" role="option" data-value="rw" aria-selected="true">Read-write</li>
+              <li class="aura-select-item" role="option" data-value="ro" aria-selected="false">Read-only</li>
+            </ul>
+          </div>
         </div>
         <button id="vol-add">CREATE</button>
       </div>
@@ -372,7 +387,7 @@ try {
 
     // ── Var / Secrets ─────────────────────────────────────────────────
     function syncValueField() {
-      const secret = kindEl.value === 'secret';
+      const secret = kindEl.dataset.value === 'secret';
       valueEl.type = secret ? 'password' : 'text';
       valueEl.placeholder = secret ? 'secret value' : 'visible value';
     }
@@ -451,7 +466,7 @@ try {
       if (addBtn.disabled) return;   // a write is already in flight
       const key = document.getElementById('ctx-key').value.trim();
       const value = valueEl.value;
-      const kind = kindEl.value;
+      const kind = kindEl.dataset.value;
       const inject = [];
       if (document.getElementById('ctx-inject-env').checked) inject.push('env');
       if (document.getElementById('ctx-inject-file').checked) inject.push('file');
@@ -697,7 +712,7 @@ try {
       if (addBtn.disabled) return;
       const name = document.getElementById('vol-name').value.trim();
       const mountPath = document.getElementById('vol-path').value.trim();
-      const mode = document.getElementById('vol-mode').value;
+      const mode = document.getElementById('vol-mode').dataset.value;
       if (!VOL_NAME_RE.test(name)) { setStatus('Invalid name — lowercase letters/digits/-/_ , e.g. shared', true); return; }
       if (!mountPath.startsWith('/')) { setStatus('Mount path must be absolute (start with /), e.g. /mnt/shared', true); return; }
 
@@ -809,8 +824,9 @@ try {
 
   <script>
     import { OsClient } from '@aura/app-sdk';
+    import '../scripts/forms.ts';
     new OsClient().nav.installGridNav({
-      selector: '.ctx-tab, #ctx-kind, #ctx-key, #ctx-value, #ctx-inject-env, #ctx-inject-file, #ctx-add, .ctx-del, .ctx-confirm-yes, .ctx-confirm-no, #vol-name, #vol-path, #vol-mode, #vol-add',
+      selector: '.ctx-tab, #ctx-kind .aura-select-trigger, #ctx-key, #ctx-value, #ctx-inject-env, #ctx-inject-file, #ctx-add, .ctx-del, .ctx-confirm-yes, .ctx-confirm-no, #vol-name, #vol-path, #vol-mode .aura-select-trigger, #vol-add',
     });
   </script>
 </body>

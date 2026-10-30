@@ -1,6 +1,7 @@
 ---
 import '@aura/ui/styles/scificn-bridge.css';
 import '../styles/settings.css';
+import Icon from '../components/Icon.astro';
 
 /**
  * Layout Managers — catalogue + per-strategy settings.
@@ -62,7 +63,7 @@ try {
 
     {layouts.length === 0 ? (
       <div class="lm-empty">
-        <div class="lm-empty-icon">○</div>
+        <div class="lm-empty-icon"><Icon name="circle" size="1.6em" /></div>
         <div class="lm-empty-text">NO LAYOUT MANAGERS REGISTERED</div>
         <div class="lm-empty-hint">// CHECK /api/os/layouts</div>
       </div>
@@ -73,7 +74,7 @@ try {
           return (
             <li class="lm-card" data-layout-id={L.id}>
               <div class="lm-card-head">
-                <span class="lm-card-glyph" aria-hidden="true">{L.icon ?? '▦'}</span>
+                <span class="lm-card-glyph" aria-hidden="true"><Icon name={L.icon ?? 'layout-template'} size="1.4em" /></span>
                 <div class="lm-card-title-block">
                   <div class="lm-card-title">
                     <span class="lm-card-name">{L.name}</span>

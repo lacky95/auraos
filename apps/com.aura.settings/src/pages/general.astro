@@ -2,6 +2,7 @@
 import '@aura/ui/styles/scificn-bridge.css';
 import '../styles/settings.css';
 import ColorModePicker from '../components/ColorModePicker';
+import Icon from '../components/Icon.astro';
 
 // SSR-read from the OS KV directly via the shell's internal port. Each
 // general-pref lives under its own key so a single field write doesn't
@@ -39,10 +40,17 @@ const state = { clockFormat, locale, timeZone, colorMode, restoreSession };
   <main class="settings-body">
     <div class="form-row">
       <label>CLOCK FORMAT</label>
-      <select id="clock-format">
-        <option value="24h"  selected={state.clockFormat === '24h'}>24-hour</option>
-        <option value="12h"  selected={state.clockFormat === '12h'}>12-hour</option>
-      </select>
+      <div class="aura-select" data-select id="clock-format" data-value={state.clockFormat}>
+        <input type="hidden" name="clockFormat" value={state.clockFormat} />
+        <button type="button" class="aura-select-trigger" aria-haspopup="listbox" aria-expanded="false">
+          <span class="aura-select-value">{state.clockFormat === '12h' ? '12-hour' : '24-hour'}</span>
+          <Icon name="chevron-down" />
+        </button>
+        <ul class="aura-select-list" role="listbox" hidden>
+          <li class="aura-select-item" role="option" data-value="24h" aria-selected={state.clockFormat === '24h' ? 'true' : 'false'}>24-hour</li>
+          <li class="aura-select-item" role="option" data-value="12h" aria-selected={state.clockFormat === '12h' ? 'true' : 'false'}>12-hour</li>
+        </ul>
+      </div>
     </div>
     <div class="form-row">
       <label>LOCALE</label>
@@ -58,7 +66,7 @@ const state = { clockFormat, locale, timeZone, colorMode, restoreSession };
           <input id="time-zone" class="combo-input" type="text" role="combobox" autocomplete="off" spellcheck="false"
                  aria-expanded="false" aria-controls="time-zone-list" aria-autocomplete="list"
                  placeholder="DEVICE DEFAULT" value={state.timeZone} />
-          <button type="button" class="combo-toggle" tabindex="-1" aria-label="Open the time zone list" data-combo-toggle>▾</button>
+          <button type="button" class="combo-toggle" tabindex="-1" aria-label="Open the time zone list" data-combo-toggle><Icon name="chevron-down" /></button>
           <ul id="time-zone-list" class="combo-list" role="listbox" hidden></ul>
         </div>
         <script type="application/json" id="time-zone-zones" set:html={JSON.stringify(zones)}></script>
@@ -79,8 +87,9 @@ const state = { clockFormat, locale, timeZone, colorMode, restoreSession };
     <div class="form-row" style="align-items: flex-start;">
       <label>RESTORE AFTER RESTART</label>
       <div>
-        <label style="display:flex;align-items:center;gap:8px;">
+        <label class="aura-check">
           <input id="restore-session" type="checkbox" checked={state.restoreSession !== false} />
+          <span class="aura-check-box" aria-hidden="true"><Icon name="check" /></span>
           <span>Bring my work back after AuraOS restarts</span>
         </label>
         <p style="margin-top: 6px; font-size: 0.6rem; color: var(--aura-color-text-dim); letter-spacing: 0.06em;">
@@ -114,7 +123,7 @@ const state = { clockFormat, locale, timeZone, colorMode, restoreSession };
       }, 200));
     }
 
-    document.getElementById('clock-format').addEventListener('change', (e) => patch('clockFormat', e.target.value));
+    document.getElementById('clock-format').addEventListener('change', (e) => patch('clockFormat', e.target.dataset.value));
     document.getElementById('restore-session').addEventListener('change', (e) => patch('restoreSession', e.target.checked));
     document.getElementById('locale').addEventListener('input', (e) => patch('locale', e.target.value));
     // ── Time-zone combobox ─────────────────────────────────────────────
@@ -284,8 +293,9 @@ const state = { clockFormat, locale, timeZone, colorMode, restoreSession };
        inside the locale input move the caret rather than jumping focus. -->
   <script>
     import { OsClient } from '@aura/app-sdk';
+    import '../scripts/forms.ts';
     new OsClient().nav.installGridNav({
-      selector: '#clock-format, #locale, #time-zone, [role="tab"]',
+      selector: '#clock-format .aura-select-trigger, #locale, #time-zone, [role="tab"]',
     });
   </script>
 </body>

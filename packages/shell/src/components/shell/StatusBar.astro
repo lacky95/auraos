@@ -797,10 +797,13 @@ let initialTimeZone: string = '';
 
   // Ordered list of registered strategy ids. Falls back to the v1 seeded
   // set if the inventory endpoint isn't reachable (e.g. Settings down).
+  // Fallback for when /api/os/layouts hasn't answered yet. Icon names are
+  // Lucide ids from the OS sprite — matches what the endpoint resolves them to
+  // (packages/shell/src/pages/api/os/layouts.ts GLYPH_TO_LUCIDE).
   let availableLayouts: Array<{ id: string; name: string; icon?: string }> =
-    [{ id: 'tiling', name: 'Tiling', icon: '▦' },
-     { id: 'fullscreen', name: 'Fullscreen', icon: '▣' },
-     { id: 'stack', name: 'Free Window', icon: '▥' }];
+    [{ id: 'tiling', name: 'Tiling', icon: 'layout-grid' },
+     { id: 'fullscreen', name: 'Fullscreen', icon: 'square' },
+     { id: 'stack', name: 'Free Window', icon: 'layout-template' }];
   // Retry on the boot-race 404: Settings autoStarts in parallel with the
   // shell's first paint, so this fetch can land before the providers are
   // registered. Five short tries cover the ~3s cold-start window.
@@ -1014,15 +1017,14 @@ let initialTimeZone: string = '';
     bundleEl.dataset['nameHidden'] = rightOverflowing() ? 'true' : 'false';
   }
 
-  // Layout-strategy `icon` hints are legacy glyphs (LayoutStrategyRegistry);
-  // map the known ones onto the OS Lucide sprite, fall back to the raw text.
-  const LAYOUT_GLYPH_ICONS: Record<string, string> = {
-    '▦': 'layout-grid', '▣': 'square', '▥': 'layout-template', '▤': 'rows-3',
-  };
-  function layoutIconSvg(hint: string): string {
-    const name = LAYOUT_GLYPH_ICONS[hint];
-    if (name) return `<svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-${name}"/></svg>`;
-    return hint.replace(/[<>&]/g, (c) => (c === '<' ? '&lt;' : c === '>' ? '&gt;' : '&amp;'));
+  // The `icon` field from /api/os/layouts is a Lucide id — resolved once by
+  // the endpoint (packages/shell/src/pages/api/os/layouts.ts) so every
+  // consumer (this chip, Settings → Workspaces, Settings → Layouts) renders
+  // the same glyph for a strategy. Guarded against odd names with a strict
+  // kebab-case allowlist so a bogus `icon` can't inject HTML.
+  function layoutIconSvg(name: string): string {
+    const safe = /^[a-z0-9-]+$/.test(name) ? name : 'layout-template';
+    return `<svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-${safe}"/></svg>`;
   }
 
   function renderLayoutChip(state: workspaceClient.WorkspaceState) {
@@ -1031,12 +1033,12 @@ let initialTimeZone: string = '';
     const nameEl = layoutChip.querySelector<HTMLElement>('.layout-chip-name');
     const active = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
     if (!active) {
-      if (iconEl) iconEl.innerHTML = layoutIconSvg('▦');
+      if (iconEl) iconEl.innerHTML = layoutIconSvg('layout-grid');
       if (nameEl) nameEl.textContent = '—';
       return;
     }
     const meta = availableLayouts.find((m) => m.id === active.layoutId);
-    const icon = meta?.icon ?? '▦';
+    const icon = meta?.icon ?? 'layout-grid';
     const name = (meta?.name ?? active.layoutId).split('/')[0]!.trim().toUpperCase();
     if (iconEl) iconEl.innerHTML = layoutIconSvg(icon);
     if (nameEl) nameEl.textContent = name;

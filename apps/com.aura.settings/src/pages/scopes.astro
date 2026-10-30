@@ -1,5 +1,6 @@
 ---
 import '../styles/settings.css';
+import Icon from '../components/Icon.astro';
 
 const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
 
@@ -19,7 +20,7 @@ try {
   if (r.ok) scopes = await r.json() as ScopeStatus[];
 } catch { /* render empty — shell may be booting */ }
 
-const SCOPE_ICONS: Record<string, string> = { system: '⊟', global: '⊞', user: '⊕' };
+const SCOPE_ICONS: Record<string, string> = { system: 'settings', global: 'globe', user: 'user' };
 const SCOPE_LABELS: Record<string, string> = {
   system: 'SYSTEM — AuraOS monorepo (immutable)',
   global: 'GLOBAL — shared across all sessions',
@@ -98,7 +99,7 @@ const SCOPE_LABELS: Record<string, string> = {
     {scopes.map((scope) => (
       <div class="scope-card" data-scope-id={scope.id}>
         <div class="scope-header">
-          <span class="scope-icon">{SCOPE_ICONS[scope.id] ?? '○'}</span>
+          <span class="scope-icon"><Icon name={SCOPE_ICONS[scope.id] ?? 'circle'} /></span>
           <span class="scope-title">{SCOPE_LABELS[scope.id] ?? scope.id.toUpperCase()}</span>
           <span class={`scope-badge${scope.immutable ? ' immutable' : ''}`}>
             {scope.immutable ? 'IMMUTABLE' : 'WRITABLE'}

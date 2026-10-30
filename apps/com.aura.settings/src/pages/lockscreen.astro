@@ -1,6 +1,7 @@
 ---
 import '@aura/ui/styles/scificn-bridge.css';
 import '../styles/settings.css';
+import Icon from '../components/Icon.astro';
 
 // SSR-read `os/lockscreen` directly from the shell's internal port. Falls
 // back to the same defaults the shell's LockScreenOverlay uses so the form
@@ -43,16 +44,16 @@ try {
 cfg.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN,
   typeof cfg.zoom === 'number' && isFinite(cfg.zoom) ? cfg.zoom : 1));
 
-const POSITIONS: { id: LockPosition; label: string }[] = [
-  { id: 'top-left',      label: '↖' },
-  { id: 'top-center',    label: '↑' },
-  { id: 'top-right',     label: '↗' },
-  { id: 'middle-left',   label: '←' },
-  { id: 'center',        label: '◉' },
-  { id: 'middle-right',  label: '→' },
-  { id: 'bottom-left',   label: '↙' },
-  { id: 'bottom-center', label: '↓' },
-  { id: 'bottom-right',  label: '↘' },
+const POSITIONS: { id: LockPosition; icon: string }[] = [
+  { id: 'top-left',      icon: 'arrow-up-left' },
+  { id: 'top-center',    icon: 'arrow-up' },
+  { id: 'top-right',     icon: 'arrow-up-right' },
+  { id: 'middle-left',   icon: 'arrow-left' },
+  { id: 'center',        icon: 'circle-dot' },
+  { id: 'middle-right',  icon: 'arrow-right' },
+  { id: 'bottom-left',   icon: 'arrow-down-left' },
+  { id: 'bottom-center', icon: 'arrow-down' },
+  { id: 'bottom-right',  icon: 'arrow-down-right' },
 ];
 ---
 <!DOCTYPE html>
@@ -85,15 +86,16 @@ const POSITIONS: { id: LockPosition; label: string }[] = [
             data-selected={String(p.id === cfg.position)}
             aria-checked={p.id === cfg.position ? 'true' : 'false'}
             title={p.id}
-          >{p.label}</button>
+          ><Icon name={p.icon} /></button>
         ))}
       </div>
     </div>
 
     <div class="form-row">
       <label>CLOCK</label>
-      <label class="checkbox-row">
+      <label class="aura-check">
         <input id="show-clock" type="checkbox" checked={cfg.showClock} />
+        <span class="aura-check-box" aria-hidden="true"><Icon name="check" /></span>
         <span>SHOW A LIVE CLOCK</span>
       </label>
     </div>
@@ -101,14 +103,14 @@ const POSITIONS: { id: LockPosition; label: string }[] = [
     <div class="form-row" style="align-items: center;">
       <label>ZOOM</label>
       <div class="zoom-row">
-        <input id="zoom" type="range" min={ZOOM_MIN} max={ZOOM_MAX} step={ZOOM_STEP} value={cfg.zoom} aria-label="Lock-screen content size" />
+        <input id="zoom" class="aura-range" type="range" min={ZOOM_MIN} max={ZOOM_MAX} step={ZOOM_STEP} value={cfg.zoom} aria-label="Lock-screen content size" />
         <span id="zoom-val">{cfg.zoom.toFixed(2)}×</span>
       </div>
     </div>
 
     <div class="form-row">
       <label></label>
-      <button id="test-btn" class="action-btn" type="button">⊞ TEST LOCK NOW</button>
+      <button id="test-btn" class="action-btn" type="button"><span style="display:inline-flex;align-items:center;gap:6px;"><Icon name="lock" /> TEST LOCK NOW</span></button>
     </div>
 
     <div class="form-row" style="align-items: flex-start;">

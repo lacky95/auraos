@@ -2,6 +2,7 @@
 import '@aura/ui/styles/scificn-bridge.css';
 import '../styles/settings.css';
 import ColorModePicker from '../components/ColorModePicker';
+import Icon from '../components/Icon.astro';
 
 // SSR-read the active theme selection from the OS KV. The page lives in
 // the Settings iframe, which is proxied by the shell — we hit the shell's
@@ -73,7 +74,7 @@ const lightThemes = THEMES.filter(t => t.tone === 'light');
             </div>
             <div class="name">{t.name}</div>
             <div class="card-desc">{t.description}</div>
-            {t.id === currentDarkId && <span class="active-tag">● ACTIVE</span>}
+            {t.id === currentDarkId && <span class="active-tag" style="display:inline-flex;align-items:center;gap:4px;"><Icon name="check" /> ACTIVE</span>}
           </button>
         ))}
       </div>
@@ -94,7 +95,7 @@ const lightThemes = THEMES.filter(t => t.tone === 'light');
             </div>
             <div class="name">{t.name}</div>
             <div class="card-desc">{t.description}</div>
-            {t.id === currentLightId && <span class="active-tag">● ACTIVE</span>}
+            {t.id === currentLightId && <span class="active-tag" style="display:inline-flex;align-items:center;gap:4px;"><Icon name="check" /> ACTIVE</span>}
           </button>
         ))}
       </div>
@@ -137,7 +138,9 @@ const lightThemes = THEMES.filter(t => t.tone === 'light');
         if (active && !tag) {
           tag = document.createElement('span');
           tag.className = 'active-tag';
-          tag.textContent = '● ACTIVE';
+          tag.style.cssText = 'display:inline-flex;align-items:center;gap:4px;';
+          tag.innerHTML =
+            '<svg aria-hidden="true" style="width:1em;height:1em;vertical-align:-0.125em;"><use href="/api/os/icons.svg#lucide-check"/></svg> ACTIVE';
           c.appendChild(tag);
         } else if (!active && tag) {
           tag.remove();
