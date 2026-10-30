@@ -3,8 +3,8 @@ title: Shell runtime modes & hot reload
 description: How the AuraOS shell runs — `astro dev` with HMR for shell development, or the production build for speed — how to switch, and how changes get picked up in each mode.
 ---
 
-**TL;DR.** The shell (`packages/shell`) runs in one of two modes, picked by
-`AURA_SHELL_MODE` when the container boots:
+**TL;DR.** The shell (`packages/shell`) runs in one of two modes, picked when the
+container boots (`aura shell mode`, see [Switch modes](#switch-modes)):
 
 | | `dev` (default) | `prod` |
 |---|---|---|
@@ -34,18 +34,21 @@ so both modes behave the same.
 
 ## Switch modes
 
-Set the variable on the master container and restart AuraOS:
+Write the mode and restart AuraOS — the desktop comes back on its own:
 
-```yaml
-# docker-compose.override.yml (or your compose file)
-services:
-  aura-os:
-    environment:
-      AURA_SHELL_MODE: prod        # dev is the default
+```sh
+aura shell mode prod      # or: aura shell mode dev
+aura restart os
 ```
 
-then `docker compose up -d aura-os` (the variable is read at boot by
-`os/boot.sh`). `aura restart os` alone does not change the environment.
+`aura shell mode` writes `/data/aura/shell-mode` (persistent, read by
+`os/boot.sh` on every boot); without an argument it prints the current and
+the configured mode. The environment variable `AURA_SHELL_MODE` on the
+master container, if set, wins over the file.
+
+The first switch on an older install needs `aura restart os --rebuild`: images
+built before `os/boot.sh` existed start the shell with a fixed command that
+does not read the mode.
 
 ## Picking up changes
 

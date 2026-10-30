@@ -12,7 +12,8 @@
 # so the container restart policy retries. AURA_BOOT_SPLASH=0 turns the splash
 # off.
 #
-# AURA_SHELL_MODE picks how the shell runs (docs: deep-dive/shell-runtime-modes):
+# AURA_SHELL_MODE (or the file /data/aura/shell-mode) picks how the shell
+# runs (docs: deep-dive/shell-runtime-modes):
 #   dev  (default) `astro dev`: Vite serves the shell from source with HMR.
 #                  The shell's own production build is skipped (unused).
 #   prod           the `astro build` output via packages/shell/server.mjs:
@@ -20,7 +21,11 @@
 #                  `aura restart os`, or AURA_SHELL_WATCH=1 for an in-process
 #                  rebuild on save).
 set -u
-SHELL_MODE="${AURA_SHELL_MODE:-dev}"
+# Mode: the env var wins; else the persistent switch file (written by
+# `aura shell mode prod|dev`, survives restarts and image rebuilds); else dev.
+SHELL_MODE_FILE=/data/aura/shell-mode
+SHELL_MODE="${AURA_SHELL_MODE:-$(tr -d '[:space:]' < "$SHELL_MODE_FILE" 2>/dev/null)}"
+case "$SHELL_MODE" in prod|dev) ;; *) SHELL_MODE=dev ;; esac
 
 BOOT_DIR=/data/aura/boot
 LOG="$BOOT_DIR/boot.log"

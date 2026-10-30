@@ -25,6 +25,7 @@ import { registerScope } from './commands/scope.js';
 import { registerSdk } from './commands/sdk.js';
 import { registerVerbs, setProgramFactory } from './commands/verbs.js';
 import { registerAdmin, registerApiKey } from './commands/admin.js';
+import { registerShellMode } from './commands/shellMode.js';
 import { LEGACY_GROUPS, markLegacy } from './lib/deprecate.js';
 import { color, visibleWidth } from './lib/format.js';
 import { RESOURCES, fetchApps, findResource, liveInstances, shortName } from './lib/resources.js';
@@ -264,6 +265,7 @@ export function buildProgram(): Command {
   registerEvents(program);
   registerData(program);
   registerAdmin(program);
+  registerShellMode(program);
   registerApiKey(program);
   // Pre-kubectl groups: registered so they keep working, then hidden.
   registerApp(program);
