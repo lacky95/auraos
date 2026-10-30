@@ -1771,6 +1771,33 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
   // A restart that never reports back (shell crash) must not pin dead
   // windows forever — after this, fall back to the normal teardown.
   const RESTART_GIVE_UP_MS = 10 * 60_000;
+  // A restart can hand the new instance / windows the SAME ids as the old
+  // ones (single-window apps: the instance id is the app id; `#a1` → `#a1`).
+  // Teardown events of the old backend that arrive after `app:restarted`
+  // would then close the NEW window and strip it from its workspace. For a
+  // while after a restart such an event is checked against the server first.
+  const RESTART_ECHO_MS = 30_000;
+  const reusedAfterRestart = new Map<string, number>();   // instanceId → until
+  function reusedRecently(instanceId: string): boolean {
+    const until = reusedAfterRestart.get(instanceId);
+    if (until === undefined) return false;
+    if (Date.now() < until) return true;
+    reusedAfterRestart.delete(instanceId);
+    return false;
+  }
+  /** Is `instanceId` (and, given, its activity `activityId`) still alive on the server? */
+  async function stillAlive(instanceId: string, activityId?: string): Promise<boolean> {
+    try {
+      const r = await fetch(`/api/instances/${encodeURIComponent(instanceId)}/status`, { cache: 'no-store' });
+      if (!r.ok) return false;
+      const st = (await r.json() as { instance?: { state?: string } }).instance?.state;
+      if (!st || st === 'destroyed' || st === 'error') return false;
+      if (!activityId) return true;
+      const a = await fetch(`/api/instances/${encodeURIComponent(instanceId)}/activities`, { cache: 'no-store' });
+      if (!a.ok) return false;
+      return (await a.json() as Array<{ activityId: string }>).some((x) => x.activityId === activityId);
+    } catch { return false; }
+  }
 
   function slotIframe(viewId: string): HTMLIFrameElement | null {
     return document.querySelector<HTMLIFrameElement>(`.app-slot[data-view-id="${CSS.escape(viewId)}"] iframe`);
@@ -1808,6 +1835,9 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     for (const id of oldIds) restartingInstances.delete(id);
 
     const restored = ev.restored ?? [];
+    for (const r of restored) {
+      if (oldIds.has(r.instanceId)) reusedAfterRestart.set(r.instanceId, Date.now() + RESTART_ECHO_MS);
+    }
     const byFrom = new Map(restored.map((r) => [r.from, r]));
     const name = manifestCache.get(ev.appId)?.name ?? ev.appId;
     const bg = manifestCache.get(ev.appId)?.backgroundService === true;
@@ -3537,7 +3567,8 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     }
   });
 
-  osEvents.subscribe(['app:*', 'activity:*', 'workspaces:*', 'workspace:*'], (ev: any) => {
+  osEvents.subscribe(['app:*', 'activity:*', 'workspaces:*', 'workspace:*'], (ev: any) => onOsEvent(ev));
+  function onOsEvent(ev: any): void {
     if (ev.type === 'app:restarting')    { beginRestart(ev); return; }
     if (ev.type === 'app:restarted')     { void finishRestart(ev); return; }
     if (ev.type === 'app:restartFailed') { failRestart(ev.appId, ev.instanceIds ?? []); return; }
@@ -3546,6 +3577,19 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     if (ev.type === 'activity:closed' && restartingInstances.has(ev.parentInstanceId)) return;
     // The restart re-opens activities itself; app:restarted places them.
     if (ev.type === 'activity:opened' && restartingApps.has(ev.appId)) return;
+    // Right after a restart that reused ids: a teardown may be the OLD
+    // backend's echo — act on it only if the server confirms (see above).
+    const teardownOf = (ev.type === 'app:stateChanged' && (ev.state === 'destroyed' || ev.state === 'error')) || ev.type === 'app:crashed'
+      ? ev.instanceId
+      : ev.type === 'activity:closed' ? ev.parentInstanceId : null;
+    if (teardownOf && reusedRecently(teardownOf) && !ev.__checked) {
+      void stillAlive(teardownOf, ev.type === 'activity:closed' ? ev.activityId : undefined).then((alive) => {
+        if (alive) return;
+        reusedAfterRestart.delete(teardownOf);
+        onOsEvent({ ...ev, __checked: true });
+      });
+      return;
+    }
     if (ev.type === 'app:stateChanged') {
       // Terminal lifecycle states ⇒ the backing process is gone (forceKilled
       // from process manager, reconciler force-kill on identity drift, or a
@@ -3668,7 +3712,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
       // via the subscribe() wire-up further up.
       workspaceClient.refresh().catch((err) => console.warn('[shell] workspace refresh failed', err));
     }
-  });
+  }
 </script>
 
 <style is:global>
