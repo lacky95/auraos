@@ -22,6 +22,7 @@ import {
   DialogClose,
   Button,
   Checkbox,
+  Icon,
 } from '@aura/ui';
 import { onOpenRequest } from '../../lib/openRequest';
 
@@ -166,61 +167,92 @@ export function AboutDialog(): React.JSX.Element {
     }
   };
 
-  // Compact "update available" chip. Deliberately smaller than the Settings
-  // page banner — this dialog has less room and the Settings page is where
-  // the actual update happens. The chip is a button: clicking it takes the
-  // user straight there (and closes this dialog).
-  const updateChip = preflight?.updateAvailable ? (
-    <button
-      type="button"
-      onClick={() => { void openSettingsAbout(); }}
-      title="Open Settings → About to apply this update"
-      style={{
-        display: 'block',
-        width: 'calc(100% - 32px)',
-        textAlign: 'left',
-        margin: '12px 16px 0',
-        padding: '6px 10px',
-        border: '1px solid var(--color-green)',
-        boxShadow: 'var(--glow-green)',
-        background: 'rgba(0, 255, 65, 0.06)',
-        fontFamily: 'var(--font-mono)',
-        cursor: 'pointer',
-        appearance: 'none',
-        outline: 'none',
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
-        <span style={{ color: 'var(--color-green)', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', fontSize: '0.6rem' }}>
-          ▲ Update available
-        </span>
-        <span style={{ color: 'var(--text-muted)', fontSize: '0.56rem', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-          {preflight.behind} new · {preflight.branch}
-        </span>
-      </div>
-      <div style={{ marginTop: '3px', display: 'flex', alignItems: 'baseline', gap: '6px', fontSize: '0.62rem' }}>
-        <span style={{ color: 'var(--text-muted)' }}>{(preflight.currentRev ?? '').slice(0, 7)}</span>
-        <span style={{ color: 'var(--color-green)' }}>→</span>
-        <span style={{ color: 'var(--color-green)' }}>{(preflight.latestRev ?? '').slice(0, 7)}</span>
-        {preflight.latestSubject ? (
-          <span
-            style={{
-              color: 'var(--text-secondary)',
-              opacity: 0.75,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-              flex: 1,
-              minWidth: 0,
-            }}
-            title={preflight.latestSubject}
-          >
-            · {preflight.latestSubject}
+  // Compact preflight chip. Two faces:
+  //   • Update available — primary glow, clickable; opens Settings → About.
+  //   • Up to date       — dim border, non-interactive; reassurance line.
+  // Deliberately smaller than the Settings page banner since this dialog has
+  // less room and the actual update action lives on the Settings page.
+  const updateChip = (() => {
+    if (!preflight) return null;
+    if (preflight.updateAvailable) {
+      return (
+        <button
+          type="button"
+          onClick={() => { void openSettingsAbout(); }}
+          title="Open Settings → About to apply this update"
+          style={{
+            display: 'block',
+            width: 'calc(100% - 32px)',
+            textAlign: 'left',
+            margin: '12px 16px 0',
+            padding: '6px 10px',
+            border: '1px solid var(--color-green)',
+            boxShadow: 'var(--glow-green)',
+            background: 'rgba(0, 255, 65, 0.06)',
+            fontFamily: 'var(--font-mono)',
+            cursor: 'pointer',
+            appearance: 'none',
+            outline: 'none',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+            <span style={{ color: 'var(--color-green)', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', fontSize: '0.6rem', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+              <Icon name="arrow-up" /> Update available
+            </span>
+            <span style={{ color: 'var(--text-muted)', fontSize: '0.56rem', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+              {preflight.behind} new · {preflight.branch}
+            </span>
+          </div>
+          <div style={{ marginTop: '3px', display: 'flex', alignItems: 'baseline', gap: '6px', fontSize: '0.62rem' }}>
+            <span style={{ color: 'var(--text-muted)' }}>{(preflight.currentRev ?? '').slice(0, 7)}</span>
+            <span style={{ color: 'var(--color-green)' }}>→</span>
+            <span style={{ color: 'var(--color-green)' }}>{(preflight.latestRev ?? '').slice(0, 7)}</span>
+            {preflight.latestSubject ? (
+              <span
+                style={{
+                  color: 'var(--text-secondary)',
+                  opacity: 0.75,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  flex: 1,
+                  minWidth: 0,
+                }}
+                title={preflight.latestSubject}
+              >
+                · {preflight.latestSubject}
+              </span>
+            ) : null}
+          </div>
+        </button>
+      );
+    }
+    // Up to date — same layout as the "available" chip but dimmed and static.
+    const cur = (preflight.currentRev ?? '').slice(0, 7);
+    const detail = cur
+      ? `${cur} · ${preflight.branch}${preflight.ahead ? ` · ${preflight.ahead} ahead` : ''}`
+      : preflight.branch;
+    return (
+      <div
+        style={{
+          margin: '12px 16px 0',
+          padding: '6px 10px',
+          border: '1px solid var(--border)',
+          background: 'transparent',
+          fontFamily: 'var(--font-mono)',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+          <span style={{ color: 'var(--text-muted)', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', fontSize: '0.6rem', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+            <Icon name="check" /> Up to date
           </span>
-        ) : null}
+          <span style={{ color: 'var(--text-muted)', fontSize: '0.56rem', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+            {detail}
+          </span>
+        </div>
       </div>
-    </button>
-  ) : null;
+    );
+  })();
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>

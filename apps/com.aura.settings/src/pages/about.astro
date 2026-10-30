@@ -116,20 +116,22 @@ const S = {
          so this page WILL lose its backend for a minute or two mid-update —
          the poller below treats that as normal and waits it out. -->
     <div style={S.upd}>
-      <!-- Shown only when the on-load check finds a newer commit. Sits right
-           above the buttons so the version numbers are impossible to miss. -->
+      <!-- Shown on-load after the preflight check: either "update available"
+           (primary glow, from → to, subject) or "up to date" (dim, no glow,
+           current rev · branch). renderCheck() toggles the look so the banner
+           is always informative, never silent. -->
       <div id="upd-banner" hidden
-           style="margin-bottom:10px;padding:10px 12px;border:1px solid var(--aura-color-primary);background:rgba(0,255,65,0.06);box-shadow:var(--aura-glow-primary);">
+           style="margin-bottom:10px;padding:10px 12px;border:1px solid var(--aura-color-border,#333);background:transparent;">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-          <span style="color:var(--aura-color-primary);font-weight:bold;letter-spacing:0.14em;text-transform:uppercase;font-size:0.66rem;display:inline-flex;align-items:center;gap:6px;"><Icon name="arrow-up" /> Update available</span>
+          <span id="upd-banner-title" style="font-weight:bold;letter-spacing:0.14em;text-transform:uppercase;font-size:0.66rem;display:inline-flex;align-items:center;gap:6px;color:var(--aura-color-primary);"></span>
           <span id="upd-banner-count" style="color:var(--aura-color-text-dim);font-size:0.58rem;letter-spacing:0.06em;text-transform:uppercase;"></span>
         </div>
-        <div style="margin-top:8px;display:flex;align-items:center;gap:10px;font-size:0.7rem;font-family:monospace;">
+        <div id="upd-banner-change" style="margin-top:8px;display:flex;align-items:center;gap:10px;font-size:0.7rem;font-family:monospace;" hidden>
           <span id="upd-banner-from" style="color:var(--aura-color-text-dim);"></span>
           <span style="color:var(--aura-color-primary);">→</span>
           <span id="upd-banner-to" style="color:var(--aura-color-primary);text-shadow:var(--aura-glow-primary);"></span>
         </div>
-        <div id="upd-banner-subject" style="margin-top:6px;font-size:0.62rem;color:var(--aura-color-secondary);line-height:1.5;"></div>
+        <div id="upd-banner-subject" style="margin-top:6px;font-size:0.62rem;color:var(--aura-color-secondary);line-height:1.5;" hidden></div>
       </div>
       <!-- Three ways to act on the master container, in descending order of
            how much they change: pull + rebuild, rebuild what is on disk,
@@ -400,10 +402,17 @@ const S = {
     }
 
     const uBanner        = document.getElementById('upd-banner');
+    const uBannerTitle   = document.getElementById('upd-banner-title');
     const uBannerCount   = document.getElementById('upd-banner-count');
+    const uBannerChange  = document.getElementById('upd-banner-change');
     const uBannerFrom    = document.getElementById('upd-banner-from');
     const uBannerTo      = document.getElementById('upd-banner-to');
     const uBannerSubject = document.getElementById('upd-banner-subject');
+    // Shared sprite-ref for the banner's title icon — swapped between
+    // arrow-up (update available) and check (up to date). Keeps the icon
+    // theming aligned with the rest of Settings.
+    const bannerIcon = (name) =>
+      `<svg aria-hidden="true" style="width:1em;height:1em;vertical-align:-0.125em;"><use href="/api/os/icons.svg#lucide-${name}"/></svg>`;
 
     function renderCheck(pre) {
       // Reset to the idle visuals; each branch re-raises what it needs.
@@ -415,19 +424,39 @@ const S = {
         note.textContent = 'Could not reach the backend to run the check.';
         return;
       }
-      // The banner is the "there IS an update" indicator — it surfaces whether
-      // or not we can apply it right now. Blockers (dirty tree etc.) still get
-      // reported below, but they don't hide the fact that a new version exists.
-      if (pre.updateAvailable && uBanner) {
+      // Banner reflects the preflight either way — green glow + from→to for an
+      // available update, dim border + "up to date" for a clean checkout.
+      // Blockers (dirty tree) still render in the log below without hiding the
+      // banner, so the version info is always visible at a glance.
+      if (uBanner) {
         const cur = (pre.currentRev || '').slice(0, 12);
-        const nxt = (pre.latestRev  || '').slice(0, 12);
-        uBannerCount.textContent   = `${pre.behind} new commit${pre.behind === 1 ? '' : 's'} · ${pre.branch}`;
-        uBannerFrom.textContent    = cur ? `current ${cur}` : 'current —';
-        uBannerTo.textContent      = nxt ? `new ${nxt}`     : 'new —';
-        uBannerSubject.textContent = pre.latestSubject || '';
-        uBannerSubject.hidden      = !pre.latestSubject;
-        uBanner.hidden             = false;
-        btn.style.boxShadow        = 'var(--aura-glow-primary)';
+        if (pre.updateAvailable) {
+          const nxt = (pre.latestRev || '').slice(0, 12);
+          uBanner.style.borderColor      = 'var(--aura-color-primary)';
+          uBanner.style.background       = 'rgba(0,255,65,0.06)';
+          uBanner.style.boxShadow        = 'var(--aura-glow-primary)';
+          uBannerTitle.innerHTML         = `${bannerIcon('arrow-up')} Update available`;
+          uBannerTitle.style.color       = 'var(--aura-color-primary)';
+          uBannerCount.textContent       = `${pre.behind} new commit${pre.behind === 1 ? '' : 's'} · ${pre.branch}`;
+          uBannerFrom.textContent        = cur ? `current ${cur}` : 'current —';
+          uBannerTo.textContent          = nxt ? `new ${nxt}`     : 'new —';
+          uBannerChange.hidden           = false;
+          uBannerSubject.textContent     = pre.latestSubject || '';
+          uBannerSubject.hidden          = !pre.latestSubject;
+          btn.style.boxShadow            = 'var(--aura-glow-primary)';
+        } else {
+          uBanner.style.borderColor      = 'var(--aura-color-border,#333)';
+          uBanner.style.background       = 'transparent';
+          uBanner.style.boxShadow        = '';
+          uBannerTitle.innerHTML         = `${bannerIcon('check')} Up to date`;
+          uBannerTitle.style.color       = 'var(--aura-color-text-dim)';
+          uBannerCount.textContent       = cur
+            ? `${cur} · ${pre.branch}${pre.ahead ? ` · ${pre.ahead} ahead` : ''}`
+            : pre.branch;
+          uBannerChange.hidden           = true;
+          uBannerSubject.hidden          = true;
+        }
+        uBanner.hidden = false;
       }
       if (pre.blockers && pre.blockers.length) {
         log.style.display = 'block';
@@ -439,8 +468,9 @@ const S = {
         return;
       }
       if (!pre.updateAvailable) {
-        note.textContent = `Already up to date — ${(pre.currentRev || '').slice(0, 12)} on ${pre.branch}`
-          + (pre.ahead ? ` (${pre.ahead} local commit(s) not pushed)` : '');
+        note.textContent = pre.ahead
+          ? `You're on the latest commit on ${pre.branch} (${pre.ahead} local commit(s) not pushed).`
+          : `You're on the latest commit on ${pre.branch}.`;
         return;
       }
       note.textContent = 'A new version is ready — click Update AuraOS to apply.';
