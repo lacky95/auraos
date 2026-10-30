@@ -1,0 +1,90 @@
+---
+title: Shell runtime modes & hot reload
+description: How the AuraOS shell runs — `astro dev` with HMR for shell development, or the production build for speed — how to switch, and how changes get picked up in each mode.
+---
+
+**TL;DR.** The shell (`packages/shell`) runs in one of two modes, picked by
+`AURA_SHELL_MODE` when the container boots:
+
+| | `dev` (default) | `prod` |
+|---|---|---|
+| Server | `astro dev` (Vite) | `node packages/shell/server.mjs` on the `astro build` output |
+| Desktop JS | ~300 unbundled modules per load | ~34 hashed chunks, cached `immutable` |
+| Shell code change | HMR / automatic page reload | `aura restart os`, or in-process rebuild with `AURA_SHELL_WATCH=1` |
+| Boot | skips the shell's own build | builds the shell (~20–25 s) |
+
+Use `dev` while you work on the shell itself; use `prod` for everyday use.
+Apps are not affected by the mode: each app runs its own server and the
+shell proxies it either way.
+
+## What is the same in both modes
+
+The shell is more than Astro pages. Next to them, on the same HTTP server,
+run:
+
+- **socket.io** at `/os-events` — the OS event stream for the desktop.
+- **The WebSocket proxy** for `/api/proxy/<instance>/…` upgrades.
+- **The SSE multiplexer** at `/_aura/sse-mux`.
+- **The `?astro` query escape** for proxied app module URLs.
+
+All of them live in `packages/shell/server/attach.mjs`. In `dev` the Vite
+plugins in `astro.config.mjs` attach them to Vite's server; in `prod`
+`server.mjs` attaches them to its own `http.Server`. It is one implementation,
+so both modes behave the same.
+
+## Switch modes
+
+Set the variable on the master container and restart AuraOS:
+
+```yaml
+# docker-compose.override.yml (or your compose file)
+services:
+  aura-os:
+    environment:
+      AURA_SHELL_MODE: prod        # dev is the default
+```
+
+then `docker compose up -d aura-os` (the variable is read at boot by
+`os/boot.sh`). `aura restart os` alone does not change the environment.
+
+## Picking up changes
+
+**Dev.** Save a file; Vite updates the page. The auto-reload switch in the
+viewport settings dialog (status bar) decides whether a full reload happens
+on its own or waits behind the "reload" chip in the status bar.
+
+**Prod, the simple way.** `aura restart os` saves the desktop, restarts the
+master container — which rebuilds every package on boot — and brings the
+desktop back (see [Restarts and restore](/docs/restarts)).
+`aura restart os --rebuild` rebuilds the container **image** from the
+current checkout first; you need that only after changing the `Dockerfile`
+or system packages.
+
+**Prod, on save.** With `AURA_SHELL_WATCH=1` (plus `AURA_SHELL_MODE=prod`)
+`server/watchRebuild.mjs` watches `packages/{shell,core,ui,kv-store,app-sdk}/src`:
+
+1. Changes are debounced (`AURA_SHELL_WATCH_DEBOUNCE_MS`, default 800 ms).
+2. `astro build --outDir dist-g<N>` runs in a child process (esbuild capped
+   with `GOMAXPROCS=2`).
+3. On success the server serves the new build — no process restart: running
+   apps, the AppManager and every socket stay up. A failed build changes
+   nothing; the log shows why (`[shell-watch]`).
+4. The OS event `shell:rebuilt` `{ generation, durationMs, changed }` goes
+   out on `/os-events`, so open desktops can offer a reload. Tabs still on the
+   previous build keep loading its chunks until they reload.
+
+Each rebuild stays loaded in memory (Node cannot unload modules). After many
+rebuilds, `aura restart os`. Code that keeps state in a module (not pinned on
+`globalThis`) starts fresh in the new build, as with Vite's SSR reload in dev.
+
+## Run it by hand
+
+```bash
+pnpm --filter @aura/shell build        # astro build → packages/shell/dist
+pnpm --filter @aura/shell start:check  # load the build, attach servers, exit
+pnpm --filter @aura/shell start        # HOST/PORT, default 0.0.0.0:3000
+```
+
+Only one shell may own the KV server and the apps: the first request that
+reaches an Astro route starts the AppManager. Don't start a second shell
+against the same `/data` next to a running one.

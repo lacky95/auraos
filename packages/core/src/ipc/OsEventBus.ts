@@ -121,6 +121,16 @@ export interface OsEvents {
     failed:   Array<{ viewId: string; appId: string; error: string }>;
     idMap:    Record<string, string>;
   };
+  /** A production shell finished an opt-in rebuild (AURA_SHELL_WATCH=1,
+   *  packages/shell/server/watchRebuild.mjs) and serves the new build from
+   *  now on: open desktops should offer / do a reload. `generation` counts
+   *  swaps since the server started; `changed` lists the files (relative to
+   *  the repo root) that triggered it, capped. */
+  'shell:rebuilt': {
+    generation: number;
+    durationMs: number;
+    changed:    string[];
+  };
   'theme:changed': {
     themeId:       string;                     // the ACTIVE (resolved) theme id
     themeName:     string;
