@@ -29,6 +29,49 @@ const SHARED_NETWORK = process.env['AURA_DOCKER_NETWORK'] ?? 'aura-net';
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * The long-running `docker logs -f` / `docker wait` watchers: two per app
+ * container, all children of the shell, all inside the shell container's
+ * pids cgroup (~1035 on a typical install) next to the shell itself. Each
+ * `docker` CLI is a Go program whose runtime starts a thread per CPU; these
+ * only wait on one stream, so one is plenty — about half the pids.
+ */
+const WATCHER_ENV = { ...process.env, GOMAXPROCS: '1' };
+const WATCHER_RETRY_MAX_MS = 30_000;
+type WatcherStdio = ['ignore', 'pipe', 'pipe' | 'ignore'];
+
+/**
+ * Spawn a docker watcher. A spawn that fails (EAGAIN — out of pids — EMFILE,
+ * ENOMEM) is retried with backoff for as long as `stillWanted()`; it must
+ * never become an uncaught 'error' that takes the shell down (seen on boot,
+ * re-adopting ~45 containers at once), nor be mistaken for the container
+ * having exited. `wire` attaches the stream handlers to every attempt;
+ * `onError` sees errors of a watcher that did start.
+ */
+function spawnDockerWatcher(
+  args: string[],
+  stdio: WatcherStdio,
+  label: string,
+  wire: (child: ChildProcess) => void,
+  stillWanted: () => boolean,
+  onError?: (err: Error) => void,
+  attempt = 0,
+): ChildProcess {
+  const child = spawn('docker', args, { stdio, env: WATCHER_ENV });
+  let started = false;
+  child.once('spawn', () => { started = true; });
+  child.on('error', (err: NodeJS.ErrnoException) => {
+    if (started) { onError?.(err); return; }
+    const delay = Math.min(WATCHER_RETRY_MAX_MS, 1000 * 2 ** attempt);
+    console.warn(`[ContainerRunner] ${label}: spawn docker ${args[0]} failed (${err.code ?? err.message}), retry in ${delay} ms`);
+    setTimeout(() => {
+      if (stillWanted()) spawnDockerWatcher(args, stdio, label, wire, stillWanted, onError, attempt + 1);
+    }, delay);
+  });
+  wire(child);
+  return child;
+}
+
 /** One entry of `docker inspect`'s `.Mounts` array (only the fields we read). */
 interface DockerMount {
   Type?: string;
@@ -264,15 +307,19 @@ export class ContainerRunner implements SandboxRunner {
     // isn't the only place to see app output. Survives until the container
     // exits or we kill it.
     const provision = new ProvisionWatch();
-    const logTail = spawn('docker', ['logs', '-f', containerId], { stdio: ['ignore', 'pipe', 'pipe'] });
-    logTail.stdout?.on('data', (d: Buffer) => {
-      provision.observe(d.toString());
-      process.stdout.write(`[${instanceId}] ${d}`);
-    });
-    logTail.stderr?.on('data', (d: Buffer) => {
-      provision.observe(d.toString());
-      process.stderr.write(`[${instanceId}] ${d}`);
-    });
+    const stillTracked = () => this.containers.get(instanceId)?.containerId === containerId;
+    const logTail = spawnDockerWatcher(['logs', '-f', containerId], ['ignore', 'pipe', 'pipe'], `${instanceId} logs`, (c) => {
+      c.stdout?.on('data', (d: Buffer) => {
+        provision.observe(d.toString());
+        process.stdout.write(`[${instanceId}] ${d}`);
+      });
+      c.stderr?.on('data', (d: Buffer) => {
+        provision.observe(d.toString());
+        process.stderr.write(`[${instanceId}] ${d}`);
+      });
+      const t = this.containers.get(instanceId);
+      if (t && t.containerId === containerId) t.logTail = c;   // a retried tail replaces the failed one
+    }, stillTracked);
 
     // `docker inspect` for the pid; useful for orphan-reaper accounting.
     let pid = 0;
@@ -285,12 +332,12 @@ export class ContainerRunner implements SandboxRunner {
     this.containers.set(instanceId, tracked);
 
     // Watch for container exit so we can fire the exit callback.
-    const watcher = spawn('docker', ['wait', containerId], { stdio: ['ignore', 'pipe', 'ignore'] });
-    watcher.stdout?.on('data', (d: Buffer) => {
-      const code = parseInt(d.toString().trim(), 10);
-      this.handleExit(instanceId, isNaN(code) ? null : code, containerId);
-    });
-    watcher.on('error', () => this.handleExit(instanceId, null, containerId));
+    spawnDockerWatcher(['wait', containerId], ['ignore', 'pipe', 'ignore'], `${instanceId} wait`, (c) => {
+      c.stdout?.on('data', (d: Buffer) => {
+        const code = parseInt(d.toString().trim(), 10);
+        this.handleExit(instanceId, isNaN(code) ? null : code, containerId);
+      });
+    }, stillTracked, () => this.handleExit(instanceId, null, containerId));
 
     try {
       await this.waitHealthy(instanceId, appId, hostname, port, manifest);
@@ -926,15 +973,19 @@ export class ContainerRunner implements SandboxRunner {
     // An adopted container is normally past provisioning, but it can be
     // re-adopted mid-install after an OS restart — so watch its log too.
     const provision = new ProvisionWatch();
-    const logTail = spawn('docker', ['logs', '-f', '--tail', '0', rec.hostname], { stdio: ['ignore', 'pipe', 'pipe'] });
-    logTail.stdout?.on('data', (d: Buffer) => {
-      provision.observe(d.toString());
-      process.stdout.write(`[${rec.instanceId}] ${d}`);
-    });
-    logTail.stderr?.on('data', (d: Buffer) => {
-      provision.observe(d.toString());
-      process.stderr.write(`[${rec.instanceId}] ${d}`);
-    });
+    const stillTracked = () => this.containers.get(rec.instanceId)?.containerId === rec.hostname;
+    const logTail = spawnDockerWatcher(['logs', '-f', '--tail', '0', rec.hostname], ['ignore', 'pipe', 'pipe'], `${rec.instanceId} logs`, (c) => {
+      c.stdout?.on('data', (d: Buffer) => {
+        provision.observe(d.toString());
+        process.stdout.write(`[${rec.instanceId}] ${d}`);
+      });
+      c.stderr?.on('data', (d: Buffer) => {
+        provision.observe(d.toString());
+        process.stderr.write(`[${rec.instanceId}] ${d}`);
+      });
+      const t = this.containers.get(rec.instanceId);
+      if (t && t.containerId === rec.hostname) t.logTail = c;   // a retried tail replaces the failed one
+    }, stillTracked);
     this.containers.set(rec.instanceId, {
       containerId:   rec.hostname,
       hostname:      rec.hostname,
@@ -952,12 +1003,12 @@ export class ContainerRunner implements SandboxRunner {
     // (crash, or an external `docker rm`), AppManager never learns — the
     // instance stays stuck in `resumed`, `start` reuses the phantom and
     // no-ops, and the app can't be recovered without a full shell restart.
-    const watcher = spawn('docker', ['wait', rec.hostname], { stdio: ['ignore', 'pipe', 'ignore'] });
-    watcher.stdout?.on('data', (d: Buffer) => {
-      const code = parseInt(d.toString().trim(), 10);
-      this.handleExit(rec.instanceId, isNaN(code) ? null : code, rec.hostname);
-    });
-    watcher.on('error', () => this.handleExit(rec.instanceId, null, rec.hostname));
+    spawnDockerWatcher(['wait', rec.hostname], ['ignore', 'pipe', 'ignore'], `${rec.instanceId} wait`, (c) => {
+      c.stdout?.on('data', (d: Buffer) => {
+        const code = parseInt(d.toString().trim(), 10);
+        this.handleExit(rec.instanceId, isNaN(code) ? null : code, rec.hostname);
+      });
+    }, stillTracked, () => this.handleExit(rec.instanceId, null, rec.hostname));
   }
 
   /** Probe the app's health endpoint until ready or timeout. */
