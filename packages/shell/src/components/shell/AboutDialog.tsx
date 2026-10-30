@@ -90,6 +90,38 @@ export function AboutDialog(): React.JSX.Element {
   const git = data?.git;
   const host = data?.host;
 
+  // Planned restart (POST /api/admin/restart → lib/plannedRestart.ts): the
+  // desktop is saved and comes back after the restart unless unticked. Two
+  // clicks — the first arms it — since it takes every activity down.
+  const [restore, setRestore] = React.useState(true);
+  const [armed, setArmed] = React.useState(false);
+  const [restartMsg, setRestartMsg] = React.useState<string | null>(null);
+  const [restarting, setRestarting] = React.useState(false);
+  React.useEffect(() => { if (!open) { setArmed(false); setRestartMsg(null); } }, [open]);
+  const restartOs = async () => {
+    if (!armed) { setArmed(true); return; }
+    setRestarting(true);
+    setRestartMsg(null);
+    try {
+      const r = await fetch('/api/admin/restart', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ restore }),
+      });
+      const j = await r.json().catch(() => ({})) as { ok?: boolean; error?: string; activities?: number };
+      if (!r.ok || !j.ok) {
+        setRestartMsg(j.error ?? (r.status === 401 ? 'needs admin — unlock admin first' : `failed (${r.status})`));
+        setRestarting(false);
+        setArmed(false);
+        return;
+      }
+      setRestartMsg(restore ? `restarting — your work comes back in a moment (${j.activities ?? 0} activities)` : 'restarting into an empty desktop');
+    } catch {
+      setRestartMsg('could not reach the shell');
+      setRestarting(false);
+      setArmed(false);
+    }
+  };
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent aria-describedby={undefined} className="max-w-md gap-0 p-0 flex flex-col">
@@ -166,10 +198,23 @@ export function AboutDialog(): React.JSX.Element {
           ) : null}
         </DialogBody>
 
-        <DialogFooter className="shrink-0 border-t border-[var(--border)] px-4 py-3">
+        <DialogFooter className="shrink-0 border-t border-[var(--border)] px-4 py-3" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.64rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', marginRight: 'auto' }}>
+            <input type="checkbox" checked={restore} disabled={restarting} onChange={(e) => setRestore(e.target.checked)} />
+            BRING MY WORK BACK
+          </label>
+          <Button variant="EXEC" size="SM" disabled={restarting} onClick={() => { void restartOs(); }}
+            title="Save the desktop, restart AuraOS and the Shell Daemon, restore the desktop">
+            {restarting ? 'RESTARTING…' : armed ? 'CONFIRM RESTART' : 'RESTART AURAOS'}
+          </Button>
           <DialogClose asChild>
             <Button variant="EXEC" size="SM">DONE</Button>
           </DialogClose>
+          {restartMsg ? (
+            <div style={{ flexBasis: '100%', fontSize: '0.64rem', fontFamily: 'var(--font-mono)', color: restarting ? 'var(--color-green)' : 'var(--color-red)' }}>
+              {restartMsg}
+            </div>
+          ) : null}
         </DialogFooter>
       </DialogContent>
     </Dialog>

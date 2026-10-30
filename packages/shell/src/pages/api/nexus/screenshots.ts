@@ -5,6 +5,9 @@ import {
   ContextStore, GitHubError, SubmitError,
 } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
+// Namespace import: the running shell may cache a core build without newer exports.
+import * as core from '@aura/core';
+import { bustCatalog, DATA_DIR, listingTarget } from '../../../lib/nexusListing.js';
 
 const OS_API_BASE = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
 
@@ -20,14 +23,18 @@ const OS_API_BASE = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
  * ContextStore, which is deliberately not readable over the API.
  *
  * Body: { appId, action: 'list'|'add'|'remove'|'replace', source?, index?,
- *         storeRepo?, dryRun?, force? }
+ *         storeRepo?, registry?, dryRun?, force? }
+ *
+ * `registry` names an OCI source: the screenshots then live in that
+ * registry, in the app's listing artifact (core nexus/OciListing.ts) — a push
+ * instead of a pull request, no GitHub involved.
  */
 export const POST: APIRoute = async ({ request }) => {
   const body = await request.json().catch(() => ({})) as {
     appId?: string;
     action?: 'list' | 'add' | 'remove' | 'replace';
     source?: string; index?: number;
-    storeRepo?: string; dryRun?: boolean; force?: boolean;
+    storeRepo?: string; registry?: string; dryRun?: boolean; force?: boolean;
   };
 
   if (!body.appId) return errorResponse('missing `appId`', 400);
@@ -35,6 +42,8 @@ export const POST: APIRoute = async ({ request }) => {
   if (!['list', 'add', 'remove', 'replace'].includes(action)) {
     return errorResponse(`unknown action '${action}'`, 400);
   }
+
+  if (body.registry) return ociScreenshots(body.appId, action as 'list' | 'add' | 'remove' | 'replace', body);
 
   const { repo: storeRepo, indexUrl } = await resolveStore(body.storeRepo);
   const messages: string[] = [];
@@ -76,6 +85,32 @@ export const POST: APIRoute = async ({ request }) => {
     return jsonResponse({ ok: false, storeRepo, messages, error: (err as Error).message }, 400);
   }
 };
+
+/** The OCI twin: same actions, the registry listing instead of a store PR. */
+async function ociScreenshots(
+  appId: string, action: 'list' | 'add' | 'remove' | 'replace',
+  body: { registry?: string; source?: string; index?: number; dryRun?: boolean },
+): Promise<Response> {
+  const r = await listingTarget(body.registry, appId);
+  if (r instanceof Response) {
+    // Same envelope as the git path, so the CLI prints the reason.
+    const j = await r.json().catch(() => ({})) as { error?: string; detail?: string };
+    return jsonResponse({ ok: false, kind: 'oci', error: j.detail ?? j.error ?? `HTTP ${r.status}` }, r.status);
+  }
+  const messages: string[] = [];
+  const storeRepo = `${r.target.host}/${r.target.repo}`;
+  try {
+    const result = core.manageOciScreenshots({
+      target: r.target, appId, sourceName: r.sourceName, action,
+      source: body.source, index: body.index, dataDir: DATA_DIR, dryRun: body.dryRun,
+      onMessage: (m) => messages.push(m),
+    });
+    if (action !== 'list' && !body.dryRun && !result.unchanged) bustCatalog(r.sourceName);
+    return jsonResponse({ ok: true, storeRepo, kind: 'oci', result, messages });
+  } catch (err) {
+    return jsonResponse({ ok: false, storeRepo, kind: 'oci', messages, error: ((err as Error).message ?? String(err)).split('\n')[0] }, 400);
+  }
+}
 
 async function readContextToken(): Promise<string | null> {
   try {

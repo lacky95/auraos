@@ -1,5 +1,6 @@
 import type { APIRoute } from 'astro';
 import { SelfUpdater } from '@aura/core';
+import { plannedRestart } from '../../../lib/plannedRestart.js';
 
 /**
  * Self-update control surface for Settings → About.
@@ -12,7 +13,7 @@ import { SelfUpdater } from '@aura/core';
  *         IN THIS PROCESS (a couple of seconds, no container) so the user
  *         learns "nothing to update" or "you have uncommitted changes"
  *         immediately, instead of after a heavy updater has spun up.
- * POST { mode } → { ok, job }         launch a run — 'update' (default),
+ * POST { mode, restore? } → { ok, job }   launch a run — 'update' (default),
  *         'rebuild' (image from the current checkout, no git) or 'restart'
  *         (bounce the master container). 202, because the
  *         work outlives this request AND this whole process — the updater
@@ -56,9 +57,16 @@ export const GET: APIRoute = ({ url }) => {
 };
 
 export const POST: APIRoute = async ({ request }) => {
-  let body: { mode?: 'update' | 'rebuild' | 'restart'; branch?: string; dryRun?: boolean } = {};
+  let body: { mode?: 'update' | 'rebuild' | 'restart'; branch?: string; dryRun?: boolean; restore?: boolean } = {};
   try { body = await request.json() as typeof body; } catch { /* empty body is fine */ }
-  const res = updater().start({ mode: body.mode, branch: body.branch, dryRun: body.dryRun });
-  if (!res.ok) return json({ ok: false, error: res.reason }, 409);
-  return json({ ok: true, job: res.job }, 202);
+  if (body.dryRun) {
+    const res = updater().start({ mode: body.mode, branch: body.branch, dryRun: true });
+    if (!res.ok) return json({ ok: false, error: res.reason }, 409);
+    return json({ ok: true, job: res.job }, 202);
+  }
+  // Every real run takes the container down: save the desktop first and bring
+  // it back after (lib/plannedRestart.ts).
+  const res = await plannedRestart({ mode: body.mode ?? 'update', branch: body.branch, restore: body.restore !== false });
+  if (!res.ok) return json({ ok: false, error: res.error }, 409);
+  return json({ ok: true, job: res.job, activities: res.activities }, 202);
 };

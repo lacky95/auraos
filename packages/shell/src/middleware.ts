@@ -134,6 +134,26 @@ async function ensureAppManager() {
     // runs it (lib/sdkBootstrap.ts) so a first boot can show its progress.
     if (onboarding) onboarding.afterInit();
     else void ensureSdkPublished();
+
+    // Pre-registered Nexus sources: sources.d/*.json seed files and
+    // AURA_NEXUS_SOURCES (lib/nexusSeeds.ts). Detached + after this init, since
+    // it goes through the shell's own KV API; loaded lazily so a broken seed
+    // module can never block boot.
+    // Desktop session (lib/desktopSession.ts): reopen the windows of before
+    // the restart on the re-adopted / restarted instances and remap the
+    // workspaces; auto-save of the desktop starts only after that. Detached,
+    // like the seeds below: it goes through the AppManager this init built.
+    setTimeout(() => {
+      import('./lib/desktopSession.js')
+        .then((m) => m.restoreDesktopSession())
+        .catch((err) => console.warn(`[middleware] desktop session restore failed: ${(err as Error).message}`));
+    }, 0);
+
+    setTimeout(() => {
+      import('./lib/nexusSeedsApply.js')
+        .then((m) => m.applySourceSeeds())
+        .catch((err) => console.warn(`[middleware] nexus source seeds failed: ${(err as Error).message}`));
+    }, 0);
   })();
   try { await initPromise; }
   finally { initPromise = null; }  // future soft-restart can trigger another cycle

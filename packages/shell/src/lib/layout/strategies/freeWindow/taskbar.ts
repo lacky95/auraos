@@ -1,7 +1,7 @@
 /**
  * Free Window taskbar — a top-region contribution (see LayoutRegion): one
- * button per window of the active workspace. Click: minimized → restore,
- * front window → minimize, otherwise → bring to front.
+ * button per activity of the active workspace. Click: minimized → restore,
+ * front activity → minimize, otherwise → bring to front.
  */
 import type { LayoutHost, LayoutRegion } from '../../types.ts';
 
@@ -27,7 +27,7 @@ export function createTaskbar(deps: TaskbarDeps): LayoutRegion {
       bar = document.createElement('div');
       bar.className = 'fw-taskbar';
       bar.setAttribute('role', 'toolbar');
-      bar.setAttribute('aria-label', 'Windows');
+      bar.setAttribute('aria-label', 'Activities');
       bar.addEventListener('click', onClick);
       container.appendChild(bar);
       lastSig = '';
@@ -36,7 +36,7 @@ export function createTaskbar(deps: TaskbarDeps): LayoutRegion {
       if (!bar) return;
       const items = host.views().map((v) => ({
         id: v.viewId,
-        label: v.windowName || v.title || v.appId,
+        label: v.userLabel || v.title || v.appId,
         min: v.minimized,
         front: !v.minimized && deps.isFront(v.viewId),
       }));
@@ -44,7 +44,7 @@ export function createTaskbar(deps: TaskbarDeps): LayoutRegion {
       if (sig === lastSig) return;
       lastSig = sig;
       bar.innerHTML = items.length === 0
-        ? '<span class="fw-taskbar-empty">NO WINDOWS</span>'
+        ? '<span class="fw-taskbar-empty">NO ACTIVITIES</span>'
         : items.map((it) => `<button type="button" class="fw-task" data-fw-view="${esc(it.id)}"`
             + ` data-min="${it.min ? '1' : '0'}" data-front="${it.front ? '1' : '0'}"`
             + ` aria-pressed="${it.front ? 'true' : 'false'}"`

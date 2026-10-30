@@ -1,10 +1,10 @@
 /**
  * Dock zones + the shared snap grid — pure, unit-tested.
  *
- * Zones (Windows-style): left/right edge → half, corners → quarter, top edge
- * → the whole windows area. Docked windows store their ZONE, not pixels; the
+ * Zones (desktop-style): left/right edge → half, corners → quarter, top edge
+ * → the whole activities area. Docked activities store their ZONE, not pixels; the
  * pixels come from `rectForZone` and the workspace's `SnapGrid` fractions, so
- * they follow viewport resizes, and windows that share a border share one
+ * they follow viewport resizes, and activities that share a border share one
  * fraction — dragging that border (a splitter) resizes all of them.
  */
 import { MIN_H, MIN_W, MOBILE_BP, type Rect, type Size } from './geometry.ts';
@@ -76,8 +76,8 @@ export function rectForZone(z: Zone, g: SnapGrid, area: Size): Rect {
 }
 
 /**
- * Grid to use when a window docks into `z` while `others` (zones of the
- * other docked windows) stay. A fraction nobody else depends on resets to
+ * Grid to use when an activity docks into `z` while `others` (zones of the
+ * other docked activities) stay. A fraction nobody else depends on resets to
  * the middle, so a fresh half/half split is 50/50 even after an earlier
  * splitter drag; a fraction a neighbour already uses is kept.
  */
@@ -97,7 +97,7 @@ export interface Splitter { key: SplitterKey; rect: Rect }
 /** Thickness of a splitter's grab area. */
 export const SPLITTER_PX = 8;
 
-/** Splitters between docked windows that share a border. */
+/** Splitters between docked activities that share a border. */
 export function splittersFor(zones: readonly Zone[], g: SnapGrid, area: Size): Splitter[] {
   const has = (z: Zone) => zones.includes(z);
   const out: Splitter[] = [];
@@ -116,7 +116,7 @@ export function splittersFor(zones: readonly Zone[], g: SnapGrid, area: Size): S
   return out;
 }
 
-/** Move one grid fraction to the pointer, keeping every window ≥ min size. */
+/** Move one grid fraction to the pointer, keeping every activity ≥ min size. */
 export function dragSplitter(g: SnapGrid, key: SplitterKey, pointer: number, area: Size): SnapGrid {
   const span = key === 'x' ? area.w : area.h;
   const min = key === 'x' ? MIN_W : MIN_H;
@@ -126,9 +126,9 @@ export function dragSplitter(g: SnapGrid, key: SplitterKey, pointer: number, are
 }
 
 /**
- * Which splitter an edge-resize of a docked window moves: dragging the edge a
- * window shares with the rest of the grid resizes the grid (all neighbours);
- * dragging an outer edge returns null → the window undocks and resizes alone.
+ * Which splitter an edge-resize of a docked activity moves: dragging the edge an
+ * activity shares with the rest of the grid resizes the grid (all neighbours);
+ * dragging an outer edge returns null → the activity undocks and resizes alone.
  * Corner handles combine both axes.
  */
 export function splittersForHandle(z: Zone, handle: string): SplitterKey[] {
@@ -147,7 +147,7 @@ export function splittersForHandle(z: Zone, handle: string): SplitterKey[] {
 }
 
 /**
- * Undock on drag: give the window its pre-dock size back, positioned so the
+ * Undock on drag: give the activity its pre-dock size back, positioned so the
  * point the user grabbed stays under the pointer (proportionally along the
  * title bar, same offset from the top).
  */

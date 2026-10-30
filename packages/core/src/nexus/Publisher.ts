@@ -23,6 +23,7 @@ import { join, resolve } from 'node:path';
 import { validateStagedDir } from './Validator.js';
 import { orasSync } from './RegistryAuth.js';
 import { APP_ARTIFACT_TYPE, APP_REPO_PREFIX, buildStoreAnnotations } from './ociMetadata.js';
+import { readListing, screenshotInput, writeListing, type ListingInput } from './OciListing.js';
 import type { AppManifest } from '../types/manifest.js';
 
 export interface PublishGitOpts {
@@ -263,6 +264,13 @@ export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }>
   }
   log('validating manifest...');
   const manifest = validateStagedDir(opts.appPath);
+  // Screenshot files are checked before anything is pushed (pushed after the
+  // release, below): a bad image must not leave a half-published app.
+  const shotRefs = manifest.store?.screenshots ?? [];
+  const shotItems: ListingInput[] = shotRefs.map((r) => {
+    try { return screenshotInput(r, opts.appPath); }
+    catch (err) { throw new Error(`[NexusPublish] store.screenshots: ${(err as Error).message}`); }
+  });
 
   // Pack the source into a tar.gz that `oras push` ingests.
   log('packing tarball...');
@@ -342,6 +350,20 @@ export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }>
   // Verify the just-pushed ref exists.
   log('verifying...');
   orasSync(['manifest', 'fetch', ref, ...extraFlags], { timeout: 30_000 });
+
+  // Screenshots named in the manifest become the app's listing (OciListing):
+  // image files are uploaded into the registry, URLs kept. The manifest is
+  // declarative here — its list replaces the listing's; the listing's texts
+  // (edited in Nexus) stay. No screenshots in the manifest: listing untouched,
+  // so pictures managed with `aura nexus app screenshots` survive a release.
+  if (shotItems.length) {
+    log(`syncing ${shotItems.length} screenshot(s) into the listing...`);
+    const slash = registryPath.indexOf('/');
+    const target = { host: registryPath.slice(0, slash), repo: registryPath.slice(slash + 1), flags: extraFlags };
+    let meta = {};
+    try { meta = readListing(target)?.meta ?? {}; } catch { /* no readable listing yet */ }
+    writeListing(target, shotItems, meta, opts.dataDir);
+  }
 
   // Clean up the staging dir.
   try { rmSync(stagingDir, { recursive: true, force: true }); }

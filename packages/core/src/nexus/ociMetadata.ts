@@ -100,7 +100,10 @@ export function buildStoreAnnotations(
     put(ANNOTATION_KEYS.licenses, store.license);
     put(ANNOTATION_KEYS.longDesc, store.longDescription);
     if (store.tags?.length)        a[ANNOTATION_KEYS.tags]        = store.tags.join(',');
-    if (store.screenshots?.length) a[ANNOTATION_KEYS.screenshots] = store.screenshots.join(',');
+    // Only URLs ride on the release; image FILES named in the manifest are
+    // uploaded into the app's listing artifact by publish (OciListing.ts).
+    const urls = (store.screenshots ?? []).filter((s) => /^https:\/\//i.test(s));
+    if (urls.length) a[ANNOTATION_KEYS.screenshots] = urls.join(',');
   }
 
   // Inline the full manifest when it's small enough — lets the resolver run

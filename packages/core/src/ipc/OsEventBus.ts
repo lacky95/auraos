@@ -101,6 +101,26 @@ export interface OsEvents {
     appId:            string;
     breadcrumb:       'os' | 'off';
   };
+  /** An app saved its activity state (`AppActivity.savedState`). No state on
+   *  the bus — it can be large and is the app's business. */
+  'activity:stateSaved': {
+    activityId:       string;
+    parentInstanceId: string;
+    appId:            string;
+  };
+  /** A planned OS restart is starting: open shells flush unsaved desktop
+   *  state (layout gestures, debounced workspace writes) now. */
+  'os:shuttingDown': {
+    restore: boolean;
+    graceMs: number;
+  };
+  /** The desktop session was restored after boot. `idMap` maps activity ids
+   *  from before the restart to the ones they have now (equal when kept). */
+  'session:restored': {
+    restored: number;
+    failed:   Array<{ viewId: string; appId: string; error: string }>;
+    idMap:    Record<string, string>;
+  };
   'theme:changed': {
     themeId:       string;                     // the ACTIVE (resolved) theme id
     themeName:     string;

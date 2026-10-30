@@ -1,0 +1,111 @@
+---
+title: Restarts and restore
+description: What comes back after AuraOS restarts — workspaces, activities, their app state and layouts — how apps and layout managers take part, and how to restart on purpose.
+---
+
+AuraOS keeps your desktop across restarts of the shell. After a restart —
+planned, an update, or a crash — every workspace comes back with its
+activities, where they were, showing what they showed: your work comes back.
+
+## What comes back
+
+- **Workspaces**: names, layout manager, order of their activities.
+- **Activities**: the app, the page it showed (path, title, back
+  stack) and the state the app saved for it — e.g. which Terminal session.
+- **Layout data**: whatever the layout manager keeps — Free Window positions,
+  docking, minimized activities; the tiling/rows/columns order.
+- **Names** you gave activities, and which activity was **maximized**
+  (also full size).
+
+Container apps keep running through a shell restart and are picked up again
+with the same instance — a Terminal activity comes back on the *same running
+shell*. Apps that run in the shell's own sandbox (proot) are started again; their
+activities reopen on the new instance.
+
+What does not come back: anything an app kept only in its browser page and did
+not save (unsaved input, scroll positions), and activities of apps that were
+uninstalled or disabled meanwhile — you get a notification listing those.
+
+## How it works
+
+The shell saves a snapshot of the desktop (KV `os/session`) whenever an
+activity opens, closes, navigates or saves state — debounced, so a crash loses at most
+about a second. After boot it reopens every saved activity, keeping its id when
+the instance survived, and remaps workspace members, layout data and activity
+state to the new ids. Members that no longer exist are removed.
+
+**Settings → General → Restore after restart** turns it off (KV `os/restoreSession`).
+
+## Restart on purpose
+
+All three save the desktop first, restart the shell **and the Aura Shell
+Daemon**, and restore the desktop afterwards:
+
+```bash
+aura restart os                 # restart, bring your work back
+aura restart os --no-restore    # restart into an empty desktop
+```
+
+- the **About** dialog (click the AuraOS logo) → **Restart AuraOS**
+- **Settings → About** → **Restart** (also **Update** and **Rebuild**)
+
+Untick *bring my work back* for a clean start. The route behind them is
+`POST /api/admin/restart { restore }` (admin).
+
+Open browser tabs show *AuraOS is restarting* and reload by themselves once the
+shell is back.
+
+## For app developers
+
+Path, title and back stack of an activity come back without any work. If an
+activity needs more — which document, which session, which view — save it as the
+activity's **state**:
+
+```ts
+import { osClient } from '@aura/app-sdk';
+
+// whenever it changes — this also survives a crash
+await osClient.activity.saveState({ documentId: 'notes/todo.md' });
+```
+
+or with plain HTTP: `PUT /api/activities/<activityId>/state { "state": … }`
+(JSON, ≤ 64 KB; `null` clears it).
+
+When the activity is recreated, `onActivityCreate` gets it back:
+
+```ts
+export const POST = createActivityCreateHandler(async ({ activityId, restore }) => {
+  if (restore) {
+    // restore.previousActivityId — the activity's id before the restart
+    //   (often equal to activityId: the OS keeps it when it can)
+    // restore.state — what saveState() stored last
+  }
+  return {};
+});
+```
+
+Optional: `POST /api/lifecycle/onSaveState { activityIds }` → `{ states }` is
+called right before a *planned* restart (about 2 s budget) for state that is
+too expensive to push on every change. New apps get a stub
+(`aura dev new`).
+
+A planned restart never calls `onActivityDestroy` — the activities are not
+being closed.
+
+## For layout managers
+
+Keep layout data in `host.patchLayoutState(…)`: it is persisted with the
+workspace, and every activity id inside it — as a key or a value, at any depth —
+is renamed or dropped automatically when activities are recreated. Two optional
+hooks on `ShellLayoutStrategy`:
+
+- `saveState(host)` — write what is not persisted yet (a drag in progress);
+  called before the page unloads and before a planned restart.
+- `onRestored(host, idMap)` — for ids kept outside `layoutState`.
+
+## The Terminal
+
+Each Terminal activity remembers the session it shows. After an OS restart it reattaches
+to that session — the same running shell when the Terminal container lived on.
+If the container ended too, the session comes back under the same name with its
+scrollback replayed and in the directory it was in.

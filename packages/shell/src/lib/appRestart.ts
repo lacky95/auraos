@@ -1,8 +1,8 @@
 /**
- * Restart that keeps the user's windows.
+ * Restart that keeps the user's activities.
  *
  * A plain stop + start drops every activity of the old instance (the shell
- * closes their windows and strips them from the workspaces). This helper
+ * closes their activities and strips them from the workspaces). This helper
  * snapshots what the user had, restarts, and re-creates it on the new
  * instance:
  *
@@ -14,12 +14,13 @@
  * Activity ids change (`<inst>#a<n>` counters restart with the instance), so
  * placement is snapshotted before the stop and each new viewId is written
  * into the `os:workspaces` KV document where its old one was. Browsers are told up front
- * (`app:restarting`) so they keep the windows as loading placeholders instead
+ * (`app:restarting`) so they keep the activities as loading placeholders instead
  * of tearing them down, and `app:restarted` carries the mapping so they swap
  * each window in place.
  */
 import { getAppManager, OsEventBus } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
+import { remapWorkspaceIds } from './workspaceRemap.js';
 
 interface RestoredActivity {
   /** Old viewId (activityId, or instanceId for activityMode='none'). */
@@ -59,7 +60,7 @@ const inFlight = new Map<string, Promise<RestartResult>>();
 
 /**
  * Restart `instanceIds` of `appId` (all user-owned instances when omitted)
- * into ONE fresh instance and restore their windows on it. Concurrent calls
+ * into ONE fresh instance and restore their activities on it. Concurrent calls
  * for the same app share the running restart.
  */
 export function restartWithActivities(appId: string, instanceIds?: string[]): Promise<RestartResult> {
@@ -215,7 +216,7 @@ async function placeWindows(
     .sort((a, b) => a.p.index - b.p.index);
   const placed = new Set<string>();
   for (const { r, p } of todo) {
-    if (placed.has(r.to)) continue;  // several old windows → one new view
+    if (placed.has(r.to)) continue;  // several old activities → one new view
     const w = next.workspaces.find((x) => x.id === p.wsId);
     if (!w) continue;
     placed.add(r.to);
@@ -224,6 +225,18 @@ async function placeWindows(
       w.layoutState = { ...w.layoutState, rects: { ...w.layoutState?.rects, [r.to]: p.rect } };
     }
     if (p.focused) w.layoutState = { ...w.layoutState, focusedViewId: r.to };
+  }
+  // Everything else that names an activity — layout data beyond rects/focus
+  // (Free Window snap + minimized, …) and the shell's per-activity state —
+  // follows generically (lib/workspaceRemap.ts).
+  const idMap: Record<string, string> = {};
+  for (const r of restored) idMap[r.from] = r.to;
+  const remapped = remapWorkspaceIds(next as never, idMap, dropped).state as unknown as WsShape;
+  for (let i = 0; i < next.workspaces.length; i++) {
+    const w = next.workspaces[i]!;
+    const rw = remapped.workspaces[i]!;
+    if (rw.layoutState) w.layoutState = rw.layoutState as WsShape['workspaces'][number]['layoutState'];
+    if ((rw as { activities?: unknown }).activities) (w as { activities?: unknown }).activities = (rw as { activities?: unknown }).activities;
   }
   if (JSON.stringify(next) === JSON.stringify(state)) return false;
 

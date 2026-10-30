@@ -1,18 +1,18 @@
 /**
- * Free Window — floating windows with Windows-style docking, built only on
+ * Free Window — floating activities with desktop-style docking, built only on
  * the layout SDK (../../types.ts):
  *
  *   • drag by the title bar; resize from the sides, bottom and bottom corners
  *     (never the top — height changes from the bottom only)
  *   • dock zones while dragging — left/right edge → half, corner → quarter,
- *     top edge → whole area — with a live preview; dragging a docked window
+ *     top edge → whole area — with a live preview; dragging a docked activity
  *     out gives it its previous size back under the pointer
- *   • docked windows share one snap grid per workspace: the border between
+ *   • docked activities share one snap grid per workspace: the border between
  *     neighbours is a splitter that resizes all of them together
- *   • `minimize: 'hide'` (every window, app stays alive) + a taskbar in the
+ *   • `minimize: 'hide'` (every activity, app stays alive) + a taskbar in the
  *     content space's top region
- *   • dragging a window up onto the shell bar hands the drag to the generic
- *     ghost drag (host.handOffWindowDrag): drop it on a workspace pill to
+ *   • dragging an activity up onto the shell bar hands the drag to the generic
+ *     ghost drag (host.handOffActivityDrag): drop it on a workspace pill to
  *     move it there; back down over the desktop it is a normal move again
  *
  * Persisted per workspace in layoutState:
@@ -36,10 +36,10 @@ interface SavedRect extends Rect {
 /** Restack once z-indices pass this, so they never climb into the overlay
  *  (800) or maximized (60 → host) ranges forever. */
 const Z_RENORMALIZE_AT = 500;
-/** Resize handles a window gets. No top edge / top corners: height only
+/** Resize handles an activity gets. No top edge / top corners: height only
  *  changes from the bottom, so the title bar is always a drag handle. */
 const RESIZE_HANDLES: readonly Handle[] = ['s', 'e', 'w', 'se', 'sw'];
-/** Pointer travel before a docked window lets go of its dock. */
+/** Pointer travel before a docked activity lets go of its dock. */
 const UNDOCK_THRESHOLD = 6;
 
 export function createFreeWindow(): ShellLayoutStrategy {
@@ -123,7 +123,7 @@ export function createFreeWindow(): ShellLayoutStrategy {
    * events flowing over app iframes; `body.aura-stack-dragging` disables
    * iframe hit-testing as a fallback. Moves are coalesced per frame. The
    * gesture always ends — on pointerup/cancel, lost capture, a pointerup
-   * anywhere, or the window losing focus — so it can never stay stuck.
+   * anywhere, or the activity losing focus — so it can never stay stuck.
    */
   function runGesture(
     el: HTMLElement | null,
@@ -192,7 +192,7 @@ export function createFreeWindow(): ShellLayoutStrategy {
     let baseP: { x: number; y: number } = startP;
     let free = !docked;
     let zone: Zone | null = null;
-    // 'ghost' while the pointer is over the shell bar: the generic window drag
+    // 'ghost' while the pointer is over the shell bar: the generic activity drag
     // (small ghost, workspace pills as drop targets) owns the gesture; 'done'
     // once that ended — the rest of this gesture is ignored.
     let mode: 'move' | 'ghost' | 'done' = 'move';
@@ -200,11 +200,11 @@ export function createFreeWindow(): ShellLayoutStrategy {
     runGesture(el, chrome, ev, (p, e) => {
       if (mode !== 'move') return;
       if (H().isOverShellBar(e.clientX, e.clientY)) {
-        const ok = H().handOffWindowDrag(e, viewId, chrome, {
+        const ok = H().handOffActivityDrag(e, viewId, chrome, {
           shouldReturn: (m) => !H().isOverShellBar(m.clientX, m.clientY),
           onReturn: () => { mode = 'move'; },
           onEnd: () => {
-            // Dropped on a workspace → the window moved there (its slot is
+            // Dropped on a workspace → the activity moved there (its slot is
             // hidden here); otherwise it goes back where it was. Either way
             // nothing of this drag is stored — re-place from saved state.
             mode = 'done';
@@ -235,7 +235,7 @@ export function createFreeWindow(): ShellLayoutStrategy {
       // render it asked for skipped this slot while the gesture was live.
       if (mode === 'done') { H().requestRender(); return; }
       if (mode !== 'move') return;
-      if (!free) return; // a click on a docked window's title: nothing moved
+      if (!free) return; // a click on a docked activity's title: nothing moved
       const z = zOf(el);
       const cur = clampRect(readRect(el), area());
       if (zone) {
@@ -257,7 +257,7 @@ export function createFreeWindow(): ShellLayoutStrategy {
     const zone = zoneOf(saved);
     const keys = zone ? splittersForHandle(zone, handle) : [];
     if (zone && keys.length) {
-      // Shared edge of a docked window: move the grid → all neighbours follow.
+      // Shared edge of a docked activity: move the grid → all neighbours follow.
       startSplitterDrag(keys, handleEl, ev);
       return;
     }
@@ -285,7 +285,7 @@ export function createFreeWindow(): ShellLayoutStrategy {
     }, () => {
       const g = liveGrid!;
       liveGrid = null;
-      // Keep each docked window's stored pixels in step (fallback + windowNav).
+      // Keep each docked activity's stored pixels in step (fallback + windowNav).
       const saved = rects();
       const updates: Record<string, SavedRect> = {};
       for (const el of placedSlots()) {
@@ -374,7 +374,7 @@ export function createFreeWindow(): ShellLayoutStrategy {
     }
   }
 
-  /** Re-apply every docked window's rect from the (live) grid. */
+  /** Re-apply every docked activity's rect from the (live) grid. */
   function layoutDocked(): void {
     const g = grid();
     const A = area();
@@ -384,7 +384,7 @@ export function createFreeWindow(): ShellLayoutStrategy {
     }
   }
 
-  /** Viewport/area changed: docked windows follow the grid, free ones are
+  /** Viewport/area changed: docked activities follow the grid, free ones are
    *  re-clamped so none ends up unreachable. */
   function reflow(): void {
     if (!host) return;
@@ -425,7 +425,7 @@ export function createFreeWindow(): ShellLayoutStrategy {
     id: 'stack',
     minimize: 'hide',
     showsMinimizedStrip: false,
-    // Free Window moves windows itself — no swap-on-drop between slots.
+    // Free Window moves activities itself — no swap-on-drop between slots.
     dragPolicy: { enabled: false },
     regions: { top: taskbar },
 
@@ -489,6 +489,10 @@ export function createFreeWindow(): ShellLayoutStrategy {
     },
 
     afterRender() { renderSplitters(); },
+
+    // A drag or resize in flight is not persisted until it ends — end it now
+    // (its release writes the rect). Everything else is already in layoutState.
+    saveState() { endGesture?.(); },
 
     onActivate(viewId) {
       const el = H().slotOf(viewId);

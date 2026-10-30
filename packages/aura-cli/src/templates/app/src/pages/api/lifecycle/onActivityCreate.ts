@@ -13,5 +13,10 @@ import { createActivityCreateHandler } from '@aura/app-sdk';
  *
  * Default impl returns `{}` — activity opens at `/`, the manifest name is
  * used as the title, no breadcrumb override. Customise as the app grows.
+ *
+ * After an OS restart the OS recreates the app's activities and calls this hook
+ * with `restore: { previousActivityId, state }` — `state` is what the app
+ * saved for that activity (`osClient.activity.saveState()` or onSaveState).
+ * Path, title and back stack come back on their own.
  */
 export const POST = createActivityCreateHandler(async () => ({}));

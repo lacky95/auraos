@@ -124,8 +124,13 @@ const S = {
         <button id="rebuild-btn" type="button" style={S.btn2}
                 title="Rebuild the image from the current checkout — no git pull">Rebuild</button>
         <button id="restart-btn" type="button" style={S.btn2}
-                title="Restart the master container — no rebuild">Restart</button>
+                title="Save the desktop, restart AuraOS and the Shell Daemon, restore the desktop — no rebuild">Restart</button>
       </div>
+      <!-- Every run takes the desktop down: it is saved first and comes back
+           after (lib/plannedRestart.ts in the shell) unless unticked. -->
+      <label style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:0.62rem;letter-spacing:0.08em;color:var(--aura-color-text-dim);">
+        <input id="upd-restore" type="checkbox" checked /> BRING MY WORK BACK AFTERWARDS
+      </label>
       <div id="upd-note" style={S.note}>Checking…</div>
       <!-- Only shown once a run exists: loads that run's full transcript
            (build output included) on demand — see ?logs=<id>. -->
@@ -306,7 +311,7 @@ const S = {
         const r = await fetch(api, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mode }),
+          body: JSON.stringify({ mode, restore: document.getElementById('upd-restore')?.checked !== false }),
         });
         const body = await r.json().catch(() => ({}));
         if (!r.ok) {

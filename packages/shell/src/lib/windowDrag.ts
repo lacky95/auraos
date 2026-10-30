@@ -77,7 +77,7 @@ interface GhostSessionOptions {
 }
 
 /** One ghost drag: threshold (unless immediate), ghost, drop-target hover,
- *  drop or cancel. Shared by `beginWindowDrag` and `handOffWindowDrag`. */
+ *  drop or cancel. Shared by `beginWindowDrag` and `handOffActivityDrag`. */
 function runGhostSession(ev: PointerEvent, src: DragSource, sourceEl: HTMLElement, opts: GhostSessionOptions): void {
   const { handle } = opts;
   const startX = ev.clientX;
@@ -222,17 +222,17 @@ export interface HandOffOptions {
   /** The ghost is gone and the caller's own drag continues from `e`. */
   onReturn?(e: PointerEvent): void;
   /** The pointer was released (or the drag cancelled) in ghost mode.
-   *  `dropped` = a drop target accepted the window. */
+   *  `dropped` = a drop target accepted the activity. */
   onEnd?(result: { dropped: boolean }): void;
 }
 
 /**
- * Switch a drag a layout runs itself (e.g. Free Window moving a window) into
+ * Switch a drag a layout runs itself (e.g. Free Window moving an activity) into
  * this ghost mode mid-gesture, from the current pointer event — so drops on
  * workspace pills etc. work in every layout. Ignores the layout drag policy
  * (the caller decided); the ghost appears at once, no threshold.
  */
-export function handOffWindowDrag(
+export function handOffActivityDrag(
   ev: PointerEvent, src: DragSource, sourceEl: HTMLElement, handle: HTMLElement | null, opts: HandOffOptions = {},
 ): boolean {
   if (dragging) return false;

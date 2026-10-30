@@ -31,6 +31,12 @@ export interface Workspace {
    * strategies pick whatever shape they need.
    */
   layoutState?: Record<string, unknown>;
+  /**
+   * Shell-owned per-activity state (`viewId → { name?, maximized? }`) kept
+   * across reloads and OS restarts; remapped with the activity id like
+   * `members` and `layoutState`.
+   */
+  activities?: Record<string, { name?: string; maximized?: 'area' | 'full' }>;
 }
 
 export interface WorkspaceState {

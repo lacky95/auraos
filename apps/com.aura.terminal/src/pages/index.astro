@@ -1562,6 +1562,19 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
           }, '*');
         } catch { /* parent gone */ }
       }
+      saveActivityState();
+    }
+
+    // Tell the OS which session this activity shows, so an OS restart brings
+    // the activity back onto it (onActivityCreate's restore). Only on change.
+    let savedSessionState: string | null = null;
+    function saveActivityState() {
+      if (!currentSessionId || activityId === instanceId || savedSessionState === currentSessionId) return;
+      const sid = currentSessionId;
+      fetch('/api/activities/' + encodeURIComponent(activityId) + '/state', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state: { sessionId: sid } }),
+      }).then((r) => { if (r.ok) savedSessionState = sid; }).catch(() => { /* OS without the route */ });
     }
 
     /**

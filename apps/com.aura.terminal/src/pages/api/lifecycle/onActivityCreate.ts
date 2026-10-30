@@ -1,8 +1,9 @@
+import type { APIRoute } from 'astro';
 import { createActivityCreateHandler, IntentRejectedError } from '@aura/app-sdk';
 import { parseOpenTerminal } from '../../../launch-intent.ts';
 import { openHeadlessSession, queueLaunchCommand, runLaunchCommand, sessionIsLive } from '../../../launch-commands.ts';
 import { localInstanceId } from '../../../session-service.ts';
-import { pickSession } from '../../../window-session.ts';
+import { pickRestoredSession, pickSession } from '../../../window-session.ts';
 
 /**
  * A new terminal window — or, for `background`, none. Only intent launches
@@ -10,7 +11,7 @@ import { pickSession } from '../../../window-session.ts';
  * "+ new window" arrives without an intent and gets exactly what it always
  * got: a window whose session is its own activity id.
  */
-export const POST = createActivityCreateHandler(async ({ activityId, intent }) => {
+const handler = createActivityCreateHandler(async ({ activityId, intent }) => {
   if (!intent) return {};
   const instanceId = localInstanceId();
   const parsed = parseOpenTerminal(intent, instanceId);
@@ -50,3 +51,24 @@ export const POST = createActivityCreateHandler(async ({ activityId, intent }) =
   if (command) queueLaunchCommand(activityId, sessionId, command);
   return { result: { instanceId, sessionId, background: false, command: command ? 'on-ready' : 'none' } };
 });
+
+/**
+ * An OS restart recreated this activity (`restore` in the body — read from the
+ * raw request so it works with any SDK version): put it back on the session
+ * it showed. The page reports that session as the activity's state
+ * (PUT /api/activities/<id>/state, `{ sessionId }`); without one the activity
+ * showed its own default — its old activity id.
+ */
+function applyRestore(body: unknown): void {
+  const b = body as { activityId?: unknown; intent?: unknown; restore?: { previousActivityId?: unknown; state?: unknown } } | null;
+  if (!b || b.intent || !b.restore || typeof b.activityId !== 'string') return;
+  const st = b.restore.state as { sessionId?: unknown } | null | undefined;
+  const prev = typeof b.restore.previousActivityId === 'string' ? b.restore.previousActivityId : '';
+  const want = typeof st?.sessionId === 'string' && st.sessionId ? st.sessionId : prev;
+  if (want && want !== b.activityId) pickRestoredSession(b.activityId, want);
+}
+
+export const POST: APIRoute = async (ctx) => {
+  try { applyRestore(await ctx.request.clone().json()); } catch { /* not JSON: the handler answers */ }
+  return handler(ctx);
+};

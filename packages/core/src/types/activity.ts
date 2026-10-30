@@ -93,4 +93,34 @@ export interface AppActivity {
    * `osClient.activity.setBreadcrumb('off')`.
    */
   breadcrumb?: 'os' | 'off';
+  /**
+   * App-defined state of this activity, saved by the app itself
+   * (`osClient.activity.saveState()` → PUT /api/activities/<id>/state, or the
+   * optional `onSaveState` lifecycle hook before a planned restart). JSON,
+   * at most ACTIVITY_STATE_MAX_BYTES serialised. Part of the desktop session
+   * snapshot: after an OS restart the activity is recreated and the app gets it
+   * back as `restore.state` in `onActivityCreate`.
+   */
+  savedState?: unknown;
+}
+
+/** Ceiling for `AppActivity.savedState` (serialised JSON). */
+export const ACTIVITY_STATE_MAX_BYTES = 64 * 1024;
+
+/**
+ * Seed for recreating an activity after an OS restart (desktop session restore).
+ * `activityId` is kept when free on this instance, so ids the app or the
+ * workspaces hold stay valid; otherwise a new one is minted.
+ */
+export interface ActivityRestoreSeed {
+  /** The id the activity had before the restart. */
+  previousActivityId: string;
+  /** Reuse this id when it belongs to the instance and is free. */
+  activityId?: string;
+  path?: string;
+  title?: string;
+  history?: Array<{ path: string; title?: string }>;
+  breadcrumb?: 'os' | 'off';
+  metadata?: Record<string, unknown>;
+  savedState?: unknown;
 }

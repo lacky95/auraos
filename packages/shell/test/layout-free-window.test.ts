@@ -46,10 +46,10 @@ test('rectForZone tiles the area exactly', () => {
   assert.deepEqual(rectForZone('full', g, AREA), { x: 0, y: 0, ...AREA });
 });
 
-test('gridForNewSnap: first docked window resets the split, a neighbour keeps it', () => {
+test('gridForNewSnap: first docked activity resets the split, a neighbour keeps it', () => {
   const g = { x: 0.7, yl: 0.3, yr: 0.4 };
   assert.equal(gridForNewSnap('left', [], g).x, 0.5);
-  assert.equal(gridForNewSnap('left', ['full'], g).x, 0.5, 'a full window is not a neighbour');
+  assert.equal(gridForNewSnap('left', ['full'], g).x, 0.5, 'a full activity is not a neighbour');
   assert.equal(gridForNewSnap('right', ['left'], g).x, 0.7);
   assert.equal(gridForNewSnap('tl', ['right'], g).yl, 0.5, 'first quarter in its column resets yl');
   assert.equal(gridForNewSnap('bl', ['tl'], g).yl, 0.3);
@@ -108,7 +108,7 @@ test('resizeRect: opposite edge stays, min size wins, stays inside area', () => 
   assert.equal(resizeRect(start, 'e', 5000, 0, AREA).w, AREA.w - 100);
 });
 
-test('clampRect keeps a window reachable', () => {
+test('clampRect keeps an activity reachable', () => {
   const r = clampRect({ x: -2000, y: -50, w: 5000, h: 100 }, AREA);
   assert.equal(r.w, AREA.w);
   assert.equal(r.h, MIN_H);

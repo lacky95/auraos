@@ -11,6 +11,17 @@ interface SourceEntry {
   ref?:     string;
   /** Private registry: the username only — the password is sealed in the OS. */
   auth?:    { type: 'basic'; username: string; secret: string };
+  repo?:    string;
+  /** Pre-registered by a seed file / AURA_NEXUS_SOURCES. `managed` = locked here. */
+  seed?:    { policy: 'seed' | 'managed'; origin: string };
+}
+interface SeedProblem { origin: string; detail: string }
+interface SeedsInfo {
+  dirs: string[]; envVar: string; envSet: boolean;
+  files: Array<{ origin: string; entries: string[]; problems: SeedProblem[] }>;
+  seeds: Array<{ name: string; policy: string; origin: string; kind: string; url: string; login: boolean }>;
+  problems: SeedProblem[];
+  last: { appliedAt?: string; changes: string[]; problems: SeedProblem[] } | null;
 }
 interface SourcesConfig { schema: number; sources: SourceEntry[]; }
 interface SourceStatus { name: string; kind: string; ok: boolean; apps: number; error?: string; }
@@ -21,6 +32,10 @@ let status: Record<string, SourceStatus> = {};
 try {
   cfg = await shellGet<SourcesConfig>('/api/nexus/sources');
 } catch { /* empty */ }
+let seedsInfo: SeedsInfo | null = null;
+try {
+  seedsInfo = await shellGet<SeedsInfo>('/api/nexus/sources/seeds');
+} catch { /* older shell */ }
 try {
   const cat = await shellGet<Catalog>('/api/nexus');
   for (const s of cat.sources ?? []) status[s.name] = s;
@@ -58,6 +73,14 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
                 {s.kind === 'oci' && s.auth && <span class="badge" style="margin-right:6px" title="private registry — login saved">🔒 {s.auth.username}</span>}
                 {s.kind === 'oci' && s.mirror && <span class="badge" style="margin-right:6px">mirror</span>}
                 {s.ref && <span class="badge" style="margin-right:6px">ref: {s.ref}</span>}
+                {s.seed && (
+                  <span class="badge" style="margin-right:6px"
+                    title={s.seed.policy === 'managed'
+                      ? 'managed by ' + s.seed.origin + ' — change it there'
+                      : 'pre-registered by ' + s.seed.origin + ' — yours to edit or remove'}>
+                    {s.seed.policy === 'managed' ? '🔒 managed' : 'pre-registered'}
+                  </span>
+                )}
                 {status[s.name]
                   ? (status[s.name].ok
                       ? <span style="color:var(--aura-color-primary)">● {status[s.name].apps} app(s)</span>
@@ -66,10 +89,58 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
               </div>
             </div>
             <div class="nexus-card-actions">
-              {s.kind === 'oci' && <button class="edit-login" data-name={s.name}>{s.auth ? 'EDIT LOGIN' : 'ADD LOGIN'}</button>}
-              <button class="remove-src" data-name={s.name} data-kind={s.kind}>REMOVE</button>
+              {s.seed?.policy === 'managed' ? (
+                <span style="color:var(--aura-color-text-dim);font-size:0.7rem" title={s.seed.origin}>set by {s.seed.origin}</span>
+              ) : (
+                <>
+                  <button class="edit-src" data-name={s.name}>EDIT</button>
+                  {s.kind === 'oci' && <button class="edit-login" data-name={s.name}>{s.auth ? 'EDIT LOGIN' : 'ADD LOGIN'}</button>}
+                  <button class="remove-src" data-name={s.name} data-kind={s.kind}>REMOVE</button>
+                </>
+              )}
             </div>
           </div>
+          {s.seed?.policy !== 'managed' && (
+            <div class="nexus-form edit-form" data-name={s.name} data-kind={s.kind} style="display:none;margin-top:10px">
+              <div class="nexus-form-grid">
+                <div>
+                  <label>Name (alias — used by <code>--to</code> and <code>publish.registry</code>)</label>
+                  <input class="edit-name" type="text" value={s.name} />
+                </div>
+                <div>
+                  <label>Priority (lower = checked first)</label>
+                  <input class="edit-priority" type="number" value={String(s.priority)} />
+                </div>
+              </div>
+              <label>{s.kind === 'oci' ? 'Registry URL' : 'Repo / index URL'}</label>
+              <input class="edit-url" type="text" value={s.url} />
+              <div class="nexus-form-grid">
+                {s.kind === 'oci' ? (
+                  <div>
+                    <label>Mirror (probe first for any ref)</label>
+                    <select class="edit-mirror">
+                      <option value="false" selected={!s.mirror}>no</option>
+                      <option value="true" selected={!!s.mirror}>yes</option>
+                    </select>
+                  </div>
+                ) : (
+                  <div>
+                    <label>Git ref (optional)</label>
+                    <input class="edit-ref" type="text" value={s.ref ?? ''} />
+                  </div>
+                )}
+                {s.kind === 'git-index' && (
+                  <div>
+                    <label>Submission repo (owner/repo, optional)</label>
+                    <input class="edit-repo" type="text" value={s.repo ?? ''} />
+                  </div>
+                )}
+              </div>
+              <div class="nexus-form-row">
+                <button class="edit-save" data-name={s.name}>SAVE</button>
+              </div>
+            </div>
+          )}
           {s.kind === 'oci' && (
             <div class="nexus-form login-form" data-name={s.name} style="display:none;margin-top:10px">
               <div class="nexus-form-grid">
@@ -90,6 +161,49 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
           )}
         </div>
       ))
+    )}
+  </section>
+
+  <section class="nexus-section">
+    <h2>// Pre-registered sources</h2>
+    <p style="color:var(--aura-color-text-dim);font-size:0.8rem">
+      An install can ship sources that exist from the first boot: JSON seed
+      files in the directories below and the <code>{seedsInfo?.envVar ?? 'AURA_NEXUS_SOURCES'}</code>
+      environment variable (later wins for the same name). A <b>pre-registered</b>
+      source is yours once added — edits and removal stick until its seed
+      changes. A <b>managed</b> one is enforced by its seed and locked here.
+    </p>
+    {seedsInfo ? (
+      <div class="nexus-card">
+        <div class="nexus-card-desc">
+          {seedsInfo.dirs.map((d) => <div><code>{d}/*.json</code></div>)}
+          <div><code>{seedsInfo.envVar}</code> — {seedsInfo.envSet ? 'set' : 'not set'}</div>
+        </div>
+        <div class="nexus-card-meta" style="margin-top:8px">
+          {seedsInfo.files.length === 0
+            ? <span style="color:var(--aura-color-text-dim)">no seed files found</span>
+            : seedsInfo.files.map((f) => (
+                <div>
+                  <code>{f.origin}</code> → {f.entries.length ? f.entries.join(', ') : '(no valid entries)'}
+                  {f.problems.map((p) => <div style="color:var(--aura-color-warning,#e0a000)">⚠ {p.detail}</div>)}
+                </div>
+              ))}
+          {seedsInfo.problems.filter((p) => !(seedsInfo?.files ?? []).some((f) => p.origin.startsWith(f.origin))).map((p) => (
+            <div style="color:var(--aura-color-warning,#e0a000)">⚠ {p.origin}: {p.detail}</div>
+          ))}
+          {seedsInfo.last && (
+            <div style="margin-top:6px;color:var(--aura-color-text-dim)">
+              last applied {seedsInfo.last.appliedAt ?? '—'}
+              {seedsInfo.last.changes.length ? ': ' + seedsInfo.last.changes.join('; ') : ' — no changes'}
+            </div>
+          )}
+        </div>
+        <div class="nexus-form-row" style="margin-top:8px">
+          <button id="seeds-apply-btn">RE-APPLY SEEDS</button>
+        </div>
+      </div>
+    ) : (
+      <div class="nexus-empty"><p>This shell does not support pre-registered sources yet.</p></div>
     )}
   </section>
 
@@ -311,6 +425,72 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
           setLog('ERROR: ' + (err && err.message ? err.message : err));
         }
       });
+    });
+
+    // Edit a source: alias, url, priority, mirror / ref / repo.
+    document.querySelectorAll('.edit-src').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const form = document.querySelector('.edit-form[data-name="' + CSS.escape(btn.getAttribute('data-name')) + '"]');
+        if (form) { form.style.display = form.style.display === 'none' ? '' : 'none'; form.querySelector('.edit-name').focus(); }
+      });
+    });
+    document.querySelectorAll('.edit-save').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const name = btn.getAttribute('data-name');
+        const form = btn.closest('.edit-form');
+        const kind = form.getAttribute('data-kind');
+        const body = {
+          name: form.querySelector('.edit-name').value.trim(),
+          url: form.querySelector('.edit-url').value.trim(),
+          priority: Number(form.querySelector('.edit-priority').value || '10'),
+        };
+        if (!body.name || !body.url) { setLog('name and url are required'); return; }
+        if (kind === 'oci') {
+          if (!/^https?:\/\//.test(body.url)) { setLog('oci url must start with http:// or https://'); return; }
+          body.mirror = form.querySelector('.edit-mirror').value === 'true';
+        } else {
+          body.ref = form.querySelector('.edit-ref').value.trim();
+          const repo = form.querySelector('.edit-repo');
+          if (repo) body.repo = repo.value.trim();
+        }
+        if (body.name !== name && !confirm('Rename "' + name + '" to "' + body.name + '"? Publish targets that use "' + name + '" (--to, publish.registry) must be updated too.')) return;
+        btn.disabled = true; btn.textContent = 'SAVING…';
+        setLog('saving "' + name + '"…');
+        try {
+          const res = await fetch('/api/nexus/sources/' + encodeURIComponent(name), {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+          });
+          const json = await res.json();
+          if (!res.ok || json.error) { setLog('ERROR: ' + (json.error || res.status) + (json.detail ? ' — ' + json.detail : '')); return; }
+          setLog('saved "' + body.name + '" ✓  reloading…');
+          setTimeout(() => location.reload(), 500);
+        } catch (err) {
+          setLog('ERROR: ' + (err && err.message ? err.message : err));
+        } finally {
+          btn.disabled = false; btn.textContent = 'SAVE';
+        }
+      });
+    });
+
+    // Re-read the seed files + env var now (no shell restart).
+    const seedsBtn = $('seeds-apply-btn');
+    if (seedsBtn) seedsBtn.addEventListener('click', async () => {
+      seedsBtn.disabled = true; seedsBtn.textContent = 'APPLYING…';
+      setLog('re-applying pre-registered sources…');
+      try {
+        const res = await fetch('/api/nexus/sources/seeds', { method: 'POST' });
+        const json = await res.json();
+        const r = json.report || { changes: [], problems: [] };
+        const lines = [r.changes.length ? 'applied:' : 'no changes'];
+        for (const c of r.changes) lines.push('  ' + c);
+        for (const p of r.problems) lines.push('  ⚠ ' + p.origin + ': ' + p.detail);
+        setLog(lines.join('\n') + (r.changes.length ? '\nreloading…' : ''));
+        if (r.changes.length) setTimeout(() => location.reload(), 800);
+      } catch (err) {
+        setLog('ERROR: ' + (err && err.message ? err.message : err));
+      } finally {
+        seedsBtn.disabled = false; seedsBtn.textContent = 'RE-APPLY SEEDS';
+      }
     });
 
     $('refresh-btn').addEventListener('click', async () => {

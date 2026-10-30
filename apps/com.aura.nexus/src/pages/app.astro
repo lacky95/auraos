@@ -13,6 +13,16 @@ interface CatalogEntry {
   tags?:        string[];
   screenshots?: string[];
   version?:     string;
+  longDescription?: string;
+  license?:     string;
+  /** What the app asks for — from the manifest an OCI release carries. */
+  requires?: {
+    sandbox?: string; componentType?: string;
+    permissions: string[]; tools: string[];
+    services: Array<{ name: string; image: string }>;
+    provides: Array<{ name: string; kind: string }>;
+    dependencies: Array<{ appId: string; required: boolean }>;
+  };
   sourceName?:  string;
   sourceKind?:  string;
   installed?:   boolean;
@@ -51,6 +61,8 @@ const tagsText       = (entry?.tags ?? []).join(', ') || '—';
 const sourceText     = `${entry?.sourceName ?? '—'} · ${entry?.sourceKind ?? '—'}`;
 const cats           = entry?.categories ?? [];
 const shots          = entry?.screenshots ?? [];
+const req            = entry?.requires;
+const editable       = entry?.sourceKind === 'oci' && !!entry?.sourceName;
 ---
 <Layout title={pageTitle} active="browse">
   <a href="/" class="btn-back"><span class="back-arrow">←</span> BROWSE</a>
@@ -85,6 +97,7 @@ const shots          = entry?.screenshots ?? [];
       </div>
 
       {entry.description && <p class="detail-desc">{entry.description}</p>}
+      {entry.longDescription && <p class="detail-long">{entry.longDescription}</p>}
 
       <pre class="nexus-log" id="install-log" hidden></pre>
 
@@ -92,6 +105,8 @@ const shots          = entry?.screenshots ?? [];
       <table class="kv">
         <tbody>
           <tr><td>publisher</td><td>{entry.publisher ?? '—'}</td></tr>
+          <tr><td>version</td><td>{entry.version ?? '—'}</td></tr>
+          <tr><td>license</td><td>{entry.license ?? '—'}</td></tr>
           <tr>
             <td>homepage</td>
             <td>
@@ -106,12 +121,59 @@ const shots          = entry?.screenshots ?? [];
         </tbody>
       </table>
 
+      {req && (
+        <div>
+          <div class="panel-sec"><span class="panel-lbl">What it needs</span></div>
+          <table class="kv">
+            <tbody>
+              <tr><td>sandbox</td><td>{req.sandbox ?? '—'}{req.componentType ? ` · ${req.componentType}` : ''}</td></tr>
+              <tr><td>permissions</td><td>{req.permissions.length ? req.permissions.map((p) => <span class="badge" style="margin:0 6px 4px 0">{p}</span>) : 'none'}</td></tr>
+              <tr><td>tools</td><td>{req.tools.length ? req.tools.map((t) => <span class="badge" style="margin:0 6px 4px 0">{t}</span>) : 'none'}</td></tr>
+              <tr><td>sidecars</td><td>{req.services.length ? req.services.map((sv) => <div><b>{sv.name}</b> <code>{sv.image}</code></div>) : 'none'}</td></tr>
+              {req.provides.length > 0 && <tr><td>provides</td><td>{req.provides.map((pv) => <span class="badge" style="margin:0 6px 4px 0">{pv.kind ? `${pv.kind}: ` : ''}{pv.name}</span>)}</td></tr>}
+              {req.dependencies.length > 0 && <tr><td>needs apps</td><td>{req.dependencies.map((d) => <div><code>{d.appId}</code>{d.required ? '' : ' (optional)'}</div>)}</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       {shots.length > 0 && (
         <div>
           <div class="panel-sec"><span class="panel-lbl">Screenshots</span></div>
           <div class="detail-shots">
             {shots.map((src) => (<img src={src} alt="screenshot" loading="lazy" />))}
           </div>
+        </div>
+      )}
+
+      {editable && (
+        <div id="listing-editor" data-source={entry.sourceName} data-app={entry.id} hidden>
+          <div class="panel-sec"><span class="panel-lbl">Edit listing</span></div>
+          <p class="editor-hint">
+            You can write to <code id="le-ref"></code>. Changes go live in the store
+            right away — no new version. An empty field shows the release's value again.
+          </p>
+          <div class="nexus-form">
+            <label for="le-desc">Short description</label>
+            <input id="le-desc" type="text" maxlength="280" />
+            <label for="le-long">Long description</label>
+            <textarea id="le-long" rows="6" maxlength="4096"></textarea>
+            <div class="nexus-form-grid">
+              <div><label for="le-tags">Tags (comma separated)</label><input id="le-tags" type="text" /></div>
+              <div><label for="le-publisher">Publisher</label><input id="le-publisher" type="text" maxlength="64" /></div>
+            </div>
+            <label for="le-homepage">Homepage</label>
+            <input id="le-homepage" type="text" placeholder="https://" />
+            <div class="nexus-form-row"><button type="button" id="le-save">SAVE TEXTS</button></div>
+          </div>
+          <div class="panel-sec"><span class="panel-lbl">Listing screenshots</span></div>
+          <div id="le-shots" class="le-shots"></div>
+          <div class="nexus-form-row" style="margin-top:8px">
+            <input id="le-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple />
+            <input id="le-url" type="text" placeholder="…or an https:// image URL" style="flex:1" />
+            <button type="button" id="le-add-url">ADD URL</button>
+          </div>
+          <pre class="nexus-log" id="le-log" hidden></pre>
         </div>
       )}
     </div>
@@ -193,6 +255,124 @@ const shots          = entry?.screenshots ?? [];
     pollLoop();
   </script>
 
+  <script is:inline>
+    // Edit listing — only for OCI sources this login may write to (the shell
+    // probes push rights; read-only customer logins never see the editor).
+    (function () {
+      const root = document.getElementById('listing-editor');
+      if (!root) return;
+      const src = root.getAttribute('data-source');
+      const app = root.getAttribute('data-app');
+      const base = '/api/nexus/listing/' + encodeURIComponent(src) + '/' + encodeURIComponent(app);
+      const $ = (id) => document.getElementById(id);
+      const logEl = $('le-log');
+      const say = (t, cls) => { logEl.hidden = false; logEl.className = 'nexus-log' + (cls ? ' ' + cls : ''); logEl.textContent = t; };
+      const errText = (j, res) => 'ERROR: ' + (j && (j.detail || j.error) ? (j.detail || j.error) : res.status);
+      let shots = [];
+
+      function renderShots() {
+        const box = $('le-shots');
+        box.innerHTML = '';
+        if (!shots.length) { box.textContent = 'no screenshots in the listing yet'; return; }
+        shots.forEach((url, i) => {
+          const d = document.createElement('div'); d.className = 'le-shot';
+          const img = document.createElement('img'); img.src = url; img.alt = 'screenshot ' + (i + 1); img.loading = 'lazy';
+          const btns = document.createElement('div'); btns.className = 'le-btns';
+          const mk = (label, title, fn, disabled) => {
+            const b = document.createElement('button'); b.type = 'button'; b.textContent = label; b.title = title;
+            b.disabled = !!disabled; b.addEventListener('click', fn); btns.appendChild(b);
+          };
+          mk('←', 'move left', () => move(i, -1), i === 0);
+          mk('→', 'move right', () => move(i, +1), i === shots.length - 1);
+          mk('✕', 'remove', () => post({ action: 'remove', index: i + 1 }, 'removing…'));
+          d.appendChild(img); d.appendChild(btns); box.appendChild(d);
+        });
+      }
+      function move(i, delta) {
+        const order = shots.map((_, k) => k + 1);
+        const j = i + delta;
+        [order[i], order[j]] = [order[j], order[i]];
+        post({ action: 'reorder', order }, 'reordering…');
+      }
+      async function post(body, busy) {
+        say(busy);
+        try {
+          const res = await fetch(base + '/screenshots', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+          });
+          const j = await res.json();
+          if (!res.ok || !j.ok) { say(errText(j, res), 'err'); return false; }
+          shots = j.screenshots || [];
+          renderShots();
+          say(j.unchanged ? 'that image is already listed' : '✓ listing updated — reload the page to see it in the store view', 'ok');
+          return true;
+        } catch (e) { say('ERROR: ' + (e && e.message ? e.message : e), 'err'); return false; }
+      }
+      const readB64 = (file) => new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(String(r.result));
+        r.onerror = () => reject(r.error);
+        r.readAsDataURL(file);
+      });
+
+      $('le-file').addEventListener('change', async (e) => {
+        const files = Array.from(e.target.files || []);
+        for (const f of files) {
+          if (f.size > (root.dataset.maxBytes ? Number(root.dataset.maxBytes) : 2 * 1024 * 1024)) {
+            say('ERROR: ' + f.name + ' is larger than the 2 MB limit', 'err'); continue;
+          }
+          const ok = await post({ action: 'add', data: await readB64(f) }, 'uploading ' + f.name + '…');
+          if (!ok) break;
+        }
+        e.target.value = '';
+      });
+      $('le-add-url').addEventListener('click', async () => {
+        const url = $('le-url').value.trim();
+        if (!/^https:\/\//i.test(url)) { say('ERROR: enter an https:// URL', 'err'); return; }
+        if (await post({ action: 'add', url }, 'adding…')) $('le-url').value = '';
+      });
+      $('le-save').addEventListener('click', async () => {
+        const btn = $('le-save');
+        const body = {
+          description: $('le-desc').value,
+          longDescription: $('le-long').value,
+          tags: $('le-tags').value.split(',').map((t) => t.trim()).filter(Boolean),
+          publisher: $('le-publisher').value,
+          homepage: $('le-homepage').value,
+        };
+        btn.disabled = true; say('saving…');
+        try {
+          const res = await fetch(base, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          const j = await res.json();
+          if (!res.ok || !j.ok) { say(errText(j, res), 'err'); return; }
+          say('✓ saved — reloading…', 'ok');
+          setTimeout(() => location.reload(), 700);
+        } catch (e) { say('ERROR: ' + (e && e.message ? e.message : e), 'err'); }
+        finally { btn.disabled = false; }
+      });
+
+      (async () => {
+        try {
+          const res = await fetch(base, { cache: 'no-store' });
+          if (!res.ok) return;                       // not published there / no access: stay hidden
+          const j = await res.json();
+          if (!j.canWrite) return;
+          const m = j.listing.meta || {}, rel = j.release || {};
+          $('le-ref').textContent = j.ref;
+          $('le-desc').value = m.description || '';         $('le-desc').placeholder = rel.description || '';
+          $('le-long').value = m.longDescription || '';     $('le-long').placeholder = rel.longDescription || '';
+          $('le-tags').value = (m.tags || []).join(', ');   $('le-tags').placeholder = (rel.tags || []).join(', ');
+          $('le-publisher').value = m.publisher || '';      $('le-publisher').placeholder = rel.publisher || '';
+          $('le-homepage').value = m.homepage || '';        $('le-homepage').placeholder = rel.homepage || 'https://';
+          if (j.maxImageBytes) root.dataset.maxBytes = String(j.maxImageBytes);
+          shots = j.listing.screenshots || [];
+          renderShots();
+          root.hidden = false;
+        } catch { /* stay hidden */ }
+      })();
+    })();
+  </script>
+
   <style is:global>
     /* Back button — clearly bordered ghost button. */
     .btn-back {
@@ -242,6 +422,17 @@ const shots          = entry?.screenshots ?? [];
       color: var(--aura-color-primary);
     }
 
+    .detail-long {
+      margin: 10px 0 0; font-size: 0.78rem; line-height: 1.6; white-space: pre-wrap;
+      color: var(--aura-color-text-dim); word-break: break-word;
+    }
+    .editor-hint { font-size: 0.72rem; color: var(--aura-color-text-dim); margin: 0 0 8px; }
+    #listing-editor textarea { width: 100%; box-sizing: border-box; font-family: inherit; }
+    .le-shots { display: flex; gap: 10px; flex-wrap: wrap; }
+    .le-shot { display: flex; flex-direction: column; gap: 4px; align-items: center; }
+    .le-shot img { max-height: 120px; max-width: 220px; border: 1px solid var(--aura-color-border); }
+    .le-shot .le-btns { display: flex; gap: 4px; }
+    .le-shot button { font-size: 0.62rem; padding: 2px 8px; cursor: pointer; }
     .detail-shots { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
     .detail-shots img { max-height: 180px; flex: 0 0 auto; border: 1px solid var(--aura-color-border); }
 

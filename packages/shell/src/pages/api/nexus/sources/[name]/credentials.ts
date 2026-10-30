@@ -3,6 +3,7 @@ import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { jsonResponse } from '../../../../../lib/appResponse.js';
 import { credentialsLoaded, loginFromBody, probeError, probeOciSource } from '../../../../../lib/nexusSourceLogin.js';
+import { managedMarker } from '../../../../../lib/nexusSeeds.js';
 
 /**
  * The login of a private OCI source (Nexus → Sources "Edit login",
@@ -23,6 +24,8 @@ async function ociSourceOr404(name: string | undefined) {
   const src = cfg.sources.find((s) => s.name === name);
   if (!src) return { cfg, res: jsonResponse({ error: 'not-found', detail: name }, 404) };
   if (src.kind !== 'oci') return { cfg, res: jsonResponse({ error: 'not-oci', detail: 'only oci registries take a login' }, 400) };
+  const managed = managedMarker(src);
+  if (managed) return { cfg, res: jsonResponse({ error: 'managed-source', detail: `${src.name} is managed by ${managed.origin} — change its login there` }, 409) };
   return { cfg, src };
 }
 

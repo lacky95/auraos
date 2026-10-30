@@ -50,6 +50,28 @@ async function dispatchEach(argvs: string[][]): Promise<void> {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+/**
+ * Planned restart of AuraOS (POST /api/admin/restart): the shell saves the
+ * desktop — activities, their app state, workspaces, layouts — restarts its
+ * container and the Aura Shell Daemon, and restores it on boot.
+ */
+async function restartOs(restore: boolean): Promise<void> {
+  let res: { ok: boolean; activities?: number; error?: string };
+  try {
+    res = await api.post('/api/admin/restart', { restore });
+  } catch (err) {
+    const e = err as Error & { status?: number; body?: string };
+    let detail = e.message;
+    try { detail = (JSON.parse(e.body ?? '') as { error?: string }).error ?? detail; } catch { /* not JSON */ }
+    fail(`restart: ${detail}`);
+  }
+  if (!res.ok) fail(`restart: ${res.error ?? 'refused'}`);
+  console.log(`${color.green('✓')} AuraOS is restarting — ${restore
+    ? `your work is saved (${res.activities ?? 0} activities) and comes back after the restart`
+    : 'it comes back with an empty desktop'}.`);
+  console.log(color.dim('  This shell connection drops for a moment; the desktop reloads by itself.'));
+}
+
 function resourceOrFail(token: string, verb: string): ResourceDef {
   const def = findResource(token);
   const allowed = resourcesFor(verb);
@@ -475,14 +497,19 @@ export function registerVerbs(program: Command): void {
     });
 
   program
-    .command('restart <resource> <names...>')
-    .description('Restart apps (all instances → one fresh), single instances, or services. Open windows come back on the same workspace, slot and path.')
-    .addHelpText('after', resourcesLine('restart') + examples([
+    .command('restart <resource> [names...]')
+    .description('Restart apps (all instances → one fresh), single instances, services — or AuraOS itself (`os`). Open activities come back on the same workspace, slot and path.')
+    .option('--no-restore', 'os: start with an empty desktop instead of bringing your work back')
+    .addHelpText('after', resourcesLine('restart') + '\n  os (aurashell, shell): the AuraOS shell + the Aura Shell Daemon — your work is saved and restored' + examples([
       'aura restart app com.aura.notepad',
       'aura restart inst com.aura.terminal-13   # stop it, start a fresh instance of its app',
       'aura restart svc sshd',
+      'aura restart os                          # save your work, restart AuraOS, bring it back',
+      'aura restart os --no-restore             # restart into an empty desktop',
     ]))
-    .action(async (resource: string, names: string[]) => {
+    .action(async (resource: string, names: string[], opts: { restore?: boolean }) => {
+      if (['os', 'shell', 'aurashell', 'aura-shell'].includes(resource)) return restartOs(opts.restore !== false);
+      if (!names.length) fail(`\`aura restart ${resource}\` needs at least one name`);
       const def = resourceOrFail(resource, 'restart');
       if (def.name === 'apps') return dispatchEach(names.map((n) => ['app', 'restart', n]));
       if (def.name === 'services') return dispatchEach(names.flatMap((n) => [['service', 'stop', n], ['service', 'start', n]]));

@@ -4,7 +4,8 @@ import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
 import type { AppLifecycleState } from '../types/lifecycle.js';
 import type { AppInstance, ResourceUsage, SidecarInfo } from '../types/instance.js';
-import type { AppActivity } from '../types/activity.js';
+import type { AppActivity, ActivityRestoreSeed } from '../types/activity.js';
+import { ACTIVITY_STATE_MAX_BYTES } from '../types/activity.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
 import { AppRegistry } from './AppRegistry.js';
 import { toolsTrackInstalledCaps } from './tool-allowlist.js';
@@ -1557,7 +1558,7 @@ export class AppManager {
   async openActivity(
     instanceId: string,
     data?: Record<string, unknown>,
-    opts?: { stackParent?: string },
+    opts?: { stackParent?: string; restore?: ActivityRestoreSeed },
   ): Promise<AppActivity> {
     // No `intent` in opts ⇒ never declined/window-less, so always an activity.
     return (await this.openActivityAndReport(instanceId, data, opts)).activity as AppActivity;
@@ -1571,7 +1572,7 @@ export class AppManager {
   private async openActivityAndReport(
     instanceId: string,
     data?: Record<string, unknown>,
-    opts?: { stackParent?: string; intent?: Intent },
+    opts?: { stackParent?: string; intent?: Intent; restore?: ActivityRestoreSeed },
   ): Promise<{ activity: AppActivity; hookAnswered: boolean; rejected?: undefined; result?: Record<string, unknown> }
     | { activity: null; hookAnswered: true; rejected?: IntentRejection; result?: Record<string, unknown> }> {
     const inst = this.instances.get(instanceId);
@@ -1607,16 +1608,18 @@ export class AppManager {
       throw new Error(`Instance ${instanceId} reached maxActivitiesPerInstance=${manifest.maxActivitiesPerInstance}`);
     }
 
-    const num = (this.nextActivityNum.get(instanceId) ?? 0) + 1;
-    this.nextActivityNum.set(instanceId, num);
-    const activityId = `${instanceId}#a${num}`;
+    const restore = opts?.restore;
+    const activityId = this.allocateActivityId(instanceId, restore?.activityId);
     const now = new Date();
 
     // Optional notification to the app. 404 / errors are silently ignored.
+    // `restore` (desktop session restore after an OS restart) carries the
+    // activity's previous id and the state the app saved for it.
     const result = await this.runnerOf(instanceId).callOptionalLifecycle(instanceId, 'onActivityCreate', {
       activityId,
       data,
       ...(opts?.intent ? { intent: intentPayload(opts.intent) } : {}),
+      ...(restore ? { restore: { previousActivityId: restore.previousActivityId, state: restore.savedState ?? null } } : {}),
     });
     // Only an INTENT launch may be declined or handled window-less: a plain
     // openActivity (launcher, "+ new window") always gets its window.
@@ -1651,6 +1654,15 @@ export class AppManager {
     if (minimizable && !manifest.backgroundService) {
       minimizable = false;
     }
+    // A restored activity comes back where it was. The app's own answer wins
+    // for metadata (it knows its restored state best); location, title,
+    // history and breadcrumb are the OS's record of the activity.
+    if (restore) {
+      if (typeof restore.path === 'string' && restore.path) path = restore.path;
+      if (typeof restore.title === 'string') title = restore.title;
+      if (restore.breadcrumb === 'os' || restore.breadcrumb === 'off') breadcrumb = restore.breadcrumb;
+      if (metadata === undefined && restore.metadata) metadata = restore.metadata;
+    }
 
     // Stack parent is validated: must belong to the same instance — cross-
     // instance back-stacks are deferred until we add Android-style task
@@ -1677,6 +1689,8 @@ export class AppManager {
       ...(metadata    !== undefined ? { metadata }    : {}),
       ...(minimizable ?               { minimizable: true } : {}),
       ...(stackParent ?               { stackParentId: stackParent } : {}),
+      ...(restore?.history?.length ?  { history: restore.history.map((h) => ({ ...h })) } : {}),
+      ...(restore && restore.savedState !== undefined && restore.savedState !== null ? { savedState: restore.savedState } : {}),
     };
     this.activities.set(activityId, activity);
     OsEventBus.emit('activity:opened', {
@@ -1848,6 +1862,82 @@ export class AppManager {
     ) {
       await this.stop(parentInstanceId);
     }
+  }
+
+  /**
+   * Next activity id for an instance. Seeded past every id the instance
+   * already has, so an adopted instance (counter lost with the old shell)
+   * never mints an id that is still in use. `preferred` (desktop restore)
+   * is taken when it belongs to this instance and is free.
+   */
+  private allocateActivityId(instanceId: string, preferred?: string): string {
+    const prefix = `${instanceId}#a`;
+    let max = this.nextActivityNum.get(instanceId) ?? 0;
+    for (const id of this.activities.keys()) {
+      if (!id.startsWith(prefix)) continue;
+      const n = Number(id.slice(prefix.length));
+      if (Number.isInteger(n) && n > max) max = n;
+    }
+    if (preferred && preferred.startsWith(prefix) && !this.activities.has(preferred)) {
+      const n = Number(preferred.slice(prefix.length));
+      if (Number.isInteger(n) && n > 0) {
+        this.nextActivityNum.set(instanceId, Math.max(max, n));
+        return preferred;
+      }
+    }
+    this.nextActivityNum.set(instanceId, max + 1);
+    return `${prefix}${max + 1}`;
+  }
+
+  /**
+   * Store the app-defined state of an activity (`savedState`). `null` clears
+   * it. Throws on an unknown activity or state larger than the limit.
+   */
+  setActivityState(activityId: string, state: unknown): void {
+    const activity = this.activities.get(activityId);
+    if (!activity) throw new Error(`Activity not found: ${activityId}`);
+    if (state === null || state === undefined) {
+      delete activity.savedState;
+    } else {
+      const json = JSON.stringify(state);
+      if (json === undefined) throw new Error('state must be JSON');
+      if (Buffer.byteLength(json) > ACTIVITY_STATE_MAX_BYTES) {
+        throw new Error(`state is larger than ${ACTIVITY_STATE_MAX_BYTES / 1024} KB`);
+      }
+      activity.savedState = JSON.parse(json);
+    }
+    OsEventBus.emit('activity:stateSaved', {
+      activityId, parentInstanceId: activity.parentInstanceId, appId: activity.appId,
+    });
+  }
+
+  /**
+   * Before a planned restart: ask every instance with activities for their
+   * state (optional `onSaveState` hook, `{ activityIds }` →
+   * `{ states: { [activityId]: json } }`) and store what comes back as
+   * `savedState`. All instances in parallel, each bounded by `timeoutMs`; an
+   * app without the hook (404) or a slow one just keeps its last saved state.
+   */
+  async collectActivityStates(timeoutMs = 2_000): Promise<{ asked: number; saved: number }> {
+    const byInstance = new Map<string, string[]>();
+    for (const a of this.activities.values()) {
+      const list = byInstance.get(a.parentInstanceId) ?? [];
+      list.push(a.activityId);
+      byInstance.set(a.parentInstanceId, list);
+    }
+    let saved = 0;
+    await Promise.all([...byInstance].map(async ([instanceId, activityIds]) => {
+      const call = this.runnerOf(instanceId).callOptionalLifecycle(instanceId, 'onSaveState', { activityIds })
+        .catch(() => null);
+      const reply = await Promise.race([call, new Promise<null>((r) => setTimeout(() => r(null), timeoutMs))]);
+      const states = (reply as { states?: unknown } | null)?.states;
+      if (!states || typeof states !== 'object') return;
+      for (const [id, state] of Object.entries(states as Record<string, unknown>)) {
+        if (!activityIds.includes(id)) continue;
+        try { this.setActivityState(id, state); saved++; } catch { /* too large / gone: keep the old one */ }
+      }
+    }));
+    return { asked: byInstance.size, saved };
   }
 
   getActivity(activityId: string): AppActivity | undefined {

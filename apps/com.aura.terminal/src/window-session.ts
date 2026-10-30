@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { listSessions } from './pty-server.ts';
+import { listSessions, sessionHasHistory } from './pty-server.ts';
 
 /**
  * Which session each WINDOW last picked, so a reload lands back on it.
@@ -43,7 +43,26 @@ export function pickedSession(windowId: string | null): string | null {
   if (!windowId) return null;
   const want = read()[windowId];
   if (!want) return null;
-  return listSessions().some((s) => s.id === want) ? want : null;
+  if (listSessions().some((s) => s.id === want)) return want;
+  // An activity the OS restored after a restart goes back to its session even
+  // when that shell is gone (this container ended): same name, scrollback
+  // replayed, old directory — instead of a fresh default shell.
+  return restoredActivities().has(windowId) && sessionHasHistory(want) ? want : null;
+}
+
+/** Activities recreated by an OS restore in this process (see pickRestoredSession). */
+function restoredActivities(): Set<string> {
+  const g = globalThis as { __auraTermRestored?: Set<string> };
+  return (g.__auraTermRestored ??= new Set<string>());
+}
+
+/**
+ * An OS restore recreated `windowId`; it showed `sessionId` before. Unlike a
+ * plain pick this one also stands when the shell has to be recreated.
+ */
+export function pickRestoredSession(windowId: string, sessionId: string): void {
+  pickSession(windowId, sessionId);
+  if (sessionId !== windowId) restoredActivities().add(windowId);
 }
 
 /** Remember `sessionId` for `windowId`; its own default (or null) forgets. */

@@ -136,6 +136,34 @@ export class ActivityApi {
     return document.querySelector('meta[name="aura-activity-id"]')?.getAttribute('content') ?? null;
   }
 
+  /**
+   * Save this activity's state so the OS can bring the activity back after a
+   * restart: it is handed back in `onActivityCreate` as `restore.state`.
+   * JSON, at most 64 KB; `null` clears it. Call it whenever the state that
+   * matters changes (which document is open, which session is shown) — a
+   * crash gives no chance to save later. Server-side, pass the activity id.
+   */
+  async saveState(state: unknown, activityId?: string): Promise<boolean> {
+    const id = activityId ?? this.getActivityId();
+    if (!id) return false;
+    const res = await fetch(`${this.osApiBase()}/api/activities/${encodeURIComponent(id)}/state`, {
+      method:  'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ state }),
+    }).catch(() => null);
+    return !!res?.ok;
+  }
+
+  /** The state last saved for this activity (`saveState`), or null. */
+  async savedState<T = unknown>(activityId?: string): Promise<T | null> {
+    const id = activityId ?? this.getActivityId();
+    if (!id) return null;
+    const res = await fetch(`${this.osApiBase()}/api/activities/${encodeURIComponent(id)}/state`).catch(() => null);
+    if (!res?.ok) return null;
+    const body = await res.json().catch(() => null) as { state?: T } | null;
+    return body?.state ?? null;
+  }
+
   // ---- internals ---------------------------------------------------------
 
   private async post(path: string, opts: NavigateOptions): Promise<boolean> {

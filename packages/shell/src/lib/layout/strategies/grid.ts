@@ -1,5 +1,5 @@
 /**
- * The CSS-grid layouts: tiling, rows, columns, fullscreen. Each window is
+ * The CSS-grid layouts: tiling, rows, columns, fullscreen. Each activity is
  * pinned to an explicit (grid-row, grid-column) by its index — never by DOM
  * order — because moving a slot in the DOM would reload its iframe.
  */
@@ -31,8 +31,8 @@ function tilingShape(n: number): { cols: number; rows: number } {
   return { cols, rows: Math.max(1, Math.ceil(n / cols)) };
 }
 
-/** Square-ish grid; a window expands down over empty cells below it, so
- *  e.g. 3 windows in a 2×2 grid give the right-hand one full height. */
+/** Square-ish grid; an activity expands down over empty cells below it, so
+ *  e.g. 3 activities in a 2×2 grid give the right-hand one full height. */
 export const tiling: ShellLayoutStrategy = {
   id: 'tiling',
   dragPolicy: LAYOUT_DRAG_POLICIES['tiling'],
@@ -84,7 +84,7 @@ export const columns: ShellLayoutStrategy = {
   release: unpin,
 };
 
-/** 1×1 grid — every window in the same cell; the focused one wins via DOM
+/** 1×1 grid — every activity in the same cell; the focused one wins via DOM
  *  order / z-index, siblings stay warm underneath. */
 export const fullscreen: ShellLayoutStrategy = {
   id: 'fullscreen',

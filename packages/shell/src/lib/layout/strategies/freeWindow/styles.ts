@@ -61,9 +61,9 @@ const CSS = `
 `;
 
 export function ensureFreeWindowStyles(): void {
-  if (document.getElementById('aura-free-window-css')) return;
+  if (document.getElementById('aura-free-activity-css')) return;
   const s = document.createElement('style');
-  s.id = 'aura-free-window-css';
+  s.id = 'aura-free-activity-css';
   s.textContent = CSS;
   document.head.appendChild(s);
 }
