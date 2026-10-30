@@ -1,0 +1,347 @@
+---
+/**
+ * KeyboardOverlay — the single, always-mounted virtual keyboard of the shell.
+ *
+ * A body-root overlay (z-index 1065: above the dock overflow menu, below the
+ * notification toasts). It hosts the AuraKeyboard island and decides where
+ * the keyboard sits:
+ *   • docked    full width, just above the dock. "push" reserves its height
+ *               in #layout-region-bottom so windows shrink above it;
+ *               "overlay" lets it cover the bottom of the windows.
+ *   • floating  movable + resizable (rect persisted in the OS KV).
+ *   • activity  attached to one window: follows it, hides while that window
+ *               is hidden, falls back to docked when it closes. Input is
+ *               pinned to that window.
+ *
+ * Closing only hides it (simple-keyboard stays mounted). It force-closes
+ * when the lock screen comes up and when the device's own keyboard opens.
+ *
+ * Agents and apps:
+ *   • UI commands openKeyboard / closeKeyboard / sendKey (shell MCP);
+ *   • an app may post {type:'aura.keyboard.open', attach?, layout?} or
+ *     {type:'aura.keyboard.close'} to its parent — `attach` can only ever
+ *     attach to the sender's own window.
+ */
+import AuraKeyboard from './AuraKeyboard.tsx';
+import { SYNTHETIC_RECEIVER_JS } from '../../../lib/keyboard/receiverScript.ts';
+---
+<div id="virtual-keyboard" class="aura-vkb" role="region" aria-label="Virtual keyboard" aria-hidden="true" data-mode="docked">
+  <AuraKeyboard client:idle={{ timeout: 2000 }} />
+</div>
+
+<!-- Same receiver the proxy injects into apps: lets the keyboard type into shell fields. -->
+<script is:inline set:html={SYNTHETIC_RECEIVER_JS}></script>
+
+<style is:global>
+  .aura-vkb {
+    position: fixed;
+    z-index: 1065;
+    box-sizing: border-box;
+    background: var(--aura-color-bg);
+    border: var(--aura-border);
+    box-shadow: 0 -4px 18px rgba(0, 0, 0, 0.4);
+    font-family: var(--aura-font-mono);
+    touch-action: none;
+  }
+  .aura-vkb[aria-hidden="true"] { display: none; }
+  .aura-vkb[data-detached="true"] { visibility: hidden; pointer-events: none; }
+  .aura-vkb[data-mode="docked"] {
+    left: 0; right: 0;
+    bottom: calc(var(--aura-dock-height) + env(safe-area-inset-bottom, 0px));
+    max-height: 48vh;
+    border-left: none; border-right: none; border-bottom: none;
+  }
+  .aura-vkb[data-mode="floating"],
+  .aura-vkb[data-mode="activity"] { box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5), var(--aura-glow-subtle, none); }
+
+  .aura-kb { display: flex; flex-direction: column; height: 100%; container-type: inline-size; position: relative; }
+  .aura-kb-head {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 4px 6px;
+    border-bottom: var(--aura-border);
+    font-size: 0.62rem; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--aura-color-text-dim);
+    user-select: none;
+  }
+  .aura-kb[data-mode="floating"] .aura-kb-head { cursor: move; }
+  .aura-kb-target { display: inline-flex; align-items: center; gap: 5px; min-width: 0; flex: 1 1 120px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--aura-color-primary); }
+  .aura-kb-target > span { overflow: hidden; text-overflow: ellipsis; }
+  .aura-kb-group { display: inline-flex; gap: 3px; flex-wrap: wrap; }
+  .aura-kb-chip, .aura-kb-icon {
+    appearance: none; display: inline-flex; align-items: center; justify-content: center;
+    height: 22px; min-width: 22px; padding: 0 6px; box-sizing: border-box;
+    font: inherit; color: var(--aura-color-text-dim); background: transparent;
+    border: var(--aura-border); cursor: pointer;
+  }
+  .aura-kb-icon { padding: 0; width: 24px; }
+  .aura-kb-chip:hover, .aura-kb-icon:hover { color: var(--aura-color-primary); border-color: var(--aura-color-primary); }
+  .aura-kb-chip[aria-pressed="true"], .aura-kb-icon[aria-pressed="true"] {
+    color: var(--aura-color-bg); background: var(--aura-color-primary); border-color: var(--aura-color-primary);
+  }
+  .aura-kb-icon:disabled { opacity: 0.35; cursor: not-allowed; }
+  .aura-kb-keys { flex: 1; min-height: 0; }
+  /* Floating resize: one grip in the bottom-right corner. */
+  .aura-kb-handle[data-edge="se"] {
+    position: absolute; z-index: 3; right: -6px; bottom: -6px;
+    width: 22px; height: 22px; cursor: nwse-resize; touch-action: none;
+  }
+  @media (pointer: coarse) { .aura-kb-handle[data-edge="se"] { width: 34px; height: 34px; } }
+  /* A strip under the keys so the grip doesn't sit on the last key. */
+  .aura-vkb[data-mode="floating"] .aura-kb-keys { padding-bottom: 10px; }
+  .aura-kb-handle[data-edge="se"]::after {
+    content: ''; position: absolute; right: 8px; bottom: 8px;
+    width: 10px; height: 10px;
+    border-right: 2px solid var(--aura-color-primary); border-bottom: 2px solid var(--aura-color-primary);
+    opacity: 0.7;
+  }
+  .aura-kb-handle:hover::after, .aura-vkb[data-gesture="true"] .aura-kb-handle::after { opacity: 1; }
+  /* The focus-mode frame isn't an .app-slot iframe; keep drags flowing over it too. */
+  body.aura-stack-dragging #focus-frame { pointer-events: none; }
+
+  /* simple-keyboard, re-skinned with the OS theme tokens. */
+  .hg-theme-default.aura-kb-theme {
+    background: transparent; border-radius: 0; padding: 4px; box-sizing: border-box;
+    font-family: var(--aura-font-mono); height: 100%;
+  }
+  .hg-theme-default.aura-kb-theme .hg-button {
+    height: 42px; border-radius: 0; box-shadow: none;
+    background: var(--aura-color-surface, transparent);
+    color: var(--aura-color-text);
+    border: var(--aura-border);
+    border-bottom: var(--aura-border);
+    font-size: 0.9rem;
+  }
+  .hg-theme-default.aura-kb-theme .hg-button.hg-functionBtn { color: var(--aura-color-text-dim); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  .hg-theme-default.aura-kb-theme .hg-button.hg-activeButton,
+  .hg-theme-default.aura-kb-theme .hg-button:active {
+    background: var(--aura-color-primary); color: var(--aura-color-bg); box-shadow: var(--aura-glow-primary);
+  }
+  .hg-theme-default.aura-kb-theme .hg-button.aura-kb-on { color: var(--aura-color-primary); border-color: var(--aura-color-primary); box-shadow: var(--aura-glow-subtle, var(--aura-glow-primary)); }
+  .hg-theme-default.aura-kb-theme .hg-button.aura-kb-lock { color: var(--aura-color-bg); background: var(--aura-color-primary); border-color: var(--aura-color-primary); }
+  .hg-theme-default.aura-kb-theme .hg-button[data-skbtn="{space}"] { flex-grow: 6; }
+  /* Floating / attached: the keys fill whatever size the user gave the keyboard. */
+  .aura-vkb[data-mode="floating"] .hg-theme-default.aura-kb-theme .hg-rows,
+  .aura-vkb[data-mode="activity"] .hg-theme-default.aura-kb-theme .hg-rows { display: flex; flex-direction: column; height: 100%; }
+  .aura-vkb[data-mode="floating"] .hg-theme-default.aura-kb-theme .hg-row,
+  .aura-vkb[data-mode="activity"] .hg-theme-default.aura-kb-theme .hg-row { flex: 1; min-height: 0; }
+  .aura-vkb[data-mode="floating"] .hg-theme-default.aura-kb-theme .hg-button,
+  .aura-vkb[data-mode="activity"] .hg-theme-default.aura-kb-theme .hg-button { height: auto; }
+  @container (max-width: 520px) {
+    .hg-theme-default.aura-kb-theme .hg-button { height: 36px; font-size: 0.8rem; padding: 2px; }
+    .hg-theme-default.aura-kb-theme .hg-row .hg-button:not(:last-child) { margin-right: 3px; }
+  }
+  @media (pointer: coarse) {
+    .hg-theme-default.aura-kb-theme .hg-button { height: 48px; }
+  }
+</style>
+
+<script>
+  import { kbState, type KbRect } from '../../../lib/keyboard/kbState.ts';
+  import { inputManager } from '../../../lib/keyboard/AuraInputManager.ts';
+  import { pinDock, watchLock } from '../notifications/placement.ts';
+  import { getAnchor } from '../../../lib/notifications/anchor.ts';
+  import { registerUiCommand, registerSnapshotPart } from '../../../lib/uiCommands.ts';
+  import { KEYS, LAYOUTS, keyForChar } from './layouts.ts';
+  import { clampRect, localViewport, rectToLocal, type Rect } from '../../../lib/keyboard/floatGesture.ts';
+
+  const el = document.getElementById('virtual-keyboard') as HTMLElement | null;
+  if (el) {
+    const st = kbState();
+    const im = inputManager();
+    const SPACER_ID = 'vkb-push-spacer';
+
+    // All geometry is in body-local px: the shell zooms <body> with a
+    // transform, and this overlay is a fixed child of it (floatGesture.ts).
+    const dockTop = () => {
+      const d = document.getElementById('dock');
+      return d ? rectToLocal(d.getBoundingClientRect()).top : localViewport().height - 44;
+    };
+
+    // ── Floating rect ────────────────────────────────────────────────
+    function defaultRect(): KbRect {
+      const vp = localViewport();
+      const width = Math.min(760, vp.width - 24);
+      const height = Math.min(320, Math.round(vp.height * 0.45));
+      const btn = getAnchor<HTMLElement>('keyboard');
+      const br = btn ? rectToLocal(btn.getBoundingClientRect()) : null;
+      const right = br ? br.left + br.width : vp.width - 12;
+      return {
+        width, height,
+        left: Math.max(12, Math.min(right, vp.width - 12) - width),
+        top: Math.max(12, Math.min(dockTop(), vp.height) - height - 12),
+      };
+    }
+    const clamp = (r: KbRect): KbRect => clampRect(r as Rect, localViewport());
+    function place(r: KbRect | null): void {
+      if (!r) { el!.style.left = el!.style.top = el!.style.width = el!.style.height = ''; return; }
+      el!.style.left = `${r.left}px`; el!.style.top = `${r.top}px`;
+      el!.style.width = `${r.width}px`; el!.style.height = `${r.height}px`;
+    }
+
+    // ── Push mode: reserve the space the keyboard covers ─────────────
+    // The spacer in #layout-region-bottom insets the windows (index.astro
+    // syncLayoutRegions). Its height is measured, not assumed: with auto-hide
+    // bars the desktop runs under the dock, and the keyboard sits above the
+    // dock, so "keyboard height" alone leaves windows covered.
+    //   reserve = desktop bottom − keyboard top   (body-local px)
+    // The spacer only moves windows, never the keyboard or the desktop box,
+    // so re-measuring can't loop.
+    let pushObs: { ro: ResizeObserver | null; mo: MutationObserver; onResize: () => void } | null = null;
+    let pushRaf = 0;
+    function measurePush(): void {
+      pushRaf = 0;
+      const spacer = document.getElementById(SPACER_ID);
+      const box = document.getElementById('desktop-content') ?? spacer?.parentElement?.parentElement;
+      if (!spacer || !box) return;
+      const desktopBottom = rectToLocal(box.getBoundingClientRect());
+      const kb = rectToLocal(el!.getBoundingClientRect());
+      const reserve = Math.max(0, Math.ceil(desktopBottom.top + desktopBottom.height - kb.top));
+      const h = `${reserve}px`;
+      if (spacer.style.height !== h) spacer.style.height = h;
+    }
+    const schedulePush = () => { if (!pushRaf) pushRaf = requestAnimationFrame(measurePush); };
+
+    function setPush(on: boolean): void {
+      const region = document.getElementById('layout-region-bottom');
+      let spacer = document.getElementById(SPACER_ID);
+      if (!on || !region) {
+        spacer?.remove();
+        if (pushObs) {
+          pushObs.ro?.disconnect();
+          pushObs.mo.disconnect();
+          window.removeEventListener('resize', pushObs.onResize);
+          pushObs = null;
+        }
+        if (pushRaf) { cancelAnimationFrame(pushRaf); pushRaf = 0; }
+        return;
+      }
+      if (!spacer) {
+        spacer = document.createElement('div');
+        spacer.id = SPACER_ID;
+        spacer.setAttribute('aria-hidden', 'true');
+        spacer.style.flexShrink = '0';
+      }
+      if (spacer.parentElement !== region || region.lastElementChild !== spacer) region.appendChild(spacer);
+      schedulePush();
+      if (!pushObs) {
+        const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(schedulePush) : null;
+        ro?.observe(el!);
+        const box = document.getElementById('desktop-content');
+        if (box) ro?.observe(box);
+        // Auto-hide bars and shell zoom/margins change <body> attributes.
+        const mo = new MutationObserver(schedulePush);
+        mo.observe(document.body, { attributes: true, attributeFilter: ['data-autohide-bars', 'style'] });
+        window.addEventListener('resize', schedulePush);
+        pushObs = { ro, mo, onResize: schedulePush };
+      }
+    }
+
+    // ── Activity mode: follow the attached window ────────────────────
+    let follow = 0;
+    function slotFor(viewId: string | null): HTMLElement | null {
+      return viewId ? document.querySelector<HTMLElement>(`.app-slot[data-view-id="${CSS.escape(viewId)}"]`) : null;
+    }
+    function followTick(): void {
+      follow = 0;
+      if (!st.$open.get() || st.$mode.get() !== 'activity') return;
+      const slot = slotFor(st.$attachedViewId.get());
+      if (!slot) { st.$attachedViewId.set(null); st.$mode.set('docked'); return; } // window closed
+      const r = rectToLocal(slot.getBoundingClientRect());
+      const visible = r.width > 0 && r.height > 0 && slot.offsetParent !== null;
+      el!.dataset['detached'] = visible ? 'false' : 'true';
+      if (visible) {
+        const h = Math.max(150, Math.min(Math.round(r.height * 0.5), 300));
+        place({ left: r.left, top: r.top + r.height - h, width: r.width, height: h });
+      }
+      follow = requestAnimationFrame(followTick);
+    }
+
+    // ── Apply state → DOM ────────────────────────────────────────────
+    function apply(): void {
+      const open = st.$open.get();
+      const mode = st.$mode.get();
+      el!.setAttribute('aria-hidden', String(!open));
+      el!.dataset['mode'] = mode;
+      el!.dataset['detached'] = 'false';
+      pinDock('virtual-keyboard', open);
+      if (follow) { cancelAnimationFrame(follow); follow = 0; }
+      im.setTargetActivity(open && mode === 'activity' ? st.$attachedViewId.get() : null);
+
+      if (!open) { setPush(false); return; }
+      if (mode === 'docked') {
+        place(null);
+        setPush(st.$dockBehavior.get() === 'push');
+      } else if (mode === 'floating') {
+        setPush(false);
+        let r = st.$floatRect.get();
+        if (!r) { r = defaultRect(); st.$floatRect.set(r); }
+        place(clamp(r));
+      } else {
+        setPush(false);
+        followTick();
+      }
+      document.dispatchEvent(new CustomEvent('aura:keyboard.state', { detail: { open, mode, layout: st.$layout.get() } }));
+    }
+    for (const s of [st.$open, st.$mode, st.$dockBehavior, st.$attachedViewId]) s.listen(apply);
+    // During a gesture the island already produced a clamped rect; place it as is.
+    st.$floatRect.listen((r) => {
+      if (!st.$open.get() || st.$mode.get() !== 'floating' || !r) return;
+      place(st.$dragging.get() ? r : clamp(r));
+    });
+    st.$dragging.listen((d) => { el!.dataset['gesture'] = String(d); });
+    st.$open.listen((open) => { if (!open) document.dispatchEvent(new CustomEvent('aura:keyboard.state', { detail: { open, mode: st.$mode.get(), layout: st.$layout.get() } })); });
+    window.addEventListener('resize', () => { if (st.$open.get() && st.$mode.get() === 'floating') { const r = st.$floatRect.get(); if (r) place(clamp(r)); } });
+    apply();
+
+    // ── Force-close: lock screen, device keyboard ────────────────────
+    watchLock((locked) => { if (locked) st.$open.set(false); });
+    const vv = window.visualViewport;
+    vv?.addEventListener('resize', () => {
+      if (!st.$open.get() || Math.abs((vv.scale ?? 1) - 1) > 0.01) return;
+      if (vv.height < window.innerHeight - 80 && matchMedia('(pointer: coarse)').matches) st.$open.set(false);
+    });
+
+    // ── Apps asking for the keyboard (only ever their own window) ────
+    window.addEventListener('message', (ev) => {
+      const d = ev.data as { type?: string; attach?: boolean; layout?: string } | null;
+      if (!d || (d.type !== 'aura.keyboard.open' && d.type !== 'aura.keyboard.close')) return;
+      let frame: HTMLIFrameElement | null = null;
+      for (const f of document.querySelectorAll<HTMLIFrameElement>('.app-slot iframe, #focus-frame')) {
+        if (f.contentWindow === ev.source) { frame = f; break; }
+      }
+      if (!frame) return;
+      if (d.type === 'aura.keyboard.close') { st.$open.set(false); return; }
+      if (typeof d.layout === 'string' && LAYOUTS.some((l) => l.id === d.layout)) st.$layout.set(d.layout);
+      const viewId = frame.closest<HTMLElement>('.app-slot')?.dataset['viewId'];
+      if (d.attach && viewId) { st.$attachedViewId.set(viewId); st.$mode.set('activity'); }
+      st.$open.set(true);
+    });
+
+    // ── Shell MCP / agents ───────────────────────────────────────────
+    const snapshot = () => ({
+      open: st.$open.get(), mode: st.$mode.get(), layout: st.$layout.get(),
+      dockBehavior: st.$dockBehavior.get(), attachedViewId: st.$attachedViewId.get(),
+      target: (() => { const t = im.resolveTarget(); return t ? { kind: t.kind, label: t.label } : null; })(),
+      layouts: LAYOUTS.map((l) => l.id),
+    });
+    registerSnapshotPart('keyboard', snapshot);
+    registerUiCommand('openKeyboard', ({ layout, mode, dockBehavior }) => {
+      if (typeof layout === 'string' && LAYOUTS.some((l) => l.id === layout)) st.$layout.set(layout);
+      if (mode === 'docked' || mode === 'floating') st.$mode.set(mode);
+      if (dockBehavior === 'push' || dockBehavior === 'overlay') st.$dockBehavior.set(dockBehavior);
+      st.$open.set(true);
+      return snapshot();
+    });
+    registerUiCommand('closeKeyboard', () => { st.$open.set(false); return snapshot(); });
+    registerUiCommand('sendKey', async ({ key, text, ctrl, alt, shift, meta }) => {
+      if (typeof text === 'string' && text) {
+        return { ok: await im.send({ action: 'text', text }), target: snapshot().target };
+      }
+      if (typeof key !== 'string' || !key) throw new Error('sendKey needs `key` (e.g. "Enter", "a", "F5") or `text`');
+      const named = KEYS[`{${key.toLowerCase()}}`] ?? KEYS[`{${key.toLowerCase().replace(/^esc$/, 'escape')}}`];
+      const spec = named ?? (key.length === 1 ? keyForChar(key) : { key, code: key, keyCode: 0 });
+      const ok = await im.press(spec, { ctrl: !!ctrl, alt: !!alt, shift: !!shift, meta: !!meta });
+      return { ok, target: snapshot().target };
+    });
+  }
+</script>

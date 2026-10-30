@@ -2,6 +2,7 @@ import type { APIRoute } from 'astro';
 import { getAppManager, ThemeManager, keymapRegistry, resolveProxyConfig, INTERFACE_PATH_KINDS } from '@aura/core';
 import type { AppManifest, ColorMode, KeyAction, OsKeymapState, ProxyConfig } from '@aura/core';
 import { sharedKv } from '../../../../lib/sharedKv.js';
+import { SYNTHETIC_RECEIVER_JS } from '../../../../lib/keyboard/receiverScript.js';
 
 /**
  * Fallback proxy config for the corner case where the AppManager can't
@@ -678,6 +679,10 @@ window.addEventListener('keyup',function(e){
 window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod.sr=mod.ml=mod.mr=0;});
 }catch(_){}})();</script>`;
         rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${keyForwarder}`);
+        // Virtual-keyboard receiver (`aura.key.synthetic`, see
+        // components/shell/keyboard/PROTOCOL.md). Same gate as the forwarder:
+        // apps that opt out of OS key handling handle synthetic keys themselves.
+        rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}<script>${SYNTHETIC_RECEIVER_JS}</script>`);
       }
 
       // Focus-on-click. Clicking anywhere in an app window must move keyboard

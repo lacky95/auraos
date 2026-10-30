@@ -1,0 +1,70 @@
+---
+/**
+ * Dock toggle for the virtual keyboard — the rightmost item, right of the
+ * notification bell. Opening/closing flips the shared keyboard state
+ * (lib/keyboard/kbState.ts); KeyboardOverlay does the rest.
+ *
+ * mousedown is prevented so tapping the button never takes keyboard focus
+ * away from the app the user wants to type into.
+ */
+import Icon from '../../ui/Icon.astro';
+---
+<button
+  id="dock-kb-btn"
+  type="button"
+  class="dock-kb-btn"
+  aria-label="Virtual keyboard"
+  title="Virtual keyboard"
+  aria-expanded="false"
+  aria-controls="virtual-keyboard"
+  data-early-click="keyboard"
+>
+  <span class="dock-kb-icon" aria-hidden="true"><Icon name="keyboard" /></span>
+</button>
+
+<style is:global>
+  .dock-kb-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 44px;
+    min-width: 44px;
+    flex-shrink: 0;
+    padding: 0 10px;
+    box-sizing: border-box;
+    color: var(--aura-color-text-dim);
+    border: var(--aura-border);
+    border-left: none;
+    background: transparent;
+    cursor: pointer;
+    transition: box-shadow 0.1s, color 0.1s;
+  }
+  .dock-kb-btn:hover,
+  .dock-kb-btn:focus,
+  .dock-kb-btn:focus-visible { color: var(--aura-color-primary); box-shadow: var(--aura-glow-primary); outline: none; }
+  .dock-kb-btn:focus-visible { box-shadow: inset 0 0 0 2px var(--aura-color-primary), var(--aura-glow-primary); }
+  .dock-kb-btn[aria-expanded="true"] {
+    color: var(--aura-color-bg);
+    background: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+  }
+  .dock-kb-icon { line-height: 1; display: inline-flex; font-size: 1.2rem; }
+</style>
+
+<script>
+  import { kbState } from '../../../lib/keyboard/kbState.ts';
+  import { registerAnchor } from '../../../lib/notifications/anchor.ts';
+  import { claimEarlyClicks } from '../../../lib/earlyClicks.ts';
+
+  const btn = document.getElementById('dock-kb-btn') as HTMLButtonElement | null;
+  if (btn) {
+    const st = kbState();
+    const toggle = () => st.$open.set(!st.$open.get());
+    btn.addEventListener('mousedown', (e) => e.preventDefault());
+    btn.addEventListener('click', toggle);
+    st.$open.subscribe((open) => btn.setAttribute('aria-expanded', String(open)));
+    registerAnchor('keyboard', btn);
+    claimEarlyClicks('keyboard', toggle);
+    document.dispatchEvent(new CustomEvent('aura:dock.refit'));
+  }
+</script>

@@ -421,6 +421,12 @@ importers:
       react-dom:
         specifier: ^19.0.0
         version: 19.2.6(react@19.2.6)
+      simple-keyboard:
+        specifier: ^3.8.202
+        version: 3.8.202
+      simple-keyboard-layouts:
+        specifier: ^3.4.278
+        version: 3.4.278
       socket.io:
         specifier: ^4.8.0
         version: 4.8.3
@@ -4509,6 +4515,12 @@ packages:
     resolution: {integrity: sha512-bzyZ1e88w9O1iNJbKnOlvYTrWPDl46O1bG0D3XInv+9tkPrxrN8jUUTiFlDkkmKWgn1M6CfIA13SuGqOa9Korw==}
     engines: {node: '>=14'}
 
+  simple-keyboard-layouts@3.4.278:
+    resolution: {integrity: sha512-1+h5zTPLRFIvlXTEExfbYJIDZIV7fkgYrDkjgyMUu0WglM64AlbRBw+zgPlUff8VS+VrJl0DBOyj8IFo6BdvIA==}
+
+  simple-keyboard@3.8.202:
+    resolution: {integrity: sha512-3ECIn7JeGueuJS4KSJ39dhRvHtwwLdom/qkVbk9NO+C472I7z58Dw9+RIzP9AdiIrHCpUtsPqUKoaXg7B8zMQg==}
+
   sisteransi@1.0.5:
     resolution: {integrity: sha512-bLGGlR1QxBcynn2d5YmDX4MGjlZvy2MRBDRNHLJ8VI6l6+9FUiyTFNJ0IveOSP0bcXgVDPRcfGqA0pjaqUpfVg==}
 
@@ -6022,7 +6034,7 @@ snapshots:
     dependencies:
       '@hono/node-server': 1.19.14(hono@4.12.19)
       ajv: 8.20.0
-      ajv-formats: 3.0.1(ajv@8.20.0)
+      ajv-formats: 3.0.1
       content-type: 1.0.5
       cors: 2.8.6
       cross-spawn: 7.0.6
@@ -6044,7 +6056,7 @@ snapshots:
     dependencies:
       '@hono/node-server': 1.19.14(hono@4.12.19)
       ajv: 8.20.0
-      ajv-formats: 3.0.1(ajv@8.20.0)
+      ajv-formats: 3.0.1
       content-type: 1.0.5
       cors: 2.8.6
       cross-spawn: 7.0.6
@@ -7048,8 +7060,8 @@ snapshots:
     optionalDependencies:
       ajv: 8.20.0
 
-  ajv-formats@3.0.1(ajv@8.20.0):
-    optionalDependencies:
+  ajv-formats@3.0.1:
+    dependencies:
       ajv: 8.20.0
 
   ajv@8.20.0:
@@ -9678,6 +9690,10 @@ snapshots:
   signal-exit@3.0.7: {}
 
   signal-exit@4.1.0: {}
+
+  simple-keyboard-layouts@3.4.278: {}
+
+  simple-keyboard@3.8.202: {}
 
   sisteransi@1.0.5: {}
 
