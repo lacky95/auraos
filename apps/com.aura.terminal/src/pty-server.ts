@@ -9,6 +9,7 @@ import { dialogAction, getDialog, installDialogHooks, setDialogText } from './in
 import { openPaneTap, paneRepaint, tmuxHasSession, type PaneTap } from './pane-tap.ts';
 import { forgetSessionPicks } from './window-session.ts';
 import { forgetCwd, hasSavedCwd, savedCwd, startCwdRecorder } from './session-cwd.ts';
+import { replayBudget, replayTail } from './replay-tail.ts';
 
 /**
  * PTY session registry — one live VIEW at a time, survives browser reload.
@@ -68,10 +69,11 @@ import { forgetCwd, hasSavedCwd, savedCwd, startCwdRecorder } from './session-cw
  *   • The OS `onActivityDestroy` lifecycle hook calls `killSession`
  *     which closes all bound WSes and kills the PTY immediately.
  *
- * Scrollback: each newly GRANTED socket gets a one-shot replay of the
- * session's scrollback ring buffer (256 KiB cap) before live output continues
- * — so a browser reload, or a take-over from a different browser, returns to
- * exactly where the session left off.
+ * Scrollback: each newly GRANTED socket gets a one-shot replay of the newest
+ * part of the session's scrollback ring buffer (256 KiB cap; the replay is
+ * the last 64 KiB, see replay-tail.ts) before live output continues — so a
+ * browser reload, or a take-over from a different browser, returns to where
+ * the session left off.
  *
  * Anonymous connections (no `_aura_session`) get the old "kill on
  * close" behavior — keeps direct `/ws` consumers (curl, tests) working.
@@ -118,6 +120,8 @@ interface Session {
 }
 
 const SCROLLBACK_BYTES = 256 * 1024;
+/** What a newly granted window gets replayed (replay-tail.ts). */
+const REPLAY_BYTES = replayBudget();
 const RECONCILE_MS     = 5_000;        // winsize self-heal heartbeat interval
 const OUTPUT_FRAME_MS  = 16;           // output-coalescing frame (~60Hz)
 
@@ -396,7 +400,7 @@ function grant(sess: Session, ws: WebSocket): void {
   if (sess.buffer.length > 0) {
     // Joined first, then stripped: a query can straddle two chunks, and half a
     // sequence is exactly the case a per-chunk filter would miss.
-    const replay = stripTerminalQueries(sess.buffer.join(''));
+    const replay = stripTerminalQueries(replayTail(sess.buffer.join(''), REPLAY_BYTES));
     if (replay) { try { ws.send(replay); } catch { /* socket may have torn down */ } }
   }
 }

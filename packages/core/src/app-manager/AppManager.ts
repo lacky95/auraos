@@ -771,6 +771,10 @@ export class AppManager {
     // `state: 'resumed'` ready for normal lifecycle calls.
     try {
       const orphans = await this.runners.container.listOrphanRecords?.() ?? [];
+      // Idle warm-pool members stay pool members: adopted as ordinary
+      // instances, every restart left one more window-less container behind
+      // while the pool spawned a fresh one.
+      const pooled = this.loadPoolIds();
       for (const o of orphans) {
         if (this.instances.has(o.instanceId)) continue;
         const inst: AppInstance = {
@@ -782,7 +786,7 @@ export class AppManager {
           startedAt:         new Date(),
           lastTransitionAt:  new Date(),
           restartCount:      0,
-          inPool:            false,
+          inPool:            pooled.has(o.instanceId),
           sandbox:           'container',
         };
         this.instances.set(o.instanceId, inst);
@@ -1216,6 +1220,7 @@ export class AppManager {
         instanceToken:   this.tokens.mint(instanceId),
       });
       this.upsertInstance(instanceId, appId, { pid, port, startedAt: new Date(), inPool: opts.inPool, sandbox: manifest.sandbox });
+      if (opts.inPool) this.savePoolIds();
       this.transition(instanceId, appId, 'created', port);
 
       // Re-attach the instance's declared cross-app mounts. Binds are reaped on
@@ -1284,8 +1289,16 @@ export class AppManager {
     for (const inst of this.instances.values()) {
       if (inst.appId !== appId || !inst.inPool) continue;
       if (inst.state !== 'resumed' || inst.pid == null) continue;
+      // Same liveness rule as the reconciler: a container's pid is a HOST pid,
+      // invisible from inside aura-shell, so `process.kill(pid, 0)` always
+      // failed and no container app (Terminal) ever got its warm-pool member
+      // — every launch spawned a fresh container instead.
       let alive = false;
-      try { process.kill(inst.pid, 0); alive = true; } catch { /* dead */ }
+      if (inst.sandbox === 'container') {
+        alive = this.runnerOf(inst.instanceId).isRunning(inst.instanceId);
+      } else {
+        try { process.kill(inst.pid, 0); alive = true; } catch { /* dead */ }
+      }
       if (!alive) {
         // Reconciler will tidy this up on its next tick; just skip for now.
         continue;
@@ -1293,6 +1306,7 @@ export class AppManager {
       // Hand-off — keep the existing instanceId (its env was baked at spawn
       // time with this id, so renaming would break identity invariants).
       inst.inPool = false;
+      this.savePoolIds();
       const manifest = this.registry.getById(appId);
       if (manifest) {
         this.providers.registerInstance(inst, manifest);
@@ -1338,6 +1352,27 @@ export class AppManager {
         if (n <= 0) this.refillInFlight.delete(appId);
         else this.refillInFlight.set(appId, n);
       });
+  }
+
+  /**
+   * Which instances are idle warm-pool members, kept across shell restarts
+   * (<dataDir>/aura/warm-pool.json) so re-adopted containers keep the flag.
+   * Written on every pool spawn and claim; stale ids are harmless (only ids
+   * that are adopted again are looked up).
+   */
+  private poolFile(): string { return join(this.dataDir, 'aura', 'warm-pool.json'); }
+  private savePoolIds(): void {
+    const ids = [...this.instances.values()].filter((i) => i.inPool).map((i) => i.instanceId);
+    try {
+      mkdirSync(join(this.dataDir, 'aura'), { recursive: true });
+      writeFileSync(this.poolFile(), JSON.stringify(ids));
+    } catch (err) { console.warn(`[AppManager] pool: cannot save ${this.poolFile()}: ${(err as Error).message}`); }
+  }
+  private loadPoolIds(): Set<string> {
+    try {
+      const ids = JSON.parse(readFileSync(this.poolFile(), 'utf-8')) as unknown;
+      return new Set(Array.isArray(ids) ? ids.filter((x): x is string => typeof x === 'string') : []);
+    } catch { return new Set(); }
   }
 
   /** Number of currently-idle pool members for an app. Used by Process Manager. */
@@ -1595,6 +1630,7 @@ export class AppManager {
     // Also schedules a refill so the pool stays at target size.
     if (inst.inPool) {
       inst.inPool = false;
+      this.savePoolIds();
       this.providers.registerInstance(inst, manifest);
       this.interfaces.registerInstance(inst, manifest);
       OsEventBus.emit('app:stateChanged', { instanceId: inst.instanceId, appId: inst.appId, state: inst.state, port: inst.port });
