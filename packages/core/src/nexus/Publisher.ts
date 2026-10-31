@@ -21,7 +21,7 @@ import {
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { validateStagedDir } from './Validator.js';
-import { orasSync } from './RegistryAuth.js';
+import { orasPushArtifact, orasSync } from './RegistryAuth.js';
 import { APP_ARTIFACT_TYPE, APP_REPO_PREFIX, buildStoreAnnotations } from './ociMetadata.js';
 import { readListing, screenshotInput, writeListing, type ListingInput } from './OciListing.js';
 import { publishFileList, type PublishFileList } from './PublishFiles.js';
@@ -336,13 +336,8 @@ export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }>
   log('pushing oci artifact...');
   const ref = `${registryPath}:${opts.tag}`;
   // orasSync adds the registry's login when the target is a private source.
-  orasSync([
-    'push', ref,
-    `${tarName}:application/vnd.aura.app.bundle.v1.tar+gzip`,
-    '--artifact-type', APP_ARTIFACT_TYPE,
-    ...annotationFlags,
-    ...extraFlags,
-  ], { timeout: 180_000, cwd: stagingDir });
+  orasPushArtifact(ref, [`${tarName}:application/vnd.aura.app.bundle.v1.tar+gzip`], APP_ARTIFACT_TYPE,
+    [...annotationFlags, ...extraFlags], { timeout: 180_000, cwd: stagingDir });
 
   // Tag additional refs. `latest` is what the catalog aggregator anchors on
   // when listing a repo; the channel label (e.g. `stable`) lets installs pin

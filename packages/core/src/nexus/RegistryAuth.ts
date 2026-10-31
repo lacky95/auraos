@@ -172,6 +172,51 @@ export function authFileContent(host: string, login: RegistryLogin): string {
   return JSON.stringify({ auths: { [host]: { auth } } });
 }
 
+// ─── Pushing Aura artifacts ─────────────────────────────────────────────
+
+/** Where an Aura artifact type is kept when the registry refuses it as the
+ *  manifest's artifactType / config media type (see orasPushArtifact). */
+export const ARTIFACT_TYPE_ANNOTATION = 'app.aura.artifactType';
+const OCI_IMAGE_CONFIG = 'application/vnd.oci.image.config.v1+json';
+const UNKNOWN_MEDIA_TYPE = /unknown media type|unsupported media type|manifest invalid/i;
+
+/**
+ * `oras push <ref> <files…> --artifact-type <type>` — and when the registry
+ * refuses a media type it doesn't know (GitLab only takes image config types),
+ * the same push as a plain OCI image (v1.0 manifest, empty `{}` config) with
+ * the type in the `app.aura.artifactType` annotation. Readers use
+ * `artifactTypeOf`. `files` are relative to `opts.cwd`, which must be set.
+ */
+export function orasPushArtifact(
+  ref: string, files: string[], artifactType: string, extra: string[], opts: ExecFileSyncOptions & { cwd: string },
+): Buffer {
+  try {
+    return orasSync(['push', ref, ...files, '--artifact-type', artifactType, ...extra], opts);
+  } catch (err) {
+    if (err instanceof OrasAuthError || !UNKNOWN_MEDIA_TYPE.test((err as Error).message)) throw err;
+  }
+  const cfg = '.aura-oci-config.json';
+  writeFileSync(join(opts.cwd, cfg), '{}');
+  return orasSync([
+    'push', ref, ...files,
+    '--image-spec', 'v1.0',
+    '--config', `${cfg}:${OCI_IMAGE_CONFIG}`,
+    '--annotation', `${ARTIFACT_TYPE_ANNOTATION}=${artifactType}`,
+    ...extra,
+  ], opts);
+}
+
+/** The Aura artifact type of a fetched manifest, wherever the push put it. */
+export function artifactTypeOf(m: {
+  artifactType?: string; annotations?: Record<string, string>; config?: { mediaType?: string };
+}): string | undefined {
+  if (m.artifactType) return m.artifactType;
+  const ann = m.annotations?.[ARTIFACT_TYPE_ANNOTATION];
+  if (ann) return ann;
+  const cfg = m.config?.mediaType;
+  return cfg && cfg !== OCI_IMAGE_CONFIG && cfg !== 'application/vnd.oci.empty.v1+json' ? cfg : undefined;
+}
+
 /**
  * `execFileSync('oras', args, opts)` with the target registry's login, when
  * one is known (or given as `login` — used to probe a login before saving it).

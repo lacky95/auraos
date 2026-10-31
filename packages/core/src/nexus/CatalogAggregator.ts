@@ -28,7 +28,7 @@ import { seedIndex } from './defaultIndex.js';
 import { parseStoreAnnotations } from './ociMetadata.js';
 import { listingScreenshotUrls, readListing, type Listing } from './OciListing.js';
 import { orasFlagsForUrl, orasHostFromUrl } from './RegistryConfig.js';
-import { orasSync } from './RegistryAuth.js';
+import { artifactTypeOf, OrasAuthError, orasSync } from './RegistryAuth.js';
 import { catalogRepo, readOciCatalog } from './OciCatalog.js';
 import {
   DEFAULT_APP_REPO_PREFIX, sortedSources,
@@ -307,7 +307,13 @@ export class CatalogAggregator {
         if (r.startsWith(`${prefix}/`)) found.add(r);
       }
     } catch (err) {
-      if (!catalog) throw err;
+      // A registry that refuses /v2/_catalog to every login (GitLab:
+      // "Type:registry Name:catalog") just has no apps listed yet when the
+      // catalog artifact is missing too — empty, not down. The login itself
+      // was checked when the source was added (RegistryProbe).
+      const catalogApiRefused = err instanceof OrasAuthError
+        && /Name:catalog\b[^\]]*Type:registry|registry:catalog/i.test(err.message);
+      if (!catalog && !catalogApiRefused) throw err;
     }
     found.delete(catalogRepo(prefix));
     const repos = [...found].slice(0, MAX_REPOS_PER_OCI);
@@ -317,9 +323,12 @@ export class CatalogAggregator {
       try {
         const raw = orasSync(['manifest', 'fetch', `${host}/${repo}:latest`, ...flags],
           { timeout: ORAS_TIMEOUT_MS }).toString();
-        const manifest = JSON.parse(raw) as { artifactType?: string; annotations?: Record<string, string> };
+        const manifest = JSON.parse(raw) as {
+          artifactType?: string; annotations?: Record<string, string>; config?: { mediaType?: string };
+        };
         // Only surface artifacts published as Aura apps.
-        if (manifest.artifactType && !manifest.artifactType.startsWith('application/vnd.aura.app')) continue;
+        const type = artifactTypeOf(manifest);
+        if (type && !type.startsWith('application/vnd.aura.app')) continue;
         const meta = parseStoreAnnotations(manifest.annotations);
         const id = meta.id ?? repo.slice(prefix.length + 1);
         if (!id) continue;

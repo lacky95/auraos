@@ -17,7 +17,7 @@
  */
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { orasSync, type RegistryLogin } from './RegistryAuth.js';
+import { artifactTypeOf, orasPushArtifact, orasSync, type RegistryLogin } from './RegistryAuth.js';
 
 export const CATALOG_REPO          = 'catalog';
 export const CATALOG_TAG           = 'latest';
@@ -76,9 +76,12 @@ export function readOciCatalog(t: CatalogTarget, login?: RegistryLogin): Catalog
   const ref = `${t.host}/${catalogRepo(t.prefix)}`;
   try {
     const manifest = JSON.parse(orasSync(['manifest', 'fetch', `${ref}:${CATALOG_TAG}`, ...t.flags],
-      { timeout: ORAS_TIMEOUT_MS }, login).toString()) as { artifactType?: string; layers?: Array<{ digest?: string }> };
-    if (manifest.artifactType !== CATALOG_ARTIFACT_TYPE) return null;
-    const digest = manifest.layers?.[0]?.digest;
+      { timeout: ORAS_TIMEOUT_MS }, login).toString()) as {
+        artifactType?: string; annotations?: Record<string, string>; config?: { mediaType?: string };
+        layers?: Array<{ digest?: string; mediaType?: string }>;
+      };
+    if (artifactTypeOf(manifest) !== CATALOG_ARTIFACT_TYPE) return null;
+    const digest = manifest.layers?.find((l) => l.mediaType === CATALOG_LAYER_TYPE)?.digest ?? manifest.layers?.[0]?.digest;
     if (!digest || !/^sha256:[a-f0-9]{64}$/.test(digest)) return null;
     const blob = orasSync(['blob', 'fetch', `${ref}@${digest}`, '--output', '-', ...t.flags],
       { timeout: ORAS_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 }, login).toString();
@@ -96,11 +99,8 @@ export function upsertOciCatalog(t: CatalogTarget, app: CatalogApp, dataDir: str
   try {
     writeFileSync(join(stage, 'catalog.json'), JSON.stringify(next, null, 2));
     // Relative file name: oras rejects absolute paths (see Publisher).
-    orasSync([
-      'push', `${t.host}/${catalogRepo(t.prefix)}:${CATALOG_TAG}`, `catalog.json:${CATALOG_LAYER_TYPE}`,
-      '--artifact-type', CATALOG_ARTIFACT_TYPE,
-      ...t.flags,
-    ], { timeout: 60_000, cwd: stage });
+    orasPushArtifact(`${t.host}/${catalogRepo(t.prefix)}:${CATALOG_TAG}`, [`catalog.json:${CATALOG_LAYER_TYPE}`],
+      CATALOG_ARTIFACT_TYPE, t.flags, { timeout: 60_000, cwd: stage });
     return next;
   } finally {
     rmSync(stage, { recursive: true, force: true });

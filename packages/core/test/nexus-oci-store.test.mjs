@@ -20,6 +20,7 @@ import { publishFileList, withheldReason } from '../dist/nexus/PublishFiles.js';
 import { parseCatalog, catalogRepo } from '../dist/nexus/OciCatalog.js';
 import { checkRegistryLogin, probeRegistryAddress, parseChallenge } from '../dist/nexus/RegistryProbe.js';
 import { splitOciUrl, orasHostFromUrl } from '../dist/nexus/RegistryConfig.js';
+import { artifactTypeOf, ARTIFACT_TYPE_ANNOTATION } from '../dist/nexus/RegistryAuth.js';
 import { discoverStore } from '../dist/nexus/StoreDiscovery.js';
 
 function appDir(files) {
@@ -175,4 +176,15 @@ test('an address without aura-store.json that is a registry becomes the store (h
   });
   // A plain web host is not a registry.
   assert.equal(await probeRegistryAddress('www.example.com', async () => new Response('<html>', { status: 200 })), null);
+});
+
+test('the Aura artifact type is found wherever a registry let the push put it', () => {
+  const t = 'application/vnd.aura.app.manifest.v1+json';
+  assert.equal(artifactTypeOf({ artifactType: t }), t);                                    // OCI 1.1 artifact
+  assert.equal(artifactTypeOf({ config: { mediaType: t } }), t);                           // 1.0, custom config
+  assert.equal(artifactTypeOf({                                                            // GitLab fallback
+    config: { mediaType: 'application/vnd.oci.image.config.v1+json' },
+    annotations: { [ARTIFACT_TYPE_ANNOTATION]: t },
+  }), t);
+  assert.equal(artifactTypeOf({ config: { mediaType: 'application/vnd.oci.image.config.v1+json' } }), undefined);
 });

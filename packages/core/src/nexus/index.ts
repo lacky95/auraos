@@ -17,6 +17,7 @@ export { getNexusManager, initNexusManager, refreshNexusSources } from './single
 export {
   secretKeyFor, sealedLoginValue, passwordForHost, SOURCE_SECRET_PATTERN, saveRegistryLogin, deleteRegistryLogin, loadRegistryCredentials, hasRegistryLogin,
   orasSync, orasTargetHost, authFileContent, isAuthFailure, authFailureReason, OrasAuthError,
+  orasPushArtifact, artifactTypeOf, ARTIFACT_TYPE_ANNOTATION,
 } from './RegistryAuth.js';
 export type { RegistryLogin, SourceAuth } from './RegistryAuth.js';
 export { discoverStore, parseStoreDescriptor, wellKnownUrl, StoreDiscoveryError } from './StoreDiscovery.js';

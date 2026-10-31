@@ -27,7 +27,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
-import { orasSync } from './RegistryAuth.js';
+import { artifactTypeOf, orasPushArtifact, orasSync } from './RegistryAuth.js';
 import { orasFlagsForUrl, orasHostFromUrl } from './RegistryConfig.js';
 import { APP_REPO_PREFIX } from './ociMetadata.js';
 import { identifyImage, MAX_SCREENSHOTS, type ImageInfo } from './StoreAssets.js';
@@ -123,9 +123,11 @@ export function readListing(t: OciAppTarget): Listing | null {
   const m = JSON.parse(raw) as {
     artifactType?: string;
     annotations?: Record<string, string>;
+    config?: { mediaType?: string };
     layers?: Array<{ digest: string; mediaType: string; size?: number }>;
   };
-  if (m.artifactType && m.artifactType !== LISTING_ARTIFACT_TYPE) return null;
+  const type = artifactTypeOf(m);
+  if (type && type !== LISTING_ARTIFACT_TYPE) return null;
   const layers = new Map((m.layers ?? []).map((l) => [l.digest, l]));
   let order: unknown = [];
   try { order = JSON.parse(m.annotations?.[LISTING_ORDER_ANNOTATION] ?? '[]'); } catch { /* corrupt: fall back to layers */ }
@@ -182,9 +184,7 @@ export function writeListing(t: OciAppTarget, items: ListingInput[], meta: Listi
       // Relative names: oras rejects absolute paths (see Publisher).
       files.push(`${name}:${it.info.mime}`);
     }
-    orasSync([
-      'push', `${t.host}/${t.repo}:${LISTING_TAG}`, ...files,
-      '--artifact-type', LISTING_ARTIFACT_TYPE,
+    orasPushArtifact(`${t.host}/${t.repo}:${LISTING_TAG}`, files, LISTING_ARTIFACT_TYPE, [
       '--annotation', `${LISTING_ORDER_ANNOTATION}=${JSON.stringify(order)}`,
       '--annotation', `${LISTING_META_ANNOTATION}=${JSON.stringify(meta)}`,
       ...t.flags,
