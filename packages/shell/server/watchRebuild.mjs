@@ -149,10 +149,30 @@ export function startWatchRebuild({ shellDir, swap }) {
     }
   }
 
+  // One non-recursive watcher per DIRECTORY, not Node's `recursive: true`:
+  // on Linux that one watches every file's inode, so a file replaced by a new
+  // inode (docker cp, editors that write + rename) was never seen again. A
+  // directory watch reports its children by name, whatever their inode.
+  const watching = new Map();
+  const watchDir = (dir) => {
+    if (watching.has(dir) || IGNORE.test(dir)) return;
+    let w;
+    try {
+      w = watch(dir, (_event, name) => {
+        if (!name) return;
+        const p = join(dir, name.toString());
+        try { if (statSync(p).isDirectory()) { watchDir(p); return; } } catch { /* deleted */ }
+        trigger(p);
+      });
+    } catch { return; }
+    w.on('error', () => { w.close(); watching.delete(dir); });
+    watching.set(dir, w);
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (e.isDirectory()) watchDir(join(dir, e.name));
+    }
+  };
   const dirs = watchedDirs(shellDir);
-  for (const dir of dirs) {
-    watch(dir, { recursive: true }, (_event, name) => trigger(name ? join(dir, name.toString()) : null));
-  }
+  for (const dir of dirs) watchDir(dir);
   log('watching', dirs.map((d) => relative(repoRoot, d)).join(', '));
   return { rebuild };
 }
