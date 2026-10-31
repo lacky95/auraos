@@ -111,8 +111,18 @@ aura nexus registry add acme https://registry.acme.com --username publisher
 aura nexus app publish ./my-app --to acme --tag 1.0.0 --channel stable
 ```
 
-The app lands under `aura-apps/<id>` with its store metadata as
-annotations — the registry *is* the catalog, there is no index to maintain.
+The app lands under `aura-apps/<id>` (or the source's prefix) with its store
+metadata as annotations, and is added to `<prefix>/catalog:latest`. The
+registry *is* the catalog; there is no index to maintain.
+
+**Registries that refuse `/v2/_catalog`** (GitLab, GHCR) work the same way,
+because the store reads that catalog artifact instead. On GitLab, each repo
+path is a project:
+- Create one project per app (`<group>/<appId>`) plus `<group>/catalog`.
+- Use a group deploy token with `read_registry` (customers) or
+  `write_registry` (you).
+- Add the source as `https://registry.example.com/<group>` (the path becomes
+  the prefix).
 
 ### 3. Let customers find it by address (optional)
 
@@ -139,3 +149,11 @@ Serve one small file at
 | `appRepoPrefix` | Optional, when apps aren't under `aura-apps/` |
 
 Customers then only need the address and their login.
+
+**No web host?** The registry address itself works too. When there is no
+`aura-store.json`, AuraOS checks whether the address is an OCI registry and
+uses its path as the app prefix:
+
+```bash
+aura nexus registry add registry.example.com/team/apps --name team --username <user>
+```

@@ -114,6 +114,7 @@ schema defaults.
 ```jsonc
 {
   "id": "com.example.hello",
+  "originId": "550e8400-e29b-41d4-a716-446655440000",   // set by `aura dev new` — don't edit
   "name": "Hello",
   "instanceMode": "single",        // or "multi"
   "activityMode": "none",          // or "multi"
@@ -132,6 +133,27 @@ schema defaults.
 
 See [Core Concepts](/docs/core-concepts) for what each policy does at
 runtime.
+
+### `id` and `originId`
+
+An app has two identifiers:
+
+| Field | What it is | Changes when |
+|---|---|---|
+| `id` | Reverse-domain name, unique on this AuraOS. How the app is addressed locally. | You clone or rename the app, or install it under another id. |
+| `originId` | UUID: *which* app this is, across registries, versions and ids. | You create an independent copy (clone or fork). Never on an update, publish or registry move. |
+
+- `aura dev new` generates the `originId`.
+- `aura dev clone` gives the copy a new one. `--keep-origin` keeps it when you
+  are moving or renaming the *same* app.
+- Apps from before `originId` existed get one with `aura dev origin --assign <id>`,
+  or `--assign --all` for every app.
+- `aura dev origin` lists them. `--reassign` changes an existing one, which needs
+  admin; the app then stops being recognised as what it was.
+
+A matching `originId` is a *claim* of shared identity. It is not proof of
+publisher or code, so the store asks before it acts on it
+([Nexus → Same id, same app?](/docs/nexus#same-id-same-app)).
 
 Need a database, an agent or any other foreign image next to your app? Use
 `"sandbox": "container"`, declare it as a template in `services[]`, add the

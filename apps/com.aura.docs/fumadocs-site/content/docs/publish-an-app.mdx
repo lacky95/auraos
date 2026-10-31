@@ -14,7 +14,9 @@ same backend.
 
 ## Prerequisites
 
-- A runnable app with a valid `app.manifest.json`. Sanity-check it first:
+- A runnable app with a valid `app.manifest.json` **with an `originId`**.
+  Publish refuses an app without one; `aura dev origin --assign <id>` adds it
+  (commit that change). Sanity-check the manifest first:
   ```bash
   aura dev validate /data/scopes/users/default/apps/com.example.hello   # where user-scope apps live
   aura dev validate --all                                               # or every app
@@ -39,6 +41,7 @@ where it publishes. Add them to `app.manifest.json`:
 ```jsonc
 {
   "id": "com.example.hello",
+  "originId": "550e8400-e29b-41d4-a716-446655440000",
   "name": "Hello",
   "version": "0.1.0",
   "description": "A tiny demo app.",
@@ -109,10 +112,23 @@ aura-com.aura.registry:4090/aura-apps/com.example.hello:0.1.0   ← the version
 ```
 
 Your `store` fields + core manifest are embedded in the artifact's OCI
-annotations (`org.opencontainers.image.*` and `app.aura.*`), so the store
-can list your app with full metadata **without pulling the bundle**. Apps
-live under the `aura-apps/` repo prefix, which keeps them cleanly separate
-from any other artifacts in the same registry.
+annotations (`org.opencontainers.image.*` and `app.aura.*`, including
+`app.aura.origin-id`), so the store can list your app with full metadata
+**without pulling the bundle**.
+- **Where it lands:** apps live under the source's repo prefix. The default is
+  `aura-apps/`; a source added as `https://host/team/apps` uses `team/apps/`.
+- **App list:** publish also adds the app to `<prefix>/catalog:latest`. That's
+  how registries that can't list their repos (GitLab, GHCR) still show every
+  app.
+
+### What gets shipped
+
+Exactly the files git would track: it follows `.gitignore` and
+`publish.ignore`. On top of that, a fixed deny list no manifest can switch
+off: `.sidecars/`, the `<appId>/` data dir, `.env*`, keys, `*.db` / `*.sqlite`,
+credentials files, and an `.npmrc` with a login. The app dir is also where its
+instance keeps state, and none of that leaves the machine. Publish prints what
+it kept out.
 
 ## 3. See it in the store
 
@@ -170,10 +186,15 @@ a per-user install, or `--channel beta` to pin a channel. First install of an
 app prompts to approve the tools/permissions it declares — pass `-y` to
 auto-approve (right for CI, not for user-driven installs).
 
+If an installed app already shares the id or `originId`, the store asks first
+and never replaces it silently; see
+[Nexus → Same id, same app?](./nexus#same-id-same-app).
+
 ## Versions & channels
 
 - Bump `version` in the manifest and re-run `aura nexus app publish` to cut a
-  new release. The new `<version>` tag is pushed, and `:latest` (plus the
+  new release. Keep the `originId`: it is what makes the new release an
+  update of the installed app. The new `<version>` tag is pushed, and `:latest` (plus the
   channel) move to it.
 - Channels are just extra tags. Ship `--channel beta` for pre-releases; users
   opt in with `aura nexus app install <id> --channel beta`.

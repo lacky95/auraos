@@ -159,6 +159,29 @@ Installs default to the **global** [scope](./scopes); pass `--scope user`
 for a per-user install. Full command flags live in the
 [CLI Reference](./cli-reference).
 
+## Same id, same app?
+
+The store compares the app's `id` *and* its `originId`
+([what they are](./develop-an-app#id-and-originid)). An install never replaces
+an installed app just because the ids match:
+
+| Situation | What happens |
+|---|---|
+| Same app (`originId`), from the source it was installed from | Normal update. |
+| Same app, offered by **another** source | Asks: update the installed app, which then follows the new source, or install an independent copy. |
+| Same `id`, **different** app | Asks: install it under another id. The installed app is kept. |
+| Same app under **another** local id | Asks: update that app (it keeps its local id), or install a copy. |
+| Neither matches | Normal install. |
+
+Interactively, `aura nexus app install` / `update` asks. In scripts, answer
+with `--update-existing` (alias `--switch-source`), `--as <appId>` or
+`--copy [appId]`. A copy gets a new id and a new `originId` and never updates
+from the source.
+
+Over the API, `/api/nexus/install` (and `/update/<id>`) reply
+`{ needsIdentityChoice, conflict }`. Send the install again with
+`identity: { action, appId? }`, where `action` is one of `conflict.choices`.
+
 ## Permission gating
 
 Before an install lands, Nexus diffs the incoming manifest's `permissions[]`,
@@ -175,9 +198,9 @@ Every install walks the same stages, driven as an async generator
 stream:
 
 ```
-ref  →  Resolver  →  Fetcher  →  Validator  →  PermissionDiff  →  Installer
-                                                     ↓
-                                              (approval gate)
+ref  →  Resolver  →  Fetcher  →  Validator  →  Identity  →  PermissionDiff  →  Installer
+                                                  ↓                ↓
+                                            (choice gate)   (approval gate)
                                                      ↓
                                               install record
 ```
@@ -187,6 +210,8 @@ ref  →  Resolver  →  Fetcher  →  Validator  →  PermissionDiff  →  Inst
 - **Fetcher** pulls the source into staging — `oras pull` for OCI, `git
   clone` for git, copy for local.
 - **Validator** runs the manifest schema and rejects anything malformed.
+- **Identity** matches the app against installed ones by `id` + `originId`
+  ([above](#same-id-same-app)) and, when chosen, gives it another local id.
 - **PermissionDiff** computes the approval gate above.
 - **Installer** lands the app into the target scope's `appsDir` and writes an
   install record; the AppRegistry picks it up and the app becomes launchable.

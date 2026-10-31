@@ -272,15 +272,15 @@ Find, install, update and publish apps; every command posts to the shell's
 | Command | What it does | Key flags |
 |---|---|---|
 | `aura nexus search [query]` | Search the aggregated catalog by id, name, description or tag. | `--category <slug>`, `--refresh` |
-| `aura nexus app install <ref>` | Resolve, fetch, validate, install. Pauses on new-permission diffs unless `-y`. | `-y`, `--channel <name>`, `--scope global\|user` |
-| `aura nexus app update [id]` | Re-resolve an installed app and reinstall if it moved. | `-y`, `--all` |
+| `aura nexus app install <ref>` | Resolve, fetch, validate, install. Pauses on new-permission diffs unless `-y`, and asks when an installed app shares the id or `originId`. | `-y`, `--channel <name>`, `--scope global\|user`, `--update-existing`, `--as <appId>`, `--copy [appId]` |
+| `aura nexus app update [id]` | Re-resolve an installed app and reinstall if it moved. | `-y`, `--all`, `--update-existing`, `--as`, `--copy` |
 | `aura nexus app uninstall <id>` | Remove; per-app data is kept unless `--purge`. | `--purge` |
 | `aura nexus app list` / `info <ref>` | Installed apps + their Nexus source / dry-run preview of a ref (manifest + permission diff). | `--source git\|oci\|index\|local` |
 | `aura nexus app publish [path]` | Push the app to an OCI registry or git repo. Bare + TTY = wizard. | `--to`, `--kind oci\|git`, `--tag`, `--channel`, `--branch`, `-y`, `--submit` |
 | `aura nexus app submit [path]` | Open a store PR for an already-published app. | `--from`, `--kind`, `--tag`, `--channel`, `--store-repo`, `--dry-run` |
 | `aura nexus app screenshots list\|add\|replace\|remove` | Manage the screenshots of a store listing. | — |
 | `aura nexus store login\|status` | Store a GitHub token for submissions / show the store target. | — |
-| `aura nexus registry list\|add\|remove` | Manage the sources Nexus aggregates (OCI registries + git catalogs). | `add`: `--kind oci\|git-index\|git-app`, `--priority`, `--mirror`, `--ref` |
+| `aura nexus registry list\|add\|login\|logout\|remove` | Manage the sources Nexus aggregates (OCI registries + git catalogs). `add <address>` alone discovers the store (`aura-store.json`, or the address is the registry: `host/<prefix>`). | `add`: `--kind oci\|git-index\|git-app`, `--priority`, `--mirror`, `--prefix <path>`, `--ref`, `--username`, `--password-stdin` |
 
 Ref shapes `install` / `info` accept:
 
@@ -296,8 +296,9 @@ Ref shapes `install` / `info` accept:
 | Command | What it does | Key flags |
 |---|---|---|
 | `aura dev new [appId]` | Scaffold a new app. Wizard if `appId` is omitted. | `--name`, `--icon`, `--description`, `--shape activity\|activity-bg\|service`, `--instance-mode single\|multi`, `--sandbox proot\|container`, `--tools`, `--scope user\|global`, `--force`, `--non-interactive` |
-| `aura dev clone [source] [target]` | Clone any app (incl. system apps) into `user` or `global` scope. Wizard if ids are omitted. | `--scope`, `--source-scope`, `--name`, `--no-rewrite-ids`, `--exclude-git`, `--with-data`, `--force`, `--dry-run`, `--json`, … |
-| `aura dev validate [path]` | Validate one manifest against the schema, or all with `--all`. | `--all` |
+| `aura dev clone [source] [target]` | Clone any app (incl. system apps) into `user` or `global` scope. The copy gets a new `originId`. Wizard if ids are omitted. | `--scope`, `--source-scope`, `--name`, `--keep-origin`, `--no-rewrite-ids`, `--exclude-git`, `--with-data`, `--force`, `--dry-run`, `--json`, … |
+| `aura dev validate [path]` | Validate one manifest against the schema, or all with `--all`. Warns when `originId` is missing. | `--all` |
+| `aura dev origin [appId]` | List app `originId`s, or set them. | `--assign [--all]`, `--reassign` (admin), `--origin-id <uuid>`, `--scope`, `--json` |
 | `aura dev clean-manifest [path]` | Strip manifest fields equal to the schema default. | `--all`, `--dry-run` |
 | `aura dev standalone <appId>` | Run an app directly with `astro dev` (no sandbox, no shell wrapper) for fast UI iteration. | — |
 
