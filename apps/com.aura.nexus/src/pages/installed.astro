@@ -1,160 +1,144 @@
 ---
 import Layout from '../layouts/Layout.astro';
+import InstallControl from '../components/InstallControl.astro';
+import SectionHeader from '../components/SectionHeader.astro';
 import { shellGet } from '../lib/shellClient';
+import type { Catalog, CatalogEntry, InstallState } from '../lib/catalog';
 
 interface InstalledItem {
-  manifest: { id: string; name: string; version: string };
+  manifest: { id: string; name: string; version: string; icon?: string; description?: string; originId?: string };
   record: {
     id: string; version: string;
     source: 'oci' | 'git' | 'index' | 'local';
     ref: string; digest: string; channel: string | null;
     installedAt: string; updatedAt: string;
+    sourceName?: string; detached?: boolean; remoteId?: string;
   };
   isNexusInstalled: boolean;
   scope?: string;
 }
 
 let items: InstalledItem[] = [];
+let catalog: CatalogEntry[] = [];
 let error: string | null = null;
 try {
-  items = await shellGet<InstalledItem[]>('/api/nexus/installed');
+  [items, catalog] = await Promise.all([
+    shellGet<InstalledItem[]>('/api/nexus/installed'),
+    shellGet<Catalog>('/api/nexus').then((c) => c.apps).catch(() => [] as CatalogEntry[]),
+  ]);
 } catch (err) {
   error = (err as Error).message;
 }
+
+// Each installed app's store entry (by id AND originId — the shell's
+// InstallState says which local app an entry maps to), so it gets the same
+// control and update signal as on Browse.
+const byLocal = new Map<string, CatalogEntry>();
+for (const e of catalog) {
+  const st = e.install;
+  if (!st || st.status !== 'installed' || !st.localAppId) continue;
+  const prev = byLocal.get(st.localAppId);
+  if (!prev || (!prev.install!.verified && st.verified)) byLocal.set(st.localAppId, e);
+}
+
+const rows = items
+  .slice()
+  .sort((a, b) => a.manifest.name.localeCompare(b.manifest.name))
+  .map((it, index) => {
+    const entry = byLocal.get(it.manifest.id);
+    const kind = it.scope === 'system' ? 'system' : it.isNexusInstalled ? 'store' : 'local';
+    const localState: InstallState = {
+      status: 'installed', localAppId: it.manifest.id, scope: it.scope,
+      installedVersion: it.manifest.version, updateAvailable: false,
+      fromThisSource: it.isNexusInstalled, hasRecord: it.isNexusInstalled,
+      canUninstall: it.isNexusInstalled && it.scope !== 'system',
+      detached: !!it.record.detached, verified: true,
+    };
+    const update = !!entry?.install?.updateAvailable;
+    return {
+      it, entry, kind, index, update, localState,
+      localUpdate: it.isNexusInstalled && it.record.source !== 'local' && it.scope !== 'system' && !it.record.detached,
+      facets: [kind, update ? 'update' : ''].filter(Boolean).join(' '),
+      search: [it.manifest.name, it.manifest.id, it.manifest.description, it.record.sourceName, entry?.publisher]
+        .filter(Boolean).join(' ').toLowerCase(),
+      glyph: (it.manifest.icon ?? it.manifest.name.charAt(0)).slice(0, 3).toUpperCase(),
+      source: it.record.sourceName ?? (kind === 'store' ? it.record.source : kind),
+    };
+  });
+const n = (k: string) => rows.filter((r) => r.facets.split(' ').includes(k)).length;
 ---
 <Layout title="Installed" active="installed">
   {error && <div class="nexus-empty">Error: {error}</div>}
-  {!error && items.length === 0 && (
-    <div class="nexus-empty">No apps installed.</div>
-  )}
-  {items.map((it) => (
-    <div class="nexus-card" data-app-id={it.manifest.id}>
-      <div class="nexus-card-head">
-        <div>
-          <div class="nexus-card-title">
-            {it.manifest.name}
-            <span style="color:var(--aura-color-text-dim);font-weight:400"> · {it.manifest.id} · v{it.manifest.version}</span>
-            <span class="badge" style="margin-left:8px">{it.record.source}</span>
-            {!it.isNexusInstalled && <span class="badge" style="margin-left:4px">monorepo</span>}
-            {it.record.channel && <span class="badge primary" style="margin-left:4px">{it.record.channel}</span>}
+  {!error && rows.length === 0 && <div class="nexus-empty">No apps installed.</div>}
+  {rows.length > 0 && (
+    <div class="browse" data-browse data-key="installed" data-default-view="list">
+      <div class="toolbar">
+        <label class="search">
+          <span class="search-icon" aria-hidden="true">⌕</span>
+          <input data-q type="search" placeholder="Search installed apps" aria-label="Search installed apps" autocomplete="off" spellcheck="false" />
+          <kbd class="search-kbd" aria-hidden="true">/</kbd>
+        </label>
+        <div class="toolbar-row">
+          <div class="chips" data-chips="show" role="group" aria-label="Show">
+            <button type="button" class="chip" data-chip="">All <span data-chip-count>{rows.length}</span></button>
+            <button type="button" class="chip chip-update" data-chip="update">Updates <span data-chip-count>{n('update')}</span></button>
+            <button type="button" class="chip" data-chip="store">From the store <span data-chip-count>{n('store')}</span></button>
+            <button type="button" class="chip" data-chip="local">Built here <span data-chip-count>{n('local')}</span></button>
+            <button type="button" class="chip" data-chip="system">System <span data-chip-count>{n('system')}</span></button>
           </div>
-          <div class="nexus-card-meta">
-            {it.record.ref}
-            {it.record.digest && <span> · digest {it.record.digest.slice(0, 16)}</span>}
-            {it.record.installedAt && <span> · installed {it.record.installedAt.slice(0, 10)}</span>}
+          <div class="toolbar-end">
+            <select data-sort aria-label="Sort">
+              <option value="default">Name</option>
+              <option value="source">Source</option>
+            </select>
+            <div class="view-toggle" role="group" aria-label="View">
+              <button type="button" data-view="grid" title="Grid view" aria-label="Grid view">▦</button>
+              <button type="button" data-view="list" title="List view" aria-label="List view">☰</button>
+            </div>
           </div>
-        </div>
-        <div class="nexus-card-actions">
-          {it.scope === 'system' && <span class="badge">system · built-in</span>}
-          {it.scope !== 'system' && it.record.source !== 'local' && (
-            <button class="update-btn" data-app-id={it.manifest.id}>UPDATE</button>
-          )}
-          {it.scope !== 'system' && (
-            <button class="uninstall-btn" data-app-id={it.manifest.id}>UNINSTALL</button>
-          )}
         </div>
       </div>
+
+      <section class="nexus-section">
+        <SectionHeader title="Installed apps" count={rows.length} desc="Store apps update here; apps built or copied on this machine are never removed from the store.">
+          <button type="button" class="btn-ghost" data-reset hidden>Clear filters</button>
+        </SectionHeader>
+        <div class="app-list view-list" data-list>
+          {rows.map((r) => (
+            <article class="app-card" data-card data-facets={r.facets} data-search={r.search}
+              data-name={r.it.manifest.name.toLowerCase()} data-source={r.source} data-index={r.index}>
+              <a class="app-card-link" href={r.entry ? `/app?id=${encodeURIComponent(r.entry.id)}` : undefined}>
+                <span class="app-glyph" aria-hidden="true">{r.glyph}</span>
+                <span class="app-card-text">
+                  <span class="app-card-name">{r.it.manifest.name}</span>
+                  <span class="app-card-id">{r.it.manifest.id}</span>
+                  {r.it.manifest.description && <span class="app-card-desc">{r.it.manifest.description}</span>}
+                </span>
+              </a>
+              <div class="app-card-foot">
+                <div class="app-card-meta">
+                  <span class="badge">v{r.it.manifest.version}</span>
+                  {r.kind === 'store' && <span class="badge" title={r.it.record.ref}>{r.source}</span>}
+                  {r.it.scope && r.it.scope !== 'system' && <span class="badge cat">{r.it.scope}</span>}
+                  {r.it.record.channel && <span class="badge cat">{r.it.record.channel}</span>}
+                  <span class="app-card-status" data-ic-status></span>
+                </div>
+                {r.entry
+                  ? <InstallControl ref={r.entry.id} name={r.it.manifest.name} version={r.entry.version} state={r.entry.install!} />
+                  : <InstallControl localOnly localUpdate={r.localUpdate} name={r.it.manifest.name} state={r.localState} />}
+              </div>
+              <div class="ic-note" data-ic-note hidden></div>
+            </article>
+          ))}
+        </div>
+        <div class="nexus-empty" data-noresults hidden>
+          <p>No installed apps match.</p>
+          <p><button type="button" class="btn-ghost" data-reset>Clear filters</button></p>
+        </div>
+      </section>
     </div>
-  ))}
-
-  <script is:inline>
-    // Inline feedback per card (no native confirm()/alert() — both are
-    // suppressed inside the OS app iframe).
-    function feedback(card, text, cls) {
-      if (!card) return;
-      let fb = card.querySelector('.row-feedback');
-      if (!fb) {
-        fb = document.createElement('div'); fb.className = 'row-feedback';
-        fb.style.cssText = 'margin-top:8px;padding-top:6px;border-top:1px dashed var(--aura-color-border);font-size:0.72rem;white-space:pre-wrap;word-break:break-word;';
-        card.appendChild(fb);
-      }
-      fb.style.color = cls === 'ok' ? 'var(--aura-color-primary)'
-                     : cls === 'err' ? 'var(--aura-color-warning, #e0a000)'
-                     : 'var(--aura-color-text-dim)';
-      fb.textContent = text;
-    }
-    const dangerOn  = (b) => { b.style.color = 'var(--aura-color-warning, #e0a000)'; b.style.borderColor = 'var(--aura-color-warning, #e0a000)'; };
-    const dangerOff = (b) => { b.style.color = ''; b.style.borderColor = ''; };
-
-    // Reconcile the rendered list against server truth — the authority for
-    // "what's actually installed". Drops cards for apps no longer installed.
-    async function reconcileList() {
-      try {
-        const items = await (await fetch('/api/nexus/installed', { cache: 'no-store' })).json();
-        const ids = new Set((items || []).map((it) => it && it.manifest && it.manifest.id).filter(Boolean));
-        document.querySelectorAll('.nexus-card[data-app-id]').forEach((el) => {
-          if (!ids.has(el.getAttribute('data-app-id'))) el.remove();
-        });
-        if (!document.querySelector('.nexus-card[data-app-id]') && !document.querySelector('.nexus-empty')) {
-          const main = document.querySelector('.nexus-main') || document.body;
-          const empty = document.createElement('div');
-          empty.className = 'nexus-empty'; empty.textContent = 'No apps installed.';
-          main.appendChild(empty);
-        }
-      } catch { /* transient */ }
-    }
-
-    document.querySelectorAll('.uninstall-btn').forEach((btn) => {
-      const id   = btn.getAttribute('data-app-id');
-      const card = btn.closest('.nexus-card');
-      btn.addEventListener('click', async () => {
-        // First click arms; second click confirms (no modal needed).
-        if (btn.dataset.confirm !== '1') {
-          btn.dataset.confirm = '1'; btn.textContent = 'CONFIRM REMOVE'; dangerOn(btn);
-          feedback(card, 'Per-app data is preserved. Click "CONFIRM REMOVE" again to uninstall.');
-          return;
-        }
-        btn.disabled = true; btn.textContent = 'REMOVING…';
-        feedback(card, 'uninstalling ' + id + '…');
-        try {
-          const res = await fetch('/api/nexus/uninstall/' + encodeURIComponent(id), { method: 'POST' });
-          const j = await res.json().catch(() => ({}));
-          if (!res.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + res.status));
-          feedback(card, '✓ uninstalled — data preserved', 'ok');
-          if (card) card.style.opacity = '0.45';   // instant visual cue
-          // Authority: reconcile the list against the server (the app is gone
-          // now, so its card is dropped) — robust regardless of DOM quirks.
-          reconcileList();
-        } catch (err) {
-          feedback(card, 'ERROR: ' + (err && err.message ? err.message : err), 'err');
-          btn.disabled = false; btn.dataset.confirm = ''; btn.textContent = 'UNINSTALL'; dangerOff(btn);
-        }
-      });
-    });
-
-    document.querySelectorAll('.update-btn').forEach((btn) => {
-      const id   = btn.getAttribute('data-app-id');
-      const card = btn.closest('.nexus-card');
-      btn.addEventListener('click', async () => {
-        // An update can ask for MORE than the installed version had — a new
-        // tool, a new permission, a data provider. Showing that diff is the
-        // whole point: the user already trusted v1, not necessarily v2.
-        btn.disabled = true; btn.textContent = 'CHECKING…';
-        feedback(card, 'checking what the update asks for…');
-        try {
-          const j = await window.auraUpdate(id, {
-            name: id,
-            onApproved: () => { btn.textContent = 'UPDATING…'; feedback(card, 'updating ' + id + '…'); },
-          });
-          if (j.cancelled) { feedback(card, 'cancelled — nothing was updated'); btn.disabled = false; btn.textContent = 'UPDATE'; return; }
-          if (j.ok) { feedback(card, '✓ updated to v' + (j.record ? j.record.version : '?'), 'ok'); setTimeout(() => location.reload(), 700); }
-          else { feedback(card, 'update: ' + (j.error || 'nothing to update'), 'err'); btn.disabled = false; btn.textContent = 'UPDATE'; }
-        } catch (err) {
-          feedback(card, 'ERROR: ' + (err && err.message ? err.message : err), 'err'); btn.disabled = false; btn.textContent = 'UPDATE';
-        }
-      });
-    });
-
-    // Continuous reconcile (visible-only): the list always matches the server,
-    // so a removed app drops out even if a handler hung or it was uninstalled
-    // from elsewhere.
-    let listTimer = null;
-    function listLoop() {
-      listTimer = null;
-      if (!document.hidden) reconcileList();
-      listTimer = setTimeout(listLoop, 2500);
-    }
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) reconcileList(); });
-    listLoop();
+  )}
+  <script>
+    import '../scripts/browse';
   </script>
 </Layout>

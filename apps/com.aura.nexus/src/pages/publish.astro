@@ -1,9 +1,10 @@
 ---
 import Layout from '../layouts/Layout.astro';
+import SectionHeader from '../components/SectionHeader.astro';
 ---
 <Layout title="Publish" active="publish">
   <section class="nexus-section">
-    <h2>// Publish an app</h2>
+    <SectionHeader title="Publish an app" desc="Push an app to an OCI registry or a git repo; it needs an originId (aura dev origin --assign)." />
     <p style="color:var(--aura-color-text-dim);font-size:0.8rem">
       Prefer the CLI: <code>aura nexus app publish</code> runs an interactive
       wizard (or takes flags for CI). Publishing to an OCI registry embeds your
@@ -50,11 +51,13 @@ import Layout from '../layouts/Layout.astro';
   </section>
 
   <section class="nexus-section">
-    <h2>// Output</h2>
+    <SectionHeader title="Output" />
     <pre class="nexus-log" id="log">(no output yet)</pre>
   </section>
 
   <script is:inline>
+    // Re-runs on every page swap (ClientRouter): keep its names out of the global scope.
+    (function () {
     const log       = document.getElementById('log');
     const publishB  = document.getElementById('publish-btn');
 
@@ -95,5 +98,6 @@ import Layout from '../layouts/Layout.astro';
         publishB.textContent = 'PUBLISH';
       }
     });
+    })();
   </script>
 </Layout>

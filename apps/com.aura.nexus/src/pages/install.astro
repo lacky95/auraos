@@ -1,10 +1,11 @@
 ---
 import Layout from '../layouts/Layout.astro';
+import SectionHeader from '../components/SectionHeader.astro';
 const initialRef = new URL(Astro.request.url).searchParams.get('ref') ?? '';
 ---
 <Layout title="Install" active="install">
   <section class="nexus-section">
-    <h2>// Install an app</h2>
+    <SectionHeader title="Install an app" desc="A store id, an OCI reference, a git URL or a local path — previewed before anything is installed." />
     <p style="color:var(--aura-color-text-dim);font-size:0.8rem">
       Paste a Git URL, OCI ref, index id, or local path. Examples:
       <code style="color:var(--aura-color-primary)">github.com/user/aura-foo</code>,
@@ -23,11 +24,13 @@ const initialRef = new URL(Astro.request.url).searchParams.get('ref') ?? '';
   </section>
 
   <section class="nexus-section">
-    <h2>// Output</h2>
+    <SectionHeader title="Output" />
     <pre class="nexus-log" id="log">(no output yet)</pre>
   </section>
 
   <script is:inline>
+    // Re-runs on every page swap (ClientRouter): keep its names out of the global scope.
+    (function () {
     const input    = document.getElementById('ref-input');
     const previewB = document.getElementById('preview-btn');
     const installB = document.getElementById('install-btn');
@@ -110,5 +113,6 @@ const initialRef = new URL(Astro.request.url).searchParams.get('ref') ?? '';
         installB.textContent = 'INSTALL';
       }
     });
+    })();
   </script>
 </Layout>

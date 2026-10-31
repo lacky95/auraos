@@ -1,5 +1,6 @@
 ---
 import Layout from '../layouts/Layout.astro';
+import SectionHeader from '../components/SectionHeader.astro';
 import { shellGet } from '../lib/shellClient';
 
 interface SourceEntry {
@@ -45,7 +46,7 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
 ---
 <Layout title="Sources" active="sources">
   <section class="nexus-section">
-    <h2>// Sources</h2>
+    <SectionHeader title="Sources" desc="Where the store finds apps: OCI registries and git catalogs, checked in priority order." />
     <p style="color:var(--aura-color-text-dim);font-size:0.8rem">
       Nexus aggregates apps from every source below into the
       <a href="/">Browse</a> tab. A source is either an <b>OCI registry</b>
@@ -165,7 +166,7 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
   </section>
 
   <section class="nexus-section">
-    <h2>// Pre-registered sources</h2>
+    <SectionHeader title="Pre-registered sources" />
     <p style="color:var(--aura-color-text-dim);font-size:0.8rem">
       An install can ship sources that exist from the first boot: JSON seed
       files in the directories below and the <code>{seedsInfo?.envVar ?? 'AURA_NEXUS_SOURCES'}</code>
@@ -208,7 +209,7 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
   </section>
 
   <section class="nexus-section">
-    <h2>// Add a store by address</h2>
+    <SectionHeader title="Add a store by address" desc="Its address, e.g. apps.example.com or registry.example.com/team/apps." />
     <p style="color:var(--aura-color-text-dim);font-size:0.8rem">
       Got an address from an app publisher, like <code>apps.example.com</code>?
       Enter it here — the store describes itself and only the login is left to
@@ -223,7 +224,7 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
   </section>
 
   <section class="nexus-section">
-    <h2>// Add a source</h2>
+    <SectionHeader title="Add a source" />
     <div class="nexus-form">
       <label for="src-kind">Kind</label>
       <select id="src-kind">
@@ -273,11 +274,13 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
   </section>
 
   <section class="nexus-section">
-    <h2>// Output</h2>
+    <SectionHeader title="Output" />
     <pre class="nexus-log" id="log">(no output yet)</pre>
   </section>
 
   <script is:inline>
+    // Re-runs on every page swap (ClientRouter): keep its names out of the global scope.
+    (function () {
     const $ = (id) => document.getElementById(id);
     const log = $('log');
     const setLog = (t) => { log.textContent = t; };
@@ -530,5 +533,6 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
         }
       });
     });
+    })();
   </script>
 </Layout>

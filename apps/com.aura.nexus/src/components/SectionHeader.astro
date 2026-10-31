@@ -1,0 +1,14 @@
+---
+/** A section heading: title, optional count + one-line description, actions
+ *  on the right. Replaces the old `// LABEL` headings. */
+interface Props { title: string; count?: number | string; desc?: string; id?: string; level?: 2 | 3 }
+const { title, count, desc, id, level = 2 } = Astro.props;
+const Tag = level === 3 ? 'h3' : 'h2';
+---
+<div class="sec-head" id={id}>
+  <div class="sec-head-text">
+    <Tag class="sec-title">{title}{count !== undefined && <span class="sec-count" data-count>{count}</span>}</Tag>
+    {desc && <p class="sec-desc">{desc}</p>}
+  </div>
+  {Astro.slots.has('default') && <div class="sec-actions"><slot /></div>}
+</div>

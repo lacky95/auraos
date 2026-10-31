@@ -13,6 +13,10 @@ export default defineConfig({
   security: { checkOrigin: false },
   server: { port, host: true },
   devToolbar: { enabled: false },
+  // Pages are server-rendered; ClientRouter (Layout.astro) swaps them in
+  // place, and prefetching on hover / when links scroll into view on touch
+  // makes a tab or an app's detail page open without a visible load.
+  prefetch: { prefetchAll: true, defaultStrategy: 'hover' },
   integrations: [auraAppIntegration()],
   vite: {
     server: { hmr: false },

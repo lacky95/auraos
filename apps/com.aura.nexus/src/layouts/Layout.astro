@@ -1,4 +1,6 @@
 ---
+import { ClientRouter } from 'astro:transitions';
+
 interface Props {
   title?: string;
   active?: 'browse' | 'installed' | 'install' | 'publish' | 'sources';
@@ -7,39 +9,44 @@ interface Props {
 const { title = 'Nexus', active = 'browse' } = Astro.props;
 
 const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: string }> = [
-  { id: 'browse',    label: 'BROWSE',    href: '/' },
-  { id: 'installed', label: 'INSTALLED', href: '/installed' },
-  { id: 'install',   label: 'INSTALL',   href: '/install' },
-  { id: 'publish',   label: 'PUBLISH',   href: '/publish' },
-  { id: 'sources',   label: 'SOURCES',   href: '/sources' },
+  { id: 'browse',    label: 'Browse',    href: '/' },
+  { id: 'installed', label: 'Installed', href: '/installed' },
+  { id: 'install',   label: 'Install',   href: '/install' },
+  { id: 'publish',   label: 'Publish',   href: '/publish' },
+  { id: 'sources',   label: 'Sources',   href: '/sources' },
 ];
 ---
 <!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{title} · Nexus</title>
+    <ClientRouter fallback="swap" />
   </head>
   <body>
     <header class="nexus-bar">
-      <h1 class="nexus-title">
+      <a class="nexus-brand" href="/" aria-label="Nexus — browse">
         <span class="glyph">NEX</span>
         <span class="wordmark">NEXUS</span>
-        <span class="subtitle">// AuraOS app store</span>
-      </h1>
-      <nav class="nexus-tabs">
+        <span class="subtitle">AuraOS app store</span>
+      </a>
+      <nav class="nexus-tabs" aria-label="Store">
         {TABS.map((tab) => (
           <a
             href={tab.href}
             class:list={['nexus-tab', { active: tab.id === active }]}
-          >{tab.label}</a>
+            aria-current={tab.id === active ? 'page' : undefined}
+          >{tab.label}{tab.id === 'installed' && <span class="tab-badge" data-updates-badge hidden></span>}</a>
         ))}
       </nav>
     </header>
     <main class="nexus-main">
       <slot />
     </main>
+    <script>
+      import '../scripts/store';
+    </script>
 
     <style is:global>
       :root {
@@ -80,117 +87,55 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
         outline: none;
         border-color: var(--aura-color-primary);
       }
-      /* ── Responsive top bar + tab nav ───────────────────────────────────
-       * Three regimes, controlled by the bar's container width — not the
-       * viewport — so the same logic works inside the OS launcher, a
-       * narrow tiling cell, or full-screen.
-       *
-       *   ≥ 720px  — title + subtitle on the left, all four tabs on the
-       *              right, single row.
-       *   ≥ 480px  — subtitle drops; tabs flow under the title on a
-       *              second row, still all visible.
-       *   < 480px  — tabs become a scroll-snap horizontal strip so the
-       *              user can swipe through them without stacking into a
-       *              tall vertical menu that eats half the iframe. */
+      /* ── Top bar: brand + tabs. One row on wide screens; on narrow ones
+       *   the tabs become a swipeable strip on their own row. ── */
       .nexus-bar {
         position: sticky; top: 0;
         background: var(--aura-color-surface);
         border-bottom: 1px solid var(--aura-color-border);
-        padding: 10px 16px;
-        display: flex;
-        flex-wrap: wrap;            /* nav can drop below title on narrow */
-        align-items: center;
-        column-gap: 24px;
-        row-gap: 8px;
-        z-index: 10;
+        padding: 8px 16px;
+        display: flex; flex-wrap: wrap; align-items: center;
+        column-gap: 24px; row-gap: 6px;
+        z-index: 20;
       }
-      .nexus-title {
-        display: flex;
-        align-items: baseline;
-        gap: 10px;
-        margin: 0;
-        font-size: 0.95rem;
-        min-width: 0;                /* allows the title to shrink */
-        flex: 0 0 auto;
-      }
-      .nexus-title .glyph {
-        color: var(--aura-color-primary);
-        font-weight: 700;
-        letter-spacing: 0.12em;
-        border: 1px solid var(--aura-color-primary);
-        padding: 2px 5px;
-        font-size: 0.7rem;
-        flex-shrink: 0;
-      }
-      .nexus-title .wordmark {
-        font-weight: 700;
-        letter-spacing: 0.15em;
+      .nexus-brand {
+        display: flex; align-items: center; gap: 10px;
+        font-size: 0.95rem; flex: 0 0 auto; min-width: 0;
         color: var(--aura-color-text);
       }
-      .nexus-title .subtitle {
-        color: var(--aura-color-text-dim);
-        font-size: 0.7rem;
-        letter-spacing: 0.08em;
-        white-space: nowrap;
+      .nexus-brand:hover { text-shadow: none; }
+      .nexus-brand .glyph {
+        color: var(--aura-color-primary); font-weight: 700; letter-spacing: 0.12em;
+        border: 1px solid var(--aura-color-primary); padding: 2px 5px; font-size: 0.7rem;
       }
+      .nexus-brand .wordmark { font-weight: 700; letter-spacing: 0.15em; }
+      .nexus-brand .subtitle { color: var(--aura-color-text-dim); font-size: 0.7rem; letter-spacing: 0.06em; white-space: nowrap; }
       .nexus-tabs {
-        display: flex;
-        flex-wrap: wrap;             /* tabs line-break when there's no room */
-        gap: 4px;
-        flex: 1 1 auto;              /* takes remaining row when both fit */
-        justify-content: flex-start;
-        min-width: 0;
+        display: flex; gap: 2px; flex: 1 1 auto; min-width: 0;
+        overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch;
       }
+      .nexus-tabs::-webkit-scrollbar { display: none; }
       .nexus-tab {
-        padding: 4px 10px;
-        font-size: 0.7rem;
-        letter-spacing: 0.12em;
+        position: relative;
+        padding: 8px 12px;
+        font-size: 0.72rem; letter-spacing: 0.1em; text-transform: uppercase;
         color: var(--aura-color-text-dim);
-        border: 1px solid transparent;
-        white-space: nowrap;
-        flex-shrink: 0;              /* tabs never squash */
+        border-bottom: 2px solid transparent;
+        white-space: nowrap; flex-shrink: 0;
       }
-      .nexus-tab:hover { color: var(--aura-color-text); border-color: var(--aura-color-border); }
-      .nexus-tab.active {
-        color: var(--aura-color-primary);
-        border-color: var(--aura-color-primary);
-        background: color-mix(in srgb, var(--aura-color-primary) 8%, transparent);
+      .nexus-tab:hover { color: var(--aura-color-text); text-shadow: none; }
+      .nexus-tab.active { color: var(--aura-color-primary); border-bottom-color: var(--aura-color-primary); }
+      .tab-badge {
+        display: inline-block; margin-left: 6px; min-width: 16px; padding: 0 4px;
+        font-size: 0.62rem; line-height: 16px; text-align: center; letter-spacing: 0;
+        color: var(--aura-color-bg); background: var(--aura-color-warning, #e0a000);
       }
-
-      /* Medium: drop the subtitle so the title chunk stays compact while
-       * the tabs flow onto their second row neatly. */
+      .tab-badge[hidden] { display: none; }
       @media (max-width: 720px) {
-        .nexus-title .subtitle { display: none; }
-        .nexus-bar { column-gap: 16px; padding: 8px 12px; }
-      }
-
-      /* Tight: lock tabs into a balanced 2-up grid so they wrap as a
-       * unit (2 + 2) instead of 3-on-top-and-PUBLISH-dangling-below.
-       *
-       * `flex: 1 1 calc(50% - 2px)` makes each tab basis half-row minus
-       * half the gap (4px gap → 2px share each). All four reach for the
-       * same width, so they break into rows of 2 cleanly. When the
-       * container is so narrow that 50%-of-row is smaller than the
-       * widest label ("INSTALLED") the basis floors out and they stack
-       * 1-per-row instead. */
-      @media (max-width: 480px) {
-        .nexus-bar  { padding: 8px 10px; }
-        .nexus-tabs { width: 100%; }      /* the tab grid owns its own row */
-        .nexus-tab {
-          flex: 1 1 calc(50% - 2px);
-          text-align: center;
-          padding: 6px 10px;
-        }
-      }
-      /* Phone-narrow: stack one tab per row so the labels can breathe
-       * even with the chunky letter-spacing. */
-      @media (max-width: 360px) {
-        .nexus-tab { flex: 1 1 100%; }
-      }
-
-      /* Extra-tight: drop the wordmark — glyph + tabs alone. */
-      @media (max-width: 320px) {
-        .nexus-title .wordmark { display: none; }
+        .nexus-brand .subtitle { display: none; }
+        .nexus-bar { padding: 6px 10px 0; }
+        .nexus-tabs { flex: 1 1 100%; }
+        .nexus-tab { padding: 8px 10px; }
       }
       .nexus-main { padding: 20px 16px; max-width: 1100px; margin: 0 auto; }
       .nexus-card {
@@ -268,37 +213,38 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
       .nexus-section {
         margin: 16px 0;
       }
-      /* The catalogue's staleness is bounded by the aggregator's TTLs, but a
-         maintainer who just merged a store PR should not have to wait out even
-         a short one. `?refresh=1` makes the route re-fetch every source,
-         bypassing the memo and the per-source disk caches. */
-      .nexus-h2-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
+      /* ── Section header (SectionHeader.astro) — replaces the old `// LABEL`. ── */
+      .sec-head {
+        display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between;
+        gap: 8px 16px; margin: 0 0 12px;
       }
-      .nexus-refresh {
-        font-size: 0.65rem;
-        letter-spacing: 0.12em;
-        padding: 3px 8px;
-        color: var(--aura-color-text-dim);
-        border: 1px solid var(--aura-color-border);
-        text-transform: uppercase;
-        white-space: nowrap;
-        flex-shrink: 0;
+      .sec-head-text { min-width: 0; }
+      .sec-title {
+        display: flex; align-items: center; gap: 10px;
+        margin: 0; font-size: 0.95rem; font-weight: 600; letter-spacing: 0.04em;
+        color: var(--aura-color-text);
       }
-      .nexus-refresh:hover {
-        color: var(--aura-color-primary);
-        border-color: var(--aura-color-primary);
+      .sec-title::before {
+        content: ''; width: 3px; height: 1em; background: var(--aura-color-primary);
+        box-shadow: 0 0 6px var(--aura-color-primary);
       }
-      .nexus-section h2 {
-        font-size: 0.75rem;
-        letter-spacing: 0.18em;
-        color: var(--aura-color-text-dim);
-        text-transform: uppercase;
-        margin: 0 0 10px;
+      h3.sec-title { font-size: 0.82rem; }
+      .sec-count {
+        font-size: 0.68rem; font-weight: 400; padding: 1px 7px;
+        color: var(--aura-color-text-dim); border: 1px solid var(--aura-color-border);
       }
+      .sec-desc { margin: 4px 0 0 13px; font-size: 0.74rem; color: var(--aura-color-text-dim); }
+      .sec-actions { display: flex; gap: 6px; align-items: center; }
+      .btn-ghost, .btn-icon {
+        display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+        font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+        padding: 6px 12px; min-height: 32px; box-sizing: border-box;
+        color: var(--aura-color-text-dim); background: transparent;
+        border: 1px solid var(--aura-color-border); cursor: pointer; white-space: nowrap;
+      }
+      .btn-ghost:hover, .btn-icon:hover { color: var(--aura-color-primary); border-color: var(--aura-color-primary); text-shadow: none; box-shadow: none; }
+      .btn-icon { padding: 6px 10px; font-size: 0.9rem; letter-spacing: 0; }
+      [hidden] { display: none !important; }
       .badge {
         display: inline-block;
         font-size: 0.65rem;
@@ -448,12 +394,201 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
         border: 1px solid var(--aura-color-border); }
       .id-newid input[aria-invalid="true"] { border-color: var(--aura-color-danger); }
       .id-err { color: var(--aura-color-danger); text-transform: none; letter-spacing: normal; min-height: 1em; }
+      /* ── Browse toolbar: search, status chips, sort, view, categories ── */
+      .toolbar {
+        position: sticky; top: var(--bar-h, 46px); z-index: 10;
+        display: flex; flex-direction: column; gap: 8px;
+        margin: -20px -16px 16px; padding: 12px 16px 10px;
+        background: color-mix(in srgb, var(--aura-color-bg) 92%, transparent);
+        backdrop-filter: blur(6px);
+        border-bottom: 1px solid var(--aura-color-border);
+      }
+      .search {
+        display: flex; align-items: center; gap: 8px;
+        border: 1px solid var(--aura-color-border); background: var(--aura-color-surface);
+        padding: 0 10px; min-height: 40px;
+      }
+      .search:focus-within { border-color: var(--aura-color-primary); box-shadow: 0 0 8px color-mix(in srgb, var(--aura-color-primary) 40%, transparent); }
+      .search input { flex: 1; min-width: 0; border: 0; background: transparent; padding: 8px 0; font-size: 0.9rem; }
+      .search input:focus { border: 0; }
+      .search-icon { color: var(--aura-color-text-dim); font-size: 1.05rem; }
+      .search-kbd {
+        font: inherit; font-size: 0.65rem; color: var(--aura-color-text-dim);
+        border: 1px solid var(--aura-color-border); padding: 0 5px;
+      }
+      @media (hover: none) { .search-kbd { display: none; } }
+      .toolbar-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+      .toolbar-end { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+      .toolbar-end select { min-height: 32px; font-size: 0.75rem; }
+      .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+      .chips-scroll { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
+      .chips-scroll::-webkit-scrollbar { display: none; }
+      .chip {
+        display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+        min-height: 32px; padding: 4px 12px; font-size: 0.72rem; letter-spacing: 0.04em;
+        text-transform: none; color: var(--aura-color-text-dim);
+        border: 1px solid var(--aura-color-border); border-radius: 999px; background: transparent;
+      }
+      .chip [data-chip-count] { font-size: 0.65rem; opacity: 0.75; }
+      .chip [data-chip-count]:empty { display: none; }
+      .chip:hover { color: var(--aura-color-text); border-color: var(--aura-color-text-dim); box-shadow: none; }
+      .chip.active {
+        color: var(--aura-color-primary); border-color: var(--aura-color-primary);
+        background: color-mix(in srgb, var(--aura-color-primary) 10%, transparent);
+      }
+      .chip.is-empty { opacity: 0.45; }
+      .chip-update.active, .chip-update:not(.is-empty) [data-chip-count] { color: var(--aura-color-warning, #e0a000); }
+      .view-toggle { display: inline-flex; }
+      .view-toggle button {
+        min-height: 32px; min-width: 36px; padding: 4px 8px; font-size: 0.95rem; letter-spacing: 0;
+        color: var(--aura-color-text-dim);
+      }
+      .view-toggle button + button { border-left: 0; }
+      .view-toggle button.active { color: var(--aura-color-primary); border-color: var(--aura-color-primary); }
+      /* Phones: the toolbar scrolls away with the page (the header stays),
+         each chip group is one swipeable row, and the controls share a row. */
+      @media (max-width: 560px) {
+        .toolbar { position: static; margin: -14px -12px 12px; padding: 10px 12px 8px; gap: 6px; }
+        .toolbar-row { flex-direction: column; align-items: stretch; gap: 6px; }
+        .toolbar .chips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+        .toolbar .chips::-webkit-scrollbar { display: none; }
+        .toolbar-end { flex-wrap: nowrap; width: 100%; min-width: 0; }
+        .toolbar-end > * { flex: 0 0 auto; }
+        .toolbar-end select { flex: 1 1 0; width: 1px; min-width: 0; text-overflow: ellipsis; }
+        .nexus-main { padding: 14px 12px; }
+      }
+      .source-warn {
+        border: 1px solid var(--aura-color-warning, #e0a000); color: var(--aura-color-warning, #e0a000);
+        background: color-mix(in srgb, var(--aura-color-warning, #e0a000) 8%, transparent);
+        padding: 8px 12px; margin-bottom: 12px; font-size: 0.72rem;
+      }
+      .source-warn summary { cursor: pointer; }
+      .source-warn div { margin-top: 4px; word-break: break-word; }
+
+      /* ── App list: grid tiles or list rows, same card markup ── */
+      .app-list.view-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
+      .app-list.view-list { display: flex; flex-direction: column; gap: 6px; }
+      .app-card {
+        position: relative; display: flex; flex-direction: column; gap: 10px;
+        padding: 12px; min-width: 0;
+        background: var(--aura-color-surface); border: 1px solid var(--aura-color-border);
+        transition: border-color 0.12s, box-shadow 0.12s;
+      }
+      .app-card:hover { border-color: color-mix(in srgb, var(--aura-color-primary) 55%, var(--aura-color-border)); }
+      .app-card[hidden] { display: none; }
+      .app-card-link { display: flex; gap: 12px; align-items: flex-start; color: inherit; min-width: 0; }
+      .app-card-link:hover { text-shadow: none; }
+      .app-card-link:hover .app-card-name { color: var(--aura-color-primary); }
+      .app-glyph {
+        flex: 0 0 auto; width: 44px; height: 44px; display: grid; place-items: center;
+        font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em;
+        color: var(--aura-color-primary); border: 1px solid var(--aura-color-primary);
+        background: color-mix(in srgb, var(--aura-color-primary) 8%, transparent);
+      }
+      .app-card-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+      .app-card-name { font-weight: 600; letter-spacing: 0.03em; color: var(--aura-color-text); overflow-wrap: anywhere; }
+      .app-card-id { font-size: 0.66rem; color: var(--aura-color-text-dim); overflow-wrap: anywhere; }
+      .app-card-desc {
+        margin-top: 4px; font-size: 0.76rem; line-height: 1.45; color: var(--aura-color-text-dim);
+        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+      }
+      .app-card-foot { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; margin-top: auto; }
+      .app-card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+      .app-card-meta .badge.cat { color: var(--aura-color-text-dim); }
+      .app-card-status { flex-basis: 100%; font-size: 0.66rem; color: var(--aura-color-primary); }
+      .app-card-status:empty { display: none; }
+      .app-card-status.is-update { color: var(--aura-color-warning, #e0a000); }
+      /* List rows: one line on wide screens. */
+      .view-list .app-card { flex-direction: row; flex-wrap: wrap; align-items: center; padding: 8px 12px; }
+      .view-list .app-card-link { flex: 1 1 320px; align-items: center; }
+      .view-list .app-glyph { width: 34px; height: 34px; font-size: 0.64rem; }
+      .view-list .app-card-desc { -webkit-line-clamp: 1; margin-top: 0; }
+      .view-list .app-card-foot { flex: 0 1 auto; margin-top: 0; align-items: center; }
+      .view-list .ic-note { flex-basis: 100%; }
+      @media (max-width: 560px) {
+        .app-list.view-grid { grid-template-columns: 1fr; }
+        .view-list .app-card-link { flex-basis: 100%; }
+        .view-list .app-card-foot { flex-basis: 100%; }
+        .view-list .app-card-desc { display: none; }
+      }
+      /* Featured: a swipeable strip. */
+      .featured-strip {
+        display: grid; grid-auto-flow: column; grid-auto-columns: minmax(260px, 1fr);
+        gap: 10px; overflow-x: auto; scroll-snap-type: x mandatory; padding-bottom: 4px;
+      }
+      .featured-strip .app-card { scroll-snap-align: start; border-left: 3px solid var(--aura-color-primary); }
+      @media (max-width: 560px) { .featured-strip { grid-auto-columns: 85%; } }
+
+      /* ── Install control: main button + ▾ menu ── */
+      .ic { display: inline-flex; flex: 0 0 auto; }
+      .ic button {
+        min-height: 34px; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em;
+        color: var(--aura-color-primary); border: 1px solid var(--aura-color-primary);
+        background: color-mix(in srgb, var(--aura-color-primary) 8%, transparent);
+      }
+      .ic .ic-main { padding: 6px 14px; min-width: 84px; }
+      .ic .ic-more { padding: 6px 8px; border-left-color: color-mix(in srgb, var(--aura-color-primary) 40%, transparent); }
+      .ic .ic-main + .ic-more { margin-left: -1px; }
+      .ic .ic-main.is-open { background: transparent; }
+      .ic .ic-main.is-update, .ic[data-status="installed"] .ic-main.is-update + .ic-more {
+        color: var(--aura-color-warning, #e0a000); border-color: var(--aura-color-warning, #e0a000);
+        background: color-mix(in srgb, var(--aura-color-warning, #e0a000) 10%, transparent);
+      }
+      .ic[data-status="id-taken"] button { color: var(--aura-color-text-dim); border-color: var(--aura-color-border); background: transparent; }
+      .ic-lg button { min-height: 40px; font-size: 0.8rem; }
+      .ic-lg .ic-main { padding: 8px 20px; }
+      .ic-note {
+        font-size: 0.72rem; padding-top: 6px; border-top: 1px dashed var(--aura-color-border);
+        color: var(--aura-color-text-dim); white-space: pre-wrap; overflow-wrap: anywhere;
+      }
+      .ic-note.ok { color: var(--aura-color-primary); }
+      .ic-note.err { color: var(--aura-color-warning, #e0a000); }
+      .ic-backdrop { position: fixed; inset: 0; z-index: 90; background: color-mix(in srgb, var(--aura-color-bg) 70%, transparent); }
+      .ic-menu {
+        position: fixed; z-index: 95; min-width: 240px; max-width: min(340px, calc(100vw - 16px));
+        max-height: 70vh; overflow-y: auto;
+        background: var(--aura-color-surface); border: 1px solid var(--aura-color-primary);
+        box-shadow: var(--aura-glow-primary, 0 0 12px rgba(0,0,0,.4)); padding: 6px;
+      }
+      .ic-menu.is-sheet {
+        left: 0; right: 0; bottom: 0; top: auto; max-width: none; width: 100%; box-sizing: border-box;
+        border-width: 1px 0 0; padding: 10px 10px calc(10px + env(safe-area-inset-bottom));
+        animation: sheet-in 0.16s ease-out;
+      }
+      @keyframes sheet-in { from { transform: translateY(100%); } to { transform: none; } }
+      .ic-menu-title {
+        padding: 6px 10px 8px; font-size: 0.68rem; letter-spacing: 0.1em; text-transform: uppercase;
+        color: var(--aura-color-text-dim); border-bottom: 1px solid var(--aura-color-border); margin-bottom: 4px;
+      }
+      .ic-item {
+        display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%;
+        min-height: 40px; padding: 8px 10px; text-align: left; text-transform: none; letter-spacing: 0.02em;
+        border: 1px solid transparent; color: var(--aura-color-text);
+      }
+      .ic-item:hover, .ic-item:focus-visible { border-color: var(--aura-color-primary); outline: none; box-shadow: none; color: var(--aura-color-primary); }
+      .ic-item-label { font-size: 0.8rem; }
+      .ic-item-desc { font-size: 0.68rem; color: var(--aura-color-text-dim); }
+      .ic-item.danger, .ic-item.danger:hover { color: var(--aura-color-danger, #ff5555); }
+      .ic-form-hint { margin: 6px 10px 10px; font-size: 0.72rem; color: var(--aura-color-text-dim); line-height: 1.45; }
+      .ic-form { display: flex; flex-direction: column; gap: 4px; margin: 0 10px; font-size: 0.66rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--aura-color-text-dim); }
+      .ic-form input { font-size: 0.85rem; letter-spacing: normal; text-transform: none; padding: 8px; }
+      .ic-form-err { color: var(--aura-color-danger, #ff5555); text-transform: none; letter-spacing: normal; min-height: 1em; }
+      .ic-form-row { display: flex; justify-content: flex-end; gap: 8px; margin: 10px; }
+      .ic-form-row .ic-go { color: var(--aura-color-bg); background: var(--aura-color-primary); border-color: var(--aura-color-primary); }
+      .ic-form-row .ic-go:disabled { opacity: 0.5; }
+
+      /* Page transitions: a quick fade; none for reduced motion. */
+      ::view-transition-old(root), ::view-transition-new(root) { animation-duration: 0.12s; }
+      @media (prefers-reduced-motion: reduce) {
+        ::view-transition-old(root), ::view-transition-new(root) { animation: none; }
+        .ic-menu.is-sheet { animation: none; }
+      }
     </style>
 
     <!-- Permission approval. One dialog for every page that can install; the
          pages call `auraInstall()` rather than POSTing /api/nexus/install
          themselves, so none of them can skip the diff by accident. -->
-    <div class="perm-overlay" data-perm-overlay hidden>
+    <div class="perm-overlay" data-perm-overlay hidden transition:persist="nexus-perm-dialog">
       <div class="perm-dialog" role="dialog" aria-modal="true" aria-labelledby="perm-title">
         <h2 class="perm-title" id="perm-title" data-perm-title>Review permissions</h2>
         <p class="perm-sub" data-perm-sub></p>
@@ -468,7 +603,7 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
     <!-- Identity choice: the app shares its id or originId with an installed
          app (scenarios A, B, D in core AppIdentity). Nothing is installed
          until the user picks what should happen. -->
-    <div class="perm-overlay" data-id-overlay hidden>
+    <div class="perm-overlay" data-id-overlay hidden transition:persist="nexus-id-dialog">
       <div class="perm-dialog" role="dialog" aria-modal="true" aria-labelledby="id-title">
         <h2 class="perm-title" id="id-title" data-id-title>Already installed</h2>
         <p class="id-text" data-id-text></p>
@@ -502,8 +637,12 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
        * answer is the same install again, carrying the decision.
        */
       (function () {
+        // Runs again on every ClientRouter page swap; the dialogs are
+        // persisted DOM, so wire them (and the globals) only once.
+        if (window.__auraDialogs) return;
         var overlay = document.querySelector('[data-perm-overlay]');
         if (!overlay) return;
+        window.__auraDialogs = true;
         var titleEl  = overlay.querySelector('[data-perm-title]');
         var subEl    = overlay.querySelector('[data-perm-sub]');
         var bodyEl   = overlay.querySelector('[data-perm-body]');
@@ -738,7 +877,9 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
          * identity (A/B/D), then new permissions — each answer a re-POST with
          * the decision in the body, as the CLI does. */
         async function runInstall(url, base, opts, fallbackError) {
-          var identity = null;
+          // A choice made up front (Install as… / a fresh copy) rides along from
+          // the first request; otherwise the store's question fills it in.
+          var identity = opts.identity || null;
           var auto = false;
           for (var round = 0; round < 4; round++) {
             var body = Object.assign({}, base);

@@ -1,0 +1,39 @@
+---
+/**
+ * The install / installed control of one app: a main button plus a ▾ menu,
+ * driven by its InstallState (scripts/store.ts renders and keeps it current).
+ *
+ *   catalog app: data-app = catalog id (polled via /api/nexus/status)
+ *   local app:   data-local-only (Installed page: an app the store doesn't list)
+ */
+import type { InstallState } from '../lib/catalog';
+interface Props {
+  ref?: string;              // catalog id — what an install resolves
+  name: string;
+  version?: string;          // catalog version
+  state: InstallState;
+  localOnly?: boolean;
+  /** Local-only app with a store install record: can still update from its ref. */
+  localUpdate?: boolean;
+  size?: 'sm' | 'lg';
+}
+const { ref, name, version, state, localOnly = false, localUpdate = false, size = 'sm' } = Astro.props;
+// First paint before the script runs — same rules as store.ts mainAction().
+const main = state.status === 'installing' ? 'Installing…'
+  : state.status === 'id-taken' ? 'Install as…'
+  : state.status === 'installed' ? (state.updateAvailable ? 'Update' : 'Open')
+  : 'Install';
+---
+<div
+  class:list={['ic', `ic-${size}`]}
+  data-ic
+  data-app={localOnly ? undefined : ref}
+  data-local-only={localOnly ? '' : undefined}
+  data-local-update={localUpdate ? '' : undefined}
+  data-name={name}
+  data-version={version}
+  data-state={JSON.stringify(state)}
+>
+  <button type="button" class="ic-main" disabled={state.status === 'installing'}>{main}</button>
+  <button type="button" class="ic-more" aria-haspopup="menu" aria-expanded="false" aria-label={`More actions for ${name}`}>▾</button>
+</div>

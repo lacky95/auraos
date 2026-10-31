@@ -1,37 +1,11 @@
 ---
 import Layout from '../layouts/Layout.astro';
 import AppCard from '../components/AppCard.astro';
+import SectionHeader from '../components/SectionHeader.astro';
 import { shellGet } from '../lib/shellClient';
-
-interface CatalogEntry {
-  id:           string;
-  name:         string;
-  description?: string;
-  icon?:        string;
-  publisher?:   string;
-  categories?:  string[];
-  tags?:        string[];
-  version?:     string;
-  sourceName?:  string;
-  sourceKind?:  string;
-  installed?:   boolean;
-  installedVersion?: string | null;
-}
-
-interface SourceStatus {
-  name: string; kind: string; ok: boolean; apps: number; error?: string;
-}
-
-interface Catalog {
-  schema:     number;
-  apps:       CatalogEntry[];
-  featured:   string[];
-  categories: Array<{ slug: string; label: string }>;
-  sources:    SourceStatus[];
-}
+import { stateOf, type Catalog } from '../lib/catalog';
 
 const url = new URL(Astro.request.url);
-const activeCategory = url.searchParams.get('category') ?? '';
 const refresh = url.searchParams.get('refresh') === '1';
 
 let doc: Catalog;
@@ -41,206 +15,108 @@ try {
   doc = { schema: 1, apps: [], featured: [], categories: [], sources: [] };
 }
 
-const featured = doc.apps.filter((a) => doc.featured.includes(a.id));
-const visible = activeCategory
-  ? doc.apps.filter((a) => (a.categories ?? []).includes(activeCategory))
-  : doc.apps;
+const apps = doc.apps;
+const featured = apps.filter((a) => doc.featured.includes(a.id));
 const degraded = (doc.sources ?? []).filter((s) => !s.ok);
-// Keep the category the user is looking at across a refresh — dropping it
-// would look like the button navigated somewhere rather than reloaded.
-const refreshHref = activeCategory ? `/?category=${activeCategory}&refresh=1` : '/?refresh=1';
+// Only categories some app is in; label from the catalog's taxonomy.
+const used = new Set(apps.flatMap((a) => a.categories ?? []));
+const label = new Map(doc.categories.map((c) => [c.slug, c.label]));
+const categories = [...used].sort().map((slug) => ({ slug, label: label.get(slug) ?? slug }));
+const sources = [...new Set(apps.map((a) => a.sourceName).filter(Boolean))].sort() as string[];
+const states = apps.map(stateOf);
+const count = (pred: (i: number) => boolean) => apps.filter((_, i) => pred(i)).length;
+const nInstalled = count((i) => states[i]!.status === 'installed' || states[i]!.status === 'installing');
+const nUpdates = count((i) => states[i]!.updateAvailable);
+const nAvailable = count((i) => states[i]!.status === 'available');
 ---
 <Layout title="Browse" active="browse">
-  {degraded.length > 0 && (
-    <div class="nexus-source-warn">
-      {degraded.map((s) => (
-        <span>⚠ source <b>{s.name}</b> ({s.kind}) unavailable{s.error ? `: ${s.error}` : ''}</span>
-      ))}
-    </div>
-  )}
-
-  {doc.apps.length === 0 ? (
+  {apps.length === 0 ? (
     <section class="nexus-section">
       <div class="nexus-empty">
         <p>No apps in the catalog yet.</p>
-        <p style="margin-top:8px">
-          Publish one with <code>aura nexus app publish</code>, or register a source with
-          <code>aura nexus registry add &lt;name&gt; &lt;url&gt; --kind oci|git-index|git-app</code>.
+        <p>
+          Publish one with <code>aura nexus app publish</code>, or add a source on the
+          <a href="/sources">Sources</a> tab.
         </p>
-        <p style="margin-top:8px">
-          You can still install directly from the <a href="/install">Install</a> tab.
-        </p>
-        <p style="margin-top:16px">
-          <a class="nexus-refresh" href={refreshHref}>↻ Refresh sources</a>
-        </p>
+        <p>You can still install by reference from the <a href="/install">Install</a> tab.</p>
+        <p><a class="btn-ghost" href="/?refresh=1">↻ Refresh sources</a></p>
       </div>
     </section>
   ) : (
-    <>
-      {!activeCategory && featured.length > 0 && (
-        <section class="nexus-section">
-          <h2>// Featured</h2>
-          {featured.map((e) => <AppCard entry={e} />)}
-        </section>
+    <div class="browse" data-browse data-key="browse" data-default-view="grid">
+      <div class="toolbar">
+        <label class="search">
+          <span class="search-icon" aria-hidden="true">⌕</span>
+          <input data-q type="search" placeholder="Search apps" aria-label="Search apps" autocomplete="off" spellcheck="false" />
+          <kbd class="search-kbd" aria-hidden="true">/</kbd>
+        </label>
+        <div class="toolbar-row">
+          <div class="chips" data-chips="status" role="group" aria-label="Show">
+            <button type="button" class="chip" data-chip="">All <span data-chip-count>{apps.length}</span></button>
+            <button type="button" class="chip" data-chip="installed">Installed <span data-chip-count>{nInstalled}</span></button>
+            <button type="button" class="chip chip-update" data-chip="update">Updates <span data-chip-count>{nUpdates}</span></button>
+            <button type="button" class="chip" data-chip="available">Not installed <span data-chip-count>{nAvailable}</span></button>
+          </div>
+          <div class="toolbar-end">
+            {sources.length > 1 && (
+              <select data-filter="src" aria-label="Source">
+                <option value="">All sources</option>
+                {sources.map((s) => <option value={`src:${s}`}>{s}</option>)}
+              </select>
+            )}
+            <select data-sort aria-label="Sort">
+              <option value="default">Store order</option>
+              <option value="name">Name</option>
+              <option value="source">Source</option>
+            </select>
+            <div class="view-toggle" role="group" aria-label="View">
+              <button type="button" data-view="grid" title="Grid view" aria-label="Grid view">▦</button>
+              <button type="button" data-view="list" title="List view" aria-label="List view">☰</button>
+            </div>
+            <a class="btn-icon" href="/?refresh=1" data-refresh title="Re-fetch every source now" aria-label="Refresh sources">↻</a>
+          </div>
+        </div>
+        {categories.length > 0 && (
+          <div class="chips chips-scroll" data-chips="cat" role="group" aria-label="Category">
+            <button type="button" class="chip" data-chip="">All categories</button>
+            {categories.map((c) => (
+              <button type="button" class="chip" data-chip={`cat:${c.slug}`}>{c.label} <span data-chip-count></span></button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {degraded.length > 0 && (
+        <details class="source-warn">
+          <summary>⚠ {degraded.length} source{degraded.length > 1 ? 's' : ''} unavailable — showing the last known apps</summary>
+          {degraded.map((s) => <div><b>{s.name}</b> ({s.kind}){s.error ? `: ${s.error}` : ''}</div>)}
+        </details>
       )}
 
-      {doc.categories.length > 0 && (
-        <section class="nexus-section">
-          <h2>// Categories</h2>
-          <div style="display:flex;flex-wrap:wrap;gap:8px">
-            <a class:list={['nexus-tab', { active: !activeCategory }]} href="/">ALL</a>
-            {doc.categories.map((c) => (
-              <a class:list={['nexus-tab', { active: c.slug === activeCategory }]} href={`/?category=${c.slug}`}>{c.label}</a>
-            ))}
+      {featured.length > 0 && (
+        <section class="nexus-section" data-hide-when-filtered>
+          <SectionHeader title="Featured" />
+          <div class="featured-strip">
+            {featured.map((e) => <AppCard entry={e} />)}
           </div>
         </section>
       )}
 
       <section class="nexus-section">
-        <h2 class="nexus-h2-row">
-          <span>// {activeCategory ? `${activeCategory} apps` : 'All apps'} <span style="opacity:.6">({visible.length})</span></span>
-          <a class="nexus-refresh" href={refreshHref} title="Re-fetch every source now, bypassing all caches">↻ Refresh</a>
-        </h2>
-        {visible.length === 0 ? (
-          <div class="nexus-empty"><p>No apps in this category.</p></div>
-        ) : (
-          visible.map((e) => <AppCard entry={e} />)
-        )}
+        <SectionHeader title="Apps" count={apps.length}>
+          <button type="button" class="btn-ghost" data-reset hidden>Clear filters</button>
+        </SectionHeader>
+        <div class="app-list view-grid" data-list>
+          {apps.map((e, i) => <AppCard entry={e} index={i} />)}
+        </div>
+        <div class="nexus-empty" data-noresults hidden>
+          <p>No apps match.</p>
+          <p><button type="button" class="btn-ghost" data-reset>Clear filters</button></p>
+        </div>
       </section>
-    </>
+    </div>
   )}
-
-  <script is:inline>
-    // Installing grants tools and permissions to code the user has not read,
-    // so it goes through auraInstall() (defined in the layout), which shows the
-    // server-computed permission diff and only proceeds once it is approved.
-    // A click is consent to *begin*; it cannot be consent to a list nobody saw.
-    async function postInstall(ref, name, onApproved) {
-      const json = await window.auraInstall(ref, { name: name, onApproved: onApproved });
-      return { json };
-    }
-
-    // Apply the server's truth to one button. `st` = { installing:[], installed:{id:ver} }.
-    function applyState(b, st) {
-      const ref = b.getAttribute('data-ref');
-      const installed = st.installed || {};
-      const installing = new Set(st.installing || []);
-      if (installed[ref] != null) {
-        const txt = 'INSTALLED v' + installed[ref] + ' ✓';
-        if (b.dataset.state !== 'installed' || b.textContent !== txt) { b.dataset.state = 'installed'; b.disabled = true; b.textContent = txt; }
-      } else if (installing.has(ref)) {
-        if (b.dataset.state !== 'installing') { b.dataset.state = 'installing'; b.disabled = true; b.textContent = 'INSTALLING…'; }
-      } else {
-        // Not installed and not installing → INSTALL (this also flips a button
-        // back from INSTALLED when the app was uninstalled elsewhere).
-        if (b.dataset.state !== 'install') { b.dataset.state = 'install'; b.disabled = false; b.textContent = 'INSTALL'; }
-      }
-    }
-
-    let lastStatus = { installing: [], installed: {} };
-    async function syncNow() {
-      const btns = document.querySelectorAll('.install-cta[data-ref]');
-      if (!btns.length) return;
-      try {
-        lastStatus = await (await fetch('/api/nexus/status', { cache: 'no-store' })).json();
-        // Respect a button's optimistic state only briefly (busyUntil); after
-        // that the server is authoritative — so a stuck button always self-heals.
-        btns.forEach((b) => { if (Date.now() >= (Number(b.dataset.busyUntil) || 0)) applyState(b, lastStatus); });
-      } catch { /* transient */ }
-    }
-
-    document.addEventListener('click', async (ev) => {
-      const btn = ev.target && ev.target.closest ? ev.target.closest('.install-cta') : null;
-      if (!btn || btn.disabled || btn.dataset.state !== 'install') return;
-      const ref  = btn.getAttribute('data-ref');
-      const card = btn.closest('.nexus-card');
-      const fb   = card ? card.querySelector('.install-feedback') : null;
-      const show = (t, cls) => { if (!fb) return; fb.hidden = false; fb.className = 'install-feedback' + (cls ? ' ' + cls : ''); fb.textContent = t; };
-      const name = btn.getAttribute('data-name') || ref;
-      const reset = () => {
-        btn.dataset.busyUntil = '0'; btn.dataset.state = 'install';
-        btn.disabled = false; btn.textContent = 'INSTALL';
-      };
-      // No optimistic window yet: the permission dialog may be up for a while,
-      // and a 6s timer started here would expire mid-read and let the poller
-      // flip the button back underneath the user.
-      btn.disabled = true; btn.textContent = 'REVIEWING…';
-      show('checking what ' + ref + ' asks for…');
-      try {
-        const r = await postInstall(ref, name, () => {
-          btn.dataset.busyUntil = String(Date.now() + 6000);   // optimistic window; poller wins after
-          btn.dataset.state = 'installing'; btn.textContent = 'INSTALLING…';
-          show('installing ' + ref + '…');
-        });
-        if (r.json.cancelled) { show('cancelled — nothing was installed'); reset(); return; }
-        if (!r.json.ok) { show('ERROR: ' + (r.json.error || 'install failed'), 'err'); reset(); return; }
-        show('✓ installed v' + r.json.record.version + ' — scope: ' + (r.json.record.scope || 'global'), 'ok');
-        btn.dataset.busyUntil = '0';
-        syncNow();   // reflect the new INSTALLED state immediately
-      } catch (err) {
-        show('ERROR: ' + (err && err.message ? err.message : err), 'err');
-        reset();
-      }
-    });
-
-    // ── Continuous, visible-only state sync ────────────────────────────────
-    // Keeps every button correct (INSTALL / INSTALLING… / INSTALLED) within a
-    // couple seconds of any change anywhere — install OR uninstall.
-    let pollTimer = null;
-    function pollLoop() {
-      pollTimer = null;
-      if (!document.hidden) syncNow();
-      pollTimer = setTimeout(pollLoop, 2500);
-    }
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) syncNow(); });
-    syncNow();
-    pollLoop();
+  <script>
+    import '../scripts/browse';
   </script>
-
-  <style is:global>
-    .nexus-source-warn {
-      border: 1px solid var(--aura-color-warning, #e0a000);
-      color: var(--aura-color-warning, #e0a000);
-      background: color-mix(in srgb, var(--aura-color-warning, #e0a000) 8%, transparent);
-      padding: 8px 12px;
-      margin-bottom: 12px;
-      font-size: 0.72rem;
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }
-    .install-cta {
-      padding: 4px 10px;
-      font-size: 0.7rem;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--aura-color-primary);
-      border: 1px solid var(--aura-color-primary);
-      background: color-mix(in srgb, var(--aura-color-primary) 8%, transparent);
-      cursor: pointer;
-      white-space: nowrap;
-    }
-    .install-cta:hover { box-shadow: 0 0 8px var(--aura-color-primary); }
-    .install-cta[disabled] { opacity: 0.5; cursor: default; box-shadow: none; }
-    .install-feedback {
-      margin: 8px 0 0;
-      padding-top: 6px;
-      border-top: 1px dashed var(--aura-color-border);
-      font-size: 0.72rem;
-      white-space: pre-wrap;
-      word-break: break-word;
-      color: var(--aura-color-text-dim);
-    }
-    .install-feedback.ok  { color: var(--aura-color-primary); }
-    .install-feedback.err { color: var(--aura-color-warning, #e0a000); }
-    .approve-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-    .btn-ghost {
-      color: var(--aura-color-text-dim, #6a8a6a);
-      border: 1px solid var(--aura-color-text-dim, #6a8a6a);
-      background: transparent;
-      font-size: 0.7rem; letter-spacing: 0.1em; text-transform: uppercase;
-      padding: 4px 12px; cursor: pointer; white-space: nowrap;
-    }
-    .btn-ghost:hover { color: var(--aura-color-text); border-color: var(--aura-color-text); }
-  </style>
 </Layout>

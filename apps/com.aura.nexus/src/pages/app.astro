@@ -2,35 +2,8 @@
 import Layout from '../layouts/Layout.astro';
 import { shellGet } from '../lib/shellClient';
 
-interface CatalogEntry {
-  id:           string;
-  name:         string;
-  description?: string;
-  icon?:        string;
-  publisher?:   string;
-  homepage?:    string;
-  categories?:  string[];
-  tags?:        string[];
-  screenshots?: string[];
-  version?:     string;
-  longDescription?: string;
-  license?:     string;
-  /** What the app asks for — from the manifest an OCI release carries. */
-  requires?: {
-    sandbox?: string; componentType?: string;
-    permissions: string[]; tools: string[];
-    services: Array<{ name: string; image: string }>;
-    provides: Array<{ name: string; kind: string }>;
-    dependencies: Array<{ appId: string; required: boolean }>;
-  };
-  sourceName?:  string;
-  sourceKind?:  string;
-  installed?:   boolean;
-  installedVersion?: string | null;
-  installing?:  boolean;
-  sources?:     { git?: { ref: string }; oci?: { ref: string } };
-}
-interface Catalog { apps: CatalogEntry[]; }
+import InstallControl from '../components/InstallControl.astro';
+import { stateOf, type Catalog, type CatalogEntry } from '../lib/catalog';
 
 const url = new URL(Astro.request.url);
 const id = url.searchParams.get('id') ?? '';
@@ -47,13 +20,7 @@ if (id) {
 // JSX-in-ternary expressions (which the Astro/esbuild parser trips on).
 const pageTitle      = entry ? entry.name : 'App';
 const glyph          = entry ? (entry.icon ?? entry.name.charAt(0).toUpperCase()) : '';
-const installed      = !!entry?.installed;
-// One state-driven button (a poller keeps it correct: install ↔ installing ↔ installed).
-const btnState       = installed ? 'installed' : (entry?.installing ? 'installing' : 'install');
-const btnLabel       = btnState === 'installed'
-  ? `INSTALLED${entry?.installedVersion ? ` v${entry.installedVersion}` : ''} ✓`
-  : btnState === 'installing' ? 'INSTALLING…' : 'INSTALL';
-const btnDisabled    = btnState !== 'install';
+const state          = entry ? stateOf(entry) : null;
 const distRef        = entry?.sources?.oci?.ref ?? entry?.sources?.git?.ref ?? '—';
 const distKind       = entry?.sources?.oci ? 'oci' : (entry?.sources?.git ? 'git' : '—');
 const categoriesText = (entry?.categories ?? []).join(', ') || '—';
@@ -65,7 +32,7 @@ const req            = entry?.requires;
 const editable       = entry?.sourceKind === 'oci' && !!entry?.sourceName;
 ---
 <Layout title={pageTitle} active="browse">
-  <a href="/" class="btn-back"><span class="back-arrow">←</span> BROWSE</a>
+  <a href="/" class="btn-back" data-back><span class="back-arrow">←</span> Back</a>
 
   {!entry && (
     <div class="nexus-card" style="border-left:3px solid var(--aura-color-primary)">
@@ -76,7 +43,7 @@ const editable       = entry?.sourceKind === 'oci' && !!entry?.sourceName;
   )}
 
   {entry && (
-    <div class="nexus-card detail-panel">
+    <div class="nexus-card detail-panel" data-ic-scope>
       <div class="nexus-card-head">
         <div>
           <div class="nexus-card-title">
@@ -88,18 +55,19 @@ const editable       = entry?.sourceKind === 'oci' && !!entry?.sourceName;
           <div class="nexus-card-meta">
             {entry.publisher && <span>{entry.publisher} · </span>}
             {entry.sourceName && <span class="badge" style="margin-right:6px">{sourceText}</span>}
-            {cats.map((c) => <a class="badge" style="margin-right:6px" href={`/?category=${c}`}>{c}</a>)}
+            {cats.map((c) => <a class="badge" style="margin-right:6px" href={`/?cat=cat:${encodeURIComponent(c)}`}>{c}</a>)}
           </div>
         </div>
-        <div class="nexus-card-actions">
-          <button type="button" id="detail-install-btn" class="install-cta" data-ref={entry.id} data-name={entry.name} data-state={btnState} disabled={btnDisabled}>{btnLabel}</button>
+        <div class="nexus-card-actions detail-actions">
+          <InstallControl ref={entry.id} name={entry.name} version={entry.version} state={state!} size="lg" />
+          <span class="app-card-status" data-ic-status></span>
         </div>
       </div>
 
       {entry.description && <p class="detail-desc">{entry.description}</p>}
       {entry.longDescription && <p class="detail-long">{entry.longDescription}</p>}
 
-      <pre class="nexus-log" id="install-log" hidden></pre>
+      <div class="ic-note" data-ic-note hidden></div>
 
       <div class="panel-sec"><span class="panel-lbl">Details</span></div>
       <table class="kv">
@@ -180,79 +148,15 @@ const editable       = entry?.sourceKind === 'oci' && !!entry?.sourceName;
   )}
 
   <script is:inline>
-    const btn = document.getElementById('detail-install-btn');
-    const log = document.getElementById('install-log');
-    const show = (t, cls) => { if (!log) return; log.hidden = false; log.className = 'nexus-log' + (cls ? ' ' + cls : ''); log.textContent = t; };
-
-    // Apply server truth to the button (also flips INSTALLED → INSTALL on an
-    // uninstall performed elsewhere).
-    function applyState(st) {
-      if (!btn) return;
-      if (Date.now() < (Number(btn.dataset.busyUntil) || 0)) return;   // brief optimistic window
-      const ref = btn.getAttribute('data-ref');
-      const installed = st.installed || {};
-      const installing = new Set(st.installing || []);
-      if (installed[ref] != null) {
-        const txt = 'INSTALLED v' + installed[ref] + ' ✓';
-        if (btn.dataset.state !== 'installed' || btn.textContent !== txt) { btn.dataset.state = 'installed'; btn.disabled = true; btn.textContent = txt; }
-      } else if (installing.has(ref)) {
-        if (btn.dataset.state !== 'installing') { btn.dataset.state = 'installing'; btn.disabled = true; btn.textContent = 'INSTALLING…'; }
-      } else {
-        if (btn.dataset.state !== 'install') { btn.dataset.state = 'install'; btn.disabled = false; btn.textContent = 'INSTALL'; }
-      }
-    }
-    async function syncNow() {
-      if (!btn) return;
-      try { applyState(await (await fetch('/api/nexus/status', { cache: 'no-store' })).json()); } catch { /* transient */ }
-    }
-
-    if (btn) {
-      const ref  = btn.getAttribute('data-ref');
-      const name = btn.getAttribute('data-name') || ref;
-      // A click starts the install; it is not consent to a permission list the
-      // user never saw. auraInstall() (layout) shows the server-computed diff
-      // and only proceeds once it is approved.
-      const reset = () => {
-        btn.dataset.busyUntil = '0'; btn.dataset.state = 'install';
-        btn.disabled = false; btn.textContent = 'INSTALL';
-      };
-      btn.addEventListener('click', async () => {
-        if (btn.dataset.state !== 'install' || btn.disabled) return;
-        // No optimistic window until the dialog is answered — it would expire
-        // while the user is still reading.
-        btn.disabled = true; btn.textContent = 'REVIEWING…';
-        show('checking what ' + ref + ' asks for…');
-        try {
-          const json = await window.auraInstall(ref, {
-            name: name,
-            onApproved: () => {
-              btn.dataset.busyUntil = String(Date.now() + 6000);
-              btn.dataset.state = 'installing'; btn.textContent = 'INSTALLING…';
-              show('installing ' + ref + '…');
-            },
-          });
-          if (json.cancelled) { show('cancelled — nothing was installed'); reset(); return; }
-          if (!json.ok) { show('ERROR: ' + (json.error || 'install failed'), 'err'); reset(); return; }
-          show('✓ installed ' + json.record.id + ' v' + json.record.version + ' — scope: ' + (json.record.scope || 'global'), 'ok');
-          btn.dataset.busyUntil = '0';
-          syncNow();
-        } catch (err) {
-          show('ERROR: ' + (err && err.message ? err.message : err), 'err');
-          reset();
-        }
+    // Back: return to where the user came from inside the store (keeps their
+    // search + filters); a direct link falls back to Browse.
+    (function () {
+      var back = document.querySelector('[data-back]');
+      if (!back) return;
+      back.addEventListener('click', function (ev) {
+        if ((window.__nexusNavDepth || 0) > 0) { ev.preventDefault(); history.back(); }
       });
-    }
-
-    // ── Continuous, visible-only state sync ────────────────────────────────
-    let pollTimer = null;
-    function pollLoop() {
-      pollTimer = null;
-      if (!document.hidden) syncNow();
-      pollTimer = setTimeout(pollLoop, 2500);
-    }
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) syncNow(); });
-    syncNow();
-    pollLoop();
+    })();
   </script>
 
   <script is:inline>
@@ -444,31 +348,18 @@ const editable       = entry?.sourceKind === 'oci' && !!entry?.sourceName;
     }
     a.badge:hover { color: var(--aura-color-primary); border-color: var(--aura-color-primary); text-shadow: none; }
 
-    .install-cta {
-      color: var(--aura-color-primary);
-      border: 1px solid var(--aura-color-primary);
-      background: color-mix(in srgb, var(--aura-color-primary) 8%, transparent);
-      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
-      padding: 6px 14px; cursor: pointer; white-space: nowrap;
+    .detail-actions { flex-direction: column; align-items: flex-end; gap: 6px; }
+    .detail-actions .app-card-status { flex-basis: auto; text-align: right; }
+    .detail-panel .ic-note { margin-top: 12px; }
+    @media (max-width: 560px) {
+      .detail-actions { align-items: stretch; width: 100%; }
+      .detail-actions .ic { width: 100%; }
+      .detail-actions .ic-main { flex: 1; }
+      .detail-actions .app-card-status { text-align: left; }
+      table.kv, table.kv tbody, table.kv tr, table.kv td { display: block; width: auto; }
+      table.kv tr { padding: 6px 0; border-bottom: 1px solid var(--aura-color-border); }
+      table.kv td { padding: 2px 0; }
+      table.kv td:first-child { width: auto; }
     }
-    .install-cta:hover { box-shadow: 0 0 8px var(--aura-color-primary); }
-    .install-cta[disabled] { opacity: 0.5; cursor: default; box-shadow: none; }
-    /* Emphasised state when the button is asking for approval. */
-    .install-cta.cta-approve {
-      background: color-mix(in srgb, var(--aura-color-primary) 22%, transparent);
-      box-shadow: 0 0 10px color-mix(in srgb, var(--aura-color-primary) 55%, transparent);
-      animation: cta-pulse 1.4s ease-in-out infinite;
-    }
-    @keyframes cta-pulse { 0%,100% { box-shadow: 0 0 6px color-mix(in srgb, var(--aura-color-primary) 40%, transparent); } 50% { box-shadow: 0 0 14px var(--aura-color-primary); } }
-
-    .approve-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-    .btn-ghost {
-      color: var(--aura-color-text-dim, #6a8a6a);
-      border: 1px solid var(--aura-color-text-dim, #6a8a6a);
-      background: transparent;
-      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
-      padding: 6px 14px; cursor: pointer; white-space: nowrap;
-    }
-    .btn-ghost:hover { color: var(--aura-color-text); border-color: var(--aura-color-text); }
   </style>
 </Layout>
