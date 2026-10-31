@@ -34,7 +34,7 @@ const detailHref = `/app?id=${encodeURIComponent(e.id)}`;
   <div class="app-card-foot">
     <div class="app-card-meta">
       {e.version && <span class="badge" data-ic-version>v{e.version}</span>}
-      {e.sourceName && <span class="badge" title={e.sourceKind}>{e.sourceName}</span>}
+      {e.sourceName && <span class="badge" data-tip={e.sourceKind}>{e.sourceName}</span>}
       {(e.categories ?? []).slice(0, 2).map((c) => <span class="badge cat">{c}</span>)}
       <span class="app-card-status" data-ic-status></span>
     </div>

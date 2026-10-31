@@ -2,6 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 import InstallControl from '../components/InstallControl.astro';
 import SectionHeader from '../components/SectionHeader.astro';
+import StoreToolbar from '../components/StoreToolbar.astro';
 import { shellGet } from '../lib/shellClient';
 import type { Catalog, CatalogEntry, InstallState } from '../lib/catalog';
 
@@ -72,32 +73,19 @@ const n = (k: string) => rows.filter((r) => r.facets.split(' ').includes(k)).len
   {!error && rows.length === 0 && <div class="nexus-empty">No apps installed.</div>}
   {rows.length > 0 && (
     <div class="browse" data-browse data-key="installed" data-default-view="list">
-      <div class="toolbar">
-        <label class="search">
-          <span class="search-icon" aria-hidden="true">⌕</span>
-          <input data-q type="search" placeholder="Search installed apps" aria-label="Search installed apps" autocomplete="off" spellcheck="false" />
-          <kbd class="search-kbd" aria-hidden="true">/</kbd>
-        </label>
-        <div class="toolbar-row">
-          <div class="chips" data-chips="show" role="group" aria-label="Show">
-            <button type="button" class="chip" data-chip="">All <span data-chip-count>{rows.length}</span></button>
-            <button type="button" class="chip chip-update" data-chip="update">Updates <span data-chip-count>{n('update')}</span></button>
-            <button type="button" class="chip" data-chip="store">From the store <span data-chip-count>{n('store')}</span></button>
-            <button type="button" class="chip" data-chip="local">Built here <span data-chip-count>{n('local')}</span></button>
-            <button type="button" class="chip" data-chip="system">System <span data-chip-count>{n('system')}</span></button>
-          </div>
-          <div class="toolbar-end">
-            <select data-sort aria-label="Sort">
-              <option value="default">Name</option>
-              <option value="source">Source</option>
-            </select>
-            <div class="view-toggle" role="group" aria-label="View">
-              <button type="button" data-view="grid" title="Grid view" aria-label="Grid view">▦</button>
-              <button type="button" data-view="list" title="List view" aria-label="List view">☰</button>
-            </div>
-          </div>
-        </div>
-      </div>
+      <StoreToolbar
+        placeholder="Search installed apps"
+        groups={[
+          { key: 'show', label: 'Show', segmented: true, options: [
+            { value: '', label: 'All', count: rows.length },
+            { value: 'update', label: 'Updates', count: n('update'), tone: 'update' },
+            { value: 'store', label: 'From the store', count: n('store') },
+            { value: 'local', label: 'Built here', count: n('local') },
+            { value: 'system', label: 'System', count: n('system') },
+          ] },
+        ]}
+        sorts={[{ value: 'default', label: 'Name' }, { value: 'source', label: 'Source' }]}
+      />
 
       <section class="nexus-section">
         <SectionHeader title="Installed apps" count={rows.length} desc="Store apps update here; apps built or copied on this machine are never removed from the store.">
@@ -118,7 +106,7 @@ const n = (k: string) => rows.filter((r) => r.facets.split(' ').includes(k)).len
               <div class="app-card-foot">
                 <div class="app-card-meta">
                   <span class="badge">v{r.it.manifest.version}</span>
-                  {r.kind === 'store' && <span class="badge" title={r.it.record.ref}>{r.source}</span>}
+                  {r.kind === 'store' && <span class="badge" data-tip={r.it.record.ref}>{r.source}</span>}
                   {r.it.scope && r.it.scope !== 'system' && <span class="badge cat">{r.it.scope}</span>}
                   {r.it.record.channel && <span class="badge cat">{r.it.record.channel}</span>}
                   <span class="app-card-status" data-ic-status></span>

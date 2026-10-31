@@ -1,0 +1,25 @@
+---
+/**
+ * A dropdown drawn in HTML instead of the browser's native <select>: a
+ * button and an option list in a popover (a bottom sheet in the compact
+ * view). <nx-select> (defined in Layout.astro's head, before the page is
+ * parsed) behaves like a <select> for scripts: `.value`, a `change` event.
+ * Extra attributes (id, class, data-*) land on <nx-select>.
+ */
+interface Option { value: string; label: string }
+interface Props { options: Option[]; value?: string; label: string; [attr: string]: unknown }
+const { options, value = options[0]?.value ?? '', label, ...rest } = Astro.props;
+const listId = `nxs-${Math.random().toString(36).slice(2, 8)}`;
+const current = options.find((o) => o.value === value) ?? options[0];
+---
+<nx-select data-value={current?.value ?? ''} {...rest}>
+  <button type="button" class="nxs-btn" popovertarget={listId} aria-haspopup="listbox" aria-label={label}>
+    <span class="nxs-label">{current?.label ?? ''}</span><span class="nxs-caret" aria-hidden="true">▾</span>
+  </button>
+  <div popover="auto" id={listId} class="nxs-list" role="listbox" aria-label={label}>
+    <div class="nxs-title">{label}</div>
+    {options.map((o) => (
+      <button type="button" class="nxs-opt" role="option" data-value={o.value} aria-selected={o.value === current?.value ? 'true' : 'false'}>{o.label}</button>
+    ))}
+  </div>
+</nx-select>

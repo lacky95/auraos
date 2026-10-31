@@ -23,6 +23,117 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{title} · Nexus</title>
     <ClientRouter fallback="swap" />
+    <!-- HTML controls instead of native browser widgets. Inline + in <head>
+         so <nx-select> is defined before the page is parsed (page scripts may
+         read its .value right away); guarded, since inline scripts re-run on
+         every ClientRouter swap. -->
+    <script is:inline>
+      (function () {
+        if (window.__nexusControls) return;
+        window.__nexusControls = true;
+        var compact = window.matchMedia('(max-width: 1099px), (pointer: coarse)');
+
+        /* Place an open popover under its anchor (desktop); compact = CSS sheet. */
+        function placePopover(pop, anchor) {
+          if (compact.matches || !anchor) { pop.style.left = pop.style.top = pop.style.minWidth = ''; return; }
+          var r = anchor.getBoundingClientRect();
+          pop.style.minWidth = Math.max(r.width, 180) + 'px';
+          var w = pop.offsetWidth, h = pop.offsetHeight;
+          var left = Math.max(8, Math.min(window.innerWidth - w - 8, r.left));
+          var below = r.bottom + 4 + h < window.innerHeight;
+          pop.style.left = left + 'px';
+          pop.style.top = (below ? r.bottom + 4 : Math.max(8, r.top - h - 4)) + 'px';
+        }
+        window.auraPlacePopover = placePopover;
+
+        /* <nx-select>: a <select> drawn in HTML (components/Select.astro). */
+        customElements.define('nx-select', class extends HTMLElement {
+          get value() { return this.dataset.value || ''; }
+          set value(v) {
+            v = String(v == null ? '' : v);
+            this.dataset.value = v;
+            var label = this.querySelector('.nxs-label');
+            this.querySelectorAll('.nxs-opt').forEach(function (o) {
+              var on = o.dataset.value === v;
+              o.setAttribute('aria-selected', on ? 'true' : 'false');
+              if (on && label) label.textContent = o.textContent;
+            });
+          }
+          connectedCallback() {
+            if (this._wired) return;
+            this._wired = true;
+            var self = this;
+            var list = this.querySelector('.nxs-list');
+            var btn = this.querySelector('.nxs-btn');
+            this.addEventListener('click', function (ev) {
+              var opt = ev.target.closest && ev.target.closest('.nxs-opt');
+              if (!opt) return;
+              var changed = opt.dataset.value !== self.value;
+              self.value = opt.dataset.value;
+              if (list && list.hidePopover) list.hidePopover();
+              if (btn) btn.focus();
+              if (changed) self.dispatchEvent(new Event('change', { bubbles: true }));
+            });
+            if (list) list.addEventListener('toggle', function (ev) {
+              if (ev.newState !== 'open') return;
+              placePopover(list, btn);
+              var sel = list.querySelector('[aria-selected="true"]') || list.querySelector('.nxs-opt');
+              if (sel) sel.focus();
+            });
+            this.addEventListener('keydown', function (ev) {
+              if (!list || !list.matches(':popover-open')) return;
+              if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp' && ev.key !== 'Home' && ev.key !== 'End') return;
+              var opts = Array.prototype.slice.call(list.querySelectorAll('.nxs-opt'));
+              var i = opts.indexOf(document.activeElement);
+              var n = ev.key === 'Home' ? 0 : ev.key === 'End' ? opts.length - 1
+                : ev.key === 'ArrowDown' ? Math.min(opts.length - 1, i + 1) : Math.max(0, i - 1);
+              ev.preventDefault();
+              if (opts[n]) opts[n].focus();
+            });
+          }
+        });
+
+        /* auraConfirm(message, { ok, danger }) → Promise<boolean>. The
+           browser's confirm() is suppressed inside the OS window. */
+        window.auraConfirm = function (message, opts) {
+          opts = opts || {};
+          var dlg = document.querySelector('[data-confirm]');
+          if (!dlg) return Promise.resolve(false);
+          dlg.querySelector('[data-confirm-text]').textContent = message;
+          var ok = dlg.querySelector('[data-confirm-ok]');
+          ok.textContent = opts.ok || 'OK';
+          ok.classList.toggle('is-danger', !!opts.danger);
+          dlg.returnValue = '';
+          dlg.showModal();
+          ok.focus();
+          return new Promise(function (resolve) {
+            dlg.addEventListener('close', function () { resolve(dlg.returnValue === 'ok'); }, { once: true });
+          });
+        };
+
+        document.addEventListener('click', function (ev) {
+          var t = ev.target;
+          if (!t || !t.closest) return;
+          /* A disclosure: button[data-disclose] shows/hides #aria-controls. */
+          var d = t.closest('[data-disclose]');
+          if (d) {
+            var panel = document.getElementById(d.getAttribute('aria-controls'));
+            var open = d.getAttribute('aria-expanded') !== 'true';
+            d.setAttribute('aria-expanded', open ? 'true' : 'false');
+            if (panel) panel.hidden = !open;
+            return;
+          }
+          /* A file picker opened from our own button. */
+          var f = t.closest('[data-file-for]');
+          if (f) { var input = document.getElementById(f.getAttribute('data-file-for')); if (input) input.click(); }
+        });
+        window.addEventListener('resize', function () {
+          document.querySelectorAll('.nxs-list:popover-open').forEach(function (l) {
+            placePopover(l, l.parentElement && l.parentElement.querySelector('.nxs-btn'));
+          });
+        });
+      })();
+    </script>
   </head>
   <body>
     <header class="nexus-bar">
@@ -394,7 +505,15 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
         border: 1px solid var(--aura-color-border); }
       .id-newid input[aria-invalid="true"] { border-color: var(--aura-color-danger); }
       .id-err { color: var(--aura-color-danger); text-transform: none; letter-spacing: normal; min-height: 1em; }
-      /* ── Browse toolbar: search, status chips, sort, view, categories ── */
+      /* ═══ Store list: toolbar, filter sheet, cards, install control ═══════
+       * One markup, two layouts:
+       *   desktop  (≥ 1100 px, fine pointer): search row + filters inline
+       *   compact  (< 1100 px or touch — phones, iPads, narrow windows):
+       *            one row (search · Filters · view), filters in a bottom
+       *            sheet, active filters as pills, dense list rows.
+       * Every element is server-rendered; JS only toggles state. */
+
+      /* ── Toolbar ── */
       .toolbar {
         position: sticky; top: var(--bar-h, 46px); z-index: 10;
         display: flex; flex-direction: column; gap: 8px;
@@ -403,26 +522,37 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
         backdrop-filter: blur(6px);
         border-bottom: 1px solid var(--aura-color-border);
       }
+      .toolbar-main { display: flex; align-items: center; gap: 6px; }
       .search {
+        flex: 1 1 auto; min-width: 0;
         display: flex; align-items: center; gap: 8px;
         border: 1px solid var(--aura-color-border); background: var(--aura-color-surface);
-        padding: 0 10px; min-height: 40px;
+        padding: 0 10px; min-height: 40px; box-sizing: border-box;
       }
       .search:focus-within { border-color: var(--aura-color-primary); box-shadow: 0 0 8px color-mix(in srgb, var(--aura-color-primary) 40%, transparent); }
       .search input { flex: 1; min-width: 0; border: 0; background: transparent; padding: 8px 0; font-size: 0.9rem; }
       .search input:focus { border: 0; }
       .search-icon { color: var(--aura-color-text-dim); font-size: 1.05rem; }
-      .search-kbd {
-        font: inherit; font-size: 0.65rem; color: var(--aura-color-text-dim);
-        border: 1px solid var(--aura-color-border); padding: 0 5px;
+      .search-kbd { font: inherit; font-size: 0.65rem; color: var(--aura-color-text-dim); border: 1px solid var(--aura-color-border); padding: 0 5px; }
+      .view-toggle { display: inline-flex; flex: 0 0 auto; }
+      .view-toggle button {
+        min-height: 40px; min-width: 40px; padding: 4px 8px; font-size: 0.95rem; letter-spacing: 0;
+        color: var(--aura-color-text-dim);
       }
-      @media (hover: none) { .search-kbd { display: none; } }
-      .toolbar-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
-      .toolbar-end { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-      .toolbar-end select { min-height: 32px; font-size: 0.75rem; }
+      .view-toggle button + button { border-left: 0; }
+      .view-toggle button.active { color: var(--aura-color-primary); border-color: var(--aura-color-primary); }
+      .tb-refresh { min-height: 40px; min-width: 40px; }
+      .btn-filters {
+        display: none; flex: 0 0 auto; align-items: center; gap: 6px;
+        min-height: 40px; padding: 4px 12px; font-size: 0.74rem; text-transform: none; letter-spacing: 0.04em;
+        color: var(--aura-color-text);
+      }
+      .btn-filters-icon { color: var(--aura-color-primary); }
+      .filter-count {
+        min-width: 18px; padding: 0 5px; line-height: 18px; font-size: 0.66rem; text-align: center;
+        color: var(--aura-color-bg); background: var(--aura-color-primary);
+      }
       .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-      .chips-scroll { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
-      .chips-scroll::-webkit-scrollbar { display: none; }
       .chip {
         display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
         min-height: 32px; padding: 4px 12px; font-size: 0.72rem; letter-spacing: 0.04em;
@@ -432,31 +562,33 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
       .chip [data-chip-count] { font-size: 0.65rem; opacity: 0.75; }
       .chip [data-chip-count]:empty { display: none; }
       .chip:hover { color: var(--aura-color-text); border-color: var(--aura-color-text-dim); box-shadow: none; }
-      .chip.active {
-        color: var(--aura-color-primary); border-color: var(--aura-color-primary);
-        background: color-mix(in srgb, var(--aura-color-primary) 10%, transparent);
-      }
+      .chip.active { color: var(--aura-color-primary); border-color: var(--aura-color-primary); background: color-mix(in srgb, var(--aura-color-primary) 10%, transparent); }
       .chip.is-empty { opacity: 0.45; }
       .chip-update.active, .chip-update:not(.is-empty) [data-chip-count] { color: var(--aura-color-warning, #e0a000); }
-      .view-toggle { display: inline-flex; }
-      .view-toggle button {
-        min-height: 32px; min-width: 36px; padding: 4px 8px; font-size: 0.95rem; letter-spacing: 0;
-        color: var(--aura-color-text-dim);
+      .active-pills { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+      .active-pills::-webkit-scrollbar { display: none; }
+      .pill {
+        flex: 0 0 auto; min-height: 28px; padding: 2px 10px; font-size: 0.7rem; text-transform: none; letter-spacing: 0.02em;
+        color: var(--aura-color-primary); border: 1px solid var(--aura-color-primary); border-radius: 999px;
+        background: color-mix(in srgb, var(--aura-color-primary) 10%, transparent);
       }
-      .view-toggle button + button { border-left: 0; }
-      .view-toggle button.active { color: var(--aura-color-primary); border-color: var(--aura-color-primary); }
-      /* Phones: the toolbar scrolls away with the page (the header stays),
-         each chip group is one swipeable row, and the controls share a row. */
-      @media (max-width: 560px) {
-        .toolbar { position: static; margin: -14px -12px 12px; padding: 10px 12px 8px; gap: 6px; }
-        .toolbar-row { flex-direction: column; align-items: stretch; gap: 6px; }
-        .toolbar .chips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
-        .toolbar .chips::-webkit-scrollbar { display: none; }
-        .toolbar-end { flex-wrap: nowrap; width: 100%; min-width: 0; }
-        .toolbar-end > * { flex: 0 0 auto; }
-        .toolbar-end select { flex: 1 1 0; width: 1px; min-width: 0; text-overflow: ellipsis; }
-        .nexus-main { padding: 14px 12px; }
+
+      /* Filter blocks — inline on desktop (the popover's closed-state
+         display:none is only a browser default, overridden here). */
+      .filter-sheet {
+        display: grid; grid-template-columns: 1fr auto; grid-template-areas: "status selects" "cat cat";
+        gap: 8px 12px; align-items: center;
+        position: static; inset: auto; margin: 0; padding: 0; width: auto; max-width: none; max-height: none;
+        overflow: visible; background: transparent; border: 0; color: inherit;
       }
+      .fs-head, .fs-foot, .fs-group > .fs-label, .fs-field > .fs-label { display: none; }
+      .fs-group { min-width: 0; }
+      .fs-group-status, .fs-group-show { grid-area: status; }
+      .fs-group-cat { grid-area: cat; }
+      .fs-group-cat .chips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
+      .fs-group-cat .chips::-webkit-scrollbar { display: none; }
+      .fs-selects { grid-area: selects; display: flex; gap: 6px; }
+      .fs-field nx-select { min-width: 150px; }
       .source-warn {
         border: 1px solid var(--aura-color-warning, #e0a000); color: var(--aura-color-warning, #e0a000);
         background: color-mix(in srgb, var(--aura-color-warning, #e0a000) 8%, transparent);
@@ -472,10 +604,9 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
         position: relative; display: flex; flex-direction: column; gap: 10px;
         padding: 12px; min-width: 0;
         background: var(--aura-color-surface); border: 1px solid var(--aura-color-border);
-        transition: border-color 0.12s, box-shadow 0.12s;
+        transition: border-color 0.12s;
       }
       .app-card:hover { border-color: color-mix(in srgb, var(--aura-color-primary) 55%, var(--aura-color-border)); }
-      .app-card[hidden] { display: none; }
       .app-card-link { display: flex; gap: 12px; align-items: flex-start; color: inherit; min-width: 0; }
       .app-card-link:hover { text-shadow: none; }
       .app-card-link:hover .app-card-name { color: var(--aura-color-primary); }
@@ -498,44 +629,34 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
       .app-card-status { flex-basis: 100%; font-size: 0.66rem; color: var(--aura-color-primary); }
       .app-card-status:empty { display: none; }
       .app-card-status.is-update { color: var(--aura-color-warning, #e0a000); }
-      /* List rows: one line on wide screens. */
       .view-list .app-card { flex-direction: row; flex-wrap: wrap; align-items: center; padding: 8px 12px; }
       .view-list .app-card-link { flex: 1 1 320px; align-items: center; }
       .view-list .app-glyph { width: 34px; height: 34px; font-size: 0.64rem; }
       .view-list .app-card-desc { -webkit-line-clamp: 1; margin-top: 0; }
       .view-list .app-card-foot { flex: 0 1 auto; margin-top: 0; align-items: center; }
       .view-list .ic-note { flex-basis: 100%; }
-      @media (max-width: 560px) {
-        .app-list.view-grid { grid-template-columns: 1fr; }
-        .view-list .app-card-link { flex-basis: 100%; }
-        .view-list .app-card-foot { flex-basis: 100%; }
-        .view-list .app-card-desc { display: none; }
-      }
-      /* Featured: a swipeable strip. */
       .featured-strip {
         display: grid; grid-auto-flow: column; grid-auto-columns: minmax(260px, 1fr);
         gap: 10px; overflow-x: auto; scroll-snap-type: x mandatory; padding-bottom: 4px;
       }
       .featured-strip .app-card { scroll-snap-align: start; border-left: 3px solid var(--aura-color-primary); }
-      @media (max-width: 560px) { .featured-strip { grid-auto-columns: 85%; } }
 
-      /* ── Install control: main button + ▾ menu ── */
+      /* ── Install control: main button + ▾ (native popover menu) ── */
       .ic { display: inline-flex; flex: 0 0 auto; }
-      .ic button {
+      .ic > button {
         min-height: 34px; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em;
         color: var(--aura-color-primary); border: 1px solid var(--aura-color-primary);
         background: color-mix(in srgb, var(--aura-color-primary) 8%, transparent);
       }
       .ic .ic-main { padding: 6px 14px; min-width: 84px; }
-      .ic .ic-more { padding: 6px 8px; border-left-color: color-mix(in srgb, var(--aura-color-primary) 40%, transparent); }
-      .ic .ic-main + .ic-more { margin-left: -1px; }
+      .ic .ic-more { padding: 6px 8px; margin-left: -1px; border-left-color: color-mix(in srgb, var(--aura-color-primary) 40%, transparent); }
       .ic .ic-main.is-open { background: transparent; }
-      .ic .ic-main.is-update, .ic[data-status="installed"] .ic-main.is-update + .ic-more {
+      .ic .ic-main.is-update, .ic .ic-main.is-update + .ic-more {
         color: var(--aura-color-warning, #e0a000); border-color: var(--aura-color-warning, #e0a000);
         background: color-mix(in srgb, var(--aura-color-warning, #e0a000) 10%, transparent);
       }
-      .ic[data-status="id-taken"] button { color: var(--aura-color-text-dim); border-color: var(--aura-color-border); background: transparent; }
-      .ic-lg button { min-height: 40px; font-size: 0.8rem; }
+      .ic[data-status="id-taken"] > button { color: var(--aura-color-text-dim); border-color: var(--aura-color-border); background: transparent; }
+      .ic-lg > button { min-height: 40px; font-size: 0.8rem; }
       .ic-lg .ic-main { padding: 8px 20px; }
       .ic-note {
         font-size: 0.72rem; padding-top: 6px; border-top: 1px dashed var(--aura-color-border);
@@ -543,45 +664,176 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
       }
       .ic-note.ok { color: var(--aura-color-primary); }
       .ic-note.err { color: var(--aura-color-warning, #e0a000); }
-      .ic-backdrop { position: fixed; inset: 0; z-index: 90; background: color-mix(in srgb, var(--aura-color-bg) 70%, transparent); }
       .ic-menu {
-        position: fixed; z-index: 95; min-width: 240px; max-width: min(340px, calc(100vw - 16px));
-        max-height: 70vh; overflow-y: auto;
-        background: var(--aura-color-surface); border: 1px solid var(--aura-color-primary);
+        position: fixed; inset: auto; margin: 0; min-width: 240px; max-width: min(340px, calc(100vw - 16px));
+        max-height: 70vh; overflow-y: auto; box-sizing: border-box;
+        color: var(--aura-color-text); background: var(--aura-color-surface); border: 1px solid var(--aura-color-primary);
         box-shadow: var(--aura-glow-primary, 0 0 12px rgba(0,0,0,.4)); padding: 6px;
       }
-      .ic-menu.is-sheet {
-        left: 0; right: 0; bottom: 0; top: auto; max-width: none; width: 100%; box-sizing: border-box;
-        border-width: 1px 0 0; padding: 10px 10px calc(10px + env(safe-area-inset-bottom));
-        animation: sheet-in 0.16s ease-out;
-      }
-      @keyframes sheet-in { from { transform: translateY(100%); } to { transform: none; } }
       .ic-menu-title {
+        display: flex; flex-direction: column; gap: 2px;
         padding: 6px 10px 8px; font-size: 0.68rem; letter-spacing: 0.1em; text-transform: uppercase;
         color: var(--aura-color-text-dim); border-bottom: 1px solid var(--aura-color-border); margin-bottom: 4px;
       }
+      .ic-menu-status { text-transform: none; letter-spacing: 0.02em; color: var(--aura-color-primary); }
+      .ic-menu-status:empty { display: none; }
       .ic-item {
-        display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%;
+        display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; box-sizing: border-box;
         min-height: 40px; padding: 8px 10px; text-align: left; text-transform: none; letter-spacing: 0.02em;
-        border: 1px solid transparent; color: var(--aura-color-text);
+        font-size: inherit; background: transparent; border: 1px solid transparent; color: var(--aura-color-text); cursor: pointer;
       }
-      .ic-item:hover, .ic-item:focus-visible { border-color: var(--aura-color-primary); outline: none; box-shadow: none; color: var(--aura-color-primary); }
+      .ic-item:hover, .ic-item:focus-visible { border-color: var(--aura-color-primary); outline: none; box-shadow: none; color: var(--aura-color-primary); text-shadow: none; }
       .ic-item-label { font-size: 0.8rem; }
       .ic-item-desc { font-size: 0.68rem; color: var(--aura-color-text-dim); }
       .ic-item.danger, .ic-item.danger:hover { color: var(--aura-color-danger, #ff5555); }
-      .ic-form-hint { margin: 6px 10px 10px; font-size: 0.72rem; color: var(--aura-color-text-dim); line-height: 1.45; }
-      .ic-form { display: flex; flex-direction: column; gap: 4px; margin: 0 10px; font-size: 0.66rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--aura-color-text-dim); }
-      .ic-form input { font-size: 0.85rem; letter-spacing: normal; text-transform: none; padding: 8px; }
-      .ic-form-err { color: var(--aura-color-danger, #ff5555); text-transform: none; letter-spacing: normal; min-height: 1em; }
-      .ic-form-row { display: flex; justify-content: flex-end; gap: 8px; margin: 10px; }
-      .ic-form-row .ic-go { color: var(--aura-color-bg); background: var(--aura-color-primary); border-color: var(--aura-color-primary); }
-      .ic-form-row .ic-go:disabled { opacity: 0.5; }
+      .ic-item.danger[data-armed] { border-color: var(--aura-color-danger, #ff5555); }
+
+      /* ── Id dialog (install as / a fresh copy) ── */
+      .id-form-dialog {
+        width: min(440px, calc(100vw - 32px)); box-sizing: border-box; padding: 18px 20px;
+        color: var(--aura-color-text); background: var(--aura-color-surface);
+        border: 1px solid var(--aura-color-primary); box-shadow: var(--aura-glow-primary);
+      }
+      .id-form-dialog::backdrop { background: color-mix(in srgb, var(--aura-color-bg) 80%, transparent); }
+      .id-form-dialog label { display: flex; flex-direction: column; gap: 4px; font-size: 0.66rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--aura-color-text-dim); }
+      .id-form-dialog input { font-size: 0.9rem; letter-spacing: normal; text-transform: none; padding: 8px; }
+      .id-form-dialog input[aria-invalid="true"] { border-color: var(--aura-color-danger, #ff5555); }
+      .idf-err { color: var(--aura-color-danger, #ff5555); text-transform: none; letter-spacing: normal; min-height: 1em; }
+      .idf-hint { margin: 0 0 14px; font-size: 0.76rem; line-height: 1.5; color: var(--aura-color-text-dim); }
+
+      /* ── HTML controls (no native widgets) ── */
+      nx-select { display: inline-flex; position: relative; min-width: 0; }
+      .nxs-btn {
+        display: inline-flex; align-items: center; justify-content: space-between; gap: 10px;
+        width: 100%; min-height: 32px; padding: 4px 10px; box-sizing: border-box;
+        font-size: 0.75rem; text-transform: none; letter-spacing: 0.02em; text-align: left;
+        color: var(--aura-color-text); background: var(--aura-color-surface); border: 1px solid var(--aura-color-border);
+      }
+      .nxs-btn:hover, .nxs-btn:focus-visible { border-color: var(--aura-color-primary); box-shadow: none; outline: none; }
+      .nxs-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .nxs-caret { color: var(--aura-color-text-dim); font-size: 0.7rem; }
+      .nxs-list {
+        position: fixed; inset: auto; margin: 0; padding: 4px; box-sizing: border-box;
+        max-height: 60vh; overflow-y: auto; max-width: min(420px, calc(100vw - 16px));
+        color: var(--aura-color-text); background: var(--aura-color-surface);
+        border: 1px solid var(--aura-color-primary); box-shadow: var(--aura-glow-primary, 0 0 12px rgba(0,0,0,.4));
+      }
+      .nxs-title { display: none; }
+      .nxs-opt {
+        display: block; width: 100%; box-sizing: border-box; min-height: 34px; padding: 6px 10px;
+        font-size: 0.78rem; text-transform: none; letter-spacing: 0.02em; text-align: left; white-space: normal;
+        color: var(--aura-color-text); background: transparent; border: 1px solid transparent;
+      }
+      .nxs-opt:hover, .nxs-opt:focus-visible { border-color: var(--aura-color-primary); color: var(--aura-color-primary); box-shadow: none; outline: none; }
+      .nxs-opt[aria-selected="true"] { color: var(--aura-color-primary); background: color-mix(in srgb, var(--aura-color-primary) 10%, transparent); }
+      .nxs-opt[aria-selected="true"]::before { content: '✓ '; }
+      .nexus-form nx-select { width: 100%; }
+      .nexus-form .nxs-btn { min-height: 36px; font-size: 0.82rem; }
+      .confirm-text { margin: 0 0 16px; font-size: 0.85rem; line-height: 1.5; white-space: pre-wrap; }
+      .perm-ok.is-danger { color: var(--aura-color-bg); background: var(--aura-color-danger, #ff5555); border-color: var(--aura-color-danger, #ff5555); }
+      /* Tooltips from data-tip instead of the browser's title tooltip. */
+      [data-tip] { position: relative; }
+      [data-tip]:hover::after, [data-tip]:focus-visible::after {
+        content: attr(data-tip); position: absolute; left: 50%; bottom: calc(100% + 6px); transform: translateX(-50%);
+        z-index: 30; width: max-content; max-width: 260px; padding: 4px 8px; white-space: normal;
+        font-size: 0.68rem; letter-spacing: 0.02em; text-transform: none; line-height: 1.4;
+        color: var(--aura-color-text); background: var(--aura-color-surface); border: 1px solid var(--aura-color-border);
+        pointer-events: none;
+      }
+      @media (hover: none) { [data-tip]::after { display: none; } }
+      .search-clear { flex: 0 0 auto; min-width: 32px; min-height: 32px; padding: 0; border: 0; color: var(--aura-color-text-dim); font-size: 0.9rem; }
+      .search-clear:hover { color: var(--aura-color-primary); box-shadow: none; }
+      input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+      input[type="number"]::-webkit-inner-spin-button, input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+      .disclose { display: flex; align-items: center; gap: 8px; width: 100%; padding: 0; border: 0; background: transparent;
+        color: inherit; font-size: inherit; text-transform: none; letter-spacing: 0; text-align: left; }
+      .disclose::before { content: '▸'; transition: transform 0.12s; }
+      .disclose[aria-expanded="true"]::before { transform: rotate(90deg); }
+      .disclose:hover { box-shadow: none; }
+
+      /* ═══ Compact view: phones, iPads (also landscape), narrow windows ═══ */
+      @media (max-width: 1099px), (pointer: coarse) {
+        .toolbar { gap: 6px; padding: 10px 12px 8px; margin: -14px -12px 12px; }
+        .nexus-main { padding: 14px 12px 24px; }
+        .search-kbd, .tb-refresh { display: none; }
+        .btn-filters { display: inline-flex; }
+        .view-toggle button { min-width: 38px; }
+        /* The filter blocks become a bottom sheet (native popover). */
+        .filter-sheet { display: none; }
+        .filter-sheet:popover-open {
+          display: flex; flex-direction: column; gap: 14px;
+          position: fixed; inset: auto 0 0 0; margin: 0; width: 100%; max-width: none; box-sizing: border-box;
+          max-height: 85vh; overflow-y: auto; padding: 14px 14px calc(14px + env(safe-area-inset-bottom));
+          background: var(--aura-color-surface); border-top: 1px solid var(--aura-color-primary);
+          box-shadow: 0 -8px 24px rgba(0,0,0,.25);
+          animation: sheet-in 0.18s ease-out;
+        }
+        .filter-sheet::backdrop { background: color-mix(in srgb, var(--aura-color-bg) 70%, transparent); }
+        .fs-head { display: flex; align-items: center; justify-content: space-between; }
+        .fs-title { font-weight: 600; letter-spacing: 0.04em; }
+        .fs-close { min-width: 40px; min-height: 40px; padding: 0; border: 0; color: var(--aura-color-text-dim); }
+        .fs-group > .fs-label, .fs-field > .fs-label { display: block; margin-bottom: 6px; font-size: 0.66rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--aura-color-text-dim); }
+        .fs-group .chips { flex-wrap: wrap; overflow: visible; }
+        .fs-group .chip { min-height: 38px; padding: 6px 14px; font-size: 0.78rem; }
+        /* "Show" as a segmented control: equal-width cells. */
+        .fs-segmented .chips { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 0; }
+        .fs-segmented .chip { border-radius: 0; justify-content: center; margin: 0 -1px -1px 0; }
+        .fs-selects { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .fs-field nx-select { width: 100%; }
+        .fs-foot { display: flex; gap: 8px; align-items: center; position: sticky; bottom: 0; }
+        .fs-foot .btn-ghost { min-height: 42px; }
+        .fs-done {
+          margin-left: auto; min-height: 42px; padding: 8px 18px; font-size: 0.78rem;
+          color: var(--aura-color-bg); background: var(--aura-color-primary); border-color: var(--aura-color-primary);
+        }
+        /* Dense list rows: icon + name, the status line under it, one button. */
+        .app-list.view-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); }
+        .view-list .app-card {
+          display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 10px; row-gap: 2px;
+          align-items: center; padding: 8px 10px;
+        }
+        .view-list .app-card-foot, .view-list .app-card-meta { display: contents; }
+        .view-list .app-card-link { grid-column: 1; grid-row: 1; gap: 10px; }
+        .view-list .app-card-id, .view-list .app-card-desc, .view-list .app-card-meta .badge { display: none; }
+        .view-list .app-card-status { grid-column: 1; grid-row: 2; padding-left: 44px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .view-list .ic { grid-column: 2; grid-row: 1 / span 2; }
+        .view-list .ic-note { grid-column: 1 / -1; }
+        .ic > button { min-height: 38px; }
+        .ic .ic-main { min-width: 72px; padding: 6px 12px; }
+        .ic .ic-more { min-width: 34px; }
+        /* Menus are bottom sheets too. */
+        .ic-menu {
+          inset: auto 0 0 0 !important; left: 0 !important; top: auto !important; width: 100%; max-width: none;
+          border-width: 1px 0 0; padding: 10px 10px calc(10px + env(safe-area-inset-bottom));
+          animation: sheet-in 0.16s ease-out;
+        }
+        .ic-menu::backdrop { background: color-mix(in srgb, var(--aura-color-bg) 70%, transparent); }
+        .nxs-list {
+          inset: auto 0 0 0 !important; left: 0 !important; top: auto !important; width: 100%; max-width: none; min-width: 0 !important;
+          max-height: 70vh; border-width: 1px 0 0; padding: 10px 10px calc(10px + env(safe-area-inset-bottom));
+          animation: sheet-in 0.16s ease-out;
+        }
+        .nxs-list::backdrop { background: color-mix(in srgb, var(--aura-color-bg) 70%, transparent); }
+        .nxs-title { display: block; padding: 4px 10px 10px; font-size: 0.68rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--aura-color-text-dim); border-bottom: 1px solid var(--aura-color-border); margin-bottom: 4px; }
+        .nxs-opt { min-height: 46px; font-size: 0.85rem; }
+        .nxs-btn { min-height: 40px; }
+        .ic-item { min-height: 46px; }
+        .featured-strip { grid-auto-columns: min(85%, 340px); }
+        .nexus-brand .subtitle { display: none; }
+      }
+      @media (max-width: 560px) {
+        .nexus-brand .wordmark { display: none; }
+        .btn-filters-label { display: none; }
+        .fs-selects { grid-template-columns: 1fr; }
+        .app-list.view-grid { grid-template-columns: 1fr; }
+      }
+      @keyframes sheet-in { from { transform: translateY(100%); } to { transform: none; } }
 
       /* Page transitions: a quick fade; none for reduced motion. */
       ::view-transition-old(root), ::view-transition-new(root) { animation-duration: 0.12s; }
       @media (prefers-reduced-motion: reduce) {
         ::view-transition-old(root), ::view-transition-new(root) { animation: none; }
-        .ic-menu.is-sheet { animation: none; }
+        .ic-menu, .nxs-list, .filter-sheet:popover-open { animation: none; }
       }
     </style>
 
@@ -603,6 +855,37 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
     <!-- Identity choice: the app shares its id or originId with an installed
          app (scenarios A, B, D in core AppIdentity). Nothing is installed
          until the user picks what should happen. -->
+    <!-- auraConfirm(): the HTML confirmation (Layout head script). -->
+    <dialog class="id-form-dialog confirm-dialog" data-confirm transition:persist="nexus-confirm-dialog">
+      <form method="dialog">
+        <p class="confirm-text" data-confirm-text></p>
+        <div class="perm-actions">
+          <button type="submit" value="cancel">Cancel</button>
+          <button type="submit" value="ok" class="perm-ok" data-confirm-ok>OK</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- "Install under another id" / "Install a fresh copy": the local id. -->
+    <dialog class="id-form-dialog" data-id-form transition:persist="nexus-idform-dialog" aria-labelledby="idf-title">
+      <form method="dialog">
+        <h2 class="perm-title" id="idf-title">
+          <span data-idf-mode="install-copy">Install a fresh copy</span>
+          <span data-idf-mode="install-as" hidden>Install under another id</span>
+        </h2>
+        <p class="idf-hint" data-idf-mode="install-copy">A separate app with its own id and identity. It does not get updates from the store.</p>
+        <p class="idf-hint" data-idf-mode="install-as" hidden>The same app under a local id of your choice. It keeps getting updates from this source.</p>
+        <label>Local app id
+          <input type="text" name="appId" data-idf-input spellcheck="false" autocomplete="off" autocapitalize="off" />
+          <span class="idf-err" data-idf-err></span>
+        </label>
+        <div class="perm-actions">
+          <button type="submit" value="cancel" formnovalidate>Cancel</button>
+          <button type="submit" value="ok" class="perm-ok" data-idf-ok>Install</button>
+        </div>
+      </form>
+    </dialog>
+
     <div class="perm-overlay" data-id-overlay hidden transition:persist="nexus-id-dialog">
       <div class="perm-dialog" role="dialog" aria-modal="true" aria-labelledby="id-title">
         <h2 class="perm-title" id="id-title" data-id-title>Already installed</h2>

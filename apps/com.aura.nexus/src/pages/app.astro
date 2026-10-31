@@ -59,7 +59,7 @@ const editable       = entry?.sourceKind === 'oci' && !!entry?.sourceName;
           </div>
         </div>
         <div class="nexus-card-actions detail-actions">
-          <InstallControl ref={entry.id} name={entry.name} version={entry.version} state={state!} size="lg" />
+          <InstallControl ref={entry.id} name={entry.name} version={entry.version} state={state!} size="lg" onDetail />
           <span class="app-card-status" data-ic-status></span>
         </div>
       </div>
@@ -137,7 +137,8 @@ const editable       = entry?.sourceKind === 'oci' && !!entry?.sourceName;
           <div class="panel-sec"><span class="panel-lbl">Listing screenshots</span></div>
           <div id="le-shots" class="le-shots"></div>
           <div class="nexus-form-row" style="margin-top:8px">
-            <input id="le-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple />
+            <input id="le-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden />
+            <button type="button" class="btn-ghost" data-file-for="le-file">Add images…</button>
             <input id="le-url" type="text" placeholder="…or an https:// image URL" style="flex:1" />
             <button type="button" id="le-add-url">ADD URL</button>
           </div>
@@ -351,11 +352,24 @@ const editable       = entry?.sourceKind === 'oci' && !!entry?.sourceName;
     .detail-actions { flex-direction: column; align-items: flex-end; gap: 6px; }
     .detail-actions .app-card-status { flex-basis: auto; text-align: right; }
     .detail-panel .ic-note { margin-top: 12px; }
+    /* Compact view: the install control is a bar at the bottom of the
+       screen — always in reach — and the info tables stack. */
+    @media (max-width: 1099px), (pointer: coarse) {
+      .detail-panel { margin-bottom: 72px; }
+      .detail-actions {
+        position: fixed; left: 0; right: 0; bottom: 0; z-index: 15;
+        flex-direction: row; align-items: center; gap: 10px;
+        padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+        background: var(--aura-color-surface); border-top: 1px solid var(--aura-color-border);
+        box-shadow: 0 -6px 18px rgba(0,0,0,.18);
+      }
+      .detail-actions .app-card-status { order: -1; flex: 1 1 auto; text-align: left; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .detail-actions .ic { flex: 0 0 auto; }
+    }
     @media (max-width: 560px) {
-      .detail-actions { align-items: stretch; width: 100%; }
-      .detail-actions .ic { width: 100%; }
+      .detail-actions .app-card-status { display: none; }
+      .detail-actions .ic { flex: 1 1 auto; }
       .detail-actions .ic-main { flex: 1; }
-      .detail-actions .app-card-status { text-align: left; }
       table.kv, table.kv tbody, table.kv tr, table.kv td { display: block; width: auto; }
       table.kv tr { padding: 6px 0; border-bottom: 1px solid var(--aura-color-border); }
       table.kv td { padding: 2px 0; }

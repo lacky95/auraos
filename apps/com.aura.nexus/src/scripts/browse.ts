@@ -6,18 +6,25 @@
  *   [data-browse]                       root, data-key = localStorage namespace
  *     input[data-q]                     search box ("/" focuses it)
  *     [data-chips=<group>] button[data-chip=<facet|''>]   one active per group
- *     select[data-filter]               value = a facet ('' = all)
- *     select[data-sort]                 default | name | source
+ *     nx-select[data-filter]            value = a facet ('' = all)   (Select.astro)
+ *     nx-select[data-sort]              default | name | source
  *     button[data-view=grid|list]
  *     [data-list]                       holds the [data-card]s
  *     [data-count]  [data-noresults] (with button[data-reset])
+ *     button[data-reset-all]            always-visible reset (filter sheet)
+ *     [data-pill=<group>][data-pill-value]  removable pill per active filter
+ *     [data-filter-count]               number of active filters (Filters button)
  *     [data-hide-when-filtered]         e.g. Featured
+ *   All of it is server-rendered (StoreToolbar.astro); this only applies it.
  *   [data-card]  data-facets="installed update src:x cat:y" data-search data-name data-source data-index
  *
  * State lives in the URL (?q=&status=&cat=&src=&sort=&view=) so Back and
  * links restore it; view + sort are also remembered per list.
  */
 import { navigate } from 'astro:transitions/client';
+
+/** <nx-select> (Select.astro): a <select> drawn in HTML — .value + change. */
+type ValueEl = HTMLElement & { value: string };
 
 interface Filters { q: string; chips: Record<string, string>; selects: Record<string, string>; sort: string; view: string }
 
@@ -40,9 +47,9 @@ function init(): void {
   const key = `nexus.${root.dataset.key ?? 'browse'}`;
   const list = root.querySelector<HTMLElement>('[data-list]')!;
   const q = root.querySelector<HTMLInputElement>('[data-q]');
-  const sortSel = root.querySelector<HTMLSelectElement>('[data-sort]');
+  const sortSel = root.querySelector<ValueEl>('[data-sort]');
   const groups = [...root.querySelectorAll<HTMLElement>('[data-chips]')];
-  const selects = [...root.querySelectorAll<HTMLSelectElement>('select[data-filter]')];
+  const selects = [...root.querySelectorAll<ValueEl>('nx-select[data-filter]')];
   const url = new URL(location.href);
 
   // ── Initial state: URL first, then what this list remembered. ──
@@ -51,7 +58,10 @@ function init(): void {
     chips: Object.fromEntries(groups.map((g) => [g.dataset.chips!, url.searchParams.get(g.dataset.chips!) ?? ''])),
     selects: Object.fromEntries(selects.map((s) => [s.dataset.filter!, url.searchParams.get(s.dataset.filter!) ?? ''])),
     sort: url.searchParams.get('sort') ?? store(`${key}.sort`) ?? 'default',
-    view: url.searchParams.get('view') ?? store(`${key}.view`) ?? (root.dataset.defaultView || 'grid'),
+    // Phones / iPads / narrow windows start in the dense list; desktop in the
+    // list's own default. A choice the user made wins either way.
+    view: url.searchParams.get('view') ?? store(`${key}.view`)
+      ?? (window.matchMedia('(max-width: 1099px), (pointer: coarse)').matches ? 'list' : (root.dataset.defaultView || 'grid')),
   };
   // Older links: /?category=x
   const legacyCat = url.searchParams.get('category');
@@ -100,6 +110,20 @@ function init(): void {
     root.querySelectorAll<HTMLElement>('[data-noresults]').forEach((el) => { el.hidden = shown > 0; });
     document.querySelectorAll<HTMLElement>('[data-hide-when-filtered]').forEach((el) => { el.hidden = filtered; });
     root.querySelectorAll<HTMLElement>('[data-reset]').forEach((el) => { el.hidden = !filtered; });
+    // Active-filter pills + the count on the Filters button (compact view).
+    const active: Record<string, string> = { ...f.chips, ...f.selects };
+    let anyPill = false;
+    root.querySelectorAll<HTMLElement>('[data-pill]').forEach((p) => {
+      const on = !!p.dataset.pillValue && active[p.dataset.pill!] === p.dataset.pillValue;
+      p.hidden = !on;
+      anyPill ||= on;
+    });
+    root.querySelectorAll<HTMLElement>('[data-pills]').forEach((el) => { el.hidden = !anyPill; });
+    const nActive = Object.values(active).filter(Boolean).length;
+    root.querySelectorAll<HTMLElement>('[data-filter-count]').forEach((el) => {
+      el.textContent = nActive ? String(nActive) : '';
+      el.hidden = !nActive;
+    });
     if (push) syncUrl();
   }
 
@@ -144,6 +168,10 @@ function init(): void {
     t = setTimeout(() => { f.q = q.value; apply(); }, 80);
   }, { signal });
   q?.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && q.value) { q.value = ''; f.q = ''; apply(); } }, { signal });
+  const qClear = root.querySelector<HTMLElement>('[data-q-clear]');
+  const syncClear = () => { if (qClear && q) qClear.hidden = !q.value; };
+  q?.addEventListener('input', syncClear, { signal });
+  qClear?.addEventListener('click', () => { if (!q) return; q.value = ''; f.q = ''; syncClear(); apply(); q.focus(); }, { signal });
   for (const g of groups) {
     g.addEventListener('click', (ev) => {
       const chip = (ev.target as HTMLElement).closest<HTMLElement>('[data-chip]');
@@ -158,11 +186,18 @@ function init(): void {
   root.querySelectorAll<HTMLElement>('[data-view]').forEach((b) => b.addEventListener('click', () => {
     view(b.dataset.view!); store(`${key}.view`, f.view); syncUrl();
   }, { signal }));
-  root.querySelectorAll<HTMLElement>('[data-reset]').forEach((b) => b.addEventListener('click', () => {
+  root.querySelectorAll<HTMLElement>('[data-pill]').forEach((p) => p.addEventListener('click', () => {
+    const g = p.dataset.pill!;
+    if (g in f.chips) f.chips[g] = '';
+    if (g in f.selects) { f.selects[g] = ''; const sel = selects.find((x) => x.dataset.filter === g); if (sel) sel.value = ''; }
+    apply();
+  }, { signal }));
+  root.querySelectorAll<HTMLElement>('[data-reset], [data-reset-all]').forEach((b) => b.addEventListener('click', () => {
     f.q = ''; if (q) q.value = '';
     for (const k of Object.keys(f.chips)) f.chips[k] = '';
     for (const s of selects) { s.value = ''; f.selects[s.dataset.filter!] = ''; }
-    apply(); q?.focus();
+    apply();
+    if (!b.closest('[popover]')) q?.focus();
   }, { signal }));
   // Refresh re-fetches every source but keeps what the user is looking at.
   root.querySelectorAll<HTMLAnchorElement>('[data-refresh]').forEach((a) => a.addEventListener('click', (ev) => {
@@ -181,6 +216,7 @@ function init(): void {
   view(f.view);
   sort();
   apply();
+  syncClear();
   root.classList.add('is-ready');
 }
 

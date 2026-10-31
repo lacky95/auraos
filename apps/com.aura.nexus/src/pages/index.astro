@@ -2,6 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 import AppCard from '../components/AppCard.astro';
 import SectionHeader from '../components/SectionHeader.astro';
+import StoreToolbar from '../components/StoreToolbar.astro';
 import { shellGet } from '../lib/shellClient';
 import { stateOf, type Catalog } from '../lib/catalog';
 
@@ -44,53 +45,32 @@ const nAvailable = count((i) => states[i]!.status === 'available');
     </section>
   ) : (
     <div class="browse" data-browse data-key="browse" data-default-view="grid">
-      <div class="toolbar">
-        <label class="search">
-          <span class="search-icon" aria-hidden="true">⌕</span>
-          <input data-q type="search" placeholder="Search apps" aria-label="Search apps" autocomplete="off" spellcheck="false" />
-          <kbd class="search-kbd" aria-hidden="true">/</kbd>
-        </label>
-        <div class="toolbar-row">
-          <div class="chips" data-chips="status" role="group" aria-label="Show">
-            <button type="button" class="chip" data-chip="">All <span data-chip-count>{apps.length}</span></button>
-            <button type="button" class="chip" data-chip="installed">Installed <span data-chip-count>{nInstalled}</span></button>
-            <button type="button" class="chip chip-update" data-chip="update">Updates <span data-chip-count>{nUpdates}</span></button>
-            <button type="button" class="chip" data-chip="available">Not installed <span data-chip-count>{nAvailable}</span></button>
-          </div>
-          <div class="toolbar-end">
-            {sources.length > 1 && (
-              <select data-filter="src" aria-label="Source">
-                <option value="">All sources</option>
-                {sources.map((s) => <option value={`src:${s}`}>{s}</option>)}
-              </select>
-            )}
-            <select data-sort aria-label="Sort">
-              <option value="default">Store order</option>
-              <option value="name">Name</option>
-              <option value="source">Source</option>
-            </select>
-            <div class="view-toggle" role="group" aria-label="View">
-              <button type="button" data-view="grid" title="Grid view" aria-label="Grid view">▦</button>
-              <button type="button" data-view="list" title="List view" aria-label="List view">☰</button>
-            </div>
-            <a class="btn-icon" href="/?refresh=1" data-refresh title="Re-fetch every source now" aria-label="Refresh sources">↻</a>
-          </div>
-        </div>
-        {categories.length > 0 && (
-          <div class="chips chips-scroll" data-chips="cat" role="group" aria-label="Category">
-            <button type="button" class="chip" data-chip="">All categories</button>
-            {categories.map((c) => (
-              <button type="button" class="chip" data-chip={`cat:${c.slug}`}>{c.label} <span data-chip-count></span></button>
-            ))}
-          </div>
-        )}
-      </div>
+      <StoreToolbar
+        placeholder="Search apps"
+        refresh
+        groups={[
+          { key: 'status', label: 'Show', segmented: true, options: [
+            { value: '', label: 'All', count: apps.length },
+            { value: 'installed', label: 'Installed', count: nInstalled },
+            { value: 'update', label: 'Updates', count: nUpdates, tone: 'update' },
+            { value: 'available', label: 'Not installed', count: nAvailable },
+          ] },
+          ...(categories.length ? [{ key: 'cat', label: 'Category', options: [
+            { value: '', label: 'All categories' },
+            ...categories.map((c) => ({ value: `cat:${c.slug}`, label: c.label, count: apps.filter((x) => (x.categories ?? []).includes(c.slug)).length })),
+          ] }] : []),
+        ]}
+        selects={sources.length > 1 ? [{ key: 'src', label: 'Source', all: 'All sources', options: sources.map((x) => ({ value: `src:${x}`, label: x })) }] : []}
+        sorts={[{ value: 'default', label: 'Store order' }, { value: 'name', label: 'Name' }, { value: 'source', label: 'Source' }]}
+      />
 
       {degraded.length > 0 && (
-        <details class="source-warn">
-          <summary>⚠ {degraded.length} source{degraded.length > 1 ? 's' : ''} unavailable — showing the last known apps</summary>
-          {degraded.map((s) => <div><b>{s.name}</b> ({s.kind}){s.error ? `: ${s.error}` : ''}</div>)}
-        </details>
+        <div class="source-warn">
+          <button type="button" class="disclose" data-disclose aria-expanded="false" aria-controls="source-warn-detail">⚠ {degraded.length} source{degraded.length > 1 ? 's' : ''} unavailable — showing the last known apps</button>
+          <div id="source-warn-detail" hidden>
+            {degraded.map((s) => <div><b>{s.name}</b> ({s.kind}){s.error ? `: ${s.error}` : ''}</div>)}
+          </div>
+        </div>
       )}
 
       {featured.length > 0 && (

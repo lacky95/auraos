@@ -1,5 +1,6 @@
 ---
 import Layout from '../layouts/Layout.astro';
+import Select from '../components/Select.astro';
 import SectionHeader from '../components/SectionHeader.astro';
 import { shellGet } from '../lib/shellClient';
 
@@ -71,12 +72,12 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
               </div>
               <div class="nexus-card-desc"><code>{s.url}</code></div>
               <div class="nexus-card-meta">
-                {s.kind === 'oci' && s.auth && <span class="badge" style="margin-right:6px" title="private registry — login saved">🔒 {s.auth.username}</span>}
+                {s.kind === 'oci' && s.auth && <span class="badge" style="margin-right:6px" data-tip="private registry — login saved">🔒 {s.auth.username}</span>}
                 {s.kind === 'oci' && s.mirror && <span class="badge" style="margin-right:6px">mirror</span>}
                 {s.ref && <span class="badge" style="margin-right:6px">ref: {s.ref}</span>}
                 {s.seed && (
                   <span class="badge" style="margin-right:6px"
-                    title={s.seed.policy === 'managed'
+                    data-tip={s.seed.policy === 'managed'
                       ? 'managed by ' + s.seed.origin + ' — change it there'
                       : 'pre-registered by ' + s.seed.origin + ' — yours to edit or remove'}>
                     {s.seed.policy === 'managed' ? '🔒 managed' : 'pre-registered'}
@@ -91,7 +92,7 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
             </div>
             <div class="nexus-card-actions">
               {s.seed?.policy === 'managed' ? (
-                <span style="color:var(--aura-color-text-dim);font-size:0.7rem" title={s.seed.origin}>set by {s.seed.origin}</span>
+                <span style="color:var(--aura-color-text-dim);font-size:0.7rem" data-tip={s.seed.origin}>set by {s.seed.origin}</span>
               ) : (
                 <>
                   <button class="edit-src" data-name={s.name}>EDIT</button>
@@ -119,10 +120,8 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
                 {s.kind === 'oci' ? (
                   <div>
                     <label>Mirror (probe first for any ref)</label>
-                    <select class="edit-mirror">
-                      <option value="false" selected={!s.mirror}>no</option>
-                      <option value="true" selected={!!s.mirror}>yes</option>
-                    </select>
+                    <Select class="edit-mirror" label="Mirror" value={s.mirror ? 'true' : 'false'}
+                      options={[{ value: 'false', label: 'no' }, { value: 'true', label: 'yes' }]} />
                   </div>
                 ) : (
                   <div>
@@ -226,12 +225,12 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
   <section class="nexus-section">
     <SectionHeader title="Add a source" />
     <div class="nexus-form">
-      <label for="src-kind">Kind</label>
-      <select id="src-kind">
-        <option value="oci">oci — OCI registry (apps published to it appear automatically)</option>
-        <option value="git-index">git-index — a repo hosting index.yaml (many apps)</option>
-        <option value="git-app">git-app — a repo that is a single app</option>
-      </select>
+      <label>Kind</label>
+      <Select id="src-kind" label="Kind" options={[
+        { value: 'oci', label: 'oci — OCI registry (apps published to it appear automatically)' },
+        { value: 'git-index', label: 'git-index — a repo hosting index.yaml (many apps)' },
+        { value: 'git-app', label: 'git-app — a repo that is a single app' },
+      ]} />
 
       <label for="src-name">Name (unique)</label>
       <input id="src-name" type="text" placeholder="my-registry" />
@@ -245,8 +244,8 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
           <input id="src-priority" type="number" value="10" />
         </div>
         <div id="mirror-cell">
-          <label for="src-mirror">Mirror (oci — probe first for any ref)</label>
-          <select id="src-mirror"><option value="false">no</option><option value="true">yes</option></select>
+          <label>Mirror (oci — probe first for any ref)</label>
+          <Select id="src-mirror" label="Mirror" options={[{ value: 'false', label: 'no' }, { value: 'true', label: 'yes' }]} />
         </div>
         <div id="ref-cell" style="display:none">
           <label for="src-ref">Git ref (branch/tag/commit, optional)</label>
@@ -417,7 +416,7 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
     document.querySelectorAll('.login-remove').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const name = btn.getAttribute('data-name');
-        if (!confirm('Remove the login of "' + name + '"? Its apps will not load until you add it again.')) return;
+        if (!(await window.auraConfirm('Remove the login of "' + name + '"? Its apps will not load until you add it again.', { ok: 'Remove login', danger: true }))) return;
         try {
           const res = await fetch('/api/nexus/sources/' + encodeURIComponent(name) + '/credentials', { method: 'DELETE' });
           const json = await res.json();
@@ -456,7 +455,7 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
           const repo = form.querySelector('.edit-repo');
           if (repo) body.repo = repo.value.trim();
         }
-        if (body.name !== name && !confirm('Rename "' + name + '" to "' + body.name + '"? Publish targets that use "' + name + '" (--to, publish.registry) must be updated too.')) return;
+        if (body.name !== name && !(await window.auraConfirm('Rename "' + name + '" to "' + body.name + '"? Publish targets that use "' + name + '" (--to, publish.registry) must be updated too.', { ok: 'Rename' }))) return;
         btn.disabled = true; btn.textContent = 'SAVING…';
         setLog('saving "' + name + '"…');
         try {
@@ -514,7 +513,7 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
     document.querySelectorAll('.remove-src').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const name = btn.getAttribute('data-name');
-        if (!confirm('Remove source "' + name + '"?')) return;
+        if (!(await window.auraConfirm('Remove source "' + name + '"?', { ok: 'Remove', danger: true }))) return;
         btn.disabled = true; btn.textContent = '…';
         setLog('removing "' + name + '"…');
         try {

@@ -1,5 +1,6 @@
 ---
 import Layout from '../layouts/Layout.astro';
+import Select from '../components/Select.astro';
 import SectionHeader from '../components/SectionHeader.astro';
 ---
 <Layout title="Publish" active="publish">
@@ -17,11 +18,8 @@ import SectionHeader from '../components/SectionHeader.astro';
       <label for="path-input">Local app path</label>
       <input id="path-input" type="text" placeholder="/workspace/apps/com.example.foo" />
 
-      <label for="source-select">Source</label>
-      <select id="source-select">
-        <option value="git">git (v1 default)</option>
-        <option value="oci">oci (needs `oras`)</option>
-      </select>
+      <label>Source</label>
+      <Select id="source-select" label="Source" options={[{ value: 'git', label: 'git (v1 default)' }, { value: 'oci', label: 'oci (needs `oras`)' }]} />
 
       <label for="repo-input">Git repo (overrides manifest.publish.repo)</label>
       <input id="repo-input" type="text" placeholder="github.com/user/aura-foo" />

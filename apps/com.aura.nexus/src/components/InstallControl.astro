@@ -1,39 +1,75 @@
 ---
 /**
- * The install / installed control of one app: a main button plus a ▾ menu,
- * driven by its InstallState (scripts/store.ts renders and keeps it current).
+ * The install / installed control of one app: a main button and a ▾ menu,
+ * all rendered here. The menu is a native popover (opens, closes, Esc and
+ * light-dismiss without JS); every possible item is in the HTML and the
+ * state decides which are shown — scripts/store.ts only toggles `hidden`,
+ * labels and positions, from the same rules (lib/catalog.ts).
  *
  *   catalog app: data-app = catalog id (polled via /api/nexus/status)
  *   local app:   data-local-only (Installed page: an app the store doesn't list)
  */
-import type { InstallState } from '../lib/catalog';
+import {
+  MAIN_LABEL, mainActionOf, statusLineOf, visibleItems, type InstallState,
+} from '../lib/catalog';
 interface Props {
   ref?: string;              // catalog id — what an install resolves
   name: string;
-  version?: string;          // catalog version
+  version?: string;          // store version
   state: InstallState;
   localOnly?: boolean;
-  /** Local-only app with a store install record: can still update from its ref. */
   localUpdate?: boolean;
+  onDetail?: boolean;
   size?: 'sm' | 'lg';
 }
-const { ref, name, version, state, localOnly = false, localUpdate = false, size = 'sm' } = Astro.props;
-// First paint before the script runs — same rules as store.ts mainAction().
-const main = state.status === 'installing' ? 'Installing…'
-  : state.status === 'id-taken' ? 'Install as…'
-  : state.status === 'installed' ? (state.updateAvailable ? 'Update' : 'Open')
-  : 'Install';
+const { ref, name, version, state, localOnly = false, localUpdate = false, onDetail = false, size = 'sm' } = Astro.props;
+const opts = { catalog: !localOnly && !!ref, localUpdate, onDetail };
+const main = mainActionOf(state);
+const items = visibleItems(state, opts);
+const menuId = `icm-${(ref ?? state.localAppId ?? 'app').replace(/[^a-z0-9]+/gi, '-')}-${Math.random().toString(36).slice(2, 7)}`;
+const v = state.availableVersion ?? version;
+const detailHref = ref ? `/app?id=${encodeURIComponent(ref)}` : undefined;
 ---
 <div
   class:list={['ic', `ic-${size}`]}
   data-ic
-  data-app={localOnly ? undefined : ref}
+  data-app={opts.catalog ? ref : undefined}
   data-local-only={localOnly ? '' : undefined}
   data-local-update={localUpdate ? '' : undefined}
+  data-on-detail={onDetail ? '' : undefined}
   data-name={name}
   data-version={version}
+  data-status={state.status}
   data-state={JSON.stringify(state)}
 >
-  <button type="button" class="ic-main" disabled={state.status === 'installing'}>{main}</button>
-  <button type="button" class="ic-more" aria-haspopup="menu" aria-expanded="false" aria-label={`More actions for ${name}`}>▾</button>
+  <button type="button" class:list={['ic-main', { 'is-update': main === 'update', 'is-open': main === 'open' }]}
+    data-action={main ?? ''} disabled={!main}>{main ? MAIN_LABEL[main] : 'Installing…'}</button>
+  <button type="button" class="ic-more" popovertarget={menuId} aria-haspopup="menu"
+    aria-label={`More actions for ${name}`} hidden={items.size === 0}>▾</button>
+  <div popover="auto" id={menuId} class="ic-menu" role="menu" aria-label={`${name} actions`}>
+    <div class="ic-menu-title">{name}<span class="ic-menu-status" data-ic-menu-status>{statusLineOf(state, ref, version)}</span></div>
+    <button type="button" class="ic-item" role="menuitem" data-item="open" hidden={!items.has('open')}>
+      <span class="ic-item-label">Open</span>
+    </button>
+    <button type="button" class="ic-item" role="menuitem" data-item="update" hidden={!items.has('update')}>
+      <span class="ic-item-label" data-update-label>{v ? `Update to v${v}` : 'Update'}</span>
+    </button>
+    <button type="button" class="ic-item" role="menuitem" data-item="install-copy" hidden={!items.has('install-copy')}>
+      <span class="ic-item-label">Install a fresh copy…</span>
+      <span class="ic-item-desc">New id + identity, no updates from the store</span>
+    </button>
+    <button type="button" class="ic-item" role="menuitem" data-item="install-as" hidden={!items.has('install-as')}>
+      <span class="ic-item-label">Install under another id…</span>
+      <span class="ic-item-desc">Same app, a local id of your choice</span>
+    </button>
+    <button type="button" class="ic-item danger" role="menuitem" data-item="uninstall" hidden={!items.has('uninstall')}>
+      <span class="ic-item-label" data-uninstall-label>Uninstall</span>
+      <span class="ic-item-desc">App data is kept</span>
+    </button>
+    {detailHref && (
+      <a class="ic-item" role="menuitem" data-item="details" href={detailHref} hidden={!items.has('details')}>
+        <span class="ic-item-label">Details</span>
+      </a>
+    )}
+  </div>
 </div>

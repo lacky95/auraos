@@ -1,0 +1,88 @@
+---
+/**
+ * Search + filters of a store list — all rendered here; scripts/browse.ts
+ * only applies them.
+ *
+ * Desktop (≥ 1100 px, fine pointer): search on top, the filter blocks inline
+ * below it (status chips, selects, sort, category chips).
+ * Compact (phones, iPads, narrow windows, touch): one row — search, a
+ * Filters button with the number of active filters, the view switch — and
+ * the same filter blocks in a bottom sheet (a native popover, opens without
+ * JS). Active filters show as removable pills under the search.
+ */
+import Select from './Select.astro';
+interface Option { value: string; label: string; count?: number; tone?: 'update' }
+interface Group { key: string; label: string; options: Option[]; segmented?: boolean }
+interface Select { key: string; label: string; all: string; options: Array<{ value: string; label: string }> }
+interface Props {
+  placeholder: string;
+  groups: Group[];
+  selects?: Select[];
+  sorts: Array<{ value: string; label: string }>;
+  refresh?: boolean;
+}
+const { placeholder, groups, selects = [], sorts, refresh = false } = Astro.props;
+const sheetId = `filters-${Math.random().toString(36).slice(2, 7)}`;
+---
+<div class="toolbar">
+  <div class="toolbar-main">
+    <label class="search">
+      <span class="search-icon" aria-hidden="true">⌕</span>
+      <input data-q type="text" inputmode="search" placeholder={placeholder} aria-label={placeholder} autocomplete="off" spellcheck="false" enterkeyhint="search" />
+      <button type="button" class="search-clear" data-q-clear aria-label="Clear search" hidden>✕</button>
+      <kbd class="search-kbd" aria-hidden="true">/</kbd>
+    </label>
+    <button type="button" class="btn-filters" popovertarget={sheetId} aria-label="Filters">
+      <span class="btn-filters-icon" aria-hidden="true">⚲</span><span class="btn-filters-label">Filters</span>
+      <span class="filter-count" data-filter-count hidden></span>
+    </button>
+    <div class="view-toggle" role="group" aria-label="View">
+      <button type="button" data-view="grid" aria-label="Grid view" data-tip="Grid view">▦</button>
+      <button type="button" data-view="list" aria-label="List view" data-tip="List view">☰</button>
+    </div>
+    {refresh && <a class="btn-icon tb-refresh" href="/?refresh=1" data-refresh aria-label="Refresh sources" data-tip="Re-fetch every source now">↻</a>}
+  </div>
+
+  <div class="active-pills" data-pills hidden>
+    {groups.flatMap((g) => g.options.filter((o) => o.value).map((o) => (
+      <button type="button" class="pill" data-pill={g.key} data-pill-value={o.value} hidden>{o.label} <span aria-hidden="true">✕</span></button>
+    )))}
+    {selects.flatMap((s) => s.options.filter((o) => o.value).map((o) => (
+      <button type="button" class="pill" data-pill={s.key} data-pill-value={o.value} hidden>{o.label} <span aria-hidden="true">✕</span></button>
+    )))}
+  </div>
+
+  <div class="filter-sheet" id={sheetId} popover="auto" aria-label="Filters" data-filter-sheet>
+    <div class="fs-head">
+      <span class="fs-title">Filters</span>
+      <button type="button" class="fs-close" popovertarget={sheetId} popovertargetaction="hide" aria-label="Close filters">✕</button>
+    </div>
+    {groups.map((g) => (
+      <section class:list={['fs-group', `fs-group-${g.key}`, { 'fs-segmented': g.segmented }]}>
+        <div class="fs-label">{g.label}</div>
+        <div class="chips" data-chips={g.key} role="group" aria-label={g.label}>
+          {g.options.map((o) => (
+            <button type="button" class:list={['chip', { 'chip-update': o.tone === 'update' }]} data-chip={o.value}>
+              {o.label} <span data-chip-count>{o.count ?? ''}</span>
+            </button>
+          ))}
+        </div>
+      </section>
+    ))}
+    <section class="fs-group fs-selects">
+      {selects.map((s) => (
+        <div class="fs-field"><span class="fs-label">{s.label}</span>
+          <Select data-filter={s.key} label={s.label} options={[{ value: '', label: s.all }, ...s.options]} />
+        </div>
+      ))}
+      <div class="fs-field"><span class="fs-label">Sort</span>
+        <Select data-sort label="Sort" options={sorts} />
+      </div>
+    </section>
+    <div class="fs-foot">
+      <button type="button" class="btn-ghost" data-reset-all>Reset</button>
+      {refresh && <a class="btn-ghost" href="/?refresh=1" data-refresh>↻ Refresh sources</a>}
+      <button type="button" class="fs-done" popovertarget={sheetId} popovertargetaction="hide">Show <span data-count></span> apps</button>
+    </div>
+  </div>
+</div>

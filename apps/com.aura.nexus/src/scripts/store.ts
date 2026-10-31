@@ -1,16 +1,21 @@
 /**
- * Install controls on every store page: render each `[data-ic]` from its
- * InstallState, keep them current from /api/nexus/status, and run the actions
- * behind the main button and the ▾ menu.
+ * Install controls on every store page. All markup is server-rendered
+ * (InstallControl.astro, the id dialog in Layout.astro); this script only:
+ *   - applies an InstallState to a control (labels, which items are hidden),
+ *     with the same rules as the server (lib/catalog.ts),
+ *   - keeps them current from /api/nexus/status,
+ *   - runs the actions behind the buttons,
+ *   - places an open menu next to its ▾ on desktop (phones: CSS bottom sheet).
  *
  * Bundled once and kept across ClientRouter page swaps: the poller and the
  * delegated handlers live for the whole session and always work on the
  * current page's DOM.
  */
-import { navigate } from 'astro:transitions/client';
-import type { InstallState } from '../lib/catalog';
+import {
+  MAIN_LABEL, mainActionOf, statusLineOf, visibleItems, type InstallState, type MenuAction,
+} from '../lib/catalog';
 
-type Action = 'install' | 'open' | 'update' | 'install-as' | 'install-copy' | 'uninstall' | 'details';
+type Action = 'install' | 'open' | 'update' | 'install-as' | 'install-copy' | 'uninstall';
 type Result = { ok?: boolean; record?: { id: string; version: string; scope?: string }; cancelled?: boolean; error?: string };
 
 declare global {
@@ -25,6 +30,7 @@ declare global {
 const APP_ID = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
 const POLL_MS = 2500;
 const STATE_FACETS = new Set(['available', 'installed', 'id-taken', 'installing', 'update']);
+const compact = window.matchMedia('(max-width: 1099px), (pointer: coarse)');
 
 // ─── State → control ───────────────────────────────────────────────────────
 
@@ -33,93 +39,59 @@ function stateOf(ic: HTMLElement): InstallState {
   catch { return { status: 'available' } as InstallState; }
 }
 
-function mainAction(st: InstallState): Action | null {
-  if (st.status === 'installing') return null;
-  if (st.status === 'id-taken') return 'install-as';
-  if (st.status === 'installed') return st.updateAvailable ? 'update' : 'open';
-  return 'install';
+function optsOf(ic: HTMLElement) {
+  return {
+    catalog: !!ic.dataset.app,
+    localUpdate: ic.hasAttribute('data-local-update'),
+    onDetail: ic.hasAttribute('data-on-detail'),
+  };
 }
 
-const MAIN_LABEL: Record<Action, string> = {
-  install: 'Install', open: 'Open', update: 'Update', 'install-as': 'Install as…',
-  'install-copy': 'Install a copy…', uninstall: 'Uninstall', details: 'Details',
-};
-
-/** The version the store offers: live from the poll, else as rendered. */
-function storeVersion(ic: HTMLElement, st: InstallState): string | undefined {
-  return st.availableVersion ?? ic.dataset.version;
-}
-
-function menuItems(ic: HTMLElement, st: InstallState): Array<{ action: Action; label: string; desc?: string; danger?: boolean }> {
-  const v = storeVersion(ic, st);
-  const items: Array<{ action: Action; label: string; desc?: string; danger?: boolean }> = [];
-  const main = mainAction(st);
-  if (st.status === 'available') {
-    items.push({ action: 'install-as', label: 'Install under another id…', desc: 'Same app, a local id of your choice' });
-  }
-  if (st.status === 'installed') {
-    if (main !== 'open') items.push({ action: 'open', label: 'Open' });
-    const canUpdate = st.updateAvailable || ic.hasAttribute('data-local-update');
-    if (main !== 'update' && canUpdate && !st.detached) {
-      items.push({ action: 'update', label: v ? `Update to v${v}` : 'Update' });
-    }
-    if (!ic.hasAttribute('data-local-only')) {
-      items.push({ action: 'install-copy', label: 'Install a fresh copy…', desc: 'New id + identity, no updates from the store' });
-    }
-    if (st.canUninstall) items.push({ action: 'uninstall', label: 'Uninstall', desc: 'App data is kept', danger: true });
-  }
-  if (ic.dataset.app && !location.pathname.endsWith('/app')) items.push({ action: 'details', label: 'Details' });
-  return items;
-}
-
-function statusText(ic: HTMLElement, st: InstallState): string {
-  if (st.status === 'installing') return 'installing…';
-  if (st.status === 'id-taken') return `id taken by another app (${st.localAppId})`;
-  if (st.status !== 'installed') return '';
-  const parts = [`installed${st.installedVersion ? ` v${st.installedVersion}` : ''}`];
-  const v = storeVersion(ic, st);
-  if (st.updateAvailable && v) parts.push(`→ v${v}`);
-  if (st.localAppId && ic.dataset.app && st.localAppId !== ic.dataset.app) parts.push(`as ${st.localAppId}`);
-  if (st.detached) parts.push('copy');
-  else if (!st.verified) parts.push('not verified');
-  else if (st.scope === 'system') parts.push('system app');
-  else if (!st.hasRecord) parts.push('built here');
-  return parts.join(' · ');
-}
-
-/** Render one control (and its card) from a state. */
+/** Apply a state to one control and its card. Only toggles and text. */
 function render(ic: HTMLElement, st: InstallState): void {
   ic.dataset.state = JSON.stringify(st);
+  ic.dataset.status = st.status;
+  const busy = ic.dataset.busy === '1';
+  const action = mainActionOf(st);
+  const v = st.availableVersion ?? ic.dataset.version;
+  if (v) ic.dataset.version = v;
+
   const main = ic.querySelector<HTMLButtonElement>('.ic-main');
-  const more = ic.querySelector<HTMLButtonElement>('.ic-more');
-  const action = mainAction(st);
-  if (main) {
+  if (main && !busy) {
     const label = action ? MAIN_LABEL[action] : 'Installing…';
     if (main.textContent !== label) main.textContent = label;
-    main.disabled = !action || ic.dataset.busy === '1';
+    main.disabled = !action;
     main.dataset.action = action ?? '';
     main.classList.toggle('is-update', action === 'update');
     main.classList.toggle('is-open', action === 'open');
   }
-  if (more) more.hidden = menuItems(ic, st).length === 0;
-  ic.dataset.status = st.status;
 
-  const card = ic.closest<HTMLElement>('[data-card]');
-  const line = card?.querySelector<HTMLElement>('[data-ic-status]') ?? ic.parentElement?.querySelector<HTMLElement>('[data-ic-status]');
-  if (line) {
-    const t = statusText(ic, st);
-    if (line.textContent !== t) line.textContent = t;
-    line.classList.toggle('is-update', st.updateAvailable);
+  const items = visibleItems(st, optsOf(ic));
+  ic.querySelectorAll<HTMLElement>('[data-item]').forEach((el) => {
+    el.hidden = !items.has(el.dataset.item as MenuAction);
+  });
+  const more = ic.querySelector<HTMLButtonElement>('.ic-more');
+  if (more) more.hidden = items.size === 0;
+  const upd = ic.querySelector<HTMLElement>('[data-update-label]');
+  if (upd) upd.textContent = v ? `Update to v${v}` : 'Update';
+
+  const line = statusLineOf(st, ic.dataset.app, ic.dataset.version);
+  const menuStatus = ic.querySelector<HTMLElement>('[data-ic-menu-status]');
+  if (menuStatus && menuStatus.textContent !== line) menuStatus.textContent = line;
+
+  const card = ic.closest<HTMLElement>('[data-card]') ?? ic.closest<HTMLElement>('[data-ic-scope]');
+  const status = card?.querySelector<HTMLElement>('[data-ic-status]');
+  if (status) {
+    if (status.textContent !== line) status.textContent = line;
+    status.classList.toggle('is-update', st.updateAvailable);
   }
   const vBadge = card?.querySelector<HTMLElement>('[data-ic-version]');
-  const v = storeVersion(ic, st);
   if (vBadge && v && vBadge.textContent !== `v${v}`) vBadge.textContent = `v${v}`;
-  if (v) ic.dataset.version = v;
   if (card?.dataset.facets !== undefined) {
     // Replace only the tags this state owns; keep the page's own (src:, cat:, store …).
     const keep = card.dataset.facets.split(' ').filter((f) => f && !STATE_FACETS.has(f));
-    const status = st.status === 'installing' ? 'installed' : st.status;
-    const next = [status, st.updateAvailable ? 'update' : '', ...keep].filter(Boolean).join(' ');
+    const s = st.status === 'installing' ? 'installed' : st.status;
+    const next = [s, st.updateAvailable ? 'update' : '', ...keep].filter(Boolean).join(' ');
     if (next !== card.dataset.facets) {
       card.dataset.facets = next;
       document.dispatchEvent(new CustomEvent('nexus:facets'));
@@ -148,7 +120,6 @@ function renderAll(): void {
 
 // ─── Poller ────────────────────────────────────────────────────────────────
 
-let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let updates = 0;
 
 async function syncNow(): Promise<void> {
@@ -178,7 +149,7 @@ function showUpdates(): void {
 
 function pollLoop(): void {
   if (!document.hidden) void syncNow();
-  pollTimer = setTimeout(pollLoop, POLL_MS);
+  setTimeout(pollLoop, POLL_MS);
 }
 
 // ─── Actions ───────────────────────────────────────────────────────────────
@@ -222,9 +193,6 @@ async function run(ic: HTMLElement, action: Action, appId?: string): Promise<voi
 
   try {
     switch (action) {
-      case 'details':
-        if (ref) void navigate(withBase(`/app?id=${encodeURIComponent(ref)}`));
-        return;
       case 'open': {
         if (!local) return;
         busy(true, 'Opening…');
@@ -255,7 +223,7 @@ async function run(ic: HTMLElement, action: Action, appId?: string): Promise<voi
       }
       case 'update': {
         busy(true, 'Checking…');
-        note(ic, `checking what the update asks for…`);
+        note(ic, 'checking what the update asks for…');
         const onApproved = () => { busy(true, 'Updating…'); note(ic, `updating ${name}…`); };
         // From its own source: a plain update. Otherwise installing from here
         // asks first (switch source / not verified) — the identity dialog.
@@ -285,143 +253,72 @@ async function run(ic: HTMLElement, action: Action, appId?: string): Promise<voi
   }
 }
 
-/** A path inside this app, under the shell proxy prefix it is served at. */
-function withBase(path: string): string {
-  const base = (document.querySelector<HTMLAnchorElement>('a.nexus-brand')?.getAttribute('href') ?? '/').replace(/\/$/, '');
-  return base + path;
-}
+// ─── The id dialog (Layout.astro) for "install as" / "a fresh copy" ────────
 
-// ─── The ▾ menu (popover on desktop, bottom sheet on phones) ───────────────
+let idFor: { ic: HTMLElement; action: 'install-as' | 'install-copy' } | null = null;
 
-let menu: HTMLDivElement | null = null;
-let backdrop: HTMLDivElement | null = null;
-let menuFor: HTMLElement | null = null;
-const sheetQuery = window.matchMedia('(max-width: 560px)');
-
-function ensureMenu(): HTMLDivElement {
-  if (menu && document.body.contains(menu)) return menu;
-  backdrop = document.createElement('div');
-  backdrop.className = 'ic-backdrop';
-  backdrop.hidden = true;
-  backdrop.addEventListener('click', () => closeMenu());
-  menu = document.createElement('div');
-  menu.className = 'ic-menu';
-  menu.setAttribute('role', 'menu');
-  menu.hidden = true;
-  document.body.append(backdrop, menu);
-  return menu;
-}
-
-function closeMenu(focusBack = true): void {
-  if (!menu || menu.hidden) return;
-  menu.hidden = true;
-  if (backdrop) backdrop.hidden = true;
-  const more = menuFor?.querySelector<HTMLButtonElement>('.ic-more');
-  more?.setAttribute('aria-expanded', 'false');
-  if (focusBack) more?.focus();
-  menuFor = null;
-}
-
-function place(anchor: HTMLElement): void {
-  const m = ensureMenu();
-  const sheet = sheetQuery.matches;
-  m.classList.toggle('is-sheet', sheet);
-  if (backdrop) backdrop.hidden = !sheet;
-  if (sheet) { m.style.left = m.style.top = ''; return; }
-  const r = anchor.getBoundingClientRect();
-  const w = m.offsetWidth || 260;
-  const h = m.offsetHeight || 200;
-  const left = Math.max(8, Math.min(window.innerWidth - w - 8, r.right - w));
-  const below = r.bottom + 4 + h < window.innerHeight;
-  m.style.left = `${left}px`;
-  m.style.top = `${below ? r.bottom + 4 : Math.max(8, r.top - h - 4)}px`;
-}
-
-function openMenu(ic: HTMLElement): void {
-  const m = ensureMenu();
-  const st = stateOf(ic);
-  m.textContent = '';
-  const title = document.createElement('div');
-  title.className = 'ic-menu-title';
-  title.textContent = ic.dataset.name || st.localAppId || '';
-  m.append(title);
-  for (const it of menuItems(ic, st)) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'ic-item' + (it.danger ? ' danger' : '');
-    b.setAttribute('role', 'menuitem');
-    b.dataset.action = it.action;
-    const l = document.createElement('span'); l.className = 'ic-item-label'; l.textContent = it.label;
-    b.append(l);
-    if (it.desc) { const d = document.createElement('span'); d.className = 'ic-item-desc'; d.textContent = it.desc; b.append(d); }
-    b.addEventListener('click', () => onMenuItem(ic, it.action, b));
-    m.append(b);
-  }
-  menuFor = ic;
-  m.hidden = false;
-  ic.querySelector('.ic-more')?.setAttribute('aria-expanded', 'true');
-  place(ic.querySelector<HTMLElement>('.ic-more') ?? ic);
-  m.querySelector<HTMLButtonElement>('.ic-item')?.focus();
-}
-
-/** The menu turns into a small id form for install-as / install-copy. */
 function askId(ic: HTMLElement, action: 'install-as' | 'install-copy'): void {
-  const m = ensureMenu();
+  const dlg = document.querySelector<HTMLDialogElement>('[data-id-form]');
+  if (!dlg) return;
   const st = stateOf(ic);
+  dlg.querySelectorAll<HTMLElement>('[data-idf-mode]').forEach((el) => { el.hidden = el.dataset.idfMode !== action; });
+  const input = dlg.querySelector<HTMLInputElement>('[data-idf-input]')!;
   const base = action === 'install-copy' ? (st.localAppId ?? ic.dataset.app ?? 'app') : (ic.dataset.app ?? 'app');
-  m.textContent = '';
-  const title = document.createElement('div');
-  title.className = 'ic-menu-title';
-  title.textContent = action === 'install-copy' ? 'Install a fresh copy' : 'Install under another id';
-  const hint = document.createElement('p');
-  hint.className = 'ic-form-hint';
-  hint.textContent = action === 'install-copy'
-    ? 'A separate app with its own id and identity. It does not get updates from the store.'
-    : 'The same app under a local id of your choice. It keeps getting updates from this source.';
-  const label = document.createElement('label');
-  label.className = 'ic-form';
-  label.textContent = 'Local app id';
-  const input = document.createElement('input');
-  input.type = 'text'; input.spellcheck = false; input.autocomplete = 'off';
   input.value = `${base}.copy`;
-  const err = document.createElement('span'); err.className = 'ic-form-err';
-  label.append(input, err);
-  const row = document.createElement('div'); row.className = 'ic-form-row';
-  const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Cancel';
-  const go = document.createElement('button'); go.type = 'button'; go.className = 'ic-go'; go.textContent = 'Install';
-  row.append(cancel, go);
-  m.append(title, hint, label, row);
-  const check = () => {
-    const ok = APP_ID.test(input.value.trim());
-    err.textContent = ok ? '' : 'reverse-domain id, e.g. com.example.app';
-    go.disabled = !ok;
-    return ok;
-  };
-  input.addEventListener('input', check);
-  input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && check()) go.click(); });
-  cancel.addEventListener('click', () => closeMenu());
-  go.addEventListener('click', () => {
-    if (!check()) return;
-    const id = input.value.trim();
-    closeMenu(false);
-    void run(ic, action, id);
-  });
-  check();
-  place(ic.querySelector<HTMLElement>('.ic-more') ?? ic);
+  idFor = { ic, action };
+  checkId(dlg);
+  dlg.showModal();
   input.focus();
   input.select();
 }
 
-function onMenuItem(ic: HTMLElement, action: Action, item: HTMLButtonElement): void {
-  if (action === 'install-as' || action === 'install-copy') { askId(ic, action); return; }
-  if (action === 'uninstall' && item.dataset.armed !== '1') {
-    // Two steps, inside the menu: native confirm() is suppressed in the OS iframe.
-    item.dataset.armed = '1';
-    item.querySelector('.ic-item-label')!.textContent = 'Click again to uninstall';
-    return;
+function checkId(dlg: HTMLDialogElement): boolean {
+  const input = dlg.querySelector<HTMLInputElement>('[data-idf-input]')!;
+  const err = dlg.querySelector<HTMLElement>('[data-idf-err]')!;
+  const ok = APP_ID.test(input.value.trim());
+  err.textContent = ok ? '' : 'reverse-domain id, e.g. com.example.app';
+  input.setAttribute('aria-invalid', String(!ok));
+  dlg.querySelector<HTMLButtonElement>('[data-idf-ok]')!.disabled = !ok;
+  return ok;
+}
+
+function wireIdDialog(): void {
+  const dlg = document.querySelector<HTMLDialogElement>('[data-id-form]');
+  if (!dlg || dlg.dataset.wired) return;
+  dlg.dataset.wired = '1';
+  dlg.querySelector('[data-idf-input]')!.addEventListener('input', () => checkId(dlg));
+  dlg.addEventListener('close', () => {
+    const target = idFor;
+    idFor = null;
+    if (dlg.returnValue !== 'ok' || !target || !checkId(dlg)) return;
+    const id = dlg.querySelector<HTMLInputElement>('[data-idf-input]')!.value.trim();
+    void run(target.ic, target.action, id);
+  });
+}
+
+// ─── Menu placement (desktop) ──────────────────────────────────────────────
+
+/** A popover opens centred by default; on desktop put it under its ▾. */
+function place(menu: HTMLElement): void {
+  if (compact.matches) { menu.style.left = menu.style.top = ''; return; }
+  const anchor = menu.parentElement?.querySelector<HTMLElement>('.ic-more');
+  if (!anchor) return;
+  const r = anchor.getBoundingClientRect();
+  const w = menu.offsetWidth || 260;
+  const h = menu.offsetHeight || 200;
+  const left = Math.max(8, Math.min(window.innerWidth - w - 8, r.right - w));
+  const below = r.bottom + 4 + h < window.innerHeight;
+  menu.style.left = `${left}px`;
+  menu.style.top = `${below ? r.bottom + 4 : Math.max(8, r.top - h - 4)}px`;
+}
+
+function disarm(menu: HTMLElement): void {
+  const u = menu.querySelector<HTMLElement>('[data-item="uninstall"]');
+  if (u?.dataset.armed) {
+    delete u.dataset.armed;
+    const l = u.querySelector('[data-uninstall-label]');
+    if (l) l.textContent = 'Uninstall';
   }
-  closeMenu(false);
-  void run(ic, action);
 }
 
 // ─── Wiring (once per session) ─────────────────────────────────────────────
@@ -432,43 +329,61 @@ if (!window.__nexusStore) {
   document.addEventListener('click', (ev) => {
     const t = ev.target as HTMLElement | null;
     const main = t?.closest<HTMLButtonElement>('.ic-main');
-    const more = t?.closest<HTMLButtonElement>('.ic-more');
     if (main) {
       const ic = main.closest<HTMLElement>('[data-ic]')!;
       const action = main.dataset.action as Action | '';
       if (!action || main.disabled) return;
-      if (action === 'install-as') { openMenu(ic); askId(ic, 'install-as'); return; }
+      if (action === 'install-as') { askId(ic, 'install-as'); return; }
       void run(ic, action);
       return;
     }
-    if (more) {
-      const ic = more.closest<HTMLElement>('[data-ic]')!;
-      if (menuFor === ic && menu && !menu.hidden) { closeMenu(); return; }
-      openMenu(ic);
+    const item = t?.closest<HTMLElement>('.ic-item[data-item]');
+    if (!item || item.tagName === 'A') return;          // Details is a plain link
+    const ic = item.closest<HTMLElement>('[data-ic]')!;
+    const menu = item.closest<HTMLElement>('.ic-menu');
+    const action = item.dataset.item as Action;
+    if (action === 'uninstall' && !item.dataset.armed) {
+      // Two steps inside the menu: native confirm() is suppressed in the OS iframe.
+      item.dataset.armed = '1';
+      const l = item.querySelector('[data-uninstall-label]');
+      if (l) l.textContent = 'Tap again to uninstall';
       return;
     }
-    if (menu && !menu.hidden && !menu.contains(t)) closeMenu(false);
+    menu?.hidePopover();
+    if (action === 'install-as' || action === 'install-copy') { askId(ic, action); return; }
+    void run(ic, action);
   });
 
-  document.addEventListener('keydown', (ev) => {
-    if (!menu || menu.hidden) return;
-    if (ev.key === 'Escape') { ev.preventDefault(); closeMenu(); return; }
-    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
-      const items = [...menu.querySelectorAll<HTMLButtonElement>('.ic-item')];
-      if (!items.length) return;
-      ev.preventDefault();
-      const i = items.indexOf(document.activeElement as HTMLButtonElement);
-      const next = ev.key === 'ArrowDown' ? (i + 1) % items.length : (i - 1 + items.length) % items.length;
-      items[next]!.focus();
-    }
+  // Popovers: place on open, reset the two-step uninstall on close.
+  document.addEventListener('toggle', (ev) => {
+    const menu = ev.target as HTMLElement;
+    if (!menu.classList?.contains('ic-menu')) return;
+    const open = (ev as ToggleEvent).newState === 'open';
+    menu.parentElement?.querySelector('.ic-more')?.setAttribute('aria-expanded', String(open));
+    if (open) { place(menu); menu.querySelector<HTMLElement>('.ic-item:not([hidden])')?.focus(); }
+    else disarm(menu);
+  }, true);
+  window.addEventListener('resize', () => {
+    measureBar();
+    document.querySelectorAll<HTMLElement>('.ic-menu:popover-open').forEach(place);
   });
-
-  window.addEventListener('resize', () => { measureBar(); if (menuFor && menu && !menu.hidden) place(menuFor.querySelector('.ic-more') ?? menuFor); });
   document.addEventListener('scroll', (ev) => {
-    if (!sheetQuery.matches && !(menu && menu.contains(ev.target as Node))) closeMenu(false);
+    if (compact.matches) return;
+    document.querySelectorAll<HTMLElement>('.ic-menu:popover-open').forEach((m) => {
+      if (!m.contains(ev.target as Node)) m.hidePopover();
+    });
   }, { passive: true, capture: true });
+  document.addEventListener('keydown', (ev) => {
+    const menu = document.querySelector<HTMLElement>('.ic-menu:popover-open');
+    if (!menu || (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp')) return;
+    const items = [...menu.querySelectorAll<HTMLElement>('.ic-item:not([hidden])')];
+    if (!items.length) return;
+    ev.preventDefault();
+    const i = items.indexOf(document.activeElement as HTMLElement);
+    items[ev.key === 'ArrowDown' ? (i + 1) % items.length : (i - 1 + items.length) % items.length]!.focus();
+  });
+
   document.addEventListener('visibilitychange', () => { if (!document.hidden) void syncNow(); });
-  document.addEventListener('astro:before-swap', () => closeMenu(false));
   // How many in-store pages deep we are — the detail page's Back goes back
   // in history (keeping search + filters) when there is somewhere to go.
   window.__nexusNavDepth = 0;
@@ -479,9 +394,10 @@ if (!window.__nexusStore) {
       window.__nexusNavDepth = Math.max(0, (window.__nexusNavDepth ?? 0) + (e.direction === 'back' ? -1 : 1));
     }
   });
-  document.addEventListener('astro:page-load', () => { measureBar(); renderAll(); showUpdates(); void syncNow(); });
+  document.addEventListener('astro:page-load', () => { measureBar(); wireIdDialog(); renderAll(); showUpdates(); void syncNow(); });
 
   measureBar();
+  wireIdDialog();
   renderAll();
   pollLoop();
 }

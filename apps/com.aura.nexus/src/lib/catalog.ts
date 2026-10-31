@@ -84,3 +84,60 @@ export function searchTextOf(e: CatalogEntry): string {
   return [e.name, e.id, e.description, e.publisher, ...(e.tags ?? []), ...(e.categories ?? [])]
     .filter(Boolean).join(' ').toLowerCase();
 }
+
+// ─── Install control: one set of rules for the server render and store.ts ──
+
+export type MainAction = 'install' | 'open' | 'update' | 'install-as';
+export type MenuAction = 'open' | 'update' | 'install-copy' | 'install-as' | 'uninstall' | 'details';
+
+export interface ControlOpts {
+  /** Backed by a store entry (not just a local app). */
+  catalog: boolean;
+  /** Local app with a store install record: it can still update from its ref. */
+  localUpdate?: boolean;
+  /** Rendered on the app's own detail page (no "Details" item). */
+  onDetail?: boolean;
+}
+
+export const MAIN_LABEL: Record<MainAction, string> = {
+  install: 'Install', open: 'Open', update: 'Update', 'install-as': 'Install as…',
+};
+
+/** What the main button does (null while installing). */
+export function mainActionOf(st: InstallState): MainAction | null {
+  if (st.status === 'installing') return null;
+  if (st.status === 'id-taken') return 'install-as';
+  if (st.status === 'installed') return st.updateAvailable ? 'update' : 'open';
+  return 'install';
+}
+
+/** Which ▾ menu items apply to this state. */
+export function visibleItems(st: InstallState, o: ControlOpts): Set<MenuAction> {
+  const out = new Set<MenuAction>();
+  const main = mainActionOf(st);
+  if (st.status === 'available') out.add('install-as');
+  if (st.status === 'installed') {
+    if (main !== 'open') out.add('open');
+    if (main !== 'update' && (st.updateAvailable || o.localUpdate) && !st.detached) out.add('update');
+    if (o.catalog) out.add('install-copy');
+    if (st.canUninstall) out.add('uninstall');
+  }
+  if (o.catalog && !o.onDetail) out.add('details');
+  return out;
+}
+
+/** The short status line under a card ("installed v1.0 · → v1.1 · built here"). */
+export function statusLineOf(st: InstallState, catalogId?: string, storeVersion?: string): string {
+  if (st.status === 'installing') return 'installing…';
+  if (st.status === 'id-taken') return `id taken by another app (${st.localAppId})`;
+  if (st.status !== 'installed') return '';
+  const v = st.availableVersion ?? storeVersion;
+  const parts = [`installed${st.installedVersion ? ` v${st.installedVersion}` : ''}`];
+  if (st.updateAvailable && v) parts.push(`→ v${v}`);
+  if (st.localAppId && catalogId && st.localAppId !== catalogId) parts.push(`as ${st.localAppId}`);
+  if (st.detached) parts.push('copy');
+  else if (!st.verified) parts.push('not verified');
+  else if (st.scope === 'system') parts.push('system app');
+  else if (!st.hasRecord) parts.push('built here');
+  return parts.join(' · ');
+}
