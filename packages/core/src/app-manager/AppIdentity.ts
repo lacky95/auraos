@@ -59,10 +59,13 @@ export function readOriginId(manifestPath: string): string | null {
 }
 
 /**
- * Write `originId` into a manifest file (raw JSON edit, key order kept).
- * `mode: 'assign'` only fills a missing one; `'reassign'` replaces it — the
- * explicit, controlled identity change. Returns the id now in the file and
- * whether the file changed.
+ * Write `originId` into a manifest file. `mode: 'assign'` only fills a
+ * missing one; `'reassign'` replaces it — the explicit, controlled identity
+ * change. Returns the id now in the file and whether the file changed.
+ *
+ * A text edit, not a re-serialisation: manifests are hand-written (escapes,
+ * one-line arrays, no final newline) and a reformat turns a one-line change
+ * into a noisy diff. Falls back to JSON.stringify for layouts it can't read.
  */
 export function setOriginIdInFile(
   manifestPath: string, opts: { mode: 'assign' | 'reassign'; originId?: string },
@@ -74,8 +77,37 @@ export function setOriginIdInFile(
   const next = opts.originId ?? newOriginId();
   if (!isOriginId(next)) throw new Error(`not a UUID: ${next}`);
   if (next === previous) return { originId: next, previous, changed: false };
-  writeFileSync(manifestPath, JSON.stringify(withKeyAfterId(m, 'originId', next), null, 2) + '\n');
+  const want = withKeyAfterId({ ...m }, 'originId', next);
+  writeFileSync(manifestPath, insertOriginIdText(raw, m, next, previous) ?? JSON.stringify(want, null, 2) + '\n');
   return { originId: next, previous, changed: true };
+}
+
+/** The manifest text with originId set as a one-line edit, or null when the
+ *  result would not parse to exactly the intended manifest. */
+export function insertOriginIdText(raw: string, m: Record<string, unknown>, next: string, previous: string | null): string | null {
+  let text: string | null = null;
+  if (previous) {
+    const re = new RegExp(`("originId"\\s*:\\s*")${previous}(")`);
+    if (re.test(raw)) text = raw.replace(re, `$1${next}$2`);
+  } else {
+    // The top-level `"id": "<id>",` line (first one: `id` leads the manifest).
+    const lines = raw.split('\n');
+    const esc = String(m['id']).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const i = lines.findIndex((l) => new RegExp(`^\\s*"id"\\s*:\\s*"${esc}"\\s*,\\s*$`).test(l));
+    if (i >= 0) {
+      const indent = /^\s*/.exec(lines[i]!)![0];
+      lines.splice(i + 1, 0, `${indent}"originId": "${next}",`);
+      text = lines.join('\n');
+    }
+  }
+  if (text === null) return null;
+  try {
+    const got = JSON.parse(text) as Record<string, unknown>;
+    const exp = { ...m, originId: next };
+    const same = JSON.stringify(Object.keys(got).sort().map((k) => [k, got[k]]))
+      === JSON.stringify(Object.keys(exp).sort().map((k) => [k, (exp as Record<string, unknown>)[k]]));
+    return same ? text : null;
+  } catch { return null; }
 }
 
 // ─── Rewriting an app tree to a new id ──────────────────────────────────

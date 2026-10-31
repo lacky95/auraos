@@ -47,6 +47,17 @@ test('setOriginIdInFile puts the key after id, keeps order, assign never overwri
   assert.deepEqual(withKeyAfterId({ name: 'n' }, 'originId', O1), { name: 'n', originId: O1 });
 });
 
+test('setOriginIdInFile is a one-line edit: hand formatting survives', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'aura-oid-fmt-'));
+  const p = join(dir, 'app.manifest.json');
+  const raw = '{\n  "id": "a.b",\n  "name": "X \\u2014 y",\n  "version": "1.0.0",\n  "tools": ["git", "node"]\n}';
+  writeFileSync(p, raw);
+  const a = setOriginIdInFile(p, { mode: 'assign' });
+  assert.equal(readFileSync(p, 'utf-8'), raw.replace('"id": "a.b",\n', `"id": "a.b",\n  "originId": "${a.originId}",\n`));
+  setOriginIdInFile(p, { mode: 'reassign', originId: O2 });
+  assert.equal(readFileSync(p, 'utf-8'), raw.replace('"id": "a.b",\n', `"id": "a.b",\n  "originId": "${O2}",\n`));
+});
+
 test('rewriteAppIdentity: a clone gets the new id everywhere and a new originId', () => {
   const dir = mkdtempSync(join(tmpdir(), 'aura-rw-'));
   writeFileSync(join(dir, 'app.manifest.json'), JSON.stringify({
