@@ -19,11 +19,13 @@ import { execFileSync } from 'node:child_process';
 import {
   cpSync, mkdirSync, readdirSync, rmSync, writeFileSync,
 } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { validateStagedDir } from './Validator.js';
 import { orasSync } from './RegistryAuth.js';
 import { APP_ARTIFACT_TYPE, APP_REPO_PREFIX, buildStoreAnnotations } from './ociMetadata.js';
 import { readListing, screenshotInput, writeListing, type ListingInput } from './OciListing.js';
+import { publishFileList, type PublishFileList } from './PublishFiles.js';
+import { upsertOciCatalog } from './OciCatalog.js';
 import type { AppManifest } from '../types/manifest.js';
 
 export interface PublishGitOpts {
@@ -85,7 +87,8 @@ export async function publishGit(opts: PublishGitOpts): Promise<PublishGitResult
 
   // 5. Clobber working tree with the local source (respecting ignore list).
   log('staging source...');
-  syncWorkTree(appPath, stagingDir, manifest);
+  const list = syncWorkTree(appPath, stagingDir, manifest);
+  logWithheld(list, log);
 
   // 6. Commit + tag + push.
   log('committing...');
@@ -182,16 +185,12 @@ function configureGitIdentity(repoDir: string): void {
 }
 
 /**
- * Sync `src` → `dst` excluding ignored paths. Preserves the `.git/`
- * directory in `dst` (cloned earlier).
+ * Sync `src` → `dst`: exactly the publish file list (PublishFiles — honours
+ * .gitignore + manifest.publish.ignore, never runtime data or secrets).
+ * Preserves the `.git/` directory in `dst` (cloned earlier).
  */
-function syncWorkTree(src: string, dst: string, manifest: AppManifest): void {
-  const ignore = [
-    '.git', // keep dst's .git (cloned target) intact
-    ...manifest.publish?.ignore ?? [
-      'node_modules', '.next', 'dist', '.astro', '.turbo', '.cache',
-    ],
-  ];
+function syncWorkTree(src: string, dst: string, manifest: AppManifest): PublishFileList {
+  const list = publishFileList(src, { appId: manifest.id, ignore: manifest.publish?.ignore });
   // Remove everything in dst EXCEPT .git
   try {
     const entries = readdirSafe(dst);
@@ -201,15 +200,10 @@ function syncWorkTree(src: string, dst: string, manifest: AppManifest): void {
     }
   } catch { /* dst empty */ }
 
-  // Copy src → dst, skipping ignore list.
-  cpSync(src, dst, {
-    recursive: true,
-    filter: (s) => {
-      const rel = s.slice(src.length).replace(/^\/+/, '');
-      const top = rel.split('/')[0] ?? '';
-      return !ignore.includes(top);
-    },
-  });
+  for (const rel of list.files) {
+    mkdirSync(dirname(join(dst, rel)), { recursive: true });
+    cpSync(join(src, rel), join(dst, rel), { verbatimSymlinks: true });
+  }
 
   // Write a marker so updates can detect Nexus publishes (not load-bearing
   // for v1, but cheap and useful for diagnostics).
@@ -219,6 +213,14 @@ function syncWorkTree(src: string, dst: string, manifest: AppManifest): void {
     publishedVersion: manifest.version,
   };
   writeFileSync(join(dst, '.nexus-published.json'), JSON.stringify(marker, null, 2));
+  return list;
+}
+
+/** Say what the deny list kept out, so an author notices a missing file. */
+function logWithheld(list: PublishFileList, log: (m: string) => void): void {
+  if (!list.withheld.length) return;
+  const shown = list.withheld.slice(0, 5).join(', ');
+  log(`kept out ${list.withheld.length} file(s) with runtime data or secrets: ${shown}${list.withheld.length > 5 ? ', …' : ''}`);
 }
 
 function readdirSafe(p: string): string[] {
@@ -249,10 +251,15 @@ export interface PublishOciOpts {
    *  to treating `opts.registry` as a literal path. */
   registryResolver?: (bareName: string) => string | null;
   /** When `opts.registry` resolves to a bare name, the actual OCI repo path
-   *  has to come from somewhere. Defaults to `aura-apps/<manifestId>` (the app
-   *  store prefix — kept distinct from the `aura/<pkg>` SDK artifacts); callers
-   *  can override. */
+   *  has to come from somewhere. Defaults to `<appRepoPrefix>/<manifestId>`
+   *  (the app store prefix — kept distinct from the `aura/<pkg>` SDK
+   *  artifacts); callers can override. */
   repoPathForName?: string;
+  /** The named source's `appRepoPrefix` (default `aura-apps`). */
+  appRepoPrefix?: string;
+  /** For a full-path target: the prefix of the source it belongs to, so the
+   *  source's catalog (OciCatalog) is updated too. null/undefined = none. */
+  catalogPrefix?: string | null;
 }
 
 export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }> {
@@ -284,14 +291,14 @@ export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }>
   const tarName = 'bundle.tar.gz';
   const tarPath = join(stagingDir, tarName);
 
-  // Build an --exclude list from manifest.publish.ignore.
-  const ignores = manifest.publish?.ignore ?? [
-    'node_modules', '.next', 'dist', '.astro', '.turbo', '.cache',
-  ];
-  const tarArgs = ['-czf', tarPath, '-C', opts.appPath];
-  for (const i of ignores) tarArgs.push(`--exclude=${i}`);
-  tarArgs.push('.');
-  execFileSync('tar', tarArgs, { stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 });
+  // Exactly the publish file list (PublishFiles): .gitignore +
+  // manifest.publish.ignore, never runtime data or secrets.
+  const list = publishFileList(opts.appPath, { appId: manifest.id, ignore: manifest.publish?.ignore });
+  logWithheld(list, log);
+  const listPath = join(stagingDir, 'files.lst');
+  writeFileSync(listPath, list.files.map((f) => `${f}\0`).join(''));
+  execFileSync('tar', ['-czf', tarPath, '-C', resolve(opts.appPath), '--no-recursion', '--null', '-T', listPath],
+    { stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 });
 
   // Resolve a bare-name registry through the RegistryConfig before pushing.
   // Bare = no `/` AND no `:` — looks like a label, not a URL/path. When it
@@ -301,6 +308,7 @@ export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }>
   const isBareName = !opts.registry.includes('/') && !opts.registry.includes(':');
   let registryPath = opts.registry;
   let extraFlags: string[] = [];
+  let catalogPrefix: string | null = opts.catalogPrefix ?? null;
   if (isBareName && opts.registryResolver) {
     const url = opts.registryResolver(opts.registry);
     if (!url) {
@@ -308,9 +316,11 @@ export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }>
     }
     const { orasHostFromUrl, orasFlagsForUrl } = await import('./RegistryConfig.js');
     const host = orasHostFromUrl(url);
-    const repo = opts.repoPathForName ?? `${APP_REPO_PREFIX}/${manifest.id}`;
+    const prefix = (opts.appRepoPrefix ?? APP_REPO_PREFIX).replace(/\/+$/, '');
+    const repo = opts.repoPathForName ?? `${prefix}/${manifest.id}`;
     registryPath = `${host}/${repo}`;
     extraFlags = orasFlagsForUrl(url);
+    if (!opts.repoPathForName) catalogPrefix = prefix;
   }
 
   // Embed storefront metadata as OCI manifest annotations so the catalog
@@ -363,6 +373,23 @@ export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }>
     let meta = {};
     try { meta = readListing(target)?.meta ?? {}; } catch { /* no readable listing yet */ }
     writeListing(target, shotItems, meta, opts.dataDir);
+  }
+
+  // The source's own app list, for registries without /v2/_catalog
+  // (OciCatalog). Best-effort: the release is out either way, and on GitLab
+  // the catalog project may not exist yet.
+  if (catalogPrefix) {
+    const slash = registryPath.indexOf('/');
+    try {
+      upsertOciCatalog(
+        { host: registryPath.slice(0, slash), prefix: catalogPrefix, flags: extraFlags },
+        { id: manifest.id, repo: registryPath.slice(slash + 1), version: manifest.version, updatedAt: new Date().toISOString() },
+        opts.dataDir,
+      );
+      log(`catalog: listed in ${catalogPrefix}/catalog`);
+    } catch (err) {
+      log(`catalog not updated (${catalogPrefix}/catalog): ${(err as Error).message.split('\n').filter(Boolean).pop()}`);
+    }
   }
 
   // Clean up the staging dir.

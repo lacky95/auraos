@@ -49,7 +49,16 @@ export type {
 export {
   loadRegistryConfig, saveRegistryConfig, seedRegistryConfigIfMissing,
   pickMirror, resolveByName, urlForHost, sorted as sortedRegistries,
-  orasHostFromUrl, orasFlagsForUrl,
+  orasHostFromUrl, orasFlagsForUrl, splitOciUrl,
   DEFAULT_REGISTRY_CONFIG, LOCAL_REGISTRY_DEFAULT_URL, LOCAL_REGISTRY_HOST,
 } from './RegistryConfig.js';
 export type { RegistryConfig, RegistryEntry } from './RegistryConfig.js';
+export { publishFileList, withheldReason, DEFAULT_PUBLISH_IGNORE } from './PublishFiles.js';
+export type { PublishFileList, PublishFileOpts } from './PublishFiles.js';
+export {
+  readOciCatalog, upsertOciCatalog, parseCatalog, catalogRepo,
+  CATALOG_REPO, CATALOG_TAG, CATALOG_ARTIFACT_TYPE,
+} from './OciCatalog.js';
+export type { CatalogApp, CatalogDoc, CatalogTarget } from './OciCatalog.js';
+export { checkRegistryLogin, probeRegistryAddress, parseChallenge } from './RegistryProbe.js';
+export type { LoginCheck, RegistryAddress } from './RegistryProbe.js';

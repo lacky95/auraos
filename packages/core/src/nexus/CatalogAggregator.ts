@@ -29,6 +29,7 @@ import { parseStoreAnnotations } from './ociMetadata.js';
 import { listingScreenshotUrls, readListing, type Listing } from './OciListing.js';
 import { orasFlagsForUrl, orasHostFromUrl } from './RegistryConfig.js';
 import { orasSync } from './RegistryAuth.js';
+import { catalogRepo, readOciCatalog } from './OciCatalog.js';
 import {
   DEFAULT_APP_REPO_PREFIX, sortedSources,
   type GitIndexSource, type OciSource, type SourceEntry, type SourcesConfig,
@@ -292,12 +293,24 @@ export class CatalogAggregator {
     const flags = orasFlagsForUrl(src.url);
     const prefix = (src.appRepoPrefix ?? DEFAULT_APP_REPO_PREFIX).replace(/\/+$/, '');
 
-    // List repos. `oras repo ls <host>` prints one repo path per line.
-    // orasSync adds the source's login (private registries) — RegistryAuth.ts.
-    const listOut = orasSync(['repo', 'ls', host, ...flags], { timeout: ORAS_TIMEOUT_MS }).toString();
-    const repos = listOut.split('\n').map((s) => s.trim()).filter(Boolean)
-      .filter((r) => r === prefix || r.startsWith(`${prefix}/`))
-      .slice(0, MAX_REPOS_PER_OCI);
+    // Which repos hold apps: the source's catalog artifact (OciCatalog — the
+    // only list on registries without /v2/_catalog, e.g. GitLab) merged with
+    // `oras repo ls <host>` where the registry allows it. Only when neither
+    // answers is the source down. orasSync adds the source's login
+    // (private registries) — RegistryAuth.ts.
+    const found = new Set<string>();
+    const catalog = readOciCatalog({ host, prefix, flags });
+    for (const a of catalog?.apps ?? []) found.add(a.repo);
+    try {
+      const listOut = orasSync(['repo', 'ls', host, ...flags], { timeout: ORAS_TIMEOUT_MS }).toString();
+      for (const r of listOut.split('\n').map((x) => x.trim()).filter(Boolean)) {
+        if (r.startsWith(`${prefix}/`)) found.add(r);
+      }
+    } catch (err) {
+      if (!catalog) throw err;
+    }
+    found.delete(catalogRepo(prefix));
+    const repos = [...found].slice(0, MAX_REPOS_PER_OCI);
 
     const entries: CatalogEntry[] = [];
     for (const repo of repos) {

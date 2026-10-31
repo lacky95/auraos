@@ -8,7 +8,7 @@ import {
 // a core build without them.
 import * as core from '@aura/core';
 import { jsonResponse } from '../../../lib/appResponse.js';
-import { credentialsLoaded, loginFromBody, probeError, probeOciSource } from '../../../lib/nexusSourceLogin.js';
+import { credentialsLoaded, loginFromBody, normaliseOciEntry, probeError, probeOciSource } from '../../../lib/nexusSourceLogin.js';
 import { probeGitApp } from '../../../lib/nexusGitApp.js';
 import { managedMarker } from '../../../lib/nexusSeeds.js';
 
@@ -30,7 +30,10 @@ import { managedMarker } from '../../../lib/nexusSeeds.js';
  *   • git-index → must fetch + parse an index.yaml, else 422
  *   • git-app   → must shallow-clone + carry a valid app.manifest.json at root;
  *                 the manifest snapshot is captured into `appMeta`, else 422
- *   • oci       → listed once with `oras repo ls`. A registry that wants a
+ *   • oci       → a URL path is the app prefix (`https://host/team/apps` →
+ *                 url `https://host`, appRepoPrefix `team/apps`). Listed once
+ *                 (`oras repo ls`, else the source's catalog artifact, else a
+ *                 login handshake — GitLab has no /v2/_catalog). A registry that wants a
  *                 login → 422 login-required; with `username` + `password`
  *                 in the body (private store) the login must work → else 422
  *                 login-failed / unreachable. The password is sealed as an
@@ -123,7 +126,8 @@ export const POST: APIRoute = async ({ request }) => {
 
   let apps: number | undefined;
   if (entry.kind === 'oci') {
-    const probe = probeOciSource(entry.url, login, entry.appRepoPrefix);
+    normaliseOciEntry(entry);
+    const probe = await probeOciSource(entry.url, login, entry.appRepoPrefix);
     if (probe.ok) apps = probe.apps;
     else if (login || probe.error === 'login-required') return probeError(probe);
     // No login and merely unreachable: accepted (it may be offline right now).

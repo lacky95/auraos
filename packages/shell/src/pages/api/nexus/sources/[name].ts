@@ -66,6 +66,12 @@ export const PATCH: APIRoute = async ({ params, request }) => {
       const p = typeof body['appRepoPrefix'] === 'string' ? body['appRepoPrefix'].trim() : '';
       if (p) next['appRepoPrefix'] = p; else delete next['appRepoPrefix'];
     }
+    // A URL path is the app prefix (same rule as on add).
+    if (body['url'] !== undefined) {
+      const { url, prefix } = core.splitOciUrl(next.url);
+      next.url = url;
+      if (prefix && body['appRepoPrefix'] === undefined) next['appRepoPrefix'] = prefix;
+    }
     if (cur.auth && next.url !== cur.url && core.orasHostFromUrl(next.url) !== core.orasHostFromUrl(cur.url)) {
       return jsonResponse({ error: 'login-bound-to-host', detail: 'this registry has a login for its current host — remove the login before moving it to another host' }, 409);
     }

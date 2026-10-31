@@ -90,6 +90,7 @@ interface SourceEntry {
   url:      string;
   priority: number;
   mirror?:  boolean;
+  appRepoPrefix?: string;
   ref?:     string;
   /** Private oci registry: only the username — the password is sealed. */
   auth?:    { type: 'basic'; username: string; secret: string };
@@ -924,7 +925,7 @@ function wireRegistry(registry: Command): void {
           URL:      e.url,
           PRIORITY: String(e.priority),
           EXTRA:    e.kind === 'oci'
-            ? [e.mirror ? 'mirror' : '', e.auth ? `login:${e.auth.username}` : ''].filter(Boolean).join(' ')
+            ? [e.mirror ? 'mirror' : '', e.appRepoPrefix ? `prefix:${e.appRepoPrefix}` : '', e.auth ? `login:${e.auth.username}` : ''].filter(Boolean).join(' ')
             : (e.ref ? `ref:${e.ref}` : ''),
         }));
       console.log(table(rows));
@@ -936,17 +937,18 @@ function wireRegistry(registry: Command): void {
     .option('--kind <kind>',     'oci | git-index | git-app (default: oci)', 'oci')
     .option('--priority <n>',    'lower = checked first', '10')
     .option('--mirror',          '[oci] probe this registry for ANY ref before the canonical host')
+    .option('--prefix <path>',   '[oci] repo path the apps live under (default aura-apps; a URL path sets it too: https://host/team/apps)')
     .option('--ref <ref>',       '[git-*] branch/tag/commit (default remote HEAD)')
     .option('--name <name>',     '[by address] use this source name instead of the one the store suggests')
     .option('--username <user>', '[oci] login for a private registry (the password is asked for, or piped in)')
     .option('--password-stdin',  '[oci] read the password from stdin: echo "$PW" | aura nexus registry add … --username me --password-stdin')
     .action(async (first: string, url: string | undefined, o: {
-      kind?: string; priority?: string; mirror?: boolean; ref?: string; name?: string;
+      kind?: string; priority?: string; mirror?: boolean; prefix?: string; ref?: string; name?: string;
       username?: string; passwordStdin?: boolean;
     }) => {
       let name = first;
       let kind = (o.kind ?? 'oci') as SourceEntry['kind'];
-      let appRepoPrefix: string | undefined;
+      let appRepoPrefix: string | undefined = o.prefix?.replace(/^\/+|\/+$/g, '') || undefined;
       let needsLogin = !!o.username;
       if (url === undefined) {
         // One argument: a store address — ask the store what it is.
@@ -958,9 +960,9 @@ function wireRegistry(registry: Command): void {
         name = o.name ?? store!.name;
         url = store!.url;
         kind = 'oci';
-        appRepoPrefix = store!.appRepoPrefix;
+        appRepoPrefix ??= store!.appRepoPrefix;
         needsLogin ||= store!.auth === 'basic';
-        info(`found ${color.cyan(store!.title ?? store!.name)} → ${url}${store!.auth === 'basic' ? ' (needs a login)' : ''}`);
+        info(`found ${color.cyan(store!.title ?? store!.name)} → ${url}${appRepoPrefix ? ` (apps under ${appRepoPrefix}/)` : ''}${store!.auth === 'basic' ? ' (needs a login)' : ''}`);
       }
       if (!['oci', 'git-index', 'git-app'].includes(kind)) {
         fail(`invalid --kind '${kind}' (expected oci | git-index | git-app)`);

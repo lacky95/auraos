@@ -134,10 +134,21 @@ export function sorted(cfg: RegistryConfig): RegistryEntry[] {
 }
 
 // ─── URL ↔ oras CLI helpers ─────────────────────────────────────────────
-/** Strip scheme + trailing slash so the result is a valid `oras` host
+/** Strip scheme, path + trailing slash so the result is a valid `oras` host
  *  prefix: 'http://aura-com.aura.registry:4090' → 'aura-com.aura.registry:4090'. */
 export function orasHostFromUrl(url: string): string {
-  return url.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  return url.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+}
+
+/**
+ * A registry URL may carry the app prefix as its path — one address for a
+ * store on a shared registry: 'https://registry.example.com/team/apps' →
+ * { url: 'https://registry.example.com', prefix: 'team/apps' }.
+ */
+export function splitOciUrl(url: string): { url: string; prefix?: string } {
+  const m = /^(https?:\/\/[^/]+)\/*(.*?)\/*$/.exec(url.trim());
+  if (!m) return { url: url.trim() };
+  return m[2] ? { url: m[1]!, prefix: m[2]!.toLowerCase() } : { url: m[1]! };
 }
 
 /** Flags `oras` needs based on the URL scheme. HTTPS hosts get nothing

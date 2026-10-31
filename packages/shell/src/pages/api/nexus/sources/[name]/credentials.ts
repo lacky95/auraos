@@ -39,7 +39,7 @@ export const PUT: APIRoute = async ({ params, request }) => {
   if (login instanceof Response) return login;
   if (!login) return jsonResponse({ error: 'invalid-login', detail: 'send a username and password' }, 400);
 
-  const probe = probeOciSource(src!.url, login, src!.appRepoPrefix);
+  const probe = await probeOciSource(src!.url, login, src!.appRepoPrefix);
   if (!probe.ok) return probeError(probe);
   src!.auth = await core.saveRegistryLogin(DATA_DIR, src!.name, src!.url, login);
   await core.saveSourcesConfig(OS_API_BASE, cfg);

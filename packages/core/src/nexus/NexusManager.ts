@@ -29,9 +29,9 @@ import type {
   InstallRecord, NexusProgressEvent, ResolvedRef,
 } from './types.js';
 import type { RegistryConfig } from './RegistryConfig.js';
-import { resolveByName, urlForHost } from './RegistryConfig.js';
-import type { SourcesConfig } from './SourcesConfig.js';
-import { DEFAULT_SOURCES_CONFIG, loadSourcesConfig, ociRegistryView } from './SourcesConfig.js';
+import { orasHostFromUrl, resolveByName, urlForHost } from './RegistryConfig.js';
+import type { OciSource, SourcesConfig } from './SourcesConfig.js';
+import { DEFAULT_APP_REPO_PREFIX, DEFAULT_SOURCES_CONFIG, loadSourcesConfig, ociRegistryView } from './SourcesConfig.js';
 import { loadRegistryCredentials } from './RegistryAuth.js';
 import { needsProvisioning, provisionApp } from '../app-manager/provisioning.js';
 
@@ -144,6 +144,22 @@ export class NexusManager {
   /** Convenience for Publisher / sdk install: resolve a bare-name registry. */
   resolveRegistryName(bareName: string): string | null {
     return resolveByName(ociRegistryView(this.sourcesConfig), bareName);
+  }
+  private ociSourceByName(name: string): OciSource | undefined {
+    return this.sourcesConfig.sources.find((s): s is OciSource => s.kind === 'oci' && s.name === name);
+  }
+  /** A full-path publish target (`host/<prefix>/<app>`) that lies in a
+   *  configured source: that source's prefix, so its catalog is kept too. */
+  private catalogPrefixForPath(target: string): string | null {
+    if (!target.includes('/')) return null;
+    const path = target.replace(/^https?:\/\//, '');
+    for (const s of this.sourcesConfig.sources) {
+      if (s.kind !== 'oci') continue;
+      const prefix = (s.appRepoPrefix ?? DEFAULT_APP_REPO_PREFIX).replace(/\/+$/, '');
+      const base = `${orasHostFromUrl(s.url)}/${prefix}/`;
+      if (path.startsWith(base) && !path.slice(base.length).includes('/')) return prefix;
+    }
+    return null;
   }
   /** Recover a registry URL (with scheme) from an OCI host so fetch/resolve
    *  can add `--plain-http` for the local zot. */
@@ -373,6 +389,7 @@ export class NexusManager {
     channel?: string;
   }): AsyncGenerator<NexusProgressEvent, { ref: string }, void> {
     yield { type: 'publish.start' };
+    await this.credentialsReady;   // a private target needs its login
     const messages: string[] = [];
     const result = await publishOci({
       ...opts,
@@ -381,6 +398,8 @@ export class NexusManager {
       // Let authors write `--registry local` (a source name) instead of the
       // full zot URL; Publisher derives host + `--plain-http` + repo path.
       registryResolver: (name) => this.resolveRegistryName(name),
+      appRepoPrefix: this.ociSourceByName(opts.registry)?.appRepoPrefix,
+      catalogPrefix: this.catalogPrefixForPath(opts.registry),
     });
     for (const m of messages) yield { type: 'publish.progress', message: m };
     yield { type: 'publish.done', ref: result.ref };

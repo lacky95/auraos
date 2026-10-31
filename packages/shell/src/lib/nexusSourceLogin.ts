@@ -29,25 +29,51 @@ export type ProbeResult =
   | { ok: false; status: 422; error: 'login-failed' | 'login-required' | 'unreachable'; detail: string };
 
 /**
- * List the registry (with `login` when given). Counts repos under the app
- * prefix so the caller can say "3 apps found". Never throws.
+ * Check the source (with `login` when given) and count its apps. Never throws.
+ *
+ *   1. `oras repo ls` — registries with a catalog API.
+ *   2. The source's catalog artifact (OciCatalog) — registries without one
+ *      (GitLab refuses /v2/_catalog even to a good login).
+ *   3. Neither lists: the login itself is checked with the registry's auth
+ *      handshake (RegistryProbe) — a good login to a store with no apps yet
+ *      is fine, a bad one is refused.
  */
-export function probeOciSource(url: string, login: LoginInput | null, appRepoPrefix = 'aura-apps'): ProbeResult {
+export async function probeOciSource(url: string, login: LoginInput | null, appRepoPrefix = 'aura-apps'): Promise<ProbeResult> {
   const host = core.orasHostFromUrl(url);
+  const prefix = appRepoPrefix.replace(/\/+$/, '');
+  const flags = core.orasFlagsForUrl(url);
+  let listErr: unknown;
   try {
-    const out = core.orasSync(['repo', 'ls', host, ...core.orasFlagsForUrl(url)], { timeout: 20_000 }, login ?? undefined).toString();
-    const prefix = appRepoPrefix.replace(/\/+$/, '');
-    const apps = out.split('\n').map((s) => s.trim()).filter((r) => r.startsWith(`${prefix}/`)).length;
+    const out = core.orasSync(['repo', 'ls', host, ...flags], { timeout: 20_000 }, login ?? undefined).toString();
+    const apps = out.split('\n').map((s) => s.trim())
+      .filter((r) => r.startsWith(`${prefix}/`) && r !== core.catalogRepo(prefix)).length;
     return { ok: true, apps };
-  } catch (err) {
-    if (err instanceof core.OrasAuthError) {
-      return login
-        ? { ok: false, status: 422, error: 'login-failed', detail: `${host} did not accept that username and password` }
-        : { ok: false, status: 422, error: 'login-required', detail: `${host} needs a login — add a username and password` };
+  } catch (err) { listErr = err; }
+
+  const catalog = core.readOciCatalog({ host, prefix, flags }, login ?? undefined);
+  if (catalog) return { ok: true, apps: catalog.apps.length };
+
+  if (listErr instanceof core.OrasAuthError) {
+    const check = await core.checkRegistryLogin(url, login, core.catalogRepo(prefix));
+    if (check === 'ok') return { ok: true, apps: 0 };
+    if (check === 'required' || (check === 'rejected' && !login)) {
+      return { ok: false, status: 422, error: 'login-required', detail: `${host} needs a login — add a username and password` };
     }
-    const msg = (err as Error).message.split('\n').filter(Boolean).pop() ?? 'no answer';
-    return { ok: false, status: 422, error: 'unreachable', detail: `could not reach ${host}: ${msg}` };
+    if (check === 'rejected') {
+      return { ok: false, status: 422, error: 'login-failed', detail: `${host} did not accept that username and password` };
+    }
+    return { ok: false, status: 422, error: 'unreachable', detail: `could not reach ${host} to check the login` };
   }
+  const msg = (listErr as Error).message.split('\n').filter(Boolean).pop() ?? 'no answer';
+  return { ok: false, status: 422, error: 'unreachable', detail: `could not reach ${host}: ${msg}` };
+}
+
+/** An oci URL with a path is host + app prefix: move the path into
+ *  `appRepoPrefix` (an explicit prefix wins). */
+export function normaliseOciEntry(entry: { url: string; appRepoPrefix?: string }): void {
+  const { url, prefix } = core.splitOciUrl(entry.url);
+  entry.url = url;
+  if (prefix && !entry.appRepoPrefix) entry.appRepoPrefix = prefix;
 }
 
 export function probeError(p: Extract<ProbeResult, { ok: false }>): Response {

@@ -17,6 +17,8 @@
  * for the username and password when `auth` is "basic".
  */
 
+import { probeRegistryAddress } from './RegistryProbe.js';
+
 export interface StoreDescriptor {
   name:  string;
   title?: string;
@@ -66,7 +68,10 @@ export function parseStoreDescriptor(json: unknown): StoreDescriptor {
   return out;
 }
 
-/** Fetch and validate a store's descriptor from its address. */
+/** Fetch and validate a store's descriptor from its address. When the
+ *  address has no `/.well-known/aura-store.json` but is itself an OCI
+ *  registry (`registry.example.com/team/apps`), the address is the store:
+ *  host = registry, path = app prefix (RegistryProbe). */
 export async function discoverStore(address: string, fetchImpl: typeof fetch = fetch): Promise<StoreDescriptor> {
   const url = wellKnownUrl(address);
   let res: Response;
@@ -75,11 +80,36 @@ export async function discoverStore(address: string, fetchImpl: typeof fetch = f
   } catch (err) {
     throw new StoreDiscoveryError(`could not reach ${url}: ${(err as Error).message}`);
   }
-  if (res.status === 404) throw new StoreDiscoveryError(`${new URL(url).host} has no AuraOS store (no /.well-known/aura-store.json) — add it with the registry URL instead`);
+  if (res.status === 404) {
+    const reg = await registryStore(address, fetchImpl);
+    if (reg) return reg;
+    throw new StoreDiscoveryError(`${new URL(url).host} has no AuraOS store (no /.well-known/aura-store.json) and is no OCI registry — add it with the registry URL instead`);
+  }
   if (!res.ok) throw new StoreDiscoveryError(`${url} answered HTTP ${res.status}`);
   const text = await res.text();
   if (text.length > MAX_BYTES) throw new StoreDiscoveryError('aura-store.json is too large');
   let json: unknown;
-  try { json = JSON.parse(text); } catch { throw new StoreDiscoveryError('aura-store.json is not valid JSON'); }
+  try { json = JSON.parse(text); } catch {
+    const reg = await registryStore(address, fetchImpl);
+    if (reg) return reg;
+    throw new StoreDiscoveryError('aura-store.json is not valid JSON');
+  }
   return parseStoreDescriptor(json);
+}
+
+/** The descriptor of an address that is an OCI registry, or null. */
+async function registryStore(address: string, fetchImpl: typeof fetch): Promise<StoreDescriptor | null> {
+  const reg = await probeRegistryAddress(address, fetchImpl);
+  if (!reg) return null;
+  // Suggested source name: the host without a leading `registry.` / `oci.`.
+  const host = new URL(reg.url).host.toLowerCase();
+  const suggested = host.replace(/^(registry|oci|cr|docker)\./, '').replace(/:\d+$/, '').slice(0, 63);
+  return {
+    name:  NAME.test(suggested) ? suggested : 'registry',
+    title: reg.prefix ? `${host}/${reg.prefix}` : host,
+    kind:  'oci',
+    url:   reg.url,
+    auth:  reg.needsLogin ? 'basic' : 'none',
+    ...(reg.prefix ? { appRepoPrefix: reg.prefix } : {}),
+  };
 }
