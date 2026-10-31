@@ -51,6 +51,7 @@ export default function AuraKeyboard(): React.JSX.Element {
   const layoutId = useStore(st.$layout);
   const dockBehavior = useStore(st.$dockBehavior);
   const autoFit = useStore(st.$autoFit);
+  const suppressNative = useStore(st.$suppressNative);
 
   const rootRef = React.useRef<HTMLDivElement>(null);
   const keysRef = React.useRef<HTMLDivElement>(null);
@@ -276,6 +277,11 @@ export default function AuraKeyboard(): React.JSX.Element {
           <button type="button" className="aura-kb-chip" aria-pressed={autoFit} onMouseDown={stop}
             title="Switch to the compact layout when the keyboard is narrow"
             onClick={() => st.$autoFit.set(!autoFit)}>Fit</button>
+          <button type="button" className="aura-kb-chip" aria-pressed={!suppressNative} onMouseDown={stop}
+            title={suppressNative
+              ? 'Device keyboard is kept away from text fields on touch screens — tap to allow it'
+              : 'Device keyboard may open on touch screens — tap to keep it away'}
+            onClick={() => st.$suppressNative.set(!suppressNative)}>Device</button>
         </span>
 
         <span className="aura-kb-group" role="group" aria-label="Position">

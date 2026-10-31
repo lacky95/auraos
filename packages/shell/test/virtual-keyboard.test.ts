@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Window } from 'happy-dom';
 import { SYNTHETIC_RECEIVER_JS } from '../src/lib/keyboard/receiverScript.ts';
+import { NATIVE_KEYBOARD_JS } from '../src/lib/keyboard/nativeKeyboardScript.ts';
 import { parseCombo, keyForChar, layoutById, displayFor, LAYOUTS } from '../src/components/shell/keyboard/layouts.ts';
 
 function setup(html: string) {
@@ -191,4 +192,72 @@ test('nothing focused: keys go back to the field that had focus last', async () 
   b.blur();                                   // e.g. a tap that left only <body> focused
   await tap('k', 'KeyK');
   assert.equal(b.value, 'k');
+});
+
+// ── Device-keyboard policy (lib/keyboard/nativeKeyboardScript.ts) ──────────
+
+function setupNative(html: string, coarse = true) {
+  const win = new Window({ url: 'http://localhost/' });
+  win.document.body.innerHTML = html;
+  if (coarse) win.eval('window.matchMedia = function () { return { matches: true }; }');
+  const sent: Array<{ type?: string; focused?: boolean }> = [];
+  win.addEventListener('message', (ev) => sent.push((ev as unknown as MessageEvent).data as never));
+  win.eval(NATIVE_KEYBOARD_JS);
+  const self = win.eval('window') as unknown;
+  const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+  const policy = async (suppressNative: boolean, source: unknown = self) => {
+    win.dispatchEvent(new win.MessageEvent('message', { data: { type: 'aura.keyboard.policy', suppressNative }, source: source as never }));
+    await tick();
+  };
+  const fields = () => sent.filter((m) => m.type === 'aura.keyboard.field');
+  return { win, doc: win.document, sent, policy, tick, fields };
+}
+
+test('device keyboard: fields get inputmode="none" only while the policy is on; originals come back', async () => {
+  const { doc, policy } = setupNative('<input id="i" type="text" inputmode="numeric"><textarea id="t"></textarea>');
+  const i = doc.getElementById('i') as unknown as HTMLInputElement;
+  const t = doc.getElementById('t') as unknown as HTMLTextAreaElement;
+  i.focus();
+  assert.equal(i.getAttribute('inputmode'), 'numeric');   // no policy yet
+  await policy(true);
+  assert.equal(i.getAttribute('inputmode'), 'none');      // the already-focused field, at once
+  t.focus();
+  assert.equal(t.getAttribute('inputmode'), 'none');
+  await policy(false);
+  assert.equal(i.getAttribute('inputmode'), 'numeric');
+  assert.equal(t.hasAttribute('inputmode'), false);
+  assert.equal(i.hasAttribute('data-aura-inputmode'), false);
+});
+
+test('device keyboard: pointerdown mutes the field before focus lands (iOS picks the keyboard on focus)', async () => {
+  const { doc, win, policy } = setupNative('<input id="i" type="text"><button id="b">x</button>');
+  await policy(true);
+  const i = doc.getElementById('i') as unknown as HTMLInputElement;
+  i.dispatchEvent(new win.Event('pointerdown', { bubbles: true, composed: true }) as unknown as Event);
+  assert.equal(i.getAttribute('inputmode'), 'none');
+  const b = doc.getElementById('b')!;
+  b.dispatchEvent(new win.Event('pointerdown', { bubbles: true, composed: true }));
+  assert.equal(b.hasAttribute('inputmode'), false);       // only text fields
+});
+
+test('device keyboard: hello on load, field focus/blur reports on touch screens, other senders ignored', async () => {
+  const { doc, sent, policy, tick, fields } = setupNative('<input id="i" type="text">');
+  await tick();
+  assert.ok(sent.some((m) => m.type === 'aura.keyboard.hello'));
+  await policy(true, {});                                   // not window.parent → ignored
+  const i = doc.getElementById('i') as unknown as HTMLInputElement;
+  i.focus();
+  assert.equal(i.hasAttribute('inputmode'), false);
+  await tick();
+  assert.equal(fields().pop()?.focused, true);
+  i.blur();
+  await tick(260);
+  assert.equal(fields().pop()?.focused, false);
+});
+
+test('device keyboard: no field reports on a mouse (fine-pointer) screen', async () => {
+  const { doc, tick, fields } = setupNative('<input id="i" type="text">', false);
+  (doc.getElementById('i') as unknown as HTMLInputElement).focus();
+  await tick();
+  assert.equal(fields().length, 0);
 });

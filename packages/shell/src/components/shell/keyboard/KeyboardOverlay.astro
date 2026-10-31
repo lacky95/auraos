@@ -16,6 +16,11 @@
  * Closing only hides it (simple-keyboard stays mounted). It force-closes
  * when the lock screen comes up and when the device's own keyboard opens.
  *
+ * Device keyboard: with `$suppressNative` on (the default) the shell tells
+ * every document (apps + itself) to keep the device's on-screen keyboard
+ * away from text fields, and opens/closes this keyboard as fields get and
+ * lose focus on touch screens — see lib/keyboard/nativeKeyboardScript.ts.
+ *
  * Agents and apps:
  *   • UI commands openKeyboard / closeKeyboard / sendKey (shell MCP);
  *   • an app may post {type:'aura.keyboard.open', attach?, layout?} or
@@ -24,6 +29,7 @@
  */
 import AuraKeyboard from './AuraKeyboard.tsx';
 import { SYNTHETIC_RECEIVER_JS } from '../../../lib/keyboard/receiverScript.ts';
+import { NATIVE_KEYBOARD_JS } from '../../../lib/keyboard/nativeKeyboardScript.ts';
 ---
 <div id="virtual-keyboard" class="aura-vkb" role="region" aria-label="Virtual keyboard" aria-hidden="true" data-mode="docked">
   <AuraKeyboard client:idle={{ timeout: 2000 }} />
@@ -31,6 +37,7 @@ import { SYNTHETIC_RECEIVER_JS } from '../../../lib/keyboard/receiverScript.ts';
 
 <!-- Same receiver the proxy injects into apps: lets the keyboard type into shell fields. -->
 <script is:inline set:html={SYNTHETIC_RECEIVER_JS}></script>
+<script is:inline set:html={NATIVE_KEYBOARD_JS}></script>
 
 <style is:global>
   .aura-vkb {
@@ -47,7 +54,10 @@ import { SYNTHETIC_RECEIVER_JS } from '../../../lib/keyboard/receiverScript.ts';
   .aura-vkb[data-detached="true"] { visibility: hidden; pointer-events: none; }
   .aura-vkb[data-mode="docked"] {
     left: 0; right: 0;
-    bottom: calc(var(--aura-dock-height) + env(safe-area-inset-bottom, 0px));
+    /* The dock sits flush at the bottom, under the device's home-indicator
+       zone; the keyboard only keeps half of that inset as breathing room above
+       the dock (the full inset read as a gap on the iPad). Zero on desktops. */
+    bottom: calc(var(--aura-dock-height) + env(safe-area-inset-bottom, 0px) / 2);
     max-height: 48vh;
     border-left: none; border-right: none; border-bottom: none;
   }
@@ -317,10 +327,37 @@ import { SYNTHETIC_RECEIVER_JS } from '../../../lib/keyboard/receiverScript.ts';
       st.$open.set(true);
     });
 
+    // ── Device keyboard policy (lib/keyboard/nativeKeyboardScript.ts) ──
+    // Documents say hello when they load and get the policy back; a change
+    // is pushed to all of them. On touch screens a focused text field opens
+    // this keyboard and losing focus closes it again — but only a keyboard
+    // that opened that way, never one the user opened.
+    const frames = () => document.querySelectorAll<HTMLIFrameElement>('.app-slot iframe, #focus-frame');
+    const sendPolicy = (w: Window | null | undefined) => {
+      try { w?.postMessage({ type: 'aura.keyboard.policy', suppressNative: st.$suppressNative.get() }, w === window ? location.origin : '*'); }
+      catch { /* frame gone */ }
+    };
+    const broadcastPolicy = () => { sendPolicy(window); for (const f of frames()) sendPolicy(f.contentWindow); };
+    st.$suppressNative.listen(broadcastPolicy);
+    let autoOpened = false;
+    st.$open.listen((open) => { if (!open) autoOpened = false; });
+    window.addEventListener('message', (ev) => {
+      const d = ev.data as { type?: string; focused?: boolean } | null;
+      if (!d || (d.type !== 'aura.keyboard.hello' && d.type !== 'aura.keyboard.field')) return;
+      if (ev.source !== window && ![...frames()].some((f) => f.contentWindow === ev.source)) return;
+      if (d.type === 'aura.keyboard.hello') { sendPolicy(ev.source as Window); return; }
+      if (!st.$suppressNative.get() || !matchMedia('(pointer: coarse)').matches) return;
+      if (d.focused) { if (!st.$open.get()) { autoOpened = true; st.$open.set(true); } }
+      else if (autoOpened) st.$open.set(false);
+    });
+    // The shell page's own copy said hello before this script ran.
+    broadcastPolicy();
+
     // ── Shell MCP / agents ───────────────────────────────────────────
     const snapshot = () => ({
       open: st.$open.get(), mode: st.$mode.get(), layout: st.$layout.get(),
       dockBehavior: st.$dockBehavior.get(), attachedViewId: st.$attachedViewId.get(),
+      suppressNative: st.$suppressNative.get(),
       target: (() => { const t = im.resolveTarget(); return t ? { kind: t.kind, label: t.label } : null; })(),
       layouts: LAYOUTS.map((l) => l.id),
     });
@@ -333,6 +370,11 @@ import { SYNTHETIC_RECEIVER_JS } from '../../../lib/keyboard/receiverScript.ts';
       return snapshot();
     });
     registerUiCommand('closeKeyboard', () => { st.$open.set(false); return snapshot(); });
+    registerUiCommand('setKeyboardPolicy', ({ suppressNative }) => {
+      if (typeof suppressNative !== 'boolean') throw new Error('setKeyboardPolicy needs `suppressNative: boolean`');
+      st.$suppressNative.set(suppressNative);
+      return snapshot();
+    });
     registerUiCommand('sendKey', async ({ key, text, ctrl, alt, shift, meta }) => {
       if (typeof text === 'string' && text) {
         return { ok: await im.send({ action: 'text', text }), target: snapshot().target };

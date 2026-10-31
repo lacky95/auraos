@@ -3,6 +3,7 @@ import { getAppManager, ThemeManager, keymapRegistry, resolveProxyConfig, INTERF
 import type { AppManifest, ColorMode, KeyAction, OsKeymapState, ProxyConfig } from '@aura/core';
 import { sharedKv } from '../../../../lib/sharedKv.js';
 import { SYNTHETIC_RECEIVER_JS } from '../../../../lib/keyboard/receiverScript.js';
+import { NATIVE_KEYBOARD_JS } from '../../../../lib/keyboard/nativeKeyboardScript.js';
 
 /**
  * Fallback proxy config for the corner case where the AppManager can't
@@ -683,6 +684,9 @@ window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod
         // components/shell/keyboard/PROTOCOL.md). Same gate as the forwarder:
         // apps that opt out of OS key handling handle synthetic keys themselves.
         rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}<script>${SYNTHETIC_RECEIVER_JS}</script>`);
+        // Device-keyboard policy (`aura.keyboard.policy`, same doc): keeps the
+        // device's on-screen keyboard away from text fields when the shell says so.
+        rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}<script>${NATIVE_KEYBOARD_JS}</script>`);
       }
 
       // Focus-on-click. Clicking anywhere in an app window must move keyboard
