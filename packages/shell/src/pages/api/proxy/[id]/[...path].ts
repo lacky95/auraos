@@ -6,6 +6,37 @@ import { SYNTHETIC_RECEIVER_JS } from '../../../../lib/keyboard/receiverScript.j
 import { NATIVE_KEYBOARD_JS } from '../../../../lib/keyboard/nativeKeyboardScript.js';
 
 /**
+ * Absolute import URLs Vite emits inside served JS modules. Rewritten to the
+ * app's proxy prefix (see the JS branch of the handler). `/@react-refresh` is
+ * a bare virtual module (no path segment after it) that @astrojs/react's
+ * before-hydration script imports in dev; without it a React island never
+ * mounts (the browser asks the shell root and gets 404).
+ */
+const JS_IMPORT_RE = /(["'`])(\/(?:(?:@fs|@vite|@id|node_modules|src)\/[^"'`\s]*|@react-refresh))\1/g;
+
+/**
+ * Version of this proxy's response rewriting, derived from the rules above
+ * and mixed into every ETag the proxy hands out. The app's ETag covers the
+ * app's bytes, not ours: when the rewrite changes, a browser that revalidates
+ * with the app's tag gets a 304 and keeps the body the OLD rewrite produced
+ * (how a fix to the import rewriter stayed invisible until caches were
+ * cleared). With the version in the tag, a stale cache misses once and is
+ * refilled; after that revalidation works as before.
+ */
+const REWRITE_VERSION = (() => {
+  let h = 0x811c9dc5;
+  for (const ch of `${JS_IMPORT_RE.source}|1`) h = Math.imul(h ^ ch.charCodeAt(0), 0x01000193) >>> 0;
+  return h.toString(36);
+})();
+const REWRITE_TAG_SUFFIX = `.${REWRITE_VERSION}"`;
+
+/** Stamp the proxy's rewrite version into a response's ETag (idempotent). */
+function tagEtag(headers: Headers): void {
+  const etag = headers.get('etag');
+  if (etag && etag.endsWith('"') && !etag.endsWith(REWRITE_TAG_SUFFIX)) headers.set('etag', etag.slice(0, -1) + REWRITE_TAG_SUFFIX);
+}
+
+/**
  * Fallback proxy config for the corner case where the AppManager can't
  * resolve a manifest (race during pool warm-up / app reload). Mirrors the
  * historical Astro-default behaviour so we never silently strip injection.
@@ -309,8 +340,19 @@ export default {};
     const hasBody = !['GET', 'HEAD'].includes(request.method);
     // Rewritten-module cache (see jsModuleCache below): ask the app whether
     // our rewritten copy is still current; a 304 is answered from memory.
-    const jsKey = `/api/proxy/${id}|${targetUrl}`;
-    const jsCached = request.method === 'GET' && !request.headers.get('if-none-match')
+    // The browser's validator carries our rewrite version (tagEtag). Strip it
+    // before the app sees it. One WITHOUT the tag names a body produced by an
+    // older rewrite (or by the app directly): do not let the app answer 304
+    // for it — fetch in full, and decide below (passthrough compares the
+    // app's tag itself; rewritten JS is re-sent).
+    const clientEtag = request.headers.get('if-none-match');
+    let staleClientEtag: string | undefined;
+    if (clientEtag) {
+      if (clientEtag.includes(REWRITE_TAG_SUFFIX)) headers.set('if-none-match', clientEtag.split(REWRITE_TAG_SUFFIX).join('"'));
+      else { headers.delete('if-none-match'); staleClientEtag = clientEtag; }
+    }
+    const jsKey = `/api/proxy/${id}|${targetUrl}`;  // scoped per build by jsModuleCache()
+    const jsCached = request.method === 'GET' && !headers.get('if-none-match')
       ? jsModuleCache().get(jsKey) : undefined;
     if (jsCached) headers.set('if-none-match', jsCached.etag);
     const upstream = await fetch(targetUrl, {
@@ -872,15 +914,13 @@ window.EventSource=AuraEventSource;
       // after a reload (scripts keep loading fine, so it looks half-updated).
       outHeaders.set('cache-control', 'no-store');
       scopeCookies(upstream, outHeaders, proxyPrefix);
+      tagEtag(outHeaders);
       return new Response(rewritten, { status: upstream.status, headers: outHeaders });
     }
 
     // JS: rewrite absolute import URLs that Vite emits inside served modules.
     // Catches patterns like `import "/@fs/..."`, `import("/node_modules/.vite/...")`,
     // and bare quoted strings referencing /@vite/, /@id/, /@fs/, /node_modules/.
-    // `/@react-refresh` is a bare virtual module (no path segment after it) that
-    // @astrojs/react's before-hydration script imports in dev — without it a
-    // React island never mounts (the browser asks the shell root and gets 404).
     // Without this, the Vite HMR client's internal imports escape to the shell origin.
     // Only fires when the manifest opts in to URL rewriting (cfg.rewriteHtml !== 'none')
     // — raw apps that don't run Vite don't emit these patterns and don't need the
@@ -893,15 +933,13 @@ window.EventSource=AuraEventSource;
     const isJs = /\b(javascript|typescript|ecmascript)\b/.test(contentType);
     if (isJs && cfg.rewriteHtml !== 'none') {
       const js = await upstream.text();
-      const rewritten = js.replace(
-        /(["'`])(\/(?:(?:@fs|@vite|@id|node_modules|src)\/[^"'`\s]*|@react-refresh))\1/g,
-        (_full, q, url) => `${q}${prefixUrl(url)}${q}`,
-      );
+      const rewritten = js.replace(JS_IMPORT_RE, (_full, q, url) => `${q}${prefixUrl(url)}${q}`);
       const outHeaders = new Headers(upstream.headers);
       outHeaders.delete('content-encoding');
       outHeaders.delete('content-length');
       hardenDevCache(outHeaders, request);
       scopeCookies(upstream, outHeaders, proxyPrefix);
+      tagEtag(outHeaders);
       const etag = upstream.headers.get('etag');
       if (request.method === 'GET' && upstream.status === 200 && etag && !outHeaders.has('set-cookie')) {
         jsModuleCache().set(jsKey, { etag, body: rewritten, headers: [...outHeaders] });
@@ -919,6 +957,17 @@ window.EventSource=AuraEventSource;
     outHeaders.delete('content-length');
     hardenDevCache(outHeaders, request);
     scopeCookies(upstream, outHeaders, proxyPrefix);
+    tagEtag(outHeaders);
+    // Untouched bodies: the app's validator is ours too, so a browser holding
+    // an untagged copy of an unchanged asset still gets its 304 (we asked the
+    // app in full to keep it from answering for rewritten bodies, see above).
+    if (staleClientEtag && upstream.status === 200 && request.method === 'GET') {
+      const appEtag = upstream.headers.get('etag');
+      if (appEtag && staleClientEtag.split(',').map((t) => t.trim()).includes(appEtag)) {
+        try { upstream.body?.cancel(); } catch { /* ignore */ }
+        return new Response(null, { status: 304, headers: outHeaders });
+      }
+    }
     return new Response(upstream.body ? wrapSafeStream(upstream.body) : null, {
       status:  upstream.status,
       headers: outHeaders,
@@ -1004,9 +1053,19 @@ function scopeCookies(upstream: Response, outHeaders: Headers, proxyPrefix: stri
  */
 interface CachedModule { etag: string; body: string; headers: Array<[string, string]> }
 const JS_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+/**
+ * Identity of THIS build of the rewriter. The cache is pinned on globalThis,
+ * which the shell's live-rebuild generations (server/watchRebuild.mjs) share
+ * in one process: without this tag a new generation with a changed rewrite
+ * keeps serving bodies the old generation rewrote (the app says 304, so the
+ * stale copy wins). Each generation re-executes this module and gets a fresh
+ * tag, which drops the previous generation's entries.
+ */
+const JS_CACHE_BUILD = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 function jsModuleCache() {
-  const g = globalThis as unknown as { __auraProxyJsCache?: { map: Map<string, CachedModule>; bytes: number } };
-  const c = (g.__auraProxyJsCache ??= { map: new Map(), bytes: 0 });
+  const g = globalThis as unknown as { __auraProxyJsCache?: { build: string; map: Map<string, CachedModule>; bytes: number } };
+  if (g.__auraProxyJsCache?.build !== JS_CACHE_BUILD) g.__auraProxyJsCache = { build: JS_CACHE_BUILD, map: new Map(), bytes: 0 };
+  const c = g.__auraProxyJsCache;
   return {
     get(key: string): CachedModule | undefined {
       const hit = c.map.get(key);
