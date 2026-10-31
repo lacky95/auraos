@@ -424,6 +424,30 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
       .perm-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
       .perm-actions .perm-ok { color: var(--aura-color-bg); background: var(--aura-color-primary); border-color: var(--aura-color-primary); }
       .perm-actions .perm-ok:hover { box-shadow: var(--aura-glow-primary); }
+      .perm-actions .perm-ok:disabled { opacity: 0.5; box-shadow: none; cursor: not-allowed; }
+      /* ── identity choice ──────────────────────────────────────────────
+         The store found an installed app with the same id or originId and
+         will not decide for the user which one wins. */
+      .id-text { margin: 0 0 12px; font-size: 0.82rem; line-height: 1.5; }
+      .id-ids  { margin: 0 0 14px; font-size: 0.72rem; color: var(--aura-color-text-dim); line-height: 1.6; }
+      .id-ids code { font-size: 0.72rem; }
+      .id-choices { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; border: 0; }
+      .id-choice {
+        display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: start;
+        padding: 8px 10px; border: 1px solid var(--aura-color-border); cursor: pointer;
+      }
+      .id-choice:has(input:checked) { border-color: var(--aura-color-primary); }
+      .id-choice input { margin: 3px 0 0; grid-row: span 2; }
+      .id-choice-label { font-size: 0.82rem; }
+      .id-choice-desc  { font-size: 0.74rem; color: var(--aura-color-text-dim); }
+      .id-newid { margin-top: 12px; display: flex; flex-direction: column; gap: 4px; font-size: 0.72rem;
+        letter-spacing: 0.12em; text-transform: uppercase; color: var(--aura-color-text-dim); }
+      .id-newid[hidden] { display: none; }
+      .id-newid input { font: inherit; font-size: 0.85rem; letter-spacing: normal; text-transform: none;
+        padding: 6px 8px; color: var(--aura-color-text); background: var(--aura-color-bg);
+        border: 1px solid var(--aura-color-border); }
+      .id-newid input[aria-invalid="true"] { border-color: var(--aura-color-danger); }
+      .id-err { color: var(--aura-color-danger); text-transform: none; letter-spacing: normal; min-height: 1em; }
     </style>
 
     <!-- Permission approval. One dialog for every page that can install; the
@@ -441,6 +465,27 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
       </div>
     </div>
 
+    <!-- Identity choice: the app shares its id or originId with an installed
+         app (scenarios A, B, D in core AppIdentity). Nothing is installed
+         until the user picks what should happen. -->
+    <div class="perm-overlay" data-id-overlay hidden>
+      <div class="perm-dialog" role="dialog" aria-modal="true" aria-labelledby="id-title">
+        <h2 class="perm-title" id="id-title" data-id-title>Already installed</h2>
+        <p class="id-text" data-id-text></p>
+        <p class="id-ids" data-id-ids></p>
+        <fieldset class="id-choices" data-id-choices></fieldset>
+        <label class="id-newid" data-id-newid hidden>
+          Local app id
+          <input type="text" data-id-appid spellcheck="false" autocomplete="off" />
+          <span class="id-err" data-id-err></span>
+        </label>
+        <div class="perm-actions">
+          <button type="button" data-id-cancel>Cancel</button>
+          <button type="button" class="perm-ok" data-id-ok>Continue</button>
+        </div>
+      </div>
+    </div>
+
     <script is:inline>
       /* Install with informed consent.
        *
@@ -451,8 +496,10 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
        * ever naming them. `docker` in an app's tools[] is host root via the
        * socket; that is not something to hand over silently.
        *
-       * Flow: install without autoApprove → if the server asks for approval,
-       * show the diff → on approve, install again with autoApprove.
+       * Flow: install without autoApprove → if the app shares its id or
+       * originId with an installed one, ask what should happen (identity
+       * dialog) → if the server asks for approval, show the diff → each
+       * answer is the same install again, carrying the decision.
        */
       (function () {
         var overlay = document.querySelector('[data-perm-overlay]');
@@ -559,55 +606,182 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
           return new Promise(function (res) { resolver = res; });
         }
 
-        /** Update an installed app, asking for approval when the server
-         *  requires it. Same contract as install: the route returns
-         *  { needsApproval, diff } unless autoApprove is passed. */
-        window.auraUpdate = async function (id, opts) {
-          opts = opts || {};
-          var url = '/api/nexus/update/' + encodeURIComponent(id);
-          var post = function (auto) {
-            return fetch(url, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(auto ? { autoApprove: true } : {}),
-            }).then(function (r) { return r.json().catch(function () { return {}; }); });
+        // ─── Identity choice ───────────────────────────────────────────
+        var idOverlay = document.querySelector('[data-id-overlay]');
+        var idTitle   = idOverlay.querySelector('[data-id-title]');
+        var idText    = idOverlay.querySelector('[data-id-text]');
+        var idIds     = idOverlay.querySelector('[data-id-ids]');
+        var idChoices = idOverlay.querySelector('[data-id-choices]');
+        var idNew     = idOverlay.querySelector('[data-id-newid]');
+        var idInput   = idOverlay.querySelector('[data-id-appid]');
+        var idErr     = idOverlay.querySelector('[data-id-err]');
+        var idOk      = idOverlay.querySelector('[data-id-ok]');
+        var idCancel  = idOverlay.querySelector('[data-id-cancel]');
+        var idResolver = null;
+        var idOpener   = null;
+        var APP_ID = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
+
+        function from(c) { return c.incoming.sourceName || c.incoming.ref; }
+
+        /* What the store found, in one sentence, per conflict kind. */
+        var TEXT = {
+          'switch-source': function (c, name) {
+            return name + ' is already installed' + (c.existing.sourceName ? ' from ' + c.existing.sourceName : ' (built or copied here)')
+              + '. ' + from(c) + ' offers the same app.';
+          },
+          'id-taken': function (c, name) {
+            return 'An app with the id ' + c.existing.appId + ' is already installed, and it is '
+              + (c.existing.originId && c.incoming.originId ? 'a different app' : 'not known to be the same app')
+              + '. The store will not replace it.';
+          },
+          'same-origin': function (c, name) {
+            return name + ' (' + c.incoming.appId + ') is the same app as your installed ' + c.existing.appId + '.';
+          },
+        };
+        var TITLE = { 'switch-source': 'Already installed', 'id-taken': 'Id already taken', 'same-origin': 'Same app, other id' };
+
+        function label(action, c) {
+          if (action === 'update-existing') return {
+            label: 'Update ' + c.existing.appId,
+            desc: c.kind === 'id-taken'
+              ? 'Replace the installed app with ' + c.incoming.version + ' from ' + from(c) + '.'
+              : 'Install ' + c.incoming.version + ' into it; it keeps its id and data and updates from ' + from(c) + ' from now on.',
           };
-          var json = await post(false);
-          if (json.ok) return json;
-          if (!json.needsApproval) return { error: json.error || 'nothing to update' };
-          var approved = await ask(json.diff, opts.name);
-          if (!approved) return { cancelled: true };
-          if (opts.onApproved) opts.onApproved();
-          var json2 = await post(true);
-          return json2.ok ? json2 : { error: json2.error || 'update failed' };
+          if (action === 'install-as') return {
+            label: 'Install under another id',
+            desc: 'Keep ' + c.existing.appId + ' and install this app beside it.',
+          };
+          return {
+            label: 'Install an independent copy',
+            desc: 'A separate app with its own id and identity. It does not get updates from ' + from(c) + '.',
+          };
+        }
+
+        function selected() {
+          var r = idChoices.querySelector('input:checked');
+          return r ? r.value : null;
+        }
+        function syncId() {
+          var a = selected();
+          var needsId = a === 'install-as' || a === 'install-copy';
+          idNew.hidden = !needsId;
+          var bad = needsId && !APP_ID.test(idInput.value.trim());
+          idInput.setAttribute('aria-invalid', bad ? 'true' : 'false');
+          idErr.textContent = bad ? 'reverse-domain id, e.g. com.example.app' : '';
+          idOk.disabled = !a || bad;
+        }
+
+        function renderIdentity(c, name) {
+          var n = name || c.incoming.name || c.incoming.appId;
+          idTitle.textContent = TITLE[c.kind] || 'Already installed';
+          idText.textContent = (TEXT[c.kind] || TEXT['id-taken'])(c, n);
+          idIds.textContent = '';
+          [['installed', c.existing.appId, c.existing.originId, c.existing.scope],
+           ['offered', c.incoming.appId, c.incoming.originId, from(c)]].forEach(function (row) {
+            var line = document.createElement('div');
+            line.textContent = row[0] + ': ' + row[1] + ' · ' + row[3] + ' · origin ' + (row[2] || 'unknown');
+            idIds.appendChild(line);
+          });
+          idChoices.textContent = '';
+          c.choices.forEach(function (action, i) {
+            var l = label(action, c);
+            var wrap = document.createElement('label');
+            wrap.className = 'id-choice';
+            var input = document.createElement('input');
+            input.type = 'radio'; input.name = 'id-choice'; input.value = action;
+            if (i === 0) input.checked = true;
+            input.addEventListener('change', syncId);
+            var t = document.createElement('span'); t.className = 'id-choice-label'; t.textContent = l.label;
+            var d = document.createElement('span'); d.className = 'id-choice-desc';  d.textContent = l.desc;
+            wrap.appendChild(input); wrap.appendChild(t); wrap.appendChild(d);
+            idChoices.appendChild(wrap);
+          });
+          idInput.value = c.suggestedAppId || '';
+          syncId();
+        }
+
+        function closeIdentity(result) {
+          idOverlay.hidden = true;
+          if (idOpener && idOpener.focus) idOpener.focus();
+          idOpener = null;
+          var r = idResolver; idResolver = null;
+          if (r) r(result);
+        }
+        idInput.addEventListener('input', syncId);
+        idOk.addEventListener('click', function () {
+          var action = selected();
+          if (!action || idOk.disabled) return;
+          var d = { action: action };
+          if (action !== 'update-existing') d.appId = idInput.value.trim();
+          closeIdentity(d);
+        });
+        idCancel.addEventListener('click', function () { closeIdentity(null); });
+        idOverlay.addEventListener('click', function (ev) { if (ev.target === idOverlay) closeIdentity(null); });
+        document.addEventListener('keydown', function (ev) {
+          if (idOverlay.hidden) return;
+          if (ev.key === 'Escape') { ev.preventDefault(); closeIdentity(null); }
+          if (ev.key === 'Enter' && ev.target !== idCancel) { ev.preventDefault(); idOk.click(); }
+        });
+
+        /** Ask how to resolve an identity conflict. Resolves the decision or null. */
+        function askIdentity(conflict, name) {
+          renderIdentity(conflict, name);
+          idOpener = document.activeElement;
+          idOverlay.hidden = false;
+          var first = idChoices.querySelector('input:checked');
+          (first || idOk).focus();
+          return new Promise(function (res) { idResolver = res; });
+        }
+
+        // ─── One flow for install + update ──────────────────────────────
+        /* POST, then answer the store's questions in order — the app's
+         * identity (A/B/D), then new permissions — each answer a re-POST with
+         * the decision in the body, as the CLI does. */
+        async function runInstall(url, base, opts, fallbackError) {
+          var identity = null;
+          var auto = false;
+          for (var round = 0; round < 4; round++) {
+            var body = Object.assign({}, base);
+            if (auto) body.autoApprove = true;
+            if (identity) body.identity = identity;
+            var res = await fetch(url, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            var json = await res.json().catch(function () { return {}; });
+            if (json.ok) return json;
+            if (json.needsIdentityChoice && json.conflict) {
+              if (identity) return { error: 'the store asked about this app again' };
+              identity = await askIdentity(json.conflict, opts.name);
+              if (!identity) return { cancelled: true };
+              if (opts.onApproved) opts.onApproved();
+              continue;
+            }
+            if (json.needsApproval && json.diff && !auto) {
+              var approved = await ask(json.diff, opts.name);
+              if (!approved) return { cancelled: true };
+              if (opts.onApproved) opts.onApproved();
+              auto = true;
+              continue;
+            }
+            return { error: json.error || (round === 0 ? fallbackError : '') || ('HTTP ' + res.status) };
+          }
+          return { error: 'too many questions from the store' };
+        }
+
+        /** Update an installed app, asking about its identity and new
+         *  permissions when the server requires it. */
+        window.auraUpdate = function (id, opts) {
+          return runInstall('/api/nexus/update/' + encodeURIComponent(id), {}, opts || {}, 'nothing to update');
         };
 
-        /** Install `ref`, asking for approval when the server requires it.
-         *  Resolves { ok, record } | { cancelled: true } | { error }. */
-        window.auraInstall = async function (ref, opts) {
+        /** Install `ref`, asking about its identity and new permissions when
+         *  the server requires it. Resolves { ok, record } | { cancelled: true } | { error }. */
+        window.auraInstall = function (ref, opts) {
           opts = opts || {};
           var body = { ref: ref };
           if (opts.scope) body.scope = opts.scope;
-
-          var res  = await fetch('/api/nexus/install', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          });
-          var json = await res.json();
-
-          if (json.ok) return json;
-          if (!json.needsApproval) return { error: json.error || ('HTTP ' + res.status) };
-
-          var approved = await ask(json.diff, opts.name);
-          if (!approved) return { cancelled: true };
-          if (opts.onApproved) opts.onApproved();
-
-          body.autoApprove = true;
-          var res2  = await fetch('/api/nexus/install', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          });
-          var json2 = await res2.json();
-          return json2.ok ? json2 : { error: json2.error || ('HTTP ' + res2.status) };
+          return runInstall('/api/nexus/install', body, opts, '');
         };
       })();
     </script>
