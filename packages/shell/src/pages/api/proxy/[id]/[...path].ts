@@ -878,6 +878,9 @@ window.EventSource=AuraEventSource;
     // JS: rewrite absolute import URLs that Vite emits inside served modules.
     // Catches patterns like `import "/@fs/..."`, `import("/node_modules/.vite/...")`,
     // and bare quoted strings referencing /@vite/, /@id/, /@fs/, /node_modules/.
+    // `/@react-refresh` is a bare virtual module (no path segment after it) that
+    // @astrojs/react's before-hydration script imports in dev — without it a
+    // React island never mounts (the browser asks the shell root and gets 404).
     // Without this, the Vite HMR client's internal imports escape to the shell origin.
     // Only fires when the manifest opts in to URL rewriting (cfg.rewriteHtml !== 'none')
     // — raw apps that don't run Vite don't emit these patterns and don't need the
@@ -891,7 +894,7 @@ window.EventSource=AuraEventSource;
     if (isJs && cfg.rewriteHtml !== 'none') {
       const js = await upstream.text();
       const rewritten = js.replace(
-        /(["'`])(\/(?:@fs|@vite|@id|node_modules|src)\/[^"'`\s]*)\1/g,
+        /(["'`])(\/(?:(?:@fs|@vite|@id|node_modules|src)\/[^"'`\s]*|@react-refresh))\1/g,
         (_full, q, url) => `${q}${prefixUrl(url)}${q}`,
       );
       const outHeaders = new Headers(upstream.headers);
