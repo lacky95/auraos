@@ -1,5 +1,6 @@
 {
   "id": "com.aura.aurashelld",
+  "originId": "9221a10b-5e89-4f29-b640-c0ad79720979",
   "name": "Aura Shell Daemon",
   "version": "0.1.0",
   "description": "Headless service hosting the `shell` MCP — an agent's remote control for the AuraOS shell UI: overview, apps, workspaces, layouts, windows, zoom, viewports, light/dark mode, fullscreen, lock, launcher, processes, notifications (markdown reports too).",

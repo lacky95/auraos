@@ -1,5 +1,6 @@
 {
   "id":             "com.aura.registry",
+  "originId": "02f21820-9215-4dc9-9473-56284a1c4025",
   "name":           "Registry",
   "version":        "0.1.0",
   "description":    "Local OCI registry (Zot) — system infrastructure. Nexus pushes/pulls @aura/* packages and AuraOS apps through here.",

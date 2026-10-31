@@ -1,5 +1,6 @@
 {
   "id": "com.aura.nexus",
+  "originId": "b61b5559-5176-472b-8270-b8e1792b83a5",
   "name": "Nexus",
   "version": "0.1.0",
   "description": "AuraOS app store + package manager. Browse, install, update, publish.",
