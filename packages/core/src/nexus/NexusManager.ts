@@ -35,9 +35,45 @@ import { DEFAULT_APP_REPO_PREFIX, DEFAULT_SOURCES_CONFIG, loadSourcesConfig, oci
 import { loadRegistryCredentials } from './RegistryAuth.js';
 import { needsProvisioning, provisionApp } from '../app-manager/provisioning.js';
 import {
-  APP_ID_PATTERN, classifyIdentity, rewriteAppIdentity, scanInstalledIdentities, suggestFreeAppId,
+  APP_ID_PATTERN, classifyIdentity, rewriteAppIdentity, scanInstalledIdentities, suggestFreeAppId, tracksSource,
   type InstalledIdentity,
 } from '../app-manager/AppIdentity.js';
+import { compareVersions } from './version.js';
+import type { CatalogEntry } from './CatalogAggregator.js';
+
+/**
+ * How a store entry relates to this installation — the one answer the store
+ * UI renders its buttons from. Matches by id AND originId (AppIdentity), so an
+ * app installed under another id, or built here without a store record, still
+ * reads as installed.
+ */
+export interface InstallState {
+  /** available: not here · installed: this app is here (maybe under another id)
+   *  · id-taken: a DIFFERENT app owns the id · installing: in flight */
+  status: 'available' | 'installed' | 'id-taken' | 'installing';
+  /** The local app it maps to (installed / id-taken). */
+  localAppId?: string;
+  scope?: ScopeId;
+  installedVersion?: string;
+  /** The version the store offers now (the entry's). */
+  availableVersion?: string;
+  /** The store has a newer version than the installed one. */
+  updateAvailable: boolean;
+  /** Installed from exactly this source: an update is a plain update; otherwise
+   *  installing from here switches the app's source (asks first). */
+  fromThisSource: boolean;
+  /** Installed through the store (has an install record) — what uninstall needs. */
+  hasRecord: boolean;
+  /** Can be uninstalled from the store: a store install outside the system
+   *  scope. Apps built or copied here are never deleted from the store. */
+  canUninstall: boolean;
+  /** The installed app is an independent copy (no updates from a source). */
+  detached: boolean;
+  /** Proven to be the same app: originIds match, or it was installed from
+   *  this source. False when one side has no originId (an older publish) — it
+   *  shares the id, but installing from here asks first. */
+  verified: boolean;
+}
 
 export interface NexusManagerOpts {
   scopes:  ScopeDefinition[];
@@ -186,6 +222,44 @@ export class NexusManager {
     };
   }
 
+  /**
+   * The install state of each catalog entry, keyed by entry id. One scan of
+   * the installed apps for the whole list.
+   */
+  installStates(entries: Array<Pick<CatalogEntry, 'id' | 'originId' | 'sourceName' | 'sources' | 'version'>>): Record<string, InstallState> {
+    const installed = this.installedIdentities();
+    const out: Record<string, InstallState> = {};
+    for (const e of entries) {
+      const inc = {
+        appId: e.id, originId: e.originId ?? null,
+        rawRef: e.sources?.oci?.ref ?? e.sources?.git?.ref ?? e.id,
+        ...(e.sourceName ? { sourceName: e.sourceName } : {}),
+      };
+      const v = classifyIdentity(inc, installed);
+      const local = v.kind === 'update' ? v.target : v.kind === 'conflict' ? v.existing : null;
+      const localOrigin = local ? local.originId ?? local.record?.originId ?? null : null;
+      // Only a KNOWN different originId is another app. Same id with an
+      // originId missing on either side is shown as installed, unverified.
+      const otherApp = v.kind === 'conflict' && v.conflict === 'id-taken' && !!inc.originId && !!localOrigin;
+      const status: InstallState['status'] = !local ? 'available' : otherApp ? 'id-taken' : 'installed';
+      const rec = local?.record ?? null;
+      const installing = this.isInstalling(e.id) || (!!local && this.isInstalling(local.appId));
+      out[e.id] = {
+        status: installing ? 'installing' : status,
+        ...(local ? { localAppId: local.appId, scope: local.scope } : {}),
+        ...(local?.version ? { installedVersion: local.version } : {}),
+        ...(e.version ? { availableVersion: e.version } : {}),
+        updateAvailable: status === 'installed' && !rec?.detached && compareVersions(e.version, local?.version) > 0,
+        fromThisSource: status === 'installed' && tracksSource(rec, inc),
+        hasRecord: !!rec,
+        canUninstall: !!rec && local?.scope !== 'system',
+        detached: !!rec?.detached,
+        verified: status === 'installed' && (v.kind === 'update' || (!!inc.originId && inc.originId === localOrigin)),
+      };
+    }
+    return out;
+  }
+
   /** Every installed app with its originId and install record, highest
    *  priority scope first (the copy the OS actually runs comes first). */
   private installedIdentities(): InstalledIdentity[] {
@@ -317,15 +391,40 @@ export class NexusManager {
         installed,
       );
       let link: { remoteId?: string; detached?: boolean } = {};
-      if (verdict.kind === 'update') {
+      const taken = new Set(installed.map((i) => i.appId));
+      const suggestedAppId = suggestFreeAppId(remoteId, taken);
+      /** install-as / install-copy: the app under a local id of the user's choice. */
+      const installUnderLocalId = (decision: IdentityDecision): void => {
+        const localId = decision.appId ?? suggestedAppId;
+        if (!APP_ID_PATTERN.test(localId)) throw new Error(`invalid app id: ${localId}`);
+        if (taken.has(localId)) throw new Error(`${localId} is already installed — choose another id`);
+        if (decision.action === 'install-as') {
+          // Same artifact under a local name: keeps its originId, updates follow.
+          manifest = this.retarget(stagingDir, remoteId, localId, 'keep', targetScope);
+          link = { remoteId };
+        } else {
+          // An independent copy: new id AND new originId, no update link.
+          manifest = this.retarget(stagingDir, remoteId, localId, 'new', targetScope);
+          link = { detached: true };
+        }
+      };
+      // Asked for without a conflict: "install a fresh copy" of an installed
+      // app (the store's Installed ▾ menu), or "install as" for an app that
+      // isn't installed yet. A second same-artifact install of an installed
+      // app is only possible as an independent copy.
+      const explicit = opts.identity && verdict.kind !== 'conflict'
+        && (opts.identity.action === 'install-copy' || (opts.identity.action === 'install-as' && verdict.kind === 'fresh'))
+        ? opts.identity : null;
+      if (explicit) {
+        installUnderLocalId(explicit);
+        yield { type: 'identity.resolved', action: explicit.action, appId: manifest.id };
+      } else if (verdict.kind === 'update') {
         if (verdict.target.scope !== 'system') targetScope = verdict.target.scope;
         if (verdict.target.appId !== manifest.id) {
           manifest = this.retarget(stagingDir, remoteId, verdict.target.appId, 'keep', targetScope);
           link = { remoteId };
         }
       } else if (verdict.kind === 'conflict') {
-        const taken = new Set(installed.map((i) => i.appId));
-        const suggestedAppId = suggestFreeAppId(remoteId, taken);
         const decision = opts.identity;
         if (!decision) {
           unmark();
@@ -359,18 +458,7 @@ export class NexusManager {
             manifest = this.retarget(stagingDir, remoteId, ex.appId, ex.originId, targetScope);
           }
         } else {
-          const localId = decision.appId ?? suggestedAppId;
-          if (!APP_ID_PATTERN.test(localId)) throw new Error(`invalid app id: ${localId}`);
-          if (taken.has(localId)) throw new Error(`${localId} is already installed — choose another id`);
-          if (decision.action === 'install-as') {
-            // Another app that happens to share the id: same artifact, local name.
-            manifest = this.retarget(stagingDir, remoteId, localId, 'keep', targetScope);
-            link = { remoteId };
-          } else {
-            // An independent copy: new id AND new originId, no update link.
-            manifest = this.retarget(stagingDir, remoteId, localId, 'new', targetScope);
-            link = { detached: true };
-          }
+          installUnderLocalId(decision);
         }
         mark();
         yield { type: 'identity.resolved', action: decision.action, appId: manifest.id };

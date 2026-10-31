@@ -167,3 +167,66 @@ test('originId travels with releases and the registry catalog', () => {
   const doc = parseCatalog({ apps: [{ id: 'a.b', repo: 'p/a.b', originId: O1 }, { id: 'c.d', repo: 'p/c.d', originId: 'nope' }] }, 'p');
   assert.deepEqual(doc.apps.map((a) => a.originId), [O1, undefined]);
 });
+
+// ─── The store's view: catalog entry → install state ─────────────────────
+
+import { compareVersions } from '../dist/nexus/version.js';
+import { NexusManager } from '../dist/nexus/NexusManager.js';
+
+test('compareVersions: numeric parts, pre-releases first, junk never "newer"', () => {
+  assert.equal(compareVersions('1.10.0', '1.9.9'), 1);
+  assert.equal(compareVersions('1.0.0', '1.0.0'), 0);
+  assert.equal(compareVersions('v2.0', '2.0.0'), 0);
+  assert.equal(compareVersions('1.0.0-beta', '1.0.0'), -1);
+  assert.equal(compareVersions('1.0.0-beta.10', '1.0.0-beta.2'), 1);
+  assert.equal(compareVersions('latest', '1.0.0'), 0);
+  assert.equal(compareVersions(undefined, '1.0.0'), 0);
+});
+
+test('installStates: id + originId decide what the store shows', () => {
+  const root = mkdtempSync(join(tmpdir(), 'aura-states-'));
+  const O = (n) => `00000000-0000-4000-8000-00000000000${n}`;
+  const scope = (id, priority, immutable) => ({ id, appsDir: join(root, id, 'apps'), dataDir: join(root, id, 'data'), immutable, priority });
+  const scopes = [scope('system', 0, true), scope('global', 1, false), scope('user', 2, false)];
+  const put = (s, id, originId, version, record) => {
+    const dir = join(s.appsDir, id); mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'app.manifest.json'), JSON.stringify({ id, originId, name: id, version }));
+    if (record) {
+      mkdirSync(join(s.dataDir, 'nexus', 'installed'), { recursive: true });
+      writeFileSync(join(s.dataDir, 'nexus', 'installed', `${id}.json`), JSON.stringify({ id, version, scope: s.id, ...record }));
+    }
+  };
+  const [sys, , user] = scopes;
+  put(user, 'io.a.same', O(1), '1.0.0', { ref: 'io.a.same', sourceName: 'src', source: 'index' });
+  put(user, 'io.my.editor', O(2), '1.0.0');                                        // built here, no record
+  put(user, 'io.taken', O(3), '1.0.0');
+  put(user, 'io.a.same.copy', O(6), '1.0.0', { ref: 'io.a.same', sourceName: 'src', detached: true });
+  put(sys, 'com.sys', O(5), '2.0.0');
+
+  const mgr = new NexusManager({ scopes, rootDataDir: join(root, 'root') });
+  const e = (id, originId, version, sourceName = 'src') => ({ id, originId, version, sourceName, sources: { oci: { ref: `reg/${id}` } } });
+  const st = mgr.installStates([
+    e('io.a.same', O(1), '1.1.0'),
+    e('com.ex.editor', O(2), '3.0.0', 'other'),
+    e('io.taken', O(4), '1.0.0'),
+    e('io.new', O(7), '1.0.0'),
+    e('com.sys', O(5), '2.0.0'),
+  ]);
+
+  assert.deepEqual(st['io.a.same'], {
+    status: 'installed', localAppId: 'io.a.same', scope: 'user', installedVersion: '1.0.0', availableVersion: '1.1.0',
+    updateAvailable: true, fromThisSource: true, hasRecord: true, canUninstall: true, detached: false, verified: true,
+  }, 'record ref is the bare id, the entry ref is reg/… — the same source name decides');
+  assert.equal(st['com.ex.editor'].status, 'installed', 'same originId under another id');
+  assert.equal(st['com.ex.editor'].localAppId, 'io.my.editor');
+  assert.equal(st['com.ex.editor'].canUninstall, false, 'built here: never deleted from the store');
+  assert.equal(st['com.ex.editor'].updateAvailable, true);
+  assert.deepEqual([st['io.taken'].status, st['io.taken'].localAppId], ['id-taken', 'io.taken']);
+  assert.equal(st['io.new'].status, 'available');
+  // An entry without an originId (older publish) on an id that is installed:
+  // installed, but not verified — never "taken" without proof.
+  const legacy = mgr.installStates([e('io.taken', undefined, '1.0.0', 'official')])['io.taken'];
+  assert.deepEqual([legacy.status, legacy.verified, legacy.localAppId], ['installed', false, 'io.taken']);
+  assert.equal(st['com.ex.editor'].verified, true);
+  assert.deepEqual([st['com.sys'].status, st['com.sys'].canUninstall, st['com.sys'].updateAvailable], ['installed', false, false]);
+});

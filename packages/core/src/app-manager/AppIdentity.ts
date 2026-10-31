@@ -289,6 +289,8 @@ export interface InstalledIdentity {
   appId:     string;
   originId:  string | null;
   scope:     ScopeId;
+  /** The installed manifest's version. */
+  version?:  string;
   /** Its Nexus install record, when it came from the store. */
   record?:   {
     ref: string; sourceName?: string; remoteId?: string; originId?: string; detached?: boolean;
@@ -319,6 +321,10 @@ export type AppIdentityVerdict =
   | { kind: 'conflict'; conflict: IdentityConflictKind; existing: InstalledIdentity; choices: IdentityAction[] };
 
 /** Was `rec` installed from the same place `inc` comes from? */
+export function tracksSource(rec: InstalledIdentity['record'], inc: Pick<IncomingIdentity, 'rawRef' | 'sourceName'>): boolean {
+  return tracks(rec, inc as IncomingIdentity);
+}
+
 function tracks(rec: InstalledIdentity['record'], inc: IncomingIdentity): boolean {
   if (!rec || rec.detached) return false;
   if (rec.sourceName && inc.sourceName) return rec.sourceName === inc.sourceName;
@@ -392,7 +398,10 @@ export function scanInstalledIdentities(appsDir: string, scope: ScopeId): Array<
     try {
       const m = JSON.parse(readFileSync(p, 'utf-8')) as Record<string, unknown>;
       if (m['id'] !== name) continue;
-      out.push({ appId: name, originId: isOriginId(m['originId']) ? m['originId'] : null, scope });
+      out.push({
+        appId: name, originId: isOriginId(m['originId']) ? m['originId'] : null, scope,
+        ...(typeof m['version'] === 'string' ? { version: m['version'] } : {}),
+      });
     } catch { /* unreadable manifest: not an app */ }
   }
   return out;
