@@ -231,7 +231,6 @@ import Icon from '../ui/Icon.astro';
        the (pinned) page behind it. */
     touch-action: pan-y;
     overscroll-behavior: contain;
-    -webkit-overflow-scrolling: touch;
   }
 
   .lo-app {
@@ -424,10 +423,22 @@ import Icon from '../ui/Icon.astro';
     search.value = '';
     grid.querySelectorAll<HTMLElement>('.lo-app').forEach(el => el.hidden = false);
     updateCount();
-    // defer focus until the slide-in starts, so the focus ring doesn't trigger
-    // a layout shift mid-animation
-    requestAnimationFrame(() => search.focus());
+    // Focus right here, inside the dock tap, not in a later frame: iOS only
+    // treats a focus() made during the user's gesture as a real one. A
+    // deferred focus left iPad Safari with a focused box but a grid that
+    // ignored swipes until the box was blurred. preventScroll: the panel is
+    // still off-screen mid slide-in, don't let the browser chase the input.
+    search.focus({ preventScroll: true });
   }
+  // iOS can also miss that the grid became a scroll container while the
+  // panel was sliding in (a transformed ancestor). Once the slide-in ends,
+  // toggle its overflow so WebKit rebuilds the scroller: swipes work at once.
+  panel.addEventListener('transitionend', (e) => {
+    if (e.target !== panel || e.propertyName !== 'transform' || !isOpen()) return;
+    grid.style.overflowY = 'hidden';
+    void grid.offsetHeight;
+    grid.style.overflowY = '';
+  });
   function closePanel() { panel.setAttribute('aria-hidden', 'true'); }
 
   // Keep the panel above the on-screen keyboard. openPanel() focuses the
