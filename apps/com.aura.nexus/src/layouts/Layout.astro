@@ -31,7 +31,7 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
       (function () {
         if (window.__nexusControls) return;
         window.__nexusControls = true;
-        var compact = window.matchMedia('(max-width: 1099px), (pointer: coarse)');
+        var compact = window.matchMedia('(max-width: 819px)');
 
         /* Place an open popover under its anchor (desktop); compact = CSS sheet. */
         function placePopover(pop, anchor) {
@@ -507,10 +507,13 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
       .id-err { color: var(--aura-color-danger); text-transform: none; letter-spacing: normal; min-height: 1em; }
       /* ═══ Store list: toolbar, filter sheet, cards, install control ═══════
        * One markup, two layouts:
-       *   desktop  (≥ 1100 px, fine pointer): search row + filters inline
-       *   compact  (< 1100 px or touch — phones, iPads, narrow windows):
-       *            one row (search · Filters · view), filters in a bottom
-       *            sheet, active filters as pills, dense list rows.
+       *   wide     (≥ 820 px of real space — the app's own width, any
+       *            device): search row + filters inline
+       *   compact  (< 820 px): one row (search · Filters · view), the status
+       *            chips as a quick row, the other filters in a sheet,
+       *            active filters as pills, dense list rows.
+       * Width only — a big touch screen or an iPad in landscape has the room
+       * for the wide view and gets it.
        * Every element is server-rendered; JS only toggles state. */
 
       /* ── Toolbar ── */
@@ -751,12 +754,20 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
       .disclose[aria-expanded="true"]::before { transform: rotate(90deg); }
       .disclose:hover { box-shadow: none; }
 
-      /* ═══ Compact view: phones, iPads (also landscape), narrow windows ═══ */
-      @media (max-width: 1099px), (pointer: coarse) {
+      /* Quick status row: compact view only (wide shows the chips inline). */
+      .quick-chips { display: none; }
+
+      /* ═══ Compact view: less than 820 px of real space ═══ */
+      @media (max-width: 819px) {
         .toolbar { gap: 6px; padding: 10px 12px 8px; margin: -14px -12px 12px; }
         .nexus-main { padding: 14px 12px 24px; }
         .search-kbd, .tb-refresh { display: none; }
         .btn-filters { display: inline-flex; }
+        .quick-chips { display: flex; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; gap: 6px; }
+        .quick-chips::-webkit-scrollbar { display: none; }
+        .quick-chips .chip { min-height: 34px; }
+        /* The sheet shows the quick row's group again — not needed twice. */
+        .filter-sheet .fs-segmented { display: none; }
         .view-toggle button { min-width: 38px; }
         /* The filter blocks become a bottom sheet (native popover). */
         .filter-sheet { display: none; }
@@ -821,6 +832,19 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
         .featured-strip { grid-auto-columns: min(85%, 340px); }
         .nexus-brand .subtitle { display: none; }
       }
+      /* Medium (560–819 px): sheets become a centred panel, list rows keep a
+         one-line description. */
+      @media (min-width: 561px) and (max-width: 819px) {
+        .filter-sheet:popover-open, .ic-menu, .nxs-list {
+          left: 50% !important; right: auto !important; transform: translateX(-50%);
+          width: min(560px, calc(100% - 32px)) !important; border-width: 1px !important;
+          animation-name: sheet-in-centred;
+        }
+        .view-list .app-card-desc { display: -webkit-box; -webkit-line-clamp: 1; grid-column: 1; grid-row: 2; padding-left: 44px; margin: 0; font-size: 0.72rem; }
+        .view-list .app-card { grid-template-rows: auto auto auto; }
+        .view-list .app-card-status { grid-row: 3; }
+        .view-list .ic { grid-row: 1 / span 3; }
+      }
       @media (max-width: 560px) {
         .nexus-brand .wordmark { display: none; }
         .btn-filters-label { display: none; }
@@ -828,6 +852,7 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
         .app-list.view-grid { grid-template-columns: 1fr; }
       }
       @keyframes sheet-in { from { transform: translateY(100%); } to { transform: none; } }
+      @keyframes sheet-in-centred { from { transform: translate(-50%, 100%); } to { transform: translateX(-50%); } }
 
       /* Page transitions: a quick fade; none for reduced motion. */
       ::view-transition-old(root), ::view-transition-new(root) { animation-duration: 0.12s; }

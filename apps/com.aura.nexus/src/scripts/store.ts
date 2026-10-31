@@ -30,7 +30,7 @@ declare global {
 const APP_ID = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
 const POLL_MS = 2500;
 const STATE_FACETS = new Set(['available', 'installed', 'id-taken', 'installing', 'update']);
-const compact = window.matchMedia('(max-width: 1099px), (pointer: coarse)');
+const compact = window.matchMedia('(max-width: 819px)');
 
 // ─── State → control ───────────────────────────────────────────────────────
 

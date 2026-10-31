@@ -3,12 +3,12 @@
  * Search + filters of a store list — all rendered here; scripts/browse.ts
  * only applies them.
  *
- * Desktop (≥ 1100 px, fine pointer): search on top, the filter blocks inline
- * below it (status chips, selects, sort, category chips).
- * Compact (phones, iPads, narrow windows, touch): one row — search, a
- * Filters button with the number of active filters, the view switch — and
- * the same filter blocks in a bottom sheet (a native popover, opens without
- * JS). Active filters show as removable pills under the search.
+ * Wide (≥ 820 px of the app's own width, any device): search on top, the
+ * filter blocks inline below it (status chips, selects, sort, categories).
+ * Compact (< 820 px): one row — search, a Filters button with the number of
+ * active filters, the view switch — then the status chips as a quick row,
+ * and the other filter blocks in a sheet (a native popover, opens without
+ * JS). Other active filters show as removable pills.
  */
 import Select from './Select.astro';
 interface Option { value: string; label: string; count?: number; tone?: 'update' }
@@ -23,6 +23,9 @@ interface Props {
 }
 const { placeholder, groups, selects = [], sorts, refresh = false } = Astro.props;
 const sheetId = `filters-${Math.random().toString(36).slice(2, 7)}`;
+// The segmented group (Show: all / installed / updates …) is also a quick
+// row under the search in the compact view — the filter people use most.
+const quick = groups.find((g) => g.segmented);
 ---
 <div class="toolbar">
   <div class="toolbar-main">
@@ -43,8 +46,18 @@ const sheetId = `filters-${Math.random().toString(36).slice(2, 7)}`;
     {refresh && <a class="btn-icon tb-refresh" href="/?refresh=1" data-refresh aria-label="Refresh sources" data-tip="Re-fetch every source now">↻</a>}
   </div>
 
+  {quick && (
+    <div class="chips quick-chips" data-chips={quick.key} role="group" aria-label={quick.label}>
+      {quick.options.map((o) => (
+        <button type="button" class:list={['chip', { 'chip-update': o.tone === 'update' }]} data-chip={o.value}>
+          {o.label} <span data-chip-count>{o.count ?? ''}</span>
+        </button>
+      ))}
+    </div>
+  )}
+
   <div class="active-pills" data-pills hidden>
-    {groups.flatMap((g) => g.options.filter((o) => o.value).map((o) => (
+    {groups.filter((g) => g !== quick).flatMap((g) => g.options.filter((o) => o.value).map((o) => (
       <button type="button" class="pill" data-pill={g.key} data-pill-value={o.value} hidden>{o.label} <span aria-hidden="true">✕</span></button>
     )))}
     {selects.flatMap((s) => s.options.filter((o) => o.value).map((o) => (

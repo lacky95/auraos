@@ -61,7 +61,7 @@ function init(): void {
     // Phones / iPads / narrow windows start in the dense list; desktop in the
     // list's own default. A choice the user made wins either way.
     view: url.searchParams.get('view') ?? store(`${key}.view`)
-      ?? (window.matchMedia('(max-width: 1099px), (pointer: coarse)').matches ? 'list' : (root.dataset.defaultView || 'grid')),
+      ?? (window.matchMedia('(max-width: 819px)').matches ? 'list' : (root.dataset.defaultView || 'grid')),
   };
   // Older links: /?category=x
   const legacyCat = url.searchParams.get('category');
