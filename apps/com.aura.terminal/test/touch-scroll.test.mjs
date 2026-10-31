@@ -180,3 +180,87 @@ test('a drag keeps scrolling after its start element is re-rendered away (detach
   span.dispatchEvent(ev('touchmove', [800]));                   // gesture over: listeners removed
   assert.equal(scrolled.reduce((a, b) => a + b, 0), -10);
 });
+
+// ── long-press hook ──────────────────────────────────────────────────────
+
+function setupPress({ claim = true, tapResult = false } = {}) {
+  const container = new EventTarget();
+  const scrolled = [];
+  const calls = [];
+  let t = 0;
+  let timer = null;
+  attachTouchScroll(container, { scrollLines: (n) => scrolled.push(n), modes: { mouseTrackingMode: 'none' } }, {
+    rowHeight: () => ROW,
+    now: () => t,
+    raf: () => 1,
+    caf: () => {},
+    setTimer: (cb, ms) => { timer = { cb, ms }; return timer; },
+    clearTimer: (h) => { if (timer === h) timer = null; },
+    longPress: {
+      start: (x, y) => { calls.push(['start', x, y]); return claim; },
+      move: (x, y) => calls.push(['move', x, y]),
+      end: () => calls.push(['end']),
+      tap: (x, y) => { calls.push(['tap', x, y]); return tapResult; },
+    },
+  });
+  const send = (type, ys, dt = 16, changed = 1) => { t += dt; const e = touch(type, ys, changed); container.dispatchEvent(e); return e; };
+  const fire = () => { const f = timer; timer = null; f?.cb(); };
+  return { send, fire, calls, scrolled, armed: () => timer !== null, timerMs: () => timer?.ms };
+}
+
+test('holding one finger still hands the gesture to longPress — no scrolling', () => {
+  const s = setupPress();
+  s.send('touchstart', [500]);
+  assert.ok(s.armed());
+  s.send('touchmove', [504]);                    // within slop: still a press candidate
+  s.fire();
+  assert.deepEqual(s.calls[0], ['start', 100, 504]);
+  for (let y = 520; y <= 700; y += 20) s.send('touchmove', [y]);
+  const end = s.send('touchend', [], 5);
+  assert.equal(s.scrolled.length, 0, 'press moves never scroll');
+  assert.deepEqual(s.calls.at(-2), ['move', 100, 700]);
+  assert.deepEqual(s.calls.at(-1), ['end']);
+  assert.equal(end.defaultPrevented, true, 'no click after a press');
+});
+
+test('moving past the slop first is a plain scroll and never a press', () => {
+  const s = setupPress();
+  s.send('touchstart', [500]);
+  s.send('touchmove', [520]);
+  assert.equal(s.armed(), false);
+  for (let y = 540; y <= 600; y += 20) s.send('touchmove', [y]);
+  s.send('touchend', [], 500);
+  assert.equal(s.calls.length, 0);
+  assert.equal(s.scrolled.reduce((a, b) => a + b, 0), -5);
+});
+
+test('a second finger cancels the long-press', () => {
+  const s = setupPress();
+  s.send('touchstart', [500]);
+  s.send('touchstart', [500, 540]);
+  assert.equal(s.armed(), false);
+});
+
+test('a declined long-press leaves the gesture scrolling', () => {
+  const s = setupPress({ claim: false });
+  s.send('touchstart', [500]);
+  s.fire();
+  for (let y = 520; y <= 600; y += 20) s.send('touchmove', [y]);
+  const end = s.send('touchend', [], 500);
+  assert.equal(s.scrolled.reduce((a, b) => a + b, 0), -5);
+  assert.equal(end.defaultPrevented, false);
+  assert.ok(!s.calls.some((c) => c[0] === 'tap'), 'a long hold is not a tap');
+});
+
+test('a short motionless touch is offered as a tap; true swallows its click', () => {
+  const swallow = setupPress({ tapResult: true });
+  swallow.send('touchstart', [300]);
+  const e1 = swallow.send('touchend', [], 80);
+  assert.deepEqual(swallow.calls, [['tap', 100, 300]]);
+  assert.equal(e1.defaultPrevented, true);
+
+  const pass = setupPress({ tapResult: false });
+  pass.send('touchstart', [300]);
+  const e2 = pass.send('touchend', [], 80);
+  assert.equal(e2.defaultPrevented, false, 'a normal tap still clicks');
+});

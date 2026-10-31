@@ -24,10 +24,26 @@
 // mouse events. Mouse and real wheel events are not touched. The container
 // should also carry `touch-action: none` so iOS never starts a native pan whose
 // touchmoves would arrive uncancelable.
+//
+// Optional long-press (`longPress`): one finger held still for LONG_PRESS_MS
+// hands the rest of that gesture to the hook (text selection, touch-select.ts)
+// instead of scrolling — its moves never scroll and its touchend is cancelled
+// so no click reaches the program. A finger that moves past PRESS_SLOP_PX
+// first is a plain scroll, exactly as without the hook. A short motionless
+// touch is offered to `tap`; returning true cancels its click.
 
 export interface TouchScrollTerminal {
   scrollLines(amount: number): void;
   readonly modes: { readonly mouseTrackingMode: string };
+}
+
+export interface TouchLongPress {
+  /** Long-press fired at a point. Return true to take over the gesture. */
+  start(clientX: number, clientY: number): boolean;
+  move(clientX: number, clientY: number): void;
+  end(): void;
+  /** A short motionless one-finger touch. Return true to swallow its click. */
+  tap?(clientX: number, clientY: number): boolean;
 }
 
 export interface TouchScrollOptions {
@@ -36,8 +52,11 @@ export interface TouchScrollOptions {
   /** Scroll the program by `rows` wheel notches (positive = down) at a point —
    *  used while it has mouse tracking on. Without it, scrollLines is used. */
   wheel?: (rows: number, clientX: number, clientY: number) => void;
-  /** Clock + frame scheduler — injectable for tests. */
+  longPress?: TouchLongPress;
+  /** Clock + frame scheduler + timers — injectable for tests. */
   now?: () => number;
+  setTimer?: (cb: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
   raf?: (cb: () => void) => unknown;
   caf?: (handle: unknown) => void;
 }
@@ -52,6 +71,10 @@ const VELOCITY_WINDOW_MS = 100;
 // A flick that interrupts a coast and lands within this long adds the coast's
 // speed to its own (same direction only), so repeated flicks accelerate.
 const BOOST_WINDOW_MS = 400;
+// Long-press: how long one finger must rest, and how far it may drift (total
+// distance from where it landed) before the touch counts as a scroll.
+const LONG_PRESS_MS = 450;
+const PRESS_SLOP_PX = 10;
 
 type Pt = { clientX?: number; clientY: number };
 
@@ -69,6 +92,9 @@ export function attachTouchScroll(
   const now = opts.now ?? (() => performance.now());
   const raf = opts.raf ?? ((cb) => requestAnimationFrame(cb));
   const caf = opts.caf ?? ((h) => cancelAnimationFrame(h as number));
+  const setTimer = opts.setTimer ?? ((cb, ms) => setTimeout(cb, ms));
+  const clearTimer = opts.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
+  const lp = opts.longPress;
 
   let active = false;
   let lastX = 0;
@@ -79,6 +105,15 @@ export function attachTouchScroll(
   let flingV = 0;                      // current coast speed, px/ms
   let boostV = 0;                      // speed of the coast this gesture interrupted
   let gestureStart = 0;
+  let pressing = false;                // the long-press hook owns this gesture
+  let pressTimer: unknown = null;
+  let still = false;                   // one finger, not yet past PRESS_SLOP_PX
+  let downX = 0;
+  let downY = 0;
+
+  function disarm() {
+    if (pressTimer !== null) { clearTimer(pressTimer); pressTimer = null; }
+  }
 
   // Positive dy = finger moved up = scroll toward newer output (down).
   function scrollBy(dy: number) {
@@ -127,10 +162,24 @@ export function attachTouchScroll(
       samples = [];
       boostV = coasting;
       gestureStart = now();
+      pressing = false;
     }
     active = true;
     lastX = avg(e.touches, 'clientX');
     lastY = avg(e.touches, 'clientY');
+    disarm();
+    // A second finger (or a touch that stopped a coast) is never a press.
+    still = !!lp && fresh && e.touches.length === 1 && !coasting;
+    if (still) {
+      downX = lastX;
+      downY = lastY;
+      pressTimer = setTimer(() => {
+        pressTimer = null;
+        if (!active || !still) return;
+        still = false;
+        if (lp!.start(lastX, lastY)) { pressing = true; carry = 0; samples = []; }
+      }, LONG_PRESS_MS);
+    }
   }
 
   function onMove(e: TouchEvent) {
@@ -138,7 +187,12 @@ export function attachTouchScroll(
     e.stopPropagation();
     if (e.cancelable) e.preventDefault();  // no page pan / pinch-zoom under the terminal
     lastX = avg(e.touches, 'clientX');
+    if (pressing) { lastY = avg(e.touches, 'clientY'); lp!.move(lastX, lastY); return; }
     const y = avg(e.touches, 'clientY');
+    if (still && (e.touches.length !== 1 || Math.hypot(lastX - downX, y - downY) > PRESS_SLOP_PX)) {
+      still = false;
+      disarm();
+    }
     const dy = lastY - y;
     lastY = y;
     if (dy === 0) return;
@@ -154,10 +208,20 @@ export function attachTouchScroll(
     if (e.touches.length > 0) {
       lastX = avg(e.touches, 'clientX');
       lastY = avg(e.touches, 'clientY');
+      if (!pressing) { still = false; disarm(); }
       return;
     }
     active = false;
+    disarm();
+    if (pressing) {
+      pressing = false;
+      if (e.cancelable) e.preventDefault();  // no click / focus after a press
+      lp!.end();
+      return;
+    }
     if (e.type === 'touchcancel') return;
+    if (still && lp?.tap && lp.tap(lastX, lastY) && e.cancelable) e.preventDefault();
+    still = false;
     const t = now();
     const recent = samples.filter((s) => t - s.t <= VELOCITY_WINDOW_MS);
     samples = [];
@@ -218,6 +282,7 @@ export function attachTouchScroll(
   container.addEventListener('touchcancel', end, cap);
   return () => {
     stopFling();
+    disarm();
     untrack();
     container.removeEventListener('touchstart', start, cap);
     container.removeEventListener('touchmove', move, cap);

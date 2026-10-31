@@ -83,6 +83,9 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
        rubber-band, so iOS never sends the uncancelable touchmoves that let
        the viewport pan by pixels and snap back row by row. */
     #terminal { touch-action: none; overscroll-behavior: none; }
+    /* Long-press selects through touch-select.ts — never the browser's own
+       callout / text selection over xterm's DOM rows. */
+    #terminal { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
     .xterm { height: 100%; }
     .xterm-viewport { background: var(--aura-color-bg) !important; }
     /* xterm flips `.xterm-screen` to `cursor: crosshair` whenever Alt is
@@ -275,6 +278,23 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
   </aside>
 
 
+  <!-- Touch selection (touch-select.ts): the two drag handles and the
+       Copy/Paste bar shown after a long-press selection. Outside #terminal so
+       touch-scroll's capture listeners never see their touches; inline styles
+       for the same reason as the lock panel above. Each handle is a 32px hit
+       area whose top-centre sits on the selection's bottom corner. -->
+  <div id="sel-handle-start" data-handle="start" aria-hidden="true"
+       style="display:none;position:fixed;z-index:45;width:32px;height:32px;margin-left:-16px;touch-action:none;-webkit-user-select:none;user-select:none;"><span style="position:absolute;left:9px;top:2px;width:14px;height:14px;border-radius:50%;background:var(--aura-color-primary,#00ff41);box-shadow:0 0 0 1px var(--aura-color-bg,#0a0a0a);"></span></div>
+  <div id="sel-handle-end" data-handle="end" aria-hidden="true"
+       style="display:none;position:fixed;z-index:45;width:32px;height:32px;margin-left:-16px;touch-action:none;-webkit-user-select:none;user-select:none;"><span style="position:absolute;left:9px;top:2px;width:14px;height:14px;border-radius:50%;background:var(--aura-color-primary,#00ff41);box-shadow:0 0 0 1px var(--aura-color-bg,#0a0a0a);"></span></div>
+  <div id="sel-bar" role="toolbar" aria-label="Selection"
+       style="display:none;position:fixed;z-index:46;align-items:stretch;border:1px solid var(--aura-color-primary,#00ff41);background:var(--aura-color-surface,#0f0f0f);box-shadow:0 6px 20px rgba(0,0,0,0.5);touch-action:none;-webkit-user-select:none;user-select:none;white-space:nowrap;">
+    <button type="button" data-sel="copy" style="appearance:none;-webkit-appearance:none;box-sizing:border-box;min-height:34px;padding:0 12px;border:0;border-right:1px solid var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:transparent;color:var(--aura-color-primary,#00ff41);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.68rem;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;outline:none;">Copy</button>
+    <button type="button" data-sel="paste" style="appearance:none;-webkit-appearance:none;box-sizing:border-box;min-height:34px;padding:0 12px;border:0;border-right:1px solid var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:transparent;color:var(--aura-color-primary,#00ff41);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.68rem;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;outline:none;">Paste</button>
+    <button type="button" data-sel="all" style="appearance:none;-webkit-appearance:none;box-sizing:border-box;min-height:34px;padding:0 12px;border:0;border-right:1px solid var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:transparent;color:var(--aura-color-primary,#00ff41);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.68rem;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;outline:none;">All</button>
+    <button type="button" data-sel="close" aria-label="Clear selection" style="appearance:none;-webkit-appearance:none;box-sizing:border-box;min-height:34px;padding:0 12px;border:0;border-right:1px solid var(--aura-color-border,rgba(0,255,65,0.2));border-radius:0;background:transparent;color:var(--aura-color-primary,#00ff41);font-family:var(--aura-font-mono,'Courier New',monospace);font-size:0.68rem;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;outline:none;border-right:0;color:var(--aura-color-text-dim,#557755);">✕</button>
+  </div>
+
   <!-- Review-before-insert dialog (input-dialog.ts). Opened by the MCP's
        type_text; the agent can also edit / insert / copy / close it. Inline
        styles for the same reason as the lock panel above. -->
@@ -310,6 +330,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     import '@xterm/xterm/css/xterm.css';
     import { createLaunchGate } from '../launch-gate';
     import { attachTouchScroll } from '../touch-scroll';
+    import { attachTouchSelect } from '../touch-select';
     import { pickNextSession } from '../next-session';
 
     // Startup timeline for the desktop's boot report (shell lib/bootTimeline:
@@ -544,8 +565,141 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     for (const el of [term.element, term.element?.querySelector('.xterm-viewport')]) {
       if (el) { el.style.touchAction = 'none'; el.style.overscrollBehavior = 'none'; }
     }
+    // Long-press selects a word, dragging on extends it; on lift the handles +
+    // Copy/Paste bar appear (see touch-select.ts and the #sel-* elements).
+    const touchSelect = attachTouchSelect(term, {
+      screen: () => term.element?.querySelector('.xterm-screen')?.getBoundingClientRect() ?? null,
+      cell: () => ({ w: cellW || 8.4, h: cellH || 17 }),
+      onChange: () => scheduleSelLayout(),
+      vibrate: (ms) => { try { navigator.vibrate?.(ms); } catch { /* unsupported */ } },
+      clipboard: navigator.clipboard ?? null,
+      fallbackCopy: (text) => {
+        // Non-secure origin / no clipboard permission: the old execCommand way.
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none;';
+        document.body.appendChild(ta);
+        ta.select();
+        ta.setSelectionRange(0, text.length);
+        let ok = false;
+        try { ok = document.execCommand('copy'); } catch { /* unsupported */ }
+        ta.remove();
+        return ok;
+      },
+    });
+    const selBar = document.getElementById('sel-bar');
+    const selHandles = {
+      start: document.getElementById('sel-handle-start'),
+      end: document.getElementById('sel-handle-end'),
+    };
+    let selLayoutQueued = false;
+    let selDragging = false;
+    function scheduleSelLayout() {
+      if (selLayoutQueued) return;
+      selLayoutQueued = true;
+      requestAnimationFrame(() => { selLayoutQueued = false; layoutSel(); });
+    }
+    function layoutSel() {
+      const l = touchSelect.isActive() ? touchSelect.layout() : null;
+      for (const which of ['start', 'end'] as const) {
+        const el = selHandles[which];
+        const p = l?.[which];
+        if (!el) continue;
+        if (!p?.visible) { el.style.display = 'none'; continue; }
+        el.style.display = 'block';
+        el.style.left = p.x + 'px';
+        el.style.top = p.y + 'px';
+      }
+      if (!selBar) return;
+      // The bar hides while a handle is dragged so it never sits under the finger.
+      if (!l || selDragging) { selBar.style.display = 'none'; return; }
+      selBar.style.display = 'flex';
+      const bw = selBar.offsetWidth, bh = selBar.offsetHeight;
+      const vw = window.innerWidth, vh = window.innerHeight;
+      // Above the selection; below it (past the handles) when there is no room.
+      let top = l.top - bh - 8;
+      if (top < 4) top = Math.min(vh - bh - 4, l.bottom + 36);
+      const mid = l.start.visible && l.end.visible ? (l.start.x + l.end.x) / 2 : vw / 2;
+      selBar.style.top = Math.max(4, top) + 'px';
+      selBar.style.left = Math.min(vw - bw - 4, Math.max(4, mid - bw / 2)) + 'px';
+    }
+    term.onRender(() => { if (touchSelect.isActive()) scheduleSelLayout(); });
+    term.onScroll(() => { if (touchSelect.isActive()) scheduleSelLayout(); });
+    term.onSelectionChange(() => { touchSelect.selectionChanged(); if (touchSelect.isActive()) scheduleSelLayout(); });
+    window.addEventListener('resize', () => { if (touchSelect.isActive()) scheduleSelLayout(); });
+
+    // Handle drags. The finger sits on the knob below the text, so the point
+    // that moves the selection is offset back onto the selected row: the
+    // offset is taken at pointerdown so the handle doesn't jump.
+    for (const which of ['start', 'end'] as const) {
+      const el = selHandles[which];
+      if (!el) continue;
+      let offX = 0, offY = 0;
+      el.addEventListener('pointerdown', (e) => {
+        const l = touchSelect.layout();
+        if (!l) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const w = cellW || 8.4, h = cellH || 17;
+        const p = l[which];
+        offX = e.clientX - (which === 'start' ? p.x + w / 2 : p.x - w / 2);
+        offY = e.clientY - (p.y - h / 2);
+        try { el.setPointerCapture(e.pointerId); } catch { /* already gone */ }
+        selDragging = true;
+        touchSelect.beginHandle(which);
+        scheduleSelLayout();
+      });
+      el.addEventListener('pointermove', (e) => {
+        if (!selDragging) return;
+        e.preventDefault();
+        touchSelect.moveHandle(e.clientX - offX, e.clientY - offY);
+      });
+      const up = (e: PointerEvent) => {
+        if (!selDragging) return;
+        selDragging = false;
+        try { el.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+        touchSelect.endHandle();
+        scheduleSelLayout();
+      };
+      el.addEventListener('pointerup', up);
+      el.addEventListener('pointercancel', up);
+    }
+
+    function flashSelBar(text: string, then?: () => void) {
+      const btn = selBar?.querySelector('[data-sel="copy"]') as HTMLElement | null;
+      if (!btn) { then?.(); return; }
+      btn.textContent = text;
+      setTimeout(() => { btn.textContent = 'Copy'; then?.(); }, 700);
+    }
+    selBar?.addEventListener('pointerdown', (e) => e.preventDefault());  // keep focus where it is
+    selBar?.addEventListener('click', async (e) => {
+      const act = (e.target as HTMLElement | null)?.closest?.('[data-sel]')?.getAttribute('data-sel');
+      if (act === 'copy') {
+        if (await touchSelect.copy()) flashSelBar('Copied', () => touchSelect.clear());
+        else flashSelBar('No access');
+      } else if (act === 'paste') {
+        if (await touchSelect.paste()) touchSelect.clear();
+        else flashSelBar('No access');
+      } else if (act === 'all') {
+        touchSelect.selectAll();
+      } else if (act === 'close') {
+        touchSelect.clear();
+      }
+    });
+
+    // Android fires contextmenu on a long-press; xterm would move its textarea
+    // under the finger for a paste menu. Touch selection owns long-press, so a
+    // contextmenu that follows a touch is dropped (mouse right-click still works).
+    let lastTouchAt = -Infinity;
+    document.addEventListener('touchstart', () => { lastTouchAt = performance.now(); }, { capture: true, passive: true });
+    document.getElementById('terminal')?.addEventListener('contextmenu', (e) => {
+      if (performance.now() - lastTouchAt < 1500) { e.preventDefault(); e.stopPropagation(); }
+    }, { capture: true });
+
     attachTouchScroll(document.getElementById('terminal'), term, {
       rowHeight: () => cellH || 17,
+      longPress: touchSelect.hook,
       wheel: (rows, clientX, clientY) => {
         const el = term.element?.querySelector('.xterm-screen') ?? term.element;
         if (!el) return;
