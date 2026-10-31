@@ -98,9 +98,9 @@ server.listen(port, host, () => {
 });
 
 if (process.env.AURA_SHELL_WATCH === '1') {
-  const { startWatchRebuild, cleanGenerations } = await import('./server/watchRebuild.mjs');
+  const { startWatchRebuild, cleanGenerations, sourcesNewerThan } = await import('./server/watchRebuild.mjs');
   cleanGenerations(here);
-  startWatchRebuild({
+  const watcher = startWatchRebuild({
     shellDir: here,
     swap: async (outDir) => {
       const next = await loadBuild(outDir);
@@ -108,6 +108,15 @@ if (process.env.AURA_SHELL_WATCH === '1') {
       current = next;
     },
   });
+  // A restart drops the watched generations and boot does not rebuild on a
+  // plain restart, so edits saved since the boot build would vanish from the
+  // desktop. Catch up right away: serve the boot build now, swap in a fresh
+  // one as soon as it is ready.
+  const stale = sourcesNewerThan(here, join(current.outDir, 'server', 'entry.mjs'));
+  if (stale) {
+    console.log(`[shell-watch] sources changed since the served build (${stale}) — rebuilding`);
+    void watcher.rebuild();
+  }
 }
 
 // Save the desktop before going down (lib/desktopSession.ts): a docker stop or

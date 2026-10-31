@@ -21,7 +21,7 @@
  * In dev mode (`astro dev`) none of this runs: Vite's HMR does the job.
  */
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync, rmSync, watch } from 'node:fs';
+import { existsSync, readdirSync, rmSync, statSync, watch } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 
 const DEBOUNCE_MS = Number(process.env.AURA_SHELL_WATCH_DEBOUNCE_MS ?? 800);
@@ -40,6 +40,27 @@ export function watchedDirs(shellDir) {
     join(pkgs, 'kv-store', 'src'),
     join(pkgs, 'app-sdk', 'src'),
   ].filter((d) => existsSync(d));
+}
+
+/**
+ * First watched source file (repo-relative) modified after `builtFile`, or
+ * null when the build is current (or `builtFile` is missing — boot builds then).
+ */
+export function sourcesNewerThan(shellDir, builtFile) {
+  let since;
+  try { since = statSync(builtFile).mtimeMs; } catch { return null; }
+  const repoRoot = resolve(shellDir, '..', '..');
+  const walk = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (IGNORE.test(p)) continue;
+      if (e.isDirectory()) { const hit = walk(p); if (hit) return hit; }
+      else if (e.isFile() && statSync(p).mtimeMs > since) return relative(repoRoot, p);
+    }
+    return null;
+  };
+  for (const dir of watchedDirs(shellDir)) { const hit = walk(dir); if (hit) return hit; }
+  return null;
 }
 
 /** Output directory of generation `n` (0 = the boot build, dist-prod/ — see os/boot.sh). */
