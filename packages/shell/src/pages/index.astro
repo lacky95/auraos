@@ -3990,6 +3990,10 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     border-bottom: var(--aura-border);
     flex-shrink: 0;
     gap: 8px;
+    /* Touch: without this, mobile browsers (Android Chrome) claim a touch
+       drag on the title bar as a page pan and fire pointercancel, so the
+       window-drag ghost never appears. Buttons inside still get taps. */
+    touch-action: none;
     /* min-width:0 so the title can actually shrink past its intrinsic
        width inside this flex container. Without it, long breadcrumb
        trails would force the slot wider than its grid cell. */
