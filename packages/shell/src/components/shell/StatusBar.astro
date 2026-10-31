@@ -770,6 +770,13 @@ let initialTimeZone: string = '';
   window.addEventListener(WINDOW_DRAG_EVENT, (e) => {
     if (!bundleEl) return;
     const active = (e as CustomEvent<{ active: boolean }>).detail?.active === true;
+    dragBrowse = active;
+    if (!active) {
+      // Drag over: stop any arrow scrolling and page back to the active pill.
+      stopDragNav();
+      const state = workspaceClient.getCached();
+      if (state) renderPills(state);
+    }
     if (active) {
       if (bundleEl.dataset['fold'] !== 'all') return;
       pickAnchor();
@@ -780,6 +787,59 @@ let initialTimeZone: string = '';
       bundleEl.dataset['open'] = 'false';
       collapseBtn?.setAttribute('aria-expanded', 'false');
     }
+  });
+
+  // Dragging a window onto ‹ / › pages through the workspaces: one step on
+  // entering the arrow, then — while it stays there — auto-repeat after a
+  // short pause, like holding a scroll arrow. Only the visible pill window
+  // moves (dragBrowse); the active workspace stays put until a drop.
+  const DRAG_NAV_DELAY_MS  = 600;
+  const DRAG_NAV_REPEAT_MS = 350;
+  let dragNavDelay:  ReturnType<typeof setTimeout>  | null = null;
+  let dragNavRepeat: ReturnType<typeof setInterval> | null = null;
+  let dragNavLeave:  ReturnType<typeof setTimeout>  | null = null;
+  function stopDragNav(): void {
+    if (dragNavDelay)  { clearTimeout(dragNavDelay);   dragNavDelay  = null; }
+    if (dragNavRepeat) { clearInterval(dragNavRepeat); dragNavRepeat = null; }
+    if (dragNavLeave)  { clearTimeout(dragNavLeave);   dragNavLeave  = null; }
+    dragNavHover = null;
+  }
+  function dragNavStep(dir: 'prev' | 'next'): void {
+    const state = workspaceClient.getCached();
+    if (!state) return;
+    const before = pillOffset;
+    pillOffset += dir === 'next' ? 1 : -1;
+    pillOffset = clampOffset(state.workspaces.length);
+    if (pillOffset === before) { stopDragNav(); renderPills(state); return; }  // reached the end
+    renderPills(state);
+  }
+  registerDropTarget({
+    id: 'workspace-nav',
+    resolve(el) {
+      const btn = el.closest<HTMLButtonElement>('.ws-pill-nav[data-ws-action]');
+      if (!btn || btn.disabled) return null;
+      return { el: btn, data: btn.dataset['wsAction'] };
+    },
+    enter(match) {
+      const dir = match.data as 'prev' | 'next';
+      // A step re-renders the pills, so the arrow under the pointer is a new
+      // element: leave(old) + enter(new) for the same arrow is not a re-entry.
+      if (dragNavLeave) { clearTimeout(dragNavLeave); dragNavLeave = null; }
+      if (dragNavHover === dir) return;
+      stopDragNav();
+      dragNavHover = dir;
+      dragNavStep(dir);
+      if (dragNavHover !== dir) return;  // already at the end
+      dragNavDelay = setTimeout(() => {
+        dragNavDelay = null;
+        dragNavRepeat = setInterval(() => dragNavStep(dir), DRAG_NAV_REPEAT_MS);
+      }, DRAG_NAV_DELAY_MS);
+    },
+    leave() {
+      if (dragNavLeave) clearTimeout(dragNavLeave);
+      dragNavLeave = setTimeout(() => { dragNavLeave = null; stopDragNav(); }, 0);
+    },
+    drop() { /* paging is the whole effect */ },
   });
 
   // Re-pick anchor if the viewport changes while the popover is open
@@ -847,6 +907,12 @@ let initialTimeZone: string = '';
   const MIN_PILL_WINDOW = 1;   // last resort before collapsing into the dropdown
   let pillWindow = MAX_PILL_WINDOW;
   let pillOffset = 0;
+  // During a window drag the ‹/› arrows page the visible pills (see the
+  // 'workspace-nav' drop target) instead of switching workspace, so the
+  // window doesn't snap back to the active pill and the arrows' disabled
+  // state follows the visible window rather than the active workspace.
+  let dragBrowse = false;
+  let dragNavHover: 'prev' | 'next' | null = null;
 
   // Debounced step: `<` / `>` clicks update the visually-selected pill
   // immediately so the user gets instant feedback, but defer the real
@@ -894,7 +960,7 @@ let initialTimeZone: string = '';
     // fires.
     const effectiveActiveId = pendingActiveId ?? state.activeWorkspaceId;
     const activeIdx = state.workspaces.findIndex((w) => w.id === effectiveActiveId);
-    if (paginated && activeIdx >= 0) {
+    if (paginated && activeIdx >= 0 && !dragBrowse) {
       if (activeIdx < pillOffset) pillOffset = activeIdx;
       else if (activeIdx >= pillOffset + pillWindow) pillOffset = activeIdx - pillWindow + 1;
     }
@@ -904,13 +970,15 @@ let initialTimeZone: string = '';
     const end   = paginated ? Math.min(total, pillOffset + pillWindow) : total;
 
     // Disable chevrons when at the absolute first / last workspace.
-    const atFirst = activeIdx <= 0;
-    const atLast  = activeIdx === -1 || activeIdx >= total - 1;
+    const atFirst = dragBrowse ? pillOffset <= 0 : activeIdx <= 0;
+    const atLast  = dragBrowse ? pillOffset + pillWindow >= total : (activeIdx === -1 || activeIdx >= total - 1);
+    // Re-rendered while a dragged window hovers an arrow: keep its highlight.
+    const navHover = (a: 'prev' | 'next') => dragNavHover === a ? 'data-drop-hover="true"' : '';
     const prev = paginated
-      ? `<button class="ws-pill ws-pill-nav" data-ws-action="prev" ${atFirst ? 'disabled' : ''} title="Previous workspace"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-chevron-left"/></svg></button>`
+      ? `<button class="ws-pill ws-pill-nav" data-ws-action="prev" ${atFirst ? 'disabled' : ''} ${navHover('prev')} title="Previous workspace"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-chevron-left"/></svg></button>`
       : '';
     const next = paginated
-      ? `<button class="ws-pill ws-pill-nav" data-ws-action="next" ${atLast ? 'disabled' : ''} title="Next workspace"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-chevron-right"/></svg></button>`
+      ? `<button class="ws-pill ws-pill-nav" data-ws-action="next" ${atLast ? 'disabled' : ''} ${navHover('next')} title="Next workspace"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-chevron-right"/></svg></button>`
       : '';
 
     const numbered = state.workspaces.slice(start, end).map((w, i) => {

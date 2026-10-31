@@ -51,6 +51,7 @@ export default function AuraKeyboard(): React.JSX.Element {
   const layoutId = useStore(st.$layout);
   const dockBehavior = useStore(st.$dockBehavior);
   const autoFit = useStore(st.$autoFit);
+  const deviceKb = useStore(st.$deviceKeyboard);
 
   const rootRef = React.useRef<HTMLDivElement>(null);
   const keysRef = React.useRef<HTMLDivElement>(null);
@@ -294,6 +295,16 @@ export default function AuraKeyboard(): React.JSX.Element {
             </button>
           ) : null}
         </span>
+
+        <button type="button" className="aura-kb-chip" onMouseDown={stop}
+          title={{
+            auto: "Device keyboard: hidden on touch devices (iPad, tablets). Click to always hide it.",
+            hide: "Device keyboard: always hidden. Click to always show it.",
+            show: "Device keyboard: always shown. Click for automatic.",
+          }[deviceKb]}
+          onClick={() => st.$deviceKeyboard.set(deviceKb === 'auto' ? 'hide' : deviceKb === 'hide' ? 'show' : 'auto')}>
+          <Icon name={deviceKb === 'show' ? 'smartphone' : 'keyboard-off'} />&nbsp;{deviceKb === 'auto' ? 'Auto' : deviceKb === 'hide' ? 'Hidden' : 'Shown'}
+        </button>
 
         <button type="button" className="aura-kb-icon" title="Close keyboard" aria-label="Close keyboard"
           onMouseDown={stop} onClick={() => st.$open.set(false)}><Icon name="x" /></button>

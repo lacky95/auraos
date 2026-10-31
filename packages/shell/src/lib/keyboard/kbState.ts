@@ -13,6 +13,8 @@ import { getKvValue, setKv, subscribeKv } from '../kvClient.ts';
 
 export type KbMode = 'docked' | 'floating' | 'activity';
 export type KbDockBehavior = 'push' | 'overlay';
+/** The device's own on-screen keyboard: hide on touch devices (auto), always, or never. */
+export type KbDeviceKeyboard = 'auto' | 'hide' | 'show';
 export interface KbRect { left: number; top: number; width: number; height: number }
 
 export interface KbState {
@@ -22,6 +24,7 @@ export interface KbState {
   $dockBehavior:   WritableAtom<KbDockBehavior>;
   $floatRect:      WritableAtom<KbRect | null>;
   $attachedViewId: WritableAtom<string | null>;
+  $deviceKeyboard: WritableAtom<KbDeviceKeyboard>;
   /** Swap a wide layout for `compact` when the keyboard is too narrow for it. */
   $autoFit:        WritableAtom<boolean>;
   /** True while the user drags/resizes; incoming KV updates for floatRect are ignored. */
@@ -43,6 +46,7 @@ function atoms(): KbState {
     $floatRect:      atom<KbRect | null>(null),
     $attachedViewId: atom<string | null>(null),
     $autoFit:        atom(true),
+    $deviceKeyboard: atom<KbDeviceKeyboard>('auto'),
     $dragging:       atom(false),
   };
 }
@@ -61,12 +65,13 @@ function create(): KbState {
     }
     else if (field === 'attachedViewId' && (typeof v === 'string' || v === null)) s.$attachedViewId.set(v);
     else if (field === 'autoFit' && typeof v === 'boolean') s.$autoFit.set(v);
+    else if (field === 'deviceKeyboard' && (v === 'auto' || v === 'hide' || v === 'show')) s.$deviceKeyboard.set(v);
   };
 
   // Hydrate, then write back on change (debounced). `hydrated` keeps the
   // initial defaults from overwriting stored values before the read lands.
   let hydrated = false;
-  const fields = ['mode', 'layout', 'dockBehavior', 'floatRect', 'attachedViewId', 'autoFit'] as const;
+  const fields = ['mode', 'layout', 'dockBehavior', 'floatRect', 'attachedViewId', 'autoFit', 'deviceKeyboard'] as const;
   void Promise.all(fields.map(async (f) => {
     try { const v = await getKvValue(NS, KEY(f)); if (v !== null) apply(f, v); } catch { /* KV down — defaults */ }
   })).finally(() => { hydrated = true; });
@@ -86,6 +91,7 @@ function create(): KbState {
   s.$dragging.listen((d) => { if (!d) saveRect(); });
   s.$attachedViewId.listen((v) => persist('attachedViewId', v));
   s.$autoFit.listen((v) => persist('autoFit', v));
+  s.$deviceKeyboard.listen((v) => persist('deviceKeyboard', v));
 
   // Cross-tab / cross-device sync.
   subscribeKv({ namespace: NS }, (ev) => {

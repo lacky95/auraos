@@ -192,3 +192,51 @@ test('nothing focused: keys go back to the field that had focus last', async () 
   await tap('k', 'KeyK');
   assert.equal(b.value, 'k');
 });
+
+// ── Device keyboard suppression (aura.keyboard.native) ──────────────────
+
+async function native(ctx: ReturnType<typeof setup>, hide: boolean) {
+  const self = ctx.win.eval('window') as unknown;
+  ctx.win.dispatchEvent(new ctx.win.MessageEvent('message', { data: { type: 'aura.keyboard.native', hide }, source: self as never }));
+  await new Promise((r) => setTimeout(r, 0));
+}
+
+test('hiding the device keyboard marks fields inputmode="none" and restores them', async () => {
+  const ctx = setup('<input id="a" type="text"><input id="n" type="text" inputmode="numeric"><input id="c" type="checkbox"><div id="e" contenteditable="true"></div>');
+  const $ = (id: string) => ctx.doc.getElementById(id)!;
+  await native(ctx, true);
+  assert.equal($('a').getAttribute('inputmode'), 'none');
+  assert.equal($('n').getAttribute('inputmode'), 'none');
+  assert.equal($('e').getAttribute('inputmode'), 'none');
+  assert.equal($('c').getAttribute('inputmode'), null);      // not a text field
+  await native(ctx, false);
+  assert.equal($('a').getAttribute('inputmode'), null);
+  assert.equal($('n').getAttribute('inputmode'), 'numeric'); // original kept
+  assert.equal($('a').hasAttribute('data-aura-im'), false);
+});
+
+test('fields added later are marked too, and typing still works', async () => {
+  const ctx = setup('<div id="host"></div>');
+  await native(ctx, true);
+  const t = ctx.doc.createElement('textarea');
+  ctx.doc.getElementById('host')!.appendChild(t);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(t.getAttribute('inputmode'), 'none');
+  (t as unknown as HTMLTextAreaElement).focus();
+  await ctx.tap('x', 'KeyX');
+  assert.equal((t as unknown as HTMLTextAreaElement).value, 'x');
+});
+
+test('focusing a field while hidden asks the shell for the AuraOS keyboard', async () => {
+  const ctx = setup('<input id="a" type="text">');
+  const asks: string[] = [];
+  ctx.win.addEventListener('message', (e) => { const d = (e as unknown as MessageEvent).data as { type?: string }; if (d?.type === 'aura.keyboard.fieldFocus') asks.push(d.type); });
+  (ctx.doc.getElementById('a') as unknown as HTMLInputElement).focus();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(asks.length, 0);                              // not hiding yet
+  (ctx.doc.getElementById('a') as unknown as HTMLInputElement).blur();
+  await native(ctx, true);
+  (ctx.doc.getElementById('a') as unknown as HTMLInputElement).focus();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(asks.length, 1);
+});

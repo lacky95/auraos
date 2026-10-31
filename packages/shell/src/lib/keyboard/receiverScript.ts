@@ -116,4 +116,29 @@ window.addEventListener('message',function(ev){
   if(isXterm(t))return;
   editKey(t,k,mods.shiftKey,mods.ctrlKey||mods.metaKey);
 });
+// ── Device keyboard suppression (aura.keyboard.native) ──────────────────
+// While on, every text field gets inputmode="none": it still takes focus,
+// a caret, hardware keys and our synthetic keys, but the device (iPad,
+// Android) does not pop up its own keyboard. The original inputmode is kept
+// in data-aura-im and restored when turned off. Fields are marked as they
+// appear (MutationObserver) and again on touch/pointer-down, before focus.
+var hideNative=false;
+var ED='input,textarea,[contenteditable]';
+function editable(el){if(!el||el.nodeType!==1)return false;if(el.isContentEditable)return true;if(el.tagName==='TEXTAREA')return true;if(el.tagName!=='INPUT')return false;return /^(text|search|email|url|tel|password|number|)$/i.test(el.type||'');}
+function mark(el){
+  if(!editable(el))return;
+  if(hideNative){if(!el.hasAttribute('data-aura-im'))el.setAttribute('data-aura-im',el.getAttribute('inputmode')||'');if(el.getAttribute('inputmode')!=='none')el.setAttribute('inputmode','none');}
+  else if(el.hasAttribute('data-aura-im')){var o=el.getAttribute('data-aura-im');if(o)el.setAttribute('inputmode',o);else el.removeAttribute('inputmode');el.removeAttribute('data-aura-im');}
+}
+function sweep(root){if(!root)return;if(root.nodeType===1)mark(root);if(root.querySelectorAll){var l=root.querySelectorAll(ED);for(var i=0;i<l.length;i++)mark(l[i]);}}
+try{new MutationObserver(function(ms){if(!hideNative)return;for(var i=0;i<ms.length;i++){var m=ms[i];if(m.type==='attributes')mark(m.target);else for(var j=0;j<m.addedNodes.length;j++)sweep(m.addedNodes[j]);}}).observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['contenteditable','type','inputmode']});}catch(_){}
+function early(e){if(hideNative){var t=e.composedPath?e.composedPath()[0]:e.target;mark(t);if(t&&t.closest){var c=t.closest(ED);if(c)mark(c);}}}
+document.addEventListener('touchstart',early,{capture:true,passive:true});
+document.addEventListener('pointerdown',early,true);
+// A tapped text field while the device keyboard is hidden: ask the shell to
+// show the AuraOS keyboard instead.
+document.addEventListener('focusin',function(e){var t=e.composedPath?e.composedPath()[0]:e.target;if(!hideNative||!editable(t))return;mark(t);try{window.parent.postMessage({type:'aura.keyboard.fieldFocus'},'*');}catch(_){}},true);
+window.addEventListener('message',function(ev){var d=ev.data;if(!d||d.type!=='aura.keyboard.native'||ev.source!==window.parent)return;var on=!!d.hide;if(on===hideNative)return;hideNative=on;sweep(document.documentElement);});
+// Ask the shell for the current setting (an app page loads after the shell).
+try{if(window.parent!==window)window.parent.postMessage({type:'aura.keyboard.hello'},'*');}catch(_){}
 }catch(_){}})();`;

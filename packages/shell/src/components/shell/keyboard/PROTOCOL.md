@@ -71,16 +71,37 @@ An app can post to `window.parent`:
 pins input to it. `layout` is one of the built-in ids (`full`, `qwerty`,
 `compact`, `navigation`, `shortcuts`, `terminal`, `editor`, `remote`).
 
+## Device keyboard (iPad, Android)
+
+The device's own on-screen keyboard is hidden with `inputmode="none"`: a
+field keeps focus, caret, hardware keys and virtual-keyboard input, but the
+device doesn't pop up its keyboard.
+
+- Setting `os/virtual-keyboard/deviceKeyboard`: `auto` (default — hide on
+  touch devices, detected by `navigator.maxTouchPoints > 1` or a coarse
+  pointer), `hide` (always), `show` (never). Toggled from the keyboard header.
+- Shell → page: `{ type: 'aura.keyboard.native', hide: boolean }`, sent to
+  the shell window and every iframe whenever the setting changes. Accepted
+  only from `window.parent`.
+- Page → shell: `{ type: 'aura.keyboard.hello' }` on load (the shell answers
+  with the current `aura.keyboard.native`), and
+  `{ type: 'aura.keyboard.fieldFocus' }` when a text field gets focus while
+  hiding is on — the shell then opens the AuraOS keyboard.
+- The receiver marks fields as they appear and again on touch/pointer-down,
+  keeps the original `inputmode` in `data-aura-im`, and restores it when
+  hiding is turned off. Fields inside closed shadow roots or nested iframes
+  of an app are not covered.
+
 ## Agents (shell MCP UI commands)
 
-- `openKeyboard { layout?, mode?: 'docked'|'floating', dockBehavior?: 'push'|'overlay' }`
+- `openKeyboard { layout?, mode?: 'docked'|'floating', dockBehavior?: 'push'|'overlay', deviceKeyboard?: 'auto'|'hide'|'show' }`
 - `closeKeyboard`
 - `sendKey { key, ctrl?, alt?, shift?, meta? }` or `sendKey { text }`
 - snapshot part `keyboard`: open state, mode, layout, current target.
 
 ## State (OS KV `os/virtual-keyboard/*`)
 
-`mode`, `layout`, `dockBehavior`, `floatRect`, `attachedViewId`, `autoFit`,
+`mode`, `layout`, `dockBehavior`, `floatRect`, `attachedViewId`, `autoFit`, `deviceKeyboard`,
 and an optional user `customLayout` (`{ default: string[], shift?: string[] }`
 in simple-keyboard format). The open flag is not stored: the keyboard
 starts closed on every load.

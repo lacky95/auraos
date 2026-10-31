@@ -297,18 +297,56 @@ import { SYNTHETIC_RECEIVER_JS } from '../../../lib/keyboard/receiverScript.ts';
     watchLock((locked) => { if (locked) st.$open.set(false); });
     const vv = window.visualViewport;
     vv?.addEventListener('resize', () => {
-      if (!st.$open.get() || Math.abs((vv.scale ?? 1) - 1) > 0.01) return;
+      if (!st.$open.get() || hidingNative() || Math.abs((vv.scale ?? 1) - 1) > 0.01) return;
       if (vv.height < window.innerHeight - 80 && matchMedia('(pointer: coarse)').matches) st.$open.set(false);
+    });
+
+    // ── Device keyboard (iPad / Android on-screen keyboard) ──────────
+    // 'auto' hides it on touch devices (iPadOS reports a desktop UA, so use
+    // maxTouchPoints), 'hide' always, 'show' never. The receiver in every
+    // page (receiverScript.ts) marks text fields inputmode="none" while on.
+    const touchDevice = () => (navigator.maxTouchPoints ?? 0) > 1 || matchMedia('(pointer: coarse)').matches;
+    function hidingNative(): boolean {
+      const m = st.$deviceKeyboard.get();
+      return m === 'hide' || (m === 'auto' && touchDevice());
+    }
+    const nativeMsg = () => ({ type: 'aura.keyboard.native', hide: hidingNative() });
+    function broadcastNative(): void {
+      const msg = nativeMsg();
+      try { window.postMessage(msg, location.origin); } catch { /* shell itself */ }
+      for (const f of document.querySelectorAll('iframe')) {
+        try { f.contentWindow?.postMessage(msg, '*'); } catch { /* gone */ }
+      }
+    }
+    st.$deviceKeyboard.listen(broadcastNative);
+    broadcastNative();
+
+    function senderFrame(source: MessageEventSource | null): HTMLIFrameElement | null {
+      for (const f of document.querySelectorAll<HTMLIFrameElement>('.app-slot iframe, #focus-frame')) {
+        if (f.contentWindow === source) return f;
+      }
+      return null;
+    }
+    window.addEventListener('message', (ev) => {
+      const t = (ev.data as { type?: string } | null)?.type;
+      // A page (re)loaded and asks for the current setting.
+      if (t === 'aura.keyboard.hello') {
+        try { (ev.source as Window | null)?.postMessage(nativeMsg(), '*'); } catch { /* gone */ }
+        return;
+      }
+      // A text field was tapped while the device keyboard is hidden: show ours.
+      if (t === 'aura.keyboard.fieldFocus') {
+        if (ev.source !== window && !senderFrame(ev.source)) return;
+        if (!hidingNative() || st.$open.get() || document.getElementById('lockscreen')?.getAttribute('aria-hidden') === 'false') return;
+        st.$open.set(true);
+      }
     });
 
     // ── Apps asking for the keyboard (only ever their own window) ────
     window.addEventListener('message', (ev) => {
       const d = ev.data as { type?: string; attach?: boolean; layout?: string } | null;
       if (!d || (d.type !== 'aura.keyboard.open' && d.type !== 'aura.keyboard.close')) return;
-      let frame: HTMLIFrameElement | null = null;
-      for (const f of document.querySelectorAll<HTMLIFrameElement>('.app-slot iframe, #focus-frame')) {
-        if (f.contentWindow === ev.source) { frame = f; break; }
-      }
+      const frame = senderFrame(ev.source);
       if (!frame) return;
       if (d.type === 'aura.keyboard.close') { st.$open.set(false); return; }
       if (typeof d.layout === 'string' && LAYOUTS.some((l) => l.id === d.layout)) st.$layout.set(d.layout);
@@ -321,11 +359,13 @@ import { SYNTHETIC_RECEIVER_JS } from '../../../lib/keyboard/receiverScript.ts';
     const snapshot = () => ({
       open: st.$open.get(), mode: st.$mode.get(), layout: st.$layout.get(),
       dockBehavior: st.$dockBehavior.get(), attachedViewId: st.$attachedViewId.get(),
+      deviceKeyboard: st.$deviceKeyboard.get(), deviceKeyboardHidden: hidingNative(),
       target: (() => { const t = im.resolveTarget(); return t ? { kind: t.kind, label: t.label } : null; })(),
       layouts: LAYOUTS.map((l) => l.id),
     });
     registerSnapshotPart('keyboard', snapshot);
-    registerUiCommand('openKeyboard', ({ layout, mode, dockBehavior }) => {
+    registerUiCommand('openKeyboard', ({ layout, mode, dockBehavior, deviceKeyboard }) => {
+      if (deviceKeyboard === 'auto' || deviceKeyboard === 'hide' || deviceKeyboard === 'show') st.$deviceKeyboard.set(deviceKeyboard);
       if (typeof layout === 'string' && LAYOUTS.some((l) => l.id === layout)) st.$layout.set(layout);
       if (mode === 'docked' || mode === 'floating') st.$mode.set(mode);
       if (dockBehavior === 'push' || dockBehavior === 'overlay') st.$dockBehavior.set(dockBehavior);
