@@ -5,7 +5,7 @@ import { dirname } from 'node:path';
 const LOG_FILE = process.env['AURA_CONSOLE_LOG'] ?? '/data/console.log';
 const MAX_TAIL_ENTRIES = 500;
 
-interface LogEntry {
+export interface LogEntry {
   type: string;
   level: string;
   timestamp: number;
@@ -13,7 +13,7 @@ interface LogEntry {
   args: string[];
 }
 
-function isLogEntry(x: unknown): x is LogEntry {
+export function isLogEntry(x: unknown): x is LogEntry {
   if (!x || typeof x !== 'object') return false;
   const o = x as Record<string, unknown>;
   return (
@@ -25,13 +25,20 @@ function isLogEntry(x: unknown): x is LogEntry {
   );
 }
 
-let wss: WebSocketServer | null = null;
-const clients = new Set<WebSocket>();
+// Module state lives on globalThis: an in-process Astro restart (any edit to
+// a config) loads this module a second time, and the MCP route (src/mcp/logs.ts)
+// may be served by a different module instance than the one the /ws upgrade
+// hook holds. One shared state means `onLogEntry` always sees the live feed.
+type State = { wss: WebSocketServer | null; clients: Set<WebSocket>; listeners: Set<(e: LogEntry) => void> };
+const KEY = Symbol.for('aura.console.logServer');
+const g = globalThis as unknown as Record<symbol, State | undefined>;
+const state: State = g[KEY] ??= { wss: null, clients: new Set(), listeners: new Set() };
 
 export function getLogWss(): WebSocketServer {
-  if (wss) return wss;
+  if (state.wss) return state.wss;
   mkdirSync(dirname(LOG_FILE), { recursive: true });
-  wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true });
+  const { clients } = state;
 
   wss.on('connection', (ws) => {
     clients.add(ws);
@@ -45,14 +52,30 @@ export function getLogWss(): WebSocketServer {
             try { c.send(JSON.stringify(parsed)); } catch { /* ignore */ }
           }
         }
+        emitLogEntry(parsed);
       } catch { /* malformed payload — silently drop */ }
     });
     ws.on('close', () => { clients.delete(ws); });
     ws.on('error', () => { clients.delete(ws); });
   });
 
+  state.wss = wss;
   console.log(`[console] log WebSocket ready (file=${LOG_FILE})`);
   return wss;
+}
+
+/** Subscribe to entries as they arrive (the MCP's wait_for_log). Returns the
+ *  unsubscribe function. Listeners never see history. */
+export function onLogEntry(cb: (e: LogEntry) => void): () => void {
+  state.listeners.add(cb);
+  return () => { state.listeners.delete(cb); };
+}
+
+/** Hand an entry to the listeners (also used by tests to simulate arrivals). */
+export function emitLogEntry(e: LogEntry): void {
+  for (const l of state.listeners) {
+    try { l(e); } catch { /* a listener's problem, not the feed's */ }
+  }
 }
 
 export function tailLogFile(maxEntries = MAX_TAIL_ENTRIES): LogEntry[] {

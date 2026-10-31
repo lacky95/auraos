@@ -7,7 +7,8 @@
     "dev": "APP_PORT=${APP_PORT:-4001} astro dev --host 0.0.0.0 --port ${APP_PORT:-4001}",
     "build": "astro build",
     "start": "node dist/server/entry.mjs",
-    "typecheck": "astro check"
+    "typecheck": "astro check",
+    "test": "node --test --experimental-strip-types test/*.test.mjs"
   },
   "dependencies": {
     "@aura/app-sdk": "workspace:*",
@@ -19,7 +20,10 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwindcss": "^4.1.0",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",

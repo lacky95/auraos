@@ -15,5 +15,14 @@
   "useProot": true,
   "sandbox": "container",
   "permissions": [],
-  "tools": ["bash", "node"]
+  "tools": ["bash", "node"],
+  "provides": [
+    {
+      "name": "logs",
+      "kind": "http/mcp",
+      "address": "/mcp/logs",
+      "version": "1",
+      "description": "Query the logs the Console collected from the shell and every app iframe: tail/search by level, source (appId) and text, a per-source overview, and wait for the next matching line."
+    }
+  ]
 }
