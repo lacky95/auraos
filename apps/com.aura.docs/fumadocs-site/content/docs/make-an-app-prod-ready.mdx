@@ -1,0 +1,226 @@
+---
+title: Make an App Prod Ready
+description: Run your app from its production build instead of astro dev — check where it stands, build it, and port dev-server hooks (WebSockets, proxies) to a server.mjs.
+---
+
+An Astro app can run two ways:
+
+- **dev** — `astro dev`. Slow first load, many small requests, but every
+  edit shows after a window reload.
+- **prod** — its `astro build` output. Bundled, cached scripts in one Node
+  process: fast to open and light on the machine.
+
+You never pick by hand. At every start AuraOS runs the app from its build
+**when that build matches the current sources**, and with `astro dev`
+otherwise. So "prod ready" means: the app *can* run from a build, and it
+*has* a current one. Editing stays quick — change a file and the next start
+is dev again; build again and it is fast again.
+
+The mechanics (fingerprint, build container, start command) are in
+[App serve modes](/docs/deep-dive/app-serve-modes). This page is the how-to.
+
+## 1. Check where the app stands
+
+```bash
+aura get apps          # SERVE column
+```
+
+| SERVE | What to do |
+|---|---|
+| `prod` | Nothing. It runs from a current build. |
+| `dev: no build` | Never built. Go to [step 2](#2-build-it). |
+| `dev: changed` | Sources changed since the last build. Go to [step 2](#2-build-it). |
+| `dev: dev only` | Its `astro.config` hooks into the dev server, or the manifest says `"serve": "dev"`. Do [step 3](#3-dev-only-port-the-dev-hooks-to-a-servermjs) first. |
+| `-` (own entrypoint) | The app ships `entrypoint.sh` or uses `runtime: raw` and starts itself. AuraOS doesn't manage its serve mode. |
+
+The reason in full:
+
+```bash
+curl -s "$OS_API_BASE/api/apps/serve" | jq '.apps[] | select(.appId=="com.example.notes")'
+# { "appId": "...", "mode": "dev", "reason": "dev-only",
+#   "detail": "astro.config hooks into the dev server (needs server.mjs + manifest \"serve\": \"auto\")" }
+```
+
+## 2. Build it
+
+```bash
+aura build app com.example.notes             # build; switches on its next start
+aura build app com.example.notes --restart   # build and switch the running app now
+aura build app --all --restart               # every app that changed or was never built
+```
+
+- The build runs `astro build` in a throwaway container, one build at a time.
+  It takes 10–60 s.
+- A failed build prints the last lines of its output. Fix and run it again.
+- `dependencies not installed yet — start the app once`: run the app once
+  (`aura run <app>`) so `node_modules` exists, then build.
+- Settings → About → **Update** / **Rebuild** does the same for every
+  enabled app that changed.
+
+Builds never run when an app starts. After you edit an app it stays on dev
+until you build it again.
+
+## 3. Dev only: port the dev hooks to a `server.mjs`
+
+`astro build` keeps your pages and API routes, but nothing that only lives in
+the dev server. AuraOS marks an app **dev only** when its `astro.config.*`
+uses any of:
+
+- `astro:server:setup` (usually: attach a WebSocket to the dev server)
+- `configureServer`
+- `ssrLoadModule`
+- a Vite `proxy:` block
+
+A build would silently lose those, so the app stays on dev until it ships a
+production replacement and opts in:
+
+1. **Add `server.mjs`** at the app root. It starts the built server and
+   does in prod what the dev hook does in dev.
+2. **Opt in** in `app.manifest.json`:
+
+   ```json
+   { "serve": "auto" }
+   ```
+
+3. **Build** (step 2).
+
+In prod the runner starts `node server.mjs` when the file exists (else
+`node dist/server/entry.mjs`), with `PORT`/`APP_PORT`, `HOST=0.0.0.0` and
+`NODE_ENV=production`.
+
+### The `server.mjs` skeleton
+
+```js
+// server.mjs — production entry: the built Astro server plus what
+// astro.config.mjs adds to the dev server.
+process.env.ASTRO_NODE_AUTOSTART = 'disabled';   // we start it ourselves
+
+const { startServer } = await import('./dist/server/entry.mjs');
+const { server } = startServer();
+const http = server.server;                      // the adapter's http.Server
+
+// …attach WebSocket upgrades, proxies, timers here…
+```
+
+This needs the Node adapter in standalone mode
+(`adapter: node({ mode: 'standalone' })`), which `aura dev new` scaffolds.
+
+### Pattern A: one plain module, used by both modes
+
+Best when the hook's code can live outside `src/`. Put it in a plain `.mjs`
+file at the app root: `astro build` doesn't copy `src/` modules for you to
+import, but a root file is next to `server.mjs` in both modes. SteelAIBrowser
+does this for its CDP WebSocket gateway:
+
+```js
+// astro.config.mjs — dev
+const steelWsProxy = () => ({
+  name: 'steel-ws-proxy',
+  hooks: {
+    'astro:server:setup': async ({ server }) => {
+      const { attachSteelUpgradeProxy } = await import('./ws-proxy.mjs');
+      if (server.httpServer) attachSteelUpgradeProxy(server.httpServer);
+    },
+  },
+});
+```
+
+```js
+// server.mjs — prod
+process.env.ASTRO_NODE_AUTOSTART = 'disabled';
+const { startServer } = await import('./dist/server/entry.mjs');
+const { attachSteelUpgradeProxy } = await import('./ws-proxy.mjs');
+const { server } = startServer();
+attachSteelUpgradeProxy(server.server);
+```
+
+### Pattern B: the hook needs bundled `src/` code
+
+Best when the WebSocket handler uses TypeScript modules from `src/` that
+only exist inside the build. Terminal does this for its PTY socket:
+
+- A route (`src/pages/api/pty-ready.ts`) imports the PTY module and puts its
+  handler on `globalThis` under a `Symbol.for(...)` key.
+- `server.mjs` calls that route once, after the server listens. Then it
+  forwards `/ws` upgrades to the handler it finds on `globalThis`:
+
+```js
+const KEY = Symbol.for('aura.terminal.getPtyWss');
+const port = process.env.PORT ?? process.env.APP_PORT ?? '4001';
+const ensurePty = () => globalThis[KEY]
+  ? Promise.resolve(globalThis[KEY])
+  : fetch(`http://127.0.0.1:${port}/api/pty-ready`).then(() => globalThis[KEY]);
+
+http.on('upgrade', (req, socket, head) => {
+  if (new URL(req.url ?? '/', 'http://x').pathname !== '/ws') return;
+  ensurePty().then((get) => {
+    if (!get) return socket.destroy();
+    const wss = get();
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  }, () => socket.destroy());
+});
+```
+
+See `apps/com.aura.terminal/server.mjs` for the full file.
+
+### A Vite `proxy:` block
+
+Write the same proxy in `server.mjs` with `node:http` (or `http-proxy` when
+the app already depends on it): forward `request` and `upgrade` events for
+those paths before the Astro handler gets them.
+
+## 4. Check the code for build-only breakage
+
+Things that work under `astro dev` and break in a build:
+
+- **Files resolved from `import.meta.url`.** In a build that points into
+  `dist/`. Resolve app files from `process.cwd()` (the app dir) instead.
+- **Modules imported by path at runtime** (`import('./src/lib/x.ts')`). Not in
+  the build: import them statically, or move them to a root `.mjs` file
+  (pattern A).
+- **Generated files under `src/` or `public/`.** Anything the app writes
+  there at runtime changes the fingerprint and drops the app back to dev on
+  every start. Write data to `/data`, or list the path in the manifest:
+
+  ```json
+  { "build": { "ignore": ["public/generated/**"] } }
+  ```
+
+Identity headers (`X-Aura-App-Id`, `X-Aura-Instance-Id`) and dynamic
+`/_astro/…` imports work in both modes; you don't need to change anything
+for them.
+
+## 5. Verify
+
+```bash
+aura build app com.example.notes --restart
+aura get apps | grep com.example.notes        # SERVE: prod
+aura logs inst com.example.notes | grep -i production
+# [com.example.notes] Starting production server (server.mjs) on port 4001
+```
+
+Then use the app for real: open a window, and exercise every WebSocket,
+proxied path and background job you ported in step 3. A missing piece shows
+as a 404, a socket that never connects, or a feature that silently does
+nothing. Nothing marks it as a prod problem.
+
+## Day to day
+
+- **Editing a prod app.** Just edit. The next start runs dev, so your change
+  shows. When you're done, `aura build app <id> --restart`.
+- **Always dev.** Set `"serve": "dev"` in the manifest for an app you never
+  want built, e.g. one you're rewriting.
+- **Terminal and OpsConsole** are never restarted by `--restart` or by
+  Settings → Rebuild, because they hold live shells and agent sessions.
+  They switch to the new build on their next start.
+
+## Reference
+
+- [App serve modes](/docs/deep-dive/app-serve-modes) — how the decision is
+  made, what the fingerprint covers, the build container.
+- [CLI Reference](/docs/cli-reference) — `aura build` flags.
+- Source: `packages/core/src/app-manager/appBuild.ts` (serve state,
+  prod-capability check), `AppManager.buildApp` (builds),
+  `app-manager/provisioning.ts` (prod start command).
+- Examples: `apps/com.aura.terminal` (pattern B), SteelAIBrowser
+  `io.lakner.steelaibrowser` (pattern A).
