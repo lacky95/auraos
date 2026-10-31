@@ -326,11 +326,12 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
 
   <script>
     import { Terminal } from '@xterm/xterm';
-    import { FitAddon } from '@xterm/addon-fit';
     import '@xterm/xterm/css/xterm.css';
     import { createLaunchGate } from '../launch-gate';
     import { attachTouchScroll } from '../touch-scroll';
     import { attachTouchSelect } from '../touch-select';
+    import { proposeGrid, settleBoxes } from '../fit-model';
+    import { createConnection } from '../connection';
     import { pickNextSession } from '../next-session';
 
     // Startup timeline for the desktop's boot report (shell lib/bootTimeline:
@@ -546,14 +547,11 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       }
     });
 
-    // FitAddon is kept ONLY as the ground-truth measurer for the slow watchdog
-    // (verifyAndRepair below). The hot resize path is pure arithmetic
-    // (applyFit) and never calls fit(). No eager fit() here: the grid stays at
-    // xterm's default (and #terminal is visibility:hidden) until the first
-    // authoritative box arrives and reveals it — so the boot fit is invisible
-    // instead of a visible jump from a wrong guess.
-    const fitAddon = new FitAddon();
-    term.loadAddon(fitAddon);
+    // No addon-fit: the grid is pure arithmetic (applyFit / fit-model.ts) on
+    // xterm's real cell and the measured chrome. No eager fit here either: the
+    // grid stays at xterm's default (and #terminal is visibility:hidden) until
+    // the first authoritative box arrives and reveals it — so the boot fit is
+    // invisible instead of a visible jump from a wrong guess.
     term.open(document.getElementById('terminal'));
     perfMark('xterm-open');
     // One- and two-finger drags scroll the scrollback (see touch-scroll.ts).
@@ -627,11 +625,23 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     term.onRender(() => { if (touchSelect.isActive()) scheduleSelLayout(); });
     term.onScroll(() => { if (touchSelect.isActive()) scheduleSelLayout(); });
     term.onSelectionChange(() => { touchSelect.selectionChanged(); if (touchSelect.isActive()) scheduleSelLayout(); });
+    // Typing and mouse clicks dismiss a selection (xterm's convention); a
+    // clear from a program repaint does not (touch-select re-pins it).
+    term.onData(() => touchSelect.userActed());
+    term.element?.addEventListener('mousedown', () => touchSelect.userActed(), true);
     window.addEventListener('resize', () => { if (touchSelect.isActive()) scheduleSelLayout(); });
 
     // Handle drags. The finger sits on the knob below the text, so the point
     // that moves the selection is offset back onto the selected row: the
     // offset is taken at pointerdown so the handle doesn't jump.
+    // Neither the handles nor the bar may move focus (a touch on them would
+    // otherwise blur xterm's textarea → the soft keyboard closes): cancelling
+    // touchstart stops the browser's compat mouse events and focus change.
+    // Pointer events still fire, so the handle drags below keep working.
+    const noFocusTouch = (e: TouchEvent) => { if (e.cancelable) e.preventDefault(); };
+    for (const el of [selHandles.start, selHandles.end, selBar]) {
+      el?.addEventListener('touchstart', noFocusTouch, { passive: false });
+    }
     for (const which of ['start', 'end'] as const) {
       const el = selHandles[which];
       if (!el) continue;
@@ -672,9 +682,20 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       btn.textContent = text;
       setTimeout(() => { btn.textContent = 'Copy'; then?.(); }, 700);
     }
-    selBar?.addEventListener('pointerdown', (e) => e.preventDefault());  // keep focus where it is
-    selBar?.addEventListener('click', async (e) => {
-      const act = (e.target as HTMLElement | null)?.closest?.('[data-sel]')?.getAttribute('data-sel');
+    selBar?.addEventListener('pointerdown', (e) => e.preventDefault());  // keep focus where it is (mouse)
+    const selActOf = (el: EventTarget | Element | null) =>
+      (el as HTMLElement | null)?.closest?.('[data-sel]')?.getAttribute('data-sel') ?? null;
+    // Mouse: click. Touch: its touchstart is cancelled (no click comes), so the
+    // button acts on touchend — when the finger lifts over the button it began on.
+    selBar?.addEventListener('click', (e) => runSelAction(selActOf(e.target)));
+    selBar?.addEventListener('touchend', (e) => {
+      const t = e.changedTouches[0];
+      const act = selActOf(e.target);
+      if (!t || !act || selActOf(document.elementFromPoint(t.clientX, t.clientY)) !== act) return;
+      if (e.cancelable) e.preventDefault();
+      runSelAction(act);
+    }, { passive: false });
+    async function runSelAction(act: string | null) {
       if (act === 'copy') {
         if (await touchSelect.copy()) flashSelBar('Copied', () => touchSelect.clear());
         else flashSelBar('No access');
@@ -686,7 +707,24 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       } else if (act === 'close') {
         touchSelect.clear();
       }
-    });
+    }
+
+    // touch-scroll cancels every touchstart on the terminal (see there), so the
+    // browser makes no click of its own: a tap is replayed here. Focus opens
+    // the soft keyboard as a real tap would (this runs inside touchend, a user
+    // gesture), and the mouse events reach xterm — its own handlers, or the
+    // program while it has mouse tracking on. A tap that clears a touch
+    // selection does neither, so the keyboard stays as it was.
+    function tapTerminal(x: number, y: number) {
+      if (touchSelect.hook.tap()) return;
+      term.focus();
+      const target = document.elementFromPoint(x, y) ?? term.element;
+      if (!target || !term.element?.contains(target)) return;
+      const init = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0, detail: 1 };
+      target.dispatchEvent(new MouseEvent('mousedown', { ...init, buttons: 1 }));
+      target.dispatchEvent(new MouseEvent('mouseup', { ...init, buttons: 0 }));
+      target.dispatchEvent(new MouseEvent('click', { ...init, buttons: 0 }));
+    }
 
     // Android fires contextmenu on a long-press; xterm would move its textarea
     // under the finger for a paste menu. Touch selection owns long-press, so a
@@ -699,7 +737,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
 
     attachTouchScroll(document.getElementById('terminal'), term, {
       rowHeight: () => cellH || 17,
-      longPress: touchSelect.hook,
+      longPress: { ...touchSelect.hook, tap: tapTerminal },
       wheel: (rows, clientX, clientY) => {
         const el = term.element?.querySelector('.xterm-screen') ?? term.element;
         if (!el) return;
@@ -1017,16 +1055,25 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // default to the iframe viewport for the message-less callers (fonts.ready,
     // ws.onopen), which equals the shell's contentW/H (the iframe has no inner
     // transform). The first call with a real box reveals the terminal.
+    // The last box the shell gave us. Box-less callers (fonts.ready, a DPR
+    // change, a grant) refit to THIS, not to window.inner* — the two differ
+    // whenever the shell's broadcast is ahead of the iframe's own layout.
+    let lastBox: { w: number; h: number } | null = null;
+    // One box per animation frame arrives while the soft keyboard slides or a
+    // window is dragged; the first applies at once, the rest settle into one
+    // trailing resize (see fit-model.ts) instead of ~20 reflows + SIGWINCHes.
+    const boxes = settleBoxes((w, h) => applyFit(w, h));
     function applyFit(boxW?: number, boxH?: number) {
       if (locked) return;                   // another view owns the terminal → nothing of ours to fit
-      const w = boxW ?? window.innerWidth;
-      const h = boxH ?? window.innerHeight;
+      if (boxW != null && boxH != null) lastBox = { w: boxW, h: boxH };
+      const w = boxW ?? lastBox?.w ?? window.innerWidth;
+      const h = boxH ?? lastBox?.h ?? window.innerHeight;
       if (!w || !h) return;                 // hidden / off-workspace → never resize
       if (!cellW || !cellH) { if (!realCell()) estimateCell(); }
       if (!cellW || !cellH) return;         // nothing safe to compute with yet
-      const { x, y } = chromeInset();
-      const cols = Math.max(1, Math.floor((w - x) / cellW));
-      const rows = Math.max(1, Math.floor((h - y) / cellH));
+      const grid = proposeGrid({ boxW: w, boxH: h, cell: { w: cellW, h: cellH }, inset: chromeInset() });
+      if (!grid) return;
+      const { cols, rows } = grid;
       if (cols !== term.cols || rows !== term.rows) {
         term.resize(cols, rows);
         realCell();                         // refresh cache from ground truth post-resize (cheap, no extra render)
@@ -1046,36 +1093,18 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       if (el) el.style.visibility = 'visible';
     }
     // Safety net: never leave the terminal invisible. If — for any reason — no
-    // applyFit lands a valid box in the first second (e.g. metrics probe fails,
-    // no viewport message, ws never opens), reveal anyway so the user always
-    // sees the terminal. The watchdog will still correct the grid afterwards.
-    setTimeout(revealTerminal, 1000);
+    // box arrives in the first second (no viewport message, ws never opens),
+    // fit to our own window and reveal, so the user never sees xterm's default
+    // 80×24 grid.
+    setTimeout(() => { applyFit(); revealTerminal(); }, 1000);
 
-    // ── Watchdog (safety net only) ────────────────────────────────────────
-    // With a real cell + measured chrome the event-driven applyFit is already
-    // exact, so this should essentially never repair. It stays as a slow
-    // heartbeat for drift the event path can't see (a CSS-var/font swap that
-    // moved the cell, a layout mutation that didn't broadcast). It recalibrates
-    // from xterm's render metrics and only resizes if proposeDimensions truly
-    // disagrees — idempotent and silent in steady state. The repair counter is
-    // temporary instrumentation: it should read 0 across a session; if it
-    // climbs, the cell/chrome model still disagrees with xterm.
-    let watchdogRepairs = 0;
-    function verifyAndRepair() {
-      if (!document.getElementById('terminal')?.offsetWidth) return false; // hidden → skip
-      realCell();
-      measureScrollbar();
-      let dims;
-      try { dims = fitAddon.proposeDimensions(); } catch { return false; }
-      if (!dims || !dims.cols || !dims.rows) return false;
-      if (dims.cols === term.cols && dims.rows === term.rows) return false; // already perfect
-      term.resize(dims.cols, dims.rows);
-      sendResizeIfChanged();
-      watchdogRepairs++;
-      console.debug('[terminal] watchdog repaired grid →', dims.cols, '×', dims.rows, '(total', watchdogRepairs + ')');
-      return true;
-    }
-    setInterval(verifyAndRepair, 5000);
+    // There is deliberately NO periodic re-fit. The old 5 s watchdog asked
+    // addon-fit's proposeDimensions, which measures differently from applyFit
+    // (border-box height includes our padding; a 15 px scrollbar fallback where
+    // overlay scrollbars measure 0) — so it "repaired" to +1 row / −1 col and
+    // the next viewport box flipped it back: a resize + SIGWINCH + full
+    // repaint every few seconds. Everything that can move the cell (fonts,
+    // DPR) refits explicitly through applyFit instead.
 
     // devicePixelRatio changes (monitor move, browser zoom) re-round xterm's
     // cell — invalidate, re-read from the new render, refit, and re-arm for the
@@ -1114,7 +1143,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     //      which fire the instant the user actually returns, and
     //   3. a slow watchdog, as a floor under both.
     //
-    // All three funnel through `ensureConnected`, which is idempotent: if a
+    // All three funnel through connection.ts, which is idempotent: if a
     // socket is already OPEN or CONNECTING it does nothing, so the wake-up
     // burst (several of these fire together when a tab is restored) can't
     // produce duplicate sockets.
@@ -1163,33 +1192,40 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       reflectInstance();
     }
 
-    let reconnectTimer = null;
-    function clearReconnectTimer() {
-      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-    }
-    function wsHealthy() {
-      return activeWs && (activeWs.readyState === 0 /* CONNECTING */ || activeWs.readyState === 1 /* OPEN */);
-    }
-    // Backoff for unattended retries: quick at first (a shell restart is back
-    // in a second or two), capped at 10s so a long outage doesn't turn into a
-    // long wait once the network returns. The wake-up path below bypasses this
-    // entirely — when the user is present we redial immediately.
-    function backoffMs() {
-      return Math.min(500 * Math.pow(2, Math.max(0, attempt - 1)), 10_000);
-    }
-    function scheduleReconnect() {
-      if (detached() || reconnectTimer || wsHealthy()) return;
-      const delay = backoffMs();
-      reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, delay);
-    }
-    function ensureConnected(reason) {
-      if (detached() || wsHealthy()) return;
-      clearReconnectTimer();
-      console.debug('[terminal] reconnect →', reason);
-      connect();
-    }
-
-    let attempt = 0;
+    // WHEN to dial lives in connection.ts (backoff, wake-ups, the floor tick,
+    // waiting for a superseded socket to close, the delayed outage notice);
+    // HOW is `dial` below. `connect()` is what every caller uses.
+    let everOpened = false;
+    const conn = createConnection({
+      dial,
+      healthy: () => !!activeWs && (activeWs.readyState === 0 /* CONNECTING */ || activeWs.readyState === 1 /* OPEN */),
+      detached,
+      // Never leave two sockets running. A previous one that is merely CLOSING
+      // is still an attached, granted client on the server: it receives the
+      // same output, answers the same terminal queries (the duplicate reply
+      // arrives at the shell as a second `0;276;0c` on the command line), and
+      // its size still counts for the PTY. So it is detached from `activeWs`
+      // here — its close then reports as `current:false` and is what lets the
+      // policy dial the next one.
+      closeCurrent: () => {
+        const ws = activeWs;
+        if (!ws || ws.readyState > 1) return false;
+        activeWs = null;
+        try { ws.close(1000, 'superseded'); } catch { /* already gone */ }
+        return true;
+      },
+      // Only an outage longer than a second is worth a line in the buffer; a
+      // blip (the phone waking, a proxy hiccup) reconnects silently.
+      onOutage: () => {
+        if (locked || detached()) return;
+        statusEl.textContent = 'DISCONNECTED — RECONNECTING...';
+        statusEl.style.color = 'var(--aura-color-secondary)';
+        term.writeln('');
+        term.writeln(`${ORG}  [disconnected — reconnecting]${RST}`);
+        startDots('reconnecting');
+      },
+    });
+    const connect = () => conn.connect();
     // First output after page load = the scrollback replay; it is "done" once
     // the socket has been quiet for 150 ms and xterm has parsed what it got
     // (term.write's callback), so the mark includes the parse cost.
@@ -1211,18 +1247,11 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       }, 150);
     }
 
-    function connect() {
+    function dial() {
       if (detached()) return;
-      // Never leave two sockets running. A previous one that is merely CLOSING
-      // is still an attached, granted client on the server, so it receives the
-      // same output and answers the same terminal queries — and the duplicate
-      // reply arrives at the shell as a second `0;276;0c` on the command line.
-      // onclose ignores superseded sockets, so this cannot trigger a reconnect.
-      if (activeWs) { try { activeWs.close(1000, 'superseded'); } catch { /* already gone */ } }
       // The dialog belongs to the session being left; the server re-sends the
       // (new) session's open dialog as soon as this socket is granted.
       hideInputDialog();
-      attempt++;
       const ws = new WebSocket(wsUrlFor(currentSessionId, claimOnConnect || claimNextConnect));
       // Control frames arrive as binary (see pty-server sendCtl); read them
       // synchronously as an ArrayBuffer rather than a Blob.
@@ -1231,27 +1260,20 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       let opened = false;
 
       ws.onopen = () => {
-        perfMark('ws-open', { attempt });
+        perfMark('ws-open', { attempt: conn.attempt() });
         opened = true;
+        everOpened = true;
         claimOnConnect = false;      // the launch claim is spent once it lands
         claimNextConnect = false;    // …and so is an explicit session take-over
-        attempt = 0;                 // reset the backoff ladder for the next drop
-        clearReconnectTimer();
+        conn.opened();               // backoff ladder + outage notice reset
         stopDots();
         statusEl.textContent = 'CONNECTED';
         statusEl.style.color = 'var(--aura-color-primary)';
-        // Clear the splash up-front, BEFORE the resize/PTY output arrives.
-        // (Earlier we did this on a 120ms timer which raced with the bash
-        // prompt and sometimes wiped the prompt itself — leaving the user
-        // staring at an empty blinking cursor.)
-        term.write('\x1b[2J\x1b[H');
-        // Fresh PTY on (re)connect: reset the send baseline so the first sync
-        // always asserts our real size to it, even if our cols didn't change
-        // since before the drop. No double-rAF settle needed — the shell's
-        // viewport broadcast already fits us to the settled box; this just
-        // (re)asserts that size to the new PTY.
+        // Tell the new socket our size before it is granted (the server sizes
+        // the PTY from it at grant time). The screen itself is NOT touched
+        // here: `granted` resets and refits right before the replay lands.
         lastSentCols = -1; lastSentRows = -1;
-        applyFit();
+        sendResizeIfChanged();
       };
 
       // TEXT frame ⇒ raw PTY output. BINARY frame ⇒ a control message from the
@@ -1262,7 +1284,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         if (typeof e.data === 'string') { noteOutput(e.data.length); term.write(e.data); return; }
         let msg;
         try { msg = JSON.parse(ctlDecoder.decode(e.data)); } catch { return; }
-        if (msg?.type === 'granted')   { perfMark('granted'); setLocked(false); launchGate?.live(); }
+        if (msg?.type === 'granted')   { perfMark('granted'); onGranted(); launchGate?.live(); }
         else if (msg?.type === 'busy') { perfMark('busy'); setLocked(true); hideInputDialog(); }
         else if (msg?.type === 'dialog') showInputDialog(msg.dialog);
         else if (msg?.type === 'dialog-copy') agentCopyInputDialog(msg.id);
@@ -1270,35 +1292,31 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       };
 
       ws.onclose = () => {
-        // Only the CURRENT socket's close is news. A session switch closes the
-        // old one and dials the next in the same tick, so without this the dead
-        // socket's handler overwrites "SWITCHING…" with a reconnect warning and
-        // the transition looks like a fault.
-        if (activeWs !== ws) return;
+        // Only the CURRENT socket's close is news. A superseded one (session
+        // switch, redial) just tells the policy it is gone, which is what lets
+        // the next socket dial; without this the dead socket's handler would
+        // overwrite "SWITCHING…" with a reconnect warning.
+        if (activeWs !== ws) { conn.closed({ current: false, wasOpen: opened }); return; }
         launchGate?.lost();
         // A close we asked for. The window is showing the no-session
         // placeholder; announcing a reconnect would contradict it, and the
-        // reconnect is never coming — scheduleReconnect no-ops while detached.
-        if (detached()) { stopDots(); return; }
-        statusEl.textContent = 'DISCONNECTED — RECONNECTING...';
-        statusEl.style.color = 'var(--aura-color-secondary)';
-        if (opened && !locked) {
-          // Was connected, now dropped — surface in-band.
-          term.writeln('');
-          term.writeln(`${ORG}  [disconnected — reconnecting]${RST}`);
-          startDots('reconnecting');
-        } else {
-          // Never connected this attempt; keep the connecting animation
-          // but bump it to a "retry" label so the user sees something is happening.
-          startDots(`retry ${attempt}`);
+        // reconnect is never coming — the policy no-ops while detached.
+        if (detached()) { stopDots(); conn.closed({ current: true, wasOpen: opened }); return; }
+        // A drop stays silent for a second (conn.onOutage then speaks). A dial
+        // that never opened only animates while an outage is already on
+        // screen, or before the very first connection — never over live text.
+        if (!opened && (conn.outage() || !everOpened)) {
+          statusEl.textContent = 'DISCONNECTED — RECONNECTING...';
+          statusEl.style.color = 'var(--aura-color-secondary)';
+          startDots(`retry ${conn.attempt()}`);
         }
-        scheduleReconnect();
+        conn.closed({ current: true, wasOpen: opened });
       };
 
       ws.onerror = () => {
         statusEl.textContent = 'ERROR';
         statusEl.style.color = 'var(--aura-color-danger)';
-        if (!opened && !locked) {
+        if (!opened && !locked && (conn.outage() || !everOpened)) {
           // Connection refused / handshake error — surface inline so the
           // user knows it's not just a black screen.
           term.write(`\r\x1b[2K${RED}  ws error — retrying${RST}\r\n`);
@@ -1344,8 +1362,11 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       dlgId = null;
       clearTimeout(dlgEditTimer); dlgEditTimer = null;
       if (dlgEl.style.display !== 'none') {
+        const hadFocus = dlgEl.contains(document.activeElement);
         dlgEl.style.display = 'none';
-        try { term.focus(); } catch { /* not ready */ }
+        // Give focus back only if the dialog held it: hideInputDialog also runs
+        // on every (re)connect, where a term.focus() would open the keyboard.
+        if (hadFocus) { try { term.focus(); } catch { /* not ready */ } }
       }
     }
     function showInputDialog(d) {
@@ -1416,17 +1437,15 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // before any throttled timer would — which is what turns "my session died
     // while I was away" into "it was there when I came back".
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) ensureConnected('visible');
+      if (!document.hidden) conn.wake();
     });
-    window.addEventListener('focus',   () => ensureConnected('focus'));
-    window.addEventListener('online',  () => ensureConnected('online'));
-    window.addEventListener('pageshow', () => ensureConnected('pageshow'));
+    window.addEventListener('focus',   () => conn.wake());
+    window.addEventListener('online',  () => conn.wake());
+    window.addEventListener('pageshow', () => conn.wake());
 
     // Floor under everything: if the socket is dead and no retry is pending
     // (a close event we somehow missed, a frozen-then-thawed timer), redial.
-    setInterval(() => {
-      if (!detached() && !wsHealthy() && !reconnectTimer) ensureConnected('watchdog');
-    }, 5000);
+    setInterval(() => conn.tick(), 5000);
 
     // THE single resize driver. The shell posts `aura.viewport.changed` for
     // every size change — tiling reflow, workspace switch (reveals our tile),
@@ -1442,7 +1461,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       const d = ev.data;
       if (d?.type !== 'aura.viewport.changed') return;
       if (d.contentW === 0) return;
-      applyFit(d.contentW, d.contentH);
+      boxes.push(d.contentW, d.contentH);
     });
 
     // ─── Take-over panel ("in use somewhere else") ───────────────────────
@@ -1475,27 +1494,34 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         if (changed) term.reset();
         statusEl.textContent = 'IN USE ELSEWHERE';
         statusEl.style.color = 'var(--aura-color-secondary)';
-      } else if (changed) {
-        // We're the live view again, and the order here is the whole trick:
-        //   1. the terminal is already back to display:'' (above), so
-        //      chromeInset/measureScrollbar force a real layout and measure the
-        //      visible box instead of the collapsed one;
-        //   2. reset BEFORE the server's scrollback replay, which follows
-        //      `granted` on the very next frame — otherwise it paints on top of
-        //      whatever was on screen when we were revoked;
-        //   3. fit BEFORE that replay too, so it reflows into the final width
-        //      once instead of being written narrow and re-wrapped;
-        //   4. forceSendResize because the PTY is sized to US now even though
-        //      our own cols/rows never moved (send-on-change would say nothing).
-        stopDots();
-        statusEl.textContent = 'CONNECTED';
-        statusEl.style.color = 'var(--aura-color-primary)';
-        revealTerminal();
-        term.reset();
-        applyFit();
-        forceSendResize();
-        term.focus();
       }
+    }
+
+    // The server granted us the session: EVERY grant (first connect, a
+    // reconnect after a drop, a take-over) replays up to 64 KiB of scrollback
+    // on the very next frame, with no clear of its own. So each grant starts
+    // from a fresh canvas, in this order:
+    //   1. the terminal is back to display:'' (setLocked), so chromeInset /
+    //      measureScrollbar measure the visible box, not a collapsed one;
+    //   2. reset BEFORE the replay — otherwise it paints on top of what is
+    //      there (after a reconnect that was the SAME history, shown twice);
+    //   3. fit BEFORE the replay too, so it reflows into the final width once
+    //      instead of being written narrow and re-wrapped;
+    //   4. forceSendResize because the PTY is sized to US now even though our
+    //      own cols/rows never moved (send-on-change would say nothing).
+    // No term.focus() here: a grant is the server's doing, not the user's, and
+    // on a phone a focus opens the soft keyboard — which resizes the terminal
+    // and repaints everything right after it settled.
+    function onGranted() {
+      setLocked(false);
+      stopDots();
+      statusEl.textContent = 'CONNECTED';
+      statusEl.style.color = 'var(--aura-color-primary)';
+      revealTerminal();
+      term.reset();
+      boxes.flush();
+      applyFit();
+      forceSendResize();
     }
 
     /** Ask the server for this session. Returns false if we have no socket. */
@@ -2221,7 +2247,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         console.debug('[terminal] closing session', sessionId);
         currentSessionId = null;
         recordWindowSession(null);
-        clearReconnectTimer();
+        conn.stop();
         try { activeWs?.close(1000, 'session-closed'); } catch { /* already gone */ }
         activeWs = null;
         term.reset();
@@ -2249,7 +2275,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       if (!sessionId || sessionId !== currentSessionId) return;
       console.debug('[terminal] session ended', sessionId);
       currentSessionId = null;
-      clearReconnectTimer();
+      conn.stop();
       hideInputDialog();
       forgetSession(instanceId, sessionId);
       stopDots();

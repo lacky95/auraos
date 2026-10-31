@@ -11,6 +11,14 @@
 // its MOUSE selection then. The selection itself is read back from
 // `getSelectionPosition` every time instead of being kept here, because xterm
 // shifts it when scrollback trims and clears it when the user types.
+//
+// One exception: xterm also clears the selection on EVERY mouse-tracking
+// DECSET, even one that doesn't change the mode — and a TUI repainting after
+// a SIGWINCH re-sends its mouse modes. So while a touch selection is shown,
+// its range and text are pinned; when xterm drops it and the same cells still
+// hold the same text, it is re-selected and the handles stay. A clear the USER
+// caused (typing, a mouse click — the page reports those via `userActed`)
+// unpins first, so those still dismiss the selection as they always did.
 
 export interface SelectCell {
   getChars(): string;
@@ -87,6 +95,8 @@ export function attachTouchSelect(term: SelectTerminal, opts: TouchSelectOptions
   let lastY = 0;
   let edgeTimer: unknown = null;
   let edgeDir = 0;
+  let pinned: { start: Pos; end: Pos; text: string } | null = null;
+  let reapplying = false;
 
   function setActive(on: boolean) {
     if (active === on) return;
@@ -141,6 +151,7 @@ export function attachTouchSelect(term: SelectTerminal, opts: TouchSelectOptions
   function apply(a: Pos, b: Pos) {
     const [s, e] = cmp(a, b) <= 0 ? [a, b] : [b, a];
     term.select(s.col, s.row, (e.row - s.row) * term.cols + e.col - s.col + 1);
+    pinned = { start: s, end: e, text: term.getSelection() };
   }
 
   /** The current selection as inclusive cells, from xterm. */
@@ -203,7 +214,8 @@ export function attachTouchSelect(term: SelectTerminal, opts: TouchSelectOptions
       stopDrag();
       setActive(term.hasSelection());
     },
-    /** A tap while a touch selection is shown clears it and swallows the tap. */
+    /** A tap while a touch selection is shown clears it; true = it did, so
+     *  the tap must not also click into the program. */
     tap(): boolean {
       if (!active) return false;
       clear();
@@ -213,8 +225,23 @@ export function attachTouchSelect(term: SelectTerminal, opts: TouchSelectOptions
 
   function clear() {
     stopDrag();
+    pinned = null;
     term.clearSelection();
     setActive(false);
+  }
+
+  /** xterm dropped the selection behind our back: put it back if the text
+   *  under it is unchanged (a repaint), otherwise it is really gone. */
+  function repin(): boolean {
+    if (!pinned || reapplying) return false;
+    reapplying = true;
+    try {
+      const { start, end, text } = pinned;
+      apply(start, end);
+      if (term.hasSelection() && term.getSelection() === text) return true;
+      term.clearSelection();
+      return false;
+    } finally { reapplying = false; }
   }
 
   return {
@@ -223,6 +250,7 @@ export function attachTouchSelect(term: SelectTerminal, opts: TouchSelectOptions
     clear,
     selectAll() {
       term.selectAll();
+      pinned = null;                 // select-all has no cell range to pin
       setActive(term.hasSelection());
     },
     /** Start dragging a handle: the OTHER end stays put. */
@@ -234,10 +262,16 @@ export function attachTouchSelect(term: SelectTerminal, opts: TouchSelectOptions
     },
     moveHandle: dragTo,
     endHandle() { stopDrag(); },
-    /** Call when xterm's selection changed — a click or typing may have
-     *  cleared it behind our back. */
+    /** The user typed or clicked: a selection clear that follows is theirs. */
+    userActed() { pinned = null; },
+    /** Call when xterm's selection changed — a repaint, a click or typing may
+     *  have cleared it behind our back. */
     selectionChanged() {
-      if (active && !term.hasSelection()) { stopDrag(); setActive(false); }
+      if (reapplying || !active || term.hasSelection()) return;
+      if (repin()) return;
+      pinned = null;
+      stopDrag();
+      setActive(false);
     },
     layout(): SelectLayout | null {
       const r = range();

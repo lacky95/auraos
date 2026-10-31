@@ -27,10 +27,14 @@
 //
 // Optional long-press (`longPress`): one finger held still for LONG_PRESS_MS
 // hands the rest of that gesture to the hook (text selection, touch-select.ts)
-// instead of scrolling — its moves never scroll and its touchend is cancelled
-// so no click reaches the program. A finger that moves past PRESS_SLOP_PX
-// first is a plain scroll, exactly as without the hook. A short motionless
-// touch is offered to `tap`; returning true cancels its click.
+// instead of scrolling — its moves never scroll. A finger that moves past
+// PRESS_SLOP_PX first is a plain scroll, exactly as without the hook.
+// With the hook, every touchstart is cancelled too: otherwise the browser
+// turns a touch into compatibility mouse events and its own long-press
+// handling, which move focus — the soft keyboard pops open or closes under a
+// selection, and the focus change clears it. So the browser never clicks;
+// every short motionless one-finger touch goes to `tap`, which makes the
+// click itself (focus + synthetic mouse events — see index.astro).
 
 export interface TouchScrollTerminal {
   scrollLines(amount: number): void;
@@ -42,8 +46,9 @@ export interface TouchLongPress {
   start(clientX: number, clientY: number): boolean;
   move(clientX: number, clientY: number): void;
   end(): void;
-  /** A short motionless one-finger touch. Return true to swallow its click. */
-  tap?(clientX: number, clientY: number): boolean;
+  /** A short motionless one-finger touch. The browser makes no click of its
+   *  own (touchstart is cancelled), so this does whatever a tap should. */
+  tap(clientX: number, clientY: number): void;
 }
 
 export interface TouchScrollOptions {
@@ -153,6 +158,7 @@ export function attachTouchScroll(
   function onStart(e: TouchEvent) {
     const coasting = stopFling();
     e.stopPropagation();
+    if (lp && e.cancelable) e.preventDefault();  // no compat mouse events / focus moves / native long-press
     // Every finger new → a fresh gesture, even if a lost touchend left us
     // `active`. A finger added mid-gesture just re-anchors on the new average
     // so the jump in the average doesn't register as a scroll.
@@ -215,12 +221,12 @@ export function attachTouchScroll(
     disarm();
     if (pressing) {
       pressing = false;
-      if (e.cancelable) e.preventDefault();  // no click / focus after a press
+      if (e.cancelable) e.preventDefault();
       lp!.end();
       return;
     }
     if (e.type === 'touchcancel') return;
-    if (still && lp?.tap && lp.tap(lastX, lastY) && e.cancelable) e.preventDefault();
+    if (still && lp) lp.tap(lastX, lastY);
     still = false;
     const t = now();
     const recent = samples.filter((s) => t - s.t <= VELOCITY_WINDOW_MS);

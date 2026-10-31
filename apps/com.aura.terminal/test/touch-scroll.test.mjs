@@ -183,7 +183,7 @@ test('a drag keeps scrolling after its start element is re-rendered away (detach
 
 // ── long-press hook ──────────────────────────────────────────────────────
 
-function setupPress({ claim = true, tapResult = false } = {}) {
+function setupPress({ claim = true } = {}) {
   const container = new EventTarget();
   const scrolled = [];
   const calls = [];
@@ -200,7 +200,7 @@ function setupPress({ claim = true, tapResult = false } = {}) {
       start: (x, y) => { calls.push(['start', x, y]); return claim; },
       move: (x, y) => calls.push(['move', x, y]),
       end: () => calls.push(['end']),
-      tap: (x, y) => { calls.push(['tap', x, y]); return tapResult; },
+      tap: (x, y) => { calls.push(['tap', x, y]); },
     },
   });
   const send = (type, ys, dt = 16, changed = 1) => { t += dt; const e = touch(type, ys, changed); container.dispatchEvent(e); return e; };
@@ -252,15 +252,28 @@ test('a declined long-press leaves the gesture scrolling', () => {
   assert.ok(!s.calls.some((c) => c[0] === 'tap'), 'a long hold is not a tap');
 });
 
-test('a short motionless touch is offered as a tap; true swallows its click', () => {
-  const swallow = setupPress({ tapResult: true });
-  swallow.send('touchstart', [300]);
-  const e1 = swallow.send('touchend', [], 80);
-  assert.deepEqual(swallow.calls, [['tap', 100, 300]]);
-  assert.equal(e1.defaultPrevented, true);
+test('with a long-press hook every touchstart is cancelled, and each tap goes to tap()', () => {
+  const s = setupPress();
+  const start = s.send('touchstart', [300]);
+  assert.equal(start.defaultPrevented, true, 'no compat mouse events / focus change / native long-press');
+  s.send('touchend', [], 80);
+  assert.deepEqual(s.calls, [['tap', 100, 300]]);
+});
 
-  const pass = setupPress({ tapResult: false });
-  pass.send('touchstart', [300]);
-  const e2 = pass.send('touchend', [], 80);
-  assert.equal(e2.defaultPrevented, false, 'a normal tap still clicks');
+test('a drag or a two-finger touch is not a tap', () => {
+  const s = setupPress();
+  s.send('touchstart', [300]);
+  s.send('touchmove', [340]);
+  s.send('touchend', [], 80);
+  s.send('touchstart', [300]);
+  s.send('touchstart', [300, 340]);
+  s.send('touchend', [300], 20);
+  s.send('touchend', [], 20);
+  assert.equal(s.calls.length, 0);
+});
+
+test('without a long-press hook touchstart is left alone (the browser clicks)', () => {
+  const s = setup();
+  const start = s.send('touchstart', [300]);
+  assert.equal(start.defaultPrevented, false);
 });

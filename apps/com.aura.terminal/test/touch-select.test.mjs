@@ -149,9 +149,11 @@ test('selection cleared elsewhere (typing, a click) hides the touch UI', () => {
   const term = fakeTerm(['word']);
   const { ts, at, changes } = setup(term);
   ts.hook.start(...at(1, 0)); ts.hook.end();
-  term.clearSelection();
+  ts.userActed();                                         // a keypress / mouse click…
+  term.clearSelection();                                  // …which made xterm clear
   ts.selectionChanged();
   assert.equal(ts.isActive(), false);
+  assert.equal(term.hasSelection(), false, 'not re-pinned: the user dismissed it');
   assert.deepEqual(changes, [true, false]);
 });
 
@@ -181,4 +183,40 @@ test('paste sends the clipboard to the program; false without read access', asyn
   assert.deepEqual(term.pasted, ['hello']);
   const t2 = fakeTerm(['x']);
   assert.equal(await setup(t2, { clipboard: null }).ts.paste(), false);
+});
+
+test('a selection xterm dropped during a repaint comes back when the text is unchanged', () => {
+  const term = fakeTerm(['alpha beta gamma']);
+  const { ts, at, changes } = setup(term);
+  ts.hook.start(...at(7, 0)); ts.hook.end();              // "beta"
+  const before = term.selects.length;
+  term.clearSelection();                                  // e.g. a mouse-mode DECSET from the TUI
+  ts.selectionChanged();
+  assert.equal(ts.isActive(), true);
+  assert.equal(term.hasSelection(), true);
+  assert.deepEqual(term.selects.at(-1), [6, 0, 4]);
+  assert.equal(term.selects.length, before + 1);
+  assert.deepEqual(changes, [true], 'handles never flickered');
+});
+
+test('…but stays gone when the text under it changed', () => {
+  const term = fakeTerm(['alpha beta gamma']);
+  const { ts, at, changes } = setup(term);
+  ts.hook.start(...at(7, 0)); ts.hook.end();
+  term.getSelection = () => 'OTHER';                      // the cells now hold different text
+  term.clearSelection();
+  ts.selectionChanged();
+  assert.equal(ts.isActive(), false);
+  assert.equal(term.hasSelection(), false);
+  assert.deepEqual(changes, [true, false]);
+});
+
+test('a tap still clears a pinned selection for good', () => {
+  const term = fakeTerm(['alpha beta gamma']);
+  const { ts, at } = setup(term);
+  ts.hook.start(...at(7, 0)); ts.hook.end();
+  assert.equal(ts.hook.tap(), true);
+  ts.selectionChanged();
+  assert.equal(term.hasSelection(), false);
+  assert.equal(ts.isActive(), false);
 });
