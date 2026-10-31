@@ -260,7 +260,8 @@ export function ViewportSettingsDialog(): React.JSX.Element {
           whereas `vh` would ignore them and measure the raw browser viewport.
           With no transform (default profile) the containing block is the ICB,
           so `80%` still equals 80vh — consistent in both cases. */}
-      <DialogContent className="max-w-3xl h-[80%] gap-0 p-0 flex flex-col">
+      {/* z-[1055] (backdrop too): over focused activities — same layer as AboutDialog. */}
+      <DialogContent overlayClassName="z-[1055]" className="z-[1055] max-w-3xl h-[80%] gap-0 p-0 flex flex-col">
         <DialogHeader className="shrink-0 border-b border-[var(--border)] px-4 py-3">
           <DialogTitle className="flex items-center gap-2 text-[var(--color-green)] text-sm tracking-widest uppercase">
             <span aria-hidden="true"><svg className="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-layout-grid"/></svg></span> VIEWPORT

@@ -256,7 +256,10 @@ export function AboutDialog(): React.JSX.Element {
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent aria-describedby={undefined} className="max-w-md gap-0 p-0 flex flex-col">
+      {/* z-[1055] (backdrop too): above a focused activity (60, full size 950),
+          the launcher / process-manager panels (1000) and the dock (1050);
+          below the on-screen keyboard (1065), notifications and the lock screen. */}
+      <DialogContent aria-describedby={undefined} overlayClassName="z-[1055]" className="z-[1055] max-w-md gap-0 p-0 flex flex-col">
         <DialogHeader className="shrink-0 border-b border-[var(--border)] px-4 py-3">
           <DialogTitle className="flex items-center gap-2 text-[var(--color-green)] text-sm tracking-widest uppercase">
             <span aria-hidden="true"><svg className="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-info"/></svg></span> ABOUT
