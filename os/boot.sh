@@ -26,6 +26,13 @@ set -u
 SHELL_MODE_FILE=/data/aura/shell-mode
 SHELL_MODE="${AURA_SHELL_MODE:-$(tr -d '[:space:]' < "$SHELL_MODE_FILE" 2>/dev/null)}"
 case "$SHELL_MODE" in prod|dev) ;; *) SHELL_MODE=dev ;; esac
+# Prod only: AURA_SHELL_WATCH=1 (or "1"/"on" in /data/aura/shell-watch) makes
+# the running prod shell rebuild itself on source saves and swap to the new
+# build in-process (packages/shell/server/watchRebuild.mjs) — live changes on
+# top of a stable build. The env var wins, like the mode above.
+SHELL_WATCH_FILE=/data/aura/shell-watch
+SHELL_WATCH="${AURA_SHELL_WATCH:-$(tr -d '[:space:]' < "$SHELL_WATCH_FILE" 2>/dev/null)}"
+case "$SHELL_WATCH" in 1|on|true) export AURA_SHELL_WATCH=1 ;; *) unset AURA_SHELL_WATCH ;; esac
 
 BOOT_DIR=/data/aura/boot
 LOG="$BOOT_DIR/boot.log"
@@ -200,7 +207,7 @@ stop_splash
 ( until curl -sf -o /dev/null --max-time 60 http://127.0.0.1:3000/api/apps; do sleep 2; done
   echo '[aura] boot: shell warmed up' ) &
 if [ "$SHELL_MODE" = prod ]; then
-  echo "[aura] boot: shell mode prod (packages/shell/server.mjs)" | tee -a "$LOG"
+  echo "[aura] boot: shell mode prod (packages/shell/server.mjs)${AURA_SHELL_WATCH:+, watching sources for live rebuilds}" | tee -a "$LOG"
   # node itself is PID 1: SIGTERM to a PID 1 without a handler is dropped,
   # and the pnpm launcher has none — docker stop then killed the shell after
   # 10 s without the desktop save of server.mjs (lib/desktopSession.ts).

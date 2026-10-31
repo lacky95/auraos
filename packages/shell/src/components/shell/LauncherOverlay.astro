@@ -25,7 +25,7 @@ import Icon from '../ui/Icon.astro';
 ---
 <aside id="lo-panel" class="lo-panel" aria-hidden="true">
   <header class="lo-header">
-    <span class="lo-title"><Icon name="layout-grid" /> LAUNCH APP</span>
+    <span class="lo-title"><Icon name="layout-grid" /> LAUNCH APP <span id="lo-count" class="lo-count" title="Apps in the launcher">{apps.length}</span></span>
     <div class="lo-header-actions">
       <button id="lo-reload" class="lo-reload" title="Reload the app list" aria-label="Reload the app list"><span class="lo-reload-icon"><Icon name="rotate-cw" /></span></button>
       <button id="lo-close" class="lo-close" title="Close launcher (Esc)"><Icon name="x" /></button>
@@ -89,6 +89,11 @@ import Icon from '../ui/Icon.astro';
     box-shadow: 8px 0 32px rgba(0, 0, 0, 0.4);
   }
   .lo-panel[aria-hidden="false"] { transform: translateX(0); }
+  /* On-screen keyboard open (iPad / phone, search box focused): end the panel
+     above the keyboard so the whole grid stays reachable by scrolling, instead
+     of its lower rows sitting under the keyboard. --lo-kb is set by the script.
+     !important + the extra class beat OSLayout's autohide `bottom: 0 !important`. */
+  body #lo-panel.lo-panel[data-kb="true"] { bottom: var(--lo-kb) !important; }
 
   .lo-header {
     display: flex;
@@ -111,6 +116,20 @@ import Icon from '../ui/Icon.astro';
     color: var(--aura-color-primary);
     text-transform: uppercase;
     letter-spacing: 0.12em;
+  }
+  /* App count next to the title: "12", or "3 / 12" while a search filters the grid. */
+  .lo-count {
+    padding: 1px 6px;
+    border: var(--aura-border);
+    color: var(--aura-color-text-dim);
+    font-family: var(--aura-font-mono);
+    font-size: var(--aura-font-size-xs);
+    letter-spacing: 0.04em;
+    font-variant-numeric: tabular-nums;
+  }
+  .lo-count[data-filtered="true"] {
+    color: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
   }
   /* The header is `justify-content: space-between`; without this wrapper a
      third child would spread the three evenly instead of keeping the title
@@ -208,6 +227,11 @@ import Icon from '../ui/Icon.astro';
     grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
     gap: 6px;
     align-content: start;
+    /* Touch: a swipe on the tiles scrolls the grid and doesn't chain into
+       the (pinned) page behind it. */
+    touch-action: pan-y;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
   }
 
   .lo-app {
@@ -376,6 +400,7 @@ import Icon from '../ui/Icon.astro';
   import { claimEarlyClicks } from '../../lib/earlyClicks.ts';
   import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
   import { registerUiCommand, registerSnapshotPart } from '../../lib/uiCommands.ts';
+  import { computePlacement } from './notifications/placement.ts';
   const keyDispatcher = getKeyDispatcher();
 
   const panel  = document.getElementById('lo-panel') as HTMLElement;
@@ -383,16 +408,44 @@ import Icon from '../ui/Icon.astro';
   const reload = document.getElementById('lo-reload') as HTMLButtonElement;
   const search = document.getElementById('lo-search') as HTMLInputElement;
   const grid   = document.getElementById('lo-grid')   as HTMLElement;
+  const count  = document.getElementById('lo-count')  as HTMLElement;
+
+  // Header badge: total tiles, or "shown / total" while the search hides some.
+  function updateCount() {
+    const tiles = grid.querySelectorAll<HTMLElement>('.lo-app');
+    const shown = Array.from(tiles).filter((el) => !el.hidden).length;
+    const filtered = shown !== tiles.length;
+    count.textContent = filtered ? `${shown} / ${tiles.length}` : String(tiles.length);
+    count.dataset['filtered'] = String(filtered);
+  }
 
   function openPanel() {
     panel.setAttribute('aria-hidden', 'false');
     search.value = '';
     grid.querySelectorAll<HTMLElement>('.lo-app').forEach(el => el.hidden = false);
+    updateCount();
     // defer focus until the slide-in starts, so the focus ring doesn't trigger
     // a layout shift mid-animation
     requestAnimationFrame(() => search.focus());
   }
   function closePanel() { panel.setAttribute('aria-hidden', 'true'); }
+
+  // Keep the panel above the on-screen keyboard. openPanel() focuses the
+  // search box, which on a tablet brings the keyboard up over the bottom of
+  // the panel; visualViewport tells us how much it covers.
+  function fitAboveKeyboard() {
+    // keyboard is 0 below 80 px, so it is always taller than the dock it replaces.
+    const { keyboard } = computePlacement(null);
+    if (panel.getAttribute('aria-hidden') === 'false' && keyboard > 0) {
+      panel.style.setProperty('--lo-kb', `${keyboard}px`);
+      panel.dataset['kb'] = 'true';
+    } else {
+      delete panel.dataset['kb'];
+    }
+  }
+  window.visualViewport?.addEventListener('resize', fitAboveKeyboard);
+  window.visualViewport?.addEventListener('scroll', fitAboveKeyboard);
+  new MutationObserver(fitAboveKeyboard).observe(panel, { attributes: true, attributeFilter: ['aria-hidden'] });
   // Variant used when the close came from the user dismissing the panel
   // (✕ button, Esc) — returns keyboard focus to the dock's chrome-nav
   // anchor so arrows continue from a stable spot. Launching an app uses
@@ -616,6 +669,7 @@ import Icon from '../ui/Icon.astro';
       el.hidden = needle !== '' && !name.toLowerCase().includes(needle) && !id.toLowerCase().includes(needle);
       if (!el.hidden) matches.push({ appId: id, name });
     });
+    updateCount();
     // If the user was on a tile that just got filtered out, leave focus on
     // the search field — they're mid-typing. Don't auto-jump back into the
     // grid; that would steal their cursor.
@@ -828,6 +882,7 @@ import Icon from '../ui/Icon.astro';
     // had set are gone — re-apply the current query or a filtered grid comes
     // back showing everything.
     if (search.value.trim() !== '') applyLauncherFilter(search.value);
+    else updateCount();
   }
 
   // Boot stage 2: this bar's triggers work from here on.
