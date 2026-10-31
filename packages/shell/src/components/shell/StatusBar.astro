@@ -81,15 +81,20 @@ let initialTimeZone: string = '';
         <span class="ws-collapse-icon" aria-hidden="true"><Icon name="layout-grid" /></span>
       </button>
       <div id="ws-pills" class="ws-pills"></div>
+      <!-- Compact + "+" — their own group so the dropdown can put them on the
+           pill row or, when that row is too wide, beside the layout chip. -->
+      <div id="ws-pill-actions" class="ws-pills ws-pill-actions"></div>
       <button id="ws-layout-chip" class="layout-chip" title="Cycle workspace layout" aria-label="Layout strategy">
         <span class="layout-chip-icon" aria-hidden="true"><Icon name="layout-grid" /></span>
         <span class="layout-chip-name">—</span>
         <span class="layout-chip-cycle" aria-hidden="true"><Icon name="rotate-cw" /></span>
       </button>
-      <!-- Dropdown popover host: starts empty; fitWorkspaceUI() relocates the
-           folded controls (chip, then pills) into it. Absolutely positioned,
-           so its DOM position here doesn't affect the inline bar layout. -->
-      <div id="ws-content" class="ws-content" role="group" aria-label="Workspaces"></div>
+      <!-- Dropdown popover host: two rows, empty until fitWorkspaceUI()
+           relocates the folded controls into them. Row 1: pills (+ compact
+           and "+" when they fit); row 2: layout chip (+ compact and "+"
+           otherwise) — see arrangeDropdown(). Absolutely positioned, so its
+           DOM position here doesn't affect the inline bar layout. -->
+      <div id="ws-content" class="ws-content" role="group" aria-label="Workspaces"><div id="ws-drop-row1" class="ws-drop-row"></div><div id="ws-drop-row2" class="ws-drop-row"></div></div>
       <!--
         Per-pill context menu (right-click / long-press on a numbered pill).
         Static markup so Astro's scoped <style> applies — the pills themselves
@@ -204,7 +209,7 @@ let initialTimeZone: string = '';
   import { requestOpen } from '../../lib/openRequest.ts';
   import { claimEarlyClicks } from '../../lib/earlyClicks.ts';
   import * as workspaceClient from '../../lib/workspaceClient';
-  import { registerDropTarget } from '../../lib/windowDrag';
+  import { registerDropTarget, WINDOW_DRAG_EVENT } from '../../lib/windowDrag';
   import * as viewportClient from '../../lib/viewportClient';
   import { queueViewportBroadcast } from '../../lib/viewportBroadcaster.ts';
   import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
@@ -633,6 +638,9 @@ let initialTimeZone: string = '';
   const bundleEl    = document.getElementById('ws-bundle')       as HTMLElement       | null;
   const popoverEl   = document.getElementById('ws-content')      as HTMLElement       | null;
   const collapseBtn = document.getElementById('ws-collapse-btn') as HTMLButtonElement | null;
+  const actionsEl   = document.getElementById('ws-pill-actions') as HTMLElement       | null;
+  const dropRow1El  = document.getElementById('ws-drop-row1')    as HTMLElement       | null;
+  const dropRow2El  = document.getElementById('ws-drop-row2')    as HTMLElement       | null;
   const statusBar   = document.getElementById('statusbar')       as HTMLElement       | null;
   const rightEl     = statusBar?.querySelector('.right')         as HTMLElement       | null;
   const osNameEl    = statusBar?.querySelector('.os-name')       as HTMLElement       | null;
@@ -738,6 +746,7 @@ let initialTimeZone: string = '';
                               // toggles still picks the right side
     bundleEl.dataset['open'] = String(next);
     collapseBtn.setAttribute('aria-expanded', String(next));
+    if (next) arrangeDropdown();
   });
   // Window drag & drop (lib/windowDrag.ts): dropping a window on a numbered
   // pill moves it to that workspace. Pills are re-rendered constantly, so the
@@ -755,35 +764,28 @@ let initialTimeZone: string = '';
       return workspaceClient.addMemberToWorkspace(data as string, src.viewId);
     },
   });
-  // Folded bar: the pills live in the dropdown. Hovering the ▦ button for a
-  // moment during a drag opens it so the pills become reachable drop targets.
-  let dragOpenTimer: ReturnType<typeof setTimeout> | null = null;
-  registerDropTarget({
-    id: 'workspace-dropdown-open',
-    resolve(el) {
-      if (!collapseBtn || !bundleEl || bundleEl.dataset['fold'] !== 'all') return null;
-      return el.closest('#ws-collapse-btn') ? { el: collapseBtn, data: null } : null;
-    },
-    enter() {
-      if (dragOpenTimer) clearTimeout(dragOpenTimer);
-      dragOpenTimer = setTimeout(() => {
-        dragOpenTimer = null;
-        if (!bundleEl || bundleEl.dataset['open'] === 'true') return;
-        pickAnchor();
-        bundleEl.dataset['open'] = 'true';
-        collapseBtn?.setAttribute('aria-expanded', 'true');
-      }, 500);
-    },
-    leave() {
-      if (dragOpenTimer) { clearTimeout(dragOpenTimer); dragOpenTimer = null; }
-    },
-    drop() { /* opening the dropdown is the whole effect */ },
+  // Folded bar (small screens): the pills live in the dropdown, so it opens
+  // as soon as a window drag starts — the pills are drop targets for the whole
+  // drag — and closes when the drag ends (dropped or cancelled).
+  window.addEventListener(WINDOW_DRAG_EVENT, (e) => {
+    if (!bundleEl) return;
+    const active = (e as CustomEvent<{ active: boolean }>).detail?.active === true;
+    if (active) {
+      if (bundleEl.dataset['fold'] !== 'all') return;
+      pickAnchor();
+      bundleEl.dataset['open'] = 'true';
+      collapseBtn?.setAttribute('aria-expanded', 'true');
+      arrangeDropdown();
+    } else if (bundleEl.dataset['open'] === 'true') {
+      bundleEl.dataset['open'] = 'false';
+      collapseBtn?.setAttribute('aria-expanded', 'false');
+    }
   });
 
   // Re-pick anchor if the viewport changes while the popover is open
   // (responsive resize, zoom changes, etc.).
   window.addEventListener('resize', () => {
-    if (bundleEl?.dataset['open'] === 'true') pickAnchor();
+    if (bundleEl?.dataset['open'] === 'true') { pickAnchor(); arrangeDropdown(); }
   });
   // Close-on-outside-click. `composedPath()` is captured at dispatch time
   // so it survives DOM mutations during the click handler chain. We need
@@ -922,7 +924,9 @@ let initialTimeZone: string = '';
     // Disabled when it would change nothing.
     const compact = `<button class="ws-pill ws-pill-compact" data-ws-action="compact" ${workspaceClient.canCompact(state) ? '' : 'disabled'} title="Compact workspaces (remove empty ones, renumber WS names)">${COMPACT_ICON}</button>`;
     const add = `<button class="ws-pill ws-pill-add" data-ws-action="new" title="New workspace (Ctrl+Shift+N)">+</button>`;
-    pillsEl.innerHTML = prev + numbered + next + compact + add;
+    pillsEl.innerHTML = prev + numbered + next;
+    if (actionsEl) actionsEl.innerHTML = compact + add;
+    arrangeDropdown();   // pill count may have changed the row width
   }
 
   // Relocate the pills + layout chip between their inline home (as direct
@@ -941,17 +945,36 @@ let initialTimeZone: string = '';
     if (!bundleEl || !popoverEl) return;
     bundleEl.dataset['fold'] = fold;
     if (fold === 'none') {
-      // Inline, in order: pills before chip (both before the popover host).
+      // Inline, in order: pills, compact/+, chip (all before the popover host).
       if (pillsEl)    bundleEl.insertBefore(pillsEl, popoverEl);
+      if (actionsEl)  bundleEl.insertBefore(actionsEl, popoverEl);
       if (layoutChip) bundleEl.insertBefore(layoutChip, popoverEl);
     } else if (fold === 'chip') {
       if (pillsEl)    bundleEl.insertBefore(pillsEl, popoverEl);
-      if (layoutChip) popoverEl.appendChild(layoutChip);
+      if (actionsEl)  bundleEl.insertBefore(actionsEl, popoverEl);
+      if (layoutChip) dropRow2El?.appendChild(layoutChip);
     } else {
-      // 'all' — pills first so the dropdown reads pills · chip top-to-bottom.
-      if (pillsEl)    popoverEl.appendChild(pillsEl);
-      if (layoutChip) popoverEl.appendChild(layoutChip);
+      // 'all' — pills on row 1, chip on row 2; arrangeDropdown() places
+      // compact/+ on whichever row they fit.
+      if (pillsEl)    dropRow1El?.appendChild(pillsEl);
+      if (layoutChip) dropRow2El?.appendChild(layoutChip);
+      arrangeDropdown();
     }
+  }
+
+  // Folded dropdown ('all'): compact + "+" go on the pill row when it has the
+  // room, else onto row 2 after the layout chip. Only measurable while the
+  // dropdown is shown, so it re-runs on open, on resize and after renderPills.
+  function arrangeDropdown(): void {
+    if (!bundleEl || !actionsEl || !dropRow1El || !dropRow2El) return;
+    if (bundleEl.dataset['fold'] !== 'all') return;
+    dropRow1El.appendChild(actionsEl);
+    if (bundleEl.dataset['open'] !== 'true') return;
+    // Measure the unwrapped row 1 against the popover's capped width.
+    bundleEl.dataset['dropMeasure'] = 'true';
+    const overflows = dropRow1El.scrollWidth > dropRow1El.clientWidth + 1;
+    delete bundleEl.dataset['dropMeasure'];
+    if (overflows) dropRow2El.appendChild(actionsEl);
   }
 
   // Size the workspace switcher to the available bar width, degrading in
@@ -1138,7 +1161,7 @@ let initialTimeZone: string = '';
     fitWorkspaceUI();
   });
 
-  pillsEl?.addEventListener('click', (e) => {
+  const onPillClick = (e: MouseEvent) => {
     // A long-press already opened the context menu for this pill; the click
     // that follows pointerup must not also switch workspace. stopPropagation
     // additionally keeps the document-level dismiss handlers from closing the
@@ -1193,7 +1216,9 @@ let initialTimeZone: string = '';
       clearPending();
       workspaceClient.setActive(id).catch((err) => console.warn('[StatusBar] setActive failed', err));
     }
-  });
+  };
+  pillsEl?.addEventListener('click', onPillClick);
+  actionsEl?.addEventListener('click', onPillClick);
 
   // ---- Per-pill context menu ------------------------------------------
   // Right-click or long-press a numbered pill → a menu with Move / Rename /
@@ -1935,8 +1960,9 @@ let initialTimeZone: string = '';
    * to whichever side has room — so a bundle near the right edge opens
    * leftward, and one near the left edge opens rightward. */
   .ws-bundle[data-open="true"] .ws-content {
-    display: inline-flex;
-    flex-wrap: wrap;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
     gap: 6px;
     position: absolute;
     top: calc(100% + 6px);
@@ -1946,8 +1972,23 @@ let initialTimeZone: string = '';
     border: var(--aura-border);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
     min-width: 220px;
-    max-width: min(360px, 90vw);
+    /* As wide as its widest row, capped to the viewport. */
+    width: max-content;
+    max-width: min(400px, 90vw);
   }
+  /* Two rows: pills (+ compact/+ when they fit), then the layout chip. */
+  .ws-drop-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .ws-drop-row:empty { display: none; }
+  /* Last resort on very narrow screens: the pills wrap instead of spilling
+     out. Off while arrangeDropdown() measures the unwrapped width. */
+  .ws-drop-row > .ws-pills { flex-wrap: wrap; row-gap: 6px; min-width: 0; }
+  .ws-bundle[data-drop-measure="true"] .ws-drop-row > .ws-pills { flex-wrap: nowrap; }
   .ws-bundle[data-anchor="right"] .ws-content { right: 0; left: auto; }
   .ws-bundle[data-anchor="left"]  .ws-content { left: 0;  right: auto; }
   /* Center anchor — used when neither side fits in a narrow viewport.
@@ -2270,7 +2311,6 @@ let initialTimeZone: string = '';
    * like "+" (it is a workspace-list action, not a workspace). */
   .ws-pill-compact {
     color: var(--aura-color-text-dim);
-    margin-left: 4px;
     padding: 0 8px;
     font-size: 0.85rem;
   }

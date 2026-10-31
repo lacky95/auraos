@@ -39,6 +39,14 @@ export interface WindowDropTarget {
   leave?(match: DropMatch, src: DragSource): void;
 }
 
+/** Fired on `window` when a ghost drag starts / ends (detail: `{ active }`),
+ *  so shell chrome can react — e.g. the folded workspace dropdown opens for
+ *  the whole drag so its pills are drop targets. */
+export const WINDOW_DRAG_EVENT = 'aura:window-drag';
+function announceDrag(active: boolean): void {
+  window.dispatchEvent(new CustomEvent(WINDOW_DRAG_EVENT, { detail: { active } }));
+}
+
 const DRAG_THRESHOLD_PX = 5;
 const GHOST_OFFSET_PX = 4;
 
@@ -114,6 +122,7 @@ function runGhostSession(ev: PointerEvent, src: DragSource, sourceEl: HTMLElemen
     bar.textContent = src.title;
     ghost.appendChild(bar);
     document.body.appendChild(ghost);
+    announceDrag(true);
   };
 
   const track = (e: PointerEvent) => {
@@ -169,6 +178,7 @@ function runGhostSession(ev: PointerEvent, src: DragSource, sourceEl: HTMLElemen
     sourceEl.removeAttribute('data-drag-source');
     document.body.classList.remove('aura-window-dragging');
     dragging = false;
+    announceDrag(false);
     return hit;
   };
 
@@ -176,12 +186,20 @@ function runGhostSession(ev: PointerEvent, src: DragSource, sourceEl: HTMLElemen
     if (!started) { removeListeners(); return; }
     const hit = teardown();
     try { handle?.releasePointerCapture(pointerId); } catch { /* already released */ }
-    // Swallow the click that follows a real drag so title-bar handlers don't fire.
-    // The click (if any) is dispatched right after pointerup, so a 0ms
-    // timeout removes the swallower before any later, genuine click.
-    const swallow = (e: MouseEvent) => { e.stopPropagation(); e.preventDefault(); };
+    // Swallow the click that follows a real drag so title-bar handlers and
+    // click-outside dismissers (e.g. the folded workspace dropdown) don't fire.
+    // Mouse browsers dispatch it right after pointerup, but Android Chrome
+    // sends a touch's click in a later task — a 0ms timeout misses it. So the
+    // swallower stays until that click, the next press, or a short timeout.
+    const disarm = () => {
+      clearTimeout(disarmTimer);
+      window.removeEventListener('click', swallow, true);
+      window.removeEventListener('pointerdown', disarm, true);
+    };
+    const swallow = (e: MouseEvent) => { e.stopPropagation(); e.preventDefault(); disarm(); };
     window.addEventListener('click', swallow, true);
-    setTimeout(() => window.removeEventListener('click', swallow, true), 0);
+    window.addEventListener('pointerdown', disarm, true);
+    const disarmTimer = setTimeout(disarm, 400);
     const dropped = commit && !!hit;
     if (dropped) {
       Promise.resolve(hit!.target.drop(src, hit!.match.data)).catch((err) =>
