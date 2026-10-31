@@ -73,6 +73,7 @@ export interface GitIndexSource extends SourceCommon {
  *  the catalog can list it without cloning on every aggregation. */
 export interface GitAppMeta {
   id:           string;
+  originId?:    string;
   name:         string;
   version:      string;
   description?: string;

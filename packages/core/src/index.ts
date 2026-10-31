@@ -17,6 +17,7 @@ export * from './app-manager/SidecarManager.js';
 export * from './app-manager/BaseImage.js';
 export * from './app-manager/sidecar-spec.js';
 export * from './app-manager/IntentResolver.js';
+export * from './app-manager/AppIdentity.js';
 export * from './permissions/index.js';
 export * from './content/index.js';
 export * from './interfaces/index.js';

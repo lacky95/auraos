@@ -53,6 +53,31 @@ export interface InstallRecord {
   /** The source it came from, so an update asks the same (possibly private)
    *  source again. Absent in older records → resolved as at install time. */
   sourceName?: string;
+  /** The app's originId when installed (see core AppIdentity). */
+  originId?:   string;
+  /** The app's id in its source, when it is installed under another local id
+   *  ("install as" / "update existing") — updates from that source land here. */
+  remoteId?:   string;
+  /** Installed as an independent copy: no originId link to its source, so
+   *  the store never updates it from there. */
+  detached?:   boolean;
+}
+
+/** How the user resolved an identity conflict (re-sent with the install). */
+export interface IdentityDecision {
+  action: import('../app-manager/AppIdentity.js').IdentityAction;
+  /** The local id to install under (install-as / install-copy); default suggested. */
+  appId?: string;
+}
+
+/** An install the user must decide about (scenarios A, B, D). */
+export interface IdentityConflict {
+  kind:     import('../app-manager/AppIdentity.js').IdentityConflictKind;
+  incoming: { appId: string; originId: string | null; version: string; name: string; sourceName?: string; ref: string };
+  existing: { appId: string; originId: string | null; scope: ScopeId; sourceName?: string; ref?: string };
+  choices:  import('../app-manager/AppIdentity.js').IdentityAction[];
+  /** A free local id for install-as / install-copy. */
+  suggestedAppId: string;
 }
 
 /**
@@ -86,6 +111,8 @@ export interface PermissionDiff {
  */
 export interface IndexEntry {
   id:          string;
+  /** The app's originId — the same app across registries (see AppIdentity). */
+  originId?:   string;
   name:        string;
   description?: string;
   icon?:       string;
@@ -128,6 +155,8 @@ export type NexusProgressEvent =
   | { type: 'fetch.progress';     bytesDownloaded: number; bytesTotal?: number }
   | { type: 'fetch.done';         stagingDir: string }
   | { type: 'validate.done';      manifest: AppManifest }
+  | { type: 'identity.choice';    conflict: IdentityConflict }
+  | { type: 'identity.resolved';  action: string; appId: string }
   | { type: 'permission.needed';  diff: PermissionDiff }
   | { type: 'permission.approved' }
   | { type: 'permission.denied' }

@@ -23,6 +23,7 @@ export function probeGitApp(url: string, ref?: string): GitAppMeta {
     const manifest = validateStagedDir(tmp);
     return {
       id:          manifest.id,
+      ...(manifest.originId ? { originId: manifest.originId } : {}),
       name:        manifest.name,
       version:     manifest.version,
       description: manifest.description,

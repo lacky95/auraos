@@ -2,7 +2,7 @@ import type { Command } from 'commander';
 import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync, chmodSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { AppManifestSchema, AURA_NPMRC, needsNpmrc, portPackageJsonForScope, portToolsForScope } from '@aura/core';
+import { AppManifestSchema, AURA_NPMRC, needsNpmrc, newOriginId, portPackageJsonForScope, portToolsForScope } from '@aura/core';
 import { color, fail, info, ok, warn } from '../lib/format.js';
 import { promptText, promptChoice, promptConfirm, promptMultiSelect, PromptCancelled, BACK, type MultiSelectMode } from '../lib/prompts.js';
 import { ensureRegistry, loadRegistry, loadState, type CapabilityEntry } from '../lib/registry.js';
@@ -106,6 +106,9 @@ interface ScaffoldConfig {
 function manifestFromConfig(cfg: ScaffoldConfig): Record<string, unknown> {
   const m: Record<string, unknown> = {
     id:          cfg.appId,
+    // A new, independent app: its own logical identity across registries and
+    // versions (see core AppIdentity). Updates and publishes keep it.
+    originId:    newOriginId(),
     name:        cfg.name,
     version:     '0.1.0',
     description: cfg.description ?? 'Scaffolded by `aura dev new`.',
@@ -804,16 +807,26 @@ export function registerDev(program: Command): void {
         fail('Pass a path or --all.');
       }
       let failed = 0;
+      let noOrigin = 0;
       for (const m of targets) {
         try {
           const data = JSON.parse(readFileSync(m, 'utf-8')) as unknown;
           const result = AppManifestSchema.safeParse(data);
-          if (result.success) ok(`${m}`);
-          else { warn(`${m}: ${result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`); failed++; }
+          if (!result.success) { warn(`${m}: ${result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`); failed++; continue; }
+          ok(`${m}`);
+          // Not an error (apps from before originIds), but the store can't
+          // recognise the app across registries and publish refuses it.
+          if (!result.data.originId) {
+            noOrigin++;
+            warn(`  no originId — run ${color.cyan(`aura dev origin --assign ${result.data.id}`)}`);
+          }
         } catch (err) { warn(`${m}: ${String(err)}`); failed++; }
       }
+      if (noOrigin > 1) info(`${noOrigin} app(s) without an originId — ${color.cyan('aura dev origin --assign --all')} gives them one`);
       if (failed > 0) process.exit(1);
     });
+
+  registerDevOrigin(dev);
 
   dev
     .command('standalone <appId>')
@@ -933,4 +946,83 @@ function deepEqual(a: unknown, b: unknown): boolean {
     return aKeys.every((k, i) => k === bKeys[i] && deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
   }
   return false;
+}
+
+// ─── dev origin ─────────────────────────────────────────────────────────────
+
+interface OriginRow { appId: string; originId: string | null; scope: ScopeId; mutable: boolean; active: boolean }
+interface OriginResult { appId: string; scope: ScopeId; originId: string | null; previous: string | null; changed: boolean; skipped?: string }
+
+/**
+ * `aura dev origin` — show and set app originIds (the UUID that says which
+ * logical app an install is, across registries; `id` stays the local name).
+ * The files are written by the shell (`/api/admin/app-origin`), which sees
+ * every scope; system apps get theirs in the AuraOS repo.
+ */
+function registerDevOrigin(dev: Command): void {
+  dev
+    .command('origin [appId]')
+    .option('--assign',        'Give the app (or --all apps) an originId if it has none — never changes an existing one')
+    .option('--all',           'With --assign: every app in every mutable scope')
+    .option('--reassign',      'Replace the app\'s originId with a new one (admin): it stops being recognised as the app it was')
+    .option('--origin-id <uuid>', 'With --reassign: use this UUID instead of a new one (adopt an existing identity)')
+    .option('--scope <id>',    'system | global | user — pick the copy in this scope (an id shadowed across scopes)')
+    .option('-y, --yes',       'With --reassign: do not ask for confirmation')
+    .option('--json',          'Print the raw response')
+    .description('Show or set app originIds — the stable identity of an app across registries, versions and ids.')
+    .action(async (appId: string | undefined, o: {
+      assign?: boolean; all?: boolean; reassign?: boolean; originId?: string; scope?: ScopeId; yes?: boolean; json?: boolean;
+    }) => {
+      if (appId && !PKG_RE.test(appId)) fail(`Invalid app ID: ${appId}`);
+      if (o.scope && !ALL_SCOPES.includes(o.scope)) fail(`Invalid --scope: '${o.scope}'. Expected one of: ${ALL_SCOPES.join(' | ')}.`);
+      if (o.assign && o.reassign) fail('Pass --assign or --reassign, not both.');
+      if (o.originId && !o.reassign) fail('--origin-id only goes with --reassign.');
+
+      if (!o.assign && !o.reassign) {
+        const { apps } = await api.get<{ apps: OriginRow[] }>('/api/admin/app-origin');
+        const rows = apps.filter((r) => (!appId || r.appId === appId) && (!o.scope || r.scope === o.scope));
+        if (o.json) { console.log(JSON.stringify(rows, null, 2)); return; }
+        if (!rows.length) { info(appId ? `${appId} is not installed` : 'no apps'); return; }
+        const w = Math.max(...rows.map((r) => r.appId.length));
+        for (const r of rows) {
+          const id = r.originId ?? color.yellow('(none)');
+          console.log(`${r.appId.padEnd(w)}  ${r.scope.padEnd(6)}  ${id}${r.active ? '' : color.dim('  (shadowed)')}`);
+        }
+        const missing = rows.filter((r) => !r.originId && r.mutable).length;
+        if (missing) info(`${missing} app(s) without an originId — ${color.cyan('aura dev origin --assign --all')}`);
+        return;
+      }
+
+      if (o.assign) {
+        if (!appId && !o.all) fail('Pass an <appId> or --all.');
+        const res = await api.post<{ results: OriginResult[] }>('/api/admin/app-origin', {
+          mode: 'assign', ...(o.all ? { all: true } : { appIds: [appId] }), ...(o.scope ? { scope: o.scope } : {}),
+        });
+        if (o.json) { console.log(JSON.stringify(res, null, 2)); return; }
+        let n = 0;
+        for (const r of res.results) {
+          if (r.changed) { n++; ok(`${r.appId} ${color.dim(`(${r.scope})`)} → ${r.originId}`); }
+          else if (r.skipped) warn(`${r.appId} ${color.dim(`(${r.scope})`)}: ${r.skipped}`);
+        }
+        info(n ? `assigned ${n} originId(s); existing ones were left alone` : 'every app already has an originId');
+        return;
+      }
+
+      // --reassign: an identity change, so one app, admin, and a confirmation.
+      if (!appId || o.all) fail('--reassign takes exactly one <appId>.');
+      if (!o.yes) {
+        warn(`${appId} gets a new originId: the store will treat it as a DIFFERENT app from the one it was (updates from its old source stop matching).`);
+        let yes: boolean | typeof BACK;
+        try { yes = await promptConfirm('Reassign?', false); }
+        catch (err) { if (err instanceof PromptCancelled) { info('cancelled'); return; } throw err; }
+        if (yes !== true) { info('cancelled'); return; }
+      }
+      const res = await api.post<{ results: OriginResult[] }>('/api/admin/app-origin', {
+        mode: 'reassign', appIds: [appId], ...(o.scope ? { scope: o.scope } : {}), ...(o.originId ? { originId: o.originId } : {}),
+      });
+      if (o.json) { console.log(JSON.stringify(res, null, 2)); return; }
+      const r = res.results[0];
+      if (!r || r.skipped) fail(`${appId}: ${r?.skipped ?? 'not changed'}`);
+      ok(`${r!.appId} ${color.dim(`(${r!.scope})`)}: ${r!.previous ?? color.dim('(none)')} → ${r!.originId}`);
+    });
 }

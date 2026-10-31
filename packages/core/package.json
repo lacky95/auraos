@@ -27,7 +27,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test test/identity-routing.test.mjs test/container-volume.test.mjs test/updater-script.test.mjs test/intent-resolver.test.mjs test/intent-dispatch.test.mjs test/interface-registry.test.mjs test/store-entry.test.mjs test/store-assets.test.mjs test/oci-listing.test.mjs test/provisioning.test.mjs test/tool-sidecars.test.mjs test/tool-libs.test.mjs test/sidecars.test.mjs test/port-manager.test.mjs test/instance-tokens.test.mjs test/sidecar-spec.test.mjs test/sidecar-tools.test.mjs test/sidecar-manager.test.mjs test/mount-manager.test.mjs test/notifications.test.mjs test/auth.test.mjs test/notifications-privacy.test.mjs test/base-image.test.mjs test/registry-auth.test.mjs test/nexus-oci-store.test.mjs"
+    "test": "tsc && node --test test/identity-routing.test.mjs test/container-volume.test.mjs test/updater-script.test.mjs test/intent-resolver.test.mjs test/intent-dispatch.test.mjs test/interface-registry.test.mjs test/store-entry.test.mjs test/store-assets.test.mjs test/oci-listing.test.mjs test/provisioning.test.mjs test/tool-sidecars.test.mjs test/tool-libs.test.mjs test/sidecars.test.mjs test/port-manager.test.mjs test/instance-tokens.test.mjs test/sidecar-spec.test.mjs test/sidecar-tools.test.mjs test/sidecar-manager.test.mjs test/mount-manager.test.mjs test/notifications.test.mjs test/auth.test.mjs test/notifications-privacy.test.mjs test/base-image.test.mjs test/registry-auth.test.mjs test/nexus-oci-store.test.mjs test/app-identity.test.mjs"
   },
   "dependencies": {
     "@aura/kv-store": "workspace:*",

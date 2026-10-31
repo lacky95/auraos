@@ -58,6 +58,9 @@ interface CloneResponse {
   strippedFields: string[];
   shadows: ScopeId | null;
   warnings: string[];
+  /** The source's originId and the copy's (new unless --keep-origin). */
+  sourceOriginId?: string | null;
+  originId?: string | null;
 }
 
 /** The full set of knobs the wizard and the flag path both produce. */
@@ -75,6 +78,8 @@ interface CloneConfig {
   stripPublish: boolean;
   stripStore:   boolean;
   withData:     boolean;
+  /** Keep the source's originId: a move/rename of the same app, not a fork. */
+  keepOrigin:   boolean;
   force:        boolean;
   dryRun:       boolean;
 }
@@ -289,6 +294,7 @@ async function runWizard(apps: AppDto[], seed: Partial<CloneConfig>): Promise<Cl
           { key: 'stripPublish', label: 'strip publish',  on: draft.stripPublish ?? false, desc: "Drop `publish` so `nexus app publish` can't push to the original's repo." },
           { key: 'stripStore',   label: 'strip store',    on: draft.stripStore ?? false,   desc: 'Drop `store` metadata (publisher, homepage, screenshots) about the original.' },
           { key: 'withData',     label: 'copy app data',  on: draft.withData ?? false,     desc: "Also copy the source's runtime /data tree into the clone." },
+          { key: 'keepOrigin',   label: 'keep originId',  on: draft.keepOrigin ?? false,   desc: 'Same app under a new id (a move/rename). Off = an independent copy with its own originId.' },
         ];
         const modes: MultiSelectMode<string>[] = [{
           label: 'clone options',
@@ -302,6 +308,7 @@ async function runWizard(apps: AppDto[], seed: Partial<CloneConfig>): Promise<Cl
         draft.stripPublish = on.has('stripPublish');
         draft.stripStore   = on.has('stripStore');
         draft.withData     = on.has('withData');
+        draft.keepOrigin   = on.has('keepOrigin');
         return 'advance';
       },
     },
@@ -372,6 +379,7 @@ function describeOptions(cfg: CloneConfig): string {
   if (cfg.stripPublish) on.push('strip-publish');
   if (cfg.stripStore)   on.push('strip-store');
   if (cfg.withData)     on.push('with-data');
+  if (cfg.keepOrigin)   on.push('keep-origin');
   return on.length > 0 ? color.green(on.join(', ')) : color.dim('(none)');
 }
 
@@ -396,6 +404,7 @@ async function cloneFromConfig(cfg: CloneConfig, asJson: boolean): Promise<void>
       stripPublish: cfg.stripPublish,
       stripStore:   cfg.stripStore,
       withData:     cfg.withData,
+      keepOriginId: cfg.keepOrigin,
       force:        cfg.force,
       dryRun:       cfg.dryRun,
     });
@@ -415,6 +424,11 @@ async function cloneFromConfig(cfg: CloneConfig, asJson: boolean): Promise<void>
   } else {
     ok(`cloned ${color.bold(r.sourceAppId)} ${color.dim(`(${r.sourceScope})`)} → ${color.bold(r.targetAppId)} at ${r.dest}`);
     info(`${r.fileCount} file(s), ${(r.bytes / 1024).toFixed(0)} KB`);
+  }
+  if (r.originId !== undefined) {
+    const from = r.sourceOriginId ?? color.dim('(none)');
+    const to = r.originId ?? color.dim('(none)');
+    info(`originId: ${from} → ${r.originId && r.originId === r.sourceOriginId ? `${to} ${color.dim('(kept — same app)')}` : `${to} ${color.dim('(new — independent copy)')}`}`);
   }
   if (r.rewrittenFiles.length > 0) {
     info(`rewrote the source id in ${r.rewrittenFiles.length} file(s): ${color.dim(r.rewrittenFiles.slice(0, 5).join(', '))}${r.rewrittenFiles.length > 5 ? color.dim(', …') : ''}`);
@@ -448,6 +462,7 @@ export function registerDevClone(dev: Command): void {
     .option('--strip-publish',       'Drop the manifest `publish` block (repo/registry/channels)')
     .option('--strip-store',         'Drop the manifest `store` metadata (publisher, homepage, screenshots)')
     .option('--with-data',           'Also copy the source app\'s runtime /data tree')
+    .option('--keep-origin',         'Keep the source\'s originId (moving/renaming the SAME app). Default: a clone is an independent app with a new originId')
     .option('--force',               'Overwrite the target if it already exists (stops its instances first)')
     .option('--dry-run',             'Report what would be copied and rewritten; write nothing')
     .option('--non-interactive',     'Never prompt; require both app ids')
@@ -460,7 +475,7 @@ export function registerDevClone(dev: Command): void {
         scope: ScopeId; sourceScope?: ScopeId;
         name?: string; icon?: string; description?: string; version?: string;
         rewriteIds: boolean; excludeGit?: boolean; stripPublish?: boolean;
-        stripStore?: boolean; withData?: boolean;
+        stripStore?: boolean; withData?: boolean; keepOrigin?: boolean;
         force?: boolean; dryRun?: boolean; nonInteractive?: boolean; json?: boolean;
       },
     ) => {
@@ -504,6 +519,7 @@ export function registerDevClone(dev: Command): void {
           stripPublish: opts.stripPublish ?? false,
           stripStore:   opts.stripStore   ?? false,
           withData:     opts.withData     ?? false,
+          keepOrigin:   opts.keepOrigin   ?? false,
           force:        opts.force        ?? false,
           dryRun:       opts.dryRun       ?? false,
         });
@@ -547,6 +563,7 @@ export function registerDevClone(dev: Command): void {
         stripPublish: opts.stripPublish ?? false,
         stripStore:   opts.stripStore   ?? false,
         withData:     opts.withData     ?? false,
+        keepOrigin:   opts.keepOrigin   ?? false,
         force:        opts.force        ?? false,
         dryRun:       opts.dryRun       ?? false,
       }, opts.json ?? false);

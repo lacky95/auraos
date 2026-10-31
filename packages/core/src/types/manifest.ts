@@ -246,6 +246,17 @@ export const AppManifestSchema = z.object({
     message: 'App ID must be reverse-domain notation: com.example.app',
   }),
   /**
+   * Which logical app artifact this is — a UUID, generated once when an
+   * independent app is created (`aura dev new`). It stays the same across
+   * versions, publishes and registries; a clone or fork gets a new one
+   * (`aura dev clone`). `id` is how the app is addressed locally (unique per
+   * installation, may differ per registry); `originId` is what the store
+   * matches to recognise the same app elsewhere — a claim, not proof of
+   * publisher or code. Optional for apps created before it existed
+   * (`aura dev origin --assign` fills it in). See core AppIdentity.ts.
+   */
+  originId: z.string().uuid({ message: 'originId must be a UUID' }).optional(),
+  /**
    * Component archetype — direct counterpart of Android's component model:
    *   'activity' (default) → user-facing app. Spawn lazily on launch, lifecycle
    *      includes onActivityCreate/onActivityDestroy, attaches to the UI shell.

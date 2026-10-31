@@ -9,8 +9,8 @@
  * `next()` call before continuing. The caller (CLI or shell route)
  * implements its own approval UI between yields.
  */
-import { mkdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { join, resolve as resolvePath } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import type { OsEventBus as OsEventBusSingleton } from '../ipc/OsEventBus.js';
 import type { ScopeDefinition, ScopeId } from '../scopes/types.js';
@@ -26,7 +26,7 @@ import { fetchOci } from './Fetchers/OciFetcher.js';
 import { publishGit, publishOci } from './Publisher.js';
 import { computePermissionDiff, diffRequiresApproval } from './PermissionDiff.js';
 import type {
-  InstallRecord, NexusProgressEvent, ResolvedRef,
+  IdentityDecision, InstallRecord, NexusProgressEvent, ResolvedRef,
 } from './types.js';
 import type { RegistryConfig } from './RegistryConfig.js';
 import { orasHostFromUrl, resolveByName, urlForHost } from './RegistryConfig.js';
@@ -34,6 +34,10 @@ import type { OciSource, SourcesConfig } from './SourcesConfig.js';
 import { DEFAULT_APP_REPO_PREFIX, DEFAULT_SOURCES_CONFIG, loadSourcesConfig, ociRegistryView } from './SourcesConfig.js';
 import { loadRegistryCredentials } from './RegistryAuth.js';
 import { needsProvisioning, provisionApp } from '../app-manager/provisioning.js';
+import {
+  APP_ID_PATTERN, classifyIdentity, rewriteAppIdentity, scanInstalledIdentities, suggestFreeAppId,
+  type InstalledIdentity,
+} from '../app-manager/AppIdentity.js';
 
 export interface NexusManagerOpts {
   scopes:  ScopeDefinition[];
@@ -69,6 +73,8 @@ export class NexusManager {
   /** App ids (and raw refs) currently mid-install. Exposed so the store UI can
    *  render/persist an "installing…" state that survives a page reload. */
   private readonly installing = new Set<string>();
+  /** Every scope, system included — the identity check looks at all of them. */
+  private readonly scopeDefs: ScopeDefinition[];
 
   /** True while an install for this id/ref is in flight. */
   isInstalling(id: string): boolean { return this.installing.has(id); }
@@ -77,6 +83,7 @@ export class NexusManager {
 
   constructor(opts: NexusManagerOpts) {
     this.rootDataDir   = opts.rootDataDir;
+    this.scopeDefs     = opts.scopes;
     this.bus           = opts.bus;
     this.onAppChanged  = opts.onAppChanged;
     this.sourcesConfig = opts.sourcesConfig ?? cloneDefaultSources();
@@ -179,6 +186,48 @@ export class NexusManager {
     };
   }
 
+  /** Every installed app with its originId and install record, highest
+   *  priority scope first (the copy the OS actually runs comes first). */
+  private installedIdentities(): InstalledIdentity[] {
+    const out: InstalledIdentity[] = [];
+    for (const s of [...this.scopeDefs].sort((a, b) => b.priority - a.priority)) {
+      const inst = this.installers.get(s.id);
+      for (const a of scanInstalledIdentities(s.appsDir, s.id)) {
+        const r = inst?.getRecord(a.appId) ?? null;
+        out.push({
+          ...a,
+          record: r ? {
+            ref: r.ref,
+            ...(r.sourceName ? { sourceName: r.sourceName } : {}),
+            ...(r.remoteId ? { remoteId: r.remoteId } : {}),
+            ...(r.originId ? { originId: r.originId } : {}),
+            ...(r.detached ? { detached: true } : {}),
+          } : null,
+        });
+      }
+    }
+    return out;
+  }
+
+  /** Give the staged app another local id (and originId), revalidated. */
+  private retarget(stagingDir: string, fromId: string, toId: string, originId: 'keep' | 'new' | string, scope: ScopeId): AppManifest {
+    const rw = rewriteAppIdentity(stagingDir, {
+      fromId, toId, scope, originId, sdkVersion: this.sdkVersion(),
+    });
+    if (!rw.ok) throw new Error(`could not install as ${toId}: ${rw.message}`);
+    return validateStagedDir(stagingDir);
+  }
+
+  /** The @aura/app-sdk version of this OS (system scope = <repo>/apps). */
+  private sdkVersion(): string {
+    const sys = this.scopeDefs.find((s) => s.id === 'system')?.appsDir;
+    if (!sys) return '0.0.1';
+    try {
+      const pkg = JSON.parse(readFileSync(join(resolvePath(sys, '..'), 'packages/app-sdk/package.json'), 'utf-8')) as { version?: unknown };
+      return typeof pkg.version === 'string' ? pkg.version : '0.0.1';
+    } catch { return '0.0.1'; }
+  }
+
   private getRecord(id: string): InstallRecord | null {
     // Check higher-priority scopes first (user before global).
     for (const [, installer] of [...this.installers].reverse()) {
@@ -226,9 +275,10 @@ export class NexusManager {
     autoApprove?: boolean;
     /** Updates: ask this source first (see Resolver.resolve). */
     sourceName?: string;
+    /** The user's answer to an earlier `identity.choice` (re-sent install). */
+    identity?:   IdentityDecision;
   }): AsyncGenerator<NexusProgressEvent, InstallRecord, { approve: boolean } | void> {
-    const targetScope = opts.scope ?? 'global';
-    const installer   = this.installerFor(targetScope);
+    let targetScope: 'global' | 'user' = opts.scope ?? 'global';
     const stagingDir  = join(this.rootDataDir, 'nexus', 'staging', `pending-${Date.now()}`);
     mkdirSync(stagingDir, { recursive: true });
 
@@ -252,9 +302,81 @@ export class NexusManager {
       await this.fetch(resolved, stagingDir);
       yield { type: 'fetch.done', stagingDir };
 
-      const manifest = validateStagedDir(stagingDir);
+      let manifest = validateStagedDir(stagingDir);
       keys.add(manifest.id); this.installing.add(manifest.id);
       yield { type: 'validate.done', manifest };
+
+      // ─── Identity: which installed app (if any) is this? ────────────────
+      // `id` alone decides nothing: the same id can be an unrelated app, and
+      // the same app (originId) can live under another id. Scenarios A, B, D
+      // need the user's choice and are never resolved silently (AppIdentity).
+      const remoteId = manifest.id;
+      const installed = this.installedIdentities();
+      const verdict = classifyIdentity(
+        { appId: manifest.id, originId: manifest.originId ?? null, rawRef: resolved.rawRef, sourceName: resolved.sourceName },
+        installed,
+      );
+      let link: { remoteId?: string; detached?: boolean } = {};
+      if (verdict.kind === 'update') {
+        if (verdict.target.scope !== 'system') targetScope = verdict.target.scope;
+        if (verdict.target.appId !== manifest.id) {
+          manifest = this.retarget(stagingDir, remoteId, verdict.target.appId, 'keep', targetScope);
+          link = { remoteId };
+        }
+      } else if (verdict.kind === 'conflict') {
+        const taken = new Set(installed.map((i) => i.appId));
+        const suggestedAppId = suggestFreeAppId(remoteId, taken);
+        const decision = opts.identity;
+        if (!decision) {
+          unmark();
+          yield {
+            type: 'identity.choice',
+            conflict: {
+              kind: verdict.conflict,
+              incoming: { appId: remoteId, originId: manifest.originId ?? null, version: manifest.version, name: manifest.name,
+                          ref: resolved.rawRef, ...(resolved.sourceName ? { sourceName: resolved.sourceName } : {}) },
+              existing: { appId: verdict.existing.appId, originId: verdict.existing.originId, scope: verdict.existing.scope,
+                          ...(verdict.existing.record?.sourceName ? { sourceName: verdict.existing.record.sourceName } : {}),
+                          ...(verdict.existing.record?.ref ? { ref: verdict.existing.record.ref } : {}) },
+              choices: verdict.choices,
+              suggestedAppId,
+            },
+          };
+          throw new Error('install needs an identity decision');
+        }
+        if (!verdict.choices.includes(decision.action)) {
+          throw new Error(`'${decision.action}' is not possible here (${verdict.conflict}: ${verdict.choices.join(' | ')})`);
+        }
+        if (decision.action === 'update-existing') {
+          const ex = verdict.existing;
+          if (ex.scope === 'system') throw new Error(`${ex.appId} is a system app and cannot be replaced`);
+          targetScope = ex.scope;
+          if (ex.appId !== manifest.id) {
+            manifest = this.retarget(stagingDir, remoteId, ex.appId, 'keep', targetScope);
+            link = { remoteId };
+          } else if (!manifest.originId && ex.originId) {
+            // A source without originIds replacing an app that has one keeps it.
+            manifest = this.retarget(stagingDir, remoteId, ex.appId, ex.originId, targetScope);
+          }
+        } else {
+          const localId = decision.appId ?? suggestedAppId;
+          if (!APP_ID_PATTERN.test(localId)) throw new Error(`invalid app id: ${localId}`);
+          if (taken.has(localId)) throw new Error(`${localId} is already installed — choose another id`);
+          if (decision.action === 'install-as') {
+            // Another app that happens to share the id: same artifact, local name.
+            manifest = this.retarget(stagingDir, remoteId, localId, 'keep', targetScope);
+            link = { remoteId };
+          } else {
+            // An independent copy: new id AND new originId, no update link.
+            manifest = this.retarget(stagingDir, remoteId, localId, 'new', targetScope);
+            link = { detached: true };
+          }
+        }
+        mark();
+        yield { type: 'identity.resolved', action: decision.action, appId: manifest.id };
+      }
+      keys.add(manifest.id); this.installing.add(manifest.id);
+      const installer = this.installerFor(targetScope);
 
       // Permission diff vs. currently-installed version in any scope.
       const currentRecord = this.getRecord(manifest.id);
@@ -281,7 +403,7 @@ export class NexusManager {
       }
 
       yield { type: 'install.start' };
-      const record = await installer.install(stagingDir, manifest, resolved);
+      const record = await installer.install(stagingDir, manifest, resolved, link);
 
       // Register with the AppRegistry NOW — before provisioning, and well before
       // yielding install.done. Two reasons, and the order matters:
@@ -337,15 +459,23 @@ export class NexusManager {
     }
   }
 
-  async *update(appId: string, opts: { autoApprove?: boolean } = {}): AsyncGenerator<NexusProgressEvent, InstallRecord | null, { approve: boolean } | void> {
+  async *update(appId: string, opts: { autoApprove?: boolean; identity?: IdentityDecision } = {}): AsyncGenerator<NexusProgressEvent, InstallRecord | null, { approve: boolean } | void> {
     const current = this.getRecord(appId);
     if (!current) {
       yield { type: 'error', code: 'not-installed',
               message: `'${appId}' is not installed; nothing to update` };
       return null;
     }
+    if (current.detached) {
+      yield { type: 'error', code: 'detached',
+              message: `'${appId}' was installed as an independent copy — it has no update source` };
+      return null;
+    }
     const scope = (current.scope === 'system' ? 'global' : current.scope) ?? 'global';
-    const result = yield* this.install({ ref: current.ref, scope, autoApprove: opts.autoApprove, sourceName: current.sourceName });
+    const result = yield* this.install({
+      ref: current.ref, scope, autoApprove: opts.autoApprove, sourceName: current.sourceName,
+      ...(opts.identity ? { identity: opts.identity } : {}),
+    });
     this.bus?.emit('nexus:update.complete', { id: appId, record: result });
     return result;
   }

@@ -43,6 +43,7 @@ export const ANNOTATION_KEYS = {
   created:     'org.opencontainers.image.created',
   // Aura custom
   id:          'app.aura.id',
+  originId:    'app.aura.origin-id',
   icon:        'app.aura.icon',
   category:    'app.aura.category',
   tags:        'app.aura.tags',          // comma-joined
@@ -58,6 +59,8 @@ export const ANNOTATION_KEYS = {
  */
 export interface StoreMetadata {
   id?:              string;
+  /** The app's originId (logical artifact identity across registries). */
+  originId?:        string;
   name?:            string;
   description?:     string;
   longDescription?: string;
@@ -90,6 +93,7 @@ export function buildStoreAnnotations(
   put(ANNOTATION_KEYS.version,     manifest.version);
   put(ANNOTATION_KEYS.created,     opts.createdAt);
   put(ANNOTATION_KEYS.id,          manifest.id);
+  put(ANNOTATION_KEYS.originId,    manifest.originId);
   put(ANNOTATION_KEYS.icon,        manifest.icon);
   put(ANNOTATION_KEYS.category,    manifest.category);
 
@@ -141,6 +145,7 @@ export function parseStoreAnnotations(
 
   return {
     id:              get(ANNOTATION_KEYS.id) ?? manifest?.id,
+    originId:        get(ANNOTATION_KEYS.originId) ?? manifest?.originId,
     name:            get(ANNOTATION_KEYS.title) ?? manifest?.name,
     description:     get(ANNOTATION_KEYS.description) ?? manifest?.description,
     longDescription: get(ANNOTATION_KEYS.longDesc),

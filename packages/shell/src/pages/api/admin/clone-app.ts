@@ -2,13 +2,11 @@ import type { APIRoute } from 'astro';
 import { execFileSync } from 'node:child_process';
 import {
   cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync,
-  statSync, writeFileSync,
 } from 'node:fs';
-import { join, resolve, relative } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
-  AppManifestSchema, AURA_NPMRC, getAppManager, needsNpmrc,
-  portPackageJsonForScope, portToolsForScope,
-  type ScopeDefinition, type ScopeId,
+  getAppManager, rewriteAppIdentity,
+  type ManifestPatch, type ScopeDefinition, type ScopeId,
 } from '@aura/core';
 import { auditAdmin, requireAdmin } from '../../../lib/auth.js';
 
@@ -39,17 +37,6 @@ const SEMVER_RE  = /^\d+\.\d+\.\d+$/;
 /** Build artefacts + dep trees that must never follow an app to a new id. */
 const COPY_EXCLUDES = ['node_modules', '.pnpm-store', '.next', 'dist', '.astro', '.turbo', '.cache'];
 
-/** Id-rewrite guards: skip anything big or binary rather than corrupting it. */
-const REWRITE_MAX_BYTES = 512 * 1024;
-const BINARY_SNIFF_BYTES = 8 * 1024;
-
-interface ManifestPatch {
-  name?:        string | null;
-  icon?:        string | null;
-  description?: string | null;
-  version?:     string | null;
-}
-
 interface CloneRequest {
   sourceAppId:  string;
   /** Optional — pins which scope to read the source from when an app id is
@@ -61,6 +48,10 @@ interface CloneRequest {
   manifest?:    ManifestPatch;
   /** Substitute sourceAppId → targetAppId inside copied text files. Default true. */
   rewriteIds?:  boolean;
+  /** Keep the source's originId (a move/rename of the SAME artifact). Default
+   *  false: a clone is an independent app and gets a new originId — also a
+   *  same-id fork into another scope. */
+  keepOriginId?: boolean;
   excludeGit?:   boolean;
   stripPublish?: boolean;
   stripStore?:   boolean;
@@ -194,109 +185,32 @@ export const POST: APIRoute = async ({ request }) => {
     try { copyTree(srcDir, staging, excludes, rootExcludes); }
     catch (err) { return json({ error: 'copy-failed', message: (err as Error).message }, 500); }
 
-    // ─── Rewrite the manifest ──────────────────────────────────────────────
-    const manifestPath = join(staging, 'app.manifest.json');
-    if (!existsSync(manifestPath)) {
-      return json({ error: 'source-has-no-manifest', message: `${srcDir}/app.manifest.json is missing.` }, 422);
+    // ─── Give the copy its identity ────────────────────────────────────────
+    // id + originId (new unless keepOriginId), dataProvider.authority, tools
+    // and package.json for the target scope, and the source id swept out of
+    // the text files — shared with Nexus "install as" (core AppIdentity).
+    const rw = rewriteAppIdentity(staging, {
+      fromId: sourceAppId, toId: targetAppId, scope: targetScopeId,
+      originId: body.keepOriginId ? 'keep' : 'new',
+      rewriteIds, patch: body.manifest,
+      stripPublish: body.stripPublish, stripStore: body.stripStore,
+      sdkVersion: readSdkVersion(scopes), excludes,
+    });
+    if (!rw.ok) {
+      return json({ error: rw.error, message: rw.message, ...(rw.issues ? { issues: rw.issues } : {}) }, 422);
     }
-    let m: Record<string, unknown>;
-    try { m = JSON.parse(readFileSync(manifestPath, 'utf-8')) as Record<string, unknown>; }
-    catch (err) { return json({ error: 'source-has-no-manifest', message: `Unparseable manifest: ${(err as Error).message}` }, 422); }
-
-    const strippedFields: string[] = [];
-    m['id'] = targetAppId;
-    applyPatch(m, body.manifest);
-
-    // `dataProvider.authority` is a GLOBAL namespace key — /api/data/<authority>
-    // resolves through it. A clone that keeps the source's authority collides
-    // with the source, so this rewrite is unconditional (not a user option).
-    const dp = m['dataProvider'] as { authority?: string } | undefined;
-    if (dp && typeof dp.authority === 'string') {
-      if (dp.authority === sourceAppId) {
-        dp.authority = targetAppId;
-      } else {
-        warnings.push(`dataProvider.authority is '${dp.authority}' (not the source's own id) — left as-is; it may collide with the app that owns it.`);
-      }
+    warnings.push(...rw.warnings);
+    if (body.keepOriginId && !rw.originId) {
+      warnings.push(`${sourceAppId} has no originId to keep — the copy has none either (aura dev origin --assign).`);
     }
-
-    // `critical` is the one unconditional strip. Critical apps cannot be
-    // disabled and the schema says apps a user installs themselves should
-    // never set it — a user-scope clone of one would be undisablable.
-    if (m['critical'] !== undefined) { delete m['critical']; strippedFields.push('critical'); }
-
-    if (body.stripPublish) {
-      if (m['publish'] !== undefined) { delete m['publish']; strippedFields.push('publish'); }
-    } else if (m['publish'] !== undefined) {
-      warnings.push("manifest keeps the source's `publish` block — `aura nexus app publish` would push this clone to the ORIGINAL's repo/registry.");
-    }
-    if (body.stripStore && m['store'] !== undefined) { delete m['store']; strippedFields.push('store'); }
-
-    const portedTools = portToolsForScope((m['tools'] as string[] | undefined) ?? [], targetScopeId);
-    if (portedTools.length > 0) m['tools'] = portedTools;
-
-    const parsed = AppManifestSchema.safeParse(m);
-    if (!parsed.success) {
-      return json({
-        error: 'manifest-invalid',
-        message: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
-        issues: parsed.error.issues,
-      }, 422);
-    }
-    writeFileSync(manifestPath, JSON.stringify(m, null, 2) + '\n');
-
-    // ─── Rewrite package.json + emit .npmrc ────────────────────────────────
-    let ported = false;
-    const pkgPath = join(staging, 'package.json');
-    if (existsSync(pkgPath)) {
-      try {
-        const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as Record<string, unknown>;
-        if (pkg['name'] === sourceAppId) pkg['name'] = targetAppId;
-        const res = portPackageJsonForScope(pkg, targetScopeId, readSdkVersion(scopes));
-        ported = res.changed;
-        writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
-      } catch (err) {
-        warnings.push(`package.json could not be rewritten (${(err as Error).message}); left verbatim.`);
-      }
-    }
-    const npmrcPath = join(staging, '.npmrc');
-    if (needsNpmrc(targetScopeId) && !existsSync(npmrcPath)) {
-      writeFileSync(npmrcPath, AURA_NPMRC);
-    }
-
-    // ─── Sweep the source id out of the remaining text files ───────────────
-    // Without this the clone still says `com.aura.counter` in its astro
-    // header fallbacks, api paths, and anywhere else the id is hardcoded.
-    // app.manifest.json is excluded — the structured rewrite above owns it.
-    const rewrittenFiles: string[] = [];
-    const idPattern = idRegex(sourceAppId);
-    let fileCount = 0;
-    let bytes = 0;
-    for (const rel of walkFiles(staging, excludes)) {
-      const abs = join(staging, rel);
-      const size = statSync(abs).size;
-      fileCount++;
-      bytes += size;
-      // A same-id cross-scope clone (the "fork an OS app to shadow it" flow)
-      // has nothing to substitute — skip so the report doesn't claim rewrites
-      // that replaced the id with itself.
-      // app.manifest.json and package.json are excluded — the structured
-      // rewrites above own them, and sweeping them again would turn the
-      // already-written target id into `<target>.copy` when the target id
-      // extends the source id (the default `<source>.copy` suggestion).
-      if (!rewriteIds || sourceAppId === targetAppId || rel === 'app.manifest.json' || rel === 'package.json') continue;
-      if (size > REWRITE_MAX_BYTES) continue;
-      const buf = readFileSync(abs);
-      if (buf.subarray(0, BINARY_SNIFF_BYTES).includes(0)) continue;
-      const before = buf.toString('utf-8');
-      const after = before.replace(idPattern, targetAppId);
-      if (after === before) continue;
-      writeFileSync(abs, after);
-      rewrittenFiles.push(rel);
-    }
+    const { fileCount, bytes, ported, rewrittenFiles, strippedFields } = rw;
+    const originId = rw.originId;
+    const sourceOriginId = rw.previousOriginId;
 
     if (body.dryRun) {
       return json({
         ok: true, dryRun: true, sourceAppId, sourceScope, targetAppId, scope: targetScopeId,
+        sourceOriginId, originId,
         dest, fileCount, bytes, ported, rewrittenFiles, strippedFields, shadows, warnings,
       });
     }
@@ -360,6 +274,7 @@ export const POST: APIRoute = async ({ request }) => {
 
     return json({
       ok: true, sourceAppId, sourceScope, targetAppId, scope: targetScopeId,
+      sourceOriginId, originId,
       dest, fileCount, bytes, ported, rewrittenFiles, strippedFields, shadows, warnings,
     });
   } finally {
@@ -371,17 +286,6 @@ function scopeDef(scopes: ScopeDefinition[], id: ScopeId): ScopeDefinition {
   return scopes.find((s) => s.id === id)!;
 }
 
-/** Apply the caller's field overrides: string sets, null deletes, undefined
- *  leaves the source's value alone. */
-function applyPatch(m: Record<string, unknown>, patch: ManifestPatch | undefined): void {
-  if (!patch) return;
-  for (const key of ['name', 'icon', 'description', 'version'] as const) {
-    const v = patch[key];
-    if (v === undefined) continue;
-    if (v === null) delete m[key];
-    else m[key] = v;
-  }
-}
 
 /**
  * Read the live @aura/app-sdk version from the monorepo so cloned user/global
@@ -422,15 +326,6 @@ function copyTree(src: string, dst: string, excludes: string[], rootExcludes: st
   }
 }
 
-/**
- * Matches the app id as a whole id only: `com.a.b` but not the prefix of
- * `com.a.b.copy` or `com.a.bc`. Without the boundary a rewrite to an id that
- * extends the source would also hit ids that already name other apps.
- */
-function idRegex(id: string): RegExp {
-  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(?<![A-Za-z0-9_.-])${escaped}(?![A-Za-z0-9_-]|\\.[A-Za-z0-9])`, 'g');
-}
 
 /** Move a directory, falling back to copy+delete when rename(2) can't (cross
  *  device, busy mount). Destination must not exist. */
@@ -448,21 +343,6 @@ function moveOrCopy(src: string, dst: string): void {
   }
 }
 
-/** Every file under `root`, as paths relative to it, skipping excluded dirs. */
-function* walkFiles(root: string, excludes: string[]): Generator<string> {
-  const skip = new Set(excludes);
-  const stack: string[] = [root];
-  while (stack.length > 0) {
-    const dir = stack.pop()!;
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (skip.has(entry.name)) continue;
-      const abs = join(dir, entry.name);
-      if (entry.isDirectory()) { stack.push(abs); continue; }
-      if (!entry.isFile()) continue;
-      yield relative(root, abs);
-    }
-  }
-}
 
 function json(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload, null, 2), {

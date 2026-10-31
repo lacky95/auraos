@@ -4,7 +4,7 @@
  *
  *   <host>/<appRepoPrefix>/catalog:latest
  *     artifactType  application/vnd.aura.catalog.v1+json
- *     layer         catalog.json = { schema: 1, apps: [{ id, repo, version, updatedAt }] }
+ *     layer         catalog.json = { schema: 1, apps: [{ id, originId, repo, version, updatedAt }] }
  *
  * `publishOci` upserts the app it just pushed; the CatalogAggregator reads it
  * and merges it with `oras repo ls` where that works. The list only names
@@ -26,9 +26,12 @@ const CATALOG_LAYER_TYPE           = 'application/vnd.aura.catalog.v1+json';
 const ORAS_TIMEOUT_MS              = 20_000;
 const MAX_APPS                     = 1000;
 const APP_ID                       = /^[a-z0-9][a-z0-9._-]*$/i;
+const ORIGIN_ID                    = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface CatalogApp {
   id:         string;
+  /** The app's originId (same app across registries / ids). */
+  originId?:  string;
   /** Repo path on the host, always `<appRepoPrefix>/<something>`. */
   repo:       string;
   version?:   string;
@@ -53,12 +56,13 @@ export function parseCatalog(raw: unknown, prefix: string): CatalogDoc {
     const seen = new Set<string>();
     for (const a of list.slice(0, MAX_APPS)) {
       if (!a || typeof a !== 'object') continue;
-      const { id, repo, version, updatedAt } = a as Record<string, unknown>;
+      const { id, repo, version, updatedAt, originId } = a as Record<string, unknown>;
       if (typeof id !== 'string' || !APP_ID.test(id) || seen.has(id)) continue;
       if (typeof repo !== 'string' || !repo.startsWith(`${p}/`) || repo === catalogRepo(p) || repo.includes('..')) continue;
       seen.add(id);
       apps.push({
         id, repo,
+        ...(typeof originId === 'string' && ORIGIN_ID.test(originId) ? { originId } : {}),
         ...(typeof version === 'string' ? { version } : {}),
         ...(typeof updatedAt === 'string' ? { updatedAt } : {}),
       });

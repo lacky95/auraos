@@ -60,6 +60,8 @@ export interface StoreEntrySource {
 
 export interface StoreEntry {
   id:           string;
+  /** The app's originId — the same app across registries and ids. */
+  originId?:    string;
   name:         string;
   description?: string;
   publisher?:   string;
@@ -285,6 +287,7 @@ export function buildStoreEntry(
 
   const entry: StoreEntry = {
     id:   m.id,
+    ...(m.originId ? { originId: m.originId } : {}),
     name: m.name,
     ...(description ? { description } : {}),
     ...(m.store?.publisher ? { publisher: m.store.publisher } : {}),
@@ -303,7 +306,7 @@ export function buildStoreEntry(
 /** Key order matching the store's build-index.mjs KEY_ORDER, so a hand-written
  *  entry and the generated index read the same way. */
 const KEY_ORDER: Array<keyof StoreEntry> = [
-  'id', 'name', 'description', 'publisher', 'homepage', 'icon',
+  'id', 'originId', 'name', 'description', 'publisher', 'homepage', 'icon',
   'categories', 'tags', 'screenshots', 'sources', 'channels',
 ];
 

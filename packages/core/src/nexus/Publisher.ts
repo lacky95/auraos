@@ -60,6 +60,7 @@ export async function publishGit(opts: PublishGitOpts): Promise<PublishGitResult
   // 1. Validate manifest.
   log('validating manifest...');
   const manifest = validateStagedDir(appPath);
+  requireOriginId(manifest);
   const tag = opts.tag ?? `v${manifest.version}`;
   const branch = opts.branch ?? 'main';
 
@@ -125,6 +126,15 @@ export async function publishGit(opts: PublishGitOpts): Promise<PublishGitResult
     commit,
     installCmd,
   };
+}
+
+/** A published app must say which app it is: the store matches installs
+ *  across registries and ids by originId. Publish never writes into the
+ *  source tree, so the author assigns it. */
+function requireOriginId(manifest: AppManifest): void {
+  if (!manifest.originId) {
+    throw new Error(`[NexusPublish] ${manifest.id} has no originId — run \`aura dev origin --assign ${manifest.id}\` (commit the manifest change), then publish again.`);
+  }
 }
 
 /** Decide which git URL the user is publishing to. */
@@ -271,6 +281,7 @@ export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }>
   }
   log('validating manifest...');
   const manifest = validateStagedDir(opts.appPath);
+  requireOriginId(manifest);
   // Screenshot files are checked before anything is pushed (pushed after the
   // release, below): a bad image must not leave a half-published app.
   const shotRefs = manifest.store?.screenshots ?? [];
@@ -378,7 +389,7 @@ export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }>
     try {
       upsertOciCatalog(
         { host: registryPath.slice(0, slash), prefix: catalogPrefix, flags: extraFlags },
-        { id: manifest.id, repo: registryPath.slice(slash + 1), version: manifest.version, updatedAt: new Date().toISOString() },
+        { id: manifest.id, ...(manifest.originId ? { originId: manifest.originId } : {}), repo: registryPath.slice(slash + 1), version: manifest.version, updatedAt: new Date().toISOString() },
         opts.dataDir,
       );
       log(`catalog: listed in ${catalogPrefix}/catalog`);

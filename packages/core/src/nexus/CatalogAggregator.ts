@@ -342,6 +342,7 @@ export class CatalogAggregator {
           : (meta.screenshots ?? []);
         entries.push({
           id,
+          ...(meta.originId ? { originId: meta.originId } : {}),
           name:        meta.name ?? id,
           description: lm.description ?? meta.description,
           longDescription: lm.longDescription ?? meta.longDescription,
@@ -382,6 +383,7 @@ export class CatalogAggregator {
     if (!m) return [];
     return [{
       id:          m.id,
+      ...(m.originId ? { originId: m.originId } : {}),
       name:        m.name,
       description: m.description,
       icon:        m.icon,

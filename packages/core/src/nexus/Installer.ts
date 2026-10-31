@@ -19,6 +19,7 @@ import { dirname, join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import type { InstallRecord, ResolvedRef } from './types.js';
 import type { ScopeId } from '../scopes/types.js';
+import { readOriginId } from '../app-manager/AppIdentity.js';
 
 export interface InstallerOpts {
   appsDir: string;
@@ -37,7 +38,10 @@ export class Installer {
    * moved aside to `data/nexus/trash/<id>-<ts>/` first so an undo window
    * exists.
    */
-  async install(stagingDir: string, manifest: AppManifest, resolved: ResolvedRef): Promise<InstallRecord> {
+  async install(
+    stagingDir: string, manifest: AppManifest, resolved: ResolvedRef,
+    link: { remoteId?: string; detached?: boolean } = {},
+  ): Promise<InstallRecord> {
     const targetDir = join(this.opts.appsDir, manifest.id);
     const ts = Date.now();
     const tmpDir = `${targetDir}.tmp.${ts}`;
@@ -52,6 +56,14 @@ export class Installer {
     //    `data/` may live on different mounts (bind mounts vs the
     //    container's own fs), in which case `rename(2)` fails with
     //    EXDEV — fall back to cp+rm.
+    // Never replace a DIFFERENT app: the caller (NexusManager's identity
+    // check) only gets here for the same artifact or an explicit choice, so
+    // two different originIds under one id is a bug, not a decision.
+    const have = readOriginId(join(targetDir, 'app.manifest.json'));
+    if (have && manifest.originId && have !== manifest.originId) {
+      rmSync(tmpDir, { recursive: true, force: true });
+      throw new Error(`refusing to replace ${manifest.id}: it is a different app (originId ${have}, incoming ${manifest.originId})`);
+    }
     if (existsSync(targetDir)) {
       const trashRoot = join(this.opts.dataDir, 'nexus', 'trash');
       mkdirSync(trashRoot, { recursive: true });
@@ -64,7 +76,7 @@ export class Installer {
 
     // 4. Write the install record. Stored under data/, NOT in the app
     //    dir (keeps the app dir reproducible across publishes).
-    const record = buildInstallRecord(manifest, resolved, ts, this.opts.scope);
+    const record = buildInstallRecord(manifest, resolved, ts, this.opts.scope, link);
     const recordPath = join(this.opts.dataDir, 'nexus', 'installed', `${manifest.id}.json`);
     mkdirSync(dirname(recordPath), { recursive: true });
     writeFileSync(recordPath, JSON.stringify(record, null, 2));
@@ -156,7 +168,10 @@ function moveOrCopy(src: string, dst: string): void {
   }
 }
 
-function buildInstallRecord(m: AppManifest, r: ResolvedRef, ts: number, scope: ScopeId): InstallRecord {
+function buildInstallRecord(
+  m: AppManifest, r: ResolvedRef, ts: number, scope: ScopeId,
+  link: { remoteId?: string; detached?: boolean },
+): InstallRecord {
   const iso = new Date(ts).toISOString();
   return {
     id:          m.id,
@@ -169,5 +184,8 @@ function buildInstallRecord(m: AppManifest, r: ResolvedRef, ts: number, scope: S
     updatedAt:   iso,
     scope,
     ...(r.sourceName ? { sourceName: r.sourceName } : {}),
+    ...(m.originId ? { originId: m.originId } : {}),
+    ...(link.remoteId && link.remoteId !== m.id ? { remoteId: link.remoteId } : {}),
+    ...(link.detached ? { detached: true } : {}),
   };
 }

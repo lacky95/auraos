@@ -63,8 +63,23 @@ interface InstallResponse {
   record?:        InstallRecord;
   needsApproval?: boolean;
   diff?:          PermissionDiff;
+  needsIdentityChoice?: boolean;
+  conflict?:      IdentityConflict;
   error?:         string;
 }
+
+type IdentityAction = 'update-existing' | 'install-as' | 'install-copy';
+interface IdentityDecision { action: IdentityAction; appId?: string }
+/** The store's question when an app shares an id or originId with an installed
+ *  one (core AppIdentity: A switch-source, B id-taken, D same-origin). */
+interface IdentityConflict {
+  kind:     'switch-source' | 'id-taken' | 'same-origin';
+  incoming: { appId: string; originId: string | null; version: string; name: string; sourceName?: string; ref: string };
+  existing: { appId: string; originId: string | null; scope: string; sourceName?: string; ref?: string };
+  choices:  IdentityAction[];
+  suggestedAppId: string;
+}
+interface IdentityFlags { updateExisting?: boolean; switchSource?: boolean; as?: string; copy?: string | boolean }
 
 interface InstalledItem {
   manifest: { id: string; name: string; version: string };
@@ -749,66 +764,151 @@ function wireStore(parent: Command): void {
 }
 
 function wireInstall(parent: Command, opts: { hidden?: boolean } = {}): void {
-  parent
+  identityOptions(parent
     .command('install <ref>', { hidden: opts.hidden })
     .description('Install an app. <ref> can be a git URL, OCI tag, index id, or local path.')
     .option('-y, --yes',             'auto-approve any permission changes')
     .option('--channel <name>',      'channel to install (when <ref> is an index id)', 'stable')
-    .option('--scope <global|user>', 'install into this scope (default: global)', 'global')
-    .action(async (rawRef: string, o: { yes?: boolean; channel?: string; scope?: string }) => {
+    .option('--scope <global|user>', 'install into this scope (default: global)', 'global'))
+    .action(async (rawRef: string, o: { yes?: boolean; channel?: string; scope?: string } & IdentityFlags) => {
       const ref = normaliseRef(rawRef);
       if (o.scope === 'system') fail('cannot install into system scope');
       const scope = o.scope === 'user' ? 'user' : 'global';
 
-      let res = await api.post<InstallResponse>('/api/nexus/install',
-        { ref, scope, autoApprove: !!o.yes });
-
-      if (res.needsApproval && res.diff) {
-        printPermissionDiff(res.diff);
-        try {
-          const okPrompt = await promptConfirm('Approve and install?', false);
-          if (okPrompt !== true) { info('install cancelled'); return; }
-        } catch (err) {
-          if (err instanceof PromptCancelled) { info('install cancelled'); return; }
-          throw err;
-        }
-        res = await api.post<InstallResponse>('/api/nexus/install',
-          { ref, scope, autoApprove: true });
-      }
-
+      const res = await installWithChoices('/api/nexus/install', { ref, scope }, o, 'install');
+      if (!res) { info('install cancelled'); return; }
       if (!res.ok || !res.record) fail(res.error ?? 'install failed');
-      ok(`installed ${color.cyan(res.record!.id)} (${res.record!.version}) from ${res.record!.source} → scope:${scope}`);
+      ok(`installed ${color.cyan(res.record!.id)} (${res.record!.version}) from ${res.record!.source} → scope:${res.record!.scope ?? scope}`);
       info(`  ref:    ${res.record!.ref}`);
       if (res.record!.digest) info(`  digest: ${res.record!.digest.slice(0, 16)}`);
     });
 }
 
+/** The flags that answer an identity question without a prompt. */
+function identityOptions(cmd: Command): Command {
+  return cmd
+    .option('--update-existing', 'if it is the same app as an installed one (originId): update that app')
+    .option('--switch-source',   'alias of --update-existing: the installed app now updates from this source')
+    .option('--as <appId>',      'if its id is taken by a different app: install it under this local id')
+    .option('--copy [appId]',    'install an independent copy (new id + new originId, no updates from the source)');
+}
+
+function decisionFromFlags(o: IdentityFlags): IdentityDecision | undefined {
+  const picked = [o.updateExisting || o.switchSource, o.as, o.copy].filter(Boolean).length;
+  if (picked > 1) fail('pass only one of --update-existing / --as / --copy');
+  if (o.updateExisting || o.switchSource) return { action: 'update-existing' };
+  if (o.as) return { action: 'install-as', appId: o.as };
+  if (o.copy) return { action: 'install-copy', ...(typeof o.copy === 'string' ? { appId: o.copy } : {}) };
+  return undefined;
+}
+
+const IDENTITY_TEXT: Record<IdentityConflict['kind'], (c: IdentityConflict) => string> = {
+  'switch-source': (c) => `${c.existing.appId} is already installed${c.existing.sourceName ? ` from ${c.existing.sourceName}` : ''} — the same app (originId ${c.incoming.originId}) is offered by ${c.incoming.sourceName ?? c.incoming.ref}.`,
+  'id-taken':      (c) => `${c.existing.appId} is already installed and is a ${c.existing.originId && c.incoming.originId ? 'DIFFERENT app' : 'possibly different app (no originId to compare)'} — the store will not replace it silently.`,
+  'same-origin':   (c) => `${c.incoming.appId} is the same app (originId ${c.incoming.originId}) as your installed ${c.existing.appId}.`,
+};
+const ACTION_LABEL: Record<IdentityAction, (c: IdentityConflict) => { label: string; desc: string }> = {
+  'update-existing': (c) => ({ label: `update ${c.existing.appId}`, desc: `replace it with ${c.incoming.version} from this source (it keeps its id${c.kind === 'id-taken' ? '' : ' and data'})` }),
+  'install-as':      (c) => ({ label: 'install under another id', desc: `keep ${c.existing.appId}; install this one as e.g. ${c.suggestedAppId}` }),
+  'install-copy':    (c) => ({ label: 'install an independent copy', desc: `new id + new originId (e.g. ${c.suggestedAppId}); no updates from the source` }),
+};
+
+/** Ask how to resolve an identity conflict. null = cancelled. */
+async function askIdentity(c: IdentityConflict, preset: IdentityDecision | undefined): Promise<IdentityDecision | null> {
+  info('');
+  warn(IDENTITY_TEXT[c.kind](c));
+  if (preset) {
+    if (!c.choices.includes(preset.action)) {
+      fail(`${preset.action} is not possible here — choose one of: ${c.choices.map(flagFor).join(', ')}`);
+    }
+    return preset;
+  }
+  if (!process.stdin.isTTY) {
+    fail(`decide how to install it: ${c.choices.map(flagFor).join(' | ')} (or run interactively)`);
+  }
+  try {
+    const CANCEL = ' cancel';
+    const pick = await promptChoice<string>('What should happen?', [
+      ...c.choices.map((a) => ({ value: a, ...ACTION_LABEL[a](c) })),
+      { value: CANCEL, label: 'cancel', desc: 'install nothing' },
+    ], 0);
+    if (pick === BACK || pick === CANCEL) return null;
+    const action = pick as IdentityAction;
+    if (action === 'update-existing') return { action };
+    const appId = await promptText('Local app id', {
+      default: c.suggestedAppId,
+      validate: (v) => (/^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/.test(v) ? null : 'reverse-domain id, e.g. com.example.app'),
+    });
+    if (appId === BACK) return null;
+    return { action, appId };
+  } catch (err) {
+    if (err instanceof PromptCancelled) return null;
+    throw err;
+  }
+}
+
+function flagFor(a: IdentityAction): string {
+  return a === 'update-existing' ? '--update-existing' : a === 'install-as' ? '--as <appId>' : '--copy [appId]';
+}
+
+/**
+ * POST an install/update, answering the store's questions: the identity of
+ * the app (A/B/D) first, then new permissions. Each answer is a re-POST with
+ * the decision in the body. null = the user cancelled.
+ */
+async function installWithChoices(
+  path: string, body: Record<string, unknown>, o: { yes?: boolean } & IdentityFlags, verb: 'install' | 'update',
+): Promise<InstallResponse | null> {
+  // A flag decision is only sent once the store has asked (and checked
+  // against its choices) — on a plain install it must not change anything.
+  const preset = decisionFromFlags(o);
+  let identity: IdentityDecision | undefined;
+  let autoApprove = !!o.yes;
+  for (let round = 0; round < 4; round++) {
+    const res = await postStore<InstallResponse>(path, { ...body, autoApprove, ...(identity ? { identity } : {}) });
+    if (res.needsIdentityChoice && res.conflict) {
+      if (identity) fail('the store asked about the app identity again — giving up');
+      const d = await askIdentity(res.conflict, preset);
+      if (!d) return null;
+      identity = d;
+      continue;
+    }
+    if (res.needsApproval && res.diff && !autoApprove) {
+      printPermissionDiff(res.diff);
+      try {
+        const okPrompt = await promptConfirm(`Approve and ${verb}?`, false);
+        if (okPrompt !== true) return null;
+      } catch (err) {
+        if (err instanceof PromptCancelled) return null;
+        throw err;
+      }
+      autoApprove = true;
+      continue;
+    }
+    return res;
+  }
+  fail(`${verb}: too many rounds of questions`);
+}
+
 // ─── app update ─────────────────────────────────────────────────────────────
 function wireUpdate(parent: Command, opts: { hidden?: boolean } = {}): void {
-  parent
+  identityOptions(parent
     .command('update [id]', { hidden: opts.hidden })
     .description('Re-resolve an installed app and reinstall if updated.')
     .option('-y, --yes', 'auto-approve any permission changes')
-    .option('--all',     'update every Nexus-installed app')
-    .action(async (id: string | undefined, o: { yes?: boolean; all?: boolean }) => {
+    .option('--all',     'update every Nexus-installed app'))
+    .action(async (id: string | undefined, o: { yes?: boolean; all?: boolean } & IdentityFlags) => {
       if (!id && !o.all) fail('pass an <id> or --all');
       const ids: string[] = id
         ? [id]
         : (await api.get<InstalledItem[]>('/api/nexus/installed'))
-            .filter((it) => it.isNexusInstalled && it.record.source !== 'local')
+            .filter((it) => it.isNexusInstalled && it.record.source !== 'local' && !(it.record as { detached?: boolean }).detached)
             .map((it) => it.manifest.id);
       if (ids.length === 0) { info('no Nexus-installed apps to update'); return; }
       for (const i of ids) {
         info(`updating ${i}...`);
-        let res = await api.post<InstallResponse>(`/api/nexus/update/${encodeURIComponent(i)}`,
-          { autoApprove: !!o.yes });
-        if (res.needsApproval && res.diff) {
-          printPermissionDiff(res.diff);
-          const okPrompt = await promptConfirm('Approve and update?', false).catch(() => false as const);
-          if (okPrompt !== true) { info(`  → ${i} skipped`); continue; }
-          res = await api.post<InstallResponse>(`/api/nexus/update/${encodeURIComponent(i)}`,
-            { autoApprove: true });
-        }
+        const res = await installWithChoices(`/api/nexus/update/${encodeURIComponent(i)}`, {}, o, 'update');
+        if (!res) { info(`  → ${i} skipped`); continue; }
         if (!res.ok) info(`  → ${i} failed: ${res.error ?? '<unknown>'}`);
         else        ok(`  → ${i} updated to ${res.record?.version ?? '<?>'}`);
       }
