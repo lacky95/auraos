@@ -15,7 +15,7 @@ import { join } from 'node:path';
 
 import {
   secretKeyFor, sealedLoginValue, passwordForHost, authFileContent, orasTargetHost,
-  isAuthFailure, authFailureReason, orasSync, OrasAuthError, SOURCE_SECRET_PATTERN,
+  isAuthFailure, authFailureReason, orasSync, orasAsync, OrasAuthError, SOURCE_SECRET_PATTERN,
 } from '../dist/nexus/RegistryAuth.js';
 import { parseStoreDescriptor, wellKnownUrl, discoverStore, StoreDiscoveryError } from '../dist/nexus/StoreDiscovery.js';
 import { isSourceEntry, isSourceAuth } from '../dist/nexus/SourcesConfig.js';
@@ -147,4 +147,23 @@ test('discoverStore fetches and validates, with readable errors', async () => {
   await assert.rejects(discoverStore('apps.acme.com', async () => new Response('nope', { status: 404 })), /has no AuraOS store/);
   await assert.rejects(discoverStore('apps.acme.com', async () => new Response('{oops', { status: 200 })), /not valid JSON/);
   await assert.rejects(discoverStore('apps.acme.com', async () => { throw new Error('ENOTFOUND'); }), /could not reach/);
+});
+
+test('orasAsync: same login handling, and the event loop keeps running meanwhile', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fake-oras-'));
+  const bin = join(dir, 'oras');
+  const old = process.env.PATH;
+  process.env.PATH = `${dir}:${old}`;
+  try {
+    writeFileSync(bin, '#!/bin/sh\nsleep 0.4; echo "ARGS $*"\n'); chmodSync(bin, 0o755);
+    let ticked = false;
+    setTimeout(() => { ticked = true; }, 50);
+    const out = (await orasAsync(['repo', 'ls', 'public.example.com'])).toString().trim();
+    assert.equal(out, 'ARGS repo ls public.example.com');
+    assert.ok(ticked, 'a timer fired while oras was running — nothing blocked');
+
+    writeFileSync(bin, '#!/bin/sh\necho "Error: response status code 401: unauthorized" >&2; exit 1\n');
+    await assert.rejects(orasAsync(['repo', 'ls', 'registry.acme.com'], {}, { username: 'cust', password: 'x' }),
+      (err) => err instanceof OrasAuthError && /login to registry\.acme\.com failed/.test(err.message));
+  } finally { process.env.PATH = old; }
 });

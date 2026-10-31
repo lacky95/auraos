@@ -17,7 +17,7 @@
  */
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { artifactTypeOf, orasPushArtifact, orasSync, type RegistryLogin } from './RegistryAuth.js';
+import { artifactTypeOf, orasAsync, orasPushArtifact, orasSync, type RegistryLogin } from './RegistryAuth.js';
 
 export const CATALOG_REPO          = 'catalog';
 export const CATALOG_TAG           = 'latest';
@@ -79,18 +79,37 @@ export function parseCatalog(raw: unknown, prefix: string): CatalogDoc {
 export function readOciCatalog(t: CatalogTarget, login?: RegistryLogin): CatalogDoc | null {
   const ref = `${t.host}/${catalogRepo(t.prefix)}`;
   try {
-    const manifest = JSON.parse(orasSync(['manifest', 'fetch', `${ref}:${CATALOG_TAG}`, ...t.flags],
-      { timeout: ORAS_TIMEOUT_MS }, login).toString()) as {
-        artifactType?: string; annotations?: Record<string, string>; config?: { mediaType?: string };
-        layers?: Array<{ digest?: string; mediaType?: string }>;
-      };
-    if (artifactTypeOf(manifest) !== CATALOG_ARTIFACT_TYPE) return null;
-    const digest = manifest.layers?.find((l) => l.mediaType === CATALOG_LAYER_TYPE)?.digest ?? manifest.layers?.[0]?.digest;
-    if (!digest || !/^sha256:[a-f0-9]{64}$/.test(digest)) return null;
+    const digest = catalogLayer(orasSync(['manifest', 'fetch', `${ref}:${CATALOG_TAG}`, ...t.flags],
+      { timeout: ORAS_TIMEOUT_MS }, login).toString());
+    if (!digest) return null;
     const blob = orasSync(['blob', 'fetch', `${ref}@${digest}`, '--output', '-', ...t.flags],
       { timeout: ORAS_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 }, login).toString();
     return parseCatalog(JSON.parse(blob), t.prefix);
   } catch { return null; }
+}
+
+/** readOciCatalog without blocking the event loop (store catalog refresh). */
+export async function readOciCatalogAsync(t: CatalogTarget, login?: RegistryLogin): Promise<CatalogDoc | null> {
+  const ref = `${t.host}/${catalogRepo(t.prefix)}`;
+  try {
+    const digest = catalogLayer((await orasAsync(['manifest', 'fetch', `${ref}:${CATALOG_TAG}`, ...t.flags],
+      { timeout: ORAS_TIMEOUT_MS }, login)).toString());
+    if (!digest) return null;
+    const blob = (await orasAsync(['blob', 'fetch', `${ref}@${digest}`, '--output', '-', ...t.flags],
+      { timeout: ORAS_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 }, login)).toString();
+    return parseCatalog(JSON.parse(blob), t.prefix);
+  } catch { return null; }
+}
+
+/** The catalog layer's digest from a fetched manifest, or null if it isn't one. */
+function catalogLayer(raw: string): string | null {
+  const manifest = JSON.parse(raw) as {
+    artifactType?: string; annotations?: Record<string, string>; config?: { mediaType?: string };
+    layers?: Array<{ digest?: string; mediaType?: string }>;
+  };
+  if (artifactTypeOf(manifest) !== CATALOG_ARTIFACT_TYPE) return null;
+  const digest = manifest.layers?.find((l) => l.mediaType === CATALOG_LAYER_TYPE)?.digest ?? manifest.layers?.[0]?.digest;
+  return digest && /^sha256:[a-f0-9]{64}$/.test(digest) ? digest : null;
 }
 
 /** Put (or refresh) one app in the catalog. Throws when the push fails. */

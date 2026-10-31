@@ -18,7 +18,7 @@ export { isOrasAvailable } from './Fetchers/OciFetcher.js';
 export { getNexusManager, initNexusManager, refreshNexusSources } from './singleton.js';
 export {
   secretKeyFor, sealedLoginValue, passwordForHost, SOURCE_SECRET_PATTERN, saveRegistryLogin, deleteRegistryLogin, loadRegistryCredentials, hasRegistryLogin,
-  orasSync, orasTargetHost, authFileContent, isAuthFailure, authFailureReason, OrasAuthError,
+  orasSync, orasAsync, orasTargetHost, authFileContent, isAuthFailure, authFailureReason, OrasAuthError,
   orasPushArtifact, artifactTypeOf, ARTIFACT_TYPE_ANNOTATION,
 } from './RegistryAuth.js';
 export type { RegistryLogin, SourceAuth } from './RegistryAuth.js';
@@ -34,7 +34,7 @@ export {
 export type { StoreMetadata } from './ociMetadata.js';
 export {
   LISTING_TAG, LISTING_ARTIFACT_TYPE, LISTING_ORDER_ANNOTATION, LISTING_META_ANNOTATION,
-  ociAppTarget, isDigest, listingAssetPath, listingScreenshotUrls, readListing, fetchListingBlob,
+  ociAppTarget, isDigest, listingAssetPath, listingScreenshotUrls, readListing, readListingAsync, fetchListingBlob,
   writeListing, listingInputs, screenshotInput, manageOciScreenshots, reorderOciScreenshots,
   updateListingMeta, assertPublished, canWriteListing, normaliseListingMeta,
 } from './OciListing.js';
@@ -59,7 +59,7 @@ export type { RegistryConfig, RegistryEntry } from './RegistryConfig.js';
 export { publishFileList, withheldReason, DEFAULT_PUBLISH_IGNORE } from './PublishFiles.js';
 export type { PublishFileList, PublishFileOpts } from './PublishFiles.js';
 export {
-  readOciCatalog, upsertOciCatalog, parseCatalog, catalogRepo,
+  readOciCatalog, readOciCatalogAsync, upsertOciCatalog, parseCatalog, catalogRepo,
   CATALOG_REPO, CATALOG_TAG, CATALOG_ARTIFACT_TYPE,
 } from './OciCatalog.js';
 export type { CatalogApp, CatalogDoc, CatalogTarget } from './OciCatalog.js';

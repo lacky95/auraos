@@ -27,7 +27,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
-import { artifactTypeOf, orasPushArtifact, orasSync } from './RegistryAuth.js';
+import { artifactTypeOf, orasAsync, orasPushArtifact, orasSync } from './RegistryAuth.js';
 import { orasFlagsForUrl, orasHostFromUrl } from './RegistryConfig.js';
 import { APP_REPO_PREFIX } from './ociMetadata.js';
 import { identifyImage, MAX_SCREENSHOTS, type ImageInfo } from './StoreAssets.js';
@@ -120,6 +120,23 @@ export function readListing(t: OciAppTarget): Listing | null {
     if (isNotFound(err)) return null;
     throw err;
   }
+  return parseListingManifest(raw);
+}
+
+/** readListing without blocking the event loop (store catalog refresh). */
+export async function readListingAsync(t: OciAppTarget): Promise<Listing | null> {
+  let raw: string;
+  try {
+    raw = (await orasAsync(['manifest', 'fetch', `${t.host}/${t.repo}:${LISTING_TAG}`, ...t.flags],
+      { timeout: ORAS_TIMEOUT_MS })).toString();
+  } catch (err) {
+    if (isNotFound(err)) return null;
+    throw err;
+  }
+  return parseListingManifest(raw);
+}
+
+function parseListingManifest(raw: string): Listing | null {
   const m = JSON.parse(raw) as {
     artifactType?: string;
     annotations?: Record<string, string>;

@@ -24,7 +24,7 @@
  *     `OrasAuthError` with a readable message instead of a bare exit code.
  */
 
-import { execFileSync, type ExecFileSyncOptions } from 'node:child_process';
+import { execFile, execFileSync, type ExecFileSyncOptions } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -217,30 +217,64 @@ export function artifactTypeOf(m: {
   return cfg && cfg !== OCI_IMAGE_CONFIG && cfg !== 'application/vnd.oci.empty.v1+json' ? cfg : undefined;
 }
 
-/**
- * `execFileSync('oras', args, opts)` with the target registry's login, when
- * one is known (or given as `login` — used to probe a login before saving it).
- */
-export function orasSync(args: string[], opts: ExecFileSyncOptions = {}, login?: RegistryLogin): Buffer {
+/** The auth file for one oras call (when the target host has a login). */
+function orasAuth(args: string[], login?: RegistryLogin): { fullArgs: string[]; host: string | null; hadLogin: boolean; cleanup: () => void } {
   const host = orasTargetHost(args);
   const use = login ?? (host ? logins().get(host) : undefined);
-  let dir: string | null = null;
   const fullArgs = [...args];
+  let dir: string | null = null;
   if (host && use) {
     dir = mkdtempSync(join(tmpdir(), 'aura-oras-'));
     const file = join(dir, 'config.json');
     writeFileSync(file, authFileContent(host, use), { mode: 0o600 });
     fullArgs.push('--registry-config', file);
   }
+  return { fullArgs, host, hadLogin: !!use, cleanup: () => { if (dir) rmSync(dir, { recursive: true, force: true }); } };
+}
+
+/** A failed oras call as a readable error (OrasAuthError for login trouble). */
+function orasError(err: unknown, host: string | null, hadLogin: boolean): Error {
+  const e = err as Error & { stderr?: Buffer | string; stdout?: Buffer | string };
+  const out = `${e.stderr?.toString() ?? ''}\n${e.stdout?.toString() ?? ''}`.trim();
+  if (host && isAuthFailure(out)) return new OrasAuthError(host, out.split('\n').pop() ?? 'unauthorized', authFailureReason(out, hadLogin));
+  if (out && !e.message.includes(out)) e.message = `${e.message}\n${out}`;
+  return e;
+}
+
+/**
+ * `execFileSync('oras', args, opts)` with the target registry's login, when
+ * one is known (or given as `login` — used to probe a login before saving it).
+ * Blocks the event loop for the whole call — fine for one-off actions
+ * (publish, install), never for anything a page polls: use orasAsync.
+ */
+export function orasSync(args: string[], opts: ExecFileSyncOptions = {}, login?: RegistryLogin): Buffer {
+  const a = orasAuth(args, login);
   try {
-    return execFileSync('oras', fullArgs, { stdio: ['ignore', 'pipe', 'pipe'], ...opts }) as Buffer;
+    return execFileSync('oras', a.fullArgs, { stdio: ['ignore', 'pipe', 'pipe'], ...opts }) as Buffer;
   } catch (err) {
-    const e = err as Error & { stderr?: Buffer | string; stdout?: Buffer | string };
-    const out = `${e.stderr?.toString() ?? ''}\n${e.stdout?.toString() ?? ''}`.trim();
-    if (host && isAuthFailure(out)) throw new OrasAuthError(host, out.split('\n').pop() ?? 'unauthorized', authFailureReason(out, !!use));
-    if (out && !e.message.includes(out)) e.message = `${e.message}\n${out}`;
-    throw e;
+    throw orasError(err, a.host, a.hadLogin);
   } finally {
-    if (dir) rmSync(dir, { recursive: true, force: true });
+    a.cleanup();
+  }
+}
+
+/** orasSync without blocking: the shell keeps serving while a registry
+ *  answers (the store's catalog reads many manifests from a remote registry). */
+export async function orasAsync(
+  args: string[], opts: { timeout?: number; maxBuffer?: number; cwd?: string } = {}, login?: RegistryLogin,
+): Promise<Buffer> {
+  const a = orasAuth(args, login);
+  try {
+    return await new Promise<Buffer>((resolve, reject) => {
+      execFile('oras', a.fullArgs, {
+        encoding: 'buffer', timeout: opts.timeout, maxBuffer: opts.maxBuffer ?? 16 * 1024 * 1024, cwd: opts.cwd,
+      }, (err, stdout, stderr) => {
+        if (err) { Object.assign(err, { stdout, stderr }); reject(err); } else resolve(stdout);
+      });
+    });
+  } catch (err) {
+    throw orasError(err, a.host, a.hadLogin);
+  } finally {
+    a.cleanup();
   }
 }

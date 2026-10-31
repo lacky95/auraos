@@ -26,10 +26,10 @@ import * as YAML from 'yaml';
 import type { IndexDocument, IndexEntry } from './types.js';
 import { seedIndex } from './defaultIndex.js';
 import { parseStoreAnnotations } from './ociMetadata.js';
-import { listingScreenshotUrls, readListing, type Listing } from './OciListing.js';
+import { listingScreenshotUrls, readListingAsync, type Listing } from './OciListing.js';
 import { orasFlagsForUrl, orasHostFromUrl } from './RegistryConfig.js';
-import { artifactTypeOf, OrasAuthError, orasSync } from './RegistryAuth.js';
-import { catalogRepo, readOciCatalog } from './OciCatalog.js';
+import { artifactTypeOf, OrasAuthError, orasAsync } from './RegistryAuth.js';
+import { catalogRepo, readOciCatalogAsync } from './OciCatalog.js';
 import {
   DEFAULT_APP_REPO_PREFIX, sortedSources,
   type GitIndexSource, type OciSource, type SourceEntry, type SourcesConfig,
@@ -49,7 +49,8 @@ const CACHE_TTL_MS      = 60 * 1000;        // 1 min
 const MEMO_TTL_MS       = 15 * 1000;        // 15 s
 const FETCH_TIMEOUT_MS  = 10_000;
 const ORAS_TIMEOUT_MS   = 15_000;
-const MAX_REPOS_PER_OCI = 200;              // defensive cap on N+1 fetches
+const MAX_REPOS_PER_OCI = 200;
+const OCI_PARALLEL = 6;                     // registry reads in flight per source              // defensive cap on N+1 fetches
 
 /** One aggregated app, with attribution back to the source that provided it. */
 export interface CatalogEntry extends IndexEntry {
@@ -147,19 +148,36 @@ export class CatalogAggregator {
     this.getSources = opts.getSources;
   }
 
-  /** Aggregated catalog, using per-source disk caches when fresh. */
+  /**
+   * Aggregated catalog, using per-source disk caches when fresh.
+   *
+   * Stale-while-revalidate: once the memo is older than its TTL the caller
+   * gets it right away and one re-aggregation runs in the background
+   * (concurrent callers share it). Only the very first read — or one after
+   * invalidate() / a sources change — waits for the sources. The store polls
+   * this; a page must never wait on a registry round-trip to get an answer.
+   */
   async get(): Promise<Catalog> {
     if (this.memo && Date.now() - this.memoAt < MEMO_TTL_MS) return this.memo;
-    this.memo = await this.aggregate(false);
-    this.memoAt = Date.now();
-    return this.memo;
+    const next = this.reaggregate(false);
+    if (this.memo) { next.catch(() => undefined); return this.memo; }
+    return next;
   }
 
   /** Force every source to re-fetch, bypassing caches. */
   async refresh(): Promise<Catalog> {
-    this.memo = await this.aggregate(true);
-    this.memoAt = Date.now();
-    return this.memo;
+    return this.reaggregate(true);
+  }
+
+  private inflight: { force: boolean; p: Promise<Catalog> } | null = null;
+  /** One aggregation at a time; a forced one never reuses a cached run. */
+  private reaggregate(force: boolean): Promise<Catalog> {
+    if (this.inflight && (this.inflight.force || !force)) return this.inflight.p;
+    const p = this.aggregate(force)
+      .then((c) => { this.memo = c; this.memoAt = Date.now(); return c; })
+      .finally(() => { if (this.inflight?.p === p) this.inflight = null; });
+    this.inflight = { force, p };
+    return p;
   }
 
   /** Drop the in-memory memo (keeps disk caches) so the next `get()`
@@ -272,7 +290,7 @@ export class CatalogAggregator {
       let entries: CatalogEntry[];
       let featured: string[] | undefined;
       switch (src.kind) {
-        case 'oci':       entries = this.fetchOciCatalog(src); break;
+        case 'oci':       entries = await this.fetchOciCatalog(src); break;
         case 'git-index': ({ entries, featured } = await this.fetchGitIndexCatalog(src)); break;
         case 'git-app':   entries = this.fetchGitAppEntry(src); break;
       }
@@ -288,7 +306,7 @@ export class CatalogAggregator {
   }
 
   // ─── OCI source ─────────────────────────────────────────────────────────
-  private fetchOciCatalog(src: OciSource): CatalogEntry[] {
+  private async fetchOciCatalog(src: OciSource): Promise<CatalogEntry[]> {
     const host = orasHostFromUrl(src.url);
     const flags = orasFlagsForUrl(src.url);
     const prefix = (src.appRepoPrefix ?? DEFAULT_APP_REPO_PREFIX).replace(/\/+$/, '');
@@ -296,13 +314,15 @@ export class CatalogAggregator {
     // Which repos hold apps: the source's catalog artifact (OciCatalog — the
     // only list on registries without /v2/_catalog, e.g. GitLab) merged with
     // `oras repo ls <host>` where the registry allows it. Only when neither
-    // answers is the source down. orasSync adds the source's login
+    // answers is the source down. orasAsync adds the source's login
     // (private registries) — RegistryAuth.ts.
     const found = new Set<string>();
-    const catalog = readOciCatalog({ host, prefix, flags });
+    // Everything here is async (orasAsync): a remote registry answering slowly
+    // must not freeze the shell for everyone while the store refreshes.
+    const catalog = await readOciCatalogAsync({ host, prefix, flags });
     for (const a of catalog?.apps ?? []) found.add(a.repo);
     try {
-      const listOut = orasSync(['repo', 'ls', host, ...flags], { timeout: ORAS_TIMEOUT_MS }).toString();
+      const listOut = (await orasAsync(['repo', 'ls', host, ...flags], { timeout: ORAS_TIMEOUT_MS })).toString();
       for (const r of listOut.split('\n').map((x) => x.trim()).filter(Boolean)) {
         if (r.startsWith(`${prefix}/`)) found.add(r);
       }
@@ -318,29 +338,28 @@ export class CatalogAggregator {
     found.delete(catalogRepo(prefix));
     const repos = [...found].slice(0, MAX_REPOS_PER_OCI);
 
-    const entries: CatalogEntry[] = [];
-    for (const repo of repos) {
+    const readRepo = async (repo: string): Promise<CatalogEntry | null> => {
       try {
-        const raw = orasSync(['manifest', 'fetch', `${host}/${repo}:latest`, ...flags],
-          { timeout: ORAS_TIMEOUT_MS }).toString();
+        const raw = (await orasAsync(['manifest', 'fetch', `${host}/${repo}:latest`, ...flags],
+          { timeout: ORAS_TIMEOUT_MS })).toString();
         const manifest = JSON.parse(raw) as {
           artifactType?: string; annotations?: Record<string, string>; config?: { mediaType?: string };
         };
         // Only surface artifacts published as Aura apps.
         const type = artifactTypeOf(manifest);
-        if (type && !type.startsWith('application/vnd.aura.app')) continue;
+        if (type && !type.startsWith('application/vnd.aura.app')) return null;
         const meta = parseStoreAnnotations(manifest.annotations);
         const id = meta.id ?? repo.slice(prefix.length + 1);
-        if (!id) continue;
+        if (!id) return null;
         // The listing (OciListing.ts) holds screenshots + edited texts apart
         // from releases; it wins over the release annotations when present.
         let listing: Listing | null = null;
-        try { listing = readListing({ host, repo, flags }); } catch { /* unreadable: release data only */ }
+        try { listing = await readListingAsync({ host, repo, flags }); } catch { /* unreadable: release data only */ }
         const lm = listing?.meta ?? {};
         const shots = listing && listing.screenshots.length
           ? listingScreenshotUrls(listing, src.name, id)
           : (meta.screenshots ?? []);
-        entries.push({
+        return {
           id,
           ...(meta.originId ? { originId: meta.originId } : {}),
           name:        meta.name ?? id,
@@ -358,9 +377,17 @@ export class CatalogAggregator {
           sourceKind:  'oci',
           version:     meta.version,
           requires:    manifestRequirements(meta.manifest),
-        });
-      } catch { /* skip repos that don't resolve a :latest manifest */ }
-    }
+        };
+      } catch { return null; /* skip repos that don't resolve a :latest manifest */ }
+    };
+    // A few repos at a time: quick on a remote registry, gentle on a small one.
+    const entries: CatalogEntry[] = [];
+    const results = new Array<CatalogEntry | null>(repos.length).fill(null);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(OCI_PARALLEL, repos.length) }, async () => {
+      while (next < repos.length) { const i = next++; results[i] = await readRepo(repos[i]!); }
+    }));
+    for (const e of results) if (e) entries.push(e);
     return entries;
   }
 
