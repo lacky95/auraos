@@ -116,15 +116,15 @@ export function AboutDialog(): React.JSX.Element {
   const host = data?.host;
 
   // Planned restart (POST /api/admin/restart → lib/plannedRestart.ts): the
-  // desktop is saved and comes back after the restart unless unticked. Two
-  // clicks — the first arms it — since it takes every activity down.
+  // desktop is saved and comes back after the restart unless unticked. It
+  // takes every activity down, so the button first asks YES / NO inline.
   const [restore, setRestore] = React.useState(true);
   const [armed, setArmed] = React.useState(false);
   const [restartMsg, setRestartMsg] = React.useState<string | null>(null);
   const [restarting, setRestarting] = React.useState(false);
   React.useEffect(() => { if (!open) { setArmed(false); setRestartMsg(null); } }, [open]);
   const restartOs = async () => {
-    if (!armed) { setArmed(true); return; }
+    setArmed(false);
     setRestarting(true);
     setRestartMsg(null);
     try {
@@ -332,28 +332,45 @@ export function AboutDialog(): React.JSX.Element {
           ) : null}
         </DialogBody>
 
-        <DialogFooter className="shrink-0 border-t border-[var(--border)] px-4 py-3" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px' }}>
-          <div style={{ marginRight: 'auto', fontFamily: 'var(--font-mono)' }}>
-            <Checkbox
-              id="about-restore"
-              checked={restore}
-              disabled={restarting}
-              onCheckedChange={(v) => setRestore(v === true)}
-              label="BRING MY WORK BACK"
-            />
+        <DialogFooter className="shrink-0 border-t border-[var(--border)] px-4 py-3" style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: '10px' }}>
+          {/* Row 1: restart (with its option). Row 2: reload + close. */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px' }}>
+            <div style={{ marginRight: 'auto', fontFamily: 'var(--font-mono)' }}>
+              <Checkbox
+                id="about-restore"
+                checked={restore}
+                disabled={restarting}
+                onCheckedChange={(v) => setRestore(v === true)}
+                label="BRING MY WORK BACK"
+              />
+            </div>
+            {armed ? (
+              <div role="group" aria-label="Confirm restart" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <span style={{ fontSize: '0.66rem', fontFamily: 'var(--font-mono)' }}>RESTART AURAOS?</span>
+                <Button variant="ABORT" size="SM" onClick={() => { void restartOs(); }}>YES</Button>
+                <Button variant="OUTLINE" size="SM" autoFocus onClick={() => setArmed(false)}>NO</Button>
+              </div>
+            ) : (
+              <Button variant="EXEC" size="SM" disabled={restarting} onClick={() => setArmed(true)}
+                title="Save the desktop, restart AuraOS and the Shell Daemon, restore the desktop">
+                {restarting ? 'RESTARTING…' : 'RESTART AURAOS'}
+              </Button>
+            )}
           </div>
-          <Button variant="EXEC" size="SM" disabled={restarting} onClick={() => { void restartOs(); }}
-            title="Save the desktop, restart AuraOS and the Shell Daemon, restore the desktop">
-            {restarting ? 'RESTARTING…' : armed ? 'CONFIRM RESTART' : 'RESTART AURAOS'}
-          </Button>
-          <DialogClose asChild>
-            <Button variant="EXEC" size="SM">DONE</Button>
-          </DialogClose>
           {restartMsg ? (
-            <div style={{ flexBasis: '100%', fontSize: '0.64rem', fontFamily: 'var(--font-mono)', color: restarting ? 'var(--color-green)' : 'var(--color-red)' }}>
+            <div style={{ fontSize: '0.64rem', fontFamily: 'var(--font-mono)', color: restarting ? 'var(--color-green)' : 'var(--color-red)' }}>
               {restartMsg}
             </div>
           ) : null}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '10px' }}>
+            <Button variant="EXEC" size="SM" disabled={restarting} onClick={() => window.location.reload()}
+              title="Reload this browser tab (AuraOS keeps running)">
+              RELOAD
+            </Button>
+            <DialogClose asChild>
+              <Button variant="EXEC" size="SM">DONE</Button>
+            </DialogClose>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>
