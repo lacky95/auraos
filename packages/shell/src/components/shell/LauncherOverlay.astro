@@ -85,10 +85,22 @@ import Icon from '../ui/Icon.astro';
     display: flex;
     flex-direction: column;
     transform: translateX(-100%);
-    transition: transform 0.15s ease-out;
+    /* Same as #pm-panel: `visibility: hidden` while closed (delayed so the
+       slide-out still shows) takes the panel out of the tab order and makes
+       opening a real show. iPad Safari only builds the grid's touch scroller
+       when the panel becomes visible; a panel that was merely translated
+       off-screen opened with a grid that ignored swipes until a relayout
+       (e.g. blurring the search box). */
+    visibility: hidden;
+    transition: transform 0.15s ease-out, visibility 0s linear 0.15s;
     box-shadow: 8px 0 32px rgba(0, 0, 0, 0.4);
+    will-change: transform;
   }
-  .lo-panel[aria-hidden="false"] { transform: translateX(0); }
+  .lo-panel[aria-hidden="false"] {
+    transform: translateX(0);
+    visibility: visible;
+    transition: transform 0.15s ease-out, visibility 0s;
+  }
   /* On-screen keyboard open (iPad / phone, search box focused): end the panel
      above the keyboard so the whole grid stays reachable by scrolling, instead
      of its lower rows sitting under the keyboard. --lo-kb is set by the script.
@@ -423,22 +435,32 @@ import Icon from '../ui/Icon.astro';
     search.value = '';
     grid.querySelectorAll<HTMLElement>('.lo-app').forEach(el => el.hidden = false);
     updateCount();
-    // Focus right here, inside the dock tap, not in a later frame: iOS only
-    // treats a focus() made during the user's gesture as a real one. A
-    // deferred focus left iPad Safari with a focused box but a grid that
-    // ignored swipes until the box was blurred. preventScroll: the panel is
-    // still off-screen mid slide-in, don't let the browser chase the input.
-    search.focus({ preventScroll: true });
+    // Touch devices: focus only once the slide-in is over. iPad Safari, given
+    // an input focused while its panel was still mid-transform, left the grid
+    // ignoring swipes until the box was blurred; the Process Manager, which
+    // focuses after its list loads (slide-in done), never had that. Mouse /
+    // keyboard: focus now, so the first keystrokes after opening aren't lost.
+    if (matchMedia('(pointer: coarse)').matches) focusAfterSlideIn();
+    else search.focus({ preventScroll: true });
   }
-  // iOS can also miss that the grid became a scroll container while the
-  // panel was sliding in (a transformed ancestor). Once the slide-in ends,
-  // toggle its overflow so WebKit rebuilds the scroller: swipes work at once.
-  panel.addEventListener('transitionend', (e) => {
-    if (e.target !== panel || e.propertyName !== 'transform' || !isOpen()) return;
-    grid.style.overflowY = 'hidden';
-    void grid.offsetHeight;
-    grid.style.overflowY = '';
-  });
+  let slideInWait: (() => void) | null = null;
+  function focusAfterSlideIn() {
+    slideInWait?.();
+    const done = () => {
+      slideInWait?.();
+      if (isOpen()) search.focus({ preventScroll: true });
+    };
+    const onEnd = (e: TransitionEvent) => {
+      if (e.target === panel && e.propertyName === 'transform') done();
+    };
+    const timer = setTimeout(done, 300);   // no transitionend (reduced motion, already open)
+    panel.addEventListener('transitionend', onEnd);
+    slideInWait = () => {
+      clearTimeout(timer);
+      panel.removeEventListener('transitionend', onEnd);
+      slideInWait = null;
+    };
+  }
   function closePanel() { panel.setAttribute('aria-hidden', 'true'); }
 
   // Keep the panel above the on-screen keyboard. openPanel() focuses the
