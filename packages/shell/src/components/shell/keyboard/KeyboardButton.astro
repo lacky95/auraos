@@ -6,6 +6,11 @@
  *
  * mousedown is prevented so tapping the button never takes keyboard focus
  * away from the app the user wants to type into.
+ *
+ * Right-click or long-press toggles **Auto** (`$suppressNative`): with it on
+ * the keyboard opens by itself when a text field is tapped on a touch screen
+ * and the device's own keyboard stays away; with it off the device keyboard
+ * is used instead. A dot on the button shows Auto is on.
  */
 import Icon from '../../ui/Icon.astro';
 ---
@@ -14,12 +19,14 @@ import Icon from '../../ui/Icon.astro';
   type="button"
   class="dock-kb-btn"
   aria-label="Virtual keyboard"
-  title="Virtual keyboard"
+  title="Virtual keyboard (right-click or hold: Auto on/off)"
   aria-expanded="false"
+  data-auto="false"
   aria-controls="virtual-keyboard"
   data-early-click="keyboard"
 >
   <span class="dock-kb-icon" aria-hidden="true"><Icon name="keyboard" /></span>
+  <span class="dock-kb-auto" aria-hidden="true"></span>
 </button>
 
 <style is:global>
@@ -49,6 +56,17 @@ import Icon from '../../ui/Icon.astro';
     border-color: var(--aura-color-primary);
   }
   .dock-kb-icon { line-height: 1; display: inline-flex; font-size: 1.2rem; }
+  .dock-kb-btn { position: relative; }
+  /* Auto indicator: a dot in the corner while the keyboard opens by itself. */
+  .dock-kb-auto {
+    display: none;
+    position: absolute; right: 5px; top: 7px;
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--aura-color-primary);
+    box-shadow: var(--aura-glow-primary);
+  }
+  .dock-kb-btn[data-auto="true"] .dock-kb-auto { display: block; }
+  .dock-kb-btn[aria-expanded="true"] .dock-kb-auto { background: var(--aura-color-bg); box-shadow: none; }
 </style>
 
 <script>
@@ -61,8 +79,35 @@ import Icon from '../../ui/Icon.astro';
     const st = kbState();
     const toggle = () => st.$open.set(!st.$open.get());
     btn.addEventListener('mousedown', (e) => e.preventDefault());
-    btn.addEventListener('click', toggle);
     st.$open.subscribe((open) => btn.setAttribute('aria-expanded', String(open)));
+    st.$suppressNative.subscribe((auto) => {
+      btn.dataset['auto'] = String(auto);
+      btn.title = `Virtual keyboard · Auto ${auto ? 'on' : 'off'} (right-click or hold to change)`;
+    });
+
+    // Auto on/off: right-click, or hold the button (touch has no right-click).
+    // A fired long-press flags the click that follows so it doesn't also
+    // open/close the keyboard.
+    const LONGPRESS_MS = 500;
+    const SLOP_PX = 8;
+    const toggleAuto = () => st.$suppressNative.set(!st.$suppressNative.get());
+    let pressTimer: ReturnType<typeof setTimeout> | null = null;
+    let pressOrigin: { x: number; y: number } | null = null;
+    let swallowClick = false;
+    const cancelPress = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } pressOrigin = null; };
+    btn.addEventListener('contextmenu', (e) => { e.preventDefault(); cancelPress(); toggleAuto(); });
+    btn.addEventListener('pointerdown', (e) => {
+      swallowClick = false;
+      cancelPress();
+      if (e.button !== 0) return;
+      pressOrigin = { x: e.clientX, y: e.clientY };
+      pressTimer = setTimeout(() => { pressTimer = null; pressOrigin = null; swallowClick = true; toggleAuto(); }, LONGPRESS_MS);
+    });
+    btn.addEventListener('pointermove', (e) => {
+      if (pressOrigin && Math.hypot(e.clientX - pressOrigin.x, e.clientY - pressOrigin.y) > SLOP_PX) cancelPress();
+    });
+    for (const ev of ['pointerup', 'pointercancel', 'pointerleave'] as const) btn.addEventListener(ev, cancelPress);
+    btn.addEventListener('click', () => { if (swallowClick) { swallowClick = false; return; } toggle(); });
     registerAnchor('keyboard', btn);
     claimEarlyClicks('keyboard', toggle);
     document.dispatchEvent(new CustomEvent('aura:dock.refit'));

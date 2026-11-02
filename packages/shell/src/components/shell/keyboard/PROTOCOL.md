@@ -92,9 +92,11 @@ Messages (same trust rule as the receiver: a document only listens to
 
 With the policy on, a focused text field opens the virtual keyboard and
 losing focus closes it again (only a keyboard that opened that way), as the
-device keyboard would. The setting is the **Device** chip in the keyboard
-header, KV `os/virtual-keyboard/suppressNative` (default `true`) or the agent
-command `setKeyboardPolicy`.
+device keyboard would. The setting is the **Auto** chip in the keyboard
+header (right-click or long-press the dock keyboard button toggles it too; a
+dot on that button shows it is on), KV `os/virtual-keyboard/suppressNative`
+(default `true`) or the agent command `setKeyboardPolicy`. Auto off means the
+device's own keyboard is used and this keyboard only opens when asked.
 
 Not covered: documents without the receiver (apps with `injectKeyForwarder`
 off, raw apps) and native surfaces (real native WebViews over a window) —

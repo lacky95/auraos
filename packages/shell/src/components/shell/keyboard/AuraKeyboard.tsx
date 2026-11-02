@@ -277,11 +277,12 @@ export default function AuraKeyboard(): React.JSX.Element {
           <button type="button" className="aura-kb-chip" aria-pressed={autoFit} onMouseDown={stop}
             title="Switch to the compact layout when the keyboard is narrow"
             onClick={() => st.$autoFit.set(!autoFit)}>Fit</button>
-          <button type="button" className="aura-kb-chip" aria-pressed={!suppressNative} onMouseDown={stop}
+          <button type="button" className="aura-kb-chip" aria-pressed={suppressNative} onMouseDown={stop}
+            aria-label={suppressNative ? 'Auto keyboard on' : 'Auto keyboard off'}
             title={suppressNative
-              ? 'Device keyboard is kept away from text fields on touch screens — tap to allow it'
-              : 'Device keyboard may open on touch screens — tap to keep it away'}
-            onClick={() => st.$suppressNative.set(!suppressNative)}>Device</button>
+              ? 'Auto on: this keyboard opens by itself when you tap a text field and the device keyboard stays away — tap to turn off'
+              : 'Auto off: the device keyboard opens instead — tap to let this keyboard open by itself'}
+            onClick={() => st.$suppressNative.set(!suppressNative)}>Auto</button>
         </span>
 
         <span className="aura-kb-group" role="group" aria-label="Position">
