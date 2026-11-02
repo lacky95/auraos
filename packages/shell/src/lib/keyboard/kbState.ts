@@ -56,13 +56,25 @@ function atoms(): KbState {
 function create(): KbState {
   const s = atoms();
 
+  // A value that arrived from the KV must not be written back: with two or
+  // more desktop tabs open, every tab re-saving what it just received under
+  // its own tag made the tabs ping-pong the same floatRect forever, and a
+  // stale echo from that storm landing after a drag snapped the keyboard
+  // back to where it started. `applying` names the field being applied so
+  // its persist() is skipped (other fields changed by listeners still save).
+  let applying: string | null = null;
   const apply = (field: string, v: unknown): void => {
+    applying = field;
+    try { applyField(field, v); } finally { applying = null; }
+  };
+  const applyField = (field: string, v: unknown): void => {
     if (field === 'mode' && MODES.includes(v as KbMode)) s.$mode.set(v as KbMode);
     else if (field === 'layout' && typeof v === 'string' && v) s.$layout.set(v);
     else if (field === 'dockBehavior' && (v === 'push' || v === 'overlay')) s.$dockBehavior.set(v);
     else if (field === 'floatRect' && isRect(v)) {
       // Our own write coming back, or the user is mid-gesture: keep the local rect.
       if ((v as { by?: string }).by === TAB || s.$dragging.get()) return;
+      if (sameRect(s.$floatRect.get(), v)) return; // atoms notify on every new object
       s.$floatRect.set({ left: v.left, top: v.top, width: v.width, height: v.height });
     }
     else if (field === 'attachedViewId' && (typeof v === 'string' || v === null)) s.$attachedViewId.set(v);
@@ -81,7 +93,7 @@ function create(): KbState {
 
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
   const persist = (field: string, v: unknown): void => {
-    if (!hydrated) return;
+    if (!hydrated || applying === field) return;
     clearTimeout(timers.get(field));
     timers.set(field, setTimeout(() => { void setKv(NS, KEY(field), v).catch(() => undefined); }, 250));
   };
@@ -103,6 +115,10 @@ function create(): KbState {
     apply(ev.key.slice('virtual-keyboard/'.length), ev.value);
   });
   return s;
+}
+
+function sameRect(a: KbRect | null, b: KbRect): boolean {
+  return !!a && a.left === b.left && a.top === b.top && a.width === b.width && a.height === b.height;
 }
 
 function isRect(v: unknown): v is KbRect {
