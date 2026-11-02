@@ -52,6 +52,7 @@ export default function AuraKeyboard(): React.JSX.Element {
   const dockBehavior = useStore(st.$dockBehavior);
   const autoFit = useStore(st.$autoFit);
   const suppressNative = useStore(st.$suppressNative);
+  const autoOpen = useStore(st.$autoOpen);
 
   const rootRef = React.useRef<HTMLDivElement>(null);
   const keysRef = React.useRef<HTMLDivElement>(null);
@@ -277,12 +278,18 @@ export default function AuraKeyboard(): React.JSX.Element {
           <button type="button" className="aura-kb-chip" aria-pressed={autoFit} onMouseDown={stop}
             title="Switch to the compact layout when the keyboard is narrow"
             onClick={() => st.$autoFit.set(!autoFit)}>Fit</button>
-          <button type="button" className="aura-kb-chip" aria-pressed={suppressNative} onMouseDown={stop}
-            aria-label={suppressNative ? 'Auto keyboard on' : 'Auto keyboard off'}
+          <button type="button" className="aura-kb-chip" aria-pressed={autoOpen} onMouseDown={stop}
+            aria-label={autoOpen ? 'Auto open on' : 'Auto open off'}
+            title={autoOpen
+              ? 'Auto on: this keyboard opens by itself when you tap a text field on a touch screen — tap to turn off'
+              : 'Auto off: this keyboard only opens when asked — tap to let it open by itself'}
+            onClick={() => st.$autoOpen.set(!autoOpen)}>Auto</button>
+          <button type="button" className="aura-kb-chip" aria-pressed={!suppressNative} onMouseDown={stop}
+            aria-label={suppressNative ? 'Device keyboard hidden' : 'Device keyboard allowed'}
             title={suppressNative
-              ? 'Auto on: this keyboard opens by itself when you tap a text field and the device keyboard stays away — tap to turn off'
-              : 'Auto off: the device keyboard opens instead — tap to let this keyboard open by itself'}
-            onClick={() => st.$suppressNative.set(!suppressNative)}>Auto</button>
+              ? 'Device keyboard is kept away from text fields on touch screens — tap to allow it'
+              : 'Device keyboard may open on touch screens — tap to keep it away'}
+            onClick={() => st.$suppressNative.set(!suppressNative)}>Device</button>
         </span>
 
         <span className="aura-kb-group" role="group" aria-label="Position">

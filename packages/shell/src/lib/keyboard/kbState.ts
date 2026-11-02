@@ -5,7 +5,7 @@
  * the AuraKeyboard island are separate module instances.
  *
  * Persisted in the OS KV under `os/virtual-keyboard/*`: mode, layout,
- * dockBehavior, floatRect, attachedViewId, autoFit, suppressNative. The open flag is NOT persisted —
+ * dockBehavior, floatRect, attachedViewId, autoFit, suppressNative, autoOpen. The open flag is NOT persisted —
  * every page load starts with the keyboard closed.
  */
 import { atom, type WritableAtom } from 'nanostores';
@@ -26,6 +26,8 @@ export interface KbState {
   $autoFit:        WritableAtom<boolean>;
   /** Keep the device's own on-screen keyboard away from text fields (touch screens). */
   $suppressNative: WritableAtom<boolean>;
+  /** Open this keyboard by itself when a text field gets focus on a touch screen. */
+  $autoOpen:       WritableAtom<boolean>;
   /** True while the user drags/resizes; incoming KV updates for floatRect are ignored. */
   $dragging:       WritableAtom<boolean>;
 }
@@ -46,6 +48,7 @@ function atoms(): KbState {
     $attachedViewId: atom<string | null>(null),
     $autoFit:        atom(true),
     $suppressNative: atom(true),
+    $autoOpen:       atom(true),
     $dragging:       atom(false),
   };
 }
@@ -65,12 +68,13 @@ function create(): KbState {
     else if (field === 'attachedViewId' && (typeof v === 'string' || v === null)) s.$attachedViewId.set(v);
     else if (field === 'autoFit' && typeof v === 'boolean') s.$autoFit.set(v);
     else if (field === 'suppressNative' && typeof v === 'boolean') s.$suppressNative.set(v);
+    else if (field === 'autoOpen' && typeof v === 'boolean') s.$autoOpen.set(v);
   };
 
   // Hydrate, then write back on change (debounced). `hydrated` keeps the
   // initial defaults from overwriting stored values before the read lands.
   let hydrated = false;
-  const fields = ['mode', 'layout', 'dockBehavior', 'floatRect', 'attachedViewId', 'autoFit', 'suppressNative'] as const;
+  const fields = ['mode', 'layout', 'dockBehavior', 'floatRect', 'attachedViewId', 'autoFit', 'suppressNative', 'autoOpen'] as const;
   void Promise.all(fields.map(async (f) => {
     try { const v = await getKvValue(NS, KEY(f)); if (v !== null) apply(f, v); } catch { /* KV down — defaults */ }
   })).finally(() => { hydrated = true; });
@@ -91,6 +95,7 @@ function create(): KbState {
   s.$attachedViewId.listen((v) => persist('attachedViewId', v));
   s.$autoFit.listen((v) => persist('autoFit', v));
   s.$suppressNative.listen((v) => persist('suppressNative', v));
+  s.$autoOpen.listen((v) => persist('autoOpen', v));
 
   // Cross-tab / cross-device sync.
   subscribeKv({ namespace: NS }, (ev) => {

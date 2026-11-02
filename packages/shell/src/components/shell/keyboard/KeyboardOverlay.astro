@@ -16,10 +16,11 @@
  * Closing only hides it (simple-keyboard stays mounted). It force-closes
  * when the lock screen comes up and when the device's own keyboard opens.
  *
- * Device keyboard ("Auto"): with `$suppressNative` on (the default) the shell tells
+ * Device keyboard: with `$suppressNative` on (the default) the shell tells
  * every document (apps + itself) to keep the device's on-screen keyboard
- * away from text fields, and opens/closes this keyboard as fields get and
- * lose focus on touch screens — see lib/keyboard/nativeKeyboardScript.ts.
+ * away from text fields; with `$autoOpen` on ("Auto", default) it also
+ * opens/closes this keyboard as fields get and lose focus on touch screens.
+ * The two are independent — see lib/keyboard/nativeKeyboardScript.ts.
  *
  * Agents and apps:
  *   • UI commands openKeyboard / closeKeyboard / sendKey (shell MCP);
@@ -329,9 +330,9 @@ import { NATIVE_KEYBOARD_JS } from '../../../lib/keyboard/nativeKeyboardScript.t
 
     // ── Device keyboard policy (lib/keyboard/nativeKeyboardScript.ts) ──
     // Documents say hello when they load and get the policy back; a change
-    // is pushed to all of them. On touch screens a focused text field opens
-    // this keyboard and losing focus closes it again — but only a keyboard
-    // that opened that way, never one the user opened.
+    // is pushed to all of them. With Auto on, a focused text field on a touch
+    // screen opens this keyboard and losing focus closes it again — but only a
+    // keyboard that opened that way, never one the user opened.
     const frames = () => document.querySelectorAll<HTMLIFrameElement>('.app-slot iframe, #focus-frame');
     const sendPolicy = (w: Window | null | undefined) => {
       try { w?.postMessage({ type: 'aura.keyboard.policy', suppressNative: st.$suppressNative.get() }, w === window ? location.origin : '*'); }
@@ -346,7 +347,7 @@ import { NATIVE_KEYBOARD_JS } from '../../../lib/keyboard/nativeKeyboardScript.t
       if (!d || (d.type !== 'aura.keyboard.hello' && d.type !== 'aura.keyboard.field')) return;
       if (ev.source !== window && ![...frames()].some((f) => f.contentWindow === ev.source)) return;
       if (d.type === 'aura.keyboard.hello') { sendPolicy(ev.source as Window); return; }
-      if (!st.$suppressNative.get() || !matchMedia('(pointer: coarse)').matches) return;
+      if (!st.$autoOpen.get() || !matchMedia('(pointer: coarse)').matches) return;
       if (d.focused) { if (!st.$open.get()) { autoOpened = true; st.$open.set(true); } }
       else if (autoOpened) st.$open.set(false);
     });
@@ -357,7 +358,7 @@ import { NATIVE_KEYBOARD_JS } from '../../../lib/keyboard/nativeKeyboardScript.t
     const snapshot = () => ({
       open: st.$open.get(), mode: st.$mode.get(), layout: st.$layout.get(),
       dockBehavior: st.$dockBehavior.get(), attachedViewId: st.$attachedViewId.get(),
-      suppressNative: st.$suppressNative.get(),
+      suppressNative: st.$suppressNative.get(), autoOpen: st.$autoOpen.get(),
       target: (() => { const t = im.resolveTarget(); return t ? { kind: t.kind, label: t.label } : null; })(),
       layouts: LAYOUTS.map((l) => l.id),
     });
@@ -370,9 +371,10 @@ import { NATIVE_KEYBOARD_JS } from '../../../lib/keyboard/nativeKeyboardScript.t
       return snapshot();
     });
     registerUiCommand('closeKeyboard', () => { st.$open.set(false); return snapshot(); });
-    registerUiCommand('setKeyboardPolicy', ({ suppressNative }) => {
-      if (typeof suppressNative !== 'boolean') throw new Error('setKeyboardPolicy needs `suppressNative: boolean`');
-      st.$suppressNative.set(suppressNative);
+    registerUiCommand('setKeyboardPolicy', ({ suppressNative, autoOpen }) => {
+      if (typeof suppressNative !== 'boolean' && typeof autoOpen !== 'boolean') throw new Error('setKeyboardPolicy needs `suppressNative: boolean` and/or `autoOpen: boolean`');
+      if (typeof suppressNative === 'boolean') st.$suppressNative.set(suppressNative);
+      if (typeof autoOpen === 'boolean') st.$autoOpen.set(autoOpen);
       return snapshot();
     });
     registerUiCommand('sendKey', async ({ key, text, ctrl, alt, shift, meta }) => {

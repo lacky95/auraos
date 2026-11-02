@@ -90,13 +90,20 @@ Messages (same trust rule as the receiver: a document only listens to
 { type: 'aura.keyboard.field', focused: boolean }         // document → shell, touch screens only
 ```
 
-With the policy on, a focused text field opens the virtual keyboard and
-losing focus closes it again (only a keyboard that opened that way), as the
-device keyboard would. The setting is the **Auto** chip in the keyboard
-header (right-click or long-press the dock keyboard button toggles it too; a
-dot on that button shows it is on), KV `os/virtual-keyboard/suppressNative`
-(default `true`) or the agent command `setKeyboardPolicy`. Auto off means the
-device's own keyboard is used and this keyboard only opens when asked.
+Two independent settings, both in the keyboard header and both default on:
+
+- **Device** chip (lit = device keyboard allowed): `suppressNative`, KV
+  `os/virtual-keyboard/suppressNative` (`true` = kept away). This is the
+  policy above.
+- **Auto** chip: `autoOpen`, KV `os/virtual-keyboard/autoOpen`. With it on a
+  focused text field on a touch screen opens the virtual keyboard and losing
+  focus closes it again (only a keyboard that opened that way), as the device
+  keyboard would. Right-click or long-press the dock keyboard button toggles
+  it too; a dot on that button shows it is on. Auto off means this keyboard
+  only opens when asked — the device keyboard stays suppressed as long as
+  Device is off.
+
+Agents set either with `setKeyboardPolicy`.
 
 Not covered: documents without the receiver (apps with `injectKeyForwarder`
 off, raw apps) and native surfaces (real native WebViews over a window) —
@@ -107,14 +114,14 @@ the virtual keyboard when it does.
 
 - `openKeyboard { layout?, mode?: 'docked'|'floating', dockBehavior?: 'push'|'overlay' }`
 - `closeKeyboard`
-- `setKeyboardPolicy { suppressNative: boolean }`
+- `setKeyboardPolicy { suppressNative?: boolean, autoOpen?: boolean }` (at least one)
 - `sendKey { key, ctrl?, alt?, shift?, meta? }` or `sendKey { text }`
-- snapshot part `keyboard`: open state, mode, layout, `suppressNative`, current target.
+- snapshot part `keyboard`: open state, mode, layout, `suppressNative`, `autoOpen`, current target.
 
 ## State (OS KV `os/virtual-keyboard/*`)
 
 `mode`, `layout`, `dockBehavior`, `floatRect`, `attachedViewId`, `autoFit`,
-`suppressNative`,
+`suppressNative`, `autoOpen`,
 and an optional user `customLayout` (`{ default: string[], shift?: string[] }`
 in simple-keyboard format). The open flag is not stored: the keyboard
 starts closed on every load.

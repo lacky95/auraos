@@ -7,10 +7,10 @@
  * mousedown is prevented so tapping the button never takes keyboard focus
  * away from the app the user wants to type into.
  *
- * Right-click or long-press toggles **Auto** (`$suppressNative`): with it on
- * the keyboard opens by itself when a text field is tapped on a touch screen
- * and the device's own keyboard stays away; with it off the device keyboard
- * is used instead. A dot on the button shows Auto is on.
+ * Right-click or long-press toggles **Auto** (`$autoOpen`): with it on the
+ * keyboard opens by itself when a text field is tapped on a touch screen.
+ * A dot on the button shows Auto is on. Whether the device's own keyboard is
+ * kept away is a separate setting (`$suppressNative`, the Device chip).
  */
 import Icon from '../../ui/Icon.astro';
 ---
@@ -80,7 +80,7 @@ import Icon from '../../ui/Icon.astro';
     const toggle = () => st.$open.set(!st.$open.get());
     btn.addEventListener('mousedown', (e) => e.preventDefault());
     st.$open.subscribe((open) => btn.setAttribute('aria-expanded', String(open)));
-    st.$suppressNative.subscribe((auto) => {
+    st.$autoOpen.subscribe((auto) => {
       btn.dataset['auto'] = String(auto);
       btn.title = `Virtual keyboard · Auto ${auto ? 'on' : 'off'} (right-click or hold to change)`;
     });
@@ -90,7 +90,7 @@ import Icon from '../../ui/Icon.astro';
     // open/close the keyboard.
     const LONGPRESS_MS = 500;
     const SLOP_PX = 8;
-    const toggleAuto = () => st.$suppressNative.set(!st.$suppressNative.get());
+    const toggleAuto = () => st.$autoOpen.set(!st.$autoOpen.get());
     let pressTimer: ReturnType<typeof setTimeout> | null = null;
     let pressOrigin: { x: number; y: number } | null = null;
     let swallowClick = false;
