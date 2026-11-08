@@ -220,3 +220,16 @@ test('a tap still clears a pinned selection for good', () => {
   assert.equal(term.hasSelection(), false);
   assert.equal(ts.isActive(), false);
 });
+
+test('copy runs the text through prepareClipboardText before writing', async () => {
+  const written = [];
+  const term = fakeTerm(['Token: abc def']);
+  term.getSelection = () => 'Token: abc def';
+  const { ts, at } = setup(term, {
+    clipboard: { writeText: async (t) => { written.push(t); } },
+    prepareClipboardText: (t) => '​' + t,
+  });
+  ts.hook.start(...at(1, 0));
+  assert.equal(await ts.copy(), true);
+  assert.deepEqual(written, ['​Token: abc def']);
+});

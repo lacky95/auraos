@@ -56,6 +56,9 @@ export interface TouchSelectOptions {
   } | null;
   /** Last-resort copy for contexts without the async clipboard. */
   fallbackCopy?: (text: string) => boolean;
+  /** Text transform applied right before writing (clipboard-text.ts: keeps
+   *  iOS from turning "Word: …" text into a percent-encoded URL). */
+  prepareClipboardText?: (text: string) => string;
   setInterval?: (cb: () => void, ms: number) => unknown;
   clearInterval?: (handle: unknown) => void;
 }
@@ -292,8 +295,9 @@ export function attachTouchSelect(term: SelectTerminal, opts: TouchSelectOptions
     },
     /** Copy the selection. Call from a click handler (needs a user gesture). */
     async copy(): Promise<boolean> {
-      const text = term.getSelection();
-      if (!text) return false;
+      const raw = term.getSelection();
+      if (!raw) return false;
+      const text = opts.prepareClipboardText ? opts.prepareClipboardText(raw) : raw;
       try {
         if (opts.clipboard?.writeText) { await opts.clipboard.writeText(text); return true; }
       } catch { /* not allowed here — try the fallback */ }

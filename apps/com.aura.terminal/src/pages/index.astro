@@ -330,6 +330,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     import { createLaunchGate } from '../launch-gate';
     import { attachTouchScroll } from '../touch-scroll';
     import { attachTouchSelect } from '../touch-select';
+    import { clipboardSafeText, detectIOS } from '../clipboard-text';
     import { proposeGrid, settleBoxes } from '../fit-model';
     import { createConnection } from '../connection';
     import { pickNextSession } from '../next-session';
@@ -565,26 +566,31 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     }
     // Long-press selects a word, dragging on extends it; on lift the handles +
     // Copy/Paste bar appear (see touch-select.ts and the #sel-* elements).
+    // iOS promotes clipboard text that parses as a URL ("Username: …") to a
+    // URL item, which pastes percent-encoded; clipboardSafeText defuses it.
+    const IS_IOS = detectIOS();
+    // Non-secure origin / no clipboard permission: the old execCommand way.
+    function copyViaTextarea(text: string): boolean {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none;';
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch { /* unsupported */ }
+      ta.remove();
+      return ok;
+    }
     const touchSelect = attachTouchSelect(term, {
       screen: () => term.element?.querySelector('.xterm-screen')?.getBoundingClientRect() ?? null,
       cell: () => ({ w: cellW || 8.4, h: cellH || 17 }),
       onChange: () => scheduleSelLayout(),
       vibrate: (ms) => { try { navigator.vibrate?.(ms); } catch { /* unsupported */ } },
       clipboard: navigator.clipboard ?? null,
-      fallbackCopy: (text) => {
-        // Non-secure origin / no clipboard permission: the old execCommand way.
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.setAttribute('readonly', '');
-        ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none;';
-        document.body.appendChild(ta);
-        ta.select();
-        ta.setSelectionRange(0, text.length);
-        let ok = false;
-        try { ok = document.execCommand('copy'); } catch { /* unsupported */ }
-        ta.remove();
-        return ok;
-      },
+      fallbackCopy: copyViaTextarea,
+      prepareClipboardText: (text) => clipboardSafeText(text, IS_IOS),
     });
     const selBar = document.getElementById('sel-bar');
     const selHandles = {
@@ -1400,11 +1406,11 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       hideInputDialog();
     }
     async function copyDialogText() {
-      try { await navigator.clipboard.writeText(dlgText.value); return true; }
+      const text = clipboardSafeText(dlgText.value, IS_IOS);   // same iOS URL-promotion guard as the selection copy
+      try { await navigator.clipboard.writeText(text); return true; }
       catch {
         // Fallback for contexts without the async clipboard (non-secure origin).
-        dlgText.select();
-        try { return document.execCommand('copy'); } catch { return false; }
+        return copyViaTextarea(text);
       }
     }
     // The agent asked for a copy. Without a user gesture the browser usually
