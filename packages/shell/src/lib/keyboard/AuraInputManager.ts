@@ -12,7 +12,9 @@
  * Target choice, in order:
  *   1. a pinned activity (`setTargetActivity`, used by activity-attached mode);
  *   2. the focused shell text field (not inside the keyboard);
- *   3. the focused iframe;
+ *   3. the focused iframe — unless the user has since tapped another window:
+ *      iPad Safari leaves `document.activeElement` on the old iframe when you
+ *      tap into a new one, and we would focus the old one right back;
  *   4. whichever was used last: an iframe the user clicked in
  *      (`aura.pointerdown` from the proxy) or a shell field that had focus;
  *   5. nothing — the key is dropped rather than sprayed into the page.
@@ -136,9 +138,14 @@ function create(): AuraInputManager {
 
     const a = document.activeElement;
     if (isEditable(a) && !inKeyboard(a)) return { kind: 'shell', element: a, label: shellLabel(a) };
-    if (a instanceof HTMLIFrameElement && a.isConnected) return { kind: 'iframe', frame: a, label: frameLabel(a) };
-
     const frameOk = !!lastFrame?.isConnected && lastFrame.offsetParent !== null;
+    if (a instanceof HTMLIFrameElement && a.isConnected) {
+      // Every way into an iframe (focusin, blur, pointerdown) records
+      // lastFrame, so a different lastFrame is the newer one.
+      const f = frameOk ? lastFrame! : a;
+      return { kind: 'iframe', frame: f, label: frameLabel(f) };
+    }
+
     const shellOk = !!lastShell?.isConnected && lastShell.offsetParent !== null && isEditable(lastShell);
     if (frameOk && (!shellOk || lastFrameAt >= lastShellAt)) {
       return { kind: 'iframe', frame: lastFrame!, label: frameLabel(lastFrame!) };
