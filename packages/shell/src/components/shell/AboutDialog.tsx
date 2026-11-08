@@ -2,9 +2,9 @@
  * AboutDialog — the "About AuraOS" panel that opens when the user clicks the
  * AURAOS logo in the status bar. Mirrors the ViewportSettingsDialog pattern:
  * a React island that listens for a `aura.about.open` CustomEvent (dispatched
- * from the logo click in StatusBar.astro) and flips its own open state, using
- * the shared Radix Dialog primitives from @aura/ui (Esc / click-outside /
- * focus-trap for free).
+ * from the logo click in StatusBar.astro) and flips its own open state. Plain
+ * HTML throughout (./nativeDialog: frame, buttons, checkbox — no Radix), so
+ * every button works with mouse, finger and Apple Pencil alike.
  *
  * All content is fetched live from `/api/os/about` — the single source shared
  * with the Settings app's About page, so version / git / host never drift.
@@ -12,19 +12,9 @@
  * can surface a compact "update available" chip when a newer commit exists.
  */
 import * as React from 'react';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogBody,
-  DialogFooter,
-  DialogClose,
-  Button,
-  Checkbox,
-  Icon,
-} from '@aura/ui';
+import { Icon } from '@aura/ui';
 import { onOpenRequest } from '../../lib/openRequest';
+import { Btn, CheckBox, NativeDialog } from './nativeDialog';
 
 interface AboutData {
   name: string;
@@ -254,19 +244,59 @@ export function AboutDialog(): React.JSX.Element {
     );
   })();
 
-  return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      {/* z-[1055] (backdrop too): above a focused activity (60, full size 950),
-          the launcher / process-manager panels (1000) and the dock (1050);
-          below the on-screen keyboard (1065), notifications and the lock screen. */}
-      <DialogContent aria-describedby={undefined} overlayClassName="z-[1055]" className="z-[1055] max-w-md gap-0 p-0 flex flex-col">
-        <DialogHeader className="shrink-0 border-b border-[var(--border)] px-4 py-3">
-          <DialogTitle className="flex items-center gap-2 text-[var(--color-green)] text-sm tracking-widest uppercase">
-            <span aria-hidden="true"><svg className="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-info"/></svg></span> ABOUT
-          </DialogTitle>
-        </DialogHeader>
+  const footer = (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: '10px' }}>
+      {/* Row 1: restart (with its option). Row 2: reload + close. */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px' }}>
+        <div style={{ marginRight: 'auto', fontFamily: 'var(--font-mono)' }}>
+          <CheckBox
+            checked={restore}
+            disabled={restarting}
+            onChange={setRestore}
+            className="text-[0.65rem] tracking-widest text-[var(--text-secondary)] uppercase"
+          >
+            BRING MY WORK BACK
+          </CheckBox>
+        </div>
+        {armed ? (
+          <div role="group" aria-label="Confirm restart" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span style={{ fontSize: '0.66rem', fontFamily: 'var(--font-mono)' }}>RESTART AURAOS?</span>
+            <Btn tone="abort" onClick={() => { void restartOs(); }}>YES</Btn>
+            <Btn tone="outline" autoFocus onClick={() => setArmed(false)}>NO</Btn>
+          </div>
+        ) : (
+          <Btn tone="exec" disabled={restarting} onClick={() => setArmed(true)}
+            title="Save the desktop, restart AuraOS and the Shell Daemon, restore the desktop">
+            {restarting ? 'RESTARTING…' : 'RESTART AURAOS'}
+          </Btn>
+        )}
+      </div>
+      {restartMsg ? (
+        <div style={{ fontSize: '0.64rem', fontFamily: 'var(--font-mono)', color: restarting ? 'var(--color-green)' : 'var(--color-red)' }}>
+          {restartMsg}
+        </div>
+      ) : null}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '10px' }}>
+        <Btn tone="exec" disabled={restarting} onClick={() => window.location.reload()}
+          title="Reload this browser tab (AuraOS keeps running)">
+          RELOAD
+        </Btn>
+        <Btn tone="exec" onClick={() => setOpen(false)}>DONE</Btn>
+      </div>
+    </div>
+  );
 
-        <DialogBody className="p-0">
+  return (
+    <NativeDialog
+      open={open}
+      onClose={() => setOpen(false)}
+      title="ABOUT"
+      icon="info"
+      role="about-dialog"
+      className="max-w-md"
+      footer={footer}
+    >
+      <div className="min-h-0 overflow-y-auto">
           {/* Hero */}
           <div style={{ textAlign: 'center', padding: '26px 16px 18px' }}>
             <div
@@ -333,50 +363,8 @@ export function AboutDialog(): React.JSX.Element {
               Could not load system info.
             </div>
           ) : null}
-        </DialogBody>
-
-        <DialogFooter className="shrink-0 border-t border-[var(--border)] px-4 py-3" style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: '10px' }}>
-          {/* Row 1: restart (with its option). Row 2: reload + close. */}
-          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px' }}>
-            <div style={{ marginRight: 'auto', fontFamily: 'var(--font-mono)' }}>
-              <Checkbox
-                id="about-restore"
-                checked={restore}
-                disabled={restarting}
-                onCheckedChange={(v) => setRestore(v === true)}
-                label="BRING MY WORK BACK"
-              />
-            </div>
-            {armed ? (
-              <div role="group" aria-label="Confirm restart" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <span style={{ fontSize: '0.66rem', fontFamily: 'var(--font-mono)' }}>RESTART AURAOS?</span>
-                <Button variant="ABORT" size="SM" onClick={() => { void restartOs(); }}>YES</Button>
-                <Button variant="OUTLINE" size="SM" autoFocus onClick={() => setArmed(false)}>NO</Button>
-              </div>
-            ) : (
-              <Button variant="EXEC" size="SM" disabled={restarting} onClick={() => setArmed(true)}
-                title="Save the desktop, restart AuraOS and the Shell Daemon, restore the desktop">
-                {restarting ? 'RESTARTING…' : 'RESTART AURAOS'}
-              </Button>
-            )}
-          </div>
-          {restartMsg ? (
-            <div style={{ fontSize: '0.64rem', fontFamily: 'var(--font-mono)', color: restarting ? 'var(--color-green)' : 'var(--color-red)' }}>
-              {restartMsg}
-            </div>
-          ) : null}
-          <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '10px' }}>
-            <Button variant="EXEC" size="SM" disabled={restarting} onClick={() => window.location.reload()}
-              title="Reload this browser tab (AuraOS keeps running)">
-              RELOAD
-            </Button>
-            <DialogClose asChild>
-              <Button variant="EXEC" size="SM">DONE</Button>
-            </DialogClose>
-          </div>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      </div>
+    </NativeDialog>
   );
 }
 
