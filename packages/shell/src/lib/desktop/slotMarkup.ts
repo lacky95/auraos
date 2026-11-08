@@ -54,7 +54,7 @@ export function slotInnerHtml(opts: { minimizable?: boolean; bodyHtml?: string }
         <div class="slot-title" title="Double-click to name this window" style="flex:1;min-width:0;display:flex;align-items:center;gap:6px;overflow:hidden;color:var(--aura-color-primary);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.08em;">
           <span class="slot-window-name" style="display:none;flex-shrink:0;max-width:24ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:1px 6px;background:var(--aura-color-surface);border:var(--aura-border);color:var(--aura-color-primary);text-transform:none;letter-spacing:0.04em;"></span>
           <span class="slot-title-trail" style="display:flex;align-items:center;gap:4px;flex:1;min-width:0;overflow:hidden;"></span>
-          <span class="slot-title-id" style="color:var(--aura-color-text-dim);font-size:0.6rem;flex-shrink:0;"></span>
+          <span class="slot-title-id" title="Click to copy" style="color:var(--aura-color-text-dim);font-size:0.6rem;flex-shrink:0;cursor:pointer;"></span>
         </div>
         <div class="slot-controls" style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
           <span class="slot-focus-hint" style="display:none;align-items:center;gap:4px;margin-right:4px;padding:1px 6px;border:1px solid var(--aura-color-primary);color:var(--aura-color-primary);font-family:var(--aura-font-mono);font-size:0.55rem;letter-spacing:0.1em;white-space:nowrap;">${icon('circle-dot')} FOCUS · ESC</span>

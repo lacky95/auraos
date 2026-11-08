@@ -2979,6 +2979,48 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
    * For restore: the button itself carries both `data-action="restore"` and
    * `data-view-id`, since chips don't live inside a slot.
    */
+  /**
+   * Click exactly on the id text in the title bar (`.slot-title-id`, the
+   * activity/instance id) copies it to the clipboard. Delegated on document
+   * like the other chrome handlers. The span briefly reads COPIED; the next
+   * updateSlot() repaints the real id anyway, so the timer only shortens that.
+   */
+  document.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement | null;
+    const idEl = target?.closest('.slot-title-id') as HTMLElement | null;
+    if (!idEl) return;
+    const slot = idEl.closest('.app-slot[data-view-id]') as HTMLElement | null;
+    const viewId = slot?.dataset['viewId'];
+    if (!slot || !viewId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const v = views.find((x) => x.viewId === viewId);
+    const text = (v ? (v.sessionLabel ?? v.activityId ?? v.instanceId) : idEl.textContent?.trim()) ?? '';
+    if (!text) return;
+    void copyText(text).then((ok) => {
+      idEl.textContent = ok ? 'COPIED' : 'COPY FAILED';
+      window.setTimeout(() => repaintSlot(viewId), 900);
+    });
+  });
+
+  /** Clipboard write with a fallback for non-secure contexts (plain http). */
+  async function copyText(text: string): Promise<boolean> {
+    try {
+      if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
+    } catch { /* fall through to execCommand */ }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none;';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch { return false; }
+  }
+
   document.addEventListener('click', (e) => {
     const target = e.target as HTMLElement | null;
     if (!target) return;
@@ -3048,7 +3090,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
   // handler above.
   document.addEventListener('dblclick', (e) => {
     const target = e.target as HTMLElement | null;
-    if (!target || target.closest('button')) return;
+    if (!target || target.closest('button') || target.closest('.slot-title-id')) return;
     const titleEl = target.closest('.slot-title') as HTMLElement | null;
     if (!titleEl) return;
     const slot = titleEl.closest('.app-slot[data-view-id]') as HTMLElement | null;
@@ -4023,7 +4065,9 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     color: var(--aura-color-text-dim);
     font-size: 0.6rem;
     flex-shrink: 0;
+    cursor: pointer;
   }
+  .app-slot .slot-title-id:hover { color: var(--aura-color-primary); text-decoration: underline dotted; }
   .app-slot .slot-controls { display: flex; gap: 4px; flex-shrink: 0; }
   .app-slot .slot-controls button,
   .app-slot .crumb-back {
