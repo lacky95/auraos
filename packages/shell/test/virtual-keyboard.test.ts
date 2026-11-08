@@ -194,6 +194,53 @@ test('nothing focused: keys go back to the field that had focus last', async () 
   assert.equal(b.value, 'k');
 });
 
+// A WebKit-style execCommand: fires its own beforeinput (cancelable) before editing.
+const WEBKIT_EXEC = `document.execCommand = function (cmd, ui, arg) {
+  var types = { insertText: 'insertText', insertParagraph: 'insertParagraph', delete: 'deleteContentBackward', forwardDelete: 'deleteContentForward' };
+  var ok = document.getElementById('e').dispatchEvent(new InputEvent('beforeinput', { inputType: types[cmd], data: cmd === 'insertText' ? arg : null, bubbles: true, cancelable: true }));
+  if (ok) window.__exec = (window.__exec || []).concat(cmd);
+  return ok;
+};`;
+
+test('contenteditable on WebKit: the engine\'s own beforeinput is the only one the editor sees', async () => {
+  const { win, doc, tap } = setup('<div id="e" contenteditable="true">x</div>');
+  const e = doc.getElementById('e') as unknown as HTMLElement;
+  e.focus();
+  win.eval(WEBKIT_EXEC);
+  const seen: string[] = [];
+  e.addEventListener('beforeinput', (ev) => seen.push((ev as InputEvent).inputType));
+  for (let n = 0; n < 2; n++) await tap('a', 'KeyA');   // 1st key learns the engine, 2nd uses it
+  await tap('Enter', 'Enter');
+  await tap('Backspace', 'Backspace');
+  assert.deepEqual(seen, ['insertText', 'insertText', 'insertParagraph', 'deleteContentBackward']);
+  assert.equal(win.eval('window.__exec.join()'), 'insertText,insertText,insertParagraph,delete');
+});
+
+test('contenteditable on Chromium (execCommand fires no beforeinput): ours is sent, once per edit', async () => {
+  const { win, doc, tap } = setup('<div id="e" contenteditable="true">x</div>');
+  const e = doc.getElementById('e') as unknown as HTMLElement;
+  e.focus();
+  win.eval('document.execCommand = function (cmd) { window.__exec = (window.__exec || []).concat(cmd); return true; };');
+  const seen: string[] = [];
+  e.addEventListener('beforeinput', (ev) => seen.push((ev as InputEvent).inputType));
+  await tap('a', 'KeyA');
+  await tap('a', 'KeyA');
+  await tap('Backspace', 'Backspace');
+  assert.deepEqual(seen, ['insertText', 'insertText', 'deleteContentBackward']);
+  assert.equal(win.eval('window.__exec.join()'), 'insertText,insertText,delete');
+});
+
+test('contenteditable: an editor that cancels beforeinput does the edit itself, execCommand is skipped', async () => {
+  const { win, doc, tap } = setup('<div id="e" contenteditable="true">x</div>');
+  const e = doc.getElementById('e') as unknown as HTMLElement;
+  e.focus();
+  win.eval('document.execCommand = function (cmd) { window.__exec = (window.__exec || []).concat(cmd); return true; };');
+  e.addEventListener('beforeinput', (ev) => ev.preventDefault());
+  await tap('a', 'KeyA');
+  await tap('Backspace', 'Backspace');
+  assert.equal(win.eval('window.__exec'), undefined);
+});
+
 // ── Device-keyboard policy (lib/keyboard/nativeKeyboardScript.ts) ──────────
 
 function setupNative(html: string, coarse = true) {

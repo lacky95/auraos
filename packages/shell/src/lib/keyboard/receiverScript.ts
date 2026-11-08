@@ -19,6 +19,14 @@
  * Enter) — but only when the app didn't preventDefault the keydown, so apps
  * that handle keys themselves are never edited twice.
  *
+ * Contenteditable edits go through document.execCommand. WebKit (Safari, so
+ * every iPad/iPhone browser) fires its own trusted `beforeinput` for it,
+ * Chromium does not. The app must see exactly one: editors that queue an edit
+ * per `beforeinput` without preventDefault (CKEditor 5, i.e. Trilium) type
+ * every key twice otherwise. So where the engine fires one we send none, else
+ * we send ours first; which engine we are on is learned from every edit, and
+ * an echo after ours is swallowed.
+ *
  * Kept as ES5-style source in a string because it is injected verbatim as a
  * <script>; do not reference anything outside the IIFE.
  */
@@ -48,10 +56,20 @@ function edit(t,inputType,data,apply){
   apply();
   t.dispatchEvent(new InputEvent('input',{inputType:inputType,data:data,bubbles:true}));
 }
+var nativeBeforeInput=/Apple/.test(navigator.vendor||'');
+function editContent(t,inputType,data,cmd,arg){
+  var ours=!nativeBeforeInput,echo=false;
+  if(ours&&!t.dispatchEvent(new InputEvent('beforeinput',{inputType:inputType,data:data,bubbles:true,cancelable:true})))return;
+  var seen=function(e){echo=true;if(ours)e.stopImmediatePropagation();};
+  window.addEventListener('beforeinput',seen,true);
+  try{document.execCommand(cmd,false,arg);}finally{window.removeEventListener('beforeinput',seen,true);}
+  nativeBeforeInput=echo;
+}
 function insertText(t,text){
   if(t.isContentEditable){
-    if(!t.dispatchEvent(new InputEvent('beforeinput',{inputType:text==='\n'?'insertParagraph':'insertText',data:text,bubbles:true,cancelable:true})))return;
-    document.execCommand(text==='\n'?'insertParagraph':'insertText',false,text);return;
+    if(text==='\n')editContent(t,'insertParagraph',null,'insertParagraph');
+    else editContent(t,'insertText',text,'insertText',text);
+    return;
   }
   if(!isField(t))return;
   var c=caret(t);
@@ -63,8 +81,8 @@ function insertText(t,text){
 function editKey(t,key,shift,ctrl){
   if(t.isContentEditable){
     var sel=window.getSelection&&window.getSelection();
-    if(key==='Backspace'){document.execCommand('delete');return;}
-    if(key==='Delete'){document.execCommand('forwardDelete');return;}
+    if(key==='Backspace'){editContent(t,'deleteContentBackward',null,'delete');return;}
+    if(key==='Delete'){editContent(t,'deleteContentForward',null,'forwardDelete');return;}
     if(!sel||!sel.modify)return;
     var how=shift?'extend':'move';
     if(key==='ArrowLeft')sel.modify(how,'backward',ctrl?'word':'character');
