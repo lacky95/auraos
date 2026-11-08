@@ -28,7 +28,7 @@ let initialTimeZone: string = '';
 }
 ---
 <header id="statusbar">
-  <span id="os-about-btn" class="os-name" role="button" tabindex="0" aria-haspopup="dialog" title="About AuraOS" data-early-click="about">AURA<span class="os-ver">OS</span></span>
+  <span id="os-about-btn" class="os-name" role="button" tabindex="0" aria-haspopup="dialog" title="About AuraOS" data-early-click="about">A<span class="os-name-rest">URA</span><span class="os-ver">OS</span></span>
   <div class="right">
     <!--
       Workspace switcher: a row of numbered pills (1..N) plus a [+] add-new
@@ -69,6 +69,13 @@ let initialTimeZone: string = '';
         aria-label="Active workspace name"
         title="Rename the active workspace"
       />
+      <!-- ‹ ▦ › — when everything has folded (data-fold="all") the arrows
+           stay beside the ▦ button so the workspace can still be stepped
+           without opening the dropdown. Same data-ws-action as the pill
+           row's arrows (onPillClick). -->
+      <div class="ws-fold-group" role="group" aria-label="Workspace">
+      <button id="ws-fold-prev" type="button" class="status-btn ws-fold-nav" data-ws-action="prev"
+              title="Previous workspace" aria-label="Previous workspace"><Icon name="chevron-left" /></button>
       <button
         id="ws-collapse-btn"
         type="button"
@@ -79,7 +86,12 @@ let initialTimeZone: string = '';
         aria-controls="ws-content"
       >
         <span class="ws-collapse-icon" aria-hidden="true"><Icon name="layout-grid" /></span>
+        <!-- Fully folded (‹ n ›): the active workspace's number instead of ▦. -->
+        <span class="ws-collapse-num" aria-hidden="true"></span>
       </button>
+      <button id="ws-fold-next" type="button" class="status-btn ws-fold-nav" data-ws-action="next"
+              title="Next workspace" aria-label="Next workspace"><Icon name="chevron-right" /></button>
+      </div>
       <div id="ws-pills" class="ws-pills"></div>
       <!-- Compact + "+" — their own group so the dropdown can put them on the
            pill row or, when that row is too wide, beside the layout chip. -->
@@ -151,8 +163,9 @@ let initialTimeZone: string = '';
       type="button"
       class="reload-pending-chip"
       title="The shell changed while auto-reload is off — click to reload"
+      aria-label="Reload the shell"
       hidden
-    ><Icon name="rotate-cw" /> RELOAD</button>
+    ><Icon name="rotate-cw" /><span class="reload-pending-label">RELOAD</span></button>
     <span id="clock" class="clock" data-clock-format={initialClockFormat} data-locale={initialLocale} data-time-zone={initialTimeZone}>--:--:--</span>
     <div class="status-zoom" role="group" aria-label="Page zoom">
       <button id="zoom-out"   type="button" class="status-btn" title="Zoom out (Ctrl -)">-</button>
@@ -182,6 +195,51 @@ let initialTimeZone: string = '';
     </button>
   </div>
 </header>
+
+<!--
+  Edge badge for auto-hide mode (shown only while it's on, see OSLayout's
+  global autohide rules). Joined to it along the edge: a ⌨ segment (toggles
+  the virtual keyboard) and, while peeking, a ✓ segment on the badge's other
+  side (or past ⌨ when there's no room there).
+  Tap: peek both bars for barsPrefs.peekMs and pop the ✓; ✓ leaves auto-hide (bars permanent), another
+  badge tap hides the bars right away. Hold 200 ms, then drag: slide it along the
+  screen edge and over a corner onto the next one; it snaps to the nearest
+  edge.
+-->
+<button
+  id="bars-badge"
+  type="button"
+  class="bars-badge"
+  title="Show bars (hold, then drag to move)"
+  aria-label="Show bars"
+  data-edge="right"
+  data-ok-side="after"
+  data-ok-place="opposite"
+  data-peek="false"
+>
+  <span class="bars-badge-icon" aria-hidden="true"><Icon name="unfold-vertical" /></span>
+  <span class="bars-badge-timer" aria-hidden="true"></span>
+</button>
+<button
+  id="bars-badge-ok"
+  type="button"
+  class="bars-seg bars-badge-ok"
+  title="Keep the bars shown (leave auto-hide)"
+  aria-label="Keep bars shown"
+>
+  <span class="bars-badge-icon" aria-hidden="true"><Icon name="check" /></span>
+</button>
+<button
+  id="bars-badge-kb"
+  type="button"
+  class="bars-seg bars-badge-kb"
+  title="Virtual keyboard"
+  aria-label="Virtual keyboard"
+  aria-expanded="false"
+  aria-controls="virtual-keyboard"
+>
+  <span class="bars-badge-icon" aria-hidden="true"><Icon name="keyboard" /></span>
+</button>
 
 <!--
   Viewport / settings dialog. Now a React island composed of scificn primitives
@@ -215,7 +273,10 @@ let initialTimeZone: string = '';
   import { getKeyDispatcher } from '../../lib/keyDispatcher.ts';
   import { registerUiCommand, registerSnapshotPart } from '../../lib/uiCommands.ts';
   import { osEvents } from '../../lib/osEvents.ts';
+  import { kbState } from '../../lib/keyboard/kbState.ts';
   import { installShellReloadGuard, installRebuildListener, RELOAD_PENDING_EVENT } from '../../lib/devReload';
+  import { loadBarsPrefs, onBarsPrefs, AUTOHIDE_EVENT } from '../../lib/barsPrefs.ts';
+  import { installClockCalendar } from './clockCalendar.ts';
 
   const keyDispatcher = getKeyDispatcher();
 
@@ -260,6 +321,8 @@ let initialTimeZone: string = '';
   }
   tick();
   setInterval(tick, 1000);
+  // Tap / click the clock: a month calendar drops down under it.
+  installClockCalendar();
 
   // Live-refresh when Settings → General writes a new value. The Redis
   // KV PUT fires `kv:changed`, which arrives here over socket.io.
@@ -322,11 +385,14 @@ let initialTimeZone: string = '';
   // whole viewport) and #statusbar / #dock fixed-position on top with a
   // CSS transform that translates them off-edge. Moving the mouse into a
   // small "hot zone" along the top / bottom edge reveals the matching bar
-  // for AUTOHIDE_DWELL_MS; the timer resets while the cursor remains in
+  // for barsPrefs.hideDelayMs; the timer resets while the cursor remains in
   // the hot zone OR over the bar itself.
   const AUTOHIDE_KEY = 'aura.shell.autohide-bars';
-  const AUTOHIDE_DWELL_MS = 1800;     // how long a bar stays after the cursor leaves
-  const AUTOHIDE_TRIGGER_PX = 12;     // edge thickness that triggers reveal
+  // Hide delay, edge strip, reveal delay, kept bars, badge: device prefs from the
+  // viewport dialog's MENU BARS page (lib/barsPrefs), re-read live on change.
+  let barsPrefs = loadBarsPrefs();
+  // A kept bar stays shown in auto-hide mode (only the other one hides).
+  const kept = (which: 'top' | 'bottom') => (which === 'top' ? barsPrefs.keepTop : barsPrefs.keepBottom);
   const autohideBtn = document.getElementById('autohide-btn') as HTMLButtonElement | null;
   // Mode + visibility attributes live on <body> so the selectors in
   // OSLayout don't depend on the exact DOM nesting (Astro island wrappers
@@ -353,12 +419,30 @@ let initialTimeZone: string = '';
       if (which === 'bottom' && bottomTimer) { clearTimeout(bottomTimer); bottomTimer = null; }
       if (autohideEnabled) setBarVisible(which, true);
     } else if (set.delete(key) && autohideEnabled) {
-      bumpReveal(which);   // resume the normal dwell-hide from now
+      // Resume the normal dwell-hide from now — only for a bar that is up. A pin
+      // that never got its bar shown (e.g. the free keyboard's Dock pin while the
+      // Dock stays hidden) must not flash it on release.
+      const shown = root?.dataset[which === 'top' ? 'showTop' : 'showBottom'] === 'true';
+      if (shown || kept(which)) bumpReveal(which);
     }
   };
 
+  // An open docked virtual keyboard takes the Dock's place at the bottom
+  // edge (KeyboardOverlay), so while it's up the auto-hidden Dock stays
+  // hidden: no hot-zone, hover or pin reveal. Only the edge badge's peek
+  // brings it up — the keyboard then rides on top of it (KeyboardOverlay
+  // CSS keys off data-show-bottom) and drops back when the peek ends.
+  const kbs = kbState();
+  const kbDocked = () => kbs.$open.get() && kbs.$mode.get() === 'docked';
+  let badgePeeking = false;
   function setBarVisible(which: 'top' | 'bottom', visible: boolean) {
     if (!root) return;
+    if (which === 'bottom' && visible && autohideEnabled && kbDocked() && !badgePeeking) visible = false;
+    // Free (floating / attached) keyboard open: a hidden Dock stays hidden — just the
+    // keyboard. The badge peek still brings it up; a Dock that is already up is left alone.
+    if (which === 'bottom' && visible && autohideEnabled && kbs.$open.get() && !kbDocked() && !badgePeeking
+        && root.dataset['showBottom'] !== 'true') visible = false;
+    if (autohideEnabled && kept(which)) visible = true;
     root.dataset[which === 'top' ? 'showTop' : 'showBottom'] = visible ? 'true' : 'false';
   }
   function bumpReveal(which: 'top' | 'bottom') {
@@ -366,28 +450,49 @@ let initialTimeZone: string = '';
     // Pinned bars never auto-hide. The pin is owned by the focus
     // listeners — when focus leaves the bar they call bumpReveal again
     // without the pin and the dwell timer is allowed to run.
-    if (which === 'top' && (topPinned || extPins.top.size > 0))       { if (topTimer)    { clearTimeout(topTimer);    topTimer    = null; } return; }
-    if (which === 'bottom' && (bottomPinned || extPins.bottom.size > 0)) { if (bottomTimer) { clearTimeout(bottomTimer); bottomTimer = null; } return; }
+    if (which === 'top' && (topPinned || extPins.top.size > 0 || barsPrefs.keepTop))       { if (topTimer)    { clearTimeout(topTimer);    topTimer    = null; } return; }
+    if (which === 'bottom' && (bottomPinned || extPins.bottom.size > 0 || barsPrefs.keepBottom)) { if (bottomTimer) { clearTimeout(bottomTimer); bottomTimer = null; } return; }
     if (which === 'top') {
       if (topTimer) clearTimeout(topTimer);
-      topTimer = setTimeout(() => setBarVisible('top', false), AUTOHIDE_DWELL_MS);
+      topTimer = setTimeout(() => setBarVisible('top', false), barsPrefs.hideDelayMs);
     } else {
       if (bottomTimer) clearTimeout(bottomTimer);
-      bottomTimer = setTimeout(() => setBarVisible('bottom', false), AUTOHIDE_DWELL_MS);
+      bottomTimer = setTimeout(() => setBarVisible('bottom', false), barsPrefs.hideDelayMs);
     }
   }
+  // Reveal delay: the pointer has to rest in the edge strip this long before a
+  // hidden bar comes; leaving the strip first cancels it.
+  let edgeWait: { which: 'top' | 'bottom'; timer: ReturnType<typeof setTimeout> } | null = null;
+  const cancelEdgeWait = () => { if (edgeWait) { clearTimeout(edgeWait.timer); edgeWait = null; } };
   function onMouseMove(e: MouseEvent) {
-    if (!autohideEnabled) return;
+    if (!autohideEnabled || !barsPrefs.edgeHover) return;
+    // The edge badge can sit in a hot zone; hovering it must not pop a bar.
+    if ((e.target as Element | null)?.closest?.('#bars-badge, .bars-seg')) { cancelEdgeWait(); return; }
     const h = window.innerHeight;
-    if (e.clientY <= AUTOHIDE_TRIGGER_PX)              bumpReveal('top');
-    else if (e.clientY >= h - AUTOHIDE_TRIGGER_PX)     bumpReveal('bottom');
+    const zone = barsPrefs.hotZonePx;
+    const which = e.clientY <= zone ? 'top' : e.clientY >= h - zone ? 'bottom' : null;
+    if (!which) { cancelEdgeWait(); return; }
+    const shown = root?.dataset[which === 'top' ? 'showTop' : 'showBottom'] === 'true';
+    if (shown || barsPrefs.revealDelayMs <= 0) { cancelEdgeWait(); bumpReveal(which); return; }
+    if (edgeWait?.which === which) return;
+    cancelEdgeWait();
+    edgeWait = { which, timer: setTimeout(() => { edgeWait = null; if (autohideEnabled) bumpReveal(which); }, barsPrefs.revealDelayMs) };
   }
+  // Floating panels that sit INSIDE a bar's DOM but not inside its strip
+  // (the process manager is mounted in #dock). Hovering or focusing them is
+  // not using the bar, so it must not reveal or pin it — they stay open on
+  // their own while the bar hides.
+  const DETACHED_PANELS = '#pm-panel';
+  const inDetachedPanel = (t: EventTarget | null) =>
+    !!(t as Element | null)?.closest?.(DETACHED_PANELS);
   // Hovering directly over a revealed bar keeps it open — re-bump on every
   // mousemove inside the bar's bounding box.
   function attachHoverPersist(barId: string, which: 'top' | 'bottom') {
     const bar = document.getElementById(barId);
     if (!bar) return;
-    bar.addEventListener('mousemove', () => { if (autohideEnabled) bumpReveal(which); });
+    bar.addEventListener('mousemove', (e) => {
+      if (autohideEnabled && !inDetachedPanel(e.target)) bumpReveal(which);
+    });
     bar.addEventListener('mouseleave', () => {
       // Let the dwell timer fire normally; nothing to do here. (No special
       // mouseleave handling — the next time the cursor crosses a hot zone
@@ -405,7 +510,8 @@ let initialTimeZone: string = '';
   function attachFocusPin(barId: string, which: 'top' | 'bottom') {
     const bar = document.getElementById(barId);
     if (!bar) return;
-    bar.addEventListener('focusin', () => {
+    bar.addEventListener('focusin', (e) => {
+      if (inDetachedPanel(e.target)) return;
       if (which === 'top') topPinned = true; else bottomPinned = true;
       // Clear any pending hide timer immediately and force the bar visible.
       if (which === 'top'    && topTimer)    { clearTimeout(topTimer);    topTimer    = null; }
@@ -415,18 +521,263 @@ let initialTimeZone: string = '';
     bar.addEventListener('focusout', (e) => {
       // Only unpin if focus moves to something OUTSIDE this bar — not
       // when the user just arrowed between two buttons of the same bar.
+      if (inDetachedPanel(e.target)) return;   // never pinned (see focusin)
       const related = (e as FocusEvent).relatedTarget as Node | null;
-      if (related && bar.contains(related)) return;
+      if (related && bar.contains(related) && !inDetachedPanel(related)) return;
       if (which === 'top') topPinned = false; else bottomPinned = false;
-      // Resume the normal dwell-hide cadence from this moment.
-      if (autohideEnabled) bumpReveal(which);
+      // Resume the normal dwell-hide cadence from this moment — only if the
+      // bar is still up. A bar already hidden (e.g. the badge peek ran out
+      // while a dock button had focus) must not pop back on focus leaving.
+      const shown = root?.dataset[which === 'top' ? 'showTop' : 'showBottom'] === 'true';
+      if (autohideEnabled && shown) bumpReveal(which);
     });
   }
   attachFocusPin('statusbar', 'top');
   attachFocusPin('dock', 'bottom');
 
+  // Edge badge: the touch-friendly way back to the bars (no hover on a
+  // phone). A tap peeks both bars for barsPrefs.peekMs via an external pin and
+  // pops the docked ✓ (badgeOk) — tapping that leaves auto-hide mode. Dragging slides it along
+  // any edge (nearest edge wins, so it rounds corners); edge + position
+  // (0..1) persist per device.
+  type BadgeEdge = 'left' | 'right' | 'top' | 'bottom';
+  const BADGE_EDGES: BadgeEdge[] = ['left', 'right', 'top', 'bottom'];
+  const BADGE_HOLD_MS = 200;          // hold this long before the badge can be dragged
+  const BADGE_SLOP_PX = 10;           // finger jitter allowed during the hold
+  const BADGE_POS_KEY = 'aura.shell.bars-badge';
+  const BADGE_PIN = 'bars-badge';
+  const badge = document.getElementById('bars-badge') as HTMLButtonElement | null;
+  const badgeOk = document.getElementById('bars-badge-ok') as HTMLButtonElement | null;
+  const badgeKb = document.getElementById('bars-badge-kb') as HTMLButtonElement | null;
+  let peekTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // ✓ goes on the badge's side opposite ⌨ when it fits there, else past ⌨.
+  // Either way the badge itself stays put.
+  function chooseOkPlace() {
+    if (!badge || !badgeOk) return;
+    const r = document.body.getBoundingClientRect();
+    const br = badge.getBoundingClientRect();
+    const vertical = badge.dataset['edge'] === 'left' || badge.dataset['edge'] === 'right';
+    const scale = r.width / Math.max(1, document.body.offsetWidth);   // viewport zoom
+    const okLen = (parseFloat(getComputedStyle(badgeOk).getPropertyValue('--ok-len')) || 36) * scale;
+    const room = badge.dataset['okSide'] === 'after'
+      ? (vertical ? br.top - r.top : br.left - r.left)        // ✓ before the badge
+      : (vertical ? r.bottom - br.bottom : r.right - br.right); // ✓ after the badge
+    badge.dataset['okPlace'] = room >= okLen ? 'opposite' : 'far';
+  }
+  function startBadgePeek() {
+    if (peekTimer) clearTimeout(peekTimer);
+    peekTimer = null;
+    chooseOkPlace();
+    badgePeeking = true;
+    (window as any).auraPinBar('top', BADGE_PIN, true);
+    (window as any).auraPinBar('bottom', BADGE_PIN, true);
+    if (badge) badge.dataset['peek'] = 'true';
+    // Tapped while a hold is already active (field focused, notifications
+    // open): start paused.
+    peekHolds.clear();
+    if (fieldFocused()) peekHolds.add('field');
+    if (notificationsOpen) peekHolds.add('notifications');
+    if (peekHolds.size > 0) { peekPaused = true; if (badge) badge.dataset['peekPaused'] = 'true'; }
+    else peekTimer = setTimeout(() => endBadgePeek(true), barsPrefs.peekMs);
+  }
+  // Using the top bar during a peek restarts it: a fresh barsPrefs.peekMs from
+  // the last click/tap on any of its buttons (Enter/Space land here too).
+  function restartBadgePeek() {
+    if (!badgePeeking || peekPaused) return;
+    if (peekTimer) clearTimeout(peekTimer);
+    peekTimer = setTimeout(() => endBadgePeek(true), barsPrefs.peekMs);
+    // Restart the countdown strip's CSS animation from full.
+    const strip = badge?.querySelector<HTMLElement>('.bars-badge-timer');
+    if (strip) { strip.style.animation = 'none'; void strip.offsetWidth; strip.style.animation = ''; }
+  }
+  const statusbarEl = document.getElementById('statusbar');
+  statusbarEl?.addEventListener('click', (e) => {
+    if ((e.target as Element | null)?.closest?.('button, [role="button"], a')) restartBadgePeek();
+  }, true);
+  // Peek holds: while any is active the peek doesn't count down (the strip
+  // shows full); when the last one ends a fresh barsPrefs.peekMs starts.
+  //   'field'         — a top-bar text field has focus (workspace name, the
+  //                     context menu's slot / rename fields)
+  //   'notifications' — the notification center is open
+  const peekHolds = new Set<string>();
+  let peekPaused = false;
+  const TEXT_FIELD = 'input, textarea, [contenteditable=""], [contenteditable="true"]';
+  const isTextField = (t: EventTarget | null) => !!(t as Element | null)?.closest?.(TEXT_FIELD);
+  const fieldFocused = () => isTextField(document.activeElement) && !!statusbarEl?.contains(document.activeElement);
+  let notificationsOpen = false;
+  function setPeekHold(reason: string, on: boolean) {
+    if (on) peekHolds.add(reason); else peekHolds.delete(reason);
+    const paused = badgePeeking && peekHolds.size > 0;
+    if (peekPaused === paused) return;
+    peekPaused = paused;
+    if (badge) badge.dataset['peekPaused'] = String(paused);
+    if (paused) { if (peekTimer) { clearTimeout(peekTimer); peekTimer = null; } }
+    else restartBadgePeek();
+  }
+  statusbarEl?.addEventListener('focusin', (e) => {
+    if (isTextField(e.target)) setPeekHold('field', true);
+  });
+  statusbarEl?.addEventListener('focusout', (e) => {
+    const next = (e as FocusEvent).relatedTarget as Element | null;
+    if (next && statusbarEl.contains(next) && isTextField(next)) return;   // moved to another field
+    setPeekHold('field', false);
+  });
+  document.addEventListener('aura:notifications.center', (e) => {
+    notificationsOpen = !!(e as CustomEvent<{ open?: boolean }>).detail?.open;
+    setPeekHold('notifications', notificationsOpen);
+  });
+  // hide=true (peek ran out): hide both bars NOW, whatever else holds them —
+  // a focused dock button (launcher / process-manager toggles, and the
+  // process manager itself lives inside #dock), hover, or another surface's
+  // pin. Open panels are fixed-position and stay open; only the bars go.
+  // The focus pins are dropped too, so the next reveal dwell-hides normally.
+  // hide=false: just drop the pins (auto-hide is being turned off anyway).
+  function endBadgePeek(hide: boolean) {
+    if (peekTimer) { clearTimeout(peekTimer); peekTimer = null; }
+    badgePeeking = false;
+    peekPaused = false;
+    peekHolds.clear();
+    if (badge) badge.dataset['peekPaused'] = 'false';
+    extPins.top.delete(BADGE_PIN);
+    extPins.bottom.delete(BADGE_PIN);
+    if (hide && autohideEnabled) {
+      topPinned = false;
+      bottomPinned = false;
+      if (topTimer)    { clearTimeout(topTimer);    topTimer    = null; }
+      if (bottomTimer) { clearTimeout(bottomTimer); bottomTimer = null; }
+      setBarVisible('top', false);
+      setBarVisible('bottom', false);
+    }
+    if (badge) badge.dataset['peek'] = 'false';
+  }
+
+  // The docked keyboard covers the bottom of the screen. The badge keeps its
+  // spot and is lifted above the keyboard instead (data-kb-docked → CSS).
+  function syncKbDocked() {
+    const v = String(autohideEnabled && kbDocked());
+    for (const el of [badge, badgeOk, badgeKb]) if (el) el.dataset['kbDocked'] = v;
+  }
+  {
+    const onKb = () => {
+      if (autohideEnabled && kbDocked() && !badgePeeking) setBarVisible('bottom', false);
+      syncKbDocked();
+    };
+    kbs.$open.listen(onKb);
+    kbs.$mode.listen(onKb);
+  }
+
+  function placeBadge(edge: BadgeEdge, pos: number) {
+    if (!badge) return;
+    badge.dataset['edge'] = edge;
+    const p = String(Math.min(1, Math.max(0, pos)));
+    badge.style.setProperty('--badge-pos', p);
+    // The segments (⌨, ✓) dock via `.bars-badge ~ .bars-seg` off the same value.
+    badgeOk?.style.setProperty('--badge-pos', p);
+    badgeKb?.style.setProperty('--badge-pos', p);
+    // Segments go on the side of the badge with more room along the edge.
+    badge.dataset['okSide'] = Number(p) > 0.5 ? 'before' : 'after';
+  }
+  try {
+    const saved = JSON.parse(localStorage.getItem(BADGE_POS_KEY) || 'null');
+    if (saved && BADGE_EDGES.includes(saved.edge) && typeof saved.pos === 'number') {
+      placeBadge(saved.edge, saved.pos);
+    }
+  } catch {}
+
+  if (badge) {
+    // Long-press to move: the press must be held BADGE_HOLD_MS (within
+    // BADGE_SLOP_PX of where it started) before drag mode arms; moving
+    // earlier cancels the press, so a quick tap or a swipe never moves it.
+    let drag: { id: number; x0: number; y0: number; armed: boolean; cancelled: boolean } | null = null;
+    let holdTimer: ReturnType<typeof setTimeout> | null = null;
+    // A long-press/drag release is followed by a click — on the badge, or on
+    // whatever is under the finger (⌨/✓ segment, a window) depending on the
+    // browser's touch handling. Swallow that one click, wherever it lands.
+    let swallowClickUntil = 0;
+    window.addEventListener('click', (e) => {
+      if (!swallowClickUntil) return;
+      const live = performance.now() < swallowClickUntil;
+      swallowClickUntil = 0;
+      if (live) { e.preventDefault(); e.stopImmediatePropagation(); }
+    }, true);
+    const clearHold = () => { if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; } };
+    badge.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      clearHold();
+      swallowClickUntil = 0;
+      const d = { id: e.pointerId, x0: e.clientX, y0: e.clientY, armed: false, cancelled: false };
+      drag = d;
+      badge.setPointerCapture(e.pointerId);
+      holdTimer = setTimeout(() => {
+        holdTimer = null;
+        if (drag !== d || d.cancelled) return;
+        d.armed = true;
+        badge.dataset['dragging'] = 'true';
+        try { navigator.vibrate?.(15); } catch {}
+      }, BADGE_HOLD_MS);
+    });
+    badge.addEventListener('pointermove', (e) => {
+      if (!drag || e.pointerId !== drag.id || drag.cancelled) return;
+      if (!drag.armed) {
+        if (Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) > BADGE_SLOP_PX) {
+          drag.cancelled = true;   // moved before the hold armed: not a tap, not a drag
+          clearHold();
+        }
+        return;
+      }
+      // Body may be scaled/offset by the viewport zoom + margins; measure in
+      // its (screen-space) rect so the badge tracks the finger exactly.
+      const r = document.body.getBoundingClientRect();
+      const br = badge.getBoundingClientRect();
+      const len = Math.max(br.width, br.height);   // long side, either orientation
+      const x = e.clientX - r.left, y = e.clientY - r.top;
+      const dist: Record<BadgeEdge, number> = { left: x, right: r.width - x, top: y, bottom: r.height - y };
+      const edge = BADGE_EDGES.reduce((a, b) => (dist[b] < dist[a] ? b : a));
+      const pos = edge === 'left' || edge === 'right'
+        ? (y - len / 2) / Math.max(1, r.height - len)
+        : (x - len / 2) / Math.max(1, r.width - len);
+      placeBadge(edge, pos);
+    });
+    const endDrag = (e: PointerEvent) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      clearHold();
+      if (drag.armed || drag.cancelled) swallowClickUntil = performance.now() + 600;
+      if (drag.armed) {
+        badge.dataset['dragging'] = 'false';
+        chooseOkPlace();   // a peek may still be running: re-dock ✓ at the new spot
+        try {
+          localStorage.setItem(BADGE_POS_KEY, JSON.stringify({
+            edge: badge.dataset['edge'],
+            pos: Number(badge.style.getPropertyValue('--badge-pos')) || 0,
+          }));
+        } catch {}
+      }
+      drag = null;
+    };
+    badge.addEventListener('pointerup', endDrag);
+    badge.addEventListener('pointercancel', endDrag);
+    // No long-press context menu / callout on touch.
+    badge.addEventListener('contextmenu', (e) => e.preventDefault());
+    badge.addEventListener('click', () => {
+      if (!autohideEnabled) return;
+      if (badgePeeking) endBadgePeek(true);   // tap while peeking: hide right away
+      else startBadgePeek();
+    });
+  }
+  badgeOk?.addEventListener('click', () => { if (autohideEnabled) applyAutohide(false); });
+  // ⌨ segment: same toggle as the Dock's keyboard button. mousedown is
+  // prevented so the tap never steals focus from the field being typed in.
+  if (badgeKb) {
+    const kb = kbState();
+    badgeKb.addEventListener('mousedown', (e) => e.preventDefault());
+    badgeKb.addEventListener('click', () => kb.$open.set(!kb.$open.get()));
+    kb.$open.subscribe((open) => badgeKb.setAttribute('aria-expanded', String(open)));
+  }
+
   function applyAutohide(next: boolean, persist = true) {
     autohideEnabled = next;
+    syncKbDocked();
     if (root) root.dataset['autohideBars'] = next ? 'on' : 'off';
     if (autohideBtn) {
       autohideBtn.setAttribute('aria-pressed', next ? 'true' : 'false');
@@ -437,6 +788,7 @@ let initialTimeZone: string = '';
       bumpReveal('top');
       bumpReveal('bottom');
     } else {
+      endBadgePeek(/*hide*/ false);
       setBarVisible('top', false);
       setBarVisible('bottom', false);
       if (topTimer)    { clearTimeout(topTimer);    topTimer    = null; }
@@ -445,6 +797,7 @@ let initialTimeZone: string = '';
     if (persist) {
       try { localStorage.setItem(AUTOHIDE_KEY, next ? '1' : '0'); } catch {}
     }
+    window.dispatchEvent(new CustomEvent(AUTOHIDE_EVENT, { detail: { on: next } }));
   }
   // Restore persisted preference.
   try {
@@ -453,6 +806,25 @@ let initialTimeZone: string = '';
   autohideBtn?.addEventListener('click', () => applyAutohide(!autohideEnabled));
   document.addEventListener('mousemove', onMouseMove);
   (window as any).auraToggleAutohideBars = () => applyAutohide(!autohideEnabled);
+  (window as any).auraSetAutohideBars = (on: boolean) => { if (!!on !== autohideEnabled) applyAutohide(!!on); };
+
+  // MENU BARS prefs → <body> attributes for OSLayout's CSS (kept bars, badge,
+  // countdown length), and live re-apply: a kept bar shows now, a bar that is
+  // up restarts its dwell with the new delay.
+  function applyBarsPrefs() {
+    root.dataset['keepTop'] = String(barsPrefs.keepTop);
+    root.dataset['keepBottom'] = String(barsPrefs.keepBottom);
+    root.dataset['barsBadge'] = barsPrefs.showBadge ? 'on' : 'off';
+    root.style.setProperty('--bars-peek', `${barsPrefs.peekMs}ms`);
+    cancelEdgeWait();
+    if (!autohideEnabled) return;
+    for (const which of ['top', 'bottom'] as const) {
+      const shown = root.dataset[which === 'top' ? 'showTop' : 'showBottom'] === 'true';
+      if (kept(which) || shown) bumpReveal(which);
+    }
+  }
+  applyBarsPrefs();
+  onBarsPrefs((p) => { barsPrefs = p; applyBarsPrefs(); });
 
   // ---- Viewport (zoom + screen-edge margins) --------------------------
   // We can't drive the browser's real zoom from JS, so we fake it via
@@ -638,6 +1010,9 @@ let initialTimeZone: string = '';
   const bundleEl    = document.getElementById('ws-bundle')       as HTMLElement       | null;
   const popoverEl   = document.getElementById('ws-content')      as HTMLElement       | null;
   const collapseBtn = document.getElementById('ws-collapse-btn') as HTMLButtonElement | null;
+  const foldPrevBtn = document.getElementById('ws-fold-prev') as HTMLButtonElement | null;
+  const collapseNumEl = collapseBtn?.querySelector<HTMLElement>('.ws-collapse-num') ?? null;
+  const foldNextBtn = document.getElementById('ws-fold-next') as HTMLButtonElement | null;
   const actionsEl   = document.getElementById('ws-pill-actions') as HTMLElement       | null;
   const dropRow1El  = document.getElementById('ws-drop-row1')    as HTMLElement       | null;
   const dropRow2El  = document.getElementById('ws-drop-row2')    as HTMLElement       | null;
@@ -673,8 +1048,8 @@ let initialTimeZone: string = '';
   //   3. `data-fold="all"` — when even a SINGLE pill won't fit, the pills fold
   //      into the dropdown too (it now hosts pills + chip), but the name field
   //      stays beside the ▦ button so the active workspace name stays visible;
-  //   4. hide the AURAOS logo (`data-logo-hidden` on #statusbar) — the
-  //      workspace name matters more than branding;
+  //   4. shrink the AURAOS logo to its "A" (`data-logo-hidden` on #statusbar;
+  //      it still opens About) — the workspace name matters more than branding;
   //   5. hide the clock (`data-clock-hidden`), also below the name;
   //   6. last resort, if button + name field still won't fit, drop the name
   //      field too (`data-name-hidden`) and show only the icon button.
@@ -925,6 +1300,11 @@ let initialTimeZone: string = '';
     const compact = `<button class="ws-pill ws-pill-compact" data-ws-action="compact" ${workspaceClient.canCompact(state) ? '' : 'disabled'} title="Compact workspaces (remove empty ones, renumber WS names)">${COMPACT_ICON}</button>`;
     const add = `<button class="ws-pill ws-pill-add" data-ws-action="new" title="New workspace (Ctrl+Shift+N)">+</button>`;
     pillsEl.innerHTML = prev + numbered + next;
+    // Fully folded, the ▦ button shows the (pending or committed) active number.
+    if (collapseNumEl) collapseNumEl.textContent = activeIdx >= 0 ? String(activeIdx + 1) : '–';
+    // The folded-bar arrows step through ALL workspaces (no window there).
+    if (foldPrevBtn) foldPrevBtn.disabled = total < 2 || activeIdx <= 0;
+    if (foldNextBtn) foldNextBtn.disabled = total < 2 || activeIdx === -1 || activeIdx >= total - 1;
     if (actionsEl) actionsEl.innerHTML = compact + add;
     arrangeDropdown();   // pill count may have changed the row width
   }
@@ -1032,9 +1412,9 @@ let initialTimeZone: string = '';
     pillWindow = MAX_PILL_WINDOW;
     if (state) renderPills(state);
 
-    // Tier 3: the workspace name outranks branding — hide the AURAOS logo
-    // before touching the name field. rightOverflowing() reads the logo's
-    // offsetWidth, which is 0 once hidden, so the freed space counts.
+    // Tier 3: the workspace name outranks branding — shrink the AURAOS logo
+    // to its "A" before touching the name field. rightOverflowing() reads the
+    // logo's offsetWidth, which then is just the "A", so the freed space counts.
     if (!rightOverflowing()) return;
     statusBar.dataset['logoHidden'] = 'true';
 
@@ -1219,6 +1599,8 @@ let initialTimeZone: string = '';
   };
   pillsEl?.addEventListener('click', onPillClick);
   actionsEl?.addEventListener('click', onPillClick);
+  foldPrevBtn?.addEventListener('click', onPillClick);
+  foldNextBtn?.addEventListener('click', onPillClick);
 
   // ---- Per-pill context menu ------------------------------------------
   // Right-click or long-press a numbered pill → a menu with Move / Rename /
@@ -1767,7 +2149,9 @@ let initialTimeZone: string = '';
     cursor: pointer;
     user-select: none;
   }
-  #statusbar[data-logo-hidden="true"] .os-name { display: none; }
+  /* Too narrow for the full logo: keep just the "A" (still opens About). */
+  #statusbar[data-logo-hidden="true"] .os-name-rest,
+  #statusbar[data-logo-hidden="true"] .os-ver { display: none; }
   #statusbar[data-clock-hidden="true"] .clock { display: none; }
   .os-name:hover { filter: brightness(1.25); }
   .os-name:focus-visible { outline: 1px solid var(--aura-color-primary); outline-offset: 2px; }
@@ -1780,9 +2164,286 @@ let initialTimeZone: string = '';
 
   .clock { color: var(--aura-color-text); font-family: var(--aura-font-mono); }
 
+  /* Auto-hide edge badge. Hidden here; OSLayout's global autohide rules
+     show it while the mode is on. Sits above the revealed bars (900) and
+     below the launcher / process-manager panels (1000). Upright on the
+     left/right edge, lying on the top/bottom edge; --badge-pos (0..1) is
+     its place along the edge. */
+  .bars-badge,
+  .bars-seg {
+    --badge-thick: 22px;
+    --badge-len: 48px;
+    --kb-len: 36px;
+    --ok-len: 36px;
+    /* Never let a tap / long-press select the icon or open the iOS callout. */
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+  .bars-badge :global(*),
+  .bars-seg :global(*) {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+  .bars-badge {
+    display: none;
+    position: fixed;
+    padding: 0;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    z-index: 950;
+    font-size: 14px;
+    color: var(--aura-color-primary);
+    background: var(--aura-color-surface);
+    border: var(--aura-border);
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.35);
+    opacity: 0.55;
+    cursor: grab;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+    transition: opacity 0.15s, color 0.15s, background 0.15s,
+      top 0.18s ease-out, bottom 0.18s ease-out, left 0.12s ease-out;
+  }
+  .bars-badge[data-edge="left"],
+  .bars-badge[data-edge="right"] {
+    width: var(--badge-thick);
+    height: var(--badge-len);
+    top: calc(var(--badge-pos, 0.5) * (100% - var(--badge-len)));
+  }
+  .bars-badge[data-edge="top"],
+  .bars-badge[data-edge="bottom"] {
+    width: var(--badge-len);
+    height: var(--badge-thick);
+    left: calc(var(--badge-pos, 0.5) * (100% - var(--badge-len)));
+  }
+  .bars-badge[data-edge="right"]  { right: 0;  border-right: none;  border-radius: 8px 0 0 8px; }
+  .bars-badge[data-edge="left"]   { left: 0;   border-left: none;   border-radius: 0 8px 8px 0; }
+  .bars-badge[data-edge="top"]    { top: 0;    border-top: none;    border-radius: 0 0 8px 8px; }
+  .bars-badge[data-edge="bottom"] { bottom: 0; border-bottom: none; border-radius: 8px 8px 0 0; }
+  /* On the top/bottom edge, ride along with the revealed bar instead of
+     covering it. */
+  :global(body[data-show-top="true"]) .bars-badge[data-edge="top"] { top: var(--aura-statusbar-height); }
+  :global(body[data-show-bottom="true"]) .bars-badge[data-edge="bottom"] { bottom: var(--aura-dock-height); }
+  .bars-badge:hover,
+  .bars-badge:focus-visible,
+  .bars-badge[data-dragging="true"],
+  .bars-badge[data-peek="true"],
+  .bars-badge:has(~ .bars-badge-kb:hover) { opacity: 1; }
+  .bars-badge:focus-visible { outline: 1px solid var(--aura-color-primary); outline-offset: -3px; }
+  .bars-badge[data-dragging="true"] {
+    cursor: grabbing;
+    transition: none;
+    box-shadow: 0 0 0 2px var(--aura-color-primary), 0 0 14px rgba(0, 0, 0, 0.45);
+  }
+  .bars-badge[data-peek="true"] {
+    color: var(--aura-color-bg);
+    background: var(--aura-color-primary);
+    border-color: var(--aura-color-primary);
+  }
+  .bars-badge-icon { display: inline-flex; pointer-events: none; }
+  /* Docked keyboard open (z-index 1065): stay where it is, on top of it. */
+  .bars-badge[data-kb-docked="true"],
+  .bars-seg[data-kb-docked="true"] { z-index: 1070; }
+
+  /* Segments joined to the badge along the edge, on the side with more
+     room (data-ok-side, set by JS): ⌨ (virtual keyboard) always, ✓ (leave
+     auto-hide) at the far end while the badge peeks. Each sits at the
+     badge's own start (edge + --badge-pos, mirrored by JS) plus --seg-off,
+     so the badge never moves when a segment appears. */
+  .bars-seg {
+    display: none;
+    position: fixed;
+    padding: 0;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    z-index: 950;
+    font-size: 14px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.35);
+    cursor: pointer;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    transition: opacity 0.15s, color 0.15s, background 0.15s,
+      top 0.18s ease-out, bottom 0.18s ease-out;
+  }
+  .bars-badge-kb {
+    --seg-len: var(--kb-len);
+    color: var(--aura-color-primary);
+    background: var(--aura-color-surface);
+    border: var(--aura-border);
+    opacity: 0.55;
+  }
+  :global(body[data-autohide-bars="on"]) .bars-badge-kb { display: inline-flex; }
+  .bars-badge-kb:hover,
+  .bars-badge-kb:focus-visible,
+  .bars-badge-kb[aria-expanded="true"],
+  .bars-badge:hover ~ .bars-badge-kb,
+  .bars-badge[data-peek="true"] ~ .bars-badge-kb,
+  .bars-badge[data-dragging="true"] ~ .bars-badge-kb { opacity: 1; }
+  .bars-badge-kb[aria-expanded="true"] {
+    color: var(--aura-color-bg);
+    background: var(--aura-color-primary);
+  }
+  .bars-badge-kb:focus-visible { outline: 1px solid var(--aura-color-primary); outline-offset: -3px; }
+  .bars-badge-ok {
+    --seg-len: var(--ok-len);
+    color: var(--aura-color-bg);
+    background: var(--aura-color-primary);
+    border: 1px solid var(--aura-color-primary);
+    animation: bars-badge-ok-pop 0.16s ease-out;
+  }
+  .bars-badge[data-peek="true"]:not([data-dragging="true"]) ~ .bars-badge-ok { display: inline-flex; }
+  .bars-badge-ok:hover { filter: brightness(1.15); }
+  .bars-badge-ok:focus-visible { outline: 1px solid var(--aura-color-bg); outline-offset: -4px; }
+  .bars-badge[data-dragging="true"] ~ .bars-seg { transition: none; }
+
+  /* Size + cross-axis: same thickness as the badge, flush with the edge. */
+  .bars-badge[data-edge="left"] ~ .bars-seg,
+  .bars-badge[data-edge="right"] ~ .bars-seg { width: var(--badge-thick); height: var(--seg-len); }
+  .bars-badge[data-edge="top"] ~ .bars-seg,
+  .bars-badge[data-edge="bottom"] ~ .bars-seg { width: var(--seg-len); height: var(--badge-thick); }
+  .bars-badge[data-edge="left"]   ~ .bars-seg { left: 0;   border-left: none; }
+  .bars-badge[data-edge="right"]  ~ .bars-seg { right: 0;  border-right: none; }
+  .bars-badge[data-edge="top"]    ~ .bars-seg { top: 0;    border-top: none; }
+  .bars-badge[data-edge="bottom"] ~ .bars-seg { bottom: 0; border-bottom: none; }
+  :global(body[data-show-top="true"]) .bars-badge[data-edge="top"] ~ .bars-seg { top: var(--aura-statusbar-height); }
+  :global(body[data-show-bottom="true"]) .bars-badge[data-edge="bottom"] ~ .bars-seg { bottom: var(--aura-dock-height); }
+
+  /* Along the edge: ⌨ joins the badge on the roomier side (data-ok-side);
+     ✓ sits on the badge's other side (data-ok-place="opposite") or, near a
+     corner, past ⌨ ("far"). */
+  .bars-badge[data-ok-side="after"]  ~ .bars-badge-kb { --seg-off: var(--badge-len); }
+  .bars-badge[data-ok-side="after"]  ~ .bars-badge-ok { --seg-off: calc(var(--badge-len) + var(--kb-len)); }
+  .bars-badge[data-ok-side="after"][data-ok-place="opposite"]  ~ .bars-badge-ok { --seg-off: calc(-1 * var(--ok-len)); }
+  .bars-badge[data-ok-side="before"][data-ok-place="opposite"] ~ .bars-badge-ok { --seg-off: var(--badge-len); }
+  .bars-badge[data-ok-side="before"] ~ .bars-badge-kb { --seg-off: calc(-1 * var(--kb-len)); }
+  .bars-badge[data-ok-side="before"] ~ .bars-badge-ok { --seg-off: calc(-1 * (var(--kb-len) + var(--ok-len))); }
+  .bars-badge[data-edge="left"] ~ .bars-seg,
+  .bars-badge[data-edge="right"] ~ .bars-seg {
+    top: calc(var(--badge-pos, 0.5) * (100% - var(--badge-len)) + var(--seg-off, 0px));
+  }
+  .bars-badge[data-edge="top"] ~ .bars-seg,
+  .bars-badge[data-edge="bottom"] ~ .bars-seg {
+    left: calc(var(--badge-pos, 0.5) * (100% - var(--badge-len)) + var(--seg-off, 0px));
+  }
+  /* Joints: ⌨ drops its border toward the badge (the badge's own border
+     separates them); ✓ gets a 1px background-coloured line toward ⌨. */
+  .bars-badge[data-edge="left"][data-ok-side="after"] ~ .bars-badge-kb,
+  .bars-badge[data-edge="right"][data-ok-side="after"] ~ .bars-badge-kb { border-top: none; }
+  .bars-badge[data-edge="left"][data-ok-side="before"] ~ .bars-badge-kb,
+  .bars-badge[data-edge="right"][data-ok-side="before"] ~ .bars-badge-kb { border-bottom: none; }
+  .bars-badge[data-edge="top"][data-ok-side="after"] ~ .bars-badge-kb,
+  .bars-badge[data-edge="bottom"][data-ok-side="after"] ~ .bars-badge-kb { border-left: none; }
+  .bars-badge[data-edge="top"][data-ok-side="before"] ~ .bars-badge-kb,
+  .bars-badge[data-edge="bottom"][data-ok-side="before"] ~ .bars-badge-kb { border-right: none; }
+  .bars-badge[data-edge="left"][data-ok-side="after"] ~ .bars-badge-ok,
+  .bars-badge[data-edge="right"][data-ok-side="after"] ~ .bars-badge-ok { border-top: 1px solid var(--aura-color-bg); }
+  .bars-badge[data-edge="left"][data-ok-side="before"] ~ .bars-badge-ok,
+  .bars-badge[data-edge="right"][data-ok-side="before"] ~ .bars-badge-ok { border-bottom: 1px solid var(--aura-color-bg); }
+  .bars-badge[data-edge="top"][data-ok-side="after"] ~ .bars-badge-ok,
+  .bars-badge[data-edge="bottom"][data-ok-side="after"] ~ .bars-badge-ok { border-left: 1px solid var(--aura-color-bg); }
+  .bars-badge[data-edge="top"][data-ok-side="before"] ~ .bars-badge-ok,
+  .bars-badge[data-edge="bottom"][data-ok-side="before"] ~ .bars-badge-ok { border-right: 1px solid var(--aura-color-bg); }
+
+  /* Corners: square at every joint, rounded at the far end of the chain
+     (⌨'s end normally, ✓'s end while it shows). */
+  .bars-badge[data-edge="right"][data-ok-side="after"]   { border-bottom-left-radius: 0; }
+  .bars-badge[data-edge="right"][data-ok-side="before"]  { border-top-left-radius: 0; }
+  .bars-badge[data-edge="left"][data-ok-side="after"]    { border-bottom-right-radius: 0; }
+  .bars-badge[data-edge="left"][data-ok-side="before"]   { border-top-right-radius: 0; }
+  .bars-badge[data-edge="top"][data-ok-side="after"]     { border-bottom-right-radius: 0; }
+  .bars-badge[data-edge="top"][data-ok-side="before"]    { border-bottom-left-radius: 0; }
+  .bars-badge[data-edge="bottom"][data-ok-side="after"]  { border-top-right-radius: 0; }
+  .bars-badge[data-edge="bottom"][data-ok-side="before"] { border-top-left-radius: 0; }
+  .bars-badge[data-edge="right"][data-ok-side="after"]   ~ .bars-seg { border-radius: 0 0 0 8px; }
+  .bars-badge[data-edge="right"][data-ok-side="before"]  ~ .bars-seg { border-radius: 8px 0 0 0; }
+  .bars-badge[data-edge="left"][data-ok-side="after"]    ~ .bars-seg { border-radius: 0 0 8px 0; }
+  .bars-badge[data-edge="left"][data-ok-side="before"]   ~ .bars-seg { border-radius: 0 8px 0 0; }
+  .bars-badge[data-edge="top"][data-ok-side="after"]     ~ .bars-seg { border-radius: 0 0 8px 0; }
+  .bars-badge[data-edge="top"][data-ok-side="before"]    ~ .bars-seg { border-radius: 0 0 0 8px; }
+  .bars-badge[data-edge="bottom"][data-ok-side="after"]  ~ .bars-seg { border-radius: 0 8px 0 0; }
+  .bars-badge[data-edge="bottom"][data-ok-side="before"] ~ .bars-seg { border-radius: 8px 0 0 0; }
+  .bars-badge[data-peek="true"][data-ok-place="far"]:not([data-dragging="true"]) ~ .bars-badge-kb { border-radius: 0; }
+
+  /* ✓ on the opposite side: its own joint line + rounded far end, and the
+     badge squares that corner while ✓ shows. */
+  .bars-badge[data-ok-place="opposite"][data-ok-side] ~ .bars-badge-ok { border: 1px solid var(--aura-color-primary); }
+  .bars-badge[data-ok-place="opposite"][data-edge="left"]   ~ .bars-badge-ok { border-left: none; }
+  .bars-badge[data-ok-place="opposite"][data-edge="right"]  ~ .bars-badge-ok { border-right: none; }
+  .bars-badge[data-ok-place="opposite"][data-edge="top"]    ~ .bars-badge-ok { border-top: none; }
+  .bars-badge[data-ok-place="opposite"][data-edge="bottom"] ~ .bars-badge-ok { border-bottom: none; }
+  .bars-badge[data-ok-place="opposite"][data-edge="right"][data-ok-side="after"]   ~ .bars-badge-ok { border-bottom: 1px solid var(--aura-color-bg); border-radius: 8px 0 0 0; }
+  .bars-badge[data-ok-place="opposite"][data-edge="right"][data-ok-side="before"]  ~ .bars-badge-ok { border-top: 1px solid var(--aura-color-bg);    border-radius: 0 0 0 8px; }
+  .bars-badge[data-ok-place="opposite"][data-edge="left"][data-ok-side="after"]    ~ .bars-badge-ok { border-bottom: 1px solid var(--aura-color-bg); border-radius: 0 8px 0 0; }
+  .bars-badge[data-ok-place="opposite"][data-edge="left"][data-ok-side="before"]   ~ .bars-badge-ok { border-top: 1px solid var(--aura-color-bg);    border-radius: 0 0 8px 0; }
+  .bars-badge[data-ok-place="opposite"][data-edge="top"][data-ok-side="after"]     ~ .bars-badge-ok { border-right: 1px solid var(--aura-color-bg);  border-radius: 0 0 0 8px; }
+  .bars-badge[data-ok-place="opposite"][data-edge="top"][data-ok-side="before"]    ~ .bars-badge-ok { border-left: 1px solid var(--aura-color-bg);   border-radius: 0 0 8px 0; }
+  .bars-badge[data-ok-place="opposite"][data-edge="bottom"][data-ok-side="after"]  ~ .bars-badge-ok { border-right: 1px solid var(--aura-color-bg);  border-radius: 8px 0 0 0; }
+  .bars-badge[data-ok-place="opposite"][data-edge="bottom"][data-ok-side="before"] ~ .bars-badge-ok { border-left: 1px solid var(--aura-color-bg);   border-radius: 0 8px 0 0; }
+  .bars-badge[data-peek="true"][data-ok-place="opposite"][data-edge="right"][data-ok-side="after"]:not([data-dragging="true"])   { border-top-left-radius: 0; }
+  .bars-badge[data-peek="true"][data-ok-place="opposite"][data-edge="right"][data-ok-side="before"]:not([data-dragging="true"])  { border-bottom-left-radius: 0; }
+  .bars-badge[data-peek="true"][data-ok-place="opposite"][data-edge="left"][data-ok-side="after"]:not([data-dragging="true"])    { border-top-right-radius: 0; }
+  .bars-badge[data-peek="true"][data-ok-place="opposite"][data-edge="left"][data-ok-side="before"]:not([data-dragging="true"])   { border-bottom-right-radius: 0; }
+  .bars-badge[data-peek="true"][data-ok-place="opposite"][data-edge="top"][data-ok-side="after"]:not([data-dragging="true"])     { border-bottom-left-radius: 0; }
+  .bars-badge[data-peek="true"][data-ok-place="opposite"][data-edge="top"][data-ok-side="before"]:not([data-dragging="true"])    { border-bottom-right-radius: 0; }
+  .bars-badge[data-peek="true"][data-ok-place="opposite"][data-edge="bottom"][data-ok-side="after"]:not([data-dragging="true"])  { border-top-left-radius: 0; }
+  .bars-badge[data-peek="true"][data-ok-place="opposite"][data-edge="bottom"][data-ok-side="before"]:not([data-dragging="true"]) { border-top-right-radius: 0; }
+  @keyframes bars-badge-ok-pop {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+  /* Peek countdown: a thin strip on the inner side that drains over the
+     peek window (--bars-peek = barsPrefs.peekMs, set by applyBarsPrefs). */
+  .bars-badge-timer {
+    position: absolute;
+    background: currentColor;
+    pointer-events: none;
+  }
+  .bars-badge[data-edge="left"] .bars-badge-timer,
+  .bars-badge[data-edge="right"] .bars-badge-timer {
+    top: 0; bottom: 0; width: 2px;
+    transform-origin: bottom;
+    transform: scaleY(0);
+  }
+  .bars-badge[data-edge="top"] .bars-badge-timer,
+  .bars-badge[data-edge="bottom"] .bars-badge-timer {
+    left: 0; right: 0; height: 2px;
+    transform-origin: left;
+    transform: scaleX(0);
+  }
+  .bars-badge[data-edge="right"]  .bars-badge-timer { left: 0; }
+  .bars-badge[data-edge="left"]   .bars-badge-timer { right: 0; }
+  .bars-badge[data-edge="top"]    .bars-badge-timer { bottom: 0; }
+  .bars-badge[data-edge="bottom"] .bars-badge-timer { top: 0; }
+  .bars-badge[data-peek="true"][data-edge="left"] .bars-badge-timer,
+  .bars-badge[data-peek="true"][data-edge="right"] .bars-badge-timer {
+    animation: bars-badge-countdown-y var(--bars-peek, 6s) linear forwards;
+  }
+  .bars-badge[data-peek="true"][data-edge="top"] .bars-badge-timer,
+  .bars-badge[data-peek="true"][data-edge="bottom"] .bars-badge-timer {
+    animation: bars-badge-countdown-x var(--bars-peek, 6s) linear forwards;
+  }
+  .bars-badge[data-peek-paused="true"] .bars-badge-timer { animation: none !important; transform: none; }
+  @keyframes bars-badge-countdown-y {
+    from { transform: scaleY(1); }
+    to   { transform: scaleY(0); }
+  }
+  @keyframes bars-badge-countdown-x {
+    from { transform: scaleX(1); }
+    to   { transform: scaleX(0); }
+  }
+
   /* Dev-only "reload pending" chip: shown when auto-reload is off and a source
      change was suppressed. Attention-toned (warning color) + pulse so it's
      obvious a change is waiting. `hidden` by default; the script reveals it. */
+  /* Small bar (everything folded, or the logo shrunk to its "A"): the chip
+     keeps just its reload icon. */
+  #statusbar:has(#ws-bundle[data-fold="all"]) .reload-pending-label,
+  #statusbar[data-logo-hidden="true"] .reload-pending-label { display: none; }
+  #statusbar:has(#ws-bundle[data-fold="all"]) .reload-pending-chip,
+  #statusbar[data-logo-hidden="true"] .reload-pending-chip { padding: 0 5px; }
   .reload-pending-chip {
     display: inline-flex;
     align-items: center;
@@ -1906,12 +2567,45 @@ let initialTimeZone: string = '';
     gap: 8px;
   }
   .ws-collapse-btn { display: none; }
+  .ws-fold-nav { display: none; }
+  /* ‹ n › as one segmented control, like the zoom buttons. Before the full
+     fold the group is layout-transparent and ▦ keeps its own border. */
+  .ws-fold-group { display: contents; }
+  .ws-bundle[data-fold="all"] .ws-fold-group {
+    display: inline-flex;
+    align-items: center;
+    border: var(--aura-border);
+  }
+  .ws-bundle[data-fold="all"] .ws-fold-group .status-btn { border: none; }
+  .ws-bundle[data-fold="all"] .ws-fold-group .ws-fold-nav { width: 22px; }
+  .ws-bundle[data-fold="all"] .ws-fold-group .status-btn + .status-btn { border-left: 1px solid var(--aura-color-border); }
+  .ws-bundle[data-fold="all"] .ws-fold-group .status-btn:hover {
+    background: color-mix(in srgb, var(--aura-color-primary) 14%, transparent);
+    box-shadow: none;
+  }
+  .ws-bundle[data-fold="all"] .ws-fold-nav { display: inline-flex; align-items: center; justify-content: center; }
+  .ws-fold-nav:disabled { opacity: 0.35; cursor: default; }
   /* The ▦ trigger appears as soon as anything has folded into the dropdown. */
   .ws-bundle[data-fold="chip"] .ws-collapse-btn,
   .ws-bundle[data-fold="all"]  .ws-collapse-btn { display: inline-flex; }
   /* Dropdown host is hidden until opened (it only holds folded controls). */
   .ws-content { display: none; }
   .ws-collapse-icon { line-height: 1; font-size: 0.9rem; }
+  /* ‹ n ›: number in the zoom-percent style (.status-btn-text). */
+  .ws-collapse-num { display: none; }
+  .ws-bundle[data-fold="all"] .ws-collapse-icon { display: none; }
+  .ws-bundle[data-fold="all"] .ws-collapse-num { display: inline; }
+  .ws-bundle[data-fold="all"] .ws-collapse-btn {
+    /* Fixed two-digit width, so 1 → 12 never shifts the arrows. */
+    width: calc(2ch + 16px);
+    min-width: 0;
+    padding: 0;
+    justify-content: center;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.65rem;
+    letter-spacing: 0.06em;
+    color: var(--aura-color-text);
+  }
 
   /* ── Workspace name field ──
    * Editable text input for the active workspace's name, the priority control

@@ -902,6 +902,15 @@ const activeThemeId   = activeTheme.id;
   body[data-autohide-bars="on"] #desktop {
     height: 100%;
   }
+  /* MENU BARS → a bar set to "Always shown" (lib/barsPrefs, body[data-keep-*] from
+   * StatusBar) stays in place in auto-hide mode, and the desktop leaves room for it. */
+  body[data-autohide-bars="on"][data-keep-top="true"]    { --aura-kept-top: var(--aura-statusbar-height); }
+  body[data-autohide-bars="on"][data-keep-bottom="true"] { --aura-kept-bottom: var(--aura-dock-height); }
+  body[data-autohide-bars="on"][data-keep-top="true"] #desktop,
+  body[data-autohide-bars="on"][data-keep-bottom="true"] #desktop {
+    margin-top: var(--aura-kept-top, 0px);
+    height: calc(100% - var(--aura-kept-top, 0px) - var(--aura-kept-bottom, 0px));
+  }
   /* Animate top/bottom rather than `transform: translateY(...)` to avoid
    * creating a new containing block on the bars. The Dock currently mounts
    * <ProcessManager /> inside <nav id="dock">, and pm-panel is a
@@ -935,6 +944,19 @@ const activeThemeId   = activeTheme.id;
   body[data-autohide-bars="on"][data-show-bottom="true"] #dock {
     bottom: 0;
   }
+  body[data-autohide-bars="on"][data-keep-top="true"] #statusbar,
+  body[data-autohide-bars="on"][data-keep-bottom="true"] #dock {
+    box-shadow: none;
+  }
+  /* MENU BARS → "Edge badge" off: no badge, no ⌨ / ✓ segments. */
+  body[data-bars-badge="off"] #bars-badge,
+  body[data-bars-badge="off"] .bars-seg {
+    display: none !important;
+  }
+  /* Edge badge (StatusBar) — the way back to the bars without edge-hover. */
+  body[data-autohide-bars="on"] #bars-badge {
+    display: inline-flex;
+  }
   #autohide-btn[data-active="on"] {
     color: var(--aura-color-bg);
     background: var(--aura-color-primary);
@@ -957,8 +979,8 @@ const activeThemeId   = activeTheme.id;
    * autohide where the open menu covers the taskbar slot. */
   body[data-autohide-bars="on"] #lo-panel,
   body[data-autohide-bars="on"] #pm-panel {
-    top: 0 !important;
-    bottom: 0 !important;
+    top: var(--aura-kept-top, 0px) !important;      /* a kept bar (MENU BARS) stays uncovered */
+    bottom: var(--aura-kept-bottom, 0px) !important;
   }
   /* (Bars stay below panels — panels render on top of revealed bars,
    *  Windows-style. Z-index already set on the primary autohide rule

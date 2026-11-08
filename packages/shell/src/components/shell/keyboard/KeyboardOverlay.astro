@@ -61,6 +61,24 @@ import { NATIVE_KEYBOARD_JS } from '../../../lib/keyboard/nativeKeyboardScript.t
     bottom: calc(var(--aura-dock-height) + env(safe-area-inset-bottom, 0px) / 2);
     max-height: 48vh;
     border-left: none; border-right: none; border-bottom: none;
+    transition: bottom 0.18s ease-out;
+  }
+  /* Auto-hide bars: the Dock is out of the way (StatusBar keeps it hidden
+     while the docked keyboard is open), so the keyboard takes its place
+     flush at the bottom edge. When the edge badge peeks the Dock up, the
+     keyboard rides up on top of it and back down with it (same timing as
+     the Dock's slide in OSLayout). */
+  body[data-autohide-bars="on"] .aura-vkb[data-mode="docked"] {
+    bottom: calc(env(safe-area-inset-bottom, 0px) / 2);
+  }
+  body[data-autohide-bars="on"][data-show-bottom="true"] .aura-vkb[data-mode="docked"] {
+    bottom: calc(var(--aura-dock-height) + env(safe-area-inset-bottom, 0px) / 2);
+  }
+  /* While the launcher or process manager is open — with or without
+     auto-hide bars — the docked keyboard goes flush to the bottom edge,
+     over the Dock, so more of the panel being used stays visible. */
+  body:has(#lo-panel[aria-hidden="false"], #pm-panel[aria-hidden="false"]) .aura-vkb[data-mode="docked"] {
+    bottom: calc(env(safe-area-inset-bottom, 0px) / 2);
   }
   .aura-vkb[data-mode="floating"],
   .aura-vkb[data-mode="activity"] { box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5), var(--aura-glow-subtle, none); }
@@ -274,7 +292,10 @@ import { NATIVE_KEYBOARD_JS } from '../../../lib/keyboard/nativeKeyboardScript.t
       el!.setAttribute('aria-hidden', String(!open));
       el!.dataset['mode'] = mode;
       el!.dataset['detached'] = 'false';
-      pinDock('virtual-keyboard', open);
+      // Docked, the keyboard replaces the Dock rather than needing it (with
+      // auto-hide bars it sits where the Dock would be); only the floating /
+      // window-attached keyboard keeps the Dock pinned up.
+      pinDock('virtual-keyboard', open && mode !== 'docked');
       if (follow) { cancelAnimationFrame(follow); follow = 0; }
       im.setTargetActivity(open && mode === 'activity' ? st.$attachedViewId.get() : null);
 
