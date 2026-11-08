@@ -264,7 +264,8 @@ export default function AuraKeyboard(): React.JSX.Element {
 
   return (
     <div ref={rootRef} className="aura-kb" data-mode={mode}>
-      <div className="aura-kb-head" onMouseDown={stop} onPointerDown={(e) => startGesture(e, null)}>
+      {/* paddingRight keeps the header's chips clear of the close button in the corner. */}
+      <div className="aura-kb-head" style={{ paddingRight: 36 }} onMouseDown={stop} onPointerDown={(e) => startGesture(e, null)}>
         <span className="aura-kb-target" title={target ? `Typing into ${target.label}` : 'No target'}>
           <Icon name={target ? (target.kind === 'iframe' ? 'app-window' : 'text-cursor-input') : 'circle-off'} />
           <span>{target ? target.label : 'Click an app or field'}</span>
@@ -309,8 +310,10 @@ export default function AuraKeyboard(): React.JSX.Element {
           ) : null}
         </span>
 
-        <button type="button" className="aura-kb-icon" title="Close keyboard" aria-label="Close keyboard"
-          onMouseDown={stop} onClick={() => st.$open.set(false)}><Icon name="x" /></button>
+        {/* Always the keyboard's top-right corner, also when the header wraps onto several rows. */}
+        <button type="button" className="aura-kb-icon aura-kb-close" title="Close keyboard" aria-label="Close keyboard"
+          style={{ position: 'absolute', top: 4, right: 6 }}
+          onMouseDown={stop} onPointerDown={(e) => e.stopPropagation()} onClick={() => st.$open.set(false)}><Icon name="x" /></button>
       </div>
 
       <div ref={keysRef} className="aura-kb-keys" onMouseDown={stop} />
