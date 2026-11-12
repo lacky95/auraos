@@ -469,6 +469,22 @@ export const AppManifestSchema = z.object({
     defaultHeight: z.number().int().min(240).default(600),
     resizable: z.boolean().default(true),
   }).default({}),
+  /**
+   * Free-flight activities (`presentation: 'flight'`). Opening one needs the
+   * `system.overlay` permission. `maxPerApp` caps live flights across all
+   * instances of the app; sizes are the defaults for a flight that names none.
+   */
+  flight: z.object({
+    maxPerApp: z.number().int().min(1).max(8).default(1),
+    /** How a new flight shows up ('free' floating panel or 'edge' drawer). */
+    defaultMode: z.enum(['free', 'edge']).optional(),
+    /** Modes the user may switch between (default: both). */
+    modes: z.array(z.enum(['free', 'edge'])).min(1).optional(),
+    /** Default edge-drawer size: length along the edge ('full' = whole edge) × depth. */
+    edgeSize: z.object({ length: z.union([z.number().int().min(120), z.literal('full')]), depth: z.number().int().min(120) }).optional(),
+    defaultSize: z.object({ w: z.number().int().min(120), h: z.number().int().min(80) }).optional(),
+    minSize: z.object({ w: z.number().int().min(80), h: z.number().int().min(60) }).optional(),
+  }).optional(),
   lifecycleBasePath: z.string().default('/api/lifecycle'),
   /**
    * The app's preferred layout-strategy id. Free-form string so third-party

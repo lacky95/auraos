@@ -40,7 +40,7 @@
 import { randomUUID } from 'node:crypto';
 // Namespace import: the running shell may cache a core build without newer exports.
 import * as core from '@aura/core';
-import type { AppActivity } from '@aura/core';
+import type { AppActivity, FlightState } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
 import { allMembers, overdueDeadMembers, remapWorkspaceIds, type RemapState } from './workspaceRemap.js';
 
@@ -56,6 +56,8 @@ export interface SessionActivity {
   stackParentId?:   string;
   createdAt:        string;
   savedState?:      unknown;
+  presentation?:    'window' | 'flight';
+  flight?:          FlightState;
 }
 export interface SessionInstance {
   instanceId: string;
@@ -137,6 +139,7 @@ export async function buildSnapshot(reason: DesktopSnapshot['reason']): Promise<
       ...(a.stackParentId ? { stackParentId: a.stackParentId } : {}),
       createdAt: new Date(a.createdAt).toISOString(),
       ...(a.savedState !== undefined ? { savedState: a.savedState } : {}),
+      ...(a.presentation === 'flight' && a.flight ? { presentation: 'flight' as const, flight: a.flight } : {}),
     }))
     .sort((x, y) => x.createdAt.localeCompare(y.createdAt));
 
@@ -180,7 +183,7 @@ function bindEvents(): void {
   const on = (ev: string) => (bus as unknown as { on(e: string, fn: () => void): void }).on(ev, scheduleSave);
   for (const ev of [
     'activity:opened', 'activity:closed', 'activity:navigated', 'activity:breadcrumbChanged',
-    'activity:stateSaved', 'app:stateChanged', 'workspaces:changed',
+    'activity:stateSaved', 'app:stateChanged', 'workspaces:changed', 'activity:flightChanged',
   ]) on(ev);
 }
 
@@ -363,6 +366,7 @@ async function reopenActivities(mgr: Mgr, snap: DesktopSnapshot, report: Restore
           ...(a.breadcrumb ? { breadcrumb: a.breadcrumb } : {}),
           ...(a.metadata ? { metadata: a.metadata } : {}),
           ...(a.savedState !== undefined ? { savedState: a.savedState } : {}),
+          ...(a.presentation === 'flight' && a.flight ? { presentation: 'flight' as const, flight: a.flight } : {}),
         },
       });
       report.idMap[a.activityId] = opened.activityId;

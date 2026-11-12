@@ -102,6 +102,89 @@ export interface AppActivity {
    * back as `restore.state` in `onActivityCreate`.
    */
   savedState?: unknown;
+  /**
+   * How the shell shows this activity. 'window' (default) = a slot in a
+   * workspace layout. 'flight' = a free-flight activity: floats above every
+   * workspace in the shell's flight layer, is never a workspace member, and
+   * can perch on a screen edge as a tab. Needs `system.overlay`.
+   */
+  presentation?: 'window' | 'flight';
+  /** Geometry + tab state while `presentation === 'flight'`. */
+  flight?: FlightState;
+}
+
+export type FlightEdge = 'left' | 'right' | 'top' | 'bottom';
+
+/** Viewport CSS pixels (the shell clamps on every viewport change). */
+export interface FlightRect { x: number; y: number; w: number; h: number }
+
+/** What the perched tab shows next to the app icon. */
+export interface FlightBadge {
+  /** Short text, e.g. "03:12", "REC", "MUTE" (≤ 12 chars). */
+  label?: string;
+  /** Counter dot; 0 hides it. */
+  count?: number;
+  /** Ring 0..1; null/absent hides it. */
+  progress?: number | null;
+  /** CSS colour for the tab; default = the app's accent. */
+  tint?: string;
+}
+
+export interface FlightAction { id: string; label: string }
+
+/**
+ * How a flight shows up. 'free': a floating panel anywhere (folds into its
+ * edge tab). 'edge': a drawer flush against its anchor edge, slid out from
+ * its tab and hidden back into it.
+ */
+export type FlightMode = 'free' | 'edge';
+export const FLIGHT_MODES: readonly FlightMode[] = ['free', 'edge'];
+
+/** Where the flight's tab sits: an edge and the position along it (0..1). */
+export interface FlightAnchor { edge: FlightEdge; pos: number }
+
+/** Edge-mode drawer size: along the edge (`'full'` = the whole edge) × into the screen. */
+export interface FlightEdgeSize { length: number | 'full'; depth: number }
+
+export interface FlightState {
+  mode: FlightMode;
+  /** Modes the user may switch between (default: all). Always contains `mode`. */
+  modes?: FlightMode[];
+  /** Free-mode rect; null = the shell picks one (centred, `size`). */
+  rect: FlightRect | null;
+  /** Requested size for the first placement when `rect` is null. */
+  size?: { w: number; h: number };
+  minSize?: { w: number; h: number };
+  /** The tab's place — both modes. */
+  anchor: FlightAnchor;
+  /** Where the drawer was last docked in edge mode (informational; docking uses `anchor`). */
+  edgeAnchor?: FlightAnchor;
+  /** Collapsed into the tab (free: perched, edge: hidden). */
+  folded: boolean;
+  /** Edge-mode drawer size. */
+  edgeSize: FlightEdgeSize;
+  /**
+   * Compatibility alias, always derived: `folded ? anchor : null`. Accepted in
+   * a patch too (null = unfold; an edge = fold there).
+   */
+  perch: FlightAnchor | null;
+  badge?: FlightBadge;
+  /** App buttons on the flight's ongoing notification (≤ 2). */
+  actions?: FlightAction[];
+}
+
+/** Patch accepted by `AppManager.updateFlight` (`badge`/`actions` replace, `null` clears). */
+export interface FlightPatch {
+  rect?: FlightRect | null;
+  perch?: { edge: FlightEdge; pos: number } | null;
+  mode?: FlightMode;
+  anchor?: FlightAnchor;
+  folded?: boolean;
+  edgeSize?: Partial<FlightEdgeSize>;
+  badge?: FlightBadge | null;
+  actions?: FlightAction[] | null;
+  minSize?: { w: number; h: number } | null;
+  title?: string;
 }
 
 /** Ceiling for `AppActivity.savedState` (serialised JSON). */
@@ -123,4 +206,7 @@ export interface ActivityRestoreSeed {
   breadcrumb?: 'os' | 'off';
   metadata?: Record<string, unknown>;
   savedState?: unknown;
+  /** A flight comes back as a flight, where it was (perched or airborne). */
+  presentation?: 'window' | 'flight';
+  flight?: FlightState;
 }

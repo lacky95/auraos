@@ -1,0 +1,181 @@
+---
+title: Flights
+description: Free-flight activities — small floating popups of your app above every workspace that perch on a screen edge as a tab. Manifest, SDK, REST, events.
+---
+
+A **flight** is a small activity of your app that floats **above every
+workspace**, like the floating virtual keyboard: a call widget, a recorder, a
+timer, a chat head. It is not a window — it lives outside the workspace
+layouts, on its own layer.
+
+- **Airborne:** a free panel. Drag it by its header, resize it from the left,
+  right or bottom edge or a bottom corner — like a Free Window. Its buttons: ⇤ perch, ✈ plane-landing (pop back into the workspace as a window), ✕ close.
+- **Perched:** drag it against a screen edge (the edge glows) or press ⇤, and
+  it collapses into a **tab** on that edge — your app's glyph plus whatever
+  your app puts on it: a short label (`03:12`, `REC`, `MUTE`), a counter, a
+  progress ring, a tint. **Tap** the tab to open it again. **Press and hold**
+  the tab to lift it and move it along its edge or onto any other edge.
+  While perched, your page keeps running (it is only hidden).
+- **Ongoing notification:** while a flight lives, AuraOS shows a pinned,
+  locked notification for it — **Show / Perch / Close** plus up to two
+  buttons of your own. The user can't swipe it away; closing the flight
+  removes it.
+- **Take off / land:** every window of an app that may fly gets a plane-takeoff (pop out) button
+  in its title bar, next to refresh. It turns the window into a flight, and
+  plane-landing on the flight pops it back in. The page is moved, not reloaded (Chromium
+  133+; older browsers reload it).
+
+Flights are global, not per workspace. Their position, perch and tab are
+stored with the activity, so they follow you across reloads, devices and an
+OS restart. A flight closes when its instance stops.
+
+## Modes
+
+A flight can show up in more than one way. The app picks the default mode,
+the user can switch (within the `modes` the app allows), and the choice is
+saved with the flight.
+
+| Mode | Open | Folded |
+|---|---|---|
+| **`free`** | a floating panel anywhere — drag by the header, resize from the sides/bottom | a tab on an edge |
+| **`edge`** | a **drawer** flush against its edge, centred on its tab — from a small panel to the whole edge (`edgeSize.length: 'full'`) | a tab on that edge |
+
+The edged drawer is an overlay (the windows below don't move) and is clearly
+docked: square and borderless on the edge side with an accent stripe, rounded
+inside, sliding in from the edge. Its title bar sits on the inner side and
+has **hide** (a chevron pointing into the edge), **float** (switch to free),
+**pop in** (plane-landing) and **close**. While it is open, its tab sticks
+out of its inner side as a handle: tap it to hide the drawer, press and hold
+to move it — along the edge or onto another edge, and the drawer follows.
+
+- Drag the drawer's title bar along the edge to slide it; drag it about 80 px
+  away from the edge to **tear it off** into a free flight.
+- Resize a drawer from its inner side (depth) and its ends (length); resizing
+  the length of a `'full'` drawer gives it a fixed length.
+- A free flight's **dock** button turns it into a drawer on its nearest edge.
+  Dragging a free flight onto an edge still folds it into its tab.
+
+Every flight has an **anchor** (`{ edge, pos }`, where its tab sits) and a
+**folded** flag, in both modes. `perch` is kept as a compatibility alias:
+`perch = folded ? anchor : null`.
+
+## Manifest
+
+```jsonc
+{
+  "activityMode": "multi",              // a flight is an activity
+  "permissions": ["system.overlay"],    // required to fly
+  "flight": {                           // optional
+    "maxPerApp": 1,                     // live flights across all instances (default 1, max 8)
+    "defaultMode": "edge",              // "free" (default) | "edge"
+    "modes": ["edge", "free"],          // what the user may switch between (default: both)
+    "edgeSize": { "length": "full", "depth": 360 },  // drawer size; length may be a number
+    "defaultSize": { "w": 320, "h": 200 },
+    "minSize": { "w": 240, "h": 120 }
+  }
+}
+```
+
+Without `system.overlay`, opening a flight answers **403** and the title bar
+shows no pop-out button. Flights don't count against `maxActivitiesPerInstance`.
+
+## SDK — `osClient.flight`
+
+```ts
+import { OsClient } from '@aura/app-sdk';
+const os = new OsClient();
+
+const f = await os.flight.open({
+  path: '/widget',                 // page of your app (onActivityCreate may override)
+  title: 'Call',
+  size: { w: 320, h: 200 },
+  // perched: { edge: 'right', pos: 0.5 },   // open already as a tab
+});
+await f.setBadge({ label: '00:12', tint: '#30a46c', progress: 0.4 });
+await f.setActions([{ id: 'hangup', label: 'Hang up' }]);   // ≤ 2, on the notification
+f.on('action', ({ actionId }) => { if (actionId === 'hangup') hangUp(); });
+f.on('perched', ({ edge }) => {});  f.on('unfolded', () => {});
+await f.setConfirmClose(true);    // only while there is something to lose
+f.on('closing', (ev) => { if (callLive) { ev.keep(); askHangUp(); } else ev.proceed(); });
+f.on('closed', () => {});           f.on('landed', () => {});
+
+await f.perch('left', 0.3);  await f.unfold();  await f.setRect({ x, y, w, h });
+await f.hide();  await f.show();               // fold / unfold in any mode
+await f.setMode('edge');  await f.setEdgeSize({ length: 'full', depth: 320 });
+f.on('mode', ({ mode }) => {});
+
+// An edged flight from the start:
+await os.flight.open({ path: '/panel', mode: 'edge', edge: 'right', edgeSize: { length: 'full', depth: 360 }, modes: ['edge'] });
+await f.land();              await f.close();   // your own close: no veto round
+
+// Inside the flight's own page:
+const me = await os.flight.current();          // FlightHandle | null
+// Turn this page's own window into a flight:
+await os.flight.takeOff();
+```
+
+`on()` is browser-only (it rides `/api/apps/events`); everything else works
+server-side too.
+
+### Closing and the veto
+
+A user close (✕ or **Close** on the notification) closes the flight **at
+once** — unless your app turned the veto on with `setConfirmClose(true)`
+(`PATCH …/flight {confirmClose: true}`). Then your app gets `closing` and has
+**3 s** to call `ev.keep()` (the flight unfolds so your page can ask, e.g. "A
+call is still running — hang up?") or `ev.proceed()` (close now). A second
+Close, or no answer, closes it. Force-removing the notification closes at once.
+
+Turn the veto on only while there is something to lose — CallGemini switches
+it on when a call starts and off when it ends — so closing stays instant
+otherwise.
+
+### What the tab shows
+
+`setBadge({ label, count, progress, tint })` — `label` ≤ 12 chars, `count` a
+dot (0 hides it), `progress` 0..1 draws a ring, `tint` any CSS colour (default:
+the theme accent). Updating it a few times a second is fine: the notification
+is only re-sent when its own content (title, perched/airborne, buttons)
+changes, not for badge updates.
+
+## REST
+
+| Call | Does |
+|---|---|
+| `POST /api/instances/<id>/activities` `{ presentation: 'flight', path?, data?, flight?: { mode, modes, anchor, folded, edgeSize, size, minSize, badge, actions } }` | open a flight |
+| `GET /api/flights` | every live flight (activityId, appId, path, title, icon, flight) |
+| `GET /api/activities/<id>/flight` | one activity's presentation + flight state |
+| `PATCH /api/activities/<id>/flight` `{ mode?, anchor?, folded?, edgeSize?, rect?, perch?, badge?, actions?, minSize?, title?, confirmClose? }` | switch mode / move / fold / re-label (`null` clears) / switch the close veto |
+| `POST /api/activities/<id>/flight/takeoff` `{ rect? }` | window → flight |
+| `POST /api/activities/<id>/flight/land` | flight → window (active workspace) |
+| `POST /api/activities/<id>/flight/close` | user close (instant, or the veto round when `confirmClose` is on) |
+| `POST /api/activities/<id>/flight/keep` | veto a pending close |
+| `POST /api/activities/<id>/flight/proceed` | let a pending close go now |
+| `POST /api/activities/<id>/close` | close now (no veto) |
+
+## Events
+
+On the OS event bus (`/api/apps/events`, shell Socket.IO):
+
+- `activity:opened` — carries `presentation: 'flight'` and `flight`.
+- `activity:flightChanged` — `{ presentation, flight, title, path, change: 'update' | 'land' | 'takeoff' }`.
+- `activity:flightClosing` — `{ reason, vetoMs }`.
+- `activity:flightKept`, `activity:flightAction` — `{ actionId }`.
+- `activity:closed` — as for any activity.
+
+## Inside the flight page
+
+The shell also posts to the flight's iframe: `aura.flight.state`,
+`aura.flight.closing`, `aura.flight.action`, `aura.flight.mode`. The page may post
+`aura.flight.perch {edge?, pos?}`, `aura.flight.unfold`, `aura.flight.hide`,
+`aura.flight.show`, `aura.flight.mode {mode}` and
+`aura.flight.resize {w, h}` to the parent; the shell identifies the sender by
+its window, never by the payload.
+
+## Example
+
+`io.lakner.callgemini.copy` pops its call out as a flight (header button
+"Pop out call widget"): the widget page (`/flight`) shows the call clock,
+mic level, mute / speaker / call buttons; the main page drives the tab
+(`03:12` green, `MUTE` red, mic-level ring) over a `BroadcastChannel`, and
+closing during a live call asks "Hang up & close?".

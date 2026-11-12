@@ -1,5 +1,6 @@
 import EventEmitter from 'eventemitter3';
 import type { AppLifecycleState } from '../types/lifecycle.js';
+import type { FlightState } from '../types/activity.js';
 
 /**
  * Compact framework fingerprint carried on theme/mode change events. Apps that
@@ -65,7 +66,29 @@ export interface OsEvents {
   /** A user launched an app — dock uses this to re-order its MRU tiles live. */
   'app:mruChanged': { appId: string; at: number };
   /** restored: reopened by the desktop-session restore after an OS restart, not by a user or an app. */
-  'activity:opened': { activityId: string; parentInstanceId: string; appId: string; path: string; title?: string; minimizable?: boolean; stackParentId?: string; restored?: boolean };
+  'activity:opened': { activityId: string; parentInstanceId: string; appId: string; path: string; title?: string; minimizable?: boolean; stackParentId?: string; restored?: boolean; presentation?: 'window' | 'flight'; flight?: FlightState };
+  /**
+   * A flight moved, perched, changed its tab/actions, or the activity switched
+   * presentation (`land`: flight → window, `takeoff`: window → flight).
+   */
+  'activity:flightChanged': {
+    activityId: string; parentInstanceId: string; appId: string; path: string;
+    presentation: 'window' | 'flight';
+    flight?: FlightState;
+    title?: string;
+    change: 'update' | 'land' | 'takeoff';
+    /** Echo suppression: the shell tab that wrote it. */
+    by?: string;
+  };
+  /**
+   * The user asked to close a flight. The app has `vetoMs` to keep it
+   * (POST /api/activities/<id>/flight/keep) — e.g. to ask "hang up?".
+   */
+  'activity:flightClosing': { activityId: string; parentInstanceId: string; appId: string; reason: string; vetoMs: number };
+  /** The app kept a flight that was closing (it un-perches + gets focus). */
+  'activity:flightKept': { activityId: string; parentInstanceId: string; appId: string };
+  /** A button the app added to its flight's ongoing notification was pressed. */
+  'activity:flightAction': { activityId: string; parentInstanceId: string; appId: string; actionId: string };
   'activity:closed': { activityId: string; parentInstanceId: string; appId: string };
   /**
    * Emitted by `goBack` after the popped activity is closed: the shell should

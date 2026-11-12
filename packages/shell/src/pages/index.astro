@@ -98,6 +98,8 @@ for (const inst of mgr.getAllInstances()) {
 
   if (manifest.activityMode === 'multi') {
     for (const act of mgr.getActivitiesByInstance(inst.instanceId)) {
+      // Free-flight activities live in the flight layer, never in a workspace.
+      if (act.presentation === 'flight') continue;
       const stripped = (act.path ?? '/').replace(/^\/+/, '');
       // Activity declared minimizable AND the parent is a background
       // service — same gating as the live launchApp path.
@@ -294,6 +296,8 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
   import { subscribeKv } from '../lib/kvClient.ts';
   import { appsSnapshotStats } from '../lib/appsSnapshot.ts';
   import { slotInnerHtml, SLOT_STYLE, IFRAME_STYLE } from '../lib/desktop/slotMarkup.ts';
+  import { parkFrame, claimFrame, hasParkedFrame, moveInto as moveFrameInto } from '../lib/flight/handoff.ts';
+  import { rectToLocal } from '../lib/keyboard/floatGesture.ts';
 
   const layoutLog = createLogger('shell:layout');
   const iframeLog = createLogger('shell:iframe');
@@ -2225,6 +2229,42 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
    * re-shown for the reload's duration so the user sees an immediate
    * "something happened" signal, matching the cold-launch visual.
    */
+  // ── Free-flight activities: take off from a window ─────────────────────
+  // Apps that declare `system.overlay` may fly; the title bar's ✈ button
+  // (slotMarkup.ts) shows only for their activities. Looked up once per app.
+  const flightableApps = new Map<string, boolean | 'pending'>();
+  function isFlightable(appId: string): boolean {
+    const known = flightableApps.get(appId);
+    if (known === undefined) {
+      flightableApps.set(appId, 'pending');
+      fetch(`/api/apps/${encodeURIComponent(appId)}/status`)
+        .then((r) => r.json())
+        .then((d: { manifest?: { permissions?: string[] } }) => {
+          const yes = !!d.manifest?.permissions?.includes('system.overlay');
+          flightableApps.set(appId, yes);
+          if (yes) renderLayout();
+        })
+        .catch(() => flightableApps.delete(appId));
+    }
+    return known === true;
+  }
+
+  /** Window → flight, starting where the window is now. The server's
+   *  `activity:flightChanged {change:'takeoff'}` moves the live iframe over. */
+  function takeOffView_(viewId: string, slot: HTMLElement): void {
+    const v = views.find((x) => x.viewId === viewId);
+    if (!v?.activityId) return;
+    const r = rectToLocal(slot.getBoundingClientRect());
+    const rect = { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) };
+    void fetch(`/api/activities/${encodeURIComponent(v.activityId)}/flight/takeoff`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ rect }),
+    }).then(async (res) => {
+      if (!res.ok) console.warn('[shell] take-off refused:', (await res.json().catch(() => ({}))).error ?? res.status);
+    }).catch(() => undefined);
+  }
+
   function refreshView_(viewId: string) {
     const slot = dynamicLayout.querySelector<HTMLElement>(`.app-slot[data-view-id="${CSS.escape(viewId)}"]`);
     if (!slot) return;
@@ -2760,6 +2800,9 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     // minimize policy, plus the strategy's own title-bar buttons.
     const minBtn = slot.querySelector('.slot-minimize-btn') as HTMLElement | null;
     if (minBtn) minBtn.style.display = (v.minimizable || currentStrategy?.minimize === 'hide') ? '' : 'none';
+    // Take off (window → free-flight activity): activities of apps with system.overlay.
+    const takeoffBtn = slot.querySelector('.slot-takeoff-btn') as HTMLElement | null;
+    if (takeoffBtn) takeoffBtn.style.display = v.activityId && isFlightable(v.appId) ? '' : 'none';
     const layoutBtnHost = slot.querySelector('.slot-layout-btns') as HTMLElement | null;
     if (layoutBtnHost) {
       const btns = currentStrategy?.chromeButtons?.(toLayoutViewInfo(v), layoutHost) ?? [];
@@ -2835,6 +2878,30 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     // Transition: backend says resumed → mount the iframe ONCE under the
     // skeleton overlay. The skeleton stays until the iframe's `load` (the
     // embedded app's document has loaded, splash painted).
+    // A flight that just landed hands over its live iframe (no reload). The
+    // move only keeps the app alive between CONNECTED parents, and createSlot()
+    // fills a slot before it is inserted — so wait until the slot is in the page.
+    if (v.activityId && hasParkedFrame(v.activityId) && !body.isConnected) {
+      const retry = (left: number) => {
+        const cur = views.find((x) => x.viewId === v.viewId);
+        if (!cur) return;
+        if (slot.isConnected || left <= 0) updateSlot(slot, cur);
+        else requestAnimationFrame(() => retry(left - 1));
+      };
+      queueMicrotask(() => retry(30));
+      return;
+    }
+    const landed = v.activityId ? claimFrame(v.activityId) : null;
+    if (landed) {
+      landed.className = '';
+      landed.title = v.title;
+      landed.style.cssText = IFRAME_STYLE;
+      moveFrameInto(body, landed, body.firstChild);
+      body.querySelector('[data-aura-skeleton]')?.remove();
+      wireIframe(landed, body, v);
+      observeIframe(landed);
+      return;
+    }
     if (v.iframeUrl) {
       const iframe = document.createElement('iframe');
       iframe.title = v.title;
@@ -3048,6 +3115,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     if (action === 'close')    { e.preventDefault(); closeView_(viewId); }
     if (action === 'minimize') { e.preventDefault(); minimizeView_(viewId); }
     if (action === 'refresh')  { e.preventDefault(); refreshView_(viewId); }
+    if (action === 'takeoff')  { e.preventDefault(); takeOffView_(viewId, slot); }
     if (action === 'rename')   { e.preventDefault(); beginRenameWindow(slot, viewId); }
     if (action === 'maximize') {
       // In-place focus: promote/restore THIS slot without reloading its
@@ -3705,6 +3773,25 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
       renderLayout();
       console.error(`[AuraOS] ${ev.instanceId} crashed:`, ev.error);
     }
+    // A window took off (now a flight) or a flight landed (now a window).
+    if (ev.type === 'activity:flightChanged' && ev.change === 'takeoff') {
+      // Hand the live iframe to the flight layer (lib/flight/handoff.ts) — no reload.
+      const liveFrame = document.querySelector<HTMLIFrameElement>(`.app-slot[data-view-id="${CSS.escape(ev.activityId)}"] .slot-body iframe`);
+      if (liveFrame) parkFrame(ev.activityId, liveFrame);
+      const gone = views.filter((v) => v.activityId === ev.activityId);
+      if (gone.some((v) => v.viewId === maximizedViewId)) maximizedViewId = null;
+      views = views.filter((v) => v.activityId !== ev.activityId);
+      workspaceClient.removeMember(ev.activityId).catch(() => undefined);
+      if (focusedActivityId === ev.activityId) exitFocus();
+      renderLayout();
+      return;
+    }
+    if (ev.type === 'activity:flightChanged' && ev.change === 'land') {
+      // Park the flight's live iframe first; updateSlot() claims it for the window.
+      (window as unknown as { auraFlights?: { release(id: string): void } }).auraFlights?.release(ev.activityId);
+      ev = { ...ev, type: 'activity:opened', presentation: 'window' };
+    }
+    if (ev.type === 'activity:opened' && ev.presentation === 'flight') return; // the flight layer's
     if (ev.type === 'activity:opened') {
       // Render a view for activities the shell didn't initiate (e.g. an app
       // iframe POSTed /api/instances/<id>/activities directly — common when

@@ -1,5 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getAppManager } from '@aura/core';
+import type { FlightState } from '@aura/core';
+import { loadFlightMemory, rememberedFlight } from '../../../../lib/flight/memory.js';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
 import { bumpMru } from '../../../../lib/appMru.js';
 
@@ -35,9 +37,28 @@ export const POST: APIRoute = async ({ params, request }) => {
   // keys specially when both shapes coexist, callers can be on either side
   // during the rollout.
   const body = await request.json().catch(() => undefined) as
-    | (Record<string, unknown> & { data?: Record<string, unknown>; stackParent?: string })
+    | (Record<string, unknown> & { data?: Record<string, unknown>; stackParent?: string; presentation?: string; flight?: Partial<FlightState>; path?: string; title?: string })
     | undefined;
   const stackParent = typeof body?.stackParent === 'string' ? body.stackParent : undefined;
+  // `presentation: 'flight'` opens a free-flight activity (needs system.overlay).
+  const flight = body?.presentation === 'flight'
+    ? ((body.flight && typeof body.flight === 'object') ? body.flight : {})
+    : undefined;
+  // A flight names its own page; the app's onActivityCreate may still override it.
+  const path = flight && typeof body?.path === 'string' ? body.path.slice(0, 2048) : undefined;
+  // Where the user last had this app's flight (lib/flight/memory.ts): it comes
+  // back there, open. Fields the app sets explicitly win.
+  if (flight) {
+    await loadFlightMemory();
+    const last = rememberedFlight(inst.appId, path ?? '/');
+    if (last) {
+      const req = flight as Partial<FlightState>;
+      if (req.mode === undefined && !req.perch) req.mode = last.mode;
+      if (req.anchor === undefined && !req.perch) req.anchor = last.anchor;
+      if (req.edgeSize === undefined) req.edgeSize = last.edgeSize;
+      if (req.rect === undefined && last.rect) req.rect = last.rect;
+    }
+  }
   const data = (body && typeof body.data === 'object' && body.data !== null)
     ? body.data
     : body; // legacy: whole body is the data bag
@@ -45,7 +66,7 @@ export const POST: APIRoute = async ({ params, request }) => {
     const activity = await mgr.openActivity(
       instanceId,
       data,
-      stackParent ? { stackParent } : undefined,
+      stackParent || flight ? { ...(stackParent ? { stackParent } : {}), ...(flight ? { flight } : {}), ...(path ? { path } : {}) } : undefined,
     );
     // Opening an activity is a "user is using this app now" signal. Cold
     // launches bump MRU in /api/apps/<id>/start, but reusing an
@@ -56,7 +77,10 @@ export const POST: APIRoute = async ({ params, request }) => {
     void bumpMru(inst.appId);
     return jsonResponse({ activityId: activity.activityId, activity });
   } catch (err) {
-    return errorResponse(String(err), 500);
+    const msg = String(err);
+    if (flight && /system\.overlay/.test(msg)) return errorResponse(msg, 403);
+    if (flight && /flight limit/.test(msg)) return errorResponse(msg, 409);
+    return errorResponse(msg, 500);
   }
 };
 

@@ -50,6 +50,7 @@ import { SurfaceApi } from './surface.js';
 import { ActivityApi } from './activity.js';
 import { InterfacesApi } from './interfaces.js';
 import { NotificationsApi, type CreateResult } from './notifications.js';
+import { FlightApi } from './flight.js';
 export type { KeymapHandler, KeymapHandlerCtx, KeymapChangeInfo } from './keymap.js';
 export type { BackEvent, BackHandler } from './nav.js';
 export type { NavigateOptions } from './activity.js';
@@ -97,6 +98,12 @@ export class OsClient {
    * token) on the server, unverified in the browser. See ./notifications.ts.
    */
   readonly notifications: NotificationsApi;
+  /**
+   * Free-flight activities — small floating popups of your app above every
+   * workspace that can perch on a screen edge as a tab. Needs
+   * `system.overlay`. See ./flight.ts.
+   */
+  readonly flight: FlightApi;
 
   constructor() {
     // Bare `process.env.X` throws `ReferenceError: process is not defined`
@@ -117,6 +124,7 @@ export class OsClient {
     this.activity = new ActivityApi(this);
     this.interfaces = new InterfacesApi(this);
     this.notifications = new NotificationsApi();
+    this.flight = new FlightApi(this);
   }
 
   // -------- OS event subscription (BroadcastReceiver-equivalent) --------

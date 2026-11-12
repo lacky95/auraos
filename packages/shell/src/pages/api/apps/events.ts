@@ -59,6 +59,9 @@ export const GET: APIRoute = ({ url }) => {
       const onActFocus      = (ev: unknown) => send('activity:focus',   ev);
       const onActNavigated  = (ev: unknown) => send('activity:navigated', ev);
       const onActBreadcrumb = (ev: unknown) => send('activity:breadcrumbChanged', ev);
+      // Free-flight activities: apps follow their flights (SDK FlightHandle).
+      const FLIGHT_EVENTS = ['activity:flightChanged', 'activity:flightClosing', 'activity:flightKept', 'activity:flightAction'] as const;
+      const onFlight = FLIGHT_EVENTS.map((t) => [t, (ev: unknown) => send(t, ev)] as const);
       const onThemeChanged  = (ev: unknown) => send('theme:changed',    ev);
       const onModeChanged   = (ev: unknown) => send('mode:changed',     ev);
       // Phase 5: the legacy content-carrying 'notification' relay is gone (it leaked
@@ -82,6 +85,7 @@ export const GET: APIRoute = ({ url }) => {
       OsEventBus.on('activity:focus',     onActFocus);
       OsEventBus.on('activity:navigated', onActNavigated);
       OsEventBus.on('activity:breadcrumbChanged', onActBreadcrumb);
+      for (const [t, fn] of onFlight) (OsEventBus as unknown as { on(e: string, f: (ev: unknown) => void): void }).on(t, fn);
       OsEventBus.on('theme:changed',      onThemeChanged);
       OsEventBus.on('mode:changed',       onModeChanged);
       OsEventBus.on('ui:command',         onUiCommand);
@@ -108,6 +112,7 @@ export const GET: APIRoute = ({ url }) => {
         OsEventBus.off('activity:closed',    onActClosed);
         OsEventBus.off('activity:focus',     onActFocus);
         OsEventBus.off('activity:navigated', onActNavigated);
+        for (const [t, fn] of onFlight) (OsEventBus as unknown as { off(e: string, f: (ev: unknown) => void): void }).off(t, fn);
         OsEventBus.off('activity:breadcrumbChanged', onActBreadcrumb);
         OsEventBus.off('theme:changed',      onThemeChanged);
         OsEventBus.off('mode:changed',       onModeChanged);

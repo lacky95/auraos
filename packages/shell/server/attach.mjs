@@ -353,6 +353,8 @@ export async function attachSio(httpServer) {
     'app:enabledChanged', 'app:mruChanged',
     'activity:opened', 'activity:closed', 'activity:focus',
     'activity:navigated', 'activity:breadcrumbChanged',
+    // Free-flight activities (lib/flight).
+    'activity:flightChanged', 'activity:flightClosing', 'activity:flightKept', 'activity:flightAction',
     // (Phase 5: the legacy content-carrying 'notification' event is gone.)
     'theme:changed', 'mode:changed', 'ui:command',
     'workspaces:changed', 'workspace:activated', 'kv:changed',

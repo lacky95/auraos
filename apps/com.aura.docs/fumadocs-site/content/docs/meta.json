@@ -11,6 +11,7 @@
     "cross-app-mounts",
     "interfaces",
     "notifications",
+    "flights",
     "onboard-existing-apps",
     "bring-your-own-runtime",
     "sidecars",

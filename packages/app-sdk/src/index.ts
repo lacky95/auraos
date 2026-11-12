@@ -10,6 +10,13 @@ export type {
   SurfaceRect, NeedsTopLevelInfo, NeedsTopLevelHandler, OccludedInfo, OccludedHandler,
 } from './surface.js';
 export { ActivityApi } from './activity.js';
+// Free-flight activities — `osClient.flight`.
+export { FlightApi, FlightHandle } from './flight.js';
+export type {
+  FlightEdge, FlightRect, FlightBadge, FlightAction, FlightState, FlightOpenOptions,
+  FlightMode, FlightAnchor, FlightEdgeSize,
+  FlightClosingEvent, FlightEvents,
+} from './flight.js';
 // Interface Registry — `osClient.interfaces`. Discovery + runtime registration.
 export { InterfacesApi } from './interfaces.js';
 // Notifications — `osClient.notifications`. create / update / remove / get /

@@ -1,0 +1,273 @@
+---
+/**
+ * Free-flight activities: the layer every flight floats in (lib/flight/layer.ts).
+ * z 1062 — above the notification center (1060), below the virtual keyboard
+ * (1065) and the toasts (1070). The layer itself never takes pointer events;
+ * only its flights and tabs do.
+ */
+---
+<div id="flight-layer" aria-label="Flights"></div>
+
+<script>
+  import { initFlightLayer } from '../../../lib/flight/layer.ts';
+  const root = document.getElementById('flight-layer');
+  if (root) initFlightLayer(root);
+</script>
+
+<style is:global>
+  #flight-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 1062;
+    pointer-events: none;
+  }
+  #flight-layer[hidden] { display: none; }
+
+  /* ── Airborne flight ─────────────────────────────────────────────── */
+  .flight {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    pointer-events: auto;
+    background: var(--aura-color-bg);
+    border: 1px solid var(--aura-color-primary);
+    box-shadow: 0 10px 34px rgba(0, 0, 0, 0.45), var(--aura-glow-primary, none);
+    --r-tl: 10px; --r-tr: 10px; --r-br: 10px; --r-bl: 10px;
+    border-radius: var(--r-tl) var(--r-tr) var(--r-br) var(--r-bl);
+    /* No overflow clip here: the resize grips sit just outside the rounded
+       corners and would be clipped away. Header + body clip themselves. */
+    transition: opacity 140ms ease, transform 140ms ease;
+  }
+  .flight.is-perched {
+    /* The iframe stays mounted (the app keeps running and its state) — just unseen. */
+    visibility: hidden;
+    pointer-events: none;
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  .flight.is-perch-target { opacity: 0.55; }
+  .flight.is-closing { border-color: var(--aura-color-danger, #e5484d); }
+
+  .flight-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 30px;
+    flex: 0 0 30px;
+    padding: 0 4px 0 8px;
+    cursor: grab;
+    user-select: none;
+    touch-action: none;
+    border-bottom: 1px solid var(--aura-border);
+    border-radius: var(--r-tl) var(--r-tr) 0 0;
+    overflow: hidden;
+    color: var(--aura-color-text);
+    font-size: 12px;
+  }
+  .flight-glyph {
+    flex: 0 0 auto;
+    min-width: 20px;
+    padding: 0 3px;
+    height: 18px;
+    line-height: 18px;
+    text-align: center;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    color: var(--aura-color-bg);
+    background: var(--aura-color-primary);
+  }
+  .flight-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .flight-closing {
+    font-size: 10px;
+    color: var(--aura-color-danger, #e5484d);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .flight-btn {
+    flex: 0 0 auto;
+    width: 26px;
+    height: 24px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--aura-color-text-dim);
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .flight-btn .flight-icon { width: 14px; height: 14px; vertical-align: middle; }
+  .flight-btn:hover, .flight-btn:focus-visible { background: var(--aura-border); color: var(--aura-color-text); outline: none; }
+  .flight-btn-close:hover { color: var(--aura-color-danger, #e5484d); }
+
+  .flight-body { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; border-radius: 0 0 var(--r-br) var(--r-bl); }
+  .flight-btn[hidden] { display: none; }
+  .flight-btn .flight-icon-hide { transition: transform 120ms ease; }
+
+  /* ── Edge mode: a drawer stuck to its edge ───────────────────────── */
+  /* Square + borderless on the edge side, rounded inside, an accent stripe
+     along the edge, and it slides in from the edge. */
+  .flight[data-mode="edge"][data-edge="right"]  { --r-tr: 0; --r-br: 0; border-right: 0; }
+  .flight[data-mode="edge"][data-edge="left"]   { --r-tl: 0; --r-bl: 0; border-left: 0; }
+  .flight[data-mode="edge"][data-edge="top"]    { --r-tl: 0; --r-tr: 0; border-top: 0; flex-direction: column-reverse; }
+  .flight[data-mode="edge"][data-edge="bottom"] { --r-bl: 0; --r-br: 0; border-bottom: 0; }
+  /* Top edge: the title bar sits on the inner (bottom) side. */
+  .flight[data-mode="edge"][data-edge="top"] .flight-head { border-radius: 0 0 var(--r-br) var(--r-bl); border-bottom: 0; border-top: 1px solid var(--aura-border); }
+  .flight[data-mode="edge"][data-edge="top"] .flight-body { border-radius: var(--r-tl) var(--r-tr) 0 0; }
+  .flight[data-mode="edge"]::before {
+    content: '';
+    position: absolute;
+    z-index: 3;
+    pointer-events: none;
+    background: var(--flight-tint, var(--aura-color-primary));
+  }
+  .flight[data-mode="edge"][data-edge="right"]::before  { top: 0; bottom: 0; right: 0; width: 3px; }
+  .flight[data-mode="edge"][data-edge="left"]::before   { top: 0; bottom: 0; left: 0; width: 3px; }
+  .flight[data-mode="edge"][data-edge="top"]::before    { left: 0; right: 0; top: 0; height: 3px; }
+  .flight[data-mode="edge"][data-edge="bottom"]::before { left: 0; right: 0; bottom: 0; height: 3px; }
+  .flight[data-mode="edge"] .flight-head { cursor: pointer; }
+  .flight[data-mode="edge"] .flight-head:active { cursor: grabbing; }
+  /* The hide chevron points into the drawer's edge. */
+  .flight[data-edge="left"] .flight-icon-hide   { transform: rotate(180deg); }
+  .flight[data-edge="top"] .flight-icon-hide    { transform: rotate(-90deg); }
+  .flight[data-edge="bottom"] .flight-icon-hide { transform: rotate(90deg); }
+  /* Free mode: always a plain "down" chevron (it folds into a tab). */
+  .flight[data-mode="free"] .flight-icon-hide { transform: rotate(90deg); }
+  .flight[data-mode="edge"]:not(.is-perched) { animation: flight-slide-in 160ms ease-out; }
+  .flight[data-mode="edge"][data-edge="right"]  { --flight-slide: translateX(40px); }
+  .flight[data-mode="edge"][data-edge="left"]   { --flight-slide: translateX(-40px); }
+  .flight[data-mode="edge"][data-edge="top"]    { --flight-slide: translateY(-40px); }
+  .flight[data-mode="edge"][data-edge="bottom"] { --flight-slide: translateY(40px); }
+  @keyframes flight-slide-in { from { transform: var(--flight-slide); opacity: 0; } }
+  /* Torn off the edge while dragging: about to float freely. */
+  .flight.is-tearing { opacity: 0.85; border-radius: 10px; border: 1px dashed var(--aura-color-primary); }
+  .flight.is-tearing::before { display: none; }
+  .flight.is-tearing.is-dock-target { opacity: 0.6; }
+  .flight-tab.is-handle { box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3); }
+  .flight-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; }
+  body.aura-stack-dragging .flight-frame { pointer-events: none; }
+
+  .flight-resize { position: absolute; touch-action: none; z-index: 4; }
+  .flight-resize[hidden] { display: none; }
+  .flight-resize[data-edge="n"]  { top: -3px; left: 10px; right: 10px; height: 7px; cursor: ns-resize; }
+  .flight-resize[data-edge="ne"] { right: -5px; top: -5px; width: 18px; height: 18px; cursor: nesw-resize; }
+  .flight-resize[data-edge="nw"] { left: -5px; top: -5px; width: 18px; height: 18px; cursor: nwse-resize; }
+  .flight-resize[data-edge="s"]  { bottom: -3px; left: 10px; right: 10px; height: 7px; cursor: ns-resize; }
+  .flight-resize[data-edge="e"]  { right: -3px; top: 30px; bottom: 10px; width: 7px; cursor: ew-resize; }
+  .flight-resize[data-edge="w"]  { left: -3px; top: 30px; bottom: 10px; width: 7px; cursor: ew-resize; }
+  .flight-resize[data-edge="se"] { right: -5px; bottom: -5px; width: 18px; height: 18px; cursor: nwse-resize; }
+  .flight-resize[data-edge="sw"] { left: -5px; bottom: -5px; width: 18px; height: 18px; cursor: nesw-resize; }
+
+  /* ── Perch preview while dragging to an edge ─────────────────────── */
+  .flight-perch-glow {
+    position: absolute;
+    pointer-events: none;
+    background: var(--aura-color-primary);
+    opacity: 0.55;
+    box-shadow: 0 0 18px 4px var(--aura-color-primary);
+  }
+  .flight-perch-glow[hidden] { display: none; }
+  .flight-perch-glow[data-edge="left"]   { left: 0; top: 0; bottom: 0; width: 4px; }
+  .flight-perch-glow[data-edge="right"]  { right: 0; top: 0; bottom: 0; width: 4px; }
+  .flight-perch-glow[data-edge="top"]    { top: 0; left: 0; right: 0; height: 4px; }
+  .flight-perch-glow[data-edge="bottom"] { bottom: 0; left: 0; right: 0; height: 4px; }
+
+  /* ── Perched: the tab on the edge ────────────────────────────────── */
+  .flight-tab {
+    --flight-tint: var(--aura-color-primary);
+    position: absolute;
+    pointer-events: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    padding: 0;
+    border: 1px solid var(--flight-tint);
+    background: color-mix(in srgb, var(--aura-color-bg) 82%, var(--flight-tint));
+    color: var(--aura-color-text);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+    cursor: pointer;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    transition: transform 120ms ease, box-shadow 120ms ease;
+  }
+  .flight-tab[hidden] { display: none; }
+  /* Flat side against the edge, rounded side toward the screen. */
+  .flight-tab[data-edge="left"]   { border-left: 0;   border-radius: 0 12px 12px 0; }
+  .flight-tab[data-edge="right"]  { border-right: 0;  border-radius: 12px 0 0 12px; }
+  .flight-tab[data-edge="top"]    { border-top: 0;    border-radius: 0 0 12px 12px; flex-direction: row; gap: 4px; }
+  .flight-tab[data-edge="bottom"] { border-bottom: 0; border-radius: 12px 12px 0 0; flex-direction: row; gap: 4px; }
+  .flight-tab:hover, .flight-tab:focus-visible { box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5), 0 0 10px var(--flight-tint); outline: none; }
+  .flight-tab[data-edge="left"]:hover   { transform: translateX(3px); }
+  .flight-tab[data-edge="right"]:hover  { transform: translateX(-3px); }
+  .flight-tab[data-edge="top"]:hover    { transform: translateY(3px); }
+  .flight-tab[data-edge="bottom"]:hover { transform: translateY(-3px); }
+  .flight-tab.is-lifted {
+    transform: scale(1.12);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55), 0 0 14px var(--flight-tint);
+    cursor: grabbing;
+    transition: none;
+  }
+  .flight-tab-glyph {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    color: var(--flight-tint);
+    line-height: 1;
+  }
+  .flight-tab-label {
+    max-width: 100%;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: clip;
+    font-family: var(--aura-font-mono);
+    font-size: 9px;
+    line-height: 1;
+    color: var(--aura-color-text-dim);
+  }
+  .flight-tab-label[hidden] { display: none; }
+  .flight-tab-count {
+    position: absolute;
+    top: -5px;
+    right: -5px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 8px;
+    background: var(--aura-color-danger, #e5484d);
+    color: #fff;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 16px;
+    text-align: center;
+  }
+  .flight-tab[data-edge="right"] .flight-tab-count { right: auto; left: -5px; }
+  .flight-tab-count[hidden] { display: none; }
+  /* Progress: a ring drawn as a conic border around the tab. */
+  .flight-tab-ring { display: none; }
+  .flight-tab.has-progress .flight-tab-ring {
+    display: block;
+    position: absolute;
+    inset: -2px;
+    border-radius: inherit;
+    padding: 2px;
+    background: conic-gradient(var(--flight-tint) calc(var(--flight-progress, 0) * 360deg), transparent 0);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .flight, .flight-tab { transition: none; animation: none; }
+  }
+</style>

@@ -10,6 +10,7 @@ import NotificationToasts from '../components/shell/notifications/NotificationTo
 import NotificationDialogs from '../components/shell/notifications/NotificationDialogs.astro';
 import LockScreenNotifications from '../components/shell/notifications/LockScreenNotifications.astro';
 import KeyboardOverlay from '../components/shell/keyboard/KeyboardOverlay.astro';
+import FlightLayer from '../components/shell/flight/FlightLayer.astro';
 import ClientSession from '../components/shell/ClientSession.astro';
 import { ThemeManager } from '@aura/core';
 import type { AppManifest, ColorMode } from '@aura/core';
@@ -527,6 +528,8 @@ const activeThemeId   = activeTheme.id;
   <NotificationToasts />
   <!-- Phase 4: notification dialogues (window overlays, floating z 1080, desktop decision z 1900). -->
   <NotificationDialogs />
+  <!-- Free-flight activities: floating app popups + their edge tabs (z 1062). -->
+  <FlightLayer />
   <!-- Virtual keyboard: one shell-owned keyboard for every activity (z 1065). -->
   <KeyboardOverlay />
   <!--

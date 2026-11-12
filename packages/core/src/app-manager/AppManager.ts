@@ -4,8 +4,8 @@ import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
 import type { AppLifecycleState } from '../types/lifecycle.js';
 import type { AppInstance, ResourceUsage, SidecarInfo } from '../types/instance.js';
-import type { AppActivity, ActivityRestoreSeed } from '../types/activity.js';
-import { ACTIVITY_STATE_MAX_BYTES } from '../types/activity.js';
+import type { AppActivity, ActivityRestoreSeed, FlightPatch, FlightState, FlightRect, FlightBadge, FlightAction, FlightEdge, FlightEdgeSize, FlightMode } from '../types/activity.js';
+import { ACTIVITY_STATE_MAX_BYTES, FLIGHT_MODES } from '../types/activity.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
 import { AppRegistry } from './AppRegistry.js';
 import { toolsTrackInstalledCaps } from './tool-allowlist.js';
@@ -1649,7 +1649,7 @@ export class AppManager {
   async openActivity(
     instanceId: string,
     data?: Record<string, unknown>,
-    opts?: { stackParent?: string; restore?: ActivityRestoreSeed },
+    opts?: { stackParent?: string; restore?: ActivityRestoreSeed; flight?: Partial<FlightState>; path?: string },
   ): Promise<AppActivity> {
     // No `intent` in opts ⇒ never declined/window-less, so always an activity.
     return (await this.openActivityAndReport(instanceId, data, opts)).activity as AppActivity;
@@ -1663,7 +1663,7 @@ export class AppManager {
   private async openActivityAndReport(
     instanceId: string,
     data?: Record<string, unknown>,
-    opts?: { stackParent?: string; intent?: Intent; restore?: ActivityRestoreSeed },
+    opts?: { stackParent?: string; intent?: Intent; restore?: ActivityRestoreSeed; flight?: Partial<FlightState>; path?: string },
   ): Promise<{ activity: AppActivity; hookAnswered: boolean; rejected?: undefined; result?: Record<string, unknown> }
     | { activity: null; hookAnswered: true; rejected?: IntentRejection; result?: Record<string, unknown> }> {
     const inst = this.instances.get(instanceId);
@@ -1693,9 +1693,15 @@ export class AppManager {
       console.log(`[AppManager] pool: auto-claimed ${inst.instanceId} (activity open on pool member)`);
       this.scheduleRefill(inst.appId);
     }
+    // A flight is asked for explicitly (opts.flight) or comes back as one
+    // after an OS restart. Flights have their own cap and don't count
+    // against maxActivitiesPerInstance (an app's popup is not a window).
+    const flightReq = opts?.flight ?? (opts?.restore?.presentation === 'flight' ? opts.restore.flight ?? {} : undefined);
+    if (flightReq) this.assertMayFly(inst.appId, manifest);
     if (
+      !flightReq &&
       manifest.maxActivitiesPerInstance > 0 &&
-      this.getActivitiesByInstance(instanceId).length >= manifest.maxActivitiesPerInstance
+      this.getActivitiesByInstance(instanceId).filter((a) => a.presentation !== 'flight').length >= manifest.maxActivitiesPerInstance
     ) {
       throw new Error(`Instance ${instanceId} reached maxActivitiesPerInstance=${manifest.maxActivitiesPerInstance}`);
     }
@@ -1712,6 +1718,7 @@ export class AppManager {
       data,
       ...(opts?.intent ? { intent: intentPayload(opts.intent) } : {}),
       ...(restore ? { restore: { previousActivityId: restore.previousActivityId, state: restore.savedState ?? null } } : {}),
+      ...(flightReq ? { presentation: 'flight' } : {}),
     });
     // Only an INTENT launch may be declined or handled window-less: a plain
     // openActivity (launcher, "+ new window") always gets its window.
@@ -1724,7 +1731,8 @@ export class AppManager {
       }
     }
     const handled = opts?.intent ? replyResult(result) : null;
-    let path = '/';
+    // The caller's start path (e.g. a flight's own page); the app's hook wins.
+    let path = typeof opts?.path === 'string' && opts.path ? (opts.path.startsWith('/') ? opts.path : `/${opts.path}`) : '/';
     let title: string | undefined;
     let metadata: Record<string, unknown> | undefined;
     let minimizable = false;
@@ -1783,6 +1791,7 @@ export class AppManager {
       ...(stackParent ?               { stackParentId: stackParent } : {}),
       ...(restore?.history?.length ?  { history: restore.history.map((h) => ({ ...h })) } : {}),
       ...(restore && restore.savedState !== undefined && restore.savedState !== null ? { savedState: restore.savedState } : {}),
+      ...(flightReq ? { presentation: 'flight' as const, flight: normalizeFlight(flightReq, manifest.flight) } : {}),
     };
     this.activities.set(activityId, activity);
     OsEventBus.emit('activity:opened', {
@@ -1794,6 +1803,7 @@ export class AppManager {
       ...(minimizable ?         { minimizable: true } : {}),
       ...(stackParent ?         { stackParentId: stackParent } : {}),
       ...(restore ?             { restored: true } : {}),
+      ...(activity.flight ?     { presentation: 'flight' as const, flight: cloneFlight(activity.flight) } : {}),
     });
     return { activity, hookAnswered: result !== null && result !== undefined, ...(handled ? { result: handled } : {}) };
   }
@@ -1928,6 +1938,105 @@ export class AppManager {
       breadcrumb:       mode,
     });
     return true;
+  }
+
+  // ─── Free-flight activities ───────────────────────────────────────────
+
+  /** Throws unless the app declares `system.overlay` and is below its flight cap. */
+  private assertMayFly(appId: string, manifest: AppManifest, except?: string): void {
+    if (!manifest.permissions.includes('system.overlay')) {
+      throw new Error(`App ${appId} may not open flights (needs the system.overlay permission)`);
+    }
+    const max = manifest.flight?.maxPerApp ?? 1;
+    const live = this.getActivitiesByApp(appId).filter((a) => a.presentation === 'flight' && a.activityId !== except).length;
+    if (live >= max) throw new Error(`App ${appId} reached its flight limit (flight.maxPerApp=${max})`);
+  }
+
+  private emitFlight(a: AppActivity, change: 'update' | 'land' | 'takeoff', by?: string): void {
+    OsEventBus.emit('activity:flightChanged', {
+      activityId: a.activityId,
+      parentInstanceId: a.parentInstanceId,
+      appId: a.appId,
+      path: a.path,
+      presentation: a.presentation === 'flight' ? 'flight' : 'window',
+      change,
+      ...(a.flight ? { flight: cloneFlight(a.flight) } : {}),
+      ...(a.title !== undefined ? { title: a.title } : {}),
+      ...(by ? { by } : {}),
+    });
+  }
+
+  /**
+   * Move / perch / re-label a flight. Returns the new state, or null when the
+   * activity is unknown or not a flight. Throws on invalid input.
+   */
+  updateFlight(activityId: string, patch: FlightPatch, by?: string): FlightState | null {
+    const a = this.activities.get(activityId);
+    if (!a || a.presentation !== 'flight' || !a.flight) return null;
+    const f = a.flight;
+    if (patch.rect !== undefined) f.rect = patch.rect === null ? null : cleanRect(patch.rect);
+    // `perch` is the compatibility alias of anchor + folded.
+    if (patch.perch !== undefined) {
+      if (patch.perch === null) f.folded = false;
+      else { f.anchor = cleanPerch(patch.perch); f.folded = true; }
+    }
+    if (patch.anchor !== undefined) f.anchor = cleanPerch(patch.anchor);
+    if (patch.folded !== undefined) f.folded = patch.folded === true;
+    if (patch.mode !== undefined) {
+      const allowed = f.modes ?? FLIGHT_MODES;
+      if (!allowed.includes(patch.mode)) throw new Error(`flight: mode '${String(patch.mode)}' is not one of ${allowed.join(', ')}`);
+      // Docking (free → edge) keeps `anchor`: the drawer opens where the
+      // badge was put last, whichever mode it was moved in.
+      f.mode = patch.mode;
+    }
+    if (f.mode === 'edge') f.edgeAnchor = { ...f.anchor };
+    if (patch.edgeSize !== undefined) f.edgeSize = cleanEdgeSize({ ...f.edgeSize, ...patch.edgeSize });
+    f.perch = f.folded ? { ...f.anchor } : null;
+    if (patch.badge !== undefined) {
+      if (patch.badge === null) delete f.badge; else f.badge = cleanBadge(patch.badge);
+    }
+    if (patch.actions !== undefined) {
+      if (patch.actions === null) delete f.actions; else f.actions = cleanActions(patch.actions);
+    }
+    if (patch.minSize !== undefined) {
+      if (patch.minSize === null) delete f.minSize; else f.minSize = cleanSize(patch.minSize);
+    }
+    if (typeof patch.title === 'string') a.title = patch.title.slice(0, 200);
+    a.lastTransitionAt = new Date();
+    this.emitFlight(a, 'update', by);
+    return cloneFlight(f);
+  }
+
+  /** Flight → normal window (the shell adds it to the active workspace). */
+  landFlight(activityId: string, by?: string): boolean {
+    const a = this.activities.get(activityId);
+    if (!a || a.presentation !== 'flight') return false;
+    a.presentation = 'window';
+    a.lastTransitionAt = new Date();
+    this.emitFlight(a, 'land', by);
+    // Geometry is the window layout's business from here on.
+    delete a.flight;
+    return true;
+  }
+
+  /** Window → flight, starting at `init.rect` (the window's current rect). */
+  takeOffActivity(activityId: string, init: Partial<FlightState> = {}, by?: string): FlightState {
+    const a = this.activities.get(activityId);
+    if (!a) throw new Error(`Activity not found: ${activityId}`);
+    if (a.presentation === 'flight' && a.flight) return cloneFlight(a.flight);
+    const manifest = this.registry.getById(a.appId);
+    if (!manifest) throw new Error(`Manifest gone for ${a.appId}`);
+    this.assertMayFly(a.appId, manifest, activityId);
+    a.presentation = 'flight';
+    // A window takes off as a free flight at its own rect (when the app allows free).
+    a.flight = normalizeFlight({ mode: 'free', ...init }, manifest.flight);
+    a.lastTransitionAt = new Date();
+    this.emitFlight(a, 'takeoff', by);
+    return cloneFlight(a.flight);
+  }
+
+  getFlights(): AppActivity[] {
+    return this.getAllActivities().filter((a) => a.presentation === 'flight');
   }
 
   /**
@@ -2528,4 +2637,78 @@ function replyResult(reply: unknown): Record<string, unknown> | null {
   if (!reply || typeof reply !== 'object' || Array.isArray(reply)) return null;
   const r = (reply as { result?: unknown }).result;
   return r && typeof r === 'object' && !Array.isArray(r) ? r as Record<string, unknown> : null;
+}
+
+// ─── Flight helpers (validation; every input may come from an app) ─────────
+
+const FLIGHT_EDGES = new Set(['left', 'right', 'top', 'bottom']);
+const finite = (v: unknown, name: string): number => {
+  if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error(`flight: ${name} must be a finite number`);
+  return v;
+};
+function cleanRect(r: FlightRect): FlightRect {
+  return {
+    x: Math.round(finite(r?.x, 'rect.x')), y: Math.round(finite(r?.y, 'rect.y')),
+    w: Math.max(80, Math.round(finite(r?.w, 'rect.w'))), h: Math.max(60, Math.round(finite(r?.h, 'rect.h'))),
+  };
+}
+function cleanSize(s: { w: number; h: number }): { w: number; h: number } {
+  return { w: Math.max(80, Math.round(finite(s?.w, 'w'))), h: Math.max(60, Math.round(finite(s?.h, 'h'))) };
+}
+function cleanPerch(p: { edge: string; pos: number }): { edge: FlightEdge; pos: number } {
+  if (!p || !FLIGHT_EDGES.has(p.edge)) throw new Error('flight: perch.edge must be left|right|top|bottom');
+  return { edge: p.edge as FlightEdge, pos: Math.min(1, Math.max(0, finite(p.pos, 'perch.pos'))) };
+}
+function cleanBadge(b: FlightBadge): FlightBadge {
+  const out: FlightBadge = {};
+  if (typeof b?.label === 'string' && b.label) out.label = b.label.slice(0, 12);
+  if (typeof b?.count === 'number' && Number.isFinite(b.count) && b.count > 0) out.count = Math.min(9999, Math.round(b.count));
+  if (typeof b?.progress === 'number' && Number.isFinite(b.progress)) out.progress = Math.min(1, Math.max(0, b.progress));
+  // Colour only — no url()/expressions into the shell's CSS.
+  if (typeof b?.tint === 'string' && /^(#[0-9a-fA-F]{3,8}|(rgb|hsl)a?\([\d\s.,%/-]+\)|[a-zA-Z]{3,20})$/.test(b.tint)) out.tint = b.tint;
+  return out;
+}
+function cleanActions(list: FlightAction[]): FlightAction[] {
+  if (!Array.isArray(list)) throw new Error('flight: actions must be an array');
+  return list.slice(0, 2)
+    .filter((x) => x && typeof x.id === 'string' && x.id && typeof x.label === 'string' && x.label)
+    .map((x) => ({ id: x.id.slice(0, 64), label: x.label.slice(0, 32) }));
+}
+function cleanEdgeSize(e: Partial<FlightEdgeSize> | undefined): FlightEdgeSize {
+  const length = e?.length === 'full' ? 'full' : Math.max(120, Math.round(finite(e?.length ?? 480, 'edgeSize.length')));
+  return { length, depth: Math.max(120, Math.round(finite(e?.depth ?? 360, 'edgeSize.depth'))) };
+}
+function normalizeFlight(req: Partial<FlightState>, defaults?: AppManifest['flight']): FlightState {
+  const modes = cleanModes(req.modes ?? defaults?.modes);
+  const want = req.mode ?? defaults?.defaultMode ?? 'free';
+  if (req.mode !== undefined && !FLIGHT_MODES.includes(req.mode)) throw new Error(`flight: unknown mode '${String(req.mode)}'`);
+  const mode = modes.includes(want) ? want : modes[0]!;
+  // Older state (and the compat alias) has only `perch`.
+  const anchor = req.anchor ? cleanPerch(req.anchor) : req.perch ? cleanPerch(req.perch) : { edge: 'right' as FlightEdge, pos: 0.5 };
+  const folded = typeof req.folded === 'boolean' ? req.folded : !!req.perch;
+  const f: FlightState = {
+    mode,
+    rect: req.rect ? cleanRect(req.rect) : null,
+    anchor,
+    ...(req.edgeAnchor ? { edgeAnchor: cleanPerch(req.edgeAnchor) } : mode === 'edge' ? { edgeAnchor: { ...anchor } } : {}),
+    folded,
+    edgeSize: cleanEdgeSize(req.edgeSize ?? defaults?.edgeSize),
+    perch: folded ? { ...anchor } : null,
+  };
+  if (req.modes || defaults?.modes) f.modes = modes;
+  const size = req.size ?? defaults?.defaultSize;
+  if (size) f.size = cleanSize(size);
+  const min = req.minSize ?? defaults?.minSize;
+  if (min) f.minSize = cleanSize(min);
+  if (req.badge) f.badge = cleanBadge(req.badge);
+  if (req.actions) f.actions = cleanActions(req.actions);
+  return f;
+}
+function cleanModes(list: unknown): FlightMode[] {
+  if (!Array.isArray(list)) return [...FLIGHT_MODES];
+  const out = FLIGHT_MODES.filter((m) => list.includes(m));
+  return out.length ? out : [...FLIGHT_MODES];
+}
+function cloneFlight(f: FlightState): FlightState {
+  return JSON.parse(JSON.stringify(f)) as FlightState;
 }

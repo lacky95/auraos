@@ -8,6 +8,7 @@ import { bootstrapKv } from './lib/kvBootstrap.js';
 import { ensureSdkPublished } from './lib/sdkBootstrap.js';
 import { startOnboarding, noteClientConnected, type OnboardingHandle } from './lib/onboarding/index.js';
 import { loadCustomInterfaces } from './lib/customInterfaces.js';
+import { startFlightService } from './lib/flight/service.js';
 
 // Source of truth is the singleton on globalThis — NOT a module-scoped flag.
 // The soft-restart endpoint deletes that singleton; if we tracked init state
@@ -184,10 +185,19 @@ function appAssetRedirect(request: Request, url: URL): Response | null {
   return new Response(null, { status: 307, headers: { Location: `/api/proxy/${m[1]}${url.pathname}${url.search}` } });
 }
 
+let flightServiceStarted = false;
+
 export const onRequest = defineMiddleware(async (ctx, next) => {
   const assetRedirect = appAssetRedirect(ctx.request, ctx.url);
   if (assetRedirect) return assetRedirect;
   await ensureAppManager();
+  // Free-flight activities (lib/flight/service.ts): once per shell build —
+  // a hot-swapped build takes over the previous one's listeners + notifications.
+  if (!flightServiceStarted) {
+    flightServiceStarted = true;
+    try { startFlightService(); }
+    catch (err) { console.warn(`[middleware] flight service start failed: ${(err as Error).message}`); }
+  }
   const res = await next();
   // A shell tab registering itself: onboarding cards wait for the first one,
   // because only notifications that arrive while a tab listens pop up.
