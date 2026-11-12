@@ -382,6 +382,23 @@ capabilities:
     binary_path: /usr/local/bin/argocd
     binary: argocd
     description: Argo CD CLI — manage Argo CD apps, clusters and repos (GitOps)
+  glab:
+    source: curl
+    install_cmd: >-
+      set -e
+
+      export DEBIAN_FRONTEND=noninteractive
+
+      V=$(curl -fsSL "https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/releases/permalink/latest" | sed -n 's/.*"tag_name":"v\([^"]*\)".*/\1/p')
+
+      curl -fsSL -o /tmp/glab.deb "https://gitlab.com/gitlab-org/cli/-/releases/v${V}/downloads/glab_${V}_linux_amd64.deb"
+
+      apt-get install -y -q /tmp/glab.deb
+
+      rm -f /tmp/glab.deb
+    binary_path: /usr/bin/glab
+    binary: glab
+    description: GitLab CLI (official .deb via apt)
 services:
   sshd:
     source: apt
