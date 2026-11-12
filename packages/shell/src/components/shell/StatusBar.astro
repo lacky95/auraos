@@ -1254,6 +1254,15 @@ let initialTimeZone: string = '';
     return Math.min(Math.max(0, pillOffset), max);
   }
 
+  // The pill-row chevrons are inlined (like COMPACT_ICON below):
+  // an external `<use href="/api/os/icons.svg#…">` stays blank until the sprite
+  // has loaded, and at desktop boot that request queues behind the proxied app
+  // windows and event streams (HTTP/1.1, ~6 connections) — the arrows showed up
+  // seconds after the numbered pills.
+  const svgIcon = (paths: string) => `<svg class="aura-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+  const CHEVRON_LEFT_ICON  = svgIcon('<path d="m15 18-6-6 6-6"/>');
+  const CHEVRON_RIGHT_ICON = svgIcon('<path d="m9 18 6-6-6-6"/>');
+
   // Lucide `fold-horizontal`, inlined: it is not in the curated sprite (which
   // comes from @aura/core's built dist), and inlining keeps currentColor.
   const COMPACT_ICON = '<svg class="aura-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h6"/><path d="M22 12h-6"/><path d="M12 2v2"/><path d="M12 8v2"/><path d="M12 14v2"/><path d="M12 20v2"/><path d="m19 9-3 3 3 3"/><path d="m5 15 3-3-3-3"/></svg>';
@@ -1282,10 +1291,10 @@ let initialTimeZone: string = '';
     const atFirst = activeIdx <= 0;
     const atLast  = activeIdx === -1 || activeIdx >= total - 1;
     const prev = paginated
-      ? `<button class="ws-pill ws-pill-nav" data-ws-action="prev" ${atFirst ? 'disabled' : ''} title="Previous workspace"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-chevron-left"/></svg></button>`
+      ? `<button class="ws-pill ws-pill-nav" data-ws-action="prev" ${atFirst ? 'disabled' : ''} title="Previous workspace">${CHEVRON_LEFT_ICON}</button>`
       : '';
     const next = paginated
-      ? `<button class="ws-pill ws-pill-nav" data-ws-action="next" ${atLast ? 'disabled' : ''} title="Next workspace"><svg class="aura-icon" aria-hidden="true"><use href="/api/os/icons.svg#lucide-chevron-right"/></svg></button>`
+      ? `<button class="ws-pill ws-pill-nav" data-ws-action="next" ${atLast ? 'disabled' : ''} title="Next workspace">${CHEVRON_RIGHT_ICON}</button>`
       : '';
 
     const numbered = state.workspaces.slice(start, end).map((w, i) => {
