@@ -2182,7 +2182,11 @@ export class AppManager {
    */
   reloadScopedApp(appId: string): void {
     this.reloadManifest(appId);
-    OsEventBus.emit(this.registry.has(appId) ? 'app:installed' : 'app:removed', { appId });
+    const installed = this.registry.has(appId);
+    // An install/update replaced the app's directory: re-bind every mount of
+    // it, or consumers keep seeing the old (trashed) copy.
+    if (installed) void this.mounts.rebindTarget(appId);
+    OsEventBus.emit(installed ? 'app:installed' : 'app:removed', { appId });
   }
 
   /**

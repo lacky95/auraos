@@ -200,3 +200,35 @@ test('forgetConsumer: unmounts, drops declarations, removes the empty root', asy
   assert.equal(w.decls(SC), null);
   assert.equal(fs.existsSync(w.mountRootDir(SC)), false);
 });
+
+test('rebindTarget: an app whose dir was replaced is re-bound everywhere, same mode, origin and declaration', async (t) => {
+  const w = world(t);
+  w.setTargets([{ consumer: SC, exclude: [], forceRo: true }]);
+  await w.mm.add(INST, { targetAppId: 'io.target.app', mode: 'rw' });
+  await w.mm.add(INST, { targetAppId: 'io.target.app', data: true });
+  await w.mm.add(INST, { targetAppId: 'com.aura.docs' });
+  await w.mm.settled();
+  const declsBefore = w.decls(INST);
+  const binds = (dest) => w.calls.filter((a) => Array.isArray(a) && a.at(-1) === dest
+    && a[a.indexOf('-euc') + 1]?.includes('mount --bind')).length;
+  const src = join(w.mountRootDir(INST), 'io.target.app');
+  const inherited = join(w.mountRootDir(SC), 'io.target.app');
+  const docs = join(w.mountRootDir(INST), 'com.aura.docs');
+  const before = { src: binds(src), inherited: binds(inherited), docs: binds(docs) };
+
+  const r = await w.mm.rebindTarget('io.target.app');
+  assert.deepEqual(r, { rebound: 4, failed: 0 }, 'source + data in the instance, and both inherited copies in the sidecar');
+  assert.equal(binds(src), before.src + 1, 're-bound');
+  assert.equal(binds(inherited), before.inherited + 1, 're-bound once, not twice');
+  assert.equal(binds(docs), before.docs, 'other apps untouched');
+  assert.equal(w.kernel.get(src), 'rw');
+  assert.equal(w.kernel.get(inherited), 'ro', 'the sidecar keeps its read-only cap');
+  assert.deepEqual(w.mm.list(INST).map((m) => [m.id, m.mode, m.origin]).sort(),
+    [['com.aura.docs', 'ro', 'added'], ['io.target.app', 'rw', 'added'], ['io.target.app:data', 'ro', 'added']]);
+  const sc = w.mm.list(SC).find((m) => m.id === 'io.target.app');
+  assert.equal(sc.origin, 'inherited');
+  assert.equal(sc.inheritedFrom, INST);
+  assert.deepEqual(w.decls(INST), declsBefore, 'declarations unchanged');
+  assert.equal(w.decls(SC), null);
+  assert.deepEqual(await w.mm.rebindTarget('io.not.mounted'), { rebound: 0, failed: 0 });
+});

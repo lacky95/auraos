@@ -499,6 +499,46 @@ export class MountManager {
     for (const key of sidecars) this.forgetConsumer(key);
   }
 
+  /**
+   * An app's directory was REPLACED (a Nexus install/update renames a fresh
+   * copy into place and moves the old one to trash). A bind holds the
+   * directory it was made from, so every consumer would silently keep seeing
+   * the trashed copy. Re-bind each of the app's mounts at its current path —
+   * same mode, origin and declaration. Data mounts too: a user-scoped app's
+   * data dir lives inside its source tree and is replaced with it; for one
+   * that did not move the re-bind is a no-op.
+   *
+   * Best-effort per mount; never throws. A mount that cannot be re-made stays
+   * declared, so the consumer's next spawn restores it (reapply).
+   */
+  async rebindTarget(targetAppId: string): Promise<{ rebound: number; failed: number }> {
+    let rebound = 0, failed = 0;
+    if (!this.capable().ok) return { rebound, failed };
+    for (const [consumer, set] of [...this.mounts]) {
+      for (const old of [...set.values()]) {
+        if (old.targetAppId !== targetAppId) continue;
+        // A parent's re-add fans out into its sidecars and may already have
+        // replaced their inherited copy.
+        if (set.get(old.id) !== old) continue;
+        try {
+          this.unmountHost(consumer, old.hostDest);
+          set.delete(old.id);
+          await this.add(consumer, {
+            targetAppId, mode: old.mode, data: old.kind === 'data', declaredAt: old.declaredAt,
+          }, { persist: false, origin: old.origin });
+          rebound++;
+        } catch (err) {
+          failed++;
+          console.warn(`[MountManager] could not re-bind ${old.id} into ${consumer}: ${(err as Error).message}`);
+        }
+      }
+      if (set.size === 0) this.mounts.delete(consumer);
+    }
+    await this.settled();
+    if (rebound || failed) console.log(`[MountManager] re-bound ${targetAppId}: ${rebound} mount(s), ${failed} failed`);
+    return { rebound, failed };
+  }
+
   // ─── Sidecar consumers ─────────────────────────────────────────────────
 
   /**
