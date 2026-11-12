@@ -3,7 +3,7 @@
 //   cd packages/shell && npx tsx --test test/workspace-remap.test.ts
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { allMembers, remapWorkspaceIds, type RemapState } from '../src/lib/workspaceRemap.ts';
+import { allMembers, overdueDeadMembers, remapWorkspaceIds, type RemapState } from '../src/lib/workspaceRemap.ts';
 
 const A1 = 'com.aura.terminal-3#a1';
 const A2 = 'com.aura.terminal-3#a2';
@@ -77,4 +77,19 @@ test('legacy per-activity state (`windows`, maximized "window") is migrated', ()
   const out = s.workspaces[0]! as Record<string, unknown>;
   assert.equal(out['windows'], undefined);
   assert.deepEqual(out['activities'], { [A1]: { name: 'old' }, [NOTE]: { maximized: 'area' } });
+});
+
+test('overdueDeadMembers: dead only after the grace, live again resets', () => {
+  const since = new Map<string, number>();
+  const members = [A1, A2, NOTE];
+  // First sighting only records the time.
+  assert.deepEqual(overdueDeadMembers(members, new Set([NOTE]), since, 1_000, 30_000), []);
+  assert.deepEqual([...since.keys()].sort(), [A1, A2].sort());
+  // A2 comes back before the grace is up; A1 stays dead.
+  assert.deepEqual(overdueDeadMembers(members, new Set([NOTE, A2]), since, 20_000, 30_000), []);
+  assert.deepEqual([...since.keys()], [A1]);
+  assert.deepEqual(overdueDeadMembers(members, new Set([NOTE, A2]), since, 31_000, 30_000), [A1]);
+  // Gone from the members (pruned): forgotten.
+  assert.deepEqual(overdueDeadMembers([A2, NOTE], new Set([NOTE, A2]), since, 40_000, 30_000), []);
+  assert.equal(since.size, 0);
 });

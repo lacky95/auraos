@@ -110,3 +110,34 @@ function migrateLegacy(w: RemapWorkspace): void {
 export function allMembers(state: RemapState): string[] {
   return state.workspaces.flatMap((w) => w.members ?? []);
 }
+
+/**
+ * Members that have been dead (not in `live`) for at least `graceMs` — the
+ * runtime sweep (lib/desktopSession.ts) prunes these. A browser normally strips
+ * a closed window itself, but only while one is connected and hears the close;
+ * the rest linger as members that hold an otherwise empty workspace (and keep
+ * the topbar's compact button disabled).
+ *
+ * `deadSince` carries first-seen-dead times between sweeps and is updated in
+ * place: ids that are live again or no longer members leave it, newly dead ids
+ * enter it at `now`. The grace covers the short gap of an app restart (its
+ * windows are recreated with new ids and placed by lib/appRestart.ts).
+ */
+export function overdueDeadMembers(
+  members: Iterable<string>,
+  live: ReadonlySet<string>,
+  deadSince: Map<string, number>,
+  now: number,
+  graceMs: number,
+): string[] {
+  const dead = new Set<string>();
+  for (const m of members) if (!live.has(m)) dead.add(m);
+  for (const id of [...deadSince.keys()]) if (!dead.has(id)) deadSince.delete(id);
+  const overdue: string[] = [];
+  for (const id of dead) {
+    const since = deadSince.get(id);
+    if (since === undefined) deadSince.set(id, now);
+    else if (now - since >= graceMs) overdue.push(id);
+  }
+  return overdue;
+}

@@ -21,6 +21,10 @@
  *     (lib/workspaceRemap.ts); members that no longer exist are pruned.
  *   • Auto-save starts only after the restore: the empty desktop of a fresh
  *     boot must never overwrite the snapshot it is about to restore.
+ *   • Member sweep — also after the restore: workspace members whose window
+ *     is gone are pruned at runtime too, not only at the next boot. Browsers
+ *     strip a closed window themselves, but only one that is connected and
+ *     hears the close (startMemberSweep).
  *
  *   • Signal shutdown — SIGTERM / SIGINT (docker stop, a container recreate,
  *     the host health guard) runs `shutdownForSignal` from server.mjs: tabs
@@ -38,7 +42,7 @@ import { randomUUID } from 'node:crypto';
 import * as core from '@aura/core';
 import type { AppActivity } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
-import { allMembers, remapWorkspaceIds, type RemapState } from './workspaceRemap.js';
+import { allMembers, overdueDeadMembers, remapWorkspaceIds, type RemapState } from './workspaceRemap.js';
 
 export interface SessionActivity {
   activityId:       string;
@@ -86,10 +90,18 @@ interface SessionGlobal {
   restore:  Promise<RestoreReport> | null;
   restored: boolean;
   bootId:   string;
+  sweep:    MemberSweep | null;
+}
+interface MemberSweep {
+  timer:     ReturnType<typeof setTimeout> | null;
+  interval:  ReturnType<typeof setInterval>;
+  onEvent:   () => void;
+  deadSince: Map<string, number>;
+  running:   boolean;
 }
 const g = (): SessionGlobal => ((globalThis as { [G_KEY]?: SessionGlobal })[G_KEY] ??= {
   autosave: false, frozen: false, timer: null, writing: null, bound: false, restore: null,
-  restored: false, bootId: randomUUID(),
+  restored: false, bootId: randomUUID(), sweep: null,
 });
 // server.mjs reaches the signal shutdown through this (it loads the build, not this module).
 const SHUTDOWN_HOOK = Symbol.for('aura.shellShutdown');
@@ -232,7 +244,7 @@ export interface RestoreReport {
 /** Restore once per boot (serialised; later calls get the same report). */
 export function restoreDesktopSession(): Promise<RestoreReport> {
   const st = g();
-  st.restore ??= doRestore().finally(() => { st.restored = true; startAutosave(); });
+  st.restore ??= doRestore().finally(() => { st.restored = true; startAutosave(); startMemberSweep(); });
   return st.restore;
 }
 
@@ -365,6 +377,17 @@ async function reopenActivities(mgr: Mgr, snap: DesktopSnapshot, report: Restore
 async function remapWorkspaces(mgr: Mgr, idMap: Record<string, string>): Promise<number> {
   const state = await withKv((kv) => kv.getValue<RemapState>('os', 'workspaces'));
   if (!state?.workspaces) return 0;
+  const live = liveViewIds(mgr);
+  const renamed = remapWorkspaceIds(state, idMap).state;
+  const dead = allMembers(renamed).filter((m) => !live.has(m));
+  const { state: next, changed } = remapWorkspaceIds(renamed, {}, dead);
+  if (!changed && JSON.stringify(renamed) === JSON.stringify(state)) return 0;
+  await writeWorkspaces(next);
+  return dead.length;
+}
+
+/** Ids a workspace member can name right now: open activities, and single-activity instances. */
+function liveViewIds(mgr: Mgr): Set<string> {
   const live = new Set<string>(mgr.getAllActivities().map((a) => a.activityId));
   for (const inst of mgr.getAllInstances()) {
     const m = mgr.getManifest(inst.appId);
@@ -372,10 +395,11 @@ async function remapWorkspaces(mgr: Mgr, idMap: Record<string, string>): Promise
       live.add(inst.instanceId);
     }
   }
-  const renamed = remapWorkspaceIds(state, idMap).state;
-  const dead = allMembers(renamed).filter((m) => !live.has(m));
-  const { state: next, changed } = remapWorkspaceIds(renamed, {}, dead);
-  if (!changed && JSON.stringify(renamed) === JSON.stringify(state)) return 0;
+  return live;
+}
+
+/** Store the workspace document and tell the browsers (same events as a KV PUT). */
+async function writeWorkspaces(next: RemapState): Promise<void> {
   const stored = await withKv((kv) => kv.set('os', 'workspaces', next));
   core.OsEventBus.emit('kv:changed', { namespace: 'os', key: 'workspaces', value: stored.value });
   core.OsEventBus.emit('workspaces:changed', {
@@ -387,8 +411,87 @@ async function remapWorkspaces(mgr: Mgr, idMap: Record<string, string>): Promise
     })),
     activeWorkspaceId: next.activeWorkspaceId,
   });
-  return dead.length;
 }
+
+// ─── Member sweep ──────────────────────────────────────────────────────────
+
+const SWEEP_DEBOUNCE_MS = 2_000;
+const SWEEP_INTERVAL_MS = 60_000;
+/** How long a member must stay dead before it is pruned (covers an app restart). */
+const DEAD_GRACE_MS = 30_000;
+const SWEEP_EVENTS = ['activity:closed', 'app:stateChanged', 'app:crashed'] as const;
+
+/**
+ * Prune workspace members whose window is gone, while the shell runs: shortly
+ * after a close / instance death, and every minute. A member is dropped only
+ * after it has been dead for DEAD_GRACE_MS. (Re)starting replaces a previous
+ * sweep, so a rebuilt module takes over from the old one.
+ */
+export function startMemberSweep(): void {
+  const st = g();
+  stopMemberSweep();
+  const bus = core.OsEventBus as unknown as { on(e: string, fn: () => void): void };
+  const sweep: MemberSweep = {
+    timer: null,
+    deadSince: new Map(),
+    running: false,
+    interval: setInterval(() => { void runSweep(sweep); }, SWEEP_INTERVAL_MS),
+    onEvent: () => scheduleSweep(sweep, SWEEP_DEBOUNCE_MS),
+  };
+  sweep.interval.unref?.();
+  for (const ev of SWEEP_EVENTS) bus.on(ev, sweep.onEvent);
+  st.sweep = sweep;
+  scheduleSweep(sweep, SWEEP_DEBOUNCE_MS);
+}
+
+function stopMemberSweep(): void {
+  const st = g();
+  const sweep = st.sweep;
+  if (!sweep) return;
+  const bus = core.OsEventBus as unknown as { off(e: string, fn: () => void): void };
+  for (const ev of SWEEP_EVENTS) bus.off(ev, sweep.onEvent);
+  clearInterval(sweep.interval);
+  if (sweep.timer) clearTimeout(sweep.timer);
+  st.sweep = null;
+}
+
+function scheduleSweep(sweep: MemberSweep, delayMs: number): void {
+  if (sweep.timer) clearTimeout(sweep.timer);
+  sweep.timer = setTimeout(() => { sweep.timer = null; void runSweep(sweep); }, delayMs);
+  sweep.timer.unref?.();
+}
+
+async function runSweep(sweep: MemberSweep): Promise<void> {
+  if (sweep.running || g().sweep !== sweep || g().frozen) return;
+  sweep.running = true;
+  try {
+    const mgr = core.getAppManager();
+    const state = await withKv((kv) => kv.getValue<RemapState>('os', 'workspaces'));
+    if (!state?.workspaces) return;
+    const overdue = overdueDeadMembers(allMembers(state), liveViewIds(mgr), sweep.deadSince, Date.now(), DEAD_GRACE_MS);
+    // Dead but still in grace: look again right after it ends.
+    if (sweep.deadSince.size > overdue.length) scheduleSweep(sweep, DEAD_GRACE_MS + 1_000);
+    if (!overdue.length) return;
+    // Re-read: a browser may have written meanwhile. Only ids still dead go.
+    const current = await withKv((kv) => kv.getValue<RemapState>('os', 'workspaces'));
+    if (!current?.workspaces) return;
+    const live = liveViewIds(mgr);
+    const gone = overdue.filter((id) => !live.has(id));
+    const { state: next, changed } = remapWorkspaceIds(current, {}, gone);
+    if (!changed) return;
+    await writeWorkspaces(next);
+    for (const id of gone) sweep.deadSince.delete(id);
+    console.log(`[desktop-session] pruned ${gone.length} stale workspace member(s): ${gone.join(', ')}`);
+  } catch (err) {
+    console.warn(`[desktop-session] member sweep failed: ${(err as Error).message}`);
+  } finally {
+    sweep.running = false;
+  }
+}
+
+// A rebuilt module (prod shell-watch swaps builds in-process) takes the sweep
+// over, so its code is the one that runs; at boot the restore starts it.
+if (g().restored) startMemberSweep();
 
 /** After a planned restart the Shell Daemon starts fresh, not re-adopted. */
 async function restartShellDaemon(mgr: Mgr): Promise<void> {
