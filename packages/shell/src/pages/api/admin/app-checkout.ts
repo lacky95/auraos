@@ -92,7 +92,7 @@ export const POST: APIRoute = async ({ request }) => {
   const manifest = manifestOf(t.appDir);
   if (manifest instanceof Response) return manifest;
   try {
-    const result = core.checkoutApp(t.appDir, manifest, {
+    const result = await core.checkoutApp(t.appDir, manifest, {
       ...(body.repository ? { repository: body.repository } : {}),
       ...(body.ref ? { ref: body.ref } : {}),
       ...(body.branch ? { branch: body.branch } : {}),

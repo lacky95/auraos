@@ -34,6 +34,12 @@ SHELL_WATCH_FILE=/data/aura/shell-watch
 SHELL_WATCH="${AURA_SHELL_WATCH:-$(tr -d '[:space:]' < "$SHELL_WATCH_FILE" 2>/dev/null)}"
 case "$SHELL_WATCH" in 1|on|true) export AURA_SHELL_WATCH=1 ;; *) unset AURA_SHELL_WATCH ;; esac
 
+# Git must never ask for a username or password. The container has a tty, so a
+# missing credential would make git wait on a prompt nobody can answer — and
+# the shell runs git with execFileSync, which freezes the whole OS for the
+# call's timeout. With these it fails at once.
+export GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never
+
 BOOT_DIR=/data/aura/boot
 LOG="$BOOT_DIR/boot.log"
 mkdir -p "$BOOT_DIR"

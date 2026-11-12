@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:http';
 import { join } from 'node:path';
 
 import {
@@ -107,7 +108,7 @@ test('the release source rides on OCI annotations and back', () => {
   assert.equal(buildStoreAnnotations(manifestOf())['org.opencontainers.image.source'], undefined);
 });
 
-test('checkoutApp puts HEAD on the release commit without touching the files', () => {
+test('checkoutApp puts HEAD on the release commit without touching the files', async () => {
   const f = fixture();
   const m = manifestOf({ repository: { url: f.url } });
   const marker = buildPublishMarker(m, readAppSource(f.author, m));
@@ -120,7 +121,7 @@ test('checkoutApp puts HEAD on the release commit without touching the files', (
   const before = readFileSync(join(dir, 'index.js'), 'utf-8');
   assert.equal(isDevCheckout(dir), false);
 
-  const r = checkoutApp(dir, m);
+  const r = await checkoutApp(dir, m);
   assert.equal(r.created, true);
   assert.equal(r.target.how, 'release-commit');
   assert.equal(r.repoFrom, 'manifest');
@@ -132,11 +133,11 @@ test('checkoutApp puts HEAD on the release commit without touching the files', (
   assert.equal(isDevCheckout(dir), true);
 
   // Idempotent: a checkout is only reported on.
-  const again = checkoutApp(dir, m);
+  const again = await checkoutApp(dir, m);
   assert.equal(again.created, false);
 });
 
-test('without a release commit: the v<version> tag, else the branch tip with a warning', () => {
+test('without a release commit: the v<version> tag, else the branch tip with a warning', async () => {
   const f = fixture();
   git(f.author, 'tag', 'v1.2.0'); git(f.author, 'push', '-q', 'origin', 'v1.2.0');
   const tagged = git(f.author, 'rev-parse', 'HEAD');
@@ -145,14 +146,14 @@ test('without a release commit: the v<version> tag, else the branch tip with a w
 
   const m = manifestOf({ repository: { url: f.url } });
   const a = install(f.author, join(f.root, 'a'));
-  const r = checkoutApp(a, m);
+  const r = await checkoutApp(a, m);
   assert.equal(r.target.how, 'version-tag');
   assert.equal(git(a, 'rev-parse', 'HEAD'), tagged);
   assert.deepEqual(r.changes, [' M index.js'], 'differences show as local changes, never overwritten');
   assert.equal(readFileSync(join(a, 'index.js'), 'utf-8'), 'two\n');
 
   const b = install(f.author, join(f.root, 'b'));
-  const r2 = checkoutApp(b, manifestOf({ version: '9.9.9', repository: { url: f.url } }));
+  const r2 = await checkoutApp(b, manifestOf({ version: '9.9.9', repository: { url: f.url } }));
   assert.equal(r2.target.how, 'branch');
   assert.ok(r2.warnings.some((w) => w.includes('tip of main')));
 });
@@ -166,20 +167,20 @@ test('the repo comes from the flag, the manifest, the release, then publish.repo
   assert.equal(resolveAppRepository(manifestOf(), null), null);
 });
 
-test('checkoutApp uses the commit stamped into the manifest', () => {
+test('checkoutApp uses the commit stamped into the manifest', async () => {
   const f = fixture();
   const first = git(f.author, 'rev-parse', 'HEAD');
   writeFileSync(join(f.author, 'later.js'), 'x\n');
   git(f.author, 'add', '-A'); git(f.author, 'commit', '-qm', 'two'); git(f.author, 'push', '-q', 'origin', 'HEAD:main');
   const dir = install(f.author, f.root);   // no publish marker at all
   rmSync(join(dir, 'later.js'));
-  const r = checkoutApp(dir, manifestOf({ repository: { url: f.url, branch: 'main', commit: first } }));
+  const r = await checkoutApp(dir, manifestOf({ repository: { url: f.url, branch: 'main', commit: first } }));
   assert.equal(r.target.how, 'release-commit');
   assert.equal(git(dir, 'rev-parse', 'HEAD'), first);
   assert.deepEqual(r.changes, []);
 });
 
-test('checkout undoes the publish stamp in the manifest, and only that', () => {
+test('checkout undoes the publish stamp in the manifest, and only that', async () => {
   const f = fixture();
   const raw = readFileSync(join(f.author, 'app.manifest.json'), 'utf-8');
   const withRepo = JSON.stringify({ ...JSON.parse(raw), repository: { url: f.url, commit: '' } }, null, 2) + '\n';
@@ -190,7 +191,7 @@ test('checkout undoes the publish stamp in the manifest, and only that', () => {
 
   const a = install(f.author, join(f.root, 'a'));
   writeFileSync(join(a, 'app.manifest.json'), released);
-  const r = checkoutApp(a, m);
+  const r = await checkoutApp(a, m);
   assert.deepEqual(r.changes, []);
   assert.equal(readFileSync(join(a, 'app.manifest.json'), 'utf-8'), withRepo);
 
@@ -198,18 +199,42 @@ test('checkout undoes the publish stamp in the manifest, and only that', () => {
   const b = install(f.author, join(f.root, 'b'));
   const edited = released.replace('"App"', '"App 2"');
   writeFileSync(join(b, 'app.manifest.json'), edited);
-  const r2 = checkoutApp(b, m);
+  const r2 = await checkoutApp(b, m);
   assert.deepEqual(r2.changes, [' M app.manifest.json']);
   assert.equal(readFileSync(join(b, 'app.manifest.json'), 'utf-8'), edited);
 });
 
-test('a failed checkout leaves no .git behind', () => {
+test('a failed checkout leaves no .git behind', async () => {
   const f = fixture();
   const dir = install(f.author, f.root);
-  assert.throws(() => checkoutApp(dir, manifestOf()), /does not say where its source lives/);
-  assert.throws(() => checkoutApp(dir, manifestOf({ repository: { url: `file://${f.root}/missing.git` } })), /could not fetch/);
+  await assert.rejects(() => checkoutApp(dir, manifestOf()), /does not say where its source lives/);
+  await assert.rejects(() => checkoutApp(dir, manifestOf({ repository: { url: `file://${f.root}/missing.git` } })), /could not fetch/);
   assert.equal(existsSync(join(dir, '.git')), false);
-  assert.throws(() => checkoutApp(dir, manifestOf({ repository: { url: f.url } }), { ref: 'nope' }), /'nope' is not a commit/);
+  await assert.rejects(() => checkoutApp(dir, manifestOf({ repository: { url: f.url } }), { ref: 'nope' }), /'nope' is not a commit/);
   assert.equal(existsSync(join(dir, '.git')), false);
   assert.equal(readPublishMarker(dir), null);
+});
+
+test('a repo that needs a login fails fast, without prompting or blocking the event loop', async () => {
+  // A git host that answers every request with 401, like a private GitLab repo
+  // fetched without credentials. Git would ask for a username; it must not.
+  const server = createServer((_req, res) => {
+    res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="git"' }).end();
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${server.address().port}/o/private.git`;
+  const f = fixture();
+  const dir = install(f.author, f.root);
+  let ticks = 0;
+  const timer = setInterval(() => { ticks++; }, 5);
+  const started = Date.now();
+  try {
+    await assert.rejects(() => checkoutApp(dir, manifestOf({ repository: { url } })), /could not fetch .*(Username|credential|terminal prompts disabled)/i);
+  } finally {
+    clearInterval(timer);
+    server.close();
+  }
+  assert.ok(Date.now() - started < 10_000, 'failed at once, not after the fetch timeout');
+  assert.ok(ticks > 0, 'the event loop kept running during the fetch');
+  assert.equal(existsSync(join(dir, '.git')), false);
 });

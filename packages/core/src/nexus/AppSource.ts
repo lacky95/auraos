@@ -22,7 +22,8 @@
  * is undone). An app with a `.git` is a dev checkout;
  * Nexus refuses to update or replace it unless forced (NexusManager).
  */
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
@@ -51,7 +52,8 @@ export interface PublishMarker {
 
 // Runs inside the shell, where nobody can answer a prompt: a repo that needs
 // credentials must fail at once instead of hanging until the timeout.
-const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
+const execFileAsync = promisify(execFile);
 
 function git(cwd: string, args: string[], timeout = 15_000): string {
   return execFileSync('git', ['-C', cwd, ...args],
@@ -243,7 +245,7 @@ export function resolveAppRepository(
  * repository stamp is all that differs. Idempotent: an app that
  * already has `.git` is only reported on.
  */
-export function checkoutApp(appDir: string, manifest: AppManifest, opts: CheckoutOpts = {}): CheckoutResult {
+export async function checkoutApp(appDir: string, manifest: AppManifest, opts: CheckoutOpts = {}): Promise<CheckoutResult> {
   if (isDevCheckout(appDir)) {
     return { ...checkoutStatus(appDir), created: false, warnings: [] };
   }
@@ -261,9 +263,13 @@ export function checkoutApp(appDir: string, manifest: AppManifest, opts: Checkou
     git(appDir, ['init', '-q']);
     git(appDir, ['remote', 'add', 'origin', repo.url]);
     try {
-      git(appDir, ['fetch', '--tags', 'origin'], 300_000);
+      // The one network call, and it can take minutes: async, so a slow fetch
+      // holds only this request, not the shell's event loop. Local git calls
+      // stay sync — they are milliseconds.
+      await execFileAsync('git', ['-C', appDir, 'fetch', '--tags', 'origin'],
+        { timeout: 300_000, env: GIT_ENV, maxBuffer: 16 * 1024 * 1024 });
     } catch (err) {
-      const msg = ((err as { stderr?: Buffer }).stderr?.toString() || (err as Error).message).trim().split('\n').pop();
+      const msg = ((err as { stderr?: string }).stderr || (err as Error).message).trim().split('\n').pop();
       throw new Error(`could not fetch ${repo.url}: ${msg} (private repos need git credentials in the master container)`);
     }
     // origin/HEAD tells us the remote's default branch.
