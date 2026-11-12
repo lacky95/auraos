@@ -13,6 +13,7 @@
  * accept, and it's one round-trip to read.
  */
 import type { AppManifest } from '../types/manifest.js';
+import type { AppSourceInfo } from './AppSource.js';
 
 /**
  * OCI repo path prefix for published apps: `<host>/aura-apps/<app-id>`.
@@ -41,6 +42,8 @@ export const ANNOTATION_KEYS = {
   vendor:      'org.opencontainers.image.vendor',
   licenses:    'org.opencontainers.image.licenses',
   created:     'org.opencontainers.image.created',
+  source:      'org.opencontainers.image.source',     // repo the release was built from
+  revision:    'org.opencontainers.image.revision',   // its commit
   // Aura custom
   id:          'app.aura.id',
   originId:    'app.aura.origin-id',
@@ -73,6 +76,9 @@ export interface StoreMetadata {
   tags?:            string[];
   screenshots?:     string[];
   createdAt?:       string;
+  /** Source repo + commit of the release (see AppSource.ts). */
+  repository?:      string;
+  revision?:        string;
   /** Full manifest when it was small enough to inline. */
   manifest?:        AppManifest;
 }
@@ -81,7 +87,7 @@ export interface StoreMetadata {
  *  clock) so callers control it and tests stay deterministic. */
 export function buildStoreAnnotations(
   manifest: AppManifest,
-  opts: { createdAt?: string } = {},
+  opts: { createdAt?: string; source?: AppSourceInfo } = {},
 ): Record<string, string> {
   const a: Record<string, string> = {};
   const put = (k: string, v: string | undefined | null) => {
@@ -96,6 +102,8 @@ export function buildStoreAnnotations(
   put(ANNOTATION_KEYS.originId,    manifest.originId);
   put(ANNOTATION_KEYS.icon,        manifest.icon);
   put(ANNOTATION_KEYS.category,    manifest.category);
+  put(ANNOTATION_KEYS.source,      opts.source?.repository);
+  put(ANNOTATION_KEYS.revision,    opts.source?.commit);
 
   const store = manifest.store;
   if (store) {
@@ -158,6 +166,8 @@ export function parseStoreAnnotations(
     tags:            splitList(ANNOTATION_KEYS.tags),
     screenshots:     splitList(ANNOTATION_KEYS.screenshots),
     createdAt:       get(ANNOTATION_KEYS.created),
+    repository:      get(ANNOTATION_KEYS.source) ?? manifest?.repository?.url,
+    revision:        get(ANNOTATION_KEYS.revision),
     manifest,
   };
 }

@@ -769,13 +769,14 @@ function wireInstall(parent: Command, opts: { hidden?: boolean } = {}): void {
     .description('Install an app. <ref> can be a git URL, OCI tag, index id, or local path.')
     .option('-y, --yes',             'auto-approve any permission changes')
     .option('--channel <name>',      'channel to install (when <ref> is an index id)', 'stable')
-    .option('--scope <global|user>', 'install into this scope (default: global)', 'global'))
-    .action(async (rawRef: string, o: { yes?: boolean; channel?: string; scope?: string } & IdentityFlags) => {
+    .option('--scope <global|user>', 'install into this scope (default: global)', 'global')
+    .option('--force',               'replace the app even if it is a dev checkout (`aura dev checkout`)'))
+    .action(async (rawRef: string, o: { yes?: boolean; channel?: string; scope?: string; force?: boolean } & IdentityFlags) => {
       const ref = normaliseRef(rawRef);
       if (o.scope === 'system') fail('cannot install into system scope');
       const scope = o.scope === 'user' ? 'user' : 'global';
 
-      const res = await installWithChoices('/api/nexus/install', { ref, scope }, o, 'install');
+      const res = await installWithChoices('/api/nexus/install', { ref, scope, ...(o.force ? { force: true } : {}) }, o, 'install');
       if (!res) { info('install cancelled'); return; }
       if (!res.ok || !res.record) fail(res.error ?? 'install failed');
       ok(`installed ${color.cyan(res.record!.id)} (${res.record!.version}) from ${res.record!.source} → scope:${res.record!.scope ?? scope}`);
@@ -896,9 +897,11 @@ function wireUpdate(parent: Command, opts: { hidden?: boolean } = {}): void {
     .command('update [id]', { hidden: opts.hidden })
     .description('Re-resolve an installed app and reinstall if updated.')
     .option('-y, --yes', 'auto-approve any permission changes')
-    .option('--all',     'update every Nexus-installed app'))
-    .action(async (id: string | undefined, o: { yes?: boolean; all?: boolean } & IdentityFlags) => {
+    .option('--all',     'update every Nexus-installed app (dev checkouts are skipped)')
+    .option('--force',   'also replace an app that is a dev checkout (`aura dev checkout`)'))
+    .action(async (id: string | undefined, o: { yes?: boolean; all?: boolean; force?: boolean } & IdentityFlags) => {
       if (!id && !o.all) fail('pass an <id> or --all');
+      if (o.force && !id) fail('--force replaces a dev checkout — name the one <id>, not --all');
       const ids: string[] = id
         ? [id]
         : (await api.get<InstalledItem[]>('/api/nexus/installed'))
@@ -907,7 +910,7 @@ function wireUpdate(parent: Command, opts: { hidden?: boolean } = {}): void {
       if (ids.length === 0) { info('no Nexus-installed apps to update'); return; }
       for (const i of ids) {
         info(`updating ${i}...`);
-        const res = await installWithChoices(`/api/nexus/update/${encodeURIComponent(i)}`, {}, o, 'update');
+        const res = await installWithChoices(`/api/nexus/update/${encodeURIComponent(i)}`, o.force ? { force: true } : {}, o, 'update');
         if (!res) { info(`  → ${i} skipped`); continue; }
         if (!res.ok) info(`  → ${i} failed: ${res.error ?? '<unknown>'}`);
         else        ok(`  → ${i} updated to ${res.record?.version ?? '<?>'}`);

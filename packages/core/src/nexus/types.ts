@@ -6,6 +6,7 @@
  */
 import type { AppManifest } from '../types/manifest.js';
 import type { ScopeId } from '../scopes/types.js';
+import type { AppSourceInfo } from './AppSource.js';
 
 /** Where an app came from. Stored in the install record per app. */
 export type NexusSource = 'oci' | 'git' | 'index' | 'local';
@@ -61,6 +62,9 @@ export interface InstallRecord {
   /** Installed as an independent copy: no originId link to its source, so
    *  the store never updates it from there. */
   detached?:   boolean;
+  /** Source repo + commit the release was built from (its publish marker,
+   *  else manifest.repository) — what `aura dev checkout` uses. */
+  upstream?:   AppSourceInfo;
 }
 
 /** How the user resolved an identity conflict (re-sent with the install). */

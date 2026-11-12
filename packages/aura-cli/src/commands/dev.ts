@@ -827,6 +827,7 @@ export function registerDev(program: Command): void {
     });
 
   registerDevOrigin(dev);
+  registerDevCheckout(dev);
 
   dev
     .command('standalone <appId>')
@@ -946,6 +947,89 @@ function deepEqual(a: unknown, b: unknown): boolean {
     return aKeys.every((k, i) => k === bKeys[i] && deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
   }
   return false;
+}
+
+// ─── dev checkout ───────────────────────────────────────────────────────────
+
+interface CheckoutInfo {
+  appId: string; scope: ScopeId; appDir: string; version: string; checkout: boolean;
+  repository: string | null; repositoryFrom: string | null;
+  upstream: { repository?: string; branch?: string; commit?: string; dirty?: boolean } | null;
+}
+interface CheckoutResponse {
+  ok?: boolean; error?: string; message?: string;
+  appId: string; scope: ScopeId; appDir: string; created: boolean;
+  repository: string | null; branch: string | null; head: string | null; changes: string[];
+  target?: { ref: string; how: string }; repoFrom?: string; warnings: string[];
+}
+
+/**
+ * `aura dev checkout` — make an installed app ready for development: its dir
+ * becomes a git checkout of the repo it is developed in, at the commit the
+ * release was built from, without touching its files. Published bundles never
+ * carry .git; the repo comes from the manifest's `repository` (or the release,
+ * or --repo). The shell does the git work (`/api/admin/app-checkout`) — it
+ * sees every scope; this sandbox may not.
+ */
+function registerDevCheckout(dev: Command): void {
+  dev
+    .command('checkout <appId>')
+    .option('--repo <url>',    'Source repo, when the app does not declare one (manifest "repository")')
+    .option('--ref <ref>',     'Put HEAD on this commit/tag/branch instead of the release commit')
+    .option('--branch <name>', 'Local branch name (default: the declared branch, else the repo default)')
+    .option('--scope <id>',    'global | user — pick the copy in this scope (an id shadowed across scopes)')
+    .option('--dry-run',       'Only show which repo and commit would be used')
+    .option('--json',          'Print the raw response')
+    .description('Make an installed app a git checkout of its source repo (in place), ready for development.')
+    .action(async (appId: string, o: { repo?: string; ref?: string; branch?: string; scope?: ScopeId; dryRun?: boolean; json?: boolean }) => {
+      if (!PKG_RE.test(appId)) fail(`Invalid app ID: ${appId}`);
+      if (o.scope && !ALL_SCOPES.includes(o.scope)) fail(`Invalid --scope: '${o.scope}'. Expected one of: ${ALL_SCOPES.join(' | ')}.`);
+
+      const qs = `appId=${encodeURIComponent(appId)}${o.scope ? `&scope=${encodeURIComponent(o.scope)}` : ''}`;
+      const infoRes = await apiOrBody<CheckoutInfo & { error?: string; message?: string }>(() => api.get(`/api/admin/app-checkout?${qs}`));
+      if (infoRes.error) fail(infoRes.message ?? infoRes.error);
+      if (o.dryRun) {
+        if (o.json) { console.log(JSON.stringify(infoRes, null, 2)); return; }
+        console.log(`${infoRes.appId} ${color.dim(`(${infoRes.scope}, ${infoRes.version})`)}  ${infoRes.appDir}`);
+        if (infoRes.checkout) { info('already a git checkout'); return; }
+        const repo = o.repo ?? infoRes.repository;
+        console.log(`  repository: ${repo ?? color.yellow('(none — declare "repository" in the manifest or pass --repo)')}${!o.repo && infoRes.repositoryFrom ? color.dim(`  (from ${infoRes.repositoryFrom})`) : ''}`);
+        const c = infoRes.upstream?.commit;
+        console.log(`  commit:     ${o.ref ?? (c ? `${c.slice(0, 12)}${infoRes.upstream?.dirty ? color.yellow(' (released with uncommitted changes)') : ''}` : color.dim(`v${infoRes.version} tag, else the branch tip`))}`);
+        return;
+      }
+
+      const res = await apiOrBody<CheckoutResponse>(() => api.post('/api/admin/app-checkout', {
+        appId, ...(o.scope ? { scope: o.scope } : {}), ...(o.repo ? { repository: o.repo } : {}),
+        ...(o.ref ? { ref: o.ref } : {}), ...(o.branch ? { branch: o.branch } : {}),
+      }));
+      if (o.json) { console.log(JSON.stringify(res, null, 2)); if (res.error) process.exitCode = 1; return; }
+      if (res.error) fail(res.message ?? res.error);
+      for (const w of res.warnings ?? []) warn(w);
+      if (!res.created) info(`${appId} already is a git checkout — nothing changed`);
+      else ok(`${appId} is now a git checkout${res.target ? ` at ${res.target.ref} ${color.dim(`(${res.target.how})`)}` : ''}`);
+      console.log(`  dir:    ${res.appDir}`);
+      console.log(`  origin: ${res.repository ?? color.dim('(none)')}`);
+      console.log(`  branch: ${res.branch ?? color.dim('(detached)')}  ${res.head ?? ''}`);
+      if (res.changes.length) {
+        warn(`${res.changes.length}${res.changes.length >= 50 ? '+' : ''} file(s) differ from that commit — check with git status before committing`);
+        for (const c of res.changes.slice(0, 10)) console.log(color.dim(`    ${c}`));
+      } else if (res.created) {
+        info('working tree matches the commit');
+      }
+      if (res.created) info(`Nexus no longer updates this app over your work (update/install need --force). Jump in with ${color.cyan(`aura jump ${appId}`)}.`);
+    });
+}
+
+/** Admin routes answer errors with a JSON body; surface it instead of throwing. */
+async function apiOrBody<T>(call: () => Promise<unknown>): Promise<T> {
+  try {
+    return await call() as T;
+  } catch (err) {
+    const raw = (err as { body?: string }).body;
+    if (raw) { try { return JSON.parse(raw) as T; } catch { /* not JSON */ } }
+    throw err;
+  }
 }
 
 // ─── dev origin ─────────────────────────────────────────────────────────────

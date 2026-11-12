@@ -24,6 +24,7 @@ import { fetchLocal } from './Fetchers/LocalFetcher.js';
 import { fetchGit } from './Fetchers/GitFetcher.js';
 import { fetchOci } from './Fetchers/OciFetcher.js';
 import { publishGit, publishOci } from './Publisher.js';
+import { isDevCheckout } from './AppSource.js';
 import { computePermissionDiff, diffRequiresApproval } from './PermissionDiff.js';
 import type {
   IdentityDecision, InstallRecord, NexusProgressEvent, ResolvedRef,
@@ -351,6 +352,9 @@ export class NexusManager {
     sourceName?: string;
     /** The user's answer to an earlier `identity.choice` (re-sent install). */
     identity?:   IdentityDecision;
+    /** Replace the app even when it is a dev checkout (`aura dev checkout`).
+     *  The old dir, `.git` included, still goes to nexus/trash. */
+    replaceCheckout?: boolean;
   }): AsyncGenerator<NexusProgressEvent, InstallRecord, { approve: boolean } | void> {
     let targetScope: 'global' | 'user' = opts.scope ?? 'global';
     const stagingDir  = join(this.rootDataDir, 'nexus', 'staging', `pending-${Date.now()}`);
@@ -465,6 +469,10 @@ export class NexusManager {
       }
       keys.add(manifest.id); this.installing.add(manifest.id);
       const installer = this.installerFor(targetScope);
+      // A dev checkout holds work that is not in any release.
+      if (!opts.replaceCheckout && isDevCheckout(join(installer.appsDir, manifest.id))) {
+        throw new Error(`${manifest.id} is a dev checkout (it has .git) — installing would replace your working tree. Commit/push your work, then pass force to replace it.`);
+      }
 
       // Permission diff vs. currently-installed version in any scope.
       const currentRecord = this.getRecord(manifest.id);
@@ -547,7 +555,7 @@ export class NexusManager {
     }
   }
 
-  async *update(appId: string, opts: { autoApprove?: boolean; identity?: IdentityDecision } = {}): AsyncGenerator<NexusProgressEvent, InstallRecord | null, { approve: boolean } | void> {
+  async *update(appId: string, opts: { autoApprove?: boolean; identity?: IdentityDecision; replaceCheckout?: boolean } = {}): AsyncGenerator<NexusProgressEvent, InstallRecord | null, { approve: boolean } | void> {
     const current = this.getRecord(appId);
     if (!current) {
       yield { type: 'error', code: 'not-installed',
@@ -560,9 +568,15 @@ export class NexusManager {
       return null;
     }
     const scope = (current.scope === 'system' ? 'global' : current.scope) ?? 'global';
+    if (!opts.replaceCheckout && isDevCheckout(join(this.installerFor(scope).appsDir, appId))) {
+      yield { type: 'error', code: 'dev-checkout',
+              message: `'${appId}' is a dev checkout (it has .git) — update it with git, or force the update to replace it` };
+      return null;
+    }
     const result = yield* this.install({
       ref: current.ref, scope, autoApprove: opts.autoApprove, sourceName: current.sourceName,
       ...(opts.identity ? { identity: opts.identity } : {}),
+      ...(opts.replaceCheckout ? { replaceCheckout: true } : {}),
     });
     this.bus?.emit('nexus:update.complete', { id: appId, record: result });
     return result;

@@ -17,7 +17,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import {
-  cpSync, mkdirSync, readdirSync, rmSync, writeFileSync,
+  cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { validateStagedDir } from './Validator.js';
@@ -25,6 +25,7 @@ import { orasPushArtifact, orasSync } from './RegistryAuth.js';
 import { APP_ARTIFACT_TYPE, APP_REPO_PREFIX, buildStoreAnnotations } from './ociMetadata.js';
 import { readListing, screenshotInput, writeListing, type ListingInput } from './OciListing.js';
 import { publishFileList, type PublishFileList } from './PublishFiles.js';
+import { buildPublishMarker, PUBLISH_MARKER, readAppSource, stampManifest, type PublishMarker } from './AppSource.js';
 import { upsertOciCatalog } from './OciCatalog.js';
 import type { AppManifest } from '../types/manifest.js';
 
@@ -215,15 +216,29 @@ function syncWorkTree(src: string, dst: string, manifest: AppManifest): PublishF
     cpSync(join(src, rel), join(dst, rel), { verbatimSymlinks: true });
   }
 
-  // Write a marker so updates can detect Nexus publishes (not load-bearing
-  // for v1, but cheap and useful for diagnostics).
-  const marker = {
-    publishedBy: 'aura-nexus',
-    publishedAt: new Date().toISOString(),
-    publishedVersion: manifest.version,
-  };
-  writeFileSync(join(dst, '.nexus-published.json'), JSON.stringify(marker, null, 2));
+  // The marker says which release this is and which source commit it was
+  // built from — what `aura dev checkout` puts HEAD on (AppSource.ts). An app
+  // that declares `repository` gets branch + commit in its released manifest.
+  const marker = writePublishMarker(src, dst, manifest);
+  const stamped = releasedManifest(src, marker);
+  if (stamped) writeFileSync(join(dst, 'app.manifest.json'), stamped);
   return list;
+}
+
+/** Write `.nexus-published.json` for a publish of `src` into `dir`. */
+function writePublishMarker(src: string, dir: string, manifest: AppManifest): PublishMarker {
+  const marker = buildPublishMarker(manifest, readAppSource(src, manifest));
+  writeFileSync(join(dir, PUBLISH_MARKER), JSON.stringify(marker, null, 2));
+  return marker;
+}
+
+/** `app.manifest.json` of `src` with repository.branch/commit stamped (AppSource
+ *  stampManifest), or null when the app declares no repository or the commit
+ *  is unknown. Publish never writes it back into `src`. */
+function releasedManifest(src: string, marker: PublishMarker): string | null {
+  if (!marker.source) return null;
+  try { return stampManifest(readFileSync(join(src, 'app.manifest.json'), 'utf-8'), marker.source); }
+  catch { return null; }
 }
 
 /** Say what the deny list kept out, so an author notices a missing file. */
@@ -306,10 +321,23 @@ export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }>
   // manifest.publish.ignore, never runtime data or secrets.
   const list = publishFileList(opts.appPath, { appId: manifest.id, ignore: manifest.publish?.ignore });
   logWithheld(list, log);
+  // The publish marker and a stamped manifest are generated in staging
+  // (publish never writes into the source tree) and added from there: tar
+  // applies each -C to the names after it.
+  const marker = writePublishMarker(opts.appPath, stagingDir, manifest);
+  const stamped = releasedManifest(opts.appPath, marker);
+  const generated = [PUBLISH_MARKER, ...(stamped ? ['app.manifest.json'] : [])];
+  if (stamped) {
+    writeFileSync(join(stagingDir, 'app.manifest.json'), stamped);
+    manifest.repository = { ...manifest.repository!, ...(marker.source?.branch ? { branch: marker.source.branch } : {}), commit: marker.source!.commit! };
+    log(`repository: ${manifest.repository.branch ?? '?'} @ ${manifest.repository.commit!.slice(0, 12)}`);
+  }
   const listPath = join(stagingDir, 'files.lst');
-  writeFileSync(listPath, list.files.map((f) => `${f}\0`).join(''));
-  execFileSync('tar', ['-czf', tarPath, '-C', resolve(opts.appPath), '--no-recursion', '--null', '-T', listPath],
+  writeFileSync(listPath, list.files.filter((f) => !generated.includes(f)).map((f) => `${f}\0`).join(''));
+  execFileSync('tar', ['-czf', tarPath, '-C', resolve(opts.appPath), '--no-recursion', '--null', '-T', listPath,
+                       '-C', stagingDir, ...generated],
     { stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 });
+  if (marker.source?.dirty) log('note: the app has uncommitted changes — the release records its last commit');
 
   // Resolve a bare-name registry through the RegistryConfig before pushing.
   // Bare = no `/` AND no `:` — looks like a label, not a URL/path. When it
@@ -337,7 +365,7 @@ export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }>
   // Embed storefront metadata as OCI manifest annotations so the catalog
   // aggregator can read it back with a single `oras manifest fetch` — no
   // bundle pull needed to list the app.
-  const annotations = buildStoreAnnotations(manifest, { createdAt: new Date().toISOString() });
+  const annotations = buildStoreAnnotations(manifest, { createdAt: new Date().toISOString(), source: marker.source });
   const annotationFlags: string[] = [];
   for (const [k, v] of Object.entries(annotations)) {
     annotationFlags.push('--annotation', `${k}=${v}`);

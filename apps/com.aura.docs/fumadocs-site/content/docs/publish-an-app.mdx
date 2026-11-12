@@ -35,8 +35,8 @@ without any external account.
 
 ## 1. Add store metadata
 
-Two optional manifest blocks drive how your app appears in the store and
-where it publishes. Add them to `app.manifest.json`:
+Optional manifest blocks drive how your app appears in the store, where it
+publishes, and where its source lives. Add them to `app.manifest.json`:
 
 ```jsonc
 {
@@ -56,6 +56,14 @@ where it publishes. Add them to `app.manifest.json`:
     "tags": ["demo", "hello"],
     "longDescription": "A longer description for the app's detail page.",
     "screenshots": ["store/shot1.png", "https://example.com/hello/shot2.png"]
+  },
+
+  // Where the app is developed — lets others turn an install into a git
+  // checkout (see "Develop an installed app" below). Opt-in.
+  "repository": {
+    "url": "gitlab.com/example/hello",   // also https://… or git@host:owner/repo
+    "branch": "main",                    // optional; default: the repo's default branch
+    "commit": ""                         // filled in by publish — leave empty in the repo
   },
 
   // Publish defaults — used when you run `aura nexus app publish` with no flags.
@@ -130,6 +138,18 @@ credentials files, and an `.npmrc` with a login. The app dir is also where its
 instance keeps state, and none of that leaves the machine. Publish prints what
 it kept out.
 
+`.git` is on that deny list too: a release never carries history, remotes or
+anything ever committed. Instead every release records **where it came from**:
+
+- If the manifest declares `repository`, publish sets `repository.branch` and
+  `repository.commit` in the **released** manifest to the branch and commit
+  it was published from. Your source tree is never written; keep
+  `"commit": ""` there.
+- Every release also gets `.nexus-published.json` with the same source repo
+  (`repository.url`, else the checkout's `origin`) and commit, flagged `dirty`
+  when the tree had uncommitted changes. OCI releases carry the pair as the
+  standard `org.opencontainers.image.source` / `.revision` annotations too.
+
 ## 3. See it in the store
 
 The store aggregates every registered source. Refresh and search:
@@ -202,6 +222,27 @@ and never replaces it silently; see
   ```bash
   aura nexus app update com.example.hello   # or --all
   ```
+
+## Develop an installed app
+
+An installed app is plain files — no `.git`. If it declares a `repository`
+(or its release recorded one), make it a git checkout in place:
+
+```bash
+aura dev checkout com.example.hello --dry-run   # which repo + commit would be used
+aura dev checkout com.example.hello
+```
+
+This creates `.git` in the app dir, fetches the repo and points the branch at
+the commit the release was built from (`repository.commit`, else the release
+marker, else the `v<version>` tag, else the branch tip). **No file is written**: anything that differs from that commit
+shows up in `git status`. Pass `--repo` for an app that declares nothing,
+`--ref` to pick another commit. The git work runs in the master container, so
+private repos need credentials there.
+
+From then on the app is a dev checkout: `aura nexus app update` refuses to
+replace it (`--all` skips it) unless you name it with `--force` — and even then
+the old dir, `.git` included, goes to `nexus/trash`.
 
 ## Alternative: publish to a git repo
 

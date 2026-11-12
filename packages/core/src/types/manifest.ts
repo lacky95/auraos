@@ -579,6 +579,23 @@ export const AppManifestSchema = z.object({
    */
   consumes: z.array(ConsumedInterfaceSchema).default([]),
   /**
+   * Where the app's source is developed — opt-in, for apps others may work
+   * on. Bundles never ship `.git`; this (plus the release commit Nexus records
+   * at publish, see nexus/AppSource.ts) is what lets `aura dev checkout` turn
+   * an installed copy into a git checkout. Not the same as `publish.repo`,
+   * which is where a git publish pushes releases to.
+   *   • `url`    — `gitlab.com/<owner>/<repo>`, an https URL, or `git@host:owner/repo`.
+   *   • `branch` — the development branch (default: the repo's default branch).
+   *   • `commit` — the commit this copy was built from. Publish fills in
+   *                `branch` + `commit` in the RELEASED manifest (never the
+   *                source tree), so leave it empty (`""`) in the repo.
+   */
+  repository: z.object({
+    url:    z.string().min(1),
+    branch: z.string().min(1).optional(),
+    commit: z.string().regex(/^([0-9a-f]{7,64})?$/, { message: 'commit must be a git commit hash (or "")' }).optional(),
+  }).optional(),
+  /**
    * Optional Nexus publish metadata. Drives `aura nexus publish` — none of
    * these are runtime fields, they just steer the publisher when an author
    * runs the command without flags.

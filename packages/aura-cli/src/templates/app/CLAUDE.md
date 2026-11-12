@@ -112,6 +112,12 @@ Optional fields (all have defaults — only set them if you need a non-default):
 `themeStrategy`, `theme`, `keymapActions`, `dataProvider`, `serverPort`,
 `icon`, `entrypoint`.
 
+`repository: { url, branch?, commit? }` says where the app is developed.
+Published bundles never ship `.git`; publish fills in `branch` + `commit` in
+the released manifest (keep `"commit": ""` in your repo), and anyone who
+installs the app can run `aura dev checkout <id>` to turn their copy into a
+git checkout at exactly that commit.
+
 **Instance vs. Activity**:
 - *Instance* = one running backend process (one Astro server, one PID, one port).
 - *Activity* = one UI screen / iframe. Multiple activities can share an instance.
@@ -368,6 +374,7 @@ aura grant perm  com.example.foo <perm>       # add a manifest permission
 # Dev
 aura dev validate apps/com.example.foo        # schema-check the manifest
 aura dev clean-manifest <path>                # strip default-valued fields
+aura dev checkout com.example.foo             # installed app → git checkout of its `repository`
 aura --help                                   # every command, by task
 ```
 

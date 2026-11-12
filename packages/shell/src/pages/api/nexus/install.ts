@@ -7,7 +7,7 @@ import { parseIdentity } from '../../../lib/nexusIdentity.js';
  * Install an app from a Nexus ref.
  *
  * POST body:
- *   { ref: string, scope?: 'global' | 'user', autoApprove?: boolean,
+ *   { ref: string, scope?: 'global' | 'user', autoApprove?: boolean, force?: boolean,
  *     identity?: { action: 'update-existing' | 'install-as' | 'install-copy', appId?: string } }
  *
  * Returns one of:
@@ -18,12 +18,16 @@ import { parseIdentity } from '../../../lib/nexusIdentity.js';
  *       B, D — core AppIdentity). Nothing was installed; POST again with
  *       `identity` set to one of `conflict.choices`.
  *   { ok: false, error: string }
+ *
+ * `force` replaces an app that is a dev checkout (`aura dev checkout`); without
+ * it such an install fails rather than overwriting the working tree.
  */
 export const POST: APIRoute = async ({ request }) => {
   const body = await request.json().catch(() => ({})) as {
     ref?:         string;
     scope?:       string;
     autoApprove?: boolean;
+    force?:       boolean;
     identity?:    unknown;
   };
   if (!body.ref || typeof body.ref !== 'string') {
@@ -38,7 +42,10 @@ export const POST: APIRoute = async ({ request }) => {
   if (identity instanceof Response) return identity;
 
   const nexus = getNexusManager();
-  const it = nexus.install({ ref: body.ref, scope, autoApprove: body.autoApprove, ...(identity ? { identity } : {}) });
+  const it = nexus.install({
+    ref: body.ref, scope, autoApprove: body.autoApprove,
+    ...(identity ? { identity } : {}), ...(body.force === true ? { replaceCheckout: true } : {}),
+  });
 
   try {
     let cursor = await it.next();

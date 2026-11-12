@@ -9,11 +9,12 @@ import { parseIdentity } from '../../../../lib/nexusIdentity.js';
  * `{ ok: false, needsApproval: true, diff }` when new permissions appear, or
  * `{ ok: false, needsIdentityChoice: true, conflict }` when the source now
  * serves a different app under this id (re-POST with `identity`).
+ * A dev checkout (`aura dev checkout`) answers 409 unless `force: true`.
  */
 export const POST: APIRoute = async ({ params, request }) => {
   const id = params['id'];
   if (!id) return errorResponse('missing app id', 400);
-  const body = await request.json().catch(() => ({})) as { autoApprove?: boolean; identity?: unknown };
+  const body = await request.json().catch(() => ({})) as { autoApprove?: boolean; force?: boolean; identity?: unknown };
   const identity = parseIdentity(body.identity);
   if (identity instanceof Response) return identity;
 
@@ -22,7 +23,9 @@ export const POST: APIRoute = async ({ params, request }) => {
     return errorResponse(`app '${id}' has no Nexus install record — cannot auto-update`, 404);
   }
 
-  const it = nexus.update(id, { autoApprove: body.autoApprove, ...(identity ? { identity } : {}) });
+  const it = nexus.update(id, {
+    autoApprove: body.autoApprove, ...(identity ? { identity } : {}), ...(body.force === true ? { replaceCheckout: true } : {}),
+  });
   try {
     let cursor = await it.next();
     while (!cursor.done) {
@@ -36,7 +39,7 @@ export const POST: APIRoute = async ({ params, request }) => {
         return jsonResponse({ ok: false, needsApproval: true, diff: ev.diff });
       }
       if (ev.type === 'error') {
-        return errorResponse(ev.message, 500);
+        return errorResponse(ev.message, ev.code === 'dev-checkout' ? 409 : 500);
       }
       if (ev.type === 'install.done') {
         return jsonResponse({ ok: true, record: ev.record });

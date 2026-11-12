@@ -272,8 +272,8 @@ Find, install, update and publish apps; every command posts to the shell's
 | Command | What it does | Key flags |
 |---|---|---|
 | `aura nexus search [query]` | Search the aggregated catalog by id, name, description or tag. | `--category <slug>`, `--refresh` |
-| `aura nexus app install <ref>` | Resolve, fetch, validate, install. Pauses on new-permission diffs unless `-y`, and asks when an installed app shares the id or `originId`. | `-y`, `--channel <name>`, `--scope global\|user`, `--update-existing`, `--as <appId>`, `--copy [appId]` |
-| `aura nexus app update [id]` | Re-resolve an installed app and reinstall if it moved. | `-y`, `--all`, `--update-existing`, `--as`, `--copy` |
+| `aura nexus app install <ref>` | Resolve, fetch, validate, install. Pauses on new-permission diffs unless `-y`, and asks when an installed app shares the id or `originId`. | `-y`, `--channel <name>`, `--scope global\|user`, `--update-existing`, `--as <appId>`, `--copy [appId]`, `--force` (replace a dev checkout) |
+| `aura nexus app update [id]` | Re-resolve an installed app and reinstall if it moved. Dev checkouts are left alone. | `-y`, `--all`, `--update-existing`, `--as`, `--copy`, `--force` (replace a dev checkout) |
 | `aura nexus app uninstall <id>` | Remove; per-app data is kept unless `--purge`. | `--purge` |
 | `aura nexus app list` / `info <ref>` | Installed apps + their Nexus source / dry-run preview of a ref (manifest + permission diff). | `--source git\|oci\|index\|local` |
 | `aura nexus app publish [path]` | Push the app to an OCI registry or git repo. Bare + TTY = wizard. | `--to`, `--kind oci\|git`, `--tag`, `--channel`, `--branch`, `-y`, `--submit` |
@@ -299,6 +299,7 @@ Ref shapes `install` / `info` accept:
 | `aura dev clone [source] [target]` | Clone any app (incl. system apps) into `user` or `global` scope. The copy gets a new `originId`. Wizard if ids are omitted. | `--scope`, `--source-scope`, `--name`, `--keep-origin`, `--no-rewrite-ids`, `--exclude-git`, `--with-data`, `--force`, `--dry-run`, `--json`, … |
 | `aura dev validate [path]` | Validate one manifest against the schema, or all with `--all`. Warns when `originId` is missing. | `--all` |
 | `aura dev origin [appId]` | List app `originId`s, or set them. | `--assign [--all]`, `--reassign` (admin), `--origin-id <uuid>`, `--scope`, `--json` |
+| `aura dev checkout <appId>` | Make an installed app a git checkout of its source repo, in place (files untouched), at the release's commit. Nexus then stops updating it. | `--repo <url>`, `--ref <ref>`, `--branch <name>`, `--scope`, `--dry-run`, `--json` |
 | `aura dev clean-manifest [path]` | Strip manifest fields equal to the schema default. | `--all`, `--dry-run` |
 | `aura dev standalone <appId>` | Run an app directly with `astro dev` (no sandbox, no shell wrapper) for fast UI iteration. | — |
 

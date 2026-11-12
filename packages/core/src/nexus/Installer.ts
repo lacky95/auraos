@@ -20,6 +20,7 @@ import type { AppManifest } from '../types/manifest.js';
 import type { InstallRecord, ResolvedRef } from './types.js';
 import type { ScopeId } from '../scopes/types.js';
 import { readOriginId } from '../app-manager/AppIdentity.js';
+import { readPublishMarker, type AppSourceInfo } from './AppSource.js';
 
 export interface InstallerOpts {
   appsDir: string;
@@ -76,7 +77,7 @@ export class Installer {
 
     // 4. Write the install record. Stored under data/, NOT in the app
     //    dir (keeps the app dir reproducible across publishes).
-    const record = buildInstallRecord(manifest, resolved, ts, this.opts.scope, link);
+    const record = buildInstallRecord(manifest, resolved, ts, this.opts.scope, link, upstreamOf(targetDir, manifest));
     const recordPath = join(this.opts.dataDir, 'nexus', 'installed', `${manifest.id}.json`);
     mkdirSync(dirname(recordPath), { recursive: true });
     writeFileSync(recordPath, JSON.stringify(record, null, 2));
@@ -168,9 +169,25 @@ function moveOrCopy(src: string, dst: string): void {
   }
 }
 
+/** Where the installed release's source lives: its manifest's `repository`
+ *  (publish stamps branch + commit there), else its publish marker. */
+function upstreamOf(appDir: string, m: AppManifest): AppSourceInfo | undefined {
+  const marker = readPublishMarker(appDir)?.source;
+  if (m.repository) {
+    const commit = m.repository.commit || undefined;
+    return {
+      repository: m.repository.url,
+      ...(m.repository.branch ? { branch: m.repository.branch } : {}),
+      ...(commit ? { commit } : {}),
+      ...(commit && marker?.commit === commit && marker.dirty ? { dirty: true } : {}),
+    };
+  }
+  return marker?.repository ? marker : undefined;
+}
+
 function buildInstallRecord(
   m: AppManifest, r: ResolvedRef, ts: number, scope: ScopeId,
-  link: { remoteId?: string; detached?: boolean },
+  link: { remoteId?: string; detached?: boolean }, upstream?: AppSourceInfo,
 ): InstallRecord {
   const iso = new Date(ts).toISOString();
   return {
@@ -187,5 +204,6 @@ function buildInstallRecord(
     ...(m.originId ? { originId: m.originId } : {}),
     ...(link.remoteId && link.remoteId !== m.id ? { remoteId: link.remoteId } : {}),
     ...(link.detached ? { detached: true } : {}),
+    ...(upstream ? { upstream } : {}),
   };
 }
