@@ -26,7 +26,7 @@
  */
 import type { Notification } from '../../../lib/notifications/api.ts';
 import { senderLabel, type AppLookup } from '../../../lib/notifications/format.ts';
-import { renderNotificationCard, updateNotificationCard, spriteIcon, type CardActions } from './NotificationCard.ts';
+import { renderNotificationCard, requestDismiss, updateNotificationCard, spriteIcon, type CardActions } from './NotificationCard.ts';
 import { CLOSE_LATER } from '../../../lib/notifications/dialogs.ts';
 import { ExitMachine } from '../../../lib/notifications/exit.ts';
 import { getMaximizeMemory, initialMaximized, isMaximizeShortcut, MAXIMIZE_ARIA_KEYS, MAXIMIZE_SHORTCUT_LABEL } from '../../../lib/notifications/maximize.ts';
@@ -52,6 +52,11 @@ export interface FrameOptions {
   appLookup?: AppLookup;
   /** Shows the header ✕ "Close (answer later)" (Escape does the same). Absent: no ✕. */
   onLater?: () => void;
+  /**
+   * The header ✕ dismisses the notification instead (an unanswered question
+   * confirms first, like the list's ✕); Escape still puts it off.
+   */
+  dismissible?: boolean;
   /** Collapsed bar's "Answer" / bar click (default: expand in place). */
   onAnswer?: () => void;
   /** Activity-linked panel: yellow accent + badge (phase 4). */
@@ -153,16 +158,28 @@ export function buildDialogFrame(n: Notification, opts: FrameOptions): DialogFra
     maxBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleMax(); });
     bar.appendChild(maxBtn);
   }
-  if (opts.onLater) {
+  if (opts.onLater || opts.dismissible) {
     // Window-style close, top-right in the header — never in the sender's button row.
-    const later = el('button', 'aura-dlg-btn aura-dlg-close');
-    later.type = 'button';
-    later.dataset['action'] = 'later';
-    later.setAttribute('aria-label', CLOSE_LATER.label);
-    later.title = CLOSE_LATER.title;
-    later.appendChild(spriteIcon('lucide-x'));
-    later.addEventListener('click', () => opts.onLater?.());
-    bar.appendChild(later);
+    const close = el('button', 'aura-dlg-btn aura-dlg-close');
+    close.type = 'button';
+    if (opts.dismissible) {
+      close.dataset['action'] = 'dismiss';
+      close.setAttribute('aria-label', `Dismiss ${n.title}`);
+      close.title = 'Dismiss';
+    } else {
+      close.dataset['action'] = 'later';
+      close.setAttribute('aria-label', CLOSE_LATER.label);
+      close.title = CLOSE_LATER.title;
+    }
+    close.appendChild(spriteIcon('lucide-x'));
+    close.addEventListener('click', (e) => {
+      if (!opts.dismissible) { opts.onLater?.(); return; }
+      e.stopPropagation();
+      // The confirm shows in the body: a collapsed bar opens first.
+      if (collapsed) { setCollapsed(false); opts.onCollapseChange?.(false); }
+      requestDismiss(card, n, cardOpts, close);
+    });
+    bar.appendChild(close);
   }
   root.appendChild(bar);
 

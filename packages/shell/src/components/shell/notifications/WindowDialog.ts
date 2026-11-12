@@ -8,7 +8,8 @@
  *
  *   non-blocking  a panel docked at the bottom, collapsible to a bar; the
  *                 host lets clicks through, so the app above stays usable.
- *                 "Later" / Escape hide it (it stays in the list).
+ *                 The header ✕ dismisses it (an unanswered question
+ *                 confirms first); "Later" / Escape collapse it to the bar.
  *   blocking      a dimmed full cover; the window's iframe is `inert` and
  *                 blurred if it had focus. No "Later". `inert` is removed
  *                 when the dialogue is resolved / removed / detached, and
@@ -159,6 +160,8 @@ export function mountWindowDialog(slot: HTMLElement, n: Notification, opts: Wind
     modal: opts.blocking,
     collapsible: !opts.blocking,
     ...(opts.blocking ? {} : { onLater: opts.onLater }),
+    // ✕ removes it (Locked: only the sender can; its ✕ keeps collapsing).
+    dismissible: !opts.blocking && n.type !== 'locked',
     ...(opts.onAnswer ? { onAnswer: opts.onAnswer } : {}),
     ...(opts.onCollapseChange ? { onCollapseChange: opts.onCollapseChange } : {}),
     // A panel inside its own window is always activity-linked: yellow accent.
@@ -177,6 +180,8 @@ export function mountWindowDialog(slot: HTMLElement, n: Notification, opts: Wind
   return {
     update: (next) => frame.update(next),
     focus: () => frame.focus(),
+    // False once the slot was re-created (same viewId, new DOM): the controller re-attaches.
+    isAttached: () => frame.root.isConnected,
     setCollapsed: (c) => { frame.setCollapsed(c); if (!c) focusFirst(frame.root); },
     dispose: (o) => {
       if (disposed) return;

@@ -564,13 +564,14 @@ function laterFor(card: HTMLElement, n: Notification, opts: CardOptions): void {
 }
 
 /**
- * Dismiss from a list card (✕ / Delete). An unanswered question asks first
+ * Dismiss from a list card (✕ / Delete) or an in-window panel's header ✕
+ * (DialogFrame `dismissible`). An unanswered question asks first
  * (ConfirmInline, the same component and look as the Locked force-remove
  * confirm): [Answer] (opens it) · [Dismiss anyway] · [Cancel] (Esc; focus
  * back to the ✕). A typed draft adds "Your entered answers will be lost." and
  * is cleared only on Dismiss anyway.
  */
-function requestDismiss(card: HTMLElement, n: Notification, opts: CardOptions, returnTo: HTMLElement): void {
+export function requestDismiss(card: HTMLElement, n: Notification, opts: CardOptions, returnTo: HTMLElement): void {
   const rule = needsDismissConfirm(n, getDrafts().get(n.id));
   const doDismiss = async (): Promise<boolean> => {
     const ok = await runAction(card, opts.actions.dismiss(n.id), returnTo instanceof HTMLButtonElement ? returnTo : undefined);

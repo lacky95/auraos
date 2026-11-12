@@ -192,3 +192,55 @@ test('global surfaces: linked → yellow accent + "Go to activity · <app · win
   assert.equal(linkPresentation({ ...linked, lockscreen: true, redacted: true } as never, visible, 'Notepad'), null);
   assert.equal(linkPresentation(linked, null, 'Notepad'), null);
 });
+
+test('the in-window ✕ dismisses: a simple item at once; a question confirms first (from the collapsed bar too); Locked keeps collapsing', async () => {
+  resetDom();
+  const dismissed: string[] = [];
+  const acts = { ...actions, dismiss: async (id: string) => { dismissed.push(id); return { ok: true as const }; } };
+  const closeBtn = (slot: HTMLElement) => panel(slot).querySelector<HTMLButtonElement>('.aura-dlg-close')!;
+
+  // A simple (banner) item: gone right away, Later is not called.
+  let later = 0;
+  const simple = item({ type: 'simple' });
+  let slot = makeSlot();
+  mountWindowDialog(slot, simple, { actions: acts, blocking: false, takeFocus: false, onLater: () => later++ });
+  assert.equal(closeBtn(slot).dataset['action'], 'dismiss');
+  assert.equal(closeBtn(slot).title, 'Dismiss');
+  click(closeBtn(slot));
+  await flush();
+  assert.deepEqual(dismissed, [simple.id]);
+  assert.equal(later, 0, '✕ no longer just puts it off');
+
+  // A question, collapsed to the bar: ✕ opens it with the confirm; Dismiss anyway removes it.
+  resetDom();
+  slot = makeSlot();
+  const q = item();
+  const changes: boolean[] = [];
+  mountWindowDialog(slot, q, { actions: acts, blocking: false, takeFocus: false, collapsed: true, onLater: () => later++, onCollapseChange: (c) => changes.push(c) });
+  assert.equal(isCollapsed(slot), true);
+  click(closeBtn(slot));
+  assert.equal(isCollapsed(slot), false, 'expanded to show the confirm');
+  assert.deepEqual(changes, [false]);
+  assert.equal(dismissed.length, 1, 'not yet');
+  const anyway = [...panel(slot).querySelectorAll<HTMLButtonElement>('.aura-ntf-dismiss-confirm button')].find((b) => b.textContent?.includes('Dismiss anyway'))!;
+  assert.ok(anyway, 'the list\'s confirm');
+  anyway.click();
+  await flush();
+  assert.deepEqual(dismissed, [simple.id, q.id]);
+
+  // Escape still only puts it off.
+  resetDom();
+  slot = makeSlot();
+  mountWindowDialog(slot, item(), { actions: acts, blocking: false, takeFocus: false, onLater: () => later++ });
+  panel(slot).dispatchEvent(new dom.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }) as unknown as Event);
+  assert.equal(later, 1);
+
+  // Locked: only the sender removes it — ✕ stays "answer later".
+  resetDom();
+  slot = makeSlot();
+  mountWindowDialog(slot, item({ type: 'locked' }), { actions: acts, blocking: false, takeFocus: false, onLater: () => later++ });
+  assert.equal(closeBtn(slot).dataset['action'], 'later');
+  click(closeBtn(slot));
+  assert.equal(later, 2);
+  assert.equal(dismissed.length, 2);
+});

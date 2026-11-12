@@ -423,7 +423,7 @@
   .aura-dlg[data-collapsed="true"] .aura-dlg-bar { border-bottom: 0; cursor: pointer; }
   .aura-dlg-kicker { color: var(--aura-color-primary); text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.62rem; white-space: nowrap; }
   .aura-dlg-bar-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--aura-color-text-dim); }
-  .aura-dlg:not([data-collapsed="true"]) .aura-dlg-bar-title { visibility: hidden; }
+  section.aura-dlg:not([data-collapsed="true"]) .aura-dlg-bar-title { visibility: hidden; }
   .aura-dlg-btn {
     display: inline-flex; align-items: center; justify-content: center; gap: 4px;
     height: 22px; padding: 0 8px; cursor: pointer; flex-shrink: 0;
@@ -462,13 +462,16 @@
     padding: 8px; box-sizing: border-box;
     pointer-events: none;
   }
+  /* Blocking: the host is the dimmed cover. Only the blocking dialogue
+     centres (auto margins take the free space, order puts it first); docked
+     bars of the same window stay at the bottom, full width. */
   .aura-dlg-host[data-blocking="true"] {
-    pointer-events: auto; justify-content: center; align-items: center;
+    pointer-events: auto;
     background: color-mix(in srgb, var(--aura-color-bg) 72%, transparent);
     backdrop-filter: blur(2px);
   }
   .aura-dlg-window { width: 100%; max-height: 70%; }
-  .aura-dlg-host[data-blocking="true"] .aura-dlg-window { width: min(440px, 100%); max-height: 90%; }
+  .aura-dlg-window[data-blocking="true"] { order: -1; margin: auto; width: min(440px, 100%); max-height: 90%; }
   .aura-dlg-window[data-blocking="true"] { border-color: var(--aura-color-warning); }
 
   /* Floating (desktop panel / phone sheet), z 1080: above list 1060 + pop-ups 1070. */

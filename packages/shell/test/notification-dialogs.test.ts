@@ -76,7 +76,7 @@ class FakeHost implements DialogHost {
   isPhone = false;
   isLocked = false;
   focusOk = true;
-  mounted: Array<{ id: string; p: Placement; takeFocus: boolean; disposed: boolean; later: () => void; updates: number; focused: number; collapsed: boolean; instant?: boolean }> = [];
+  mounted: Array<{ id: string; p: Placement; takeFocus: boolean; disposed: boolean; later: () => void; updates: number; focused: number; collapsed: boolean; instant?: boolean; attached: boolean }> = [];
   revealed: string[] = [];
   markers: { view: Map<string, number>; ws: Map<string, number> } = { view: new Map(), ws: new Map() };
   viewDetail(ctx: { instanceId: string; activityId?: string }) { return this.views.get(ctx.activityId ?? ctx.instanceId) ?? null; }
@@ -90,12 +90,13 @@ class FakeHost implements DialogHost {
   locked() { return this.isLocked; }
   focusInWindowOrNowhere() { return this.focusOk; }
   mount(n: Notification, p: Placement, opts: { takeFocus: boolean; onLater: () => void; collapsed?: boolean }): MountedDialog {
-    const rec: FakeHost['mounted'][number] = { id: n.id, p, takeFocus: opts.takeFocus, disposed: false, later: opts.onLater, updates: 0, focused: 0, collapsed: !!opts.collapsed };
+    const rec: FakeHost['mounted'][number] = { id: n.id, p, takeFocus: opts.takeFocus, disposed: false, later: opts.onLater, updates: 0, focused: 0, collapsed: !!opts.collapsed, attached: true };
     this.mounted.push(rec);
     return {
       update: () => { rec.updates++; }, focus: () => { rec.focused++; },
       dispose: (o) => { rec.disposed = true; rec.instant = !!o?.instant; },
       setCollapsed: (c) => { rec.collapsed = c; },
+      isAttached: () => rec.attached,
     };
   }
   setMarkers(v: ReadonlyMap<string, number>, w: ReadonlyMap<string, number>) { this.markers = { view: new Map(v), ws: new Map(w) }; }
@@ -410,4 +411,30 @@ test('activity-linked: badge counts per window / workspace; Later collapses (not
   assert.equal(h.mounted.filter((m) => m.id === 'b').every((m) => m.instant || !m.disposed || m.collapsed !== undefined), true);
   h.isLocked = false; c.onLock(false);
   assert.equal(h.live('b').length, 1);
+});
+
+test('controller: a slot re-created under the same viewId re-attaches its panels (docked bar and opened dialogue)', async () => {
+  const h = new FakeHost();
+  h.views.set(ACT.id, view('visible'));
+  const c = new DialogController(h);
+  const bar = ntf({ id: 'bar', context: ACT });
+  const pop = ntf({ id: 'pop', context: ACT, popup: true });
+  c.onStore(snap([bar, pop]), [added('bar'), added('pop')]);
+  assert.equal(h.live('bar')[0]!.collapsed, true);
+  assert.equal(h.live('pop').length, 1);
+  // Same view, still visible, but the old slot (and the panels in it) left the page.
+  for (const m of h.mounted) m.attached = false;
+  c.onViewsChanged();
+  const b = h.live('bar');
+  const p = h.live('pop');
+  assert.equal(b.length, 1, 'the docked bar is mounted again');
+  assert.equal(b[0]!.attached, true);
+  assert.equal(b[0]!.collapsed, true, 'still the bar');
+  assert.equal(p.length, 1, 'the opened dialogue is mounted again');
+  assert.equal(p[0]!.attached, true);
+  assert.ok(h.mounted.filter((m) => !m.attached).every((m) => m.disposed && m.instant), 'the detached copies are disposed instantly');
+  // Nothing changes while the panels stay in the page.
+  const count = h.mounted.length;
+  c.onViewsChanged();
+  assert.equal(h.mounted.length, count);
 });

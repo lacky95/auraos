@@ -277,6 +277,8 @@ export interface MountedDialog {
   dispose(opts?: { instant?: boolean }): void;
   /** Collapse to / expand from the compact bar (activity-linked panels). */
   setCollapsed?(c: boolean): void;
+  /** Still in the page? A window panel goes with its slot. Absent = assume yes. */
+  isAttached?(): boolean;
 }
 
 export interface DialogHost {
@@ -430,9 +432,10 @@ export class DialogController {
       const ctx = windowContext(o.n);
       const v = ctx ? this.host.viewDetail(ctx) : null;
       const viewId = o.placement.kind === 'window' ? o.placement.viewId : o.placement.blockViewId;
-      // Still on screen, and still the right shape (overlay on desktop, sheet on phone)?
+      // Still on screen, still the right shape (overlay on desktop, sheet on phone),
+      // and still in the page (a slot re-created under the same viewId takes it along)?
       const shapeOk = this.host.phone() ? o.placement.kind === 'floating' : o.placement.kind === 'window';
-      if (v && v.state === 'visible' && v.viewId === viewId && shapeOk) continue;
+      if (v && v.state === 'visible' && v.viewId === viewId && shapeOk && o.mounted.isAttached?.() !== false) continue;
       o.mounted.dispose({ instant: true });
       this.open.delete(id);
       // A docked bar comes back by itself (ensureDocked); an opened panel re-attaches.
