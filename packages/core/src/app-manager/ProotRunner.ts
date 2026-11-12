@@ -1,4 +1,5 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { promisify } from 'node:util';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
@@ -6,7 +7,7 @@ import { lifecyclePath } from '../types/manifest.js';
 import { toolsGrant } from './tool-allowlist.js';
 import { ALL_TOOLS_PATH, MY_TOOLS_PATH, SHARED_HOME_PATH, currentToolsMode, provisionAllowlist } from './tool-provision.js';
 import { userHomeDir } from '../scopes/home.js';
-import type { SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
+import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import type { SpawnContext } from '../scopes/types.js';
 import { ContextStore } from '../context/ContextStore.js';
 import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
@@ -49,7 +50,12 @@ interface SpawnedApp {
    * flag matters; treated read-only after spawn.
    */
   manifest: AppManifest;
+  /** How the instance was launched, so `exec` can join the same sandbox:
+   *  the proot args minus the entrypoint (empty when not prooted), env, cwd. */
+  launch: { prooted: boolean; sandboxArgs: string[]; env: Record<string, string>; appDir: string };
 }
+
+const execFileAsync = promisify(execFile);
 
 export class ProotRunner implements SandboxRunner {
   private processes = new Map<string, SpawnedApp>();
@@ -236,7 +242,11 @@ export class ProotRunner implements SandboxRunner {
     child.once('exit', (code, signal) => { exited = signal ? `signal ${signal}` : `code ${code}`; });
     child.once('error', (err) => { exited = `spawn error: ${err.message}`; });
 
-    this.processes.set(instanceId, { process: child, port, appId, manifest, provision });
+    const sandboxArgs = prooted ? args.slice(0, args.length - entrypointArgv.length) : [];
+    this.processes.set(instanceId, {
+      process: child, port, appId, manifest, provision,
+      launch: { prooted, sandboxArgs, env, appDir },
+    });
 
     try {
       await this.waitHealthy(instanceId, appId, port, manifest, () => exited);
@@ -522,6 +532,22 @@ export class ProotRunner implements SandboxRunner {
 
   getPort(instanceId: string): number | null {
     return this.processes.get(instanceId)?.port ?? null;
+  }
+
+  /**
+   * Run `argv` in the instance's sandbox: a sibling proot with the same binds,
+   * env and cwd it was launched with (so the same tools at /aura/my-tools and
+   * the same HOME), or — not prooted — a plain process with that env.
+   */
+  async exec(instanceId: string, argv: string[], opts: SandboxExecOpts = {}): Promise<{ stdout: string; stderr: string }> {
+    const p = this.processes.get(instanceId);
+    if (!p || !argv.length) throw new Error(`${instanceId} is not running in PRoot`);
+    const { prooted, sandboxArgs, env, appDir } = p.launch;
+    const [cmd, args] = prooted ? ['proot', [...sandboxArgs, ...argv]] : [argv[0]!, argv.slice(1)];
+    return execFileAsync(cmd, args, {
+      cwd: appDir, env: { ...env, ...opts.env },
+      timeout: opts.timeoutMs ?? 120_000, maxBuffer: 16 * 1024 * 1024,
+    });
   }
 
   isRunning(instanceId: string): boolean {

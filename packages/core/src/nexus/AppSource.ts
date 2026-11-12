@@ -177,6 +177,29 @@ export interface CheckoutOpts {
   ref?:        string;
   /** Branch to create locally (default: the declared branch, else the remote's default). */
   branch?:     string;
+  /**
+   * Where to run the fetch — the one git call that needs credentials — tried
+   * in order until one succeeds. Each runs `git <args>` with the app dir as
+   * its working directory (e.g. inside the app's own sandbox, whose git and
+   * logins are the app's). Default: git here, in the shell.
+   */
+  fetchVia?:   FetchPlace[];
+}
+
+/** A place to run the checkout's `git fetch`. */
+export interface FetchPlace {
+  /** Shown in results and errors, e.g. `app io.example.foo-2` or `shell`. */
+  label: string;
+  run:   (gitArgs: string[]) => Promise<unknown>;
+}
+
+/** The default fetch place: git in this process's environment. */
+export function shellFetchPlace(appDir: string): FetchPlace {
+  return {
+    label: 'shell',
+    run: (args) => execFileAsync('git', ['-C', appDir, ...args],
+      { timeout: 300_000, env: GIT_ENV, maxBuffer: 16 * 1024 * 1024 }),
+  };
 }
 
 export interface CheckoutResult extends CheckoutStatus {
@@ -186,6 +209,8 @@ export interface CheckoutResult extends CheckoutStatus {
   target?:  { ref: string; how: 'flag' | 'release-commit' | 'version-tag' | 'branch' };
   /** Where the repository came from. */
   repoFrom?: 'flag' | 'manifest' | 'release' | 'publish.repo';
+  /** Label of the FetchPlace whose fetch succeeded. */
+  fetchedIn?: string;
   warnings: string[];
 }
 
@@ -262,16 +287,27 @@ export async function checkoutApp(appDir: string, manifest: AppManifest, opts: C
   try {
     git(appDir, ['init', '-q']);
     git(appDir, ['remote', 'add', 'origin', repo.url]);
-    try {
-      // The one network call, and it can take minutes: async, so a slow fetch
-      // holds only this request, not the shell's event loop. Local git calls
-      // stay sync — they are milliseconds.
-      await execFileAsync('git', ['-C', appDir, 'fetch', '--tags', 'origin'],
-        { timeout: 300_000, env: GIT_ENV, maxBuffer: 16 * 1024 * 1024 });
-    } catch (err) {
-      const msg = ((err as { stderr?: string }).stderr || (err as Error).message).trim().split('\n').pop();
-      throw new Error(`could not fetch ${repo.url}: ${msg} (private repos need git credentials in the master container)`);
+    // The one network call, and it can take minutes: async, so a slow fetch
+    // holds only this request, not the shell's event loop. Local git calls
+    // stay sync — they are milliseconds. It is also the only call that needs
+    // credentials, so it runs where they are (opts.fetchVia), first success wins.
+    const places = opts.fetchVia?.length ? opts.fetchVia : [shellFetchPlace(appDir)];
+    const failures: string[] = [];
+    let fetchedIn: string | undefined;
+    for (const place of places) {
+      try {
+        await place.run(['fetch', '--tags', 'origin']);
+        fetchedIn = place.label;
+        break;
+      } catch (err) {
+        const msg = ((err as { stderr?: string }).stderr || (err as Error).message).trim().split('\n').pop();
+        failures.push(`${place.label}: ${msg}`);
+      }
     }
+    if (!fetchedIn) {
+      throw new Error(`could not fetch ${repo.url} — ${failures.join('; ')} (a private repo needs git credentials where the fetch runs)`);
+    }
+    if (failures.length) warnings.push(`fetched in ${fetchedIn} after: ${failures.join('; ')}`);
     // origin/HEAD tells us the remote's default branch.
     tryGit(appDir, ['remote', 'set-head', 'origin', '--auto']);
     const remoteDefault = tryGit(appDir, ['symbolic-ref', '--short', '-q', 'refs/remotes/origin/HEAD'])?.replace(/^origin\//, '') ?? null;
@@ -324,7 +360,7 @@ export async function checkoutApp(appDir: string, manifest: AppManifest, opts: C
     if (has(`origin/${branch}`)) tryGit(appDir, ['branch', '-q', `--set-upstream-to=origin/${branch}`, branch]);
     // The publish marker belongs to the release, not to the repo.
     try { appendFileSync(join(appDir, '.git', 'info', 'exclude'), `\n${PUBLISH_MARKER}\n`); } catch { /* cosmetic */ }
-    return { ...checkoutStatus(appDir), created: true, target, repoFrom: repo.from, warnings };
+    return { ...checkoutStatus(appDir), created: true, target, repoFrom: repo.from, fetchedIn, warnings };
   } catch (err) {
     // Leave the app as it was: no half-made checkout that blocks updates.
     rmSync(join(appDir, '.git'), { recursive: true, force: true });

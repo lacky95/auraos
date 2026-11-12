@@ -61,6 +61,14 @@ export interface SandboxRunner {
   onExit(instanceId: string, cb: (code: number | null) => void): void;
 
   /**
+   * Run a command inside a running instance's sandbox — its filesystem view,
+   * granted tools, HOME and env — with the app dir as working directory.
+   * Rejects (with `stderr` on the error) on a non-zero exit, a timeout, or an
+   * instance this runner is not running. No shell: `argv` is exec'd as given.
+   */
+  exec?(instanceId: string, argv: string[], opts?: SandboxExecOpts): Promise<{ stdout: string; stderr: string }>;
+
+  /**
    * Optional — runners whose sandboxes outlive the shell process (currently
    * just ContainerRunner) implement these so AppManager.init() can pick up
    * survivors from the last shell lifetime. PRoot intentionally doesn't:
@@ -116,6 +124,13 @@ export interface SandboxRunner {
    * from under a live bind would leave the bind pinned and unreachable.
    */
   clearMountRoot?(instanceId: string): void;
+}
+
+export interface SandboxExecOpts {
+  /** Extra environment for the command. */
+  env?:       Record<string, string>;
+  /** Default 120 s. */
+  timeoutMs?: number;
 }
 
 /** What every concrete runner needs to construct. */

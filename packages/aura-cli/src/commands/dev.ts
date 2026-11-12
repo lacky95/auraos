@@ -960,7 +960,7 @@ interface CheckoutResponse {
   ok?: boolean; error?: string; message?: string;
   appId: string; scope: ScopeId; appDir: string; created: boolean;
   repository: string | null; branch: string | null; head: string | null; changes: string[];
-  target?: { ref: string; how: string }; repoFrom?: string; warnings: string[];
+  target?: { ref: string; how: string }; repoFrom?: string; fetchedIn?: string; warnings: string[];
 }
 
 /**
@@ -1009,7 +1009,7 @@ function registerDevCheckout(dev: Command): void {
       if (!res.created) info(`${appId} already is a git checkout — nothing changed`);
       else ok(`${appId} is now a git checkout${res.target ? ` at ${res.target.ref} ${color.dim(`(${res.target.how})`)}` : ''}`);
       console.log(`  dir:    ${res.appDir}`);
-      console.log(`  origin: ${res.repository ?? color.dim('(none)')}`);
+      console.log(`  origin: ${res.repository ?? color.dim('(none)')}${res.fetchedIn ? color.dim(`  (fetched in ${res.fetchedIn})`) : ''}`);
       console.log(`  branch: ${res.branch ?? color.dim('(detached)')}  ${res.head ?? ''}`);
       if (res.changes.length) {
         warn(`${res.changes.length}${res.changes.length >= 50 ? '+' : ''} file(s) differ from that commit — check with git status before committing`);

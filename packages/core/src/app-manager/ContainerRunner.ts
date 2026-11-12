@@ -11,7 +11,7 @@ import { userHomeSubpath } from '../scopes/home.js';
 // Value import, but MountManager imports ContainerRunner type-only, so there
 // is no runtime cycle.
 import { MOUNT_ROOT_PATH } from './MountManager.js';
-import type { SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
+import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
 import { SIDECAR_PS_FORMAT, USAGE_STATS_FORMAT, parseSidecarPs, parseUsageStats } from './sidecars.js';
 import type { SpawnContext } from '../scopes/types.js';
@@ -1207,6 +1207,16 @@ export class ContainerRunner implements SandboxRunner {
       }, timeoutMs);
       child.on('error', (err) => { clearTimeout(timer); untrack(); resolve({ ok: false, output: `${output}\n${err.message}` }); });
       child.on('close', (code) => { clearTimeout(timer); untrack(); resolve({ ok: code === 0, output }); });
+    });
+  }
+
+  /** Run `argv` in the instance's container (`docker exec`), in its app dir. */
+  async exec(instanceId: string, argv: string[], opts: SandboxExecOpts = {}): Promise<{ stdout: string; stderr: string }> {
+    const c = this.containers.get(instanceId);
+    if (!c || !argv.length) throw new Error(`${instanceId} is not running in a container`);
+    const envFlags = Object.entries(opts.env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
+    return execFileAsync('docker', ['exec', '-w', `/workspace/apps/${c.appId}`, ...envFlags, this.containerName(instanceId), ...argv], {
+      timeout: opts.timeoutMs ?? 120_000, maxBuffer: 16 * 1024 * 1024,
     });
   }
 

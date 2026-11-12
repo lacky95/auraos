@@ -22,7 +22,7 @@ import { PortManager, type ExposeSpec } from './PortManager.js';
 import { InstanceTokens } from './InstanceTokens.js';
 import { SidecarManager } from './SidecarManager.js';
 import { parentOfConsumer } from './MountManager.js';
-import type { SandboxRunner } from './SandboxRunner.js';
+import type { SandboxExecOpts, SandboxRunner } from './SandboxRunner.js';
 import { selectOrphanSidecars } from './sidecars.js';
 import {
   INTENT_FLAGS, IntentError, IntentResolver, intentPayload, parseIntentRejection,
@@ -1635,6 +1635,20 @@ export class AppManager {
 
   getAllInstances(): AppInstance[] {
     return Array.from(this.instances.values());
+  }
+
+  /**
+   * Run `argv` inside the sandbox of one of the app's running instances
+   * (SandboxRunner.exec) — the app's own tools, HOME and logins. Pool warmers
+   * are skipped: they belong to no user yet. Rejects when no instance is
+   * running or its runner cannot exec.
+   */
+  async execInApp(appId: string, argv: string[], opts?: SandboxExecOpts): Promise<{ instanceId: string; stdout: string; stderr: string }> {
+    const inst = this.getInstancesByApp(appId).find((i) => !i.inPool && this.runnerOf(i.instanceId).isRunning(i.instanceId));
+    if (!inst) throw new Error(`${appId} has no running instance`);
+    const runner = this.runnerOf(inst.instanceId);
+    if (!runner.exec) throw new Error(`${inst.instanceId}: its sandbox cannot run commands`);
+    return { instanceId: inst.instanceId, ...await runner.exec(inst.instanceId, argv, opts) };
   }
 
   // ----- Activity API -----

@@ -15,9 +15,9 @@ export type { InstallState } from './NexusManager.js';
 export { compareVersions } from './version.js';
 export { publishGit, publishOci } from './Publisher.js';
 export {
-  checkoutApp, cloneUrl, isDevCheckout, readAppSource, readPublishMarker, resolveAppRepository, stampManifest, PUBLISH_MARKER,
+  checkoutApp, cloneUrl, isDevCheckout, readAppSource, readPublishMarker, resolveAppRepository, shellFetchPlace, stampManifest, PUBLISH_MARKER,
 } from './AppSource.js';
-export type { AppSourceInfo, CheckoutOpts, CheckoutResult, CheckoutStatus, PublishMarker } from './AppSource.js';
+export type { AppSourceInfo, CheckoutOpts, CheckoutResult, CheckoutStatus, FetchPlace, PublishMarker } from './AppSource.js';
 export { isOrasAvailable } from './Fetchers/OciFetcher.js';
 export { getNexusManager, initNexusManager, refreshNexusSources } from './singleton.js';
 export {

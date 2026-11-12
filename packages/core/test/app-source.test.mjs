@@ -16,7 +16,7 @@ import { join } from 'node:path';
 
 import {
   buildPublishMarker, checkoutApp, cloneUrl, isDevCheckout, readAppSource, readPublishMarker,
-  resolveAppRepository, stampManifest, PUBLISH_MARKER,
+  resolveAppRepository, shellFetchPlace, stampManifest, PUBLISH_MARKER,
 } from '../dist/nexus/AppSource.js';
 import { AppManifestSchema } from '../dist/types/manifest.js';
 import { buildStoreAnnotations, parseStoreAnnotations } from '../dist/nexus/ociMetadata.js';
@@ -202,6 +202,26 @@ test('checkout undoes the publish stamp in the manifest, and only that', async (
   const r2 = await checkoutApp(b, m);
   assert.deepEqual(r2.changes, [' M app.manifest.json']);
   assert.equal(readFileSync(join(b, 'app.manifest.json'), 'utf-8'), edited);
+});
+
+test('the fetch runs in the first place that works, and says which', async () => {
+  const f = fixture();
+  const m = manifestOf({ repository: { url: f.url } });
+  const calls = [];
+  const sandbox = { label: 'app io.test.app', run: async (args) => { calls.push(args); throw Object.assign(new Error('x'), { stderr: 'git: not found' }); } };
+
+  const dir = install(f.author, join(f.root, 'a'));
+  const r = await checkoutApp(dir, m, { fetchVia: [sandbox, shellFetchPlace(dir)] });
+  assert.deepEqual(calls, [['fetch', '--tags', 'origin']], 'git args only — the place runs them in the app dir');
+  assert.equal(r.fetchedIn, 'shell');
+  assert.ok(r.warnings.some((w) => w.includes('app io.test.app: git: not found')));
+
+  // Every place fails: one error naming each, and no .git left.
+  const b = install(f.author, join(f.root, 'b'));
+  await assert.rejects(() => checkoutApp(b, m, { fetchVia: [sandbox, { label: 'shell', run: async () => { throw new Error('denied'); } }] }),
+    /app io\.test\.app: git: not found; shell: denied/);
+  assert.equal(existsSync(join(b, '.git')), false);
+  assert.equal((await checkoutApp(install(f.author, join(f.root, 'c')), m)).fetchedIn, 'shell', 'default: the shell');
 });
 
 test('a failed checkout leaves no .git behind', async () => {
