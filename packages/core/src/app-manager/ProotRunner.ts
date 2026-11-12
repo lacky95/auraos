@@ -186,7 +186,26 @@ export class ProotRunner implements SandboxRunner {
       ...(ctx.instanceToken ? { AURA_INSTANCE_TOKEN: ctx.instanceToken.token } : {}),
     };
 
-    console.log(`[ProotRunner] Spawning ${instanceId} (app=${appId}) on port ${port}`);
+    try {
+      return await this.startProcess(instanceId, appId, port, manifest, args, appDir, env, prooted, entrypointArgv);
+    } catch (err) {
+      // A production build that won't boot (it exits, or never answers) must
+      // not leave the app dead: the sources are right there, so `astro dev`
+      // is a working fallback. Store-installed apps hit this first — their
+      // build was made on this machine and nobody watched it boot.
+      if (env['AURA_SERVE'] !== 'prod' || !(err instanceof StartupFailure)) throw err;
+      console.warn(`[ProotRunner] ${instanceId}: production build failed to start — retrying with astro dev`);
+      return await this.startProcess(instanceId, appId, port, manifest, args, appDir, { ...env, AURA_SERVE: 'dev' }, prooted, entrypointArgv);
+    }
+  }
+
+  /** Spawn the sandbox once and wait until it is healthy, or fail loud. */
+  private async startProcess(
+    instanceId: string, appId: string, port: number, manifest: AppManifest,
+    args: string[], appDir: string, env: Record<string, string>,
+    prooted: boolean, entrypointArgv: string[],
+  ): Promise<number> {
+    console.log(`[ProotRunner] Spawning ${instanceId} (app=${appId}) on port ${port} (serve=${env['AURA_SERVE']})`);
 
     // detached: true makes proot a process-group leader so we can SIGKILL the
     // entire group on cleanup (including any detached astro children). Without
@@ -199,24 +218,37 @@ export class ProotRunner implements SandboxRunner {
     );
 
     const provision = new ProvisionWatch();
+    const tail = new OutputTail();
     child.stdout?.on('data', (d) => {
       provision.observe(d.toString());
+      tail.push(d.toString());
       process.stdout.write(`[${instanceId}] ${d}`);
     });
     child.stderr?.on('data', (d) => {
       provision.observe(d.toString());
+      tail.push(d.toString());
       process.stderr.write(`[${instanceId}] ${d}`);
     });
+    // An app that dies while booting used to surface only as "did not become
+    // healthy within 30000ms" — no exit code, no reason. Record the exit so
+    // waitHealthy can fail at once and say why.
+    let exited: string | null = null;
+    child.once('exit', (code, signal) => { exited = signal ? `signal ${signal}` : `code ${code}`; });
+    child.once('error', (err) => { exited = `spawn error: ${err.message}`; });
 
     this.processes.set(instanceId, { process: child, port, appId, manifest, provision });
 
     try {
-      await this.waitHealthy(instanceId, appId, port, manifest);
+      await this.waitHealthy(instanceId, appId, port, manifest, () => exited);
     } catch (err) {
-      // Either timeout or identity mismatch — clean up the partial spawn so we
-      // don't leak an orphan process or a stale instance entry. Caller is
-      // responsible for releasing the port.
-      console.error(`[ProotRunner] ${instanceId} health-check failed: ${(err as Error).message}`);
+      // Either timeout, early exit or identity mismatch — clean up the partial
+      // spawn so we don't leak an orphan process or a stale instance entry.
+      // Caller is responsible for releasing the port.
+      const out = tail.text();
+      console.error(
+        `[ProotRunner] ${instanceId} health-check failed: ${(err as Error).message}` +
+        (out ? `\n[ProotRunner] ${instanceId} last output:\n${out}` : ` (no output)`),
+      );
       this.forceKill(instanceId);
       throw err;
     }
@@ -360,7 +392,10 @@ export class ProotRunner implements SandboxRunner {
    * "another app squatting our port" failure mode that caused the wrong-
    * content bug — a bare 200 is no longer enough.
    */
-  private async waitHealthy(instanceId: string, appId: string, port: number, manifest: AppManifest): Promise<void> {
+  private async waitHealthy(
+    instanceId: string, appId: string, port: number, manifest: AppManifest,
+    exited: () => string | null = () => null,
+  ): Promise<void> {
     // See ContainerRunner.waitHealthy — a cold app installs its dependency
     // tree in the entrypoint, which must not be timed with the boot budget.
     const startedAt    = Date.now();
@@ -370,6 +405,10 @@ export class ProotRunner implements SandboxRunner {
     const healthUrl = `http://localhost:${port}${lifecyclePath(manifest, instanceId, 'health')}`;
     let lastBody: string | null = null;
     while (Date.now() < deadline) {
+      const exit = exited();
+      if (exit) {
+        throw new StartupFailure(`[ProotRunner] ${instanceId} exited during startup (${exit}) before answering on port ${port}`);
+      }
       try {
         const res = await fetch(healthUrl, { signal: AbortSignal.timeout(1000) });
         if (res.ok) {
@@ -401,7 +440,7 @@ export class ProotRunner implements SandboxRunner {
       await sleep(HEALTH_CHECK_INTERVAL_MS);
     }
     const waited = Math.round((Date.now() - startedAt) / 1000);
-    throw new Error(
+    throw new StartupFailure(
       provision?.everProvisioned
         ? `[ProotRunner] ${instanceId} did not become healthy ${waited}s after starting to install its dependencies (last body: ${lastBody ?? 'none'})`
         : `[ProotRunner] ${instanceId} did not become healthy within ${HEALTH_CHECK_TIMEOUT_MS}ms (last body: ${lastBody ?? 'none'})`,
@@ -506,6 +545,28 @@ export class ProotRunner implements SandboxRunner {
 
   onExit(instanceId: string, cb: (code: number | null) => void): void {
     this.processes.get(instanceId)?.process.on('exit', cb);
+  }
+}
+
+/**
+ * The app did not come up: it exited while booting or never answered its
+ * health check. Distinct from an identity mismatch (someone else owns the
+ * port), which a retry in another serve mode can't fix.
+ */
+export class StartupFailure extends Error {}
+
+/** The last few KB of an app's output, for the startup-failure log. */
+export class OutputTail {
+  private chunks: string[] = [];
+  private size = 0;
+  constructor(private readonly max = 4096) {}
+  push(text: string): void {
+    this.chunks.push(text);
+    this.size += text.length;
+    while (this.size > this.max && this.chunks.length > 1) this.size -= this.chunks.shift()!.length;
+  }
+  text(): string {
+    return this.chunks.join('').slice(-this.max).trimEnd();
   }
 }
 

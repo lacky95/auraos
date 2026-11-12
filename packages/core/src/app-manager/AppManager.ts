@@ -1321,8 +1321,9 @@ export class AppManager {
         // npm dep pulled in via the page's <script> rather than a static vendor
         // file). Fire-and-forget; never blocks the spawn.
         const warmups = ['/'];
+        const host = this.runnerOf(instanceId).getHost(instanceId) ?? '127.0.0.1';
         for (const path of warmups) {
-          fetch(`http://localhost:${port}${path}`, { signal: AbortSignal.timeout(5000) })
+          fetch(`http://${host}:${port}${path}`, { signal: AbortSignal.timeout(5000) })
             .then((r) => r.body?.cancel()).catch(() => undefined);
         }
       }
@@ -2390,7 +2391,14 @@ export class AppManager {
       try {
         const manifest = this.registry.getById(inst.appId);
         if (!manifest) continue; // app uninstalled mid-run; skip
-        const res = await fetch(`http://localhost:${inst.port}${lifecyclePath(manifest, inst.instanceId, 'health')}`, {
+        // Probe where the instance actually lives. Container apps each have
+        // their own network namespace, so their port numbers overlap freely
+        // with PRoot apps (which share the shell's): `localhost:<port>` of a
+        // container instance can be a PRoot app, and this check used to
+        // force-kill the healthy container for it.
+        const host = this.runnerOf(inst.instanceId).getHost(inst.instanceId);
+        if (!host) continue; // runner doesn't track it (yet); step 1 handles dead ones
+        const res = await fetch(`http://${host}:${inst.port}${lifecyclePath(manifest, inst.instanceId, 'health')}`, {
           signal: AbortSignal.timeout(1000),
         });
         if (!res.ok) continue; // transient — don't punish on a single bad response

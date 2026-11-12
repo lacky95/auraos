@@ -19,7 +19,7 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 
 import { PortAllocator } from '../dist/app-manager/PortAllocator.js';
-import { verifyHealthIdentity, killProcessGroup } from '../dist/app-manager/ProotRunner.js';
+import { verifyHealthIdentity, killProcessGroup, OutputTail } from '../dist/app-manager/ProotRunner.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -132,4 +132,18 @@ test('killProcessGroup terminates detached descendants, not just the root', asyn
   }
   assert.equal(isDead(child.pid),  true, `bash pid ${child.pid} should be gone after group kill`);
   assert.equal(isDead(innerPid),   true, `inner pid ${innerPid} should be gone after group kill`);
+});
+
+test('OutputTail keeps only the last output for the startup-failure log', () => {
+  // A PRoot app that dies while booting is reported with its last output —
+  // bounded, so a chatty install can't flood the shell log.
+  const tail = new OutputTail(16);
+  assert.equal(tail.text(), '');
+  tail.push('first line\n');
+  tail.push('second line\n');
+  tail.push('Error: boom\n');
+  assert.equal(tail.text(), 'Error: boom');
+  // A single chunk longer than the budget is cut to its end.
+  tail.push('x'.repeat(40) + 'fatal\n');
+  assert.equal(tail.text(), 'x'.repeat(10) + 'fatal');
 });
