@@ -28,6 +28,20 @@
       "address": "/mcp/terminal",
       "version": "1",
       "description": "MCP over terminal sessions on every terminal instance: list/open/kill sessions, read the screen as a text grid (cursor, alternate-screen mode, scrollback), type text and send keys. Any instance reaches ALL sessions; the stable app-level endpoint /api/proxy/com.aura.terminal/mcp/terminal cold-starts an instance when none is running."
+    },
+    {
+      "name": "sessions",
+      "kind": "http/rest",
+      "address": "/api/sessions",
+      "version": "1",
+      "description": "Terminal sessions of this instance as REST: GET list (each row has `agent`: what a Claude Code / Codex session reports \u2014 running, needs_approval, waiting_input, idle, exited), POST mint an id, DELETE ?id= kill; /screen?id=, /input?id=. Agent events: GET /api/sessions/events (snapshot) or ?stream=1 (SSE `agent` events); hooks POST there. Hook installer: GET/POST/DELETE /api/agent-hooks."
+    },
+    {
+      "name": "embed",
+      "kind": "http/raw",
+      "address": "/?embed=1",
+      "version": "1",
+      "description": "Embed a live terminal session in your app's iframe: /api/proxy/<instanceId>/?embed=1&session=<id> (no chrome, claims the session). Host posts aura.viewport.changed {contentW, contentH} and forwards theme/keymap/focus; page posts aura.terminal.ready / .locked / .session-ended. Get a session via OPEN_TERMINAL intent with extras.background. Contract: src/embed.ts."
     }
   ],
   "instanceMode": "multi",
@@ -37,7 +51,9 @@
   "intentFilters": [
     {
       "action": "aura.intent.action.OPEN_TERMINAL",
-      "category": ["aura.intent.category.DEFAULT"]
+      "category": [
+        "aura.intent.category.DEFAULT"
+      ]
     }
   ],
   "warmPool": 1,

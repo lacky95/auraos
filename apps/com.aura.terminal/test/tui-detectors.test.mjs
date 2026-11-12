@@ -139,3 +139,9 @@ test('program profiles are data: label + role only; unknown programs keep their 
   // A node-hosted CLI needs a screen signature too; plain node stays "node".
   assert.equal(summarizeScreen({ command: 'node', title: '', mode: 'normal', screen: ['> '], cursor: { x: 2, y: 0 } }).program, 'node');
 });
+
+test('codex profile: by command, and under node by its header', () => {
+  assert.equal(profileFor('codex', '', []).program, 'codex');
+  assert.equal(profileFor('node', '', ['╭───╮', '│ >_ OpenAI Codex (v0.1) │']).program, 'codex');
+  assert.equal(profileFor('node', '', ['plain node output']), null);
+});

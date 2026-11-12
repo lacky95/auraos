@@ -48,6 +48,10 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       display: flex;
       flex-direction: column;
     }
+    /* Embed mode (embed.ts): the host app draws the chrome. */
+    body.embed #terminal-bar,
+    body.embed #inst-menu,
+    body.embed #qc-panel { display: none !important; }
     #terminal-bar {
       display: flex;
       align-items: center;
@@ -334,6 +338,17 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     import { proposeGrid, settleBoxes } from '../fit-model';
     import { createConnection } from '../connection';
     import { pickNextSession } from '../next-session';
+    import { parseEmbed } from '../embed';
+
+    // Embed mode (embed.ts): hosted inside another app's iframe. No chrome of
+    // our own, the session we were given, and `aura.terminal.*` messages to the
+    // host instead of the OS window messages.
+    const EMBED = parseEmbed(location.search);
+    if (EMBED.embed) document.body.classList.add('embed');
+    function postToHost(msg) {
+      if (!EMBED.embed || !window.parent || window.parent === window) return;
+      try { window.parent.postMessage(msg, '*'); } catch { /* host gone */ }
+    }
 
     // Startup timeline for the desktop's boot report (shell lib/bootTimeline:
     // `app:<window>:<stage>`, with `shell:boot` logging on). `t` is ms since
@@ -811,7 +826,9 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         localStorage.setItem(PENDING_SESSION_KEY, JSON.stringify(map));
       } catch { /* private mode — the move still happens, on the default session */ }
     }
-    const pendingSession = takePendingSession();
+    // An embedded page shows exactly the session its host asked for, and
+    // claims it: the host's choice is explicit, like a picker switch.
+    const pendingSession = EMBED.embed ? EMBED.session : takePendingSession();
 
     // The pick survives a reload through this container, not the browser: the
     // page is server-rendered with the session this window last chose (see
@@ -819,6 +836,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // is gone. Tell the container on every switch; a failure only costs the
     // restore, so it is logged, not surfaced.
     function recordWindowSession(sessionId) {
+      if (EMBED.embed) return;   // not an OS window of ours — the host keeps its own picks
       const q = `window=${encodeURIComponent(activityId)}` + (sessionId ? `&session=${encodeURIComponent(sessionId)}` : '');
       fetch(`/api/proxy/${encodeURIComponent(instanceId)}/api/sessions?${q}`, { method: 'PUT' })
         .then((r) => { if (!r.ok) console.warn('[terminal] could not record the session pick →', r.status); })
@@ -858,6 +876,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // window must never steal the terminal back from wherever the user moved it.
     const LAUNCHED_HERE_KEY = 'aura.launchedHere';
     const launchedHere = (() => {
+      if (EMBED.embed) return false;   // the host's session already claims
       try {
         const raw = sessionStorage.getItem(LAUNCHED_HERE_KEY);
         if (!raw) return false;
@@ -1290,7 +1309,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         if (typeof e.data === 'string') { noteOutput(e.data.length); term.write(e.data); return; }
         let msg;
         try { msg = JSON.parse(ctlDecoder.decode(e.data)); } catch { return; }
-        if (msg?.type === 'granted')   { perfMark('granted'); onGranted(); launchGate?.live(); }
+        if (msg?.type === 'granted')   { perfMark('granted'); onGranted(); launchGate?.live(); postToHost({ type: 'aura.terminal.ready', session: currentSessionId }); }
         else if (msg?.type === 'busy') { perfMark('busy'); setLocked(true); hideInputDialog(); }
         else if (msg?.type === 'dialog') showInputDialog(msg.dialog);
         else if (msg?.type === 'dialog-copy') agentCopyInputDialog(msg.id);
@@ -1469,6 +1488,13 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       if (d.contentW === 0) return;
       boxes.push(d.contentW, d.contentH);
     });
+    // Embedded, the host is the driver above (it forwards `aura.viewport.changed`
+    // with our iframe's box). A host that doesn't still gets a fit on resize.
+    if (EMBED.embed) {
+      window.addEventListener('resize', () => {
+        if (window.innerWidth > 0) boxes.push(window.innerWidth, window.innerHeight);
+      });
+    }
 
     // ─── Take-over panel ("in use somewhere else") ───────────────────────
     // Driven entirely by the server's control frames: `busy` ⇒ another view has
@@ -1483,6 +1509,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       if (next) launchGate?.lost();     // another browser has it: not live here
       const changed = next !== locked;
       locked = next;
+      if (changed) postToHost({ type: 'aura.terminal.locked', session: currentSessionId, locked: next });
       // Swap terminal ↔ panel. `display:none` (not visibility) so the hidden
       // one takes no space and applyFit's box arithmetic is never fed a
       // collapsed terminal.
@@ -1772,7 +1799,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       // Keep the OS window chrome honest. Its id label is the window's ACTIVITY
       // by default, which stops being the truth the moment a session switch
       // happens without the shell — same instance, new socket, no rebind.
-      if (window.parent && window.parent !== window) {
+      if (window.parent && window.parent !== window && !EMBED.embed) {
         try {
           window.parent.postMessage({
             type: 'aura.window.label',
@@ -1849,6 +1876,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     function requestRebind(targetInstanceId) {
       if (targetInstanceId === instanceId) return;
       const selfNavigate = () => location.assign(`/api/proxy/${encodeURIComponent(targetInstanceId)}/`);
+      if (EMBED.embed) return;   // the host owns which instance it embeds
       if (!window.parent || window.parent === window) { selfNavigate(); return; }
       window.parent.postMessage({ type: 'aura.window.rebind', instanceId: targetInstanceId }, '*');
       statusEl.textContent = 'MOVING...';
@@ -2280,6 +2308,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     async function onSessionEnded(sessionId) {
       if (!sessionId || sessionId !== currentSessionId) return;
       console.debug('[terminal] session ended', sessionId);
+      postToHost({ type: 'aura.terminal.session-ended', session: sessionId });
       currentSessionId = null;
       conn.stop();
       hideInputDialog();

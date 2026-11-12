@@ -497,6 +497,8 @@ function compactRow(s: SessionView): Record<string, unknown> {
     id: s.id, alias: aliasOf(s.id), live: s.live, inUse: s.inUse,
     program: cmd === null ? null : isShellCommand(cmd) ? 'shell' : cmd,
     state: cmd === null ? 'unknown' : s.alternate ? 'fullscreen' : isShellCommand(cmd) ? 'shell_prompt' : 'busy',
+    // What a coding agent reports through its hooks (agent-state.ts) — exact, unlike the screen guess above.
+    ...(s.agent ? { agent: { source: s.agent.source, status: s.agent.status, tool: s.agent.tool, message: s.agent.message } } : {}),
   };
 }
 
@@ -567,7 +569,8 @@ const TOOLS: OwnTool[] = [
     description:
       'Every terminal session on every terminal instance, grouped by instance — call it to find a `target` when the '
       + 'user names a session you do not know, or to see what runs where. Returns per session `id`, short `alias` ("16a1"), `inUse` '
-      + '(a human window renders it), `program` and `state`. `default_target` is the session used when you omit target. '
+      + '(a human window renders it), `program` and `state`, and `agent` ({source, status: running|needs_approval|waiting_input|idle|exited}) '
+      + 'when a Claude Code / Codex session reports through its hooks. `default_target` is the session used when you omit target. '
       + 'An instance that is not serving or did not answer is listed with `reachable: false` and why (`stale: true`: '
       + 'its last known sessions). Paused instances are not queried unless `include_paused: true` (that wakes them). '
       + '`verbose: true` adds pane size, title and the raw foreground command. Example: {} → then get_status {target: "16a1"}.',

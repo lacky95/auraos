@@ -347,6 +347,7 @@ export async function newSession(sessionId: string, cols: number, rows: number):
     '-x', String(cols), '-y', String(rows),
     '-c', shellCwd(),
     '-e', `AURA_TERM_LABEL=${HOST_LABEL}`,
+    '-e', `AURA_TERM_SESSION=${sessionId}`,   // lets programs in the shell (agent hooks) name their session
     ...shellArgv(shell),
   ], { env: { ...process.env, AURA_TERM_LABEL: HOST_LABEL } });
 }

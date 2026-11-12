@@ -82,6 +82,7 @@ export function openPaneTap(
     ? ['new-session', '-d', '-s', name,
        '-x', String(create.cols), '-y', String(create.rows),
        '-c', create.cwd, '-e', `AURA_TERM_LABEL=${create.env['AURA_TERM_LABEL'] ?? ''}`,
+       '-e', `AURA_TERM_SESSION=${sessionId}`,   // lets programs in the shell (agent hooks) name their session
        ...shellArgv(create.shell), ';', ...pipe]
     : pipe;
   const r = spawnSync(tmuxBin, ['-L', TMUX_SOCKET, '-f', TMUX_CONF, '-u', ...args],

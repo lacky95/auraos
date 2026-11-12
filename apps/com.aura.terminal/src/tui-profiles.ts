@@ -45,6 +45,12 @@ export const PROGRAM_PROFILES: readonly ProgramProfile[] = [
     screen: [/Claude Code|claude\.ai|\? for shortcuts|esc to interrupt|bypass permissions|⏵⏵/],
     screenPairs: [{ above: /^\s*─{10,}/, row: /^\s*❯\s/ }],
   },
+  {
+    // Codex CLI: a native `codex` binary, or the npm launcher under `node`,
+    // which is recognised by the header box its TUI draws.
+    program: 'codex', role: 'prompt-tui', commands: /^codex$/, title: /codex/i, hosts: /^node$/,
+    screen: [/OpenAI Codex/],
+  },
   { role: 'editor', commands: /^(n?vim?|vi|nano|emacs|micro|hx)$/ },
   { role: 'pager', commands: /^(less|more|man|most)$/ },
   { program: 'python', role: 'repl', commands: /^python\d*(\.\d+)?$/ },

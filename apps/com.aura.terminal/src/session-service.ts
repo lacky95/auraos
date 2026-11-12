@@ -20,6 +20,8 @@ import { isReadyState, settleKey, summarizeScreen } from './screen-summary.ts';
 import type { PaneState } from './tmux-control.ts';
 import { dialogAction, getDialog, openDialog, setDialogText } from './input-dialog.ts';
 import type { InputDialog } from './input-dialog.ts';
+import { agentFor } from './agent-state.ts';
+import type { AgentState } from './agent-state.ts';
 
 export interface SessionView {
   /** Full id, `<instanceId>#a<n>`. */
@@ -39,6 +41,8 @@ export interface SessionView {
   command: string | null;
   title: string | null;
   attached: number | null;
+  /** What a coding agent in this session reports through its hooks (agent-state.ts); null ⇒ none reported. */
+  agent: AgentState | null;
 }
 
 export interface ScreenView {
@@ -140,6 +144,7 @@ function view(info: SessionInfo, pane: PaneState | undefined): SessionView {
     command:   pane?.command ?? null,
     title:     pane?.title ?? null,
     attached:  pane?.attachedClients ?? null,
+    agent:     agentFor(info.id),
   };
 }
 

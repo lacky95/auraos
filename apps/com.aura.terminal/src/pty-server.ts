@@ -10,6 +10,7 @@ import { openPaneTap, paneRepaint, tmuxHasSession, type PaneTap } from './pane-t
 import { forgetSessionPicks } from './window-session.ts';
 import { forgetCwd, hasSavedCwd, savedCwd, startCwdRecorder } from './session-cwd.ts';
 import { replayBudget, replayTail } from './replay-tail.ts';
+import { forgetAgent } from './agent-state.ts';
 
 /**
  * PTY session registry — one live VIEW at a time, survives browser reload.
@@ -304,6 +305,7 @@ function spawnPty(sessionId: string | null, cols: number, rows: number): IPty {
     '-u',
     'new-session', '-A', '-s', tmuxName(sessionId),
     ...(dir ? ['-c', dir] : []),
+    '-e', `AURA_TERM_SESSION=${sessionId}`,   // lets programs in the shell (agent hooks) name their session; ignored on attach
     ...shellArgv(shell),   // root `exit` ends the session, a crash restarts the shell
   ], opts);
 }
@@ -525,6 +527,7 @@ function attachPtyOutput(sess: Session): void {
       for (const ws of sess.clients.keys()) sendCtl(ws, { type: 'session-ended', id: sess.id });
       deleteScrollback(sess.id);
       forgetSessionPicks(sess.id);
+      forgetAgent(sess.id);
     }
     for (const ws of sess.clients.keys()) { try { ws.close(); } catch { /* ignore */ } }
     sess.clients.clear();
@@ -885,6 +888,7 @@ export function killSession(sessionId: string): boolean {
   const killedTmux = tmuxKill(sessionId);
   deleteScrollback(sessionId);
   forgetCwd(sessionId);
+  forgetAgent(sessionId);
 
   if (!sess) {
     if (killedTmux) log('killSession', sessionId, 'detached tmux session reaped (no in-memory session)');
