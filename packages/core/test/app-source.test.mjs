@@ -179,6 +179,30 @@ test('checkoutApp uses the commit stamped into the manifest', () => {
   assert.deepEqual(r.changes, []);
 });
 
+test('checkout undoes the publish stamp in the manifest, and only that', () => {
+  const f = fixture();
+  const raw = readFileSync(join(f.author, 'app.manifest.json'), 'utf-8');
+  const withRepo = JSON.stringify({ ...JSON.parse(raw), repository: { url: f.url, commit: '' } }, null, 2) + '\n';
+  writeFileSync(join(f.author, 'app.manifest.json'), withRepo);
+  git(f.author, 'commit', '-qam', 'repo'); git(f.author, 'push', '-q', 'origin', 'HEAD:main');
+  const released = stampManifest(withRepo, { branch: 'main', commit: git(f.author, 'rev-parse', 'HEAD') });
+  const m = manifestOf({ repository: { url: f.url, branch: 'main', commit: git(f.author, 'rev-parse', 'HEAD') } });
+
+  const a = install(f.author, join(f.root, 'a'));
+  writeFileSync(join(a, 'app.manifest.json'), released);
+  const r = checkoutApp(a, m);
+  assert.deepEqual(r.changes, []);
+  assert.equal(readFileSync(join(a, 'app.manifest.json'), 'utf-8'), withRepo);
+
+  // A real edit next to the stamp: the file is left exactly as it was.
+  const b = install(f.author, join(f.root, 'b'));
+  const edited = released.replace('"App"', '"App 2"');
+  writeFileSync(join(b, 'app.manifest.json'), edited);
+  const r2 = checkoutApp(b, m);
+  assert.deepEqual(r2.changes, [' M app.manifest.json']);
+  assert.equal(readFileSync(join(b, 'app.manifest.json'), 'utf-8'), edited);
+});
+
 test('a failed checkout leaves no .git behind', () => {
   const f = fixture();
   const dir = install(f.author, f.root);

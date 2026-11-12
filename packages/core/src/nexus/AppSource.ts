@@ -18,11 +18,12 @@
  *
  * `checkoutApp` uses that to make an installed app ready for development:
  * init `.git` in place, fetch the repo, and point HEAD at the release commit
- * WITHOUT touching the files on disk. An app with a `.git` is a dev checkout;
+ * without touching the app's files (only publish's stamp in app.manifest.json
+ * is undone). An app with a `.git` is a dev checkout;
  * Nexus refuses to update or replace it unless forced (NexusManager).
  */
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 
@@ -48,9 +49,13 @@ export interface PublishMarker {
   source?:          AppSourceInfo;
 }
 
+// Runs inside the shell, where nobody can answer a prompt: a repo that needs
+// credentials must fail at once instead of hanging until the timeout.
+const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+
 function git(cwd: string, args: string[], timeout = 15_000): string {
   return execFileSync('git', ['-C', cwd, ...args],
-    { stdio: ['ignore', 'pipe', 'pipe'], timeout }).toString().trim();
+    { stdio: ['ignore', 'pipe', 'pipe'], timeout, env: GIT_ENV }).toString().trim();
 }
 
 function tryGit(cwd: string, args: string[], timeout?: number): string | null {
@@ -152,7 +157,7 @@ function checkoutStatus(appDir: string): CheckoutStatus {
   let porcelain = '';
   try {
     porcelain = execFileSync('git', ['-C', appDir, 'status', '--porcelain'],
-      { stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 }).toString();
+      { stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000, env: GIT_ENV }).toString();
   } catch { /* not a work tree */ }
   const changes = porcelain.split('\n').filter(Boolean);
   return {
@@ -182,6 +187,39 @@ export interface CheckoutResult extends CheckoutStatus {
   warnings: string[];
 }
 
+/**
+ * Publish stamped `repository.branch`/`.commit` into the released manifest; the
+ * repo keeps them empty. Put the repo's version back when that stamp is the
+ * ONLY difference, so a fresh checkout is clean and the stamp never gets
+ * committed. Any other edit to the manifest is left alone.
+ */
+function unstampManifest(appDir: string): void {
+  const strip = (raw: string): string | null => {
+    try {
+      const doc = JSON.parse(raw) as Record<string, unknown>;
+      const repo = doc['repository'];
+      if (repo && typeof repo === 'object') {
+        delete (repo as Record<string, unknown>)['commit'];
+        delete (repo as Record<string, unknown>)['branch'];
+      }
+      return JSON.stringify(doc);
+    } catch { return null; }
+  };
+  const committed = tryGitRaw(appDir, ['show', 'HEAD:app.manifest.json']);
+  if (committed === null) return;
+  let onDisk: string;
+  try { onDisk = readFileSync(join(appDir, 'app.manifest.json'), 'utf-8'); } catch { return; }
+  if (onDisk === committed) return;
+  const a = strip(committed);
+  if (a !== null && a === strip(onDisk)) writeFileSync(join(appDir, 'app.manifest.json'), committed);
+}
+
+function tryGitRaw(cwd: string, args: string[]): string | null {
+  try {
+    return execFileSync('git', ['-C', cwd, ...args], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000, env: GIT_ENV }).toString();
+  } catch { return null; }
+}
+
 /** Which repo an installed app says it is developed in, and why. */
 export function resolveAppRepository(
   manifest: AppManifest, marker: PublishMarker | null, flag?: string,
@@ -200,7 +238,9 @@ export function resolveAppRepository(
  * left exactly as installed: `.git` is created, the repo fetched, and HEAD set
  * to the release commit (else the `v<version>` tag, else the branch tip) with
  * a mixed reset, so any difference between the release and that commit shows
- * up as local changes rather than being overwritten. Idempotent: an app that
+ * up as local changes rather than being overwritten. The one file it may
+ * write: app.manifest.json, back to the repo's version when publish's
+ * repository stamp is all that differs. Idempotent: an app that
  * already has `.git` is only reported on.
  */
 export function checkoutApp(appDir: string, manifest: AppManifest, opts: CheckoutOpts = {}): CheckoutResult {
@@ -274,6 +314,7 @@ export function checkoutApp(appDir: string, manifest: AppManifest, opts: Checkou
     git(appDir, ['symbolic-ref', 'HEAD', `refs/heads/${branch}`]);
     git(appDir, ['update-ref', `refs/heads/${branch}`, commit]);
     git(appDir, ['reset', '-q'], 60_000);
+    unstampManifest(appDir);
     if (has(`origin/${branch}`)) tryGit(appDir, ['branch', '-q', `--set-upstream-to=origin/${branch}`, branch]);
     // The publish marker belongs to the release, not to the repo.
     try { appendFileSync(join(appDir, '.git', 'info', 'exclude'), `\n${PUBLISH_MARKER}\n`); } catch { /* cosmetic */ }

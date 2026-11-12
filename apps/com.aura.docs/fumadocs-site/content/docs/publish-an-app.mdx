@@ -235,8 +235,10 @@ aura dev checkout com.example.hello
 
 This creates `.git` in the app dir, fetches the repo and points the branch at
 the commit the release was built from (`repository.commit`, else the release
-marker, else the `v<version>` tag, else the branch tip). **No file is written**: anything that differs from that commit
-shows up in `git status`. Pass `--repo` for an app that declares nothing,
+marker, else the `v<version>` tag, else the branch tip). Your files are not overwritten: anything that differs from that
+commit shows up in `git status`. The one exception is the `repository.commit`
+stamp in `app.manifest.json`, which is put back to the repo's `""` so a fresh
+checkout is clean. Pass `--repo` for an app that declares nothing,
 `--ref` to pick another commit. The git work runs in the master container, so
 private repos need credentials there.
 
