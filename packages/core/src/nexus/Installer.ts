@@ -35,8 +35,9 @@ export class Installer {
 
   /**
    * Move a validated staging dir into `apps/<id>/`, writing the install
-   * record. If `apps/<id>/` already exists (update path), the old dir is
-   * moved aside to `data/nexus/trash/<id>-<ts>/` first so an undo window
+   * record. If `apps/<id>/` already exists (update path), its runtime data
+   * moves into the new copy (`carryOverRuntimeData`) and the rest of the old
+   * dir is moved aside to `data/nexus/trash/<id>-<ts>/` so an undo window
    * exists.
    */
   async install(
@@ -66,6 +67,9 @@ export class Installer {
       throw new Error(`refusing to replace ${manifest.id}: it is a different app (originId ${have}, incoming ${manifest.originId})`);
     }
     if (existsSync(targetDir)) {
+      // An update must not wipe the user's data: in the global and user
+      // scopes it lives inside the app dir that is being replaced.
+      carryOverRuntimeData(targetDir, tmpDir, manifest.id);
       const trashRoot = join(this.opts.dataDir, 'nexus', 'trash');
       mkdirSync(trashRoot, { recursive: true });
       moveOrCopy(targetDir, join(trashRoot, `${manifest.id}-${ts}`));
@@ -143,6 +147,36 @@ function readdirSafe(p: string): string[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * The entries of an app dir that are runtime state, not code. In the global
+ * and user scopes an app's dir is also its data dir: each instance keeps
+ * `<appId>/` or `<appId>-<n>/` there (AppManager: `<scope data>/apps/<appId>/
+ * <instanceId>`), sidecar volumes live in `.sidecars/`, and `.data/` is the
+ * app's own. A release never contains them (PublishFiles' deny list).
+ */
+export function runtimeDataEntries(appDir: string, appId: string): string[] {
+  const instanceDir = new RegExp(`^${appId.replace(/\./g, '\\.')}(-\\d+)?$`);
+  return readdirSafe(appDir).filter((name) => name === '.sidecars' || name === '.data' || instanceDir.test(name));
+}
+
+/**
+ * Move an app's runtime data from the copy being replaced into the new one.
+ * Moved, not copied: a rename keeps the directory itself, so a running
+ * instance keeps writing to the same data (now inside the new copy) instead
+ * of into the trash. The user's data wins over anything a bundle shipped
+ * under the same name. Returns what was carried over.
+ */
+export function carryOverRuntimeData(oldDir: string, newDir: string, appId: string): string[] {
+  const moved: string[] = [];
+  for (const name of runtimeDataEntries(oldDir, appId)) {
+    const dst = join(newDir, name);
+    if (existsSync(dst)) rmSync(dst, { recursive: true, force: true });
+    moveOrCopy(join(oldDir, name), dst);
+    moved.push(name);
+  }
+  return moved;
 }
 
 function rsyncOrCp(src: string, dst: string): void {
