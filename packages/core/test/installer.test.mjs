@@ -79,3 +79,24 @@ test('a fresh install has nothing to carry over', async () => {
   await w.installer.install(w.stage('1.0.0'), manifest('1.0.0'), resolved);
   assert.deepEqual(readdirSync(w.appDir).sort(), ['app.manifest.json', 'index.js']);
 });
+
+test('uninstall keeps the data in place and a reinstall picks it up; --purge does not', async () => {
+  const w = setup();
+  await w.installer.install(w.stage('1.0.0'), manifest('1.0.0'), resolved);
+  put(join(w.appDir, ID, 'settings.json'), 'mine');
+  put(join(w.appDir, '.sidecars', 'db', 'pg'), 'rows');
+
+  await w.installer.uninstall(ID);
+  assert.deepEqual(readdirSync(w.appDir).sort(), ['.sidecars', ID], 'only the data is left — no manifest, so no app');
+  const trash = join(w.dataDir, 'nexus', 'trash');
+  assert.ok(readdirSync(trash).some((d) => existsSync(join(trash, d, 'index.js'))), 'the code is in the trash');
+
+  const trashedBefore = readdirSync(trash).length;
+  await w.installer.install(w.stage('2.0.0'), manifest('2.0.0'), resolved);
+  assert.equal(readFileSync(join(w.appDir, ID, 'settings.json'), 'utf-8'), 'mine');
+  assert.equal(readFileSync(join(w.appDir, '.sidecars', 'db', 'pg'), 'utf-8'), 'rows');
+  assert.equal(readdirSync(trash).length, trashedBefore, 'the empty leftover is removed, not trashed');
+
+  await w.installer.uninstall(ID, { purge: true });
+  assert.equal(existsSync(w.appDir), false, 'purge takes the data too');
+});

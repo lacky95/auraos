@@ -70,9 +70,14 @@ export class Installer {
       // An update must not wipe the user's data: in the global and user
       // scopes it lives inside the app dir that is being replaced.
       carryOverRuntimeData(targetDir, tmpDir, manifest.id);
-      const trashRoot = join(this.opts.dataDir, 'nexus', 'trash');
-      mkdirSync(trashRoot, { recursive: true });
-      moveOrCopy(targetDir, join(trashRoot, `${manifest.id}-${ts}`));
+      if (readdirSafe(targetDir).length === 0) {
+        // Only data was left (an uninstall keeps it): nothing to keep in trash.
+        rmSync(targetDir, { recursive: true, force: true });
+      } else {
+        const trashRoot = join(this.opts.dataDir, 'nexus', 'trash');
+        mkdirSync(trashRoot, { recursive: true });
+        moveOrCopy(targetDir, join(trashRoot, `${manifest.id}-${ts}`));
+      }
     }
 
     // 3. Atomic rename — this is the chokidar trigger. tmpDir lives
@@ -90,15 +95,27 @@ export class Installer {
   }
 
   /**
-   * Uninstall: move the app dir to trash, drop the install record.
-   * Preserves per-app data at `data/apps/<id>/` unless `purge: true`.
+   * Uninstall: move the app's code to trash, drop the install record.
+   * Preserves the app's data unless `purge: true`: its runtime data
+   * (`runtimeDataEntries`) stays in `apps/<id>/` — without
+   * `app.manifest.json` that dir is no app — and a reinstall carries it over;
+   * per-app data at `data/apps/<id>/` stays too.
    */
   async uninstall(appId: string, opts: { purge?: boolean } = {}): Promise<void> {
     const appDir = join(this.opts.appsDir, appId);
     if (existsSync(appDir)) {
       const trashRoot = join(this.opts.dataDir, 'nexus', 'trash');
       mkdirSync(trashRoot, { recursive: true });
-      moveOrCopy(appDir, join(trashRoot, `${appId}-${Date.now()}`));
+      const dest = join(trashRoot, `${appId}-${Date.now()}`);
+      const keep = opts.purge ? [] : runtimeDataEntries(appDir, appId);
+      if (keep.length === 0) {
+        moveOrCopy(appDir, dest);
+      } else {
+        mkdirSync(dest, { recursive: true });
+        for (const name of readdirSafe(appDir)) {
+          if (!keep.includes(name)) moveOrCopy(join(appDir, name), join(dest, name));
+        }
+      }
     }
 
     const recordPath = join(this.opts.dataDir, 'nexus', 'installed', `${appId}.json`);
