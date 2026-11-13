@@ -790,7 +790,7 @@ function identityOptions(cmd: Command): Command {
   return cmd
     .option('--update-existing', 'if it is the same app as an installed one (originId): update that app')
     .option('--switch-source',   'alias of --update-existing: the installed app now updates from this source')
-    .option('--as <appId>',      'if its id is taken by a different app: install it under this local id')
+    .option('--as <appId>',      'install it under this local id (update: if its id now belongs to a different app)')
     .option('--copy [appId]',    'install an independent copy (new id + new originId, no updates from the source)');
 }
 
@@ -860,10 +860,14 @@ function flagFor(a: IdentityAction): string {
 async function installWithChoices(
   path: string, body: Record<string, unknown>, o: { yes?: boolean } & IdentityFlags, verb: 'install' | 'update',
 ): Promise<InstallResponse | null> {
-  // A flag decision is only sent once the store has asked (and checked
-  // against its choices) — on a plain install it must not change anything.
+  // On install, --as / --copy are sent up front: the store does not ask when
+  // the same app is already installed (it would just update it), so a flag
+  // held back for a question was silently ignored. The store checks them
+  // against the situation and refuses what does not fit. --update-existing,
+  // and every flag on update, only answer a question once the store asks.
   const preset = decisionFromFlags(o);
-  let identity: IdentityDecision | undefined;
+  let identity: IdentityDecision | undefined =
+    verb === 'install' && preset && preset.action !== 'update-existing' ? preset : undefined;
   let autoApprove = !!o.yes;
   for (let round = 0; round < 4; round++) {
     const res = await postStore<InstallResponse>(path, { ...body, autoApprove, ...(identity ? { identity } : {}) });

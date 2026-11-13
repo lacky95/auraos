@@ -419,6 +419,11 @@ export class NexusManager {
       const explicit = opts.identity && verdict.kind !== 'conflict'
         && (opts.identity.action === 'install-copy' || (opts.identity.action === 'install-as' && verdict.kind === 'fresh'))
         ? opts.identity : null;
+      // "Install as" for an app that IS installed would otherwise fall through
+      // to the update below: the opposite of what was asked. Say so instead.
+      if (!explicit && opts.identity?.action === 'install-as' && verdict.kind === 'update') {
+        throw new Error(`${remoteId} is already installed as ${verdict.target.appId} — "install as" only installs an app that is not installed yet; install an independent copy instead (install-copy, \`--copy\`)`);
+      }
       if (explicit) {
         installUnderLocalId(explicit);
         yield { type: 'identity.resolved', action: explicit.action, appId: manifest.id };

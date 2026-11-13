@@ -230,3 +230,37 @@ test('installStates: id + originId decide what the store shows', () => {
   assert.equal(st['com.ex.editor'].verified, true);
   assert.deepEqual([st['com.sys'].status, st['com.sys'].canUninstall, st['com.sys'].updateAvailable], ['installed', false, false]);
 });
+
+test('install: --copy installs a second copy of an installed app; --as for it is refused, never an update', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'aura-as-'));
+  const scope = (id, priority, immutable) => ({ id, appsDir: join(root, id, 'apps'), dataDir: join(root, id, 'data'), immutable, priority });
+  const scopes = [scope('system', 0, true), scope('global', 1, false), scope('user', 2, false)];
+  // One dir per app id: a re-install from it is the same source (an update).
+  const src = (id, version, originId = O1) => {
+    const dir = join(root, 'src', id); mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'app.manifest.json'), JSON.stringify({ id, originId, name: 'A', version }));
+    return dir;
+  };
+  const mgr = new NexusManager({ scopes, rootDataDir: join(root, 'root') });
+  const run = async (opts) => {
+    const it = mgr.install({ scope: 'user', autoApprove: true, ...opts });
+    for (let c = await it.next(); ; c = await it.next()) if (c.done) return c.value;
+  };
+  const manifestAt = (id) => JSON.parse(readFileSync(join(scopes[2].appsDir, id, 'app.manifest.json'), 'utf-8'));
+
+  await run({ ref: src('io.a.app', '1.0.0') });
+  await assert.rejects(() => run({ ref: src('io.a.app', '2.0.0'), identity: { action: 'install-as', appId: 'io.a.other' } }),
+    /already installed as io\.a\.app .*--copy/);
+  assert.equal(manifestAt('io.a.app').version, '1.0.0', 'the refused --as did not update the installed app');
+
+  const rec = await run({ ref: src('io.a.app', '2.0.0'), identity: { action: 'install-copy', appId: 'io.a.copy' } });
+  assert.deepEqual([rec.id, rec.detached], ['io.a.copy', true]);
+  assert.notEqual(manifestAt('io.a.copy').originId, O1);
+  assert.equal(manifestAt('io.a.app').version, '1.0.0');
+
+  // --as for an app that is not installed yet: installed under that id,
+  // still linked to its source (same originId, remoteId kept).
+  const as = await run({ ref: src('io.b.app', '1.0.0', O2), identity: { action: 'install-as', appId: 'io.b.mine' } });
+  assert.deepEqual([as.id, as.remoteId, as.detached], ['io.b.mine', 'io.b.app', undefined]);
+  assert.equal(manifestAt('io.b.mine').originId, O2);
+});

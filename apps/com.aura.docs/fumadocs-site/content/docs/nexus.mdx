@@ -178,6 +178,12 @@ with `--update-existing` (alias `--switch-source`), `--as <appId>` or
 `--copy [appId]`. A copy gets a new id and a new `originId` and never updates
 from the source.
 
+On `install`, `--as` and `--copy` apply even when the store would not ask:
+`--copy` installs a second, independent copy of an app you already have, and
+`--as` installs an app that is not installed yet under another id. `--as` for
+an app that is already installed is refused (it would be an update); use
+`--copy`.
+
 Over the API, `/api/nexus/install` (and `/update/<id>`) reply
 `{ needsIdentityChoice, conflict }`. Send the install again with
 `identity: { action, appId? }`, where `action` is one of `conflict.choices`.
