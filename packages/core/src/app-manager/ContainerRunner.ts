@@ -538,6 +538,11 @@ export class ContainerRunner implements SandboxRunner {
     );
     const a: string[] = [
       'run', '--rm', '-d',
+      // docker-init (tini) as PID 1 reaps orphans. Without it the app's own
+      // process is PID 1, and app servers (node, python) never reap: every
+      // backgrounded child that outlives its parent stays a zombie until the
+      // container's pid limit is hit and fork() fails for everything.
+      '--init',
       '--name', hostname,
       // Docker DNS uses --name for cross-container resolution (the proxy at
       // /api/proxy/<id> resolves to the aura-<instanceId> name), so --name

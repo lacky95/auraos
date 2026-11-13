@@ -35,7 +35,10 @@ export const HOOK_SCRIPT = `#!/usr/bin/env bash
 # Reports a coding agent's hook event to the terminal session it runs in.
 #   Claude Code: agent-hook.sh claude      (event JSON on stdin)
 #   Codex:       agent-hook.sh codex JSON  (notify passes the JSON as an argument)
-# Never blocks the agent: background post, 2s cap, always exit 0.
+# Never blocks the agent for long: 2s cap, always exit 0. The post runs in the
+# foreground on purpose: a backgrounded pipeline outlives this script, gets
+# reparented to the container's PID 1 (node, which never reaps) and stays a
+# zombie until the 1035-pid cap is hit.
 src="\${1:-claude}"
 if [ "$src" = codex ]; then payload="\${2:-}"; else payload="$(cat)"; fi
 [ -n "\${AURA_TERM_SESSION:-}" ] && [ -n "$payload" ] || exit 0
@@ -44,7 +47,7 @@ inst="\${AURA_TERM_SESSION%%#*}"
 base="\${OS_API_BASE:-http://localhost:3000}"
 printf '{"session":"%s","source":"%s","payload":%s}' "$AURA_TERM_SESSION" "$src" "$payload" \\
   | curl -s -m 2 -o /dev/null -X POST -H 'content-type: application/json' --data-binary @- \\
-      "$base/api/proxy/$inst/api/sessions/events" >/dev/null 2>&1 &
+      "$base/api/proxy/$inst/api/sessions/events" >/dev/null 2>&1
 exit 0
 `;
 
