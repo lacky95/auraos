@@ -124,8 +124,9 @@ import { NATIVE_KEYBOARD_JS } from '../../../lib/keyboard/nativeKeyboardScript.t
     opacity: 0.7;
   }
   .aura-kb-handle:hover::after, .aura-vkb[data-gesture="true"] .aura-kb-handle::after { opacity: 1; }
-  /* The focus-mode frame isn't an .app-slot iframe; keep drags flowing over it too. */
-  body.aura-stack-dragging #focus-frame { pointer-events: none; }
+  /* The focus-mode and flight frames aren't .app-slot iframes; keep drags flowing over them too. */
+  body.aura-stack-dragging #focus-frame,
+  body.aura-stack-dragging #flight-layer iframe { pointer-events: none; }
 
   /* simple-keyboard, re-skinned with the OS theme tokens. */
   .hg-theme-default.aura-kb-theme {
@@ -333,12 +334,16 @@ import { NATIVE_KEYBOARD_JS } from '../../../lib/keyboard/nativeKeyboardScript.t
       if (vv.height < window.innerHeight - 80 && matchMedia('(pointer: coarse)').matches) st.$open.set(false);
     });
 
+    // Every frame that shows an app: window slots, focus mode, and flight
+    // panels (lib/flight/layer.ts) — they all get the policy and may open it.
+    const APP_FRAMES = '.app-slot iframe, #focus-frame, #flight-layer iframe.flight-frame';
+
     // ── Apps asking for the keyboard (only ever their own window) ────
     window.addEventListener('message', (ev) => {
       const d = ev.data as { type?: string; attach?: boolean; layout?: string } | null;
       if (!d || (d.type !== 'aura.keyboard.open' && d.type !== 'aura.keyboard.close')) return;
       let frame: HTMLIFrameElement | null = null;
-      for (const f of document.querySelectorAll<HTMLIFrameElement>('.app-slot iframe, #focus-frame')) {
+      for (const f of document.querySelectorAll<HTMLIFrameElement>(APP_FRAMES)) {
         if (f.contentWindow === ev.source) { frame = f; break; }
       }
       if (!frame) return;
@@ -354,7 +359,7 @@ import { NATIVE_KEYBOARD_JS } from '../../../lib/keyboard/nativeKeyboardScript.t
     // is pushed to all of them. With Auto on, a focused text field on a touch
     // screen opens this keyboard and losing focus closes it again — but only a
     // keyboard that opened that way, never one the user opened.
-    const frames = () => document.querySelectorAll<HTMLIFrameElement>('.app-slot iframe, #focus-frame');
+    const frames = () => document.querySelectorAll<HTMLIFrameElement>(APP_FRAMES);
     const sendPolicy = (w: Window | null | undefined) => {
       try { w?.postMessage({ type: 'aura.keyboard.policy', suppressNative: st.$suppressNative.get() }, w === window ? location.origin : '*'); }
       catch { /* frame gone */ }
