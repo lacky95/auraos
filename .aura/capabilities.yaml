@@ -14,6 +14,12 @@ capabilities:
     binary: codex
     binary_path: /usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
     description: OpenAI Codex CLI
+  copilot:
+    source: npm
+    package: "@github/copilot"
+    binary: copilot
+    binary_path: /usr/local/lib/node_modules/@github/copilot/node_modules/@github/copilot-linux-x64/copilot
+    description: GitHub Copilot CLI
   ssh:
     source: apt
     package: openssh-client
