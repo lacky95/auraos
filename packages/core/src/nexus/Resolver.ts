@@ -157,8 +157,17 @@ export class Resolver {
 
   private async resolveIndex(bareRef: string, rawRef: string, sourceName?: string): Promise<ResolvedRef> {
     const [id, channel = 'stable'] = bareRef.split('@');
-    const entry = (sourceName ? await this.opts.catalog.lookupIn(id!, sourceName) : null)
+    const find = async () => (sourceName ? await this.opts.catalog.lookupIn(id!, sourceName) : null)
       ?? await this.opts.catalog.lookup(id!);
+    let entry = await find();
+    // The catalog is cached (a minute per source, served stale while it
+    // revalidates): an app published moments ago, or one a refresh could not
+    // read, may be missing from it. Ask the sources once more before saying
+    // it does not exist.
+    if (!entry) {
+      await this.opts.catalog.refresh();
+      entry = await find();
+    }
     if (!entry) {
       throw new Error(`[NexusResolver] '${id}' not found in any registered source`);
     }

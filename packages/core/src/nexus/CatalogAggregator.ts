@@ -290,7 +290,7 @@ export class CatalogAggregator {
       let entries: CatalogEntry[];
       let featured: string[] | undefined;
       switch (src.kind) {
-        case 'oci':       entries = await this.fetchOciCatalog(src); break;
+        case 'oci':       entries = await this.fetchOciCatalog(src, this.readCache(src.name, /* ignoreTtl */ true) ?? []); break;
         case 'git-index': ({ entries, featured } = await this.fetchGitIndexCatalog(src)); break;
         case 'git-app':   entries = this.fetchGitAppEntry(src); break;
       }
@@ -306,7 +306,9 @@ export class CatalogAggregator {
   }
 
   // ─── OCI source ─────────────────────────────────────────────────────────
-  private async fetchOciCatalog(src: OciSource): Promise<CatalogEntry[]> {
+  /** `previous`: the source's last cached entries — what a repo that cannot
+   *  be read right now keeps showing, instead of vanishing from the store. */
+  private async fetchOciCatalog(src: OciSource, previous: CatalogEntry[] = []): Promise<CatalogEntry[]> {
     const host = orasHostFromUrl(src.url);
     const flags = orasFlagsForUrl(src.url);
     const prefix = (src.appRepoPrefix ?? DEFAULT_APP_REPO_PREFIX).replace(/\/+$/, '');
@@ -338,10 +340,20 @@ export class CatalogAggregator {
     found.delete(catalogRepo(prefix));
     const repos = [...found].slice(0, MAX_REPOS_PER_OCI);
 
+    const previousByRef = new Map(previous.filter((e) => e.sources.oci).map((e) => [e.sources.oci!.ref, e]));
     const readRepo = async (repo: string): Promise<CatalogEntry | null> => {
+      let raw: string;
       try {
-        const raw = (await orasAsync(['manifest', 'fetch', `${host}/${repo}:latest`, ...flags],
+        raw = (await orasAsync(['manifest', 'fetch', `${host}/${repo}:latest`, ...flags],
           { timeout: ORAS_TIMEOUT_MS })).toString();
+      } catch {
+        // Unreadable right now (a timeout, a rate limit, a registry hiccup) is
+        // not "gone" — dropping it would hide the app from the store and from
+        // installs until the next refresh. Keep what the last read listed for
+        // this repo; a repo with no :latest yet had nothing there.
+        return previousByRef.get(`${host}/${repo}`) ?? null;
+      }
+      try {
         const manifest = JSON.parse(raw) as {
           artifactType?: string; annotations?: Record<string, string>; config?: { mediaType?: string };
         };
@@ -378,7 +390,7 @@ export class CatalogAggregator {
           version:     meta.version,
           requires:    manifestRequirements(meta.manifest),
         };
-      } catch { return null; /* skip repos that don't resolve a :latest manifest */ }
+      } catch { return null; /* not an Aura app manifest */ }
     };
     // A few repos at a time: quick on a remote registry, gentle on a small one.
     const entries: CatalogEntry[] = [];
