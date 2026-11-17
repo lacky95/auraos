@@ -10,10 +10,16 @@
  *   • Convenience helpers (createWorkspace, deleteWorkspace, moveWorkspace,
  *     setActive, patchWorkspace) that compose the above primitives.
  *
- * Every mutation funnels through `pushState()`, which posts the FULL workspace
+ * Every mutation funnels through `commit()`, which posts the FULL workspace
  * list to the KV endpoint. That endpoint stores whatever JSON it's given — the
  * invariants (id uniqueness, activeWorkspaceId existence, never deleting the
  * last workspace) are enforced here, on the client.
+ *
+ * Writes are conditional (`ifUpdatedAt` = the version the cache came from):
+ * a cache that fell behind — a tab or phone WebView resumed after hours —
+ * gets 409 + the current state, and the mutation is replayed on that instead
+ * of rolling every newer change back (2026-11-17: a day-old tab replaced 8
+ * workspaces with 3).
  *
  * Members are kept as activityIds (or instanceIds for activityMode='none'
  * apps). The shell's viewId already equals `activityId ?? instanceId`, so
@@ -98,6 +104,8 @@ async function fetchWithBootRetry(
 type Listener = (state: WorkspaceState) => void;
 
 let cached: WorkspaceState | null = null;
+/** `updatedAt` of the server version `cached` is based on (null: unknown). */
+let baseUpdatedAt: number | null = null;
 const listeners = new Set<Listener>();
 
 /**
@@ -182,10 +190,12 @@ export function flushPendingOnUnload(): void {
   }
   pendingPatch.clear();
   try {
+    // Conditional like every write: a stale page loses its last patch
+    // rather than overwriting newer state.
     void fetch(ENDPOINT, {
       method: 'PUT', keepalive: true,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ value: s }),
+      body: JSON.stringify(putBody(s)),
     });
   } catch { /* page is going away */ }
 }
@@ -196,9 +206,11 @@ function notify(state: WorkspaceState): void {
   }
 }
 
-/** Seed the cache from SSR (avoids a fetch on first read). */
-export function hydrate(state: WorkspaceState): void {
+/** Seed the cache from SSR (avoids a fetch on first read). `updatedAt` is
+ *  the version SSR read; without it the first write is unconditional. */
+export function hydrate(state: WorkspaceState, updatedAt?: number | null): void {
   cached = clone(state);
+  baseUpdatedAt = typeof updatedAt === 'number' ? updatedAt : null;
 }
 
 /** Subscribe to state changes. Returns an unsubscribe function. */
@@ -227,23 +239,40 @@ export async function refresh(): Promise<WorkspaceState> {
   if (!res.ok) throw new Error(`[workspaceClient] GET → HTTP ${res.status}`);
   // KV API wraps values: `{ value: WorkspaceState, updatedAt: number }`.
   // Unwrap before notifying subscribers; they speak `WorkspaceState`.
-  const body = await res.json() as { value: WorkspaceState };
+  const body = await res.json() as { value: WorkspaceState; updatedAt?: number };
   // Local edits newer than this response: keep them. Their own PUT fires
   // `workspaces:changed`, whose refresh brings the converged state.
   if (cached && (gen !== writeGen || writesInFlight > 0 || pendingPatch.size > 0)) {
     return clone(cached);
   }
   cached = clone(body.value);
+  baseUpdatedAt = typeof body.updatedAt === 'number' ? body.updatedAt : null;
   notify(cached);
   return cached;
 }
 
+/** KV PUT body: the state, conditional on the version the cache is based on. */
+function putBody(value: WorkspaceState): { value: WorkspaceState; ifUpdatedAt?: number } {
+  return baseUpdatedAt === null ? { value } : { value, ifUpdatedAt: baseUpdatedAt };
+}
+
+/** A mutation: gets a private copy of the state, returns the next state, or
+ *  null when there is nothing to change. Pure — it may run again on a newer
+ *  state when the server says the cache was stale. */
+type Mutation = (s: WorkspaceState) => WorkspaceState | null;
+
+const MAX_REBASES = 3;
+
 /**
- * Push the full workspace list + active id to the provider. Local cache is
- * updated optimistically; on server error the cache reverts via the SSE
- * reconcile path (`workspaces:changed` carries the server's view).
+ * Apply `mutate` to the cache (optimistic: subscribers see it at once) and
+ * write the result. A 409 means another device or the server changed the
+ * state since this cache was loaded: adopt the server's state, replay
+ * `mutate` on it, and try again. On any other failure the cache reverts via
+ * the SSE reconcile path (`workspaces:changed` carries the server's view).
  */
-async function pushState(next: WorkspaceState): Promise<void> {
+async function commit(mutate: Mutation): Promise<void> {
+  let next = mutate(clone(require_()));
+  if (!next) return;
   const previous = cached;
   cached = clone(next);
   notify(cached);
@@ -251,16 +280,38 @@ async function pushState(next: WorkspaceState): Promise<void> {
   writeGen++;
   writesInFlight++;
   try {
-    const res = await fetchWithBootRetry(ENDPOINT, {
-      method:  'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      // KV PUT body shape is `{ value: <payload> }` — wrap the
-      // WorkspaceState so the server doesn't have to special-case us.
-      body:    JSON.stringify({ value: next }),
-    });
-    if (!res.ok) {
-      console.warn('[workspaceClient] PUT failed:', await res.text());
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetchWithBootRetry(ENDPOINT, {
+        method:  'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        // KV PUT body shape is `{ value: <payload> }` — wrap the
+        // WorkspaceState so the server doesn't have to special-case us.
+        body:    JSON.stringify(putBody(next)),
+      });
+      if (res.ok) {
+        const stored = await res.json().catch(() => null) as { updatedAt?: number } | null;
+        if (typeof stored?.updatedAt === 'number') baseUpdatedAt = stored.updatedAt;
+        return;
+      }
+      if (res.status === 409 && attempt < MAX_REBASES) {
+        const body = await res.json().catch(() => null) as { current?: { value: WorkspaceState; updatedAt: number } } | null;
+        const current = body?.current;
+        if (current?.value && Array.isArray(current.value.workspaces)) {
+          console.info('[workspaceClient] cache was stale — replaying the change on the current state');
+          baseUpdatedAt = current.updatedAt;
+          cached = clone(current.value);
+          const rebased = mutate(clone(current.value));
+          if (!rebased) { notify(cached); return; }
+          next = rebased;
+          cached = clone(next);
+          notify(cached);
+          continue;
+        }
+      }
+      console.warn('[workspaceClient] PUT failed:', res.status, await res.text().catch(() => ''));
+      if (res.status === 409) { void refresh().catch(() => undefined); return; }
       if (previous) { cached = previous; notify(previous); }
+      return;
     }
   } catch (err) {
     console.error('[workspaceClient] PUT errored:', err);
@@ -291,55 +342,62 @@ export async function setActive(id: string): Promise<void> {
     console.warn(`[workspaceClient] setActive('${id}'): unknown workspace`);
     return;
   }
-  await pushState({ ...clone(s), activeWorkspaceId: id });
+  await commit((s) => {
+    if (s.activeWorkspaceId === id || !s.workspaces.some((w) => w.id === id)) return null;
+    return { ...s, activeWorkspaceId: id };
+  });
 }
 
 /** Replace one workspace's fields. The workspace must already exist. */
 export async function patchWorkspace(id: string, patch: Partial<Omit<Workspace, 'id'>>): Promise<void> {
-  const s = clone(require_());
-  const idx = s.workspaces.findIndex((w) => w.id === id);
-  if (idx < 0) return;
-  s.workspaces[idx] = { ...s.workspaces[idx]!, ...patch };
-  await pushState(s);
+  await commit((s) => {
+    const idx = s.workspaces.findIndex((w) => w.id === id);
+    if (idx < 0) return null;
+    s.workspaces[idx] = { ...s.workspaces[idx]!, ...patch };
+    return s;
+  });
 }
 
 export async function createWorkspace(name?: string): Promise<Workspace> {
-  const s = clone(require_());
-  // Pick the next free `ws-<n>`. Numbers can have gaps if the user deleted
-  // workspaces — we always pick (max + 1) so renumbering never disturbs an
-  // existing id (members reference them and we don't want broken pointers).
-  // The default NAME follows the pill number instead (count + 1), so it stays
-  // in step with `compactWorkspaces()` renumbering.
-  let maxN = 0;
-  for (const w of s.workspaces) {
-    const m = /^ws-(\d+)$/.exec(w.id);
-    if (m) maxN = Math.max(maxN, Number(m[1]));
-  }
-  const id = `ws-${maxN + 1}`;
-  const ws: Workspace = {
-    id,
-    name: name ?? `WS ${s.workspaces.length + 1}`,
-    layoutId: 'tiling',
-    members: [],
-  };
-  s.workspaces.push(ws);
-  s.activeWorkspaceId = id;
-  await pushState(s);
+  let ws!: Workspace;
+  await commit((s) => {
+    // Pick the next free `ws-<n>`. Numbers can have gaps if the user deleted
+    // workspaces — we always pick (max + 1) so renumbering never disturbs an
+    // existing id (members reference them and we don't want broken pointers).
+    // The default NAME follows the pill number instead (count + 1), so it stays
+    // in step with `compactWorkspaces()` renumbering.
+    let maxN = 0;
+    for (const w of s.workspaces) {
+      const m = /^ws-(\d+)$/.exec(w.id);
+      if (m) maxN = Math.max(maxN, Number(m[1]));
+    }
+    const id = `ws-${maxN + 1}`;
+    ws = {
+      id,
+      name: name ?? `WS ${s.workspaces.length + 1}`,
+      layoutId: 'tiling',
+      members: [],
+    };
+    s.workspaces.push(ws);
+    s.activeWorkspaceId = id;
+    return s;
+  });
   return ws;
 }
 
 /** Remove a workspace. Its members migrate to the active fallback workspace. */
 export async function deleteWorkspace(id: string): Promise<void> {
-  const s = clone(require_());
-  if (s.workspaces.length <= 1) return;  // never delete the last one
-  const victim = s.workspaces.find((w) => w.id === id);
-  if (!victim) return;
-  const fallback = s.workspaces.find((w) => w.id !== id);
-  if (!fallback) return;
-  fallback.members = [...fallback.members, ...victim.members];
-  s.workspaces = s.workspaces.filter((w) => w.id !== id);
-  if (s.activeWorkspaceId === id) s.activeWorkspaceId = fallback.id;
-  await pushState(s);
+  await commit((s) => {
+    if (s.workspaces.length <= 1) return null;  // never delete the last one
+    const victim = s.workspaces.find((w) => w.id === id);
+    if (!victim) return null;
+    const fallback = s.workspaces.find((w) => w.id !== id);
+    if (!fallback) return null;
+    fallback.members = [...fallback.members, ...victim.members];
+    s.workspaces = s.workspaces.filter((w) => w.id !== id);
+    if (s.activeWorkspaceId === id) s.activeWorkspaceId = fallback.id;
+    return s;
+  });
 }
 
 /** Default names (`WS <n>`) are renumbered by compaction; anything else is the user's. */
@@ -385,9 +443,7 @@ export function canCompact(state: WorkspaceState): boolean {
 
 /** Remove empty workspaces and renumber default `WS <n>` names, in one write. */
 export async function compactWorkspaces(): Promise<void> {
-  const s = require_();
-  if (!canCompact(s)) return;
-  await pushState(compactState(s));
+  await commit((s) => (canCompact(s) ? compactState(s) : null));
 }
 
 /**
@@ -403,14 +459,15 @@ export async function compactWorkspaces(): Promise<void> {
  * active stays active, it just renumbers.
  */
 export async function moveWorkspace(id: string, toIndex: number): Promise<void> {
-  const s = clone(require_());
-  const from = s.workspaces.findIndex((w) => w.id === id);
-  if (from < 0) return;
-  const to = Math.min(Math.max(0, toIndex), s.workspaces.length - 1);
-  if (to === from) return;
-  const [ws] = s.workspaces.splice(from, 1);
-  s.workspaces.splice(to, 0, ws!);
-  await pushState(s);
+  await commit((s) => {
+    const from = s.workspaces.findIndex((w) => w.id === id);
+    if (from < 0) return null;
+    const to = Math.min(Math.max(0, toIndex), s.workspaces.length - 1);
+    if (to === from) return null;
+    const [ws] = s.workspaces.splice(from, 1);
+    s.workspaces.splice(to, 0, ws!);
+    return s;
+  });
 }
 
 /**
@@ -421,14 +478,16 @@ export async function moveWorkspace(id: string, toIndex: number): Promise<void> 
  * SSE `activity:opened` listener tries to add it to the active one too.
  */
 export async function addMemberToActive(viewId: string): Promise<void> {
-  const s = clone(require_());
-  return addMemberToWorkspaceInState(s, s.activeWorkspaceId, viewId);
+  // The active workspace at the time of the call — a replay must not move
+  // the view to whatever another device made active meanwhile.
+  const wsId = require_().activeWorkspaceId;
+  await commit((s) => addMemberInState(s, wsId, viewId));
 }
 
 /** Shared core for both `addMemberToActive` and `addMemberToWorkspace`. */
-async function addMemberToWorkspaceInState(s: WorkspaceState, wsId: string, viewId: string): Promise<void> {
+function addMemberInState(s: WorkspaceState, wsId: string, viewId: string): WorkspaceState | null {
   const target = s.workspaces.find((w) => w.id === wsId);
-  if (!target) return;
+  if (!target) return null;
   let mutated = false;
   for (const w of s.workspaces) {
     if (w.id === wsId) continue;
@@ -440,7 +499,7 @@ async function addMemberToWorkspaceInState(s: WorkspaceState, wsId: string, view
     target.members.push(viewId);
     mutated = true;
   }
-  if (mutated) await pushState(s);
+  return mutated ? s : null;
 }
 
 /**
@@ -452,19 +511,19 @@ async function addMemberToWorkspaceInState(s: WorkspaceState, wsId: string, view
  * newly-active workspace via a racy SSE refresh or fallback path.
  */
 export async function addMemberToWorkspace(wsId: string, viewId: string): Promise<void> {
-  const s = clone(require_());
-  return addMemberToWorkspaceInState(s, wsId, viewId);
+  await commit((s) => addMemberInState(s, wsId, viewId));
 }
 
 /** Remove a viewId from every workspace's members (strict mode: at most one). */
 export async function removeMember(viewId: string): Promise<void> {
-  const s = clone(require_());
-  let touched = false;
-  for (const w of s.workspaces) {
-    const next = w.members.filter((m) => m !== viewId);
-    if (next.length !== w.members.length) { w.members = next; touched = true; }
-  }
-  if (touched) await pushState(s);
+  await commit((s) => {
+    let touched = false;
+    for (const w of s.workspaces) {
+      const next = w.members.filter((m) => m !== viewId);
+      if (next.length !== w.members.length) { w.members = next; touched = true; }
+    }
+    return touched ? s : null;
+  });
 }
 
 /** Find the workspace that owns a given viewId (or null). */
@@ -482,3 +541,26 @@ export function applyServerState(state: WorkspaceState): void {
   cached = clone(state);
   notify(cached);
 }
+
+/**
+ * A page that sat in the background (hidden tab, suspended phone WebView)
+ * can miss `workspaces:changed` events: reload the state when it comes back,
+ * before the user acts on an old desktop. Writes are conditional anyway —
+ * this just keeps what the user sees current.
+ */
+function installForegroundRefresh(): void {
+  if (typeof document === 'undefined') return;
+  const flag = globalThis as { __auraWsForegroundRefresh?: boolean };
+  if (flag.__auraWsForegroundRefresh) return;
+  flag.__auraWsForegroundRefresh = true;
+  let hiddenAt = 0;
+  const STALE_AFTER_MS = 5_000;
+  const reload = () => { if (cached) void refresh().catch(() => undefined); };
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
+    if (hiddenAt && Date.now() - hiddenAt > STALE_AFTER_MS) reload();
+  });
+  // Restored from the back/forward cache: the whole page is old.
+  window.addEventListener('pageshow', (e) => { if (e.persisted) reload(); });
+}
+installForegroundRefresh();

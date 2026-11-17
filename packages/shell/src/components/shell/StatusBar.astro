@@ -1533,7 +1533,7 @@ let initialTimeZone: string = '';
     try {
       const node = document.getElementById('aura-initial-workspaces');
       if (node?.textContent) {
-        workspaceClient.hydrate(JSON.parse(node.textContent) as workspaceClient.WorkspaceState);
+        workspaceClient.hydrate(JSON.parse(node.textContent) as workspaceClient.WorkspaceState, Number(node.dataset['updatedAt']) || null);
       } else if (!workspaceClient.getCached()) {
         await workspaceClient.refresh();
       }

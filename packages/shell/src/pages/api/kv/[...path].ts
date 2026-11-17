@@ -13,6 +13,9 @@ import { withEtag } from '../../../lib/etag.js';
  *
  * GET    returns `{ value, updatedAt }` (404 if absent).
  * PUT    body `{ value }` writes; emits `kv:changed` on the OS event bus.
+ *        Optional `ifUpdatedAt` (the `updatedAt` the edit is based on):
+ *        when the stored value is newer, nothing is written and the answer
+ *        is 409 `{ error, current: { value, updatedAt } }`.
  * DELETE removes the key; same event with `value: null`.
  *
  * Permission model (see plan):
@@ -75,12 +78,27 @@ export const ALL: APIRoute = async ({ params, request }) => {
     }
 
     if (method === 'PUT' || method === 'POST') {
-      const body = await request.json().catch(() => null) as { value?: unknown } | null;
+      const body = await request.json().catch(() => null) as { value?: unknown; ifUpdatedAt?: unknown } | null;
       if (!body || !('value' in body)) {
         return jsonError('PUT body must be `{ "value": <json> }`', 400);
       }
-      const previous = await kv.get(namespace, key);
-      const stored = await kv.set(namespace, key, body.value);
+      const ifUpdatedAt = typeof body.ifUpdatedAt === 'number' ? body.ifUpdatedAt : null;
+      const result = await serialized(`${namespace}:${key}`, async () => {
+        const previous = await kv.get(namespace, key);
+        // Optimistic concurrency (opt-in): the writer says which version its
+        // edit is based on. A newer stored value means the writer's copy is
+        // stale — e.g. a tab resumed after a day — and writing it would roll
+        // every change since back. 409 hands the writer the current value
+        // to rebase on instead.
+        if (ifUpdatedAt !== null && previous && previous.updatedAt !== ifUpdatedAt) {
+          return { conflict: previous } as const;
+        }
+        return { previous, stored: await kv.set(namespace, key, body.value) } as const;
+      });
+      if ('conflict' in result) {
+        return jsonResponse({ error: `Stale write to ${namespace}:${key}`, current: result.conflict }, 409);
+      }
+      const { previous, stored } = result;
       OsEventBus.emit('kv:changed', {
         namespace,
         key,
@@ -113,6 +131,23 @@ export const ALL: APIRoute = async ({ params, request }) => {
     return jsonError(`KV error: ${(err as Error).message}`, 500);
   }
 };
+
+/**
+ * Run PUTs to one key one after another, so the `ifUpdatedAt` check and the
+ * write can't interleave with another request's. On globalThis: a rebuilt
+ * module (shell-watch) must share the queue with the old one.
+ */
+const g = globalThis as { __auraKvPutQueue?: Map<string, Promise<unknown>> };
+const putQueue = (g.__auraKvPutQueue ??= new Map());
+
+function serialized<T>(id: string, fn: () => Promise<T>): Promise<T> {
+  const prev = putQueue.get(id) ?? Promise.resolve();
+  const run = prev.then(fn, fn);
+  const tail = run.catch(() => undefined);
+  putQueue.set(id, tail);
+  void tail.then(() => { if (putQueue.get(id) === tail) putQueue.delete(id); });
+  return run;
+}
 
 /**
  * Returns a Response if the caller is forbidden, `null` if they may proceed.

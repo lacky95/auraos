@@ -33,10 +33,11 @@ const session = sessionBootInfo();
 
 // Both SSR reads in one round of the shared KV connection (lib/sharedKv.ts).
 const kv = sharedKv();
-const [mruMap, storedWorkspaces] = await Promise.all([
+const [mruMap, workspacesEntry] = await Promise.all([
   kv.getValue<Record<string, number>>('os', 'app-mru').then((v) => v ?? {}).catch(() => ({} as Record<string, number>)),
-  kv.getValue<WorkspaceState>('os', 'workspaces').catch(() => null),
+  kv.get<WorkspaceState>('os', 'workspaces').catch(() => null),
 ]);
+const storedWorkspaces = workspacesEntry?.value ?? null;
 const pinnedApps = [...allApps]
   .filter((m) => enabledMap[m.id] !== false)
   // Services are headless by design — they have no UI and clicking their
@@ -56,8 +57,13 @@ const pinnedApps = [...allApps]
 // by bootstrapKv() before any request hits this route. Defaults are used
 // only if Redis is unhealthy (shouldn't happen in steady state).
 let workspaceState: WorkspaceState = DEFAULT_WORKSPACE_STATE;
+// The stored version: the browser's writes are conditional on it
+// (lib/workspaceClient.ts), so a page that grew stale can't roll newer
+// workspaces back.
+let workspacesUpdatedAt: number | null = null;
 if (storedWorkspaces && Array.isArray(storedWorkspaces.workspaces) && storedWorkspaces.workspaces.length > 0) {
   workspaceState = storedWorkspaces;
+  workspacesUpdatedAt = workspacesEntry?.updatedAt ?? null;
 }
 
 /**
@@ -246,7 +252,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     <div id="layout-region-right"  class="layout-region" data-side="right"></div>
     <div id="layout-overlay" aria-hidden="true"></div>
     <script type="application/json" id="aura-initial-views" set:html={JSON.stringify(initialViews)}></script>
-    <script type="application/json" id="aura-initial-workspaces" set:html={JSON.stringify(workspaceState)}></script>
+    <script type="application/json" id="aura-initial-workspaces" data-updated-at={workspacesUpdatedAt ?? undefined} set:html={JSON.stringify(workspaceState)}></script>
     <script type="application/json" id="aura-boot" set:html={JSON.stringify(session)}></script>
 
     <!-- Focus mode: covers the entire viewport when activated from Process Manager -->
@@ -1539,8 +1545,9 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
   // Once we have data, switch to the JS-managed dynamicLayout immediately so close/minimize
   // and SSE updates work uniformly across SSR-rendered and dynamically-created slots.
   try {
-    const wsJson = document.getElementById('aura-initial-workspaces')?.textContent;
-    if (wsJson) workspaceClient.hydrate(JSON.parse(wsJson) as workspaceClient.WorkspaceState);
+    const wsNode = document.getElementById('aura-initial-workspaces');
+    const wsJson = wsNode?.textContent;
+    if (wsJson) workspaceClient.hydrate(JSON.parse(wsJson) as workspaceClient.WorkspaceState, Number(wsNode!.dataset['updatedAt']) || null);
   } catch (err) { console.warn('[shell] failed to hydrate workspaceState', err); }
   try {
     const ssrJson = document.getElementById('aura-initial-views')?.textContent;
