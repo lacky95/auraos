@@ -28,8 +28,9 @@ capabilities:
     source: npm
     package: "@github/copilot"
     binary: copilot
-    # Use the native binary instead of the npm loader, which resolves
-    # its platform package relative to itself.
+    # Same shape as codex: the npm bin is a JS loader that resolves a platform
+    # package relative to itself, so point at the native (glibc) binary from
+    # the optional linux-x64 dep instead.
     binary_path: /usr/local/lib/node_modules/@github/copilot/node_modules/@github/copilot-linux-x64/copilot
     description: "GitHub Copilot CLI"
 

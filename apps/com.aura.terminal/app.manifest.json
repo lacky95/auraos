@@ -20,7 +20,8 @@
     "git",
     "node",
     "claude-code",
-    "adb"
+    "adb",
+    "copilot"
   ],
   "provides": [
     {
@@ -35,7 +36,7 @@
       "kind": "http/rest",
       "address": "/api/sessions",
       "version": "1",
-      "description": "Terminal sessions of this instance as REST: GET list (each row has `agent`: what a Claude Code / Codex session reports \u2014 running, needs_approval, waiting_input, idle, exited), POST mint an id, DELETE ?id= kill; /screen?id=, /input?id=. Agent events: GET /api/sessions/events (snapshot) or ?stream=1 (SSE `agent` events); hooks POST there. Hook installer: GET/POST/DELETE /api/agent-hooks."
+      "description": "Terminal sessions of this instance as REST: GET list (each row has `agent`: what a Claude Code / Codex session reports — running, needs_approval, waiting_input, idle, exited), POST mint an id, DELETE ?id= kill; /screen?id=, /input?id=. Agent events: GET /api/sessions/events (snapshot) or ?stream=1 (SSE `agent` events); hooks POST there. Hook installer: GET/POST/DELETE /api/agent-hooks."
     },
     {
       "name": "embed",
