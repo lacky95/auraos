@@ -24,6 +24,7 @@ import { SidecarManager } from './SidecarManager.js';
 import { parentOfConsumer } from './MountManager.js';
 import type { SandboxExecOpts, SandboxRunner } from './SandboxRunner.js';
 import { selectOrphanSidecars } from './sidecars.js';
+import { SidecarParking, keepServicesOf } from './sidecarParking.js';
 import {
   INTENT_FLAGS, IntentError, IntentResolver, intentPayload, parseIntentRejection,
   type Intent, type IntentMatch, type IntentRejection,
@@ -83,6 +84,8 @@ export class AppManager {
   private sidecars: Array<{ runner: SandboxRunner; info: SidecarInfo }> = [];
   /** Consecutive syncs each sidecar's parent was absent — see selectOrphanSidecars. */
   private sidecarAbsence = new Map<string, number>();
+  /** Sidecars kept running across a restart/crash of their instance (sidecarParking.ts). */
+  private readonly sidecarParking = new SidecarParking();
   // Pool refills currently in flight per appId. The "pool" itself is just the
   // subset of `instances` with `inPool === true`; we don't keep a separate
   // queue (avoids stale instanceId references when a pool member dies). The
@@ -1441,8 +1444,14 @@ export class AppManager {
     return n;
   }
 
-  async stop(instanceId: string): Promise<void> {
+  /**
+   * Stop an instance. `reason: 'restart'` (appRestart) keeps the sibling
+   * containers that opted in (`aura.keep-restart=1`) running and parks them
+   * until the instance is back; any other stop removes them all.
+   */
+  async stop(instanceId: string, opts: { reason?: 'user' | 'restart' } = {}): Promise<void> {
     if (!this.runnerOf(instanceId).isRunning(instanceId)) return;
+    const reason = opts.reason ?? 'user';
     const inst = this.instances.get(instanceId);
     if (!inst) return;
     const appId = inst.appId;
@@ -1456,22 +1465,26 @@ export class AppManager {
     this.purgeActivitiesOfInstance(instanceId);
 
     this.transition(instanceId, appId, 'pausing', port);
-    await this.runnerOf(instanceId).callLifecycle(instanceId, 'onPause').catch(() => undefined);
+    await this.runnerOf(instanceId).callLifecycle(instanceId, 'onPause', { reason }).catch(() => undefined);
     this.transition(instanceId, appId, 'paused', port);
 
     this.transition(instanceId, appId, 'stopping', port);
-    await this.runnerOf(instanceId).callLifecycle(instanceId, 'onStop').catch(() => undefined);
+    await this.runnerOf(instanceId).callLifecycle(instanceId, 'onStop', { reason }).catch(() => undefined);
     this.transition(instanceId, appId, 'stopped', port);
 
     this.transition(instanceId, appId, 'destroying', null);
-    await this.runnerOf(instanceId).callLifecycle(instanceId, 'onDestroy').catch(() => undefined);
+    await this.runnerOf(instanceId).callLifecycle(instanceId, 'onDestroy', { reason }).catch(() => undefined);
     // Detach cross-app mounts BEFORE the container goes: a live bind under the
     // instance's data dir pins the source filesystem and would outlive it.
     this.mounts.forget(instanceId);
     this.tokens.forgetInstance(instanceId);
     this.osSidecars.forget(instanceId);
     this.portExpose.removeAll(instanceId);
-    await this.runnerOf(instanceId).kill(instanceId);
+    if (reason === 'restart') this.sidecarParking.park(instanceId);
+    else this.sidecarParking.unpark(instanceId);
+    await this.runnerOf(instanceId).kill(instanceId, reason === 'restart'
+      ? { keep: { services: keepServicesOf(this.registry.getById(appId)) } }
+      : {});
     if (port) this.ports.release(port);
     this.transition(instanceId, appId, 'destroyed', null);
 
@@ -1484,9 +1497,9 @@ export class AppManager {
   }
 
   /** Stop ALL instances of an app. */
-  async stopAll(appId: string): Promise<void> {
+  async stopAll(appId: string, opts: { reason?: 'user' | 'restart' } = {}): Promise<void> {
     const instances = this.getInstancesByApp(appId);
-    await Promise.all(instances.map((i) => this.stop(i.instanceId)));
+    await Promise.all(instances.map((i) => this.stop(i.instanceId, opts)));
   }
 
   /** Mark/unmark an app as being uninstalled. While marked, the warm-pool
@@ -1534,6 +1547,7 @@ export class AppManager {
     this.tokens.forgetInstance(instanceId);
     this.osSidecars.forget(instanceId);
     this.portExpose.removeAll(instanceId);
+    this.sidecarParking.unpark(instanceId); // a kill keeps nothing
     const killed = this.runnerOf(instanceId).forceKill(instanceId);
     if (port) this.ports.release(port);
     if (killed) {
@@ -2256,6 +2270,10 @@ export class AppManager {
 
   private transition(instanceId: string, appId: string, state: AppLifecycleState, port: number | null, error?: string): void {
     this.fsm.transition(instanceId, state);
+    // Back up after a restart/crash: its parked sidecars were adopted by the app.
+    if ((state === 'started' || state === 'resumed') && this.sidecarParking.unpark(instanceId)) {
+      console.log(`[AppManager] ${instanceId} is back — its parked sidecars stay`);
+    }
     this.upsertInstance(instanceId, appId, {
       state,
       port: port ?? this.instances.get(instanceId)?.port ?? null,
@@ -2477,6 +2495,12 @@ export class AppManager {
     //    sidecars whose parent instance is gone. Two consecutive misses are
     //    required so a sidecar is never reaped in the window between an
     //    instance being dropped and re-adopted.
+    // Parked sidecars whose instance did not come back in time.
+    for (const instanceId of this.sidecarParking.takeExpired()) {
+      if (this.instances.has(instanceId)) continue; // back (and adopted) after all
+      console.warn(`[AppManager] ${instanceId} did not come back — reaping its parked sidecars`);
+      this.runners.container.reapSiblingsOf?.(instanceId);
+    }
     await this.syncSidecars(2);
   }
 
@@ -2496,6 +2520,7 @@ export class AppManager {
     // Snapshot live instances AFTER listing: an instance always exists before
     // it can create a sidecar, so this order can't misclassify a new one.
     const live = new Set(this.instances.keys());
+    for (const p of this.sidecarParking.list()) if (this.sidecarParking.isParked(p.instanceId)) live.add(p.instanceId);
     const orphans = selectOrphanSidecars(fresh.map((s) => s.info), live, this.sidecarAbsence, graceTicks);
     if (orphans.length > 0) {
       const orphanIds = new Set(orphans.map((o) => o.id));
@@ -2568,7 +2593,10 @@ export class AppManager {
     // A crashed app never runs its onDestroy, so any sibling runtime containers
     // it spawned (with `--restart unless-stopped`) would keep running orphaned.
     // Reap them by label; a respawn re-creates fresh ones via the SDK.
-    this.runnerOf(instanceId).reapSiblingsOf?.(instanceId);
+    // Sidecars that opted in (aura.keep-restart=1) are parked instead, so a
+    // respawn adopts them; they are reaped if it doesn't come back in time.
+    this.sidecarParking.park(instanceId);
+    this.runnerOf(instanceId).reapSiblingsOf?.(instanceId, { keep: { services: keepServicesOf(this.registry.getById(appId)) } });
     // Same reasoning for cross-app mounts: a crash skips onDestroy, and a bind
     // left under the dead instance's data dir pins the source filesystem.
     this.mounts.removeAll(instanceId);

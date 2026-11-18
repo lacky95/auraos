@@ -295,6 +295,16 @@ export interface ServiceSpec {
 
   dns?: string[];
   restart?: 'no' | 'on-failure' | 'always' | 'unless-stopped';
+  /**
+   * Keep this sidecar running across a RESTART (or crash) of the app instance:
+   * the OS parks it instead of removing it, and the restarted instance's
+   * `ensure()` adopts the running container (same name). An explicit stop or
+   * kill still removes it at once; a restart that doesn't come back within
+   * the grace (3 min) gets it reaped. Sets the label `aura.keep-restart=1`.
+   * Your `onDestroy` should skip its own teardown when
+   * `reason === 'restart'` (see createLifecycleHandler). Default false.
+   */
+  keepAcrossRestart?: boolean;
   readiness?: { path?: string; timeoutMs?: number };
 
   /**
@@ -835,6 +845,7 @@ export class SidecarHost {
       '--label', `aura.parent=${this.opts.instanceId}`,
       '--label', `aura.app=${this.opts.appId}`,
       '--label', `aura.service=${svc.name}`,
+      ...(svc.keepAcrossRestart ? ['--label', 'aura.keep-restart=1'] : []),
       ...(svc.dns ?? []).flatMap((d) => ['--dns', d]),
       ...(svc.publish ?? []).flatMap((p) => ['-p', `${p.host}:${p.container}`]),
       ...(svc.volumes ?? []).flatMap((v) => {

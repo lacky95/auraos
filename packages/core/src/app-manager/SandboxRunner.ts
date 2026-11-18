@@ -1,3 +1,4 @@
+import type { KeepSiblings } from './sidecarParking.js';
 import type { AppManifest } from '../types/manifest.js';
 import type { SpawnContext } from '../scopes/types.js';
 import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
@@ -34,13 +35,16 @@ export interface SandboxRunner {
   /** Launch the app's astro process and wait until it's healthy. */
   spawn(instanceId: string, appId: string, port: number, manifest: AppManifest, ctx: SpawnContext): Promise<number>;
 
-  /** Graceful shutdown (SIGTERM, wait, then SIGKILL on the proot group). */
-  kill(instanceId: string): Promise<void>;
+  /** Graceful shutdown (SIGTERM, wait, then SIGKILL on the proot group).
+   *  `keep`: a restart stop — sibling containers that opted in keep running
+   *  (see sidecarParking.ts / KeepSiblings). */
+  kill(instanceId: string, opts?: { keep?: KeepSiblings }): Promise<void>;
   /** Hard kill (SIGKILL) — no lifecycle hooks. Returns whether anything was killed. */
   forceKill(instanceId: string): boolean;
 
-  /** Invoke a required lifecycle hook (onCreate/onStart/onResume/onPause/onStop/onDestroy). */
-  callLifecycle(instanceId: string, hook: string): Promise<void>;
+  /** Invoke a required lifecycle hook (onCreate/onStart/onResume/onPause/onStop/onDestroy).
+   *  `reason` (stop hooks) is sent as `x-aura-stop-reason: user|restart`. */
+  callLifecycle(instanceId: string, hook: string, opts?: { reason?: string }): Promise<void>;
   /** Invoke a best-effort lifecycle hook with optional payload. */
   callOptionalLifecycle(instanceId: string, hook: string, body?: unknown): Promise<unknown>;
 
@@ -103,7 +107,7 @@ export interface SandboxRunner {
    * unexpected exit so a crashed bring-your-own-runtime app doesn't leak its
    * siblings. Container-only; PRoot apps don't spawn siblings.
    */
-  reapSiblingsOf?(instanceId: string): void;
+  reapSiblingsOf?(instanceId: string, opts?: { keep?: KeepSiblings }): number;
   /**
    * Every sidecar this backend currently knows about, across all instances
    * (see `SidecarInfo`). Resolves null when the backend could not be queried,

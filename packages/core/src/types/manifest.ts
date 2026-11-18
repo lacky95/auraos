@@ -762,6 +762,14 @@ export const AppManifestSchema = z.object({
     dns: z.array(z.string()).default([]),
     /** Docker restart policy for the service. */
     restart: z.enum(['no', 'on-failure', 'always', 'unless-stopped']).default('unless-stopped'),
+    /**
+     * Keep this sidecar running across a RESTART (or crash) of the instance:
+     * the OS parks it (label `aura.keep-restart=1`) and the restarted instance
+     * adopts it; an explicit stop/kill still removes it at once, and it is
+     * reaped if the instance isn't back within the grace. App-managed (SDK
+     * docker mode) sidecars only for now. See app-manager/sidecarParking.ts.
+     */
+    keepAcrossRestart: z.boolean().optional(),
     /** Optional readiness probe used to gate `proxyDashboard` traffic. */
     readiness: z.object({
       path:      z.string().default('/'),

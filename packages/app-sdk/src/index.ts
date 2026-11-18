@@ -78,6 +78,7 @@ export { parseIntentPayload, IntentRejectedError } from './intent.js';
 export type { IntentPayload } from './intent.js';
 export type {
   LifecycleHookName,
+  LifecycleContext,
   ActivityCreateRequest,
   ActivityCreateResult,
   ActivityRestore,

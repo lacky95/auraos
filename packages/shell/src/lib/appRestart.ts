@@ -99,8 +99,10 @@ async function doRestart(appId: string, only?: string[]): Promise<RestartResult>
   });
 
   try {
-    if (only) await Promise.all(oldInstanceIds.map((id) => mgr.stop(id)));
-    else await mgr.stopAll(appId);
+    // reason 'restart': sidecars that opted in (keepAcrossRestart) keep running
+    // and the new instance adopts them (core sidecarParking.ts).
+    if (only) await Promise.all(oldInstanceIds.map((id) => mgr.stop(id, { reason: 'restart' })));
+    else await mgr.stopAll(appId, { reason: 'restart' });
     const instanceId = await mgr.start(appId);
 
     const restored: RestoredActivity[] = [];

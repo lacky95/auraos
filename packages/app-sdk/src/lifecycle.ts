@@ -59,18 +59,25 @@ export type LifecycleHookName =
   | 'onCreate' | 'onStart' | 'onResume'
   | 'onPause'  | 'onStop'  | 'onDestroy';
 
+/** Why a stop hook (onPause/onStop/onDestroy) runs: `restart` = the instance
+ *  comes right back (keep what should survive, e.g. `keepAcrossRestart`
+ *  sidecars); `user` = a real stop; null = not a stop, or an older OS. */
+export interface LifecycleContext { reason: 'user' | 'restart' | null; }
+
 /**
  * Factory for the six plain lifecycle hooks. Default behaviour: log + return
  * `{ ok: true }`. Pass `impl` to run app code; errors propagate as 500.
  */
 export function createLifecycleHandler(
   hook: LifecycleHookName,
-  impl?: () => void | Promise<void>,
+  impl?: (ctx: LifecycleContext) => void | Promise<void>,
 ): APIRoute {
-  return async () => {
-    console.log(`[${APP_ID()}] ${hook}`);
+  return async ({ request }) => {
+    const r = request.headers.get('x-aura-stop-reason');
+    const ctx: LifecycleContext = { reason: r === 'restart' || r === 'user' ? r : null };
+    console.log(`[${APP_ID()}] ${hook}${ctx.reason ? ` (${ctx.reason})` : ''}`);
     try {
-      if (impl) await impl();
+      if (impl) await impl(ctx);
     } catch (err) {
       console.error(`[${APP_ID()}] ${hook} failed:`, err);
       return json({ ok: false, error: String(err) }, 500);

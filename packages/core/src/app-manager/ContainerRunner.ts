@@ -11,6 +11,7 @@ import { userHomeSubpath } from '../scopes/home.js';
 // Value import, but MountManager imports ContainerRunner type-only, so there
 // is no runtime cycle.
 import { MOUNT_ROOT_PATH } from './MountManager.js';
+import { KEEP_RESTART_LABEL, keptAcrossRestart, type KeepSiblings } from './sidecarParking.js';
 import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
 import { SIDECAR_PS_FORMAT, USAGE_STATS_FORMAT, parseSidecarPs, parseUsageStats } from './sidecars.js';
@@ -815,16 +816,28 @@ export class ContainerRunner implements SandboxRunner {
    * labelled `aura.parent=<instanceId>` / `aura.app=<appId>` / `aura.service`
    * by the SDK so the OS can find and remove them. Idempotent.
    */
-  private reapSiblings(labelKey: 'aura.parent' | 'aura.app', labelVal: string): void {
+  /** Remove the containers with `labelKey=labelVal`. With `keep` (a restart
+   *  stop), the ones that opted in are left running; returns how many. */
+  private reapSiblings(labelKey: 'aura.parent' | 'aura.app', labelVal: string, keep?: KeepSiblings): number {
     let ids: string[] = [];
+    let kept = 0;
     try {
-      const out = execSync(`docker ps -aq --filter "label=${labelKey}=${labelVal}"`, {
+      const out = execSync(`docker ps -a --filter "label=${labelKey}=${labelVal}" --format '{{.ID}}\t{{.Names}}\t{{.Label "${KEEP_RESTART_LABEL}"}}\t{{.Label "aura.service"}}'`, {
         stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000, encoding: 'utf-8',
       });
-      ids = out.split('\n').map((s) => s.trim()).filter(Boolean);
+      for (const line of out.split('\n')) {
+        const [id, name, keepLabel, service] = line.trim().split('\t');
+        if (!id) continue;
+        if (keep && keptAcrossRestart(keepLabel, service, keep)) {
+          kept++;
+          console.log(`[ContainerRunner] parked sibling ${name ?? id} (${labelKey}=${labelVal}, survives the restart)`);
+          continue;
+        }
+        ids.push(id);
+      }
     } catch (err) {
       console.warn(`[ContainerRunner] reapSiblings ${labelKey}=${labelVal}: docker ps failed: ${(err as Error).message}`);
-      return;
+      return 0;
     }
     for (const id of ids) {
       try {
@@ -832,12 +845,13 @@ export class ContainerRunner implements SandboxRunner {
         console.log(`[ContainerRunner] reaped sibling ${id} (${labelKey}=${labelVal})`);
       } catch { /* already gone */ }
     }
+    return kept;
   }
 
   /** Remove sibling containers belonging to a specific instance. Public so
    *  AppManager can reap on graceful stop AND unexpected-exit (crash). */
-  public reapSiblingsOf(instanceId: string): void {
-    this.reapSiblings('aura.parent', instanceId);
+  public reapSiblingsOf(instanceId: string, opts: { keep?: KeepSiblings } = {}): number {
+    return this.reapSiblings('aura.parent', instanceId, opts.keep);
   }
 
   // ─── Sidecars (OS abstraction; container encoding in ./sidecars.ts) ───
@@ -1080,14 +1094,17 @@ export class ContainerRunner implements SandboxRunner {
   }
 
   // ─── Lifecycle hooks (identical shape to ProotRunner) ─────────────────
-  async callLifecycle(instanceId: string, hook: string): Promise<void> {
+  async callLifecycle(instanceId: string, hook: string, opts: { reason?: string } = {}): Promise<void> {
     const tracked = this.containers.get(instanceId);
     if (!tracked) return;
     const url = `http://${tracked.hostname}:${tracked.port}${lifecyclePath(tracked.manifest, instanceId, hook)}`;
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), LIFECYCLE_TIMEOUT_MS);
     try {
-      const res = await fetch(url, { method: 'POST', signal: ctrl.signal });
+      const res = await fetch(url, {
+        method: 'POST', signal: ctrl.signal,
+        ...(opts.reason ? { headers: { 'x-aura-stop-reason': opts.reason } } : {}),
+      });
       if (!res.ok) throw new Error(`${hook} → HTTP ${res.status}`);
     } finally { clearTimeout(t); }
   }
@@ -1111,15 +1128,16 @@ export class ContainerRunner implements SandboxRunner {
   }
 
   // ─── Kill / cleanup ───────────────────────────────────────────────────
-  async kill(instanceId: string): Promise<void> {
+  async kill(instanceId: string, opts: { keep?: KeepSiblings } = {}): Promise<void> {
     const tracked = this.containers.get(instanceId);
     if (!tracked) return;
     tracked.expectingKill = true;
     try { execSync(`docker stop -t 5 ${tracked.containerId}`, { stdio: 'ignore', timeout: 8_000 }); } catch { /* may already be dead */ }
     // Stop this instance's sibling runtime containers too (the app's own
     // onDestroy usually tears them down first; this is belt-and-braces so a
-    // failed/slow teardown can't leak them).
-    this.reapSiblingsOf(instanceId);
+    // failed/slow teardown can't leak them). A restart stop keeps the ones
+    // that opted in (aura.keep-restart=1); AppManager parks them.
+    this.reapSiblingsOf(instanceId, opts);
     this.handleExit(instanceId, 0);
   }
   forceKill(instanceId: string): boolean {
