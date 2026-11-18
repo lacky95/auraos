@@ -488,6 +488,21 @@ await os.activity.navigate('/keyboard');
 await os.activity.back();   // → /theme
 ```
 
+## osClient.flight
+
+Free-flight activities — small windows that float above every workspace and
+perch on a screen edge as a tab. The full guide is [Flights](/docs/flights).
+
+| Call | Does |
+|---|---|
+| `flight.open({ path?, title?, mode?, edge?, size?, … })` → `FlightHandle` | open a flight of this app (needs `system.overlay`) |
+| `flight.get(activityId)` / `flight.current()` / `flight.takeOff(rect?)` | a handle for an existing flight / this page's own flight / turn this window into one |
+| `handle.setBadge({ label?, count?, progress?, tint? } \| null)` | what the perched tab shows (state: a clock, a level) |
+| `handle.notify({ level: 'info' \| 'attention' \| 'urgent', text?, count?, blink?, ttlMs?, clearOnOpen? } \| null)` · `handle.clearNotice()` | ask for attention on the tab: colour + blink + text bubble + count (an event, not state); opening the flight clears it. Flight-only — separate from `osClient.notifications` |
+| `handle.perch(edge?, pos?)` · `unfold()` · `hide()` · `setMode(mode)` · `setRect(rect)` · `setEdgeSize(size)` | move it |
+| `handle.setTitle(t)` · `setActions([...])` · `setConfirmClose(on)` · `land()` · `close()` | title, buttons on its ongoing notification, the close veto, transitions |
+| `handle.on('change' \| 'perched' \| 'unfolded' \| 'mode' \| 'notice' \| 'closing' \| 'action' \| 'landed' \| 'closed', fn)` | events (browser only) |
+
 ## Loose exports
 
 ### Context (`packages/app-sdk/src/context.ts`)

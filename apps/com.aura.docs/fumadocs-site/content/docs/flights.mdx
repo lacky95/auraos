@@ -44,9 +44,9 @@ The edged drawer is an overlay (the windows below don't move) and is clearly
 docked: square and borderless on the edge side with an accent stripe, rounded
 inside, sliding in from the edge. Its title bar sits on the inner side and
 has **hide** (a chevron pointing into the edge), **float** (switch to free),
-**pop in** (plane-landing) and **close**. While it is open, its tab sticks
-out of its inner side as a handle: tap it to hide the drawer, press and hold
-to move it — along the edge or onto another edge, and the drawer follows.
+**pop in** (plane-landing) and **close**. While it is open, no tab is shown:
+the drawer's own title bar is the handle — click it to hide the drawer, drag
+it to move it along the edge or onto another edge.
 
 - Drag the drawer's title bar along the edge to slide it; drag it about 80 px
   away from the edge to **tear it off** into a free flight.
@@ -138,6 +138,42 @@ the theme accent). Updating it a few times a second is fine: the notification
 is only re-sent when its own content (title, perched/airborne, buttons)
 changes, not for badge updates.
 
+### Asking for attention: `notify`
+
+The badge is *state* (a clock, a level, a mode). When something *happened*
+that the user should look at — new messages, a call, a finished job — ask for
+attention on the tab:
+
+```ts
+f.notify({ level: 'attention', text: 'Koch: hi there', count: unread });
+f.notify({ level: 'urgent', text: 'Incoming call', blink: 6, clearOnOpen: false });
+f.clearNotice();                      // same as f.notify(null)
+```
+
+What it does:
+
+- **Perched (tab):** the tab takes the level's colour — `info` the app accent,
+  `attention` the theme's warning colour (amber), `urgent` the danger colour
+  (red) with a glow — **blinks** `blink` times (default 3) on arrival, shows
+  `count` on the tab (it wins over `badge.count` while set) and `text`
+  (≤ 24 chars) in a small bubble next to the tab for `ttlMs` (default 6 s).
+  The colour and the count stay until the notice is cleared.
+- **Open (panel or drawer):** the panel border / the drawer's edge stripe takes
+  the colour and pulses once; no bubble (the user sees your page anyway).
+- **Clearing:** `notify(null)`, or the user **opening** the flight from its tab
+  (an open acknowledges it) — unless you pass `clearOnOpen: false`, e.g. for an
+  unread count that only your own logic should clear. Landing or closing the
+  flight drops it too.
+- A notice **replaces** the previous one and blinks again on every call: call
+  it per event, not per tick (the badge is for ticking). It survives an OS
+  restart with the flight (without blinking again).
+- It is **separate from `osClient.notifications`**: nothing lands in the
+  notification center, nothing is shown while the flight is not perched or
+  open. Use a notification for things the user must see anywhere; use
+  `notify` for "look at this tab".
+
+Reduced-motion users get the colour without the blink.
+
 ## REST
 
 | Call | Does |
@@ -146,6 +182,7 @@ changes, not for badge updates.
 | `GET /api/flights` | every live flight (activityId, appId, path, title, icon, flight) |
 | `GET /api/activities/<id>/flight` | one activity's presentation + flight state |
 | `PATCH /api/activities/<id>/flight` `{ mode?, anchor?, folded?, edgeSize?, rect?, perch?, badge?, actions?, minSize?, title?, confirmClose? }` | switch mode / move / fold / re-label (`null` clears) / switch the close veto |
+| `POST /api/activities/<id>/flight/notify` `{ level, text?, count?, blink?, ttlMs?, clearOnOpen? }` or `null` · `DELETE …/flight/notify` | ask for attention on the tab (see above); `null`/DELETE clears |
 | `POST /api/activities/<id>/flight/takeoff` `{ rect? }` | window → flight |
 | `POST /api/activities/<id>/flight/land` | flight → window (active workspace) |
 | `POST /api/activities/<id>/flight/close` | user close (instant, or the veto round when `confirmClose` is on) |
@@ -158,7 +195,7 @@ changes, not for badge updates.
 On the OS event bus (`/api/apps/events`, shell Socket.IO):
 
 - `activity:opened` — carries `presentation: 'flight'` and `flight`.
-- `activity:flightChanged` — `{ presentation, flight, title, path, change: 'update' | 'land' | 'takeoff' }`.
+- `activity:flightChanged` — `{ presentation, flight, title, path, change: 'update' | 'land' | 'takeoff' | 'notice' }` (`flight.notice` carries the current notice, stamped `at`).
 - `activity:flightClosing` — `{ reason, vetoMs }`.
 - `activity:flightKept`, `activity:flightAction` — `{ actionId }`.
 - `activity:closed` — as for any activity.
@@ -168,8 +205,8 @@ On the OS event bus (`/api/apps/events`, shell Socket.IO):
 The shell also posts to the flight's iframe: `aura.flight.state`,
 `aura.flight.closing`, `aura.flight.action`, `aura.flight.mode`. The page may post
 `aura.flight.perch {edge?, pos?}`, `aura.flight.unfold`, `aura.flight.hide`,
-`aura.flight.show`, `aura.flight.mode {mode}` and
-`aura.flight.resize {w, h}` to the parent; the shell identifies the sender by
+`aura.flight.show`, `aura.flight.mode {mode}`, `aura.flight.resize {w, h}` and
+`aura.flight.notify {notice}` (`notice: null` clears) to the parent; the shell identifies the sender by
 its window, never by the payload.
 
 ## Example

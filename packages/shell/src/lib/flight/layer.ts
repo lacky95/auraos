@@ -25,7 +25,7 @@
  * tabs and devices follow via `activity:flightChanged`.
  *
  * Apps talk to their own flight from inside it over postMessage
- * (`aura.flight.*`, see app-sdk flight.ts); the sender is identified by
+ * (`aura.flight.*`, see app-sdk flight.ts — incl. `aura.flight.notify`); the sender is identified by
  * `ev.source`, never by the payload.
  */
 
@@ -34,6 +34,7 @@ import { runGesture, toLocal, localViewport, rectToLocal, type Edge } from '../k
 import { watchLock } from '../../components/shell/notifications/placement.ts';
 import { attachEdgeDrag } from '../edgeBadge.ts';
 import { claimFrame, moveInto, parkFrame } from './handoff.ts';
+import { noticeView, type Notice } from './notice.ts';
 import {
   clampFlightRect, defaultFlightRect, layoutTabs, nearestEdge, perchTarget, posAlong, unfoldRect,
   edgeRect, edgeSizeOf, distanceFromEdge, TEAR_OFF_PX,
@@ -57,6 +58,8 @@ interface FlightState {
   /** Compatibility alias (server-derived): folded ? anchor : null. */
   perch: Anchor | null;
   badge?: FlightBadge;
+  /** The app asked for attention (notice.ts). */
+  notice?: Notice | null;
   actions?: Array<{ id: string; label: string }>;
 }
 
@@ -86,6 +89,10 @@ interface FlightView extends FlightInfo {
   /** Gesture in progress: ignore server echoes for geometry. */
   busy: boolean;
   closing: boolean;
+  /** `notice.at` painted last (null before the first paint) — a change = blink. */
+  noticeAt: number | null;
+  /** Hides the notice's text bubble when its ttl is up. */
+  noteTimer: number;
 }
 
 const TAB = (() => { try { return crypto.randomUUID(); } catch { return `t${Math.random().toString(36).slice(2)}`; } })();
@@ -123,7 +130,7 @@ let zTop = 1;
 const enc = encodeURIComponent;
 const api = (id: string, suffix = '') => `/api/activities/${enc(id)}/flight${suffix}`;
 
-function send(id: string, suffix: string, method: 'PATCH' | 'POST', body?: unknown): Promise<Response | null> {
+function send(id: string, suffix: string, method: 'PATCH' | 'POST' | 'DELETE', body?: unknown): Promise<Response | null> {
   return fetch(api(id, suffix), {
     method,
     headers: { 'content-type': 'application/json', 'x-aura-tab': TAB },
@@ -211,10 +218,10 @@ function build(info: FlightInfo): FlightView {
   tab.type = 'button';
   tab.className = 'flight-tab';
   tab.dataset['activityId'] = info.activityId;
-  tab.innerHTML = `<span class="flight-tab-ring" aria-hidden="true"></span><span class="flight-tab-glyph"></span><span class="flight-tab-label"></span><span class="flight-tab-count" hidden></span>`;
+  tab.innerHTML = `<span class="flight-tab-ring" aria-hidden="true"></span><span class="flight-tab-glyph"></span><span class="flight-tab-label"></span><span class="flight-tab-count" hidden></span><span class="flight-tab-note" hidden></span>`;
 
   layer.append(tab);
-  const f: FlightView = { ...info, flight: normalize(info.flight), panel, tab, iframe, busy: false, closing: false };
+  const f: FlightView = { ...info, flight: normalize(info.flight), panel, tab, iframe, busy: false, closing: false, noticeAt: null, noteTimer: 0 };
   wire(f);
   return f;
 }
@@ -252,23 +259,43 @@ function paint(f: FlightView): void {
   } else if (!folded && mode === 'edge' && !f.busy) {
     place(f.panel, edgeRect(anchor, f.flight.edgeSize, vp.w, vp.h, ins));
   }
-  const tint = f.flight.badge?.tint;
-  if (tint) f.panel.style.setProperty('--flight-tint', tint); else f.panel.style.removeProperty('--flight-tint');
-
   const b = f.flight.badge ?? {};
+  // A notice (the app asks for attention) colours the tab and the panel by its level
+  // (CSS on data-notice) — the badge tint steps back while one is set.
+  const nv = noticeView(f.flight.notice, b.count, f.noticeAt, Date.now());
+  f.noticeAt = f.flight.notice?.at ?? 0;
+  const tint = nv.level ? undefined : f.flight.badge?.tint;
+  if (tint) f.panel.style.setProperty('--flight-tint', tint); else f.panel.style.removeProperty('--flight-tint');
+  for (const el of [f.tab, f.panel]) { if (nv.level) el.dataset['notice'] = nv.level; else delete el.dataset['notice']; }
+
   f.tab.querySelector<HTMLElement>('.flight-tab-glyph')!.textContent = glyph;
   const label = f.tab.querySelector<HTMLElement>('.flight-tab-label')!;
   label.textContent = b.label ?? '';
   label.hidden = !b.label;
   const count = f.tab.querySelector<HTMLElement>('.flight-tab-count')!;
-  count.textContent = b.count ? String(b.count > 99 ? '99+' : b.count) : '';
-  count.hidden = !b.count;
+  count.textContent = nv.count ? String(nv.count > 99 ? '99+' : nv.count) : '';
+  count.hidden = !nv.count;
+  const note = f.tab.querySelector<HTMLElement>('.flight-tab-note')!;
+  note.textContent = nv.text ?? '';
+  note.hidden = !nv.showText;
+  clearTimeout(f.noteTimer);
+  if (nv.textUntil !== null) f.noteTimer = window.setTimeout(() => { note.hidden = true; }, Math.max(0, nv.textUntil - Date.now()));
+  if (nv.blinkTimes > 0) { pulse(f.tab, nv.blinkTimes); pulse(f.panel, 1); }
   f.tab.style.setProperty('--flight-progress', typeof b.progress === 'number' ? String(b.progress) : '');
   f.tab.classList.toggle('has-progress', typeof b.progress === 'number');
-  if (b.tint) f.tab.style.setProperty('--flight-tint', b.tint); else f.tab.style.removeProperty('--flight-tint');
-  const tip = `${f.appName}${f.title && f.title !== f.appName ? ` — ${f.title}` : ''}${b.label ? ` · ${b.label}` : ''}`;
+  if (tint) f.tab.style.setProperty('--flight-tint', tint); else f.tab.style.removeProperty('--flight-tint');
+  const tip = `${f.appName}${f.title && f.title !== f.appName ? ` — ${f.title}` : ''}${b.label ? ` · ${b.label}` : ''}${nv.text ? ` · ${nv.text}` : ''}`;
   f.tab.title = `${tip}\nTap to open · hold to move`;
   f.tab.setAttribute('aria-label', `Open ${tip}`);
+}
+
+/** One-shot attention animation: `data-pulse` runs the CSS keyframes `times` and clears itself. */
+function pulse(el: HTMLElement, times: number): void {
+  el.style.setProperty('--flight-blink-n', String(times));
+  delete el.dataset['pulse'];
+  void el.offsetWidth; // restart the animation when one is still running
+  el.dataset['pulse'] = 'true';
+  el.addEventListener('animationend', () => { delete el.dataset['pulse']; }, { once: true });
 }
 
 function indexOf(f: FlightView): number {
@@ -590,6 +617,7 @@ function drop(id: string, park = false): void {
   const f = flights.get(id);
   if (!f) return;
   flights.delete(id);
+  clearTimeout(f.noteTimer);
   if (park) parkFrame(id, f.iframe);
   f.panel.remove();
   f.tab.remove();
@@ -682,6 +710,11 @@ function onMessage(ev: MessageEvent): void {
       else perchNearest(f);
       return;
     }
+    case 'aura.flight.notify':
+      // Ask for attention on its own tab (see notice.ts); `notice: null` clears.
+      if (d['notice'] === null) void send(f.activityId, '/notify', 'DELETE');
+      else if (d['notice'] && typeof d['notice'] === 'object') void send(f.activityId, '/notify', 'POST', d['notice']);
+      return;
     case 'aura.flight.unfold':
     case 'aura.flight.show':
       if (f.flight.folded) unfold(f);

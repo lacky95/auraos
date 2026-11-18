@@ -4,7 +4,8 @@ import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
 import type { AppLifecycleState } from '../types/lifecycle.js';
 import type { AppInstance, ResourceUsage, SidecarInfo } from '../types/instance.js';
-import type { AppActivity, ActivityRestoreSeed, FlightPatch, FlightState, FlightRect, FlightBadge, FlightAction, FlightEdge, FlightEdgeSize, FlightMode } from '../types/activity.js';
+import type { AppActivity, ActivityRestoreSeed, FlightPatch, FlightNotice, FlightState, FlightRect, FlightBadge, FlightAction, FlightEdge, FlightEdgeSize, FlightMode } from '../types/activity.js';
+import { cleanNotice, patchOpensFlight, noticeClearsOnOpen } from './flight-notice.js';
 import { ACTIVITY_STATE_MAX_BYTES, FLIGHT_MODES } from '../types/activity.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
 import { AppRegistry } from './AppRegistry.js';
@@ -1981,7 +1982,7 @@ export class AppManager {
     if (live >= max) throw new Error(`App ${appId} reached its flight limit (flight.maxPerApp=${max})`);
   }
 
-  private emitFlight(a: AppActivity, change: 'update' | 'land' | 'takeoff', by?: string): void {
+  private emitFlight(a: AppActivity, change: 'update' | 'land' | 'takeoff' | 'notice', by?: string): void {
     OsEventBus.emit('activity:flightChanged', {
       activityId: a.activityId,
       parentInstanceId: a.parentInstanceId,
@@ -2011,6 +2012,8 @@ export class AppManager {
     }
     if (patch.anchor !== undefined) f.anchor = cleanPerch(patch.anchor);
     if (patch.folded !== undefined) f.folded = patch.folded === true;
+    // Opening it (from its tab, or docking/floating open) acknowledges a notice that allows it.
+    if (patchOpensFlight(patch) && noticeClearsOnOpen(f.notice)) delete f.notice;
     if (patch.mode !== undefined) {
       const allowed = f.modes ?? FLIGHT_MODES;
       if (!allowed.includes(patch.mode)) throw new Error(`flight: mode '${String(patch.mode)}' is not one of ${allowed.join(', ')}`);
@@ -2034,6 +2037,21 @@ export class AppManager {
     a.lastTransitionAt = new Date();
     this.emitFlight(a, 'update', by);
     return cloneFlight(f);
+  }
+
+  /**
+   * Ask for attention on a flight's tab — flight-only, separate from the
+   * notification API. Replaces the previous notice; `null` clears. Each call
+   * stamps `at`, so the shell blinks again. Returns the new state, or null
+   * when the activity is not a flight. Throws on invalid input.
+   */
+  notifyFlight(activityId: string, notice: FlightNotice | null, by?: string): FlightState | null {
+    const a = this.activities.get(activityId);
+    if (!a || a.presentation !== 'flight' || !a.flight) return null;
+    if (notice === null) delete a.flight.notice; else a.flight.notice = cleanNotice(notice, Date.now());
+    a.lastTransitionAt = new Date();
+    this.emitFlight(a, 'notice', by);
+    return cloneFlight(a.flight);
   }
 
   /** Flight → normal window (the shell adds it to the active workspace). */
@@ -2755,6 +2773,8 @@ function normalizeFlight(req: Partial<FlightState>, defaults?: AppManifest['flig
   const min = req.minSize ?? defaults?.minSize;
   if (min) f.minSize = cleanSize(min);
   if (req.badge) f.badge = cleanBadge(req.badge);
+  // Restored state keeps its `at`: the shell then shows the notice without blinking again.
+  if (req.notice) f.notice = cleanNotice(req.notice, typeof req.notice.at === 'number' ? req.notice.at : Date.now());
   if (req.actions) f.actions = cleanActions(req.actions);
   return f;
 }

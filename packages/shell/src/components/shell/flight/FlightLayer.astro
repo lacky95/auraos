@@ -267,6 +267,48 @@
     pointer-events: none;
   }
 
+  /* ── Notice: the app asks for attention (lib/flight/notice.ts) ───────
+     Level → colour on the tab and the panel; one-shot blink on arrival via
+     data-pulse (removed on animationend); a text bubble beside the tab. */
+  .flight-tab[data-notice="info"],      .flight[data-notice="info"]      { --flight-tint: var(--aura-color-primary); }
+  .flight-tab[data-notice="attention"], .flight[data-notice="attention"] { --flight-tint: var(--aura-color-warning, #f5a524); }
+  .flight-tab[data-notice="urgent"],    .flight[data-notice="urgent"]    { --flight-tint: var(--aura-color-danger, #e5484d); }
+  .flight-tab[data-notice] { box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4), 0 0 8px var(--flight-tint); }
+  .flight-tab[data-notice="urgent"] { box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4), var(--aura-glow-danger, 0 0 12px var(--flight-tint)); }
+  .flight[data-notice] { border-color: var(--flight-tint); }
+  .flight[data-notice]:not([data-mode="edge"]) { box-shadow: 0 10px 34px rgba(0, 0, 0, 0.45), 0 0 10px var(--flight-tint); }
+  .flight-tab[data-pulse] { animation: aura-flight-blink 0.6s ease-in-out var(--flight-blink-n, 3); }
+  .flight[data-pulse]:not(.is-perched) { animation: aura-flight-pulse 0.9s ease-out 1; }
+  @keyframes aura-flight-blink {
+    0%, 100% { filter: brightness(1); }
+    50% { filter: brightness(1.6); box-shadow: 0 0 18px var(--flight-tint); }
+  }
+  @keyframes aura-flight-pulse {
+    0% { box-shadow: 0 0 0 0 var(--flight-tint); }
+    100% { box-shadow: 0 0 0 14px transparent; }
+  }
+  .flight-tab-note {
+    position: absolute;
+    max-width: 180px;
+    padding: 4px 8px;
+    border-radius: 8px;
+    border: 1px solid var(--flight-tint);
+    background: var(--aura-color-surface, var(--aura-color-bg));
+    color: var(--aura-color-text);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+    font-size: 11px;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+  }
+  .flight-tab-note[hidden] { display: none; }
+  .flight-tab[data-edge="left"]   .flight-tab-note { left: calc(100% + 8px);  top: 50%;  transform: translateY(-50%); }
+  .flight-tab[data-edge="right"]  .flight-tab-note { right: calc(100% + 8px); top: 50%;  transform: translateY(-50%); }
+  .flight-tab[data-edge="top"]    .flight-tab-note { top: calc(100% + 8px);   left: 50%; transform: translateX(-50%); }
+  .flight-tab[data-edge="bottom"] .flight-tab-note { bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%); }
+
   @media (prefers-reduced-motion: reduce) {
     .flight, .flight-tab { transition: none; animation: none; }
   }

@@ -130,6 +130,31 @@ export interface FlightBadge {
   tint?: string;
 }
 
+/** How loud a flight asks for attention (`FlightNotice.level`). */
+export type FlightNoticeLevel = 'info' | 'attention' | 'urgent';
+/**
+ * A flight-only "look here": colours the perched tab (and an open drawer's
+ * stripe), blinks it on arrival, shows a short text bubble and a count.
+ * Separate from `badge` (which apps re-send freely) and from the OS
+ * notification API. Set with `AppManager.notifyFlight`; `null` clears.
+ */
+export interface FlightNotice {
+  /** info = app accent, attention = warning colour, urgent = danger colour + glow. */
+  level: FlightNoticeLevel;
+  /** Short text in a bubble next to the tab (≤ 24 chars), gone after `ttlMs`. */
+  text?: string;
+  /** Count on the tab (1..9999); overrides `badge.count` while set. */
+  count?: number;
+  /** One-shot flashes on arrival, 0..10 (default 3). */
+  blink?: number;
+  /** How long the text bubble stays, ms (1 000..60 000, default 6 000). */
+  ttlMs?: number;
+  /** Opening (unfolding) the flight clears the notice (default true). */
+  clearOnOpen?: boolean;
+  /** Set by the OS: when this notice arrived. A new `at` = blink again. */
+  at?: number;
+}
+
 export interface FlightAction { id: string; label: string }
 
 /**
@@ -169,6 +194,8 @@ export interface FlightState {
    */
   perch: FlightAnchor | null;
   badge?: FlightBadge;
+  /** Attention asked by the app (`AppManager.notifyFlight`). */
+  notice?: FlightNotice;
   /** App buttons on the flight's ongoing notification (≤ 2). */
   actions?: FlightAction[];
 }

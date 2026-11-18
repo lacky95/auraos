@@ -9,6 +9,12 @@
  * on the tab opens it again; press-and-hold moves the tab along or onto any
  * edge.
  *
+ * Asking for attention from the tab (flight-only, separate from
+ * `osClient.notifications`): `f.notify({ level: 'attention', text: 'Koch: hi', count: 3 })`
+ * colours the perched tab (amber; 'urgent' red), blinks it, shows the text
+ * in a bubble for a few seconds and the count on the tab. Opening the flight
+ * clears it (unless `clearOnOpen: false`); `f.clearNotice()` clears it too.
+ *
  * While a flight lives, the OS shows an ongoing notification for it (Show /
  * Perch / Close + up to two of your own buttons via `setActions`). The user
  * can't swipe it away — only close the flight.
@@ -66,6 +72,25 @@ export interface FlightBadge {
   /** CSS colour of the tab (default: the theme accent). */
   tint?: string;
 }
+/** How loud a flight asks for attention. */
+export type FlightNoticeLevel = 'info' | 'attention' | 'urgent';
+/** `FlightHandle.notify` — what the tab shows to ask for attention. */
+export interface FlightNotice {
+  /** info = app accent, attention = warning colour (amber), urgent = danger colour (red) + glow. */
+  level: FlightNoticeLevel;
+  /** ≤ 24 chars, in a bubble next to the tab for `ttlMs`. */
+  text?: string;
+  /** 1..9999 on the tab; overrides `badge.count` while set. */
+  count?: number;
+  /** One-shot flashes on arrival, 0..10 (default 3). */
+  blink?: number;
+  /** How long the text bubble stays (ms, 1 000..60 000, default 6 000). The colour/count stay until cleared. */
+  ttlMs?: number;
+  /** Opening the flight clears the notice (default true). */
+  clearOnOpen?: boolean;
+  /** Set by the OS: when this notice arrived. */
+  at?: number;
+}
 export interface FlightAction { id: string; label: string }
 /** How a flight shows up: a free floating panel, or a drawer stuck to an edge. */
 export type FlightMode = 'free' | 'edge';
@@ -90,6 +115,8 @@ export interface FlightState {
   /** Compatibility alias: `folded ? anchor : null`. */
   perch: FlightAnchor | null;
   badge?: FlightBadge;
+  /** The attention currently asked (see `notify`). */
+  notice?: FlightNotice | null;
   actions?: FlightAction[];
   /** The close veto is on (see `setConfirmClose`). */
   confirmClose?: boolean;
@@ -144,6 +171,8 @@ export interface FlightEvents {
   closing: FlightClosingEvent;
   /** One of your `setActions` buttons was pressed on the notification. */
   action: { actionId: string };
+  /** The notice changed (set, replaced, or cleared — also by the user opening the flight). */
+  notice: { notice: FlightNotice | null };
   /** It became a normal window (the user pressed ⧉). */
   landed: Record<string, never>;
   closed: Record<string, never>;
@@ -177,6 +206,7 @@ export class FlightHandle {
   private unsubscribe: (() => void) | null = null;
   private lastPerched: boolean | null = null;
   private lastMode: FlightMode | null = null;
+  private lastNoticeAt: number | null = null;
 
   constructor(private readonly client: OsClient, readonly activityId: string, private state: FlightState | null = null) {}
 
@@ -217,6 +247,22 @@ export class FlightHandle {
   /** What the tab shows; `null` clears. Replaces the previous badge. */
   setBadge(badge: FlightBadge | null): Promise<FlightState> { return this.patch({ badge }); }
   setTitle(title: string): Promise<FlightState> { return this.patch({ title }); }
+  /**
+   * Ask for attention on the tab — flight-only, separate from
+   * `osClient.notifications`. Replaces the previous notice; `null` clears.
+   * Each call blinks the tab again, so call it per event, not per tick.
+   *
+   *   f.notify({ level: 'attention', text: 'Koch: hi', count: unread });
+   *   f.notify({ level: 'urgent', text: 'Incoming call', blink: 6, clearOnOpen: false });
+   */
+  async notify(notice: FlightNotice | null): Promise<FlightState> {
+    const res = await call(act(this.activityId, '/flight/notify'), 'POST', notice);
+    const body = await res.json() as { flight: FlightState };
+    this.state = body.flight;
+    return body.flight;
+  }
+  /** Same as `notify(null)`. */
+  clearNotice(): Promise<FlightState> { return this.notify(null); }
   /** Up to two buttons on the ongoing notification → `on('action')`. */
   setActions(actions: FlightAction[] | null): Promise<FlightState> { return this.patch({ actions }); }
   /**
@@ -283,6 +329,9 @@ export class FlightHandle {
             this.lastPerched = folded;
             if (this.lastMode !== null && f.mode && f.mode !== this.lastMode) this.emit('mode', { mode: f.mode });
             if (f.mode) this.lastMode = f.mode;
+            const noticeAt = f.notice?.at ?? 0;
+            if (ev['change'] === 'notice' || (this.lastNoticeAt !== null && noticeAt !== this.lastNoticeAt)) this.emit('notice', { notice: f.notice ?? null });
+            this.lastNoticeAt = noticeAt;
             return;
           }
           case 'activity:flightClosing':
@@ -305,6 +354,7 @@ export class FlightHandle {
     );
     this.lastPerched = this.state ? (this.state.folded ?? !!this.state.perch) : null;
     this.lastMode = this.state?.mode ?? null;
+    this.lastNoticeAt = this.state ? (this.state.notice?.at ?? 0) : null;
   }
 }
 

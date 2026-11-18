@@ -13,7 +13,7 @@ export { ActivityApi } from './activity.js';
 // Free-flight activities — `osClient.flight`.
 export { FlightApi, FlightHandle } from './flight.js';
 export type {
-  FlightEdge, FlightRect, FlightBadge, FlightAction, FlightState, FlightOpenOptions,
+  FlightEdge, FlightRect, FlightBadge, FlightNotice, FlightNoticeLevel, FlightAction, FlightState, FlightOpenOptions,
   FlightMode, FlightAnchor, FlightEdgeSize,
   FlightClosingEvent, FlightEvents,
 } from './flight.js';
