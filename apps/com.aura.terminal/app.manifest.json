@@ -10,7 +10,8 @@
     "storage.read",
     "storage.write",
     "network.local",
-    "apps.mount"
+    "apps.mount",
+    "system.overlay"
   ],
   "tools": [
     "*",
@@ -64,6 +65,12 @@
     "defaultWidth": 800,
     "defaultHeight": 500,
     "resizable": true
+  },
+  "flight": {
+    "maxPerApp": 4,
+    "defaultSize": { "w": 640, "h": 400 },
+    "minSize": { "w": 320, "h": 180 },
+    "edgeSize": { "length": "full", "depth": 420 }
   },
   "preferredLayout": "tiling"
 }
