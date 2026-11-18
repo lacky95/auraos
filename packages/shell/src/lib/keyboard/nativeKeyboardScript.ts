@@ -24,6 +24,10 @@
  * The `field` messages let the shell open its keyboard when a field gets
  * focus and close it again when focus leaves — the device keyboard's own
  * behaviour. They are only sent on coarse-pointer (touch) screens.
+ * In an app document, focus that moves into a child iframe is not reported
+ * as leaving: a frame that relays these messages (the Browser app's engine)
+ * reports its own field, and a "left" from here would race it and close the
+ * keyboard.
  *
  * Kept as ES5-style source in a string because it is injected verbatim as a
  * <script>; do not reference anything outside the IIFE.
@@ -41,7 +45,7 @@ function post(m){try{P.postMessage(m,P===window?location.origin:'*');}catch(_){}
 function setOn(v){v=!!v;if(v===on)return;on=v;if(on)mute(focused());else unmuteAll();}
 addEventListener('pointerdown',function(e){if(on)mute(deepTarget(e));},true);
 addEventListener('focusin',function(e){var t=deepTarget(e);if(on)mute(t);if(editable(t)&&coarse()){clearTimeout(blurTimer);post({type:'aura.keyboard.field',focused:true});}},true);
-addEventListener('focusout',function(e){if(!editable(deepTarget(e))||!coarse())return;clearTimeout(blurTimer);blurTimer=setTimeout(function(){if(!editable(focused()))post({type:'aura.keyboard.field',focused:false});},200);},true);
+addEventListener('focusout',function(e){if(!editable(deepTarget(e))||!coarse())return;clearTimeout(blurTimer);blurTimer=setTimeout(function(){var f=focused();if(!editable(f)&&!(P!==window&&f&&f.tagName==='IFRAME'))post({type:'aura.keyboard.field',focused:false});},200);},true);
 addEventListener('message',function(ev){var d=ev.data;if(!d||d.type!=='aura.keyboard.policy'||ev.source!==P)return;setOn(d.suppressNative);});
 post({type:'aura.keyboard.hello'});
 }catch(_){}})();`;

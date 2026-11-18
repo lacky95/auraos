@@ -71,6 +71,7 @@ const FRAME_NAME = JSON.stringify({
         <div class="menu-wrap">
           <button id="settings-btn" title="Settings" aria-label="Settings" aria-haspopup="true" aria-expanded="false">⚙</button>
           <div id="settings-menu" class="settings-menu" role="menu" hidden>
+            <button id="menu-native-btn" type="button" role="menuitemcheckbox" aria-checked="false" disabled title="Checking whether this device can open native windows…">Native mode</button>
             <button id="menu-debug-btn" type="button" role="menuitem" aria-pressed="false">Debug panel</button>
           </div>
         </div>
@@ -383,6 +384,9 @@ const FRAME_NAME = JSON.stringify({
         color: var(--aura-color-primary, #00ff41);
         outline: none;
       }
+      .settings-menu button:disabled { opacity: 0.5; cursor: default; }
+      .settings-menu button:disabled:hover { border-color: transparent; color: var(--aura-color-text, #ccffcc); }
+      .settings-menu button[aria-checked="true"],
       .settings-menu button[aria-pressed="true"] {
         background: color-mix(in srgb, var(--aura-color-primary, #00ff41) 12%, transparent);
         border-color: var(--aura-color-primary, #00ff41);
@@ -410,6 +414,7 @@ const FRAME_NAME = JSON.stringify({
         var settingsBtn = document.getElementById('settings-btn');
         var settingsMenu= document.getElementById('settings-menu');
         var menuDebugBtn= document.getElementById('menu-debug-btn');
+        var menuNativeBtn= document.getElementById('menu-native-btn');
         var zoomInB  = document.getElementById('zoom-in-btn');
         var zoomOutB = document.getElementById('zoom-out-btn');
         var zoomRstB = document.getElementById('zoom-reset-btn');
@@ -656,6 +661,43 @@ const FRAME_NAME = JSON.stringify({
           dbgRefresh();
         });
 
+        // ── Virtual keyboard relay into the engine ────────────────
+        // The shell's keyboard messages reach THIS document (the proxy injects
+        // the receiver and the device-keyboard policy script here). When focus
+        // is inside the engine iframe, our receiver can only hit the <iframe>
+        // element, so we pass the messages one frame further down. A page in
+        // there that runs the same scripts (AuraOS pages via /api/proxy, or a
+        // host that injects them) accepts them because we are its parent.
+        // Cross-origin sites without them ignore the messages.
+        //   shell → engine: aura.key.synthetic (only while the engine has
+        //                   focus), aura.keyboard.policy
+        //   engine → shell: aura.keyboard.hello / .field / .open / .close
+        var KB_UP = { 'aura.keyboard.hello': 1, 'aura.keyboard.field': 1, 'aura.keyboard.open': 1, 'aura.keyboard.close': 1 };
+        window.addEventListener('message', function (e) {
+          var d = e.data;
+          if (!d || typeof d !== 'object' || typeof d.type !== 'string') return;
+          var inner = engine.contentWindow;
+          if (e.source === window.parent && window.parent !== window) {
+            if (!inner) return;
+            if (d.type === 'aura.keyboard.policy' ||
+                (d.type === 'aura.key.synthetic' && document.activeElement === engine)) {
+              try { inner.postMessage(d, '*'); } catch (err) { /* engine gone */ }
+            }
+            return;
+          }
+          if (!inner || e.source !== inner || !KB_UP[d.type]) return;
+          // The engine reports "left" when focus moves up into our own chrome
+          // too; when that is a text field (the URL bar) our document has just
+          // reported it as focused, and passing this on would close the keyboard.
+          if (d.type === 'aura.keyboard.field' && !d.focused && isTextField(document.activeElement)) return;
+          postToOs(d.type, d);
+        });
+        function isTextField(el) {
+          if (!el || el === engine) return false;
+          if (el.isContentEditable || el.tagName === 'TEXTAREA') return true;
+          return el.tagName === 'INPUT' && /^(text|search|email|url|tel|password|number|)$/i.test(el.type || '');
+        }
+
         // ── Native surface: pages that refuse to be framed ────────
         //
         // Some sites can only run as a top-level document — duck.ai's
@@ -672,7 +714,15 @@ const FRAME_NAME = JSON.stringify({
         // host can give us a native window. We cannot check for Capacitor
         // ourselves: the host injects its bridge only into the shell's own
         // document, so window.Capacitor is undefined in here. Only the OS knows.
+        //
+        // The user can turn it off from the ⚙ menu (stored per browser): then
+        // pages render in the iframe even on a host that has native windows,
+        // and a page that cannot be framed is not moved to a native window.
         var nativeMode  = false;
+        var nativeSupported = false;
+        var NATIVE_PREF_KEY = 'aura.browser.nativeMode';
+        var nativeWanted = true;
+        try { nativeWanted = localStorage.getItem(NATIVE_PREF_KEY) !== 'off'; } catch (err) { /* storage blocked */ }
         var surfaceId   = null;
         var surfaceUrl  = null;
         var surfaceRO   = null;
@@ -795,15 +845,11 @@ const FRAME_NAME = JSON.stringify({
 
           // Startup capability answer.
           if (d.type === 'aura.surface.capability') {
-            nativeMode = d.supported === true;
-            dbgLog_line('ok', 'native window support: ' + (nativeMode ? 'yes' : 'no'));
-            if (nativeMode) {
-              // Take over immediately: whatever the iframe was showing gets
-              // re-opened natively so there is one consistent engine.
-              var start = history[cursor] || HOME;
-              engine.setAttribute('src', 'about:blank');
-              attachSurface(start);
-            }
+            nativeSupported = d.supported === true;
+            dbgLog_line('ok', 'native window support: ' + (nativeSupported ? 'yes' : 'no') + (nativeWanted ? '' : ' (turned off)'));
+            // Take over immediately: whatever the iframe was showing gets
+            // re-opened natively so there is one consistent engine.
+            setNativeMode(nativeSupported && nativeWanted);
             return;
           }
 
@@ -851,8 +897,41 @@ const FRAME_NAME = JSON.stringify({
           // to every window, since it cannot tell which one framed the URL.
           var current = history[cursor];
           if (!current || !sameSite(d.url, current)) return;
+          if (!nativeWanted) { dbgLog_line('warn', 'cannot be framed (' + (d.reason || '?') + '); native mode is off'); return; }
           dbgLog_line('warn', 'cannot be framed (' + (d.reason || '?') + ') → going native');
           attachSurface(d.url);
+        });
+
+        // Switch the engine between the native window and the iframe, keeping
+        // the page the user is on.
+        function setNativeMode(on) {
+          on = on && nativeSupported;
+          syncNativeMenu(on);
+          if (on === nativeMode && (on ? surfaceId : !surfaceId)) return;
+          nativeMode = on;
+          var current = surfaceUrl || history[cursor] || HOME;
+          if (on) {
+            engine.setAttribute('src', 'about:blank');
+            attachSurface(current);
+          } else {
+            detachSurface('native mode off');
+            navigate(current, { push: current !== history[cursor] });
+          }
+          dbgLog_line('ok', 'native mode ' + (on ? 'on' : 'off'));
+        }
+        function syncNativeMenu(on) {
+          menuNativeBtn.disabled = !nativeSupported;
+          menuNativeBtn.setAttribute('aria-checked', String(on));
+          menuNativeBtn.textContent = 'Native mode: ' + (on ? 'on' : 'off');
+          menuNativeBtn.title = nativeSupported
+            ? 'Open pages in a native window (on) or in this window\'s iframe (off)'
+            : 'This device cannot open native windows';
+        }
+        menuNativeBtn.addEventListener('click', function () {
+          nativeWanted = !nativeMode;
+          try { localStorage.setItem(NATIVE_PREF_KEY, nativeWanted ? 'on' : 'off'); } catch (err) { /* storage blocked */ }
+          toggleMenu(false);
+          setNativeMode(nativeWanted);
         });
 
         // Startup probe: does the host offer native windows? The answer
