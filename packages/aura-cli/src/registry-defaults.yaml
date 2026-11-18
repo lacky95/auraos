@@ -24,6 +24,15 @@ capabilities:
     # OWN executable, so without it Code Mode fails closed on every run.
     description: "OpenAI Codex CLI"
 
+  copilot:
+    source: npm
+    package: "@github/copilot"
+    binary: copilot
+    # Use the native binary instead of the npm loader, which resolves
+    # its platform package relative to itself.
+    binary_path: /usr/local/lib/node_modules/@github/copilot/node_modules/@github/copilot-linux-x64/copilot
+    description: "GitHub Copilot CLI"
+
   ssh:
     source: apt
     package: openssh-client
