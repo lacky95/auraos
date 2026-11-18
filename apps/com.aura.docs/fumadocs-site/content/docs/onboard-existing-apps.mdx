@@ -28,6 +28,7 @@ Then pick:
 
 | Strategy | Use when | Reference |
 |---|---|---|
+| **0. App host** | The UI must own an origin root: it builds `/api/…` or asset URLs at runtime, proxies other pages, or has no working base-path setting. Serve it at its own host name and skip the prefix work below entirely. | [App hosts](/docs/app-hosts) |
 | **A. Native app** | The UI is small, or you want it to feel like AuraOS. You rebuild it as an Astro app and call the original's API or library. | [Develop an app](/docs/develop-an-app) |
 | **B. Direct process** | A single binary or package, no foreign image. It runs inside the app container behind a small lifecycle wrapper. | `com.aura.registry` |
 | **C. Sidecar, zero-config** | A Docker image that starts without first-run input. `createSidecars().listen()` does everything. | [Bring-your-own-runtime](/docs/bring-your-own-runtime), `com.aura.hermes` |
@@ -164,6 +165,12 @@ that prefix before forwarding, so the app sees `/`. But anything the
 **browser** resolves from a root-absolute path (`/api/x`, `/assets/y`) goes to
 the shell, not to your app. The shell's 404 page and the JSON parse errors you
 get from it are the most common onboarding failures.
+
+<Callout type="info">
+If the list below turns into a fight, step back: declare an
+[app host](/docs/app-hosts) and serve the UI at the root of its own host
+name. Nothing is rewritten there, so none of these fixes are needed.
+</Callout>
 
 Fix it from the top of this list down, and stop as soon as the UI works:
 

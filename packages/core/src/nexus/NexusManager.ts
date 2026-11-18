@@ -9,7 +9,7 @@
  * `next()` call before continuing. The caller (CLI or shell route)
  * implements its own approval UI between yields.
  */
-import { mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import type { OsEventBus as OsEventBusSingleton } from '../ipc/OsEventBus.js';
@@ -19,7 +19,8 @@ import { Resolver } from './Resolver.js';
 type OsEventBus = typeof OsEventBusSingleton;
 import { CatalogAggregator } from './CatalogAggregator.js';
 import { Installer } from './Installer.js';
-import { validateStagedDir } from './Validator.js';
+import { NexusValidationError, validateStagedDir } from './Validator.js';
+import { hostConflicts, type HostClaim } from '../app-hosts/appHosts.js';
 import { fetchLocal } from './Fetchers/LocalFetcher.js';
 import { fetchGit } from './Fetchers/GitFetcher.js';
 import { fetchOci } from './Fetchers/OciFetcher.js';
@@ -263,6 +264,24 @@ export class NexusManager {
 
   /** Every installed app with its originId and install record, highest
    *  priority scope first (the copy the OS actually runs comes first). */
+  /** Every installed app's host names, read straight from the manifests on disk. */
+  private installedHostClaims(): HostClaim[] {
+    const out: HostClaim[] = [];
+    for (const s of this.scopeDefs) {
+      let dirs: string[];
+      try { dirs = readdirSync(s.appsDir); } catch { continue; }
+      for (const d of dirs) {
+        try {
+          const m = JSON.parse(readFileSync(join(s.appsDir, d, 'app.manifest.json'), 'utf8')) as { id?: unknown; hosts?: unknown };
+          if (typeof m.id !== 'string' || !Array.isArray(m.hosts)) continue;
+          const hosts = m.hosts.filter((h): h is { name: string } => !!h && typeof (h as { name?: unknown }).name === 'string');
+          if (hosts.length) out.push({ appId: m.id, hosts });
+        } catch { /* not an app dir, or an unreadable manifest */ }
+      }
+    }
+    return out;
+  }
+
   private installedIdentities(): InstalledIdentity[] {
     const out: InstalledIdentity[] = [];
     for (const s of [...this.scopeDefs].sort((a, b) => b.priority - a.priority)) {
@@ -381,6 +400,11 @@ export class NexusManager {
       yield { type: 'fetch.done', stagingDir };
 
       let manifest = validateStagedDir(stagingDir);
+      // App host names are global: `{name}--{host}` must route to ONE app.
+      const clashes = hostConflicts({ appId: manifest.id, hosts: manifest.hosts }, this.installedHostClaims());
+      if (clashes.length) {
+        throw new NexusValidationError(clashes.map((c) => `hosts: '${c.name}' is already the app host of ${c.heldBy}`));
+      }
       keys.add(manifest.id); this.installing.add(manifest.id);
       yield { type: 'validate.done', manifest };
 

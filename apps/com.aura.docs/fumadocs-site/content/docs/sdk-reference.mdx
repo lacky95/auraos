@@ -560,6 +560,22 @@ export const ALL: APIRoute = ({ request, params }) =>
   proxyFetch(`http://localhost:8080/${params['path']}`, request);
 ```
 
+### App hosts (`packages/app-sdk/src/hosts.ts`)
+
+The URL of an [app host](/docs/app-hosts) your manifest declares:
+`{name}--{the host AuraOS is open at}`, same scheme and port. `null` when
+AuraOS was opened by raw IP.
+
+| Symbol | Signature | Note |
+|---|---|---|
+| `appHostUrl` | `(name: string, desktop?: { protocol: string; host: string }) => string \| null` | **(B)** Defaults to `location`; inside an app iframe that is the desktop's origin. |
+| `appHostUrlFromRequest` | `(request: Request, name: string) => string \| null` | **(S)** Reads `X-Forwarded-Proto` / `-Host` the shell sets. |
+
+```ts
+import { appHostUrl } from '@aura/app-sdk';
+frame.src = (appHostUrl('marklayer') ?? 'about:blank') + '/s/' + room;
+```
+
 ### OS-managed sidecars (`packages/app-sdk/src/os-sidecars.ts`)
 
 **(S)** server-only. Import from `@aura/app-sdk/os-sidecars` (also re-exported

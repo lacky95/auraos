@@ -3,6 +3,7 @@
   "pages": [
     "introduction",
     "installation",
+    "reaching-auraos",
     "getting-started",
     "quick-start",
     "develop-an-app",
@@ -14,6 +15,7 @@
     "flights",
     "onboard-existing-apps",
     "bring-your-own-runtime",
+    "app-hosts",
     "sidecars",
     "sdk-reference",
     "cli-reference",

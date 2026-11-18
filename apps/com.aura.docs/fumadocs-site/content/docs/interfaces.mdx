@@ -57,6 +57,7 @@ proxy base when handing out a live URL.
 | `http` `rest` `mcp` `ws` | a path on **your own server**, must start with `/` | `/api/transcribe` | `/api/proxy/<instanceId>/api/transcribe` |
 | `event` | an OsEventBus topic or glob, **no** leading `/` | `whisper:transcript.*` | `/api/apps/events?topics=…` |
 | `kv` | a KV namespace/key prefix, **no** leading `/` | `app/com.acme.api/jobs` | `/api/kv/app/com.acme.api/jobs` |
+| `http/host` | the [app host](/docs/app-hosts) name — never declared in `provides`, the registry derives it from `hosts[]` | `marklayer` | `/api/apps/<appId>/hosts/marklayer` (a redirect to `{name}--{your host}`) |
 
 That leading-slash rule is validated at parse time: get it wrong and the
 manifest is rejected rather than silently producing an address nobody can dial.

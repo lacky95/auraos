@@ -11,6 +11,7 @@
  * Node's loader, before/without Vite.
  */
 import { attachSseMux, MUX_PATH } from './sse-mux.mjs';
+import { createAppHostRouter } from './app-hosts.mjs';
 
 // Plain-inline mirror of @aura/core/logger's filter spec. These servers are
 // attached before (dev: astro.config.mjs) or beside (prod: server.mjs) the
@@ -437,8 +438,24 @@ export async function attachSio(httpServer) {
   sioDbg('attached', '/os-events', 'transports=websocket');
 }
 
+/**
+ * App hosts (./app-hosts.mjs): requests for `{name}--{desktop host}` go
+ * straight to the app or sidecar that declares the host, before any other
+ * listener sees them. Attach it first; it wraps the server's `emit`.
+ */
+const APPHOST_NS = 'app-hosts';
+let appHostRouter = null;
+export function attachAppHosts(httpServer) {
+  appHostRouter ??= createAppHostRouter({
+    appsList: appsListCached,
+    log: (...args) => { if (nsEnabled(APPHOST_NS, process.env.AURA_LOG ?? '')) console.log(`[${APPHOST_NS}]`, ...args); },
+  });
+  appHostRouter.attach(httpServer);
+}
+
 /** Everything the shell needs on its HTTP server besides the Astro app. */
 export async function attachShellServers(httpServer) {
+  attachAppHosts(httpServer);
   attachWsProxy(httpServer);
   await attachShellSseMux(httpServer);
   await attachSio(httpServer);

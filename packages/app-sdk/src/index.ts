@@ -19,6 +19,7 @@ export type {
 } from './flight.js';
 // Interface Registry — `osClient.interfaces`. Discovery + runtime registration.
 export { InterfacesApi } from './interfaces.js';
+export { appHostUrl, appHostUrlFromRequest } from './hosts.js';
 // Notifications — `osClient.notifications`. create / update / remove / get /
 // list / waitForAnswer / waitForInteraction / subscribe.
 export { NotificationsApi, NotificationsError, parseSse } from './notifications.js';

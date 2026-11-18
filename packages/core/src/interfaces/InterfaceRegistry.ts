@@ -39,6 +39,7 @@
 import type { AppInstance } from '../types/instance.js';
 import type { AppLifecycleState } from '../types/lifecycle.js';
 import type {
+  AppHost,
   AppManifest,
   ConsumedInterface,
   CustomInterface,
@@ -166,6 +167,11 @@ interface LiveRecord {
  * and a node-side caller prefixes `OS_API_BASE` (or uses `upstream` and skips
  * the shell entirely).
  */
+/** The shell route that redirects to an app host's absolute URL (`/api/apps/<id>/hosts/<name>`). */
+export function appHostRedirectPath(appId: string, name: string): string {
+  return `/api/apps/${encodeURIComponent(appId)}/hosts/${encodeURIComponent(name)}`;
+}
+
 export function interfaceUrl(instanceId: string, kind: InterfaceKind, address: string): string {
   if (kind === 'os/kv')    return `/api/kv/${address.replace(/^\/+/, '')}`;
   if (kind === 'os/event') return `/api/apps/events?topics=${encodeURIComponent(address)}`;
@@ -184,6 +190,8 @@ export class InterfaceRegistry {
   // ── catalog layer — rebuilt wholesale from manifests (cf. IntentResolver) ──
   private provided: Array<{ appId: string; iface: ProvidedInterface }> = [];
   private consumed: Array<{ appId: string; need: ConsumedInterface }> = [];
+  /** App hosts (manifest `hosts[]`), listed as `http/host` entries. */
+  private hosts: Array<{ appId: string; host: AppHost }> = [];
 
   // ── custom layer — user-registered external endpoints, owned by the shell ──
   private custom: CustomInterface[] = [];
@@ -206,12 +214,15 @@ export class InterfaceRegistry {
   reload(manifests: readonly AppManifest[]): void {
     const provided: typeof this.provided = [];
     const consumed: typeof this.consumed = [];
+    const hosts: typeof this.hosts = [];
     for (const m of manifests) {
       for (const iface of m.provides) provided.push({ appId: m.id, iface });
       for (const need of m.consumes)  consumed.push({ appId: m.id, need });
+      for (const host of m.hosts ?? []) hosts.push({ appId: m.id, host });
     }
     this.provided = provided;
     this.consumed = consumed;
+    this.hosts = hosts;
   }
 
   /**
@@ -373,6 +384,26 @@ export class InterfaceRegistry {
         scope: 'app',
         status: upApps.has(appId) ? 'live' : 'catalog',
         url: interfaceUrl(appId, iface.kind, iface.address),
+      });
+    }
+
+    // App hosts: one app-scoped entry each. The url is the shell's redirect to
+    // the host's absolute address, which only the CALLER's own host decides
+    // (`{name}--{that host}`), so the registry hands out the stable redirect.
+    for (const { appId, host } of this.hosts) {
+      covered.add(`${appId}/${host.name}`);
+      views.push({
+        id: `${appId}/${host.name}`,
+        appId,
+        name: host.name,
+        kind: 'http/host',
+        version: '1',
+        address: host.name,
+        ...(host.description ? { description: host.description } : {}),
+        source: 'manifest',
+        scope: 'app',
+        status: upApps.has(appId) ? 'live' : 'catalog',
+        url: appHostRedirectPath(appId, host.name),
       });
     }
 

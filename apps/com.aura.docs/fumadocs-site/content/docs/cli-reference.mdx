@@ -79,6 +79,7 @@ aura jump -m                                  # the aura-shell master container
 | `aura get svc [name]` | Services on the master (sshd, code-server …). | `-o` |
 | `aura get mounts [name]` | Cross-app mounts (INSTANCE, TARGET, KIND, MODE, PATH, ORIGIN). | `-a`, `-i <instance>` |
 | `aura get ports [name]` | Port exposes, app-to-app or host (OWNER, ID, KIND, SOURCE, LISTEN, STICKY). | `-a`, `-i` |
+| `aura get hosts [name]` | [App hosts](/docs/app-hosts) (NAME, APP, TARGET, STATUS, URL). The CLI reaches the shell by container name, so URL shows `{name}--<desktop host>`. | `-a` |
 | `aura get scopes [name]` | Install scopes (system / global / user). | `-o` |
 | `aura get themes [name]` | Theme presets; ACTIVE marks the dark/light slot in use. | `-o` |
 | `aura get perms [app]` | Declared manifest permissions per app. | `-o` |
@@ -337,6 +338,7 @@ eval "$(aura completion bash)"        # add to ~/.bashrc
 | `services` | `service`, `svc` | get, describe, start, stop, restart, install, delete, logs | Long-running daemons on the master (sshd, code-server, …) |
 | `mounts` | `mount` | get, delete | Cross-app mounts into a container instance (`aura mount`) |
 | `ports` | `port` | get, delete | Port exposes into another app or onto the host (`aura port`) |
+| `hosts` | `host` | get | App hosts: apps served at their own host name `{name}--{desktop host}` |
 | `scopes` | `scope` | get | App installation scopes (system / global / user) |
 | `themes` | `theme` | get, set | Theme presets; ACTIVE marks the dark/light slot in use |
 | `permissions` | `permission`, `perms`, `perm` | get, grant, revoke | Apps' declared manifest permissions |

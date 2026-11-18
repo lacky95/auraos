@@ -21,6 +21,7 @@ export * from './app-manager/AppIdentity.js';
 export * from './permissions/index.js';
 export * from './content/index.js';
 export * from './interfaces/index.js';
+export * from './app-hosts/appHosts.js';
 export * from './theme/index.js';
 export * from './layout/LayoutStrategyRegistry.js';
 export * from './keymap/index.js';

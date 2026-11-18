@@ -1,3 +1,4 @@
+import { HOST_NAME_RE, RESERVED_HOST_NAMES, isValidHostName } from '../app-hosts/appHosts.js';
 import { z } from 'zod';
 
 /**
@@ -132,6 +133,9 @@ export type DataProvider      = z.infer<typeof DataProviderSchema>;
  */
 export const INTERFACE_KINDS = [
   'http/rest', 'http/raw', 'http/mcp', 'http/mcp-sse',
+  // An app host (manifest `hosts[]`): its address is the host NAME, not a
+  // path, and it is never declared in `provides` — the registry derives it.
+  'http/host',
   'ws/raw', 'ws/acp', 'ws/cdp',
   'os/event', 'os/kv',
 ] as const;
@@ -160,8 +164,8 @@ export function kindProtocol(kind: string): string {
 /** Interface names are app-local; the globally unique ref is `<appId>/<name>`. */
 const INTERFACE_NAME_RE = /^[a-z][a-z0-9-]*$/;
 
-/** Kinds whose `address` is a path on the providing app's own server: every http and ws kind. */
-export const INTERFACE_PATH_KINDS = new Set<string>(INTERFACE_KINDS.filter((k) => kindTransport(k) !== 'os'));
+/** Kinds whose `address` is a path on the providing app's own server: every http and ws kind but `http/host`. */
+export const INTERFACE_PATH_KINDS = new Set<string>(INTERFACE_KINDS.filter((k) => kindTransport(k) !== 'os' && k !== 'http/host'));
 
 export const ProvidedInterfaceSchema = z.object({
   /** App-local, kebab-case. Unique within the app (enforced on the manifest). */
@@ -191,6 +195,9 @@ export const ProvidedInterfaceSchema = z.object({
    */
   permission: z.string().optional(),
 }).refine(
+  (i) => i.kind !== 'http/host',
+  { message: "http/host is not declared in provides — declare the app host in the manifest's hosts[]", path: ['kind'] },
+).refine(
   (i) => (INTERFACE_PATH_KINDS.has(i.kind) ? i.address.startsWith('/') : !i.address.startsWith('/')),
   {
     message: "http/* and ws/* addresses must start with '/' (a path on the app's server); os/event and os/kv addresses must not",
@@ -240,6 +247,25 @@ const ConsumedInterfaceSchema = z.object({
 export type InterfaceKind     = z.infer<typeof InterfaceKindSchema>;
 export type ProvidedInterface = z.infer<typeof ProvidedInterfaceSchema>;
 export type ConsumedInterface = z.infer<typeof ConsumedInterfaceSchema>;
+
+/**
+ * One app host: this app (or one of its sidecars) served at the root of its
+ * own host name `{name}--{desktop host}` (app-hosts/appHosts.ts). For UIs
+ * that must own an origin root — root-absolute URLs built at runtime, their
+ * own page proxy — instead of living under `/api/proxy/<id>/`.
+ */
+export const AppHostSchema = z.object({
+  /** The label before `--`: letters and digits, unique across installed apps. */
+  name: z.string().refine(isValidHostName, {
+    message: `host name must match ${HOST_NAME_RE.source} (letters and digits, no hyphens) and not be one of: ${[...RESERVED_HOST_NAMES].join(', ')}`,
+  }),
+  /** A `services[]` template; the router targets the sidecar spawned from it. Omitted = the app's own server. */
+  service: z.string().optional(),
+  /** Port on the target. Default: the template's `port`, or the app's own port. */
+  port: z.number().int().min(1).max(65535).optional(),
+  description: z.string().optional(),
+});
+export type AppHost = z.infer<typeof AppHostSchema>;
 
 export const AppManifestSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/, {
@@ -579,6 +605,12 @@ export const AppManifestSchema = z.object({
    */
   consumes: z.array(ConsumedInterfaceSchema).default([]),
   /**
+   * App hosts: the app or a sidecar served at the root of its own host name,
+   * `{name}--{desktop host}` (see AppHostSchema). Only declared targets are
+   * reachable; the Interface Registry lists each as an `http/host` entry.
+   */
+  hosts: z.array(AppHostSchema).default([]),
+  /**
    * Where the app's source is developed — opt-in, for apps others may work
    * on. Bundles never ship `.git`; this (plus the release commit Nexus records
    * at publish, see nexus/AppSource.ts) is what lets `aura dev checkout` turn
@@ -785,6 +817,20 @@ export const AppManifestSchema = z.object({
   // meant. Caught here rather than at registration, where it would be silent.
   (m) => new Set(m.provides.map((p) => p.name)).size === m.provides.length,
   { message: 'provides[].name must be unique within an app', path: ['provides'] },
+).refine(
+  (m) => new Set(m.hosts.map((h) => h.name)).size === m.hosts.length,
+  { message: 'hosts[].name must be unique within an app', path: ['hosts'] },
+).refine(
+  // The registry lists hosts beside provides under the same `<appId>/<name>` ref.
+  (m) => m.hosts.every((h) => !m.provides.some((p) => p.name === h.name)),
+  { message: 'a hosts[].name must not repeat a provides[].name', path: ['hosts'] },
+).refine(
+  (m) => m.hosts.every((h) => !h.service || m.services.some((s) => s.name === h.service)),
+  { message: 'hosts[].service must name a services[] template of this manifest', path: ['hosts'] },
+).refine(
+  // A sidecar has no port to fall back on but its template's.
+  (m) => m.hosts.every((h) => !h.service || h.port != null || m.services.find((s) => s.name === h.service)?.port != null),
+  { message: 'hosts[].port is required when its service template declares no port', path: ['hosts'] },
 );
 
 export type AppManifest = z.infer<typeof AppManifestSchema>;

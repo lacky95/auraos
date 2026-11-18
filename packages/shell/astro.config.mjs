@@ -6,7 +6,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  attachShellSseMux, attachSio, attachWsProxy, proxyQueryEscapeMiddleware,
+  attachAppHosts, attachShellSseMux, attachSio, attachWsProxy, proxyQueryEscapeMiddleware,
 } from './server/attach.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -25,6 +25,16 @@ function proxyViteQueryEscape() {
     name: 'aura-proxy-vite-query-escape',
     configureServer(server) {
       server.middlewares.use(proxyQueryEscapeMiddleware);
+    },
+  };
+}
+
+/** App hosts (server/app-hosts.mjs): in front of Vite, like in front of the prod handler. */
+function appHostsPlugin() {
+  return {
+    name: 'aura-app-hosts',
+    configureServer(server) {
+      if (server.httpServer) attachAppHosts(server.httpServer);
     },
   };
 }
@@ -130,6 +140,6 @@ export default defineConfig({
     },
     // tailwindcss() must come before wsProxyPlugin so its content-scanning
     // hooks run on every transformed module.
-    plugins: [tailwindcss(), proxyViteQueryEscape(), wsProxyPlugin(), sseMuxPlugin(), sioPlugin()],
+    plugins: [tailwindcss(), appHostsPlugin(), proxyViteQueryEscape(), wsProxyPlugin(), sseMuxPlugin(), sioPlugin()],
   },
 });

@@ -435,6 +435,34 @@ const ports: ResourceDef<PortDto> = {
   ],
 };
 
+interface HostDto {
+  id: string; appId: string; name: string; target: string; port: number | null;
+  status: 'live' | 'catalog'; url: string | null; reason?: string;
+}
+
+const hosts: ResourceDef<HostDto> = {
+  name: 'hosts',
+  aliases: ['host'],
+  description: 'App hosts: apps served at their own host name {name}--{desktop host}',
+  verbs: ['get'],
+  scopes: ['app'],
+  nameOf: (h) => h.name,
+  list: async (ctx) => {
+    const res = await api.get<{ hosts: HostDto[] }>(
+      ctx.app ? `/api/apps/${encodeURIComponent(ctx.app)}/hosts` : '/api/hosts');
+    return res.hosts ?? [];
+  },
+  columns: [
+    { header: 'NAME', value: (h) => h.name },
+    { header: 'APP', value: (h) => h.appId },
+    { header: 'TARGET', value: (h) => (h.port != null ? `${h.target}:${h.port}` : h.target) },
+    { header: 'STATUS', value: (h) => h.status },
+    // The CLI reaches the shell by its container name, which has no label to
+    // prepend; the browser's URL is `{name}--{the host you open AuraOS at}`.
+    { header: 'URL', value: (h) => h.url ?? `${h.name}--<desktop host>` },
+  ],
+};
+
 interface ScopeRow { id: string; appsDir: string; dataDir: string; immutable: boolean; appCount: number; gitRepo: string | null }
 
 const scopes: ResourceDef<ScopeRow> = {
@@ -534,7 +562,7 @@ const notifPerms: ResourceDef<NotifPermRow> = {
 
 /** Display order for help, api-resources and completion. */
 export const RESOURCES: ResourceDef[] = [
-  apps, instances, sidecars, activities, capabilities, services, mounts, ports, scopes, themes, permissions, notifPerms,
+  apps, instances, sidecars, activities, capabilities, services, mounts, ports, hosts, scopes, themes, permissions, notifPerms,
 ];
 
 /** Look a resource up by any of its names (`inst`, `instance`, `instances`). */

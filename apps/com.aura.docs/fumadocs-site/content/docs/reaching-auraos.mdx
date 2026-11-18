@@ -1,0 +1,81 @@
+---
+title: Reaching AuraOS
+description: Open AuraOS at a nip.io address (no domain needed) or at your own domain, and what each gives you.
+---
+
+**TL;DR.** Without a domain, open AuraOS at
+`http://<ip-with-dashes>.nip.io:3000`, e.g. `http://10-0-0-2.nip.io:3000`.
+With a domain, put an HTTPS edge in front and route `host` and
+`*--host` to the shell. Both support everything, including
+[App hosts](/docs/app-hosts); only a domain gives you HTTPS.
+
+## The three ways in
+
+| Access | Example | App hosts | HTTPS-only browser APIs |
+|---|---|---|---|
+| **Custom domain** (recommended) | `https://lukas-01.aura.int.lakner.io` | yes | yes |
+| **nip.io** (no domain needed) | `http://10-0-0-2.nip.io:3000` | yes | no |
+| Raw IP | `http://10.0.0.2:3000` | no | no |
+
+"HTTPS-only browser APIs" are what browsers allow only on a secure origin:
+the clipboard API, microphone and camera, service workers, `crypto.subtle`.
+On plain HTTP those features of AuraOS and its apps don't work.
+
+## nip.io: no domain needed
+
+[nip.io](https://nip.io) is public wildcard DNS: any name ending in
+`<ip-with-dashes>.nip.io` resolves to that IP. `10-0-0-2.nip.io` and
+`marklayer--10-0-0-2.nip.io` both resolve to `10.0.0.2`, so the desktop and
+every app host work on port 3000 with no setup. sslip.io works the same way.
+
+<Callout type="warn">
+Some routers and resolvers refuse public names that resolve to private IPs
+("DNS rebinding protection": Fritz!Box by default, Pi-hole/unbound with
+private-address filtering, dnsmasq `stop-dns-rebind`). Symptom: the nip.io
+name doesn't resolve at all. Allow `nip.io` in that filter, or use a domain.
+</Callout>
+
+## Custom domain
+
+Three one-time pieces, all on your side:
+
+1. **DNS**: a wildcard, e.g. `*.aura.example.com`, pointing to your edge
+   (or straight to the AuraOS host).
+2. **Certificate**: one wildcard, `*.aura.example.com`. App hosts use `--`
+   instead of a dot (`marklayer--box.aura.example.com`), so one label is
+   enough for every machine and every app.
+3. **Route**: send `box.aura.example.com` **and** `*--box.aura.example.com`
+   to the shell (`<host>:3000`), keeping `Host`, with WebSocket upgrade, and
+   tell the shell it was HTTPS.
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name box.aura.example.com ~^[a-z][a-z0-9]{0,30}--box\.aura\.example\.com$;
+    ssl_certificate     /etc/ssl/wildcard.aura.example.com/fullchain.pem;
+    ssl_certificate_key /etc/ssl/wildcard.aura.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://10.0.0.2:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        $connection_upgrade;   # map $http_upgrade → upgrade/close
+        proxy_read_timeout 1h;
+    }
+}
+```
+
+**Trusting the edge.** By default the shell believes `X-Forwarded-Proto`,
+`-Host` and `-For` from any client (a forged header only changes the
+forger's own response). To believe them only from your edge, set
+`AURA_TRUSTED_PROXIES` on the shell container to its address(es),
+comma-separated.
+
+## Raw IP
+
+`http://10.0.0.2:3000` keeps working for the desktop and every
+`/api/proxy/…` app. App hosts need a label to prepend, so apps that use them
+show a hint to switch to the nip.io address.
