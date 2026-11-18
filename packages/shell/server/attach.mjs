@@ -224,45 +224,58 @@ export function attachWsProxy(httpServer) {
       if (req.headers[h] != null) upstreamHeaders[h] = req.headers[h];
     }
     if (activityId) upstreamHeaders['x-aura-activity-id'] = activityId;
-    const upstream = new WebSocket(upstreamUrl, {
-      headers: Object.keys(upstreamHeaders).length ? upstreamHeaders : undefined,
-    });
-
-    upstream.once('open', () => {
-      dbg('WS-PROXY', 'upstream-open', `${Date.now() - tUpstreamStart}ms total=${Date.now() - t0}ms`);
-      const wss = new WebSocketServer({ noServer: true });
-      wss.handleUpgrade(req, socket, head, (client) => {
-        dbg('WS-PROXY', 'client-handshake-done', `total=${Date.now() - t0}ms`);
-        client.on('message', (data, isBinary) => {
-          if (upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary: isBinary });
-        });
-        upstream.on('message', (data, isBinary) => {
-          if (client.readyState === WebSocket.OPEN) client.send(data, { binary: isBinary });
-        });
-
-        // Heartbeat the browser leg (see WS_PING_MS). `alive` flips true on
-        // every pong; a sweep that finds it still false means the previous
-        // ping went unanswered → the client is gone, terminate and let the
-        // close handlers tear the pair down.
-        let alive = true;
-        client.on('pong', () => { alive = true; });
-        const hb = setInterval(() => {
-          if (!alive) {
-            dbg('WS-PROXY', 'client-keepalive-timeout', instanceId);
-            try { client.terminate(); } catch {}
-            return;
-          }
-          alive = false;
-          try { client.ping(); } catch {}
-        }, WS_PING_MS);
-        if (typeof hb.unref === 'function') hb.unref();
-
-        client.on('close', () => { clearInterval(hb); upstream.terminate(); });
-        upstream.on('close', () => { clearInterval(hb); try { client.terminate(); } catch {} });
+    // Offer the browser's subprotocols upstream and answer the browser with the
+    // one upstream chose: servers such as Vite's HMR refuse an upgrade without
+    // theirs (`vite-hmr`). An upstream that ignores them makes the `ws` client
+    // fail ("Server sent no subprotocol"), so that case re-dials without any and
+    // keeps the old behaviour of acknowledging the browser's first offer.
+    const protocols = (req.headers['sec-websocket-protocol'] ?? '').split(',').map((p) => p.trim()).filter(Boolean);
+    const dial = (offer) => {
+      const upstream = new WebSocket(upstreamUrl, offer, {
+        headers: Object.keys(upstreamHeaders).length ? upstreamHeaders : undefined,
       });
-    });
 
-    upstream.on('error', (e) => { dbg('WS-PROXY', 'upstream-error', String(e), `t=${Date.now() - tUpstreamStart}ms`); socket.destroy(); });
+      upstream.once('open', () => {
+        dbg('WS-PROXY', 'upstream-open', `${Date.now() - tUpstreamStart}ms total=${Date.now() - t0}ms`);
+        const wss = new WebSocketServer({ noServer: true, handleProtocols: (offered) => upstream.protocol || offered.values().next().value || false });
+        wss.handleUpgrade(req, socket, head, (client) => {
+          dbg('WS-PROXY', 'client-handshake-done', `total=${Date.now() - t0}ms`);
+          client.on('message', (data, isBinary) => {
+            if (upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary: isBinary });
+          });
+          upstream.on('message', (data, isBinary) => {
+            if (client.readyState === WebSocket.OPEN) client.send(data, { binary: isBinary });
+          });
+
+          // Heartbeat the browser leg (see WS_PING_MS). `alive` flips true on
+          // every pong; a sweep that finds it still false means the previous
+          // ping went unanswered → the client is gone, terminate and let the
+          // close handlers tear the pair down.
+          let alive = true;
+          client.on('pong', () => { alive = true; });
+          const hb = setInterval(() => {
+            if (!alive) {
+              dbg('WS-PROXY', 'client-keepalive-timeout', instanceId);
+              try { client.terminate(); } catch {}
+              return;
+            }
+            alive = false;
+            try { client.ping(); } catch {}
+          }, WS_PING_MS);
+          if (typeof hb.unref === 'function') hb.unref();
+
+          client.on('close', () => { clearInterval(hb); upstream.terminate(); });
+          upstream.on('close', () => { clearInterval(hb); try { client.terminate(); } catch {} });
+        });
+      });
+
+      upstream.on('error', (e) => {
+        dbg('WS-PROXY', 'upstream-error', String(e), `t=${Date.now() - tUpstreamStart}ms`);
+        if (offer && /subprotocol/i.test(String(e))) { dial(undefined); return; }
+        socket.destroy();
+      });
+    };
+    dial(protocols.length ? protocols : undefined);
   });
 }
 
