@@ -113,6 +113,21 @@ desktop, which is fine for an iframe. If your UI sends
 `*` for a private install. Remember that `frame-ancestors` is checked against
 **every** ancestor, not just the parent.
 
+## Virtual keyboard
+
+The shell proxy injects the virtual-keyboard receiver into every app page; an
+app host gets nothing injected. Load it yourself, from the desktop:
+
+```html
+<script src="https://<desktop host>/api/os/keyboard.js"></script>
+```
+
+It holds the receiver, the device-keyboard policy (keeps the iPad's own
+keyboard away) and a relay into your own iframes, and listens only to
+`window.parent`. Your app window, which frames the host, passes the keyboard's
+messages one level down (see `components/shell/keyboard/PROTOCOL.md`). The
+desktop host is your own host minus the `name--` prefix.
+
 ## Limits
 
 - **nip.io is plain HTTP.** Browsers switch off HTTPS-only APIs there

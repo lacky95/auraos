@@ -105,6 +105,23 @@ Two independent settings, both in the keyboard header and both default on:
 
 Agents set either with `setKeyboardPolicy`.
 
+## Documents the proxy doesn't inject into: `/api/os/keyboard.js`
+
+App hosts (`{name}--{host}`) are passed through untouched, so their documents
+get no receiver. They load the same scripts themselves:
+
+```html
+<script src="https://<desktop host>/api/os/keyboard.js"></script>
+```
+
+The bundle is a relay into child iframes (`lib/keyboard/frameRelayScript.ts`)
+followed by the receiver and the device-keyboard policy. The relay passes
+`aura.key.synthetic` to the focused child iframe (and stops it there, so this
+document's receiver doesn't fire it at the `<iframe>` element),
+`aura.keyboard.policy` to every child iframe, and the children's `hello` /
+`field` / `open` / `close` up to the parent. The app window that frames the
+app host relays one level itself, like the Browser app does for its engine.
+
 Not covered: documents without the receiver (apps with `injectKeyForwarder`
 off, raw apps) and native surfaces (real native WebViews over a window) —
 there the device keyboard still opens, and the shell's existing rule closes
