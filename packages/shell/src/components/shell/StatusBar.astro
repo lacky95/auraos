@@ -878,6 +878,7 @@ let initialTimeZone: string = '';
   //   global rule in index.astro applies it) → net app content = M·S·(A/S) =
   //   M·A, independent of the shell zoom. All three default to 1, where this
   //   collapses to the original single-zoom behaviour.
+  const VIEWPORT_H = CSS.supports('height', '100dvh') ? '100dvh' : '100vh';
   function applyViewport() {
     const body = document.body;
     const m = margins;
@@ -903,7 +904,11 @@ let initialTimeZone: string = '';
       body.style.top             = `${m.top}px`;
       body.style.left            = `${m.left}px`;
       body.style.width           = `calc((100vw - ${m.left + m.right}px) / ${bodyScale})`;
-      body.style.height          = `calc((100vh - ${m.top + m.bottom}px) / ${bodyScale})`;
+      // dvh, not vh: on Android Chrome 100vh is the LARGE viewport (URL bar
+      // hidden), but the shell never scrolls so the bar never hides — a
+      // 100vh body pushes the dock below the screen edge. dvh is the area
+      // actually visible right now.
+      body.style.height          = `calc((${VIEWPORT_H} - ${m.top + m.bottom}px) / ${bodyScale})`;
       body.style.transformOrigin = 'top left';
       body.style.transform       = `scale(${bodyScale})`;
     }

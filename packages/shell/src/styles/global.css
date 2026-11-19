@@ -20,6 +20,10 @@
 html, body {
   padding: 0;
   height: 100%;
+  /* The visible viewport. On Android Chrome `100%` (the initial containing
+   * block) can differ from what is on screen next to the URL bar / gesture
+   * bar; dvh follows it. Browsers without dvh keep 100%. */
+  height: 100dvh;
   overflow: hidden;
   background: var(--aura-color-bg);
   color: var(--aura-color-text);

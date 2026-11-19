@@ -50,7 +50,7 @@ function slotStyle(view: AppView, i: number): string {
     + `width:${w}px;height:${h}px;`
     // Cap to the viewport so a stack saved on a wide screen doesn't
     // paint past the right edge on first reflow on a narrow one.
-    + `max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);`
+    + `max-width:calc(100vw - 16px);max-height:calc(100dvh - 16px);`
     + `z-index:${z};`
   );
 }
