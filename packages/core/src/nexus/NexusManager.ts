@@ -9,7 +9,7 @@
  * `next()` call before continuing. The caller (CLI or shell route)
  * implements its own approval UI between yields.
  */
-import { mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import type { OsEventBus as OsEventBusSingleton } from '../ipc/OsEventBus.js';
@@ -18,9 +18,10 @@ import { Resolver } from './Resolver.js';
 
 type OsEventBus = typeof OsEventBusSingleton;
 import { CatalogAggregator } from './CatalogAggregator.js';
-import { Installer } from './Installer.js';
+import { Installer, removeContained } from './Installer.js';
 import { NexusValidationError, validateStagedDir } from './Validator.js';
-import { hostConflicts, type HostClaim } from '../app-hosts/appHosts.js';
+import { hostConflicts, isProtectedHostName, type HostClaim } from '../app-hosts/appHosts.js';
+import type { AppHostLifecycle, AppIdentityFacts, AppRestoreCheck } from '../app-hosts/lifecycle.js';
 import { fetchLocal } from './Fetchers/LocalFetcher.js';
 import { fetchGit } from './Fetchers/GitFetcher.js';
 import { fetchOci } from './Fetchers/OciFetcher.js';
@@ -91,6 +92,8 @@ export interface NexusManagerOpts {
    *  unreliable. Injected by the singleton (which owns the AppManager ref) to
    *  avoid a NexusManager→AppManager import cycle. */
   onAppChanged?: (appId: string) => void;
+  /** App Host records follow the install lifecycle. Injected by the singleton. */
+  hostLifecycle?: AppHostLifecycle;
 }
 
 export class NexusManager {
@@ -108,6 +111,7 @@ export class NexusManager {
   private sourcesLoaded = false;
   /** Deterministic AppRegistry (re)registration hook. */
   private readonly onAppChanged?: (appId: string) => void;
+  private readonly hostLifecycle?: AppHostLifecycle;
   /** App ids (and raw refs) currently mid-install. Exposed so the store UI can
    *  render/persist an "installing…" state that survives a page reload. */
   private readonly installing = new Set<string>();
@@ -124,6 +128,7 @@ export class NexusManager {
     this.scopeDefs     = opts.scopes;
     this.bus           = opts.bus;
     this.onAppChanged  = opts.onAppChanged;
+    this.hostLifecycle = opts.hostLifecycle;
     this.sourcesConfig = opts.sourcesConfig ?? cloneDefaultSources();
     this.catalog       = new CatalogAggregator({
       rootDataDir: opts.rootDataDir,
@@ -401,10 +406,6 @@ export class NexusManager {
 
       let manifest = validateStagedDir(stagingDir);
       // App host names are global: `{name}--{host}` must route to ONE app.
-      const clashes = hostConflicts({ appId: manifest.id, hosts: manifest.hosts }, this.installedHostClaims());
-      if (clashes.length) {
-        throw new NexusValidationError(clashes.map((c) => `hosts: '${c.name}' is already the app host of ${c.heldBy}`));
-      }
       keys.add(manifest.id); this.installing.add(manifest.id);
       yield { type: 'validate.done', manifest };
 
@@ -497,10 +498,38 @@ export class NexusManager {
         yield { type: 'identity.resolved', action: decision.action, appId: manifest.id };
       }
       keys.add(manifest.id); this.installing.add(manifest.id);
+      // After the identity step, which may have given the app another local id.
+      await this.assertHostsAllowed(manifest);
       const installer = this.installerFor(targetScope);
       // A dev checkout holds work that is not in any release.
       if (!opts.replaceCheckout && isDevCheckout(join(installer.appsDir, manifest.id))) {
         throw new Error(`${manifest.id} is a dev checkout (it has .git) — installing would replace your working tree. Commit/push your work, then pass force to replace it.`);
+      }
+
+      // Retained data and App Hosts: compare with the saved installation BEFORE
+      // the install can carry anything over (5.13).
+      const hostFacts: AppIdentityFacts = {
+        appId: manifest.id, originId: manifest.originId ?? null, scope: targetScope,
+        source: { kind: resolved.source, ref: resolved.rawRef, ...(resolved.digest ? { digest: resolved.digest } : {}) },
+      };
+      const restore: AppRestoreCheck = this.hostLifecycle
+        ? await this.hostLifecycle.checkRestore(hostFacts, installer.hasRetainedData(manifest.id))
+        : { kind: 'none' };
+      if (restore.kind === 'confirm' && opts.identity?.action !== 'update-existing') {
+        unmark();
+        yield {
+          type: 'identity.choice',
+          conflict: {
+            kind: 'switch-source',
+            incoming: { appId: remoteId, originId: manifest.originId ?? null, version: manifest.version, name: manifest.name,
+                        ref: resolved.rawRef, ...(resolved.sourceName ? { sourceName: resolved.sourceName } : {}) },
+            existing: { appId: manifest.id, originId: restore.installation?.originId ?? null, scope: targetScope,
+                        ...(restore.installation ? { ref: restore.installation.source.ref } : {}) },
+            choices: ['update-existing', 'install-copy'],
+            suggestedAppId,
+          },
+        };
+        throw new Error('install needs an identity decision');
       }
 
       // Permission diff vs. currently-installed version in any scope.
@@ -528,7 +557,24 @@ export class NexusManager {
       }
 
       yield { type: 'install.start' };
-      const record = await installer.install(stagingDir, manifest, resolved, link);
+      let record: InstallRecord;
+      this.hostLifecycle?.beginInstall(manifest.id, targetScope);
+      try {
+        if (restore.kind === 'deny') {
+          installer.setAsideRetainedData(manifest.id, restore.installation.installationId);
+        } else if (restore.kind === 'restore' || (restore.kind === 'confirm' && restore.installation)) {
+          installer.restoreRetainedData(manifest.id, restore.installation!.installationId);
+        }
+        record = await installer.install(stagingDir, manifest, resolved, link);
+        // Before the registry reload below, so its host guard accepts this manifest.
+        try {
+          await this.hostLifecycle?.completeInstall(hostFacts, restore, manifest.hosts.map((h) => h.name));
+        } catch (err) {
+          console.warn(`[nexus] app host update for ${manifest.id} failed: ${(err as Error).message}`);
+        }
+      } finally {
+        this.hostLifecycle?.endInstall(manifest.id, targetScope);
+      }
 
       // Register with the AppRegistry NOW — before provisioning, and well before
       // yielding install.done. Two reasons, and the order matters:
@@ -616,10 +662,57 @@ export class NexusManager {
     if (!current) throw new Error(`'${appId}' is not installed`);
     const scope = (current.scope === 'system' ? undefined : current.scope);
     if (!scope) throw new Error(`Cannot uninstall '${appId}' from system scope`);
+    // Routes go first: if this fails, no data has moved or been deleted.
+    if (opts.purge) await this.hostLifecycle?.retireApp(appId, scope);
+    else await this.hostLifecycle?.reserveApp(appId, scope);
     await this.installerFor(scope).uninstall(appId, opts);
     // Deregister (or unmask a lower-scope copy) immediately.
     this.onAppChanged?.(appId);
     this.bus?.emit('nexus:uninstall.complete', { id: appId });
+  }
+
+  /**
+   * Delete an app from one scope, store-installed or not. In a mutable scope
+   * the app's data lives in its dir, so this is "Delete app data". A system
+   * app's data is elsewhere and its code can return with the repo, so its
+   * installation is only reserved. Returns whether a directory was removed.
+   */
+  async removeFromScope(appId: string, scopeId: ScopeId): Promise<{ removed: boolean; dest: string }> {
+    if (!APP_ID_PATTERN.test(appId)) throw new Error(`invalid app id: ${appId}`);
+    const def = this.scopeDefs.find((s) => s.id === scopeId);
+    if (!def) throw new Error(`unknown scope: ${scopeId}`);
+    const dest = join(def.appsDir, appId);
+    const removed = existsSync(dest);
+    if (def.immutable) {
+      await this.hostLifecycle?.reserveApp(appId, scopeId);
+      removeContained(def.appsDir, appId);
+    } else {
+      await this.hostLifecycle?.retireApp(appId, scopeId);
+      await this.installerFor(scopeId).uninstall(appId, { purge: true });
+    }
+    this.onAppChanged?.(appId);
+    return { removed, dest };
+  }
+
+  /**
+   * App host names are global: `{name}--{host}` must route to ONE app. Rejects
+   * a name another app holds, an allocated or retired App Host label, and an OS
+   * or system-app name unless this same app id already declares it.
+   */
+  private async assertHostsAllowed(manifest: AppManifest): Promise<void> {
+    if (manifest.hosts.length === 0) return;
+    const claims = this.installedHostClaims();
+    const clashes = hostConflicts({ appId: manifest.id, hosts: manifest.hosts }, claims);
+    const problems = clashes.map((c) => `hosts: '${c.name}' is already the app host of ${c.heldBy}`);
+    const own = new Set(claims.filter((c) => c.appId === manifest.id).flatMap((c) => c.hosts.map((h) => h.name)));
+    if (this.hostLifecycle) {
+      problems.push(...await this.hostLifecycle.manifestHostProblems(manifest.id, manifest.hosts.map((h) => h.name), own));
+    } else {
+      for (const h of manifest.hosts) {
+        if (isProtectedHostName(h.name) && !own.has(h.name)) problems.push(`hosts: '${h.name}' is reserved for the OS`);
+      }
+    }
+    if (problems.length) throw new NexusValidationError(problems);
   }
 
   async *publishGit(opts: {

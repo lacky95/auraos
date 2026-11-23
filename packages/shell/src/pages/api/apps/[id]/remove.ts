@@ -1,30 +1,16 @@
 import type { APIRoute } from 'astro';
-import { rmSync, existsSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { getAppManager } from '@aura/core';
+import { getAppManager, removeInstalledApp } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
 
 /**
- * Delete an installed app. Two-phase:
- *   1. Kill every instance via AppManager.killAllForApp — graceful
- *      onPause/onStop/onDestroy first, then SIGKILL for survivors, then a
- *      sweep of stray sibling containers, all under markUninstalling so the
- *      warm pool can't refill mid-delete.
- *   2. `rm -rf <scopeAppsDir>/<id>` — the app's real directory is resolved via
- *      the registry (`getAppDir`), which spans all scopes (system/global/user).
- *      A hardcoded `/workspace/apps` would only find system-scope apps and
- *      silently no-op (returning `removed:false`) on user/global installs —
- *      the CLI then falsely prints "removed". chokidar's `unlink` watcher emits
- *      `app:removed` automatically, which deletes the AppRegistry entry and
- *      ripples through the dock + launcher live (same osEvents pipeline the
- *      enable/disable flow uses).
- *   3. Clean up the per-app enable-state entry in KV so it doesn't accumulate
- *      forever when apps churn.
+ * Delete an installed app through the core lifecycle (`removeInstalledApp`):
+ * it stops every instance, deletes the app from its scope with path checks,
+ * and retires its App Hosts. This route validates the id and tidies the
+ * per-app enable-state entry in KV so it doesn't accumulate as apps churn.
  *
  * The CLI + Settings UI both confirm "Do you want to delete this app?" before
- * calling here — but we still validate the appId server-side and refuse to
- * touch anything outside the apps dir as a defence-in-depth measure.
+ * calling here.
  */
 
 const APP_ID_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
@@ -44,52 +30,14 @@ async function deleteApp(appId: string | undefined): Promise<Response> {
     return errorResponse(`App not installed: ${appId}`, 404);
   }
 
-  // Resolve the app's real directory across ALL scopes via the registry.
-  const dest = resolve(mgr.registry.getAppDir(appId));
-  // Path-escape guard: the resolved dir must be exactly `<scopeAppsDir>/<appId>`.
-  // appId is already regex-validated, and getAppDir returns a registry-computed
-  // `<scope.appsDir>/<appId>`, so this defends against a future regex bypass.
-  if (!dest.endsWith(`/${appId}`)) {
-    return errorResponse(`Refusing to delete unexpected path: ${dest}`, 400);
-  }
-
-  // Kill everything first, the same way the Nexus uninstall path does.
-  // `stopAll` on its own is not enough for a delete: it leaves warm-pool
-  // refill armed (the reconciler can spawn a fresh instance while we rm),
-  // it doesn't force-kill instances whose graceful stop failed, and it
-  // doesn't sweep sibling containers. markUninstalling suppresses the refill
-  // for the duration; killAllForApp does the graceful stop, then SIGKILLs
-  // survivors, then sweeps stray containers. Failures are warnings — we
-  // still want the directory gone rather than a half-broken install.
-  mgr.markUninstalling(appId, true);
+  let result: { removed: boolean; dest: string };
   try {
-    await mgr.killAllForApp(appId);
+    result = await removeInstalledApp(appId);
   } catch (err) {
-    console.warn(`[apps/remove] killAllForApp(${appId}) failed: ${(err as Error).message} — continuing with rm`);
+    return errorResponse(`Could not delete ${appId}: ${(err as Error).message}`, 500);
   }
-
-  try {
-    return await removeFiles(appId, dest);
-  } finally {
-    // Always unmark, including on the early `did not exist` return — leaving
-    // an app marked uninstalling would silently suppress its warm pool for
-    // the rest of the process's life.
-    mgr.markUninstalling(appId, false);
-  }
-}
-
-async function removeFiles(appId: string, dest: string): Promise<Response> {
-  if (!existsSync(dest)) {
-    // Directory already gone (manual rm earlier?) — chokidar may or may not
-    // have caught it. Tell the registry directly via a fresh scan so the
-    // launcher/dock stop offering a ghost app.
-    return jsonResponse({ ok: true, appId, removed: false, message: `${dest} did not exist on disk; registry will reconcile.` });
-  }
-
-  try {
-    rmSync(dest, { recursive: true, force: true });
-  } catch (err) {
-    return errorResponse(`rm -rf ${dest} failed: ${(err as Error).message}`, 500);
+  if (!result.removed) {
+    return jsonResponse({ ok: true, appId, removed: false, message: `${result.dest} did not exist on disk; registry will reconcile.` });
   }
 
   // KV cleanup — drop this app's entry from the enable map so the persisted
@@ -110,5 +58,5 @@ async function removeFiles(appId: string, dest: string): Promise<Response> {
     console.warn(`[apps/remove] KV cleanup failed: ${(err as Error).message}`);
   }
 
-  return jsonResponse({ ok: true, appId, removed: true, dest });
+  return jsonResponse({ ok: true, appId, removed: true, dest: result.dest });
 }

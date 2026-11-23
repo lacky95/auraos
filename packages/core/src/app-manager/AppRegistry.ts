@@ -4,14 +4,27 @@ import chokidar from 'chokidar';
 import { AppManifestSchema, type AppManifest } from '../types/manifest.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
 import type { ScopeDefinition, ScopedManifest } from '../scopes/types.js';
+import type { ManifestHostGuard } from '../app-hosts/manifestHostGuard.js';
 
 export class AppRegistry {
   private manifests = new Map<string, ScopedManifest>();
   /** Scopes sorted ascending by priority (0=system, 1=global, 2=user). */
   private readonly scopes: ScopeDefinition[];
+  /** Decides which manifest `hosts[]` take effect, however the app arrived. */
+  private hostGuard: ManifestHostGuard | null = null;
 
   constructor(scopes: ScopeDefinition[]) {
     this.scopes = scopes.slice().sort((a, b) => a.priority - b.priority);
+  }
+
+  setHostGuard(guard: ManifestHostGuard | null): void {
+    this.hostGuard = guard;
+  }
+
+  private guarded(m: ScopedManifest): ScopedManifest {
+    if (!this.hostGuard) return m;
+    const hosts = this.hostGuard.filter(m, this.manifests.values());
+    return hosts === m.hosts ? m : { ...m, hosts };
   }
 
   async init(): Promise<void> {
@@ -60,11 +73,11 @@ export class AppRegistry {
     try {
       const raw = JSON.parse(readFileSync(manifestPath, 'utf-8'));
       const base = AppManifestSchema.parse(raw);
-      const candidate: ScopedManifest = {
+      const candidate = this.guarded({
         ...base,
         scopeId: scope.id,
         appDir:  join(scope.appsDir, base.id),
-      };
+      });
 
       const existing = this.manifests.get(base.id);
       // Higher priority scope wins; only update if incoming priority is >= current.
@@ -114,7 +127,7 @@ export class AppRegistry {
       try {
         const raw = JSON.parse(readFileSync(manifestPath, 'utf-8'));
         const base = AppManifestSchema.parse(raw);
-        return { ...base, scopeId: scope.id, appDir: join(scope.appsDir, base.id) };
+        return this.guarded({ ...base, scopeId: scope.id, appDir: join(scope.appsDir, base.id) });
       } catch { /* skip corrupt */ }
     }
     return null;
@@ -153,7 +166,7 @@ export class AppRegistry {
     if (candidates.length === 0) return;
     // Pick the highest-priority candidate.
     const winner = candidates.sort((a, b) => this.scopePriority(b.scopeId) - this.scopePriority(a.scopeId))[0]!;
-    this.manifests.set(appId, winner);
+    this.manifests.set(appId, this.guarded(winner));
   }
 
   getAll(): ScopedManifest[] {

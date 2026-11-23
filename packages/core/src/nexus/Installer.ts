@@ -12,14 +12,14 @@
  */
 import { execFileSync } from 'node:child_process';
 import {
-  cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync,
-  rmSync, writeFileSync,
+  cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync,
+  renameSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import type { InstallRecord, ResolvedRef } from './types.js';
 import type { ScopeId } from '../scopes/types.js';
-import { readOriginId } from '../app-manager/AppIdentity.js';
+import { APP_ID_PATTERN, isOriginId, readOriginId } from '../app-manager/AppIdentity.js';
 import { readPublishMarker, type AppSourceInfo } from './AppSource.js';
 
 export interface InstallerOpts {
@@ -98,16 +98,23 @@ export class Installer {
    * Uninstall: move the app's code to trash, drop the install record.
    * Preserves the app's data unless `purge: true`: its runtime data
    * (`runtimeDataEntries`) stays in `apps/<id>/` — without
-   * `app.manifest.json` that dir is no app — and a reinstall carries it over;
-   * per-app data at `data/apps/<id>/` stays too.
+   * `app.manifest.json` that dir is no app — and a reinstall that passes the
+   * restore check carries it over; per-app data at `data/apps/<id>/` stays too.
+   *
+   * `purge` is "Delete app data": nothing is moved to trash, and the app's
+   * earlier trash copies and set-aside data are deleted as well.
    */
   async uninstall(appId: string, opts: { purge?: boolean } = {}): Promise<void> {
+    if (opts.purge) {
+      this.purge(appId);
+      return;
+    }
     const appDir = join(this.opts.appsDir, appId);
     if (existsSync(appDir)) {
       const trashRoot = join(this.opts.dataDir, 'nexus', 'trash');
       mkdirSync(trashRoot, { recursive: true });
       const dest = join(trashRoot, `${appId}-${Date.now()}`);
-      const keep = opts.purge ? [] : runtimeDataEntries(appDir, appId);
+      const keep = runtimeDataEntries(appDir, appId);
       if (keep.length === 0) {
         moveOrCopy(appDir, dest);
       } else {
@@ -120,11 +127,61 @@ export class Installer {
 
     const recordPath = join(this.opts.dataDir, 'nexus', 'installed', `${appId}.json`);
     if (existsSync(recordPath)) rmSync(recordPath);
+  }
 
-    if (opts.purge) {
-      const appData = join(this.opts.dataDir, 'apps', appId);
-      if (existsSync(appData)) rmSync(appData, { recursive: true, force: true });
+  /** Delete the app dir, its per-app data, its trash entries, its set-aside data and its record. */
+  private purge(appId: string): void {
+    if (!APP_ID_PATTERN.test(appId)) throw new Error(`refusing to purge: invalid app id ${JSON.stringify(appId)}`);
+    removeContained(this.opts.appsDir, appId);
+    removeContained(join(this.opts.dataDir, 'apps'), appId);
+    const trashRoot = join(this.opts.dataDir, 'nexus', 'trash');
+    for (const name of readdirSafe(trashRoot)) {
+      if (isTrashEntryOf(name, appId)) removeContained(trashRoot, name);
     }
+    removeContained(this.retainedRoot(), appId);
+    removeContained(join(this.opts.dataDir, 'nexus', 'installed'), `${appId}.json`);
+  }
+
+  private retainedRoot(): string { return join(this.opts.dataDir, 'nexus', 'retained'); }
+
+  private retainedDir(appId: string, installationId: string): string {
+    if (!APP_ID_PATTERN.test(appId) || !isOriginId(installationId)) {
+      throw new Error(`invalid retained-data path: ${appId}/${installationId}`);
+    }
+    return join(this.retainedRoot(), appId, installationId);
+  }
+
+  /** Whether `apps/<id>/` holds only what a keep-data uninstall left behind. */
+  hasRetainedData(appId: string): boolean {
+    const appDir = join(this.opts.appsDir, appId);
+    return !existsSync(join(appDir, 'app.manifest.json')) && runtimeDataEntries(appDir, appId).length > 0;
+  }
+
+  /**
+   * Set retained data aside for its installation, because the app being
+   * installed under this id is not entitled to it. Moved, never deleted.
+   */
+  setAsideRetainedData(appId: string, installationId: string): void {
+    const appDir = join(this.opts.appsDir, appId);
+    const entries = runtimeDataEntries(appDir, appId);
+    if (entries.length === 0) return;
+    const dest = this.retainedDir(appId, installationId);
+    if (existsSync(dest)) throw new Error(`retained data of ${appId} is already set aside for ${installationId}`);
+    mkdirSync(dest, { recursive: true });
+    for (const name of entries) moveOrCopy(join(appDir, name), join(dest, name));
+  }
+
+  /** Put data set aside earlier back, once its installation passed the restore check. */
+  restoreRetainedData(appId: string, installationId: string): void {
+    const src = this.retainedDir(appId, installationId);
+    if (!existsSync(src)) return;
+    const appDir = join(this.opts.appsDir, appId);
+    const names = readdirSafe(src);
+    const clash = names.find((name) => existsSync(join(appDir, name)));
+    if (clash) throw new Error(`cannot restore ${appId}: ${clash} already exists`);
+    mkdirSync(appDir, { recursive: true });
+    for (const name of names) moveOrCopy(join(src, name), join(appDir, name));
+    removeContained(join(this.retainedRoot(), appId), installationId);
   }
 
   /** Lookup the install record for an app, or null. */
@@ -156,6 +213,33 @@ export class Installer {
     }
     return out;
   }
+}
+
+/** `<appId>-<timestamp>`, the exact name the installer gives a trash entry. */
+export function isTrashEntryOf(name: string, appId: string): boolean {
+  return name.startsWith(`${appId}-`) && /^\d+$/.test(name.slice(appId.length + 1));
+}
+
+/**
+ * Delete exactly `<root>/<name>`, which must be a direct child of `root`.
+ * Refuses separators, dot segments and NUL. A symlink is unlinked, never
+ * followed. Returns whether anything was removed.
+ */
+export function removeContained(root: string, name: string): boolean {
+  if (!name || name === '.' || name === '..' || /[/\\\0]/.test(name)) {
+    throw new Error(`refusing to delete unsafe path segment: ${JSON.stringify(name)}`);
+  }
+  if (!existsSync(root)) return false;
+  const realRoot = realpathSync(root);
+  const target = join(realRoot, name);
+  if (dirname(target) !== realRoot) throw new Error(`refusing to delete outside ${realRoot}: ${target}`);
+  try { lstatSync(target); }
+  catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw err;
+  }
+  rmSync(target, { recursive: true, force: true });
+  return true;
 }
 
 function readdirSafe(p: string): string[] {
