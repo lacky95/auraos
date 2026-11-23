@@ -456,7 +456,33 @@ const modalApps = apps.filter((a) => requests(a, 'notifications.systemModal'));
 
       // ---- unlock / lock -------------------------------------------------
       const dlg = $('unlock-dialog');
+      // On an App Host the credential is typed in the Shell's own dialog, so
+      // this page only ever holds the short-lived session token.
+      // PHASE2-CUTOVER: make this the only path and delete the inline dialog.
+      const onAppHost = location.hostname.split('.')[0].includes('--');
+      function adminUnlocked(data) {
+        session = { token: data.token, expiresAt: data.expiresAt };
+        const ms = Math.max(0, data.expiresAt - Date.now());
+        lockTimer = setTimeout(() => lockLocal('Admin locked automatically after 15 minutes.'), ms);
+        render();
+        setStatus('Admin unlocked.');
+        return loadAll();
+      }
+      function requestShellUnlock() {
+        const shellOrigin = `${location.protocol}//${location.host.slice(location.host.indexOf('--') + 2)}`;
+        const requestId = Math.random().toString(36).slice(2); // correlation only
+        const onResult = (ev) => {
+          if (ev.source !== window.parent || ev.origin !== shellOrigin) return;
+          const d = ev.data;
+          if (!d || d.type !== 'aura.admin.unlock.result' || d.requestId !== requestId) return;
+          window.removeEventListener('message', onResult);
+          if (d.ok && d.token) void adminUnlocked(d);
+        };
+        window.addEventListener('message', onResult);
+        window.parent.postMessage({ type: 'aura.admin.unlock.request', requestId }, shellOrigin);
+      }
       $('btn-unlock').addEventListener('click', () => {
+        if (onAppHost) { requestShellUnlock(); return; }
         $('unlock-credential').value = '';
         $('unlock-error').hidden = true;
         dlg.showModal();
@@ -478,13 +504,8 @@ const modalApps = apps.filter((a) => requests(a, 'notifications.systemModal'));
           $('unlock-error').hidden = false;
           return;
         }
-        session = { token: data.token, expiresAt: data.expiresAt };
         dlg.close();
-        const ms = Math.max(0, data.expiresAt - Date.now());
-        lockTimer = setTimeout(() => lockLocal('Admin locked automatically after 15 minutes.'), ms);
-        render();
-        setStatus('Admin unlocked.');
-        await loadAll();
+        await adminUnlocked(data);
       });
       $('btn-lock').addEventListener('click', async () => {
         const token = session && session.token;

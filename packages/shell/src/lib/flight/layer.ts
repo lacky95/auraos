@@ -34,6 +34,8 @@ import { runGesture, toLocal, localViewport, rectToLocal, type Edge } from '../k
 import { watchLock } from '../../components/shell/notifications/placement.ts';
 import { attachEdgeDrag } from '../edgeBadge.ts';
 import { claimFrame, moveInto, parkFrame } from './handoff.ts';
+import { postToFrame, proxyFrameUrl, setAppFrameUrl } from '../appFrame.ts';
+import { onAuraChannel, type AuraChannelEvent } from '../auraChannelShell.ts';
 import { noticeView, type Notice } from './notice.ts';
 import {
   clampFlightRect, defaultFlightRect, layoutTabs, nearestEdge, perchTarget, posAlong, unfoldRect,
@@ -139,8 +141,7 @@ function send(id: string, suffix: string, method: 'PATCH' | 'POST' | 'DELETE', b
 }
 
 function iframeUrl(f: FlightInfo): string {
-  const p = (f.path || '/').replace(/^\/+/, '');
-  return `/api/proxy/${f.parentInstanceId}/${p}?_aura_activity=${enc(f.activityId)}`;
+  return proxyFrameUrl({ appId: f.appId, instanceId: f.parentInstanceId, activityId: f.activityId, path: f.path || '/' });
 }
 
 function glyphOf(f: FlightInfo): string {
@@ -204,11 +205,15 @@ function build(info: FlightInfo): FlightView {
   let iframe = claimFrame(info.activityId);
   if (iframe) {
     iframe.removeAttribute('style');
-    if (iframe.dataset['src'] && !iframe.getAttribute('src')) { iframe.src = iframe.dataset['src']; delete iframe.dataset['src']; }
+    if (iframe.dataset['src'] && !iframe.getAttribute('src')) {
+      const src = iframe.dataset['src'];
+      delete iframe.dataset['src'];
+      setAppFrameUrl(iframe, src, info.appId);
+    }
     moveInto(body, iframe);
   } else {
     iframe = document.createElement('iframe');
-    iframe.src = iframeUrl(info);
+    setAppFrameUrl(iframe, iframeUrl(info), info.appId);
     body.appendChild(iframe);
   }
   iframe.className = 'flight-frame';
@@ -682,7 +687,7 @@ function onEvent(ev: { type: string; [k: string]: unknown }): void {
 // ─── App ↔ shell (postMessage) ───────────────────────────────────────────
 
 function notifyFrame(f: FlightView, type: string, payload: Record<string, unknown>): void {
-  try { f.iframe.contentWindow?.postMessage({ type, activityId: f.activityId, ...payload }, '*'); } catch { /* gone */ }
+  postToFrame(f.iframe, { type, activityId: f.activityId, ...payload });
 }
 
 function flightOfSource(src: MessageEventSource | null): FlightView | null {
@@ -695,12 +700,11 @@ function flightOfSource(src: MessageEventSource | null): FlightView | null {
  * Messages from inside a flight (SDK `os.flight.current`): the flight
  * controls itself. Geometry from an app is a request — the shell clamps it.
  */
-function onMessage(ev: MessageEvent): void {
-  const d = ev.data as { type?: unknown; [k: string]: unknown } | null;
-  if (!d || typeof d.type !== 'string' || !d.type.startsWith('aura.flight.')) return;
+function onMessage(ev: AuraChannelEvent): void {
+  const d = ev.data;
   const f = flightOfSource(ev.source);
   if (!f) return;
-  switch (d.type) {
+  switch (ev.type) {
     case 'aura.flight.hello':
       notifyFrame(f, 'aura.flight.state', { flight: f.flight });
       return;
@@ -753,7 +757,10 @@ export function initFlightLayer(root: HTMLElement): void {
   layer.appendChild(glow);
 
   osEvents.subscribe(['activity:*'], (ev) => onEvent(ev));
-  window.addEventListener('message', onMessage);
+  onAuraChannel([
+    'aura.flight.hello', 'aura.flight.perch', 'aura.flight.notify', 'aura.flight.unfold',
+    'aura.flight.show', 'aura.flight.hide', 'aura.flight.mode', 'aura.flight.resize',
+  ], onMessage);
   let raf = 0;
   window.addEventListener('resize', () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; paintAll(); }); });
   // The bars appearing / hiding changes the insets the tabs avoid.

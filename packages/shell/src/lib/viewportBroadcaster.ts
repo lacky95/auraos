@@ -19,6 +19,7 @@
  * island. Apps consume via `osClient.onViewportChange`.
  */
 
+import { postToFrame } from './appFrame.ts';
 import { createLogger } from '@aura/core/logger';
 import { detachIfOwnedBy } from './nativeSurface.js';
 
@@ -74,8 +75,7 @@ export function postViewportTo(
     type: 'aura.viewport.changed',
     reason, shellZoom, iframeScale, contentW, contentH,
   };
-  try { frame.contentWindow?.postMessage(msg, '*'); }
-  catch { /* cross-origin or torn-down frame */ }
+  postToFrame(frame, msg);
   if (log.isEnabled()) log.debug('viewport post', reason, contentW, '×', contentH, frame.id || frame.closest<HTMLElement>('[data-view-id]')?.dataset['viewId'] || '');
 }
 

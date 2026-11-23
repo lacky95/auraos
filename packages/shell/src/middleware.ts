@@ -11,6 +11,7 @@ import { loadCustomInterfaces } from './lib/customInterfaces.js';
 import { startFlightService } from './lib/flight/service.js';
 import { refererProxyId } from './lib/access/legacyReferer.ts';
 import { captureAccess, createAccessReporter } from './lib/access/guard.ts';
+import { shellFramePolicy } from './lib/desktop/frameRoutes.ts';
 
 // Source of truth is the singleton on globalThis — NOT a module-scoped flag.
 // The soft-restart endpoint deletes that singleton; if we tracked init state
@@ -211,5 +212,11 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
   // A shell tab registering itself: onboarding cards wait for the first one,
   // because only notifications that arrive while a tab listens pop up.
   if (ctx.request.method === 'POST' && ctx.url.pathname === '/api/os/clients' && res.ok) noteClientConnected();
+  // The shell's own documents can't be framed by an app (lib/desktop/frameRoutes.ts).
+  const framePolicy = shellFramePolicy(ctx.url.pathname, res.headers.get('content-type'), res.headers.get('content-security-policy'));
+  if (framePolicy) {
+    try { res.headers.set('Content-Security-Policy', framePolicy); }
+    catch { /* immutable headers: not a page this shell rendered */ }
+  }
   return res;
 });

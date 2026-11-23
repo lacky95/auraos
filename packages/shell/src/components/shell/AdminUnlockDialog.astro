@@ -1,0 +1,107 @@
+---
+/**
+ * The shell-owned admin unlock. The credential is typed in the shell's own
+ * document, so an app on an App Host never sees it. Settings asks with
+ * `aura.admin.unlock.request` and gets only the short-lived session token,
+ * posted to its exact origin. A native modal `<dialog>` sits in the browser's
+ * top layer, above every z-index, and makes the rest of the page inert.
+ */
+---
+<dialog id="aura-admin-unlock" aria-labelledby="aura-admin-unlock-title">
+  <form id="aura-admin-unlock-form">
+    <div id="aura-admin-unlock-title">UNLOCK ADMIN</div>
+    <p>AuraOS is asking on behalf of Settings. Enter the shared admin credential (<code>aura admin credential</code> in the master container).</p>
+    <input id="aura-admin-unlock-input" type="password" autocomplete="off" spellcheck="false" placeholder="aura_admin_…" aria-label="Admin credential" />
+    <p id="aura-admin-unlock-error" role="alert" hidden></p>
+    <div class="aura-admin-unlock-actions">
+      <button type="button" id="aura-admin-unlock-cancel">CANCEL</button>
+      <button type="submit">UNLOCK</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+  import { onAuraChannel, replyTo, type AuraChannelEvent } from '../../lib/auraChannelShell.ts';
+
+  const dlg = document.getElementById('aura-admin-unlock') as HTMLDialogElement | null;
+  const form = document.getElementById('aura-admin-unlock-form') as HTMLFormElement | null;
+  const input = document.getElementById('aura-admin-unlock-input') as HTMLInputElement | null;
+  const error = document.getElementById('aura-admin-unlock-error');
+  const cancel = document.getElementById('aura-admin-unlock-cancel');
+
+  let pending: AuraChannelEvent | null = null;
+
+  function finish(result: { ok: true; token: string; expiresAt: number } | { ok: false }): void {
+    const req = pending;
+    pending = null;
+    if (input) input.value = '';
+    if (dlg?.open) dlg.close();
+    if (req) replyTo(req, { type: 'aura.admin.unlock.result', requestId: req.data['requestId'], ...result });
+  }
+
+  if (dlg && form && input && error && cancel) {
+    onAuraChannel('aura.admin.unlock.request', (ev) => {
+      if (pending) { replyTo(ev, { type: 'aura.admin.unlock.result', requestId: ev.data['requestId'], ok: false }); return; }
+      pending = ev;
+      input.value = '';
+      error.hidden = true;
+      dlg.showModal();
+      input.focus();
+    });
+    cancel.addEventListener('click', () => finish({ ok: false }));
+    dlg.addEventListener('cancel', (e) => { e.preventDefault(); finish({ ok: false }); });
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const credential = input.value.trim();
+      input.value = '';
+      if (!credential || !pending) return;
+      const r = await fetch('/api/admin/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ credential }),
+      }).catch(() => null);
+      const data = (r ? await r.json().catch(() => ({})) : {}) as { token?: string; expiresAt?: number; message?: string };
+      if (!r?.ok || !data.token || typeof data.expiresAt !== 'number') {
+        error.textContent = data.message || 'Unlock failed.';
+        error.hidden = false;
+        input.focus();
+        return;
+      }
+      finish({ ok: true, token: data.token, expiresAt: data.expiresAt });
+    });
+  }
+</script>
+
+<style is:global>
+  #aura-admin-unlock {
+    width: min(440px, calc(100vw - 32px));
+    box-sizing: border-box;
+    padding: 16px;
+    background: var(--aura-color-surface);
+    color: var(--aura-color-text);
+    border: 1px solid var(--aura-color-warning);
+    font-family: var(--aura-font-mono);
+    font-size: 0.8rem;
+  }
+  #aura-admin-unlock::backdrop { background: color-mix(in srgb, var(--aura-color-bg) 88%, transparent); }
+  #aura-admin-unlock-title { color: var(--aura-color-warning); font-weight: 700; letter-spacing: 0.08em; }
+  #aura-admin-unlock input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 6px 8px;
+    background: var(--aura-color-bg);
+    color: var(--aura-color-text);
+    border: var(--aura-border);
+    font: inherit;
+  }
+  #aura-admin-unlock-error { color: var(--aura-color-danger, #ff4a4a); }
+  .aura-admin-unlock-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+  .aura-admin-unlock-actions button {
+    padding: 4px 12px;
+    background: transparent;
+    color: var(--aura-color-primary);
+    border: var(--aura-border);
+    font: inherit;
+    cursor: pointer;
+  }
+</style>

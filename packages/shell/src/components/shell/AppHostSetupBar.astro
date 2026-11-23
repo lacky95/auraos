@@ -1,0 +1,85 @@
+---
+/**
+ * Limited IP mode: a full-width bar that can't be dismissed. It links to this
+ * installation's App Hosts address, or to the custom-domain guide when that
+ * address doesn't resolve. Decisions are in lib/desktop/setupBar.ts.
+ *
+ * PHASE2-CUTOVER: stop gating the bar on apps with `frameRoute: host`.
+ */
+---
+<div id="aura-setup-bar" role="status" hidden>
+  <strong>Limited IP mode.</strong>
+  <span id="aura-setup-bar-text"></span>
+  <a id="aura-setup-bar-link" hidden></a>
+</div>
+
+<script>
+  import { hostRouteAppList } from '../../lib/appFrame.ts';
+  import {
+    isWebKitBrowser, planSetupBar, probeAppHostAddress, settleSetupBar, type SetupBarPlan,
+  } from '../../lib/desktop/setupBar.ts';
+
+  const bar = document.getElementById('aura-setup-bar');
+  const text = document.getElementById('aura-setup-bar-text');
+  const link = document.getElementById('aura-setup-bar-link') as HTMLAnchorElement | null;
+
+  function paint(plan: SetupBarPlan): void {
+    if (!bar || !text || !link || !plan.show) return;
+    if (plan.kind === 'link') {
+      text.textContent = "Apps can't open from an IP address. Switch to this Aura installation's app address.";
+      link.href = plan.href;
+      link.textContent = `Open Aura with App Hosts: ${plan.address}`;
+      link.hidden = false;
+    } else {
+      text.textContent = "Apps can't open from this address, and no app address could be reached. Point a DNS name at this server and open Aura there. See App Hosts in Aura Docs.";
+      link.removeAttribute('href');
+      link.hidden = true;
+    }
+    bar.hidden = false;
+    // Set only while the bar shows, so the desktop's layout is untouched otherwise.
+    const root = document.getElementById('os-root');
+    const sync = () => {
+      if (!root) return;
+      root.style.marginTop = `${bar.offsetHeight}px`;
+      root.style.height = `calc(100% - ${bar.offsetHeight}px)`;
+    };
+    sync();
+    if ('ResizeObserver' in window) new ResizeObserver(sync).observe(bar);
+  }
+
+  const plan = planSetupBar({
+    host: location.host,
+    protocol: location.protocol,
+    pathname: location.pathname,
+    hostRouteApps: hostRouteAppList().size,
+    webkit: isWebKitBrowser(navigator.userAgent),
+  });
+  if (plan.show && plan.kind === 'link') {
+    void probeAppHostAddress(plan.probeUrl).then((ok) => paint(settleSetupBar(plan, ok)));
+  } else {
+    paint(plan);
+  }
+</script>
+
+<style is:global>
+  /* Below the trusted dialogs (1900) and the auto-hide badge (1890). */
+  #aura-setup-bar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 1880;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 10px;
+    box-sizing: border-box;
+    padding: 6px 12px;
+    background: var(--aura-color-warning);
+    color: var(--aura-color-bg);
+    font-family: var(--aura-font-mono);
+    font-size: 0.75rem;
+  }
+  #aura-setup-bar[hidden] { display: none; }
+  #aura-setup-bar a { color: inherit; font-weight: 700; text-decoration: underline; overflow-wrap: anywhere; }
+</style>

@@ -5,6 +5,8 @@ import StatusBar from '../components/shell/StatusBar.astro';
 import Dock from '../components/shell/Dock.astro';
 import LauncherOverlay from '../components/shell/LauncherOverlay.astro';
 import LockScreenOverlay from '../components/shell/LockScreenOverlay.astro';
+import AppHostSetupBar from '../components/shell/AppHostSetupBar.astro';
+import AdminUnlockDialog from '../components/shell/AdminUnlockDialog.astro';
 import NotificationCenter from '../components/shell/notifications/NotificationCenter.astro';
 import NotificationToasts from '../components/shell/notifications/NotificationToasts.astro';
 import NotificationDialogs from '../components/shell/notifications/NotificationDialogs.astro';
@@ -56,6 +58,23 @@ const activeThemeId   = activeTheme.id;
   <!-- Boot timeline origin + the `?log=<filter>` switch. Must run before any
        module logs, so it is inline and import-free; the module side is
        lib/bootTimeline.ts (marks/stages) and lib/logControl.ts (KV mirror). -->
+  <!-- AuraChannel bootstrap: the inline scripts below register here. Their
+       messages wait until lib/auraChannelShell.ts has installed the checks. -->
+  <script is:inline>
+  (() => {
+    const handlers = Object.create(null);
+    const early = [];
+    const listener = (ev) => {
+      const type = ev.data && ev.data.type;
+      if (typeof type === 'string' && handlers[type] && early.length < 512) early.push(ev);
+    };
+    window.addEventListener('message', listener);
+    window.__auraChannelBoot = {
+      handlers, early, listener,
+      on(type, fn) { (handlers[type] = handlers[type] || []).push(fn); },
+    };
+  })();
+  </script>
   <script is:inline>
   (function () {
     var b = window.__auraBoot = window.__auraBoot || { marks: [], stages: null, summaryPrinted: false };
@@ -307,13 +326,20 @@ const activeThemeId   = activeTheme.id;
     // (`aura.console.requestBacklog`). Posting every shell console line to
     // every app iframe cost N posts per line for nothing — and N² when the
     // line itself was logged per iframe.
-    const consoleSubscribers = new Set();
+    const consoleSubscribers = new Map(); // window -> its verified origin
+    function frameOrigin(f) {
+      if (f.dataset.auraFrameRoute !== 'host') return location.origin;
+      return f.dataset.auraFrameReady === '1' ? (f.dataset.auraFrameOrigin || null) : null;
+    }
     function consoleTargets() {
       const out = [];
       document.querySelectorAll('iframe').forEach((f) => {
         const w = f.contentWindow;
         if (!w) return;
-        if (consoleSubscribers.has(w) || (f.getAttribute('src') || '').indexOf('/api/proxy/com.aura.console') === 0) out.push(w);
+        const isConsole = f.dataset.auraAppId === 'com.aura.console'
+          || (f.getAttribute('src') || '').indexOf('/api/proxy/com.aura.console') === 0;
+        const origin = consoleSubscribers.get(w) || (isConsole ? frameOrigin(f) : null);
+        if (origin) out.push([w, origin]);
       });
       return out;
     }
@@ -322,7 +348,7 @@ const activeThemeId   = activeTheme.id;
       if (isNoisyDev(entry.args)) return;
       buffer.push(entry);
       if (buffer.length > MAX) buffer.shift();
-      consoleTargets().forEach((w) => { try { w.postMessage(entry, '*'); } catch (_) {} });
+      consoleTargets().forEach(([w, origin]) => { try { w.postMessage(entry, origin); } catch (_) {} });
       sendToConsoleWs(entry);
     }
 
@@ -485,19 +511,15 @@ const activeThemeId   = activeTheme.id;
       };
     }
 
-    window.addEventListener('message', (e) => {
-      const d = e.data;
-      if (!d || typeof d !== 'object') return;
-      // Iframe forwarding its own console (proxy-injected relay script)
-      if (d.type === 'aura.console.relay' && d.entry) {
-        broadcast(d.entry);
-        return;
-      }
-      // Console app asking for backlog on mount
-      if (d.type === 'aura.console.requestBacklog') {
-        if (e.source) consoleSubscribers.add(e.source);
-        try { e.source && e.source.postMessage({ type: 'aura.console.backlog', entries: buffer.slice() }, '*'); } catch (_) {}
-      }
+    // Iframe forwarding its own console (proxy-injected relay script)
+    window.__auraChannelBoot.on('aura.console.relay', (m) => {
+      if (m.data.entry) broadcast(m.data.entry);
+    });
+    // Console app asking for backlog on mount
+    window.__auraChannelBoot.on('aura.console.requestBacklog', (m) => {
+      if (!m.source) return;
+      consoleSubscribers.set(m.source, m.origin);
+      try { m.source.postMessage({ type: 'aura.console.backlog', entries: buffer.slice() }, m.origin); } catch (_) {}
     });
 
     window.auraGetConsoleBuffer = () => buffer.slice();
@@ -506,6 +528,7 @@ const activeThemeId   = activeTheme.id;
   </script>
 </head>
 <body>
+  <AppHostSetupBar />
   <div id="os-root">
     <StatusBar />
     <main id="desktop">
@@ -532,6 +555,8 @@ const activeThemeId   = activeTheme.id;
   <FlightLayer />
   <!-- Virtual keyboard: one shell-owned keyboard for every activity (z 1065). -->
   <KeyboardOverlay />
+  <!-- Shell-owned admin unlock: a native modal, in the browser's top layer. -->
+  <AdminUnlockDialog />
   <!--
     LockScreenOverlay mounted last so its z-index 2000 sits above every
     other shell surface (launcher 1000, focus-view 50, dock, statusbar,
@@ -584,6 +609,8 @@ const activeThemeId   = activeTheme.id;
 
     function verifyFrame(frame) {
       if (frame.dataset.auraIdentityChecked === '1') return;
+      // Cross-origin App Host: its identity is the verified host, not a meta tag.
+      if (frame.dataset.auraFrameRoute === 'host') return;
       const src = frame.getAttribute('src') || '';
       const expected = expectedAppFromSrc(src);
       if (!expected) return;
@@ -640,6 +667,10 @@ const activeThemeId   = activeTheme.id;
     import { createLogger } from '@aura/core/logger';
     import { installSummaryTrigger, mark } from '../lib/bootTimeline.ts';
     import { startLogControl } from '../lib/logControl.ts';
+    import { postToFrame } from '../lib/appFrame.ts';
+    import { installShellChannel } from '../lib/auraChannelShell.ts';
+
+    installShellChannel();
 
     const themeLog = createLogger('shell:theme');
     mark('first-module');
@@ -728,9 +759,7 @@ const activeThemeId   = activeTheme.id;
             colorMode:    m.colorMode,
             resolvedMode: m.resolvedMode,
           };
-      document.querySelectorAll('iframe').forEach((f) => {
-        try { f.contentWindow?.postMessage(payload, '*'); } catch {}
-      });
+      document.querySelectorAll('iframe').forEach((f) => { postToFrame(f, payload); });
     };
 
     _osEvents.subscribe(['theme:changed', 'mode:changed'], (ev) => onThemeEvent(ev as ThemeEvt | ModeEvt));
