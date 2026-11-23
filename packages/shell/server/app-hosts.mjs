@@ -3,7 +3,7 @@
  *
  * A request for `{name}--{desktop host}` (e.g. `marklayer--10-201-1-2.nip.io:3000`)
  * whose `name` an installed manifest declares in `hosts[]` is streamed to that
- * app's server or sidecar, untouched: no prefix, no HTML/JS rewriting, no
+ * app's server or sidecar, minus the shell's own credentials: no prefix, no HTML/JS rewriting, no
  * injected scripts, no cookie scoping. The app owns the origin root. Every
  * other request goes on to the shell exactly as before. Docs: /docs/app-hosts;
  * the rules live in @aura/core app-hosts/appHosts.ts and are mirrored below in
@@ -23,6 +23,10 @@
  */
 import http from 'node:http';
 import net from 'node:net';
+import {
+  internalServiceHeaders, observeHttpSurface, reportSurface, surfaceIdentity,
+} from './access-bridge.mjs';
+import { stripShellCredentials } from './shell-credentials.mjs';
 
 // ── the rule (mirror of @aura/core app-hosts/appHosts.ts) ───────────────────
 
@@ -146,7 +150,8 @@ export function createAppHostRouter({ appsList, shellPort = process.env.SHELL_PO
       if (Date.now() - last > START_RETRY_MS) {
         startAsked.set(appId, Date.now());
         log('start', appId);
-        fetch(`http://127.0.0.1:${shellPort}/api/apps/${encodeURIComponent(appId)}/start`, { method: 'POST', signal: AbortSignal.timeout(10_000) })
+        const startUrl = `http://127.0.0.1:${shellPort}/api/apps/${encodeURIComponent(appId)}/start`;
+        fetch(startUrl, { method: 'POST', headers: internalServiceHeaders(startUrl), signal: AbortSignal.timeout(10_000) })
           .catch((err) => log('start-failed', appId, String(err)));
       }
       return { starting: true, appId, appName: app.manifest.name ?? appId };
@@ -166,15 +171,23 @@ export function createAppHostRouter({ appsList, shellPort = process.env.SHELL_PO
   }
 
   async function handleRequest(name, req, res) {
+    const identity = surfaceIdentity(req.headers);
+    const method = req.method;
+    let reportedApp = null;
+    res.once('close', () => reportSurface({
+      subject: 'app-hosts', method, identity, appId: reportedApp, status: res.headersSent ? res.statusCode : 0,
+    }));
     let t;
     try { t = await resolve(name); } catch (err) {
       return reply(res, 503, 'AuraOS is starting', 'The app list is not available yet. This page reloads by itself.', { refresh: 3 });
     }
     if (t.missing) return reply(res, 404, `No app host “${name}”`, `No installed app declares the host <code>${name}</code>.`);
+    reportedApp = t.appId ?? null;
     if (t.starting) return reply(res, 503, `Starting ${t.appName}…`, 'This page reloads by itself when it is up.', { refresh: 2 });
 
     const headers = {};
     for (const [k, v] of Object.entries(req.headers)) if (!HOP_BY_HOP.has(k)) headers[k] = v;
+    stripShellCredentials(headers, 'app-hosts-http');
     Object.assign(headers, forwardedHeaders(req), identityHeaders(t));
 
     const up = http.request({ host: t.host, port: t.port, method: req.method, path: req.url, headers }, (ures) => {
@@ -204,13 +217,23 @@ export function createAppHostRouter({ appsList, shellPort = process.env.SHELL_PO
   }
 
   async function handleUpgrade(name, req, socket, head) {
+    const identity = surfaceIdentity(req.headers);
+    let reportedApp = null;
+    let reported = false;
+    const reportUpgrade = (status) => {
+      if (reported) return;
+      reported = true;
+      reportSurface({ subject: 'app-hosts', method: 'UPGRADE', identity, appId: reportedApp, status });
+    };
     const fail = (status, text) => {
+      reportUpgrade(status);
       try { socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); } catch { /* gone */ }
     };
     socket.on('error', () => {});
     let t;
     try { t = await resolve(name); } catch { return fail(503, 'Service Unavailable'); }
     if (t.missing) return fail(404, 'Not Found');
+    reportedApp = t.appId ?? null;
     if (t.starting) return fail(503, 'Service Unavailable');
 
     // Byte-for-byte: the original request line and headers (Host kept), plus
@@ -218,11 +241,13 @@ export function createAppHostRouter({ appsList, shellPort = process.env.SHELL_PO
     // app's own pings pass through untouched.
     const extra = { ...forwardedHeaders(req), ...identityHeaders(t) };
     const lines = [`${req.method} ${req.url} HTTP/${req.httpVersion}`];
-    for (let i = 0; i < req.rawHeaders.length; i += 2) {
-      if (!(req.rawHeaders[i].toLowerCase() in extra)) lines.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
+    const rawHeaders = stripShellCredentials(req.rawHeaders, 'app-hosts-upgrade');
+    for (let i = 0; i < rawHeaders.length; i += 2) {
+      if (!(rawHeaders[i].toLowerCase() in extra)) lines.push(`${rawHeaders[i]}: ${rawHeaders[i + 1]}`);
     }
     for (const [k, v] of Object.entries(extra)) lines.push(`${k}: ${v}`);
     const upstream = net.connect(t.port, t.host, () => {
+      reportUpgrade(101);
       upstream.write(lines.join('\r\n') + '\r\n\r\n');
       if (head?.length) upstream.write(head);
       socket.pipe(upstream).pipe(socket);
@@ -253,6 +278,7 @@ export function createAppHostRouter({ appsList, shellPort = process.env.SHELL_PO
           return true;
         }
       }
+      if (event === 'request') observeHttpSurface(req, rest[0]);
       return emit.call(this, event, req, ...rest);
     };
     void load().catch(() => {});   // warm the index; the shell may still be booting

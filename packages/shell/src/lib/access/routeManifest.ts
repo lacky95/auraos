@@ -112,6 +112,7 @@ const routes: RouteAccessManifest['routes'] = {
     // The build transcript is not setup status.
     variants: [{ id: 'build-log', methods: ['GET'], match: { on: 'query', name: 'log' }, rule: rule(OWNER, 'system') }],
   },
+  '/api/admin/access-report': { methods: { GET: rule(OWNER, 'system') } },
   '/api/admin/onboarding': {
     methods: {
       GET: rule(OWNER, 'system', decide(1, 'Reports setupDoneAt. Decide whether the setup page reads it before login or uses first-boot status instead.')),

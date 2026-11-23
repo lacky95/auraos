@@ -1,4 +1,4 @@
-import { ROUTE_METHODS } from './types.ts';
+import { HTTP_METHODS, ROUTE_METHODS } from './types.ts';
 import type { AccessRule, RouteAccessManifest, RouteMethod } from './types.ts';
 
 /**
@@ -40,3 +40,61 @@ export function effectiveRule(
 export const variantApplies = (methods: readonly RouteMethod[], method: RouteMethod, info: RouteHandlers): boolean =>
   methods.includes(method)
   || (method === 'HEAD' && methods.includes('GET') && !info.handlers.includes('ALL') && !info.handlers.includes('HEAD'));
+
+/** A request method as a rule names it: anything non-standard is `OTHER`. */
+export function normalizeMethod(method: string): RouteMethod {
+  const m = method.toUpperCase();
+  return (HTTP_METHODS as readonly string[]).includes(m) ? m as RouteMethod : 'OTHER';
+}
+
+/**
+ * A route's handlers as the manifest records them. An `ALL` route lists every
+ * method there (the manifest test holds that), and a route without an entry
+ * falls back to its group.
+ */
+export function handlersOf(manifest: RouteAccessManifest, route: string): string[] {
+  const methods = manifest.routes[route]?.methods;
+  if (!methods) return [];
+  const names = Object.keys(methods);
+  return ROUTE_METHODS.every((m) => names.includes(m)) ? ['ALL'] : names;
+}
+
+/** The request facts a variant can match on, short of its body. */
+export interface VariantFacts {
+  query: URLSearchParams;
+  namespace: 'os' | 'app' | null;
+}
+
+export interface RuleCandidate {
+  variant: string | null;
+  rule: AccessRule;
+}
+
+/**
+ * Every rule this request could fall under, in first-match order. A body
+ * variant is never read, so it stays a candidate and the walk goes on; a
+ * variant that definitely matches ends it.
+ */
+export function candidateRules(
+  manifest: RouteAccessManifest, info: RouteHandlers, method: RouteMethod, facts: VariantFacts,
+): RuleCandidate[] {
+  const out: RuleCandidate[] = [];
+  for (const v of manifest.routes[info.route]?.variants ?? []) {
+    if (!variantApplies(v.methods, method, info)) continue;
+    const m = v.match;
+    if (m.on === 'body') {
+      out.push({ variant: v.id, rule: v.rule });
+      continue;
+    }
+    const matches = m.on === 'query'
+      ? facts.query.has(m.name) && (m.equals === undefined || facts.query.get(m.name) === m.equals)
+      : facts.namespace === m.namespace;
+    if (matches) {
+      out.push({ variant: v.id, rule: v.rule });
+      return out;
+    }
+  }
+  const base = effectiveRule(manifest, info, method);
+  if (base) out.push({ variant: null, rule: base });
+  return out;
+}
