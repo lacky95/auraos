@@ -2,7 +2,7 @@
 // localhost: when invoked from a PRoot sandbox the bound base-rootfs has no
 // /etc/hosts entry for `localhost` (Debian-slim ships an empty one), so the
 // DNS lookup fails with ENOTFOUND. The literal address always resolves.
-const DEFAULT_SHELL_URL = 'http://127.0.0.1:3000';
+export const DEFAULT_SHELL_URL = 'http://127.0.0.1:3000';
 
 /**
  * Resolve the shell URL. Probe order:

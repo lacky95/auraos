@@ -6,7 +6,7 @@ Run the test instance on a **separate VM or Docker host**. Do not run it on the 
 
 AuraOS treats its Docker daemon as its own. A second instance on the live daemon would adopt or delete the live `aura-*` containers (`ContainerRunner.ts`, `AppManager.ts`, `SidecarManager.ts`, `PortManager.ts`). The names `aura-shell` and `aura-net` are fixed in `docker-compose.yml`, and no environment variable isolates them.
 
-The shell also gets root-equivalent access through its Docker socket, and `docker-compose.yml` sets `AURA_AUTH_MODE: none`. So:
+The shell also gets root-equivalent access through its Docker socket. So:
 
 - Never give the test instance the live host's `/var/run/docker.sock`.
 - Never run its `docker compose` with `DOCKER_HOST` or a context that points at the live daemon. The compose socket mount resolves on whichever daemon runs it.

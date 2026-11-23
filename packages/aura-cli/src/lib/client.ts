@@ -1,5 +1,6 @@
 import { shellUrl } from './shell-url.js';
-import { adminHeaders, isAdminPath, recoverAdminSession } from './admin-session.js';
+import { isAdminPath, recoverAdminSession } from './admin-session.js';
+import { adminRefusal, isTrustedShellUrl, shellFetch } from './identity.js';
 
 export { shellUrl };
 
@@ -8,27 +9,31 @@ export interface ShellError extends Error {
   body?: string;
 }
 
+function causeOf(err: unknown): string {
+  const cause = (err as { cause?: { message?: string } }).cause?.message;
+  return cause ? ` (${cause})` : '';
+}
+
 async function request<T>(
   method: string,
   path: string,
   body?: unknown,
 ): Promise<T> {
-  const url = `${shellUrl()}${path}`;
   const admin = isAdminPath(path);
   const send = async (): Promise<Response> => {
     const headers: Record<string, string> = {};
     if (body !== undefined) headers['Content-Type'] = 'application/json';
-    // /api/admin/* management routes take the admin session (aura admin login).
-    if (admin) Object.assign(headers, adminHeaders());
     try {
-      return await fetch(url, {
+      // /api/admin/* takes the admin session. Everything else stays anonymous (see identity.ts).
+      return await shellFetch(path, {
         method,
         headers,
+        intent: admin ? 'admin' : 'anonymous',
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });
     } catch (err) {
       const e = new Error(
-        `Cannot reach AuraOS shell at ${shellUrl()} — is the container running?\n  ${String(err)}`,
+        `Cannot reach AuraOS shell at ${shellUrl()} — is the container running?\n  ${String(err)}${causeOf(err)}`,
       ) as ShellError;
       throw e;
     }
@@ -45,8 +50,10 @@ async function request<T>(
     if (res.status === 401) {
       const e = new Error(
         `${method} ${path} needs an admin session.\n` +
-        '  Run `aura admin login --save` (asks for the shared admin credential), or set AURA_ADMIN_CREDENTIAL / AURA_ADMIN_SESSION.\n' +
-        '  The credential is in the master container: `aura jump -m`, then `aura admin credential`.',
+        (isTrustedShellUrl(shellUrl())
+          ? '  Run `aura admin login --save` (asks for the shared admin credential), or set AURA_ADMIN_CREDENTIAL / AURA_ADMIN_SESSION.\n' +
+            '  Read the credential on the host: `docker exec -it aura-shell aura admin credential`.'
+          : `  ${adminRefusal(shellUrl())}`),
       ) as ShellError;
       e.status = 401;
       e.body = text;
@@ -89,11 +96,10 @@ export function subscribeEvents(
   onError?: (err: Error) => void,
 ): () => void {
   const controller = new AbortController();
-  const url = `${shellUrl()}${path}`;
 
   void (async () => {
     try {
-      const res = await fetch(url, {
+      const res = await shellFetch(path, {
         headers: { Accept: 'text/event-stream' },
         signal: controller.signal,
       });

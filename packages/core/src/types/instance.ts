@@ -30,6 +30,11 @@ export interface AppInstance {
    * to dispatch to the runner that ACTUALLY launched the process.
    */
   sandbox?: 'proot' | 'container';
+  /**
+   * The user this instance runs for. Set on spawn and on warm-pool claim;
+   * undefined only while the instance is an unclaimed pool member.
+   */
+  owner?: string;
 }
 
 export type SidecarState = 'running' | 'starting' | 'stopped' | 'error' | 'unknown';

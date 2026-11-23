@@ -1,4 +1,5 @@
-import type { APIRoute } from 'astro';
+import type { APIContext, APIRoute } from 'astro';
+import { dropServiceWorkerScope, stripShellCredentials } from '../../../../../server/shell-credentials.mjs';
 import { getAppManager, ThemeManager, keymapRegistry, resolveProxyConfig, INTERFACE_PATH_KINDS } from '@aura/core';
 import type { AppManifest, ColorMode, KeyAction, OsKeymapState, ProxyConfig } from '@aura/core';
 import { sharedKv } from '../../../../lib/sharedKv.js';
@@ -91,7 +92,9 @@ function ensureInstance(mgr: ReturnType<typeof getAppManager>, appId: string): P
  * `X-Aura-Activity-Id` header on the upstream request. Apps that don't
  * care about activities can ignore the header.
  */
-export const ALL: APIRoute = async ({ params, request }) => {
+export const ALL: APIRoute = async (ctx) => dropServiceWorkerScope(await forward(ctx));
+
+const forward = async ({ params, request }: APIContext): Promise<Response> => {
   const id   = params['id'];
   const path = params['path'] ?? '';
 
@@ -286,7 +289,7 @@ export default {};
   const targetUrl = `http://${upHost}:${upPort}/${upstreamPath}${search}`;
 
   try {
-    const headers = new Headers(request.headers);
+    const headers = stripShellCredentials(new Headers(request.headers), 'proxy-http');
     headers.set('X-Aura-App-Id', instance.appId);
     headers.set('X-Aura-Instance-Id', instance.instanceId);
     if (activityId) headers.set('X-Aura-Activity-Id', activityId);

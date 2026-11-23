@@ -65,7 +65,6 @@ services:
       AURA_TOOLCHAIN_DIR: /os/toolchain
       AURA_APP_PORT_START: "4001"
       AURA_APP_PORT_END: "4999"
-      AURA_AUTH_MODE: none
       # Aura Context (env/secret manager) master key — base64 of 32 bytes,
       # e.g. `openssl rand -base64 32`. Seals context values at rest in Valkey.
       # If unset (dev default), a random key is generated once and persisted at

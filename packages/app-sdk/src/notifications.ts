@@ -1,3 +1,4 @@
+import { isBrowser, osAuthHeaders, osBase } from './os-auth.js';
 /**
  * `osClient.notifications` — the AuraOS notification API for apps.
  *
@@ -312,14 +313,6 @@ export interface NotificationsOptions {
 
 const LONG_POLL_S = 25;
 
-function isBrowser(): boolean {
-  return typeof window !== 'undefined';
-}
-
-function env(): Record<string, string | undefined> {
-  return typeof process !== 'undefined' && process.env ? process.env : {};
-}
-
 export class NotificationsApi {
   private readonly senderTokens = new Map<string, string>();
 
@@ -329,15 +322,12 @@ export class NotificationsApi {
 
   private base(): string {
     if (this.opts.base !== undefined) return this.opts.base.replace(/\/+$/, '');
-    if (isBrowser()) return '';
-    return (env()['OS_API_BASE'] ?? 'http://localhost:3000').replace(/\/+$/, '');
+    return osBase().replace(/\/+$/, '');
   }
 
   /** Bearer on Node only — a browser never sends (or sees) the instance token. */
-  private authHeaders(): Record<string, string> {
-    if (isBrowser()) return {};
-    const token = this.opts.token ?? env()['AURA_INSTANCE_TOKEN'];
-    return token ? { Authorization: `Bearer ${token}` } : {};
+  private authHeaders(url: string): Record<string, string> {
+    return osAuthHeaders(url, this.opts.token !== undefined ? { token: this.opts.token } : {});
   }
 
   private doFetch(): typeof fetch {
@@ -345,9 +335,10 @@ export class NotificationsApi {
   }
 
   private async call<T>(method: string, path: string, body?: unknown, extra: Record<string, string> = {}, signal?: AbortSignal): Promise<{ data: T; res: Response }> {
-    const res = await this.doFetch()(`${this.base()}${path}`, {
+    const url = `${this.base()}${path}`;
+    const res = await this.doFetch()(url, {
       method,
-      headers: { ...this.authHeaders(), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...extra },
+      headers: { ...this.authHeaders(url), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...extra },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       ...(signal ? { signal } : {}),
     });
@@ -537,7 +528,7 @@ export class NotificationsApi {
         controller = new AbortController();
         try {
           const res = await this.doFetch()(url(), {
-            headers: { Accept: 'text/event-stream', ...this.authHeaders(), ...(lastId ? { 'Last-Event-ID': lastId } : {}) },
+            headers: { Accept: 'text/event-stream', ...this.authHeaders(url()), ...(lastId ? { 'Last-Event-ID': lastId } : {}) },
             signal: controller.signal,
           });
           if (!res.ok || !res.body) {

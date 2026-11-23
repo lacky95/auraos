@@ -64,6 +64,7 @@ const groups: RouteAccessManifest['groups'] = {
   activities:    rule(INSTANCE, 'activity'),
   admin:         rule(OWNER, 'system'),
   apps:          rule(OWNER, 'app'),
+  auth:          rule(OWNER, 'session'),
   data:          rule(['app-permission'], 'data-provider'),
   flights:       rule(OWNER, 'system'),
   hosts:         rule(OWNER, 'system'),
@@ -112,10 +113,29 @@ const routes: RouteAccessManifest['routes'] = {
     // The build transcript is not setup status.
     variants: [{ id: 'build-log', methods: ['GET'], match: { on: 'query', name: 'log' }, rule: rule(OWNER, 'system') }],
   },
+  '/api/admin/access-report': { methods: { GET: rule(OWNER, 'system') } },
   '/api/admin/onboarding': {
     methods: {
       GET: rule(OWNER, 'system', decide(1, 'Reports setupDoneAt. Decide whether the setup page reads it before login or uses first-boot status instead.')),
     },
+  },
+
+  // Owner login (D37): all but status answer 404 unless AURA_OWNER_LOGIN=on.
+  // `setup` also takes the reset path: both need a one-time host code (D8).
+  '/api/auth/status': { methods: { GET: rule(['public'], 'system') } },
+  '/api/auth/setup': { methods: { POST: rule(['public'], 'system') } },
+  '/api/auth/login': { methods: { POST: rule(['public'], 'session') } },
+  '/api/auth/logout': {
+    methods: { POST: rule(OWNER, 'session', decide(3,
+      'Acts only on the session in its own cookie. Enforcement must let an expired session through to clear the cookie, or the handler has to become public.')) },
+  },
+  '/api/auth/session': {
+    methods: { GET: rule(OWNER, 'session', decide(3,
+      'Answers authenticated:false to a visitor without a session. Decide whether enforcement keeps that answer or returns 401 first.')) },
+  },
+  '/api/auth/whoami': {
+    methods: { GET: rule(INSTANCE, 'session', decide(3,
+      'Reflects only the caller, works while login is dark, and a login cookie is labelled information. Anonymous and API-key callers count as would-deny here; decide at enforcement whether they keep an answer.')) },
   },
 
   // Static candidates for the login page; everything else in `os` stays owner.
@@ -279,7 +299,7 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/notifications/history': { methods: { DELETE: notificationUserOp } },
   '/api/notifications/stream': { methods: { GET: notificationRead } },
 
-  // Interfaces: identity is self-asserted today (see interfaces/identify.ts).
+  // Interfaces: identity is self-asserted today (see lib/access/identify.ts).
   '/api/interfaces': {
     methods: {
       GET: rule(['own-instance'], 'interface', decide(3,
@@ -333,7 +353,5 @@ const routes: RouteAccessManifest['routes'] = {
 export const ROUTE_ACCESS_MANIFEST: RouteAccessManifest = {
   groups,
   routes,
-  nonRoutes: {
-    '/api/interfaces/identify': 'Helper imported by the interfaces routes. Astro registers it, and with no handler it answers 404.',
-  },
+  nonRoutes: {},
 };

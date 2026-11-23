@@ -30,7 +30,7 @@ export interface InstanceLaunch {
 }
 
 export interface InstanceDTO {
-  instance: AppInstance;
+  instance: Omit<AppInstance, 'owner'>;
   health: AppHealth;
   /** Present when the app's manifest resolves; carries scope-correct paths. */
   launch?: InstanceLaunch;
@@ -124,9 +124,15 @@ export async function buildAppDTO(appId: string): Promise<AppDTO | null> {
   const manifest = mgr.getManifest(appId);
   if (!manifest) return null;
   const instances = await Promise.all(
-    mgr.getInstancesByApp(appId).map((inst) => probeHealth(inst).then((health) => ({ instance: inst, health }))),
+    mgr.getInstancesByApp(appId).map((inst) => probeHealth(inst).then((health) => ({ instance: publicInstance(inst), health }))),
   );
   return { manifest, instances };
+}
+
+/** An instance for an API response. `owner` is server-side until Phase 3. */
+export function publicInstance(inst: AppInstance): Omit<AppInstance, 'owner'> {
+  const { owner: _owner, ...rest } = inst;
+  return rest;
 }
 
 export function jsonResponse(data: unknown, status = 200) {

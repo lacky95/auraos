@@ -17,6 +17,7 @@
  */
 import type { OsClient } from './OsClient.js';
 import { getAppContext } from './context.js';
+import { osBase } from './os-auth.js';
 
 /**
  * `transport/protocol` — mirrors INTERFACE_KINDS in @aura/core. `http/mcp` is
@@ -173,8 +174,7 @@ export class InterfacesApi {
    * URLs already hit the OS. Node: OS_API_BASE. Same split as ActivityApi.
    */
   private base(): string {
-    if (typeof window !== 'undefined') return '';
-    return process.env['OS_API_BASE'] ?? 'http://localhost:3000';
+    return osBase();
   }
 
   /**

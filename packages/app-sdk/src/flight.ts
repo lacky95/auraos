@@ -57,6 +57,7 @@
  * work server-side too.
  */
 
+import { osBase } from './os-auth.js';
 import type { OsClient } from './OsClient.js';
 import { getAppBasePath } from './context.js';
 
@@ -180,11 +181,8 @@ export interface FlightEvents {
 
 type Handler<K extends keyof FlightEvents> = (ev: FlightEvents[K]) => void;
 
-const apiBase = (): string =>
-  typeof window !== 'undefined' ? '' : (process.env['OS_API_BASE'] ?? 'http://localhost:3000');
-
 async function call(path: string, method: string, body?: unknown): Promise<Response> {
-  const res = await fetch(`${apiBase()}${path}`, {
+  const res = await fetch(`${osBase()}${path}`, {
     method,
     headers: { 'Content-Type': 'application/json' },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),

@@ -3,6 +3,7 @@ import { getAppManager, OsEventBus, ThemeManager, type ColorMode } from '@aura/c
 import { isValidKey, isValidNamespace, type KvNamespace } from '@aura/kv-store';
 import { sharedKv } from '../../../lib/sharedKv.js';
 import { withEtag } from '../../../lib/etag.js';
+import { refererAppId } from '../../../lib/access/legacyReferer.ts';
 
 /**
  * OS-wide key-value store proxy.
@@ -57,7 +58,7 @@ export const ALL: APIRoute = async ({ params, request }) => {
 
   const namespace = ns as KvNamespace;
   const mgr = getAppManager();
-  const sourceAppId = identifySource(request.headers.get('referer'), mgr);
+  const sourceAppId = refererAppId(request.headers.get('referer'), mgr) ?? 'system';
   const method = request.method.toUpperCase();
 
   // Permission gate. `'system'` (no Referer, e.g. SSR / curl) is privileged
@@ -177,20 +178,6 @@ function checkPermission(
   // Cross-app read can be granted later via `data:app/<id>:read`; for now
   // refuse everything but same-app.
   return jsonError(`Cross-app access to ${namespace} requires same-app caller (saw '${sourceAppId}')`, 403);
-}
-
-function identifySource(referer: string | null, mgr: ReturnType<typeof getAppManager>): string {
-  if (!referer) return 'system';
-  try {
-    const url = new URL(referer);
-    const match = url.pathname.match(/^\/api\/proxy\/([^/]+)\//);
-    if (!match) return 'system';
-    const idOrInstanceId = match[1]!;
-    const inst = mgr.getInstance(idOrInstanceId) ?? mgr.getInstancesByApp(idOrInstanceId)[0];
-    return inst?.appId ?? idOrInstanceId;
-  } catch {
-    return 'system';
-  }
 }
 
 function jsonResponse(body: unknown, status = 200): Response {

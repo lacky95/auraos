@@ -26,6 +26,9 @@
  *                    {op:'fail', id, status}               bad response; client closes for good
  */
 
+import { reportSurface, surfaceIdentity } from './access-bridge.mjs';
+import { stripShellCredentials } from './shell-credentials.mjs';
+
 export const MUX_PATH = '/_aura/sse-mux';
 
 const PING_MS = 25_000;
@@ -40,6 +43,15 @@ export function toUpstreamUrl(origin, raw) {
   if (typeof raw !== 'string' || !raw.startsWith('/') || raw.startsWith('//')) return null;
   const u = new URL(raw, origin);
   return u.origin === origin ? u.href : null;
+}
+
+/** Stream headers for `url`: a target that reaches an app gets no shell credentials. */
+export function streamHeaders(baseHeaders, url) {
+  const headers = { ...baseHeaders };
+  const path = new URL(url).pathname;
+  return path.startsWith('/api/proxy/') || path.startsWith('/api/data/')
+    ? stripShellCredentials(headers, 'sse-mux')
+    : headers;
 }
 
 /**
@@ -115,6 +127,9 @@ export async function attachSseMux(httpServer, origin, log = () => {}) {
       if (req.headers[h] != null) baseHeaders[h] = String(req.headers[h]);
     }
     log('connect', req.socket.remoteAddress);
+    const identity = surfaceIdentity(req.headers);
+    const reportStream = (method, status) => reportSurface({ subject: 'sse-mux', method, status, via: 'sse-mux', identity });
+    reportStream('UPGRADE', 101);
 
     const send = (msg) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
@@ -127,7 +142,7 @@ export async function attachSseMux(httpServer, origin, log = () => {}) {
       streams.get(id)?.abort();
       const ctrl = new AbortController();
       streams.set(id, ctrl);
-      const headers = { ...baseHeaders };
+      const headers = streamHeaders(baseHeaders, url);
       if (lastEventId) headers['last-event-id'] = lastEventId;
 
       let res;
@@ -136,11 +151,13 @@ export async function attachSseMux(httpServer, origin, log = () => {}) {
       } catch (err) {
         if (streams.get(id) !== ctrl) return;
         streams.delete(id);
+        reportStream('GET', 0);
         log('fetch-error', rawUrl, String(err));
         send({ op: 'end', id });
         return;
       }
       if (streams.get(id) !== ctrl) { res.body?.cancel().catch(() => {}); return; }
+      reportStream('GET', res.status);
       const ct = res.headers.get('content-type') ?? '';
       if (res.status !== 200 || !/^text\/event-stream\b/i.test(ct)) {
         streams.delete(id);

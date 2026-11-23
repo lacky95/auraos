@@ -1,4 +1,5 @@
 import type { AppInstance, AppManager } from '@aura/core';
+import { refererProxyId } from './legacyReferer.ts';
 
 /**
  * Resolve the calling INSTANCE for a write to the Interface Registry.
@@ -44,19 +45,13 @@ import type { AppInstance, AppManager } from '@aura/core';
  * it needs every caller (SDK, apps) to send the token first.
  */
 export function identifyInstance(request: Request, mgr: AppManager): AppInstance | null {
-  const referer = request.headers.get('referer');
-  if (referer) {
-    try {
-      const match = new URL(referer).pathname.match(/^\/api\/proxy\/([^/]+)\//);
-      if (match) {
-        const idOrAppId = match[1]!;
-        const inst = mgr.getInstance(idOrAppId)
-          // A bare appId in the proxy path: pick the app's one real instance.
-          // Pool members are excluded — the proxy won't route to them either.
-          ?? mgr.getInstancesByApp(idOrAppId).find((i) => !i.inPool && i.port !== null);
-        if (inst) return inst;
-      }
-    } catch { /* malformed Referer — fall through to the header */ }
+  const idOrAppId = refererProxyId(request.headers.get('referer'));
+  if (idOrAppId) {
+    const inst = mgr.getInstance(idOrAppId)
+      // A bare appId in the proxy path: pick the app's one real instance.
+      // Pool members are excluded — the proxy won't route to them either.
+      ?? mgr.getInstancesByApp(idOrAppId).find((i) => !i.inPool && i.port !== null);
+    if (inst) return inst;
   }
 
   const claimed = request.headers.get('x-aura-instance-id');

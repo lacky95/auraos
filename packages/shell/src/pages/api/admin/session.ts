@@ -18,8 +18,8 @@ import { markWelcomeStep } from '../../../lib/onboarding/index.js';
  *   DELETE (with session) → lock: the session stops working at once
  *
  * The credential is in <dataDir>/aura/secrets/admin.key in the master
- * container (aura-shell) — read it there (`aura jump -m`, then
- * `aura admin credential`). Rotate with `aura admin rotate` (master only).
+ * container (aura-shell) — read it from the host
+ * (`docker exec -it aura-shell aura admin credential`). Rotate with `aura admin rotate` (master only).
  * Every unlock / lock / failed attempt is audited as "admin (shared credential)".
  */
 export const POST: APIRoute = async ({ request }) => {

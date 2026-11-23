@@ -124,7 +124,7 @@ export interface WelcomeStep {
 export const WELCOME_STEPS: WelcomeStep[] = [
   {
     id: 'admin', target: 'settings', title: 'Unlock admin',
-    how: 'Settings → Notifications & access → Unlock admin. The credential is in the master container: in the Terminal run `aura jump -m`, then `aura admin credential`.',
+    how: 'Settings → Notifications & access → Unlock admin. The credential is in the master container. On the host, run `docker exec -it aura-shell aura admin credential`.',
   },
   {
     id: 'agent', target: 'terminal', title: 'Install an AI agent',

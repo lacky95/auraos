@@ -1,0 +1,74 @@
+---
+import AuthLayout from '../layouts/AuthLayout.astro';
+import * as core from '@aura/core';
+import { authPageGate } from '../lib/authSurface.js';
+
+const gate = authPageGate();
+if (!gate.enabled) return gate.response;
+for (const [name, value] of Object.entries(gate.headers)) Astro.response.headers.set(name, value);
+---
+<AuthLayout title="Set up" nonce={gate.nonce}>
+  <div id="intro-setup">
+    <h1>Create the owner account</h1>
+    <p>On the server running AuraOS, create a one-time code. It works once and expires after 10 minutes.</p>
+    <p><code>docker exec -it aura-shell aura setup-code</code></p>
+  </div>
+  <div id="intro-reset" hidden>
+    <h1>Reset your password</h1>
+    <p>On the server running AuraOS, create a one-time reset code. Resetting signs out every browser.</p>
+    <p><code>docker exec -it aura-shell aura user reset-password &lt;username&gt;</code></p>
+  </div>
+  <form id="setup" method="post" novalidate>
+    <label>One-time code <input name="code" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" required /></label>
+    <label id="username-field">Username <input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required /></label>
+    <label>New password (at least {core.PASSWORD_MIN_LENGTH} characters) <input name="password" type="password" autocomplete="new-password" required /></label>
+    <label>Repeat password <input name="confirm" type="password" autocomplete="new-password" required /></label>
+    <button type="submit">Continue</button>
+    <p class="error" role="alert"></p>
+  </form>
+  <script is:inline nonce={gate.nonce}>
+    (async () => {
+      const form = document.getElementById('setup');
+      const error = form.querySelector('.error');
+      const button = form.querySelector('button');
+      const messages = {
+        'setup-rejected': 'That code is not valid. Create a new one and try again.',
+        'invalid-username': 'Use 3 to 32 lowercase letters, digits, dots, dashes or underscores.',
+        'invalid-password': 'Choose a longer password that differs from the username.',
+      };
+      let reset = false;
+      try {
+        const status = await (await fetch('/api/auth/status', { credentials: 'same-origin' })).json();
+        reset = status.setup === 'complete';
+      } catch { /* the setup form stays, and the server decides */ }
+      document.getElementById('intro-setup').hidden = reset;
+      document.getElementById('intro-reset').hidden = !reset;
+      document.getElementById('username-field').hidden = reset;
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        error.textContent = '';
+        const { code, username, password, confirm } = form.elements;
+        if (password.value !== confirm.value) { error.textContent = 'The passwords do not match.'; return; }
+        button.disabled = true;
+        try {
+          const body = reset
+            ? { purpose: 'reset', code: code.value.trim(), password: password.value }
+            : { code: code.value.trim(), username: username.value, password: password.value };
+          const res = await fetch('/api/auth/setup', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          if (res.ok) { location.replace('/login'); return; }
+          const data = await res.json().catch(() => ({}));
+          error.textContent = messages[data.error] ?? 'Setup is unavailable right now.';
+        } catch {
+          error.textContent = 'Could not reach AuraOS.';
+        }
+        button.disabled = false;
+      });
+    })();
+  </script>
+</AuthLayout>
