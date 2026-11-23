@@ -263,12 +263,10 @@ let initial: LockScreenConfig = DEFAULT_CONFIG;
     window.auraUnlockScreen = deactivate;
     window.auraLockScreenActive = function () { return active; };
 
-    // Some triggers (e.g. the Settings-page "TEST" button) live in iframes and
-    // post a message asking us to lock. Accept it regardless of which frame
-    // boundary it arrived through. (Fast path when messaging works.)
-    window.addEventListener('message', function (ev) {
-      if (ev && ev.data && ev.data.type === 'aura.lockscreen.activate') activate();
-    });
+    // The Settings-page "TEST" button lives in an iframe and posts a message
+    // asking us to lock. The shell's channel accepts it only from the verified
+    // Settings window (lib/auraChannelShell.ts). (Fast path when messaging works.)
+    window.__auraChannelBoot.on('aura.lockscreen.activate', function () { activate(); });
 
     // ── Backend signal (the reliable path) ──────────────────────────────────
     // postMessage across frames is unreliable in some hosts (Android WebView),

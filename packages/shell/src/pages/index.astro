@@ -7,6 +7,8 @@ import { sharedKv } from '../lib/sharedKv';
 import { sessionBootInfo, waitForRestore } from '../lib/desktopSession';
 import { slotInnerHtml, iframeHtml, SLOT_STYLE } from '../lib/desktop/slotMarkup';
 import { ssrGridLayout } from '../lib/layout/gridShape';
+import { proxyFrameUrl } from '../lib/appFrame';
+import { hostRouteAppIds } from '../lib/desktop/frameRoutes';
 
 // The shell page must never be served stale: WebView hosts (Android) cache
 // heuristically when no Cache-Control is present, which leaves devices
@@ -38,6 +40,9 @@ const [mruMap, workspacesEntry] = await Promise.all([
   kv.get<WorkspaceState>('os', 'workspaces').catch(() => null),
 ]);
 const storedWorkspaces = workspacesEntry?.value ?? null;
+// PHASE2-CUTOVER: every app opens on its App Host; remove the per-app route.
+const hostRouteApps = await hostRouteAppIds(allApps.map((a) => a.id), kv);
+const hostRouteSet = new Set(hostRouteApps);
 const pinnedApps = [...allApps]
   .filter((m) => enabledMap[m.id] !== false)
   // Services are headless by design — they have no UI and clicking their
@@ -106,7 +111,6 @@ for (const inst of mgr.getAllInstances()) {
     for (const act of mgr.getActivitiesByInstance(inst.instanceId)) {
       // Free-flight activities live in the flight layer, never in a workspace.
       if (act.presentation === 'flight') continue;
-      const stripped = (act.path ?? '/').replace(/^\/+/, '');
       // Activity declared minimizable AND the parent is a background
       // service — same gating as the live launchApp path.
       const minimizable = !!act.minimizable && !!manifest.backgroundService;
@@ -116,7 +120,7 @@ for (const inst of mgr.getAllInstances()) {
         instanceId: inst.instanceId,
         activityId: act.activityId,
         title:      act.title ?? manifest.name,
-        iframeUrl:  `/api/proxy/${inst.instanceId}/${stripped}?_aura_activity=${encodeURIComponent(act.activityId)}`,
+        iframeUrl:  proxyFrameUrl({ appId: inst.appId, instanceId: inst.instanceId, activityId: act.activityId, path: act.path ?? '/' }),
         state:      'normal',
         zIndex:     0,
         isFocused:  true,
@@ -132,7 +136,7 @@ for (const inst of mgr.getAllInstances()) {
       appId:      inst.appId,
       instanceId: inst.instanceId,
       title:      manifest.name,
-      iframeUrl:  `/api/proxy/${inst.instanceId}/`,
+      iframeUrl:  proxyFrameUrl({ appId: inst.appId, instanceId: inst.instanceId }),
       state:      'normal',
       zIndex:     0,
       isFocused:  true,
@@ -226,7 +230,7 @@ const ssrSlots = ssrVisibleViews.map((v) => {
   return {
     viewId: v.viewId, instanceId: v.instanceId, activityId: v.activityId,
     style: SLOT_STYLE + (i >= 0 ? (ssrGrid.slots[i] ?? '') : 'display:none;'),
-    html: slotInnerHtml({ minimizable: v.minimizable, bodyHtml: iframeHtml(v.iframeUrl, v.title) }),
+    html: slotInnerHtml({ minimizable: v.minimizable, bodyHtml: iframeHtml(v.iframeUrl, v.title, hostRouteSet.has(v.appId)) }),
   };
 });
 const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:none; position:absolute; inset:0;';
@@ -254,6 +258,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     <script type="application/json" id="aura-initial-views" set:html={JSON.stringify(initialViews)}></script>
     <script type="application/json" id="aura-initial-workspaces" data-updated-at={workspacesUpdatedAt ?? undefined} set:html={JSON.stringify(workspaceState)}></script>
     <script type="application/json" id="aura-boot" set:html={JSON.stringify(session)}></script>
+    <script type="application/json" id="aura-frame-routes" set:html={JSON.stringify(hostRouteApps)}></script>
 
     <!-- Focus mode: covers the entire viewport when activated from Process Manager -->
     <div id="focus-view" aria-hidden="true">
@@ -304,6 +309,11 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
   import { slotInnerHtml, SLOT_STYLE, IFRAME_STYLE } from '../lib/desktop/slotMarkup.ts';
   import { parkFrame, claimFrame, hasParkedFrame, moveInto as moveFrameInto } from '../lib/flight/handoff.ts';
   import { rectToLocal } from '../lib/keyboard/floatGesture.ts';
+  import {
+    clearAppFrame, frameAppId, isHostFrame, isHostFrameReady, postToFrame, proxyFrameUrl,
+    reloadHostFrame, setAppFrameUrl,
+  } from '../lib/appFrame.ts';
+  import { onAuraChannel, replyTo, senderAppId, setNativeRuntimeCheck } from '../lib/auraChannelShell.ts';
 
   const layoutLog = createLogger('shell:layout');
   const iframeLog = createLogger('shell:iframe');
@@ -324,23 +334,21 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
   // whenever it changes (state/catalogue/focus). Re-broadcast also happens
   // on each iframe's `load` event so a freshly-mounted iframe never has an
   // empty claim list.
-  window.addEventListener('message', (ev: MessageEvent) => {
-    const d = ev.data as { type?: string; combo?: string; appId?: string; actionIds?: string[]; reason?: string } | null;
-    if (!d || typeof d !== 'object') return;
+  // Every message below has passed the origin, source and route checks
+  // (lib/auraChannelShell.ts).
+  setNativeRuntimeCheck(nativeSurface.isSupported);
+  onAuraChannel('*', (ev) => {
+    const d = ev.data as { type?: string; combo?: string; appId?: string; actionIds?: string[]; reason?: string };
 
     // Forwarded keystroke from an app iframe.
     if (d.type === 'aura.key') {
-      if (typeof d.combo !== 'string' || typeof d.appId !== 'string') return;
-      const res = keyDispatcher.handleIframeCombo(d.combo, d.appId);
+      const keyAppId = senderAppId(ev.sender, d.appId);
+      if (typeof d.combo !== 'string' || !keyAppId) return;
+      const res = keyDispatcher.handleIframeCombo(d.combo, keyAppId);
       // App-scope action that the shell can't run itself — bounce back so
       // the SDK in-iframe fires the registered handler.
       if (res.actionId && res.actionId.startsWith('app.') && !res.fired) {
-        try {
-          (ev.source as Window | null)?.postMessage(
-            { type: 'aura.action.fire', actionId: res.actionId, combo: d.combo },
-            '*',
-          );
-        } catch { /* iframe gone */ }
+        replyTo(ev, { type: 'aura.action.fire', actionId: res.actionId, combo: d.combo });
       }
       return;
     }
@@ -351,14 +359,9 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     // just rebroadcast in case the iframe missed the initial send, and
     // mirror the SDK contract that subscribe is the trigger.
     if (d.type === 'aura.keymap.subscribe') {
-      const target = ev.source as Window | null;
-      try {
-        const combos = (() => {
-          if (typeof d.appId !== 'string') return [];
-          return keyDispatcher.getClaimListForApp(d.appId);
-        })();
-        target?.postMessage({ type: 'aura.key.claim', combos }, '*');
-      } catch { /* iframe gone */ }
+      const subscriberAppId = senderAppId(ev.sender, d.appId);
+      const combos = subscriberAppId ? keyDispatcher.getClaimListForApp(subscriberAppId) : [];
+      replyTo(ev, { type: 'aura.key.claim', combos });
       return;
     }
 
@@ -433,7 +436,9 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
       if (aid) slot = document.querySelector<HTMLElement>(`.app-slot[data-activity-id="${CSS.escape(aid)}"]`);
       if (!slot && iid) slot = document.querySelector<HTMLElement>(`.app-slot[data-instance-id="${CSS.escape(iid)}"]`);
       const target = slot?.querySelector<HTMLIFrameElement>('iframe');
-      try { target?.contentWindow?.postMessage(d, '*'); } catch { /* iframe gone */ }
+      // A host frame's hint may only update its own window.
+      if (ev.sender.frame?.route === 'host' && ev.sender.frame.element !== target) return;
+      if (target) postToFrame(target, d);
       return;
     }
 
@@ -473,10 +478,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
       if (!url || !/^https?:\/\//i.test(url)) return;
       const owner = ownerFrameOf(ev.source as Window | null);
       if (!owner) { console.debug('[needsTopLevel] no owning window for', url); return; }
-      try {
-        owner.contentWindow?.postMessage(
-          { type: 'aura.host.needsTopLevel', url, reason: p.reason ?? 'detector' }, '*');
-      } catch { /* frame gone */ }
+      postToFrame(owner, { type: 'aura.host.needsTopLevel', url, reason: p.reason ?? 'detector' });
       return;
     }
 
@@ -488,11 +490,11 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
       if (p.source !== 'host') return;
       const url = typeof p.url === 'string' ? p.url.trim() : '';
       if (!url || !/^https?:\/\//i.test(url)) return;
+      const notice = { type: 'aura.host.needsTopLevel', url, reason: p.reason ?? 'known-host' };
+      // A host frame's hint stays in its own window.
+      if (ev.sender.frame?.route === 'host') { postToFrame(ev.sender.frame.element, notice); return; }
       // Broadcast: only the app that actually framed this URL will act on it.
-      document.querySelectorAll<HTMLIFrameElement>('.app-slot iframe').forEach((f) => {
-        try { f.contentWindow?.postMessage({ type: 'aura.host.needsTopLevel', url, reason: p.reason ?? 'known-host' }, '*'); }
-        catch { /* frame gone */ }
-      });
+      document.querySelectorAll<HTMLIFrameElement>('.app-slot iframe').forEach((f) => { postToFrame(f, notice); });
       return;
     }
 
@@ -504,11 +506,8 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     // injects its bridge only into the shell's own document — so "am I running
     // under the native host?" is a question only the OS can answer.
     if (d.type === 'aura.surface.query') {
-      const src = ev.source as Window | null;
-      if (!appFrameFor(src)) return;
-      try {
-        src?.postMessage({ type: 'aura.surface.capability', supported: nativeSurface.isSupported() }, '*');
-      } catch { /* frame gone */ }
+      if (!appFrameFor(ev.source as Window | null)) return;
+      replyTo(ev, { type: 'aura.surface.capability', supported: nativeSurface.isSupported() });
       return;
     }
 
@@ -659,23 +658,15 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     }
   }
 
-  function appIdFromIframe(frame: HTMLIFrameElement): string | null {
-    const m = (frame.getAttribute('src') ?? '').match(/^\/api\/proxy\/([^/]+)\//);
-    if (!m) return null;
-    return (m[1] ?? '').replace(/-\d+$/, '');
-  }
-
   function sendClaimList(frame: HTMLIFrameElement): void {
-    const appId    = appIdFromIframe(frame);
+    const appId    = frameAppId(frame);
     const combos   = keyDispatcher.getClaimListForApp(appId);
     const bindings = keyDispatcher.getBindingsForApp(appId);
-    try {
-      frame.contentWindow?.postMessage({ type: 'aura.key.claim',     combos   }, '*');
-      // Bindings travel separately so the SDK's getBinding() can refresh
-      // without parsing the claim list. Sent on every iframe-load + every
-      // state change so menu shortcut hints stay current.
-      frame.contentWindow?.postMessage({ type: 'aura.keymap.changed', bindings }, '*');
-    } catch { /* cross-origin or torn-down frame */ }
+    postToFrame(frame, { type: 'aura.key.claim',     combos   });
+    // Bindings travel separately so the SDK's getBinding() can refresh
+    // without parsing the claim list. Sent on every iframe-load + every
+    // state change so menu shortcut hints stay current.
+    postToFrame(frame, { type: 'aura.keymap.changed', bindings });
   }
 
   function broadcastClaims(): void {
@@ -751,9 +742,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
   function findIframeByAppId(appId: string | null): HTMLIFrameElement | null {
     if (!appId) return null;
     for (const frame of document.querySelectorAll<HTMLIFrameElement>('iframe')) {
-      const src = frame.getAttribute('src') ?? '';
-      const m = src.match(/^\/api\/proxy\/([^/]+)\//);
-      if (m && (m[1] ?? '').replace(/-\d+$/, '') === appId) return frame;
+      if (frameAppId(frame) === appId) return frame;
     }
     return null;
   }
@@ -766,22 +755,18 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
   async function sendBackAndWaitForAck(frame: HTMLIFrameElement, timeoutMs: number): Promise<boolean> {
     return new Promise((resolve) => {
       let done = false;
-      const handler = (ev: MessageEvent) => {
+      const off = onAuraChannel('aura.back.ack', (ev) => {
         if (ev.source !== frame.contentWindow) return;
-        const d = ev.data as { type?: string; handled?: boolean } | null;
-        if (!d || d.type !== 'aura.back.ack') return;
         if (done) return;
         done = true;
-        window.removeEventListener('message', handler);
-        resolve(!!d.handled);
-      };
-      window.addEventListener('message', handler);
-      try { frame.contentWindow?.postMessage({ type: 'aura.back' }, '*'); }
-      catch { /* iframe gone */ }
+        off();
+        resolve(!!ev.data['handled']);
+      });
+      postToFrame(frame, { type: 'aura.back' });
       setTimeout(() => {
         if (done) return;
         done = true;
-        window.removeEventListener('message', handler);
+        off();
         resolve(false);
       }, timeoutMs);
     });
@@ -976,8 +961,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     // on the live app the overlay is showing.
     if (focusedInstanceId !== null) {
       focusFrame.focus();
-      try { focusFrame.contentWindow?.postMessage({ type: 'aura.window.focus' }, '*'); }
-      catch { /* iframe gone or cross-origin */ }
+      postToFrame(focusFrame, { type: 'aura.window.focus' });
       keyDispatcher.setMode('app');
       return;
     }
@@ -994,8 +978,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     // don't keep the default browser behaviour (the iframe stays focused
     // at its outer element). Posted AFTER iframe.focus() so the inner
     // focus call doesn't compete with the browser's focus restoration.
-    try { iframe?.contentWindow?.postMessage({ type: 'aura.window.focus' }, '*'); }
-    catch { /* iframe gone or cross-origin */ }
+    if (iframe) postToFrame(iframe, { type: 'aura.window.focus' });
     keyDispatcher.setMode('app');
   });
 
@@ -1493,8 +1476,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     const viewId = slot?.dataset['viewId'];
     if (viewId && currentStrategy) currentStrategy.onActivate?.(viewId, layoutHost);
   }
-  window.addEventListener('message', (ev: MessageEvent) => {
-    if ((ev.data as { type?: unknown } | null)?.type !== 'aura.pointerdown') return;
+  onAuraChannel('aura.pointerdown', (ev) => {
     activateViewOfFrame(ownerFrameOf(ev.source as Window | null));
   });
   window.addEventListener('blur', () => {
@@ -1574,15 +1556,13 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     lifecycleState: string,
     minimizable: boolean,
   ): AppView {
-    const stripped = path.replace(/^\/+/, '');
-    const query = activityId ? `?_aura_activity=${encodeURIComponent(activityId)}` : '';
     return {
       viewId:         activityId ?? instanceId,
       appId,
       instanceId,
       ...(activityId ? { activityId } : {}),
       title:          name,
-      iframeUrl:      `/api/proxy/${instanceId}/${stripped}${query}`,
+      iframeUrl:      proxyFrameUrl({ appId, instanceId, activityId, path }),
       state:          'normal',
       zIndex:         views.length,
       isFocused:      true,
@@ -2105,7 +2085,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
       slot.dataset['instanceId'] = next.instanceId;
       slot.dataset['activityId'] = next.activityId ?? '';
       const iframe = slot.querySelector<HTMLIFrameElement>('iframe');
-      if (iframe) setIframeUrl(iframe, next.iframeUrl);
+      if (iframe) setIframeUrl(iframe, next.iframeUrl, next.appId);
     }
     markLaunchedHere(next.viewId);
     renderLayout();
@@ -2229,10 +2209,10 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
   }
 
   /**
-   * Hard-reload the iframe inside a slot. Every Aura iframe is same-origin
-   * (proxied through the shell), so `contentWindow.location.reload()`
-   * works without the `src='about:blank'` dance — and avoids the white
-   * flash that re-assigning src would cause. The skeleton overlay is
+   * Hard-reload the iframe inside a slot. A proxied iframe is same-origin,
+   * so `contentWindow.location.reload()` works without the `src='about:blank'`
+   * dance — and avoids the white flash that re-assigning src would cause. A
+   * host frame is cross-origin and takes a fresh handoff. The skeleton overlay is
    * re-shown for the reload's duration so the user sees an immediate
    * "something happened" signal, matching the cold-launch visual.
    */
@@ -2304,6 +2284,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
         if (sk) sk.remove();
       }));
     }, { once: true });
+    if (isHostFrame(ifr)) { reloadHostFrame(ifr); return; }
     try {
       ifr.contentWindow?.location.reload();
     } catch {
@@ -2671,19 +2652,16 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
       if (ifr && !ifr.getAttribute('src')) {
         el.remove(); // never loaded: no app to shut down
       } else if (ifr?.contentWindow) {
-        try { ifr.contentWindow.postMessage({ type: 'aura.shutdown' }, '*'); } catch (_) { /* ignore */ }
+        postToFrame(ifr, { type: 'aura.shutdown' });
         // Race the ack against a hard timeout. Either way el.remove() runs.
+        let offAck: () => void = () => undefined;
         const done = new Promise<void>((resolve) => {
-          const onAck = (ev: MessageEvent) => {
-            if (ev.source === ifr.contentWindow && (ev.data as { type?: string } | null)?.type === 'aura.shutdown.done') {
-              window.removeEventListener('message', onAck);
-              resolve();
-            }
-          };
-          window.addEventListener('message', onAck);
+          offAck = onAuraChannel('aura.shutdown.done', (ev) => {
+            if (ev.source === ifr.contentWindow) resolve();
+          });
         });
         const timeout = new Promise<void>((resolve) => setTimeout(resolve, 200));
-        void Promise.race([done, timeout]).then(() => el.remove());
+        void Promise.race([done, timeout]).then(() => { offAck(); el.remove(); });
       } else {
         el.remove();
       }
@@ -2912,7 +2890,8 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     if (v.iframeUrl) {
       const iframe = document.createElement('iframe');
       iframe.title = v.title;
-      // No `allow=` attribute: our iframes are same-origin (proxied through
+      // No `allow=` attribute on the proxy route (setAppFrameUrl adds the shared
+      // one for App Hosts): these iframes are same-origin (proxied through
       // /api/proxy/<id>/ on the shell's port), so clipboard, microphone, etc.
       // are inherited from the parent. Firefox warns ("unsupported feature
       // name") on Chrome-specific Permissions Policy strings like
@@ -2922,7 +2901,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
       // Only activities that may load now get a src (lib/iframeWarmer.ts):
       // the active workspace at once, the others when warmed or opened.
       if (iframeWarmer.isWarm(v.viewId)) {
-        iframe.src = v.iframeUrl;
+        setAppFrameUrl(iframe, v.iframeUrl, v.appId);
         noteIframeSrc(v.viewId, 'active');
       } else {
         iframe.dataset['src'] = v.iframeUrl;
@@ -2941,6 +2920,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
   /** True once `iframe` shows its app's document (not the initial about:blank). */
   function isIframeLoaded(iframe: HTMLIFrameElement): boolean {
     if (!iframe.getAttribute('src')) return false;
+    if (isHostFrame(iframe)) return isHostFrameReady(iframe);
     try {
       const doc = iframe.contentDocument;
       return !!doc && doc.readyState === 'complete' && doc.URL !== 'about:blank';
@@ -2983,8 +2963,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
           // (same race the terminal's `term.focus()` hit on Enter).
           requestAnimationFrame(() => {
             iframe.focus();
-            try { iframe.contentWindow?.postMessage({ type: 'aura.window.focus' }, '*'); }
-            catch { /* iframe gone or cross-origin */ }
+            postToFrame(iframe, { type: 'aura.window.focus' });
           });
         }
       }
@@ -3004,14 +2983,14 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     const src = iframe.dataset['src'];
     delete iframe.dataset['src'];
     if (!src) return;
-    iframe.src = src;
+    setAppFrameUrl(iframe, src, views.find((x) => x.viewId === viewId)?.appId ?? '');
     noteIframeSrc(viewId, reason);
   }
 
   /** Point an iframe at `url` — a cold one just keeps the new url for later. */
-  function setIframeUrl(iframe: HTMLIFrameElement, url: string): void {
+  function setIframeUrl(iframe: HTMLIFrameElement, url: string, appId: string): void {
     if (iframe.dataset['src'] !== undefined) { iframe.dataset['src'] = url; return; }
-    if (iframe.getAttribute('src') !== url) iframe.src = url;
+    setAppFrameUrl(iframe, url, appId);
   }
 
   let iframeSrcCount = 0;
@@ -3320,18 +3299,19 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     // ── Fallback: no live window to reuse → mount the overlay iframe. This
     // path DOES load the app fresh, but there's nothing warm to promote. ──
     let title = instanceId;
+    let focusAppId = '';
     try {
       const res = await fetch(`/api/instances/${encodeURIComponent(instanceId)}/status`);
       if (res.ok) {
         const data = await res.json();
         title = data.instance?.appId ?? instanceId;
+        focusAppId = data.instance?.appId ?? '';
       }
     } catch {}
 
     focusedInstanceId = instanceId;
     focusedActivityId = activityId ?? null;
-    const suffix = activityId ? `?_aura_activity=${encodeURIComponent(activityId)}` : '';
-    focusFrame.src = `/api/proxy/${instanceId}/${suffix}`;
+    setAppFrameUrl(focusFrame, proxyFrameUrl({ appId: focusAppId, instanceId, activityId }), focusAppId);
     focusTitleEl.textContent = title;
     focusInstIdEl.textContent = activityId ? `${instanceId}  ${activityId}` : instanceId;
     focusView.setAttribute('aria-hidden', 'false');
@@ -3339,7 +3319,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
 
   function exitFocus() {
     focusView.setAttribute('aria-hidden', 'true');
-    focusFrame.src = 'about:blank';
+    clearAppFrame(focusFrame);
     focusedInstanceId = null;
     focusedActivityId = null;
     // Drop back to windowed so the next focus session starts inside the
@@ -3861,7 +3841,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
         ];
         const slot = document.querySelector<HTMLElement>(`.app-slot[data-view-id="${CSS.escape(v.viewId)}"]`);
         const iframe = slot?.querySelector<HTMLIFrameElement>('iframe');
-        if (iframe) setIframeUrl(iframe, nextUrl);
+        if (iframe) setIframeUrl(iframe, nextUrl, v.appId);
         renderLayout(); // refresh title chrome (breadcrumb trail + title)
       }
     }

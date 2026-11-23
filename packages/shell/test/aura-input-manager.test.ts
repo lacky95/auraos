@@ -19,7 +19,7 @@ const { inputManager } = await import('../src/lib/keyboard/AuraInputManager.ts')
 
 const frame = (id: string) => win.document.getElementById(id) as unknown as HTMLIFrameElement;
 const tapInto = (f: HTMLIFrameElement) =>
-  win.dispatchEvent(new win.MessageEvent('message', { data: { type: 'aura.pointerdown' }, source: f.contentWindow as never }));
+  win.dispatchEvent(new win.MessageEvent('message', { data: { type: 'aura.pointerdown' }, source: f.contentWindow as never, origin: 'http://localhost' }));
 
 test('a tap into another window wins over a stale activeElement (iPad Safari keeps the old iframe focused)', () => {
   const im = inputManager();

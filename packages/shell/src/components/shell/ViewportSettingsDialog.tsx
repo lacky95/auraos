@@ -38,6 +38,7 @@ import * as React from 'react';
 import { createPortal } from 'react-dom';
 import { BTN_SHAPE, BTN_TONE, Btn, CheckBox, NativeDialog } from './nativeDialog';
 import * as viewportClient from '../../lib/viewportClient';
+import { osEvents } from '../../lib/osEvents';
 import {
   type ViewportProfile,
   type ViewportMargins,
@@ -559,15 +560,13 @@ export function ViewportSettingsDialog(): React.JSX.Element {
   // Listen to live theme/mode broadcasts from the shell so the picker stays in
   // sync if the user changes it from Settings while the dialog is open.
   React.useEffect(() => {
-    const onMsg = (ev: MessageEvent) => {
-      const m = ev.data?.colorMode as ColorMode | undefined;
-      if (ev.data?.type === 'aura.mode.changed' && m) {
+    return osEvents.subscribe('mode:changed', (ev) => {
+      const m = (ev as { colorMode?: ColorMode }).colorMode;
+      if (m) {
         setColorMode(m);
         setResolvedMode(resolveMode(m));
       }
-    };
-    window.addEventListener('message', onMsg);
-    return () => window.removeEventListener('message', onMsg);
+    });
   }, []);
 
   // Derive the active profile + its values from the client state.

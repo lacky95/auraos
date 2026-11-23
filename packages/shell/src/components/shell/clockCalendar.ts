@@ -13,6 +13,7 @@
  * While it is open the auto-hidden top bar stays up (auraPinBar); if the bar
  * hides anyway (the edge badge's peek ran out), the calendar closes with it.
  */
+import { onAuraChannel } from '../../lib/auraChannelShell.ts';
 
 const PANEL_ID = 'clock-calendar';
 const PIN_KEY = 'clock-calendar';
@@ -194,13 +195,15 @@ export function installClockCalendar(): void {
     // Taps inside an app window (iframe) never reach this document: the shell's
     // injected focus script relays them as `aura.pointerdown`. (Not `blur` — the
     // shell hands focus back to the active app right after a tap on the bar.)
-    window.addEventListener('message', onAppPointer);
+    offAppPointer = onAuraChannel('aura.pointerdown', () => close(false));
     // The top bar hid anyway (badge peek ended): close with it.
     barWatch = new MutationObserver(() => {
       if (document.body.dataset['autohideBars'] === 'on' && document.body.dataset['showTop'] === 'false') close(false);
     });
     barWatch.observe(document.body, { attributes: true, attributeFilter: ['data-show-top', 'data-autohide-bars'] });
   }
+
+  let offAppPointer: (() => void) | null = null;
 
   function close(refocus: boolean): void {
     if (!panel) return;
@@ -210,7 +213,8 @@ export function installClockCalendar(): void {
     document.removeEventListener('pointerdown', onAway, true);
     document.removeEventListener('keydown', onEsc);
     window.removeEventListener('resize', place);
-    window.removeEventListener('message', onAppPointer);
+    offAppPointer?.();
+    offAppPointer = null;
     barWatch?.disconnect();
     barWatch = null;
     pin(false);
@@ -241,9 +245,6 @@ export function installClockCalendar(): void {
     const t = e.target as Node | null;
     if (t instanceof Node && (panel?.contains(t) || clock!.contains(t))) return;
     close(false);
-  }
-  function onAppPointer(e: MessageEvent): void {
-    if ((e.data as { type?: string } | null)?.type === 'aura.pointerdown') close(false);
   }
   function onEsc(e: KeyboardEvent): void {
     if (e.key === 'Escape') { e.stopPropagation(); close(true); }

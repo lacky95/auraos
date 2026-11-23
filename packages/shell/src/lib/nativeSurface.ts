@@ -27,6 +27,7 @@
  * Browser window therefore brings up a second native view rather than stealing
  * the first one's.
  */
+import { postToFrame } from './appFrame.ts';
 
 /** A rectangle in the requesting app's own CSS pixel space. */
 export interface SurfaceRect {
@@ -227,10 +228,7 @@ function startStateRelay(): void {
       const id = (data as { surfaceId?: unknown } | null)?.surfaceId;
       const surface = typeof id === 'string' ? surfaces.get(id) : undefined;
       if (!surface) return;
-      try {
-        surface.frame.contentWindow?.postMessage(
-          { type: 'aura.surface.state', surfaceId: surface.surfaceId, state: data }, '*');
-      } catch { /* frame gone */ }
+      postToFrame(surface.frame, { type: 'aura.surface.state', surfaceId: surface.surfaceId, state: data });
     });
   } catch (err) {
     console.warn('[surface] state relay unavailable', err);
@@ -284,14 +282,12 @@ function checkOcclusion(surface: ActiveSurface): void {
   const by = occluderOf(top);
   if (by === surface.occludedBy) return;
   surface.occludedBy = by;
-  try {
-    surface.frame.contentWindow?.postMessage({
-      type: 'aura.surface.occluded',
-      surfaceId: surface.surfaceId,
-      occluded: by !== null,
-      by,
-    }, '*');
-  } catch { /* frame gone */ }
+  postToFrame(surface.frame, {
+    type: 'aura.surface.occluded',
+    surfaceId: surface.surfaceId,
+    occluded: by !== null,
+    by,
+  });
 }
 
 /** Push the current geometry to the host, deduped. */

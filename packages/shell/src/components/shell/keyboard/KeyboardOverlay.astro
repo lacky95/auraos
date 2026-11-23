@@ -173,6 +173,8 @@ import { NATIVE_KEYBOARD_JS } from '../../../lib/keyboard/nativeKeyboardScript.t
   import { registerUiCommand, registerSnapshotPart } from '../../../lib/uiCommands.ts';
   import { KEYS, LAYOUTS, keyForChar } from './layouts.ts';
   import { clampRect, localViewport, rectToLocal, type Rect } from '../../../lib/keyboard/floatGesture.ts';
+    import { postToFrame } from '../../../lib/appFrame.ts';
+    import { isHostNestedSender, onAuraChannel, replyTo } from '../../../lib/auraChannelShell.ts';
 
   const el = document.getElementById('virtual-keyboard') as HTMLElement | null;
   if (el) {
@@ -339,12 +341,14 @@ import { NATIVE_KEYBOARD_JS } from '../../../lib/keyboard/nativeKeyboardScript.t
     const APP_FRAMES = '.app-slot iframe, #focus-frame, #flight-layer iframe.flight-frame';
 
     // ── Apps asking for the keyboard (only ever their own window) ────
-    window.addEventListener('message', (ev) => {
-      const d = ev.data as { type?: string; attach?: boolean; layout?: string } | null;
-      if (!d || (d.type !== 'aura.keyboard.open' && d.type !== 'aura.keyboard.close')) return;
-      let frame: HTMLIFrameElement | null = null;
-      for (const f of document.querySelectorAll<HTMLIFrameElement>(APP_FRAMES)) {
-        if (f.contentWindow === ev.source) { frame = f; break; }
+    onAuraChannel(['aura.keyboard.open', 'aura.keyboard.close'], (ev) => {
+      const d = ev.data as { type?: string; attach?: boolean; layout?: string };
+      // A nested App Host reports straight to the Shell; it acts for its window.
+      let frame: HTMLIFrameElement | null = isHostNestedSender(ev.sender) ? (ev.sender.frame?.element ?? null) : null;
+      if (!frame) {
+        for (const f of document.querySelectorAll<HTMLIFrameElement>(APP_FRAMES)) {
+          if (f.contentWindow === ev.source) { frame = f; break; }
+        }
       }
       if (!frame) return;
       if (d.type === 'aura.keyboard.close') { st.$open.set(false); return; }
@@ -360,19 +364,29 @@ import { NATIVE_KEYBOARD_JS } from '../../../lib/keyboard/nativeKeyboardScript.t
     // screen opens this keyboard and losing focus closes it again — but only a
     // keyboard that opened that way, never one the user opened.
     const frames = () => document.querySelectorAll<HTMLIFrameElement>(APP_FRAMES);
-    const sendPolicy = (w: Window | null | undefined) => {
-      try { w?.postMessage({ type: 'aura.keyboard.policy', suppressNative: st.$suppressNative.get() }, w === window ? location.origin : '*'); }
-      catch { /* frame gone */ }
+    const policyMessage = () => ({ type: 'aura.keyboard.policy', suppressNative: st.$suppressNative.get() });
+    // Nested App Hosts that said hello: they get the policy directly, with no relay.
+    const nestedHellos = new Map<Window, string>();
+    const broadcastPolicy = () => {
+      replyTo({ source: window, origin: location.origin }, policyMessage());
+      for (const f of frames()) postToFrame(f, policyMessage());
+      for (const [w, origin] of nestedHellos) {
+        if (w.closed) nestedHellos.delete(w);
+        else replyTo({ source: w, origin }, policyMessage());
+      }
     };
-    const broadcastPolicy = () => { sendPolicy(window); for (const f of frames()) sendPolicy(f.contentWindow); };
     st.$suppressNative.listen(broadcastPolicy);
     let autoOpened = false;
     st.$open.listen((open) => { if (!open) autoOpened = false; });
-    window.addEventListener('message', (ev) => {
-      const d = ev.data as { type?: string; focused?: boolean } | null;
-      if (!d || (d.type !== 'aura.keyboard.hello' && d.type !== 'aura.keyboard.field')) return;
-      if (ev.source !== window && ![...frames()].some((f) => f.contentWindow === ev.source)) return;
-      if (d.type === 'aura.keyboard.hello') { sendPolicy(ev.source as Window); return; }
+    onAuraChannel(['aura.keyboard.hello', 'aura.keyboard.field'], (ev) => {
+      const d = ev.data as { type?: string; focused?: boolean };
+      const nested = isHostNestedSender(ev.sender);
+      if (ev.source !== window && !nested && ![...frames()].some((f) => f.contentWindow === ev.source)) return;
+      if (d.type === 'aura.keyboard.hello') {
+        if (nested) nestedHellos.set(ev.source as Window, ev.origin);
+        replyTo(ev, policyMessage());
+        return;
+      }
       if (!st.$autoOpen.get() || !matchMedia('(pointer: coarse)').matches) return;
       if (d.focused) { if (!st.$open.get()) { autoOpened = true; st.$open.set(true); } }
       else if (autoOpened) st.$open.set(false);

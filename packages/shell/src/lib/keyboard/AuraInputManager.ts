@@ -22,6 +22,8 @@
  * Singleton on `window`: the overlay script and the React island are
  * separate module instances.
  */
+import { postToFrame } from '../appFrame.ts';
+import { focusedNestedFrame, isHostNestedSender, onAuraChannel } from '../auraChannelShell.ts';
 
 export interface AuraKeyboardInput {
   action: 'keydown' | 'keyup' | 'text';
@@ -109,11 +111,8 @@ function create(): AuraInputManager {
 
   // A click inside an app iframe never reaches the shell DOM; the proxy's
   // focus-on-click script tells us with `aura.pointerdown`.
-  window.addEventListener('message', (ev) => {
-    if ((ev.data as { type?: string } | null)?.type !== 'aura.pointerdown') return;
-    for (const f of document.querySelectorAll('iframe')) {
-      if (f.contentWindow === ev.source) { noteFrame(f); return; }
-    }
+  onAuraChannel('aura.pointerdown', (ev) => {
+    if (ev.sender.frame && (ev.sender.direct || isHostNestedSender(ev.sender))) noteFrame(ev.sender.frame.element);
   });
   document.addEventListener('focusin', (ev) => {
     const t = ev.target as Element | null;
@@ -170,8 +169,11 @@ function create(): AuraInputManager {
         if (document.activeElement !== t.frame) {
           try { t.frame.focus({ preventScroll: true }); } catch { /* gone */ }
         }
-        w.postMessage(msg, '*');
-        return true;
+        // The focused nested App Host gets keys directly: the embedding app is
+        // not a relay (D29). Everything else goes to the window's own frame.
+        const nested = focusedNestedFrame(t.frame);
+        if (nested) { nested.source.postMessage(msg, nested.origin); return true; }
+        return postToFrame(t.frame, msg);
       }
       if (document.activeElement !== t.element) t.element.focus({ preventScroll: true });
       window.postMessage(msg, location.origin);

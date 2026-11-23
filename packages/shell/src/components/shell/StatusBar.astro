@@ -2180,9 +2180,11 @@ let initialTimeZone: string = '';
   .clock { color: var(--aura-color-text); font-family: var(--aura-font-mono); }
 
   /* Auto-hide edge badge. Hidden here; OSLayout's global autohide rules
-     show it while the mode is on. Sits on top of every shell layer — the
-     launcher / process manager (1000), docked keyboard (1065), dialogs
-     (≤ 1900) — and only below the lock screen (2000). Upright on the
+     show it while the mode is on. Above the launcher / process manager
+     (≤ 1201) and docked keyboard (1065), and BELOW the trusted dialogs:
+     system decisions, approvals and password prompts (1900) and the lock
+     screen (2000), so it can never cover or take a click from them.
+     test/shell-frame-boundary.test.ts holds this rule. Upright on the
      left/right edge, lying on the top/bottom edge; --badge-pos (0..1) is
      its place along the edge. */
   .bars-badge,
@@ -2209,7 +2211,7 @@ let initialTimeZone: string = '';
     align-items: center;
     justify-content: center;
     overflow: hidden;
-    z-index: 1950;
+    z-index: 1890;
     font-size: 14px;
     color: var(--aura-color-primary);
     background: var(--aura-color-surface);
@@ -2272,7 +2274,7 @@ let initialTimeZone: string = '';
     align-items: center;
     justify-content: center;
     overflow: hidden;
-    z-index: 1950;
+    z-index: 1890;
     font-size: 14px;
     box-shadow: 0 0 10px rgba(0, 0, 0, 0.35);
     cursor: pointer;

@@ -77,7 +77,11 @@ export function slotInnerHtml(opts: { minimizable?: boolean; bodyHtml?: string }
       <div class="slot-body" style="flex:1;overflow:clip;position:relative;">${opts.bodyHtml ?? ''}</div>`;
 }
 
-/** Server-side iframe markup for an activity that loads right away. */
-export function iframeHtml(src: string, title: string): string {
-  return `<iframe src="${escapeHtml(src)}" title="${escapeHtml(title)}" style="${IFRAME_STYLE}"></iframe>`;
+/**
+ * Server-side iframe markup. `deferred` keeps the URL in `data-src` for the
+ * desktop script: a `frameRoute: host` frame needs its sandbox and a one-time
+ * handoff before it may load (lib/appFrame.ts).
+ */
+export function iframeHtml(src: string, title: string, deferred = false): string {
+  return `<iframe ${deferred ? 'data-src' : 'src'}="${escapeHtml(src)}" title="${escapeHtml(title)}" style="${IFRAME_STYLE}"></iframe>`;
 }

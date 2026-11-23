@@ -76,7 +76,7 @@ export const AURA_CHANNEL_MESSAGES = {
   // Navigation and window
   'aura.back': TO_APP,
   'aura.back.ack': TO_SHELL,
-  'aura.pointerdown': TO_SHELL,
+  'aura.pointerdown': [route('app', 'shell'), route('embedded-app', 'shell')],
   'aura.window.focus': TO_APP_AND_EMBED,
   'aura.window.label': TO_SHELL,
   'aura.window.rebind': TO_SHELL,
@@ -107,6 +107,10 @@ export const AURA_CHANNEL_MESSAGES = {
   'aura.system.toggleHome': TO_SHELL,
   'aura.system.lockScreen': TO_SHELL,
   'aura.system.switchWorkspace': TO_SHELL,
+
+  // Admin unlock: Settings asks, the Shell collects the credential itself
+  'aura.admin.unlock.request': TO_SHELL,
+  'aura.admin.unlock.result': TO_APP,
 
   // Native host
   'aura.host.url-changed': NATIVE_TO_APP,
