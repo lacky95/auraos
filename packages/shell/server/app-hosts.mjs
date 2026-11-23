@@ -37,7 +37,7 @@ import {
   SESSION_COOKIES, countSurfaceEvent, internalServiceHeaders, observeHttpSurface, reportSurface, surfaceIdentity,
 } from './access-bridge.mjs';
 import { appHostAuth, safeReturnPath } from './app-host-auth.mjs';
-import { handleAppGateway, serveAppRuntime } from './app-gateway.mjs';
+import { handleAppGateway, handleAppGatewayUpgrade, serveAppRuntime } from './app-gateway.mjs';
 import { classifyHost, hostPolicy, isTrustedProxy, originOf, requestEdge } from './host-policy.mjs';
 import { stripCookies, stripShellCredentials } from './shell-credentials.mjs';
 
@@ -512,11 +512,17 @@ export function createAppHostRouter({
     };
     socket.on('error', () => {});
     const url = String(req.url ?? '');
-    if (!url.startsWith('/') || isAuraReservedPath(url)) return fail(404, 'Not Found');
+    const mux = url.split(/[?#]/, 1)[0] === `${AURA_RESERVED_PATHS.os}sse-mux`;
+    if (!url.startsWith('/') || (!mux && isAuraReservedPath(url))) return fail(404, 'Not Found');
     if (req.headers.origin !== edge.origin) return fail(403, 'Forbidden');
     let t;
     try {
-      if (!(await appSession(route, req, edge))) return fail(401, 'Unauthorized');
+      const session = await appSession(route, req, edge);
+      if (!session) return fail(401, 'Unauthorized');
+      if (mux) {
+        reportUpgrade(0);   // the gateway answers the handshake
+        return await handleAppGatewayUpgrade(req, socket, head, { record: route.record, slot: route.slot, session });
+      }
       t = await slotTarget(route);
     } catch { return fail(503, 'Service Unavailable'); }
     if (t.missing) return fail(404, 'Not Found');

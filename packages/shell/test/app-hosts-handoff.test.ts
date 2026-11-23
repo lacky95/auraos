@@ -403,6 +403,15 @@ test('a WebSocket needs the cookie and the exact Origin', async () => {
   assert.equal(seen.length, 0);
 });
 
+test('the gateway mux upgrade needs the cookie and exact Origin, and never reaches the app', async () => {
+  const good = await signIn();
+  const mux = '/_aura/os/sse-mux';
+  assert.match(await upgrade(HOST, mux, { Origin: ORIGIN }), /^HTTP\/1\.1 401/);
+  assert.match(await upgrade(HOST, mux, { Cookie: good, Origin: `http://other5678--${BASE}` }), /^HTTP\/1\.1 403/);
+  assert.doesNotMatch(await upgrade(HOST, mux, { Cookie: good, Origin: ORIGIN }), /^HTTP\/1\.1 (401|403|404)/);
+  assert.equal(seen.length, 0);
+});
+
 test('SSE, socket.io polling and writes refuse another origin', async () => {
   const good = await signIn();
   const sibling = `http://other5678--${BASE}`;
