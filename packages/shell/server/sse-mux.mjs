@@ -118,7 +118,11 @@ export async function attachSseMux(httpServer, origin, log = () => {}) {
     wss.handleUpgrade(req, socket, head, (ws) => serve(ws, req));
   });
 
-  function serve(ws, req) {
+  /**
+   * `scope` (App Host gateway): `scope.stream(rawUrl)` returns the one URL and
+   * headers a stream may use, or null. Nothing from the upgrade request is sent.
+   */
+  function serve(ws, req, scope = null) {
     const streams = new Map(); // id → AbortController
     // Headers every stream carries upstream: the page's cookies and identity,
     // exactly what a native EventSource request from that document would send.
@@ -136,18 +140,19 @@ export async function attachSseMux(httpServer, origin, log = () => {}) {
     };
 
     async function open(id, rawUrl, lastEventId) {
-      const url = toUpstreamUrl(origin, rawUrl);
+      const target = scope ? scope.stream(rawUrl) : null;
+      const url = scope ? target?.url : toUpstreamUrl(origin, rawUrl);
       if (!url) { send({ op: 'fail', id, status: 0 }); return; }
       if (streams.size >= MAX_STREAMS_PER_SOCKET) { send({ op: 'fail', id, status: 0 }); return; }
       streams.get(id)?.abort();
       const ctrl = new AbortController();
       streams.set(id, ctrl);
-      const headers = streamHeaders(baseHeaders, url);
+      const headers = scope ? { ...target.headers } : streamHeaders(baseHeaders, url);
       if (lastEventId) headers['last-event-id'] = lastEventId;
 
       let res;
       try {
-        res = await fetch(url, { headers, signal: ctrl.signal, redirect: 'follow' });
+        res = await fetch(url, { headers, signal: ctrl.signal, redirect: scope ? 'error' : 'follow' });
       } catch (err) {
         if (streams.get(id) !== ctrl) return;
         streams.delete(id);
@@ -213,5 +218,8 @@ export async function attachSseMux(httpServer, origin, log = () => {}) {
     });
   }
 
+  wss.serveScoped = (req, socket, head, scope) => {
+    wss.handleUpgrade(req, socket, head, (ws) => serve(ws, req, scope));
+  };
   return wss;
 }

@@ -36,6 +36,8 @@
  *   });
  */
 
+import { isFromShell, postToShell } from './channel.js';
+import { appHostRuntime } from './os-auth.js';
 import type { OsClient } from './OsClient.js';
 
 /** A rectangle in your app's own CSS pixel space (as getBoundingClientRect returns). */
@@ -161,6 +163,7 @@ export class SurfaceApi {
     if (this.listening || typeof window === 'undefined') return;
     this.listening = true;
     window.addEventListener('message', (ev: MessageEvent) => {
+      if (!isFromShell(ev)) return;
       const d = ev.data as {
         type?: unknown; url?: unknown; reason?: unknown; occluded?: unknown; by?: unknown;
       } | null;
@@ -179,6 +182,8 @@ export class SurfaceApi {
 
       if (d.type !== 'aura.host.needsTopLevel') return;
       if (typeof d.url !== 'string') return;
+      // A native-host hint, relayed by the shell: still only a claim about a URL.
+      if (appHostRuntime() && !/^https?:\/\//i.test(d.url)) return;
       const info: NeedsTopLevelInfo = {
         url: d.url,
         reason: typeof d.reason === 'string' ? d.reason : 'unknown',
@@ -190,8 +195,6 @@ export class SurfaceApi {
   }
 
   private post(type: string, extras: Record<string, unknown>): void {
-    if (typeof window === 'undefined' || window.parent === window) return;
-    try { window.parent.postMessage({ type, ...extras }, '*'); }
-    catch { /* parent gone */ }
+    postToShell({ type, ...extras });
   }
 }

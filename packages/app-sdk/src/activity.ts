@@ -18,7 +18,7 @@
  * from their own UI to pop manually.
  */
 
-import { osBase } from './os-auth.js';
+import { bodylessMutationHeaders, osBase } from './os-auth.js';
 import type { OsClient } from './OsClient.js';
 
 export interface NavigateOptions {
@@ -69,6 +69,7 @@ export class ActivityApi {
     if (!id) return;
     await fetch(`${this.osApiBase()}/api/activities/${encodeURIComponent(id)}/back`, {
       method: 'POST',
+      headers: bodylessMutationHeaders(),
     }).catch(() => undefined);
   }
 

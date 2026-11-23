@@ -16,6 +16,7 @@ import { withEtag } from '../../../lib/etag.js';
  * loading it can be typed into by its parent frame, never by anyone else.
  * Protocol: components/shell/keyboard/PROTOCOL.md.
  */
+// PHASE2-CUTOVER: trusts `window.parent`; manifest `hosts[]` documents must move to /_aura/runtime.js.
 const BUNDLE = `${FRAME_RELAY_JS}\n${SYNTHETIC_RECEIVER_JS}\n${NATIVE_KEYBOARD_JS}\n`;
 
 export const GET: APIRoute = ({ request }) => {

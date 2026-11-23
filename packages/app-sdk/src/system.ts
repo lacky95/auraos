@@ -10,6 +10,7 @@
  * `OsClient.subscribeOsEvents` if you want to observe the side effects.
  */
 
+import { postToShell } from './channel.js';
 import type { OsClient } from './OsClient.js';
 
 export class SystemApi {
@@ -34,8 +35,6 @@ export class SystemApi {
   }
 
   private post(type: string, extras: Record<string, unknown> = {}): void {
-    if (typeof window === 'undefined' || window.parent === window) return;
-    try { window.parent.postMessage({ type, ...extras }, '*'); }
-    catch { /* parent gone */ }
+    postToShell({ type, ...extras });
   }
 }

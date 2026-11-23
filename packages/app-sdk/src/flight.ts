@@ -57,7 +57,7 @@
  * work server-side too.
  */
 
-import { osBase } from './os-auth.js';
+import { appHostRuntime, osBase } from './os-auth.js';
 import type { OsClient } from './OsClient.js';
 import { getAppBasePath } from './context.js';
 
@@ -418,6 +418,9 @@ export class FlightApi {
 /** `/api/proxy/<instanceId>` in the browser, APP_INSTANCE_ID on the server. */
 function ownInstanceId(): string | null {
   if (typeof process !== 'undefined' && process.env?.['APP_INSTANCE_ID']) return process.env['APP_INSTANCE_ID'];
+  const host = appHostRuntime();
+  if (host) return host.instanceId;
+  // PHASE2-CUTOVER: only a proxied page has its instance id in a base path.
   try {
     const m = getAppBasePath().match(/^\/api\/proxy\/([^/]+)/);
     return m ? decodeURIComponent(m[1]!) : null;

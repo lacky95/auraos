@@ -30,7 +30,8 @@
  * Kept as ES5-style source in a string because it is injected verbatim as a
  * <script>; do not reference anything outside the IIFE.
  */
-export const SYNTHETIC_RECEIVER_JS = String.raw`(function(){try{
+/** `reject` is a JS condition on `ev` that refuses the sender. */
+export const syntheticReceiverJs = (reject: string): string => String.raw`(function(){try{
 if(window.__auraSynthRx)return;window.__auraSynthRx=true;
 function active(d){var a=d.activeElement;while(a&&a.shadowRoot&&a.shadowRoot.activeElement)a=a.shadowRoot.activeElement;return a||d.body;}
 var lastEl=null;
@@ -110,7 +111,7 @@ function editKey(t,key,shift,ctrl){
 }
 window.addEventListener('message',function(ev){
   var d=ev.data;if(!d||d.type!=='aura.key.synthetic')return;
-  if(ev.source!==window.parent)return;
+  if(${reject})return;
   var t=target();
   var mods={ctrlKey:!!d.ctrl,altKey:!!d.alt,shiftKey:!!d.shift,metaKey:!!d.meta};
   if(d.action==='text'){if(d.text&&!isXterm(t))insertText(t,String(d.text));
@@ -135,3 +136,6 @@ window.addEventListener('message',function(ev){
   editKey(t,k,mods.shiftKey,mods.ctrlKey||mods.metaKey);
 });
 }catch(_){}})();`;
+
+// PHASE2-CUTOVER: the parent check is only safe for proxied documents, where the parent is the shell.
+export const SYNTHETIC_RECEIVER_JS = syntheticReceiverJs('ev.source!==window.parent');

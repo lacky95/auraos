@@ -19,6 +19,7 @@
  * labels can render before any HTTP round-trip.
  */
 
+import { isFromShell, postToShell } from './channel.js';
 import type { OsClient } from './OsClient.js';
 
 export interface KeymapHandlerCtx {
@@ -123,17 +124,15 @@ export class KeymapApi {
   }
 
   private notifySubscribe(): void {
-    if (typeof window === 'undefined' || window.parent === window) return;
-    try {
-      window.parent.postMessage({
-        type:      'aura.keymap.subscribe',
-        appId:     this.getAppId(),
-        actionIds: Array.from(this.handlers.keys()),
-      }, '*');
-    } catch { /* parent gone */ }
+    postToShell({
+      type:      'aura.keymap.subscribe',
+      appId:     this.getAppId(),
+      actionIds: Array.from(this.handlers.keys()),
+    });
   }
 
   private handleMessage = (ev: MessageEvent): void => {
+    if (!isFromShell(ev)) return;
     const d = ev.data as { type?: string } | null;
     if (!d || typeof d !== 'object') return;
 

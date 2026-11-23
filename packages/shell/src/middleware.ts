@@ -11,6 +11,7 @@ import { loadCustomInterfaces } from './lib/customInterfaces.js';
 import { startFlightService } from './lib/flight/service.js';
 import { refererProxyId } from './lib/access/legacyReferer.ts';
 import { captureAccess, createAccessReporter } from './lib/access/guard.ts';
+import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 
 // Source of truth is the singleton on globalThis — NOT a module-scoped flag.
 // The soft-restart endpoint deletes that singleton; if we tracked init state
@@ -199,6 +200,19 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
     flightServiceStarted = true;
     try { startFlightService(); }
     catch (err) { console.warn(`[middleware] flight service start failed: ${(err as Error).message}`); }
+  }
+  // App Host gateway calls are the one enforced path: the manifest decides here.
+  if (ctx.request.headers.has(GATEWAY_IDENTITY_HEADER)) {
+    let refused: Response | null;
+    try {
+      refused = await (await import('./lib/access/gatewayCaller.ts')).enforceGateway(ctx);
+    } catch {
+      refused = new Response(JSON.stringify({ error: 'gateway-denied' }), { status: 403, headers: { 'content-type': 'application/json' } });
+    }
+    if (refused) {
+      reportAccess(access, refused.status);
+      return refused;
+    }
   }
   let res: Response;
   try {

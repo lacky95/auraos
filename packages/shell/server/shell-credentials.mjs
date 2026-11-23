@@ -7,10 +7,12 @@
  *   - the session cookie (`aura_session`, `__Host-aura_session`)
  *   - bearers starting `aura-sess1.` or `aura-admin1.`
  *   - the internal service label
+ *   - the gateway's signed identity claim
  *
  * App cookies and app-owned auth pass through byte for byte. Instance tokens
  * and API keys are still forwarded and only counted: Phase 3 decides them.
  */
+import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { INTERNAL_SERVICE_HEADER, SESSION_COOKIES, countCredential } from './access-bridge.mjs';
 
 const SHELL_BEARER = /(?:^|,)\s*Bearer\s+aura-(sess1|admin1)\./i;
@@ -44,7 +46,7 @@ function cleanAuthorization(value, surface) {
 }
 
 function cleanValue(name, value, surface) {
-  if (name === INTERNAL_SERVICE_HEADER) return null;
+  if (name === INTERNAL_SERVICE_HEADER || name === GATEWAY_IDENTITY_HEADER) return null;
   if (name === 'cookie') return cleanCookie(value, surface);
   if (name === 'authorization') return cleanAuthorization(value, surface);
   return value;
@@ -65,7 +67,7 @@ export function stripShellCredentials(headers, surface) {
     return out;
   }
   if (typeof headers?.get === 'function') {
-    for (const name of ['cookie', 'authorization', INTERNAL_SERVICE_HEADER]) {
+    for (const name of ['cookie', 'authorization', INTERNAL_SERVICE_HEADER, GATEWAY_IDENTITY_HEADER]) {
       const current = headers.get(name);
       if (current === null) continue;
       const value = cleanValue(name, current, surface);
@@ -76,7 +78,7 @@ export function stripShellCredentials(headers, surface) {
   }
   for (const key of Object.keys(headers ?? {})) {
     const name = key.toLowerCase();
-    if (name !== 'cookie' && name !== 'authorization' && name !== INTERNAL_SERVICE_HEADER) continue;
+    if (name !== 'cookie' && name !== 'authorization' && name !== INTERNAL_SERVICE_HEADER && name !== GATEWAY_IDENTITY_HEADER) continue;
     const current = headers[key];
     if (Array.isArray(current)) {
       const kept = current.map((v) => cleanValue(name, v, surface)).filter((v) => v !== null);

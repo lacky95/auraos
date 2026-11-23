@@ -147,6 +147,9 @@ const routes: RouteAccessManifest['routes'] = {
       'Owner for now. Loaded by App Host documents, not by login. Phase 2 makes it public only if a cross-origin <script> cannot carry the login handoff.'))),
   },
 
+  // Reached only through the App Host gateway, which names the instance.
+  '/api/os/app-runtime.js': { methods: on(['GET'], rule(['own-instance'], 'system')) },
+
   '/api/os/about': {
     methods: {
       GET: rule(OWNER, 'system', decide(1,
