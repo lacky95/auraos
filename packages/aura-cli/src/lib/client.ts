@@ -1,6 +1,6 @@
 import { shellUrl } from './shell-url.js';
 import { isAdminPath, recoverAdminSession } from './admin-session.js';
-import { isTrustedShellUrl, shellFetch } from './identity.js';
+import { adminRefusal, isTrustedShellUrl, shellFetch } from './identity.js';
 
 export { shellUrl };
 
@@ -53,7 +53,7 @@ async function request<T>(
         (isTrustedShellUrl(shellUrl())
           ? '  Run `aura admin login --save` (asks for the shared admin credential), or set AURA_ADMIN_CREDENTIAL / AURA_ADMIN_SESSION.\n' +
             '  Read the credential on the host: `docker exec -it aura-shell aura admin credential`.'
-          : `  ${shellUrl()} is not this system's shell, so no stored credential was sent. To use one anyway, set AURA_ADMIN_SESSION or AURA_ADMIN_CREDENTIAL.`),
+          : `  ${adminRefusal(shellUrl())}`),
       ) as ShellError;
       e.status = 401;
       e.body = text;

@@ -9,8 +9,7 @@ import { candidateRules, handlersOf, normalizeMethod } from './resolve.ts';
 import { ROUTE_ACCESS_MANIFEST } from './routeManifest.ts';
 import { SURFACE_MANIFEST } from './surfaceManifest.ts';
 import {
-  ACCESS_BRIDGE_KEY, ACCESS_EVENT_METHODS, ACCESS_REASONS, ACCESS_STATUS_CLASSES, ACCESS_VIAS,
-  CREDENTIAL_COUNT_KINDS, CREDENTIAL_SURFACES, POLICY_OUTCOMES, UNRESOLVED_VARIANT,
+  ACCESS_BRIDGE_KEY, CREDENTIAL_COUNT_KINDS, CREDENTIAL_SURFACES, UNRESOLVED_VARIANT,
 } from './types.ts';
 import type {
   AccessBridge, AccessBridgeHost, AccessEvent, AccessEventMethod, AccessEventSurface, AccessLabel,
@@ -256,9 +255,6 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(x, y);
 }
 
-const variantIds = (manifest: RouteAccessManifest, route: string) =>
-  new Set((manifest.routes[route]?.variants ?? []).map((v) => v.id));
-
 export interface ObserverOptions {
   deps: ObserverDeps;
   report: AccessReport;
@@ -390,28 +386,7 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
     };
   }
 
-  /** A complete event from an untyped sender: every field must be a known label. */
-  function validEvent(e: AccessEvent): boolean {
-    if (!e || typeof e !== 'object') return false;
-    const surface = surfaceById.get(e.subject);
-    const isRoute = e.surface === 'api' && e.subject.startsWith('/api/')
-      && (e.subject in manifest.routes || e.subject.split('/')[2]! in manifest.groups);
-    if (!isRoute && !(surface && surface.kind === e.surface)) return false;
-    if (e.variant !== null && e.variant !== UNRESOLVED_VARIANT
-      && !(isRoute && variantIds(manifest, e.subject).has(e.variant))) return false;
-    if (e.appId !== null && knownApp(e.appId) === null) return false;
-    return closed(ACCESS_EVENT_METHODS, e.method) && closed(POLICY_OUTCOMES, e.decision)
-      && closed(ACCESS_REASONS, e.reason) && closed(ACCESS_STATUS_CLASSES, e.status)
-      && closed(ACCESS_VIAS, e.via) && closed(PRINCIPAL_CLASSES, e.principal);
-  }
-
   const bridge: AccessBridge = {
-    report(event) {
-      try {
-        if (validEvent(event)) report.add(event);
-        else report.note('dropped');
-      } catch { report.note('dropped'); }
-    },
     observeSurface(observation) {
       void evaluateSurface(observation)
         .then((event) => { if (event) report.add(event); else report.note('dropped'); })
@@ -434,8 +409,6 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
 
   return { observeRequest, bridge };
 }
-
-const PRINCIPAL_CLASSES = ['instance', 'apiKey', 'admin', 'anonymous', 'system', 'user', 'operator'] as const;
 
 // ── the running shell ───────────────────────────────────────────────────────
 

@@ -123,6 +123,26 @@ export class LoginSessionStore implements LoginSessions {
       : prefix === SHARED_KEY_SESSION_PREFIX ? 'shared-key' : null;
     if (!method) return null;
 
+    const p = this.claimsOf(method, prefix, payload, sig, shared);
+    if (!p) return null;
+
+    // Outside any catch: a Valkey failure is a service error, not a bad session.
+    const raw = await this.redis().get(loginSessionKey(p.s));
+    if (!raw) return null;
+    let nonce: Partial<Nonce>;
+    try { nonce = JSON.parse(raw) as Partial<Nonce>; } catch { return null; }
+    if (nonce.m !== p.m || nonce.u !== p.u) return null;
+    return {
+      sessionId: p.s, expiresAt: p.e, method: p.m,
+      ...(p.u ? { userId: p.u } : {}),
+      ...(p.f ? { keyFingerprint: p.f } : {}),
+    };
+  }
+
+  /** The token's verified claims, or null. An unusable MAC key counts as invalid. */
+  private claimsOf(
+    method: LoginMethod, prefix: string, payload: string, sig: string, shared: SharedKey,
+  ): { s: string; e: number; m: LoginMethod; u?: string; f?: string } | null {
     try {
       const given = Buffer.from(sig, 'base64url');
       const want = this.mac(method, prefix, payload, shared);
@@ -134,15 +154,10 @@ export class LoginSessionStore implements LoginSessions {
       if (p.u !== undefined && typeof p.u !== 'string') return null;
       if (p.m === 'password' && !p.u) return null;
       if (p.m === 'shared-key' && (typeof p.f !== 'string' || p.f !== shared()?.fingerprint)) return null;
-
-      const raw = await this.redis().get(loginSessionKey(p.s));
-      if (!raw) return null;
-      const nonce = JSON.parse(raw) as Partial<Nonce>;
-      if (nonce.m !== p.m || nonce.u !== p.u) return null;
       return {
-        sessionId: p.s, expiresAt: p.e, method: p.m,
-        ...(p.u ? { userId: p.u } : {}),
-        ...(p.f ? { keyFingerprint: p.f } : {}),
+        s: p.s, e: p.e, m: p.m,
+        ...(p.u ? { u: p.u } : {}),
+        ...(p.f ? { f: p.f } : {}),
       };
     } catch {
       return null;

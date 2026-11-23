@@ -184,14 +184,14 @@ export interface AccessEvent {
 /**
  * How `.mjs` servers reach the observer, which they can't import:
  *
- *   globalThis[Symbol.for('aura.access')]?.report(event)
+ *   globalThis[Symbol.for('aura.access')]?.observeSurface(observation)
  *
- * `report` never throws and is never awaited, so it can't change a response.
+ * The bridge builds each event itself, so a sender can't write report rows.
+ * Its methods never throw and are never awaited, so they can't change a response.
  */
 export const ACCESS_BRIDGE_KEY: unique symbol = Symbol.for('aura.access');
 
 export interface AccessBridge {
-  report(event: AccessEvent): void;
   /** A surface event: the bridge checks it, runs `decide()` and counts it. */
   observeSurface(observation: SurfaceObservation): void;
   /** A high-frequency event on a surface: a counter only. */

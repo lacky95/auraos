@@ -122,15 +122,6 @@ export class FileSetupTickets implements SetupTickets {
     this.beforeClaim = opts.beforeClaim;
   }
 
-  async write(ticket: SetupTicket): Promise<void> {
-    if (!SHA256_RE.test(ticket.sha256)) throw new Error('invalid ticket hash');
-    mkdirSync(this.dir, { recursive: true, mode: 0o700 });
-    writePrivate(join(this.dir, `${ticket.sha256}.json`), {
-      sha256: ticket.sha256, purpose: ticket.purpose, expiresAt: ticket.expiresAt,
-      ...(ticket.username !== undefined ? { username: ticket.username } : {}),
-    });
-  }
-
   async claim(code: string, purpose: SetupTicketPurpose): Promise<SetupTicket | null> {
     if (this.beforeClaim) await this.beforeClaim().catch(() => undefined);
     const canonical = canonicalCode(code);

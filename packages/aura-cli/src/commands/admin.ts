@@ -116,7 +116,7 @@ export function registerAdmin(program: Command): void {
       if (inSandbox() && (opts.save || opts.print)) {
         warnOnce('login-sandbox', `${opts.save ? '--save' : '--print'} inside an app sandbox exposes the admin session to other apps and agents. It stops working here in Phase 4.`);
       }
-      const credential = await obtainCredential('login');
+      const credential = await obtainCredential('login').catch((err: Error) => fail(err.message));
       if (!credential) fail('no credential: set AURA_ADMIN_CREDENTIAL or run this on a TTY. Read it on the host: `docker exec -it aura-shell aura admin credential`.');
       const s = await adminLogin(credential!).catch((err: Error) => fail(err.message));
       if (opts.print) {

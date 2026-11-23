@@ -37,11 +37,10 @@ export interface UserStore {
   createOwner(input: { username: string; password: string }): Promise<UserAccount | null>;
   /**
    * Rate-limited before any hashing. Never throws on a bad password.
-   * `rateLimitKey` identifies the client for the per-client limit (default: the username).
+   * `rateLimitKey` identifies the client. Without one there is no per-client
+   * limit, because a shared bucket would let one caller lock out everyone.
    */
   verifyPassword(username: string, password: string, opts?: { rateLimitKey?: string }): Promise<PasswordCheck>;
-  /** False for an unknown user. Revoking sessions is the caller's step. */
-  setPassword(userId: string, password: string): Promise<boolean>;
 }
 
 // ── login sessions ──────────────────────────────────────────────────────────
@@ -80,7 +79,7 @@ export type LoginSessionInput =
 
 export interface LoginSessions {
   issue(input: LoginSessionInput): Promise<{ token: string; session: LoginSession }>;
-  /** A valid, unexpired, unrevoked session, else null. Never throws on bad input. */
+  /** A valid, unexpired, unrevoked session, else null. Rejects only when the store fails. */
   verify(token: string | null | undefined): Promise<LoginSession | null>;
   /** True when a live session was removed. */
   revoke(sessionId: string): Promise<boolean>;
@@ -104,7 +103,6 @@ export interface SetupTicket {
 }
 
 export interface SetupTickets {
-  write(ticket: SetupTicket): Promise<void>;
   /**
    * Atomic and single-use: of any number of concurrent calls with the right
    * code, one gets the ticket. Null for a wrong, expired, used or

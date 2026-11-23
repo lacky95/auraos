@@ -13,7 +13,8 @@ import type { ObserverDeps } from '../src/lib/access/observer.ts';
 import { AccessReport } from '../src/lib/access/report.ts';
 import type { ReportRedis } from '../src/lib/access/report.ts';
 import type { RouteAccessManifest } from '../src/lib/access/types.ts';
-import { authenticate } from '../src/lib/auth.ts';
+import { publicInstance } from '../src/lib/appResponse.ts';
+import { authenticate, requireAdmin } from '../src/lib/auth.ts';
 import type { AuthDeps } from '../src/lib/auth.ts';
 import {
   authLogin, authLogout, authPageGate, authSession, authSetup, authStatus, authWhoami, clientRateKey, coreAuthServices,
@@ -306,6 +307,54 @@ test('fail-open: the real observer records an error instead of throwing on a bad
   snapshot.status = 200;
   await assert.doesNotReject(observer.observeRequest(snapshot));
   assert.ok(report.pending().meta['errors']! >= 1);
+});
+
+test('a Valkey blip on an admin session is a service error, never a 401', async () => {
+  const deps = {
+    ...authDeps(),
+    admin: { verifySession: async () => { throw new Error('valkey down'); } },
+  } as AuthDeps;
+  const request = new Request('http://localhost/api/admin/x', { headers: { authorization: 'Bearer aura-admin1.a.b' } });
+  await assert.rejects(requireAdmin(request, deps), /valkey down/);
+  const who = await authWhoami(get({ authorization: 'Bearer aura-admin1.a.b' }), {
+    env: {}, services: () => null, authenticate: (r) => authenticate(r, deps),
+  });
+  assert.equal(who.status, 503);
+});
+
+test('fail-open: a Valkey failure in peek is counted and never reaches a response', async () => {
+  const report = new AccessReport({ redis: () => null });
+  const observer = createObserver({
+    report,
+    deps: {
+      ...brokenDeps,
+      mgr: () => null,
+      redisReady: () => true,
+      internalSecret: () => null,
+      services: () => ({
+        admin: { peekSession: async () => { throw new Error('valkey down'); } },
+        apiKeys: { peek: async () => { throw new Error('valkey down'); } },
+      }),
+    },
+  });
+  for (const authorization of ['Bearer aura-admin1.a.b', `Bearer aura_k1_${'0'.repeat(16)}_${'a'.repeat(43)}`]) {
+    const request = new Request('http://localhost/api/apps', { headers: { authorization } });
+    const snapshot = captureAccess({ request, url: new URL(request.url), routePattern: '/api/apps', params: {} })!;
+    snapshot.status = 200;
+    await assert.doesNotReject(observer.observeRequest(snapshot));
+  }
+  assert.equal(report.pending().meta['errors'], 2);
+});
+
+test('an instance in an API response carries no owner', () => {
+  const inst = { instanceId: 'a-1', appId: 'a', owner: 'default', state: 'resumed' } as unknown as Parameters<typeof publicInstance>[0];
+  const shown = publicInstance(inst);
+  assert.equal('owner' in shown, false);
+  assert.equal(shown.instanceId, 'a-1');
+  assert.equal(inst.owner, 'default', 'the record itself is unchanged');
+  for (const file of ['../src/pages/api/apps/index.ts', '../src/pages/api/apps/[id]/instances.ts', '../src/lib/appResponse.ts']) {
+    assert.ok(readFileSync(new URL(file, import.meta.url), 'utf-8').includes('publicInstance('), file);
+  }
 });
 
 test('the surface reads no credential file content into a response', () => {

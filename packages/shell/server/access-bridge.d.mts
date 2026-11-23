@@ -12,5 +12,4 @@ export function surfaceIdentity(headers: unknown): {
 } | null;
 export function staticSurface(url: unknown): string | null;
 export function observeHttpSurface(req: unknown, res: unknown): void;
-export function loopbackUrl(url: string): string | null;
 export function internalServiceHeaders(url: string): Record<string, string>;

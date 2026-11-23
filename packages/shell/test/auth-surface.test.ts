@@ -51,11 +51,6 @@ function fakes() {
         if (!owner || owner.disabled || owner.username !== username || owner.password !== password) return { ok: false, reason: 'invalid' };
         return { ok: true, user: publicUser()! };
       },
-      setPassword: async (userId, password) => {
-        if (owner?.id !== userId) return false;
-        owner.password = password;
-        return true;
-      },
       credentialEpoch: () => epoch,
       recoverOwnerPassword: async (ticket, password) => {
         if (!ticket.username) return { ok: false, reason: 'invalid-ticket' };
@@ -89,7 +84,6 @@ function fakes() {
       revokeByMethod: async () => 0,
     },
     setupTickets: {
-      write: async (t) => { tickets.set(t.sha256, t); },
       claim: async (code, purpose) => {
         calls.claim++;
         const t = tickets.get(code);
@@ -101,7 +95,7 @@ function fakes() {
     audit: { record: async (e) => { audited.push(e.action); } },
   };
   const addTicket = (code: string, purpose: 'setup' | 'reset', username?: string) =>
-    services.setupTickets.write({ sha256: code, purpose, expiresAt: Date.now() + 60_000, username });
+    void tickets.set(code, { sha256: code, purpose, expiresAt: Date.now() + 60_000, username });
   return {
     services, sessions, calls, audited, addTicket,
     disableOwner: () => { if (owner) owner.disabled = true; },

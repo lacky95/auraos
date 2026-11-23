@@ -11,13 +11,13 @@
  * THIS command only (nothing is written) from:
  *   AURA_ADMIN_CREDENTIAL, or the key file when running in the master
  *   container (<dataDir>/aura/secrets/admin.key), or a hidden prompt on a TTY.
- * Stored credentials only ever go to the trusted shell (see identity.ts).
+ * Every credential only ever goes to the trusted shell (see identity.ts).
  *
  * The session is a header (`Authorization: Bearer …`), never a cookie.
  */
 import { defaultAdminKeyFile, readAdminCredential } from '@aura/core';
 import { shellUrl } from './shell-url.js';
-import { isTrustedShellUrl, shellFetch, warnExplicitAdmin, warnOnce } from './identity.js';
+import { adminRefusal, isTrustedShellUrl, shellFetch, warnExplicitAdmin } from './identity.js';
 import { clearSavedSession, forgetInProcessSession, savedSession, setInProcessSession, type Session } from './admin-session-store.js';
 
 export { ADMIN_SESSION_FILE, clearSavedSession, forgetInProcessSession, saveSession, savedSession } from './admin-session-store.js';
@@ -67,6 +67,7 @@ export class AdminLoginError extends Error {
 
 /** POST /api/admin/session with the credential → a session (kept in this process). */
 export async function adminLogin(credential: string): Promise<Session> {
+  if (!isTrustedShellUrl(shellUrl())) throw new AdminLoginError(adminRefusal(shellUrl()), 0);
   let res: Response;
   try {
     res = await shellFetch('/api/admin/session', {
@@ -88,38 +89,37 @@ export async function adminLogin(credential: string): Promise<Session> {
 }
 
 /**
- * Find the credential: AURA_ADMIN_CREDENTIAL, then (trusted shell only) the
- * master key file, then a hidden prompt. `recover` runs because a server said
- * 401, so it never prompts for a URL that is not the trusted shell.
+ * Find the credential for the trusted shell: AURA_ADMIN_CREDENTIAL, then the
+ * master key file, then a hidden prompt. For any other URL, `login` is refused
+ * and `recover` (a server said 401) finds nothing.
  */
 export async function obtainCredential(mode: 'login' | 'recover'): Promise<string | null> {
   const url = shellUrl();
+  if (!isTrustedShellUrl(url)) {
+    if (mode === 'recover') return null;
+    throw new AdminLoginError(adminRefusal(url), 0);
+  }
   const explicit = process.env['AURA_ADMIN_CREDENTIAL']?.trim();
   if (explicit) {
-    warnExplicitAdmin('AURA_ADMIN_CREDENTIAL', url);
+    warnExplicitAdmin('AURA_ADMIN_CREDENTIAL');
     return explicit;
   }
-  const trusted = isTrustedShellUrl(url);
-  if (trusted) {
-    const f = masterKeyFile();
-    if (f) return readAdminCredential(f);
-  } else if (mode === 'recover') {
-    return null;
-  }
+  const f = masterKeyFile();
+  if (f) return readAdminCredential(f);
   if (!process.stdin.isTTY || !process.stderr.isTTY) return null;
-  if (!trusted) warnOnce('prompt-untrusted', `${url} is not this system's shell. Only type a credential if you trust it.`);
   return (await promptSecret('AuraOS admin credential (hidden): ')) || null;
 }
 
 /**
  * Called after a 401 admin-required: drop a stale session, then try to get a
  * fresh one for this command only. True when a new session is in place. A 401
- * from a URL that is not the trusted shell proves nothing, so the saved
- * session is left alone and only an explicit credential is used.
+ * from a URL that is not the trusted shell proves nothing: the saved session is
+ * left alone and nothing is sent.
  */
 export async function recoverAdminSession(): Promise<boolean> {
+  if (!isTrustedShellUrl(shellUrl())) return false;
   if (process.env['AURA_ADMIN_SESSION']) return false; // the caller pinned one; don't second-guess it
-  if (isTrustedShellUrl(shellUrl()) && savedSession()) clearSavedSession();
+  if (savedSession()) clearSavedSession();
   forgetInProcessSession();
   const credential = await obtainCredential('recover').catch(() => null);
   if (!credential) return false;

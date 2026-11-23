@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import { dirname, join } from 'node:path';
 import { defaultAdminKeyFile } from '@aura/core';
 import { api, subscribeEvents } from '../src/lib/client.js';
-import { ADMIN_SESSION_FILE, adminLogin, forgetInProcessSession, saveSession } from '../src/lib/admin-session.js';
+import { ADMIN_SESSION_FILE, adminLogin, forgetInProcessSession, obtainCredential, saveSession } from '../src/lib/admin-session.js';
 import {
   holdsInstanceIdentity, isProxyPath, isRunnerShellUrl, isTrustedShellUrl, resetIdentityWarnings,
   resolveIdentity, runnerShellUrl, shellFetch,
@@ -21,6 +21,7 @@ import { issueSetupCode, SetupCodeRefused } from '../src/lib/setup-ticket.js';
 import { fetchWhoami, localHints } from '../src/commands/identity.js';
 import { printAccessReport } from '../src/commands/admin.js';
 import { eventKey, readAccessReport } from '../../shell/src/lib/access/report.ts';
+import { osAuthHeaders } from '../../app-sdk/src/os-auth.ts';
 
 const KEY = `aura_admin_${'k'.repeat(43)}`;
 const ENV = ['AURA_SHELL_URL', 'OS_API_BASE', 'AURA_OS_URL', 'AURA_INSTANCE_TOKEN', 'APP_INSTANCE_ID', 'AURA_INSTANCE_ID',
@@ -220,31 +221,47 @@ test('credentialed requests never follow a redirect; anonymous ones still do', a
   assert.equal(sink.seen[0]!.auth, undefined);
 });
 
-test('explicit AURA_ADMIN_* keeps working on another URL, with a warning and no value printed', async () => {
-  const other = await fakeShell(({ method, url, auth }) => {
-    if (method === 'POST' && url === '/api/admin/session') return [200, { token: 'other-session', expiresAt: Date.now() + 60_000 }];
-    return auth ? [200, { ok: true }] : [401, { error: 'admin-required' }];
-  });
+test('explicit AURA_ADMIN_* is never sent to another URL, even after a 401', async () => {
+  const other = await fakeShell(fake401);
   process.env['AURA_SHELL_URL'] = other.base;
+  const refused = (e: Error & { status?: number }) => e.status === 401 && /not this system's shell/.test(e.message) && /AURA_ADMIN_/.test(e.message);
+
   process.env['AURA_ADMIN_SESSION'] = 'pinned-value';
-  const first = await stderrOf(() => api.get('/api/admin/grants'));
-  assert.equal(other.seen[0]!.auth, 'Bearer pinned-value');
-  assert.match(first, /AURA_ADMIN_SESSION/);
+  const first = await stderrOf(() => assert.rejects(api.get('/api/admin/grants'), refused));
+  assert.match(first, /AURA_ADMIN_/);
   assert.doesNotMatch(first, /pinned-value/);
+  assert.equal(resolveIdentity({ url: other.base, path: '/api/admin/x', intent: 'whoami' }).kind, 'none');
 
   delete process.env['AURA_ADMIN_SESSION'];
   process.env['AURA_ADMIN_CREDENTIAL'] = KEY;
-  const second = await stderrOf(() => api.get('/api/admin/grants'));
-  assert.match(second, /AURA_ADMIN_CREDENTIAL/);
-  assert.ok(!second.includes(KEY));
-  assert.equal(other.seen.at(-1)!.auth, 'Bearer other-session');
+  await assert.rejects(api.get('/api/admin/grants'), refused);
+  await assert.rejects(obtainCredential('login'), /not this system's shell/);
+  assert.equal(await obtainCredential('recover'), null);
+  await assert.rejects(adminLogin(KEY), /not this system's shell/);
+
+  assert.ok(other.seen.every((r) => r.auth === undefined && !r.body.includes(KEY) && !r.body.includes('pinned-value')));
+  assert.ok(other.seen.every((r) => r.method === 'GET'), 'no credential exchange was attempted');
+});
+
+test('explicit AURA_ADMIN_* still works on the trusted shell', async () => {
+  const shell = await fakeShell(({ method, url, auth }) => {
+    if (method === 'POST' && url === '/api/admin/session') return [200, { token: 'env-session', expiresAt: Date.now() + 60_000 }];
+    return auth ? [200, { ok: true }] : [401, { error: 'admin-required' }];
+  });
+  process.env['OS_API_BASE'] = shell.base;
+  process.env['AURA_ADMIN_SESSION'] = 'pinned-value';
+  assert.deepEqual(await api.get('/api/admin/grants'), { ok: true });
+  assert.equal(shell.seen[0]!.auth, 'Bearer pinned-value');
+  delete process.env['AURA_ADMIN_SESSION'];
+  process.env['AURA_ADMIN_CREDENTIAL'] = KEY;
+  assert.deepEqual(await api.get('/api/admin/grants'), { ok: true });
+  assert.equal(shell.seen.at(-1)!.auth, 'Bearer env-session');
 });
 
 test('an in-process session is bound to the origin that issued it', async () => {
   const a = await fakeShell(({ method }) => (method === 'POST' ? [200, { token: 'a-session', expiresAt: Date.now() + 60_000 }] : [200, {}]));
   const b = await fakeShell();
-  process.env['AURA_SHELL_URL'] = a.base;
-  process.env['AURA_ADMIN_CREDENTIAL'] = KEY;
+  process.env['OS_API_BASE'] = a.base;
   await stderrOf(() => adminLogin(KEY));
   assert.equal(resolveIdentity({ url: a.base, path: '/api/admin/x', intent: 'admin' }).kind, 'admin');
   assert.equal(resolveIdentity({ url: b.base, path: '/api/admin/x', intent: 'admin' }).kind, 'none');
@@ -323,4 +340,19 @@ test('access-report: prints the shape the real report reader returns', async () 
     assert.ok(out.includes(want), want);
   }
   assert.ok(!out.includes('[object Object]') && !out.includes('{"'));
+});
+
+test('the CLI and the SDK agree on what is a proxy path', () => {
+  const cases = [
+    '/api/proxy', '/api/proxy/', '/api/proxy/a/b', '/API/PROXY/a', '/api//proxy/a', '//api/proxy/a', '/api/./proxy/a',
+    '/api/x/../proxy/a', '/api/%70roxy/a', '/api/%2570roxy/a', '/api\\proxy/a', '/api/proxy?x=1', '/api/proxy#x',
+    'http://shell:3000/api/proxy/a', 'http://shell:3000/api/%70roxy/a', '/api/%zz', 'not a url',
+    '/api/proxyish', '/api/admin/grants', '/api/apps', 'http://shell:3000/api/apps', '/api/apps?u=/api/proxy/a',
+  ];
+  for (const c of cases) {
+    const sdkProxied = Object.keys(osAuthHeaders(c, { token: 't' })).length === 0;
+    assert.equal(sdkProxied, isProxyPath(c), c);
+  }
+  assert.equal(isProxyPath('/api/proxy/a'), true);
+  assert.equal(isProxyPath('/api/apps'), false);
 });

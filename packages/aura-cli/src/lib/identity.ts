@@ -4,10 +4,10 @@
  * Rules (Phase 1, report-only):
  *   - An instance token goes only to the origin of the runner-injected
  *     OS_API_BASE or AURA_OS_URL.
- *   - Implicit admin credentials (saved session, master key file) go only to
- *     the trusted shell: the runner origin, or the loopback default when no
- *     runner origin exists. A 401 from any other URL never triggers them.
- *   - Explicit AURA_ADMIN_* still works everywhere, with a warning.
+ *   - Every admin credential (AURA_ADMIN_*, saved session, master key file,
+ *     typed credential) goes only to the trusted shell: the runner origin, or
+ *     the loopback default when no runner origin exists. A 401 from any other
+ *     URL never triggers a send. Remote admin login does not exist yet.
  *   - Nothing is attached to /api/proxy/*, and a credentialed request never
  *     follows a redirect.
  *
@@ -115,11 +115,13 @@ export function resetIdentityWarnings(): void {
   warned.clear();
 }
 
+/** Why no admin credential goes to this URL. Never contains a credential. */
+export function adminRefusal(url: string): string {
+  return `${httpOrigin(url) ?? 'this URL'} is not this system's shell, so no admin credential (including AURA_ADMIN_*) is sent to it. Remote admin login is not available yet.`;
+}
+
 /** Warn about an explicit AURA_ADMIN_* variable. Its value is never printed. */
-export function warnExplicitAdmin(name: string, url: string): void {
-  if (!isTrustedShellUrl(url)) {
-    warnOnce(`untrusted:${name}`, `sending ${name} to ${httpOrigin(url) ?? 'an invalid URL'}, which is not this system's shell.`);
-  }
+export function warnExplicitAdmin(name: string): void {
   if (inSandbox()) {
     warnOnce(`sandbox:${name}`, `${name} is set inside an app sandbox, where other agents may read it. It stops working here in Phase 4.`);
   }
@@ -133,13 +135,16 @@ const bearer = (token: string) => ({ Authorization: `Bearer ${token}` });
 
 function adminIdentity(target: string, trusted: boolean): ResolvedIdentity {
   const pinned = process.env['AURA_ADMIN_SESSION']?.trim();
+  if (!trusted) {
+    if (pinned) warnOnce('refused:AURA_ADMIN_SESSION', adminRefusal(target));
+    return none(trusted);
+  }
   if (pinned) {
-    warnExplicitAdmin('AURA_ADMIN_SESSION', target);
+    warnExplicitAdmin('AURA_ADMIN_SESSION');
     return { kind: 'admin', source: 'admin-env', headers: bearer(pinned), credentialed: true, trusted };
   }
   const own = inProcessSession(httpOrigin(target));
   if (own) return { kind: 'admin', source: 'admin-process', headers: bearer(own.token), credentialed: true, trusted };
-  if (!trusted) return none(trusted);
   const saved = savedSession();
   return saved
     ? { kind: 'admin', source: 'admin-saved', headers: bearer(saved.token), credentialed: true, trusted }

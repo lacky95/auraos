@@ -97,18 +97,49 @@ test('a tampered record never authenticates and cannot be replaced by setup', as
   assert.equal(await users.hasOwner(), true);
   assert.equal((await users.verifyPassword('mallory', PASSWORD, { rateLimitKey: 'c4' })).ok, false);
   assert.equal(await users.createOwner({ username: 'mallory', password: PASSWORD }), null);
-  assert.equal(await users.setPassword('default', 'attacker password'), false);
   await redis.set(OWNER_RECORD_KEY, original);
   assert.ok(await users.getOwner());
 });
 
-test('setPassword replaces the hash and rejects unknown users', async () => {
+test('one client cannot lock out another, and no address means no shared bucket', async () => {
   const username = (await users.getOwner()).username;
-  assert.equal(await users.setPassword('someone-else', 'new password 1'), false);
-  assert.equal(await users.setPassword('default', 'new password 1'), true);
-  assert.equal((await users.verifyPassword(username, PASSWORD, { rateLimitKey: 'c5' })).ok, false);
-  assert.equal((await users.verifyPassword(username, 'new password 1', { rateLimitKey: 'c5' })).ok, true);
-  assert.equal(await users.setPassword('default', PASSWORD), true);
+  const long = 'x'.repeat(PASSWORD_MAX_BYTES + 1);
+  // More attempts than any old global limit, all refused before hashing.
+  for (let i = 0; i < 40; i++) await users.verifyPassword(username, long, { rateLimitKey: 'attacker' });
+  assert.deepEqual(await users.verifyPassword(username, PASSWORD, { rateLimitKey: 'attacker' }), { ok: false, reason: 'rate-limited' });
+  assert.equal((await users.verifyPassword(username, PASSWORD, { rateLimitKey: 'owner-client' })).ok, true);
+  for (let i = 0; i < 40; i++) await users.verifyPassword(username, long);
+  assert.equal((await users.verifyPassword(username, PASSWORD)).ok, true, 'no client address');
+});
+
+test('a Valkey failure is a service error, not an invalid session', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'aura-session-outage-'));
+  let down = false;
+  const flaky = new Proxy({}, {
+    get: (_t, prop) => {
+      if (prop === 'get' && down) return async () => { throw new Error('valkey down'); };
+      const v = redis[prop];
+      return typeof v === 'function' ? v.bind(redis) : v;
+    },
+  });
+  try {
+    const auth = new AdminAuth({ keyFile: join(dir, 'admin.key'), redis: () => flaky, now });
+    auth.ensure();
+    const unlocked = await auth.unlock(readAdminCredential(auth.keyFile));
+    const password = await auth.sessions.issue({ method: 'password', userId: 'default' });
+    down = true;
+    await assert.rejects(auth.verifySession(unlocked.token), /valkey down/);
+    await assert.rejects(auth.peekSession(unlocked.token), /valkey down/);
+    await assert.rejects(auth.sessions.verify(password.token), /valkey down/);
+    assert.equal(await auth.sessions.verify('aura-sess1.bad.sig'), null, 'a bad token needs no store');
+    down = false;
+    assert.ok(await auth.verifySession(unlocked.token), 'the session survives the blip');
+
+    await redis.set(`usersess:${unlocked.sessionId}`, 'not json');
+    assert.equal(await auth.verifySession(unlocked.token), null, 'a corrupt nonce is invalid');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('password session: lifetimes, expiry, revoke and revokeByUser', async () => {
@@ -379,7 +410,6 @@ test('recovery after a replaced identity.key re-seals from the ticket and revoke
   const shared = await adminAuth.unlock(readAdminCredential(adminAuth.keyFile));
   rmSync(identityKeyFile);
   assert.equal(await store.getOwner(), null, 'old MAC no longer verifies');
-  assert.equal(await store.setPassword('default', NEW_PASSWORD), false, 'setPassword stays strict');
 
   const out = await store.recoverOwnerPassword(await claimReset('lukas'), NEW_PASSWORD);
   assert.equal(out.ok, true);

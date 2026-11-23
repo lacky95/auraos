@@ -27,7 +27,6 @@ export const PASSWORD_MIN_LENGTH = 12;
 /** In UTF-8 bytes. Longer input is refused before hashing. */
 export const PASSWORD_MAX_BYTES = 512;
 export const USERNAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/;
-export const LOGIN_ATTEMPTS_PER_MINUTE = 30;
 export const LOGIN_ATTEMPTS_PER_KEY_PER_MINUTE = 10;
 
 const SCRYPT = { N: 2 ** 17, r: 8, p: 1, keyLen: 32, saltLen: 16 } as const;
@@ -182,7 +181,7 @@ export class ValkeyUserStore implements UserStore {
   }
 
   /**
-   * Moves after each password change and before its sessions are revoked. A
+   * Moves after each password recovery and before its sessions are revoked. A
    * login that checked the old password compares this after issuing: either
    * the revoke removed its session, or it sees the change and revokes it.
    */
@@ -252,20 +251,22 @@ export class ValkeyUserStore implements UserStore {
     return created === 'OK' ? accountOf(user) : null;
   }
 
-  /** Counts this attempt. True when it is over a limit, or the limit can't be checked. */
-  private async overLimit(username: string, rateLimitKey?: string): Promise<boolean> {
+  /**
+   * Counts this attempt for its client. True when it is over the limit, or the
+   * limit can't be checked. There is no global bucket and no shared bucket for
+   * unattributed callers, because either would let one caller lock out the
+   * owner. `MAX_QUEUED_VERIFIES` and serialized hashing bound the cost.
+   */
+  private async overLimit(rateLimitKey?: string): Promise<boolean> {
+    if (!rateLimitKey) return false;
     const minute = Math.floor(this.now() / 60_000);
-    const id = createHash('sha256').update(rateLimitKey ?? `user:${username}`).digest('hex').slice(0, 32);
-    const bump = async (bucket: string) => {
+    const id = createHash('sha256').update(rateLimitKey).digest('hex').slice(0, 32);
+    const bucket = `ratelimit:login:key:${id}:${minute}`;
+    try {
       const r = this.redis();
       const n = await r.incr(bucket);
       if (n === 1) await r.pexpire(bucket, 120_000);
-      return n;
-    };
-    try {
-      const all = await bump(`ratelimit:login:all:${minute}`);
-      const perKey = await bump(`ratelimit:login:key:${id}:${minute}`);
-      return all > LOGIN_ATTEMPTS_PER_MINUTE || perKey > LOGIN_ATTEMPTS_PER_KEY_PER_MINUTE;
+      return n > LOGIN_ATTEMPTS_PER_KEY_PER_MINUTE;
     } catch {
       return true;
     }
@@ -273,11 +274,12 @@ export class ValkeyUserStore implements UserStore {
 
   /**
    * @param opts.rateLimitKey  the caller's identity for the per-client limit,
-   *   e.g. its address. Defaults to the username. Stored only as a hash.
+   *   e.g. its address. Stored only as a hash. Without one, only the hashing
+   *   queue limits the attempt.
    */
   async verifyPassword(username: string, password: string, opts: { rateLimitKey?: string } = {}): Promise<PasswordCheck> {
     const name = typeof username === 'string' ? normalizeUsername(username).slice(0, 64) : '';
-    if (await this.overLimit(name, opts.rateLimitKey)) return { ok: false, reason: 'rate-limited' };
+    if (await this.overLimit(opts.rateLimitKey)) return { ok: false, reason: 'rate-limited' };
     if (typeof password !== 'string' || password.length === 0 || Buffer.byteLength(password) > PASSWORD_MAX_BYTES) {
       return { ok: false, reason: 'invalid' };
     }
@@ -296,19 +298,6 @@ export class ValkeyUserStore implements UserStore {
     } finally {
       queuedVerifies--;
     }
-  }
-
-  async setPassword(userId: string, password: string): Promise<boolean> {
-    assertPassword(password);
-    if (userId !== DEFAULT_OWNER_ID) return false;
-    const r = this.redis();
-    const raw = await r.get(OWNER_RECORD_KEY);
-    const user = this.unseal(raw);
-    if (!user) return false;
-    const next = this.seal({ ...user, passwordHash: await hashPassword(password) });
-    const changed = (await r.eval(SET_IF_UNCHANGED, 1, OWNER_RECORD_KEY, raw!, next)) === 1;
-    if (changed) this.epoch += 1;
-    return changed;
   }
 
   /**

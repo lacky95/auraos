@@ -24,7 +24,7 @@ import { SURFACE_MANIFEST } from '../src/lib/access/surfaceManifest.ts';
 import { ROUTE_METHODS } from '../src/lib/access/types.ts';
 import type { AccessEvent, AccessLabel, AccessRule, DecideInput, RequestSnapshot } from '../src/lib/access/types.ts';
 import {
-  INTERNAL_SERVICE_HEADER, internalServiceHeaders, loopbackUrl, reportSurface, staticSurface, surfaceIdentity,
+  INTERNAL_SERVICE_HEADER, internalServiceHeaders, reportSurface, staticSurface, surfaceIdentity,
 } from '../server/access-bridge.mjs';
 import { dropServiceWorkerScope, stripSessionCookie, stripShellCredentials } from '../server/shell-credentials.mjs';
 import { createAppHostRouter } from '../server/app-hosts.mjs';
@@ -596,30 +596,13 @@ test('internal label: only literal loopback gets it', () => {
   for (const url of ['http://localhost:3000/', 'http://aura-shell:3000/', 'http://127.0.0.1.evil.test/', 'nonsense']) {
     assert.deepEqual(internalServiceHeaders(url), {}, url);
   }
-  assert.equal(loopbackUrl('http://localhost:3000/x'), 'http://127.0.0.1:3000/x');
-  assert.equal(loopbackUrl('http://aura-shell:3000/x'), null);
 });
 
 // ── bridge validation ───────────────────────────────────────────────────────
 
-test('bridge: a mismatched subject, variant, appId or field is dropped', () => {
-  const { report, observer } = observerWith();
-  const before = () => report.pending().events;
-  observer.bridge.report(event({ decision: 'allow', reason: 'owner' }));
-  assert.equal(before(), 1, 'a valid event counts');
-  const bad: AccessEvent[] = [
-    event({ subject: '/raw/path?token=x' as AccessLabel }),
-    event({ surface: 'websocket', subject: 'not-a-surface' as AccessLabel }),
-    event({ surface: 'static', subject: 'ws-proxy' as AccessLabel }),
-    event({ variant: 'made-up' as AccessLabel }),
-    event({ appId: 'com.not.installed' as AccessLabel }),
-    event({ reason: 'free text' as never }),
-    event({ via: 'x' as never }),
-    null as never,
-  ];
-  for (const e of bad) observer.bridge.report(e);
-  assert.equal(before(), 1);
-  assert.equal(report.pending().meta['dropped'], bad.length);
+test('bridge: there is no way to write a finished event into the report', () => {
+  const { observer } = observerWith();
+  assert.equal('report' in observer.bridge, false);
 });
 
 test('bridge: a surface observation is validated before it counts', async () => {

@@ -148,7 +148,7 @@ export class AdminAuth {
     return { ok: true, token, sessionId: session.sessionId, expiresAt: session.expiresAt };
   }
 
-  /** The shared-key session of a valid token, else null. Never throws on bad input. */
+  /** The shared-key session of a valid token, else null. Rejects only when Valkey fails. */
   async verifySession(token: string | null | undefined): Promise<AdminSession | null> {
     if (!token || !looksLikeAdminSession(token)) return null;
     const s = await this.sessions.verify(token);

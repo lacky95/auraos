@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import { getAppManager } from '@aura/core';
-import { jsonResponse } from '../../../lib/appResponse.js';
+import { jsonResponse, publicInstance } from '../../../lib/appResponse.js';
 
 /**
  * Returns every installed app with its manifest, running instances and
@@ -19,7 +19,7 @@ export const GET: APIRoute = () => {
     // `sidecarCount` comes from the reconciler's cache — no backend call, so
     // this stays cheap. Details + usage: /api/instances/<id>/sidecars.
     instances:  mgr.getInstancesByApp(manifest.id).map((inst) => ({
-      ...inst,
+      ...publicInstance(inst),
       sidecarCount: mgr.getSidecars(inst.instanceId).length,
     })),
     activities: mgr.getActivitiesByApp(manifest.id),

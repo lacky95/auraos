@@ -87,17 +87,6 @@ function isLiteralLoopback(url) {
   try { return LOOPBACK_HOSTS.has(new URL(url).hostname); } catch { return false; }
 }
 
-/** `url` with `localhost` spelled as 127.0.0.1, or null if it isn't loopback. */
-export function loopbackUrl(url) {
-  try {
-    const u = new URL(url);
-    if (u.hostname === 'localhost') u.hostname = '127.0.0.1';
-    return LOOPBACK_HOSTS.has(u.hostname) ? u.href : null;
-  } catch {
-    return null;
-  }
-}
-
 /** The per-boot label for a call to `url`: empty unless it is literal loopback. */
 export function internalServiceHeaders(url) {
   try {
