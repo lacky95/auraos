@@ -1,0 +1,91 @@
+---
+/**
+ * The Browse page's content for one catalog. Rendered into the page when the
+ * catalog is already there, otherwise by /partials/browse (scripts/catalog.ts).
+ */
+import AppCard from './AppCard.astro';
+import SectionHeader from './SectionHeader.astro';
+import StoreToolbar from './StoreToolbar.astro';
+import { stateOf, type Catalog } from '../lib/catalog';
+interface Props { doc: Catalog }
+const { doc } = Astro.props;
+
+const apps = doc.apps;
+const featured = apps.filter((a) => doc.featured.includes(a.id));
+const degraded = (doc.sources ?? []).filter((s) => !s.ok);
+// Only categories some app is in; label from the catalog's taxonomy.
+const used = new Set(apps.flatMap((a) => a.categories ?? []));
+const label = new Map(doc.categories.map((c) => [c.slug, c.label]));
+const categories = [...used].sort().map((slug) => ({ slug, label: label.get(slug) ?? slug }));
+const sources = [...new Set(apps.map((a) => a.sourceName).filter(Boolean))].sort() as string[];
+const states = apps.map(stateOf);
+const count = (pred: (i: number) => boolean) => apps.filter((_, i) => pred(i)).length;
+const nInstalled = count((i) => states[i]!.status === 'installed' || states[i]!.status === 'installing');
+const nUpdates = count((i) => states[i]!.updateAvailable);
+const nAvailable = count((i) => states[i]!.status === 'available');
+---
+{apps.length === 0 ? (
+  <section class="nexus-section">
+    <div class="nexus-empty">
+      <p>No apps in the catalog yet.</p>
+      <p>
+        Publish one with <code>aura nexus app publish</code>, or add a source on the
+        <a href="/sources">Sources</a> tab.
+      </p>
+      <p>You can still install by reference from the <a href="/install">Install</a> tab.</p>
+      <p><a class="btn-ghost" href="/?refresh=1" data-refresh>↻ Refresh sources</a></p>
+    </div>
+  </section>
+) : (
+  <div class="browse" data-browse data-key="browse" data-default-view="grid">
+    <StoreToolbar
+      placeholder="Search apps"
+      refresh
+      groups={[
+        { key: 'status', label: 'Show', segmented: true, options: [
+          { value: '', label: 'All', count: apps.length },
+          { value: 'installed', label: 'Installed', count: nInstalled },
+          { value: 'update', label: 'Updates', count: nUpdates, tone: 'update' },
+          { value: 'available', label: 'Not installed', count: nAvailable },
+        ] },
+        ...(categories.length ? [{ key: 'cat', label: 'Category', options: [
+          { value: '', label: 'All categories' },
+          ...categories.map((c) => ({ value: `cat:${c.slug}`, label: c.label, count: apps.filter((x) => (x.categories ?? []).includes(c.slug)).length })),
+        ] }] : []),
+      ]}
+      selects={sources.length > 1 ? [{ key: 'src', label: 'Source', all: 'All sources', options: sources.map((x) => ({ value: `src:${x}`, label: x })) }] : []}
+      sorts={[{ value: 'default', label: 'Store order' }, { value: 'name', label: 'Name' }, { value: 'source', label: 'Source' }]}
+    />
+
+    {degraded.length > 0 && (
+      <div class="source-warn">
+        <button type="button" class="disclose" data-disclose aria-expanded="false" aria-controls="source-warn-detail">⚠ {degraded.length} source{degraded.length > 1 ? 's' : ''} unavailable — showing the last known apps</button>
+        <div id="source-warn-detail" hidden>
+          {degraded.map((s) => <div><b>{s.name}</b> ({s.kind}){s.error ? `: ${s.error}` : ''}</div>)}
+        </div>
+      </div>
+    )}
+
+    {featured.length > 0 && (
+      <section class="nexus-section" data-hide-when-filtered>
+        <SectionHeader title="Featured" />
+        <div class="featured-strip">
+          {featured.map((e) => <AppCard entry={e} />)}
+        </div>
+      </section>
+    )}
+
+    <section class="nexus-section">
+      <SectionHeader title="Apps" count={apps.length}>
+        <button type="button" class="btn-ghost" data-reset hidden>Clear filters</button>
+      </SectionHeader>
+      <div class="app-list view-grid" data-list>
+        {apps.map((e, i) => <AppCard entry={e} index={i} />)}
+      </div>
+      <div class="nexus-empty" data-noresults hidden>
+        <p>No apps match.</p>
+        <p><button type="button" class="btn-ghost" data-reset>Clear filters</button></p>
+      </div>
+    </section>
+  </div>
+)}

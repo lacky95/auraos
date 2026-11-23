@@ -9,11 +9,12 @@ const url = new URL(Astro.request.url);
 const id = url.searchParams.get('id') ?? '';
 
 let entry: CatalogEntry | null = null;
+let catalogDown = false;
 if (id) {
   try {
     const doc = await shellGet<Catalog>('/api/nexus');
     entry = doc.apps.find((a) => a.id === id) ?? null;
-  } catch { entry = null; }
+  } catch { catalogDown = true; }
 }
 
 // Derive display values in the frontmatter — keeps the template free of
@@ -37,7 +38,9 @@ const editable       = entry?.sourceKind === 'oci' && !!entry?.sourceName;
   {!entry && (
     <div class="nexus-card" style="border-left:3px solid var(--aura-color-primary)">
       <div class="nexus-empty" style="padding:36px 16px">
-        <p>App <code>{id}</code> not found in the catalog.</p>
+        {catalogDown
+          ? <p>The store is still loading its sources. <a href={`/app?id=${encodeURIComponent(id)}`} data-astro-reload>Try again</a></p>
+          : <p>App <code>{id}</code> not found in the catalog.</p>}
       </div>
     </div>
   )}

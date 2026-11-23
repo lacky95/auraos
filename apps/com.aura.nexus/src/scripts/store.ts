@@ -394,7 +394,12 @@ if (!window.__nexusStore) {
       window.__nexusNavDepth = Math.max(0, (window.__nexusNavDepth ?? 0) + (e.direction === 'back' ? -1 : 1));
     }
   });
-  document.addEventListener('astro:page-load', () => { measureBar(); wireIdDialog(); renderAll(); showUpdates(); void syncNow(); });
+  document.addEventListener('astro:before-preparation', () => document.documentElement.classList.add('is-navigating'));
+  document.addEventListener('astro:page-load', () => {
+    document.documentElement.classList.remove('is-navigating');
+    measureBar(); wireIdDialog(); renderAll(); showUpdates(); void syncNow();
+  });
+  document.addEventListener('nexus:catalog-swapped', () => { measureBar(); renderAll(); showUpdates(); void syncNow(); });
 
   measureBar();
   wireIdDialog();

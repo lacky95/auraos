@@ -1,0 +1,18 @@
+---
+/** The Browse content alone, for scripts/catalog.ts. Waits for the sources. */
+import BrowseContent from '../../components/BrowseContent.astro';
+import { shellGet } from '../../lib/shellClient';
+import type { Catalog } from '../../lib/catalog';
+
+export const partial = true;
+
+const refresh = new URL(Astro.request.url).searchParams.get('refresh') === '1';
+
+let doc: Catalog;
+try {
+  doc = await shellGet<Catalog>(`/api/nexus${refresh ? '?refresh=1' : ''}`, 180_000);
+} catch (err) {
+  return new Response((err as Error).message, { status: 502 });
+}
+---
+<BrowseContent doc={doc} />

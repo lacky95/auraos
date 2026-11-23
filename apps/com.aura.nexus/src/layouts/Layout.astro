@@ -854,11 +854,48 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
       @keyframes sheet-in { from { transform: translateY(100%); } to { transform: none; } }
       @keyframes sheet-in-centred { from { transform: translate(-50%, 100%); } to { transform: translateX(-50%); } }
 
+      /* ── Loading: skeleton cards, catalog status, page-change bar ── */
+      .catalog-status {
+        display: flex; align-items: center; gap: 10px; margin: 0 0 12px; padding: 8px 12px;
+        font-size: 0.76rem; color: var(--aura-color-text-dim);
+        background: var(--aura-color-surface); border: 1px solid var(--aura-color-border);
+      }
+      .catalog-status[hidden] { display: none; }
+      .catalog-status .btn-ghost { margin-left: auto; }
+      .catalog-spinner {
+        flex: 0 0 auto; width: 12px; height: 12px; border-radius: 50%;
+        border: 2px solid var(--aura-color-border); border-top-color: var(--aura-color-primary);
+        animation: nx-spin 0.8s linear infinite;
+      }
+      .catalog[data-state='ready'] .catalog-spinner,
+      .catalog[data-state='error'] .catalog-spinner,
+      .catalog[data-state='error'] .catalog-skeleton { display: none; }
+      .catalog[data-state='refreshing'] [data-list] { opacity: 0.72; transition: opacity 0.15s; }
+      .skel-card {
+        display: flex; gap: 12px; padding: 12px; min-height: 118px;
+        background: var(--aura-color-surface); border: 1px solid var(--aura-color-border);
+      }
+      .skel-lines { flex: 1; display: flex; flex-direction: column; gap: 8px; padding-top: 2px; }
+      .skel { display: block; background: var(--aura-color-border); animation: nx-pulse 1.3s ease-in-out infinite; }
+      .skel-glyph { flex: 0 0 auto; width: 44px; height: 44px; }
+      .skel-line { height: 9px; }
+      /* Long lists: the browser skips laying out cards that are off screen. */
+      .app-list > .app-card { content-visibility: auto; contain-intrinsic-size: auto 150px; }
+      html.is-navigating::before {
+        content: ''; position: fixed; z-index: 9999; inset: 0 auto auto 0; width: 100%; height: 2px;
+        background: var(--aura-color-primary); transform-origin: left;
+        animation: nx-nav 1.6s cubic-bezier(0.1, 0.7, 0.2, 1) 0.12s both;
+      }
+      @keyframes nx-spin { to { transform: rotate(360deg); } }
+      @keyframes nx-pulse { 50% { opacity: 0.45; } }
+      @keyframes nx-nav { from { transform: scaleX(0); } to { transform: scaleX(0.9); } }
+
       /* Page transitions: a quick fade; none for reduced motion. */
       ::view-transition-old(root), ::view-transition-new(root) { animation-duration: 0.12s; }
       @media (prefers-reduced-motion: reduce) {
         ::view-transition-old(root), ::view-transition-new(root) { animation: none; }
-        .ic-menu, .nxs-list, .filter-sheet:popover-open { animation: none; }
+        .ic-menu, .nxs-list, .filter-sheet:popover-open, .skel { animation: none; }
+        .catalog-spinner { animation-duration: 2.4s; }
       }
     </style>
 

@@ -21,8 +21,6 @@
  * State lives in the URL (?q=&status=&cat=&src=&sort=&view=) so Back and
  * links restore it; view + sort are also remembered per list.
  */
-import { navigate } from 'astro:transitions/client';
-
 /** <nx-select> (Select.astro): a <select> drawn in HTML — .value + change. */
 type ValueEl = HTMLElement & { value: string };
 
@@ -199,13 +197,6 @@ function init(): void {
     apply();
     if (!b.closest('[popover]')) q?.focus();
   }, { signal }));
-  // Refresh re-fetches every source but keeps what the user is looking at.
-  root.querySelectorAll<HTMLAnchorElement>('[data-refresh]').forEach((a) => a.addEventListener('click', (ev) => {
-    ev.preventDefault();
-    const u = new URL(location.href);
-    u.searchParams.set('refresh', '1');
-    void navigate(u.href);
-  }, { signal }));
   // A card's install state changed (store.ts re-tags facets): re-filter.
   document.addEventListener('nexus:facets', () => apply(false), { signal });
   document.addEventListener('keydown', (ev) => {
@@ -221,4 +212,5 @@ function init(): void {
 }
 
 document.addEventListener('astro:page-load', init);
+document.addEventListener('nexus:catalog-swapped', init);
 document.addEventListener('astro:before-swap', () => abort?.abort());

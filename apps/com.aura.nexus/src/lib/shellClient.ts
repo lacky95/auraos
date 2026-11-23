@@ -3,9 +3,9 @@
  *  for outside-OS dev runs. */
 const OS_API = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
 
-export async function shellGet<T>(path: string): Promise<T> {
+export async function shellGet<T>(path: string, timeoutMs = 8_000): Promise<T> {
   const res = await fetch(`${OS_API}${path}`, {
-    signal: AbortSignal.timeout(8_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`${path} → HTTP ${res.status}`);
   return res.json() as Promise<T>;

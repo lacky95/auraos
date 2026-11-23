@@ -1,0 +1,15 @@
+---
+/** Placeholder cards while the catalog loads; same grid as the real list. */
+---
+<div class="app-list view-grid catalog-skeleton" aria-hidden="true">
+  {Array.from({ length: 8 }, () => (
+    <div class="skel-card">
+      <span class="skel skel-glyph"></span>
+      <span class="skel-lines">
+        <span class="skel skel-line" style="width:55%"></span>
+        <span class="skel skel-line" style="width:80%"></span>
+        <span class="skel skel-line" style="width:95%"></span>
+      </span>
+    </div>
+  ))}
+</div>
