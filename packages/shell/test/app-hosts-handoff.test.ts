@@ -561,16 +561,105 @@ const callRoute = (headers: Record<string, string>, body: unknown) => handoffRou
   clientAddress: '127.0.0.1',
 } as never) as Promise<Response>;
 
+const SHELL = `http://${BASE}`;
+const routeBody = (over: Record<string, unknown> = {}) => ({
+  appId: 'io.acme.notes', instanceId: 'io.acme.notes', activityId: 'io.acme.notes#a1', returnPath: '/page?_aura_activity=x', ...over,
+});
+const G = globalThis as unknown as Record<string | symbol, unknown>;
+const SERVICES = Symbol.for('aura.appHosts.services');
+const AUTH = Symbol.for('aura.appHosts.auth');
+const MANAGER = '__aura_app_manager__';
+
+async function withRouteWorld(run: () => Promise<void>) {
+  const saved = [G[SERVICES], G[AUTH], G[MANAGER]];
+  const instances: Record<string, unknown> = {
+    'io.acme.notes': { instanceId: 'io.acme.notes', appId: 'io.acme.notes', inPool: false },
+    'io.acme.notes-pool': { instanceId: 'io.acme.notes-pool', appId: 'io.acme.notes', inPool: true },
+    'io.acme.notes-free': { instanceId: 'io.acme.notes-free', appId: 'io.acme.notes', inPool: false },
+    'io.other.app': { instanceId: 'io.other.app', appId: 'io.other.app', inPool: false },
+  };
+  const activities: Record<string, unknown> = {
+    'io.acme.notes#a1': { activityId: 'io.acme.notes#a1', parentInstanceId: 'io.acme.notes', appId: 'io.acme.notes' },
+    'io.other.app#a1': { activityId: 'io.other.app#a1', parentInstanceId: 'io.other.app', appId: 'io.other.app' },
+  };
+  G[MANAGER] = {
+    getManifest: (id: string) => (id === 'io.acme.notes' || id === 'io.other.app' ? { id, componentType: 'activity' } : undefined),
+    getInstance: (id: string) => instances[id],
+    getActivity: (id: string) => activities[id],
+  };
+  G[AUTH] = auth;
+  G[SERVICES] = {
+    ...svc,
+    registry: {
+      ...registry,
+      listForApp: async (appId: string) => (appId === 'io.acme.notes' ? [labels['notes1234'].record] : []),
+    },
+  };
+  try { await run(); } finally {
+    [G[SERVICES], G[AUTH], G[MANAGER]] = saved;
+    if (saved[0] === undefined) delete G[SERVICES];
+    if (saved[1] === undefined) delete G[AUTH];
+    if (saved[2] === undefined) delete G[MANAGER];
+  }
+}
+
 test('the handoff route refuses a sibling origin', async () => {
   for (const headers of [
-    { origin: ORIGIN }, { origin: `http://${BASE}`, 'sec-fetch-site': 'same-site' }, {},
+    { origin: ORIGIN }, { origin: SHELL, 'sec-fetch-site': 'same-site' }, {},
   ] as Array<Record<string, string>>) {
-    assert.equal((await callRoute(headers, { label: 'notes1234' })).status, 403);
+    assert.equal((await callRoute(headers, routeBody())).status, 403);
   }
 });
 
-test('the handoff route refuses an open redirect before any lookup', async () => {
-  const r = await callRoute({ origin: `http://${BASE}` }, { label: 'notes1234', returnPath: '//evil.example' });
-  assert.equal(r.status, 400);
+test('the handoff route refuses an open redirect and malformed ids before any lookup', async () => {
+  for (const over of [{ returnPath: '//evil.example' }, { appId: 7 }, { instanceId: '../x' }, { activityId: 'a b' }]) {
+    assert.equal((await callRoute({ origin: SHELL }, routeBody(over))).status, 400);
+  }
 });
 
+test('the handoff route answers {code, origin, slot}, and the code signs in', async () => {
+  await withRouteWorld(async () => {
+    const r = await callRoute({ origin: SHELL }, routeBody());
+    assert.equal(r.status, 200);
+    const out = await r.json() as { code: string; origin: string; slot: number };
+    assert.deepEqual(Object.keys(out).sort(), ['code', 'origin', 'slot']);
+    assert.equal(out.origin, ORIGIN);
+    assert.equal(out.slot, 1);
+    liveSessions.add('login-dark');
+    const signed = await get(HOST, `/_aura/handoff?code=${out.code}`);
+    assert.equal(signed.status, 303);
+    assert.equal(signed.headers.location, '/page?_aura_activity=x');
+  });
+});
+
+test('the handoff route takes a new code on every call', async () => {
+  await withRouteWorld(async () => {
+    const a = await (await callRoute({ origin: SHELL }, routeBody())).json() as { code: string };
+    const b = await (await callRoute({ origin: SHELL }, routeBody())).json() as { code: string };
+    assert.notEqual(a.code, b.code);
+  });
+});
+
+test('the handoff route checks every id in the body', async () => {
+  await withRouteWorld(async () => {
+    const status = async (over: Record<string, unknown>) => (await callRoute({ origin: SHELL }, routeBody(over))).status;
+    assert.equal(await status({ appId: 'io.missing.app' }), 404);
+    assert.equal(await status({ instanceId: 'io.missing' }), 404);
+    assert.equal(await status({ instanceId: 'io.other.app', activityId: null }), 404);   // another app's instance
+    assert.equal(await status({ instanceId: 'io.acme.notes-pool', activityId: null }), 404);   // warm pool
+    assert.equal(await status({ activityId: 'io.other.app#a1' }), 404);   // another app's window
+    assert.equal(await status({ activityId: 'io.acme.notes#a9' }), 404);
+    assert.equal(await status({ instanceId: 'io.acme.notes-free', activityId: null }), 409);   // running, no slot
+    assert.equal(await status({ appId: 'io.other.app', instanceId: 'io.other.app', activityId: null }), 409);   // proxy route
+  });
+});
+
+test('the handoff route refuses a slot whose label was retired', async () => {
+  await withRouteWorld(async () => {
+    const held = labels['notes1234'];
+    const world = G[SERVICES] as { registry: Record<string, unknown> };
+    world.registry['listForApp'] = async () => [held.record];
+    world.registry['resolveLabel'] = async () => ({ status: 'retired', tombstone: {} });
+    assert.equal((await callRoute({ origin: SHELL }, routeBody())).status, 410);
+  });
+});
