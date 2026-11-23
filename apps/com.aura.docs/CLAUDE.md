@@ -116,6 +116,22 @@ can't proxy through. Three things change versus the default Astro path:
    [ ! -d node_modules ] && npm install
    exec npx next dev --hostname 0.0.0.0 --port "${APP_PORT:-4001}"
    ```
+   **This app's real `entrypoint.sh` does NOT run `next dev`** in normal
+   operation. A long-lived Next dev server grows without bound (11 GB on
+   2026-11-19, host in swap), and with `backgroundService: true` this app
+   lives as long as the shell. So the entrypoint execs
+   `fumadocs-site/serve.mjs`: a small supervisor that runs `next build`
+   when sources changed (stamp in `.next/aura-build.json`), serves with
+   `next start` (heap capped via `DOCS_HEAP_MB`, default 768), watches
+   `content/`, `app/`, `lib/` + the config files, and on an edit rebuilds
+   into `.next-staging` while the old build keeps serving, then swaps and
+   restarts. A placeholder answers `/api/lifecycle/health` with the identity
+   body during the first build and the swap, so the spawn gate never times
+   out. Edits show up after one build (~1 min), not instantly. For heavy
+   layout work: `touch apps/com.aura.docs/.dev-mode && aura restart app
+   com.aura.docs` runs `next dev --turbo` again — remove the marker and
+   restart when done. Pre-warm a build outside the sandbox with
+   `node serve.mjs --build-only` (env `APP_INSTANCE_ID` decides basePath).
 2. **You serve the lifecycle endpoints yourself** — same contract as
    Astro apps (POST `/api/lifecycle/{onCreate,onStart,onResume,onPause,
    onStop,onDestroy}` returning `{ ok: true }`, plus GET `/api/lifecycle/health`

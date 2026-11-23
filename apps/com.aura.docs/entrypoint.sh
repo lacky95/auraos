@@ -2,15 +2,25 @@
 # Aura raw-runtime entrypoint for com.aura.docs.
 #
 # The OS spawns this script with $APP_PORT (the proxy upstream port),
-# $APP_ID, $APP_INSTANCE_ID, $OS_API_BASE pre-set by the runner. We exec
-# Next.js's dev server directly on $APP_PORT — no Astro layer in between.
+# $APP_ID, $APP_INSTANCE_ID, $OS_API_BASE pre-set by the runner.
+#
+# Default: PRODUCTION mode via fumadocs-site/serve.mjs — `next build` once
+# (only when sources changed), then `next start` in a small flat process.
+# serve.mjs watches content/ and app/ and rebuilds + restarts on edits, so
+# docs stay editable; a change shows up after one build (~30-60 s).
+#
+# Dev mode (`next dev --turbo`, instant HMR) for heavy layout work:
+#   touch /workspace/apps/com.aura.docs/.dev-mode && aura restart app com.aura.docs
+# Remove the marker and restart to go back. Don't leave it on: a long-lived
+# Next dev server grows without bound (11 GB on 2026-11-19).
 #
 # Next.js's basePath is derived from $APP_INSTANCE_ID at startup (see
 # fumadocs-site/next.config.mjs) so multi-instance shifts the prefix
 # without a rebuild. The lifecycle endpoints + identity headers live
 # inside the Next app via @aura/app-sdk/runtime/next.
 set -e
-cd /workspace/apps/com.aura.docs/fumadocs-site
+APP_DIR=/workspace/apps/com.aura.docs
+cd "$APP_DIR/fumadocs-site"
 
 # Install deps lazily on first spawn — mirrors how the synthesised Astro
 # entrypoint behaves so a fresh checkout doesn't require a manual install.
@@ -19,9 +29,10 @@ if [ ! -d node_modules ]; then
   npm install --prefer-offline 2>&1 || npm install
 fi
 
-echo "[${APP_ID:-com.aura.docs}] Starting Next.js (turbopack) on port ${APP_PORT:-4001} (basePath=/api/proxy/${APP_INSTANCE_ID:-com.aura.docs})"
-# --turbo: Rust-based dev bundler (stable in Next 15). On fumadocs the cold
-# webpack compile for /docs/[[...slug]] is ~1.1 s; Turbopack drops it
-# typically to a few hundred ms because it skips the module-graph rebuild
-# webpack does each first-hit. HMR semantics are unchanged.
-exec npx next dev --turbo --hostname 0.0.0.0 --port "${APP_PORT:-4001}"
+if [ "${DOCS_MODE:-}" = "dev" ] || [ -e "$APP_DIR/.dev-mode" ]; then
+  echo "[${APP_ID:-com.aura.docs}] DEV mode: Next.js (turbopack) on port ${APP_PORT:-4001} (basePath=/api/proxy/${APP_INSTANCE_ID:-com.aura.docs})"
+  exec npx next dev --turbo --hostname 0.0.0.0 --port "${APP_PORT:-4001}"
+fi
+
+echo "[${APP_ID:-com.aura.docs}] PROD mode: serve.mjs on port ${APP_PORT:-4001} (basePath=/api/proxy/${APP_INSTANCE_ID:-com.aura.docs})"
+exec node serve.mjs
