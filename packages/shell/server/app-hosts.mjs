@@ -15,19 +15,33 @@
  * The claim is synchronous: it reads a host index rebuilt from the shell's own
  * /api/apps (the same source the WS proxy uses, see attach.mjs).
  *
+ * Two paths share this file while apps migrate:
+ *   `frameRoute: proxy` (the default) keeps the manifest-host behavior above.
+ *   `frameRoute: host` resolves the exact label through the App Host registry.
+ *   Nothing reaches such an app without a valid app cookie from the one-time
+ *   handoff, and `/_aura/*` is answered here, never by the app.
+ *
  * Env:
  *   AURA_TRUSTED_PROXIES  comma-separated client addresses whose
  *                         X-Forwarded-Proto/-Host/-For are believed (the edge
- *                         in front of a custom domain). Unset = believe any:
- *                         a forged header only changes the forger's own reply.
+ *                         in front of a custom domain). See host-policy.mjs.
+ *                         On the `proxy` path, unset still believes any.
+ *   AURA_HOST_POLICY      `report` (default) or `enforce`, see host-policy.mjs.
  */
 import http from 'node:http';
 import net from 'node:net';
-import { parseAppHost } from '@aura/core/host-rules';
 import {
-  internalServiceHeaders, observeHttpSurface, reportSurface, surfaceIdentity,
+  AURA_RESERVED_PATHS, appHostCookieName, isAuraReservedPath, parseAppHost,
+} from '@aura/core/host-rules';
+import {
+  SESSION_COOKIES, countSurfaceEvent, internalServiceHeaders, observeHttpSurface, reportSurface, surfaceIdentity,
 } from './access-bridge.mjs';
-import { stripShellCredentials } from './shell-credentials.mjs';
+import { appHostAuth, safeReturnPath } from './app-host-auth.mjs';
+import { handleAppGateway, handleAppGatewayUpgrade, serveAppRuntime } from './app-gateway.mjs';
+import { classifyHost, hostPolicy, isTrustedProxy, originOf, requestEdge } from './host-policy.mjs';
+import { stripCookies, stripShellCredentials } from './shell-credentials.mjs';
+
+export { classifyHost } from './host-policy.mjs';
 
 /** `name` of a `{name}--{base}` Host header, or null. */
 export function appHostName(host) {
@@ -44,21 +58,30 @@ const HOP_BY_HOP = new Set([
 const INDEX_TTL_MS = 2000;
 const START_RETRY_MS = 15_000;
 
-const trusted = (process.env.AURA_TRUSTED_PROXIES ?? '')
-  .split(',').map((s) => s.trim().replace(/^::ffff:/, '')).filter(Boolean);
-const isTrusted = (addr) => trusted.length === 0 || trusted.includes(String(addr ?? '').replace(/^::ffff:/, ''));
+// PHASE2-CUTOVER: the `proxy` path believes any peer when no proxy is configured.
+const legacyTrusted = (addr) => !(process.env.AURA_TRUSTED_PROXIES ?? '').split(',').some((s) => s.trim())
+  || isTrustedProxy(addr);
 
+/** Never sent to an app, and an app may not set them. */
+const AURA_COOKIES = new Set([appHostCookieName(true), appHostCookieName(false), ...SESSION_COOKIES]);
+const AURA_BEARER = /(?:^|,)\s*Bearer\s+(?:aura-(?:sess1|admin1)\.|aura1\.|aura_k1_)/i;
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+const EXACT_ORIGIN_RE = /^https?:\/\/[a-z0-9.-]+(?::\d{1,5})?$/;
+
+const isLive = (i) => i.port != null && (i.state === 'resumed' || i.state === 'started');
+
+// PHASE2-CUTOVER: `frameRoute: host` routes by slot assignment and never to a pool member.
 function liveInstance(app) {
-  const live = (app.instances ?? []).filter((i) => i.port != null && (i.state === 'resumed' || i.state === 'started'));
+  const live = (app.instances ?? []).filter(isLive);
   return live.find((i) => !i.inPool) ?? live[0] ?? null;
 }
 
 /** X-Forwarded-* for the upstream, from what the client (or a trusted edge) said. */
-function forwardedHeaders(req) {
-  const fromEdge = isTrusted(req.socket?.remoteAddress);
-  const host = (fromEdge && req.headers['x-forwarded-host']) || req.headers.host || '';
-  const protoIn = fromEdge ? String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim() : '';
-  const proto = protoIn === 'https' || protoIn === 'http' ? protoIn : (req.socket?.encrypted ? 'https' : 'http');
+function forwardedHeaders(req, edge = null) {
+  const fromEdge = edge ? edge.fromEdge : legacyTrusted(req.socket?.remoteAddress);
+  const host = edge ? edge.host : ((fromEdge && req.headers['x-forwarded-host']) || req.headers.host || '');
+  const protoIn = fromEdge && !edge ? String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim() : '';
+  const proto = edge ? edge.scheme : (protoIn === 'https' || protoIn === 'http' ? protoIn : (req.socket?.encrypted ? 'https' : 'http'));
   const port = String(host).match(/:(\d+)$/)?.[1] ?? (proto === 'https' ? '443' : '80');
   const priorFor = fromEdge ? req.headers['x-forwarded-for'] : undefined;
   const client = String(req.socket?.remoteAddress ?? '').replace(/^::ffff:/, '');
@@ -85,22 +108,91 @@ function reply(res, status, title, body, opts = {}) {
     'content-type': 'text/html; charset=utf-8',
     'cache-control': 'no-store',
     ...(opts.refresh ? { 'retry-after': String(opts.refresh) } : {}),
+    ...opts.headers,
   });
   res.end(html);
+}
+
+// ── frameRoute: host ────────────────────────────────────────────────────────
+
+/** Request headers for the app, as a flat list: no Aura credential or identity claim. */
+function appRequestHeaders(req, surface, { keepUpgrade = false } = {}) {
+  const raw = stripShellCredentials(req.rawHeaders, surface);
+  const out = [];
+  for (let i = 0; i + 1 < raw.length; i += 2) {
+    const name = String(raw[i]).toLowerCase();
+    let value = raw[i + 1];
+    if (!keepUpgrade && HOP_BY_HOP.has(name)) continue;
+    if (name.startsWith('x-aura-') || name.startsWith('x-forwarded-') || name === 'forwarded') continue;
+    if (name === 'authorization' && AURA_BEARER.test(String(value))) continue;
+    if (name === 'cookie') {
+      value = stripCookies(value, AURA_COOKIES);
+      if (value === null) continue;
+    }
+    out.push(raw[i], value);
+  }
+  return out;
+}
+
+const setCookieName = (value) => String(value).split('=', 1)[0].trim().toLowerCase();
+
+/** Response headers for the browser: the shell decides who may frame this origin. */
+function appResponseHeaders(rawHeaders, frameAncestors) {
+  const out = [];
+  for (let i = 0; i + 1 < rawHeaders.length; i += 2) {
+    const name = rawHeaders[i].toLowerCase();
+    if (HOP_BY_HOP.has(name) || name === 'x-frame-options' || name.startsWith('x-aura-')) continue;
+    if (name === 'set-cookie' && AURA_COOKIES.has(setCookieName(rawHeaders[i + 1]))) continue;
+    out.push(rawHeaders[i], rawHeaders[i + 1]);
+  }
+  // A second policy can only narrow the app's own.
+  out.push('content-security-policy', `frame-ancestors ${frameAncestors.join(' ')}`);
+  return out;
+}
+
+/**
+ * Exact Origin for a request that a same-site sibling could otherwise send
+ * with this app's cookie. A same-origin EventSource or GET sends no Origin, so
+ * there Sec-Fetch-Site decides.
+ */
+function browserRequestAllowed(req, edge, path) {
+  const origin = req.headers.origin;
+  const stream = String(req.headers.accept ?? '').includes('text/event-stream') || path.startsWith('/socket.io/');
+  if (SAFE_METHODS.has(req.method) && !stream) return true;
+  if (origin !== undefined) return origin === edge.origin;
+  const site = req.headers['sec-fetch-site'];
+  return site === undefined || site === 'same-origin' || site === 'none';
 }
 
 // ── the router ──────────────────────────────────────────────────────────────
 
 /**
- * @param {{ appsList: (opts?: { fresh?: boolean }) => Promise<any[]>, shellPort?: string, log?: (...a: any[]) => void }} deps
+ * @param {{
+ *   appsList: (opts?: { fresh?: boolean }) => Promise<any[]>,
+ *   shellPort?: string,
+ *   log?: (...a: any[]) => void,
+ *   services?: () => Promise<any>,
+ *   auth?: any,
+ *   embedAncestors?: (ctx: { record: any, slot: any, session: any, url: string }) => string[],
+ *   env?: Record<string, string | undefined>,
+ * }} deps
  *   `appsList` = the shell's /api/apps (manifest + instances per app).
+ *   `services` = the App Host registry and session check; null keeps every
+ *   request on the `proxy` path.
+ *   `embedAncestors` = extra exact origins allowed to frame an `embed=1`
+ *   document (5.16). Empty until the embed grant exists, so nothing can embed.
  */
-export function createAppHostRouter({ appsList, shellPort = process.env.SHELL_PORT ?? '3000', log = () => {} }) {
+export function createAppHostRouter({
+  appsList, shellPort = process.env.SHELL_PORT ?? '3000', log = () => {},
+  services = async () => null, auth = null, embedAncestors = () => [], env = process.env,
+}) {
   /** name → appId; null until the first load. */
   let index = null;
   let indexAt = 0;
   let loading = null;
   const startAsked = new Map();   // appId → when we last asked the shell to start it
+  const slotStarts = new Map();   // installation and scope → the slot-1 start in flight
+  const hostAuth = () => (auth ??= appHostAuth());
 
   function load(fresh = false) {
     loading ??= appsList({ fresh }).then((apps) => {
@@ -160,6 +252,7 @@ export function createAppHostRouter({ appsList, shellPort = process.env.SHELL_PO
     return { 'x-aura-app-id': t.appId, 'x-aura-instance-id': t.instanceId };
   }
 
+  // PHASE2-CUTOVER: the open manifest-host path (this and handleUpgrade) ends with `frameRoute: proxy`.
   async function handleRequest(name, req, res) {
     const identity = surfaceIdentity(req.headers);
     const method = req.method;
@@ -179,7 +272,16 @@ export function createAppHostRouter({ appsList, shellPort = process.env.SHELL_PO
     for (const [k, v] of Object.entries(req.headers)) if (!HOP_BY_HOP.has(k)) headers[k] = v;
     stripShellCredentials(headers, 'app-hosts-http');
     Object.assign(headers, forwardedHeaders(req), identityHeaders(t));
+    pipeHttp(name, t, req, res, headers, (raw) => {
+      const out = [];
+      for (let i = 0; i < raw.length; i += 2) {
+        if (!HOP_BY_HOP.has(raw[i].toLowerCase())) out.push(raw[i], raw[i + 1]);
+      }
+      return out;
+    });
+  }
 
+  function pipeHttp(name, t, req, res, headers, responseHeaders) {
     const up = http.request({ host: t.host, port: t.port, method: req.method, path: req.url, headers }, (ures) => {
       // An app server that answers with another app's identity is a stale port.
       const declared = ures.headers['x-aura-app-id'];
@@ -188,12 +290,7 @@ export function createAppHostRouter({ appsList, shellPort = process.env.SHELL_PO
         log('identity-mismatch', name, declared);
         return reply(res, 502, `${t.appName} is restarting`, 'This page reloads by itself.', { refresh: 2 });
       }
-      const out = [];
-      for (let i = 0; i < ures.rawHeaders.length; i += 2) {
-        const k = ures.rawHeaders[i];
-        if (!HOP_BY_HOP.has(k.toLowerCase())) out.push(k, ures.rawHeaders[i + 1]);
-      }
-      res.writeHead(ures.statusCode ?? 502, ures.statusMessage, out);
+      res.writeHead(ures.statusCode ?? 502, ures.statusMessage, responseHeaders(ures.rawHeaders));
       ures.pipe(res);
     });
     up.on('error', (err) => {
@@ -236,6 +333,10 @@ export function createAppHostRouter({ appsList, shellPort = process.env.SHELL_PO
       if (!(rawHeaders[i].toLowerCase() in extra)) lines.push(`${rawHeaders[i]}: ${rawHeaders[i + 1]}`);
     }
     for (const [k, v] of Object.entries(extra)) lines.push(`${k}: ${v}`);
+    pipeUpgrade(name, t, socket, head, lines, reportUpgrade, fail);
+  }
+
+  function pipeUpgrade(name, t, socket, head, lines, reportUpgrade, fail) {
     const upstream = net.connect(t.port, t.host, () => {
       reportUpgrade(101);
       upstream.write(lines.join('\r\n') + '\r\n\r\n');
@@ -251,6 +352,227 @@ export function createAppHostRouter({ appsList, shellPort = process.env.SHELL_PO
     upstream.on('close', drop);
   }
 
+  // ── frameRoute: host ──────────────────────────────────────────────────────
+
+  /**
+   * Where a `{label}--…` request goes. Throws when the registry can't answer,
+   * and the caller refuses the request: an unreachable registry must not put a
+   * `host` app back on the open `proxy` path.
+   */
+  async function decide(host, name) {
+    // The first load also boots the KV store the registry reads.
+    if (!index) await load().catch(() => {});
+    const svc = await services();
+    if (!svc) return { to: 'proxy' };
+    if (!index) throw new Error('app list unavailable');
+    if (host.kind === 'app') {
+      const found = await svc.registry.resolveLabel(host.label);
+      if (found.status === 'retired') return { to: 'gone' };
+      if (found.status === 'reserved') return { to: 'missing' };
+      if (found.status === 'active' && await svc.frameRoute(found.record.appId) === 'host') {
+        return { to: 'host', svc, record: found.record, slot: found.slot, label: host.label, base: host.base };
+      }
+    }
+    // A `host` app's manifest names carry no handoff, so they can't stay open.
+    const declaring = name ? index?.get(name) : null;
+    if (declaring && await svc.frameRoute(declaring) === 'host') return { to: 'denied' };
+    if (!declaring && hostPolicy(env) === 'enforce') return { to: 'missing' };
+    return { to: 'proxy' };
+  }
+
+  /** The verified app cookie's payload, or null. */
+  async function appSession(route, req, edge) {
+    const payload = hostAuth().readCookie(req.headers.cookie, appHostCookieName(edge.scheme === 'https'), {
+      aud: edge.origin, label: route.label, installationId: route.record.installationId,
+    });
+    if (!payload) return null;
+    return (await route.svc.sessionLive(payload.sid)) ? payload : null;
+  }
+
+  /** Asks for a start, once at a time. `start()` claims the slot in the lifecycle. */
+  function startSlotOne({ record }) {
+    const scope = record.instanceScope.kind === 'user' ? `user:${record.instanceScope.userId}` : 'shared';
+    const key = `${record.installationId}\0${scope}`;
+    if (slotStarts.has(key) || Date.now() - (startAsked.get(key) ?? 0) <= START_RETRY_MS) return;
+    startAsked.set(key, Date.now());
+    log('start', record.appId);
+    const startUrl = `http://127.0.0.1:${shellPort}/api/apps/${encodeURIComponent(record.appId)}/start`;
+    const flight = (async () => {
+      const r = await fetch(startUrl, { method: 'POST', headers: internalServiceHeaders(startUrl), signal: AbortSignal.timeout(30_000) });
+      if (!r.ok) throw new Error(`start ${r.status}`);
+    })().catch((err) => log('start-failed', record.appId, String(err)))
+      .finally(() => slotStarts.delete(key));
+    slotStarts.set(key, flight);
+  }
+
+  /**
+   * The assigned live instance, or {missing}/{starting}/{notReady}. A running
+   * instance without this slot gets no traffic. Only slot 1 asks for a start.
+   */
+  async function slotTarget(route) {
+    const { record, slot } = route;
+    const find = (apps) => apps.find((a) => a.manifest?.id === record.appId);
+    const assigned = (app) => (app?.instances ?? []).find((i) => i.instanceId === slot.instanceId && !i.inPool && isLive(i));
+    let app = find(await load());
+    if (!app || (slot.instanceId && !assigned(app))) app = find(await load(true));
+    if (!app || app.manifest.componentType === 'service') return { missing: true };
+    const appName = app.manifest.name ?? record.appId;
+    const inst = slot.instanceId ? assigned(app) : null;
+    if (inst) {
+      return {
+        host: inst.sandbox === 'container' ? `aura-${inst.instanceId}` : '127.0.0.1',
+        port: inst.port, appId: record.appId, instanceId: inst.instanceId, sidecar: false, appName,
+      };
+    }
+    if (slot.slot !== 1) return { notReady: true, appName };
+    startSlotOne(route);
+    return { starting: true, appName };
+  }
+
+  function frameAncestors(route, edge, session, url) {
+    const ancestors = [originOf(edge.scheme, route.base)];
+    if (session && new URL(url, 'http://h').searchParams.get('embed') === '1') {
+      const extra = embedAncestors({ record: route.record, slot: route.slot, session, url });
+      for (const o of extra) if (EXACT_ORIGIN_RE.test(o) && !ancestors.includes(o)) ancestors.push(o);
+    }
+    return ancestors;
+  }
+
+  function redeemHandoff(route, req, res, edge, pageHeaders) {
+    const refuse = () => reply(res, 403, 'This link has expired', 'Open the app from the AuraOS desktop.', { headers: pageHeaders });
+    if (req.method !== 'GET') return refuse();
+    let code;
+    try { code = new URL(req.url, 'http://h').searchParams.get('code'); } catch { return refuse(); }
+    const entry = hostAuth().consumeCode(code, { aud: edge.origin, label: route.label });
+    if (!entry || entry.claim.installationId !== route.record.installationId || entry.claim.slot !== route.slot.slot) return refuse();
+    const location = safeReturnPath(entry.claim.returnPath);
+    if (!location) return refuse();
+    return route.svc.sessionLive(entry.claim.sid).then((live) => {
+      if (!live) return refuse();
+      const secure = edge.scheme === 'https';
+      const { value, maxAgeSeconds } = hostAuth().sealCookie(entry);
+      res.writeHead(303, {
+        location,
+        'set-cookie': `${appHostCookieName(secure)}=${value}; Path=/; Max-Age=${maxAgeSeconds}; HttpOnly${secure ? '; Secure' : ''}; SameSite=Lax`,
+        'cache-control': 'no-store',
+        'referrer-policy': 'no-referrer',
+      });
+      res.end();
+    });
+  }
+
+  async function serveHostRequest(route, req, res, edge) {
+    const url = String(req.url ?? '');
+    const pageHeaders = {
+      'content-security-policy': `frame-ancestors ${originOf(edge.scheme, route.base)}`,
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+    };
+    const page = (status, title, body, opts = {}) => reply(res, status, title, body, { ...opts, headers: pageHeaders });
+    // Absolute-form targets would hide the path from the reserved check.
+    if (!url.startsWith('/')) return page(400, 'Bad request', 'This request can\'t be served.');
+    const path = url.split(/[?#]/, 1)[0];
+    if (path === AURA_RESERVED_PATHS.handoff) return redeemHandoff(route, req, res, edge, pageHeaders);
+    if (path === AURA_RESERVED_PATHS.hostProbe) {
+      res.writeHead(204, { 'cache-control': 'no-store', 'access-control-allow-origin': '*' });
+      return res.end();
+    }
+
+    const session = await appSession(route, req, edge);
+    if (!session) return page(401, 'Open this app from AuraOS', 'This address needs a sign-in from the AuraOS desktop.');
+    if (!browserRequestAllowed(req, edge, path)) return page(403, 'Request refused', 'This request came from another origin.');
+
+    if (isAuraReservedPath(url)) {
+      if (path === AURA_RESERVED_PATHS.runtime) return serveAppRuntime(req, res, { record: route.record, slot: route.slot });
+      if (path.startsWith(AURA_RESERVED_PATHS.os)) return handleAppGateway(req, res, { record: route.record, slot: route.slot, session });
+      return page(404, 'Not found', 'This path is reserved by AuraOS.');
+    }
+
+    const t = await slotTarget(route);
+    if (t.missing) return page(404, 'No app here', 'This app has no page at this address.');
+    if (t.notReady) return page(503, `${t.appName} is not ready`, 'No running instance holds this address. Open the app again from the AuraOS desktop.');
+    if (t.starting) return page(503, `Starting ${t.appName}…`, 'This page reloads by itself when it is up.', { refresh: 2 });
+    const headers = appRequestHeaders(req, 'app-hosts-http');
+    for (const [k, v] of Object.entries({ ...forwardedHeaders(req, edge), ...identityHeaders(t) })) headers.push(k, v);
+    const ancestors = frameAncestors(route, edge, session, url);
+    pipeHttp(route.label, t, req, res, headers, (raw) => appResponseHeaders(raw, ancestors));
+  }
+
+  async function serveHostUpgrade(route, req, socket, head, edge) {
+    const identity = surfaceIdentity(req.headers);
+    let reported = false;
+    const reportUpgrade = (status) => {
+      if (reported) return;
+      reported = true;
+      reportSurface({ subject: 'app-hosts', method: 'UPGRADE', identity, appId: route.record.appId, status });
+    };
+    const fail = (status, text) => {
+      reportUpgrade(status);
+      try { socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); } catch { /* gone */ }
+    };
+    socket.on('error', () => {});
+    const url = String(req.url ?? '');
+    const mux = url.split(/[?#]/, 1)[0] === `${AURA_RESERVED_PATHS.os}sse-mux`;
+    if (!url.startsWith('/') || (!mux && isAuraReservedPath(url))) return fail(404, 'Not Found');
+    if (req.headers.origin !== edge.origin) return fail(403, 'Forbidden');
+    let t;
+    try {
+      const session = await appSession(route, req, edge);
+      if (!session) return fail(401, 'Unauthorized');
+      if (mux) {
+        reportUpgrade(0);   // the gateway answers the handshake
+        return await handleAppGatewayUpgrade(req, socket, head, { record: route.record, slot: route.slot, session });
+      }
+      t = await slotTarget(route);
+    } catch { return fail(503, 'Service Unavailable'); }
+    if (t.missing) return fail(404, 'Not Found');
+    if (t.starting || t.notReady) return fail(503, 'Service Unavailable');
+    const extra = { ...forwardedHeaders(req, edge), ...identityHeaders(t) };
+    const raw = appRequestHeaders(req, 'app-hosts-upgrade', { keepUpgrade: true });
+    const lines = [`${req.method} ${url} HTTP/${req.httpVersion}`];
+    for (let i = 0; i + 1 < raw.length; i += 2) lines.push(`${raw[i]}: ${raw[i + 1]}`);
+    for (const [k, v] of Object.entries(extra)) lines.push(`${k}: ${v}`);
+    pipeUpgrade(route.label, t, socket, head, lines, reportUpgrade, fail);
+  }
+
+  function refuse(event, target, status, title, body, opts = {}) {
+    if (event === 'request') return reply(target, status, title, body, opts);
+    target.on('error', () => {});
+    try { target.end(`HTTP/1.1 ${status} ${title}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); } catch { /* gone */ }
+    return undefined;
+  }
+
+  async function routeLabeled(host, event, req, rest, passOn) {
+    const target = rest[0];
+    try {
+      const route = await decide(host, appHostName(req.headers.host));
+      if (route.to === 'host') {
+        const edge = requestEdge(req, env);
+        if (event === 'request') {
+          const identity = surfaceIdentity(req.headers);
+          const method = req.method;
+          target.once('close', () => reportSurface({
+            subject: 'app-hosts', method, identity, appId: route.record.appId, status: target.headersSent ? target.statusCode : 0,
+          }));
+          await serveHostRequest(route, req, target, edge);
+        }
+        else await serveHostUpgrade(route, req, target, rest[1], edge);
+        return;
+      }
+      if (route.to === 'gone') return refuse(event, target, 410, 'Gone', 'This app was removed, and its address is not used again.');
+      if (route.to === 'missing') return refuse(event, target, 404, 'Not Found', 'No app uses this address.');
+      if (route.to === 'denied') return refuse(event, target, 403, 'Forbidden', 'Open this app from the AuraOS desktop.');
+      const name = claims(req);
+      if (!name) return passOn();
+      if (event === 'request') await handleRequest(name, req, target);
+      else await handleUpgrade(name, req, target, rest[1]);
+    } catch (err) {
+      log('route-failed', err?.name ?? 'error');
+      if (event === 'request' && target.headersSent) { target.destroy(); return; }
+      refuse(event, target, 503, 'Service Unavailable', 'AuraOS could not check this address. This page reloads by itself.', { refresh: 3 });
+    }
+  }
+
   /**
    * Put the router in front of `server`: claimed `request`/`upgrade` events
    * are handled here and never emitted to the server's other listeners.
@@ -261,14 +583,25 @@ export function createAppHostRouter({ appsList, shellPort = process.env.SHELL_PO
     const emit = server.emit;
     server.emit = function (event, req, ...rest) {
       if (event === 'request' || event === 'upgrade') {
-        const name = claims(req);
-        if (name) {
-          if (event === 'request') void handleRequest(name, req, rest[0]);
-          else void handleUpgrade(name, req, rest[0], rest[1]);
+        const passOn = () => {
+          if (event === 'request') observeHttpSurface(req, rest[0]);
+          return emit.call(this, event, req, ...rest);
+        };
+        const host = classifyHost(requestEdge(req, env).host);
+        if (host.kind === 'app' || appHostName(req.headers.host)) {
+          void routeLabeled(host, event, req, rest, passOn);
           return true;
         }
+        if (host.kind === 'unknown') {
+          countSurfaceEvent('shell-listener');
+          log('unknown-host', host.reason);
+          if (hostPolicy(env) === 'enforce') {
+            refuse(event, rest[0], 400, 'Bad Request', 'This address is not served here.');
+            return true;
+          }
+        }
+        return passOn();
       }
-      if (event === 'request') observeHttpSurface(req, rest[0]);
       return emit.call(this, event, req, ...rest);
     };
     void load().catch(() => {});   // warm the index; the shell may still be booting

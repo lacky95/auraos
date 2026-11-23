@@ -19,13 +19,16 @@ const SHELL_BEARER = /(?:^|,)\s*Bearer\s+aura-(sess1|admin1)\./i;
 const INSTANCE_BEARER = /(?:^|,)\s*Bearer\s+aura1\./i;
 const API_KEY_BEARER = /(?:^|,)\s*Bearer\s+aura_k1_/i;
 
-/** The Cookie value without the session cookie; null when nothing is left. */
-export function stripSessionCookie(value) {
+/** The Cookie value without the cookies in `names`; null when nothing is left. */
+export function stripCookies(value, names) {
   const parts = String(value).split(';');
-  const kept = parts.filter((p) => !SESSION_COOKIES.has(p.split('=', 1)[0].trim()));
+  const kept = parts.filter((p) => !names.has(p.split('=', 1)[0].trim()));
   if (kept.length === parts.length) return value;
   return kept.map((p) => p.trim()).filter(Boolean).join('; ') || null;
 }
+
+/** The Cookie value without the session cookie; null when nothing is left. */
+export const stripSessionCookie = (value) => stripCookies(value, SESSION_COOKIES);
 
 function cleanCookie(value, surface) {
   const next = stripSessionCookie(value);

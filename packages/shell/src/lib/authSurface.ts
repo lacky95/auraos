@@ -18,6 +18,7 @@ import type {
   LoginSession, LoginSessions, Principal, SetupTickets, UserAccount, UserStore, ValkeyUserStore,
 } from '@aura/core';
 import { authenticate } from './auth.js';
+import { isTrustedProxy } from '../../server/host-policy.mjs';
 
 export const LOGIN_FLAG = 'AURA_OWNER_LOGIN';
 export const COOKIE_HTTPS = '__Host-aura_session';
@@ -127,19 +128,13 @@ function peerAddress(ctx: AuthContext): string | null {
   catch { return null; }
 }
 
-/**
- * An empty list trusts nobody, unlike `isTrusted` in server/app-hosts.mjs.
- * Astro's `clientAddress` is the socket peer only while `security.allowedDomains`
- * is unset: with it set, Astro takes `X-Forwarded-For`. A test pins the config.
- */
-function trustedProxies(env: Env): Set<string> {
-  return new Set((env['AURA_TRUSTED_PROXIES'] ?? '').split(',').map(normalizeAddress).filter(Boolean));
-}
+// Astro's `clientAddress` is the socket peer only while `security.allowedDomains`
+// is unset: with it set, Astro takes `X-Forwarded-For`. A test pins the config.
 
 /** HTTPS only on the word of a configured proxy. Its own value is the last one. */
 export function requestScheme(ctx: AuthContext, env: Env): Scheme {
   const peer = peerAddress(ctx);
-  if (!peer || !trustedProxies(env).has(peer)) return 'http';
+  if (!peer || !isTrustedProxy(peer, env)) return 'http';
   const proto = (ctx.request.headers.get('x-forwarded-proto') ?? '').split(',').at(-1)?.trim().toLowerCase();
   return proto === 'https' ? 'https' : 'http';
 }
@@ -151,12 +146,11 @@ export function requestScheme(ctx: AuthContext, env: Env): Scheme {
 export function clientRateKey(ctx: AuthContext, env: Env): string | undefined {
   const peer = peerAddress(ctx);
   if (!peer) return undefined;
-  const trusted = trustedProxies(env);
-  if (!trusted.has(peer)) return `ip:${peer}`;
+  if (!isTrustedProxy(peer, env)) return `ip:${peer}`;
   const hops = (ctx.request.headers.get('x-forwarded-for') ?? '').split(',').map(normalizeAddress);
   for (let i = hops.length - 1; i >= 0; i -= 1) {
     const hop = hops[i]!;
-    if (!hop || trusted.has(hop)) continue;
+    if (!hop || isTrustedProxy(hop, env)) continue;
     return isIP(hop) ? `ip:${hop}` : `ip:${peer}`;
   }
   return `ip:${peer}`;
@@ -308,6 +302,18 @@ async function currentSession(
   const user = await svc.users.getOwner();
   if (!user || user.disabled || user.id !== session.userId) return null;
   return { session, user };
+}
+
+/** The verified owner session of this request, for the App Host handoff. */
+export async function currentOwnerSession(
+  ctx: AuthContext,
+  deps: AuthSurfaceDeps = defaultDeps(),
+): Promise<{ sessionId: string; userId: string; expiresAt: number } | null> {
+  if (!loginEnabled(deps.env)) return null;
+  const svc = deps.services();
+  if (!svc) return null;
+  const current = await currentSession(ctx, svc, requestScheme(ctx, deps.env));
+  return current ? { sessionId: current.session.sessionId, userId: current.user.id, expiresAt: current.session.expiresAt } : null;
 }
 
 // ── routes ──────────────────────────────────────────────────────────────────

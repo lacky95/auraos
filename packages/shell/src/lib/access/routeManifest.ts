@@ -122,6 +122,7 @@ const routes: RouteAccessManifest['routes'] = {
 
   // Owner login (D37): all but status answer 404 unless AURA_OWNER_LOGIN=on.
   // `setup` also takes the reset path: both need a one-time host code (D8).
+  '/api/app-hosts/handoff': { methods: { POST: rule(OWNER, 'session') } },
   '/api/auth/status': { methods: { GET: rule(['public'], 'system') } },
   '/api/auth/setup': { methods: { POST: rule(['public'], 'system') } },
   '/api/auth/login': { methods: { POST: rule(['public'], 'session') } },
