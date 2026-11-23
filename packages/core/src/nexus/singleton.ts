@@ -6,6 +6,7 @@
 import { NexusManager } from './NexusManager.js';
 import { getAppManager } from '../app-manager/AppManager.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
+import { getAppHostServices } from '../app-hosts/services.js';
 import type { SourcesConfig } from './SourcesConfig.js';
 import { DEFAULT_SOURCES_CONFIG } from './SourcesConfig.js';
 import * as Publisher from './Publisher.js';
@@ -64,6 +65,7 @@ export function getNexusManager(): NexusManager {
     // Deterministically (re)register scoped apps after install/uninstall —
     // the fs-watch on scope dirs is unreliable (see AppManager.reloadScopedApp).
     onAppChanged:  (id) => { try { getAppManager().reloadScopedApp(id); } catch { /* pre-init */ } },
+    hostLifecycle: getAppHostServices().lifecycle,
   });
   g[GLOBAL_KEY] = instance;
   g[CODE_KEY] = CODE;

@@ -38,7 +38,9 @@ import { InterfaceRegistry } from '../interfaces/InterfaceRegistry.js';
 import type { InterfaceView } from '../interfaces/InterfaceRegistry.js';
 import { keymapRegistry } from '../keymap/KeymapRegistry.js';
 import { ScopeRegistry } from '../scopes/ScopeRegistry.js';
-import type { ScopeDefinition } from '../scopes/types.js';
+import type { ScopeDefinition, ScopeId } from '../scopes/types.js';
+import { getAppHostServices } from '../app-hosts/services.js';
+import { appSourceFingerprint } from '../app-hosts/lifecycle.js';
 
 const RECONCILE_INTERVAL_MS = 5_000;
 const ERROR_GRACE_MS        = 30_000;
@@ -102,6 +104,8 @@ export class AppManager {
    * mutated via `setEnabled()` (which also stops running instances on disable).
    */
   private disabled = new Set<string>();
+  /** Set once the boot migration ran, so discovery events can sync hosts. */
+  private appHostsReady = false;
   /** Apps currently being uninstalled — suppresses warm-pool refill so we can
    *  kill every instance without the reconciler respawning them. */
   private readonly uninstalling = new Set<string>();
@@ -202,7 +206,87 @@ export class AppManager {
     OsEventBus.on('app:installed', ({ appId }) => {
       const m = this.registry.getById(appId);
       if (m?.services?.some((x) => x.prePull)) void this.osSidecars.prePull(m);
+      void this.syncAppHost(appId);
     });
+  }
+
+  // ─── App Hosts ──────────────────────────────────────────────────────────
+  // Never fatal: a Valkey problem must not stop an app starting on the proxy
+  // route, and the boot migration repairs anything missed here.
+
+  /** Before the first manifest scan: load which protected hosts are accepted. */
+  private async prepareAppHostGuard(): Promise<void> {
+    try {
+      const hosts = getAppHostServices();
+      hosts.manifestHostNames = () => this.registry.getAll().flatMap((m) => m.hosts.map((h) => h.name));
+      hosts.guard.setKnown(await hosts.registry.getKnownManifestHosts());
+      this.registry.setHostGuard(hosts.guard);
+    } catch (err) {
+      console.warn(`[AppManager] app host guard not loaded: ${(err as Error).message}`);
+    }
+  }
+
+  /** After adoption: installation + host for every app, dead slots freed. */
+  private async migrateAppHosts(): Promise<void> {
+    try {
+      const { lifecycle } = getAppHostServices();
+      const { apps, failed } = await lifecycle.migrate(this.getScopeDefinitions());
+      for (const f of failed) console.warn(`[AppManager] app host migration failed for ${f}`);
+      for (const m of this.registry.getAll()) {
+        await lifecycle.releaseDeadSlots(m.id, (id) => this.instances.has(id));
+        await this.blockForeignHosts(m.id);
+      }
+      this.appHostsReady = true;
+      console.log(`[AppManager] app hosts: ${apps} installation(s) checked`);
+    } catch (err) {
+      console.warn(`[AppManager] app host migration failed: ${(err as Error).message}`);
+    }
+  }
+
+  /** An app discovered by clone, scaffold or a copied directory. */
+  private async syncAppHost(appId: string): Promise<void> {
+    if (!this.appHostsReady) return;
+    const m = this.registry.getById(appId);
+    if (!m) return;
+    try {
+      const { lifecycle } = getAppHostServices();
+      const scope = this.scopeRegistry.getById(m.scopeId);
+      await lifecycle.syncDiscovered({
+        appId, originId: m.originId ?? null, scope: m.scopeId, source: appSourceFingerprint(scope, appId),
+      });
+      await this.blockForeignHosts(appId);
+    } catch (err) {
+      console.warn(`[AppManager] app host sync for ${appId} failed: ${(err as Error).message}`);
+    }
+  }
+
+  /** A manifest host equal to another app's generated label stops routing. */
+  private async blockForeignHosts(appId: string): Promise<void> {
+    const m = this.registry.getById(appId);
+    if (!m || m.scopeId === 'system' || m.hosts.length === 0) return;
+    const { lifecycle, guard } = getAppHostServices();
+    let blocked = false;
+    for (const h of m.hosts) {
+      if (await lifecycle.isForeignLabel(appId, h.name)) { guard.block(appId, h.name); blocked = true; }
+    }
+    if (blocked) this.reloadManifest(appId);
+  }
+
+  /** A slot is assigned when an instance is claimed for use, never to a pool member. */
+  private async claimHostSlot(appId: string, instanceId: string): Promise<void> {
+    const scope: ScopeId | undefined = this.registry.getScopeId(appId);
+    if (!scope) return;
+    try { await getAppHostServices().lifecycle.claimSlot(appId, scope, instanceId); }
+    catch (err) { console.warn(`[AppManager] app host slot for ${instanceId} failed: ${(err as Error).message}`); }
+  }
+
+  private releaseHostSlot(appId: string, instanceId: string): void {
+    const scope = this.registry.getScopeId(appId);
+    if (!scope) return;
+    try {
+      void getAppHostServices().lifecycle.releaseSlot(appId, scope, instanceId)
+        .catch((err) => console.warn(`[AppManager] app host slot release for ${instanceId} failed: ${(err as Error).message}`));
+    } catch { /* no Valkey: the boot migration frees it */ }
   }
 
   /**
@@ -818,6 +902,7 @@ export class AppManager {
   async init(): Promise<void> {
     mkdirSync(join(this.dataDir, 'apps'), { recursive: true });
     this.healToolchainShims();
+    await this.prepareAppHostGuard();
     await this.registry.init();
     this.refreshManifestDerived();
     console.log(`[AppManager] Ready. Apps found: ${this.registry.getAll().length}, keymap actions: ${keymapRegistry.list().length}`);
@@ -912,6 +997,7 @@ export class AppManager {
     await this.syncSidecars(1).catch((err) => {
       console.warn(`[AppManager] sidecar reconcile failed: ${(err as Error).message}`);
     });
+    await this.migrateAppHosts();
     this.startReconciler();
     // Background, missing images only — never delays boot.
     for (const m of this.registry.getAll()) {
@@ -978,6 +1064,12 @@ export class AppManager {
    * @returns instanceId of the (new or existing) running instance.
    */
   async start(appId: string): Promise<string> {
+    const instanceId = await this.launch(appId);
+    await this.claimHostSlot(appId, instanceId);
+    return instanceId;
+  }
+
+  private async launch(appId: string): Promise<string> {
     const manifest = this.registry.getById(appId);
     if (!manifest) throw new Error(`App not found: ${appId}`);
     // Disabled apps refuse launches. Same error class as a missing manifest
@@ -1499,6 +1591,7 @@ export class AppManager {
     // Clear instance after destroy
     this.runnerOf(instanceId).clearToolsDir(instanceId);
     this.runners.container.clearMountRoot?.(instanceId);
+    this.releaseHostSlot(appId, instanceId);
     this.instances.delete(instanceId);
     this.fsm.delete(instanceId);
     this.nextActivityNum.delete(instanceId);
@@ -1564,6 +1657,7 @@ export class AppManager {
     }
     this.runnerOf(instanceId).clearToolsDir(instanceId);
     this.runners.container.clearMountRoot?.(instanceId);
+    this.releaseHostSlot(appId, instanceId);
     this.instances.delete(instanceId);
     this.fsm.delete(instanceId);
     this.nextActivityNum.delete(instanceId);
@@ -2402,6 +2496,7 @@ export class AppManager {
         // Covers instances that reached 'error' via the spawn catch and so
         // never passed a normal teardown path.
         this.interfaces.unregisterInstance(inst);
+        this.releaseHostSlot(inst.appId, inst.instanceId);
         this.instances.delete(inst.instanceId);
         this.fsm.delete(inst.instanceId);
         this.nextActivityNum.delete(inst.instanceId);
