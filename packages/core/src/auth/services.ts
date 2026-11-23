@@ -7,16 +7,20 @@
  */
 import { defaultRedis } from '@aura/kv-store';
 import { getAppManager } from '../app-manager/AppManager.js';
-import { AdminAudit } from './AdminAudit.js';
+import { AdminAudit, IDENTITY_AUDIT_ACTIONS, operatorAttribution } from './AdminAudit.js';
 import { AdminAuth } from './AdminAuth.js';
 import { defaultAdminKeyFile } from './adminCredential.js';
 import { ApiKeyStore } from './ApiKeyStore.js';
 import { ClientSessionStore } from './ClientSessions.js';
 import { Authorizer } from './Authorizer.js';
 import { GrantStore } from './GrantStore.js';
+import { defaultIdentityKeyFile } from './identityKey.js';
+import type { LoginSessionStore } from './LoginSessionStore.js';
+import { defaultSetupTicketDir, FileSetupTickets } from './setupTickets.js';
+import { ValkeyUserStore } from './ValkeyUserStore.js';
 
 /** Bump when the shape changes, so a singleton made by an older module copy is replaced. */
-export const AUTH_SERVICES_VERSION = 4;
+export const AUTH_SERVICES_VERSION = 5;
 
 export interface AuthServices {
   version: number;
@@ -27,6 +31,12 @@ export interface AuthServices {
   authorizer: Authorizer;
   /** Phase 5: lock state per shell client (tab). Not a credential. */
   clientSessions: ClientSessionStore;
+  /** The owner account. */
+  users: ValkeyUserStore;
+  /** The one session store; the same object as `admin.sessions`. */
+  loginSessions: LoginSessionStore;
+  /** One-time setup and reset codes. */
+  setupTickets: FileSetupTickets;
 }
 
 const GLOBAL_KEY = '__auraAuthServices';
@@ -46,6 +56,7 @@ export function getAuthServices(): AuthServices {
   const audit = new AdminAudit(redis);
   const admin = new AdminAuth({
     keyFile: defaultAdminKeyFile(),
+    identityKeyFile: defaultIdentityKeyFile(),
     redis,
     onRotated: (purged) => {
       console.log(`[auth] admin credential changed on disk (rotation) — ${purged} admin session(s) revoked`);
@@ -57,11 +68,32 @@ export function getAuthServices(): AuthServices {
     declared: (appId) => registry()?.getById(appId)?.permissions,
     appScope: (appId) => registry()?.getScopeId(appId),
   });
+  const users = new ValkeyUserStore({
+    identityKeyFile: defaultIdentityKeyFile(),
+    redis,
+    onTampered: () => {
+      console.warn('[auth] the owner record failed its integrity check');
+      void audit.record({ by: { kind: 'system' }, action: IDENTITY_AUDIT_ACTIONS.recordTampered, outcome: 'failed' }).catch(() => undefined);
+    },
+  });
+  // The CLI creates tickets without Valkey, so the shell audits them from their event files.
+  const auditCreatedTickets = async () => {
+    await setupTickets.drainCreatedEvents(async (e) => {
+      await audit.record({
+        by: operatorAttribution(), action: IDENTITY_AUDIT_ACTIONS.ticketCreated,
+        ...(e.username ? { target: `user:${e.username}` } : {}),
+        detail: { purpose: e.purpose, createdAt: e.at },
+      });
+    });
+  };
+  const setupTickets: FileSetupTickets = new FileSetupTickets({ dir: defaultSetupTicketDir(), beforeClaim: auditCreatedTickets });
   const svc: AuthServices = {
     version: AUTH_SERVICES_VERSION, grants, apiKeys: new ApiKeyStore(redis), admin, audit, authorizer,
     clientSessions: new ClientSessionStore({ redis }),
+    users, loginSessions: admin.sessions, setupTickets,
   };
   g[GLOBAL_KEY] = svc;
+  void auditCreatedTickets().catch((err) => console.warn(`[auth] ticket audit failed: ${(err as Error).message}`));
   // Phase 6 rename: grants of notifications.desktopModal → notifications.systemModal (once, idempotent).
   void grants.migrateLegacy().then(async (moved) => {
     for (const m of moved) {

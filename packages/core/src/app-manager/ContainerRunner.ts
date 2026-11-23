@@ -15,7 +15,8 @@ import { KEEP_RESTART_LABEL, keptAcrossRestart, type KeepSiblings } from './side
 import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
 import { SIDECAR_PS_FORMAT, USAGE_STATS_FORMAT, parseSidecarPs, parseUsageStats } from './sidecars.js';
-import type { SpawnContext } from '../scopes/types.js';
+import type { InstanceSpawnContext } from './SandboxRunner.js';
+import { OWNER_LABEL } from './instanceOwner.js';
 import { ContextStore } from '../context/ContextStore.js';
 import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
 import {
@@ -265,7 +266,7 @@ export class ContainerRunner implements SandboxRunner {
   }
 
   // ─── Spawn ────────────────────────────────────────────────────────────
-  async spawn(instanceId: string, appId: string, port: number, manifest: AppManifest, ctx: SpawnContext): Promise<number> {
+  async spawn(instanceId: string, appId: string, port: number, manifest: AppManifest, ctx: InstanceSpawnContext): Promise<number> {
     // On a first boot without the base image the shell builds it in the
     // background; the spawn waits for it instead of failing on a docker pull.
     await whenBaseImageReady();
@@ -447,7 +448,7 @@ export class ContainerRunner implements SandboxRunner {
     port: number,
     manifest: AppManifest,
     hostname: string,
-    ctx: SpawnContext,
+    ctx: InstanceSpawnContext,
     contextEnv: Record<string, string>,
     contextVolumes: VolumeEntry[],
   ): string[] {
@@ -559,6 +560,7 @@ export class ContainerRunner implements SandboxRunner {
       // shell restart. Not `aura.parent`: that label marks sidecars, which
       // orphan adoption must skip.
       ...(ctx.instanceToken ? ['--label', `aura.token.nonce=${ctx.instanceToken.nonce}`] : []),
+      ...(ctx.owner ? ['--label', `${OWNER_LABEL}=${ctx.owner}`] : []),
       '--workdir', `/workspace/apps/${appId}`,
       // Per-app slice of /workspace. Sibling apps in apps/<other> are not
       // visible — the individual app folder is bound directly, with no parent
@@ -911,6 +913,7 @@ export class ContainerRunner implements SandboxRunner {
     hostname:   string;
     pid:        number;
     tokenNonce?: string;
+    ownerLabel?: string;
   }>> {
     type DockerPsRow = { Names: string };
     type DockerInspect = { Config: { Env: string[]; Labels?: Record<string, string> }; State: { Pid: number } };
@@ -925,7 +928,7 @@ export class ContainerRunner implements SandboxRunner {
       return [];
     }
     const lines = psOut.split('\n').map((l) => l.trim()).filter(Boolean);
-    const out: Array<{ instanceId: string; appId: string; port: number; hostname: string; pid: number; tokenNonce?: string }> = [];
+    const out: Array<{ instanceId: string; appId: string; port: number; hostname: string; pid: number; tokenNonce?: string; ownerLabel?: string }> = [];
     for (const line of lines) {
       let row: DockerPsRow;
       try { row = JSON.parse(line) as DockerPsRow; }
@@ -967,6 +970,7 @@ export class ContainerRunner implements SandboxRunner {
         hostname: row.Names,
         pid: inspect.State?.Pid ?? 0,
         tokenNonce: inspect.Config?.Labels?.['aura.token.nonce'],
+        ownerLabel: inspect.Config?.Labels?.[OWNER_LABEL],
       });
     }
     return out;

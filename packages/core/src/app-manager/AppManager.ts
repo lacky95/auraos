@@ -1,3 +1,5 @@
+import { DEFAULT_OWNER_ID } from '../auth/identityContracts.js';
+import { adoptedInstanceOwner } from './instanceOwner.js';
 import { mkdirSync, readdirSync, readFileSync, lstatSync, writeFileSync, chmodSync, copyFileSync, renameSync, unlinkSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
@@ -848,6 +850,7 @@ export class AppManager {
           restartCount:      0,
           inPool:            pooled.has(o.instanceId),
           sandbox:           'container',
+          owner:             adoptedInstanceOwner(o.ownerLabel, pooled.has(o.instanceId)),
         };
         this.instances.set(o.instanceId, inst);
         // The FSM must agree with the record: left at its default
@@ -1269,6 +1272,8 @@ export class AppManager {
     // Honor manifest.serverPort when present (currently used by
     // com.aura.registry to pin :4090 so RegistryConfig URLs stay stable).
     const port = await this.ports.allocate(instanceId, manifest.serverPort);
+    // A pool member belongs to nobody until it is claimed.
+    const owner = opts.inPool ? undefined : this.instances.get(instanceId)?.owner ?? DEFAULT_OWNER_ID;
 
     try {
       const runner = this.runners[manifest.sandbox] ?? this.runners['proot'];
@@ -1278,8 +1283,9 @@ export class AppManager {
         // Fresh nonce per spawn: tokens of a previous life of a recycled
         // instance id stop verifying the moment this one is minted.
         instanceToken:   this.tokens.mint(instanceId),
+        ...(owner ? { owner } : {}),
       });
-      this.upsertInstance(instanceId, appId, { pid, port, startedAt: new Date(), inPool: opts.inPool, sandbox: manifest.sandbox });
+      this.upsertInstance(instanceId, appId, { pid, port, startedAt: new Date(), inPool: opts.inPool, sandbox: manifest.sandbox, owner });
       if (opts.inPool) this.savePoolIds();
       this.transition(instanceId, appId, 'created', port);
 
@@ -1367,6 +1373,7 @@ export class AppManager {
       // Hand-off — keep the existing instanceId (its env was baked at spawn
       // time with this id, so renaming would break identity invariants).
       inst.inPool = false;
+      inst.owner ??= DEFAULT_OWNER_ID;
       this.savePoolIds();
       const manifest = this.registry.getById(appId);
       if (manifest) {
@@ -1716,6 +1723,7 @@ export class AppManager {
     // Also schedules a refill so the pool stays at target size.
     if (inst.inPool) {
       inst.inPool = false;
+      inst.owner ??= DEFAULT_OWNER_ID;
       this.savePoolIds();
       this.providers.registerInstance(inst, manifest);
       this.interfaces.registerInstance(inst, manifest);

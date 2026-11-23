@@ -1,22 +1,48 @@
 /**
- * Admin audit trail — the `audit:admin` Valkey stream (MAXLEN ~ 10000).
+ * The audit trail — the `audit:admin` Valkey stream (MAXLEN ~ 10000).
  *
- * Every admin change (unlock / lock, grant / revoke, API key create / revoke,
- * manifest edits, credential rotation) is one entry. The actor is always
- * "admin (shared credential)": AuraOS has no user accounts, so no entry ever
- * names an individual person. Secrets never go in here.
+ * One entry per admin change (unlock / lock, grant / revoke, API key create /
+ * revoke, manifest edits, credential rotation) and per identity event (setup,
+ * login, logout, password reset, ticket creation). The actor is the shared
+ * admin credential, a signed-in `user:<id>`, the host `operator`, `system` or
+ * `anonymous`.
+ *
+ * Passwords, codes, tokens and hashes never go in here: `detail` fields with
+ * such names are dropped on write, at any depth.
  */
 import type { Redis } from '@aura/kv-store';
-import { ADMIN_AUDIT_LABEL, type AdminAttribution } from './types.js';
+import { ADMIN_AUDIT_LABEL, type AdminAttribution, type UserPrincipal } from './types.js';
 
 export const AUDIT_ADMIN_KEY = 'audit:admin';
 export const AUDIT_MAXLEN = 10_000;
+
+export const IDENTITY_AUDIT_ACTIONS = {
+  setup: 'auth.setup',
+  login: 'auth.login',
+  logout: 'auth.logout',
+  passwordReset: 'auth.password-reset',
+  ticketCreated: 'auth.ticket-created',
+  recordTampered: 'auth.record-tampered',
+} as const;
+
+export interface UserAttribution {
+  kind: 'user';
+  userId: string;
+  /** Short prefix of the session id. */
+  session?: string;
+}
+export interface OperatorAttribution { kind: 'operator' }
+
+export function userAttribution(p: Pick<UserPrincipal, 'userId'> & { sessionId?: string }): UserAttribution {
+  return { kind: 'user', userId: p.userId, ...(p.sessionId ? { session: p.sessionId.slice(0, 8) } : {}) };
+}
+export const operatorAttribution = (): OperatorAttribution => ({ kind: 'operator' });
 
 export interface AuditEntry {
   /** Stream id `<ms>-<seq>`. */
   id: string;
   at: number;
-  /** Always `admin (shared credential)` (or `system` for in-process changes). */
+  /** `admin (shared credential)`, `user:<id>`, `operator`, `system` or `anonymous`. */
   actor: string;
   session?: string;
   action: string;
@@ -27,22 +53,40 @@ export interface AuditEntry {
 }
 
 export interface AuditInput {
-  by: AdminAttribution | { kind: 'system' } | { kind: 'anonymous' };
+  by: AdminAttribution | UserAttribution | OperatorAttribution | { kind: 'system' } | { kind: 'anonymous' };
   action: string;
   target?: string;
   outcome?: 'ok' | 'denied' | 'failed';
   detail?: Record<string, unknown>;
 }
 
+const SECRET_FIELD = /pass(word|wd|phrase)|secret|token|hash|credential|^(setup|reset|ticket)?_?code$/i;
+
+function scrub(value: unknown, depth = 0): unknown {
+  if (depth > 6) return '[truncated]';
+  if (Array.isArray(value)) return value.map((v) => scrub(v, depth + 1));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value)
+      .filter(([k]) => !SECRET_FIELD.test(k))
+      .map(([k, v]) => [k, scrub(v, depth + 1)]));
+  }
+  return value;
+}
+
+function actorOf(by: AuditInput['by']): string {
+  if (by.kind === 'admin') return ADMIN_AUDIT_LABEL;
+  if (by.kind === 'user') return `user:${by.userId}`;
+  return by.kind;
+}
+
 export class AdminAudit {
   constructor(private readonly redis: () => Redis, private readonly now: () => number = Date.now) {}
 
   async record(e: AuditInput): Promise<string> {
-    const actor = e.by.kind === 'admin' ? ADMIN_AUDIT_LABEL : e.by.kind;
-    const fields: string[] = ['at', String(this.now()), 'actor', actor, 'action', e.action, 'outcome', e.outcome ?? 'ok'];
-    if (e.by.kind === 'admin' && e.by.session) fields.push('session', e.by.session);
+    const fields: string[] = ['at', String(this.now()), 'actor', actorOf(e.by), 'action', e.action, 'outcome', e.outcome ?? 'ok'];
+    if ((e.by.kind === 'admin' || e.by.kind === 'user') && e.by.session) fields.push('session', e.by.session);
     if (e.target) fields.push('target', e.target);
-    if (e.detail) fields.push('detail', JSON.stringify(e.detail));
+    if (e.detail) fields.push('detail', JSON.stringify(scrub(e.detail)));
     const id = await this.redis().xadd(AUDIT_ADMIN_KEY, 'MAXLEN', '~', String(AUDIT_MAXLEN), '*', ...fields);
     return id ?? '';
   }
