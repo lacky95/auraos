@@ -18,6 +18,7 @@
  * from their own UI to pop manually.
  */
 
+import { osBase } from './os-auth.js';
 import type { OsClient } from './OsClient.js';
 
 export interface NavigateOptions {
@@ -178,10 +179,6 @@ export class ActivityApi {
   }
 
   private osApiBase(): string {
-    // Browser: same-origin (the iframe is proxied through the shell). Node:
-    // OS_API_BASE env var from ProotRunner. Matches the convention used by
-    // OsClient.startIntent and friends.
-    if (typeof window !== 'undefined') return '';
-    return process.env['OS_API_BASE'] ?? 'http://localhost:3000';
+    return osBase();
   }
 }

@@ -1,3 +1,4 @@
+import { runnerShellUrl } from './identity.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -247,7 +248,8 @@ function enterProot(
     APP_ID: appId,
     APP_INSTANCE_ID: instanceId,
     APP_PORT: port?.toString() ?? '',
-    OS_API_BASE: process.env['AURA_SHELL_URL'] ?? 'http://127.0.0.1:3000',
+    // Never AURA_SHELL_URL: this value decides where the sandbox may send its token.
+    OS_API_BASE: runnerShellUrl(),
     // The host shell exports AURA_TERM_LABEL (= "aura-shell") to pin its own
     // title; clear it here so the jumped proot shows the app (via APP_ID),
     // not the host we jumped from. Container jumps get a fresh env, so this

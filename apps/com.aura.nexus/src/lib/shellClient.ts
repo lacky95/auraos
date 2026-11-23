@@ -1,7 +1,9 @@
 /** Server-side fetch helper. Calls the shell directly (no proxy hop)
  *  using the OS_API_BASE env the runner injects. Falls back to localhost
  *  for outside-OS dev runs. */
-const OS_API = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
+import { osBase } from '@aura/app-sdk/os-auth';
+
+const OS_API = osBase({ fallback: 'http://127.0.0.1:3000' });
 
 export async function shellGet<T>(path: string, timeoutMs = 8_000): Promise<T> {
   const res = await fetch(`${OS_API}${path}`, {

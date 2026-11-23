@@ -2,8 +2,9 @@
  *  same shape the shell's /api/nexus/installed returns, but with this app's
  *  dataProvider authority handling permissions. */
 import type { APIRoute } from 'astro';
+import { osBase } from '@aura/app-sdk/os-auth';
 
-const OS_API = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
+const OS_API = osBase({ fallback: 'http://127.0.0.1:3000' });
 
 export const GET: APIRoute = async () => {
   const res = await fetch(`${OS_API}/api/nexus/installed`, {

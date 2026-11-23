@@ -2,11 +2,12 @@ import type { Command } from 'commander';
 import { existsSync } from 'node:fs';
 import { defaultAdminKeyFile, readAdminCredential, rotateAdminCredential } from '@aura/core';
 import { api, shellUrl } from '../lib/client.js';
+import { inSandbox, isTrustedShellUrl, resolveIdentity, shellFetch, warnOnce } from '../lib/identity.js';
 import { buildSystemDecisionPayload, describeDecision, releaseBody } from '../lib/system-decision.js';
 import { color, fail, info, ok, table, warn } from '../lib/format.js';
 import { promptConfirm } from '../lib/prompts.js';
 import {
-  ADMIN_SESSION_FILE, adminHeaders, adminLogin, clearSavedSession, currentAdminSession, forgetInProcessSession,
+  ADMIN_SESSION_FILE, adminLogin, clearSavedSession, forgetInProcessSession,
   obtainCredential, saveSession, savedSession,
 } from '../lib/admin-session.js';
 
@@ -95,6 +96,8 @@ function inMaster(): boolean {
   return existsSync(defaultAdminKeyFile());
 }
 
+const adminIdentity = () => resolveIdentity({ url: shellUrl(), path: '/api/admin/session', intent: 'admin' });
+
 function fmtTime(ms: number): string {
   return new Date(ms).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
 }
@@ -110,8 +113,11 @@ export function registerAdmin(program: Command): void {
     .option('--save', `keep the session in ${ADMIN_SESSION_FILE} (0600) for its 15 minutes`)
     .option('--print', 'print the session token (for `export AURA_ADMIN_SESSION=…`)')
     .action(async (opts: { save?: boolean; print?: boolean }) => {
-      const credential = await obtainCredential(true);
-      if (!credential) fail('no credential: set AURA_ADMIN_CREDENTIAL or run this on a TTY. The credential is in the master container — `aura jump -m`, then `aura admin credential`.');
+      if (inSandbox() && (opts.save || opts.print)) {
+        warnOnce('login-sandbox', `${opts.save ? '--save' : '--print'} inside an app sandbox exposes the admin session to other apps and agents. It stops working here in Phase 4.`);
+      }
+      const credential = await obtainCredential('login');
+      if (!credential) fail('no credential: set AURA_ADMIN_CREDENTIAL or run this on a TTY. Read it on the host: `docker exec -it aura-shell aura admin credential`.');
       const s = await adminLogin(credential!).catch((err: Error) => fail(err.message));
       if (opts.print) {
         process.stdout.write(`${s.token}\n`);
@@ -131,12 +137,13 @@ export function registerAdmin(program: Command): void {
     .command('logout')
     .description('Lock admin: revoke the saved / exported session and delete the session file.')
     .action(async () => {
-      const token = currentAdminSession();
-      if (token) {
-        const res = await fetch(`${shellUrl()}/api/admin/session`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } })
+      if (adminIdentity().kind === 'admin') {
+        const res = await shellFetch('/api/admin/session', { method: 'DELETE', intent: 'admin' })
           .catch(() => null);
         if (res?.ok) ok('admin session revoked');
         else info('session was already invalid or expired');
+      } else if (savedSession() && !isTrustedShellUrl(shellUrl())) {
+        warn(`the saved session was not revoked on the server: ${shellUrl()} is not this system's shell.`);
       } else {
         info('no admin session');
       }
@@ -149,9 +156,8 @@ export function registerAdmin(program: Command): void {
     .command('status')
     .description('Is an admin session available, and until when?')
     .action(async () => {
-      const token = currentAdminSession();
-      if (!token) { info('locked — no admin session (aura admin login --save)'); return; }
-      const res = await fetch(`${shellUrl()}/api/admin/session`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => null);
+      if (adminIdentity().kind !== 'admin') { info('locked — no admin session (aura admin login --save)'); return; }
+      const res = await shellFetch('/api/admin/session', { intent: 'admin' }).catch(() => null);
       if (!res?.ok) { info('locked — the session is invalid or expired'); return; }
       const body = await res.json() as { expiresAt?: number };
       const saved = savedSession();
@@ -160,11 +166,11 @@ export function registerAdmin(program: Command): void {
 
   admin
     .command('credential')
-    .description('Print the shared admin credential (master container only: `aura jump -m` first).')
+    .description('Print the shared admin credential (master container only; from the host: `docker exec -it aura-shell aura admin credential`).')
     .action(() => {
       const f = defaultAdminKeyFile();
       const c = inMaster() ? readAdminCredential(f) : null;
-      if (!c) fail(`no readable credential at ${f} — this works only in the master container (aura jump -m).`);
+      if (!c) fail(`no readable credential at ${f} — this works only in the master container. From the host: docker exec -it aura-shell aura admin credential`);
       process.stdout.write(`${c}\n`);
     });
 
@@ -174,7 +180,7 @@ export function registerAdmin(program: Command): void {
     .option('-y, --yes', 'do not ask')
     .action(async (opts: { yes?: boolean }) => {
       const f = defaultAdminKeyFile();
-      if (!inMaster()) fail(`${f} is not here — rotate in the master container (aura jump -m).`);
+      if (!inMaster()) fail(`${f} is not here. Rotate from the host: docker exec -it aura-shell aura admin rotate`);
       if (!opts.yes) {
         const yes = await promptConfirm('Rotate the admin credential? Every admin session (CLI and Settings) ends now.', false);
         if (yes !== true) { info('aborted'); return; }
@@ -219,6 +225,24 @@ export function registerAdmin(program: Command): void {
   registerAdminNotif(admin);
 
   admin
+    .command('access-report')
+    .description('What the report-only access policy would have decided (nothing is blocked yet).')
+    .option('-o, --output <format>', 'json')
+    .action(async (opts: { output?: string }) => {
+      let report: unknown;
+      try {
+        report = await api.get<unknown>('/api/admin/access-report');
+      } catch (err) {
+        const e = err as Error & { status?: number };
+        if (e.status === 404) fail('this shell has no access report yet.');
+        fail(e.message);
+        return;
+      }
+      if (opts.output === 'json') { console.log(JSON.stringify(report, null, 2)); return; }
+      printAccessReport(report);
+    });
+
+  admin
     .command('audit')
     .description('The admin audit trail, newest first.')
     .option('-n, --limit <n>', 'entries', '30')
@@ -235,6 +259,25 @@ export function registerAdmin(program: Command): void {
         DETAIL: e.detail ? JSON.stringify(e.detail) : '',
       }))));
     });
+}
+
+/** The report's scalar fields, then each list of rows as a table. */
+function printAccessReport(report: unknown): void {
+  if (!report || typeof report !== 'object') { console.log(String(report ?? 'empty report')); return; }
+  const cell = (v: unknown): string => (v === null || v === undefined ? '-' : typeof v === 'object' ? JSON.stringify(v) : String(v));
+  const entries = Object.entries(report as Record<string, unknown>);
+  for (const [k, v] of entries) if (typeof v !== 'object' || v === null) console.log(`${k}: ${cell(v)}`);
+  for (const [k, v] of entries) {
+    if (typeof v !== 'object' || v === null) continue;
+    console.log(`\n${color.bold(k)}`);
+    if (Array.isArray(v) && v.every((row) => row && typeof row === 'object' && !Array.isArray(row))) {
+      if (v.length === 0) { info('none'); continue; }
+      const columns = [...new Set(v.flatMap((row) => Object.keys(row as object)))];
+      console.log(table(v.map((row) => Object.fromEntries(columns.map((c) => [c, cell((row as Record<string, unknown>)[c])]))), columns));
+    } else {
+      console.log(JSON.stringify(v, null, 2));
+    }
+  }
 }
 
 // ─── aura admin notif … ─────────────────────────────────────────────────────
@@ -304,8 +347,8 @@ export function registerAdminDev(admin: Command): void {
       for (;;) {
         const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
         const t = Math.min(25, left);
-        // The admin session reads every notification (GET is not an /api/admin route, so attach it here).
-        const res = await fetch(`${shellUrl()}/api/notifications/${encodeURIComponent(r.notification.id)}?waitFor=resolved&timeout=${t}`, { headers: adminHeaders() })
+        // The admin session reads every notification (GET is not an /api/admin route, so ask for it here).
+        const res = await shellFetch(`/api/notifications/${encodeURIComponent(r.notification.id)}?waitFor=resolved&timeout=${t}`, { intent: 'admin' })
           .catch((err: Error) => fail(`cannot reach the shell: ${err.message}`));
         const n = await (res as Response).json() as { state: string; outcome?: string; answer?: unknown; removedReason?: string; error?: string };
         if (!(res as Response).ok) fail(`waiting failed: ${(res as Response).status} ${n.error ?? ''}`);
