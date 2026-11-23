@@ -13,8 +13,11 @@
  *   anonymous  no credentials; referer / instance-id headers are hints only
  *   system     in-process only — the frozen `SYSTEM_PRINCIPAL`, by identity
  *
- * Reserved for later (multi-user / delegation), NOT implemented:
+ * Typed for the access policy, NOT returned by `authenticate()` yet:
  *   user       a logged-in human account
+ *   operator   the host operator, in access reports only
+ *
+ * Reserved for later (delegation), NOT implemented:
  *   agent      a verified agent identity acting for a principal
  *
  * `actor` is a self-declared display name (e.g. the MCP agent's name). It is
@@ -59,13 +62,34 @@ export type Principal =
 /** Kinds reserved for multi-user / delegation. Not produced anywhere yet. */
 export type ReservedPrincipalKind = 'user' | 'agent';
 
+export type UserRole = 'owner';
+
+/** A logged-in human. Outside `Principal` until `authenticate()` produces it. */
+export type UserPrincipal = WithActor & {
+  kind: 'user';
+  userId: string;
+  role: UserRole;
+  sessionId: string;
+  verification: 'verified';
+};
+
+/** The host operator, as a report-level class. It never authenticates a request. */
+export interface OperatorPrincipal {
+  kind: 'operator';
+  verification: 'verified';
+}
+
+/** What the access policy can be asked about. `Authorizer` still takes `Principal`. */
+export type AccessPrincipal = Principal | UserPrincipal | OperatorPrincipal;
+export type PrincipalClass = AccessPrincipal['kind'];
+
 /**
  * The ONLY system principal: the same frozen object as notifications'
  * `SYSTEM_CALLER`, checked by object identity.
  */
 export const SYSTEM_PRINCIPAL: SystemPrincipal = SYSTEM_CALLER;
 
-export function isSystemPrincipal(p: Principal): p is SystemPrincipal {
+export function isSystemPrincipal(p: AccessPrincipal): p is SystemPrincipal {
   return p === SYSTEM_PRINCIPAL;
 }
 

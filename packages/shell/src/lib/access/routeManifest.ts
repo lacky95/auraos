@@ -279,7 +279,7 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/notifications/history': { methods: { DELETE: notificationUserOp } },
   '/api/notifications/stream': { methods: { GET: notificationRead } },
 
-  // Interfaces: identity is self-asserted today (see interfaces/identify.ts).
+  // Interfaces: identity is self-asserted today (see lib/access/identify.ts).
   '/api/interfaces': {
     methods: {
       GET: rule(['own-instance'], 'interface', decide(3,
@@ -333,7 +333,5 @@ const routes: RouteAccessManifest['routes'] = {
 export const ROUTE_ACCESS_MANIFEST: RouteAccessManifest = {
   groups,
   routes,
-  nonRoutes: {
-    '/api/interfaces/identify': 'Helper imported by the interfaces routes. Astro registers it, and with no handler it answers 404.',
-  },
+  nonRoutes: {},
 };

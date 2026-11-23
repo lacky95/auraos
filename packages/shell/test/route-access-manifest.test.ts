@@ -8,11 +8,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ROUTE_ACCESS_MANIFEST } from '../src/lib/access/routeManifest.ts';
 import { SURFACE_MANIFEST } from '../src/lib/access/surfaceManifest.ts';
+import { dispatchedMethods, effectiveRule } from '../src/lib/access/resolve.ts';
 import { ROUTE_METHODS } from '../src/lib/access/types.ts';
 import type { AccessRule, AccessSurface, RouteAccessManifest } from '../src/lib/access/types.ts';
 import {
-  analyzeExports, attachedSurfaces, auditRoutes, auditSurfaces, dispatchedMethods, effectiveRule, enumerateRoutes,
-  listenerSites, listenersIn,
+  analyzeExports, attachedSurfaces, auditRoutes, auditSurfaces, enumerateRoutes, listenerSites, listenersIn,
 } from './helpers/enumerateRoutes.ts';
 import type { AuditIssue, AuditPolicy } from './helpers/enumerateRoutes.ts';
 

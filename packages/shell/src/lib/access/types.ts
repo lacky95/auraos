@@ -1,10 +1,11 @@
 /**
  * Vocabulary of the route access manifest (routeManifest.ts, surfaceManifest.ts).
  *
- * Phase 0 is data only: nothing in the running shell imports `lib/access`, and
- * no request is allowed or refused because of it. Phase 1 reads these rules in
- * report-only mode; Phase 3 enforces them.
+ * Data only so far: of `lib/access`, the running shell imports just the
+ * `identify` helper, and no request is allowed or refused because of a rule.
+ * Phase 1 reads these rules in report-only mode; Phase 3 enforces them.
  */
+import type { AccessPrincipal, PrincipalClass } from '@aura/core';
 
 export const ACCESS_LEVELS = ['public', 'owner', 'own-instance', 'app-permission'] as const;
 export type AccessLevel = (typeof ACCESS_LEVELS)[number];
@@ -108,3 +109,123 @@ export interface AccessSurface {
   page?: string;
   rule: AccessRule;
 }
+
+// ── access events ───────────────────────────────────────────────────────────
+
+declare const accessLabel: unique symbol;
+/**
+ * A value taken from a closed list: a manifest route pattern, surface id or
+ * variant id, or an installed app id. Never a request value, so a raw path,
+ * query, header, token, cookie, Referer, body or KV key can't be typed here.
+ * `.mjs` callers have no types: the bridge must check these against the
+ * manifest and app registry, and drop an event that doesn't match.
+ */
+export type AccessLabel = string & { readonly [accessLabel]: true };
+
+export const POLICY_OUTCOMES = [
+  'allow', 'deny', 'needs-approval', 'needs-fresh-auth', 'needs-https', 'needs-operator',
+] as const;
+export type PolicyOutcome = (typeof POLICY_OUTCOMES)[number];
+
+export const ACCESS_REASONS = [
+  // allowed, by the level that matched
+  'public', 'owner', 'own-instance', 'app-permission', 'system',
+  // refused
+  'unclassified', 'unauthenticated', 'wrong-principal', 'wrong-target',
+  'missing-permission', 'missing-target-permission', 'rule-denied', 'ambiguous-rule',
+  // a further step is needed
+  'approval-required', 'fresh-auth-required', 'https-required', 'operator-required',
+  'policy-error',
+] as const;
+export type AccessReason = (typeof ACCESS_REASONS)[number];
+
+/** How the caller's identity was established. The `*-hint` values prove nothing. */
+export const ACCESS_VIAS = [
+  'login-session', 'instance-token', 'api-key', 'admin-session', 'operator-ticket',
+  'referer-hint', 'instance-id-hint', 'internal', 'none',
+] as const;
+export type AccessVia = (typeof ACCESS_VIAS)[number];
+
+export const ACCESS_STATUS_CLASSES = ['1xx', '2xx', '3xx', '4xx', '5xx', 'none'] as const;
+/** `none`: no status was sent, such as a dropped socket. */
+export type AccessStatusClass = (typeof ACCESS_STATUS_CLASSES)[number];
+
+/** `api` is an Astro route. The rest are the manifest's surface kinds. */
+export type AccessEventSurface = 'api' | SurfaceKind;
+
+/** `UPGRADE` is a WebSocket handshake. */
+export type AccessEventMethod = RouteMethod | 'UPGRADE';
+
+/** One observed decision, on any surface. Plain JSON: every field is closed. */
+export interface AccessEvent {
+  surface: AccessEventSurface;
+  /** The manifest route pattern, or the surface id. */
+  subject: AccessLabel;
+  method: AccessEventMethod;
+  variant: AccessLabel | null;
+  principal: PrincipalClass;
+  appId: AccessLabel | null;
+  decision: PolicyOutcome;
+  reason: AccessReason;
+  status: AccessStatusClass;
+  via: AccessVia;
+}
+
+/**
+ * How `.mjs` servers reach the observer, which they can't import:
+ *
+ *   globalThis[Symbol.for('aura.access')]?.report(event)
+ *
+ * `report` never throws and is never awaited, so it can't change a response.
+ */
+export const ACCESS_BRIDGE_KEY: unique symbol = Symbol.for('aura.access');
+
+export interface AccessBridge {
+  report(event: AccessEvent): void;
+}
+
+export type AccessBridgeHost = typeof globalThis & { [ACCESS_BRIDGE_KEY]?: AccessBridge };
+
+// ── decide() ────────────────────────────────────────────────────────────────
+
+export type PolicyTransport = 'https' | 'http';
+export type AccessProfile = 'open' | 'zero-trust';
+export type SystemMode = 'normal' | 'developer';
+export type DeploymentKind = 'private' | 'public';
+
+export interface PolicyAction {
+  surface: AccessEventSurface;
+  subject: AccessLabel;
+  method: AccessEventMethod;
+  variant: AccessLabel | null;
+  /** The effective rule. Null is an unclassified request, which is denied (Q28). */
+  rule: AccessRule | null;
+}
+
+/** The specific target, as far as it could be resolved. */
+export interface PolicyResource {
+  target: AccessTarget;
+  appId?: string;
+  instanceId?: string;
+  sidecar?: string;
+  /** The other side of an `instance-pair`. */
+  peerInstanceId?: string;
+}
+
+export interface DecideInput {
+  principal: AccessPrincipal;
+  action: PolicyAction;
+  resource: PolicyResource;
+  transport: PolicyTransport;
+  auth: { fresh: boolean };
+  accessProfile: AccessProfile;
+  systemMode: SystemMode;
+  deployment: DeploymentKind;
+}
+
+export interface DecideResult {
+  outcome: PolicyOutcome;
+  reason: AccessReason;
+}
+
+export type Decide = (input: DecideInput) => Promise<DecideResult>;

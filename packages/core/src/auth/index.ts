@@ -1,4 +1,5 @@
 export * from './types.js';
+export * from './identityContracts.js';
 export * from './GrantStore.js';
 export * from './ApiKeyStore.js';
 export * from './adminCredential.js';

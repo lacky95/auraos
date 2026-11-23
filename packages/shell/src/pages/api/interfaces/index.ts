@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getAppManager, ProvidedInterfaceSchema } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
-import { identifyInstance } from './identify.js';
+import { identifyInstance } from '../../../lib/access/identify.js';
 
 /**
  * Interface discovery + runtime registration.
@@ -15,7 +15,7 @@ import { identifyInstance } from './identify.js';
  *
  * Reads are open to every app: the response contains only what apps themselves
  * declared, plus a proxy path any caller could already construct. Writes are
- * caller-scoped — see identify.ts.
+ * caller-scoped — see lib/access/identify.ts.
  */
 export const GET: APIRoute = ({ url }) => {
   const mgr = getAppManager();

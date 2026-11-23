@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getAppManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
-import { identifyInstance } from './identify.js';
+import { identifyInstance } from '../../../lib/access/identify.js';
 
 /**
  * DELETE /api/interfaces/<name> — drop a runtime registration.
@@ -12,7 +12,7 @@ import { identifyInstance } from './identify.js';
  *
  * There is no appId in the path on purpose: the caller's identity supplies it,
  * so the ordinary way of touching another app's entry does not exist. (Identity
- * itself is self-asserted — see identify.ts for exactly how far that goes.)
+ * itself is self-asserted — see lib/access/identify.ts for exactly how far that goes.)
  */
 export const DELETE: APIRoute = ({ params, request }) => {
   const mgr = getAppManager();

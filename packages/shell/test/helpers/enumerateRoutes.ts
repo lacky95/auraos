@@ -11,7 +11,8 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import ts from 'typescript';
-import { ACCESS_LEVELS, HTTP_METHODS, ROUTE_METHODS } from '../../src/lib/access/types.ts';
+import { dispatchedMethods, effectiveRule, groupOf, variantApplies } from '../../src/lib/access/resolve.ts';
+import { ACCESS_LEVELS, HTTP_METHODS } from '../../src/lib/access/types.ts';
 import type {
   AccessRule, AccessSurface, RouteAccessManifest, RouteMethod, RouteRefinement,
 } from '../../src/lib/access/types.ts';
@@ -126,14 +127,6 @@ export function analyzeExports(fileName: string, text: string): { handlers: stri
   return { handlers: [...handlers].sort(), problems };
 }
 
-/** Every method Astro dispatches to one of these handlers. */
-export function dispatchedMethods(handlers: readonly string[]): RouteMethod[] {
-  if (handlers.includes('ALL')) return [...ROUTE_METHODS];
-  const methods = new Set(handlers as RouteMethod[]);
-  if (methods.has('GET')) methods.add('HEAD');
-  return ROUTE_METHODS.filter((m) => methods.has(m));
-}
-
 // ── routes ──────────────────────────────────────────────────────────────────
 
 export function enumerateRoutes(pagesDir: string): RouteInventory {
@@ -173,26 +166,6 @@ export function enumerateRoutes(pagesDir: string): RouteInventory {
   walk(pagesDir, []);
   return inventory;
 }
-
-/** The group of `/api/<group>/…`. */
-const groupOf = (route: string): string => route.split('/')[2] ?? '';
-
-/** The rule for a method, before any variant applies. */
-export function effectiveRule(
-  manifest: RouteAccessManifest,
-  info: Pick<RouteInfo, 'route' | 'handlers'>,
-  method: RouteMethod,
-): AccessRule | undefined {
-  const methods = manifest.routes[info.route]?.methods;
-  const own = methods?.[method];
-  if (own) return own;
-  if (method === 'HEAD' && !info.handlers.includes('ALL') && !info.handlers.includes('HEAD') && methods?.GET) return methods.GET;
-  return manifest.groups[groupOf(info.route)];
-}
-
-const variantApplies = (methods: readonly RouteMethod[], method: RouteMethod, info: RouteInfo): boolean =>
-  methods.includes(method)
-  || (method === 'HEAD' && methods.includes('GET') && !info.handlers.includes('ALL') && !info.handlers.includes('HEAD'));
 
 // ── audit ───────────────────────────────────────────────────────────────────
 

@@ -1,5 +1,5 @@
 import type { AppManager, NotificationCaller, CallerHints } from '@aura/core';
-import { identifyInstance } from '../pages/api/interfaces/identify.js';
+import { identifyInstance } from './access/identify.js';
 import { errorResponse, jsonResponse } from './appResponse.js';
 
 /**

@@ -164,7 +164,7 @@ function auraContext(): Record<string, string> {
     'APP_ID', 'APP_INSTANCE_ID', 'APP_PORT',
     'OS_API_BASE',
     'AURA_APPS_DIR', 'AURA_DATA_DIR', 'AURA_BASE_ROOTFS', 'AURA_TOOLCHAIN_DIR',
-    'AURA_USE_PROOT', 'AURA_AUTH_MODE',
+    'AURA_USE_PROOT',
     'AURA_APP_PORT_START', 'AURA_APP_PORT_END',
     'AURA_SHELL_URL',
   ];

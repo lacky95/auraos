@@ -41,9 +41,9 @@ export const POST: APIRoute = async ({ params, request }) => {
   // The consumer id comes from the instance record, never from the request
   // body — the body is fully attacker-controlled, the instance record is not.
   //
-  // Honest about the limit: this OS has no request authentication
-  // (AURA_AUTH_MODE: none), so nothing stops a caller from putting SOME OTHER
-  // instance's id in the URL and borrowing that app's grant. Deriving the
+  // Honest about the limit: this route doesn't authenticate its caller, so
+  // nothing stops it from putting SOME OTHER instance's id in the URL and
+  // borrowing that app's grant. Deriving the
   // appId server-side is defence-in-depth — it stops a mount request from
   // simply declaring who it is — not a hard security boundary. A real
   // boundary needs authenticated callers.
