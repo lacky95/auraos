@@ -6,8 +6,8 @@
  * app's server or sidecar, minus the shell's own credentials: no prefix, no HTML/JS rewriting, no
  * injected scripts, no cookie scoping. The app owns the origin root. Every
  * other request goes on to the shell exactly as before. Docs: /docs/app-hosts;
- * the rules live in @aura/core app-hosts/appHosts.ts and are mirrored below in
- * plain JS (this file loads before / beside the Astro build).
+ * the rules live in @aura/core/host-rules, which has no dependencies, so this
+ * file can load before / beside the Astro build.
  *
  * Interception wraps the HTTP server's `emit` for `request` and `upgrade`, so
  * a claimed request never reaches Astro, Vite, socket.io (whose engine.io
@@ -23,26 +23,16 @@
  */
 import http from 'node:http';
 import net from 'node:net';
+import { parseAppHost } from '@aura/core/host-rules';
 import {
   internalServiceHeaders, observeHttpSurface, reportSurface, surfaceIdentity,
 } from './access-bridge.mjs';
 import { stripShellCredentials } from './shell-credentials.mjs';
 
-// ── the rule (mirror of @aura/core app-hosts/appHosts.ts) ───────────────────
-
-const HOST_NAME_RE = /^[a-z][a-z0-9]{0,30}$/;
-const RESERVED = new Set(['aura', 'shell', 'os', 'api', 'www', 'admin', 'app', 'apps', 'xn']);
-
 /** `name` of a `{name}--{base}` Host header, or null. */
 export function appHostName(host) {
   if (!host) return null;
-  const h = String(host).trim().toLowerCase();
-  const at = h.indexOf('--');
-  if (at <= 0) return null;
-  const name = h.slice(0, at);
-  const base = h.slice(at + 2);
-  if (!HOST_NAME_RE.test(name) || RESERVED.has(name) || !base || base.startsWith('.') || base.startsWith(':')) return null;
-  return name;
+  return parseAppHost(String(host))?.name ?? null;
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────

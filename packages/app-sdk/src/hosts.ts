@@ -12,21 +12,7 @@
  * there is no label to prepend — ask the user to use the nip.io address.
  */
 
-const HOST_NAME_RE = /^[a-z][a-z0-9]{0,30}$/;
-
-function isRawIpHost(host: string): boolean {
-  const h = host.trim().toLowerCase();
-  if (h.startsWith('[')) return true;
-  const name = h.replace(/:\d+$/, '');
-  return /^\d{1,3}(\.\d{1,3}){3}$/.test(name) || name === 'localhost' || !name.includes('.');
-}
-
-/** The desktop part of a host that may itself be an app host (`x--desk` → `desk`). */
-function desktopPart(host: string): string {
-  const h = host.trim().toLowerCase();
-  const at = h.indexOf('--');
-  return at > 0 && HOST_NAME_RE.test(h.slice(0, at)) ? h.slice(at + 2) : h;
-}
+import { HOST_NAME_RE, desktopPart, isRawIpHost } from './hostRules.js';
 
 /**
  * URL of app host `name` for a desktop at `desktop` (default: this page's
