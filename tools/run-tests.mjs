@@ -147,21 +147,28 @@ function parse(text) {
   return { ...counts, failures };
 }
 
+// --test-force-exit can cut off the summary, so a clean exit with no counted
+// tests proves nothing.
+const incomplete = (r) => r.code === 0 && r.tests === 0;
+const passed = (r) => r.code === 0 && !incomplete(r);
+const label = (r) => r.timedOut ? 'TIMEOUT' : incomplete(r) ? 'FAILED (no test summary)' : r.code === 0 ? 'ok' : `FAILED (exit ${r.code})`;
+
 const results = [];
 for (const suite of suites) {
   process.stdout.write(`running ${suite.dir} ... `);
-  const r = await runSuite(suite);
+  let r = await runSuite(suite);
+  if (incomplete(r)) r = await runSuite(suite);
   results.push(r);
-  console.log(r.timedOut ? 'TIMEOUT' : r.code === 0 ? 'ok' : 'FAILED');
+  console.log(label(r));
 }
 
 console.log('\nsuite                          tests  pass  fail  cancel  skip  todo  time  result');
 for (const r of results) {
   const n = (v, w) => String(v).padStart(w);
-  const result = r.timedOut ? 'TIMEOUT' : r.code === 0 ? 'ok' : `FAILED (exit ${r.code})`;
+  const result = label(r);
   console.log(`${r.dir.padEnd(30)} ${n(r.tests, 5)} ${n(r.pass, 5)} ${n(r.fail, 5)} ${n(r.cancelled, 7)} ${n(r.skipped, 5)} ${n(r.todo, 5)} ${n(r.seconds, 4)}s  ${result}`);
   for (const f of r.failures) console.log(`    x ${f}`);
-  if (r.code !== 0) console.log(`    log: ${r.logPath}`);
+  if (!passed(r)) console.log(`    log: ${r.logPath}`);
 }
 if (existsSync(guardLog)) {
   const blocked = [...new Set(readFileSync(guardLog, 'utf-8').trim().split('\n'))];
@@ -169,4 +176,4 @@ if (existsSync(guardLog)) {
   for (const b of blocked.slice(0, 40)) console.log(`    ${b.slice(0, 120)}`);
 }
 console.log(`\nlogs: ${runDir}`);
-process.exit(results.every((r) => r.code === 0) ? 0 : 1);
+process.exit(results.every(passed) ? 0 : 1);
