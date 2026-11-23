@@ -273,7 +273,7 @@ export class AppManager {
   }
 
   /** A slot is assigned when an instance is claimed for use, never to a pool member. */
-  private async claimHostSlot(appId: string, instanceId: string): Promise<void> {
+  async claimHostSlot(appId: string, instanceId: string): Promise<void> {
     const scope: ScopeId | undefined = this.registry.getScopeId(appId);
     if (!scope) return;
     try { await getAppHostServices().lifecycle.claimSlot(appId, scope, instanceId); }

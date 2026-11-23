@@ -586,6 +586,7 @@ async function withRouteWorld(run: () => Promise<void>) {
     getManifest: (id: string) => (id === 'io.acme.notes' || id === 'io.other.app' ? { id, componentType: 'activity' } : undefined),
     getInstance: (id: string) => instances[id],
     getActivity: (id: string) => activities[id],
+    claimHostSlot: async () => {},
   };
   G[AUTH] = auth;
   G[SERVICES] = {

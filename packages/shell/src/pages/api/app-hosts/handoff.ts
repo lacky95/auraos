@@ -91,9 +91,15 @@ export const POST: APIRoute = async (ctx) => {
       if (!activity || activity.appId !== appId || activity.parentInstanceId !== instanceId) return json({ error: 'not-found' }, 404);
     }
 
-    const held = (await services.registry.listForApp(appId))
+    const heldSlots = async () => (await services.registry.listForApp(appId))
       .filter((r) => r.state === 'active')
       .flatMap((r) => r.slots.filter((s) => s.instanceId === instanceId));
+    let held = await heldSlots();
+    // PHASE2-CUTOVER: only an instance started before its app moved to `host` lacks a slot.
+    if (held.length === 0) {
+      await mgr.claimHostSlot(appId, instanceId);
+      held = await heldSlots();
+    }
     if (held.length !== 1) return json({ error: 'slot-not-assigned' }, 409);
     const label = held[0]!.label;
     const resolved = await services.registry.resolveLabel(label);
