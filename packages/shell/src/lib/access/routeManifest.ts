@@ -64,6 +64,7 @@ const groups: RouteAccessManifest['groups'] = {
   activities:    rule(INSTANCE, 'activity'),
   admin:         rule(OWNER, 'system'),
   apps:          rule(OWNER, 'app'),
+  auth:          rule(OWNER, 'session'),
   data:          rule(['app-permission'], 'data-provider'),
   flights:       rule(OWNER, 'system'),
   hosts:         rule(OWNER, 'system'),
@@ -116,6 +117,24 @@ const routes: RouteAccessManifest['routes'] = {
     methods: {
       GET: rule(OWNER, 'system', decide(1, 'Reports setupDoneAt. Decide whether the setup page reads it before login or uses first-boot status instead.')),
     },
+  },
+
+  // Owner login (D37): all but status answer 404 unless AURA_OWNER_LOGIN=on.
+  // `setup` also takes the reset path: both need a one-time host code (D8).
+  '/api/auth/status': { methods: { GET: rule(['public'], 'system') } },
+  '/api/auth/setup': { methods: { POST: rule(['public'], 'system') } },
+  '/api/auth/login': { methods: { POST: rule(['public'], 'session') } },
+  '/api/auth/logout': {
+    methods: { POST: rule(OWNER, 'session', decide(3,
+      'Acts only on the session in its own cookie. Enforcement must let an expired session through to clear the cookie, or the handler has to become public.')) },
+  },
+  '/api/auth/session': {
+    methods: { GET: rule(OWNER, 'session', decide(3,
+      'Answers authenticated:false to a visitor without a session. Decide whether enforcement keeps that answer or returns 401 first.')) },
+  },
+  '/api/auth/whoami': {
+    methods: { GET: rule(OWNER, 'session', decide(3,
+      'Reports the login-cookie principal only. Decide whether instance tokens and API keys may ask it too, once the CLI identity path is settled.')) },
   },
 
   // Static candidates for the login page; everything else in `os` stays owner.

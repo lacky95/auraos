@@ -125,6 +125,24 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     rule: { allow: ['owner'], target: 'system' },
   },
   {
+    id: 'page-setup',
+    kind: 'page',
+    source: 'packages/shell/src/pages/setup.astro',
+    paths: ['/setup'],
+    page: '/setup',
+    // 404 unless AURA_OWNER_LOGIN=on (D37). Acting on it needs a one-time host code.
+    rule: { allow: ['public'], target: 'system' },
+  },
+  {
+    id: 'page-login',
+    kind: 'page',
+    source: 'packages/shell/src/pages/login.astro',
+    paths: ['/login'],
+    page: '/login',
+    // 404 unless AURA_OWNER_LOGIN=on (D37).
+    rule: { allow: ['public'], target: 'session' },
+  },
+  {
     id: 'page-dev-notification-controls',
     kind: 'page',
     source: 'packages/shell/src/pages/dev/notification-controls.astro',
