@@ -15,6 +15,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { markClaimedTicket } from './claimedTickets.js';
 import type { SetupTicket, SetupTicketPurpose, SetupTickets } from './identityContracts.js';
 
 export const SETUP_TICKET_TTL_MS = 10 * 60_000;
@@ -149,6 +150,9 @@ export class FileSetupTickets implements SetupTickets {
       return null;
     }
     rmSync(claimed, { force: true });
+    // Frozen: the claim vouches for exactly these fields.
+    Object.freeze(ticket);
+    markClaimedTicket(ticket);
     return ticket;
   }
 

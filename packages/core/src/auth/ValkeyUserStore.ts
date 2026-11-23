@@ -4,7 +4,8 @@
  *
  * The record carries a MAC from identity.key, so a Valkey writer cannot swap
  * the hash, username or role. A record that fails the MAC never authenticates,
- * and still counts as an existing owner so setup cannot replace it.
+ * and still counts as an existing owner so setup cannot replace it. Only
+ * `recoverOwnerPassword`, with a claimed reset ticket, can re-seal it.
  *
  * Passwords use async scrypt with its parameters in the hash string. Hashing is
  * serialized and login attempts are rate limited BEFORE any hashing, because
@@ -12,8 +13,12 @@
  */
 import { createHash, createHmac, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import type { Redis } from '@aura/kv-store';
-import { deriveIdentitySubkey } from './identityKey.js';
-import { DEFAULT_OWNER_ID, type PasswordCheck, type UserAccount, type UserStore } from './identityContracts.js';
+import { consumeClaimedTicket, isClaimedTicket } from './claimedTickets.js';
+import { deriveIdentitySubkey, IdentityKeyError, identityKeyStatus, type IdentityKeyStatus } from './identityKey.js';
+import {
+  DEFAULT_OWNER_ID,
+  type LoginSessions, type PasswordCheck, type SetupTicket, type UserAccount, type UserStore,
+} from './identityContracts.js';
 import type { UserRole } from './types.js';
 
 export const OWNER_RECORD_KEY = `user:${DEFAULT_OWNER_ID}`;
@@ -38,6 +43,24 @@ export class UserStoreError extends Error {
 }
 
 interface StoredUser extends UserAccount { passwordHash: string }
+
+export type OwnerRecoveryResult =
+  | {
+    ok: true;
+    user: UserAccount;
+    /** False when the old record failed its MAC, so the username came from the ticket. */
+    recordTrusted: boolean;
+    /** Null when the password changed but revoking sessions failed. */
+    sessionsRevoked: number | null;
+  }
+  | { ok: false; reason: 'invalid-ticket' | 'no-owner' | 'username-mismatch' | 'identity-key-unavailable' | 'conflict' };
+
+export interface OwnerRecoveryEvent {
+  username: string;
+  recordTrusted: boolean;
+  usernameSource: 'record' | 'ticket';
+  sessionsRevoked: number | null;
+}
 
 function deriveKey(password: string, salt: Buffer, N: number, r: number, p: number, keyLen: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -90,12 +113,28 @@ function assertPassword(password: unknown): asserts password is string {
   }
 }
 
+/** Display-only metadata from a record that failed its MAC. */
+function untrustedCreatedAt(raw: string, fallback: number): number {
+  try {
+    const t = (JSON.parse(raw) as { createdAt?: unknown }).createdAt;
+    return typeof t === 'number' && Number.isSafeInteger(t) && t > 0 && t <= fallback ? t : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export interface ValkeyUserStoreOptions {
   identityKeyFile: string;
   redis: () => Redis;
   now?: () => number;
   /** A stored record failed its MAC. Never receives record contents. */
   onTampered?: () => void;
+  /** identity.key is unusable, so password login is disabled. Reported once per outage. */
+  onIdentityKeyError?: (err: IdentityKeyError) => void;
+  /** Required by `recoverOwnerPassword`, which revokes every password session. */
+  sessions?: Pick<LoginSessions, 'revokeByMethod'>;
+  /** Audit hook for a completed recovery. Its failure never undoes the recovery. */
+  onOwnerRecovered?: (e: OwnerRecoveryEvent) => Promise<void> | void;
 }
 
 export class ValkeyUserStore implements UserStore {
@@ -103,7 +142,10 @@ export class ValkeyUserStore implements UserStore {
   private readonly now: () => number;
   private readonly identityKeyFile: string;
   private readonly onTampered?: () => void;
-  private macKey: Buffer | null = null;
+  private readonly onIdentityKeyError?: (err: IdentityKeyError) => void;
+  private readonly sessions?: Pick<LoginSessions, 'revokeByMethod'>;
+  private readonly onOwnerRecovered?: (e: OwnerRecoveryEvent) => Promise<void> | void;
+  private keyErrorReported = false;
   /** Digest of the last bad record, so one tampering is reported once. */
   private reportedTamper: string | null = null;
 
@@ -112,20 +154,34 @@ export class ValkeyUserStore implements UserStore {
     this.redis = opts.redis;
     this.now = opts.now ?? Date.now;
     this.onTampered = opts.onTampered;
+    this.onIdentityKeyError = opts.onIdentityKeyError;
+    this.sessions = opts.sessions;
+    this.onOwnerRecovered = opts.onOwnerRecovered;
   }
 
   private mac(u: StoredUser): Buffer {
-    this.macKey ??= deriveIdentitySubkey(this.identityKeyFile, 'user-record');
+    const key = deriveIdentitySubkey(this.identityKeyFile, 'user-record');
     const canonical = JSON.stringify([OWNER_RECORD_KEY, u.id, u.username, u.passwordHash, u.role, u.createdAt, u.disabled]);
-    return createHmac('sha256', this.macKey).update(canonical).digest();
+    return createHmac('sha256', key).update(canonical).digest();
   }
 
   private seal(u: StoredUser): string {
     return JSON.stringify({ ...u, mac: this.mac(u).toString('base64url') });
   }
 
+  private reportKeyError(err: IdentityKeyError): void {
+    if (this.keyErrorReported) return;
+    this.keyErrorReported = true;
+    this.onIdentityKeyError?.(err);
+  }
+
+  /** For status routes: `malformed` means password login is disabled. */
+  identityKeyStatus(): IdentityKeyStatus {
+    return identityKeyStatus(this.identityKeyFile);
+  }
+
   /** The record if it exists and its MAC is valid. */
-  private unseal(raw: string | null): StoredUser | null {
+  private unseal(raw: string | null, report = true): StoredUser | null {
     if (!raw) return null;
     try {
       const o = JSON.parse(raw) as Partial<StoredUser> & { mac?: unknown };
@@ -138,9 +194,15 @@ export class ValkeyUserStore implements UserStore {
       };
       const given = Buffer.from(o.mac, 'base64url');
       const want = this.mac(u);
+      this.keyErrorReported = false;
       if (given.length !== want.length || !timingSafeEqual(given, want)) throw new Error('mac');
       return u;
-    } catch {
+    } catch (err) {
+      if (err instanceof IdentityKeyError) {
+        if (report) this.reportKeyError(err);
+        return null;
+      }
+      if (!report) return null;
       const digest = createHash('sha256').update(raw).digest('hex');
       if (digest !== this.reportedTamper) {
         this.reportedTamper = digest;
@@ -166,6 +228,7 @@ export class ValkeyUserStore implements UserStore {
     }
     assertPassword(input.password);
     if (await this.hasOwner()) return null; // Skip the expensive hash; SET NX below is the real guard.
+    deriveIdentitySubkey(this.identityKeyFile, 'user-record'); // Fail before hashing on a bad key.
     const user: StoredUser = {
       id: DEFAULT_OWNER_ID, username, passwordHash: await hashPassword(input.password),
       role: 'owner', createdAt: this.now(), disabled: false,
@@ -229,5 +292,58 @@ export class ValkeyUserStore implements UserStore {
     if (!user) return false;
     const next = this.seal({ ...user, passwordHash: await hashPassword(password) });
     return (await r.eval(SET_IF_UNCHANGED, 1, OWNER_RECORD_KEY, raw!, next)) === 1;
+  }
+
+  /**
+   * Operator recovery, e.g. after identity.key was lost or replaced. Needs the
+   * object returned by a successful `FileSetupTickets.claim(code, 'reset')`,
+   * which it spends. Re-seals the owner record even if its MAC fails, then
+   * revokes every password session. When the MAC fails, nothing in the old
+   * record is trusted: the username comes from the ticket and the account is
+   * re-enabled. Audited through `onOwnerRecovered`.
+   */
+  async recoverOwnerPassword(ticket: SetupTicket, password: string): Promise<OwnerRecoveryResult> {
+    assertPassword(password);
+    if (!this.sessions) throw new Error('recoverOwnerPassword needs a session store');
+    if (!isClaimedTicket(ticket) || ticket.purpose !== 'reset' || ticket.expiresAt <= this.now()) {
+      return { ok: false, reason: 'invalid-ticket' };
+    }
+    const ticketName = typeof ticket.username === 'string' ? normalizeUsername(ticket.username) : '';
+    if (!USERNAME_PATTERN.test(ticketName)) return { ok: false, reason: 'invalid-ticket' };
+    try {
+      deriveIdentitySubkey(this.identityKeyFile, 'user-record');
+    } catch (err) {
+      if (err instanceof IdentityKeyError) this.reportKeyError(err);
+      return { ok: false, reason: 'identity-key-unavailable' };
+    }
+    if (!consumeClaimedTicket(ticket)) return { ok: false, reason: 'invalid-ticket' };
+
+    const r = this.redis();
+    const raw = await r.get(OWNER_RECORD_KEY);
+    if (!raw) return { ok: false, reason: 'no-owner' };
+    const trusted = this.unseal(raw, false);
+    if (trusted && trusted.username !== ticketName) return { ok: false, reason: 'username-mismatch' };
+
+    const passwordHash = await hashPassword(password);
+    const user: StoredUser = trusted
+      ? { ...trusted, passwordHash }
+      : {
+        id: DEFAULT_OWNER_ID, username: ticketName, passwordHash,
+        role: 'owner', createdAt: untrustedCreatedAt(raw, this.now()), disabled: false,
+      };
+    if ((await r.eval(SET_IF_UNCHANGED, 1, OWNER_RECORD_KEY, raw, this.seal(user))) !== 1) {
+      return { ok: false, reason: 'conflict' };
+    }
+    this.reportedTamper = null;
+
+    let sessionsRevoked: number | null = null;
+    try { sessionsRevoked = await this.sessions.revokeByMethod('password'); } catch { /* reported below */ }
+    try {
+      await this.onOwnerRecovered?.({
+        username: user.username, recordTrusted: !!trusted,
+        usernameSource: trusted ? 'record' : 'ticket', sessionsRevoked,
+      });
+    } catch { /* the recovery itself succeeded */ }
+    return { ok: true, user: accountOf(user), recordTrusted: !!trusted, sessionsRevoked };
   }
 }

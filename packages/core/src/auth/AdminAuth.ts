@@ -3,7 +3,8 @@
  *
  *   credential  <dataDir>/aura/secrets/admin.key (see adminCredential.ts)
  *   unlock      credential → 15-minute `shared-key` login session, not renewed.
- *               Sessions themselves live in `LoginSessionStore`.
+ *               Sessions live in `LoginSessionStore`, but their MAC key comes
+ *               from this credential, so recovery works without identity.key.
  *
  * Sent as `Authorization: Bearer aura-admin1.…` — never as a cookie, because
  * the shell proxy forwards request headers (and cookies) to app upstreams.
@@ -13,7 +14,7 @@
  * also purges the shared-key sessions and reports it through `onRotated`
  * (audit). Password sessions are not affected.
  */
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Redis } from '@aura/kv-store';
@@ -48,6 +49,7 @@ export interface AdminAuthOptions {
 
 interface Loaded {
   credential: string;
+  sessionKey: Buffer;
   fp: string;
   stamp: string;
 }
@@ -80,7 +82,10 @@ export class AdminAuth {
       identityKeyFile: opts.identityKeyFile ?? join(dirname(opts.keyFile), 'identity.key'),
       redis: opts.redis,
       now: this.now,
-      sharedKeyFingerprint: () => this.load()?.fp ?? null,
+      sharedKey: () => {
+        const cur = this.load();
+        return cur ? { fingerprint: cur.fp, macKey: cur.sessionKey } : null;
+      },
     });
   }
 
@@ -104,7 +109,12 @@ export class AdminAuth {
     const credential = readAdminCredential(this.keyFile);
     if (!credential) { this.loaded = null; return null; }
     const prev = this.loaded;
-    const next: Loaded = { credential, fp: sha256(credential).toString('hex').slice(0, 12), stamp };
+    const next: Loaded = {
+      credential,
+      sessionKey: createHmac('sha256', credential).update('aura-login-session/shared-key/v1').digest(),
+      fp: sha256(credential).toString('hex').slice(0, 12),
+      stamp,
+    };
     this.loaded = next;
     if (prev && prev.credential !== credential) {
       void this.sessions.revokeByMethod('shared-key').then((n) => this.onRotated?.(n)).catch(() => undefined);

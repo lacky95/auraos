@@ -23,6 +23,8 @@ export const IDENTITY_AUDIT_ACTIONS = {
   passwordReset: 'auth.password-reset',
   ticketCreated: 'auth.ticket-created',
   recordTampered: 'auth.record-tampered',
+  identityKeyError: 'auth.identity-key-error',
+  ownerRecovered: 'auth.owner-recovered',
 } as const;
 
 export interface UserAttribution {

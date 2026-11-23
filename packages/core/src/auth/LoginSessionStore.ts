@@ -6,7 +6,9 @@
  *           sessions, which is the prefix the shell and CLI route as admin.
  *           The prefix is covered by the MAC and must match the method, so a
  *           password session can never be relabelled as an admin session.
- *   HMAC    subkey of identity.key
+ *   HMAC    password: subkey of identity.key. shared-key: derived from the
+ *           admin credential, so recovery never depends on identity.key. The
+ *           method is part of the MAC input as well.
  *   nonce   usersess:<sid> in Valkey with the session's TTL; deleting it
  *           revokes the session.
  *   `f`     shared-key sessions only: must match the current credential, so a
@@ -35,8 +37,8 @@ export interface LoginSessionStoreOptions {
   identityKeyFile: string;
   redis: () => Redis;
   now?: () => number;
-  /** Fingerprint of the current shared credential; null when there is none. */
-  sharedKeyFingerprint?: () => string | null;
+  /** MAC key and fingerprint of the current shared credential; null when there is none. */
+  sharedKey?: () => { fingerprint: string; macKey: Buffer } | null;
 }
 
 const prefixFor = (m: LoginMethod) => (m === 'password' ? LOGIN_SESSION_PREFIX : SHARED_KEY_SESSION_PREFIX);
@@ -45,25 +47,31 @@ export class LoginSessionStore implements LoginSessions {
   private readonly redis: () => Redis;
   private readonly now: () => number;
   private readonly identityKeyFile: string;
-  private readonly sharedKeyFingerprint: () => string | null;
-  private macKey: Buffer | null = null;
+  private readonly sharedKey: () => { fingerprint: string; macKey: Buffer } | null;
 
   constructor(opts: LoginSessionStoreOptions) {
     this.identityKeyFile = opts.identityKeyFile;
     this.redis = opts.redis;
     this.now = opts.now ?? Date.now;
-    this.sharedKeyFingerprint = opts.sharedKeyFingerprint ?? (() => null);
+    this.sharedKey = opts.sharedKey ?? (() => null);
   }
 
-  private mac(prefix: string, payload: string): Buffer {
-    this.macKey ??= deriveIdentitySubkey(this.identityKeyFile, 'login-session');
-    return createHmac('sha256', this.macKey).update(`${prefix}.${payload}`).digest();
+  /** Throws `IdentityKeyError` for a password session when identity.key is unusable. */
+  private mac(method: LoginMethod, prefix: string, payload: string): Buffer {
+    const key = method === 'password'
+      ? deriveIdentitySubkey(this.identityKeyFile, 'login-session')
+      : this.sharedKey()?.macKey;
+    if (!key) throw new Error('no shared credential');
+    return createHmac('sha256', key).update(`${method}\0${prefix}.${payload}`).digest();
   }
 
   async issue(input: LoginSessionInput): Promise<{ token: string; session: LoginSession }> {
     const maxTtl = input.method === 'password' ? STAY_SIGNED_IN_TTL_MS : SHARED_KEY_SESSION_TTL_MS;
     const ttlMs = input.ttlMs ?? (input.method === 'password' ? PASSWORD_SESSION_TTL_MS : SHARED_KEY_SESSION_TTL_MS);
     if (!Number.isInteger(ttlMs) || ttlMs <= 0 || ttlMs > maxTtl) throw new RangeError('invalid session lifetime');
+    if (input.method === 'shared-key' && this.sharedKey()?.fingerprint !== input.keyFingerprint) {
+      throw new Error('shared-key fingerprint does not match the current credential');
+    }
 
     const sessionId = randomBytes(16).toString('hex');
     const createdAt = this.now();
@@ -75,7 +83,7 @@ export class LoginSessionStore implements LoginSessions {
     };
     const prefix = prefixFor(input.method);
     const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
-    const token = `${prefix}.${payload}.${this.mac(prefix, payload).toString('base64url')}`;
+    const token = `${prefix}.${payload}.${this.mac(input.method, prefix, payload).toString('base64url')}`;
     const nonce: Nonce = { m: input.method, ...(input.userId ? { u: input.userId } : {}), createdAt, expiresAt };
     await this.redis().set(loginSessionKey(sessionId), JSON.stringify(nonce), 'PX', ttlMs);
     return {
@@ -93,20 +101,21 @@ export class LoginSessionStore implements LoginSessions {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
     const [prefix, payload, sig] = parts as [string, string, string];
-    if (prefix !== LOGIN_SESSION_PREFIX && prefix !== SHARED_KEY_SESSION_PREFIX) return null;
+    const method: LoginMethod | null = prefix === LOGIN_SESSION_PREFIX ? 'password'
+      : prefix === SHARED_KEY_SESSION_PREFIX ? 'shared-key' : null;
+    if (!method) return null;
 
     try {
       const given = Buffer.from(sig, 'base64url');
-      const want = this.mac(prefix, payload);
+      const want = this.mac(method, prefix, payload);
       if (given.length !== want.length || !timingSafeEqual(given, want)) return null;
 
       const p = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as Partial<LoginSessionPayload>;
       if (typeof p.s !== 'string' || !SESSION_ID_RE.test(p.s) || typeof p.e !== 'number') return null;
-      if (p.m !== 'password' && p.m !== 'shared-key') return null;
-      if (prefix !== prefixFor(p.m) || p.e <= this.now()) return null;
+      if (p.m !== method || p.e <= this.now()) return null;
       if (p.u !== undefined && typeof p.u !== 'string') return null;
       if (p.m === 'password' && !p.u) return null;
-      if (p.m === 'shared-key' && (typeof p.f !== 'string' || p.f !== this.sharedKeyFingerprint())) return null;
+      if (p.m === 'shared-key' && (typeof p.f !== 'string' || p.f !== this.sharedKey()?.fingerprint)) return null;
 
       const raw = await this.redis().get(loginSessionKey(p.s));
       if (!raw) return null;

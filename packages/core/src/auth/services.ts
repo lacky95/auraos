@@ -75,6 +75,18 @@ export function getAuthServices(): AuthServices {
       console.warn('[auth] the owner record failed its integrity check');
       void audit.record({ by: { kind: 'system' }, action: IDENTITY_AUDIT_ACTIONS.recordTampered, outcome: 'failed' }).catch(() => undefined);
     },
+    onIdentityKeyError: (err) => {
+      console.error(`[auth] ${err.message}`);
+      void audit.record({ by: { kind: 'system' }, action: IDENTITY_AUDIT_ACTIONS.identityKeyError, outcome: 'failed' }).catch(() => undefined);
+    },
+    sessions: admin.sessions,
+    onOwnerRecovered: async (e) => {
+      await audit.record({
+        by: operatorAttribution(), action: IDENTITY_AUDIT_ACTIONS.ownerRecovered, target: `user:${e.username}`,
+        outcome: e.sessionsRevoked === null ? 'failed' : 'ok',
+        detail: { recordTrusted: e.recordTrusted, usernameSource: e.usernameSource, sessionsRevoked: e.sessionsRevoked },
+      });
+    },
   });
   // The CLI creates tickets without Valkey, so the shell audits them from their event files.
   const auditCreatedTickets = async () => {
