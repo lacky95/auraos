@@ -24,11 +24,18 @@ const attachSource = fs.readFileSync(path.join(root, 'server/attach.mjs'), 'utf8
 const STATIC_CANDIDATES = ['/api/os/theme.css', '/api/os/icons.svg', '/api/os/icons/[name].svg'];
 const candidateKeys = STATIC_CANDIDATES.flatMap((r) => [`GET ${r}`, `HEAD ${r}`]);
 const POLICY: AuditPolicy = {
-  publicRoutes: new Set(['POST /api/admin/session', 'GET /api/admin/first-boot', 'HEAD /api/admin/first-boot', ...candidateKeys]),
+  publicRoutes: new Set([
+    'POST /api/admin/session', 'GET /api/admin/first-boot', 'HEAD /api/admin/first-boot',
+    'GET /api/auth/status', 'HEAD /api/auth/status', 'POST /api/auth/setup', 'POST /api/auth/login',
+    ...candidateKeys,
+  ]),
   publicCandidates: new Set(candidateKeys),
-  publicSurfaces: new Set(['shell-static-assets']),
+  publicSurfaces: new Set(['shell-static-assets', 'page-setup', 'page-login']),
 };
-const NEVER_PUBLIC = ['/api/os/context', '/api/os/volumes', '/api/os/lock', '/api/os/unlock', '/api/os/ui/command'];
+const NEVER_PUBLIC = [
+  '/api/os/context', '/api/os/volumes', '/api/os/lock', '/api/os/unlock', '/api/os/ui/command',
+  '/api/auth/logout', '/api/auth/session', '/api/auth/whoami',
+];
 // Classified in SURFACE_MANIFEST as shell-listener, ws-proxy and sse-mux.
 const KNOWN_LISTENERS = [
   'server.mjs createServer',

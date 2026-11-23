@@ -1,0 +1,54 @@
+---
+/**
+ * The setup and login pages. Deliberately not OSLayout: no desktop bootstrap,
+ * no socket, no app data. The page sets its headers through `authPageGate`.
+ */
+interface Props {
+  title: string;
+  nonce: string;
+}
+const { title, nonce } = Astro.props;
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <meta name="referrer" content="no-referrer" />
+    <title>{title} · AuraOS</title>
+    <link rel="icon" href="/favicon.ico" />
+    <link rel="stylesheet" href="/api/os/theme.css" />
+    <style is:inline nonce={nonce}>
+      :root { color-scheme: dark light; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px;
+        background: var(--aura-color-bg, #0b0d10); color: var(--aura-color-text, #e6e8eb);
+        font: 15px/1.5 system-ui, sans-serif;
+      }
+      main { width: 100%; max-width: 380px; }
+      h1 { font-size: 20px; margin: 0 0 8px; }
+      p { margin: 0 0 16px; }
+      code { display: block; padding: 8px; overflow-wrap: anywhere; border: 1px solid var(--aura-color-border, #333); }
+      label { display: block; margin-bottom: 12px; }
+      label.check { display: flex; gap: 8px; align-items: center; }
+      input:not([type=checkbox]) {
+        display: block; width: 100%; margin-top: 4px; padding: 8px; font: inherit; color: inherit;
+        background: transparent; border: 1px solid var(--aura-color-border, #333);
+      }
+      button {
+        width: 100%; padding: 9px; font: inherit; cursor: pointer; color: var(--aura-color-bg, #0b0d10);
+        background: var(--aura-color-primary, #7acc4d); border: 0;
+      }
+      button:disabled { opacity: .6; cursor: default; }
+      a { color: var(--aura-color-primary, #7acc4d); }
+      [hidden] { display: none !important; }
+      .error { min-height: 1.5em; margin: 12px 0 0; color: var(--aura-color-danger, #ff2020); }
+      .alt { margin: 16px 0 0; }
+    </style>
+  </head>
+  <body>
+    <main><slot /></main>
+  </body>
+</html>

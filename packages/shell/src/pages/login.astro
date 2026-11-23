@@ -1,0 +1,54 @@
+---
+import AuthLayout from '../layouts/AuthLayout.astro';
+import { authPageGate } from '../lib/authSurface.js';
+
+const gate = authPageGate();
+if (!gate.enabled) return gate.response;
+for (const [name, value] of Object.entries(gate.headers)) Astro.response.headers.set(name, value);
+---
+<AuthLayout title="Sign in" nonce={gate.nonce}>
+  <h1>Sign in to AuraOS</h1>
+  <form id="login" method="post" novalidate>
+    <label>Username <input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required /></label>
+    <label>Password <input name="password" type="password" autocomplete="current-password" required /></label>
+    <label class="check"><input name="stay" type="checkbox" /> Stay signed in for 30 days</label>
+    <button type="submit">Sign in</button>
+    <p class="error" role="alert"></p>
+  </form>
+  <p class="alt"><a href="/setup">Forgot your password?</a></p>
+  <script is:inline nonce={gate.nonce}>
+    (() => {
+      const form = document.getElementById('login');
+      const error = form.querySelector('.error');
+      const button = form.querySelector('button');
+      const messages = {
+        'invalid-credentials': 'Wrong username or password.',
+        'rate-limited': 'Too many attempts. Wait a minute and try again.',
+      };
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        error.textContent = '';
+        button.disabled = true;
+        try {
+          const res = await fetch('/api/auth/login', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              username: form.elements.username.value,
+              password: form.elements.password.value,
+              staySignedIn: form.elements.stay.checked,
+            }),
+          });
+          if (res.ok) { location.replace('/'); return; }
+          const data = await res.json().catch(() => ({}));
+          error.textContent = messages[data.error] ?? 'Sign-in is unavailable right now.';
+        } catch {
+          error.textContent = 'Could not reach AuraOS.';
+        }
+        form.elements.password.value = '';
+        button.disabled = false;
+      });
+    })();
+  </script>
+</AuthLayout>
