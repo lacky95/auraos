@@ -1,31 +1,30 @@
 /**
- * AdminAuth — minimal admin authentication with ONE shared operator
- * credential (no user accounts).
+ * AdminAuth — the shared operator credential, kept as the recovery path.
  *
  *   credential  <dataDir>/aura/secrets/admin.key (see adminCredential.ts)
- *   unlock      credential → short-lived session token
- *                 aura-admin1.<b64url {s: sessionId, e: expiresAt, f: keyFp}>.<b64url HMAC>
- *               HMAC key = HMAC-SHA256(credential, 'aura-admin-session/v1'),
- *               so rotating the credential invalidates every token.
- *   nonce       adminsess:<sessionId> in Valkey with the same TTL — `lock`
- *               (DELETE) revokes one session before it expires.
- *   TTL         15 minutes, not renewed.
+ *   unlock      credential → 15-minute `shared-key` login session, not renewed.
+ *               Sessions live in `LoginSessionStore`, but their MAC key comes
+ *               from this credential, so recovery works without identity.key.
  *
  * Sent as `Authorization: Bearer aura-admin1.…` — never as a cookie, because
  * the shell proxy forwards request headers (and cookies) to app upstreams.
  *
  * Rotation (`aura admin rotate` in the master container) rewrites the key
- * file; the next check here notices the changed file, purges all sessions and
- * reports it through `onRotated` (audit).
+ * file. The session fingerprint stops matching at once; the next check here
+ * also purges the shared-key sessions and reports it through `onRotated`
+ * (audit). Password sessions are not affected.
  */
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import type { Redis } from '@aura/kv-store';
 import { ensureAdminCredential, readAdminCredential } from './adminCredential.js';
+import {
+  LoginSessionStore, SHARED_KEY_SESSION_PREFIX, SHARED_KEY_SESSION_TTL_MS,
+} from './LoginSessionStore.js';
 
-export const ADMIN_SESSION_PREFIX = 'aura-admin1';
-export const ADMIN_SESSION_TTL_MS = 15 * 60_000;
-export const adminSessionKey = (sid: string) => `adminsess:${sid}`;
+export const ADMIN_SESSION_PREFIX = SHARED_KEY_SESSION_PREFIX;
+export const ADMIN_SESSION_TTL_MS = SHARED_KEY_SESSION_TTL_MS;
 const FAILED_UNLOCKS_PER_MINUTE = 30;
 
 export interface AdminSession {
@@ -40,6 +39,8 @@ export type UnlockResult =
 export interface AdminAuthOptions {
   keyFile: string;
   redis: () => Redis;
+  /** Defaults to `identity.key` next to `keyFile`. */
+  identityKeyFile?: string;
   now?: () => number;
   ttlMs?: number;
   /** Called once when a changed key file is detected (after sessions were purged). */
@@ -63,6 +64,8 @@ export function looksLikeAdminSession(s: string): boolean {
 
 export class AdminAuth {
   readonly keyFile: string;
+  /** The one login-session store, shared with password logins. */
+  readonly sessions: LoginSessionStore;
   private readonly redis: () => Redis;
   private readonly now: () => number;
   readonly ttlMs: number;
@@ -75,6 +78,15 @@ export class AdminAuth {
     this.now = opts.now ?? Date.now;
     this.ttlMs = opts.ttlMs ?? ADMIN_SESSION_TTL_MS;
     this.onRotated = opts.onRotated;
+    this.sessions = new LoginSessionStore({
+      identityKeyFile: opts.identityKeyFile ?? join(dirname(opts.keyFile), 'identity.key'),
+      redis: opts.redis,
+      now: this.now,
+      sharedKey: () => {
+        const cur = this.load();
+        return cur ? { fingerprint: cur.fp, macKey: cur.sessionKey } : null;
+      },
+    });
   }
 
   /** Create the credential file when missing (first shell start). Never returns the secret. */
@@ -99,13 +111,13 @@ export class AdminAuth {
     const prev = this.loaded;
     const next: Loaded = {
       credential,
-      sessionKey: createHmac('sha256', credential).update('aura-admin-session/v1').digest(),
+      sessionKey: createHmac('sha256', credential).update('aura-login-session/shared-key/v1').digest(),
       fp: sha256(credential).toString('hex').slice(0, 12),
       stamp,
     };
     this.loaded = next;
     if (prev && prev.credential !== credential) {
-      void this.purgeSessions().then((n) => this.onRotated?.(n)).catch(() => undefined);
+      void this.sessions.revokeByMethod('shared-key').then((n) => this.onRotated?.(n)).catch(() => undefined);
     }
     return next;
   }
@@ -115,10 +127,6 @@ export class AdminAuth {
     const cur = this.load();
     if (!cur || typeof input !== 'string' || input.length === 0 || input.length > 200) return false;
     return timingSafeEqual(sha256(input.trim()), sha256(cur.credential));
-  }
-
-  private mac(payload: string, key: Buffer): Buffer {
-    return createHmac('sha256', key).update(payload).digest();
   }
 
   /**
@@ -136,52 +144,20 @@ export class AdminAuth {
       if (fails === 1) await r.pexpire(bucket, 120_000);
       return { ok: false, reason: fails > FAILED_UNLOCKS_PER_MINUTE ? 'rate-limited' : 'invalid' };
     }
-
-    const sessionId = randomBytes(8).toString('hex');
-    const expiresAt = this.now() + this.ttlMs;
-    const payload = Buffer.from(JSON.stringify({ s: sessionId, e: expiresAt, f: cur.fp })).toString('base64url');
-    const token = `${ADMIN_SESSION_PREFIX}.${payload}.${this.mac(payload, cur.sessionKey).toString('base64url')}`;
-    await r.set(adminSessionKey(sessionId), JSON.stringify({ createdAt: this.now(), expiresAt }), 'PX', this.ttlMs);
-    return { ok: true, token, sessionId, expiresAt };
+    const { token, session } = await this.sessions.issue({ method: 'shared-key', keyFingerprint: cur.fp, ttlMs: this.ttlMs });
+    return { ok: true, token, sessionId: session.sessionId, expiresAt: session.expiresAt };
   }
 
-  /** The session of a valid, unexpired, unrevoked token, else null. Never throws on bad input. */
+  /** The shared-key session of a valid token, else null. Never throws on bad input. */
   async verifySession(token: string | null | undefined): Promise<AdminSession | null> {
     if (!token || !looksLikeAdminSession(token)) return null;
-    const parts = token.split('.');
-    if (parts.length !== 3) return null;
-    const [, payload, sig] = parts as [string, string, string];
-    const cur = this.load();
-    if (!cur) return null;
-    let given: Buffer;
-    try { given = Buffer.from(sig, 'base64url'); } catch { return null; }
-    const want = this.mac(payload, cur.sessionKey);
-    if (given.length !== want.length || !timingSafeEqual(given, want)) return null;
-    let p: { s?: unknown; e?: unknown; f?: unknown };
-    try { p = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as typeof p; } catch { return null; }
-    if (typeof p.s !== 'string' || typeof p.e !== 'number' || p.f !== cur.fp) return null;
-    if (p.e <= this.now()) return null;
-    const exists = await this.redis().exists(adminSessionKey(p.s));
-    if (!exists) return null;
-    return { sessionId: p.s, expiresAt: p.e };
+    const s = await this.sessions.verify(token);
+    if (!s || s.method !== 'shared-key') return null;
+    return { sessionId: s.sessionId, expiresAt: s.expiresAt };
   }
 
   /** Revoke one session (lock). */
-  async lock(sessionId: string): Promise<boolean> {
-    if (!/^[0-9a-f]{16}$/.test(sessionId)) return false;
-    return (await this.redis().del(adminSessionKey(sessionId))) > 0;
-  }
-
-  /** Drop every admin session (rotation). */
-  async purgeSessions(): Promise<number> {
-    const r = this.redis();
-    let cursor = '0';
-    let n = 0;
-    do {
-      const [next, keys] = await r.scan(cursor, 'MATCH', 'adminsess:*', 'COUNT', 200);
-      cursor = next;
-      if (keys.length) n += await r.del(...keys);
-    } while (cursor !== '0');
-    return n;
+  lock(sessionId: string): Promise<boolean> {
+    return this.sessions.revoke(sessionId);
   }
 }

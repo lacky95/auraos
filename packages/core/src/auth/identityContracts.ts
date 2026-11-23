@@ -1,6 +1,7 @@
 /**
  * Contracts for the owner account, login sessions and setup tickets (D5, D16,
- * 5.6). Interfaces only: nothing implements or calls them yet.
+ * 5.6). Implemented by `ValkeyUserStore`, `LoginSessionStore` and
+ * `FileSetupTickets`.
  *
  * No method returns a password hash, and tickets hold only the code's SHA-256.
  */
@@ -34,8 +35,11 @@ export interface UserStore {
   getOwner(): Promise<UserAccount | null>;
   /** Create-once and atomic: null when an owner already exists. */
   createOwner(input: { username: string; password: string }): Promise<UserAccount | null>;
-  /** Rate-limited before any hashing. Never throws on a bad password. */
-  verifyPassword(username: string, password: string): Promise<PasswordCheck>;
+  /**
+   * Rate-limited before any hashing. Never throws on a bad password.
+   * `rateLimitKey` identifies the client for the per-client limit (default: the username).
+   */
+  verifyPassword(username: string, password: string, opts?: { rateLimitKey?: string }): Promise<PasswordCheck>;
   /** False for an unknown user. Revoking sessions is the caller's step. */
   setPassword(userId: string, password: string): Promise<boolean>;
 }
@@ -46,7 +50,10 @@ export const LOGIN_SESSION_PREFIX = 'aura-sess1';
 
 export type LoginMethod = 'password' | 'shared-key';
 
-/** Signed token payload: `aura-sess1.<b64url payload>.<b64url MAC>`. */
+/**
+ * Signed token payload: `<prefix>.<b64url payload>.<b64url MAC>`. The prefix is
+ * `aura-sess1` for password sessions and `aura-admin1` for shared-key sessions.
+ */
 export interface LoginSessionPayload {
   /** Session id. */
   s: string;

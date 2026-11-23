@@ -20,6 +20,9 @@ import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
  * tool allowlist dir (/aura/my-tools), so AppManager doesn't care which
  * concrete runner backs an instance — it just calls SandboxRunner methods.
  */
+/** Spawn input from AppManager. `owner` is absent for warm-pool members. */
+export type InstanceSpawnContext = SpawnContext & { owner?: string };
+
 export interface SandboxRunner {
   /** Resolve the per-instance toolchain allowlist directory on the host. */
   toolsDir(instanceId: string): string;
@@ -33,7 +36,7 @@ export interface SandboxRunner {
   clearToolsDir(instanceId: string): void;
 
   /** Launch the app's astro process and wait until it's healthy. */
-  spawn(instanceId: string, appId: string, port: number, manifest: AppManifest, ctx: SpawnContext): Promise<number>;
+  spawn(instanceId: string, appId: string, port: number, manifest: AppManifest, ctx: InstanceSpawnContext): Promise<number>;
 
   /** Graceful shutdown (SIGTERM, wait, then SIGKILL on the proot group).
    *  `keep`: a restart stop — sibling containers that opted in keep running
@@ -86,6 +89,8 @@ export interface SandboxRunner {
     pid:        number;
     /** `aura.token.nonce` label — absent on containers spawned before tokens. */
     tokenNonce?: string;
+    /** `aura.owner` label — absent on containers from before owners and on pool members. */
+    ownerLabel?: string;
   }>>;
   registerAdopted?(rec: {
     instanceId: string;
