@@ -43,7 +43,8 @@ export interface ThemeSelection {
 /** How an app participates in OS theming. Read from `<meta name="aura-theme-strategy">`. */
 export type ThemeStrategy = 'inherit' | 'themed' | 'override';
 
-import { osBase } from './os-auth.js';
+import { appHostRuntime, bodylessMutationHeaders, osBase } from './os-auth.js';
+import { isFromShell } from './channel.js';
 import { KeymapApi } from './keymap.js';
 import { NavApi } from './nav.js';
 import { SystemApi } from './system.js';
@@ -276,6 +277,7 @@ export class OsClient {
     if (!activityId) return;
     await fetch(`${this.base}/api/activities/${encodeURIComponent(activityId)}/back`, {
       method: 'POST',
+      headers: bodylessMutationHeaders(),
     });
   }
 
@@ -480,6 +482,7 @@ export class OsClient {
   }) => void): () => void {
     if (typeof window === 'undefined') return () => undefined;
     const handler = (ev: MessageEvent) => {
+      if (!isFromShell(ev)) return;
       const d = ev.data as Partial<ThemeSelection> & {
         type?: string; themeId?: string; resolvedMode?: ResolvedMode; framework?: DesignFramework;
       };
@@ -511,6 +514,7 @@ export class OsClient {
   }) => void): () => void {
     if (typeof window === 'undefined') return () => undefined;
     const handler = (ev: MessageEvent) => {
+      if (!isFromShell(ev)) return;
       const d = ev.data as Partial<ThemeSelection> & {
         type?: string; themeId?: string; resolvedMode?: ResolvedMode;
       };
@@ -582,8 +586,8 @@ export class OsClient {
   onViewportChange(cb: (info: ViewportChangeInfo) => void): () => void {
     if (typeof window === 'undefined') return () => undefined;
     const handler = (ev: MessageEvent) => {
-      // Same-origin proxied iframes: trust the parent only.
-      if (ev.source !== window.parent) return;
+      // PHASE2-CUTOVER: the parent check is for proxied iframes; an App Host trusts only the Shell.
+      if (appHostRuntime() ? !isFromShell(ev) : ev.source !== window.parent) return;
       const d = ev.data as {
         type?: string; reason?: string; shellZoom?: number; iframeScale?: number;
         contentW?: number; contentH?: number;

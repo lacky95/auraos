@@ -94,6 +94,7 @@ export function readIdentityHeaders(request: Request): IdentityHeaders {
  *   import { getAppBasePath } from '@aura/app-sdk';
  *   const router = createRouter({ history: createWebHistory(getAppBasePath()) });
  */
+// PHASE2-CUTOVER: base paths exist only for proxied apps. An App Host serves from `/`, so the runtime sets ''.
 export function getAppBasePath(): string {
   // Browser path — prefer the window global, fall back to the meta tag.
   // typeof checks satisfy both Node SSR and bundler tree-shaking.

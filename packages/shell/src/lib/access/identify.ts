@@ -1,4 +1,5 @@
 import type { AppInstance, AppManager } from '@aura/core';
+import { gatewayClaimOf } from '../../../server/gateway-identity.mjs';
 import { refererProxyId } from './legacyReferer.ts';
 
 /**
@@ -45,6 +46,9 @@ import { refererProxyId } from './legacyReferer.ts';
  * it needs every caller (SDK, apps) to send the token first.
  */
 export function identifyInstance(request: Request, mgr: AppManager): AppInstance | null {
+  const gateway = gatewayInstance(request, mgr);
+  if (gateway !== null) return gateway === 'invalid' ? null : gateway;
+
   const idOrAppId = refererProxyId(request.headers.get('referer'));
   if (idOrAppId) {
     const inst = mgr.getInstance(idOrAppId)
@@ -58,4 +62,21 @@ export function identifyInstance(request: Request, mgr: AppManager): AppInstance
   if (claimed) return mgr.getInstance(claimed) ?? null;
 
   return null;
+}
+
+/**
+ * The instance a signed App Host gateway claim names (server/app-gateway.mjs).
+ * Null when the request has no claim, `invalid` when it has one that doesn't
+ * verify or whose instance is no longer that app. The only caller identity
+ * here that is proved rather than asserted, and it never falls back.
+ */
+export function gatewayInstance(
+  request: Request,
+  mgr: Pick<AppManager, 'getInstance'>,
+): AppInstance | 'invalid' | null {
+  const claim = gatewayClaimOf(request);
+  if (claim === null) return null;
+  if (!claim || !claim.instanceId) return 'invalid';
+  const inst = mgr.getInstance(claim.instanceId);
+  return inst && inst.appId === claim.appId ? inst : 'invalid';
 }

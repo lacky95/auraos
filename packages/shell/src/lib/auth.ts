@@ -3,6 +3,7 @@
 import * as core from '@aura/core';
 import type { AdminPrincipal, ApiKeyPrincipal, Principal } from '@aura/core';
 import { jsonResponse } from './appResponse.js';
+import { gatewayInstance } from './access/identify.js';
 import { authenticateCaller, type CallerAuthManager } from './notificationCaller.js';
 
 /**
@@ -14,6 +15,7 @@ import { authenticateCaller, type CallerAuthManager } from './notificationCaller
  *   Authorization: Bearer aura-admin1.…  → admin    (session from the shared credential)
  *   any other / invalid / expired credential → 401 — NEVER downgraded to anonymous
  *   no Authorization                     → anonymous (Referer / X-Aura-Instance-Id = hints only)
+ *   signed App Host gateway claim        → instance (checked first; the gateway forwards no bearer)
  *
  * `SYSTEM_PRINCIPAL` is unreachable from HTTP by construction.
  *
@@ -46,6 +48,9 @@ function unauthorized(error: string, message: string): Response {
 }
 
 export async function authenticate(request: Request, deps: AuthDeps = defaultAuthDeps()): Promise<Principal | Response> {
+  const gateway = gatewayInstance(request, deps.mgr);
+  if (gateway === 'invalid') return unauthorized('gateway-identity-invalid', 'invalid gateway identity');
+  if (gateway) return { kind: 'instance', appId: gateway.appId, instanceId: gateway.instanceId, verification: 'verified' };
   const token = bearer(request);
   if (token && token.startsWith(API_KEY_PREFIX)) {
     const rec = await deps.apiKeys.verify(token);

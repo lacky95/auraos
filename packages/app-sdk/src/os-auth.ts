@@ -5,6 +5,10 @@
  * Most SDK calls stay anonymous on purpose: only callers that already sent the
  * instance token (notifications, OS sidecars, aurashelld) use osAuthHeaders.
  */
+import type { AuraRuntimeBootstrap } from '@aura/core';
+import { AURA_CHANNEL_VERSION } from './auraChannel.js';
+import { AURA_RESERVED_PATHS } from './hostRules.js';
+
 const LOCAL_OS = 'http://localhost:3000';
 
 export function isBrowser(): boolean {
@@ -16,8 +20,30 @@ export function osEnv(): Record<string, string | undefined> {
   return typeof process !== 'undefined' && process.env ? process.env : {};
 }
 
+/**
+ * The bootstrap of `/_aura/runtime.js` when this page runs on an App Host, else
+ * null (proxied, server, or outside AuraOS). It selects a transport and grants
+ * nothing: the gateway and the Shell verify the caller themselves.
+ */
+export function appHostRuntime(): AuraRuntimeBootstrap | null {
+  if (!isBrowser()) return null;
+  const b = (window as unknown as { AuraRuntimeBootstrap?: AuraRuntimeBootstrap }).AuraRuntimeBootstrap;
+  if (!b || b.channelVersion !== AURA_CHANNEL_VERSION || b.gatewayBase !== AURA_RESERVED_PATHS.os) return null;
+  if (b.appOrigin !== window.location.origin || typeof b.shellOrigin !== 'string' || !b.shellOrigin) return null;
+  return b;
+}
+
+/**
+ * Headers for a mutation that sends no body. The gateway's CSRF rule needs a
+ * JSON content type; a proxied call stays as it was.
+ */
+export function bodylessMutationHeaders(): Record<string, string> {
+  return appHostRuntime() ? { 'Content-Type': 'application/json' } : {};
+}
+
 export interface OsBaseOptions {
   /**
+   * On an App Host, `relative` and `origin` are the same-origin gateway.
    * `relative` (default): '' in a browser, else OS_API_BASE.
    * `origin`: OS_API_BASE, else the page's origin (OsClient).
    * `server`: OS_API_BASE, else AURA_OS_URL, else '' so the caller can refuse.
@@ -29,6 +55,11 @@ export interface OsBaseOptions {
 
 export function osBase(opts: OsBaseOptions = {}): string {
   const { mode = 'relative', fallback = LOCAL_OS } = opts;
+  const host = mode === 'server' ? null : appHostRuntime();
+  if (host) {
+    const gateway = host.gatewayBase.replace(/\/$/, '');
+    return mode === 'origin' ? `${window.location.origin}${gateway}` : gateway;
+  }
   if (mode === 'server') return osEnv()['OS_API_BASE'] ?? osEnv()['AURA_OS_URL'] ?? '';
   if (mode === 'origin') return osEnv()['OS_API_BASE'] ?? (isBrowser() ? window.location.origin : fallback);
   if (isBrowser()) return '';

@@ -161,7 +161,7 @@ export async function observeIdentity(identity: SurfaceIdentity | null, deps: Ob
 
 const kvSegments = (s: RequestSnapshot) => (s.params['path'] ?? '').split('/').filter(Boolean);
 
-function kvNamespace(s: RequestSnapshot): 'os' | 'app' | null {
+export function kvNamespace(s: RequestSnapshot): 'os' | 'app' | null {
   if (s.routePattern !== '/api/kv/[...path]') return null;
   const first = kvSegments(s)[0];
   return first === 'os' || first === 'app' ? first : null;
@@ -173,7 +173,7 @@ function provider(s: RequestSnapshot, mgr: ObserverManager | null) {
   try { return mgr.providers.resolveProvider(authority, `/api/data/${s.params['path'] ?? ''}`); } catch { return null; }
 }
 
-function resourceFor(rule: AccessRule, s: RequestSnapshot, mgr: ObserverManager | null): PolicyResource {
+export function resourceFor(rule: AccessRule, s: RequestSnapshot, mgr: ObserverManager | null): PolicyResource {
   const r: PolicyResource = { target: rule.target };
   const { instanceId, activityId, id, name } = s.params;
   if (instanceId) {
@@ -206,7 +206,7 @@ function resourceFor(rule: AccessRule, s: RequestSnapshot, mgr: ObserverManager 
 }
 
 /** Fill the manifest's `<placeholder>` permissions from this request. */
-function concreteRule(
+export function concreteRule(
   rule: AccessRule, s: RequestSnapshot, principal: AccessPrincipal, mgr: ObserverManager | null,
 ): AccessRule {
   if (!rule.permissions?.some((p) => p.includes('<'))) return rule;

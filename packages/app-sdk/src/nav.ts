@@ -15,6 +15,7 @@
  * can call `osClient.nav.finish()` from the same namespace.
  */
 
+import { isFromShell, postToShell } from './channel.js';
 import type { OsClient } from './OsClient.js';
 
 export interface BackEvent {
@@ -182,7 +183,7 @@ export class NavApi {
     // (button/input) actually receives keyboard input.
     const onMessage = (ev: MessageEvent): void => {
       const d = ev.data as { type?: string } | null;
-      if (d?.type !== 'aura.window.focus') return;
+      if (!isFromShell(ev) || d?.type !== 'aura.window.focus') return;
       focusFirst();
     };
 
@@ -208,6 +209,7 @@ export class NavApi {
   // be inlined by the bundler and unit-tested independently.)
 
   private handleMessage = (ev: MessageEvent): void => {
+    if (!isFromShell(ev)) return;
     const d = ev.data as { type?: string } | null;
     if (!d || typeof d !== 'object' || d.type !== 'aura.back') return;
     if (this.handlers.size === 0) return;
@@ -230,10 +232,7 @@ export class NavApi {
           console.warn('[NavApi] onBack handler threw:', err);
         }
       }
-      if (prevented && typeof window !== 'undefined' && window.parent !== window) {
-        try { window.parent.postMessage({ type: 'aura.back.ack', handled: true }, '*'); }
-        catch { /* parent gone */ }
-      }
+      if (prevented) postToShell({ type: 'aura.back.ack', handled: true });
     })();
   };
 }

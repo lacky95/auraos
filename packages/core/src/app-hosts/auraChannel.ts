@@ -43,8 +43,14 @@ const TO_APP = [route('shell', 'app')] as const;
 /** The UI-integration messages an embed host may forward (5.16). */
 const TO_APP_AND_EMBED = [route('shell', 'app'), route('embed-host', 'embedded-app')] as const;
 const FROM_EMBEDDED = [route('embedded-app', 'embed-host')] as const;
-/** Keyboard reports: up through the app's relay, or from the shell's own document. */
-const KEYBOARD_UP = [route('app', 'shell'), route('app-subframe', 'app')] as const;
+/**
+ * Keyboard reports: from a window, up through a proxied app's relay, or (App
+ * Hosts) straight from a nested frame to the verified shell.
+ */
+const KEYBOARD_UP = [
+  route('app', 'shell'), route('app-subframe', 'app'),
+  route('app-subframe', 'shell'), route('embedded-app', 'shell'),
+] as const;
 const KEYBOARD_REPORT = [...KEYBOARD_UP, route('shell', 'shell')] as const;
 const NATIVE_TO_APP = [route('native-host', 'shell'), route('shell', 'app')] as const;
 
@@ -55,7 +61,7 @@ export const AURA_CHANNEL_MESSAGES = {
   'aura.key.claim': TO_APP,
   // No embed-host route: a parent app must not inject keys (D29). The shell
   // posts directly to the focused frame; a relay only reaches the app's own subframes.
-  'aura.key.synthetic': [route('shell', 'app'), route('shell', 'embedded-app'), route('shell', 'shell'), route('app', 'app-subframe')],
+  'aura.key.synthetic': [route('shell', 'app'), route('shell', 'app-subframe'), route('shell', 'embedded-app'), route('shell', 'shell'), route('app', 'app-subframe')],
   'aura.keymap.subscribe': TO_SHELL,
   'aura.keymap.changed': TO_APP_AND_EMBED,
   'aura.action.fire': TO_APP,
@@ -65,7 +71,7 @@ export const AURA_CHANNEL_MESSAGES = {
   'aura.keyboard.field': KEYBOARD_REPORT,
   'aura.keyboard.open': KEYBOARD_UP,
   'aura.keyboard.close': KEYBOARD_UP,
-  'aura.keyboard.policy': [route('shell', 'app'), route('shell', 'shell'), route('app', 'app-subframe')],
+  'aura.keyboard.policy': [route('shell', 'app'), route('shell', 'app-subframe'), route('shell', 'embedded-app'), route('shell', 'shell'), route('app', 'app-subframe')],
 
   // Navigation and window
   'aura.back': TO_APP,

@@ -17,6 +17,8 @@
  * shortcuts would see it). Must run BEFORE the receiver: the bundle puts it first.
  *
  * Kept as ES5-style source in a string because it is served verbatim.
+ *
+ * PHASE2-CUTOVER: a relay lets an embedding parent type into its child. App Hosts use lib/appRuntime.ts instead.
  */
 export const FRAME_RELAY_JS = String.raw`(function(){try{
 if(window.__auraKbRelay||window.parent===window)return;window.__auraKbRelay=true;

@@ -17,7 +17,7 @@
  */
 import type { OsClient } from './OsClient.js';
 import { getAppContext } from './context.js';
-import { osBase } from './os-auth.js';
+import { bodylessMutationHeaders, osBase } from './os-auth.js';
 
 /**
  * `transport/protocol` — mirrors INTERFACE_KINDS in @aura/core. `http/mcp` is
@@ -134,6 +134,7 @@ export class InterfacesApi {
    */
   urlFor(view: InterfaceView): string | null {
     if (!view.url) return null;
+    // PHASE2-CUTOVER: `view.url` is an /api/proxy path, which the gateway refuses to app callers.
     return `${this.base()}${view.url}`;
   }
 
@@ -160,7 +161,7 @@ export class InterfacesApi {
   async unregister(name: string): Promise<boolean> {
     const res = await fetch(`${this.base()}/api/interfaces/${encodeURIComponent(name)}`, {
       method: 'DELETE',
-      headers: this.identity(),
+      headers: { ...bodylessMutationHeaders(), ...this.identity() },
     });
     if (!res.ok) return false;
     const body = await res.json() as { removed?: boolean };
