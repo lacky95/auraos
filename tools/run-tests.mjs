@@ -5,7 +5,8 @@
 // This runs inside the master container, which holds the real Docker socket
 // and data, so each suite gets throwaway state plus a guard: a `docker` stub
 // that always fails, and a Node preload that refuses connections to the Docker
-// socket, the live shell port (3000), and any non-loopback host.
+// socket, every port already listening on loopback when the run starts, and
+// any non-loopback host.
 import { spawn } from 'node:child_process';
 import { chmodSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -28,12 +29,20 @@ const ORDER = ['packages/kv-store', 'packages/core', 'packages/app-sdk'];
 // Remove this once that test closes its connections (see tools/test-baseline.md).
 const FORCE_EXIT = new Set(['packages/shell']);
 const only = opt('only')?.split(',');
+const matchesOnly = (dir, o) => Boolean(o) && dir.endsWith(o);
 const timeoutMs = Number(opt('timeout') ?? 600) * 1000;
-const suites = ['packages', 'apps']
+const allSuites = ['packages', 'apps']
   .flatMap((group) => readdirSync(join(ROOT, group)).sort().map((name) => `${group}/${name}`))
   .filter((dir) => existsSync(join(ROOT, dir, 'package.json')))
   .map((dir) => ({ dir, script: JSON.parse(readFileSync(join(ROOT, dir, 'package.json'), 'utf-8')).scripts?.test }))
-  .filter((s) => s.script && (!only || only.some((o) => s.dir.endsWith(o))))
+  .filter((s) => s.script);
+const unmatched = only?.filter((o) => !allSuites.some((s) => matchesOnly(s.dir, o))) ?? [];
+if (unmatched.length) {
+  console.error(`--only matched no suite: ${unmatched.map((o) => o || '(empty)').join(', ')}`);
+  process.exit(2);
+}
+const suites = allSuites
+  .filter((s) => !only || only.some((o) => matchesOnly(s.dir, o)))
   .sort((a, b) => rank(a.dir) - rank(b.dir));
 function rank(dir) { const i = ORDER.indexOf(dir); return i < 0 ? ORDER.length : i; }
 
@@ -43,17 +52,40 @@ const binDir = join(runDir, 'bin');
 mkdirSync(binDir);
 writeFileSync(join(binDir, 'docker'), `#!/bin/sh\necho "docker $*" >> '${guardLog}'\necho 'docker is blocked during tests' >&2\nexit 1\n`);
 chmodSync(join(binDir, 'docker'), 0o755);
+
+// /proc hex: IPv4 is little-endian, so 127.x ends in 7F. Wildcards reach loopback too.
+const reachesLoopback = (addr) => /^0+$/.test(addr) || (addr.length === 8
+  ? addr.endsWith('7F')
+  : addr === '00000000000000000000000001000000' || /^0{16}FFFF0{4}[0-9A-F]{6}7F$/.test(addr));
+
+/** Read once, before any suite, so ports the tests open later stay usable. */
+function liveLoopbackPorts() {
+  const ports = new Set([3000]);
+  for (const file of ['/proc/net/tcp', '/proc/net/tcp6']) {
+    let text;
+    try { text = readFileSync(file, 'utf-8'); } catch { continue; }
+    for (const line of text.split('\n').slice(1)) {
+      const [, local, , state] = line.trim().split(/\s+/);
+      if (state !== '0A') continue;
+      const [addr, port] = local.split(':');
+      if (reachesLoopback(addr)) ports.add(parseInt(port, 16));
+    }
+  }
+  return [...ports].sort((a, b) => a - b);
+}
+
 const guardFile = join(runDir, 'guard.cjs');
 writeFileSync(guardFile, `
 const net = require('node:net'), fs = require('node:fs');
 const connect = net.Socket.prototype.connect;
 const loopback = (h) => !h || h === 'localhost' || h === '::1' || /^127\\./.test(h);
+const livePorts = new Set(${JSON.stringify(liveLoopbackPorts())});
 net.Socket.prototype.connect = function (...a) {
   let o = Array.isArray(a[0]) ? a[0][0] : a[0];
   if (typeof o === 'string') o = { path: o };
   else if (typeof o !== 'object' || o === null) o = { port: o, host: typeof a[1] === 'string' ? a[1] : undefined };
   const why = o.path ? (String(o.path).includes('docker.sock') ? o.path : null)
-    : (!loopback(o.host) || Number(o.port) === 3000) ? (o.host || 'localhost') + ':' + o.port : null;
+    : (!loopback(o.host) || livePorts.has(Number(o.port))) ? (o.host || 'localhost') + ':' + o.port : null;
   if (!why) return connect.apply(this, a);
   try { fs.appendFileSync(${JSON.stringify(guardLog)}, 'connect ' + why + '\\n'); } catch {}
   const err = Object.assign(new Error('blocked by test guard: ' + why), { code: 'ECONNREFUSED' });

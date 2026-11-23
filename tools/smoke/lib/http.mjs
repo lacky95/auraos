@@ -65,13 +65,11 @@ export function createClient({ target, guard, fetchImpl = fetch, timeoutMs = 10_
  */
 export async function startGuardProxy(client) {
   const refused = [];
-  let forwarded = 0;
 
   const server = createServer(async (req, res) => {
     req.resume();
     try {
       const upstream = await client.request(req.method, req.url);
-      forwarded += 1;
       res.writeHead(upstream.status || 502, { 'content-type': 'application/json' });
       res.end(upstream.text);
     } catch (err) {
@@ -90,7 +88,6 @@ export async function startGuardProxy(client) {
   return {
     url: `http://127.0.0.1:${server.address().port}`,
     refused,
-    forwardedCount: () => forwarded,
     close: () => new Promise((resolve) => {
       server.closeAllConnections();
       server.close(resolve);

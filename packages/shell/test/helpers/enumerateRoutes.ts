@@ -306,6 +306,40 @@ export function attachedSurfaces(source: string): string[] {
   return [...calls].sort();
 }
 
+const UPGRADE_SUBSCRIBERS = new Set(['on', 'once', 'addListener', 'prependListener', 'prependOnceListener']);
+const calleeName = (e: ts.Expression): string =>
+  ts.isIdentifier(e) ? e.text : ts.isPropertyAccessExpression(e) ? e.name.text : '';
+
+/** Each place one module opens a server or takes over socket upgrades. */
+export function listenersIn(file: string, text: string): string[] {
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const found: string[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isNewExpression(node) && calleeName(node.expression) === 'WebSocketServer') {
+      found.push(`${file} WebSocketServer`);
+    } else if (ts.isCallExpression(node)) {
+      const [first] = node.arguments;
+      if (calleeName(node.expression) === 'createServer') found.push(`${file} createServer`);
+      else if (ts.isPropertyAccessExpression(node.expression) && UPGRADE_SUBSCRIBERS.has(node.expression.name.text)
+        && first && ts.isStringLiteralLike(first) && first.text === 'upgrade') found.push(`${file} upgrade`);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return found;
+}
+
+/** Every listener in `server.mjs` and `server/`, sorted. */
+export function listenerSites(shellRoot: string): string[] {
+  const dir = path.join(shellRoot, 'server');
+  const nested = fs.readdirSync(dir, { recursive: true, encoding: 'utf8' })
+    .filter((f) => /\.(mjs|cjs|js|ts)$/.test(f))
+    .map((f) => `server/${f.split(path.sep).join('/')}`);
+  return ['server.mjs', ...nested]
+    .flatMap((f) => listenersIn(f, fs.readFileSync(path.join(shellRoot, f), 'utf8')))
+    .sort();
+}
+
 export function auditSurfaces(
   surfaces: readonly AccessSurface[],
   attached: readonly string[],

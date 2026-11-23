@@ -117,20 +117,14 @@ const routes: RouteAccessManifest['routes'] = {
       GET: rule(OWNER, 'system', decide(1, 'Reports setupDoneAt. Decide whether the setup page reads it before login or uses first-boot status instead.')),
     },
   },
-  '/api/admin/self-update': {
-    variants: [
-      { id: 'run-log', methods: ['GET'], match: { on: 'query', name: 'logs' }, rule: rule(OWNER, 'system') },
-      { id: 'preflight', methods: ['GET'], match: { on: 'query', name: 'check', equals: '1' }, rule: rule(OWNER, 'system') },
-    ],
-  },
 
   // Static candidates for the login page; everything else in `os` stays owner.
   '/api/os/theme.css': staticAsset,
   '/api/os/icons.svg': staticAsset,
   '/api/os/icons/[name].svg': staticAsset,
   '/api/os/keyboard.js': {
-    methods: on(['GET'], rule(['public', 'owner'], 'system', decide(2,
-      'Loaded by App Host documents, not by login. Stays public only if a cross-origin <script> cannot carry the login handoff; otherwise owner.'))),
+    methods: on(['GET'], rule(OWNER, 'system', decide(2,
+      'Owner for now. Loaded by App Host documents, not by login. Phase 2 makes it public only if a cross-origin <script> cannot carry the login handoff.'))),
   },
 
   '/api/os/about': {

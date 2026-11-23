@@ -5,6 +5,7 @@
  * non-secret ids. Never copy a response value here unless it is one of those.
  */
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { GuardViolation, startGuardProxy } from './http.mjs';
 import { TERMINAL_APP_ID } from './guard.mjs';
@@ -37,6 +38,8 @@ export const ALLOWED_CLI_COMMANDS = Object.freeze([
 const EXPECTED_CLI_REFUSALS = new Set(['GET /api/apps/serve']);
 
 const CLAUDE_CREDENTIALS = '/home/aura/.claude/.credentials.json';
+const EXCALIDRAW_APP_ID = 'io.lakner.excalidraw';
+const TERMINALX_APP_ID = 'io.lakner.terminalx';
 const SAFE_REPORT_ID = /^[\w.#:-]{1,128}$/;
 
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -44,15 +47,12 @@ const safeId = (v) => (typeof v === 'string' && SAFE_REPORT_ID.test(v) ? v : '<u
 const hasPermission = (manifest, name) => Array.isArray(manifest?.permissions)
   && manifest.permissions.some((p) => p === name || p?.name === name);
 
-function pathExists(path) {
-  return new Promise((resolve) => {
-    execFile('test', ['-e', path], (err) => resolve(!err));
-  });
-}
+const isRunning = (apps, appId) => Array.isArray(apps) && apps.some((a) => a?.manifest?.id === appId
+  && (a.instances ?? []).some((i) => i?.state === 'resumed' && !i.inPool));
 
-async function findOnPath(name, env) {
+function findOnPath(name, env) {
   for (const dir of (env.PATH ?? '').split(delimiter)) {
-    if (dir && await pathExists(join(dir, name))) return join(dir, name);
+    if (dir && existsSync(join(dir, name))) return join(dir, name);
   }
   return null;
 }
@@ -78,16 +78,24 @@ function recorder() {
 }
 
 async function snapshot(client, guard) {
-  const out = { instances: [], sessions: {}, errors: [] };
+  const out = { apps: [], activities: [], instances: [], sessions: {}, errors: [] };
   const apps = await client.getJson('/api/apps');
   if (!Array.isArray(apps.json)) {
     out.errors.push(`apps: ${apps.error ?? 'not an array'}`);
     return out;
   }
+  const byId = (a, b) => a.id.localeCompare(b.id);
+  out.apps = apps.json.map((a) => ({ id: safeId(a?.manifest?.id), enabled: Boolean(a?.enabled) })).sort(byId);
+  out.activities = apps.json.flatMap((a) => a.activities ?? []).map((x) => safeId(x?.activityId)).sort();
   out.instances = apps.json
     .flatMap((a) => a.instances ?? [])
-    .map((i) => ({ id: safeId(i.instanceId), state: safeId(i.state), inPool: Boolean(i.inPool) }))
-    .sort((a, b) => a.id.localeCompare(b.id));
+    .map((i) => ({
+      id: safeId(i.instanceId),
+      state: safeId(i.state),
+      inPool: Boolean(i.inPool),
+      sidecars: Number(i.sidecarCount) || 0,
+    }))
+    .sort(byId);
   for (const id of guard.runningTerminals().sort()) {
     const res = await client.getJson(`/api/proxy/${id}/api/sessions`);
     if (!Array.isArray(res.json?.sessions)) {
@@ -99,26 +107,44 @@ async function snapshot(client, guard) {
   return out;
 }
 
+function diffIds(label, before, after, where = '') {
+  const x = new Set(before);
+  const y = new Set(after);
+  return [
+    ...[...x].filter((v) => !y.has(v)).map((v) => `${label} removed${where}: ${v}`),
+    ...[...y].filter((v) => !x.has(v)).map((v) => `${label} added${where}: ${v}`),
+  ];
+}
+
 export function diffSnapshots(before, after) {
-  const changes = [];
-  const states = (s) => new Map(s.instances.map((i) => [i.id, `${i.state}${i.inPool ? '/pool' : ''}`]));
-  const a = states(before);
-  const b = states(after);
-  for (const [id, state] of a) {
-    if (!b.has(id)) changes.push(`instance removed: ${id}`);
-    else if (b.get(id) !== state) changes.push(`instance ${id}: ${state} -> ${b.get(id)}`);
+  const ids = (list) => list.map((x) => x.id);
+  const changes = [
+    ...diffIds('app', ids(before.apps), ids(after.apps)),
+    ...diffIds('activity', before.activities, after.activities),
+    ...diffIds('instance', ids(before.instances), ids(after.instances)),
+  ];
+  const enabled = new Map(before.apps.map((a) => [a.id, a.enabled]));
+  for (const a of after.apps) {
+    if (enabled.has(a.id) && enabled.get(a.id) !== a.enabled) changes.push(`app ${a.id} enabled: ${enabled.get(a.id)} -> ${a.enabled}`);
   }
-  for (const id of b.keys()) if (!a.has(id)) changes.push(`instance added: ${id}`);
+  const state = (i) => `${i.state}${i.inPool ? '/pool' : ''}`;
+  const prior = new Map(before.instances.map((i) => [i.id, i]));
+  for (const i of after.instances) {
+    const p = prior.get(i.id);
+    if (!p) continue;
+    if (state(p) !== state(i)) changes.push(`instance ${i.id}: ${state(p)} -> ${state(i)}`);
+    if (p.sidecars !== i.sidecars) changes.push(`instance ${i.id} sidecars: ${p.sidecars} -> ${i.sidecars}`);
+  }
   for (const term of new Set([...Object.keys(before.sessions), ...Object.keys(after.sessions)])) {
-    const x = new Set(before.sessions[term] ?? []);
-    const y = new Set(after.sessions[term] ?? []);
-    for (const s of x) if (!y.has(s)) changes.push(`session removed on ${term}: ${s}`);
-    for (const s of y) if (!x.has(s)) changes.push(`session added on ${term}: ${s}`);
+    changes.push(...diffIds('session', before.sessions[term] ?? [], after.sessions[term] ?? [], ` on ${term}`));
   }
   return changes;
 }
 
-async function checkHttp(r, client, guard, apps) {
+async function checkHttp(r, client, guard, apps, tier) {
+  // A test instance need not have the owner's optional apps. Live stays strict.
+  const absent = (appId) => tier === 'test-instance' && !isRunning(apps, appId);
+
   const about = await client.getJson('/api/os/about');
   if (typeof about.json?.version === 'string' && typeof about.json?.git?.commit === 'string') {
     r.pass('about', 'live', `version=${safeId(about.json.version)} commit=${safeId(about.json.git.commit)}`);
@@ -149,20 +175,25 @@ async function checkHttp(r, client, guard, apps) {
   if (!Array.isArray(list)) r.fail('interfaces', 'live', ifaces.error ?? 'no interfaces[]');
   else {
     const live = (appId, name) => list.some((i) => i?.appId === appId && i?.name === name && i?.kind === 'http/mcp' && i?.status === 'live');
-    const missing = [[TERMINAL_APP_ID, 'terminal'], ['io.lakner.excalidraw', 'mcp']]
-      .filter(([a, n]) => !live(a, n)).map(([a, n]) => `${a}/${n}`);
+    const skipExcalidraw = absent(EXCALIDRAW_APP_ID);
+    const required = [[TERMINAL_APP_ID, 'terminal'], ...(skipExcalidraw ? [] : [[EXCALIDRAW_APP_ID, 'mcp']])];
+    const missing = required.filter(([a, n]) => !live(a, n)).map(([a, n]) => `${a}/${n}`);
     if (missing.length) r.fail('interfaces', 'live', `MCP not live: ${missing.join(', ')}`);
-    else r.pass('interfaces', 'live', 'Terminal and Excalidraw MCP are live');
+    else r.pass('interfaces', 'live', skipExcalidraw ? 'Terminal MCP is live' : 'Terminal and Excalidraw MCP are live');
+    if (skipExcalidraw) r.skip('interfaces-excalidraw', 'test-instance', 'Excalidraw is not installed or running');
   }
 
   const flights = await client.getJson('/api/flights');
   if (Array.isArray(flights.json)) r.pass('flights', 'live', 'array');
   else r.fail('flights', 'live', flights.error ?? 'not an array');
 
-  const tx = await client.getJson('/api/instances/io.lakner.terminalx/status');
-  if (tx.json?.instance?.instanceId === 'io.lakner.terminalx') {
-    r.pass('terminalx-status', 'live', `present, sandbox=${safeId(tx.json.instance.sandbox)} (recorded, not asserted)`);
-  } else r.fail('terminalx-status', 'live', tx.error ?? 'instance missing from response');
+  if (absent(TERMINALX_APP_ID)) r.skip('terminalx-status', 'test-instance', 'TerminalX is not installed or running');
+  else {
+    const tx = await client.getJson(`/api/instances/${TERMINALX_APP_ID}/status`);
+    if (tx.json?.instance?.instanceId === TERMINALX_APP_ID) {
+      r.pass('terminalx-status', 'live', `present, sandbox=${safeId(tx.json.instance.sandbox)} (recorded, not asserted)`);
+    } else r.fail('terminalx-status', 'live', tx.error ?? 'instance missing from response');
+  }
 
   const nexus = await client.getJson('/api/nexus/installed');
   if (Array.isArray(nexus.json) && nexus.json.every((e) => typeof e?.manifest?.id === 'string')) {
@@ -264,7 +295,7 @@ export async function runSmoke({ client, guard, tier = 'live', env = process.env
     findCli: () => findOnPath('aura', env),
     runCli: (binary, args, url) => defaultRunCli(binary, args, url, env),
     findClaude: () => findOnPath('claude', env),
-    exists: pathExists,
+    exists: existsSync,
     ...deps,
   };
   const r = recorder();
@@ -275,7 +306,7 @@ export async function runSmoke({ client, guard, tier = 'live', env = process.env
   if (!Array.isArray(apps)) r.fail('discovery', 'live', appsRes.error ?? '/api/apps is not an array');
 
   const before = await snapshot(client, guard);
-  await checkHttp(r, client, guard, apps);
+  await checkHttp(r, client, guard, apps, tier);
   await checkCli(r, client, d);
   await checkLocal(r, env, d.exists, d.findClaude);
 
@@ -290,7 +321,7 @@ export async function runSmoke({ client, guard, tier = 'live', env = process.env
   const changes = diffSnapshots(before, after);
   if (problems.length) r.fail('state-guard', 'live', `could not compare state: ${problems.join('; ')}`);
   else if (changes.length) r.fail('state-guard', 'live', `state changed during the run: ${changes.join('; ')}`);
-  else r.pass('state-guard', 'live', 'instances, states and Terminal sessions unchanged');
+  else r.pass('state-guard', 'live', 'apps, Activities, instances, sidecar counts and Terminal sessions unchanged');
 
   const count = (s) => r.results.filter((x) => x.status === s).length;
   return {

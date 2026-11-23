@@ -2,6 +2,7 @@
 # copy-data.sh: build a sanitized AuraOS data copy for a separate test instance.
 # Dry-run by default. Writes only with --apply. See README.md.
 set -euo pipefail
+shopt -s extglob
 export LC_ALL=C
 
 usage() {
@@ -75,29 +76,43 @@ fi
 EXCLUDED=(aura/secrets context/.masterkey kv-redis-backup.orig kv-migration.json
   aura/runtime aura/mounts aura/warm-pool.json aura/boot aura/update)
 [ "$INCLUDE_KV" = 1 ] || EXCLUDED+=(kv)
-# Matched at any depth inside aura/home/<user>/.
-HOME_DENY=(.ssh .docker '.claude*' .codex .config .gitconfig .bash_history
+# The one credential denylist. Lowercase globs, matched case-insensitively on
+# every path component, at any depth, in every root. `*credential*` also covers
+# .cargo/credentials*. CRED_PATHS covers Git configs, which can hold remote tokens.
+CRED_NAMES=(.env '.env.*' '*.pem' '*.key' 'id_rsa*' 'id_ed25519*' '*credential*'
+  '*secret*' '*token*' auth.json .ssh .docker '.claude*' .codex .config .gitconfig
   '.*_history' .netrc .git-credentials .gnupg .aws .kube .azure .gemini
   .npmrc .pypirc .pgpass)
+CRED_PATHS=('*/.git/config*' '*/.git/*/config*')
+CRED_GLOB="@($(IFS='|'; printf '%s' "${CRED_NAMES[*]}"))"
+CRED_FIND=()
+for pat in "${CRED_PATHS[@]}"; do CRED_FIND+=(-ipath "$pat" -o); done
+for pat in "${CRED_NAMES[@]}"; do CRED_FIND+=(-iname "$pat" -o); done
+unset 'CRED_FIND[-1]'
 
-is_excluded() {
-  local rel=$1 item rest comp pat
-  for item in "${EXCLUDED[@]}"; do
-    if [[ $rel == "$item" || $rel == "$item"/* ]]; then return 0; fi
+is_credential() {
+  local rest=${1,,} comp pat
+  for pat in "${CRED_PATHS[@]}"; do
+    # shellcheck disable=SC2053  # pat is intentionally a glob
+    if [[ /$rest == $pat ]]; then return 0; fi
   done
-  if [[ $rel == aura/home/*/* ]]; then
-    rest=${rel#aura/home/}; rest=${rest#*/}
-    while [ -n "$rest" ]; do
-      comp=${rest%%/*}
-      for pat in "${HOME_DENY[@]}"; do
-        # shellcheck disable=SC2254  # pat is intentionally a glob
-        case "$comp" in $pat) return 0 ;; esac
-      done
-      if [[ $rest == */* ]]; then rest=${rest#*/}; else rest=""; fi
-    done
-  fi
+  while [ -n "$rest" ]; do
+    comp=${rest%%/*}
+    # shellcheck disable=SC2053  # CRED_GLOB is intentionally a glob
+    if [[ $comp == $CRED_GLOB ]]; then return 0; fi
+    if [[ $rest == */* ]]; then rest=${rest#*/}; else rest=""; fi
+  done
   return 1
 }
+
+in_excluded_list() {
+  local item
+  for item in "${EXCLUDED[@]}"; do
+    if [[ $1 == "$item" || $1 == "$item"/* ]]; then return 0; fi
+  done
+  return 1
+}
+is_excluded() { in_excluded_list "$1" || is_credential "$1"; }
 
 ROOTS=()
 SKIPPED_ROOTS=()
@@ -123,15 +138,14 @@ in_roots() {
 }
 is_copied() { in_roots "$1" && ! is_excluded "$1"; }
 
-# Walk ROOTS from inside SRC, pruning denied home paths. Args: find actions.
-HOME_NAMES=()
-for pat in "${HOME_DENY[@]}"; do
-  [ ${#HOME_NAMES[@]} -eq 0 ] || HOME_NAMES+=(-o)
-  HOME_NAMES+=(-name "$pat")
-done
+# Walk ROOTS from inside SRC, pruning credential paths. Args: find actions.
 walk() {
   [ ${#ROOTS[@]} -gt 0 ] || return 0
-  (cd "$SRC" && find "${ROOTS[@]}" \( -path 'aura/home/*/*' \( "${HOME_NAMES[@]}" \) \) -prune -o "$@")
+  (cd "$SRC" && find "${ROOTS[@]}" \( "${CRED_FIND[@]}" \) -prune -o "$@")
+}
+list_credentials() {
+  [ ${#ROOTS[@]} -gt 0 ] || return 0
+  (cd "$SRC" && find "${ROOTS[@]}" \( "${CRED_FIND[@]}" \) -prune -print0)
 }
 
 # Read one NUL-terminated command result exactly, including any newlines.
@@ -157,16 +171,22 @@ while IFS= read -r -d '' rel; do
   if link_ok "$rel"; then KEPT_LINKS+=("$rel"); else DROPPED_LINKS+=("$rel"); fi
 done < <(walk -type l -print0)
 
-# Hardlinks: a copied name must not share an inode with an excluded file.
-declare -A BAD_INODES=()
+# Hardlinks: keep a name only if every name of its inode is in the copy set. A
+# link count above the names seen here means one is outside the source.
+declare -A BAD_INODES=() INODE_NAMES=() INODE_LINKS=()
 HL_CANDIDATES=()
 HL_INODES=()
 while IFS= read -r -d '' rec; do
-  inode=${rec%% *}; rel=${rec#* }; rel=${rel#./}
+  inode=${rec%% *}; rec=${rec#* }; links=${rec%% *}; rel=${rec#* }; rel=${rel#./}
+  INODE_LINKS[$inode]=$links
+  INODE_NAMES[$inode]=$(( ${INODE_NAMES[$inode]:-0} + 1 ))
   if is_copied "$rel"; then HL_CANDIDATES+=("$rel"); HL_INODES+=("$inode")
-  elif is_excluded "$rel"; then BAD_INODES[$inode]=1
+  else BAD_INODES[$inode]=1
   fi
-done < <(cd "$SRC" && find . -type f -links +1 -printf '%D:%i %p\0')
+done < <(cd "$SRC" && find . -type f -links +1 -printf '%D:%i %n %p\0')
+for inode in "${!INODE_LINKS[@]}"; do
+  [ "${INODE_NAMES[$inode]}" -eq "${INODE_LINKS[$inode]}" ] || BAD_INODES[$inode]=1
+done
 KEPT_HARD=()
 DROPPED_HARD=()
 for i in "${!HL_CANDIDATES[@]}"; do
@@ -185,7 +205,7 @@ emit_manifest() {
 LIVE_HARD=()
 LIVE_SOFT=()
 detect_live() {
-  local p comm state cwd ids line msource mdest name live_path
+  local p comm state cwd ids mounts inspect_ok=1 msource mdest name live_path
   for p in /proc/[0-9]*; do
     comm=$(cat "$p/comm" 2>/dev/null) || continue
     case "$comm" in
@@ -204,14 +224,17 @@ detect_live() {
 
   if command -v docker >/dev/null 2>&1 && ids=$(timeout 10 docker ps -q 2>/dev/null); then
     if [ -n "$ids" ]; then
+      # A partial answer still counts, so read it before judging the failure.
       # shellcheck disable=SC2086  # ids is a whitespace-separated list
+      mounts=$(timeout 20 docker inspect --format '{{$n := .Name}}{{range .Mounts}}{{$n}}{{"\t"}}{{.Source}}{{"\t"}}{{.Destination}}{{"\n"}}{{end}}' $ids 2>/dev/null) || inspect_ok=0
       while IFS=$'\t' read -r name msource mdest; do
         [ -n "${msource:-}" ] || continue
         msource=$(realpath -m -- "$msource")
         if [ "$msource" != / ] && { under "$msource" "$SRC" || { [ "$mdest" = /data ] && under "$SRC" "$msource"; }; }; then
           LIVE_HARD+=("running container ${name#/} mounts $msource at $mdest")
         fi
-      done < <(timeout 20 docker inspect --format '{{$n := .Name}}{{range .Mounts}}{{$n}}{{"\t"}}{{.Source}}{{"\t"}}{{.Destination}}{{"\n"}}{{end}}' $ids 2>/dev/null || true)
+      done <<< "$mounts"
+      [ "$inspect_ok" = 1 ] || LIVE_SOFT+=("docker inspect failed, so running containers could not be ruled out")
     fi
   elif [ -d "$SRC/kv" ]; then
     LIVE_SOFT+=("could not query Docker to rule out a running instance on this data")
@@ -247,34 +270,28 @@ print_summary() {
   for item in "${EXCLUDED[@]}"; do
     if [ -e "$SRC/$item" ] || [ -L "$SRC/$item" ]; then echo "  $item"; fi
   done
-  if [ -d "$SRC/aura/home" ] && [ ! -L "$SRC/aura/home" ]; then
-    if [ "$INCLUDE_HOMES" = 1 ]; then
-      while IFS= read -r -d '' entry; do printf '  %q\n' "$entry"; done < <(
-        cd "$SRC" && find aura/home -path 'aura/home/*/*' \( "${HOME_NAMES[@]}" \) -prune -print0)
-    else
-      echo "  aura/home (not requested)"
-    fi
+  if [ "$INCLUDE_HOMES" != 1 ] && [ -d "$SRC/aura/home" ] && [ ! -L "$SRC/aura/home" ]; then
+    echo "  aura/home (not requested)"
   fi
+  while IFS= read -r -d '' entry; do
+    count=$((count + 1))
+    if [ "$shown" -lt 50 ]; then printf '  credential name: %q\n' "$entry"; shown=$((shown + 1)); fi
+  done < <(list_credentials)
+  echo "Credential-named paths excluded: $count (first $shown listed)"
   echo "Other paths not in the copy allowlist:"
   for entry in "$SRC"/* "$SRC"/.[!.]* "$SRC"/aura/* "$SRC"/aura/.[!.]*; do
     { [ -e "$entry" ] || [ -L "$entry" ]; } || continue
     item=${entry#"$SRC"/}
     [ "$item" != aura ] || continue
-    if is_excluded "$item" || in_roots "$item"; then continue; fi
+    if in_excluded_list "$item" || in_roots "$item"; then continue; fi
     [ "$item" != aura/home ] || continue
     printf '  %q\n' "$item"
   done
   echo "Symlinks kept: ${#KEPT_LINKS[@]}, dropped as unsafe: ${#DROPPED_LINKS[@]}"
   for item in ${DROPPED_LINKS[@]+"${DROPPED_LINKS[@]}"}; do printf '  dropped symlink: %q\n' "$item"; done
-  for item in ${DROPPED_HARD[@]+"${DROPPED_HARD[@]}"}; do printf '  dropped hardlink to excluded file: %q\n' "$item"; done
+  for item in ${DROPPED_HARD[@]+"${DROPPED_HARD[@]}"}; do printf '  dropped hardlink with a name outside the copy set: %q\n' "$item"; done
   echo
   echo "WARNING: scopes/, apps/, and nexus/ may embed tokens in app data, caches, or logs."
-  while IFS= read -r -d '' entry; do
-    count=$((count + 1))
-    if [ "$shown" -lt 10 ]; then printf '  review: %q\n' "$entry"; shown=$((shown + 1)); fi
-  done < <(walk -type f \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name '*.key' \
-    -o -name 'id_rsa*' -o -name 'id_ed25519*' -o -iname '*credential*' -o -iname '*token*' -o -iname '*secret*' \) -print0)
-  echo "Files with credential-like names in the copy set: $count"
   echo "NOTE: context/.masterkey is never copied, so Context secrets are not usable in the copy."
   if [ "$INCLUDE_KV" = 1 ]; then
     echo "NOTE: kv/ is included without its master key. Sealed values cannot be decrypted."

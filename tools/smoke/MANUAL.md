@@ -9,3 +9,11 @@ For the owner, after `tools/smoke/run.mjs` passes. These steps change state on p
 - [ ] **Flight:** start a Flight from an app that offers one, confirm it appears, and dismiss it.
 - [ ] **TerminalX embed:** open TerminalX and confirm the embedded Terminal works. **Opening this window creates a Terminal session.** Close that session afterward if you don't need it.
 - [ ] **Nexus:** open Nexus, confirm the catalog loads and installed apps are listed. Don't install or update anything on the live system unless you intend to.
+
+## Separate CLI check
+
+`packages/aura-cli/test/smoke.sh` is a broader check of the CLI's read commands. It is **not** part of `tools/smoke/run.mjs` and **bypasses its allowlist and state guard**, because it calls the shell directly. Run it by hand, only when you intend to, and preferably on the test instance:
+
+```sh
+cd packages/aura-cli && sh test/smoke.sh
+```

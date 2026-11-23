@@ -118,13 +118,15 @@ tools/test-instance/copy-data.sh --source /mnt/aura-snapshot --dest /srv/aura-co
 **Optional:**
 
 - `--include-kv` copies `kv/`.
-- `--include-homes` copies `aura/home/*`, without `.ssh`, `.docker`, `.claude*`, `.codex`, `.config`, `.gitconfig`, shell histories, `.netrc`, `.git-credentials`, and other common credential stores, at any depth.
+- `--include-homes` copies `aura/home/*`, minus the credential names below.
+
+**Credential names are excluded at any depth in every copied root**, case-insensitively: `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `*credential*`, `*secret*`, `*token*`, `auth.json`, Git configs, `.ssh`, `.docker`, `.claude*`, `.codex`, `.config`, `.gitconfig`, shell histories, `.netrc`, `.gnupg`, `.aws`, `.kube`, `.azure`, `.gemini`, `.npmrc`, `.pypirc`, and `.pgpass`. The match is deliberately broad, so harmless names such as `node_modules/js-tokens` are left out too. Reinstall dependencies on the test instance. The summary lists excluded names, never contents.
 
 **The master key and KV are a pair.** Context values in KV are sealed with `context/.masterkey`. By default both are excluded, so **Context secrets are not copied**. With `--include-kv`, the sealed values are present but cannot be decrypted, and AuraOS generates a new key.
 
-**App data may still embed tokens** in databases, caches, or logs. The script flags files with credential-like names, but it cannot detect tokens inside files. Review the copy and keep it private.
+**App data may still embed tokens** in databases, caches, or logs. The script excludes by name and cannot detect tokens inside files. Review the copy and keep it private.
 
-Symlinks are kept only if they are relative and resolve inside copied data. Hardlinks to excluded files, sockets, FIFOs, and devices are not copied.
+Symlinks are kept only if they are relative and resolve inside copied data. A hardlink is copied only if every name of its file is in the copy set. Sockets, FIFOs, and devices are not copied.
 
 Move the copy to the test host if you made it elsewhere, then seed the volume **before first boot**:
 

@@ -24,11 +24,11 @@ Exit codes: `0` no failures, `1` a check failed, `2` usage error.
 - **The Terminal is never proxied by app id.** A bare `/api/proxy/com.aura.terminal/api/sessions` can cold-start it. The exact instance id cannot.
 - **The CLI is guarded too.** `aura` runs against a loopback proxy that applies the same guard, with a minimal environment and no inherited tokens. `aura get apps` also requests `/api/apps/serve`, which is refused, and the CLI tolerates that.
 - **No credentials are sent.** There are no tokens or cookies, and redirects are not followed.
-- **Reports hold no secrets.** They contain statuses, counts, field presence, and non-secret ids. Response bodies, env values, logs, and notification content are never copied. Credential and binary checks use `test -e` only.
-- **State guard.** Instance ids, instance states, and Terminal session ids are recorded before and after the run. Any change fails the run. Activity by someone else during the run will also trip it, so rerun on a quiet system before treating it as a bug.
+- **Reports hold no secrets.** They contain statuses, counts, field presence, and non-secret ids. Response bodies, env values, logs, and notification content are never copied. Credential and binary checks test for existence only.
+- **State guard.** App ids and `enabled`, Activity ids, instance ids and states, sidecar counts, and Terminal session ids are recorded before and after the run. Any change fails the run. Activity by someone else during the run will also trip it, so rerun on a quiet system before treating it as a bug.
 
 ## Tiers
 
 `live` runs the read-only checks. Workflows that change state or need fixtures are tagged `test-instance` and reported as skipped: PTY attach, MCP handshake, Activities, Flights, TerminalX embed, Nexus install and update, jump, sidecar/mount/port changes, KV writes, and update/rollback.
 
-`--tier test-instance` runs the same read-only checks. **The fixture workflows are not automated yet**, so they are still reported as skipped and do not count as passing. Use [MANUAL.md](MANUAL.md) for them.
+`--tier test-instance` runs the same read-only checks, but skips the Excalidraw and TerminalX checks when those apps are not installed or running. `live` always requires them. **The fixture workflows are not automated yet**, so they are still reported as skipped and do not count as passing. Use [MANUAL.md](MANUAL.md) for them.

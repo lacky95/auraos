@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Commit** | `6e4a797` plus the Phase 0 test-command changes (no product code changed) |
+| **Commit** | The Phase 0 review-fix commit on `phase0/baseline`, based on `e2f3664` (no product code changed from `6e4a797`) |
 | **Date** | 2026-11-23 |
 | **Node** | v22.23.5 |
 | **Where** | Git worktree inside the `aura-shell` master container |
@@ -12,15 +12,15 @@
 
 | Suite | Files | Tests | Pass | Fail | Skip | Result |
 |---|---:|---:|---:|---:|---:|---|
-| `packages/core` | 35 of 36 | 428 | 414 | 14 | 0 | fail |
-| `packages/shell` | 36 | 295 | 295 | 0 | 0 | pass (forced exit, see below) |
+| `packages/core` | 35 of 36 | 428 | 415 | 13 | 0 | fail |
+| `packages/shell` | 37 | 340 | 340 | 0 | 0 | pass (forced exit, see below) |
 | `apps/com.aura.terminal` | 29 | 183 | 162 | 0 | 21 | pass |
 | `packages/app-sdk` | 3 | 21 | 21 | 0 | 0 | pass |
 | `apps/com.aura.aurashelld` | 3 | 47 | 47 | 0 | 0 | pass |
 | `packages/aura-cli` | 2 | 20 | 19 | 1 | 0 | fail |
 | `apps/com.aura.console` | 2 | 15 | 15 | 0 | 0 | pass |
 | `packages/kv-store` | 1 | 16 | 16 | 0 | 0 | pass |
-| **Total** | **111 of 112** | **1025** | **989** | **15** | **21** | |
+| **Total** | **112 of 113** | **1070** | **1035** | **14** | **21** | |
 
 ## Existing failures
 
@@ -41,10 +41,13 @@ None of these were fixed.
 - result from a window-opening onActivityCreate is returned alongside activityId
 - plain openActivity ignores rejected/noActivity (only intent launches may decline a window)
 
-**`packages/core`: master container environment (2).**
+**`packages/core`: master container environment (1).**
 
 - `PortAllocator refuses ports that are bound at the OS level`: the test binds fixed port 4001, which a live process already holds here (`EADDRINUSE`).
-- `killProcessGroup terminates detached descendants, not just the root`: the killed process stays a zombie because PID 1 in this container does not reap orphans, and the test counts a zombie as alive.
+
+**Environment-dependent, passed in this run.**
+
+- `killProcessGroup terminates detached descendants, not just the root`: it can fail in the master container, because PID 1 does not reliably reap orphans and the test counts a zombie as alive. It failed in the first baseline run and passed in this one, so a failure here is not by itself a regression.
 
 **`packages/aura-cli` (1).**
 
@@ -58,7 +61,7 @@ None of these were fixed.
 
 - **21 Terminal tests skipped.** They need real `tmux`, which is not installed in the master container.
 - **No suite was withheld as unsafe.** Each was inspected first. Tests that call Docker use mocks or stubs.
-- **`packages/aura-cli/test/smoke.sh` not run.** It is not part of the CLI `test` script; the live smoke stream owns it.
+- **`packages/aura-cli/test/smoke.sh` not run.** It is not part of the CLI `test` script and bypasses the smoke guard, so it is a separate manual check in `tools/smoke/MANUAL.md`.
 
 ## Known test-harness issue
 
@@ -66,7 +69,7 @@ None of these were fixed.
 
 ## Isolation
 
-`tools/run-tests.mjs` refuses to run from `/workspace` unless `--allow-live-workspace` is passed. Each suite gets a temporary data directory and home, no inherited `AURA_*`, `OS_API*`, `DOCKER_*`, or `TMUX*` variables, a `docker` stub that always fails, and a Node preload that blocks the Docker socket, port 3000, and non-loopback hosts. The guard recorded no blocked attempts in this run.
+`tools/run-tests.mjs` refuses to run from `/workspace` unless `--allow-live-workspace` is passed. Each suite gets a temporary data directory and home, no inherited `AURA_*`, `OS_API*`, `DOCKER_*`, or `TMUX*` variables, a `docker` stub that always fails, and a Node preload that blocks the Docker socket, port 3000, every port already listening on loopback when the run starts (read from `/proc/net/tcp` and `/proc/net/tcp6`), and non-loopback hosts. Ports the tests open later stay usable. The guard recorded no blocked attempts in this run.
 
 The guard does not sandbox the filesystem or block every process. `updater-script.test.mjs` creates and removes `/tmp/rebuilt`, `/tmp/restarted`, and `/tmp/rebased`. Run the suite only from a worktree.
 

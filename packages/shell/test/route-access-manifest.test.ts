@@ -12,6 +12,7 @@ import { ROUTE_METHODS } from '../src/lib/access/types.ts';
 import type { AccessRule, AccessSurface, RouteAccessManifest } from '../src/lib/access/types.ts';
 import {
   analyzeExports, attachedSurfaces, auditRoutes, auditSurfaces, dispatchedMethods, effectiveRule, enumerateRoutes,
+  listenerSites, listenersIn,
 } from './helpers/enumerateRoutes.ts';
 import type { AuditIssue, AuditPolicy } from './helpers/enumerateRoutes.ts';
 
@@ -20,7 +21,7 @@ const pagesDir = path.join(root, 'src/pages');
 const attachSource = fs.readFileSync(path.join(root, 'server/attach.mjs'), 'utf8');
 
 // Held here, apart from the manifest, so widening public takes two edits (Q27).
-const STATIC_CANDIDATES = ['/api/os/theme.css', '/api/os/icons.svg', '/api/os/icons/[name].svg', '/api/os/keyboard.js'];
+const STATIC_CANDIDATES = ['/api/os/theme.css', '/api/os/icons.svg', '/api/os/icons/[name].svg'];
 const candidateKeys = STATIC_CANDIDATES.flatMap((r) => [`GET ${r}`, `HEAD ${r}`]);
 const POLICY: AuditPolicy = {
   publicRoutes: new Set(['POST /api/admin/session', 'GET /api/admin/first-boot', 'HEAD /api/admin/first-boot', ...candidateKeys]),
@@ -28,6 +29,14 @@ const POLICY: AuditPolicy = {
   publicSurfaces: new Set(['shell-static-assets']),
 };
 const NEVER_PUBLIC = ['/api/os/context', '/api/os/volumes', '/api/os/lock', '/api/os/unlock', '/api/os/ui/command'];
+// Classified in SURFACE_MANIFEST as shell-listener, ws-proxy and sse-mux.
+const KNOWN_LISTENERS = [
+  'server.mjs createServer',
+  'server/attach.mjs WebSocketServer',
+  'server/attach.mjs upgrade',
+  'server/sse-mux.mjs WebSocketServer',
+  'server/sse-mux.mjs upgrade',
+];
 
 const inventory = enumerateRoutes(pagesDir);
 const apiRoutes = inventory.routes.filter((r) => r.route.startsWith('/api/'));
@@ -49,6 +58,25 @@ test('every non-Astro surface and SSR page is classified', () => {
   assert.ok(attached.includes('attachWsProxy'), 'the parse found attachShellServers');
   const issues = auditSurfaces(SURFACE_MANIFEST, attached, inventory.pages, POLICY);
   assert.deepEqual(issues, [], show(issues));
+});
+
+test('every listener in the shell server is classified', () => {
+  assert.deepEqual(listenerSites(root), KNOWN_LISTENERS);
+});
+
+test('the listener scan finds each form and ignores strings and comments', () => {
+  const source = [
+    `server.on('upgrade', handler);`,
+    `http.createServer(handler);`,
+    `new WebSocketServer({ noServer: true });`,
+    `new ws.WebSocketServer({ noServer: true });`,
+    `server.on('request', handler);`,
+    `// server.on('upgrade', handler);`,
+    'const s = `http.createServer()`;',
+  ].join('\n');
+  assert.deepEqual(listenersIn('x.mjs', source), [
+    'x.mjs upgrade', 'x.mjs createServer', 'x.mjs WebSocketServer', 'x.mjs WebSocketServer',
+  ]);
 });
 
 test('the route names follow Astro', () => {

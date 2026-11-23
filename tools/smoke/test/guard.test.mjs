@@ -143,11 +143,33 @@ test('the target must be a plain origin', () => {
 });
 
 test('the state diff reports instance and session changes', () => {
-  const base = { instances: [{ id: 'a', state: 'resumed', inPool: false }], sessions: { t: ['s1'] } };
+  const base = { apps: [], activities: [], instances: [{ id: 'a', state: 'resumed', inPool: false, sidecars: 0 }], sessions: { t: ['s1'] } };
   assert.deepEqual(diffSnapshots(base, structuredClone(base)), []);
-  const changed = { instances: [{ id: 'a', state: 'paused', inPool: false }, { id: 'b', state: 'resumed', inPool: false }], sessions: { t: ['s2'] } };
+  const changed = { ...base, instances: [{ id: 'a', state: 'paused', inPool: false, sidecars: 0 }, { id: 'b', state: 'resumed', inPool: false, sidecars: 0 }], sessions: { t: ['s2'] } };
   const out = diffSnapshots(base, changed);
   assert.equal(out.length, 4);
+});
+
+test('the state diff reports Activity, sidecar count and enabled changes', () => {
+  const base = {
+    apps: [{ id: 'x', enabled: true }],
+    activities: ['x#1'],
+    instances: [{ id: 'a', state: 'resumed', inPool: false, sidecars: 1 }],
+    sessions: {},
+  };
+  assert.deepEqual(diffSnapshots(base, structuredClone(base)), []);
+  const out = diffSnapshots(base, {
+    apps: [{ id: 'x', enabled: false }],
+    activities: ['x#2'],
+    instances: [{ id: 'a', state: 'resumed', inPool: false, sidecars: 2 }],
+    sessions: {},
+  });
+  assert.deepEqual(out.sort(), [
+    'activity added: x#2',
+    'activity removed: x#1',
+    'app x enabled: true -> false',
+    'instance a sidecars: 1 -> 2',
+  ]);
 });
 
 /** A fake shell that records every request and puts a canary in sensitive fields. */
@@ -236,6 +258,31 @@ test('the state guard fails when a session appears during the run', async () => 
     const state = report.results.find((x) => x.id === 'state-guard');
     assert.equal(state.status, 'fail');
     assert.match(state.detail, /session added/);
+  } finally {
+    await shell.close();
+  }
+});
+
+test('optional apps skip on a test instance and stay strict on live', async () => {
+  const apps = appsFixture().filter((a) => a.manifest.id !== 'io.lakner.terminalx');
+  const shell = await fakeShell({
+    '/api/apps': apps,
+    '/api/interfaces?consumers=0': { interfaces: [{ appId: 'com.aura.terminal', name: 'terminal', kind: 'http/mcp', status: 'live' }] },
+    '/api/instances/io.lakner.terminalx/status': { error: 'not found' },
+  });
+  const run = async (tier) => {
+    const guard = createGuard();
+    const report = await runSmoke({ client: createClient({ target: shell.url, guard }), guard, tier, env: {}, deps: NO_CLI });
+    return Object.fromEntries(report.results.map((x) => [x.id, x.status]));
+  };
+  try {
+    const instance = await run('test-instance');
+    assert.equal(instance.interfaces, 'pass');
+    assert.equal(instance['interfaces-excalidraw'], 'skip');
+    assert.equal(instance['terminalx-status'], 'skip');
+    const live = await run('live');
+    assert.equal(live.interfaces, 'fail');
+    assert.equal(live['terminalx-status'], 'fail');
   } finally {
     await shell.close();
   }

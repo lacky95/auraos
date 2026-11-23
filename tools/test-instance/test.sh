@@ -41,7 +41,7 @@ case "$1 ${2:-}" in
     case "$host" in live*) echo "LIVE-ID" ;; *) echo "${STUB_TARGET_ID:-TARGET-ID}" ;; esac ;;
   "ps -q") [ "${STUB_DOCKER_DOWN:-}" != 1 ] || exit 1; printf '%s' "${STUB_RUNNING:-}" ;;
   "ps -a") printf '%b' "${STUB_PS:-}" ;;
-  "inspect "*) printf '%b' "${STUB_MOUNTS:-}" ;;
+  "inspect "*) [ "${STUB_INSPECT_FAIL:-}" != 1 ] || exit 1; printf '%b' "${STUB_MOUNTS:-}" ;;
   "volume ls") printf '%b' "${STUB_VOLUMES:-}" ;;
   "network ls") printf 'bridge\nhost\nnone\n'; printf '%b' "${STUB_NETWORKS:-}" ;;
   *) echo "stub refuses: $*" >&2; exit 99 ;;
@@ -148,6 +148,11 @@ AURA_DATA_DIR="$SRC" expect_rc "refused when source is AURA_DATA_DIR" 1 "$COPY" 
 STUB_RUNNING=abc STUB_MOUNTS="/aura-x\t$SRC\t/data\n" expect_rc "refused: running container mounts source" 1 \
   "$COPY" --source "$SRC" --dest "$L" --apply --confirm-stopped-snapshot
 absent "container refusal not overridable" "$L"
+STUB_RUNNING=abc STUB_INSPECT_FAIL=1 expect_rc "refused: docker inspect failed" 1 "$COPY" --source "$SRC" --dest "$L" --apply
+case "$OUT" in *"POSSIBLY LIVE: docker inspect failed"*) ok "inspect failure reported" ;; *) bad "inspect failure reported" ;; esac
+absent "inspect failure wrote nothing" "$L"
+STUB_RUNNING=abc STUB_INSPECT_FAIL=1 expect_rc "inspect failure is overridable" 0 \
+  "$COPY" --source "$SRC" --dest "$T/inspect-ok" --apply --confirm-stopped-snapshot
 touch "$SRC/kv/aura.rdb"
 expect_rc "refused: recent kv write" 1 "$COPY" --source "$SRC" --dest "$L" --apply
 touch -d '2020-01-01 00:00:00' "$SRC/kv/aura.rdb"
@@ -218,6 +223,42 @@ ln -s ../elsewhere "$R2/aura/home"
 find "$R2" -exec touch -h -d '2020-01-01 00:00:00' {} +
 expect_rc "symlinked aura/home handled" 0 "$COPY" --source "$R2" --dest "$T/homelink-out" --apply --include-homes
 absent "symlinked aura/home skipped" "$T/homelink-out/aura"
+
+# One credential denylist, at any depth, in every root.
+C="$T/creds"
+CRED_FILES=(apps/com.x/.ssh/id_rsa apps/com.x/.env apps/com.x/API_TOKEN.txt
+  scopes/users/default/apps/com.x/i1/.claude/.credentials.json nexus/cache/server.pem
+  aura/home/user/work/.env aura/home/user/work/repo/.git/config
+  aura/home/user/work/repo/.git/modules/sub/config
+  aura/home/user/.cargo/credentials.toml aura/home/user/.local/share/opencode/auth.json)
+for f in "${CRED_FILES[@]}"; do mkdir -p "$C/$(dirname "$f")"; echo FIXTURE_SECRET > "$C/$f"; done
+mkdir -p "$C/context/system" "$C/aura/home/user/work/repo/.git"
+echo keep > "$C/apps/com.x/keep.txt"
+echo ref > "$C/aura/home/user/work/repo/.git/HEAD"
+# Hardlinks: to an uncopied name, to a credential, to a name outside the source.
+echo FIXTURE_SECRET > "$C/context/system/sys.conf"; ln "$C/context/system/sys.conf" "$C/apps/com.x/hl-context"
+ln "$C/apps/com.x/.env" "$C/apps/com.x/hl-env"
+echo FIXTURE_SECRET > "$T/outside-source"; ln "$T/outside-source" "$C/apps/com.x/hl-outside"
+echo same > "$C/apps/com.x/hl-a"; ln "$C/apps/com.x/hl-a" "$C/apps/com.x/hl-b"
+find "$C" -exec touch -h -d '2020-01-01 00:00:00' {} +
+expect_rc "credential fixture dry run" 0 "$COPY" --source "$C" --dest "$T/creds-dry" --include-homes
+case "$OUT" in *FIXTURE_SECRET*) bad "credential report prints no contents" ;; *) ok "credential report prints no contents" ;; esac
+case "$OUT" in *"credential name: apps/com.x/.env"*) ok "credential report names paths" ;; *) bad "credential report names paths" ;; esac
+CO="$T/creds-out"
+expect_rc "credential fixture apply" 0 "$COPY" --source "$C" --dest "$CO" --apply --include-homes
+for f in "${CRED_FILES[@]}"; do absent "credential excluded: $f" "$CO/$f"; done
+for f in hl-context hl-env hl-outside; do absent "poisoned hardlink dropped: $f" "$CO/apps/com.x/$f"; done
+present "plain file kept" "$CO/apps/com.x/keep.txt"
+present "other .git files kept" "$CO/aura/home/user/work/repo/.git/HEAD"
+[ "$(stat -c %i "$CO/apps/com.x/hl-a")" = "$(stat -c %i "$CO/apps/com.x/hl-b")" ] \
+  && ok "hardlink inside copy set kept" || bad "hardlink inside copy set kept"
+if grep -rqs FIXTURE_SECRET "$CO"; then bad "no credential content in copy"; else ok "no credential content in copy"; fi
+# Verification must catch a credential name the walk did not produce.
+mkdir "$T/badtar"
+printf '#!/bin/sh\n"%s" "$@"; rc=$?\n[ "$3" != -xpf ] || echo planted > "$2/apps/com.x/.env"\nexit $rc\n' "$(command -v tar)" > "$T/badtar/tar"
+chmod +x "$T/badtar/tar"
+PATH="$T/badtar:$PATH" expect_rc "verification rejects a credential name" 1 "$COPY" --source "$C" --dest "$T/creds-bad" --apply
+case "$OUT" in *"VERIFY FAILED: excluded path in dest: apps/com.x/.env"*) ok "verification names the path" ;; *) bad "verification names the path" ;; esac
 
 # Isolation preflight
 : > "$STUB_LOG"
