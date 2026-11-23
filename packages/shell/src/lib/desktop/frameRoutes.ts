@@ -6,26 +6,11 @@
  */
 import * as core from '@aura/core';
 
-type FrameRouteValue = 'proxy' | 'host';
-type GetFrameRoute = (appId: string) => Promise<FrameRouteValue> | FrameRouteValue;
-
-/** Namespace access: the registry stream provides these at integration. */
-function frameRouteReader(kv: unknown): GetFrameRoute | null {
-  const c = core as unknown as {
-    createAppHostRegistry?: (kv: unknown) => { getFrameRoute?: GetFrameRoute };
-    getFrameRoute?: GetFrameRoute;
-  };
-  const registry = c.createAppHostRegistry?.(kv);
-  if (registry?.getFrameRoute) return registry.getFrameRoute.bind(registry);
-  return c.getFrameRoute ?? null;
-}
-
-export async function hostRouteAppIds(appIds: string[], kv: unknown): Promise<string[]> {
+export async function hostRouteAppIds(appIds: string[]): Promise<string[]> {
   try {
-    const get = frameRouteReader(kv);
-    if (!get) return [];
+    const { registry } = core.getAppHostServices();
     const routes = await Promise.all(appIds.map(async (id) => {
-      try { return (await get(id)) === 'host' ? id : null; }
+      try { return (await registry.getFrameRoute(id)) === 'host' ? id : null; }
       catch { return null; }
     }));
     return routes.filter((id): id is string => id !== null);

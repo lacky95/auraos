@@ -41,7 +41,7 @@ const [mruMap, workspacesEntry] = await Promise.all([
 ]);
 const storedWorkspaces = workspacesEntry?.value ?? null;
 // PHASE2-CUTOVER: every app opens on its App Host; remove the per-app route.
-const hostRouteApps = await hostRouteAppIds(allApps.map((a) => a.id), kv);
+const hostRouteApps = await hostRouteAppIds(allApps.map((a) => a.id));
 const hostRouteSet = new Set(hostRouteApps);
 const pinnedApps = [...allApps]
   .filter((m) => enabledMap[m.id] !== false)
