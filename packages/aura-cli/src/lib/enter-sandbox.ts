@@ -98,6 +98,8 @@ export interface SandboxLaunch {
   /** Scoped host path to this instance's data dir. Falls back to the legacy
    *  `/data/apps/<appId>/<instanceId>` when absent. */
   instanceDataDir?: string;
+  /** Interactive cwd inside the sandbox; HOME remains shared. */
+  startDir?: string;
 }
 
 export function enterSandbox(
@@ -113,12 +115,12 @@ export function enterSandbox(
   // INSIDE the container (ContainerRunner), so enterContainer keeps that
   // in-container path and ignores the scoped host `launch` paths. Only the
   // proot path runs against real host paths and needs the scope-correct dirs.
-  if (sandbox === 'container') return enterContainer(instanceId, appId, cmd);
+  if (sandbox === 'container') return enterContainer(instanceId, appId, cmd, launch?.startDir);
   return enterProot(instanceId, appId, port, tools, cmd, launch);
 }
 
 /** Joins the sibling container's namespace via docker exec. */
-function enterContainer(instanceId: string, appId: string, cmd?: string): void {
+function enterContainer(instanceId: string, appId: string, cmd?: string, startDir?: string): void {
   // Mirrors ContainerRunner.containerName() — same sanitisation rule.
   const containerName = 'aura-' + instanceId.replace(/[^a-zA-Z0-9_.-]/g, '_');
   const appDir = `/workspace/apps/${appId}`;
@@ -154,10 +156,13 @@ function enterContainer(instanceId: string, appId: string, cmd?: string): void {
     ...termEnv,
     containerName,
   ];
-  const shellArgs = cmd ? ['bash', '-lc', cmd] : ['bash', '-i'];
+  // Positional arguments avoid shell interpolation; absent data falls back to source.
+  const shellArgs = cmd ? ['bash', '-lc', cmd] : startDir
+    ? ['bash', '-c', 'cd -- "$1" 2>/dev/null || printf "Workspace unavailable; using %s\\n" "$PWD"; exec bash -i', 'aura-jump', startDir]
+    : ['bash', '-i'];
   const args = [...execArgs, ...shellArgs];
   // One-off `cmd` runs print only the command's own output, like docker exec.
-  if (!cmd) info(`entering container ${color.bold(containerName)} (sandbox=container, cwd=${appDir})`);
+  if (!cmd) info(`entering container ${color.bold(containerName)} (sandbox=container, cwd=${startDir ?? appDir})`);
   // Interactive jumps update the Terminal's host indicator; one-off `cmd` runs
   // don't (they return immediately and shouldn't flicker the bar).
   const restoreHost = cmd ? null : callerHostLabel();
@@ -257,7 +262,9 @@ function enterProot(
     AURA_TERM_LABEL: '',
   };
 
-  const command = cmd ? ['bash', '-lc', cmd] : ['bash', '-i'];
+  const command = cmd ? ['bash', '-lc', cmd] : launch?.startDir
+    ? ['bash', '-c', 'cd -- "$1" 2>/dev/null || printf "Workspace unavailable; using %s\\n" "$PWD"; exec bash -i', 'aura-jump', useProot ? launch.startDir : join(instDataDir, launch.startDir.slice('/data/'.length))]
+    : ['bash', '-i'];
 
   // Drive the Terminal's host indicator (interactive jumps only). Capture the
   // caller's label before spawning so we can restore the bar on exit.

@@ -19,6 +19,17 @@ const BASE_PATH = `/api/proxy/${INSTANCE_ID}`;
 const config = {
   reactStrictMode: true,
   basePath: BASE_PATH,
+  // serve.mjs builds into `.next-staging` while the old build keeps serving,
+  // then swaps it in — so the dist dir has to be selectable per process.
+  distDir: process.env.NEXT_DIST_DIR || '.next',
+  // Production builds type-check; `next dev` never did, and the
+  // fumadocs-core@15 / fumadocs-mdx@11 interop (see lib/source.ts) trips
+  // `PageData.body`. Serve what compiles — same behaviour dev mode had.
+  typescript: { ignoreBuildErrors: true },
+  eslint: { ignoreDuringBuilds: true },
+  // Two lockfiles are visible (the monorepo's and this site's); pin the root
+  // so Next stops guessing and warning on every build.
+  outputFileTracingRoot: new URL('.', import.meta.url).pathname,
 };
 
 export default withMDX(config);

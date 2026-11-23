@@ -8,6 +8,7 @@ import { enterSandbox, enterSidecar, syncDockerExecWinsize, setTerminalHost, cal
 import { resolveInstance, resolveSidecar } from '../lib/resolve.js';
 import { sidecarId } from '../lib/resources.js';
 import { truncateAnsi } from '../lib/tui.js';
+import { jumpWorkspace } from '../lib/jump-workspace.js';
 
 interface InstanceLite {
   instanceId: string;
@@ -101,7 +102,9 @@ Examples:
       const dto = await api.get<{
         launch?: { appDir?: string; instanceDataDir?: string; tools?: string[] };
       }>(`/api/instances/${encodeURIComponent(pick.instanceId)}/status`);
-      enterSandbox(pick.instanceId, pick.appId, pick.port, dto.launch?.tools ?? [], pick.sandbox, undefined, dto.launch);
+      const apps = await api.get<Array<{ manifest: { id: string; metadata?: Record<string, unknown> } }>>('/api/apps');
+      const app = apps.find(a => a.manifest.id === pick.appId);
+      enterSandbox(pick.instanceId, pick.appId, pick.port, dto.launch?.tools ?? [], pick.sandbox, undefined, { ...dto.launch, startDir: app && jumpWorkspace(app.manifest) });
     });
 }
 
@@ -122,7 +125,9 @@ async function jumpDirect(target: string | undefined, sidecar: string | undefine
   const dto = await api.get<{
     launch?: { appDir?: string; instanceDataDir?: string; tools?: string[] };
   }>(`/api/instances/${encodeURIComponent(inst.instanceId)}/status`);
-  enterSandbox(inst.instanceId, inst.appId, inst.port, dto.launch?.tools ?? [], inst.sandbox, undefined, dto.launch);
+  const apps = await api.get<Array<{ manifest: { id: string; metadata?: Record<string, unknown> } }>>('/api/apps');
+  const app = apps.find(a => a.manifest.id === inst.appId);
+  enterSandbox(inst.instanceId, inst.appId, inst.port, dto.launch?.tools ?? [], inst.sandbox, undefined, { ...dto.launch, startDir: app && jumpWorkspace(app.manifest) });
 }
 
 /** `docker exec -it aura-shell bash` — same TUI env passthrough we use for

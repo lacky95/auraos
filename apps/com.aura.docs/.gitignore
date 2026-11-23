@@ -1,0 +1,4 @@
+# serve.mjs builds into a staging dir before swapping it into .next
+fumadocs-site/.next-staging/
+# marker that switches entrypoint.sh to `next dev` (see entrypoint.sh)
+.dev-mode
