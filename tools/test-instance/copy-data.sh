@@ -185,11 +185,14 @@ emit_manifest() {
 LIVE_HARD=()
 LIVE_SOFT=()
 detect_live() {
-  local p comm cwd ids line msource mdest name live_path
+  local p comm state cwd ids line msource mdest name live_path
   for p in /proc/[0-9]*; do
     comm=$(cat "$p/comm" 2>/dev/null) || continue
     case "$comm" in
       valkey-server|redis-server)
+        # A zombie has exited and holds no data, and its cwd is unreadable.
+        state=$(sed 's/.*) //' "$p/stat" 2>/dev/null | cut -d' ' -f1)
+        [ "$state" != Z ] || continue
         cwd=$(readlink "$p/cwd" 2>/dev/null || true)
         if [ -z "$cwd" ]; then
           LIVE_SOFT+=("cannot inspect $comm (pid ${p#/proc/})")

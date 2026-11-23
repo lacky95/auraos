@@ -69,3 +69,7 @@ None of these were fixed.
 `tools/run-tests.mjs` refuses to run from `/workspace` unless `--allow-live-workspace` is passed. Each suite gets a temporary data directory and home, no inherited `AURA_*`, `OS_API*`, `DOCKER_*`, or `TMUX*` variables, a `docker` stub that always fails, and a Node preload that blocks the Docker socket, port 3000, and non-loopback hosts. The guard recorded no blocked attempts in this run.
 
 The guard does not sandbox the filesystem or block every process. `updater-script.test.mjs` creates and removes `/tmp/rebuilt`, `/tmp/restarted`, and `/tmp/rebased`. Run the suite only from a worktree.
+
+## Typecheck
+
+`packages/shell` typecheck at this baseline reports 6 errors, none in Phase 0 files. Two are `@aura/ui` imports because the worktree has no `packages/ui/dist`. Four are existing test type errors in `test/app-hosts.test.ts` and `test/desktop-ssr-slots.test.ts`.
