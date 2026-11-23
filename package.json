@@ -13,7 +13,9 @@
     "build:libs": "pnpm --filter @aura/core --filter @aura/kv-store --filter @aura/app-sdk --filter @aura/ui --filter @aura/cli build",
     "publish:local": "node ./os/publish-aura-packages.mjs",
     "publish:local:fresh": "pnpm build:libs && pnpm publish:local",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "test": "node tools/run-tests.mjs",
+    "smoke": "node tools/smoke/run.mjs"
   },
   "devDependencies": {
     "typescript": "^5.5.0"

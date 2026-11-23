@@ -42,3 +42,6 @@ apps/*.tmp.*/
 **/.bash_history
 # boot.sh build fingerprints (skip an unchanged build on boot)
 /packages/.aura-build-*
+
+# CLI test bundles (packages/aura-cli/test/run.mjs)
+.test-dist/
