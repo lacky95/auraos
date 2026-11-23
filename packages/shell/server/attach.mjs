@@ -12,6 +12,7 @@
  */
 import { attachSseMux, MUX_PATH } from './sse-mux.mjs';
 import { createAppHostRouter } from './app-hosts.mjs';
+import { loadAppHostServices } from './app-host-auth.mjs';
 import { countSurfaceEvent, internalServiceHeaders, reportSurface, surfaceIdentity } from './access-bridge.mjs';
 import { stripShellCredentials } from './shell-credentials.mjs';
 
@@ -471,6 +472,7 @@ let appHostRouter = null;
 export function attachAppHosts(httpServer) {
   appHostRouter ??= createAppHostRouter({
     appsList: appsListCached,
+    services: loadAppHostServices,
     log: (...args) => { if (nsEnabled(APPHOST_NS, process.env.AURA_LOG ?? '')) console.log(`[${APPHOST_NS}]`, ...args); },
   });
   appHostRouter.attach(httpServer);

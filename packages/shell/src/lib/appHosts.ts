@@ -23,7 +23,10 @@ export interface AppHostDTO {
   reason?: 'raw-ip';
 }
 
-/** The desktop's scheme + host as the caller sees it. */
+/**
+ * The desktop's scheme + host as the caller sees it.
+ * PHASE2-CUTOVER: believes X-Forwarded-* from any peer; move to server/host-policy.mjs `edgeView`.
+ */
 export function callerDesktop(request: Request): { scheme: string; host: string } {
   const u = new URL(request.url);
   const host = request.headers.get('x-forwarded-host')?.split(',')[0]?.trim() || request.headers.get('host') || u.host;
