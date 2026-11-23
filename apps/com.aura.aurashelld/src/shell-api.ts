@@ -6,7 +6,9 @@
  * command channel into the browser (packages/shell/src/lib/uiCommandBroker.ts).
  * `setFetch` lets the tests script every route without a network.
  */
-export const OS_BASE = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
+import { osAuthHeaders, osBase } from '@aura/app-sdk/os-auth';
+
+export const OS_BASE = osBase();
 
 let fetchImpl: typeof fetch = (input, init) => fetch(input, init);
 /** Test hook: replace the transport. */
@@ -181,11 +183,11 @@ export interface NotificationWarningWire { code: string; field: string; message:
 export const WAIT_MAX_S = 25;
 
 function authed(init: RequestInit = {}): RequestInit {
-  const token = process.env['AURA_INSTANCE_TOKEN'];
-  if (!token) {
+  const bearer = osAuthHeaders(`${OS_BASE}/api/notifications`)['Authorization'];
+  if (!bearer) {
     throw new ShellApiError(401, 'this service has no AURA_INSTANCE_TOKEN in its env, so it cannot send verified notifications — restart com.aura.aurashelld');
   }
-  return { ...init, headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${token}` } };
+  return { ...init, headers: { ...(init.headers as Record<string, string> | undefined), authorization: bearer } };
 }
 
 const nid = (id: string) => encodeURIComponent(id);

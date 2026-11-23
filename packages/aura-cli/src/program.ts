@@ -26,6 +26,7 @@ import { registerSdk } from './commands/sdk.js';
 import { registerVerbs, setProgramFactory } from './commands/verbs.js';
 import { registerAdmin, registerApiKey } from './commands/admin.js';
 import { registerShellMode } from './commands/shellMode.js';
+import { registerIdentity } from './commands/identity.js';
 import { LEGACY_GROUPS, markLegacy } from './lib/deprecate.js';
 import { color, visibleWidth } from './lib/format.js';
 import { RESOURCES, fetchApps, findResource, liveInstances, shortName } from './lib/resources.js';
@@ -115,7 +116,10 @@ export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]
     ['aura revoke nperm <app> <locked|popup|read>', 'Revoke them again, takes effect at once'],
     ['aura get nperm [app]', 'Requested vs granted notification features'],
     ['aura admin login', 'Unlock admin with the shared credential (--save: 15 min)'],
-    ['aura admin ...', 'logout · status · audit · credential · rotate (master)'],
+    ['aura admin ...', 'logout · status · audit · access-report · credential · rotate (master)'],
+    ['aura whoami', 'Server-verified identity, and local hints'],
+    ['aura setup-code', 'Host: one-time owner setup code'],
+    ['aura user reset-password <username>', 'Host: one-time password reset code'],
     ['aura apikey ...', 'API keys for REST callers: create · ls · revoke (admin)'],
   ] },
   { title: 'Ecosystem & dev', lines: [
@@ -266,6 +270,7 @@ export function buildProgram(): Command {
   registerData(program);
   registerAdmin(program);
   registerShellMode(program);
+  registerIdentity(program);
   registerApiKey(program);
   // Pre-kubectl groups: registered so they keep working, then hidden.
   registerApp(program);

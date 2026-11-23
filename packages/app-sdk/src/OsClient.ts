@@ -43,6 +43,7 @@ export interface ThemeSelection {
 /** How an app participates in OS theming. Read from `<meta name="aura-theme-strategy">`. */
 export type ThemeStrategy = 'inherit' | 'themed' | 'override';
 
+import { osBase } from './os-auth.js';
 import { KeymapApi } from './keymap.js';
 import { NavApi } from './nav.js';
 import { SystemApi } from './system.js';
@@ -106,17 +107,9 @@ export class OsClient {
   readonly flight: FlightApi;
 
   constructor() {
-    // Bare `process.env.X` throws `ReferenceError: process is not defined`
-    // in the browser, which would prevent every browser-side `new OsClient()`
-    // from working — the SDK is consumed both server-side (lifecycle
-    // endpoints, Astro frontmatter) and client-side (page <script> blocks,
-    // React islands), so the constructor has to be safe in both.
-    const env = (typeof process !== 'undefined' && process.env) ? process.env : {};
-    // In-browser default is same-origin (so the URL is correct even when
-    // the app's iframe was launched on a non-localhost host). The
-    // OS_API_BASE env var is only honoured server-side.
-    const browserDefault = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
-    this.base = env['OS_API_BASE'] ?? browserDefault;
+    // Safe in both Node and the browser. In a browser this is the page's
+    // origin, so it is right even on a non-localhost host.
+    this.base = osBase({ mode: 'origin' });
     this.keymap   = new KeymapApi(this);
     this.nav      = new NavApi(this);
     this.system   = new SystemApi(this);

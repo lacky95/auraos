@@ -28,6 +28,8 @@
  * then acts with that sidecar's own token, so its spawns are its children).
  */
 
+import { isBrowser, osAuthHeaders, osBase, osEnv } from './os-auth.js';
+
 export interface SidecarMountsRequest {
   own?: boolean;
   inherit?: boolean | { exclude?: string[]; mode?: 'ro' };
@@ -184,8 +186,8 @@ export interface OsSidecarsClient {
 }
 
 export function osSidecars(options: OsSidecarsOptions = {}): OsSidecarsClient {
-  const env = typeof process !== 'undefined' ? process.env : {};
-  const base = (options.base ?? env['OS_API_BASE'] ?? env['AURA_OS_URL'] ?? '').replace(/\/+$/, '');
+  const env = osEnv();
+  const base = (options.base ?? osBase({ mode: 'server' })).replace(/\/+$/, '');
   const instanceId = options.instanceId ?? env['APP_INSTANCE_ID'] ?? env['AURA_INSTANCE_ID'] ?? '';
   const token = options.token ?? env['AURA_INSTANCE_TOKEN'] ?? '';
   const timeoutMs = options.timeoutMs ?? 15 * 60_000;
@@ -198,11 +200,12 @@ export function osSidecars(options: OsSidecarsOptions = {}): OsSidecarsClient {
 
   async function call<T>(method: string, url: string, body?: unknown): Promise<T> {
     if (!token) throw new OsSidecarError(401, 'osSidecars: no AURA_INSTANCE_TOKEN in the env — the instance predates instance tokens; restart it');
+    if (isBrowser()) throw new OsSidecarError(401, 'osSidecars: server-side only — a browser never sends the instance token');
     let res: Response;
     try {
       res = await doFetch(url, {
         method,
-        headers: { Authorization: `Bearer ${token}`, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+        headers: { ...osAuthHeaders(url, { token }), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
         signal: AbortSignal.timeout(timeoutMs),
       });

@@ -21,6 +21,10 @@
       "import": "./dist/sidecars.js",
       "types": "./dist/sidecars.d.ts"
     },
+    "./os-auth": {
+      "import": "./dist/os-auth.js",
+      "types": "./dist/os-auth.d.ts"
+    },
     "./os-sidecars": {
       "import": "./dist/os-sidecars.js",
       "types": "./dist/os-sidecars.d.ts"

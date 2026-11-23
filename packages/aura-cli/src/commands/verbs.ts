@@ -9,6 +9,7 @@
  * prompt, safety check and message of the original command stays the single
  * implementation — the verbs are a grammar, not a second copy of the logic.
  */
+import { holdsInstanceIdentity, shellFetch } from '../lib/identity.js';
 import type { Command } from 'commander';
 import { spawn } from 'node:child_process';
 import { api, shellUrl, subscribeEvents } from '../lib/client.js';
@@ -203,20 +204,15 @@ async function describeCmd(resource: string, name: string, opts: { output?: stri
 // ─── OS-sidecar API (token) ─────────────────────────────────────────────────
 
 /**
- * The bearer for the token-gated sidecar routes — only when the CLI runs
- * inside that very instance (or one of its OS sidecars), where the OS put
- * AURA_INSTANCE_TOKEN in the env. Everywhere else there is no token, by design.
+ * The token-gated sidecar routes. Only the CLI inside that very instance (or
+ * one of its OS sidecars) holds the token: see holdsInstanceIdentity().
  */
-function ownToken(instanceId: string): string | null {
-  const token = process.env['AURA_INSTANCE_TOKEN'];
-  const self = process.env['APP_INSTANCE_ID'] ?? process.env['AURA_INSTANCE_ID'];
-  return token && self === instanceId ? token : null;
-}
-
-async function sidecarApi<T>(method: string, instanceId: string, path: string, token: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${shellUrl()}/api/instances/${encodeURIComponent(instanceId)}/sidecars${path}`, {
+async function sidecarApi<T>(method: string, instanceId: string, path: string, body?: unknown): Promise<T> {
+  const res = await shellFetch(`/api/instances/${encodeURIComponent(instanceId)}/sidecars${path}`, {
     method,
-    headers: { Authorization: `Bearer ${token}`, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+    intent: 'instance',
+    instanceId,
+    headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
   const text = await res.text();
@@ -251,16 +247,15 @@ async function sidecarToolsCmd(verb: 'grant' | 'revoke', target: string, sidecar
   const inst = await resolveInstance(target);
   const sc = await resolveSidecar(inst.instanceId, sidecar);
   if (sc.managedBy !== 'os') fail(`${sidecarId(sc)} is app-managed — only OS sidecars have tools of their own (use inheritTools there)`);
-  const token = ownToken(inst.instanceId);
-  if (!token) {
+  if (!holdsInstanceIdentity(inst.instanceId)) {
     fail(`${verb === 'grant' ? 'granting tools to' : 'revoking tools from'} a running OS sidecar needs ${inst.instanceId}'s token — run this inside the app (aura jump ${inst.instanceId}),`
       + ` or change the template instead (persistent): aura ${verb} caps ${inst.appId} ${names.join(' ')} --template ${sc.template ?? '<template>'}`);
   }
   const path = `/${encodeURIComponent(sc.service)}/tools`;
   const r = verb === 'grant'
-    ? await sidecarApi<SidecarToolsDto & { granted: string[] }>('POST', inst.instanceId, path, token, { tools: names })
+    ? await sidecarApi<SidecarToolsDto & { granted: string[] }>('POST', inst.instanceId, path, { tools: names })
     : await sidecarApi<SidecarToolsDto & { revoked: string[] }>('DELETE', inst.instanceId,
-      `${path}?${new URLSearchParams(names.map((n): [string, string] => ['tool', n])).toString()}`, token);
+      `${path}?${new URLSearchParams(names.map((n): [string, string] => ['tool', n])).toString()}`);
   const changed = verb === 'grant' ? (r as { granted: string[] }).granted : (r as { revoked: string[] }).revoked;
   const where = `${inst.instanceId}/${sidecarId(sc)}`;
   if (changed.length) console.log(`${color.green('✓')} ${verb === 'grant' ? 'granted' : 'revoked'} ${changed.join(', ')} ${verb === 'grant' ? '→' : 'from'} ${where}`);
@@ -312,10 +307,9 @@ async function logsCmd(resource: string, name: string, opts: { container?: strin
   }
   const sc = await resolveSidecar(inst.instanceId, opts.container);
   // Inside the app that owns an OS sidecar: the OS reads the logs, no docker needed.
-  const token = sc.managedBy === 'os' && !opts.follow ? ownToken(inst.instanceId) : null;
-  if (token) {
+  if (sc.managedBy === 'os' && !opts.follow && holdsInstanceIdentity(inst.instanceId)) {
     const q = opts.tail ? `?tail=${encodeURIComponent(opts.tail)}` : '';
-    const out = await sidecarApi<{ stdout: string; stderr: string }>('GET', inst.instanceId, `/${encodeURIComponent(sc.service)}/logs${q}`, token);
+    const out = await sidecarApi<{ stdout: string; stderr: string }>('GET', inst.instanceId, `/${encodeURIComponent(sc.service)}/logs${q}`);
     process.stdout.write(out.stdout);
     process.stderr.write(out.stderr);
     return;
@@ -626,9 +620,8 @@ export function registerVerbs(program: Command): void {
           for (const n of names) {
             const sc = await resolveSidecar(inst.instanceId, n);
             if (sc.managedBy !== 'os') fail(`${sidecarId(sc)} is app-managed — ${inst.appId} runs it itself; stop it there (or stop the instance)`);
-            const token = ownToken(inst.instanceId);
-            if (!token) fail(`deleting an OS sidecar needs ${inst.instanceId}'s token — run this inside the app (aura jump ${inst.instanceId}), or stop the instance`);
-            await sidecarApi('DELETE', inst.instanceId, `/${encodeURIComponent(sc.service)}`, token);
+            if (!holdsInstanceIdentity(inst.instanceId)) fail(`deleting an OS sidecar needs ${inst.instanceId}'s token — run this inside the app (aura jump ${inst.instanceId}), or stop the instance`);
+            await sidecarApi('DELETE', inst.instanceId, `/${encodeURIComponent(sc.service)}`);
             console.log(`${color.green('✓')} deleted sidecar ${sidecarId(sc)} of ${inst.instanceId}`);
           }
           return;
