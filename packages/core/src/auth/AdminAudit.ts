@@ -20,7 +20,6 @@ export const IDENTITY_AUDIT_ACTIONS = {
   setup: 'auth.setup',
   login: 'auth.login',
   logout: 'auth.logout',
-  passwordReset: 'auth.password-reset',
   ticketCreated: 'auth.ticket-created',
   recordTampered: 'auth.record-tampered',
   identityKeyError: 'auth.identity-key-error',

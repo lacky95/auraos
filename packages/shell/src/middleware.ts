@@ -50,7 +50,7 @@ async function ensureAppManager() {
       const auth = core.getAuthServices?.();
       const r = auth?.admin.ensure();
       if (r?.created) {
-        console.log(`[auth] created the AuraOS admin credential at ${r.keyFile} — read it in the master container: \`aura jump -m\`, then \`aura admin credential\``);
+        console.log(`[auth] created the AuraOS admin credential at ${r.keyFile} — read it from the host: \`docker exec -it aura-shell aura admin credential\``);
       }
     } catch (err) {
       console.warn(`[middleware] admin credential setup failed: ${(err as Error).message}`);

@@ -5,7 +5,7 @@ import { inSandbox, isRunnerShellUrl, isTrustedShellUrl, resolveIdentity, shellF
 import { issueSetupCode, SetupCodeRefused, type SetupTicketInput } from '../lib/setup-ticket.js';
 
 export type WhoamiResult =
-  | { state: 'verified'; identity: Record<string, string> }
+  | { state: 'verified'; identity: Record<string, string>; login?: Record<string, string> }
   | { state: 'unavailable' | 'rejected' | 'unreachable'; status?: number };
 
 const SENSITIVE_FIELD = /token|secret|credential|password|key|cookie/i;
@@ -13,7 +13,11 @@ const SENSITIVE_FIELD = /token|secret|credential|password|key|cookie/i;
 /** Plain fields of the server's answer, never anything secret-shaped. */
 function verifiedFields(body: unknown): Record<string, string> {
   const root = (body ?? {}) as Record<string, unknown>;
-  const source = (root['principal'] && typeof root['principal'] === 'object' ? root['principal'] : root) as Record<string, unknown>;
+  return plainFields(root['principal'] && typeof root['principal'] === 'object' ? root['principal'] : root);
+}
+
+function plainFields(value: unknown): Record<string, string> {
+  const source = value as Record<string, unknown>;
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(source)) {
     if (SENSITIVE_FIELD.test(k)) continue;
@@ -32,7 +36,13 @@ export async function fetchWhoami(): Promise<WhoamiResult> {
   if (res.status === 401) return { state: 'rejected', status: 401 };
   if (!res.ok) return { state: 'unavailable', status: res.status };
   const body = await res.json().catch(() => null);
-  return body === null ? { state: 'unavailable', status: res.status } : { state: 'verified', identity: verifiedFields(body) };
+  if (body === null) return { state: 'unavailable', status: res.status };
+  const login = (body as Record<string, unknown>)['login'];
+  return {
+    state: 'verified',
+    identity: verifiedFields(body),
+    ...(login && typeof login === 'object' ? { login: plainFields(login) } : {}),
+  };
 }
 
 /** What this process can see locally. Hints only, and never a secret value. */
@@ -85,11 +95,15 @@ export function registerIdentity(program: Command): void {
         for (const [k, v] of Object.entries(server.identity)) console.log(`  ${k}: ${v}`);
         if (Object.keys(server.identity).length === 0) console.log('  (no identity fields returned)');
       } else if (server.state === 'unavailable') {
-        warn(`  not available (HTTP ${server.status}): this shell does not serve verified identity yet, because owner login is not active.`);
+        warn(`  not available (HTTP ${server.status}): the shell could not report a verified identity.`);
       } else if (server.state === 'rejected') {
         warn('  the shell rejected the credential that was sent (401).');
       } else {
         warn(`  cannot reach the shell at ${shellUrl()}.`);
+      }
+      if (server.state === 'verified' && server.login) {
+        console.log(color.bold('Login session (information only, grants no authority)'));
+        for (const [k, v] of Object.entries(server.login)) console.log(`  ${k}: ${v}`);
       }
       console.log(color.bold('Local hints (not proof)'));
       for (const [k, v] of Object.entries(local)) console.log(`  ${k}: ${v}`);

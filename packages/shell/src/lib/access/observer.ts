@@ -28,8 +28,6 @@ import type {
 const INTERNAL_CALLS: ReadonlyArray<{ method: string; route: string; path?: string }> = [
   { method: 'GET', route: '/api/apps' },
   { method: 'POST', route: '/api/apps/[id]/start' },
-  { method: 'GET', route: '/api/kv/[...path]', path: '/api/kv/os/nexus/source-seeds' },
-  { method: 'PUT', route: '/api/kv/[...path]', path: '/api/kv/os/nexus/source-seeds' },
 ];
 
 const INTERNAL_SECRET = Symbol.for('aura.access.internal');

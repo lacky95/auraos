@@ -22,9 +22,10 @@ import {
 import type { UserRole } from './types.js';
 
 export const OWNER_RECORD_KEY = `user:${DEFAULT_OWNER_ID}`;
-export const PASSWORD_MIN_LENGTH = 8;
+/** The one password policy; the login surface imports it. In characters. */
+export const PASSWORD_MIN_LENGTH = 12;
 /** In UTF-8 bytes. Longer input is refused before hashing. */
-export const PASSWORD_MAX_BYTES = 1024;
+export const PASSWORD_MAX_BYTES = 512;
 export const USERNAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/;
 export const LOGIN_ATTEMPTS_PER_MINUTE = 30;
 export const LOGIN_ATTEMPTS_PER_KEY_PER_MINUTE = 10;
@@ -104,6 +105,10 @@ const dummyHash = (): string =>
 const normalizeUsername = (u: string) => u.trim().toLowerCase();
 const accountOf = ({ passwordHash: _omit, ...account }: StoredUser): UserAccount => account;
 
+export const passwordWithinMax = (password: string): boolean => Buffer.byteLength(password) <= PASSWORD_MAX_BYTES;
+export const passwordAcceptable = (password: string): boolean =>
+  [...password].length >= PASSWORD_MIN_LENGTH && passwordWithinMax(password);
+
 function assertPassword(password: unknown): asserts password is string {
   if (typeof password !== 'string' || [...password].length < PASSWORD_MIN_LENGTH) {
     throw new UserStoreError('invalid-password', `password must have at least ${PASSWORD_MIN_LENGTH} characters`);
@@ -148,6 +153,7 @@ export class ValkeyUserStore implements UserStore {
   private keyErrorReported = false;
   /** Digest of the last bad record, so one tampering is reported once. */
   private reportedTamper: string | null = null;
+  private epoch = 0;
 
   constructor(opts: ValkeyUserStoreOptions) {
     this.identityKeyFile = opts.identityKeyFile;
@@ -173,6 +179,15 @@ export class ValkeyUserStore implements UserStore {
     if (this.keyErrorReported) return;
     this.keyErrorReported = true;
     this.onIdentityKeyError?.(err);
+  }
+
+  /**
+   * Moves after each password change and before its sessions are revoked. A
+   * login that checked the old password compares this after issuing: either
+   * the revoke removed its session, or it sees the change and revokes it.
+   */
+  credentialEpoch(): number {
+    return this.epoch;
   }
 
   /** For status routes: `malformed` means password login is disabled. */
@@ -291,7 +306,9 @@ export class ValkeyUserStore implements UserStore {
     const user = this.unseal(raw);
     if (!user) return false;
     const next = this.seal({ ...user, passwordHash: await hashPassword(password) });
-    return (await r.eval(SET_IF_UNCHANGED, 1, OWNER_RECORD_KEY, raw!, next)) === 1;
+    const changed = (await r.eval(SET_IF_UNCHANGED, 1, OWNER_RECORD_KEY, raw!, next)) === 1;
+    if (changed) this.epoch += 1;
+    return changed;
   }
 
   /**
@@ -335,6 +352,7 @@ export class ValkeyUserStore implements UserStore {
       return { ok: false, reason: 'conflict' };
     }
     this.reportedTamper = null;
+    this.epoch += 1;
 
     let sessionsRevoked: number | null = null;
     try { sessionsRevoked = await this.sessions.revokeByMethod('password'); } catch { /* reported below */ }

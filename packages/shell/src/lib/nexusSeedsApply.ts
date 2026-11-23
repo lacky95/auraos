@@ -12,7 +12,6 @@ import type { SourcesConfig } from '@aura/core';
 import { dedupeSeeds, mergeSeeds, parseSeedDoc, type SeedEntry, type SeedEnv, type SeedProblem, type SeedState } from './nexusSeeds.js';
 import { probeGitApp } from './nexusGitApp.js';
 import { credentialsLoaded } from './nexusSourceLogin.js';
-import { internalServiceHeaders, loopbackUrl } from '../../server/access-bridge.mjs';
 
 const OS_API_BASE = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
 const DATA_DIR    = process.env['AURA_DATA_DIR'] ?? '/data';
@@ -77,32 +76,16 @@ export function readSeeds(): { seeds: SeedEntry[]; files: SeedFileReport[]; prob
   return { seeds: dedupeSeeds(all), files, problems };
 }
 
-/**
- * The shell's own KV route, labelled for the access report when it is on
- * loopback. If the literal address doesn't answer, the configured one still does.
- */
-async function stateFetch(init: RequestInit = {}): Promise<Response> {
-  const url = `${OS_API_BASE}${STATE_KV}`;
-  const loop = loopbackUrl(url);
-  const label = loop ? internalServiceHeaders(loop) : {};
-  if (loop && Object.keys(label).length) {
-    try {
-      return await fetch(loop, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), ...label } });
-    } catch { /* fall through to the configured address */ }
-  }
-  return fetch(url, init);
-}
-
 async function loadState(): Promise<SeedState> {
   try {
-    const r = await stateFetch();
+    const r = await fetch(`${OS_API_BASE}${STATE_KV}`);
     if (!r.ok) return {};
     const v = (await r.json() as { value?: unknown }).value;
     return v && typeof v === 'object' ? v as SeedState : {};
   } catch { return {}; }
 }
 async function saveState(state: SeedState): Promise<void> {
-  await stateFetch({
+  await fetch(`${OS_API_BASE}${STATE_KV}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ value: state }),
   });

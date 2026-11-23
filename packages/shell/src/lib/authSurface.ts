@@ -2,16 +2,22 @@
  * The owner login surface (D5, D6, D8, D16, D37): the handlers behind
  * `/api/auth/*` and the gate of the `/setup` and `/login` pages.
  *
- * DARK unless `AURA_OWNER_LOGIN=on`: every route but `status` answers 404
- * before it reads a body or touches a service. The session cookie grants no
- * authority in Phase 1, because `authenticate()` and `viewerFor` never read it.
+ * DARK unless `AURA_OWNER_LOGIN=on`: every route but `status` and `whoami`
+ * answers 404 before it reads a body or touches a service. `whoami` reports the
+ * bearer principal from `authenticate()` and only labels the login cookie. The
+ * session cookie grants no authority in Phase 1, because `authenticate()` and
+ * `viewerFor` never read it.
  *
  * Nothing here needs AppManager. `getAuthServices()` builds its stores lazily.
  */
 import { randomBytes } from 'node:crypto';
+import { isIP } from 'node:net';
 // Namespace import: the running shell may cache a core build without these.
 import * as core from '@aura/core';
-import type { LoginSession, LoginSessions, SetupTickets, UserAccount, UserStore } from '@aura/core';
+import type {
+  LoginSession, LoginSessions, Principal, SetupTickets, UserAccount, UserStore, ValkeyUserStore,
+} from '@aura/core';
+import { authenticate } from './auth.js';
 
 export const LOGIN_FLAG = 'AURA_OWNER_LOGIN';
 export const COOKIE_HTTPS = '__Host-aura_session';
@@ -19,8 +25,6 @@ export const COOKIE_HTTP = 'aura_session';
 export const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 export const STAY_SIGNED_IN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const MAX_BODY_BYTES = 8 * 1024;
-export const PASSWORD_MIN_CHARS = 12;
-export const PASSWORD_MAX_BYTES = 512;
 
 const USERNAME_RE = /^[a-z0-9][a-z0-9._-]{2,31}$/;
 const MAX_CODE_CHARS = 128;
@@ -29,9 +33,23 @@ type Env = Record<string, string | undefined>;
 type Scheme = 'https' | 'http';
 type Body = Record<string, unknown>;
 
+type AuditActor =
+  | { kind: 'anonymous' } | { kind: 'system' } | { kind: 'operator' }
+  | { kind: 'user'; userId: string; session?: string };
+
+/** D38: a desktop notice for each use of a host code. Carries no secret. */
+export type AuthNotice = 'setup' | 'reset' | 'reset-sessions-kept';
+
+const RESET_HINT = 'If this was not you, reset the password from the host: docker exec -it aura-shell aura user reset-password <username>';
+const NOTICES: Record<AuthNotice, { title: string; text: string }> = {
+  setup: { title: 'AuraOS owner account created', text: `A one-time host code was used to create the owner account. ${RESET_HINT}` },
+  reset: { title: 'AuraOS owner password reset', text: `A one-time host code was used to reset the password, and all login sessions were signed out. ${RESET_HINT}` },
+  'reset-sessions-kept': { title: 'AuraOS owner password reset, sessions not revoked', text: `The password was reset, but existing login sessions could not be revoked. Run the reset again. ${RESET_HINT}` },
+};
+
 export interface AuthAudit {
   record(entry: {
-    by: { kind: 'anonymous' } | { kind: 'system' };
+    by: AuditActor;
     action: string;
     target?: string;
     outcome?: 'ok' | 'denied' | 'failed';
@@ -39,16 +57,19 @@ export interface AuthAudit {
 }
 
 export interface AuthSurfaceServices {
-  users: UserStore;
+  users: UserStore & Pick<ValkeyUserStore, 'recoverOwnerPassword' | 'credentialEpoch'> & Partial<Pick<ValkeyUserStore, 'identityKeyStatus'>>;
   loginSessions: LoginSessions;
   setupTickets: SetupTickets;
   audit?: AuthAudit;
+  notify?: (notice: AuthNotice) => Promise<unknown>;
 }
 
 export interface AuthSurfaceDeps {
   env: Env;
   /** Null until stream A's accessors exist on `getAuthServices()`. */
   services: () => AuthSurfaceServices | null;
+  /** The shell's bearer authentication. Replaced in tests. */
+  authenticate?: (request: Request) => Promise<Principal | Response>;
 }
 
 /** The part of Astro's APIContext these handlers read. */
@@ -61,8 +82,14 @@ export interface AuthContext {
 /** The one place that binds the surface to core. */
 export function coreAuthServices(): AuthSurfaceServices | null {
   const svc = core.getAuthServices?.() as unknown as Partial<AuthSurfaceServices> | undefined;
-  if (!svc?.users || !svc.loginSessions || !svc.setupTickets) return null;
-  return { users: svc.users, loginSessions: svc.loginSessions, setupTickets: svc.setupTickets, audit: svc.audit };
+  if (!svc?.users?.recoverOwnerPassword || !svc.users.credentialEpoch || !svc.loginSessions || !svc.setupTickets) return null;
+  return {
+    users: svc.users, loginSessions: svc.loginSessions, setupTickets: svc.setupTickets, audit: svc.audit,
+    notify: (notice) => core.getNotificationService().create(
+      { type: 'simple', ...NOTICES[notice] } as Parameters<ReturnType<typeof core.getNotificationService>['create']>[0],
+      core.SYSTEM_CALLER,
+    ),
+  };
 }
 
 const defaultDeps = (): AuthSurfaceDeps => ({ env: process.env, services: coreAuthServices });
@@ -115,6 +142,24 @@ export function requestScheme(ctx: AuthContext, env: Env): Scheme {
   if (!peer || !trustedProxies(env).has(peer)) return 'http';
   const proto = (ctx.request.headers.get('x-forwarded-proto') ?? '').split(',').at(-1)?.trim().toLowerCase();
   return proto === 'https' ? 'https' : 'http';
+}
+
+/**
+ * The client for the login rate limit. Forwarded addresses count only from a
+ * configured proxy: the nearest hop that is not itself one of those proxies.
+ */
+export function clientRateKey(ctx: AuthContext, env: Env): string | undefined {
+  const peer = peerAddress(ctx);
+  if (!peer) return undefined;
+  const trusted = trustedProxies(env);
+  if (!trusted.has(peer)) return `ip:${peer}`;
+  const hops = (ctx.request.headers.get('x-forwarded-for') ?? '').split(',').map(normalizeAddress);
+  for (let i = hops.length - 1; i >= 0; i -= 1) {
+    const hop = hops[i]!;
+    if (!hop || trusted.has(hop)) continue;
+    return isIP(hop) ? `ip:${hop}` : `ip:${peer}`;
+  }
+  return `ip:${peer}`;
 }
 
 /** Built from Host: `request.url` is `localhost` without `allowedDomains`. */
@@ -190,9 +235,6 @@ async function readBody(request: Request): Promise<Body | Response> {
 
 const normalizeUsername = (name: string) => name.trim().toLowerCase();
 
-const passwordInBounds = (password: string) => Buffer.byteLength(password) <= PASSWORD_MAX_BYTES;
-const passwordAcceptable = (password: string) =>
-  [...password].length >= PASSWORD_MIN_CHARS && passwordInBounds(password);
 const codeAcceptable = (code: unknown): code is string =>
   typeof code === 'string' && code.length > 0 && code.length <= MAX_CODE_CHARS;
 
@@ -235,18 +277,23 @@ async function mutate(
   return guarded(deps, (svc) => run(svc, parsed, scheme));
 }
 
-async function audit(svc: AuthSurfaceServices, action: string, target?: string): Promise<void> {
-  try { await svc.audit?.record({ by: { kind: 'anonymous' }, action, target, outcome: 'ok' }); }
+async function audit(
+  svc: AuthSurfaceServices,
+  action: 'setup' | 'login' | 'logout',
+  by: () => AuditActor,
+  target?: string,
+): Promise<void> {
+  try { await svc.audit?.record({ by: by(), action: core.IDENTITY_AUDIT_ACTIONS[action], target, outcome: 'ok' }); }
   catch { /* the audit trail must not fail the request */ }
 }
 
-/**
- * Closes the race of a login that checked the old password just before a
- * reset: it issues its session after `revokeByUser` ran, so it looks here
- * and revokes that session itself.
- */
-const credentialEpochs = new WeakMap<UserStore, number>();
-const credentialEpoch = (users: UserStore) => credentialEpochs.get(users) ?? 0;
+/** Never awaited: a stalled notification store must not hold a finished request. */
+function raiseNotice(svc: AuthSurfaceServices, notice: AuthNotice): void {
+  void Promise.resolve().then(() => svc.notify?.(notice)).catch(() => undefined);
+}
+
+/** Checked before a claim, so an unusable identity.key never burns a code. */
+const identityKeyUsable = (svc: AuthSurfaceServices) => svc.users.identityKeyStatus?.() !== 'malformed';
 
 /** A live password session of the current, enabled owner. */
 async function currentSession(
@@ -291,32 +338,38 @@ async function createOwner(svc: AuthSurfaceServices, body: Body): Promise<Respon
   }
   const username = normalizeUsername(rawName);
   if (!USERNAME_RE.test(username)) return json({ error: 'invalid-username' }, 400);
-  if (!passwordAcceptable(password) || password.toLowerCase() === username) return json({ error: 'invalid-password' }, 400);
+  if (!core.passwordAcceptable(password) || password.toLowerCase() === username) return json({ error: 'invalid-password' }, 400);
 
   // Before the claim, so a finished setup never burns a code.
   if (await svc.users.hasOwner()) return setupRejected();
+  if (!identityKeyUsable(svc)) return unavailable();
   if (!(await svc.setupTickets.claim(code, 'setup'))) return setupRejected();
   const owner = await svc.users.createOwner({ username, password });
   if (!owner) return setupRejected();
-  await audit(svc, 'owner.setup', owner.id);
+  // The code came from the host, so the operator is the actor.
+  await audit(svc, 'setup', () => core.operatorAttribution(), `user:${owner.id}`);
+  raiseNotice(svc, 'setup');
   return json({ ok: true });
 }
 
 async function resetPassword(svc: AuthSurfaceServices, body: Body, scheme: Scheme): Promise<Response> {
   const { code, password } = body;
   if (!codeAcceptable(code) || typeof password !== 'string') return json({ error: 'invalid-request' }, 400);
-  if (!passwordAcceptable(password)) return json({ error: 'invalid-password' }, 400);
+  if (!core.passwordAcceptable(password)) return json({ error: 'invalid-password' }, 400);
 
+  if (!identityKeyUsable(svc)) return unavailable();
   const ticket = await svc.setupTickets.claim(code, 'reset');
-  if (!ticket?.username) return setupRejected();
-  const owner = await svc.users.getOwner();
-  if (!owner || normalizeUsername(ticket.username) !== owner.username) return setupRejected();
-  if (!(await svc.users.setPassword(owner.id, password))) return setupRejected();
+  if (!ticket) return setupRejected();
+  // The store moves the credential epoch, revokes sessions and writes the one
+  // audit event (`auth.owner-recovered`) with the final outcome.
+  const result = await svc.users.recoverOwnerPassword(ticket, password);
+  if (!result.ok) {
+    return result.reason === 'identity-key-unavailable' || result.reason === 'conflict' ? unavailable() : setupRejected();
+  }
 
-  credentialEpochs.set(svc.users, credentialEpoch(svc.users) + 1);
-  await svc.loginSessions.revokeByUser(owner.id);
-  await audit(svc, 'owner.password-reset', owner.id);
-  return json({ ok: true }, 200, { 'Set-Cookie': clearCookie(scheme) });
+  const revoked = result.sessionsRevoked !== null;
+  raiseNotice(svc, revoked ? 'reset' : 'reset-sessions-kept');
+  return json(revoked ? { ok: true } : { ok: true, sessionsRevoked: false }, 200, { 'Set-Cookie': clearCookie(scheme) });
 }
 
 export function authLogin(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps()): Promise<Response> {
@@ -324,16 +377,16 @@ export function authLogin(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps(
     const { username: rawName, password, staySignedIn } = body;
     if (typeof rawName !== 'string' || typeof password !== 'string') return badCredentials();
     const username = normalizeUsername(rawName);
-    if (!USERNAME_RE.test(username) || !password || !passwordInBounds(password)) return badCredentials();
+    if (!USERNAME_RE.test(username) || !password || !core.passwordWithinMax(password)) return badCredentials();
 
-    const epoch = credentialEpoch(svc.users);
-    const check = await svc.users.verifyPassword(username, password);
+    const epoch = svc.users.credentialEpoch();
+    const check = await svc.users.verifyPassword(username, password, { rateLimitKey: clientRateKey(ctx, deps.env) });
     if (!check.ok) return check.reason === 'rate-limited' ? json({ error: 'rate-limited' }, 429) : badCredentials();
     if (check.user.disabled || check.user.role !== 'owner') return badCredentials();
 
     const ttlMs = staySignedIn === true ? STAY_SIGNED_IN_TTL_MS : SESSION_TTL_MS;
     const { token, session } = await svc.loginSessions.issue({ method: 'password', userId: check.user.id, ttlMs });
-    if (credentialEpoch(svc.users) !== epoch) {
+    if (svc.users.credentialEpoch() !== epoch) {
       await svc.loginSessions.revoke(session.sessionId);
       return badCredentials();
     }
@@ -346,7 +399,7 @@ export function authLogin(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps(
         if (old && old.sessionId !== session.sessionId) await svc.loginSessions.revoke(old.sessionId);
       } catch { /* the old session expires on its own */ }
     }
-    await audit(svc, 'owner.login', check.user.id);
+    await audit(svc, 'login', () => core.userAttribution({ userId: check.user.id, sessionId: session.sessionId }), `user:${check.user.id}`);
     return json({ ok: true, expiresAt: session.expiresAt }, 200, {
       'Set-Cookie': setCookie(scheme, token, Math.floor(ttlMs / 1000)),
     });
@@ -359,7 +412,8 @@ export function authLogout(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps
     const session = token ? await svc.loginSessions.verify(token) : null;
     if (session) {
       await svc.loginSessions.revoke(session.sessionId);
-      await audit(svc, 'owner.logout', session.userId);
+      const { userId, sessionId } = session;
+      await audit(svc, 'logout', () => (userId ? core.userAttribution({ userId, sessionId }) : { kind: 'anonymous' }), userId ? `user:${userId}` : undefined);
     }
     return json({ ok: true }, 200, { 'Set-Cookie': clearCookie(scheme) });
   });
@@ -372,13 +426,48 @@ export function authSession(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDep
   });
 }
 
-export function authWhoami(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps()): Promise<Response> {
-  return read(ctx, deps, async (svc, scheme) => {
+/** The verified class of the caller. Hints, session ids and scopes stay out. */
+function publicPrincipal(p: Principal): Record<string, string> {
+  switch (p.kind) {
+    case 'instance':
+      return {
+        kind: p.kind, verification: p.verification, appId: p.appId, instanceId: p.instanceId,
+        ...(p.sidecar ? { sidecar: p.sidecar } : {}),
+      };
+    case 'apiKey':
+      return { kind: p.kind, verification: p.verification, name: p.name };
+    case 'admin':
+      return { kind: p.kind, verification: p.verification };
+    default:
+      return { kind: 'anonymous', verification: 'unverified' };
+  }
+}
+
+/** The login cookie as labelled information. While dark, no service is touched. */
+async function observedLogin(ctx: AuthContext, deps: AuthSurfaceDeps): Promise<Record<string, unknown>> {
+  const scheme = requestScheme(ctx, deps.env);
+  if (!loginEnabled(deps.env)) {
+    return { state: 'disabled', cookie: readSessionCookie(ctx.request, scheme) ? 'present' : 'absent', authority: false };
+  }
+  try {
+    const svc = deps.services();
+    if (!svc) return { state: 'unavailable', authority: false };
     const current = await currentSession(ctx, svc, scheme);
-    if (!current) return json({ authenticated: false });
+    if (!current) return { state: 'signed-out', authority: false };
     const { id, username, role } = current.user;
-    return json({ authenticated: true, principal: { kind: 'user', id, username, role } });
-  });
+    return { state: 'signed-in', authority: false, userId: id, username, role };
+  } catch {
+    return { state: 'unavailable', authority: false };
+  }
+}
+
+/** Works while login is dark. A login cookie never changes `principal`. */
+export async function authWhoami(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps()): Promise<Response> {
+  let principal: Principal | Response;
+  try { principal = await (deps.authenticate ?? authenticate)(ctx.request); }
+  catch { return unavailable(); }
+  if (principal instanceof Response) return json({ error: 'invalid-credential' }, 401);
+  return json({ principal: publicPrincipal(principal), login: await observedLogin(ctx, deps) });
 }
 
 // ── pages ───────────────────────────────────────────────────────────────────

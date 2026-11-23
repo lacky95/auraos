@@ -227,11 +227,14 @@ export function registerAdmin(program: Command): void {
   admin
     .command('access-report')
     .description('What the report-only access policy would have decided (nothing is blocked yet).')
+    .option('--days <n>', 'days to show, newest first (1-14)', '1')
     .option('-o, --output <format>', 'json')
-    .action(async (opts: { output?: string }) => {
+    .action(async (opts: { days: string; output?: string }) => {
+      const days = Number(opts.days);
+      if (!Number.isInteger(days) || days < 1 || days > 14) fail('--days must be a whole number from 1 to 14');
       let report: unknown;
       try {
-        report = await api.get<unknown>('/api/admin/access-report');
+        report = await api.get<unknown>(`/api/admin/access-report?days=${days}`);
       } catch (err) {
         const e = err as Error & { status?: number };
         if (e.status === 404) fail('this shell has no access report yet.');
@@ -261,23 +264,40 @@ export function registerAdmin(program: Command): void {
     });
 }
 
-/** The report's scalar fields, then each list of rows as a table. */
-function printAccessReport(report: unknown): void {
-  if (!report || typeof report !== 'object') { console.log(String(report ?? 'empty report')); return; }
-  const cell = (v: unknown): string => (v === null || v === undefined ? '-' : typeof v === 'object' ? JSON.stringify(v) : String(v));
-  const entries = Object.entries(report as Record<string, unknown>);
-  for (const [k, v] of entries) if (typeof v !== 'object' || v === null) console.log(`${k}: ${cell(v)}`);
-  for (const [k, v] of entries) {
-    if (typeof v !== 'object' || v === null) continue;
-    console.log(`\n${color.bold(k)}`);
-    if (Array.isArray(v) && v.every((row) => row && typeof row === 'object' && !Array.isArray(row))) {
-      if (v.length === 0) { info('none'); continue; }
-      const columns = [...new Set(v.flatMap((row) => Object.keys(row as object)))];
-      console.log(table(v.map((row) => Object.fromEntries(columns.map((c) => [c, cell((row as Record<string, unknown>)[c])]))), columns));
-    } else {
-      console.log(JSON.stringify(v, null, 2));
-    }
+const REPORT_COLUMNS = ['surface', 'subject', 'method', 'variant', 'principal', 'appId', 'decision', 'reason', 'status', 'via', 'count'];
+
+interface AccessReportBody {
+  days: Array<{ day: string; rows: Array<Record<string, unknown>>; counters: Record<string, number> }>;
+  samples: Array<Record<string, string>>;
+  pending: { keys: number; events: number; meta: Record<string, number> } | null;
+}
+
+function isAccessReport(v: unknown): v is AccessReportBody {
+  const r = v as Partial<AccessReportBody> | null;
+  return !!r && Array.isArray(r.days) && Array.isArray(r.samples)
+    && r.days.every((d) => !!d && typeof d.day === 'string' && Array.isArray(d.rows) && !!d.counters && typeof d.counters === 'object');
+}
+
+/** The shape of GET /api/admin/access-report: days of rows, samples, pending. */
+export function printAccessReport(report: unknown): void {
+  if (!isAccessReport(report)) { console.log(JSON.stringify(report, null, 2)); return; }
+  const cell = (v: unknown): string => (v === null || v === undefined ? '-' : String(v));
+  const rowsOf = (rows: Array<Record<string, unknown>>, columns: string[]) =>
+    rows.map((row) => Object.fromEntries(columns.map((c) => [c, cell(row[c])])));
+  for (const d of report.days) {
+    console.log(`\n${color.bold(d.day)}`);
+    if (d.rows.length === 0) info('no events');
+    else console.log(table(rowsOf(d.rows, REPORT_COLUMNS), REPORT_COLUMNS));
+    const counters = Object.entries(d.counters);
+    if (counters.length) console.log(`counters: ${counters.map(([k, n]) => `${k}=${n}`).join(' ')}`);
   }
+  console.log(`\n${color.bold('would-deny samples')}`);
+  if (report.samples.length === 0) info('none');
+  else {
+    const columns = [...new Set(report.samples.flatMap((row) => Object.keys(row)))];
+    console.log(table(rowsOf(report.samples, columns), columns));
+  }
+  if (report.pending) console.log(`\npending flush: ${report.pending.events} event(s) in ${report.pending.keys} key(s)`);
 }
 
 // ─── aura admin notif … ─────────────────────────────────────────────────────

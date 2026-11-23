@@ -7,8 +7,9 @@ import { afterEach, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import net from 'node:net';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { defaultAdminKeyFile } from '@aura/core';
 import { api, subscribeEvents } from '../src/lib/client.js';
 import { ADMIN_SESSION_FILE, adminLogin, forgetInProcessSession, saveSession } from '../src/lib/admin-session.js';
@@ -18,6 +19,8 @@ import {
 } from '../src/lib/identity.js';
 import { issueSetupCode, SetupCodeRefused } from '../src/lib/setup-ticket.js';
 import { fetchWhoami, localHints } from '../src/commands/identity.js';
+import { printAccessReport } from '../src/commands/admin.js';
+import { eventKey, readAccessReport } from '../../shell/src/lib/access/report.ts';
 
 const KEY = `aura_admin_${'k'.repeat(43)}`;
 const ENV = ['AURA_SHELL_URL', 'OS_API_BASE', 'AURA_OS_URL', 'AURA_INSTANCE_TOKEN', 'APP_INSTANCE_ID', 'AURA_INSTANCE_ID',
@@ -273,8 +276,51 @@ test('setup codes: refused unless owner login is on, refused in a sandbox', asyn
   process.env['APP_INSTANCE_ID'] = 'a.b';
   await assert.rejects(issueSetupCode({ purpose: 'setup' }, create), SetupCodeRefused);
   delete process.env['APP_INSTANCE_ID'];
-  await assert.rejects(issueSetupCode({ purpose: 'setup' }, null), /no setup ticket support/);
   assert.equal(calls.length, 0);
   assert.deepEqual(await issueSetupCode({ purpose: 'reset', username: 'owner' }, create), { code: 'c', expiresAt: 1 });
   assert.deepEqual(calls[0]![1], { purpose: 'reset', username: 'owner' });
+});
+
+test('setup-code: the real path writes one private ticket and opens no connection', async () => {
+  process.env['AURA_OWNER_LOGIN'] = 'on';
+  const connect = net.Socket.prototype.connect;
+  let connections = 0;
+  net.Socket.prototype.connect = function (this: net.Socket, ...args: unknown[]) {
+    connections += 1;
+    return (connect as (...a: unknown[]) => net.Socket).apply(this, args);
+  } as typeof net.Socket.prototype.connect;
+  try {
+    const { code } = await issueSetupCode({ purpose: 'reset', username: 'owner' });
+    assert.equal(connections, 0);
+    const dir = join(process.env['AURA_DATA_DIR']!, 'aura', 'secrets', 'setup-tickets');
+    const files = readdirSync(dir).filter((f) => f.endsWith('.json'));
+    assert.equal(files.length, 1);
+    assert.equal(statSync(join(dir, files[0]!)).mode & 0o777, 0o600);
+    const stored = readFileSync(join(dir, files[0]!), 'utf-8');
+    assert.equal(JSON.parse(stored).username, 'owner');
+    assert.ok(!stored.includes(code) && !stored.includes(code.replace(/-/g, '')));
+  } finally {
+    net.Socket.prototype.connect = connect;
+  }
+});
+
+test('access-report: prints the shape the real report reader returns', async () => {
+  const key = eventKey({
+    surface: 'api', subject: '/api/apps', method: 'GET', variant: null, principal: 'anonymous', appId: null,
+    decision: 'deny', reason: 'unauthenticated', status: '2xx', via: 'none',
+  } as Parameters<typeof eventKey>[0]);
+  const read = await readAccessReport({
+    hgetall: async () => ({ [key]: '3', '#dropped': '2' }),
+    xrevrange: async () => [['1-0', ['subject', '/api/apps', 'decision', 'deny']]],
+  } as unknown as Parameters<typeof readAccessReport>[0], 1, Date.UTC(2026, 10, 23));
+  const lines: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => { lines.push(a.join(' ')); };
+  try { printAccessReport({ ...read, pending: { keys: 1, events: 4, meta: {} } }); }
+  finally { console.log = log; }
+  const out = lines.join('\n');
+  for (const want of ['2026-11-23', '/api/apps', 'unauthenticated', 'dropped=2', 'would-deny samples', 'pending flush: 4 event(s)']) {
+    assert.ok(out.includes(want), want);
+  }
+  assert.ok(!out.includes('[object Object]') && !out.includes('{"'));
 });

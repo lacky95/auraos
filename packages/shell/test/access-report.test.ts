@@ -8,6 +8,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// @ts-expect-error ws has no type declarations in this workspace
 import { WebSocketServer, WebSocket } from 'ws';
 import { AdminAuth, ApiKeyStore, Authorizer, SYSTEM_PRINCIPAL } from '@aura/core';
 import type { AccessPrincipal } from '@aura/core';
@@ -586,7 +587,7 @@ test('observer: the internal label needs the secret AND an allowlisted route', a
   assert.notEqual((await run({ internal: 'internal-secret', routePattern: '/api/proxy/[id]/[...path]' })).via, 'internal');
   const kv = { routePattern: '/api/kv/[...path]', params: { path: 'os/other' } };
   assert.notEqual((await run({ ...kv, pathname: '/api/kv/os/other', internal: 'internal-secret' })).via, 'internal');
-  assert.equal((await run({ ...kv, pathname: '/api/kv/os/nexus/source-seeds', internal: 'internal-secret' })).via, 'internal');
+  assert.notEqual((await run({ ...kv, pathname: '/api/kv/os/nexus/source-seeds', internal: 'internal-secret' })).via, 'internal');
 });
 
 test('internal label: only literal loopback gets it', () => {

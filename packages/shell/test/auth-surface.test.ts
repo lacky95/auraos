@@ -16,7 +16,6 @@ import { POST as setupRoute } from '../src/pages/api/auth/setup.ts';
 import { POST as loginRoute } from '../src/pages/api/auth/login.ts';
 import { POST as logoutRoute } from '../src/pages/api/auth/logout.ts';
 import { GET as sessionRoute } from '../src/pages/api/auth/session.ts';
-import { GET as whoamiRoute } from '../src/pages/api/auth/whoami.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ORIGIN = 'http://aura.test:3000';
@@ -29,6 +28,7 @@ function fakes() {
   const calls = { verify: 0, claim: 0, create: 0 };
   let seq = 0;
   let beforeIssue: (() => Promise<void>) | null = null;
+  let epoch = 0;
   const audited: string[] = [];
   const publicUser = () => {
     if (!owner) return null;
@@ -55,6 +55,18 @@ function fakes() {
         if (owner?.id !== userId) return false;
         owner.password = password;
         return true;
+      },
+      credentialEpoch: () => epoch,
+      recoverOwnerPassword: async (ticket, password) => {
+        if (!ticket.username) return { ok: false, reason: 'invalid-ticket' };
+        if (!owner) return { ok: false, reason: 'no-owner' };
+        if (ticket.username !== owner.username) return { ok: false, reason: 'username-mismatch' };
+        owner.password = password;
+        epoch += 1;
+        const sessionsRevoked = sessions.size;
+        sessions.clear();
+        audited.push('auth.owner-recovered');
+        return { ok: true, user: publicUser()!, recordTrusted: true, sessionsRevoked };
       },
     },
     loginSessions: {
@@ -97,6 +109,7 @@ function fakes() {
     deps: (env: Record<string, string> = {}): AuthSurfaceDeps => ({
       env: { AURA_OWNER_LOGIN: 'on', ...env },
       services: () => services,
+      authenticate: async () => ({ kind: 'anonymous', verification: 'unverified' }),
     }),
   };
 }
@@ -134,11 +147,10 @@ const ROUTES = [
   ['login', loginRoute, () => post({ username: 'lukas', password: PASSWORD })],
   ['logout', logoutRoute, () => post({})],
   ['session', sessionRoute, () => get()],
-  ['whoami', whoamiRoute, () => get()],
 ] as const;
 
 for (const flag of [undefined, '', 'off', 'ON', '1', 'true']) {
-  test(`flag ${JSON.stringify(flag)}: every route but status is 404, with no cookie`, async () => {
+  test(`flag ${JSON.stringify(flag)}: every route but status and whoami is 404, with no cookie`, async () => {
     const saved = process.env['AURA_OWNER_LOGIN'];
     if (flag === undefined) delete process.env['AURA_OWNER_LOGIN'];
     else process.env['AURA_OWNER_LOGIN'] = flag;
@@ -165,14 +177,20 @@ for (const flag of [undefined, '', 'off', 'ON', '1', 'true']) {
 }
 
 test('flag off: no service is touched and the body is not read', async () => {
-  const deps: AuthSurfaceDeps = { env: {}, services: () => { throw new Error('touched'); } };
+  const deps: AuthSurfaceDeps = {
+    env: {}, services: () => { throw new Error('touched'); },
+    authenticate: async () => ({ kind: 'anonymous', verification: 'unverified' }),
+  };
   const ctx = post(setupBody());
   assert.equal((await authSetup(ctx, deps)).status, 404);
   assert.equal(ctx.request.bodyUsed, false);
   assert.equal((await authLogin(post({}), deps)).status, 404);
   assert.equal((await authLogout(post({}), deps)).status, 404);
   assert.equal((await authSession(get(), deps)).status, 404);
-  assert.equal((await authWhoami(get(), deps)).status, 404);
+  assert.deepEqual(await (await authWhoami(get({ cookie: 'aura_session=x' }), deps)).json(), {
+    principal: { kind: 'anonymous', verification: 'unverified' },
+    login: { state: 'disabled', cookie: 'present', authority: false },
+  });
   assert.deepEqual(await (await authStatus(get(), deps)).json(), { login: 'disabled' });
 });
 
@@ -232,7 +250,7 @@ test('setup with a valid code creates the owner `default`, once', async () => {
   const owner = await f.services.users.getOwner();
   assert.equal(owner?.id, 'default');
   assert.equal(owner?.username, 'lukas');
-  assert.ok(f.audited.includes('owner.setup'));
+  assert.ok(f.audited.includes('auth.setup'));
 });
 
 test('a wrong code creates nothing', async () => {
@@ -340,22 +358,23 @@ test('session and whoami report only the verified principal', async () => {
   const whoRes = await authWhoami(get(cookie), f.deps());
   const whoText = await whoRes.text();
   assert.deepEqual(JSON.parse(whoText), {
-    authenticated: true, principal: { kind: 'user', id: 'default', username: 'lukas', role: 'owner' },
+    principal: { kind: 'anonymous', verification: 'unverified' },
+    login: { state: 'signed-in', authority: false, userId: 'default', username: 'lukas', role: 'owner' },
   });
   assert.ok(!whoText.includes(token));
   assert.ok(!whoText.includes(PASSWORD));
   assert.equal(whoRes.headers.get('cache-control'), 'no-store');
 
   for (const bad of ['', 'aura_session=aura-sess1.forged.mac', `aura_session=${token}; aura_session=${token}`]) {
-    assert.deepEqual(await (await authWhoami(get({ cookie: bad }), f.deps())).json(), { authenticated: false }, bad);
+    assert.equal((await (await authWhoami(get({ cookie: bad }), f.deps())).json()).login.state, 'signed-out', bad);
   }
-  assert.deepEqual(await (await authWhoami(get({ 'x-aura-user': 'default' }), f.deps())).json(), { authenticated: false });
+  assert.equal((await (await authWhoami(get({ 'x-aura-user': 'default' }), f.deps())).json()).login.state, 'signed-out');
 });
 
 test('a session of another kind or a disabled owner is not a principal', async () => {
   const f = await withOwner();
   const { token } = await f.services.loginSessions.issue({ method: 'shared-key', keyFingerprint: 'abc', userId: 'default' });
-  assert.deepEqual(await (await authWhoami(get({ cookie: `aura_session=${token}` }), f.deps())).json(), { authenticated: false });
+  assert.equal((await (await authWhoami(get({ cookie: `aura_session=${token}` }), f.deps())).json()).login.state, 'signed-out');
   const login = await authLogin(post({ username: 'lukas', password: PASSWORD }), f.deps());
   f.disableOwner();
   assert.deepEqual(await (await authSession(get({ cookie: `aura_session=${tokenOf(login)}` }), f.deps())).json(), { authenticated: false });
@@ -396,7 +415,7 @@ test('reset changes the password and revokes every session of that user', async 
   assert.equal(await f.services.loginSessions.verify(b), null);
   assert.equal((await authLogin(post({ username: 'lukas', password: PASSWORD }), f.deps())).status, 401);
   assert.equal((await authLogin(post({ username: 'lukas', password: NEW_PASSWORD }), f.deps())).status, 200);
-  assert.ok(f.audited.includes('owner.password-reset'));
+  assert.deepEqual(f.audited.filter((a) => a.includes('reset') || a.includes('recovered')), ['auth.owner-recovered']);
 });
 
 test('reset is refused without a reset ticket for the owner, and on replay', async () => {

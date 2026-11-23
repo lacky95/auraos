@@ -41,6 +41,8 @@ export interface LoginSessionStoreOptions {
   sharedKey?: () => { fingerprint: string; macKey: Buffer } | null;
 }
 
+type SharedKey = () => { fingerprint: string; macKey: Buffer } | null;
+
 const prefixFor = (m: LoginMethod) => (m === 'password' ? LOGIN_SESSION_PREFIX : SHARED_KEY_SESSION_PREFIX);
 
 export class LoginSessionStore implements LoginSessions {
@@ -57,10 +59,10 @@ export class LoginSessionStore implements LoginSessions {
   }
 
   /** Throws `IdentityKeyError` for a password session when identity.key is unusable. */
-  private mac(method: LoginMethod, prefix: string, payload: string): Buffer {
+  private mac(method: LoginMethod, prefix: string, payload: string, shared: SharedKey = this.sharedKey): Buffer {
     const key = method === 'password'
       ? deriveIdentitySubkey(this.identityKeyFile, 'login-session')
-      : this.sharedKey()?.macKey;
+      : shared()?.macKey;
     if (!key) throw new Error('no shared credential');
     return createHmac('sha256', key).update(`${method}\0${prefix}.${payload}`).digest();
   }
@@ -96,7 +98,23 @@ export class LoginSessionStore implements LoginSessions {
     };
   }
 
-  async verify(token: string | null | undefined): Promise<LoginSession | null> {
+  verify(token: string | null | undefined): Promise<LoginSession | null> {
+    return this.check(token, this.sharedKey);
+  }
+
+  /**
+   * `verify` of a shared-key session against key material the caller already
+   * holds, so it can't trigger rotation handling. Reads only.
+   */
+  async peekShared(
+    token: string | null | undefined,
+    material: { fingerprint: string; macKey: Buffer },
+  ): Promise<LoginSession | null> {
+    if (typeof token !== 'string' || !token.startsWith(`${SHARED_KEY_SESSION_PREFIX}.`)) return null;
+    return this.check(token, () => material);
+  }
+
+  private async check(token: string | null | undefined, shared: SharedKey): Promise<LoginSession | null> {
     if (typeof token !== 'string' || token.length === 0 || token.length > MAX_TOKEN_LENGTH) return null;
     const parts = token.split('.');
     if (parts.length !== 3) return null;
@@ -107,7 +125,7 @@ export class LoginSessionStore implements LoginSessions {
 
     try {
       const given = Buffer.from(sig, 'base64url');
-      const want = this.mac(method, prefix, payload);
+      const want = this.mac(method, prefix, payload, shared);
       if (given.length !== want.length || !timingSafeEqual(given, want)) return null;
 
       const p = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as Partial<LoginSessionPayload>;
@@ -115,7 +133,7 @@ export class LoginSessionStore implements LoginSessions {
       if (p.m !== method || p.e <= this.now()) return null;
       if (p.u !== undefined && typeof p.u !== 'string') return null;
       if (p.m === 'password' && !p.u) return null;
-      if (p.m === 'shared-key' && (typeof p.f !== 'string' || p.f !== this.sharedKey()?.fingerprint)) return null;
+      if (p.m === 'shared-key' && (typeof p.f !== 'string' || p.f !== shared()?.fingerprint)) return null;
 
       const raw = await this.redis().get(loginSessionKey(p.s));
       if (!raw) return null;

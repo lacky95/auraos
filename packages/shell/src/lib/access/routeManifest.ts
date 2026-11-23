@@ -134,8 +134,8 @@ const routes: RouteAccessManifest['routes'] = {
       'Answers authenticated:false to a visitor without a session. Decide whether enforcement keeps that answer or returns 401 first.')) },
   },
   '/api/auth/whoami': {
-    methods: { GET: rule(OWNER, 'session', decide(3,
-      'Reports the login-cookie principal only. Decide whether instance tokens and API keys may ask it too, once the CLI identity path is settled.')) },
+    methods: { GET: rule(INSTANCE, 'session', decide(3,
+      'Reflects only the caller, works while login is dark, and a login cookie is labelled information. Anonymous and API-key callers count as would-deny here; decide at enforcement whether they keep an answer.')) },
   },
 
   // Static candidates for the login page; everything else in `os` stays owner.

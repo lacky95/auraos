@@ -97,8 +97,8 @@ const modalApps = apps.filter((a) => requests(a, 'notifications.systemModal'));
         <button class="btn unlocked-only" id="btn-lock" type="button" hidden>LOCK</button>
       </div>
       <p class="acc-note">
-        Grants and API keys need the shared admin credential. It lives in the master container only:
-        run <code>aura jump -m</code>, then <code>aura admin credential</code>. The unlock lasts 15 minutes,
+        Grants and API keys need the shared admin credential. It lives in the master container only.
+        On the host, run <code>docker exec -it aura-shell aura admin credential</code>. The unlock lasts 15 minutes,
         stays in this page's memory only, and every change is audited as "admin (shared credential)".
       </p>
     </section>

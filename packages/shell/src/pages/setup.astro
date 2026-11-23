@@ -1,6 +1,7 @@
 ---
 import AuthLayout from '../layouts/AuthLayout.astro';
-import { authPageGate, PASSWORD_MIN_CHARS } from '../lib/authSurface.js';
+import * as core from '@aura/core';
+import { authPageGate } from '../lib/authSurface.js';
 
 const gate = authPageGate();
 if (!gate.enabled) return gate.response;
@@ -20,7 +21,7 @@ for (const [name, value] of Object.entries(gate.headers)) Astro.response.headers
   <form id="setup" method="post" novalidate>
     <label>One-time code <input name="code" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" required /></label>
     <label id="username-field">Username <input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required /></label>
-    <label>New password (at least {PASSWORD_MIN_CHARS} characters) <input name="password" type="password" autocomplete="new-password" required /></label>
+    <label>New password (at least {core.PASSWORD_MIN_LENGTH} characters) <input name="password" type="password" autocomplete="new-password" required /></label>
     <label>Repeat password <input name="confirm" type="password" autocomplete="new-password" required /></label>
     <button type="submit">Continue</button>
     <p class="error" role="alert"></p>

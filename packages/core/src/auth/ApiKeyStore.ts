@@ -90,31 +90,8 @@ export class ApiKeyStore {
     return { key, apiKey: publicOf(rec) };
   }
 
-  /** The key's record if `key` is valid and not revoked, else null. Never throws on bad input. */
-  async verify(key: string | null | undefined): Promise<ApiKeyRecord | null> {
-    if (!key) return null;
-    const m = API_KEY_PATTERN.exec(key);
-    if (!m) return null;
-    const [, id, secret] = m as unknown as [string, string, string];
-    const raw = await this.redis().get(apiKeyRecordKey(id));
-    if (!raw) return null;
-    const rec = JSON.parse(raw) as StoredKey;
-    const a = Buffer.from(sha256hex(secret), 'hex');
-    const b = Buffer.from(rec.hash, 'hex');
-    if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
-    if (rec.revokedAt !== undefined) return null;
-    const now = this.now();
-    const last = this.lastUsed.get(id) ?? 0;
-    if (now - last >= LAST_USED_RESOLUTION_MS) {
-      this.lastUsed.set(id, now);
-      // Best effort; never block or fail a request on it.
-      void this.redis().hset(API_KEY_USED, id, String(now)).catch(() => undefined);
-    }
-    return { ...publicOf(rec), lastUsedAt: now };
-  }
-
-  /** `verify` without recording a use: for the access report, which must change nothing. */
-  async peek(key: string | null | undefined): Promise<ApiKeyRecord | null> {
+  /** The stored record of a valid, unrevoked key. Reads only. */
+  private async match(key: string | null | undefined): Promise<StoredKey | null> {
     if (!key) return null;
     const m = API_KEY_PATTERN.exec(key);
     if (!m) return null;
@@ -125,7 +102,27 @@ export class ApiKeyStore {
     const a = Buffer.from(sha256hex(secret), 'hex');
     const b = Buffer.from(rec.hash, 'hex');
     if (a.length !== b.length || !timingSafeEqual(a, b) || rec.revokedAt !== undefined) return null;
-    return publicOf(rec);
+    return rec;
+  }
+
+  /** The key's record if `key` is valid and not revoked, else null. Never throws on bad input. */
+  async verify(key: string | null | undefined): Promise<ApiKeyRecord | null> {
+    const rec = await this.match(key);
+    if (!rec) return null;
+    const now = this.now();
+    const last = this.lastUsed.get(rec.id) ?? 0;
+    if (now - last >= LAST_USED_RESOLUTION_MS) {
+      this.lastUsed.set(rec.id, now);
+      // Best effort; never block or fail a request on it.
+      void this.redis().hset(API_KEY_USED, rec.id, String(now)).catch(() => undefined);
+    }
+    return { ...publicOf(rec), lastUsedAt: now };
+  }
+
+  /** `verify` without recording a use: for the access report, which must change nothing. */
+  async peek(key: string | null | undefined): Promise<ApiKeyRecord | null> {
+    const rec = await this.match(key);
+    return rec ? publicOf(rec) : null;
   }
 
   async get(id: string): Promise<ApiKeyRecord | null> {

@@ -4,7 +4,7 @@ import { test, after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { kvServer, defaultRedis, createRedis } from '@aura/kv-store';
 import {
@@ -238,13 +238,34 @@ test('audit: user and operator attribution, secrets never recorded', async () =>
     action: IDENTITY_AUDIT_ACTIONS.login,
     detail: { password: secret, nested: { sessionToken: secret, passwordHash: secret, code: secret }, method: 'password' },
   });
-  await audit.record({ by: operatorAttribution(), action: IDENTITY_AUDIT_ACTIONS.passwordReset, target: 'user:default' });
+  await audit.record({ by: operatorAttribution(), action: IDENTITY_AUDIT_ACTIONS.ownerRecovered, target: 'user:default' });
   const [reset, login] = await audit.list(2);
   assert.equal(reset.actor, 'operator');
   assert.equal(login.actor, 'user:default');
   assert.equal(login.session, 'abcdef01');
   assert.equal(login.detail.method, 'password');
   assert.equal(JSON.stringify(login).includes(secret), false);
+});
+
+test('the setup-tickets entry is file-only: its import graph has no Valkey', () => {
+  const coreRoot = join(import.meta.dirname, '..');
+  const pkg = JSON.parse(readFileSync(join(coreRoot, 'package.json'), 'utf-8'));
+  const entry = join(coreRoot, pkg.exports['./setup-tickets'].import);
+  const seen = new Set();
+  const external = new Set();
+  const visit = (file) => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    const source = readFileSync(file, 'utf-8');
+    for (const m of source.matchAll(/^(?:import|export)\s(?:[^'"\n;]*\sfrom\s)?['"]([^'"]+)['"]/gm)) {
+      if (m[1].startsWith('.')) visit(join(dirname(file), m[1]));
+      else external.add(m[1]);
+    }
+    assert.equal(/\bimport\s*\(|\brequire\s*\(/.test(source), false, `dynamic import in ${file}`);
+  };
+  visit(entry);
+  assert.ok(seen.size >= 2, 'follows relative imports');
+  assert.deepEqual([...external].filter((d) => !d.startsWith('node:')), [], 'only Node builtins');
 });
 
 test('instance owner: label wins, adoption falls back, pool members stay unowned', () => {
