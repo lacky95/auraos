@@ -653,7 +653,8 @@ let initialTimeZone: string = '';
   }
 
   // The docked keyboard covers the bottom of the screen. The badge keeps its
-  // spot and is lifted above the keyboard instead (data-kb-docked → CSS).
+  // spot; its z-index already sits above the keyboard (data-kb-docked is a
+  // state hook only).
   function syncKbDocked() {
     const v = String(autohideEnabled && kbDocked());
     for (const el of [badge, badgeOk, badgeKb]) if (el) el.dataset['kbDocked'] = v;
@@ -2179,8 +2180,9 @@ let initialTimeZone: string = '';
   .clock { color: var(--aura-color-text); font-family: var(--aura-font-mono); }
 
   /* Auto-hide edge badge. Hidden here; OSLayout's global autohide rules
-     show it while the mode is on. Sits above the revealed bars (900) and
-     below the launcher / process-manager panels (1000). Upright on the
+     show it while the mode is on. Sits on top of every shell layer — the
+     launcher / process manager (1000), docked keyboard (1065), dialogs
+     (≤ 1900) — and only below the lock screen (2000). Upright on the
      left/right edge, lying on the top/bottom edge; --badge-pos (0..1) is
      its place along the edge. */
   .bars-badge,
@@ -2207,7 +2209,7 @@ let initialTimeZone: string = '';
     align-items: center;
     justify-content: center;
     overflow: hidden;
-    z-index: 950;
+    z-index: 1950;
     font-size: 14px;
     color: var(--aura-color-primary);
     background: var(--aura-color-surface);
@@ -2257,9 +2259,6 @@ let initialTimeZone: string = '';
     border-color: var(--aura-color-primary);
   }
   .bars-badge-icon { display: inline-flex; pointer-events: none; }
-  /* Docked keyboard open (z-index 1065): stay where it is, on top of it. */
-  .bars-badge[data-kb-docked="true"],
-  .bars-seg[data-kb-docked="true"] { z-index: 1070; }
 
   /* Segments joined to the badge along the edge, on the side with more
      room (data-ok-side, set by JS): ⌨ (virtual keyboard) always, ✓ (leave
@@ -2273,7 +2272,7 @@ let initialTimeZone: string = '';
     align-items: center;
     justify-content: center;
     overflow: hidden;
-    z-index: 950;
+    z-index: 1950;
     font-size: 14px;
     box-shadow: 0 0 10px rgba(0, 0, 0, 0.35);
     cursor: pointer;

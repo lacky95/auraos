@@ -5,6 +5,7 @@ import type { AppManifest, ColorMode, KeyAction, OsKeymapState, ProxyConfig } fr
 import { sharedKv } from '../../../../lib/sharedKv.js';
 import { SYNTHETIC_RECEIVER_JS } from '../../../../lib/keyboard/receiverScript.js';
 import { NATIVE_KEYBOARD_JS } from '../../../../lib/keyboard/nativeKeyboardScript.js';
+import { FRAME_RELAY_JS } from '../../../../lib/keyboard/frameRelayScript.js';
 
 /**
  * Absolute import URLs Vite emits inside served JS modules. Rewritten to the
@@ -732,6 +733,12 @@ window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod
         // Device-keyboard policy (`aura.keyboard.policy`, same doc): keeps the
         // device's on-screen keyboard away from text fields when the shell says so.
         rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}<script>${NATIVE_KEYBOARD_JS}</script>`);
+        // Relay for apps that frame other apps (TerminalX embedding a Terminal):
+        // passes keys + policy one frame down and hello/field/open/close up, so
+        // a nested document gets the same keyboard as a window. Inserted last ⇒
+        // runs first, before the receiver, which it must precede to stop a key
+        // it passed down. No-op in documents without a focused child iframe.
+        rewritten = rewritten.replace(/<head(\s[^>]*)?>/i, (m) => `${m}<script>${FRAME_RELAY_JS}</script>`);
       }
 
       // Focus-on-click. Clicking anywhere in an app window must move keyboard
