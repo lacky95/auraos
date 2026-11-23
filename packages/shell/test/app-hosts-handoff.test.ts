@@ -55,8 +55,6 @@ let labels: Record<string, any>;
 let frameRoutes: Record<string, string>;
 let apps: any[];
 let liveSessions: Set<string>;
-let assigned: string[];
-let released: string[];
 let registryDown = false;
 
 const registry = {
@@ -64,11 +62,8 @@ const registry = {
     if (registryDown) throw new Error('kv down');
     return labels[label] ?? { status: 'unknown' };
   },
-  getFrameRoute: async (appId: string) => frameRoutes[appId] ?? 'proxy',
-  assignSlot: async (_i: string, _s: unknown, instanceId: string) => { assigned.push(instanceId); return slotOf(1, 'notes1234', instanceId); },
-  releaseSlot: async (_i: string, _s: unknown, instanceId: string) => { released.push(instanceId); },
 };
-const svc = { registry, sessionLive: async (sid: string) => liveSessions.has(sid) };
+const svc = { registry, frameRoute: async (appId: string) => frameRoutes[appId] ?? 'proxy', sessionLive: async (sid: string) => liveSessions.has(sid) };
 
 let nowMs = 1_000_000;
 const auth = createAppHostAuth({ secret: Buffer.alloc(32, 7), now: () => nowMs });
@@ -91,8 +86,6 @@ beforeEach(() => {
   frameRoutes = { 'io.acme.notes': 'host' };
   apps = [{ manifest: { id: 'io.acme.notes', name: 'Notes', componentType: 'activity', hosts: [] }, instances: [live('io.acme.notes')] }];
   liveSessions = new Set(['sess-1']);
-  assigned = [];
-  released = [];
   registryDown = false;
   startCalls = 0;
   startDelayMs = 0;
@@ -448,7 +441,7 @@ test('a warm-pool member never gets traffic', async () => {
   await new Promise((r) => setTimeout(r, 60));   // let the slot-1 start from above finish
 });
 
-test('concurrent requests start slot 1 once, then assign it', async () => {
+test('concurrent requests ask for one slot-1 start', async () => {
   const fresh = 'freshlabel1';
   const rec = { ...record([slotOf(1, fresh, null)]), installationId: '33333333-3333-4333-8333-333333333333' };
   labels[fresh] = { status: 'active', record: rec, slot: slotOf(1, fresh, null) };
@@ -464,7 +457,25 @@ test('concurrent requests start slot 1 once, then assign it', async () => {
   assert.ok(replies.every((r) => r.status === 503));
   await new Promise((r) => setTimeout(r, 150));
   assert.equal(startCalls, 1);
-  assert.deepEqual(assigned, ['io.acme.notes-9']);
+});
+
+test('a running instance without the slot gets a not-ready answer, never traffic', async () => {
+  const label = 'notes1234x3';
+  const unassigned = slotOf(3, label, null);
+  labels[label] = { status: 'active', record: record([unassigned]), slot: unassigned };
+  const code = auth.issueCode({
+    aud: `http://${label}--${BASE}`, label, installationId: INSTALL, appId: 'io.acme.notes', slot: 3,
+    userId: 'default', sid: 'sess-1', returnPath: '/',
+  }).code;
+  const signed = await get(`${label}--${BASE}`, `/_aura/handoff?code=${code}`);
+  const cookie = String(signed.headers['set-cookie']![0]).split(';')[0]!;
+  const r = await get(`${label}--${BASE}`, '/', { cookie });
+  assert.equal(r.status, 503);
+  assert.match(r.body, /not ready/);
+  assert.equal(r.headers['retry-after'], undefined);
+  assert.match(await upgrade(`${label}--${BASE}`, '/ws', { Cookie: cookie, Origin: `http://${label}--${BASE}` }), /^HTTP\/1\.1 503/);
+  assert.equal(seen.length, 0);
+  assert.equal(startCalls, 0);
 });
 
 test('no start without a valid cookie', async () => {
@@ -487,7 +498,7 @@ test('a higher slot routes only when assigned and never starts', async () => {
     return String(r.headers['set-cookie']![0]).split(';')[0]!;
   };
   const cookie = await signIn2(slotOf(2, label, null));
-  assert.equal((await get(`${label}--${BASE}`, '/', { cookie })).status, 404);
+  assert.equal((await get(`${label}--${BASE}`, '/', { cookie })).status, 503);
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(startCalls, 0);
 

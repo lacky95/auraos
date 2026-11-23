@@ -369,13 +369,13 @@ export function createAppHostRouter({
       const found = await svc.registry.resolveLabel(host.label);
       if (found.status === 'retired') return { to: 'gone' };
       if (found.status === 'reserved') return { to: 'missing' };
-      if (found.status === 'active' && await svc.registry.getFrameRoute(found.record.appId) === 'host') {
+      if (found.status === 'active' && await svc.frameRoute(found.record.appId) === 'host') {
         return { to: 'host', svc, record: found.record, slot: found.slot, label: host.label, base: host.base };
       }
     }
     // A `host` app's manifest names carry no handoff, so they can't stay open.
     const declaring = name ? index?.get(name) : null;
-    if (declaring && await svc.registry.getFrameRoute(declaring) === 'host') return { to: 'denied' };
+    if (declaring && await svc.frameRoute(declaring) === 'host') return { to: 'denied' };
     if (!declaring && hostPolicy(env) === 'enforce') return { to: 'missing' };
     return { to: 'proxy' };
   }
@@ -389,7 +389,8 @@ export function createAppHostRouter({
     return (await route.svc.sessionLive(payload.sid)) ? payload : null;
   }
 
-  function startSlotOne({ svc, record, slot }) {
+  /** Asks for a start, once at a time. `start()` claims the slot in the lifecycle. */
+  function startSlotOne({ record }) {
     const scope = record.instanceScope.kind === 'user' ? `user:${record.instanceScope.userId}` : 'shared';
     const key = `${record.installationId}\0${scope}`;
     if (slotStarts.has(key) || Date.now() - (startAsked.get(key) ?? 0) <= START_RETRY_MS) return;
@@ -399,19 +400,15 @@ export function createAppHostRouter({
     const flight = (async () => {
       const r = await fetch(startUrl, { method: 'POST', headers: internalServiceHeaders(startUrl), signal: AbortSignal.timeout(30_000) });
       if (!r.ok) throw new Error(`start ${r.status}`);
-      const { instanceId } = await r.json();
-      if (typeof instanceId !== 'string') throw new Error('start returned no instance');
-      if (slot.instanceId && slot.instanceId !== instanceId) {
-        await svc.registry.releaseSlot(record.installationId, record.instanceScope, slot.instanceId);
-      }
-      const assigned = await svc.registry.assignSlot(record.installationId, record.instanceScope, instanceId);
-      if (assigned.slot !== 1) log('start-other-slot', record.appId, assigned.slot);
     })().catch((err) => log('start-failed', record.appId, String(err)))
       .finally(() => slotStarts.delete(key));
     slotStarts.set(key, flight);
   }
 
-  /** The assigned live instance, or {missing}/{starting}. Only slot 1 starts one. */
+  /**
+   * The assigned live instance, or {missing}/{starting}/{notReady}. A running
+   * instance without this slot gets no traffic. Only slot 1 asks for a start.
+   */
   async function slotTarget(route) {
     const { record, slot } = route;
     const find = (apps) => apps.find((a) => a.manifest?.id === record.appId);
@@ -427,7 +424,7 @@ export function createAppHostRouter({
         port: inst.port, appId: record.appId, instanceId: inst.instanceId, sidecar: false, appName,
       };
     }
-    if (slot.slot !== 1) return slot.instanceId ? { starting: true, appName } : { missing: true };
+    if (slot.slot !== 1) return { notReady: true, appName };
     startSlotOne(route);
     return { starting: true, appName };
   }
@@ -493,6 +490,7 @@ export function createAppHostRouter({
 
     const t = await slotTarget(route);
     if (t.missing) return page(404, 'No app here', 'This app has no page at this address.');
+    if (t.notReady) return page(503, `${t.appName} is not ready`, 'No running instance holds this address. Open the app again from the AuraOS desktop.');
     if (t.starting) return page(503, `Starting ${t.appName}…`, 'This page reloads by itself when it is up.', { refresh: 2 });
     const headers = appRequestHeaders(req, 'app-hosts-http');
     for (const [k, v] of Object.entries({ ...forwardedHeaders(req, edge), ...identityHeaders(t) })) headers.push(k, v);
@@ -522,7 +520,7 @@ export function createAppHostRouter({
       t = await slotTarget(route);
     } catch { return fail(503, 'Service Unavailable'); }
     if (t.missing) return fail(404, 'Not Found');
-    if (t.starting) return fail(503, 'Service Unavailable');
+    if (t.starting || t.notReady) return fail(503, 'Service Unavailable');
     const extra = { ...forwardedHeaders(req, edge), ...identityHeaders(t) };
     const raw = appRequestHeaders(req, 'app-hosts-upgrade', { keepUpgrade: true });
     const lines = [`${req.method} ${url} HTTP/${req.httpVersion}`];

@@ -77,7 +77,7 @@ export const POST: APIRoute = async (ctx) => {
     if (resolved.status === 'retired') return json({ error: 'retired' }, 410);
     if (resolved.status !== 'active') return json({ error: 'not-found' }, 404);
     const { record, slot } = resolved;
-    if (await services.registry.getFrameRoute(record.appId) !== 'host') return json({ error: 'not-host-routed' }, 409);
+    if (await services.frameRoute(record.appId) !== 'host') return json({ error: 'not-host-routed' }, 409);
     const manifest = core.getAppManager().getManifest(record.appId);
     if (!manifest || manifest.componentType === 'service') return json({ error: 'not-found' }, 404);
     if (slot.slot !== 1 && !slot.instanceId) return json({ error: 'slot-not-assigned' }, 409);

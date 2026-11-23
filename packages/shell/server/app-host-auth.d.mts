@@ -4,7 +4,8 @@ export const LOGIN_DARK_SID: string;
 export function safeReturnPath(value: unknown): string | null;
 export function cookieValues(header: unknown, name: string): string[];
 export interface AppHostServices {
-  registry: import('@aura/core').AppHostRegistry & { getFrameRoute(appId: string): Promise<'proxy' | 'host'> };
+  registry: import('@aura/core').AppHostRegistry;
+  frameRoute(appId: string): Promise<'proxy' | 'host'>;
   sessionLive(sid: string): Promise<boolean>;
 }
 export interface HandoffInput {
