@@ -15,6 +15,7 @@ const HEADERS = {
   'Referrer-Policy': 'no-referrer',
 };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: HEADERS });
+const isId = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9._#:-]{1,256}$/.test(v);
 const peerOf = (ctx: { clientAddress?: string }) => {
   try { return ctx.clientAddress; } catch { return undefined; }
 };
@@ -42,6 +43,9 @@ async function readBody(request: Request): Promise<Record<string, unknown> | nul
  * A one-time code that signs this browser in to one App Host. Shell origin
  * only: App Hosts are same-site with the shell, so an exact Origin is what
  * stops one app from asking for a code to another.
+ *
+ * Body `{appId, instanceId, activityId, returnPath}`, answer `{code, origin, slot}`.
+ * The label and slot come from the registry, never from the body.
  */
 export const POST: APIRoute = async (ctx) => {
   const { request } = ctx;
@@ -56,10 +60,11 @@ export const POST: APIRoute = async (ctx) => {
   const body = await readBody(request);
   if (!body) return json({ error: 'invalid-request' }, 400);
   const returnPath = safeReturnPath(body['returnPath'] ?? '/');
-  if (typeof body['label'] !== 'string' || !returnPath) return json({ error: 'invalid-request' }, 400);
-  const label = body['label'].toLowerCase();
-  const host = buildAppHost(label, edge.host);
-  if (!host) return json({ error: 'no-app-hosts' }, 409);
+  const { appId, instanceId } = body;
+  const activityId = body['activityId'] ?? null;
+  if (!returnPath || !isId(appId) || !isId(instanceId) || (activityId !== null && !isId(activityId))) {
+    return json({ error: 'invalid-request' }, 400);
+  }
 
   try {
     let identity: { sid: string; userId: string | null; sessionExpiresAt: number | null };
@@ -73,27 +78,41 @@ export const POST: APIRoute = async (ctx) => {
 
     const services = await loadAppHostServices();
     if (!services) return json({ error: 'unavailable' }, 503);
+    const mgr = core.getAppManager();
+    const manifest = mgr.getManifest(appId);
+    if (!manifest || manifest.componentType === 'service') return json({ error: 'not-found' }, 404);
+    if (await services.frameRoute(appId) !== 'host') return json({ error: 'not-host-routed' }, 409);
+
+    // The body only names a window. Each id is checked against what is running.
+    const instance = mgr.getInstance(instanceId);
+    if (!instance || instance.appId !== appId || instance.inPool) return json({ error: 'not-found' }, 404);
+    if (activityId !== null) {
+      const activity = mgr.getActivity(activityId);
+      if (!activity || activity.appId !== appId || activity.parentInstanceId !== instanceId) return json({ error: 'not-found' }, 404);
+    }
+
+    const held = (await services.registry.listForApp(appId))
+      .filter((r) => r.state === 'active')
+      .flatMap((r) => r.slots.filter((s) => s.instanceId === instanceId));
+    if (held.length !== 1) return json({ error: 'slot-not-assigned' }, 409);
+    const label = held[0]!.label;
     const resolved = await services.registry.resolveLabel(label);
     if (resolved.status === 'retired') return json({ error: 'retired' }, 410);
-    if (resolved.status !== 'active') return json({ error: 'not-found' }, 404);
+    if (resolved.status !== 'active' || resolved.record.appId !== appId || resolved.slot.instanceId !== instanceId) {
+      return json({ error: 'slot-not-assigned' }, 409);
+    }
     const { record, slot } = resolved;
-    if (await services.frameRoute(record.appId) !== 'host') return json({ error: 'not-host-routed' }, 409);
-    const manifest = core.getAppManager().getManifest(record.appId);
-    if (!manifest || manifest.componentType === 'service') return json({ error: 'not-found' }, 404);
-    if (slot.slot !== 1 && !slot.instanceId) return json({ error: 'slot-not-assigned' }, 409);
-    if (body['slot'] !== undefined && body['slot'] !== slot.slot) return json({ error: 'slot-mismatch' }, 409);
+    const host = buildAppHost(label, edge.host);
+    if (!host) return json({ error: 'no-app-hosts' }, 409);
 
     const scopeUser = record.instanceScope.kind === 'user' ? record.instanceScope.userId : 'default';
-    const aud = originOf(edge.scheme, host);
-    const { code, expiresAt } = appHostAuth().issueCode({
-      aud, label, installationId: record.installationId, appId: record.appId, slot: slot.slot,
+    const origin = originOf(edge.scheme, host);
+    const { code } = appHostAuth().issueCode({
+      aud: origin, label, installationId: record.installationId, appId, slot: slot.slot,
       userId: identity.userId ?? scopeUser, sid: identity.sid, returnPath,
       sessionExpiresAt: identity.sessionExpiresAt,
     });
-    return json({
-      code, origin: aud, url: `${aud}/_aura/handoff?code=${encodeURIComponent(code)}`,
-      label, slot: slot.slot, expiresAt,
-    });
+    return json({ code, origin, slot: slot.slot });
   } catch (err) {
     console.warn(`[app-hosts] handoff failed: ${(err as Error)?.name ?? 'error'}`);
     return json({ error: 'unavailable' }, 503);
