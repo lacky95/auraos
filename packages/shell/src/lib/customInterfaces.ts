@@ -1,5 +1,6 @@
 import { CustomInterfaceSchema, type AppManager, type CustomInterface } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
+import { refererAppId } from './access/legacyReferer.ts';
 
 /**
  * User-registered (custom) interfaces — external endpoints the OS lists next
@@ -51,16 +52,9 @@ export const CUSTOM_INTERFACES_WRITE_PERMISSION = 'system.kv.os.interfaces.write
  * calling app lacks the permission, else null.
  */
 export function checkCustomWrite(request: Request, mgr: AppManager): string | null {
-  const referer = request.headers.get('referer');
-  const match = referer ? safePath(referer).match(/^\/api\/proxy\/([^/]+)\//) : null;
-  if (!match) return null;
-  const inst = mgr.getInstance(match[1]!) ?? mgr.getInstancesByApp(match[1]!)[0];
-  const appId = inst?.appId ?? match[1]!;
+  const appId = refererAppId(request.headers.get('referer'), mgr);
+  if (appId === null) return null;
   return mgr.permissions.hasPermission(appId, CUSTOM_INTERFACES_WRITE_PERMISSION)
     ? null
     : `Permission denied: ${CUSTOM_INTERFACES_WRITE_PERMISSION}`;
-}
-
-function safePath(url: string): string {
-  try { return new URL(url).pathname; } catch { return ''; }
 }

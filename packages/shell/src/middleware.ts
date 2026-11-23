@@ -9,6 +9,8 @@ import { ensureSdkPublished } from './lib/sdkBootstrap.js';
 import { startOnboarding, noteClientConnected, type OnboardingHandle } from './lib/onboarding/index.js';
 import { loadCustomInterfaces } from './lib/customInterfaces.js';
 import { startFlightService } from './lib/flight/service.js';
+import { refererProxyId } from './lib/access/legacyReferer.ts';
+import { captureAccess, createAccessReporter } from './lib/access/guard.ts';
 
 // Source of truth is the singleton on globalThis — NOT a module-scoped flag.
 // The soft-restart endpoint deletes that singleton; if we tracked init state
@@ -176,20 +178,20 @@ async function ensureAppManager() {
  */
 function appAssetRedirect(request: Request, url: URL): Response | null {
   if (!url.pathname.startsWith('/_astro/')) return null;
-  const ref = request.headers.get('referer');
-  if (!ref) return null;
-  let refPath: string;
-  try { refPath = new URL(ref).pathname; } catch { return null; }
-  const m = refPath.match(/^\/api\/proxy\/([^/]+)\//);
-  if (!m) return null;
-  return new Response(null, { status: 307, headers: { Location: `/api/proxy/${m[1]}${url.pathname}${url.search}` } });
+  const id = refererProxyId(request.headers.get('referer'));
+  if (!id) return null;
+  return new Response(null, { status: 307, headers: { Location: `/api/proxy/${id}${url.pathname}${url.search}` } });
 }
 
 let flightServiceStarted = false;
 
+// Report-only (lib/access): loaded on first use, and nothing it does can reach a response.
+const reportAccess = createAccessReporter(() => import('./lib/access/observer.ts'));
+
 export const onRequest = defineMiddleware(async (ctx, next) => {
   const assetRedirect = appAssetRedirect(ctx.request, ctx.url);
   if (assetRedirect) return assetRedirect;
+  const access = captureAccess(ctx);
   await ensureAppManager();
   // Free-flight activities (lib/flight/service.ts): once per shell build —
   // a hot-swapped build takes over the previous one's listeners + notifications.
@@ -198,7 +200,14 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
     try { startFlightService(); }
     catch (err) { console.warn(`[middleware] flight service start failed: ${(err as Error).message}`); }
   }
-  const res = await next();
+  let res: Response;
+  try {
+    res = await next();
+  } catch (err) {
+    reportAccess(access, 500);
+    throw err;
+  }
+  reportAccess(access, res.status);
   // A shell tab registering itself: onboarding cards wait for the first one,
   // because only notifications that arrive while a tab listens pop up.
   if (ctx.request.method === 'POST' && ctx.url.pathname === '/api/os/clients' && res.ok) noteClientConnected();

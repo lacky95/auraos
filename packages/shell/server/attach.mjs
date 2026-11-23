@@ -12,6 +12,8 @@
  */
 import { attachSseMux, MUX_PATH } from './sse-mux.mjs';
 import { createAppHostRouter } from './app-hosts.mjs';
+import { countSurfaceEvent, internalServiceHeaders, reportSurface, surfaceIdentity } from './access-bridge.mjs';
+import { stripShellCredentials } from './shell-credentials.mjs';
 
 // Plain-inline mirror of @aura/core/logger's filter spec. These servers are
 // attached before (dev: astro.config.mjs) or beside (prod: server.mjs) the
@@ -58,7 +60,9 @@ function sioDbg(tag, ...args) {
  */
 export async function fetchAppsList() {
   const shellPort = process.env.SHELL_PORT ?? process.env.AURA_SHELL_PORT ?? '3000';
-  const res = await fetch(`http://127.0.0.1:${shellPort}/api/apps`, {
+  const url = `http://127.0.0.1:${shellPort}/api/apps`;
+  const res = await fetch(url, {
+    headers: internalServiceHeaders(url),
     signal: AbortSignal.timeout(2000),
   });
   if (!res.ok) throw new Error(`/api/apps → ${res.status}`);
@@ -170,6 +174,17 @@ export function attachWsProxy(httpServer) {
     let host = null;
     let port = null;
     let chosenInstanceId = null;
+    let chosenAppId = null;
+    const identity = surfaceIdentity(req.headers);
+    let reported = false;
+    const reportWs = (status) => {
+      if (reported) return;
+      reported = true;
+      reportSurface({
+        subject: chosenAppId === 'com.aura.terminal' && proxyPath === 'ws' ? 'terminal-pty' : 'ws-proxy',
+        method: 'UPGRADE', appId: chosenAppId, status, identity,
+      });
+    };
     // Pick the live instance for `instanceId` (an instance id, or an app id).
     const resolve = (apps) => {
       let chosen = null;
@@ -203,10 +218,11 @@ export function attachWsProxy(httpServer) {
         host = chosen.sandbox === 'container' ? `aura-${chosen.instanceId}` : '127.0.0.1';
         port = chosen.port;
         chosenInstanceId = chosen.instanceId;
+        chosenAppId = chosen.appId ?? null;
       }
     } catch (err) { dbg('WS-PROXY', 'resolve-err', String(err)); }
 
-    if (!port) { dbg('WS-PROXY', 'no-port → destroy', instanceId, `t=${Date.now() - t0}ms`); socket.destroy(); return; }
+    if (!port) { reportWs(0); dbg('WS-PROXY', 'no-port → destroy', instanceId, `t=${Date.now() - t0}ms`); socket.destroy(); return; }
     dbg('WS-PROXY', 'chose', chosenInstanceId, `host=${host} port=${port}`, `t=${Date.now() - t0}ms`);
 
     // Inject activity header for the upstream upgrade request
@@ -224,6 +240,7 @@ export function attachWsProxy(httpServer) {
     for (const h of ['cookie', 'authorization']) {
       if (req.headers[h] != null) upstreamHeaders[h] = req.headers[h];
     }
+    stripShellCredentials(upstreamHeaders, 'ws-proxy');
     if (activityId) upstreamHeaders['x-aura-activity-id'] = activityId;
     // Offer the browser's subprotocols upstream and answer the browser with the
     // one upstream chose: servers such as Vite's HMR refuse an upgrade without
@@ -241,6 +258,7 @@ export function attachWsProxy(httpServer) {
         const wss = new WebSocketServer({ noServer: true, handleProtocols: (offered) => upstream.protocol || offered.values().next().value || false });
         wss.handleUpgrade(req, socket, head, (client) => {
           dbg('WS-PROXY', 'client-handshake-done', `total=${Date.now() - t0}ms`);
+          reportWs(101);
           client.on('message', (data, isBinary) => {
             if (upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary: isBinary });
           });
@@ -273,6 +291,7 @@ export function attachWsProxy(httpServer) {
       upstream.on('error', (e) => {
         dbg('WS-PROXY', 'upstream-error', String(e), `t=${Date.now() - tUpstreamStart}ms`);
         if (offer && /subprotocol/i.test(String(e))) { dial(undefined); return; }
+        reportWs(0);
         socket.destroy();
       });
     };
@@ -393,6 +412,8 @@ export async function attachSio(httpServer) {
 
   io.on('connection', (socket) => {
     sioDbg('connect', socket.id);
+    reportSurface({ subject: 'socketio-os-events', method: 'UPGRADE', status: 101, identity: surfaceIdentity(socket.handshake?.headers) });
+    const countEmit = (type) => countSurfaceEvent(type === 'kv:changed' ? 'socketio-kv' : 'socketio-os-events');
     let accepts = null;  // null = firehose; otherwise topic matcher
     // Phase 5: the tab's shell client session (handshake auth, then 'cs'
     // updates). Not a credential — it only selects the lock-screen filter.
@@ -409,10 +430,12 @@ export async function attachSio(httpServer) {
         if (type.startsWith('notification:')) {
           notifChain = notifChain.then(async () => {
             if (await socketLocked(sid) && await hiddenWhenLocked(ev)) return;
+            countEmit(type);
             socket.emit('event', { type, ...ev });
           }).catch(() => {});
           return;
         }
+        countEmit(type);
         socket.emit('event', { type, ...ev });
       };
       OsEventBus.on(type, fn);

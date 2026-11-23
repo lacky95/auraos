@@ -1,5 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getAppManager } from '@aura/core';
+import { refererAppId } from '../../../../lib/access/legacyReferer.ts';
+import { dropServiceWorkerScope, stripShellCredentials } from '../../../../../server/shell-credentials.mjs';
 
 /**
  * Content-Provider Proxy.
@@ -30,7 +32,7 @@ export const ALL: APIRoute = async ({ params, request }) => {
   }
 
   // ---- Source-app identification ----
-  const sourceAppId = identifySource(request.headers.get('referer'), mgr);
+  const sourceAppId = refererAppId(request.headers.get('referer'), mgr) ?? 'system';
 
   // ---- Permission check ----
   const method = request.method.toUpperCase();
@@ -57,7 +59,7 @@ export const ALL: APIRoute = async ({ params, request }) => {
   const targetUrl = `http://${upHost}:${upPort}${requestPath}${reqUrl.search}`;
 
   try {
-    const headers = new Headers(request.headers);
+    const headers = stripShellCredentials(new Headers(request.headers), 'data');
     headers.set('X-Aura-Source-App-Id', sourceAppId);
     headers.set('X-Aura-Source-Permission-Mode', 'auto-granted-mvp');
     headers.delete('host');
@@ -71,29 +73,14 @@ export const ALL: APIRoute = async ({ params, request }) => {
       duplex: 'half',
     });
 
-    return new Response(upstream.body, {
+    return dropServiceWorkerScope(new Response(upstream.body, {
       status:  upstream.status,
       headers: upstream.headers,
-    });
+    }));
   } catch (err) {
     return jsonError(`Provider upstream error: ${String(err)}`, 502);
   }
 };
-
-function identifySource(referer: string | null, mgr: ReturnType<typeof getAppManager>): string {
-  if (!referer) return 'system';
-  try {
-    const url = new URL(referer);
-    const match = url.pathname.match(/^\/api\/proxy\/([^/]+)\//);
-    if (!match) return 'system';
-    const idOrInstanceId = match[1]!;
-    // The proxy id can be either an instanceId or a bare appId
-    const inst = mgr.getInstance(idOrInstanceId) ?? mgr.getInstancesByApp(idOrInstanceId)[0];
-    return inst?.appId ?? idOrInstanceId;
-  } catch {
-    return 'system';
-  }
-}
 
 function jsonError(message: string, status: number) {
   return new Response(JSON.stringify({ error: message }), {

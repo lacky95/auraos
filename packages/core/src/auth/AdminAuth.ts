@@ -166,6 +166,27 @@ export class AdminAuth {
     return { sessionId: p.s, expiresAt: p.e };
   }
 
+  /**
+   * `verifySession` that can't trigger rotation handling: for the access
+   * report. It uses the loaded credential and answers null if the file changed.
+   */
+  async peekSession(token: string | null | undefined): Promise<AdminSession | null> {
+    if (!token || !looksLikeAdminSession(token)) return null;
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const [, payload, sig] = parts as [string, string, string];
+    const cur = this.loaded;
+    if (!cur || this.stamp() !== cur.stamp) return null;
+    const given = Buffer.from(sig, 'base64url');
+    const want = this.mac(payload, cur.sessionKey);
+    if (given.length !== want.length || !timingSafeEqual(given, want)) return null;
+    let p: { s?: unknown; e?: unknown; f?: unknown };
+    try { p = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as typeof p; } catch { return null; }
+    if (typeof p.s !== 'string' || typeof p.e !== 'number' || p.f !== cur.fp || p.e <= this.now()) return null;
+    if (!(await this.redis().exists(adminSessionKey(p.s)))) return null;
+    return { sessionId: p.s, expiresAt: p.e };
+  }
+
   /** Revoke one session (lock). */
   async lock(sessionId: string): Promise<boolean> {
     if (!/^[0-9a-f]{16}$/.test(sessionId)) return false;

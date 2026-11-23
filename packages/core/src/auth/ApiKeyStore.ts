@@ -113,6 +113,21 @@ export class ApiKeyStore {
     return { ...publicOf(rec), lastUsedAt: now };
   }
 
+  /** `verify` without recording a use: for the access report, which must change nothing. */
+  async peek(key: string | null | undefined): Promise<ApiKeyRecord | null> {
+    if (!key) return null;
+    const m = API_KEY_PATTERN.exec(key);
+    if (!m) return null;
+    const [, id, secret] = m as unknown as [string, string, string];
+    const raw = await this.redis().get(apiKeyRecordKey(id));
+    if (!raw) return null;
+    const rec = JSON.parse(raw) as StoredKey;
+    const a = Buffer.from(sha256hex(secret), 'hex');
+    const b = Buffer.from(rec.hash, 'hex');
+    if (a.length !== b.length || !timingSafeEqual(a, b) || rec.revokedAt !== undefined) return null;
+    return publicOf(rec);
+  }
+
   async get(id: string): Promise<ApiKeyRecord | null> {
     if (!/^[0-9a-f]{16}$/.test(id)) return null;
     const r = this.redis();

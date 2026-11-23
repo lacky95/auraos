@@ -1,9 +1,8 @@
 /**
  * Vocabulary of the route access manifest (routeManifest.ts, surfaceManifest.ts).
  *
- * Data only so far: of `lib/access`, the running shell imports just the
- * `identify` helper, and no request is allowed or refused because of a rule.
- * Phase 1 reads these rules in report-only mode; Phase 3 enforces them.
+ * No request is allowed or refused because of a rule. Phase 1 reads these
+ * rules in report-only mode (observer.ts); Phase 3 enforces them.
  */
 import type { AccessPrincipal, PrincipalClass } from '@aura/core';
 
@@ -53,6 +52,8 @@ export interface AccessRule {
   /** The right rule isn't settled yet. Requires `decision`. */
   ambiguous?: true;
   decision?: AccessDecision;
+  /** Needs a fresh authentication (5.11). No route sets it yet. */
+  freshAuth?: true;
 }
 
 /** The part of a request, beyond its method, that selects a variant. */
@@ -130,6 +131,8 @@ export type PolicyOutcome = (typeof POLICY_OUTCOMES)[number];
 export const ACCESS_REASONS = [
   // allowed, by the level that matched
   'public', 'owner', 'own-instance', 'app-permission', 'system',
+  // allowed only because core has not enforced this permission yet
+  'auto-granted',
   // refused
   'unclassified', 'unauthenticated', 'wrong-principal', 'wrong-target',
   'missing-permission', 'missing-target-permission', 'rule-denied', 'ambiguous-rule',
@@ -142,7 +145,10 @@ export type AccessReason = (typeof ACCESS_REASONS)[number];
 /** How the caller's identity was established. The `*-hint` values prove nothing. */
 export const ACCESS_VIAS = [
   'login-session', 'instance-token', 'api-key', 'admin-session', 'operator-ticket',
-  'referer-hint', 'instance-id-hint', 'internal', 'none',
+  'referer-hint', 'instance-id-hint', 'internal', 'sse-mux',
+  // a credential that isn't a valid Aura one / one that can't be checked right now
+  'foreign-or-invalid', 'unverified',
+  'none',
 ] as const;
 export type AccessVia = (typeof ACCESS_VIAS)[number];
 
@@ -155,6 +161,10 @@ export type AccessEventSurface = 'api' | SurfaceKind;
 
 /** `UPGRADE` is a WebSocket handshake. */
 export type AccessEventMethod = RouteMethod | 'UPGRADE';
+export const ACCESS_EVENT_METHODS = [...ROUTE_METHODS, 'UPGRADE'] as const;
+
+/** Reported when a request's candidate rules disagree and only its body could tell. */
+export const UNRESOLVED_VARIANT = 'unresolved';
 
 /** One observed decision, on any surface. Plain JSON: every field is closed. */
 export interface AccessEvent {
@@ -182,7 +192,54 @@ export const ACCESS_BRIDGE_KEY: unique symbol = Symbol.for('aura.access');
 
 export interface AccessBridge {
   report(event: AccessEvent): void;
+  /** A surface event: the bridge checks it, runs `decide()` and counts it. */
+  observeSurface(observation: SurfaceObservation): void;
+  /** A high-frequency event on a surface: a counter only. */
+  countEvent(subject: string): void;
+  countCredential(kind: string, surface: string): void;
+  pending(): { keys: number; events: number; meta: Record<string, number> };
+  dispose(): void;
 }
+
+/** Transient request facts for identity observation. Never stored. */
+export interface SurfaceIdentity {
+  authorization: string | null;
+  /** Whether a session cookie was present. Its value is not kept. */
+  sessionCookie: boolean;
+  referer: string | null;
+  instanceId: string | null;
+}
+
+/** What a `.mjs` server sends. Untyped there, so all of it is validated. */
+export interface SurfaceObservation {
+  subject: string;
+  method: string;
+  status: number;
+  appId?: string | null;
+  via?: 'sse-mux';
+  identity?: SurfaceIdentity | null;
+}
+
+/** What the middleware copies from a request. Never stored. */
+export interface RequestSnapshot {
+  method: string;
+  routePattern: string;
+  pathname: string;
+  search: string;
+  params: Record<string, string | undefined>;
+  https: boolean;
+  status: number;
+  internal: string | null;
+  identity: SurfaceIdentity;
+}
+
+export const CREDENTIAL_COUNT_KINDS = [
+  'stripped-session-cookie', 'stripped-login-bearer', 'stripped-admin-bearer',
+  'forwarded-instance-token', 'forwarded-api-key',
+] as const;
+export const CREDENTIAL_SURFACES = [
+  'proxy-http', 'data', 'ws-proxy', 'sse-mux', 'app-hosts-http', 'app-hosts-upgrade',
+] as const;
 
 export type AccessBridgeHost = typeof globalThis & { [ACCESS_BRIDGE_KEY]?: AccessBridge };
 
