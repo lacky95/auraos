@@ -530,6 +530,7 @@ function attachPtyOutput(sess: Session): void {
       forgetSessionPicks(sess.id);
       forgetAgent(sess.id);
       releaseSessionGrants(sess.id);
+      endedSessionNames().add(sess.id);
     }
     for (const ws of sess.clients.keys()) { try { ws.close(); } catch { /* ignore */ } }
     sess.clients.clear();
@@ -830,9 +831,20 @@ function sessionRows(alive: Set<string>): { info: SessionInfo; file: string | nu
  * recycled, so those files can be months old and belong to nobody here.
  */
 export function reservedSessionNames(): string[] {
-  const ids = new Set<string>(sessions.keys());
+  const ids = new Set<string>([...sessions.keys(), ...endedSessionNames()]);
   try { for (const f of readdirSync(SCROLLBACK_DIR)) ids.add(f); } catch { /* no dir yet */ }
   return [...ids];
+}
+
+/**
+ * Names of sessions that ended (root `exit`) or were killed in this process.
+ * Their scrollback is gone, but a new shell must still not take the name: a
+ * window or embedding app still showing the ended session would read the new
+ * one as the same session (TerminalX kept the "session ended" page).
+ */
+function endedSessionNames(): Set<string> {
+  const g = globalThis as { __auraTermEnded?: Set<string> };
+  return (g.__auraTermEnded ??= new Set<string>());
 }
 
 /**
@@ -892,6 +904,7 @@ export function killSession(sessionId: string): boolean {
   forgetCwd(sessionId);
   forgetAgent(sessionId);
   releaseSessionGrants(sessionId);
+  endedSessionNames().add(sessionId);
 
   if (!sess) {
     if (killedTmux) log('killSession', sessionId, 'detached tmux session reaped (no in-memory session)');
