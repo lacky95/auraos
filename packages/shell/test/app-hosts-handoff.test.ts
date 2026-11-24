@@ -7,6 +7,7 @@ import http from 'node:http';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { activityHeaders, classifyHost, createAppHostRouter } from '../server/app-hosts.mjs';
+import { hostListed, hostPolicy } from '../server/host-policy.mjs';
 import { createAppHostAuth, safeReturnPath } from '../server/app-host-auth.mjs';
 import { POST as handoffRoute } from '../src/pages/api/app-hosts/handoff.ts';
 
@@ -464,7 +465,7 @@ test('an unknown Host keeps working in report mode and is refused in enforce mod
   assert.equal((await get('zzz--desk.example')).body, 'desktop');
   assert.equal((await get('bad_host')).body, 'desktop');
   const strict = createAppHostRouter({
-    appsList: async () => apps, services: async () => svc, auth, env: { AURA_HOST_POLICY: 'enforce' },
+    appsList: async () => apps, services: async () => svc, auth, env: { AURA_HOST_POLICY: 'enforce', AURA_DESKTOP_HOSTS: 'desk.example' },
   });
   const server = http.createServer((_q, s) => s.end('desktop'));
   strict.attach(server);
@@ -478,6 +479,45 @@ test('an unknown Host keeps working in report mode and is refused in enforce mod
     assert.equal(await at('10.0.0.2:3000'), 200);
     assert.equal(await at('aura-shell:3000'), 200);
   } finally { server.closeAllConnections?.(); server.close(); }
+});
+
+test('DNS rebinding: only listed custom domains are served, and every other access path stays', async () => {
+  const listed = { AURA_DESKTOP_HOSTS: ' Box.Example.com:443 , desk.example. ' };
+  const cls = (h: string) => hostListed(classifyHost(h), listed);
+  for (const h of [
+    '127.0.0.1:3000', '[::1]:3000', '10.0.0.2:3000', '203.0.113.5:3000',      // loopback, LAN IP (setup mode), any IP
+    'localhost:3000', 'aura.localhost:3000', 'os.aura.localhost:3000',          // loopback names
+    '10-0-0-2.nip.io:3000', '127-0-0-1.nip.io:3000', 'notes--10-0-0-2.nip.io:3000',
+    'aura-shell:3000',                                                          // a container name
+    'box.example.com', 'notes1234--box.example.com', 'desk.example:3000',       // configured custom domains
+  ]) assert.equal(cls(h), true, h);
+  for (const h of ['evil.example', 'rebind.attacker.com:3000', 'notes1234--evil.example', 'sub.box.example.com', 'bad_host', '']) {
+    assert.equal(cls(h), false, h);
+  }
+  assert.equal(hostListed(classifyHost('box.example.com'), {}), false, 'nothing listed: no custom domain');
+  assert.equal(hostPolicy({}), 'report', 'report until cutover');
+  assert.equal(hostPolicy({ AURA_HOST_POLICY: 'enforce' }), 'enforce');
+  assert.equal(hostPolicy({ AURA_HOST_POLICY: 'bogus' }), 'report');
+
+  const strict = createAppHostRouter({
+    appsList: async () => apps, services: async () => svc, auth, env: { AURA_HOST_POLICY: 'enforce', AURA_DESKTOP_HOSTS: 'desk.example' },
+  });
+  const server = http.createServer((_q, s) => s.end('desktop'));
+  strict.attach(server);
+  const strictPort = await listen(server);
+  const at = (host: string) => new Promise<number>((resolve, reject) => {
+    http.get({ port: strictPort, agent: false, headers: { host } }, (res) => { res.resume(); resolve(res.statusCode ?? 0); }).on('error', reject);
+  });
+  try {
+    for (const h of ['desk.example', '127.0.0.1:3000', '10.0.0.2:3000', '10-0-0-2.nip.io:3000', 'os.aura.localhost:3000', 'localhost:3000', 'aura-shell:3000']) {
+      assert.equal(await at(h), 200, h);
+    }
+    assert.equal(await at('rebind.attacker.com'), 400);
+    assert.equal(await at('notes1234--rebind.attacker.com'), 400);
+    assert.equal(await at(HOST), 401, 'a listed base still routes its App Hosts');
+  } finally { server.closeAllConnections?.(); server.close(); }
+  // Report mode (today's default) still serves an unlisted custom domain.
+  assert.equal((await get('rebind.attacker.com')).body, 'desktop');
 });
 
 // ── Origin ──────────────────────────────────────────────────────────────────

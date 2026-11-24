@@ -10,6 +10,8 @@ export function edgeView(request: { peer: unknown; encrypted?: boolean; header: 
 export function requestEdge(req: unknown, env?: Env): EdgeView;
 export function classifyHost(host: unknown): HostClass;
 export function hostPolicy(env?: Env): 'report' | 'enforce';
+export function desktopHosts(env?: Env): Set<string>;
+export function hostListed(host: HostClass, env?: Env): boolean;
 export const SAME_ORIGIN_HEADER: string;
 export const OWN_API_RE: RegExp;
 export function browserBoundaryError(

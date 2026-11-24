@@ -5,6 +5,17 @@
  * `X-Forwarded-*` counts only from a peer listed in AURA_TRUSTED_PROXIES. An
  * empty list trusts nobody. A proxy appends its own value, so the last one is
  * the value it vouches for.
+ *
+ * Env:
+ *   AURA_DESKTOP_HOSTS  comma-separated custom domains this AuraOS is opened
+ *                       at, e.g. `box.aura.example.com` (its App Hosts
+ *                       `*--box.aura.example.com` follow). Stops DNS
+ *                       rebinding: a page on a name its owner points at this
+ *                       machine is then not served. IP addresses, `localhost`,
+ *                       `os.aura.localhost`, nip.io names and single-label
+ *                       container names need no entry (see `hostListed`).
+ *   AURA_HOST_POLICY    `report` (default until cutover) logs a Host that is
+ *                       malformed or not listed; `enforce` refuses it.
  */
 import { classifyDesktopHost, parseAppHost, supportsAppHosts } from '@aura/core/host-rules';
 
@@ -165,9 +176,42 @@ export function isShellOrigin(origin, req) {
   return named.some((h) => bareHost(scheme, h) === host);
 }
 
+/** The custom domains in AURA_DESKTOP_HOSTS, lowercase, without port or trailing dot. */
+export function desktopHosts(env = process.env) {
+  return new Set(String(env.AURA_DESKTOP_HOSTS ?? '').split(',')
+    .map((h) => h.trim().toLowerCase().replace(/\.$/, '').replace(/:\d{1,5}$/, ''))
+    .filter(Boolean));
+}
+
 /**
- * `report` keeps every address that works today. `enforce` refuses unknown
- * Hosts.
- * PHASE2-CUTOVER: make `enforce` the only behavior and remove AURA_HOST_POLICY.
+ * Whether a classified Host is one this AuraOS answers to: the DNS rebinding
+ * check. Only a custom domain needs listing, because only there can another
+ * party's DNS name reach this machine:
+ *   ip           a page's Host is its own name, never this machine's address
+ *   localhost    browsers resolve `localhost` and `*.localhost` to loopback
+ *   nip          `a-b-c-d.nip.io` always resolves to a.b.c.d, so no one can
+ *                point it elsewhere (true for the machine's own addresses
+ *                and any other: it only ever reaches the address it names)
+ *   internal     a single-label container name (`aura-shell`), not public DNS
+ *   custom       only the names in AURA_DESKTOP_HOSTS, and their App Hosts
  */
-export const hostPolicy = (env = process.env) => (env.AURA_HOST_POLICY === 'enforce' ? 'enforce' : 'report');
+export function hostListed(host, env = process.env) {
+  if (!host || host.kind === 'unknown') return false;
+  if (host.kind === 'shell' && host.internal) return true;
+  const desktop = host.desktop;
+  if (!desktop || desktop.kind === 'invalid') return false;
+  if (desktop.kind !== 'custom') return true;
+  return desktopHosts(env).has(desktop.hostname);
+}
+
+/**
+ * `report` keeps every address that works today and logs the rest;
+ * `enforce` refuses a malformed or unlisted Host. AURA_HOST_POLICY overrides.
+ * PHASE2-CUTOVER: the default becomes `enforce`, once the live install's custom
+ * domain is in AURA_DESKTOP_HOSTS.
+ */
+const DEFAULT_HOST_POLICY = 'report';
+export const hostPolicy = (env = process.env) => {
+  const set = env.AURA_HOST_POLICY;
+  return set === 'enforce' || set === 'report' ? set : DEFAULT_HOST_POLICY;
+};

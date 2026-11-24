@@ -26,7 +26,9 @@
  *                         X-Forwarded-Proto/-Host/-For are believed (the edge
  *                         in front of a custom domain). See host-policy.mjs.
  *                         On the `proxy` path, unset still believes any.
- *   AURA_HOST_POLICY      `report` (default) or `enforce`, see host-policy.mjs.
+ *   AURA_DESKTOP_HOSTS    custom domains this AuraOS answers to (DNS
+ *                         rebinding), see host-policy.mjs.
+ *   AURA_HOST_POLICY      `report` (default until cutover) or `enforce`.
  */
 import http from 'node:http';
 import net from 'node:net';
@@ -39,7 +41,7 @@ import {
 import { appHostAuth, appHostEmbedCookieName, safeReturnPath } from './app-host-auth.mjs';
 import { handleAppGateway, handleAppGatewayUpgrade, serveAppRuntime } from './app-gateway.mjs';
 import {
-  OWN_API_RE, browserBoundaryError, classifyHost, hostPolicy, isShellOrigin, isTrustedProxy, originOf, requestEdge,
+  OWN_API_RE, browserBoundaryError, classifyHost, hostListed, hostPolicy, isShellOrigin, isTrustedProxy, originOf, requestEdge,
 } from './host-policy.mjs';
 import { stripCookies, stripShellCredentials } from './shell-credentials.mjs';
 import { EMBEDDER_PARAM } from './terminal-embed.mjs';
@@ -688,6 +690,15 @@ export function createAppHostRouter({
           return emit.call(this, event, req, ...rest);
         };
         const host = classifyHost(requestEdge(req, env).host);
+        // DNS rebinding: a custom domain this AuraOS was not told about.
+        if (host.kind !== 'unknown' && !hostListed(host, env)) {
+          countSurfaceEvent('shell-listener');
+          log('unlisted-host', host.kind);
+          if (hostPolicy(env) === 'enforce') {
+            refuse(event, rest[0], 400, 'Bad Request', 'This address is not one of this AuraOS\'s addresses (AURA_DESKTOP_HOSTS).');
+            return true;
+          }
+        }
         if (host.kind === 'app' || appHostName(req.headers.host)) {
           void routeLabeled(host, event, req, rest, passOn);
           return true;

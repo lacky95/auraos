@@ -74,6 +74,26 @@ forger's own response). To believe them only from your edge, set
 `AURA_TRUSTED_PROXIES` on the shell container to its address(es),
 comma-separated.
 
+**Listing your domain.** Set `AURA_DESKTOP_HOSTS` on the shell container to
+the domain(s) you open AuraOS at, comma-separated, without `https://`:
+
+```yaml
+environment:
+  AURA_DESKTOP_HOSTS: box.aura.example.com
+```
+
+Its app hosts (`*--box.aura.example.com`) follow automatically. This stops
+DNS rebinding: any website could otherwise point a name of its own at your
+machine and reach AuraOS as that name. IP addresses, `localhost` and
+`os.aura.localhost`, nip.io names and container names never need listing.
+`sslip.io` and every other domain do.
+
+`AURA_HOST_POLICY` decides what happens to an address that is not listed:
+`report` (today's default) serves it and logs `unlisted-host`; `enforce`
+refuses it with *400 This address is not one of this AuraOS's addresses*.
+`enforce` becomes the default when App Hosts carry every app, so list your
+domain now.
+
 ## Raw IP
 
 `http://10.0.0.2:3000` keeps working for the desktop and every
