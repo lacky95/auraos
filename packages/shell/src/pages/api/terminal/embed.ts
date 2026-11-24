@@ -20,6 +20,10 @@ import { gatewayInstance } from '../../../lib/access/identify.ts';
  * exactly that embedder frame it (`frame-ancestors`), and only while the app
  * still holds `terminal.embed` and the session's own grant. A session the app
  * did not create is refused.
+ *
+ * The code is restricted: the app's server can redeem it too, so the cookie
+ * it sets opens that one document, its assets and that session's socket, and
+ * never anything else on the Terminal's host (app-hosts.mjs).
  */
 export const POST: APIRoute = async ({ request }) => {
   const mgr = core.getAppManager();
@@ -53,6 +57,7 @@ export const POST: APIRoute = async ({ request }) => {
       services, mgr, appId: TERMINAL_APP_ID, instanceId: terminalInstance, returnPath,
       scheme: desktop.scheme, desktopHost: desktop.host,
       identity: { sid: claim.sid, userId: claim.userId, sessionExpiresAt: null },
+      embed: { sessionId, embedder: claim.label },
     });
     if ('error' in issued) {
       // The session's instance is gone (restarted or stopped), and the session with it.

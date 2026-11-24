@@ -62,6 +62,8 @@ export async function issueAppHostHandoff(opts: {
   scheme: string;
   desktopHost: string;
   identity: HandoffIdentity;
+  /** A restricted sign-in for one embedded Terminal session (D25, 5.16). */
+  embed?: core.AppHostEmbedClaim;
 }): Promise<HandoffResult> {
   const { services, mgr, appId, instanceId, identity } = opts;
   if (await services.frameRoute(appId) !== 'host') return { error: 'not-host-routed', status: 409 };
@@ -93,7 +95,7 @@ export async function issueAppHostHandoff(opts: {
   const { code } = appHostAuth().issueCode({
     aud: origin, label, installationId: record.installationId, appId, slot: slot.slot,
     userId: identity.userId ?? scopeUser, sid: identity.sid, returnPath: opts.returnPath,
-    sessionExpiresAt: identity.sessionExpiresAt,
+    sessionExpiresAt: identity.sessionExpiresAt, embed: opts.embed ?? null,
   });
   return { code, origin, slot: slot.slot };
 }

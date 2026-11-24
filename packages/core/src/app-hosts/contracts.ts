@@ -135,8 +135,20 @@ export interface AppHostHandoffClaim {
   sid: string;
   /** Same-origin path to continue to. */
   returnPath: string;
+  /** A restricted sign-in for one embedded Terminal session (D25, 5.16). */
+  embed?: AppHostEmbedClaim;
   iat: number;
   exp: number;
+}
+
+/**
+ * What a restricted App Host cookie allows: one `embed=1` document for one
+ * session, its assets, and that session's socket. Never a full sign-in.
+ */
+export interface AppHostEmbedClaim {
+  sessionId: string;
+  /** The App Host label of the app that frames it. */
+  embedder: string;
 }
 
 /** The host-only cookie set by the handoff, stripped before forwarding. */
@@ -148,6 +160,8 @@ export interface AppHostCookiePayload {
   installationId: string;
   userId: string;
   sid: string;
+  /** Present only on the restricted embed cookie, which has its own name. */
+  embed?: AppHostEmbedClaim;
   iat: number;
   exp: number;
 }

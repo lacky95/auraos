@@ -105,7 +105,8 @@ function buildClaim({ record, slot }, { method, path, origin, userId, sid = null
  * the desktop). Fails closed when the registry can't be read.
  */
 async function ownerActing(ctx, session) {
-  if (!ownerUiApp(ctx.record?.appId)) return null;
+  // A restricted embed cookie (5.16) is never the owner, whatever the app.
+  if (session.embed !== undefined || !ownerUiApp(ctx.record?.appId)) return null;
   try {
     const svc = ctx.services ?? await loadAppHostServices();
     if (!svc) return null;

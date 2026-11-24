@@ -320,3 +320,11 @@ test('gateway: an unreadable registry fails closed', async () => {
   assert.equal(out.claim?.owner, undefined);
   assert.equal(out.authorization, undefined);
 });
+
+test('gateway: a restricted embed cookie never acts for the owner', async () => {
+  const c = gatewayCtx(SETTINGS, 'inst-settings');
+  const embedded = { ...c, session: { ...c.session, embed: { sessionId: 'com.aura.terminal-1#a3', embedder: 'tx1' } } };
+  const out = await forwarded(embedded, { authorization: 'Bearer aura-admin1.abc.def' });
+  assert.equal(out.claim?.owner, undefined);
+  assert.equal(out.authorization, undefined);
+});

@@ -13,7 +13,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, readFileSync, writeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { isAuraReservedPath } from '@aura/core/host-rules';
+import { appHostCookieName, isAuraReservedPath } from '@aura/core/host-rules';
 
 export const HANDOFF_TTL_MS = 60_000;
 export const APP_COOKIE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -25,6 +25,25 @@ const MAX_RETURN_PATH = 2048;
 const CODE_RE = /^[A-Za-z0-9_-]{43}$/;
 const AUTH = Symbol.for('aura.appHosts.auth');
 const SERVICES = Symbol.for('aura.appHosts.services');
+
+/**
+ * The restricted cookie of an embed handoff (D25, 5.16): one Terminal session
+ * shown inside one app. Its own name, so it never replaces the full cookie a
+ * desktop window of the same host holds, and a full read never accepts it.
+ */
+export const appHostEmbedCookieName = (secure) => `${appHostCookieName(secure)}_embed`;
+
+const EMBED_SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}#[A-Za-z0-9._-]{1,64}$/;
+const EMBED_LABEL_RE = /^[a-z0-9]{1,63}$/;
+
+/** A well-formed embed claim, copied, or null. */
+function embedClaim(value) {
+  if (!value || typeof value !== 'object') return null;
+  const { sessionId, embedder } = value;
+  if (typeof sessionId !== 'string' || !EMBED_SESSION_RE.test(sessionId)) return null;
+  if (typeof embedder !== 'string' || !EMBED_LABEL_RE.test(embedder)) return null;
+  return { sessionId, embedder };
+}
 
 const sign = (secret, body) => createHmac('sha256', secret).update(`aura-app-cookie\0${body}`).digest();
 
@@ -62,12 +81,18 @@ export function createAppHostAuth({ secret, now = Date.now }) {
   }
 
   /** @returns {{ code: string, expiresAt: number }} */
-  function issueCode({ aud, label, installationId, appId, slot, userId, sid, returnPath, sessionExpiresAt = null }) {
+  /** `embed` makes it a restricted embed code (see appHostEmbedCookieName). */
+  function issueCode({ aud, label, installationId, appId, slot, userId, sid, returnPath, sessionExpiresAt = null, embed = null }) {
+    const restricted = embed === null ? null : embedClaim(embed);
+    if (embed !== null && !restricted) throw new TypeError('malformed embed claim');
     sweep();
     const code = randomBytes(32).toString('base64url');
     const iat = now();
     const exp = iat + HANDOFF_TTL_MS;
-    const claim = { v: 1, jti: code, aud, label, installationId, appId, slot, userId, sid, returnPath, iat, exp };
+    const claim = {
+      v: 1, jti: code, aud, label, installationId, appId, slot, userId, sid, returnPath,
+      ...(restricted ? { embed: restricted } : {}), iat, exp,
+    };
     pending.set(code, { claim, sessionExpiresAt });
     return { code, expiresAt: exp };
   }
@@ -90,15 +115,18 @@ export function createAppHostAuth({ secret, now = Date.now }) {
   function sealCookie({ claim, sessionExpiresAt }) {
     const iat = now();
     const exp = Math.min(iat + APP_COOKIE_TTL_MS, sessionExpiresAt ?? Infinity);
+    const embed = claim.embed === undefined ? null : embedClaim(claim.embed);
+    if (claim.embed !== undefined && !embed) throw new TypeError('malformed embed claim');
     const payload = {
       v: 1, aud: claim.aud, label: claim.label, installationId: claim.installationId,
-      userId: claim.userId, sid: claim.sid, iat, exp,
+      userId: claim.userId, sid: claim.sid, ...(embed ? { embed } : {}), iat, exp,
     };
     const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
     return { value: `${body}.${sign(secret, body).toString('base64url')}`, maxAgeSeconds: Math.max(0, Math.floor((exp - iat) / 1000)), payload };
   }
 
-  function openCookie(value, { aud, label, installationId }) {
+  /** `embed`: read the restricted embed cookie, else only a full one passes. */
+  function openCookie(value, { aud, label, installationId, embed = false }) {
     const dot = String(value).indexOf('.');
     if (dot <= 0) return null;
     const body = value.slice(0, dot);
@@ -109,6 +137,8 @@ export function createAppHostAuth({ secret, now = Date.now }) {
       const p = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
       if (p.v !== 1 || p.aud !== aud || p.label !== label || p.installationId !== installationId) return null;
       if (typeof p.sid !== 'string' || typeof p.userId !== 'string' || !(p.exp > now())) return null;
+      // A restricted cookie never reads as a full one, under any name.
+      if (embed ? !embedClaim(p.embed) : p.embed !== undefined) return null;
       return p;
     } catch {
       return null;

@@ -780,3 +780,90 @@ test('a spent code continues only for a browser that holds the cookie', async ()
   const evil = encodeURIComponent('//evil.example');
   assert.equal((await get(HOST, `/_aura/handoff?code=${code}&next=${evil}`, { cookie })).status, 403);
 });
+
+// ── a Terminal embed handoff (5.16): restricted to one session ──────────────
+
+const TERM = 'term1234';
+const TERM_HOST = `${TERM}--${BASE}`;
+const TERM_ORIGIN = `http://${TERM_HOST}`;
+const EMBED_SESSION = 'com.aura.terminal-1#a3';
+const EMBED_DOC = `/?embed=1&session=${encodeURIComponent(EMBED_SESSION)}&_aura_embedder=terminalx1`;
+const EMBED_WS = `/ws?_aura_session=${encodeURIComponent(EMBED_SESSION)}&embed=1&session=${encodeURIComponent(EMBED_SESSION)}&_aura_embedder=terminalx1`;
+
+function terminalWorld() {
+  const termRecord = { ...record([slotOf(1, TERM, 'com.aura.terminal-1')]), appId: 'com.aura.terminal', baseName: TERM };
+  labels[TERM] = { status: 'active', record: termRecord, slot: slotOf(1, TERM, 'com.aura.terminal-1') };
+  frameRoutes['com.aura.terminal'] = 'host';
+  apps.push({ manifest: { id: 'com.aura.terminal', name: 'Terminal', componentType: 'activity', hosts: [] }, instances: [live('com.aura.terminal-1')] });
+  embedOrigins = ['http://terminalx1--desk.example'];
+}
+async function terminalSignIn(embed: { sessionId: string; embedder: string } | null): Promise<{ name: string; cookie: string }> {
+  const code = auth.issueCode({
+    aud: TERM_ORIGIN, label: TERM, installationId: INSTALL, appId: 'com.aura.terminal', slot: 1,
+    userId: 'default', sid: 'sess-1', returnPath: embed ? EMBED_DOC : '/', ...(embed ? { embed } : {}),
+  } as never).code;
+  const r = await get(TERM_HOST, `/_aura/handoff?code=${code}`);
+  assert.equal(r.status, 303);
+  const cookie = String(r.headers['set-cookie']![0]).split(';')[0]!;
+  return { name: cookie.split('=')[0]!, cookie };
+}
+
+test('an embed handoff signs in for its one session only, never as the Terminal', async () => {
+  terminalWorld();
+  const { name, cookie } = await terminalSignIn({ sessionId: EMBED_SESSION, embedder: 'terminalx1' });
+  assert.equal(name, 'aura_app_embed', 'its own cookie, which never replaces a window\'s full one');
+  // The embed document, for exactly this session and embedder, and its assets.
+  const doc = await get(TERM_HOST, EMBED_DOC, { cookie });
+  assert.equal(doc.status, 200);
+  assert.equal(doc.headers['content-security-policy'], `frame-ancestors 'self' http://${BASE} http://terminalx1--desk.example`);
+  assert.equal((await get(TERM_HOST, '/_astro/index.abc.js', { cookie })).status, 200);
+  assert.equal((await get(TERM_HOST, '/api/os/theme.css', { cookie })).status, 200);
+  // Nothing else on the Terminal's host: other pages, its API, MCP, the gateway.
+  seen.length = 0;
+  for (const path of [
+    '/', '/?embed=1', `/?embed=1&session=${encodeURIComponent('com.aura.terminal-1#a9')}&_aura_embedder=terminalx1`,
+    `/?embed=1&session=${encodeURIComponent(EMBED_SESSION)}&_aura_embedder=other1`, '/index.html',
+    '/api/sessions', '/api/sessions/screen?id=x', '/mcp/terminal', '/_aura/os/api/apps', '/_aura/os/api/os/context',
+  ]) {
+    assert.equal((await get(TERM_HOST, path, { cookie, 'x-aura-same-origin': '1' })).status, 403, path);
+  }
+  assert.equal((await get(TERM_HOST, EMBED_DOC, { cookie, origin: TERM_ORIGIN }, 'POST')).status, 403);
+  assert.equal(seen.length, 0);
+  // The socket: only this session, as an embed.
+  const ws = (path: string) => upgrade(TERM_HOST, path, { Cookie: cookie, Origin: TERM_ORIGIN });
+  assert.match(await ws(EMBED_WS), /^HTTP\/1\.1 101/);
+  for (const path of [
+    `/ws?_aura_session=${encodeURIComponent(EMBED_SESSION)}`,
+    `/ws?_aura_session=${encodeURIComponent('com.aura.terminal-1#a1')}`,
+    EMBED_WS.replace('_aura_session=com.aura.terminal-1%23a3', '_aura_session=com.aura.terminal-1%23a1'),
+    '/_aura/os/sse-mux', '/?token=hmr',
+  ]) assert.match(await ws(path), /^HTTP\/1\.1 403/, path);
+  // Copied under the full cookie's name it is nothing.
+  const value = cookie.slice(cookie.indexOf('=') + 1);
+  assert.equal((await get(TERM_HOST, '/', { cookie: `aura_app=${value}` })).status, 401);
+  // Revoking the grant ends the document too.
+  embedOrigins = [];
+  assert.equal((await get(TERM_HOST, EMBED_DOC, { cookie })).status, 403);
+});
+
+test('a full Terminal cookie keeps working beside an embed cookie, and an embed socket names one session', async () => {
+  terminalWorld();
+  const full = await terminalSignIn(null);
+  const embed = await terminalSignIn({ sessionId: EMBED_SESSION, embedder: 'terminalx1' });
+  assert.equal(full.name, 'aura_app');
+  const both = `${embed.cookie}; ${full.cookie}`;
+  assert.equal((await get(TERM_HOST, '/api/sessions', { cookie: both, 'x-aura-same-origin': '1' })).status, 200);
+  // Even the full cookie may not attach an embed socket to a different session.
+  const mismatched = EMBED_WS.replace('_aura_session=com.aura.terminal-1%23a3', '_aura_session=com.aura.terminal-1%23a1');
+  assert.match(await upgrade(TERM_HOST, mismatched, { Cookie: full.cookie, Origin: TERM_ORIGIN }), /^HTTP\/1\.1 403/);
+  assert.match(await upgrade(TERM_HOST, EMBED_WS, { Cookie: full.cookie, Origin: TERM_ORIGIN }), /^HTTP\/1\.1 101/);
+});
+
+test('an embed claim must be well formed', () => {
+  for (const embed of [{ sessionId: 'x', embedder: 'tx' }, { sessionId: EMBED_SESSION, embedder: 'Bad-Label' }, { sessionId: EMBED_SESSION }]) {
+    assert.throws(() => auth.issueCode({
+      aud: TERM_ORIGIN, label: TERM, installationId: INSTALL, appId: 'com.aura.terminal', slot: 1,
+      userId: 'default', sid: 'sess-1', returnPath: '/', embed,
+    } as never), /embed/);
+  }
+});

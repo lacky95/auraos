@@ -36,10 +36,11 @@ import {
 import {
   SESSION_COOKIES, countSurfaceEvent, internalServiceHeaders, observeHttpSurface, reportSurface, surfaceIdentity,
 } from './access-bridge.mjs';
-import { appHostAuth, safeReturnPath } from './app-host-auth.mjs';
+import { appHostAuth, appHostEmbedCookieName, safeReturnPath } from './app-host-auth.mjs';
 import { handleAppGateway, handleAppGatewayUpgrade, serveAppRuntime } from './app-gateway.mjs';
 import { classifyHost, hostPolicy, isTrustedProxy, originOf, requestEdge } from './host-policy.mjs';
 import { stripCookies, stripShellCredentials } from './shell-credentials.mjs';
+import { EMBEDDER_PARAM } from './terminal-embed.mjs';
 
 export { classifyHost } from './host-policy.mjs';
 
@@ -63,7 +64,9 @@ const legacyTrusted = (addr) => !(process.env.AURA_TRUSTED_PROXIES ?? '').split(
   || isTrustedProxy(addr);
 
 /** Never sent to an app, and an app may not set them. */
-const AURA_COOKIES = new Set([appHostCookieName(true), appHostCookieName(false), ...SESSION_COOKIES]);
+const AURA_COOKIES = new Set([
+  appHostCookieName(true), appHostCookieName(false), appHostEmbedCookieName(true), appHostEmbedCookieName(false), ...SESSION_COOKIES,
+]);
 const AURA_BEARER = /(?:^|,)\s*Bearer\s+(?:aura-(?:sess1|admin1)\.|aura1\.|aura_k1_)/i;
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const EXACT_ORIGIN_RE = /^https?:\/\/[a-z0-9.-]+(?::\d{1,5})?$/;
@@ -83,6 +86,36 @@ const OWN_ORIGIN_ONLY_APPS = new Set(['com.aura.terminal']);
 export const SAME_ORIGIN_HEADER = 'x-aura-same-origin';
 /** The app's API. `/api/os/*` there is the SDK's redirect to shell assets (a `<link>` can't add a header). */
 const OWN_API_RE = /^\/(?:api(?:\/|$)(?!os\/)|mcp(?:\/|$))/;
+
+/**
+ * What a restricted embed cookie may load besides its document (5.16): built
+ * assets (`/_astro/`, Vite's `/@…` and `/node_modules/` in dev, any file with
+ * an extension other than HTML), never the app's API, MCP or another page.
+ */
+const EMBED_ASSET_RE = /^\/(?:_astro\/|@|node_modules\/|(?:[^?#]*\/)?[^/?#]+\.(?!html?$)[A-Za-z0-9]{1,8}$)/i;
+/** Shell assets an embedded page may fetch through its gateway: the theme and icons, nothing with an identity. */
+const EMBED_GATEWAY_RE = /^\/_aura\/os\/api\/os\/(?:theme\.css|icons\.svg|icons\/[A-Za-z0-9._-]{1,64}\.svg)$/;
+
+/** Whether `params` name exactly the session and embedder a restricted cookie was issued for. */
+function namesEmbed(params, embed) {
+  return params.get('embed') === '1' && params.get('session') === embed.sessionId
+    && params.get(EMBEDDER_PARAM) === embed.embedder;
+}
+
+/**
+ * A request on a restricted embed cookie: its `?embed=1&session=` document,
+ * that page's assets, the runtime and the shell's theme and icons. Reads only.
+ * The PTY socket is checked in `serveHostUpgrade`.
+ */
+function embedRequestAllowed(req, url, path, embed) {
+  if (!SAFE_METHODS.has(req.method) || req.method === 'OPTIONS') return false;
+  if (path === '/') {
+    try { return namesEmbed(new URL(url, 'http://h').searchParams, embed); } catch { return false; }
+  }
+  if (path === AURA_RESERVED_PATHS.runtime) return true;
+  if (isAuraReservedPath(url)) return EMBED_GATEWAY_RE.test(path);
+  return !OWN_API_RE.test(path) && EMBED_ASSET_RE.test(path);
+}
 
 const isLive = (i) => i.port != null && (i.state === 'resumed' || i.state === 'started');
 
@@ -419,11 +452,15 @@ export function createAppHostRouter({
     return { to: 'proxy' };
   }
 
-  /** The verified app cookie's payload, or null. */
+  /**
+   * The verified app cookie's payload, or null. The full cookie wins; without
+   * one, the restricted embed cookie's payload (it carries `embed`).
+   */
   async function appSession(route, req, edge) {
-    const payload = hostAuth().readCookie(req.headers.cookie, appHostCookieName(edge.scheme === 'https'), {
-      aud: edge.origin, label: route.label, installationId: route.record.installationId,
-    });
+    const secure = edge.scheme === 'https';
+    const expected = { aud: edge.origin, label: route.label, installationId: route.record.installationId };
+    const payload = hostAuth().readCookie(req.headers.cookie, appHostCookieName(secure), expected)
+      ?? hostAuth().readCookie(req.headers.cookie, appHostEmbedCookieName(secure), { ...expected, embed: true });
     if (!payload) return null;
     return (await route.svc.sessionLive(payload.sid)) ? payload : null;
   }
@@ -512,9 +549,11 @@ export function createAppHostRouter({
       if (!live) return refuse();
       const secure = edge.scheme === 'https';
       const { value, maxAgeSeconds } = hostAuth().sealCookie(entry);
+      // An embed code signs in for its one session only, under its own name.
+      const name = entry.claim.embed ? appHostEmbedCookieName(secure) : appHostCookieName(secure);
       res.writeHead(303, {
         location,
-        'set-cookie': `${appHostCookieName(secure)}=${value}; Path=/; Max-Age=${maxAgeSeconds}; HttpOnly${secure ? '; Secure' : ''}; SameSite=Lax`,
+        'set-cookie': `${name}=${value}; Path=/; Max-Age=${maxAgeSeconds}; HttpOnly${secure ? '; Secure' : ''}; SameSite=Lax`,
         'cache-control': 'no-store',
         'referrer-policy': 'no-referrer',
       });
@@ -544,6 +583,9 @@ export function createAppHostRouter({
     if (!browserRequestAllowed(req, edge, path, OWN_ORIGIN_ONLY_APPS.has(route.record.appId))) {
       return page(403, 'Request refused', 'This request came from another origin.');
     }
+    if (session.embed && !embedRequestAllowed(req, url, path, session.embed)) {
+      return page(403, 'Request refused', 'This sign-in shows one embedded session only.');
+    }
 
     if (isAuraReservedPath(url)) {
       if (path === AURA_RESERVED_PATHS.runtime) return serveAppRuntime(req, res, { record: route.record, slot: route.slot });
@@ -558,6 +600,8 @@ export function createAppHostRouter({
     const headers = appRequestHeaders(req, 'app-hosts-http');
     for (const [k, v] of Object.entries({ ...forwardedHeaders(req, edge), ...identityHeaders(t), ...activityHeaders(req.url, t.instanceId), [APP_HOST_ROUTE_HEADER]: 'host' })) headers.push(k, v);
     const ancestors = await frameAncestors(route, edge, session, url);
+    // The embed document still needs the grant its code was issued under.
+    if (session.embed && path === '/' && ancestors.length <= 2) return page(403, 'Request refused', 'This embedded session is no longer granted.');
     pipeHttp(route.label, t, req, res, headers, (raw) => appResponseHeaders(raw, ancestors));
   }
 
@@ -582,13 +626,20 @@ export function createAppHostRouter({
     try {
       const session = await appSession(route, req, edge);
       if (!session) return fail(401, 'Unauthorized');
+      if (mux && session.embed) return fail(403, 'Forbidden');
       if (mux) {
         reportUpgrade(0);   // the gateway answers the handshake
         return await handleAppGatewayUpgrade(req, socket, head, { record: route.record, slot: route.slot, session });
       }
       // An embedded page's socket (5.16) needs the embed grant its frame needed,
-      // so revoking the grant also ends every reconnect.
-      if (new URL(url, 'http://h').searchParams.get('embed') === '1') {
+      // so revoking the grant also ends every reconnect. It attaches only to
+      // the session the grant names, and a restricted cookie to nothing else.
+      const params = new URL(url, 'http://h').searchParams;
+      if (session.embed && (url.split(/[?#]/, 1)[0] !== '/ws' || !namesEmbed(params, session.embed))) {
+        return fail(403, 'Forbidden');
+      }
+      if (params.get('embed') === '1') {
+        if (params.get('_aura_session') !== params.get('session')) return fail(403, 'Forbidden');
         const ancestors = await frameAncestors(route, edge, session, url);
         if (ancestors.length <= 2) return fail(403, 'Forbidden');
       }
