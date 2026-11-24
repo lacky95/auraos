@@ -107,6 +107,8 @@ for (const inst of mgr.getAllInstances()) {
   if (!mgr.isEnabled(inst.appId)) continue;
   const manifest = mgr.getManifest(inst.appId);
   if (!manifest) continue;
+  // Services are headless: they have no App Host page, so no window.
+  if (manifest.componentType === 'service') continue;
 
   if (manifest.activityMode === 'multi') {
     for (const act of mgr.getActivitiesByInstance(inst.instanceId)) {
@@ -158,19 +160,13 @@ for (const inst of mgr.getAllInstances()) {
 // closed window whose handle lived on, a restored one that was hidden before
 // the restart), and the backfill — persisted with the next workspace write —
 // piled those onto the active workspace on every reload (seen 2026-10-30).
-// Service components (componentType=service) are deliberately hidden from
-// workspace membership — they have no UI.
 const knownMembers = new Set<string>(
   workspaceState.workspaces.flatMap((w) => w.members),
 );
 const active = workspaceState.workspaces.find(w => w.id === workspaceState.activeWorkspaceId)
             ?? workspaceState.workspaces[0]!;
 for (const v of workspaceState === DEFAULT_WORKSPACE_STATE ? initialViews : []) {
-  // Services don't get added to any workspace — their presence in `views`
-  // is incidental (they don't render UI in the desktop), and adding them
-  // would clutter the user's app set.
   const m = mgr.getManifest(v.appId);
-  if (m?.componentType === 'service') continue;
   // Nor an app whose backend runs without a window (autoStart, or
   // backgroundService — closing its window leaves it running). Without
   // activities its view only says "the instance is up", not "a window was
@@ -185,14 +181,7 @@ for (const v of workspaceState === DEFAULT_WORKSPACE_STATE ? initialViews : []) 
   }
 }
 
-// Filter the SSR views the same way the JS will at runtime — only the
-// active workspace's members render in the first paint. Services still
-// SSR (their iframe exists) but Phase 3+ will hide them visually via CSS
-// since they're not in `members`. For now: drop services from initial
-// render entirely.
-const ssrServiceViewIds = new Set<string>(
-  initialViews.filter((v) => mgr.getManifest(v.appId)?.componentType === 'service').map((v) => v.viewId),
-);
+// Only the active workspace's members render in the first paint.
 // Sort by workspace.members order so the tiling/stack/rows/columns layout
 // hands cell N to the same viewId on every reload. Without this, order
 // follows AppManager's instance-creation order (effectively process
@@ -201,7 +190,7 @@ const ssrServiceViewIds = new Set<string>(
 // active.members) keep relative order because they were appended.
 const orderIndex = new Map<string, number>(active.members.map((id, i) => [id, i]));
 const ssrVisibleViews = initialViews
-  .filter((v) => active.members.includes(v.viewId) && !ssrServiceViewIds.has(v.viewId))
+  .filter((v) => active.members.includes(v.viewId))
   .sort((a, b) => (orderIndex.get(a.viewId) ?? 1e9) - (orderIndex.get(b.viewId) ?? 1e9));
 
 // Apply per-workspace focus state — `Workspace.layoutState.focusedViewId`.
@@ -2167,9 +2156,8 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     const v = views.find((x) => x.viewId === viewId);
     if (v && v.instanceId) {
       // Skip backend call for placeholder views (no instance yet).
-      // Services are headless by design — their iframe rendering is just
-      // the proxy's SERVICE-HAS-NO-UI placeholder, so closing that window
-      // must NOT stop the underlying backend (sidecars + state would die
+      // Services are headless by design and have no App Host page, so
+      // closing such a window must NOT stop the underlying backend (sidecars + state would die
       // with it). Drop the visual slot only; the AppManager keeps the
       // service running.
       const manifest = manifestCache.get(v.appId);
