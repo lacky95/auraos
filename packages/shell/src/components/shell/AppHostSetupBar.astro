@@ -2,36 +2,46 @@
 /**
  * Limited IP mode: a full-width bar that can't be dismissed. It links to this
  * installation's App Hosts address, or to the custom-domain guide when that
- * address doesn't resolve. Decisions are in lib/desktop/setupBar.ts.
+ * address doesn't resolve. The same bar shows on an App Hosts address whose
+ * App Host cookie this browser drops (WebKit on `os.aura.localhost`, D44).
+ * Decisions are in lib/desktop/setupBar.ts.
  *
  * PHASE2-CUTOVER: stop gating the bar on apps with `frameRoute: host`.
  */
 ---
 <div id="aura-setup-bar" role="status" hidden>
-  <strong>Limited IP mode.</strong>
+  <strong id="aura-setup-bar-title">Limited IP mode.</strong>
   <span id="aura-setup-bar-text"></span>
   <a id="aura-setup-bar-link" hidden></a>
 </div>
 
 <script>
-  import { hostRouteAppList } from '../../lib/appFrame.ts';
+  import { APP_FRAME_SANDBOX, hostRouteAppList } from '../../lib/appFrame.ts';
   import {
-    isWebKitBrowser, planSetupBar, probeAppHostAddress, settleSetupBar, type SetupBarPlan,
+    cookieProbeUrl, isWebKitBrowser, planCookieFallback, planSetupBar, probeAppHostAddress, probeAppHostCookie,
+    settleSetupBar, type SetupBarPlan,
   } from '../../lib/desktop/setupBar.ts';
 
   const bar = document.getElementById('aura-setup-bar');
+  const title = document.getElementById('aura-setup-bar-title');
   const text = document.getElementById('aura-setup-bar-text');
   const link = document.getElementById('aura-setup-bar-link') as HTMLAnchorElement | null;
 
   function paint(plan: SetupBarPlan): void {
-    if (!bar || !text || !link || !plan.show) return;
+    if (!bar || !title || !text || !link || !plan.show) return;
+    const cookies = plan.reason === 'cookies';
+    title.textContent = cookies ? 'Apps blocked in this browser.' : 'Limited IP mode.';
     if (plan.kind === 'link') {
-      text.textContent = "Apps can't open from an IP address. Switch to this Aura installation's app address.";
+      text.textContent = cookies
+        ? "This browser doesn't keep app sign-ins on this address. Switch to this Aura installation's other app address."
+        : "Apps can't open from an IP address. Switch to this Aura installation's app address.";
       link.href = plan.href;
       link.textContent = `Open Aura with App Hosts: ${plan.address}`;
       link.hidden = false;
     } else {
-      text.textContent = "Apps can't open from this address, and no app address could be reached. Point a DNS name at this server and open Aura there. See App Hosts in Aura Docs.";
+      text.textContent = cookies
+        ? "This browser doesn't keep app sign-ins on this address, and no other app address could be reached. Point a DNS name at this server and open Aura there. See Reaching AuraOS in Aura Docs."
+        : "Apps can't open from this address, and no app address could be reached. Point a DNS name at this server and open Aura there. See App Hosts in Aura Docs.";
       link.removeAttribute('href');
       link.hidden = true;
     }
@@ -47,17 +57,25 @@
     if ('ResizeObserver' in window) new ResizeObserver(sync).observe(bar);
   }
 
-  const plan = planSetupBar({
+  const input = {
     host: location.host,
     protocol: location.protocol,
     pathname: location.pathname,
     hostRouteApps: hostRouteAppList().size,
     webkit: isWebKitBrowser(navigator.userAgent),
-  });
-  if (plan.show && plan.kind === 'link') {
-    void probeAppHostAddress(plan.probeUrl).then((ok) => paint(settleSetupBar(plan, ok)));
+  };
+  const show = (plan: SetupBarPlan) => {
+    if (plan.show && plan.kind === 'link') {
+      void probeAppHostAddress(plan.probeUrl).then((ok) => paint(settleSetupBar(plan, ok)));
+    } else {
+      paint(plan);
+    }
+  };
+  const cookieProbe = cookieProbeUrl(input);
+  if (cookieProbe) {
+    void probeAppHostCookie(cookieProbe, { sandbox: APP_FRAME_SANDBOX }).then((kept) => { if (!kept) show(planCookieFallback(input)); });
   } else {
-    paint(plan);
+    show(planSetupBar(input));
   }
 </script>
 

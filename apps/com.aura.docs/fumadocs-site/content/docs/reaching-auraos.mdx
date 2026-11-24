@@ -9,13 +9,30 @@ With a domain, put an HTTPS edge in front and route `host` and
 `*--host` to the shell. Both support everything, including
 [App hosts](/docs/app-hosts); only a domain gives you HTTPS.
 
-## The three ways in
+## The ways in
 
 | Access | Example | App hosts | HTTPS-only browser APIs |
 |---|---|---|---|
 | **Custom domain** (recommended) | `https://lukas-01.aura.int.lakner.io` | yes | yes |
 | **nip.io** (no domain needed) | `http://10-0-0-2.nip.io:3000` | yes | no |
-| Raw IP | `http://10.0.0.2:3000` | no | no |
+| On the machine itself, or an SSH tunnel | `http://os.aura.localhost:3000` | yes (not Safari, see below) | no |
+| Raw IP | `http://10.0.0.2:3000` | no, setup only | no |
+
+## What each address needs
+
+These were checked in Chromium, Firefox and WebKit (the engine of Safari).
+
+| Address | What you set up |
+|---|---|
+| nip.io | Nothing, unless your router's DNS rebinding protection blocks it (see the nip.io section below). |
+| `os.aura.localhost` | Nothing. **Safari** (and every iPhone and iPad browser) does not keep App Host sign-ins on `*.localhost`, so use `http://127-0-0-1.nip.io:<same port>` there. The desktop shows a bar with that link when the browser drops the sign-in. |
+| HTTPS custom domain | DNS for the desktop name **and** `*.<parent>`, a wildcard certificate, a domain on a public suffix, an edge (reverse proxy) that keeps `Host`, sets `X-Forwarded-Proto` and `X-Forwarded-Host`, and passes WebSocket upgrades, `AURA_TRUSTED_PROXIES` set to that edge's exact address, and the domain in `AURA_DESKTOP_HOSTS`. See [Custom domain](#custom-domain). |
+| SSH tunnel | Forward a local port to `127.0.0.1:3000` on the AuraOS machine, e.g. `ssh -L 3000:127.0.0.1:3000 you@box`, then open `http://os.aura.localhost:3000` (Safari: `http://127-0-0-1.nip.io:3000`). Any free local port works; App Hosts follow it. |
+| Direct IP | Nothing, but it is setup only: the desktop opens, apps on App Hosts don't. A bar links to the matching nip.io address. |
+
+An address shaped like an app host (`name--…`) is never the desktop: a name
+no app uses answers *404*, a removed app's name *410*. An address the
+browser's URL parser can't read (`foo.123`, `1.2.3.999`) answers *400*.
 
 "HTTPS-only browser APIs" are what browsers allow only on a secure origin:
 the clipboard API, microphone and camera, service workers, `crypto.subtle`.
@@ -35,18 +52,42 @@ private-address filtering, dnsmasq `stop-dns-rebind`). Symptom: the nip.io
 name doesn't resolve at all. Allow `nip.io` in that filter, or use a domain.
 </Callout>
 
+## On the machine itself: `os.aura.localhost`
+
+Browsers resolve `localhost` and every `*.localhost` name to the machine
+itself, so `http://os.aura.localhost:3000` and its app hosts
+(`marklayer--os.aura.localhost:3000`) need no DNS. Use `os.aura.localhost`,
+not bare `aura.localhost`: only the first carries app hosts.
+
+**Safari:** WebKit doesn't send an app host's sign-in cookie on
+`*.localhost`, so every app would stop at *Open this app from AuraOS*. Open
+`http://127-0-0-1.nip.io:3000` instead (the same machine through nip.io).
+The desktop checks this itself when it starts on `os.aura.localhost` and,
+when the browser drops the cookie, shows a bar with that link.
+
+**SSH tunnel:** `ssh -L 3000:127.0.0.1:3000 you@box` forwards your local port
+3000 to the AuraOS machine, and `http://os.aura.localhost:3000` (or
+`127-0-0-1.nip.io:3000` in Safari) then works as above.
+
 ## Custom domain
 
 Three one-time pieces, all on your side:
 
-1. **DNS**: a wildcard, e.g. `*.aura.example.com`, pointing to your edge
+1. **DNS**: the desktop name and a wildcard for its parent, e.g.
+   `box.aura.example.com` and `*.aura.example.com`, pointing to your edge
    (or straight to the AuraOS host).
 2. **Certificate**: one wildcard, `*.aura.example.com`. App hosts use `--`
    instead of a dot (`marklayer--box.aura.example.com`), so one label is
    enough for every machine and every app.
 3. **Route**: send `box.aura.example.com` **and** `*--box.aura.example.com`
-   to the shell (`<host>:3000`), keeping `Host`, with WebSocket upgrade, and
-   tell the shell it was HTTPS.
+   to the shell (`<host>:3000`), keeping `Host`, setting
+   `X-Forwarded-Proto` and `X-Forwarded-Host`, and passing WebSocket upgrades.
+4. **Trust and list**: `AURA_TRUSTED_PROXIES` and `AURA_DESKTOP_HOSTS` on the
+   shell container (below).
+
+The domain must end in a public suffix (`.com`, `.io`, `.de`, …). WebKit
+rejects app host cookies under suffixes that aren't public, such as `.test`,
+`.lan`, `.local`, `.home` or `.internal`, so apps don't open there in Safari.
 
 ```nginx
 server {
@@ -60,6 +101,7 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Host              $host;
         proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host  $host;
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header Upgrade           $http_upgrade;
         proxy_set_header Connection        $connection_upgrade;   # map $http_upgrade → upgrade/close
@@ -68,11 +110,12 @@ server {
 }
 ```
 
-**Trusting the edge.** By default the shell believes `X-Forwarded-Proto`,
-`-Host` and `-For` from any client (a forged header only changes the
-forger's own response). To believe them only from your edge, set
-`AURA_TRUSTED_PROXIES` on the shell container to its address(es),
-comma-separated.
+**Trusting the edge.** Set `AURA_TRUSTED_PROXIES` on the shell container to
+your edge's exact address as the shell sees it (comma-separated if there are
+several). App hosts believe `X-Forwarded-Proto`, `-Host` and `-For` only from
+those addresses. Without it the shell can't tell that the browser used HTTPS,
+so the desktop refuses the `http://` app host addresses it gets and apps
+don't open.
 
 **Listing your domain.** Set `AURA_DESKTOP_HOSTS` on the shell container to
 the domain(s) you open AuraOS at, comma-separated, without `https://`:

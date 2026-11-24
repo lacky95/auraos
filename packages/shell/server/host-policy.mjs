@@ -57,6 +57,20 @@ export function requestEdge(req, env = process.env) {
   }, env);
 }
 
+/**
+ * Whether `new URL()` reads `host` as the authority it names. A Host it
+ * rejects (`foo.123`, `1.2.3.999`, `x--1.2.3.4`) throws in code that builds a
+ * URL from the request, such as the Vite dev server, which then never
+ * answered. One that reads as another authority (`a@b`, `a/b`) is refused
+ * too. No Host at all is left to the server, as before.
+ */
+export function hostParses(host) {
+  const value = String(single(host)).trim();
+  if (!value) return true;
+  if (/[\s/\\?#@]/.test(value)) return false;
+  return URL.canParse(`http://${value}/`);
+}
+
 const INTERNAL_NAME_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?::\d{1,5})?$/;
 
 /**

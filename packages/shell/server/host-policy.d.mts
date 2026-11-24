@@ -8,6 +8,7 @@ export function isTrustedProxy(peer: unknown, env?: Env): boolean;
 export function originOf(scheme: string, host: string): string;
 export function edgeView(request: { peer: unknown; encrypted?: boolean; header: (name: string) => unknown }, env?: Env): EdgeView;
 export function requestEdge(req: unknown, env?: Env): EdgeView;
+export function hostParses(host: unknown): boolean;
 export function classifyHost(host: unknown): HostClass;
 export function hostPolicy(env?: Env): 'report' | 'enforce';
 export function desktopHosts(env?: Env): Set<string>;

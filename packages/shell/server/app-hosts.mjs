@@ -41,7 +41,8 @@ import {
 import { appHostAuth, appHostEmbedCookieName, safeReturnPath } from './app-host-auth.mjs';
 import { handleAppGateway, handleAppGatewayUpgrade, serveAppRuntime } from './app-gateway.mjs';
 import {
-  OWN_API_RE, browserBoundaryError, classifyHost, hostListed, hostPolicy, isShellOrigin, isTrustedProxy, originOf, requestEdge,
+  OWN_API_RE, browserBoundaryError, classifyHost, hostListed, hostParses, hostPolicy, isShellOrigin, isTrustedProxy, originOf,
+  requestEdge,
 } from './host-policy.mjs';
 import { stripCookies, stripShellCredentials } from './shell-credentials.mjs';
 import { EMBEDDER_PARAM } from './terminal-embed.mjs';
@@ -67,9 +68,13 @@ const START_RETRY_MS = 15_000;
 const legacyTrusted = (addr) => !(process.env.AURA_TRUSTED_PROXIES ?? '').split(',').some((s) => s.trim())
   || isTrustedProxy(addr);
 
+/** The host probe's cookie (`answerHostProbe`), set exactly like the app cookie. */
+const probeCookieName = (secure) => (secure ? '__Host-aura_host_probe' : 'aura_host_probe');
+
 /** Never sent to an app, and an app may not set them. */
 const AURA_COOKIES = new Set([
-  appHostCookieName(true), appHostCookieName(false), appHostEmbedCookieName(true), appHostEmbedCookieName(false), ...SESSION_COOKIES,
+  appHostCookieName(true), appHostCookieName(false), appHostEmbedCookieName(true), appHostEmbedCookieName(false),
+  probeCookieName(true), probeCookieName(false), ...SESSION_COOKIES,
 ]);
 const AURA_BEARER = /(?:^|,)\s*Bearer\s+(?:aura-(?:sess1|admin1)\.|aura1\.|aura_k1_)/i;
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -156,6 +161,53 @@ function reply(res, status, title, body, opts = {}) {
     ...opts.headers,
   });
   res.end(html);
+}
+
+/**
+ * `/_aura/host-probe` on any well-formed App Host. It answers the same for
+ * every label, before any registry lookup, so no site can use it to list the
+ * installed apps, and it never reaches an app:
+ *
+ *   (no query)      204: DNS for App Hosts reaches this shell (the IP setup bar).
+ *   `?cookie=set`   sets a probe cookie the way the handoff sets the app
+ *                   cookie, and redirects to `?cookie=check`.
+ *   `?cookie=check` a page that tells the desktop framing it whether the
+ *                   cookie came back. WebKit drops it on `*.localhost` (D44),
+ *                   where every app frame would then end on the sign-in page,
+ *                   so the desktop offers `127-0-0-1.nip.io` instead.
+ */
+function answerHostProbe(req, res, host, edge) {
+  let step = null;
+  try { step = new URL(String(req.url ?? ''), 'http://h').searchParams.get('cookie'); } catch { /* the plain probe */ }
+  const secure = edge.scheme === 'https';
+  const name = probeCookieName(secure);
+  const cookie = (value, maxAge) => `${name}=${value}; Path=/; Max-Age=${maxAge}; HttpOnly${secure ? '; Secure' : ''}; SameSite=Lax`;
+  if (step === 'set') {
+    res.writeHead(303, {
+      location: `${AURA_RESERVED_PATHS.hostProbe}?cookie=check`,
+      'set-cookie': cookie('1', 60),
+      'cache-control': 'no-store',
+      'referrer-policy': 'no-referrer',
+    });
+    return res.end();
+  }
+  if (step === 'check') {
+    const desktop = originOf(edge.scheme, host.base);
+    const kept = String(req.headers.cookie ?? '').split(';').some((c) => c.split('=', 1)[0].trim() === name);
+    const json = (v) => JSON.stringify(v).replace(/</g, '\\u003c');
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-store',
+      'content-security-policy': `default-src 'none'; script-src 'unsafe-inline'; frame-ancestors ${desktop}`,
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+      ...(kept ? { 'set-cookie': cookie('', 0) } : {}),
+    });
+    return res.end('<!doctype html><meta charset="utf-8"><title>AuraOS</title>'
+      + `<script>parent.postMessage(${json({ type: 'aura.hostprobe.cookie', cookie: kept })}, ${json(desktop)});</script>`);
+  }
+  res.writeHead(204, { 'cache-control': 'no-store', 'access-control-allow-origin': '*' });
+  return res.end();
 }
 
 // ── frameRoute: host ────────────────────────────────────────────────────────
@@ -422,7 +474,8 @@ export function createAppHostRouter({
     // A `host` app's manifest names carry no handoff, so they can't stay open.
     const declaring = name ? index?.get(name) : null;
     if (declaring && await svc.frameRoute(declaring) === 'host') return { to: 'denied' };
-    if (!declaring && hostPolicy(env) === 'enforce') return { to: 'missing' };
+    // An App Host name no app uses is never the desktop, nor its API.
+    if (!declaring) return { to: 'missing' };
     return { to: 'proxy' };
   }
 
@@ -633,7 +686,7 @@ export function createAppHostRouter({
     return undefined;
   }
 
-  async function routeLabeled(host, event, req, rest, passOn) {
+  async function routeLabeled(host, event, req, rest) {
     const target = rest[0];
     try {
       const route = await decide(host, appHostName(req.headers.host));
@@ -653,8 +706,9 @@ export function createAppHostRouter({
       if (route.to === 'gone') return refuse(event, target, 410, 'Gone', 'This app was removed, and its address is not used again.');
       if (route.to === 'missing') return refuse(event, target, 404, 'Not Found', 'No app uses this address.');
       if (route.to === 'denied') return refuse(event, target, 403, 'Forbidden', 'Open this app from the AuraOS desktop.');
+      // App Host shaped, and no app uses it: never the desktop, nor its API.
       const name = claims(req);
-      if (!name) return passOn();
+      if (!name) return refuse(event, target, 404, 'Not Found', 'No app uses this address.');
       if (event === 'request') await handleRequest(name, req, target);
       else await handleUpgrade(name, req, target, rest[1]);
     } catch (err) {
@@ -685,7 +739,16 @@ export function createAppHostRouter({
           if (event === 'request') observeHttpSurface(req, rest[0]);
           return emit.call(this, event, req, ...rest);
         };
-        const host = classifyHost(requestEdge(req, env).host);
+        const edge = requestEdge(req, env);
+        // A Host `new URL()` rejects throws further in (the Vite dev server
+        // builds the request URL from it) and the request is never answered.
+        if (!hostParses(req.headers.host) || !hostParses(edge.host)) {
+          countSurfaceEvent('shell-listener');
+          log('unparseable-host');
+          refuse(event, rest[0], 400, 'Bad Request', 'This address can\'t be read.');
+          return true;
+        }
+        const host = classifyHost(edge.host);
         // DNS rebinding: a custom domain this AuraOS was not told about.
         if (host.kind !== 'unknown' && !hostListed(host, env)) {
           countSurfaceEvent('shell-listener');
@@ -695,16 +758,12 @@ export function createAppHostRouter({
             return true;
           }
         }
-        // The probe only proves that DNS for App Hosts reaches this shell. It
-        // answers the same for every well-formed name, before any registry
-        // lookup, so no site can use it to list the installed apps.
         if (host.kind === 'app' && event === 'request' && String(req.url ?? '').split(/[?#]/, 1)[0] === AURA_RESERVED_PATHS.hostProbe) {
-          rest[0].writeHead(204, { 'cache-control': 'no-store', 'access-control-allow-origin': '*' });
-          rest[0].end();
+          answerHostProbe(req, rest[0], host, edge);
           return true;
         }
         if (host.kind === 'app' || appHostName(req.headers.host)) {
-          void routeLabeled(host, event, req, rest, passOn);
+          void routeLabeled(host, event, req, rest);
           return true;
         }
         if (host.kind === 'unknown') {

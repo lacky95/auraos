@@ -106,8 +106,10 @@ test('redirects pass through unchanged', async () => {
   assert.equal(r.headers.location, '/s/abc');
 });
 
-test('an undeclared name falls through to the desktop once the index is loaded', async () => {
-  assert.equal((await get('zzz--desk.example')).body, 'desktop');
+test('an undeclared name is 404 once the index is loaded, never the desktop', async () => {
+  const r = await get('zzz--desk.example');
+  assert.equal(r.status, 404);
+  assert.notEqual(r.body, 'desktop');
 });
 
 test('a WebSocket upgrade is piped byte for byte', async () => {

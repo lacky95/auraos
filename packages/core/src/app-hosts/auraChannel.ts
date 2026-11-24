@@ -118,6 +118,10 @@ export const AURA_CHANNEL_MESSAGES = {
   'aura.terminal.share.request': TO_SHELL,
   'aura.terminal.share.result': TO_APP,
 
+  // The desktop's cookie probe frame on an App Host (D44): whether the
+  // browser kept a cookie there. Only the router answers that page.
+  'aura.hostprobe.cookie': TO_SHELL,
+
   // Native host
   'aura.host.url-changed': NATIVE_TO_APP,
   'aura.host.needsTopLevel': NATIVE_TO_APP,

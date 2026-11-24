@@ -7,7 +7,7 @@ import http from 'node:http';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { activityHeaders, classifyHost, createAppHostRouter } from '../server/app-hosts.mjs';
-import { hostListed, hostPolicy } from '../server/host-policy.mjs';
+import { hostListed, hostParses, hostPolicy } from '../server/host-policy.mjs';
 import { createAppHostAuth, safeReturnPath } from '../server/app-host-auth.mjs';
 import { POST as handoffRoute } from '../src/pages/api/app-hosts/handoff.ts';
 
@@ -462,7 +462,8 @@ test('a spoofed Host gets a cookie that is useless on the real one', async () =>
 });
 
 test('an unknown Host keeps working in report mode and is refused in enforce mode', async () => {
-  assert.equal((await get('zzz--desk.example')).body, 'desktop');
+  // An App Host name no app uses is 404 in both (see below), never the desktop.
+  assert.equal((await get('zzz--desk.example')).status, 404);
   assert.equal((await get('bad_host')).body, 'desktop');
   const strict = createAppHostRouter({
     appsList: async () => apps, services: async () => svc, auth, env: { AURA_HOST_POLICY: 'enforce', AURA_DESKTOP_HOSTS: 'desk.example' },
@@ -997,4 +998,156 @@ test('the host probe answers alike for every App Host name and never asks the re
     assert.deepEqual(answers[0], [204, '*', '']);
     assert.deepEqual(asked, []);
   } finally { registry.resolveLabel = original; }
+});
+
+// ── the cookie probe (D44) ──────────────────────────────────────────────────
+
+test('the cookie probe sets a cookie like the handoff and reports it to this desktop only, for every label', async () => {
+  const asked: string[] = [];
+  const original = registry.resolveLabel;
+  registry.resolveLabel = async (label: string) => { asked.push(label); return original(label); };
+  try {
+    for (const label of ['hostprobe', 'notes1234', 'nosuchapp1']) {
+      const set = await get(`${label}--${BASE}:3000`, '/_aura/host-probe?cookie=set');
+      assert.equal(set.status, 303, label);
+      assert.equal(set.headers.location, '/_aura/host-probe?cookie=check');
+      assert.match(String(set.headers['set-cookie']![0]), /^aura_host_probe=1; Path=\/; Max-Age=60; HttpOnly; SameSite=Lax$/);
+
+      const kept = await get(`${label}--${BASE}:3000`, '/_aura/host-probe?cookie=check', { cookie: 'aura_host_probe=1' });
+      assert.equal(kept.status, 200);
+      assert.match(String(kept.headers['content-security-policy']), /frame-ancestors http:\/\/desk\.example:3000$/);
+      assert.match(kept.body, /parent\.postMessage\(\{"type":"aura\.hostprobe\.cookie","cookie":true\}, "http:\/\/desk\.example:3000"\)/);
+      assert.match(String(kept.headers['set-cookie']![0]), /^aura_host_probe=; Path=\/; Max-Age=0;/);
+
+      const dropped = await get(`${label}--${BASE}:3000`, '/_aura/host-probe?cookie=check', { cookie: 'aura_host_probe_x=1; other=2' });
+      assert.match(dropped.body, /"cookie":false/);
+      assert.equal(dropped.headers['set-cookie'], undefined);
+    }
+    assert.deepEqual(asked, []);
+    assert.equal(seen.length, 0);
+  } finally { registry.resolveLabel = original; }
+});
+
+test('the cookie probe behind a trusted HTTPS edge uses a __Host- Secure cookie and the https desktop', async () => {
+  const edge = http.createServer((_q, s) => s.end('desktop'));
+  createAppHostRouter({ appsList: async () => apps, services: async () => svc, auth, env: { AURA_TRUSTED_PROXIES: '127.0.0.1' } }).attach(edge);
+  const edgePort = await listen(edge);
+  const at = (path: string, headers: Record<string, string>) => new Promise<Reply>((resolve, reject) => {
+    http.get({ port: edgePort, path, agent: false, headers: { host: `hostprobe--${BASE}`, 'x-forwarded-proto': 'https', ...headers } }, (res) => {
+      let body = '';
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body, headers: res.headers }));
+    }).on('error', reject);
+  });
+  try {
+    const set = await at('/_aura/host-probe?cookie=set', {});
+    assert.match(String(set.headers['set-cookie']![0]), /^__Host-aura_host_probe=1; Path=\/; Max-Age=60; HttpOnly; Secure; SameSite=Lax$/);
+    const check = await at('/_aura/host-probe?cookie=check', { cookie: '__Host-aura_host_probe=1' });
+    assert.match(check.body, /"cookie":true\}, "https:\/\/desk\.example"/);
+  } finally { edge.closeAllConnections?.(); edge.close(); }
+});
+
+test('an app never receives the probe cookie', async () => {
+  const good = await signIn();
+  await get(HOST, '/', { cookie: `${good}; aura_host_probe=1; own=1` });
+  assert.equal(seen.at(-1)!.headers.cookie, 'own=1');
+});
+
+// ── Host values the URL parser rejects ──────────────────────────────────────
+
+/** A raw request, so no client refuses the Host first. The status line, or 'no answer'. */
+function rawStatus(p: number, host: string, extra = '') {
+  return new Promise<string>((resolve, reject) => {
+    const sock = net.connect(p, '127.0.0.1');
+    let buf = '';
+    const done = (line: string) => { clearTimeout(timer); sock.destroy(); resolve(line); };
+    const timer = setTimeout(() => done(buf.split('\r\n', 1)[0] || 'no answer'), 1500);
+    sock.on('data', (d) => { buf += d; if (buf.includes('\r\n')) done(buf.split('\r\n', 1)[0]!); });
+    sock.on('error', reject);
+    const connection = /^connection:/im.test(extra) ? '' : 'Connection: close\r\n';
+    sock.write(`GET / HTTP/1.1\r\nHost: ${host}\r\n${extra}${connection}\r\n`);
+  });
+}
+const UPGRADE = 'Upgrade: websocket\r\nConnection: Upgrade\r\n';
+const URL_REJECTS = ['foo.123', '1.2.3.999', 'x--1.2.3.4', 'label--10.100.0.2:3000', 'notes1234--1.2.3.999:3000'];
+
+test('a Host the URL parser rejects is answered 400 under every policy, never passed on', async () => {
+  for (const host of URL_REJECTS) assert.throws(() => new URL(`http://${host}/`), host);
+  // Stands in for code that builds a URL from Host (the Vite dev server): it throws and never answers.
+  const hanging = () => {
+    const s = http.createServer((req) => { try { new URL(`http://${req.headers.host}/`); } catch { /* never answered */ } });
+    s.on('upgrade', () => {});
+    return s;
+  };
+  const strict = hanging();
+  createAppHostRouter({
+    appsList: async () => apps, services: async () => svc, auth,
+    env: { AURA_HOST_POLICY: 'enforce', AURA_DESKTOP_HOSTS: 'desk.example', AURA_TRUSTED_PROXIES: '127.0.0.1' },
+  }).attach(strict);
+  const lax = hanging();
+  createAppHostRouter({ appsList: async () => apps, services: async () => svc, auth, env: {} }).attach(lax);
+  const [strictPort, laxPort] = await Promise.all([listen(strict), listen(lax)]);
+  try {
+    for (const host of [...URL_REJECTS, 'a@desk.example']) {
+      for (const p of [port, strictPort, laxPort]) {
+        assert.match(await rawStatus(p, host), /^HTTP\/1\.1 400/, `${p} ${host}`);
+        assert.match(await rawStatus(p, host, UPGRADE), /^HTTP\/1\.1 400/, `upgrade ${p} ${host}`);
+      }
+    }
+    // A trusted edge's X-Forwarded-Host is checked the same way.
+    assert.match(await rawStatus(strictPort, BASE, 'X-Forwarded-Host: foo.123\r\n'), /^HTTP\/1\.1 400/);
+    assert.equal(seen.length, 0);
+  } finally { for (const s of [strict, lax]) { s.closeAllConnections?.(); s.close(); } }
+  // Every address that works today still passes.
+  for (const host of ['127.0.0.1:3000', '[::1]:3000', '10.0.0.2:3000', 'localhost:3000', 'os.aura.localhost:3000', '10-0-0-2.nip.io:3000',
+    'notes1234--10-0-0-2.nip.io:3000', 'box.example.com', 'aura-shell:3000', 'bad_host', 'xn--bcher-kva.example']) {
+    assert.equal(hostParses(host), true, host);
+  }
+  for (const host of [...URL_REJECTS, 'a@b', 'a/b', 'a\\b', 'a?b', 'a#b', 'a b']) assert.equal(hostParses(host), false, host);
+  assert.equal(hostParses(undefined), true, 'no Host is left to the server');
+});
+
+// ── App Host names no app uses ──────────────────────────────────────────────
+
+test('an App Host name no app uses is 404 under every policy, never the desktop or its API', async () => {
+  const hosts = [
+    `nosuchlabel1--${BASE}`, 'nosuchlabel1--10-100-0-2.nip.io:3000', 'nosuchlabel1--os.aura.localhost:3000',
+    'label--localhost:3000', 'label--aura.localhost:3000',
+  ];
+  const desktop = () => {
+    const s = http.createServer((_q, res) => res.end('desktop'));
+    s.on('upgrade', (_q, socket) => socket.end('HTTP/1.1 418 Desktop\r\n\r\n'));
+    return s;
+  };
+  const strict = desktop();
+  createAppHostRouter({ appsList: async () => apps, services: async () => svc, auth, env: { AURA_HOST_POLICY: 'enforce', AURA_DESKTOP_HOSTS: BASE } }).attach(strict);
+  const noRegistry = desktop();
+  createAppHostRouter({ appsList: async () => apps, auth, env: {} }).attach(noRegistry);
+  const ports = [port, ...await Promise.all([strict, noRegistry].map(listen))];
+  const answer = (p: number, host: string, path: string, method: string) => new Promise<string>((resolve, reject) => {
+    const req = http.request({ port: p, path, method, agent: false, headers: { host } }, (res) => {
+      let body = '';
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => resolve(`${res.statusCode} ${body}`));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+  try {
+    for (const p of ports) {
+      for (const host of hosts) {
+        for (const [path, method] of [['/', 'GET'], ['/api/apps', 'GET'], ['/api/intents/start', 'POST']] as const) {
+          const r = await answer(p, host, path, method);
+          assert.match(r, /^404 /, `${p} ${host} ${method} ${path}`);
+          assert.doesNotMatch(r, /desktop/);
+        }
+        assert.match(await rawStatus(p, host, UPGRADE), /^HTTP\/1\.1 404/, `upgrade ${p} ${host}`);
+      }
+    }
+    // A retired label stays 410; the desktop and an active label are untouched.
+    labels['gone1234'] = { status: 'retired' };
+    assert.equal((await get(`gone1234--${BASE}`)).status, 410);
+    assert.equal((await get(BASE)).body, 'desktop');
+    assert.equal((await get(HOST)).status, 401);
+  } finally { for (const s of [strict, noRegistry]) { s.closeAllConnections?.(); s.close(); } }
 });

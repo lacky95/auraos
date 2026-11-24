@@ -10,7 +10,9 @@ import {
   parseProxyFrameUrl, proxyFrameUrl, resolveAppFrame,
 } from '../src/lib/appFrame.ts';
 import { authorizeShellMessage, classifySender, isHostNestedSender, nestedFocusChange, senderAppId, type ChannelFrame } from '../src/lib/auraChannelShell.ts';
-import { isWebKitBrowser, planSetupBar, probeAppHostAddress, settleSetupBar } from '../src/lib/desktop/setupBar.ts';
+import {
+  COOKIE_PROBE_LABEL, cookieProbeUrl, isWebKitBrowser, planCookieFallback, planSetupBar, probeAppHostAddress, probeAppHostCookie, settleSetupBar,
+} from '../src/lib/desktop/setupBar.ts';
 import { SHELL_FRAME_ANCESTORS, shellFramePolicy } from '../src/lib/desktop/frameRoutes.ts';
 import { iframeHtml } from '../src/lib/desktop/slotMarkup.ts';
 
@@ -288,14 +290,14 @@ test('loopback gets os.aura.localhost, and WebKit gets the nip.io fallback', () 
 });
 
 test('public and other IPv6 addresses get the custom-domain guide', () => {
-  assert.deepEqual(bar('8.8.8.8:3000'), { show: true, kind: 'guide' });
-  assert.deepEqual(bar('[2001:db8::1]:3000'), { show: true, kind: 'guide' });
+  assert.deepEqual(bar('8.8.8.8:3000'), { show: true, kind: 'guide', reason: 'address' });
+  assert.deepEqual(bar('[2001:db8::1]:3000'), { show: true, kind: 'guide', reason: 'address' });
 });
 
 test('a failed probe falls back to the guide', async () => {
   const p = bar('10.201.1.2:3000');
   assert.equal(settleSetupBar(p, true), p);
-  assert.deepEqual(settleSetupBar(p, false), { show: true, kind: 'guide' });
+  assert.deepEqual(settleSetupBar(p, false), { show: true, kind: 'guide', reason: 'address' });
   assert.equal(await probeAppHostAddress('http://x/', (async () => new Response('')) as typeof fetch), true);
   assert.equal(await probeAppHostAddress('http://x/', (async () => { throw new TypeError('dns'); }) as typeof fetch), false);
 });
@@ -305,6 +307,88 @@ test('the probe is a fetch browsers accept: no-cors with the default redirect', 
   await probeAppHostAddress('http://x/', (async (_u: unknown, i?: RequestInit) => { init = i; return new Response(''); }) as typeof fetch);
   assert.equal(init?.mode, 'no-cors');
   assert.ok(init?.redirect === undefined || init.redirect === 'follow', `redirect ${init?.redirect} is rejected with no-cors`);
+});
+
+// ── the cookie probe (D44) ───────────────────────────────────────────────────
+
+const probeAt = (host: string, hostRouteApps = 1, protocol = 'http:') => cookieProbeUrl({ host, protocol, hostRouteApps });
+
+test('the cookie probe runs only where a browser may drop the App Host cookie', () => {
+  assert.equal(probeAt('os.aura.localhost:3000'), 'http://hostprobe--os.aura.localhost:3000/_aura/host-probe?cookie=set');
+  assert.equal(probeAt('box.aura.test', 1, 'https:'), 'https://hostprobe--box.aura.test/_aura/host-probe?cookie=set');
+  assert.equal(probeAt('os.aura.localhost:3000', 0), null, 'no app on App Hosts yet');
+  // Every tested browser keeps it on nip.io and a public suffix; no App Hosts on IP and localhost.
+  for (const host of ['10-201-1-2.nip.io:3000', '127-0-0-1.nip.io:3000', 'box.aura.example.com', '10.201.1.2:3000', '127.0.0.1:3000', 'localhost:3000']) {
+    assert.equal(probeAt(host), null, host);
+  }
+  assert.equal(COOKIE_PROBE_LABEL, 'hostprobe');
+});
+
+test('a dropped cookie on os.aura.localhost offers 127-0-0-1.nip.io on the same port, in every browser', () => {
+  for (const webkit of [true, false]) {
+    const p = planCookieFallback({ host: 'os.aura.localhost:3000', protocol: 'http:', pathname: '/desk', hostRouteApps: 1, webkit });
+    assert.ok(p.show && p.kind === 'link');
+    assert.equal(p.reason, 'cookies');
+    assert.equal(p.href, 'http://127-0-0-1.nip.io:3000/desk');
+    assert.equal(p.probeUrl, 'http://127-0-0-1.nip.io:3000/_aura/host-probe');
+    assert.deepEqual(settleSetupBar(p, false), { show: true, kind: 'guide', reason: 'cookies' });
+  }
+  // A custom domain on a non-public suffix has no other address: the guide.
+  assert.deepEqual(planCookieFallback({ host: 'box.aura.test', protocol: 'https:', hostRouteApps: 1, webkit: true }),
+    { show: true, kind: 'guide', reason: 'cookies' });
+});
+
+/** Just enough of a window and document for the probe frame. */
+function probeWorld() {
+  const listeners = new Set<(e: MessageEvent) => void>();
+  const frameWin = {};
+  const frame = {
+    attrs: {} as Record<string, string>, style: { cssText: '' }, tabIndex: 0, src: '', removed: false,
+    contentWindow: frameWin,
+    setAttribute(k: string, v: string) { this.attrs[k] = v; },
+    remove() { this.removed = true; },
+  };
+  const appended: unknown[] = [];
+  const doc = { createElement: () => frame, body: { appendChild: (el: unknown) => { appended.push(el); } } };
+  const win = {
+    addEventListener: (_t: string, fn: (e: MessageEvent) => void) => { listeners.add(fn); },
+    removeEventListener: (_t: string, fn: (e: MessageEvent) => void) => { listeners.delete(fn); },
+  };
+  const post = (data: unknown, origin: string, source: unknown = frameWin) => {
+    for (const fn of [...listeners]) fn({ data, origin, source } as unknown as MessageEvent);
+  };
+  return { frame, frameWin, doc: doc as unknown as Document, win: win as unknown as Window, post, listeners, appended };
+}
+
+const PROBE = 'http://hostprobe--os.aura.localhost:3000/_aura/host-probe?cookie=set';
+const PROBE_ORIGIN = 'http://hostprobe--os.aura.localhost:3000';
+
+test('the probe frame has the app frames\' sandbox and trusts only its own answer', async () => {
+  const w = probeWorld();
+  const kept = probeAppHostCookie(PROBE, { sandbox: APP_FRAME_SANDBOX, doc: w.doc, win: w.win, timeoutMs: 1000 });
+  assert.equal(w.frame.src, PROBE);
+  assert.equal(w.frame.attrs['sandbox'], APP_FRAME_SANDBOX);
+  assert.deepEqual(w.appended, [w.frame]);
+  // Forgeries: another origin, another window, another type.
+  w.post({ type: 'aura.hostprobe.cookie', cookie: false }, 'http://evil--os.aura.localhost:3000');
+  w.post({ type: 'aura.hostprobe.cookie', cookie: false }, PROBE_ORIGIN, {});
+  w.post({ type: 'aura.key', cookie: false }, PROBE_ORIGIN);
+  w.post({ type: 'aura.hostprobe.cookie', cookie: false }, PROBE_ORIGIN);
+  assert.equal(await kept, false);
+  assert.equal(w.frame.removed, true);
+  assert.equal(w.listeners.size, 0);
+
+  const w2 = probeWorld();
+  const ok = probeAppHostCookie(PROBE, { sandbox: APP_FRAME_SANDBOX, doc: w2.doc, win: w2.win, timeoutMs: 1000 });
+  w2.post({ type: 'aura.hostprobe.cookie', cookie: true }, PROBE_ORIGIN);
+  assert.equal(await ok, true);
+});
+
+test('a probe that never answers does not show the bar', async () => {
+  const w = probeWorld();
+  assert.equal(await probeAppHostCookie(PROBE, { sandbox: APP_FRAME_SANDBOX, doc: w.doc, win: w.win, timeoutMs: 20 }), true);
+  assert.equal(w.frame.removed, true);
+  assert.equal(w.listeners.size, 0);
 });
 
 test('WebKit detection does not catch Chromium', () => {
