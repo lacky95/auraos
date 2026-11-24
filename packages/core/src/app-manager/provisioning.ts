@@ -69,14 +69,27 @@ export class ProvisionWatch {
 }
 
 /**
- * The provisioning block for a synthesised entrypoint, as shell source.
+ * When an app's npm tree counts as installed, per runtime. The OS starts an
+ * Astro app itself, so it needs `astro`. A raw app starts through its own
+ * entrypoint, so any installed tree will do, and one without dependencies
+ * needs none. needsProvisioning() and provisionApp() apply the same rule.
+ */
+const NPM_MISSING_SHELL = {
+  astro: '[ ! -x "node_modules/.bin/astro" ] && [ ! -x "/workspace/node_modules/.bin/astro" ]',
+  raw: `[ ! -d node_modules ] && node -e 'process.exit(Object.keys(require("./package.json").dependencies || {}).length ? 0 : 1)' 2>/dev/null`,
+} as const;
+
+/**
+ * The provisioning block an app's start runs first, as shell source.
  *
  * Shared by both runners so the markers can never drift from the work they
  * bracket. Written with explicit `if` blocks: under `set -e` a bare
  * `[ -x foo ] && VAR=1` exits the script when the test is false.
  */
-export const PROVISION_SHELL = `PROVISION=0
-if [ ! -x "node_modules/.bin/astro" ] && [ ! -x "/workspace/node_modules/.bin/astro" ]; then
+export function provisionShell(runtime: 'astro' | 'raw'): string {
+  const npmMissing = NPM_MISSING_SHELL[runtime];
+  return `PROVISION=0
+if ${npmMissing}; then
   PROVISION=1
 fi
 if [ ! -d node_modules/@aura ] && grep -qE '"(aura)?[dD]ependencies"|"@aura/' package.json 2>/dev/null; then
@@ -86,7 +99,7 @@ if [ "$PROVISION" = 1 ]; then
   # Bracket the slow part so the runner can tell "being prepared" from
   # "failing to boot" and hold its health budget open. See provisioning.ts.
   echo "${PROVISION_BEGIN}"
-  if [ ! -x "node_modules/.bin/astro" ] && [ ! -x "/workspace/node_modules/.bin/astro" ]; then
+  if ${npmMissing}; then
     # Install with the package manager the lockfile belongs to. A pnpm
     # project installed by npm resolves from scratch and can miss
     # platform-specific optional deps (npm/cli#4828, e.g. rollup's native
@@ -99,11 +112,11 @@ if [ "$PROVISION" = 1 ]; then
       # the OS workspace file mounted at /workspace and fail on its lockfile.
       PNPM_SCOPE=""
       if [ ! -f pnpm-workspace.yaml ]; then PNPM_SCOPE="--ignore-workspace"; fi
-      echo "[\${APP_ID:-app}] pnpm install via '\$PNPM' (astro not yet present)..."
+      echo "[\${APP_ID:-app}] pnpm install via '\$PNPM' (dependencies not yet installed)..."
       \$PNPM install \$PNPM_SCOPE --frozen-lockfile 2>&1 || \$PNPM install \$PNPM_SCOPE 2>&1 \\
         || echo "[\${APP_ID:-app}] WARNING: pnpm install exited non-zero (often just ignored build scripts) — trying to boot anyway"
     else
-      echo "[\${APP_ID:-app}] npm install (astro not yet present)..."
+      echo "[\${APP_ID:-app}] npm install (dependencies not yet installed)..."
       npm install --prefer-offline 2>&1 || npm install
     fi
   fi
@@ -119,6 +132,20 @@ if [ "$PROVISION" = 1 ]; then
   fi
   echo "${PROVISION_END}"
 fi`;
+}
+
+/** The provisioning block of an Astro app (kept as a constant for the tests). */
+export const PROVISION_SHELL = provisionShell('astro');
+
+/**
+ * The start command of a raw app: the same provisioning as an Astro app,
+ * then the app's own entrypoint (`$1`). Raw apps used to skip provisioning,
+ * so an app that imports `@aura/app-sdk` only booted after a manual
+ * `aura sdk install`.
+ */
+export const RAW_START_SHELL = `set -e
+${provisionShell('raw')}
+exec bash "$1"`;
 
 /**
  * The start command of an Astro app that ships no entrypoint of its own —
@@ -178,10 +205,22 @@ export interface ProvisionResult {
 }
 
 /** Does this app still need dependencies installed? */
-export function needsProvisioning(appDir: string): boolean {
+export function needsProvisioning(appDir: string, runtime: AppRuntime = 'astro'): boolean {
   if (!existsSync(join(appDir, 'package.json'))) return false;
-  if (!existsSync(join(appDir, 'node_modules', '.bin', 'astro'))) return true;
+  if (npmMissing(appDir, runtime)) return true;
   return referencesAuraPackages(appDir) && !existsSync(join(appDir, 'node_modules', '@aura'));
+}
+
+type AppRuntime = keyof typeof NPM_MISSING_SHELL;
+
+/** NPM_MISSING_SHELL in TypeScript, for the install-time path. */
+function npmMissing(appDir: string, runtime: AppRuntime): boolean {
+  if (runtime === 'astro') return !existsSync(join(appDir, 'node_modules', '.bin', 'astro'));
+  if (existsSync(join(appDir, 'node_modules'))) return false;
+  try {
+    const pkg = JSON.parse(readFileSync(join(appDir, 'package.json'), 'utf-8')) as { dependencies?: Record<string, string> };
+    return Object.keys(pkg.dependencies ?? {}).length > 0;
+  } catch { return false; }
 }
 
 function referencesAuraPackages(appDir: string): boolean {
@@ -207,13 +246,14 @@ function referencesAuraPackages(appDir: string): boolean {
  * without it there is no app.
  */
 export async function provisionApp(
-  appDir:  string,
-  onLine?: (line: string) => void,
+  appDir:   string,
+  onLine?:  (line: string) => void,
+  runtime:  AppRuntime = 'astro',
 ): Promise<ProvisionResult> {
   const result: ProvisionResult = { ran: [], warnings: [] };
   if (!existsSync(join(appDir, 'package.json'))) return result;
 
-  if (!existsSync(join(appDir, 'node_modules', '.bin', 'astro'))) {
+  if (npmMissing(appDir, runtime)) {
     result.ran.push('npm install');
     const code = await run('npm', ['install', '--prefer-offline'], appDir, onLine);
     if (code !== 0) {

@@ -20,7 +20,7 @@ import { OWNER_LABEL } from './instanceOwner.js';
 import { ContextStore } from '../context/ContextStore.js';
 import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
 import {
-  ASTRO_START_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
+  ASTRO_START_SHELL, RAW_START_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
 } from './provisioning.js';
 import { BUILD_STAGING_DIR, serveState } from './appBuild.js';
 import { BASE_IMAGE, whenBaseImageReady } from './BaseImage.js';
@@ -713,7 +713,8 @@ export class ContainerRunner implements SandboxRunner {
           `Raw apps must ship an executable entrypoint that binds the app to $APP_PORT.`,
         );
       }
-      return ['bash', `/workspace/apps/${appId}/${manifest.entrypoint}`];
+      // Provision first (npm tree, @aura/* packages), then the app's own entrypoint.
+      return ['bash', '-c', RAW_START_SHELL, 'aura-raw', `/workspace/apps/${appId}/${manifest.entrypoint}`];
     }
     if (entrypointExists) return ['bash', `/workspace/apps/${appId}/${manifest.entrypoint}`];
     return ['bash', '-c', SYNTHESISED_ENTRYPOINT];

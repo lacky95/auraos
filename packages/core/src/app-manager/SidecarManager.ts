@@ -161,6 +161,8 @@ export async function sidecarLimit(): Promise<number> {
 const MAX_STDIN = 64 * 1024;
 const MAX_OUTPUT = 4 * 1024 * 1024;
 const PULL_TIMEOUT_MS = 10 * 60_000;
+/** Readiness waits ask docker whether the container is still up on every Nth failed probe. */
+const UP_CHECK_EVERY = 4;
 const DOCKER_SOCK = '/var/run/docker.sock';
 
 interface DockerResult { code: number | null; stdout: string; stderr: string; timedOut: boolean; truncated: boolean }
@@ -341,7 +343,10 @@ export class SidecarManager {
     };
     const toolsOut = (v: SidecarToolsView) => ({ tools: { effective: v.effective, ignored: v.ignored } });
 
-    return this.locked(container, async () => {
+    // The lock covers deciding and creating only. Waiting for readiness happens
+    // after it, so a sidecar that never comes up (or crash-loops) cannot hold
+    // back every later spawn or remove of the same name for the whole timeout.
+    const out = await this.locked(container, async () => {
       const existing = await this.inspect(container);
       // A sidecar may (re)spawn only within its own subtree: a name that is
       // already someone else's is not its to replace.
@@ -437,13 +442,37 @@ export class SidecarManager {
       this.track(instanceId, spec.name, spec.mounts, record);
       this.opts.changed?.();
       if (wantsMountRoot) await this.opts.mounts.reapplyConsumer(consumer, spec.mounts);
-      if (req.wait?.ready && spec.readiness && spec.port) {
-        await waitForHttp(container, spec.port, spec.readiness.path, req.wait.timeoutMs ?? spec.readiness.timeoutMs);
-      } else if ((req.wait?.port || req.wait?.ready) && spec.port) {
-        await waitForPort(container, spec.port, req.wait.timeoutMs ?? 60_000);
-      }
       return { created: true, sidecar: toView(container, 'running', record), ...(tools ? toolsOut(tools) : {}) };
     });
+    // An adopted sidecar may still be starting (a concurrent spawn created it),
+    // so a caller that asked to wait waits in both cases.
+    if (spec.port && (req.wait?.ready || req.wait?.port)) {
+      const up = await this.upProbe(container);
+      if (req.wait.ready && spec.readiness) {
+        await waitForHttp(container, spec.port, spec.readiness.path, req.wait.timeoutMs ?? spec.readiness.timeoutMs, up);
+      } else {
+        await waitForPort(container, spec.port, req.wait.timeoutMs ?? 60_000, up);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * A check for the readiness waits: throws once the container is gone, no
+   * longer running, or has restarted since the wait began. A crash-looping
+   * runtime then fails the spawn within seconds, with its own last words,
+   * instead of only at the readiness timeout.
+   */
+  private async upProbe(container: string): Promise<() => Promise<void>> {
+    const restartsAtStart = (await this.inspect(container))?.restarts ?? 0;
+    return async () => {
+      const now = await this.inspect(container);
+      if (!now) throw new Error(`${container} was removed before it became ready`);
+      if (now.state === 'running' && now.restarts <= restartsAtStart) return;
+      const logs = await docker(['logs', '--tail', '20', container]);
+      const how = now.state === 'running' ? `restarted ${now.restarts - restartsAtStart} time(s)` : `is ${now.state}`;
+      throw new Error(`${container} ${how} before it became ready:\n${(logs.stdout + logs.stderr).trim() || '(no output)'}`);
+    };
   }
 
   private async ensureImage(image: string): Promise<void> {
@@ -922,13 +951,13 @@ export class SidecarManager {
     this.live.delete(`${instanceId}--${name}`);
   }
 
-  private async inspect(container: string): Promise<{ name: string; state: string; labels: Record<string, string> } | null> {
-    const r = await docker(['inspect', '--format', '{{.Name}}\t{{.State.Status}}\t{{json .Config.Labels}}', container]);
+  private async inspect(container: string): Promise<{ name: string; state: string; labels: Record<string, string>; restarts: number } | null> {
+    const r = await docker(['inspect', '--format', '{{.Name}}\t{{.State.Status}}\t{{json .Config.Labels}}\t{{.RestartCount}}', container]);
     if (r.code !== 0) return null;
-    const [name, state, labels] = r.stdout.trim().split('\t');
+    const [name, state, labels, restarts] = r.stdout.trim().split('\t');
     let parsed: Record<string, string> = {};
     try { parsed = (JSON.parse(labels ?? '{}') ?? {}) as Record<string, string>; } catch { /* no labels */ }
-    return { name: (name ?? container).replace(/^\//, ''), state: state ?? 'unknown', labels: parsed };
+    return { name: (name ?? container).replace(/^\//, ''), state: state ?? 'unknown', labels: parsed, restarts: Number(restarts) || 0 };
   }
 }
 
@@ -962,23 +991,24 @@ function toView(containerName: string, state: string, rec: SpecRecord): OsSideca
  * real answer means the server is up and routing (a 401/404 on a health path
  * is still an answer); refused connections and 5xx mean not yet.
  */
-async function waitForHttp(host: string, port: number, path: string, timeoutMs: number): Promise<void> {
+async function waitForHttp(host: string, port: number, path: string, timeoutMs: number, up: () => Promise<void>): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   const url = `http://${host}:${port}${path.startsWith('/') ? path : `/${path}`}`;
-  for (;;) {
+  for (let attempt = 0; ; attempt++) {
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(3000), redirect: 'manual' });
       await res.body?.cancel();
       if (res.status < 500) return;
     } catch { /* not up yet */ }
     if (Date.now() > deadline) throw new Error(`${url} did not become ready within ${timeoutMs} ms`);
+    if (attempt % UP_CHECK_EVERY === 0) await up();
     await new Promise((r) => setTimeout(r, 500));
   }
 }
 
-async function waitForPort(host: string, port: number, timeoutMs: number): Promise<void> {
+async function waitForPort(host: string, port: number, timeoutMs: number, up: () => Promise<void>): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  for (;;) {
+  for (let attempt = 0; ; attempt++) {
     const ok = await new Promise<boolean>((resolve) => {
       const s = connect({ host, port });
       const done = (v: boolean) => { s.destroy(); resolve(v); };
@@ -988,6 +1018,7 @@ async function waitForPort(host: string, port: number, timeoutMs: number): Promi
     });
     if (ok) return;
     if (Date.now() > deadline) throw new Error(`${host}:${port} did not accept connections within ${timeoutMs} ms`);
+    if (attempt % UP_CHECK_EVERY === 0) await up();
     await new Promise((r) => setTimeout(r, 300));
   }
 }

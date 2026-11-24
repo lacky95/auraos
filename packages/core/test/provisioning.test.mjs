@@ -9,12 +9,13 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ProvisionWatch, nextHealthDeadline, needsProvisioning,
-  PROVISION_BEGIN, PROVISION_END, PROVISION_SHELL,
+  PROVISION_BEGIN, PROVISION_END, PROVISION_SHELL, RAW_START_SHELL,
 } from '../dist/app-manager/provisioning.js';
 
 // ── ProvisionWatch ────────────────────────────────────────────────────────
@@ -138,6 +139,34 @@ test('auraDependencies already materialised needs nothing', () => {
 test('a legacy @aura/* in plain dependencies counts too', () => {
   const d = appDir({ dependencies: { astro: '^6', '@aura/app-sdk': '^0.0.1' } }, { astro: true });
   assert.equal(needsProvisioning(d), true);
+});
+
+// ── raw apps: same rule, but their own entrypoint starts them ─────────────
+test('raw: any installed tree counts, astro is not required', () => {
+  const pkg = { dependencies: { astro: '^6' }, auraDependencies: { '@aura/app-sdk': '^0.0.1' } };
+  assert.equal(needsProvisioning(appDir(pkg), 'raw'), true, 'nothing installed yet');
+  assert.equal(needsProvisioning(appDir(pkg, { aura: true }), 'raw'), false, 'a tree without astro is enough');
+  assert.equal(needsProvisioning(appDir({ name: 'x' }), 'raw'), false, 'no dependencies, nothing to install');
+  assert.equal(needsProvisioning(appDir({ auraDependencies: { '@aura/app-sdk': '^0.0.1' } }), 'raw'), true, '@aura/* still pulled');
+});
+
+test('raw start: provisions @aura/* through the same block, then runs the entrypoint', () => {
+  // The Trilium case: a raw server that imports @aura/app-sdk, no npm deps of its own.
+  const d = appDir({ name: 'raw', auraDependencies: { '@aura/app-sdk': '^0.0.1' } });
+  const bin = mkdtempSync(join(tmpdir(), 'aura-prov-bin-'));
+  writeFileSync(join(bin, 'aura'), '#!/bin/sh\necho "aura $*" >> calls.log\nmkdir -p node_modules/@aura/app-sdk\n');
+  chmodSync(join(bin, 'aura'), 0o755);
+  writeFileSync(join(d, 'entrypoint.sh'), 'echo "entry $(pwd)"\n');
+  const start = () => execFileSync('bash', ['-c', RAW_START_SHELL, 'aura-raw', join(d, 'entrypoint.sh')],
+    { cwd: d, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, encoding: 'utf-8' });
+  const first = start();
+  assert.ok(first.indexOf(PROVISION_BEGIN) < first.indexOf(PROVISION_END), 'bracketed for the runner');
+  assert.ok(first.indexOf(PROVISION_END) < first.indexOf(`entry ${d}`), 'entrypoint runs after, in the app dir');
+  assert.equal(readFileSync(join(d, 'calls.log'), 'utf-8'), 'aura sdk install --quiet\n');
+  assert.ok(!existsSync(join(d, 'package-lock.json')), 'no npm install without dependencies');
+  const second = start();
+  assert.ok(!second.includes(PROVISION_BEGIN), 'a provisioned app boots straight away');
+  assert.match(second, /^entry /m);
 });
 
 // ── the shell the entrypoint runs ─────────────────────────────────────────

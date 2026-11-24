@@ -12,7 +12,7 @@ import type { SpawnContext } from '../scopes/types.js';
 import { ContextStore } from '../context/ContextStore.js';
 import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
 import {
-  ASTRO_START_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
+  ASTRO_START_SHELL, RAW_START_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
 } from './provisioning.js';
 import { serveState } from './appBuild.js';
 
@@ -273,7 +273,8 @@ export class ProotRunner implements SandboxRunner {
    *     synthesised astro fallback is intentionally not used — a raw app
    *     that ships nothing has no defensible default to spawn. Throw with a
    *     clear message so the manifest error surfaces at spawn time, not in
-   *     the form of a hung health check.
+   *     the form of a hung health check. It is provisioned like an Astro
+   *     app first (RAW_START_SHELL), then its entrypoint runs.
    */
   private resolveEntrypoint(appDir: string, manifest: AppManifest): string[] {
     const entrypointPath = join(appDir, manifest.entrypoint);
@@ -285,7 +286,8 @@ export class ProotRunner implements SandboxRunner {
           `Raw apps must ship an executable entrypoint that binds the app to $APP_PORT.`,
         );
       }
-      return ['bash', entrypointPath];
+      // Provision first (npm tree, @aura/* packages), then the app's own entrypoint.
+      return ['bash', '-c', RAW_START_SHELL, 'aura-raw', entrypointPath];
     }
     if (entrypointExists) return ['bash', entrypointPath];
     return ['bash', '-c', SYNTHESISED_ENTRYPOINT];

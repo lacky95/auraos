@@ -44,7 +44,7 @@ function fakeDocker(t, { failStart = false, dieOnBoot = false, missingImages = [
       if (args[2]?.startsWith('{{range .Config.Env}}')) { reply(cb, 0, 'PARENT_ONLY=yes\nK1=from-parent\n'); return { stdin: { end() {} } }; }
       const c = byRef(ref);
       if (!c) reply(cb, 1, '', `No such object: ${ref}`);
-      else reply(cb, 0, `/${c.name}\t${c.state}\t${JSON.stringify(c.labels)}\n`);
+      else reply(cb, 0, `/${c.name}\t${c.state}\t${JSON.stringify(c.labels)}\t${c.restarts ?? 0}\n`);
     } else if (verb === 'ps') {
       const filters = args.flatMap((a, i) => (args[i - 1] === '--filter' ? [a.replace(/^label=/, '')] : []));
       const match = [...containers.values()].filter((c) => filters.every((f) => {
@@ -179,6 +179,40 @@ test('a runtime that dies on boot fails the spawn with its logs and is removed',
   await assert.rejects(mgr.spawn(INST, { template: 'box' }, { instanceId: INST }), /exited right after start:\nboom: config missing/);
   assert.equal(d.containers.size, 0);
   assert.equal(tokens.hasNonce(INST, 'box'), false);
+});
+
+/** A template with a readiness path, and a fetch that never sees it ready. */
+function readinessFixture(t, onProbe) {
+  const f = fixture(t, { services: [{ name: 'web', image: 'alpine:3', port: 8080, readiness: { path: '/health', timeoutMs: 600_000 } }] });
+  t.mock.method(globalThis, 'fetch', async (url) => { onProbe?.(String(url)); throw new TypeError('fetch failed'); });
+  return f;
+}
+
+test('readiness: a crash-looping sidecar fails the spawn with its logs, not at the timeout', async (t) => {
+  const d = fakeDocker(t);
+  let crash = (c) => { c.restarts = 3; };
+  const { mgr } = readinessFixture(t, () => crash(d.containers.get(`aura-${INST}--web`)));
+  const started = Date.now();
+  await assert.rejects(mgr.spawn(INST, { template: 'web', wait: { ready: true } }, { instanceId: INST }),
+    /aura-io\.test\.app-2--web restarted 3 time\(s\) before it became ready:\nboom: config missing/);
+  assert.ok(Date.now() - started < 5_000, 'failed fast');
+  crash = (c) => { c.state = 'exited'; };   // restart policy "no": it just stops
+  await assert.rejects(mgr.spawn(INST, { template: 'web', wait: { ready: true } }, { instanceId: INST }), /is exited before it became ready/);
+});
+
+test('readiness: the wait does not hold the per-container lock (remove and spawn go through)', async (t) => {
+  const d = fakeDocker(t);
+  let probing;
+  const probed = new Promise((r) => { probing = r; });
+  const { mgr } = readinessFixture(t, () => probing());
+  const waiting = mgr.spawn(INST, { template: 'web', wait: { ready: true } }, { instanceId: INST });
+  const outcome = waiting.then(() => 'ready', (e) => e.message);
+  await probed;   // the first spawn now sits in its readiness wait
+  const again = await mgr.spawn(INST, { template: 'web' }, { instanceId: INST });
+  assert.equal(again.created, false, 'a second spawn adopts it at once');
+  await mgr.remove(INST, 'web');   // would block for the readiness timeout under the lock
+  assert.equal(d.containers.size, 0);
+  assert.match(await outcome, /was removed before it became ready/);
 });
 
 test('remove deletes grandchildren, mounts and the token', async (t) => {

@@ -607,12 +607,12 @@ export class NexusManager {
       // hangs up mid-install — costs a slow first launch, not a broken app.
       // The entrypoint still provisions as a fallback and the runners wait.
       const appDir = join(installer.appsDir, manifest.id);
-      if (needsProvisioning(appDir)) {
+      if (needsProvisioning(appDir, manifest.runtime)) {
         yield { type: 'install.provision', message: 'installing dependencies…' };
         try {
           const prov = await provisionApp(appDir, (line) => {
             this.bus?.emit('nexus:install.progress', { id: manifest.id, line });
-          });
+          }, manifest.runtime);
           for (const w of prov.warnings) yield { type: 'install.provision', message: w };
           if (prov.ran.length) {
             yield { type: 'install.provision', message: `dependencies ready (${prov.ran.join(', ')})` };
