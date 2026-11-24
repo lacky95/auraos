@@ -9,7 +9,7 @@
  * `next()` call before continuing. The caller (CLI or shell route)
  * implements its own approval UI between yields.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import type { OsEventBus as OsEventBusSingleton } from '../ipc/OsEventBus.js';
@@ -499,7 +499,10 @@ export class NexusManager {
       }
       keys.add(manifest.id); this.installing.add(manifest.id);
       // After the identity step, which may have given the app another local id.
-      await this.assertHostsAllowed(manifest);
+      // Under another id it is a copy of the artifact: the source's host names
+      // aren't its to claim, so it installs without the ones it can't have.
+      if (manifest.id !== remoteId) manifest = await this.withoutRefusedHosts(stagingDir, manifest);
+      else await this.assertHostsAllowed(manifest);
       const installer = this.installerFor(targetScope);
       // A dev checkout holds work that is not in any release.
       if (!opts.replaceCheckout && isDevCheckout(join(installer.appsDir, manifest.id))) {
@@ -700,19 +703,44 @@ export class NexusManager {
    * or system-app name unless this same app id already declares it.
    */
   private async assertHostsAllowed(manifest: AppManifest): Promise<void> {
-    if (manifest.hosts.length === 0) return;
+    const problems = [...(await this.hostProblems(manifest)).values()].flat();
+    if (problems.length) throw new NexusValidationError(problems);
+  }
+
+  /** Why each refused host name of `manifest` is refused. */
+  private async hostProblems(manifest: AppManifest): Promise<Map<string, string[]>> {
+    const problems = new Map<string, string[]>();
+    if (manifest.hosts.length === 0) return problems;
+    const add = (name: string, problem: string) => problems.set(name, [...(problems.get(name) ?? []), problem]);
     const claims = this.installedHostClaims();
-    const clashes = hostConflicts({ appId: manifest.id, hosts: manifest.hosts }, claims);
-    const problems = clashes.map((c) => `hosts: '${c.name}' is already the app host of ${c.heldBy}`);
+    for (const c of hostConflicts({ appId: manifest.id, hosts: manifest.hosts }, claims)) {
+      add(c.name, `hosts: '${c.name}' is already the app host of ${c.heldBy}`);
+    }
     const own = new Set(claims.filter((c) => c.appId === manifest.id).flatMap((c) => c.hosts.map((h) => h.name)));
-    if (this.hostLifecycle) {
-      problems.push(...await this.hostLifecycle.manifestHostProblems(manifest.id, manifest.hosts.map((h) => h.name), own));
-    } else {
-      for (const h of manifest.hosts) {
-        if (isProtectedHostName(h.name) && !own.has(h.name)) problems.push(`hosts: '${h.name}' is reserved for the OS`);
+    for (const { name } of manifest.hosts) {
+      if (this.hostLifecycle) {
+        for (const p of await this.hostLifecycle.manifestHostProblems(manifest.id, [name], own)) add(name, p);
+      } else if (isProtectedHostName(name) && !own.has(name)) {
+        add(name, `hosts: '${name}' is reserved for the OS`);
       }
     }
-    if (problems.length) throw new NexusValidationError(problems);
+    return problems;
+  }
+
+  /**
+   * Write the staged manifest without the hosts this app may not claim. They
+   * leave the manifest rather than being filtered at load, so a copy can't
+   * pick a name up later when its holder is uninstalled.
+   */
+  private async withoutRefusedHosts(stagingDir: string, manifest: AppManifest): Promise<AppManifest> {
+    const refused = await this.hostProblems(manifest);
+    if (refused.size === 0) return manifest;
+    for (const [name, why] of refused) console.warn(`[Nexus] ${manifest.id}: leaving out host '${name}': ${why.join('; ')}`);
+    const path = join(stagingDir, 'app.manifest.json');
+    const raw = JSON.parse(readFileSync(path, 'utf-8')) as { hosts?: Array<{ name: string }> };
+    raw.hosts = (raw.hosts ?? []).filter((h) => !refused.has(h.name));
+    writeFileSync(path, JSON.stringify(raw, null, 2) + '\n');
+    return validateStagedDir(stagingDir);
   }
 
   async *publishGit(opts: {

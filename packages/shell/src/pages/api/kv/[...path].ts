@@ -3,6 +3,7 @@ import { getAppManager, OsEventBus, ThemeManager, type ColorMode } from '@aura/c
 import { isValidKey, isValidNamespace, type KvNamespace } from '@aura/kv-store';
 import { sharedKv } from '../../../lib/sharedKv.js';
 import { withEtag } from '../../../lib/etag.js';
+import { kvReadAllowed } from '../../../lib/access/kvAccess.ts';
 import { refererAppId } from '../../../lib/access/legacyReferer.ts';
 
 /**
@@ -161,9 +162,9 @@ function checkPermission(
   mgr:       ReturnType<typeof getAppManager>,
 ): Response | null {
   const isRead  = method === 'GET' || method === 'HEAD';
+  if (isRead && kvReadAllowed(namespace, sourceAppId)) return null;
 
   if (namespace === 'os') {
-    if (isRead) return null;                                            // public read
     // First topic segment of the key → permission scope. e.g. key
     // `theme.colorMode` ⇒ permission `system.kv.os.theme.write`.
     const topic = key.split(/[./]/, 1)[0]!;

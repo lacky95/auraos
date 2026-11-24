@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import vm from 'node:vm';
+import { OsEventBus } from '@aura/core';
 import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import type { GatewayIdentityClaim, ProxyConfig } from '@aura/core';
 import {
@@ -13,10 +14,12 @@ import {
 import { gatewayClaimOf, signGatewayClaim, verifyGatewayClaim } from '../server/gateway-identity.mjs';
 import { stripShellCredentials } from '../server/shell-credentials.mjs';
 import { createDecide } from '../src/lib/access/decide.ts';
+import { gatewayEventView, type GatewayEventView } from '../src/lib/access/gatewayEvents.ts';
 import { enforceGateway } from '../src/lib/access/gatewayCaller.ts';
 import type { ObserverManager } from '../src/lib/access/observer.ts';
 import { buildAppRuntimeJs } from '../src/lib/appRuntime.ts';
 import { authenticate, type AuthDeps } from '../src/lib/auth.ts';
+import { GET as eventsRoute } from '../src/pages/api/apps/events.ts';
 
 const ORIGIN = 'http://notesabcd1234--desk.example:3000';
 const record = { appId: 'com.acme.notes', installationId: 'inst-1', instanceScope: { kind: 'user', userId: 'default' } };
@@ -128,6 +131,175 @@ test('a body-selected variant counts at its strictest', async () => {
   });
   const c = apiCtx('POST', '/api/instances/com.acme.notes-1/sidecars', '/api/instances/[instanceId]/sidecars', { instanceId: 'com.acme.notes-1' });
   assert.equal((await enforceGateway(c, { mgr, decide: strict }))?.status, 403);
+});
+
+// ── what an app may do through the gateway ──────────────────────────────────
+
+const INTENTS = '/api/intents/start';
+const TERMINAL = 'com.aura.terminal';
+const TERMINAL_INSTANCE = 'com.aura.terminal-1';
+const OPEN_TERMINAL = 'aura.intent.action.OPEN_TERMINAL';
+
+/** The gateway's manager, with the Terminal installed in `scopeId`. */
+const terminalMgr = (scopeId: string) => ({
+  ...mgr,
+  getInstance: (id: string) => (id === TERMINAL_INSTANCE ? { appId: TERMINAL, instanceId: id } : liveInstances[id]),
+  getManifest: (id: string) => (id === TERMINAL ? { scopeId } : mgr.getManifest?.(id)),
+}) as unknown as ObserverManager;
+
+function intentCtx(body: string, appId = record.appId, instanceId = slot.instanceId) {
+  const url = new URL(INTENTS, 'http://127.0.0.1:3000');
+  const request = new Request(url, {
+    method: 'POST',
+    headers: {
+      [GATEWAY_IDENTITY_HEADER]: signGatewayClaim(claim('POST', INTENTS, { appId, instanceId })),
+      'content-type': 'application/json',
+    },
+    body,
+  });
+  return { request, url, routePattern: INTENTS, params: {} };
+}
+const sendIntent = (body: unknown, appId?: string, instanceId?: string, scopeId = 'system') =>
+  enforceGateway(intentCtx(JSON.stringify(body), appId, instanceId), { mgr: terminalMgr(scopeId), decide });
+
+test('intents: an app may send one, and the body is still there for the route', async () => {
+  assert.equal(await sendIntent({ action: OPEN_TERMINAL, appId: TERMINAL, extras: { background: true } }), null);
+  assert.equal(await sendIntent({ action: 'aura.intent.action.VIEW', uri: 'https://example.com' }), null);
+  const c = intentCtx(JSON.stringify({ action: 'x' }));
+  assert.equal(await enforceGateway(c, { mgr: terminalMgr('system'), decide }), null);
+  assert.deepEqual(await c.request.json(), { action: 'x' });
+});
+
+test('intents: an ordinary app cannot carry the OPEN_TERMINAL command extra', async () => {
+  for (const body of [
+    { action: OPEN_TERMINAL, appId: TERMINAL, extras: { command: 'id' } },
+    { action: OPEN_TERMINAL, extras: { background: true, command: 'id' } },
+    { action: 'some.other.action', appId: TERMINAL, extras: { command: 'id' } },
+    { action: OPEN_TERMINAL, extras: { command: null } },
+  ]) {
+    assert.equal((await sendIntent(body))?.status, 403, JSON.stringify(body));
+  }
+  const viaProto = '{"action":"' + OPEN_TERMINAL + '","extras":{"__proto__":{"command":"id"}}}';
+  const res = await enforceGateway(intentCtx(viaProto), { mgr: terminalMgr('system'), decide });
+  assert.equal(res?.status, 403, 'an inherited command is refused too');
+  const lastKeyWins = '{"action":"' + OPEN_TERMINAL + '","extras":{"command":"id","background":true,"command":"ls"}}';
+  assert.equal((await enforceGateway(intentCtx(lastKeyWins), { mgr: terminalMgr('system'), decide }))?.status, 403);
+});
+
+test('intents: only the system Terminal may carry a command', async () => {
+  const body = { action: OPEN_TERMINAL, extras: { command: 'id' } };
+  assert.equal(await sendIntent(body, TERMINAL, TERMINAL_INSTANCE), null);
+  assert.equal((await sendIntent(body, TERMINAL, TERMINAL_INSTANCE, 'user'))?.status, 403, 'a same-id app in another scope');
+});
+
+test('intents: a malformed body reaches the route, an oversized one does not', async () => {
+  assert.equal(await enforceGateway(intentCtx('{not json'), { mgr: terminalMgr('system'), decide }), null);
+  const big = JSON.stringify({ action: 'x', pad: 'x'.repeat(1024 * 1024) });
+  assert.equal((await enforceGateway(intentCtx(big), { mgr: terminalMgr('system'), decide }))?.status, 413);
+});
+
+test('intents: sending one opens no install or admin route', async () => {
+  for (const [path, route, params] of [
+    ['/api/nexus/install', '/api/nexus/install', {}],
+    ['/api/admin/access-report', '/api/admin/access-report', {}],
+  ] as Array<[string, string, Record<string, string>]>) {
+    assert.equal((await enforce(apiCtx('POST', path, route, params)))?.status, 403, path);
+  }
+});
+
+test('themes are readable by an app; the layout and keymap catalogues stay as they were', async () => {
+  assert.equal(await enforce(apiCtx('GET', '/api/os/themes', '/api/os/themes')), null);
+  for (const p of ['/api/os/layouts', '/api/os/keymap']) {
+    assert.equal((await enforce(apiCtx('GET', p, p)))?.status, 403, p);
+  }
+});
+
+const eventRequest = (token?: string) => new Request('http://127.0.0.1:3000/api/apps/events', {
+  headers: token === undefined ? {} : { [GATEWAY_IDENTITY_HEADER]: token },
+});
+const eventToken = () => signGatewayClaim(claim('GET', '/api/apps/events'));
+
+test('events: the view shows the theme, own app and readable KV, and nothing else', () => {
+  const view = gatewayEventView(eventRequest(eventToken()), mgr as never) as GatewayEventView;
+  const own = { appId: record.appId, instanceId: slot.instanceId, activityId: 'a', parentInstanceId: slot.instanceId };
+  const other = { ...own, appId: 'com.other.app' };
+  for (const [type, ev] of [
+    ['theme:changed', { themeId: 't' }],
+    ['mode:changed', { themeId: 't' }],
+    ['app:stateChanged', own],
+    ['activity:flightChanged', own],
+    ['kv:changed', { namespace: 'os', key: 'theme', value: 1 }],
+    ['kv:changed', { namespace: `app/${record.appId}`, key: 'k', value: 1 }],
+  ] as Array<[string, unknown]>) {
+    assert.equal(view.allows(type, ev), true, type);
+  }
+  for (const [type, ev] of [
+    ['kv:changed', { namespace: 'app/com.other.app', key: 'k', value: 'private' }],
+    ['kv:changed', { namespace: 'context', key: 'k', value: 'private' }],
+    ['kv:changed', { key: 'k', value: 'private' }],
+    ['app:stateChanged', other],
+    ['activity:navigated', other],
+    ['ui:command', { id: '1', action: 'x', appId: record.appId }],
+    ['workspaces:changed', { workspaces: [], activeWorkspaceId: 'w' }],
+    ['app:installed', { appId: record.appId }],
+    ['some:future-event', own],
+  ] as Array<[string, unknown]>) {
+    assert.equal(view.allows(type, ev), false, `${type} ${JSON.stringify(ev)}`);
+  }
+});
+
+test('events: no claim means the unfiltered stream, a bad claim is invalid', () => {
+  assert.equal(gatewayEventView(eventRequest(), mgr as never), null);
+  assert.equal(gatewayEventView(eventRequest('forged'), mgr as never), 'invalid');
+});
+
+test('events: the view closes with its instance', () => {
+  const gone = { ...liveInstances };
+  const shrinking = { getInstance: (id: string) => gone[id] };
+  const view = gatewayEventView(eventRequest(eventToken()), shrinking as never) as GatewayEventView;
+  assert.equal(view.live(), true);
+  delete gone[slot.instanceId];
+  assert.equal(view.live(), false);
+  assert.equal(view.allows('theme:changed', {}), false);
+});
+
+test('events route: another namespace never reaches the wire, the shell still gets it', async () => {
+  const key = '__aura_app_manager__';
+  const g = globalThis as Record<string, unknown>;
+  const saved = g[key];
+  g[key] = mgr;
+  const open = async (request: Request) => {
+    const res = await eventsRoute({ url: new URL(request.url), request } as never) as Response;
+    const reader = res.body!.getReader();
+    await reader.read();
+    return reader;
+  };
+  const drain = async (reader: ReadableStreamDefaultReader<Uint8Array>) => {
+    let text = '';
+    const deadline = setTimeout(() => void reader.cancel(), 2000);
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += new TextDecoder().decode(value);
+      if (text.includes('marker-value')) break;
+    }
+    clearTimeout(deadline);
+    await reader.cancel();
+    assert.ok(text.includes('marker-value'), `stream ended early: ${text.slice(0, 120)}`);
+    return text;
+  };
+  try {
+    const app = await open(eventRequest(eventToken()));
+    const desktop = await open(eventRequest());
+    OsEventBus.emit('kv:changed', { namespace: 'app/com.other.app', key: 'k', value: 'other-app-value' });
+    OsEventBus.emit('kv:changed', { namespace: `app/${record.appId}`, key: 'k', value: 'marker-value' });
+    const seenByApp = await drain(app);
+    const seenByShell = await drain(desktop);
+    assert.ok(!seenByApp.includes('other-app-value'));
+    assert.ok(seenByShell.includes('other-app-value'));
+  } finally {
+    g[key] = saved;
+  }
 });
 
 // ── identity ────────────────────────────────────────────────────────────────

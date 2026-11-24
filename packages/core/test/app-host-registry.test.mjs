@@ -619,7 +619,7 @@ test('nexus: a changed source asks first, and confirming restores', async () => 
   assert.equal((await registry.findInstallation(id, 'user')).installationId, owner.installationId);
 });
 
-test('nexus: host conflicts and protected names cannot be bypassed, also by a copy', async () => {
+test('nexus: host conflicts and protected names cannot be bypassed', async () => {
   const w = nexusWorld();
   const hosts = [{ name: 'marklayer' }];
   const first = await w.run({ ref: w.source('a', { id: 'com.example.notes', originId: randomUUID(), hosts }) });
@@ -629,13 +629,6 @@ test('nexus: host conflicts and protected names cannot be bypassed, also by a co
   assert.match(clash.error?.message ?? clash.error?.errors?.join(' ') ?? String(clash.error), /validation|marklayer/i);
   assert.equal(existsSync(join(w.user.appsDir, 'com.other.app')), false);
 
-  const copy = await w.run({
-    ref: w.source('c', { id: 'com.example.notes', originId: randomUUID(), hosts }),
-    identity: { action: 'install-as', appId: 'com.example.notescopy' },
-  });
-  assert.ok(copy.error, 'a copy may not keep the same host');
-  assert.equal(existsSync(join(w.user.appsDir, 'com.example.notescopy')), false);
-
   const reserved = await w.run({ ref: w.source('d', { id: 'com.evil.term', originId: randomUUID(), hosts: [{ name: 'terminal' }] }) });
   assert.ok(reserved.error, 'a system app name is refused');
   assert.equal(existsSync(join(w.user.appsDir, 'com.evil.term')), false);
@@ -643,4 +636,33 @@ test('nexus: host conflicts and protected names cannot be bypassed, also by a co
   const [{ baseName }] = await registry.listForApp('com.example.notes');
   const spoof = await w.run({ ref: w.source('e', { id: 'com.evil.spoof', originId: randomUUID(), hosts: [{ name: baseName }] }) });
   assert.ok(spoof.error, 'an allocated label is refused');
+});
+
+test('nexus: a copy installs without the hosts it may not claim, and keeps its own', async () => {
+  const w = nexusWorld();
+  const hostsOf = (id) => JSON.parse(readFileSync(join(w.user.appsDir, id, 'app.manifest.json'), 'utf8')).hosts ?? [];
+  const id = 'com.example.hosted';
+  const hosts = [{ name: 'hostedapp' }];
+  const originId = randomUUID();
+  const first = await w.run({ ref: w.source('a', { id, originId, hosts }) });
+  assert.ok(first.record, String(first.error));
+
+  const asCopy = await w.run({
+    ref: w.source('b', { id, originId: randomUUID(), hosts: [...hosts, { name: 'hostedextra' }] }),
+    identity: { action: 'install-as', appId: 'com.example.hostedcopy' },
+  });
+  assert.ok(asCopy.record, String(asCopy.error));
+  assert.deepEqual(hostsOf('com.example.hostedcopy').map((h) => h.name), ['hostedextra'], 'only the free name stays');
+  assert.deepEqual(hostsOf(id).map((h) => h.name), ['hostedapp'], 'the original keeps its host');
+
+  const independent = await w.run({
+    ref: w.source('c', { id, originId, hosts: [{ name: 'terminal' }, ...hosts] }),
+    identity: { action: 'install-copy', appId: 'com.example.hostedcopy2' },
+  });
+  assert.ok(independent.record, String(independent.error));
+  assert.deepEqual(hostsOf('com.example.hostedcopy2'), [], 'a protected or taken name is left out');
+
+  const foreign = await w.run({ ref: w.source('d', { id: 'com.other.claimer', originId: randomUUID(), hosts }) });
+  assert.ok(foreign.error, 'a different app claiming a taken host is still refused');
+  assert.equal(existsSync(join(w.user.appsDir, 'com.other.claimer')), false);
 });

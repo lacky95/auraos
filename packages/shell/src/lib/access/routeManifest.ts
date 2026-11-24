@@ -166,7 +166,8 @@ const routes: RouteAccessManifest['routes'] = {
   },
   '/api/os/volumes': { methods: on(['GET', 'POST'], rule(OWNER, 'system', SYSTEM_APP_CALLER)) },
   '/api/os/volumes/[name]': { methods: { DELETE: rule(OWNER, 'system', SYSTEM_APP_CALLER) } },
-  '/api/os/themes': { methods: { GET: rule(OWNER, 'system', SYSTEM_APP_CALLER) } },
+  // The non-secret theme catalogue, read by the SDK's listThemes().
+  '/api/os/themes': { methods: { GET: rule(INSTANCE, 'system') } },
   '/api/os/layouts': { methods: { GET: rule(OWNER, 'system', SYSTEM_APP_CALLER) } },
   '/api/os/keymap': { methods: { GET: rule(OWNER, 'system', SYSTEM_APP_CALLER) } },
   '/api/os/ui/command': {
@@ -268,16 +269,24 @@ const routes: RouteAccessManifest['routes'] = {
   },
   '/api/apps/events': {
     methods: {
-      GET: rule(OWNER, 'system', decide(3,
-        'A firehose that includes kv:changed values from every namespace. SDK subscribers use it from apps, so they need a filtered per-caller view.')),
+      GET: rule(INSTANCE, 'system', decide(3,
+        'App Host callers get a filtered per-caller view (lib/access/gatewayEvents.ts). A non-gateway instance still gets the full stream, with kv:changed values from every namespace, until it moves to that view.')),
     },
   },
 
   '/api/intents/start': {
     methods: {
-      POST: rule(INSTANCE, 'app', decide(5,
-        'An intent can start any app, and OPEN_TERMINAL carries a `command` extra. Apply the D29 caller table to which apps may send it.')),
+      POST: rule(INSTANCE, 'system', decide(5,
+        'An app may send intents, and the `command` extra is held to the Terminal (D29). Still open: an owner grant for a trusted terminal (D24), and `sessionId`, which opens a window on an existing Terminal session.')),
     },
+    variants: [{
+      // Types a line and presses Enter as the owner (5.16). Matched on any
+      // action: the extra is refused however the intent names its target.
+      id: 'terminal-command',
+      methods: ['POST'],
+      match: { on: 'body', field: 'extras.command', readAtGateway: true },
+      rule: rule(INSTANCE, 'app', { systemApp: 'com.aura.terminal' }),
+    }],
   },
 
   '/api/scopes': { methods: { GET: rule(OWNER, 'system', SYSTEM_APP_CALLER) } },

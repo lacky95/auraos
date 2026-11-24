@@ -1,5 +1,6 @@
 import type { APIRoute } from 'astro';
-import { OsEventBus, compileTopicMatcher, parseTopicsParam, createLogger } from '@aura/core';
+import { OsEventBus, compileTopicMatcher, getAppManager, parseTopicsParam, createLogger } from '@aura/core';
+import { gatewayEventView } from '../../../lib/access/gatewayEvents.ts';
 
 const log = createLogger('sse');
 let nextStreamId = 1;
@@ -10,8 +11,17 @@ let nextStreamId = 1;
  * matching events are written to the stream — equivalent to Android
  * `<intent-filter>` registration on a BroadcastReceiver, so consumers stop
  * paying for event types they don't care about.
+ *
+ * An App Host caller gets its own filtered view (lib/access/gatewayEvents.ts).
  */
-export const GET: APIRoute = ({ url }) => {
+export const GET: APIRoute = ({ url, request }) => {
+  const view = gatewayEventView(request, { getInstance: (id) => getAppManager().getInstance(id) });
+  if (view === 'invalid') {
+    return new Response(JSON.stringify({ error: 'gateway-identity-invalid' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+    });
+  }
   const topics = parseTopicsParam(url.searchParams.get('topics'));
   // null → firehose (no filter); [] is technically impossible here because
   // parseTopicsParam collapses empty lists to null. A populated array →
@@ -46,6 +56,7 @@ export const GET: APIRoute = ({ url }) => {
 
       const send = (type: string, ev: unknown) => {
         if (accepts && !accepts(type)) return;
+        if (view && !view.allows(type, ev)) return;
         safeEnqueue(encoder.encode(`data: ${JSON.stringify({ type, ...(ev as object) })}\n\n`));
       };
 
@@ -98,7 +109,15 @@ export const GET: APIRoute = ({ url }) => {
 
       // 10s keeps idle connections from being killed by reverse proxies
       // (Nginx default 60s, Cloudflare 100s) without flooding the wire.
-      const heartbeat = setInterval(() => safeEnqueue(encoder.encode(': hb\n\n')), 10_000);
+      const heartbeat = setInterval(() => {
+        if (view && !view.live()) {
+          closed = true;
+          cleanup();
+          try { controller.close(); } catch { /* already closed */ }
+          return;
+        }
+        safeEnqueue(encoder.encode(': hb\n\n'));
+      }, 10_000);
 
       const cleanup = () => {
         log.info('close', `#${streamId}`, 'dur=', `${Date.now() - t0}ms`);

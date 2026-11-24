@@ -63,6 +63,24 @@ export function handlersOf(manifest: RouteAccessManifest, route: string): string
 export interface VariantFacts {
   query: URLSearchParams;
   namespace: 'os' | 'app' | null;
+  /** The parsed JSON body, for `readAtGateway` variants. Undefined = not read. */
+  body?: unknown;
+}
+
+/**
+ * Whether a parsed body has `field` (and its value, with `equals`). An own
+ * `__proto__` on the path counts as a match: a later merge could turn it into
+ * the inherited field this check looked for.
+ */
+export function bodyFieldMatches(body: unknown, field: string, equals?: string): boolean {
+  let current = body;
+  for (const part of field.split('.')) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return false;
+    if (Object.hasOwn(current, '__proto__')) return true;
+    if (!Object.hasOwn(current, part)) return false;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return equals === undefined || current === equals;
 }
 
 export interface RuleCandidate {
@@ -72,8 +90,8 @@ export interface RuleCandidate {
 
 /**
  * Every rule this request could fall under, in first-match order. A body
- * variant is never read, so it stays a candidate and the walk goes on; a
- * variant that definitely matches ends it.
+ * variant that wasn't read stays a candidate and the walk goes on; a variant
+ * that definitely matches ends it.
  */
 export function candidateRules(
   manifest: RouteAccessManifest, info: RouteHandlers, method: RouteMethod, facts: VariantFacts,
@@ -83,6 +101,11 @@ export function candidateRules(
     if (!variantApplies(v.methods, method, info)) continue;
     const m = v.match;
     if (m.on === 'body') {
+      if (m.readAtGateway && facts.body !== undefined) {
+        if (!bodyFieldMatches(facts.body, m.field, m.equals)) continue;
+        out.push({ variant: v.id, rule: v.rule });
+        return out;
+      }
       out.push({ variant: v.id, rule: v.rule });
       continue;
     }

@@ -5,7 +5,6 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
-// @ts-expect-error plain ESM without types
 import { appHostName, createAppHostRouter } from '../server/app-hosts.mjs';
 
 const listen = (s: http.Server | net.Server) =>

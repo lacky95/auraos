@@ -54,13 +54,28 @@ export interface AccessRule {
   decision?: AccessDecision;
   /** Needs a fresh authentication (5.11). No route sets it yet. */
   freshAuth?: true;
+  /**
+   * The `app` target is this app, and only while its system-scope copy is the
+   * one installed: an app of the same id in another scope doesn't qualify.
+   */
+  systemApp?: string;
 }
 
 /** The part of a request, beyond its method, that selects a variant. */
 export type AccessMatch =
   | { on: 'query'; name: string; equals?: string }
   | { on: 'namespace'; namespace: 'os' | 'app' }
-  | { on: 'body'; field: string; equals?: string };
+  | {
+    on: 'body';
+    /** Dotted path into the JSON body. */
+    field: string;
+    equals?: string;
+    /**
+     * The App Host gateway parses the body and settles this variant. Everywhere
+     * else a body variant stays unread and counts at its strictest.
+     */
+    readAtGateway?: true;
+  };
 
 /** A rule for some requests of a method. First match wins, else the method's rule. */
 export interface AccessVariant {

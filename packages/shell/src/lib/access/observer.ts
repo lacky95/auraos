@@ -175,6 +175,11 @@ function provider(s: RequestSnapshot, mgr: ObserverManager | null) {
 
 export function resourceFor(rule: AccessRule, s: RequestSnapshot, mgr: ObserverManager | null): PolicyResource {
   const r: PolicyResource = { target: rule.target };
+  if (rule.systemApp) {
+    const installed = mgr?.getManifest?.(rule.systemApp) as { scopeId?: string } | undefined;
+    if (installed?.scopeId === 'system') r.appId = rule.systemApp;
+    return r;
+  }
   const { instanceId, activityId, id, name } = s.params;
   if (instanceId) {
     r.instanceId = instanceId;
