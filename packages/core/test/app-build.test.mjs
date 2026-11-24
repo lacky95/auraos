@@ -4,7 +4,7 @@
 //   pnpm --filter @aura/core test
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -207,6 +207,76 @@ test('an install handles a path that changed between file and directory', () => 
   installBuild(dir, { prune: false });
   assert.equal(readFileSync(join(dir, 'dist', 'client', 'thing', 'b.js'), 'utf-8'), 'now a dir');
   assert.equal(readFileSync(join(dir, 'dist', 'client', 'dir'), 'utf-8'), 'now a file');
+});
+
+// ── An install never follows a symlink the app planted ─────────────────────
+
+/** A directory outside the app, standing in for the shell's own files. */
+function outside(files = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'aura-outside-'));
+  roots.push(dir);
+  for (const [rel, content] of Object.entries(files)) {
+    mkdirSync(join(dir, rel, '..'), { recursive: true });
+    writeFileSync(join(dir, rel), content);
+  }
+  return dir;
+}
+const listing = (dir) => readdirSync(dir, { recursive: true }).map(String).sort();
+
+test('a dist/ that is a symlink is refused: nothing is written, read or removed through it', () => {
+  const secret = outside({ 'server/entry.mjs': 'shell file', 'keep.txt': 'shell file' });
+  const dir = app({ 'package.json': '{}' });
+  symlinkSync(secret, join(dir, 'dist'));
+  const before = listing(secret);
+  assert.throws(() => prepareBuildStaging(dir), /symlink/);
+  assert.throws(() => installBuild(dir, { prune: true }), /symlink/);
+  assert.throws(() => writeBuildStamp(dir, 'x'), /symlink/);
+  assert.throws(() => discardBuildStaging(dir), /symlink/);
+  assert.deepEqual(listing(secret), before);
+  assert.equal(readFileSync(join(secret, 'keep.txt'), 'utf-8'), 'shell file');
+});
+
+test('a staging tree that points elsewhere is never read into dist/', () => {
+  const secret = outside({ 'server/entry.mjs': 'SECRET', 'credentials.json': 'SECRET' });
+  const dir = builtApp({ 'server/entry.mjs': 'old' });
+  symlinkSync(secret, join(dir, 'dist', BUILD_STAGING_DIR));
+  assert.throws(() => installBuild(dir, { prune: true }), /symlink/);
+  assert.equal(readFileSync(join(dir, 'dist', 'server', 'entry.mjs'), 'utf-8'), 'old');
+  assert.ok(!existsSync(join(dir, 'dist', 'credentials.json')));
+  // A symlinked file inside the build lands as a symlink, never as the file's bytes.
+  const dir2 = builtApp({ 'server/entry.mjs': 'old' });
+  stage(dir2, { 'server/entry.mjs': 'new' });
+  symlinkSync(join(secret, 'credentials.json'), join(dir2, 'dist', BUILD_STAGING_DIR, 'leak.json'));
+  installBuild(dir2, { prune: false });
+  assert.ok(lstatSync(join(dir2, 'dist', 'leak.json')).isSymbolicLink());
+});
+
+test('symlinked directories in dist/ are replaced or removed as links, never written or pruned through', () => {
+  const victim = outside({ 'chunks/x.mjs': 'shell file', 'old.js': 'shell file' });
+  const dir = builtApp({ 'server/entry.mjs': 'old' });
+  symlinkSync(victim, join(dir, 'dist', 'client'));
+  mkdirSync(join(dir, 'dist', 'server', 'chunks'), { recursive: true });
+  rmSync(join(dir, 'dist', 'server', 'chunks'), { recursive: true });
+  symlinkSync(join(victim, 'chunks'), join(dir, 'dist', 'server', 'chunks'));
+  stage(dir, { 'server/entry.mjs': 'new', 'server/chunks/page.mjs': 'new' });
+  const before = listing(victim);
+  assert.throws(() => installBuild(dir, { prune: true }), /symlink/);
+  assert.deepEqual(listing(victim), before, 'the build did not land in the link target');
+  // With the planted links gone the install goes through, and a prune never follows one.
+  rmSync(join(dir, 'dist', 'server', 'chunks'));
+  installBuild(dir, { prune: true });
+  assert.equal(readFileSync(join(dir, 'dist', 'server', 'chunks', 'page.mjs'), 'utf-8'), 'new');
+  assert.ok(!existsSync(join(dir, 'dist', 'client')), 'the stale link itself was pruned');
+  assert.deepEqual(listing(victim), before);
+});
+
+test('the stamp replaces a planted symlink instead of writing through it', () => {
+  const victim = outside({ 'target.txt': 'shell file' });
+  const dir = builtApp({ 'server/entry.mjs': 'x' });
+  symlinkSync(join(victim, 'target.txt'), join(dir, 'dist', '.aura-build'));
+  writeBuildStamp(dir, 'fp');
+  assert.equal(readFileSync(join(victim, 'target.txt'), 'utf-8'), 'shell file');
+  assert.equal(readBuildStamp(dir), 'fp');
 });
 
 test('the logged failure reason names the error and carries no credentials', () => {

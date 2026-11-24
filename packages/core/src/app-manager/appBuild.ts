@@ -21,8 +21,11 @@
  * chunks it was started with.
  */
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import {
+  closeSync, constants as fsc, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync,
+  readSync, realpathSync, renameSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeSync,
+} from 'node:fs';
+import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 
 export const BUILD_STAMP_FILE = '.aura-build';
@@ -213,33 +216,168 @@ export function readBuildStamp(appDir: string): string | null {
   try { return readFileSync(join(appDir, 'dist', BUILD_STAMP_FILE), 'utf-8').trim() || null; } catch { return null; }
 }
 
+// ── The app's tree, written without following its symlinks ─────────────────
+//
+// `appDir` is the app's own: a running instance can write to it while the
+// shell installs a build, and can swap any directory for a symlink between a
+// check and a write. So below `appDir` nothing is reached by path. Each
+// directory is opened without following a symlink and held by its fd, and
+// every read and write goes through `/proc/self/fd/<fd>/<name>`, which stays
+// on that directory whatever happens to the path (Linux, where the shell runs).
+
+const DIR_FLAGS = fsc.O_RDONLY | fsc.O_DIRECTORY | fsc.O_NOFOLLOW;
+
+/** A directory held by fd. `at(name)` is a path to one entry in it. */
+class PinnedDir {
+  private constructor(private readonly fd: number) {}
+
+  /** `appDir` itself: the shell chose it, so it may be reached by path. */
+  static root(path: string): PinnedDir {
+    return new PinnedDir(openSync(path, fsc.O_RDONLY | fsc.O_DIRECTORY));
+  }
+
+  at(name: string): string {
+    if (!name || name === '.' || name === '..' || name.includes('/') || name.includes('\0')) {
+      throw new Error(`invalid build path entry: ${JSON.stringify(name)}`);
+    }
+    return `/proc/self/fd/${this.fd}/${name}`;
+  }
+
+  /**
+   * The subdirectory `name`. A symlink there is refused. With `create`, a
+   * missing one is made and a file in its place replaced (an older build had
+   * a file where this one has a directory).
+   */
+  child(name: string, create = false): PinnedDir {
+    const path = this.at(name);
+    try {
+      return new PinnedDir(openSync(path, DIR_FLAGS));
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      // Linux answers a symlink with ELOOP, or ENOTDIR when O_DIRECTORY is checked first.
+      if (code === 'ELOOP' || (code === 'ENOTDIR' && lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink())) {
+        throw new Error(`refusing a symlink in the build path: ${name}`);
+      }
+      if (!create || (code !== 'ENOENT' && code !== 'ENOTDIR')) throw err;
+    }
+    if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error(`refusing a symlink in the build path: ${name}`);
+    this.remove(name);
+    mkdirSync(path);
+    return new PinnedDir(openSync(path, DIR_FLAGS));
+  }
+
+  /** The subdirectory at `parts` (at least one) below this one; each level passed is closed. */
+  descend(parts: readonly string[], create = false): PinnedDir {
+    if (parts.length === 0) throw new Error('descend needs a path');
+    let dir: PinnedDir = this;
+    for (const part of parts) {
+      const next = dir.child(part, create);
+      if (dir !== this) dir.close();
+      dir = next;
+    }
+    return dir;
+  }
+
+  entries() {
+    return readdirSync(`/proc/self/fd/${this.fd}`, { withFileTypes: true });
+  }
+
+  /** Remove `name` (a file, a symlink itself, or a whole directory). Gone already is fine. */
+  remove(name: string): void {
+    const path = this.at(name);
+    try {
+      unlinkSync(path);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return;
+      if (code !== 'EISDIR' && code !== 'EPERM') throw err;
+    }
+    const dir = this.child(name);
+    try {
+      for (const e of dir.entries()) dir.remove(e.name);
+    } finally { dir.close(); }
+    rmdirSync(path);
+  }
+
+  /** Copy the entry `name` here to `dest`'s new entry `as`: a file's bytes, or a symlink as a symlink. */
+  copyTo(name: string, dest: PinnedDir, as: string): void {
+    const src = this.at(name);
+    let fd: number;
+    try {
+      fd = openSync(src, fsc.O_RDONLY | fsc.O_NOFOLLOW);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ELOOP') throw err;
+      symlinkSync(readlinkSync(src), dest.at(as));
+      return;
+    }
+    try {
+      if (!fstatSync(fd).isFile()) throw new Error(`not a file in the build: ${name}`);
+      const out = openSync(dest.at(as), fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o644);
+      try {
+        const buf = Buffer.allocUnsafe(64 * 1024);
+        for (let n; (n = readSync(fd, buf, 0, buf.length, null)) > 0;) writeSync(out, buf, 0, n);
+      } finally { closeSync(out); }
+    } finally { closeSync(fd); }
+  }
+
+  /** Write a small file (replacing a file or symlink there). */
+  writeFile(name: string, content: string): void {
+    this.remove(name);
+    const fd = openSync(this.at(name), fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o644);
+    try { writeSync(fd, content); } finally { closeSync(fd); }
+  }
+
+  /** Whether `name` is a directory here (not following a symlink). */
+  isDir(name: string): boolean {
+    return lstatSync(this.at(name), { throwIfNoEntry: false })?.isDirectory() ?? false;
+  }
+
+  close(): void {
+    try { closeSync(this.fd); } catch { /* already closed */ }
+  }
+}
+
+/** `run(dist)` on the app's `dist/`, pinned; every fd is closed after. */
+function withDist<T>(appDir: string, run: (dist: PinnedDir) => T): T {
+  const root = PinnedDir.root(appDir);
+  try {
+    const dist = root.child('dist', true);
+    try { return run(dist); } finally { dist.close(); }
+  } finally { root.close(); }
+}
+
 export function writeBuildStamp(appDir: string, fingerprint: string): void {
-  writeFileSync(join(appDir, 'dist', BUILD_STAMP_FILE), `${fingerprint}\n`);
+  withDist(appDir, (dist) => dist.writeFile(BUILD_STAMP_FILE, `${fingerprint}\n`));
 }
 
 /** An empty staging directory for the next build (a crashed build may have left one). */
 export function prepareBuildStaging(appDir: string): string {
-  const next = join(appDir, 'dist', BUILD_STAGING_DIR);
-  rmSync(next, { recursive: true, force: true });
-  mkdirSync(next, { recursive: true });
-  return next;
+  withDist(appDir, (dist) => {
+    dist.remove(BUILD_STAGING_DIR);
+    dist.child(BUILD_STAGING_DIR, true).close();
+  });
+  return join(appDir, 'dist', BUILD_STAGING_DIR);
 }
 
 export function discardBuildStaging(appDir: string): void {
-  rmSync(join(appDir, 'dist', BUILD_STAGING_DIR), { recursive: true, force: true });
+  withDist(appDir, (dist) => dist.remove(BUILD_STAGING_DIR));
 }
 
-function listBuildFiles(root: string): string[] {
+/** Every non-directory below `dir`, as `a/b/c` paths. A symlink is listed, never followed. */
+function listBuildFiles(dir: PinnedDir, skipTop: string | null = null): string[] {
   const out: string[] = [];
-  const walk = (rel: string) => {
-    for (const e of readdirSync(join(root, rel), { withFileTypes: true })) {
+  const walk = (d: PinnedDir, rel: string) => {
+    for (const e of d.entries()) {
       const r = rel ? `${rel}/${e.name}` : e.name;
-      if (r === BUILD_STAGING_DIR) continue;
-      if (e.isDirectory()) walk(r);
-      else out.push(r);
+      if (r === skipTop) continue;
+      if (e.isDirectory()) {
+        const sub = d.child(e.name);
+        try { walk(sub, r); } finally { sub.close(); }
+      } else out.push(r);
     }
   };
-  walk('');
+  walk(dir, '');
   return out;
 }
 
@@ -249,17 +387,18 @@ function installRank(rel: string): number {
   return rel.startsWith('server/pages/') || /^server\/[^/]+\.mjs$/.test(rel) ? 1 : 0;
 }
 
-/** Make `dist/<rel>` placeable when an old build had a file where this one has a directory, or the reverse. */
-function clearPathConflicts(dist: string, rel: string): void {
-  const parts = rel.split('/');
-  for (let i = 1; i < parts.length; i++) {
-    const parent = join(dist, ...parts.slice(0, i));
-    try { if (!lstatSync(parent).isDirectory()) rmSync(parent, { force: true }); } catch { break; }
+/** Remove the directories below `dir` that are empty, deepest first. */
+function dropEmptyDirs(dir: PinnedDir, skipTop: string | null): void {
+  for (const e of dir.entries()) {
+    if (!e.isDirectory() || e.name === skipTop) continue;
+    const sub = dir.child(e.name);
+    let empty: boolean;
+    try {
+      dropEmptyDirs(sub, null);
+      empty = sub.entries().length === 0;
+    } finally { sub.close(); }
+    if (empty) rmdirSync(dir.at(e.name));
   }
-  mkdirSync(dirname(join(dist, rel)), { recursive: true });
-  try {
-    if (lstatSync(join(dist, rel)).isDirectory()) rmSync(join(dist, rel), { recursive: true, force: true });
-  } catch { /* nothing there */ }
 }
 
 /**
@@ -270,34 +409,45 @@ function clearPathConflicts(dist: string, rel: string): void {
  * file lands by rename. With `prune` (nothing runs from this dist) files of
  * older builds are removed afterwards. The stamp goes first and the caller
  * writes the new one last, so an interrupted install reads as "changed" → dev.
+ * Every step goes through pinned directories (see PinnedDir): a symlink the
+ * app planted anywhere in `dist/` or the staging tree is refused, never followed.
  */
 export function installBuild(appDir: string, opts: { prune: boolean }): void {
-  const dist = join(appDir, 'dist');
-  const next = join(dist, BUILD_STAGING_DIR);
-  const files = listBuildFiles(next);
-  if (!files.includes('server/entry.mjs')) throw new Error('the build produced no server/entry.mjs');
-  rmSync(join(dist, BUILD_STAMP_FILE), { force: true });
-  for (const rel of [...files].sort((a, b) => installRank(a) - installRank(b))) {
-    clearPathConflicts(dist, rel);
-    const tmp = `${join(dist, rel)}.aura-tmp`;
-    rmSync(tmp, { force: true });
-    cpSync(join(next, rel), tmp, { verbatimSymlinks: true });
-    renameSync(tmp, join(dist, rel));
-  }
-  if (opts.prune) {
-    const keep = new Set(files);
-    for (const rel of listBuildFiles(dist)) if (!keep.has(rel)) rmSync(join(dist, rel), { force: true });
-    const dropEmpty = (rel: string) => {
-      for (const e of readdirSync(join(dist, rel), { withFileTypes: true })) {
-        const r = rel ? `${rel}/${e.name}` : e.name;
-        if (!e.isDirectory() || r === BUILD_STAGING_DIR) continue;
-        dropEmpty(r);
-        if (!readdirSync(join(dist, r)).length) rmSync(join(dist, r), { recursive: true, force: true });
+  withDist(appDir, (dist) => {
+    const next = dist.child(BUILD_STAGING_DIR);
+    try {
+      const files = listBuildFiles(next);
+      if (!files.includes('server/entry.mjs')) throw new Error('the build produced no server/entry.mjs');
+      dist.remove(BUILD_STAMP_FILE);
+      for (const rel of [...files].sort((a, b) => installRank(a) - installRank(b))) {
+        const parts = rel.split('/');
+        const name = parts.pop()!;
+        const from = parts.length ? next.descend(parts) : null;
+        const to = parts.length ? dist.descend(parts, true) : null;
+        try {
+          const src = from ?? next;
+          const dst = to ?? dist;
+          const tmp = `${name}.aura-tmp`;
+          dst.remove(tmp);
+          src.copyTo(name, dst, tmp);
+          if (dst.isDir(name)) dst.remove(name);
+          renameSync(dst.at(tmp), dst.at(name));
+        } finally { from?.close(); to?.close(); }
       }
-    };
-    dropEmpty('');
-  }
-  rmSync(next, { recursive: true, force: true });
+      if (opts.prune) {
+        const keep = new Set(files);
+        for (const rel of listBuildFiles(dist, BUILD_STAGING_DIR)) {
+          if (keep.has(rel)) continue;
+          const parts = rel.split('/');
+          const name = parts.pop()!;
+          const dir = parts.length ? dist.descend(parts) : null;
+          try { (dir ?? dist).remove(name); } finally { dir?.close(); }
+        }
+        dropEmptyDirs(dist, BUILD_STAGING_DIR);
+      }
+    } finally { next.close(); }
+    dist.remove(BUILD_STAGING_DIR);
+  });
 }
 
 const SECRET_ASSIGNMENT = /([\w.-]*(?:pass(?:word|wd|phrase)?|secret|token|api[_-]?key|credential|cookie|authorization)[\w.-]*["']?\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi;
