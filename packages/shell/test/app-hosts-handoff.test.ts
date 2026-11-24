@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
-import { classifyHost, createAppHostRouter } from '../server/app-hosts.mjs';
+import { activityHeaders, classifyHost, createAppHostRouter } from '../server/app-hosts.mjs';
 import { createAppHostAuth, safeReturnPath } from '../server/app-host-auth.mjs';
 import { POST as handoffRoute } from '../src/pages/api/app-hosts/handoff.ts';
 
@@ -663,4 +663,12 @@ test('the handoff route refuses a slot whose label was retired', async () => {
     world.registry['resolveLabel'] = async () => ({ status: 'retired', tombstone: {} });
     assert.equal((await callRoute({ origin: SHELL }, routeBody())).status, 410);
   });
+});
+
+test('an App Host forwards only an Activity of the routed instance', () => {
+  const own = encodeURIComponent('io.acme.notes-2#a1');
+  assert.deepEqual(activityHeaders(`/?_aura_activity=${own}`, 'io.acme.notes-2'), { 'x-aura-activity-id': 'io.acme.notes-2#a1' });
+  assert.deepEqual(activityHeaders(`/?_aura_activity=${own}`, 'io.acme.notes'), {});
+  assert.deepEqual(activityHeaders('/?_aura_activity=other%23a1', 'io.acme.notes-2'), {});
+  assert.deepEqual(activityHeaders('/page', 'io.acme.notes-2'), {});
 });

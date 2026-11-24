@@ -19,3 +19,4 @@ export interface AppHostRouter {
   resolve(name: string): Promise<any>;
 }
 export function createAppHostRouter(opts: AppHostRouterOptions): AppHostRouter;
+export function activityHeaders(url: string | undefined, instanceId: string): Record<string, string>;

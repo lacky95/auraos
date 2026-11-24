@@ -166,6 +166,13 @@ function browserRequestAllowed(req, edge, path) {
 
 // ── the router ──────────────────────────────────────────────────────────────
 
+/** The Activity a request names, kept only when it belongs to `instanceId`. */
+export function activityHeaders(url, instanceId) {
+  let id = null;
+  try { id = new URL(url ?? '/', 'http://app.invalid').searchParams.get('_aura_activity'); } catch { /* no activity */ }
+  return id?.startsWith(`${instanceId}#`) ? { 'x-aura-activity-id': id } : {};
+}
+
 /**
  * @param {{
  *   appsList: (opts?: { fresh?: boolean }) => Promise<any[]>,
@@ -493,7 +500,7 @@ export function createAppHostRouter({
     if (t.notReady) return page(503, `${t.appName} is not ready`, 'No running instance holds this address. Open the app again from the AuraOS desktop.');
     if (t.starting) return page(503, `Starting ${t.appName}…`, 'This page reloads by itself when it is up.', { refresh: 2 });
     const headers = appRequestHeaders(req, 'app-hosts-http');
-    for (const [k, v] of Object.entries({ ...forwardedHeaders(req, edge), ...identityHeaders(t) })) headers.push(k, v);
+    for (const [k, v] of Object.entries({ ...forwardedHeaders(req, edge), ...identityHeaders(t), ...activityHeaders(req.url, t.instanceId) })) headers.push(k, v);
     const ancestors = frameAncestors(route, edge, session, url);
     pipeHttp(route.label, t, req, res, headers, (raw) => appResponseHeaders(raw, ancestors));
   }
@@ -527,7 +534,7 @@ export function createAppHostRouter({
     } catch { return fail(503, 'Service Unavailable'); }
     if (t.missing) return fail(404, 'Not Found');
     if (t.starting || t.notReady) return fail(503, 'Service Unavailable');
-    const extra = { ...forwardedHeaders(req, edge), ...identityHeaders(t) };
+    const extra = { ...forwardedHeaders(req, edge), ...identityHeaders(t), ...activityHeaders(req.url, t.instanceId) };
     const raw = appRequestHeaders(req, 'app-hosts-upgrade', { keepUpgrade: true });
     const lines = [`${req.method} ${url} HTTP/${req.httpVersion}`];
     for (let i = 0; i + 1 < raw.length; i += 2) lines.push(`${raw[i]}: ${raw[i + 1]}`);
