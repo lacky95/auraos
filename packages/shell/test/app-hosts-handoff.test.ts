@@ -357,7 +357,7 @@ test('the Terminal answers its own origin only, while a navigation may still arr
   const cookie = String(signedIn.headers['set-cookie']![0]).split(';')[0]!;
   const sibling = `http://notes1234--${BASE}`;
   // A sibling page's fetch, with this host's cookie: refused, reads too.
-  for (const h of [
+  for (const h of <Array<Record<string, string>>>[
     { 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'cors', origin: sibling },
     { 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'no-cors' },
     { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', origin: 'http://evil.example' },

@@ -345,7 +345,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     import { createConnection } from '../connection';
     import { pickNextSession } from '../next-session';
     import { parseEmbed } from '../embed';
-    import { appHostRuntime, bodylessMutationHeaders, osUrl } from '@aura/app-sdk/os-auth';
+    import { appHostRuntime, bodylessMutationHeaders, osUrl } from '@aura/app-sdk';
 
     // Embed mode (embed.ts): hosted inside another app's iframe. No chrome of
     // our own, the session we were given, and `aura.terminal.*` messages to the
@@ -812,7 +812,8 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // Our App Host serves its API to our own page only (5.16). Over plain HTTP
     // nothing else tells the OS a GET is ours, so every backend call says so.
     const OWN_HEADERS = onAppHost ? { 'x-aura-same-origin': '1' } : {};
-    const asOwn = (init = {}) => ({ ...init, headers: { ...OWN_HEADERS, ...(init.headers || {}) } });
+    const asOwn = (init: RequestInit = {}): RequestInit =>
+      ({ ...init, headers: { ...OWN_HEADERS, ...(init.headers as Record<string, string> | undefined) } });
     /** `/api/sessions…` of `targetInstanceId`: its own proxy path, or (App Host) ours, which forwards. */
     function sessionsApi(targetInstanceId, query = '') {
       if (proxied || !onAppHost) return `/api/proxy/${encodeURIComponent(targetInstanceId)}/api/sessions${query ? `?${query}` : ''}`;
