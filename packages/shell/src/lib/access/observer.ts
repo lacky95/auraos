@@ -56,7 +56,7 @@ export interface ObserverManager {
   };
   getInstance(id: string): { appId: string; instanceId: string } | undefined;
   getInstancesByApp(appId: string): ReadonlyArray<{ appId: string; instanceId: string }>;
-  getActivity?(id: string): { appId?: string; instanceId?: string } | undefined;
+  getActivity?(id: string): { appId?: string; parentInstanceId?: string; instanceId?: string } | undefined;
   getManifest?(id: string): unknown;
   registry?: { getById(id: string): unknown };
   providers?: {
@@ -191,7 +191,9 @@ export function resourceFor(rule: AccessRule, s: RequestSnapshot, mgr: ObserverM
     let decoded = activityId;
     try { decoded = decodeURIComponent(activityId); } catch { /* keep as written */ }
     const a = mgr?.getActivity?.(decoded);
-    if (a?.instanceId) r.instanceId = a.instanceId;
+    // An AppActivity names its instance `parentInstanceId`.
+    const owner = a?.parentInstanceId ?? a?.instanceId;
+    if (owner) r.instanceId = owner;
     if (a?.appId) r.appId = a.appId;
   }
   if (id) {

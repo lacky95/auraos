@@ -125,6 +125,19 @@ test('the route manifest decides: own data yes, another app or an owner route no
   }
 });
 
+test('an app reaches its own Activity routes, never another instance\'s', async () => {
+  const activities: Record<string, { appId: string; parentInstanceId: string }> = {
+    'com.acme.notes-1#a1': { appId: 'com.acme.notes', parentInstanceId: 'com.acme.notes-1' },
+    'com.other.app-1#a1': { appId: 'com.other.app', parentInstanceId: 'com.other.app-1' },
+  };
+  const withActivities = { ...mgr, getActivity: (id: string) => activities[id] } as unknown as ObserverManager;
+  const state = (id: string, method = 'PUT') => enforceGateway(apiCtx(method, `/api/activities/${encodeURIComponent(id)}/state`,
+    '/api/activities/[activityId]/state', { activityId: encodeURIComponent(id) }), { mgr: withActivities, decide });
+  assert.equal(await state('com.acme.notes-1#a1'), null);
+  assert.equal((await state('com.other.app-1#a1'))?.status, 403);
+  assert.equal((await state('com.acme.notes-1#a9'))?.status, 403, 'an unknown activity');
+});
+
 test('a body-selected variant counts at its strictest', async () => {
   const strict = createDecide({
     authorizer: { authorize: async (_p, a) => ({ allow: a !== 'sidecars.tools', reason: 'test' }) },
