@@ -54,7 +54,11 @@ export const POST: APIRoute = async ({ request }) => {
       scheme: desktop.scheme, desktopHost: desktop.host,
       identity: { sid: claim.sid, userId: claim.userId, sessionExpiresAt: null },
     });
-    if ('error' in issued) return jsonResponse({ error: issued.error }, issued.status);
+    if ('error' in issued) {
+      // The session's instance is gone (restarted or stopped), and the session with it.
+      const message = issued.status === 404 ? 'That Terminal session has ended.' : undefined;
+      return jsonResponse({ error: issued.error, ...(message ? { message } : {}) }, issued.status);
+    }
     const url = new URL(AURA_RESERVED_PATHS.handoff, issued.origin);
     url.searchParams.set('code', issued.code);
     url.searchParams.set('next', returnPath);
