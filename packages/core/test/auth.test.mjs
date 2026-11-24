@@ -17,7 +17,7 @@ import { KvServer, KvClient, createRedis } from '@aura/kv-store';
 import {
   Authorizer, GrantStore, ApiKeyStore, AdminAuth, AdminAudit,
   SYSTEM_PRINCIPAL, ADMIN_AUDIT_LABEL, PRIVILEGED_PERMISSIONS, GrantError, ApiKeyError,
-  adminAttribution, rotateAdminCredential, readAdminCredential, API_KEY_PATTERN,
+  adminAttribution, rotateAdminCredential, readAdminCredential, API_KEY_PATTERN, terminalSessionScope,
 } from '../dist/auth/index.js';
 import { NotificationService, NotificationError } from '../dist/notifications/index.js';
 import { ENFORCED_PERMISSIONS } from '../dist/permissions/PermissionManager.js';
@@ -37,6 +37,8 @@ const apps = new Map([
   ['com.example.other', { permissions: ['system.notifications'], scope: 'user' }],
   // Phase 6 rename: a manifest that still requests the deprecated name.
   ['com.example.legacy', { permissions: ['system.notifications', 'notifications.desktopModal'], scope: 'user' }],
+  // D25: an app that requests the owner's Terminal grants.
+  ['com.example.embedder', { permissions: ['terminal.embed', 'terminal.sessions.list'], scope: 'user' }],
 ]);
 const inst = (appId, n = 1) => ({ kind: 'instance', appId, instanceId: `${appId}-${n}`, verification: 'verified' });
 const ANON = { kind: 'anonymous', verification: 'unverified' };
@@ -473,4 +475,50 @@ test('rename: stored desktopModal grants migrate to systemModal (subject, scope,
   assert.ok(PRIVILEGED_PERMISSIONS.includes('notifications.systemModal') && !PRIVILEGED_PERMISSIONS.includes('notifications.desktopModal'));
   assert.ok(ENFORCED_PERMISSIONS.includes('notifications.systemModal') && ENFORCED_PERMISSIONS.includes('notifications.desktopModal'));
   await grants.revoke(subject, 'notifications.systemModal');
+});
+
+test('terminal.embed and terminal.sessions.list: requested AND owner-granted, per app, revocable', async () => {
+  const BY = adminAttribution(ADMIN);
+  const app = { kind: 'app', id: 'com.example.embedder' };
+  for (const perm of ['terminal.embed', 'terminal.sessions.list']) {
+    assert.ok(PRIVILEGED_PERMISSIONS.includes(perm) && ENFORCED_PERMISSIONS.includes(perm), perm);
+    assert.equal((await authz.authorize(inst('com.example.embedder'), perm)).allow, false, `${perm} before the grant`);
+    assert.equal((await authz.authorize(inst('com.example.basic'), perm)).allow, false, `${perm} not requested`);
+  }
+  await grants.grant(app, 'terminal.embed', { by: BY, appScope: 'user' });
+  assert.equal((await authz.authorize(inst('com.example.embedder'), 'terminal.embed')).allow, true);
+  assert.equal((await authz.authorize(inst('com.example.embedder'), 'terminal.sessions.list')).allow, false, 'listing is separate');
+  // A grant to an app that does not request it does nothing.
+  await grants.grant({ kind: 'app', id: 'com.example.basic' }, 'terminal.embed', { by: BY, appScope: 'user' });
+  assert.equal((await authz.authorize(inst('com.example.basic'), 'terminal.embed')).allow, false);
+  await grants.revoke({ kind: 'app', id: 'com.example.basic' }, 'terminal.embed');
+  await grants.revoke(app, 'terminal.embed');
+  assert.equal((await authz.authorize(inst('com.example.embedder'), 'terminal.embed')).allow, false);
+});
+
+test('a Terminal session grant is its own record, and revoking the app grant drops it', async () => {
+  const BY = adminAttribution(ADMIN);
+  const app = { kind: 'app', id: 'com.example.embedder' };
+  const s1 = terminalSessionScope('com.aura.terminal-2#a3');
+  const s2 = terminalSessionScope('com.aura.terminal-2#a4');
+  await grants.grant(app, 'terminal.embed', { by: BY, appScope: 'user' });
+  await grants.grant(app, 'terminal.embed', { by: { kind: 'system' }, appScope: 'user', scope: s1 });
+  assert.ok(await grants.get(app, 'terminal.embed', s1));
+  assert.equal(await grants.get(app, 'terminal.embed', s2), null, 'another session');
+  // The OS-wide grant and a session grant are separate fields.
+  assert.ok(await grants.get(app, 'terminal.embed'));
+  // Only terminal.embed can be scoped to a session, only for an app, only to a session id.
+  const refused400 = (p) => assert.rejects(p, (err) => err instanceof GrantError && err.status === 400);
+  await refused400(grants.grant(app, 'notifications.locked', { by: BY, scope: s1 }));
+  await refused400(grants.grant({ kind: 'apiKey', id: 'k1' }, 'terminal.embed', { by: BY, scope: s1 }));
+  await refused400(grants.grant(app, 'terminal.embed', { by: BY, scope: terminalSessionScope('no-session') }));
+  await refused400(grants.grant(app, 'terminal.embed', { by: BY, scope: { kind: 'user', id: 'x' } }));
+  // Revoking one session leaves the app grant; revoking the app grant leaves nothing.
+  await grants.grant(app, 'terminal.embed', { by: { kind: 'system' }, appScope: 'user', scope: s2 });
+  await grants.revoke(app, 'terminal.embed', s2);
+  assert.equal(await grants.get(app, 'terminal.embed', s2), null);
+  assert.ok(await grants.get(app, 'terminal.embed'));
+  await grants.revoke(app, 'terminal.embed');
+  assert.equal(await grants.get(app, 'terminal.embed', s1), null, 'the session grant went with the app grant');
+  assert.deepEqual(await grants.listFor(app), []);
 });

@@ -43,8 +43,10 @@ export function notifPermission(name: string): string {
     process.stderr.write(`warning: '${name}' is deprecated — use 'systemModal' (notifications.systemModal)\n`);
     return old;
   }
+  // The owner's Terminal grants (D25) go by their full name.
+  if (name === 'terminal.embed' || name === 'terminal.sessions.list') return name;
   const p = FEATURES[name];
-  if (!p) fail(`unknown notification permission '${name}' — use locked | popup | read | systemModal`);
+  if (!p) fail(`unknown notification permission '${name}' — use locked | popup | read | systemModal, or terminal.embed | terminal.sessions.list`);
   return p!;
 }
 

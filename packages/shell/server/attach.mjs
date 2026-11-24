@@ -13,6 +13,9 @@
 import { attachSseMux, MUX_PATH } from './sse-mux.mjs';
 import { createAppHostRouter } from './app-hosts.mjs';
 import { loadAppHostServices } from './app-host-auth.mjs';
+import { terminalEmbedAncestors } from './terminal-embed.mjs';
+import { buildAppHost } from '@aura/core/host-rules';
+import { originOf } from './host-policy.mjs';
 import { countSurfaceEvent, internalServiceHeaders, reportSurface, surfaceIdentity } from './access-bridge.mjs';
 import { stripShellCredentials } from './shell-credentials.mjs';
 
@@ -473,6 +476,14 @@ export function attachAppHosts(httpServer) {
   appHostRouter ??= createAppHostRouter({
     appsList: appsListCached,
     services: loadAppHostServices,
+    // A Terminal session shows inside the app the owner granted it to (5.16).
+    embedAncestors: (ctx) => terminalEmbedAncestors({
+      ...ctx,
+      buildOrigin: (scheme, label, base) => {
+        const host = buildAppHost(label, base);
+        return host ? originOf(scheme, host) : null;
+      },
+    }),
     log: (...args) => { if (nsEnabled(APPHOST_NS, process.env.AURA_LOG ?? '')) console.log(`[${APPHOST_NS}]`, ...args); },
   });
   appHostRouter.attach(httpServer);

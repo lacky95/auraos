@@ -302,6 +302,84 @@ test('embedding adds granted origins only on an embed document', async () => {
   assert.equal(r.headers['content-security-policy'], `frame-ancestors 'self' http://${BASE} http://terminalx1--desk.example`);
 });
 
+test('the embed grant is asked for asynchronously, with the route and edge', async () => {
+  const good = await signIn();
+  const router2 = createAppHostRouter({
+    appsList: async () => apps, shellPort: String(shellPort), services: async () => svc, auth, env,
+    embedAncestors: async (ctx: any) => {
+      assert.equal(ctx.base, BASE);
+      assert.equal(ctx.edge.origin, ORIGIN);
+      assert.equal(ctx.registry, registry);
+      return ['http://terminalx1--desk.example'];
+    },
+  });
+  const front2 = http.createServer((_req, res) => res.end('desktop'));
+  router2.attach(front2);
+  const port2 = await listen(front2);
+  try {
+    const r = await new Promise<Reply>((resolve, reject) => {
+      const req = http.request({ port: port2, path: '/?embed=1', agent: false, headers: { host: HOST, cookie: good } }, (res) => {
+        res.resume(); res.on('end', () => resolve({ status: res.statusCode ?? 0, body: '', headers: res.headers }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    assert.equal(r.headers['content-security-policy'], `frame-ancestors 'self' http://${BASE} http://terminalx1--desk.example`);
+  } finally { front2.close(); }
+});
+
+test('an embedded page\'s socket needs the embed grant its frame needed', async () => {
+  const good = await signIn();
+  const path = '/ws?_aura_session=s&embed=1&session=s&_aura_embedder=terminalx1';
+  assert.match(await upgrade(HOST, path, { Cookie: good, Origin: ORIGIN }), /^HTTP\/1\.1 403/);
+  assert.equal(seen.length, 0);
+  embedOrigins = ['http://terminalx1--desk.example'];
+  assert.match(await upgrade(HOST, path, { Cookie: good, Origin: ORIGIN }), /^HTTP\/1\.1 101/);
+  // The window's own socket needs no embed grant.
+  embedOrigins = [];
+  assert.match(await upgrade(HOST, '/ws?_aura_session=s', { Cookie: good, Origin: ORIGIN }), /^HTTP\/1\.1 101/);
+});
+
+test('the Terminal answers its own origin only, while a navigation may still arrive', async () => {
+  const TERM = 'term1234';
+  const termHost = `${TERM}--${BASE}`;
+  const termOrigin = `http://${termHost}`;
+  const termRecord = { ...record([slotOf(1, TERM, 'com.aura.terminal-1')]), appId: 'com.aura.terminal', baseName: TERM };
+  labels[TERM] = { status: 'active', record: termRecord, slot: slotOf(1, TERM, 'com.aura.terminal-1') };
+  frameRoutes['com.aura.terminal'] = 'host';
+  apps.push({ manifest: { id: 'com.aura.terminal', name: 'Terminal', componentType: 'activity', hosts: [] }, instances: [live('com.aura.terminal-1')] });
+  const code = auth.issueCode({
+    aud: termOrigin, label: TERM, installationId: INSTALL, appId: 'com.aura.terminal', slot: 1,
+    userId: 'default', sid: 'sess-1', returnPath: '/',
+  } as never).code;
+  const signedIn = await get(termHost, `/_aura/handoff?code=${code}`);
+  assert.equal(signedIn.status, 303);
+  const cookie = String(signedIn.headers['set-cookie']![0]).split(';')[0]!;
+  const sibling = `http://notes1234--${BASE}`;
+  // A sibling page's fetch, with this host's cookie: refused, reads too.
+  for (const h of [
+    { 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'cors', origin: sibling },
+    { 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'no-cors' },
+    { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', origin: 'http://evil.example' },
+  ]) {
+    assert.equal((await get(termHost, '/api/sessions', { cookie, ...h })).status, 403, JSON.stringify(h));
+  }
+  assert.equal((await get(termHost, '/api/sessions?id=x', { cookie, 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'navigate' }, 'DELETE')).status, 403);
+  assert.equal(seen.length, 0);
+  // Its own page, and a frame the Shell or an embedder navigates.
+  assert.equal((await get(termHost, '/api/sessions', { cookie, 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors' })).status, 200);
+  assert.equal((await get(termHost, '/api/sessions?id=x', { cookie, origin: termOrigin, 'sec-fetch-site': 'same-origin' }, 'DELETE')).status, 200);
+  const nav = await get(termHost, '/?embed=1', { cookie, 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'iframe' });
+  assert.equal(nav.status, 200);
+  assert.equal(nav.headers['content-security-policy'], `frame-ancestors 'self' http://${BASE}`);
+  // The PTY socket: exact Origin only.
+  assert.match(await upgrade(termHost, '/ws', { Cookie: cookie, Origin: sibling }), /^HTTP\/1\.1 403/);
+  assert.match(await upgrade(termHost, '/ws', { Cookie: cookie, Origin: termOrigin }), /^HTTP\/1\.1 101/);
+  // Another app keeps its cross-origin reads.
+  const good = await signIn();
+  assert.equal((await get(HOST, '/', { cookie: good, 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'no-cors' })).status, 200);
+});
+
 test('with no embed grant, an embed document is framed by the shell only', async () => {
   const good = await signIn();
   const r = await get(HOST, '/?embed=1', { cookie: good });

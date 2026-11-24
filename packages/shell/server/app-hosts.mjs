@@ -68,6 +68,14 @@ const AURA_BEARER = /(?:^|,)\s*Bearer\s+(?:aura-(?:sess1|admin1)\.|aura1\.|aura_
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const EXACT_ORIGIN_RE = /^https?:\/\/[a-z0-9.-]+(?::\d{1,5})?$/;
 
+/**
+ * Apps whose App Host answers its own pages only (5.16 safeguard 3): the
+ * Terminal's HTTP session control and PTY socket are the owner's shell, and a
+ * same-site sibling page can send this host's cookie. A navigation may still
+ * arrive from the Shell or an embedder; `frame-ancestors` decides where it shows.
+ */
+const OWN_ORIGIN_ONLY_APPS = new Set(['com.aura.terminal']);
+
 const isLive = (i) => i.port != null && (i.state === 'resumed' || i.state === 'started');
 
 // PHASE2-CUTOVER: `frameRoute: host` routes by slot assignment and never to a pool member.
@@ -155,8 +163,14 @@ function appResponseHeaders(rawHeaders, frameAncestors) {
  * with this app's cookie. A same-origin EventSource or GET sends no Origin, so
  * there Sec-Fetch-Site decides.
  */
-function browserRequestAllowed(req, edge, path) {
+function browserRequestAllowed(req, edge, path, ownOriginOnly = false) {
   const origin = req.headers.origin;
+  if (ownOriginOnly) {
+    if (origin !== undefined && origin !== edge.origin) return false;
+    const site = req.headers['sec-fetch-site'];
+    if (site === undefined || site === 'same-origin' || site === 'none') return true;
+    return req.headers['sec-fetch-mode'] === 'navigate' && SAFE_METHODS.has(req.method);
+  }
   const stream = String(req.headers.accept ?? '').includes('text/event-stream') || path.startsWith('/socket.io/');
   if (SAFE_METHODS.has(req.method) && !stream) return true;
   if (origin !== undefined) return origin === edge.origin;
@@ -180,14 +194,14 @@ export function activityHeaders(url, instanceId) {
  *   log?: (...a: any[]) => void,
  *   services?: () => Promise<any>,
  *   auth?: any,
- *   embedAncestors?: (ctx: { record: any, slot: any, session: any, url: string }) => string[],
+ *   embedAncestors?: (ctx: { record: any, slot: any, session: any, url: string, edge: any, base: string, registry: any }) => string[] | Promise<string[]>,
  *   env?: Record<string, string | undefined>,
  * }} deps
  *   `appsList` = the shell's /api/apps (manifest + instances per app).
  *   `services` = the App Host registry and session check; null keeps every
  *   request on the `proxy` path.
  *   `embedAncestors` = extra exact origins allowed to frame an `embed=1`
- *   document (5.16). Empty until the embed grant exists, so nothing can embed.
+ *   document (5.16): the Terminal's granted embedder (terminal-embed.mjs).
  */
 export function createAppHostRouter({
   appsList, shellPort = process.env.SHELL_PORT ?? '3000', log = () => {},
@@ -444,13 +458,20 @@ export function createAppHostRouter({
     return { starting: true, appName };
   }
 
-  function frameAncestors(route, edge, session, url) {
+  async function frameAncestors(route, edge, session, url) {
     // 'self': an app may frame its own pages (Steel's Live view embeds its ui/).
     // Every ancestor must match, so the chain still has to start at the shell.
     const ancestors = ["'self'", originOf(edge.scheme, route.base)];
     if (session && new URL(url, 'http://h').searchParams.get('embed') === '1') {
-      const extra = embedAncestors({ record: route.record, slot: route.slot, session, url });
-      for (const o of extra) if (EXACT_ORIGIN_RE.test(o) && !ancestors.includes(o)) ancestors.push(o);
+      let extra = [];
+      try {
+        extra = await embedAncestors({
+          record: route.record, slot: route.slot, session, url, edge, base: route.base, registry: route.svc.registry,
+        });
+      } catch { extra = []; }
+      for (const o of Array.isArray(extra) ? extra : []) {
+        if (EXACT_ORIGIN_RE.test(o) && !ancestors.includes(o)) ancestors.push(o);
+      }
     }
     return ancestors;
   }
@@ -510,7 +531,9 @@ export function createAppHostRouter({
 
     const session = await appSession(route, req, edge);
     if (!session) return page(401, 'Open this app from AuraOS', 'This address needs a sign-in from the AuraOS desktop.');
-    if (!browserRequestAllowed(req, edge, path)) return page(403, 'Request refused', 'This request came from another origin.');
+    if (!browserRequestAllowed(req, edge, path, OWN_ORIGIN_ONLY_APPS.has(route.record.appId))) {
+      return page(403, 'Request refused', 'This request came from another origin.');
+    }
 
     if (isAuraReservedPath(url)) {
       if (path === AURA_RESERVED_PATHS.runtime) return serveAppRuntime(req, res, { record: route.record, slot: route.slot });
@@ -524,7 +547,7 @@ export function createAppHostRouter({
     if (t.starting) return page(503, `Starting ${t.appName}…`, 'This page reloads by itself when it is up.', { refresh: 2 });
     const headers = appRequestHeaders(req, 'app-hosts-http');
     for (const [k, v] of Object.entries({ ...forwardedHeaders(req, edge), ...identityHeaders(t), ...activityHeaders(req.url, t.instanceId), [APP_HOST_ROUTE_HEADER]: 'host' })) headers.push(k, v);
-    const ancestors = frameAncestors(route, edge, session, url);
+    const ancestors = await frameAncestors(route, edge, session, url);
     pipeHttp(route.label, t, req, res, headers, (raw) => appResponseHeaders(raw, ancestors));
   }
 
@@ -552,6 +575,12 @@ export function createAppHostRouter({
       if (mux) {
         reportUpgrade(0);   // the gateway answers the handshake
         return await handleAppGatewayUpgrade(req, socket, head, { record: route.record, slot: route.slot, session });
+      }
+      // An embedded page's socket (5.16) needs the embed grant its frame needed,
+      // so revoking the grant also ends every reconnect.
+      if (new URL(url, 'http://h').searchParams.get('embed') === '1') {
+        const ancestors = await frameAncestors(route, edge, session, url);
+        if (ancestors.length <= 2) return fail(403, 'Forbidden');
       }
       t = await slotTarget(route);
     } catch { return fail(503, 'Service Unavailable'); }

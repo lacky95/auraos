@@ -89,11 +89,11 @@ function hostSession({ record, slot, session }) {
   return session;
 }
 
-function buildClaim({ record, slot }, { method, path, origin, userId, owner = null }) {
+function buildClaim({ record, slot }, { method, path, origin, userId, sid = null, owner = null }) {
   const iat = Math.floor(Date.now() / 1000);
   return {
     v: 1, appId: record.appId, installationId: record.installationId, instanceId: slot.instanceId,
-    label: slot.label, slot: slot.slot, origin, userId, ...(owner ? { owner } : {}),
+    label: slot.label, slot: slot.slot, origin, userId, ...(sid ? { sid } : {}), ...(owner ? { owner } : {}),
     method, path, iat, exp: iat + GATEWAY_CLAIM_TTL_S,
   };
 }
@@ -197,7 +197,7 @@ export async function handleAppGateway(req, res, ctx) {
   const path = gatewayShellPath(req.url);
   if (!path) return refuse(res, 404, 'not-a-gateway-path');
   const owner = await ownerActing(ctx, session);
-  const claim = buildClaim(ctx, { method: req.method, path, origin: session.aud, userId: session.userId, owner });
+  const claim = buildClaim(ctx, { method: req.method, path, origin: session.aud, userId: session.userId, sid: session.sid, owner });
   return pipeToShell(req, res, path, shellHeaders(req.headers, claim));
 }
 

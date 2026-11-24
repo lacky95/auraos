@@ -30,9 +30,18 @@
  * Consuming the mark is the app's job and must happen exactly once: it says
  * "this page load was the launch", so a later reload of the same window must
  * not silently steal the session back from wherever the user moved it.
+ *
+ * An App Host frame is on its own origin and can't read this tab's storage, so
+ * there the Shell consumes the mark itself when it resolves the frame
+ * (lib/appFrame.ts) and adds `_aura_launched=1` to the page's first URL. The
+ * app removes the parameter once read (history.replaceState), which keeps a
+ * reload from claiming again.
+ * PHASE2-CUTOVER: the sessionStorage contract goes with proxy frames; the parameter stays.
  */
 
 export const LAUNCHED_HERE_KEY = 'aura.launchedHere';
+/** On an App Host frame's first URL: this browser launched the window. */
+export const LAUNCHED_HERE_PARAM = '_aura_launched';
 
 /** A mark stops meaning anything after this long — a window nobody mounted. */
 const MAX_AGE_MS = 5 * 60_000;
@@ -60,4 +69,19 @@ export function markLaunchedHere(viewId: string): void {
     map[viewId] = now;
     sessionStorage.setItem(LAUNCHED_HERE_KEY, JSON.stringify(map));
   } catch { /* storage unavailable — first-come ownership, as before */ }
+}
+
+/** Consume this browser's mark for `viewId`: true once, when it launched that window. */
+export function takeLaunchMark(viewId: string): boolean {
+  if (!viewId) return false;
+  try {
+    const raw = sessionStorage.getItem(LAUNCHED_HERE_KEY);
+    const map: unknown = raw ? JSON.parse(raw) : null;
+    if (!map || typeof map !== 'object' || Array.isArray(map)) return false;
+    const at = (map as Record<string, unknown>)[viewId];
+    if (typeof at !== 'number') return false;
+    delete (map as Record<string, unknown>)[viewId];
+    sessionStorage.setItem(LAUNCHED_HERE_KEY, JSON.stringify(map));
+    return Date.now() - at <= MAX_AGE_MS;
+  } catch { return false; }
 }

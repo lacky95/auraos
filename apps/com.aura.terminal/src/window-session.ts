@@ -89,3 +89,23 @@ export function forgetSessionPicks(sessionId: string): void {
   for (const w of windows) delete map[w];
   write(map);
 }
+
+/**
+ * A session handed over from a window on ANOTHER instance that is about to
+ * move here (the picker's cross-instance switch). Proxied pages pass it through
+ * localStorage; App Host pages have one origin per instance, so the old page
+ * leaves it with this container instead (PUT /api/sessions?pending=, through
+ * its own backend). One-shot: the next page this container renders takes it.
+ */
+const PENDING_TTL_MS = 60_000;
+function pendingSlot(): { sessionId: string; at: number } | null {
+  return (globalThis as { __auraTermPending?: { sessionId: string; at: number } | null }).__auraTermPending ?? null;
+}
+export function leavePendingSession(sessionId: string): void {
+  (globalThis as { __auraTermPending?: { sessionId: string; at: number } | null }).__auraTermPending = { sessionId, at: Date.now() };
+}
+export function takePendingSession(): string | null {
+  const p = pendingSlot();
+  (globalThis as { __auraTermPending?: unknown }).__auraTermPending = null;
+  return p && Date.now() - p.at <= PENDING_TTL_MS ? p.sessionId : null;
+}

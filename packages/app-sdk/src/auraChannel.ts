@@ -57,8 +57,10 @@ const NATIVE_TO_APP = [route('native-host', 'shell'), route('shell', 'app')] as 
 /** Every message type and its allowed routes. */
 export const AURA_CHANNEL_MESSAGES = {
   // Keys and keymap
-  'aura.key': TO_SHELL,
-  'aura.key.claim': TO_APP,
+  // An embedded App Host's runtime reports OS shortcuts to the verified shell
+  // itself, the same as an app window, so its embedder relays nothing (D29).
+  'aura.key': [route('app', 'shell'), route('embedded-app', 'shell')],
+  'aura.key.claim': [route('shell', 'app'), route('shell', 'embedded-app')],
   // No embed-host route: a parent app must not inject keys (D29). The shell
   // posts directly to the focused frame; a relay only reaches the app's own subframes.
   'aura.key.synthetic': [route('shell', 'app'), route('shell', 'app-subframe'), route('shell', 'embedded-app'), route('shell', 'shell'), route('app', 'app-subframe')],

@@ -1,11 +1,9 @@
 import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
-import { buildAppHost } from '@aura/core/host-rules';
+import { issueAppHostHandoff } from '../../../lib/appHostHandoff.ts';
 import { currentOwnerSession, loginEnabled } from '../../../lib/authSurface.js';
-import {
-  appHostAuth, LOGIN_DARK_SID, loadAppHostServices, safeReturnPath,
-} from '../../../../server/app-host-auth.mjs';
-import { classifyHost, edgeView, originOf } from '../../../../server/host-policy.mjs';
+import { LOGIN_DARK_SID, loadAppHostServices, safeReturnPath } from '../../../../server/app-host-auth.mjs';
+import { classifyHost, edgeView } from '../../../../server/host-policy.mjs';
 
 const MAX_BODY_BYTES = 4 * 1024;
 const HEADERS = {
@@ -81,44 +79,17 @@ export const POST: APIRoute = async (ctx) => {
     const mgr = core.getAppManager();
     const manifest = mgr.getManifest(appId);
     if (!manifest || manifest.componentType === 'service') return json({ error: 'not-found' }, 404);
-    if (await services.frameRoute(appId) !== 'host') return json({ error: 'not-host-routed' }, 409);
 
     // The body only names a window. Each id is checked against what is running.
-    const instance = mgr.getInstance(instanceId);
-    if (!instance || instance.appId !== appId || instance.inPool) return json({ error: 'not-found' }, 404);
     if (activityId !== null) {
       const activity = mgr.getActivity(activityId);
       if (!activity || activity.appId !== appId || activity.parentInstanceId !== instanceId) return json({ error: 'not-found' }, 404);
     }
-
-    const heldSlots = async () => (await services.registry.listForApp(appId))
-      .filter((r) => r.state === 'active')
-      .flatMap((r) => r.slots.filter((s) => s.instanceId === instanceId));
-    let held = await heldSlots();
-    // PHASE2-CUTOVER: only an instance started before its app moved to `host` lacks a slot.
-    if (held.length === 0) {
-      await mgr.claimHostSlot(appId, instanceId);
-      held = await heldSlots();
-    }
-    if (held.length !== 1) return json({ error: 'slot-not-assigned' }, 409);
-    const label = held[0]!.label;
-    const resolved = await services.registry.resolveLabel(label);
-    if (resolved.status === 'retired') return json({ error: 'retired' }, 410);
-    if (resolved.status !== 'active' || resolved.record.appId !== appId || resolved.slot.instanceId !== instanceId) {
-      return json({ error: 'slot-not-assigned' }, 409);
-    }
-    const { record, slot } = resolved;
-    const host = buildAppHost(label, edge.host);
-    if (!host) return json({ error: 'no-app-hosts' }, 409);
-
-    const scopeUser = record.instanceScope.kind === 'user' ? record.instanceScope.userId : 'default';
-    const origin = originOf(edge.scheme, host);
-    const { code } = appHostAuth().issueCode({
-      aud: origin, label, installationId: record.installationId, appId, slot: slot.slot,
-      userId: identity.userId ?? scopeUser, sid: identity.sid, returnPath,
-      sessionExpiresAt: identity.sessionExpiresAt,
+    const issued = await issueAppHostHandoff({
+      services, mgr, appId, instanceId, returnPath, scheme: edge.scheme, desktopHost: edge.host, identity,
     });
-    return json({ code, origin, slot: slot.slot });
+    if ('error' in issued) return json({ error: issued.error }, issued.status);
+    return json(issued);
   } catch (err) {
     console.warn(`[app-hosts] handoff failed: ${(err as Error)?.name ?? 'error'}`);
     return json({ error: 'unavailable' }, 503);

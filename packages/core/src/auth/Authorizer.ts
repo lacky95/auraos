@@ -142,7 +142,8 @@ export class Authorizer {
           if (!has) return deny(`${appId} does not request '${action}' in app.manifest.json permissions[]`);
           const subject: GrantSubject = { kind: 'app', id: appId };
           const g = await this.deps.grants.get(subject, action);
-          if (!g) return deny(`'${action}' is requested by ${appId} but not granted — an admin must grant it (aura grant notif-perms ${appId} ${action.split('.')[1]})`);
+          const short = action.startsWith('notifications.') ? action.split('.')[1] : action;
+          if (!g) return deny(`'${action}' is requested by ${appId} but not granted — an admin must grant it (aura grant notif-perms ${appId} ${short})`);
           const scope = this.deps.appScope(appId);
           if (g.appScope && scope && g.appScope !== scope) {
             return deny(`'${action}' was granted to ${appId} in scope '${g.appScope}', but the app now resolves to scope '${scope}' — grant it again`);

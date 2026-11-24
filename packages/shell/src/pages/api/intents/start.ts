@@ -1,6 +1,8 @@
 import type { APIRoute } from 'astro';
 import { getAppManager, IntentError } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
+import { verifiedAppCaller } from '../../../lib/terminalCaller.ts';
+import { grantSession, isSystemTerminal, openTerminalRefusal } from '../../../../server/terminal-embed.mjs';
 
 interface IntentBody {
   action?:   unknown;
@@ -31,6 +33,11 @@ interface IntentBody {
  *   { kind: 'noHandler' }                                 — 404 (or explicit appId not installed)
  * A malformed intent (unknown flag, bad instanceId, …) answers 4xx
  * `{ kind: 'error', code, error, hint? }`.
+ *
+ * OPEN_TERMINAL from an app (D29, 5.16): `command` is the System Terminal's
+ * own, `background` needs the owner's `terminal.embed` grant, and `sessionId`
+ * a session the app was granted (403 `terminal-not-granted`). A session an app
+ * creates with `background` is granted to it here.
  */
 export const POST: APIRoute = async ({ request }) => {
   const body = await request.json().catch(() => null) as IntentBody | null;
@@ -53,10 +60,21 @@ export const POST: APIRoute = async ({ request }) => {
   if (body.flags !== undefined && !Array.isArray(body.flags)) {
     return errorResponse('`flags` must be an array of strings', 400);
   }
+  const caller = verifiedAppCaller(request, getAppManager());
+  if (caller === 'invalid') return errorResponse('The caller identity did not verify', 401);
+  const refusal = await openTerminalRefusal(intent, caller);
+  if (refusal) return jsonResponse({ kind: 'error', code: 'terminal-not-granted', error: refusal }, 403);
   try {
     const result = await getAppManager().startIntent(intent);
     if (result.kind === 'noHandler') return errorResponse('No app handles this intent', 404);
     if (result.kind === 'rejected') return jsonResponse({ ...result, error: result.message }, result.status);
+    const created = (result as { result?: Record<string, unknown> }).result?.['sessionId'];
+    if (caller && intent.extras?.['background'] === true && typeof created === 'string' && !(await isSystemTerminal(caller.appId))) {
+      // Without it the app can't show the session it asked for; the session itself is fine.
+      await grantSession(caller.appId, created).catch((err: unknown) => {
+        console.warn(`[intents] could not grant ${created} to ${caller.appId}: ${(err as Error).message}`);
+      });
+    }
     return jsonResponse(result);
   } catch (err) {
     if (err instanceof IntentError) {

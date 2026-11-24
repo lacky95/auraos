@@ -313,7 +313,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     clearAppFrame, frameAppId, isHostFrame, isHostFrameReady, postToFrame, proxyFrameUrl,
     reloadHostFrame, setAppFrameUrl,
   } from '../lib/appFrame.ts';
-  import { onAuraChannel, replyTo, senderAppId, setNativeRuntimeCheck } from '../lib/auraChannelShell.ts';
+  import { isHostNestedSender, onAuraChannel, replyTo, senderAppId, setNativeRuntimeCheck } from '../lib/auraChannelShell.ts';
 
   const layoutLog = createLogger('shell:layout');
   const iframeLog = createLogger('shell:iframe');
@@ -350,6 +350,13 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
       if (res.actionId && res.actionId.startsWith('app.') && !res.fired) {
         replyTo(ev, { type: 'aura.action.fire', actionId: res.actionId, combo: d.combo });
       }
+      return;
+    }
+
+    // An App Host nested in a window (the Terminal inside TerminalX) reports
+    // OS shortcuts to the shell itself, so it needs the window's claim list.
+    if (d.type === 'aura.keyboard.hello' && isHostNestedSender(ev.sender)) {
+      replyTo(ev, { type: 'aura.key.claim', combos: keyDispatcher.getClaimListForApp(senderAppId(ev.sender, null)) });
       return;
     }
 

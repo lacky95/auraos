@@ -20,6 +20,7 @@ import {
   parseAppHost,
   supportsAppHosts,
 } from '@aura/core/host-rules';
+import { LAUNCHED_HERE_PARAM, takeLaunchMark } from './launchOrigin.ts';
 
 export type FrameRoute = 'proxy' | 'host';
 
@@ -169,7 +170,11 @@ export async function resolveAppFrame(target: AppFrameTarget, deps: ResolveAppFr
   if (!appHostsAvailable(new URL(shellOrigin).host)) throw new AppFrameBlockedError();
 
   const logical = proxyFrameUrl(target);
-  const returnPath = logical.slice(`/api/proxy/${target.instanceId}`.length);
+  let returnPath = logical.slice(`/api/proxy/${target.instanceId}`.length);
+  // "This browser launched the window" (lib/launchOrigin.ts), read once by the page.
+  if (takeLaunchMark(target.activityId ?? target.instanceId)) {
+    returnPath += `${returnPath.includes('?') ? '&' : '?'}${LAUNCHED_HERE_PARAM}=1`;
+  }
   const res = await (deps.fetch ?? fetch)(HANDOFF_ROUTE, {
     method: 'POST',
     credentials: 'same-origin',

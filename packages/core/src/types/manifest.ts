@@ -45,6 +45,17 @@ export const BUILTIN_PERMISSIONS = [
   'notifications.systemModal',
   /** Deprecated (phase 6 rename): the old name of `notifications.systemModal`; still accepted. */
   'notifications.desktopModal',
+  /**
+   * Embed the owner's System Terminal (D25, 5.16): create Terminal sessions
+   * (OPEN_TERMINAL `background`), show the ones it created in its own iframe
+   * (`/api/terminal/embed`) and close them. Privileged: takes effect only once
+   * the owner grants it (`aura grant notif-perms <app> terminal.embed`), and
+   * revoking it ends every session grant at once. Never typing or running a
+   * command (the OPEN_TERMINAL `command` extra stays the Terminal's own).
+   */
+  'terminal.embed',
+  /** List the metadata of every Terminal session (`/api/terminal/sessions`). Privileged like `terminal.embed`. */
+  'terminal.sessions.list',
   'system.clipboard',
   'system.overlay',
   'system.theme.broadcast',

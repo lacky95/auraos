@@ -1,8 +1,14 @@
 ---
 import manifest from '../../app.manifest.json';
-import { pickedSession } from '../window-session';
+import { pickedSession, takePendingSession } from '../window-session';
 import { hasLaunchCommand } from '../launch-commands';
 const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
+// Our backend identity, from the OS (proxy and App Host both send it). On an
+// App Host the page URL no longer names the instance.
+const instanceIdHeader = Astro.request.headers.get('x-aura-instance-id') ?? '';
+// A session a window on another instance handed over before moving here
+// (App Host pages only; proxied ones use localStorage). Not for an embed.
+const handedSession = Astro.url.searchParams.get('embed') === '1' ? '' : (takePendingSession() ?? '');
 // The session this window last picked, if that shell still exists — so a
 // reload of the OS UI reopens it instead of the window's default session.
 const windowSession = pickedSession(Astro.request.headers.get('x-aura-activity-id')) ?? '';
@@ -221,7 +227,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     <div data-ph-detail style="font-size:0.8rem;letter-spacing:.04em;color:var(--aura-color-text);">This window is not attached to a shell.</div>
     <div data-ph-hint style="font-size:0.7rem;color:var(--aura-color-text-dim);">Pick one from the <span style="color:var(--aura-color-primary);">session menu</span> in the bar, or start a new one.</div>
   </div>
-  <div id="terminal" data-app-id={appId} data-max-instances={String(maxInstances)} data-window-session={windowSession} data-launch-pending={launchPending ? '1' : ''}></div>
+  <div id="terminal" data-app-id={appId} data-instance-id={instanceIdHeader} data-handed-session={handedSession} data-max-instances={String(maxInstances)} data-window-session={windowSession} data-launch-pending={launchPending ? '1' : ''}></div>
 
   <!-- Shown INSTEAD of the terminal while another browser view holds this
        session (driven by the server's control frames — see the ws.onmessage
@@ -339,11 +345,14 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     import { createConnection } from '../connection';
     import { pickNextSession } from '../next-session';
     import { parseEmbed } from '../embed';
+    import { appHostRuntime, bodylessMutationHeaders, osUrl } from '@aura/app-sdk/os-auth';
 
     // Embed mode (embed.ts): hosted inside another app's iframe. No chrome of
     // our own, the session we were given, and `aura.terminal.*` messages to the
     // host instead of the OS window messages.
     const EMBED = parseEmbed(location.search);
+    // The App Host label of the app embedding us, as the OS put it on our URL (5.16).
+    const embedder = EMBED.embed ? new URLSearchParams(location.search).get('_aura_embedder') : null;
     if (EMBED.embed) document.body.classList.add('embed');
     function postToHost(msg) {
       if (!EMBED.embed || !window.parent || window.parent === window) return;
@@ -789,10 +798,25 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // backend container — they then fight over a single PTY session
     // every 2 s.
     //
-    // The iframe path is `/api/proxy/<instanceId>/...`, so the first
-    // segment after `/api/proxy/` is our backend identity.
+    // Proxied, the iframe path is `/api/proxy/<instanceId>/...`, so the first
+    // segment after `/api/proxy/` is our backend identity. On our own App Host
+    // (one origin per instance) the server renders it, and the page reaches
+    // its backend at `/` and the shell through the gateway (osUrl).
     const pathParts  = location.pathname.split('/').filter(Boolean);
-    const instanceId = pathParts[0] === 'api' && pathParts[1] === 'proxy' && pathParts[2] ? pathParts[2] : appId;
+    const proxied    = pathParts[0] === 'api' && pathParts[1] === 'proxy' && !!pathParts[2];
+    const onAppHost  = !proxied && appHostRuntime() !== null;
+    const instanceId = proxied ? pathParts[2]
+      : (document.getElementById('terminal')?.dataset.instanceId || appHostRuntime()?.instanceId || appId);
+    // PHASE2-CUTOVER: only the App Host form stays, where our backend is '' and another instance goes through it.
+    const ownBase = proxied ? `/api/proxy/${encodeURIComponent(instanceId)}` : '';
+    /** `/api/sessions…` of `targetInstanceId`: its own proxy path, or (App Host) ours, which forwards. */
+    function sessionsApi(targetInstanceId, query = '') {
+      if (proxied || !onAppHost) return `/api/proxy/${encodeURIComponent(targetInstanceId)}/api/sessions${query ? `?${query}` : ''}`;
+      const q = new URLSearchParams(query);
+      if (targetInstanceId !== instanceId) q.set('instance', targetInstanceId);
+      const qs = q.toString();
+      return `/api/sessions${qs ? `?${qs}` : ''}`;
+    }
     // The OS activity id — this WINDOW's handle. Not the session: a session is
     // a shell, and any window may take one over (that is what the "in use
     // elsewhere" screen is for), so the two are deliberately separate.
@@ -828,7 +852,8 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     }
     // An embedded page shows exactly the session its host asked for, and
     // claims it: the host's choice is explicit, like a picker switch.
-    const pendingSession = EMBED.embed ? EMBED.session : takePendingSession();
+    const pendingSession = EMBED.embed ? EMBED.session
+      : (takePendingSession() ?? (document.getElementById('terminal')?.dataset.handedSession || null));
 
     // The pick survives a reload through this container, not the browser: the
     // page is server-rendered with the session this window last chose (see
@@ -838,7 +863,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     function recordWindowSession(sessionId) {
       if (EMBED.embed) return;   // not an OS window of ours — the host keeps its own picks
       const q = `window=${encodeURIComponent(activityId)}` + (sessionId ? `&session=${encodeURIComponent(sessionId)}` : '');
-      fetch(`/api/proxy/${encodeURIComponent(instanceId)}/api/sessions?${q}`, { method: 'PUT' })
+      fetch(sessionsApi(instanceId, q), { method: 'PUT' })
         .then((r) => { if (!r.ok) console.warn('[terminal] could not record the session pick →', r.status); })
         .catch((err) => console.warn('[terminal] could not record the session pick →', err));
     }
@@ -856,8 +881,11 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // panel. It's on the URL (not a first message) so the decision is made at
     // attach time — no window where we'd render before knowing.
     function wsUrlFor(sessionId, claim) {
-      return `${wsProto}//${location.host}/api/proxy/${instanceId}/ws`
+      return `${wsProto}//${location.host}${ownBase}/ws`
         + `?_aura_session=${encodeURIComponent(sessionId)}`
+        // Embedded on an App Host, the socket names its embedder like the page
+        // did, so the OS rechecks the embed grant on every (re)connect.
+        + (EMBED.embed && embedder ? `&embed=1&session=${encodeURIComponent(sessionId)}&_aura_embedder=${encodeURIComponent(embedder)}` : '')
         + `&_aura_browser=${encodeURIComponent(browserId)}`
         + (claim ? '&_aura_claim=1' : '');
     }
@@ -877,6 +905,16 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     const LAUNCHED_HERE_KEY = 'aura.launchedHere';
     const launchedHere = (() => {
       if (EMBED.embed) return false;   // the host's session already claims
+      // App Host: the shell consumed its mark and put it on our first URL
+      // (shell lib/launchOrigin.ts). Drop it, so a reload doesn't claim again.
+      if (onAppHost) {
+        const params = new URLSearchParams(location.search);
+        if (params.get('_aura_launched') !== '1') return false;
+        params.delete('_aura_launched');
+        const qs = params.toString();
+        try { history.replaceState(history.state, '', `${location.pathname}${qs ? `?${qs}` : ''}${location.hash}`); } catch { /* keep it */ }
+        return true;
+      }
       try {
         const raw = sessionStorage.getItem(LAUNCHED_HERE_KEY);
         if (!raw) return false;
@@ -905,7 +943,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
           fire: async () => {
             let r;
             try {
-              r = await fetch(`/api/proxy/${encodeURIComponent(instanceId)}/api/sessions/launch?window=${encodeURIComponent(activityId)}`,
+              r = await fetch(`${ownBase}/api/sessions/launch?window=${encodeURIComponent(activityId)}`,
                 { method: 'POST', cache: 'no-store' });
             } catch { return 'retry'; }                          // network blip — try again while live
             if (r.ok) return 'done';
@@ -1816,7 +1854,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     function saveActivityState() {
       if (!currentSessionId || activityId === instanceId || savedSessionState === currentSessionId) return;
       const sid = currentSessionId;
-      fetch('/api/activities/' + encodeURIComponent(activityId) + '/state', {
+      fetch(osUrl(`/api/activities/${encodeURIComponent(activityId)}/state`), {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ state: { sessionId: sid } }),
       }).then((r) => { if (r.ok) savedSessionState = sid; }).catch(() => { /* OS without the route */ });
@@ -1875,7 +1913,8 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
      */
     function requestRebind(targetInstanceId) {
       if (targetInstanceId === instanceId) return;
-      const selfNavigate = () => location.assign(`/api/proxy/${encodeURIComponent(targetInstanceId)}/`);
+      // PHASE2-CUTOVER: an App Host page can't load another instance's origin; only the shell moves it.
+      const selfNavigate = () => { if (!onAppHost) location.assign(`/api/proxy/${encodeURIComponent(targetInstanceId)}/`); };
       if (EMBED.embed) return;   // the host owns which instance it embeds
       if (!window.parent || window.parent === window) { selfNavigate(); return; }
       window.parent.postMessage({ type: 'aura.window.rebind', instanceId: targetInstanceId }, '*');
@@ -1896,12 +1935,19 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
      */
     function goToSession(targetInstanceId, sessionId) {
       if (targetInstanceId === instanceId) { switchSession(sessionId); return; }
+      if (onAppHost) {
+        // Its page is on another origin: leave the session with that container.
+        fetch(sessionsApi(targetInstanceId, `pending=${encodeURIComponent(sessionId)}`), { method: 'PUT' })
+          .catch(() => { /* the move still happens, on the default session */ })
+          .finally(() => requestRebind(targetInstanceId));
+        return;
+      }
       stashPendingSession(targetInstanceId, sessionId);
       requestRebind(targetInstanceId);
     }
 
     async function fetchInstances() {
-      const res = await fetch(`/api/apps/${encodeURIComponent(appId)}/instances`, { cache: 'no-store' });
+      const res = await fetch(osUrl(`/api/apps/${encodeURIComponent(appId)}/instances`), { cache: 'no-store' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = await res.json();
       const all = Array.isArray(body) ? body : [];
@@ -1942,14 +1988,14 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     const reservedByInstance = new Map();
 
     async function sessionsFor(targetInstanceId) {
-      const own = await fetch(`/api/proxy/${encodeURIComponent(targetInstanceId)}/api/sessions`, { cache: 'no-store' })
+      const own = await fetch(sessionsApi(targetInstanceId), { cache: 'no-store' })
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null);
       reservedByInstance.set(targetInstanceId, Array.isArray(own?.reserved) ? own.reserved : []);
       const items = Array.isArray(own?.sessions)
         ? [...own.sessions]
         : await (async () => {
-            const acts = await fetch(`/api/instances/${encodeURIComponent(targetInstanceId)}/activities`, { cache: 'no-store' })
+            const acts = await fetch(osUrl(`/api/instances/${encodeURIComponent(targetInstanceId)}/activities`), { cache: 'no-store' })
               .then((r) => (r.ok ? r.json() : []))
               .catch(() => []);
             return (Array.isArray(acts) ? acts : []).map((a) => ({
@@ -2034,7 +2080,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       // read a body and worked fine. An abort is meant to bound that, but the
       // safe move in a host that has already shown it can stall a read is not
       // to depend on the read at all.
-      const acts = await fetch(`/api/instances/${encodeURIComponent(targetInstanceId)}/activities`, { cache: 'no-store' })
+      const acts = await fetch(osUrl(`/api/instances/${encodeURIComponent(targetInstanceId)}/activities`), { cache: 'no-store' })
         .then((r) => (r.ok ? r.json() : []))
         .catch(() => []);
       const taken = new Set([
@@ -2288,8 +2334,8 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         setDetached(true);
       }
       forgetSession(targetInstanceId, sessionId);
-      fetch(`/api/proxy/${encodeURIComponent(targetInstanceId)}/api/sessions?id=${encodeURIComponent(sessionId)}`,
-        { method: 'DELETE' })
+      fetch(sessionsApi(targetInstanceId, `id=${encodeURIComponent(sessionId)}`),
+        { method: 'DELETE', headers: bodylessMutationHeaders() })
         .then((r) => { if (!r.ok) console.debug('[terminal] session kill unavailable →', r.status); })
         .catch(() => { /* older instance, or offline — the detach already happened */ });
     }
@@ -2377,7 +2423,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         // alone catches a refusal, and a GET (which works here) says which
         // instance appeared — better evidence than the reply anyway, since the
         // instance really is created either way.
-        const res = await fetch(`/api/apps/${encodeURIComponent(appId)}/start`, { method: 'POST' });
+        const res = await fetch(osUrl(`/api/apps/${encodeURIComponent(appId)}/start`), { method: 'POST', headers: bodylessMutationHeaders() });
         if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
 
         let next = null;
@@ -2411,9 +2457,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // Backend endpoint for the synced list. Our page is served through the OS
     // proxy at /api/proxy/<instanceId>/…, so a bare '/api/…' would hit the
     // SHELL instead of our own backend — prefix it the same way the WS URL is.
-    const qcApiUrl = (pathParts[0] === 'api' && pathParts[1] === 'proxy' && pathParts[2]
-      ? `/api/proxy/${pathParts[2]}`
-      : '') + '/api/quick-commands';
+    const qcApiUrl = `${ownBase}/api/quick-commands`;
     const qcPanel    = document.getElementById('qc-panel');
     const qcToggleBtn= document.getElementById('qc-toggle');
     const qcEditBtn  = document.getElementById('qc-edit');

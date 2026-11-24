@@ -43,7 +43,7 @@ export interface ThemeSelection {
 /** How an app participates in OS theming. Read from `<meta name="aura-theme-strategy">`. */
 export type ThemeStrategy = 'inherit' | 'themed' | 'override';
 
-import { appHostRuntime, bodylessMutationHeaders, osBase } from './os-auth.js';
+import { appHostRuntime, bodylessMutationHeaders, osAuthHeaders, osBase } from './os-auth.js';
 import { isFromShell } from './channel.js';
 import { KeymapApi } from './keymap.js';
 import { NavApi } from './nav.js';
@@ -238,9 +238,11 @@ export class OsClient {
     | { kind: 'disambiguation'; candidates: Array<{ appId: string; score: number }> }
     | { kind: 'noHandler' }
   > {
-    const res = await fetch(`${this.base}/api/intents/start`, {
+    const url = `${this.base}/api/intents/start`;
+    // Server side, the instance token says which app asks (OPEN_TERMINAL grants, D29).
+    const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...osAuthHeaders(url) },
       body: JSON.stringify(intent),
     });
     const body = await res.json().catch(() => null) as { kind?: string; error?: string; code?: string; hint?: string } | null;

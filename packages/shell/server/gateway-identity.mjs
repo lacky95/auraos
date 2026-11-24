@@ -32,6 +32,11 @@ export const OWNER_UI_APPS = Object.freeze({
     groups: Object.freeze(['apps', 'nexus']),
     routes: Object.freeze(['/api/os/ui/command']),
   }),
+  // The Terminal's instance and session picker (D29: the owner in the desktop has full control).
+  'com.aura.terminal': Object.freeze({
+    groups: Object.freeze([]),
+    routes: Object.freeze(['/api/apps/[id]/instances', '/api/apps/[id]/start', '/api/instances/[instanceId]/activities']),
+  }),
 });
 
 /** The trusted system UI entry for an app id, or null. */

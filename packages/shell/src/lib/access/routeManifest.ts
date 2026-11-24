@@ -77,6 +77,8 @@ const groups: RouteAccessManifest['groups'] = {
   os:            rule(OWNER, 'system'),
   proxy:         rule(OWNER, 'proxy-upstream'),
   scopes:        rule(OWNER, 'system'),
+  // The owner's System Terminal, for apps the owner granted (D25, D29).
+  terminal:      rule(APP_PERMISSION, 'app', { permissions: ['terminal.embed'] }),
 };
 
 // ── reusable refinements ────────────────────────────────────────────────────
@@ -277,7 +279,7 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/intents/start': {
     methods: {
       POST: rule(INSTANCE, 'system', decide(5,
-        'An app may send intents, and the `command` extra is held to the Terminal (D29). Still open: an owner grant for a trusted terminal (D24), and `sessionId`, which opens a window on an existing Terminal session.')),
+        'An app may send intents. OPEN_TERMINAL: `command` is held to the Terminal (D29); `background` needs the owner\'s terminal.embed grant and `sessionId` a session the app was granted, checked in the route for every verified app caller (server/terminal-embed.mjs). Still open: an owner grant for a trusted terminal (D24).')),
     },
     variants: [{
       // Types a line and presses Enter as the owner (5.16). Matched on any
@@ -290,6 +292,17 @@ const routes: RouteAccessManifest['routes'] = {
   },
 
   '/api/scopes': { methods: { GET: rule(OWNER, 'system', SYSTEM_APP_CALLER) } },
+
+  // Each route also checks the one session against its own grant (server/terminal-embed.mjs).
+  '/api/terminal/embed': {
+    methods: { POST: rule(APP_PERMISSION, 'app', { permissions: ['terminal.embed'] }) },
+  },
+  '/api/terminal/sessions': {
+    methods: {
+      GET: rule(APP_PERMISSION, 'app', { permissions: ['terminal.sessions.list'] }),
+      DELETE: rule(APP_PERMISSION, 'app', { permissions: ['terminal.embed'] }),
+    },
+  },
 
   '/api/nexus/assets/[source]/[appId]/[digest]': {
     methods: {

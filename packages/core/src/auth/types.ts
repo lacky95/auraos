@@ -113,8 +113,11 @@ export interface GrantSubject {
  * users). Multi-user adds e.g. `{ kind: 'user', userId }` without changing
  * the subject or the permission.
  */
-export type GrantScope = { kind: 'os' };
-export const OS_SCOPE: GrantScope = Object.freeze({ kind: 'os' }) as GrantScope;
+export type GrantScope =
+  | { kind: 'os' }
+  /** One Terminal session (`<instanceId>#<label>`), for `terminal.embed` only (D25). */
+  | { kind: 'terminal-session'; id: string };
+export const OS_SCOPE: GrantScope = Object.freeze({ kind: 'os' as const });
 
 /** Admin attribution stored with a grant / key / audit entry. */
 export interface AdminAttribution {

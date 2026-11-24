@@ -164,6 +164,12 @@ export interface GatewayIdentityClaim {
   origin: string;
   userId: string;
   /**
+   * The owner session the host cookie is bound to. Lets the shell sign this
+   * browser in to a Terminal session the app may show (D25), bound to the
+   * same session. Never sent to an app.
+   */
+  sid?: string;
+  /**
    * Set only for a trusted system UI (D45): the system-scope copy of an
    * allowlisted app, on a host cookie bound to a live owner session. The
    * shell evaluates the call as that owner acting through the app.

@@ -34,6 +34,9 @@ export const ENFORCED_PERMISSIONS: readonly string[] = [
   'notifications.systemModal',
   // Deprecated alias of systemModal (phase 6 rename) — same gate.
   'notifications.desktopModal',
+  // The owner's System Terminal (D25, D29): embed its sessions, list them.
+  'terminal.embed',
+  'terminal.sessions.list',
 ];
 const ENFORCED = new Set<string>(ENFORCED_PERMISSIONS);
 

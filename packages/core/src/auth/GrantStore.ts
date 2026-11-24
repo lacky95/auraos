@@ -6,8 +6,11 @@
  *
  * The manifest REQUESTS a privileged permission; a grant here is the admin's
  * answer. `Authorizer` needs both. Grants are explicitly scoped
- * (`GrantScope`, today always `{kind:'os'}`), so per-user grants can be added
- * later without re-keying.
+ * (`GrantScope`), so per-user grants can be added later without re-keying.
+ * Today a grant is OS-wide (`{kind:'os'}`), except a Terminal embed grant for
+ * ONE session (`{kind:'terminal-session', id}`, D25): the shell records it
+ * when an app holding the OS-wide `terminal.embed` grant creates that session,
+ * and it counts only while that OS-wide grant does.
  *
  * App grants are pinned to the app's install scope (`appScope`): a clone,
  * scaffold or store install that SHADOWS the app from another scope under the
@@ -31,7 +34,13 @@ export const grantKey = (s: GrantSubject) => `grant:${s.kind}:${s.id}`;
  * `notifications.read` (phase 5) additionally carries a read scope
  * (`GrantRecord.read`): which senders, and whether secret items count.
  */
-export const PRIVILEGED_PERMISSIONS = ['notifications.locked', 'notifications.popup', 'notifications.read', 'notifications.systemModal'] as const;
+export const PRIVILEGED_PERMISSIONS = [
+  'notifications.locked', 'notifications.popup', 'notifications.read', 'notifications.systemModal',
+  // The owner's System Terminal (D25, D29, 5.16). `terminal.embed`: create
+  // Terminal sessions and show and close the ones it created (each is also
+  // granted per session). `terminal.sessions.list`: read every session's metadata.
+  'terminal.embed', 'terminal.sessions.list',
+] as const;
 /**
  * Deprecated permission names → their current name. Accepted by grant /
  * revoke / get (and the Authorizer for manifest permissions[]) so nothing
@@ -45,6 +54,8 @@ export function canonicalPermission(p: string): string {
   return LEGACY_PERMISSION_ALIASES[p] ?? p;
 }
 export const NOTIFICATIONS_READ_PERMISSION = 'notifications.read';
+export const TERMINAL_EMBED_PERMISSION = 'terminal.embed';
+export const TERMINAL_SESSIONS_LIST_PERMISSION = 'terminal.sessions.list';
 export type PrivilegedPermission = typeof PRIVILEGED_PERMISSIONS[number];
 /** What GrantStore accepts. Deliberately not "any permission": no generic bypass. */
 export const GRANTABLE_PERMISSIONS: readonly string[] = [...PRIVILEGED_PERMISSIONS];
@@ -54,6 +65,8 @@ export function isPrivilegedPermission(p: string): p is PrivilegedPermission {
 }
 
 const SUBJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
+/** A Terminal session id, `<instanceId>#<label>` (com.aura.terminal pty-server). */
+const TERMINAL_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}#[A-Za-z0-9._-]{1,64}$/;
 const SUBJECT_KINDS: readonly GrantSubjectKind[] = ['app', 'apiKey'];
 
 export type GrantedBy = AdminAttribution | { kind: 'system' };
@@ -85,8 +98,11 @@ export class GrantError extends Error {
 }
 
 function scopeKey(scope: GrantScope): string {
-  return scope.kind;
+  return scope.kind === 'os' ? scope.kind : `${scope.kind}:${scope.id}`;
 }
+
+/** The grant of `permission` for one Terminal session. */
+export const terminalSessionScope = (sessionId: string): GrantScope => ({ kind: 'terminal-session', id: sessionId });
 
 function field(permission: string, scope: GrantScope): string {
   return `${scopeKey(scope)}|${permission}`;
@@ -95,12 +111,17 @@ function field(permission: string, scope: GrantScope): string {
 export class GrantStore {
   constructor(private readonly redis: () => Redis, private readonly now: () => number = Date.now) {}
 
-  private validate(subject: GrantSubject, permission: string): void {
+  private validate(subject: GrantSubject, permission: string, scope: GrantScope = OS_SCOPE): void {
     permission = canonicalPermission(permission);
     if (!SUBJECT_KINDS.includes(subject.kind)) throw new GrantError(400, `subject kind must be one of ${SUBJECT_KINDS.join(', ')}`);
     if (typeof subject.id !== 'string' || !SUBJECT_ID.test(subject.id)) throw new GrantError(400, 'invalid subject id');
     if (!GRANTABLE_PERMISSIONS.includes(permission)) {
       throw new GrantError(400, `'${permission}' cannot be granted here — grantable: ${GRANTABLE_PERMISSIONS.join(', ')}`);
+    }
+    if (scope.kind === 'os') return;
+    if (scope.kind !== 'terminal-session' || permission !== TERMINAL_EMBED_PERMISSION || subject.kind !== 'app'
+      || typeof scope.id !== 'string' || !TERMINAL_SESSION_ID.test(scope.id)) {
+      throw new GrantError(400, 'only an app\'s terminal.embed grant can be scoped to one Terminal session');
     }
   }
 
@@ -114,8 +135,8 @@ export class GrantStore {
     opts: { by: GrantedBy; appScope?: string; scope?: GrantScope; read?: { scope: unknown; includeSecret?: boolean } },
   ): Promise<{ record: GrantRecord; changed: boolean }> {
     permission = canonicalPermission(permission);
-    this.validate(subject, permission);
     const scope = opts.scope ?? OS_SCOPE;
+    this.validate(subject, permission, scope);
     let read: ReadGrant | undefined;
     if (permission === NOTIFICATIONS_READ_PERMISSION) {
       if (!opts.read) throw new GrantError(400, `'${permission}' needs a read scope: apps, senders or all (e.g. --scope app:com.example.x)`);
@@ -142,14 +163,25 @@ export class GrantStore {
     return { record, changed };
   }
 
-  /** Revoke. Returns the removed record, or null when there was none. */
+  /**
+   * Revoke. Returns the removed record, or null when there was none. Revoking
+   * an OS-wide grant also drops the subject's narrower grants of it (the
+   * per-session Terminal embed grants), so nothing outlives the owner's answer.
+   */
   async revoke(subject: GrantSubject, permission: string, scope: GrantScope = OS_SCOPE): Promise<GrantRecord | null> {
     permission = canonicalPermission(permission);
-    this.validate(subject, permission);
+    this.validate(subject, permission, scope);
     const r = this.redis();
     const key = grantKey(subject);
     const prev = await r.hget(key, field(permission, scope));
-    if (!prev) return null;
+    const narrower = scope.kind === 'os'
+      ? Object.keys(await r.hgetall(key)).filter((f) => f.endsWith(`|${permission}`) && f !== field(permission, scope))
+      : [];
+    if (narrower.length) await r.hdel(key, ...narrower);
+    if (!prev) {
+      if (narrower.length && (await r.hlen(key)) === 0) await r.multi().del(key).srem(GRANT_INDEX_KEY, key).exec();
+      return null;
+    }
     await r.hdel(key, field(permission, scope));
     if ((await r.hlen(key)) === 0) await r.multi().del(key).srem(GRANT_INDEX_KEY, key).exec();
     this.emit({ subjectKind: subject.kind, subjectId: subject.id, permission, change: 'revoked' });
