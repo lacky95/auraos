@@ -10,3 +10,14 @@ export function edgeView(request: { peer: unknown; encrypted?: boolean; header: 
 export function requestEdge(req: unknown, env?: Env): EdgeView;
 export function classifyHost(host: unknown): HostClass;
 export function hostPolicy(env?: Env): 'report' | 'enforce';
+export const SAME_ORIGIN_HEADER: string;
+export const OWN_API_RE: RegExp;
+export function browserBoundaryError(
+  req: { method?: string; headers: Record<string, unknown> },
+  opts: {
+    policy: 'shell' | 'app' | 'own-origin' | 'gateway';
+    origin: string | ((origin: string) => boolean);
+    path?: string; upgrade?: boolean; csrf?: boolean;
+  },
+): string | null;
+export function isShellOrigin(origin: unknown, req: { headers: Record<string, unknown> }): boolean;

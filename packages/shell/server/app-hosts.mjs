@@ -38,11 +38,13 @@ import {
 } from './access-bridge.mjs';
 import { appHostAuth, appHostEmbedCookieName, safeReturnPath } from './app-host-auth.mjs';
 import { handleAppGateway, handleAppGatewayUpgrade, serveAppRuntime } from './app-gateway.mjs';
-import { classifyHost, hostPolicy, isTrustedProxy, originOf, requestEdge } from './host-policy.mjs';
+import {
+  OWN_API_RE, browserBoundaryError, classifyHost, hostPolicy, isShellOrigin, isTrustedProxy, originOf, requestEdge,
+} from './host-policy.mjs';
 import { stripCookies, stripShellCredentials } from './shell-credentials.mjs';
 import { EMBEDDER_PARAM } from './terminal-embed.mjs';
 
-export { classifyHost } from './host-policy.mjs';
+export { SAME_ORIGIN_HEADER, classifyHost } from './host-policy.mjs';
 
 /** `name` of a `{name}--{base}` Host header, or null. */
 export function appHostName(host) {
@@ -78,14 +80,6 @@ const EXACT_ORIGIN_RE = /^https?:\/\/[a-z0-9.-]+(?::\d{1,5})?$/;
  * arrive from the Shell or an embedder; `frame-ancestors` decides where it shows.
  */
 const OWN_ORIGIN_ONLY_APPS = new Set(['com.aura.terminal']);
-/**
- * Over plain HTTP browsers send no Sec-Fetch-*, and a no-cors GET no Origin,
- * so such an app's API also needs this header from its own page: a sibling
- * can't add it without a CORS preflight, which the Origin check refuses.
- */
-export const SAME_ORIGIN_HEADER = 'x-aura-same-origin';
-/** The app's API. `/api/os/*` there is the SDK's redirect to shell assets (a `<link>` can't add a header). */
-const OWN_API_RE = /^\/(?:api(?:\/|$)(?!os\/)|mcp(?:\/|$))/;
 
 /**
  * What a restricted embed cookie may load besides its document (5.16): built
@@ -197,28 +191,6 @@ function appResponseHeaders(rawHeaders, frameAncestors) {
   // A second policy can only narrow the app's own.
   out.push('content-security-policy', `frame-ancestors ${frameAncestors.join(' ')}`);
   return out;
-}
-
-/**
- * Exact Origin for a request that a same-site sibling could otherwise send
- * with this app's cookie. A same-origin EventSource or GET sends no Origin, so
- * there Sec-Fetch-Site decides.
- */
-function browserRequestAllowed(req, edge, path, ownOriginOnly = false) {
-  const origin = req.headers.origin;
-  if (ownOriginOnly) {
-    if (origin !== undefined && origin !== edge.origin) return false;
-    const site = req.headers['sec-fetch-site'];
-    const sameOrigin = site === undefined || site === 'same-origin' || site === 'none';
-    if (!sameOrigin && !(req.headers['sec-fetch-mode'] === 'navigate' && SAFE_METHODS.has(req.method))) return false;
-    if (OWN_API_RE.test(path)) return origin === edge.origin || req.headers[SAME_ORIGIN_HEADER] === '1';
-    return true;
-  }
-  const stream = String(req.headers.accept ?? '').includes('text/event-stream') || path.startsWith('/socket.io/');
-  if (SAFE_METHODS.has(req.method) && !stream) return true;
-  if (origin !== undefined) return origin === edge.origin;
-  const site = req.headers['sec-fetch-site'];
-  return site === undefined || site === 'same-origin' || site === 'none';
 }
 
 // ── the router ──────────────────────────────────────────────────────────────
@@ -580,7 +552,8 @@ export function createAppHostRouter({
 
     const session = await appSession(route, req, edge);
     if (!session) return page(401, 'Open this app from AuraOS', 'This address needs a sign-in from the AuraOS desktop.');
-    if (!browserRequestAllowed(req, edge, path, OWN_ORIGIN_ONLY_APPS.has(route.record.appId))) {
+    const policy = OWN_ORIGIN_ONLY_APPS.has(route.record.appId) ? 'own-origin' : 'app';
+    if (browserBoundaryError(req, { policy, origin: edge.origin, path })) {
       return page(403, 'Request refused', 'This request came from another origin.');
     }
     if (session.embed && !embedRequestAllowed(req, url, path, session.embed)) {
@@ -704,6 +677,13 @@ export function createAppHostRouter({
     server.emit = function (event, req, ...rest) {
       if (event === 'request' || event === 'upgrade') {
         const passOn = () => {
+          // D40: no other site may write to the shell or open its sockets.
+          if (browserBoundaryError(req, { policy: 'shell', origin: (o) => isShellOrigin(o, req), upgrade: event === 'upgrade' })) {
+            countSurfaceEvent('shell-origin');
+            log('cross-origin', req.method, String(req.url ?? '').split('?', 1)[0]);
+            refuse(event, rest[0], 403, 'Forbidden', 'This request came from another site.');
+            return true;
+          }
           if (event === 'request') observeHttpSurface(req, rest[0]);
           return emit.call(this, event, req, ...rest);
         };

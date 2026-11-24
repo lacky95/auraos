@@ -1,5 +1,8 @@
 import type * as core from '@aura/core';
+import type { APIContext } from 'astro';
 import { gatewayInstance } from './access/identify.ts';
+import { shellOwner } from './appHostHandoff.ts';
+import { authenticate } from './auth.ts';
 
 /**
  * The app making a call, when that is proved: an App Host gateway claim, or
@@ -22,4 +25,22 @@ export function verifiedAppCaller(
   if (!claims) return null;
   const inst = mgr.getInstance(claims.instanceId);
   return inst ? { appId: inst.appId, instanceId: inst.instanceId } : 'invalid';
+}
+
+/**
+ * Whether the owner made this call: the desktop's own page (exact Origin and
+ * the owner's session, or login dark; appHostHandoff `shellOwner`) or an
+ * admin session (`aura admin login`). For the one Terminal action that needs
+ * it (OPEN_TERMINAL `command`); never throws.
+ */
+export async function isOwnerCaller(ctx: Pick<APIContext, 'request' | 'cookies'> & { clientAddress?: string }): Promise<boolean> {
+  try {
+    const p = await authenticate(ctx.request);
+    if (!(p instanceof Response) && p.kind === 'admin') return true;
+  } catch { /* not an admin session */ }
+  try {
+    return !('error' in await shellOwner(ctx));
+  } catch {
+    return false;
+  }
 }

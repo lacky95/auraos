@@ -14,8 +14,9 @@
  *
  * The System Terminal itself (system scope) keeps full control, and an
  * unverified caller (the owner's desktop, the CLI, an agent) is not an app, so
- * nothing here limits it: deny-by-default for those is Phase 3 and the private
- * Terminal ingress Phase 5.
+ * nothing here limits it, except OPEN_TERMINAL `command`, which types as the
+ * owner and so needs the owner or the System Terminal proved. The rest of
+ * deny-by-default for those is Phase 3, the private Terminal ingress Phase 5.
  *
  * Plain ESM: the router loads it beside the Astro build. @aura/core is
  * imported lazily, and its services are globalThis singletons, so both copies
@@ -251,16 +252,30 @@ export async function shareSession(appId, sessionId, { access = live, grant = gr
   return null;
 }
 
+/** Whether this intent carries OPEN_TERMINAL's `command`, the one extra that needs a proved caller. */
+export function openTerminalCommand(intent) {
+  return intent?.action === OPEN_TERMINAL_ACTION && !!intent.extras && typeof intent.extras === 'object'
+    && Object.hasOwn(intent.extras, 'command');
+}
+
 /**
- * Why an app may not send this intent, or null. Applies to a verified app
- * caller only (`caller` = {appId}); see the file header for the others.
+ * Why this caller may not send this intent, or null. `caller` is a verified
+ * app ({appId}), the proved owner ({owner: true}: the desktop's own page or an
+ * admin session), or null (nothing proved).
  *   `command` types a line as the owner (5.16 safeguard 2): the System
- *             Terminal's own, never an embedder's.
+ *             Terminal's own or the owner's, never an embedder's, and never
+ *             an unproved caller's (any site can POST a no-cors text/plain body).
  *   `sessionId` opens a window on an existing session: a session the app was granted.
  *   `background` creates one: the app's embed grant.
+ * Only `command` limits an owner or unproved caller; see the file header.
  */
 export async function openTerminalRefusal(intent, caller, access = live) {
-  if (!caller || intent?.action !== OPEN_TERMINAL_ACTION) return null;
+  if (intent?.action !== OPEN_TERMINAL_ACTION) return null;
+  if (!caller?.appId) {
+    return openTerminalCommand(intent) && caller?.owner !== true
+      ? 'the OPEN_TERMINAL command extra needs the owner or the System Terminal'
+      : null;
+  }
   if (await access.isSystemTerminal(caller.appId)) return null;
   const extras = intent.extras && typeof intent.extras === 'object' ? intent.extras : {};
   if (Object.hasOwn(extras, 'command')) return 'the OPEN_TERMINAL command extra is the System Terminal\'s own';

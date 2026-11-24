@@ -885,3 +885,58 @@ test('an embed claim must be well formed', () => {
     } as never), /embed/);
   }
 });
+
+// ── the shell's own listener: no other site may write or open a socket (D40) ─
+
+test('a write or socket to the shell from another site is refused before the shell sees it', async () => {
+  const intent = JSON.stringify({ action: 'aura.intent.action.OPEN_TERMINAL', extras: { command: 'id' } });
+  const post = (headers: Record<string, string>, host = BASE) => new Promise<Reply>((resolve, reject) => {
+    const req = http.request({ port, path: '/api/intents/start', method: 'POST', agent: false, headers: { host, 'content-type': 'text/plain', ...headers } }, (res) => {
+      let body = '';
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body, headers: res.headers }));
+    });
+    req.on('error', reject);
+    req.end(intent);
+  });
+  // Any web page's no-cors text/plain POST, an App Host sibling, a sandboxed frame.
+  for (const origin of ['http://evil.example', ORIGIN, 'null', `http://${BASE}.evil.example`, 'http://desk.example:3001']) {
+    const r = await post({ origin });
+    assert.equal(r.status, 403, origin);
+    assert.notEqual(r.body, 'desktop', origin);
+  }
+  for (const method of ['PUT', 'PATCH', 'DELETE']) {
+    assert.equal((await get(BASE, '/api/x', { origin: 'http://evil.example' }, method)).status, 403, method);
+  }
+  assert.match(await upgrade(BASE, '/os-events/?EIO=4&transport=websocket', { Origin: 'http://evil.example' }), /^HTTP\/1\.1 403/);
+  assert.match(await upgrade(BASE, '/api/proxy/com.aura.terminal/ws', { Origin: ORIGIN }), /^HTTP\/1\.1 403/);
+  // The desktop's own page, on either scheme an edge may terminate.
+  assert.equal((await post({ origin: `http://${BASE}` })).body, 'desktop');
+  assert.equal((await post({ origin: `https://${BASE}` })).body, 'desktop');
+  assert.equal((await post({ origin: 'http://10.0.0.2:3000' }, '10.0.0.2:3000')).body, 'desktop');
+  // Behind an edge that sets X-Forwarded-Host.
+  assert.equal((await post({ origin: 'https://box.example.com', 'x-forwarded-host': 'box.example.com' }, '10.0.0.2:3000')).body, 'desktop');
+  assert.match(await upgrade(BASE, '/os-events/?EIO=4&transport=websocket', { Origin: `http://${BASE}` }), /^HTTP\/1\.1 418/);
+  // Reads are untouched: a cross-site <img>, a script tag, the setup probe.
+  assert.equal((await get(BASE, '/api/os/keyboard.js', { origin: 'http://evil.example' })).body, 'desktop');
+});
+
+test('machine callers send no Origin and keep working: the CLI, an app server\'s SDK, the Terminal backend', async () => {
+  // Each of them calls the shell with Node's fetch (CLI api.ts, app-sdk OsClient
+  // and osAuthHeaders, the Terminal's session-grants.ts), which sends no Origin.
+  const seenOrigins: Array<string | undefined> = [];
+  const probe = http.createServer((req, res) => { seenOrigins.push(req.headers.origin); res.end('ok'); });
+  const probePort = await listen(probe);
+  try {
+    await (await fetch(`http://127.0.0.1:${probePort}/api/intents/start`, { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } })).text();
+  } finally { probe.close(); }
+  assert.deepEqual(seenOrigins, [undefined], 'Node fetch sends no Origin');
+  for (const method of ['POST', 'PUT', 'DELETE']) {
+    const r = await fetch(`http://127.0.0.1:${port}/api/intents/start`, {
+      method, body: '{}', headers: { 'content-type': 'application/json', authorization: 'Bearer aura1.token' },
+    });
+    assert.equal(await r.text(), 'desktop', method);
+  }
+  for (const method of ['POST', 'DELETE']) assert.equal((await get('aura-shell:3000', '/api/x', {}, method)).body, 'desktop', method);
+  assert.match(await upgrade('aura-shell:3000', '/os-events/?EIO=4&transport=websocket', {}), /^HTTP\/1\.1 418/);
+});

@@ -27,6 +27,7 @@ import http from 'node:http';
 import { AURA_RESERVED_PATHS, GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { loadAppHostServices } from './app-host-auth.mjs';
 import { GATEWAY_CLAIM_TTL_S, gatewayKey, isOwnerUiInstallation, ownerUiApp, signGatewayClaim } from './gateway-identity.mjs';
+import { browserBoundaryError } from './host-policy.mjs';
 import { attachSseMux } from './sse-mux.mjs';
 
 const OS_PREFIX = AURA_RESERVED_PATHS.os;
@@ -38,8 +39,6 @@ const RUNTIME_ROUTE = '/api/os/app-runtime.js';
 /** An admin session, the only Authorization a trusted system UI may pass on (lib/auth.ts). */
 const ADMIN_BEARER_RE = /^Bearer aura-admin1\.[A-Za-z0-9._~+/=-]{1,2048}$/;
 
-const SAFE_METHODS = new Set(['GET', 'HEAD']);
-const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 const FORWARDED_REQUEST_HEADERS = [
   'accept', 'accept-language', 'content-type', 'content-length', 'if-match', 'if-none-match',
@@ -147,20 +146,11 @@ function validCsrfToken(value, session) {
   return given.length === want.length && timingSafeEqual(given, want);
 }
 
-const isJson = (value) => /^application\/json\s*(;|$)/i.test(String(value ?? '').trim());
-
-/** Null when this browser request may proceed, else the error code. */
-export function browserBoundaryError(req, session) {
-  const method = req.method;
-  if (!SAFE_METHODS.has(method) && !MUTATING_METHODS.has(method)) return 'method-not-allowed';
-  const site = req.headers['sec-fetch-site'];
-  if (site !== undefined && site !== 'same-origin' && site !== 'none') return 'cross-site';
-  const origin = req.headers.origin;
-  if (origin !== undefined && origin !== session.aud) return 'origin-mismatch';
-  if (SAFE_METHODS.has(method)) return null;
-  if (origin === undefined) return 'origin-required';
-  if (isJson(req.headers['content-type']) || validCsrfToken(req.headers[GATEWAY_CSRF_HEADER], session)) return null;
-  return 'csrf-required';
+/** Null when this browser request may reach the gateway, else the error code (host-policy.mjs). */
+function gatewayBoundaryError(req, session) {
+  return browserBoundaryError(req, {
+    policy: 'gateway', origin: session.aud, csrf: validCsrfToken(req.headers[GATEWAY_CSRF_HEADER], session),
+  });
 }
 
 function pipeToShell(req, res, path, headers) {
@@ -186,7 +176,7 @@ export async function handleAppGateway(req, res, ctx) {
   if (!ctx?.slot?.instanceId) return refuse(res, 409, 'no-instance');
   const session = hostSession(ctx);
   if (!session) return refuse(res, 401, 'no-session');
-  const boundary = browserBoundaryError(req, session);
+  const boundary = gatewayBoundaryError(req, session);
   if (boundary) return refuse(res, boundary === 'method-not-allowed' ? 405 : 403, boundary);
 
   if ((req.url ?? '').split('?')[0] === GATEWAY_CSRF_PATH) {

@@ -74,8 +74,17 @@ test('the System Terminal keeps full control; a same-id copy in another scope do
   assert.notEqual(await openTerminalRefusal(intent({ command: 'id' }), { appId: TERMINAL }, shadow), null);
 });
 
-test('a caller without an app identity is left to Phase 3', async () => {
-  assert.equal(await openTerminalRefusal(intent({ command: 'id' }), null, access()), null);
+test('a command needs a proved owner or the System Terminal; the rest is left to Phase 3 for non-app callers', async () => {
+  // Nothing proved: any web page can POST a no-cors text/plain body.
+  assert.notEqual(await openTerminalRefusal(intent({ command: 'id' }), null, access()), null);
+  assert.notEqual(await openTerminalRefusal(intent({ command: 'id', background: true }), null, access()), null);
+  assert.notEqual(await openTerminalRefusal(intent({ command: 'id' }), { owner: false } as never, access()), null);
+  // The owner (the desktop's own page or an admin session).
+  assert.equal(await openTerminalRefusal(intent({ command: 'id' }), { owner: true } as never, access()), null);
+  // Without `command`, a caller with no app identity is not limited here.
+  assert.equal(await openTerminalRefusal(intent({ background: true }), null, access()), null);
+  assert.equal(await openTerminalRefusal(intent({ sessionId: SESSION }), null, access()), null);
+  assert.equal(await openTerminalRefusal({ action: 'aura.intent.action.VIEW', extras: { command: 'id' } }, null, access()), null);
 });
 
 // ── a session grant lives as long as its session ────────────────────────────

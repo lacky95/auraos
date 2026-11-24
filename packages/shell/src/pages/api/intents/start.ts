@@ -1,9 +1,10 @@
 import type { APIRoute } from 'astro';
 import { getAppManager, IntentError } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
-import { verifiedAppCaller } from '../../../lib/terminalCaller.ts';
+import { isOwnerCaller, verifiedAppCaller } from '../../../lib/terminalCaller.ts';
 import {
-  OPEN_TERMINAL_ACTION, TERMINAL_APP_ID, grantSession, isSystemTerminal, openTerminalRefusal, terminalSessionInstance,
+  OPEN_TERMINAL_ACTION, TERMINAL_APP_ID, grantSession, isSystemTerminal, openTerminalCommand, openTerminalRefusal,
+  terminalSessionInstance,
 } from '../../../../server/terminal-embed.mjs';
 
 interface IntentBody {
@@ -36,12 +37,14 @@ interface IntentBody {
  * A malformed intent (unknown flag, bad instanceId, …) answers 4xx
  * `{ kind: 'error', code, error, hint? }`.
  *
- * OPEN_TERMINAL from an app (D29, 5.16): `command` is the System Terminal's
- * own, `background` needs the owner's `terminal.embed` grant, and `sessionId`
- * a session the app was granted (403 `terminal-not-granted`). A session an app
- * creates with `background` is granted to it here.
+ * OPEN_TERMINAL (D29, 5.16): `command` needs the System Terminal (its
+ * instance token) or the owner (the desktop's own page, or an admin session);
+ * from an app, `background` needs the owner's `terminal.embed` grant and
+ * `sessionId` a session the app was granted (403 `terminal-not-granted`). A
+ * session an app creates with `background` is granted to it here.
  */
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = async (ctx) => {
+  const { request } = ctx;
   const body = await request.json().catch(() => null) as IntentBody | null;
   if (!body || typeof body.action !== 'string' || body.action.length === 0) {
     return errorResponse('Intent body must include a string `action`', 400);
@@ -64,7 +67,8 @@ export const POST: APIRoute = async ({ request }) => {
   }
   const caller = verifiedAppCaller(request, getAppManager());
   if (caller === 'invalid') return errorResponse('The caller identity did not verify', 401);
-  const refusal = await openTerminalRefusal(intent, caller);
+  const asking = caller ?? (openTerminalCommand(intent) && await isOwnerCaller(ctx) ? { owner: true } : null);
+  const refusal = await openTerminalRefusal(intent, asking);
   if (refusal) return jsonResponse({ kind: 'error', code: 'terminal-not-granted', error: refusal }, 403);
   try {
     const result = await getAppManager().startIntent(intent);

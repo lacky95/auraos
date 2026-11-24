@@ -9,9 +9,10 @@ import { OsEventBus } from '@aura/core';
 import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import type { GatewayIdentityClaim, ProxyConfig } from '@aura/core';
 import {
-  browserBoundaryError, gatewayShellPath, handleAppGateway, serveAppRuntime,
+  gatewayShellPath, handleAppGateway, serveAppRuntime,
 } from '../server/app-gateway.mjs';
 import { gatewayClaimOf, signGatewayClaim, verifyGatewayClaim } from '../server/gateway-identity.mjs';
+import { browserBoundaryError } from '../server/host-policy.mjs';
 import { stripShellCredentials } from '../server/shell-credentials.mjs';
 import { createDecide } from '../src/lib/access/decide.ts';
 import { gatewayEventView, type GatewayEventView } from '../src/lib/access/gatewayEvents.ts';
@@ -391,7 +392,7 @@ test('no system fallback: without an instance or session nothing is forwarded', 
 
 test('CSRF: mutations need the exact Origin plus JSON or the token', async () => {
   const boundary = (method: string, headers: Record<string, string>) =>
-    browserBoundaryError({ method, headers } as unknown as http.IncomingMessage, session);
+    browserBoundaryError({ method, headers }, { policy: 'gateway', origin: session.aud, csrf: false });
   assert.equal(boundary('GET', {}), null);
   assert.equal(boundary('GET', { 'sec-fetch-site': 'same-site' }), 'cross-site');
   assert.equal(boundary('GET', { origin: 'http://evil--desk.example:3000' }), 'origin-mismatch');
@@ -405,7 +406,8 @@ test('CSRF: mutations need the exact Origin plus JSON or the token', async () =>
   assert.equal(boundary('OPTIONS', { origin: ORIGIN }), 'method-not-allowed');
 
   const issued = JSON.parse((await call('/_aura/os/_csrf')).body) as { token: string; header: string };
-  assert.equal(boundary('POST', { origin: ORIGIN, 'content-type': 'multipart/form-data', [issued.header]: issued.token }), null);
+  assert.equal(browserBoundaryError({ method: 'POST', headers: { origin: ORIGIN } }, { policy: 'gateway', origin: session.aud, csrf: true }), null);
+  assert.equal((await call('/_aura/os/api/kv/app/x', 'POST', { origin: ORIGIN, 'content-type': 'multipart/form-data', [issued.header]: issued.token }, 'x')).status, 200);
   assert.equal((await call('/_aura/os/api/kv/app/x', 'POST', { origin: ORIGIN, 'content-type': 'text/plain' }, 'x')).status, 403);
   assert.equal((await call('/_aura/os/api/kv/app/x', 'POST', json, '{}')).status, 200);
 });

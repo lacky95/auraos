@@ -76,6 +76,9 @@ export default defineConfig({
   // edge. Apps all opt out of it; the shell should too.
   devToolbar: { enabled: false },
   security: {
+    // Astro's check covers form posts only. The shell's one Origin check runs
+    // in front of Astro for every write and WebSocket upgrade instead
+    // (server/host-policy.mjs `browserBoundaryError`, policy `shell`).
     checkOrigin: false,
   },
   server: {

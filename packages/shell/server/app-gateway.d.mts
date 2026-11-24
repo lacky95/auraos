@@ -13,7 +13,6 @@ export interface AppGatewayContext {
   services?: import('./app-host-auth.mjs').AppHostServices | null;
 }
 export function gatewayShellPath(rawUrl: unknown): string | null;
-export function browserBoundaryError(req: IncomingMessage, session: { aud: string; sid?: string }): string | null;
 export function handleAppGateway(req: IncomingMessage, res: ServerResponse, ctx: AppGatewayContext): Promise<void>;
 export function handleAppGatewayUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, ctx: AppGatewayContext): Promise<void>;
 export function serveAppRuntime(req: IncomingMessage, res: ServerResponse, ctx: AppGatewayContext): void;
