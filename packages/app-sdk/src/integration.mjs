@@ -1,3 +1,5 @@
+import { AURA_RUNTIME_LOADER_JS, SHELL_ASSET_ROUTES } from './runtime/loader.js';
+
 /**
  * Unified Astro integration for Aura apps. Bundles every framework concern an
  * app needs to wire up at startup:
@@ -10,6 +12,10 @@
  *     polls this during `waitHealthy` and the reconciler. Apps that need
  *     custom health logic can still ship their own `src/pages/api/lifecycle/
  *     health.ts`; Astro's filesystem routes take precedence on collision.
+ *   • Makes every page load `/_aura/runtime.js` on an App Host (theme,
+ *     keyboard, console, channel), and nothing on the proxy path. See
+ *     runtime/loader. Routes for the shell's theme and icons
+ *     (runtime/shell-asset-route) keep existing references working on both.
  *   • Logs identity at server start so container logs make it obvious which
  *     app each port belongs to.
  *
@@ -31,7 +37,7 @@ export function auraAppIntegration(opts = {}) {
   return {
     name: 'aura-app',
     hooks: {
-      'astro:config:setup': ({ injectRoute, updateConfig, addMiddleware }) => {
+      'astro:config:setup': ({ injectRoute, injectScript, updateConfig, addMiddleware }) => {
         // Identity headers on every rendered response, in dev AND in a
         // production build (the astro:server:setup hook below is dev-only).
         addMiddleware({
@@ -48,6 +54,10 @@ export function auraAppIntegration(opts = {}) {
         // (sibling container on aura-net only) and (b) the shell's HTTP
         // proxy verifies identity via X-Aura-App-Id headers anyway.
         updateConfig({ vite: { server: { allowedHosts: true } } });
+        injectScript('head-inline', AURA_RUNTIME_LOADER_JS);
+        for (const pattern of SHELL_ASSET_ROUTES) {
+          injectRoute({ pattern, entrypoint: new URL('./runtime/shell-asset-route.js', import.meta.url) });
+        }
         if (!injectHealth) return;
         // Resolve relative to whatever's on disk (this file ships in both
         // src/ during dev AND in dist/ after tsc, with runtime/ as a sibling

@@ -31,7 +31,7 @@
 import http from 'node:http';
 import net from 'node:net';
 import {
-  AURA_RESERVED_PATHS, appHostCookieName, isAuraReservedPath, parseAppHost,
+  APP_HOST_ROUTE_HEADER, AURA_RESERVED_PATHS, appHostCookieName, isAuraReservedPath, parseAppHost,
 } from '@aura/core/host-rules';
 import {
   SESSION_COOKIES, countSurfaceEvent, internalServiceHeaders, observeHttpSurface, reportSurface, surfaceIdentity,
@@ -275,8 +275,15 @@ export function createAppHostRouter({
     reportedApp = t.appId ?? null;
     if (t.starting) return reply(res, 503, `Starting ${t.appName}…`, 'This page reloads by itself when it is up.', { refresh: 2 });
 
+    // PHASE2-CUTOVER: the SDK's loader asks every `--` host for the runtime; this path has none to give.
+    if (String(req.url ?? '').split(/[?#]/, 1)[0] === AURA_RESERVED_PATHS.runtime) {
+      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      return res.end();
+    }
+
     const headers = {};
     for (const [k, v] of Object.entries(req.headers)) if (!HOP_BY_HOP.has(k)) headers[k] = v;
+    delete headers[APP_HOST_ROUTE_HEADER];
     stripShellCredentials(headers, 'app-hosts-http');
     Object.assign(headers, forwardedHeaders(req), identityHeaders(t));
     pipeHttp(name, t, req, res, headers, (raw) => {
@@ -337,7 +344,8 @@ export function createAppHostRouter({
     const lines = [`${req.method} ${req.url} HTTP/${req.httpVersion}`];
     const rawHeaders = stripShellCredentials(req.rawHeaders, 'app-hosts-upgrade');
     for (let i = 0; i < rawHeaders.length; i += 2) {
-      if (!(rawHeaders[i].toLowerCase() in extra)) lines.push(`${rawHeaders[i]}: ${rawHeaders[i + 1]}`);
+      const key = rawHeaders[i].toLowerCase();
+      if (!(key in extra) && key !== APP_HOST_ROUTE_HEADER) lines.push(`${rawHeaders[i]}: ${rawHeaders[i + 1]}`);
     }
     for (const [k, v] of Object.entries(extra)) lines.push(`${k}: ${v}`);
     pipeUpgrade(name, t, socket, head, lines, reportUpgrade, fail);
@@ -500,7 +508,7 @@ export function createAppHostRouter({
     if (t.notReady) return page(503, `${t.appName} is not ready`, 'No running instance holds this address. Open the app again from the AuraOS desktop.');
     if (t.starting) return page(503, `Starting ${t.appName}…`, 'This page reloads by itself when it is up.', { refresh: 2 });
     const headers = appRequestHeaders(req, 'app-hosts-http');
-    for (const [k, v] of Object.entries({ ...forwardedHeaders(req, edge), ...identityHeaders(t), ...activityHeaders(req.url, t.instanceId) })) headers.push(k, v);
+    for (const [k, v] of Object.entries({ ...forwardedHeaders(req, edge), ...identityHeaders(t), ...activityHeaders(req.url, t.instanceId), [APP_HOST_ROUTE_HEADER]: 'host' })) headers.push(k, v);
     const ancestors = frameAncestors(route, edge, session, url);
     pipeHttp(route.label, t, req, res, headers, (raw) => appResponseHeaders(raw, ancestors));
   }
@@ -534,7 +542,7 @@ export function createAppHostRouter({
     } catch { return fail(503, 'Service Unavailable'); }
     if (t.missing) return fail(404, 'Not Found');
     if (t.starting || t.notReady) return fail(503, 'Service Unavailable');
-    const extra = { ...forwardedHeaders(req, edge), ...identityHeaders(t), ...activityHeaders(req.url, t.instanceId) };
+    const extra = { ...forwardedHeaders(req, edge), ...identityHeaders(t), ...activityHeaders(req.url, t.instanceId), [APP_HOST_ROUTE_HEADER]: 'host' };
     const raw = appRequestHeaders(req, 'app-hosts-upgrade', { keepUpgrade: true });
     const lines = [`${req.method} ${url} HTTP/${req.httpVersion}`];
     for (let i = 0; i + 1 < raw.length; i += 2) lines.push(`${raw[i]}: ${raw[i + 1]}`);

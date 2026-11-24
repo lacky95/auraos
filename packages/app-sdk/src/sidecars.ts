@@ -27,6 +27,8 @@ import net from 'node:net';
 import { existsSync } from 'node:fs';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { osSidecars, OsSidecarError, type OsSidecarsClient } from './os-sidecars.js';
+import { APP_HOST_ROUTE_HEADER } from './hostRules.js';
+import { AURA_RUNTIME_LOADER_JS, appHostAssetLocation } from './runtime/loader.js';
 
 // The OS-managed client lives in its own child_process-free module; re-export
 // it so `@aura/app-sdk/sidecars` is the one import for both paths.
@@ -998,14 +1000,15 @@ export class SidecarHost {
       stamp(res);
       const refresh = (this.phase === 'image-missing' || this.phase === 'error') ? '' : '<meta http-equiv="refresh" content="4">';
       res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-      res.end(`<!doctype html><html><head><meta charset="utf-8">${refresh}<link rel="stylesheet" href="/api/os/theme.css">
+      res.end(`<!doctype html><html><head><meta charset="utf-8">${refresh}<script>${AURA_RUNTIME_LOADER_JS}</script><link rel="stylesheet" href="/api/os/theme.css">
 <style>html,body{margin:0;height:100%;background:var(--aura-color-bg,#0a0a0a);color:var(--aura-color-text,#ccffcc);font-family:var(--aura-font-mono,monospace);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;text-align:center;padding:24px}h1{color:var(--aura-color-primary,#00ff41)}p{color:var(--aura-color-text-dim,#557755);max-width:520px}</style></head>
 <body><h1>${this.opts.appId}</h1><p>Runtime status: <b>${this.phase}</b>${this.detail ? ` — ${this.detail}` : ''}</p></body></html>`);
     };
 
     const forward = async (req: http.IncomingMessage, res: http.ServerResponse, allowRetry: boolean): Promise<void> => {
       const headers: http.OutgoingHttpHeaders = { ...req.headers, host: `${dashHost}:${dashPort}` };
-      if (this.forwardedPrefix) headers['x-forwarded-prefix'] = this.forwardedPrefix;
+      // PHASE2-CUTOVER: an App Host serves from `/`, so only the proxy path has a prefix.
+      if (this.forwardedPrefix && req.headers[APP_HOST_ROUTE_HEADER] !== 'host') headers['x-forwarded-prefix'] = this.forwardedPrefix;
       if (this.opts.auth) Object.assign(headers, await this.opts.auth.headers());
       const upstream = http.request({ hostname: dashHost!, port: dashPort!, method: req.method, path: req.url, headers }, (upRes) => {
         const loc = (upRes.headers.location as string) || '';
@@ -1026,6 +1029,12 @@ export class SidecarHost {
     const server = http.createServer((req, res) => {
       const url = req.url || '/';
       if (handleLifecycle(req, res, url)) return;
+      const assetLocation = appHostAssetLocation(req.headers[APP_HOST_ROUTE_HEADER], url);
+      if (assetLocation) {
+        res.writeHead(307, { location: assetLocation, 'cache-control': 'no-store' });
+        res.end();
+        return;
+      }
       if (!dashHost) { interstitial(res, 503); return; }
       forward(req, res, req.method === 'GET').catch(() => { if (!res.headersSent) interstitial(res, 503); });
     });
@@ -1035,7 +1044,8 @@ export class SidecarHost {
       if (!dashHost) { sock.destroy(); return; }
       void (async () => {
         const headers: http.OutgoingHttpHeaders = { ...req.headers, host: `${dashHost}:${dashPort}` };
-        if (this.forwardedPrefix) headers['x-forwarded-prefix'] = this.forwardedPrefix;
+        // PHASE2-CUTOVER: an App Host serves from `/`, so only the proxy path has a prefix.
+        if (this.forwardedPrefix && req.headers[APP_HOST_ROUTE_HEADER] !== 'host') headers['x-forwarded-prefix'] = this.forwardedPrefix;
         if (this.opts.auth) Object.assign(headers, await this.opts.auth.headers());
         const lines = [`${req.method} ${req.url} HTTP/1.1`];
         for (const [k, v] of Object.entries(headers)) {

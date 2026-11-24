@@ -507,3 +507,88 @@ test('the runtime refuses to start on a host that is not its own label', () => {
   vm.runInContext(js, vm.createContext(sandbox));
   assert.equal(sandbox.AuraRuntimeBootstrap, undefined);
 });
+
+// ── theme in the runtime ────────────────────────────────────────────────────
+
+function bootThemed(opts: { links?: string[]; parsing?: boolean; strategy?: 'inherit' | 'override' }) {
+  const links = (opts.links ?? []).map((href) => {
+    const l = { href, getAttribute: () => l.href, setAttribute: (_: string, v: string) => { l.href = v; } };
+    return l;
+  });
+  const written: string[] = [];
+  const appended: Array<{ href?: string }> = [];
+  const listeners: Array<(ev: unknown) => void> = [];
+  const top = {};
+  const sandbox: Record<string, unknown> = {
+    location: { host: `${slot.label}--desk.example:3000`, protocol: 'http:', origin: ORIGIN, search: '' },
+    document: {
+      readyState: opts.parsing ? 'loading' : 'complete',
+      currentScript: opts.parsing ? { async: false, defer: false } : null,
+      head: { appendChild: (e: { href?: string }) => appended.push(e) },
+      documentElement: {},
+      write: (html: string) => written.push(html),
+      createElement: () => ({}),
+      querySelector: (s: string) => (s.startsWith('link[') && links.length ? links[0] : null),
+      querySelectorAll: (s: string) => (s.startsWith('link[') ? links : []),
+      addEventListener() {},
+    },
+    addEventListener: (type: string, fn: (ev: unknown) => void) => { if (type === 'message') listeners.push(fn); },
+    top, URLSearchParams, Date,
+  };
+  sandbox.window = sandbox;
+  vm.runInContext(buildAppRuntimeJs({
+    appId: record.appId, instanceId: slot.instanceId, label: slot.label, slot: 1,
+    cfg: { ...cfg, injectMeta: true, injectKeyForwarder: false } as ProxyConfig,
+    themeStrategy: opts.strategy ?? 'inherit',
+    framework: { id: 'f', version: '1' },
+    theme: { themeId: 't', themeIdDark: 'd', themeIdLight: 'l', colorMode: 'dark', resolvedMode: 'dark' },
+    keymap: { actions: [], bindings: {} },
+  }), vm.createContext(sandbox));
+  const fire = (type: string, source: unknown, origin: string) => { for (const l of listeners) l({ data: { type }, source, origin }); };
+  return { links, written, appended, fire, top };
+}
+const SHELL_ORIGIN = 'http://desk.example:3000';
+const GATEWAY_THEME = '/_aura/os/api/os/theme.css';
+
+test('a page with no theme link gets a parser-blocking one through the gateway', () => {
+  const { written, appended } = bootThemed({ parsing: true });
+  assert.deepEqual(written, [`<link rel="stylesheet" href="${GATEWAY_THEME}">`]);
+  assert.deepEqual(appended.filter((e) => e.href), []);
+});
+
+test('after parsing the link is appended, never written', () => {
+  const { written, appended } = bootThemed({});
+  assert.deepEqual(written, []);
+  assert.equal(appended.filter((e) => e.href === GATEWAY_THEME).length, 1);
+});
+
+test('a page that links the theme itself is left as it is', () => {
+  const { links, written, appended } = bootThemed({ parsing: true, links: ['/api/os/theme.css'] });
+  assert.deepEqual(written, []);
+  assert.deepEqual(appended.filter((e) => e.href), []);
+  assert.equal(links[0]!.href, '/api/os/theme.css');
+});
+
+test('an override app gets no theme link', () => {
+  const { written, appended } = bootThemed({ parsing: true, strategy: 'override' });
+  assert.deepEqual(written, []);
+  assert.deepEqual(appended.filter((e) => e.href), []);
+});
+
+test('only the verified Shell can refresh the theme, and only theme links change', () => {
+  const { links, fire, top } = bootThemed({ links: ['/api/os/theme.css', GATEWAY_THEME, '/own.css'] });
+  fire('aura.theme.changed', {}, SHELL_ORIGIN);                 // right origin, wrong window
+  fire('aura.theme.changed', top, 'http://evil.example');       // right window, wrong origin
+  fire('aura.other', top, SHELL_ORIGIN);
+  assert.deepEqual(links.map((l) => l.href), ['/api/os/theme.css', GATEWAY_THEME, '/own.css']);
+  fire('aura.mode.changed', top, SHELL_ORIGIN);
+  assert.match(links[0]!.href, /^\/api\/os\/theme\.css\?t=\d+$/);
+  assert.match(links[1]!.href, /^\/_aura\/os\/api\/os\/theme\.css\?t=\d+$/);
+  assert.equal(links[2]!.href, '/own.css');
+});
+
+test('the theme and icons are public through the gateway', async () => {
+  assert.equal(await enforce(apiCtx('GET', '/api/os/theme.css', '/api/os/theme.css')), null);
+  assert.equal(await enforce(apiCtx('GET', '/api/os/icons.svg', '/api/os/icons.svg')), null);
+  assert.equal(await enforce(apiCtx('GET', '/api/os/icons/sun.svg', '/api/os/icons/[name].svg', { name: 'sun' })), null);
+});

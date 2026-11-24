@@ -1,3 +1,4 @@
+import { APP_HOST_ROUTE_HEADER } from '@aura/core/host-rules';
 import type { APIContext, APIRoute } from 'astro';
 import { dropServiceWorkerScope, stripShellCredentials } from '../../../../../server/shell-credentials.mjs';
 import { getAppManager, ThemeManager, keymapRegistry, resolveProxyConfig, INTERFACE_PATH_KINDS } from '@aura/core';
@@ -293,6 +294,7 @@ export default {};
 
   try {
     const headers = stripShellCredentials(new Headers(request.headers), 'proxy-http');
+    headers.delete(APP_HOST_ROUTE_HEADER);
     headers.set('X-Aura-App-Id', instance.appId);
     headers.set('X-Aura-Instance-Id', instance.instanceId);
     if (activityId) headers.set('X-Aura-Activity-Id', activityId);

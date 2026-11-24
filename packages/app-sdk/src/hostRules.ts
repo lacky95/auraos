@@ -367,6 +367,13 @@ export const AURA_RESERVED_PATHS = {
 export const AURA_RESERVED_PREFIX = '/_aura/';
 
 /**
+ * Set to `host` by the router on a request it serves from a verified App Host,
+ * and removed from every other request. It selects URLs (no base path) and
+ * grants nothing.
+ */
+export const APP_HOST_ROUTE_HEADER = 'x-aura-frame-route';
+
+/**
  * Whether a raw request path falls under `/_aura`, after resolving dot
  * segments, slashes, one layer of percent-encoding and case. A path that can't
  * be decoded counts as reserved, so it can't slip past the router to the app.

@@ -20,6 +20,7 @@ import { syntheticReceiverJs } from './keyboard/receiverScript.js';
  */
 
 const SHELL_ONLY = 'ev.origin!==SHELL||ev.source!==window.top';
+const SHELL_THEME_PATH = '/api/os/theme.css';
 
 export const APP_HOST_CHANNEL: DocumentChannel = {
   parent: 'window.top',
@@ -39,6 +40,31 @@ if(window.parent===window.top)return;
 function report(){try{window.top.postMessage({type:'aura.keyboard.hello',focused:true},SHELL);}catch(_){}}
 addEventListener('focus',report);addEventListener('focusin',report,true);
 }catch(_){}})();`;
+
+/**
+ * Adds the theme for a page that doesn't link it. While the parser is waiting
+ * on this script, `document.write` makes the link parser-created, so it blocks
+ * first paint in every engine and the page never shows unthemed.
+ */
+function themeLinkJs(href: string): string {
+  const h = JSON.stringify(href);
+  return `if(!document.querySelector('link[href*="${SHELL_THEME_PATH}"]')){var CS=document.currentScript;`
+    + `if(document.readyState==='loading'&&CS&&!CS.async&&!CS.defer)document.write('<link rel="stylesheet" href="'+${h}+'">');`
+    + `else{var L=document.createElement('link');L.rel='stylesheet';L.href=${h};HEAD.appendChild(L);}}`;
+}
+
+/**
+ * The Shell announces a theme or mode change; a loaded stylesheet won't refetch
+ * by itself. Covers the link added above and an app's own `/api/os/theme.css`
+ * tag (which the SDK's asset route redirects to the gateway).
+ */
+function themeRefreshJs(gatewayHref: string): string {
+  return `addEventListener('message',function(ev){if(${SHELL_ONLY})return;var t=ev.data&&ev.data.type;`
+    + `if(t!=='aura.theme.changed'&&t!=='aura.mode.changed')return;`
+    + `document.querySelectorAll('link[rel="stylesheet"]').forEach(function(l){`
+    + `var h=(l.getAttribute('href')||'').split('?')[0];`
+    + `if(h==='${SHELL_THEME_PATH}'||h===${JSON.stringify(gatewayHref)})l.setAttribute('href',h+'?t='+Date.now());});});`;
+}
 
 export interface AppRuntimeInput {
   appId: string;
@@ -92,7 +118,7 @@ export function buildAppRuntimeJs(input: AppRuntimeInput): string {
       );
     }
   }
-  const themeCss = `${AURA_RESERVED_PATHS.os}api/os/theme.css`;
+  const themeCss = `${AURA_RESERVED_PATHS.os}${SHELL_THEME_PATH.slice(1)}`;
   const linkTheme = cfg.injectMeta && themeStrategy === 'inherit';
 
   const parts = [
@@ -121,7 +147,8 @@ window.AURA_APP_ID=B.appId;window.AURA_INSTANCE_ID=B.instanceId;window.AURA_APP_
 var M=${JSON.stringify(meta)};if(ACT)M.push(['aura-activity-id',ACT]);
 var HEAD=document.head||document.documentElement;
 M.forEach(function(m){if(document.querySelector('meta[name="'+m[0]+'"]'))return;var e=document.createElement('meta');e.name=m[0];e.content=m[1];HEAD.appendChild(e);});
-${linkTheme ? `if(!document.querySelector('link[href$="/api/os/theme.css"]')){var L=document.createElement('link');L.rel='stylesheet';L.href=${JSON.stringify(themeCss)};HEAD.appendChild(L);}` : ''}
+${linkTheme ? themeLinkJs(themeCss) : ''}
+${themeRefreshJs(themeCss)}
 ${parts}
 }catch(_){}})();
 `;

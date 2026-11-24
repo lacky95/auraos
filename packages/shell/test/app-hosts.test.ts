@@ -89,6 +89,17 @@ test('an app host is streamed to the app, untouched, with X-Forwarded-*', async 
   assert.equal(h['x-aura-app-id'], 'io.acme.notes');
 });
 
+test('a manifest host answers the runtime path itself and drops a forged route header', async () => {
+  const before = seen.length;
+  const r = await get('notes--desk.example', '/_aura/runtime.js');
+  assert.equal(r.status, 200);
+  assert.equal(r.body, '');
+  assert.match(String(r.headers['content-type']), /javascript/);
+  assert.equal(seen.length, before);                            // never reached the app
+  await get('notes--desk.example', '/page', { 'x-aura-frame-route': 'host' });
+  assert.equal(seen.at(-1)!.headers['x-aura-frame-route'], undefined);
+});
+
 test('redirects pass through unchanged', async () => {
   const r = await get('notes--desk.example', '/redirect');
   assert.equal(r.status, 302);
@@ -115,6 +126,17 @@ test('a WebSocket upgrade is piped byte for byte', async () => {
   assert.equal(h.url, '/ws/room?x=1');
   assert.equal(h.headers['sec-websocket-protocol'], 'chat');
   assert.equal(h.headers.host, 'notes--desk.example');
+});
+
+test('a manifest host drops a forged route header on an upgrade', async () => {
+  await new Promise<void>((resolve, reject) => {
+    const sock = net.connect(port, '127.0.0.1');
+    sock.on('error', reject);
+    sock.once('data', () => { sock.destroy(); resolve(); });
+    sock.write('GET /ws HTTP/1.1\r\nHost: notes--desk.example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nX-Aura-Frame-Route: host\r\n\r\n');
+  });
+  assert.equal(seen.at(-1)!.url, '/ws');
+  assert.equal(seen.at(-1)!.headers['x-aura-frame-route'], undefined);
 });
 
 test('a desktop upgrade still reaches the desktop', async () => {

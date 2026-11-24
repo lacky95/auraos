@@ -66,6 +66,15 @@ export function osBase(opts: OsBaseOptions = {}): string {
   return osEnv()['OS_API_BASE'] ?? fallback;
 }
 
+/**
+ * The URL of a shell path (`/api/os/icons.svg`) for this page, on either route.
+ * For anything an app can't reach through an SDK method: an icon sprite, an
+ * `<img>`, a hand-written fetch.
+ */
+export function osUrl(path: `/${string}`): string {
+  return `${osBase()}${path}`;
+}
+
 /** True for any spelling of /api/proxy. An unparsable URL counts as proxied. */
 function isProxyUrl(url: string): boolean {
   try {

@@ -29,6 +29,10 @@
       "import": "./dist/os-sidecars.js",
       "types": "./dist/os-sidecars.d.ts"
     },
+    "./runtime/loader": {
+      "import": "./dist/runtime/loader.js",
+      "types": "./dist/runtime/loader.d.ts"
+    },
     "./runtime/next": {
       "import": "./dist/runtime/next.js",
       "types": "./dist/runtime/next.d.ts"

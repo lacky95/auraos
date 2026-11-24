@@ -177,6 +177,12 @@ test('on HTTPS from a trusted proxy the cookie is __Host- and Secure', async () 
   } finally { edgeFront.closeAllConnections?.(); edgeFront.close(); }
 });
 
+test('a request served from an App Host is marked for the app, and the mark cannot be forged away', async () => {
+  const cookie = await signIn();
+  await get(HOST, '/page', { cookie, 'x-aura-frame-route': 'forged' });
+  assert.equal(seen.at(-1)!.headers['x-aura-frame-route'], 'host');
+});
+
 test('a code works once, even when redeemed concurrently', async () => {
   const code = issue();
   const replies = await Promise.all([1, 2, 3, 4].map(() => get(HOST, `/_aura/handoff?code=${code}`)));

@@ -5,6 +5,7 @@
  * parsing.
  */
 
+import { APP_HOST_ROUTE_HEADER } from './hostRules.js';
 export interface AppContext {
   /** Reverse-domain app id, e.g. "com.aura.notepad". */
   appId: string;
@@ -95,7 +96,9 @@ export function readIdentityHeaders(request: Request): IdentityHeaders {
  *   const router = createRouter({ history: createWebHistory(getAppBasePath()) });
  */
 // PHASE2-CUTOVER: base paths exist only for proxied apps. An App Host serves from `/`, so the runtime sets ''.
-export function getAppBasePath(): string {
+export function getAppBasePath(request?: Request): string {
+  // On the server, only the request knows which route it came through.
+  if (request?.headers.get(APP_HOST_ROUTE_HEADER) === 'host') return '';
   // Browser path — prefer the window global, fall back to the meta tag.
   // typeof checks satisfy both Node SSR and bundler tree-shaking.
   if (typeof document !== 'undefined') {

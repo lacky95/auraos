@@ -195,7 +195,7 @@ export class OsClient {
   async getState(): Promise<string> {
     // Bare `process.env` throws in the browser (see the constructor).
     const env = (typeof process !== 'undefined' && process.env) ? process.env : {};
-    const instanceId = env['APP_INSTANCE_ID'] ?? env['APP_ID'] ?? 'unknown';
+    const instanceId = appHostRuntime()?.instanceId ?? env['APP_INSTANCE_ID'] ?? env['APP_ID'] ?? 'unknown';
     const res = await fetch(`${this.base}/api/instances/${encodeURIComponent(instanceId)}/status`);
     const data = await res.json() as { instance: { state: string } };
     return data.instance.state;
