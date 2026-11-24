@@ -64,7 +64,7 @@ const initialRef = new URL(Astro.request.url).searchParams.get('ref') ?? '';
       if (!ref) { setLog('paste a ref first'); return; }
       setLog('resolving...');
       try {
-        const res  = await fetch('/api/nexus/preview', {
+        const res  = await fetch(window.auraOs.url('/api/nexus/preview'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ref }),

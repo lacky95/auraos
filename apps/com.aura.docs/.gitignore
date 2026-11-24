@@ -1,4 +1,7 @@
 # serve.mjs builds into a staging dir before swapping it into .next
 fumadocs-site/.next-staging/
+# the App Host route's build and its staging dir (serve.mjs, Phase 2)
+fumadocs-site/.next-host/
+fumadocs-site/.next-host-staging/
 # marker that switches entrypoint.sh to `next dev` (see entrypoint.sh)
 .dev-mode

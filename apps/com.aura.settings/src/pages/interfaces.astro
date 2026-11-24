@@ -301,7 +301,7 @@ function statusStyle(s: string): [string, string] {
       if (del) {
         const name = del.getAttribute('data-delete');
         if (!confirm(`Delete custom interface '${name}'?`)) return;
-        const r = await fetch(`/api/interfaces/custom/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        const r = await fetch(window.auraOs.url(`/api/interfaces/custom/${encodeURIComponent(name)}`), { method: 'DELETE', headers: window.auraOs.bodylessHeaders() });
         if (r.ok) location.reload();
         else alert((await r.json().catch(() => ({}))).error ?? `HTTP ${r.status}`);
         return;
@@ -482,6 +482,10 @@ function statusStyle(s: string): [string, string] {
       });
       if (input.value) apply();                             // browser restored a query on back/forward
     })();
+  </script>
+  <!-- window.auraOs for the inline script above (scripts/os.ts). -->
+  <script>
+    import '../scripts/os.ts';
   </script>
 </body>
 </html>

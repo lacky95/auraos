@@ -1,12 +1,12 @@
 import * as core from '@aura/core';
-import type { AccessPrincipal } from '@aura/core';
-import { gatewayClaimOf } from '../../../server/gateway-identity.mjs';
+import type { AccessPrincipal, AuditInput, UserPrincipal } from '@aura/core';
+import { gatewayClaimOf, ownerUiApp } from '../../../server/gateway-identity.mjs';
 import { decide as liveDecide } from './decide.ts';
-import { gatewayInstance } from './identify.ts';
+import { gatewayInstance, gatewayOwner, type GatewayOwnerDeps } from './identify.ts';
 import { combineCandidates, concreteRule, kvNamespace, resourceFor, type ObserverManager } from './observer.ts';
 import { candidateRules, handlersOf, normalizeMethod, variantApplies } from './resolve.ts';
 import { ROUTE_ACCESS_MANIFEST } from './routeManifest.ts';
-import type { AccessLabel, Decide, RequestSnapshot, RouteAccessManifest } from './types.ts';
+import type { AccessLabel, AccessTarget, Decide, RequestSnapshot, RouteAccessManifest } from './types.ts';
 
 /**
  * The enforcement of `/_aura/os/*`. The gateway proves who is calling; this
@@ -16,13 +16,40 @@ import type { AccessLabel, Decide, RequestSnapshot, RouteAccessManifest } from '
  * candidate, unless the variant is marked `readAtGateway`: then the body is
  * parsed here exactly as the route will parse it. An unclassified route is
  * refused.
+ *
+ * A trusted system UI (D45, identify.ts `gatewayOwner`) is checked a second
+ * time, as the owner acting through it, when its instance rules refuse a call.
+ * That second check only covers the API groups and routes its OWNER_UI_APPS
+ * entry lists and never a login session, a shell screen or another app's
+ * upstream. Freshness and approvals on a rule still apply to the owner.
  */
 
 export interface GatewayEnforceDeps {
   mgr: ObserverManager;
   decide: Decide;
   manifest?: RouteAccessManifest;
+  /** App Host services for the D45 owner check; loaded when absent. */
+  ownerServices?: GatewayOwnerDeps['services'];
+  /** Where an owner action through a trusted UI is recorded. */
+  audit?: (entry: AuditInput) => Promise<unknown>;
 }
+
+/**
+ * Targets the owner never reaches through an app, whatever the rule says: its
+ * login session and handoff, a shell screen's client session, and another
+ * app's upstream (which includes the Terminal, D23, D29).
+ */
+const OWNER_UI_EXCLUDED_TARGETS: ReadonlySet<AccessTarget> = new Set(['session', 'client-session', 'proxy-upstream']);
+
+/** Whether this route is in the trusted UI's list (group or exact route). */
+function ownerUiCovers(appId: string, route: string): boolean {
+  const entry = ownerUiApp(appId);
+  if (!entry) return false;
+  const group = route.split('/')[2] ?? '';
+  return entry.groups.includes(group) || entry.routes.includes(route);
+}
+
+const liveAudit = (entry: AuditInput): Promise<unknown> => core.getAuthServices().audit.record(entry);
 
 export interface GatewayRequestContext {
   request: Request;
@@ -101,10 +128,11 @@ export async function enforceGateway(
   });
   if (candidates.length === 0) return refused(403, 'gateway-denied');
 
-  const principal: AccessPrincipal = {
-    kind: 'instance', appId: inst.appId, instanceId: inst.instanceId, verification: 'verified',
-  };
-  const results = await Promise.all(candidates.map(async ({ variant, rule }) => {
+  const transport = snapshot.https ? 'https' as const : 'http' as const;
+  const decideAs = (principal: AccessPrincipal) => Promise.all(candidates.map(async ({ variant, rule }) => {
+    if (principal.kind === 'user' && OWNER_UI_EXCLUDED_TARGETS.has(rule.target)) {
+      return { variant, result: { outcome: 'deny' as const, reason: 'wrong-principal' as const } };
+    }
     const concrete = concreteRule(rule, snapshot, principal, deps.mgr);
     const result = await deps.decide({
       principal,
@@ -113,7 +141,7 @@ export async function enforceGateway(
         variant: variant ? variant as AccessLabel : null, rule: concrete,
       },
       resource: resourceFor(concrete, snapshot, deps.mgr),
-      transport: snapshot.https ? 'https' : 'http',
+      transport,
       auth: { fresh: false },
       accessProfile: 'open',
       systemMode: 'normal',
@@ -121,5 +149,33 @@ export async function enforceGateway(
     });
     return { variant, result };
   }));
-  return combineCandidates(results).result.outcome === 'allow' ? null : refused(403, 'gateway-denied');
+  const allowed = (results: Awaited<ReturnType<typeof decideAs>>) => combineCandidates(results).result.outcome === 'allow';
+
+  const instance: AccessPrincipal = {
+    kind: 'instance', appId: inst.appId, instanceId: inst.instanceId, verification: 'verified',
+  };
+  if (allowed(await decideAs(instance))) return null;
+
+  // D45: the owner acting through a trusted system UI, on that UI's routes only.
+  if (!claim.owner || !ownerUiCovers(inst.appId, route)) return refused(403, 'gateway-denied');
+  const owner = await gatewayOwner(ctx.request, { mgr: deps.mgr as unknown as GatewayOwnerDeps['mgr'], services: deps.ownerServices });
+  if (!owner || !allowed(await decideAs(owner))) return refused(403, 'gateway-denied');
+  if (method !== 'GET' && method !== 'HEAD') await recordOwnerAction(deps.audit ?? liveAudit, owner, route, method);
+  return null;
+}
+
+/** Audit: who (the owner's session) and through which app. Never blocks the call. */
+async function recordOwnerAction(
+  audit: NonNullable<GatewayEnforceDeps['audit']>, owner: UserPrincipal, route: string, method: string,
+): Promise<void> {
+  try {
+    await audit({
+      by: core.userAttribution(owner),
+      action: 'gateway.owner-ui',
+      target: route,
+      detail: { method, through: owner.through?.appId, instance: owner.through?.instanceId },
+    });
+  } catch (err) {
+    console.warn(`[gateway] audit write failed: ${(err as Error).message}`);
+  }
 }

@@ -3,7 +3,7 @@
 import * as core from '@aura/core';
 import type { AdminPrincipal, ApiKeyPrincipal, Principal } from '@aura/core';
 import { jsonResponse } from './appResponse.js';
-import { gatewayInstance } from './access/identify.js';
+import { gatewayInstance, gatewayOwner, type GatewayOwnerDeps } from './access/identify.js';
 import { authenticateCaller, type CallerAuthManager } from './notificationCaller.js';
 
 /**
@@ -16,6 +16,8 @@ import { authenticateCaller, type CallerAuthManager } from './notificationCaller
  *   any other / invalid / expired credential → 401 — NEVER downgraded to anonymous
  *   no Authorization                     → anonymous (Referer / X-Aura-Instance-Id = hints only)
  *   signed App Host gateway claim        → instance (checked first; the gateway forwards no bearer)
+ *   … from a trusted system UI (D45)     → admin, only with a valid admin session bearer, which
+ *                                          the gateway forwards for that UI alone; else instance
  *
  * `SYSTEM_PRINCIPAL` is unreachable from HTTP by construction.
  *
@@ -28,6 +30,8 @@ const ADMIN_SESSION_PREFIX = 'aura-admin1.';
 
 export interface AuthDeps {
   mgr: CallerAuthManager;
+  /** App Host services for the D45 owner check; loaded when absent. */
+  ownerServices?: GatewayOwnerDeps['services'];
   apiKeys: { verify(key: string): Promise<{ id: string; name: string; scopes: string[] } | null> };
   admin: { verifySession(token: string): Promise<{ sessionId: string; expiresAt: number } | null> };
 }
@@ -50,8 +54,19 @@ function unauthorized(error: string, message: string): Response {
 export async function authenticate(request: Request, deps: AuthDeps = defaultAuthDeps()): Promise<Principal | Response> {
   const gateway = gatewayInstance(request, deps.mgr);
   if (gateway === 'invalid') return unauthorized('gateway-identity-invalid', 'invalid gateway identity');
-  if (gateway) return { kind: 'instance', appId: gateway.appId, instanceId: gateway.instanceId, verification: 'verified' };
   const token = bearer(request);
+  if (gateway) {
+    // D45: Settings with an admin session from the shell's own unlock dialog.
+    // The owner check runs first, so a bearer on any other gateway call is ignored.
+    if (token?.startsWith(ADMIN_SESSION_PREFIX)
+      && await gatewayOwner(request, { mgr: deps.mgr as unknown as GatewayOwnerDeps['mgr'], services: deps.ownerServices })) {
+      const s = await deps.admin.verifySession(token);
+      if (!s) return unauthorized('admin-session-invalid', 'admin session invalid or expired — unlock admin again');
+      const p: AdminPrincipal = { kind: 'admin', credential: 'shared', sessionId: s.sessionId, verification: 'verified' };
+      return p;
+    }
+    return { kind: 'instance', appId: gateway.appId, instanceId: gateway.instanceId, verification: 'verified' };
+  }
   if (token && token.startsWith(API_KEY_PREFIX)) {
     const rec = await deps.apiKeys.verify(token);
     if (!rec) return unauthorized('invalid-api-key', 'invalid or revoked API key');

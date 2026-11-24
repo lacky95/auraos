@@ -378,9 +378,11 @@ const modalApps = apps.filter((a) => requests(a, 'notifications.systemModal'));
 
       async function admin(method, path, body) {
         if (!session) throw new Error('locked');
-        const r = await fetch(path, {
+        // On an App Host the gateway forwards this bearer only for the system
+        // Settings app acting for a live owner session (D45).
+        const r = await fetch(window.auraOs.url(path), {
           method,
-          headers: { Authorization: `Bearer ${session.token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+          headers: { Authorization: `Bearer ${session.token}`, ...(body ? { 'Content-Type': 'application/json' } : window.auraOs.bodylessHeaders()) },
           body: body ? JSON.stringify(body) : undefined,
         });
         const data = await r.json().catch(() => ({}));
@@ -459,7 +461,12 @@ const modalApps = apps.filter((a) => requests(a, 'notifications.systemModal'));
       // On an App Host the credential is typed in the Shell's own dialog, so
       // this page only ever holds the short-lived session token.
       // PHASE2-CUTOVER: make this the only path and delete the inline dialog.
-      const onAppHost = location.hostname.split('.')[0].includes('--');
+      // Asked at the moment of use: window.auraOs comes from a module that runs
+      // after this script. Fails closed: no auraOs, a runtime bootstrap, or an
+      // App Host name (even if its runtime failed to load) all count, so the
+      // inline credential dialog only ever opens on the proxy route.
+      const onAppHost = () => !window.auraOs || window.auraOs.appHost() !== null
+        || location.hostname.split('.')[0].includes('--');
       function adminUnlocked(data) {
         session = { token: data.token, expiresAt: data.expiresAt };
         const ms = Math.max(0, data.expiresAt - Date.now());
@@ -469,20 +476,20 @@ const modalApps = apps.filter((a) => requests(a, 'notifications.systemModal'));
         return loadAll();
       }
       function requestShellUnlock() {
-        const shellOrigin = `${location.protocol}//${location.host.slice(location.host.indexOf('--') + 2)}`;
+        if (!window.auraOs || !window.auraOs.appHost()) return;
         const requestId = Math.random().toString(36).slice(2); // correlation only
         const onResult = (ev) => {
-          if (ev.source !== window.parent || ev.origin !== shellOrigin) return;
+          if (!window.auraOs.isFromShell(ev)) return;
           const d = ev.data;
           if (!d || d.type !== 'aura.admin.unlock.result' || d.requestId !== requestId) return;
           window.removeEventListener('message', onResult);
           if (d.ok && d.token) void adminUnlocked(d);
         };
         window.addEventListener('message', onResult);
-        window.parent.postMessage({ type: 'aura.admin.unlock.request', requestId }, shellOrigin);
+        window.auraOs.postToShell({ type: 'aura.admin.unlock.request', requestId });
       }
       $('btn-unlock').addEventListener('click', () => {
-        if (onAppHost) { requestShellUnlock(); return; }
+        if (onAppHost()) { requestShellUnlock(); return; }
         $('unlock-credential').value = '';
         $('unlock-error').hidden = true;
         dlg.showModal();
@@ -492,10 +499,12 @@ const modalApps = apps.filter((a) => requests(a, 'notifications.systemModal'));
         const submitter = ev.submitter;
         if (!submitter || submitter.value !== 'unlock') { $('unlock-credential').value = ''; return; }
         ev.preventDefault();
+        // Never send a credential typed in this document from an App Host.
+        if (onAppHost()) { $('unlock-credential').value = ''; dlg.close(); return; }
         const credential = $('unlock-credential').value.trim();
         $('unlock-credential').value = '';
         if (!credential) return;
-        const r = await fetch('/api/admin/session', {
+        const r = await fetch(window.auraOs.url('/api/admin/session'), {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credential }),
         }).catch(() => null);
         const data = r ? await r.json().catch(() => ({})) : {};
@@ -510,12 +519,12 @@ const modalApps = apps.filter((a) => requests(a, 'notifications.systemModal'));
       $('btn-lock').addEventListener('click', async () => {
         const token = session && session.token;
         lockLocal('Admin locked.');
-        if (token) await fetch('/api/admin/session', { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+        if (token) await fetch(window.auraOs.url('/api/admin/session'), { method: 'DELETE', headers: { Authorization: `Bearer ${token}`, ...window.auraOs.bodylessHeaders() } }).catch(() => {});
       });
       // Leaving the page drops the session from memory; also revoke it server-side.
       window.addEventListener('pagehide', () => {
         if (session) {
-          fetch('/api/admin/session', { method: 'DELETE', headers: { Authorization: `Bearer ${session.token}` }, keepalive: true }).catch(() => {});
+          fetch(window.auraOs.url('/api/admin/session'), { method: 'DELETE', headers: { Authorization: `Bearer ${session.token}`, ...window.auraOs.bodylessHeaders() }, keepalive: true }).catch(() => {});
           session = null;
         }
       });
@@ -633,7 +642,7 @@ const modalApps = apps.filter((a) => requests(a, 'notifications.systemModal'));
       const lsSaved = $('ls-saved');
       async function loadNotifSettings() {
         try {
-          const r = await fetch('/api/kv/os/notifications', { headers: { accept: 'application/json' } });
+          const r = await fetch(window.auraOs.url('/api/kv/os/notifications'), { headers: { accept: 'application/json' } });
           nset = r.ok ? ((await r.json()).value || {}) : {};
         } catch { nset = {}; }
         const ls = nset.lockscreen || {};
@@ -699,7 +708,7 @@ const modalApps = apps.filter((a) => requests(a, 'notifications.systemModal'));
           retention: { ...(nset.retention || {}), days: d === 'forever' ? 'forever' : Number(d), apps: rtApps },
         };
         try {
-          const r = await fetch('/api/kv/os/notifications', {
+          const r = await fetch(window.auraOs.url('/api/kv/os/notifications'), {
             method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value }),
           });
           if (!r.ok) {
@@ -724,9 +733,10 @@ const modalApps = apps.filter((a) => requests(a, 'notifications.systemModal'));
 
       // Deferred until the themed-select driver (forms.ts) has registered its
       // `window.auraForms` helpers — loadNotifSettings hydrates the selects via
-      // setSelectValue, so it must run AFTER the bundled module has loaded.
+      // setSelectValue, so it must run AFTER the bundled module has loaded —
+      // and until scripts/os.ts has set `window.auraOs`, which it reads from.
       function whenFormsReady(fn) {
-        if (window.auraForms) return fn();
+        if (window.auraForms && window.auraOs) return fn();
         setTimeout(() => whenFormsReady(fn), 10);
       }
       whenFormsReady(() => { void loadNotifSettings(); });
@@ -736,6 +746,7 @@ const modalApps = apps.filter((a) => requests(a, 'notifications.systemModal'));
   </script>
   <script>
     import '../scripts/forms.ts';
+    import '../scripts/os.ts';
   </script>
 </body>
 </html>

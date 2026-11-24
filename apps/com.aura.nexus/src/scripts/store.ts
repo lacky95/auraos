@@ -11,6 +11,7 @@
  * delegated handlers live for the whole session and always work on the
  * current page's DOM.
  */
+import { osUrl } from '@aura/app-sdk/os-auth';
 import {
   MAIN_LABEL, mainActionOf, statusLineOf, visibleItems, type InstallState, type MenuAction,
 } from '../lib/catalog';
@@ -127,7 +128,7 @@ async function syncNow(): Promise<void> {
   const badge = document.querySelector<HTMLElement>('[data-updates-badge]');
   if (!controls.length && !badge) return;
   try {
-    const res = await fetch('/api/nexus/status', { cache: 'no-store' });
+    const res = await fetch(osUrl('/api/nexus/status'), { cache: 'no-store' });
     const st = await res.json() as { apps?: Record<string, InstallState> };
     const apps = st.apps ?? {};
     for (const ic of controls) {
@@ -154,8 +155,8 @@ function pollLoop(): void {
 
 // ─── Actions ───────────────────────────────────────────────────────────────
 
-async function postJson(url: string, body?: unknown): Promise<{ res: Response; json: Record<string, unknown> }> {
-  const res = await fetch(url, {
+async function postJson(path: `/${string}`, body?: unknown): Promise<{ res: Response; json: Record<string, unknown> }> {
+  const res = await fetch(osUrl(path), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),

@@ -77,7 +77,7 @@ import SectionHeader from '../components/SectionHeader.astro';
       publishB.textContent = '...';
       log.textContent = 'publishing ' + body.source + ' for ' + path + '...';
       try {
-        const res = await fetch('/api/nexus/publish', {
+        const res = await fetch(window.auraOs.url('/api/nexus/publish'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),

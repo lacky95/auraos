@@ -514,7 +514,7 @@ export function createAppHostRouter({
 
     if (isAuraReservedPath(url)) {
       if (path === AURA_RESERVED_PATHS.runtime) return serveAppRuntime(req, res, { record: route.record, slot: route.slot });
-      if (path.startsWith(AURA_RESERVED_PATHS.os)) return handleAppGateway(req, res, { record: route.record, slot: route.slot, session });
+      if (path.startsWith(AURA_RESERVED_PATHS.os)) return handleAppGateway(req, res, { record: route.record, slot: route.slot, session, services: route.svc });
       return page(404, 'Not found', 'This path is reserved by AuraOS.');
     }
 

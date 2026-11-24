@@ -778,6 +778,7 @@ const FRAME_NAME = JSON.stringify({
         // back/forward and the address bar reflect the real iframe
         // location even across origins.
         window.addEventListener('message', function (e) {
+          if (!fromShell(e)) return;
           var d = e.data;
           if (!d || typeof d !== 'object') return;
           if (d.type !== 'aura.host.url-changed') return;
@@ -879,11 +880,27 @@ const FRAME_NAME = JSON.stringify({
           return { x: r.left, y: r.top, width: r.width, height: r.height };
         }
 
+        // The Shell's exact origin when this page runs on its App Host
+        // (/_aura/runtime.js names it), else null (proxy route, where the
+        // Shell is this document's own origin).
+        function shellOrigin() {
+          var B = window.AuraRuntimeBootstrap;
+          return B && typeof B.shellOrigin === 'string' ? B.shellOrigin : null;
+        }
+        // Only the Shell, our parent window, speaks for the OS and the native
+        // host. The page in the engine iframe is any website: without this it
+        // could post aura.host.url-changed and put any URL in our address bar.
+        function fromShell(e) {
+          if (window.parent === window || e.source !== window.parent) return false;
+          return e.origin === (shellOrigin() || location.origin);
+        }
+
         function postToOs(type, extras) {
           if (window.parent === window) return;
           var msg = { type: type };
           for (var k in extras) if (Object.prototype.hasOwnProperty.call(extras, k)) msg[k] = extras[k];
-          try { window.parent.postMessage(msg, '*'); } catch (err) { /* parent gone */ }
+          // PHASE2-CUTOVER: '*' only for the proxy route, where the parent is this same origin.
+          try { window.parent.postMessage(msg, shellOrigin() || '*'); } catch (err) { /* parent gone */ }
         }
 
         // Everything that wants the native window out of the way registers a
@@ -981,6 +998,7 @@ const FRAME_NAME = JSON.stringify({
         }
 
         window.addEventListener('message', function (e) {
+          if (!fromShell(e)) return;
           var d = e.data;
           if (!d || typeof d !== 'object') return;
 

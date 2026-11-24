@@ -152,11 +152,11 @@ const lightThemes = THEMES.filter(t => t.tone === 'light');
       try {
         // KV is full-value-replace, so read-modify-write to merge the
         // single field the user just clicked.
-        const cur = await fetch('/api/kv/os/theme');
+        const cur = await fetch(window.auraOs.url('/api/kv/os/theme'));
         const previous = cur.ok ? ((await cur.json()).value ?? {}) : {};
         const field = slot === 'dark' ? 'themeIdDark' : 'themeIdLight';
         const next = { ...previous, [field]: themeId };
-        const res = await fetch('/api/kv/os/theme', {
+        const res = await fetch(window.auraOs.url('/api/kv/os/theme'), {
           method:  'PUT',
           headers: { 'Content-Type': 'application/json' },
           body:    JSON.stringify({ value: next }),
@@ -196,6 +196,7 @@ const lightThemes = THEMES.filter(t => t.tone === 'light');
        rows live in different y-bands. -->
   <script>
     import { OsClient } from '@aura/app-sdk';
+    import '../scripts/os.ts';
     new OsClient().nav.installGridNav({ selector: '.theme-card[data-theme-id]' });
   </script>
 </body>

@@ -131,7 +131,22 @@ can't proxy through. Three things change versus the default Astro path:
    layout work: `touch apps/com.aura.docs/.dev-mode && aura restart app
    com.aura.docs` runs `next dev --turbo` again — remove the marker and
    restart when done. Pre-warm a build outside the sandbox with
-   `node serve.mjs --build-only` (env `APP_INSTANCE_ID` decides basePath).
+   `node serve.mjs --build-only` (add `--host` for the App Host build).
+
+   **Two routes, two builds (Phase 2).** A Next `basePath` is fixed at
+   build time. The proxy route needs `/api/proxy/<instanceId>` (env
+   `APP_INSTANCE_ID`); an App Host serves from `/`. `lib/base-path.mjs` is
+   the one place that decides it. serve.mjs owns `$APP_PORT` and passes
+   each request to the `next start` of its route, chosen by the
+   `x-aura-frame-route: host` header the shell's App Host router sets (and
+   strips from every other request). The proxy build (`.next`) always runs,
+   because the lifecycle calls and the agents' MCP at
+   `/api/proxy/com.aura.docs/mcp` arrive with the prefix on both routes.
+   The App Host build (`.next-host`) is built and started on the first App
+   Host request. Both builds load `/_aura/runtime.js` through
+   `AURA_RUNTIME_LOADER_JS` from `@aura/app-sdk/runtime/loader`; it does
+   nothing on the proxy route. At the Phase 2 cutover the proxy build goes
+   (see the cutover markers in serve.mjs and lib/base-path.mjs).
 2. **You serve the lifecycle endpoints yourself** — same contract as
    Astro apps (POST `/api/lifecycle/{onCreate,onStart,onResume,onPause,
    onStop,onDestroy}` returning `{ ok: true }`, plus GET `/api/lifecycle/health`

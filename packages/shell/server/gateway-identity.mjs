@@ -17,6 +17,39 @@ const KEY = Symbol.for('aura.gateway.key');
 const PREFIX = 'agw1';
 export const GATEWAY_CLAIM_TTL_S = 30;
 
+/**
+ * Trusted system UIs (D45): the owner acts through these apps, and through no
+ * other. Fixed here, never configurable, and only their `system` scope copy
+ * qualifies. Each lists the API groups (first segment after `/api`) and exact
+ * routes where the owner rule may apply; anything else stays on instance rules.
+ */
+export const OWNER_UI_APPS = Object.freeze({
+  'com.aura.settings': Object.freeze({
+    groups: Object.freeze(['activities', 'admin', 'apps', 'instances', 'interfaces', 'kv', 'os', 'scopes']),
+    routes: Object.freeze([]),
+  }),
+  'com.aura.nexus': Object.freeze({
+    groups: Object.freeze(['apps', 'nexus']),
+    routes: Object.freeze(['/api/os/ui/command']),
+  }),
+});
+
+/** The trusted system UI entry for an app id, or null. */
+export function ownerUiApp(appId) {
+  return Object.hasOwn(OWNER_UI_APPS, appId) ? OWNER_UI_APPS[appId] : null;
+}
+
+/**
+ * Whether this app and installation may act for the owner: an allowlisted id
+ * whose host record belongs to the active `system` installation. A same-id
+ * app installed in `global` or `user` has its own installation and never passes.
+ */
+export async function isOwnerUiInstallation(registry, { appId, installationId }) {
+  if (!ownerUiApp(appId) || typeof installationId !== 'string' || !installationId) return false;
+  const inst = await registry?.getInstallation?.(installationId);
+  return !!inst && inst.appId === appId && inst.scope === 'system' && inst.state === 'active';
+}
+
 export function gatewayKey() {
   globalThis[KEY] ??= randomBytes(32);
   return globalThis[KEY];
@@ -35,6 +68,9 @@ export function signGatewayClaim(claim) {
   return `${PREFIX}.${payload}.${mac(payload).toString('base64url')}`;
 }
 
+const validOwner = (o) => !!o && typeof o === 'object'
+  && typeof o.userId === 'string' && !!o.userId && typeof o.sid === 'string' && !!o.sid;
+
 /** The claim, if the token is genuine, current and for this method and path. Never throws. */
 export function verifyGatewayClaim(token, { method, path, now = Date.now() }) {
   try {
@@ -45,6 +81,7 @@ export function verifyGatewayClaim(token, { method, path, now = Date.now() }) {
     if (given.length !== want.length || !timingSafeEqual(given, want)) return null;
     const claim = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
     if (claim?.v !== 1 || typeof claim.appId !== 'string' || !claim.appId) return null;
+    if (claim.owner !== undefined && !validOwner(claim.owner)) return null;
     const seconds = now / 1000;
     if (typeof claim.exp !== 'number' || claim.exp < seconds || claim.iat > seconds + 5) return null;
     if (claim.method !== method || canonicalPath(claim.path) !== canonicalPath(path)) return null;

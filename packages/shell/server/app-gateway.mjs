@@ -14,14 +14,19 @@
  *     each other, so SameSite does not separate them)
  *   - mutations: exact Origin, plus a JSON content type or the CSRF token
  *   - request headers: an allowlist, so cookies, Authorization, X-Forwarded-*
- *     and any inbound identity never reach the shell
+ *     and any inbound identity never reach the shell. One exception: a trusted
+ *     system UI acting for the owner (D45) may send an admin session bearer
+ *   - owner acting through a trusted system UI (D45): only the `system` copy of
+ *     an app in OWNER_UI_APPS, on a host cookie bound to a live owner session,
+ *     gets an `owner` field in its claim. Nothing in the request can set it
  *   - response headers: no Set-Cookie, CORS grant or redirect target
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import { AURA_RESERVED_PATHS, GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
-import { GATEWAY_CLAIM_TTL_S, gatewayKey, signGatewayClaim } from './gateway-identity.mjs';
+import { loadAppHostServices } from './app-host-auth.mjs';
+import { GATEWAY_CLAIM_TTL_S, gatewayKey, isOwnerUiInstallation, ownerUiApp, signGatewayClaim } from './gateway-identity.mjs';
 import { attachSseMux } from './sse-mux.mjs';
 
 const OS_PREFIX = AURA_RESERVED_PATHS.os;
@@ -29,6 +34,9 @@ export const GATEWAY_MUX_PATH = `${OS_PREFIX}sse-mux`;
 export const GATEWAY_CSRF_PATH = `${OS_PREFIX}_csrf`;
 export const GATEWAY_CSRF_HEADER = 'x-aura-csrf';
 const RUNTIME_ROUTE = '/api/os/app-runtime.js';
+
+/** An admin session, the only Authorization a trusted system UI may pass on (lib/auth.ts). */
+const ADMIN_BEARER_RE = /^Bearer aura-admin1\.[A-Za-z0-9._~+/=-]{1,2048}$/;
 
 const SAFE_METHODS = new Set(['GET', 'HEAD']);
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -81,12 +89,32 @@ function hostSession({ record, slot, session }) {
   return session;
 }
 
-function buildClaim({ record, slot }, { method, path, origin, userId }) {
+function buildClaim({ record, slot }, { method, path, origin, userId, owner = null }) {
   const iat = Math.floor(Date.now() / 1000);
   return {
     v: 1, appId: record.appId, installationId: record.installationId, instanceId: slot.instanceId,
-    label: slot.label, slot: slot.slot, origin, userId, method, path, iat, exp: iat + GATEWAY_CLAIM_TTL_S,
+    label: slot.label, slot: slot.slot, origin, userId, ...(owner ? { owner } : {}),
+    method, path, iat, exp: iat + GATEWAY_CLAIM_TTL_S,
   };
+}
+
+/**
+ * D45: the owner this request acts for, or null. Only an allowlisted app's
+ * active `system` installation qualifies, and only while the session its host
+ * cookie came from is live (`login-dark` counts while login is dark, as for
+ * the desktop). Fails closed when the registry can't be read.
+ */
+async function ownerActing(ctx, session) {
+  if (!ownerUiApp(ctx.record?.appId)) return null;
+  try {
+    const svc = ctx.services ?? await loadAppHostServices();
+    if (!svc) return null;
+    if (!(await isOwnerUiInstallation(svc.registry, ctx.record))) return null;
+    if (!(await svc.sessionLive(session.sid))) return null;
+    return { userId: session.userId, sid: session.sid };
+  } catch {
+    return null;
+  }
 }
 
 /** Everything the shell receives: allowlisted headers plus the verified identity. */
@@ -95,6 +123,9 @@ function shellHeaders(reqHeaders, claim) {
   for (const name of FORWARDED_REQUEST_HEADERS) {
     if (reqHeaders[name] !== undefined) headers[name] = reqHeaders[name];
   }
+  // An admin session the shell's own unlock dialog handed to a trusted UI.
+  const auth = reqHeaders.authorization;
+  if (claim.owner && typeof auth === 'string' && ADMIN_BEARER_RE.test(auth)) headers.authorization = auth;
   headers[GATEWAY_IDENTITY_HEADER] = signGatewayClaim(claim);
   headers['x-aura-app-id'] = claim.appId;
   headers['x-aura-instance-id'] = claim.instanceId;
@@ -150,7 +181,7 @@ function pipeToShell(req, res, path, headers) {
 }
 
 /** `/_aura/os/*`. See the file header for what is checked here and in the shell. */
-export function handleAppGateway(req, res, ctx) {
+export async function handleAppGateway(req, res, ctx) {
   if (!ctx?.slot?.instanceId) return refuse(res, 409, 'no-instance');
   const session = hostSession(ctx);
   if (!session) return refuse(res, 401, 'no-session');
@@ -165,7 +196,8 @@ export function handleAppGateway(req, res, ctx) {
 
   const path = gatewayShellPath(req.url);
   if (!path) return refuse(res, 404, 'not-a-gateway-path');
-  const claim = buildClaim(ctx, { method: req.method, path, origin: session.aud, userId: session.userId });
+  const owner = await ownerActing(ctx, session);
+  const claim = buildClaim(ctx, { method: req.method, path, origin: session.aud, userId: session.userId, owner });
   return pipeToShell(req, res, path, shellHeaders(req.headers, claim));
 }
 
@@ -183,6 +215,8 @@ function gatewayMux() {
  * WebSocket upgrade for `/_aura/os/sse-mux`. Each stream goes through the same
  * path check and its own signed GET claim, and sends nothing from the upgrade
  * request. A stream the manifest refuses ends with the mux's `fail` frame.
+ * Streams stay on instance rules even for a trusted system UI (D45): a stream
+ * outlives the session check it started with.
  */
 export async function handleAppGatewayUpgrade(req, socket, head, ctx) {
   const fail = (status, text) => {

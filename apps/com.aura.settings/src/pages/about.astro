@@ -180,12 +180,12 @@ const S = {
   </div>
 
   <script>
-    // The shell's own endpoint, called with an ABSOLUTE path on purpose: this
-    // page is served through the OS proxy, so its origin already IS the shell
-    // (same origin as /api/os/theme.css linked above). Going straight there
-    // avoids proxying an OS-level operation through an app backend that has
-    // no business owning it.
-    const api = '/api/admin/self-update';
+    import { osUrl } from '@aura/app-sdk';
+    // The shell's own endpoint, never this app's backend: an OS-level
+    // operation has no business going through an app. On the proxy route the
+    // page's origin is the shell; on an App Host osUrl() is the same-origin
+    // gateway.
+    const api = osUrl('/api/admin/self-update');
 
     const btn        = document.getElementById('upd-btn')     as HTMLButtonElement;
     const rebuildBtn = document.getElementById('rebuild-btn') as HTMLButtonElement;

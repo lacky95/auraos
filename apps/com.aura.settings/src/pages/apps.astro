@@ -378,7 +378,7 @@ apps.sort((a, b) => {
         const next = btn.dataset.on !== 'true';
         btn.disabled = true;
         try {
-          const r = await fetch('/api/admin/apps/enabled', {
+          const r = await fetch(window.auraOs.url('/api/admin/apps/enabled'), {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             body:    JSON.stringify({ appId, enabled: next }),
@@ -495,7 +495,7 @@ apps.sort((a, b) => {
       if (choice !== 'confirm' || !appId || !btn) return;
       btn.disabled = true;
       try {
-        const r = await fetch(`/api/apps/${encodeURIComponent(appId)}/remove`, { method: 'POST' });
+        const r = await fetch(window.auraOs.url(`/api/apps/${encodeURIComponent(appId)}/remove`), { method: 'POST', headers: window.auraOs.bodylessHeaders() });
         const body = await r.json().catch(() => null);
         if (!r.ok || !body?.ok) {
           throw new Error(body?.error ?? `HTTP ${r.status}`);
@@ -518,6 +518,7 @@ apps.sort((a, b) => {
        from jumping sideways into the trash button. -->
   <script>
     import { OsClient } from '@aura/app-sdk';
+    import '../scripts/os.ts';
     // getElements (not `selector`) because it is re-resolved on every
     // keypress: a row hidden by the filter must drop out of the arrow-walk,
     // and a static selector would keep walking onto invisible rows.
