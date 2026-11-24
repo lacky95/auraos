@@ -522,3 +522,27 @@ test('a Terminal session grant is its own record, and revoking the app grant dro
   assert.equal(await grants.get(app, 'terminal.embed', s1), null, 'the session grant went with the app grant');
   assert.deepEqual(await grants.listFor(app), []);
 });
+
+test('an ended Terminal session takes every grant of it along, and nothing else', async () => {
+  const BY = adminAttribution(ADMIN);
+  const a = { kind: 'app', id: 'com.example.embedder' };
+  const b = { kind: 'app', id: 'com.example.basic' };
+  const s1 = terminalSessionScope('com.aura.terminal-2#a3');
+  const s2 = terminalSessionScope('com.aura.terminal-3#a1');
+  await grants.grant(a, 'terminal.embed', { by: BY, appScope: 'user' });
+  await grants.grant(a, 'terminal.embed', { by: { kind: 'system' }, appScope: 'user', scope: s1 });
+  await grants.grant(b, 'terminal.embed', { by: { kind: 'system' }, appScope: 'user', scope: s1 });
+  await grants.grant(a, 'terminal.embed', { by: { kind: 'system' }, appScope: 'user', scope: s2 });
+  const sameId = (id) => (sc) => sc.kind === 'terminal-session' && sc.id === id;
+  assert.equal(await grants.revokeScopes('terminal.embed', sameId('com.aura.terminal-2#a3')), 2);
+  assert.equal(await grants.get(a, 'terminal.embed', s1), null);
+  assert.equal(await grants.get(b, 'terminal.embed', s1), null);
+  // A new session under the reused name starts with no grant; the rest stands.
+  assert.ok(await grants.get(a, 'terminal.embed', s2));
+  assert.ok(await grants.get(a, 'terminal.embed'), 'the app-wide grant is not a session grant');
+  // A whole instance.
+  assert.equal(await grants.revokeScopes('terminal.embed', (sc) => sc.kind === 'terminal-session' && sc.id.startsWith('com.aura.terminal-3#')), 1);
+  await grants.revoke(a, 'terminal.embed');
+  assert.deepEqual(await grants.listFor(a), []);
+  assert.deepEqual(await grants.listFor(b), []);
+});

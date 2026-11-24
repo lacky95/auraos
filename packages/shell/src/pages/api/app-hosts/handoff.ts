@@ -1,9 +1,8 @@
 import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
-import { issueAppHostHandoff } from '../../../lib/appHostHandoff.ts';
-import { currentOwnerSession, loginEnabled } from '../../../lib/authSurface.js';
-import { LOGIN_DARK_SID, loadAppHostServices, safeReturnPath } from '../../../../server/app-host-auth.mjs';
-import { classifyHost, edgeView } from '../../../../server/host-policy.mjs';
+import { issueAppHostHandoff, shellOwner } from '../../../lib/appHostHandoff.ts';
+import { loadAppHostServices, safeReturnPath } from '../../../../server/app-host-auth.mjs';
+import { classifyHost } from '../../../../server/host-policy.mjs';
 
 const MAX_BODY_BYTES = 4 * 1024;
 const HEADERS = {
@@ -14,9 +13,6 @@ const HEADERS = {
 };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: HEADERS });
 const isId = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9._#:-]{1,256}$/.test(v);
-const peerOf = (ctx: { clientAddress?: string }) => {
-  try { return ctx.clientAddress; } catch { return undefined; }
-};
 
 async function readBody(request: Request): Promise<Record<string, unknown> | null> {
   if (!/^application\/json\s*(;|$)/i.test(request.headers.get('content-type') ?? '')) return null;
@@ -47,12 +43,9 @@ async function readBody(request: Request): Promise<Record<string, unknown> | nul
  */
 export const POST: APIRoute = async (ctx) => {
   const { request } = ctx;
-  const edge = edgeView({ peer: peerOf(ctx), header: (name) => request.headers.get(name) });
-  const site = request.headers.get('sec-fetch-site');
-  if ((site !== null && site !== 'same-origin') || request.headers.get('origin') !== edge.origin) {
-    return json({ error: 'forbidden-origin' }, 403);
-  }
-  const shell = classifyHost(edge.host);
+  const owner = await shellOwner(ctx);
+  if ('error' in owner && owner.error === 'forbidden-origin') return json({ error: owner.error }, owner.status);
+  const shell = classifyHost(owner.edge.host);
   if (shell.kind !== 'shell' || shell.internal) return json({ error: 'no-app-hosts' }, 409);
 
   const body = await readBody(request);
@@ -65,14 +58,8 @@ export const POST: APIRoute = async (ctx) => {
   }
 
   try {
-    let identity: { sid: string; userId: string | null; sessionExpiresAt: number | null };
-    if (loginEnabled()) {
-      const current = await currentOwnerSession(ctx);
-      if (!current) return json({ error: 'login-required' }, 401);
-      identity = { sid: current.sessionId, userId: current.userId, sessionExpiresAt: current.expiresAt };
-    } else {
-      identity = { sid: LOGIN_DARK_SID, userId: null, sessionExpiresAt: null };
-    }
+    if ('error' in owner) return json({ error: owner.error }, owner.status);
+    const { identity } = owner;
 
     const services = await loadAppHostServices();
     if (!services) return json({ error: 'unavailable' }, 503);
@@ -86,7 +73,7 @@ export const POST: APIRoute = async (ctx) => {
       if (!activity || activity.appId !== appId || activity.parentInstanceId !== instanceId) return json({ error: 'not-found' }, 404);
     }
     const issued = await issueAppHostHandoff({
-      services, mgr, appId, instanceId, returnPath, scheme: edge.scheme, desktopHost: edge.host, identity,
+      services, mgr, appId, instanceId, returnPath, scheme: owner.edge.scheme, desktopHost: owner.edge.host, identity,
     });
     if ('error' in issued) return json({ error: issued.error }, issued.status);
     return json(issued);

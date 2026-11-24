@@ -8,6 +8,7 @@ import { HOST_LABEL, TMUX_CONF, TMUX_SOCKET, liveTmuxSessions, respawnIfDead, sh
 import { dialogAction, getDialog, installDialogHooks, setDialogText } from './input-dialog.ts';
 import { openPaneTap, paneRepaint, tmuxHasSession, type PaneTap } from './pane-tap.ts';
 import { forgetSessionPicks } from './window-session.ts';
+import { releaseSessionGrants } from './session-grants.ts';
 import { forgetCwd, hasSavedCwd, savedCwd, startCwdRecorder } from './session-cwd.ts';
 import { replayBudget, replayTail } from './replay-tail.ts';
 import { forgetAgent } from './agent-state.ts';
@@ -528,6 +529,7 @@ function attachPtyOutput(sess: Session): void {
       deleteScrollback(sess.id);
       forgetSessionPicks(sess.id);
       forgetAgent(sess.id);
+      releaseSessionGrants(sess.id);
     }
     for (const ws of sess.clients.keys()) { try { ws.close(); } catch { /* ignore */ } }
     sess.clients.clear();
@@ -889,6 +891,7 @@ export function killSession(sessionId: string): boolean {
   deleteScrollback(sessionId);
   forgetCwd(sessionId);
   forgetAgent(sessionId);
+  releaseSessionGrants(sessionId);
 
   if (!sess) {
     if (killedTmux) log('killSession', sessionId, 'detached tmux session reaped (no in-memory session)');

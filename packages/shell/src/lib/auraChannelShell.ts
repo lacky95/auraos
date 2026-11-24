@@ -116,6 +116,13 @@ export function authorizeShellMessage<E>(
       && isAuraChannelRouteAllowed(type, sender.endpoint, 'shell');
   }
 
+  // Asking the owner to share a Terminal session: only an App Host window
+  // itself, so the dialog can name the app from the frame, never the payload.
+  if (type === 'aura.terminal.share.request') {
+    return !!frame && sender.direct && frame.route === 'host' && !!frame.appId
+      && isAuraChannelRouteAllowed(type, sender.endpoint, 'shell');
+  }
+
   // The shell's console holds other apps' output.
   if (type === 'aura.console.requestBacklog' && frame?.route === 'host' && frame.appId !== CONSOLE_APP_ID) {
     return false;

@@ -188,6 +188,30 @@ export class GrantStore {
     return JSON.parse(prev) as GrantRecord;
   }
 
+  /**
+   * Drop every subject's grant of `permission` in the narrower scopes `match`
+   * selects (a Terminal session ended, or its whole instance). Returns how many.
+   */
+  async revokeScopes(permission: string, match: (scope: GrantScope) => boolean): Promise<number> {
+    permission = canonicalPermission(permission);
+    const r = this.redis();
+    let n = 0;
+    for (const key of await r.smembers(GRANT_INDEX_KEY)) {
+      let dropped = 0;
+      for (const [f, raw] of Object.entries(await r.hgetall(key))) {
+        let rec: GrantRecord;
+        try { rec = JSON.parse(raw) as GrantRecord; } catch { continue; }
+        if (rec.permission !== permission || !rec.scope || rec.scope.kind === 'os' || !match(rec.scope)) continue;
+        await r.hdel(key, f);
+        dropped++;
+        this.emit({ subjectKind: rec.subject.kind, subjectId: rec.subject.id, permission, change: 'revoked' });
+      }
+      n += dropped;
+      if (dropped && (await r.hlen(key)) === 0) await r.multi().del(key).srem(GRANT_INDEX_KEY, key).exec();
+    }
+    return n;
+  }
+
   /** The grant record of one permission, or null. Read live on every check (no cache). */
   async get(subject: GrantSubject, permission: string, scope: GrantScope = OS_SCOPE): Promise<GrantRecord | null> {
     permission = canonicalPermission(permission);

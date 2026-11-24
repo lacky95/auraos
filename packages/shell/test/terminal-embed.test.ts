@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  OPEN_TERMINAL_ACTION, createTerminalAccess, openTerminalRefusal, terminalEmbedAncestors, terminalSessionInstance,
+  OPEN_TERMINAL_ACTION, createTerminalAccess, openTerminalRefusal, shareSession, terminalEmbedAncestors, terminalSessionInstance,
 } from '../server/terminal-embed.mjs';
 
 const TERMINAL = 'com.aura.terminal';
@@ -103,4 +103,19 @@ test('only the System Terminal\'s pages can be embedded this way', async () => {
   assert.deepEqual(await terminalEmbedAncestors(ctx(embedUrl(SESSION, 'terminalx1'), { record: { appId: COUNTER } }), access()), []);
   const shadow = access({ scopes: { [TERMINAL]: 'user', [TX]: 'user' } });
   assert.deepEqual(await terminalEmbedAncestors(ctx(embedUrl(SESSION, 'terminalx1')), shadow), []);
+});
+
+// ── the owner shares an existing session (Shell dialog) ─────────────────────
+
+test('the owner can share a session only with an app holding terminal.embed', async () => {
+  const granted: Array<[string, string]> = [];
+  const grant = async (appId: string, sessionId: string) => { granted.push([appId, sessionId]); };
+  const a = access({ sessions: {} });
+  assert.equal(await shareSession(TX, SESSION, { access: a, grant }), null);
+  assert.deepEqual(granted, [[TX, SESSION]]);
+  assert.equal(await shareSession(COUNTER, SESSION, { access: a, grant }), 'not-granted');
+  assert.equal(await shareSession(TERMINAL, SESSION, { access: a, grant }), 'not-an-embedder');
+  assert.equal(await shareSession(TX, 'io.evil-1#a1', { access: a, grant }), 'bad-session-id');
+  assert.equal(await shareSession(TX, SESSION, { access: access({ grants: {} }), grant }), 'not-granted', 'revoked');
+  assert.equal(granted.length, 1);
 });

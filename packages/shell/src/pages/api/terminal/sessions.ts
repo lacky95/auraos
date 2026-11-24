@@ -3,7 +3,7 @@ import * as core from '@aura/core';
 import { jsonResponse } from '../../../lib/appResponse.js';
 import { verifiedAppCaller } from '../../../lib/terminalCaller.ts';
 import {
-  TERMINAL_APP_ID, forgetSession, holdsListGrant, isSystemTerminal, mayUseSession, terminalSessionInstance,
+  TERMINAL_APP_ID, forgetSessionGrants, holdsListGrant, isSystemTerminal, mayUseSession, terminalSessionInstance,
 } from '../../../../server/terminal-embed.mjs';
 
 /**
@@ -82,6 +82,7 @@ export const DELETE: APIRoute = async ({ request, url }) => {
     return jsonResponse({ error: 'not-granted', message: 'This app was not granted that Terminal session.' }, 403);
   }
   const res = await forward(instanceId, `/api/sessions?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
-  if (res.ok && caller) await forgetSession(caller.appId, id);
+  // The Terminal reports the end too; dropping the grants here closes the gap.
+  if (res.ok) await forgetSessionGrants(id).catch(() => 0);
   return res;
 };

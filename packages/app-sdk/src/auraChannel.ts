@@ -114,6 +114,10 @@ export const AURA_CHANNEL_MESSAGES = {
   'aura.admin.unlock.request': TO_SHELL,
   'aura.admin.unlock.result': TO_APP,
 
+  // Terminal session share: an embed host asks, the owner decides in the Shell (D25)
+  'aura.terminal.share.request': TO_SHELL,
+  'aura.terminal.share.result': TO_APP,
+
   // Native host
   'aura.host.url-changed': NATIVE_TO_APP,
   'aura.host.needsTopLevel': NATIVE_TO_APP,

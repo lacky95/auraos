@@ -1,0 +1,112 @@
+---
+/**
+ * The owner decides, in the Shell's own document, whether an app may show an
+ * existing Terminal session (D25: "Open in TerminalX", or attaching to a
+ * session the app did not create). The app only asks, with
+ * `aura.terminal.share.request`. The app named here comes from its frame,
+ * never from the message, and the grant is recorded by /api/terminal/share
+ * for this page's owner session. A native modal `<dialog>` sits in the
+ * browser's top layer, above every app frame.
+ */
+---
+<dialog id="aura-terminal-share" aria-labelledby="aura-terminal-share-title">
+  <form id="aura-terminal-share-form">
+    <div id="aura-terminal-share-title">SHOW TERMINAL SESSION</div>
+    <p><strong id="aura-terminal-share-app"></strong> asks to show Terminal session <code id="aura-terminal-share-session"></code>.</p>
+    <p>It will see everything in that session and can type into it and close it, until the session ends or you revoke its <code>terminal.embed</code>.</p>
+    <div class="aura-terminal-share-actions">
+      <button type="button" id="aura-terminal-share-cancel">CANCEL</button>
+      <button type="submit" id="aura-terminal-share-allow">SHOW IT</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+  import { onAuraChannel, replyTo, type AuraChannelEvent } from '../../lib/auraChannelShell.ts';
+
+  const dlg = document.getElementById('aura-terminal-share') as HTMLDialogElement | null;
+  const form = document.getElementById('aura-terminal-share-form') as HTMLFormElement | null;
+  const appEl = document.getElementById('aura-terminal-share-app');
+  const sessEl = document.getElementById('aura-terminal-share-session');
+  const cancel = document.getElementById('aura-terminal-share-cancel');
+
+  let pending: { ev: AuraChannelEvent; appId: string; sessionId: string } | null = null;
+  let checking = false;
+
+  async function share(body: Record<string, unknown>): Promise<{ ok: boolean; body: Record<string, unknown> }> {
+    try {
+      const r = await fetch('/api/terminal/share', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      return { ok: r.ok, body: await r.json().catch(() => ({})) as Record<string, unknown> };
+    } catch {
+      return { ok: false, body: {} };
+    }
+  }
+
+  function answer(ev: AuraChannelEvent, ok: boolean, reason?: string): void {
+    replyTo(ev, {
+      type: 'aura.terminal.share.result', requestId: ev.data['requestId'], sessionId: ev.data['sessionId'], ok,
+      ...(reason ? { reason } : {}),
+    });
+  }
+
+  function finish(ok: boolean, reason?: string): void {
+    const p = pending;
+    pending = null;
+    if (dlg?.open) dlg.close();
+    if (p) answer(p.ev, ok, reason);
+  }
+
+  if (dlg && form && appEl && sessEl && cancel) {
+    onAuraChannel('aura.terminal.share.request', async (ev) => {
+      const appId = ev.sender.frame?.appId ?? null;
+      const sessionId = ev.data['sessionId'];
+      if (!appId || typeof sessionId !== 'string') { answer(ev, false, 'invalid'); return; }
+      if (pending || checking) { answer(ev, false, 'busy'); return; }
+      // Only an app the owner already granted terminal.embed, for a live session, gets as far as asking.
+      checking = true;
+      const check = await share({ appId, sessionId, check: true });
+      checking = false;
+      if (!check.ok || check.body['eligible'] !== true) { answer(ev, false, 'not-eligible'); return; }
+      pending = { ev, appId, sessionId };
+      appEl.textContent = appId;
+      sessEl.textContent = sessionId;
+      dlg.showModal();
+      document.getElementById('aura-terminal-share-allow')?.focus();
+    });
+    cancel.addEventListener('click', () => finish(false, 'declined'));
+    dlg.addEventListener('cancel', (e) => { e.preventDefault(); finish(false, 'declined'); });
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const p = pending;
+      if (!p) return;
+      const r = await share({ appId: p.appId, sessionId: p.sessionId });
+      finish(r.ok, r.ok ? undefined : String(r.body['error'] ?? 'failed'));
+    });
+  }
+</script>
+
+<style is:global>
+  #aura-terminal-share {
+    width: min(460px, calc(100vw - 32px));
+    box-sizing: border-box;
+    padding: 16px;
+    background: var(--aura-color-surface);
+    color: var(--aura-color-text);
+    border: 1px solid var(--aura-color-warning);
+    font-family: var(--aura-font-mono);
+    font-size: 0.8rem;
+  }
+  #aura-terminal-share::backdrop { background: color-mix(in srgb, var(--aura-color-bg) 88%, transparent); }
+  #aura-terminal-share-title { color: var(--aura-color-warning); font-weight: 700; letter-spacing: 0.08em; }
+  .aura-terminal-share-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+  .aura-terminal-share-actions button {
+    padding: 4px 12px;
+    background: transparent;
+    color: var(--aura-color-primary);
+    border: var(--aura-border);
+    font: inherit;
+    cursor: pointer;
+  }
+</style>

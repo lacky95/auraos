@@ -1,7 +1,9 @@
 import type * as core from '@aura/core';
 import { buildAppHost } from '@aura/core/host-rules';
-import { appHostAuth } from '../../server/app-host-auth.mjs';
-import { originOf } from '../../server/host-policy.mjs';
+import type { APIContext } from 'astro';
+import { appHostAuth, LOGIN_DARK_SID } from '../../server/app-host-auth.mjs';
+import { edgeView, originOf } from '../../server/host-policy.mjs';
+import { currentOwnerSession, loginEnabled } from './authSurface.js';
 
 /**
  * A one-time code that signs a browser in to one running instance's App Host:
@@ -20,6 +22,31 @@ export interface HandoffIdentity {
   sid: string;
   userId: string | null;
   sessionExpiresAt: number | null;
+}
+
+/**
+ * The owner behind a request from the Shell's own page, or why not. Exact
+ * Origin: App Hosts are same-site with the Shell, so this is what stops an
+ * app's page from acting as the desktop. With owner login dark, reaching the
+ * desktop is all it takes (a Phase 3 item).
+ */
+export async function shellOwner(ctx: Pick<APIContext, 'request' | 'cookies'> & { clientAddress?: string }): Promise<
+  | { edge: ReturnType<typeof edgeView>; identity: HandoffIdentity }
+  | { edge: ReturnType<typeof edgeView>; error: string; status: number }
+> {
+  const { request } = ctx;
+  let peer: string | undefined;
+  try { peer = ctx.clientAddress; } catch { peer = undefined; }
+  const edge = edgeView({ peer, header: (name: string) => request.headers.get(name) });
+  const site = request.headers.get('sec-fetch-site');
+  if ((site !== null && site !== 'same-origin') || request.headers.get('origin') !== edge.origin) {
+    return { edge, error: 'forbidden-origin', status: 403 };
+  }
+  if (!loginEnabled()) return { edge, identity: { sid: LOGIN_DARK_SID, userId: null, sessionExpiresAt: null } };
+  let current: Awaited<ReturnType<typeof currentOwnerSession>>;
+  try { current = await currentOwnerSession(ctx as never); } catch { return { edge, error: 'unavailable', status: 503 }; }
+  if (!current) return { edge, error: 'login-required', status: 401 };
+  return { edge, identity: { sid: current.sessionId, userId: current.userId, sessionExpiresAt: current.expiresAt } };
 }
 
 export type HandoffResult =

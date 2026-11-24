@@ -94,12 +94,46 @@ export async function grantSession(appId, sessionId) {
   });
 }
 
-/** The session is gone: its grant goes with it. */
-export async function forgetSession(appId, sessionId) {
-  try {
-    const c = await core();
-    await c.getAuthServices().grants.revoke({ kind: 'app', id: appId }, 'terminal.embed', c.terminalSessionScope(sessionId));
-  } catch { /* nothing to drop */ }
+/**
+ * A session ended or was deleted: every app's grant of it goes, so a new
+ * session under the reused name starts with none. The Terminal reports each
+ * end (/api/terminal/sessions/ended); a whole instance ends here too.
+ */
+export async function forgetSessionGrants(sessionId) {
+  const c = await core();
+  return c.getAuthServices().grants.revokeScopes('terminal.embed', (sc) => sc.kind === 'terminal-session' && sc.id === sessionId);
+}
+
+/** Every session grant of one Terminal instance (it was destroyed). */
+export async function forgetInstanceGrants(instanceId) {
+  const c = await core();
+  const prefix = `${instanceId}#`;
+  return c.getAuthServices().grants.revokeScopes('terminal.embed', (sc) => sc.kind === 'terminal-session' && sc.id.startsWith(prefix));
+}
+
+const WATCH = Symbol.for('aura.terminalEmbed.watch');
+
+/** Once per process: a destroyed Terminal instance takes its sessions' grants along. */
+export async function watchTerminalInstances() {
+  if (globalThis[WATCH]) return;
+  globalThis[WATCH] = true;
+  const c = await core();
+  c.OsEventBus.on('app:stateChanged', (ev) => {
+    if (ev?.appId !== TERMINAL_APP_ID || ev.state !== 'destroyed') return;
+    forgetInstanceGrants(ev.instanceId).catch(() => { /* KV down: the Terminal's own reports still apply */ });
+  });
+}
+
+/**
+ * The owner chose to show an existing session in an app (D25), on a trusted
+ * surface: the Shell's own dialog. Only for an app that holds `terminal.embed`.
+ */
+export async function shareSession(appId, sessionId, { access = live, grant = grantSession } = {}) {
+  if (!terminalSessionInstance(sessionId)) return 'bad-session-id';
+  if (await access.isSystemTerminal(appId)) return 'not-an-embedder';
+  if (!(await access.holdsEmbedGrant(appId))) return 'not-granted';
+  await grant(appId, sessionId);
+  return null;
 }
 
 /**

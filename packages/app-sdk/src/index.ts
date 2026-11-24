@@ -21,7 +21,7 @@ export type {
 export { InterfacesApi } from './interfaces.js';
 export { appHostUrl, appHostUrlFromRequest } from './hosts.js';
 // App Host transport: the runtime bootstrap and the verified shell channel.
-export { appHostRuntime, bodylessMutationHeaders, osUrl } from './os-auth.js';
+export { appHostRuntime, bodylessMutationHeaders, osAuthHeaders, osUrl } from './os-auth.js';
 export { postToShell, isFromShell } from './channel.js';
 // Notifications — `osClient.notifications`. create / update / remove / get /
 // list / waitForAnswer / waitForInteraction / subscribe.

@@ -13,7 +13,7 @@
 import { attachSseMux, MUX_PATH } from './sse-mux.mjs';
 import { createAppHostRouter } from './app-hosts.mjs';
 import { loadAppHostServices } from './app-host-auth.mjs';
-import { terminalEmbedAncestors } from './terminal-embed.mjs';
+import { terminalEmbedAncestors, watchTerminalInstances } from './terminal-embed.mjs';
 import { buildAppHost } from '@aura/core/host-rules';
 import { originOf } from './host-policy.mjs';
 import { countSurfaceEvent, internalServiceHeaders, reportSurface, surfaceIdentity } from './access-bridge.mjs';
@@ -487,6 +487,8 @@ export function attachAppHosts(httpServer) {
     log: (...args) => { if (nsEnabled(APPHOST_NS, process.env.AURA_LOG ?? '')) console.log(`[${APPHOST_NS}]`, ...args); },
   });
   appHostRouter.attach(httpServer);
+  // A destroyed Terminal instance takes its sessions' embed grants along.
+  void watchTerminalInstances().catch(() => {});
 }
 
 /** Everything the shell needs on its HTTP server besides the Astro app. */

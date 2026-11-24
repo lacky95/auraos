@@ -164,6 +164,16 @@ test('only the verified Settings window may trigger the lock message or admin un
   }
 });
 
+test('only an App Host window itself may ask the owner to share a Terminal session', () => {
+  const w = worlds();
+  const type = 'aura.terminal.share.request';
+  assert.equal(allowed(type, w.from(w.hostWin, APP)), true);
+  assert.equal(allowed(type, w.from(w.nestedApp, APP)), false, 'its subframe');
+  assert.equal(allowed(type, w.from(w.nestedForeign, OTHER_APP)), false, 'an embedded app');
+  assert.equal(allowed(type, w.from(w.proxyWin, SHELL)), false, 'a proxied frame (on the shell origin)');
+  assert.equal(allowed(type, w.from(w.shell, SHELL)), false);
+});
+
 test('a native-host message from a host frame needs the native runtime', () => {
   const w = worlds();
   for (const type of ['aura.host.url-changed', 'aura.host.needsTopLevel', 'aura.host.popup']) {

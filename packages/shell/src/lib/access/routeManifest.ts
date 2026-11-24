@@ -297,6 +297,12 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/terminal/embed': {
     methods: { POST: rule(APP_PERMISSION, 'app', { permissions: ['terminal.embed'] }) },
   },
+  // The owner, from the Shell's own dialog (the route checks the exact Origin and owner session).
+  '/api/terminal/share': { methods: { POST: rule(OWNER, 'system') } },
+  // The System Terminal reports an ended session; the route checks it is the session's own instance.
+  '/api/terminal/sessions/ended': {
+    methods: { POST: rule(INSTANCE, 'app', { systemApp: 'com.aura.terminal' }) },
+  },
   '/api/terminal/sessions': {
     methods: {
       GET: rule(APP_PERMISSION, 'app', { permissions: ['terminal.sessions.list'] }),
