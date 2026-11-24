@@ -197,14 +197,11 @@ test('slots: stable across container replacement and a shell restart', async () 
   assert.equal((await restarted.resolveLabel(b.label)).slot.instanceId, 'container-2');
 });
 
-test('slots: a warm-pool member has none until claimed, and only on the host route', async () => {
+test('slots: a warm-pool member has none until claimed', async () => {
   const s = scopes()[2];
   putApp(s, 'com.example.notes');
   const { installation, record } = await lifecycle.sync({ appId: 'com.example.notes', originId: null, scope: 'user', source: SRC });
   assert.equal(record.slots[0].instanceId, null);
-  await lifecycle.claimSlot('com.example.notes', 'user', 'pool-1');
-  assert.equal((await registry.listForApp(installation.appId))[0].slots[0].instanceId, null, 'proxy route assigns nothing');
-  await registry.setFrameRoute('com.example.notes', 'host');
   await lifecycle.claimSlot('com.example.notes', 'user', 'pool-1');
   assert.equal((await registry.listForApp(installation.appId))[0].slots[0].instanceId, 'pool-1');
   await lifecycle.releaseDeadSlots('com.example.notes', () => false);
@@ -218,16 +215,7 @@ test('slots: separate user scopes get separate hosts', async () => {
   assert.notEqual(a.baseName, b.baseName);
 });
 
-// ── frame route and KV reachability ──────────────────────────────────────────
-
-test('frame route: default proxy, switchable, rejects anything else', async () => {
-  assert.equal(await registry.getFrameRoute('com.example.notes'), 'proxy');
-  await registry.setFrameRoute('com.example.notes', 'host');
-  assert.equal(await registry.getFrameRoute('com.example.notes'), 'host');
-  await registry.setFrameRoute('com.example.notes', 'proxy');
-  assert.equal(await registry.getFrameRoute('com.example.notes'), 'proxy');
-  await assert.rejects(registry.setFrameRoute('com.example.notes', 'other'), TypeError);
-});
+// ── KV reachability ──────────────────────────────────────────────────────────
 
 test('apphost: is not reachable as a /api/kv namespace', () => {
   for (const ns of ['apphost', 'apphost:label', 'apphost:install', 'app/apphost', 'apphost:frame:com.a.b']) {

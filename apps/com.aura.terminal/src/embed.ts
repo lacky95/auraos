@@ -1,9 +1,10 @@
 /**
  * Embed mode — the terminal as a building block for OTHER apps.
  *
- * Any app can host a live terminal session in its own iframe:
+ * An app granted `terminal.embed` can host a live terminal session in its
+ * own iframe, at the Terminal App Host URL `/api/terminal/embed` returns:
  *
- *   /api/proxy/<instanceId>/?embed=1&session=<id>
+ *   https://<terminal host>/_aura/handoff?…&next=/?embed=1&session=<id>
  *
  * The page then has no chrome of its own (the host draws it), shows exactly
  * the session it was given (claiming it, like a picker switch), and stays out

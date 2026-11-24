@@ -9,10 +9,9 @@ import { ensureSdkPublished } from './lib/sdkBootstrap.js';
 import { startOnboarding, noteClientConnected, type OnboardingHandle } from './lib/onboarding/index.js';
 import { loadCustomInterfaces } from './lib/customInterfaces.js';
 import { startFlightService } from './lib/flight/service.js';
-import { refererProxyId } from './lib/access/legacyReferer.ts';
 import { captureAccess, createAccessReporter } from './lib/access/guard.ts';
 import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
-import { shellFramePolicy } from './lib/desktop/frameRoutes.ts';
+import { shellFramePolicy } from './lib/desktop/shellFramePolicy.ts';
 
 // Source of truth is the singleton on globalThis — NOT a module-scoped flag.
 // The soft-restart endpoint deletes that singleton; if we tracked init state
@@ -178,29 +177,12 @@ async function ensureAppManager() {
   finally { initPromise = null; }  // future soft-restart can trigger another cycle
 }
 
-/**
- * An app built for production loads some chunks through Vite's preload helper,
- * which builds root-absolute `/_astro/…` URLs at runtime — past the proxy's
- * HTML/JS rewriting, so they reach the SHELL instead of the app. The shell's
- * own assets are served before this middleware (prod) or don't live there
- * (dev), so a `/_astro/` request that gets here from a proxied app page is
- * that app's: send it to `/api/proxy/<id>/_astro/…`.
- */
-function appAssetRedirect(request: Request, url: URL): Response | null {
-  if (!url.pathname.startsWith('/_astro/')) return null;
-  const id = refererProxyId(request.headers.get('referer'));
-  if (!id) return null;
-  return new Response(null, { status: 307, headers: { Location: `/api/proxy/${id}${url.pathname}${url.search}` } });
-}
-
 let flightServiceStarted = false;
 
 // Report-only (lib/access): loaded on first use, and nothing it does can reach a response.
 const reportAccess = createAccessReporter(() => import('./lib/access/observer.ts'));
 
 export const onRequest = defineMiddleware(async (ctx, next) => {
-  const assetRedirect = appAssetRedirect(ctx.request, ctx.url);
-  if (assetRedirect) return assetRedirect;
   const access = captureAccess(ctx);
   await ensureAppManager();
   // Free-flight activities (lib/flight/service.ts): once per shell build —
@@ -234,7 +216,7 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
   // A shell tab registering itself: onboarding cards wait for the first one,
   // because only notifications that arrive while a tab listens pop up.
   if (ctx.request.method === 'POST' && ctx.url.pathname === '/api/os/clients' && res.ok) noteClientConnected();
-  // The shell's own documents can't be framed by an app (lib/desktop/frameRoutes.ts).
+  // The shell's own documents can't be framed (lib/desktop/shellFramePolicy.ts).
   const framePolicy = shellFramePolicy(ctx.url.pathname, res.headers.get('content-type'), res.headers.get('content-security-policy'));
   if (framePolicy) {
     try { res.headers.set('Content-Security-Policy', framePolicy); }

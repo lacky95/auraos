@@ -204,6 +204,6 @@ export interface GatewayIdentityClaim {
 /** The owner session a trusted system UI acts for (D45). */
 export interface GatewayOwnerClaim {
   userId: string;
-  /** The login session the host cookie is bound to, or `login-dark`. */
+  /** The login session the host cookie is bound to. */
   sid: string;
 }

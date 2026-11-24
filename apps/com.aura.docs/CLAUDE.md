@@ -13,18 +13,22 @@ There are two layers:
 1. **The shell** (`packages/shell`, listens on `:3000`) — an Astro SSR app
    that draws the desktop: status bar, dock, launcher, layout manager, process
    manager. It owns the `AppManager` (lifecycle FSM, port allocator), the
-   reverse proxy at `/api/proxy/<id>/<path>`, the content-provider router at
+   App Host router (`{label}--{desktop host}`, one origin per app), the
+   machine proxy at `/api/proxy/<id>/<path>`, the content-provider router at
    `/api/data/<authority>/<path>`, and a global SSE event bus.
 
 2. **The apps** (`apps/<reverse.domain.id>/`) — each is its **own Astro app**
    spawned in a **PRoot sandbox** with `/workspace`, `/data`, and an opt-in
    set of toolchain binaries bind-mounted in. Apps never talk to the browser
-   directly; the shell proxies every request and injects HTML rewrites + a
-   console-relay script into each iframe.
+   directly; the shell streams each App Host's requests to the app, with
+   nothing rewritten or injected.
 
-The shell loads each running instance in an iframe pointing at
-`/api/proxy/<instanceId>/`. The proxy forwards to `http://localhost:<port>`
-where the app's Astro dev server listens.
+The shell loads each running instance in an iframe on its App Host,
+`{label}--{desktop host}`, served from `/`. The page loads
+`/_aura/runtime.js` (theme, keymap, on-screen keyboard, console relay) and
+reaches the shell through `/_aura/os/`. `/api/proxy/<id>/<path>` is for
+machines only (agents' MCP URLs, other apps' servers); it strips its prefix
+and refuses browser documents.
 
 ## What an "Aura app" is
 
@@ -33,14 +37,12 @@ Two runtime modes ship today:
 
 - **`runtime: 'astro'` (default)** — the shell synthesises an `astro dev`
   command if no `entrypoint.sh` is present, and `auraAppIntegration()`
-  injects identity headers + `/api/lifecycle/health`. The shell proxy
-  rewrites HTML attributes, injects `<base href>`, meta tags, console
-  relay, and key forwarder. Pick this for apps that *want* Astro/Vite —
+  adds identity headers, `/api/lifecycle/health` and the
+  `/_aura/runtime.js` loader. Pick this for apps that *want* Astro/Vite —
   pretty much every reference app under `apps/` does.
 - **`runtime: 'raw'`** — the OS spawns `manifest.entrypoint` directly. No
-  Astro synth, no `<base href>`, no attribute rewriting. The app is
-  responsible for binding to `$APP_PORT` and serving the lifecycle
-  endpoints itself. Pick this for frameworks that already own their HTML
+  Astro synth. The app is responsible for binding to `$APP_PORT`, serving
+  the lifecycle endpoints and loading the runtime itself. Pick this for frameworks that already own their HTML
   + dev server (Next.js, SvelteKit, Nuxt, Remix, Astro-with-customised-
   config). This very app (`com.aura.docs`) is on `runtime: 'raw'` over
   Next.js — see "Raw runtime" below for the pattern.
@@ -131,22 +133,16 @@ can't proxy through. Three things change versus the default Astro path:
    layout work: `touch apps/com.aura.docs/.dev-mode && aura restart app
    com.aura.docs` runs `next dev --turbo` again — remove the marker and
    restart when done. Pre-warm a build outside the sandbox with
-   `node serve.mjs --build-only` (add `--host` for the App Host build).
+   `node serve.mjs --build-only`.
 
-   **Two routes, two builds (Phase 2).** A Next `basePath` is fixed at
-   build time. The proxy route needs `/api/proxy/<instanceId>` (env
-   `APP_INSTANCE_ID`); an App Host serves from `/`. `lib/base-path.mjs` is
-   the one place that decides it. serve.mjs owns `$APP_PORT` and passes
-   each request to the `next start` of its route, chosen by the
-   `x-aura-frame-route: host` header the shell's App Host router sets (and
-   strips from every other request). The proxy build (`.next`) always runs,
-   because the lifecycle calls and the agents' MCP at
-   `/api/proxy/com.aura.docs/mcp` arrive with the prefix on both routes.
-   The App Host build (`.next-host`) is built and started on the first App
-   Host request. Both builds load `/_aura/runtime.js` through
-   `AURA_RUNTIME_LOADER_JS` from `@aura/app-sdk/runtime/loader`; it does
-   nothing on the proxy route. At the Phase 2 cutover the proxy build goes
-   (see the cutover markers in serve.mjs and lib/base-path.mjs).
+   **One build, served from `/`.** No Next `basePath`: the window opens on
+   Docs' App Host, the runner calls `/api/lifecycle/*` directly, and the
+   shell proxy strips `/api/proxy/com.aura.docs` from the agents' MCP, so
+   it arrives as `/mcp`. serve.mjs owns `$APP_PORT` and passes every
+   request to `next start` on a loopback port; that front is what keeps
+   health answering while there is no `next start`. `app/layout.tsx` loads
+   `/_aura/runtime.js` through `AURA_RUNTIME_LOADER_JS` from
+   `@aura/app-sdk/runtime/loader`.
 2. **You serve the lifecycle endpoints yourself** — same contract as
    Astro apps (POST `/api/lifecycle/{onCreate,onStart,onResume,onPause,
    onStop,onDestroy}` returning `{ ok: true }`, plus GET `/api/lifecycle/health`
@@ -180,35 +176,11 @@ can't proxy through. Three things change versus the default Astro path:
    onto every response, plus a `GET /api/lifecycle/health` returning the
    identity body. Lifecycle hooks default to a no-op `{ ok: true }` JSON.
 
-3. **The shell proxy switches its inject pipeline off by default.** Each
-   inject (HTML attribute rewriting, `<base href>`, meta tags, console
-   relay, key forwarder, identity script) is independently toggleable
-   in the manifest's `proxy` block. Three presets to copy:
-
-   ```jsonc
-   // Pure pass-through (e.g. a Go web server you don't want to touch):
-   "runtime": "raw",
-   "proxy": { "rewriteHtml": "none", "injectMeta": false,
-              "injectConsoleRelay": false, "injectKeyForwarder": false,
-              "injectIdentityScript": false }
-
-   // Next.js with basePath (this app's preset — keeps OS meta + relay,
-   // forwards the proxy prefix to upstream so basePath matches without 308):
-   "runtime": "raw",
-   "proxy": { "rewriteHtml": "none", "preservePrefix": true,
-              "injectMeta": true, "injectConsoleRelay": true,
-              "injectKeyForwarder": true }
-
-   // SvelteKit / Nuxt that emit absolute basePath-prefixed URLs but DON'T
-   // want a <base href>: rewrite attributes but skip the base tag.
-   "runtime": "raw",
-   "proxy": { "rewriteHtml": "absolute", "preservePrefix": true,
-              "injectMeta": true }
-   ```
-
-The `aura-app-id` + `aura-instance-id` meta tags are ALWAYS injected —
-the shell's iframe identity guard reads them on load. Everything else
-is gated by the flags above.
+3. **You load the runtime yourself.** Put `AURA_RUNTIME_LOADER_JS` first
+   in the document head (see `app/layout.tsx`). The manifest's `proxy`
+   flags (`injectMeta`, `injectConsoleRelay`, `injectKeyForwarder`, …)
+   switch parts of `/_aura/runtime.js` off per app; nothing is ever
+   injected into your HTML.
 
 ## Manifest fields
 
@@ -232,7 +204,7 @@ to strip any default-valued fields you've written by hand.
 
 Optional fields (all have defaults — only set them if you need a non-default):
 `runtime` (`'astro' | 'raw'` — see Raw runtime above), `proxy` (per-app
-proxy inject toggles), `maxInstances`, `maxActivitiesPerInstance`,
+runtime toggles), `maxInstances`, `maxActivitiesPerInstance`,
 `defaultLaunch`, `backgroundService`, `warmPool`, `viewConfig`, `preferredLayout`,
 `themeStrategy`, `theme`, `keymapActions`, `dataProvider`, `serverPort`,
 `icon`, `entrypoint`.
@@ -249,11 +221,11 @@ AuraOS exposes its palette as CSS custom properties (`--aura-color-primary`,
 `--aura-color-bg`, …) plus a `prefers-color-scheme`-aware light/dark axis.
 Pick how this app participates by setting `themeStrategy` in the manifest:
 
-| Strategy    | What the proxy injects                                    | When to use                                     |
+| Strategy    | What the runtime provides                                 | When to use                                     |
 |-------------|-----------------------------------------------------------|-------------------------------------------------|
-| `inherit`   | `<link rel="stylesheet" href="/api/os/theme.css">` + meta | **Default.** Use `var(--aura-color-*)` and you're done. |
-| `themed`    | `<meta name="aura-theme-id">`, `aura-color-mode`, framework | App ships its own palettes but reacts to OS theme/mode (via `osClient.onThemeChange()` / `onModeChange()`). |
-| `override`  | Only `aura-color-mode` meta as a hint                     | App owns its palette completely — photo editors, brand-locked surfaces, accessibility tools. |
+| `inherit`   | The OS theme stylesheet + the bootstrap's theme           | **Default.** Use `var(--aura-color-*)` and you're done. |
+| `themed`    | The bootstrap's theme id, mode and framework              | App ships its own palettes but reacts to OS theme/mode (via `osClient.onThemeChange()` / `onModeChange()`). |
+| `override`  | Only the bootstrap's resolved mode, as a hint             | App owns its palette completely — photo editors, brand-locked surfaces, accessibility tools. |
 
 The Process Manager surfaces a `THEMED` / `OVERRIDE` chip on apps that don't
 `inherit`, so users understand why an app looks different.
@@ -340,7 +312,7 @@ const ctx = getAppContext();
 // → { appId, instanceId, appPort, osApiBase, dataDir, layerTag }
 ```
 
-On HTTP requests proxied through the shell, your handlers also receive:
+On HTTP requests the shell forwards to you, your handlers also receive:
 
 | Request header        | Meaning                                                              |
 |-----------------------|----------------------------------------------------------------------|
@@ -355,15 +327,14 @@ hand-rolling `request.headers.get(...)`.
 
 **Live updates to the iframe**: open an SSE endpoint inside your app
 (`src/pages/api/events.ts`) and connect from the browser with
-`new EventSource('api/events')` — relative URL, because the iframe's
-`<base href>` is set by the proxy. The shell preserves stream lifetimes.
+`new EventSource('/api/events')`: the page is served from `/` on its App
+Host, so root-absolute URLs reach your app.
 
 **WebSockets**: add an integration in `astro.config.mjs` that hooks
 `astro:server:setup` and listens for `upgrade` events on `server.httpServer`.
-The shell's Vite plugin proxies the upgrade through
-`ws://<host>/api/proxy/<id>/<path>`. See `apps/com.aura.terminal` for a
-working example (PTY over `/ws`) and `apps/com.aura.console` for a logging
-WebSocket that persists to disk.
+The App Host pipes the upgrade to your app byte for byte. See
+`apps/com.aura.terminal` for a working example (PTY over `/ws`) and
+`apps/com.aura.console` for a logging WebSocket that persists to disk.
 
 **Cross-app data**: declare a `dataProvider` in the manifest and serve
 `/api/data/<...>` from your app. Other apps reach you via
@@ -372,10 +343,10 @@ by the `PermissionManager`. Read provider data with `OsClient` from
 `@aura/app-sdk` (`queryProvider`, `writeProvider`, `watchProvider`) or
 plain `fetch`.
 
-**Console + debugging**: every iframe's `console.*`, uncaught errors,
-unhandled rejections, `fetch`/`XHR`/`EventSource` errors are auto-relayed
-to the shell and forwarded to the Console app (and persisted to a JSONL
-file via WebSocket → `apps/com.aura.console`). No setup needed.
+**Console + debugging**: every iframe's `console.*`, uncaught errors and
+unhandled rejections are relayed by `/_aura/runtime.js` to the shell and
+forwarded to the Console app (and persisted to a JSONL file via WebSocket →
+`apps/com.aura.console`). No setup needed.
 
 **Keyboard shortcuts + OS Back + system actions**: all flow through the
 single `@aura/app-sdk` framework. Declare actions in the manifest, register
@@ -477,8 +448,6 @@ The terminal apps' bash also annotates the prompt with the detected layer
 - TypeScript strict, ES modules.
 - Reverse-domain IDs (`com.example.foo`); the dir name must equal `manifest.id`.
 - Don't import server-only Node modules into client-rendered Astro pages.
-- HMR is disabled in app iframes (the upstream Vite WS isn't reachable from
-  the browser through the proxy). Full iframe reload picks up changes.
 - Class names are for styling, `data-*` attributes are for JS hooks — see
   "Styling rules that stop silent misses".
 - After a write, render the row from the response you already have; treat the
@@ -505,7 +474,7 @@ The terminal apps' bash also annotates the prompt with the detected layer
 ```
 packages/core         AppManager, ProotRunner, OsEventBus, PermissionManager,
                       ContentProviderRegistry, ThemeManager, manifest schema
-packages/shell        Astro SSR shell, /api/proxy, /api/data, /api/apps,
+packages/shell        Astro SSR shell, App Hosts, /api/proxy, /api/data, /api/apps,
                       OSLayout (console bridge, theme), launcher, layout
 packages/app-sdk      App-side SDK: OsClient, lifecycle factories, context,
                       auraAppIntegration
@@ -518,7 +487,7 @@ apps/<id>             Each app, including this one
 
 - Lifecycle FSM and allowed transitions: `packages/core/src/app-manager/LifecycleStateMachine.ts`
 - How the shell builds your iframe URL: `packages/shell/src/pages/index.astro` (`buildView`)
-- How HTML/JS get rewritten on the way to the iframe: `packages/shell/src/pages/api/proxy/[id]/[...path].ts`
+- How a window's requests reach your app: `packages/shell/server/app-hosts.mjs`; the runtime and gateway: `packages/shell/server/app-gateway.mjs`
 - How the spawner constructs the PRoot args: `packages/core/src/app-manager/ProotRunner.ts` (`buildProotArgs`)
 - The reference apps for richer patterns: `apps/com.aura.terminal` (WS+PTY),
   `apps/com.aura.notepad` (multi-activity shared state), `apps/com.aura.counter`

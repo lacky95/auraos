@@ -485,6 +485,7 @@ function bootRuntime(frame: 'window' | 'nested') {
     framework: { id: 'f', version: '1' },
     theme: { themeId: 't', themeIdDark: 'd', themeIdLight: 'l', colorMode: 'dark', resolvedMode: 'dark' },
     keymap: { bindings: {} },
+    histories: {},
   }), context);
   const fire = (source: unknown, origin: string) => {
     for (const l of listeners) l({ data: { type: 'aura.key.synthetic', action: 'keydown', key: 'F5' }, source, origin });
@@ -510,12 +511,40 @@ test('a nested frame reports to the Shell at its exact origin, not through its p
   assert.ok(posted.every(([, origin]) => origin === 'http://desk.example:3000'));
 });
 
+test('the bootstrap carries the back stack of the page\'s own Activity only', () => {
+  const histories = {
+    [`${slot.instanceId}#a1`]: [{ path: '/list', title: 'List' }],
+    [`${slot.instanceId}#a2`]: [{ path: '/other' }],
+  };
+  const boot = (search: string) => {
+    const js = buildAppRuntimeJs({
+      appId: record.appId, instanceId: slot.instanceId, label: slot.label, slot: 1, cfg, themeStrategy: 'inherit',
+      framework: { id: 'f', version: '1' },
+      theme: { themeId: 't', themeIdDark: 'd', themeIdLight: 'l', colorMode: 'dark', resolvedMode: 'dark' },
+      keymap: { bindings: {} },
+      histories,
+    });
+    const sandbox: Record<string, unknown> = { location: { host: `${slot.label}--desk.example:3000`, protocol: 'http:', origin: ORIGIN, search }, URLSearchParams };
+    sandbox.window = sandbox;
+    vm.runInContext(js, vm.createContext(sandbox));
+    return sandbox.AuraRuntimeBootstrap as { activityId: string | null; activityHistory: unknown[] };
+  };
+  const a1 = boot(`?_aura_activity=${encodeURIComponent(`${slot.instanceId}#a1`)}`);
+  assert.equal(a1.activityId, `${slot.instanceId}#a1`);
+  // The runtime ran in another realm: compare as JSON.
+  assert.equal(JSON.stringify(a1.activityHistory), JSON.stringify([{ path: '/list', title: 'List' }]));
+  assert.ok(Object.isFrozen(a1.activityHistory));
+  assert.equal(JSON.stringify(boot('').activityHistory), '[]');
+  assert.equal(JSON.stringify(boot('?_aura_activity=constructor').activityHistory), '[]', 'no prototype keys');
+});
+
 test('the runtime refuses to start on a host that is not its own label', () => {
   const js = buildAppRuntimeJs({
     appId: record.appId, instanceId: slot.instanceId, label: 'someoneelse', slot: 1, cfg, themeStrategy: 'inherit',
     framework: { id: 'f', version: '1' },
     theme: { themeId: 't', themeIdDark: 'd', themeIdLight: 'l', colorMode: 'dark', resolvedMode: 'dark' },
     keymap: { bindings: {} },
+    histories: {},
   });
   const sandbox: Record<string, unknown> = { location: { host: `${slot.label}--desk.example:3000`, protocol: 'http:', origin: ORIGIN, search: '' } };
   sandbox.window = sandbox;
@@ -558,6 +587,7 @@ function bootThemed(opts: { links?: string[]; parsing?: boolean; strategy?: 'inh
     framework: { id: 'f', version: '1' },
     theme: { themeId: 't', themeIdDark: 'd', themeIdLight: 'l', colorMode: 'dark', resolvedMode: 'dark' },
     keymap: { bindings: {} },
+    histories: {},
   }), vm.createContext(sandbox));
   const fire = (type: string, source: unknown, origin: string) => { for (const l of listeners) l({ data: { type }, source, origin }); };
   return { links, written, appended, fire, top, sandbox };

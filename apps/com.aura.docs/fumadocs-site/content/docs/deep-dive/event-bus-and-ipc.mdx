@@ -16,7 +16,8 @@ Source of truth:
 - Topic glob: `packages/core/src/ipc/topicMatcher.ts`
 - SSE endpoint: `packages/shell/src/pages/api/apps/events.ts`
 - postMessage protocol: read each `type` constant; canonical senders
-  are the proxy inject scripts in `packages/shell/src/pages/api/proxy/[id]/[...path].ts`.
+  are the runtime's scripts, assembled in `packages/shell/src/lib/appRuntime.ts`
+  (served as `/_aura/runtime.js`).
 
 ## The events
 
@@ -189,7 +190,8 @@ Per-connection lifecycle:
 
 This is the only IPC channel that crosses the security boundary into
 the app iframe. Apps can't reach the host's `OsEventBus` directly —
-they bridge via injected scripts that send/receive postMessage.
+they bridge via `/_aura/runtime.js`, whose scripts send and receive
+postMessage between the app's origin and the desktop's.
 
 ### Host → iframe (the OS speaks)
 
@@ -217,7 +219,7 @@ they bridge via injected scripts that send/receive postMessage.
 | `aura.system.openLauncher` | App called `osClient.system.openLauncher()` | `{}` |
 
 The host validates every incoming message: `event.origin` must match
-the proxied iframe origin, `event.data.type` must start with `aura.`,
+the app's App Host origin, `event.data.type` must start with `aura.`,
 and the message must reference an instance the sender actually owns
 (spoofing across activities is rejected).
 

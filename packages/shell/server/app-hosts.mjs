@@ -1,34 +1,25 @@
 /**
- * App hosts — the Host-header router in front of everything else.
+ * App Hosts — the Host-header router in front of everything else.
  *
- * A request for `{name}--{desktop host}` (e.g. `marklayer--10-201-1-2.nip.io:3000`)
- * whose `name` an installed manifest declares in `hosts[]` is streamed to that
- * app's server or sidecar, minus the shell's own credentials: no prefix, no HTML/JS rewriting, no
- * injected scripts, no cookie scoping. The app owns the origin root. Every
- * other request goes on to the shell exactly as before. Docs: /docs/app-hosts;
- * the rules live in @aura/core/host-rules, which has no dependencies, so this
- * file can load before / beside the Astro build.
+ * Every app with a UI has its own origin, `{label}--{desktop host}` (e.g.
+ * `notes--10-201-1-2.nip.io:3000`). The label is resolved exactly through the
+ * App Host registry to one installation and slot, and the request is streamed
+ * to the instance that holds the slot, minus the shell's own credentials: no
+ * prefix, no rewriting, no injected scripts. Nothing reaches the app without
+ * a valid app cookie from the one-time handoff, and `/_aura/*` is answered
+ * here, never by the app. Every other Host goes on to the shell.
  *
  * Interception wraps the HTTP server's `emit` for `request` and `upgrade`, so
  * a claimed request never reaches Astro, Vite, socket.io (whose engine.io
  * would end an upgrade it doesn't own after 1 s) or the /api/proxy WS proxy.
- * The claim is synchronous: it reads a host index rebuilt from the shell's own
- * /api/apps (the same source the WS proxy uses, see attach.mjs).
- *
- * Two paths share this file while apps migrate:
- *   `frameRoute: proxy` (the default) keeps the manifest-host behavior above.
- *   `frameRoute: host` resolves the exact label through the App Host registry.
- *   Nothing reaches such an app without a valid app cookie from the one-time
- *   handoff, and `/_aura/*` is answered here, never by the app.
  *
  * Env:
  *   AURA_TRUSTED_PROXIES  comma-separated client addresses whose
  *                         X-Forwarded-Proto/-Host/-For are believed (the edge
  *                         in front of a custom domain). See host-policy.mjs.
- *                         On the `proxy` path, unset still believes any.
  *   AURA_DESKTOP_HOSTS    custom domains this AuraOS answers to (DNS
  *                         rebinding), see host-policy.mjs.
- *   AURA_HOST_POLICY      `report` (default until cutover) or `enforce`.
+ *   AURA_HOST_POLICY      `enforce` (default) or `report`.
  */
 import http from 'node:http';
 import net from 'node:net';
@@ -41,19 +32,12 @@ import {
 import { appHostAuth, appHostEmbedCookieName, safeReturnPath } from './app-host-auth.mjs';
 import { handleAppGateway, handleAppGatewayUpgrade, serveAppRuntime } from './app-gateway.mjs';
 import {
-  OWN_API_RE, browserBoundaryError, classifyHost, hostListed, hostParses, hostPolicy, isShellOrigin, isTrustedProxy, originOf,
-  requestEdge,
+  OWN_API_RE, browserBoundaryError, classifyHost, hostListed, hostParses, hostPolicy, isShellOrigin, originOf, requestEdge,
 } from './host-policy.mjs';
 import { stripCookies, stripShellCredentials } from './shell-credentials.mjs';
 import { EMBEDDER_PARAM } from './terminal-embed.mjs';
 
 export { SAME_ORIGIN_HEADER, classifyHost } from './host-policy.mjs';
-
-/** `name` of a `{name}--{base}` Host header, or null. */
-export function appHostName(host) {
-  if (!host) return null;
-  return parseAppHost(String(host))?.name ?? null;
-}
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -61,12 +45,7 @@ const HOP_BY_HOP = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'proxy-connection',
   'te', 'trailer', 'transfer-encoding', 'upgrade',
 ]);
-const INDEX_TTL_MS = 2000;
 const START_RETRY_MS = 15_000;
-
-// PHASE2-CUTOVER: the `proxy` path believes any peer when no proxy is configured.
-const legacyTrusted = (addr) => !(process.env.AURA_TRUSTED_PROXIES ?? '').split(',').some((s) => s.trim())
-  || isTrustedProxy(addr);
 
 /** The host probe's cookie (`answerHostProbe`), set exactly like the app cookie. */
 const probeCookieName = (secure) => (secure ? '__Host-aura_host_probe' : 'aura_host_probe');
@@ -120,18 +99,9 @@ function embedRequestAllowed(req, url, path, embed) {
 
 const isLive = (i) => i.port != null && (i.state === 'resumed' || i.state === 'started');
 
-// PHASE2-CUTOVER: `frameRoute: host` routes by slot assignment and never to a pool member.
-function liveInstance(app) {
-  const live = (app.instances ?? []).filter(isLive);
-  return live.find((i) => !i.inPool) ?? live[0] ?? null;
-}
-
-/** X-Forwarded-* for the upstream, from what the client (or a trusted edge) said. */
-function forwardedHeaders(req, edge = null) {
-  const fromEdge = edge ? edge.fromEdge : legacyTrusted(req.socket?.remoteAddress);
-  const host = edge ? edge.host : ((fromEdge && req.headers['x-forwarded-host']) || req.headers.host || '');
-  const protoIn = fromEdge && !edge ? String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim() : '';
-  const proto = edge ? edge.scheme : (protoIn === 'https' || protoIn === 'http' ? protoIn : (req.socket?.encrypted ? 'https' : 'http'));
+/** X-Forwarded-* for the upstream, from the edge view (`requestEdge`). */
+function forwardedHeaders(req, edge) {
+  const { host, scheme: proto, fromEdge } = edge;
   const port = String(host).match(/:(\d+)$/)?.[1] ?? (proto === 'https' ? '443' : '80');
   const priorFor = fromEdge ? req.headers['x-forwarded-for'] : undefined;
   const client = String(req.socket?.remoteAddress ?? '').replace(/^::ffff:/, '');
@@ -210,7 +180,7 @@ function answerHostProbe(req, res, host, edge) {
   return res.end();
 }
 
-// ── frameRoute: host ────────────────────────────────────────────────────────
+// ── the app's side ──────────────────────────────────────────────────────────
 
 /** Request headers for the app, as a flat list: no Aura credential or identity claim. */
 function appRequestHeaders(req, surface, { keepUpgrade = false } = {}) {
@@ -267,8 +237,8 @@ export function activityHeaders(url, instanceId) {
  *   env?: Record<string, string | undefined>,
  * }} deps
  *   `appsList` = the shell's /api/apps (manifest + instances per app).
- *   `services` = the App Host registry and session check; null keeps every
- *   request on the `proxy` path.
+ *   `services` = the App Host registry and session check. Without it, every
+ *   App Host request is refused.
  *   `embedAncestors` = extra exact origins allowed to frame an `embed=1`
  *   document (5.16): the Terminal's granted embedder (terminal-embed.mjs).
  */
@@ -276,113 +246,30 @@ export function createAppHostRouter({
   appsList, shellPort = process.env.SHELL_PORT ?? '3000', log = () => {},
   services = async () => null, auth = null, embedAncestors = () => [], env = process.env,
 }) {
-  /** name → appId; null until the first load. */
-  let index = null;
-  let indexAt = 0;
+  let apps = null;   // the last app list; null until the first load
   let loading = null;
   const startAsked = new Map();   // appId → when we last asked the shell to start it
   const slotStarts = new Map();   // installation and scope → the slot-1 start in flight
   const hostAuth = () => (auth ??= appHostAuth());
 
+  /** The shell's app list (`appsList` caches it); `fresh` reloads it. */
   function load(fresh = false) {
-    loading ??= appsList({ fresh }).then((apps) => {
-      const next = new Map();
-      for (const a of apps) {
-        for (const h of a.manifest?.hosts ?? []) if (!next.has(h.name)) next.set(h.name, a.manifest.id);
-      }
-      index = next;
-      indexAt = Date.now();
-      return apps;
+    loading ??= appsList({ fresh }).then((list) => {
+      apps = list;
+      return list;
     }).finally(() => { loading = null; });
     return loading;
-  }
-
-  /** Synchronous: is this request for an app host? */
-  function claims(req) {
-    const name = appHostName(req.headers.host);
-    if (!name) return null;
-    if (Date.now() - indexAt > INDEX_TTL_MS) void load().catch(() => {});
-    // Before the first load: claim anything that parses (a cold shell has no
-    // desktop yet either). After it: only names an app declares.
-    if (index && !index.has(name)) return null;
-    return name;
-  }
-
-  /** The upstream {host, port, appId, service} for `name`, or {starting}/{missing}. */
-  async function resolve(name) {
-    let apps = await load();
-    let app = apps.find((a) => (a.manifest?.hosts ?? []).some((h) => h.name === name));
-    if (!app) { apps = await load(true); app = apps.find((a) => (a.manifest?.hosts ?? []).some((h) => h.name === name)); }
-    if (!app) return { missing: true };
-    const spec = app.manifest.hosts.find((h) => h.name === name);
-    const appId = app.manifest.id;
-    const inst = liveInstance(app);
-    if (!inst) {
-      const last = startAsked.get(appId) ?? 0;
-      if (Date.now() - last > START_RETRY_MS) {
-        startAsked.set(appId, Date.now());
-        log('start', appId);
-        const startUrl = `http://127.0.0.1:${shellPort}/api/apps/${encodeURIComponent(appId)}/start`;
-        fetch(startUrl, { method: 'POST', headers: internalServiceHeaders(startUrl), signal: AbortSignal.timeout(10_000) })
-          .catch((err) => log('start-failed', appId, String(err)));
-      }
-      return { starting: true, appId, appName: app.manifest.name ?? appId };
-    }
-    if (spec.service) {
-      const tpl = (app.manifest.services ?? []).find((s) => s.name === spec.service);
-      return { host: `aura-${inst.instanceId}--${spec.service}`, port: spec.port ?? tpl?.port, appId, instanceId: inst.instanceId, sidecar: true, appName: app.manifest.name ?? appId };
-    }
-    return {
-      host: inst.sandbox === 'container' ? `aura-${inst.instanceId}` : '127.0.0.1',
-      port: spec.port ?? inst.port, appId, instanceId: inst.instanceId, sidecar: false, appName: app.manifest.name ?? appId,
-    };
   }
 
   function identityHeaders(t) {
     return { 'x-aura-app-id': t.appId, 'x-aura-instance-id': t.instanceId };
   }
 
-  // PHASE2-CUTOVER: the open manifest-host path (this and handleUpgrade) ends with `frameRoute: proxy`.
-  async function handleRequest(name, req, res) {
-    const identity = surfaceIdentity(req.headers);
-    const method = req.method;
-    let reportedApp = null;
-    res.once('close', () => reportSurface({
-      subject: 'app-hosts', method, identity, appId: reportedApp, status: res.headersSent ? res.statusCode : 0,
-    }));
-    let t;
-    try { t = await resolve(name); } catch (err) {
-      return reply(res, 503, 'AuraOS is starting', 'The app list is not available yet. This page reloads by itself.', { refresh: 3 });
-    }
-    if (t.missing) return reply(res, 404, `No app host “${name}”`, `No installed app declares the host <code>${name}</code>.`);
-    reportedApp = t.appId ?? null;
-    if (t.starting) return reply(res, 503, `Starting ${t.appName}…`, 'This page reloads by itself when it is up.', { refresh: 2 });
-
-    // PHASE2-CUTOVER: the SDK's loader asks every `--` host for the runtime; this path has none to give.
-    if (String(req.url ?? '').split(/[?#]/, 1)[0] === AURA_RESERVED_PATHS.runtime) {
-      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-      return res.end();
-    }
-
-    const headers = {};
-    for (const [k, v] of Object.entries(req.headers)) if (!HOP_BY_HOP.has(k)) headers[k] = v;
-    delete headers[APP_HOST_ROUTE_HEADER];
-    stripShellCredentials(headers, 'app-hosts-http');
-    Object.assign(headers, forwardedHeaders(req), identityHeaders(t));
-    pipeHttp(name, t, req, res, headers, (raw) => {
-      const out = [];
-      for (let i = 0; i < raw.length; i += 2) {
-        if (!HOP_BY_HOP.has(raw[i].toLowerCase())) out.push(raw[i], raw[i + 1]);
-      }
-      return out;
-    });
-  }
-
   function pipeHttp(name, t, req, res, headers, responseHeaders) {
     const up = http.request({ host: t.host, port: t.port, method: req.method, path: req.url, headers }, (ures) => {
       // An app server that answers with another app's identity is a stale port.
       const declared = ures.headers['x-aura-app-id'];
-      if (!t.sidecar && declared && declared !== t.appId) {
+      if (declared && declared !== t.appId) {
         ures.resume();
         log('identity-mismatch', name, declared);
         return reply(res, 502, `${t.appName} is restarting`, 'This page reloads by itself.', { refresh: 2 });
@@ -398,40 +285,6 @@ export function createAppHostRouter({
     req.on('aborted', () => up.destroy());
     res.on('close', () => { if (!res.writableFinished) up.destroy(); });
     req.pipe(up);
-  }
-
-  async function handleUpgrade(name, req, socket, head) {
-    const identity = surfaceIdentity(req.headers);
-    let reportedApp = null;
-    let reported = false;
-    const reportUpgrade = (status) => {
-      if (reported) return;
-      reported = true;
-      reportSurface({ subject: 'app-hosts', method: 'UPGRADE', identity, appId: reportedApp, status });
-    };
-    const fail = (status, text) => {
-      reportUpgrade(status);
-      try { socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); } catch { /* gone */ }
-    };
-    socket.on('error', () => {});
-    let t;
-    try { t = await resolve(name); } catch { return fail(503, 'Service Unavailable'); }
-    if (t.missing) return fail(404, 'Not Found');
-    reportedApp = t.appId ?? null;
-    if (t.starting) return fail(503, 'Service Unavailable');
-
-    // Byte-for-byte: the original request line and headers (Host kept), plus
-    // X-Forwarded-*; then a plain TCP pipe. Subprotocols, extensions and the
-    // app's own pings pass through untouched.
-    const extra = { ...forwardedHeaders(req), ...identityHeaders(t) };
-    const lines = [`${req.method} ${req.url} HTTP/${req.httpVersion}`];
-    const rawHeaders = stripShellCredentials(req.rawHeaders, 'app-hosts-upgrade');
-    for (let i = 0; i < rawHeaders.length; i += 2) {
-      const key = rawHeaders[i].toLowerCase();
-      if (!(key in extra) && key !== APP_HOST_ROUTE_HEADER) lines.push(`${rawHeaders[i]}: ${rawHeaders[i + 1]}`);
-    }
-    for (const [k, v] of Object.entries(extra)) lines.push(`${k}: ${v}`);
-    pipeUpgrade(name, t, socket, head, lines, reportUpgrade, fail);
   }
 
   function pipeUpgrade(name, t, socket, head, lines, reportUpgrade, fail) {
@@ -450,33 +303,19 @@ export function createAppHostRouter({
     upstream.on('close', drop);
   }
 
-  // ── frameRoute: host ──────────────────────────────────────────────────────
-
   /**
    * Where a `{label}--…` request goes. Throws when the registry can't answer,
-   * and the caller refuses the request: an unreachable registry must not put a
-   * `host` app back on the open `proxy` path.
+   * and the caller refuses the request.
    */
-  async function decide(host, name) {
+  async function decide(host) {
     // The first load also boots the KV store the registry reads.
-    if (!index) await load().catch(() => {});
+    if (!apps) await load().catch(() => {});
     const svc = await services();
-    if (!svc) return { to: 'proxy' };
-    if (!index) throw new Error('app list unavailable');
-    if (host.kind === 'app') {
-      const found = await svc.registry.resolveLabel(host.label);
-      if (found.status === 'retired') return { to: 'gone' };
-      if (found.status === 'reserved') return { to: 'missing' };
-      if (found.status === 'active' && await svc.frameRoute(found.record.appId) === 'host') {
-        return { to: 'host', svc, record: found.record, slot: found.slot, label: host.label, base: host.base };
-      }
-    }
-    // A `host` app's manifest names carry no handoff, so they can't stay open.
-    const declaring = name ? index?.get(name) : null;
-    if (declaring && await svc.frameRoute(declaring) === 'host') return { to: 'denied' };
-    // An App Host name no app uses is never the desktop, nor its API.
-    if (!declaring) return { to: 'missing' };
-    return { to: 'proxy' };
+    if (!svc) throw new Error('app host registry unavailable');
+    const found = await svc.registry.resolveLabel(host.label);
+    if (found.status === 'retired') return { to: 'gone' };
+    if (found.status !== 'active') return { to: 'missing' };
+    return { to: 'host', svc, record: found.record, slot: found.slot, label: host.label, base: host.base };
   }
 
   /**
@@ -689,28 +528,20 @@ export function createAppHostRouter({
   async function routeLabeled(host, event, req, rest) {
     const target = rest[0];
     try {
-      const route = await decide(host, appHostName(req.headers.host));
-      if (route.to === 'host') {
-        const edge = requestEdge(req, env);
-        if (event === 'request') {
-          const identity = surfaceIdentity(req.headers);
-          const method = req.method;
-          target.once('close', () => reportSurface({
-            subject: 'app-hosts', method, identity, appId: route.record.appId, status: target.headersSent ? target.statusCode : 0,
-          }));
-          await serveHostRequest(route, req, target, edge);
-        }
-        else await serveHostUpgrade(route, req, target, rest[1], edge);
-        return;
-      }
+      const route = await decide(host);
       if (route.to === 'gone') return refuse(event, target, 410, 'Gone', 'This app was removed, and its address is not used again.');
+      // An App Host name no app uses is never the desktop, nor its API.
       if (route.to === 'missing') return refuse(event, target, 404, 'Not Found', 'No app uses this address.');
-      if (route.to === 'denied') return refuse(event, target, 403, 'Forbidden', 'Open this app from the AuraOS desktop.');
-      // App Host shaped, and no app uses it: never the desktop, nor its API.
-      const name = claims(req);
-      if (!name) return refuse(event, target, 404, 'Not Found', 'No app uses this address.');
-      if (event === 'request') await handleRequest(name, req, target);
-      else await handleUpgrade(name, req, target, rest[1]);
+      const edge = requestEdge(req, env);
+      if (event === 'request') {
+        const identity = surfaceIdentity(req.headers);
+        const method = req.method;
+        target.once('close', () => reportSurface({
+          subject: 'app-hosts', method, identity, appId: route.record.appId, status: target.headersSent ? target.statusCode : 0,
+        }));
+        await serveHostRequest(route, req, target, edge);
+      }
+      else await serveHostUpgrade(route, req, target, rest[1], edge);
     } catch (err) {
       log('route-failed', err?.name ?? 'error');
       if (event === 'request' && target.headersSent) { target.destroy(); return; }
@@ -762,8 +593,13 @@ export function createAppHostRouter({
           answerHostProbe(req, rest[0], host, edge);
           return true;
         }
-        if (host.kind === 'app' || appHostName(req.headers.host)) {
+        if (host.kind === 'app') {
           void routeLabeled(host, event, req, rest);
+          return true;
+        }
+        // App Host shaped on a base that carries none: never the desktop, nor its API.
+        if (parseAppHost(String(req.headers.host ?? ''))) {
+          refuse(event, rest[0], 404, 'Not Found', 'No app uses this address.');
           return true;
         }
         if (host.kind === 'unknown') {
@@ -778,8 +614,8 @@ export function createAppHostRouter({
       }
       return emit.call(this, event, req, ...rest);
     };
-    void load().catch(() => {});   // warm the index; the shell may still be booting
+    void load().catch(() => {});   // warm the app list; the shell may still be booting
   }
 
-  return { attach, claims, resolve };
+  return { attach };
 }

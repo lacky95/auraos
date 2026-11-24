@@ -2,7 +2,6 @@ import './global.css';
 import { RootProvider } from 'fumadocs-ui/provider/next';
 import type { ReactNode } from 'react';
 import { AURA_RUNTIME_LOADER_JS } from '@aura/app-sdk/runtime/loader';
-import { docsSearchApi } from '@/lib/base-path.mjs';
 
 // Sync `<html class="dark">` with the AuraOS color-mode resolution BEFORE
 // React hydrates. The resolved mode comes from the bootstrap of
@@ -37,13 +36,6 @@ try {
 } catch (e) {}
 `;
 
-// The search dialog's default fetch URL is built as
-// `new URL("/api/search", window.location.origin)` inside fumadocs-core,
-// which bypasses Next.js's basePath, so the proxy route would land at the
-// SHELL origin. We always pass the `api` prop. next.config.mjs inlines the
-// basePath of this build (proxy prefix or '' on an App Host).
-const SEARCH_API = docsSearchApi(process.env.DOCS_BASE_PATH ?? '');
-
 export default function Layout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
@@ -52,10 +44,7 @@ export default function Layout({ children }: { children: ReactNode }) {
         <script dangerouslySetInnerHTML={{ __html: darkBootstrap }} />
       </head>
       <body className="flex flex-col min-h-screen scanlines">
-        <RootProvider
-          theme={{ enabled: false }}
-          search={{ options: { api: SEARCH_API } }}
-        >
+        <RootProvider theme={{ enabled: false }}>
           {children}
         </RootProvider>
       </body>

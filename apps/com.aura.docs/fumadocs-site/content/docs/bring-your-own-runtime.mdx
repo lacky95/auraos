@@ -36,7 +36,6 @@ The app is a `raw` runtime in a container sandbox; the foreign image is a
   "tools": ["bash", "node"],
   "permissions": ["sidecars.spawn"],
   "serverPort": 4110,
-  "proxy": { "rewriteHtml": "astro" },
   "services": [
     {
       "name": "runtime",                       // container aura-<instanceId>--runtime
@@ -114,26 +113,16 @@ createSidecars({
 ## 3. Rendering fidelity
 
 A third-party dashboard ships its own complete styling, and you usually want
-it to look exactly like it does natively. Two manifest settings control what
-the shell proxy injects into the app document:
+it to look exactly like it does natively. It does: the window is the app's
+[App Host](/docs/app-hosts), served from `/`, and the controller passes the
+dashboard's pages through unchanged. Root-absolute URLs (`/assets/*`, and
+any the SPA builds in script) reach the dashboard, and nothing is injected
+into its HTML.
 
-- **`themeStrategy: "override"`** (top-level) stops the proxy injecting
-  `<link rel="stylesheet" href="/api/os/theme.css">`. That stylesheet is
-  mostly harmless `:root { --aura-* }` variables, but it also carries global
-  `*` and `::-webkit-scrollbar` rules that restyle the app's scrollbars.
-  (The Process Manager shows an `OVERRIDE` chip so users know why it looks
-  different.)
-- **`proxy.injectMeta: false`** drops the non-rendering `aura-*` meta tags
-  (design framework, theme, keymap). Optional; the identity meta
-  `aura-app-id` / `aura-instance-id` always stay, so the iframe identity
-  gate is unaffected.
-
-Keep `rewriteHtml: "astro"` even so: it rewrites the runtime's root-absolute
-`/assets/*` tags to `/api/proxy/<id>/assets/*` and doesn't touch appearance.
-SPAs that emit root-absolute URLs from script may need
-`rewriteHtml: "absolute"` plus `preservePrefix`. `com.aura.hermes` uses
-`themeStrategy: "override"` + `injectMeta: false` to render the Hermes
-dashboard natively.
+Set **`themeStrategy: "override"`** (top-level) to say the app keeps its own
+palette rather than the OS theme; the Process Manager shows an `OVERRIDE`
+chip so users know why it looks different. `com.aura.hermes` does this for
+the Hermes dashboard.
 
 ## Requirements & caveats
 

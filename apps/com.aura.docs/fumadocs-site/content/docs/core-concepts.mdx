@@ -15,7 +15,8 @@ Two layers. That's it.
 │   aura-shell  (Astro SSR, port 3000)                         │
 │                                                              │
 │   • AppManager: lifecycle FSM, port allocator                │
-│   • Reverse proxy:   /api/proxy/<id>/<path>                  │
+│   • App Hosts:       {label}--{host}, one origin per app     │
+│   • Machine proxy:   /api/proxy/<id>/<path>                  │
 │   • Content router:  /api/data/<authority>/<path>            │
 │   • OS event bus:    SSE + socket.io fan-out                 │
 └────┬─────────────────────────────────────────────────────┬───┘
@@ -32,7 +33,7 @@ Two layers. That's it.
 
 The shell is one Astro server. Apps are many, each its own dev server
 on its own port. The shell never embeds an app's code; it just
-forwards HTTP + WebSocket through the proxy.
+forwards HTTP + WebSocket to it.
 
 ## Instance vs activity
 
@@ -73,7 +74,7 @@ Almost every app should use this.
 to `$APP_PORT` and serving the lifecycle endpoints itself. Pick this
 when your framework owns its own HTML + dev server (Next.js, SvelteKit,
 Nuxt, Remix). The `com.aura.docs` app is the reference — it runs
-Next.js + fumadocs raw on Turbopack.
+Next.js + fumadocs raw.
 
 ## Sandbox modes
 
@@ -94,37 +95,30 @@ hard isolation or runs untrusted code.
 
 ## Proxy and iframe
 
-Every request from the browser to an app goes through:
+Each app window is an iframe on the app's own **App Host**:
 
 ```
-browser → /api/proxy/<instanceId>/<path>   →   aura-shell
+browser → {label}--{desktop host}/<path>   →   aura-shell (Host router)
                                           ↓
-                                    proxy resolves
+                                    label → instance
                                           ↓
                                     http://upstream:<port>/<path>
 ```
 
-The proxy:
+The shell streams the request with `X-Aura-App-Id` +
+`X-Aura-Instance-Id` set and nothing rewritten or injected. The page
+loads `/_aura/runtime.js` itself, which brings the theme, the keymap
+forwarder, the on-screen keyboard and a console relay (each switchable
+with a manifest `proxy.inject*` flag), and reaches the shell through
+the same-origin gateway `/_aura/os/` (`osUrl()` in the SDK). See
+[App hosts](/docs/app-hosts) and
+[Building an app for App Hosts](/docs/building-for-app-hosts).
 
-1. Sets `X-Aura-App-Id` + `X-Aura-Instance-Id` on the request.
-2. Forwards to the app's port (with `preservePrefix: true` for
-   basePath-aware SPAs, it keeps the `/api/proxy/<id>` prefix in the
-   upstream URL).
-3. Identity-gates the response: if the app declares
-   `X-Aura-App-Id` and it doesn't match, the proxy 502s instead of
-   forwarding (port-squat protection).
-4. On HTML responses, optionally injects:
-   - `<base href>` (Astro apps with relative URLs)
-   - `<meta name="aura-*">` identity + theme + keymap tags
-   - `/api/os/theme.css` link (for `themeStrategy: 'inherit'`)
-   - A console relay that postMessages every `console.*` + uncaught
-     error up to the shell
-   - A keystroke forwarder that lets OS-claimed combos reach the
-     dispatcher
-5. JS module URL rewriting for Vite's `/@fs/...` style imports.
-
-Each step is gated by a manifest `proxy.*` flag — raw apps usually
-disable most injections.
+`/api/proxy/<id>/<path>` is for machines: agents' MCP URLs and one
+app's server calling another. It strips the prefix, refuses
+browser documents with 403, never touches HTML, and identity-gates the
+response (502 when the app's `X-Aura-App-Id` doesn't match: port-squat
+protection). Details: [Proxy + iframe](/docs/deep-dive/proxy-and-iframe).
 
 ## Theme system
 
@@ -135,16 +129,16 @@ light, one dark — plus a color mode (`light` / `dark` / `auto`).
 
 `manifest.themeStrategy` chooses how an app participates:
 
-- **`inherit`** (default) — proxy injects
-  `<link href="/api/os/theme.css">`. Use `var(--aura-color-*)` and
-  you're done. Theme switches in Settings re-paint the iframe.
+- **`inherit`** (default) — `/_aura/runtime.js` links the OS theme
+  stylesheet. Use `var(--aura-color-*)` and you're done. Theme
+  switches in Settings re-paint the iframe.
 - **`themed`** — app ships its own palettes but reacts to OS theme/
-  mode via the meta tags + `osClient.onThemeChange()`.
-- **`override`** — app owns its palette entirely. Only the
-  color-mode meta is injected as a hint. Photo editors, brand-locked
-  surfaces, accessibility tools.
+  mode via the runtime bootstrap + `osClient.onThemeChange()`.
+- **`override`** — app owns its palette entirely. The resolved
+  color mode is still in the bootstrap as a hint. Photo editors,
+  brand-locked surfaces, accessibility tools.
 
-The canonical CSS variables the `inherit` strategy injects (full list
+The canonical CSS variables the `inherit` strategy provides (full list
 straight from `ColorPalette` in `packages/core/src/theme/ThemeManager.ts`):
 
 ```css
@@ -349,8 +343,7 @@ What `@aura/app-sdk` ships, by file:
   `createNextHealthRoute`, `auraIdentityHeaders` — for raw-runtime
   Next.js apps.
 - `proxyFetch`, `sanitizeHeaders` — for apps that proxy upstream HTTP
-  themselves (rare; the shell's `/api/proxy/*` already covers iframe
-  traffic).
+  themselves (rare).
 
 ## Distribution (Nexus)
 
@@ -376,7 +369,7 @@ packages/core         AppManager, ProotRunner, ContainerRunner,
                       OsEventBus, PermissionManager,
                       ContentProviderRegistry, ThemeManager,
                       manifest schema
-packages/shell        Astro SSR shell, /api/proxy, /api/data,
+packages/shell        Astro SSR shell, App Hosts, /api/proxy, /api/data,
                       /api/apps, OSLayout (console bridge, theme),
                       launcher, layout, status bar, dock,
                       Process Manager
@@ -393,8 +386,9 @@ apps/<id>             Each app, including this one
   `packages/core/src/app-manager/LifecycleStateMachine.ts`
 - How the shell builds your iframe URL:
   `packages/shell/src/pages/index.astro` (`buildView`)
-- How HTML/JS get rewritten on the way to the iframe:
-  `packages/shell/src/pages/api/proxy/[id]/[...path].ts`
+- How a window's requests reach your app:
+  `packages/shell/server/app-hosts.mjs`; the runtime script and
+  gateway: `packages/shell/server/app-gateway.mjs`
 - How the spawner constructs the PRoot args:
   `packages/core/src/app-manager/ProotRunner.ts` (`buildProotArgs`)
 - Reference apps for richer patterns: `apps/com.aura.terminal`

@@ -24,9 +24,7 @@ import {
   frameAppId,
   frameExpectedOrigin,
   isAppHostOriginOf,
-  isHostFrame,
   isSystemHostFrame,
-  type FrameRoute,
 } from './appFrame.ts';
 
 const SETTINGS_APP_ID = 'com.aura.settings';
@@ -38,8 +36,7 @@ export interface ChannelFrame<W = unknown, E = HTMLIFrameElement> {
   window: W;
   origin: string | null;
   appId: string | null;
-  route: FrameRoute;
-  /** A host frame of the app's `system` installation (appFrame `isSystemHostFrame`). */
+  /** A frame of the app's `system` installation (appFrame `isSystemHostFrame`). */
   system: boolean;
   element: E;
 }
@@ -82,7 +79,7 @@ export function classifySender<E>(input: ClassifyInput<E>): ChannelSender<E> | n
         return origin === frame.origin ? { endpoint: 'app', frame, direct: true } : null;
       }
       if (origin === frame.origin) return { endpoint: 'app', frame, direct: false };
-      if (frame.route === 'host' && isAppHostOriginOf(origin, shellOrigin)) {
+      if (isAppHostOriginOf(origin, shellOrigin)) {
         return { endpoint: 'embedded-app', frame, direct: false };
       }
       return { endpoint: 'app-subframe', frame, direct: false };
@@ -95,12 +92,11 @@ export function classifySender<E>(input: ClassifyInput<E>): ChannelSender<E> | n
 }
 
 /**
- * The built-in app `appId` itself: on a host frame, its `system` installation
- * (D45), so a same-id copy from `global` or `user` never qualifies.
- * PHASE2-CUTOVER: a proxy frame shares the shell's origin, so its id is all there is.
+ * The built-in app `appId` itself: its `system` installation (D45), so a
+ * same-id copy from `global` or `user` never qualifies.
  */
 function isSystemApp<E>(frame: ChannelFrame<unknown, E> | null, appId: string): boolean {
-  return !!frame && frame.appId === appId && (frame.route === 'proxy' || frame.system);
+  return !!frame && frame.appId === appId && frame.system;
 }
 
 /** Whether a verified sender may deliver this message to the shell. */
@@ -117,8 +113,6 @@ export function authorizeShellMessage<E>(
   // handlers bind each hint to the sender's own window.
   if (isAuraChannelRouteAllowed(type, 'native-host', 'shell')) {
     if (data.source !== 'host' || !frame) return false;
-    // PHASE2-CUTOVER: proxy frames keep the unverified native path; only the host rule remains.
-    if (frame.route === 'proxy') return true;
     return ctx.nativeRuntime;
   }
 
@@ -131,28 +125,21 @@ export function authorizeShellMessage<E>(
   // Asking the owner to share a Terminal session: only an App Host window
   // itself, so the dialog can name the app from the frame, never the payload.
   if (type === 'aura.terminal.share.request') {
-    return !!frame && sender.direct && frame.route === 'host' && !!frame.appId
+    return !!frame && sender.direct && !!frame.appId
       && isAuraChannelRouteAllowed(type, sender.endpoint, 'shell');
   }
 
   // The shell's console holds other apps' output.
-  if (type === 'aura.console.requestBacklog' && frame?.route === 'host' && !isSystemApp(frame, CONSOLE_APP_ID)) {
+  if (type === 'aura.console.requestBacklog' && frame && !isSystemApp(frame, CONSOLE_APP_ID)) {
     return false;
   }
-
-  // PHASE2-CUTOVER: a third-party frame inside a proxy app still reports taps for window focus.
-  if (type === 'aura.pointerdown' && sender.endpoint === 'app-subframe' && frame?.route === 'proxy') return true;
 
   return isAuraChannelRouteAllowed(type, sender.endpoint, 'shell');
 }
 
-/**
- * The app id a message speaks for. A host frame's id comes from the frame.
- * PHASE2-CUTOVER: drop the claimed id once no proxy frame remains.
- */
-export function senderAppId<E>(sender: ChannelSender<E>, claimed: unknown): string | null {
-  if (sender.frame?.route === 'host') return sender.frame.appId;
-  return typeof claimed === 'string' ? claimed : null;
+/** The app id a message speaks for: always the frame's, never one the message claims. */
+export function senderAppId<E>(sender: ChannelSender<E>): string | null {
+  return sender.frame?.appId ?? null;
 }
 
 /**
@@ -161,7 +148,7 @@ export function senderAppId<E>(sender: ChannelSender<E>, claimed: unknown): stri
  * can't claim keyboard focus and receive what the user types.
  */
 export function isHostNestedSender<E>(sender: ChannelSender<E>): boolean {
-  return !sender.direct && sender.frame?.route === 'host'
+  return !sender.direct && !!sender.frame
     && (sender.endpoint === 'app' || sender.endpoint === 'embedded-app');
 }
 
@@ -175,7 +162,7 @@ export function nestedFocusChange<E>(
   sender: ChannelSender<E>,
   data: Record<string, unknown>,
 ): 'set' | 'clear' | 'clear-own' | null {
-  if (sender.frame?.route !== 'host') return null;
+  if (!sender.frame) return null;
   if (sender.direct) {
     return type === 'aura.pointerdown' || (type === 'aura.keyboard.field' && data['focused'] === true) ? 'clear' : null;
   }
@@ -218,7 +205,6 @@ function knownFrames(): ChannelFrame[] {
     window: element.contentWindow,
     origin: frameExpectedOrigin(element),
     appId: frameAppId(element),
-    route: isHostFrame(element) ? 'host' as const : 'proxy' as const,
     system: isSystemHostFrame(element),
     element,
   }));

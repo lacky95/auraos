@@ -1,4 +1,4 @@
-// `frameRoute: host` on the App Host router, against real sockets: a fake app,
+// The App Host router, against real sockets: a fake app,
 // a fake shell API, and a fake registry. Covers the handoff, the app cookie,
 // the Host and Origin checks, and slot routing.
 import { test, after, beforeEach } from 'node:test';
@@ -7,9 +7,10 @@ import http from 'node:http';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { activityHeaders, classifyHost, createAppHostRouter } from '../server/app-hosts.mjs';
-import { hostListed, hostParses, hostPolicy } from '../server/host-policy.mjs';
+import { browserDocumentRequest, hostListed, hostParses, hostPolicy } from '../server/host-policy.mjs';
 import { createAppHostAuth, safeReturnPath } from '../server/app-host-auth.mjs';
 import { POST as handoffRoute } from '../src/pages/api/app-hosts/handoff.ts';
+import { ALL as machineProxyRoute } from '../src/pages/api/proxy/[id]/[...path].ts';
 
 const listen = (s: http.Server) =>
   new Promise<number>((r) => s.listen(0, '127.0.0.1', () => r((s.address() as AddressInfo).port)));
@@ -53,7 +54,6 @@ const record = (slots: any[]) => ({
 const live = (instanceId: string, extra = {}) => ({ instanceId, port: appPort, state: 'resumed', inPool: false, sandbox: 'proot', ...extra });
 
 let labels: Record<string, any>;
-let frameRoutes: Record<string, string>;
 let apps: any[];
 let liveSessions: Set<string>;
 let registryDown = false;
@@ -64,13 +64,13 @@ const registry = {
     return labels[label] ?? { status: 'unknown' };
   },
 };
-const svc = { registry, frameRoute: async (appId: string) => frameRoutes[appId] ?? 'proxy', sessionLive: async (sid: string) => liveSessions.has(sid) };
+const svc = { registry, sessionLive: async (sid: string) => liveSessions.has(sid) };
 
 let nowMs = 1_000_000;
 const auth = createAppHostAuth({ secret: Buffer.alloc(32, 7), now: () => nowMs });
 const embedCalls: unknown[] = [];
 let embedOrigins: string[] = [];
-const env = { AURA_TRUSTED_PROXIES: '10.9.9.9' };
+const env = { AURA_TRUSTED_PROXIES: '10.9.9.9', AURA_DESKTOP_HOSTS: BASE };
 const router = createAppHostRouter({
   appsList: async () => apps, shellPort: String(shellPort), services: async () => svc, auth, env,
   embedAncestors: (ctx: unknown) => { embedCalls.push(ctx); return embedOrigins; },
@@ -84,7 +84,6 @@ after(() => { for (const s of [upstream, shellApi, front]) { s.closeAllConnectio
 
 beforeEach(() => {
   labels = { notes1234: { status: 'active', record: record([slotOf(1, 'notes1234', 'io.acme.notes')]), slot: slotOf(1, 'notes1234', 'io.acme.notes') } };
-  frameRoutes = { 'io.acme.notes': 'host' };
   apps = [{ manifest: { id: 'io.acme.notes', name: 'Notes', componentType: 'activity', hosts: [] }, instances: [live('io.acme.notes')] }];
   liveSessions = new Set(['sess-1']);
   registryDown = false;
@@ -158,7 +157,7 @@ test('on HTTPS from a trusted proxy the cookie is __Host- and Secure', async () 
   assert.equal(r.status, 403);
 
   const trustedRouter = createAppHostRouter({
-    appsList: async () => apps, services: async () => svc, auth, env: { AURA_TRUSTED_PROXIES: '127.0.0.1' },
+    appsList: async () => apps, services: async () => svc, auth, env: { AURA_TRUSTED_PROXIES: '127.0.0.1', AURA_DESKTOP_HOSTS: BASE },
   });
   const edgeFront = http.createServer((_q, s) => s.end('desktop'));
   trustedRouter.attach(edgeFront);
@@ -347,7 +346,6 @@ test('the Terminal answers its own origin only, while a navigation may still arr
   const termOrigin = `http://${termHost}`;
   const termRecord = { ...record([slotOf(1, TERM, 'com.aura.terminal-1')]), appId: 'com.aura.terminal', baseName: TERM };
   labels[TERM] = { status: 'active', record: termRecord, slot: slotOf(1, TERM, 'com.aura.terminal-1') };
-  frameRoutes['com.aura.terminal'] = 'host';
   apps.push({ manifest: { id: 'com.aura.terminal', name: 'Terminal', componentType: 'activity', hosts: [] }, instances: [live('com.aura.terminal-1')] });
   const code = auth.issueCode({
     aud: termOrigin, label: TERM, installationId: INSTALL, appId: 'com.aura.terminal', slot: 1,
@@ -458,15 +456,31 @@ test('X-Forwarded-Proto from an untrusted peer cannot change the cookie audience
 
 test('a spoofed Host gets a cookie that is useless on the real one', async () => {
   const good = await signIn();
-  assert.equal((await get(`notes1234--evil.example`, '/', { cookie: good })).status, 401);
+  assert.equal((await get(`notes1234--evil.example`, '/', { cookie: good })).status, 400, 'an unlisted base is refused outright');
+  const lax = createAppHostRouter({ appsList: async () => apps, services: async () => svc, auth, env: { ...env, AURA_HOST_POLICY: 'report' } });
+  const server = http.createServer((_q, s) => s.end('desktop'));
+  lax.attach(server);
+  const laxPort = await listen(server);
+  try {
+    const status = await new Promise<number>((resolve, reject) => {
+      http.get({ port: laxPort, agent: false, headers: { host: 'notes1234--evil.example', cookie: good } }, (res) => { res.resume(); resolve(res.statusCode ?? 0); }).on('error', reject);
+    });
+    assert.equal(status, 401, 'and in report mode the cookie is useless there');
+  } finally { server.closeAllConnections?.(); server.close(); }
 });
 
-test('an unknown Host keeps working in report mode and is refused in enforce mode', async () => {
+test('an unknown or malformed Host is refused by default, and served only in report mode', async () => {
   // An App Host name no app uses is 404 in both (see below), never the desktop.
   assert.equal((await get('zzz--desk.example')).status, 404);
-  assert.equal((await get('bad_host')).body, 'desktop');
+  for (const host of ['bad_host', 'a..b', 'a..b:3000', 'unknown.example']) {
+    const r = await get(host);
+    assert.equal(r.status, 400, host);
+    assert.notEqual(r.body, 'desktop', host);
+  }
+  assert.equal((await get('notes1234--a..b')).status, 404, 'App Host shaped on a base that carries none');
+  assert.match(await upgrade('a..b', '/os-events/?EIO=4&transport=websocket', {}), /^HTTP\/1\.1 400/);
   const strict = createAppHostRouter({
-    appsList: async () => apps, services: async () => svc, auth, env: { AURA_HOST_POLICY: 'enforce', AURA_DESKTOP_HOSTS: 'desk.example' },
+    appsList: async () => apps, services: async () => svc, auth, env: { AURA_HOST_POLICY: 'report', AURA_DESKTOP_HOSTS: 'desk.example' },
   });
   const server = http.createServer((_q, s) => s.end('desktop'));
   strict.attach(server);
@@ -476,7 +490,8 @@ test('an unknown Host keeps working in report mode and is refused in enforce mod
   });
   try {
     assert.equal(await at('zzz--desk.example'), 404);
-    assert.equal(await at('bad_host'), 400);
+    assert.equal(await at('bad_host'), 200, 'report mode serves it and logs it');
+    assert.equal(await at('a..b'), 200);
     assert.equal(await at('10.0.0.2:3000'), 200);
     assert.equal(await at('aura-shell:3000'), 200);
   } finally { server.closeAllConnections?.(); server.close(); }
@@ -496,12 +511,12 @@ test('DNS rebinding: only listed custom domains are served, and every other acce
     assert.equal(cls(h), false, h);
   }
   assert.equal(hostListed(classifyHost('box.example.com'), {}), false, 'nothing listed: no custom domain');
-  assert.equal(hostPolicy({}), 'report', 'report until cutover');
-  assert.equal(hostPolicy({ AURA_HOST_POLICY: 'enforce' }), 'enforce');
-  assert.equal(hostPolicy({ AURA_HOST_POLICY: 'bogus' }), 'report');
+  assert.equal(hostPolicy({}), 'enforce', 'enforce by default');
+  assert.equal(hostPolicy({ AURA_HOST_POLICY: 'report' }), 'report');
+  assert.equal(hostPolicy({ AURA_HOST_POLICY: 'bogus' }), 'enforce');
 
   const strict = createAppHostRouter({
-    appsList: async () => apps, services: async () => svc, auth, env: { AURA_HOST_POLICY: 'enforce', AURA_DESKTOP_HOSTS: 'desk.example' },
+    appsList: async () => apps, services: async () => svc, auth, env: { AURA_DESKTOP_HOSTS: 'desk.example' },
   });
   const server = http.createServer((_q, s) => s.end('desktop'));
   strict.attach(server);
@@ -510,15 +525,16 @@ test('DNS rebinding: only listed custom domains are served, and every other acce
     http.get({ port: strictPort, agent: false, headers: { host } }, (res) => { res.resume(); resolve(res.statusCode ?? 0); }).on('error', reject);
   });
   try {
-    for (const h of ['desk.example', '127.0.0.1:3000', '10.0.0.2:3000', '10-0-0-2.nip.io:3000', 'os.aura.localhost:3000', 'localhost:3000', 'aura-shell:3000']) {
+    for (const h of ['desk.example', '127.0.0.1:3000', '[::1]:3000', '10.0.0.2:3000', '10-0-0-2.nip.io:3000', '127-0-0-1.nip.io:3000',
+      'os.aura.localhost:3000', 'localhost:3000', 'aura-shell:3000']) {
       assert.equal(await at(h), 200, h);
     }
     assert.equal(await at('rebind.attacker.com'), 400);
     assert.equal(await at('notes1234--rebind.attacker.com'), 400);
     assert.equal(await at(HOST), 401, 'a listed base still routes its App Hosts');
   } finally { server.closeAllConnections?.(); server.close(); }
-  // Report mode (today's default) still serves an unlisted custom domain.
-  assert.equal((await get('rebind.attacker.com')).body, 'desktop');
+  // The default router refuses an unlisted custom domain too.
+  assert.equal((await get('rebind.attacker.com')).status, 400);
 });
 
 // ── Origin ──────────────────────────────────────────────────────────────────
@@ -657,25 +673,13 @@ test('a service-only app gets no UI host', async () => {
   assert.equal(seen.length, 0);
 });
 
-// ── the proxy path and failure ──────────────────────────────────────────────
+// ── failure ─────────────────────────────────────────────────────────────────
 
-test('a proxy-route app keeps the open manifest-host path', async () => {
-  frameRoutes = {};
-  labels = {};
-  apps = [{ manifest: { id: 'io.acme.legacy', name: 'Legacy', hosts: [{ name: 'legacy' }] }, instances: [live('io.acme.legacy')] }];
-  await router.resolve('legacy');
-  const r = await get(`legacy--${BASE}`, '/x', { cookie: 'aura_app=stays; aura_session=S' });
-  assert.equal(r.status, 200);
-  assert.equal(r.headers['x-frame-options'], 'DENY');
-  assert.equal(seen.at(-1)!.headers.cookie, 'aura_app=stays');
-});
-
-test('a host-route app cannot be reached through a manifest host', async () => {
+test('a manifest host name is not served: only registry labels are', async () => {
   labels = {};
   apps = [{ manifest: { id: 'io.acme.notes', name: 'Notes', componentType: 'activity', hosts: [{ name: 'named' }] }, instances: [live('io.acme.notes')] }];
-  await router.resolve('named');
-  assert.equal((await get(`named--${BASE}`)).status, 403);
-  assert.match(await upgrade(`named--${BASE}`, '/ws', { Origin: `http://named--${BASE}` }), /^HTTP\/1\.1 403/);
+  assert.equal((await get(`named--${BASE}`)).status, 404);
+  assert.match(await upgrade(`named--${BASE}`, '/ws', { Origin: `http://named--${BASE}` }), /^HTTP\/1\.1 404/);
   assert.equal(seen.length, 0);
 });
 
@@ -688,9 +692,11 @@ test('a registry failure fails closed', async () => {
 
 // ── POST /api/app-hosts/handoff ─────────────────────────────────────────────
 
+/** The owner's login cookie on the desktop (a fake login session store below). */
+const OWNER_COOKIE = 'aura_session=owner-token';
 const callRoute = (headers: Record<string, string>, body: unknown) => handoffRoute({
   request: new Request(`http://${BASE}/api/app-hosts/handoff`, {
-    method: 'POST', headers: { 'content-type': 'application/json', host: BASE, ...headers }, body: JSON.stringify(body),
+    method: 'POST', headers: { 'content-type': 'application/json', host: BASE, cookie: OWNER_COOKIE, ...headers }, body: JSON.stringify(body),
   }),
   clientAddress: '127.0.0.1',
 } as never) as Promise<Response>;
@@ -703,9 +709,24 @@ const G = globalThis as unknown as Record<string | symbol, unknown>;
 const SERVICES = Symbol.for('aura.appHosts.services');
 const AUTH = Symbol.for('aura.appHosts.auth');
 const MANAGER = '__aura_app_manager__';
+const AUTH_SERVICES = '__auraAuthServices';
+/** core.getAuthServices(), faked: one owner with one live login session, `sess-route`. */
+const fakeAuthServices = {
+  version: Number.MAX_SAFE_INTEGER,
+  users: {
+    recoverOwnerPassword: async () => ({ ok: false }), credentialEpoch: () => 0,
+    getOwner: async () => ({ id: 'default', username: 'owner', role: 'owner', disabled: false }),
+  },
+  loginSessions: {
+    verify: async (token: string) => (token === 'owner-token'
+      ? { sessionId: 'sess-route', method: 'password', userId: 'default', expiresAt: Date.now() + 3_600_000 } : null),
+  },
+  setupTickets: {},
+};
 
 async function withRouteWorld(run: () => Promise<void>) {
-  const saved = [G[SERVICES], G[AUTH], G[MANAGER]];
+  const saved = [G[SERVICES], G[AUTH], G[MANAGER], G[AUTH_SERVICES]];
+  G[AUTH_SERVICES] = fakeAuthServices;
   const instances: Record<string, unknown> = {
     'io.acme.notes': { instanceId: 'io.acme.notes', appId: 'io.acme.notes', inPool: false },
     'io.acme.notes-pool': { instanceId: 'io.acme.notes-pool', appId: 'io.acme.notes', inPool: true },
@@ -731,10 +752,11 @@ async function withRouteWorld(run: () => Promise<void>) {
     },
   };
   try { await run(); } finally {
-    [G[SERVICES], G[AUTH], G[MANAGER]] = saved;
+    [G[SERVICES], G[AUTH], G[MANAGER], G[AUTH_SERVICES]] = saved;
     if (saved[0] === undefined) delete G[SERVICES];
     if (saved[1] === undefined) delete G[AUTH];
     if (saved[2] === undefined) delete G[MANAGER];
+    if (saved[3] === undefined) delete G[AUTH_SERVICES];
   }
 }
 
@@ -752,6 +774,16 @@ test('the handoff route refuses an open redirect and malformed ids before any lo
   }
 });
 
+test('the handoff route needs the owner\'s login session', async () => {
+  await withRouteWorld(async () => {
+    for (const cookie of ['', 'aura_session=forged', `${OWNER_COOKIE}; ${OWNER_COOKIE}`]) {
+      const r = await callRoute({ origin: SHELL, cookie }, routeBody());
+      assert.equal(r.status, 401, cookie);
+      assert.deepEqual(await r.json(), { error: 'login-required' });
+    }
+  });
+});
+
 test('the handoff route answers {code, origin, slot}, and the code signs in', async () => {
   await withRouteWorld(async () => {
     const r = await callRoute({ origin: SHELL }, routeBody());
@@ -761,7 +793,7 @@ test('the handoff route answers {code, origin, slot}, and the code signs in', as
     assert.equal(out.origin, ORIGIN);
     assert.equal(out.slot, 1);
     assert.equal(out.system, false, 'a user-scope installation');
-    liveSessions.add('login-dark');
+    liveSessions.add('sess-route');
     const signed = await get(HOST, `/_aura/handoff?code=${out.code}`);
     assert.equal(signed.status, 303);
     assert.equal(signed.headers.location, '/page?_aura_activity=x');
@@ -852,7 +884,6 @@ const EMBED_WS = `/ws?_aura_session=${encodeURIComponent(EMBED_SESSION)}&embed=1
 function terminalWorld() {
   const termRecord = { ...record([slotOf(1, TERM, 'com.aura.terminal-1')]), appId: 'com.aura.terminal', baseName: TERM };
   labels[TERM] = { status: 'active', record: termRecord, slot: slotOf(1, TERM, 'com.aura.terminal-1') };
-  frameRoutes['com.aura.terminal'] = 'host';
   apps.push({ manifest: { id: 'com.aura.terminal', name: 'Terminal', componentType: 'activity', hosts: [] }, instances: [live('com.aura.terminal-1')] });
   embedOrigins = ['http://terminalx1--desk.example'];
 }
@@ -959,7 +990,7 @@ test('a write or socket to the shell from another site is refused before the she
   assert.equal((await post({ origin: 'https://box.example.com', 'x-forwarded-host': 'box.example.com' }, '10.0.0.2:3000')).body, 'desktop');
   assert.match(await upgrade(BASE, '/os-events/?EIO=4&transport=websocket', { Origin: `http://${BASE}` }), /^HTTP\/1\.1 418/);
   // Reads are untouched: a cross-site <img>, a script tag, the setup probe.
-  assert.equal((await get(BASE, '/api/os/keyboard.js', { origin: 'http://evil.example' })).body, 'desktop');
+  assert.equal((await get(BASE, '/api/os/theme.css', { origin: 'http://evil.example' })).body, 'desktop');
 });
 
 test('machine callers send no Origin and keep working: the CLI, an app server\'s SDK, the Terminal backend', async () => {
@@ -1030,7 +1061,7 @@ test('the cookie probe sets a cookie like the handoff and reports it to this des
 
 test('the cookie probe behind a trusted HTTPS edge uses a __Host- Secure cookie and the https desktop', async () => {
   const edge = http.createServer((_q, s) => s.end('desktop'));
-  createAppHostRouter({ appsList: async () => apps, services: async () => svc, auth, env: { AURA_TRUSTED_PROXIES: '127.0.0.1' } }).attach(edge);
+  createAppHostRouter({ appsList: async () => apps, services: async () => svc, auth, env: { AURA_TRUSTED_PROXIES: '127.0.0.1', AURA_DESKTOP_HOSTS: BASE } }).attach(edge);
   const edgePort = await listen(edge);
   const at = (path: string, headers: Record<string, string>) => new Promise<Reply>((resolve, reject) => {
     http.get({ port: edgePort, path, agent: false, headers: { host: `hostprobe--${BASE}`, 'x-forwarded-proto': 'https', ...headers } }, (res) => {
@@ -1122,8 +1153,9 @@ test('an App Host name no app uses is 404 under every policy, never the desktop 
   const strict = desktop();
   createAppHostRouter({ appsList: async () => apps, services: async () => svc, auth, env: { AURA_HOST_POLICY: 'enforce', AURA_DESKTOP_HOSTS: BASE } }).attach(strict);
   const noRegistry = desktop();
-  createAppHostRouter({ appsList: async () => apps, auth, env: {} }).attach(noRegistry);
-  const ports = [port, ...await Promise.all([strict, noRegistry].map(listen))];
+  createAppHostRouter({ appsList: async () => apps, auth, env: { AURA_DESKTOP_HOSTS: BASE } }).attach(noRegistry);
+  const [strictPort, noRegistryPort] = await Promise.all([strict, noRegistry].map(listen)) as [number, number];
+  const ports = [port, strictPort];
   const answer = (p: number, host: string, path: string, method: string) => new Promise<string>((resolve, reject) => {
     const req = http.request({ port: p, path, method, agent: false, headers: { host } }, (res) => {
       let body = '';
@@ -1149,5 +1181,66 @@ test('an App Host name no app uses is 404 under every policy, never the desktop 
     assert.equal((await get(`gone1234--${BASE}`)).status, 410);
     assert.equal((await get(BASE)).body, 'desktop');
     assert.equal((await get(HOST)).status, 401);
+    // Without a registry every App Host fails closed, never the desktop.
+    for (const host of [...hosts, HOST]) {
+      const r = await answer(noRegistryPort, host, '/', 'GET');
+      assert.match(r, /^(503|404) /, host);
+      assert.doesNotMatch(r, /desktop/);
+    }
+    assert.match(await answer(noRegistryPort, HOST, '/', 'GET'), /^503 /, 'a valid label fails closed');
   } finally { for (const s of [strict, noRegistry]) { s.closeAllConnections?.(); s.close(); } }
+});
+
+// ── the machine proxy (/api/proxy/*) ────────────────────────────────────────
+
+test('a browser page, frame or worker load is a document request; a fetch, curl or MCP call is not', () => {
+  const ask = (h: Record<string, string>, method = 'GET') => browserDocumentRequest(method, (n: string) => h[n]);
+  for (const dest of ['document', 'iframe', 'frame', 'embed', 'object', 'worker', 'sharedworker', 'serviceworker']) {
+    assert.equal(ask({ 'sec-fetch-dest': dest }), true, dest);
+  }
+  assert.equal(ask({ 'sec-fetch-mode': 'navigate' }), true);
+  // Plain HTTP: no Sec-Fetch-*, but every navigation sends Upgrade-Insecure-Requests.
+  assert.equal(ask({ 'upgrade-insecure-requests': '1', accept: 'text/html' }), true);
+  for (const h of [
+    {}, { accept: 'application/json, text/event-stream' }, { 'sec-fetch-dest': 'empty', 'sec-fetch-mode': 'cors' },
+    { 'sec-fetch-dest': 'empty', 'upgrade-insecure-requests': '1' }, { 'user-agent': 'curl/8' },
+  ] as Array<Record<string, string>>) assert.equal(ask(h), false, JSON.stringify(h));
+  assert.equal(ask({ 'upgrade-insecure-requests': '1' }, 'POST'), false, 'a form post is not a load the proxy could render');
+});
+
+test('the machine proxy refuses a browser document and serves a machine call, stripped of the prefix and of cookies', async () => {
+  const saved = G[MANAGER];
+  G[MANAGER] = {
+    getInstance: (id: string) => (id === 'io.acme.notes' ? { instanceId: 'io.acme.notes', appId: 'io.acme.notes', state: 'resumed', port: appPort, inPool: false } : undefined),
+    getInstancesByApp: () => [],
+    getManifest: (id: string) => ({ id, componentType: 'activity', provides: [] }),
+    getUpstreamUrl: () => ({ host: '127.0.0.1', port: appPort }),
+  };
+  const call = (path: string, headers: Record<string, string> = {}, method = 'GET') => machineProxyRoute({
+    params: { id: 'io.acme.notes', path: path.slice(1) },
+    request: new Request(`http://${BASE}/api/proxy/io.acme.notes${path}`, { method, headers: { host: BASE, ...headers } }),
+  } as never) as Promise<Response>;
+  try {
+    for (const headers of [
+      { 'sec-fetch-dest': 'document', 'sec-fetch-mode': 'navigate' },
+      { 'sec-fetch-dest': 'iframe', 'sec-fetch-mode': 'navigate' },
+      { 'upgrade-insecure-requests': '1', accept: 'text/html' },
+    ] as Array<Record<string, string>>) {
+      const r = await call('/', headers);
+      assert.equal(r.status, 403, JSON.stringify(headers));
+      assert.equal((await r.json() as { error: string }).error, 'browser-document-refused');
+      assert.equal(r.headers.get('content-security-policy'), 'sandbox');
+    }
+    assert.equal(seen.length, 0, 'a refused document never reaches the app');
+
+    // An agent's MCP call: no login, no Sec-Fetch-*, JSON.
+    const r = await call('/mcp', { accept: 'application/json, text/event-stream', 'content-type': 'application/json', cookie: 'aura_session=S; app=1' });
+    assert.equal(r.status, 200);
+    assert.equal(await r.text(), 'app');
+    assert.equal(seen.at(-1)!.url, '/mcp', 'the prefix is stripped');
+    assert.equal(seen.at(-1)!.headers.cookie, 'app=1', 'shell credentials never reach the app');
+    assert.equal(r.headers.get('set-cookie'), null, 'an app cannot set cookies on the shell origin');
+    assert.equal(r.headers.get('content-security-policy'), 'sandbox');
+    assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
+  } finally { G[MANAGER] = saved; if (saved === undefined) delete G[MANAGER]; }
 });

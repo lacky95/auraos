@@ -158,7 +158,8 @@ build the iframe URL.
 
 The proxy is **not** in this loop. Runner → app is direct over the
 inner network (loopback in PRoot mode, the `aura-net` bridge in
-container mode). The proxy only ever serves the browser-facing iframe.
+container mode). Windows reach the app on its App Host; the machine proxy
+serves agents and other apps.
 
 ## Reading the source
 

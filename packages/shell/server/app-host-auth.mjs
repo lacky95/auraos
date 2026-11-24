@@ -17,8 +17,6 @@ import { appHostCookieName, isAuraReservedPath } from '@aura/core/host-rules';
 
 export const HANDOFF_TTL_MS = 60_000;
 export const APP_COOKIE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-/** The `sid` of a handoff issued while owner login is dark. */
-export const LOGIN_DARK_SID = 'login-dark';
 
 const MAX_PENDING_CODES = 10_000;
 const MAX_RETURN_PATH = 2048;
@@ -208,20 +206,9 @@ export async function loadAppHostServices() {
   // The shared singleton: it knows manifest host names, so generated names avoid them.
   const shared = core.getAppHostServices();
   const registry = shared.registry;
-  const frameRoute = shared.getFrameRoute?.bind(shared) ?? registry.getFrameRoute?.bind(registry) ?? core.getFrameRoute;
-  if (typeof frameRoute !== 'function') {
-    console.warn('[app-hosts] this core has no getFrameRoute; every app stays on the proxy path');
-    return null;
-  }
   globalThis[SERVICES] = {
     registry,
-    frameRoute,
-    sessionLive: async (sid) => {
-      const login = process.env.AURA_OWNER_LOGIN === 'on';
-      if (sid === LOGIN_DARK_SID) return !login;
-      if (!login) return false;
-      return (await kvStore.defaultRedis().exists(core.loginSessionKey(sid))) === 1;
-    },
+    sessionLive: async (sid) => (await kvStore.defaultRedis().exists(core.loginSessionKey(sid))) === 1,
   };
   return globalThis[SERVICES];
 }

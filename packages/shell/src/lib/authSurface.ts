@@ -1,12 +1,13 @@
 /**
  * The owner login surface (D5, D6, D8, D16, D37): the handlers behind
- * `/api/auth/*` and the gate of the `/setup` and `/login` pages.
+ * `/api/auth/*`, the headers of the `/setup` and `/login` pages, and the
+ * desktop's sign-in gate. Login is always on (D6): until the owner exists the
+ * desktop sends everyone to `/setup`, after that to `/login`.
  *
- * DARK unless `AURA_OWNER_LOGIN=on`: every route but `status` and `whoami`
- * answers 404 before it reads a body or touches a service. `whoami` reports the
- * bearer principal from `authenticate()` and only labels the login cookie. The
- * session cookie grants no authority in Phase 1, because `authenticate()` and
- * `viewerFor` never read it.
+ * `whoami` reports the bearer principal from `authenticate()` and only labels
+ * the login cookie: `authenticate()` and `viewerFor` never read it. A login
+ * session opens the desktop and its App Hosts (the handoff); API access
+ * control is Phase 3.
  *
  * Nothing here needs AppManager. `getAuthServices()` builds its stores lazily.
  */
@@ -20,7 +21,6 @@ import type {
 import { authenticate } from './auth.js';
 import { isTrustedProxy } from '../../server/host-policy.mjs';
 
-export const LOGIN_FLAG = 'AURA_OWNER_LOGIN';
 export const COOKIE_HTTPS = '__Host-aura_session';
 export const COOKIE_HTTP = 'aura_session';
 export const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -95,8 +95,6 @@ export function coreAuthServices(): AuthSurfaceServices | null {
 
 const defaultDeps = (): AuthSurfaceDeps => ({ env: process.env, services: coreAuthServices });
 
-export const loginEnabled = (env: Env = process.env): boolean => env[LOGIN_FLAG] === 'on';
-
 // ── responses ───────────────────────────────────────────────────────────────
 
 const API_HEADERS = {
@@ -112,7 +110,6 @@ function json(body: unknown, status = 200, extra: Record<string, string> = {}): 
   });
 }
 
-const notFound = () => new Response(null, { status: 404, headers: API_HEADERS });
 const unavailable = () => json({ error: 'unavailable' }, 503);
 /** One answer for an unknown user, a wrong password and a disabled account. */
 const badCredentials = () => json({ error: 'invalid-credentials' }, 401);
@@ -250,7 +247,6 @@ function read(
   deps: AuthSurfaceDeps,
   run: (svc: AuthSurfaceServices, scheme: Scheme) => Promise<Response>,
 ): Promise<Response> {
-  if (!loginEnabled(deps.env)) return Promise.resolve(notFound());
   const scheme = requestScheme(ctx, deps.env);
   return guarded(deps, (svc) => run(svc, scheme));
 }
@@ -260,7 +256,6 @@ async function mutate(
   deps: AuthSurfaceDeps,
   run: (svc: AuthSurfaceServices, body: Body, scheme: Scheme) => Promise<Response>,
 ): Promise<Response> {
-  if (!loginEnabled(deps.env)) return notFound();
   const scheme = requestScheme(ctx, deps.env);
   if (!sameOrigin(ctx.request, scheme)) return json({ error: 'forbidden-origin' }, 403);
   let body: Body | Response;
@@ -309,7 +304,6 @@ export async function currentOwnerSession(
   ctx: AuthContext,
   deps: AuthSurfaceDeps = defaultDeps(),
 ): Promise<{ sessionId: string; userId: string; expiresAt: number } | null> {
-  if (!loginEnabled(deps.env)) return null;
   const svc = deps.services();
   if (!svc) return null;
   const current = await currentSession(ctx, svc, requestScheme(ctx, deps.env));
@@ -319,7 +313,6 @@ export async function currentOwnerSession(
 // ── routes ──────────────────────────────────────────────────────────────────
 
 export async function authStatus(_ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps()): Promise<Response> {
-  if (!loginEnabled(deps.env)) return json({ login: 'disabled' });
   try {
     const svc = deps.services();
     if (!svc) return json({ login: 'unavailable' });
@@ -449,12 +442,9 @@ function publicPrincipal(p: Principal): Record<string, string> {
   }
 }
 
-/** The login cookie as labelled information. While dark, no service is touched. */
+/** The login cookie as labelled information. */
 async function observedLogin(ctx: AuthContext, deps: AuthSurfaceDeps): Promise<Record<string, unknown>> {
   const scheme = requestScheme(ctx, deps.env);
-  if (!loginEnabled(deps.env)) {
-    return { state: 'disabled', cookie: readSessionCookie(ctx.request, scheme) ? 'present' : 'absent', authority: false };
-  }
   try {
     const svc = deps.services();
     if (!svc) return { state: 'unavailable', authority: false };
@@ -467,7 +457,7 @@ async function observedLogin(ctx: AuthContext, deps: AuthSurfaceDeps): Promise<R
   }
 }
 
-/** Works while login is dark. A login cookie never changes `principal`. */
+/** A login cookie never changes `principal`. */
 export async function authWhoami(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps()): Promise<Response> {
   let principal: Principal | Response;
   try { principal = await (deps.authenticate ?? authenticate)(ctx.request); }
@@ -478,19 +468,15 @@ export async function authWhoami(ctx: AuthContext, deps: AuthSurfaceDeps = defau
 
 // ── pages ───────────────────────────────────────────────────────────────────
 
-export type AuthPageGate =
-  | { enabled: false; response: Response }
-  | { enabled: true; nonce: string; headers: Record<string, string> };
+export interface AuthPageHeaders { nonce: string; headers: Record<string, string> }
 
 /**
  * `form-action 'none'`: the forms submit through fetch, so a page whose script
  * failed can't post a password anywhere.
  */
-export function authPageGate(env: Env = process.env): AuthPageGate {
-  if (!loginEnabled(env)) return { enabled: false, response: notFound() };
+export function authPageHeaders(): AuthPageHeaders {
   const nonce = randomBytes(16).toString('base64');
   return {
-    enabled: true,
     nonce,
     headers: {
       ...API_HEADERS,
@@ -509,4 +495,21 @@ export function authPageGate(env: Env = process.env): AuthPageGate {
       'Cross-Origin-Resource-Policy': 'same-origin',
     },
   };
+}
+
+/**
+ * D6: the desktop's own pages open only for the signed-in owner. Null lets the
+ * page render; otherwise the redirect to `/setup` (no owner yet) or `/login`.
+ * An unreadable store sends the browser to `/login`, which says so.
+ */
+export async function desktopSignIn(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps()): Promise<Response | null> {
+  const to = (path: string) => new Response(null, { status: 303, headers: { ...API_HEADERS, Location: path } });
+  try {
+    const svc = deps.services();
+    if (!svc) return to('/login');
+    if (!(await svc.users.hasOwner())) return to('/setup');
+    return (await currentSession(ctx, svc, requestScheme(ctx, deps.env))) ? null : to('/login');
+  } catch {
+    return to('/login');
+  }
 }

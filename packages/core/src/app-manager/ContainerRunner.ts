@@ -124,10 +124,6 @@ interface TrackedContainer {
    * /api/instances/X/stop response.
    */
   expectingKill: boolean;
-  /** Cached manifest snapshot for lifecycle URL building. See ProotRunner's
-   *  SpawnedApp.manifest field for the rationale (raw-mode basePath apps
-   *  need the proxy prefix prepended to lifecycle URLs). */
-  manifest: AppManifest;
 }
 
 /**
@@ -328,7 +324,7 @@ export class ContainerRunner implements SandboxRunner {
       pid = parseInt(out, 10) || 0;
     } catch { /* leave 0; reaper will ignore */ }
 
-    const tracked: TrackedContainer = { containerId, hostname, port, appId, logTail, pid, exitCb: null, expectingKill: false, manifest, provision };
+    const tracked: TrackedContainer = { containerId, hostname, port, appId, logTail, pid, exitCb: null, expectingKill: false, provision };
     this.containers.set(instanceId, tracked);
 
     // Watch for container exit so we can fire the exit callback.
@@ -340,7 +336,7 @@ export class ContainerRunner implements SandboxRunner {
     }, stillTracked, () => this.handleExit(instanceId, null, containerId));
 
     try {
-      await this.waitHealthy(instanceId, appId, hostname, port, manifest);
+      await this.waitHealthy(instanceId, appId, hostname, port);
     } catch (err) {
       console.error(`[ContainerRunner] ${instanceId} health-check failed: ${(err as Error).message}`);
       this.forceKill(instanceId);
@@ -989,7 +985,6 @@ export class ContainerRunner implements SandboxRunner {
     port:       number;
     hostname:   string;
     pid:        number;
-    manifest:   AppManifest;
   }): void {
     if (this.containers.has(rec.instanceId)) return;
     // We don't have the container ID handy — docker inspect would have it,
@@ -1020,7 +1015,6 @@ export class ContainerRunner implements SandboxRunner {
       pid:           rec.pid,
       exitCb:        null,
       expectingKill: false,
-      manifest:      rec.manifest,
       provision,
     });
     // CRITICAL for restart stability: watch the adopted container for exit,
@@ -1037,7 +1031,7 @@ export class ContainerRunner implements SandboxRunner {
   }
 
   /** Probe the app's health endpoint until ready or timeout. */
-  private async waitHealthy(instanceId: string, appId: string, hostname: string, port: number, manifest: AppManifest): Promise<void> {
+  private async waitHealthy(instanceId: string, appId: string, hostname: string, port: number): Promise<void> {
     // Two clocks, because "not answering yet" has two very different causes.
     //
     // A cold user/global-scope app installs its whole dependency tree in the
@@ -1051,7 +1045,7 @@ export class ContainerRunner implements SandboxRunner {
     const hardDeadline = startedAt + PROVISION_TIMEOUT_MS;
     const provision   = this.containers.get(instanceId)?.provision;
     let   deadline    = startedAt + HEALTH_CHECK_TIMEOUT_MS;
-    const healthUrl = `http://${hostname}:${port}${lifecyclePath(manifest, instanceId, 'health')}`;
+    const healthUrl = `http://${hostname}:${port}${lifecyclePath('health')}`;
     let lastBody: string | null = null;
     while (Date.now() < deadline) {
       try {
@@ -1101,7 +1095,7 @@ export class ContainerRunner implements SandboxRunner {
   async callLifecycle(instanceId: string, hook: string, opts: { reason?: string } = {}): Promise<void> {
     const tracked = this.containers.get(instanceId);
     if (!tracked) return;
-    const url = `http://${tracked.hostname}:${tracked.port}${lifecyclePath(tracked.manifest, instanceId, hook)}`;
+    const url = `http://${tracked.hostname}:${tracked.port}${lifecyclePath(hook)}`;
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), LIFECYCLE_TIMEOUT_MS);
     try {
@@ -1115,7 +1109,7 @@ export class ContainerRunner implements SandboxRunner {
   async callOptionalLifecycle(instanceId: string, hook: string, body?: unknown): Promise<unknown> {
     const tracked = this.containers.get(instanceId);
     if (!tracked) return null;
-    const url = `http://${tracked.hostname}:${tracked.port}${lifecyclePath(tracked.manifest, instanceId, hook)}`;
+    const url = `http://${tracked.hostname}:${tracked.port}${lifecyclePath(hook)}`;
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), LIFECYCLE_TIMEOUT_MS);
     try {

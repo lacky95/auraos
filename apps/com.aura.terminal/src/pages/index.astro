@@ -3,11 +3,10 @@ import manifest from '../../app.manifest.json';
 import { pickedSession, takePendingSession } from '../window-session';
 import { hasLaunchCommand } from '../launch-commands';
 const appId = Astro.request.headers.get('x-aura-app-id') ?? 'com.aura.terminal';
-// Our backend identity, from the OS (proxy and App Host both send it). On an
-// App Host the page URL no longer names the instance.
+// Our backend identity, from the OS: the page URL on an App Host doesn't name it.
 const instanceIdHeader = Astro.request.headers.get('x-aura-instance-id') ?? '';
-// A session a window on another instance handed over before moving here
-// (App Host pages only; proxied ones use localStorage). Not for an embed.
+// A session a window on another instance handed over before moving here.
+// Not for an embed.
 const handedSession = Astro.url.searchParams.get('embed') === '1' ? '' : (takePendingSession() ?? '');
 // The session this window last picked, if that shell still exists — so a
 // reload of the OS UI reopens it instead of the window's default session.
@@ -37,11 +36,10 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     own Vite build — the module <script> at the end of <body> imports the library
     and its CSS. No CDN, no hand-vendored files: upgrades are tracked in
     package.json and the bundle is served (minified, hashed) by the app itself,
-    proxied through the shell like every other asset.
+    on its App Host like every other asset.
   -->
-  <!-- /api/os/theme.css is auto-injected by the proxy for themeStrategy='inherit'
-       apps (the default). The explicit link below is harmless and survives
-       direct curl/headless renders that don't go through the proxy. -->
+  <!-- The OS palette. On an App Host the SDK sends /api/os/* to the shell's
+       theme through the gateway. -->
   <link rel="stylesheet" href="/api/os/theme.css" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -220,7 +218,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
        session — after closing the current one from the picker. The window,
        its size and its place in the layout all stay; only the shell is gone.
        Inline-styled for the same reason the lock panel is: Astro's scoped CSS
-       proved unreliable for elements inside the proxied app iframe. -->
+       proved unreliable for elements inside the app iframe. -->
   <div id="no-session" role="status" aria-live="polite"
        style="display:none;flex:1;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px;text-align:center;">
     <div data-ph-title style="font-size:0.95rem;line-height:1;letter-spacing:.18em;text-transform:uppercase;color:var(--aura-color-text-dim);">No session</div>
@@ -234,7 +232,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
        demux). The window and all its other state stay exactly as they are;
        only the live terminal moves. Styled inline for the same reason the
        bar's buttons are: Astro's scoped CSS proved unreliable for elements
-       inside the proxied app iframe, and inline styles never depend on a
+       inside the app iframe, and inline styles never depend on a
        scope attribute landing. -->
   <div id="session-lock" role="status" aria-live="polite"
        style="display:none;flex:1;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center;">
@@ -789,33 +787,17 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
 
     const statusEl = document.getElementById('conn-status');
     const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // Route the WS to OUR OWN backend instance (the one this iframe was
-    // loaded from), NOT the app id. The shell's WS proxy resolves
-    // `/api/proxy/<instanceId>/...` directly to that instance (Pass 1 in
-    // wsProxyPlugin); routing by app id falls into Pass 2's "pick first
-    // matching instance" which lands EVERY terminal tab on the same
-    // backend container — they then fight over a single PTY session
-    // every 2 s.
-    //
-    // Proxied, the iframe path is `/api/proxy/<instanceId>/...`, so the first
-    // segment after `/api/proxy/` is our backend identity. On our own App Host
-    // (one origin per instance) the server renders it, and the page reaches
-    // its backend at `/` and the shell through the gateway (osUrl).
-    const pathParts  = location.pathname.split('/').filter(Boolean);
-    const proxied    = pathParts[0] === 'api' && pathParts[1] === 'proxy' && !!pathParts[2];
-    const onAppHost  = !proxied && appHostRuntime() !== null;
-    const instanceId = proxied ? pathParts[2]
-      : (document.getElementById('terminal')?.dataset.instanceId || appHostRuntime()?.instanceId || appId);
-    // PHASE2-CUTOVER: only the App Host form stays, where our backend is '' and another instance goes through it.
-    const ownBase = proxied ? `/api/proxy/${encodeURIComponent(instanceId)}` : '';
+    // Our page is on our own App Host (one origin per instance): it reaches
+    // its backend at `/` and the shell through the gateway (osUrl). The server
+    // renders our instance id; another instance's sessions go through ours.
+    const instanceId = document.getElementById('terminal')?.dataset.instanceId || appHostRuntime()?.instanceId || appId;
     // Our App Host serves its API to our own page only (5.16). Over plain HTTP
     // nothing else tells the OS a GET is ours, so every backend call says so.
-    const OWN_HEADERS = onAppHost ? { 'x-aura-same-origin': '1' } : {};
+    const OWN_HEADERS = { 'x-aura-same-origin': '1' };
     const asOwn = (init: RequestInit = {}): RequestInit =>
       ({ ...init, headers: { ...OWN_HEADERS, ...(init.headers as Record<string, string> | undefined) } });
-    /** `/api/sessions…` of `targetInstanceId`: its own proxy path, or (App Host) ours, which forwards. */
+    /** `/api/sessions…` of `targetInstanceId`, through our backend, which forwards to another instance. */
     function sessionsApi(targetInstanceId, query = '') {
-      if (proxied || !onAppHost) return `/api/proxy/${encodeURIComponent(targetInstanceId)}/api/sessions${query ? `?${query}` : ''}`;
       const q = new URLSearchParams(query);
       if (targetInstanceId !== instanceId) q.set('instance', targetInstanceId);
       const qs = q.toString();
@@ -832,32 +814,12 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     //
     // A cross-instance pick can't be carried in the message that moves the
     // window (the shell rebinds us and this document is replaced), so it is
-    // handed over through localStorage, keyed by the instance we are about to
-    // become. Same origin for every proxied app, so it survives the move.
-    const PENDING_SESSION_KEY = 'aura.terminal.pendingSession';
-    function takePendingSession() {
-      try {
-        const raw = localStorage.getItem(PENDING_SESSION_KEY);
-        if (!raw) return null;
-        const map = JSON.parse(raw);
-        const want = map?.[instanceId];
-        if (!want) return null;
-        delete map[instanceId];                       // one-shot: a later reload must not re-steal
-        localStorage.setItem(PENDING_SESSION_KEY, JSON.stringify(map));
-        return String(want);
-      } catch { return null; }
-    }
-    function stashPendingSession(targetInstanceId, sessionId) {
-      try {
-        const map = JSON.parse(localStorage.getItem(PENDING_SESSION_KEY) || '{}') || {};
-        map[targetInstanceId] = sessionId;
-        localStorage.setItem(PENDING_SESSION_KEY, JSON.stringify(map));
-      } catch { /* private mode — the move still happens, on the default session */ }
-    }
+    // left with the target container (`?pending=`), which renders it into the
+    // page it serves next (window-session.ts `takePendingSession`).
     // An embedded page shows exactly the session its host asked for, and
     // claims it: the host's choice is explicit, like a picker switch.
     const pendingSession = EMBED.embed ? EMBED.session
-      : (takePendingSession() ?? (document.getElementById('terminal')?.dataset.handedSession || null));
+      : (document.getElementById('terminal')?.dataset.handedSession || null);
 
     // The pick survives a reload through this container, not the browser: the
     // page is server-rendered with the session this window last chose (see
@@ -885,7 +847,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // panel. It's on the URL (not a first message) so the decision is made at
     // attach time — no window where we'd render before knowing.
     function wsUrlFor(sessionId, claim) {
-      return `${wsProto}//${location.host}${ownBase}/ws`
+      return `${wsProto}//${location.host}/ws`
         + `?_aura_session=${encodeURIComponent(sessionId)}`
         // Embedded on an App Host, the socket names its embedder like the page
         // did, so the OS rechecks the embed grant on every (re)connect.
@@ -901,33 +863,20 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // first — regularly the browser the user is NOT at, who then sees "in use
     // somewhere else" on a terminal they just opened.
     //
-    // So the launching browser leaves a one-shot mark (shell lib/launchOrigin.ts)
-    // keyed by this window's id, written before our iframe existed. Finding it
-    // means "this page load IS the launch" → take the session outright rather
-    // than racing for it. Consume it immediately: a later reload of the same
-    // window must never steal the terminal back from wherever the user moved it.
-    const LAUNCHED_HERE_KEY = 'aura.launchedHere';
+    // So the launching browser leaves a one-shot mark (shell lib/launchOrigin.ts),
+    // which the shell consumes and puts on our first URL as `_aura_launched=1`.
+    // Finding it means "this page load IS the launch" → take the session
+    // outright rather than racing for it. Drop it at once: a later reload of
+    // the same window must never steal the terminal back from wherever the
+    // user moved it.
     const launchedHere = (() => {
       if (EMBED.embed) return false;   // the host's session already claims
-      // App Host: the shell consumed its mark and put it on our first URL
-      // (shell lib/launchOrigin.ts). Drop it, so a reload doesn't claim again.
-      if (onAppHost) {
-        const params = new URLSearchParams(location.search);
-        if (params.get('_aura_launched') !== '1') return false;
-        params.delete('_aura_launched');
-        const qs = params.toString();
-        try { history.replaceState(history.state, '', `${location.pathname}${qs ? `?${qs}` : ''}${location.hash}`); } catch { /* keep it */ }
-        return true;
-      }
-      try {
-        const raw = sessionStorage.getItem(LAUNCHED_HERE_KEY);
-        if (!raw) return false;
-        const map = JSON.parse(raw);
-        if (!map || typeof map !== 'object' || !(activityId in map)) return false;
-        delete map[activityId];
-        sessionStorage.setItem(LAUNCHED_HERE_KEY, JSON.stringify(map));
-        return true;
-      } catch { return false; }   // no storage → plain first-come, as before
+      const params = new URLSearchParams(location.search);
+      if (params.get('_aura_launched') !== '1') return false;
+      params.delete('_aura_launched');
+      const qs = params.toString();
+      try { history.replaceState(history.state, '', `${location.pathname}${qs ? `?${qs}` : ''}${location.hash}`); } catch { /* keep it */ }
+      return true;
     })();
     // Held until a socket actually OPENS, not just until the first attempt, so
     // a retry (backend still booting) still carries the claim.
@@ -947,7 +896,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
           fire: async () => {
             let r;
             try {
-              r = await fetch(`${ownBase}/api/sessions/launch?window=${encodeURIComponent(activityId)}`,
+              r = await fetch(`/api/sessions/launch?window=${encodeURIComponent(activityId)}`,
                 asOwn({ method: 'POST', cache: 'no-store' }));
             } catch { return 'retry'; }                          // network blip — try again while live
             if (r.ok) return 'done';
@@ -1690,7 +1639,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // palette it reads) used to be shared with the terminal-sizing buttons;
     // those were removed upstream when sessions became one-live-view, so it
     // now serves the toggle alone. Inline styles because the bar lives in a
-    // proxied app iframe where Astro's scoped CSS proved unreliable — and
+    // app iframe where Astro's scoped CSS proved unreliable — and
     // inline styles carry no :hover, hence the explicit hover repaint.
     const C = {
       dim:     'var(--aura-color-text-dim, #557755)',
@@ -1805,10 +1754,9 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     //   "in use somewhere else" panel has always been for. Switching session
     //   inside the same container is just a new socket — no reload, no shell.
     //
-    // Instance list comes from the SHELL (`/api/apps/...`); session lists come
-    // from each INSTANCE's own app (`/api/proxy/<id>/api/sessions`). Our page
-    // is proxied from the shell's origin, so a bare `/api/...` is the shell's
-    // and only the `/api/proxy/<id>` prefix reaches an app backend.
+    // Instance list comes from the SHELL (through the gateway, osUrl); session
+    // lists come from each INSTANCE's own backend, reached through ours
+    // (`sessionsApi`).
     const instBtn  = document.getElementById('inst-btn');
     const instMenu = document.getElementById('inst-menu');
     /** Escape for both text and attribute positions in the rows we inject. */
@@ -1917,16 +1865,12 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
      */
     function requestRebind(targetInstanceId) {
       if (targetInstanceId === instanceId) return;
-      // PHASE2-CUTOVER: an App Host page can't load another instance's origin; only the shell moves it.
-      const selfNavigate = () => { if (!onAppHost) location.assign(`/api/proxy/${encodeURIComponent(targetInstanceId)}/`); };
+      // Our page can't load another instance's origin: only the shell moves the window.
       if (EMBED.embed) return;   // the host owns which instance it embeds
-      if (!window.parent || window.parent === window) { selfNavigate(); return; }
+      if (!window.parent || window.parent === window) return;
       window.parent.postMessage({ type: 'aura.window.rebind', instanceId: targetInstanceId }, '*');
       statusEl.textContent = 'MOVING...';
       statusEl.style.color = 'var(--aura-color-text-dim)';
-      // A real move replaces this whole document, so this timer only ever
-      // fires when nothing happened.
-      setTimeout(selfNavigate, 2500);
     }
 
     /**
@@ -1939,15 +1883,10 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
      */
     function goToSession(targetInstanceId, sessionId) {
       if (targetInstanceId === instanceId) { switchSession(sessionId); return; }
-      if (onAppHost) {
-        // Its page is on another origin: leave the session with that container.
-        fetch(sessionsApi(targetInstanceId, `pending=${encodeURIComponent(sessionId)}`), asOwn({ method: 'PUT' }))
-          .catch(() => { /* the move still happens, on the default session */ })
-          .finally(() => requestRebind(targetInstanceId));
-        return;
-      }
-      stashPendingSession(targetInstanceId, sessionId);
-      requestRebind(targetInstanceId);
+      // Its page is on another origin: leave the session with that container.
+      fetch(sessionsApi(targetInstanceId, `pending=${encodeURIComponent(sessionId)}`), asOwn({ method: 'PUT' }))
+        .catch(() => { /* the move still happens, on the default session */ })
+        .finally(() => requestRebind(targetInstanceId));
     }
 
     async function fetchInstances() {
@@ -2466,10 +2405,8 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // (truncated with an ellipsis). Persisted in localStorage so they survive
     // reloads and are shared across this device's terminals.
     const QC_KEY = 'aura.terminal.quickCommands';
-    // Backend endpoint for the synced list. Our page is served through the OS
-    // proxy at /api/proxy/<instanceId>/…, so a bare '/api/…' would hit the
-    // SHELL instead of our own backend — prefix it the same way the WS URL is.
-    const qcApiUrl = `${ownBase}/api/quick-commands`;
+    // Backend endpoint for the synced list, on our own App Host.
+    const qcApiUrl = '/api/quick-commands';
     const qcPanel    = document.getElementById('qc-panel');
     const qcToggleBtn= document.getElementById('qc-toggle');
     const qcEditBtn  = document.getElementById('qc-edit');
@@ -2632,7 +2569,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
 
     // Style the panel + its structure INLINE (scope-proof) so the overlay and
     // slide work even when the scoped <style> doesn't reach these elements in
-    // the proxied iframe. The panel is position:fixed over the console (below
+    // the app iframe. The panel is position:fixed over the console (below
     // the 24px bar) and slides in via a transform we toggle in open/close.
     function qcInitStyles() {
       if (qcPanel) Object.assign(qcPanel.style, {

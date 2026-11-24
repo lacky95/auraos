@@ -1,16 +1,14 @@
 /**
  * The one answer to "what does this window load?". Every Activity and Flight
- * open, reload, restart, restore, take-off and landing goes through here.
+ * open, reload, restart, restore, take-off and landing goes through here: the
+ * app's own App Host, entered through a one-time handoff, in a sandboxed frame.
  *
- *   frameRoute proxy (default)  the same-origin `/api/proxy/<instance>/` URL,
- *                               with no `sandbox` or `allow` attribute.
- *   frameRoute host             the app's own App Host, entered through a
- *                               one-time handoff, in a sandboxed frame.
+ * A view names what it shows by a logical address, `/api/proxy/<instance>/<path>
+ * ?_aura_activity=<id>` (`logicalFrameUrl`): instance, path and activity, in
+ * the form saved desktop sessions already hold. No frame ever loads it; the
+ * proxy refuses browser documents.
  *
- * A view keeps its proxy-form URL as its logical address on both routes: it
- * names the instance, path and activity. A host frame never loads it.
- *
- * Nothing here reads a host frame's document or location: those frames are
+ * Nothing here reads a frame's document or location: those frames are
  * cross-origin, so load state comes from the `load` event only.
  */
 import type { ResolvedAppFrame } from '@aura/core';
@@ -21,8 +19,6 @@ import {
   supportsAppHosts,
 } from '@aura/core/host-rules';
 import { LAUNCHED_HERE_PARAM, takeLaunchMark } from './launchOrigin.ts';
-
-export type FrameRoute = 'proxy' | 'host';
 
 export interface AppFrameTarget {
   appId: string;
@@ -71,60 +67,29 @@ const HANDOFF_ROUTE = '/api/app-hosts/handoff';
 
 // ── URLs ─────────────────────────────────────────────────────────────────────
 
-/** PHASE2-CUTOVER: the proxy URL stops being a loadable document; keep only a logical address. */
-export function proxyFrameUrl(t: AppFrameTarget): string {
+/** A view's logical address. Never loaded: `setAppFrameUrl` resolves it to the App Host. */
+export function logicalFrameUrl(t: AppFrameTarget): string {
   const stripped = (t.path ?? '').replace(/^\/+/, '');
   const query = t.activityId ? `?_aura_activity=${encodeURIComponent(t.activityId)}` : '';
   return `/api/proxy/${t.instanceId}/${stripped}${query}`;
 }
 
 /** The target a logical URL names, or null for anything else. */
-export function parseProxyFrameUrl(url: string, appId: string): AppFrameTarget | null {
+export function parseLogicalFrameUrl(url: string, appId: string): AppFrameTarget | null {
   const m = url.match(/^\/api\/proxy\/([^/?#]+)\/([^?#]*)(?:\?([^#]*))?/);
   if (!m) return null;
   const activityId = new URLSearchParams(m[3] ?? '').get('_aura_activity');
   return { appId, instanceId: m[1]!, path: `/${m[2] ?? ''}`, ...(activityId ? { activityId } : {}) };
 }
 
-/** The bare app id in a proxy `src`: the instance id without its `-N` suffix. */
-export function appIdFromProxySrc(src: string): string | null {
-  const m = src.match(/^\/api\/proxy\/([^/]+)\//);
-  return m ? (m[1] ?? '').replace(/-\d+$/, '') : null;
-}
-
-// ── route ────────────────────────────────────────────────────────────────────
-
-let hostRouteApps: ReadonlySet<string> | null = null;
-
-/** The apps on `frameRoute: host`. The desktop page renders them once per load. */
-export function setHostRouteApps(ids: Iterable<string>): void {
-  hostRouteApps = new Set(ids);
-}
-
-export function hostRouteAppList(): ReadonlySet<string> {
-  if (hostRouteApps) return hostRouteApps;
-  let ids: string[] = [];
-  try {
-    const raw = typeof document === 'undefined' ? null : document.getElementById('aura-frame-routes')?.textContent;
-    const parsed: unknown = raw ? JSON.parse(raw) : [];
-    if (Array.isArray(parsed)) ids = parsed.filter((x): x is string => typeof x === 'string');
-  } catch { /* no list: every app stays on the proxy */ }
-  hostRouteApps = new Set(ids);
-  return hostRouteApps;
-}
-
-export function frameRouteFor(appId: string): FrameRoute {
-  return hostRouteAppList().has(appId) ? 'host' : 'proxy';
-}
+// ── resolve ──────────────────────────────────────────────────────────────────
 
 /** Whether this address can carry App Hosts. Direct IP and `localhost` can't. */
 export function appHostsAvailable(host: string): boolean {
   return supportsAppHosts(classifyDesktopHost(host));
 }
 
-// ── resolve ──────────────────────────────────────────────────────────────────
-
-/** A `frameRoute: host` app on an address that has no App Hosts (limited IP mode). */
+/** An app on an address that has no App Hosts (limited IP mode). */
 export class AppFrameBlockedError extends Error {
   constructor() {
     super('App Hosts are not available on this address');
@@ -150,26 +115,20 @@ export function isAppHostOriginOf(origin: string, shellOrigin: string): boolean 
   try { assertAppHostOrigin(origin, shellOrigin); return true; } catch { return false; }
 }
 
-export function resolveProxyFrame(target: AppFrameTarget, shellOrigin: string): ResolvedAppFrame {
-  return { origin: shellOrigin, url: proxyFrameUrl(target), label: '', slot: 0, sandbox: '', allow: '' };
-}
-
 export interface ResolveAppFrameDeps {
   shellOrigin?: string;
   fetch?: typeof fetch;
-  route?: FrameRoute;
 }
 
 /**
- * What `target` loads. For a host app this spends a fresh one-time code, so
- * call it once per navigation and never cache the result.
+ * What `target` loads. This spends a fresh one-time code, so call it once per
+ * navigation and never cache the result.
  */
 export async function resolveAppFrame(target: AppFrameTarget, deps: ResolveAppFrameDeps = {}): Promise<ResolvedAppFrame> {
   const shellOrigin = deps.shellOrigin ?? window.location.origin;
-  if ((deps.route ?? frameRouteFor(target.appId)) === 'proxy') return resolveProxyFrame(target, shellOrigin);
   if (!appHostsAvailable(new URL(shellOrigin).host)) throw new AppFrameBlockedError();
 
-  const logical = proxyFrameUrl(target);
+  const logical = logicalFrameUrl(target);
   let returnPath = logical.slice(`/api/proxy/${target.instanceId}`.length);
   // "This browser launched the window" (lib/launchOrigin.ts), read once by the page.
   if (takeLaunchMark(target.activityId ?? target.instanceId)) {
@@ -209,8 +168,9 @@ export async function resolveAppFrame(target: AppFrameTarget, deps: ResolveAppFr
 const loadSeq = new WeakMap<HTMLIFrameElement, number>();
 const readyHooked = new WeakSet<HTMLIFrameElement>();
 
+/** Whether a frame shows (or is opening) an app: `setAppFrameUrl` pointed it at an App Host. */
 export function isHostFrame(frame: HTMLIFrameElement): boolean {
-  return frame.dataset['auraFrameRoute'] === 'host';
+  return frame.dataset['auraHostFrame'] === '1';
 }
 
 /**
@@ -223,12 +183,12 @@ export function isSystemHostFrame(frame: HTMLIFrameElement): boolean {
 
 /** The app in a frame. Set by the shell, never read from the app's document. */
 export function frameAppId(frame: HTMLIFrameElement): string | null {
-  return frame.dataset['auraAppId'] ?? appIdFromProxySrc(frame.getAttribute('src') ?? '');
+  return frame.dataset['auraAppId'] ?? null;
 }
 
 /** The origin a frame must be on, for both sending and receiving. */
 export function frameExpectedOrigin(frame: HTMLIFrameElement): string | null {
-  return isHostFrame(frame) ? (frame.dataset['auraFrameOrigin'] ?? null) : window.location.origin;
+  return isHostFrame(frame) ? (frame.dataset['auraFrameOrigin'] ?? null) : null;
 }
 
 /** Whether a frame's document has loaded. Host frames rely on the `load` event alone. */
@@ -240,7 +200,7 @@ export function isHostFrameReady(frame: HTMLIFrameElement): boolean {
 export function postToFrame(frame: HTMLIFrameElement, message: unknown): boolean {
   const w = frame.contentWindow;
   if (!w) return false;
-  if (isHostFrame(frame) && !isHostFrameReady(frame)) return false;
+  if (!isHostFrameReady(frame)) return false;
   const origin = frameExpectedOrigin(frame);
   if (!origin) return false;
   try { w.postMessage(message, origin); return true; }
@@ -267,16 +227,16 @@ function clearHostState(frame: HTMLIFrameElement): void {
   loadSeq.set(frame, (loadSeq.get(frame) ?? 0) + 1);
   frame.removeAttribute('sandbox');
   frame.removeAttribute('allow');
-  for (const key of ['auraFrameRoute', 'auraFrameOrigin', 'auraFrameReady', 'auraFrameUrl', 'auraAppId', 'auraSystemApp']) delete frame.dataset[key];
+  for (const key of ['auraHostFrame', 'auraFrameOrigin', 'auraFrameReady', 'auraFrameUrl', 'auraAppId', 'auraSystemApp']) delete frame.dataset[key];
   clearFrameNotice(frame);
 }
 
 function navigateHostFrame(frame: HTMLIFrameElement, url: string, appId: string): void {
-  const target = parseProxyFrameUrl(url, appId);
+  const target = parseLogicalFrameUrl(url, appId);
   if (!target) { showFrameNotice(frame, 'This window has no valid app address.'); return; }
   const seq = (loadSeq.get(frame) ?? 0) + 1;
   loadSeq.set(frame, seq);
-  frame.dataset['auraFrameRoute'] = 'host';
+  frame.dataset['auraHostFrame'] = '1';
   frame.dataset['auraAppId'] = appId;
   frame.dataset['auraFrameUrl'] = url;
   delete frame.dataset['auraFrameReady'];
@@ -292,7 +252,7 @@ function navigateHostFrame(frame: HTMLIFrameElement, url: string, appId: string)
       if (isHostFrame(frame) && frame.getAttribute('src')) frame.dataset['auraFrameReady'] = '1';
     }, { capture: true });
   }
-  resolveAppFrame(target, { route: 'host' }).then((resolved) => {
+  resolveAppFrame(target).then((resolved) => {
     if (loadSeq.get(frame) !== seq) return; // a newer navigation won
     frame.dataset['auraFrameOrigin'] = resolved.origin;
     if (resolved.system) frame.dataset['auraSystemApp'] = '1';
@@ -309,13 +269,8 @@ function navigateHostFrame(frame: HTMLIFrameElement, url: string, appId: string)
   });
 }
 
-/** Point a frame at a view's logical URL, on that app's route. */
+/** Point a frame at a view's logical URL: its App Host, through a fresh handoff. */
 export function setAppFrameUrl(frame: HTMLIFrameElement, url: string, appId: string): void {
-  if (frameRouteFor(appId) !== 'host') {
-    clearHostState(frame);
-    if (frame.getAttribute('src') !== url) frame.src = url;
-    return;
-  }
   if (isHostFrame(frame) && frame.dataset['auraFrameUrl'] === url && frame.getAttribute('src')) return;
   navigateHostFrame(frame, url, appId);
 }

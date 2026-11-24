@@ -28,7 +28,8 @@ test('the server puts the iframe inside .slot-body, attributes escaped', () => {
   el.innerHTML = slotInnerHtml({ bodyHtml: iframeHtml('/api/proxy/x-1/?a=1&b="2"', 'A <b>') });
   const ifr = el.querySelector('.slot-body > iframe') as HTMLIFrameElement;
   assert.ok(ifr);
-  assert.equal(ifr.getAttribute('src'), '/api/proxy/x-1/?a=1&b="2"');
+  assert.equal(ifr.getAttribute('data-src'), '/api/proxy/x-1/?a=1&b="2"');
+  assert.equal(ifr.getAttribute('src'), null, 'no src before the handoff');
   assert.equal(ifr.getAttribute('title'), 'A <b>');
   assert.equal(escapeHtml(`<&"'>`), '&lt;&amp;&quot;&#39;&gt;');
 });

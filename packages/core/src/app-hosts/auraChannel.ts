@@ -185,6 +185,8 @@ export interface AuraRuntimeBootstrap {
   instanceId: string;
   /** Null for a document that isn't an Activity window. */
   activityId: string | null;
+  /** The Activity's in-window back stack, oldest first, as `{ path, title }`. Empty without one. */
+  activityHistory: Array<{ path: string; title?: string }>;
   label: string;
   slot: number;
   /** The exact origin the channel accepts shell messages from. */

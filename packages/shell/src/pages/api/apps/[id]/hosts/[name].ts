@@ -9,11 +9,12 @@ import { listAppHosts } from '../../../../../lib/appHosts.js';
  * `Accept: application/json` (or `?format=json`) it answers the DTO instead.
  * 409 when the caller reached the shell by raw IP: there is no host to build.
  */
-export const GET: APIRoute = ({ params, request, url }) => {
+export const GET: APIRoute = (ctx) => {
+  const { params, request, url } = ctx;
   const appId = params['id'];
   const name = params['name'];
   if (!appId || !name) return errorResponse('Missing app id or host name', 400);
-  const host = listAppHosts(request, appId).find((h) => h.name === name);
+  const host = listAppHosts(ctx, appId).find((h) => h.name === name);
   if (!host) return errorResponse(`${appId} declares no host '${name}'`, 404);
 
   const wantsJson = url.searchParams.get('format') === 'json'

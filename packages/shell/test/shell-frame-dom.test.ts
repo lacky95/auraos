@@ -16,11 +16,9 @@ for (const k of ['window', 'document', 'HTMLElement', 'HTMLIFrameElement', 'CSS'
 
 const {
   APP_FRAME_ALLOW, APP_FRAME_SANDBOX, clearAppFrame, isHostFrameReady, postToFrame, reloadHostFrame,
-  setAppFrameUrl, setHostRouteApps,
+  setAppFrameUrl,
 } = await import('../src/lib/appFrame.ts');
 const { onAuraChannel } = await import('../src/lib/auraChannelShell.ts');
-
-setHostRouteApps(['com.x.notes']);
 
 let codes = 0;
 let gate: Promise<void> = Promise.resolve();
@@ -44,16 +42,7 @@ function slotFrame(id: string, src?: string): HTMLIFrameElement {
   return f as unknown as HTMLIFrameElement;
 }
 
-test('a proxy frame gets exactly its URL and no sandbox or allow', () => {
-  const f = slotFrame('p1');
-  setAppFrameUrl(f, '/api/proxy/com.x.proxy/page?_aura_activity=a', 'com.x.proxy');
-  assert.equal(f.getAttribute('src'), '/api/proxy/com.x.proxy/page?_aura_activity=a');
-  assert.equal(f.hasAttribute('sandbox'), false);
-  assert.equal(f.hasAttribute('allow'), false);
-  assert.equal(f.dataset['auraFrameRoute'], undefined);
-});
-
-test('a host frame is sandboxed before it has a src, and is posted to at its exact origin', async () => {
+test('an app frame is sandboxed before it has a src, and is posted to at its exact origin', async () => {
   let open: () => void = () => undefined;
   gate = new Promise((r) => { open = r; });
   const f = slotFrame('h1');
@@ -95,9 +84,9 @@ test('a reused frame drops the sandbox before the next app', async () => {
   clearAppFrame(f);
   assert.equal(f.hasAttribute('sandbox'), false);
   assert.equal(f.getAttribute('src'), 'about:blank');
-  setAppFrameUrl(f, '/api/proxy/com.x.proxy/', 'com.x.proxy');
-  assert.equal(f.hasAttribute('sandbox'), false);
-  assert.equal(f.getAttribute('src'), '/api/proxy/com.x.proxy/');
+  setAppFrameUrl(f, '/api/proxy/com.x.other/', 'com.x.other');
+  assert.equal(f.getAttribute('sandbox'), APP_FRAME_SANDBOX, 'the next app gets its own sandbox');
+  assert.equal(f.getAttribute('src'), 'about:blank', 'and nothing before its handoff');
 });
 
 test('a late handoff cannot overwrite a newer navigation', async () => {
@@ -146,20 +135,28 @@ test('a host frame is marked system only when the handoff says its installation 
 });
 
 test('the listener drops a forged lock message and accepts the verified Settings window', () => {
-  const settings = slotFrame('s1', '/api/proxy/com.aura.settings/lockscreen');
-  const other = slotFrame('o1', '/api/proxy/com.x.proxy/');
-  // happy-dom gives no contentWindow with page loading off.
-  for (const f of [settings, other]) Object.defineProperty(f, 'contentWindow', { configurable: true, value: { parent: win } });
+  const SETTINGS = 'http://settings1a2b3c4d--10-201-1-2.nip.io:3000';
+  const frame = (id: string, appId: string, origin: string, system: boolean) => {
+    const f = slotFrame(id, `${origin}/_aura/handoff?code=x`);
+    Object.assign(f.dataset, { auraHostFrame: '1', auraFrameOrigin: origin, auraFrameReady: '1', auraAppId: appId, ...(system ? { auraSystemApp: '1' } : {}) });
+    // happy-dom gives no contentWindow with page loading off.
+    Object.defineProperty(f, 'contentWindow', { configurable: true, value: { parent: win } });
+    return f;
+  };
+  const settings = frame('s1', 'com.aura.settings', SETTINGS, true);
+  const other = frame('o1', 'com.x.notes', APP, false);
   let locks = 0;
   const off = onAuraChannel('aura.lockscreen.activate', () => { locks++; });
   const send = (source: unknown, origin: string) => win.dispatchEvent(new win.MessageEvent('message', {
     data: { type: 'aura.lockscreen.activate' }, source: source as never, origin,
   }));
-  send(other.contentWindow, SHELL);
+  send(other.contentWindow, APP);
+  send(other.contentWindow, SETTINGS);
   send(settings.contentWindow, 'http://evil.example');
-  send(null, SHELL);
-  assert.equal(locks, 0);
   send(settings.contentWindow, SHELL);
+  send(null, SETTINGS);
+  assert.equal(locks, 0);
+  send(settings.contentWindow, SETTINGS);
   assert.equal(locks, 1);
   off();
 });

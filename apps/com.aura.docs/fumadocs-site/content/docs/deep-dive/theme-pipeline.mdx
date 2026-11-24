@@ -6,8 +6,8 @@ description: Two-slot picker, intrinsic tone, CSS-var palette, three themeStrate
 **TL;DR.** Each theme is intrinsically light or dark. The user picks
 **one light theme and one dark theme**, plus a `colorMode` (`'light' |
 'dark' | 'auto'`) — auto defers to `prefers-color-scheme`. The shell
-serves the active palette at `/api/os/theme.css`, the proxy auto-injects
-this stylesheet into every `themeStrategy: 'inherit'` app, and theme
+serves the active palette at `/api/os/theme.css`, `/_aura/runtime.js`
+links this stylesheet into every `themeStrategy: 'inherit'` app, and theme
 changes broadcast over SSE so live windows swap their palette without
 reload.
 
@@ -110,21 +110,13 @@ OsEventBus.emit('theme:changed', { themeId, themeName, ... })
 ```
 
 Inside each iframe, the `OsClient.onThemeChange()` handler fires (for
-`themed` apps that subscribed). `inherit` apps don't need to do anything
-— the stylesheet they injected refetches under the same URL or the
-shell-side swap of `<style id="aura-theme">` cascades into the iframe.
-
-Wait — does it cascade into the iframe? It can't. `<style>` in the host
-document doesn't reach the iframe document. The mechanism for `inherit`
-apps is: the proxy injects `<link rel="stylesheet" href="/api/os/theme.css">`
-into the iframe's own `<head>`. On theme change, the iframe's `OsClient`
-listens for `aura.theme.changed` postMessage and either:
-- re-`<link>` toggle to bust cache, or
-- fetch the new CSS and replace the existing stylesheet contents
-
-The exact mechanism is in `packages/app-sdk/src/runtime/inheritTheme.ts`
-(grep for it). The point: `inherit` apps need zero theme code; the
-inject does it all.
+`themed` apps that subscribed). `inherit` apps don't need to do anything.
+A `<style>` in the desktop document can't reach an iframe on another
+origin, so `/_aura/runtime.js` links the stylesheet into the iframe's own
+`<head>` (through the App Host's gateway, `/_aura/os/api/os/theme.css`) and
+refreshes it when `aura.theme.changed` arrives. The runtime is built in
+`packages/shell/src/lib/appRuntime.ts`. The point: `inherit` apps need
+zero theme code.
 
 ## Adding a new theme
 
@@ -167,7 +159,7 @@ entry.
 
 ## Icons
 
-The injected `theme.css` also ships the `.aura-icon` class for the OS
+The linked `theme.css` also ships the `.aura-icon` class for the OS
 icon sprite (Lucide, `currentColor`), so icons follow the palette with no
 extra code. Usage, endpoints and the "bring your own stack" option are on
 the [Icons](/docs/icons) page.
@@ -214,8 +206,8 @@ $ grep -rn "themeStrategy" apps/*/app.manifest.json   # who declares what
 
 When a colour "looks wrong" the diagnostic order is:
 1. **Which theme is active?** `aura get themes` marks the active dark/light slot (it reads the KV); `aura set theme <id> --tone dark|light` switches a slot.
-2. **Did the iframe get the CSS?** DevTools → Network → `/api/os/theme.css`.
+2. **Did the iframe get the CSS?** DevTools → Network → `/_aura/os/api/os/theme.css`.
 3. **Is the CSS var defined?** Inspect `<html>` in DevTools — the
    `--aura-color-*` custom properties should be on `:root`.
 4. **Is the manifest `themeStrategy: 'override'`?** Then the OS palette
-   isn't injected — by design.
+   isn't linked — by design.

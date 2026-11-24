@@ -14,10 +14,9 @@
 # Remove the marker and restart to go back. Don't leave it on: a long-lived
 # Next dev server grows without bound (11 GB on 2026-11-19).
 #
-# Next.js's basePath depends on the frame route (fumadocs-site/lib/base-path.mjs):
-# /api/proxy/$APP_INSTANCE_ID on the proxy route, '' on an App Host. serve.mjs
-# keeps one build per route and picks by request. Dev mode serves one route
-# only: the proxy route, or the App Host with DOCS_FRAME_ROUTE=host.
+# Docs is served from `/` on its App Host (no Next basePath). The runner calls
+# /api/lifecycle/* directly, and the shell proxy strips /api/proxy/<id> from
+# the agents' MCP, so it arrives as /mcp.
 # The lifecycle endpoints + identity headers live inside the Next app via
 # @aura/app-sdk/runtime/next.
 set -e
@@ -32,10 +31,9 @@ if [ ! -d node_modules ]; then
 fi
 
 if [ "${DOCS_MODE:-}" = "dev" ] || [ -e "$APP_DIR/.dev-mode" ]; then
-  # PHASE2-CUTOVER: dev mode defaults to the App Host route (basePath '') once the proxy route is gone.
-  echo "[${APP_ID:-com.aura.docs}] DEV mode: Next.js (turbopack) on port ${APP_PORT:-4001} (frame route ${DOCS_FRAME_ROUTE:-proxy})"
+  echo "[${APP_ID:-com.aura.docs}] DEV mode: Next.js (turbopack) on port ${APP_PORT:-4001}"
   exec npx next dev --turbo --hostname 0.0.0.0 --port "${APP_PORT:-4001}"
 fi
 
-echo "[${APP_ID:-com.aura.docs}] PROD mode: serve.mjs on port ${APP_PORT:-4001} (proxy route, App Host route on first use)"
+echo "[${APP_ID:-com.aura.docs}] PROD mode: serve.mjs on port ${APP_PORT:-4001}"
 exec node serve.mjs

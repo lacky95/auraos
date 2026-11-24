@@ -23,7 +23,8 @@ The desktop opens each app window on an **App Host**: an origin of its own,
 `<label>--<desktop host>`, same scheme and port, e.g.
 `http://notesabcd1234--10-0-0-2.nip.io:3000`. The shell picks the label;
 each instance of a multi-instance app gets its own. The desktop signs the
-window in with a one-time handoff; you don't do anything for that.
+window in with a one-time handoff; you don't do anything for that. Service
+apps have no UI and no App Host.
 
 Your app is served from `/` there, with nothing rewritten and nothing
 injected into your HTML. So:
@@ -41,7 +42,9 @@ injected into your HTML. So:
 `window.AuraRuntimeBootstrap` (your app, instance and activity, the theme and
 the keymap), links the OS theme for `inherit` apps and refreshes it on a
 change, forwards OS shortcuts and the on-screen keyboard, and relays your
-console. It must run before your own scripts.
+console. It must run before your own scripts. The manifest's `proxy` flags
+(`injectMeta`, `injectConsoleRelay`, `injectKeyForwarder`, …) switch those
+parts off per app.
 
 **Astro apps** with `auraAppIntegration()` get it on every page. Nothing to do.
 
@@ -180,10 +183,35 @@ hints, the token is proof. Requests the shell forwards to you carry
 
 `/api/proxy/<appId>/<path>` stays, for machines only: agents and other
 apps' servers calling your MCP server or REST API at
-`$OS_API_BASE/api/proxy/<appId>/…`. It never serves a browser window, and
-the SDK never sends your instance token on it. Declare those endpoints in
+`$OS_API_BASE/api/proxy/<appId>/…`. Your app sees the request without the
+prefix: `/api/proxy/com.acme.notes/mcp` arrives as `/mcp`. The proxy:
+
+- **refuses browser documents** with *403*: navigations and frames
+  (`Sec-Fetch-Dest` `document`, `iframe`, `frame`, `embed`, `object`,
+  `worker`; `Sec-Fetch-Mode: navigate`; or `Upgrade-Insecure-Requests`),
+- passes your response unchanged (no HTML rewriting, nothing injected), but
+  drops `Set-Cookie` and adds `Content-Security-Policy: sandbox`,
+- for a service app, refuses every path outside `/api/` unless the manifest
+  sets `proxy.exposeAllPaths`.
+
+The SDK never sends your instance token on it. Declare those endpoints in
 `provides[]` ([Interfaces](/docs/interfaces)); `osClient.interfaces.urlFor()`
-gives a caller the right address on its side.
+gives a caller the right address on its side. Agents' machine paths need no
+desktop sign-in.
+
+## Upgrading to App Hosts
+
+On an install that still opened windows under `/api/proxy/<id>/`, the
+update moves every app onto its App Host:
+
+- **Open windows reload** onto their App Hosts.
+- **Running Terminal sessions end**: Terminal instances are restarted.
+- **Browser-only data starts empty.** `localStorage`, IndexedDB and cookies
+  belong to the old origin, so each app starts without them on its App
+  Host. Notably the Terminal's local quick commands: copy them out before
+  upgrading.
+- **Apps with their own login** ask again (e.g. Trilium, if its login is on).
+- **TerminalX re-shares its sessions** once.
 
 ## Checklist
 

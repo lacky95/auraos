@@ -147,11 +147,11 @@ const activeThemeId   = activeTheme.id;
 
   <!--
     Console bridge: wraps console.*, captures uncaught errors + promise
-    rejections, buffers entries, and broadcasts them via postMessage to every
-    iframe. App iframes can either:
+    rejections, buffers entries, and broadcasts them via postMessage to the
+    system Console's frame and any frame that asked for the backlog. App iframes can either:
       • subscribe to 'aura.console' messages (the Console app does this), or
-      • relay their OWN console output up via 'aura.console.relay' (injected
-        into each iframe by the proxy — see /api/proxy/[id]/[...path].ts).
+      • relay their OWN console output up via 'aura.console.relay' (part of
+        each App Host's /_aura/runtime.js — see lib/appRuntime.ts).
     Placed in <head> as inline so it captures from the very first frame.
   -->
   <script is:inline>
@@ -329,7 +329,6 @@ const activeThemeId   = activeTheme.id;
     // line itself was logged per iframe.
     const consoleSubscribers = new Map(); // window -> its verified origin
     function frameOrigin(f) {
-      if (f.dataset.auraFrameRoute !== 'host') return location.origin;
       return f.dataset.auraFrameReady === '1' ? (f.dataset.auraFrameOrigin || null) : null;
     }
     function consoleTargets() {
@@ -338,8 +337,7 @@ const activeThemeId   = activeTheme.id;
         const w = f.contentWindow;
         if (!w) return;
         // A host frame counts only as the system Console (appFrame isSystemHostFrame).
-        const isConsole = (f.dataset.auraAppId === 'com.aura.console' && f.dataset.auraSystemApp === '1')
-          || (f.getAttribute('src') || '').indexOf('/api/proxy/com.aura.console') === 0;
+        const isConsole = f.dataset.auraAppId === 'com.aura.console' && f.dataset.auraSystemApp === '1';
         const origin = consoleSubscribers.get(w) || (isConsole ? frameOrigin(f) : null);
         if (origin) out.push([w, origin]);
       });
@@ -570,95 +568,6 @@ const activeThemeId   = activeTheme.id;
   <!-- Phase 5: the redacted list inside #lockscreen (separate module; if it
        fails only the list is missing, the lock screen still arms). -->
   <LockScreenNotifications />
-
-  <!--
-    Iframe identity guard: on every iframe load, read the <meta name="aura-app-id">
-    the proxy injected and compare it to the appId the iframe was *supposed* to
-    show (parsed from the iframe's own src `/api/proxy/<id>/...`). Mismatch
-    means the proxy routed to the wrong upstream (or the upstream's identity
-    middleware is stale) — replace the iframe with a visible error overlay
-    instead of silently showing the wrong app's UI.
-
-    This is the third independent identity check after:
-      1. ProotRunner.waitHealthy   (spawn-time identity body match)
-      2. Proxy X-Aura-App-Id header (per-request middleware verification)
-  -->
-  <script is:inline>
-  (() => {
-    function expectedAppFromSrc(src) {
-      try {
-        const u = new URL(src, location.href);
-        const m = u.pathname.match(/^\/api\/proxy\/([^/]+)\//);
-        if (!m) return null;
-        // Strip optional -N instance suffix to compare against bare appId.
-        return m[1].replace(/-\d+$/, '');
-      } catch { return null; }
-    }
-
-    function showMismatchOverlay(frame, expected, got) {
-      const parent = frame.parentElement;
-      if (!parent) return;
-      const overlay = document.createElement('div');
-      overlay.setAttribute('data-aura-identity-error', '1');
-      overlay.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#1a0a0a;color:#ff5050;font-family:var(--aura-font-mono, monospace);font-size:0.8rem;text-align:center;padding:16px;letter-spacing:0.08em;gap:8px;';
-      overlay.innerHTML = '<div style="font-size:1rem;">// IDENTITY MISMATCH</div>'
-        + '<div>Expected app: <strong>' + expected + '</strong></div>'
-        + '<div>Got: <strong>' + (got || '(none)') + '</strong></div>'
-        + '<div style="color:#aa3030;">Iframe removed to prevent showing wrong content.</div>';
-      frame.remove();
-      if (getComputedStyle(parent).position === 'static') parent.style.position = 'relative';
-      parent.appendChild(overlay);
-    }
-
-    function verifyFrame(frame) {
-      if (frame.dataset.auraIdentityChecked === '1') return;
-      // Cross-origin App Host: its identity is the verified host, not a meta tag.
-      if (frame.dataset.auraFrameRoute === 'host') return;
-      const src = frame.getAttribute('src') || '';
-      const expected = expectedAppFromSrc(src);
-      if (!expected) return;
-      let metaApp = null;
-      try {
-        const doc = frame.contentDocument;
-        const meta = doc && doc.querySelector('meta[name="aura-app-id"]');
-        metaApp = meta ? meta.getAttribute('content') : null;
-      } catch {
-        // cross-origin would throw — but same-origin proxy, so this only
-        // happens for about:blank or transient navigation states. Skip.
-        return;
-      }
-      if (!metaApp) return; // no meta injected yet (NOT READY splash, etc.) — let next load retry
-      frame.dataset.auraIdentityChecked = '1';
-      if (metaApp !== expected) {
-        console.error('[AuraOS] Iframe identity mismatch — expected ' + expected + ', got ' + metaApp + '. Removing iframe.');
-        showMismatchOverlay(frame, expected, metaApp);
-      }
-    }
-
-    function hookFrame(frame) {
-      if (frame.dataset.auraIdentityHooked === '1') return;
-      frame.dataset.auraIdentityHooked = '1';
-      frame.addEventListener('load', () => {
-        delete frame.dataset.auraIdentityChecked;
-        verifyFrame(frame);
-      });
-    }
-
-    // Hook every existing iframe and any future iframe added to the DOM.
-    document.querySelectorAll('iframe').forEach(hookFrame);
-    const mo = new MutationObserver((muts) => {
-      for (const m of muts) {
-        for (const node of m.addedNodes) {
-          if (node.nodeType !== 1) continue;
-          const el = node;
-          if (el.tagName === 'IFRAME') hookFrame(el);
-          else el.querySelectorAll && el.querySelectorAll('iframe').forEach(hookFrame);
-        }
-      }
-    });
-    mo.observe(document.documentElement, { childList: true, subtree: true });
-  })();
-  </script>
 
   <script>
     // Theme/mode live updates flow through the shared OS event channel

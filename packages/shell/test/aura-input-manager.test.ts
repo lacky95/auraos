@@ -18,8 +18,13 @@ Object.defineProperty(win.HTMLElement.prototype, 'offsetParent', { get() { retur
 const { inputManager } = await import('../src/lib/keyboard/AuraInputManager.ts');
 
 const frame = (id: string) => win.document.getElementById(id) as unknown as HTMLIFrameElement;
+// Each window is an App Host frame, as setAppFrameUrl leaves it after its load.
+const originOf = (id: string) => `http://${id}1a2b--os.aura.localhost`;
+for (const id of ['term', 'tri']) {
+  Object.assign(frame(id).dataset, { auraHostFrame: '1', auraFrameReady: '1', auraFrameOrigin: originOf(id), auraAppId: `com.x.${id}` });
+}
 const tapInto = (f: HTMLIFrameElement) =>
-  win.dispatchEvent(new win.MessageEvent('message', { data: { type: 'aura.pointerdown' }, source: f.contentWindow as never, origin: 'http://localhost' }));
+  win.dispatchEvent(new win.MessageEvent('message', { data: { type: 'aura.pointerdown' }, source: f.contentWindow as never, origin: originOf(f.id) }));
 
 test('a tap into another window wins over a stale activeElement (iPad Safari keeps the old iframe focused)', () => {
   const im = inputManager();

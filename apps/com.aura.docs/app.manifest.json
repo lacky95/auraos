@@ -14,8 +14,6 @@
   "backgroundService": true,
   "themeStrategy": "inherit",
   "proxy": {
-    "rewriteHtml": "none",
-    "preservePrefix": true,
     "injectMeta": true,
     "injectConsoleRelay": true,
     "injectKeyForwarder": true

@@ -1,152 +1,72 @@
 ---
 title: App hosts
-description: Serve an app or one of its sidecars at the root of its own host name, `{name}--{desktop host}`, instead of under /api/proxy/<id>/.
+description: Every app with a UI runs at the root of its own host name, `{label}--{desktop host}`. What the shell does on that host, and its limits.
 ---
 
-**TL;DR.** Add `hosts` to your manifest and the shell serves your app (or a
-sidecar) at `{name}--{the host AuraOS is open at}`, same scheme and port,
-with nothing rewritten. Use it for UIs that must own an origin root: they
-build root-absolute URLs at runtime, run their own page proxy, or simply
-fight the `/api/proxy/<id>/` prefix.
+**TL;DR.** Every app with a UI opens on its own **App Host**:
+`{label}--{the host AuraOS is open at}`, same scheme and port, served from
+`/` with nothing rewritten. The shell picks the label. Service apps have no
+UI and no App Host; machines reach them at `/api/proxy/<id>/…`.
 
-```jsonc
-// app.manifest.json
-"hosts": [
-  { "name": "marklayer", "service": "worker", "port": 8787 }
-]
-```
-
-| AuraOS opened at | The app host `marklayer` |
+| AuraOS opened at | An App Host of Notes |
 |---|---|
-| `http://10-201-1-2.nip.io:3000` | `http://marklayer--10-201-1-2.nip.io:3000` |
-| `https://lukas-01.aura.int.lakner.io` | `https://marklayer--lukas-01.aura.int.lakner.io` |
+| `http://10-201-1-2.nip.io:3000` | `http://notesabcd1234--10-201-1-2.nip.io:3000` |
+| `https://lukas-01.aura.int.lakner.io` | `https://notesabcd1234--lukas-01.aura.int.lakner.io` |
 
-## When to use it
+How to write an app for it: [Building an app for App Hosts](/docs/building-for-app-hosts).
 
-Every app window normally lives at `/api/proxy/<instanceId>/` on the
-desktop's origin, and the shell rewrites HTML and JS so root-absolute paths
-land in your app ([Behind the proxy](/docs/onboard-existing-apps#behind-the-proxy)).
-That is right for Astro apps and most dashboards. It fails when a UI:
+## Why an origin of its own
 
-- builds `/api/…`, `/ws/…` or asset URLs in JavaScript at runtime,
-- proxies third-party pages (their scripts know nothing of a prefix),
-- has no base-path setting, or a broken one.
+- **A real origin root.** Root-absolute URLs (`/api/…`, `/ws/…`, assets
+  built at runtime) reach your own server. No base path, no rewriting.
+- **Isolation.** Code on an App Host can't read the desktop's DOM, cookies or
+  storage, nor another app's.
 
-An app host gives that UI a real origin root. It also isolates it: code on
-`marklayer--host` can't read the desktop's cookies or storage, unlike code
-under `/api/proxy/…`, which shares the desktop's origin.
+## Labels
 
-## Declare a host
+The App Host registry assigns each installation a label, and each instance
+of a multi-instance app its own. Labels follow `^[a-z][a-z0-9]{0,30}$`
+(letters and digits, no hyphens: nip.io would read them as an IPv6 address).
+A removed app's label is never given out again; it answers *410*.
 
-| Field | Required | Meaning |
-|---|---|---|
-| `name` | yes | The label before `--`. `^[a-z][a-z0-9]{0,30}$`: letters and digits, **no hyphens** (nip.io would read them as an IPv6 address). Unique across installed apps. Reserved: `aura`, `shell`, `os`, `api`, `www`, `admin`, `app`, `apps`, `xn`. |
-| `service` | no | A `services[]` template. The shell routes to the sidecar spawned from it, `aura-<instanceId>--<service>`. Omitted = your app's own server. |
-| `port` | no | Port on the target. Default: the template's `port`, or your app's own port. Required when the template has none. |
-| `description` | no | Shown in Settings → Interfaces. |
-
-The manifest is rejected when a name is invalid or repeated, collides with
-one of your `provides[]` names, or names an unknown template. Installing an
-app whose host name another installed app already holds fails with
-`hosts: '<name>' is already the app host of <appId>`.
-
-<Callout type="info">
-Only declared targets are reachable. A host is not a door to arbitrary
-sidecars or ports, and it needs no `sidecars.privileged`: the shell reaches
-sidecars over aura-net like it always does.
-</Callout>
+Manifest `hosts[]` names are not served: only the labels the registry
+assigns are.
 
 ## What the shell does
 
-The shell checks the `Host` header before anything else. For
-`{name}--{anything}` where an installed app declares `name`:
+The shell checks the `Host` header before anything else. For a
+`{label}--{anything}` the registry knows:
 
-- **HTTP and WebSocket** are streamed to the target. Upgrades are piped
+- **Sign-in first.** The desktop opens the window with a one-time handoff
+  that sets an app cookie on that origin. Without it, nothing reaches the
+  app: the page asks you to open the app from AuraOS.
+- **`/_aura/*` is the shell's.** `/_aura/runtime.js` and the gateway
+  `/_aura/os/` are answered by the shell, never by your app.
+- **HTTP and WebSocket** are streamed to the instance. Upgrades are piped
   byte for byte, so subprotocols and your own pings pass through.
 - **Nothing is changed**: no prefix stripped or added, no HTML/JS rewriting,
-  no injected scripts, no `Set-Cookie` path scoping. Redirects pass as sent.
+  no injected scripts. Redirects pass as sent.
 - **`Host` is kept.** The shell adds `X-Forwarded-Host`, `X-Forwarded-Proto`,
   `X-Forwarded-Port`, `X-Forwarded-For`, `X-Aura-App-Id` and
   `X-Aura-Instance-Id`. Build absolute links from `X-Forwarded-Proto` and
   `Host`: behind an HTTPS edge the hop to the shell is plain HTTP.
 - **A stopped app is started** on the first request. While it starts, a
   browser gets a page that reloads by itself (503, `Retry-After: 2`).
-- Every other host, including the desktop's own, goes to the shell as before.
-
-## Get the URL
-
-Never build the URL from config: it depends on the host the user opened
-AuraOS at. Ask for it:
-
-```ts
-import { appHostUrl, appHostUrlFromRequest } from '@aura/app-sdk';
-
-// In your page (an iframe on the desktop's origin):
-frame.src = appHostUrl('marklayer') + '/s/' + room;
-
-// On your server, from a request the shell proxied to you:
-const url = appHostUrlFromRequest(request, 'marklayer');
-```
-
-Both return `null` when AuraOS was opened by raw IP (`http://10.0.0.2:3000`):
-there is no label to prepend. Show a hint to open AuraOS at its nip.io
-address instead ([Reaching AuraOS](/docs/reaching-auraos)).
-
-The same from anywhere else:
-
-| Where | What |
-|---|---|
-| REST | `GET /api/apps/<id>/hosts` → `{ hosts: [{ name, url, target, port, status }] }`; `GET /api/hosts` for all apps |
-| Redirect | `GET /api/apps/<id>/hosts/<name>[?path=/s/x]` → 302 to the host (`Accept: application/json` → the entry) |
-| Interface Registry | one `http/host` entry per host; `address` = the name, `url` = the redirect above |
-| CLI | `aura get hosts [-a <app>]` |
-
-The URL is built from the caller's host, so an agent that reaches the shell
-as `aura-shell:3000` gets `url: null`. It talks to the target directly over
-aura-net instead (`aura-<instanceId>--<service>:<port>`).
+- An unknown label answers *404*. Every other host, including the desktop's
+  own, goes to the shell.
 
 ## Framing and embedding
 
-Your window can iframe its own host: the host is cross-origin to the
-desktop, which is fine for an iframe. If your UI sends
+The desktop frames your App Host, cross-origin. If your UI sends
 `Content-Security-Policy: frame-ancestors`, allow the desktop's origin, or
 `*` for a private install. Remember that `frame-ancestors` is checked against
 **every** ancestor, not just the parent.
-
-## Virtual keyboard
-
-The shell proxy injects the virtual-keyboard receiver into every app page; an
-app host gets nothing injected. Load it yourself, from the desktop:
-
-```html
-<script src="https://<desktop host>/api/os/keyboard.js"></script>
-```
-
-It holds the receiver, the device-keyboard policy (keeps the iPad's own
-keyboard away) and a relay into your own iframes, and listens only to
-`window.parent`. Your app window, which frames the host, passes the keyboard's
-messages one level down (see `components/shell/keyboard/PROTOCOL.md`). The
-desktop host is your own host minus the `name--` prefix.
 
 ## Limits
 
 - **nip.io is plain HTTP.** Browsers switch off HTTPS-only APIs there
   (clipboard, microphone, camera, service workers, `crypto.subtle`), for
   the whole of AuraOS. Use a custom domain for those ([Reaching AuraOS](/docs/reaching-auraos)).
-- **Raw IP access has no app hosts.**
-- **One instance.** A host routes to the app's live instance (a user-owned
-  one first). Multi-instance apps get no per-instance host yet.
-
-## Example: MarkLayer
-
-`io.lakner.marklayer` runs the MarkLayer Worker as a sidecar. Its viewer
-proxies arbitrary web pages and opens `/ws/<room>` sockets, so it can't live
-under a prefix:
-
-```jsonc
-"hosts": [{ "name": "marklayer", "service": "worker", "port": 8787,
-            "description": "MarkLayer viewer and page proxy" }]
-```
-
-The window's top bar loads `appHostUrl('marklayer') + '/s/<room>'` in an
-iframe. Agents keep using the MCP at `/api/proxy/io.lakner.marklayer/mcp`.
+- **Raw IP access has no App Hosts**, so apps don't open there.
+- **Browser storage is per origin.** Each App Host starts empty, and each
+  address AuraOS is opened at has its own set of App Hosts.

@@ -13,12 +13,15 @@ description: AuraOS — the OS for everywhere. One coherent surface, any device,
 AuraOS is a browser-based WebOS that runs inside one Docker container.
 The shell draws the desktop — status bar, dock, launcher, layout
 manager, process manager — and every app you launch boots inside its
-own sandbox (PRoot or container) and is rendered in an iframe.
+own sandbox (PRoot or container) and is rendered in an iframe on its
+own origin, an [App Host](/docs/app-hosts) (`{label}--{desktop host}`).
 
-The shell talks to apps only through the reverse proxy at
-`/api/proxy/<id>/<path>`. Apps never reach the browser directly; the
-proxy injects identity headers, theme tokens, a console relay, and a
-keystroke forwarder on the way in.
+Apps never reach the browser directly: the shell streams each App
+Host's requests to its app, with identity headers and nothing
+rewritten. A page loads `/_aura/runtime.js` for the theme, OS
+shortcuts and a console relay, and reaches the shell through
+`/_aura/os/`. Machines (agents, other apps' servers) reach an app at
+`/api/proxy/<id>/<path>`.
 
 ## Architecture in one diagram
 
@@ -27,6 +30,7 @@ keystroke forwarder on the way in.
                        │       Browser            │
                        │  ┌────────────────────┐  │
                        │  │  iframe per app    │  │
+                       │  │  {label}--{host}   │  │
                        │  └────────────────────┘  │
                        └────────────┬─────────────┘
                                     │ http://shell:3000
@@ -34,8 +38,9 @@ keystroke forwarder on the way in.
    ┌──────────────────────────────────────────────────────────┐
    │  aura-shell  (Astro SSR + AppManager + SSE event bus)    │
    │                                                          │
-   │  /api/proxy/<id>/<path>  ──────► (HTML rewrites, meta,   │
-   │                                    console relay, keys)   │
+   │  {label}--{host}/*       ──────► (App Host: the app,     │
+   │                                    /_aura/runtime.js)    │
+   │  /api/proxy/<id>/<path>  ──────► (machine calls)         │
    │  /api/data/<authority>/* ──────► (content provider router)│
    │  /api/apps, /api/events  ──────► (lifecycle + bus)        │
    └────────────┬────────────────────────────┬────────────────┘
@@ -49,7 +54,7 @@ keystroke forwarder on the way in.
 ```
 
 The shell is one process. Apps are many — each one its own dev server
-listening on its own port, reached only through the proxy.
+listening on its own port, reached only through the shell.
 
 ## Why
 

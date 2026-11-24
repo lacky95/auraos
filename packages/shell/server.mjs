@@ -23,7 +23,7 @@ import http from 'node:http';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { attachShellServers, escapeProxyViteQuery } from './server/attach.mjs';
+import { attachShellServers } from './server/attach.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const check = process.argv.includes('--check');
@@ -72,8 +72,6 @@ let current = await loadBuild(await initialBuildDir());
 let previous = null;
 
 const server = http.createServer((req, res) => {
-  // Same request shape as in dev (see escapeProxyViteQuery in attach.mjs).
-  req.url = escapeProxyViteQuery(req.url);
   // After a watched rebuild, tabs still on the previous build lazily load its
   // hashed chunks: serve those from the previous generation until they reload.
   if (previous && req.url?.startsWith('/_astro/')) {

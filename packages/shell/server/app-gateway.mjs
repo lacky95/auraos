@@ -22,13 +22,12 @@
  *   - response headers: no Set-Cookie, CORS grant or redirect target
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import { AURA_RESERVED_PATHS, GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { loadAppHostServices } from './app-host-auth.mjs';
 import { GATEWAY_CLAIM_TTL_S, gatewayKey, ownerUiActs, ownerUiApp, signGatewayClaim } from './gateway-identity.mjs';
 import { browserBoundaryError } from './host-policy.mjs';
-import { attachSseMux } from './sse-mux.mjs';
+import { createSseMux } from './sse-mux.mjs';
 
 const OS_PREFIX = AURA_RESERVED_PATHS.os;
 export const GATEWAY_MUX_PATH = `${OS_PREFIX}sse-mux`;
@@ -100,8 +99,8 @@ function buildClaim({ record, slot }, { method, path, origin, userId, sid = null
 /**
  * D45: the owner this request acts for, or null (gateway-identity.mjs
  * `ownerUiActs`): an allowlisted app's active `system` installation, on a
- * path its entry covers, while the session its host cookie came from is live
- * (`login-dark` counts while login is dark, as for the desktop). Fails closed
+ * path its entry covers, while the session its host cookie came from is live.
+ * Fails closed
  * when the registry can't be read.
  */
 async function ownerActing(ctx, session, path) {
@@ -198,9 +197,9 @@ export async function handleAppGateway(req, res, ctx) {
 
 let scopedMux = null;
 
-/** The mux, on a private emitter: only `serveScoped` can reach this instance. */
+/** The gateway's one mux: only `serveScoped` reaches it. */
 function gatewayMux() {
-  scopedMux ??= attachSseMux(new EventEmitter(), `http://127.0.0.1:${shellPort()}`);
+  scopedMux ??= createSseMux();
   return scopedMux;
 }
 

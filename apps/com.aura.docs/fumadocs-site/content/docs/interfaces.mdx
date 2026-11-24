@@ -57,7 +57,7 @@ proxy base when handing out a live URL.
 | `http` `rest` `mcp` `ws` | a path on **your own server**, must start with `/` | `/api/transcribe` | `/api/proxy/<instanceId>/api/transcribe` |
 | `event` | an OsEventBus topic or glob, **no** leading `/` | `whisper:transcript.*` | `/api/apps/events?topics=…` |
 | `kv` | a KV namespace/key prefix, **no** leading `/` | `app/com.acme.api/jobs` | `/api/kv/app/com.acme.api/jobs` |
-| `http/host` | the [app host](/docs/app-hosts) name — never declared in `provides`, the registry derives it from `hosts[]` | `marklayer` | `/api/apps/<appId>/hosts/marklayer` (a redirect to `{name}--{your host}`) |
+| `http/host` | a manifest `hosts[]` name — never declared in `provides`, the registry derives it from `hosts[]`. Those names are not served ([App hosts](/docs/app-hosts#labels)) | `marklayer` | `/api/apps/<appId>/hosts/marklayer` (a redirect to `{name}--{your host}`) |
 
 That leading-slash rule is validated at parse time: get it wrong and the
 manifest is rejected rather than silently producing an address nobody can dial.
@@ -160,9 +160,9 @@ DELETE /api/interfaces/<name>              withdraw a runtime registration
 
 Reads are open to every app — they expose only what apps themselves declared.
 Writes are caller-scoped: there is no `appId` field in a write, so you can only
-ever register under your own instance. In a browser context the OS identifies
-you from the iframe's proxy URL; server-side (no Referer) the SDK sends the
-`X-Aura-Instance-Id` the OS injected at spawn.
+ever register under your own instance. In a page, the App Host gateway
+(`/_aura/os/`) signs the call with your app and instance; on your server, the
+SDK sends your instance token (`osAuthHeaders`).
 
 <Callout type="warn">
 App identity is **self-asserted**, exactly as it is for `/api/kv` and

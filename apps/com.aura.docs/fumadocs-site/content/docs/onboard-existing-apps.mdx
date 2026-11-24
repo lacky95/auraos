@@ -1,14 +1,14 @@
 ---
 title: Onboard an existing app
-description: Bring a third-party app into AuraOS. Pick a strategy (native, direct process, sidecar, sidecar with a setup step), wire it in, and get its UI working behind the proxy.
+description: Bring a third-party app into AuraOS. Pick a strategy (native, direct process, sidecar, sidecar with a setup step), wire it in, and get its UI working on its App Host.
 ---
 
 **TL;DR.** Most third-party apps come in one of three shapes: a single binary
 or package, a Docker image, or a Docker image that needs secrets and a database
-on first run. Each shape has a strategy below. Whatever you pick, the part that
-takes the most time is the **UI behind the proxy**: every app window lives
-under `/api/proxy/<instanceId>/`, and a foreign UI usually doesn't know that.
-Read [Behind the proxy](#behind-the-proxy) before you debug anything else.
+on first run. Each shape has a strategy below. Whatever you pick, the UI runs
+at the root of the app's own [App Host](/docs/app-hosts), so a foreign UI
+needs no base path. [The UI on its App Host](#the-ui-on-its-app-host) lists
+what is left to check.
 
 ## Pick a strategy
 
@@ -21,14 +21,12 @@ Answer these about the app you want to bring in:
 | Does it need **other services** (Postgres, Redis, a worker)? | Each one is another sidecar template, so start order and the wiring between them become your job. |
 | Does it need **secrets on first run** (admin key, DB password, encryption salt)? | Then you need a setup step and must pass the values at spawn time. See [strategy D](#d-sidecar-with-a-setup-step). |
 | How long is its **first boot**? | Database migrations can take minutes. Plan for readiness polling, not one long request. |
-| Can its UI be told a **base path** (`basePath`, `PUBLIC_URL`, `ROOT_URL`, `server_root_path`, `<base>`)? | That is the single biggest factor in how hard the UI part is. |
 | Does it need **docker itself**? | Only then is the [app-managed](/docs/sidecars/app-managed) path right. |
 
 Then pick:
 
 | Strategy | Use when | Reference |
 |---|---|---|
-| **0. App host** | The UI must own an origin root: it builds `/api/…` or asset URLs at runtime, proxies other pages, or has no working base-path setting. Serve it at its own host name and skip the prefix work below entirely. | [App hosts](/docs/app-hosts) |
 | **A. Native app** | The UI is small, or you want it to feel like AuraOS. You rebuild it as an Astro app and call the original's API or library. | [Develop an app](/docs/develop-an-app) |
 | **B. Direct process** | A single binary or package, no foreign image. It runs inside the app container behind a small lifecycle wrapper. | `com.aura.registry` |
 | **C. Sidecar, zero-config** | A Docker image that starts without first-run input. `createSidecars().listen()` does everything. | [Bring-your-own-runtime](/docs/bring-your-own-runtime), `com.aura.hermes` |
@@ -39,9 +37,8 @@ Then pick:
 
 Scaffold with `aura dev new`, then talk to the original project from your
 server routes: its HTTP API, its CLI as a granted [capability](/docs/cli-reference),
-or its library as a dependency. You own the UI, so everything in this guide
-about the proxy prefix goes away. It's the most work up front, but the least
-upkeep afterwards.
+or its library as a dependency. You own the UI. It's the most work up front,
+but the least upkeep afterwards.
 
 ## B. Direct process
 
@@ -158,65 +155,35 @@ Three traps in this flow. Each one cost hours in the LiteLLM onboarding:
 Also: start order is yours. Spawn the database, wait for its port, then build
 the dependents' env from `sidecar.host`.
 
-## Behind the proxy
+## The UI on its App Host
 
-Every app window is an iframe at `/api/proxy/<instanceId>/`. The shell strips
-that prefix before forwarding, so the app sees `/`. But anything the
-**browser** resolves from a root-absolute path (`/api/x`, `/assets/y`) goes to
-the shell, not to your app. The shell's 404 page and the JSON parse errors you
-get from it are the most common onboarding failures.
+Every app window is an iframe on the app's own App Host, served from `/`, with
+nothing rewritten. Your controller sees the browser's paths unchanged, and
+root-absolute URLs (`/api/x`, `/assets/y`, URLs built in JavaScript) reach it.
+Leave the UI's base-path setting (`basePath`, `PUBLIC_URL`, `ROOT_URL`, …) at
+`/`. What is left:
 
-<Callout type="info">
-If the list below turns into a fight, step back: declare an
-[app host](/docs/app-hosts) and serve the UI at the root of its own host
-name. Nothing is rewritten there, so none of these fixes are needed.
-</Callout>
-
-Fix it from the top of this list down, and stop as soon as the UI works:
-
-1. **Relative URLs in your own code.** `fetch('api/setup')`, not
-   `fetch('/api/setup')`. The proxy's `<base href>` makes relative URLs land
-   in your app.
-2. **The app's own base-path setting.** Most UIs have one: `basePath`,
-   `PUBLIC_URL`, `ROOT_URL`, `server_root_path`, a `<base>` option. Set it to
-   `/api/proxy/<instanceId>`. If it's only delivered at runtime (LiteLLM
-   serves it from `/litellm/.well-known/litellm-ui-config`), rewrite that one
-   response in your controller. This is the real fix, because the app then
-   builds its links, redirects and API calls correctly.
-3. **`proxy.rewriteHtml`.** `'astro'` (default) rewrites root-absolute
-   attributes (`src`, `href`) in HTML and injects `<base>`. It can't see URLs
-   built in JavaScript or embedded in data.
-4. **Rewrite asset paths in text responses.** Frameworks embed asset paths in
-   inline data, which the attribute rewrite never sees. Next.js (`self.__next_f`,
-   RSC `.txt` / `text/x-component` payloads) is the common case. Replace the
-   build's asset prefix in every text response under the UI path.
-5. **A fetch/XHR shim**, injected into the UI's `<head>`, for apps that call
-   their API by root-absolute path and have no setting for it. Capture the
-   prefix at load time, because client-side routing can move `location` out of
-   it.
-6. **A landing redirect.** If `/` isn't the UI (LiteLLM serves Swagger there),
+1. **A landing redirect.** If `/` isn't the UI (LiteLLM serves Swagger there),
    redirect `/` to the real dashboard path.
-
-Bundler specifics you may hit at step 4:
-
-- **Turbopack** matches loaded `<script src>` against `TURBOPACK_CHUNK_BASE_PATH`.
-  Once the shell rewrote those srcs, set `self.TURBOPACK_CHUNK_BASE_PATH` to the
-  prefixed base in your shim, or the runtime waits forever for chunks it
-  thinks never loaded. There is no error.
-- **A static export** answers page-switch data requests with `index.txt`
-  files (`text/plain`), so include `text/plain` in the rewrite.
+2. **Framing.** The desktop frames the App Host. If the UI sends
+   `X-Frame-Options` or a `frame-ancestors` that leaves out the desktop's
+   origin, drop or widen it in your controller.
+3. **`/_aura/*` is reserved.** The shell answers those paths on every App Host;
+   a UI that uses them itself needs another path.
+4. **The OS runtime.** For the theme, OS shortcuts, the on-screen keyboard and
+   the console relay, a page loads `/_aura/runtime.js` first in its `<head>`
+   ([Building an app for App Hosts](/docs/building-for-app-hosts)). A foreign
+   UI you pass through unchanged works without it, just without those.
 
 ## Symptoms → cause
 
 | You see | Likely cause |
 |---|---|
-| `Unexpected token '<', "<!doctype "... is not valid JSON` | A root-absolute `fetch` reached the shell's 404 page. Use relative URLs (step 1). |
 | "could not start" with no reason | The controller swallowed the error. Log `error.message`, then check `aura logs inst <id>`. |
 | A sidecar keeps restarting and its logs say a required secret is missing | The secret went through `envInherit`, or `listen()` re-created the sidecar without it. See the warning in strategy D. |
 | `fetch failed` about 5 minutes into a spawn | `wait: { ready }` on a slow first boot. Poll readiness yourself. |
-| The UI's placeholder ("Loading...") forever, no error | Asset paths inside inline data 404, or a bundler base path mismatch (steps 4–5). Check the browser's network log. |
-| `404: Not found · Path: /ui/...` after a click | The UI navigated out of the prefix. Set its base path (step 2). |
-| "This page couldn't load", fixed by reload | Page-switch data still has unprefixed asset paths (step 4, include `text/plain`). |
+| The UI's placeholder ("Loading...") forever, no error | Assets 404: a base path left over from an older setup. Set it back to `/`. Check the browser's network log. |
+| A blank window | The UI refuses to be framed (step 2). |
 | `No space left on device` in a sidecar log | The host disk is full. Check `df -h` before debugging the app. |
 
 ## Debugging
@@ -225,8 +192,8 @@ Bundler specifics you may hit at step 4:
   lists the sidecars, and `aura logs inst <id> -c <sidecar>` shows their logs.
 - Reproduce a spawn by hand from inside the app (`aura exec inst <id> -- node -e …`)
   to see the real error behind a bare 500.
-- Watch the browser's network log, not just your server's. The prefix
-  problems are only visible there. For the Android app, connect with `adb`
+- Watch the browser's network log, not just your server's: failed asset
+  and API requests are only visible there. For the Android app, connect with `adb`
   and inspect its WebView (`webview_devtools_remote_<pid>`).
 - `aura restart app <id>` keeps your windows (same workspace, slot and path),
   so restarting during debugging is cheap.
@@ -238,8 +205,8 @@ Bundler specifics you may hit at step 4:
 - [ ] `aura restart app <id>` comes back to a working UI, without asking again.
 - [ ] Secrets live only in `/data/<app>/` (mode `0600`) and in spawn `env`.
       They're never in the manifest or in logs.
-- [ ] Every page of the UI loads by click and by reload. The network log
-      shows nothing outside `/api/proxy/<id>/` except `/api/os/*`.
+- [ ] Every page of the UI loads by click and by reload, with no failed
+      requests in the network log.
 - [ ] It also works from the Android app (its proxy drops the body of form
       POST navigations; `fetch`/XHR are fine).
 - [ ] The first boot on an empty volume finishes. Time it.
@@ -248,8 +215,7 @@ Bundler specifics you may hit at step 4:
 
 - `com.aura.registry`: direct process (zot) behind a lifecycle wrapper.
 - `com.aura.hermes`: zero-config sidecar with auto-login and native rendering.
-- `io.lakner.litellm`: sidecar with a setup step, Postgres, generated secrets,
-  and a Next.js UI made to work behind the proxy (base path via the config
-  response, asset-prefix rewrite, fetch shim).
+- `io.lakner.litellm`: sidecar with a setup step, Postgres and generated
+  secrets.
 - `builders/io.lakner.pocketbuilder/templates/pocketbase-react`: an OS-managed
   sidecar inside an Astro app, with its own proxy route.

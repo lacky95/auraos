@@ -30,14 +30,12 @@ import {
 export const APP_HOST_PREFIX = 'apphost:';
 /** The alpha's one user (D19). */
 export const APP_HOST_DEFAULT_USER = 'default';
-export type AppFrameRoute = 'proxy' | 'host';
 
 const installKey = (id: string) => `apphost:install:${id}`;
 const bindKey = (appId: string, scope: string, userId: string) => `apphost:bind:${scope}:${userId}:${appId}`;
 const appKey = (appId: string) => `apphost:app:${appId}`;
 const hostsKey = (id: string) => `apphost:hosts:${id}`;
 const labelKey = (label: string) => `apphost:label:${label}`;
-const frameKey = (appId: string) => `apphost:frame:${appId}`;
 const MANIFEST_HOSTS_KEY = 'apphost:manifest-hosts';
 
 const MAX_COMMIT_ATTEMPTS = 256;
@@ -129,8 +127,6 @@ export interface AppHostStore extends AppHostRegistry {
   /** Creates the app's installation, or returns the one already bound. */
   createInstallation(input: NewInstallationInput): Promise<AppInstallation>;
   updateInstallation(installationId: string, patch: { originId?: string | null; source?: AppSourceFingerprint }): Promise<AppInstallation>;
-  getFrameRoute(appId: string): Promise<AppFrameRoute>;
-  setFrameRoute(appId: string, route: AppFrameRoute): Promise<void>;
   /** `null` until the first boot migration recorded them. */
   getKnownManifestHosts(): Promise<Set<string> | null>;
   addKnownManifestHosts(claims: readonly string[]): Promise<void>;
@@ -471,18 +467,6 @@ export function createAppHostRegistry(kv: Redis | (() => Redis), opts: AppHostRe
       const out: AppHostRecord[] = [];
       for (const id of ids) out.push(...(await readRecords(id)).map((r) => r.value));
       return out;
-    },
-
-    // PHASE2-CUTOVER: frameRoute exists only while apps migrate one at a time.
-    async getFrameRoute(appId) {
-      return (await redis().get(frameKey(appId))) === 'host' ? 'host' : 'proxy';
-    },
-
-    // PHASE2-CUTOVER: frameRoute exists only while apps migrate one at a time.
-    async setFrameRoute(appId, route) {
-      if (route !== 'proxy' && route !== 'host') throw new TypeError(`invalid frame route: ${String(route)}`);
-      if (route === 'host') await redis().set(frameKey(appId), 'host');
-      else await redis().del(frameKey(appId));
     },
 
     async getKnownManifestHosts() {

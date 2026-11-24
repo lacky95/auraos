@@ -979,7 +979,7 @@ export class AppManager {
         }
         const manifest = this.registry.getById(o.appId);
         if (manifest) {
-          this.runners.container.registerAdopted?.({ ...o, manifest });
+          this.runners.container.registerAdopted?.(o);
           // Wire the crash handler so a dying adopted container is detected
           // (registerAdopted starts the `docker wait` watcher that fires this).
           // Without it the instance would stick in `resumed` forever and be
@@ -2579,7 +2579,7 @@ export class AppManager {
         // force-kill the healthy container for it.
         const host = this.runnerOf(inst.instanceId).getHost(inst.instanceId);
         if (!host) continue; // runner doesn't track it (yet); step 1 handles dead ones
-        const res = await fetch(`http://${host}:${inst.port}${lifecyclePath(manifest, inst.instanceId, 'health')}`, {
+        const res = await fetch(`http://${host}:${inst.port}${lifecyclePath('health')}`, {
           signal: AbortSignal.timeout(1000),
         });
         if (!res.ok) continue; // transient — don't punish on a single bad response

@@ -31,8 +31,9 @@ These were checked in Chromium, Firefox and WebKit (the engine of Safari).
 | Direct IP | Nothing, but it is setup only: the desktop opens, apps on App Hosts don't. A bar links to the matching nip.io address. |
 
 An address shaped like an app host (`name--…`) is never the desktop: a name
-no app uses answers *404*, a removed app's name *410*. An address the
-browser's URL parser can't read (`foo.123`, `1.2.3.999`) answers *400*.
+no app uses answers *404*, a removed app's name *410*. A malformed address
+(`a..b`, or one the browser's URL parser can't read: `foo.123`,
+`1.2.3.999`) answers *400*.
 
 "HTTPS-only browser APIs" are what browsers allow only on a secure origin:
 the clipboard API, microphone and camera, service workers, `crypto.subtle`.
@@ -127,15 +128,27 @@ environment:
 
 Its app hosts (`*--box.aura.example.com`) follow automatically. This stops
 DNS rebinding: any website could otherwise point a name of its own at your
-machine and reach AuraOS as that name. IP addresses, `localhost` and
-`os.aura.localhost`, nip.io names and container names never need listing.
-`sslip.io` and every other domain do.
+machine and reach AuraOS as that name. Loopback, IP addresses, `localhost`
+and `os.aura.localhost`, nip.io names and single-label container names
+(`aura-shell`) never need listing. `sslip.io` and every other domain do.
 
-`AURA_HOST_POLICY` decides what happens to an address that is not listed:
-`report` (today's default) serves it and logs `unlisted-host`; `enforce`
-refuses it with *400 This address is not one of this AuraOS's addresses*.
-`enforce` becomes the default when App Hosts carry every app, so list your
-domain now.
+A domain that is not listed is refused with *400 This address is not one of
+this AuraOS's addresses*. `AURA_HOST_POLICY=report` relaxes that to serving
+it and logging `unlisted-host`; leave it unset (`enforce`) otherwise.
+
+## Signing in
+
+AuraOS has one owner account, created on first start (see
+[Installation](/docs/installation#create-the-owner-account)). The desktop
+asks for it at `/login`.
+
+Each address has its own sign-in, because the sign-in cookie belongs to that
+host: an IP, a nip.io name and a custom domain each ask once. Moving from the
+raw IP's setup bar to the nip.io address, for example, means signing in again
+there. App windows need nothing extra: the desktop signs each App Host in.
+
+Agents' machine paths (the MCP URLs under `/api/proxy/<app>/…`) need no
+sign-in.
 
 ## Raw IP
 

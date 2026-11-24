@@ -78,5 +78,5 @@ Other things to check when an app moves to prod:
   in a build that points into `dist/`.
 - The SDK stamps `X-Aura-App-Id` / `X-Aura-Instance-Id` in both modes (an
   Astro middleware).
-- Absolute `/_astro/…` URLs built at runtime (Vite's preload helper) are
-  redirected by the shell to the app's proxy prefix, so dynamic imports work.
+- Absolute `/_astro/…` URLs built at runtime (Vite's preload helper) reach
+  the app directly on its App Host, so dynamic imports work.

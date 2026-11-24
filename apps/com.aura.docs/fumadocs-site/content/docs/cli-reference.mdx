@@ -79,7 +79,7 @@ aura jump -m                                  # the aura-shell master container
 | `aura get svc [name]` | Services on the master (sshd, code-server …). | `-o` |
 | `aura get mounts [name]` | Cross-app mounts (INSTANCE, TARGET, KIND, MODE, PATH, ORIGIN). | `-a`, `-i <instance>` |
 | `aura get ports [name]` | Port exposes, app-to-app or host (OWNER, ID, KIND, SOURCE, LISTEN, STICKY). | `-a`, `-i` |
-| `aura get hosts [name]` | [App hosts](/docs/app-hosts) (NAME, APP, TARGET, STATUS, URL). The CLI reaches the shell by container name, so URL shows `{name}--<desktop host>`. | `-a` |
+| `aura get hosts [name]` | Manifest `hosts[]` entries (NAME, APP, TARGET, STATUS, URL). These names are not served; windows run on registry-assigned [App Hosts](/docs/app-hosts). The CLI reaches the shell by container name, so URL shows `{name}--<desktop host>`. | `-a` |
 | `aura get scopes [name]` | Install scopes (system / global / user). | `-o` |
 | `aura get themes [name]` | Theme presets; ACTIVE marks the dark/light slot in use. | `-o` |
 | `aura get perms [app]` | Declared manifest permissions per app. | `-o` |
@@ -318,6 +318,8 @@ aura dev validate --all
 | `aura set theme <name>` | Switch the active theme for a tone slot; updates the shell and apps live. Theme ids from `aura get themes`. | `--tone dark\|light` (default `dark`) |
 | `aura completion bash\|zsh` | Print a completion script: commands, resource types, and live names (apps, instances). | — |
 | `aura api-resources` | All resource types, short names, verbs. | — |
+| `aura setup-code` | Host command: a one-time code for creating the owner account at `/setup` (expires after 10 minutes). Run it as `docker exec -it aura-shell aura setup-code`. | — |
+| `aura user reset-password <username>` | Host command: a one-time code for resetting the owner's password at `/setup`. Signs out every browser. | — |
 
 ```bash
 aura set theme paper --tone light
@@ -338,7 +340,7 @@ eval "$(aura completion bash)"        # add to ~/.bashrc
 | `services` | `service`, `svc` | get, describe, start, stop, restart, install, delete, logs | Long-running daemons on the master (sshd, code-server, …) |
 | `mounts` | `mount` | get, delete | Cross-app mounts into a container instance (`aura mount`) |
 | `ports` | `port` | get, delete | Port exposes into another app or onto the host (`aura port`) |
-| `hosts` | `host` | get | App hosts: apps served at their own host name `{name}--{desktop host}` |
+| `hosts` | `host` | get | Manifest `hosts[]` entries (not served; see [App hosts](/docs/app-hosts#labels)) |
 | `scopes` | `scope` | get | App installation scopes (system / global / user) |
 | `themes` | `theme` | get, set | Theme presets; ACTIVE marks the dark/light slot in use |
 | `permissions` | `permission`, `perms`, `perm` | get, grant, revoke | Apps' declared manifest permissions |

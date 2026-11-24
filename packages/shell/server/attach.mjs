@@ -10,7 +10,6 @@
  * Plain ESM (not TS): astro.config.mjs and server.mjs both load it with
  * Node's loader, before/without Vite.
  */
-import { attachSseMux, MUX_PATH } from './sse-mux.mjs';
 import { createAppHostRouter } from './app-hosts.mjs';
 import { loadAppHostServices } from './app-host-auth.mjs';
 import { terminalEmbedAncestors, watchTerminalInstances } from './terminal-embed.mjs';
@@ -43,7 +42,6 @@ function dbg(tag, ...args) {
   if (!nsEnabled(WS_NS, process.env.AURA_LOG ?? '')) return;
   console.log(`[${WS_NS}]`, tag, ...args);
 }
-const MUX_NS = 'ssemux';
 const SIO_NS = 'sio';
 function sioDbg(tag, ...args) {
   if (!nsEnabled(SIO_NS, process.env.AURA_LOG ?? '')) return;
@@ -89,27 +87,6 @@ export function appsListCached({ fresh = false } = {}) {
   appsCache = { at: now, promise };
   promise.catch(() => { if (appsCache?.promise === promise) appsCache = null; });
   return promise;
-}
-
-/**
- * Escape `?astro|?vue|?svelte` on /api/proxy/<id>/<path> so the shell's own
- * Vite (vite-plugin-astro) never claims an app's module URL; the proxy route
- * turns them back before forwarding upstream. Applied in prod too, so the
- * proxy route always sees the same request shape.
- */
-export function escapeProxyViteQuery(url) {
-  if (!url || !url.startsWith('/api/proxy/')) return url;
-  if (!/[?&](astro|vue|svelte)(=|&|$)/.test(url)) return url;
-  return url
-    .replace(/(\?|&)astro(?=&|$)/g,    '$1_aura_vite_astro=1')
-    .replace(/(\?|&)vue(?=&|=|$)/g,    '$1_aura_vite_vue')
-    .replace(/(\?|&)svelte(?=&|=|$)/g, '$1_aura_vite_svelte');
-}
-
-/** Connect-style middleware form of escapeProxyViteQuery. */
-export function proxyQueryEscapeMiddleware(req, _res, next) {
-  if (req.url) req.url = escapeProxyViteQuery(req.url);
-  next();
 }
 
 /**
@@ -304,25 +281,6 @@ export function attachWsProxy(httpServer) {
 }
 
 /**
- * Attach the EventSource multiplexer to the shell's HTTP
- * server (see ./sse-mux.mjs for the why and the wire
- * protocol; the client half is injected by the proxy route).
- *
- * Path is `/_aura/sse-mux`, WS-only, so it lives on the upgrade pipe beside
- * `wsProxyPlugin` (which ignores non-/api/proxy URLs) and socket.io's
- * `/os-events`. Streams are re-fetched against our own HTTP origin, so they
- * keep going through `/api/proxy/...` with the page's cookies.
- */
-export async function attachShellSseMux(httpServer) {
-  const shellPort = process.env.SHELL_PORT ?? process.env.AURA_SHELL_PORT ?? '3000';
-  await attachSseMux(httpServer, `http://127.0.0.1:${shellPort}`, (tag, ...args) => {
-    if (!nsEnabled(MUX_NS, process.env.AURA_LOG ?? '')) return;
-    console.log(`[${MUX_NS}]`, tag, ...args);
-  });
-  if (nsEnabled(MUX_NS, process.env.AURA_LOG ?? '')) console.log(`[${MUX_NS}]`, 'attached', MUX_PATH);
-}
-
-/**
  * Attach the Socket.IO server (`/os-events`) to the shell's HTTP server.
  *
  * Replaces the previous fan-out of 5 parallel `/api/apps/events` SSE
@@ -495,6 +453,5 @@ export function attachAppHosts(httpServer) {
 export async function attachShellServers(httpServer) {
   attachAppHosts(httpServer);
   attachWsProxy(httpServer);
-  await attachShellSseMux(httpServer);
   await attachSio(httpServer);
 }

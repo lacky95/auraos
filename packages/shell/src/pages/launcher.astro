@@ -2,7 +2,10 @@
 import OSLayout from '../layouts/OSLayout.astro';
 import AppDrawer from '../components/launcher/AppDrawer.astro';
 import { getAppManager } from '@aura/core';
+import { desktopSignIn } from '../lib/authSurface.js';
 
+const signIn = await desktopSignIn(Astro);
+if (signIn) return signIn;
 const apps = getAppManager().getManifests();
 ---
 <OSLayout>

@@ -29,12 +29,13 @@ modify, so apps that track modifier keys (Guacamole) stay in sync.
 
 ### Receiver
 
-`lib/keyboard/receiverScript.ts` — injected by the proxy into every app
-document when `injectKeyForwarder` is on (the default), and into the shell
-page by `KeyboardOverlay.astro`.
+`lib/keyboard/receiverScript.ts` — part of `/_aura/runtime.js` in every app
+document when `injectKeyForwarder` is on (the default), and in the shell page
+through `KeyboardOverlay.astro`.
 
-- Accepts messages only from `window.parent` (the shell). Apps cannot inject
-  keys into the shell or into each other.
+- In an app, accepts messages only from the verified Shell at its exact
+  origin (`lib/appRuntime.ts`). Apps cannot inject keys into the shell or into
+  each other. A nested App Host frame gets its keys from the Shell directly.
 - Dispatches `keydown` / `keypress` / `keyup` on the deepest
   `document.activeElement` (through open shadow roots).
 - Synthetic events have `isTrusted === false`, so the browser does no editing.
@@ -75,7 +76,7 @@ pins input to it. `layout` is one of the built-in ids (`full`, `qwerty`,
 
 On touch screens the device's own on-screen keyboard would come up next to
 ours. The shell keeps it away: `lib/keyboard/nativeKeyboardScript.ts` is
-injected next to the receiver (every app document and the shell page) and
+installed next to the receiver (every app document and the shell page) and
 sets `inputmode="none"` on text fields before they get focus — the one
 switch Safari honours. Focus and the caret stay; hardware keyboards still
 type. A field's own `inputmode` is kept in `data-aura-inputmode` and
@@ -104,23 +105,6 @@ Two independent settings, both in the keyboard header and both default on:
   Device is off.
 
 Agents set either with `setKeyboardPolicy`.
-
-## Documents the proxy doesn't inject into: `/api/os/keyboard.js`
-
-App hosts (`{name}--{host}`) are passed through untouched, so their documents
-get no receiver. They load the same scripts themselves:
-
-```html
-<script src="https://<desktop host>/api/os/keyboard.js"></script>
-```
-
-The bundle is a relay into child iframes (`lib/keyboard/frameRelayScript.ts`)
-followed by the receiver and the device-keyboard policy. The relay passes
-`aura.key.synthetic` to the focused child iframe (and stops it there, so this
-document's receiver doesn't fire it at the `<iframe>` element),
-`aura.keyboard.policy` to every child iframe, and the children's `hello` /
-`field` / `open` / `close` up to the parent. The app window that frames the
-app host relays one level itself, like the Browser app does for its engine.
 
 Not covered: documents without the receiver (apps with `injectKeyForwarder`
 off, raw apps) and native surfaces (real native WebViews over a window) —

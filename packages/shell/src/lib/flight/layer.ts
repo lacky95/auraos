@@ -34,7 +34,7 @@ import { runGesture, toLocal, localViewport, rectToLocal, type Edge } from '../k
 import { watchLock } from '../../components/shell/notifications/placement.ts';
 import { attachEdgeDrag } from '../edgeBadge.ts';
 import { claimFrame, moveInto, parkFrame } from './handoff.ts';
-import { postToFrame, proxyFrameUrl, setAppFrameUrl } from '../appFrame.ts';
+import { postToFrame, logicalFrameUrl, setAppFrameUrl } from '../appFrame.ts';
 import { onAuraChannel, type AuraChannelEvent } from '../auraChannelShell.ts';
 import { noticeView, type Notice } from './notice.ts';
 import {
@@ -141,7 +141,7 @@ function send(id: string, suffix: string, method: 'PATCH' | 'POST' | 'DELETE', b
 }
 
 function iframeUrl(f: FlightInfo): string {
-  return proxyFrameUrl({ appId: f.appId, instanceId: f.parentInstanceId, activityId: f.activityId, path: f.path || '/' });
+  return logicalFrameUrl({ appId: f.appId, instanceId: f.parentInstanceId, activityId: f.activityId, path: f.path || '/' });
 }
 
 function glyphOf(f: FlightInfo): string {

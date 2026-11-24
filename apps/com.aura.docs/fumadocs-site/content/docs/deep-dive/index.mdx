@@ -13,7 +13,7 @@ description: OS internals — proxy plumbing, sandbox runners, FSMs, IPC. Nerdy,
 | Page | What it covers |
 |---|---|
 | [Architecture](/docs/deep-dive/architecture) | Every package, every wire. The full system map. |
-| [Proxy + iframe](/docs/deep-dive/proxy-and-iframe) | `/api/proxy/<id>/<path>` HTML rewriting, identity gate, JS module URL rewriter, WebSocket upgrade chain. |
+| [Proxy + iframe](/docs/deep-dive/proxy-and-iframe) | App Hosts for windows, `/api/proxy/<id>/<path>` for machines: routing, refusals, identity gate, WebSocket upgrades. |
 | [Sandbox runners](/docs/deep-dive/sandbox-runners) | PRoot args vs Docker container args. Bind mounts. Tools allowlist. Spawn cost. |
 | [Lifecycle FSM](/docs/deep-dive/lifecycle-fsm) | State machine, transitions, edge cases (pool claim, autostart, crash recovery). |
 | [Event bus + IPC](/docs/deep-dive/event-bus-and-ipc) | `OsEventBus` topic shape, the SSE pipeline + socket.io fanout. |

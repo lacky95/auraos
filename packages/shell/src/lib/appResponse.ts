@@ -68,14 +68,7 @@ async function probeHealth(instance: AppInstance): Promise<AppHealth> {
     const mgr = getAppManager();
     const up = mgr.getUpstreamUrl?.(instance.instanceId);
     const upHost = up?.host ?? 'localhost';
-    // Raw apps with `proxy.preservePrefix` mount their lifecycle routes under
-    // the proxy prefix (Next.js basePath etc.). Use the manifest-aware
-    // `lifecyclePath` helper so the probe URL matches the runner's spawn
-    // probe instead of 404ing for the entire app's lifetime.
-    const manifest = mgr.getManifest(instance.appId);
-    const path = manifest
-      ? lifecyclePath(manifest, instance.instanceId, 'health')
-      : '/api/lifecycle/health';
+    const path = lifecyclePath('health');
     try {
       const res = await fetch(`http://${upHost}:${instance.port}${path}`, {
         signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),

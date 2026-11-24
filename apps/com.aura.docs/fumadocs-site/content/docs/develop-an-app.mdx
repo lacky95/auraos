@@ -202,7 +202,7 @@ import { getAppContext, readIdentityHeaders } from '@aura/app-sdk';
 const ctx = getAppContext();
 //  ctx = { appId, instanceId, appPort, osApiBase, dataDir, layerTag }
 //
-// In a request handler — pull headers the proxy stamps on every
+// In a request handler — pull headers the shell stamps on every
 // incoming request:
 export const POST: APIRoute = async ({ request }) => {
   const { appId, instanceId, activityId } = readIdentityHeaders(request);

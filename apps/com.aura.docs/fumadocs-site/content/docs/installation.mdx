@@ -43,7 +43,7 @@ for `10.0.0.2`, or your own domain: see [Reaching AuraOS](/docs/reaching-auraos)
 
 ## First boot
 
-A first start walks you through three stages, all in the browser:
+A first start walks you through four stages, all in the browser:
 
 1. **AuraOS is starting** — while the shell container installs its
    dependencies and builds every package, `:3000` serves a small page
@@ -51,12 +51,14 @@ A first start walks you through three stages, all in the browser:
    `os/boot-splash.mjs`). It switches to the desktop by itself. If the
    build fails, the page shows the error; the container retries after a
    few minutes. The same log is in `/data/aura/boot/boot.log`.
-2. **Setting up AuraOS** — on the desktop, a pinned notification
+2. **Create the owner account** — until it exists, the desktop sends every
+   visitor to `/setup` (see [below](#create-the-owner-account)).
+3. **Setting up AuraOS** — on the desktop, a pinned notification
    follows the background work step by step: the app image, the app
    registry and SDK, and Aura Docs.
    A failed step shows its error and a **Retry** button. You can
    already look around while it runs.
-3. **Welcome to AuraOS** — a getting-started checklist: unlock admin,
+4. **Welcome to AuraOS** — a getting-started checklist: unlock admin,
    install and log in to an AI agent, pick a theme, build your first
    app, read the docs. Its buttons open the right app, and the steps
    tick themselves off. Hide it whenever you like. See
@@ -74,6 +76,28 @@ Daemon. Open the launcher (`⣿` in the dock, or
 Click an icon, the sandbox spawns, the iframe loads. First-spawn cold
 start is ~1-3 s; subsequent launches hit the warm pool when present.
 
+## Create the owner account
+
+AuraOS always requires a sign-in. On first start, `/setup` asks for a
+one-time code that only the machine running AuraOS can create:
+
+```bash
+docker exec -it aura-shell aura setup-code
+```
+
+The code works once and expires after 10 minutes. Enter it with a username
+and password; that is the owner account. From then on the desktop asks you
+to sign in at `/login`: for 12 hours, or 30 days with **Stay signed in**.
+Each address you open AuraOS at signs in separately
+([Reaching AuraOS](/docs/reaching-auraos#signing-in)).
+
+**Forgot the password?** Create a reset code on the host and enter it at
+`/setup`. A reset signs out every browser.
+
+```bash
+docker exec -it aura-shell aura user reset-password <username>
+```
+
 ## Troubleshooting
 
 **`pull access denied for aura-base, repository does not exist`.**
@@ -86,10 +110,9 @@ with an older `docker-compose.yml`.
 own (see above); `GET /api/admin/first-boot` shows that build's state
 and `?log=1` its log.
 
-**`GET /api/proxy/com.aura.foo/ → 503`.** The app is mid-spawn. The
-proxy returns 503 until the AppManager's health probe passes. Wait
-2-3 s and reload the iframe; the skeleton in the slot will swap to
-the real content as soon as health is green.
+**A window shows *Starting …*.** The app is mid-spawn. Its App Host
+answers 503 until the AppManager's health probe passes, and the page
+reloads itself until then.
 
 **Nothing in the launcher.** Check `docker logs aura-shell` for
 `[AppRegistry] Loaded: <id>` lines — if your app isn't in the list,

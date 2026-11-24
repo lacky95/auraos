@@ -17,7 +17,7 @@ import { publicInstance } from '../src/lib/appResponse.ts';
 import { authenticate, requireAdmin } from '../src/lib/auth.ts';
 import type { AuthDeps } from '../src/lib/auth.ts';
 import {
-  authLogin, authLogout, authPageGate, authSession, authSetup, authStatus, authWhoami, clientRateKey, coreAuthServices,
+  authLogin, authLogout, authSession, authSetup, authStatus, authWhoami, clientRateKey, coreAuthServices, desktopSignIn,
 } from '../src/lib/authSurface.ts';
 import type { AuthContext, AuthNotice, AuthSurfaceDeps, AuthSurfaceServices } from '../src/lib/authSurface.ts';
 
@@ -58,7 +58,7 @@ function services(over: Partial<AuthSurfaceServices> = {}): AuthSurfaceServices 
 }
 
 const on = (over: Partial<AuthSurfaceServices> = {}): AuthSurfaceDeps => ({
-  env: { AURA_OWNER_LOGIN: 'on' },
+  env: {},
   services: () => services(over),
   authenticate: (request) => authenticate(request, authDeps()),
 });
@@ -95,40 +95,17 @@ after(async () => {
   rmSync(DATA_DIR, { recursive: true, force: true });
 });
 
-// ── flag off ────────────────────────────────────────────────────────────────
+// ── real stores ─────────────────────────────────────────────────────────────
 
-test('flag off: setup, login and mutations are disabled, set no cookie and touch no service', async () => {
-  const ticket = code('setup');
-  const dark: AuthSurfaceDeps = {
-    env: {},
-    services: () => { throw new Error('touched'); },
-    authenticate: (request) => authenticate(request, authDeps()),
-  };
-  for (const [name, res] of [
-    ['setup', await authSetup(post({ code: ticket, username: 'lukas', password: PASSWORD }), dark)],
-    ['login', await authLogin(post({ username: 'lukas', password: PASSWORD }), dark)],
-    ['logout', await authLogout(post({}), dark)],
-    ['session', await authSession(get(), dark)],
-  ] as const) {
-    assert.equal(res.status, 404, name);
-    assert.equal(res.headers.get('set-cookie'), null, name);
-  }
-  assert.equal(authPageGate({}).enabled, false);
-  assert.deepEqual(await (await authStatus(get(), dark)).json(), { login: 'disabled' });
+test('before setup: no owner, and the desktop sends the browser to setup', async () => {
   assert.equal(await core.getAuthServices().users.hasOwner(), false);
-
-  const who = await authWhoami(get({ cookie: 'aura_session=anything' }), dark);
-  assert.equal(who.status, 200);
-  assert.equal(who.headers.get('set-cookie'), null);
-  assert.deepEqual(await who.json(), {
-    principal: ANONYMOUS,
-    login: { state: 'disabled', cookie: 'present', authority: false },
-  });
+  assert.deepEqual(await (await authStatus(get(), on())).json(), { login: 'enabled', setup: 'required' });
+  const gate = await desktopSignIn(get(), on());
+  assert.equal(gate?.headers.get('location'), '/setup');
 });
 
-// ── flag on, real stores ────────────────────────────────────────────────────
 
-test('flag on: setup is once only, and a replayed code is refused', async () => {
+test('setup is once only, and a replayed code is refused', async () => {
   const ticket = code('setup');
   const body = { code: ticket, username: 'lukas', password: PASSWORD };
   assert.equal((await authSetup(post({ ...body, password: 'elevenchars' }), on())).status, 400, 'core password policy');
@@ -143,7 +120,7 @@ test('flag on: setup is once only, and a replayed code is refused', async () => 
   assert.deepEqual(notices, ['setup']);
 });
 
-test('flag on: login, labelled whoami, no authority from the cookie, logout', async () => {
+test('login, labelled whoami, no authority from the cookie, logout', async () => {
   assert.equal((await login('the wrong password')).status, 401);
   const res = await login(PASSWORD);
   assert.equal(res.status, 200);
@@ -173,7 +150,7 @@ test('flag on: login, labelled whoami, no authority from the cookie, logout', as
   assert.equal((await auditOf(core.IDENTITY_AUDIT_ACTIONS.logout))[0]?.actor, 'user:default');
 });
 
-test('flag on: reset revokes sessions, audits once with the final outcome, and a replay fails', async () => {
+test('reset revokes sessions, audits once with the final outcome, and a replay fails', async () => {
   const before = cookieOf(await login(PASSWORD));
   const ticket = code('reset');
   const res = await reset(ticket);
@@ -196,7 +173,7 @@ test('flag on: reset revokes sessions, audits once with the final outcome, and a
   }
 });
 
-test('flag on: a login that checked the old password cannot outlive a reset', async () => {
+test('a login that checked the old password cannot outlive a reset', async () => {
   const real = core.getAuthServices().loginSessions;
   const ticket = code('reset');
   let raced = false;
@@ -214,7 +191,7 @@ test('flag on: a login that checked the old password cannot outlive a reset', as
   assert.equal((await core.getAuthServices().audit.list(1))[0]?.outcome, 'ok');
 });
 
-test('flag on: a failed revoke is reported, in the audit and to the caller', async () => {
+test('a failed revoke is reported, in the audit and to the caller', async () => {
   const failing = new core.ValkeyUserStore({
     identityKeyFile: core.defaultIdentityKeyFile(DATA_DIR),
     redis: () => defaultRedis(),

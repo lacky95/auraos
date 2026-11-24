@@ -320,21 +320,6 @@ const modalApps = apps.filter((a) => requests(a, 'notifications.systemModal'));
     <p id="status"></p>
   </main>
 
-  <dialog id="unlock-dialog" aria-labelledby="unlock-title">
-    <form method="dialog" id="unlock-form">
-      <div class="dlg-title" id="unlock-title" style="display:flex;align-items:center;gap:8px;"><Icon name="unlock" /> UNLOCK ADMIN</div>
-      <p class="acc-note">Enter the shared admin credential (<code>aura admin credential</code> in the master container).</p>
-      <div class="row-inline" style="margin-top: 8px;">
-        <input type="password" id="unlock-credential" autocomplete="off" spellcheck="false" placeholder="aura_admin_…" />
-      </div>
-      <p class="acc-note" id="unlock-error" style="color: var(--aura-color-danger, #ff4a4a);" hidden></p>
-      <div class="dlg-actions">
-        <button class="btn" type="submit" value="cancel" formnovalidate>CANCEL</button>
-        <button class="btn" type="submit" value="unlock" id="btn-unlock-submit">UNLOCK</button>
-      </div>
-    </form>
-  </dialog>
-
   <footer class="settings-foot">PROVIDER · /api/admin/session · /api/admin/grants · /api/admin/api-keys · /api/admin/audit · /api/kv/os/notifications</footer>
 
   <script is:inline>
@@ -457,16 +442,8 @@ const modalApps = apps.filter((a) => requests(a, 'notifications.systemModal'));
       }
 
       // ---- unlock / lock -------------------------------------------------
-      const dlg = $('unlock-dialog');
-      // On an App Host the credential is typed in the Shell's own dialog, so
-      // this page only ever holds the short-lived session token.
-      // PHASE2-CUTOVER: make this the only path and delete the inline dialog.
-      // Asked at the moment of use: window.auraOs comes from a module that runs
-      // after this script. Fails closed: no auraOs, a runtime bootstrap, or an
-      // App Host name (even if its runtime failed to load) all count, so the
-      // inline credential dialog only ever opens on the proxy route.
-      const onAppHost = () => !window.auraOs || window.auraOs.appHost() !== null
-        || location.hostname.split('.')[0].includes('--');
+      // The credential is typed in the Shell's own dialog, so this page only
+      // ever holds the short-lived session token.
       function adminUnlocked(data) {
         session = { token: data.token, expiresAt: data.expiresAt };
         const ms = Math.max(0, data.expiresAt - Date.now());
@@ -488,34 +465,7 @@ const modalApps = apps.filter((a) => requests(a, 'notifications.systemModal'));
         window.addEventListener('message', onResult);
         window.auraOs.postToShell({ type: 'aura.admin.unlock.request', requestId });
       }
-      $('btn-unlock').addEventListener('click', () => {
-        if (onAppHost()) { requestShellUnlock(); return; }
-        $('unlock-credential').value = '';
-        $('unlock-error').hidden = true;
-        dlg.showModal();
-        $('unlock-credential').focus();
-      });
-      $('unlock-form').addEventListener('submit', async (ev) => {
-        const submitter = ev.submitter;
-        if (!submitter || submitter.value !== 'unlock') { $('unlock-credential').value = ''; return; }
-        ev.preventDefault();
-        // Never send a credential typed in this document from an App Host.
-        if (onAppHost()) { $('unlock-credential').value = ''; dlg.close(); return; }
-        const credential = $('unlock-credential').value.trim();
-        $('unlock-credential').value = '';
-        if (!credential) return;
-        const r = await fetch(window.auraOs.url('/api/admin/session'), {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credential }),
-        }).catch(() => null);
-        const data = r ? await r.json().catch(() => ({})) : {};
-        if (!r || !r.ok || !data.token) {
-          $('unlock-error').textContent = (data && data.message) || 'Unlock failed.';
-          $('unlock-error').hidden = false;
-          return;
-        }
-        dlg.close();
-        await adminUnlocked(data);
-      });
+      $('btn-unlock').addEventListener('click', requestShellUnlock);
       $('btn-lock').addEventListener('click', async () => {
         const token = session && session.token;
         lockLocal('Admin locked.');

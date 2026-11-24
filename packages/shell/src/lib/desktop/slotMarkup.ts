@@ -78,10 +78,10 @@ export function slotInnerHtml(opts: { minimizable?: boolean; bodyHtml?: string }
 }
 
 /**
- * Server-side iframe markup. `deferred` keeps the URL in `data-src` for the
- * desktop script: a `frameRoute: host` frame needs its sandbox and a one-time
- * handoff before it may load (lib/appFrame.ts).
+ * Server-side iframe markup. The view's logical URL waits in `data-src` for
+ * the desktop script: an app frame needs its sandbox and a one-time handoff
+ * before it may load (lib/appFrame.ts).
  */
-export function iframeHtml(src: string, title: string, deferred = false): string {
-  return `<iframe ${deferred ? 'data-src' : 'src'}="${escapeHtml(src)}" title="${escapeHtml(title)}" style="${IFRAME_STYLE}"></iframe>`;
+export function iframeHtml(src: string, title: string): string {
+  return `<iframe data-src="${escapeHtml(src)}" title="${escapeHtml(title)}" style="${IFRAME_STYLE}"></iframe>`;
 }

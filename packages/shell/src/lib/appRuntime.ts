@@ -76,6 +76,8 @@ export interface AppRuntimeInput {
   framework: { id: string; version: string };
   theme: Omit<AuraRuntimeBootstrap['theme'], 'strategy' | 'framework'>;
   keymap: { bindings: Record<string, string | null> };
+  /** Back stack per Activity of this instance; the page picks its own by `_aura_activity`. */
+  histories: Record<string, Array<{ path: string; title?: string }>>;
 }
 
 export function buildAppRuntimeJs(input: AppRuntimeInput): string {
@@ -115,9 +117,10 @@ if(window.AuraRuntimeBootstrap)return;
 var LABEL=${JSON.stringify(input.label)},H=location.host,AT=H.indexOf('--');
 if(AT<=0||H.slice(0,AT)!==LABEL)return;
 var SHELL=location.protocol+'//'+H.slice(AT+2);
-var B=${JSON.stringify(bootstrap)},ACT=null;
+var B=${JSON.stringify(bootstrap)},HIST=${JSON.stringify(input.histories)},ACT=null;
 try{ACT=new URLSearchParams(location.search).get('_aura_activity');}catch(_){}
-B.activityId=ACT;B.shellOrigin=SHELL;B.appOrigin=location.origin;
+B.activityId=ACT;B.activityHistory=Object.freeze((ACT&&Object.prototype.hasOwnProperty.call(HIST,ACT)&&HIST[ACT])||[]);
+B.shellOrigin=SHELL;B.appOrigin=location.origin;
 Object.freeze(B.theme.framework);Object.freeze(B.theme);Object.freeze(B.keymap);
 Object.defineProperty(window,'AuraRuntimeBootstrap',{value:Object.freeze(B)});
 var HEAD=document.head||document.documentElement;

@@ -18,8 +18,6 @@
   "permissions":    ["storage.read", "storage.write"],
   "serverPort":     4090,
   "proxy": {
-    "rewriteHtml":          "none",
-    "preservePrefix":       false,
     "injectMeta":           false,
     "injectConsoleRelay":   false,
     "injectKeyForwarder":   false,

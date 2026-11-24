@@ -1,4 +1,5 @@
 import { appHostUrl, getAppManager, isRawIpHost, type AppManifest } from '@aura/core';
+import { edgeView } from '../../server/host-policy.mjs';
 
 /**
  * App hosts as the API hands them out (`/api/hosts`, `/api/apps/<id>/hosts`).
@@ -23,20 +24,20 @@ export interface AppHostDTO {
   reason?: 'raw-ip';
 }
 
-/**
- * The desktop's scheme + host as the caller sees it.
- * PHASE2-CUTOVER: believes X-Forwarded-* from any peer; move to server/host-policy.mjs `edgeView`.
- */
-export function callerDesktop(request: Request): { scheme: string; host: string } {
-  const u = new URL(request.url);
-  const host = request.headers.get('x-forwarded-host')?.split(',')[0]?.trim() || request.headers.get('host') || u.host;
-  const proto = request.headers.get('x-forwarded-proto')?.split(',')[0]?.trim() || u.protocol.replace(':', '');
-  return { scheme: proto === 'https' ? 'https' : 'http', host };
+/** The caller of an Astro route: its request and socket peer. */
+export interface HostCaller { request: Request; readonly clientAddress?: string }
+
+/** The desktop's scheme + host as the caller sees it; `X-Forwarded-*` only from a trusted proxy. */
+export function callerDesktop(ctx: HostCaller): { scheme: string; host: string } {
+  let peer: string | undefined;
+  try { peer = ctx.clientAddress; } catch { peer = undefined; }
+  const { scheme, host } = edgeView({ peer, header: (name: string) => ctx.request.headers.get(name) ?? undefined });
+  return { scheme, host: host || new URL(ctx.request.url).host };
 }
 
-export function listAppHosts(request: Request, appId?: string): AppHostDTO[] {
+export function listAppHosts(ctx: HostCaller, appId?: string): AppHostDTO[] {
   const mgr = getAppManager();
-  const desktop = callerDesktop(request);
+  const desktop = callerDesktop(ctx);
   const raw = isRawIpHost(desktop.host);
   const out: AppHostDTO[] = [];
   for (const m of mgr.getManifests() as AppManifest[]) {

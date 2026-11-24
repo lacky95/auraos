@@ -37,6 +37,7 @@ export const GET: APIRoute = async ({ request }) => {
     framework: theme.framework,
     theme: { themeId: theme.id, themeIdDark, themeIdLight, colorMode, resolvedMode },
     keymap: { bindings: resolveBindings(actions, inst.appId, state) },
+    histories: Object.fromEntries(mgr.getActivitiesByInstance(inst.instanceId).map((a) => [a.activityId, a.history ?? []])),
   });
   return withEtag(request, js, 'text/javascript; charset=utf-8');
 };

@@ -24,9 +24,8 @@ The shell is more than Astro pages. Next to them, on the same HTTP server,
 run:
 
 - **socket.io** at `/os-events` — the OS event stream for the desktop.
+- **The App Host router** for `{label}--{desktop host}` requests.
 - **The WebSocket proxy** for `/api/proxy/<instance>/…` upgrades.
-- **The SSE multiplexer** at `/_aura/sse-mux`.
-- **The `?astro` query escape** for proxied app module URLs.
 
 All of them live in `packages/shell/server/attach.mjs`. In `dev` the Vite
 plugins in `astro.config.mjs` attach them to Vite's server; in `prod`

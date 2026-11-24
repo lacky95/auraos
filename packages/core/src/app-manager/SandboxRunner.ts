@@ -98,7 +98,6 @@ export interface SandboxRunner {
     port:       number;
     hostname:   string;
     pid:        number;
-    manifest:   AppManifest;
   }): void;
   /**
    * Remove EVERY host sandbox belonging to an app (all instances, incl.

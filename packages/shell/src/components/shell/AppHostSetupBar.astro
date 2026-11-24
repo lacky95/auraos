@@ -5,8 +5,6 @@
  * address doesn't resolve. The same bar shows on an App Hosts address whose
  * App Host cookie this browser drops (WebKit on `os.aura.localhost`, D44).
  * Decisions are in lib/desktop/setupBar.ts.
- *
- * PHASE2-CUTOVER: stop gating the bar on apps with `frameRoute: host`.
  */
 ---
 <div id="aura-setup-bar" role="status" hidden>
@@ -16,7 +14,7 @@
 </div>
 
 <script>
-  import { APP_FRAME_SANDBOX, hostRouteAppList } from '../../lib/appFrame.ts';
+  import { APP_FRAME_SANDBOX } from '../../lib/appFrame.ts';
   import {
     cookieProbeUrl, isWebKitBrowser, planCookieFallback, planSetupBar, probeAppHostAddress, probeAppHostCookie,
     settleSetupBar, type SetupBarPlan,
@@ -61,7 +59,6 @@
     host: location.host,
     protocol: location.protocol,
     pathname: location.pathname,
-    hostRouteApps: hostRouteAppList().size,
     webkit: isWebKitBrowser(navigator.userAgent),
   };
   const show = (plan: SetupBarPlan) => {

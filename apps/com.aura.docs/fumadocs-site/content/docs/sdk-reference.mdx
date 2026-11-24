@@ -478,7 +478,7 @@ default fall-through).
 | `back` | `() => Promise<void>` | **(B+S)** Pop one step. |
 | `backTo` | `(index: number) => Promise<void>` | **(B+S)** Jump to position 0..n-1 in the stack. |
 | `setBreadcrumb` | `(mode: 'os' \| 'off') => Promise<void>` | **(B+S)** Hide OS breadcrumb when app draws its own. |
-| `getHistory` | `() => Array<{ path; title? }>` | **(B)** Reads the back stack the proxy wrote into the page. Returns `[]` on an App Host for now. |
+| `getHistory` | `() => Array<{ path; title? }>` | **(B)** The Activity's back stack from the runtime bootstrap (`activityHistory`), as of this page load; `[]` outside an Activity. |
 | `getActivityId` | `() => string \| null` | **(B+S)** From `APP_ACTIVITY_ID` env or the runtime bootstrap. |
 
 ```ts
@@ -574,9 +574,11 @@ export const ALL: APIRoute = ({ request, params }) =>
 
 ### App hosts (`packages/app-sdk/src/hosts.ts`)
 
-The URL of an [app host](/docs/app-hosts) your manifest declares:
+The URL of a host name your manifest declares in `hosts[]`:
 `{name}--{the host AuraOS is open at}`, same scheme and port. `null` when
-AuraOS was opened by raw IP.
+AuraOS was opened by raw IP. Manifest `hosts[]` names are not served (only
+the [App Host](/docs/app-hosts) labels the registry assigns are), so nothing
+answers at these URLs.
 
 | Symbol | Signature | Note |
 |---|---|---|

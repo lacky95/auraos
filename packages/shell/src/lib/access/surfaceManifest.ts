@@ -50,12 +50,12 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     id: 'sse-mux',
     kind: 'websocket',
     source: 'packages/shell/server/sse-mux.mjs',
-    paths: ['/_aura/sse-mux'],
-    attach: 'attachShellSseMux',
+    paths: ['{label}--{desktop host}/_aura/os/sse-mux'],
+    attach: 'attachAppHosts',
     rule: {
       allow: ['owner'],
       target: 'proxy-upstream',
-      ...decide(3, 'Reopens any same-origin path over loopback with the socket\'s cookie and authorization. Loopback must not count as trusted, and each stream is authorized as its own request.'),
+      ...decide(3, 'Behind the App Host gateway: each stream is one shell path the gateway allows, sent with its own signed GET claim and nothing from the upgrade. Streams outlive the session check they started with.'),
     },
   },
   {
@@ -130,7 +130,7 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     source: 'packages/shell/src/pages/setup.astro',
     paths: ['/setup'],
     page: '/setup',
-    // 404 unless AURA_OWNER_LOGIN=on (D37). Acting on it needs a one-time host code.
+    // Acting on it needs a one-time host code (D8).
     rule: { allow: ['public'], target: 'system' },
   },
   {
@@ -139,7 +139,6 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     source: 'packages/shell/src/pages/login.astro',
     paths: ['/login'],
     page: '/login',
-    // 404 unless AURA_OWNER_LOGIN=on (D37).
     rule: { allow: ['public'], target: 'session' },
   },
   {
@@ -159,7 +158,7 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     rule: {
       allow: ['public', 'owner'],
       target: 'system',
-      ...decide(1, 'The login page needs its bundles. Keep secrets and per-user data out of them. A /_astro request with an app Referer is redirected into that app\'s proxy path, which has its own rule.'),
+      ...decide(1, 'The login page needs its bundles. Keep secrets and per-user data out of them.'),
     },
   },
   {

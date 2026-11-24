@@ -32,8 +32,6 @@ export interface SetupBarInput {
   /** `location.protocol`. */
   protocol: string;
   pathname?: string;
-  /** How many apps are on `frameRoute: host`. PHASE2-CUTOVER: always show in direct IP mode. */
-  hostRouteApps: number;
   webkit: boolean;
 }
 
@@ -57,7 +55,6 @@ function linkPlan(input: SetupBarInput, reason: SetupBarReason, address: string)
 }
 
 export function planSetupBar(input: SetupBarInput): SetupBarPlan {
-  if (input.hostRouteApps <= 0) return { show: false };
   if (supportsAppHosts(classifyDesktopHost(input.host))) return { show: false };
   const suggestion = suggestAppHostAddress(input.host);
   if (suggestion.kind !== 'switch') return { show: true, kind: 'guide', reason: 'address' };
@@ -80,12 +77,10 @@ export function settleSetupBar(plan: SetupBarPlan, probeOk: boolean): SetupBarPl
 export const COOKIE_PROBE_LABEL = 'hostprobe';
 
 /**
- * Where to run the cookie probe, or null when there is no need: no app on
- * App Hosts yet, an address without App Hosts (`planSetupBar` covers it), or
+ * Where to run the cookie probe, or null when there is no need: an address without App Hosts (`planSetupBar` covers it), or
  * one where every tested browser keeps the cookie (nip.io, a public suffix).
  */
-export function cookieProbeUrl(input: Pick<SetupBarInput, 'host' | 'protocol' | 'hostRouteApps'>): string | null {
-  if (input.hostRouteApps <= 0) return null;
+export function cookieProbeUrl(input: Pick<SetupBarInput, 'host' | 'protocol'>): string | null {
   const desktop = classifyDesktopHost(input.host);
   if (!supportsAppHosts(desktop) || webkitSendsSiblingCookies(desktop)) return null;
   const host = buildAppHost(COOKIE_PROBE_LABEL, input.host);

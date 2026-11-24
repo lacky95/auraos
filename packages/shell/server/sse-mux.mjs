@@ -1,23 +1,21 @@
 /**
- * Server half of the EventSource multiplexer.
+ * Server half of the EventSource multiplexer, behind the App Host gateway
+ * (`/_aura/os/sse-mux`, app-gateway.mjs).
  *
- * Browsers open at most 6 HTTP/1.1 connections per host, and every AuraOS
- * window shares the shell's host. An EventSource holds its connection for as
- * long as the window lives, so a handful of streaming windows (one per
- * notepad activity, one per SDK `subscribeOsEvents`, …) exhausts the pool:
- * every later request — including a reloaded app's own scripts — queues
- * forever and the window never leaves its loading skeleton.
+ * Browsers open at most 6 HTTP/1.1 connections per host. An EventSource holds
+ * its connection for as long as the window lives, so a handful of streaming
+ * windows exhausts the pool: every later request queues forever and the
+ * window never leaves its loading skeleton.
  *
- * WebSockets don't draw from that pool. The proxy injects a client shim into
- * every app document that replaces `EventSource` for same-origin URLs and
- * sends the stream over one WebSocket to `MUX_PATH`. Here we open each stream
- * as a plain server-side fetch against our own HTTP server — so it still goes
- * through `/api/proxy/...` with the page's cookies — parse the SSE framing and
- * relay events as JSON frames. The client reproduces EventSource semantics
- * (readyState, reconnect with Last-Event-ID, `retry:`), so apps can't tell.
+ * WebSockets don't draw from that pool. `/_aura/runtime.js` replaces
+ * `EventSource` for the shell's streams with one that sends them over one
+ * WebSocket. Here each stream is opened as a server-side fetch with the URL
+ * and headers the gateway's scope allows, its SSE framing is parsed and its
+ * events are relayed as JSON frames. The client reproduces EventSource
+ * semantics (readyState, reconnect with Last-Event-ID, `retry:`).
  *
  * Wire protocol (JSON text frames):
- *   client → server  {op:'open', id, url, lastEventId?}   url: path+query, same origin
+ *   client → server  {op:'open', id, url, lastEventId?}   url: a shell path
  *                    {op:'close', id}
  *   server → client  {op:'open', id}                      upstream answered 200 text/event-stream
  *                    {op:'event', id, type, data, lastEventId}
@@ -27,32 +25,9 @@
  */
 
 import { reportSurface, surfaceIdentity } from './access-bridge.mjs';
-import { stripShellCredentials } from './shell-credentials.mjs';
-
-export const MUX_PATH = '/_aura/sse-mux';
 
 const PING_MS = 25_000;
 const MAX_STREAMS_PER_SOCKET = 256;
-
-/**
- * Only same-origin absolute paths may be opened: the mux must not become an
- * open relay to arbitrary hosts, so the URL is always resolved against our
- * own loopback origin.
- */
-export function toUpstreamUrl(origin, raw) {
-  if (typeof raw !== 'string' || !raw.startsWith('/') || raw.startsWith('//')) return null;
-  const u = new URL(raw, origin);
-  return u.origin === origin ? u.href : null;
-}
-
-/** Stream headers for `url`: a target that reaches an app gets no shell credentials. */
-export function streamHeaders(baseHeaders, url) {
-  const headers = { ...baseHeaders };
-  const path = new URL(url).pathname;
-  return path.startsWith('/api/proxy/') || path.startsWith('/api/data/')
-    ? stripShellCredentials(headers, 'sse-mux')
-    : headers;
-}
 
 /**
  * Incremental SSE parser per the WHATWG EventSource spec: `data` lines join
@@ -103,33 +78,17 @@ export function createSseParser(onEvent, onRetry) {
 }
 
 /**
- * Attach the mux to a Node HTTP server's `upgrade` event.
- * @param httpServer  the shell's HTTP server
- * @param origin      loopback origin streams are fetched from, e.g. http://127.0.0.1:3000
- * @param log         optional debug logger (tag, ...args)
+ * The mux. `serveScoped` takes over an upgrade the gateway checked;
+ * `scope.stream(rawUrl)` returns the one URL and headers a stream may use, or
+ * null. Nothing from the upgrade request is sent upstream.
+ * @param log  optional debug logger (tag, ...args)
  */
-export async function attachSseMux(httpServer, origin, log = () => {}) {
+export async function createSseMux(log = () => {}) {
   const { WebSocketServer, WebSocket } = await import('ws');
   const wss = new WebSocketServer({ noServer: true });
 
-  httpServer.on('upgrade', (req, socket, head) => {
-    const path = (req.url ?? '').split('?')[0];
-    if (path !== MUX_PATH) return;
-    wss.handleUpgrade(req, socket, head, (ws) => serve(ws, req));
-  });
-
-  /**
-   * `scope` (App Host gateway): `scope.stream(rawUrl)` returns the one URL and
-   * headers a stream may use, or null. Nothing from the upgrade request is sent.
-   */
-  function serve(ws, req, scope = null) {
+  function serve(ws, req, scope) {
     const streams = new Map(); // id → AbortController
-    // Headers every stream carries upstream: the page's cookies and identity,
-    // exactly what a native EventSource request from that document would send.
-    const baseHeaders = { accept: 'text/event-stream', 'cache-control': 'no-cache' };
-    for (const h of ['cookie', 'authorization', 'user-agent', 'accept-language']) {
-      if (req.headers[h] != null) baseHeaders[h] = String(req.headers[h]);
-    }
     log('connect', req.socket.remoteAddress);
     const identity = surfaceIdentity(req.headers);
     const reportStream = (method, status) => reportSurface({ subject: 'sse-mux', method, status, via: 'sse-mux', identity });
@@ -140,19 +99,19 @@ export async function attachSseMux(httpServer, origin, log = () => {}) {
     };
 
     async function open(id, rawUrl, lastEventId) {
-      const target = scope ? scope.stream(rawUrl) : null;
-      const url = scope ? target?.url : toUpstreamUrl(origin, rawUrl);
+      const target = scope.stream(rawUrl);
+      const url = target?.url;
       if (!url) { send({ op: 'fail', id, status: 0 }); return; }
       if (streams.size >= MAX_STREAMS_PER_SOCKET) { send({ op: 'fail', id, status: 0 }); return; }
       streams.get(id)?.abort();
       const ctrl = new AbortController();
       streams.set(id, ctrl);
-      const headers = scope ? { ...target.headers } : streamHeaders(baseHeaders, url);
+      const headers = { ...target.headers };
       if (lastEventId) headers['last-event-id'] = lastEventId;
 
       let res;
       try {
-        res = await fetch(url, { headers, signal: ctrl.signal, redirect: scope ? 'error' : 'follow' });
+        res = await fetch(url, { headers, signal: ctrl.signal, redirect: 'error' });
       } catch (err) {
         if (streams.get(id) !== ctrl) return;
         streams.delete(id);
@@ -218,8 +177,9 @@ export async function attachSseMux(httpServer, origin, log = () => {}) {
     });
   }
 
-  wss.serveScoped = (req, socket, head, scope) => {
-    wss.handleUpgrade(req, socket, head, (ws) => serve(ws, req, scope));
+  return {
+    serveScoped(req, socket, head, scope) {
+      wss.handleUpgrade(req, socket, head, (ws) => serve(ws, req, scope));
+    },
   };
-  return wss;
 }

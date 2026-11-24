@@ -7,13 +7,17 @@ import { sharedKv } from '../lib/sharedKv';
 import { sessionBootInfo, waitForRestore } from '../lib/desktopSession';
 import { slotInnerHtml, iframeHtml, SLOT_STYLE } from '../lib/desktop/slotMarkup';
 import { ssrGridLayout } from '../lib/layout/gridShape';
-import { proxyFrameUrl } from '../lib/appFrame';
-import { hostRouteAppIds } from '../lib/desktop/frameRoutes';
+import { logicalFrameUrl } from '../lib/appFrame';
+import { desktopSignIn } from '../lib/authSurface';
 
 // The shell page must never be served stale: WebView hosts (Android) cache
 // heuristically when no Cache-Control is present, which leaves devices
 // running old shell code after a deploy/edit even through pull-to-refresh.
 Astro.response.headers.set('Cache-Control', 'no-store');
+
+// D6: the desktop opens only for the signed-in owner.
+const signIn = await desktopSignIn(Astro);
+if (signIn) return signIn;
 
 const mgr = getAppManager();
 // SSR ALL installed apps + per-app enable state — the dock applies the
@@ -40,9 +44,6 @@ const [mruMap, workspacesEntry] = await Promise.all([
   kv.get<WorkspaceState>('os', 'workspaces').catch(() => null),
 ]);
 const storedWorkspaces = workspacesEntry?.value ?? null;
-// PHASE2-CUTOVER: every app opens on its App Host; remove the per-app route.
-const hostRouteApps = await hostRouteAppIds(allApps.map((a) => a.id));
-const hostRouteSet = new Set(hostRouteApps);
 const pinnedApps = [...allApps]
   .filter((m) => enabledMap[m.id] !== false)
   // Services are headless by design — they have no UI and clicking their
@@ -120,7 +121,7 @@ for (const inst of mgr.getAllInstances()) {
         instanceId: inst.instanceId,
         activityId: act.activityId,
         title:      act.title ?? manifest.name,
-        iframeUrl:  proxyFrameUrl({ appId: inst.appId, instanceId: inst.instanceId, activityId: act.activityId, path: act.path ?? '/' }),
+        iframeUrl:  logicalFrameUrl({ appId: inst.appId, instanceId: inst.instanceId, activityId: act.activityId, path: act.path ?? '/' }),
         state:      'normal',
         zIndex:     0,
         isFocused:  true,
@@ -136,7 +137,7 @@ for (const inst of mgr.getAllInstances()) {
       appId:      inst.appId,
       instanceId: inst.instanceId,
       title:      manifest.name,
-      iframeUrl:  proxyFrameUrl({ appId: inst.appId, instanceId: inst.instanceId }),
+      iframeUrl:  logicalFrameUrl({ appId: inst.appId, instanceId: inst.instanceId }),
       state:      'normal',
       zIndex:     0,
       isFocused:  true,
@@ -230,7 +231,7 @@ const ssrSlots = ssrVisibleViews.map((v) => {
   return {
     viewId: v.viewId, instanceId: v.instanceId, activityId: v.activityId,
     style: SLOT_STYLE + (i >= 0 ? (ssrGrid.slots[i] ?? '') : 'display:none;'),
-    html: slotInnerHtml({ minimizable: v.minimizable, bodyHtml: iframeHtml(v.iframeUrl, v.title, hostRouteSet.has(v.appId)) }),
+    html: slotInnerHtml({ minimizable: v.minimizable, bodyHtml: iframeHtml(v.iframeUrl, v.title) }),
   };
 });
 const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:none; position:absolute; inset:0;';
@@ -258,7 +259,6 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     <script type="application/json" id="aura-initial-views" set:html={JSON.stringify(initialViews)}></script>
     <script type="application/json" id="aura-initial-workspaces" data-updated-at={workspacesUpdatedAt ?? undefined} set:html={JSON.stringify(workspaceState)}></script>
     <script type="application/json" id="aura-boot" set:html={JSON.stringify(session)}></script>
-    <script type="application/json" id="aura-frame-routes" set:html={JSON.stringify(hostRouteApps)}></script>
 
     <!-- Focus mode: covers the entire viewport when activated from Process Manager -->
     <div id="focus-view" aria-hidden="true">
@@ -310,7 +310,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
   import { parkFrame, claimFrame, hasParkedFrame, moveInto as moveFrameInto } from '../lib/flight/handoff.ts';
   import { rectToLocal } from '../lib/keyboard/floatGesture.ts';
   import {
-    clearAppFrame, frameAppId, isHostFrame, isHostFrameReady, postToFrame, proxyFrameUrl,
+    clearAppFrame, frameAppId, isHostFrameReady, postToFrame, logicalFrameUrl,
     reloadHostFrame, setAppFrameUrl,
   } from '../lib/appFrame.ts';
   import { isHostNestedSender, onAuraChannel, replyTo, senderAppId, setNativeRuntimeCheck } from '../lib/auraChannelShell.ts';
@@ -342,7 +342,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
 
     // Forwarded keystroke from an app iframe.
     if (d.type === 'aura.key') {
-      const keyAppId = senderAppId(ev.sender, d.appId);
+      const keyAppId = senderAppId(ev.sender);
       if (typeof d.combo !== 'string' || !keyAppId) return;
       const res = keyDispatcher.handleIframeCombo(d.combo, keyAppId);
       // App-scope action that the shell can't run itself — bounce back so
@@ -356,7 +356,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     // An App Host nested in a window (the Terminal inside TerminalX) reports
     // OS shortcuts to the shell itself, so it needs the window's claim list.
     if (d.type === 'aura.keyboard.hello' && isHostNestedSender(ev.sender)) {
-      replyTo(ev, { type: 'aura.key.claim', combos: keyDispatcher.getClaimListForApp(senderAppId(ev.sender, null)) });
+      replyTo(ev, { type: 'aura.key.claim', combos: keyDispatcher.getClaimListForApp(senderAppId(ev.sender)) });
       return;
     }
 
@@ -366,7 +366,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     // just rebroadcast in case the iframe missed the initial send, and
     // mirror the SDK contract that subscribe is the trigger.
     if (d.type === 'aura.keymap.subscribe') {
-      const subscriberAppId = senderAppId(ev.sender, d.appId);
+      const subscriberAppId = senderAppId(ev.sender);
       const combos = subscriberAppId ? keyDispatcher.getClaimListForApp(subscriberAppId) : [];
       replyTo(ev, { type: 'aura.key.claim', combos });
       return;
@@ -443,8 +443,8 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
       if (aid) slot = document.querySelector<HTMLElement>(`.app-slot[data-activity-id="${CSS.escape(aid)}"]`);
       if (!slot && iid) slot = document.querySelector<HTMLElement>(`.app-slot[data-instance-id="${CSS.escape(iid)}"]`);
       const target = slot?.querySelector<HTMLIFrameElement>('iframe');
-      // A host frame's hint may only update its own window.
-      if (ev.sender.frame?.route === 'host' && ev.sender.frame.element !== target) return;
+      // An app frame's hint may only update its own window.
+      if (ev.sender.frame && ev.sender.frame.element !== target) return;
       if (target) postToFrame(target, d);
       return;
     }
@@ -498,8 +498,8 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
       const url = typeof p.url === 'string' ? p.url.trim() : '';
       if (!url || !/^https?:\/\//i.test(url)) return;
       const notice = { type: 'aura.host.needsTopLevel', url, reason: p.reason ?? 'known-host' };
-      // A host frame's hint stays in its own window.
-      if (ev.sender.frame?.route === 'host') { postToFrame(ev.sender.frame.element, notice); return; }
+      // An app frame's hint stays in its own window.
+      if (ev.sender.frame) { postToFrame(ev.sender.frame.element, notice); return; }
       // Broadcast: only the app that actually framed this URL will act on it.
       document.querySelectorAll<HTMLIFrameElement>('.app-slot iframe').forEach((f) => { postToFrame(f, notice); });
       return;
@@ -1569,7 +1569,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
       instanceId,
       ...(activityId ? { activityId } : {}),
       title:          name,
-      iframeUrl:      proxyFrameUrl({ appId, instanceId, activityId, path }),
+      iframeUrl:      logicalFrameUrl({ appId, instanceId, activityId, path }),
       state:          'normal',
       zIndex:         views.length,
       isFocused:      true,
@@ -2216,10 +2216,8 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
   }
 
   /**
-   * Hard-reload the iframe inside a slot. A proxied iframe is same-origin,
-   * so `contentWindow.location.reload()` works without the `src='about:blank'`
-   * dance — and avoids the white flash that re-assigning src would cause. A
-   * host frame is cross-origin and takes a fresh handoff. The skeleton overlay is
+   * Hard-reload the iframe inside a slot. App frames are cross-origin, so a
+   * reload takes a fresh handoff (reloadHostFrame). The skeleton overlay is
    * re-shown for the reload's duration so the user sees an immediate
    * "something happened" signal, matching the cold-launch visual.
    */
@@ -2291,16 +2289,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
         if (sk) sk.remove();
       }));
     }, { once: true });
-    if (isHostFrame(ifr)) { reloadHostFrame(ifr); return; }
-    try {
-      ifr.contentWindow?.location.reload();
-    } catch {
-      // Cross-origin guard (shouldn't trigger for Aura proxied iframes —
-      // defensive fallback). Re-assigning src to itself forces a navigate.
-      const url = ifr.src;
-      ifr.src = 'about:blank';
-      ifr.src = url;
-    }
+    reloadHostFrame(ifr);
   }
 
   /**
@@ -2897,12 +2886,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     if (v.iframeUrl) {
       const iframe = document.createElement('iframe');
       iframe.title = v.title;
-      // No `allow=` attribute on the proxy route (setAppFrameUrl adds the shared
-      // one for App Hosts): these iframes are same-origin (proxied through
-      // /api/proxy/<id>/ on the shell's port), so clipboard, microphone, etc.
-      // are inherited from the parent. Firefox warns ("unsupported feature
-      // name") on Chrome-specific Permissions Policy strings like
-      // `clipboard-read`/`clipboard-write`, which we don't need anyway.
+      // setAppFrameUrl adds the sandbox and `allow` before the frame gets a src.
       iframe.style.cssText = IFRAME_STYLE;
       wireIframe(iframe, body, v);
       // Only activities that may load now get a src (lib/iframeWarmer.ts):
@@ -2926,12 +2910,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
 
   /** True once `iframe` shows its app's document (not the initial about:blank). */
   function isIframeLoaded(iframe: HTMLIFrameElement): boolean {
-    if (!iframe.getAttribute('src')) return false;
-    if (isHostFrame(iframe)) return isHostFrameReady(iframe);
-    try {
-      const doc = iframe.contentDocument;
-      return !!doc && doc.readyState === 'complete' && doc.URL !== 'about:blank';
-    } catch { return true; /* not same-origin: it navigated, so it loaded */ }
+    return !!iframe.getAttribute('src') && isHostFrameReady(iframe);
   }
 
   /**
@@ -3318,7 +3297,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
 
     focusedInstanceId = instanceId;
     focusedActivityId = activityId ?? null;
-    setAppFrameUrl(focusFrame, proxyFrameUrl({ appId: focusAppId, instanceId, activityId }), focusAppId);
+    setAppFrameUrl(focusFrame, logicalFrameUrl({ appId: focusAppId, instanceId, activityId }), focusAppId);
     focusTitleEl.textContent = title;
     focusInstIdEl.textContent = activityId ? `${instanceId}  ${activityId}` : instanceId;
     focusView.setAttribute('aria-hidden', 'false');
@@ -3741,7 +3720,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
       // Terminal lifecycle states ⇒ the backing process is gone (forceKilled
       // from process manager, reconciler force-kill on identity drift, or a
       // clean stop). Drop the view so its iframe doesn't keep hammering a
-      // dead /api/proxy/<id>/ — same effect as app:crashed, just from a
+      // dead instance — same effect as app:crashed, just from a
       // different code path.
       if (ev.state === 'destroyed' || ev.state === 'error') {
         const dead = views.filter((v) => v.instanceId === ev.instanceId);

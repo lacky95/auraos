@@ -1,19 +1,19 @@
 /**
- * The desktop's browser boundary: frame resolution on both routes, the sandbox,
+ * The desktop's browser boundary: frame resolution, the sandbox,
  * AuraChannel origin + source checks, the IP setup bar and the badge layering.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  APP_FRAME_ALLOW, APP_FRAME_SANDBOX, AppFrameBlockedError, appIdFromProxySrc, assertAppHostOrigin,
-  parseProxyFrameUrl, proxyFrameUrl, resolveAppFrame,
+  APP_FRAME_ALLOW, APP_FRAME_SANDBOX, AppFrameBlockedError, assertAppHostOrigin,
+  logicalFrameUrl, parseLogicalFrameUrl, resolveAppFrame,
 } from '../src/lib/appFrame.ts';
 import { authorizeShellMessage, classifySender, isHostNestedSender, nestedFocusChange, senderAppId, type ChannelFrame } from '../src/lib/auraChannelShell.ts';
 import {
   COOKIE_PROBE_LABEL, cookieProbeUrl, isWebKitBrowser, planCookieFallback, planSetupBar, probeAppHostAddress, probeAppHostCookie, settleSetupBar,
 } from '../src/lib/desktop/setupBar.ts';
-import { SHELL_FRAME_ANCESTORS, shellFramePolicy } from '../src/lib/desktop/frameRoutes.ts';
+import { SHELL_FRAME_ANCESTORS, shellFramePolicy } from '../src/lib/desktop/shellFramePolicy.ts';
 import { iframeHtml } from '../src/lib/desktop/slotMarkup.ts';
 
 const SHELL = 'http://10-201-1-2.nip.io:3000';
@@ -26,30 +26,20 @@ const SHADOW_CONSOLE = 'http://app1f2e3d4c--10-201-1-2.nip.io:3000';
 
 // ── frame resolution ─────────────────────────────────────────────────────────
 
-test('proxy route: the exact URLs the desktop has always used', () => {
-  assert.equal(proxyFrameUrl({ appId: 'a', instanceId: 'com.x.a' }), '/api/proxy/com.x.a/');
-  assert.equal(proxyFrameUrl({ appId: 'a', instanceId: 'com.x.a-2', path: '/' }), '/api/proxy/com.x.a-2/');
+test('a view keeps the logical address saved desktops already hold', () => {
+  assert.equal(logicalFrameUrl({ appId: 'a', instanceId: 'com.x.a' }), '/api/proxy/com.x.a/');
+  assert.equal(logicalFrameUrl({ appId: 'a', instanceId: 'com.x.a-2', path: '/' }), '/api/proxy/com.x.a-2/');
   assert.equal(
-    proxyFrameUrl({ appId: 'a', instanceId: 'i', activityId: 'act 1', path: '//notes/1' }),
+    logicalFrameUrl({ appId: 'a', instanceId: 'i', activityId: 'act 1', path: '//notes/1' }),
     '/api/proxy/i/notes/1?_aura_activity=act%201',
   );
 });
 
-test('proxy route: no handoff, no sandbox, no allow', async () => {
-  let called = false;
-  const f = await resolveAppFrame({ appId: 'a', instanceId: 'i', path: '/x' }, {
-    shellOrigin: SHELL, route: 'proxy', fetch: (async () => { called = true; return new Response('{}'); }) as typeof fetch,
-  });
-  assert.equal(called, false);
-  assert.deepEqual(f, { origin: SHELL, url: '/api/proxy/i/x', label: '', slot: 0, sandbox: '', allow: '' });
-});
-
-test('host route: resolves through the handoff with the shared attributes', async () => {
+test('every app resolves through the handoff with the shared attributes', async () => {
   let body: Record<string, unknown> = {};
   let url = '';
   const f = await resolveAppFrame({ appId: 'com.x.notes', instanceId: 'i', activityId: 'a1', path: '/doc' }, {
     shellOrigin: SHELL,
-    route: 'host',
     fetch: (async (u: string, init: RequestInit) => {
       url = u; body = JSON.parse(String(init.body));
       return new Response(JSON.stringify({ code: 'c0de', origin: APP, slot: 2 }));
@@ -65,10 +55,10 @@ test('host route: resolves through the handoff with the shared attributes', asyn
   assert.equal(f.allow, APP_FRAME_ALLOW);
 });
 
-test('host route: direct IP opens no frame and spends no code', async () => {
+test('direct IP opens no frame and spends no code', async () => {
   let called = false;
   await assert.rejects(resolveAppFrame({ appId: 'a', instanceId: 'i' }, {
-    shellOrigin: 'http://10.201.1.2:3000', route: 'host',
+    shellOrigin: 'http://10.201.1.2:3000',
     fetch: (async () => { called = true; return new Response('{}'); }) as typeof fetch,
   }), AppFrameBlockedError);
   assert.equal(called, false);
@@ -88,18 +78,16 @@ test('a handoff can only point at an App Host of this desktop', () => {
 });
 
 test('a logical URL round-trips to its target', () => {
-  assert.deepEqual(parseProxyFrameUrl('/api/proxy/i-2/a/b?_aura_activity=x%20y', 'app'), {
+  assert.deepEqual(parseLogicalFrameUrl('/api/proxy/i-2/a/b?_aura_activity=x%20y', 'app'), {
     appId: 'app', instanceId: 'i-2', path: '/a/b', activityId: 'x y',
   });
-  assert.equal(parseProxyFrameUrl('https://elsewhere/', 'app'), null);
-  assert.equal(appIdFromProxySrc('/api/proxy/com.x.a-3/'), 'com.x.a');
+  assert.equal(parseLogicalFrameUrl('https://elsewhere/', 'app'), null);
 });
 
-test('server markup: only a host frame holds back its src', () => {
-  assert.match(iframeHtml('/api/proxy/i/', 'T'), /^<iframe src="\/api\/proxy\/i\/"/);
-  const deferred = iframeHtml('/api/proxy/i/', 'T', true);
-  assert.match(deferred, /data-src=/);
-  assert.doesNotMatch(deferred, /\ssrc=/);
+test('server markup: a frame holds back its src until the handoff', () => {
+  const html = iframeHtml('/api/proxy/i/', 'T');
+  assert.match(html, /data-src=/);
+  assert.doesNotMatch(html, /\ssrc=/);
 });
 
 // ── sandbox ──────────────────────────────────────────────────────────────────
@@ -119,31 +107,26 @@ function worlds() {
   const shell = { name: 'shell' } as { parent?: unknown };
   shell.parent = shell;
   const hostWin = { parent: shell };
-  const proxyWin = { parent: shell };
-  const settingsWin = { parent: shell };
   const nestedApp = { parent: hostWin };
   const nestedForeign = { parent: hostWin };
-  const proxyNested = { parent: proxyWin };
   const stranger = { parent: { parent: null } };
   const hostSettingsWin = { parent: shell };
   const shadowSettingsWin = { parent: shell };
   const hostConsoleWin = { parent: shell };
   const shadowConsoleWin = { parent: shell };
-  const f = (window: unknown, origin: string, appId: string, route: 'host' | 'proxy', system = false): ChannelFrame<unknown, string> =>
-    ({ window, origin, appId, route, system, element: appId });
+  const f = (window: unknown, origin: string, appId: string, system = false): ChannelFrame<unknown, string> =>
+    ({ window, origin, appId, system, element: appId });
   const frames = [
-    f(hostWin, APP, 'com.x.notes', 'host'),
-    f(proxyWin, SHELL, 'com.x.proxy', 'proxy'),
-    f(settingsWin, SHELL, 'com.aura.settings', 'proxy'),
-    f(hostSettingsWin, SETTINGS_APP, 'com.aura.settings', 'host', true),
-    f(shadowSettingsWin, SHADOW_APP, 'com.aura.settings', 'host', false),
-    f(hostConsoleWin, CONSOLE_APP, 'com.aura.console', 'host', true),
-    f(shadowConsoleWin, SHADOW_CONSOLE, 'com.aura.console', 'host', false),
+    f(hostWin, APP, 'com.x.notes'),
+    f(hostSettingsWin, SETTINGS_APP, 'com.aura.settings', true),
+    f(shadowSettingsWin, SHADOW_APP, 'com.aura.settings', false),
+    f(hostConsoleWin, CONSOLE_APP, 'com.aura.console', true),
+    f(shadowConsoleWin, SHADOW_CONSOLE, 'com.aura.console', false),
   ];
   const from = (source: unknown, origin: string) =>
     classifySender({ source, origin, shellWindow: shell, shellOrigin: SHELL, frames });
   return {
-    shell, hostWin, proxyWin, settingsWin, nestedApp, nestedForeign, proxyNested, stranger, from,
+    shell, hostWin, nestedApp, nestedForeign, stranger, from,
     hostSettingsWin, shadowSettingsWin, hostConsoleWin, shadowConsoleWin,
   };
 }
@@ -165,7 +148,7 @@ test('nested senders are classed by their origin', () => {
   assert.equal(w.from(w.nestedApp, APP)?.direct, false);
   assert.equal(w.from(w.nestedForeign, OTHER_APP)?.endpoint, 'embedded-app');
   assert.equal(w.from(w.nestedForeign, 'https://site.example')?.endpoint, 'app-subframe');
-  assert.equal(w.from(w.proxyNested, SHELL)?.endpoint, 'app');
+  assert.equal(w.from(w.nestedForeign, SHELL)?.endpoint, 'app-subframe', 'nothing nested speaks for the shell');
 });
 
 const allowed = (type: string, sender: ReturnType<ReturnType<typeof worlds>['from']>, data: Record<string, unknown> = {}, nativeRuntime = false) =>
@@ -174,9 +157,8 @@ const allowed = (type: string, sender: ReturnType<ReturnType<typeof worlds>['fro
 test('only the verified Settings window may trigger the lock message or admin unlock', () => {
   const w = worlds();
   for (const type of ['aura.lockscreen.activate', 'aura.admin.unlock.request']) {
-    assert.equal(allowed(type, w.from(w.settingsWin, SHELL)), true, type);
+    assert.equal(allowed(type, w.from(w.hostSettingsWin, SETTINGS_APP)), true, type);
     assert.equal(allowed(type, w.from(w.hostWin, APP)), false, type);
-    assert.equal(allowed(type, w.from(w.proxyWin, SHELL)), false, type);
     assert.equal(allowed(type, w.from(w.nestedForeign, OTHER_APP)), false, type);
   }
 });
@@ -187,7 +169,6 @@ test('only an App Host window itself may ask the owner to share a Terminal sessi
   assert.equal(allowed(type, w.from(w.hostWin, APP)), true);
   assert.equal(allowed(type, w.from(w.nestedApp, APP)), false, 'its subframe');
   assert.equal(allowed(type, w.from(w.nestedForeign, OTHER_APP)), false, 'an embedded app');
-  assert.equal(allowed(type, w.from(w.proxyWin, SHELL)), false, 'a proxied frame (on the shell origin)');
   assert.equal(allowed(type, w.from(w.shell, SHELL)), false);
 });
 
@@ -197,7 +178,6 @@ test('a native-host message from a host frame needs the native runtime', () => {
     assert.equal(allowed(type, w.from(w.hostWin, APP), { source: 'host' }, false), false, type);
     assert.equal(allowed(type, w.from(w.hostWin, APP), { source: 'host' }, true), true, type);
     assert.equal(allowed(type, w.from(w.hostWin, APP), {}, true), false, `${type} without the marker`);
-    assert.equal(allowed(type, w.from(w.proxyWin, SHELL), { source: 'host' }), true, `${type} stays as it was on the proxy`);
   }
 });
 
@@ -214,7 +194,6 @@ test('routes come from the registry', () => {
 test('a host app cannot read the shell console backlog, except Console', () => {
   const w = worlds();
   assert.equal(allowed('aura.console.requestBacklog', w.from(w.hostWin, APP)), false);
-  assert.equal(allowed('aura.console.requestBacklog', w.from(w.proxyWin, SHELL)), true);
 });
 
 test('on App Hosts only the system installation of Settings or Console is trusted, never a same-id copy', () => {
@@ -232,8 +211,8 @@ test('on App Hosts only the system installation of Settings or Console is truste
 
 test('a host frame cannot claim another app id', () => {
   const w = worlds();
-  assert.equal(senderAppId(w.from(w.hostWin, APP)!, 'com.aura.settings'), 'com.x.notes');
-  assert.equal(senderAppId(w.from(w.proxyWin, SHELL)!, 'com.x.proxy'), 'com.x.proxy');
+  assert.equal(senderAppId(w.from(w.hostWin, APP)!), 'com.x.notes');
+  assert.equal(senderAppId(w.from(w.shell, SHELL)!), null);
 });
 
 test('keyboard focus: only a runtime document nested in a host frame can claim it', () => {
@@ -245,7 +224,6 @@ test('keyboard focus: only a runtime document nested in a host frame can claim i
   const thirdParty = w.from(w.nestedForeign, 'https://site.example')!;
   assert.equal(isHostNestedSender(thirdParty), false);
   assert.equal(nestedFocusChange('aura.keyboard.hello', thirdParty, focused), null);
-  assert.equal(nestedFocusChange('aura.keyboard.hello', w.from(w.proxyNested, SHELL)!, focused), null, 'proxy keeps its relay');
 });
 
 test('keyboard focus returns to the window when its own document is used', () => {
@@ -258,14 +236,8 @@ test('keyboard focus returns to the window when its own document is used', () =>
 
 // ── IP setup bar ─────────────────────────────────────────────────────────────
 
-const bar = (host: string, hostRouteApps = 1, webkit = false) =>
-  planSetupBar({ host, protocol: 'http:', pathname: '/', hostRouteApps, webkit });
-
-test('the bar stays hidden until an app is on frameRoute: host', () => {
-  for (const host of ['10.201.1.2:3000', '127.0.0.1:3000', 'localhost:3000', '[::1]:3000', '8.8.8.8']) {
-    assert.deepEqual(bar(host, 0), { show: false }, host);
-  }
-});
+const bar = (host: string, webkit = false) =>
+  planSetupBar({ host, protocol: 'http:', pathname: '/', webkit });
 
 test('the bar stays hidden on an address that already has App Hosts', () => {
   for (const host of ['10-201-1-2.nip.io:3000', 'os.aura.localhost:3000', 'box.aura.example.com']) {
@@ -284,7 +256,7 @@ test('loopback gets os.aura.localhost, and WebKit gets the nip.io fallback', () 
   const p = bar('127.0.0.1:3000');
   assert.ok(p.show && p.kind === 'link');
   assert.equal(p.address, 'http://os.aura.localhost:3000');
-  const safari = bar('127.0.0.1:3000', 1, true);
+  const safari = bar('127.0.0.1:3000', true);
   assert.ok(safari.show && safari.kind === 'link');
   assert.equal(safari.address, 'http://127-0-0-1.nip.io:3000');
 });
@@ -311,12 +283,11 @@ test('the probe is a fetch browsers accept: no-cors with the default redirect', 
 
 // ── the cookie probe (D44) ───────────────────────────────────────────────────
 
-const probeAt = (host: string, hostRouteApps = 1, protocol = 'http:') => cookieProbeUrl({ host, protocol, hostRouteApps });
+const probeAt = (host: string, protocol = 'http:') => cookieProbeUrl({ host, protocol });
 
 test('the cookie probe runs only where a browser may drop the App Host cookie', () => {
   assert.equal(probeAt('os.aura.localhost:3000'), 'http://hostprobe--os.aura.localhost:3000/_aura/host-probe?cookie=set');
-  assert.equal(probeAt('box.aura.test', 1, 'https:'), 'https://hostprobe--box.aura.test/_aura/host-probe?cookie=set');
-  assert.equal(probeAt('os.aura.localhost:3000', 0), null, 'no app on App Hosts yet');
+  assert.equal(probeAt('box.aura.test', 'https:'), 'https://hostprobe--box.aura.test/_aura/host-probe?cookie=set');
   // Every tested browser keeps it on nip.io and a public suffix; no App Hosts on IP and localhost.
   for (const host of ['10-201-1-2.nip.io:3000', '127-0-0-1.nip.io:3000', 'box.aura.example.com', '10.201.1.2:3000', '127.0.0.1:3000', 'localhost:3000']) {
     assert.equal(probeAt(host), null, host);
@@ -326,7 +297,7 @@ test('the cookie probe runs only where a browser may drop the App Host cookie', 
 
 test('a dropped cookie on os.aura.localhost offers 127-0-0-1.nip.io on the same port, in every browser', () => {
   for (const webkit of [true, false]) {
-    const p = planCookieFallback({ host: 'os.aura.localhost:3000', protocol: 'http:', pathname: '/desk', hostRouteApps: 1, webkit });
+    const p = planCookieFallback({ host: 'os.aura.localhost:3000', protocol: 'http:', pathname: '/desk', webkit });
     assert.ok(p.show && p.kind === 'link');
     assert.equal(p.reason, 'cookies');
     assert.equal(p.href, 'http://127-0-0-1.nip.io:3000/desk');
@@ -334,7 +305,7 @@ test('a dropped cookie on os.aura.localhost offers 127-0-0-1.nip.io on the same 
     assert.deepEqual(settleSetupBar(p, false), { show: true, kind: 'guide', reason: 'cookies' });
   }
   // A custom domain on a non-public suffix has no other address: the guide.
-  assert.deepEqual(planCookieFallback({ host: 'box.aura.test', protocol: 'https:', hostRouteApps: 1, webkit: true }),
+  assert.deepEqual(planCookieFallback({ host: 'box.aura.test', protocol: 'https:', webkit: true }),
     { show: true, kind: 'guide', reason: 'cookies' });
 });
 
@@ -400,7 +371,8 @@ test('WebKit detection does not catch Chromium', () => {
 
 // ── shell frame-ancestors ────────────────────────────────────────────────────
 
-test('frame-ancestors covers shell pages and leaves app content and login alone', () => {
+test('frame-ancestors: no one may frame the shell\'s pages', () => {
+  assert.equal(SHELL_FRAME_ANCESTORS, "frame-ancestors 'none'");
   assert.equal(shellFramePolicy('/', 'text/html; charset=utf-8', null), SHELL_FRAME_ANCESTORS);
   assert.equal(shellFramePolicy('/launcher', 'text/html', null), SHELL_FRAME_ANCESTORS);
   assert.equal(shellFramePolicy('/api/proxy/x/', 'text/html', null), null);

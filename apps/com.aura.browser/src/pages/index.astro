@@ -892,15 +892,15 @@ const FRAME_NAME = JSON.stringify({
         // could post aura.host.url-changed and put any URL in our address bar.
         function fromShell(e) {
           if (window.parent === window || e.source !== window.parent) return false;
-          return e.origin === (shellOrigin() || location.origin);
+          return e.origin === shellOrigin();
         }
 
         function postToOs(type, extras) {
-          if (window.parent === window) return;
+          var target = shellOrigin();
+          if (window.parent === window || !target) return;
           var msg = { type: type };
           for (var k in extras) if (Object.prototype.hasOwnProperty.call(extras, k)) msg[k] = extras[k];
-          // PHASE2-CUTOVER: '*' only for the proxy route, where the parent is this same origin.
-          try { window.parent.postMessage(msg, shellOrigin() || '*'); } catch (err) { /* parent gone */ }
+          try { window.parent.postMessage(msg, target); } catch (err) { /* parent gone */ }
         }
 
         // Everything that wants the native window out of the way registers a

@@ -122,7 +122,7 @@ const routes: RouteAccessManifest['routes'] = {
     },
   },
 
-  // Owner login (D37): all but status answer 404 unless AURA_OWNER_LOGIN=on.
+  // Owner login (D6, D37), always on.
   // `setup` also takes the reset path: both need a one-time host code (D8).
   '/api/app-hosts/handoff': { methods: { POST: rule(OWNER, 'session') } },
   '/api/auth/status': { methods: { GET: rule(['public'], 'system') } },
@@ -138,17 +138,13 @@ const routes: RouteAccessManifest['routes'] = {
   },
   '/api/auth/whoami': {
     methods: { GET: rule(INSTANCE, 'session', decide(3,
-      'Reflects only the caller, works while login is dark, and a login cookie is labelled information. Anonymous and API-key callers count as would-deny here; decide at enforcement whether they keep an answer.')) },
+      'Reflects only the caller, and a login cookie is labelled information. Anonymous and API-key callers count as would-deny here; decide at enforcement whether they keep an answer.')) },
   },
 
   // Static candidates for the login page; everything else in `os` stays owner.
   '/api/os/theme.css': staticAsset,
   '/api/os/icons.svg': staticAsset,
   '/api/os/icons/[name].svg': staticAsset,
-  '/api/os/keyboard.js': {
-    methods: on(['GET'], rule(OWNER, 'system', decide(2,
-      'Owner for now. Loaded by App Host documents, not by login. Phase 2 makes it public only if a cross-origin <script> cannot carry the login handoff.'))),
-  },
 
   // Reached only through the App Host gateway, which names the instance.
   '/api/os/app-runtime.js': { methods: on(['GET'], rule(['own-instance'], 'system')) },

@@ -18,9 +18,6 @@ export async function issueSetupCode(
   input: SetupTicketInput,
   create: CreateSetupTicket = createSetupTicket,
 ): Promise<{ code: string; expiresAt: number }> {
-  if (process.env['AURA_OWNER_LOGIN'] !== 'on') {
-    throw new SetupCodeRefused('owner login is not active on this system (AURA_OWNER_LOGIN is not on).');
-  }
   if (inSandbox()) {
     throw new SetupCodeRefused('this is a host command. Run it from the host: docker exec -it aura-shell aura <command>');
   }

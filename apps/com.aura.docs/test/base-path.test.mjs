@@ -1,50 +1,30 @@
-// Docs URL building on both frame routes (Phase 2): the base path, the search
-// endpoint, which build a request reaches, and the runtime loader.
+// Docs is one build served from `/` (Phase 2): the window opens on its App
+// Host, and the shell proxy strips `/api/proxy/<id>` from the machine paths,
+// so the agents' MCP and the lifecycle calls arrive at the root too.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, readFileSync } from 'node:fs';
 import vm from 'node:vm';
-import {
-  FRAME_ROUTE_HEADER, docsBasePath, docsInstanceId, docsSearchApi, frameRouteOf, requestRoute,
-} from '../fumadocs-site/lib/base-path.mjs';
-import { APP_HOST_ROUTE_HEADER, AURA_RESERVED_PATHS } from '../../../packages/app-sdk/dist/hostRules.js';
+import { AURA_RESERVED_PATHS } from '../../../packages/app-sdk/dist/hostRules.js';
 import { AURA_RUNTIME_LOADER_JS } from '../../../packages/app-sdk/dist/runtime/loader.js';
 
-test('the route header is the one the App Host router sets', () => {
-  assert.equal(FRAME_ROUTE_HEADER, APP_HOST_ROUTE_HEADER);
+const site = (p) => new URL(`../fumadocs-site/${p}`, import.meta.url);
+const manifest = JSON.parse(readFileSync(new URL('../app.manifest.json', import.meta.url), 'utf8'));
+
+test('the build has no basePath: it is served at /', () => {
+  const config = readFileSync(site('next.config.mjs'), 'utf8');
+  assert.doesNotMatch(config, /\bbasePath\s*:/);
 });
 
-test('proxy route: basePath and search carry the instance prefix', () => {
-  const base = docsBasePath('proxy', 'com.aura.docs');
-  assert.equal(base, '/api/proxy/com.aura.docs');
-  assert.equal(docsSearchApi(base), '/api/proxy/com.aura.docs/api/search');
-  assert.equal(docsBasePath('proxy', 'com.aura.docs-2'), '/api/proxy/com.aura.docs-2');
+test('the MCP the manifest advertises is the /mcp route', () => {
+  const mcp = manifest.provides.find((p) => p.kind === 'http/mcp');
+  assert.equal(mcp.address, '/mcp');
+  assert.ok(existsSync(site('app/mcp/route.ts')));
+  assert.ok(existsSync(site('app/api/lifecycle/health/route.ts')));
 });
 
-test('App Host route: served from /', () => {
-  const base = docsBasePath('host', 'com.aura.docs');
-  assert.equal(base, '');
-  assert.equal(docsSearchApi(base), '/api/search');
-});
-
-test('anything but `host` is the proxy route', () => {
-  for (const v of [undefined, null, '', 'HOST', 'proxy', 'host ', ['proxy']]) assert.equal(frameRouteOf(v), 'proxy');
-  assert.equal(frameRouteOf('host'), 'host');
-});
-
-test('a request picks its build by the router header only', () => {
-  assert.equal(requestRoute({ [FRAME_ROUTE_HEADER]: 'host' }), 'host');
-  assert.equal(requestRoute({ [FRAME_ROUTE_HEADER]: ['host', 'proxy'] }), 'host');
-  assert.equal(requestRoute({}), 'proxy');
-  assert.equal(requestRoute(undefined), 'proxy');
-  // The agents' MCP and the lifecycle calls arrive through the shell proxy,
-  // which never carries the header: they reach the prefixed build.
-  assert.equal(requestRoute({ host: 'aura-com.aura.docs:4101' }), 'proxy');
-});
-
-test('instance id: APP_INSTANCE_ID, then APP_ID, then the app id', () => {
-  assert.equal(docsInstanceId({ APP_INSTANCE_ID: 'com.aura.docs-3', APP_ID: 'x' }), 'com.aura.docs-3');
-  assert.equal(docsInstanceId({ APP_ID: 'com.aura.docs' }), 'com.aura.docs');
-  assert.equal(docsInstanceId({}), 'com.aura.docs');
+test('the manifest keeps only the runtime flags of its proxy block', () => {
+  assert.deepEqual(Object.keys(manifest.proxy).sort(), ['injectConsoleRelay', 'injectKeyForwarder', 'injectMeta']);
 });
 
 /** Runs the loader as app/layout.tsx emits it, and returns what it wrote. */
@@ -55,12 +35,11 @@ function runLoader(hostname, pathname) {
   return written.join('');
 }
 
-test('runtime loader: nothing on the proxy route', () => {
-  assert.equal(runLoader('192.168.1.5.nip.io', '/api/proxy/com.aura.docs/docs/introduction'), '');
-  assert.equal(runLoader('os.aura.localhost', '/api/proxy/com.aura.docs/'), '');
-});
-
 test('runtime loader: loads /_aura/runtime.js on an App Host', () => {
   const out = runLoader('docs5f9f7565--os.aura.localhost', '/docs/introduction');
   assert.match(out, new RegExp(`src="${AURA_RESERVED_PATHS.runtime.replace(/[.]/g, '\\.')}"`));
+});
+
+test('runtime loader: nothing off an App Host', () => {
+  assert.equal(runLoader('localhost', '/docs/introduction'), '');
 });

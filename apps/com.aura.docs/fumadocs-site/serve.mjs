@@ -12,24 +12,19 @@
 // A page edit shows up after one build (~30-60 s) instead of instantly —
 // for heavy layout work switch to dev mode (see entrypoint.sh).
 //
-// One build per frame route (Phase 2, lib/base-path.mjs): a Next basePath is
-// fixed at build time, and the proxy route needs `/api/proxy/<instance>`
-// while an App Host serves from `/`. This process owns $APP_PORT and passes
-// each request to the `next start` of its route, picked by the App Host
-// route header the shell's router sets (and strips everywhere else). The
-// `proxy` build always runs: it also answers the machine paths, the
-// lifecycle calls and the agents' MCP at /api/proxy/<instance>/mcp. The
-// `host` build is only built and started on the first App Host request, so
-// an install that never moves Docs to its App Host costs what it did before.
+// One build, served from `/`: the window opens on Docs' App Host, the
+// runner calls /api/lifecycle/* directly, and the shell proxy strips
+// `/api/proxy/<id>` from the agents' MCP, so it arrives as `/mcp`.
 //
-// Health: while a build has no server yet (the first build, a swap), this
-// process answers /api/lifecycle/health with the identity body the
-// AppManager's spawn gate expects, so a cold boot never trips the 60 s
-// health deadline; everything else gets a 503 "building" page.
+// This process owns $APP_PORT and passes every request to `next start` on a
+// loopback port. That front is what keeps the port answering while there is
+// no `next start` (the first build, a swap): it replies to
+// /api/lifecycle/health with the identity body the AppManager's spawn gate
+// expects, so a cold boot never trips the 60 s health deadline; everything
+// else gets a 503 "building" page.
 //
-// Usage: node serve.mjs                     serve (build first if stale)
-//        node serve.mjs --build-only        just build the proxy route (CI, pre-warming)
-//        node serve.mjs --build-only --host also build the App Host route
+// Usage: node serve.mjs              serve (build first if stale)
+//        node serve.mjs --build-only just build (CI, pre-warming)
 import { spawn } from 'node:child_process';
 import { createServer, request as httpRequest } from 'node:http';
 import { createServer as createNetServer, connect } from 'node:net';
@@ -37,12 +32,11 @@ import {
   existsSync, readFileSync, writeFileSync, statSync, readdirSync, rmSync, renameSync, watch,
 } from 'node:fs';
 import { join } from 'node:path';
-import { docsBasePath, docsInstanceId, requestRoute } from './lib/base-path.mjs';
 
 const ROOT = process.cwd();
 const PORT = Number(process.env.APP_PORT || 4101);
 const APP_ID = process.env.APP_ID || 'com.aura.docs';
-const INSTANCE_ID = docsInstanceId();
+const INSTANCE_ID = process.env.APP_INSTANCE_ID || APP_ID;
 const STAMP = 'aura-build.json';
 /** Everything a build depends on. Directories are walked recursively. */
 const SOURCES = [
@@ -61,25 +55,16 @@ const TAG = `[${APP_ID}]`;
 
 const log = (...a) => console.log(TAG, ...a);
 
-/** One build and its `next start`, for one frame route. */
-function variant(route, dist, staging) {
-  return {
-    route, dist, staging,
-    basePath: docsBasePath(route, INSTANCE_ID),
-    wanted: false,   // serve it (and rebuild it on edits)
-    starting: null,  // the first build + start in flight
-    server: null,    // running `next start`
-    port: null,      // its loopback port
-    ready: false,    // accepting connections
-    stopping: false, // killed on purpose
-    lastBuilt: null,
-  };
-}
+const DIST = '.next';
+const STAGING = '.next-staging';
 
-const VARIANTS = {
-  // PHASE2-CUTOVER: the proxy build goes with the proxy route; `host` becomes the only build, in `.next`.
-  proxy: variant('proxy', '.next', '.next-staging'),
-  host: variant('host', '.next-host', '.next-host-staging'),
+/** The build's `next start`. */
+const next = {
+  server: null,    // running `next start`
+  port: null,      // its loopback port
+  ready: false,    // accepting connections
+  stopping: false, // killed on purpose
+  lastBuilt: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -100,15 +85,14 @@ function fingerprint() {
   return { newest, count };
 }
 
-function readStamp(v) {
-  try { return JSON.parse(readFileSync(join(ROOT, v.dist, STAMP), 'utf8')); } catch { return null; }
+function readStamp() {
+  try { return JSON.parse(readFileSync(join(ROOT, DIST, STAMP), 'utf8')); } catch { return null; }
 }
 
-function isStale(v, fp) {
-  if (!existsSync(join(ROOT, v.dist, 'BUILD_ID'))) return 'no build';
-  const s = readStamp(v);
+function isStale(fp) {
+  if (!existsSync(join(ROOT, DIST, 'BUILD_ID'))) return 'no build';
+  const s = readStamp();
   if (!s) return 'no build stamp';
-  if (s.basePath !== v.basePath) return `basePath changed (${s.basePath} → ${v.basePath})`;
   if (s.newest < fp.newest || s.count !== fp.count) return 'sources changed';
   return null;
 }
@@ -116,14 +100,12 @@ function isStale(v, fp) {
 // ---------------------------------------------------------------------------
 //  Build into STAGING, then swap into DIST (caller stops the server first).
 // ---------------------------------------------------------------------------
-function run(v, args, env, heapMb) {
+function run(args, env, heapMb) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [NEXT_BIN, ...args], {
       cwd: ROOT, stdio: 'inherit',
       env: {
         ...process.env, ...env,
-        // next.config.mjs picks the basePath from this, at build and start alike.
-        DOCS_FRAME_ROUTE: v.route,
         NEXT_TELEMETRY_DISABLED: '1',
         // The runner exports a non-standard NODE_ENV; Next wants production.
         NODE_ENV: 'production',
@@ -136,18 +118,17 @@ function run(v, args, env, heapMb) {
   });
 }
 
-async function buildStaging(v, fp) {
-  rmSync(join(ROOT, v.staging), { recursive: true, force: true });
+async function buildStaging(fp) {
+  rmSync(join(ROOT, STAGING), { recursive: true, force: true });
   const t0 = Date.now();
-  log(`next build → ${v.staging} (route=${v.route}, basePath=${v.basePath || '/'})`);
-  const { code } = await run(v, ['build'], { NEXT_DIST_DIR: v.staging }, BUILD_HEAP_MB);
+  log(`next build → ${STAGING}`);
+  const { code } = await run(['build'], { NEXT_DIST_DIR: STAGING }, BUILD_HEAP_MB);
   if (code !== 0) { log(`build FAILED (exit ${code}) — keeping the previous build`); return false; }
-  writeFileSync(join(ROOT, v.staging, STAMP), JSON.stringify({
-    basePath: v.basePath, newest: fp.newest, count: fp.count, builtAt: new Date().toISOString(),
+  writeFileSync(join(ROOT, STAGING, STAMP), JSON.stringify({
+    newest: fp.newest, count: fp.count, builtAt: new Date().toISOString(),
   }));
   // `next build` rewrites next-env.d.ts to reference the dist dir it built
-  // into; point it back at `.next` whichever build ran (keeps git clean —
-  // this file is tracked).
+  // into; point it back at `.next` (keeps git clean — this file is tracked).
   try {
     const envDts = join(ROOT, 'next-env.d.ts');
     const txt = readFileSync(envDts, 'utf8');
@@ -158,13 +139,13 @@ async function buildStaging(v, fp) {
   return true;
 }
 
-function swapStaging(v) {
-  rmSync(join(ROOT, v.dist), { recursive: true, force: true });
-  renameSync(join(ROOT, v.staging), join(ROOT, v.dist));
+function swapStaging() {
+  rmSync(join(ROOT, DIST), { recursive: true, force: true });
+  renameSync(join(ROOT, STAGING), join(ROOT, DIST));
 }
 
 // ---------------------------------------------------------------------------
-//  Placeholder: identity-correct health while a route has no `next start`.
+//  Placeholder: identity-correct health while there is no `next start`.
 // ---------------------------------------------------------------------------
 function identityHeaders() {
   return { 'X-Aura-App-Id': APP_ID, 'X-Aura-Instance-Id': INSTANCE_ID };
@@ -172,12 +153,12 @@ function identityHeaders() {
 
 function placeholder(req, res) {
   const url = req.url || '/';
-  if (/\/api\/lifecycle\/health(\?|$)/.test(url)) {
+  if (/^\/api\/lifecycle\/health(\?|$)/.test(url)) {
     res.writeHead(200, { 'Content-Type': 'application/json', ...identityHeaders() });
     res.end(JSON.stringify({ ok: true, appId: APP_ID, instanceId: INSTANCE_ID, building: true }));
     return;
   }
-  if (/\/api\/lifecycle\//.test(url)) {
+  if (/^\/api\/lifecycle\//.test(url)) {
     res.writeHead(200, { 'Content-Type': 'application/json', ...identityHeaders() });
     res.end('{"ok":true}');
     return;
@@ -188,11 +169,11 @@ function placeholder(req, res) {
 }
 
 // ---------------------------------------------------------------------------
-//  Front: $APP_PORT, passed on to the `next start` of the request's route.
+//  Front: $APP_PORT, passed on to `next start`.
 // ---------------------------------------------------------------------------
-function forward(v, req, res) {
+function forward(req, res) {
   const up = httpRequest({
-    host: '127.0.0.1', port: v.port, method: req.method, path: req.url, headers: req.headers,
+    host: '127.0.0.1', port: next.port, method: req.method, path: req.url, headers: req.headers,
   }, (ures) => {
     res.writeHead(ures.statusCode ?? 502, ures.headers);
     ures.pipe(res);
@@ -206,16 +187,7 @@ function forward(v, req, res) {
 }
 
 function startFront() {
-  const srv = createServer((req, res) => {
-    const v = VARIANTS[requestRoute(req.headers)];
-    if (!v.wanted) {
-      log(`first ${v.route} request — building that route`);
-      v.wanted = true;
-      void ensureVariant(v).catch((e) => log(`${v.route} route failed to start: ${e.message}`));
-    }
-    if (!v.ready) return placeholder(req, res);
-    return forward(v, req, res);
-  });
+  const srv = createServer((req, res) => (next.ready ? forward(req, res) : placeholder(req, res)));
   // A production build opens no WebSocket.
   srv.on('upgrade', (_req, socket) => socket.destroy());
   return new Promise((resolve, reject) => {
@@ -244,97 +216,74 @@ function accepting(port) {
   });
 }
 
-async function startServer(v) {
-  v.stopping = false;
-  v.port = await freePort();
-  const p = run(v, ['start', '--hostname', '127.0.0.1', '--port', String(v.port)],
-    { NEXT_DIST_DIR: v.dist }, SERVE_HEAP_MB);
+async function startServer() {
+  next.stopping = false;
+  next.port = await freePort();
+  const p = run(['start', '--hostname', '127.0.0.1', '--port', String(next.port)],
+    { NEXT_DIST_DIR: DIST }, SERVE_HEAP_MB);
   const child = run.last;
-  v.server = child;
-  log(`next start (${v.route}) on 127.0.0.1:${v.port} (heap ≤ ${SERVE_HEAP_MB} MB, pid ${child.pid})`);
+  next.server = child;
+  log(`next start on 127.0.0.1:${next.port} (heap ≤ ${SERVE_HEAP_MB} MB, pid ${child.pid})`);
   p.then(({ code, sig }) => {
-    if (v.stopping || shuttingDown) return;
-    log(`next start (${v.route}) exited unexpectedly (code=${code} sig=${sig}) — giving up so the OS sees the crash`);
+    if (next.stopping || shuttingDown) return;
+    log(`next start exited unexpectedly (code=${code} sig=${sig}) — giving up so the OS sees the crash`);
     process.exit(code ?? 1);
   });
   const deadline = Date.now() + READY_TIMEOUT_MS;
-  while (child.exitCode === null && !(await accepting(v.port))) {
-    if (Date.now() > deadline) { log(`next start (${v.route}) not accepting after ${READY_TIMEOUT_MS / 1000}s`); break; }
+  while (child.exitCode === null && !(await accepting(next.port))) {
+    if (Date.now() > deadline) { log(`next start not accepting after ${READY_TIMEOUT_MS / 1000}s`); break; }
     await new Promise((r) => setTimeout(r, 200));
   }
-  if (child.exitCode === null && v.server === child) v.ready = true;
+  if (child.exitCode === null && next.server === child) next.ready = true;
 }
 
-function stopServer(v) {
-  v.ready = false;
+function stopServer() {
+  next.ready = false;
   return new Promise((resolve) => {
-    if (!v.server || v.server.exitCode !== null) return resolve();
-    v.stopping = true;
-    const s = v.server;
+    if (!next.server || next.server.exitCode !== null) return resolve();
+    next.stopping = true;
+    const s = next.server;
     const t = setTimeout(() => { try { s.kill('SIGKILL'); } catch {} }, 8000);
     s.once('exit', () => { clearTimeout(t); resolve(); });
     s.kill('SIGTERM');
   });
 }
 
-/** Build when stale, then start. Shared by boot and the first request of a route. */
-async function prepare(v, { serve }) {
+/** Build when stale; used at boot and by --build-only. */
+async function prepare() {
   const fp = fingerprint();
-  const why = isStale(v, fp);
+  const why = isStale(fp);
   if (why) {
-    log(`${v.route} build is stale: ${why}`);
-    const ok = await buildStaging(v, fp);
-    // The next source change retries (rebuildIfChanged), as for any broken edit.
-    if (!ok) { v.lastBuilt = fp; throw new Error(`${v.route} build failed`); }
-    swapStaging(v);
+    log(`build is stale: ${why}`);
+    const ok = await buildStaging(fp);
+    if (!ok) throw new Error('build failed');
+    swapStaging();
   } else {
-    log(`${v.route} build is current (${readStamp(v)?.builtAt ?? 'unknown'})`);
+    log(`build is current (${readStamp()?.builtAt ?? 'unknown'})`);
   }
-  v.lastBuilt = fp;
-  if (serve) await startServer(v);
+  next.lastBuilt = fp;
 }
 
-/** Builds share the build lock with rebuilds, so two never run at once. */
-function ensureVariant(v) {
-  v.starting ??= withBuildLock(() => prepare(v, { serve: true }));
-  return v.starting;
-}
-
-let building = Promise.resolve();
-function withBuildLock(fn) {
-  const next = building.then(fn, fn);
-  building = next.catch(() => {});
-  return next;
-}
-
+let building = false;
 let pending = false;
-let rebuildQueued = false;
 
-async function rebuildVariant(v, reason) {
-  const fp = fingerprint();
-  if (v.lastBuilt && fp.newest === v.lastBuilt.newest && fp.count === v.lastBuilt.count) return;
-  log(`change detected (${reason}) — rebuilding ${v.route}`);
-  const ok = await buildStaging(v, fp);
-  if (!ok) { v.lastBuilt = fp; return; } // don't loop on a broken edit; next change retries
-  await stopServer(v);   // this process answers with the placeholder meanwhile
-  swapStaging(v);
-  await startServer(v);
-  v.lastBuilt = fp;
-}
-
-function rebuildIfChanged(reason) {
-  if (rebuildQueued) { pending = true; return; }
-  rebuildQueued = true;
-  void withBuildLock(async () => {
-    try {
-      for (const v of Object.values(VARIANTS)) {
-        if (v.wanted && v.lastBuilt) await rebuildVariant(v, reason);
-      }
-    } finally {
-      rebuildQueued = false;
-      if (pending) { pending = false; rebuildIfChanged('queued change'); }
-    }
-  });
+async function rebuildIfChanged(reason) {
+  if (building) { pending = true; return; }
+  building = true;
+  try {
+    const fp = fingerprint();
+    if (next.lastBuilt && fp.newest === next.lastBuilt.newest && fp.count === next.lastBuilt.count) return;
+    log(`change detected (${reason}) — rebuilding`);
+    const ok = await buildStaging(fp);
+    if (!ok) { next.lastBuilt = fp; return; } // don't loop on a broken edit; next change retries
+    await stopServer();   // this process answers with the placeholder meanwhile
+    swapStaging();
+    await startServer();
+    next.lastBuilt = fp;
+  } finally {
+    building = false;
+    if (pending) { pending = false; void rebuildIfChanged('queued change'); }
+  }
 }
 
 function startWatcher() {
@@ -342,7 +291,7 @@ function startWatcher() {
   const kick = (what) => {
     if (/(^|\/)(\.next[A-Za-z-]*|node_modules|\.source)(\/|$)/.test(what)) return;
     clearTimeout(timer);
-    timer = setTimeout(() => rebuildIfChanged(what), DEBOUNCE_MS);
+    timer = setTimeout(() => void rebuildIfChanged(what), DEBOUNCE_MS);
   };
   for (const s of SOURCES) {
     const p = join(ROOT, s);
@@ -356,21 +305,22 @@ function startWatcher() {
 }
 
 async function main() {
+  // The second build of the old two-route layout.
+  for (const d of ['.next-host', '.next-host-staging']) rmSync(join(ROOT, d), { recursive: true, force: true });
   if (process.argv.includes('--build-only')) {
-    const routes = process.argv.includes('--host') ? ['proxy', 'host'] : ['proxy'];
-    for (const r of routes) {
-      try { await prepare(VARIANTS[r], { serve: false }); } catch { process.exit(1); }
-    }
+    try { await prepare(); } catch { process.exit(1); }
     return;
   }
-  const proxy = VARIANTS.proxy;
-  proxy.wanted = true;
   await startFront();
+  building = true;
   try {
-    await ensureVariant(proxy);
+    await prepare();
+    await startServer();
   } catch (e) {
     log(`fatal: ${e.message}`);
     process.exit(1);
+  } finally {
+    building = false;
   }
   startWatcher();
 }
@@ -380,7 +330,7 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
     if (shuttingDown) return;
     shuttingDown = true;
     log(`${sig} — stopping`);
-    await Promise.all(Object.values(VARIANTS).map(stopServer));
+    await stopServer();
     process.exit(0);
   });
 }

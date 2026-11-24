@@ -27,9 +27,7 @@ import {
   INTERNAL_SERVICE_HEADER, internalServiceHeaders, reportSurface, staticSurface, surfaceIdentity,
 } from '../server/access-bridge.mjs';
 import { dropServiceWorkerScope, stripSessionCookie, stripShellCredentials } from '../server/shell-credentials.mjs';
-import { createAppHostRouter } from '../server/app-hosts.mjs';
 import { attachWsProxy } from '../server/attach.mjs';
-import { streamHeaders } from '../server/sse-mux.mjs';
 import { enumerateRoutes } from './helpers/enumerateRoutes.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -721,7 +719,7 @@ test('the proxy and data routes strip on the way in and out', () => {
   const proxy = fs.readFileSync(path.join(root, 'src/pages/api/proxy/[id]/[...path].ts'), 'utf8');
   const data = fs.readFileSync(path.join(root, 'src/pages/api/data/[authority]/[...path].ts'), 'utf8');
   assert.match(proxy, /stripShellCredentials\(new Headers\(request\.headers\), 'proxy-http'\)/);
-  assert.match(proxy, /ALL: APIRoute = async \(ctx\) => dropServiceWorkerScope\(await forward\(ctx\)\)/);
+  assert.match(proxy, /ALL: APIRoute = async \(ctx\) => machineOnly\(dropServiceWorkerScope\(await forward\(ctx\)\)\)/);
   assert.match(data, /stripShellCredentials\(new Headers\(request\.headers\), 'data'\)/);
   assert.match(data, /dropServiceWorkerScope\(new Response/);
   for (const src of [proxy, data]) assert.equal((src.match(/new Headers\(request\.headers\)/g) ?? []).length, 1);
@@ -741,71 +739,7 @@ test('dropServiceWorkerScope handles mutable and immutable responses', async () 
   assert.equal(await copy.text(), 'body');
 });
 
-test('SSE mux: app targets lose shell credentials, shell routes keep them', () => {
-  const base = { cookie: 'aura_session=s; app=1', authorization: 'Bearer aura-admin1.x', accept: 'text/event-stream' };
-  for (const p of ['/api/proxy/com.a.app/events', '/api/data/com.a/x']) {
-    const h = streamHeaders(base, `http://127.0.0.1:3000${p}`);
-    assert.equal(h.cookie, 'app=1');
-    assert.equal(h.authorization, undefined);
-  }
-  const shell = streamHeaders(base, 'http://127.0.0.1:3000/api/notifications/stream');
-  assert.equal(shell.authorization, base.authorization);
-  assert.equal(shell.cookie, base.cookie);
-  assert.equal(base.authorization, 'Bearer aura-admin1.x', 'the socket-level headers are not changed');
-});
-
 const listen = (s: http.Server) => new Promise<number>((res) => s.listen(0, '127.0.0.1', () => res((s.address() as net.AddressInfo).port)));
-
-test('App Hosts HTTP and raw upgrade strip shell credentials and keep app ones', { timeout: 10_000 }, async () => {
-  let httpSeen: http.IncomingHttpHeaders = {};
-  let upgradeSeen = '';
-  const upstream = http.createServer((req, res) => { httpSeen = req.headers; res.end('ok'); });
-  upstream.on('upgrade', (req, socket) => {
-    upgradeSeen = req.rawHeaders.join('\n');
-    socket.end('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: x\r\n\r\n');
-  });
-  const port = await listen(upstream);
-  const apps = [{
-    manifest: { id: 'com.a.app', name: 'A', hosts: [{ name: 'aapp' }] },
-    instances: [{ instanceId: 'com.a.app-1', port, state: 'resumed', sandbox: 'proot' }],
-  }];
-  const front = http.createServer((_q, r) => { r.statusCode = 418; r.end(); });
-  // Node only parses an upgrade when the server has a listener for it.
-  front.on('upgrade', (_q, socket) => socket.destroy());
-  createAppHostRouter({ appsList: async () => apps }).attach(front);
-  const frontPort = await listen(front);
-  try {
-    await new Promise<void>((resolve, reject) => {
-      http.get({
-        port: frontPort, host: '127.0.0.1',
-        headers: { host: 'aapp--desk.test', cookie: 'aura_session=SECRET; app=1', authorization: 'Bearer aura-admin1.SECRET' },
-      }, (res) => { res.resume(); res.on('end', resolve); }).on('error', reject);
-    });
-    assert.equal(httpSeen.cookie, 'app=1');
-    assert.equal(httpSeen.authorization, undefined);
-
-    await new Promise<void>((resolve, reject) => {
-      const req = http.request({
-        port: frontPort, host: '127.0.0.1',
-        headers: {
-          host: 'aapp--desk.test', connection: 'Upgrade', upgrade: 'x',
-          cookie: '__Host-aura_session=SECRET; app=2', authorization: 'Bearer aura-sess1.SECRET',
-        },
-      });
-      req.on('upgrade', (_r, socket) => { socket.destroy(); resolve(); });
-      req.on('response', (r) => { r.resume(); reject(new Error(`no upgrade: ${r.statusCode}`)); });
-      req.on('error', reject);
-      req.end();
-    });
-    assert.ok(!upgradeSeen.includes('SECRET'));
-    assert.match(upgradeSeen, /app=2/);
-  } finally {
-    front.closeAllConnections();
-    upstream.closeAllConnections();
-    front.close();
-    upstream.close();
-  }
-});
 
 test('WS proxy strips shell credentials and keeps app cookies', { timeout: 10_000 }, async () => {
   let seen: http.IncomingHttpHeaders = {};

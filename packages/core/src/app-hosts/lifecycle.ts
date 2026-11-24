@@ -241,10 +241,8 @@ export class AppHostLifecycle {
     }
   }
 
-  /** Give a claimed instance its slot, for apps on the App Host route. */
+  /** Give a claimed instance its slot. */
   async claimSlot(appId: string, scope: ScopeId, instanceId: string): Promise<void> {
-    // PHASE2-CUTOVER: every app gets a slot once frameRoute is removed.
-    if ((await this.registry.getFrameRoute(appId)) !== 'host') return;
     const i = await this.registry.findInstallation(appId, scope);
     if (i?.state !== 'active') return;
     await this.registry.assignSlot(i.installationId, userScope(i.userId), instanceId);

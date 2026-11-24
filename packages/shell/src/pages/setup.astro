@@ -1,10 +1,9 @@
 ---
 import AuthLayout from '../layouts/AuthLayout.astro';
 import * as core from '@aura/core';
-import { authPageGate } from '../lib/authSurface.js';
+import { authPageHeaders } from '../lib/authSurface.js';
 
-const gate = authPageGate();
-if (!gate.enabled) return gate.response;
+const gate = authPageHeaders();
 for (const [name, value] of Object.entries(gate.headers)) Astro.response.headers.set(name, value);
 ---
 <AuthLayout title="Set up" nonce={gate.nonce}>

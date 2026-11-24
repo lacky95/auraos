@@ -51,5 +51,5 @@ addEventListener('message',function(ev){${guard}var d=ev.data;if(!d||d.type!=='a
 post({type:'aura.keyboard.hello'});
 }catch(_){}})();`;
 
-// PHASE2-CUTOVER: proxied documents report to their parent with target `*`.
+// The shell's own document (KeyboardOverlay): the top window reports to itself at its own origin.
 export const NATIVE_KEYBOARD_JS = nativeKeyboardJs('window.parent', "'*'", '');

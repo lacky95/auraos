@@ -1,12 +1,8 @@
 /**
  * The scripts every app document runs: console relay, key forwarder, focus on
- * click, input compatibility and the EventSource multiplexer. One source, two
- * deliveries:
- *
- *   - proxied documents get them inlined by the proxy, talking to
- *     `window.parent` with target `*` (PROXY_CHANNEL, output unchanged);
- *   - App Host documents get them from `/_aura/runtime.js` (lib/appRuntime.ts),
- *     talking only to the verified Shell at `window.top` and its exact origin.
+ * click, input compatibility and the EventSource multiplexer. App Host
+ * documents get them from `/_aura/runtime.js` (lib/appRuntime.ts), talking
+ * only to the verified Shell at its exact origin (APP_HOST_CHANNEL).
  *
  * Kept as ES5-style source in strings because they are served verbatim.
  */
@@ -25,16 +21,7 @@ export interface DocumentChannel {
   muxSkip: string;
 }
 
-// PHASE2-CUTOVER: proxied documents go away with proxy serving; only the App Host channel stays.
-export const PROXY_CHANNEL: DocumentChannel = {
-  parent: 'window.parent',
-  target: "'*'",
-  guard: '',
-  muxPath: "'/_aura/sse-mux'",
-  muxSkip: '',
-};
-
-export const consoleRelayJs = (appIdJs: string, c: DocumentChannel = PROXY_CHANNEL): string => `(function(){try{
+export const consoleRelayJs = (appIdJs: string, c: DocumentChannel): string => `(function(){try{
 var P=${c.parent};if(!P||P===window)return;
 var SRC=${appIdJs};
 var LVL=['log','info','warn','error','debug'];
@@ -57,7 +44,7 @@ var X=window.XMLHttpRequest;if(X){var oO=X.prototype.open,oS=X.prototype.send;X.
 window.addEventListener('message',function(ev){${c.guard}if(!ev.data||ev.data.type!=='aura.shutdown')return;shuttingDown=true;try{openES.forEach(function(es){try{es.close();}catch(_){}});openWS.forEach(function(ws){try{ws.close(1000,'app-shutdown');}catch(_){}});openES.clear();openWS.clear();}catch(_){}try{P.postMessage({type:'aura.shutdown.done',source:SRC},${c.target});}catch(_){}});
 }catch(_){}})();`;
 
-export const keyForwarderJs = (appIdJs: string, c: DocumentChannel = PROXY_CHANNEL): string => `(function(){try{
+export const keyForwarderJs = (appIdJs: string, c: DocumentChannel): string => `(function(){try{
 var P=${c.parent};if(!P||P===window)return;
 var SRC=${appIdJs};
 var claims=new Set();
@@ -129,8 +116,8 @@ window.addEventListener('keyup',function(e){
 window.addEventListener('blur',function(){mod.cl=mod.cr=mod.al=mod.ar=mod.sl=mod.sr=mod.ml=mod.mr=0;});
 }catch(_){}})();`;
 
-export function focusOnClickJs(c: DocumentChannel = PROXY_CHANNEL): string {
-  const p = c === PROXY_CHANNEL ? 'parent' : c.parent;
+export function focusOnClickJs(c: DocumentChannel): string {
+  const p = c.parent;
   return `(function(){try{
 if(window.__auraFocusOnClick)return;window.__auraFocusOnClick=true;
 addEventListener('pointerdown',function(){try{if(!document.hasFocus())window.focus();}catch(_){}
@@ -180,7 +167,7 @@ oAdd.call(window,'pointerup',follow('touchend',true),true);
 oAdd.call(window,'pointercancel',follow('touchcancel',true),true);
 }catch(_){}})();`;
 
-export const sseMuxJs = (c: DocumentChannel = PROXY_CHANNEL): string => `(function(){try{
+export const sseMuxJs = (c: DocumentChannel): string => `(function(){try{
 var NES=window.EventSource;if(!NES||window.__auraSseMux||typeof WebSocket!=='function'||typeof EventTarget!=='function')return;
 window.__auraSseMux=true;
 var PATH=${c.muxPath};

@@ -43,13 +43,6 @@ interface SpawnedApp {
   provision: ProvisionWatch;
   port: number;
   appId: string;
-  /**
-   * Cached manifest snapshot used by lifecycle/health URL building. Stored
-   * once at spawn so subsequent calls (`callLifecycle`, the reconciler probe)
-   * don't have to re-fetch from the registry. Currently only the proxy.preservePrefix
-   * flag matters; treated read-only after spawn.
-   */
-  manifest: AppManifest;
   /** How the instance was launched, so `exec` can join the same sandbox:
    *  the proot args minus the entrypoint (empty when not prooted), env, cwd. */
   launch: { prooted: boolean; sandboxArgs: string[]; env: Record<string, string>; appDir: string };
@@ -244,12 +237,12 @@ export class ProotRunner implements SandboxRunner {
 
     const sandboxArgs = prooted ? args.slice(0, args.length - entrypointArgv.length) : [];
     this.processes.set(instanceId, {
-      process: child, port, appId, manifest, provision,
+      process: child, port, appId, provision,
       launch: { prooted, sandboxArgs, env, appDir },
     });
 
     try {
-      await this.waitHealthy(instanceId, appId, port, manifest, () => exited);
+      await this.waitHealthy(instanceId, appId, port, () => exited);
     } catch (err) {
       // Either timeout, early exit or identity mismatch — clean up the partial
       // spawn so we don't leak an orphan process or a stale instance entry.
@@ -405,7 +398,7 @@ export class ProotRunner implements SandboxRunner {
    * content bug — a bare 200 is no longer enough.
    */
   private async waitHealthy(
-    instanceId: string, appId: string, port: number, manifest: AppManifest,
+    instanceId: string, appId: string, port: number,
     exited: () => string | null = () => null,
   ): Promise<void> {
     // See ContainerRunner.waitHealthy — a cold app installs its dependency
@@ -414,7 +407,7 @@ export class ProotRunner implements SandboxRunner {
     const hardDeadline = startedAt + PROVISION_TIMEOUT_MS;
     const provision    = this.processes.get(instanceId)?.provision;
     let   deadline     = startedAt + HEALTH_CHECK_TIMEOUT_MS;
-    const healthUrl = `http://localhost:${port}${lifecyclePath(manifest, instanceId, 'health')}`;
+    const healthUrl = `http://localhost:${port}${lifecyclePath('health')}`;
     let lastBody: string | null = null;
     while (Date.now() < deadline) {
       const exit = exited();
@@ -462,7 +455,7 @@ export class ProotRunner implements SandboxRunner {
   async callLifecycle(instanceId: string, hook: string): Promise<void> {
     const spawned = this.processes.get(instanceId);
     if (!spawned) throw new Error(`[ProotRunner] ${instanceId} is not running`);
-    const url = `http://localhost:${spawned.port}${lifecyclePath(spawned.manifest, instanceId, hook)}`;
+    const url = `http://localhost:${spawned.port}${lifecyclePath(hook)}`;
     const res = await fetch(url, {
       method: 'POST',
       signal: AbortSignal.timeout(LIFECYCLE_TIMEOUT_MS),
@@ -486,7 +479,7 @@ export class ProotRunner implements SandboxRunner {
     const spawned = this.processes.get(instanceId);
     if (!spawned) return null;
     try {
-      const res = await fetch(`http://localhost:${spawned.port}${lifecyclePath(spawned.manifest, instanceId, hook)}`, {
+      const res = await fetch(`http://localhost:${spawned.port}${lifecyclePath(hook)}`, {
         method: 'POST',
         headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
         body: body !== undefined ? JSON.stringify(body) : undefined,

@@ -85,7 +85,7 @@ postMessages each iframe its applicable subset:
 { type: 'aura.key.claim', combos: [...os, ...perApp.get(thisAppId) ?? []], generation: N }
 ```
 
-Inside the iframe (the proxy-injected key forwarder) maintains its own
+Inside the iframe, the key forwarder (part of `/_aura/runtime.js`) maintains its own
 canonical-combo machine — duplicates the dispatcher's logic — and ONLY
 postMessages keys whose canonical combo is in the claim set. Everything
 else gets the browser's native handling.

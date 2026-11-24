@@ -42,7 +42,6 @@ const KNOWN_LISTENERS = [
   'server/attach.mjs WebSocketServer',
   'server/attach.mjs upgrade',
   'server/sse-mux.mjs WebSocketServer',
-  'server/sse-mux.mjs upgrade',
 ];
 
 const inventory = enumerateRoutes(pagesDir);
@@ -88,7 +87,7 @@ test('the listener scan finds each form and ignores strings and comments', () =>
 
 test('the route names follow Astro', () => {
   const routes = new Set(inventory.routes.map((r) => r.route));
-  for (const r of ['/api/os/theme.css', '/api/os/icons/[name].svg', '/api/os/keyboard.js', '/api/apps', '/api/kv/[...path]']) {
+  for (const r of ['/api/os/theme.css', '/api/os/icons/[name].svg', '/api/apps', '/api/kv/[...path]']) {
     assert.ok(routes.has(r), r);
   }
   assert.ok(!routes.has('/api/apps/index'));

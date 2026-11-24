@@ -108,26 +108,14 @@ export class ActivityApi {
   }
 
   /**
-   * Current in-activity back stack as `{ path, title }` pairs, read off
-   * the proxy-injected `<meta name="aura-activity-history">` tag. Apps
-   * that opt out of the OS breadcrumb (`setBreadcrumb('off')`) use this
-   * to render their own trail. Refreshed on every iframe load (which is
-   * how navigations happen — the OS swaps the iframe `src`, the new doc
-   * reads the new meta).
+   * Current in-activity back stack as `{ path, title }` pairs, from the
+   * runtime bootstrap. Apps that opt out of the OS breadcrumb
+   * (`setBreadcrumb('off')`) use this to render their own trail. Refreshed on
+   * every frame load, which is how navigations happen: the OS points the
+   * frame at the new path, and the new document reads the new bootstrap.
    */
   getHistory(): Array<{ path: string; title?: string }> {
-    if (typeof document === 'undefined') return [];
-    // PHASE2-CUTOVER: only the proxy writes this tag, so an App Host page reads []. It needs
-    // another source (the bootstrap or an activity route) before proxy serving goes.
-    const raw = document.querySelector('meta[name="aura-activity-history"]')?.getAttribute('content');
-    if (!raw) return [];
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      if (!Array.isArray(parsed)) return [];
-      return parsed.filter((e): e is { path: string; title?: string } =>
-        e !== null && typeof e === 'object' && typeof (e as { path?: unknown }).path === 'string',
-      );
-    } catch { return []; }
+    return [...(appHostRuntime()?.activityHistory ?? [])];
   }
 
   /**

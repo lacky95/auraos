@@ -1,4 +1,4 @@
-// The dark owner login surface: lib/authSurface.ts and the /api/auth routes.
+// The owner login surface: lib/authSurface.ts, the /api/auth routes and the desktop gate.
 // Fakes only, so nothing here touches Valkey or AppManager.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -7,8 +7,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { LoginSession, LoginSessionInput, SetupTicket, UserAccount } from '@aura/core';
 import {
-  authLogin, authLogout, authPageGate, authSession, authSetup, authStatus, authWhoami,
-  MAX_BODY_BYTES, requestScheme,
+  authLogin, authLogout, authPageHeaders, authSession, authSetup, authStatus, authWhoami,
+  desktopSignIn, MAX_BODY_BYTES, requestScheme,
 } from '../src/lib/authSurface.ts';
 import type { AuthContext, AuthSurfaceDeps, AuthSurfaceServices } from '../src/lib/authSurface.ts';
 import { GET as statusRoute } from '../src/pages/api/auth/status.ts';
@@ -101,7 +101,7 @@ function fakes() {
     disableOwner: () => { if (owner) owner.disabled = true; },
     setBeforeIssue: (fn: (() => Promise<void>) | null) => { beforeIssue = fn; },
     deps: (env: Record<string, string> = {}): AuthSurfaceDeps => ({
-      env: { AURA_OWNER_LOGIN: 'on', ...env },
+      env: { ...env },
       services: () => services,
       authenticate: async () => ({ kind: 'anonymous', verification: 'unverified' }),
     }),
@@ -134,83 +134,58 @@ async function withOwner() {
   return f;
 }
 
-// ── dark by default ─────────────────────────────────────────────────────────
+// ── always on (D6) ──────────────────────────────────────────────────────────
 
-const ROUTES = [
-  ['setup', setupRoute, () => post(setupBody())],
-  ['login', loginRoute, () => post({ username: 'lukas', password: PASSWORD })],
-  ['logout', logoutRoute, () => post({})],
-  ['session', sessionRoute, () => get()],
-] as const;
-
-for (const flag of [undefined, '', 'off', 'ON', '1', 'true']) {
-  test(`flag ${JSON.stringify(flag)}: every route but status and whoami is 404, with no cookie`, async () => {
-    const saved = process.env['AURA_OWNER_LOGIN'];
-    if (flag === undefined) delete process.env['AURA_OWNER_LOGIN'];
-    else process.env['AURA_OWNER_LOGIN'] = flag;
-    try {
-      for (const [name, route, ctx] of ROUTES) {
-        const res = await (route as (c: AuthContext) => Promise<Response>)(ctx());
-        assert.equal(res.status, 404, name);
-        assert.equal(res.headers.get('set-cookie'), null, name);
-        assert.equal(res.headers.get('cache-control'), 'no-store', name);
-        assert.equal(await res.text(), '', name);
-      }
-      const status = await (statusRoute as (c: AuthContext) => Promise<Response>)(get());
-      assert.equal(status.status, 200);
-      assert.deepEqual(await status.json(), { login: 'disabled' });
-      assert.equal(status.headers.get('cache-control'), 'no-store');
-      const gate = authPageGate();
-      assert.equal(gate.enabled, false);
-      if (!gate.enabled) assert.equal(gate.response.status, 404);
-    } finally {
-      if (saved === undefined) delete process.env['AURA_OWNER_LOGIN'];
-      else process.env['AURA_OWNER_LOGIN'] = saved;
-    }
-  });
-}
-
-test('flag off: no service is touched and the body is not read', async () => {
-  const deps: AuthSurfaceDeps = {
-    env: {}, services: () => { throw new Error('touched'); },
-    authenticate: async () => ({ kind: 'anonymous', verification: 'unverified' }),
-  };
-  const ctx = post(setupBody());
-  assert.equal((await authSetup(ctx, deps)).status, 404);
-  assert.equal(ctx.request.bodyUsed, false);
-  assert.equal((await authLogin(post({}), deps)).status, 404);
-  assert.equal((await authLogout(post({}), deps)).status, 404);
-  assert.equal((await authSession(get(), deps)).status, 404);
-  assert.deepEqual(await (await authWhoami(get({ cookie: 'aura_session=x' }), deps)).json(), {
-    principal: { kind: 'anonymous', verification: 'unverified' },
-    login: { state: 'disabled', cookie: 'present', authority: false },
-  });
-  assert.deepEqual(await (await authStatus(get(), deps)).json(), { login: 'disabled' });
+test('there is no login flag: the routes answer without one', async () => {
+  const f = fakes();
+  for (const env of [{}, { AURA_OWNER_LOGIN: 'off' }]) {
+    const deps = { ...f.deps(), env };
+    assert.deepEqual(await (await authStatus(get(), deps)).json(), { login: 'enabled', setup: 'required' });
+    assert.equal((await authLogin(post({ username: 'lukas', password: PASSWORD }), deps)).status, 401);
+    assert.deepEqual(await (await authSession(get(), deps)).json(), { authenticated: false });
+  }
 });
 
-test('both pages stop at the gate before rendering anything', () => {
+test('the desktop sends everyone to setup until the owner exists, then to login', async () => {
+  const location = async (ctx: AuthContext, deps: AuthSurfaceDeps) => {
+    const r = await desktopSignIn(ctx, deps);
+    return r ? `${r.status} ${r.headers.get('location')}` : null;
+  };
+  const fresh = fakes();
+  assert.equal(await location(get(), fresh.deps()), '303 /setup');
+  const f = await withOwner();
+  assert.equal(await location(get(), f.deps()), '303 /login');
+  assert.equal(await location(get({ cookie: 'aura_session=aura-sess1.forged.mac' }), f.deps()), '303 /login');
+  const token = tokenOf(await authLogin(post({ username: 'lukas', password: PASSWORD }), f.deps()));
+  assert.equal(await location(get({ cookie: `aura_session=${token}` }), f.deps()), null, 'signed in');
+  const missing: AuthSurfaceDeps = { env: {}, services: () => null };
+  assert.equal(await location(get(), missing), '303 /login', 'an unreadable store fails closed');
+  const broken: AuthSurfaceDeps = { env: {}, services: () => { throw new Error('down'); } };
+  assert.equal(await location(get(), broken), '303 /login');
+});
+
+test('the desktop pages check the sign-in before rendering anything', () => {
+  for (const page of ['index', 'launcher']) {
+    const front = fs.readFileSync(path.join(root, `src/pages/${page}.astro`), 'utf8').split('---')[1]!;
+    const gate = front.indexOf('if (signIn) return signIn;');
+    assert.ok(gate > front.indexOf('desktopSignIn(Astro)'), page);
+    assert.ok(gate < front.indexOf('getAppManager()'), `${page}: before any app data`);
+  }
+});
+
+test('both auth pages set their headers before rendering anything', () => {
   for (const page of ['setup', 'login']) {
     const src = fs.readFileSync(path.join(root, `src/pages/${page}.astro`), 'utf8');
     const front = src.split('---')[1]!;
-    assert.ok(front.indexOf('if (!gate.enabled) return gate.response;') > front.indexOf('authPageGate()'), page);
+    assert.ok(front.includes('authPageHeaders()'), page);
     assert.ok(!src.includes('OSLayout'), page);
     assert.ok(!/(?:src|href)="https?:/.test(src), `${page}: no third-party asset`);
   }
   assert.ok(!/(?:src|href)="https?:/.test(fs.readFileSync(path.join(root, 'src/layouts/AuthLayout.astro'), 'utf8')));
 });
 
-test('nothing outside the surface links to it', () => {
-  for (const file of ['src/layouts/OSLayout.astro', 'src/pages/index.astro', 'src/middleware.ts']) {
-    const src = fs.readFileSync(path.join(root, file), 'utf8');
-    assert.ok(!/['"`]\/(login|setup)['"`]/.test(src), file);
-    assert.ok(!src.includes('/api/auth/'), file);
-  }
-});
-
-test('the page gate sets the frame, opener and cache headers', () => {
-  const gate = authPageGate({ AURA_OWNER_LOGIN: 'on' });
-  assert.ok(gate.enabled);
-  if (!gate.enabled) return;
+test('the page headers set the frame, opener and cache headers', () => {
+  const gate = authPageHeaders();
   const csp = gate.headers['Content-Security-Policy']!;
   assert.ok(csp.includes(`frame-ancestors 'none'`));
   assert.ok(csp.includes(`script-src 'nonce-${gate.nonce}'`));
@@ -228,7 +203,7 @@ test('status names no owner and survives missing services', async () => {
   const text = await (await authStatus(get(), f.deps())).text();
   assert.deepEqual(JSON.parse(text), { login: 'enabled', setup: 'complete' });
   assert.ok(!text.includes('lukas'));
-  const missing: AuthSurfaceDeps = { env: { AURA_OWNER_LOGIN: 'on' }, services: () => null };
+  const missing: AuthSurfaceDeps = { env: {}, services: () => null };
   assert.deepEqual(await (await authStatus(get(), missing)).json(), { login: 'unavailable' });
   assert.equal((await authLogin(post({ username: 'lukas', password: PASSWORD }), missing)).status, 503);
 });

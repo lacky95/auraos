@@ -15,31 +15,16 @@
  * that window exists — so the app can only ever read the mark after it was
  * written. No handshake, no timing window, and nothing to retry.
  *
- * `sessionStorage` is exactly the right transport here. It is scoped to one
- * browser TAB, and app iframes are proxied from the shell's own origin
- * (`/api/proxy/…`), so every iframe in this tab reads what the shell wrote
- * while another tab — or another browser, or another device — sees nothing.
- *
- * The contract for apps (the Terminal implements it):
- *
- *   key    'aura.launchedHere'
- *   value  JSON `{ [viewId]: epochMs }`, viewId === activityId ?? instanceId
- *   use    on start-up, look for your own id; if it's there, DELETE it and
- *          write the map back, then take the session for this browser.
- *
- * Consuming the mark is the app's job and must happen exactly once: it says
- * "this page load was the launch", so a later reload of the same window must
- * not silently steal the session back from wherever the user moved it.
- *
- * An App Host frame is on its own origin and can't read this tab's storage, so
- * there the Shell consumes the mark itself when it resolves the frame
- * (lib/appFrame.ts) and adds `_aura_launched=1` to the page's first URL. The
- * app removes the parameter once read (history.replaceState), which keeps a
- * reload from claiming again.
- * PHASE2-CUTOVER: the sessionStorage contract goes with proxy frames; the parameter stays.
+ * `sessionStorage` is the right store: it is scoped to one browser TAB, so
+ * another tab, browser or device sees nothing. The shell writes the mark when
+ * it launches a window and consumes it when it resolves that window's frame
+ * (lib/appFrame.ts), adding `_aura_launched=1` to the page's first URL: an App
+ * Host frame is on its own origin and can't read this tab's storage. The app
+ * removes the parameter once read (history.replaceState), so a reload can't
+ * claim again. The Terminal implements this.
  */
 
-export const LAUNCHED_HERE_KEY = 'aura.launchedHere';
+const LAUNCHED_HERE_KEY = 'aura.launchedHere';
 /** On an App Host frame's first URL: this browser launched the window. */
 export const LAUNCHED_HERE_PARAM = '_aura_launched';
 

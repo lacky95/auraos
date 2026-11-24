@@ -14,8 +14,8 @@
  *                       machine is then not served. IP addresses, `localhost`,
  *                       `os.aura.localhost`, nip.io names and single-label
  *                       container names need no entry (see `hostListed`).
- *   AURA_HOST_POLICY    `report` (default until cutover) logs a Host that is
- *                       malformed or not listed; `enforce` refuses it.
+ *   AURA_HOST_POLICY    `enforce` (default) refuses a Host that is malformed
+ *                       or not listed; `report` only logs it.
  */
 import { classifyDesktopHost, parseAppHost, supportsAppHosts } from '@aura/core/host-rules';
 
@@ -166,6 +166,29 @@ export function browserBoundaryError(req, { policy, origin: expected, path = '',
   }
 }
 
+/** Destinations a browser renders or runs as a document or worker of the URL's own origin. */
+const DOCUMENT_DESTS = new Set([
+  'document', 'iframe', 'frame', 'embed', 'object', 'fencedframe', 'worker', 'sharedworker', 'serviceworker',
+]);
+
+/**
+ * Whether a request is a browser loading a page, frame or worker, which the
+ * machine proxy (`/api/proxy/*`) never serves. `Sec-Fetch-*` says so where
+ * the browser sends it (HTTPS and localhost); over plain HTTP a navigation
+ * still carries `Upgrade-Insecure-Requests: 1`, which fetch() can't set.
+ * Machine callers (curl, MCP clients, an app's server) send none of these.
+ * @param {string | undefined} method
+ * @param {(name: string) => unknown} header
+ */
+export function browserDocumentRequest(method, header) {
+  const dest = String(header('sec-fetch-dest') ?? '').toLowerCase();
+  if (DOCUMENT_DESTS.has(dest)) return true;
+  const mode = String(header('sec-fetch-mode') ?? '').toLowerCase();
+  if (mode === 'navigate' || mode === 'nested-navigate') return true;
+  return String(header('upgrade-insecure-requests') ?? '').trim() === '1'
+    && READ_METHODS.has(String(method ?? 'GET').toUpperCase()) && !dest;
+}
+
 /** `host` without the scheme's default port, lowercase. */
 function bareHost(scheme, host) {
   const h = String(host ?? '').trim().toLowerCase();
@@ -219,12 +242,10 @@ export function hostListed(host, env = process.env) {
 }
 
 /**
- * `report` keeps every address that works today and logs the rest;
- * `enforce` refuses a malformed or unlisted Host. AURA_HOST_POLICY overrides.
- * PHASE2-CUTOVER: the default becomes `enforce`, once the live install's custom
- * domain is in AURA_DESKTOP_HOSTS.
+ * `enforce` refuses a malformed or unlisted Host; `report` serves it and logs
+ * it. AURA_HOST_POLICY overrides.
  */
-const DEFAULT_HOST_POLICY = 'report';
+const DEFAULT_HOST_POLICY = 'enforce';
 export const hostPolicy = (env = process.env) => {
   const set = env.AURA_HOST_POLICY;
   return set === 'enforce' || set === 'report' ? set : DEFAULT_HOST_POLICY;

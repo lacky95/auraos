@@ -137,5 +137,5 @@ window.addEventListener('message',function(ev){
 });
 }catch(_){}})();`;
 
-// PHASE2-CUTOVER: the parent check is only safe for proxied documents, where the parent is the shell.
+// The shell's own document (KeyboardOverlay): it is the top window, so its parent is itself.
 export const SYNTHETIC_RECEIVER_JS = syntheticReceiverJs('ev.source!==window.parent');

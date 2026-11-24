@@ -1,10 +1,10 @@
 import type * as core from '@aura/core';
 import { buildAppHost } from '@aura/core/host-rules';
 import type { APIContext } from 'astro';
-import { appHostAuth, LOGIN_DARK_SID, type AppHostServices } from '../../server/app-host-auth.mjs';
+import { appHostAuth, type AppHostServices } from '../../server/app-host-auth.mjs';
 import { isSystemInstallation } from '../../server/gateway-identity.mjs';
 import { edgeView, originOf } from '../../server/host-policy.mjs';
-import { currentOwnerSession, loginEnabled } from './authSurface.js';
+import { currentOwnerSession } from './authSurface.js';
 
 /**
  * A one-time code that signs a browser in to one running instance's App Host:
@@ -16,20 +16,18 @@ import { currentOwnerSession, loginEnabled } from './authSurface.js';
 type AppManager = ReturnType<typeof core.getAppManager>;
 interface HandoffServices {
   registry: core.AppHostRegistry & Partial<Pick<AppHostServices['registry'], 'getInstallation'>>;
-  frameRoute: (appId: string) => Promise<'proxy' | 'host'>;
 }
 
 export interface HandoffIdentity {
   sid: string;
-  userId: string | null;
+  userId: string;
   sessionExpiresAt: number | null;
 }
 
 /**
  * The owner behind a request from the Shell's own page, or why not. Exact
  * Origin: App Hosts are same-site with the Shell, so this is what stops an
- * app's page from acting as the desktop. With owner login dark, reaching the
- * desktop is all it takes (a Phase 3 item).
+ * app's page from acting as the desktop.
  */
 export async function shellOwner(ctx: Pick<APIContext, 'request' | 'cookies'> & { clientAddress?: string }): Promise<
   | { edge: ReturnType<typeof edgeView>; identity: HandoffIdentity }
@@ -43,7 +41,6 @@ export async function shellOwner(ctx: Pick<APIContext, 'request' | 'cookies'> & 
   if ((site !== null && site !== 'same-origin') || request.headers.get('origin') !== edge.origin) {
     return { edge, error: 'forbidden-origin', status: 403 };
   }
-  if (!loginEnabled()) return { edge, identity: { sid: LOGIN_DARK_SID, userId: null, sessionExpiresAt: null } };
   let current: Awaited<ReturnType<typeof currentOwnerSession>>;
   try { current = await currentOwnerSession(ctx as never); } catch { return { edge, error: 'unavailable', status: 503 }; }
   if (!current) return { edge, error: 'login-required', status: 401 };
@@ -68,7 +65,6 @@ export async function issueAppHostHandoff(opts: {
   embed?: core.AppHostEmbedClaim;
 }): Promise<HandoffResult> {
   const { services, mgr, appId, instanceId, identity } = opts;
-  if (await services.frameRoute(appId) !== 'host') return { error: 'not-host-routed', status: 409 };
   const instance = mgr.getInstance(instanceId);
   if (!instance || instance.appId !== appId || instance.inPool) return { error: 'not-found', status: 404 };
 
@@ -76,7 +72,7 @@ export async function issueAppHostHandoff(opts: {
     .filter((r) => r.state === 'active')
     .flatMap((r) => r.slots.filter((s) => s.instanceId === instanceId));
   let held = await heldSlots();
-  // PHASE2-CUTOVER: only an instance started before its app moved to `host` lacks a slot.
+  // An instance without a slot yet (adopted from before slots, or its slot was freed) claims it here.
   if (held.length === 0) {
     await mgr.claimHostSlot(appId, instanceId);
     held = await heldSlots();
@@ -92,11 +88,10 @@ export async function issueAppHostHandoff(opts: {
   const host = buildAppHost(label, opts.desktopHost);
   if (!host) return { error: 'no-app-hosts', status: 409 };
 
-  const scopeUser = record.instanceScope.kind === 'user' ? record.instanceScope.userId : 'default';
   const origin = originOf(opts.scheme, host);
   const { code } = appHostAuth().issueCode({
     aud: origin, label, installationId: record.installationId, appId, slot: slot.slot,
-    userId: identity.userId ?? scopeUser, sid: identity.sid, returnPath: opts.returnPath,
+    userId: identity.userId, sid: identity.sid, returnPath: opts.returnPath,
     sessionExpiresAt: identity.sessionExpiresAt, embed: opts.embed ?? null,
   });
   return { code, origin, slot: slot.slot, system: await isSystemInstallation(services.registry, record) };

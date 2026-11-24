@@ -111,13 +111,13 @@ export function registerIdentity(program: Command): void {
 
   program
     .command('setup-code')
-    .description('Host command: create a one-time owner setup code (needs AURA_OWNER_LOGIN=on).')
+    .description('Host command: create a one-time owner setup code.')
     .action(() => printCode({ purpose: 'setup' }));
 
   const user = program.command('user').description('Owner account recovery (host commands).');
   user
     .command('reset-password <username>')
-    .description('Host command: create a one-time password reset code (needs AURA_OWNER_LOGIN=on).')
+    .description('Host command: create a one-time password reset code.')
     .action((username: string) => {
       const name = username.trim();
       if (!name) fail('aura user reset-password <username>');

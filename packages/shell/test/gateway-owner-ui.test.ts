@@ -32,9 +32,8 @@ const installations: Record<string, { appId: string; scope: string; state: strin
   'inst-notes': { appId: NOTES, scope: 'user', state: 'active' },
 };
 const liveSessions = new Set(['s-live']);
-let loginOn = true;
 /** Mirrors app-host-auth.mjs `sessionLive`. */
-const sessionLive = async (sid: string) => (sid === 'login-dark' ? !loginOn : loginOn && liveSessions.has(sid));
+const sessionLive = async (sid: string) => liveSessions.has(sid);
 const services = {
   registry: { getInstallation: async (id: string) => installations[id] ?? null },
   sessionLive,
@@ -166,17 +165,9 @@ test('a cookie without a live session, or a revoked session, is refused', async 
   assert.equal((await enforce(apiCtx(settings, method, path, route, { owner: { userId: 'u-other', sid: 's-live' } })))?.status, 403);
 });
 
-test('login dark: the login-dark session acts for the owner only while login is dark', async () => {
+test('only a live login session acts for the owner; the old login-dark marker never does', async () => {
   const [method, path, route] = OWNER_ROUTES[0]!;
-  const dark = { userId: OWNER.userId, sid: 'login-dark' };
-  loginOn = false;
-  try {
-    assert.equal(await enforce(apiCtx(settings, method, path, route, { owner: dark })), null);
-    assert.equal((await enforce(apiCtx(settings, method, path, route)))?.status, 403, 'a login session is not live while dark');
-  } finally {
-    loginOn = true;
-  }
-  assert.equal((await enforce(apiCtx(settings, method, path, route, { owner: dark })))?.status, 403);
+  assert.equal((await enforce(apiCtx(settings, method, path, route, { owner: { userId: OWNER.userId, sid: 'login-dark' } })))?.status, 403);
 });
 
 test('never a login session, a shell screen or another app, even for Settings', async () => {

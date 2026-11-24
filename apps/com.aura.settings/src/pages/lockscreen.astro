@@ -373,18 +373,9 @@ const POSITIONS: { id: LockPosition; icon: string }[] = [
         failText = err && err.message ? err.message : 'network error';
       }
 
-      // Fast path: also postMessage (instant where messaging works). On an
-      // App Host the SDK posts to the Shell's exact origin only.
-      if (window.auraOs.appHost()) {
-        window.auraOs.postToShell({ type: 'aura.lockscreen.activate' });
-      } else {
-        // PHASE2-CUTOVER: a proxied page posts to parent and top with target `*`.
-        const targets = new Set([window.parent, window.top].filter((w) => w && w !== window));
-        targets.forEach((w) => {
-          try { w.postMessage({ type: 'aura.lockscreen.activate' }, '*'); } catch { /* frame gone */ }
-          try { w.postMessage({ type: 'aura.system.lockScreen' }, '*'); } catch { /* frame gone */ }
-        });
-      }
+      // Fast path: also postMessage (instant where messaging works). The SDK
+      // posts to the Shell's exact origin only.
+      window.auraOs.postToShell({ type: 'aura.lockscreen.activate' });
 
       statusEl.innerHTML = signalled
         ? `🔒 LOCK SIGNAL SENT · ${new Date().toLocaleTimeString()} — overlay appears within ~1s`

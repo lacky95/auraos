@@ -5,29 +5,12 @@ import tailwindcss from '@tailwindcss/vite';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import {
-  attachAppHosts, attachShellSseMux, attachSio, attachWsProxy, proxyQueryEscapeMiddleware,
-} from './server/attach.mjs';
+import { attachAppHosts, attachSio, attachWsProxy } from './server/attach.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // The shell's non-Astro servers live in ./server/attach.mjs, shared with the
 // production entry (server.mjs). In dev they attach to Vite's HTTP server:
-
-/**
- * Rewrite `/api/proxy/<id>/<path>?astro|?vue|?svelte` BEFORE vite-plugin-astro
- * sees it (it would try to compile the app's file relative to packages/shell).
- * Registered WITHOUT returning a function from configureServer so it lands
- * BEFORE Vite's internal middlewares.
- */
-function proxyViteQueryEscape() {
-  return {
-    name: 'aura-proxy-vite-query-escape',
-    configureServer(server) {
-      server.middlewares.use(proxyQueryEscapeMiddleware);
-    },
-  };
-}
 
 /** App hosts (server/app-hosts.mjs): in front of Vite, like in front of the prod handler. */
 function appHostsPlugin() {
@@ -44,15 +27,6 @@ function wsProxyPlugin() {
     name: 'aura-ws-proxy',
     configureServer(server) {
       if (server.httpServer) attachWsProxy(server.httpServer);
-    },
-  };
-}
-
-function sseMuxPlugin() {
-  return {
-    name: 'aura-sse-mux',
-    async configureServer(server) {
-      if (server.httpServer) await attachShellSseMux(server.httpServer);
     },
   };
 }
@@ -143,6 +117,6 @@ export default defineConfig({
     },
     // tailwindcss() must come before wsProxyPlugin so its content-scanning
     // hooks run on every transformed module.
-    plugins: [tailwindcss(), appHostsPlugin(), proxyViteQueryEscape(), wsProxyPlugin(), sseMuxPlugin(), sioPlugin()],
+    plugins: [tailwindcss(), appHostsPlugin(), wsProxyPlugin(), sioPlugin()],
   },
 });

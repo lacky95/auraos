@@ -25,7 +25,7 @@ import { osAuthHeaders } from '../../app-sdk/src/os-auth.ts';
 
 const KEY = `aura_admin_${'k'.repeat(43)}`;
 const ENV = ['AURA_SHELL_URL', 'OS_API_BASE', 'AURA_OS_URL', 'AURA_INSTANCE_TOKEN', 'APP_INSTANCE_ID', 'AURA_INSTANCE_ID',
-  'AURA_ADMIN_SESSION', 'AURA_ADMIN_CREDENTIAL', 'AURA_OWNER_LOGIN', 'APP_ID', 'AURA_APP_ID'];
+  'AURA_ADMIN_SESSION', 'AURA_ADMIN_CREDENTIAL', 'APP_ID', 'AURA_APP_ID'];
 
 interface Seen { method: string; url: string; auth?: string; body: string }
 type Handler = (r: Seen, res: http.ServerResponse) => [number, unknown] | 'handled';
@@ -285,11 +285,9 @@ test('whoami: verified, dark, rejected, unreachable; no secret in the output', a
   assert.equal((await fetchWhoami()).state, 'unreachable');
 });
 
-test('setup codes: refused unless owner login is on, refused in a sandbox', async () => {
+test('setup codes: refused in a sandbox', async () => {
   const calls: unknown[][] = [];
   const create = (dir: string, input: { purpose: string }) => { calls.push([dir, input]); return { code: 'c', expiresAt: 1 }; };
-  await assert.rejects(issueSetupCode({ purpose: 'setup' }, create), SetupCodeRefused);
-  process.env['AURA_OWNER_LOGIN'] = 'on';
   process.env['APP_INSTANCE_ID'] = 'a.b';
   await assert.rejects(issueSetupCode({ purpose: 'setup' }, create), SetupCodeRefused);
   delete process.env['APP_INSTANCE_ID'];
@@ -299,7 +297,6 @@ test('setup codes: refused unless owner login is on, refused in a sandbox', asyn
 });
 
 test('setup-code: the real path writes one private ticket and opens no connection', async () => {
-  process.env['AURA_OWNER_LOGIN'] = 'on';
   const connect = net.Socket.prototype.connect;
   let connections = 0;
   net.Socket.prototype.connect = function (this: net.Socket, ...args: unknown[]) {
