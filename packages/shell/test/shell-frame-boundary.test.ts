@@ -300,6 +300,13 @@ test('a failed probe falls back to the guide', async () => {
   assert.equal(await probeAppHostAddress('http://x/', (async () => { throw new TypeError('dns'); }) as typeof fetch), false);
 });
 
+test('the probe is a fetch browsers accept: no-cors with the default redirect', async () => {
+  let init: RequestInit | undefined;
+  await probeAppHostAddress('http://x/', (async (_u: unknown, i?: RequestInit) => { init = i; return new Response(''); }) as typeof fetch);
+  assert.equal(init?.mode, 'no-cors');
+  assert.ok(init?.redirect === undefined || init.redirect === 'follow', `redirect ${init?.redirect} is rejected with no-cors`);
+});
+
 test('WebKit detection does not catch Chromium', () => {
   assert.equal(isWebKitBrowser('Mozilla/5.0 (Macintosh) AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15'), true);
   assert.equal(isWebKitBrowser('Mozilla/5.0 (iPhone) AppleWebKit/605.1.15 CriOS/120 Mobile/15E148 Safari/604.1'), true);
