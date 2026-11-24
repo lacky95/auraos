@@ -52,7 +52,7 @@ test('host route: resolves through the handoff with the shared attributes', asyn
   assert.equal(url, '/api/app-hosts/handoff');
   assert.equal(body['returnPath'], '/doc?_aura_activity=a1');
   assert.equal(f.origin, APP);
-  assert.equal(f.url, `${APP}/_aura/handoff?code=c0de`);
+  assert.equal(f.url, `${APP}/_aura/handoff?code=c0de&next=${encodeURIComponent('/doc?_aura_activity=a1')}`);
   assert.equal(f.label, 'notes1a2b3c4d');
   assert.equal(f.slot, 2);
   assert.equal(f.sandbox, APP_FRAME_SANDBOX);

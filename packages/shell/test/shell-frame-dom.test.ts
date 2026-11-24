@@ -63,7 +63,7 @@ test('a host frame is sandboxed before it has a src, and is posted to at its exa
   open();
   await settle();
   gate = Promise.resolve();
-  assert.match(f.getAttribute('src') ?? '', /^http:\/\/notes1a2b3c4d--10-201-1-2\.nip\.io:3000\/_aura\/handoff\?code=code\d+$/);
+  assert.match(f.getAttribute('src') ?? '', /^http:\/\/notes1a2b3c4d--10-201-1-2\.nip\.io:3000\/_aura\/handoff\?code=code\d+&next=%2Fdoc$/);
   assert.equal(postToFrame(f, { type: 'aura.window.focus' }), false, 'not before its load');
 
   f.dispatchEvent(new win.Event('load') as unknown as Event);

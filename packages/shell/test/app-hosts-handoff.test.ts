@@ -678,3 +678,18 @@ test('an App Host forwards only an Activity of the routed instance', () => {
   assert.deepEqual(activityHeaders('/?_aura_activity=other%23a1', 'io.acme.notes-2'), {});
   assert.deepEqual(activityHeaders('/page', 'io.acme.notes-2'), {});
 });
+
+test('a spent code continues only for a browser that holds the cookie', async () => {
+  const code = issue();
+  const next = encodeURIComponent('/page?_aura_activity=x');
+  const signed = await get(HOST, `/_aura/handoff?code=${code}&next=${next}`);
+  assert.equal(signed.status, 303);
+  const cookie = String(signed.headers['set-cookie']![0]).split(';')[0]!;
+  const again = await get(HOST, `/_aura/handoff?code=${code}&next=${next}`, { cookie });
+  assert.equal(again.status, 303);
+  assert.equal(again.headers.location, '/page?_aura_activity=x');
+  assert.equal(again.headers['set-cookie'], undefined);
+  assert.equal((await get(HOST, `/_aura/handoff?code=${code}&next=${next}`)).status, 403);
+  const evil = encodeURIComponent('//evil.example');
+  assert.equal((await get(HOST, `/_aura/handoff?code=${code}&next=${evil}`, { cookie })).status, 403);
+});

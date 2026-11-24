@@ -187,6 +187,7 @@ export async function resolveAppFrame(target: AppFrameTarget, deps: ResolveAppFr
   const { origin, label } = assertAppHostOrigin(h.origin, shellOrigin);
   const url = new URL(AURA_RESERVED_PATHS.handoff, origin);
   url.searchParams.set('code', h.code);
+  url.searchParams.set('next', returnPath);
   return {
     origin,
     url: url.href,

@@ -456,9 +456,22 @@ export function createAppHostRouter({
   function redeemHandoff(route, req, res, edge, pageHeaders) {
     const refuse = () => reply(res, 403, 'This link has expired', 'Open the app from the AuraOS desktop.', { headers: pageHeaders });
     if (req.method !== 'GET') return refuse();
-    let code;
-    try { code = new URL(req.url, 'http://h').searchParams.get('code'); } catch { return refuse(); }
+    let code, next;
+    try {
+      const params = new URL(req.url, 'http://h').searchParams;
+      code = params.get('code');
+      next = safeReturnPath(params.get('next'));
+    } catch { return refuse(); }
     const entry = hostAuth().consumeCode(code, { aud: edge.origin, label: route.label });
+    // Moving an iframe reloads its src, a code already spent. A browser that
+    // still holds this host's cookie just continues to the page.
+    if (!entry && next) {
+      return appSession(route, req, edge).then((session) => {
+        if (!session) return refuse();
+        res.writeHead(303, { location: next, 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
+        res.end();
+      });
+    }
     if (!entry || entry.claim.installationId !== route.record.installationId || entry.claim.slot !== route.slot.slot) return refuse();
     const location = safeReturnPath(entry.claim.returnPath);
     if (!location) return refuse();
