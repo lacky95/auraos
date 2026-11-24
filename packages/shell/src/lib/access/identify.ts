@@ -1,6 +1,6 @@
 import type { AppInstance, AppManager, UserPrincipal } from '@aura/core';
 import { loadAppHostServices, type AppHostServices } from '../../../server/app-host-auth.mjs';
-import { gatewayClaimOf, isOwnerUiInstallation, ownerUiApp } from '../../../server/gateway-identity.mjs';
+import { gatewayClaimOf, ownerUiActs, ownerUiApp } from '../../../server/gateway-identity.mjs';
 import { refererProxyId } from './legacyReferer.ts';
 
 /**
@@ -96,10 +96,13 @@ const owners = new WeakMap<Request, Promise<UserPrincipal | null>>();
  * live state, so a claim minted a moment before any of it changed buys nothing:
  *
  *   - a verified claim for a live instance of that app (gatewayInstance)
- *   - the app is in OWNER_UI_APPS, its installed copy is the `system` one, and
- *     the claim's installation is that active `system` installation
- *   - the login session the host cookie came from is still live
+ *   - its installed copy is the `system` one, and the one scope decision
+ *     (gateway-identity.mjs `ownerUiActs`) holds for the path called: an
+ *     OWNER_UI_APPS entry that covers it, the claim's installation is that
+ *     active `system` installation, and the owner's session is live
  *
+ * The route manifest check (gatewayCaller.ts) and `authenticate()` (auth.ts)
+ * both ask this, so no caller can skip the path scope.
  * The principal is the user, carrying the app it acts through. Cached per request.
  */
 export function gatewayOwner(request: Request, deps: GatewayOwnerDeps): Promise<UserPrincipal | null> {
@@ -119,8 +122,9 @@ async function resolveGatewayOwner(request: Request, deps: GatewayOwnerDeps): Pr
   const installed = deps.mgr.getManifest(inst.appId) as { scopeId?: string } | undefined;
   if (installed?.scopeId !== 'system') return null;
   const svc = await (deps.services ?? loadAppHostServices)();
-  if (!svc || !(await isOwnerUiInstallation(svc.registry, claim))) return null;
-  if (!(await svc.sessionLive(claim.owner.sid))) return null;
+  if (!svc) return null;
+  const path = new URL(request.url).pathname;
+  if (!(await ownerUiActs({ appId: inst.appId, installationId: claim.installationId, sid: claim.owner.sid, path }, svc))) return null;
   return {
     kind: 'user', userId: claim.owner.userId, role: 'owner', sessionId: claim.owner.sid,
     verification: 'verified', through: { appId: inst.appId, instanceId: inst.instanceId },

@@ -26,7 +26,7 @@ import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import { AURA_RESERVED_PATHS, GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { loadAppHostServices } from './app-host-auth.mjs';
-import { GATEWAY_CLAIM_TTL_S, gatewayKey, isOwnerUiInstallation, ownerUiApp, signGatewayClaim } from './gateway-identity.mjs';
+import { GATEWAY_CLAIM_TTL_S, gatewayKey, ownerUiActs, ownerUiApp, signGatewayClaim } from './gateway-identity.mjs';
 import { browserBoundaryError } from './host-policy.mjs';
 import { attachSseMux } from './sse-mux.mjs';
 
@@ -98,20 +98,22 @@ function buildClaim({ record, slot }, { method, path, origin, userId, sid = null
 }
 
 /**
- * D45: the owner this request acts for, or null. Only an allowlisted app's
- * active `system` installation qualifies, and only while the session its host
- * cookie came from is live (`login-dark` counts while login is dark, as for
- * the desktop). Fails closed when the registry can't be read.
+ * D45: the owner this request acts for, or null (gateway-identity.mjs
+ * `ownerUiActs`): an allowlisted app's active `system` installation, on a
+ * path its entry covers, while the session its host cookie came from is live
+ * (`login-dark` counts while login is dark, as for the desktop). Fails closed
+ * when the registry can't be read.
  */
-async function ownerActing(ctx, session) {
+async function ownerActing(ctx, session, path) {
   // A restricted embed cookie (5.16) is never the owner, whatever the app.
   if (session.embed !== undefined || !ownerUiApp(ctx.record?.appId)) return null;
   try {
     const svc = ctx.services ?? await loadAppHostServices();
     if (!svc) return null;
-    if (!(await isOwnerUiInstallation(svc.registry, ctx.record))) return null;
-    if (!(await svc.sessionLive(session.sid))) return null;
-    return { userId: session.userId, sid: session.sid };
+    const acts = await ownerUiActs({
+      appId: ctx.record.appId, installationId: ctx.record.installationId, sid: session.sid, path,
+    }, svc);
+    return acts ? { userId: session.userId, sid: session.sid } : null;
   } catch {
     return null;
   }
@@ -187,7 +189,7 @@ export async function handleAppGateway(req, res, ctx) {
 
   const path = gatewayShellPath(req.url);
   if (!path) return refuse(res, 404, 'not-a-gateway-path');
-  const owner = await ownerActing(ctx, session);
+  const owner = await ownerActing(ctx, session, path);
   const claim = buildClaim(ctx, { method: req.method, path, origin: session.aud, userId: session.userId, sid: session.sid, owner });
   return pipeToShell(req, res, path, shellHeaders(req.headers, claim));
 }

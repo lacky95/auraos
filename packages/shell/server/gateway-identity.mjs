@@ -61,6 +61,51 @@ export async function isOwnerUiInstallation(registry, ref) {
   return !!ownerUiApp(ref?.appId) && isSystemInstallation(registry, ref);
 }
 
+const routeRegexes = new Map();
+/** An Astro route pattern (`/api/apps/[id]/start`) as a regex over concrete paths. */
+function routeRegex(route) {
+  let re = routeRegexes.get(route);
+  if (!re) {
+    const body = route.split('/').map((seg) => {
+      if (/^\[\.\.\.[^\]]+\]$/.test(seg)) return '.+';
+      if (/^\[[^\]]+\]$/.test(seg)) return '[^/]+';
+      return seg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }).join('/');
+    re = new RegExp(`^${body}$`);
+    routeRegexes.set(route, re);
+  }
+  return re;
+}
+
+/**
+ * Whether the owner may act through `appId` on this shell path: an API group
+ * (first segment after `/api`) or exact route its OWNER_UI_APPS entry lists.
+ * Takes the concrete path, so the gateway, the route manifest check and
+ * `authenticate()` all answer from what was actually called.
+ */
+export function ownerUiCovers(appId, path) {
+  const entry = ownerUiApp(appId);
+  if (!entry) return false;
+  const p = String(path ?? '').split(/[?#]/, 1)[0];
+  if (!p.startsWith('/api/')) return false;
+  const group = p.split('/')[2] ?? '';
+  return entry.groups.includes(group) || entry.routes.some((route) => routeRegex(route).test(p));
+}
+
+/**
+ * D45, the one scope decision: the owner acts through this app on this path.
+ * An allowlisted app, a path its entry covers, its active `system`
+ * installation, and a live owner session. The gateway signs an owner claim
+ * only when this holds, and the shell checks it again (identify.ts
+ * `gatewayOwner`, used by the route manifest check and `authenticate()`).
+ * Throws when the registry can't be read; callers fail closed.
+ */
+export async function ownerUiActs({ appId, installationId, sid, path }, { registry, sessionLive }) {
+  if (!ownerUiCovers(appId, path)) return false;
+  if (!(await isOwnerUiInstallation(registry, { appId, installationId }))) return false;
+  return typeof sid === 'string' && !!sid && !!(await sessionLive(sid));
+}
+
 export function gatewayKey() {
   globalThis[KEY] ??= randomBytes(32);
   return globalThis[KEY];

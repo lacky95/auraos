@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net';
 import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import type { AuditInput, GatewayIdentityClaim } from '@aura/core';
 import { handleAppGateway } from '../server/app-gateway.mjs';
-import { signGatewayClaim, verifyGatewayClaim } from '../server/gateway-identity.mjs';
+import { ownerUiCovers, signGatewayClaim, verifyGatewayClaim } from '../server/gateway-identity.mjs';
 import { createDecide } from '../src/lib/access/decide.ts';
 import { enforceGateway } from '../src/lib/access/gatewayCaller.ts';
 import type { GatewayOwnerDeps } from '../src/lib/access/identify.ts';
@@ -248,6 +248,46 @@ test('authenticate(): an admin bearer counts only through the owner path', async
   }
 });
 
+test('authenticate(): an admin bearer counts only on a path the trusted UI covers (the one D45 scope)', async () => {
+  const deps = {
+    mgr, ownerServices,
+    apiKeys: { verify: async () => null },
+    admin: { verifySession: async (t: string) => (t === 'aura-admin1.good' ? { sessionId: 'adm-1', expiresAt: 9e15 } : null) },
+  } as unknown as AuthDeps;
+  const req = (c: Caller, path: string, method = 'GET') => new Request(`http://127.0.0.1:3000${path}`, {
+    method,
+    headers: {
+      [GATEWAY_IDENTITY_HEADER]: signGatewayClaim(claim(c, method, path, { owner: OWNER })),
+      authorization: 'Bearer aura-admin1.good',
+    },
+  });
+  // Nexus covers `apps` and `nexus` only: not the admin API.
+  for (const [c, path] of [
+    [nexus, '/api/admin/grants'], [nexus, '/api/os/context'], [settings, '/api/terminal/sessions'], [settings, '/api/nexus/install'],
+  ] as Array<[Caller, string]>) {
+    const p = await authenticate(req(c, path), deps);
+    assert.ok(!(p instanceof Response) && p.kind === 'instance', `${c.appId} ${path}: ${JSON.stringify(p)}`);
+  }
+  for (const [c, path] of [[settings, '/api/admin/grants'], [nexus, '/api/apps/com.acme.notes/start'], [nexus, '/api/os/ui/command']] as Array<[Caller, string]>) {
+    const p = await authenticate(req(c, path, 'POST'), deps);
+    assert.ok(!(p instanceof Response) && p.kind === 'admin', `${c.appId} ${path}`);
+  }
+});
+
+test('the D45 scope matches route patterns against the concrete path', () => {
+  assert.equal(ownerUiCovers('com.aura.terminal', '/api/apps/com.aura.terminal/instances'), true);
+  assert.equal(ownerUiCovers('com.aura.terminal', '/api/apps/com.aura.terminal/start?x=1'), true);
+  assert.equal(ownerUiCovers('com.aura.terminal', '/api/instances/com.aura.terminal-1/activities'), true);
+  assert.equal(ownerUiCovers('com.aura.terminal', '/api/apps/a/b/start'), false);
+  assert.equal(ownerUiCovers('com.aura.terminal', '/api/apps/com.aura.terminal/stop'), false);
+  assert.equal(ownerUiCovers('com.aura.terminal', '/api/admin/grants'), false);
+  assert.equal(ownerUiCovers(NEXUS, '/api/os/ui/command'), true);
+  assert.equal(ownerUiCovers(NEXUS, '/api/os/ui/commandx'), false);
+  assert.equal(ownerUiCovers(SETTINGS, '/api/admin/x'), true);
+  assert.equal(ownerUiCovers(SETTINGS, '/_aura/os/api/admin/x'), false);
+  assert.equal(ownerUiCovers(NOTES, '/api/apps/x/start'), false);
+});
+
 // ── the gateway signs the owner claim, and only for a trusted UI ───────────
 
 const seen: http.IncomingMessage[] = [];
@@ -312,6 +352,18 @@ test('gateway: no owner claim and no Authorization for anyone else', async () =>
     assert.equal(out.claim?.owner, undefined, c.record.installationId);
     assert.equal(out.authorization, undefined);
   }
+});
+
+test('gateway: no owner claim or admin session outside the paths the trusted UI covers', async () => {
+  ctx = gatewayCtx(NEXUS, 'inst-nexus');
+  seen.length = 0;
+  assert.equal(await call('/_aura/os/api/admin/grants', { authorization: 'Bearer aura-admin1.abc.def' }), 200);
+  const h = seen[0]!.headers;
+  assert.equal(verifyGatewayClaim(String(h[GATEWAY_IDENTITY_HEADER]), { method: 'GET', path: '/api/admin/grants' })?.owner, undefined);
+  assert.equal(h.authorization, undefined);
+  seen.length = 0;
+  assert.equal(await call('/_aura/os/api/nexus/sources', { authorization: 'Bearer aura-admin1.abc.def' }), 200);
+  assert.deepEqual(verifyGatewayClaim(String(seen[0]!.headers[GATEWAY_IDENTITY_HEADER]), { method: 'GET', path: '/api/nexus/sources' })?.owner, OWNER);
 });
 
 test('gateway: an unreadable registry fails closed', async () => {

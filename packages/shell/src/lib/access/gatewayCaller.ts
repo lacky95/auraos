@@ -1,6 +1,6 @@
 import * as core from '@aura/core';
 import type { AccessPrincipal, AuditInput, UserPrincipal } from '@aura/core';
-import { gatewayClaimOf, ownerUiApp } from '../../../server/gateway-identity.mjs';
+import { gatewayClaimOf } from '../../../server/gateway-identity.mjs';
 import { decide as liveDecide } from './decide.ts';
 import { gatewayInstance, gatewayOwner, type GatewayOwnerDeps } from './identify.ts';
 import { combineCandidates, concreteRule, kvNamespace, resourceFor, type ObserverManager } from './observer.ts';
@@ -19,9 +19,10 @@ import type { AccessLabel, AccessTarget, Decide, RequestSnapshot, RouteAccessMan
  *
  * A trusted system UI (D45, identify.ts `gatewayOwner`) is checked a second
  * time, as the owner acting through it, when its instance rules refuse a call.
- * That second check only covers the API groups and routes its OWNER_UI_APPS
- * entry lists and never a login session, a shell screen or another app's
- * upstream. Freshness and approvals on a rule still apply to the owner.
+ * `gatewayOwner` holds the one scope decision (the API groups and routes its
+ * OWNER_UI_APPS entry lists), and here it never reaches a login session, a
+ * shell screen or another app's upstream. Freshness and approvals on a rule
+ * still apply to the owner.
  */
 
 export interface GatewayEnforceDeps {
@@ -40,14 +41,6 @@ export interface GatewayEnforceDeps {
  * app's upstream (which includes the Terminal, D23, D29).
  */
 const OWNER_UI_EXCLUDED_TARGETS: ReadonlySet<AccessTarget> = new Set(['session', 'client-session', 'proxy-upstream']);
-
-/** Whether this route is in the trusted UI's list (group or exact route). */
-function ownerUiCovers(appId: string, route: string): boolean {
-  const entry = ownerUiApp(appId);
-  if (!entry) return false;
-  const group = route.split('/')[2] ?? '';
-  return entry.groups.includes(group) || entry.routes.includes(route);
-}
 
 const liveAudit = (entry: AuditInput): Promise<unknown> => core.getAuthServices().audit.record(entry);
 
@@ -157,7 +150,7 @@ export async function enforceGateway(
   if (allowed(await decideAs(instance))) return null;
 
   // D45: the owner acting through a trusted system UI, on that UI's routes only.
-  if (!claim.owner || !ownerUiCovers(inst.appId, route)) return refused(403, 'gateway-denied');
+  if (!claim.owner) return refused(403, 'gateway-denied');
   const owner = await gatewayOwner(ctx.request, { mgr: deps.mgr as unknown as GatewayOwnerDeps['mgr'], services: deps.ownerServices });
   if (!owner || !allowed(await decideAs(owner))) return refused(403, 'gateway-denied');
   if (method !== 'GET' && method !== 'HEAD') await recordOwnerAction(deps.audit ?? liveAudit, owner, route, method);

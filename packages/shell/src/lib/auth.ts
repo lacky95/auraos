@@ -17,7 +17,9 @@ import { authenticateCaller, type CallerAuthManager } from './notificationCaller
  *   no Authorization                     → anonymous (Referer / X-Aura-Instance-Id = hints only)
  *   signed App Host gateway claim        → instance (checked first; the gateway forwards no bearer)
  *   … from a trusted system UI (D45)     → admin, only with a valid admin session bearer, which
- *                                          the gateway forwards for that UI alone; else instance
+ *                                          the gateway forwards for that UI alone, and only on a
+ *                                          path that UI covers (identify.ts `gatewayOwner`, the
+ *                                          one D45 scope decision); else instance
  *
  * `SYSTEM_PRINCIPAL` is unreachable from HTTP by construction.
  *
