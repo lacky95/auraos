@@ -2366,6 +2366,15 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       stopDots();
       statusEl.textContent = 'SESSION ENDED';
       statusEl.style.color = 'var(--aura-color-text-dim)';
+      // Embedded, the host decides what comes next (it got session-ended above),
+      // and this page may reach only its own session, not the instance's list.
+      if (EMBED.embed) {
+        try { activeWs?.close(1000, 'session-ended'); } catch { /* already gone */ }
+        activeWs = null;
+        term.reset();
+        setDetached(true);
+        return;
+      }
       const rows = await sessionsFor(instanceId).catch(() => []);
       // The user picked something else meanwhile (menu, new session).
       if (currentSessionId !== null) return;
@@ -2823,13 +2832,17 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       if (e.key === 'Escape') { e.stopPropagation(); qcClose(); term.focus(); }
     });
 
-    qcInitStyles();
-    qcSetFormStore('remote');
-    qcRender();
-    // Warm the synced list once at start-up so the first open shows it without
-    // a flash, and so qcSetEditing's "default to synced unless unreachable"
-    // decision is based on a real answer rather than the initial `false`.
-    qcFetchRemote().then(qcRender);
+    // Embedded, the panel is the host's business (it is hidden), and this page
+    // may reach only its own session: no quick commands at all.
+    if (!EMBED.embed) {
+      qcInitStyles();
+      qcSetFormStore('remote');
+      qcRender();
+      // Warm the synced list once at start-up so the first open shows it without
+      // a flash, and so qcSetEditing's "default to synced unless unreachable"
+      // decision is based on a real answer rather than the initial `false`.
+      qcFetchRemote().then(qcRender);
+    }
   </script>
 </body>
 </html>
