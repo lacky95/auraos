@@ -3,7 +3,7 @@ import * as core from '@aura/core';
 import { jsonResponse } from '../../../lib/appResponse.js';
 import { verifiedAppCaller } from '../../../lib/terminalCaller.ts';
 import {
-  TERMINAL_APP_ID, forgetSessionGrants, holdsListGrant, isSystemTerminal, mayUseSession, terminalSessionInstance,
+  forgetSessionGrants, holdsListGrant, isSystemTerminal, mayUseSession, terminalSessionInstance, terminalUpstream,
 } from '../../../../server/terminal-embed.mjs';
 
 /**
@@ -30,21 +30,11 @@ async function appCaller(request: Request): Promise<{ appId: string } | null | R
   return caller;
 }
 
-/** A running Terminal instance, or null. */
-function terminalInstance(instanceId: string | null) {
-  if (!instanceId) return null;
-  const inst = core.getAppManager().getInstance(instanceId);
-  if (!inst || inst.appId !== TERMINAL_APP_ID || inst.port == null) return null;
-  if (inst.state === 'error' || inst.state === 'destroyed' || inst.state === 'destroying') return null;
-  return inst;
-}
-
 async function forward(instanceId: string, path: string, init: RequestInit = {}): Promise<Response> {
-  const mgr = core.getAppManager();
-  const inst = terminalInstance(instanceId);
-  if (!inst) return jsonResponse({ error: 'instance-not-running', message: `${instanceId} is not a running Terminal instance` }, 404);
-  const up = mgr.getUpstreamUrl?.(instanceId);
-  const url = `http://${up?.host ?? 'localhost'}:${up?.port ?? inst.port}${path}`;
+  const up = terminalUpstream(core.getAppManager(), instanceId);
+  if (!up) return jsonResponse({ error: 'instance-not-running', message: `${instanceId} is not a running Terminal instance` }, 404);
+  const { inst } = up;
+  const url = `${up.base}${path}`;
   try {
     const res = await fetch(url, {
       ...init,

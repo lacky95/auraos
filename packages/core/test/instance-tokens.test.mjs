@@ -83,3 +83,18 @@ test('consumerKey joins instance and sidecar with --', () => {
   assert.equal(consumerKey('a.b-2'), 'a.b-2');
   assert.equal(consumerKey('a.b-2', 'db'), 'a.b-2--db');
 });
+
+test('lifetimeId names one spawn: stable for it, new for a recycled id, gone when forgotten', () => {
+  const t = new InstanceTokens(fresh().file);
+  assert.equal(t.lifetimeId('com.example.app-2'), null);
+  const { nonce } = t.mint('com.example.app-2');
+  const first = t.lifetimeId('com.example.app-2');
+  assert.match(first, /^[A-Za-z0-9_-]{22}$/);
+  assert.ok(!first.includes(nonce), 'never the nonce itself');
+  t.register('com.example.app-2', nonce);   // adoption after a shell restart
+  assert.equal(t.lifetimeId('com.example.app-2'), first);
+  t.mint('com.example.app-2');               // the id recycled by a new spawn
+  assert.notEqual(t.lifetimeId('com.example.app-2'), first);
+  t.forgetInstance('com.example.app-2');
+  assert.equal(t.lifetimeId('com.example.app-2'), null);
+});

@@ -131,6 +131,14 @@ async function ensureAppManager() {
     }
     await mgr.init();
 
+    // Terminal session grants whose session ended while the shell was down
+    // (server/terminal-embed.mjs). Detached: it asks each running Terminal.
+    setTimeout(() => {
+      import('../server/terminal-embed.mjs')
+        .then((m) => m.sweepLiveSessionGrants())
+        .catch((err) => console.warn(`[middleware] terminal grant sweep failed: ${(err as Error).message}`));
+    }, 0);
+
     // Seed the local OCI registry with @aura/* AFTER init(), because init() is
     // what starts com.aura.registry (autoStart + critical) — before this point
     // nothing is listening on 4090. Detached and non-fatal: user/global-scope

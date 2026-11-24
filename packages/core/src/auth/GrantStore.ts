@@ -81,6 +81,12 @@ export interface GrantRecord {
   grantedBy: GrantedBy;
   /** `notifications.read` only: what the grant lets the subject read. */
   read?: ReadGrant;
+  /**
+   * A Terminal session grant only: the life of the Terminal instance the
+   * session was created in (`InstanceTokens.lifetimeId`). Session names are
+   * reused, so the grant counts only while that same life runs.
+   */
+  binding?: string;
 }
 
 export interface PermissionsChangedEvent {
@@ -132,11 +138,15 @@ export class GrantStore {
    */
   async grant(
     subject: GrantSubject, permission: string,
-    opts: { by: GrantedBy; appScope?: string; scope?: GrantScope; read?: { scope: unknown; includeSecret?: boolean } },
+    opts: { by: GrantedBy; appScope?: string; scope?: GrantScope; read?: { scope: unknown; includeSecret?: boolean }; binding?: string },
   ): Promise<{ record: GrantRecord; changed: boolean }> {
     permission = canonicalPermission(permission);
     const scope = opts.scope ?? OS_SCOPE;
     this.validate(subject, permission, scope);
+    if (opts.binding !== undefined
+      && (scope.kind !== 'terminal-session' || typeof opts.binding !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(opts.binding))) {
+      throw new GrantError(400, 'only a Terminal session grant can be bound to an instance life');
+    }
     let read: ReadGrant | undefined;
     if (permission === NOTIFICATIONS_READ_PERMISSION) {
       if (!opts.read) throw new GrantError(400, `'${permission}' needs a read scope: apps, senders or all (e.g. --scope app:com.example.x)`);
@@ -151,13 +161,14 @@ export class GrantStore {
       grantedAt: this.now(),
       grantedBy: opts.by,
       ...(read ? { read } : {}),
+      ...(opts.binding ? { binding: opts.binding } : {}),
     };
     const r = this.redis();
     const key = grantKey(subject);
     const prev = await r.hget(key, field(permission, scope));
     await r.multi().hset(key, field(permission, scope), JSON.stringify(record)).sadd(GRANT_INDEX_KEY, key).exec();
     const prevRec = prev ? (JSON.parse(prev) as GrantRecord) : null;
-    const changed = !prevRec || prevRec.appScope !== record.appScope
+    const changed = !prevRec || prevRec.appScope !== record.appScope || prevRec.binding !== record.binding
       || JSON.stringify(prevRec.read ?? null) !== JSON.stringify(record.read ?? null);
     if (changed) this.emit({ subjectKind: subject.kind, subjectId: subject.id, permission, change: 'granted' });
     return { record, changed };

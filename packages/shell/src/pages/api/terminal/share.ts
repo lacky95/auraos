@@ -48,6 +48,6 @@ export const POST: APIRoute = async (ctx) => {
   }
   if (!(await sessionExists(sessionId))) return jsonResponse({ error: 'session-gone', message: 'That Terminal session has ended.' }, 404);
   const refusal = await shareSession(appId, sessionId);
-  if (refusal) return jsonResponse({ error: refusal }, refusal === 'bad-session-id' ? 400 : 403);
+  if (refusal) return jsonResponse({ error: refusal }, refusal === 'bad-session-id' ? 400 : refusal === 'unavailable' ? 503 : 403);
   return jsonResponse({ ok: true, appId, sessionId });
 };

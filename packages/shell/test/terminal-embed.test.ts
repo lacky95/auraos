@@ -3,7 +3,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  OPEN_TERMINAL_ACTION, createTerminalAccess, openTerminalRefusal, shareSession, terminalEmbedAncestors, terminalSessionInstance,
+  OPEN_TERMINAL_ACTION, createTerminalAccess, openTerminalRefusal, shareSession, sweepSessionGrants, terminalEmbedAncestors,
+  terminalSessionInstance,
 } from '../server/terminal-embed.mjs';
 
 const TERMINAL = 'com.aura.terminal';
@@ -11,15 +12,25 @@ const TX = 'io.lakner.terminalx';
 const COUNTER = 'com.aura.counter';
 const SESSION = 'com.aura.terminal-2#a3';
 
-/** Grants: app → permissions; sessions: app → session ids; scopes: app → install scope. */
-function access(opts: { grants?: Record<string, string[]>; sessions?: Record<string, string[]>; scopes?: Record<string, string> } = {}) {
+/**
+ * Grants: app → permissions; sessions: app → session ids, granted in life
+ * `binding`; scopes: app → install scope; lives: Terminal instance → its life now.
+ */
+function access(opts: {
+  grants?: Record<string, string[]>; sessions?: Record<string, string[]>; scopes?: Record<string, string>;
+  binding?: string | undefined; lives?: Record<string, string>;
+} = {}) {
   const grants = opts.grants ?? { [TX]: ['terminal.embed'] };
   const sessions = opts.sessions ?? { [TX]: [SESSION] };
   const scopes = opts.scopes ?? { [TERMINAL]: 'system', [TX]: 'user', [COUNTER]: 'system' };
+  const binding = 'binding' in opts ? opts.binding : 'life-2';
+  const lives = opts.lives ?? { 'com.aura.terminal-2': 'life-2' };
   return createTerminalAccess({
     scopeOf: async (appId: string) => scopes[appId],
     authorize: async (appId: string, permission: string) => (grants[appId] ?? []).includes(permission),
-    sessionGrant: async (appId: string, sessionId: string) => ((sessions[appId] ?? []).includes(sessionId) ? { ok: 1 } : null),
+    sessionGrant: async (appId: string, sessionId: string) => ((sessions[appId] ?? []).includes(sessionId)
+      ? { ...(binding ? { binding } : {}) } : null),
+    sessionLife: async (sessionId: string) => lives[terminalSessionInstance(sessionId) ?? ''] ?? null,
   });
 }
 
@@ -65,6 +76,83 @@ test('the System Terminal keeps full control; a same-id copy in another scope do
 
 test('a caller without an app identity is left to Phase 3', async () => {
   assert.equal(await openTerminalRefusal(intent({ command: 'id' }), null, access()), null);
+});
+
+// ── a session grant lives as long as its session ────────────────────────────
+
+test('a session grant counts only in the instance life it was made in', async () => {
+  const tx = { appId: TX };
+  const open = intent({ sessionId: SESSION });
+  assert.equal(await openTerminalRefusal(open, tx, access()), null);
+  // The instance id was recycled (a new spawn), and the reused session name with it.
+  assert.notEqual(await openTerminalRefusal(open, tx, access({ lives: { 'com.aura.terminal-2': 'life-3' } })), null);
+  // The instance is gone.
+  assert.notEqual(await openTerminalRefusal(open, tx, access({ lives: {} })), null);
+  // A grant made before grants were bound.
+  assert.notEqual(await openTerminalRefusal(open, tx, access({ binding: undefined })), null);
+});
+
+const grantRec = (sessionId: string, binding: string | undefined, appId = TX) => ({
+  subject: { kind: 'app', id: appId }, permission: 'terminal.embed', scope: { kind: 'terminal-session', id: sessionId },
+  ...(binding ? { binding } : {}),
+});
+
+function sweepDeps(records: unknown[], instances: Record<string, { running: boolean; life: string | null }>, live: Record<string, string[] | 'down'>) {
+  const asked: string[] = [];
+  const revoked: string[][] = [];
+  return {
+    asked, revoked,
+    deps: {
+      listGrants: async () => records,
+      instance: async (id: string) => instances[id] ?? null,
+      liveSessions: async (id: string) => {
+        asked.push(id);
+        const l = live[id];
+        if (!l || l === 'down') throw new Error('unreachable');
+        return new Set(l);
+      },
+      revokeSessions: async (ids: Set<string>) => { revoked.push([...ids].sort()); },
+    },
+  };
+}
+
+test('the sweep drops grants of sessions that ended while nobody listened, and nothing else', async () => {
+  const t2 = 'com.aura.terminal-2';
+  const records = [
+    grantRec(`${t2}#a1`, 'life-2'),                      // live: kept
+    grantRec(`${t2}#a2`, 'life-2'),                      // not live any more: dropped
+    grantRec(`${t2}#a3`, 'life-1'),                      // an earlier life of the instance: dropped
+    grantRec(`${t2}#a4`, undefined),                     // unbound: dropped
+    grantRec('com.aura.terminal-5#a1', 'life-5'),        // instance gone: dropped
+    grantRec('com.aura.terminal-7#a1', 'life-7'),        // can't answer now: kept
+    grantRec('com.aura.terminal-8#a1', 'life-8'),        // starting: kept
+    { ...grantRec(`${t2}#a9`, 'life-2'), scope: { kind: 'os' } },
+    { ...grantRec(`${t2}#a9`, 'life-2'), permission: 'terminal.sessions.list' },
+  ];
+  const s = sweepDeps(records, {
+    [t2]: { running: true, life: 'life-2' },
+    'com.aura.terminal-7': { running: true, life: 'life-7' },
+    'com.aura.terminal-8': { running: false, life: 'life-8' },
+  }, { [t2]: [`${t2}#a1`, `${t2}#a9`], 'com.aura.terminal-7': 'down' });
+  const dropped = await sweepSessionGrants(null, s.deps);
+  assert.deepEqual(dropped.sort(), [`${t2}#a2`, `${t2}#a3`, `${t2}#a4`, 'com.aura.terminal-5#a1']);
+  assert.deepEqual(s.revoked, [dropped.sort()]);
+  assert.deepEqual(s.asked.sort(), [t2, 'com.aura.terminal-7'], 'one listing per running instance');
+});
+
+test('a sweep for one instance touches only its grants', async () => {
+  const s = sweepDeps([grantRec('com.aura.terminal-2#a1', 'old'), grantRec('com.aura.terminal-3#a1', 'old')],
+    { 'com.aura.terminal-2': { running: true, life: 'new' }, 'com.aura.terminal-3': { running: true, life: 'new' } }, {});
+  assert.deepEqual(await sweepSessionGrants('com.aura.terminal-3', s.deps), ['com.aura.terminal-3#a1']);
+  const none = sweepDeps([grantRec('com.aura.terminal-2#a1', 'new')], { 'com.aura.terminal-2': { running: true, life: 'new' } },
+    { 'com.aura.terminal-2': ['com.aura.terminal-2#a1'] });
+  assert.deepEqual(await sweepSessionGrants(null, none.deps), []);
+  assert.deepEqual(none.revoked, [], 'nothing to drop, no write');
+});
+
+test('sharing fails closed when the session grant cannot be recorded', async () => {
+  const grant = async () => { throw new Error('no instance identity'); };
+  assert.equal(await shareSession(TX, SESSION, { access: access({ sessions: {} }), grant }), 'unavailable');
 });
 
 // ── frame-ancestors ─────────────────────────────────────────────────────────

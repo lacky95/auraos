@@ -523,6 +523,17 @@ test('a Terminal session grant is its own record, and revoking the app grant dro
   assert.deepEqual(await grants.listFor(app), []);
 });
 
+test('a Terminal session grant records the instance life it was made in, and nothing else may carry one', async () => {
+  const app = { kind: 'app', id: 'com.example.embedder' };
+  const s1 = terminalSessionScope('com.aura.terminal-2#a3');
+  await grants.grant(app, 'terminal.embed', { by: { kind: 'system' }, appScope: 'user', scope: s1, binding: 'life-1' });
+  assert.equal((await grants.get(app, 'terminal.embed', s1)).binding, 'life-1');
+  const refused400 = (p) => assert.rejects(p, (err) => err instanceof GrantError && err.status === 400);
+  await refused400(grants.grant(app, 'terminal.embed', { by: { kind: 'system' }, binding: 'life-1' }));
+  await refused400(grants.grant(app, 'terminal.embed', { by: { kind: 'system' }, scope: s1, binding: 'bad life' }));
+  await grants.revokeAll(app);
+});
+
 test('an ended Terminal session takes every grant of it along, and nothing else', async () => {
   const BY = adminAttribution(ADMIN);
   const a = { kind: 'app', id: 'com.example.embedder' };

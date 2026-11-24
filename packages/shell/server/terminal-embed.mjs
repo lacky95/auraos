@@ -7,7 +7,9 @@
  *                           app may create sessions (OPEN_TERMINAL `background`)
  *                           and show and close the ones it created. Each such
  *                           session also gets a grant of its own, scoped to it,
- *                           which counts only while the app's grant does.
+ *                           which counts only while the app's grant does, and
+ *                           only in the life of the Terminal instance it was
+ *                           made in (`binding`): session names are reused.
  *   terminal.sessions.list  privileged, separate: read every session's metadata.
  *
  * The System Terminal itself (system scope) keeps full control, and an
@@ -39,6 +41,8 @@ export function terminalSessionInstance(sessionId) {
  *   scopeOf(appId)                 the install scope the app id resolves to
  *   authorize(appId, permission)   core's Authorizer for an instance of the app
  *   sessionGrant(appId, sessionId) the session's own `terminal.embed` record, or null
+ *   sessionLife(sessionId)         the current life of the session's Terminal
+ *                                  instance (`InstanceTokens.lifetimeId`), or null
  */
 export function createTerminalAccess(deps) {
   /** The System Terminal: its own id in the `system` scope. A same-id copy elsewhere is an ordinary app. */
@@ -57,11 +61,17 @@ export function createTerminalAccess(deps) {
     try { return await deps.authorize(appId, 'terminal.sessions.list'); } catch { return false; }
   }
 
-  /** Whether `appId` may show and close this one session: its app grant, plus the session's own. */
+  /**
+   * Whether `appId` may show and close this one session: its app grant, plus
+   * the session's own, made in the instance life that runs now.
+   */
   async function mayUseSession(appId, sessionId) {
     if (!terminalSessionInstance(sessionId)) return false;
     try {
-      return (await holdsEmbedGrant(appId)) && !!(await deps.sessionGrant(appId, sessionId));
+      if (!(await holdsEmbedGrant(appId))) return false;
+      const grant = await deps.sessionGrant(appId, sessionId);
+      const life = await deps.sessionLife(sessionId);
+      return !!grant && typeof grant.binding === 'string' && !!life && grant.binding === life;
     } catch {
       return false;
     }
@@ -71,6 +81,25 @@ export function createTerminalAccess(deps) {
 }
 
 const core = () => import('@aura/core');
+
+/** The life of a Terminal instance (`InstanceTokens.lifetimeId`), or null. */
+async function instanceLife(instanceId) {
+  if (!instanceId) return null;
+  return (await core()).getAppManager().tokens.lifetimeId?.(instanceId) ?? null;
+}
+
+/**
+ * Where to reach a running Terminal instance's own API, or null. One answer
+ * for the shell's session routes and the grant sweep.
+ */
+export function terminalUpstream(mgr, instanceId) {
+  if (!instanceId) return null;
+  const inst = mgr.getInstance(instanceId);
+  if (!inst || inst.appId !== TERMINAL_APP_ID || inst.port == null) return null;
+  if (inst.state === 'error' || inst.state === 'destroyed' || inst.state === 'destroying') return null;
+  const up = mgr.getUpstreamUrl?.(instanceId);
+  return { inst, base: `http://${up?.host ?? 'localhost'}:${up?.port ?? inst.port}` };
+}
 
 const live = createTerminalAccess({
   scopeOf: async (appId) => (await core()).getAppManager().registry.getScopeId(appId),
@@ -82,15 +111,21 @@ const live = createTerminalAccess({
     const c = await core();
     return c.getAuthServices().grants.get({ kind: 'app', id: appId }, 'terminal.embed', c.terminalSessionScope(sessionId));
   },
+  sessionLife: (sessionId) => instanceLife(terminalSessionInstance(sessionId)),
 });
 export const { isSystemTerminal, holdsEmbedGrant, holdsListGrant, mayUseSession } = live;
 
-/** Record that `appId` created `sessionId`, so it may show and close it. */
+/**
+ * Record that `appId` created (or was shown) `sessionId`, so it may show and
+ * close it, in this life of its Terminal instance only.
+ */
 export async function grantSession(appId, sessionId) {
   const c = await core();
+  const binding = await instanceLife(terminalSessionInstance(sessionId));
+  if (!binding) throw new Error(`${terminalSessionInstance(sessionId) ?? sessionId} has no instance identity`);
   const appScope = c.getAppManager().registry.getScopeId(appId);
   await c.getAuthServices().grants.grant({ kind: 'app', id: appId }, 'terminal.embed', {
-    by: { kind: 'system' }, ...(appScope ? { appScope } : {}), scope: c.terminalSessionScope(sessionId),
+    by: { kind: 'system' }, ...(appScope ? { appScope } : {}), scope: c.terminalSessionScope(sessionId), binding,
   });
 }
 
@@ -111,16 +146,96 @@ export async function forgetInstanceGrants(instanceId) {
   return c.getAuthServices().grants.revokeScopes('terminal.embed', (sc) => sc.kind === 'terminal-session' && sc.id.startsWith(prefix));
 }
 
+/**
+ * Drop the session grants whose session is gone (5.16), for every Terminal
+ * instance or only `onlyInstance`. The end reports and the instance watch need
+ * the shell to be up when a session or instance ends; this catches what they
+ * missed. A grant goes when its instance is unknown, runs another life than
+ * the grant's `binding`, or answers that the session is not live. An instance
+ * that can't answer keeps its grants until the next sweep. `deps` (tests pass
+ * fakes):
+ *   listGrants()             every grant record
+ *   instance(instanceId)     {running, life} of a known Terminal instance, or null
+ *   liveSessions(instanceId) the ids its own API lists as live (throws when unreachable)
+ *   revokeSessions(ids)      drop every grant of these session ids
+ * Returns the session ids it dropped.
+ */
+export async function sweepSessionGrants(onlyInstance = null, deps = liveSweep) {
+  const stale = new Set();
+  const lists = new Map();
+  for (const rec of await deps.listGrants()) {
+    if (rec?.permission !== 'terminal.embed' || rec.scope?.kind !== 'terminal-session') continue;
+    const sessionId = rec.scope.id;
+    const instanceId = terminalSessionInstance(sessionId);
+    if (onlyInstance && instanceId !== onlyInstance) continue;
+    const info = instanceId ? await deps.instance(instanceId) : null;
+    if (!info || !info.life || rec.binding !== info.life) { stale.add(sessionId); continue; }
+    if (!info.running) continue;
+    if (!lists.has(instanceId)) lists.set(instanceId, deps.liveSessions(instanceId).catch(() => null));
+    const live = await lists.get(instanceId);
+    if (live && !live.has(sessionId)) stale.add(sessionId);
+  }
+  if (stale.size) await deps.revokeSessions(stale);
+  return [...stale];
+}
+
+const SWEEP_TIMEOUT_MS = 10_000;
+
+const liveSweep = {
+  listGrants: async () => (await core()).getAuthServices().grants.listAll(),
+  instance: async (instanceId) => {
+    const mgr = (await core()).getAppManager();
+    const inst = mgr.getInstance(instanceId);
+    if (!inst || inst.appId !== TERMINAL_APP_ID || inst.state === 'destroyed') return null;
+    return {
+      running: !!terminalUpstream(mgr, instanceId) && (inst.state === 'started' || inst.state === 'resumed'),
+      life: mgr.tokens.lifetimeId?.(instanceId) ?? null,
+    };
+  },
+  liveSessions: async (instanceId) => {
+    const c = await core();
+    const up = terminalUpstream(c.getAppManager(), instanceId);
+    if (!up) throw new Error('not running');
+    const res = await fetch(`${up.base}/api/sessions`, {
+      headers: { 'x-aura-app-id': up.inst.appId, 'x-aura-instance-id': up.inst.instanceId },
+      signal: AbortSignal.timeout(SWEEP_TIMEOUT_MS),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const body = await res.json();
+    return new Set((Array.isArray(body?.sessions) ? body.sessions : []).filter((s) => s?.live === true).map((s) => s.id));
+  },
+  revokeSessions: async (ids) => (await core()).getAuthServices().grants.revokeScopes(
+    'terminal.embed', (sc) => sc.kind === 'terminal-session' && ids.has(sc.id),
+  ),
+};
+
+/** The sweep against the live system. Logs, never throws. */
+export async function sweepLiveSessionGrants(onlyInstance = null) {
+  try {
+    const dropped = await sweepSessionGrants(onlyInstance);
+    if (dropped.length) console.log(`[terminal] dropped ${dropped.length} grant(s) of ended Terminal sessions`);
+  } catch (err) {
+    console.warn(`[terminal] session grant sweep failed: ${err?.message ?? err}`);
+  }
+}
+
 const WATCH = Symbol.for('aura.terminalEmbed.watch');
 
-/** Once per process: a destroyed Terminal instance takes its sessions' grants along. */
+/**
+ * Once per process: a destroyed Terminal instance takes its sessions' grants
+ * along, and a Terminal that starts or resumes has its grants swept.
+ */
 export async function watchTerminalInstances() {
   if (globalThis[WATCH]) return;
   globalThis[WATCH] = true;
   const c = await core();
   c.OsEventBus.on('app:stateChanged', (ev) => {
-    if (ev?.appId !== TERMINAL_APP_ID || ev.state !== 'destroyed') return;
-    forgetInstanceGrants(ev.instanceId).catch(() => { /* KV down: the Terminal's own reports still apply */ });
+    if (ev?.appId !== TERMINAL_APP_ID) return;
+    if (ev.state === 'destroyed') {
+      forgetInstanceGrants(ev.instanceId).catch(() => { /* KV down: the next sweep drops them */ });
+    } else if (ev.state === 'started' || ev.state === 'resumed') {
+      void sweepLiveSessionGrants(ev.instanceId);
+    }
   });
 }
 
@@ -132,7 +247,7 @@ export async function shareSession(appId, sessionId, { access = live, grant = gr
   if (!terminalSessionInstance(sessionId)) return 'bad-session-id';
   if (await access.isSystemTerminal(appId)) return 'not-an-embedder';
   if (!(await access.holdsEmbedGrant(appId))) return 'not-granted';
-  await grant(appId, sessionId);
+  try { await grant(appId, sessionId); } catch { return 'unavailable'; }
   return null;
 }
 

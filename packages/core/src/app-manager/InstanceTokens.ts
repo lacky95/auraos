@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -98,6 +98,17 @@ export class InstanceTokens {
     for (const k of [...this.nonces.keys()]) {
       if (k === instanceId || k.startsWith(`${instanceId}--`)) this.nonces.delete(k);
     }
+  }
+
+  /**
+   * An id for this spawn of the instance (a hash of its nonce, never the
+   * nonce), or null. A recycled instance id gets a new one, and it survives a
+   * shell restart through adoption, like the nonce. Lets a record name "this
+   * life of the instance", e.g. a Terminal session grant (D25).
+   */
+  lifetimeId(instanceId: string): string | null {
+    const nonce = this.nonces.get(consumerKey(instanceId));
+    return nonce ? createHash('sha256').update(`aura-instance-lifetime\0${nonce}`).digest('base64url').slice(0, 22) : null;
   }
 
   hasNonce(instanceId: string, sidecar?: string): boolean {
