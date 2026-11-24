@@ -1,7 +1,7 @@
 import type * as core from '@aura/core';
 import { buildAppHost } from '@aura/core/host-rules';
 import type { APIContext } from 'astro';
-import { appHostAuth, LOGIN_DARK_SID } from '../../server/app-host-auth.mjs';
+import { appHostAuth, LOGIN_DARK_SID, type AppHostServices } from '../../server/app-host-auth.mjs';
 import { isSystemInstallation } from '../../server/gateway-identity.mjs';
 import { edgeView, originOf } from '../../server/host-policy.mjs';
 import { currentOwnerSession, loginEnabled } from './authSurface.js';
@@ -15,7 +15,7 @@ import { currentOwnerSession, loginEnabled } from './authSurface.js';
 
 type AppManager = ReturnType<typeof core.getAppManager>;
 interface HandoffServices {
-  registry: core.AppHostRegistry;
+  registry: core.AppHostRegistry & Partial<Pick<AppHostServices['registry'], 'getInstallation'>>;
   frameRoute: (appId: string) => Promise<'proxy' | 'host'>;
 }
 

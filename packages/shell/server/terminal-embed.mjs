@@ -160,6 +160,15 @@ export async function forgetInstanceGrants(instanceId) {
  *   liveSessions(instanceId) the ids its own API lists as live (throws when unreachable)
  *   revokeSessions(ids)      drop every grant of these session ids
  * Returns the session ids it dropped.
+ *
+ * @param {string | null} [onlyInstance]
+ * @param {{
+ *   listGrants: () => Promise<any[]>,
+ *   instance: (instanceId: string) => Promise<{ running: boolean, life: string | null } | null>,
+ *   liveSessions: (instanceId: string) => Promise<Set<string>>,
+ *   revokeSessions: (ids: Set<string>) => Promise<unknown>,
+ * }} [deps]
+ * @returns {Promise<string[]>}
  */
 export async function sweepSessionGrants(onlyInstance = null, deps = liveSweep) {
   const stale = new Set();
