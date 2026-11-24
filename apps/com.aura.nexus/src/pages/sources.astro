@@ -331,7 +331,7 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
       btn.disabled = true; btn.textContent = kind === 'oci' ? 'ADDING…' : 'VALIDATING…';
       setLog(kind === 'oci' ? 'checking the registry…' : 'validating source (cloning/fetching)…');
       try {
-        const res  = await fetch('/api/nexus/sources', {
+        const res  = await fetch(window.auraOs.url('/api/nexus/sources'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(entry),
@@ -359,7 +359,7 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
       btn.disabled = true; btn.textContent = 'LOOKING UP…';
       setLog('looking up ' + address + '…');
       try {
-        const res = await fetch('/api/nexus/sources/discover', {
+        const res = await fetch(window.auraOs.url('/api/nexus/sources/discover'), {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ address }),
         });
@@ -397,7 +397,7 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
         btn.disabled = true; btn.textContent = 'CHECKING…';
         setLog('checking the login for "' + name + '"…');
         try {
-          const res = await fetch('/api/nexus/sources/' + encodeURIComponent(name) + '/credentials', {
+          const res = await fetch(window.auraOs.url('/api/nexus/sources/' + encodeURIComponent(name) + '/credentials'), {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username, password }),
           });
@@ -418,7 +418,7 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
         const name = btn.getAttribute('data-name');
         if (!(await window.auraConfirm('Remove the login of "' + name + '"? Its apps will not load until you add it again.', { ok: 'Remove login', danger: true }))) return;
         try {
-          const res = await fetch('/api/nexus/sources/' + encodeURIComponent(name) + '/credentials', { method: 'DELETE' });
+          const res = await fetch(window.auraOs.url('/api/nexus/sources/' + encodeURIComponent(name) + '/credentials'), { method: 'DELETE', headers: window.auraOs.bodylessHeaders() });
           const json = await res.json();
           if (!res.ok || json.error) { setLog('ERROR: ' + (json.detail || json.error || res.status)); return; }
           setLog('login for "' + name + '" removed ✓  reloading…');
@@ -459,7 +459,7 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
         btn.disabled = true; btn.textContent = 'SAVING…';
         setLog('saving "' + name + '"…');
         try {
-          const res = await fetch('/api/nexus/sources/' + encodeURIComponent(name), {
+          const res = await fetch(window.auraOs.url('/api/nexus/sources/' + encodeURIComponent(name)), {
             method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
           });
           const json = await res.json();
@@ -480,7 +480,7 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
       seedsBtn.disabled = true; seedsBtn.textContent = 'APPLYING…';
       setLog('re-applying pre-registered sources…');
       try {
-        const res = await fetch('/api/nexus/sources/seeds', { method: 'POST' });
+        const res = await fetch(window.auraOs.url('/api/nexus/sources/seeds'), { method: 'POST', headers: window.auraOs.bodylessHeaders() });
         const json = await res.json();
         const r = json.report || { changes: [], problems: [] };
         const lines = [r.changes.length ? 'applied:' : 'no changes'];
@@ -498,7 +498,7 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
     $('refresh-btn').addEventListener('click', async () => {
       setLog('refreshing catalog from all sources…');
       try {
-        const res = await fetch('/api/nexus?refresh=1');
+        const res = await fetch(window.auraOs.url('/api/nexus?refresh=1'));
         const json = await res.json();
         const lines = ['catalog refreshed — ' + (json.apps ? json.apps.length : 0) + ' app(s)'];
         for (const s of json.sources || []) {
@@ -517,7 +517,7 @@ const sorted = [...cfg.sources].sort((a, b) => a.priority - b.priority);
         btn.disabled = true; btn.textContent = '…';
         setLog('removing "' + name + '"…');
         try {
-          const res  = await fetch('/api/nexus/sources/' + encodeURIComponent(name), { method: 'DELETE' });
+          const res  = await fetch(window.auraOs.url('/api/nexus/sources/' + encodeURIComponent(name)), { method: 'DELETE', headers: window.auraOs.bodylessHeaders() });
           const json = await res.json();
           if (!res.ok || json.error) {
             setLog('ERROR: ' + (json.error || res.status) + (json.detail ? ' — ' + json.detail : ''));

@@ -156,6 +156,7 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
       <slot />
     </main>
     <script>
+      import '../scripts/os';
       import '../scripts/store';
     </script>
 
@@ -1230,7 +1231,7 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
             var body = Object.assign({}, base);
             if (auto) body.autoApprove = true;
             if (identity) body.identity = identity;
-            var res = await fetch(url, {
+            var res = await fetch(window.auraOs.url(url), {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(body),
             });

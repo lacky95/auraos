@@ -1,6 +1,8 @@
-// /mcp — the Aura Docs MCP server (see lib/mcp.ts). Next's basePath already
-// carries the shell's proxy prefix, so this lands on
-// /api/proxy/com.aura.docs/mcp, the address the manifest advertises.
+// /mcp — the Aura Docs MCP server (see lib/mcp.ts). Agents reach it as a
+// machine path, /api/proxy/com.aura.docs/mcp (the address the manifest
+// advertises), whichever route the window uses: the shell forwards the
+// prefix, and serve.mjs sends every request without the App Host route
+// header to the build whose basePath is that prefix.
 //
 // GET is answered 405 rather than handed to the transport: a client opens GET
 // to listen for server notifications, and a stateless server has none — same

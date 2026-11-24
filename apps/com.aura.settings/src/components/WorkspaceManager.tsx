@@ -8,6 +8,7 @@
  * and other shell-side consumers continue to work unchanged.
  */
 import * as React from 'react';
+import { osUrl } from '@aura/app-sdk';
 import {
   Panel,
   PanelHeader,
@@ -75,11 +76,10 @@ export function WorkspaceManager({ initialState }: WorkspaceManagerProps): React
     }
   }
 
-  // We render inside an iframe served by the proxy; the OS KV lives at
-  // the shell's root, so we hit absolute `/api/kv/...` paths. The iframe
-  // is same-origin (proxy mounts it on the shell host), so no CORS work.
-  async function fetchShell(path: string, init?: RequestInit): Promise<Response> {
-    return fetch(path, init);
+  // The OS KV lives at the shell, not this app: osUrl() is the shell's root
+  // on the proxy route and the same-origin gateway on an App Host.
+  async function fetchShell(path: `/${string}`, init?: RequestInit): Promise<Response> {
+    return fetch(osUrl(path), init);
   }
   async function refreshState(): Promise<void> {
     try {

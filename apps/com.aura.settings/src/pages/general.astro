@@ -146,7 +146,7 @@ const state = { clockFormat, locale, timeZone, colorMode, restoreSession, lazyAc
       clearTimeout(debounceTimers.get(field));
       debounceTimers.set(field, setTimeout(async () => {
         try {
-          await fetch(`/api/kv/os/${field}`, {
+          await fetch(window.auraOs.url(`/api/kv/os/${field}`), {
             method:  'PUT',
             headers: { 'Content-Type': 'application/json' },
             body:    JSON.stringify({ value }),
@@ -331,6 +331,7 @@ const state = { clockFormat, locale, timeZone, colorMode, restoreSession, lazyAc
   <script>
     import { OsClient } from '@aura/app-sdk';
     import '../scripts/forms.ts';
+    import '../scripts/os.ts';
     new OsClient().nav.installGridNav({
       selector: '#clock-format .aura-select-trigger, #locale, #time-zone, [role="tab"]',
     });

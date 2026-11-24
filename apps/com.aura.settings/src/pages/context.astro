@@ -299,9 +299,10 @@ try {
      * abort: the deadline is a plain timer raced against the request. On the
      * deadline the caller re-reads the list to learn what actually happened.
      * Resolves { ok, status, body }; throws an Error with `timedOut: true`
-     * when the deadline passes, any other fetch error as-is.
+     * when the deadline passes, any other fetch error as-is. `path` is a
+     * shell path, resolved for this route by window.auraOs.
      */
-    async function writeJson(url, init) {
+    async function writeJson(path, init) {
       const ctrl = new AbortController();
       let timer;
       const deadline = new Promise((_, reject) => {
@@ -314,7 +315,7 @@ try {
       });
       deadline.catch(() => undefined);   // handled by whoever loses the race
       try {
-        const r = await Promise.race([fetch(url, { ...init, cache: 'no-store', signal: ctrl.signal }), deadline]);
+        const r = await Promise.race([fetch(window.auraOs.url(path), { ...init, cache: 'no-store', signal: ctrl.signal }), deadline]);
         const body = await Promise.race([r.json().catch(() => null), deadline]);
         return { ok: r.ok, status: r.status, body };
       } catch (err) {
@@ -566,7 +567,7 @@ try {
         return true;
       });
       try {
-        const res = await writeJson(`/api/os/context/${encodeURIComponent(key)}`, { method: 'DELETE' });
+        const res = await writeJson(`/api/os/context/${encodeURIComponent(key)}`, { method: 'DELETE', headers: window.auraOs.bodylessHeaders() });
         stopPoll();
         if (settled) return;
         if (!res.ok) { markPending(varRow(key), false); setStatus(`ERROR — ${esc(res.body?.error ?? res.status)}`, true); return; }
@@ -792,7 +793,7 @@ try {
         return true;
       });
       try {
-        const res = await writeJson(`/api/os/volumes/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        const res = await writeJson(`/api/os/volumes/${encodeURIComponent(name)}`, { method: 'DELETE', headers: window.auraOs.bodylessHeaders() });
         stopPoll();
         if (settled) return;
         if (!res.ok) { markPending(volRow(name), false); setStatus(`ERROR — ${esc(res.body?.error ?? res.status)}`, true); return; }
@@ -825,6 +826,7 @@ try {
   <script>
     import { OsClient } from '@aura/app-sdk';
     import '../scripts/forms.ts';
+    import '../scripts/os.ts';
     new OsClient().nav.installGridNav({
       selector: '.ctx-tab, #ctx-kind .aura-select-trigger, #ctx-key, #ctx-value, #ctx-inject-env, #ctx-inject-file, #ctx-add, .ctx-del, .ctx-confirm-yes, .ctx-confirm-no, #vol-name, #vol-path, #vol-mode .aura-select-trigger, #vol-add',
     });

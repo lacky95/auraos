@@ -1,5 +1,6 @@
-import type { AppInstance, AppManager } from '@aura/core';
-import { gatewayClaimOf } from '../../../server/gateway-identity.mjs';
+import type { AppInstance, AppManager, UserPrincipal } from '@aura/core';
+import { loadAppHostServices, type AppHostServices } from '../../../server/app-host-auth.mjs';
+import { gatewayClaimOf, isOwnerUiInstallation, ownerUiApp } from '../../../server/gateway-identity.mjs';
 import { refererProxyId } from './legacyReferer.ts';
 
 /**
@@ -79,4 +80,49 @@ export function gatewayInstance(
   if (!claim || !claim.instanceId) return 'invalid';
   const inst = mgr.getInstance(claim.instanceId);
   return inst && inst.appId === claim.appId ? inst : 'invalid';
+}
+
+/** What `gatewayOwner` reads. Structural, so tests can fake it. */
+export interface GatewayOwnerDeps {
+  mgr: Pick<AppManager, 'getInstance' | 'getManifest'>;
+  services?: () => Promise<Pick<AppHostServices, 'registry' | 'sessionLive'> | null>;
+}
+
+const owners = new WeakMap<Request, Promise<UserPrincipal | null>>();
+
+/**
+ * D45: the owner acting through a trusted system UI, or null. The gateway
+ * signs an `owner` claim only for such a UI; this checks it again against the
+ * live state, so a claim minted a moment before any of it changed buys nothing:
+ *
+ *   - a verified claim for a live instance of that app (gatewayInstance)
+ *   - the app is in OWNER_UI_APPS, its installed copy is the `system` one, and
+ *     the claim's installation is that active `system` installation
+ *   - the login session the host cookie came from is still live
+ *
+ * The principal is the user, carrying the app it acts through. Cached per request.
+ */
+export function gatewayOwner(request: Request, deps: GatewayOwnerDeps): Promise<UserPrincipal | null> {
+  let found = owners.get(request);
+  if (!found) {
+    found = resolveGatewayOwner(request, deps).catch(() => null);
+    owners.set(request, found);
+  }
+  return found;
+}
+
+async function resolveGatewayOwner(request: Request, deps: GatewayOwnerDeps): Promise<UserPrincipal | null> {
+  const claim = gatewayClaimOf(request);
+  if (!claim || !claim.owner || claim.owner.userId !== claim.userId) return null;
+  const inst = gatewayInstance(request, deps.mgr);
+  if (!inst || inst === 'invalid' || !ownerUiApp(inst.appId)) return null;
+  const installed = deps.mgr.getManifest(inst.appId) as { scopeId?: string } | undefined;
+  if (installed?.scopeId !== 'system') return null;
+  const svc = await (deps.services ?? loadAppHostServices)();
+  if (!svc || !(await isOwnerUiInstallation(svc.registry, claim))) return null;
+  if (!(await svc.sessionLive(claim.owner.sid))) return null;
+  return {
+    kind: 'user', userId: claim.owner.userId, role: 'owner', sessionId: claim.owner.sid,
+    verification: 'verified', through: { appId: inst.appId, instanceId: inst.instanceId },
+  };
 }

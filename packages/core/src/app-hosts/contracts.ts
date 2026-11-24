@@ -163,9 +163,22 @@ export interface GatewayIdentityClaim {
   /** The exact App Host origin the request arrived on. */
   origin: string;
   userId: string;
+  /**
+   * Set only for a trusted system UI (D45): the system-scope copy of an
+   * allowlisted app, on a host cookie bound to a live owner session. The
+   * shell evaluates the call as that owner acting through the app.
+   */
+  owner?: GatewayOwnerClaim;
   /** Request binding, so a claim can't be replayed on another call. */
   method: string;
   path: string;
   iat: number;
   exp: number;
+}
+
+/** The owner session a trusted system UI acts for (D45). */
+export interface GatewayOwnerClaim {
+  userId: string;
+  /** The login session the host cookie is bound to, or `login-dark`. */
+  sid: string;
 }

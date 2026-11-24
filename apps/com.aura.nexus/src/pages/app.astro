@@ -112,7 +112,9 @@ const editable       = entry?.sourceKind === 'oci' && !!entry?.sourceName;
         <div>
           <div class="panel-sec"><span class="panel-lbl">Screenshots</span></div>
           <div class="detail-shots">
-            {shots.map((src) => (<img src={src} alt="screenshot" loading="lazy" />))}
+            {shots.map((src) => (src.startsWith('/')
+              ? <img data-shell-src={src} alt="screenshot" loading="lazy" />
+              : <img src={src} alt="screenshot" loading="lazy" />))}
           </div>
         </div>
       )}
@@ -152,6 +154,20 @@ const editable       = entry?.sourceKind === 'oci' && !!entry?.sourceName;
   )}
 
   <script is:inline>
+    // A listing image the shell serves (`/api/nexus/assets/…`): its address
+    // depends on the route this page is on, so it is set here, not in markup.
+    (function () {
+      function show() {
+        document.querySelectorAll('img[data-shell-src]').forEach(function (img) {
+          img.src = window.auraOs.url(img.getAttribute('data-shell-src'));
+          img.removeAttribute('data-shell-src');
+        });
+      }
+      // First load: scripts/os.ts (window.auraOs) runs after this script.
+      if (window.auraOs) show();
+      else document.addEventListener('astro:page-load', show, { once: true });
+    })();
+
     // Back: return to where the user came from inside the store (keeps their
     // search + filters); a direct link falls back to Browse.
     (function () {
@@ -184,7 +200,7 @@ const editable       = entry?.sourceKind === 'oci' && !!entry?.sourceName;
         if (!shots.length) { box.textContent = 'no screenshots in the listing yet'; return; }
         shots.forEach((url, i) => {
           const d = document.createElement('div'); d.className = 'le-shot';
-          const img = document.createElement('img'); img.src = url; img.alt = 'screenshot ' + (i + 1); img.loading = 'lazy';
+          const img = document.createElement('img'); img.src = url.startsWith('/') ? window.auraOs.url(url) : url; img.alt = 'screenshot ' + (i + 1); img.loading = 'lazy';
           const btns = document.createElement('div'); btns.className = 'le-btns';
           const mk = (label, title, fn, disabled) => {
             const b = document.createElement('button'); b.type = 'button'; b.textContent = label; b.title = title;
@@ -205,7 +221,7 @@ const editable       = entry?.sourceKind === 'oci' && !!entry?.sourceName;
       async function post(body, busy) {
         say(busy);
         try {
-          const res = await fetch(base + '/screenshots', {
+          const res = await fetch(window.auraOs.url(base + '/screenshots'), {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
           });
           const j = await res.json();
@@ -250,7 +266,7 @@ const editable       = entry?.sourceKind === 'oci' && !!entry?.sourceName;
         };
         btn.disabled = true; say('saving…');
         try {
-          const res = await fetch(base, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          const res = await fetch(window.auraOs.url(base), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
           const j = await res.json();
           if (!res.ok || !j.ok) { say(errText(j, res), 'err'); return; }
           say('✓ saved — reloading…', 'ok');
@@ -259,9 +275,9 @@ const editable       = entry?.sourceKind === 'oci' && !!entry?.sourceName;
         finally { btn.disabled = false; }
       });
 
-      (async () => {
+      async function load() {
         try {
-          const res = await fetch(base, { cache: 'no-store' });
+          const res = await fetch(window.auraOs.url(base), { cache: 'no-store' });
           if (!res.ok) return;                       // not published there / no access: stay hidden
           const j = await res.json();
           if (!j.canWrite) return;
@@ -277,7 +293,10 @@ const editable       = entry?.sourceKind === 'oci' && !!entry?.sourceName;
           renderShots();
           root.hidden = false;
         } catch { /* stay hidden */ }
-      })();
+      }
+      // First load: scripts/os.ts (window.auraOs) runs after this script.
+      if (window.auraOs) void load();
+      else document.addEventListener('astro:page-load', () => { void load(); }, { once: true });
     })();
   </script>
 

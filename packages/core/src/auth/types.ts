@@ -71,6 +71,11 @@ export type UserPrincipal = WithActor & {
   role: UserRole;
   sessionId: string;
   verification: 'verified';
+  /**
+   * The trusted system UI this human acts through (D45), verified from a
+   * signed App Host gateway claim. Audit records it next to the user.
+   */
+  through?: { appId: string; instanceId: string };
 };
 
 /** The host operator, as a report-level class. It never authenticates a request. */

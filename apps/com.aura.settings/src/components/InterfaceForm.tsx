@@ -11,6 +11,7 @@
  * contrast is ours to set rather than inherited from scificn defaults.
  */
 import * as React from 'react';
+import { osUrl } from '@aura/app-sdk';
 // Styles: interface-form.css, imported by the pages (a CSS import here would
 // only be injected by Vite's client runtime, which the proxied iframe lacks).
 
@@ -98,7 +99,7 @@ export default function InterfaceForm({ initial }: InterfaceFormProps): React.Re
     };
     try {
       const r = await fetch(
-        editing ? `/api/interfaces/custom/${encodeURIComponent(initial!.name)}` : '/api/interfaces/custom',
+        osUrl(editing ? `/api/interfaces/custom/${encodeURIComponent(initial!.name)}` : '/api/interfaces/custom'),
         { method: editing ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
       );
       if (!r.ok) {

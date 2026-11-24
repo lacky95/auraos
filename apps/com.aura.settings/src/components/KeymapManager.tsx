@@ -15,6 +15,7 @@
  * Idempotent, single-PUT path keeps this simple.
  */
 import * as React from 'react';
+import { osUrl } from '@aura/app-sdk';
 import {
   Panel,
   PanelHeader,
@@ -113,7 +114,7 @@ export default function KeymapManager({ initialActions, initialState }: Props) {
   async function persist(next: OsKeymapState): Promise<void> {
     setError(null);
     try {
-      const res = await fetch('/api/kv/os/keymap', {
+      const res = await fetch(osUrl('/api/kv/os/keymap'), {
         method:  'PUT',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ value: next }),

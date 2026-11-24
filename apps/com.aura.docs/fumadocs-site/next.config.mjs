@@ -1,26 +1,32 @@
 import { createMDX } from 'fumadocs-mdx/next';
+import { docsBasePath, docsInstanceId, frameRouteOf } from './lib/base-path.mjs';
 
 const withMDX = createMDX();
 
-// The Aura shell loads each app iframe at `/api/proxy/<instanceId>/`. With
-// Aura's raw runtime mode this app's Next.js dev server is the upstream the
-// proxy hits directly — basePath must match the proxy prefix so SSR-emitted
-// hrefs and the client-side router agree with the shell's `cfg.preservePrefix`
-// forwarding.
+// Next's basePath follows the frame route this build serves (lib/base-path.mjs):
 //
-// We derive the prefix from `APP_INSTANCE_ID` (set by the AppManager runner
-// at spawn). `single` instance mode collapses this to `com.aura.docs`; if
-// the manifest is ever flipped to `multi` each spawn gets `com.aura.docs-2`
-// etc. and basePath shifts with it — no rebuild required.
-const INSTANCE_ID = process.env.APP_INSTANCE_ID || process.env.APP_ID || 'com.aura.docs';
-const BASE_PATH = `/api/proxy/${INSTANCE_ID}`;
+//   proxy (default)  `/api/proxy/<instanceId>`: the shell loads the iframe
+//                    there and, with `proxy.preservePrefix`, forwards the
+//                    prefix, so SSR-emitted hrefs and the client router agree
+//                    with it. The prefix comes from `APP_INSTANCE_ID` (set by
+//                    the runner at spawn), so a `multi` instance shifts it
+//                    without a code change.
+//   host             '': the app's own App Host serves it from `/`.
+//
+// serve.mjs sets DOCS_FRAME_ROUTE for both `next build` and `next start` of
+// one build, so the two always agree.
+const FRAME_ROUTE = frameRouteOf(process.env.DOCS_FRAME_ROUTE);
+const BASE_PATH = docsBasePath(FRAME_ROUTE, docsInstanceId());
 
 /** @type {import('next').NextConfig} */
 const config = {
   reactStrictMode: true,
   basePath: BASE_PATH,
-  // serve.mjs builds into `.next-staging` while the old build keeps serving,
-  // then swaps it in — so the dist dir has to be selectable per process.
+  // Inlined at build, for the search URL in app/layout.tsx.
+  env: { DOCS_BASE_PATH: BASE_PATH },
+  // serve.mjs builds into a staging dir while the old build keeps serving,
+  // then swaps it in, and keeps one build per frame route — so the dist dir
+  // has to be selectable per process.
   distDir: process.env.NEXT_DIST_DIR || '.next',
   // Production builds type-check; `next dev` never did, and the
   // fumadocs-core@15 / fumadocs-mdx@11 interop (see lib/source.ts) trips

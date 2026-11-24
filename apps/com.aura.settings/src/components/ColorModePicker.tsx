@@ -18,6 +18,7 @@
  */
 import * as React from 'react';
 import { Tabs, TabsList, TabsTrigger } from '@aura/ui';
+import { osUrl } from '@aura/app-sdk';
 
 export type ColorMode = 'light' | 'dark' | 'auto';
 
@@ -70,11 +71,11 @@ export function ColorModePicker({ defaultMode = 'dark' }: ColorModePickerProps):
     // selection object; PUT replaces it entirely, so we merge the new
     // colorMode in without losing the theme picks.
     try {
-      const cur = await fetch('/api/kv/os/theme');
+      const cur = await fetch(osUrl('/api/kv/os/theme'));
       const previous = cur.ok
         ? (await cur.json() as { value?: Record<string, unknown> }).value ?? {}
         : {};
-      const r = await fetch('/api/kv/os/theme', {
+      const r = await fetch(osUrl('/api/kv/os/theme'), {
         method:  'PUT',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ value: { ...previous, colorMode: next } }),

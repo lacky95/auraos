@@ -146,7 +146,7 @@ const SCOPE_LABELS: Record<string, string> = {
         debounceTimers.set(scopeId, setTimeout(async () => {
           const url = input.value.trim() || null;
           try {
-            const r = await fetch(`/api/scopes/${scopeId}/git-repo`, {
+            const r = await fetch(window.auraOs.url(`/api/scopes/${scopeId}/git-repo`), {
               method:  'PUT',
               headers: { 'Content-Type': 'application/json' },
               body:    JSON.stringify({ url }),
@@ -159,6 +159,10 @@ const SCOPE_LABELS: Record<string, string> = {
         }, 400));
       });
     });
+  </script>
+  <!-- window.auraOs for the inline script above (scripts/os.ts). -->
+  <script>
+    import '../scripts/os.ts';
   </script>
 </body>
 </html>

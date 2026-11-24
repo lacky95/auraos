@@ -19,8 +19,9 @@ html > body[data-scroll-locked] {
 
 /* ============================================================
    AuraOS theme bridge.
-   The shell proxy injects `<link rel="stylesheet" href="/api/os/theme.css">`
-   into every iframe whose manifest has themeStrategy='inherit'. That
+   The shell proxy (proxy route) or `/_aura/runtime.js` (App Host) adds the
+   OS theme stylesheet to every iframe whose manifest has
+   themeStrategy='inherit'. That
    stylesheet exposes the active OS theme's palette via `--aura-color-*`
    custom properties — light theme, dark theme, theme switch — all live
    there. We bind the scificn + fumadocs token sets to those vars so the

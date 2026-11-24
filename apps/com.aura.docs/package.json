@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bash entrypoint.sh"
+    "dev": "bash entrypoint.sh",
+    "test": "node --test test/*.test.mjs"
   }
 }
