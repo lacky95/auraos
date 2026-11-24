@@ -980,3 +980,21 @@ test('machine callers send no Origin and keep working: the CLI, an app server\'s
   for (const method of ['POST', 'DELETE']) assert.equal((await get('aura-shell:3000', '/api/x', {}, method)).body, 'desktop', method);
   assert.match(await upgrade('aura-shell:3000', '/os-events/?EIO=4&transport=websocket', {}), /^HTTP\/1\.1 418/);
 });
+
+test('the host probe answers alike for every App Host name and never asks the registry', async () => {
+  labels['gone1234'] = { status: 'retired' };
+  labels['held1234'] = { status: 'reserved' };
+  const asked: string[] = [];
+  const original = registry.resolveLabel;
+  registry.resolveLabel = async (label: string) => { asked.push(label); return original(label); };
+  try {
+    const answers = [];
+    for (const label of ['notes1234', 'gone1234', 'held1234', 'nosuchapp1', 'zzzzzzzz']) {
+      const r = await get(`${label}--${BASE}`, '/_aura/host-probe');
+      answers.push([r.status, r.headers['access-control-allow-origin'], r.body]);
+    }
+    assert.deepEqual(new Set(answers.map((a) => JSON.stringify(a))).size, 1, JSON.stringify(answers));
+    assert.deepEqual(answers[0], [204, '*', '']);
+    assert.deepEqual(asked, []);
+  } finally { registry.resolveLabel = original; }
+});

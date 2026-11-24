@@ -547,10 +547,6 @@ export function createAppHostRouter({
     if (!url.startsWith('/')) return page(400, 'Bad request', 'This request can\'t be served.');
     const path = url.split(/[?#]/, 1)[0];
     if (path === AURA_RESERVED_PATHS.handoff) return redeemHandoff(route, req, res, edge, pageHeaders);
-    if (path === AURA_RESERVED_PATHS.hostProbe) {
-      res.writeHead(204, { 'cache-control': 'no-store', 'access-control-allow-origin': '*' });
-      return res.end();
-    }
 
     const session = await appSession(route, req, edge);
     if (!session) return page(401, 'Open this app from AuraOS', 'This address needs a sign-in from the AuraOS desktop.');
@@ -698,6 +694,14 @@ export function createAppHostRouter({
             refuse(event, rest[0], 400, 'Bad Request', 'This address is not one of this AuraOS\'s addresses (AURA_DESKTOP_HOSTS).');
             return true;
           }
+        }
+        // The probe only proves that DNS for App Hosts reaches this shell. It
+        // answers the same for every well-formed name, before any registry
+        // lookup, so no site can use it to list the installed apps.
+        if (host.kind === 'app' && event === 'request' && String(req.url ?? '').split(/[?#]/, 1)[0] === AURA_RESERVED_PATHS.hostProbe) {
+          rest[0].writeHead(204, { 'cache-control': 'no-store', 'access-control-allow-origin': '*' });
+          rest[0].end();
+          return true;
         }
         if (host.kind === 'app' || appHostName(req.headers.host)) {
           void routeLabeled(host, event, req, rest, passOn);
