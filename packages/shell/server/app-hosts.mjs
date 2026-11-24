@@ -75,6 +75,13 @@ const EXACT_ORIGIN_RE = /^https?:\/\/[a-z0-9.-]+(?::\d{1,5})?$/;
  * arrive from the Shell or an embedder; `frame-ancestors` decides where it shows.
  */
 const OWN_ORIGIN_ONLY_APPS = new Set(['com.aura.terminal']);
+/**
+ * Over plain HTTP browsers send no Sec-Fetch-*, and a no-cors GET no Origin,
+ * so such an app's API also needs this header from its own page: a sibling
+ * can't add it without a CORS preflight, which the Origin check refuses.
+ */
+export const SAME_ORIGIN_HEADER = 'x-aura-same-origin';
+const OWN_API_RE = /^\/(?:api|mcp)(?:\/|$)/;
 
 const isLive = (i) => i.port != null && (i.state === 'resumed' || i.state === 'started');
 
@@ -168,8 +175,10 @@ function browserRequestAllowed(req, edge, path, ownOriginOnly = false) {
   if (ownOriginOnly) {
     if (origin !== undefined && origin !== edge.origin) return false;
     const site = req.headers['sec-fetch-site'];
-    if (site === undefined || site === 'same-origin' || site === 'none') return true;
-    return req.headers['sec-fetch-mode'] === 'navigate' && SAFE_METHODS.has(req.method);
+    const sameOrigin = site === undefined || site === 'same-origin' || site === 'none';
+    if (!sameOrigin && !(req.headers['sec-fetch-mode'] === 'navigate' && SAFE_METHODS.has(req.method))) return false;
+    if (OWN_API_RE.test(path)) return origin === edge.origin || req.headers[SAME_ORIGIN_HEADER] === '1';
+    return true;
   }
   const stream = String(req.headers.accept ?? '').includes('text/event-stream') || path.startsWith('/socket.io/');
   if (SAFE_METHODS.has(req.method) && !stream) return true;

@@ -809,6 +809,10 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       : (document.getElementById('terminal')?.dataset.instanceId || appHostRuntime()?.instanceId || appId);
     // PHASE2-CUTOVER: only the App Host form stays, where our backend is '' and another instance goes through it.
     const ownBase = proxied ? `/api/proxy/${encodeURIComponent(instanceId)}` : '';
+    // Our App Host serves its API to our own page only (5.16). Over plain HTTP
+    // nothing else tells the OS a GET is ours, so every backend call says so.
+    const OWN_HEADERS = onAppHost ? { 'x-aura-same-origin': '1' } : {};
+    const asOwn = (init = {}) => ({ ...init, headers: { ...OWN_HEADERS, ...(init.headers || {}) } });
     /** `/api/sessions…` of `targetInstanceId`: its own proxy path, or (App Host) ours, which forwards. */
     function sessionsApi(targetInstanceId, query = '') {
       if (proxied || !onAppHost) return `/api/proxy/${encodeURIComponent(targetInstanceId)}/api/sessions${query ? `?${query}` : ''}`;
@@ -863,7 +867,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     function recordWindowSession(sessionId) {
       if (EMBED.embed) return;   // not an OS window of ours — the host keeps its own picks
       const q = `window=${encodeURIComponent(activityId)}` + (sessionId ? `&session=${encodeURIComponent(sessionId)}` : '');
-      fetch(sessionsApi(instanceId, q), { method: 'PUT' })
+      fetch(sessionsApi(instanceId, q), asOwn({ method: 'PUT' }))
         .then((r) => { if (!r.ok) console.warn('[terminal] could not record the session pick →', r.status); })
         .catch((err) => console.warn('[terminal] could not record the session pick →', err));
     }
@@ -944,7 +948,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
             let r;
             try {
               r = await fetch(`${ownBase}/api/sessions/launch?window=${encodeURIComponent(activityId)}`,
-                { method: 'POST', cache: 'no-store' });
+                asOwn({ method: 'POST', cache: 'no-store' }));
             } catch { return 'retry'; }                          // network blip — try again while live
             if (r.ok) return 'done';
             if (r.status === 502 || r.status === 503) return 'retry';  // instance still booting
@@ -1937,7 +1941,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       if (targetInstanceId === instanceId) { switchSession(sessionId); return; }
       if (onAppHost) {
         // Its page is on another origin: leave the session with that container.
-        fetch(sessionsApi(targetInstanceId, `pending=${encodeURIComponent(sessionId)}`), { method: 'PUT' })
+        fetch(sessionsApi(targetInstanceId, `pending=${encodeURIComponent(sessionId)}`), asOwn({ method: 'PUT' }))
           .catch(() => { /* the move still happens, on the default session */ })
           .finally(() => requestRebind(targetInstanceId));
         return;
@@ -1988,12 +1992,12 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     const reservedByInstance = new Map();
 
     async function sessionsFor(targetInstanceId) {
-      const own = await fetch(sessionsApi(targetInstanceId), { cache: 'no-store' })
+      const listed = await fetch(sessionsApi(targetInstanceId), asOwn({ cache: 'no-store' }))
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null);
-      reservedByInstance.set(targetInstanceId, Array.isArray(own?.reserved) ? own.reserved : []);
-      const items = Array.isArray(own?.sessions)
-        ? [...own.sessions]
+      reservedByInstance.set(targetInstanceId, Array.isArray(listed?.reserved) ? listed.reserved : []);
+      const items = Array.isArray(listed?.sessions)
+        ? [...listed.sessions]
         : await (async () => {
             const acts = await fetch(osUrl(`/api/instances/${encodeURIComponent(targetInstanceId)}/activities`), { cache: 'no-store' })
               .then((r) => (r.ok ? r.json() : []))
@@ -2334,8 +2338,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         setDetached(true);
       }
       forgetSession(targetInstanceId, sessionId);
-      fetch(sessionsApi(targetInstanceId, `id=${encodeURIComponent(sessionId)}`),
-        { method: 'DELETE', headers: bodylessMutationHeaders() })
+      fetch(sessionsApi(targetInstanceId, `id=${encodeURIComponent(sessionId)}`), asOwn({ method: 'DELETE' }))
         .then((r) => { if (!r.ok) console.debug('[terminal] session kill unavailable →', r.status); })
         .catch(() => { /* older instance, or offline — the detach already happened */ });
     }
@@ -2493,7 +2496,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     function qcSaveLocal() { try { localStorage.setItem(QC_KEY, JSON.stringify(qcLocal)); } catch { /* private mode */ } }
     async function qcFetchRemote() {
       try {
-        const res = await fetch(qcApiUrl, { cache: 'no-store' });
+        const res = await fetch(qcApiUrl, asOwn({ cache: 'no-store' }));
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const body = await res.json();
         qcRemote = Array.isArray(body?.commands) ? body.commands : [];
@@ -2507,11 +2510,11 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     /** Push the whole synced list; returns false when it didn't land. */
     async function qcSaveRemote() {
       try {
-        const res = await fetch(qcApiUrl, {
+        const res = await fetch(qcApiUrl, asOwn({
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ commands: qcRemote }),
-        });
+        }));
         if (!res.ok) throw new Error('HTTP ' + res.status);
         qcRemoteOk = true;
         return true;
