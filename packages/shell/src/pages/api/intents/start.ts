@@ -2,7 +2,9 @@ import type { APIRoute } from 'astro';
 import { getAppManager, IntentError } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
 import { verifiedAppCaller } from '../../../lib/terminalCaller.ts';
-import { grantSession, isSystemTerminal, openTerminalRefusal } from '../../../../server/terminal-embed.mjs';
+import {
+  OPEN_TERMINAL_ACTION, TERMINAL_APP_ID, grantSession, isSystemTerminal, openTerminalRefusal, terminalSessionInstance,
+} from '../../../../server/terminal-embed.mjs';
 
 interface IntentBody {
   action?:   unknown;
@@ -68,8 +70,12 @@ export const POST: APIRoute = async ({ request }) => {
     const result = await getAppManager().startIntent(intent);
     if (result.kind === 'noHandler') return errorResponse('No app handles this intent', 404);
     if (result.kind === 'rejected') return jsonResponse({ ...result, error: result.message }, result.status);
+    // Only the System Terminal's own answer to OPEN_TERMINAL names a session it created.
     const created = (result as { result?: Record<string, unknown> }).result?.['sessionId'];
-    if (caller && intent.extras?.['background'] === true && typeof created === 'string' && !(await isSystemTerminal(caller.appId))) {
+    if (caller && intent.action === OPEN_TERMINAL_ACTION && intent.extras?.['background'] === true
+      && result.kind === 'started' && result.appId === TERMINAL_APP_ID && await isSystemTerminal(TERMINAL_APP_ID)
+      && terminalSessionInstance(created) === result.instanceId && typeof created === 'string'
+      && !(await isSystemTerminal(caller.appId))) {
       // Without it the app can't show the session it asked for; the session itself is fine.
       await grantSession(caller.appId, created).catch((err: unknown) => {
         console.warn(`[intents] could not grant ${created} to ${caller.appId}: ${(err as Error).message}`);
