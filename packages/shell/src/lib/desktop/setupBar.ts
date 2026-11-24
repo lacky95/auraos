@@ -54,12 +54,16 @@ export function settleSetupBar(plan: SetupBarPlan, probeOk: boolean): SetupBarPl
   return plan.show && plan.kind === 'link' && !probeOk ? { show: true, kind: 'guide' } : plan;
 }
 
-/** Any HTTP answer proves the name resolves and the server is reachable. */
+/**
+ * Any HTTP answer proves the name resolves and the server is reachable.
+ * `no-cors` only allows the default `redirect: follow`: any other mode makes
+ * every browser reject the fetch, so the probe would always fail.
+ */
 export async function probeAppHostAddress(url: string, fetchImpl: typeof fetch = fetch, timeoutMs = 4000): Promise<boolean> {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
-    await fetchImpl(url, { mode: 'no-cors', cache: 'no-store', credentials: 'omit', redirect: 'manual', signal: ctl.signal });
+    await fetchImpl(url, { mode: 'no-cors', cache: 'no-store', credentials: 'omit', signal: ctl.signal });
     return true;
   } catch {
     return false;
