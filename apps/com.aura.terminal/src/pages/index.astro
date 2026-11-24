@@ -370,7 +370,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
 
     // appId is server-rendered onto #terminal's data-app-id. A bundled module
     // script can't use Astro's define:vars (that requires is:inline), so we read
-    // it from the DOM instead — same pattern as the aura-activity-id meta tag.
+    // it from the DOM instead.
     // The fallback keeps the label sane for direct/headless renders.
     const appId = document.getElementById('terminal')?.dataset.appId ?? 'com.aura.terminal';
 
@@ -443,7 +443,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     const BROWSER_KEY = 'aura.terminal.browserId';
     function randomId() { return Math.random().toString(36).slice(2, 10); }
     const browserId = (() => {
-      const windowKey = document.querySelector('meta[name="aura-activity-id"]')?.getAttribute('content') ?? 'main';
+      const windowKey = appHostRuntime()?.activityId ?? 'main';
       let tab = '';
       try {
         tab = sessionStorage.getItem(BROWSER_KEY);
@@ -482,21 +482,20 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // priority listener (e.g. document-capture), this guarantees the OS
     // still gets the key.
     //
-    // The claim list is read from the `aura-keymap-bindings` meta tag the
-    // proxy emits — that map honours user keymap overrides, so a user who
+    // The claim list is read from the keymap snapshot in the runtime
+    // bootstrap — that map honours user keymap overrides, so a user who
     // rebinds the launcher away from Ctrl+Alt+Space gets the new combo
     // yielded instead of stale defaults.
     const osComboSet = new Set();
     try {
-      const bindingsMeta = document.querySelector('meta[name="aura-keymap-bindings"]');
-      const bindings = JSON.parse(bindingsMeta?.getAttribute('content') ?? '{}');
+      const bindings = appHostRuntime()?.keymap.bindings ?? {};
       for (const [id, combo] of Object.entries(bindings)) {
         // Only yield combos that look OS-level (modifier+key), not bare keys
         // — bare-key bindings are claimed by os-nav, which is mode-gated and
         // shouldn't steal typed characters from a focused terminal.
         if (typeof combo === 'string' && combo.includes('+')) osComboSet.add(combo);
       }
-    } catch { /* meta missing or malformed — no extra yields, the forwarder still works */ }
+    } catch { /* no bootstrap — no extra yields, the forwarder still works */ }
 
     function comboFromEvent(e) {
       const parts = [];
@@ -825,7 +824,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // The OS activity id — this WINDOW's handle. Not the session: a session is
     // a shell, and any window may take one over (that is what the "in use
     // elsewhere" screen is for), so the two are deliberately separate.
-    const activityId = document.querySelector('meta[name="aura-activity-id"]')?.getAttribute('content') ?? instanceId;
+    const activityId = appHostRuntime()?.activityId ?? instanceId;
 
     // Which shell we are showing. Mutable — the session picker re-points it
     // without reloading the page. Defaults to the activity id so a window that

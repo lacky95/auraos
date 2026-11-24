@@ -5,9 +5,9 @@ import { AURA_RUNTIME_LOADER_JS } from '@aura/app-sdk/runtime/loader';
 import { docsSearchApi } from '@/lib/base-path.mjs';
 
 // Sync `<html class="dark">` with the AuraOS color-mode resolution BEFORE
-// React hydrates. `<meta name="aura-resolved-mode">` comes from the shell
-// proxy on the proxy route, and from `/_aura/runtime.js` on an App Host
-// (loaded by AURA_RUNTIME_LOADER_JS, which therefore runs first in <head>).
+// React hydrates. The resolved mode comes from the bootstrap of
+// `/_aura/runtime.js` (loaded by AURA_RUNTIME_LOADER_JS, which therefore runs
+// first in <head>).
 // Our scificn/fumadocs CSS tokens are already bound to `var(--aura-color-*)`
 // so they paint in the right palette automatically — this script only flips the `.dark`
 // class so fumadocs's dark-variant utilities + our `.dark .scanlines`
@@ -15,8 +15,8 @@ import { docsSearchApi } from '@/lib/base-path.mjs';
 //
 // We also listen for `aura.mode.changed` postMessages from the shell so
 // a live color-mode flip (Settings → light/dark) updates the iframe
-// without a reload. On an App Host only the Shell itself may send it: the
-// runtime names its exact origin, and it is the top window.
+// without a reload. Only the Shell itself may send it: the runtime names
+// its exact origin, and it is the top window.
 const darkBootstrap = `
 try {
   function applyMode(mode) {
@@ -24,13 +24,12 @@ try {
     if (mode === 'dark') root.classList.add('dark');
     else root.classList.remove('dark');
   }
-  var m = document.querySelector('meta[name="aura-resolved-mode"]');
-  applyMode(m && m.getAttribute('content') === 'light' ? 'light' : 'dark');
+  var B = window.AuraRuntimeBootstrap;
+  applyMode(B && B.theme.resolvedMode === 'light' ? 'light' : 'dark');
   window.addEventListener('message', function (ev) {
     var d = ev.data;
     if (!d || typeof d !== 'object') return;
-    var B = window.AuraRuntimeBootstrap;
-    if (B && (ev.origin !== B.shellOrigin || ev.source !== window.top)) return;
+    if (!B || ev.origin !== B.shellOrigin || ev.source !== window.top) return;
     if (d.type === 'aura.mode.changed' && typeof d.resolvedMode === 'string') {
       applyMode(d.resolvedMode);
     }

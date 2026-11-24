@@ -59,7 +59,6 @@
 
 import { appHostRuntime, osBase } from './os-auth.js';
 import type { OsClient } from './OsClient.js';
-import { getAppBasePath } from './context.js';
 
 export type FlightEdge = 'left' | 'right' | 'top' | 'bottom';
 export interface FlightRect { x: number; y: number; w: number; h: number }
@@ -415,14 +414,8 @@ export class FlightApi {
   }
 }
 
-/** `/api/proxy/<instanceId>` in the browser, APP_INSTANCE_ID on the server. */
+/** APP_INSTANCE_ID on the server, the runtime bootstrap in a page. */
 function ownInstanceId(): string | null {
   if (typeof process !== 'undefined' && process.env?.['APP_INSTANCE_ID']) return process.env['APP_INSTANCE_ID'];
-  const host = appHostRuntime();
-  if (host) return host.instanceId;
-  // PHASE2-CUTOVER: only a proxied page has its instance id in a base path.
-  try {
-    const m = getAppBasePath().match(/^\/api\/proxy\/([^/]+)/);
-    return m ? decodeURIComponent(m[1]!) : null;
-  } catch { return null; }
+  return appHostRuntime()?.instanceId ?? null;
 }

@@ -5,8 +5,9 @@
  *
  *   <script dangerouslySetInnerHTML={{ __html: AURA_RUNTIME_LOADER_JS }} />
  *
- * It is the app's own output, not something a proxy adds (D43). On the proxy
- * path, or outside AuraOS, it does nothing and requests nothing. While the
+ * It is the app's own output, not something a proxy adds (D43). Off an App
+ * Host (outside AuraOS, or a host with no app label) it does nothing and
+ * requests nothing. While the
  * document is parsing it uses `document.write`, the only way an inline script
  * can load another one that blocks the parser: the bootstrap must exist before
  * any app script reads it, and the theme before first paint. A client-side
@@ -37,7 +38,7 @@ export function appHostAssetLocation(route: string | string[] | null | undefined
 }
 
 export const AURA_RUNTIME_LOADER_JS = `(function(){try{
-if(window.AuraRuntimeBootstrap||location.pathname.indexOf('/api/proxy/')===0)return;
+if(window.AuraRuntimeBootstrap)return;
 var h=location.hostname,a=h.indexOf('--');if(a<=0)return;
 var n=h.slice(0,a);if(!${HOST_NAME_RE.toString()}.test(n)||${JSON.stringify([...RESERVED_HOST_NAMES])}.indexOf(n)>=0)return;
 var u=${JSON.stringify(AURA_RESERVED_PATHS.runtime)};

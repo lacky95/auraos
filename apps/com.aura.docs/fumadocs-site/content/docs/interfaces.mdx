@@ -107,7 +107,7 @@ if (view?.status === 'live') {
 |---|---|
 | `list(filter?)` | everything, filterable by `kind` · `appId` · `name` · `live` |
 | `resolve(ref)` | single best provider, or `null`. Takes `'appId/name'` or an object |
-| `urlFor(view)` | a fetchable URL (`view.url` is shell-relative) — `null` if not live |
+| `urlFor(view)` | a fetchable URL — `null` if not live. In a page, the App Host gateway; on your server, `OS_API_BASE`. Another app's upstream (`/api/proxy/…`) is refused to pages, so dial it from your server ([Building an app for App Hosts](/docs/building-for-app-hosts)) |
 | `consumers()` | the resolution report |
 | `register(spec)` | publish an interface opened at runtime |
 | `unregister(name)` | withdraw one |

@@ -2,10 +2,9 @@
  * The shell's public assets (theme, icons) as the app's own routes, injected by
  * `auraAppIntegration`.
  *
- * On the proxy path a page's `/api/os/theme.css` reaches the shell and never
- * gets here. On an App Host this sends the browser to the same file through the
- * gateway, so existing tags, their cache-busting and their `load` listeners
- * keep working unchanged.
+ * On an App Host this sends the browser to the same file through the gateway,
+ * so existing tags, their cache-busting and their `load` listeners keep
+ * working unchanged. Any other request (the machine path) gets 404.
  */
 import { APP_HOST_ROUTE_HEADER } from '../hostRules.js';
 import { appHostAssetLocation } from './loader.js';

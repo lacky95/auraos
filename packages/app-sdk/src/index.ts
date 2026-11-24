@@ -95,7 +95,6 @@ export type {
 export {
   getAppContext,
   readIdentityHeaders,
-  getAppBasePath,
 } from './context.js';
 export type {
   AppContext,

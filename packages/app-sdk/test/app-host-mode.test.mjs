@@ -1,5 +1,5 @@
 // How the SDK picks its transport: the gateway and exact-origin AuraChannel on
-// an App Host, the proxy path otherwise.
+// an App Host. Without the runtime bootstrap there is no shell to reach.
 //
 //   pnpm --filter @aura/app-sdk test
 import { afterEach, test } from 'node:test';
@@ -35,7 +35,7 @@ test('with a valid bootstrap the SDK uses the same-origin gateway', () => {
   assert.deepEqual(bodylessMutationHeaders(), { 'Content-Type': 'application/json' });
 });
 
-test('without one, or with one for another origin or version, it stays on the proxy path', () => {
+test('without one, or with one for another origin or version, it is not on an App Host', () => {
   for (const b of [null, bootstrap({ appOrigin: 'http://evil.example' }), bootstrap({ channelVersion: 99 }), bootstrap({ gatewayBase: '//evil.example/' }), bootstrap({ shellOrigin: '' })]) {
     browser(b);
     assert.equal(appHostRuntime(), null);
@@ -52,11 +52,12 @@ test('on an App Host, messages go only to the Shell at its exact origin', () => 
   assert.deepEqual(posts.parent, []);
 });
 
-test('on the proxy path, messages still go to the parent', () => {
-  const { posts } = browser(null);
+test('without a bootstrap nothing is posted, and nothing counts as from the Shell', () => {
+  const { posts, top, parent } = browser(null);
   postToShell({ type: 'aura.system.openLauncher' });
-  assert.deepEqual(posts.parent, [[{ type: 'aura.system.openLauncher' }, '*']]);
-  assert.deepEqual(posts.top, []);
+  assert.deepEqual(posts, { top: [], parent: [] });
+  assert.equal(isFromShell({ origin: SHELL, source: top }), false);
+  assert.equal(isFromShell({ origin: SHELL, source: parent }), false);
 });
 
 test('a message counts as from the Shell only with its exact origin and window', () => {

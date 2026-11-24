@@ -16,6 +16,7 @@
     "onboard-existing-apps",
     "bring-your-own-runtime",
     "app-hosts",
+    "building-for-app-hosts",
     "sidecars",
     "sdk-reference",
     "cli-reference",

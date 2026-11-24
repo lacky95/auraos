@@ -15,11 +15,12 @@
  *   • `aura.keymap.changed`   (in)   — bindings refreshed; rerun onChange cbs.
  *
  * The current combo for any action is exposed synchronously via
- * `getBinding()` (read off proxy-injected meta tags), so menu shortcut
- * labels can render before any HTTP round-trip.
+ * `getBinding()` (read off the runtime bootstrap), so menu shortcut labels
+ * can render before any HTTP round-trip.
  */
 
 import { isFromShell, postToShell } from './channel.js';
+import { appHostRuntime } from './os-auth.js';
 import type { OsClient } from './OsClient.js';
 
 export interface KeymapHandlerCtx {
@@ -43,11 +44,10 @@ export class KeymapApi {
   private handlers = new Map<string, KeymapHandler>();
   private bindings: Bindings = {};
   private changeListeners = new Set<(info: KeymapChangeInfo) => void>();
-  private appIdCache: string | null = null;
 
   constructor(_client: OsClient) {
     if (typeof window === 'undefined') return;
-    this.hydrateFromMeta();
+    this.bindings = { ...(appHostRuntime()?.keymap.bindings ?? {}) };
     window.addEventListener('message', this.handleMessage);
   }
 
@@ -82,8 +82,8 @@ export class KeymapApi {
    * manifest-local id or the fully-qualified id (OS actions like
    * `aura.launcher.toggle`).
    *
-   * Reads from a meta-tag snapshot the proxy injects on every page load,
-   * so it's synchronous from the first render. Refreshed live on every
+   * Reads the snapshot in the runtime bootstrap (`/_aura/runtime.js`), so
+   * it's synchronous from the first render. Refreshed live on every
    * `aura.keymap.changed` postMessage from the shell.
    */
   getBinding(actionId: string): string | null {
@@ -107,20 +107,7 @@ export class KeymapApi {
   }
 
   private getAppId(): string {
-    if (this.appIdCache) return this.appIdCache;
-    if (typeof document === 'undefined') return 'unknown';
-    const v = document.querySelector('meta[name="aura-app-id"]')?.getAttribute('content');
-    this.appIdCache = v && v.length > 0 ? v : 'unknown';
-    return this.appIdCache;
-  }
-
-  private hydrateFromMeta(): void {
-    if (typeof document === 'undefined') return;
-    const meta = document.querySelector('meta[name="aura-keymap-bindings"]');
-    const raw  = meta?.getAttribute('content');
-    if (!raw) return;
-    try { this.bindings = JSON.parse(raw) as Bindings; }
-    catch { /* malformed — leave bindings empty */ }
+    return appHostRuntime()?.appId ?? 'unknown';
   }
 
   private notifySubscribe(): void {

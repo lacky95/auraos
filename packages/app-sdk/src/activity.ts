@@ -18,7 +18,7 @@
  * from their own UI to pop manually.
  */
 
-import { bodylessMutationHeaders, osBase } from './os-auth.js';
+import { appHostRuntime, bodylessMutationHeaders, osBase } from './os-auth.js';
 import type { OsClient } from './OsClient.js';
 
 export interface NavigateOptions {
@@ -41,7 +41,7 @@ export class ActivityApi {
    * `Escape`) returns to the previous path.
    *
    * The path is relative to the app's own routes — `/theme`,
-   * `/wizard/step-2`, etc. The OS rewrites it to the proxy URL.
+   * `/wizard/step-2`, etc. The OS loads it on this app's App Host.
    *
    * Returns true on success, false when the activity id couldn't be
    * resolved (the iframe is running without an activity context).
@@ -117,6 +117,8 @@ export class ActivityApi {
    */
   getHistory(): Array<{ path: string; title?: string }> {
     if (typeof document === 'undefined') return [];
+    // PHASE2-CUTOVER: only the proxy writes this tag, so an App Host page reads []. It needs
+    // another source (the bootstrap or an activity route) before proxy serving goes.
     const raw = document.querySelector('meta[name="aura-activity-history"]')?.getAttribute('content');
     if (!raw) return [];
     try {
@@ -128,14 +130,16 @@ export class ActivityApi {
     } catch { return []; }
   }
 
-  /** Current activity id, or null when no activity context is available. */
+  /**
+   * Current activity id, or null when no activity context is available:
+   * `APP_ACTIVITY_ID` on the server, the runtime bootstrap in a page.
+   */
   getActivityId(): string | null {
     if (typeof process !== 'undefined' && process.env) {
       const v = process.env['APP_ACTIVITY_ID'];
       if (v) return v;
     }
-    if (typeof document === 'undefined') return null;
-    return document.querySelector('meta[name="aura-activity-id"]')?.getAttribute('content') ?? null;
+    return appHostRuntime()?.activityId ?? null;
   }
 
   /**

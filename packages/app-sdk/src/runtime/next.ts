@@ -57,11 +57,11 @@ function json(body: unknown, status = 200): Response {
 // =========================================================================
 
 /**
- * Header pairs every raw-mode app should stamp onto its responses. The shell
- * proxy's identity gate at `packages/shell/src/pages/api/proxy/[id]/[...path].ts:167`
- * verifies these match the resolved instance — without the headers the gate
- * is silently bypassed, which works at first but breaks the moment a port
- * gets reused after a crash.
+ * Header pairs every raw-mode app should stamp onto its responses. The shell's
+ * identity gate (the App Host router, `server/app-hosts.mjs`, and the machine
+ * path `/api/proxy/<id>`) verifies these match the resolved instance — without
+ * the headers the gate is silently bypassed, which works at first but breaks
+ * the moment a port gets reused after a crash.
  *
  * `process.env.APP_ID` + `APP_INSTANCE_ID` are set by the runner at spawn
  * (see `ProotRunner.ts:132–149`). If they're unset (e.g. running the app

@@ -1,9 +1,13 @@
 /**
  * The SDK's one place for "where is the OS" and "which credential goes there".
  *
- * A browser never sends a token, and a proxied app URL never carries one.
- * Most SDK calls stay anonymous on purpose: only callers that already sent the
- * instance token (notifications, OS sidecars, aurashelld) use osAuthHeaders.
+ * Two paths, one each side:
+ *   - a page on an App Host reaches the shell through its same-origin gateway
+ *     (`/_aura/os/`), which signs the page's verified identity. A browser never
+ *     sends a token.
+ *   - an app's server reaches `OS_API_BASE` and proves itself with its instance
+ *     token (`osAuthHeaders`). The machine path to another app,
+ *     `/api/proxy/<id>/…`, never carries one: the shell forwards it upstream.
  */
 import type { AuraRuntimeBootstrap } from '@aura/core';
 import { AURA_CHANNEL_VERSION } from './auraChannel.js';
@@ -22,8 +26,9 @@ export function osEnv(): Record<string, string | undefined> {
 
 /**
  * The bootstrap of `/_aura/runtime.js` when this page runs on an App Host, else
- * null (proxied, server, or outside AuraOS). It selects a transport and grants
- * nothing: the gateway and the Shell verify the caller themselves.
+ * null (server, or outside AuraOS). It is the SDK's one source of the page's
+ * app, instance, activity, theme and keymap snapshot. It selects a transport
+ * and grants nothing: the gateway and the Shell verify the caller themselves.
  */
 export function appHostRuntime(): AuraRuntimeBootstrap | null {
   if (!isBrowser()) return null;
@@ -35,7 +40,7 @@ export function appHostRuntime(): AuraRuntimeBootstrap | null {
 
 /**
  * Headers for a mutation that sends no body. The gateway's CSRF rule needs a
- * JSON content type; a proxied call stays as it was.
+ * JSON content type; the server path doesn't.
  */
 export function bodylessMutationHeaders(): Record<string, string> {
   return appHostRuntime() ? { 'Content-Type': 'application/json' } : {};
@@ -44,6 +49,7 @@ export function bodylessMutationHeaders(): Record<string, string> {
 export interface OsBaseOptions {
   /**
    * On an App Host, `relative` and `origin` are the same-origin gateway.
+   * Elsewhere (the server, or a page outside AuraOS):
    * `relative` (default): '' in a browser, else OS_API_BASE.
    * `origin`: OS_API_BASE, else the page's origin (OsClient).
    * `server`: OS_API_BASE, else AURA_OS_URL, else '' so the caller can refuse.
@@ -67,8 +73,8 @@ export function osBase(opts: OsBaseOptions = {}): string {
 }
 
 /**
- * The URL of a shell path (`/api/os/icons.svg`) for this page, on either route.
- * For anything an app can't reach through an SDK method: an icon sprite, an
+ * The URL of a shell path (`/api/os/icons.svg`): the gateway in a page on an App
+ * Host, OS_API_BASE on the server. For anything an app can't reach through an SDK method: an icon sprite, an
  * `<img>`, a hand-written fetch.
  */
 export function osUrl(path: `/${string}`): string {

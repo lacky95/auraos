@@ -132,12 +132,13 @@ type Enriched = { app: string; appNameConflict: boolean }
 /**
  * Put the display name first so it is the first thing a reader sees, and add
  * the three ways to reach the interface next to the OS's shell-relative `url`:
- *   • `baseUrl`  — the OS shell; `baseUrl + url` is what `dialUrl` is;
+ *   • `baseUrl`  — the OS shell; `baseUrl + url` is what `dialUrl` is (a
+ *     custom entry's `url` is already its full address);
  *   • `dialUrl`  — absolute, fetchable from this app's network position;
  *   • `upstream` — the provider's own host:port, skipping the shell proxy.
  *     Filled in by the OS only while the interface is live; null otherwise.
- * The relative `url` alone is right inside an app iframe, but an MCP client is
- * usually neither in a browser nor inside the shell.
+ * The relative `url` alone is fetchable from nowhere: a page reaches the shell
+ * through its App Host gateway, and an MCP client is usually not in a browser.
  */
 function enrich(view: InterfaceView, dir: AppDirectory, ifaces: OsClient['interfaces']): Enriched {
   return {

@@ -2,15 +2,15 @@
  * Client used by apps to talk to the OS and other apps.
  *
  * Most cross-app data access goes through `queryProvider/writeProvider/watchProvider`,
- * which under the hood hit `/api/data/<authority>/<resource>` on the shell. The shell
- * proxy reads `Referer` for source-app identification, so calls made from an app's
- * iframe automatically carry their identity.
+ * which under the hood hit `/api/data/<authority>/<resource>` on the shell. From a
+ * page they go through the App Host gateway (`/_aura/os/`), which signs the app's
+ * verified identity onto every call; nothing the page sends can name another app.
  *
- * Theme-related methods read from the proxy-injected `<meta>` tags when
- * available (synchronous, set by the shell proxy's HTML rewriter) and fall
- * back to a content-provider fetch otherwise. The full palette/theme can be
- * obtained via `getPalette()`/`getTheme()`; most apps should just consume
- * `var(--aura-color-*)` directly in CSS.
+ * Theme-related methods read the runtime bootstrap (`AuraRuntimeBootstrap`, set by
+ * `/_aura/runtime.js` before any app script runs) when available, and fall back to
+ * a fetch otherwise. The full palette/theme can be obtained via
+ * `getPalette()`/`getTheme()`; most apps should just consume `var(--aura-color-*)`
+ * directly in CSS.
  */
 
 import type {
@@ -40,7 +40,7 @@ export interface ThemeSelection {
   colorMode:    ColorMode;
 }
 
-/** How an app participates in OS theming. Read from `<meta name="aura-theme-strategy">`. */
+/** How an app participates in OS theming (manifest `themeStrategy`). */
 export type ThemeStrategy = 'inherit' | 'themed' | 'override';
 
 import { appHostRuntime, bodylessMutationHeaders, osAuthHeaders, osBase } from './os-auth.js';
@@ -264,18 +264,11 @@ export class OsClient {
    * `Activity.finish()` — apps can use this from a "← Back" button in
    * a sub-screen instead of hand-rolling close + open-parent calls.
    *
-   * Reads the current activity id from `APP_ACTIVITY_ID` (Node) or the
-   * proxy-injected `<meta name="aura-activity-id">` tag (browser). No-op
-   * if no activity id is available.
+   * The activity id comes from `activity.getActivityId()`. No-op if no
+   * activity id is available.
    */
   async finish(): Promise<void> {
-    let activityId: string | null = null;
-    if (typeof process !== 'undefined' && process.env) {
-      activityId = process.env['APP_ACTIVITY_ID'] ?? null;
-    }
-    if (!activityId && typeof document !== 'undefined') {
-      activityId = document.querySelector('meta[name="aura-activity-id"]')?.getAttribute('content') ?? null;
-    }
+    const activityId = this.activity.getActivityId();
     if (!activityId) return;
     await fetch(`${this.base}/api/activities/${encodeURIComponent(activityId)}/back`, {
       method: 'POST',
@@ -323,7 +316,7 @@ export class OsClient {
 
   /**
    * Open an SSE stream against a provider with `?watch=1` appended. The provider must
-   * implement its own watch handler; the proxy just streams the response.
+   * implement its own watch handler; the shell just streams the response.
    */
   watchProvider(authority: string, resource: string): EventSource {
     const r = resource.replace(/^\/+/, '');
@@ -378,10 +371,13 @@ export class OsClient {
     if (!res.ok) throw new Error(`kv PUT ${namespace}/${key} → HTTP ${res.status}: ${await res.text()}`);
   }
 
-  /** Reads `<meta name="aura-theme-id">` set by the proxy (synchronous). */
+  /**
+   * The OS theme active when this page loaded, from the runtime bootstrap
+   * (synchronous). Null on the server or outside AuraOS. `onThemeChange`
+   * reports later changes.
+   */
   getActiveThemeId(): string | null {
-    if (typeof document === 'undefined') return null;
-    return document.querySelector('meta[name="aura-theme-id"]')?.getAttribute('content') ?? null;
+    return appHostRuntime()?.theme.themeId ?? null;
   }
 
   // -------- Theme (v2) — mode (light / dark / auto) --------
@@ -408,8 +404,8 @@ export class OsClient {
   // -------- Theme (v3) — palette + framework --------
 
   /**
-   * Active palette read off `--aura-color-*` CSS vars (the proxy auto-injects
-   * /api/os/theme.css for `inherit`-strategy apps). Most apps don't need this —
+   * Active palette read off `--aura-color-*` CSS vars (`/_aura/runtime.js`
+   * links /api/os/theme.css for `inherit`-strategy apps). Most apps don't need this —
    * `var(--aura-color-*)` works directly in CSS. Use this for things like an
    * in-app theme preview swatch or canvas painting.
    */
@@ -418,21 +414,17 @@ export class OsClient {
   }
 
   /**
-   * Returns design-framework metadata. Reads `<meta name="aura-design-framework">`
-   * synchronously when available (set by the proxy on every proxied HTML
-   * response). Falls back to looking up the active theme's framework via the
-   * Settings inventory.
+   * Returns design-framework metadata. Reads the runtime bootstrap
+   * synchronously when available, else looks up the active theme's framework
+   * in the theme inventory.
    */
   async getDesignFramework(): Promise<DesignFramework> {
-    if (typeof document !== 'undefined') {
-      const id  = document.querySelector('meta[name="aura-design-framework"]')        ?.getAttribute('content');
-      const ver = document.querySelector('meta[name="aura-design-framework-version"]')?.getAttribute('content');
-      if (id && ver) {
-        // `source` isn't exposed via meta — the framework registry is static
-        // for now (scificn only). Hardcode here; if we ever ship multiple
-        // frameworks we'll surface source via meta too.
-        return { id, name: id, source: 'https://www.scificn.dev', version: ver };
-      }
+    const fw = appHostRuntime()?.theme.framework;
+    if (fw) {
+      // `source` isn't in the bootstrap: the framework registry is static
+      // for now (scificn only). Hardcode here; if we ever ship multiple
+      // frameworks we'll add it there too.
+      return { id: fw.id, name: fw.id, source: 'https://www.scificn.dev', version: fw.version };
     }
     const themes  = await this.listThemes();
     const activeId = this.getActiveThemeId() ?? themes[0]?.id ?? '';
@@ -462,11 +454,9 @@ export class OsClient {
     };
   }
 
-  /** Reads `<meta name="aura-theme-strategy">` set by the proxy. Defaults to `'inherit'`. */
+  /** This app's theme strategy, from the runtime bootstrap. Defaults to `'inherit'`. */
   getThemeStrategy(): ThemeStrategy {
-    if (typeof document === 'undefined') return 'inherit';
-    const v = document.querySelector('meta[name="aura-theme-strategy"]')?.getAttribute('content');
-    return (v === 'themed' || v === 'override') ? v : 'inherit';
+    return appHostRuntime()?.theme.strategy ?? 'inherit';
   }
 
   // -------- Theme (v2) — subscriptions --------
@@ -588,8 +578,7 @@ export class OsClient {
   onViewportChange(cb: (info: ViewportChangeInfo) => void): () => void {
     if (typeof window === 'undefined') return () => undefined;
     const handler = (ev: MessageEvent) => {
-      // PHASE2-CUTOVER: the parent check is for proxied iframes; an App Host trusts only the Shell.
-      if (appHostRuntime() ? !isFromShell(ev) : ev.source !== window.parent) return;
+      if (!isFromShell(ev)) return;
       const d = ev.data as {
         type?: string; reason?: string; shellZoom?: number; iframeScale?: number;
         contentW?: number; contentH?: number;

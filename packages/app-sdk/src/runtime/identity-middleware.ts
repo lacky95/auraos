@@ -1,7 +1,8 @@
 /**
  * Astro middleware injected by `auraAppIntegration`: stamps every rendered
  * response with `X-Aura-App-Id` / `X-Aura-Instance-Id`, the identity the
- * shell proxy and the reconciler check (port-squatter protection).
+ * shell (App Host router, machine path) and the reconciler check
+ * (port-squatter protection).
  *
  * Middleware runs in `astro dev` AND in a production build — the
  * integration's `astro:server:setup` hook (which also stamps the assets Vite
