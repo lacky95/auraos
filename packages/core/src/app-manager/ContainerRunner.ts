@@ -22,7 +22,7 @@ import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
 import {
   ASTRO_START_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
 } from './provisioning.js';
-import { serveState } from './appBuild.js';
+import { BUILD_STAGING_DIR, serveState } from './appBuild.js';
 import { BASE_IMAGE, whenBaseImageReady } from './BaseImage.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
@@ -734,8 +734,7 @@ export class ContainerRunner implements SandboxRunner {
    *    and /home/aura below.
    *
    *  Both paths produce the same in-container view: `/workspace/apps/<id>`. */
-  private buildAppDirMount(ctxAppDir: string, appId: string, appDataVolume: string): string[] {
-    const target = `/workspace/apps/${appId}`;
+  private buildAppDirMount(ctxAppDir: string, appId: string, appDataVolume: string, target = `/workspace/apps/${appId}`): string[] {
     if (ctxAppDir.startsWith('/workspace/')) {
       // toHostPath rewrites the /workspace prefix to AURA_HOST_WORKSPACE so the
       // bind source resolves on the HOST daemon (no-op on Linux, required for
@@ -1194,7 +1193,10 @@ export class ContainerRunner implements SandboxRunner {
    * (its pids budget) and never on the launch path. Same app-dir /
    * node_modules / packages mounts as an app container, so the build sees
    * exactly what the running app sees; capped (pids, memory, cpus) so a build
-   * can't starve the running apps. The caller writes the build stamp.
+   * can't starve the running apps. The staging directory is mounted AS `dist`:
+   * paths baked into the output are the real ones, and the `dist/` a running
+   * instance loads from is untouched. The caller installs the result
+   * (installBuild) and writes the build stamp.
    */
   /** Shell-side pids of the `docker run` clients of running builds (getActivePids). */
   private readonly buildPids = new Set<number>();
@@ -1207,6 +1209,7 @@ export class ContainerRunner implements SandboxRunner {
       '--pids-limit', '512', '--memory', '3g', '--cpus', '2',
       '--workdir', `/workspace/apps/${appId}`,
       ...this.buildAppDirMount(appDir, appId, this.appDataVolume),
+      ...this.buildAppDirMount(`${appDir}/dist/${BUILD_STAGING_DIR}`, appId, this.appDataVolume, `/workspace/apps/${appId}/dist`),
       '-v', `${this.workspaceRoot}/packages:/workspace/packages:ro`,
       '-v', `${this.workspaceRoot}/package.json:/workspace/package.json:ro`,
       '-v', `${this.workspaceRoot}/pnpm-lock.yaml:/workspace/pnpm-lock.yaml:ro`,

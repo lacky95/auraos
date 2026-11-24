@@ -9,18 +9,25 @@
  * changed, and `aura build app <id>` builds on demand.
  *
  *   appFingerprint  — hash of the app's sources (not its data, builds, logs)
+ *                     and of the @aura/* packages it builds against
  *   prodCapability  — can this app run from a build at all?
  *   serveState      — 'prod' | 'dev' for the next start, with the reason
  *
  * The build stamp `dist/.aura-build` holds the fingerprint the build was made
  * from; a mismatch means the sources changed since → dev.
+ *
+ * A build never writes into the live `dist/`: it goes to a staging directory
+ * and installBuild() merges it in, so a running server can still lazy-load the
+ * chunks it was started with.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 
 export const BUILD_STAMP_FILE = '.aura-build';
+/** Inside `dist/`, so everything that already ignores builds ignores it too. */
+export const BUILD_STAGING_DIR = '.aura-next';
 
 export type ServeMode = 'prod' | 'dev';
 export type ServeReason =
@@ -57,9 +64,80 @@ function fileHash(path: string): string {
   return hash;
 }
 
+/** What a package contributes to a build; types and source maps do not. */
+const PACKAGE_RUNTIME_FILE = /\.(?:[cm]?js|css|json)$/;
+const AURA_IMPORT = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\(\s*)['"](@aura\/[a-z0-9-]+)/g;
+/** File content hash → the @aura/* packages that file imports. */
+const auraImportCache = new Map<string, string[]>();
+
+function auraImportsOf(path: string, hash: string): string[] {
+  const hit = auraImportCache.get(hash);
+  if (hit) return hit;
+  const found = [...new Set([...readFileSync(path, 'utf-8').matchAll(AURA_IMPORT)].map((m) => m[1]!))];
+  auraImportCache.set(hash, found);
+  return found;
+}
+
+function declaredAuraPackages(appDir: string): string[] {
+  try {
+    const pkg = JSON.parse(readFileSync(join(appDir, 'package.json'), 'utf-8')) as Record<string, Record<string, string> | undefined>;
+    const names = [pkg['dependencies'], pkg['devDependencies'], pkg['auraDependencies']].flatMap((d) => Object.keys(d ?? {}));
+    return [...new Set(names.filter((n) => n.startsWith('@aura/')))];
+  } catch { return []; }
+}
+
+function packageRuntimeFiles(pkgDir: string): string[] {
+  const files = ['package.json'];
+  const walk = (rel: string) => {
+    let entries: import('node:fs').Dirent[];
+    try { entries = readdirSync(join(pkgDir, rel), { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const r = `${rel}/${e.name}`;
+      if (e.isDirectory()) walk(r);
+      else if (e.isFile() && PACKAGE_RUNTIME_FILE.test(e.name)) files.push(r);
+    }
+  };
+  walk('dist');
+  return files.sort();
+}
+
+/**
+ * Content hash of the @aura/* packages this app builds against: the ones it
+ * declares, plus those their runtime files import. Follows workspace symlinks
+ * and registry copies alike, so both kinds of app go stale when their SDK
+ * changes. '' when the app uses none.
+ */
+export function sdkFingerprint(appDir: string): string {
+  const queue = declaredAuraPackages(appDir).map((name) => ({ name, from: appDir }));
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  const locate = (name: string, from: string) => {
+    try { return realpathSync(join(from, 'node_modules', name)); } catch { return null; }
+  };
+  while (queue.length) {
+    const { name, from } = queue.pop()!;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const dir = locate(name, from) ?? locate(name, appDir);
+    if (!dir) { lines.push(`${name}\0missing`); continue; }
+    for (const rel of packageRuntimeFiles(dir)) {
+      try {
+        const hash = fileHash(join(dir, rel));
+        lines.push(`${name}/${rel}\0${hash}`);
+        if (rel !== 'package.json' && !rel.endsWith('.css')) {
+          for (const dep of auraImportsOf(join(dir, rel), hash)) queue.push({ name: dep, from: dir });
+        }
+      } catch { /* vanished mid-walk */ }
+    }
+  }
+  if (!lines.length) return '';
+  return createHash('sha1').update(lines.sort().join('\n')).digest('hex');
+}
+
 /**
  * Fingerprint of an app's SOURCES: root config files plus everything under
- * src/ and public/. Excluded: builds (dist*), node_modules, .astro, the
+ * src/ and public/, and the @aura/* packages it uses (sdkFingerprint).
+ * Excluded: builds (dist*), node_modules, .astro, the
  * instance data dirs (`<appDir>/<appId>…/` — user-scope apps keep data inside
  * the app dir), backups, logs, and the manifest's `build.ignore` globs
  * (paths relative to the app dir).
@@ -93,6 +171,8 @@ export function appFingerprint(appDir: string, ignore: readonly string[] = []): 
   for (const rel of files) {
     try { h.update(rel).update('\0').update(fileHash(join(appDir, rel))).update('\n'); } catch { /* vanished mid-walk */ }
   }
+  const sdk = sdkFingerprint(appDir);
+  if (sdk) h.update('@aura\0').update(sdk).update('\n');
   return h.digest('hex');
 }
 
@@ -135,6 +215,108 @@ export function readBuildStamp(appDir: string): string | null {
 
 export function writeBuildStamp(appDir: string, fingerprint: string): void {
   writeFileSync(join(appDir, 'dist', BUILD_STAMP_FILE), `${fingerprint}\n`);
+}
+
+/** An empty staging directory for the next build (a crashed build may have left one). */
+export function prepareBuildStaging(appDir: string): string {
+  const next = join(appDir, 'dist', BUILD_STAGING_DIR);
+  rmSync(next, { recursive: true, force: true });
+  mkdirSync(next, { recursive: true });
+  return next;
+}
+
+export function discardBuildStaging(appDir: string): void {
+  rmSync(join(appDir, 'dist', BUILD_STAGING_DIR), { recursive: true, force: true });
+}
+
+function listBuildFiles(root: string): string[] {
+  const out: string[] = [];
+  const walk = (rel: string) => {
+    for (const e of readdirSync(join(root, rel), { withFileTypes: true })) {
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (r === BUILD_STAGING_DIR) continue;
+      if (e.isDirectory()) walk(r);
+      else out.push(r);
+    }
+  };
+  walk('');
+  return out;
+}
+
+/** Referenced files land before what references them: chunks, then pages, then the entry. */
+function installRank(rel: string): number {
+  if (rel === 'server/entry.mjs') return 2;
+  return rel.startsWith('server/pages/') || /^server\/[^/]+\.mjs$/.test(rel) ? 1 : 0;
+}
+
+/** Make `dist/<rel>` placeable when an old build had a file where this one has a directory, or the reverse. */
+function clearPathConflicts(dist: string, rel: string): void {
+  const parts = rel.split('/');
+  for (let i = 1; i < parts.length; i++) {
+    const parent = join(dist, ...parts.slice(0, i));
+    try { if (!lstatSync(parent).isDirectory()) rmSync(parent, { force: true }); } catch { break; }
+  }
+  mkdirSync(dirname(join(dist, rel)), { recursive: true });
+  try {
+    if (lstatSync(join(dist, rel)).isDirectory()) rmSync(join(dist, rel), { recursive: true, force: true });
+  } catch { /* nothing there */ }
+}
+
+/**
+ * Move a finished build from staging into `dist/`.
+ *
+ * Merges instead of replacing the directory: a running production server
+ * lazy-loads its hashed chunks by path, so they must outlive the build. Each
+ * file lands by rename. With `prune` (nothing runs from this dist) files of
+ * older builds are removed afterwards. The stamp goes first and the caller
+ * writes the new one last, so an interrupted install reads as "changed" → dev.
+ */
+export function installBuild(appDir: string, opts: { prune: boolean }): void {
+  const dist = join(appDir, 'dist');
+  const next = join(dist, BUILD_STAGING_DIR);
+  const files = listBuildFiles(next);
+  if (!files.includes('server/entry.mjs')) throw new Error('the build produced no server/entry.mjs');
+  rmSync(join(dist, BUILD_STAMP_FILE), { force: true });
+  for (const rel of [...files].sort((a, b) => installRank(a) - installRank(b))) {
+    clearPathConflicts(dist, rel);
+    const tmp = `${join(dist, rel)}.aura-tmp`;
+    rmSync(tmp, { force: true });
+    cpSync(join(next, rel), tmp, { verbatimSymlinks: true });
+    renameSync(tmp, join(dist, rel));
+  }
+  if (opts.prune) {
+    const keep = new Set(files);
+    for (const rel of listBuildFiles(dist)) if (!keep.has(rel)) rmSync(join(dist, rel), { force: true });
+    const dropEmpty = (rel: string) => {
+      for (const e of readdirSync(join(dist, rel), { withFileTypes: true })) {
+        const r = rel ? `${rel}/${e.name}` : e.name;
+        if (!e.isDirectory() || r === BUILD_STAGING_DIR) continue;
+        dropEmpty(r);
+        if (!readdirSync(join(dist, r)).length) rmSync(join(dist, r), { recursive: true, force: true });
+      }
+    };
+    dropEmpty('');
+  }
+  rmSync(next, { recursive: true, force: true });
+}
+
+const SECRET_ASSIGNMENT = /([\w.-]*(?:pass(?:word|wd|phrase)?|secret|token|api[_-]?key|credential|cookie|authorization)[\w.-]*["']?\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi;
+
+/**
+ * One log-safe line saying why a build failed: the last error line of its
+ * output, with anything shaped like a credential removed.
+ */
+export function buildFailureReason(r: { skipped?: string; output?: string }): string {
+  if (r.skipped) return r.skipped;
+  // eslint-disable-next-line no-control-regex
+  const lines = (r.output ?? '').replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const line = [...lines].reverse().find((l) => /error|failed|cannot|could not|not found|timed out|killed/i.test(l)) ?? lines.at(-1) ?? 'no build output';
+  return line
+    .replace(/\/\/[^/\s:@]+:[^/\s@]+@/g, '//***@')
+    .replace(/\bbearer\s+\S+/gi, 'Bearer ***')
+    .replace(SECRET_ASSIGNMENT, '$1***')
+    .replace(/\b[A-Za-z0-9+/_-]{40,}={0,2}/g, '***')
+    .slice(0, 300);
 }
 
 /** How the app starts next time, and why. */

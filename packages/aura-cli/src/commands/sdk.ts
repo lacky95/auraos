@@ -17,16 +17,25 @@
  *
  * Wired into the synth entrypoint (ContainerRunner + ProotRunner) so
  * apps boot from scratch without a manual step.
+ *
+ * The version tag never changes in this monorepo (0.0.1), so an installed copy
+ * records the digest of the layer it came from (DIGEST_FILE) and is replaced
+ * only when the registry holds a different one. With the registry unreachable
+ * an installed copy stays as it is, and a directory that is not one of our
+ * copies (a symlink, another package) is never replaced.
  */
 import type { Command } from 'commander';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, existsSync, statSync, cpSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { readFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, existsSync, statSync, lstatSync, cpSync, renameSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { color, fail, info, ok } from '../lib/format.js';
 
 const DEFAULT_REGISTRY_URL = 'http://aura-com.aura.registry:4090';
 const REGISTRY_HOST_DEFAULT = DEFAULT_REGISTRY_URL.replace(/^https?:\/\//, '');
+/** In an installed package: the registry layer digest it was unpacked from. */
+export const DIGEST_FILE = '.aura-oci-digest';
 
 interface InstallOpts {
   registry?: string;
@@ -83,10 +92,30 @@ function discoverDeps(cwd: string): Array<{ fullName: string; basename: string; 
   return out;
 }
 
+/** Digest of the tarball layer at `ref`, or null when it can't be read. */
+function remoteDigest(ref: string, orasFlags: string[]): string | null {
+  const out = spawnSync('oras', ['manifest', 'fetch', ref, ...orasFlags], { encoding: 'utf8', timeout: 15_000 });
+  if (out.status !== 0) return null;
+  try {
+    const digest = (JSON.parse(out.stdout) as { layers?: Array<{ digest?: unknown }> }).layers?.[0]?.digest;
+    return typeof digest === 'string' ? digest : null;
+  } catch { return null; }
+}
+
+/** Is `dest` a copy this command installed (now, or before digests were recorded)? */
+function isInstalledCopy(dest: string, fullName: string): boolean {
+  try {
+    if (!lstatSync(dest).isDirectory()) return false;
+    if (existsSync(join(dest, DIGEST_FILE))) return true;
+    return (JSON.parse(readFileSync(join(dest, 'package.json'), 'utf8')) as { name?: string }).name === fullName;
+  } catch { return false; }
+}
+
 /** Pull one @aura/<basename>:<version> tarball into a tmp dir, then
- *  extract its `package/` contents into <cwd>/node_modules/@aura/<basename>/.
+ *  extract its `package/` contents into <cwd>/node_modules/@aura/<basename>/,
+ *  unless the installed copy already holds that digest.
  *  `oras pull` writes the .tgz at the tmp root; we untar it via tar(1). */
-function installOne(
+export function installOne(
   cwd: string,
   registryHost: string,
   orasFlags: string[],
@@ -94,6 +123,21 @@ function installOne(
   quiet: boolean,
 ): boolean {
   const ref = `${registryHost}/aura/${pkg.basename}:${pkg.version}`;
+  const dest = join(cwd, 'node_modules', '@aura', pkg.basename);
+  const present = lstatExists(dest);
+  if (present && !isInstalledCopy(dest, pkg.fullName)) {
+    console.error(color.yellow(`[sdk] ${pkg.fullName}: ${dest} is not an installed copy — left as it is`));
+    return true;
+  }
+  const digest = remoteDigest(ref, orasFlags);
+  if (present && !digest) {
+    if (!quiet) console.error(color.yellow(`[sdk] ${pkg.fullName}: registry unavailable — keeping the installed copy`));
+    return true;
+  }
+  if (present && digest && readDigest(dest) === digest) {
+    if (!quiet) console.log(`[sdk] ${pkg.fullName}@${pkg.version} up to date`);
+    return true;
+  }
   const tmp = mkdtempSync(join(tmpdir(), `aura-sdk-${pkg.basename}-`));
   try {
     // 1. Pull the artifact. Layer is a single .tgz.
@@ -108,6 +152,13 @@ function installOne(
     if (!tgz) {
       if (!quiet) console.error(color.red(`[sdk] ${pkg.fullName}: no .tgz in pulled artifact`));
       return false;
+    }
+    if (digest) {
+      const pulled = `sha256:${createHash('sha256').update(readFileSync(join(tmp, tgz))).digest('hex')}`;
+      if (pulled !== digest) {
+        if (!quiet) console.error(color.red(`[sdk] ${pkg.fullName}: pulled tarball does not match ${digest}`));
+        return false;
+      }
     }
     // 3. Extract into a staging dir. npm pack tarballs always wrap content
     //    under a top-level `package/` directory.
@@ -124,16 +175,31 @@ function installOne(
       if (!quiet) console.error(color.red(`[sdk] ${pkg.fullName}: tarball missing top-level package/ dir`));
       return false;
     }
-    // 4. Move into node_modules/@aura/<name>/. Wipe any prior install.
-    const dest = join(cwd, 'node_modules', '@aura', pkg.basename);
-    rmSync(dest, { recursive: true, force: true });
-    mkdirSync(dest, { recursive: true });
-    cpSync(pkgRoot, dest, { recursive: true });
+    if (digest) writeFileSync(join(pkgRoot, DIGEST_FILE), `${digest}\n`);
+    // 4. Swap into node_modules/@aura/<name>/. Copied next to it first, so a
+    //    failure here leaves the installed copy in place.
+    const next = join(cwd, 'node_modules', '@aura', `.${pkg.basename}.next`);
+    const old  = join(cwd, 'node_modules', '@aura', `.${pkg.basename}.old`);
+    rmSync(next, { recursive: true, force: true });
+    rmSync(old, { recursive: true, force: true });
+    mkdirSync(next, { recursive: true });
+    cpSync(pkgRoot, next, { recursive: true });
+    if (present) renameSync(dest, old);
+    renameSync(next, dest);
+    rmSync(old, { recursive: true, force: true });
     if (!quiet) console.log(`[sdk] ${pkg.fullName}@${pkg.version} → ${dest}`);
     return true;
   } finally {
     try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
   }
+}
+
+function lstatExists(path: string): boolean {
+  try { lstatSync(path); return true; } catch { return false; }
+}
+
+function readDigest(dest: string): string | null {
+  try { return readFileSync(join(dest, DIGEST_FILE), 'utf8').trim() || null; } catch { return null; }
 }
 
 async function runInstall(opts: InstallOpts): Promise<void> {

@@ -19,7 +19,8 @@ import { PortAllocator } from './PortAllocator.js';
 import { LifecycleStateMachine } from './LifecycleStateMachine.js';
 import { ProotRunner, killProcessGroup } from './ProotRunner.js';
 import { ContainerRunner } from './ContainerRunner.js';
-import { appFingerprint, prodCapability, serveState, writeBuildStamp, type ServeState } from './appBuild.js';
+import { appFingerprint, discardBuildStaging, installBuild, prepareBuildStaging, prodCapability, sdkFingerprint, serveState, writeBuildStamp, type ServeState } from './appBuild.js';
+import { refreshAuraPackages } from './provisioning.js';
 import { MountManager } from './MountManager.js';
 import { PortManager, type ExposeSpec } from './PortManager.js';
 import { InstanceTokens } from './InstanceTokens.js';
@@ -795,7 +796,9 @@ export class AppManager {
    * `astro build` an app (ContainerRunner.buildApp — a throwaway container)
    * and stamp the build with the fingerprint of the sources it was made from.
    * Skips apps that can't run from a build, and — unless `force` — apps whose
-   * build is current. Running instances keep their mode until they restart.
+   * build is current. Running instances keep their mode until they restart,
+   * and keep loading their own chunks: the build is staged and merged in
+   * (installBuild), and old files are only pruned when nothing runs from them.
    */
   async buildApp(appId: string, opts: { force?: boolean } = {}): Promise<{
     appId: string; ok: boolean; built: boolean; skipped?: string; output?: string; ms: number; state: ServeState | null;
@@ -815,11 +818,19 @@ export class AppManager {
       const fingerprint = appFingerprint(manifest.appDir, manifest.build?.ignore ?? []);
       console.log(`[AppManager] build: ${appId} …`);
       OsEventBus.emit('app:build', { appId, phase: 'start' });
-      const res = await (this.runners.container as ContainerRunner).buildApp(appId, manifest.appDir);
-      if (res.ok) {
-        try { writeBuildStamp(manifest.appDir, fingerprint); } catch (err) {
-          return done({ ok: false, built: false, output: `${res.output}\ncannot write the build stamp: ${(err as Error).message}` });
+      let res: { ok: boolean; output: string };
+      try {
+        prepareBuildStaging(manifest.appDir);
+        res = await (this.runners.container as ContainerRunner).buildApp(appId, manifest.appDir);
+        if (res.ok) {
+          installBuild(manifest.appDir, { prune: this.getInstancesByApp(appId).length === 0 });
+          writeBuildStamp(manifest.appDir, fingerprint);
         }
+      } catch (err) {
+        OsEventBus.emit('app:build', { appId, phase: 'failed' });
+        return done({ ok: false, built: false, output: `cannot install the build: ${(err as Error).message}` });
+      } finally {
+        try { discardBuildStaging(manifest.appDir); } catch { /* next build clears it */ }
       }
       console.log(`[AppManager] build: ${appId} ${res.ok ? 'ok' : 'FAILED'} (${Math.round((Date.now() - t0) / 1000)} s)`);
       OsEventBus.emit('app:build', { appId, phase: res.ok ? 'done' : 'failed' });
@@ -828,6 +839,19 @@ export class AppManager {
     const next = this.buildChain.then(run, run);
     this.buildChain = next.catch(() => undefined);
     return next;
+  }
+
+  /**
+   * Bring the registry copy of this app's @aura/* packages up to date
+   * (`aura sdk install` compares digests). `changed` says whether what the
+   * app builds against is different now.
+   */
+  async refreshSdk(appId: string): Promise<{ changed: boolean; warning?: string }> {
+    const manifest = this.registry.getById(appId);
+    if (!manifest) throw new Error(`App not found: ${appId}`);
+    const before = sdkFingerprint(manifest.appDir);
+    const warning = await refreshAuraPackages(manifest.appDir);
+    return { changed: sdkFingerprint(manifest.appDir) !== before, ...(warning ? { warning } : {}) };
   }
 
   isEnabled(appId: string): boolean {

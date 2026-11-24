@@ -235,6 +235,28 @@ export async function provisionApp(
   return result;
 }
 
+/** Does this app hold a registry copy of @aura/* (not workspace links) to keep current? */
+export function hasRegistryAuraPackages(appDir: string): boolean {
+  if (!existsSync(join(appDir, 'node_modules', '@aura'))) return false;
+  try {
+    const pkg = JSON.parse(readFileSync(join(appDir, 'package.json'), 'utf-8')) as Record<string, Record<string, string> | undefined>;
+    return [pkg['dependencies'], pkg['devDependencies'], pkg['auraDependencies']]
+      .flatMap((d) => Object.entries(d ?? {}))
+      .some(([name, spec]) => name.startsWith('@aura/') && !String(spec).startsWith('workspace:'));
+  } catch { return false; }
+}
+
+/**
+ * Refresh an installed app's @aura/* copies from the local registry. Apps not
+ * provisioned yet are left to provisionApp. Returns a warning on failure and
+ * never throws: the app keeps the copy it has, so it stays usable offline.
+ */
+export async function refreshAuraPackages(appDir: string): Promise<string | null> {
+  if (!hasRegistryAuraPackages(appDir)) return null;
+  const code = await run('aura', ['sdk', 'install', '--quiet'], appDir);
+  return code === 0 ? null : `aura sdk install failed (exit ${code}) — keeping the installed @aura/* packages`;
+}
+
 function run(
   cmd: string, args: string[], cwd: string, onLine?: (line: string) => void,
 ): Promise<number> {

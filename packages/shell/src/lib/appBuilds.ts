@@ -10,11 +10,16 @@
  *   • at.oebb.opsconsole — it hosts agent sessions;
  *   • com.aura.terminal — live shell sessions (tmux) live in its containers;
  * both switch on their next start (new terminals, pool refills).
+ *
+ * A Rebuild can change the SDK, so the pass first publishes it to the local
+ * registry and refreshes the registry copies of installed apps; the build
+ * fingerprint (appFingerprint) then marks whoever uses it as changed.
  */
 import { existsSync, rmSync } from 'node:fs';
 // Namespace import: the running shell may cache a core build without newer exports.
 import * as core from '@aura/core';
 import { restartWithActivities } from './appRestart.js';
+import { ensureSdkPublished } from './sdkBootstrap.js';
 
 export const KEEP_RUNNING = new Set(['at.oebb.opsconsole', 'com.aura.terminal']);
 /** Left by os/boot.sh when a requested build (Update / Rebuild) ran this boot. */
@@ -22,21 +27,24 @@ export const APP_BUILD_MARKER = '/data/aura/boot/apps-build-requested';
 
 type BuildResult = Awaited<ReturnType<core.AppManager['buildApp']>> & { restarted?: boolean; restartNote?: string };
 
+const isRunning = (appId: string) =>
+  core.getAppManager().getInstancesByApp(appId).some((i) => i.state === 'resumed' || i.state === 'started');
+
+/** Move a running app onto what is now on disk, unless it must keep running. */
+async function switchRunning(appId: string): Promise<Pick<BuildResult, 'restarted' | 'restartNote'>> {
+  if (!isRunning(appId)) return { restartNote: 'not running — starts from the build next time' };
+  if (KEEP_RUNNING.has(appId)) return { restartNote: 'kept running (live sessions) — switches on its next start' };
+  try { await restartWithActivities(appId); return { restarted: true }; }
+  catch (err) { return { restartNote: `restart failed: ${(err as Error).message}` }; }
+}
+
 /** Build `appIds` (sequentially), then optionally restart the ones that were built. */
 export async function buildApps(appIds: string[], opts: { force?: boolean; restart?: boolean } = {}): Promise<BuildResult[]> {
   const mgr = core.getAppManager();
   const out: BuildResult[] = [];
   for (const appId of appIds) {
     const r: BuildResult = await mgr.buildApp(appId, { force: opts.force });
-    if (r.built && opts.restart) {
-      const running = mgr.getInstancesByApp(appId).some((i) => i.state === 'resumed' || i.state === 'started');
-      if (!running) r.restartNote = 'not running — starts from the build next time';
-      else if (KEEP_RUNNING.has(appId)) r.restartNote = 'kept running (live sessions) — switches on its next start';
-      else {
-        try { await restartWithActivities(appId); r.restarted = true; }
-        catch (err) { r.restartNote = `restart failed: ${(err as Error).message}`; }
-      }
-    }
+    if (r.built && opts.restart) Object.assign(r, await switchRunning(appId));
     out.push(r);
   }
   return out;
@@ -55,20 +63,47 @@ export function appsNeedingBuild(): string[] {
 }
 
 /**
- * After an Update / Rebuild (os/boot.sh left APP_BUILD_MARKER): build every
- * changed app in the background — the desktop is already up — and switch the
- * running ones. Detached; never throws.
+ * Refresh the registry @aura/* copies of enabled apps. A running KEEP_RUNNING
+ * app is left alone: its live process still loads from that copy.
+ * Returns the apps whose packages actually changed.
+ */
+async function refreshAppSdks(): Promise<string[]> {
+  const mgr = core.getAppManager();
+  const changed: string[] = [];
+  for (const m of mgr.getManifests()) {
+    if (!mgr.isEnabled(m.id) || (KEEP_RUNNING.has(m.id) && isRunning(m.id))) continue;
+    const r = await mgr.refreshSdk(m.id);
+    if (r.warning) console.warn(`[app-builds] ${m.id}: ${r.warning}`);
+    if (r.changed) changed.push(m.id);
+  }
+  return changed;
+}
+
+/**
+ * After an Update / Rebuild (os/boot.sh left APP_BUILD_MARKER): publish the
+ * SDK, refresh installed apps' copies, build every changed app in the
+ * background — the desktop is already up — and switch the running ones.
+ * Detached; never throws.
  */
 export function scheduleAppBuildPass(delayMs = 20_000): void {
   if (!existsSync(APP_BUILD_MARKER)) return;
   setTimeout(() => {
     void (async () => {
-      const todo = appsNeedingBuild();
-      console.log(`[app-builds] pass after Update/Rebuild: ${todo.length ? todo.join(', ') : 'nothing to build'}`);
       try {
+        // Awaited: the refresh below must see this boot's packages in the registry.
+        await ensureSdkPublished();
+        const refreshed = await refreshAppSdks();
+        const todo = appsNeedingBuild();
+        console.log(`[app-builds] pass after Update/Rebuild: ${todo.length ? todo.join(', ') : 'nothing to build'}`);
         const res = await buildApps(todo, { restart: true });
-        const failed = res.filter((r) => !r.ok).map((r) => r.appId);
-        console.log(`[app-builds] pass done: built ${res.filter((r) => r.built).length}, failed ${failed.length}${failed.length ? ` (${failed.join(', ')})` : ''}`);
+        // New SDK but nothing to build (apps on astro dev or their own entrypoint).
+        for (const appId of refreshed.filter((id) => !todo.includes(id))) {
+          const { restartNote } = await switchRunning(appId);
+          if (restartNote?.startsWith('restart failed')) console.warn(`[app-builds] ${appId}: ${restartNote}`);
+        }
+        const failed = res.filter((r) => !r.ok);
+        for (const r of failed) console.warn(`[app-builds] ${r.appId} failed: ${core.buildFailureReason(r)}`);
+        console.log(`[app-builds] pass done: built ${res.filter((r) => r.built).length}, failed ${failed.length}${failed.length ? ` (${failed.map((r) => r.appId).join(', ')})` : ''}`);
       } catch (err) {
         console.warn(`[app-builds] pass failed: ${(err as Error).message}`);
       } finally {
