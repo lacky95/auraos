@@ -87,7 +87,7 @@ es.onmessage = (e) => console.log(JSON.parse(e.data));
 | `getThemeSelection` | `() => Promise<{themeIdDark, themeIdLight, colorMode}>` | **(B+S)** |
 | `listThemes` | `() => Promise<ThemeSummary[]>` | **(B+S)** No palettes — lightweight inventory. |
 | `setOsThemeForTone` | `(tone: 'dark' \| 'light', themeId: string) => Promise<void>` | **(B+S)** Slots are independent. |
-| `getActiveThemeId` | `() => string \| null` | **(B)** Reads `<meta name="aura-theme-id">`. |
+| `getActiveThemeId` | `() => string \| null` | **(B)** The OS theme at page load, from the runtime bootstrap. |
 | `getModePreference` | `() => Promise<'light' \| 'dark' \| 'auto'>` | **(B+S)** |
 | `getMode` | `() => Promise<'light' \| 'dark'>` | **(B+S)** Resolves `'auto'` via media query. |
 | `setMode` | `(mode: 'light' \| 'dark' \| 'auto') => Promise<void>` | **(B+S)** |
@@ -99,7 +99,7 @@ es.onmessage = (e) => console.log(JSON.parse(e.data));
 | `getPalette` | `() => ColorPalette` | **(B)** Reads `var(--aura-color-*)` live. Most apps use CSS directly. |
 | `getDesignFramework` | `() => Promise<DesignFramework>` | **(B+S)** `{ id, name, source, version }`. |
 | `getTheme` | `() => Promise<OsTheme>` | **(B+S)** Full active theme: palette + tone + framework + tags. |
-| `getThemeStrategy` | `() => 'inherit' \| 'themed' \| 'override'` | **(B)** Reads `<meta name="aura-theme-strategy">`. |
+| `getThemeStrategy` | `() => 'inherit' \| 'themed' \| 'override'` | **(B)** This app's manifest `themeStrategy`, from the runtime bootstrap. |
 
 ### Theme — subscriptions
 
@@ -384,7 +384,7 @@ The SDK namespaces actions to `app.<appId>.<id>` automatically.
 |---|---|---|
 | `on` | `(actionId: string, handler: (ctx: {actionId, combo}) => void) => () => void` | **(B)** One handler per action. |
 | `off` | `(actionId: string) => void` | **(B)** |
-| `getBinding` | `(actionId: string) => string \| null` | **(B)** Synchronous; reads meta tag. |
+| `getBinding` | `(actionId: string) => string \| null` | **(B)** Synchronous; reads the runtime bootstrap's keymap snapshot. |
 | `onChange` | `(cb: (info: {actionId, oldCombo, newCombo}) => void) => () => void` | **(B)** Fires on remap. |
 
 ```ts
@@ -478,8 +478,8 @@ default fall-through).
 | `back` | `() => Promise<void>` | **(B+S)** Pop one step. |
 | `backTo` | `(index: number) => Promise<void>` | **(B+S)** Jump to position 0..n-1 in the stack. |
 | `setBreadcrumb` | `(mode: 'os' \| 'off') => Promise<void>` | **(B+S)** Hide OS breadcrumb when app draws its own. |
-| `getHistory` | `() => Array<{ path; title? }>` | **(B)** Reads meta tag; refreshed on every iframe load. |
-| `getActivityId` | `() => string \| null` | **(B+S)** From `APP_ACTIVITY_ID` env or proxy meta. |
+| `getHistory` | `() => Array<{ path; title? }>` | **(B)** Reads the back stack the proxy wrote into the page. Returns `[]` on an App Host for now. |
+| `getActivityId` | `() => string \| null` | **(B+S)** From `APP_ACTIVITY_ID` env or the runtime bootstrap. |
 
 ```ts
 // Settings drills down: index → /theme → /keyboard, OS Back pops back.
@@ -510,8 +510,20 @@ perch on a screen edge as a tab. The full guide is [Flights](/docs/flights).
 | Symbol | Signature | Note |
 |---|---|---|
 | `getAppContext` | `() => { appId, instanceId, appPort, osApiBase, dataDir, layerTag }` | **(S)** Reads `process.env` once at module load. |
-| `readIdentityHeaders` | `(req: Request) => { appId, instanceId, activityId }` | **(S)** Parses `X-Aura-*` request headers stamped by the proxy. |
-| `getAppBasePath` | `() => string` | **(B+S)** URL prefix the shell loads the iframe at, e.g. `/api/proxy/com.aura.docs-3`. Needed for SPA `basePath` config. |
+| `readIdentityHeaders` | `(req: Request) => { appId, instanceId, activityId }` | **(S)** Parses the `X-Aura-*` request headers the shell stamps. |
+
+### App Host transport (`packages/app-sdk/src/os-auth.ts`, `channel.ts`)
+
+How a page reaches the shell. See [Building an app for App Hosts](/docs/building-for-app-hosts).
+
+| Symbol | Signature | Note |
+|---|---|---|
+| `appHostRuntime` | `() => AuraRuntimeBootstrap \| null` | **(B)** The bootstrap of `/_aura/runtime.js`: app, instance, activity, theme, keymap. `null` on the server or outside AuraOS. |
+| `osUrl` | `(path: string) => string` | **(B+S)** A shell path through the gateway (`/_aura/os/…`) in a page, at `OS_API_BASE` on the server. |
+| `osAuthHeaders` | `(url: string) => Record<string, string>` | **(S)** The instance token as a Bearer. Empty in a browser and on `/api/proxy/…`. |
+| `postToShell` | `(message) => void` | **(B)** Posts an AuraChannel message to the shell at its exact origin. |
+| `isFromShell` | `(ev: MessageEvent) => boolean` | **(B)** Whether a message came from the shell (origin and window). |
+| `AURA_RUNTIME_LOADER_JS` | `string` (`@aura/app-sdk/runtime/loader`) | Inline script for a non-Astro document head; loads `/_aura/runtime.js` on an App Host. |
 
 ### Lifecycle (`packages/app-sdk/src/lifecycle.ts`)
 

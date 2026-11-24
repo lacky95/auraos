@@ -19,15 +19,16 @@ import { isBrowser, osAuthHeaders, osBase } from './os-auth.js';
  *     requested in the manifest AND granted by an admin — otherwise they are
  *     downgraded and `warnings[]` says so.
  *   - Browser: no token is ever sent (instance tokens never reach frontend
- *     code); the caller is UNVERIFIED (attribution from the Referer only).
- *     The `senderToken` create returns is remembered here, so the same page
- *     can still update / remove what it created.
+ *     code). The App Host gateway signs the page's app and instance onto the
+ *     call, so the shell attributes it to this app as VERIFIED too. The
+ *     `senderToken` create returns is remembered here, so the same page can
+ *     update / remove what it created either way.
  *
  * Reads (phase 5): a verified app sees its own notifications (get / list /
  * subscribe), plus other senders' only with an admin-granted, scoped
  * `notifications.read` (manifest request + `aura grant nperm <app> read
- * --scope …`). Browser (unverified) callers read nothing — except their own
- * items by id (`get` / `waitForAnswer` send the remembered senderToken).
+ * --scope …`). An unverified caller reads nothing — except its own items by
+ * id (`get` / `waitForAnswer` send the remembered senderToken).
  */
 // ---------------------------------------------------------------------------
 // Types (mirror @aura/core notifications; kept local so the SDK has no

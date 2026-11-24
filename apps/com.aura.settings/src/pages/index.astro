@@ -74,11 +74,9 @@ import Icon from '../components/Icon.astro';
     //                   side-by-side compare or pinning a section.
     //
     // The in-place path uses the OS endpoint /api/activities/<id>/navigate.
-    // We resolve the activity id from the meta tag the shell proxy injects
-    // (on an App Host, /_aura/runtime.js adds the same tag).
+    // The activity id comes from the runtime bootstrap (/_aura/runtime.js).
     function getActivityId() {
-      const meta = document.querySelector('meta[name="aura-activity-id"]');
-      return meta ? meta.getAttribute('content') : null;
+      return window.AuraRuntimeBootstrap?.activityId ?? null;
     }
 
     function pathForSection(section) {

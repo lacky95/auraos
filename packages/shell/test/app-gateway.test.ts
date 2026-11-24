@@ -484,7 +484,7 @@ function bootRuntime(frame: 'window' | 'nested') {
     appId: record.appId, instanceId: slot.instanceId, label: slot.label, slot: 1, cfg, themeStrategy: 'inherit',
     framework: { id: 'f', version: '1' },
     theme: { themeId: 't', themeIdDark: 'd', themeIdLight: 'l', colorMode: 'dark', resolvedMode: 'dark' },
-    keymap: { actions: [], bindings: {} },
+    keymap: { bindings: {} },
   }), context);
   const fire = (source: unknown, origin: string) => {
     for (const l of listeners) l({ data: { type: 'aura.key.synthetic', action: 'keydown', key: 'F5' }, source, origin });
@@ -515,7 +515,7 @@ test('the runtime refuses to start on a host that is not its own label', () => {
     appId: record.appId, instanceId: slot.instanceId, label: 'someoneelse', slot: 1, cfg, themeStrategy: 'inherit',
     framework: { id: 'f', version: '1' },
     theme: { themeId: 't', themeIdDark: 'd', themeIdLight: 'l', colorMode: 'dark', resolvedMode: 'dark' },
-    keymap: { actions: [], bindings: {} },
+    keymap: { bindings: {} },
   });
   const sandbox: Record<string, unknown> = { location: { host: `${slot.label}--desk.example:3000`, protocol: 'http:', origin: ORIGIN, search: '' } };
   sandbox.window = sandbox;
@@ -557,10 +557,10 @@ function bootThemed(opts: { links?: string[]; parsing?: boolean; strategy?: 'inh
     themeStrategy: opts.strategy ?? 'inherit',
     framework: { id: 'f', version: '1' },
     theme: { themeId: 't', themeIdDark: 'd', themeIdLight: 'l', colorMode: 'dark', resolvedMode: 'dark' },
-    keymap: { actions: [], bindings: {} },
+    keymap: { bindings: {} },
   }), vm.createContext(sandbox));
   const fire = (type: string, source: unknown, origin: string) => { for (const l of listeners) l({ data: { type }, source, origin }); };
-  return { links, written, appended, fire, top };
+  return { links, written, appended, fire, top, sandbox };
 }
 const SHELL_ORIGIN = 'http://desk.example:3000';
 const GATEWAY_THEME = '/_aura/os/api/os/theme.css';
@@ -582,6 +582,18 @@ test('a page that links the theme itself is left as it is', () => {
   assert.deepEqual(written, []);
   assert.deepEqual(appended.filter((e) => e.href), []);
   assert.equal(links[0]!.href, '/api/os/theme.css');
+});
+
+test('the bootstrap is the only source of identity and theme: no meta tags, no globals', () => {
+  const { appended, sandbox } = bootThemed({ strategy: 'override' });
+  const b = sandbox.AuraRuntimeBootstrap as { theme: Record<string, unknown> };
+  assert.deepEqual(JSON.parse(JSON.stringify(b.theme)), {
+    themeId: 't', themeIdDark: 'd', themeIdLight: 'l', colorMode: 'dark', resolvedMode: 'dark',
+    strategy: 'override', framework: { id: 'f', version: '1' },
+  });
+  assert.ok(Object.isFrozen(b.theme) && Object.isFrozen(b.theme.framework));
+  assert.deepEqual(appended, []);
+  for (const name of ['AURA_APP_ID', 'AURA_INSTANCE_ID', 'AURA_APP_BASE_PATH']) assert.equal(sandbox[name], undefined, name);
 });
 
 test('an override app gets no theme link', () => {

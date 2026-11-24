@@ -175,7 +175,10 @@ export function isAuraChannelRouteAllowed(type: unknown, from: AuraChannelEndpoi
   return routes.some((r) => r.from === from && r.to === to);
 }
 
-/** What `/_aura/runtime.js` starts from. Contains no credential. */
+/**
+ * What `/_aura/runtime.js` starts from, and the one source of a page's runtime
+ * identity (app, instance, activity) and theme for the SDK. Contains no credential.
+ */
 export interface AuraRuntimeBootstrap {
   channelVersion: typeof AURA_CHANNEL_VERSION;
   appId: string;
@@ -196,6 +199,10 @@ export interface AuraRuntimeBootstrap {
     themeIdLight: string;
     colorMode: 'light' | 'dark' | 'auto';
     resolvedMode: 'light' | 'dark';
+    /** The app's manifest `themeStrategy`. */
+    strategy: 'inherit' | 'themed' | 'override';
+    /** The active theme's design framework. */
+    framework: { id: string; version: string };
   };
   keymap: {
     /** Combos the shell intercepts, as in `aura.key.claim`. */

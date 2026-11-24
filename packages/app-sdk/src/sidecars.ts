@@ -391,11 +391,11 @@ export interface SidecarOptions {
    */
   permissions?: string[];
   /**
-   * Value sent as `X-Forwarded-Prefix` on proxied requests so a subpath-aware
-   * upstream (Starlette/FastAPI root_path, many SPA dashboards) emits correctly
-   * prefixed URLs instead of root-absolute ones that escape the iframe proxy.
-   * Defaults to the AuraOS shell proxy path `/api/proxy/<instanceId>` (no
-   * trailing slash). Set '' to disable.
+   * Value sent as `X-Forwarded-Prefix` on requests that arrive through the
+   * machine path, so a subpath-aware upstream (Starlette/FastAPI root_path,
+   * many dashboards) emits URLs that work for that caller. Defaults to the
+   * machine path `/api/proxy/<instanceId>` (no trailing slash). Requests from
+   * the app's App Host get none: it serves the app from `/`. Set '' to disable.
    */
   forwardedPrefix?: string;
   /** Base image used for throwaway helper containers (seeding). Default 'aura-base'. */
@@ -442,9 +442,9 @@ export class SidecarHost {
       nodeModulesVolume: process.env['AURA_NODE_MODULES_VOLUME'] || 'aura_aura-node-modules',
       ...options,
     };
-    // Default the reverse-proxy prefix to the AuraOS shell proxy path so a
-    // subpath-aware dashboard emits prefixed URLs. `?? ` (not `||`) so callers
-    // can pass '' to opt out.
+    // Default the prefix to the machine path so a subpath-aware dashboard emits
+    // prefixed URLs to machine callers. `?? ` (not `||`) so callers can pass ''
+    // to opt out.
     this.forwardedPrefix = options.forwardedPrefix ?? `/api/proxy/${options.instanceId}`;
     const wanted = options.mode ?? 'docker';
     this.mode = wanted === 'auto'
@@ -1007,7 +1007,7 @@ export class SidecarHost {
 
     const forward = async (req: http.IncomingMessage, res: http.ServerResponse, allowRetry: boolean): Promise<void> => {
       const headers: http.OutgoingHttpHeaders = { ...req.headers, host: `${dashHost}:${dashPort}` };
-      // PHASE2-CUTOVER: an App Host serves from `/`, so only the proxy path has a prefix.
+      // The App Host serves from `/`; only the machine path (/api/proxy/<id>) has a prefix.
       if (this.forwardedPrefix && req.headers[APP_HOST_ROUTE_HEADER] !== 'host') headers['x-forwarded-prefix'] = this.forwardedPrefix;
       if (this.opts.auth) Object.assign(headers, await this.opts.auth.headers());
       const upstream = http.request({ hostname: dashHost!, port: dashPort!, method: req.method, path: req.url, headers }, (upRes) => {
@@ -1044,7 +1044,7 @@ export class SidecarHost {
       if (!dashHost) { sock.destroy(); return; }
       void (async () => {
         const headers: http.OutgoingHttpHeaders = { ...req.headers, host: `${dashHost}:${dashPort}` };
-        // PHASE2-CUTOVER: an App Host serves from `/`, so only the proxy path has a prefix.
+        // The App Host serves from `/`; only the machine path has a prefix.
         if (this.forwardedPrefix && req.headers[APP_HOST_ROUTE_HEADER] !== 'host') headers['x-forwarded-prefix'] = this.forwardedPrefix;
         if (this.opts.auth) Object.assign(headers, await this.opts.auth.headers());
         const lines = [`${req.method} ${req.url} HTTP/1.1`];

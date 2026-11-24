@@ -139,6 +139,12 @@ domain now.
 
 ## Raw IP
 
-`http://10.0.0.2:3000` keeps working for the desktop and every
-`/api/proxy/…` app. App hosts need a label to prepend, so apps that use them
-show a hint to switch to the nip.io address.
+`http://10.0.0.2:3000` opens the desktop for setup only. App hosts need a
+label to prepend, so apps don't open there: the desktop shows a bar that
+links to the nip.io address.
+
+## Building apps
+
+Every address above gives each app window its own App Host origin. What
+that means for your code (reaching the shell, the runtime script, browser
+storage) is in [Building an app for App Hosts](/docs/building-for-app-hosts).

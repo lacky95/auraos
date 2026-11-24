@@ -1,5 +1,5 @@
-// What a page gets on each route: the runtime loader, the theme route, the base
-// path, and shell URLs. The proxy path must see no request and no change.
+// What a page gets: the runtime loader, the theme route, and shell URLs. A page
+// that is not on an App Host requests nothing.
 //
 //   pnpm --filter @aura/app-sdk test
 import { afterEach, test } from 'node:test';
@@ -8,15 +8,14 @@ import vm from 'node:vm';
 import { AURA_RUNTIME_LOADER_JS, appHostAssetLocation } from '../dist/runtime/loader.js';
 import { GET as assetRoute } from '../dist/runtime/shell-asset-route.js';
 import { APP_HOST_ROUTE_HEADER } from '../dist/hostRules.js';
-import { getAppBasePath } from '../dist/context.js';
 import { osUrl } from '../dist/os-auth.js';
 import { AURA_CHANNEL_VERSION } from '../dist/auraChannel.js';
 
-function runLoader({ hostname, pathname = '/', readyState = 'loading', booted = false }) {
+function runLoader({ hostname, readyState = 'loading', booted = false }) {
   const written = [];
   const appended = [];
   const sandbox = {
-    location: { hostname, pathname },
+    location: { hostname },
     document: {
       readyState,
       write: (html) => written.push(html),
@@ -42,10 +41,8 @@ test('after parsing it appends, because document.write would erase the page', ()
   assert.deepEqual(appended, ['/_aura/runtime.js']);
 });
 
-test('the proxy path, a plain host, punycode and a loaded runtime request nothing', () => {
+test('a plain host, punycode, a reserved label and a loaded runtime request nothing', () => {
   for (const page of [
-    { hostname: 'desk.example', pathname: '/api/proxy/com.acme.notes-1/' },
-    { hostname: 'notes--desk.example', pathname: '/api/proxy/com.acme.notes-1/' },
     { hostname: 'desk.example' },
     { hostname: 'localhost' },
     { hostname: 'xn--bcher-kva.example' },
@@ -87,16 +84,9 @@ test('off an App Host, or for any other path, there is no redirect', () => {
 });
 
 const APP = 'http://notesabcd1234--desk.example:3000';
-afterEach(() => { delete globalThis.window; delete process.env.APP_INSTANCE_ID; });
+afterEach(() => { delete globalThis.window; });
 
-test('the server base path follows the route of the request', () => {
-  process.env.APP_INSTANCE_ID = 'com.acme.notes-1';
-  assert.equal(getAppBasePath(), '/api/proxy/com.acme.notes-1');
-  assert.equal(getAppBasePath(new Request(APP)), '/api/proxy/com.acme.notes-1');
-  assert.equal(getAppBasePath(new Request(APP, { headers: { [APP_HOST_ROUTE_HEADER]: 'host' } })), '');
-});
-
-test('osUrl is the plain path when proxied and the gateway on an App Host', () => {
+test('osUrl is the gateway on an App Host, and the plain path outside AuraOS', () => {
   globalThis.window = { location: { origin: 'http://desk.example:3000' } };
   assert.equal(osUrl('/api/os/icons.svg'), '/api/os/icons.svg');
   globalThis.window = {

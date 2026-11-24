@@ -43,12 +43,20 @@ import { refererProxyId } from './legacyReferer.ts';
  * Real instance identity now exists: every instance gets a per-instance
  * token at spawn (`AURA_INSTANCE_TOKEN`, core's InstanceTokens), and the
  * OS-sidecar routes require it (lib/instanceAuth.ts `requireInstanceToken`).
- * Moving this route, /api/kv and /api/data onto it is the remaining step —
- * it needs every caller (SDK, apps) to send the token first.
+ * A valid token, like a gateway claim, names the instance before either
+ * hint is read; the SDK's server side sends it. Requiring it here, and moving
+ * /api/kv and /api/data onto it, is the remaining step: every caller (apps
+ * outside the SDK too) has to send it first.
  */
 export function identifyInstance(request: Request, mgr: AppManager): AppInstance | null {
   const gateway = gatewayInstance(request, mgr);
   if (gateway !== null) return gateway === 'invalid' ? null : gateway;
+
+  // An instance token proves the caller, so it wins over the hints below. The
+  // SDK sends it from an app's server instead of a self-set id header.
+  const token = /^Bearer\s+(\S+)\s*$/i.exec(request.headers.get('authorization') ?? '')?.[1];
+  const verified = token ? mgr.tokens.verify(token) : null;
+  if (verified) return mgr.getInstance(verified.instanceId) ?? null;
 
   const idOrAppId = refererProxyId(request.headers.get('referer'));
   if (idOrAppId) {

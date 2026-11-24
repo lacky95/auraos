@@ -16,8 +16,7 @@
  *     them when it stops, so forgetting `unregister()` cannot leak.
  */
 import type { OsClient } from './OsClient.js';
-import { getAppContext } from './context.js';
-import { bodylessMutationHeaders, osBase } from './os-auth.js';
+import { bodylessMutationHeaders, osAuthHeaders, osBase } from './os-auth.js';
 
 /**
  * `transport/protocol` — mirrors INTERFACE_KINDS in @aura/core. `http/mcp` is
@@ -127,14 +126,20 @@ export class InterfacesApi {
   }
 
   /**
-   * A fetchable URL for a resolved interface. `view.url` is shell-relative,
-   * which is already correct in a browser (the app iframe is same-origin) but
-   * not from the app's server, where the OS base has to be prefixed.
-   * Returns null when the interface isn't live.
+   * A fetchable URL for a resolved interface, or null when it isn't live.
+   * `view.url` is shell-relative, so it gets the OS base for this caller:
+   *
+   *   - in a page on an App Host, the same-origin gateway (`osUrl`). The
+   *     gateway applies the caller's access rules: an `os/kv` or `os/event`
+   *     address works as the route allows, while another app's upstream
+   *     (`/api/proxy/…`) is refused to app pages. Dial those from your server.
+   *   - on the server, `OS_API_BASE`: the machine path, which agents use too.
+   *
+   * A custom entry's `url` is already its full address and is returned as is.
    */
   urlFor(view: InterfaceView): string | null {
     if (!view.url) return null;
-    // PHASE2-CUTOVER: `view.url` is an /api/proxy path, which the gateway refuses to app callers.
+    if (view.status === 'external') return view.url;
     return `${this.base()}${view.url}`;
   }
 
@@ -170,23 +175,17 @@ export class InterfacesApi {
 
   // ---- Internals ----
 
-  /**
-   * Browser: '' — the iframe is served through the shell's proxy, so relative
-   * URLs already hit the OS. Node: OS_API_BASE. Same split as ActivityApi.
-   */
+  /** Browser: the App Host gateway. Node: OS_API_BASE. Same split as ActivityApi. */
   private base(): string {
     return osBase();
   }
 
   /**
-   * Server-side callers have no Referer, so they say who they are with the id
-   * the OS injected at spawn. Harmless in the browser (the OS prefers the
-   * Referer there, which an app cannot forge).
+   * Who is calling. A page needs nothing: the gateway signs its verified
+   * identity. The server sends its instance token, never a self-set id.
    */
   private identity(): Record<string, string> {
-    if (typeof window !== 'undefined') return {};
-    const ctx = getAppContext();
-    return { 'X-Aura-App-Id': ctx.appId, 'X-Aura-Instance-Id': ctx.instanceId };
+    return osAuthHeaders(`${this.base()}/api/interfaces`);
   }
 }
 

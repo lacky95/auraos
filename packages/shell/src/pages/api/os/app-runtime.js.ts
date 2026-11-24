@@ -36,7 +36,7 @@ export const GET: APIRoute = async ({ request }) => {
     themeStrategy: (manifest.themeStrategy ?? 'inherit') as 'inherit' | 'themed' | 'override',
     framework: theme.framework,
     theme: { themeId: theme.id, themeIdDark, themeIdLight, colorMode, resolvedMode },
-    keymap: { actions: [...actions], bindings: resolveBindings(actions, inst.appId, state) },
+    keymap: { bindings: resolveBindings(actions, inst.appId, state) },
   });
   return withEtag(request, js, 'text/javascript; charset=utf-8');
 };

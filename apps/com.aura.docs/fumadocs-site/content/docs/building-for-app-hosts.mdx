@@ -1,0 +1,197 @@
+---
+title: Building an app for App Hosts
+description: Every app window runs on its own origin. How a page reaches the shell (osUrl, the runtime script, AuraChannel), what it can't touch, and the machine paths agents keep using.
+---
+
+**TL;DR.** Your window is served at the root of its own host name,
+`<label>--<desktop host>`, not under the desktop. Reach the shell through
+the SDK (or `osUrl()`), never with a bare `/api/...` from the browser. Load
+`/_aura/runtime.js` (Astro apps get it for free). Talk to the shell with
+`postToShell()`, not `window.parent.postMessage`. Your server keeps using
+`OS_API_BASE` with its instance token, and agents keep using
+`/api/proxy/<app>/…`.
+
+| Who | Reaches the shell at | Proves who it is with |
+|---|---|---|
+| Your page (browser) | the gateway on its own origin, `/_aura/os/api/…` | nothing to send: the gateway signs your app and instance |
+| Your server | `$OS_API_BASE/api/…` | `Authorization: Bearer $AURA_INSTANCE_TOKEN` (`osAuthHeaders`) |
+| An agent or another app's server | `$OS_API_BASE/api/proxy/<appId>/…` (your MCP, your REST API) | its own credentials |
+
+## Where your window lives
+
+The desktop opens each app window on an **App Host**: an origin of its own,
+`<label>--<desktop host>`, same scheme and port, e.g.
+`http://notesabcd1234--10-0-0-2.nip.io:3000`. The shell picks the label;
+each instance of a multi-instance app gets its own. The desktop signs the
+window in with a one-time handoff; you don't do anything for that.
+
+Your app is served from `/` there, with nothing rewritten and nothing
+injected into your HTML. So:
+
+- **No base path.** Root-absolute URLs (`/assets/app.js`, `/api/save`,
+  `/ws`) reach your own server. Drop any `/api/proxy/<id>` prefix logic.
+- **`/api/…` is yours.** On your origin, `/api/kv/...` is a route of your
+  app, not the shell's. The shell is at `/_aura/os/`.
+- **Raw IP has no App Hosts.** Open AuraOS at its nip.io address or a
+  domain ([Reaching AuraOS](/docs/reaching-auraos)).
+
+## Load the runtime script
+
+`/_aura/runtime.js` is served on your origin. It sets
+`window.AuraRuntimeBootstrap` (your app, instance and activity, the theme and
+the keymap), links the OS theme for `inherit` apps and refreshes it on a
+change, forwards OS shortcuts and the on-screen keyboard, and relays your
+console. It must run before your own scripts.
+
+**Astro apps** with `auraAppIntegration()` get it on every page. Nothing to do.
+
+**Other frameworks** put the loader first in the document head. It loads the
+runtime on an App Host and does nothing anywhere else:
+
+```tsx
+// Next.js app/layout.tsx
+import { AURA_RUNTIME_LOADER_JS } from '@aura/app-sdk/runtime/loader';
+
+<head>
+  <script dangerouslySetInnerHTML={{ __html: AURA_RUNTIME_LOADER_JS }} />
+</head>
+```
+
+Without the SDK, a plain blocking tag does the same on an App Host:
+
+```html
+<script src="/_aura/runtime.js"></script>
+```
+
+Read identity and theme from the bootstrap, not from `<meta>` tags (there
+are none) or from the URL:
+
+```ts
+import { appHostRuntime } from '@aura/app-sdk';
+
+const rt = appHostRuntime();        // null on the server or outside AuraOS
+rt?.appId;                          // 'com.acme.notes'
+rt?.instanceId;                     // 'com.acme.notes-2'
+rt?.activityId;                     // this window's activity, or null
+rt?.theme.resolvedMode;             // 'light' | 'dark'
+```
+
+`osClient.activity.getActivityId()`, `getActiveThemeId()`,
+`getThemeStrategy()` and `keymap.getBinding()` read the same object. The
+bootstrap is a snapshot from page load: subscribe with `onThemeChange`,
+`onModeChange` and `keymap.onChange` for later changes.
+
+## Reach the shell: `osUrl`
+
+Every `OsClient` method already picks the right address. For anything
+else, such as an `<img>`, an icon sprite or a hand-written `fetch`, use
+`osUrl()`:
+
+```ts
+import { osUrl } from '@aura/app-sdk';
+
+await fetch(osUrl('/api/kv/app/com.acme.notes/config'));
+// page on an App Host: /_aura/os/api/kv/app/com.acme.notes/config
+// server:              http://aura-shell:3000/api/kv/app/com.acme.notes/config
+icon.src = osUrl('/api/os/icons/chevron-down.svg');
+```
+
+Without the SDK, prefix `window.AuraRuntimeBootstrap.gatewayBase`
+(always `/_aura/os/`).
+
+The gateway checks each call against the route's access rules for your
+app, so a page can do what its app may do and nothing more:
+
+- **Same origin only.** Other sites and other apps' hosts are refused.
+- **Writes** need a JSON `Content-Type` (the SDK sends it), or the CSRF
+  token from `GET /_aura/os/_csrf` for a form post or upload.
+- **Another app's upstream** (`/api/proxy/…`) is refused to pages. Call a
+  provider from your own server instead (below).
+
+## Talk to the shell: AuraChannel
+
+The shell is `window.top`, at the desktop's exact origin. Never post with
+`'*'` and never trust a message because of its payload:
+
+```ts
+import { isFromShell, postToShell } from '@aura/app-sdk';
+
+postToShell({ type: 'aura.system.openLauncher' });   // only to the shell's origin
+
+window.addEventListener('message', (ev) => {
+  if (!isFromShell(ev)) return;                       // origin AND window match
+  if (ev.data?.type === 'aura.theme.changed') { /* … */ }
+});
+```
+
+Only AuraChannel message types travel; prefer the `OsClient` methods that
+wrap them (`system`, `nav`, `keymap`, `surface`, `onViewportChange`).
+Without the bootstrap (outside AuraOS) nothing is sent and nothing counts
+as from the shell.
+
+## What a page can't do
+
+Your origin is not the desktop's, so the browser itself enforces:
+
+- **No shell DOM.** `window.parent.document` and `window.top.document`
+  throw. Ask the shell through the SDK instead.
+- **No shell storage or cookies.** The desktop's `localStorage`,
+  `sessionStorage`, IndexedDB and cookies are out of reach, and the
+  desktop's sign-in never reaches your server.
+- **No top navigation and no framing the login.** Open things through the
+  SDK (`startIntent`, `system`, `surface`).
+
+## Browser storage is per origin
+
+`localStorage`, IndexedDB, Cache Storage and cookies belong to one origin,
+and every App Host is its own:
+
+- Data a page stored before it moved to an App Host stays with the old
+  origin. **Each App Host starts empty.**
+- Each instance of a multi-instance app has its own origin, so its own
+  storage.
+- A user who opens AuraOS at another address (nip.io instead of a domain)
+  gets another set of origins.
+
+Keep anything the user would miss on the server: your data directory
+(`getAppContext().dataDir`), your app's KV (`/api/kv/app/<appId>/…`), or a
+sidecar database. Use browser storage only for caches and view state.
+
+## Your server: `OS_API_BASE` and the instance token
+
+Server code (API routes, lifecycle hooks, MCP handlers) talks to the shell
+directly at `OS_API_BASE` and proves which instance it is with the token
+the OS injected at spawn. SDK calls from the server do this for you; by
+hand:
+
+```ts
+import { osAuthHeaders, osUrl } from '@aura/app-sdk';
+
+const url = osUrl('/api/interfaces');
+await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...osAuthHeaders(url) }, body });
+```
+
+Never send `X-Aura-App-Id` or `X-Aura-Instance-Id` yourself: they are
+hints, the token is proof. Requests the shell forwards to you carry
+`X-Aura-App-Id`, `X-Aura-Instance-Id` and, for a window, `X-Aura-Activity-Id`
+(`readIdentityHeaders(request)`).
+
+## Machine paths for agents
+
+`/api/proxy/<appId>/<path>` stays, for machines only: agents and other
+apps' servers calling your MCP server or REST API at
+`$OS_API_BASE/api/proxy/<appId>/…`. It never serves a browser window, and
+the SDK never sends your instance token on it. Declare those endpoints in
+`provides[]` ([Interfaces](/docs/interfaces)); `osClient.interfaces.urlFor()`
+gives a caller the right address on its side.
+
+## Checklist
+
+- [ ] Runtime loaded first in `<head>` (or `auraAppIntegration()`).
+- [ ] No `/api/proxy/<id>` base path; root-absolute URLs hit your app.
+- [ ] Shell calls through `OsClient` or `osUrl()`, never a bare `/api/…`
+      from the browser.
+- [ ] `postToShell` / `isFromShell` instead of `window.parent.postMessage`.
+- [ ] Identity and theme from `appHostRuntime()`, not `<meta>` tags.
+- [ ] Nothing important only in browser storage.
+- [ ] Server calls send the instance token, not self-set id headers.

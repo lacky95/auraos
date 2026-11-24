@@ -188,7 +188,7 @@ export class NavApi {
     };
 
     // Capture phase so we run before any local bubble-phase listener;
-    // matches the proxy's iframe-side forwarder pattern.
+    // matches the key forwarder in /_aura/runtime.js.
     document.addEventListener('keydown', onKeydown, true);
     window.addEventListener('message', onMessage);
 
@@ -239,7 +239,7 @@ export class NavApi {
 
 // ---- Module-private helpers ----------------------------------------------
 
-/** Canonical combo string for a keyboard event. Mirrors the proxy-injected
+/** Canonical combo string for a keyboard event. Mirrors the runtime's key
  *  forwarder's `combo()` (Ctrl→Alt→Shift→Super order, `KeyboardEvent.code`
  *  for the trailing key) so user remaps captured via Settings → Keyboard
  *  resolve against the same form. */

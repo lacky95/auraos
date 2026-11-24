@@ -74,8 +74,8 @@ export interface AppRuntimeInput {
   cfg: ProxyConfig;
   themeStrategy: 'inherit' | 'themed' | 'override';
   framework: { id: string; version: string };
-  theme: AuraRuntimeBootstrap['theme'];
-  keymap: { actions: unknown[]; bindings: Record<string, string | null> };
+  theme: Omit<AuraRuntimeBootstrap['theme'], 'strategy' | 'framework'>;
+  keymap: { bindings: Record<string, string | null> };
 }
 
 export function buildAppRuntimeJs(input: AppRuntimeInput): string {
@@ -91,33 +91,10 @@ export function buildAppRuntimeJs(input: AppRuntimeInput): string {
     label: input.label,
     slot: input.slot,
     gatewayBase: AURA_RESERVED_PATHS.os,
-    theme,
+    theme: { ...theme, strategy: themeStrategy, framework: input.framework },
     keymap: { claims: [], bindings },
     consoleRelay: cfg.injectConsoleRelay,
   };
-  const meta: Array<[string, string]> = [
-    ['aura-app-id', input.appId],
-    ['aura-instance-id', input.instanceId],
-  ];
-  if (cfg.injectMeta) {
-    meta.push(
-      ['aura-app-base-path', ''],
-      ['aura-design-framework', input.framework.id],
-      ['aura-design-framework-version', input.framework.version],
-      ['aura-theme-strategy', themeStrategy],
-      ['aura-color-mode', theme.colorMode],
-      ['aura-resolved-mode', theme.resolvedMode],
-      ['aura-keymap-actions', JSON.stringify(input.keymap.actions)],
-      ['aura-keymap-bindings', JSON.stringify(input.keymap.bindings)],
-    );
-    if (themeStrategy !== 'override') {
-      meta.push(
-        ['aura-theme-id', theme.themeId],
-        ['aura-theme-id-dark', theme.themeIdDark],
-        ['aura-theme-id-light', theme.themeIdLight],
-      );
-    }
-  }
   const themeCss = `${AURA_RESERVED_PATHS.os}${SHELL_THEME_PATH.slice(1)}`;
   const linkTheme = cfg.injectMeta && themeStrategy === 'inherit';
 
@@ -141,12 +118,9 @@ var SHELL=location.protocol+'//'+H.slice(AT+2);
 var B=${JSON.stringify(bootstrap)},ACT=null;
 try{ACT=new URLSearchParams(location.search).get('_aura_activity');}catch(_){}
 B.activityId=ACT;B.shellOrigin=SHELL;B.appOrigin=location.origin;
-Object.freeze(B.theme);Object.freeze(B.keymap);
+Object.freeze(B.theme.framework);Object.freeze(B.theme);Object.freeze(B.keymap);
 Object.defineProperty(window,'AuraRuntimeBootstrap',{value:Object.freeze(B)});
-window.AURA_APP_ID=B.appId;window.AURA_INSTANCE_ID=B.instanceId;window.AURA_APP_BASE_PATH='';
-var M=${JSON.stringify(meta)};if(ACT)M.push(['aura-activity-id',ACT]);
 var HEAD=document.head||document.documentElement;
-M.forEach(function(m){if(document.querySelector('meta[name="'+m[0]+'"]'))return;var e=document.createElement('meta');e.name=m[0];e.content=m[1];HEAD.appendChild(e);});
 ${linkTheme ? themeLinkJs(themeCss) : ''}
 ${themeRefreshJs(themeCss)}
 ${parts}

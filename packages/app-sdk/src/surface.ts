@@ -37,7 +37,6 @@
  */
 
 import { isFromShell, postToShell } from './channel.js';
-import { appHostRuntime } from './os-auth.js';
 import type { OsClient } from './OsClient.js';
 
 /** A rectangle in your app's own CSS pixel space (as getBoundingClientRect returns). */
@@ -183,7 +182,7 @@ export class SurfaceApi {
       if (d.type !== 'aura.host.needsTopLevel') return;
       if (typeof d.url !== 'string') return;
       // A native-host hint, relayed by the shell: still only a claim about a URL.
-      if (appHostRuntime() && !/^https?:\/\//i.test(d.url)) return;
+      if (!/^https?:\/\//i.test(d.url)) return;
       const info: NeedsTopLevelInfo = {
         url: d.url,
         reason: typeof d.reason === 'string' ? d.reason : 'unknown',

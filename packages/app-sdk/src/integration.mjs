@@ -5,17 +5,17 @@ import { AURA_RUNTIME_LOADER_JS, SHELL_ASSET_ROUTES } from './runtime/loader.js'
  * app needs to wire up at startup:
  *
  *   • Stamps `X-Aura-App-Id` / `X-Aura-Instance-Id` response headers — the
- *     identity contract the shell's reverse proxy checks to catch port
- *     squatters. A middleware (runtime/identity-middleware) does it, so a
+ *     identity contract the shell checks (App Host router, machine path) to
+ *     catch port squatters. A middleware (runtime/identity-middleware) does it, so a
  *     production build sends them too.
  *   • Injects a default `/api/lifecycle/health` route (opt-out) — the OS
  *     polls this during `waitHealthy` and the reconciler. Apps that need
  *     custom health logic can still ship their own `src/pages/api/lifecycle/
  *     health.ts`; Astro's filesystem routes take precedence on collision.
  *   • Makes every page load `/_aura/runtime.js` on an App Host (theme,
- *     keyboard, console, channel), and nothing on the proxy path. See
+ *     keyboard, console, channel), and nothing anywhere else. See
  *     runtime/loader. Routes for the shell's theme and icons
- *     (runtime/shell-asset-route) keep existing references working on both.
+ *     (runtime/shell-asset-route) keep existing references working there.
  *   • Logs identity at server start so container logs make it obvious which
  *     app each port belongs to.
  *
