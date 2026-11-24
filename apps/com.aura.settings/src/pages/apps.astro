@@ -331,8 +331,8 @@ apps.sort((a, b) => {
               class="app-remove"
               type="button"
               data-action="remove"
-              title={`Delete ${m.name}`}
-              aria-label={`Delete ${m.name}`}
+              title={`Delete ${m.name} and its data`}
+              aria-label={`Delete ${m.name} and its data`}
             >🗑</button>
           </div>
         );
@@ -346,19 +346,19 @@ apps.sort((a, b) => {
 
   <dialog id="confirm-dialog" aria-labelledby="cd-title">
     <div class="cd-body">
-      <div class="cd-title" id="cd-title" style="display:flex; align-items:center; gap:8px;"><Icon name="alert-triangle" /> DELETE APP</div>
+      <div class="cd-title" id="cd-title" style="display:flex; align-items:center; gap:8px;"><Icon name="alert-triangle" /> DELETE APP DATA</div>
       <p class="cd-message">
-        Do you want to delete <strong id="cd-app-name">this app</strong>?
+        Delete <strong id="cd-app-name">this app</strong> and all its data?
       </p>
       <p class="cd-detail">
-        Stops every running instance and <code>rm -rf</code>s
-        <span id="cd-app-dest"></span> on disk. The OS KV state for this app is also dropped.
-        This can't be undone.
+        Stops every running instance and permanently deletes the app with its data,
+        its trash copies and any data kept from earlier installs. Its app addresses
+        are retired and never reused. This can't be undone.
       </p>
     </div>
     <form method="dialog" class="cd-actions">
       <button class="cd-btn" type="submit" value="cancel">Cancel</button>
-      <button class="cd-btn" type="submit" value="confirm" data-variant="danger">Delete</button>
+      <button class="cd-btn" type="submit" value="confirm" data-variant="danger">Delete app data</button>
     </form>
   </dialog>
   <footer class="settings-foot">PROVIDER · /api/admin/apps/enabled</footer>
@@ -463,7 +463,6 @@ apps.sort((a, b) => {
     // about which app they're about to remove.
     const dialog       = document.getElementById('confirm-dialog');
     const dialogName   = document.getElementById('cd-app-name');
-    const dialogDest   = document.getElementById('cd-app-dest');
     let pendingRemoveId = null;
     let pendingRemoveRow = null;
     let pendingRemoveBtn = null;
@@ -478,9 +477,6 @@ apps.sort((a, b) => {
         pendingRemoveRow = row;
         pendingRemoveBtn = btn;
         dialogName.textContent = `${name} (${appId})`;
-        // Mirror the server-side path so the user sees exactly what's about
-        // to disappear from disk. AURA_APPS_DIR is /workspace/apps by default.
-        dialogDest.textContent = `/workspace/apps/${appId}`;
         dialog.showModal();
       });
     });

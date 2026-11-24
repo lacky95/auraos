@@ -579,8 +579,8 @@ export function registerVerbs(program: Command): void {
   program
     .command('delete <resource> <names...>')
     .alias('rm')
-    .description('Delete apps, close activities, uninstall services/capabilities, detach mounts, remove port exposes.')
-    .option('-y, --yes', 'skip the confirmation (apps; mounts/ports whose instance was inferred)')
+    .description('Delete apps with all their data (Delete app data), close activities, uninstall services/capabilities, detach mounts, remove port exposes.')
+    .option('-y, --yes', 'skip the confirmation (apps: their data goes too; mounts/ports whose instance was inferred)')
     .option('-i, --instance <id>', 'mounts, sc: instance (default: $APP_INSTANCE_ID)')
     .addHelpText('after', resourcesLine('delete') + examples([
       'aura rm app com.example.hello',

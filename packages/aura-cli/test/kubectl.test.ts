@@ -231,3 +231,16 @@ test('sidecar tools: grant/revoke take --template and --sidecar; cap grant/revok
     assert.ok(flags(cmd('cap', v)).includes('--template'), `cap ${v} --template`);
   }
 });
+
+test('deleting an app says it deletes the app data (D20 "Delete app data")', () => {
+  const program = buildProgram();
+  const find = (c: Command, name: string) => c.commands.find((x) => x.name() === name || x.aliases().includes(name));
+  const remove = find(find(program, 'app')!, 'remove')!;
+  assert.match(remove.description(), /^Delete app data: /);
+  for (const word of [/its data/, /trash copies/, /kept from earlier installs/, /addresses are retired/, /cannot be undone/]) {
+    assert.match(remove.description(), word);
+  }
+  assert.match(find(program, 'delete')!.description(), /Delete apps with all their data/);
+  const help = HELP_SECTIONS.flatMap((s) => s.lines).find(([usage]) => usage.startsWith('aura rm app'));
+  assert.equal(help?.[1], 'Delete apps and all their data');
+});

@@ -86,7 +86,7 @@ export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]
     ['aura install cap [names...]', 'Install capabilities (picker if empty)'],
     ['aura install svc <name>', 'Install a service'],
     ['aura install sdk', 'Install the @aura/* SDK packages'],
-    ['aura rm app <app...>', 'Delete apps'],
+    ['aura rm app <app...>', 'Delete apps and all their data'],
     ['aura rm act <act...>', 'Close windows'],
     ['aura rm svc <svc...>', 'Uninstall services'],
     ['aura rm cap <cap...>', 'Uninstall capabilities'],

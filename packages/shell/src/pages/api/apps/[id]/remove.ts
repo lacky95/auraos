@@ -9,8 +9,9 @@ import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
  * and retires its App Hosts. This route validates the id and tidies the
  * per-app enable-state entry in KV so it doesn't accumulate as apps churn.
  *
- * The CLI + Settings UI both confirm "Do you want to delete this app?" before
- * calling here.
+ * This is "Delete app data" (D20): the app's data, trash copies and kept
+ * data go too, and its App Host labels are tombstoned. The CLI and the
+ * Settings UI both confirm with that wording before calling here.
  */
 
 const APP_ID_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;

@@ -15,6 +15,16 @@ const BUILTIN_PERMISSIONS_LIST: string[] = [...BUILTIN_PERMISSIONS];
  */
 const ENFORCED_PERMISSIONS: string[] = [...CORE_ENFORCED];
 
+/**
+ * What `aura app remove` (`aura rm app`) does, in the words of D20: the core
+ * lifecycle purges the app's data, its trash copies and set-aside data, and
+ * retires its App Hosts for good (core nexus/removeApp.ts).
+ */
+export const DELETE_APP_DATA = 'Delete app data';
+export const DELETE_APP_DATA_EFFECT = 'Stops every running instance and permanently deletes the app with its data, '
+  + 'its trash copies and any data kept from earlier installs. Its app addresses are retired and never reused. '
+  + 'This cannot be undone.';
+
 /** POST /api/apps/<id>/restart and /api/instances/<id>/restart (shell lib/appRestart.ts). */
 export interface RestartResult {
   instanceId: string;
@@ -126,7 +136,7 @@ export function registerApp(program: Command): void {
     .command('remove <appId>')
     .alias('rm')
     .option('-y, --yes', 'Skip the confirmation prompt (for scripts).')
-    .description('Stop and delete an installed app from disk. Prompts before deleting unless --yes is passed.')
+    .description(`${DELETE_APP_DATA}: ${DELETE_APP_DATA_EFFECT} Prompts unless --yes is passed.`)
     .action(async (appId: string, opts: { yes?: boolean }) => {
       // Double-check unless explicitly skipped. Default is "no" — the user
       // has to type 'y' to confirm so muscle-memory Enter doesn't blow away
@@ -135,11 +145,11 @@ export function registerApp(program: Command): void {
       // "no" and produce a confusing "aborted" message.
       if (!opts.yes) {
         if (!process.stdin.isTTY) {
-          fail(`Refusing to delete ${appId} without a TTY confirmation. Re-run with --yes (or -y) to bypass.`);
+          fail(`Refusing to delete ${appId} and its data without a TTY confirmation. Re-run with --yes (or -y) to bypass.`);
         }
         try {
           const yes = await promptConfirm(
-            `${color.red('Do you want to delete')} ${color.bold(appId)}${color.red('?')} ${color.dim('This stops every running instance and rm -rfs the app directory.')}`,
+            `${color.red(`${DELETE_APP_DATA} for`)} ${color.bold(appId)}${color.red('?')} ${color.dim(DELETE_APP_DATA_EFFECT)}`,
             /* defaultYes */ false,
           );
           // Treat anything other than an explicit `true` (including the
@@ -154,7 +164,7 @@ export function registerApp(program: Command): void {
         `/api/apps/${encodeURIComponent(appId)}/remove`,
       );
       if (!res?.ok) fail(`remove failed: ${res?.error ?? 'unknown error'}`);
-      ok(`removed ${color.bold(appId)}${res.dest ? color.dim(` (${res.dest})`) : ''}`);
+      ok(`deleted ${color.bold(appId)} and its data${res.dest ? color.dim(` (${res.dest})`) : ''}`);
     });
 
   app
