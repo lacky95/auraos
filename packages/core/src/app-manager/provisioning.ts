@@ -95,8 +95,12 @@ if [ "$PROVISION" = 1 ]; then
     if [ -f pnpm-lock.yaml ]; then
       PNPM_SPEC=$(sed -n 's/.*"packageManager": *"\\(pnpm@[^"+]*\\).*/\\1/p' package.json 2>/dev/null | head -n1)
       if command -v pnpm >/dev/null; then PNPM="pnpm"; else PNPM="npx --yes \${PNPM_SPEC:-pnpm@latest}"; fi
+      # An app with no pnpm-workspace.yaml of its own would resolve upward to
+      # the OS workspace file mounted at /workspace and fail on its lockfile.
+      PNPM_SCOPE=""
+      if [ ! -f pnpm-workspace.yaml ]; then PNPM_SCOPE="--ignore-workspace"; fi
       echo "[\${APP_ID:-app}] pnpm install via '\$PNPM' (astro not yet present)..."
-      \$PNPM install --frozen-lockfile 2>&1 || \$PNPM install 2>&1 \\
+      \$PNPM install \$PNPM_SCOPE --frozen-lockfile 2>&1 || \$PNPM install \$PNPM_SCOPE 2>&1 \\
         || echo "[\${APP_ID:-app}] WARNING: pnpm install exited non-zero (often just ignored build scripts) — trying to boot anyway"
     else
       echo "[\${APP_ID:-app}] npm install (astro not yet present)..."

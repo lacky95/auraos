@@ -148,3 +148,8 @@ test('the provisioning shell brackets its work in markers', () => {
   // false. Every guard here must therefore be a real `if`.
   assert.ok(!/^\s*\[[^\]]*\]\s*&&/m.test(PROVISION_SHELL), 'no bare test && assignment');
 });
+
+test('an app without its own pnpm workspace does not install into the OS workspace', () => {
+  assert.match(PROVISION_SHELL, /if \[ ! -f pnpm-workspace\.yaml \]; then PNPM_SCOPE="--ignore-workspace"; fi/);
+  assert.match(PROVISION_SHELL, /\$PNPM install \$PNPM_SCOPE --frozen-lockfile 2>&1 \|\| \$PNPM install \$PNPM_SCOPE 2>&1/);
+});
