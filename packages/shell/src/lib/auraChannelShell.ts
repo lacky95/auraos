@@ -25,6 +25,7 @@ import {
   frameExpectedOrigin,
   isAppHostOriginOf,
   isHostFrame,
+  isSystemHostFrame,
   type FrameRoute,
 } from './appFrame.ts';
 
@@ -38,6 +39,8 @@ export interface ChannelFrame<W = unknown, E = HTMLIFrameElement> {
   origin: string | null;
   appId: string | null;
   route: FrameRoute;
+  /** A host frame of the app's `system` installation (appFrame `isSystemHostFrame`). */
+  system: boolean;
   element: E;
 }
 
@@ -91,6 +94,15 @@ export function classifySender<E>(input: ClassifyInput<E>): ChannelSender<E> | n
   return null;
 }
 
+/**
+ * The built-in app `appId` itself: on a host frame, its `system` installation
+ * (D45), so a same-id copy from `global` or `user` never qualifies.
+ * PHASE2-CUTOVER: a proxy frame shares the shell's origin, so its id is all there is.
+ */
+function isSystemApp<E>(frame: ChannelFrame<unknown, E> | null, appId: string): boolean {
+  return !!frame && frame.appId === appId && (frame.route === 'proxy' || frame.system);
+}
+
 /** Whether a verified sender may deliver this message to the shell. */
 export function authorizeShellMessage<E>(
   type: unknown,
@@ -112,7 +124,7 @@ export function authorizeShellMessage<E>(
 
   // Locking the desktop and collecting the admin credential belong to Settings.
   if (type === 'aura.lockscreen.activate' || type === 'aura.admin.unlock.request') {
-    return !!frame && sender.direct && frame.appId === SETTINGS_APP_ID
+    return sender.direct && isSystemApp(frame, SETTINGS_APP_ID)
       && isAuraChannelRouteAllowed(type, sender.endpoint, 'shell');
   }
 
@@ -124,7 +136,7 @@ export function authorizeShellMessage<E>(
   }
 
   // The shell's console holds other apps' output.
-  if (type === 'aura.console.requestBacklog' && frame?.route === 'host' && frame.appId !== CONSOLE_APP_ID) {
+  if (type === 'aura.console.requestBacklog' && frame?.route === 'host' && !isSystemApp(frame, CONSOLE_APP_ID)) {
     return false;
   }
 
@@ -207,6 +219,7 @@ function knownFrames(): ChannelFrame[] {
     origin: frameExpectedOrigin(element),
     appId: frameAppId(element),
     route: isHostFrame(element) ? 'host' as const : 'proxy' as const,
+    system: isSystemHostFrame(element),
     element,
   }));
 }

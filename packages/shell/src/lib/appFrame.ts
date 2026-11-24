@@ -187,7 +187,7 @@ export async function resolveAppFrame(target: AppFrameTarget, deps: ResolveAppFr
     }),
   });
   if (!res.ok) throw new Error(`handoff failed (${res.status})`);
-  const h = await res.json() as { code?: unknown; origin?: unknown; slot?: unknown };
+  const h = await res.json() as { code?: unknown; origin?: unknown; slot?: unknown; system?: unknown };
   if (typeof h.code !== 'string' || !h.code) throw new Error('handoff returned no code');
   const { origin, label } = assertAppHostOrigin(h.origin, shellOrigin);
   const url = new URL(AURA_RESERVED_PATHS.handoff, origin);
@@ -200,6 +200,7 @@ export async function resolveAppFrame(target: AppFrameTarget, deps: ResolveAppFr
     slot: typeof h.slot === 'number' ? h.slot : 1,
     sandbox: APP_FRAME_SANDBOX,
     allow: APP_FRAME_ALLOW,
+    system: h.system === true,
   };
 }
 
@@ -210,6 +211,14 @@ const readyHooked = new WeakSet<HTMLIFrameElement>();
 
 export function isHostFrame(frame: HTMLIFrameElement): boolean {
   return frame.dataset['auraFrameRoute'] === 'host';
+}
+
+/**
+ * Whether a host frame shows the app's `system` installation (D45), as the
+ * handoff said. A same-id copy from `global` or `user` is not marked.
+ */
+export function isSystemHostFrame(frame: HTMLIFrameElement): boolean {
+  return isHostFrame(frame) && frame.dataset['auraSystemApp'] === '1';
 }
 
 /** The app in a frame. Set by the shell, never read from the app's document. */
@@ -258,7 +267,7 @@ function clearHostState(frame: HTMLIFrameElement): void {
   loadSeq.set(frame, (loadSeq.get(frame) ?? 0) + 1);
   frame.removeAttribute('sandbox');
   frame.removeAttribute('allow');
-  for (const key of ['auraFrameRoute', 'auraFrameOrigin', 'auraFrameReady', 'auraFrameUrl', 'auraAppId']) delete frame.dataset[key];
+  for (const key of ['auraFrameRoute', 'auraFrameOrigin', 'auraFrameReady', 'auraFrameUrl', 'auraAppId', 'auraSystemApp']) delete frame.dataset[key];
   clearFrameNotice(frame);
 }
 
@@ -271,6 +280,7 @@ function navigateHostFrame(frame: HTMLIFrameElement, url: string, appId: string)
   frame.dataset['auraAppId'] = appId;
   frame.dataset['auraFrameUrl'] = url;
   delete frame.dataset['auraFrameReady'];
+  delete frame.dataset['auraSystemApp'];
   // The sandbox must be in place before the frame ever gets a src.
   frame.setAttribute('sandbox', APP_FRAME_SANDBOX);
   frame.setAttribute('allow', APP_FRAME_ALLOW);
@@ -285,6 +295,7 @@ function navigateHostFrame(frame: HTMLIFrameElement, url: string, appId: string)
   resolveAppFrame(target, { route: 'host' }).then((resolved) => {
     if (loadSeq.get(frame) !== seq) return; // a newer navigation won
     frame.dataset['auraFrameOrigin'] = resolved.origin;
+    if (resolved.system) frame.dataset['auraSystemApp'] = '1';
     frame.src = resolved.url;
   }).catch((err: unknown) => {
     if (loadSeq.get(frame) !== seq) return;

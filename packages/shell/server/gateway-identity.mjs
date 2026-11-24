@@ -45,14 +45,20 @@ export function ownerUiApp(appId) {
 }
 
 /**
- * Whether this app and installation may act for the owner: an allowlisted id
- * whose host record belongs to the active `system` installation. A same-id
- * app installed in `global` or `user` has its own installation and never passes.
+ * Whether this installation is the app's active `system` one (D45). The one
+ * rule for "this is the built-in app": a same-id app installed in `global` or
+ * `user` (a store update, `aura dev clone`) has its own installation and
+ * never passes. The desktop marks such frames from it too (auraChannelShell).
  */
-export async function isOwnerUiInstallation(registry, { appId, installationId }) {
-  if (!ownerUiApp(appId) || typeof installationId !== 'string' || !installationId) return false;
+export async function isSystemInstallation(registry, { appId, installationId }) {
+  if (typeof appId !== 'string' || !appId || typeof installationId !== 'string' || !installationId) return false;
   const inst = await registry?.getInstallation?.(installationId);
   return !!inst && inst.appId === appId && inst.scope === 'system' && inst.state === 'active';
+}
+
+/** Whether this app and installation may act for the owner: an allowlisted id on its system installation. */
+export async function isOwnerUiInstallation(registry, ref) {
+  return !!ownerUiApp(ref?.appId) && isSystemInstallation(registry, ref);
 }
 
 export function gatewayKey() {

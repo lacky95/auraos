@@ -337,7 +337,8 @@ const activeThemeId   = activeTheme.id;
       document.querySelectorAll('iframe').forEach((f) => {
         const w = f.contentWindow;
         if (!w) return;
-        const isConsole = f.dataset.auraAppId === 'com.aura.console'
+        // A host frame counts only as the system Console (appFrame isSystemHostFrame).
+        const isConsole = (f.dataset.auraAppId === 'com.aura.console' && f.dataset.auraSystemApp === '1')
           || (f.getAttribute('src') || '').indexOf('/api/proxy/com.aura.console') === 0;
         const origin = consoleSubscribers.get(w) || (isConsole ? frameOrigin(f) : null);
         if (origin) out.push([w, origin]);

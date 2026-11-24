@@ -117,6 +117,11 @@ export interface ResolvedAppFrame {
   sandbox: string;
   /** Value of the iframe `allow` attribute. */
   allow: string;
+  /**
+   * The App Host shows the app's active `system` installation (D45), from the
+   * registry. A same-id copy in another scope is false. Absent on the proxy route.
+   */
+  system?: boolean;
 }
 
 /** The one-time code redeemed at `/_aura/handoff`. */

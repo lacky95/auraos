@@ -2,6 +2,7 @@ import type * as core from '@aura/core';
 import { buildAppHost } from '@aura/core/host-rules';
 import type { APIContext } from 'astro';
 import { appHostAuth, LOGIN_DARK_SID } from '../../server/app-host-auth.mjs';
+import { isSystemInstallation } from '../../server/gateway-identity.mjs';
 import { edgeView, originOf } from '../../server/host-policy.mjs';
 import { currentOwnerSession, loginEnabled } from './authSurface.js';
 
@@ -49,8 +50,9 @@ export async function shellOwner(ctx: Pick<APIContext, 'request' | 'cookies'> & 
   return { edge, identity: { sid: current.sessionId, userId: current.userId, sessionExpiresAt: current.expiresAt } };
 }
 
+/** `system`: the frame shows the app's `system` installation, so the desktop may trust its messages (D45). */
 export type HandoffResult =
-  | { code: string; origin: string; slot: number }
+  | { code: string; origin: string; slot: number; system: boolean }
   | { error: string; status: number };
 
 export async function issueAppHostHandoff(opts: {
@@ -97,5 +99,5 @@ export async function issueAppHostHandoff(opts: {
     userId: identity.userId ?? scopeUser, sid: identity.sid, returnPath: opts.returnPath,
     sessionExpiresAt: identity.sessionExpiresAt, embed: opts.embed ?? null,
   });
-  return { code, origin, slot: slot.slot };
+  return { code, origin, slot: slot.slot, system: await isSystemInstallation(services.registry, record) };
 }

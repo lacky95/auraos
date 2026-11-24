@@ -715,14 +715,32 @@ test('the handoff route answers {code, origin, slot}, and the code signs in', as
   await withRouteWorld(async () => {
     const r = await callRoute({ origin: SHELL }, routeBody());
     assert.equal(r.status, 200);
-    const out = await r.json() as { code: string; origin: string; slot: number };
-    assert.deepEqual(Object.keys(out).sort(), ['code', 'origin', 'slot']);
+    const out = await r.json() as { code: string; origin: string; slot: number; system: boolean };
+    assert.deepEqual(Object.keys(out).sort(), ['code', 'origin', 'slot', 'system']);
     assert.equal(out.origin, ORIGIN);
     assert.equal(out.slot, 1);
+    assert.equal(out.system, false, 'a user-scope installation');
     liveSessions.add('login-dark');
     const signed = await get(HOST, `/_aura/handoff?code=${out.code}`);
     assert.equal(signed.status, 303);
     assert.equal(signed.headers.location, '/page?_aura_activity=x');
+  });
+});
+
+test('the handoff route marks only the app\'s active system installation', async () => {
+  await withRouteWorld(async () => {
+    const world = G[SERVICES] as { registry: Record<string, unknown> };
+    for (const [installation, system] of [
+      [{ appId: 'io.acme.notes', scope: 'system', state: 'active' }, true],
+      [{ appId: 'io.acme.notes', scope: 'global', state: 'active' }, false],
+      [{ appId: 'io.acme.notes', scope: 'system', state: 'reserved' }, false],
+      [{ appId: 'io.other.app', scope: 'system', state: 'active' }, false],
+      [null, false],
+    ] as const) {
+      world.registry['getInstallation'] = async (id: string) => (id === INSTALL ? installation : null);
+      const out = await (await callRoute({ origin: SHELL }, routeBody())).json() as { system: boolean };
+      assert.equal(out.system, system, JSON.stringify(installation));
+    }
   });
 });
 

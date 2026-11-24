@@ -24,10 +24,11 @@ setHostRouteApps(['com.x.notes']);
 
 let codes = 0;
 let gate: Promise<void> = Promise.resolve();
+let handoffSystem: boolean | undefined;
 globalThis.fetch = (async () => {
   await gate;
   codes++;
-  return new Response(JSON.stringify({ code: `code${codes}`, origin: APP, slot: 1 }));
+  return new Response(JSON.stringify({ code: `code${codes}`, origin: APP, slot: 1, ...(handoffSystem === undefined ? {} : { system: handoffSystem }) }));
 }) as typeof fetch;
 
 const settle = () => new Promise((r) => setTimeout(r, 5));
@@ -122,6 +123,26 @@ test('direct IP: the window stays, with no src and a notice', async () => {
   assert.ok(f.parentElement?.querySelector('[data-aura-frame-notice]'));
   assert.ok(f.isConnected);
   win.happyDOM.setURL(`${SHELL}/`);
+});
+
+test('a host frame is marked system only when the handoff says its installation is', async () => {
+  const { isSystemHostFrame } = await import('../src/lib/appFrame.ts');
+  for (const [system, marked] of [[true, true], [false, false], [undefined, false]] as const) {
+    handoffSystem = system;
+    const f = slotFrame(`sys-${String(system)}`);
+    setAppFrameUrl(f, '/api/proxy/com.x.notes/', 'com.x.notes');
+    await settle();
+    assert.equal(isSystemHostFrame(f), marked, String(system));
+    if (marked) {
+      // A reused frame loses the mark before the next app's handoff answers.
+      handoffSystem = false;
+      reloadHostFrame(f);
+      assert.equal(isSystemHostFrame(f), false);
+      await settle();
+      assert.equal(isSystemHostFrame(f), false);
+    }
+  }
+  handoffSystem = undefined;
 });
 
 test('the listener drops a forged lock message and accepts the verified Settings window', () => {

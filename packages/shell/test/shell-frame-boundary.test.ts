@@ -17,6 +17,10 @@ import { iframeHtml } from '../src/lib/desktop/slotMarkup.ts';
 const SHELL = 'http://10-201-1-2.nip.io:3000';
 const APP = 'http://notes1a2b3c4d--10-201-1-2.nip.io:3000';
 const OTHER_APP = 'http://term1a2b3c4d--10-201-1-2.nip.io:3000';
+const SETTINGS_APP = 'http://settings1a2b3c4d--10-201-1-2.nip.io:3000';
+const SHADOW_APP = 'http://app9f8e7d6c--10-201-1-2.nip.io:3000';
+const CONSOLE_APP = 'http://console1a2b3c4d--10-201-1-2.nip.io:3000';
+const SHADOW_CONSOLE = 'http://app1f2e3d4c--10-201-1-2.nip.io:3000';
 
 // ── frame resolution ─────────────────────────────────────────────────────────
 
@@ -119,16 +123,27 @@ function worlds() {
   const nestedForeign = { parent: hostWin };
   const proxyNested = { parent: proxyWin };
   const stranger = { parent: { parent: null } };
-  const f = (window: unknown, origin: string, appId: string, route: 'host' | 'proxy'): ChannelFrame<unknown, string> =>
-    ({ window, origin, appId, route, element: appId });
+  const hostSettingsWin = { parent: shell };
+  const shadowSettingsWin = { parent: shell };
+  const hostConsoleWin = { parent: shell };
+  const shadowConsoleWin = { parent: shell };
+  const f = (window: unknown, origin: string, appId: string, route: 'host' | 'proxy', system = false): ChannelFrame<unknown, string> =>
+    ({ window, origin, appId, route, system, element: appId });
   const frames = [
     f(hostWin, APP, 'com.x.notes', 'host'),
     f(proxyWin, SHELL, 'com.x.proxy', 'proxy'),
     f(settingsWin, SHELL, 'com.aura.settings', 'proxy'),
+    f(hostSettingsWin, SETTINGS_APP, 'com.aura.settings', 'host', true),
+    f(shadowSettingsWin, SHADOW_APP, 'com.aura.settings', 'host', false),
+    f(hostConsoleWin, CONSOLE_APP, 'com.aura.console', 'host', true),
+    f(shadowConsoleWin, SHADOW_CONSOLE, 'com.aura.console', 'host', false),
   ];
   const from = (source: unknown, origin: string) =>
     classifySender({ source, origin, shellWindow: shell, shellOrigin: SHELL, frames });
-  return { shell, hostWin, proxyWin, settingsWin, nestedApp, nestedForeign, proxyNested, stranger, from };
+  return {
+    shell, hostWin, proxyWin, settingsWin, nestedApp, nestedForeign, proxyNested, stranger, from,
+    hostSettingsWin, shadowSettingsWin, hostConsoleWin, shadowConsoleWin,
+  };
 }
 
 test('source AND origin must both match', () => {
@@ -198,6 +213,19 @@ test('a host app cannot read the shell console backlog, except Console', () => {
   const w = worlds();
   assert.equal(allowed('aura.console.requestBacklog', w.from(w.hostWin, APP)), false);
   assert.equal(allowed('aura.console.requestBacklog', w.from(w.proxyWin, SHELL)), true);
+});
+
+test('on App Hosts only the system installation of Settings or Console is trusted, never a same-id copy', () => {
+  const w = worlds();
+  for (const type of ['aura.lockscreen.activate', 'aura.admin.unlock.request']) {
+    assert.equal(allowed(type, w.from(w.hostSettingsWin, SETTINGS_APP)), true, type);
+    assert.equal(allowed(type, w.from(w.shadowSettingsWin, SHADOW_APP)), false, `${type} from a global/user copy`);
+  }
+  assert.equal(allowed('aura.console.requestBacklog', w.from(w.hostConsoleWin, CONSOLE_APP)), true);
+  assert.equal(allowed('aura.console.requestBacklog', w.from(w.shadowConsoleWin, SHADOW_CONSOLE)), false);
+  // The console's live stream follows the same mark.
+  const layout = readFileSync(new URL('../src/layouts/OSLayout.astro', import.meta.url), 'utf8');
+  assert.match(layout, /f\.dataset\.auraAppId === 'com\.aura\.console' && f\.dataset\.auraSystemApp === '1'/);
 });
 
 test('a host frame cannot claim another app id', () => {

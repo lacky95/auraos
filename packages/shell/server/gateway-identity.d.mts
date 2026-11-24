@@ -7,6 +7,10 @@ export interface OwnerUiApp {
 }
 export const OWNER_UI_APPS: Readonly<Record<string, OwnerUiApp>>;
 export function ownerUiApp(appId: string): OwnerUiApp | null;
+export function isSystemInstallation(
+  registry: { getInstallation?(id: string): Promise<{ appId: string; scope: string; state: string } | null> } | null | undefined,
+  ref: { appId: string; installationId: string },
+): Promise<boolean>;
 export function isOwnerUiInstallation(
   registry: { getInstallation?(id: string): Promise<{ appId: string; scope: string; state: string } | null> } | null | undefined,
   ref: { appId: string; installationId: string },

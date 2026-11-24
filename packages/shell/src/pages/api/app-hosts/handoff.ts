@@ -38,8 +38,10 @@ async function readBody(request: Request): Promise<Record<string, unknown> | nul
  * only: App Hosts are same-site with the shell, so an exact Origin is what
  * stops one app from asking for a code to another.
  *
- * Body `{appId, instanceId, activityId, returnPath}`, answer `{code, origin, slot}`.
- * The label and slot come from the registry, never from the body.
+ * Body `{appId, instanceId, activityId, returnPath}`, answer `{code, origin, slot, system}`.
+ * The label and slot come from the registry, never from the body. `system`
+ * says the frame shows the app's `system` installation (D45), which the
+ * desktop requires before it trusts Settings' or Console's messages.
  */
 export const POST: APIRoute = async (ctx) => {
   const { request } = ctx;
