@@ -445,7 +445,9 @@ export function createAppHostRouter({
   }
 
   function frameAncestors(route, edge, session, url) {
-    const ancestors = [originOf(edge.scheme, route.base)];
+    // 'self': an app may frame its own pages (Steel's Live view embeds its ui/).
+    // Every ancestor must match, so the chain still has to start at the shell.
+    const ancestors = ["'self'", originOf(edge.scheme, route.base)];
     if (session && new URL(url, 'http://h').searchParams.get('embed') === '1') {
       const extra = embedAncestors({ record: route.record, slot: route.slot, session, url });
       for (const o of extra) if (EXACT_ORIGIN_RE.test(o) && !ancestors.includes(o)) ancestors.push(o);

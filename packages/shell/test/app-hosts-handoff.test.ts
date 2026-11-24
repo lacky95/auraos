@@ -285,10 +285,10 @@ test('an app bearer of its own passes through', async () => {
   assert.equal(seen.at(-1)!.headers.authorization, 'Bearer app-token');
 });
 
-test('the response is framed by the exact shell only, and cannot set Aura cookies', async () => {
+test('the response is framed by the exact shell (and its own pages) only, and cannot set Aura cookies', async () => {
   const good = await signIn();
   const r = await get(HOST, '/', { cookie: good });
-  assert.equal(r.headers['content-security-policy'], `frame-ancestors http://${BASE}`);
+  assert.equal(r.headers['content-security-policy'], `frame-ancestors 'self' http://${BASE}`);
   assert.equal(r.headers['x-frame-options'], undefined);
   assert.deepEqual(r.headers['set-cookie'], ['own=1; Path=/']);
 });
@@ -296,16 +296,16 @@ test('the response is framed by the exact shell only, and cannot set Aura cookie
 test('embedding adds granted origins only on an embed document', async () => {
   const good = await signIn();
   embedOrigins = ['http://terminalx1--desk.example', 'javascript:alert(1)'];
-  assert.equal((await get(HOST, '/', { cookie: good })).headers['content-security-policy'], `frame-ancestors http://${BASE}`);
+  assert.equal((await get(HOST, '/', { cookie: good })).headers['content-security-policy'], `frame-ancestors 'self' http://${BASE}`);
   assert.equal(embedCalls.length, 0);
   const r = await get(HOST, '/?embed=1', { cookie: good });
-  assert.equal(r.headers['content-security-policy'], `frame-ancestors http://${BASE} http://terminalx1--desk.example`);
+  assert.equal(r.headers['content-security-policy'], `frame-ancestors 'self' http://${BASE} http://terminalx1--desk.example`);
 });
 
 test('with no embed grant, an embed document is framed by the shell only', async () => {
   const good = await signIn();
   const r = await get(HOST, '/?embed=1', { cookie: good });
-  assert.equal(r.headers['content-security-policy'], `frame-ancestors http://${BASE}`);
+  assert.equal(r.headers['content-security-policy'], `frame-ancestors 'self' http://${BASE}`);
 });
 
 // ── reserved paths ──────────────────────────────────────────────────────────
