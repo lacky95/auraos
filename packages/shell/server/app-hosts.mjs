@@ -81,7 +81,8 @@ const OWN_ORIGIN_ONLY_APPS = new Set(['com.aura.terminal']);
  * can't add it without a CORS preflight, which the Origin check refuses.
  */
 export const SAME_ORIGIN_HEADER = 'x-aura-same-origin';
-const OWN_API_RE = /^\/(?:api|mcp)(?:\/|$)/;
+/** The app's API. `/api/os/*` there is the SDK's redirect to shell assets (a `<link>` can't add a header). */
+const OWN_API_RE = /^\/(?:api(?:\/|$)(?!os\/)|mcp(?:\/|$))/;
 
 const isLive = (i) => i.port != null && (i.state === 'resumed' || i.state === 'started');
 

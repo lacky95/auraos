@@ -376,6 +376,7 @@ test('the Terminal answers its own origin only, while a navigation may still arr
   assert.equal(seen.at(-1)!.headers['x-aura-same-origin'], undefined, 'not passed on to the app');
   assert.equal((await get(termHost, '/api/sessions', { cookie, 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors', 'x-aura-same-origin': '1' })).status, 200);
   assert.equal((await get(termHost, '/', { cookie })).status, 200, 'its page and assets need no header');
+  assert.equal((await get(termHost, '/api/os/theme.css', { cookie })).status, 200, 'nor the SDK\'s shell-asset redirect');
   assert.equal((await get(termHost, '/api/sessions?id=x', { cookie, origin: termOrigin, 'sec-fetch-site': 'same-origin' }, 'DELETE')).status, 200);
   const nav = await get(termHost, '/?embed=1', { cookie, 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'iframe' });
   assert.equal(nav.status, 200);
