@@ -62,3 +62,14 @@ test('windowed command: taken once and typed into the queued session', { skip: !
 test('sessionIsLive is false for a name tmux does not have', { skip: !haveTmux && 'tmux not installed' }, async () => {
   assert.equal(await lc.sessionIsLive('com.aura.terminal-0#a99'), false);
 });
+
+test('background session: never an existing shell, even when the spent window id names one', { skip: !haveTmux && 'tmux not installed' }, async () => {
+  const taken = 'com.aura.terminal-0#a20';
+  await lc.openHeadlessSession(taken);              // e.g. opened by open_session under the same #a<n>
+  const got = await lc.openFreshHeadlessSession(taken);
+  assert.notEqual(got, taken, 'a new name, not the live shell');
+  assert.equal(await lc.sessionIsLive(got), true);
+  const free = 'com.aura.terminal-0#a90';
+  assert.equal(await lc.openFreshHeadlessSession(free), free, 'a free spent id is used as is');
+  for (const id of [taken, got, free]) tc.tmuxKill(id);
+});

@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { createActivityCreateHandler, IntentRejectedError } from '@aura/app-sdk';
 import { parseOpenTerminal } from '../../../launch-intent.ts';
-import { openHeadlessSession, queueLaunchCommand, runLaunchCommand, sessionIsLive } from '../../../launch-commands.ts';
+import { openFreshHeadlessSession, queueLaunchCommand, runLaunchCommand, sessionIsLive } from '../../../launch-commands.ts';
 import { localInstanceId } from '../../../session-service.ts';
 import { pickRestoredSession, pickSession } from '../../../window-session.ts';
 
@@ -28,10 +28,11 @@ const handler = createActivityCreateHandler(async ({ activityId, intent }) => {
 
   if (background) {
     // The activity id the OS just allocated is never used for a window — its
-    // number is spent — so it is a collision-free name for the new shell.
-    const sessionId = activityId;
+    // number is spent — so it names the new shell, unless a session opened
+    // another way (open_session) already holds that name. Then the next free one.
+    let sessionId: string;
     try {
-      await openHeadlessSession(sessionId);
+      sessionId = await openFreshHeadlessSession(activityId);
     } catch (err) {
       throw new IntentRejectedError('session-failed', `Could not start a background session: ${(err as Error).message}`, { status: 409 });
     }

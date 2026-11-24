@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { reserveSessionName } from './pty-server.ts';
-import { inputLocal } from './session-service.ts';
+import { reserveSessionName, reservedSessionNames } from './pty-server.ts';
+import { inputLocal, openLocal } from './session-service.ts';
 import { captureScreen, liveTmuxSessionsAsync, newSession, requireTmux, tmuxName } from './tmux-control.ts';
 import { screenSettled } from './launch-intent.ts';
 
@@ -115,4 +115,22 @@ export async function openHeadlessSession(sessionId: string, cols = 120, rows = 
   reserveSessionName(sessionId);
   if (await sessionIsLive(sessionId)) return;
   await newSession(sessionId, cols, rows);
+}
+
+/**
+ * A NEW shell with no window, for OPEN_TERMINAL `background`: under
+ * `preferred` (the window id the OS just spent) when that name is free, else
+ * under the next free name. Never an existing shell: the caller is granted the
+ * session it gets back (D25), and the session names of `open_session` and
+ * window ids share one `#a<n>` series, so the OS's spent id can already name a
+ * live shell. Returns the name used.
+ */
+export async function openFreshHeadlessSession(preferred: string, cols = 120, rows = 32): Promise<string> {
+  requireTmux();
+  if (!reservedSessionNames().includes(preferred) && !(await sessionIsLive(preferred))) {
+    reserveSessionName(preferred);
+    await newSession(preferred, cols, rows);
+    return preferred;
+  }
+  return (await openLocal({ cols, rows })).id;
 }
