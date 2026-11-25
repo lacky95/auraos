@@ -4,6 +4,8 @@
  * from @aura/core. Dependency-free so both the Astro lifecycle factories and
  * the Next.js runtime adapter can share it.
  */
+import { OsError } from './errors.js';
+
 export interface IntentPayload {
   action:    string;
   /** Set on explicit intents: the app that was addressed directly. */
@@ -26,16 +28,12 @@ export interface IntentPayload {
  * Throw it for bad extras or ids that name nothing — never fall back to
  * doing something else silently.
  */
-export class IntentRejectedError extends Error {
-  readonly code: string;
+export class IntentRejectedError extends OsError {
   readonly hint: string | undefined;
-  readonly status: number;
   constructor(code: string, message: string, opts: { hint?: string; status?: number } = {}) {
-    super(message);
+    super(opts.status ?? 422, code, message);
     this.name = 'IntentRejectedError';
-    this.code = code;
     this.hint = opts.hint;
-    this.status = opts.status ?? 422;
   }
   /** The `rejected` field of the hook reply. */
   toReply(): { code: string; message: string; hint?: string; status: number } {

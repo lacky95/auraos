@@ -17,6 +17,7 @@
     "bring-your-own-runtime",
     "app-hosts",
     "building-for-app-hosts",
+    "app-contract",
     "sidecars",
     "sdk-reference",
     "cli-reference",

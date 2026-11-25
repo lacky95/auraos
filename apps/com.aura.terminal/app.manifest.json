@@ -4,6 +4,7 @@
   "name": "Terminal",
   "icon": "T",
   "version": "0.1.0",
+  "auraContract": 1,
   "description": "System terminal with AI toolchain access",
   "category": "system",
   "permissions": [

@@ -226,6 +226,17 @@ On HTTP requests proxied through the shell, your handlers also receive:
 Read them via `readIdentityHeaders(request)` from the SDK rather than
 hand-rolling `request.headers.get(...)`.
 
+## The app contract (`auraContract: 1`)
+
+The manifest says which contract the app follows (`"auraContract": 1`) and
+declares everything it uses: `permissions[]`, the Context keys it reads
+(`context[]`), its sidecars (`services[]`), `"docker"` in `tools[]` if it
+drives docker, and other apps' interfaces (`consumes[]`). App data goes in
+`getAppContext().dataDir` (`/data`), never in `~` or the app folder. Read
+Context on the server with `osClient.context.get('KEY')`, not from
+`/run/context`. `aura dev validate <dir>` checks all of it; the Aura Docs page
+"The Aura app contract" (`app-contract`) has the checklist.
+
 ## Common patterns
 
 **Live updates to the iframe**: open an SSE endpoint inside your app

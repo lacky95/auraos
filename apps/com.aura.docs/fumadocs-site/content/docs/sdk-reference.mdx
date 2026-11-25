@@ -13,6 +13,13 @@ For the lifecycle factories in context, read [Develop an App](/docs/develop-an-a
 
 ## OsClient — top-level
 
+Since contract 1 ([The Aura app contract](/docs/app-contract)) the theme,
+content-provider and intent calls live in namespaces: `os.theme.*`,
+`os.data.*`, `os.intents.start()`. The flat methods below (`getThemeSelection`,
+`queryProvider`, `startIntent`, `sendNotification`, …) stay as **deprecated
+aliases** of them, so existing apps keep working. Every call sends the
+instance token on the server, and every failure is an `OsError`.
+
 Instantiate once, in the browser (or server-side for the few async
 methods that take an URL):
 
@@ -504,6 +511,41 @@ perch on a screen edge as a tab. The full guide is [Flights](/docs/flights).
 | `handle.setTitle(t)` · `setActions([...])` · `setConfirmClose(on)` · `land()` · `close()` | title, buttons on its ongoing notification, the close veto, transitions |
 | `handle.on('change' \| 'perched' \| 'unfolded' \| 'mode' \| 'notice' \| 'closing' \| 'action' \| 'landed' \| 'closed', fn)` | events (browser only) |
 
+## osClient.context, approvals, permissions (the app contract)
+
+| Method | Signature | Note |
+|---|---|---|
+| `context.get` | `(key: string) => Promise<string \| null>` | **(S)** A Context key the manifest declares in `context[]`; `null` when not set. Undeclared: `OsError` 403 `context-undeclared`. |
+| `approvals.request` | `(ask: { action, payload?, level?, reason? } \| { approvalId }) => Promise<{ approved, outcome, approvalId? }>` | **(B+S)** Asks the owner; the `approvalId` is a single-use grant for `X-Aura-Approval`. Creating one needs `user.confirm`. |
+| `approvals.wait` / `approvals.get` | `(approvalId) => …` | **(B+S)** Wait for / read an approval this app asked for. |
+| `permissions.has` | `(permission: string) => Promise<boolean>` | **(B+S)** Whether the app holds it now (manifest, grants, access mode). |
+| `permissions.check` | `(permissions: string[]) => Promise<Record<string, boolean>>` | **(B+S)** Up to 32 at once. |
+| `theme.*` | `getSelection, list, setForTone, getActiveId, getModePreference, getMode, setMode, getPalette, getDesignFramework, get, getStrategy, onChange, onModeChange` | The theme calls above, namespaced. |
+| `data.*` | `query, write, watch` | The content-provider calls above, namespaced. |
+| `intents.start` | `(intent) => Promise<StartIntentResult>` | `startIntent`, namespaced. |
+
+```ts
+// server
+const key = await os.context.get('OPENAI_API_KEY');
+// page or server
+if (!(await os.permissions.has('sidecars.spawn'))) hideRunButton();
+const r = await os.approvals.request({ approvalId: body.approvalId });   // from a 202 needs-approval
+if (r.approved) await fetch(url, { method: 'POST', headers: approvalHeader(r.approvalId!) });
+```
+
+### Errors: `OsError`
+
+Every module throws `OsError { status, code, message }` (`status` 0 = no
+HTTP answer). The named classes (`StorageError`, `UserError`,
+`UserConfirmError`, `NotificationsError`, `OsSidecarError`,
+`IntentRejectedError`) extend it, so old `instanceof` checks keep working.
+
+```ts
+import { OsError } from '@aura/app-sdk';
+try { await os.storage.set('k', v); }
+catch (e) { if (e instanceof OsError && e.status === 403) showReadOnly(); else throw e; }
+```
+
 ## Loose exports
 
 ### Context (`packages/app-sdk/src/context.ts`)
@@ -512,6 +554,9 @@ perch on a screen edge as a tab. The full guide is [Flights](/docs/flights).
 |---|---|---|
 | `getAppContext` | `() => { appId, instanceId, appPort, osApiBase, dataDir, layerTag }` | **(S)** Reads `process.env` once at module load. |
 | `readIdentityHeaders` | `(req: Request) => { appId, instanceId, activityId }` | **(S)** Parses the `X-Aura-*` request headers the shell stamps. |
+| `ownAppId` / `ownInstanceId` | `() => string \| null` | **(B+S)** The SDK's one id resolver: env on a server (`APP_*`, a sidecar's `AURA_*`), the runtime bootstrap in a page. |
+| `identityResponseHeaders` | `() => Record<string, string>` | **(S)** `X-Aura-App-Id` / `X-Aura-Instance-Id` for a response. Never send them on a request. |
+| `AURA_CONTRACT` | `1` | The app contract this SDK implements; put it in the manifest as `auraContract`. |
 
 ### App Host transport (`packages/app-sdk/src/os-auth.ts`, `channel.ts`)
 
@@ -640,7 +685,7 @@ contract. **(S)** server-only. Used by `com.aura.docs` (this app).
 
 | Symbol | Purpose |
 |---|---|
-| `createNextLifecycleRoutes(impl?: Partial<{onCreate,onStart,onResume,onPause,onStop,onDestroy: () => void \| Promise<void>}>)` | Returns `{ POST }` for `app/api/lifecycle/[...hook]/route.ts`. |
+| `createNextLifecycleRoutes(impl?: { onCreate…onDestroy, onActivityCreate, onActivityDestroy, onIntent, onSaveState, onAssign })` | Returns `{ POST }` for `app/api/lifecycle/[...hook]/route.ts`. The hooks run through the same handlers as the Astro factories (same bodies, user, stop reason, `IntentRejectedError`). |
 | `createNextHealthRoute()` | Returns `{ GET }` for `app/api/lifecycle/health/route.ts`. |
 | `auraIdentityHeaders()` | Returns `{ 'X-Aura-App-Id', 'X-Aura-Instance-Id' }` — stamp from a Next middleware. |
 

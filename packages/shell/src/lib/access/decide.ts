@@ -71,6 +71,17 @@ async function checkPermissions(
   return { ok: true, auto };
 }
 
+/**
+ * Whether `principal` holds `permission`, as a rule's `permissions` check
+ * decides it (`osClient.permissions.has`, D48). In `strict` an auto-grant
+ * is not held.
+ */
+export async function permissionHeld(
+  deps: DecideDeps, principal: Principal, permission: string, strict = false,
+): Promise<boolean> {
+  try { return (await checkPermissions(deps, principal, [permission], strict)).ok; } catch { return false; }
+}
+
 /** The whole `targetPermissions` check of a rule, held by the TARGET app. */
 export async function targetPermissionsHeld(
   deps: DecideDeps, rule: AccessRule, resource: PolicyResource, strict = false,

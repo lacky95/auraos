@@ -15,11 +15,14 @@
  * JSON, keys are `[A-Za-z0-9._/-]`, up to 128 characters. Data your app
  * stored before AuraOS had users is read as the owner's.
  */
-import { appHostRuntime, isBrowser, osAuthHeaders, osBase, osEnv } from './os-auth.js';
+import { isBrowser, osAuthHeaders, osBase } from './os-auth.js';
+import { OsError } from './errors.js';
+import { ownAppId } from './context.js';
 
-export class StorageError extends Error {
-  constructor(readonly status: number, readonly code: string) {
-    super(`storage: ${code} (${status})`);
+/** A failed storage call. An `OsError`. */
+export class StorageError extends OsError {
+  constructor(status: number, code: string) {
+    super(status, code, `storage: ${code} (${status})`);
     this.name = 'StorageError';
   }
 }
@@ -35,7 +38,7 @@ export class StorageApi {
   }
 
   private appId(): string {
-    const id = this.appIdOverride ?? appHostRuntime()?.appId ?? osEnv()['APP_ID'] ?? osEnv()['AURA_APP_ID'];
+    const id = this.appIdOverride ?? ownAppId();
     if (!id) throw new StorageError(0, 'no-app-id');
     return id;
   }

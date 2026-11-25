@@ -15,6 +15,19 @@ export { FlightApi, FlightHandle } from './flight.js';
 export { UserApi, UserConfirmError, UserError } from './user.js';
 export type { AuraUser, ConfirmLevel, ConfirmOptions, ConfirmResult, UserProfileView } from './user.js';
 export { StorageApi, StorageError } from './storage.js';
+// One error type (OsError {status, code}); the classes above and below extend it.
+export { OsError } from './errors.js';
+// The app contract (D48): its version, Context, approvals, permissions.
+export { AURA_CONTRACT } from './contract.js';
+export { ContextApi } from './aura-context.js';
+export { ApprovalsApi, APPROVAL_HEADER, approvalHeader } from './approvals.js';
+export type { ApprovalAsk, ApprovalLevel, ApprovalOutcome, ApprovalResult, ApprovalWaitOptions } from './approvals.js';
+export { PermissionsApi } from './permissions.js';
+export { ThemeApi } from './theme.js';
+export type { ThemeSelection, ThemeStrategy } from './theme.js';
+export { DataApi } from './data.js';
+export { IntentsApi } from './intents.js';
+export type { StartIntent, StartIntentResult } from './intents.js';
 export type {
   FlightEdge, FlightRect, FlightBadge, FlightNotice, FlightNoticeLevel, FlightAction, FlightState, FlightOpenOptions,
   FlightMode, FlightAnchor, FlightEdgeSize,
@@ -103,6 +116,9 @@ export type {
 export {
   getAppContext,
   readIdentityHeaders,
+  ownAppId,
+  ownInstanceId,
+  identityResponseHeaders,
 } from './context.js';
 export type {
   AppContext,

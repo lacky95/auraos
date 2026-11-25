@@ -1,0 +1,199 @@
+---
+title: The Aura app contract
+description: Contract 1, what an app on AuraOS relies on and declares — App Hosts, identity, data, storage, Context, approvals, permissions, the manifest — with a checklist per item. Later phases change only what sits behind it.
+---
+
+**TL;DR.** Put `"auraContract": 1` in `app.manifest.json`, declare in the
+manifest everything your app uses, keep your data in `dataDir`, read Context
+with `osClient.context.get(key)` on your server, and talk to AuraOS only
+through the SDK. `aura dev validate` checks it. An app that follows contract 1
+needs no change for the later AuraOS phases (private homes, granted Context,
+the locked release, multiple users): they replace what is *behind* these
+APIs, not the APIs.
+
+The contract grows out of [Building an app for App Hosts](/docs/building-for-app-hosts),
+which is its first item.
+
+## Why a contract
+
+AuraOS hardens in phases. The breaking changes for apps are known now:
+
+- **Phase 5** gives each app its own home, hands out only the Context values
+  an app was granted, and removes the raw Context mount and the docker socket.
+- **Phase 6** runs a locked, read-only release: an app's install folder can't
+  be written.
+- **Phase 3** (now) enforces access by the manifest.
+
+Contract 1 is the API surface backed by today's mechanisms that stays the same
+through all of it. Nothing in it changes how your app runs today: anything the
+contract asks you to declare is **reported** when undeclared, not refused
+(except where a new API refuses by design, like `context.get` of an undeclared
+key).
+
+## The version
+
+```json
+{ "id": "com.example.notes", "version": "1.0.0", "auraContract": 1 }
+```
+
+- The SDK exports the same number: `import { AURA_CONTRACT } from '@aura/app-sdk'`.
+- `aura dev new` writes it into new apps.
+- AuraOS reports per app which contract it was built for:
+  `aura get apps -o wide` (column `CONTRACT`, `-` before the contract) and
+  `aura admin contract-report`.
+- From Phase 6, AuraOS refuses to start an app built for an unknown major
+  version, with a message. A future break means contract 2 and a migration
+  guide, never a silent change.
+
+**Checklist**
+
+- [ ] `"auraContract": 1` in the manifest.
+- [ ] `@aura/app-sdk` refreshed to a version that exports `AURA_CONTRACT`.
+
+## 1. App Hosts and the shell
+
+Your window runs on its own origin; your page reaches the shell through the
+SDK (the `/_aura/os/` gateway), your server through `OS_API_BASE` with the
+instance token. Details: [Building an app for App Hosts](/docs/building-for-app-hosts).
+
+**Checklist**
+
+- [ ] Everything in that page's checklist.
+- [ ] No `x-aura-app-id` / `x-aura-instance-id` on a request you send: AuraOS
+      knows who you are from the gateway or the token. The SDK sends none.
+
+## 2. Who you are
+
+One resolver: `ownAppId()` and `ownInstanceId()` (env on your server or in a
+sidecar that inherits the identity, the runtime bootstrap in a page).
+`getAppContext()` gives the rest (`osApiBase`, `dataDir`, …).
+
+The user your app acts for comes from `osClient.user.get()` (see
+[SDK Reference](/docs/sdk-reference)). Store `user.ref`, never the user id
+alone, for anything you persist.
+
+**Checklist**
+
+- [ ] No hand-rolled `process.env.APP_INSTANCE_ID` / `<meta>` reads.
+- [ ] Persisted user references are `ref` (`userId@systemId`).
+
+## 3. Your data: `dataDir`
+
+`getAppContext().dataDir` (`/data` in your sandbox) is **the only documented
+place for app data**. It persists across restarts and updates and is private
+to your app.
+
+Not supported, and listed by the contract report:
+
+- **The shared home `~`.** Phase 5 gives each app its own home; files you
+  leave in today's shared home won't be there.
+- **Your install folder** (next to `app.manifest.json`). It is read-only from
+  Phase 6.
+- **The container's own filesystem** outside the mounts: lost on every restart
+  already today.
+
+Small JSON values per user: `osClient.storage` (per user by default,
+`.shared` for all users). Needs `storage.read` / `storage.write`.
+
+**Checklist**
+
+- [ ] Files your app writes live under `dataDir`.
+- [ ] Per-user values go through `osClient.storage`, not a file keyed by
+      a user name.
+
+## 4. Context: secrets and settings
+
+```json
+{ "context": ["OPENAI_API_KEY"] }
+```
+
+```ts
+// your server
+const key = await osClient.context.get('OPENAI_API_KEY');   // null: the owner hasn't set it
+```
+
+- Server side only, with the instance token. A page never sees a value.
+- Only the keys in `context[]` are handed out. Another key is refused
+  (`OsError` 403 `context-undeclared`) and counted in the access report.
+- Today it reads the one global Context (Settings → Context). Phase 5 swaps
+  in values granted per app and user; your call stays the same.
+- Reading `/run/context/<KEY>` or the injected env var still works until
+  Phase 5, but it is not the contract: `aura dev validate` warns and the
+  contract report lists the app.
+
+**Checklist**
+
+- [ ] Every Context key you need is in `context[]`.
+- [ ] Read through `osClient.context.get`, not `/run/context` or `process.env`.
+
+## 5. The manifest declares everything you use
+
+| What you use | Declare it as |
+|---|---|
+| a shell permission (sidecars, mounts, notifications, `user.confirm`, storage, …) | `permissions[]` |
+| a Context key | `context[]` |
+| sidecars and their images | `services[]` (and `sidecars.spawn` for OS sidecars) |
+| a privileged sidecar (`privileged`, `capabilities`, `devices`, `publish`) | `sidecars.privileged` |
+| the docker CLI or socket | `"docker"` in `tools[]` |
+| another app's interface (MCP, REST, WS) | `consumes[]` |
+| what you offer others | `provides[]` ([Interfaces](/docs/interfaces)) |
+
+Undeclared use shows first in the access report (the D39 gate) and in
+`aura dev validate`; Phase 3 enforcement then refuses only what is undeclared.
+
+**Checklist**
+
+- [ ] `aura dev validate <dir>` shows no contract warnings.
+- [ ] `osClient.permissions.has(…)` before showing a feature that needs a
+      permission the owner may not have granted.
+
+## 6. Asking the owner
+
+- **Your own action** ("delete this project?"): `osClient.user.confirm({ action, reason, level })`
+  (needs `user.confirm`). The owner answers in AuraOS's own dialog; you get
+  `{ confirmed, approvalId? }`, never a password.
+- **An AuraOS action that needs approval** (a route answered `202` with an
+  approval id): `osClient.approvals.request({ approvalId })`, then send the
+  request again with `approvalHeader(approvalId)`. The grant is single use,
+  bound to your instance and the exact action, and expires.
+
+**Checklist**
+
+- [ ] No password field of your own for an owner decision.
+- [ ] A `202 needs-approval` is handled with `approvals.request`.
+
+## 7. Lifecycle
+
+- Hooks through the SDK factories (Astro) or `runtime/next` (Next.js): they
+  check the kernel's lifecycle token, carry the stop reason and the user, and
+  answer health with your identity.
+- A raw server checks `x-aura-lifecycle` with `@aura/app-sdk/runtime/lifecycle-guard`.
+
+**Checklist**
+
+- [ ] No hand-written `/api/lifecycle/health`.
+- [ ] Hand-written hook files sit behind the SDK middleware or the guard.
+
+## 8. Errors
+
+Every SDK call fails with `OsError { status, code }` (`status` 0 = no HTTP
+answer). The older classes (`StorageError`, `UserError`, `NotificationsError`,
+`OsSidecarError`, …) extend it, so existing `instanceof` checks keep working.
+
+**Checklist**
+
+- [ ] Errors handled by `status` / `code`, not by message text.
+- [ ] The namespaced calls (`osClient.theme.*`, `osClient.data.*`,
+      `osClient.intents.start`) instead of the deprecated flat ones.
+
+## Checking an app
+
+| Command | Shows |
+|---|---|
+| `aura dev validate <dir>` | the schema, the App Host checks and the contract checks, with `file:line` |
+| `aura get apps -o wide` | the `CONTRACT` each app was built for |
+| `aura admin contract-report [--datadir]` | per app: contract, declarations, undeclared use (source and access-report signals), raw Context reads, and with `--datadir` the writes outside `dataDir` |
+| `aura admin access-report` | the runtime counters `contract|<signal>|<app>` among the rest |
+
+The contract report's source checks are a text scan: they find the usual
+spellings, not every one.

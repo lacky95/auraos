@@ -48,6 +48,8 @@ export interface AppDto {
     sandbox?: string;
     tools?: string[];
     permissions?: string[];
+    /** The app contract it was built for (D48); absent before the contract. */
+    auraContract?: number;
   };
   enabled?: boolean;
   instances: InstanceDto[];
@@ -190,6 +192,8 @@ const apps: ResourceDef<AppDto> = {
     { header: 'MODE', value: (a) => `${a.manifest.instanceMode ?? '-'}/${a.manifest.activityMode ?? '-'}`, wide: true },
     { header: 'SANDBOX', value: (a) => a.manifest.sandbox ?? 'proot', wide: true },
     { header: 'BG', value: (a) => (a.manifest.backgroundService ? 'yes' : '-'), wide: true },
+    // The app contract the app was built for (D48): `-` before the contract.
+    { header: 'CONTRACT', value: (a) => (a.manifest.auraContract ? String(a.manifest.auraContract) : '-'), wide: true },
     { header: 'EN', value: (a) => (a.enabled === false ? color.red('off') : color.green('on')) },
   ],
 };

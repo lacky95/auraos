@@ -1,4 +1,5 @@
 import { isBrowser, osAuthHeaders, osBase } from './os-auth.js';
+import { OsError, statusCode } from './errors.js';
 /**
  * `osClient.notifications` — the AuraOS notification API for apps.
  *
@@ -295,9 +296,10 @@ export interface SubscribeOptions {
   onError?: (err: Error) => void;
 }
 
-export class NotificationsError extends Error {
-  constructor(public readonly status: number, message: string, public readonly details?: unknown) {
-    super(message);
+/** A failed notifications call. An `OsError`: `code` is the OS's `error` field. */
+export class NotificationsError extends OsError {
+  constructor(status: number, message: string, details?: unknown, code: string = statusCode(status)) {
+    super(status, code, message, details !== undefined ? { details } : {});
     this.name = 'NotificationsError';
   }
 }
@@ -348,7 +350,8 @@ export class NotificationsApi {
     try { data = text ? JSON.parse(text) : undefined; } catch { data = text; }
     if (!res.ok) {
       const d = data as { error?: string; message?: string; details?: unknown } | undefined;
-      throw new NotificationsError(res.status, `notifications: ${method} ${path} → ${res.status}: ${d?.message ?? d?.error ?? text}`, d?.details);
+      throw new NotificationsError(res.status, `notifications: ${method} ${path} → ${res.status}: ${d?.message ?? d?.error ?? text}`, d?.details,
+        typeof d?.error === 'string' ? d.error : statusCode(res.status));
     }
     return { data: data as T, res };
   }

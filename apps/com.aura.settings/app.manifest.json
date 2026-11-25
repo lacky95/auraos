@@ -4,6 +4,7 @@
   "name": "Settings",
   "icon": "SET",
   "version": "0.1.0",
+  "auraContract": 1,
   "description": "OS settings \u2014 themes, workspaces, general preferences. UI over the OS KV (no longer a content provider). Also serves the Interface Registry as an MCP server.",
   "category": "system",
   "permissions": [

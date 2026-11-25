@@ -2,6 +2,7 @@ import type { APIRoute } from 'astro';
 import { getAppManager, ProvidedInterfaceSchema } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
 import { actingInstance } from '../../../lib/access/identify.js';
+import { countContractSignal } from '../../../lib/access/contractSignals.ts';
 
 /**
  * Interface discovery + runtime registration.
@@ -17,9 +18,17 @@ import { actingInstance } from '../../../lib/access/identify.js';
  * declared, plus a proxy path any caller could already construct. Writes are
  * scoped to the verified calling instance (routeManifest.ts).
  */
-export const GET: APIRoute = ({ url }) => {
+export const GET: APIRoute = ({ url, locals }) => {
   const mgr = getAppManager();
   const q = url.searchParams;
+  // D48: an app looking up an interface by name declares it in consumes[] (report only).
+  const caller = locals.access ? actingInstance(locals.access.principal) : null;
+  const wanted = q.get('name');
+  if (caller && wanted) {
+    const m = mgr.getManifest(caller.appId);
+    const own = m?.provides.some((p) => p.name === wanted) ?? false;
+    if (m && !own && !m.consumes.some((c) => c.name === wanted)) countContractSignal('interface-undeclared', caller.appId);
+  }
 
   const filter = {
     ...(q.get('kind')  ? { kind:  q.get('kind') as never } : {}),

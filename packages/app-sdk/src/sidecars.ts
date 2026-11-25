@@ -27,6 +27,7 @@ import net from 'node:net';
 import { existsSync } from 'node:fs';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { osSidecars, OsSidecarError, type OsSidecarsClient } from './os-sidecars.js';
+import { OsError } from './errors.js';
 import { APP_HOST_ROUTE_HEADER } from './hostRules.js';
 import { AURA_RUNTIME_LOADER_JS, appHostAssetLocation } from './runtime/loader.js';
 import { LIFECYCLE_REFUSAL, LIFECYCLE_TOKEN_HEADER, lifecycleRequestRefused } from './runtime/lifecycle-guard.js';
@@ -452,7 +453,7 @@ export class SidecarHost {
       ? (!existsSync(DOCKER_SOCK) && process.env['AURA_INSTANCE_TOKEN'] ? 'os' : 'docker')
       : wanted;
     if (this.mode === 'os' && options.onSeed) {
-      throw new Error("createSidecars: onSeed is not available in mode 'os' — the OS seeds from services[].seed (a one-shot command in the service image)");
+      throw new OsError(0, 'invalid-option', "createSidecars: onSeed is not available in mode 'os' — the OS seeds from services[].seed (a one-shot command in the service image)");
     }
   }
 

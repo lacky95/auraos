@@ -16,6 +16,7 @@
  * there is nothing to check against, and the routes answer as before.
  */
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { identityResponseHeaders } from '../context.js';
 import { LIFECYCLE_HEALTH_PATH, LIFECYCLE_TOKEN_HEADER, lifecycleRequestPath } from '../hostRules.js';
 
 export { LIFECYCLE_TOKEN_HEADER };
@@ -47,8 +48,6 @@ export const LIFECYCLE_REFUSAL = { ok: false, error: 'lifecycle-token-required' 
 
 /** The 401 as a web `Response`, stamped with the app's identity. */
 export function lifecycleRefusalResponse(): Response {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (process.env['APP_ID']) headers['X-Aura-App-Id'] = process.env['APP_ID'];
-  if (process.env['APP_INSTANCE_ID']) headers['X-Aura-Instance-Id'] = process.env['APP_INSTANCE_ID'];
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', ...identityResponseHeaders() };
   return new Response(JSON.stringify(LIFECYCLE_REFUSAL), { status: 401, headers });
 }

@@ -17,6 +17,7 @@
  */
 import type { OsClient } from './OsClient.js';
 import { bodylessMutationHeaders, osAuthHeaders, osBase } from './os-auth.js';
+import { OsError, statusCode } from './errors.js';
 
 /**
  * `transport/protocol` — mirrors INTERFACE_KINDS in @aura/core. `http/mcp` is
@@ -152,7 +153,7 @@ export class InterfacesApi {
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({})) as { error?: string };
-      throw new Error(`interfaces.register('${spec.name}') failed: ${body.error ?? res.status}`);
+      throw new OsError(res.status, body.error ?? statusCode(res.status), `interfaces.register('${spec.name}') failed: ${body.error ?? res.status}`);
     }
     const body = await res.json() as { interface?: InterfaceView };
     return body.interface ?? null;

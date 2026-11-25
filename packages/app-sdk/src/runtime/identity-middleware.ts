@@ -13,6 +13,7 @@
  * integration's `astro:server:setup` hook (which also stamps the assets Vite
  * serves) only ever ran under `astro dev`, so built apps sent no identity.
  */
+import { identityResponseHeaders } from '../context.js';
 import { LIFECYCLE_TOKEN_HEADER, lifecycleRefusalResponse, lifecycleRequestRefused } from './lifecycle-guard.js';
 
 type Next = () => Promise<Response>;
@@ -23,18 +24,15 @@ export async function onRequest(ctx: Ctx, next: Next): Promise<Response> {
     return lifecycleRefusalResponse();
   }
   const res = await next();
-  const appId      = process.env['APP_ID'];
-  const instanceId = process.env['APP_INSTANCE_ID'];
-  if (!appId && !instanceId) return res;
+  const identity = Object.entries(identityResponseHeaders());
+  if (identity.length === 0) return res;
   try {
-    if (appId)      res.headers.set('X-Aura-App-Id', appId);
-    if (instanceId) res.headers.set('X-Aura-Instance-Id', instanceId);
+    for (const [k, v] of identity) res.headers.set(k, v);
     return res;
   } catch {
     // Immutable headers (a Response passed through from fetch): copy once.
     const copy = new Response(res.body, res);
-    if (appId)      copy.headers.set('X-Aura-App-Id', appId);
-    if (instanceId) copy.headers.set('X-Aura-Instance-Id', instanceId);
+    for (const [k, v] of identity) copy.headers.set(k, v);
     return copy;
   }
 }

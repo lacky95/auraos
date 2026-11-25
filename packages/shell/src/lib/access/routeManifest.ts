@@ -154,6 +154,7 @@ const routes: RouteAccessManifest['routes'] = {
     variants: [{ id: 'build-log', methods: ['GET'], match: { on: 'query', name: 'log' }, rule: rule(OWNER, 'system') }],
   },
   '/api/admin/access-report': { methods: { GET: ownerManages('The access report names apps and callers.') } },
+  '/api/admin/contract-report': { methods: { GET: ownerManages('The app contract report (D48) names apps, their declarations and where they write: an owner view.') } },
   '/api/admin/onboarding': {
     methods: {
       GET: rule(OWNER, 'system', decide(1, 'Reports setupDoneAt. Decide whether the setup page reads it before login or uses first-boot status instead.')),
@@ -242,6 +243,10 @@ const routes: RouteAccessManifest['routes'] = {
     methods: { GET: rule(['own-instance', 'app-permission', 'owner'], 'system', why(
       'Any verified caller: its own user and the profile fields it may read (the registry filters per app). Anonymous callers get 401.')) },
   },
+  '/api/user/me/permissions': {
+    methods: { GET: rule(['own-instance', 'app-permission', 'owner'], 'system', why(
+      'D48 `osClient.permissions`: any verified caller asks which permissions its own app holds; reflects only the caller.')) },
+  },
   '/api/user/me/profile': {
     methods: { PATCH: rule(OWNER, 'system', why(
       'The user changes their own profile: the desktop login or Settings (D45). The handler refuses every app and agent.')) },
@@ -269,7 +274,13 @@ const routes: RouteAccessManifest['routes'] = {
     },
   },
   '/api/os/context/[key]': {
-    methods: { DELETE: rule(OWNER, 'system', { freshAuth: true, ...decide(5, 'Holds secrets and is never public. Settle with the Q31 migration of /api/os/context.') }) },
+    methods: {
+      // D48 `osClient.context.get`: the app's own server, by its instance
+      // token, and only the keys its manifest declares (the handler checks).
+      GET: rule(['own-instance'], 'system', { credentials: ['instance-token'], ...why(
+        'An app instance reads a Context key its manifest declares in context[], with its own instance token (lib/appContract.ts). Never a page, never the owner: the Context API discloses no secret otherwise. Phase 5 swaps the backend for per-app granted Context.') }),
+      DELETE: rule(OWNER, 'system', { freshAuth: true, ...decide(5, 'Holds secrets and is never public. Settle with the Q31 migration of /api/os/context.') }),
+    },
   },
   '/api/os/volumes': { methods: on(['GET', 'POST'], rule(OWNER, 'system', SYSTEM_APP_CALLER)) },
   '/api/os/volumes/[name]': { methods: { DELETE: rule(OWNER, 'system', SYSTEM_APP_CALLER) } },

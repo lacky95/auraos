@@ -3,6 +3,7 @@
   "originId": "aa2cd506-919a-48af-aa90-88641fb624b0",
   "name": "Example",
   "version": "0.1.0",
+  "auraContract": 1,
   "description": "Simple example",
   "icon": "EXP",
   "instanceMode": "single",

@@ -35,6 +35,8 @@
  */
 import { postToShell, isFromShell } from './channel.js';
 import { appHostRuntime, isBrowser, osAuthHeaders, osBase } from './os-auth.js';
+import { OsError } from './errors.js';
+import { createApproval } from './approvals.js';
 
 /**
  * Profile fields an app may get. All optional, and more may come without an
@@ -86,9 +88,10 @@ export interface ConfirmResult {
   approvalId?: string;
 }
 
-export class UserConfirmError extends Error {
-  constructor(readonly code: string, message: string) {
-    super(message);
+/** `user.confirm` refused the request itself (not a "no"). An `OsError`. */
+export class UserConfirmError extends OsError {
+  constructor(code: string, message: string, status = 0) {
+    super(status, code, message);
     this.name = 'UserConfirmError';
   }
 }
@@ -100,9 +103,10 @@ function requestId(): string {
   return c?.randomUUID ? c.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
-export class UserError extends Error {
-  constructor(readonly status: number, readonly code: string) {
-    super(`user: ${code} (${status})`);
+/** A failed `user.get()`. An `OsError`. */
+export class UserError extends OsError {
+  constructor(status: number, code: string) {
+    super(status, code, `user: ${code} (${status})`);
     this.name = 'UserError';
   }
 }
@@ -149,22 +153,20 @@ export class UserApi {
     if (!isBrowser() || !appHostRuntime()) {
       throw new UserConfirmError('no-shell', 'user.confirm needs an App Host page inside AuraOS');
     }
-    const res = await fetch(`${osBase()}/api/approvals`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    let created: Awaited<ReturnType<typeof createApproval>>;
+    try {
+      created = await createApproval({
         action: 'user.confirm', payload: { action: opts.action }, level: opts.level ?? 'session',
         ...(opts.reason ? { reason: opts.reason } : {}),
-      }),
-    });
-    const body = await res.json().catch(() => ({})) as { id?: string; error?: string; message?: string };
-    if (!res.ok || typeof body.id !== 'string') {
-      // The owner blocked this app, or a request is already waiting: a "no", not a bug.
-      if (res.status === 403 && body.error === 'blocked') return NO;
-      if (res.status === 429) return NO;
-      throw new UserConfirmError(body.error ?? `http-${res.status}`, body.message ?? `confirm refused (${res.status})`);
+      });
+    } catch (err) {
+      // The same approval as osClient.approvals; refusals keep their own error class here.
+      if (err instanceof OsError) throw new UserConfirmError(err.code, err.message, err.status);
+      throw err;
     }
-    return this.askShell(body.id, opts.level ?? 'session');
+    // The owner blocked this app, or a request is already waiting: a "no", not a bug.
+    if ('no' in created) return NO;
+    return this.askShell(created.id, opts.level ?? 'session');
   }
 
   /** Post the request to the verified shell and wait for its one answer. */

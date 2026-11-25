@@ -116,7 +116,7 @@ export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]
     ['aura grant nperm <app> read --scope app:<id>|sender:<key>|all', "Let an app read other senders' notifications (--include-secret)"],
     ['aura revoke nperm <app> <locked|popup|read>', 'Revoke them again, takes effect at once'],
     ['aura get nperm [app]', 'Requested vs granted notification features'],
-    ['aura admin ...', 'grants · audit · access-report · notif release'],
+    ['aura admin ...', 'grants · audit · access-report · contract-report · notif release'],
     ['aura whoami', 'Server-verified identity, and local hints'],
     ['aura setup-code', 'Host: one-time owner setup code'],
     ['aura user reset-password <username>', 'Host: one-time password reset code'],

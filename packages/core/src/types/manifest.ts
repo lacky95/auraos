@@ -413,6 +413,19 @@ export const AppManifestSchema = z.object({
   }).optional(),
   permissions: z.array(PermissionSchema).default([]),
   tools: z.array(z.string()).default([]),
+  /**
+   * The app contract this app was built for (D48, `AURA_CONTRACT` in the SDK
+   * and in core's contract/appContract.ts). Absent: built before the contract.
+   * AuraOS reports it per app (`aura get apps -o wide`, the contract report);
+   * from Phase 6 it refuses an unknown major version with a clear message.
+   */
+  auraContract: z.number().int().min(1).optional(),
+  /**
+   * The Aura Context keys this app reads with `osClient.context.get(key)`
+   * (D48). Only these are handed to it; reading another key is refused and
+   * shows in the access report. Env-var names, like the Context keys.
+   */
+  context: z.array(z.string().regex(/^[A-Z_][A-Z0-9_]*$/, { message: 'context[] entries are Context keys: env-var names (A-Z, 0-9, _)' })).default([]),
   rootfsMode: z.enum(['shared', 'isolated']).default('shared'),
   category: z.enum(['system', 'productivity', 'media', 'communication', 'utility', 'game', 'developer']).default('utility'),
   /** Instance policy: 'single' = at most one running BACKEND process, 'multi' = multiple concurrent processes allowed. */

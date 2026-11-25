@@ -15,13 +15,18 @@
  *   });
  *
  * Replaces the byte-identical 5-line APIRoute every app used to copy.
+ *
+ * Each hook is one framework-neutral function here (`run*`, web `Request` in,
+ * `Response` out). The Astro factories below and the Next.js adapter
+ * (`./runtime/next.ts`) both call them, so a hook parses, answers and fails
+ * the same way in every runtime.
  */
 
 import type { APIRoute } from 'astro';
 import { IntentRejectedError, parseIntentPayload, type IntentPayload } from './intent.js';
+import { ownAppId, ownInstanceId } from './context.js';
 
-const APP_ID = () => process.env['APP_ID'] ?? 'unknown';
-const INSTANCE_ID = () => process.env['APP_INSTANCE_ID'] ?? null;
+const APP_ID = () => ownAppId() ?? 'unknown';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -44,11 +49,12 @@ function json(body: unknown, status = 200): Response {
  * by default. Apps that need to extend it can override their own.
  */
 export function createHealthEndpoint(): APIRoute {
-  return () => json({
-    ok: true,
-    appId: APP_ID(),
-    instanceId: INSTANCE_ID(),
-  });
+  return () => healthResponse();
+}
+
+/** The health identity answer `{ ok, appId, instanceId }`, shared by every runtime. */
+export function healthResponse(): Response {
+  return json({ ok: true, appId: APP_ID(), instanceId: ownInstanceId() });
 }
 
 // =========================================================================
@@ -78,17 +84,22 @@ export function createLifecycleHandler(
   hook: LifecycleHookName,
   impl?: (ctx: LifecycleContext) => void | Promise<void>,
 ): APIRoute {
-  return async ({ request }) => {
-    const ctx = lifecycleContextOf(request.headers);
-    console.log(`[${APP_ID()}] ${hook}${ctx.reason ? ` (${ctx.reason})` : ''}`);
-    try {
-      if (impl) await impl(ctx);
-    } catch (err) {
-      console.error(`[${APP_ID()}] ${hook} failed:`, err);
-      return json({ ok: false, error: String(err) }, 500);
-    }
-    return json({ ok: true });
-  };
+  return ({ request }) => runPlainHook(hook, request, impl);
+}
+
+/** One plain hook: the stop reason from the kernel's header, `impl`, `{ ok }`. */
+export async function runPlainHook(
+  hook: string, request: Request, impl?: (ctx: LifecycleContext) => void | Promise<void>,
+): Promise<Response> {
+  const ctx = lifecycleContextOf(request.headers);
+  console.log(`[${APP_ID()}] ${hook}${ctx.reason ? ` (${ctx.reason})` : ''}`);
+  try {
+    if (impl) await impl(ctx);
+  } catch (err) {
+    console.error(`[${APP_ID()}] ${hook} failed:`, err);
+    return json({ ok: false, error: String(err) }, 500);
+  }
+  return json({ ok: true });
 }
 
 // =========================================================================
@@ -146,33 +157,39 @@ export interface ActivityCreateResult {
 export function createActivityCreateHandler(
   impl?: (req: ActivityCreateRequest) => ActivityCreateResult | Promise<ActivityCreateResult>,
 ): APIRoute {
-  return async ({ request }) => {
-    const body = await request.json().catch(() => ({})) as Partial<ActivityCreateRequest>;
-    const activityId = typeof body.activityId === 'string' ? body.activityId : '';
-    if (!activityId) {
-      return json({ ok: false, error: 'missing activityId' }, 400);
+  return ({ request }) => runActivityCreate(request, impl);
+}
+
+/** `onActivityCreate`: body `{ activityId, data?, intent?, restore?, userId? }` → `{ ok, path?, title?, … }`. */
+export async function runActivityCreate(
+  request: Request,
+  impl?: (req: ActivityCreateRequest) => ActivityCreateResult | Promise<ActivityCreateResult>,
+): Promise<Response> {
+  const body = await request.json().catch(() => ({})) as Partial<ActivityCreateRequest>;
+  const activityId = typeof body.activityId === 'string' ? body.activityId : '';
+  if (!activityId) {
+    return json({ ok: false, error: 'missing activityId' }, 400);
+  }
+  const data = body.data ?? undefined;
+  const intent = parseIntentPayload(body.intent);
+  const r = body.restore as Partial<ActivityRestore> | undefined;
+  const restore = r && typeof r.previousActivityId === 'string'
+    ? { previousActivityId: r.previousActivityId, state: r.state ?? null }
+    : undefined;
+  const userId = typeof body.userId === 'string' && body.userId ? body.userId : undefined;
+  try {
+    const result = impl ? await impl({ activityId, ...(data ? { data } : {}), ...(intent ? { intent } : {}), ...(restore ? { restore } : {}), ...(userId ? { userId } : {}) }) : {};
+    const out: ActivityCreateResult & { ok: boolean } = { ok: true, ...result };
+    console.log(`[${APP_ID()}] onActivityCreate ${activityId}`);
+    return json(out);
+  } catch (err) {
+    if (err instanceof IntentRejectedError) {
+      console.warn(`[${APP_ID()}] onActivityCreate ${activityId} rejected the intent: ${err.code} — ${err.message}`);
+      return json({ ok: false, rejected: err.toReply() });
     }
-    const data = body.data ?? undefined;
-    const intent = parseIntentPayload(body.intent);
-    const r = body.restore as Partial<ActivityRestore> | undefined;
-    const restore = r && typeof r.previousActivityId === 'string'
-      ? { previousActivityId: r.previousActivityId, state: r.state ?? null }
-      : undefined;
-    const userId = typeof body.userId === 'string' && body.userId ? body.userId : undefined;
-    try {
-      const result = impl ? await impl({ activityId, ...(data ? { data } : {}), ...(intent ? { intent } : {}), ...(restore ? { restore } : {}), ...(userId ? { userId } : {}) }) : {};
-      const out: ActivityCreateResult & { ok: boolean } = { ok: true, ...result };
-      console.log(`[${APP_ID()}] onActivityCreate ${activityId}`);
-      return json(out);
-    } catch (err) {
-      if (err instanceof IntentRejectedError) {
-        console.warn(`[${APP_ID()}] onActivityCreate ${activityId} rejected the intent: ${err.code} — ${err.message}`);
-        return json({ ok: false, rejected: err.toReply() });
-      }
-      console.error(`[${APP_ID()}] onActivityCreate ${activityId} failed:`, err);
-      return json({ ok: false, error: String(err) }, 500);
-    }
-  };
+    console.error(`[${APP_ID()}] onActivityCreate ${activityId} failed:`, err);
+    return json({ ok: false, error: String(err) }, 500);
+  }
 }
 
 // =========================================================================
@@ -198,17 +215,22 @@ export interface SaveStateResult {
 export function createSaveStateHandler(
   impl: (req: SaveStateRequest) => SaveStateResult | Promise<SaveStateResult>,
 ): APIRoute {
-  return async ({ request }) => {
-    const body = await request.json().catch(() => ({})) as Partial<SaveStateRequest>;
-    const activityIds = Array.isArray(body.activityIds) ? body.activityIds.filter((x): x is string => typeof x === 'string') : [];
-    try {
-      const res = await impl({ activityIds });
-      return json({ ok: true, states: res?.states ?? {} });
-    } catch (err) {
-      console.error(`[${APP_ID()}] onSaveState failed:`, err);
-      return json({ ok: false, error: String(err) }, 500);
-    }
-  };
+  return ({ request }) => runSaveState(request, impl);
+}
+
+/** `onSaveState`: body `{ activityIds }` → `{ ok, states }`. */
+export async function runSaveState(
+  request: Request, impl: (req: SaveStateRequest) => SaveStateResult | Promise<SaveStateResult>,
+): Promise<Response> {
+  const body = await request.json().catch(() => ({})) as Partial<SaveStateRequest>;
+  const activityIds = Array.isArray(body.activityIds) ? body.activityIds.filter((x): x is string => typeof x === 'string') : [];
+  try {
+    const res = await impl({ activityIds });
+    return json({ ok: true, states: res?.states ?? {} });
+  } catch (err) {
+    console.error(`[${APP_ID()}] onSaveState failed:`, err);
+    return json({ ok: false, error: String(err) }, 500);
+  }
 }
 
 // =========================================================================
@@ -223,21 +245,23 @@ export function createSaveStateHandler(
 export function createActivityDestroyHandler(
   impl?: (activityId: string) => void | Promise<void>,
 ): APIRoute {
-  return async ({ params }) => {
+  return ({ params }) => {
     const raw = params['activityId'];
-    const activityId = raw ? decodeURIComponent(raw) : '';
-    if (!activityId) {
-      return json({ ok: false, error: 'missing activityId' }, 400);
-    }
-    try {
-      if (impl) await impl(activityId);
-      console.log(`[${APP_ID()}] onActivityDestroy ${activityId}`);
-      return json({ ok: true });
-    } catch (err) {
-      console.error(`[${APP_ID()}] onActivityDestroy ${activityId} failed:`, err);
-      return json({ ok: false, error: String(err) }, 500);
-    }
+    return runActivityDestroy(raw ? decodeURIComponent(raw) : '', impl);
   };
+}
+
+/** `onActivityDestroy/<activityId>` with the id already decoded. */
+export async function runActivityDestroy(activityId: string, impl?: (activityId: string) => void | Promise<void>): Promise<Response> {
+  if (!activityId) return json({ ok: false, error: 'missing activityId' }, 400);
+  try {
+    if (impl) await impl(activityId);
+    console.log(`[${APP_ID()}] onActivityDestroy ${activityId}`);
+    return json({ ok: true });
+  } catch (err) {
+    console.error(`[${APP_ID()}] onActivityDestroy ${activityId} failed:`, err);
+    return json({ ok: false, error: String(err) }, 500);
+  }
 }
 
 // =========================================================================
@@ -270,18 +294,21 @@ export interface AssignRequest {
  *   export const POST = createAssignHandler(async ({ userId }) => { await warmCacheFor(userId); });
  */
 export function createAssignHandler(impl?: (req: AssignRequest) => void | Promise<void>): APIRoute {
-  return async ({ request }) => {
-    const body = await request.json().catch(() => ({})) as { userId?: unknown };
-    if (typeof body.userId !== 'string' || !body.userId) return json({ ok: false, error: 'missing userId' }, 400);
-    try {
-      if (impl) await impl({ userId: body.userId });
-      console.log(`[${APP_ID()}] onAssign`);
-      return json({ ok: true });
-    } catch (err) {
-      console.error(`[${APP_ID()}] onAssign failed:`, err);
-      return json({ ok: false, error: String(err) }, 500);
-    }
-  };
+  return ({ request }) => runAssign(request, impl);
+}
+
+/** `onAssign`: body `{ userId }` → `{ ok }`. */
+export async function runAssign(request: Request, impl?: (req: AssignRequest) => void | Promise<void>): Promise<Response> {
+  const body = await request.json().catch(() => ({})) as { userId?: unknown };
+  if (typeof body.userId !== 'string' || !body.userId) return json({ ok: false, error: 'missing userId' }, 400);
+  try {
+    if (impl) await impl({ userId: body.userId });
+    console.log(`[${APP_ID()}] onAssign`);
+    return json({ ok: true });
+  } catch (err) {
+    console.error(`[${APP_ID()}] onAssign failed:`, err);
+    return json({ ok: false, error: String(err) }, 500);
+  }
 }
 
 /**
@@ -294,25 +321,33 @@ export function createAssignHandler(impl?: (req: AssignRequest) => void | Promis
  *     if (intent.action === 'aura.intent.action.VIEW') openUrl(String(intent.extras?.url));
  *   });
  */
+/** What an `onIntent` impl may return: `result` goes back to the caller of `startIntent`. */
+export type IntentHandlerResult = void | { result?: Record<string, unknown> };
+
 export function createIntentHandler(
-  impl?: (req: IntentRequest) => void | { result?: Record<string, unknown> } | Promise<void | { result?: Record<string, unknown> }>,
+  impl?: (req: IntentRequest) => IntentHandlerResult | Promise<IntentHandlerResult>,
 ): APIRoute {
-  return async ({ request }) => {
-    const body = await request.json().catch(() => ({})) as { intent?: unknown; newInstance?: unknown; userId?: unknown };
-    const intent = parseIntentPayload(body.intent);
-    if (!intent) return json({ ok: false, error: 'missing intent.action' }, 400);
-    try {
-      const userId = typeof body.userId === 'string' && body.userId ? body.userId : undefined;
-      const out = impl ? await impl({ intent, newInstance: body.newInstance === true, ...(userId ? { userId } : {}) }) : undefined;
-      console.log(`[${APP_ID()}] onIntent ${intent.action}`);
-      return json({ ok: true, ...(out && out.result ? { result: out.result } : {}) });
-    } catch (err) {
-      if (err instanceof IntentRejectedError) {
-        console.warn(`[${APP_ID()}] onIntent ${intent.action} rejected: ${err.code} — ${err.message}`);
-        return json({ ok: false, rejected: err.toReply() });
-      }
-      console.error(`[${APP_ID()}] onIntent ${intent.action} failed:`, err);
-      return json({ ok: false, error: String(err) }, 500);
+  return ({ request }) => runIntent(request, impl);
+}
+
+/** `onIntent`: body `{ intent, newInstance, userId? }` → `{ ok, result? }`, or `{ ok: false, rejected }`. */
+export async function runIntent(
+  request: Request, impl?: (req: IntentRequest) => IntentHandlerResult | Promise<IntentHandlerResult>,
+): Promise<Response> {
+  const body = await request.json().catch(() => ({})) as { intent?: unknown; newInstance?: unknown; userId?: unknown };
+  const intent = parseIntentPayload(body.intent);
+  if (!intent) return json({ ok: false, error: 'missing intent.action' }, 400);
+  try {
+    const userId = typeof body.userId === 'string' && body.userId ? body.userId : undefined;
+    const out = impl ? await impl({ intent, newInstance: body.newInstance === true, ...(userId ? { userId } : {}) }) : undefined;
+    console.log(`[${APP_ID()}] onIntent ${intent.action}`);
+    return json({ ok: true, ...(out && out.result ? { result: out.result } : {}) });
+  } catch (err) {
+    if (err instanceof IntentRejectedError) {
+      console.warn(`[${APP_ID()}] onIntent ${intent.action} rejected: ${err.code} — ${err.message}`);
+      return json({ ok: false, rejected: err.toReply() });
     }
-  };
+    console.error(`[${APP_ID()}] onIntent ${intent.action} failed:`, err);
+    return json({ ok: false, error: String(err) }, 500);
+  }
 }
