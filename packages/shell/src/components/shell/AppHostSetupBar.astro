@@ -4,7 +4,9 @@
  * installation's App Hosts address answers, the desktop moves there on its own
  * after a short notice ("Stay on this address" keeps it here for this tab);
  * otherwise the bar shows the custom-domain guide. The same bar shows on an App Hosts address whose
- * App Host cookie this browser drops (WebKit on `os.aura.localhost`, D44).
+ * App Host cookie this browser drops (WebKit on `os.aura.localhost`, D44),
+ * with a link to the address that works there; that one never moves on its own.
+ * Links keep this page's path, query and hash, so the sign-in there returns to it.
  * Decisions are in lib/desktop/setupBar.ts.
  */
 ---
@@ -61,9 +63,9 @@
     title.textContent = cookies ? 'Apps blocked in this browser.' : 'Limited IP mode.';
     if (plan.kind === 'link') {
       text.textContent = cookies
-        ? "This browser doesn't keep app sign-ins on this address. Switch to this Aura installation's other app address."
+        ? "This browser doesn't keep app sign-ins on this address. Switch to this Aura installation's other app address; you sign in once more there."
         : "Apps can't open from an IP address. Switch to this Aura installation's app address.";
-      link.href = plan.href;
+      link.href = autoSwitchTarget(plan.href, location.search, location.hash);
       link.textContent = `Open Aura with App Hosts: ${plan.address}`;
       link.hidden = false;
     } else {

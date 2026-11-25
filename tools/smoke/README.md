@@ -23,7 +23,7 @@ Exit codes: `0` no failures, `1` a check failed, `2` usage error.
 - **Ids come from discovery.** Instance paths accept only resumed, non-pool instances found in `GET /api/apps`.
 - **The Terminal is never proxied by app id.** A bare `/api/proxy/com.aura.terminal/api/sessions` can cold-start it. The exact instance id cannot.
 - **The CLI is guarded too.** `aura` runs against a loopback proxy that applies the same guard, with a minimal environment and no inherited tokens. `aura get apps` also requests `/api/apps/serve`, which is refused, and the CLI tolerates that.
-- **No credentials are sent.** There are no tokens or cookies, and redirects are not followed.
+- **The host operator, or no one.** Run in the master container (`docker exec aura-shell …`) against its own shell, every request carries a one-time operator ticket for exactly that method and path, made the way the host `aura` CLI makes it (`lib/operator.mjs`), so the run works when access is enforced. CLI traffic gets its ticket in the guard proxy. From a sandbox, against another origin, or without a built `packages/core`, the run is anonymous; the first output line says which. No tokens or cookies are sent, and redirects are not followed.
 - **Reports hold no secrets.** They contain statuses, counts, field presence, and non-secret ids. Response bodies, env values, logs, and notification content are never copied. Credential and binary checks test for existence only.
 - **State guard.** App ids and `enabled`, Activity ids, instance ids and states, sidecar counts, and Terminal session ids are recorded before and after the run. Any change fails the run. Activity by someone else during the run will also trip it, so rerun on a quiet system before treating it as a bug.
 

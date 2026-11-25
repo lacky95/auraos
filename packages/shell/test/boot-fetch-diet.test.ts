@@ -5,6 +5,7 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { getAppsSnapshot, appsSnapshotStats, _resetAppsSnapshot } from '../src/lib/appsSnapshot.ts';
+import { _resetSignedOut, signInUrl } from '../src/lib/desktop/signedOut.ts';
 import { etagOf, isFresh, withEtag } from '../src/lib/etag.ts';
 
 let calls = 0;
@@ -52,6 +53,26 @@ test('a failed head probe falls back to the network', async () => {
   const list = await getAppsSnapshot();
   assert.equal(calls, 1);
   assert.equal(list[0]!.manifest!.id, 'a');
+});
+
+test('a 401 (the login ended) sends the tab to the sign-in once, back to this page; other errors do not', async () => {
+  _resetSignedOut();
+  const went: string[] = [];
+  g['location'] = { pathname: '/', search: '?open=com.aura.docs', hash: '#w2', replace: (u: string) => { went.push(u); } };
+  let status = 500;
+  g['fetch'] = async () => { calls++; return new Response('{}', { status }); };
+  try {
+    await assert.rejects(getAppsSnapshot({ fresh: true }));
+    assert.deepEqual(went, [], 'a 500 is not a sign-out');
+    status = 401;
+    for (let i = 0; i < 3; i++) await assert.rejects(getAppsSnapshot({ fresh: true }));
+    assert.deepEqual(went, [`/login?next=${encodeURIComponent('/?open=com.aura.docs')}#w2`]);
+  } finally {
+    delete g['location'];
+    _resetSignedOut();
+  }
+  assert.equal(signInUrl({ pathname: '/', search: '', hash: '' }), '/login');
+  assert.equal(signInUrl({ pathname: '/login', search: '?next=%2Fx', hash: '' }), '/login');
 });
 
 test('ETag: 304 for a matching If-None-Match, 200 otherwise', async () => {

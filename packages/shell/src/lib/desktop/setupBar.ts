@@ -70,14 +70,17 @@ export const AUTO_SWITCH_SECONDS = 3;
 
 /**
  * Whether a settled plan moves the desktop to the App Hosts address on its
- * own: only a link whose probe answered, and only when the owner hasn't asked
- * to stay. The guide never moves anything.
+ * own: only an IP-mode link whose probe answered, and only when the owner
+ * hasn't asked to stay. The guide never moves anything, and neither does the
+ * cookie fallback (WebKit on `os.aura.localhost`, D44): that address works
+ * for the desktop, and the other one is a new sign-in, so the bar offers the
+ * link and the owner decides.
  */
 export function shouldAutoSwitch(plan: SetupBarPlan, stay: boolean): boolean {
-  return plan.show && plan.kind === 'link' && !stay;
+  return plan.show && plan.kind === 'link' && plan.reason === 'address' && !stay;
 }
 
-/** Where the switch goes: the link plus this page's query and hash. */
+/** Where the link and the switch go: the link plus this page's query and hash, so a sign-in there returns to it. */
 export function autoSwitchTarget(href: string, search: string, hash: string): string {
   return `${href}${search}${hash}`;
 }

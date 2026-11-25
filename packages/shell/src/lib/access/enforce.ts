@@ -155,9 +155,8 @@ export async function accessGate(
 
   const resolved = await deps.principal(ctx.request);
   const identity: VerifiedIdentity = { principal: resolved.principal, via: resolved.via };
-  // Decided at the gateway, in every mode; the route still gets its caller.
-  if (enforcing && gateway) return { refused: null, identity };
 
+  // Before the gateway's early return too: the report counts the variant the body settles, never both (ambiguous).
   let bodyVariant: string | null | undefined;
   if (readsBody(manifest, info, method)) {
     const body = await readJsonBody(ctx.request);
@@ -167,6 +166,8 @@ export async function accessGate(
     bodyVariant = candidates.find((c) => c.variant !== null && read.has(c.variant))?.variant ?? null;
   }
   const settled = bodyVariant === undefined ? {} : { bodyVariant };
+  // Decided at the gateway, in every mode; the route still gets its caller.
+  if (enforcing && gateway) return { refused: null, identity, ...settled };
 
   const seen = await withNetworkCaller(identity, candidates.map((c) => c.rule), snapshot.identity.peer, deps.network);
   const req: CandidateRequest = {
