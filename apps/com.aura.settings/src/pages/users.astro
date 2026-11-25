@@ -22,6 +22,15 @@ import Icon from '../components/Icon.astro';
  * Profile (D46): `GET /api/user/me` (with `ref`, `userId@systemId`, D47)
  * and `PATCH /api/user/me/profile`, which validates each field by the
  * shell's profile field registry; an empty input clears the field.
+ *
+ * Secrets (D56): `GET /api/admin/credentials` lists the owner's personal
+ * vault (names, the apps holding a handle, whether each may read the value,
+ * last use; never a value) as the owner through Settings (D45). Revoke
+ * (`DELETE /api/admin/credentials/<NAME>[?app=]`) answers 202 and goes
+ * through AuraOS's approval dialog, then the same call again with the
+ * approval. Secrets are added only by an app or the CLI asking
+ * (`osClient.credentials.request`, `aura secret ask`): the value is typed
+ * into the shell's dialog, never into this page.
  */
 const MIN = 4;
 const MAX = 128;
@@ -112,6 +121,21 @@ const MAX = 128;
 
       <section class="acc-section">
         <div class="acc-head">
+          <span class="acc-title"><Icon name="key" /> Secrets</span>
+        </div>
+        <table class="acc-table">
+          <thead><tr><th>NAME</th><th>USED BY</th><th>LAST USE</th><th></th></tr></thead>
+          <tbody id="secrets-body"><tr><td colspan="4" class="acc-note">Loading…</td></tr></tbody>
+        </table>
+        <p class="acc-note">
+          Your personal vault. Apps and the CLI (<code>aura secret ask</code>) ask for a secret; you type it into
+          AuraOS's own dialog, and the app gets a handle, not the value. <span class="pill on">READS</span> marks an app
+          you allowed to read the value. Revoking asks for your approval.
+        </p>
+      </section>
+
+      <section class="acc-section">
+        <div class="acc-head">
           <span class="acc-title"><Icon name="log-in" /> Signed-in sessions</span>
           <button class="btn" id="btn-revoke-others" type="button">SIGN OUT OTHER SESSIONS</button>
         </div>
@@ -159,7 +183,7 @@ const MAX = 128;
     </div>
   </main>
 
-  <footer class="settings-foot">PROVIDER · /api/auth/account · /api/user/me · /api/user/me/profile · /api/auth/password-policy · /api/auth/sessions/revoke-others</footer>
+  <footer class="settings-foot">PROVIDER · /api/auth/account · /api/admin/credentials · /api/user/me · /api/user/me/profile · /api/auth/password-policy · /api/auth/sessions/revoke-others</footer>
 
   <script is:inline define:vars={{ MIN, MAX }}>
     (() => {
@@ -268,6 +292,77 @@ const MAX = 128;
         await loadAccount();
       });
 
+      // ── secrets (D56) ────────────────────────────────────────────────
+      /* Ask AuraOS to show the approval a change created, in the Shell's own dialog. */
+      function askOwner(approvalId) {
+        return new Promise((resolve) => {
+          if (!window.auraOs || !window.auraOs.appHost()) { resolve(false); return; }
+          const requestId = Math.random().toString(36).slice(2); // correlation only
+          const onResult = (ev) => {
+            if (!window.auraOs.isFromShell(ev)) return;
+            const d = ev.data;
+            if (!d || d.type !== 'aura.approval.result' || d.requestId !== requestId) return;
+            window.removeEventListener('message', onResult);
+            resolve(d.ok === true && d.approvalId === approvalId);
+          };
+          window.addEventListener('message', onResult);
+          window.auraOs.postToShell({ type: 'aura.approval.request', requestId, approvalId });
+        });
+      }
+      /* An owner call through the gateway (D45): a read answers at once, a change after the owner's approval. */
+      async function owner(method, path) {
+        let approvalId = null;
+        for (;;) {
+          const headers = { ...window.auraOs.bodylessHeaders() };
+          if (approvalId) headers['X-Aura-Approval'] = approvalId;
+          const r = await fetch(window.auraOs.url(path), { method, headers });
+          const data = await r.json().catch(() => ({}));
+          if (r.status === 202 && data.needsApproval && data.approvalId && !approvalId) {
+            if (!(await askOwner(data.approvalId))) throw new Error('cancelled');
+            approvalId = data.approvalId;
+            continue;
+          }
+          if (!r.ok) throw new Error(data.message || data.error || `HTTP ${r.status}`);
+          return data;
+        }
+      }
+      function renderSecrets(list) {
+        const used = (c) => c.consumers.length ? c.consumers.map((a) => `
+          <div class="row-inline">
+            <span title="${esc(a.appId)}">${esc(a.name)}</span>
+            ${a.canRead ? '<span class="pill on">READS</span>' : ''}
+            <button class="btn" type="button" data-secret="${esc(c.name)}" data-app="${esc(a.appId)}">REVOKE</button>
+          </div>`).join('') : '<span class="acc-note">no app</span>';
+        $('secrets-body').innerHTML = list.length ? list.map((c) => `
+          <tr>
+            <td><code>${esc(c.name)}</code>${c.label ? `<div class="acc-note">${esc(c.label)}</div>` : ''}</td>
+            <td>${used(c)}</td>
+            <td class="acc-note">${esc(fmt(c.lastUsedAt))}${c.lastUsedBy ? ` · ${esc(c.lastUsedBy)}` : ''}</td>
+            <td><button class="btn" type="button" data-secret="${esc(c.name)}">REVOKE</button></td>
+          </tr>`).join('') : '<tr><td colspan="4" class="acc-note">No secrets yet.</td></tr>';
+      }
+      async function loadSecrets() {
+        try { renderSecrets((await owner('GET', '/api/admin/credentials')).credentials || []); }
+        catch (err) {
+          $('secrets-body').innerHTML = '<tr><td colspan="4" class="acc-note">Unavailable.</td></tr>';
+          setStatus(`ERROR — secrets: ${err.message}`, 'error');
+        }
+      }
+      $('secrets-body').addEventListener('click', async (e) => {
+        const btn = e.target.closest('button[data-secret]');
+        if (!btn) return;
+        const name = btn.dataset.secret;
+        const app = btn.dataset.app;
+        btn.disabled = true;
+        try {
+          await owner('DELETE', `/api/admin/credentials/${encodeURIComponent(name)}${app ? `?app=${encodeURIComponent(app)}` : ''}`);
+          setStatus(app ? `${app} no longer has ${name}.` : `${name} revoked.`);
+        } catch (err) {
+          if (err.message !== 'cancelled') setStatus(`ERROR — ${err.message}`, 'error');
+        }
+        await loadSecrets();
+      });
+
       // ── asking the shell ─────────────────────────────────────────────
       const ERRORS = {
         cancelled: '',
@@ -356,7 +451,7 @@ const MAX = 128;
         if (window.auraOs) return fn();
         setTimeout(() => whenReady(fn), 10);
       }
-      whenReady(() => { void loadAccount(); void loadProfile(); void loadPolicy(); });
+      whenReady(() => { void loadAccount(); void loadProfile(); void loadSecrets(); void loadPolicy(); });
     })();
   </script>
   <script>

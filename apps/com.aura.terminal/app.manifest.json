@@ -12,7 +12,8 @@
     "storage.write",
     "network.local",
     "apps.mount",
-    "system.overlay"
+    "system.overlay",
+    "credentials.request"
   ],
   "tools": [
     "*",

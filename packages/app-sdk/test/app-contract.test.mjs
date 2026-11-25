@@ -170,6 +170,35 @@ test('context.get: server only, declared keys through the token, null when not s
   await assert.rejects(ctx.get('OPENAI_API_KEY'), (e) => e instanceof OsError && e.code === 'server-only');
 });
 
+test('credentials (D56): request gets a handle after the owner\'s dialog; get reads on the server after the grant', async () => {
+  server();
+  const H = 'cred_AAAAAAAAAAAAAAAAAAAAAA';
+  const ID = 'apr_BBBBBBBBBBBBBBBBBBBBBB';
+  let granted = false;
+  serve((url, init) => {
+    if (url.endsWith('/api/credentials/requests')) return [201, { id: ID, action: 'credential.store', level: 'session', state: 'pending', expiresAt: Date.now() + 60_000 }];
+    if (url.endsWith(`/api/approvals/${ID}`)) return [200, { id: ID, state: 'approved', expiresAt: Date.now() + 60_000 }];
+    if (url.endsWith(`/api/credentials/requests/${ID}`)) return [200, { handle: H, name: 'GITHUB_TOKEN' }];
+    if (url.endsWith(`/api/credentials/${H}`)) {
+      if (init.headers?.['X-Aura-Approval'] === ID) granted = true;
+      return granted ? [200, { name: 'GITHUB_TOKEN', value: 'ghp_x' }] : [202, { needsApproval: true, approvalId: ID, level: 'fresh' }];
+    }
+    return [404, { error: 'not-found' }];
+  });
+  const c = new OsClient().credentials;
+  const r = await c.request({ name: 'GITHUB_TOKEN', label: 'GitHub', purpose: 'push' }, { pollMs: 250 });
+  assert.deepEqual(r, { ok: true, handle: H, name: 'GITHUB_TOKEN' });
+  assert.deepEqual(JSON.parse(calls[0].body), { name: 'GITHUB_TOKEN', scope: 'app', label: 'GitHub', purpose: 'push' });
+  assert.equal(calls[0].headers.Authorization, 'Bearer aura1.tok');
+  assert.ok(!calls.some((x) => /value/.test(x.body ?? '')), 'no value is ever sent by the requester');
+  assert.equal(await c.get(H, { pollMs: 250 }), 'ghp_x');
+  assert.equal(await c.get(H), 'ghp_x', 'the grant holds');
+  await assert.rejects(c.request({ name: 'bad' }), (e) => e instanceof OsError && e.code === 'invalid-name');
+  await assert.rejects(c.get('nope'), (e) => e instanceof OsError && e.code === 'invalid-handle');
+  globalThis.window = { location: { origin: 'https://x' } };
+  await assert.rejects(c.get(H), (e) => e instanceof OsError && e.code === 'server-only');
+});
+
 test('permissions.check: one call, absent answers are false, errors are OsError', async () => {
   server();
   serve(() => [200, { permissions: { a: true, b: false } }]);

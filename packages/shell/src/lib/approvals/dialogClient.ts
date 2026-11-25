@@ -86,6 +86,10 @@ export function decisionErrorText(error: string | undefined, approvalId: string)
     case 'locked': return 'Unlock the screen first.';
     case 'login-required': return 'Your login session has ended. Sign in again.';
     case 'forbidden-origin': return 'This page may not decide approvals.';
+    case 'secret-required': return 'Enter the secret to approve this.';
+    case 'secret-too-long': return 'That secret is too long (4 KiB at most).';
+    case 'other-user': return 'This request acts for another user.';
+    case 'store-failed': return 'AuraOS could not keep the secret. Try again.';
     default: return 'That did not work. Try again.';
   }
 }

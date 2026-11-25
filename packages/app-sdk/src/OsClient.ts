@@ -50,6 +50,7 @@ import { UserApi } from './user.js';
 import { StorageApi } from './storage.js';
 import { ContextApi } from './aura-context.js';
 import { ApprovalsApi } from './approvals.js';
+import { CredentialsApi } from './credentials.js';
 import { PermissionsApi } from './permissions.js';
 import { ThemeApi } from './theme.js';
 import { DataApi } from './data.js';
@@ -127,6 +128,11 @@ export class OsClient {
   readonly context: ContextApi;
   /** Ask the owner to approve an action; the answer carries a single-use grant (5.10). See ./approvals.ts. */
   readonly approvals: ApprovalsApi;
+  /**
+   * Ask the owner for a secret in AuraOS's dialog and get a handle; read the
+   * value on the server with the owner's separate grant (D56). See ./credentials.ts.
+   */
+  readonly credentials: CredentialsApi;
   /** What this app may do now, to hide what it may not. See ./permissions.ts. */
   readonly permissions: PermissionsApi;
   /** The OS theme: selection, inventory, palette, changes. See ./theme.ts. */
@@ -152,6 +158,7 @@ export class OsClient {
     this.storage = new StorageApi();
     this.context = new ContextApi();
     this.approvals = new ApprovalsApi();
+    this.credentials = new CredentialsApi();
     this.permissions = new PermissionsApi();
     const base = () => this.base;
     this.theme = new ThemeApi(base);

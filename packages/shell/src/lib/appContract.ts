@@ -11,7 +11,8 @@
  *                                      its dataDir
  *
  * Phase 3 backs `context.get` with today's one global Context, limited to the
- * keys the app declares in `context[]`. Phase 5 changes only what sits behind
+ * keys the app declares in `context[]`, plus (D56) the credentials of the
+ * caller's user vault its app was granted `credential.read:<KEY>` for. Phase 5 changes only what sits behind
  * it (Context granted per app and user). Nothing here changes enforcement
  * beyond Phase 3a: an undeclared key is a new API's refusal, every other
  * undeclared use is reported only.
@@ -39,6 +40,11 @@ export interface ContextReadDeps {
   declared(appId: string): readonly string[] | undefined;
   read(key: string): Promise<string | null>;
   signal(signal: ContractSignal, appId: string): void;
+  /**
+   * D56: a credential in the vault of the user the instance acts for, when
+   * its app holds the owner's `credential.read:<KEY>` grant; else null.
+   */
+  vault?(instance: core.InstancePrincipal, key: string): Promise<string | null>;
 }
 
 /**
@@ -54,6 +60,12 @@ export async function readContext(request: Request, key: string | undefined, dep
   if (p.kind !== 'instance' || r.via !== 'instance-token') {
     return reply({ error: 'server-only', message: 'Context values go only to an app\'s own server, with its instance token (osClient.context.get).' },
       p.kind === 'anonymous' ? 401 : 403);
+  }
+  // A granted vault credential (D56): the owner's grant to this app stands in for the declaration.
+  const granted = deps.vault ? await deps.vault(p, key) : null;
+  if (granted !== null) {
+    deps.signal('context-get', p.appId);
+    return reply({ key, value: granted });
   }
   const declared = deps.declared(p.appId);
   if (!declared?.includes(key)) {
@@ -74,6 +86,10 @@ export function liveContextReadDeps(store: Pick<ContextStore, 'get'>, signal: Co
     },
     read: (key) => store.get(key),
     signal,
+    vault: async (instance, key) => {
+      const { contextVaultRead, liveCredentialDeps } = await import('./credentials.ts');
+      return contextVaultRead(liveCredentialDeps(), instance, key);
+    },
   };
 }
 

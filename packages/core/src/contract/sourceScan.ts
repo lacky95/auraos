@@ -55,6 +55,7 @@ const isComment = (l: string): boolean => /^\s*(\/\/|\*|\/\*|<!--|#(?!!))/.test(
 /** SDK calls and the permission each needs (D48 contract checklist). */
 const PERMISSION_USES: ReadonlyArray<{ re: RegExp; permission: string; what: string }> = [
   { re: /\buser\.confirm\s*\(/, permission: 'user.confirm', what: 'osClient.user.confirm' },
+  { re: /\bcredentials\.request\s*\(/, permission: 'credentials.request', what: 'osClient.credentials.request' },
   { re: /\bosClient\.storage\b|\bstorage\.shared\.(get|set|delete)\s*\(/, permission: 'storage.read', what: 'osClient.storage' },
   { re: /\bosSidecars\s*\(/, permission: 'sidecars.spawn', what: 'osSidecars()' },
   { re: /\bsendNotification\s*\(|\bnotifications\.create\s*\(/, permission: 'system.notifications', what: 'notifications' },

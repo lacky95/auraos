@@ -10,6 +10,11 @@
  *   POST   /api/approvals/<id>/consume    the requester uses up a `user.confirm` approval
  *   DELETE /api/approvals/blocked/<app>   the owner (or operator) lifts a block
  *
+ * A `credential.store` (D56) is created by `/api/credentials/requests`; its
+ * approve request also carries the secret the owner typed into the dialog,
+ * which goes straight to the owner's vault (`storeCredential`). The host
+ * operator may deny one, never approve it: it cannot type the secret.
+ *
  * Install and update approvals are created by `/api/nexus/install|update`
  * itself, from the binding and PermissionDiff it computed: no request body
  * can describe an install.
@@ -21,11 +26,11 @@
  * login rate limit, over HTTPS; over HTTP it is the host operator's (D18).
  */
 import * as core from '@aura/core';
-import type { AccessPrincipal, ApprovalAction } from '@aura/core';
+import type { AccessPrincipal, ApprovalAction, ApprovalRecord } from '@aura/core';
 import type { CallerPrincipal } from '../access/identify.ts';
 import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import {
-  confirmDisplay, confirmPayload, contextDisplay, contextWrite, requesterReason,
+  confirmDisplay, confirmPayload, contextDisplay, contextWrite, credentialAsk, requesterReason, type CredentialAsk,
 } from './display.ts';
 import {
   approvalsChanged, approvalsVersion, json, ownerView, refusal, requestApproval, requesterSummary,
@@ -37,6 +42,8 @@ export const MAX_BODY_BYTES = 8 * 1024;
 export const LONG_POLL_MS = 25_000;
 /** The approve request names its password field so; nothing else carries one. */
 const PASSWORD_FIELD = 'password';
+/** The approve request of a `credential.store` carries the secret the owner typed in this field (D56). */
+const SECRET_FIELD = 'secret';
 
 export interface OwnerSession { userId: string; sessionId: string; username: string }
 
@@ -62,6 +69,12 @@ export interface ApprovalRouteDeps extends ApprovalServiceDeps {
   verifyPassword(username: string, password: string, rateLimitKey: string | undefined): Promise<'ok' | 'invalid' | 'rate-limited'>;
   /** The login rate-limit key of this client (authSurface `clientRateKey`). */
   rateKey(ctx: RouteCtx): string | undefined;
+  /**
+   * D56: keep the secret the owner typed into the dialog for an approved
+   * `credential.store`, in `userId`'s vault (lib/credentials.ts). Absent: no
+   * vault here, and such an approval is refused.
+   */
+  storeCredential?(userId: string, ask: CredentialAsk, value: string, record: ApprovalRecord): Promise<void>;
 }
 
 const CLIENT_SESSION_HEADER = 'x-aura-client-session';
@@ -197,6 +210,20 @@ export async function decideApproval(
   if (!record) return refusal('not-found');
   const { owner } = shell;
 
+  // D56: the secret is typed only here, in the shell's dialog, and goes straight to the owner's vault.
+  let credential: { ask: CredentialAsk; value: string } | null = null;
+  if (decision === 'approve' && record.action === 'credential.store') {
+    const ask = credentialAsk(record.payload);
+    if (!ask || core.payloadHash(ask) !== record.payloadHash) return refusal('mismatch');
+    const requesterUser = record.requester.kind === 'apiKey' ? undefined : record.requester.userId;
+    if (requesterUser && requesterUser !== owner.userId) return json({ error: 'other-user', message: 'This request acts for another user.' }, 403);
+    if (!deps.storeCredential) return json({ error: 'vault-unavailable' }, 503);
+    const value = body[SECRET_FIELD];
+    if (typeof value !== 'string' || value.length === 0) return json({ error: 'secret-required' }, 400);
+    if (Buffer.byteLength(value, 'utf8') > core.MAX_CREDENTIAL_BYTES) return json({ error: 'secret-too-long' }, 413);
+    credential = { ask, value };
+  }
+
   let fresh = false;
   if (decision === 'approve' && record.level === 'fresh') {
     // D18: the password travels only over HTTPS; on HTTP the host operator approves.
@@ -218,6 +245,16 @@ export async function decideApproval(
   if (!decider) return refusal('not-a-decider');
   const result = decision === 'approve' ? await deps.store.approve(id, decider) : await deps.store.deny(id, decider);
   if (!result.ok) return refusal(result.reason);
+  if (credential) {
+    try {
+      await deps.storeCredential!(owner.userId, credential.ask, credential.value, result.record);
+    } catch {
+      approvalsChanged();
+      return json({ error: 'store-failed', message: 'AuraOS could not keep the secret. Ask again.' }, 500);
+    } finally {
+      credential.value = '';
+    }
+  }
 
   const appId = core.requesterAppId(record.requester);
   const block = decision === 'deny' && body['block'] === true && appId !== null;
@@ -262,6 +299,9 @@ async function operatorDecision(
   if (!ticket || ticket.subject !== subject) return json({ error: 'operator-code-invalid' }, 403);
   const record = await deps.store.get(id);
   if (!record) return refusal('not-found');
+  if (decision === 'approve' && record.action === 'credential.store') {
+    return json({ error: 'dialog-required', message: 'A secret is typed only into the AuraOS desktop\'s own dialog. Approve it there, or deny it here.' }, 409);
+  }
   const result = decision === 'approve' ? await deps.store.approve(id, { kind: 'operator' }) : await deps.store.deny(id, { kind: 'operator' });
   if (!result.ok) return refusal(result.reason);
   approvalsChanged();

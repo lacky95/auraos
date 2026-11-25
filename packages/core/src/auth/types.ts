@@ -138,7 +138,9 @@ export type ReservedGrantSubject =
 export type GrantScope =
   | { kind: 'os' }
   /** One Terminal session (`<instanceId>#<label>`), for `terminal.embed` only (D25). */
-  | { kind: 'terminal-session'; id: string };
+  | { kind: 'terminal-session'; id: string }
+  /** One user (D56): a `credential.read:<NAME>` grant reads that user's vault entry only. */
+  | { kind: 'user'; id: string };
 
 /** Reserved scopes for federation (D47), types only, like `ReservedGrantSubject`. */
 export type ReservedGrantScope = { kind: 'system'; systemId: string };

@@ -49,9 +49,11 @@ export const KV_NAMESPACE_PATTERN = /^(?:os|app\/[a-z][a-z0-9]*(?:\.[a-z][a-z0-9
  * shapes. IMPORTANT: the public `/api/kv/...` proxy additionally rejects any
  * namespace beginning with `context` — these are only reachable via the
  * dedicated `/api/os/context` API and the server-internal `ContextStore`.
+ * `context:user:<userId>` is a user's personal vault (D56, core
+ * `CredentialVault`): sealed and injected nowhere.
  */
 export const KV_CONTEXT_NAMESPACE_PATTERN =
-  /^context:(?:system|volumes|app:[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+)$/;
+  /^context:(?:system|volumes|app:[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+|user:[A-Za-z0-9][A-Za-z0-9._-]{0,63})$/;
 
 /**
  * Per-user namespaces (D46), server-side only: the public `/api/kv` route

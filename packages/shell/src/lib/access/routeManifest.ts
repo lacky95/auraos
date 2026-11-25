@@ -86,6 +86,7 @@ const groups: RouteAccessManifest['groups'] = {
   activities:    rule(INSTANCE, 'activity'),
   admin:         rule(OWNER, 'system'),
   approvals:     rule(OWNER, 'session'),
+  credentials:   rule(INSTANCE, 'system'),
   apps:          rule(OWNER, 'app'),
   auth:          rule(OWNER, 'session'),
   data:          rule(['app-permission'], 'data-provider'),
@@ -314,6 +315,23 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/approvals/[id]': { methods: { GET: rule(INSTANCE, 'system') } },
   '/api/approvals/[id]/[decision]': { methods: { POST: rule(INSTANCE, 'session') } },
   '/api/approvals/blocked/[appId]': { methods: { DELETE: rule(OWNER, 'session') } },
+
+  // Credentials (D56, lib/credentials.ts). Asking needs the declared
+  // permission; collecting is the requester's own approval; the value goes
+  // only to the consuming app's server by its token, and only with the
+  // owner's `credential.read:<NAME>` grant, which the handler checks.
+  '/api/credentials/requests': {
+    methods: { POST: rule(APP_PERMISSION, 'app', { permissions: ['credentials.request'] }) },
+  },
+  '/api/credentials/requests/[id]': { methods: { POST: rule(INSTANCE, 'system') } },
+  '/api/credentials/[handle]': {
+    methods: {
+      GET: rule(['own-instance'], 'system', { credentials: ['instance-token'], ...why(
+        'The consuming app\'s own server reads a credential it holds a handle to, with its instance token and the owner\'s credential.read:<NAME> grant for its user (lib/credentials.ts). Never a page, never another user\'s handle.') }),
+    },
+  },
+  '/api/admin/credentials': { methods: { GET: ownerManages('The owner\'s personal vault (D56): names, consumers, last use; never a value.') } },
+  '/api/admin/credentials/[name]': { methods: { DELETE: ownerManages('Revoking a secret or one app\'s access to it (D56), through the owner\'s approval.') } },
 
   // Instances: the URL names the target, so the check is on that instance.
   // `targetPermissions` here were the routes' own hasPermission checks: every mode.

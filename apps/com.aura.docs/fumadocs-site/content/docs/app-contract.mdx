@@ -121,10 +121,27 @@ const key = await osClient.context.get('OPENAI_API_KEY');   // null: the owner h
   Phase 5, but it is not the contract: `aura dev validate` warns and the
   contract report lists the app.
 
+**A secret of the user's own** (a GitHub token, an API key they hold): don't
+build a field for it. Ask with `osClient.credentials.request` (needs
+`credentials.request`); the owner types it into AuraOS's own dialog and it is
+kept in their personal vault. You get a handle, not the value:
+
+```ts
+const r = await osClient.credentials.request({ name: 'GITHUB_TOKEN', label: 'GitHub token', purpose: 'Push your notes' });
+if (r.ok) await saveSetting('github', r.handle);
+// later, on your server: the first read asks the owner once more, with their password
+const token = await osClient.credentials.get(handle);
+```
+
+Once the owner allowed the read, `osClient.context.get('GITHUB_TOKEN')`
+returns it too. The owner sees and revokes it in Settings → Users &
+Identities → Secrets. From the Terminal: `aura secret ask NAME --for <app>`.
+
 **Checklist**
 
 - [ ] Every Context key you need is in `context[]`.
 - [ ] Read through `osClient.context.get`, not `/run/context` or `process.env`.
+- [ ] No input field of your own for a user's secret: `credentials.request`.
 
 ## 5. The manifest declares everything you use
 

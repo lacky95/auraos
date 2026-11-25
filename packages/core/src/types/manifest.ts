@@ -70,6 +70,13 @@ export const BUILTIN_PERMISSIONS = [
    * declaring it is enough.
    */
   'user.confirm',
+  /**
+   * Ask the owner for a credential in the shell's own dialog
+   * (`osClient.credentials.request`, D56). The app gets back a handle, never
+   * the value; reading the value is a separate grant the owner gives with
+   * a fresh approval. ENFORCED: declaring it is enough.
+   */
+  'credentials.request',
   'system.clipboard',
   'system.overlay',
   'system.theme.broadcast',

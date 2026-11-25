@@ -114,6 +114,8 @@ export interface ActionRequest {
   payload: unknown;
   level: ApprovalLevel;
   display: (requestedBy: string) => ApprovalDisplay;
+  /** Keep the payload on the record, for a decision that acts on it (credential.store). Never a secret. */
+  keepPayload?: boolean;
 }
 
 export type RequestOutcome =
@@ -130,6 +132,7 @@ export async function requestApproval(
   const result = await deps.store.create({
     requester, action: req.action, payloadHash: core.payloadHash(req.payload),
     display: req.display(requestedBy), level: req.level,
+    ...(req.keepPayload ? { payload: req.payload } : {}),
   });
   if (result.ok) {
     approvalsChanged();
