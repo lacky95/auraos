@@ -17,10 +17,15 @@
  *   • `aura dev clone` — copies a real app dir host-side (shell's
  *                        /api/admin/clone-app, which the CLI cannot do itself
  *                        from inside a sliced container sandbox)
+ *   • a patch activation of a system app (Track P), which installs the
+ *                        patched tree as a user-scope overlay
+ *                        (`portAppDirForScope`, NexusManager)
  * Divergence between them produces an app that looks fine on disk and then
  * dies at first launch when `@aura/*` can't resolve — far from the code that
  * caused it. Hence one implementation here, next to ScopeRegistry.
  */
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
 import type { ScopeId } from './types.js';
 
 /**
@@ -103,4 +108,59 @@ export function portPackageJsonForScope(
     pkg['auraDependencies'] = auraDeps;
   }
   return { pkg, changed };
+}
+
+const DEP_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'] as const;
+
+/**
+ * The dependency specs nothing installs outside the monorepo: `workspace:`,
+ * `catalog:` and `link:` (pnpm), and a `file:`/`portal:` path that leaves the
+ * app dir. Left after the port, the app would die at its first install.
+ */
+export function unportableDependencies(dir: string, pkg: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const field of DEP_FIELDS) {
+    for (const [name, spec] of Object.entries((pkg[field] as Record<string, unknown> | undefined) ?? {})) {
+      const s = String(spec);
+      const path = /^(?:file|portal):(.*)$/.exec(s)?.[1];
+      const outside = path !== undefined && relative(resolve(dir), resolve(dir, path)).startsWith('..');
+      if (/^(?:workspace|catalog|link):/.test(s) || outside) out.push(`${field}.${name}: ${s}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * Make an app dir that came from the system scope runnable in `scope`, in
+ * place: the manifest's tools gain the runtime tools, `@aura/*`
+ * `workspace:` deps move to `auraDependencies`, and `.npmrc` is added — the
+ * same port `aura dev new` and `aura dev clone` apply. Nothing else changes
+ * (id, originId and the rest of the manifest stay). `unportable` lists the
+ * dependencies the port cannot fix; the caller refuses such a tree.
+ */
+export function portAppDirForScope(dir: string, scope: ScopeId, sdkVersion: string): { changed: boolean; unportable: string[] } {
+  if (scope === 'system') return { changed: false, unportable: [] };
+  let changed = false;
+  const manifestPath = join(dir, 'app.manifest.json');
+  const m = JSON.parse(readFileSync(manifestPath, 'utf-8')) as Record<string, unknown>;
+  const tools = Array.isArray(m['tools']) ? m['tools'] as string[] : [];
+  const ported = portToolsForScope(tools, scope);
+  if (ported.length !== tools.length) {
+    m['tools'] = ported;
+    writeFileSync(manifestPath, JSON.stringify(m, null, 2) + '\n');
+    changed = true;
+  }
+  const pkgPath = join(dir, 'package.json');
+  let unportable: string[] = [];
+  if (existsSync(pkgPath)) {
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as Record<string, unknown>;
+    if (portPackageJsonForScope(pkg, scope, sdkVersion).changed) {
+      writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+      changed = true;
+    }
+    unportable = unportableDependencies(dir, pkg);
+  }
+  const npmrcPath = join(dir, '.npmrc');
+  if (needsNpmrc(scope) && !existsSync(npmrcPath)) { writeFileSync(npmrcPath, AURA_NPMRC); changed = true; }
+  return { changed, unportable };
 }

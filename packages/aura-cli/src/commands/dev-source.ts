@@ -49,7 +49,10 @@ export interface AppSourceView {
 
 export interface WorkspaceBind { ok: true; appId: string; installationId: string; n: number; path: string; created: boolean }
 
-export interface WorkspaceClean { ok: true; appId: string; installationId: string; kept: number[]; deleted: number[]; detached: number }
+export interface WorkspaceClean {
+  ok: true; appId: string; installationId: string;
+  kept: number[]; candidates: number[]; inUse: number[]; deleted: number[]; detached: number;
+}
 
 /** The calling instance: routes bind into it, so only itself (or the owner) may ask. */
 export function callerInstance(): string {
@@ -104,11 +107,16 @@ export async function detachWorkspace(app: string): Promise<void> {
   if (r.error) routeFail(`workspace for ${app}`, r);
 }
 
-/** Delete old workspaces of `app` (this user, this installation): all but the bound one and the newest `keep`. */
-export async function cleanWorkspaces(app: string, keep?: number): Promise<WorkspaceClean> {
+/**
+ * R2c: old workspaces of `app` (this user, this installation). `dryRun`: only
+ * the candidates and which are in use elsewhere; `delete`: just these;
+ * `force`: in-use ones too.
+ */
+export async function cleanWorkspaces(app: string, opts: { keep?: number; dryRun?: boolean; delete?: number[]; force?: boolean } = {}): Promise<WorkspaceClean> {
   const inst = encodeURIComponent(callerInstance());
   const r = await apiOrBody<WorkspaceClean & RouteError>(() => api.post(`/api/instances/${inst}/app-workspace/clean`, {
-    app, ...(keep !== undefined ? { keep } : {}),
+    app, ...(opts.keep !== undefined ? { keep: opts.keep } : {}), ...(opts.dryRun ? { dryRun: true } : {}),
+    ...(opts.delete ? { delete: opts.delete } : {}), ...(opts.force ? { force: true } : {}),
   }));
   if (r.error) routeFail(`clean workspaces of ${app}`, r);
   return r;

@@ -7,10 +7,13 @@ import { cleanWorkspaces, liveAppSourceDeps } from '../../../../../lib/appSource
 /**
  * Delete old patch workspaces (Track P, `aura dev patch clean`).
  *
- *   POST { app, keep? = 3 } → deletes the calling user's workspaces of the
- *        app's installation, except the one bound in THIS instance and the
- *        newest `keep`; one bound in another instance is detached first.
- *        200 { ok, appId, installationId, kept: n[], deleted: n[], detached }
+ *   POST { app, keep? = 3, dryRun?, delete?: n[], force? }
+ *        Candidates: the calling user's workspaces of the app's installation,
+ *        except the one bound in THIS instance and the newest `keep`. One bound
+ *        in another instance is `inUse`: kept unless `force` (detached first).
+ *        `dryRun` only reports; `delete` limits it to those numbers (`aura dev`
+ *        leaves out the ones with unsaved work).
+ *        200 { ok, appId, installationId, kept, candidates, inUse, deleted, detached }
  */
 const deps = () => liveAppSourceDeps((r) => authenticate(r), liveApprovalDeps(), liveOwnerActionDeps());
 

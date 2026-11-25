@@ -329,24 +329,36 @@ test('activate installs the calling user\'s workspace; only the owner names anot
   assert.notEqual(owner.status, 404);
 });
 
-test('patch clean: deletes this user\'s old workspaces, keeps the bound one and the newest N, detaches before deleting', async () => {
+test('patch clean: deletes this user\'s old workspaces; never the bound one, the newest N, or one in use (unless force)', async () => {
   const wsDir = (user: string, n: number) => join(root, 'root', 'aura', 'workspaces', user, 'inst-global-io-shop-app', String(n));
   for (let n = 1; n <= 6; n++) mkdirSync(wsDir('default', n), { recursive: true });
   mkdirSync(wsDir('bob', 1), { recursive: true });
   // Bound here: 2. Bound in another Terminal of this user: 3.
   await bindWorkspace(req('POST', { app: 'io.shop.app', n: 2 }), 'com.aura.terminal', deps());
   await bindWorkspace(req('POST', { app: 'io.shop.app', n: 3 }), 'com.aura.terminal-2', deps());
+  const clean = async (body: Record<string, unknown>) => read(await cleanWorkspaces(req('POST', { app: 'shop', ...body }), 'com.aura.terminal', deps()));
+  const present = () => [1, 2, 3, 4, 5, 6].filter((n) => existsSync(wsDir('default', n)));
 
-  const r = await read(await cleanWorkspaces(req('POST', { app: 'shop', keep: 2 }), 'com.aura.terminal', deps()));
+  const dry = await clean({ keep: 2, dryRun: true });
+  assert.deepEqual([dry.body.kept, dry.body.candidates, dry.body.inUse, dry.body.deleted], [[2, 5, 6], [1, 3, 4], [3], []]);
+  assert.deepEqual(present(), [1, 2, 3, 4, 5, 6], 'a dry run deletes nothing');
+
+  // `aura dev` found unsaved work in 4: it names only 1 (and 3, which is in use).
+  const r = await clean({ keep: 2, delete: [1, 3] });
   assert.equal(r.status, 200, JSON.stringify(r.body));
-  assert.deepEqual([r.body.kept, r.body.deleted, r.body.detached], [[2, 5, 6], [1, 3, 4], 1]);
-  assert.deepEqual([1, 2, 3, 4, 5, 6].map((n) => existsSync(wsDir('default', n))), [false, true, false, false, true, true]);
+  assert.deepEqual([r.body.deleted, r.body.inUse, r.body.detached], [[1], [3], 0]);
+  assert.deepEqual(present(), [2, 3, 4, 5, 6]);
+  // Without a list: every candidate not in use.
+  assert.deepEqual((await clean({ keep: 2 })).body.deleted, [4]);
+  assert.ok(existsSync(wsDir('default', 3)), 'still in use in the other Terminal');
   assert.ok(existsSync(wsDir('bob', 1)), 'another user\'s workspaces are not touched');
-  assert.deepEqual(kernel.filter((m) => m.kind === 'work').map((m) => [m.instanceId, m.workspace]),
-    [['com.aura.terminal', 'aura/workspaces/default/inst-global-io-shop-app/2']], 'detached in the other Terminal, still bound here');
 
-  // Default keep 3; nothing more to delete. keep 0 keeps only the bound one.
-  assert.deepEqual((await read(await cleanWorkspaces(req('POST', { app: 'io.shop.app' }), 'com.aura.terminal', deps()))).body.deleted, []);
-  assert.deepEqual((await read(await cleanWorkspaces(req('POST', { app: 'io.shop.app', keep: 0 }), 'com.aura.terminal', deps()))).body.deleted, [5, 6]);
-  assert.equal((await read(await cleanWorkspaces(req('POST', { app: 'io.shop.app', keep: -1 }), 'com.aura.terminal', deps()))).status, 400);
+  // force: detached there first, then deleted.
+  const forced = await clean({ keep: 2, force: true });
+  assert.deepEqual([forced.body.deleted, forced.body.detached], [[3], 1]);
+  assert.deepEqual(kernel.filter((m) => m.kind === 'work').map((m) => [m.instanceId, m.workspace]),
+    [['com.aura.terminal', 'aura/workspaces/default/inst-global-io-shop-app/2']], 'still bound here');
+  assert.deepEqual((await clean({ keep: 0 })).body.deleted, [5, 6]);
+  assert.equal((await clean({ keep: -1 })).status, 400);
+  assert.equal((await clean({ delete: 'all' })).status, 400);
 });

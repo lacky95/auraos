@@ -6,15 +6,17 @@
 //   pnpm --filter @aura/core test
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { Installer } from '../dist/nexus/Installer.js';
 import { NexusManager } from '../dist/nexus/NexusManager.js';
 import { effectiveSourceMode, listWorkspaces, workspaceSubpath, withoutCredentials } from '../dist/nexus/AppSource.js';
 import { ContainerRunner, ownSourceReadOnly } from '../dist/app-manager/ContainerRunner.js';
-import { appFingerprint, writeBuildStamp } from '../dist/app-manager/appBuild.js';
+import { appFingerprint, serveState, writeBuildStamp } from '../dist/app-manager/appBuild.js';
+import { validateStagedDir } from '../dist/nexus/Validator.js';
 
 const O1 = '00000000-0000-4000-8000-000000000001';
 const put = (p, text) => { mkdirSync(join(p, '..'), { recursive: true }); writeFileSync(p, text); };
@@ -158,4 +160,77 @@ test('own source read-only: a closed agent workspace (every tool) that serves it
     ['--mount', 'type=volume,source=vol,target=/workspace/apps/io.x,volume-subpath=scopes/users/default/apps/io.x,readonly']);
   assert.deepEqual(mount.call(self, '/data/scopes/users/default/apps/io.x', 'io.x', 'vol'),
     ['--mount', 'type=volume,source=vol,target=/workspace/apps/io.x,volume-subpath=scopes/users/default/apps/io.x']);
+});
+
+// ── a patched system app as a user-scope overlay: the monorepo port ────────
+
+const REPO_APPS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'apps');
+const APP_FILES = ['app.manifest.json', 'package.json', 'astro.config.mjs', 'server.mjs'];
+
+/** `npm` and `aura` stand-ins on PATH: npm refuses what real npm refuses (a `workspace:` spec). */
+function fakeToolchain(root) {
+  const bin = join(root, 'bin');
+  mkdirSync(bin, { recursive: true });
+  const log = join(root, 'tools.log');
+  const script = (name, body) => { writeFileSync(join(bin, name), `#!/bin/sh\necho "${name} $*" >> ${log}\n${body}\n`); chmodSync(join(bin, name), 0o755); };
+  script('npm', 'if grep -q \'"workspace:\' package.json; then echo "npm error code EUNSUPPORTEDPROTOCOL" >&2; exit 1; fi\nmkdir -p node_modules/.bin && : > node_modules/.bin/astro && chmod +x node_modules/.bin/astro');
+  script('aura', 'mkdir -p node_modules/@aura/app-sdk');
+  return { bin, log };
+}
+
+for (const id of ['com.aura.terminal', 'com.aura.settings']) {
+  test(`overlay of ${id}: the monorepo package.json is ported for user scope; it provisions and serves like the system copy`, async () => {
+    const w = world();
+    const copy = (dir) => { for (const f of APP_FILES) if (existsSync(join(REPO_APPS, id, f))) put(join(dir, f), readFileSync(join(REPO_APPS, id, f), 'utf-8')); return dir; };
+    const sysDir = copy(join(w.sys.appsDir, id));
+    const tree = copy(join(w.root, 'ws', id));
+    put(join(tree, 'src', 'pages', 'index.astro'), 'patched status line\n');
+    const tools = fakeToolchain(w.root);
+    const path = process.env.PATH;
+    process.env.PATH = `${tools.bin}:${path}`;
+    let done;
+    try { done = await w.run({ ref: tree, scope: 'user', action: 'app.patch.activate' }); }
+    finally { process.env.PATH = path; }
+    assert.ok(done.record, 'installed');
+
+    const appDir = join(w.user.appsDir, id);
+    const pkg = json(join(appDir, 'package.json'));
+    const specs = JSON.stringify([pkg.dependencies, pkg.devDependencies]);
+    assert.doesNotMatch(specs, /workspace:/, 'no workspace: spec is left');
+    assert.ok(pkg.auraDependencies['@aura/app-sdk'], '@aura/* moved to auraDependencies');
+    if (id === 'com.aura.settings') assert.ok(pkg.auraDependencies['@aura/ui']);
+    assert.ok(existsSync(join(appDir, '.npmrc')));
+    const manifest = validateStagedDir(appDir);
+    for (const t of ['bash', 'node', 'aura', 'oras']) assert.ok(manifest.tools.includes(t), `tool ${t}`);
+    assert.equal(manifest.id, id);
+    assert.equal(manifest.originId, json(join(sysDir, 'app.manifest.json')).originId, 'the identity is the system app\'s');
+    assert.equal(done.bindings.at(-1).tools.includes('oras'), true, 'the owner approves the ported tree');
+    // Provisioning ran (the npm stand-in refuses `workspace:`), and the app is ready to start.
+    assert.match(readFileSync(tools.log, 'utf-8'), /^npm install/m);
+    assert.ok(existsSync(join(appDir, 'node_modules', '.bin', 'astro')));
+    assert.ok(existsSync(join(appDir, 'node_modules', '@aura')));
+    // Serve state: the same decision as for the system copy (no build yet → dev).
+    assert.deepEqual(serveState(appDir, manifest), serveState(sysDir, validateStagedDir(sysDir)));
+    // The system copy itself is untouched.
+    assert.match(readFileSync(join(sysDir, 'package.json'), 'utf-8'), /"workspace:\*"/);
+  });
+}
+
+test('an overlay whose dependencies only resolve inside the monorepo is refused, nothing installed', async () => {
+  const w = world();
+  const id = 'com.aura.settings';
+  const manifest = { id, name: 'Settings', version: '1.0.0' };
+  put(join(w.sys.appsDir, id, 'app.manifest.json'), JSON.stringify(manifest));
+  const tree = join(w.root, 'ws', id);
+  put(join(tree, 'app.manifest.json'), JSON.stringify(manifest));
+  put(join(tree, 'package.json'), JSON.stringify({ name: id, dependencies: { '@aura/app-sdk': 'workspace:*', 'shared-lib': 'workspace:*', theme: 'file:../../packages/theme' } }));
+  const it = w.mgr.install({ ref: tree, scope: 'user', action: 'app.patch.activate', approval: async () => true });
+  let error = null;
+  try { for (let c = await it.next(); !c.done; c = await it.next()) if (c.value.type === 'error') error = c.value.message; }
+  catch (err) { error = err.message; }
+  assert.match(String(error), /cannot activate com\.aura\.settings in user scope: these dependencies only resolve inside the AuraOS monorepo/);
+  assert.match(String(error), /dependencies\.shared-lib: workspace:\*/);
+  assert.match(String(error), /dependencies\.theme: file:\.\.\/\.\.\/packages\/theme/);
+  assert.doesNotMatch(String(error), /@aura\/app-sdk/, 'the @aura/* deps are ported, not refused');
+  assert.equal(existsSync(join(w.user.appsDir, id)), false);
 });

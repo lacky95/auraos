@@ -14,8 +14,9 @@
  *        when it does not come up
  *   aura dev update [app] [--ref]    the series on a new upstream; a patch that
  *        no longer applies is named, the owner notified, and nothing is installed
- *   aura dev patch clean [app] [--keep N]  delete old workspaces (keeps the
- *        bound one and the newest N)
+ *   aura dev patch clean [app] [--keep N] [--force]  delete old workspaces:
+ *        never the bound one or the newest N; one in use in another Terminal
+ *        or with unsaved work only with --force (which says what is lost)
  *
  * Activate and update build in one scratch workspace per user and
  * installation (its number in the patch repo's config), emptied each time.
@@ -148,6 +149,78 @@ export function saveWorkspace(wsRoot: string, message?: string): SavedPatches {
   });
   writeWorkspaceMarker(wsRoot, { ...marker!, patchesRev: r.commit });
   return { repo, commit: r.commit, changed: r.changed, files: patches.map((p) => p.file) };
+}
+
+// ─── clean ──────────────────────────────────────────────────────────────────
+
+/**
+ * What deleting this workspace would lose, compared with the patch repo: an
+ * `am` in progress, uncommitted changes, commits whose patches are not the
+ * saved ones it was made from or last saved as. Empty: nothing (an empty
+ * dir, the scratch build workspace, or saved work). A non-empty dir that is
+ * no patch workspace counts as unknown work.
+ */
+export function unsavedWork(wsRoot: string, repo: string): string[] {
+  if (isEmptyDir(wsRoot)) return [];
+  const marker = readWorkspaceMarker(wsRoot);
+  if (!marker) return ['files that are no patch workspace'];
+  if (marker.scratch) return [];
+  const lost: string[] = [];
+  if (existsSync(join(wsRoot, '.git', 'rebase-apply'))) lost.push('a patch being applied (git am)');
+  const status = gitOut(wsRoot, ['status', '--porcelain']);
+  if (status) {
+    // `XY path`; gitOut trims, so the first line may have lost X's space.
+    const files = status.split('\n').map((l) => l.replace(/^\s*\S{1,2}\s+/, ''));
+    lost.push(`uncommitted changes in ${files.slice(0, 5).join(', ')}${files.length > 5 ? ` and ${files.length - 5} more` : ''}`);
+  }
+  let mine: Array<{ content: string }>;
+  try { mine = exportPatches(wsRoot, marker.baseCommit); }
+  catch { return [...lost, 'commits that could not be read']; }
+  let saved: Array<{ content: string }> = [];
+  try {
+    const series = marker.patchesRev && existsSync(join(repo, '.git')) ? readSeries(repo, marker.patchesRev) : null;
+    saved = series ? readPatches(repo, series, marker.patchesRev!) : [];
+  } catch { saved = []; }
+  const same = mine.length === saved.length && mine.every((p, i) => p.content === saved[i]!.content);
+  if (!same) lost.push(`${mine.length} commit(s) whose patches are not saved in ${repo}`);
+  return lost;
+}
+
+export interface CleanResult {
+  deleted: number[]; kept: number[];
+  /** Candidates kept because they are in use elsewhere or hold unsaved work (deleted with --force). */
+  held: Array<{ n: number; why: string[] }>;
+  force: boolean;
+}
+
+/**
+ * `dev patch clean`: ask the system for the candidates, inspect each one not
+ * in use here (bound briefly into this Terminal), then delete the safe ones —
+ * or, with `force`, all of them, after `onLoss` was told what goes.
+ */
+export async function cleanApp(app: string, opts: { keep?: number; force?: boolean; onLoss?: (held: CleanResult['held']) => void } = {}): Promise<CleanResult> {
+  const v = await getAppSource(app);
+  const repo = patchRepoDir(v.installationId);
+  const dry = await cleanWorkspaces(v.appId, { keep: opts.keep, dryRun: true });
+  const held: CleanResult['held'] = dry.inUse.map((n) => ({ n, why: ['bound in another Terminal'] }));
+  const inspect = dry.candidates.filter((n) => !dry.inUse.includes(n));
+  try {
+    for (const n of inspect) {
+      const ws = await bindWorkspace(v.appId, { n });
+      const why = unsavedWork(ws.path, repo);
+      if (why.length) held.push({ n, why });
+    }
+  } finally {
+    if (inspect.length) await rebind(v);
+  }
+  held.sort((a, b) => a.n - b.n);
+  const force = opts.force === true;
+  if (force && held.length) opts.onLoss?.(held);
+  const heldNs = held.map((h) => h.n);
+  const r = await cleanWorkspaces(v.appId, {
+    keep: opts.keep, force, delete: force ? dry.candidates : dry.candidates.filter((n) => !heldNs.includes(n)),
+  });
+  return { deleted: r.deleted, kept: r.kept, held: force ? held.filter((h) => !r.deleted.includes(h.n)) : held, force };
 }
 
 // ─── activate / update ──────────────────────────────────────────────────────
@@ -453,14 +526,26 @@ export function registerDevPatch(dev: Command): void {
   patch
     .command('clean [app]')
     .option('--keep <n>', 'How many of the newest workspaces to keep, besides the bound one', '3')
-    .description('Delete old patch workspaces of the app (yours): all but the one bound here and the newest N.')
-    .action(async (app: string | undefined, o: { keep: string }) => {
+    .option('--force',    'Also delete workspaces in use in another Terminal or holding unsaved work (says what is lost first)')
+    .description('Delete your old patch workspaces of the app: never the one bound here or the newest N; in-use or unsaved ones only with --force.')
+    .action(async (app: string | undefined, o: { keep: string; force?: boolean }) => {
       const keep = Number(o.keep);
       if (!Number.isInteger(keep) || keep < 0) fail('--keep takes a whole number from 0');
-      const appId = appFromArgOrCwd(app);
-      const r = await cleanWorkspaces(appId, keep);
-      if (!r.deleted.length) info(`nothing to delete — kept ${r.kept.join(', ') || '(none)'}`);
-      else ok(`deleted workspace(s) ${r.deleted.join(', ')} of ${r.appId}; kept ${r.kept.join(', ') || '(none)'}${r.detached ? ` (${r.detached} detached first)` : ''}`);
+      const r = await cleanApp(appFromArgOrCwd(app), {
+        keep, force: o.force === true,
+        onLoss: (held) => {
+          warn('--force: this work is lost with them:');
+          for (const h of held) console.log(`  workspace ${h.n}: ${h.why.join('; ')}`);
+        },
+      });
+      if (r.deleted.length) ok(`deleted workspace(s) ${r.deleted.join(', ')}`);
+      else info('nothing deleted');
+      console.log(`  kept: ${r.kept.join(', ') || color.dim('(none)')}`);
+      if (r.held.length) {
+        console.log('  kept (in use / unsaved):');
+        for (const h of r.held) console.log(`    ${h.n}: ${h.why.join('; ')}`);
+        if (!r.force) info(`save the work (aura dev patch save), or pass ${color.cyan('--force')} to delete them anyway`);
+      }
     });
 
   patch

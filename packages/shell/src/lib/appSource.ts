@@ -6,7 +6,7 @@
  *
  *   GET|POST /api/instances/<inst>/app-source      status (+ the source view in the caller)
  *   POST|DELETE /api/instances/<inst>/app-workspace  bind / detach a writable workspace
- *   POST /api/instances/<inst>/app-workspace/clean  delete old workspaces (keep the bound one + newest N)
+ *   POST /api/instances/<inst>/app-workspace/clean  delete old workspaces (never the bound one, the newest N or one in use)
  *   POST /api/apps/<id>/source-mode                 open (owner approval) or close
  *   POST /api/apps/<id>/activate                    install a workspace or the rollback tree
  *
@@ -304,9 +304,12 @@ export async function detachWorkspace(request: Request, instanceId: string | und
 
 /**
  * `aura dev patch clean`: delete this user's old workspaces of the app's
- * installation. Kept: the one bound in the calling instance and the newest
- * `keep` (default 3) by number. A workspace bound in another instance is
- * detached there first; then its directory goes. Nothing else is touched.
+ * installation. Never candidates: the one bound in the calling instance and
+ * the newest `keep` (default 3) by number. A candidate bound in another
+ * instance is `inUse` and kept unless `force` (then detached there first).
+ * Whether a workspace holds unsaved work is `aura dev`'s to judge (it knows
+ * the patch repo): it asks with `dryRun`, inspects, then names the ones to
+ * go in `delete`. Without `delete`, every candidate not in use goes.
  */
 export async function cleanWorkspaces(request: Request, instanceId: string | undefined, deps: AppSourceDeps): Promise<Response> {
   const principal = await deps.authenticate(request);
@@ -321,6 +324,11 @@ export async function cleanWorkspaces(request: Request, instanceId: string | und
   if (!Number.isInteger(keep) || (keep as number) < 0 || (keep as number) > 9999) {
     return json({ error: 'invalid-keep', message: 'keep must be a whole number from 0' }, 400);
   }
+  const only = body['delete'];
+  if (only !== undefined && (!Array.isArray(only) || !only.every((n) => Number.isInteger(n)))) {
+    return json({ error: 'invalid-delete', message: 'delete must be a list of workspace numbers' }, 400);
+  }
+  const force = body['force'] === true;
   const { key } = await patchInstallation(deps, app);
   if (!key) return json({ error: 'no-installation', message: `${app.id} has no installation record` }, 409);
   const userId = actingUser(principal);
@@ -328,10 +336,15 @@ export async function cleanWorkspaces(request: Request, instanceId: string | und
   const bound = deps.mounts.list(inst).find((m) => m.id === `${app.id}:work`);
   const boundHere = bound?.workspace?.startsWith(`aura/workspaces/${userId}/${key}/`) ? workNumber(bound) : null;
   const kept = new Set<number>([...(boundHere ? [boundHere] : []), ...(keep ? all.slice(-(keep as number)) : [])]);
+  const candidates = all.filter((n) => !kept.has(n));
+  const inUse = candidates.filter((n) => deps.mounts.workspaceBinds(core.workspaceSubpath(userId, key, n)).length > 0);
+  const base = { appId: app.id, installationId: key, kept: all.filter((n) => kept.has(n)), candidates, inUse };
+  if (body['dryRun'] === true) return json({ ok: true, ...base, deleted: [], detached: 0 });
+
+  const targets = candidates.filter((n) => (only === undefined || (only as number[]).includes(n)) && (force || !inUse.includes(n)));
   const deleted: number[] = [];
   let detached = 0;
-  for (const n of all) {
-    if (kept.has(n)) continue;
+  for (const n of targets) {
     const subpath = core.workspaceSubpath(userId, key, n);
     try {
       for (const b of deps.mounts.workspaceBinds(subpath)) { await deps.mounts.remove(b.instanceId, b.mountId); detached++; }
@@ -341,7 +354,7 @@ export async function cleanWorkspaces(request: Request, instanceId: string | und
       return json({ error: 'clean-failed', message: `workspace ${n}: ${(err as Error).message}`, deleted, detached }, 409);
     }
   }
-  return json({ ok: true, appId: app.id, installationId: key, kept: all.filter((n) => kept.has(n)), deleted, detached });
+  return json({ ok: true, ...base, deleted, detached });
 }
 
 // ── R3: open and close ──────────────────────────────────────────────────────

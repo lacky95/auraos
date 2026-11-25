@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { Command } from 'commander';
 import { registerDev } from '../src/commands/dev.js';
 import { appFromArgOrCwd, bindWorkspace, WORKSPACE_MARKER } from '../src/commands/dev-source.js';
-import { activateRevision, notifyNeedsRepair, saveWorkspace, startWorkspace, updateSeries } from '../src/commands/dev-patch.js';
+import { activateRevision, cleanApp, notifyNeedsRepair, saveWorkspace, startWorkspace, updateSeries } from '../src/commands/dev-patch.js';
 
 const ENV = ['AURA_SHELL_URL', 'OS_API_BASE', 'AURA_OS_URL', 'AURA_INSTANCE_TOKEN', 'APP_INSTANCE_ID', 'AURA_INSTANCE_ID', 'AURA_ADMIN_SESSION', 'AURA_ADMIN_CREDENTIAL'];
 const INST = 'com.aura.terminal-1';
@@ -333,12 +333,56 @@ test('activate and update reuse one scratch build workspace; patch start never h
   assert.match(readFileSync(join(fresh.path, 'status.js'), 'utf-8'), /"busy"/);
 });
 
-test('patch clean: calls the clean route with --keep and the app', async () => {
+test('patch clean: keeps in-use and unsaved workspaces (listing why); --force deletes them after saying what is lost', async () => {
+  const w = world();
+  const posts: Array<Record<string, unknown>> = [];
+  await fakeShell((r) => {
+    if (r.url !== `/api/instances/${INST}/app-workspace/clean`) return w.routes(r);
+    posts.push(r.body);
+    // Bound here: 1. Workspace 5 is bound in another Terminal.
+    const base = { ok: true, appId: APP, installationId: w.installationId, kept: [1], candidates: [2, 3, 4, 5], inUse: [5], detached: 0 };
+    if (r.body['dryRun']) return [200, { ...base, deleted: [] }];
+    const del = (r.body['delete'] as number[]).filter((n) => r.body['force'] || n !== 5);
+    return [200, { ...base, deleted: del }];
+  });
+  await savedChange(w);                                              // 1: saved, bound
+  const edit = (dir: string, text: string) => writeFileSync(join(dir, 'status.js'), readFileSync(join(dir, 'status.js'), 'utf-8').replace('"busy"', text));
+  const two = await quiet(() => startWorkspace(APP, { new: true }));  // 2: uncommitted change
+  edit(two.path, '"two"');
+  const three = await quiet(() => startWorkspace(APP, { new: true })); // 3: committed, never saved
+  edit(three.path, '"three"');
+  git(three.path, 'commit', '-qam', 'three');
+  await quiet(() => startWorkspace(APP, { new: true }));              // 4: as saved
+  await quiet(() => startWorkspace(APP, { new: true }));              // 5: in use elsewhere
+  await bindWorkspace(APP, { n: 1 });
+
+  const out = await quiet(() => cleanApp(APP, { keep: 0 }));
+  assert.deepEqual(posts[0], { app: APP, keep: 0, dryRun: true });
+  assert.deepEqual(posts[1], { app: APP, keep: 0, delete: [4] }, 'only the saved workspace goes');
+  assert.deepEqual(out.deleted, [4]);
+  assert.deepEqual(out.held.map((h) => h.n), [2, 3, 5]);
+  assert.match(out.held[0]!.why.join(), /uncommitted changes in status\.js/);
+  assert.match(out.held[1]!.why.join(), /1 commit\(s\)|2 commit\(s\)/);
+  assert.match(out.held[1]!.why.join(), /not saved/);
+  assert.deepEqual(out.held[2]!.why, ['bound in another Terminal']);
+  assert.equal(w.bound(), 1, 'the workspace bound before is bound again');
+
+  posts.length = 0;
+  let told: number[] = [];
+  const forced = await quiet(() => cleanApp(APP, { keep: 0, force: true, onLoss: (held) => { told = held.map((h) => h.n); } }));
+  assert.deepEqual(told, [2, 3, 5], 'what is lost is said before anything goes');
+  assert.deepEqual(posts[1], { app: APP, keep: 0, delete: [2, 3, 4, 5], force: true });
+  assert.deepEqual([forced.deleted, forced.held], [[2, 3, 4, 5], []]);
+});
+
+test('patch clean (command): passes --keep and --force', async () => {
   const seen = await fakeShell((r) => (r.url === `/api/instances/${INST}/app-workspace/clean`
-    ? [200, { ok: true, appId: APP, installationId: 'x', kept: [4, 5], deleted: [1, 2, 3], detached: 0 }] : undefined));
+    ? [200, { ok: true, appId: APP, installationId: 'x', kept: [4], candidates: [], inUse: [], deleted: [], detached: 0 }]
+    : r.url.startsWith(`/api/instances/${INST}/app-source`) ? [200, { appId: APP, installationId: '00000000-1111-4222-8333-444444444444', workspace: null, workspaces: [4] }] : undefined));
   const program = new Command();
   program.exitOverride();
   registerDev(program);
-  await quiet(() => program.parseAsync(['node', 'aura', 'dev', 'patch', 'clean', APP, '--keep', '1']));
-  assert.deepEqual(seen.map((r) => [r.method, r.url, r.body]), [['POST', `/api/instances/${INST}/app-workspace/clean`, { app: APP, keep: 1 }]]);
+  await quiet(() => program.parseAsync(['node', 'aura', 'dev', 'patch', 'clean', APP, '--keep', '1', '--force']));
+  const cleans = seen.filter((r) => r.url.endsWith('/app-workspace/clean')).map((r) => r.body);
+  assert.deepEqual(cleans, [{ app: APP, keep: 1, dryRun: true }, { app: APP, keep: 1, delete: [], force: true }]);
 });

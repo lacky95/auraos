@@ -16,6 +16,7 @@ import { join, resolve as resolvePath } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import type { OsEventBus as OsEventBusSingleton } from '../ipc/OsEventBus.js';
 import type { ScopeDefinition, ScopeId } from '../scopes/types.js';
+import { portAppDirForScope } from '../scopes/portability.js';
 import { Resolver } from './Resolver.js';
 
 type OsEventBus = typeof OsEventBusSingleton;
@@ -319,6 +320,12 @@ export class NexusManager {
     return validateStagedDir(stagingDir);
   }
 
+  /** Whether the system scope ships an app with this id (a patched tree of it is an overlay). */
+  private isSystemAppId(appId: string): boolean {
+    const sys = this.scopeDefs.find((s) => s.id === 'system')?.appsDir;
+    return !!sys && existsSync(join(sys, appId, 'app.manifest.json'));
+  }
+
   /** The @aura/app-sdk version of this OS (system scope = <repo>/apps). */
   private sdkVersion(): string {
     const sys = this.scopeDefs.find((s) => s.id === 'system')?.appsDir;
@@ -510,6 +517,16 @@ export class NexusManager {
         }
         mark();
         yield { type: 'identity.resolved', action: decision.action, appId: manifest.id };
+      }
+      // A patched tree of a system app comes from the monorepo (`workspace:`
+      // deps and all): ported like `aura dev clone` before it is approved and
+      // installed, or refused when it can't run outside the monorepo.
+      if (opts.action === 'app.patch.activate' && this.isSystemAppId(manifest.id)) {
+        const port = portAppDirForScope(stagingDir, targetScope, this.sdkVersion());
+        if (port.unportable.length) {
+          throw new Error(`cannot activate ${manifest.id} in ${targetScope} scope: these dependencies only resolve inside the AuraOS monorepo — ${port.unportable.join(', ')}`);
+        }
+        if (port.changed) manifest = validateStagedDir(stagingDir);
       }
       keys.add(manifest.id); this.installing.add(manifest.id);
       // After the identity step, which may have given the app another local id.
