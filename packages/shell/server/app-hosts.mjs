@@ -69,6 +69,14 @@ const EXACT_ORIGIN_RE = /^https?:\/\/[a-z0-9.-]+(?::\d{1,5})?$/;
 const OWN_ORIGIN_ONLY_APPS = new Set(['com.aura.terminal']);
 
 /**
+ * Apps whose pages their own origin may not frame. Aura Browser frames any
+ * website with `allow-same-origin` (sign-ins need it); a site that redirects
+ * its frame to the Browser's own App Host would otherwise run as the
+ * Browser's origin inside it and could lift that sandbox.
+ */
+const NO_SELF_FRAME_APPS = new Set(['com.aura.browser']);
+
+/**
  * What a restricted embed cookie may load besides its document (5.16): built
  * assets (`/_astro/`, Vite's `/@…` and `/node_modules/` in dev, any file with
  * an extension other than HTML), never the app's API, MCP or another page.
@@ -389,10 +397,13 @@ export function createAppHostRouter({
     return { starting: true, appName };
   }
 
+  /** `{ ancestors, embedders }`: the frame-ancestors list, and how many of them an embed grant added. */
   async function frameAncestors(route, edge, session, url) {
     // 'self': an app may frame its own pages (Steel's Live view embeds its ui/).
     // Every ancestor must match, so the chain still has to start at the shell.
-    const ancestors = ["'self'", originOf(edge.scheme, route.base)];
+    const shell = originOf(edge.scheme, route.base);
+    const ancestors = NO_SELF_FRAME_APPS.has(route.record.appId) ? [shell] : ["'self'", shell];
+    const own = ancestors.length;
     if (session && new URL(url, 'http://h').searchParams.get('embed') === '1') {
       let extra = [];
       try {
@@ -404,7 +415,7 @@ export function createAppHostRouter({
         if (EXACT_ORIGIN_RE.test(o) && !ancestors.includes(o)) ancestors.push(o);
       }
     }
-    return ancestors;
+    return { ancestors, embedders: ancestors.length - own };
   }
 
   function redeemHandoff(route, req, res, edge, pageHeaders) {
@@ -483,9 +494,9 @@ export function createAppHostRouter({
     if (t.starting) return page(503, `Starting ${t.appName}…`, 'This page reloads by itself when it is up.', { refresh: 2 });
     const headers = appRequestHeaders(req, 'app-hosts-http');
     for (const [k, v] of Object.entries({ ...forwardedHeaders(req, edge), ...identityHeaders(t), ...activityHeaders(req.url, t.instanceId), [APP_HOST_ROUTE_HEADER]: 'host' })) headers.push(k, v);
-    const ancestors = await frameAncestors(route, edge, session, url);
+    const { ancestors, embedders } = await frameAncestors(route, edge, session, url);
     // The embed document still needs the grant its code was issued under.
-    if (session.embed && path === '/' && ancestors.length <= 2) return page(403, 'Request refused', 'This embedded session is no longer granted.');
+    if (session.embed && path === '/' && embedders === 0) return page(403, 'Request refused', 'This embedded session is no longer granted.');
     pipeHttp(route.label, t, req, res, headers, (raw) => appResponseHeaders(raw, ancestors));
   }
 
@@ -527,8 +538,8 @@ export function createAppHostRouter({
       }
       if (params.get('embed') === '1') {
         if (params.get('_aura_session') !== params.get('session')) return fail(403, 'Forbidden');
-        const ancestors = await frameAncestors(route, edge, session, url);
-        if (ancestors.length <= 2) return fail(403, 'Forbidden');
+        const { embedders } = await frameAncestors(route, edge, session, url);
+        if (embedders === 0) return fail(403, 'Forbidden');
       }
       t = await slotTarget(route);
     } catch { return fail(503, 'Service Unavailable'); }
