@@ -1,13 +1,15 @@
 ---
 import AuthLayout from '../layouts/AuthLayout.astro';
-import { authPageHeaders } from '../lib/authSurface.js';
+import { authPageHeaders, loginReturnPath } from '../lib/authSurface.js';
 
 const gate = authPageHeaders();
+// The page the desktop sent the browser here from (desktopSignIn); only a path on this origin.
+const next = loginReturnPath(Astro.url.searchParams.get('next')) ?? '/';
 for (const [name, value] of Object.entries(gate.headers)) Astro.response.headers.set(name, value);
 ---
 <AuthLayout title="Sign in" nonce={gate.nonce}>
   <h1>Sign in to AuraOS</h1>
-  <form id="login" method="post" novalidate>
+  <form id="login" method="post" novalidate data-next={next}>
     <label>Username <input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required /></label>
     <label>Password <input name="password" type="password" autocomplete="current-password" required /></label>
     <label class="check"><input name="stay" type="checkbox" /> Stay signed in for 30 days</label>
@@ -20,6 +22,10 @@ for (const [name, value] of Object.entries(gate.headers)) Astro.response.headers
       const form = document.getElementById('login');
       const error = form.querySelector('.error');
       const button = form.querySelector('button');
+      // Back to the page that asked for the sign-in. Its fragment never reached
+      // the server; the browser kept it across the redirect, so it is ours.
+      const next = form.dataset.next || '/';
+      const back = next.includes('#') || !location.hash ? next : next + location.hash;
       const messages = {
         'invalid-credentials': 'Wrong username or password.',
         'rate-limited': 'Too many attempts. Wait a minute and try again.',
@@ -39,7 +45,7 @@ for (const [name, value] of Object.entries(gate.headers)) Astro.response.headers
               staySignedIn: form.elements.stay.checked,
             }),
           });
-          if (res.ok) { location.replace('/'); return; }
+          if (res.ok) { location.replace(back); return; }
           const data = await res.json().catch(() => ({}));
           error.textContent = messages[data.error] ?? 'Sign-in is unavailable right now.';
         } catch {

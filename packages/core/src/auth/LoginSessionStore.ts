@@ -197,16 +197,25 @@ export class LoginSessionStore implements LoginSessions {
     return this.revokeWhere((n) => n.m === method);
   }
 
+  /**
+   * The live sessions of `userId`, oldest first. Nonces past their `expiresAt`
+   * that Valkey still holds (its TTL runs on its own clock) are deleted on
+   * the way, from the batch already read.
+   */
   async listByUser(userId: string): Promise<LoginSessionInfo[]> {
     const found: LoginSessionInfo[] = [];
     const prefix = loginSessionKey('');
-    await this.scanNonces((batch) => {
+    const now = this.now();
+    await this.scanNonces(async (batch) => {
+      const expired: string[] = [];
       for (const { key, nonce: n } of batch) {
+        if (typeof n.expiresAt === 'number' && n.expiresAt <= now) { expired.push(key); continue; }
         const sessionId = key.slice(prefix.length);
         if (n.u !== userId || !SESSION_ID_RE.test(sessionId) || (n.m !== 'password' && n.m !== 'shared-key')) continue;
-        if (typeof n.createdAt !== 'number' || typeof n.expiresAt !== 'number' || n.expiresAt <= this.now()) continue;
+        if (typeof n.createdAt !== 'number' || typeof n.expiresAt !== 'number') continue;
         found.push({ sessionId, method: n.m, createdAt: n.createdAt, expiresAt: n.expiresAt });
       }
+      if (expired.length) await this.redis().del(...expired);
     });
     return found.sort((a, b) => a.createdAt - b.createdAt);
   }

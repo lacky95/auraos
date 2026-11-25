@@ -165,15 +165,18 @@ const MAX = 128;
           $('acc-username').textContent = a.username;
           $('acc-role').textContent = a.role;
           $('acc-since').textContent = fmt(a.createdAt);
-          const others = a.sessions.filter((s) => !s.current).length;
+          // This device first, then the newest others; older ones only as a count.
+          const more = Number(a.moreSessions) || 0;
+          const others = a.sessions.filter((s) => !s.current).length + more;
           $('btn-revoke-others').disabled = others === 0;
-          $('sessions-body').innerHTML = a.sessions.length ? a.sessions.map((s) => `
+          $('sessions-body').innerHTML = (a.sessions.length ? a.sessions.map((s) => `
             <tr>
               <td><code>${esc(s.id8)}…</code></td>
               <td>${esc(METHOD[s.method] ?? s.method)}</td>
               <td class="acc-note">${esc(fmt(s.createdAt))}</td>
               <td>${s.current ? '<span class="pill on">THIS DEVICE</span>' : ''}</td>
-            </tr>`).join('') : '<tr><td colspan="4" class="acc-note">No sessions.</td></tr>';
+            </tr>`).join('') : '<tr><td colspan="4" class="acc-note">No sessions.</td></tr>')
+            + (more > 0 ? `<tr><td colspan="4" class="acc-note">and ${more} older session${more === 1 ? '' : 's'}</td></tr>` : '');
         } catch (err) {
           $('sessions-body').innerHTML = '<tr><td colspan="4" class="acc-note">Unavailable.</td></tr>';
           setStatus(err.message === 'login-required'

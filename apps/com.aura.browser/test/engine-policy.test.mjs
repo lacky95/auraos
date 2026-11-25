@@ -62,9 +62,10 @@ test('sandbox per case: only websites get scripts with their own origin', () => 
   assert.equal(sandboxFor('external'), EXTERNAL_SANDBOX);
   for (const k of ['app', 'self', 'shell', 'refused']) assert.equal(sandboxFor(k), null, k);
   const ext = flags(EXTERNAL_SANDBOX);
-  for (const f of ['allow-scripts', 'allow-same-origin', 'allow-forms', 'allow-popups', 'allow-popups-to-escape-sandbox']) {
+  for (const f of ['allow-scripts', 'allow-same-origin', 'allow-forms', 'allow-popups']) {
     assert.ok(ext.includes(f), f);
   }
+  assert.ok(!ext.includes('allow-popups-to-escape-sandbox'), 'a site\'s popup stays sandboxed and cannot navigate opener.top');
   assert.ok(!ext.some((f) => f.startsWith('allow-top-navigation')), 'a site never navigates the desktop');
   assert.deepEqual(flags(BLANK_SANDBOX), [], 'a reset frame runs nothing and has an opaque origin');
   assert.equal(ENGINE_REFERRER_POLICY, 'no-referrer');
@@ -91,4 +92,17 @@ test('the shipped engine frame starts empty and fully sandboxed', () => {
   const sandboxSets = script.match(/engine\.setAttribute\('sandbox'/g) ?? [];
   assert.ok(srcSets.length > 0);
   assert.equal(sandboxSets.length, srcSets.length);
+});
+
+test('"Open site in external browser" asks the Shell for the tab inside AuraOS, a plain link outside', () => {
+  const page = readFileSync(new URL('../src/pages/index.astro', import.meta.url), 'utf8');
+  for (const id of ['external-btn', 'menu-external-btn', 'engine-notice-external']) {
+    const at = page.indexOf(`id="${id}"`);
+    const tag = page.slice(page.lastIndexOf('<a', at), page.indexOf('>', at));
+    assert.match(tag, /target="_blank"/, id);
+    assert.match(tag, /rel="noopener noreferrer"/, id);
+  }
+  const ux = readFileSync(new URL('../src/scripts/browser-ux.ts', import.meta.url), 'utf8');
+  assert.match(ux, /for \(const a of \[external, menuExternal, toolExternal\]\)/);
+  assert.match(ux, /e\.preventDefault\(\);\s*os\.system\.openExternal\(href\);/);
 });

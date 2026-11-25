@@ -459,6 +459,7 @@ fire-and-forget.
 | `toggleNavMode` | `() => void` | Flip between App mode and Nav mode. |
 | `home` | `() => void` | Enter Nav mode + highlight the first window. |
 | `switchWorkspace` | `(slot: number) => void` | 1-based; out-of-range is normalised. |
+| `openExternal` | `(url: string) => void` | Open an http(s) address in a browser tab of its own, opened by the desktop: no opener, no referrer, none of the app frame's sandbox (for sign-in and payment flows that fail inside an app). Call it from a click; the popup blocker drops it otherwise. |
 
 ```ts
 os.system.openLauncher();

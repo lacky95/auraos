@@ -109,6 +109,8 @@ export const AURA_CHANNEL_MESSAGES = {
   'aura.system.toggleHome': TO_SHELL,
   'aura.system.lockScreen': TO_SHELL,
   'aura.system.switchWorkspace': TO_SHELL,
+  // An http(s) address in a tab of its own, opened by the Shell: no opener, no sandbox
+  'aura.system.openExternal': TO_SHELL,
 
   // Admin unlock: Settings asks, the Shell collects the credential itself
   'aura.admin.unlock.request': TO_SHELL,

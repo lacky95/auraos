@@ -44,6 +44,7 @@ import {
 } from '../../../lib/notifications/format.ts';
 import { contextTarget, goToContext, type WindowHost } from '../../../lib/notifications/context.ts';
 import { createConfirmInline, type ConfirmInline } from './ConfirmInline.ts';
+import { openExternalTab } from '../../../lib/externalTab.ts';
 import { CARD_CONTROL_SELECTOR, opensDialogOnActivate } from '../../../lib/notifications/dialogs.ts';
 import { linkPresentation, linkedView } from '../../../lib/notifications/activityLinks.ts';
 import { dismissConfirmText, fieldErrorsFrom, missingRequired, needsDismissConfirm, planCardUpdate, sendsOnFieldChange } from '../../../lib/notifications/cardPatch.ts';
@@ -126,12 +127,6 @@ export function spriteIcon(name: string): SVGSVGElement {
   use.setAttribute('href', `${SPRITE}#${name}`);
   svg.appendChild(use);
   return svg;
-}
-
-function openExternal(href: string): void {
-  const safe = safeHttpUrl(href);
-  if (!safe) return;
-  window.open(safe, '_blank', 'noopener,noreferrer');
 }
 
 // ── Drafts (phase 4): saved on every input / change, restored on render,
@@ -499,7 +494,7 @@ function renderButton(card: HTMLElement, n: Notification, c: PlannedButton, opts
     } else {
       b.title = href;
       b.appendChild(spriteIcon('lucide-external-link'));
-      b.addEventListener('click', () => openExternal(href));
+      b.addEventListener('click', () => openExternalTab(href));
     }
     return b;
   }

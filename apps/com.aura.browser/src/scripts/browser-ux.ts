@@ -527,6 +527,19 @@ function initEngine(host: Host) {
   });
   menuExternal.addEventListener('click', () => host.closeSettingsMenu());
 
+  // "Open site in external browser": in AuraOS the Shell opens the tab, so it
+  // has no opener and none of this window's App Host sandbox, which a link
+  // here would pass on to it. Outside AuraOS the link opens it itself.
+  const os = new OsClient();
+  for (const a of [external, menuExternal, toolExternal]) {
+    a.addEventListener('click', (e) => {
+      const href = a.getAttribute('href');
+      if (!href || !appHostRuntime() || window.top === window) return;
+      e.preventDefault();
+      os.system.openExternal(href);
+    });
+  }
+
   host.usePolicy({ classify, sandboxFor, readableLoadAllowed, blankSandbox: BLANK_SANDBOX });
 }
 

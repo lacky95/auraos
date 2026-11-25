@@ -36,9 +36,16 @@ export interface EngineContext {
   shellOrigin: string | null;
 }
 
-/** External sites: their own origin (sign-ins), no top navigation of the desktop. */
+/**
+ * External sites: their own origin (sign-ins), no top navigation of the
+ * desktop. Their popups open under the same sandbox (no
+ * `allow-popups-to-escape-sandbox`), so a popup cannot navigate
+ * `opener.top`, the AuraOS tab, either. A sign-in or payment popup that
+ * needs more works in "Open site in external browser", a tab of its own
+ * with no opener.
+ */
 export const EXTERNAL_SANDBOX =
-  'allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads';
+  'allow-scripts allow-forms allow-same-origin allow-popups allow-modals allow-downloads';
 /** about:blank after a refusal or reset: no scripts and an opaque origin. */
 export const BLANK_SANDBOX = '';
 /**

@@ -303,6 +303,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     reloadHostFrame, setAppFrameUrl,
   } from '../lib/appFrame.ts';
   import { isHostNestedSender, onAuraChannel, replyTo, senderAppId, setNativeRuntimeCheck } from '../lib/auraChannelShell.ts';
+  import { openExternalTab } from '../lib/externalTab.ts';
 
   const layoutLog = createLogger('shell:layout');
   const iframeLog = createLogger('shell:iframe');
@@ -647,6 +648,9 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     else if (type === 'aura.system.openProcessManager')   void invokeLocal('openProcessManager').catch((err) => console.warn('[shell]', err));
     else if (type === 'aura.system.closeProcessManager')  void invokeLocal('closeProcessManager').catch((err) => console.warn('[shell]', err));
     else if (type === 'aura.system.toggleProcessManager') void invokeLocal('toggleProcessManager').catch((err) => console.warn('[shell]', err));
+    // "Open site in external browser" (Aura Browser): the desktop opens the
+    // tab, so it has no opener and no App Host sandbox (lib/externalTab.ts).
+    else if (type === 'aura.system.openExternal') openExternalTab((payload as { url?: unknown }).url);
     else if (type === 'aura.system.switchWorkspace') {
       const slot = Number((payload as { slot?: unknown }).slot);
       const target = workspaceClient.getCached()?.workspaces[slot - 1];

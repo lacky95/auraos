@@ -34,6 +34,15 @@ export class SystemApi {
     this.post('aura.system.switchWorkspace', { slot });
   }
 
+  /**
+   * Open an http(s) address in a browser tab of its own, outside AuraOS. The
+   * Shell opens it, so the tab has no opener and none of this frame's
+   * sandbox: for sign-in and payment flows that fail inside an app. Call it
+   * from a user gesture (a click); the browser's popup blocker drops it
+   * otherwise. Outside AuraOS nothing is sent: use a plain link there.
+   */
+  openExternal(url: string): void { this.post('aura.system.openExternal', { url }); }
+
   private post(type: string, extras: Record<string, unknown> = {}): void {
     postToShell({ type, ...extras });
   }

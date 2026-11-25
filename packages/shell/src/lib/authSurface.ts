@@ -563,15 +563,26 @@ export function authSetPasswordPolicy(ctx: AuthContext, deps: AuthSurfaceDeps = 
 }
 
 /** The owner's account and live sessions. Never a token or a full session id. */
+/** How many of the owner's other sessions the account lists; the rest are only counted. */
+export const ACCOUNT_SESSIONS_SHOWN = 20;
+
+/**
+ * The owner and their sessions: the current one first, then the newest
+ * `ACCOUNT_SESSIONS_SHOWN` others; `moreSessions` counts the rest (API and
+ * CLI sign-ins add up fast).
+ */
 export function authAccount(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps()): Promise<Response> {
   return read(ctx, deps, async (svc, scheme) => {
     const caller = await ownerCaller(ctx, deps, svc, scheme);
     const user = caller && await svc.users.getOwner();
     if (!caller || !user) return loginRequired();
-    const sessions = (await svc.loginSessions.listByUser(user.id))
+    const all = (await svc.loginSessions.listByUser(user.id))
       .map((s) => ({ id8: s.sessionId.slice(0, 8), method: s.method, createdAt: s.createdAt, current: s.sessionId === caller.sessionId }))
       .sort((a, b) => b.createdAt - a.createdAt);
-    return json({ userId: user.id, username: user.username, role: user.role, createdAt: user.createdAt, sessions });
+    const others = all.filter((s) => !s.current);
+    const sessions = [...all.filter((s) => s.current), ...others.slice(0, ACCOUNT_SESSIONS_SHOWN)];
+    const moreSessions = Math.max(0, others.length - ACCOUNT_SESSIONS_SHOWN);
+    return json({ userId: user.id, username: user.username, role: user.role, createdAt: user.createdAt, sessions, moreSessions });
   });
 }
 
@@ -670,19 +681,55 @@ export function authPageHeaders(): AuthPageHeaders {
   };
 }
 
+const RETURN_BASE = 'http://return.invalid';
+const MAX_RETURN_PATH = 2048;
+
+/**
+ * Where a sign-in returns to: `raw` when it is a path on this origin (with its
+ * query and fragment), else null. Never another origin, so `next` is no open
+ * redirect: no scheme, no `//host` or `/\host` (browsers read both as a
+ * host), no control characters (the URL parser drops tabs and newlines), and
+ * not the sign-in pages themselves or an API route.
+ */
+export function loginReturnPath(raw: unknown): string | null {
+  if (typeof raw !== 'string' || raw.length === 0 || raw.length > MAX_RETURN_PATH) return null;
+  if (!raw.startsWith('/') || raw.startsWith('//') || /[\\\u0000-\u001f\u007f]/.test(raw)) return null;
+  let u: URL;
+  try { u = new URL(raw, RETURN_BASE); } catch { return null; }
+  if (u.origin !== RETURN_BASE) return null;
+  if (u.pathname === '/login' || u.pathname === '/setup' || u.pathname.startsWith('/api/')) return null;
+  return `${u.pathname}${u.search}${u.hash}`;
+}
+
+/**
+ * `/login`, carrying the requested page as `next` unless it is `/`. The
+ * fragment never reaches the server; the browser keeps it across the redirect
+ * and the sign-in page adds it back (login.astro).
+ */
+export function loginLocation(request: Request): string {
+  let next: string | null = null;
+  try {
+    const u = new URL(request.url);
+    next = loginReturnPath(`${u.pathname}${u.search}`);
+  } catch { /* no usable URL: plain /login */ }
+  return next && next !== '/' ? `/login?next=${encodeURIComponent(next)}` : '/login';
+}
+
 /**
  * D6: the desktop's own pages open only for the signed-in owner. Null lets the
- * page render; otherwise the redirect to `/setup` (no owner yet) or `/login`.
- * An unreadable store sends the browser to `/login`, which says so.
+ * page render; otherwise the redirect to `/setup` (no owner yet) or `/login`
+ * (with the page to return to, `loginLocation`). An unreadable store sends the
+ * browser to `/login`, which says so.
  */
 export async function desktopSignIn(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps()): Promise<Response | null> {
   const to = (path: string) => new Response(null, { status: 303, headers: { ...API_HEADERS, Location: path } });
+  const login = () => to(loginLocation(ctx.request));
   try {
     const svc = deps.services();
-    if (!svc) return to('/login');
+    if (!svc) return login();
     if (!(await svc.users.hasOwner())) return to('/setup');
-    return (await currentSession(ctx, svc, requestScheme(ctx, deps.env))) ? null : to('/login');
+    return (await currentSession(ctx, svc, requestScheme(ctx, deps.env))) ? null : login();
   } catch {
-    return to('/login');
+    return login();
   }
 }

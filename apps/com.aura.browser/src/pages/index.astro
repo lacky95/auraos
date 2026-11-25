@@ -18,7 +18,7 @@
  * sandbox (their sign-ins need `allow-same-origin`); another Aura app opens
  * as its own window; this App Host, the shell and non-web schemes never load
  * here. A load that still ends up readable (same-origin with this page) is
- * reset to an opaque blank. "Open in external browser" is always in the ⚙
+ * reset to an opaque blank. "Open site in external browser" is always in the ⚙
  * menu, and on the notice whenever a page does not load here.
  *
  * Practical limit users will hit: most popular sites set
@@ -88,13 +88,13 @@ const FRAME_NAME = JSON.stringify({
         <button id="zoom-out-btn"   title="Zoom out (Ctrl+-)"     aria-label="Zoom out">−</button>
         <button id="zoom-reset-btn" title="Reset zoom (Ctrl+0)"   aria-label="Reset zoom">100%</button>
         <button id="zoom-in-btn"    title="Zoom in (Ctrl++)"      aria-label="Zoom in">+</button>
-        <a id="external-btn" class="tool-link" target="_blank" rel="noopener noreferrer" title="Open in external browser: for sites whose sign-in or storage fails in here, or that refuse to be shown" aria-label="Open in external browser">↗</a>
+        <a id="external-btn" class="tool-link" target="_blank" rel="noopener noreferrer" title="Open site in external browser: for sites whose sign-in, payment or storage fails in here, or that refuse to be shown" aria-label="Open site in external browser">↗</a>
         <div class="menu-wrap">
           <button id="settings-btn" title="Settings" aria-label="Settings" aria-haspopup="true" aria-expanded="false">⚙</button>
           <div id="settings-menu" class="settings-menu" role="menu" hidden>
             <button id="menu-native-btn" type="button" role="menuitemcheckbox" aria-checked="false" disabled title="Checking whether this device can open native windows…">Native mode</button>
             <button id="menu-bookmarks-btn" type="button" role="menuitemcheckbox" aria-checked="true" title="Show or hide the bookmarks bar (Ctrl+Shift+B)">Bookmarks bar: on</button>
-            <a id="menu-external-btn" role="menuitem" target="_blank" rel="noopener noreferrer" title="Open this page in its own browser tab, for sites whose sign-in or storage fails in here">Open in external browser</a>
+            <a id="menu-external-btn" role="menuitem" target="_blank" rel="noopener noreferrer" title="Open this page in its own browser tab, for sites whose sign-in, payment or storage fails in here">Open site in external browser</a>
             <button id="menu-debug-btn" type="button" role="menuitem" aria-pressed="false">Debug panel</button>
           </div>
         </div>
@@ -107,7 +107,7 @@ const FRAME_NAME = JSON.stringify({
         <span class="engine-notice-actions">
           <button id="engine-notice-app" type="button" hidden>Open as app window</button>
           <button id="engine-notice-launcher" type="button" hidden>Open launcher</button>
-          <a id="engine-notice-external" target="_blank" rel="noopener noreferrer" hidden>Open in external browser</a>
+          <a id="engine-notice-external" target="_blank" rel="noopener noreferrer" hidden>Open site in external browser</a>
           <button id="engine-notice-close" type="button" title="Dismiss" aria-label="Dismiss">✕</button>
         </span>
       </div>

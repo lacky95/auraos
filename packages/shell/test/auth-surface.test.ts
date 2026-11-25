@@ -11,7 +11,7 @@ import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import {
   authAccount, authChangePassword, authLogin, authLogout, authPageHeaders, authPasswordPolicy, authRevokeOtherSessions,
   authSession, authSetPasswordPolicy, authSetup, authStatus, authWhoami,
-  desktopSignIn, MAX_BODY_BYTES, requestScheme,
+  ACCOUNT_SESSIONS_SHOWN, desktopSignIn, loginLocation, loginReturnPath, MAX_BODY_BYTES, requestScheme,
 } from '../src/lib/authSurface.ts';
 import type { AuthContext, AuthSurfaceDeps, AuthSurfaceServices } from '../src/lib/authSurface.ts';
 import { GET as statusRoute } from '../src/pages/api/auth/status.ts';
@@ -208,6 +208,32 @@ test('the desktop sends everyone to setup until the owner exists, then to login'
   assert.equal(await location(get(), missing), '303 /login', 'an unreadable store fails closed');
   const broken: AuthSurfaceDeps = { env: {}, services: () => { throw new Error('down'); } };
   assert.equal(await location(get(), broken), '303 /login');
+});
+
+test('the login redirect keeps the page it was asked for, as a same-origin path only', async () => {
+  const f = await withOwner();
+  const page = (url: string): AuthContext => ({ clientAddress: '10.0.0.9', request: new Request(url, { headers: { host: 'aura.test:3000' } }) });
+  const r = await desktopSignIn(page('http://10-0-0-5.nip.io:3000/launcher?ws=2&q=a%20b'), f.deps());
+  assert.equal(r?.headers.get('location'), `/login?next=${encodeURIComponent('/launcher?ws=2&q=a%20b')}`);
+  assert.equal((await desktopSignIn(page('http://aura.test:3000/'), f.deps()))?.headers.get('location'), '/login', 'the desktop itself needs no next');
+  const missing: AuthSurfaceDeps = { env: {}, services: () => null };
+  assert.equal((await desktopSignIn(page('http://aura.test:3000/?x=1'), missing))?.headers.get('location'), `/login?next=${encodeURIComponent('/?x=1')}`);
+  assert.equal(loginLocation(new Request('http://aura.test/api/apps')), '/login');
+
+  for (const ok of ['/', '/?ws=2', '/launcher?a=1#frag', '/x/y%2Fz']) assert.equal(loginReturnPath(ok), ok, ok);
+  for (const bad of [
+    'https://evil.example/', '//evil.example/', '/\\evil.example/', '\\evil.example', '/\t/evil.example', '/x\nhttp:',
+    'javascript:alert(1)', 'evil.example', '', '/login', '/login?next=/', '/setup', '/api/auth/session', `/${'a'.repeat(2100)}`,
+    null, undefined, 42, ['/'],
+  ]) assert.equal(loginReturnPath(bad), null, String(bad));
+});
+
+test('the sign-in page returns to the validated next, with the fragment the browser kept', () => {
+  const src = fs.readFileSync(path.join(root, 'src/pages/login.astro'), 'utf8');
+  assert.match(src, /const next = loginReturnPath\(Astro\.url\.searchParams\.get\('next'\)\) \?\? '\/';/);
+  assert.match(src, /data-next=\{next\}/);
+  assert.match(src, /location\.replace\(back\)/);
+  assert.ok(!src.includes("location.replace('/')"));
 });
 
 test('the desktop pages check the sign-in before rendering anything', () => {
@@ -696,7 +722,7 @@ test('account: the owner and their sessions, never a token or a full session id'
   assert.equal(res.status, 200);
   const text = await res.text();
   const body = JSON.parse(text);
-  assert.deepEqual({ ...body, sessions: undefined }, { userId: 'default', username: 'lukas', role: 'owner', createdAt: 1, sessions: undefined });
+  assert.deepEqual({ ...body, sessions: undefined }, { userId: 'default', username: 'lukas', role: 'owner', createdAt: 1, sessions: undefined, moreSessions: 0 });
   assert.equal(body.sessions.length, 2);
   assert.equal(body.sessions.filter((s: { current: boolean }) => s.current).length, 1);
   for (const s of body.sessions) {
@@ -706,6 +732,24 @@ test('account: the owner and their sessions, never a token or a full session id'
   for (const id of f.sessions.keys()) assert.equal(text.includes(id), false, 'no full id');
   assert.equal(text.includes('aura-sess1'), false, 'no token');
   assert.equal((await authAccount(get(), f.deps())).status, 401);
+});
+
+test('account: the current session plus the newest others, and a count of the rest', async () => {
+  const f = await withOwner();
+  const mine = await signedIn(f);
+  const extra = ACCOUNT_SESSIONS_SHOWN + 5;
+  // Straight into the fake store (its own ids repeat past 9 sessions; the route would rate-limit).
+  for (let i = 0; i < extra; i++) {
+    const sessionId = `x${i}`.padEnd(32, 'y');
+    f.sessions.set(sessionId, { sessionId, method: 'password', userId: 'default', expiresAt: Date.now() + 60_000 });
+  }
+  const body = await (await authAccount(get(mine), f.deps())).json();
+  assert.equal(body.sessions.length, 1 + ACCOUNT_SESSIONS_SHOWN);
+  assert.equal(body.sessions[0].current, true, 'this device first, though it is the oldest');
+  assert.equal(body.sessions.filter((s: { current: boolean }) => s.current).length, 1);
+  assert.equal(body.moreSessions, 5);
+  const shown = body.sessions.slice(1).map((s: { createdAt: number }) => s.createdAt);
+  assert.deepEqual(shown, [...shown].sort((a: number, b: number) => b - a), 'newest first');
 });
 
 test('account and revoke-others work for the owner through Settings (D45), with the owner session as current', async () => {

@@ -72,3 +72,19 @@ test('every revocation tells session holders (open event streams) to check their
     OsEventBus.off('auth:sessionsRevoked', on);
   }
 });
+
+test('listing sessions prunes nonces past their expiry and lists only live ones', async () => {
+  const live = await sessions.issue({ method: 'password', userId: 'lister', ttlMs: 120_000 });
+  const old = await sessions.issue({ method: 'password', userId: 'lister', ttlMs: 60_000 });
+  const elsewhere = await sessions.issue({ method: 'password', userId: 'someone-else', ttlMs: 60_000 });
+  clock += 61_000;   // both 60 s nonces are past expiresAt; Valkey's own TTL has not run (real clock)
+  try {
+    const listed = await sessions.listByUser('lister');
+    assert.deepEqual(listed.map((s) => s.sessionId), [live.session.sessionId]);
+    assert.equal(await redis.exists(loginSessionKey(old.session.sessionId)), 0, 'pruned');
+    assert.equal(await redis.exists(loginSessionKey(elsewhere.session.sessionId)), 0, 'pruned for any user');
+    assert.equal(await redis.exists(loginSessionKey(live.session.sessionId)), 1);
+  } finally {
+    clock -= 61_000;
+  }
+});
