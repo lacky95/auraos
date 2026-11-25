@@ -24,11 +24,11 @@ async function request<T>(
     const headers: Record<string, string> = {};
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     try {
-      // /api/admin/* takes the admin session. Everything else stays anonymous (see identity.ts).
+      // /api/admin/* takes the admin session; every call carries the instance token otherwise (identity.ts).
       return await shellFetch(path, {
         method,
         headers,
-        intent: admin ? 'admin' : 'anonymous',
+        intent: admin ? 'admin' : 'self',
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });
     } catch (err) {
@@ -99,8 +99,10 @@ export function subscribeEvents(
 
   void (async () => {
     try {
+      // The stream carries this process's identity like any other call.
       const res = await shellFetch(path, {
         headers: { Accept: 'text/event-stream' },
+        intent: 'self',
         signal: controller.signal,
       });
       if (!res.ok || !res.body) {

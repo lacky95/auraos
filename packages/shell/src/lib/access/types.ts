@@ -160,6 +160,8 @@ export type AccessReason = (typeof ACCESS_REASONS)[number];
 /** How the caller's identity was established. The `*-hint` values prove nothing. */
 export const ACCESS_VIAS = [
   'login-session', 'instance-token', 'api-key', 'admin-session', 'operator-ticket',
+  // a signed App Host gateway claim / a verified App Host cookie session
+  'gateway', 'app-host',
   'referer-hint', 'instance-id-hint', 'internal', 'sse-mux',
   // a credential that isn't a valid Aura one / one that can't be checked right now
   'foreign-or-invalid', 'unverified',
@@ -207,6 +209,12 @@ export interface AccessEvent {
 export const ACCESS_BRIDGE_KEY: unique symbol = Symbol.for('aura.access');
 
 export interface AccessBridge {
+  /**
+   * Start resolving a `.mjs` server's request to its verified identity
+   * (access-bridge.mjs `surfaceIdentity`). The facts are read at once and
+   * not kept; the promise holds only the result.
+   */
+  identify(facts: SurfaceFacts): Promise<VerifiedIdentity | null>;
   /** A surface event: the bridge checks it, runs `decide()` and counts it. */
   observeSurface(observation: SurfaceObservation): void;
   /** A high-frequency event on a surface: a counter only. */
@@ -216,11 +224,29 @@ export interface AccessBridge {
   dispose(): void;
 }
 
-/** Transient request facts for identity observation. Never stored. */
+/** What a `.mjs` server hands to `identify`: its Node request headers, method, URL and a verified App Host session. */
+export interface SurfaceFacts {
+  headers: unknown;
+  method?: unknown;
+  url?: unknown;
+  appHost?: unknown;
+}
+
+/** What the principal resolver (identify.ts `resolvePrincipal`) made of a request. Never a credential. */
+export interface VerifiedIdentity {
+  principal: AccessPrincipal;
+  via: AccessVia;
+}
+
+/** What an observation knows of its caller. Transient, never stored, and never a credential. */
 export interface SurfaceIdentity {
-  authorization: string | null;
-  /** Whether a session cookie was present. Its value is not kept. */
-  sessionCookie: boolean;
+  /**
+   * The resolver's verdict, started while the request was in hand. The
+   * credentials it read are not kept. Null: it could not run (the observer
+   * was not loaded yet, or it failed).
+   */
+  verified: Promise<VerifiedIdentity | null> | VerifiedIdentity | null;
+  /** Hints for the report's app column only. */
   referer: string | null;
   instanceId: string | null;
 }

@@ -185,6 +185,7 @@ const reportAccess = createAccessReporter(() => import('./lib/access/observer.ts
 export const onRequest = defineMiddleware(async (ctx, next) => {
   const access = captureAccess(ctx);
   await ensureAppManager();
+  reportAccess.identify(access, ctx.request);
   // Free-flight activities (lib/flight/service.ts): once per shell build —
   // a hot-swapped build takes over the previous one's listeners + notifications.
   if (!flightServiceStarted) {

@@ -1,27 +1,29 @@
 /**
  * Who the CLI is on a request, and the one fetch that may carry that identity.
  *
- * Rules (Phase 1, report-only):
+ * Rules:
  *   - An instance token goes only to the origin of the runner-injected
  *     OS_API_BASE or AURA_OS_URL.
  *   - Every admin credential (AURA_ADMIN_*, saved session, master key file,
  *     typed credential) goes only to the trusted shell: the runner origin, or
  *     the loopback default when no runner origin exists. A 401 from any other
  *     URL never triggers a send. Remote admin login does not exist yet.
- *   - Nothing is attached to /api/proxy/*, and a credentialed request never
- *     follows a redirect.
+ *   - Nothing is attached to /api/proxy/*: the proxy forwards it to the app
+ *     (MCP and other proxied calls stay tokenless, D28). A credentialed
+ *     request never follows a redirect.
  *
- * Ordinary API calls and event streams stay anonymous on purpose. The shell
- * answers 401 to an invalid bearer and treats an undeclared instance more
- * strictly than an anonymous caller, so attaching a token there could change
- * outcomes. Phase 3 decides that together with enforcement.
+ * Phase 3 (5.8): inside a sandbox, every other call carries this process's
+ * instance token (`self`), event streams included, so the shell sees the
+ * instance and the user it acts for. An admin route takes the admin session
+ * instead when there is one.
  */
 import { DEFAULT_SHELL_URL, shellUrl } from './shell-url.js';
 import { inProcessSession, savedSession } from './admin-session-store.js';
 
 export type IdentityIntent =
   | 'anonymous'
-  | 'admin'                 // an admin session, if one may go to this URL
+  | 'self'                  // this process's own instance token, if it may go to this URL
+  | 'admin'                 // an admin session, if one may go to this URL; else as `self`
   | 'instance'              // this process's own instance (needs instanceId)
   | 'whoami'                // the best identity to ask the server about
   | 'credential-exchange';  // the body holds a credential: no header, no redirects
@@ -151,6 +153,7 @@ function adminIdentity(target: string, trusted: boolean): ResolvedIdentity {
     : none(trusted);
 }
 
+/** This process's instance token for `target`; with `instanceId`, only when that is this instance. */
 function instanceIdentity(target: string, trusted: boolean, instanceId?: string): ResolvedIdentity | null {
   const token = process.env['AURA_INSTANCE_TOKEN'];
   if (!token || !isRunnerShellUrl(target)) return null;
@@ -167,7 +170,11 @@ export function resolveIdentity({ url, path, intent, instanceId }: IdentityReque
   if (intent === 'anonymous' || isProxyPath(target)) return none(trusted);
   switch (intent) {
     case 'credential-exchange': return none(trusted, true);
-    case 'admin':    return adminIdentity(target, trusted);
+    case 'self':     return instanceIdentity(target, trusted) ?? none(trusted);
+    case 'admin': {
+      const admin = adminIdentity(target, trusted);
+      return admin.kind === 'admin' ? admin : instanceIdentity(target, trusted) ?? admin;
+    }
     case 'instance': return instanceIdentity(target, trusted, instanceId ?? '') ?? none(trusted);
     case 'whoami':   return instanceIdentity(target, trusted) ?? adminIdentity(target, trusted);
   }
@@ -184,9 +191,9 @@ export interface ShellFetchInit extends Omit<RequestInit, 'redirect'> {
   instanceId?: string;
 }
 
-/** The CLI's only route to the shell API. */
+/** The CLI's only route to the shell API. It carries this process's identity unless told otherwise. */
 export function shellFetch(path: string, init: ShellFetchInit = {}): Promise<Response> {
-  const { intent = 'anonymous', instanceId, headers, ...rest } = init;
+  const { intent = 'self', instanceId, headers, ...rest } = init;
   const url = shellUrl();
   const identity = resolveIdentity({ url, path, intent, ...(instanceId !== undefined ? { instanceId } : {}) });
   return fetch(`${url}${path}`, {

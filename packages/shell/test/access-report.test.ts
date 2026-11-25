@@ -15,7 +15,9 @@ import type { AccessPrincipal } from '@aura/core';
 import { createDecide } from '../src/lib/access/decide.ts';
 import { accessReportOff, captureAccess, createAccessReporter } from '../src/lib/access/guard.ts';
 import { refererAppId, refererProxyId } from '../src/lib/access/legacyReferer.ts';
-import { combineCandidates, createObserver, observeIdentity, statusClass } from '../src/lib/access/observer.ts';
+import {
+  combineCandidates, createObserver, identifyRequest, observeIdentity, requestFromFacts, statusClass,
+} from '../src/lib/access/observer.ts';
 import type { ObserverDeps } from '../src/lib/access/observer.ts';
 import { AccessReport, MAX_REPORT_KEYS, eventKey, readAccessReport, reportKey } from '../src/lib/access/report.ts';
 import { candidateRules, dispatchedMethods, handlersOf, normalizeMethod } from '../src/lib/access/resolve.ts';
@@ -93,7 +95,7 @@ const snapshot = (over: Partial<RequestSnapshot> = {}): RequestSnapshot => ({
   https: false,
   status: 200,
   internal: null,
-  identity: { authorization: null, sessionCookie: false, referer: null, instanceId: null },
+  identity: { verified: null, referer: null, instanceId: null },
   ...over,
 });
 
@@ -215,17 +217,36 @@ test('body variants stay candidates; disagreement reports `unresolved`', () => {
 
 // ── no-touch identity ───────────────────────────────────────────────────────
 
+/** A request's identity as the observer sees it: resolved, then read from the snapshot. */
+async function identityOf(headers: Record<string, string>, d: ObserverDeps = deps()) {
+  const verified = identifyRequest(new Request('http://shell/api/apps', { headers }), d);
+  return observeIdentity({ verified, referer: headers['referer'] ?? null, instanceId: null }, d);
+}
+
+const OWNER = { id: 'default', username: 'owner', role: 'owner', disabled: false };
+const LIVE_LOGIN = 'aura-sess1.live.mac';
+/** Auth services with one live owner login session; `revoked` drops it. */
+function loginServices(state: { revoked?: boolean; disabled?: boolean } = {}) {
+  return {
+    loginSessions: {
+      verify: async (t: string) => (t === LIVE_LOGIN && !state.revoked
+        ? { sessionId: 'f'.repeat(32), userId: 'default', method: 'password' as const, expiresAt: Date.now() + 60_000 }
+        : null),
+    },
+    users: { getOwner: async () => ({ ...OWNER, disabled: !!state.disabled }) },
+  } as never;
+}
+
 test('identity: foreign Authorization is labelled and never a 401', async () => {
-  const id = (authorization: string) => ({ authorization, sessionCookie: false, referer: null, instanceId: null });
   for (const header of ['Basic Zm9vOmJhcg==', 'Bearer not-aura', 'Bearer aura1.bad.sig', 'garbage']) {
-    const seen = await observeIdentity(id(header), deps());
+    const seen = await identityOf({ authorization: header });
     assert.equal(seen.via, 'foreign-or-invalid', header);
     assert.equal(seen.principal.kind, 'anonymous');
   }
 });
 
 test('identity: a valid instance token is verified', async () => {
-  const seen = await observeIdentity({ authorization: `Bearer ${GOOD_INSTANCE_TOKEN}`, sessionCookie: false, referer: null, instanceId: null }, deps());
+  const seen = await identityOf({ authorization: `Bearer ${GOOD_INSTANCE_TOKEN}` });
   assert.equal(seen.via, 'instance-token');
   assert.equal(seen.principal.kind, 'instance');
 });
@@ -233,17 +254,47 @@ test('identity: a valid instance token is verified', async () => {
 test('identity: an unknown nonce never reaches the token MAC', async () => {
   let verified = 0;
   const mgr = { ...fakeMgr(), tokens: { hasNonce: () => false, verify: () => { verified += 1; return null; } } };
-  await observeIdentity({ authorization: `Bearer ${GOOD_INSTANCE_TOKEN}`, sessionCookie: false, referer: null, instanceId: null }, deps({ mgr: () => mgr as never }));
+  await identityOf({ authorization: `Bearer ${GOOD_INSTANCE_TOKEN}` }, deps({ mgr: () => mgr as never }));
   assert.equal(verified, 0);
 });
 
-test('identity: a login cookie or session bearer is observed and grants nothing (D37)', async () => {
-  const cookie = await observeIdentity({ authorization: null, sessionCookie: true, referer: null, instanceId: null }, deps());
-  assert.equal(cookie.via, 'login-session');
-  assert.equal(cookie.principal.kind, 'anonymous');
-  const bearer = await observeIdentity({ authorization: 'Bearer aura-sess1.a.b', sessionCookie: false, referer: null, instanceId: null }, deps());
-  assert.equal(bearer.via, 'login-session');
-  assert.equal(bearer.principal.kind, 'anonymous');
+test('identity: a live login cookie or session bearer is the owner; expired or revoked is anonymous', async () => {
+  const live = deps({ services: () => loginServices() });
+  for (const headers of [{ cookie: `app=1; aura_session=${LIVE_LOGIN}` }, { cookie: `__Host-aura_session=${LIVE_LOGIN}` }, { authorization: `Bearer ${LIVE_LOGIN}` }] as Record<string, string>[]) {
+    const seen = await identityOf(headers, live);
+    assert.equal(seen.via, 'login-session');
+    assert.deepEqual(seen.principal, { kind: 'user', userId: 'default', role: 'owner', sessionId: 'f'.repeat(32), verification: 'verified' });
+  }
+  for (const services of [loginServices({ revoked: true }), loginServices({ disabled: true })]) {
+    const seen = await identityOf({ cookie: `aura_session=${LIVE_LOGIN}` }, deps({ services: () => services }));
+    assert.equal(seen.principal.kind, 'anonymous');
+    assert.equal(seen.via, 'foreign-or-invalid');
+  }
+  const expired = await identityOf({ cookie: 'aura_session=aura-sess1.expired.mac' }, live);
+  assert.equal(expired.principal.kind, 'anonymous');
+  // Two cookies of one name: one was planted, so neither counts.
+  const planted = await identityOf({ cookie: `aura_session=${LIVE_LOGIN}; aura_session=${LIVE_LOGIN}` }, live);
+  assert.equal(planted.principal.kind, 'anonymous');
+});
+
+test('identity: a verified App Host session is the owner acting through that app', async () => {
+  const facts = {
+    headers: { cookie: 'aura_app=sealed', authorization: 'Bearer app-own-token' }, method: 'GET', url: '/',
+    appHost: { appId: 'com.a.app', instanceId: 'com.a.app-1', userId: 'default', sid: 's'.repeat(32) },
+  };
+  const { bridge } = createObserver({ deps: deps(), report: new AccessReport({ redis: () => null }) });
+  const v = await bridge.identify(facts);
+  assert.deepEqual(v, {
+    principal: {
+      kind: 'user', userId: 'default', role: 'owner', sessionId: 's'.repeat(32), verification: 'verified',
+      through: { appId: 'com.a.app', instanceId: 'com.a.app-1' },
+    },
+    via: 'app-host',
+  });
+  // Anything else under that name is not a session the App Host verified.
+  const forged = await bridge.identify({ ...facts, appHost: { appId: 'com.a.app', userId: 7 } });
+  assert.notEqual(forged?.principal.kind, 'user');
+  assert.equal(requestFromFacts({ headers: { a: 'b' }, method: 'TRACE', url: 'http://evil/x' })?.url, 'http://shell/');
 });
 
 test('identity: with Valkey down, keys and sessions are `unverified` and not looked up', async () => {
@@ -251,15 +302,31 @@ test('identity: with Valkey down, keys and sessions are `unverified` and not loo
   const services = {
     apiKeys: { peek: async () => { calls += 1; return null; } },
     admin: { peekSession: async () => { calls += 1; return null; } },
+    loginSessions: { verify: async () => { calls += 1; return null; } },
+    users: { getOwner: async () => { calls += 1; return null; } },
   };
-  for (const authorization of ['Bearer aura_k1_x', 'Bearer aura-admin1.a.b']) {
-    const seen = await observeIdentity(
-      { authorization, sessionCookie: false, referer: null, instanceId: null },
-      deps({ services: () => services, redisReady: () => false }),
-    );
+  for (const headers of [{ authorization: 'Bearer aura_k1_x' }, { authorization: 'Bearer aura-admin1.a.b' }, { authorization: 'Bearer aura-sess1.a.b' }] as Record<string, string>[]) {
+    const seen = await identityOf(headers, deps({ services: () => services as never, redisReady: () => false }));
     assert.equal(seen.via, 'unverified');
   }
+  const cookie = await identityOf({ cookie: 'aura_session=aura-sess1.a.b' }, deps({ services: () => services as never, redisReady: () => false }));
+  assert.equal(cookie.principal.kind, 'anonymous');
   assert.equal(calls, 0);
+});
+
+test('identity: the middleware snapshot holds the verified result, never a token', async () => {
+  const secrets = [GOOD_INSTANCE_TOKEN, LIVE_LOGIN, 'aura_session'];
+  const loaded = { observeRequest: () => undefined, identifyAccess: (r: Request) => identifyRequest(r, deps({ services: () => loginServices() })) };
+  const reporter = createAccessReporter(async () => loaded);
+  for (const headers of [{ authorization: `Bearer ${GOOD_INSTANCE_TOKEN}` }, { cookie: `aura_session=${LIVE_LOGIN}` }] as Record<string, string>[]) {
+    const request = new Request('http://shell/api/apps', { headers });
+    const snap = captureAccess({ request, url: new URL(request.url), routePattern: '/api/apps', params: {} })!;
+    reporter.identify(snap, request);
+    const verified = await snap.identity.verified;
+    assert.ok(verified && verified.principal.kind !== 'anonymous', JSON.stringify(verified));
+    const stored = JSON.stringify({ ...snap, identity: { ...snap.identity, verified } });
+    for (const s of secrets) assert.ok(!stored.includes(s), s);
+  }
 });
 
 function memoryRedis() {
@@ -536,13 +603,13 @@ test('redaction: nothing from the request reaches the stored report', async () =
     search: '?token=query-secret',
     params: { path: 'os/private-kv-key' },
     identity: {
-      authorization: 'Bearer s3cret-token', sessionCookie: true,
+      verified: identifyRequest(new Request('http://x/', { headers: { authorization: 'Bearer s3cret-token', cookie: 'aura_session=cookie-secret' } }), deps()),
       referer: 'http://x/api/proxy/referer-secret/page?cookie-secret', instanceId: 'body-secret',
     },
   }));
   bridge.observeSurface({
     subject: 'ws-proxy', method: 'UPGRADE', status: 101,
-    identity: { authorization: 'Bearer s3cret-token', sessionCookie: false, referer: null, instanceId: null },
+    identity: { verified: bridge.identify({ headers: { authorization: 'Bearer s3cret-token' } }), referer: null, instanceId: null },
   });
   await new Promise((res) => setTimeout(res, 5));
   await report.flush();
@@ -566,7 +633,9 @@ test('observer: the admin session reports as operator', async () => {
   const { report, observer } = observerWith({
     services: () => ({ admin: { peekSession: async () => ({ sessionId: 'abcd' }) } }),
   });
-  await observer.observeRequest(snapshot({ identity: { authorization: 'Bearer aura-admin1.a.b', sessionCookie: false, referer: null, instanceId: null } }));
+  const d = deps({ services: () => ({ admin: { peekSession: async () => ({ sessionId: 'abcd' }) } }) });
+  const verified = identifyRequest(new Request('http://x/', { headers: { authorization: 'Bearer aura-admin1.a.b' } }), d);
+  await observer.observeRequest(snapshot({ identity: { verified, referer: null, instanceId: null } }));
   const [key] = [...(report as unknown as { counts: Map<string, number> }).counts.keys()].map(fields);
   assert.equal(key!.principal, 'operator');
   assert.equal(key!.decision, 'allow');
@@ -651,11 +720,23 @@ test('static surfaces: /_astro, favicon and dev-only Vite paths', () => {
   }
 });
 
-test('surfaceIdentity keeps whether a session cookie exists, not its value', () => {
-  const id = surfaceIdentity({ cookie: 'app=1; aura_session=SECRET', authorization: 'Bearer x' })!;
-  assert.equal(id.sessionCookie, true);
-  assert.ok(!JSON.stringify(id).includes('SECRET'));
-  assert.equal(surfaceIdentity({ cookie: 'my_aura_session=1' })!.sessionCookie, false);
+test('surfaceIdentity keeps the verdict and the hints, never a credential', async () => {
+  const prev = g[BRIDGE];
+  let seenFacts: unknown = null;
+  g[BRIDGE] = { identify: async (facts: unknown) => { seenFacts = facts; return { principal: anon, via: 'foreign-or-invalid' }; } };
+  try {
+    const id = surfaceIdentity({ cookie: 'app=1; aura_session=SECRET', authorization: 'Bearer TOKEN', referer: 'http://r/' }, { url: '/x' })!;
+    assert.ok(seenFacts, 'the credentials went to the resolver at once');
+    const verified = await id.verified;
+    assert.equal(verified?.via, 'foreign-or-invalid');
+    const kept = JSON.stringify({ ...id, verified });
+    assert.ok(!kept.includes('SECRET') && !kept.includes('TOKEN'), kept);
+    assert.equal(id.referer, 'http://r/');
+    g[BRIDGE] = undefined;
+    assert.equal(surfaceIdentity({ authorization: 'Bearer TOKEN' })!.verified, null, 'no observer yet: unverified');
+  } finally {
+    g[BRIDGE] = prev;
+  }
 });
 
 test('statusClass covers dropped sockets', () => {

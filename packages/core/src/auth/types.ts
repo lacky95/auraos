@@ -6,15 +6,21 @@
  * into a Principal (`packages/shell/src/lib/auth.ts`); everything that
  * decides goes through `Authorizer.authorize()`.
  *
- *   instance   verified AURA_INSTANCE_TOKEN (an app backend or OS sidecar)
+ *   instance   verified AURA_INSTANCE_TOKEN (an app backend or OS sidecar) or a
+ *              signed App Host gateway claim; `userId` when it acts for a user
  *   apiKey     verified admin-issued API key (`aura_k1_…`), external REST
  *   admin      verified admin session (`aura-admin1.…`) unlocked with the
  *              SHARED operator credential. It is never an individual user.
+ *   user       a logged-in human: a verified login session (cookie or
+ *              `aura-sess1.` bearer), or that session acting through an app
+ *              (an App Host cookie, or a trusted system UI's claim, D45)
  *   anonymous  no credentials; referer / instance-id headers are hints only
  *   system     in-process only — the frozen `SYSTEM_PRINCIPAL`, by identity
  *
- * Typed for the access policy, NOT returned by `authenticate()` yet:
- *   user       a logged-in human account
+ * Phase 3 Stage 0 resolves `user`, and `instance` acting for a user, and only
+ * reports them: routes still act on what they acted on before.
+ *
+ * Typed for the access policy only:
  *   operator   the host operator, in access reports only
  *
  * Reserved for later (delegation), NOT implemented:
@@ -39,7 +45,18 @@ export interface DeclaredActor {
 
 interface WithActor { actor?: DeclaredActor }
 
-export type InstancePrincipal = InstanceCaller & WithActor;
+/**
+ * The Aura a principal belongs to (D47, `userId@systemId`). Read wherever a
+ * principal is, not generated yet (3b): absent means this system.
+ */
+interface WithSystem { systemId?: string }
+
+/**
+ * An app instance or OS sidecar. `userId` is the user it acts for (5.8), from
+ * a verified source only: the instance token's `u` claim, the instance's
+ * server-side owner, or the gateway claim of an App Host session.
+ */
+export type InstancePrincipal = InstanceCaller & WithActor & WithSystem & { userId?: string };
 export type ApiKeyPrincipal = ApiKeyCaller & WithActor & {
   /** The key's scopes (permission names), fixed by the admin at creation. */
   scopes: string[];
@@ -52,31 +69,34 @@ export type AdminPrincipal = AdminCaller & WithActor;
 export type AnonymousPrincipal = AnonymousCaller & WithActor;
 export type SystemPrincipal = SystemCaller;
 
-export type Principal =
-  | InstancePrincipal
-  | ApiKeyPrincipal
-  | AdminPrincipal
-  | AnonymousPrincipal
-  | SystemPrincipal;
-
-/** Kinds reserved for multi-user / delegation. Not produced anywhere yet. */
-export type ReservedPrincipalKind = 'user' | 'agent';
-
 export type UserRole = 'owner';
 
-/** A logged-in human. Outside `Principal` until `authenticate()` produces it. */
-export type UserPrincipal = WithActor & {
+/** A logged-in human, verified from a live login session. */
+export type UserPrincipal = WithActor & WithSystem & {
   kind: 'user';
   userId: string;
   role: UserRole;
   sessionId: string;
   verification: 'verified';
   /**
-   * The trusted system UI this human acts through (D45), verified from a
-   * signed App Host gateway claim. Audit records it next to the user.
+   * The app this human acts through: a trusted system UI (D45, from a signed
+   * gateway claim), or any app whose App Host cookie carried the session.
+   * Audit records it next to the user. No `instanceId` while the App Host
+   * slot has no running instance.
    */
-  through?: { appId: string; instanceId: string };
+  through?: { appId: string; instanceId?: string };
 };
+
+export type Principal =
+  | InstancePrincipal
+  | ApiKeyPrincipal
+  | AdminPrincipal
+  | UserPrincipal
+  | AnonymousPrincipal
+  | SystemPrincipal;
+
+/** Kinds reserved for delegation. Not produced anywhere yet. */
+export type ReservedPrincipalKind = 'agent';
 
 /** The host operator, as a report-level class. It never authenticates a request. */
 export interface OperatorPrincipal {
@@ -85,7 +105,7 @@ export interface OperatorPrincipal {
 }
 
 /** What the access policy can be asked about. `Authorizer` still takes `Principal`. */
-export type AccessPrincipal = Principal | UserPrincipal | OperatorPrincipal;
+export type AccessPrincipal = Principal | OperatorPrincipal;
 export type PrincipalClass = AccessPrincipal['kind'];
 
 /**

@@ -1,8 +1,11 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import * as core from '@aura/core';
 import type { AccessPrincipal } from '@aura/core';
+import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { defaultRedis } from '@aura/kv-store';
+import { ownerSessionOf, sessionCookieToken } from '../authSurface.ts';
 import { createDecide, type DecideDeps } from './decide.ts';
+import { resolvePrincipal, type AppHostSession, type PrincipalDeps } from './identify.ts';
 import { refererProxyId } from './legacyReferer.ts';
 import { AccessReport, type ReportRedis } from './report.ts';
 import { candidateRules, handlersOf, normalizeMethod } from './resolve.ts';
@@ -14,8 +17,9 @@ import {
 import type {
   AccessBridge, AccessBridgeHost, AccessEvent, AccessEventMethod, AccessEventSurface, AccessLabel,
   AccessRule, AccessStatusClass, AccessSurface, AccessVia, DecideResult, PolicyResource,
-  RequestSnapshot, RouteAccessManifest, SurfaceIdentity, SurfaceObservation,
+  RequestSnapshot, RouteAccessManifest, SurfaceFacts, SurfaceIdentity, SurfaceObservation, VerifiedIdentity,
 } from './types.ts';
+import { ACCESS_VIAS } from './types.ts';
 
 /**
  * The report-only observer: identity observed without touching anything, one
@@ -52,9 +56,9 @@ export interface ObserverDeps extends DecideDeps {
 export interface ObserverManager {
   tokens: {
     hasNonce(instanceId: string, sidecar?: string): boolean;
-    verify(token: string): { instanceId: string; sidecar?: string } | null;
+    verify(token: string): { instanceId: string; sidecar?: string; userId?: string } | null;
   };
-  getInstance(id: string): { appId: string; instanceId: string } | undefined;
+  getInstance(id: string): { appId: string; instanceId: string; owner?: string } | undefined;
   getInstancesByApp(appId: string): ReadonlyArray<{ appId: string; instanceId: string }>;
   getActivity?(id: string): { appId?: string; parentInstanceId?: string; instanceId?: string } | undefined;
   getManifest?(id: string): unknown;
@@ -71,62 +75,96 @@ export interface ObserverManager {
 export interface ObserverServices {
   apiKeys?: { peek?(key: string): Promise<{ id: string; name: string; scopes: string[] } | null> };
   admin?: { peekSession?(token: string): Promise<{ sessionId: string } | null> };
+  loginSessions?: Parameters<typeof ownerSessionOf>[1]['loginSessions'];
+  users?: Parameters<typeof ownerSessionOf>[1]['users'];
 }
 
 interface Observed {
   principal: AccessPrincipal;
   via: AccessVia;
   hintAppId: string | null;
+  /** The resolver ran and failed (a store that could not be read): counted as an error. */
+  failed?: true;
 }
 
 // ── identity, without side effects ──────────────────────────────────────────
 
-/** Skips the MAC for an unknown nonce, so a stray token can't create the key file. */
-function instanceClaims(token: string, mgr: ObserverManager) {
-  const payload = token.split('.')[1];
-  if (!payload) return null;
-  let p: { i?: unknown; s?: unknown };
-  try { p = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as typeof p; } catch { return null; }
-  if (typeof p.i !== 'string' || (p.s !== undefined && typeof p.s !== 'string')) return null;
-  if (!mgr.tokens.hasNonce(p.i, p.s)) return null;
-  return mgr.tokens.verify(token);
+/**
+ * The resolver's inputs as the report reads them: API keys and admin sessions
+ * are peeked (no last-used write, no rotation handling), and nothing that
+ * needs Valkey is looked up while it is down.
+ */
+export function observerPrincipalDeps(deps: ObserverDeps): PrincipalDeps {
+  const svc = deps.services();
+  const ready = deps.redisReady();
+  const peekKey = svc?.apiKeys?.peek;
+  const peekSession = svc?.admin?.peekSession;
+  const loginSessions = svc?.loginSessions;
+  const users = svc?.users;
+  return {
+    mgr: deps.mgr() as unknown as PrincipalDeps['mgr'],
+    apiKeys: peekKey && ready ? { verify: (key) => peekKey.call(svc!.apiKeys, key) } : null,
+    admin: peekSession && ready ? { verifySession: (token) => peekSession.call(svc!.admin, token) } : null,
+    login: loginSessions && users && ready ? {
+      cookieToken: sessionCookieToken,
+      ownerSession: async (token) => {
+        const found = await ownerSessionOf(token, { loginSessions, users });
+        return found ? { sessionId: found.session.sessionId, userId: found.user.id } : null;
+      },
+    } : null,
+  };
 }
 
-async function observeBearer(token: string, deps: ObserverDeps): Promise<Pick<Observed, 'principal' | 'via'>> {
-  const mgr = deps.mgr();
-  if (token.startsWith('aura1.')) {
-    if (!mgr) return { principal: ANONYMOUS, via: 'unverified' };
-    const claims = instanceClaims(token, mgr);
-    const inst = claims ? mgr.getInstance(claims.instanceId) : undefined;
-    if (!claims || !inst) return { principal: ANONYMOUS, via: 'foreign-or-invalid' };
-    return {
-      principal: {
-        kind: 'instance', appId: inst.appId, instanceId: inst.instanceId,
-        ...(claims.sidecar ? { sidecar: claims.sidecar } : {}), verification: 'verified',
-      },
-      via: 'instance-token',
-    };
+/** The verified identity of a request, for its snapshot. Never throws; null when it can't tell. */
+export async function identifyRequest(
+  request: Request, deps: ObserverDeps, appHost: AppHostSession | null = null,
+): Promise<VerifiedIdentity | null> {
+  try {
+    const { principal, via } = await resolvePrincipal(request, observerPrincipalDeps(deps), { appHost });
+    return { principal, via };
+  } catch {
+    return null;
   }
-  if (token.startsWith('aura_k1_')) {
-    const peek = deps.services()?.apiKeys?.peek;
-    if (!peek || !deps.redisReady()) return { principal: ANONYMOUS, via: 'unverified' };
-    const rec = await deps.services()!.apiKeys!.peek!(token);
-    if (!rec) return { principal: ANONYMOUS, via: 'foreign-or-invalid' };
-    return {
-      principal: { kind: 'apiKey', keyId: rec.id, name: rec.name, scopes: [...rec.scopes], verification: 'verified' },
-      via: 'api-key',
-    };
+}
+
+const first = (v: unknown): string | undefined => {
+  const x = Array.isArray(v) ? v[0] : v;
+  return typeof x === 'string' ? x : undefined;
+};
+
+const WEB_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
+/** The only headers the resolver reads. */
+const IDENTITY_HEADERS = ['authorization', 'cookie', GATEWAY_IDENTITY_HEADER, 'referer', 'x-aura-instance-id'];
+
+/** What a `.mjs` server hands over, as a web Request with the identity headers only. All of it is checked. */
+export function requestFromFacts(facts: SurfaceFacts): Request | null {
+  try {
+    const given = (facts?.headers ?? {}) as Record<string, unknown>;
+    const headers = new Headers();
+    for (const name of IDENTITY_HEADERS) {
+      const v = first(given[name]);
+      if (v !== undefined) headers.set(name, v);
+    }
+    const method = typeof facts.method === 'string' && WEB_METHODS.has(facts.method.toUpperCase()) ? facts.method.toUpperCase() : 'GET';
+    const url = typeof facts.url === 'string' && facts.url.startsWith('/') ? facts.url : '/';
+    return new Request(new URL(url, 'http://shell'), { method, headers });
+  } catch {
+    return null;
   }
-  if (token.startsWith('aura-admin1.')) {
-    const peek = deps.services()?.admin?.peekSession;
-    if (!peek || !deps.redisReady()) return { principal: ANONYMOUS, via: 'unverified' };
-    const s = await deps.services()!.admin!.peekSession!(token);
-    if (!s) return { principal: ANONYMOUS, via: 'foreign-or-invalid' };
-    return { principal: { kind: 'admin', credential: 'shared', sessionId: s.sessionId, verification: 'verified' }, via: 'admin-session' };
-  }
-  // A login session is observed, never authority, until Phase 2 (D37).
-  if (token.startsWith('aura-sess1.')) return { principal: ANONYMOUS, via: 'login-session' };
-  return { principal: ANONYMOUS, via: 'foreign-or-invalid' };
+}
+
+/** An App Host session as app-hosts.mjs verified it, or null when it has another shape. */
+function appHostOf(v: unknown): AppHostSession | null {
+  const o = v as Partial<AppHostSession> | null;
+  if (!o || typeof o !== 'object') return null;
+  const str = (x: unknown) => typeof x === 'string' && x.length > 0;
+  if (!str(o.appId) || !str(o.userId) || !str(o.sid) || (o.instanceId !== undefined && !str(o.instanceId))) return null;
+  return { appId: o.appId!, userId: o.userId!, sid: o.sid!, ...(o.instanceId ? { instanceId: o.instanceId } : {}) };
+}
+
+function isVerified(v: unknown): v is VerifiedIdentity {
+  const o = v as VerifiedIdentity | null;
+  return !!o && typeof o === 'object' && typeof o.principal?.kind === 'string' && closed(ACCESS_VIAS, o.via);
 }
 
 function hintApp(identity: SurfaceIdentity, mgr: ObserverManager | null): { appId: string | null; via: AccessVia | null } {
@@ -143,18 +181,26 @@ function hintApp(identity: SurfaceIdentity, mgr: ObserverManager | null): { appI
   return { appId: null, via: null };
 }
 
+/** The snapshot's verified identity; an anonymous caller also gets its hint, for the app column. */
 export async function observeIdentity(identity: SurfaceIdentity | null, deps: ObserverDeps): Promise<Observed> {
   if (!identity) return { principal: ANONYMOUS, via: 'none', hintAppId: null };
-  const mgr = deps.mgr();
-  const header = identity.authorization;
-  if (header !== null && header.trim() !== '') {
-    const token = /^Bearer\s+(\S+)\s*$/i.exec(header)?.[1];
-    if (!token) return { principal: ANONYMOUS, via: 'foreign-or-invalid', hintAppId: null };
-    return { ...(await observeBearer(token, deps)), hintAppId: null };
-  }
-  const hint = hintApp(identity, mgr);
-  if (identity.sessionCookie) return { principal: ANONYMOUS, via: 'login-session', hintAppId: hint.appId };
-  return { principal: ANONYMOUS, via: hint.via ?? 'none', hintAppId: hint.appId };
+  let verified: unknown = null;
+  try { verified = await identity.verified; } catch { /* unverified below */ }
+  const v: VerifiedIdentity = isVerified(verified) ? verified : { principal: ANONYMOUS, via: 'unverified' };
+  if (v.principal.kind !== 'anonymous') return { principal: v.principal, via: v.via, hintAppId: null };
+  const hint = hintApp(identity, deps.mgr());
+  return {
+    principal: ANONYMOUS, via: v.via === 'none' ? hint.via ?? 'none' : v.via, hintAppId: hint.appId,
+    // Started, and came back empty: the resolver failed.
+    ...(identity.verified !== null && !isVerified(verified) ? { failed: true as const } : {}),
+  };
+}
+
+/** The app a principal speaks for: an instance's own, or the app a user acts through. */
+function principalApp(p: AccessPrincipal): string | null {
+  if (p.kind === 'instance') return p.appId;
+  if (p.kind === 'user') return p.through?.appId ?? null;
+  return null;
 }
 
 // ── resources and placeholders ──────────────────────────────────────────────
@@ -317,6 +363,7 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
     }
 
     const seen = await observeIdentity(s.identity, deps);
+    if (seen.failed) report.note('errors');
     const mgr = deps.mgr();
     let candidates: ReadonlyArray<{ variant: string | null; rule: AccessRule }> = [];
     if (page) candidates = [{ variant: null, rule: page.rule }];
@@ -338,7 +385,7 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
       : [{ variant: null, result: await policy(null, { target: 'system' }, seen.principal, s.https, { surface, subject, method, variant: null }) }];
 
     const { variant, result } = combineCandidates(results);
-    const callerApp = seen.principal.kind === 'instance' ? seen.principal.appId : seen.hintAppId;
+    const callerApp = principalApp(seen.principal) ?? seen.hintAppId;
     const targetApp = candidates[0] ? resourceFor(candidates[0].rule, s, mgr).appId : null;
     return {
       surface, subject: label(subject), method,
@@ -383,7 +430,7 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
       https,
       { surface: surface.kind, subject: surface.id, method, variant: null },
     );
-    const caller = seen.principal.kind === 'instance' ? seen.principal.appId : seen.hintAppId;
+    const caller = principalApp(seen.principal) ?? seen.hintAppId;
     return {
       surface: surface.kind, subject: label(surface.id), method, variant: null,
       principal: seen.principal.kind === 'admin' ? 'operator' : seen.principal.kind,
@@ -394,6 +441,10 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
   }
 
   const bridge: AccessBridge = {
+    identify(facts) {
+      const request = requestFromFacts(facts);
+      return request ? identifyRequest(request, deps, appHostOf(facts?.appHost)) : Promise.resolve(null);
+    },
     observeSurface(observation) {
       void evaluateSurface(observation)
         .then((event) => { if (event) report.add(event); else report.note('dropped'); })
@@ -469,4 +520,10 @@ function install(): Installed {
 
 export function observeRequest(snapshot: RequestSnapshot): Promise<void> {
   return install().observeRequest(snapshot);
+}
+
+/** The verified identity of an Astro request, started by the middleware (guard.ts). */
+export function identifyAccess(request: Request): Promise<VerifiedIdentity | null> {
+  install();
+  return identifyRequest(request, liveDeps);
 }

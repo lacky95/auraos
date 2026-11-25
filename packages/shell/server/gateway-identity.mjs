@@ -100,10 +100,10 @@ export function ownerUiCovers(appId, path) {
  * `gatewayOwner`, used by the route manifest check and `authenticate()`).
  * Throws when the registry can't be read; callers fail closed.
  */
-export async function ownerUiActs({ appId, installationId, sid, path }, { registry, sessionLive }) {
+export async function ownerUiActs({ appId, installationId, sid, userId, path }, { registry, sessionLive }) {
   if (!ownerUiCovers(appId, path)) return false;
   if (!(await isOwnerUiInstallation(registry, { appId, installationId }))) return false;
-  return typeof sid === 'string' && !!sid && !!(await sessionLive(sid));
+  return typeof sid === 'string' && !!sid && !!(await sessionLive(sid, userId));
 }
 
 export function gatewayKey() {

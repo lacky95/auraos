@@ -12,7 +12,9 @@ import { dirname } from 'node:path';
  * the token the OS handed the instance at spawn (`AURA_INSTANCE_TOKEN`).
  *
  * Design: stateless HMAC + a nonce that lives where the container lives.
- *   token  = aura1.<b64url(json {i, s?, n})>.<b64url(HMAC-SHA256(key, payload))>
+ *   token  = aura1.<b64url(json {i, s?, n, u?})>.<b64url(HMAC-SHA256(key, payload))>
+ *   u      = the user the instance acts for (5.8): its owner, for an
+ *            owner-started instance. Tokens without it stay valid.
  *   key    = 32 random bytes in <dataDir>/aura/secrets/instance-token.key (0600)
  *   nonce  = fresh per spawn, recorded as a docker label on the container it
  *            belongs to (`aura.token.nonce`, or inside an OS sidecar's spec
@@ -33,9 +35,11 @@ export interface TokenClaims {
   instanceId: string;
   /** Set when the token belongs to an OS-managed sidecar of `instanceId`. */
   sidecar?: string;
+  /** The `u` claim: the user the instance acts for, when it was minted with one. */
+  userId?: string;
 }
 
-interface Payload { i: string; s?: string; n: string }
+interface Payload { i: string; s?: string; n: string; u?: string }
 
 const PREFIX = 'aura1';
 
@@ -76,11 +80,14 @@ export class InstanceTokens {
     return `${PREFIX}.${payload}.${b64url(this.mac(payload))}`;
   }
 
-  /** New token + nonce for a spawn. The nonce is registered immediately. */
-  mint(instanceId: string, sidecar?: string): { token: string; nonce: string } {
+  /** New token + nonce for a spawn. The nonce is registered immediately. `userId`: the `u` claim. */
+  mint(instanceId: string, sidecar?: string, userId?: string): { token: string; nonce: string } {
     const nonce = b64url(randomBytes(12));
     this.register(instanceId, nonce, sidecar);
-    return { token: this.sign({ i: instanceId, ...(sidecar ? { s: sidecar } : {}), n: nonce }), nonce };
+    return {
+      token: this.sign({ i: instanceId, ...(sidecar ? { s: sidecar } : {}), n: nonce, ...(userId ? { u: userId } : {}) }),
+      nonce,
+    };
   }
 
   /** Re-register a nonce read back from a container label (adoption, reconcile). */
@@ -128,8 +135,9 @@ export class InstanceTokens {
     let p: Payload;
     try { p = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as Payload; } catch { return null; }
     if (typeof p.i !== 'string' || typeof p.n !== 'string') return null;
+    if (p.u !== undefined && (typeof p.u !== 'string' || !p.u)) return null;
     const current = this.nonces.get(consumerKey(p.i, p.s));
     if (!current || current !== p.n) return null;
-    return { instanceId: p.i, ...(p.s ? { sidecar: p.s } : {}) };
+    return { instanceId: p.i, ...(p.s ? { sidecar: p.s } : {}), ...(p.u ? { userId: p.u } : {}) };
   }
 }

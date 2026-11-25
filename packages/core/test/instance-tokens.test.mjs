@@ -24,6 +24,22 @@ test('mint → verify round-trips the claims', () => {
   assert.deepEqual(t.verify(sc.token), { instanceId: 'com.example.app-2', sidecar: 'db' });
 });
 
+test('the `u` claim names the user an owned instance acts for; tokens without it stay valid', () => {
+  const t = new InstanceTokens(fresh().file);
+  const owned = t.mint('com.example.app-3', undefined, 'default');
+  assert.deepEqual(t.verify(owned.token), { instanceId: 'com.example.app-3', userId: 'default' });
+  const sidecar = t.mint('com.example.app-3', 'db', 'default');
+  assert.deepEqual(t.verify(sidecar.token), { instanceId: 'com.example.app-3', sidecar: 'db', userId: 'default' });
+  // A pool member (no owner) and a token from before the claim carry no user.
+  const pooled = t.mint('com.example.app-4');
+  assert.deepEqual(t.verify(pooled.token), { instanceId: 'com.example.app-4' });
+  // The claim is under the MAC: swapping it breaks the token.
+  const [p, payload, sig] = owned.token.split('.');
+  const claims = JSON.parse(Buffer.from(payload, 'base64url').toString());
+  const swapped = Buffer.from(JSON.stringify({ ...claims, u: 'someone-else' })).toString('base64url');
+  assert.equal(t.verify(`${p}.${swapped}.${sig}`), null);
+});
+
 test('garbage, tampered payloads and foreign signatures are rejected', () => {
   const t = new InstanceTokens(fresh().file);
   const { token } = t.mint('a.b');

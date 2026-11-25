@@ -134,7 +134,7 @@ interface SidecarManagerOpts {
   tokens: InstanceTokens;
   mounts: MountManager;
   /** Live instance → app + its shell-side data dir. */
-  instance(instanceId: string): { appId: string; instanceDataDir: string } | null;
+  instance(instanceId: string): { appId: string; instanceDataDir: string; owner?: string } | null;
   /**
    * A sidecar was created or removed — lets AppManager refresh its sidecar
    * cache now instead of at the next reconciler tick (else `GET sidecars`
@@ -407,7 +407,8 @@ export class SidecarManager {
       const env = await this.environment(instanceId, inst.appId, spec);
       if (spec.seed) await this.seed(instanceId, spec, appDataSubpath, env);
 
-      const token = spec.inheritIdentity ? this.opts.tokens.mint(instanceId, spec.name) : null;
+      // The sidecar acts for the instance's owner (5.8).
+      const token = spec.inheritIdentity ? this.opts.tokens.mint(instanceId, spec.name, inst.owner) : null;
       const record: SpecRecord = {
         name: spec.name, template: spec.template, image: spec.image, specHash: hash,
         ...(token ? { nonce: token.nonce } : {}),

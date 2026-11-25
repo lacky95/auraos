@@ -196,19 +196,36 @@ export function appHostAuth() {
 }
 
 /**
+ * Whether the login session a cookie or claim names is live for that user:
+ * not revoked, not expired, a password session of `userId`, who is still the
+ * enabled owner. The same conditions as the desktop's sign-in check
+ * (authSurface `ownerSessionOf`), for holders of a session id instead of the
+ * token. Rejects when the store can't be read, so callers fail closed.
+ */
+export function createSessionLive({ sessions, users }) {
+  return async (sid, userId) => {
+    if (typeof sid !== 'string' || !sid || typeof userId !== 'string' || !userId) return false;
+    if (!(await sessions.isLive(sid, userId))) return false;
+    const owner = await users.getOwner();
+    return !!owner && !owner.disabled && owner.id === userId;
+  };
+}
+
+/**
  * The registry and session check, or null while this core has no registry.
  * Throws when it has one that can't be reached, so callers fail closed.
  */
 export async function loadAppHostServices() {
   if (globalThis[SERVICES]) return globalThis[SERVICES];
-  const [core, kvStore] = await Promise.all([import('@aura/core'), import('@aura/kv-store')]);
+  const core = await import('@aura/core');
   if (typeof core.getAppHostServices !== 'function') return null;
   // The shared singleton: it knows manifest host names, so generated names avoid them.
   const shared = core.getAppHostServices();
   const registry = shared.registry;
+  const auth = core.getAuthServices();
   globalThis[SERVICES] = {
     registry,
-    sessionLive: async (sid) => (await kvStore.defaultRedis().exists(core.loginSessionKey(sid))) === 1,
+    sessionLive: createSessionLive({ sessions: auth.loginSessions, users: auth.users }),
   };
   return globalThis[SERVICES];
 }

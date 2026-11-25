@@ -250,6 +250,7 @@ export function createAppHostRouter({
   let loading = null;
   const startAsked = new Map();   // appId → when we last asked the shell to start it
   const slotStarts = new Map();   // installation and scope → the slot-1 start in flight
+  const verifiedSessions = new WeakMap();   // req → the App Host session appSession() verified, for the report
   const hostAuth = () => (auth ??= appHostAuth());
 
   /** The shell's app list (`appsList` caches it); `fresh` reloads it. */
@@ -328,7 +329,22 @@ export function createAppHostRouter({
     const payload = hostAuth().readCookie(req.headers.cookie, appHostCookieName(secure), expected)
       ?? hostAuth().readCookie(req.headers.cookie, appHostEmbedCookieName(secure), { ...expected, embed: true });
     if (!payload) return null;
-    return (await route.svc.sessionLive(payload.sid)) ? payload : null;
+    if (!(await route.svc.sessionLive(payload.sid, payload.userId))) return null;
+    verifiedSessions.set(req, payload);
+    return payload;
+  }
+
+  /**
+   * The report's identity for a request on an App Host: the session
+   * appSession() verified, as the owner acting through this app. Never the cookie.
+   */
+  function hostIdentity(route, req) {
+    const session = verifiedSessions.get(req);
+    const appHost = session ? {
+      appId: route.record.appId, userId: session.userId, sid: session.sid,
+      ...(route.slot?.instanceId ? { instanceId: route.slot.instanceId } : {}),
+    } : null;
+    return surfaceIdentity(req.headers, { method: req.method, url: req.url, appHost });
   }
 
   /** Asks for a start, once at a time. `start()` claims the slot in the lifecycle. */
@@ -411,7 +427,7 @@ export function createAppHostRouter({
     if (!entry || entry.claim.installationId !== route.record.installationId || entry.claim.slot !== route.slot.slot) return refuse();
     const location = safeReturnPath(entry.claim.returnPath);
     if (!location) return refuse();
-    return route.svc.sessionLive(entry.claim.sid).then((live) => {
+    return route.svc.sessionLive(entry.claim.sid, entry.claim.userId).then((live) => {
       if (!live) return refuse();
       const secure = edge.scheme === 'https';
       const { value, maxAgeSeconds } = hostAuth().sealCookie(entry);
@@ -469,12 +485,11 @@ export function createAppHostRouter({
   }
 
   async function serveHostUpgrade(route, req, socket, head, edge) {
-    const identity = surfaceIdentity(req.headers);
     let reported = false;
     const reportUpgrade = (status) => {
       if (reported) return;
       reported = true;
-      reportSurface({ subject: 'app-hosts', method: 'UPGRADE', identity, appId: route.record.appId, status });
+      reportSurface({ subject: 'app-hosts', method: 'UPGRADE', identity: hostIdentity(route, req), appId: route.record.appId, status });
     };
     const fail = (status, text) => {
       reportUpgrade(status);
@@ -534,10 +549,10 @@ export function createAppHostRouter({
       if (route.to === 'missing') return refuse(event, target, 404, 'Not Found', 'No app uses this address.');
       const edge = requestEdge(req, env);
       if (event === 'request') {
-        const identity = surfaceIdentity(req.headers);
         const method = req.method;
         target.once('close', () => reportSurface({
-          subject: 'app-hosts', method, identity, appId: route.record.appId, status: target.headersSent ? target.statusCode : 0,
+          subject: 'app-hosts', method, identity: hostIdentity(route, req), appId: route.record.appId,
+          status: target.headersSent ? target.statusCode : 0,
         }));
         await serveHostRequest(route, req, target, edge);
       }

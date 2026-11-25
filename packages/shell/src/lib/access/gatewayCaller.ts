@@ -107,7 +107,7 @@ export async function enforceGateway(
     https: ctx.url.protocol === 'https:',
     status: 0,
     internal: null,
-    identity: { authorization: null, sessionCookie: false, referer: null, instanceId: inst.instanceId },
+    identity: { verified: null, referer: null, instanceId: inst.instanceId },
   };
   const info = { route, handlers: handlersOf(manifest, route) };
   const readsBody = manifest.routes[route]?.variants?.some((v) =>

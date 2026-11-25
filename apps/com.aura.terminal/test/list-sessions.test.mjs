@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const hits = { instances: 0, '-1': 0, '-2': 0, '-3': 0 };
+const auth = { os: new Set(), proxy: new Set() };   // Authorization seen on OS API calls / proxied calls
 let slow = false;                       // instance -2 hangs while true
 const session = (inst, n, command) => ({
   id: `com.aura.terminal${inst}#a${n}`, label: `#a${n}`, live: true, inUse: false, bytes: 42,
@@ -19,6 +20,7 @@ const session = (inst, n, command) => ({
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
+  auth[url.pathname.startsWith('/api/proxy/') ? 'proxy' : 'os'].add(req.headers.authorization ?? null);
   if (url.pathname === '/api/apps/com.aura.terminal/instances') {
     hits.instances++;
     res.setHeader('content-type', 'application/json');
@@ -45,6 +47,7 @@ process.env.AURA_TERM_TMUX = '0';
 process.env.AURA_DATA_DIR = mkdtempSync(join(tmpdir(), 'tm8-'));
 process.env.OS_API_BASE = `http://127.0.0.1:${server.address().port}`;
 process.env.APP_INSTANCE_ID = 'com.aura.terminal-7';   // not in the OS list: every row is remote
+process.env.AURA_INSTANCE_TOKEN = 'aura1.term.token';
 
 const router = await import('../src/session-router.ts');
 const { buildTerminalServer } = await import('../src/mcp/terminal.ts');
@@ -135,4 +138,10 @@ test('list_sessions: compact rows keep today\'s names, verbose keeps every field
   const p = await client.callTool({ name: 'list_sessions', arguments: { include_paused: true } });
   assert.equal(p.structuredContent.instances.find((i) => i.instanceId === 'com.aura.terminal-3').reachable, true);
   assert.equal(hits['-3'], 1);
+});
+
+test('OS API calls carry the instance token; calls through the proxy never do', async () => {
+  await router.listAll({ includePaused: true });
+  assert.deepEqual([...auth.os], ['Bearer aura1.term.token']);
+  assert.deepEqual([...auth.proxy], [null]);
 });
