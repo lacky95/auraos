@@ -40,3 +40,23 @@ test('no registry, or a failing one, resolves nothing', async () => {
   const failing = async () => ({ resolveLabel: async () => { throw new Error('kv down'); } });
   assert.equal(await appHostViewTarget({ action: VIEW_ACTION, uri }, { registry: failing }), null);
 });
+
+test('integration: a VIEW of a system app\'s App Host is refused like naming it (start.ts runs the lookup first)', async () => {
+  const { explicitTargetRefusal } = await import('../src/lib/intentTarget.ts');
+  const sysLabels: Record<string, { status: string; record?: { appId: string } }> = {
+    settings1: { status: 'active', record: { appId: 'com.aura.settings' } },
+  };
+  const sysRegistry = async () => ({ resolveLabel: async (l: string) => sysLabels[l] ?? labels[l] ?? { status: 'unknown' } });
+  const mgr = {
+    getInstance: () => undefined,
+    getManifest: (id: string) => ({ scopeId: id.startsWith('com.aura.') ? 'system' : 'user' }),
+  };
+  const intent: { action: string; uri: string; appId?: string } = { action: VIEW_ACTION, uri: 'http://settings1--10-201-1-2.nip.io:3000/' };
+  const target = await appHostViewTarget(intent, { registry: sysRegistry });
+  if (target) intent.appId = target;
+  assert.match(String(explicitTargetRefusal(intent, { appId: 'com.aura.browser' }, mgr)), /may not name com\.aura\.settings/);
+  // An ordinary app's App Host still opens.
+  const notes: { action: string; uri: string; appId?: string } = { action: VIEW_ACTION, uri: 'http://notes1234--10-201-1-2.nip.io:3000/' };
+  notes.appId = (await appHostViewTarget(notes, { registry: sysRegistry })) ?? undefined;
+  assert.equal(explicitTargetRefusal(notes, { appId: 'com.aura.browser' }, mgr), null);
+});
