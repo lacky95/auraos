@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getAppManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
-import { checkCustomWrite, loadCustomInterfaces, parseCustomInterface, saveCustomInterfaces } from '../../../../lib/customInterfaces.js';
+import { loadCustomInterfaces, parseCustomInterface, saveCustomInterfaces } from '../../../../lib/customInterfaces.js';
 
 /**
  * User-registered external interfaces (see lib/customInterfaces.ts).
@@ -15,8 +15,6 @@ export const GET: APIRoute = async () => {
 };
 
 export const POST: APIRoute = async ({ request }) => {
-  const denied = checkCustomWrite(request, getAppManager());
-  if (denied) return errorResponse(denied, 403);
   const parsed = parseCustomInterface(await request.json().catch(() => null));
   if (!parsed.ok) return errorResponse(parsed.error, 400);
 

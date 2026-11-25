@@ -5,7 +5,9 @@ import type { AccessSurface } from './types.ts';
  *
  * An entry with `attach` names the call in `attachShellServers`; one with
  * `page` names an Astro page. test/route-access-manifest.test.ts fails when
- * either gains something this list doesn't classify.
+ * either gains something this list doesn't classify. The `.mjs` surfaces ask
+ * their rule through one helper, server/access-bridge.mjs `surfaceGate`,
+ * which refuses in `enforce` what it denies.
  */
 
 const decide = (phase: number, note: string) => ({ ambiguous: true, decision: { phase, note } }) as const;
@@ -43,7 +45,8 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     rule: {
       allow: ['owner'],
       target: 'proxy-upstream',
-      ...decide(3, 'Upgrades never reach Astro middleware, so this needs its own check. It resolves targets through an anonymous loopback GET /api/apps.'),
+      networkCaller: true,
+      note: 'As /api/proxy (D28): the owner, and a tokenless app container by its network address. Upgrades skip the middleware, so surfaceGate checks them; the target lookup carries the internal label.',
     },
   },
   {
@@ -55,7 +58,7 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     rule: {
       allow: ['owner'],
       target: 'proxy-upstream',
-      ...decide(3, 'Behind the App Host gateway: each stream is one shell path the gateway allows, sent with its own signed GET claim and nothing from the upgrade. Streams outlive the session check they started with.'),
+      note: 'The owner, through the app whose App Host session the router verified (surfaceGate at the upgrade). Each stream is then a gateway call checked on its own, and the event streams end when the sign-in is revoked (lib/streamSession.ts).',
     },
   },
   {
@@ -67,7 +70,7 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     rule: {
       allow: ['owner'],
       target: 'system',
-      ...decide(3, 'Anonymous, any origin, firehose by default. The `cs` client session only selects the lock-screen filter and is not a credential. Needs handshake auth and per-topic filtering.'),
+      note: 'The desktop: the owner\'s login, decided at the handshake (surfaceGate). Apps never reach it (D40, exact Origin). The `cs` client session only selects the lock-screen filter.',
     },
   },
   {
@@ -79,7 +82,7 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     rule: {
       allow: ['owner'],
       target: 'kv-entry',
-      ...decide(3, 'Relays kv:changed WITH values for every namespace, including private app/<id> buckets, bypassing the KV route\'s same-app check. Must apply the KV rules per event.'),
+      note: 'kv:changed with values from every namespace: only to a socket whose caller this rule allows (the owner), decided at the handshake; others get no kv:changed.',
     },
   },
   {
@@ -169,7 +172,7 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     rule: {
       allow: ['owner'],
       target: 'system',
-      ...decide(3, 'Under `astro dev`, Vite serves source and files outside Astro\'s routes and middleware. Decide whether enforcement covers it or Normal Mode must use the production build.'),
+      note: 'The owner only: the server.emit wrapper asks surfaceGate before Vite serves source, so enforcement covers `astro dev` too.',
     },
   },
 ];

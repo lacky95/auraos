@@ -36,9 +36,10 @@ export function verifiedAppCaller(
 export async function isOwnerCaller(ctx: Pick<APIContext, 'request' | 'cookies'> & { clientAddress?: string }): Promise<boolean> {
   try {
     const p = await authenticate(ctx.request);
-    // PHASE3-ENFORCE: a `user` principal (the owner's login, or the owner
-    // through a trusted system UI) does not count here yet; `shellOwner`
-    // below decides the desktop's own calls exactly as before Stage 0.
+    // A `user` principal (the owner's login, or the owner through a trusted
+    // system UI) is not enough on its own: `shellOwner` below also wants the
+    // desktop's exact Origin, since a sibling App Host's page sends the login
+    // cookie too (same site) and this types a line as the owner (D29).
     if (!(p instanceof Response) && p.kind === 'admin') return true;
   } catch { /* not an admin session */ }
   try {

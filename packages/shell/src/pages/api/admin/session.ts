@@ -2,7 +2,7 @@ import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { jsonResponse } from '../../../lib/appResponse.js';
 import { readJson } from '../../../lib/notificationCaller.js';
-import { auditAdmin, requireAdmin } from '../../../lib/auth.js';
+import { adminOf, auditAdmin } from '../../../lib/auth.js';
 import { markWelcomeStep } from '../../../lib/onboarding/index.js';
 
 /**
@@ -43,15 +43,13 @@ export const POST: APIRoute = async ({ request }) => {
 };
 
 export const GET: APIRoute = async ({ request }) => {
-  const p = await requireAdmin(request);
-  if (p instanceof Response) return p;
   const s = await core.getAuthServices().admin.verifySession(/^Bearer\s+(\S+)/i.exec(request.headers.get('authorization') ?? '')?.[1] ?? '');
   return jsonResponse({ admin: true, actor: core.ADMIN_AUDIT_LABEL, expiresAt: s?.expiresAt ?? null });
 };
 
-export const DELETE: APIRoute = async ({ request }) => {
-  const p = await requireAdmin(request);
-  if (p instanceof Response) return p;
+export const DELETE: APIRoute = async ({ locals }) => {
+  const p = adminOf(locals);
+  if (!p) return jsonResponse({ error: 'admin-required' }, 401);
   const locked = await core.getAuthServices().admin.lock(p.sessionId);
   await auditAdmin(p, 'session.lock');
   return jsonResponse({ ok: true, locked });

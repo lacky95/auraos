@@ -14,7 +14,7 @@ import { AccessReport } from '../src/lib/access/report.ts';
 import type { ReportRedis } from '../src/lib/access/report.ts';
 import type { RouteAccessManifest } from '../src/lib/access/types.ts';
 import { publicInstance } from '../src/lib/appResponse.ts';
-import { authenticate, requireAdmin } from '../src/lib/auth.ts';
+import { authenticate } from '../src/lib/auth.ts';
 import type { AuthDeps } from '../src/lib/auth.ts';
 import {
   authLogin, authLogout, authSession, authSetup, authStatus, authWhoami, clientRateKey, coreAuthServices, desktopSignIn,
@@ -292,7 +292,7 @@ test('a Valkey blip on an admin session is a service error, never a 401', async 
     admin: { verifySession: async () => { throw new Error('valkey down'); } },
   } as AuthDeps;
   const request = new Request('http://localhost/api/admin/x', { headers: { authorization: 'Bearer aura-admin1.a.b' } });
-  await assert.rejects(requireAdmin(request, deps), /valkey down/);
+  await assert.rejects(authenticate(request, deps), /valkey down/);
   const who = await authWhoami(get({ authorization: 'Bearer aura-admin1.a.b' }), {
     env: {}, services: () => null, authenticate: (r) => authenticate(r, deps),
   });

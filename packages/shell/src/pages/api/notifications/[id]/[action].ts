@@ -2,11 +2,8 @@ import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { errorResponse, jsonResponse } from '../../../../lib/appResponse.js';
 import {
-  notificationErrorResponse, readJson, senderTokenFrom,
+  notificationCaller, notificationErrorResponse, readJson, senderTokenFrom,
 } from '../../../../lib/notificationCaller.js';
-// PHASE3-ENFORCE: the caller as before Stage 0 (a login cookie stays an anonymous screen
-// with its client session); Stage 2 gives notifications the `user` principal.
-import { authenticateLegacy } from '../../../../lib/auth.js';
 import { viewerFor } from '../../../../lib/clientSession.js';
 
 /**
@@ -40,7 +37,7 @@ export const POST: APIRoute = async ({ params, request, url }) => {
   const id = params['id'] ?? '';
   const action = params['action'] ?? '';
   const svc = core.getNotificationService();
-  const principal = await authenticateLegacy(request);
+  const principal = await notificationCaller(request);
   if (principal instanceof Response) return principal;
   const viewer = action === 'remove' ? undefined : await viewerFor(request, principal, { url });
   try {

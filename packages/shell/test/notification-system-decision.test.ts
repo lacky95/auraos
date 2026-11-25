@@ -1,6 +1,7 @@
 // DEV hook POST /api/admin/dev/system-decision (phase 6): scope system is
 // forced, the payload goes through the normal create (schema), and the hook
-// is refused without an admin session and outside the dev server.
+// is refused outside the dev server. The admin session is the route access
+// manifest's (test/access-enforce.test.ts).
 //
 //   cd packages/shell && npx tsx --test test/notification-system-decision.test.ts
 import { test } from 'node:test';
@@ -12,7 +13,7 @@ function deps(over: Partial<SystemDecisionDeps> = {}) {
   const created: Array<Record<string, unknown>> = [];
   const d: SystemDecisionDeps = {
     dev: true,
-    requireAdmin: async () => ({ kind: 'admin' }),
+    admin: { kind: 'admin' },
     audit: async (a, action, e) => { audits.push([a, action, e]); },
     create: async (input) => { created.push(input); return { notification: { id: 'ntf_000000000sys00001' }, warnings: [] }; },
     readJson: async (r) => JSON.parse(await r.text() || '{}'),
@@ -41,14 +42,6 @@ test('route: 404 outside DEV (no admin check, nothing created)', async () => {
   const r = await handleSystemDecision(req({}), d);
   assert.equal(r.status, 404);
   assert.equal(created.length + audits.length, 0);
-});
-
-test('route: refused without an admin session — and the denial is audited', async () => {
-  const { d, created, audits } = deps({ requireAdmin: async () => new Response('{"error":"admin-required"}', { status: 401 }) });
-  const r = await handleSystemDecision(req({ payload: { title: 'x' } }), d);
-  assert.equal(r.status, 401);
-  assert.equal(created.length, 0);
-  assert.deepEqual(audits.map((a) => [a[0], a[1], a[2]['outcome']]), [[null, 'dev.systemDecision', 'denied']]);
 });
 
 test('route: admin + DEV → 201, created with scope system, audited ok; schema errors pass through (400) and are audited', async () => {

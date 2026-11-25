@@ -10,6 +10,10 @@ import type { AppRegistry } from '../app-manager/AppRegistry.js';
  * it declare it in their manifest. `apps.mount` is the first with teeth — it
  * hands one app read/write access to another app's source tree, so auto-granting
  * it is not defensible.
+ *
+ * Phase 3: for a permission the shell's route access manifest names, the
+ * auto-grant counts only outside AURA_ACCESS_ENFORCE=enforce (the shell's
+ * lib/access/decide.ts `strict`). In `enforce` an app must declare it.
  */
 export const ENFORCED_PERMISSIONS: readonly string[] = [
   'apps.mount',

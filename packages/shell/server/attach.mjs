@@ -15,7 +15,9 @@ import { loadAppHostServices } from './app-host-auth.mjs';
 import { terminalEmbedAncestors, watchTerminalInstances } from './terminal-embed.mjs';
 import { buildAppHost } from '@aura/core/host-rules';
 import { originOf } from './host-policy.mjs';
-import { countSurfaceEvent, internalServiceHeaders, reportSurface, surfaceIdentity } from './access-bridge.mjs';
+import {
+  countSurfaceEvent, internalServiceHeaders, reportSurface, requestIdentity, surfaceGate, surfaceIdentity,
+} from './access-bridge.mjs';
 import { stripShellCredentials } from './shell-credentials.mjs';
 
 // Plain-inline mirror of @aura/core/logger's filter spec. These servers are
@@ -156,15 +158,13 @@ export function attachWsProxy(httpServer) {
     let port = null;
     let chosenInstanceId = null;
     let chosenAppId = null;
-    const identity = surfaceIdentity(req.headers, { url: req.url });
+    const identity = requestIdentity(req);
+    const subject = () => (chosenAppId === 'com.aura.terminal' && proxyPath === 'ws' ? 'terminal-pty' : 'ws-proxy');
     let reported = false;
     const reportWs = (status) => {
       if (reported) return;
       reported = true;
-      reportSurface({
-        subject: chosenAppId === 'com.aura.terminal' && proxyPath === 'ws' ? 'terminal-pty' : 'ws-proxy',
-        method: 'UPGRADE', appId: chosenAppId, status, identity,
-      });
+      reportSurface({ subject: subject(), method: 'UPGRADE', appId: chosenAppId, status, identity });
     };
     // Pick the live instance for `instanceId` (an instance id, or an app id).
     const resolve = (apps) => {
@@ -204,6 +204,12 @@ export function attachWsProxy(httpServer) {
     } catch (err) { dbg('WS-PROXY', 'resolve-err', String(err)); }
 
     if (!port) { reportWs(0); dbg('WS-PROXY', 'no-port → destroy', instanceId, `t=${Date.now() - t0}ms`); socket.destroy(); return; }
+    // Upgrades never reach Astro's middleware: the surface's own rule decides (enforce only).
+    if (!(await surfaceGate({ subject: subject(), method: 'UPGRADE', appId: chosenAppId, identity }))) {
+      reportWs(403);
+      try { socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); } catch { /* gone */ }
+      return;
+    }
     dbg('WS-PROXY', 'chose', chosenInstanceId, `host=${host} port=${port}`, `t=${Date.now() - t0}ms`);
 
     // Inject activity header for the upstream upgrade request
@@ -372,9 +378,33 @@ export async function attachSio(httpServer) {
     'permissions:changed',
   ];
 
+  // The handshake decides (enforce only): /os-events for the desktop's owner,
+  // and kv:changed only to a socket whose caller the KV surface rule allows.
+  const identities = new WeakMap();
+  const handshakeIdentity = (socket) => {
+    let id = identities.get(socket);
+    if (!id) {
+      id = surfaceIdentity(socket.handshake?.headers, { url: socket.handshake?.url, peer: socket.handshake?.address ?? null });
+      identities.set(socket, id);
+    }
+    return id;
+  };
+  const kvAllowed = new WeakMap();
+  io.use((socket, next) => {
+    const identity = handshakeIdentity(socket);
+    void Promise.all([
+      surfaceGate({ subject: 'socketio-os-events', method: 'UPGRADE', identity }),
+      surfaceGate({ subject: 'socketio-kv', method: 'UPGRADE', identity }),
+    ]).then(([ok, kv]) => {
+      kvAllowed.set(socket, kv);
+      next(ok ? undefined : new Error('forbidden'));
+    });
+  });
+
   io.on('connection', (socket) => {
     sioDbg('connect', socket.id);
-    reportSurface({ subject: 'socketio-os-events', method: 'UPGRADE', status: 101, identity: surfaceIdentity(socket.handshake?.headers, { url: socket.handshake?.url }) });
+    reportSurface({ subject: 'socketio-os-events', method: 'UPGRADE', status: 101, identity: handshakeIdentity(socket) });
+    const kv = kvAllowed.get(socket) === true;
     const countEmit = (type) => countSurfaceEvent(type === 'kv:changed' ? 'socketio-kv' : 'socketio-os-events');
     let accepts = null;  // null = firehose; otherwise topic matcher
     // Phase 5: the tab's shell client session (handshake auth, then 'cs'
@@ -389,6 +419,7 @@ export async function attachSio(httpServer) {
     const handlers = EVENT_TYPES.map((type) => {
       const fn = (ev) => {
         if (accepts && !accepts(type)) return;
+        if (type === 'kv:changed' && !kv) return;
         if (type.startsWith('notification:')) {
           notifChain = notifChain.then(async () => {
             if (await socketLocked(sid) && await hiddenWhenLocked(ev)) return;

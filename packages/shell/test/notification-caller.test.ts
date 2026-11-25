@@ -1,5 +1,5 @@
 // The notification API's caller rules: identity from authenticate() (lib/auth.ts,
-// the one principal resolver), hints from anonymousCaller.
+// the one principal resolver); Referer and X-Aura-Instance-Id are no hint.
 //
 //   cd packages/shell && npx tsx --test test/notification-caller.test.ts
 import { test } from 'node:test';
@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InstanceTokens } from '@aura/core';
 import { authenticate, type AuthDeps } from '../src/lib/auth.ts';
-import { anonymousCaller, withDeclaredAppHint, senderTokenFrom } from '../src/lib/notificationCaller.ts';
+import { withDeclaredAppHint, senderTokenFrom } from '../src/lib/notificationCaller.ts';
 
 const tokens = new InstanceTokens(join(mkdtempSync(join(tmpdir(), 'aura-nc-')), 'secrets', 'k.key'));
 const instances = new Map([
@@ -51,14 +51,11 @@ test('token of an instance that is gone → 401', async () => {
   assert.match(await (r as Response).text(), /com\.example\.gone-1, which is not running/);
 });
 
-test('Referer / X-Aura-Instance-Id give unverified hints only', () => {
-  const viaHeader = anonymousCaller(req({ 'x-aura-instance-id': 'com.example.notes-1' }), mgr);
-  assert.deepEqual(viaHeader, { kind: 'anonymous', verification: 'unverified', hints: { appId: 'com.example.notes', instanceId: 'com.example.notes-1' } });
-  const viaReferer = anonymousCaller(req({ referer: 'http://aura-shell:3000/api/proxy/com.example.notes-1/index.html' }), mgr);
-  assert.equal(viaReferer.verification, 'unverified');
-  assert.equal(viaReferer.kind, 'anonymous');
-  // unknown claimed instance → no hints at all
-  assert.deepEqual(anonymousCaller(req({ 'x-aura-instance-id': 'com.forged-1' }), mgr), { kind: 'anonymous', verification: 'unverified' });
+test('Referer / X-Aura-Instance-Id are no identity and no hint', async () => {
+  const hints: Array<Record<string, string>> = [{ 'x-aura-instance-id': 'com.example.notes-1' }, { referer: 'http://aura-shell:3000/api/proxy/com.example.notes-1/index.html' }];
+  for (const h of hints) {
+    assert.deepEqual(await authenticate(req(h), deps), { kind: 'anonymous', verification: 'unverified' });
+  }
 });
 
 test('no credentials → anonymous; there is no way to produce a system caller', async () => {

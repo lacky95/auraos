@@ -5,13 +5,17 @@ import type { AccessLevel, AccessRule, AccessTarget, RouteAccessManifest, RouteM
  * Who may call each `/api` route (Q27, Q28). Data only: see types.ts.
  *
  * A route's effective rule is its method entry here, else the baseline of its
- * group. `public` is for health, setup, login and their static assets, and
- * nothing else. test/route-access-manifest.test.ts holds that allowlist and
- * fails on any route or method this file doesn't account for.
+ * group; a route with neither is refused in `enforce` (deny by default). The
+ * policy is Open (D26): verified callers keep today's workflows, anonymous
+ * ones lose them. `public` is for health, setup, login and their static
+ * assets, and nothing else. test/route-access-manifest.test.ts holds that
+ * allowlist and fails on any route or method this file doesn't account for.
  *
  * `decision` marks a rule that needs an answer before it can be enforced. The
- * phase is the one that has to give it: 1 identity, 2 App Hosts, 3 enforcement,
- * 5 runtime boundaries.
+ * phase is the one that has to give it: 1 identity, 2 App Hosts, 5 runtime
+ * boundaries. A rule whose question was answered carries the answer as its
+ * `note`. `guard` marks the check a route made itself before Phase 3, which
+ * the middleware now applies in every access mode (D36).
  */
 
 const rule = (
@@ -21,6 +25,7 @@ const rule = (
 ): AccessRule => ({ allow, target, ...extra });
 
 const decide = (phase: number, note: string) => ({ ambiguous: true, decision: { phase, note } }) as const;
+const why = (note: string) => ({ note }) as const;
 
 const on = (methods: readonly RouteMethod[], r: AccessRule): Partial<Record<RouteMethod, AccessRule>> =>
   Object.fromEntries(methods.map((m) => [m, r]));
@@ -28,35 +33,39 @@ const on = (methods: readonly RouteMethod[], r: AccessRule): Partial<Record<Rout
 const OWNER = ['owner'] as const;
 const INSTANCE = ['own-instance', 'owner'] as const;
 const APP_PERMISSION = ['app-permission', 'owner'] as const;
+/** `app-permission` without permissions: any verified app instance or API key (Open, D26). */
+const VERIFIED = ['app-permission', 'owner'] as const;
+/** Before Phase 3 `requireAdmin`: only the shared admin session (`aura admin login`), in every mode. */
+const ADMIN_SESSION = { credentials: ['admin-session'], guard: 'rule' } as const;
 
 // ── shared open questions ───────────────────────────────────────────────────
 
-const SYSTEM_APP_CALLER = decide(3,
-  'Apps or the SDK call this from an app context. Use the Phase 1 report to decide whether they act for the owner or need an instance rule.');
+const SYSTEM_APP_CALLER = why(
+  'The owner: the desktop, the CLI and agents through a trusted owner agent (D29), and apps only as the owner through a trusted UI (D45). Other apps get no system setting.');
 
 const STATIC_CANDIDATE = decide(1,
   'Public only if the login or setup page needs it. <link>, <img> and <use> send no bearer token, so otherwise it needs a session cookie or App Host handoff.');
 
-const SIDECAR_OWNER_PATH = decide(3,
-  'Today only the instance token passes this gate; no owner path exists. Decide how `aura` reaches it for the owner without borrowing an instance token.');
+const SIDECAR_OWNER_PATH = why(
+  'Only the instance itself, by its own token (was sidecarGate, every mode). No owner path in the alpha: the owner reaches sidecars through the app (`aura exec`, `aura jump`).');
 
-const SIDECAR_TOKENLESS_READ = decide(3,
-  'Answers without a token today. Decide whether the tokenless read stays for `aura get sidecars` once the CLI has an owner identity.');
+const SIDECAR_READ = why(
+  'The instance itself and the owner (`aura get sidecars` from the trusted Terminal, D29). Anonymous callers no longer.');
 
-const NOTIFICATION_READ = decide(3,
-  'Own items need no permission, granted readers need notifications.read, and a shell screen reads a lock-state view through a client session that is not a credential. Map these three callers onto principals.');
+const NOTIFICATION_READ = why(
+  'The owner (the desktop login, whose client session keeps its lock view; the owner through Settings, D45), and any verified app or API key: own items, others only with the notifications.read grant the route checks.');
 
-const NOTIFICATION_USER_OP = decide(3,
-  'A user operation gated by an unlocked client session (not a credential), while senders act on their own items by token. Decide the principal for the desktop path.');
+const NOTIFICATION_USER_OP = why(
+  'The owner, whose screen must be unlocked (the route checks its client session), and verified senders on their own items. Anonymous callers no longer.');
 
-const CUSTOM_INTERFACE_WRITE = decide(3,
-  'A caller without a Referer passes checkCustomWrite today, and this permission auto-grants. Enforcement needs a verified caller and the permission added to ENFORCED_PERMISSIONS.');
+const CUSTOM_INTERFACE_WRITE = why(
+  'The owner, or an app holding system.kv.os.interfaces.write (was checkCustomWrite on the Referer; now the verified app, in every mode). Undeclared stops counting in enforce.');
 
-const DATA_ACCESS = decide(3,
-  'A missing Referer counts as `system`, and data:* permissions auto-grant today. Decide whether the owner bypasses provider permissions and move callers to instance tokens.');
+const DATA_ACCESS = why(
+  'The owner reaches any provider (the desktop, the CLI); an app needs the provider entry\'s permission unless it is the provider. Was the Referer check; now the verified app, in every mode. Auto-grants stop counting in enforce.');
 
-const PROXY_ACCESS = decide(2,
-  'Owner-only as proposed, but iframes cannot send a bearer token and apps call each other (including MCP) through this path. Replace with the App Host login handoff and caller-scoped grants; GET can cold-start an app.');
+const PROXY_ACCESS = why(
+  'D28: the owner, and a tokenless call from an app container (Claude Code\'s MCP URLs, the Terminal\'s session calls, the agent hooks), known by its network address. The SDK never sends a token on this path, and a gateway call stays refused. Caller-scoped grants are Phase 5.');
 
 // ── group baselines ─────────────────────────────────────────────────────────
 
@@ -85,26 +94,41 @@ const groups: RouteAccessManifest['groups'] = {
 
 const staticAsset = { methods: on(['GET'], rule(['public', 'owner'], 'system', STATIC_CANDIDATE)) };
 
-const sidecar = (permissions: readonly string[], extra: Omit<AccessRule, 'allow' | 'target'> = {}) =>
-  rule(INSTANCE, 'sidecar', { targetPermissions: permissions, ...extra });
+/** Was sidecarGate: the instance's own token, its app's permissions, in every mode. */
+const sidecar = (permissions: readonly string[]) =>
+  rule(['own-instance'], 'sidecar', {
+    targetPermissions: permissions, credentials: ['instance-token'], guard: 'rule', ...SIDECAR_OWNER_PATH,
+  });
 
-const notificationRead = rule(APP_PERMISSION, 'notification', { permissions: ['notifications.read'], ...NOTIFICATION_READ });
-const notificationUserOp = rule(APP_PERMISSION, 'notification', NOTIFICATION_USER_OP);
+const notificationRead = rule(VERIFIED, 'notification', NOTIFICATION_READ);
+const notificationUserOp = rule(VERIFIED, 'notification', NOTIFICATION_USER_OP);
 
 const customInterfaceWrite = rule(APP_PERMISSION, 'interface', {
   permissions: ['system.kv.os.interfaces.write'],
+  guard: 'app-callers',
   ...CUSTOM_INTERFACE_WRITE,
 });
 
-const dataRead = rule(['app-permission'], 'data-provider', { permissions: ['data:<authority>:<readPermission>'], ...DATA_ACCESS });
-const dataWrite = rule(['app-permission'], 'data-provider', { permissions: ['data:<authority>:<writePermission>'], ...DATA_ACCESS });
+const dataRead = rule(APP_PERMISSION, 'data-provider', {
+  permissions: ['data:<authority>:<readPermission>'], guard: 'app-callers', ...DATA_ACCESS,
+});
+const dataWrite = rule(APP_PERMISSION, 'data-provider', {
+  permissions: ['data:<authority>:<writePermission>'], guard: 'app-callers', ...DATA_ACCESS,
+});
+
+/** Was `requireAdmin` in the route. */
+const adminSession = (note: string) => rule(OWNER, 'system', { ...ADMIN_SESSION, ...why(note) });
 
 // ── per-route refinements ───────────────────────────────────────────────────
 
 const routes: RouteAccessManifest['routes'] = {
   // Login and setup (Q27).
   '/api/admin/session': {
-    methods: { POST: rule(['public'], 'session') },
+    methods: {
+      POST: rule(['public'], 'session'),
+      GET: adminSession('Reports the admin session it is called with.'),
+      DELETE: adminSession('Locks the admin session it is called with.'),
+    },
   },
   '/api/admin/first-boot': {
     methods: {
@@ -115,11 +139,59 @@ const routes: RouteAccessManifest['routes'] = {
     // The build transcript is not setup status.
     variants: [{ id: 'build-log', methods: ['GET'], match: { on: 'query', name: 'log' }, rule: rule(OWNER, 'system') }],
   },
-  '/api/admin/access-report': { methods: { GET: rule(OWNER, 'system') } },
+  '/api/admin/access-report': { methods: { GET: adminSession('The access report names apps and callers.') } },
   '/api/admin/onboarding': {
     methods: {
       GET: rule(OWNER, 'system', decide(1, 'Reports setupDoneAt. Decide whether the setup page reads it before login or uses first-boot status instead.')),
+      POST: adminSession('Resets onboarding and the first-boot card.'),
     },
+  },
+  // The operator credential's routes stay on the admin session in every mode
+  // (until the Phase 4 ledger): grants, keys and the audit trail, and changes
+  // to what code runs under an app id.
+  '/api/admin/grants': {
+    methods: on(['GET', 'POST', 'DELETE'], adminSession('Privileged permission grants: operator only.')),
+  },
+  '/api/admin/api-keys': {
+    methods: on(['GET', 'POST', 'DELETE'], adminSession('API keys: operator only.')),
+  },
+  '/api/admin/audit': { methods: { GET: adminSession('The audit trail: operator only.') } },
+  '/api/admin/manifest-edit': {
+    methods: { POST: adminSession('Edits an app\'s permissions and tools: operator only.') },
+  },
+  '/api/admin/notifications/release': {
+    methods: { POST: adminSession('Releases blocking system modals: operator only.') },
+  },
+  '/api/admin/dev/system-decision': {
+    methods: { POST: adminSession('A dev hook that raises a system decision: operator only.') },
+  },
+  '/api/admin/app-origin': {
+    variants: [{
+      id: 'reassign',
+      methods: ['POST'],
+      match: { on: 'body', field: 'mode', equals: 'reassign', read: true },
+      rule: adminSession('Gives an app another identity: operator only. Assigning a missing one needs no admin.'),
+    }],
+  },
+  '/api/admin/clone-app': {
+    variants: [{
+      id: 'force',
+      methods: ['POST'],
+      match: { on: 'body', field: 'force', equals: true, read: true },
+      rule: adminSession('Overwriting an app replaces the code under its id: operator only. Decided on `force: true` alone, since the route checks the existing copy after the rule.'),
+    }],
+  },
+  '/api/admin/scaffold': {
+    variants: [{
+      id: 'force',
+      methods: ['POST'],
+      match: { on: 'body', field: 'force', equals: true, read: true },
+      rule: adminSession('Overwriting an app replaces the code under its id: operator only. Decided on `force: true` alone, as clone-app.'),
+    }],
+  },
+  // D29: the owner's trusted terminal acts for the owner, so `aura enable|disable app` works from it.
+  '/api/admin/apps/enabled': {
+    methods: on(['GET', 'POST'], rule(OWNER, 'system', why('The owner: the desktop, Settings (D45) and `aura enable|disable app` from the trusted Terminal (D29).'))),
   },
 
   // Owner login (D6, D37), always on.
@@ -129,12 +201,12 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/auth/setup': { methods: { POST: rule(['public'], 'system') } },
   '/api/auth/login': { methods: { POST: rule(['public'], 'session') } },
   '/api/auth/logout': {
-    methods: { POST: rule(OWNER, 'session', decide(3,
-      'Acts only on the session in its own cookie. Enforcement must let an expired session through to clear the cookie, or the handler has to become public.')) },
+    methods: { POST: rule(OWNER, 'session', why(
+      'The signed-in owner. An expired session needs no logout: its cookie is worthless, and the next sign-in replaces it.')) },
   },
   '/api/auth/session': {
-    methods: { GET: rule(OWNER, 'session', decide(3,
-      'Answers authenticated:false to a visitor without a session. Decide whether enforcement keeps that answer or returns 401 first.')) },
+    methods: { GET: rule(OWNER, 'session', why(
+      'The signed-in owner. A visitor without a session gets 401 in enforce, which says the same as authenticated:false.')) },
   },
   // Settings → Users & Identities. A password is typed only into the shell's
   // own dialog, so those two stay on target `session`, which no app reaches
@@ -147,8 +219,8 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/auth/account': { methods: { GET: rule(OWNER, 'system') } },
   '/api/auth/sessions/revoke-others': { methods: { POST: rule(OWNER, 'system') } },
   '/api/auth/whoami': {
-    methods: { GET: rule(INSTANCE, 'session', decide(3,
-      'Reflects only the caller, and a login cookie is labelled information. Anonymous and API-key callers count as would-deny here; decide at enforcement whether they keep an answer.')) },
+    methods: { GET: rule(['own-instance', 'app-permission', 'owner'], 'session', why(
+      'Reflects only the caller: any verified one, API keys too. An anonymous caller gets 401 in enforce, which `aura whoami` reports as rejected.')) },
   },
 
   // Static candidates for the login page; everything else in `os` stays owner.
@@ -179,11 +251,11 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/os/layouts': { methods: { GET: rule(OWNER, 'system', SYSTEM_APP_CALLER) } },
   '/api/os/keymap': { methods: { GET: rule(OWNER, 'system', SYSTEM_APP_CALLER) } },
   '/api/os/ui/command': {
-    methods: { POST: rule(OWNER, 'system', decide(3, 'Drives the browser UI and is never public. Agents call it from the Terminal; settle with the D29 caller table.')) },
+    methods: { POST: rule(OWNER, 'system', why('Drives the browser UI: the owner, and agents through a trusted owner agent (the Terminal, the shell MCP, D29). Other apps none.')) },
   },
   '/api/os/lock': { methods: { POST: rule(OWNER, 'system', SYSTEM_APP_CALLER) } },
   '/api/os/unlock': {
-    methods: { POST: rule(OWNER, 'system', decide(3, 'Never public. The lock screen has no PIN today, so unlocking must not count as authentication.')) },
+    methods: { POST: rule(OWNER, 'system', why('The signed-in owner unlocks a screen; unlocking is not authentication, so the login is what counts.')) },
   },
   '/api/os/clients': {
     methods: { POST: rule(OWNER, 'client-session', decide(1, 'A tab registers before it may have logged in. Decide whether the login page needs a client session.')) },
@@ -191,62 +263,66 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/os/clients/[sid]/[action]': { methods: { POST: rule(OWNER, 'client-session') } },
 
   // Instances: the URL names the target, so the check is on that instance.
+  // `targetPermissions` here were the routes' own hasPermission checks: every mode.
   '/api/instances/[instanceId]/ports': {
-    methods: { POST: rule(INSTANCE, 'instance', { targetPermissions: ['apps.port'] }) },
+    methods: { POST: rule(INSTANCE, 'instance', { targetPermissions: ['apps.port'], guard: 'target-permissions' }) },
     variants: [
       {
         id: 'into',
         methods: ['POST'],
-        match: { on: 'body', field: 'kind', equals: 'into' },
+        match: { on: 'body', field: 'kind', equals: 'into', read: true },
         rule: rule(INSTANCE, 'instance-pair', {
           targetPermissions: ['apps.port'],
-          ...decide(3, 'Only the target app is checked today, so any app with apps.port can pull in another app\'s port. Decide what the SOURCE app must consent to.'),
+          guard: 'target-permissions',
+          ...why('The target instance itself or the owner, and the target app holds apps.port. The source app\'s consent is a Zero Trust grant (Phase 5).'),
         }),
       },
       {
         id: 'host',
         methods: ['POST'],
-        match: { on: 'body', field: 'kind', equals: 'host' },
-        rule: rule(INSTANCE, 'instance', {
+        match: { on: 'body', field: 'kind', equals: 'host', read: true },
+        rule: rule(OWNER, 'instance', {
           targetPermissions: ['apps.port'],
-          ...decide(3, 'bindAddr can be 0.0.0.0, which publishes an app beyond this machine. Decide whether a non-loopback bind needs the owner.'),
+          guard: 'target-permissions',
+          ...why('Publishing on the host (bindAddr may be 0.0.0.0) is the owner\'s call: `aura port expose` from the trusted Terminal.'),
         }),
       },
     ],
   },
   '/api/instances/[instanceId]/ports/[portId]': {
-    methods: { DELETE: rule(INSTANCE, 'instance', { targetPermissions: ['apps.port'] }) },
+    methods: { DELETE: rule(INSTANCE, 'instance', { targetPermissions: ['apps.port'], guard: 'target-permissions' }) },
   },
   '/api/instances/[instanceId]/mounts': {
-    methods: { POST: rule(INSTANCE, 'instance-pair', { targetPermissions: ['apps.mount'] }) },
+    methods: { POST: rule(INSTANCE, 'instance-pair', { targetPermissions: ['apps.mount'], guard: 'target-permissions' }) },
     variants: [{
       id: 'read-write',
       methods: ['POST'],
-      match: { on: 'body', field: 'mode', equals: 'rw' },
-      rule: rule(INSTANCE, 'instance-pair', {
+      match: { on: 'body', field: 'mode', equals: 'rw', read: true },
+      rule: rule(OWNER, 'instance-pair', {
         targetPermissions: ['apps.mount'],
-        ...decide(3, 'Q30: write access needs approval, and read-only mounts are limited to shared paths. The approval flow lands with enforcement.'),
+        guard: 'target-permissions',
+        ...why('Q30: write access to another app\'s files is the owner\'s call (`aura mount add --wr` from the trusted Terminal); an app asking for it gets an approval once stream B\'s flow covers mounts.'),
       }),
     }],
   },
   '/api/instances/[instanceId]/mounts/[mountId]': {
-    methods: { DELETE: rule(INSTANCE, 'instance', { targetPermissions: ['apps.mount'] }) },
+    methods: { DELETE: rule(INSTANCE, 'instance', { targetPermissions: ['apps.mount'], guard: 'target-permissions' }) },
   },
   '/api/instances/[instanceId]/sidecars': {
     methods: {
-      GET: rule(INSTANCE, 'instance', SIDECAR_TOKENLESS_READ),
-      POST: sidecar(['sidecars.spawn'], SIDECAR_OWNER_PATH),
+      GET: rule(INSTANCE, 'instance', SIDECAR_READ),
+      POST: sidecar(['sidecars.spawn']),
     },
     variants: [
       { id: 'managed-view', methods: ['GET'], match: { on: 'query', name: 'view', equals: 'managed' }, rule: sidecar(['sidecars.spawn']) },
-      { id: 'with-tools', methods: ['POST'], match: { on: 'body', field: 'tools' }, rule: sidecar(['sidecars.spawn', 'sidecars.tools'], SIDECAR_OWNER_PATH) },
+      { id: 'with-tools', methods: ['POST'], match: { on: 'body', field: 'tools', read: true }, rule: sidecar(['sidecars.spawn', 'sidecars.tools']) },
     ],
   },
   '/api/instances/[instanceId]/sidecars/[name]': {
     methods: on(['GET', 'DELETE'], sidecar(['sidecars.spawn'])),
   },
   '/api/instances/[instanceId]/sidecars/[name]/exec': {
-    methods: { POST: sidecar(['sidecars.spawn'], SIDECAR_OWNER_PATH) },
+    methods: { POST: sidecar(['sidecars.spawn']) },
   },
   '/api/instances/[instanceId]/sidecars/[name]/logs': {
     methods: { GET: sidecar(['sidecars.spawn']) },
@@ -262,7 +338,7 @@ const routes: RouteAccessManifest['routes'] = {
   },
   '/api/instances/[instanceId]/sidecars/[name]/tools': {
     methods: {
-      GET: rule(INSTANCE, 'sidecar', SIDECAR_TOKENLESS_READ),
+      GET: rule(INSTANCE, 'sidecar', SIDECAR_READ),
       POST: sidecar(['sidecars.tools']),
       DELETE: sidecar(['sidecars.tools']),
     },
@@ -271,14 +347,14 @@ const routes: RouteAccessManifest['routes'] = {
   // Apps.
   '/api/apps': {
     methods: {
-      GET: rule(OWNER, 'app', decide(3,
-        'The WS proxy, App Host router and apps all read this. The first two call over loopback with no identity, so they need an internal credential or a direct lookup before enforcement.')),
+      GET: rule(OWNER, 'app', why(
+        'The owner (the CLI through the trusted Terminal). The WS proxy\'s and App Host router\'s loopback lookups carry the internal label (observer.ts INTERNAL_CALLS), which the gate lets through as the shell.')),
     },
   },
   '/api/apps/events': {
     methods: {
-      GET: rule(INSTANCE, 'system', decide(3,
-        'App Host callers get a filtered per-caller view (lib/access/gatewayEvents.ts). A non-gateway instance still gets the full stream, with kv:changed values from every namespace, until it moves to that view.')),
+      GET: rule(INSTANCE, 'system', why(
+        'The owner gets the whole stream; an app instance its own per-caller view (lib/access/gatewayEvents.ts), on the gateway and off it.')),
     },
   },
 
@@ -292,7 +368,7 @@ const routes: RouteAccessManifest['routes'] = {
       // action: the extra is refused however the intent names its target.
       id: 'terminal-command',
       methods: ['POST'],
-      match: { on: 'body', field: 'extras.command', readAtGateway: true },
+      match: { on: 'body', field: 'extras.command', read: true },
       rule: rule(INSTANCE, 'app', { systemApp: 'com.aura.terminal' }),
     }],
   },
@@ -340,23 +416,31 @@ const routes: RouteAccessManifest['routes'] = {
   // Interfaces: identity is self-asserted today (see lib/access/identify.ts).
   '/api/interfaces': {
     methods: {
-      GET: rule(['own-instance'], 'interface', decide(3,
-        'Open to everyone today. The Settings panel and `curl` from the Terminal read it too, so decide whether the owner is added.')),
+      GET: rule(VERIFIED, 'interface', {
+        networkCaller: true,
+        ...why('The registry lists what apps declare: the owner, any verified app, and a tokenless `curl` from an app container (D28, the documented Terminal tour). Anonymous no longer.'),
+      }),
+      POST: rule(['own-instance'], 'interface', { guard: 'rule', ...why('Registers for the calling instance itself, verified (was a self-asserted hint, every mode).') }),
     },
+  },
+  '/api/interfaces/[name]': {
+    methods: { DELETE: rule(['own-instance'], 'interface', { guard: 'rule', ...why('Unregisters the calling instance\'s own entry, verified (was a self-asserted hint, every mode).') }) },
   },
   '/api/interfaces/custom': { methods: { POST: customInterfaceWrite } },
   '/api/interfaces/custom/[name]': { methods: { PUT: customInterfaceWrite, DELETE: customInterfaceWrite } },
 
   // Catch-alls: `ALL` handlers, so every method is listed.
   '/api/kv/[...path]': {
-    methods: on(ROUTE_METHODS, rule([], 'kv-entry')),
+    // The route's own checks applied to app callers (an app named by its
+    // Referer, which no longer counts): `guard: 'app-callers'`, every mode.
+    methods: on(ROUTE_METHODS, rule([], 'kv-entry', { guard: 'app-callers' })),
     variants: [
       {
         id: 'os-read',
         methods: ['GET', 'HEAD'],
         match: { on: 'namespace', namespace: 'os' },
-        rule: rule(INSTANCE, 'kv-entry', decide(3,
-          'Every instance could read every os.* key. Check the keys for anything an app should not see before enforcing.')),
+        rule: rule(INSTANCE, 'kv-entry', why(
+          'The owner and any app instance (theme, keymap, workspaces). Secrets live under /api/os/context, never here; the os event view is a key allowlist (gatewayEvents.ts).')),
       },
       {
         id: 'os-write',
@@ -364,14 +448,15 @@ const routes: RouteAccessManifest['routes'] = {
         match: { on: 'namespace', namespace: 'os' },
         rule: rule(APP_PERMISSION, 'kv-entry', {
           permissions: ['system.kv.os.<topic>.write'],
-          ...decide(3, 'This permission auto-grants today and a missing Referer counts as `system`. Enforcement needs a verified caller and these keys in ENFORCED_PERMISSIONS.'),
+          guard: 'app-callers',
+          ...why('The owner (also through Settings, D45, and the trusted owner agents, D29), or an app holding system.kv.os.<topic>.write. A caller without a credential is no longer `system` in enforce.'),
         }),
       },
       {
         id: 'app-entry',
         methods: ['GET', 'HEAD', 'POST', 'PUT', 'DELETE'],
         match: { on: 'namespace', namespace: 'app' },
-        rule: rule(INSTANCE, 'app'),
+        rule: rule(INSTANCE, 'app', { guard: 'app-callers' }),
       },
     ],
   },
@@ -379,12 +464,12 @@ const routes: RouteAccessManifest['routes'] = {
     methods: {
       ...on(['GET', 'HEAD'], dataRead),
       ...on(['POST', 'PUT', 'PATCH', 'DELETE'], dataWrite),
-      ...on(['OPTIONS', 'OTHER'], rule([], 'data-provider', decide(3,
-        'The handler forwards these upstream under the write permission. Denied here until a provider is shown to need them.'))),
+      ...on(['OPTIONS', 'OTHER'], rule([], 'data-provider', why(
+        'Denied: no provider needs them (none in the access reports), and the handler would forward them under the write permission.'))),
     },
   },
   '/api/proxy/[id]/[...path]': {
-    methods: on(ROUTE_METHODS, rule(OWNER, 'proxy-upstream', PROXY_ACCESS)),
+    methods: on(ROUTE_METHODS, rule(OWNER, 'proxy-upstream', { networkCaller: true, ...PROXY_ACCESS })),
   },
 };
 

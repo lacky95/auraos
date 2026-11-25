@@ -1,8 +1,11 @@
 /**
  * Vocabulary of the route access manifest (routeManifest.ts, surfaceManifest.ts).
  *
- * No request is allowed or refused because of a rule. Phase 1 reads these
- * rules in report-only mode (observer.ts); Phase 3 enforces them.
+ * AURA_ACCESS_ENFORCE (server/access-mode.mjs) picks what a rule does: in
+ * `enforce` the middleware and the surface gate refuse what it denies
+ * (enforce.ts, access-bridge.mjs `surfaceGate`); in `report` it is only
+ * counted (observer.ts). A rule's `guard` is applied in every mode: it is
+ * the check its route made itself before Phase 3 (D36).
  */
 import type { AccessPrincipal, PrincipalClass } from '@aura/core';
 
@@ -55,11 +58,39 @@ export interface AccessRule {
   /** Needs a fresh authentication (5.11). No route sets it yet. */
   freshAuth?: true;
   /**
+   * Only a principal established this way counts (identify.ts
+   * `resolvePrincipal`). The rest are refused, whatever their level.
+   */
+  credentials?: readonly AccessVia[];
+  /**
+   * D28: a caller without any credential counts as the app instance whose
+   * container network address it calls from (identify.ts `networkInstance`),
+   * and that is enough for this rule. Never a gateway or token caller.
+   */
+  networkCaller?: true;
+  /**
+   * What the route checked itself before Phase 3, which moved here (D36). The
+   * middleware applies it in EVERY access mode; the rest of the rule only in
+   * `enforce`. Permissions are read as before (core's MVP auto-grant counts).
+   *   rule                the whole rule, for every caller
+   *   app-callers         the whole rule, for a caller that is an app: an
+   *                       instance, or a user acting through one (judged as
+   *                       that app). Anyone else passes, as `system` did.
+   *   target-permissions  only `targetPermissions`, for every caller, once
+   *                       the target is known (else the route answers 404)
+   */
+  guard?: AccessGuard;
+  /** Why the rule is what it is, once its open question was answered. */
+  note?: string;
+  /**
    * The `app` target is this app, and only while its system-scope copy is the
    * one installed: an app of the same id in another scope doesn't qualify.
    */
   systemApp?: string;
 }
+
+export const ACCESS_GUARDS = ['rule', 'app-callers', 'target-permissions'] as const;
+export type AccessGuard = (typeof ACCESS_GUARDS)[number];
 
 /** The part of a request, beyond its method, that selects a variant. */
 export type AccessMatch =
@@ -69,12 +100,13 @@ export type AccessMatch =
     on: 'body';
     /** Dotted path into the JSON body. */
     field: string;
-    equals?: string;
+    equals?: string | boolean;
     /**
-     * The App Host gateway parses the body and settles this variant. Everywhere
-     * else a body variant stays unread and counts at its strictest.
+     * The middleware and the App Host gateway parse the JSON body (a clone,
+     * capped) and settle this variant. Otherwise a body variant stays unread
+     * and counts at its strictest; the report never reads a body.
      */
-    readAtGateway?: true;
+    read?: true;
   };
 
 /** A rule for some requests of a method. First match wins, else the method's rule. */
@@ -146,8 +178,10 @@ export type PolicyOutcome = (typeof POLICY_OUTCOMES)[number];
 export const ACCESS_REASONS = [
   // allowed, by the level that matched
   'public', 'owner', 'own-instance', 'app-permission', 'system',
-  // allowed only because core has not enforced this permission yet
+  // allowed only because core has not enforced this permission yet (never in `enforce`)
   'auto-granted',
+  // D28: a tokenless call from an app container's network address
+  'network-caller',
   // refused
   'unclassified', 'unauthenticated', 'wrong-principal', 'wrong-target',
   'missing-permission', 'missing-target-permission', 'rule-denied', 'ambiguous-rule',
@@ -163,6 +197,8 @@ export const ACCESS_VIAS = [
   // a signed App Host gateway claim / a verified App Host cookie session
   'gateway', 'app-host',
   'referer-hint', 'instance-id-hint', 'internal', 'sse-mux',
+  // D28: no credential, but the container network address of a running instance
+  'network',
   // a credential that isn't a valid Aura one / one that can't be checked right now
   'foreign-or-invalid', 'unverified',
   'none',
@@ -223,6 +259,8 @@ export interface AccessBridge {
   identify(facts: SurfaceFacts): Promise<VerifiedIdentity | null>;
   /** A surface event: the bridge checks it, runs `decide()` and counts it. */
   observeSurface(observation: SurfaceObservation): void;
+  /** The decision for a surface about to proceed, as `enforce` applies it. Never counted, never throws. */
+  decideSurface(observation: SurfaceObservation): Promise<SurfaceDecision>;
   /** A high-frequency event on a surface: a counter only. */
   countEvent(subject: string): void;
   countCredential(kind: string, surface: string): void;
@@ -236,6 +274,12 @@ export interface SurfaceFacts {
   method?: unknown;
   url?: unknown;
   appHost?: unknown;
+}
+
+/** What `.mjs` surfaces ask the surface gate (access-bridge.mjs `surfaceGate`). */
+export interface SurfaceDecision {
+  outcome: PolicyOutcome;
+  reason: AccessReason;
 }
 
 /** What the principal resolver (identify.ts `resolvePrincipal`) made of a request. Never a credential. */
@@ -255,6 +299,8 @@ export interface SurfaceIdentity {
   /** Hints for the report's app column only. */
   referer: string | null;
   instanceId: string | null;
+  /** The socket peer address: names an app container for a `networkCaller` rule (D28). */
+  peer?: string | null;
 }
 
 /** What a `.mjs` server sends. Untyped there, so all of it is validated. */
@@ -321,7 +367,13 @@ export interface DecideInput {
   action: PolicyAction;
   resource: PolicyResource;
   transport: PolicyTransport;
-  auth: { fresh: boolean };
+  /** `via`: how the principal was established, for `credentials` and `networkCaller`. */
+  auth: { fresh: boolean; via?: AccessVia };
+  /**
+   * `enforce` (D36 fold of core's ENFORCED_PERMISSIONS): a permission core
+   * only auto-grants does not count. Outside `enforce` it does, as before.
+   */
+  strict?: boolean;
   accessProfile: AccessProfile;
   systemMode: SystemMode;
   deployment: DeploymentKind;

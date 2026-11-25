@@ -1,13 +1,13 @@
 // Namespace import: the running shell may cache a core build without the
 // auth exports; a named import would 500 every route until restart.
 import * as core from '@aura/core';
-import type { AdminPrincipal, Principal, UserPrincipal } from '@aura/core';
+import type { AdminPrincipal, AppManager, Principal } from '@aura/core';
 import { errorResponse, jsonResponse } from './appResponse.js';
 import {
   bearerToken, resolvePrincipal, type CredentialRejection, type GatewayOwnerDeps, type PrincipalDeps,
+  type ResolvedPrincipal,
 } from './access/identify.js';
 import { coreAuthServices, ownerSessionOf, sessionCookieToken } from './authSurface.js';
-import { anonymousCaller, type CallerAuthManager } from './notificationCaller.js';
 
 /**
  * Central request authentication for the shell API (identity only — what a
@@ -29,8 +29,9 @@ import { anonymousCaller, type CallerAuthManager } from './notificationCaller.js
  *                                          UI alone, and only on a path that UI covers
  *                                          (identify.ts `gatewayOwner`, the one D45 scope decision)
  *
- * Phase 3 Stage 0 is report-only: the routes that act on a principal call
- * `authenticateLegacy`, which answers as before for the new `user` cases.
+ * Who may call a route is not decided here: the route access manifest says,
+ * and the middleware applies it (lib/access/enforce.ts). Routes ask this for
+ * the caller they act for.
  *
  * `SYSTEM_PRINCIPAL` is unreachable from HTTP by construction.
  *
@@ -38,10 +39,8 @@ import { anonymousCaller, type CallerAuthManager } from './notificationCaller.js
  * request headers to app upstreams, so a cookie would leak to every app.
  */
 
-const ADMIN_SESSION_PREFIX = 'aura-admin1.';
-
 export interface AuthDeps {
-  mgr: CallerAuthManager;
+  mgr: Pick<AppManager, 'tokens' | 'getInstance' | 'getManifest'>;
   /** App Host services for the D45 owner check; loaded when absent. */
   ownerServices?: GatewayOwnerDeps['services'];
   apiKeys: { verify(key: string): Promise<{ id: string; name: string; scopes: string[] } | null> };
@@ -91,69 +90,33 @@ function refusal(rejected: { reason: CredentialRejection; instanceId?: string })
   }
 }
 
-export async function authenticate(request: Request, deps: AuthDeps = defaultAuthDeps()): Promise<Principal | Response> {
-  const r = await resolvePrincipal(request, {
+/** The verifying resolver behind `authenticate()`. The middleware's access gate decides on it too. */
+export function resolveCaller(request: Request, deps: AuthDeps = defaultAuthDeps()): Promise<ResolvedPrincipal> {
+  return resolvePrincipal(request, {
     mgr: deps.mgr as unknown as PrincipalDeps['mgr'],
     apiKeys: deps.apiKeys,
     admin: deps.admin,
     login: deps.login ?? null,
     ownerServices: deps.ownerServices,
   });
+}
+
+export async function authenticate(request: Request, deps: AuthDeps = defaultAuthDeps()): Promise<Principal | Response> {
+  const r = await resolveCaller(request, deps);
   if (r.rejected) return refusal(r.rejected);
   if (r.principal.kind !== 'anonymous') return r.principal;
   // A credential that could not be checked is never anonymous.
   if (r.via === 'unverified' && bearerToken(request) !== null) return refusal({ reason: 'credential-invalid' });
-  return anonymousCaller(request, deps.mgr);
-}
-
-/** What `authenticate()` returned before Phase 3 Stage 0: never a `user`. */
-export type LegacyPrincipal = Exclude<Principal, UserPrincipal>;
-
-/**
- * PHASE3-ENFORCE: `authenticate()` as it answered before Stage 0, for the
- * routes that act on the principal today (notifications, whoami). Stage 0
- * resolves the owner's login and the user an instance acts for, and only
- * reports them, so these routes keep their outcomes. Stage 2 (A. Enforcement)
- * gives them the user rules and removes this:
- *   - a login cookie → anonymous with hints (a shell screen then reads
- *     notifications through its client session, as before)
- *   - an `aura-sess1.` bearer → 401, as before
- *   - the owner through a trusted system UI (D45), without its admin bearer
- *     → that UI's instance, as before
- *   - an instance acting for a user → the instance, without `userId`
- */
-export async function authenticateLegacy(request: Request, deps: AuthDeps = defaultAuthDeps()): Promise<LegacyPrincipal | Response> {
-  const p = await authenticate(request, deps);
-  if (p instanceof Response) return p;
-  if (p.kind === 'instance') {
-    const { userId: _user, systemId: _system, ...instance } = p;
-    return instance;
-  }
-  if (p.kind !== 'user') return p;
-  if (p.through?.instanceId) {
-    return { kind: 'instance', appId: p.through.appId, instanceId: p.through.instanceId, verification: 'verified' };
-  }
-  if (bearerToken(request) !== null) return refusal({ reason: 'credential-invalid' });
-  return anonymousCaller(request, deps.mgr);
+  return { kind: 'anonymous', verification: 'unverified' };
 }
 
 /**
- * Route guard: the request must carry a valid admin session. Anything else
- * (no credential, another principal, an invalid or expired session) → 401
- * `{error:'admin-required'}` — the CLI uses that code to offer a login.
+ * The admin session a route's rule required (routeManifest `credentials`), as
+ * the middleware's gate verified it (`locals.access`), for audit attribution.
  */
-export async function requireAdmin(request: Request, deps?: AuthDeps): Promise<AdminPrincipal | Response> {
-  const token = bearerToken(request);
-  if (!token || !token.startsWith(ADMIN_SESSION_PREFIX)) {
-    return unauthorized('admin-required',
-      'admin session required — run `aura admin login` (CLI) or use "Unlock admin" in Settings → Notifications & access, then send Authorization: Bearer <session>');
-  }
-  const p = await authenticate(request, deps ?? defaultAuthDeps());
-  if (p instanceof Response) {
-    return unauthorized('admin-required', 'admin session invalid or expired — unlock admin again (`aura admin login`)');
-  }
-  if (p.kind !== 'admin') return unauthorized('admin-required', 'admin session required');
-  return p;
+export function adminOf(locals: App.Locals | undefined): AdminPrincipal | null {
+  const p = locals?.access?.principal;
+  return p?.kind === 'admin' ? p as AdminPrincipal : null;
 }
 
 /** Append an admin change to the `audit:admin` stream (never throws). */

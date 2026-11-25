@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync, chmodSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, normalize, dirname, resolve } from 'node:path';
 import { getAppManager } from '@aura/core';
-import { auditAdmin, requireAdmin } from '../../../lib/auth.js';
+import { adminOf, auditAdmin } from '../../../lib/auth.js';
 
 /**
  * Server-side app scaffolding.
@@ -69,7 +69,7 @@ interface ScaffoldRequest {
   scope?: ScopeId;
 }
 
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = async ({ request, locals }) => {
   let body: ScaffoldRequest;
   try { body = await request.json() as ScaffoldRequest; }
   catch { return json({ error: 'invalid-json' }, 400); }
@@ -108,8 +108,7 @@ export const POST: APIRoute = async ({ request }) => {
   // and with it whatever was granted to that id. That needs an admin session.
   // Creating a new app does not.
   if (existsSync(dest) && force) {
-    const admin = await requireAdmin(request);
-    if (admin instanceof Response) return admin;
+    const admin = adminOf(locals);
     await auditAdmin(admin, 'app.scaffold-overwrite', { target: `app:${appId}`, detail: { scope } });
   }
 

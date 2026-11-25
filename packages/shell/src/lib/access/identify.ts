@@ -1,80 +1,11 @@
 import type {
-  AdminPrincipal, AppInstance, AppManager, InstancePrincipal, Principal, UserPrincipal,
+  AccessPrincipal, AdminPrincipal, AppInstance, AppManager, InstancePrincipal, Principal, UserPrincipal,
 } from '@aura/core';
+import { lookup as dnsLookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
 import { loadAppHostServices, type AppHostServices } from '../../../server/app-host-auth.mjs';
 import { gatewayClaimOf, ownerUiActs, ownerUiApp } from '../../../server/gateway-identity.mjs';
-import { refererProxyId } from './legacyReferer.ts';
 import type { AccessVia, VerifiedIdentity } from './types.ts';
-
-/**
- * Resolve the calling INSTANCE for a write to the Interface Registry.
- *
- * The existing `identifySource` helpers (kv, data-provider routes) resolve a
- * caller to an *appId*, which is not enough here: a registration belongs to one
- * running instance and dies with it, so an app id that maps to three instances
- * would be ambiguous about which one just opened a port.
- *
- * Two sources, in order:
- *
- *   1. `Referer` — a browser-context caller inside an app iframe, whose URL is
- *      always `/api/proxy/<instanceId>/…`. Same mechanism the KV and
- *      data-provider routes already trust.
- *   2. `X-Aura-Instance-Id` — a server-context caller (the app's own Astro
- *      route or a lifecycle hook), which has no Referer at all. The app reads
- *      the value from the `APP_INSTANCE_ID` the OS injected at spawn. This is
- *      the case that matters most in practice, because an MCP or WS server
- *      lives in the app's server code, not its page.
- *
- * Deliberately **no `'system'` fallback**. The KV route treats a missing
- * Referer as privileged; for writes that would let any unattributed caller
- * register interfaces, so an unidentifiable caller is simply refused.
- *
- * On the trust model, stated plainly because it is easy to overclaim:
- * **both sources are self-asserted.** Anything that can reach the shell API
- * can set a Referer or an X-Aura-Instance-Id and register under another app's
- * identity. That is not a hole this route opens — it is the OS's existing
- * app-identity model (`/api/kv` and `/api/data` trust the same Referer, and
- * the KV route additionally treats a *missing* Referer as privileged
- * `'system'`). Apps here are assumed cooperating, not adversarial.
- *
- * What this route does add is containment: the claimed instance must exist in
- * the live table, writes are refused outright when no instance can be named,
- * and every entry dies with its instance — at the next stop, or at the next
- * reconcile tick. So the blast radius of a forged registration is one
- * advertised address until that app next stops, never a persistent lie.
- *
- * Real instance identity now exists: every instance gets a per-instance
- * token at spawn (`AURA_INSTANCE_TOKEN`, core's InstanceTokens), and the
- * OS-sidecar routes require it (lib/instanceAuth.ts `requireInstanceToken`).
- * A valid token, like a gateway claim, names the instance before either
- * hint is read; the SDK's server side sends it. Requiring it here, and moving
- * /api/kv and /api/data onto it, is the remaining step: every caller (apps
- * outside the SDK too) has to send it first.
- */
-export function identifyInstance(request: Request, mgr: AppManager): AppInstance | null {
-  const gateway = gatewayInstance(request, mgr);
-  if (gateway !== null) return gateway === 'invalid' ? null : gateway;
-
-  // An instance token proves the caller, so it wins over the hints below. The
-  // SDK sends it from an app's server instead of a self-set id header.
-  const token = /^Bearer\s+(\S+)\s*$/i.exec(request.headers.get('authorization') ?? '')?.[1];
-  const verified = token ? mgr.tokens.verify(token) : null;
-  if (verified) return mgr.getInstance(verified.instanceId) ?? null;
-
-  const idOrAppId = refererProxyId(request.headers.get('referer'));
-  if (idOrAppId) {
-    const inst = mgr.getInstance(idOrAppId)
-      // A bare appId in the proxy path: pick the app's one real instance.
-      // Pool members are excluded — the proxy won't route to them either.
-      ?? mgr.getInstancesByApp(idOrAppId).find((i) => !i.inPool && i.port !== null);
-    if (inst) return inst;
-  }
-
-  const claimed = request.headers.get('x-aura-instance-id');
-  if (claimed) return mgr.getInstance(claimed) ?? null;
-
-  return null;
-}
 
 /**
  * The instance a signed App Host gateway claim names (server/app-gateway.mjs).
@@ -342,4 +273,118 @@ export async function resolvePrincipal(
   } catch {
     return unverified();
   }
+}
+
+// ── what a verified principal speaks for ────────────────────────────────────
+
+/**
+ * The app instance a caller is, when it is one: an instance (by token or
+ * gateway claim), or a user acting through an app instance (D45, App Hosts),
+ * judged as that instance. Null for the owner's own login, admin, API keys
+ * and anonymous callers. The routes that name their caller app (KV, data,
+ * interfaces) and the `app-callers` guard ask this; it never reads a hint.
+ */
+export function actingInstance(p: AccessPrincipal): InstancePrincipal | null {
+  if (p.kind === 'instance') return p;
+  if (p.kind === 'user' && p.through?.instanceId) {
+    return { kind: 'instance', appId: p.through.appId, instanceId: p.through.instanceId, verification: 'verified' };
+  }
+  return null;
+}
+
+/**
+ * The apps whose `system` copy acts for the owner (D29):
+ *   com.aura.terminal    the System Terminal, a trusted terminal: the owner's
+ *                        shell, `aura` CLI and coding agents
+ *   com.aura.aurashelld  the owner's shell-control MCP, which those agents
+ *                        drive (it reached the OS as `system` without a token
+ *                        before Phase 3). Phase 5 scopes who may call it.
+ */
+export const OWNER_AGENT_APPS: ReadonlySet<string> = new Set(['com.aura.terminal', 'com.aura.aurashelld']);
+
+/**
+ * D29: the owner and trusted terminals have full control. A trusted owner
+ * agent is an instance of the installed `system` copy of an OWNER_AGENT_APPS
+ * app, calling with its own instance token (never one of its sidecars). A
+ * gateway call is judged as the app's page, by its instance rules only
+ * (gatewayCaller.ts never asks this).
+ */
+export function isTrustedOwnerAgent(
+  p: InstancePrincipal, mgr: Pick<AppManager, 'getManifest'> | null,
+): boolean {
+  if (!OWNER_AGENT_APPS.has(p.appId) || p.sidecar) return false;
+  const installed = mgr?.getManifest(p.appId) as { scopeId?: string } | undefined;
+  return installed?.scopeId === 'system';
+}
+
+// ── D28: tokenless callers by their container network address ───────────────
+
+/** What `networkInstance` reads. Structural, so tests can fake it. */
+export interface NetworkDeps {
+  instances(): ReadonlyArray<Pick<AppInstance, 'appId' | 'instanceId'> & { sandbox?: string; state?: string; inPool?: boolean }>;
+  /** Every address a container name resolves to (Docker's DNS on the app network). */
+  resolve(name: string): Promise<string[]>;
+  now?(): number;
+}
+
+const NETWORK_TTL_MS = 10_000;
+/** A miss rebuilds the table at most this often, so unknown peers can't drive lookups. */
+const NETWORK_RETRY_MS = 2_000;
+const LIVE_STATES = new Set(['resumed', 'started', 'paused', 'starting']);
+
+export const normalizePeer = (addr: string | null | undefined): string | null => {
+  const a = String(addr ?? '').trim().toLowerCase().replace(/^::ffff:/, '');
+  return isIP(a) ? a : null;
+};
+
+/**
+ * D28: the running container instance whose address on the app network is
+ * `peer`, by its container name (`aura-<instanceId>`, the name the shell
+ * dials it by). Docker's DNS answers for the network, and a TCP peer address
+ * on it can't be taken over without the reply, so this names the container
+ * that opened the connection. Loopback and anything else that is no
+ * instance's address stay null: a PRoot app or the shell itself is never
+ * named this way, nor is the address a published port's traffic comes from.
+ */
+export function createNetworkIdentity(deps: NetworkDeps) {
+  const now = () => (deps.now ?? Date.now)();
+  let table: Map<string, { appId: string; instanceId: string }> = new Map();
+  let builtAt = -Infinity;
+  let building: Promise<void> | null = null;
+
+  async function rebuild(): Promise<void> {
+    const next = new Map<string, { appId: string; instanceId: string }>();
+    const live = deps.instances().filter((i) => i.sandbox === 'container' && !i.inPool && (!i.state || LIVE_STATES.has(i.state)));
+    await Promise.all(live.map(async (i) => {
+      try {
+        for (const addr of await deps.resolve(`aura-${i.instanceId}`)) {
+          const a = normalizePeer(addr);
+          if (a) next.set(a, { appId: i.appId, instanceId: i.instanceId });
+        }
+      } catch { /* not resolvable: not on the network */ }
+    }));
+    table = next;
+    builtAt = now();
+  }
+
+  const refresh = (): Promise<void> => (building ??= rebuild().finally(() => { building = null; }));
+
+  return async function networkInstance(peer: string | null | undefined): Promise<InstancePrincipal | null> {
+    const a = normalizePeer(peer);
+    if (!a || a.startsWith('127.') || a === '::1') return null;
+    const age = now() - builtAt;
+    if (age > NETWORK_TTL_MS || (!table.has(a) && age > NETWORK_RETRY_MS)) await refresh();
+    const hit = table.get(a);
+    return hit ? { kind: 'instance', appId: hit.appId, instanceId: hit.instanceId, verification: 'verified' } : null;
+  };
+}
+
+/** The live table over an AppManager (read when it is up), resolved through the container's DNS. */
+export function liveNetworkIdentity(mgr: () => Pick<AppManager, 'getAllInstances'> | null) {
+  return createNetworkIdentity({
+    instances: () => {
+      try { return mgr()?.getAllInstances() ?? []; } catch { return []; }
+    },
+    resolve: async (name) => (await dnsLookup(name, { all: true })).map((r) => r.address),
+  });
 }

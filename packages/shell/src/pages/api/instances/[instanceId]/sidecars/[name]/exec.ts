@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import type { ExecRequest } from '@aura/core';
 import { errorResponse, jsonResponse } from '../../../../../../lib/appResponse.js';
-import { jsonBody, sidecarError, sidecarGate } from '../../../../../../lib/instanceAuth.js';
+import { jsonBody, sidecarError, sidecarTarget } from '../../../../../../lib/instanceAuth.js';
 
 /**
  * Run one command in an OS-managed sidecar — the `docker exec` an app without
@@ -14,8 +14,8 @@ import { jsonBody, sidecarError, sidecarGate } from '../../../../../../lib/insta
  * capped at 4 MiB per stream (`truncated`). Interactive sessions are out of
  * scope.
  */
-export const POST: APIRoute = async ({ params, request }) => {
-  const gate = sidecarGate(params, request, ['sidecars.spawn']);
+export const POST: APIRoute = async ({ params, request, locals }) => {
+  const gate = sidecarTarget(params, locals);
   if (gate instanceof Response) return gate;
   const name = params['name'];
   if (!name) return errorResponse('Missing sidecar name', 400);

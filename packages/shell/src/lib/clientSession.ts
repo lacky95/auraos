@@ -10,7 +10,7 @@ import type { NotificationViewer, Principal } from '@aura/core';
  *   query   ?cs=<sid>                          (EventSource can't set headers)
  *
  * The sid is NOT a credential: it only picks the lock-screen view of an
- * otherwise anonymous caller. Its lock state is resolved here, server-side —
+ * otherwise anonymous caller, or of the owner's own login (a tab). Its lock state is resolved here, server-side —
  * missing / invalid / unknown / expired → `locked`. Verified principals
  * (apps, API keys, admin) are not screens; their sid is ignored.
  *
@@ -26,10 +26,14 @@ export function clientSessionIdFrom(request: Request, url?: URL): string | null 
   return q && q.trim() ? q.trim() : null;
 }
 
-export async function viewerFor(request: Request, principal: Principal, opts: { url?: URL; senderToken?: string } = {}): Promise<NotificationViewer> {
+export async function viewerFor(
+  request: Request, principal: Principal | NotificationViewer['principal'], opts: { url?: URL; senderToken?: string } = {},
+): Promise<NotificationViewer> {
   const viewer: NotificationViewer = { principal: principal as NotificationViewer['principal'] };
   if (opts.senderToken) viewer.senderToken = opts.senderToken;
-  if (principal.kind !== 'anonymous') return viewer;
+  // A screen is an anonymous tab, or the owner's own (its login): it keeps its lock view.
+  const p = principal as { kind: string; through?: unknown };
+  if (p.kind !== 'anonymous' && !(p.kind === 'user' && !p.through)) return viewer;
   const sid = clientSessionIdFrom(request, opts.url);
   if (!sid) return viewer;
   const store = (core.getAuthServices() as { clientSessions?: { effectiveLock(sid: string): Promise<'locked' | 'unlocked'> } }).clientSessions;

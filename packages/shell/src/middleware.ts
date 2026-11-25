@@ -179,13 +179,16 @@ async function ensureAppManager() {
 
 let flightServiceStarted = false;
 
-// Report-only (lib/access): loaded on first use, and nothing it does can reach a response.
+// The access report (lib/access/observer.ts): loaded on first use, and nothing it does can reach a response.
 const reportAccess = createAccessReporter(() => import('./lib/access/observer.ts'));
+
+const accessUnavailable = () => new Response(JSON.stringify({ error: 'access-unavailable' }), {
+  status: 503, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
+});
 
 export const onRequest = defineMiddleware(async (ctx, next) => {
   const access = captureAccess(ctx);
   await ensureAppManager();
-  reportAccess.identify(access, ctx.request);
   // Free-flight activities (lib/flight/service.ts): once per shell build —
   // a hot-swapped build takes over the previous one's listeners + notifications.
   if (!flightServiceStarted) {
@@ -193,7 +196,7 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
     try { startFlightService(); }
     catch (err) { console.warn(`[middleware] flight service start failed: ${(err as Error).message}`); }
   }
-  // App Host gateway calls are the one enforced path: the manifest decides here.
+  // App Host gateway calls: the manifest decides here, in every access mode.
   if (ctx.request.headers.has(GATEWAY_IDENTITY_HEADER)) {
     let refused: Response | null;
     try {
@@ -206,6 +209,25 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
       return refused;
     }
   }
+  // Every /api route (lib/access/enforce.ts): the whole manifest in `enforce`,
+  // a rule's `guard` in every mode. Fails closed.
+  let gate: Awaited<ReturnType<typeof import('./lib/access/enforce.ts')['liveAccessGate']>>;
+  try {
+    gate = await (await import('./lib/access/enforce.ts')).liveAccessGate(ctx);
+  } catch {
+    reportAccess(access, 503);
+    return accessUnavailable();
+  }
+  if (gate.identity) {
+    // One verdict: the route reads it, and the report counts it.
+    ctx.locals.access = gate.identity;
+    if (access) access.identity.verified = gate.identity;
+  }
+  if (gate.refused) {
+    reportAccess(access, gate.refused.status);
+    return gate.refused;
+  }
+  reportAccess.identify(access, ctx.request);
   let res: Response;
   try {
     res = await next();

@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import { errorResponse, jsonResponse } from '../../../../../../lib/appResponse.js';
-import { sidecarError, sidecarGate } from '../../../../../../lib/instanceAuth.js';
+import { sidecarError, sidecarTarget } from '../../../../../../lib/instanceAuth.js';
 
 /**
  * Recent output of an OS-managed sidecar.
@@ -9,8 +9,8 @@ import { sidecarError, sidecarGate } from '../../../../../../lib/instanceAuth.js
  *
  * `tail` is capped at 5000 lines; docker keeps the two streams apart.
  */
-export const GET: APIRoute = async ({ params, request, url }) => {
-  const gate = sidecarGate(params, request, ['sidecars.spawn']);
+export const GET: APIRoute = async ({ params, url, locals }) => {
+  const gate = sidecarTarget(params, locals);
   if (gate instanceof Response) return gate;
   const name = params['name'];
   if (!name) return errorResponse('Missing sidecar name', 400);

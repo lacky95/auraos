@@ -2,10 +2,7 @@ import type { APIRoute } from 'astro';
 // Namespace import, as in the other notification routes.
 import * as core from '@aura/core';
 import { errorResponse, jsonResponse } from '../../../lib/appResponse.js';
-import { notificationErrorResponse } from '../../../lib/notificationCaller.js';
-// PHASE3-ENFORCE: the caller as before Stage 0 (a login cookie stays an anonymous screen
-// with its client session); Stage 2 gives notifications the `user` principal.
-import { authenticateLegacy } from '../../../lib/auth.js';
+import { notificationCaller, notificationErrorResponse } from '../../../lib/notificationCaller.js';
 import { viewerFor } from '../../../lib/clientSession.js';
 
 /**
@@ -19,7 +16,7 @@ import { viewerFor } from '../../../lib/clientSession.js';
  *            app / API key only deletes its own history.
  */
 export const DELETE: APIRoute = async ({ request, url }) => {
-  const principal = await authenticateLegacy(request);
+  const principal = await notificationCaller(request);
   if (principal instanceof Response) return principal;
   const svc = core.getNotificationService() as unknown as { clearHistory?: (f: { sender?: string }, v: unknown) => Promise<{ deleted: number }> };
   if (typeof svc.clearHistory !== 'function') return errorResponse('clear history is not available in the running core yet', 501);

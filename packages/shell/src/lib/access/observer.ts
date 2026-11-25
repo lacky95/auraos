@@ -1,12 +1,14 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import * as core from '@aura/core';
-import type { AccessPrincipal } from '@aura/core';
+import type { AccessPrincipal, AppManager, InstancePrincipal } from '@aura/core';
 import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { defaultRedis } from '@aura/kv-store';
 import { accessMode, wouldEnforce } from '../../../server/access-mode.mjs';
 import { ownerSessionOf, sessionCookieToken } from '../authSurface.ts';
 import { createDecide, type DecideDeps } from './decide.ts';
-import { resolvePrincipal, type AppHostSession, type PrincipalDeps } from './identify.ts';
+import {
+  isTrustedOwnerAgent, liveNetworkIdentity, resolvePrincipal, type AppHostSession, type PrincipalDeps,
+} from './identify.ts';
 import { refererProxyId } from './legacyReferer.ts';
 import { AccessReport, type ReportRedis } from './report.ts';
 import { candidateRules, handlersOf, normalizeMethod } from './resolve.ts';
@@ -17,8 +19,9 @@ import {
 } from './types.ts';
 import type {
   AccessBridge, AccessBridgeHost, AccessEvent, AccessEventMethod, AccessEventSurface, AccessLabel,
-  AccessRule, AccessStatusClass, AccessSurface, AccessVia, DecideResult, PolicyResource,
-  RequestSnapshot, RouteAccessManifest, SurfaceFacts, SurfaceIdentity, SurfaceObservation, VerifiedIdentity,
+  AccessRule, AccessStatusClass, AccessSurface, AccessVia, Decide, DecideResult, PolicyResource,
+  RequestSnapshot, RouteAccessManifest, SurfaceDecision, SurfaceFacts, SurfaceIdentity, SurfaceObservation,
+  VerifiedIdentity,
 } from './types.ts';
 import { ACCESS_VIAS } from './types.ts';
 
@@ -28,8 +31,13 @@ import { ACCESS_VIAS } from './types.ts';
  * here can reach a response, and every entry point swallows its own errors.
  */
 
-/** Calls that may carry the internal label. It labels the report and grants nothing. */
-const INTERNAL_CALLS: ReadonlyArray<{ method: string; route: string; path?: string }> = [
+/**
+ * Calls that may carry the internal label (server/access-bridge.mjs): the WS
+ * proxy's and the App Host router's own loopback lookups. The label is a
+ * per-boot secret that never leaves the shell process, so these calls are
+ * the shell itself: `system` in the report, and let through by the gate.
+ */
+export const INTERNAL_CALLS: ReadonlyArray<{ method: string; route: string; path?: string }> = [
   { method: 'GET', route: '/api/apps' },
   { method: 'POST', route: '/api/apps/[id]/start' },
 ];
@@ -52,9 +60,12 @@ export interface ObserverDeps extends DecideDeps {
   services(): ObserverServices | null;
   redisReady(): boolean;
   internalSecret(): string | null;
+  /** D28: the instance whose container network address `peer` is (identify.ts `createNetworkIdentity`). */
+  network?(peer: string | null | undefined): Promise<InstancePrincipal | null>;
 }
 
 export interface ObserverManager {
+  getAllInstances?(): ReadonlyArray<{ appId: string; instanceId: string; sandbox?: string; state?: string; inPool?: boolean }>;
   tokens: {
     hasNonce(instanceId: string, sidecar?: string): boolean;
     verify(token: string): { instanceId: string; sidecar?: string; userId?: string } | null;
@@ -283,6 +294,62 @@ export function concreteRule(
   return { ...rule, permissions };
 }
 
+// ── one decision over a request's candidate rules ───────────────────────────
+
+/** What a request's decision needs besides its rules. */
+export interface CandidateRequest {
+  snapshot: RequestSnapshot;
+  principal: AccessPrincipal;
+  via: AccessVia;
+  surface: AccessEventSurface;
+  subject: string;
+  method: AccessEventMethod;
+  /** `enforce`: core's auto-grants don't count (decide.ts). */
+  strict: boolean;
+}
+
+/** `decide()` for one candidate rule, with its placeholders and target filled from the request. */
+export function decideRule(
+  decideFn: Decide, mgr: ObserverManager | null, rule: AccessRule, variant: string | null, req: CandidateRequest,
+  principal: AccessPrincipal = req.principal,
+): Promise<DecideResult> {
+  const concrete = concreteRule(rule, req.snapshot, principal, mgr);
+  return decideFn({
+    principal,
+    action: {
+      surface: req.surface, subject: label(req.subject), method: req.method,
+      variant: variant ? label(variant) : null, rule: concrete,
+    },
+    resource: resourceFor(concrete, req.snapshot, mgr),
+    transport: req.snapshot.https ? 'https' : 'http',
+    auth: { fresh: false, via: req.via },
+    strict: req.strict,
+    accessProfile: 'open',
+    systemMode: 'normal',
+    deployment: 'private',
+  });
+}
+
+/**
+ * D28: an anonymous caller with no credential at all, on a request one of
+ * whose rules takes a network caller, is the instance its address names.
+ */
+export async function withNetworkCaller(
+  seen: { principal: AccessPrincipal; via: AccessVia },
+  rules: ReadonlyArray<AccessRule>,
+  peer: string | null | undefined,
+  network: ObserverDeps['network'],
+): Promise<{ principal: AccessPrincipal; via: AccessVia }> {
+  if (seen.principal.kind !== 'anonymous' || seen.via !== 'none' || !network || !peer) return seen;
+  if (!rules.some((r) => r.networkCaller)) return seen;
+  try {
+    const inst = await network(peer);
+    return inst ? { principal: inst, via: 'network' } : seen;
+  } catch {
+    return seen;
+  }
+}
+
 // ── the observer ────────────────────────────────────────────────────────────
 
 const RESTRICTIVENESS: readonly DecideResult['outcome'][] = [
@@ -309,6 +376,13 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(x, y);
 }
 
+/** Whether a request is one of INTERNAL_CALLS carrying this boot's internal label. */
+export function isInternalCall(s: Pick<RequestSnapshot, 'internal' | 'method' | 'routePattern' | 'pathname'>, secret: string | null): boolean {
+  if (!s.internal || !secret || !safeEqual(s.internal, secret)) return false;
+  const method = normalizeMethod(s.method);
+  return INTERNAL_CALLS.some((c) => c.method === method && c.route === s.routePattern && (!c.path || c.path === s.pathname));
+}
+
 export interface ObserverOptions {
   deps: ObserverDeps;
   report: AccessReport;
@@ -317,7 +391,7 @@ export interface ObserverOptions {
 }
 
 export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST, surfaces = SURFACE_MANIFEST }: ObserverOptions) {
-  const decideRule = createDecide(deps);
+  const decideFn = createDecide(deps);
   const surfaceById = new Map(surfaces.map((s) => [s.id, s]));
   const pagesByRoute = new Map(surfaces.filter((s) => s.page).map((s) => [s.page!, s]));
 
@@ -327,26 +401,22 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
     try { return deps.mgr()?.registry?.getById(appId) ? appId : null; } catch { return null; }
   };
 
-  const policy = (rule: AccessRule | null, resource: PolicyResource, principal: AccessPrincipal, https: boolean, action: {
+  // The report counts what `enforce` decides: strict, whatever the mode.
+  const policy = (rule: AccessRule | null, resource: PolicyResource, principal: AccessPrincipal, via: AccessVia, https: boolean, action: {
     surface: AccessEventSurface; subject: string; method: AccessEventMethod; variant: string | null;
-  }) => decideRule({
+  }) => decideFn({
     principal,
     action: { ...action, subject: label(action.subject), variant: action.variant ? label(action.variant) : null, rule },
     resource,
     transport: https ? 'https' : 'http',
-    auth: { fresh: false },
+    auth: { fresh: false, via },
+    strict: true,
     accessProfile: 'open',
     systemMode: 'normal',
     deployment: 'private',
   });
 
-  function isInternal(s: RequestSnapshot): boolean {
-    if (!s.internal) return false;
-    const secret = deps.internalSecret();
-    if (!secret || !safeEqual(s.internal, secret)) return false;
-    const method = normalizeMethod(s.method);
-    return INTERNAL_CALLS.some((c) => c.method === method && c.route === s.routePattern && (!c.path || c.path === s.pathname));
-  }
+  const isInternal = (s: RequestSnapshot): boolean => isInternalCall(s, deps.internalSecret());
 
   async function evaluateRequest(s: RequestSnapshot): Promise<AccessEvent> {
     const method = normalizeMethod(s.method);
@@ -363,8 +433,8 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
       };
     }
 
-    const seen = await observeIdentity(s.identity, deps);
-    if (seen.failed) report.note('errors');
+    const observed = await observeIdentity(s.identity, deps);
+    if (observed.failed) report.note('errors');
     const mgr = deps.mgr();
     let candidates: ReadonlyArray<{ variant: string | null; rule: AccessRule }> = [];
     if (page) candidates = [{ variant: null, rule: page.rule }];
@@ -377,13 +447,18 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
       );
     }
 
+    const seen = {
+      ...observed,
+      ...await withNetworkCaller(observed, candidates.map((c) => c.rule), s.identity?.peer, deps.network),
+    };
+    const req: CandidateRequest = {
+      snapshot: s, principal: seen.principal, via: seen.via, surface, subject, method, strict: true,
+    };
     const results = candidates.length
-      ? await Promise.all(candidates.map(async ({ variant, rule }) => {
-        const concrete = concreteRule(rule, s, seen.principal, mgr);
-        const result = await policy(concrete, resourceFor(concrete, s, mgr), seen.principal, s.https, { surface, subject, method, variant });
-        return { variant, result };
-      }))
-      : [{ variant: null, result: await policy(null, { target: 'system' }, seen.principal, s.https, { surface, subject, method, variant: null }) }];
+      ? await Promise.all(candidates.map(async ({ variant, rule }) => ({
+        variant, result: await decideRule(decideFn, mgr, rule, variant, req),
+      })))
+      : [{ variant: null, result: await policy(null, { target: 'system' }, seen.principal, seen.via, s.https, { surface, subject, method, variant: null }) }];
 
     const { variant, result } = combineCandidates(results);
     const callerApp = principalApp(seen.principal) ?? seen.hintAppId;
@@ -394,8 +469,10 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
       principal: seen.principal.kind === 'admin' ? 'operator' : seen.principal.kind,
       appId: knownApp(callerApp ?? targetApp) as AccessLabel | null,
       decision: result.outcome, reason: result.reason, status, via: seen.via,
-      // A gateway call was already decided by enforceGateway, in every mode.
-      wouldEnforce: wouldEnforce(accessMode(), result.outcome, seen.via === 'gateway'),
+      // A gateway call was already decided by enforceGateway, in every mode: a
+      // refusal is its own. One it served can still be refused by `enforce`,
+      // where an auto-granted permission stops counting.
+      wouldEnforce: wouldEnforce(accessMode(), result.outcome, seen.via === 'gateway' && s.status >= 400),
     };
   }
 
@@ -424,12 +501,14 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
       }
     }
 
-    const seen = await observeIdentity(o.identity ?? null, deps);
+    const observed = await observeIdentity(o.identity ?? null, deps);
+    const seen = { ...observed, ...await withNetworkCaller(observed, [surface.rule], o.identity?.peer, deps.network) };
     const https = false;
     const result = await policy(
       surface.rule,
       { target: surface.rule.target, ...(appId ? { appId } : {}) },
       seen.principal,
+      seen.via,
       https,
       { surface: surface.kind, subject: surface.id, method, variant: null },
     );
@@ -444,6 +523,8 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
     };
   }
 
+  const DENIED: SurfaceDecision = { outcome: 'deny', reason: 'policy-error' };
+
   const bridge: AccessBridge = {
     identify(facts) {
       const request = requestFromFacts(facts);
@@ -453,6 +534,12 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
       void evaluateSurface(observation)
         .then((event) => { if (event) report.add(event); else report.note('dropped'); })
         .catch(() => report.note('dropped'));
+    },
+    decideSurface(observation) {
+      // An observation the bridge would drop (an unknown surface or app) is refused.
+      return evaluateSurface(observation)
+        .then((event) => (event ? { outcome: event.decision, reason: event.reason } : DENIED))
+        .catch(() => DENIED);
     },
     countEvent(subject) {
       if (surfaceById.has(subject)) report.note(`event|${subject}`);
@@ -483,7 +570,11 @@ function liveRedis(): (ReportRedis & { status?: string }) | null {
   }
 }
 
-const liveDeps: ObserverDeps = {
+const liveMgr = (): ObserverManager | null => {
+  try { return core.getAppManager() as unknown as ObserverManager; } catch { return null; }
+};
+
+export const liveDeps: ObserverDeps = {
   authorizer: {
     authorize: (principal, action) => {
       const svc = (globalThis as Record<string, unknown>)[AUTH_SERVICES] as { authorizer?: DecideDeps['authorizer'] } | undefined;
@@ -491,9 +582,9 @@ const liveDeps: ObserverDeps = {
       return svc.authorizer.authorize(principal, action);
     },
   },
-  mgr: () => {
-    try { return core.getAppManager() as unknown as ObserverManager; } catch { return null; }
-  },
+  mgr: liveMgr,
+  ownerAgent: (p) => isTrustedOwnerAgent(p, liveMgr() as unknown as Pick<AppManager, 'getManifest'> | null),
+  network: liveNetworkIdentity(() => liveMgr() as unknown as Pick<AppManager, 'getAllInstances'> | null),
   // Read, never created: creating them has side effects of its own.
   services: () => ((globalThis as Record<string, unknown>)[AUTH_SERVICES] as ObserverServices | undefined) ?? null,
   redisReady: () => liveRedis() !== null,

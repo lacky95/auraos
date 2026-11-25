@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import { errorResponse, jsonResponse } from '../../../../../../../lib/appResponse.js';
-import { sidecarError, sidecarGate } from '../../../../../../../lib/instanceAuth.js';
+import { sidecarError, sidecarTarget } from '../../../../../../../lib/instanceAuth.js';
 
 /**
  * Detach one of an OS sidecar's OWN mounts (`<targetAppId>` or
@@ -9,8 +9,8 @@ import { sidecarError, sidecarGate } from '../../../../../../../lib/instanceAuth
  *
  *   DELETE (token, sidecars.mounts + apps.mount) → { ok, removed }
  */
-export const DELETE: APIRoute = async ({ params, request }) => {
-  const gate = sidecarGate(params, request, ['sidecars.mounts', 'apps.mount']);
+export const DELETE: APIRoute = async ({ params, locals }) => {
+  const gate = sidecarTarget(params, locals);
   if (gate instanceof Response) return gate;
   const name = params['name'];
   const mountId = params['mountId'];

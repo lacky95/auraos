@@ -9,12 +9,23 @@ export function surfaceIdentity(
     method?: string;
     url?: string;
     appHost?: { appId: string; instanceId?: string; userId: string; sid: string } | null;
+    peer?: string | null;
   },
-): {
+): SurfaceIdentityLike | null;
+export interface SurfaceIdentityLike {
   verified: Promise<{ principal: { kind: string }; via: string } | null> | null;
   referer: string | null;
   instanceId: string | null;
-} | null;
+  peer: string | null;
+}
+export function requestIdentity(
+  req: unknown,
+  opts?: { appHost?: { appId: string; instanceId?: string; userId: string; sid: string } | null },
+): SurfaceIdentityLike | null;
+export function surfaceGate(observation: {
+  subject: string; method: string; appId?: string | null; identity: SurfaceIdentityLike | null;
+}): Promise<boolean>;
+export function gatedHttpSurface(req: unknown): boolean;
 export function staticSurface(url: unknown): string | null;
 export function observeHttpSurface(req: unknown, res: unknown): void;
 export function internalServiceHeaders(url: string): Record<string, string>;

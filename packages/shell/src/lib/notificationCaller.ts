@@ -1,33 +1,31 @@
-import type { AnonymousCaller, AppManager, NotificationCaller, CallerHints } from '@aura/core';
-import { identifyInstance } from './access/identify.js';
+import type { NotificationCaller, CallerHints } from '@aura/core';
 import { errorResponse, jsonResponse } from './appResponse.js';
+import { authenticate } from './auth.js';
 
 /**
- * Caller helpers for the notification API. Identity is `authenticate()`'s
- * (lib/auth.ts, the one principal resolver); this adds the attribution hints
- * of a caller it could not verify:
+ * Caller helpers for the notification API. The caller is `authenticate()`'s
+ * principal as it is (lib/auth.ts, the one principal resolver); who may call
+ * each route is the route access manifest's (routeManifest.ts,
+ * notifications). Core notifications know each kind:
  *
- *   Referer `/api/proxy/<id>/` or `X-Aura-Instance-Id`, no credentials
- *             → { kind:'anonymous', verification:'unverified', hints:{appId, instanceId} }
- *             Hints are attribution only; they NEVER authenticate.
- *   nothing → { kind:'anonymous', verification:'unverified' }
+ *   the owner (`user`: the desktop's login, or through a trusted UI, D45)
+ *       reads everything; a screen it sends along (its client session,
+ *       clientSession.ts `viewerFor`) keeps its lock view. Not a sender.
+ *   an instance or API key: its own items, plus a notifications.read grant
+ *   an admin session: reads everything, sends nothing
+ *   anonymous: basic sending; a shell screen by its client session; a
+ *       declared app id in a legacy body is attribution only
  *
  * `SYSTEM_CALLER` is unreachable from here by construction — it exists only
  * for in-process calls to `NotificationService`.
  */
 
-/** The slice of AppManager this needs (structural, so it can be faked in tests). */
-export type CallerAuthManager = Pick<AppManager, 'tokens' | 'getInstance' | 'getInstancesByApp'>;
-
 const APP_ID_HINT = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9-]*)+$/;
 
-/** A caller without a verified identity: anonymous, with its hints. */
-export function anonymousCaller(request: Request, mgr: CallerAuthManager): AnonymousCaller {
-  const inst = identifyInstance(request, mgr as AppManager);
-  if (inst) {
-    return { kind: 'anonymous', verification: 'unverified', hints: { appId: inst.appId, instanceId: inst.instanceId } };
-  }
-  return { kind: 'anonymous', verification: 'unverified' };
+/** The caller a notification route acts for, or the 401 of a credential that did not verify. */
+export async function notificationCaller(request: Request): Promise<NotificationCaller | Response> {
+  // The owner (`user`) is core notifications' OwnerCaller.
+  return await authenticate(request) as NotificationCaller | Response;
 }
 
 /**

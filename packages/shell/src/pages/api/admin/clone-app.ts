@@ -8,7 +8,7 @@ import {
   getAppManager, rewriteAppIdentity,
   type ManifestPatch, type ScopeDefinition, type ScopeId,
 } from '@aura/core';
-import { auditAdmin, requireAdmin } from '../../../lib/auth.js';
+import { adminOf, auditAdmin } from '../../../lib/auth.js';
 
 /**
  * Server-side app cloning — the engine behind `aura dev clone`.
@@ -60,7 +60,7 @@ interface CloneRequest {
   dryRun?:       boolean;
 }
 
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = async ({ request, locals }) => {
   let body: CloneRequest;
   try { body = await request.json() as CloneRequest; }
   catch { return json({ error: 'invalid-json' }, 400); }
@@ -143,8 +143,7 @@ export const POST: APIRoute = async ({ request }) => {
   // inherits its grants): admin only. New clones — including same-id shadows
   // in another scope, which don't inherit scope-pinned grants — need nothing.
   if (destExists && body.force) {
-    const admin = await requireAdmin(request);
-    if (admin instanceof Response) return admin;
+    const admin = adminOf(locals);
     await auditAdmin(admin, 'app.clone-overwrite', { target: `app:${targetAppId}`, detail: { sourceAppId, scope: targetScopeId } });
   }
 

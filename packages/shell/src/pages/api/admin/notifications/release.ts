@@ -3,7 +3,7 @@ import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { errorResponse, jsonResponse } from '../../../../lib/appResponse.js';
 import { notificationErrorResponse, readJson } from '../../../../lib/notificationCaller.js';
-import { auditAdmin, requireAdmin } from '../../../../lib/auth.js';
+import { adminOf, auditAdmin } from '../../../../lib/auth.js';
 
 /**
  * Admin escape hatch (phase 6): stop app system modals from blocking the
@@ -17,12 +17,8 @@ import { auditAdmin, requireAdmin } from '../../../../lib/auth.js';
  * sender sees history `updated` with reason `admin-released`. AuraOS's own
  * decisions are never released (409). Audited as `notifications.release`.
  */
-export const POST: APIRoute = async ({ request }) => {
-  const admin = await requireAdmin(request);
-  if (admin instanceof Response) {
-    await auditAdmin(null, 'notifications.release', { outcome: 'denied' });
-    return admin;
-  }
+export const POST: APIRoute = async ({ request, locals }) => {
+  const admin = adminOf(locals);
   const body = await readJson(request);
   if (body instanceof Response) return body;
   const svc = core.getNotificationService();

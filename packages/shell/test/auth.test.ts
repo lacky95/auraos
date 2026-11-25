@@ -7,7 +7,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InstanceTokens } from '@aura/core';
-import { authenticate, requireAdmin, type AuthDeps } from '../src/lib/auth.ts';
+import { authenticate, type AuthDeps } from '../src/lib/auth.ts';
 
 const tokens = new InstanceTokens(join(mkdtempSync(join(tmpdir(), 'aura-auth-')), 'secrets', 'k.key'));
 const instances = new Map([
@@ -46,19 +46,9 @@ test('bad credentials of every kind → 401, never anonymous', async () => {
   assert.equal((basic as Response).status, 401);
 });
 
-test('no credentials → anonymous with hints only', async () => {
+test('no credentials → anonymous; a self-set instance id is not even a hint', async () => {
   assert.deepEqual(await authenticate(req(), deps), { kind: 'anonymous', verification: 'unverified' });
   const hinted = await authenticate(req({ 'x-aura-instance-id': 'com.example.notes-1' }), deps);
-  assert.deepEqual(hinted, { kind: 'anonymous', verification: 'unverified', hints: { appId: 'com.example.notes', instanceId: 'com.example.notes-1' } });
+  assert.deepEqual(hinted, { kind: 'anonymous', verification: 'unverified' });
 });
 
-test('requireAdmin: only a valid admin session passes; everything else is 401 admin-required', async () => {
-  const ok = await requireAdmin(bearer(GOOD_ADMIN), deps);
-  assert.equal((ok as { kind: string }).kind, 'admin');
-  for (const r of [req(), bearer(GOOD_KEY), bearer(tokens.mint('com.example.notes-1').token), bearer('aura-admin1.expired.sig')]) {
-    const res = await requireAdmin(r, deps);
-    assert.ok(res instanceof Response);
-    assert.equal(res.status, 401);
-    assert.equal((await res.json() as { error: string }).error, 'admin-required');
-  }
-});

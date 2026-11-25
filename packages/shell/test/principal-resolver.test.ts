@@ -1,7 +1,7 @@
 /**
  * Phase 3 Stage 0: one principal resolver (access/identify.ts `resolvePrincipal`)
- * behind `authenticate()` and the access report. Report-only: the routes that
- * act on a principal keep their pre-Stage-0 outcome (`authenticateLegacy`).
+ * behind `authenticate()`, the access gate and the access report. Since Phase 3
+ * stream A every route acts on this principal; hints are no identity.
  *
  *   cd packages/shell && npx tsx --test test/principal-resolver.test.ts
  */
@@ -16,7 +16,7 @@ import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { createSessionLive } from '../server/app-host-auth.mjs';
 import { signGatewayClaim } from '../server/gateway-identity.mjs';
 import { resolvePrincipal, type GatewayOwnerDeps, type PrincipalDeps } from '../src/lib/access/identify.ts';
-import { authenticate, authenticateLegacy, type AuthDeps } from '../src/lib/auth.ts';
+import { authenticate, type AuthDeps } from '../src/lib/auth.ts';
 import { sessionCookieToken } from '../src/lib/authSurface.ts';
 
 const tokens = new InstanceTokens(join(mkdtempSync(join(tmpdir(), 'aura-resolver-')), 'secrets', 'k.key'));
@@ -63,16 +63,13 @@ function gateway(appId: string, instanceId: string, installationId: string, over
 
 const USER = { kind: 'user', userId: 'default', role: 'owner', sessionId: SID, verification: 'verified' };
 
-test('login cookie → the owner; legacy callers still see an anonymous screen with its hints', async () => {
+test('login cookie → the owner, whatever hint comes along', async () => {
   revoked = false;
   for (const cookie of [`aura_session=${LIVE}`, `theme=1; __Host-aura_session=${LIVE}`]) {
     assert.deepEqual(await authenticate(req({ cookie }), deps), USER);
   }
   const hinted = req({ cookie: `aura_session=${LIVE}`, 'x-aura-instance-id': 'com.acme.notes-1' });
   assert.deepEqual(await authenticate(hinted, deps), USER);
-  assert.deepEqual(await authenticateLegacy(hinted, deps), {
-    kind: 'anonymous', verification: 'unverified', hints: { appId: 'com.acme.notes', instanceId: 'com.acme.notes-1' },
-  });
 });
 
 test('an expired, revoked or forged login cookie → anonymous, never a 401', async () => {
@@ -88,14 +85,12 @@ test('an expired, revoked or forged login cookie → anonymous, never a 401', as
   assert.deepEqual(await authenticate(req({ cookie: `aura_session=${LIVE}` }), down), { kind: 'anonymous', verification: 'unverified' });
 });
 
-test('an aura-sess1 bearer → the owner; invalid → 401; legacy callers keep their 401', async () => {
+test('an aura-sess1 bearer → the owner; invalid → 401', async () => {
   revoked = false;
   assert.deepEqual(await authenticate(req({ authorization: `Bearer ${LIVE}` }), deps), USER);
-  for (const p of [await authenticate(req({ authorization: 'Bearer aura-sess1.forged.mac' }), deps),
-    await authenticateLegacy(req({ authorization: `Bearer ${LIVE}` }), deps)]) {
-    assert.ok(p instanceof Response && p.status === 401);
-    assert.match(await p.text(), /invalid or expired credential/);
-  }
+  const p = await authenticate(req({ authorization: 'Bearer aura-sess1.forged.mac' }), deps);
+  assert.ok(p instanceof Response && p.status === 401);
+  assert.match(await p.text(), /invalid or expired credential/);
   // Without login services a session bearer can't be checked, and is still refused.
   const noLogin: AuthDeps = { ...deps, login: undefined };
   assert.equal(((await authenticate(req({ authorization: `Bearer ${LIVE}` }), noLogin)) as Response).status, 401);
@@ -104,13 +99,12 @@ test('an aura-sess1 bearer → the owner; invalid → 401; legacy callers keep t
   assert.ok(both instanceof Response && both.status === 401);
 });
 
-test('instance token → the instance acting for its `u` claim, else its owner; legacy strips the user', async () => {
+test('instance token → the instance acting for its `u` claim, else its owner', async () => {
   const owned = tokens.mint('com.acme.notes-1', undefined, 'default').token;
   const instance = { kind: 'instance', appId: 'com.acme.notes', instanceId: 'com.acme.notes-1', verification: 'verified' };
   assert.deepEqual(await authenticate(req({ authorization: `Bearer ${owned}` }), deps), { ...instance, userId: 'default' });
   const old = tokens.mint('com.acme.notes-1').token;  // minted before the claim: the server-side owner
   assert.deepEqual(await authenticate(req({ authorization: `Bearer ${old}` }), deps), { ...instance, userId: 'default' });
-  assert.deepEqual(await authenticateLegacy(req({ authorization: `Bearer ${old}` }), deps), instance);
 });
 
 test('gateway claim → the instance, acting for the App Host session user only when the claim has one', async () => {
@@ -119,19 +113,15 @@ test('gateway claim → the instance, acting for the App Host session user only 
   assert.deepEqual(await authenticate(notes({ sid: SID }), deps), { ...instance, userId: 'default' });
   // The runtime script's claim names a scope user and no session: nobody.
   assert.deepEqual(await authenticate(notes({ userId: 'shared' }), deps), instance);
-  assert.deepEqual(await authenticateLegacy(notes({ sid: SID }), deps), instance);
   const forged = req({ [GATEWAY_IDENTITY_HEADER]: 'agw1.forged.sig' }, '/api/scopes');
   assert.equal(((await authenticate(forged, deps)) as Response).status, 401);
 });
 
-test('D45: the owner through system Settings → user through it; legacy callers still see its instance', async () => {
+test('D45: the owner through system Settings → user through it', async () => {
   revoked = false;
   const settings = gateway('com.aura.settings', 'com.aura.settings-1', 'inst-settings', { sid: SID, owner: { userId: 'default', sid: SID } });
   assert.deepEqual(await authenticate(settings, deps), {
     ...USER, through: { appId: 'com.aura.settings', instanceId: 'com.aura.settings-1' },
-  });
-  assert.deepEqual(await authenticateLegacy(settings, deps), {
-    kind: 'instance', appId: 'com.aura.settings', instanceId: 'com.aura.settings-1', verification: 'verified',
   });
 });
 

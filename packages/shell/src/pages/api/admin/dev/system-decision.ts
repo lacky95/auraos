@@ -2,7 +2,7 @@ import type { APIRoute } from 'astro';
 // Namespace import: the running shell may cache a core build without newer exports.
 import * as core from '@aura/core';
 import { notificationErrorResponse, readJson } from '../../../../lib/notificationCaller.js';
-import { auditAdmin, requireAdmin } from '../../../../lib/auth.js';
+import { adminOf, auditAdmin } from '../../../../lib/auth.js';
 import { handleSystemDecision } from '../../../../lib/notifications/systemDecision.js';
 
 /**
@@ -23,9 +23,9 @@ import { handleSystemDecision } from '../../../../lib/notifications/systemDecisi
  * identity: the request body never chooses the caller. Logic and tests:
  * lib/notifications/systemDecision.ts.
  */
-export const POST: APIRoute = async ({ request }) => handleSystemDecision(request, {
+export const POST: APIRoute = async ({ request, locals }) => handleSystemDecision(request, {
   dev: !!import.meta.env.DEV,
-  requireAdmin: (r) => requireAdmin(r),
+  admin: adminOf(locals),
   audit: (admin, action, entry) => auditAdmin(admin as Parameters<typeof auditAdmin>[0], action, entry as Parameters<typeof auditAdmin>[2]),
   create: (input) => core.getNotificationService().create(input, core.SYSTEM_CALLER),
   readJson: (r) => readJson(r),

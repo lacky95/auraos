@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import { errorResponse, jsonResponse } from '../../../../../../lib/appResponse.js';
-import { jsonBody, sidecarError, sidecarGate } from '../../../../../../lib/instanceAuth.js';
+import { jsonBody, sidecarError, sidecarTarget } from '../../../../../../lib/instanceAuth.js';
 
 /**
  * Cross-app mounts of one OS-managed sidecar — the app manages them itself,
@@ -15,8 +15,8 @@ import { jsonBody, sidecarError, sidecarGate } from '../../../../../../lib/insta
  * The sidecar must have been spawned with `mounts.own` (or inherit), so it has
  * its own mount root — 409 otherwise.
  */
-export const GET: APIRoute = async ({ params, request }) => {
-  const gate = sidecarGate(params, request, ['sidecars.spawn']);
+export const GET: APIRoute = async ({ params, locals }) => {
+  const gate = sidecarTarget(params, locals);
   if (gate instanceof Response) return gate;
   const name = params['name'];
   if (!name) return errorResponse('Missing sidecar name', 400);
@@ -31,8 +31,8 @@ export const GET: APIRoute = async ({ params, request }) => {
   }
 };
 
-export const POST: APIRoute = async ({ params, request }) => {
-  const gate = sidecarGate(params, request, ['sidecars.mounts', 'apps.mount']);
+export const POST: APIRoute = async ({ params, request, locals }) => {
+  const gate = sidecarTarget(params, locals);
   if (gate instanceof Response) return gate;
   const name = params['name'];
   if (!name) return errorResponse('Missing sidecar name', 400);

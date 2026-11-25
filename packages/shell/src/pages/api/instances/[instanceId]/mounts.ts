@@ -37,23 +37,9 @@ export const POST: APIRoute = async ({ params, request }) => {
   const instance = mgr.getInstance(instanceId);
   if (!instance) return errorResponse(`Instance not found: ${instanceId}`, 404);
 
-  // ---- Permission gate: the CONSUMER app must declare `apps.mount` ----
-  // The consumer id comes from the instance record, never from the request
-  // body — the body is fully attacker-controlled, the instance record is not.
-  //
-  // Honest about the limit: this route doesn't authenticate its caller, so
-  // nothing stops it from putting SOME OTHER instance's id in the URL and
-  // borrowing that app's grant. Deriving the
-  // appId server-side is defence-in-depth — it stops a mount request from
-  // simply declaring who it is — not a hard security boundary. A real
-  // boundary needs authenticated callers.
-  const consumerAppId = instance.appId;
-  if (!mgr.permissions.hasPermission(consumerAppId, 'apps.mount')) {
-    return errorResponse(
-      `${consumerAppId} is not granted 'apps.mount'. Add it to the app's manifest permissions[] to allow cross-app mounting.`,
-      403,
-    );
-  }
+  // The CONSUMER app (from the instance record, never the body) must hold
+  // `apps.mount`: the route access manifest's `targetPermissions`, which the
+  // middleware applies in every access mode (routeManifest.ts).
 
   let body: { targetAppId?: string; mode?: string; data?: boolean };
   try { body = await request.json(); }

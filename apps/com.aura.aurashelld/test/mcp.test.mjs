@@ -520,9 +520,9 @@ test('notification tools: Bearer only on notification calls; agent name forwarde
     assert.deepEqual(post.body.sender, { actor: { name: 'tester' } });
     assert.deepEqual(post.body.context, { kind: 'task', id: 'deploy-42', label: 'Release' });
     assert.equal('agent' in post.body, false, 'agent is not a notification field');
-    // other routes stay token-less
+    // every OS call carries the service's identity (shell-api.ts withIdentity)
     await call(client, 'list_apps');
-    assert.ok(calls.filter((c) => c.path === '/api/apps').every((c) => c.headers.authorization === undefined));
+    assert.ok(calls.filter((c) => c.path === '/api/apps').every((c) => c.headers.authorization === 'Bearer aura1.test.token'));
   } finally { delete process.env.AURA_INSTANCE_TOKEN; }
 });
 

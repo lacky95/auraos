@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import { errorResponse, jsonResponse } from '../../../../../lib/appResponse.js';
-import { sidecarError, sidecarGate } from '../../../../../lib/instanceAuth.js';
+import { sidecarError, sidecarTarget } from '../../../../../lib/instanceAuth.js';
 
 /**
  * One OS-managed sidecar.
@@ -12,8 +12,8 @@ import { sidecarError, sidecarGate } from '../../../../../lib/instanceAuth.js';
  * the app owns them. A sidecar calling with its own token reaches only the
  * sidecars it spawned, unless the app holds `sidecars.manageAll`.
  */
-export const GET: APIRoute = async ({ params, request }) => {
-  const gate = sidecarGate(params, request, ['sidecars.spawn']);
+export const GET: APIRoute = async ({ params, locals }) => {
+  const gate = sidecarTarget(params, locals);
   if (gate instanceof Response) return gate;
   const name = params['name'];
   if (!name) return errorResponse('Missing sidecar name', 400);
@@ -27,8 +27,8 @@ export const GET: APIRoute = async ({ params, request }) => {
   }
 };
 
-export const DELETE: APIRoute = async ({ params, request }) => {
-  const gate = sidecarGate(params, request, ['sidecars.spawn']);
+export const DELETE: APIRoute = async ({ params, locals }) => {
+  const gate = sidecarTarget(params, locals);
   if (gate instanceof Response) return gate;
   const name = params['name'];
   if (!name) return errorResponse('Missing sidecar name', 400);

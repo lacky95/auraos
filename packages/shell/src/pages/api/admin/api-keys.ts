@@ -2,7 +2,7 @@ import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { jsonResponse } from '../../../lib/appResponse.js';
 import { readJson } from '../../../lib/notificationCaller.js';
-import { auditAdmin, requireAdmin } from '../../../lib/auth.js';
+import { adminOf, auditAdmin } from '../../../lib/auth.js';
 
 /**
  * API keys for external REST callers. Every method needs an admin session.
@@ -22,20 +22,17 @@ function fail(err: unknown): Response {
   return jsonResponse({ error: message }, typeof status === 'number' ? status : 500);
 }
 
-export const GET: APIRoute = async ({ request }) => {
-  const p = await requireAdmin(request);
-  if (p instanceof Response) return p;
+export const GET: APIRoute = async () => {
   return jsonResponse({ scopes: core.API_KEY_SCOPES, keys: await core.getAuthServices().apiKeys.list() });
 };
 
-export const POST: APIRoute = async ({ request }) => {
-  const p = await requireAdmin(request);
-  if (p instanceof Response) return p;
+export const POST: APIRoute = async ({ request, locals }) => {
+  const p = adminOf(locals);
   const body = await readJson(request);
   if (body instanceof Response) return body;
   const scopes = Array.isArray(body['scopes']) ? body['scopes'].map(String) : ['system.notifications'];
   try {
-    const r = await core.getAuthServices().apiKeys.create({ name: String(body['name'] ?? ''), scopes, by: core.adminAttribution(p) });
+    const r = await core.getAuthServices().apiKeys.create({ name: String(body['name'] ?? ''), scopes, by: core.adminAttribution(p ?? undefined) });
     await auditAdmin(p, 'apiKey.create', { target: `apiKey:${r.apiKey.id}`, detail: { name: r.apiKey.name, scopes: r.apiKey.scopes } });
     return jsonResponse({ ok: true, ...r }, 201);
   } catch (err) {
@@ -43,9 +40,8 @@ export const POST: APIRoute = async ({ request }) => {
   }
 };
 
-export const DELETE: APIRoute = async ({ request, url }) => {
-  const p = await requireAdmin(request);
-  if (p instanceof Response) return p;
+export const DELETE: APIRoute = async ({ request, url, locals }) => {
+  const p = adminOf(locals);
   let id = url.searchParams.get('id') ?? '';
   if (!id) {
     const body = await readJson(request);

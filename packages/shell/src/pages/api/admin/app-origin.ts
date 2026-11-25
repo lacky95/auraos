@@ -3,7 +3,8 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 // Namespace import: the running shell may cache a core build without newer exports.
 import * as core from '@aura/core';
-import { auditAdmin, requireAdmin } from '../../../lib/auth.js';
+import type { AdminPrincipal } from '@aura/core';
+import { adminOf, auditAdmin } from '../../../lib/auth.js';
 
 /**
  * Origin ids of the installed apps — the engine behind `aura dev origin`.
@@ -51,7 +52,7 @@ export const GET: APIRoute = async () => {
   catch (err) { return json({ error: 'app-manager-unavailable', message: (err as Error).message }, 503); }
 };
 
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = async ({ request, locals }) => {
   let body: Body;
   try { body = await request.json() as Body; }
   catch { return json({ error: 'invalid-json' }, 400); }
@@ -67,13 +68,13 @@ export const POST: APIRoute = async ({ request }) => {
   try { ctx = listRows(); }
   catch (err) { return json({ error: 'app-manager-unavailable', message: (err as Error).message }, 503); }
 
-  let admin: Awaited<ReturnType<typeof requireAdmin>> | null = null;
+  let admin: AdminPrincipal | null = null;
   if (mode === 'reassign') {
     if (!Array.isArray(body.appIds) || body.appIds.length !== 1 || body.all) {
       return json({ error: 'one-app', message: 'reassign changes the identity of ONE app — pass exactly one appId.' }, 400);
     }
-    admin = await requireAdmin(request);
-    if (admin instanceof Response) return admin;
+    // Only with an admin session (routeManifest.ts, variant `reassign`).
+    admin = adminOf(locals);
   } else if (body.originId !== undefined) {
     return json({ error: 'invalid-origin-id', message: 'assign generates the originId; pass one only with reassign.' }, 400);
   }
@@ -113,7 +114,7 @@ export const POST: APIRoute = async ({ request }) => {
       results.push({ appId: t.appId, scope: t.scope, originId: r.originId, previous: r.previous, changed: r.changed });
       if (r.changed && t.active) { try { ctx.mgr.reloadManifest(t.appId); } catch { /* watcher reconciles */ } }
       if (r.changed && mode === 'reassign') {
-        await auditAdmin(admin as Exclude<typeof admin, Response | null>, 'app.origin-reassign', {
+        await auditAdmin(admin, 'app.origin-reassign', {
           target: `app:${t.appId}`, detail: { scope: t.scope, from: r.previous, to: r.originId },
         });
       }

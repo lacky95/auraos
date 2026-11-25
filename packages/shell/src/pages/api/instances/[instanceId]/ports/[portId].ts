@@ -4,7 +4,7 @@ import { jsonResponse, errorResponse } from '../../../../../lib/appResponse.js';
 
 /**
  * Remove one port expose. `portId` is `into-<port>` or `host-<addr>-<port>`.
- * Same `apps.port` gate as POST — deriving the app from the instance record.
+ * Same `apps.port` rule as POST (routeManifest.ts), on the instance's app.
  */
 export const DELETE: APIRoute = ({ params }) => {
   const instanceId = params['instanceId'];
@@ -15,13 +15,6 @@ export const DELETE: APIRoute = ({ params }) => {
   const mgr = getAppManager();
   const instance = mgr.getInstance(instanceId);
   if (!instance) return errorResponse(`Instance not found: ${instanceId}`, 404);
-
-  if (!mgr.permissions.hasPermission(instance.appId, 'apps.port')) {
-    return errorResponse(
-      `${instance.appId} is not granted 'apps.port'. Add it to the app's manifest permissions[] to manage exposes.`,
-      403,
-    );
-  }
 
   try {
     mgr.portExpose.remove(instanceId, decodeURIComponent(portId));

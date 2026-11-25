@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getAppManager, ProvidedInterfaceSchema } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
-import { identifyInstance } from '../../../lib/access/identify.js';
+import { actingInstance } from '../../../lib/access/identify.js';
 
 /**
  * Interface discovery + runtime registration.
@@ -15,7 +15,7 @@ import { identifyInstance } from '../../../lib/access/identify.js';
  *
  * Reads are open to every app: the response contains only what apps themselves
  * declared, plus a proxy path any caller could already construct. Writes are
- * caller-scoped — see lib/access/identify.ts.
+ * scoped to the verified calling instance (routeManifest.ts).
  */
 export const GET: APIRoute = ({ url }) => {
   const mgr = getAppManager();
@@ -35,15 +35,13 @@ export const GET: APIRoute = ({ url }) => {
   return jsonResponse({ interfaces, consumers });
 };
 
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = async ({ request, locals }) => {
   const mgr = getAppManager();
 
-  const instance = identifyInstance(request, mgr);
+  // The verified caller (routeManifest.ts: only an app instance, in every mode).
+  const instance = locals.access ? actingInstance(locals.access.principal) : null;
   if (!instance) {
-    return errorResponse(
-      'Could not identify the calling instance. Call from an app iframe, or send X-Aura-Instance-Id.',
-      401,
-    );
+    return errorResponse('Could not identify the calling instance: send Authorization: Bearer $AURA_INSTANCE_TOKEN, or call through the App Host gateway.', 401);
   }
 
   const body = await request.json().catch(() => null) as unknown;

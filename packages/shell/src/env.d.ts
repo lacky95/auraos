@@ -12,6 +12,16 @@ declare global {
      */
     auraLaunchApp?: (appId: string, opts?: { workspaceId?: string }) => Promise<void> | void;
   }
+  namespace App {
+    interface Locals {
+      /**
+       * The caller the middleware's access gate verified (lib/access/enforce.ts),
+       * when it resolved one: for every route in `enforce`, and in every mode for
+       * a route whose rule has a `guard`. Never a credential.
+       */
+      access?: import('./lib/access/types.ts').VerifiedIdentity;
+    }
+  }
 }
 
 export {};

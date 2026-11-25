@@ -19,18 +19,9 @@ export const DELETE: APIRoute = async ({ params }) => {
   const instance = mgr.getInstance(instanceId);
   if (!instance) return errorResponse(`Instance not found: ${instanceId}`, 404);
 
-  // Same `apps.mount` gate as POST. Detaching only ever REMOVES access, so this
-  // isn't about privilege escalation — it's that an ungated DELETE lets any
-  // caller rip mounts out from under an app that legitimately has them, which
-  // is a disruption vector and an inconsistent boundary. Consumer id comes from
-  // the instance record, never the request.
-  if (!mgr.permissions.hasPermission(instance.appId, 'apps.mount')) {
-    return errorResponse(
-      `${instance.appId} is not granted 'apps.mount'. Add it to the app's manifest permissions[] to manage cross-app mounts.`,
-      403,
-    );
-  }
-
+  // Same `apps.mount` rule as POST (routeManifest.ts). Detaching only ever
+  // removes access, but an ungated DELETE would let any caller rip mounts out
+  // from under an app that legitimately has them.
   try {
     await mgr.mounts.remove(instanceId, decodeURIComponent(mountId));
     return jsonResponse({ ok: true, removed: mountId });

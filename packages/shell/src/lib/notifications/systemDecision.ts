@@ -42,7 +42,8 @@ export function buildSystemDecisionInput(body: Record<string, unknown>): Record<
 
 export interface SystemDecisionDeps {
   dev: boolean;
-  requireAdmin(request: Request): Promise<unknown>;
+  /** The admin session the middleware required (routeManifest.ts `credentials`), for the audit. */
+  admin: unknown;
   audit(admin: unknown, action: string, entry: Record<string, unknown>): Promise<void>;
   /** Creates as SYSTEM_CALLER; throws NotificationError-like `{status}` on invalid input. */
   create(input: Record<string, unknown>): Promise<{ notification: { id: string }; warnings?: unknown[] }>;
@@ -55,11 +56,7 @@ const json = (body: unknown, status: number) =>
 
 export async function handleSystemDecision(request: Request, deps: SystemDecisionDeps): Promise<Response> {
   if (!deps.dev) return json({ error: 'not found', hint: 'the system-decision test hook exists only on the dev shell (astro dev)' }, 404);
-  const admin = await deps.requireAdmin(request);
-  if (admin instanceof Response) {
-    await deps.audit(null, 'dev.systemDecision', { outcome: 'denied' });
-    return admin;
-  }
+  const admin = deps.admin;
   const body = await deps.readJson(request);
   if (body instanceof Response) return body;
   const input = buildSystemDecisionInput(body);
