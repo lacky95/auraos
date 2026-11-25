@@ -1,7 +1,9 @@
 import type { APIRoute } from 'astro';
 // Namespace import, as in the other notification routes.
 import * as core from '@aura/core';
-import { authenticate } from '../../../lib/auth.js';
+// PHASE3-ENFORCE: the caller as before Stage 0 (a login cookie stays an anonymous screen
+// with its client session); Stage 2 gives notifications the `user` principal.
+import { authenticateLegacy } from '../../../lib/auth.js';
 import { viewerFor } from '../../../lib/clientSession.js';
 
 /**
@@ -63,7 +65,7 @@ function cmp(a: string, b: string): number {
 let nextStreamNo = 1;
 
 export const GET: APIRoute = async ({ request, url }) => {
-  const principal = await authenticate(request);
+  const principal = await authenticateLegacy(request);
   if (principal instanceof Response) return principal;
   const since = (request.headers.get('last-event-id') ?? url.searchParams.get('since') ?? '').trim();
   const svc = core.getNotificationService();

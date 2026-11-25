@@ -198,7 +198,10 @@ export class AppManager {
         const manifest = inst ? this.registry.getById(inst.appId) : undefined;
         if (!inst || !manifest) return null;
         const scope = this.scopeRegistry.getById(manifest.scopeId);
-        return { appId: inst.appId, instanceDataDir: join(scope.dataDir, 'apps', inst.appId, instanceId) };
+        return {
+          appId: inst.appId, instanceDataDir: join(scope.dataDir, 'apps', inst.appId, instanceId),
+          ...(inst.owner ? { owner: inst.owner } : {}),
+        };
       },
       changed: () => { void this.syncSidecars(2).catch(() => undefined); },
     });
@@ -1397,8 +1400,9 @@ export class AppManager {
         appDir:          manifest.appDir,
         instanceDataDir,
         // Fresh nonce per spawn: tokens of a previous life of a recycled
-        // instance id stop verifying the moment this one is minted.
-        instanceToken:   this.tokens.mint(instanceId),
+        // instance id stop verifying the moment this one is minted. An owned
+        // instance's token names its owner (`u`); a pool member's names nobody.
+        instanceToken:   this.tokens.mint(instanceId, undefined, owner),
         ...(owner ? { owner } : {}),
       });
       this.upsertInstance(instanceId, appId, { pid, port, startedAt: new Date(), inPool: opts.inPool, sandbox: manifest.sandbox, owner });

@@ -142,7 +142,7 @@ test('instance token: only to the runner origin, only for its own instance', asy
   assert.equal(other.seen[0]!.auth, undefined);
 });
 
-test('ordinary API calls and event streams stay anonymous even with a token', async () => {
+test('every shell call and event stream carries the instance token, never an admin session (5.8)', async () => {
   const shell = await fakeShell(({ url }, res) => {
     if (url !== '/api/apps/events') return [200, []];
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -155,12 +155,47 @@ test('ordinary API calls and event streams stay anonymous even with a token', as
   process.env['AURA_ADMIN_SESSION'] = 'pinned';
   await api.get('/api/apps');
   await api.post('/api/notifications', { title: 't' });
+  await shellFetch('/api/kv/os/theme');
   const event = await new Promise((resolve, reject) => {
     const stop = subscribeEvents('/api/apps/events', (e) => { stop(); resolve(e); }, reject);
   });
   assert.deepEqual(event, { type: 'x' });
-  assert.equal(shell.seen.length, 3);
-  assert.ok(shell.seen.every((r) => r.auth === undefined));
+  assert.equal(shell.seen.length, 4);
+  assert.ok(shell.seen.every((r) => r.auth === 'Bearer inst-token'), JSON.stringify(shell.seen));
+  // An admin route takes the admin session when there is one, else the token.
+  await api.get('/api/admin/grants');
+  assert.equal(shell.seen.at(-1)!.auth, 'Bearer pinned');
+  delete process.env['AURA_ADMIN_SESSION'];
+  await shellFetch('/api/admin/grants', { intent: 'admin' });
+  assert.equal(shell.seen.at(-1)!.auth, 'Bearer inst-token');
+});
+
+test('the instance token never goes to a foreign URL or through the proxy (D28: MCP stays tokenless)', async () => {
+  const runner = await fakeShell(({ url }, res) => {
+    if (url !== '/api/apps/events') return [200, []];
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.end('data: {"type":"y"}\n\n');
+    return 'handled';
+  });
+  const foreign = await fakeShell(({ url }, res) => {
+    if (url !== '/api/apps/events') return [200, []];
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.end('data: {"type":"x"}\n\n');
+    return 'handled';
+  });
+  process.env['OS_API_BASE'] = runner.base;
+  process.env['AURA_INSTANCE_TOKEN'] = 'inst-token';
+  process.env['APP_INSTANCE_ID'] = 'a.b';
+  await shellFetch('/api/proxy/com.aura.docs/mcp', { method: 'POST' });
+  await api.post('/api/proxy/com.aura.docs/mcp', {});
+  assert.ok(runner.seen.every((r) => r.auth === undefined), 'proxied calls carry no token');
+  process.env['AURA_SHELL_URL'] = foreign.base;
+  await api.get('/api/apps');
+  await new Promise((resolve, reject) => {
+    const stop = subscribeEvents('/api/apps/events', (e) => { stop(); resolve(e); }, reject);
+  });
+  assert.equal(foreign.seen.length, 2);
+  assert.ok(foreign.seen.every((r) => r.auth === undefined), 'nothing for a URL the runner did not inject');
 });
 
 test('fake 401 from a non-shell URL: no key read, nothing sent, saved session kept', async () => {
@@ -215,7 +250,8 @@ test('credentialed requests never follow a redirect; anonymous ones still do', a
   await assert.rejects(adminLogin(KEY));
   assert.equal(sink.seen.length, 0, 'nothing reached the redirect target');
 
-  const res = await shellFetch('/api/apps');
+  await assert.rejects(shellFetch('/api/apps'), undefined, 'an ordinary call carries the token now');
+  const res = await shellFetch('/api/apps', { intent: 'anonymous' });
   assert.equal(res.status, 200);
   assert.equal(sink.seen.length, 1);
   assert.equal(sink.seen[0]!.auth, undefined);

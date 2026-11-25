@@ -10,8 +10,9 @@ import type {
  * so its answers and its auto-grants stay the single source.
  *
  * The shared `admin` session counts as the report-level `operator`, which
- * satisfies `owner` so recovery keeps working. A browser login cookie is never
- * an input here (D37).
+ * satisfies `owner` so recovery keeps working. The owner's login (a verified
+ * `user`, identify.ts `resolvePrincipal`) satisfies `owner` too; since Phase 3
+ * Stage 0 that is reported, and enforced only from Stage 2.
  */
 
 export interface DecideDeps {

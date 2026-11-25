@@ -12,6 +12,7 @@
  * the upstream URL from the DECODED path, so a `%23` would come back as `#`
  * and `fetch` would drop everything after it as a fragment.
  */
+import { osAuthHeaders } from '@aura/app-sdk';
 import {
   SessionError, dialogGetLocal, dialogOpLocal, inputLocal, killLocal, listLocal, localInstanceId, openLocal, screenLocal,
 } from './session-service.ts';
@@ -38,6 +39,17 @@ export function isLocal(instanceId: string): boolean {
 
 export function proxyUrl(instanceId: string, path: string): string {
   return `${OS_BASE}/api/proxy/${encodeURIComponent(instanceId)}${path}`;
+}
+
+/**
+ * A call to the OS API itself, as this instance: it carries
+ * AURA_INSTANCE_TOKEN (the SDK's `osAuthHeaders`, which never adds it to a
+ * proxied path, so `remoteJson` below stays tokenless: the proxy would hand
+ * the token to the other instance).
+ */
+function osFetch(path: `/${string}`, init: RequestInit = {}): Promise<Response> {
+  const url = `${OS_BASE}${path}`;
+  return fetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), ...osAuthHeaders(url) } });
 }
 
 /**
@@ -173,7 +185,7 @@ async function osInstances(): Promise<{ instances: AppInstanceDto[]; degraded?: 
   if (osCache && Date.now() - osCache.at < OS_CACHE_MS) return osCache.value;
   let value: { instances: AppInstanceDto[]; degraded?: string };
   try {
-    const res = await fetch(`${OS_BASE}/api/apps/${APP_ID}/instances`, { signal: AbortSignal.timeout(3_000) });
+    const res = await osFetch(`/api/apps/${APP_ID}/instances`, { signal: AbortSignal.timeout(3_000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const all = await res.json() as AppInstanceDto[];
     value = { instances: all.filter((i) => !i.inPool) };
@@ -229,7 +241,7 @@ export async function listInstances(): Promise<InstanceSummary[]> {
 export async function startInstance(): Promise<string> {
   let res: Response;
   try {
-    res = await fetch(`${OS_BASE}/api/apps/${APP_ID}/start`, { method: 'POST', signal: AbortSignal.timeout(30_000) });
+    res = await osFetch(`/api/apps/${APP_ID}/start`, { method: 'POST', signal: AbortSignal.timeout(30_000) });
   } catch (err) {
     throw new SessionError(502, 'unreachable', `OS API: ${(err as Error).message}`);
   }

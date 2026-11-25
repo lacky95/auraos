@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import * as core from '@aura/core';
 import { defaultRedis, kvServer } from '@aura/kv-store';
 import { captureAccess, createAccessReporter } from '../src/lib/access/guard.ts';
-import { createObserver } from '../src/lib/access/observer.ts';
+import { createObserver, identifyRequest } from '../src/lib/access/observer.ts';
 import type { ObserverDeps } from '../src/lib/access/observer.ts';
 import { AccessReport } from '../src/lib/access/report.ts';
 import type { ReportRedis } from '../src/lib/access/report.ts';
@@ -301,22 +301,21 @@ test('a Valkey blip on an admin session is a service error, never a 401', async 
 
 test('fail-open: a Valkey failure in peek is counted and never reaches a response', async () => {
   const report = new AccessReport({ redis: () => null });
-  const observer = createObserver({
-    report,
-    deps: {
-      ...brokenDeps,
-      mgr: () => null,
-      redisReady: () => true,
-      internalSecret: () => null,
-      services: () => ({
-        admin: { peekSession: async () => { throw new Error('valkey down'); } },
-        apiKeys: { peek: async () => { throw new Error('valkey down'); } },
-      }),
-    },
-  });
+  const deps: ObserverDeps = {
+    ...brokenDeps,
+    mgr: () => null,
+    redisReady: () => true,
+    internalSecret: () => null,
+    services: () => ({
+      admin: { peekSession: async () => { throw new Error('valkey down'); } },
+      apiKeys: { peek: async () => { throw new Error('valkey down'); } },
+    }),
+  };
+  const observer = createObserver({ report, deps });
   for (const authorization of ['Bearer aura-admin1.a.b', `Bearer aura_k1_${'0'.repeat(16)}_${'a'.repeat(43)}`]) {
     const request = new Request('http://localhost/api/apps', { headers: { authorization } });
     const snapshot = captureAccess({ request, url: new URL(request.url), routePattern: '/api/apps', params: {} })!;
+    snapshot.identity.verified = identifyRequest(request, deps);
     snapshot.status = 200;
     await assert.doesNotReject(observer.observeRequest(snapshot));
   }

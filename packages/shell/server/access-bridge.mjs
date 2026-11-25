@@ -38,14 +38,28 @@ export const countCredential = (kind, surface) => withBridge((b) => b.countCrede
 
 const first = (v) => (Array.isArray(v) ? v[0] : v) ?? null;
 
-/** The request facts identity observation needs. The cookie value is not kept. */
-export function surfaceIdentity(headers) {
+/** The observer's verdict on these credentials, started now. Null before it is loaded. */
+function verify(facts) {
   try {
-    const cookie = first(headers?.cookie);
+    if (!accessReportEnabled()) return null;
+    const identify = globalThis[BRIDGE]?.identify;
+    if (typeof identify !== 'function') return null;
+    return Promise.resolve(identify(facts)).catch(() => null);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The request's identity for the report: the principal resolver's verdict
+ * (lib/access/identify.ts, through the observer), started while the request
+ * is in hand, plus the two hints. No credential is kept: not the bearer, not
+ * a cookie. `appHost`: an App Host session app-hosts.mjs already verified.
+ */
+export function surfaceIdentity(headers, { method = 'GET', url = '/', appHost = null } = {}) {
+  try {
     return {
-      authorization: first(headers?.authorization),
-      sessionCookie: typeof cookie === 'string'
-        && cookie.split(';').some((c) => SESSION_COOKIES.has(c.split('=', 1)[0].trim())),
+      verified: verify({ headers, method, url, appHost }),
       referer: first(headers?.referer),
       instanceId: first(headers?.['x-aura-instance-id']),
     };
@@ -71,7 +85,7 @@ export function observeHttpSurface(req, res) {
     if (!accessReportEnabled()) return;
     const subject = staticSurface(req.url);
     if (!subject) return;
-    const identity = surfaceIdentity(req.headers);
+    const identity = surfaceIdentity(req.headers, { method: req.method, url: req.url });
     const method = req.method;
     res.once('close', () => reportSurface({
       subject, method, identity, status: res.headersSent ? res.statusCode : 0,

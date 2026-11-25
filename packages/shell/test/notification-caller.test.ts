@@ -1,4 +1,5 @@
-// authenticateCaller: the notification API's identity rules.
+// The notification API's caller rules: identity from authenticate() (lib/auth.ts,
+// the one principal resolver), hints from anonymousCaller.
 //
 //   cd packages/shell && npx tsx --test test/notification-caller.test.ts
 import { test } from 'node:test';
@@ -7,7 +8,8 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InstanceTokens } from '@aura/core';
-import { authenticateCaller, withDeclaredAppHint, senderTokenFrom } from '../src/lib/notificationCaller.ts';
+import { authenticate, type AuthDeps } from '../src/lib/auth.ts';
+import { anonymousCaller, withDeclaredAppHint, senderTokenFrom } from '../src/lib/notificationCaller.ts';
 
 const tokens = new InstanceTokens(join(mkdtempSync(join(tmpdir(), 'aura-nc-')), 'secrets', 'k.key'));
 const instances = new Map([
@@ -18,48 +20,50 @@ const mgr = {
   getInstance: (id: string) => instances.get(id),
   getInstancesByApp: (appId: string) => [...instances.values()].filter((i) => i.appId === appId),
 } as never;
+const deps: AuthDeps = { mgr, apiKeys: { verify: async () => null }, admin: { verifySession: async () => null } };
 
 const req = (headers: Record<string, string> = {}) => new Request('http://aura-shell:3000/api/notifications', { method: 'POST', headers });
 
-test('valid Bearer → verified instance caller (appId from the instance record)', () => {
+test('valid Bearer → verified instance caller (appId from the instance record)', async () => {
   const token = tokens.mint('com.example.notes-1').token;
-  const c = authenticateCaller(req({ authorization: `Bearer ${token}`, 'x-aura-instance-id': 'com.other-1' }), mgr);
+  const c = await authenticate(req({ authorization: `Bearer ${token}`, 'x-aura-instance-id': 'com.other-1' }), deps);
   assert.deepEqual(c, { kind: 'instance', appId: 'com.example.notes', instanceId: 'com.example.notes-1', verification: 'verified' });
 });
 
-test('sidecar token keeps the sidecar name', () => {
+test('sidecar token keeps the sidecar name', async () => {
   const token = tokens.mint('com.example.notes-1', 'agent').token;
-  const c = authenticateCaller(req({ authorization: `Bearer ${token}` }), mgr) as { sidecar?: string };
+  const c = await authenticate(req({ authorization: `Bearer ${token}` }), deps) as { sidecar?: string };
   assert.equal(c.sidecar, 'agent');
 });
 
 test('invalid / garbage / non-Bearer credentials → 401, never anonymous', async () => {
   for (const authorization of ['Bearer aura-inst1.forged.sig', 'Bearer nonsense', 'Basic dXNlcjpwYXNz', 'Bearer']) {
-    const r = authenticateCaller(req({ authorization }), mgr);
+    const r = await authenticate(req({ authorization }), deps);
     assert.ok(r instanceof Response, `expected 401 for ${authorization}`);
     assert.equal((r as Response).status, 401);
   }
 });
 
-test('token of an instance that is gone → 401', () => {
+test('token of an instance that is gone → 401', async () => {
   const token = tokens.mint('com.example.gone-1').token;
-  const r = authenticateCaller(req({ authorization: `Bearer ${token}` }), mgr);
+  const r = await authenticate(req({ authorization: `Bearer ${token}` }), deps);
   assert.equal((r as Response).status, 401);
+  assert.match(await (r as Response).text(), /com\.example\.gone-1, which is not running/);
 });
 
 test('Referer / X-Aura-Instance-Id give unverified hints only', () => {
-  const viaHeader = authenticateCaller(req({ 'x-aura-instance-id': 'com.example.notes-1' }), mgr);
+  const viaHeader = anonymousCaller(req({ 'x-aura-instance-id': 'com.example.notes-1' }), mgr);
   assert.deepEqual(viaHeader, { kind: 'anonymous', verification: 'unverified', hints: { appId: 'com.example.notes', instanceId: 'com.example.notes-1' } });
-  const viaReferer = authenticateCaller(req({ referer: 'http://aura-shell:3000/api/proxy/com.example.notes-1/index.html' }), mgr);
-  assert.equal((viaReferer as { verification: string }).verification, 'unverified');
-  assert.equal((viaReferer as { kind: string }).kind, 'anonymous');
+  const viaReferer = anonymousCaller(req({ referer: 'http://aura-shell:3000/api/proxy/com.example.notes-1/index.html' }), mgr);
+  assert.equal(viaReferer.verification, 'unverified');
+  assert.equal(viaReferer.kind, 'anonymous');
   // unknown claimed instance → no hints at all
-  assert.deepEqual(authenticateCaller(req({ 'x-aura-instance-id': 'com.forged-1' }), mgr), { kind: 'anonymous', verification: 'unverified' });
+  assert.deepEqual(anonymousCaller(req({ 'x-aura-instance-id': 'com.forged-1' }), mgr), { kind: 'anonymous', verification: 'unverified' });
 });
 
-test('no credentials → anonymous; there is no way to produce a system caller', () => {
-  assert.deepEqual(authenticateCaller(req(), mgr), { kind: 'anonymous', verification: 'unverified' });
-  const c = authenticateCaller(req({ 'x-aura-caller': 'system', 'x-aura-system': '1' }), mgr) as { kind: string };
+test('no credentials → anonymous; there is no way to produce a system caller', async () => {
+  assert.deepEqual(await authenticate(req(), deps), { kind: 'anonymous', verification: 'unverified' });
+  const c = await authenticate(req({ 'x-aura-caller': 'system', 'x-aura-system': '1' }), deps) as { kind: string };
   assert.equal(c.kind, 'anonymous');
 });
 

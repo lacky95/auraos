@@ -90,7 +90,7 @@ export async function createSseMux(log = () => {}) {
   function serve(ws, req, scope) {
     const streams = new Map(); // id → AbortController
     log('connect', req.socket.remoteAddress);
-    const identity = surfaceIdentity(req.headers);
+    const identity = surfaceIdentity(req.headers, { url: req.url });
     const reportStream = (method, status) => reportSurface({ subject: 'sse-mux', method, status, via: 'sse-mux', identity });
     reportStream('UPGRADE', 101);
 

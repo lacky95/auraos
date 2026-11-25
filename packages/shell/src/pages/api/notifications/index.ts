@@ -6,7 +6,9 @@ import { jsonResponse } from '../../../lib/appResponse.js';
 import {
   notificationErrorResponse, readJson, withDeclaredAppHint,
 } from '../../../lib/notificationCaller.js';
-import { authenticate } from '../../../lib/auth.js';
+// PHASE3-ENFORCE: the caller as before Stage 0 (a login cookie stays an anonymous screen
+// with its client session); Stage 2 gives notifications the `user` principal.
+import { authenticateLegacy } from '../../../lib/auth.js';
 import { viewerFor } from '../../../lib/clientSession.js';
 
 /**
@@ -36,7 +38,7 @@ import { viewerFor } from '../../../lib/clientSession.js';
  * is gone. Live delivery is `notification:*` (content-free) + the SSE stream.
  */
 export const GET: APIRoute = async ({ url, request }) => {
-  const viewer = await authenticate(request);
+  const viewer = await authenticateLegacy(request);
   if (viewer instanceof Response) return viewer;
   try {
     const { cs: _cs, ...q } = Object.fromEntries(url.searchParams.entries());
@@ -49,7 +51,7 @@ export const GET: APIRoute = async ({ url, request }) => {
 export const POST: APIRoute = async ({ request }) => {
   const body = await readJson(request);
   if (body instanceof Response) return body;
-  const authed = await authenticate(request);
+  const authed = await authenticateLegacy(request);
   if (authed instanceof Response) return authed;
 
   // Legacy shape {appId, title, body}: `body` → text; appId → hint only.
@@ -71,7 +73,7 @@ export const POST: APIRoute = async ({ request }) => {
 };
 
 export const DELETE: APIRoute = async ({ url, request }) => {
-  const principal = await authenticate(request);
+  const principal = await authenticateLegacy(request);
   if (principal instanceof Response) return principal;
   try {
     const filter: Record<string, string> = {};

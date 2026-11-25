@@ -17,10 +17,10 @@ export function isOwnerUiInstallation(
 ): Promise<boolean>;
 export function ownerUiCovers(appId: string, path: string): boolean;
 export function ownerUiActs(
-  ref: { appId: string; installationId: string; sid: string; path: string },
+  ref: { appId: string; installationId: string; sid: string; userId: string; path: string },
   svc: {
     registry: { getInstallation?(id: string): Promise<{ appId: string; scope: string; state: string } | null> } | null | undefined;
-    sessionLive(sid: string): Promise<boolean>;
+    sessionLive(sid: string, userId: string): Promise<boolean>;
   },
 ): Promise<boolean>;
 export function gatewayKey(): Buffer;

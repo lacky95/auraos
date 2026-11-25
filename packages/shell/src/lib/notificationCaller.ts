@@ -1,18 +1,12 @@
-import type { AppManager, NotificationCaller, CallerHints } from '@aura/core';
+import type { AnonymousCaller, AppManager, NotificationCaller, CallerHints } from '@aura/core';
 import { identifyInstance } from './access/identify.js';
 import { errorResponse, jsonResponse } from './appResponse.js';
 
 /**
- * Server-established caller identity for the notification API — the
- * instance-token / hints part. Phase 2: routes call `authenticate()` in
- * `lib/auth.ts`, which handles API keys (`aura_k1_…`) and admin sessions
- * (`aura-admin1.…`) first and delegates everything else here.
+ * Caller helpers for the notification API. Identity is `authenticate()`'s
+ * (lib/auth.ts, the one principal resolver); this adds the attribution hints
+ * of a caller it could not verify:
  *
- *   valid   `Authorization: Bearer $AURA_INSTANCE_TOKEN`
- *             → { kind:'instance', appId, instanceId, sidecar?, verification:'verified' }
- *             (appId from the live instance record, never from the request)
- *   invalid / expired Bearer, or any other Authorization scheme
- *             → 401. Never downgraded to anonymous.
  *   Referer `/api/proxy/<id>/` or `X-Aura-Instance-Id`, no credentials
  *             → { kind:'anonymous', verification:'unverified', hints:{appId, instanceId} }
  *             Hints are attribution only; they NEVER authenticate.
@@ -27,26 +21,8 @@ export type CallerAuthManager = Pick<AppManager, 'tokens' | 'getInstance' | 'get
 
 const APP_ID_HINT = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9-]*)+$/;
 
-export function authenticateCaller(request: Request, mgr: CallerAuthManager): NotificationCaller | Response {
-  const header = request.headers.get('authorization');
-  if (header !== null && header.trim() !== '') {
-    const token = /^Bearer\s+(\S+)\s*$/i.exec(header)?.[1];
-    if (!token) {
-      return errorResponse('unsupported Authorization header — send Authorization: Bearer $AURA_INSTANCE_TOKEN (or an API key / admin session), or no Authorization at all', 401);
-    }
-    const claims = mgr.tokens.verify(token);
-    if (!claims) return errorResponse('invalid or expired credential (instance token, API key or admin session)', 401);
-    const inst = mgr.getInstance(claims.instanceId);
-    if (!inst) return errorResponse(`token belongs to ${claims.instanceId}, which is not running`, 401);
-    return {
-      kind: 'instance',
-      appId: inst.appId,
-      instanceId: inst.instanceId,
-      ...(claims.sidecar ? { sidecar: claims.sidecar } : {}),
-      verification: 'verified',
-    };
-  }
-
+/** A caller without a verified identity: anonymous, with its hints. */
+export function anonymousCaller(request: Request, mgr: CallerAuthManager): AnonymousCaller {
   const inst = identifyInstance(request, mgr as AppManager);
   if (inst) {
     return { kind: 'anonymous', verification: 'unverified', hints: { appId: inst.appId, instanceId: inst.instanceId } };

@@ -4,7 +4,9 @@ import { errorResponse, jsonResponse } from '../../../lib/appResponse.js';
 import {
   notificationErrorResponse, readJson, senderTokenFrom,
 } from '../../../lib/notificationCaller.js';
-import { authenticate } from '../../../lib/auth.js';
+// PHASE3-ENFORCE: the caller as before Stage 0 (a login cookie stays an anonymous screen
+// with its client session); Stage 2 gives notifications the `user` principal.
+import { authenticateLegacy } from '../../../lib/auth.js';
 import { viewerFor } from '../../../lib/clientSession.js';
 
 /**
@@ -36,7 +38,7 @@ const MAX_WAIT_S = 25;
 const DEFAULT_WAIT_S = 20;
 
 export const GET: APIRoute = async ({ params, request, url }) => {
-  const principal = await authenticate(request);
+  const principal = await authenticateLegacy(request);
   if (principal instanceof Response) return principal;
   const viewer = await viewerFor(request, principal, { url, senderToken: senderTokenFrom(request) });
   const id = params['id'] ?? '';
@@ -78,7 +80,7 @@ export const GET: APIRoute = async ({ params, request, url }) => {
 export const PATCH: APIRoute = async ({ params, request }) => {
   const body = await readJson(request);
   if (body instanceof Response) return body;
-  const caller = await authenticate(request);
+  const caller = await authenticateLegacy(request);
   if (caller instanceof Response) return caller;
   const token = senderTokenFrom(request, body);
   const { senderToken: _t, ...patch } = body;
@@ -90,7 +92,7 @@ export const PATCH: APIRoute = async ({ params, request }) => {
 };
 
 export const DELETE: APIRoute = async ({ params, request, url }) => {
-  const principal = await authenticate(request);
+  const principal = await authenticateLegacy(request);
   if (principal instanceof Response) return principal;
   try {
     return jsonResponse(await core.getNotificationService().dismiss(params['id'] ?? '', undefined, await viewerFor(request, principal, { url })));

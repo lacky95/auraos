@@ -42,7 +42,7 @@ export const POST: APIRoute = async ({ request }) => {
 
   const services = await loadAppHostServices();
   if (!services) return jsonResponse({ error: 'unavailable' }, 503);
-  if (!(await services.sessionLive(claim.sid))) return jsonResponse({ error: 'session-ended' }, 401);
+  if (!(await services.sessionLive(claim.sid, claim.userId))) return jsonResponse({ error: 'session-ended' }, 401);
   let desktop: { scheme: string; host: string } | null = null;
   try {
     const u = new URL(claim.origin);

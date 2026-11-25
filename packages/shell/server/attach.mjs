@@ -156,7 +156,7 @@ export function attachWsProxy(httpServer) {
     let port = null;
     let chosenInstanceId = null;
     let chosenAppId = null;
-    const identity = surfaceIdentity(req.headers);
+    const identity = surfaceIdentity(req.headers, { url: req.url });
     let reported = false;
     const reportWs = (status) => {
       if (reported) return;
@@ -374,7 +374,7 @@ export async function attachSio(httpServer) {
 
   io.on('connection', (socket) => {
     sioDbg('connect', socket.id);
-    reportSurface({ subject: 'socketio-os-events', method: 'UPGRADE', status: 101, identity: surfaceIdentity(socket.handshake?.headers) });
+    reportSurface({ subject: 'socketio-os-events', method: 'UPGRADE', status: 101, identity: surfaceIdentity(socket.handshake?.headers, { url: socket.handshake?.url }) });
     const countEmit = (type) => countSurfaceEvent(type === 'kv:changed' ? 'socketio-kv' : 'socketio-os-events');
     let accepts = null;  // null = firehose; otherwise topic matcher
     // Phase 5: the tab's shell client session (handshake auth, then 'cs'

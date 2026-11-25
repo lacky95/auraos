@@ -4,10 +4,11 @@
  * desktop's sign-in gate. Login is always on (D6): until the owner exists the
  * desktop sends everyone to `/setup`, after that to `/login`.
  *
- * `whoami` reports the bearer principal from `authenticate()` and only labels
- * the login cookie: `authenticate()` and `viewerFor` never read it. A login
- * session opens the desktop and its App Hosts (the handoff); API access
- * control is Phase 3.
+ * `whoami` reports the principal routes act on (`authenticateLegacy`) and
+ * only labels the login cookie. The shell's principal resolver reads the
+ * cookie through `sessionCookieToken` / `ownerSessionOf`, but in Phase 3
+ * Stage 0 that is report-only. A login session opens the desktop and its App
+ * Hosts (the handoff).
  *
  * Nothing here needs AppManager. `getAuthServices()` builds its stores lazily.
  */
@@ -19,7 +20,7 @@ import type {
   LoginSession, LoginSessions, PasswordRule, Principal, SetupTickets, UserAccount, UserPrincipal, UserStore, ValkeyUserStore,
 } from '@aura/core';
 import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
-import { authenticate } from './auth.js';
+import { authenticateLegacy } from './auth.js';
 import { isTrustedProxy } from '../../server/host-policy.mjs';
 
 export const COOKIE_HTTPS = '__Host-aura_session';
@@ -192,6 +193,10 @@ function setCookie(scheme: Scheme, value: string, maxAgeSeconds: number): string
 
 const clearCookie = (scheme: Scheme) => setCookie(scheme, '', 0);
 
+/** The login token in a request's session cookie, under either name, for the shell's principal resolver. */
+export const sessionCookieToken = (request: Request): string | null =>
+  readSessionCookie(request, 'https') ?? readSessionCookie(request, 'http');
+
 /** Two cookies of one name mean one was planted, so neither is used. */
 function readSessionCookie(request: Request, scheme: Scheme): string | null {
   const name = cookieName(scheme);
@@ -322,6 +327,22 @@ function raiseNotice(svc: AuthSurfaceServices, notice: AuthNotice): void {
 /** Checked before a claim, so an unusable identity.key never burns a code. */
 const identityKeyUsable = (svc: AuthSurfaceServices) => svc.users.identityKeyStatus?.() !== 'malformed';
 
+/**
+ * The live password session of the current, enabled owner that `token` names.
+ * The one check behind the desktop's sign-in and the shell's principal
+ * resolver (lib/access/identify.ts).
+ */
+export async function ownerSessionOf(
+  token: string,
+  svc: { loginSessions: Pick<LoginSessions, 'verify'>; users: Pick<UserStore, 'getOwner'> },
+): Promise<{ session: LoginSession; user: UserAccount } | null> {
+  const session = await svc.loginSessions.verify(token);
+  if (!session || session.method !== 'password' || !session.userId) return null;
+  const user = await svc.users.getOwner();
+  if (!user || user.disabled || user.id !== session.userId) return null;
+  return { session, user };
+}
+
 /** A live password session of the current, enabled owner. */
 async function currentSession(
   ctx: AuthContext,
@@ -329,12 +350,7 @@ async function currentSession(
   scheme: Scheme,
 ): Promise<{ session: LoginSession; user: UserAccount } | null> {
   const token = readSessionCookie(ctx.request, scheme);
-  if (!token) return null;
-  const session = await svc.loginSessions.verify(token);
-  if (!session || session.method !== 'password' || !session.userId) return null;
-  const user = await svc.users.getOwner();
-  if (!user || user.disabled || user.id !== session.userId) return null;
-  return { session, user };
+  return token ? ownerSessionOf(token, svc) : null;
 }
 
 /** The verified owner session of this request, for the App Host handoff. */
@@ -608,10 +624,14 @@ async function observedLogin(ctx: AuthContext, deps: AuthSurfaceDeps): Promise<R
   }
 }
 
-/** A login cookie never changes `principal`. */
+/**
+ * A login cookie never changes `principal`. PHASE3-ENFORCE: whoami reports
+ * what routes act on (`authenticateLegacy`), so a login user is labelled
+ * under `login` only until Stage 2 makes it the principal.
+ */
 export async function authWhoami(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps()): Promise<Response> {
   let principal: Principal | Response;
-  try { principal = await (deps.authenticate ?? authenticate)(ctx.request); }
+  try { principal = await (deps.authenticate ?? authenticateLegacy)(ctx.request); }
   catch { return unavailable(); }
   if (principal instanceof Response) return json({ error: 'invalid-credential' }, 401);
   return json({ principal: publicPrincipal(principal), login: await observedLogin(ctx, deps) });

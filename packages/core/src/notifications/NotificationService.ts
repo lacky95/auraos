@@ -1628,8 +1628,10 @@ export function getNotificationService(): NotificationService {
   }
   svc ??= g[GLOBAL_KEY] = new NotificationService();
   svc.setEventListener(emitNotificationBusEvent);
-  // Phase 2: the central Authorizer + the default create rate limit.
-  svc.setAuthorizer(getAuthServices().authorizer);
+  // Phase 2: the central Authorizer + the default create rate limit. Its
+  // `Principal` also holds `user`, which never reaches notifications: the
+  // shell hands them the caller as it was before Phase 3 (auth.ts authenticateLegacy).
+  svc.setAuthorizer(getAuthServices().authorizer as NotificationAuthorizer);
   if (!svc.rateLimitConfigured) svc.setCreateRateLimit(DEFAULT_CREATES_PER_MINUTE);
   // Phase 4: forced pop-up limit + window ownership through the AppManager.
   svc.setPopupLimit({ max: DEFAULT_POPUPS_PER_WINDOW, windowMs: DEFAULT_POPUP_WINDOW_MS });

@@ -165,6 +165,21 @@ export class LoginSessionStore implements LoginSessions {
     }
   }
 
+  /**
+   * Whether the password session `sessionId` of `userId` is live: not revoked
+   * and not expired. For holders of a sealed reference to a session (an App
+   * Host cookie) rather than its token. Rejects only when Valkey fails.
+   */
+  async isLive(sessionId: string, userId: string): Promise<boolean> {
+    if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId) || typeof userId !== 'string' || !userId) return false;
+    const raw = await this.redis().get(loginSessionKey(sessionId));
+    if (!raw) return false;
+    let nonce: Partial<Nonce>;
+    try { nonce = JSON.parse(raw) as Partial<Nonce>; } catch { return false; }
+    return nonce.m === 'password' && nonce.u === userId
+      && typeof nonce.expiresAt === 'number' && nonce.expiresAt > this.now();
+  }
+
   async revoke(sessionId: string): Promise<boolean> {
     if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) return false;
     return (await this.redis().del(loginSessionKey(sessionId))) > 0;

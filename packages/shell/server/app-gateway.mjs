@@ -110,7 +110,7 @@ async function ownerActing(ctx, session, path) {
     const svc = ctx.services ?? await loadAppHostServices();
     if (!svc) return null;
     const acts = await ownerUiActs({
-      appId: ctx.record.appId, installationId: ctx.record.installationId, sid: session.sid, path,
+      appId: ctx.record.appId, installationId: ctx.record.installationId, sid: session.sid, userId: session.userId, path,
     }, svc);
     return acts ? { userId: session.userId, sid: session.sid } : null;
   } catch {
@@ -230,7 +230,8 @@ export async function handleAppGatewayUpgrade(req, socket, head, ctx) {
       if (typeof rawUrl !== 'string') return null;
       const path = gatewayShellPath(rawUrl);
       if (!path) return null;
-      const claim = buildClaim(ctx, { method: 'GET', path, origin: session.aud, userId: session.userId });
+      // `sid`: the stream acts for this session's user (5.8). It never makes the owner (D45).
+      const claim = buildClaim(ctx, { method: 'GET', path, origin: session.aud, userId: session.userId, sid: session.sid });
       return { url: `http://127.0.0.1:${shellPort()}${path}`, headers: shellHeaders(baseHeaders, claim) };
     },
   };
