@@ -4,6 +4,7 @@ import '../styles/settings.css';
 import ColorModePicker from '../components/ColorModePicker';
 import Icon from '../components/Icon.astro';
 import { shellFetch } from '../lib/shellClient';
+import { escapeJsonForScript } from '@aura/ui/lib/utils';
 
 // SSR-read from the OS KV directly via the shell's internal port. Each
 // general-pref lives under its own key so a single field write doesn't
@@ -74,7 +75,7 @@ const state = { clockFormat, locale, timeZone, colorMode, restoreSession, lazyAc
           <button type="button" class="combo-toggle" tabindex="-1" aria-label="Open the time zone list" data-combo-toggle><Icon name="chevron-down" /></button>
           <ul id="time-zone-list" class="combo-list" role="listbox" hidden></ul>
         </div>
-        <script type="application/json" id="time-zone-zones" set:html={JSON.stringify(zones)}></script>
+        <script type="application/json" id="time-zone-zones" set:html={escapeJsonForScript(zones)}></script>
         <p id="time-zone-hint" style="margin-top: 6px; font-size: 0.6rem; color: var(--aura-color-text-dim); letter-spacing: 0.06em;">
           TYPE TO SEARCH · USED BY THE STATUS BAR, LOCK SCREEN AND THE SHELL MCP'S DATE/TIME
         </p>
@@ -151,9 +152,12 @@ const state = { clockFormat, locale, timeZone, colorMode, restoreSession, lazyAc
             headers: { 'Content-Type': 'application/json' },
             body:    JSON.stringify({ value }),
           });
-          statusEl.innerHTML = `SAVED <b>${field}</b> = ${value} · ${new Date().toLocaleTimeString()}`;
+          statusEl.replaceChildren('SAVED ', Object.assign(document.createElement('b'), { textContent: field }), ` = ${value} · ${new Date().toLocaleTimeString()}`);
         } catch (err) {
-          statusEl.innerHTML = `<b style="color: var(--aura-color-danger);">ERROR — ${err.message}</b>`;
+          const b = document.createElement('b');
+          b.style.color = 'var(--aura-color-danger)';
+          b.textContent = `ERROR — ${err.message}`;
+          statusEl.replaceChildren(b);
         }
       }, 200));
     }

@@ -6,7 +6,8 @@
 # and an interactive shell behaves the way Debian users expect.
 # Build with:
 #   docker build -t aura-base -f Dockerfile --target aura-base .
-FROM node:22 AS aura-base
+# Pinned to an exact Node 22 release (bump deliberately, with the lockfile).
+FROM node:22.23.5-bookworm AS aura-base
 # Keep the explicit `apt-get install` line for the AuraOS-specific extras
 # that aren't in the full node:22 base (ssh client+server, htop, dnsutils,
 # iproute2). Most of bash/coreutils/curl/git/procps/nano/less is already
@@ -74,7 +75,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 # ─── Stage: base ──────────────────────────────────────────────────────────────
-FROM node:22-slim AS base
+# Same exact Node 22 release as aura-base.
+FROM node:22.23.5-bookworm-slim AS base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     proot \

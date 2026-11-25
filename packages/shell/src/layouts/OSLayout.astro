@@ -41,7 +41,8 @@ let activeColorMode: ColorMode = ThemeManager.DEFAULT_COLOR_MODE;
     }>('os', 'theme');
     if (theme?.themeIdDark)  themeIdDark     = theme.themeIdDark;
     if (theme?.themeIdLight) themeIdLight    = theme.themeIdLight;
-    if (theme?.colorMode)    activeColorMode = theme.colorMode;
+    // A KV string goes into the <style> below (toCss): only the known modes.
+    if (theme?.colorMode === 'light' || theme?.colorMode === 'dark' || theme?.colorMode === 'auto') activeColorMode = theme.colorMode;
   } catch (err) {
     console.warn(`[OSLayout/SSR] theme fetch threw — falling back to defaults`, err instanceof Error ? err.message : err);
   }

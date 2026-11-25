@@ -6,9 +6,12 @@
 //
 // Prints one summary line, then one line per finding (and per warning).
 // Exit: 0 clean, 1 findings, 2 tool error (a check could not run, or the
-// allowlist is invalid). Reviewed exceptions go in tools/security-allowlist.yaml,
-// each with a reason; the values the header check expects are in
-// tools/security-expected.json. Secrets are never printed, only a fingerprint.
+// allowlist or baseline is invalid). Reviewed exceptions go in
+// tools/security-allowlist.yaml, each with a reason; the values the header
+// check expects are in tools/security-expected.json. Known debt is in
+// tools/security-baseline.json (reason and owner each): it does not fail the
+// gate, only new findings do, and the summary prints how much debt is left.
+// Secrets are never printed, only a fingerprint.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -307,6 +310,43 @@ function allowedBy(finding, entries) {
     && (!e.file || globRe(e.file).test(finding.file ?? ''))
     && (!e.id || e.id === finding.id)
     && (!e.match || (finding.source ?? finding.message).includes(e.match)));
+}
+
+// ── baseline: known debt that must shrink, never grow ───────────────────────
+
+/**
+ * What identifies a finding across line shifts: its check and file, plus the
+ * advisory or secret id, else the flagged source line with spaces collapsed.
+ * Editing that line makes it a new finding, which is the point.
+ */
+const baselineKey = (f) => `${f.check}|${f.file ?? ''}|${f.id ?? (f.source ?? f.message).replace(/\s+/g, ' ').trim()}`;
+
+function parseBaseline(text, file) {
+  let doc;
+  try { doc = JSON.parse(text); } catch (e) { throw new Error(`${file}: ${e.message}`); }
+  if (!Array.isArray(doc.entries)) throw new Error(`${file}: expected { "entries": [...] }`);
+  const KEYS = new Set(['check', 'file', 'id', 'source', 'reason', 'owner']);
+  doc.entries.forEach((e, i) => {
+    const where = `${file} entry ${i + 1}`;
+    for (const k of Object.keys(e)) if (!KEYS.has(k)) throw new Error(`${where}: unknown key "${k}"`);
+    if (!e.check || !e.file || (!e.id && !e.source)) throw new Error(`${where}: an entry needs "check", "file" and "id" or "source"`);
+    if (!e.reason || e.reason.trim().length < 15) throw new Error(`${where}: an entry needs a "reason" (a sentence)`);
+    if (!e.owner) throw new Error(`${where}: an entry needs an "owner" (who pays the debt down, and when)`);
+  });
+  return doc.entries;
+}
+
+/** Each entry covers one finding with its key (two identical lines need two entries). */
+function baselineMatcher(entries) {
+  const left = new Map();
+  for (const e of entries) {
+    const k = baselineKey(e);
+    left.set(k, [...(left.get(k) ?? []), e]);
+  }
+  return {
+    take(f) { return left.get(baselineKey(f))?.shift() ?? null; },
+    unused() { return [...left.values()].flat(); },
+  };
 }
 
 // ── 1. secrets ──────────────────────────────────────────────────────────────
@@ -679,7 +719,7 @@ const RUNNERS = { secrets: checkSecrets, deps: checkDeps, patterns: checkPattern
 export async function main(argv, out = (s) => process.stdout.write(`${s}\n`)) {
   let opts;
   try { opts = parseArgs(argv); } catch (e) { out(`SECURITY ERROR ${e.message}`); return EXIT.TOOL; }
-  if (opts.help) { out(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 11).map((l) => l.replace(/^\/\/ ?/, '')).join('\n')); return EXIT.CLEAN; }
+  if (opts.help) { out(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 15).map((l) => l.replace(/^\/\/ ?/, '')).join('\n')); return EXIT.CLEAN; }
   const root = opts.root ?? resolve(HERE, '..');
   const started = Date.now();
   const errors = [];
@@ -689,6 +729,11 @@ export async function main(argv, out = (s) => process.stdout.write(`${s}\n`)) {
   try {
     const file = join(root, 'tools/security-allowlist.yaml');
     allow = existsSync(file) ? parseAllowlist(readFileSync(file, 'utf8'), 'tools/security-allowlist.yaml') : [];
+  } catch (e) { errors.push(e.message); }
+  let baseline = [];
+  try {
+    const file = join(root, 'tools/security-baseline.json');
+    baseline = existsSync(file) ? parseBaseline(readFileSync(file, 'utf8'), 'tools/security-baseline.json') : [];
   } catch (e) { errors.push(e.message); }
 
   const ctx = {
@@ -712,26 +757,36 @@ export async function main(argv, out = (s) => process.stdout.write(`${s}\n`)) {
   const used = new Set();
   const findings = [];
   const allowed = [];
+  const debt = [];
+  const known = baselineMatcher(baseline);
   for (const c of selected) {
     for (const f of results[c]?.findings ?? []) {
       const entry = allowedBy(f, live);
-      if (entry) { used.add(entry); allowed.push({ ...f, allowlist: entry.line }); } else findings.push(f);
+      if (entry) { used.add(entry); allowed.push({ ...f, allowlist: entry.line }); continue; }
+      const owed = known.take(f);
+      if (owed) debt.push({ ...f, baseline: { reason: owed.reason, owner: owed.owner } }); else findings.push(f);
     }
   }
+  const ran = (check) => selected.includes(check) && !results[check]?.error;
   for (const e of live) {
     const check = e.check.split('/')[0];
-    if (selected.includes(check) && !results[check]?.error && !used.has(e)) warnings.push(`allowlist line ${e.line}: matches nothing (${e.check}${e.file ? ` ${e.file}` : ''}): remove it`);
+    if (ran(check) && !used.has(e)) warnings.push(`allowlist line ${e.line}: matches nothing (${e.check}${e.file ? ` ${e.file}` : ''}): remove it`);
+  }
+  // A paid-off entry leaves the baseline, so the debt count can only go down.
+  for (const e of known.unused()) {
+    const check = e.check.split('/')[0];
+    if (ran(check) && !(check === 'deps' && ctx.opts.offline)) warnings.push(`baseline: fixed, remove the entry (${e.check} ${e.file} ${e.id ?? e.source})`);
   }
 
   const counts = Object.fromEntries(selected.map((c) => [c, findings.filter((f) => f.check.startsWith(`${c}/`)).length]));
   const code = errors.length ? EXIT.TOOL : findings.length ? EXIT.FINDINGS : EXIT.CLEAN;
   const seconds = ((Date.now() - started) / 1000).toFixed(1);
   if (opts.json) {
-    out(JSON.stringify({ exit: code, root, checks: selected, counts, findings, allowlisted: allowed, warnings, errors, seconds: Number(seconds) }));
+    out(JSON.stringify({ exit: code, root, checks: selected, counts, findings, allowlisted: allowed, baseline: debt, warnings, errors, seconds: Number(seconds) }));
     return code;
   }
   const verdict = code === EXIT.TOOL ? 'ERROR' : code === EXIT.FINDINGS ? 'FAIL' : 'PASS';
-  out(`SECURITY ${verdict} ${findings.length} finding${findings.length === 1 ? '' : 's'} (${selected.map((c) => `${c} ${!results[c] ? 'not run' : results[c].error ? 'error' : counts[c]}`).join(', ')}) · ${allowed.length} allowlisted · ${warnings.length} warning${warnings.length === 1 ? '' : 's'} · ${seconds}s`);
+  out(`SECURITY ${verdict} ${findings.length} finding${findings.length === 1 ? '' : 's'} (${selected.map((c) => `${c} ${!results[c] ? 'not run' : results[c].error ? 'error' : counts[c]}`).join(', ')}) · ${allowed.length} allowlisted · debt ${debt.length} baselined · ${warnings.length} warning${warnings.length === 1 ? '' : 's'} · ${seconds}s`);
   for (const f of findings) out(`${f.check} ${f.file ?? ''}${f.line ? `:${f.line}` : ''} ${f.message}`.replace(/\s+/g, ' '));
   for (const e of errors) out(`ERROR ${e}`);
   for (const w of warnings) out(`WARN ${w}`);

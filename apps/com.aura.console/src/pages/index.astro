@@ -457,8 +457,11 @@ import AutoscrollCheckbox from '../components/AutoscrollCheckbox';
       })
       .catch(() => undefined);
 
+    // Only to the shell's exact origin: /_aura/runtime.js names it on an App
+    // Host; on the proxy route the shell is this document's own origin.
+    const shellOrigin = (window.AuraRuntimeBootstrap && window.AuraRuntimeBootstrap.shellOrigin) || location.origin;
     if (window.parent && window.parent !== window) {
-      try { window.parent.postMessage({ type: 'aura.console.requestBacklog' }, '*'); } catch (_) {}
+      try { window.parent.postMessage({ type: 'aura.console.requestBacklog' }, shellOrigin); } catch (_) {}
     }
 
     filterBtns.forEach((btn) => {

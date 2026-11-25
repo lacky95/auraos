@@ -603,7 +603,7 @@ import Icon from '../ui/Icon.astro';
     const rows = state.workspaces.map((w, i) => {
       const active = w.id === state.activeWorkspaceId;
       return `<button type="button" class="lo-ctx-ws" role="menuitem"
-                      data-ws-id="${w.id}" data-active="${active}"
+                      data-ws-id="${escapeAttr(w.id)}" data-active="${active}"
                       title="Launch in ${escapeAttr(w.name)}">
         <span class="lo-ctx-ws-slot">${i + 1}</span>
         <span class="lo-ctx-ws-name">${escapeHtml(w.name)}</span>
@@ -900,17 +900,26 @@ import Icon from '../ui/Icon.astro';
     // Sort by name to match the SSR ordering (alphabetical via Object key
     // iteration order; getManifests doesn't guarantee, but that's close).
     apps.sort((a, b) => a.manifest.name.localeCompare(b.manifest.name));
-    grid.innerHTML = apps.map((a) => {
+    // Manifest names and icons are app-supplied: text nodes, never markup.
+    grid.replaceChildren(...apps.map((a) => {
       const m = a.manifest;
       const glyph = (m.icon ?? m.name.charAt(0)).toUpperCase();
-      const safeId   = m.id.replace(/[<>&"']/g, '');
-      const safeName = m.name.replace(/[<>&]/g, '');
-      return `<button class="lo-app" data-app-id="${safeId}" data-enabled="${a.enabled}" title="${safeName}">
-        <span class="lo-app-initial" data-len="${glyph.length}">${glyph}</span>
-        <span class="lo-app-name">${safeName}</span>
-        <span class="lo-app-id">${safeId}</span>
-      </button>`;
-    }).join('');
+      const btn = document.createElement('button');
+      btn.className = 'lo-app';
+      btn.dataset['appId'] = m.id;
+      btn.dataset['enabled'] = String(a.enabled);
+      btn.title = m.name;
+      const span = (cls: string, text: string) => {
+        const el = document.createElement('span');
+        el.className = cls;
+        el.textContent = text;
+        return el;
+      };
+      const initial = span('lo-app-initial', glyph);
+      initial.dataset['len'] = String(glyph.length);
+      btn.append(initial, span('lo-app-name', m.name), span('lo-app-id', m.id));
+      return btn;
+    }));
     // The rebuild replaces every tile, so the `hidden` flags the search box
     // had set are gone — re-apply the current query or a filtered grid comes
     // back showing everything.

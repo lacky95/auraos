@@ -8,6 +8,7 @@
  * `aura.lockscreen.activate` key binding (default: Ctrl+Alt+L).
  */
 import { sharedKv } from '../../lib/sharedKv';
+import { escapeJsonForScript } from '@aura/ui/lib/utils';
 
 type LockPosition =
   | 'top-left'    | 'top-center'    | 'top-right'
@@ -84,7 +85,7 @@ let initial: LockScreenConfig = DEFAULT_CONFIG;
   <div id="lockscreen-notifications" aria-live="off"></div>
 </div>
 
-<script type="application/json" id="aura-initial-lockscreen" set:html={JSON.stringify(initial)}></script>
+<script type="application/json" id="aura-initial-lockscreen" set:html={escapeJsonForScript(initial)}></script>
 
 <script is:inline>
   // Deliberately an `is:inline` script with ZERO imports. It must run in every

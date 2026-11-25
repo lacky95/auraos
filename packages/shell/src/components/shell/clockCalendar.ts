@@ -155,8 +155,10 @@ export function installClockCalendar(): void {
       }
     }
     const todayDate = new Date(Date.UTC(now.y, now.m, now.d));
-    html += `</div><div class="cc-foot"><b>${fmtLong.format(todayDate)}</b><br>Week ${isoWeek(now.y, now.m, now.d)}${timeZone ? ` · ${timeZone}` : ''}</div>`;
+    html += `</div><div class="cc-foot"><b>${fmtLong.format(todayDate)}</b><br>Week ${isoWeek(now.y, now.m, now.d)}<span class="cc-tz"></span></div>`;
     panel.innerHTML = html;
+    // The zone is a KV string (an unknown one only falls back in today()): text, not markup.
+    if (timeZone) panel.querySelector('.cc-tz')!.textContent = ` · ${timeZone}`;
     place();
   }
 

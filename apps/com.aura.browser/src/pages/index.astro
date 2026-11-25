@@ -950,7 +950,12 @@ const FRAME_NAME = JSON.stringify({
             if (!inner) return;
             if (d.type === 'aura.keyboard.policy' ||
                 (d.type === 'aura.key.synthetic' && document.activeElement === engine)) {
-              try { inner.postMessage(d, '*'); } catch (err) { /* engine gone */ }
+              // Only to the origin we loaded into the engine: after it moves to
+              // another site on its own, keys are not handed to that site.
+              var engineOrigin = null;
+              try { engineOrigin = new URL(engine.getAttribute('src') || '', location.href).origin; } catch (err) { /* no src */ }
+              if (!engineOrigin || engineOrigin === 'null') return;
+              try { inner.postMessage(d, engineOrigin); } catch (err) { /* engine gone */ }
             }
             return;
           }

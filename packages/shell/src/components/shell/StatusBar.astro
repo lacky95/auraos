@@ -1307,7 +1307,7 @@ let initialTimeZone: string = '';
       const slot = start + i + 1;
       const active = w.id === effectiveActiveId;
       const pending = pendingActiveId === w.id;
-      return `<button class="ws-pill" data-ws-id="${w.id}" data-active="${active}" ${pending ? 'data-pending="true"' : ''} title="${escapeAttr(w.name)} (${w.members.length} window${w.members.length === 1 ? '' : 's'})">${slot}</button>`;
+      return `<button class="ws-pill" data-ws-id="${escapeAttr(w.id)}" data-active="${active}" ${pending ? 'data-pending="true"' : ''} title="${escapeAttr(w.name)} (${w.members.length} window${w.members.length === 1 ? '' : 's'})">${slot}</button>`;
     }).join('');
 
     // Compact: drop empty workspaces + renumber default `WS <n>` names.

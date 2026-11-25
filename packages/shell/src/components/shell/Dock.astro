@@ -569,7 +569,14 @@ const { apps, enabledMap = {} } = Astro.props;
             btn.dataset['enabled'] = String(a.enabled);
             btn.title = m.name;
             btn.onclick = () => (window as any).auraLaunchApp?.(m.id);
-            btn.innerHTML = `<span class="app-initial" data-len="${glyph.length}">${glyph}</span><span class="app-label">${m.name.replace(/[<>&]/g, '')}</span>`;
+            const initial = document.createElement('span');
+            initial.className = 'app-initial';
+            initial.dataset['len'] = String(glyph.length);
+            initial.textContent = glyph;
+            const label = document.createElement('span');
+            label.className = 'app-label';
+            label.textContent = m.name;
+            btn.append(initial, label);
             frag.appendChild(btn);
           }
           itemsWrap.appendChild(frag);
@@ -602,18 +609,26 @@ const { apps, enabledMap = {} } = Astro.props;
      *  closes the menu. */
     function populateOverflowMenu(overflow: HTMLElement[]) {
       if (!overflowMenu) return;
-      overflowMenu.innerHTML = overflow.map((el) => {
+      overflowMenu.replaceChildren(...overflow.map((el) => {
         const id    = el.dataset['appId'] ?? '';
         const name  = el.title || id;
         const glyph = el.querySelector<HTMLElement>('.app-initial')?.textContent ?? '?';
-        const escId  = id.replace(/"/g, '&quot;');
-        const escNm  = name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
-        const escGl  = (glyph || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
-        return `<button type="button" class="dock-overflow-item" role="menuitem" data-app-id="${escId}" title="${escNm}">
-          <span class="dock-overflow-glyph" data-len="${glyph.length}">${escGl}</span>
-          <span class="dock-overflow-name">${escNm}</span>
-        </button>`;
-      }).join('');
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'dock-overflow-item';
+        btn.setAttribute('role', 'menuitem');
+        btn.dataset['appId'] = id;
+        btn.title = name;
+        const gl = document.createElement('span');
+        gl.className = 'dock-overflow-glyph';
+        gl.dataset['len'] = String(glyph.length);
+        gl.textContent = glyph;
+        const nm = document.createElement('span');
+        nm.className = 'dock-overflow-name';
+        nm.textContent = name;
+        btn.append(gl, nm);
+        return btn;
+      }));
     }
 
     function setOverflowOpen(open: boolean) {

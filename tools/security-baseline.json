@@ -1,0 +1,432 @@
+{
+  "about": "Known security debt (tools/security-check.mjs). The gate fails only on findings not listed here; the summary prints the count, which must shrink every phase. Remove an entry when its finding is fixed (the gate warns). Never add one to make a new finding pass without a review: a reviewed-safe exception with no debt behind it belongs in tools/security-allowlist.yaml.",
+  "entries": [
+    {
+      "check": "deps/advisory",
+      "file": "pnpm-lock.yaml",
+      "id": "GHSA-26w7-cxv4-gfx2",
+      "reason": "astro 6: RCE through AVIF image optimization; fixed only in Astro 7 (a major). AuraOS apps do not use the astro:assets image service on untrusted input.",
+      "owner": "Owner: major upgrades (Astro 7, zod 4) planned right after Phase 3a"
+    },
+    {
+      "check": "deps/advisory",
+      "file": "pnpm-lock.yaml",
+      "id": "GHSA-qh8j-hqjv-7m4x",
+      "reason": "@astrojs/node 10: a malformed Host port can crash the adapter; fixed only in 11, which needs Astro 7.",
+      "owner": "Owner: major upgrades (Astro 7, zod 4) planned right after Phase 3a"
+    },
+    {
+      "check": "deps/advisory",
+      "file": "pnpm-lock.yaml",
+      "id": "GHSA-f88m-g3jw-g9cj",
+      "reason": "sharp 0.34 (libvips CVEs): astro 6 pins sharp ^0.34; 0.35 is a breaking release and comes with the Astro 7 upgrade.",
+      "owner": "Owner: major upgrades (Astro 7, zod 4) planned right after Phase 3a"
+    },
+    {
+      "check": "deps/advisory",
+      "file": "pnpm-lock.yaml",
+      "id": "GHSA-rgj7-g3m4-5g8c",
+      "reason": "sharp 0.34 (libheif): same as the libvips advisory, comes with the Astro 7 upgrade.",
+      "owner": "Owner: major upgrades (Astro 7, zod 4) planned right after Phase 3a"
+    },
+    {
+      "check": "deps/advisory",
+      "file": "pnpm-lock.yaml",
+      "id": "GHSA-wq5f-xc86-pv6w",
+      "reason": "sharp 0.34 (librsvg): same as the libvips advisory, comes with the Astro 7 upgrade.",
+      "owner": "Owner: major upgrades (Astro 7, zod 4) planned right after Phase 3a"
+    },
+    {
+      "check": "deps/advisory",
+      "file": "pnpm-lock.yaml",
+      "id": "GHSA-mrhx-c7xc-m3w5",
+      "reason": "zod 3: memory exhaustion on oversized constrained collections; fixed only in zod 4 (a major, MCP SDK and app schemas).",
+      "owner": "Owner: major upgrades (Astro 7, zod 4) planned right after Phase 3a"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.console/src/pages/index.astro",
+      "source": "output.innerHTML = `<div class=\"empty\">// ${msg}<span class=\"blink\">_</span></div>`;",
+      "reason": "Proven safe (review fixes, 2026-11-25): `msg` is one of two string constants chosen by a ternary just above.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.console/src/pages/index.astro",
+      "source": "output.innerHTML = list.map((e) => `",
+      "reason": "Proven safe (review fixes, 2026-11-25): Every log field goes through escape() (& < > \" '); formatTime() returns zero-padded numbers only.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.nexus/src/scripts/catalog.ts",
+      "source": "content.innerHTML = html;",
+      "reason": "Proven safe (review fixes, 2026-11-25): `html` is the body of the same-origin /partials/browse, an Astro server render whose expressions Astro escapes; no client data is spliced in.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/about.astro",
+      "source": "stepsEl.innerHTML = steps.map((st) => {",
+      "reason": "Proven safe (review fixes, 2026-11-25): Step label and detail go through escapeHtml(); glyph and color come from the constant STEP_UI table.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/access.astro",
+      "source": "tr.querySelector('.granted-cell').innerHTML = granted.length",
+      "reason": "Proven safe (review fixes, 2026-11-25): Permission labels go through esc(); class names and titles are constant ternaries.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/access.astro",
+      "source": "$('keys-body').innerHTML = d.keys.length ? d.keys.map((k) => `",
+      "reason": "Proven safe (review fixes, 2026-11-25): Every API-key field goes through esc(); the status cells are constants.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/access.astro",
+      "source": "$('audit-body').innerHTML = d.entries.length ? d.entries.map((e) => `",
+      "reason": "Proven safe (review fixes, 2026-11-25): Every audit field goes through esc().",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/context.astro",
+      "source": "statusEl.innerHTML = danger",
+      "reason": "Proven safe (review fixes, 2026-11-25): setStatus(): every caller builds its markup with esc() around keys, names, paths and error messages; the other values are the page's own select constants (kind, mode) and fixed `how` strings.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/context.astro",
+      "source": "document.getElementById('ctx-dialog-msg').innerHTML = msgHtml;",
+      "reason": "Proven safe (review fixes, 2026-11-25): confirmDialog() has one caller, which passes esc(key) inside constant markup.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/context.astro",
+      "source": "if (existing) existing.outerHTML = varRowHtml(e);",
+      "reason": "Proven safe (review fixes, 2026-11-25): varRowHtml() escapes key, value, inject and kind with esc(); badge and date are constants or toLocaleString().",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/context.astro",
+      "source": "tbody.innerHTML = entries.length ? entries.map(varRowHtml).join('') : CTX_EMPTY_ROW;",
+      "reason": "Proven safe (review fixes, 2026-11-25): Rows from varRowHtml() (esc() on every field) or the constant CTX_EMPTY_ROW.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/context.astro",
+      "source": "if (prevHtml) tr.outerHTML = prevHtml;",
+      "reason": "Proven safe (review fixes, 2026-11-25): Restores the row's own earlier outerHTML (read from the DOM before the optimistic edit), itself built by varRowHtml().",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/context.astro",
+      "source": "cell.innerHTML = actionCellHtml(cell);",
+      "reason": "Proven safe (review fixes, 2026-11-25): actionCellHtml() puts the dataset value through esc(); the attribute name is one of two constants.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/context.astro",
+      "source": "cell.innerHTML = actionCellHtml(cell); // restore before the write: markPending disables it",
+      "reason": "Proven safe (review fixes, 2026-11-25): actionCellHtml() puts the dataset value through esc(); the attribute name is one of two constants.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/context.astro",
+      "source": "if (existing) existing.outerHTML = volRowHtml(v);",
+      "reason": "Proven safe (review fixes, 2026-11-25): volRowHtml() escapes name, mount path and mode with esc().",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/context.astro",
+      "source": "tbody.innerHTML = volumes.length ? volumes.map(volRowHtml).join('') : VOL_EMPTY_ROW;",
+      "reason": "Proven safe (review fixes, 2026-11-25): Rows from volRowHtml() (esc() on every field) or the constant VOL_EMPTY_ROW.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/context.astro",
+      "source": "if (prevHtml) tr.outerHTML = prevHtml;",
+      "reason": "Proven safe (review fixes, 2026-11-25): Restores the row's own earlier outerHTML (read from the DOM before the optimistic edit), itself built by volRowHtml().",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/context.astro",
+      "source": "if (after) after.insertAdjacentHTML('beforebegin', varRowHtml(e));",
+      "reason": "Proven safe (review fixes, 2026-11-25): varRowHtml() escapes every field with esc().",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/context.astro",
+      "source": "else tbody.insertAdjacentHTML('beforeend', varRowHtml(e));",
+      "reason": "Proven safe (review fixes, 2026-11-25): varRowHtml() escapes every field with esc().",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/context.astro",
+      "source": "if (after) after.insertAdjacentHTML('beforebegin', volRowHtml(v));",
+      "reason": "Proven safe (review fixes, 2026-11-25): volRowHtml() escapes every field with esc().",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/context.astro",
+      "source": "else tbody.insertAdjacentHTML('beforeend', volRowHtml(v));",
+      "reason": "Proven safe (review fixes, 2026-11-25): volRowHtml() escapes every field with esc().",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/general.astro",
+      "source": "list.innerHTML = rows.length",
+      "reason": "Proven safe (review fixes, 2026-11-25): Time-zone rows: value and offset through esc(), label through highlight() which escapes each character; index and aria-selected are numbers and booleans.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/interfaces.astro",
+      "source": "el.innerHTML = out;",
+      "reason": "Proven safe (review fixes, 2026-11-25): `out` is built one character at a time, each through esc(), around constant <mark> tags.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.settings/src/pages/users.astro",
+      "source": "$('sessions-body').innerHTML = (a.sessions.length ? a.sessions.map((s) => `",
+      "reason": "Proven safe (review fixes, 2026-11-25): Every session field goes through esc(); `more` is Number()-coerced.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.terminal/src/pages/index.astro",
+      "source": "instMenu.innerHTML = instMenuHtml(groups, cap > 0 && counted >= cap);",
+      "reason": "Proven safe (review fixes, 2026-11-25): instMenuHtml() puts instance ids, states, session ids, labels and notes through instEsc(); colors and styles are constants.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "apps/com.aura.terminal/src/pages/index.astro",
+      "source": "instMenu.innerHTML = '<div style=\"padding:6px 10px;color:var(--aura-color-danger);font-size:0.6rem;\">'",
+      "reason": "Proven safe (review fixes, 2026-11-25): The error text goes through instEsc() inside constant markup.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/docker-spawn",
+      "file": "builders/io.lakner.pocketbuilder/src/lib/docker.ts",
+      "source": "execFile('docker', args, { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {",
+      "reason": "The PocketBuilder builder drives docker for its own build containers by design; builders lose direct docker with the socket removal.",
+      "owner": "Phase 5 (D55: sidecar lifecycle moves behind the shell API)"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "os/boot-splash.mjs",
+      "source": "$('steps').innerHTML = STEPS.map(([k, label], i) => {",
+      "reason": "Proven safe (review fixes, 2026-11-25): STEPS is a constant table; only class names chosen from constants are added.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/docker-spawn",
+      "file": "packages/app-sdk/src/sidecars.ts",
+      "source": "const out = execFileSync('docker',",
+      "reason": "The SDK's legacy docker sidecar mode (apps that start their own sidecars); the shell-API sidecars replace it.",
+      "owner": "Phase 5 (D55: sidecar lifecycle moves behind the shell API)"
+    },
+    {
+      "check": "patterns/docker-spawn",
+      "file": "packages/app-sdk/src/sidecars.ts",
+      "source": "const out = execFileSync('docker',",
+      "reason": "The SDK's legacy docker sidecar mode (apps that start their own sidecars); the shell-API sidecars replace it.",
+      "owner": "Phase 5 (D55: sidecar lifecycle moves behind the shell API)"
+    },
+    {
+      "check": "patterns/docker-spawn",
+      "file": "packages/app-sdk/src/sidecars.ts",
+      "source": "execFile('docker', args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {",
+      "reason": "The SDK's legacy docker sidecar mode (apps that start their own sidecars); the shell-API sidecars replace it.",
+      "owner": "Phase 5 (D55: sidecar lifecycle moves behind the shell API)"
+    },
+    {
+      "check": "patterns/docker-spawn",
+      "file": "packages/app-sdk/src/sidecars.ts",
+      "source": "execFileSync('docker', ['volume', 'inspect', source],",
+      "reason": "The SDK's legacy docker sidecar mode (apps that start their own sidecars); the shell-API sidecars replace it.",
+      "owner": "Phase 5 (D55: sidecar lifecycle moves behind the shell API)"
+    },
+    {
+      "check": "patterns/docker-spawn",
+      "file": "packages/app-sdk/src/sidecars.ts",
+      "source": "const p = spawn('docker', ['run', '--rm', '-i', ...mountArgs, this.opts.helperImage, ...args],",
+      "reason": "The SDK's legacy docker sidecar mode (apps that start their own sidecars); the shell-API sidecars replace it.",
+      "owner": "Phase 5 (D55: sidecar lifecycle moves behind the shell API)"
+    },
+    {
+      "check": "patterns/docker-spawn",
+      "file": "packages/app-sdk/src/sidecars.ts",
+      "source": "mountpoint = execFileSync('docker', ['volume', 'inspect', '-f', '{{.Mountpoint}}', source], {",
+      "reason": "The SDK's legacy docker sidecar mode (apps that start their own sidecars); the shell-API sidecars replace it.",
+      "owner": "Phase 5 (D55: sidecar lifecycle moves behind the shell API)"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/components/shell/LauncherOverlay.astro",
+      "source": "ctxSubmenu.innerHTML = rows;",
+      "reason": "Proven safe (review fixes, 2026-11-25): Workspace rows: id and name through escapeAttr()/escapeHtml(); the slot is a number.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/components/shell/ProcessManager.astro",
+      "source": "list.innerHTML = `",
+      "reason": "Proven safe (review fixes, 2026-11-25): emptyText and emptyHint are each one of three string constants.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/components/shell/ProcessManager.astro",
+      "source": "el.outerHTML = inspectBlock(inst);",
+      "reason": "Proven safe (review fixes, 2026-11-25): inspectBlock() escapes every instance and sidecar field with escapeHtml(); numbers go through formatBytes()/formatCpu(); the DOM id is reduced to [A-Za-z0-9_-].",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/components/shell/StatusBar.astro",
+      "source": "pillsEl.innerHTML = prev + numbered + next;",
+      "reason": "Proven safe (review fixes, 2026-11-25): Pills: workspace id and name through escapeAttr(); slot and member counts are numbers; chevrons are icon constants.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/components/shell/StatusBar.astro",
+      "source": "if (actionsEl) actionsEl.innerHTML = compact + add;",
+      "reason": "Proven safe (review fixes, 2026-11-25): Both buttons are constant markup with icon constants and a boolean `disabled`.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/components/shell/StatusBar.astro",
+      "source": "if (iconEl) iconEl.innerHTML = layoutIconSvg(icon);",
+      "reason": "Proven safe (review fixes, 2026-11-25): layoutIconSvg() admits only [a-z0-9-] icon names, else a constant.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/components/shell/clockCalendar.ts",
+      "source": "panel.innerHTML = html;",
+      "reason": "Proven safe (review fixes, 2026-11-25): Only numbers and Intl.DateTimeFormat output (a bad locale throws first); the KV time-zone string is set afterwards with textContent.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/components/ui/Icon.astro",
+      "source": "<Fragment set:html={svg} />",
+      "reason": "Proven safe (review fixes, 2026-11-25): SVG from the bundled lucide icon set; an unknown name throws instead of rendering.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/layouts/OSLayout.astro",
+      "source": "<style id=\"aura-theme\" set:html={activeThemeCss}></style>",
+      "reason": "Proven safe (review fixes, 2026-11-25): ThemeManager.toCss() reads only the built-in THEMES table (unknown ids fall back), and colorMode is checked against light/dark/auto before it is used.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/lib/flight/layer.ts",
+      "source": "panel.innerHTML = `",
+      "reason": "Proven safe (review fixes, 2026-11-25): Constant markup with icon constants and the constant RESIZE_EDGES; titles go in later with textContent.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/lib/layout/strategies/freeWindow/taskbar.ts",
+      "source": "bar.innerHTML = items.length === 0",
+      "reason": "Proven safe (review fixes, 2026-11-25): View ids and labels go through esc(); data flags are constant ternaries.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/pages/dev/notification-controls.astro",
+      "source": "<style set:html={themeCss}></style>",
+      "reason": "Proven safe (review fixes, 2026-11-25): A DEV-only page (404 in production) whose CSS is built from constant token lists.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/pages/index.astro",
+      "source": "sk.innerHTML = renderSkeleton(v);",
+      "reason": "Proven safe (review fixes, 2026-11-25): renderSkeleton() escapes appId and state with escapeHtml(); the rest is constant markup.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/pages/index.astro",
+      "source": "emptyEl.innerHTML = `",
+      "reason": "Proven safe (review fixes, 2026-11-25): Constant markup; btnStyle is a string constant.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/pages/index.astro",
+      "source": "strip.innerHTML = `<span style=\"font-size:0.6rem; color: var(--aura-color-text-dim); letter-spacing:0.12em; align-self:center;\">MIN ▾</span>${",
+      "reason": "Proven safe (review fixes, 2026-11-25): Minimized views: viewId and title through escapeAttr()/escapeHtml().",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/pages/index.astro",
+      "source": "slot.innerHTML = slotInnerHtml({ minimizable: v.minimizable });",
+      "reason": "Proven safe (review fixes, 2026-11-25): slotInnerHtml() is constant chrome markup (icons and style constants).",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/pages/index.astro",
+      "source": "trail.innerHTML =",
+      "reason": "Proven safe (review fixes, 2026-11-25): Breadcrumbs: paths and titles through escHtml(); styles are local constants.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/pages/index.astro",
+      "source": "trail.innerHTML = `<span class=\"crumb crumb-current\" style=\"${crumbCurrent}\">${escHtml(v.title)}</span>`;",
+      "reason": "Proven safe (review fixes, 2026-11-25): Title through escHtml(); the style is a local constant.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/pages/index.astro",
+      "source": "layoutBtnHost.innerHTML = btns.map((b) =>",
+      "reason": "Proven safe (review fixes, 2026-11-25): Action and title through escapeAttr(); `html` is the ChromeButton glyph from the shell's own built-in layout strategies (code, no data path).",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/pages/index.astro",
+      "source": "sk.innerHTML = renderSkeleton(v);",
+      "reason": "Proven safe (review fixes, 2026-11-25): renderSkeleton() escapes appId and state with escapeHtml(); the rest is constant markup.",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    },
+    {
+      "check": "patterns/html-sink",
+      "file": "packages/shell/src/pages/index.astro",
+      "source": "<div class=\"app-slot\" data-view-id={sl.viewId} data-instance-id={sl.instanceId} data-activity-id={sl.activityId} data-ssr=\"1\" style={sl.style} set:html={sl.html}></div>",
+      "reason": "Proven safe (review fixes, 2026-11-25): sl.html is slotInnerHtml() (constant chrome) around iframeHtml(), which escapes the frame URL and title with escapeHtml().",
+      "owner": "shell/Settings UI owner; keep while the line is unchanged"
+    }
+  ]
+}

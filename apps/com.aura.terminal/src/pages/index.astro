@@ -343,7 +343,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     import { createConnection } from '../connection';
     import { pickNextSession } from '../next-session';
     import { parseEmbed } from '../embed';
-    import { appHostRuntime, bodylessMutationHeaders, osUrl } from '@aura/app-sdk';
+    import { appHostRuntime, appHostUrl, bodylessMutationHeaders, osUrl } from '@aura/app-sdk';
 
     // Embed mode (embed.ts): hosted inside another app's iframe. No chrome of
     // our own, the session we were given, and `aura.terminal.*` messages to the
@@ -352,17 +352,27 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
     // The App Host label of the app embedding us, as the OS put it on our URL (5.16).
     const embedder = EMBED.embed ? new URLSearchParams(location.search).get('_aura_embedder') : null;
     if (EMBED.embed) document.body.classList.add('embed');
+    // The embedder's exact origin: the router lets only that App Host frame us
+    // (frame-ancestors), so it is our parent; without a label, post nothing.
+    const embedderOrigin = embedder ? appHostUrl(embedder) : null;
     function postToHost(msg) {
-      if (!EMBED.embed || !window.parent || window.parent === window) return;
-      try { window.parent.postMessage(msg, '*'); } catch { /* host gone */ }
+      if (!EMBED.embed || !embedderOrigin || !window.parent || window.parent === window) return;
+      try { window.parent.postMessage(msg, embedderOrigin); } catch { /* host gone */ }
     }
 
     // Startup timeline for the desktop's boot report (shell lib/bootTimeline:
     // `app:<window>:<stage>`, with `shell:boot` logging on). `t` is ms since
     // this page's own navigation start; the desktop also stamps its own clock.
+    // OS window messages go to the shell's exact origin: the App Host bootstrap
+    // names it; on the proxy route the shell is this document's own origin.
+    const shellOrigin = appHostRuntime()?.shellOrigin ?? location.origin;
+    function postToShell(msg) {
+      if (EMBED.embed || !window.parent || window.parent === window) return;
+      try { window.parent.postMessage(msg, shellOrigin); } catch { /* shell gone */ }
+    }
+    // Only the shell collects them, never an embedder.
     const perfMark = (name: string, detail?: unknown) => {
-      try { window.parent?.postMessage({ type: 'aura.perf.mark', name, t: Math.round(performance.now()), detail }, '*'); }
-      catch { /* not embedded */ }
+      postToShell({ type: 'aura.perf.mark', name, t: Math.round(performance.now()), detail });
     };
     perfMark('script');
 
@@ -1812,14 +1822,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       // Keep the OS window chrome honest. Its id label is the window's ACTIVITY
       // by default, which stops being the truth the moment a session switch
       // happens without the shell — same instance, new socket, no rebind.
-      if (window.parent && window.parent !== window && !EMBED.embed) {
-        try {
-          window.parent.postMessage({
-            type: 'aura.window.label',
-            text: currentSessionId ?? instanceId,
-          }, '*');
-        } catch { /* parent gone */ }
-      }
+      postToShell({ type: 'aura.window.label', text: currentSessionId ?? instanceId });
       saveActivityState();
     }
 
@@ -1891,7 +1894,7 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       // Our page can't load another instance's origin: only the shell moves the window.
       if (EMBED.embed) return;   // the host owns which instance it embeds
       if (!window.parent || window.parent === window) return;
-      window.parent.postMessage({ type: 'aura.window.rebind', instanceId: targetInstanceId }, '*');
+      postToShell({ type: 'aura.window.rebind', instanceId: targetInstanceId });
       statusEl.textContent = 'MOVING...';
       statusEl.style.color = 'var(--aura-color-text-dim)';
     }

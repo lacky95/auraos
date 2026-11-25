@@ -122,10 +122,15 @@ const lightThemes = THEMES.filter(t => t.tone === 'light');
     const statusEl = document.getElementById('status');
 
     function paintStatus({ themeIdDark, themeIdLight, colorMode }) {
-      statusEl.innerHTML =
-        `DARK: <b style="color: var(--aura-color-primary);">${themeIdDark.toUpperCase()}</b>` +
-        ` &middot; LIGHT: <b style="color: var(--aura-color-primary);">${themeIdLight.toUpperCase()}</b>` +
-        ` &middot; MODE: <b style="color: var(--aura-color-primary);">${colorMode.toUpperCase()}</b>`;
+      const val = (text) => {
+        const b = document.createElement('b');
+        b.style.color = 'var(--aura-color-primary)';
+        b.textContent = text.toUpperCase();
+        return b;
+      };
+      statusEl.replaceChildren(
+        'DARK: ', val(themeIdDark), ' · LIGHT: ', val(themeIdLight), ' · MODE: ', val(colorMode),
+      );
     }
 
     function markActiveCard(slot, themeId) {
@@ -163,7 +168,10 @@ const lightThemes = THEMES.filter(t => t.tone === 'light');
         markActiveCard(slot, themeId);
         paintStatus(next);
       } catch (err) {
-        statusEl.innerHTML = `<b style="color: var(--aura-color-danger);">ERROR — ${err.message}</b>`;
+        const b = document.createElement('b');
+        b.style.color = 'var(--aura-color-danger)';
+        b.textContent = `ERROR — ${err.message}`;
+        statusEl.replaceChildren(b);
       }
     }
 

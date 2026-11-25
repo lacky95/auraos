@@ -54,6 +54,12 @@ export function auraAppIntegration(opts = {}) {
         // (sibling container on aura-net only) and (b) the shell's HTTP
         // proxy verifies identity via X-Aura-App-Id headers anyway.
         updateConfig({ vite: { server: { allowedHosts: true } } });
+        // No image transcoding (Astro's passthroughImageService): Aura apps
+        // don't use astro:assets, and Sharp behind `/_image` carries the
+        // Astro 6 AVIF RCE (GHSA-26w7-cxv4-gfx2) and the libvips/libheif
+        // advisories until the Astro 7 upgrade. An app that needs optimised
+        // images sets `image.service` itself after this integration.
+        updateConfig({ image: { service: { entrypoint: 'astro/assets/services/noop', config: {} } } });
         injectScript('head-inline', AURA_RUNTIME_LOADER_JS);
         for (const pattern of SHELL_ASSET_ROUTES) {
           injectRoute({ pattern, entrypoint: new URL('./runtime/shell-asset-route.js', import.meta.url) });

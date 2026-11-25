@@ -1,4 +1,4 @@
-import { defineConfig } from 'astro/config';
+import { defineConfig, passthroughImageService } from 'astro/config';
 import node from '@astrojs/node';
 import react from '@astrojs/react';
 import tailwindcss from '@tailwindcss/vite';
@@ -44,6 +44,11 @@ export default defineConfig({
   output: 'server',
   adapter: node({ mode: 'standalone' }),
   integrations: [react()],
+  // No image transcoding: the shell doesn't use astro:assets, and Sharp behind
+  // `/_image` carries the Astro 6 AVIF RCE (GHSA-26w7-cxv4-gfx2) and the
+  // libvips/libheif advisories until the Astro 7 upgrade (apps: the same via
+  // auraAppIntegration).
+  image: { service: passthroughImageService() },
   // Astro's floating dev toolbar (audits / settings / x-ray) sits in the
   // bottom-right of every page in dev mode and gets in the way of OS
   // chrome — covers the launcher button, intercepts clicks on the dock

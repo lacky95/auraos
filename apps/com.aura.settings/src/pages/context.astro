@@ -443,8 +443,8 @@ try {
       return `
         <tr data-key="${esc(e.key)}">
           <td class="ctx-key">${esc(e.key)}</td>
-          <td><span class="ctx-badge ${e.kind}">${badge}</span></td>
-          <td class="ctx-val ${e.kind}">${val}</td>
+          <td><span class="ctx-badge ${esc(e.kind)}">${badge}</span></td>
+          <td class="ctx-val ${esc(e.kind)}">${val}</td>
           <td class="ctx-inject">${esc(inject)}</td>
           <td>${e.updatedAt ? new Date(e.updatedAt).toLocaleString() : '—'}</td>
           <td class="ctx-actions" data-key="${esc(e.key)}"><button class="ctx-del" data-key="${esc(e.key)}">DELETE</button></td>
@@ -715,7 +715,7 @@ try {
         <tr data-name="${esc(v.name)}">
           <td class="ctx-key">${esc(v.name)}</td>
           <td class="ctx-val">${esc(v.mountPath)}</td>
-          <td><span class="ctx-badge ${v.mode}">${esc(String(v.mode).toUpperCase())}</span></td>
+          <td><span class="ctx-badge ${esc(v.mode)}">${esc(String(v.mode).toUpperCase())}</span></td>
           <td>${v.createdAt ? new Date(v.createdAt).toLocaleString() : '—'}</td>
           <td class="ctx-actions" data-vol="${esc(v.name)}"><button class="ctx-del" data-vol="${esc(v.name)}">DELETE</button></td>
         </tr>`;

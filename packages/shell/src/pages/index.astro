@@ -6,6 +6,7 @@ import { getAppManager, DEFAULT_WORKSPACE_STATE, type WorkspaceState } from '@au
 import { sharedKv } from '../lib/sharedKv';
 import { sessionBootInfo, waitForRestore } from '../lib/desktopSession';
 import { slotInnerHtml, iframeHtml, SLOT_STYLE } from '../lib/desktop/slotMarkup';
+import { escapeJsonForScript } from '@aura/ui/lib/utils';
 import { ssrGridLayout } from '../lib/layout/gridShape';
 import { logicalFrameUrl } from '../lib/appFrame';
 import { desktopSignIn } from '../lib/authSurface';
@@ -245,9 +246,9 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     <div id="layout-region-left"   class="layout-region" data-side="left"></div>
     <div id="layout-region-right"  class="layout-region" data-side="right"></div>
     <div id="layout-overlay" aria-hidden="true"></div>
-    <script type="application/json" id="aura-initial-views" set:html={JSON.stringify(initialViews)}></script>
-    <script type="application/json" id="aura-initial-workspaces" data-updated-at={workspacesUpdatedAt ?? undefined} set:html={JSON.stringify(workspaceState)}></script>
-    <script type="application/json" id="aura-boot" set:html={JSON.stringify(session)}></script>
+    <script type="application/json" id="aura-initial-views" set:html={escapeJsonForScript(initialViews)}></script>
+    <script type="application/json" id="aura-initial-workspaces" data-updated-at={workspacesUpdatedAt ?? undefined} set:html={escapeJsonForScript(workspaceState)}></script>
+    <script type="application/json" id="aura-boot" set:html={escapeJsonForScript(session)}></script>
 
     <!-- Focus mode: covers the entire viewport when activated from Process Manager -->
     <div id="focus-view" aria-hidden="true">
@@ -2297,7 +2298,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
         <div class="aura-skeleton-content">
           <div class="aura-skeleton-id">
             <span class="sci-spinner sci-spinner--md" aria-hidden="true">|</span>
-            <span>${v.appId}</span>
+            <span>${escapeHtml(v.appId)}</span>
           </div>
           <div class="aura-skeleton-bars">
             <div class="aura-skeleton-bar" style="width:62%;"></div>
@@ -2307,7 +2308,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
           </div>
           <div class="aura-skeleton-status">
             <span class="aura-skeleton-dot"></span>
-            <span>${stateLabel}</span>
+            <span>${escapeHtml(stateLabel)}</span>
             <span class="aura-skeleton-dim">· LOADING PROCESS</span>
           </div>
         </div>

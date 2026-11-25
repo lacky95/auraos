@@ -308,9 +308,12 @@ const POSITIONS: { id: LockPosition; icon: string }[] = [
             body:    JSON.stringify({ value: state }),
           });
           if (!r.ok) throw new Error('HTTP ' + r.status);
-          statusEl.innerHTML = `SAVED · ${new Date().toLocaleTimeString()}`;
+          statusEl.textContent = `SAVED · ${new Date().toLocaleTimeString()}`;
         } catch (err) {
-          statusEl.innerHTML = `<b style="color: var(--aura-color-danger);">ERROR — ${err.message}</b>`;
+          const b = document.createElement('b');
+          b.style.color = 'var(--aura-color-danger)';
+          b.textContent = `ERROR — ${err.message}`;
+          statusEl.replaceChildren(b);
         }
       }, 250);
     }
@@ -377,9 +380,14 @@ const POSITIONS: { id: LockPosition; icon: string }[] = [
       // posts to the Shell's exact origin only.
       window.auraOs.postToShell({ type: 'aura.lockscreen.activate' });
 
-      statusEl.innerHTML = signalled
-        ? `🔒 LOCK SIGNAL SENT · ${new Date().toLocaleTimeString()} — overlay appears within ~1s`
-        : `<b style="color: var(--aura-color-danger);">LOCK SIGNAL FAILED — ${failText}</b>`;
+      if (signalled) {
+        statusEl.textContent = `🔒 LOCK SIGNAL SENT · ${new Date().toLocaleTimeString()} — overlay appears within ~1s`;
+      } else {
+        const b = document.createElement('b');
+        b.style.color = 'var(--aura-color-danger)';
+        b.textContent = `LOCK SIGNAL FAILED — ${failText}`;
+        statusEl.replaceChildren(b);
+      }
     });
   </script>
 
