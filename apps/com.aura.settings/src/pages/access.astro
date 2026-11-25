@@ -436,7 +436,8 @@ const modalApps = apps.filter((a) => requests(a, 'notifications.systemModal'));
           setStatus(`ERROR — ${err.message}`, 'error');
         }
       }
-      void loadAll();
+      // Reads go through window.auraOs, which scripts/os.ts sets once the bundled module has run.
+      whenFormsReady(() => { void loadAll(); });
 
       // ---- grants ----------------------------------------------------------
       document.querySelectorAll('.grant-toggle').forEach((btn) => {
