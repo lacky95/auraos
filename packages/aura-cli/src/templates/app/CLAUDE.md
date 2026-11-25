@@ -13,18 +13,43 @@ There are two layers:
 1. **The shell** (`packages/shell`, listens on `:3000`) — an Astro SSR app
    that draws the desktop: status bar, dock, launcher, layout manager, process
    manager. It owns the `AppManager` (lifecycle FSM, port allocator), the
-   reverse proxy at `/api/proxy/<id>/<path>`, the content-provider router at
+   App Host router, the content-provider router at
    `/api/data/<authority>/<path>`, and a global SSE event bus.
 
 2. **The apps** (`apps/<reverse.domain.id>/`) — each is its **own Astro app**
    spawned in a **PRoot sandbox** with `/workspace`, `/data`, and an opt-in
-   set of toolchain binaries bind-mounted in. Apps never talk to the browser
-   directly; the shell proxies every request and injects HTML rewrites + a
-   console-relay script into each iframe.
+   set of toolchain binaries bind-mounted in.
 
-The shell loads each running instance in an iframe pointing at
-`/api/proxy/<instanceId>/`. The proxy forwards to `http://localhost:<port>`
-where the app's Astro dev server listens.
+## Where your window lives: the App Host
+
+Each app window is an iframe on an **App Host**: an origin of its own,
+`<label>--<desktop host>` (e.g. `http://notesabcd1234--10-0-0-2.nip.io:3000`).
+The shell forwards it, requests and WebSockets alike, to the port your
+server listens on. Your app is **served from `/`, with nothing rewritten and
+nothing injected into your HTML**. So:
+
+- **No base path.** Root-absolute URLs (`/assets/app.js`, `/api/save`,
+  `/ws`) reach your own server. There is no `<base href>` and no
+  `getAppBasePath()`.
+- **`/api/…` on your origin is yours.** The shell is at `/_aura/os/`: reach
+  it through `OsClient` or `osUrl('/api/…')` from `@aura/app-sdk`, never with
+  a bare `/api/…` from the browser.
+- **Identity and theme come from `window.AuraRuntimeBootstrap`**, which
+  `/_aura/runtime.js` sets (`auraAppIntegration()` loads it on every page).
+  Read it with `appHostRuntime()` (`appId`, `instanceId`, `activityId`,
+  `theme.resolvedMode`). There are no `aura-*` `<meta>` tags and no
+  `AURA_APP_ID` / `AURA_INSTANCE_ID` / `AURA_APP_BASE_PATH` globals.
+- **Talk to the shell** with `postToShell()` / `isFromShell()`, never
+  `window.parent.postMessage(…, '*')`.
+- **`/api/proxy/<appId>/…` is for machines only** (agents, other apps'
+  servers): browser pages and frames get a 403 there.
+- **Browser storage is per App Host** and starts empty; keep anything that
+  matters on the server.
+
+The full contract is the Aura Docs page **"Building an app for App Hosts"**
+(`apps/com.aura.docs/fumadocs-site/content/docs/building-for-app-hosts.mdx`).
+`aura dev validate .` checks this app against it (removed SDK imports,
+`aura-*` meta reads, `/api/proxy` URLs in pages, stale manifest keys).
 
 ## What an "Aura app" is
 
@@ -130,11 +155,15 @@ AuraOS exposes its palette as CSS custom properties (`--aura-color-primary`,
 `--aura-color-bg`, …) plus a `prefers-color-scheme`-aware light/dark axis.
 Pick how this app participates by setting `themeStrategy` in the manifest:
 
-| Strategy    | What the proxy injects                                    | When to use                                     |
-|-------------|-----------------------------------------------------------|-------------------------------------------------|
-| `inherit`   | `<link rel="stylesheet" href="/api/os/theme.css">` + meta | **Default.** Use `var(--aura-color-*)` and you're done. |
-| `themed`    | `<meta name="aura-theme-id">`, `aura-color-mode`, framework | App ships its own palettes but reacts to OS theme/mode (via `osClient.onThemeChange()` / `onModeChange()`). |
-| `override`  | Only `aura-color-mode` meta as a hint                     | App owns its palette completely — photo editors, brand-locked surfaces, accessibility tools. |
+Every page gets the theme in `AuraRuntimeBootstrap.theme` (read it with
+`appHostRuntime()?.theme`); what else `/_aura/runtime.js` does depends on the
+strategy:
+
+| Strategy    | What `/_aura/runtime.js` adds                                         | When to use                                     |
+|-------------|-----------------------------------------------------------------------|-------------------------------------------------|
+| `inherit`   | Links the OS theme (`/_aura/os/api/os/theme.css`), refreshed on every change | **Default.** Use `var(--aura-color-*)` and you're done. |
+| `themed`    | Nothing beyond the bootstrap                                          | App ships its own palettes but reacts to OS theme/mode (via `osClient.onThemeChange()` / `onModeChange()`). |
+| `override`  | Nothing beyond the bootstrap                                          | App owns its palette completely — photo editors, brand-locked surfaces, accessibility tools. Use `theme.resolvedMode` for light/dark. |
 
 The Process Manager surfaces a `THEMED` / `OVERRIDE` chip on apps that don't
 `inherit`, so users understand why an app looks different.
@@ -155,16 +184,19 @@ https://lucide.dev/icons) OS-wide, themed via `currentColor`:
   HTML/Astro/React alike:
 
   ```html
-  <svg class="aura-icon"><use href="/api/os/icons.svg#lucide-settings"/></svg>
+  <svg class="aura-icon"><use href="/_aura/os/api/os/icons.svg#lucide-settings"/></svg>
   ```
 
-  `.aura-icon` (shipped in the injected theme.css) sizes the icon to `1em`
+  The shell's files are under `/_aura/os/` on your App Host (`osUrl()` from
+  the SDK builds these addresses; in an Astro app `auraAppIntegration()` also
+  redirects `/api/os/icons.svg` and `/api/os/theme.css` there). `.aura-icon` (shipped in the OS theme.css) sizes the icon to `1em`
   and aligns it with text; the stroke follows the element's `color`, so it
   recolors with the theme automatically. Override size with your own
   width/height. Unknown symbol ids render nothing — check the sprite
-  (`curl /api/os/icons.svg`) if an icon does not appear.
+  (`curl "$OS_API_BASE/api/os/icons.svg"`) if an icon does not appear.
 
-- **Single icon (any Lucide name)** — `/api/os/icons/<name>.svg` (404 on
+- **Single icon (any Lucide name)** — `/_aura/os/api/os/icons/<name>.svg`
+  (`osUrl('/api/os/icons/<name>.svg')`; 404 on
   unknown names). Fine for `<img>` or CSS `mask-image`; note a standalone
   SVG document cannot see the page's `color`, so prefer the sprite when the
   icon must follow the theme.
@@ -248,7 +280,7 @@ const ctx = getAppContext();
 // → { appId, instanceId, appPort, osApiBase, dataDir, layerTag }
 ```
 
-On HTTP requests proxied through the shell, your handlers also receive:
+On HTTP requests the shell forwards to you, your handlers also receive:
 
 | Request header        | Meaning                                                              |
 |-----------------------|----------------------------------------------------------------------|
@@ -263,15 +295,30 @@ hand-rolling `request.headers.get(...)`.
 
 **Live updates to the iframe**: open an SSE endpoint inside your app
 (`src/pages/api/events.ts`) and connect from the browser with
-`new EventSource('api/events')` — relative URL, because the iframe's
-`<base href>` is set by the proxy. The shell preserves stream lifetimes.
+`new EventSource('/api/events')`: your app is served from `/` on its App
+Host, so root-absolute URLs reach your own server. The runtime multiplexes
+same-origin streams over one socket, so many streams don't exhaust the
+browser's connection limit.
 
 **WebSockets**: add an integration in `astro.config.mjs` that hooks
 `astro:server:setup` and listens for `upgrade` events on `server.httpServer`.
-The shell's Vite plugin proxies the upgrade through
-`ws://<host>/api/proxy/<id>/<path>`. See `apps/com.aura.terminal` for a
-working example (PTY over `/ws`) and `apps/com.aura.console` for a logging
-WebSocket that persists to disk.
+The page connects to its own origin and the App Host forwards the upgrade
+to your server. **Check the path and return early for anything else**, so
+other sockets on the same server (such as Vite's `vite-hmr`) are left alone:
+
+```js
+// page
+const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+
+// astro.config.mjs, in astro:server:setup
+server.httpServer?.on('upgrade', (req, socket, head) => {
+  if (new URL(req.url ?? '/', 'http://localhost').pathname !== '/ws') return;
+  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+});
+```
+
+See `apps/com.aura.terminal` for a working example (PTY over `/ws`) and
+`apps/com.aura.console` for a logging WebSocket that persists to disk.
 
 **Cross-app data**: declare a `dataProvider` in the manifest and serve
 `/api/data/<...>` from your app. Other apps reach you via
@@ -280,9 +327,9 @@ by the `PermissionManager`. Read provider data with `OsClient` from
 `@aura/app-sdk` (`queryProvider`, `writeProvider`, `watchProvider`) or
 plain `fetch`.
 
-**Console + debugging**: every iframe's `console.*`, uncaught errors,
-unhandled rejections, `fetch`/`XHR`/`EventSource` errors are auto-relayed
-to the shell and forwarded to the Console app (and persisted to a JSONL
+**Console + debugging**: every page's `console.*`, uncaught errors,
+unhandled rejections, `fetch`/`XHR`/`EventSource` errors are relayed by
+`/_aura/runtime.js` to the shell and forwarded to the Console app (and persisted to a JSONL
 file via WebSocket → `apps/com.aura.console`). No setup needed.
 
 **Keyboard shortcuts + OS Back + system actions**: all flow through the
@@ -372,7 +419,7 @@ aura install cap <name>                       # add a tool to /os/toolchain/bin/
 aura grant cap   com.example.foo <cap>        # add to this manifest's tools[]
 aura grant perm  com.example.foo <perm>       # add a manifest permission
 # Dev
-aura dev validate apps/com.example.foo        # schema-check the manifest
+aura dev validate apps/com.example.foo        # schema + App Host contract checks
 aura dev clean-manifest <path>                # strip default-valued fields
 aura dev checkout com.example.foo             # installed app → git checkout of its `repository`
 aura --help                                   # every command, by task
@@ -386,8 +433,10 @@ The terminal apps' bash also annotates the prompt with the detected layer
 - TypeScript strict, ES modules.
 - Reverse-domain IDs (`com.example.foo`); the dir name must equal `manifest.id`.
 - Don't import server-only Node modules into client-rendered Astro pages.
-- HMR is disabled in app iframes (the upstream Vite WS isn't reachable from
-  the browser through the proxy). Full iframe reload picks up changes.
+- HMR is off in the scaffold (`hmr: false` in `astro.config.mjs`): a page
+  reload picks up changes. The App Host does forward WebSocket upgrades on
+  any app path, so Vite HMR may work with it on, but that is not verified;
+  if you turn it on, keep your own `upgrade` handlers path-checked.
 - Class names are for styling, `data-*` attributes are for JS hooks — see
   "Styling rules that stop silent misses".
 - After a write, render the row from the response you already have; treat the
@@ -414,7 +463,7 @@ The terminal apps' bash also annotates the prompt with the detected layer
 ```
 packages/core         AppManager, ProotRunner, OsEventBus, PermissionManager,
                       ContentProviderRegistry, ThemeManager, manifest schema
-packages/shell        Astro SSR shell, /api/proxy, /api/data, /api/apps,
+packages/shell        Astro SSR shell, App Hosts, /api/data, /api/apps,
                       OSLayout (console bridge, theme), launcher, layout
 packages/app-sdk      App-side SDK: OsClient, lifecycle factories, context,
                       auraAppIntegration
@@ -426,8 +475,10 @@ apps/<id>             Each app, including this one
 ## Where to look when stuck
 
 - Lifecycle FSM and allowed transitions: `packages/core/src/app-manager/LifecycleStateMachine.ts`
-- How the shell builds your iframe URL: `packages/shell/src/pages/index.astro` (`buildView`)
-- How HTML/JS get rewritten on the way to the iframe: `packages/shell/src/pages/api/proxy/[id]/[...path].ts`
+- The App Host contract (what a page can and can't do): Aura Docs, "Building an app for App Hosts"
+- How an App Host request reaches your server: `packages/shell/server/app-hosts.mjs`
+- The `/_aura/os/` gateway and `/_aura/runtime.js`: `packages/shell/server/app-gateway.mjs`, `packages/shell/src/lib/appRuntime.ts`
+- The machine proxy for agents (`/api/proxy/<id>/…`, no browser pages): `packages/shell/src/pages/api/proxy/[id]/[...path].ts`
 - How the spawner constructs the PRoot args: `packages/core/src/app-manager/ProotRunner.ts` (`buildProotArgs`)
 - The reference apps for richer patterns: `apps/com.aura.terminal` (WS+PTY),
   `apps/com.aura.notepad` (multi-activity shared state), `apps/com.aura.counter`

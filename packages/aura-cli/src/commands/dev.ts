@@ -3,7 +3,8 @@ import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSy
 import { join, resolve, dirname } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { AppManifestSchema, AURA_NPMRC, needsNpmrc, newOriginId, portPackageJsonForScope, portToolsForScope } from '@aura/core';
-import { color, fail, info, ok, warn } from '../lib/format.js';
+import { color, error, fail, info, ok, warn } from '../lib/format.js';
+import { DOCS_HINT, lintAppSources, lintManifestKeys, type Finding } from '../lib/apphost-lint.js';
 import { promptText, promptChoice, promptConfirm, promptMultiSelect, PromptCancelled, BACK, type MultiSelectMode } from '../lib/prompts.js';
 import { ensureRegistry, loadRegistry, loadState, type CapabilityEntry } from '../lib/registry.js';
 import { api } from '../lib/client.js';
@@ -793,8 +794,17 @@ export function registerDev(program: Command): void {
   dev
     .command('validate [path]')
     .option('--all', 'Validate every app across all scopes (system/global/user)')
-    .description('Validate one or all app manifests against the AuraOS schema.')
-    .action((path: string | undefined, opts: { all?: boolean }) => {
+    .option('--no-source', 'Only check the manifest, not the app\'s source files')
+    .description('Validate one or all app manifests against the AuraOS schema, and check the app against the App Host contract.')
+    .addHelpText('after', `
+Besides the schema, the App Host checks (warnings unless noted) report with file:line:
+  - removed or unknown manifest keys (e.g. proxy.rewriteHtml), which the schema drops silently
+  - @aura/app-sdk imports the installed SDK doesn't export (an error: the app crashes)
+  - reads of the AURA_APP_BASE_PATH / AURA_APP_ID / AURA_INSTANCE_ID globals or aura-* meta tags
+  - /api/proxy/ URLs in browser-served files (pages are served from / on their App Host)
+  - notes: on('upgrade') handlers with no path check, hmr: false
+Skips node_modules, dist, .astro and .next. ${DOCS_HINT}.`)
+    .action((path: string | undefined, opts: { all?: boolean; source?: boolean }) => {
       const targets: string[] = [];
       if (opts.all) {
         targets.push(...allManifestPaths());
@@ -808,22 +818,50 @@ export function registerDev(program: Command): void {
       }
       let failed = 0;
       let noOrigin = 0;
+      const tally = { error: 0, warn: 0, info: 0 };
+      const appsWithProblems: string[] = [];
+      const report = (findings: Finding[]) => {
+        for (const f of findings) {
+          tally[f.severity]++;
+          const line = `  ${f.file}:${f.line}  ${f.message}`;
+          if (f.severity === 'error') error(line);
+          else if (f.severity === 'warn') warn(line);
+          else info(color.dim(line));
+        }
+      };
       for (const m of targets) {
+        const findings: Finding[] = [];
+        let schemaOk = false;
         try {
-          const data = JSON.parse(readFileSync(m, 'utf-8')) as unknown;
+          const text = readFileSync(m, 'utf-8');
+          const data = JSON.parse(text) as unknown;
           const result = AppManifestSchema.safeParse(data);
-          if (!result.success) { warn(`${m}: ${result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`); failed++; continue; }
-          ok(`${m}`);
-          // Not an error (apps from before originIds), but the store can't
-          // recognise the app across registries and publish refuses it.
-          if (!result.data.originId) {
-            noOrigin++;
-            warn(`  no originId — run ${color.cyan(`aura dev origin --assign ${result.data.id}`)}`);
+          if (!result.success) { warn(`${m}: ${result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`); failed++; }
+          else {
+            schemaOk = true;
+            ok(`${m}`);
+            // Not an error (apps from before originIds), but the store can't
+            // recognise the app across registries and publish refuses it.
+            if (!result.data.originId) {
+              noOrigin++;
+              warn(`  no originId — run ${color.cyan(`aura dev origin --assign ${result.data.id}`)}`);
+            }
+            findings.push(...lintManifestKeys(m, text, data, result.data, REMOVED_MANIFEST_KEYS));
           }
         } catch (err) { warn(`${m}: ${String(err)}`); failed++; }
+        if (opts.source !== false) findings.push(...lintAppSources(dirname(m)));
+        if (!schemaOk && findings.length) console.error(color.dim(`  App Host checks for ${dirname(m)}:`));
+        report(findings);
+        if (findings.some((f) => f.severity !== 'info')) appsWithProblems.push(dirname(m).split('/').pop() ?? m);
       }
       if (noOrigin > 1) info(`${noOrigin} app(s) without an originId — ${color.cyan('aura dev origin --assign --all')} gives them one`);
-      if (failed > 0) process.exit(1);
+      if (tally.error + tally.warn + tally.info > 0) {
+        info(`App Host checks: ${tally.error} error(s), ${tally.warn} warning(s), ${tally.info} note(s)`
+          + (appsWithProblems.length ? ` — needs attention: ${appsWithProblems.join(', ')}` : '')
+          + `. ${DOCS_HINT}`);
+      }
+      // A missing SDK export crashes the app at load; everything else is a warning.
+      if (failed > 0 || tally.error > 0) process.exit(1);
     });
 
   registerDevOrigin(dev);
@@ -888,6 +926,17 @@ export function registerDev(program: Command): void {
       info(`done; ${changedCount} of ${targets.length} manifest(s) ${opts.dryRun ? 'would be' : 'were'} cleaned`);
     });
 }
+
+/**
+ * Manifest keys AuraOS used to read and no longer does, by dotted path, with
+ * why. The schema strips unknown keys silently, so an app that still sets one
+ * gets no error, just none of the old behaviour: `dev validate` reports these
+ * (and any other key the schema strips) with file:line.
+ */
+export const REMOVED_MANIFEST_KEYS: Record<string, string> = {
+  'proxy.rewriteHtml':    'removed in the App Host cutover: pages are served from / unchanged, nothing is rewritten',
+  'proxy.preservePrefix': 'removed in the App Host cutover: the machine proxy always strips /api/proxy/<id>',
+};
 
 /**
  * Manifest fields whose presence in JSON is redundant because the Zod schema

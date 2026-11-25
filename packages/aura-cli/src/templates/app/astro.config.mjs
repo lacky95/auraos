@@ -15,9 +15,12 @@ export default defineConfig({
   // ship their own files — Astro's filesystem routes win on collision.
   integrations: [auraAppIntegration()],
   vite: {
-    // Disable HMR: the app runs inside the shell's iframe and its dev port
-    // (e.g. 4001) is not reachable from the browser. Iframe reload picks up
-    // code changes; we accept that over a broken WebSocket reconnect loop.
+    // HMR off: a page reload picks up code changes. The page is served from
+    // `/` on its own App Host, which forwards WebSocket upgrades on any path
+    // to this server (packages/shell/server/app-hosts.mjs), so Vite's
+    // `vite-hmr` socket may well work with this removed — but that is not
+    // verified yet. If you turn it on, path-check your own `upgrade`
+    // handlers so they leave Vite's socket alone (see CLAUDE.md).
     server: { hmr: false },
   },
 });

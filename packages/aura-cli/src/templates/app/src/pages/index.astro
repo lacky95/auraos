@@ -8,16 +8,16 @@ const instanceId = Astro.request.headers.get('x-aura-instance-id') ?? appId;
   <meta charset="UTF-8" />
   <title>{{APP_NAME}} — AuraOS</title>
   <!--
-    The OS palette. `themeStrategy` defaults to 'inherit', so the shell proxy
-    already injects this link for you — declaring it explicitly (as the
-    Settings app does) keeps the page themed when it's opened directly rather
-    than through the proxy, and makes the dependency visible to whoever edits
-    this file next. The proxy skips its own injection when it sees this tag.
+    No theme <link> needed: with `themeStrategy: 'inherit'` (the default),
+    /_aura/runtime.js — loaded on every page by auraAppIntegration() — links
+    the OS palette (/_aura/os/api/os/theme.css on this App Host) and swaps it
+    when the user changes theme or light/dark mode. An explicit
+    <link href="/api/os/theme.css"> still works (auraAppIntegration redirects
+    it to the gateway) but isn't needed.
   -->
-  <link rel="stylesheet" href="/api/os/theme.css" />
   <style>
     /*
-      Every colour below comes from /api/os/theme.css, so this page follows
+      Every colour below comes from the OS theme.css, so this page follows
       whatever theme the user picked in Settings — light or dark, any accent.
       The token set is closed:
 
@@ -78,20 +78,5 @@ const instanceId = Astro.request.headers.get('x-aura-instance-id') ?? appId;
   </div>
   <p class="hint">Edit <code>src/pages/index.astro</code> to start building your app.</p>
 
-  <script is:inline>
-    // The shell postMessages every iframe when the user switches theme or
-    // light/dark mode. The stylesheet above is already applied, so the browser
-    // has no reason to refetch it on its own — re-set the href with a
-    // cache-buster to pull the new palette in without reloading the app.
-    addEventListener('message', (ev) => {
-      const t = ev.data && ev.data.type;
-      if (t !== 'aura.theme.changed' && t !== 'aura.mode.changed') return;
-      document.querySelectorAll('link[rel="stylesheet"]').forEach((link) => {
-        const href = link.getAttribute('href') || '';
-        if (!href.startsWith('/api/os/theme.css')) return;
-        link.setAttribute('href', '/api/os/theme.css?t=' + Date.now());
-      });
-    });
-  </script>
 </body>
 </html>
