@@ -45,12 +45,24 @@ addEventListener('focus',report);addEventListener('focusin',report,true);
  * Adds the theme for a page that doesn't link it. While the parser is waiting
  * on this script, `document.write` makes the link parser-created, so it blocks
  * first paint in every engine and the page never shows unthemed.
+ *
+ * A client-side router (Astro's ClientRouter, Turbo, htmx) swaps `<head>` for
+ * the next page's, which has no such link, and the runtime does not run again.
+ * Astro's `astro:before-swap` gets the link into the incoming head with the
+ * current link's exact href (a refresh adds `?t=`), since Astro keeps a loaded
+ * stylesheet only when the new head links the same href: no refetch, no flash.
+ * Any other router that drops it gets it back from the head observer.
  */
 function themeLinkJs(href: string): string {
   const h = JSON.stringify(href);
-  return `if(!document.querySelector('link[href*="${SHELL_THEME_PATH}"]')){var CS=document.currentScript;`
-    + `if(document.readyState==='loading'&&CS&&!CS.async&&!CS.defer)document.write('<link rel="stylesheet" href="'+${h}+'">');`
-    + `else{var L=document.createElement('link');L.rel='stylesheet';L.href=${h};HEAD.appendChild(L);}}`;
+  return `var TQ='link[rel="stylesheet"][href*="${SHELL_THEME_PATH}"]';`
+    + `var TH=function(d){if(d.querySelector(TQ))return;var C=document.querySelector(TQ),L=d.createElement('link');`
+    + `L.rel='stylesheet';L.href=C?C.getAttribute('href'):${h};(d.head||d.documentElement).appendChild(L);};`
+    + `var CS=document.currentScript;`
+    + `if(document.readyState==='loading'&&CS&&!CS.async&&!CS.defer){if(!document.querySelector(TQ))document.write('<link rel="stylesheet" href="'+${h}+'">');}`
+    + `else TH(document);`
+    + `document.addEventListener('astro:before-swap',function(e){if(e.newDocument)TH(e.newDocument);});`
+    + `if(typeof MutationObserver==='function')new MutationObserver(function(){TH(document);}).observe(HEAD,{childList:true});`;
 }
 
 /**
