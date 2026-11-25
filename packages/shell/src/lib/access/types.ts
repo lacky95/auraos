@@ -196,6 +196,12 @@ export interface AccessEvent {
   reason: AccessReason;
   status: AccessStatusClass;
   via: AccessVia;
+  /**
+   * Recorded in `report` mode: `enforce` would refuse this request, which
+   * was served (server/access-mode.mjs `wouldEnforce`). Always false in
+   * `enforce`, and for a gateway call, which is refused in every mode.
+   */
+  wouldEnforce: boolean;
 }
 
 /**

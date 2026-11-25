@@ -3,6 +3,7 @@ import * as core from '@aura/core';
 import type { AccessPrincipal } from '@aura/core';
 import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { defaultRedis } from '@aura/kv-store';
+import { accessMode, wouldEnforce } from '../../../server/access-mode.mjs';
 import { ownerSessionOf, sessionCookieToken } from '../authSurface.ts';
 import { createDecide, type DecideDeps } from './decide.ts';
 import { resolvePrincipal, type AppHostSession, type PrincipalDeps } from './identify.ts';
@@ -358,7 +359,7 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
     if (isInternal(s)) {
       return {
         surface, subject: label(subject), method, variant: null, principal: 'system', appId: null,
-        decision: 'allow', reason: 'system', status, via: 'internal',
+        decision: 'allow', reason: 'system', status, via: 'internal', wouldEnforce: false,
       };
     }
 
@@ -393,6 +394,8 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
       principal: seen.principal.kind === 'admin' ? 'operator' : seen.principal.kind,
       appId: knownApp(callerApp ?? targetApp) as AccessLabel | null,
       decision: result.outcome, reason: result.reason, status, via: seen.via,
+      // A gateway call was already decided by enforceGateway, in every mode.
+      wouldEnforce: wouldEnforce(accessMode(), result.outcome, seen.via === 'gateway'),
     };
   }
 
@@ -437,6 +440,7 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
       appId: knownApp(caller ?? appId) as AccessLabel | null,
       decision: result.outcome, reason: result.reason,
       status: statusClass(Number(o.status)), via: o.via ?? seen.via,
+      wouldEnforce: wouldEnforce(accessMode(), result.outcome),
     };
   }
 

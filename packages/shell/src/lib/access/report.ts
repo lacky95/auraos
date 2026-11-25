@@ -19,16 +19,21 @@ export const reportKey = (day: string) => `access:report:${day}`;
 export const reportDay = (now: number) => new Date(now).toISOString().slice(0, 10);
 
 const FIELDS = ['surface', 'subject', 'method', 'variant', 'principal', 'appId', 'decision', 'reason', 'status', 'via'] as const;
-type Row = Record<(typeof FIELDS)[number], string> & { count: number };
+/** `wouldEnforce` is the key's last part, `1` or `0`. Keys written before it have none and read as false. */
+export type AccessReportRow = Record<(typeof FIELDS)[number], string> & { wouldEnforce: boolean; count: number };
+type Row = AccessReportRow;
 
 export const eventKey = (e: AccessEvent): string => [
   e.surface, e.subject, e.method, e.variant ?? '-', e.principal, e.appId ?? '-', e.decision, e.reason, e.status, e.via,
+  e.wouldEnforce ? '1' : '0',
 ].join('|');
 
 function parseKey(key: string, count: number): Row | null {
   const parts = key.split('|');
-  if (parts.length !== FIELDS.length) return null;
-  return { ...Object.fromEntries(FIELDS.map((f, i) => [f, parts[i]!])), count } as Row;
+  if (parts.length !== FIELDS.length && parts.length !== FIELDS.length + 1) return null;
+  const flag = parts[FIELDS.length];
+  if (flag !== undefined && flag !== '0' && flag !== '1') return null;
+  return { ...Object.fromEntries(FIELDS.map((f, i) => [f, parts[i]!])), wouldEnforce: flag === '1', count } as Row;
 }
 
 const isWouldDeny = (key: string): boolean => parseKey(key, 0)?.decision !== 'allow';
@@ -151,7 +156,7 @@ export class AccessReport {
       for (const key of keys.slice(0, SAMPLE_MAX)) {
         const row = parseKey(key, 1);
         if (!row) continue;
-        const pairs = FIELDS.flatMap((f) => [f, row[f]]);
+        const pairs = [...FIELDS.flatMap((f) => [f, row[f]]), 'wouldEnforce', String(row.wouldEnforce)];
         await redis.xadd(SAMPLE_STREAM, 'MAXLEN', '~', SAMPLE_MAX, '*', 'at', this.now(), ...pairs);
       }
       await redis.expire(SAMPLE_STREAM, REPORT_TTL_SECONDS);

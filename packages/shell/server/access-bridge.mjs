@@ -6,10 +6,11 @@
  *
  * Everything here is report-only: no function throws, returns a decision or is
  * awaited by a caller. Events sent before the observer registers (it loads on
- * the first Astro request) are only counted. AURA_ACCESS_REPORT=off stops all
- * of it, including the internal service label.
+ * the first Astro request) are only counted. AURA_ACCESS_ENFORCE=off
+ * (access-mode.mjs) stops all of it, including the internal service label.
  */
 import { randomBytes } from 'node:crypto';
+import { accessMode } from './access-mode.mjs';
 
 const BRIDGE = Symbol.for('aura.access');
 const EARLY = Symbol.for('aura.access.early');
@@ -19,12 +20,11 @@ const INTERNAL = Symbol.for('aura.access.internal');
 export const INTERNAL_SERVICE_HEADER = 'x-aura-internal-service';
 export const SESSION_COOKIES = new Set(['aura_session', '__Host-aura_session']);
 
-export const accessReportEnabled = () =>
-  (process.env.AURA_ACCESS_REPORT ?? '').trim().toLowerCase() !== 'off';
+const reporting = () => accessMode() !== 'off';
 
 function withBridge(fn) {
   try {
-    if (!accessReportEnabled()) return;
+    if (!reporting()) return;
     const bridge = globalThis[BRIDGE];
     if (bridge) fn(bridge);
     else globalThis[EARLY] = (globalThis[EARLY] ?? 0) + 1;
@@ -41,7 +41,7 @@ const first = (v) => (Array.isArray(v) ? v[0] : v) ?? null;
 /** The observer's verdict on these credentials, started now. Null before it is loaded. */
 function verify(facts) {
   try {
-    if (!accessReportEnabled()) return null;
+    if (!reporting()) return null;
     const identify = globalThis[BRIDGE]?.identify;
     if (typeof identify !== 'function') return null;
     return Promise.resolve(identify(facts)).catch(() => null);
@@ -82,7 +82,7 @@ export function staticSurface(url) {
 
 export function observeHttpSurface(req, res) {
   try {
-    if (!accessReportEnabled()) return;
+    if (!reporting()) return;
     const subject = staticSurface(req.url);
     if (!subject) return;
     const identity = surfaceIdentity(req.headers, { method: req.method, url: req.url });
@@ -104,7 +104,7 @@ function isLiteralLoopback(url) {
 /** The per-boot label for a call to `url`: empty unless it is literal loopback. */
 export function internalServiceHeaders(url) {
   try {
-    if (!accessReportEnabled() || !isLiteralLoopback(url)) return {};
+    if (!reporting() || !isLiteralLoopback(url)) return {};
     globalThis[INTERNAL] ??= randomBytes(32).toString('hex');
     return { [INTERNAL_SERVICE_HEADER]: globalThis[INTERNAL] };
   } catch {

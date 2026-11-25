@@ -13,7 +13,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { AdminAuth, ApiKeyStore, Authorizer, SYSTEM_PRINCIPAL } from '@aura/core';
 import type { AccessPrincipal } from '@aura/core';
 import { createDecide } from '../src/lib/access/decide.ts';
-import { accessReportOff, captureAccess, createAccessReporter } from '../src/lib/access/guard.ts';
+import { captureAccess, createAccessReporter } from '../src/lib/access/guard.ts';
 import { refererAppId, refererProxyId } from '../src/lib/access/legacyReferer.ts';
 import {
   combineCandidates, createObserver, identifyRequest, observeIdentity, requestFromFacts, statusClass,
@@ -30,6 +30,7 @@ import {
 } from '../server/access-bridge.mjs';
 import { dropServiceWorkerScope, stripSessionCookie, stripShellCredentials } from '../server/shell-credentials.mjs';
 import { attachWsProxy } from '../server/attach.mjs';
+import { ACCESS_MODES, accessMode, parseAccessMode, wouldEnforce } from '../server/access-mode.mjs';
 import { enumerateRoutes } from './helpers/enumerateRoutes.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -107,9 +108,25 @@ function observerWith(over: Partial<ObserverDeps> = {}) {
 }
 
 const fields = (key: string) => {
-  const [surface, subject, method, variant, principal, appId, decision, reason, status, via] = key.split('|');
-  return { surface, subject, method, variant, principal, appId, decision, reason, status, via };
+  const [surface, subject, method, variant, principal, appId, decision, reason, status, via, wouldEnforce] = key.split('|');
+  return { surface, subject, method, variant, principal, appId, decision, reason, status, via, wouldEnforce };
 };
+
+/** Run `fn` with AURA_ACCESS_ENFORCE set to `value` (undefined: unset). */
+function withMode<T>(value: string | undefined, fn: () => T): T {
+  const prev = process.env['AURA_ACCESS_ENFORCE'];
+  if (value === undefined) delete process.env['AURA_ACCESS_ENFORCE']; else process.env['AURA_ACCESS_ENFORCE'] = value;
+  const restore = () => { if (prev === undefined) delete process.env['AURA_ACCESS_ENFORCE']; else process.env['AURA_ACCESS_ENFORCE'] = prev; };
+  try {
+    const out = fn();
+    if (out instanceof Promise) return out.finally(restore) as T;
+    restore();
+    return out;
+  } catch (err) {
+    restore();
+    throw err;
+  }
+}
 
 // ── decide ──────────────────────────────────────────────────────────────────
 
@@ -469,33 +486,74 @@ test('fail-open: a failing pipeline keeps the counts', async () => {
 
 // ── kill switch and body ────────────────────────────────────────────────────
 
-test('kill switch: AURA_ACCESS_REPORT=off stops capture, surfaces and the label', () => {
-  const prev = process.env['AURA_ACCESS_REPORT'];
+test('access mode: AURA_ACCESS_ENFORCE is off|report|enforce, default report', () => {
+  assert.deepEqual([...ACCESS_MODES], ['off', 'report', 'enforce']);
+  assert.equal(withMode(undefined, accessMode), 'report');
+  assert.equal(withMode('', accessMode), 'report');
+  assert.equal(withMode(' Enforce ', accessMode), 'enforce');
+  assert.equal(withMode('off', accessMode), 'off');
+  assert.equal(parseAccessMode('enforced'), null);
+  const warn = console.warn;
+  let warned = 0;
+  console.warn = () => { warned += 1; };
+  try {
+    assert.equal(withMode('enforced', accessMode), 'report', 'a typo is the default, never off');
+    withMode('nonsense', accessMode);
+  } finally { console.warn = warn; }
+  assert.ok(warned <= 1, 'an unknown value is logged once');
+});
+
+test('access mode: the env variable is read in exactly one place (D36)', () => {
+  const readers: string[] = [];
+  const walk = (dir: string) => {
+    for (const name of fs.readdirSync(dir)) {
+      if (name === 'node_modules' || name === 'dist' || name === '.astro') continue;
+      const p = path.join(dir, name);
+      if (fs.statSync(p).isDirectory()) walk(p);
+      else if (/\.(ts|mjs|js|astro)$/.test(name) && /process\.env(\.|\[['"])AURA_ACCESS_(ENFORCE|REPORT)\b|\bACCESS_MODE_ENV\]/.test(fs.readFileSync(p, 'utf8'))) {
+        readers.push(path.relative(root, p));
+      }
+    }
+  };
+  walk(path.join(root, 'src'));
+  walk(path.join(root, 'server'));
+  assert.deepEqual(readers, ['server/access-mode.mjs']);
+});
+
+test('wouldEnforce: only in report, only for a non-allow outcome not already enforced', () => {
+  for (const outcome of ['deny', 'needs-approval', 'needs-fresh-auth', 'needs-https', 'needs-operator']) {
+    assert.equal(wouldEnforce('report', outcome), true, outcome);
+    assert.equal(wouldEnforce('report', outcome, true), false, `${outcome}, already enforced`);
+    assert.equal(wouldEnforce('enforce', outcome), false, `${outcome} in enforce`);
+    assert.equal(wouldEnforce('off', outcome), false, `${outcome} in off`);
+  }
+  assert.equal(wouldEnforce('report', 'allow'), false);
+});
+
+test('kill switch: AURA_ACCESS_ENFORCE=off stops capture, surfaces and the label', () => {
   const prevBridge = g[BRIDGE];
   let called = 0;
   g[BRIDGE] = { observeSurface() { called += 1; } };
-  process.env['AURA_ACCESS_REPORT'] = 'off';
   try {
-    assert.equal(accessReportOff(), true);
-    assert.equal(captureAccess(ctxFor('http://x/api/kv/os/x')), null);
-    reportSurface({ subject: 'ws-proxy', method: 'UPGRADE', status: 101 });
-    assert.equal(called, 0);
-    assert.deepEqual(internalServiceHeaders('http://127.0.0.1:3000/api/apps'), {});
+    withMode('off', () => {
+      assert.equal(captureAccess(ctxFor('http://x/api/kv/os/x')), null);
+      reportSurface({ subject: 'ws-proxy', method: 'UPGRADE', status: 101 });
+      assert.equal(called, 0);
+      assert.deepEqual(internalServiceHeaders('http://127.0.0.1:3000/api/apps'), {});
+    });
+    for (const mode of ['report', 'enforce']) {
+      withMode(mode, () => assert.notEqual(captureAccess(ctxFor('http://x/api/kv/os/x')), null, `${mode} keeps capturing`));
+    }
   } finally {
-    if (prev === undefined) delete process.env['AURA_ACCESS_REPORT']; else process.env['AURA_ACCESS_REPORT'] = prev;
     if (prevBridge) g[BRIDGE] = prevBridge; else delete g[BRIDGE];
   }
 });
 
 test('kill switch: credential stripping stays on', () => {
-  const prev = process.env['AURA_ACCESS_REPORT'];
-  process.env['AURA_ACCESS_REPORT'] = 'off';
-  try {
+  withMode('off', () => {
     const h = stripShellCredentials(new Headers({ cookie: 'aura_session=s; app=1' }), 'proxy-http');
     assert.equal(h.get('cookie'), 'app=1');
-  } finally {
-    if (prev === undefined) delete process.env['AURA_ACCESS_REPORT']; else process.env['AURA_ACCESS_REPORT'] = prev;
-  }
+  });
 });
 
 test('no body is consumed by capture or observation', async () => {
@@ -520,7 +578,7 @@ test('the middleware hands off without awaiting the observer or reading the body
 function event(over: Partial<AccessEvent> = {}): AccessEvent {
   return {
     surface: 'api', subject: '/api/apps' as AccessLabel, method: 'GET', variant: null, principal: 'anonymous',
-    appId: null, decision: 'deny', reason: 'unauthenticated', status: '2xx', via: 'none', ...over,
+    appId: null, decision: 'deny', reason: 'unauthenticated', status: '2xx', via: 'none', wouldEnforce: true, ...over,
   };
 }
 
@@ -589,6 +647,53 @@ test('report: reading parses rows and counters', async () => {
   assert.equal(out.days[0]!.rows[0]!.count, 4);
   assert.equal(out.days[0]!.counters['overflow'], 2);
   assert.equal(out.samples[0]!['subject'], '/api/apps');
+});
+
+test('report: wouldEnforce is part of the row, and rows stored before it still parse', async () => {
+  const now = Date.UTC(2026, 10, 23);
+  const legacy = eventKey(event()).split('|').slice(0, -1).join('|');
+  const out = await readAccessReport({
+    hgetall: async (k): Promise<Record<string, string>> => (k === reportKey('2026-11-23') ? {
+      [eventKey(event())]: '5',
+      [eventKey(event({ decision: 'allow', reason: 'owner', wouldEnforce: false }))]: '3',
+      [legacy]: '2',
+      [`${legacy}|maybe`]: '1',
+    } : {}),
+    xrevrange: async () => [],
+  }, 1, now);
+  const rows = out.days[0]!.rows;
+  assert.deepEqual(rows.map((r) => [r.count, r.decision, r.wouldEnforce]), [[5, 'deny', true], [3, 'allow', false], [2, 'deny', false]]);
+  assert.equal(eventKey(event()).endsWith('|1'), true);
+  assert.equal(eventKey(event({ wouldEnforce: false })).endsWith('|0'), true);
+});
+
+test('report: a sample carries wouldEnforce', async () => {
+  const r = flushRedis();
+  const report = new AccessReport({ redis: () => r });
+  report.add(event());
+  await report.flush();
+  const args = r.stream[0]!.map(String);
+  assert.equal(args[args.indexOf('wouldEnforce') + 1], 'true');
+});
+
+test('observer: wouldEnforce follows the mode; a gateway call is already enforced', async () => {
+  const gatewayIdentity = { verified: { principal: inst('com.a.app'), via: 'gateway' as const }, referer: null, instanceId: null };
+  const flags = async (mode: string, over: Partial<RequestSnapshot> = {}) => {
+    const prev = process.env['AURA_ACCESS_ENFORCE'];
+    process.env['AURA_ACCESS_ENFORCE'] = mode;
+    try {
+      const { report, observer } = observerWith();
+      await observer.observeRequest(snapshot({ routePattern: '/404', pathname: '/nope', ...over }));
+      return [...(report as unknown as { counts: Map<string, number> }).counts.keys()].map(fields)[0]!;
+    } finally {
+      if (prev === undefined) delete process.env['AURA_ACCESS_ENFORCE']; else process.env['AURA_ACCESS_ENFORCE'] = prev;
+    }
+  };
+  const report = await flags('report');
+  assert.equal(report.decision, 'deny');
+  assert.equal(report.wouldEnforce, '1');
+  assert.equal((await flags('enforce')).wouldEnforce, '0');
+  assert.equal((await flags('report', { identity: gatewayIdentity })).wouldEnforce, '0');
 });
 
 test('redaction: nothing from the request reaches the stored report', async () => {

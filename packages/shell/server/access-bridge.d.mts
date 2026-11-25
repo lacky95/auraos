@@ -1,6 +1,5 @@
 export const INTERNAL_SERVICE_HEADER: string;
 export const SESSION_COOKIES: ReadonlySet<string>;
-export function accessReportEnabled(): boolean;
 export function reportSurface(observation: unknown): void;
 export function countSurfaceEvent(subject: string): void;
 export function countCredential(kind: string, surface: string): void;

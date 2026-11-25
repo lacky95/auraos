@@ -78,6 +78,12 @@ services:
       # AURA_HOST_POLICY=report only logs them.
       # AURA_DESKTOP_HOSTS: box.aura.example.com
       # AURA_HOST_POLICY: report
+      # Access enforcement (the route access manifest): `report` (default)
+      # only counts what `enforce` would refuse, in `aura admin access-report`;
+      # `enforce` refuses it; `off` stops the access report entirely. App Host
+      # gateway calls are enforced in every mode. See the Docs page "Core
+      # Concepts", Access enforcement modes.
+      # AURA_ACCESS_ENFORCE: report
       AURA_USE_PROOT: "true"
       # The host-side absolute path that's bind-mounted at /workspace above.
       # ContainerRunner passes this to `docker -v` as the bind source for

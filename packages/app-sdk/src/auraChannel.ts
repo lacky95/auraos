@@ -120,6 +120,14 @@ export const AURA_CHANNEL_MESSAGES = {
   'aura.account.policy.request': TO_SHELL,
   'aura.account.policy.result': TO_APP,
 
+  // Approvals (5.10, D49): an app asks, the Shell's own dialog shows the
+  // server-built request and the owner decides. Payloads: AuraApproval*,
+  // AuraUserConfirm* below.
+  'aura.approval.request': TO_SHELL,
+  'aura.approval.result': TO_APP,
+  'aura.user.confirm.request': TO_SHELL,
+  'aura.user.confirm.result': TO_APP,
+
   // Terminal session share: an embed host asks, the owner decides in the Shell (D25)
   'aura.terminal.share.request': TO_SHELL,
   'aura.terminal.share.result': TO_APP,
@@ -179,6 +187,59 @@ export function isAuraChannelRouteAllowed(type: unknown, from: AuraChannelEndpoi
   if (!isAuraChannelType(type)) return false;
   const routes: readonly AuraChannelRoute[] = AURA_CHANNEL_MESSAGES[type];
   return routes.some((r) => r.from === from && r.to === to);
+}
+
+// ── approval dialog payloads ────────────────────────────────────────────────
+// Request and result pair by `requestId`, a correlation value the app picks,
+// as for `aura.account.*`. The dialog's text never comes from these messages:
+// the Shell reads the approval from its own server.
+
+/** The same levels as core's `ApprovalLevel`. */
+export type AuraApprovalLevel = 'session' | 'fresh';
+
+/**
+ * `aura.approval.request`: show the owner a pending approval the app created
+ * with `POST /api/approvals`. Carries only its id.
+ */
+export interface AuraApprovalRequest {
+  type: 'aura.approval.request';
+  requestId: string;
+  approvalId: string;
+}
+
+/**
+ * `aura.approval.result`: `ok` when the owner approved. `error` is a closed
+ * code such as `denied`, `expired`, `cancelled` or `unavailable`.
+ */
+export interface AuraApprovalResult {
+  type: 'aura.approval.result';
+  requestId: string;
+  approvalId: string;
+  ok: boolean;
+  error?: string;
+}
+
+/**
+ * `aura.user.confirm.request` (D49, `osClient.user.confirm`): the app asks
+ * the owner to confirm. The Shell's dialog names the verified app; `fresh`
+ * also asks for the password, which only the Shell ever sees.
+ */
+export interface AuraUserConfirmRequest {
+  type: 'aura.user.confirm.request';
+  requestId: string;
+  level?: AuraApprovalLevel;
+}
+
+/**
+ * `aura.user.confirm.result`: only whether the owner confirmed, and then the
+ * single-use approval id the app's server presents (consumed once). Never a
+ * password, a session or a reason.
+ */
+export interface AuraUserConfirmResult {
+  type: 'aura.user.confirm.result';
+  requestId: string;
+  confirmed: boolean;
+  approvalId?: string;
 }
 
 /**

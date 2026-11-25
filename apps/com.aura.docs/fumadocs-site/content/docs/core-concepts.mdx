@@ -262,6 +262,24 @@ Plus dynamic content-provider perms in the form
 `manifest.permissions`; the `PermissionManager` checks them at the
 call site (provider router, theme broadcaster, etc.).
 
+### Access enforcement modes
+
+Every request to the shell is checked against one route access manifest. The
+environment variable `AURA_ACCESS_ENFORCE` on the `aura-os` service decides
+what happens with the result:
+
+| Mode | Effect |
+|---|---|
+| `report` (default) | Nothing is refused because of the manifest. Every decision is counted in the access report, and a row the manifest would refuse is marked `wouldEnforce`. |
+| `enforce` | Requests the manifest denies are refused. The report keeps counting. |
+| `off` | No access report at all. Use it only to rule the report out while debugging. |
+
+Calls an app makes through its App Host gateway (`/_aura/os/*`) are enforced
+in every mode. An unknown value counts as `report` and is logged once. Read the
+report with `aura admin access-report` (an admin session; `--days` up to 14):
+before switching to `enforce`, every `wouldEnforce` row should be explained.
+Rolling back means setting `report` again and restarting the shell.
+
 Most permissions are still **auto-granted** (logged as "would deny in v2").
 The ones in `ENFORCED_PERMISSIONS` really answer 403 when undeclared:
 

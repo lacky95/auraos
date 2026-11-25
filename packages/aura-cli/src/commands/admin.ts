@@ -228,7 +228,7 @@ export function registerAdmin(program: Command): void {
 
   admin
     .command('access-report')
-    .description('What the report-only access policy would have decided (nothing is blocked yet).')
+    .description('What the access policy decided, per route and caller. wouldEnforce marks what AURA_ACCESS_ENFORCE=enforce would refuse.')
     .option('--days <n>', 'days to show, newest first (1-14)', '1')
     .option('-o, --output <format>', 'json')
     .action(async (opts: { days: string; output?: string }) => {
@@ -266,7 +266,7 @@ export function registerAdmin(program: Command): void {
     });
 }
 
-const REPORT_COLUMNS = ['surface', 'subject', 'method', 'variant', 'principal', 'appId', 'decision', 'reason', 'status', 'via', 'count'];
+const REPORT_COLUMNS = ['surface', 'subject', 'method', 'variant', 'principal', 'appId', 'decision', 'reason', 'status', 'via', 'wouldEnforce', 'count'];
 
 interface AccessReportBody {
   days: Array<{ day: string; rows: Array<Record<string, unknown>>; counters: Record<string, number> }>;

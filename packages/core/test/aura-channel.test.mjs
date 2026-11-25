@@ -112,3 +112,17 @@ test('the channel module has no imports', () => {
   const src = readFileSync(join(ROOT, 'packages/core/src/app-hosts/auraChannel.ts'), 'utf-8');
   assert.doesNotMatch(src, /^\s*(import|export\s+\*|export\s+\{[^}]*\}\s+from)\b/m);
 });
+
+test('approval dialog messages: an app asks the shell, the shell answers the app (5.10, D49)', () => {
+  for (const t of ['aura.approval.request', 'aura.user.confirm.request']) {
+    assert.deepEqual(AURA_CHANNEL_MESSAGES[t], [{ from: 'app', to: 'shell' }], t);
+  }
+  for (const t of ['aura.approval.result', 'aura.user.confirm.result']) {
+    assert.deepEqual(AURA_CHANNEL_MESSAGES[t], [{ from: 'shell', to: 'app' }], t);
+  }
+  for (const t of ['aura.approval.request', 'aura.approval.result', 'aura.user.confirm.request', 'aura.user.confirm.result']) {
+    assert.equal(isAuraChannelRouteAllowed(t, 'embed-host', 'embedded-app'), false, `${t}: no embed relay`);
+    assert.equal(isAuraChannelRouteAllowed(t, 'embedded-app', 'shell'), false, `${t}: not from an embedded app`);
+    assert.equal(isAuraChannelRouteAllowed(t, 'app-subframe', 'shell'), false, `${t}: not from a subframe`);
+  }
+});

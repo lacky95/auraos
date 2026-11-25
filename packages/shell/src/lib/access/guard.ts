@@ -1,15 +1,14 @@
+import { accessMode } from '../../../server/access-mode.mjs';
 import type { RequestSnapshot, VerifiedIdentity } from './types.ts';
 
 /**
- * The only access code on the request path. It has no imports to fail, copies
+ * The only access code on the request path. Its one import has no imports
+ * of its own (the AURA_ACCESS_ENFORCE read point). It copies
  * what the observer needs before the response goes out, never touches the
  * body, and hands off without awaiting. Nothing here can throw into a request.
  * The snapshot never holds a credential: identity is the resolver's verdict,
  * started by `identify` while the request is in hand.
  */
-
-export const accessReportOff = (): boolean =>
-  (process.env['AURA_ACCESS_REPORT'] ?? '').trim().toLowerCase() === 'off';
 
 export interface AccessContext {
   request: Request;
@@ -20,7 +19,7 @@ export interface AccessContext {
 
 export function captureAccess(ctx: AccessContext): RequestSnapshot | null {
   try {
-    if (accessReportOff()) return null;
+    if (accessMode() === 'off') return null;
     const path = ctx.url.pathname;
     // Counted by the server.emit wrapper (server/access-bridge.mjs).
     if (path.startsWith('/_astro/') || path === '/favicon.ico') return null;
