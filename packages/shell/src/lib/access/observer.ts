@@ -448,7 +448,7 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
         manifest,
         { route: s.routePattern, handlers: handlersOf(manifest, s.routePattern) },
         method,
-        { query: new URLSearchParams(s.search), namespace: kvNamespace(s) },
+        { query: new URLSearchParams(s.search), namespace: kvNamespace(s), params: s.params },
       );
     }
 

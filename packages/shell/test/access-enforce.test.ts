@@ -213,6 +213,32 @@ test('D29: the system Terminal by its own token acts for the owner; not through 
   assert.equal(await gate('enforce', term, { path: '/api/admin/grants', route: '/api/admin/grants' }), '401 admin-required');
 });
 
+test('D29: TerminalX lists the Terminal\'s instances with its terminal.sessions.list grant; other apps\' instances stay the owner\'s', async () => {
+  const route = '/api/apps/[id]/instances';
+  const of = (id: string) => ({ path: `/api/apps/${id}/instances`, route, params: { id } });
+  const granted = { ...declared, 'com.acme.notes': [...declared['com.acme.notes']!, 'terminal.sessions.list'] };
+  const tx = new Authorizer({
+    grants: { get: async (s: { id: string }, p: string) => (s.id === 'com.acme.notes' && p === 'terminal.sessions.list' ? { appScope: 'user' } : null) } as never,
+    declared: (id: string) => granted[id],
+    appScope: (id: string) => scopes[id],
+  });
+  const asTx = async (call: ReturnType<typeof of>) => {
+    const r = await accessGate(ctx(call), { ...deps('enforce', { principal: inst('com.acme.notes'), via: 'instance-token' }), authorizer: tx });
+    return r.refused ? `${r.refused.status} ${(await r.refused.json() as { error: string }).error}` : 'pass';
+  };
+  assert.equal(await asTx(of('com.aura.terminal')), 'pass');
+  assert.equal(await asTx(of('com.other.app')), '403 access-denied', 'the grant names the Terminal only');
+  assert.equal(await gate('enforce', inst('com.other.app'), of('com.aura.terminal')), '403 access-denied', 'no grant');
+  assert.equal(await gate('enforce', anon, of('com.aura.terminal')), '401 unauthenticated');
+  assert.equal(await gate('enforce', owner, of('com.aura.terminal')), 'pass');
+  assert.equal(await gate('enforce', owner, of('com.other.app')), 'pass');
+  const info = { route, handlers: handlersOf(M, route) };
+  const facts = { query: new URLSearchParams(), namespace: null };
+  assert.deepEqual(candidateRules(M, info, 'GET', { ...facts, params: { id: 'com.aura.terminal' } }).map((c) => c.variant), ['terminal-instances']);
+  assert.deepEqual(candidateRules(M, info, 'GET', { ...facts, params: { id: 'com.aura.terminalx' } }).map((c) => c.variant), [null]);
+  assert.deepEqual(candidateRules(M, info, 'GET', facts).map((c) => c.variant), [null], 'no params: no param variant');
+});
+
 // ── D28: tokenless callers by network address ───────────────────────────────
 
 test('D28: a tokenless call from an app container reaches /api/proxy; loopback, unknown and gateway callers do not', async () => {

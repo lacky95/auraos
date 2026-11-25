@@ -63,6 +63,8 @@ export function handlersOf(manifest: RouteAccessManifest, route: string): string
 export interface VariantFacts {
   query: URLSearchParams;
   namespace: 'os' | 'app' | null;
+  /** The route's parameters (`[id]` …), for `param` variants. Absent = none match. */
+  params?: Readonly<Record<string, string | undefined>>;
   /** The parsed JSON body, for `read` body variants. Undefined = not read. */
   body?: unknown;
 }
@@ -117,7 +119,9 @@ export function candidateRules(
     }
     const matches = m.on === 'query'
       ? facts.query.has(m.name) && (m.equals === undefined || facts.query.get(m.name) === m.equals)
-      : facts.namespace === m.namespace;
+      : m.on === 'param'
+        ? facts.params?.[m.name] === m.equals
+        : facts.namespace === m.namespace;
     if (matches) {
       out.push({ variant: v.id, rule: v.rule });
       return out;

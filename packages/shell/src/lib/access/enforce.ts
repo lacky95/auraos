@@ -144,7 +144,7 @@ export async function accessGate(
   const method = normalizeMethod(ctx.request.method);
   const snapshot: RequestSnapshot = snapshotOf(ctx);
   const info = { route, handlers: handlersOf(manifest, route) };
-  const facts = { query: new URLSearchParams(snapshot.search), namespace: kvNamespace(snapshot) };
+  const facts = { query: new URLSearchParams(snapshot.search), namespace: kvNamespace(snapshot), params: snapshot.params };
   let candidates = candidateRules(manifest, info, method, facts);
   const guarded = candidates.some((c) => c.rule.guard);
   if (!enforcing && !guarded) return PASS;

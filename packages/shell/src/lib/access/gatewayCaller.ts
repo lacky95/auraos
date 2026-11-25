@@ -110,6 +110,7 @@ export async function enforceGateway(
   const candidates = candidateRules(manifest, info, method, {
     query: new URLSearchParams(ctx.url.search),
     namespace: kvNamespace(snapshot),
+    params: snapshot.params,
     ...(readsBody ? { body } : {}),
   });
   if (candidates.length === 0) return refused(403, 'gateway-denied');

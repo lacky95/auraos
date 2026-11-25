@@ -96,6 +96,8 @@ export type AccessGuard = (typeof ACCESS_GUARDS)[number];
 export type AccessMatch =
   | { on: 'query'; name: string; equals?: string }
   | { on: 'namespace'; namespace: 'os' | 'app' }
+  /** A route parameter (`[id]`) with exactly this value, e.g. one system app's id. */
+  | { on: 'param'; name: string; equals: string }
   | {
     on: 'body';
     /** Dotted path into the JSON body. */

@@ -201,7 +201,8 @@ test('every manifest route, method and variant resolves to a rule', () => {
     for (const v of ref.variants ?? []) {
       const q = v.match.on === 'query' ? new URLSearchParams({ [v.match.name]: v.match.equals ?? '1' }) : new URLSearchParams();
       const ns = v.match.on === 'namespace' ? v.match.namespace : null;
-      const c = candidateRules(M, { route, handlers: handlersOf(M, route) }, v.methods[0]!, { query: q, namespace: ns });
+      const params = v.match.on === 'param' ? { [v.match.name]: v.match.equals } : {};
+      const c = candidateRules(M, { route, handlers: handlersOf(M, route) }, v.methods[0]!, { query: q, namespace: ns, params });
       assert.ok(c.some((x) => x.variant === v.id), `${route} ${v.id}`);
     }
   }

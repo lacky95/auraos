@@ -376,6 +376,16 @@ const routes: RouteAccessManifest['routes'] = {
         'The owner (the CLI through the trusted Terminal). The WS proxy\'s and App Host router\'s loopback lookups carry the internal label (observer.ts INTERNAL_CALLS), which the gate lets through as the shell.')),
     },
   },
+  '/api/apps/[id]/instances': {
+    methods: { GET: rule(OWNER, 'app') },
+    variants: [{
+      // D29: TerminalX finds the Terminal instances whose sessions the owner let it list.
+      id: 'terminal-instances',
+      methods: ['GET'],
+      match: { on: 'param', name: 'id', equals: 'com.aura.terminal' },
+      rule: rule(APP_PERMISSION, 'app', { permissions: ['terminal.sessions.list'] }),
+    }],
+  },
   '/api/apps/events': {
     methods: {
       GET: rule(INSTANCE, 'system', why(
