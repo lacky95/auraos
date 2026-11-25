@@ -115,7 +115,14 @@ export function terminalUpstream(mgr, instanceId) {
 /**
  * A request to a running Terminal instance's own API, sent as the OS (the
  * instance's identity headers), or null when it is not running. Throws when
- * the instance does not answer in `timeoutMs`.
+ * the instance does not answer in `timeoutMs`; with `timeoutMs` null (a
+ * stream) it ends only on `init.signal`.
+ *
+ * @param {any} mgr
+ * @param {string} instanceId
+ * @param {string} path
+ * @param {RequestInit} [init]
+ * @param {number | null} [timeoutMs]
  */
 export async function fetchTerminal(mgr, instanceId, path, init = {}, timeoutMs = 10_000) {
   const up = terminalUpstream(mgr, instanceId);
@@ -123,7 +130,7 @@ export async function fetchTerminal(mgr, instanceId, path, init = {}, timeoutMs 
   return fetch(`${up.base}${path}`, {
     ...init,
     headers: { 'x-aura-app-id': up.inst.appId, 'x-aura-instance-id': up.inst.instanceId },
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: timeoutMs === null ? init.signal : AbortSignal.timeout(timeoutMs),
   });
 }
 

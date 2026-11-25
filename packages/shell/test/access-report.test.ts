@@ -216,6 +216,25 @@ test('implicit HEAD follows GET, and an ALL route answers OTHER', () => {
   assert.ok(candidateRules(M, { route: '/api/proxy/[id]/[...path]', handlers: ['ALL'] }, 'OTHER', facts).length);
 });
 
+test('the report takes the body variant the gate settled: /api/intents/start is one rule, not `unresolved`', () => {
+  const route = '/api/intents/start';
+  const at = (bodyVariant?: string | null) => candidateRules(M, { route, handlers: handlersOf(M, route) }, 'POST', {
+    query: new URLSearchParams(), namespace: null, ...(bodyVariant !== undefined ? { bodyVariant } : {}),
+  }).map((c) => c.variant);
+  assert.deepEqual(at(), ['terminal-command', null], 'not settled: both stay candidates');
+  assert.deepEqual(at(null), [null], 'the gate read the body: no command');
+  assert.deepEqual(at('terminal-command'), ['terminal-command']);
+  assert.equal(M.routes[route]!.methods!.POST!.ambiguous, undefined);
+});
+
+test('a param variant names a parameter of its own route', () => {
+  for (const [route, ref] of Object.entries(M.routes)) {
+    for (const v of ref.variants ?? []) {
+      if (v.match.on === 'param') assert.ok(route.includes(`[${v.match.name}]`), `${route}#${v.id} matches [${v.match.name}]`);
+    }
+  }
+});
+
 test('body variants stay candidates; disagreement reports `unresolved`', () => {
   const route = '/api/instances/[instanceId]/ports';
   const c = candidateRules(M, { route, handlers: handlersOf(M, route) }, 'POST', { query: new URLSearchParams(), namespace: null });

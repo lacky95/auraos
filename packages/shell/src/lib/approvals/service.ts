@@ -221,6 +221,18 @@ export function actionGate(
   };
 }
 
+/**
+ * A route's whole gate for one protected request: null when it may go ahead
+ * (the approval it presented is used up), else the 202 that asks the owner.
+ */
+export async function approvedOrAsk(
+  deps: ApprovalServiceDeps, principal: AccessPrincipal, request: Request, req: ActionRequest,
+): Promise<Response | null> {
+  const gate = actionGate(deps, principal, { approvalId: presentedApproval(request) });
+  if (await gate.allows(req.action, req.payload)) return null;
+  return gate.needsApproval(req);
+}
+
 // ── answers ─────────────────────────────────────────────────────────────────
 
 const HEADERS = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };

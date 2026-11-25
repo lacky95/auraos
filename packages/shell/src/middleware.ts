@@ -224,6 +224,7 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
     ctx.locals.access = gate.identity;
     if (access) access.identity.verified = gate.identity;
   }
+  if (access && gate.bodyVariant !== undefined) access.bodyVariant = gate.bodyVariant;
   if (gate.refused) {
     reportAccess(access, gate.refused.status);
     return gate.refused;

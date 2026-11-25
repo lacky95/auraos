@@ -3,6 +3,7 @@ import type { APIContext } from 'astro';
 import { gatewayInstance } from './access/identify.ts';
 import { shellOwner } from './appHostHandoff.ts';
 import { authenticate } from './auth.ts';
+import { isSystemTerminal } from '../../server/terminal-embed.mjs';
 
 /**
  * The app making a call, when that is proved: an App Host gateway claim, or
@@ -25,6 +26,20 @@ export function verifiedAppCaller(
   if (!claims) return null;
   const inst = mgr.getInstance(claims.instanceId);
   return inst ? { appId: inst.appId, instanceId: inst.instanceId } : 'invalid';
+}
+
+/**
+ * The app a Terminal route holds to its grants: a verified app other than the
+ * System Terminal (which keeps full control). Null for a caller without an
+ * app identity, which the manifest rule decides alone.
+ */
+export async function grantedAppCaller(
+  request: Request,
+  mgr: Pick<ReturnType<typeof core.getAppManager>, 'getInstance' | 'tokens'>,
+): Promise<{ appId: string; instanceId: string } | 'invalid' | null> {
+  const caller = verifiedAppCaller(request, mgr);
+  if (caller && caller !== 'invalid' && await isSystemTerminal(caller.appId)) return null;
+  return caller;
 }
 
 /**

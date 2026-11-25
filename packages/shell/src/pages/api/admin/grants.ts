@@ -2,7 +2,7 @@ import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { jsonResponse } from '../../../lib/appResponse.js';
 import { readJson } from '../../../lib/notificationCaller.js';
-import { adminOf, auditAdmin } from '../../../lib/auth.js';
+import { adminOf, adminRecordBy, auditAdmin } from '../../../lib/auth.js';
 import { ownerUiApp } from '../../../../server/gateway-identity.mjs';
 
 /**
@@ -116,7 +116,7 @@ export const POST: APIRoute = async ({ request, url, locals }) => {
     const read = a.permission === 'notifications.read' && readArg !== undefined
       ? { scope: readArg, includeSecret: a.src['includeSecret'] === true || a.src['includeSecret'] === 'true' }
       : undefined;
-    const r = await grants.grant({ kind: a.kind as 'app' | 'apiKey', id: a.id }, a.permission, { by: core.adminAttribution(p ?? undefined), appScope, ...(read ? { read } : {}) });
+    const r = await grants.grant({ kind: a.kind as 'app' | 'apiKey', id: a.id }, a.permission, { by: adminRecordBy(p), appScope, ...(read ? { read } : {}) });
     await auditAdmin(p, 'grant', { target: `${a.kind}:${a.id}`, detail: { permission: a.permission, appScope: appScope ?? null, changed: r.changed, ...(r.record.read ? { read: core.GrantStore.describeRead(r.record) } : {}) } });
     return jsonResponse({ ok: true, ...r, warnings });
   } catch (err) {

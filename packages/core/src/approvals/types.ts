@@ -45,8 +45,10 @@ export const FINAL_APPROVAL_STATES: ReadonlySet<ApprovalState> = new Set(['denie
  *   nexus.update       update an app: same binding as install
  *   os.context.write   write Aura Context (`/api/os/context`, needs-fresh-auth)
  *   user.confirm       an app asks the owner to confirm (D49, `osClient.user.confirm`)
+ *   terminal.agent-hooks  an app installs or removes the Terminal's agent hooks in
+ *                      the owner's home (`/api/terminal/agent-hooks`)
  */
-export const APPROVAL_ACTIONS = ['nexus.install', 'nexus.update', 'os.context.write', 'user.confirm'] as const;
+export const APPROVAL_ACTIONS = ['nexus.install', 'nexus.update', 'os.context.write', 'user.confirm', 'terminal.agent-hooks'] as const;
 export type ApprovalAction = (typeof APPROVAL_ACTIONS)[number];
 
 /**

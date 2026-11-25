@@ -35,8 +35,13 @@ const INSTANCE = ['own-instance', 'owner'] as const;
 const APP_PERMISSION = ['app-permission', 'owner'] as const;
 /** `app-permission` without permissions: any verified app instance or API key (Open, D26). */
 const VERIFIED = ['app-permission', 'owner'] as const;
-/** Before Phase 3 `requireAdmin`: only the shared admin session (`aura admin login`), in every mode. */
-const ADMIN_SESSION = { credentials: ['admin-session'], guard: 'rule' } as const;
+/**
+ * Before Phase 3 `requireAdmin`: the shared admin session (`aura admin login`),
+ * in every mode. The host operator's one-time ticket counts too: the operator
+ * is above the admin (D8), and the host CLI sends nothing else unless a
+ * session was saved.
+ */
+const ADMIN_SESSION = { credentials: ['admin-session', 'operator-ticket'], guard: 'rule' } as const;
 
 // ── shared open questions ───────────────────────────────────────────────────
 
@@ -99,6 +104,9 @@ const groups: RouteAccessManifest['groups'] = {
 /** The owner, or the System Terminal asking for the owner's approval (D29, D31). */
 const TERMINAL_ASKS = rule(INSTANCE, 'app', { systemApp: 'com.aura.terminal' });
 
+/** TerminalX's agent watch (D29): the owner, the System Terminal, an app holding the list grant. */
+const TERMINAL_AGENTS = rule(APP_PERMISSION, 'app', { permissions: ['terminal.sessions.list'], guard: 'rule' });
+
 const staticAsset = { methods: on(['GET'], rule(['public', 'owner'], 'system', STATIC_CANDIDATE)) };
 
 /** Was sidecarGate: the instance's own token, its app's permissions, in every mode. */
@@ -133,8 +141,9 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/admin/session': {
     methods: {
       POST: rule(['public'], 'session'),
-      GET: adminSession('Reports the admin session it is called with.'),
-      DELETE: adminSession('Locks the admin session it is called with.'),
+      // The session itself, so an admin session only (an operator has none).
+      GET: rule(OWNER, 'system', { credentials: ['admin-session'], guard: 'rule', ...why('Reports the admin session it is called with.') }),
+      DELETE: rule(OWNER, 'system', { credentials: ['admin-session'], guard: 'rule', ...why('Locks the admin session it is called with.') }),
     },
   },
   '/api/admin/first-boot': {
@@ -393,18 +402,24 @@ const routes: RouteAccessManifest['routes'] = {
     },
   },
 
+  // OPEN_TERMINAL `background` and `sessionId` need the embed grants, and no
+  // app names a system app or owner UI as the target: the route decides those
+  // on the parsed intent (start.ts, server/terminal-embed.mjs,
+  // lib/intentTarget.ts).
   '/api/intents/start': {
     methods: {
-      POST: rule(INSTANCE, 'system', decide(5,
-        'An app may send intents. OPEN_TERMINAL: `command` is held to the Terminal (D29); `background` needs the owner\'s terminal.embed grant and `sessionId` a session the app was granted, checked in the route for every verified app caller (server/terminal-embed.mjs). Still open: an owner grant for a trusted terminal (D24).')),
+      POST: rule(INSTANCE, 'system', why(
+        'The owner and any verified app instance: apps open each other through intents (TerminalX\'s OPEN_TERMINAL embed, D25; Aura Browser\'s VIEW of an App Host address, lib/appHostIntent.ts). An owner grant for a trusted terminal (D24) is Phase 5.')),
     },
     variants: [{
       // Types a line and presses Enter as the owner (5.16). Matched on any
       // action: the extra is refused however the intent names its target.
+      // In every mode (the route refuses it too), so the gate reads the body
+      // and the report counts the rule the gate settled, not both.
       id: 'terminal-command',
       methods: ['POST'],
       match: { on: 'body', field: 'extras.command', read: true },
-      rule: rule(INSTANCE, 'app', { systemApp: 'com.aura.terminal' }),
+      rule: rule(INSTANCE, 'app', { systemApp: 'com.aura.terminal', guard: 'rule' }),
     }],
   },
 
@@ -424,6 +439,12 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/terminal/sessions/screen': {
     methods: { GET: rule(APP_PERMISSION, 'app', { permissions: ['terminal.sessions.list', 'terminal.screen.read'] }) },
   },
+  // TerminalX's agent watch: the sessions' agent events, which the list already shows.
+  // New in Phase 3, so held to their rule in every mode (`guard: 'rule'`).
+  '/api/terminal/sessions/events': { methods: { GET: TERMINAL_AGENTS } },
+  // The agent hooks in the owner's home: an app installs or removes them only
+  // with the owner's approval, which the route asks for and consumes (lib/terminalAgents.ts).
+  '/api/terminal/agent-hooks': { methods: on(['GET', 'POST', 'DELETE'], TERMINAL_AGENTS) },
   '/api/terminal/sessions': {
     methods: {
       GET: rule(APP_PERMISSION, 'app', { permissions: ['terminal.sessions.list'] }),

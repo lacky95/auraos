@@ -216,7 +216,7 @@ test('D29: the system Terminal by its own token acts for the owner; not through 
 test('D29: TerminalX lists the Terminal\'s instances with its terminal.sessions.list grant; other apps\' instances stay the owner\'s', async () => {
   const route = '/api/apps/[id]/instances';
   const of = (id: string) => ({ path: `/api/apps/${id}/instances`, route, params: { id } });
-  const granted = { ...declared, 'com.acme.notes': [...declared['com.acme.notes']!, 'terminal.sessions.list'] };
+  const granted: Record<string, string[]> = { ...declared, 'com.acme.notes': [...declared['com.acme.notes']!, 'terminal.sessions.list'] };
   const tx = new Authorizer({
     grants: { get: async (s: { id: string }, p: string) => (s.id === 'com.acme.notes' && p === 'terminal.sessions.list' ? { appScope: 'user' } : null) } as never,
     declared: (id: string) => granted[id],

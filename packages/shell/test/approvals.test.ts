@@ -14,8 +14,8 @@ import {
   type ApprovalRouteDeps, type RouteCtx,
 } from '../src/lib/approvals/routes.ts';
 import { installGate, runInstall } from '../src/lib/approvals/nexus.ts';
-import { contextWrite, installDisplay, installLevel, requesterReason } from '../src/lib/approvals/display.ts';
-import { presentsApproval } from '../src/lib/approvals/service.ts';
+import { agentHooksDisplay, contextWrite, installDisplay, installLevel, requesterReason } from '../src/lib/approvals/display.ts';
+import { approvedOrAsk, presentsApproval } from '../src/lib/approvals/service.ts';
 import { approvalReply, outcomeOf, parseApprovalView } from '../src/lib/approvals/dialogClient.ts';
 import { approvalBelongsToSender, authorizeShellMessage, type ChannelSender } from '../src/lib/auraChannelShell.ts';
 import { ROUTE_ACCESS_MANIFEST } from '../src/lib/access/routeManifest.ts';
@@ -353,6 +353,26 @@ test('docker or privileged sidecars make an install fresh; the host operator con
   assert.equal((await install(ANON, {}, { ...BINDING, digest: 'sha256:ccc' }, 'OP')).status, 202, 'a code for another artifact');
   tickets.set('OP', { sha256: 'z', purpose: 'operator', expiresAt: Infinity, subject: host.body.operatorSubject });
   assert.equal((await install(ANON, {}, BINDING, 'OP')).body.ok, true);
+});
+
+test('agent hooks: an app installs them once per owner approval', async () => {
+  const TX: Principal = { kind: 'instance', appId: 'io.lakner.terminalx', instanceId: 'io.lakner.terminalx-1', userId: 'default', verification: 'verified' };
+  const ask = async (op: 'install' | 'remove', headers: Record<string, string> = {}) => {
+    const r = await approvedOrAsk(deps(), TX, ctx('POST', '/api/terminal/agent-hooks', undefined, headers).request, {
+      action: 'terminal.agent-hooks', payload: { op }, level: 'session', display: (by) => agentHooksDisplay({ op }, by),
+    });
+    return r ? read(r) : null;
+  };
+  const first = await ask('install');
+  assert.equal(first?.status, 202);
+  assert.equal(first?.body.action, 'terminal.agent-hooks');
+  assert.equal(first?.body.display.title, 'Install the Terminal\'s agent hooks');
+  assert.match(first?.body.display.details[0], /~\/\.claude\/settings\.json/);
+  const id = first!.body.approvalId as string;
+  assert.equal((await ask('install', { 'x-aura-approval': id }))?.status, 202, 'not approved yet');
+  await decide(id, 'approve');
+  assert.equal(await ask('install', { 'x-aura-approval': id }), null, 'goes ahead');
+  assert.equal((await ask('install', { 'x-aura-approval': id }))?.status, 202, 'single use');
 });
 
 test('Aura Context writes: the payload is the normalised write, never the value', () => {

@@ -46,6 +46,8 @@ export interface GateResult {
   refused: Response | null;
   /** The verdict this gate decided on, when it resolved one. */
   identity: VerifiedIdentity | null;
+  /** The body variant it settled, when it read the body (for the report: RequestSnapshot.bodyVariant). */
+  bodyVariant?: string | null;
 }
 
 const PASS: GateResult = { refused: null, identity: null };
@@ -157,11 +159,15 @@ export async function accessGate(
   // Decided at the gateway, in every mode; the route still gets its caller.
   if (enforcing && gateway) return { refused: null, identity };
 
+  let bodyVariant: string | null | undefined;
   if (readsBody(manifest, info, method)) {
     const body = await readJsonBody(ctx.request);
     if (body === TOO_LARGE) return { refused: refused(413, 'body-too-large'), identity };
     candidates = candidateRules(manifest, info, method, { ...facts, body });
+    const read = new Set((manifest.routes[route]?.variants ?? []).filter((v) => v.match.on === 'body' && v.match.read).map((v) => v.id));
+    bodyVariant = candidates.find((c) => c.variant !== null && read.has(c.variant))?.variant ?? null;
   }
+  const settled = bodyVariant === undefined ? {} : { bodyVariant };
 
   const seen = await withNetworkCaller(identity, candidates.map((c) => c.rule), snapshot.identity.peer, deps.network);
   const req: CandidateRequest = {
@@ -176,8 +182,8 @@ export async function accessGate(
   // No rule at all: unclassified, refused in `enforce` (combineCandidates).
   const { result } = enforcing || results.length ? combineCandidates(results) : { result: allowed() };
   const verdict: VerifiedIdentity = { principal: seen.principal, via: seen.via };
-  if (result.outcome === 'allow') return { refused: null, identity: verdict };
-  return { refused: refusal(result, candidates.map((c) => c.rule)), identity: verdict };
+  if (result.outcome === 'allow') return { refused: null, identity: verdict, ...settled };
+  return { refused: refusal(result, candidates.map((c) => c.rule)), identity: verdict, ...settled };
 }
 
 // ── the running shell ───────────────────────────────────────────────────────

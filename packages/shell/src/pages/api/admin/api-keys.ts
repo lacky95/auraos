@@ -2,7 +2,7 @@ import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { jsonResponse } from '../../../lib/appResponse.js';
 import { readJson } from '../../../lib/notificationCaller.js';
-import { adminOf, auditAdmin } from '../../../lib/auth.js';
+import { adminOf, adminRecordBy, auditAdmin } from '../../../lib/auth.js';
 
 /**
  * API keys for external REST callers. Every method needs an admin session.
@@ -32,7 +32,7 @@ export const POST: APIRoute = async ({ request, locals }) => {
   if (body instanceof Response) return body;
   const scopes = Array.isArray(body['scopes']) ? body['scopes'].map(String) : ['system.notifications'];
   try {
-    const r = await core.getAuthServices().apiKeys.create({ name: String(body['name'] ?? ''), scopes, by: core.adminAttribution(p ?? undefined) });
+    const r = await core.getAuthServices().apiKeys.create({ name: String(body['name'] ?? ''), scopes, by: adminRecordBy(p) });
     await auditAdmin(p, 'apiKey.create', { target: `apiKey:${r.apiKey.id}`, detail: { name: r.apiKey.name, scopes: r.apiKey.scopes } });
     return jsonResponse({ ok: true, ...r }, 201);
   } catch (err) {

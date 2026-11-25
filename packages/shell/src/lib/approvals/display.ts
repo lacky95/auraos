@@ -131,3 +131,20 @@ export function confirmDisplay(payload: ConfirmPayload, requestedBy: string, rea
     ...(reason ? { reason } : {}),
   };
 }
+
+// ── terminal.agent-hooks ────────────────────────────────────────────────────
+
+export interface AgentHooksChange { op: 'install' | 'remove' }
+
+export function agentHooksDisplay(change: AgentHooksChange, requestedBy: string): ApprovalDisplay {
+  return {
+    title: change.op === 'install' ? 'Install the Terminal\'s agent hooks' : 'Remove the Terminal\'s agent hooks',
+    details: [
+      'Changes ~/.claude/settings.json and ~/.codex/config.toml in your home, which every app shares (each file is backed up first).',
+      change.op === 'install'
+        ? 'Claude Code and Codex then report what they do to the Terminal session they run in.'
+        : 'Only the Terminal\'s own entries go.',
+    ],
+    requestedBy,
+  };
+}

@@ -3,8 +3,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 // Namespace import: the running shell may cache a core build without newer exports.
 import * as core from '@aura/core';
-import type { AdminPrincipal } from '@aura/core';
-import { adminOf, auditAdmin } from '../../../lib/auth.js';
+import { adminOf, auditAdmin, type AdminCaller } from '../../../lib/auth.js';
 
 /**
  * Origin ids of the installed apps — the engine behind `aura dev origin`.
@@ -68,7 +67,7 @@ export const POST: APIRoute = async ({ request, locals }) => {
   try { ctx = listRows(); }
   catch (err) { return json({ error: 'app-manager-unavailable', message: (err as Error).message }, 503); }
 
-  let admin: AdminPrincipal | null = null;
+  let admin: AdminCaller | null = null;
   if (mode === 'reassign') {
     if (!Array.isArray(body.appIds) || body.appIds.length !== 1 || body.all) {
       return json({ error: 'one-app', message: 'reassign changes the identity of ONE app — pass exactly one appId.' }, 400);

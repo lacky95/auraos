@@ -67,6 +67,8 @@ export interface VariantFacts {
   params?: Readonly<Record<string, string | undefined>>;
   /** The parsed JSON body, for `read` body variants. Undefined = not read. */
   body?: unknown;
+  /** Without the body: the `read` body variant an earlier read settled (null: none). Undefined = not settled. */
+  bodyVariant?: string | null;
 }
 
 /**
@@ -109,12 +111,12 @@ export function candidateRules(
     if (!variantApplies(v.methods, method, info)) continue;
     const m = v.match;
     if (m.on === 'body') {
-      if (m.read && facts.body !== undefined) {
-        if (!bodyFieldMatches(facts.body, m.field, m.equals)) continue;
-        out.push({ variant: v.id, rule: v.rule });
-        return out;
-      }
+      const settled = !m.read ? null
+        : facts.body !== undefined ? bodyFieldMatches(facts.body, m.field, m.equals)
+          : facts.bodyVariant !== undefined ? facts.bodyVariant === v.id : null;
+      if (settled === false) continue;
       out.push({ variant: v.id, rule: v.rule });
+      if (settled) return out;
       continue;
     }
     const matches = m.on === 'query'

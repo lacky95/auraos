@@ -1,9 +1,9 @@
 import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { jsonResponse } from '../../../lib/appResponse.js';
-import { verifiedAppCaller } from '../../../lib/terminalCaller.ts';
+import { grantedAppCaller } from '../../../lib/terminalCaller.ts';
 import {
-  fetchTerminal, forgetSessionGrants, holdsListGrant, isSystemTerminal, mayUseSession, terminalSessionInstance,
+  fetchTerminal, forgetSessionGrants, holdsListGrant, mayUseSession, terminalSessionInstance,
 } from '../../../../server/terminal-embed.mjs';
 
 /**
@@ -24,10 +24,8 @@ import {
 const TIMEOUT_MS = 10_000;
 
 async function appCaller(request: Request): Promise<{ appId: string } | null | Response> {
-  const caller = verifiedAppCaller(request, core.getAppManager());
-  if (caller === 'invalid') return jsonResponse({ error: 'caller-invalid' }, 401);
-  if (caller && await isSystemTerminal(caller.appId)) return null;
-  return caller;
+  const caller = await grantedAppCaller(request, core.getAppManager());
+  return caller === 'invalid' ? jsonResponse({ error: 'caller-invalid' }, 401) : caller;
 }
 
 async function forward(instanceId: string, path: string, init: RequestInit = {}): Promise<Response> {

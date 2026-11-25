@@ -106,7 +106,8 @@ export type AccessMatch =
     /**
      * The middleware and the App Host gateway parse the JSON body (a clone,
      * capped) and settle this variant. Otherwise a body variant stays unread
-     * and counts at its strictest; the report never reads a body.
+     * and counts at its strictest. The report never reads a body: it takes
+     * the variant the gate settled (`RequestSnapshot.bodyVariant`).
      */
     read?: true;
   };
@@ -331,6 +332,11 @@ export interface RequestSnapshot {
    * precondition. Its handler consumes it; presenting proves nothing alone.
    */
   approval?: boolean;
+  /**
+   * The body variant the gate settled when it read the body (null: none of
+   * them matched); absent when it did not read it. The id only, never the body.
+   */
+  bodyVariant?: string | null;
 }
 
 export const CREDENTIAL_COUNT_KINDS = [

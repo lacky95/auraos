@@ -1,7 +1,7 @@
 // Namespace import: the running shell may cache a core build without the
 // auth exports; a named import would 500 every route until restart.
 import * as core from '@aura/core';
-import type { AdminPrincipal, AppManager } from '@aura/core';
+import type { AdminPrincipal, AppManager, OperatorPrincipal } from '@aura/core';
 import { errorResponse, jsonResponse } from './appResponse.js';
 import {
   bearerToken, resolvePrincipal, type CallerPrincipal, type CredentialRejection, type GatewayOwnerDeps, type PrincipalDeps,
@@ -117,24 +117,36 @@ export async function authenticate(request: Request, deps: AuthDeps = defaultAut
   return { kind: 'anonymous', verification: 'unverified' };
 }
 
+/** Who may use an admin route: the admin session, or the host operator above it (D8). */
+export type AdminCaller = AdminPrincipal | OperatorPrincipal;
+
 /**
- * The admin session a route's rule required (routeManifest `credentials`), as
- * the middleware's gate verified it (`locals.access`), for audit attribution.
+ * The admin session or operator ticket a route's rule required (routeManifest
+ * `credentials`), as the middleware's gate verified it (`locals.access`), for
+ * audit attribution.
  */
-export function adminOf(locals: App.Locals | undefined): AdminPrincipal | null {
+export function adminOf(locals: App.Locals | undefined): AdminCaller | null {
   const p = locals?.access?.principal;
-  return p?.kind === 'admin' ? p as AdminPrincipal : null;
+  return p?.kind === 'admin' || p?.kind === 'operator' ? p as AdminCaller : null;
 }
+
+/**
+ * Who a grant or API key record names as its maker: the admin (shared
+ * credential). The host operator acts with that authority; the audit trail
+ * names the operator (`auditAdmin`).
+ */
+export const adminRecordBy = (p: AdminCaller | null): ReturnType<typeof core.adminAttribution> =>
+  core.adminAttribution(p?.kind === 'admin' ? p : undefined);
 
 /** Append an admin change to the `audit:admin` stream (never throws). */
 export async function auditAdmin(
-  principal: AdminPrincipal | null,
+  principal: AdminCaller | null,
   action: string,
   opts: { target?: string; outcome?: 'ok' | 'denied' | 'failed'; detail?: Record<string, unknown> } = {},
 ): Promise<void> {
   try {
     await core.getAuthServices().audit.record({
-      by: principal ? core.adminAttribution(principal) : { kind: 'anonymous' },
+      by: principal?.kind === 'operator' ? core.operatorAttribution() : principal ? core.adminAttribution(principal) : { kind: 'anonymous' },
       action, ...opts,
     });
   } catch (err) {

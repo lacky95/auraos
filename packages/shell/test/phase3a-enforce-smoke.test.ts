@@ -33,19 +33,23 @@ const TERMINAL = 'com.aura.terminal';
 const AURASHELLD = 'com.aura.aurashelld';
 const SETTINGS = 'com.aura.settings';
 const COUNTER = 'com.example.counter';
+const TERMINALX = 'io.lakner.terminalx';
 
 const instances: Record<string, { appId: string; instanceId: string; sandbox: string; state: string }> = {};
-for (const appId of [TERMINAL, AURASHELLD, SETTINGS, COUNTER]) {
+for (const appId of [TERMINAL, AURASHELLD, SETTINGS, COUNTER, TERMINALX]) {
   instances[`${appId}-1`] = { appId, instanceId: `${appId}-1`, sandbox: 'container', state: 'resumed' };
 }
-const scopes: Record<string, string> = { [TERMINAL]: 'system', [AURASHELLD]: 'system', [SETTINGS]: 'system', [COUNTER]: 'user' };
+const scopes: Record<string, string> = { [TERMINAL]: 'system', [AURASHELLD]: 'system', [SETTINGS]: 'system', [COUNTER]: 'user', [TERMINALX]: 'user' };
 const declared: Record<string, string[]> = {
   [TERMINAL]: [], [AURASHELLD]: [], [SETTINGS]: ['system.kv.os.theme.write'],
   // Declared, never granted: a privileged permission (stream C) does nothing on its own.
   [COUNTER]: ['system.kv.os.theme.write'],
+  // Declared and granted by the owner (D29): TerminalX's watcher.
+  [TERMINALX]: ['terminal.embed', 'terminal.sessions.list'],
 };
 const TOKENS: Record<string, string> = {
   'aura1.terminal': `${TERMINAL}-1`, 'aura1.aurashelld': `${AURASHELLD}-1`, 'aura1.counter': `${COUNTER}-1`,
+  'aura1.terminalx': `${TERMINALX}-1`,
 };
 const mgr = {
   tokens: { verify: (t: string) => (TOKENS[t] ? { instanceId: TOKENS[t] } : null) },
@@ -58,7 +62,7 @@ const mgr = {
 } as unknown as ObserverManager;
 
 const authorizer = new Authorizer({
-  grants: { get: async () => null } as never,
+  grants: { get: async (s: { id: string }, p: string) => (s.id === TERMINALX && p === 'terminal.sessions.list' ? { appScope: 'user' } : null) } as never,
   declared: (id: string) => declared[id],
   appScope: (id: string) => scopes[id],
 });
@@ -292,4 +296,90 @@ test('a fresh approval over HTTP says to use HTTPS or the host (D18)', async () 
   const { decisionErrorText, operatorRequiredText } = await import('../src/lib/approvals/dialogClient.ts');
   assert.equal(operatorRequiredText(APPROVAL), `This needs HTTPS, or approve on the host with \`aura approve ${APPROVAL}\`.`);
   assert.equal(decisionErrorText('operator-required', APPROVAL), operatorRequiredText(APPROVAL));
+});
+
+// ── Stage 3 (VM report run): would-denies decided ───────────────────────────
+
+/** The same request with AURA_ACCESS_ENFORCE=report. */
+async function inReport(c: Call): Promise<string> {
+  process.env[ACCESS_MODE_ENV] = 'report';
+  try { return await middleware(c); } finally { process.env[ACCESS_MODE_ENV] = 'enforce'; }
+}
+
+const CONTEXT: Call = { path: '/api/os/context', route: '/api/os/context' };
+const START_TERMINAL: Call = { method: 'POST', path: `/api/apps/${TERMINAL}/start`, route: '/api/apps/[id]/start', params: { id: TERMINAL } };
+
+test('enforce: Counter reads no Aura Context keys and starts no Terminal; report mode keeps today\'s 200', async () => {
+  const t = bearer('aura1.counter');
+  for (const c of [CONTEXT, START_TERMINAL]) {
+    assert.equal(await middleware({ ...c, headers: t }), '403 access-denied', `${c.method ?? 'GET'} ${c.path}`);
+    assert.equal(await middleware({ ...c, headers: gatewayClaim(COUNTER, c.method ?? 'GET', c.path) }), '403 gateway-denied');
+    assert.equal(await middleware({ ...c, headers: desktop }), 'pass', 'the owner');
+    assert.equal(await middleware({ ...c, headers: bearer('aura1.terminal') }), 'pass', 'the System Terminal CLI (D29)');
+    assert.equal(await inReport({ ...c, headers: t }), 'pass', 'report: counted as would-deny, not refused');
+  }
+});
+
+test('enforce: the host operator\'s ticket opens the admin-session routes, not the admin session itself', async () => {
+  for (const c of [
+    { path: '/api/admin/access-report', route: '/api/admin/access-report' },
+    { path: '/api/admin/grants', route: '/api/admin/grants' },
+    { method: 'POST', path: '/api/admin/grants', route: '/api/admin/grants', body: { subjectId: COUNTER, permission: 'notifications.popup' } },
+  ] as Call[]) {
+    const method = c.method ?? 'GET';
+    assert.equal(await middleware({ ...c, headers: operator(method, c.path) }), 'pass', `${method} ${c.path}`);
+    assert.equal(await inReport({ ...c, headers: operator(method, c.path) }), 'pass', `report: ${method} ${c.path}`);
+    assert.equal(await middleware({ ...c, headers: bearer('aura1.terminal') }), '401 admin-required', 'the Terminal is not the operator');
+    assert.equal(await middleware({ ...c, headers: desktop }), '401 admin-required', 'nor the login');
+  }
+  const session = { path: '/api/admin/session', route: '/api/admin/session' };
+  assert.equal(await middleware({ ...session, headers: operator('GET', session.path) }), '401 admin-required');
+});
+
+test('enforce: apps send intents; only the System Terminal and the owner carry a command', async () => {
+  const intent = (body: unknown): Call => ({ method: 'POST', path: '/api/intents/start', route: '/api/intents/start', body });
+  const view = intent({ action: 'aura.intent.action.VIEW', uri: 'http://com.example.counter.apps.test/' });
+  const embed = intent({ action: 'aura.intent.action.OPEN_TERMINAL', appId: TERMINAL, extras: { background: true } });
+  const command = intent({ action: 'aura.intent.action.OPEN_TERMINAL', extras: { command: 'ls' } });
+  for (const [c, h] of [
+    [view, bearer('aura1.counter')], [embed, bearer('aura1.terminalx')], [command, bearer('aura1.terminal')],
+    [view, gatewayClaim(COUNTER, 'POST', '/api/intents/start')], [command, desktop],
+  ] as const) {
+    assert.equal(await middleware({ ...c, headers: h }), 'pass');
+  }
+  assert.equal(await middleware({ ...command, headers: bearer('aura1.counter') }), '403 access-denied', '5.16: command is the System Terminal\'s');
+  assert.equal(await middleware(view), '401 unauthenticated');
+  // Report mode: the command variant holds in every mode, so the gate reads
+  // the body and hands the report the variant it settled.
+  process.env[ACCESS_MODE_ENV] = 'report';
+  try {
+    const settled = async (c: Call, headers: Record<string, string>) => {
+      const r = await accessGate(ctx({ ...c, headers }), gateDeps());
+      return [r.refused?.status ?? 'pass', r.bodyVariant];
+    };
+    assert.deepEqual(await settled(view, bearer('aura1.counter')), ['pass', null]);
+    assert.deepEqual(await settled(embed, bearer('aura1.terminalx')), ['pass', null]);
+    assert.deepEqual(await settled(command, bearer('aura1.counter')), [403, 'terminal-command']);
+    assert.deepEqual(await settled(command, bearer('aura1.terminal')), ['pass', 'terminal-command']);
+  } finally {
+    process.env[ACCESS_MODE_ENV] = 'enforce';
+  }
+});
+
+test('enforce: TerminalX\'s agent watch by its list grant; another app none, in report mode too', async () => {
+  const events: Call = { path: `/api/terminal/sessions/events?instance=${TERMINAL}-1`, route: '/api/terminal/sessions/events' };
+  const hooks: Call = { method: 'POST', path: `/api/terminal/agent-hooks?instance=${TERMINAL}-1`, route: '/api/terminal/agent-hooks' };
+  const instancesOf = (id: string): Call => ({ path: `/api/apps/${id}/instances`, route: '/api/apps/[id]/instances', params: { id } });
+  for (const c of [events, hooks, instancesOf(TERMINAL)]) {
+    assert.equal(await middleware({ ...c, headers: bearer('aura1.terminalx') }), 'pass', c.path);
+    assert.equal(await middleware({ ...c, headers: gatewayClaim(TERMINALX, c.method ?? 'GET', c.path) }), 'pass', `gateway ${c.path}`);
+    assert.equal(await middleware({ ...c, headers: bearer('aura1.terminal') }), 'pass', `System Terminal ${c.path}`);
+    assert.equal(await middleware({ ...c, headers: bearer('aura1.counter') }), '403 access-denied', `Counter ${c.path}`);
+  }
+  assert.equal(await middleware({ ...instancesOf(COUNTER), headers: bearer('aura1.terminalx') }), '403 access-denied', 'the grant names the Terminal only');
+  for (const c of [events, hooks]) {
+    assert.equal(await inReport({ ...c, headers: bearer('aura1.counter') }), '403 access-denied', `report: ${c.path} is new, held to its rule`);
+    assert.equal(await inReport(c), '401 unauthenticated');
+    assert.equal(await inReport({ ...c, headers: bearer('aura1.terminalx') }), 'pass');
+  }
 });

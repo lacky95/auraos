@@ -49,7 +49,7 @@ export const GET: APIRoute = async ({ request }) => {
 
 export const DELETE: APIRoute = async ({ locals }) => {
   const p = adminOf(locals);
-  if (!p) return jsonResponse({ error: 'admin-required' }, 401);
+  if (p?.kind !== 'admin') return jsonResponse({ error: 'admin-required' }, 401);
   const locked = await core.getAuthServices().admin.lock(p.sessionId);
   await auditAdmin(p, 'session.lock');
   return jsonResponse({ ok: true, locked });
