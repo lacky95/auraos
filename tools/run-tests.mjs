@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 // Runs every package and app test suite, continues past failures, and prints
-// per-suite results. Usage: pnpm test [-- --only=core,shell] [--timeout=600]
+// per-suite results. Usage: pnpm test [-- --only=core,shell] [--timeout=600] [--with-security]
+//
+// --with-security runs the security gate (tools/security-check.mjs) first; its
+// findings fail the run like a failed suite.
 //
 // This runs inside the master container, which holds the real Docker socket
 // and data, so each suite gets throwaway state plus a guard: a `docker` stub
 // that always fails, and a Node preload that refuses connections to the Docker
 // socket, every port already listening on loopback when the run starts, and
 // any non-loopback host.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -153,6 +156,16 @@ const incomplete = (r) => r.code === 0 && r.tests === 0;
 const passed = (r) => r.code === 0 && !incomplete(r);
 const label = (r) => r.timedOut ? 'TIMEOUT' : incomplete(r) ? 'FAILED (no test summary)' : r.code === 0 ? 'ok' : `FAILED (exit ${r.code})`;
 
+const security = args.includes('--with-security') ? runSecurity() : null;
+
+function runSecurity() {
+  process.stdout.write('running security gate ... ');
+  const r = spawnSync(process.execPath, [join(ROOT, 'tools/security-check.mjs')], { cwd: ROOT, encoding: 'utf-8' });
+  const lines = (r.stdout || r.stderr || '').trim().split('\n');
+  console.log(r.status === 0 ? 'ok' : `FAILED (exit ${r.status})`);
+  return { code: r.status, lines };
+}
+
 const results = [];
 for (const suite of suites) {
   process.stdout.write(`running ${suite.dir} ... `);
@@ -175,5 +188,10 @@ if (existsSync(guardLog)) {
   console.log(`\nguard blocked ${blocked.length} distinct live-system attempt(s):`);
   for (const b of blocked.slice(0, 40)) console.log(`    ${b.slice(0, 120)}`);
 }
+if (security) {
+  console.log(`\n${security.lines[0]}`);
+  for (const l of security.lines.slice(1, 41)) console.log(`    ${l.slice(0, 160)}`);
+  if (security.lines.length > 41) console.log(`    … ${security.lines.length - 41} more: node tools/security-check.mjs`);
+}
 console.log(`\nlogs: ${runDir}`);
-process.exit(results.every(passed) ? 0 : 1);
+process.exit(results.every(passed) && (!security || security.code === 0) ? 0 : 1);

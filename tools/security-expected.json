@@ -1,0 +1,76 @@
+{
+  "$comment": "Expected values for tools/security-check.mjs. Changing one weakens or moves a security property: say why in the commit.",
+
+  "extraSecretPaths": ["/home/aura/auraos-phase2-patches"],
+
+  "dockerScope": ["apps/**", "builders/**", "packages/app-sdk/**"],
+  "dockerAllowed": ["packages/core/src/app-manager/**"],
+
+  "htmlSinkScope": ["packages/shell/**", "apps/com.aura.*/**", "os/**"],
+
+  "trustHeaderDefinitions": ["packages/core/src/app-hosts/hostRules.ts", "packages/app-sdk/src/hostRules.ts"],
+  "trustHeaders": [
+    { "header": "x-aura-gateway-identity", "constant": "GATEWAY_IDENTITY_HEADER", "setters": ["packages/shell/server/app-gateway.mjs"] },
+    { "header": "x-aura-owner-ssr", "constant": "OWNER_SSR_HEADER", "setters": ["packages/shell/server/app-hosts.mjs", "packages/app-sdk/src/os-auth.ts"] },
+    { "header": "x-aura-lifecycle", "constant": "LIFECYCLE_TOKEN_HEADER", "setters": ["packages/core/src/app-manager/lifecycleGate.ts"] }
+  ],
+
+  "headerScope": ["packages/shell/src/**", "packages/shell/server/**"],
+  "headers": [
+    {
+      "id": "shell-frame-ancestors",
+      "file": "packages/shell/src/lib/desktop/shellFramePolicy.ts",
+      "require": ["export const SHELL_FRAME_ANCESTORS = \"frame-ancestors 'none'\";"]
+    },
+    {
+      "id": "shell-frame-policy-applied",
+      "file": "packages/shell/src/middleware.ts",
+      "require": ["shellFramePolicy(ctx.url.pathname", "res.headers.set('Content-Security-Policy', framePolicy)"]
+    },
+    {
+      "id": "auth-page-csp",
+      "file": "packages/shell/src/lib/authSurface.ts",
+      "within": "export function authPageHeaders(",
+      "require": [
+        "`default-src 'none'`", "`script-src 'nonce-${nonce}'`", "`base-uri 'none'`", "`form-action 'none'`",
+        "`frame-ancestors 'none'`", "'X-Frame-Options': 'DENY'", "'Cross-Origin-Opener-Policy': 'same-origin'"
+      ],
+      "forbid": ["unsafe-inline", "unsafe-eval", "*"]
+    },
+    {
+      "id": "auth-pages-send-headers",
+      "files": ["packages/shell/src/pages/login.astro", "packages/shell/src/pages/setup.astro"],
+      "require": ["authPageHeaders()"]
+    },
+    {
+      "id": "session-cookie-flags",
+      "file": "packages/shell/src/lib/authSurface.ts",
+      "within": "function setCookie(",
+      "require": ["scheme === 'https' ? '; Secure' : ''", "Path=/", "HttpOnly${secure}", "SameSite=Lax"]
+    },
+    {
+      "id": "app-host-frame-ancestors",
+      "file": "packages/shell/server/app-hosts.mjs",
+      "within": "function appResponseHeaders(",
+      "require": ["name === 'x-frame-options'", "name.startsWith('x-aura-')", "out.push('content-security-policy', `frame-ancestors ${frameAncestors.join(' ')}`)"]
+    },
+    {
+      "id": "app-host-cookies",
+      "file": "packages/shell/server/app-hosts.mjs",
+      "require": ["HttpOnly${secure ? '; Secure' : ''}; SameSite=Lax"]
+    },
+    {
+      "id": "proxy-machine-only",
+      "file": "packages/shell/src/pages/api/proxy/[id]/[...path].ts",
+      "within": "function machineOnly(",
+      "require": ["delete('set-cookie')", "'Content-Security-Policy', 'sandbox'", "'X-Content-Type-Options', 'nosniff'"]
+    }
+  ],
+  "weakened": [
+    { "id": "samesite-none", "pattern": "SameSite=None", "why": "SameSite=None sends the cookie on cross-site requests" },
+    { "id": "frame-ancestors-any", "pattern": "frame-ancestors\\s+(?:\\*|'self'\\s+\\*|https?:\\s|https?:['`\"])", "why": "frame-ancestors open to any origin" },
+    { "id": "unsafe-eval", "pattern": "'unsafe-eval'", "why": "CSP unsafe-eval" },
+    { "id": "cors-any-origin", "pattern": "access-control-allow-origin['\"`]\\s*[,:]\\s*['\"`]\\*", "why": "CORS open to any origin" },
+    { "id": "cors-credentials", "pattern": "access-control-allow-credentials['\"`]\\s*[,:]\\s*['\"`]?true", "why": "CORS with credentials" }
+  ]
+}
