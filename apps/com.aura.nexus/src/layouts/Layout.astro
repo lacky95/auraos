@@ -23,6 +23,9 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{title} · Nexus</title>
     <ClientRouter fallback="swap" />
+    <!-- The OS theme, linked by every page so ClientRouter keeps it across
+         swaps; the runtime's own link would be dropped with the old head. -->
+    <link rel="stylesheet" href="/api/os/theme.css" />
     <!-- HTML controls instead of native browser widgets. Inline + in <head>
          so <nx-select> is defined before the page is parsed (page scripts may
          read its .value right away); guarded, since inline scripts re-run on
