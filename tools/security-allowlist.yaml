@@ -1,0 +1,40 @@
+# Reviewed exceptions for tools/security-check.mjs (pnpm security).
+# Each entry: check (rule id, or a prefix ending in /*), what it covers (file glob, id or match),
+# and a reason saying why it is safe. Optional expires: YYYY-MM-DD.
+# Add an entry only after reading the code; "it was already there" is not a reason.
+
+- check: patterns/credential-in-url
+  file: packages/shell/src/lib/appFrame.ts
+  match: searchParams.set('code'
+  reason: The App Host handoff code is single-use and audience-bound (app-host-auth.mjs consumeCode deletes it on first read, checks exp, aud and label); the router answers with a 303 and referrer-policy no-referrer, so it never stays in a page URL.
+
+- check: patterns/credential-in-url
+  file: packages/shell/src/pages/api/terminal/embed.ts
+  match: searchParams.set('code'
+  reason: Same single-use handoff code as appFrame.ts (consumeCode in app-host-auth.mjs), issued for the one embed session.
+
+- check: patterns/referer-trust
+  file: packages/shell/src/lib/access/guard.ts
+  match: referer
+  reason: Copies the Referer into the request snapshot as an unverified hint (identity.verified stays null); only observer.ts reads it, for report attribution (via referer-hint), never for a decision.
+
+- check: patterns/referer-trust
+  file: packages/shell/server/access-bridge.mjs
+  match: referer
+  reason: surfaceIdentity keeps the Referer next to the verified principal as a report hint only; access decisions use verified.
+
+- check: headers/weakened
+  file: packages/shell/server/app-hosts.mjs
+  id: cors-any-origin
+  match: '204'
+  reason: The plain App Host probe answers 204 with no body and no cookie; the open CORS header only lets the desktop see that the host answers.
+
+- check: secrets/url-credentials
+  file: packages/core/test/app-build.test.mjs
+  id: f52fbd32b2b3
+  reason: A fake URL credential on example.test, the input of the build-log redaction test.
+
+- check: secrets/assigned-secret
+  file: packages/core/test/identity.test.mjs
+  id: 6141dc0b88de
+  reason: A made-up secret the audit test feeds in to prove the audit log never records it.

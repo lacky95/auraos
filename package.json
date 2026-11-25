@@ -15,7 +15,8 @@
     "publish:local:fresh": "pnpm build:libs && pnpm publish:local",
     "typecheck": "pnpm -r typecheck",
     "test": "node tools/run-tests.mjs",
-    "smoke": "node tools/smoke/run.mjs"
+    "smoke": "node tools/smoke/run.mjs",
+    "security": "node tools/security-check.mjs"
   },
   "devDependencies": {
     "typescript": "^5.5.0"
