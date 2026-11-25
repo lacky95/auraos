@@ -515,7 +515,7 @@ function nexusWorld() {
     return dir;
   };
   const run = async (opts) => {
-    const gen = nexus.install({ scope: 'user', autoApprove: true, ...opts });
+    const gen = nexus.install({ scope: 'user', approval: async () => true, ...opts });
     const events = [];
     try {
       for (;;) {

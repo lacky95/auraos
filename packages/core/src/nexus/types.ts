@@ -149,6 +149,28 @@ export interface IndexDocument {
 }
 
 /**
+ * What an install or update approval binds (D31, 5.10): the exact artifact,
+ * where it goes and what it may do. The shell hashes it (`payloadHash`) into
+ * the approval it consumes, so a moved tag, another scope or another tool or
+ * permission needs a new approval.
+ */
+export interface InstallBinding {
+  action:      'nexus.install' | 'nexus.update';
+  appId:       string;
+  name:        string;
+  version:     string;
+  source:      NexusSource;
+  address:     string;
+  /** The resolved digest: sha256 for OCI, the commit for git, a tree hash for a local path. */
+  digest:      string;
+  scope:       'global' | 'user';
+  identity:    IdentityDecision | null;
+  /** Everything the app declares, sorted; the diff is shown, this is bound. */
+  tools:       string[];
+  permissions: string[];
+}
+
+/**
  * Streaming progress event for install / update / publish. Both the CLI
  * (over SSE) and the Nexus app (also SSE) render these.
  */
@@ -161,7 +183,7 @@ export type NexusProgressEvent =
   | { type: 'validate.done';      manifest: AppManifest }
   | { type: 'identity.choice';    conflict: IdentityConflict }
   | { type: 'identity.resolved';  action: string; appId: string }
-  | { type: 'permission.needed';  diff: PermissionDiff }
+  | { type: 'permission.needed';  diff: PermissionDiff; binding: InstallBinding }
   | { type: 'permission.approved' }
   | { type: 'permission.denied' }
   | { type: 'install.start' }

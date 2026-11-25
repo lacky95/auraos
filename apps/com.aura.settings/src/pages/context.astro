@@ -327,6 +327,38 @@ try {
     }
 
     /**
+     * Every Aura Context write needs the owner's fresh approval (5.10): ask
+     * for one of exactly this write, have AuraOS show it in its own dialog
+     * (the password goes there, never into this page), and send the write
+     * with its id. Resolves { id } | { cancelled: true } | { error }.
+     */
+    async function ownerApproval(payload) {
+      let res;
+      try {
+        res = await fetch(window.auraOs.url('/api/approvals'), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
+          body: JSON.stringify({ action: 'os.context.write', payload }),
+        });
+      } catch (err) { return { error: err.message }; }
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || typeof body.id !== 'string') return { error: body.message || body.error || `HTTP ${res.status}` };
+      const approved = await new Promise((resolve) => {
+        if (!window.auraOs || !window.auraOs.appHost()) { resolve(false); return; }
+        const requestId = Math.random().toString(36).slice(2); // correlation only
+        const onResult = (ev) => {
+          if (!window.auraOs.isFromShell(ev)) return;
+          const d = ev.data;
+          if (!d || d.type !== 'aura.approval.result' || d.requestId !== requestId) return;
+          window.removeEventListener('message', onResult);
+          resolve(d.ok === true && d.approvalId === body.id);
+        };
+        window.addEventListener('message', onResult);
+        window.auraOs.postToShell({ type: 'aura.approval.request', requestId, approvalId: body.id });
+      });
+      return approved ? { id: body.id } : { cancelled: true };
+    }
+
+    /**
      * Poll `check()` every POLL_MS until it returns true or `stop()` is
      * called. Used alongside a write so the UI confirms from the list.
      */
@@ -478,6 +510,14 @@ try {
         const ok = await confirmDialog(`<b>${esc(key)}</b> already exists. Override its value and settings?`, 'OVERRIDE');
         if (!ok) { setStatus(`Cancelled — existing <b>${esc(key)}</b> kept`); return; }
       }
+      addBtn.disabled = true;
+      setStatus(`Waiting for your approval of <b>${esc(key)}</b>…`);
+      const approval = await ownerApproval({ op: 'set', key, kind, inject });
+      addBtn.disabled = false;
+      if (!approval.id) {
+        setStatus(approval.cancelled ? `Not approved — <b>${esc(key)}</b> unchanged` : `ERROR — ${esc(approval.error)}`, !approval.cancelled);
+        return;
+      }
 
       // React to the click BEFORE the request: pending status, optimistic
       // row, button locked. The page must visibly change whether or not the
@@ -519,12 +559,13 @@ try {
 
       try {
         const res = await writeJson('/api/os/context', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Aura-Approval': approval.id },
           body: JSON.stringify({ key, value, kind, inject }),
         });
         stopPoll();
         if (settled) return;
-        if (!res.ok) { revert(); setStatus(`ERROR — ${esc(res.body?.error ?? res.status)}`, true); return; }
+        // 202: the approval did not cover this write (it expired meanwhile).
+        if (!res.ok || res.status === 202) { revert(); setStatus(`ERROR — ${esc(res.body?.error ?? res.status)}`, true); return; }
         confirmed(res.body && res.body.key ? res.body : local, '');
         try { await refresh(); } catch (err) { console.warn('[context] entry list reconcile failed', err); }
       } catch (err) {
@@ -552,6 +593,13 @@ try {
       const tr = varRow(key);
       if (tr && tr.dataset.pending) return;   // already being written
       markPending(tr, true);
+      setStatus(`Waiting for your approval to delete <b>${esc(key)}</b>…`);
+      const approval = await ownerApproval({ op: 'delete', key });
+      if (!approval.id) {
+        markPending(varRow(key), false);
+        setStatus(approval.cancelled ? `Not approved — <b>${esc(key)}</b> kept` : `ERROR — ${esc(approval.error)}`, !approval.cancelled);
+        return;
+      }
       setStatus(`DELETING <b>${esc(key)}</b>…`);
       let settled = false;
       const confirmed = (how) => {
@@ -567,10 +615,12 @@ try {
         return true;
       });
       try {
-        const res = await writeJson(`/api/os/context/${encodeURIComponent(key)}`, { method: 'DELETE', headers: window.auraOs.bodylessHeaders() });
+        const res = await writeJson(`/api/os/context/${encodeURIComponent(key)}`, {
+          method: 'DELETE', headers: { ...window.auraOs.bodylessHeaders(), 'X-Aura-Approval': approval.id },
+        });
         stopPoll();
         if (settled) return;
-        if (!res.ok) { markPending(varRow(key), false); setStatus(`ERROR — ${esc(res.body?.error ?? res.status)}`, true); return; }
+        if (!res.ok || res.status === 202) { markPending(varRow(key), false); setStatus(`ERROR — ${esc(res.body?.error ?? res.status)}`, true); return; }
         confirmed('');
         try { await refresh(); } catch (err) { console.warn('[context] entry list reconcile failed', err); }
       } catch (err) {

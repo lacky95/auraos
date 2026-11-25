@@ -28,7 +28,8 @@ export const OWNER_UI_APPS = Object.freeze({
     // `notifications`: the owner reads them through Settings (core notifications `OwnerCaller`).
     groups: Object.freeze(['activities', 'admin', 'apps', 'instances', 'interfaces', 'kv', 'notifications', 'os', 'scopes']),
     // Users & Identities. Never the `auth` group: password routes stay in the shell's dialog.
-    routes: Object.freeze(['/api/auth/account', '/api/auth/sessions/revoke-others']),
+    // `/api/approvals`: ask for the owner's approval of an Aura Context write, as the owner.
+    routes: Object.freeze(['/api/auth/account', '/api/auth/sessions/revoke-others', '/api/approvals']),
   }),
   'com.aura.nexus': Object.freeze({
     groups: Object.freeze(['apps', 'nexus']),

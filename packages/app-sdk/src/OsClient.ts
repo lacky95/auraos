@@ -53,6 +53,7 @@ import { ActivityApi } from './activity.js';
 import { InterfacesApi } from './interfaces.js';
 import { NotificationsApi, type CreateResult } from './notifications.js';
 import { FlightApi } from './flight.js';
+import { UserApi } from './user.js';
 export type { KeymapHandler, KeymapHandlerCtx, KeymapChangeInfo } from './keymap.js';
 export type { BackEvent, BackHandler } from './nav.js';
 export type { NavigateOptions } from './activity.js';
@@ -106,6 +107,11 @@ export class OsClient {
    * `system.overlay`. See ./flight.ts.
    */
   readonly flight: FlightApi;
+  /**
+   * The owner: `confirm()` asks for their yes in AuraOS's own dialog, with
+   * the password for `level: 'fresh'` (D49). Needs `user.confirm`. See ./user.ts.
+   */
+  readonly user: UserApi;
 
   constructor() {
     // Safe in both Node and the browser. In a browser this is the page's
@@ -119,6 +125,7 @@ export class OsClient {
     this.interfaces = new InterfacesApi(this);
     this.notifications = new NotificationsApi();
     this.flight = new FlightApi(this);
+    this.user = new UserApi();
   }
 
   // -------- OS event subscription (BroadcastReceiver-equivalent) --------

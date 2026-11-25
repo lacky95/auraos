@@ -27,6 +27,7 @@ import { registerVerbs, setProgramFactory } from './commands/verbs.js';
 import { registerAdmin, registerApiKey } from './commands/admin.js';
 import { registerShellMode } from './commands/shellMode.js';
 import { registerIdentity } from './commands/identity.js';
+import { registerApprove } from './commands/approve.js';
 import { LEGACY_GROUPS, markLegacy } from './lib/deprecate.js';
 import { color, visibleWidth } from './lib/format.js';
 import { RESOURCES, fetchApps, findResource, liveInstances, shortName } from './lib/resources.js';
@@ -120,6 +121,7 @@ export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]
     ['aura whoami', 'Server-verified identity, and local hints'],
     ['aura setup-code', 'Host: one-time owner setup code'],
     ['aura user reset-password <username>', 'Host: one-time password reset code'],
+    ['aura approve <id>', 'Host: approve (--deny) a pending owner approval as the operator'],
     ['aura apikey ...', 'API keys for REST callers: create · ls · revoke (admin)'],
   ] },
   { title: 'Ecosystem & dev', lines: [
@@ -271,6 +273,7 @@ export function buildProgram(): Command {
   registerAdmin(program);
   registerShellMode(program);
   registerIdentity(program);
+  registerApprove(program);
   registerApiKey(program);
   // Pre-kubectl groups: registered so they keep working, then hidden.
   registerApp(program);

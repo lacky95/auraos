@@ -411,14 +411,18 @@ test('the auto-hide badge is above keyboard and launcher, below every trusted di
   assert.ok(badge < lock, 'below the lock screen');
 });
 
-test('the owner password dialog is a native modal, mounted, and gives the requester only the outcome', () => {
+test('the owner dialog is a native modal, mounted, and gives the requester only the outcome', () => {
   const src = css('OwnerPasswordDialog.astro');
   assert.match(src, /<dialog id="aura-owner-password"/);
   assert.match(src, /\.showModal\(\)/);
   assert.match(src, /autocomplete="current-password"/);
   assert.match(src, /autocomplete="new-password"/);
-  // The reply carries {ok, error?} only, never a field value.
-  assert.equal([...src.matchAll(/replyTo\(/g)].length, [...src.matchAll(/replyTo\([\w.]+, \{([^}]*)\}/g)].length);
+  // The reply carries {ok, error?} only, never a field value. An approval's
+  // answer is built by approvalReply() alone (approvals.test.ts pins it).
+  const literal = [...src.matchAll(/replyTo\([\w.]+, \{([^}]*)\}/g)].length;
+  const approval = [...src.matchAll(/replyTo\([\w.]+, approvalReply\(/g)].length;
+  assert.ok(approval > 0, 'approvals answer through approvalReply');
+  assert.equal([...src.matchAll(/replyTo\(/g)].length, literal + approval);
   for (const reply of src.matchAll(/replyTo\([\w.]+, \{([^}]*)\}/g)) assert.doesNotMatch(reply[1]!, /value|password:|current:|next:/, reply[0]);
   const layout = readFileSync(new URL('../src/layouts/OSLayout.astro', import.meta.url), 'utf8');
   assert.match(layout, /<OwnerPasswordDialog \/>/);

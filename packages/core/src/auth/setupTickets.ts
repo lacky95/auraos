@@ -4,13 +4,17 @@
  *
  *   <dataDir>/aura/secrets/setup-tickets/<sha256>.json   0600
  *
- * A ticket holds only `{sha256, purpose, expiresAt, username?}`. The code is
+ * A ticket holds only `{sha256, purpose, expiresAt, username?, subject?}`. The code is
  * shown once to the operator and never written or logged. It has 100 random
  * bits and expires after 10 minutes. `rename` makes a claim single-use, and
  * because the file is named by the code's hash, a wrong code touches nothing.
  *
  * Creating a ticket also leaves a small event file, because the CLI has no
  * Valkey. The shell moves those into the audit log (`drainCreatedEvents`).
+ *
+ * An `operator` ticket is the host operator's word on one `subject` (D18,
+ * `aura approve <id>`): the CLI creates it and presents it at once over HTTP,
+ * which only a process that can write this directory can do.
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -26,11 +30,15 @@ const CODE_CHARS = 20;
 const CODE_RE = new RegExp(`^[${ALPHABET}]{${CODE_CHARS}}$`);
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const TICKET_FILE_RE = /^[0-9a-f]{64}\.json$/;
+const PURPOSES: ReadonlySet<string> = new Set<SetupTicketPurpose>(['setup', 'reset', 'operator']);
+/** `approve:apr_…`, `nexus.install:<sha256>`: printable, no spaces. */
+const SUBJECT_RE = /^[A-Za-z0-9._:-]{1,200}$/;
 
 export interface SetupTicketEvent {
   at: number;
   purpose: SetupTicketPurpose;
   username?: string;
+  subject?: string;
 }
 
 export function defaultSetupTicketDir(dataDir: string = process.env['AURA_DATA_DIR'] ?? '/data'): string {
@@ -61,11 +69,13 @@ function readTicket(file: string): SetupTicket | null {
   try {
     const t = JSON.parse(readFileSync(file, 'utf-8')) as Partial<SetupTicket>;
     if (typeof t.sha256 !== 'string' || !SHA256_RE.test(t.sha256) || typeof t.expiresAt !== 'number') return null;
-    if (t.purpose !== 'setup' && t.purpose !== 'reset') return null;
+    if (typeof t.purpose !== 'string' || !PURPOSES.has(t.purpose)) return null;
     if (t.username !== undefined && typeof t.username !== 'string') return null;
+    if (t.subject !== undefined && (typeof t.subject !== 'string' || !SUBJECT_RE.test(t.subject))) return null;
     return {
       sha256: t.sha256, purpose: t.purpose, expiresAt: t.expiresAt,
       ...(t.username !== undefined ? { username: t.username } : {}),
+      ...(t.subject !== undefined ? { subject: t.subject } : {}),
     };
   } catch {
     return null;
@@ -73,15 +83,18 @@ function readTicket(file: string): SetupTicket | null {
 }
 
 /**
- * Create a one-time code for the operator. A new code replaces earlier codes of
- * the same purpose. The returned `code` is the only copy.
+ * Create a one-time code for the operator. A new setup or reset code replaces
+ * earlier codes of the same purpose; operator codes stand side by side, each
+ * for its own `subject`. The returned `code` is the only copy.
  */
 export function createSetupTicket(
   dataDir: string,
-  input: { purpose: SetupTicketPurpose; username?: string },
+  input: { purpose: SetupTicketPurpose; username?: string; subject?: string },
   now: () => number = Date.now,
 ): { code: string; expiresAt: number } {
-  if (input.purpose !== 'setup' && input.purpose !== 'reset') throw new Error('invalid ticket purpose');
+  if (!PURPOSES.has(input.purpose)) throw new Error('invalid ticket purpose');
+  if ((input.purpose === 'operator') !== (input.subject !== undefined)) throw new Error('an operator ticket, and only one, names a subject');
+  if (input.subject !== undefined && !SUBJECT_RE.test(input.subject)) throw new Error('invalid ticket subject');
   const dir = defaultSetupTicketDir(dataDir);
   mkdirSync(join(dir, 'events'), { recursive: true, mode: 0o700 });
 
@@ -89,16 +102,17 @@ export function createSetupTicket(
   for (const name of readdirSync(dir)) {
     if (!TICKET_FILE_RE.test(name)) continue;
     const t = readTicket(join(dir, name));
-    if (!t || t.purpose === input.purpose || t.expiresAt <= at) rmSync(join(dir, name), { force: true });
+    if (!t || (t.purpose === input.purpose && t.purpose !== 'operator') || t.expiresAt <= at) rmSync(join(dir, name), { force: true });
   }
 
   // Five bits per byte is unbiased over a 32-character alphabet.
   const code = [...randomBytes(CODE_CHARS)].map((b) => ALPHABET[b & 31]!).join('');
   const expiresAt = at + SETUP_TICKET_TTL_MS;
   const username = input.username !== undefined ? { username: input.username } : {};
-  const ticket: SetupTicket = { sha256: hashCode(code), purpose: input.purpose, expiresAt, ...username };
+  const subject = input.subject !== undefined ? { subject: input.subject } : {};
+  const ticket: SetupTicket = { sha256: hashCode(code), purpose: input.purpose, expiresAt, ...username, ...subject };
   writePrivate(join(dir, `${ticket.sha256}.json`), ticket);
-  const event: SetupTicketEvent = { at, purpose: input.purpose, ...username };
+  const event: SetupTicketEvent = { at, purpose: input.purpose, ...username, ...subject };
   writePrivate(join(dir, 'events', `${at}-${randomBytes(4).toString('hex')}.json`), event);
   return { code: code.replace(/(.{5})(?=.)/g, '$1-'), expiresAt };
 }
@@ -122,8 +136,12 @@ export class FileSetupTickets implements SetupTickets {
     this.beforeClaim = opts.beforeClaim;
   }
 
-  async claim(code: string, purpose: SetupTicketPurpose): Promise<SetupTicket | null> {
-    if (this.beforeClaim) await this.beforeClaim().catch(() => undefined);
+  /** The live ticket `code` names, without using it up: what an operator is about to confirm. */
+  async peek(code: string, purpose: SetupTicketPurpose): Promise<SetupTicket | null> {
+    return this.find(code, purpose)?.ticket ?? null;
+  }
+
+  private find(code: string, purpose: SetupTicketPurpose): { file: string; ticket: SetupTicket } | null {
     const canonical = canonicalCode(code);
     if (!canonical) return null;
     const sha256 = hashCode(canonical);
@@ -134,6 +152,14 @@ export class FileSetupTickets implements SetupTickets {
       rmSync(file, { force: true });
       return null;
     }
+    return { file, ticket };
+  }
+
+  async claim(code: string, purpose: SetupTicketPurpose): Promise<SetupTicket | null> {
+    if (this.beforeClaim) await this.beforeClaim().catch(() => undefined);
+    const found = this.find(code, purpose);
+    if (!found) return null;
+    const { file, ticket } = found;
     const claimed = `${file}.claimed-${randomBytes(4).toString('hex')}`;
     try {
       renameSync(file, claimed); // Only one concurrent caller can win this.

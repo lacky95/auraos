@@ -1,12 +1,15 @@
 import type { APIRoute } from 'astro';
 import { getNexusManager } from '@aura/core';
-import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
+import { errorResponse } from '../../../../lib/appResponse.js';
+import { authenticate } from '../../../../lib/auth.ts';
 import { parseIdentity } from '../../../../lib/nexusIdentity.js';
+import { liveApprovalDeps } from '../../../../lib/approvals/service.ts';
+import { installGate, runInstall } from '../../../../lib/approvals/nexus.ts';
 
 /**
  * Update an installed app to the latest version on its stored ref + channel.
- * Same protocol as /install: returns `{ ok, record }` on success or
- * `{ ok: false, needsApproval: true, diff }` when new permissions appear, or
+ * Same protocol as /install, approval included (D31): `{ ok, record }`, 202
+ * needs-approval (then again with `X-Aura-Approval`), or
  * `{ ok: false, needsIdentityChoice: true, conflict }` when the source now
  * serves a different app under this id (re-POST with `identity`).
  * A dev checkout (`aura dev checkout`) answers 409 unless `force: true`.
@@ -14,7 +17,9 @@ import { parseIdentity } from '../../../../lib/nexusIdentity.js';
 export const POST: APIRoute = async ({ params, request }) => {
   const id = params['id'];
   if (!id) return errorResponse('missing app id', 400);
-  const body = await request.json().catch(() => ({})) as { autoApprove?: boolean; force?: boolean; identity?: unknown };
+  const principal = await authenticate(request);
+  if (principal instanceof Response) return principal;
+  const body = await request.json().catch(() => ({})) as { force?: boolean; identity?: unknown; operatorCode?: unknown };
   const identity = parseIdentity(body.identity);
   if (identity instanceof Response) return identity;
 
@@ -23,31 +28,8 @@ export const POST: APIRoute = async ({ params, request }) => {
     return errorResponse(`app '${id}' has no Nexus install record — cannot auto-update`, 404);
   }
 
-  const it = nexus.update(id, {
-    autoApprove: body.autoApprove, ...(identity ? { identity } : {}), ...(body.force === true ? { replaceCheckout: true } : {}),
-  });
-  try {
-    let cursor = await it.next();
-    while (!cursor.done) {
-      const ev = cursor.value;
-      if (ev.type === 'identity.choice') {
-        await it.return(undefined as never).catch(() => undefined);
-        return jsonResponse({ ok: false, needsIdentityChoice: true, conflict: ev.conflict });
-      }
-      if (ev.type === 'permission.needed') {
-        await it.return(undefined as never).catch(() => undefined);
-        return jsonResponse({ ok: false, needsApproval: true, diff: ev.diff });
-      }
-      if (ev.type === 'error') {
-        return errorResponse(ev.message, ev.code === 'dev-checkout' ? 409 : 500);
-      }
-      if (ev.type === 'install.done') {
-        return jsonResponse({ ok: true, record: ev.record });
-      }
-      cursor = await it.next();
-    }
-    return jsonResponse({ ok: true, record: cursor.value });
-  } catch (err) {
-    return errorResponse((err as Error).message, 500);
-  }
+  const gate = installGate(liveApprovalDeps(), principal, request, body.operatorCode);
+  return runInstall(nexus.update(id, {
+    approval: gate.approval, ...(identity ? { identity } : {}), ...(body.force === true ? { replaceCheckout: true } : {}),
+  }), gate, (ev) => (ev.code === 'dev-checkout' ? 409 : 500));
 };

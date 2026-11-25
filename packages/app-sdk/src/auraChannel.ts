@@ -221,12 +221,15 @@ export interface AuraApprovalResult {
 
 /**
  * `aura.user.confirm.request` (D49, `osClient.user.confirm`): the app asks
- * the owner to confirm. The Shell's dialog names the verified app; `fresh`
- * also asks for the password, which only the Shell ever sees.
+ * the owner to confirm the `user.confirm` approval it created with
+ * `POST /api/approvals`. The Shell's dialog names the verified app from its
+ * own read of that approval; `fresh` also asks for the password, which only
+ * the Shell ever sees. `level` is a hint: the approval's own level counts.
  */
 export interface AuraUserConfirmRequest {
   type: 'aura.user.confirm.request';
   requestId: string;
+  approvalId: string;
   level?: AuraApprovalLevel;
 }
 

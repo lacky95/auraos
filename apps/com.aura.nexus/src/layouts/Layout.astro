@@ -429,14 +429,10 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
         max-height: 40vh;
         overflow-y: auto;
       }
-      .diff-add    { color: var(--aura-color-warning); }
-      .diff-remove { color: var(--aura-color-text-dim); }
-      .diff-info   { color: var(--aura-color-info, var(--aura-color-primary)); }
-      /* ── permission approval ──────────────────────────────────────────
-         Installing grants tools and permissions to code the user has not
-         read. The OS computes the diff server-side already and the CLI
-         shows it; this is the same information for the GUI, so a one-click
-         install stops being a blind grant. */
+      /* ── store dialogs ────────────────────────────────────────────────
+         The identity questions. Approving an install is not one of them:
+         AuraOS shows the exact artifact, scope and permissions in its own
+         dialog (D31). */
       .perm-overlay {
         position: fixed; inset: 0; z-index: 100;
         display: flex; align-items: center; justify-content: center;
@@ -457,28 +453,6 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
         text-transform: uppercase; color: var(--aura-color-primary);
       }
       .perm-sub { margin: 0 0 14px; font-size: 0.78rem; color: var(--aura-color-text-dim); }
-      .perm-group { margin-bottom: 12px; }
-      .perm-group-label {
-        font-size: 0.7rem; letter-spacing: 0.16em; text-transform: uppercase;
-        color: var(--aura-color-text-dim); margin-bottom: 5px;
-      }
-      .perm-list { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 6px; }
-      .perm-item {
-        font-size: 0.78rem; padding: 3px 8px;
-        border: 1px solid var(--aura-color-border);
-      }
-      /* A tool that is effectively root on the host should not look like a
-         tool that lets the app read a file. */
-      .perm-item.is-danger {
-        color: var(--aura-color-danger);
-        border-color: var(--aura-color-danger);
-      }
-      .perm-warn {
-        margin: 12px 0 0; padding: 9px 11px; font-size: 0.76rem; line-height: 1.5;
-        color: var(--aura-color-danger);
-        border: 1px solid var(--aura-color-danger);
-      }
-      .perm-none { font-size: 0.8rem; color: var(--aura-color-text-dim); }
       .perm-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
       .perm-actions .perm-ok { color: var(--aura-color-bg); background: var(--aura-color-primary); border-color: var(--aura-color-primary); }
       .perm-actions .perm-ok:hover { box-shadow: var(--aura-glow-primary); }
@@ -900,21 +874,6 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
       }
     </style>
 
-    <!-- Permission approval. One dialog for every page that can install; the
-         pages call `auraInstall()` rather than POSTing /api/nexus/install
-         themselves, so none of them can skip the diff by accident. -->
-    <div class="perm-overlay" data-perm-overlay hidden transition:persist="nexus-perm-dialog">
-      <div class="perm-dialog" role="dialog" aria-modal="true" aria-labelledby="perm-title">
-        <h2 class="perm-title" id="perm-title" data-perm-title>Review permissions</h2>
-        <p class="perm-sub" data-perm-sub></p>
-        <div data-perm-body></div>
-        <div class="perm-actions">
-          <button type="button" data-perm-cancel>Cancel</button>
-          <button type="button" class="perm-ok" data-perm-ok>Install</button>
-        </div>
-      </div>
-    </div>
-
     <!-- Identity choice: the app shares its id or originId with an installed
          app (scenarios A, B, D in core AppIdentity). Nothing is installed
          until the user picks what should happen. -->
@@ -968,131 +927,46 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
     </div>
 
     <script is:inline>
-      /* Install with informed consent.
+      /* Install with the owner's approval (D31).
        *
-       * The server already computes a PermissionDiff and refuses to proceed
-       * without approval unless `autoApprove` is passed — the CLI has always
-       * honoured that. The GUI used to pass autoApprove:true on every install,
-       * so a click granted every tool and permission an app declared without
-       * ever naming them. `docker` in an app's tools[] is host root via the
-       * socket; that is not something to hand over silently.
+       * Every install and update needs the owner's approval of the exact
+       * artifact, scope and permissions, and only AuraOS's own dialog can give
+       * it: the store's page cannot. One flow for every page that installs;
+       * the pages call `auraInstall()` rather than POSTing /api/nexus/install
+       * themselves.
        *
-       * Flow: install without autoApprove → if the app shares its id or
-       * originId with an installed one, ask what should happen (identity
-       * dialog) → if the server asks for approval, show the diff → each
-       * answer is the same install again, carrying the decision.
+       * Flow: install → if the app shares its id or originId with an
+       * installed one, ask what should happen (identity dialog) → the server
+       * answers needs-approval with an approval id → ask AuraOS to show it
+       * (`aura.approval.request`) → when the owner approves there, the same
+       * install again with `X-Aura-Approval`, which uses it up.
        */
       (function () {
         // Runs again on every ClientRouter page swap; the dialogs are
         // persisted DOM, so wire them (and the globals) only once.
         if (window.__auraDialogs) return;
-        var overlay = document.querySelector('[data-perm-overlay]');
-        if (!overlay) return;
+        var idOverlay = document.querySelector('[data-id-overlay]');
+        if (!idOverlay) return;
         window.__auraDialogs = true;
-        var titleEl  = overlay.querySelector('[data-perm-title]');
-        var subEl    = overlay.querySelector('[data-perm-sub]');
-        var bodyEl   = overlay.querySelector('[data-perm-body]');
-        var okBtn    = overlay.querySelector('[data-perm-ok]');
-        var cancelBtn= overlay.querySelector('[data-perm-cancel]');
-        var resolver = null;
-        var opener   = null;
-
-        /* Tools that are not really "a tool" — they hand over the host. Kept in
-         * step with the store's own RISKY_TOOLS. */
-        var DANGEROUS = { 'docker': 1, '*': 1 };
-
-        function group(label, items, cls) {
-          if (!items || !items.length) return null;
-          var wrap = document.createElement('div');
-          wrap.className = 'perm-group';
-          var lab = document.createElement('div');
-          lab.className = 'perm-group-label';
-          lab.textContent = label;
-          var ul = document.createElement('ul');
-          ul.className = 'perm-list';
-          items.forEach(function (t) {
-            var li = document.createElement('li');
-            li.className = 'perm-item ' + (cls || '') + (DANGEROUS[t] ? ' is-danger' : '');
-            li.textContent = t;
-            ul.appendChild(li);
+        /* Ask AuraOS to show the approval this store's install created. Resolves
+         * true only when the owner approved it there. */
+        function askOwner(approvalId) {
+          return new Promise(function (resolve) {
+            if (!window.auraOs || !window.auraOs.appHost()) { resolve(false); return; }
+            var requestId = Math.random().toString(36).slice(2); // correlation only
+            function onResult(ev) {
+              if (!window.auraOs.isFromShell(ev)) return;
+              var d = ev.data;
+              if (!d || d.type !== 'aura.approval.result' || d.requestId !== requestId) return;
+              window.removeEventListener('message', onResult);
+              resolve(d.ok === true && d.approvalId === approvalId);
+            }
+            window.addEventListener('message', onResult);
+            window.auraOs.postToShell({ type: 'aura.approval.request', requestId: requestId, approvalId: approvalId });
           });
-          wrap.appendChild(lab); wrap.appendChild(ul);
-          return wrap;
-        }
-
-        function render(diff, name) {
-          titleEl.textContent = (diff.versionFrom ? 'Update' : 'Install') + ' ' + (name || diff.appId);
-          subEl.textContent = diff.versionFrom
-            ? diff.appId + '  v' + diff.versionFrom + ' → v' + diff.versionTo
-            : diff.appId + '  v' + diff.versionTo;
-
-          bodyEl.textContent = '';
-          var added = [
-            group('Tools it will gain', diff.toolsAdded, 'diff-add'),
-            group('Permissions it will gain', diff.permissionsAdded, 'diff-add'),
-            group('New intent filters', diff.intentFiltersAdded, 'diff-info'),
-            group('Tools it gives up', diff.toolsRemoved, 'diff-remove'),
-            group('Permissions it gives up', diff.permissionsRemoved, 'diff-remove'),
-          ].filter(Boolean);
-
-          if (diff.dataProviderAdded) {
-            var dp = document.createElement('div');
-            dp.className = 'perm-group';
-            var dl = document.createElement('div');
-            dl.className = 'perm-group-label';
-            dl.textContent = 'Data provider';
-            var dv = document.createElement('div');
-            dv.className = 'perm-item diff-add';
-            dv.textContent = 'exposes data other apps can read';
-            dp.appendChild(dl); dp.appendChild(dv);
-            added.push(dp);
-          }
-
-          if (!added.length) {
-            var none = document.createElement('p');
-            none.className = 'perm-none';
-            none.textContent = 'No new tools or permissions.';
-            bodyEl.appendChild(none);
-          } else {
-            added.forEach(function (n) { bodyEl.appendChild(n); });
-          }
-
-          var risky = (diff.toolsAdded || []).filter(function (t) { return DANGEROUS[t]; });
-          if (risky.length) {
-            var w = document.createElement('p');
-            w.className = 'perm-warn';
-            w.textContent = risky.indexOf('docker') >= 0
-              ? '⚠ `docker` grants control of the container runtime — effectively root on the host.'
-              : '⚠ `*` grants every tool the OS can provide.';
-            bodyEl.appendChild(w);
-          }
-        }
-
-        function close(result) {
-          overlay.hidden = true;
-          if (opener && opener.focus) opener.focus();
-          opener = null;
-          var r = resolver; resolver = null;
-          if (r) r(result);
-        }
-        okBtn.addEventListener('click', function () { close(true); });
-        cancelBtn.addEventListener('click', function () { close(false); });
-        overlay.addEventListener('click', function (ev) { if (ev.target === overlay) close(false); });
-        document.addEventListener('keydown', function (ev) {
-          if (overlay.hidden) return;
-          if (ev.key === 'Escape') { ev.preventDefault(); close(false); }
-        });
-
-        function ask(diff, name) {
-          render(diff, name);
-          opener = document.activeElement;
-          overlay.hidden = false;
-          okBtn.focus();
-          return new Promise(function (res) { resolver = res; });
         }
 
         // ─── Identity choice ───────────────────────────────────────────
-        var idOverlay = document.querySelector('[data-id-overlay]');
         var idTitle   = idOverlay.querySelector('[data-id-title]');
         var idText    = idOverlay.querySelector('[data-id-text]');
         var idIds     = idOverlay.querySelector('[data-id-ids]');
@@ -1220,19 +1094,20 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
 
         // ─── One flow for install + update ──────────────────────────────
         /* POST, then answer the store's questions in order — the app's
-         * identity (A/B/D), then new permissions — each answer a re-POST with
-         * the decision in the body, as the CLI does. */
+         * identity (A/B/D), then the owner's approval — each answer a re-POST,
+         * as the CLI does. */
         async function runInstall(url, base, opts, fallbackError) {
           // A choice made up front (Install as… / a fresh copy) rides along from
           // the first request; otherwise the store's question fills it in.
           var identity = opts.identity || null;
-          var auto = false;
+          var approvalId = null;
           for (var round = 0; round < 4; round++) {
             var body = Object.assign({}, base);
-            if (auto) body.autoApprove = true;
             if (identity) body.identity = identity;
+            var headers = { 'Content-Type': 'application/json' };
+            if (approvalId) headers['X-Aura-Approval'] = approvalId;
             var res = await fetch(window.auraOs.url(url), {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              method: 'POST', headers: headers,
               body: JSON.stringify(body),
             });
             var json = await res.json().catch(function () { return {}; });
@@ -1244,11 +1119,11 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
               if (opts.onApproved) opts.onApproved();
               continue;
             }
-            if (json.needsApproval && json.diff && !auto) {
-              var approved = await ask(json.diff, opts.name);
+            if (json.needsApproval && json.approvalId && !approvalId) {
+              var approved = await askOwner(json.approvalId);
               if (!approved) return { cancelled: true };
               if (opts.onApproved) opts.onApproved();
-              auto = true;
+              approvalId = json.approvalId;
               continue;
             }
             return { error: json.error || (round === 0 ? fallbackError : '') || ('HTTP ' + res.status) };
@@ -1256,14 +1131,14 @@ const TABS: Array<{ id: NonNullable<Props['active']>; label: string; href: strin
           return { error: 'too many questions from the store' };
         }
 
-        /** Update an installed app, asking about its identity and new
-         *  permissions when the server requires it. */
+        /** Update an installed app, asking about its identity when the
+         *  server requires it, and the owner for approval. */
         window.auraUpdate = function (id, opts) {
           return runInstall('/api/nexus/update/' + encodeURIComponent(id), {}, opts || {}, 'nothing to update');
         };
 
-        /** Install `ref`, asking about its identity and new permissions when
-         *  the server requires it. Resolves { ok, record } | { cancelled: true } | { error }. */
+        /** Install `ref`, asking about its identity when the server requires
+         *  it, and the owner for approval. Resolves { ok, record } | { cancelled: true } | { error }. */
         window.auraInstall = function (ref, opts) {
           opts = opts || {};
           var body = { ref: ref };

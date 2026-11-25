@@ -1,12 +1,16 @@
 /**
- * One-time owner setup and password-reset codes. A host command only: the
- * ticket is a file in the master container and no HTTP endpoint mints one.
+ * One-time owner setup, password-reset and operator codes. A host command
+ * only: the ticket is a file in the master container and no HTTP endpoint
+ * mints one.
  */
 // The file-only entry: the package root would bundle Valkey and the server runtime.
 import { createSetupTicket } from '@aura/core/setup-tickets';
 import { inSandbox } from './identity.js';
 
-export type SetupTicketInput = { purpose: 'setup' | 'reset'; username?: string };
+export type SetupTicketInput =
+  | { purpose: 'setup' | 'reset'; username?: string }
+  /** The host operator's word on one exact `subject` (D18): `approve:<id>`, `<action>:<payloadHash>`, … */
+  | { purpose: 'operator'; subject: string };
 export type CreateSetupTicket = (
   dataDir: string,
   input: SetupTicketInput,

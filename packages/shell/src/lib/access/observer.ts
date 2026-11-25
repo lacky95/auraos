@@ -322,7 +322,8 @@ export function decideRule(
     },
     resource: resourceFor(concrete, req.snapshot, mgr),
     transport: req.snapshot.https ? 'https' : 'http',
-    auth: { fresh: false, via: req.via },
+    // A presented approval meets the fresh-auth precondition; the handler consumes it.
+    auth: { fresh: req.snapshot.approval === true, via: req.via },
     strict: req.strict,
     accessProfile: 'open',
     systemMode: 'normal',

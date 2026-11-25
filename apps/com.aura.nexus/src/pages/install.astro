@@ -92,11 +92,8 @@ const initialRef = new URL(Astro.request.url).searchParams.get('ref') ?? '';
       installB.textContent = '...';
       setLog('installing ' + ref + '...');
       try {
-        // This tab always asked for approval, but through a native confirm(),
-        // which is unreliable inside the shell's app iframe — the very reason
-        // the other tabs gave for skipping the prompt entirely. auraInstall()
-        // uses the in-page dialog instead, so all four install paths share one
-        // review that actually renders.
+        // auraInstall() is the one install flow: the owner approves the exact
+        // artifact, scope and permissions in AuraOS's own dialog (D31).
         const json = await window.auraInstall(ref, {
           name: ref,
           onApproved: () => setLog('approved; installing...'),

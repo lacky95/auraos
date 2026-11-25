@@ -4,11 +4,13 @@
  * streaming async iterator. Both the CLI (over SSE) and the shell HTTP
  * API consume the same event sequence.
  *
- * The pause-for-permission flow is modelled as an async generator: the
- * pipeline yields a `permission.needed` event and waits for the next
- * `next()` call before continuing. The caller (CLI or shell route)
- * implements its own approval UI between yields.
+ * Every install and update passes the install gate (D31): the caller's
+ * `approval` must vouch for the exact `InstallBinding`, which the shell does
+ * by consuming an owner approval of it. Otherwise the pipeline yields
+ * `permission.needed` and waits for the next `next()` call; only an
+ * in-process caller can answer that with `{ approve: true }`.
  */
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
@@ -27,9 +29,9 @@ import { fetchGit } from './Fetchers/GitFetcher.js';
 import { fetchOci } from './Fetchers/OciFetcher.js';
 import { publishGit, publishOci } from './Publisher.js';
 import { isDevCheckout } from './AppSource.js';
-import { computePermissionDiff, diffRequiresApproval } from './PermissionDiff.js';
+import { computePermissionDiff } from './PermissionDiff.js';
 import type {
-  IdentityDecision, InstallRecord, NexusProgressEvent, ResolvedRef,
+  IdentityDecision, InstallBinding, InstallRecord, NexusProgressEvent, PermissionDiff, ResolvedRef,
 } from './types.js';
 import type { RegistryConfig } from './RegistryConfig.js';
 import { orasHostFromUrl, resolveByName, urlForHost } from './RegistryConfig.js';
@@ -371,7 +373,13 @@ export class NexusManager {
   async *install(opts: {
     ref:         string;
     scope?:      'global' | 'user';
-    autoApprove?: boolean;
+    /**
+     * The install gate: true once an approval of exactly this binding was
+     * consumed (shell `lib/approvals`). Absent or false: `permission.needed`.
+     */
+    approval?:   (binding: InstallBinding, diff: PermissionDiff) => Promise<boolean>;
+    /** Set by `update()`, so the approval names what is happening. */
+    action?:     InstallBinding['action'];
     /** Updates: ask this source first (see Resolver.resolve). */
     sourceName?: string;
     /** The user's answer to an earlier `identity.choice` (re-sent install). */
@@ -545,12 +553,22 @@ export class NexusManager {
         } catch { /* treat as fresh install */ }
       }
       const diff = computePermissionDiff(currentManifest, manifest);
+      const binding: InstallBinding = {
+        action: opts.action ?? 'nexus.install',
+        appId: manifest.id, name: manifest.name, version: manifest.version,
+        source: resolved.source, address: resolved.address,
+        digest: resolved.digest || treeDigest(stagingDir),
+        scope: targetScope, identity: opts.identity ?? null,
+        tools: [...new Set(manifest.tools)].sort(), permissions: [...new Set(manifest.permissions)].sort(),
+      };
 
-      if (!opts.autoApprove && diffRequiresApproval(diff)) {
+      // Installing code is always the owner's decision (D31), not only when
+      // the diff grows.
+      if (!(opts.approval && await opts.approval(binding, diff))) {
         // Pausing for the user's decision — not actively installing. Clear the
         // flag (the route returns here and abandons this generator).
         unmark();
-        const decision = yield { type: 'permission.needed', diff };
+        const decision = yield { type: 'permission.needed', diff, binding };
         if (!decision || !decision.approve) {
           yield { type: 'permission.denied' };
           throw new Error('Install cancelled by user');
@@ -633,7 +651,11 @@ export class NexusManager {
     }
   }
 
-  async *update(appId: string, opts: { autoApprove?: boolean; identity?: IdentityDecision; replaceCheckout?: boolean } = {}): AsyncGenerator<NexusProgressEvent, InstallRecord | null, { approve: boolean } | void> {
+  async *update(appId: string, opts: {
+    approval?: (binding: InstallBinding, diff: PermissionDiff) => Promise<boolean>;
+    identity?: IdentityDecision;
+    replaceCheckout?: boolean;
+  } = {}): AsyncGenerator<NexusProgressEvent, InstallRecord | null, { approve: boolean } | void> {
     const current = this.getRecord(appId);
     if (!current) {
       yield { type: 'error', code: 'not-installed',
@@ -652,7 +674,8 @@ export class NexusManager {
       return null;
     }
     const result = yield* this.install({
-      ref: current.ref, scope, autoApprove: opts.autoApprove, sourceName: current.sourceName,
+      ref: current.ref, scope, action: 'nexus.update', sourceName: current.sourceName,
+      ...(opts.approval ? { approval: opts.approval } : {}),
       ...(opts.identity ? { identity: opts.identity } : {}),
       ...(opts.replaceCheckout ? { replaceCheckout: true } : {}),
     });
@@ -823,4 +846,28 @@ function splitOnLastColon(addr: string): [string, string] {
   const i = addr.lastIndexOf(':');
   if (i < 0) return [addr, 'latest'];
   return [addr.slice(0, i), addr.slice(i + 1)];
+}
+
+/**
+ * A digest of a staged tree, for a source that has none of its own (a local
+ * path): every file's path and bytes, in a fixed order, `.git` and
+ * `node_modules` left out. Approving one tree does not approve another.
+ */
+export function treeDigest(dir: string): string {
+  const h = createHash('sha256');
+  const walk = (rel: string): void => {
+    const entries = readdirSync(join(dir, rel), { withFileTypes: true })
+      .filter((e) => e.name !== '.git' && e.name !== 'node_modules')
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const e of entries) {
+      const path = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(path);
+      else if (e.isFile()) {
+        const bytes = readFileSync(join(dir, path));
+        h.update(`${path}\0${bytes.length}\0`).update(bytes);
+      } else if (e.isSymbolicLink()) h.update(`${path}\0link\0`);
+    }
+  };
+  walk('');
+  return `tree:sha256:${h.digest('hex')}`;
 }

@@ -105,6 +105,15 @@ const SETTINGS_ONLY: ReadonlySet<string> = new Set([
   'aura.account.password.request', 'aura.account.policy.request',
 ]);
 
+/**
+ * Messages that ask the owner something about the sending app: only an App
+ * Host window itself, so the dialog names the app from the frame, never the
+ * payload. Approvals (5.10, D49) also have to be the frame's app's own.
+ */
+const APP_WINDOW_ONLY: ReadonlySet<string> = new Set([
+  'aura.terminal.share.request', 'aura.approval.request', 'aura.user.confirm.request',
+]);
+
 /** Whether a verified sender may deliver this message to the shell. */
 export function authorizeShellMessage<E>(
   type: unknown,
@@ -129,9 +138,8 @@ export function authorizeShellMessage<E>(
       && isAuraChannelRouteAllowed(type, sender.endpoint, 'shell');
   }
 
-  // Asking the owner to share a Terminal session: only an App Host window
-  // itself, so the dialog can name the app from the frame, never the payload.
-  if (type === 'aura.terminal.share.request') {
+  // Asking the owner (a Terminal share, an approval, a confirmation).
+  if (APP_WINDOW_ONLY.has(type)) {
     return !!frame && sender.direct && !!frame.appId
       && isAuraChannelRouteAllowed(type, sender.endpoint, 'shell');
   }
@@ -142,6 +150,15 @@ export function authorizeShellMessage<E>(
   }
 
   return isAuraChannelRouteAllowed(type, sender.endpoint, 'shell');
+}
+
+/**
+ * Whether an approval may be shown for this sender: the app that requested it
+ * (as the server recorded it) is the app in the sender's frame. An app can't
+ * raise another app's request, or a Terminal agent's.
+ */
+export function approvalBelongsToSender<E>(sender: ChannelSender<E>, requesterAppId: string | null): boolean {
+  return !!requesterAppId && sender.direct && sender.frame?.appId === requesterAppId;
 }
 
 /** The app id a message speaks for: always the frame's, never one the message claims. */

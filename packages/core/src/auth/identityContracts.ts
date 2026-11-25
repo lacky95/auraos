@@ -101,7 +101,12 @@ export interface LoginSessions {
 
 // ── setup tickets ───────────────────────────────────────────────────────────
 
-export type SetupTicketPurpose = 'setup' | 'reset';
+/**
+ * `operator`: the host operator's word on one exact thing (D18), named by
+ * `subject`: `approve:<approvalId>`, `deny:<approvalId>`, or
+ * `<action>:<payloadHash>` for an action the operator confirmed at the host.
+ */
+export type SetupTicketPurpose = 'setup' | 'reset' | 'operator';
 
 /** A one-time ticket as stored. The plaintext code is never written or logged. */
 export interface SetupTicket {
@@ -110,6 +115,8 @@ export interface SetupTicket {
   expiresAt: number;
   /** The account a `reset` applies to. */
   username?: string;
+  /** What an `operator` ticket vouches for. */
+  subject?: string;
 }
 
 export interface SetupTickets {

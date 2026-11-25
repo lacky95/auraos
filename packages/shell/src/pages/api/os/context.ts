@@ -1,6 +1,8 @@
 import type { APIRoute } from 'astro';
-import { ContextStore, normaliseInject } from '@aura/core';
+import { ContextStore } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
+import { contextGate } from '../../../lib/approvals/context.ts';
+import { contextWrite } from '../../../lib/approvals/display.ts';
 
 /**
  * Aura Context API — OS-wide env vars / secrets ("Context Manager").
@@ -13,6 +15,11 @@ import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
  * over this API — the UI shows a "set" indicator, not the secret.
  *
  * Delete lives in ./context/[key].ts.
+ *
+ * Every write needs a fresh owner approval of exactly that key, kind and
+ * injection (lib/approvals/context.ts): ask with POST /api/approvals
+ * `{action: 'os.context.write', payload: {op: 'set', key, kind, inject}}`, then
+ * send the write with `X-Aura-Approval: <id>`. Without one: 202 needs-approval.
  */
 
 const KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
@@ -46,9 +53,12 @@ export const POST: APIRoute = async ({ request }) => {
   // container), so without it a token the OS needs would also reach every
   // installed app. `normaliseInject` preserves an empty array; a non-array
   // still defaults to both, so existing entries are unaffected.
-  const inject = normaliseInject(body.inject);
+  const write = contextWrite({ op: 'set', key: body.key, kind, inject: body.inject });
+  if (write?.op !== 'set') return errorResponse('invalid request', 400);
+  const refused = await contextGate(request, write);
+  if (refused) return refused;
   try {
-    const entry = await new ContextStore().set(body.key, body.value, kind, inject);
+    const entry = await new ContextStore().set(write.key, body.value, write.kind, write.inject);
     return jsonResponse(entry);
   } catch (err) {
     return errorResponse((err as Error).message, 500);

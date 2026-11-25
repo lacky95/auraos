@@ -42,6 +42,8 @@ const ADMIN_BEARER_RE = /^Bearer aura-admin1\.[A-Za-z0-9._~+/=-]{1,2048}$/;
 const FORWARDED_REQUEST_HEADERS = [
   'accept', 'accept-language', 'content-type', 'content-length', 'if-match', 'if-none-match',
   'if-modified-since', 'last-event-id', 'range', 'user-agent', 'x-aura-sender-token',
+  // An approval id an app retries an action with (lib/approvals). Not a credential: it is consumed against the caller.
+  'x-aura-approval',
 ];
 const DROPPED_RESPONSE_HEADERS = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-connection', 'te', 'trailer',

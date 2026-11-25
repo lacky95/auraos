@@ -3,6 +3,7 @@ import type { AccessPrincipal, AdminPrincipal, AuditInput, UserPrincipal } from 
 import { accessMode } from '../../../server/access-mode.mjs';
 import { gatewayClaimOf } from '../../../server/gateway-identity.mjs';
 import { afterResponse } from '../afterResponse.ts';
+import { presentsApproval } from '../approvals/service.ts';
 import { decide as liveDecide } from './decide.ts';
 import { readJsonBody, refused, TOO_LARGE } from './enforce.ts';
 import { gatewayInstance, gatewayOwner, type GatewayOwnerDeps } from './identify.ts';
@@ -128,7 +129,8 @@ export async function enforceGateway(
       },
       resource: resourceFor(concrete, snapshot, deps.mgr),
       transport,
-      auth: { fresh: false, via },
+      // A presented approval meets the fresh-auth precondition; the handler consumes it.
+      auth: { fresh: presentsApproval(ctx.request), via },
       strict,
       accessProfile: 'open',
       systemMode: 'normal',

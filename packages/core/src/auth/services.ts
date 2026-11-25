@@ -7,6 +7,7 @@
  */
 import { defaultRedis } from '@aura/kv-store';
 import { getAppManager } from '../app-manager/AppManager.js';
+import { ValkeyApprovalStore } from '../approvals/ValkeyApprovalStore.js';
 import { AdminAudit, IDENTITY_AUDIT_ACTIONS, operatorAttribution } from './AdminAudit.js';
 import { AdminAuth } from './AdminAuth.js';
 import { defaultAdminKeyFile } from './adminCredential.js';
@@ -20,7 +21,7 @@ import { defaultSetupTicketDir, FileSetupTickets } from './setupTickets.js';
 import { ValkeyUserStore } from './ValkeyUserStore.js';
 
 /** Bump when the shape changes, so a singleton made by an older module copy is replaced. */
-export const AUTH_SERVICES_VERSION = 6;
+export const AUTH_SERVICES_VERSION = 7;
 
 export interface AuthServices {
   version: number;
@@ -35,8 +36,10 @@ export interface AuthServices {
   users: ValkeyUserStore;
   /** The one session store; the same object as `admin.sessions`. */
   loginSessions: LoginSessionStore;
-  /** One-time setup and reset codes. */
+  /** One-time setup, reset and operator codes. */
   setupTickets: FileSetupTickets;
+  /** Owner approvals (5.10). */
+  approvals: ValkeyApprovalStore;
 }
 
 const GLOBAL_KEY = '__auraAuthServices';
@@ -108,6 +111,7 @@ export function getAuthServices(): AuthServices {
     version: AUTH_SERVICES_VERSION, grants, apiKeys: new ApiKeyStore(redis), admin, audit, authorizer,
     clientSessions: new ClientSessionStore({ redis }),
     users, loginSessions: admin.sessions, setupTickets,
+    approvals: new ValkeyApprovalStore({ redis }),
   };
   g[GLOBAL_KEY] = svc;
   void auditCreatedTickets().catch((err) => console.warn(`[auth] ticket audit failed: ${(err as Error).message}`));
