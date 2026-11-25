@@ -74,16 +74,21 @@ test('the System Terminal keeps full control; a same-id copy in another scope do
   assert.notEqual(await openTerminalRefusal(intent({ command: 'id' }), { appId: TERMINAL }, shadow), null);
 });
 
-test('a command needs a proved owner or the System Terminal; the rest is left to Phase 3 for non-app callers', async () => {
+test('a command needs a proved owner or the System Terminal; background and sessionId need the owner from a non-app caller', async () => {
   // Nothing proved: any web page can POST a no-cors text/plain body.
   assert.notEqual(await openTerminalRefusal(intent({ command: 'id' }), null, access()), null);
   assert.notEqual(await openTerminalRefusal(intent({ command: 'id', background: true }), null, access()), null);
   assert.notEqual(await openTerminalRefusal(intent({ command: 'id' }), { owner: false } as never, access()), null);
   // The owner (the desktop's own page or an admin session).
   assert.equal(await openTerminalRefusal(intent({ command: 'id' }), { owner: true } as never, access()), null);
-  // Without `command`, a caller with no app identity is not limited here.
-  assert.equal(await openTerminalRefusal(intent({ background: true }), null, access()), null);
-  assert.equal(await openTerminalRefusal(intent({ sessionId: SESSION }), null, access()), null);
+  // `background` and `sessionId` reach a session too: an unverified caller is refused them.
+  assert.match(String(await openTerminalRefusal(intent({ background: true }), null, access())), /owner/);
+  assert.match(String(await openTerminalRefusal(intent({ sessionId: SESSION }), null, access())), /owner/);
+  assert.notEqual(await openTerminalRefusal(intent({ sessionId: SESSION }), { owner: false } as never, access()), null);
+  // The owner may use them; a plain window and `background: false` stay open to everyone.
+  assert.equal(await openTerminalRefusal(intent({ background: true, sessionId: SESSION }), { owner: true } as never, access()), null);
+  assert.equal(await openTerminalRefusal(intent({}), null, access()), null);
+  assert.equal(await openTerminalRefusal(intent({ background: false }), null, access()), null);
   assert.equal(await openTerminalRefusal({ action: 'aura.intent.action.VIEW', extras: { command: 'id' } }, null, access()), null);
 });
 

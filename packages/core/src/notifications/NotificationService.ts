@@ -67,7 +67,7 @@ import {
   KEY_ACTIVE, KEY_ALL, NotificationStore, endedAtOf, senderIndexKey, type RedisProvider,
 } from './NotificationStore.js';
 import {
-  DEFAULT_NOTIFICATION_SETTINGS, accessCanRead, accessSeesFull, isViewer, parseNotificationSettings,
+  DEFAULT_NOTIFICATION_SETTINGS, accessCanRead, accessSeesFull, isViewer, ownerAccess, parseNotificationSettings,
   retentionMsFor, viewFor, systemModalLimitFor,
   type Access, type NotificationSettings, type NotificationViewer, type ReadGrant, type ViewerInput,
 } from './access.js';
@@ -335,6 +335,7 @@ export function canRead(viewer: ViewerInput, rec: Pick<Notification, 'senderKey'
   const p = v.principal;
   if (p.kind === 'system') return isSystemCaller(p);
   if (p.kind === 'admin') return true;
+  if (p.kind === 'user') return accessCanRead(ownerAccess(v), rec);
   if (p.kind === 'instance') return rec.senderKey === `app:${p.appId}`;
   if (p.kind === 'apiKey') return rec.senderKey === `key:${p.keyId}`;
   if (!v.screen) return false;
@@ -514,6 +515,7 @@ export class NotificationService {
     const p = v.principal;
     if (p.kind === 'system') return isSystemCaller(p) ? { kind: 'full' } : { kind: 'none' };
     if (p.kind === 'admin') return { kind: 'full' };
+    if (p.kind === 'user') return ownerAccess(v, v.screen ? await this.settings() : undefined);
     if (p.kind === 'instance' || p.kind === 'apiKey') {
       let grant: ReadGrant | null = null;
       try { grant = (await this.authorizer?.readGrant?.(p)) ?? null; } catch { grant = null; }
@@ -639,6 +641,9 @@ export class NotificationService {
     }
     if (caller.kind === 'admin') {
       throw new NotificationError(403, 'an admin session manages grants and keys — it cannot send or change notifications');
+    }
+    if (caller.kind === 'user') {
+      throw new NotificationError(403, 'the owner reads notifications; sending or changing one is an app\'s or an API key\'s');
     }
   }
 

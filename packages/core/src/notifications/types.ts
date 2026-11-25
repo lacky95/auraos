@@ -75,8 +75,24 @@ export interface AdminCaller {
   verification: 'verified';
 }
 
-/** Anyone the service can be called by: a sender, or an admin (reads only). */
-export type NotificationPrincipal = NotificationCaller | AdminCaller;
+/**
+ * The signed-in owner (a `user` principal): from the desktop's login, or
+ * acting through a trusted system UI such as Settings (D45, `through`). The
+ * owner reads every notification (a screen it sends along still sees its lock
+ * view) but is not a sender: sending is an app's or an API key's. Never stored
+ * as a notification's caller.
+ */
+export interface OwnerCaller {
+  kind: 'user';
+  userId: string;
+  role: 'owner';
+  sessionId: string;
+  verification: 'verified';
+  through?: { appId: string; instanceId?: string };
+}
+
+/** Anyone the service can be called by: a sender, or an admin or the owner (reads only). */
+export type NotificationPrincipal = NotificationCaller | AdminCaller | OwnerCaller;
 
 /**
  * The ONLY system caller. Checked by object identity (`caller === SYSTEM_CALLER`),

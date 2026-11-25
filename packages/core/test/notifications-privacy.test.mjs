@@ -459,3 +459,15 @@ test('system and in-process reads stay full', async () => {
   assert.equal(await svc.get(n.id, { kind: 'system', verification: 'internal' }), null, 'a look-alike reads nothing');
   await svc.forceRemove(n.id);
 });
+
+test('the owner (a user principal, e.g. through system Settings, D45) reads everything, keeps a screen\'s lock view, and sends nothing', async () => {
+  settings = DEFAULT_NOTIFICATION_SETTINGS;
+  const OWNER = { kind: 'user', userId: 'u-owner', role: 'owner', sessionId: 'a'.repeat(32), verification: 'verified', through: { appId: 'com.aura.settings', instanceId: 'com.aura.settings-1' } };
+  const n = (await svc.create({ title: 'owner sees', text: 'secret text', visibility: 'secret' }, B)).notification;
+  assert.equal((await svc.get(n.id, OWNER)).text, 'secret text', 'full, without a screen');
+  assert.ok((await svc.list({ state: 'active', limit: 200 }, OWNER)).items.some((x) => x.id === n.id));
+  // With the desktop's client session along, its lock view still applies.
+  assert.equal(await svc.get(n.id, { principal: OWNER, screen: { sid: 'test', lock: 'locked' } }), null);
+  await assert.rejects(svc.create({ title: 'x' }, OWNER), (e) => e instanceof NotificationError && e.status === 403);
+  await svc.forceRemove(n.id);
+});

@@ -12,6 +12,7 @@ import { startFlightService } from './lib/flight/service.js';
 import { captureAccess, createAccessReporter } from './lib/access/guard.ts';
 import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { shellFramePolicy } from './lib/desktop/shellFramePolicy.ts';
+import { runAfterResponse } from './lib/afterResponse.ts';
 
 // Source of truth is the singleton on globalThis — NOT a module-scoped flag.
 // The soft-restart endpoint deletes that singleton; if we tracked init state
@@ -207,11 +208,17 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
     }
   }
   let res: Response;
+  let status = 500;
   try {
     res = await next();
+    status = res.status;
   } catch (err) {
     reportAccess(access, 500);
     throw err;
+  } finally {
+    // PHASE3-C: the post-response hook point (lib/afterResponse.ts), e.g. the
+    // gateway's owner-action audit, with the route's final status.
+    runAfterResponse(ctx.request, status);
   }
   reportAccess(access, res.status);
   // A shell tab registering itself: onboarding cards wait for the first one,

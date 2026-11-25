@@ -60,8 +60,16 @@ export type PrivilegedPermission = typeof PRIVILEGED_PERMISSIONS[number];
 /** What GrantStore accepts. Deliberately not "any permission": no generic bypass. */
 export const GRANTABLE_PERMISSIONS: readonly string[] = [...PRIVILEGED_PERMISSIONS];
 
-export function isPrivilegedPermission(p: string): p is PrivilegedPermission {
-  return (PRIVILEGED_PERMISSIONS as readonly string[]).includes(p);
+/**
+ * Writing an OS-wide KV topic (`/api/kv/os/<topic>`: the theme, keymap, lock
+ * screen, notification settings, ...): one family of privileged permissions,
+ * one per topic. Declaring it only requests it; an admin grants it. The
+ * owner acting through system Settings (D45) is the owner and needs none.
+ */
+export const KV_OS_WRITE_PERMISSION_RE = /^system\.kv\.os\.[A-Za-z0-9_-]{1,128}\.write$/;
+
+export function isPrivilegedPermission(p: string): boolean {
+  return (PRIVILEGED_PERMISSIONS as readonly string[]).includes(p) || KV_OS_WRITE_PERMISSION_RE.test(p);
 }
 
 const SUBJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
@@ -121,8 +129,8 @@ export class GrantStore {
     permission = canonicalPermission(permission);
     if (!SUBJECT_KINDS.includes(subject.kind)) throw new GrantError(400, `subject kind must be one of ${SUBJECT_KINDS.join(', ')}`);
     if (typeof subject.id !== 'string' || !SUBJECT_ID.test(subject.id)) throw new GrantError(400, 'invalid subject id');
-    if (!GRANTABLE_PERMISSIONS.includes(permission)) {
-      throw new GrantError(400, `'${permission}' cannot be granted here — grantable: ${GRANTABLE_PERMISSIONS.join(', ')}`);
+    if (!isPrivilegedPermission(permission)) {
+      throw new GrantError(400, `'${permission}' cannot be granted here — grantable: ${GRANTABLE_PERMISSIONS.join(', ')}, system.kv.os.<topic>.write`);
     }
     if (scope.kind === 'os') return;
     if (scope.kind !== 'terminal-session' || permission !== TERMINAL_EMBED_PERMISSION || subject.kind !== 'app'

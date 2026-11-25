@@ -147,6 +147,11 @@ interface DockerMount { Type?: string; Name?: string; Destination?: string }
 
 const UPDATER_NAME = 'aura-updater';
 
+/** A job id: its start time, `new Date().toISOString()` with `:` and `.` as `-`. Never a path. */
+export const UPDATE_JOB_ID_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/;
+/** A branch to update from. Never an option: it is passed to git. */
+export const UPDATE_BRANCH_RE = /^(?!-)[A-Za-z0-9._\/-]{1,120}$/;
+
 export class SelfUpdater {
   constructor(private readonly dataDir: string) {}
 
@@ -164,13 +169,18 @@ export class SelfUpdater {
   }
   private jobFile(id: string): string { return join(this.jobsDir(), `${id}.json`); }
 
-  /** Read one job, or the most recent one when no id is given. */
+  /**
+   * Read one job, or the most recent one when no id is given. Reads only: a
+   * job whose updater is gone comes back closed, and is written so by the
+   * next `start()`.
+   */
   readJob(id?: string): UpdateJob | null {
     try {
       const dir = this.jobsDir();
       if (!existsSync(dir)) return null;
       let file: string;
-      if (id) {
+      if (id !== undefined) {
+        if (!UPDATE_JOB_ID_RE.test(id)) return null;
         file = this.jobFile(id);
       } else {
         const names = readdirSync(dir).filter((n) => n.endsWith('.json')).sort();
@@ -187,6 +197,7 @@ export class SelfUpdater {
    *  step summaries in the job's `log`. This is what you actually need when a
    *  build fails — compose's error is in here, not in the phase list. */
   readLog(id: string): string | null {
+    if (!UPDATE_JOB_ID_RE.test(id)) return null;
     try {
       const file = join(this.jobsDir(), `${id}.log`);
       if (!existsSync(file)) return null;
@@ -239,8 +250,17 @@ export class SelfUpdater {
       )),
       log: [...job.log, 'the updater container is gone and never acknowledged completion — marking this run failed'],
     };
-    try { writeFileSync(this.jobFile(job.id), JSON.stringify(closed, null, 2)); } catch { /* best effort */ }
     return closed;
+  }
+
+  /** Write the latest job closed when its updater is gone (`start()` only: reads never write). */
+  private settleAbandoned(): void {
+    const job = this.readJob();
+    if (!job || !UPDATE_JOB_ID_RE.test(job.id) || job.phase !== 'failed' || !job.finishedAt) return;
+    try {
+      const stored = JSON.parse(readFileSync(this.jobFile(job.id), 'utf-8')) as UpdateJob;
+      if (stored.phase !== 'failed') writeFileSync(this.jobFile(job.id), JSON.stringify(job, null, 2));
+    } catch { /* best effort */ }
   }
 
   /**
@@ -339,6 +359,10 @@ export class SelfUpdater {
       execFileSync('git', ['-C', ws, '-c', 'safe.directory=' + ws, ...args],
         { stdio: ['ignore', 'pipe', 'ignore'], timeout: 60_000, encoding: 'utf-8' }).trim();
 
+    if (!UPDATE_BRANCH_RE.test(branch)) {
+      out.blockers.push(`Invalid branch name: ${branch}`);
+      return out;
+    }
     const probed = this.probe();
     if (!probed.ok) out.blockers.push(probed.reason);
     if (this.isRunning()) out.blockers.push('An update is already running.');
@@ -391,7 +415,12 @@ export class SelfUpdater {
   start(opts: { mode?: UpdateMode; branch?: string; dryRun?: boolean } = {}):
       { ok: true; job: UpdateJob } | { ok: false; reason: string } {
     const mode: UpdateMode = opts.mode ?? 'update';
+    const branch = (opts.branch ?? 'main').trim();
+    if (!UPDATE_BRANCH_RE.test(branch)) {
+      return { ok: false, reason: `Invalid branch name: ${branch}` };
+    }
     if (this.isRunning()) return { ok: false, reason: 'An update is already running.' };
+    this.settleAbandoned();
     const probed = this.probe();
     if (!probed.ok) return { ok: false, reason: probed.reason };
     // Git preconditions apply to `update` only. A rebuild deliberately builds
@@ -401,14 +430,10 @@ export class SelfUpdater {
       // Re-run the checks here rather than trusting the caller: the UI's
       // pre-flight result can be minutes stale, and a dirty tree that appeared
       // in between must not get rebuilt over.
-      const pre = this.preflight(opts.branch ?? 'main');
+      const pre = this.preflight(branch);
       if (pre.blockers.length) return { ok: false, reason: pre.blockers[0]! };
     }
 
-    const branch = (opts.branch ?? 'main').trim();
-    if (!/^[A-Za-z0-9._\/-]{1,120}$/.test(branch)) {
-      return { ok: false, reason: `Invalid branch name: ${branch}` };
-    }
     const dryRun = opts.dryRun === true;
     // Timestamped id: sorts chronologically, so "latest job" is a plain sort.
     const id = new Date().toISOString().replace(/[:.]/g, '-');

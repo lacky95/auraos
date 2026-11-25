@@ -12,11 +12,12 @@
  *                           made in (`binding`): session names are reused.
  *   terminal.sessions.list  privileged, separate: read every session's metadata.
  *
- * The System Terminal itself (system scope) keeps full control, and an
- * unverified caller (the owner's desktop, the CLI, an agent) is not an app, so
- * nothing here limits it, except OPEN_TERMINAL `command`, which types as the
- * owner and so needs the owner or the System Terminal proved. The rest of
- * deny-by-default for those is Phase 3, the private Terminal ingress Phase 5.
+ * The System Terminal itself (system scope) keeps full control. A caller that
+ * is not a verified app (the owner's desktop, the CLI, an agent, anyone who
+ * can POST) needs the owner proved for the OPEN_TERMINAL extras that reach a
+ * session: `command` types as the owner, `sessionId` opens a window on an
+ * existing session, `background` creates one an app never asked for. A plain
+ * OPEN_TERMINAL stays open to it. The private Terminal ingress is Phase 5.
  *
  * Plain ESM: the router loads it beside the Astro build. @aura/core is
  * imported lazily, and its services are globalThis singletons, so both copies
@@ -261,10 +262,21 @@ export async function shareSession(appId, sessionId, { access = live, grant = gr
   return null;
 }
 
-/** Whether this intent carries OPEN_TERMINAL's `command`, the one extra that needs a proved caller. */
+/** Whether this intent carries OPEN_TERMINAL's `command`, which types as the owner. */
 export function openTerminalCommand(intent) {
   return intent?.action === OPEN_TERMINAL_ACTION && !!intent.extras && typeof intent.extras === 'object'
     && Object.hasOwn(intent.extras, 'command');
+}
+
+/**
+ * Whether this OPEN_TERMINAL reaches a session: `command`, `sessionId`, or
+ * `background: true`. Such an intent needs a proved caller: the System
+ * Terminal, a granted app, or the owner.
+ */
+export function openTerminalNeedsProof(intent) {
+  if (intent?.action !== OPEN_TERMINAL_ACTION || !intent.extras || typeof intent.extras !== 'object') return false;
+  const extras = intent.extras;
+  return Object.hasOwn(extras, 'command') || Object.hasOwn(extras, 'sessionId') || extras.background === true;
 }
 
 /**
@@ -276,14 +288,15 @@ export function openTerminalCommand(intent) {
  *             an unproved caller's (any site can POST a no-cors text/plain body).
  *   `sessionId` opens a window on an existing session: a session the app was granted.
  *   `background` creates one: the app's embed grant.
- * Only `command` limits an owner or unproved caller; see the file header.
+ * The owner may use all three; an unproved caller none (see the file header).
  */
 export async function openTerminalRefusal(intent, caller, access = live) {
   if (intent?.action !== OPEN_TERMINAL_ACTION) return null;
   if (!caller?.appId) {
-    return openTerminalCommand(intent) && caller?.owner !== true
+    if (caller?.owner === true || !openTerminalNeedsProof(intent)) return null;
+    return openTerminalCommand(intent)
       ? 'the OPEN_TERMINAL command extra needs the owner or the System Terminal'
-      : null;
+      : 'the OPEN_TERMINAL sessionId and background extras need the owner or an app granted terminal.embed';
   }
   if (await access.isSystemTerminal(caller.appId)) return null;
   const extras = intent.extras && typeof intent.extras === 'object' ? intent.extras : {};

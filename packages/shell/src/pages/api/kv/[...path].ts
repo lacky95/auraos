@@ -1,10 +1,11 @@
 import type { APIRoute } from 'astro';
-import { getAppManager, OsEventBus, ThemeManager, type ColorMode } from '@aura/core';
+import { getAppManager, getAuthServices, OsEventBus, ThemeManager, type ColorMode } from '@aura/core';
 import { isValidKey, isValidNamespace, type KvNamespace } from '@aura/kv-store';
 import { sharedKv } from '../../../lib/sharedKv.js';
 import { withEtag } from '../../../lib/etag.js';
 import { kvReadAllowed } from '../../../lib/access/kvAccess.ts';
 import { refererAppId } from '../../../lib/access/legacyReferer.ts';
+import { gatewayOwner } from '../../../lib/access/identify.ts';
 
 /**
  * OS-wide key-value store proxy.
@@ -24,7 +25,10 @@ import { refererAppId } from '../../../lib/access/legacyReferer.ts';
  *   • Read `os.*`               — public.
  *   • Read `app/<id>.*`         — caller must be `<id>` (Referer check)
  *                                  or hold `data:app/<id>:read`.
- *   • Write `os.<topic>`        — caller must hold `system.kv.os.<topic>.write`
+ *   • Write `os.<topic>`        — caller must hold `system.kv.os.<topic>.write`,
+ *                                  requested in its manifest AND granted by an
+ *                                  admin (core auth GrantStore); the owner
+ *                                  through system Settings (D45) needs none
  *                                  (or be `'system'` — server-side SSR).
  *   • Write `app/<id>.*`        — caller must be `<id>`.
  */
@@ -65,7 +69,7 @@ export const ALL: APIRoute = async ({ params, request }) => {
   // Permission gate. `'system'` (no Referer, e.g. SSR / curl) is privileged
   // and skips checks — same convention as the content-provider proxy.
   if (sourceAppId !== 'system') {
-    const gate = checkPermission(namespace, key, sourceAppId, method, mgr);
+    const gate = await checkPermission(request, namespace, key, sourceAppId, method, mgr);
     if (gate) return gate;
   }
 
@@ -154,13 +158,14 @@ function serialized<T>(id: string, fn: () => Promise<T>): Promise<T> {
 /**
  * Returns a Response if the caller is forbidden, `null` if they may proceed.
  */
-function checkPermission(
+async function checkPermission(
+  request:   Request,
   namespace: KvNamespace,
   key:       string,
   sourceAppId: string,
   method:    string,
   mgr:       ReturnType<typeof getAppManager>,
-): Response | null {
+): Promise<Response | null> {
   const isRead  = method === 'GET' || method === 'HEAD';
   if (isRead && kvReadAllowed(namespace, sourceAppId)) return null;
 
@@ -169,8 +174,8 @@ function checkPermission(
     // `theme.colorMode` ⇒ permission `system.kv.os.theme.write`.
     const topic = key.split(/[./]/, 1)[0]!;
     const permKey = `system.kv.os.${topic}.write`;
-    if (mgr.permissions.hasPermission(sourceAppId, permKey)) return null;
-    return jsonError(`Permission denied: ${permKey}`, 403);
+    if (await mayWriteOs(request, sourceAppId, permKey, mgr)) return null;
+    return jsonError(`Permission denied: ${permKey} (requested in the manifest and granted by an admin: aura grant notif-perms ${sourceAppId} ${permKey})`, 403);
   }
 
   // namespace === 'app/<id>': must be the same app.
@@ -179,6 +184,24 @@ function checkPermission(
   // Cross-app read can be granted later via `data:app/<id>:read`; for now
   // refuse everything but same-app.
   return jsonError(`Cross-app access to ${namespace} requires same-app caller (saw '${sourceAppId}')`, 403);
+}
+
+/**
+ * An `os` write: the owner through system Settings (D45, identify.ts
+ * `gatewayOwner`) is the owner; an app needs `permKey` requested in its
+ * manifest and granted (core auth `Authorizer`: it is privileged, so
+ * declaring it alone grants nothing). Fails closed.
+ */
+async function mayWriteOs(
+  request: Request, sourceAppId: string, permKey: string, mgr: ReturnType<typeof getAppManager>,
+): Promise<boolean> {
+  try {
+    if (await gatewayOwner(request, { mgr })) return true;
+    const principal = { kind: 'instance', appId: sourceAppId, instanceId: sourceAppId, verification: 'verified' } as const;
+    return (await getAuthServices().authorizer.authorize(principal, permKey)).allow;
+  } catch {
+    return false;
+  }
 }
 
 function jsonResponse(body: unknown, status = 200): Response {

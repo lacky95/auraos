@@ -13,6 +13,13 @@
  * so back/forward walk our own list — same way every native browser UI
  * separates "tab history" from the underlying window history.
  *
+ * The engine is a sandbox: the page in it gets scripts but never this
+ * frame's origin (no `allow-same-origin`, which together with scripts would
+ * let a page served from this App Host lift its own sandbox), and its popups
+ * stay sandboxed too. Pages it opens get no Referer, so visited sites never
+ * learn the App Host's URL. The cost: a page runs with an opaque origin, so
+ * a site that needs its own cookies or storage (a sign-in) can fail here.
+ *
  * Practical limit users will hit: most popular sites set
  * `X-Frame-Options: DENY` or `Content-Security-Policy: frame-ancestors`
  * which forbid being framed. Those refuse to load and the iframe stays
@@ -98,9 +105,9 @@ const FRAME_NAME = JSON.stringify({
         name={FRAME_NAME}
         data-home={DEFAULT_HOME}
         src={INITIAL_URL}
-        referrerpolicy="no-referrer-when-downgrade"
+        referrerpolicy="no-referrer"
         allow="clipboard-read; clipboard-write; fullscreen"
-        sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
+        sandbox="allow-scripts allow-forms allow-popups allow-modals allow-downloads"
       ></iframe>
       <aside id="debug-panel" class="debug-panel" hidden aria-label="Debug">
         <header class="debug-head">
@@ -711,9 +718,9 @@ const FRAME_NAME = JSON.stringify({
           var ms = Math.round(performance.now() - navStartedAt);
           dbgSetLoadMs(ms);
           dbgSetState('idle');
-          // Same-origin frames let us peek contentWindow.location to
-          // capture user-driven nav (link clicks). Cross-origin throws;
-          // we just trust the URL we set ourselves in that case.
+          // A sandboxed page is never same-origin with us, so reading
+          // contentWindow.location throws and we trust the URL we set
+          // ourselves (the host's URL relay below fills in link clicks).
           try {
             var real = engine.contentWindow && engine.contentWindow.location.href;
             pageTitle = (engine.contentDocument && engine.contentDocument.title) || '';

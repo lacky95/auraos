@@ -1,6 +1,10 @@
 import type { APIRoute } from 'astro';
 import { OsEventBus, compileTopicMatcher, getAppManager, parseTopicsParam, createLogger } from '@aura/core';
-import { gatewayEventView } from '../../../lib/access/gatewayEvents.ts';
+import type { Principal } from '@aura/core';
+import { gatewayEventView, principalEventView, type GatewayEventView } from '../../../lib/access/gatewayEvents.ts';
+import { authenticate } from '../../../lib/auth.ts';
+import { followSession, streamSessionOf } from '../../../lib/streamSession.ts';
+import { isSystemTerminal } from '../../../../server/terminal-embed.mjs';
 
 const log = createLogger('sse');
 let nextStreamId = 1;
@@ -12,16 +16,32 @@ let nextStreamId = 1;
  * `<intent-filter>` registration on a BroadcastReceiver, so consumers stop
  * paying for event types they don't care about.
  *
- * An App Host caller gets its own filtered view (lib/access/gatewayEvents.ts).
+ * An app instance gets its own filtered view (lib/access/gatewayEvents.ts):
+ * an App Host caller, and an instance that presents its own token (the SDK's
+ * server side, sidecars). The System Terminal's own instance keeps the whole
+ * stream: it is the owner's terminal (D29), where `aura events` and
+ * `aura ps -w` run. A stream opened on a sign-in (the desktop's login, an App
+ * Host frame, an admin session) ends when that sign-in is revoked or expires
+ * (lib/streamSession.ts).
  */
-export const GET: APIRoute = ({ url, request }) => {
-  const view = gatewayEventView(request, { getInstance: (id) => getAppManager().getInstance(id) });
-  if (view === 'invalid') {
+export const GET: APIRoute = async ({ url, request }) => {
+  const mgr = getAppManager();
+  const gateway = gatewayEventView(request, { getInstance: (id) => mgr.getInstance(id) });
+  if (gateway === 'invalid') {
     return new Response(JSON.stringify({ error: 'gateway-identity-invalid' }), {
       status: 401,
       headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
     });
   }
+  let view: GatewayEventView | null = gateway;
+  let principal: Principal | null = null;
+  if (!view) {
+    const p = await authenticate(request);
+    if (p instanceof Response) return p;
+    principal = p;
+    view = await principalEventView(p, { getInstance: (id) => mgr.getInstance(id) }, isSystemTerminal);
+  }
+  const session = streamSessionOf(request, principal);
   const topics = parseTopicsParam(url.searchParams.get('topics'));
   // null → firehose (no filter); [] is technically impossible here because
   // parseTopicsParam collapses empty lists to null. A populated array →
@@ -107,20 +127,26 @@ export const GET: APIRoute = ({ url, request }) => {
       OsEventBus.on('app:restarted',       onRestarted);
       OsEventBus.on('app:restartFailed',   onRestartFailed);
 
+      const end = () => {
+        if (closed) return;
+        closed = true;
+        cleanup();
+        try { controller.close(); } catch { /* already closed */ }
+      };
+      // The sign-in this stream was opened on: revoked or expired ends it.
+      const following = session ? followSession(session, end) : null;
+
       // 10s keeps idle connections from being killed by reverse proxies
       // (Nginx default 60s, Cloudflare 100s) without flooding the wire.
       const heartbeat = setInterval(() => {
-        if (view && !view.live()) {
-          closed = true;
-          cleanup();
-          try { controller.close(); } catch { /* already closed */ }
-          return;
-        }
+        if (view && !view.live()) { end(); return; }
+        following?.recheck();
         safeEnqueue(encoder.encode(': hb\n\n'));
       }, 10_000);
 
       const cleanup = () => {
         log.info('close', `#${streamId}`, 'dur=', `${Date.now() - t0}ms`);
+        following?.stop();
         clearInterval(heartbeat);
         OsEventBus.off('app:stateChanged',   onStateChanged);
         OsEventBus.off('app:crashed',        onCrashed);

@@ -45,8 +45,10 @@ export function notifPermission(name: string): string {
   }
   // The owner's Terminal grants (D25) go by their full name.
   if (name === 'terminal.embed' || name === 'terminal.sessions.list') return name;
+  // Writing an OS-wide KV topic (system.kv.os.<topic>.write) also goes by its full name.
+  if (/^system\.kv\.os\.[A-Za-z0-9_-]{1,128}\.write$/.test(name)) return name;
   const p = FEATURES[name];
-  if (!p) fail(`unknown notification permission '${name}' — use locked | popup | read | systemModal, or terminal.embed | terminal.sessions.list`);
+  if (!p) fail(`unknown notification permission '${name}' — use locked | popup | read | systemModal, or terminal.embed | terminal.sessions.list | system.kv.os.<topic>.write`);
   return p!;
 }
 

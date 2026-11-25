@@ -5,6 +5,8 @@ import * as core from '@aura/core';
 // with its client session); Stage 2 gives notifications the `user` principal.
 import { authenticateLegacy } from '../../../lib/auth.js';
 import { viewerFor } from '../../../lib/clientSession.js';
+import { authenticate } from '../../../lib/auth.js';
+import { followSession, streamSessionOf, type StreamSession } from '../../../lib/streamSession.ts';
 
 /**
  * Live notification feed (SSE) with catch-up.
@@ -42,6 +44,10 @@ import { viewerFor } from '../../../lib/clientSession.js';
  *     with heartbeats only);
  *   - admin sessions: everything.
  * An invalid credential → 401.
+ *
+ * A stream opened on a sign-in (the desktop's login, an App Host frame, an
+ * admin session) ends when that sign-in is revoked or expires
+ * (lib/streamSession.ts); the client reconnects through the checks above.
  */
 const EVENT_NAMES = [
   'created', 'updated', 'displayed', 'seen', 'resolved', 'removed', 'interacted',
@@ -67,6 +73,7 @@ let nextStreamNo = 1;
 export const GET: APIRoute = async ({ request, url }) => {
   const principal = await authenticateLegacy(request);
   if (principal instanceof Response) return principal;
+  const session = await openedOn(request);
   const since = (request.headers.get('last-event-id') ?? url.searchParams.get('since') ?? '').trim();
   const svc = core.getNotificationService();
   // Access is resolved per event (cached for a second), so a lock / unlock
@@ -127,9 +134,17 @@ export const GET: APIRoute = async ({ request, url }) => {
         return [`notification:${event}`, fn] as const;
       });
 
-      const heartbeat = setInterval(() => write(': hb\n\n'), 10_000);
+      const end = () => {
+        if (closed) return;
+        cleanup();
+        try { controller.close(); } catch { /* already closed */ }
+      };
+      // The sign-in this stream was opened on: revoked or expired ends it.
+      const following = session ? followSession(session, end) : null;
+      const heartbeat = setInterval(() => { following?.recheck(); write(': hb\n\n'); }, 10_000);
       cleanup = () => {
         closed = true;
+        following?.stop();
         clearInterval(heartbeat);
         for (const [type, fn] of handlers) bus.off(type, fn);
       };
@@ -179,3 +194,12 @@ export const GET: APIRoute = async ({ request, url }) => {
     },
   });
 };
+
+/**
+ * The sign-in this stream follows. Asked of the one resolver, not of the
+ * legacy caller above, which reads the owner's login as an anonymous screen.
+ */
+async function openedOn(request: Request): Promise<StreamSession | null> {
+  const p = await authenticate(request);
+  return streamSessionOf(request, p instanceof Response ? null : p);
+}
