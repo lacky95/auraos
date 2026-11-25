@@ -94,7 +94,7 @@ export async function grantNotif(verb: 'grant' | 'revoke', appId: string, featur
   }
 }
 
-function fmtTime(ms: number): string {
+export function fmtTime(ms: number): string {
   return new Date(ms).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
 }
 

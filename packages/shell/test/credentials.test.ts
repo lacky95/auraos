@@ -17,7 +17,7 @@ import {
 } from '../src/lib/credentials.ts';
 import { readContext } from '../src/lib/appContract.ts';
 import { approvalBelongsToSender, authorizeShellMessage, type ChannelSender } from '../src/lib/auraChannelShell.ts';
-import { parseApprovalView } from '../src/lib/approvals/dialogClient.ts';
+import { parseApprovalView, secretTransportNotice, SECRET_OVER_HTTP_NOTICE } from '../src/lib/approvals/dialogClient.ts';
 import { ROUTE_ACCESS_MANIFEST } from '../src/lib/access/routeManifest.ts';
 import type { ResolvedPrincipal } from '../src/lib/access/identify.ts';
 
@@ -98,6 +98,8 @@ let vault: core.CredentialVault;
 let caller: Principal;
 let via: string;
 let responses: string[];
+/** The desktop's scheme as the shell sees it (D56: HTTP stays allowed, with a notice). */
+let scheme: 'http' | 'https';
 
 function deps(): CredentialDeps & ApprovalRouteDeps {
   const d: CredentialDeps & ApprovalRouteDeps = {
@@ -110,7 +112,7 @@ function deps(): CredentialDeps & ApprovalRouteDeps {
     },
     authenticate: async () => caller as never,
     resolve: async () => ({ principal: caller, via } as unknown as ResolvedPrincipal),
-    shellOwner: async () => ({ owner: { userId: 'default', sessionId: 'sess-desk', username: 'owner' }, scheme: 'https' }),
+    shellOwner: async () => ({ owner: { userId: 'default', sessionId: 'sess-desk', username: 'owner' }, scheme }),
     ownerRead: async () => ({ userId: 'default', sessionId: 'sess-desk', username: 'owner' }),
     lockOf: async () => 'unlocked',
     verifyPassword: async (_u, p) => (p === PASSWORD ? 'ok' : 'invalid'),
@@ -132,6 +134,7 @@ beforeEach(() => {
   caller = NOTES;
   via = 'instance-token';
   responses = [];
+  scheme = 'https';
 });
 
 const req = (method: string, path: string, body?: unknown, headers: Record<string, string> = {}) => new Request(`http://shell.test${path}`, {
@@ -230,6 +233,21 @@ test('the secret is typed only in the dialog: approve needs it, the operator can
   const viaApp = await read(await decideApproval(ctx('POST', `/api/approvals/${r.body.id}/approve`, { secret: SECRET }, { ...desk, authorization: 'Bearer aura1.x' }), r.body.id, 'approve', deps()));
   assert.equal(viaApp.status, 403);
   assert.deepEqual(await vault.list('default'), []);
+});
+
+test('over plain HTTP a secret can still be stored, and the dialog says the connection is not encrypted; on HTTPS it says nothing', async () => {
+  assert.equal(SECRET_OVER_HTTP_NOTICE, 'This connection is not encrypted — use HTTPS for sensitive secrets.');
+  assert.equal(secretTransportNotice('credential.store', 'http:'), SECRET_OVER_HTTP_NOTICE);
+  assert.equal(secretTransportNotice('credential.store', 'https:'), null);
+  assert.equal(secretTransportNotice('context.set', 'http:'), null, 'only the secret field gets the notice');
+  scheme = 'http';
+  const r = await ask();
+  assert.equal(r.status, 201);
+  const view = parseApprovalView({ ...r.body, appId: 'com.example.notes' });
+  assert.equal(secretTransportNotice(view!.action, 'http:'), SECRET_OVER_HTTP_NOTICE);
+  assert.equal((await ownerDecides(r.body.id, 'approve', { secret: SECRET })).status, 200, 'D56: HTTP is not refused');
+  assert.equal((await collect(r.body.id)).status, 200);
+  assert.deepEqual((await vault.list('default')).map((c) => c.name), ['GITHUB_TOKEN']);
 });
 
 test('handle by default: the requester gets {handle, name}, never the value; nothing leaks to replies, logs, audit or storage', async () => {

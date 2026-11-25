@@ -439,7 +439,13 @@ test('enforce: the owner SSR claim grants nothing on its own, replayed, stale, f
       } as unknown as GatewayIdentityClaim),
     };
   })();
-  const forged = { [OWNER_SSR_HEADER]: ownerSsr()[OWNER_SSR_HEADER].replace(/.$/, (ch) => (ch === 'A' ? 'B' : 'A')) };
+  // Flip the signature's first character: it carries 6 full bits of the MAC's first byte. (The last
+  // base64url character of a 32-byte MAC is mostly padding bits, so flipping it could still verify.)
+  const forged = (() => {
+    const [prefix, payload, sig = ''] = ownerSsr()[OWNER_SSR_HEADER].split('.');
+    assert.ok(sig.length > 1);
+    return { [OWNER_SSR_HEADER]: `${prefix}.${payload}.${sig[0] === 'A' ? 'B' : 'A'}${sig.slice(1)}` };
+  })();
   for (const c of SSR_READS) {
     const cases: Array<[string, Record<string, string>, string]> = [
       ['no instance token', ownerSsr(), '401 unauthenticated'],

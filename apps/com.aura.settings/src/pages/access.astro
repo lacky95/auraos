@@ -330,47 +330,8 @@ const modalApps = apps.filter((a) => requests(a, 'notifications.systemModal'));
       const fmt = (ms) => (ms ? new Date(ms).toLocaleString() : '—');
       const label = (p) => (p === 'notifications.systemModal' ? 'System modal' : p.replace('notifications.', ''));
 
-      /*
-       * Ask AuraOS to show the approval this change created, in the Shell's
-       * own dialog. Resolves true only when the owner approved it there.
-       */
-      function askOwner(approvalId) {
-        return new Promise((resolve) => {
-          if (!window.auraOs || !window.auraOs.appHost()) { resolve(false); return; }
-          const requestId = Math.random().toString(36).slice(2); // correlation only
-          const onResult = (ev) => {
-            if (!window.auraOs.isFromShell(ev)) return;
-            const d = ev.data;
-            if (!d || d.type !== 'aura.approval.result' || d.requestId !== requestId) return;
-            window.removeEventListener('message', onResult);
-            resolve(d.ok === true && d.approvalId === approvalId);
-          };
-          window.addEventListener('message', onResult);
-          window.auraOs.postToShell({ type: 'aura.approval.request', requestId, approvalId });
-        });
-      }
-
-      /*
-       * An owner call through the gateway (D45): reads answer at once; a
-       * change answers 202 needs-approval, the owner decides in the Shell's
-       * dialog, and the same change goes again with that approval.
-       */
-      async function owner(method, path, body) {
-        let approvalId = null;
-        for (;;) {
-          const headers = body ? { 'Content-Type': 'application/json' } : { ...window.auraOs.bodylessHeaders() };
-          if (approvalId) headers['X-Aura-Approval'] = approvalId;
-          const r = await fetch(window.auraOs.url(path), { method, headers, body: body ? JSON.stringify(body) : undefined });
-          const data = await r.json().catch(() => ({}));
-          if (r.status === 202 && data.needsApproval && data.approvalId && !approvalId) {
-            if (!(await askOwner(data.approvalId))) throw new Error('cancelled');
-            approvalId = data.approvalId;
-            continue;
-          }
-          if (!r.ok) throw new Error(data.message || data.error || `HTTP ${r.status}`);
-          return data;
-        }
-      }
+      /* An owner call through the gateway, approval included (scripts/os.ts). */
+      const owner = (method, path, body) => window.auraOs.owner(method, path, body);
 
       async function loadGrants() {
         const d = await owner('GET', '/api/admin/grants');

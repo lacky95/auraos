@@ -135,7 +135,11 @@ const token = await osClient.credentials.get(handle);
 
 Once the owner allowed the read, `osClient.context.get('GITHUB_TOKEN')`
 returns it too. The owner sees and revokes it in Settings → Users &
-Identities → Secrets. From the Terminal: `aura secret ask NAME --for <app>`.
+Identities → Secrets. From the Terminal: `aura secret ask NAME --for <app>`,
+`aura secret ls` (names, apps and last use, never a value) and
+`aura secret rm NAME [--app <app>]` (with the owner's approval, like the
+Revoke in Settings). Over plain HTTP the dialog still takes the secret, with
+a notice that the connection is not encrypted: use HTTPS for sensitive ones.
 
 **Checklist**
 

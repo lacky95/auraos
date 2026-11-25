@@ -293,39 +293,8 @@ const MAX = 128;
       });
 
       // ── secrets (D56) ────────────────────────────────────────────────
-      /* Ask AuraOS to show the approval a change created, in the Shell's own dialog. */
-      function askOwner(approvalId) {
-        return new Promise((resolve) => {
-          if (!window.auraOs || !window.auraOs.appHost()) { resolve(false); return; }
-          const requestId = Math.random().toString(36).slice(2); // correlation only
-          const onResult = (ev) => {
-            if (!window.auraOs.isFromShell(ev)) return;
-            const d = ev.data;
-            if (!d || d.type !== 'aura.approval.result' || d.requestId !== requestId) return;
-            window.removeEventListener('message', onResult);
-            resolve(d.ok === true && d.approvalId === approvalId);
-          };
-          window.addEventListener('message', onResult);
-          window.auraOs.postToShell({ type: 'aura.approval.request', requestId, approvalId });
-        });
-      }
-      /* An owner call through the gateway (D45): a read answers at once, a change after the owner's approval. */
-      async function owner(method, path) {
-        let approvalId = null;
-        for (;;) {
-          const headers = { ...window.auraOs.bodylessHeaders() };
-          if (approvalId) headers['X-Aura-Approval'] = approvalId;
-          const r = await fetch(window.auraOs.url(path), { method, headers });
-          const data = await r.json().catch(() => ({}));
-          if (r.status === 202 && data.needsApproval && data.approvalId && !approvalId) {
-            if (!(await askOwner(data.approvalId))) throw new Error('cancelled');
-            approvalId = data.approvalId;
-            continue;
-          }
-          if (!r.ok) throw new Error(data.message || data.error || `HTTP ${r.status}`);
-          return data;
-        }
-      }
+      /* An owner call through the gateway, approval included (scripts/os.ts). */
+      const owner = (method, path) => window.auraOs.owner(method, path);
       function renderSecrets(list) {
         const used = (c) => c.consumers.length ? c.consumers.map((a) => `
           <div class="row-inline">
