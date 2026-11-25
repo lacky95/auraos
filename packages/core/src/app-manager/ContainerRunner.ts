@@ -99,6 +99,62 @@ export function pickVolumeByDestination(mounts: DockerMount[], destination: stri
 // ASTRO_START_SHELL, chosen per start via AURA_SERVE (appBuild.ts serveState).
 const SYNTHESISED_ENTRYPOINT = ASTRO_START_SHELL;
 
+/** What `docker inspect` says about a container name; null when no such container. */
+export interface ContainerNameState { id: string; status: string }
+
+export interface ClearContainerNameDeps {
+  inspect: (name: string) => Promise<ContainerNameState | null>;
+  remove: (ref: string) => Promise<void>;
+  sleep: (ms: number) => Promise<void>;
+  /** True when `id` is the container a live instance is using right now. */
+  isLive: (id: string) => boolean;
+  timeoutMs?: number;
+  pollMs?: number;
+}
+
+/**
+ * Make sure no container holds `name` before `docker run --name <name>`.
+ *
+ * App containers run with `--rm`, so after `docker stop` returns the daemon
+ * removes the container asynchronously. A `docker rm -f` in that window fails
+ * with "removal … already in progress" and returns at once, and an immediate
+ * `docker run` then hits "Conflict. The container name … is already in use".
+ * So: wait while the container is `removing`, force-remove any other leftover
+ * (exited, created, dead, or an untracked orphan), and re-check until the name
+ * is free. A container a live instance is still using is never removed.
+ */
+export async function clearContainerName(name: string, deps: ClearContainerNameDeps): Promise<void> {
+  const timeoutMs = deps.timeoutMs ?? 20_000;
+  const pollMs = deps.pollMs ?? 200;
+  const deadline = Date.now() + timeoutMs;
+  let last = 'unknown';
+  for (;;) {
+    const st = await deps.inspect(name);
+    if (!st) return;
+    last = st.status;
+    if (deps.isLive(st.id)) {
+      throw new Error(`container name ${name} is in use by live container ${st.id.slice(0, 12)} (${st.status})`);
+    }
+    if (st.status !== 'removing') {
+      try { await deps.remove(st.id); } catch { /* removal may already be under way; re-check below */ }
+    }
+    if (Date.now() >= deadline) break;
+    await deps.sleep(pollMs);
+  }
+  throw new Error(`container name ${name} still taken after ${timeoutMs} ms (state=${last})`);
+}
+
+async function dockerInspectState(name: string): Promise<ContainerNameState | null> {
+  try {
+    const { stdout } = await execFileAsync('docker', ['inspect', '-f', '{{.Id}} {{.State.Status}}', name], { timeout: 5_000 });
+    const [id, status] = stdout.trim().split(/\s+/);
+    return id ? { id, status: status ?? 'unknown' } : null;
+  } catch (err) {
+    if (/no such (object|container)/i.test(String((err as { stderr?: string }).stderr ?? (err as Error).message))) return null;
+    throw err;
+  }
+}
+
 interface TrackedContainer {
   /** Watches the app's log to tell "installing dependencies" from "failing
    *  to boot", so the health deadline can stay open for the former. */
@@ -269,10 +325,15 @@ export class ContainerRunner implements SandboxRunner {
     this.provisionToolsDir(instanceId, manifest);
 
     const hostname = this.containerName(instanceId);
-    // Remove any stale container with the same name (orphaned by a previous
-    // crash); --rm would have cleaned a normal exit, but `kill -9` of the
-    // shell can leave them behind.
-    try { execSync(`docker rm -f ${hostname}`, { stdio: 'ignore', timeout: 5_000 }); } catch { /* didn't exist */ }
+    // The name must be free before `docker run`: a leftover from a crashed
+    // shell, or — on a restart — the previous container that `--rm` is still
+    // removing after kill()'s `docker stop` returned.
+    await clearContainerName(hostname, {
+      inspect: dockerInspectState,
+      remove: async (ref) => { await execFileAsync('docker', ['rm', '-f', ref], { timeout: 10_000 }); },
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      isLive: (id) => this.containers.get(instanceId)?.containerId === id,
+    });
 
     // Resolve OS Context (env/secret) LIVE from Valkey on every spawn so a
     // respawned app always sees current values (the master never restarts,
