@@ -14,18 +14,21 @@
 import { createHash, createHmac, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import type { Redis } from '@aura/kv-store';
 import { consumeClaimedTicket, isClaimedTicket } from './claimedTickets.js';
+import { IDENTITY_AUDIT_ACTIONS, userAttribution, type AuditInput } from './AdminAudit.js';
 import { deriveIdentitySubkey, IdentityKeyError, identityKeyStatus, type IdentityKeyStatus } from './identityKey.js';
 import {
   DEFAULT_OWNER_ID,
   type LoginSessions, type PasswordCheck, type SetupTicket, type UserAccount, type UserStore,
 } from './identityContracts.js';
+import {
+  DEFAULT_PASSWORD_POLICY, PASSWORD_MAX_BYTES, parsePasswordPolicy, passwordViolation,
+  type PasswordPolicy, type PasswordRule,
+} from './passwordPolicy.js';
 import type { UserRole } from './types.js';
 
 export const OWNER_RECORD_KEY = `user:${DEFAULT_OWNER_ID}`;
-/** The one password policy; the login surface imports it. In characters. */
-export const PASSWORD_MIN_LENGTH = 12;
-/** In UTF-8 bytes. Longer input is refused before hashing. */
-export const PASSWORD_MAX_BYTES = 512;
+/** The sealed password policy (passwordPolicy.ts). Missing means the defaults. */
+export const PASSWORD_POLICY_KEY = 'user:policy:password';
 export const USERNAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/;
 export const LOGIN_ATTEMPTS_PER_KEY_PER_MINUTE = 10;
 
@@ -36,7 +39,12 @@ const MAX_QUEUED_VERIFIES = 8;
 const SET_IF_UNCHANGED = `if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('SET', KEYS[1], ARGV[2]) return 1 end return 0`;
 
 export class UserStoreError extends Error {
-  constructor(readonly code: 'invalid-username' | 'invalid-password', message: string) {
+  constructor(
+    readonly code: 'invalid-username' | 'invalid-password' | 'invalid-policy',
+    message: string,
+    /** For `invalid-password`: the rule the password broke. */
+    readonly rule?: PasswordRule,
+  ) {
     super(message);
     this.name = 'UserStoreError';
   }
@@ -54,6 +62,21 @@ export type OwnerRecoveryResult =
     sessionsRevoked: number | null;
   }
   | { ok: false; reason: 'invalid-ticket' | 'no-owner' | 'username-mismatch' | 'identity-key-unavailable' | 'conflict' };
+
+/** `invalid` covers a wrong current password and a caller that is not the enabled owner. */
+export type OwnerCredentialRefusal = { ok: false; reason: 'invalid' | 'rate-limited' | 'conflict' };
+
+export type PasswordChangeResult =
+  | {
+    ok: true;
+    /** The owner's other sessions that were signed out; null when revoking failed. */
+    sessionsRevoked: number | null;
+  }
+  | OwnerCredentialRefusal;
+
+export type PasswordPolicyChangeResult =
+  | { ok: true; previous: PasswordPolicy; policy: PasswordPolicy }
+  | OwnerCredentialRefusal;
 
 export interface OwnerRecoveryEvent {
   username: string;
@@ -104,18 +127,24 @@ const dummyHash = (): string =>
 const normalizeUsername = (u: string) => u.trim().toLowerCase();
 const accountOf = ({ passwordHash: _omit, ...account }: StoredUser): UserAccount => account;
 
-export const passwordWithinMax = (password: string): boolean => Buffer.byteLength(password) <= PASSWORD_MAX_BYTES;
-export const passwordAcceptable = (password: string): boolean =>
-  [...password].length >= PASSWORD_MIN_LENGTH && passwordWithinMax(password);
+const RULE_MESSAGES: Record<PasswordRule, (p: PasswordPolicy) => string> = {
+  length: (p) => `password must have at least ${p.minLength} characters`,
+  'max-bytes': () => `password must be at most ${PASSWORD_MAX_BYTES} bytes`,
+  classes: (p) => `password must use at least ${p.requiredClasses} of lowercase, uppercase, digits and other characters`,
+  username: () => 'password must differ from the username',
+};
 
-function assertPassword(password: unknown): asserts password is string {
-  if (typeof password !== 'string' || [...password].length < PASSWORD_MIN_LENGTH) {
-    throw new UserStoreError('invalid-password', `password must have at least ${PASSWORD_MIN_LENGTH} characters`);
-  }
-  if (Buffer.byteLength(password) > PASSWORD_MAX_BYTES) {
-    throw new UserStoreError('invalid-password', `password must be at most ${PASSWORD_MAX_BYTES} bytes`);
-  }
+/** The one check for a new password: setup, recovery and change all call it. */
+function assertPassword(
+  password: unknown,
+  opts: { username?: string; policy: PasswordPolicy },
+): asserts password is string {
+  const rule = passwordViolation(password, opts);
+  if (rule) throw new UserStoreError('invalid-password', RULE_MESSAGES[rule](opts.policy), rule);
 }
+
+const policyEquals = (a: PasswordPolicy, b: PasswordPolicy) =>
+  a.minLength === b.minLength && a.requiredClasses === b.requiredClasses && a.differFromUsername === b.differFromUsername;
 
 /** Display-only metadata from a record that failed its MAC. */
 function untrustedCreatedAt(raw: string, fallback: number): number {
@@ -135,10 +164,14 @@ export interface ValkeyUserStoreOptions {
   onTampered?: () => void;
   /** identity.key is unusable, so password login is disabled. Reported once per outage. */
   onIdentityKeyError?: (err: IdentityKeyError) => void;
-  /** Required by `recoverOwnerPassword`, which revokes every password session. */
-  sessions?: Pick<LoginSessions, 'revokeByMethod'>;
+  /** Required by `recoverOwnerPassword` (every password session) and `changeOwnerPassword` (the owner's others). */
+  sessions?: Pick<LoginSessions, 'revokeByMethod' | 'revokeByUser'>;
   /** Audit hook for a completed recovery. Its failure never undoes the recovery. */
   onOwnerRecovered?: (e: OwnerRecoveryEvent) => Promise<void> | void;
+  /** The audit trail for password and policy changes. Its failure never undoes the change. */
+  audit?: { record(entry: AuditInput): Promise<unknown> };
+  /** The stored password policy failed its MAC, so the defaults apply. Reported once per record. */
+  onPolicyTampered?: () => void;
 }
 
 export class ValkeyUserStore implements UserStore {
@@ -147,11 +180,15 @@ export class ValkeyUserStore implements UserStore {
   private readonly identityKeyFile: string;
   private readonly onTampered?: () => void;
   private readonly onIdentityKeyError?: (err: IdentityKeyError) => void;
-  private readonly sessions?: Pick<LoginSessions, 'revokeByMethod'>;
+  private readonly sessions?: Pick<LoginSessions, 'revokeByMethod' | 'revokeByUser'>;
   private readonly onOwnerRecovered?: (e: OwnerRecoveryEvent) => Promise<void> | void;
+  private readonly audit?: { record(entry: AuditInput): Promise<unknown> };
+  private readonly onPolicyTampered?: () => void;
   private keyErrorReported = false;
   /** Digest of the last bad record, so one tampering is reported once. */
   private reportedTamper: string | null = null;
+  /** The same for the policy record. */
+  private reportedPolicyTamper: string | null = null;
   private epoch = 0;
 
   constructor(opts: ValkeyUserStoreOptions) {
@@ -162,6 +199,8 @@ export class ValkeyUserStore implements UserStore {
     this.onIdentityKeyError = opts.onIdentityKeyError;
     this.sessions = opts.sessions;
     this.onOwnerRecovered = opts.onOwnerRecovered;
+    this.audit = opts.audit;
+    this.onPolicyTampered = opts.onPolicyTampered;
   }
 
   private mac(u: StoredUser): Buffer {
@@ -181,7 +220,7 @@ export class ValkeyUserStore implements UserStore {
   }
 
   /**
-   * Moves after each password recovery and before its sessions are revoked. A
+   * Moves after each password recovery or change, before sessions are revoked. A
    * login that checked the old password compares this after issuing: either
    * the revoke removed its session, or it sees the change and revokes it.
    */
@@ -240,7 +279,7 @@ export class ValkeyUserStore implements UserStore {
     if (!USERNAME_PATTERN.test(username)) {
       throw new UserStoreError('invalid-username', 'username must be 1-32 letters, digits, ".", "_" or "-"');
     }
-    assertPassword(input.password);
+    assertPassword(input.password, { username, policy: await this.getPasswordPolicy() });
     if (await this.hasOwner()) return null; // Skip the expensive hash; SET NX below is the real guard.
     deriveIdentitySubkey(this.identityKeyFile, 'user-record'); // Fail before hashing on a bad key.
     const user: StoredUser = {
@@ -309,13 +348,16 @@ export class ValkeyUserStore implements UserStore {
    * re-enabled. Audited through `onOwnerRecovered`.
    */
   async recoverOwnerPassword(ticket: SetupTicket, password: string): Promise<OwnerRecoveryResult> {
-    assertPassword(password);
+    const policy = await this.getPasswordPolicy();
+    assertPassword(password, { policy });
     if (!this.sessions) throw new Error('recoverOwnerPassword needs a session store');
     if (!isClaimedTicket(ticket) || ticket.purpose !== 'reset' || ticket.expiresAt <= this.now()) {
       return { ok: false, reason: 'invalid-ticket' };
     }
     const ticketName = typeof ticket.username === 'string' ? normalizeUsername(ticket.username) : '';
     if (!USERNAME_PATTERN.test(ticketName)) return { ok: false, reason: 'invalid-ticket' };
+    // The username is known only from the ticket, so this rule is checked here.
+    assertPassword(password, { username: ticketName, policy });
     try {
       deriveIdentitySubkey(this.identityKeyFile, 'user-record');
     } catch (err) {
@@ -352,5 +394,152 @@ export class ValkeyUserStore implements UserStore {
       });
     } catch { /* the recovery itself succeeded */ }
     return { ok: true, user: accountOf(user), recordTrusted: !!trusted, sessionsRevoked };
+  }
+
+  // ── password policy ───────────────────────────────────────────────────────
+
+  private policyMac(p: PasswordPolicy): Buffer {
+    const key = deriveIdentitySubkey(this.identityKeyFile, 'password-policy');
+    const canonical = JSON.stringify([PASSWORD_POLICY_KEY, 1, p.minLength, p.requiredClasses, p.differFromUsername]);
+    return createHmac('sha256', key).update(canonical).digest();
+  }
+
+  private sealPolicy(p: PasswordPolicy): string {
+    return JSON.stringify({ v: 1, ...p, mac: this.policyMac(p).toString('base64url') });
+  }
+
+  /** The stored policy if its MAC holds, else null. Reports a bad record once. */
+  private unsealPolicy(raw: string): PasswordPolicy | null {
+    try {
+      const o = JSON.parse(raw) as Record<string, unknown>;
+      const policy = o['v'] === 1 ? parsePasswordPolicy(o) : null;
+      if (!policy || typeof o['mac'] !== 'string') throw new Error('shape');
+      const given = Buffer.from(o['mac'], 'base64url');
+      const want = this.policyMac(policy);
+      if (given.length !== want.length || !timingSafeEqual(given, want)) throw new Error('mac');
+      return policy;
+    } catch (err) {
+      if (err instanceof IdentityKeyError) {
+        this.reportKeyError(err);
+        return null;
+      }
+      const digest = createHash('sha256').update(raw).digest('hex');
+      if (digest !== this.reportedPolicyTamper) {
+        this.reportedPolicyTamper = digest;
+        this.onPolicyTampered?.();
+      }
+      return null;
+    }
+  }
+
+  /**
+   * The rules for new passwords. A missing or invalid record means the
+   * defaults, so tampering can only ever reset the policy, never lower it
+   * below them.
+   */
+  async getPasswordPolicy(): Promise<PasswordPolicy> {
+    const raw = await this.redis().get(PASSWORD_POLICY_KEY);
+    return (raw && this.unsealPolicy(raw)) || { ...DEFAULT_PASSWORD_POLICY };
+  }
+
+  /** The rule a new password breaks, or null. The shell asks before spending a setup code. */
+  async checkNewPassword(password: unknown, username?: string): Promise<PasswordRule | null> {
+    const name = typeof username === 'string' ? normalizeUsername(username) : undefined;
+    return passwordViolation(password, { username: name, policy: await this.getPasswordPolicy() });
+  }
+
+  /**
+   * The current, enabled owner `userId` proving `current` through
+   * `verifyPassword`, so the login rate limit applies. Returns the raw record
+   * it read, for a compare-and-set.
+   */
+  private async ownerProof(
+    userId: string, current: unknown, rateLimitKey?: string,
+  ): Promise<{ ok: true; raw: string; user: StoredUser } | OwnerCredentialRefusal> {
+    const raw = await this.redis().get(OWNER_RECORD_KEY);
+    const user = raw ? this.unseal(raw) : null;
+    if (!raw || !user || user.id !== userId || user.disabled) {
+      // Still counts against the rate limit, like any failed attempt.
+      if (await this.overLimit(rateLimitKey)) return { ok: false, reason: 'rate-limited' };
+      return { ok: false, reason: 'invalid' };
+    }
+    const check = await this.verifyPassword(user.username, typeof current === 'string' ? current : '', { rateLimitKey });
+    if (!check.ok) return { ok: false, reason: check.reason };
+    return { ok: true, raw, user };
+  }
+
+  private async record(entry: AuditInput): Promise<void> {
+    try { await this.audit?.record(entry); } catch { /* the change itself succeeded */ }
+  }
+
+  /**
+   * The signed-in owner changes their password. Checks `current` first
+   * (rate limited), applies the policy to `next`, writes with
+   * compare-and-set, moves the credential epoch and signs out every other
+   * session of the owner, keeping `keepSessionId`. Audited as
+   * `auth.password-changed`.
+   */
+  async changeOwnerPassword(
+    userId: string,
+    current: string,
+    next: string,
+    keepSessionId: string,
+    opts: { rateLimitKey?: string } = {},
+  ): Promise<PasswordChangeResult> {
+    if (!this.sessions) throw new Error('changeOwnerPassword needs a session store');
+    const policy = await this.getPasswordPolicy();
+    // The username rule needs the record; the others are checked before any hashing.
+    assertPassword(next, { policy });
+    const proof = await this.ownerProof(userId, current, opts.rateLimitKey);
+    if (!proof.ok) return proof;
+    assertPassword(next, { username: proof.user.username, policy });
+
+    const user: StoredUser = { ...proof.user, passwordHash: await hashPassword(next) };
+    if ((await this.redis().eval(SET_IF_UNCHANGED, 1, OWNER_RECORD_KEY, proof.raw, this.seal(user))) !== 1) {
+      return { ok: false, reason: 'conflict' };
+    }
+    this.epoch += 1;
+
+    let sessionsRevoked: number | null = null;
+    try { sessionsRevoked = await this.sessions.revokeByUser(userId, { except: keepSessionId }); } catch { /* reported below */ }
+    await this.record({
+      by: userAttribution({ userId, sessionId: keepSessionId }), action: IDENTITY_AUDIT_ACTIONS.passwordChanged,
+      target: `user:${userId}`, outcome: sessionsRevoked === null ? 'failed' : 'ok', detail: { sessionsRevoked },
+    });
+    return { ok: true, sessionsRevoked };
+  }
+
+  /**
+   * The owner sets the password policy, proving `current` (rate limited).
+   * Existing passwords stay valid: only new and changed ones are checked.
+   * Audited as `auth.password-policy-changed` with the old and new rules.
+   * Throws `UserStoreError('invalid-policy')` for out-of-range rules.
+   */
+  async setPasswordPolicy(
+    input: unknown,
+    opts: { userId: string; current: string; sessionId?: string; rateLimitKey?: string },
+  ): Promise<PasswordPolicyChangeResult> {
+    const policy = parsePasswordPolicy(input);
+    if (!policy) throw new UserStoreError('invalid-policy', 'password policy out of range');
+    deriveIdentitySubkey(this.identityKeyFile, 'password-policy'); // Fail before hashing on a bad key.
+    const proof = await this.ownerProof(opts.userId, opts.current, opts.rateLimitKey);
+    if (!proof.ok) return proof;
+
+    const r = this.redis();
+    const raw = await r.get(PASSWORD_POLICY_KEY);
+    const previous = (raw && this.unsealPolicy(raw)) || { ...DEFAULT_PASSWORD_POLICY };
+    if (!policyEquals(previous, policy)) {
+      const written = raw
+        ? (await r.eval(SET_IF_UNCHANGED, 1, PASSWORD_POLICY_KEY, raw, this.sealPolicy(policy))) === 1
+        : (await r.set(PASSWORD_POLICY_KEY, this.sealPolicy(policy), 'NX')) === 'OK';
+      if (!written) return { ok: false, reason: 'conflict' };
+      this.reportedPolicyTamper = null;
+      await this.record({
+        by: userAttribution({ userId: opts.userId, sessionId: opts.sessionId }),
+        action: IDENTITY_AUDIT_ACTIONS.passwordPolicyChanged, target: PASSWORD_POLICY_KEY,
+        detail: { from: previous, to: policy },
+      });
+    }
+    return { ok: true, previous, policy };
   }
 }

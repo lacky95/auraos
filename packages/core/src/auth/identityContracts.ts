@@ -77,14 +77,24 @@ export type LoginSessionInput =
   | { method: 'password'; userId: string; ttlMs?: number }
   | { method: 'shared-key'; keyFingerprint: string; userId?: string; ttlMs?: number };
 
+/** A live session as listed for its owner. Carries no token. */
+export interface LoginSessionInfo {
+  sessionId: string;
+  method: LoginMethod;
+  createdAt: number;
+  expiresAt: number;
+}
+
 export interface LoginSessions {
   issue(input: LoginSessionInput): Promise<{ token: string; session: LoginSession }>;
   /** A valid, unexpired, unrevoked session, else null. Rejects only when the store fails. */
   verify(token: string | null | undefined): Promise<LoginSession | null>;
   /** True when a live session was removed. */
   revoke(sessionId: string): Promise<boolean>;
-  /** How many sessions were removed. */
-  revokeByUser(userId: string): Promise<number>;
+  /** How many sessions were removed. `except` keeps that one session. */
+  revokeByUser(userId: string, opts?: { except?: string }): Promise<number>;
+  /** The user's live sessions, oldest first. */
+  listByUser(userId: string): Promise<LoginSessionInfo[]>;
   /** How many sessions were removed. */
   revokeByMethod(method: LoginMethod): Promise<number>;
 }

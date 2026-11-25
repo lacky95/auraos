@@ -3,7 +3,7 @@
  *
  * One entry per admin change (unlock / lock, grant / revoke, API key create /
  * revoke, manifest edits, credential rotation) and per identity event (setup,
- * login, logout, password reset, ticket creation). The actor is the shared
+ * login, logout, password reset or change, policy change, ticket creation). The actor is the shared
  * admin credential, a signed-in `user:<id>`, the host `operator`, `system` or
  * `anonymous`.
  *
@@ -24,6 +24,10 @@ export const IDENTITY_AUDIT_ACTIONS = {
   recordTampered: 'auth.record-tampered',
   identityKeyError: 'auth.identity-key-error',
   ownerRecovered: 'auth.owner-recovered',
+  passwordChanged: 'auth.password-changed',
+  passwordPolicyChanged: 'auth.password-policy-changed',
+  passwordPolicyTampered: 'auth.password-policy-tampered',
+  sessionsRevoked: 'auth.sessions-revoked',
 } as const;
 
 export interface UserAttribution {

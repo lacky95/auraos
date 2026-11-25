@@ -5,6 +5,7 @@ export * from './ApiKeyStore.js';
 export * from './adminCredential.js';
 export * from './identityKey.js';
 export * from './LoginSessionStore.js';
+export * from './passwordPolicy.js';
 export * from './ValkeyUserStore.js';
 export * from './setupTickets.js';
 export * from './AdminAuth.js';

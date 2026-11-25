@@ -20,7 +20,7 @@ import { defaultSetupTicketDir, FileSetupTickets } from './setupTickets.js';
 import { ValkeyUserStore } from './ValkeyUserStore.js';
 
 /** Bump when the shape changes, so a singleton made by an older module copy is replaced. */
-export const AUTH_SERVICES_VERSION = 5;
+export const AUTH_SERVICES_VERSION = 6;
 
 export interface AuthServices {
   version: number;
@@ -80,6 +80,11 @@ export function getAuthServices(): AuthServices {
       void audit.record({ by: { kind: 'system' }, action: IDENTITY_AUDIT_ACTIONS.identityKeyError, outcome: 'failed' }).catch(() => undefined);
     },
     sessions: admin.sessions,
+    audit,
+    onPolicyTampered: () => {
+      console.warn('[auth] the password policy failed its integrity check; the defaults apply');
+      void audit.record({ by: { kind: 'system' }, action: IDENTITY_AUDIT_ACTIONS.passwordPolicyTampered, outcome: 'failed' }).catch(() => undefined);
+    },
     onOwnerRecovered: async (e) => {
       await audit.record({
         by: operatorAttribution(), action: IDENTITY_AUDIT_ACTIONS.ownerRecovered, target: `user:${e.username}`,

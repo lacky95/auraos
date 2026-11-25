@@ -19,7 +19,8 @@ import type { Redis } from '@aura/kv-store';
 import { deriveIdentitySubkey } from './identityKey.js';
 import {
   LOGIN_SESSION_PREFIX,
-  type LoginMethod, type LoginSession, type LoginSessionInput, type LoginSessionPayload, type LoginSessions,
+  type LoginMethod, type LoginSession, type LoginSessionInfo, type LoginSessionInput, type LoginSessionPayload,
+  type LoginSessions,
 } from './identityContracts.js';
 
 export const SHARED_KEY_SESSION_PREFIX = 'aura-admin1';
@@ -169,30 +170,55 @@ export class LoginSessionStore implements LoginSessions {
     return (await this.redis().del(loginSessionKey(sessionId))) > 0;
   }
 
-  revokeByUser(userId: string): Promise<number> {
-    return this.revokeWhere((n) => n.u === userId);
+  revokeByUser(userId: string, opts: { except?: string } = {}): Promise<number> {
+    const keep = opts.except ? loginSessionKey(opts.except) : null;
+    return this.revokeWhere((n, key) => n.u === userId && key !== keep);
   }
 
   revokeByMethod(method: LoginMethod): Promise<number> {
     return this.revokeWhere((n) => n.m === method);
   }
 
-  private async revokeWhere(match: (n: Partial<Nonce>) => boolean): Promise<number> {
+  async listByUser(userId: string): Promise<LoginSessionInfo[]> {
+    const found: LoginSessionInfo[] = [];
+    const prefix = loginSessionKey('');
+    await this.scanNonces((batch) => {
+      for (const { key, nonce: n } of batch) {
+        const sessionId = key.slice(prefix.length);
+        if (n.u !== userId || !SESSION_ID_RE.test(sessionId) || (n.m !== 'password' && n.m !== 'shared-key')) continue;
+        if (typeof n.createdAt !== 'number' || typeof n.expiresAt !== 'number' || n.expiresAt <= this.now()) continue;
+        found.push({ sessionId, method: n.m, createdAt: n.createdAt, expiresAt: n.expiresAt });
+      }
+    });
+    return found.sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  private async revokeWhere(match: (n: Partial<Nonce>, key: string) => boolean): Promise<number> {
+    let removed = 0;
+    await this.scanNonces(async (batch) => {
+      const doomed = batch.filter(({ key, nonce }) => match(nonce, key)).map(({ key }) => key);
+      if (doomed.length) removed += await this.redis().del(...doomed);
+    });
+    return removed;
+  }
+
+  /** Every stored session nonce, a SCAN batch at a time. Unparseable values are skipped. */
+  private async scanNonces(
+    each: (batch: { key: string; nonce: Partial<Nonce> }[]) => Promise<void> | void,
+  ): Promise<void> {
     const r = this.redis();
     let cursor = '0';
-    let removed = 0;
     do {
       const [next, keys] = await r.scan(cursor, 'MATCH', loginSessionKey('*'), 'COUNT', 200);
       cursor = next;
       if (keys.length === 0) continue;
       const values = await r.mget(...keys);
-      const doomed = keys.filter((_, i) => {
+      const batch = keys.flatMap((key, i) => {
         const raw = values[i];
-        if (!raw) return false;
-        try { return match(JSON.parse(raw) as Partial<Nonce>); } catch { return false; }
+        if (!raw) return [];
+        try { return [{ key, nonce: JSON.parse(raw) as Partial<Nonce> }]; } catch { return []; }
       });
-      if (doomed.length) removed += await r.del(...doomed);
+      await each(batch);
     } while (cursor !== '0');
-    return removed;
   }
 }
