@@ -4,6 +4,7 @@ import type { FlightState } from '@aura/core';
 import { loadFlightMemory, rememberedFlight } from '../../../../lib/flight/memory.js';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
 import { bumpMru } from '../../../../lib/appMru.js';
+import { requestUserId } from '../../../../lib/userContext.js';
 
 /** Open a new activity on an existing instance. Optional `data` is passed to the app's onActivityCreate hook. */
 export const POST: APIRoute = async ({ params, request }) => {
@@ -72,11 +73,13 @@ export const POST: APIRoute = async ({ params, request }) => {
   const data = (body && typeof body.data === 'object' && body.data !== null)
     ? body.data
     : body; // legacy: whole body is the data bag
+  // The verified caller's user (D46): the hook gets it, and a claimed pool member becomes theirs.
+  const userId = (await requestUserId(request)) ?? undefined;
   try {
     const activity = await mgr.openActivity(
       instanceId,
       data,
-      stackParent || flight ? { ...(stackParent ? { stackParent } : {}), ...(flight ? { flight } : {}), ...(path ? { path } : {}) } : undefined,
+      { ...(stackParent ? { stackParent } : {}), ...(flight ? { flight } : {}), ...(stackParent || flight) && path ? { path } : {}, ...(userId ? { userId } : {}) },
     );
     // Opening an activity is a "user is using this app now" signal. Cold
     // launches bump MRU in /api/apps/<id>/start, but reusing an
@@ -84,7 +87,7 @@ export const POST: APIRoute = async ({ params, request }) => {
     // /start — so without this the dock's recency would go stale and never
     // promote apps the user actively returns to. Fire-and-forget; don't
     // block the response on the KV round-trip.
-    void bumpMru(inst.appId);
+    void bumpMru(inst.appId, userId);
     return jsonResponse({ activityId: activity.activityId, activity });
   } catch (err) {
     const msg = String(err);

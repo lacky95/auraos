@@ -54,6 +54,7 @@ import { InterfacesApi } from './interfaces.js';
 import { NotificationsApi, type CreateResult } from './notifications.js';
 import { FlightApi } from './flight.js';
 import { UserApi } from './user.js';
+import { StorageApi } from './storage.js';
 export type { KeymapHandler, KeymapHandlerCtx, KeymapChangeInfo } from './keymap.js';
 export type { BackEvent, BackHandler } from './nav.js';
 export type { NavigateOptions } from './activity.js';
@@ -108,10 +109,16 @@ export class OsClient {
    */
   readonly flight: FlightApi;
   /**
-   * The owner: `confirm()` asks for their yes in AuraOS's own dialog, with
-   * the password for `level: 'fresh'` (D49). Needs `user.confirm`. See ./user.ts.
+   * The user this app acts for: `get()` and `onChange()` (D46). The owner's
+   * `confirm()` asks for their yes in AuraOS's own dialog, with the password
+   * for `level: 'fresh'` (D49); it needs `user.confirm`. See ./user.ts.
    */
   readonly user: UserApi;
+  /**
+   * This app's storage, per user (D46), with `.shared` for every user of the
+   * app. Needs `storage.read` / `storage.write`. See ./storage.ts.
+   */
+  readonly storage: StorageApi;
 
   constructor() {
     // Safe in both Node and the browser. In a browser this is the page's
@@ -125,7 +132,8 @@ export class OsClient {
     this.interfaces = new InterfacesApi(this);
     this.notifications = new NotificationsApi();
     this.flight = new FlightApi(this);
-    this.user = new UserApi();
+    this.user = new UserApi(this);
+    this.storage = new StorageApi();
   }
 
   // -------- OS event subscription (BroadcastReceiver-equivalent) --------

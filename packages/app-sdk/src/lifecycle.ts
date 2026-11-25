@@ -97,6 +97,11 @@ export interface ActivityCreateRequest {
   /** Set when the activity was opened by `startIntent`. */
   intent?: IntentPayload;
   /**
+   * The user the window is opened for (D46): the verified caller's, else the
+   * instance's owner. Opaque; `osClient.user.get()` has the profile.
+   */
+  userId?: string;
+  /**
    * Set when the OS recreates an activity after a restart (desktop session
    * restore): the id the activity had before, and the state the app saved for
    * it (`osClient.activity.saveState()` / `onSaveState`). `activityId` is the
@@ -148,8 +153,9 @@ export function createActivityCreateHandler(
     const restore = r && typeof r.previousActivityId === 'string'
       ? { previousActivityId: r.previousActivityId, state: r.state ?? null }
       : undefined;
+    const userId = typeof body.userId === 'string' && body.userId ? body.userId : undefined;
     try {
-      const result = impl ? await impl({ activityId, ...(data ? { data } : {}), ...(intent ? { intent } : {}), ...(restore ? { restore } : {}) }) : {};
+      const result = impl ? await impl({ activityId, ...(data ? { data } : {}), ...(intent ? { intent } : {}), ...(restore ? { restore } : {}), ...(userId ? { userId } : {}) }) : {};
       const out: ActivityCreateResult & { ok: boolean } = { ok: true, ...result };
       console.log(`[${APP_ID()}] onActivityCreate ${activityId}`);
       return json(out);
@@ -237,6 +243,40 @@ export interface IntentRequest {
   intent: IntentPayload;
   /** True when this instance was spawned for this intent; false = it was already running. */
   newInstance: boolean;
+  /** The user the intent comes from (D46): the verified caller's, else the instance's owner. */
+  userId?: string;
+}
+
+// =========================================================================
+//  onAssign — body { userId }: a warm-pool instance was handed to a user
+// =========================================================================
+
+export interface AssignRequest {
+  /** The user this instance now runs for (D46). */
+  userId: string;
+}
+
+/**
+ * Factory for the optional `src/pages/api/lifecycle/onAssign.ts`. A
+ * `warmPool` instance starts for nobody; the OS posts this when it hands
+ * the instance to a user, before their first window. Load per-user state
+ * here. A missing or failing hook never fails the hand-off.
+ *
+ *   export const POST = createAssignHandler(async ({ userId }) => { await warmCacheFor(userId); });
+ */
+export function createAssignHandler(impl?: (req: AssignRequest) => void | Promise<void>): APIRoute {
+  return async ({ request }) => {
+    const body = await request.json().catch(() => ({})) as { userId?: unknown };
+    if (typeof body.userId !== 'string' || !body.userId) return json({ ok: false, error: 'missing userId' }, 400);
+    try {
+      if (impl) await impl({ userId: body.userId });
+      console.log(`[${APP_ID()}] onAssign`);
+      return json({ ok: true });
+    } catch (err) {
+      console.error(`[${APP_ID()}] onAssign failed:`, err);
+      return json({ ok: false, error: String(err) }, 500);
+    }
+  };
 }
 
 /**
@@ -253,11 +293,12 @@ export function createIntentHandler(
   impl?: (req: IntentRequest) => void | { result?: Record<string, unknown> } | Promise<void | { result?: Record<string, unknown> }>,
 ): APIRoute {
   return async ({ request }) => {
-    const body = await request.json().catch(() => ({})) as { intent?: unknown; newInstance?: unknown };
+    const body = await request.json().catch(() => ({})) as { intent?: unknown; newInstance?: unknown; userId?: unknown };
     const intent = parseIntentPayload(body.intent);
     if (!intent) return json({ ok: false, error: 'missing intent.action' }, 400);
     try {
-      const out = impl ? await impl({ intent, newInstance: body.newInstance === true }) : undefined;
+      const userId = typeof body.userId === 'string' && body.userId ? body.userId : undefined;
+      const out = impl ? await impl({ intent, newInstance: body.newInstance === true, ...(userId ? { userId } : {}) }) : undefined;
       console.log(`[${APP_ID()}] onIntent ${intent.action}`);
       return json({ ok: true, ...(out && out.result ? { result: out.result } : {}) });
     } catch (err) {

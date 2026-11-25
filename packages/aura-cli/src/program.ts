@@ -120,6 +120,7 @@ export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]
     ['aura whoami', 'Server-verified identity, and local hints'],
     ['aura setup-code', 'Host: one-time owner setup code'],
     ['aura user reset-password <username>', 'Host: one-time password reset code'],
+    ['aura system reidentify', 'Host: new systemId and key for a copied /data'],
     ['aura approve <id>', 'Host: approve (--deny) a pending owner approval as the operator'],
     ['aura apikey ...', 'API keys for REST callers: create · ls · revoke'],
   ], note: 'Grants, API keys, the audit and manifest edits are the owner\'s: in the System Terminal they wait for '

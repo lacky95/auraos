@@ -23,6 +23,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import http from 'node:http';
 import { AURA_RESERVED_PATHS, GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
+import { localSystemId } from '@aura/core/system-identity';
 import { loadAppHostServices } from './app-host-auth.mjs';
 import { GATEWAY_CLAIM_TTL_S, gatewayKey, ownerUiActs, ownerUiApp, signGatewayClaim } from './gateway-identity.mjs';
 import { browserBoundaryError } from './host-policy.mjs';
@@ -85,10 +86,15 @@ function hostSession({ record, slot, session }) {
   return session;
 }
 
+/** This Aura (D47), signed into every claim as `sys`; left out if the identity is unreadable. */
+function systemClaim() {
+  try { return { sys: localSystemId() }; } catch { return {}; }
+}
+
 function buildClaim({ record, slot }, { method, path, origin, userId, sid = null, owner = null }) {
   const iat = Math.floor(Date.now() / 1000);
   return {
-    v: 1, appId: record.appId, installationId: record.installationId, instanceId: slot.instanceId,
+    v: 1, ...systemClaim(), appId: record.appId, installationId: record.installationId, instanceId: slot.instanceId,
     label: slot.label, slot: slot.slot, origin, userId, ...(sid ? { sid } : {}), ...(owner ? { owner } : {}),
     method, path, iat, exp: iat + GATEWAY_CLAIM_TTL_S,
   };

@@ -40,3 +40,6 @@ export * from './updater/SelfUpdater.js';
 export * from './notifications/index.js';
 export * from './auth/index.js';
 export * from './approvals/index.js';
+export * from './system/systemIdentity.js';
+export * from './users/profileRegistry.js';
+export * from './users/userData.js';

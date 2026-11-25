@@ -77,6 +77,9 @@ const CONTEXT_Q31 = decide(5,
 const PROXY_ACCESS = why(
   'D28: the owner, and a tokenless call from an app container (Claude Code\'s MCP URLs, the Terminal\'s session calls, the agent hooks), known by its network address. The SDK never sends a token on this path, and a gateway call stays refused. Caller-scoped grants are Phase 5.');
 
+const STORAGE_ACCESS = why(
+  'Only app <id> (and the owner), and only while the app declares storage.read / storage.write. The value is the caller\'s user\'s (D46), from the verified principal.');
+
 // ── group baselines ─────────────────────────────────────────────────────────
 
 const groups: RouteAccessManifest['groups'] = {
@@ -99,6 +102,7 @@ const groups: RouteAccessManifest['groups'] = {
   scopes:        rule(OWNER, 'system'),
   // The owner's System Terminal, for apps the owner granted (D25, D29).
   terminal:      rule(APP_PERMISSION, 'app', { permissions: ['terminal.embed'] }),
+  user:          rule(OWNER, 'system'),
 };
 
 // ── reusable refinements ────────────────────────────────────────────────────
@@ -230,6 +234,17 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/auth/whoami': {
     methods: { GET: rule(['own-instance', 'app-permission', 'owner'], 'session', why(
       'Reflects only the caller: any verified one, API keys too. An anonymous caller gets 401 in enforce, which `aura whoami` reports as rejected.')) },
+  },
+
+  // D46: who the caller acts for. Reflects only the caller, like whoami, but
+  // on target `system` so the owner reads it through Settings too (D45).
+  '/api/user/me': {
+    methods: { GET: rule(['own-instance', 'app-permission', 'owner'], 'system', why(
+      'Any verified caller: its own user and the profile fields it may read (the registry filters per app). Anonymous callers get 401.')) },
+  },
+  '/api/user/me/profile': {
+    methods: { PATCH: rule(OWNER, 'system', why(
+      'The user changes their own profile: the desktop login or Settings (D45). The handler refuses every app and agent.')) },
   },
 
   // Static candidates for the login page; everything else in `os` stays owner.
@@ -512,11 +527,19 @@ const routes: RouteAccessManifest['routes'] = {
           ...why('The owner (also through Settings, D45, and the trusted owner agents, D29), or an app holding system.kv.os.<topic>.write. A caller without a credential is no longer `system` in enforce.'),
         }),
       },
+      // D46: per-user app storage (and `?shared=1`), enforced by the app's own
+      // manifest declaration (Phase 3a's model: declared, not auto-granted, in enforce).
       {
-        id: 'app-entry',
-        methods: ['GET', 'HEAD', 'POST', 'PUT', 'DELETE'],
+        id: 'app-read',
+        methods: ['GET', 'HEAD'],
         match: { on: 'namespace', namespace: 'app' },
-        rule: rule(INSTANCE, 'app', { guard: 'app-callers' }),
+        rule: rule(INSTANCE, 'app', { guard: 'app-callers', targetPermissions: ['storage.read'], ...STORAGE_ACCESS }),
+      },
+      {
+        id: 'app-write',
+        methods: ['POST', 'PUT', 'DELETE'],
+        match: { on: 'namespace', namespace: 'app' },
+        rule: rule(INSTANCE, 'app', { guard: 'app-callers', targetPermissions: ['storage.write'], ...STORAGE_ACCESS }),
       },
     ],
   },

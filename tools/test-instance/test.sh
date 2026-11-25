@@ -48,6 +48,14 @@ case "$1 ${2:-}" in
 esac
 STUB
 chmod +x "$T/bin/docker"
+# The aura CLI: the copy asks it for a new system identity (D47).
+cat > "$T/bin/aura" <<'STUB'
+#!/usr/bin/env bash
+echo "$* data=$AURA_DATA_DIR" >> "$AURA_STUB_LOG"
+mkdir -p "$AURA_DATA_DIR/aura" && echo '{"v":1}' > "$AURA_DATA_DIR/aura/system.json"
+STUB
+chmod +x "$T/bin/aura"
+export AURA_STUB_LOG="$T/aura.log"
 export PATH="$T/bin:$PATH" STUB_LOG="$T/docker.log"
 unset DOCKER_HOST DOCKER_CONTEXT AURA_DATA_DIR
 
@@ -178,7 +186,9 @@ A="$D/scopes/users/default/apps/com.ex.a"
 present "copies scopes" "$A/index.txt"
 present "copies apps" "$D/apps/com.ex.b/data.txt"
 present "copies nexus" "$D/nexus/cache/catalog.json"
-for e in aura context kv kv-migration.json kv-redis-backup.orig dev; do absent "excluded: $e" "$D/$e"; done
+for e in context kv kv-migration.json kv-redis-backup.orig dev aura/secrets aura/home; do absent "excluded: $e" "$D/$e"; done
+[ "$(cd "$D/aura" && find . -mindepth 1 | sort | tr '\n' ' ')" = "./system.json " ] && ok "aura/ holds only the new identity" || bad "aura/ holds only the new identity"
+grep -qx "system reidentify --yes data=$D" "$AURA_STUB_LOG" && ok "copy gets a new system identity" || bad "copy gets a new system identity"
 if grep -rqs FIXTURE_SECRET "$D"; then bad "no secret content in copy"; else ok "no secret content in copy"; fi
 [ "$(readlink "$A/safe-link")" = index.txt ] && ok "safe symlink kept" || bad "safe symlink kept"
 [ "$(cat "$A/safe-cross-root")" = app ] && ok "safe cross-root symlink resolves" || bad "safe cross-root symlink resolves"
@@ -222,7 +232,7 @@ R2="$T/homelink"; mkdir -p "$R2/elsewhere/default" "$R2/aura"; echo FIXTURE_SECR
 ln -s ../elsewhere "$R2/aura/home"
 find "$R2" -exec touch -h -d '2020-01-01 00:00:00' {} +
 expect_rc "symlinked aura/home handled" 0 "$COPY" --source "$R2" --dest "$T/homelink-out" --apply --include-homes
-absent "symlinked aura/home skipped" "$T/homelink-out/aura"
+absent "symlinked aura/home skipped" "$T/homelink-out/aura/home"
 
 # One credential denylist, at any depth, in every root.
 C="$T/creds"

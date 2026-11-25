@@ -3,6 +3,7 @@ import type {
 } from '@aura/core';
 // The file-only entry, as the CLI uses it: one subject rule on both sides.
 import { operatorRequestSubject } from '@aura/core/setup-tickets';
+import { localSystemId } from '@aura/core/system-identity';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { loadAppHostServices, type AppHostServices } from '../../../server/app-host-auth.mjs';
@@ -110,7 +111,7 @@ async function ownerThrough(
   if (!(await ownerUiActs({ appId: inst.appId, path, ...ref }, svc))) return null;
   return {
     kind: 'user', userId: ref.userId, role: 'owner', sessionId: ref.sid,
-    verification: 'verified', through: { appId: inst.appId, instanceId: inst.instanceId },
+    verification: 'verified', ...systemOf(), through: { appId: inst.appId, instanceId: inst.instanceId },
   };
 }
 
@@ -197,8 +198,16 @@ export function bearerToken(request: Request): string | null {
   return /^Bearer\s+(\S+)\s*$/i.exec(header)?.[1] ?? '';
 }
 
+/**
+ * The Aura a verified principal belongs to (D47): always this one in the
+ * alpha, read rather than assumed. Left out if the identity is unreadable.
+ */
+export function systemOf(): { systemId?: string } {
+  try { return { systemId: localSystemId() }; } catch { return {}; }
+}
+
 function userPrincipal(userId: string, sessionId: string, through?: UserPrincipal['through']): UserPrincipal {
-  return { kind: 'user', userId, role: 'owner', sessionId, verification: 'verified', ...(through ? { through } : {}) };
+  return { kind: 'user', userId, role: 'owner', sessionId, verification: 'verified', ...systemOf(), ...(through ? { through } : {}) };
 }
 
 /**
@@ -224,6 +233,7 @@ function instancePrincipal(
     ...(extra.sidecar ? { sidecar: extra.sidecar } : {}),
     ...(extra.userId ? { userId: extra.userId } : {}),
     verification: 'verified',
+    ...systemOf(),
   };
 }
 

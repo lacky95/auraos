@@ -26,6 +26,9 @@ import { isTrustedOwnerAgent, type GatewayOwnerDeps } from '../src/lib/access/id
 import type { ObserverManager } from '../src/lib/access/observer.ts';
 import { installGate } from '../src/lib/approvals/nexus.ts';
 import { resolveCaller, type AuthDeps } from '../src/lib/auth.ts';
+import { localSystemId } from '@aura/core/system-identity';
+/** The test data dir's own system id (D47): every resolved principal carries it. */
+const SYS = localSystemId();
 
 // ── the system ──────────────────────────────────────────────────────────────
 
@@ -43,7 +46,7 @@ const scopes: Record<string, string> = { [TERMINAL]: 'system', [AURASHELLD]: 'sy
 const declared: Record<string, string[]> = {
   [TERMINAL]: [], [AURASHELLD]: [], [SETTINGS]: ['system.kv.os.theme.write'],
   // Declared, never granted: a privileged permission (stream C) does nothing on its own.
-  [COUNTER]: ['system.kv.os.theme.write'],
+  [COUNTER]: ['system.kv.os.theme.write', 'storage.read'],
   // Declared and granted by the owner (D29): TerminalX's watcher.
   [TERMINALX]: ['terminal.embed', 'terminal.sessions.list'],
 };
@@ -189,6 +192,8 @@ test('enforce: App Host gateway calls: an app on its own rules, Settings as the 
   assert.equal(await middleware({ ...themes, headers: gatewayClaim(COUNTER, 'GET', themes.path) }), 'pass');
   const own = { path: `/api/kv/app/${COUNTER}/k`, route: '/api/kv/[...path]', params: { path: `app/${COUNTER}/k` } };
   assert.equal(await middleware({ ...own, headers: gatewayClaim(COUNTER, 'GET', own.path) }), 'pass');
+  // D46: its own storage only with the declaration: Counter declares storage.read, not storage.write.
+  assert.equal(await middleware({ ...own, method: 'PUT', headers: gatewayClaim(COUNTER, 'PUT', own.path) }), '403 gateway-denied');
   const asOwner = gatewayClaim(SETTINGS, 'PUT', THEME_PUT.path, { installationId: 'inst-settings', owner: { userId: 'default', sid: OWNER_SID } } as Partial<GatewayIdentityClaim>);
   assert.equal(await middleware({ ...THEME_PUT, headers: asOwner }), 'pass');
 });
@@ -419,7 +424,7 @@ test('enforce: Settings\' page render reads as the owner with its token and the 
   }
   const resolved = await resolveCaller(ctx({ ...APPS, headers: { ...bearer('aura1.settings'), ...ownerSsr() } }).request, authDeps());
   assert.deepEqual(resolved.principal, {
-    kind: 'user', userId: 'default', role: 'owner', sessionId: OWNER_SID, verification: 'verified',
+    kind: 'user', userId: 'default', role: 'owner', sessionId: OWNER_SID, verification: 'verified', systemId: SYS,
     through: { appId: SETTINGS, instanceId: `${SETTINGS}-1` },
   });
 });

@@ -1,6 +1,10 @@
 import type { APIRoute } from 'astro';
-import { OsEventBus, ThemeManager, type ColorMode } from '@aura/core';
+import {
+  OsEventBus, ThemeManager, appStorageNamespace, isUserPrefKey, legacyAppNamespace, userPrefsNamespace,
+  type ColorMode,
+} from '@aura/core';
 import { isValidKey, isValidNamespace, type KvNamespace } from '@aura/kv-store';
+import { requestUserId } from '../../../lib/userContext.js';
 import { sharedKv } from '../../../lib/sharedKv.js';
 import { withEtag } from '../../../lib/etag.js';
 
@@ -17,6 +21,19 @@ import { withEtag } from '../../../lib/etag.js';
  *        when the stored value is newer, nothing is written and the answer
  *        is 409 `{ error, current: { value, updatedAt } }`.
  * DELETE removes the key; same event with `value: null`.
+ *
+ * Per user (D46). The user is the verified caller's (lib/userContext.ts),
+ * never something the request names:
+ *   • `os/<pref>` for a per-user preference (core `USER_PREF_KEYS`: theme,
+ *     locale, keymap, workspaces, app-mru, session) is the caller's own
+ *     `user/<userId>/prefs:<pref>`. A read falls back to the shared `os`
+ *     value from before the move, for one release; a write never touches it.
+ *   • `app/<id>/<key>` is the app's storage for the caller's user,
+ *     `app/<id>/u/<userId>`, falling back to the pre-D46 `app/<id>` bucket on
+ *     a read. `?shared=1` is the app's storage for all its users,
+ *     `app/<id>/shared` (`osClient.storage.shared`).
+ *   The event names the logical address (`os`, `app/<id>`) plus `userId` or
+ *   `shared`, so every subscriber keeps its filter.
  *
  * Who may read and write which key is the route access manifest's
  * (routeManifest.ts, `/api/kv/[...path]`), applied by the middleware:
@@ -61,8 +78,31 @@ export const ALL: APIRoute = async ({ params, request }) => {
   const kv = sharedKv();
 
   try {
+    // Where the caller's value lives (D46): `store` is read and written,
+    // `fallback` only read. `namespace` stays the address the caller named.
+    let store: KvNamespace = namespace;
+    let fallback: KvNamespace | null = null;
+    let scope: { userId?: string; shared?: true } = {};
+    const perUserPref = namespace === 'os' && isUserPrefKey(key);
+    if (perUserPref || namespace.startsWith('app/')) {
+      const userId = await requestUserId(request);
+      if (userId === null) return jsonError('invalid or expired credential', 401);
+      const shared = namespace !== 'os' && new URL(request.url).searchParams.get('shared') === '1';
+      if (perUserPref) {
+        store = userPrefsNamespace(userId);
+        fallback = 'os';
+        scope = { userId };
+      } else {
+        const appId = namespace.slice('app/'.length);
+        store = shared ? appStorageNamespace(appId, 'shared') : appStorageNamespace(appId, { userId });
+        fallback = shared ? null : legacyAppNamespace(appId);
+        scope = shared ? { shared: true } : { userId };
+      }
+    }
+    const read = async () => (await kv.get(store, key)) ?? (fallback ? await kv.get(fallback, key) : null);
+
     if (method === 'GET' || method === 'HEAD') {
-      const entry = await kv.get(namespace, key);
+      const entry = await read();
       if (entry === null) return jsonError(`No value at ${namespace}:${key}`, 404);
       // ETag: unchanged values (polled config, keymap, workspaces) answer 304.
       return withEtag(request, JSON.stringify(entry), 'application/json');
@@ -74,8 +114,8 @@ export const ALL: APIRoute = async ({ params, request }) => {
         return jsonError('PUT body must be `{ "value": <json> }`', 400);
       }
       const ifUpdatedAt = typeof body.ifUpdatedAt === 'number' ? body.ifUpdatedAt : null;
-      const result = await serialized(`${namespace}:${key}`, async () => {
-        const previous = await kv.get(namespace, key);
+      const result = await serialized(`${store}:${key}`, async () => {
+        const previous = await read();
         // Optimistic concurrency (opt-in): the writer says which version its
         // edit is based on. A newer stored value means the writer's copy is
         // stale — e.g. a tab resumed after a day — and writing it would roll
@@ -84,16 +124,17 @@ export const ALL: APIRoute = async ({ params, request }) => {
         if (ifUpdatedAt !== null && previous && previous.updatedAt !== ifUpdatedAt) {
           return { conflict: previous } as const;
         }
-        return { previous, stored: await kv.set(namespace, key, body.value) } as const;
+        return { previous, stored: await kv.set(store, key, body.value) } as const;
       });
       if ('conflict' in result) {
         return jsonResponse({ error: `Stale write to ${namespace}:${key}`, current: result.conflict }, 409);
       }
       const { previous, stored } = result;
       OsEventBus.emit('kv:changed', {
-        namespace,
+        namespace: namespace as 'os' | `app/${string}`,
         key,
         value: stored.value,
+        ...scope,
       });
       // Legacy event bridges: until every consumer migrates to subscribing
       // on `kv:changed`, the well-known OS keys also re-emit the typed
@@ -110,9 +151,10 @@ export const ALL: APIRoute = async ({ params, request }) => {
     }
 
     if (method === 'DELETE') {
-      const removed = await kv.del(namespace, key);
+      // The caller's own value only: an old shared value stays for the fallback (F0).
+      const removed = await kv.del(store, key);
       if (removed) {
-        OsEventBus.emit('kv:changed', { namespace, key, value: null });
+        OsEventBus.emit('kv:changed', { namespace: namespace as 'os' | `app/${string}`, key, value: null, ...scope });
       }
       return jsonResponse({ removed });
     }

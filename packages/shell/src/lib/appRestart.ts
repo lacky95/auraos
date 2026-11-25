@@ -18,7 +18,8 @@
  * of tearing them down, and `app:restarted` carries the mapping so they swap
  * each window in place.
  */
-import { getAppManager, OsEventBus } from '@aura/core';
+import { getAppManager, OsEventBus, readUserPref, writeUserPref } from '@aura/core';
+import { localOwnerId } from './userContext.js';
 import { defaultKv } from '@aura/kv-store';
 import { remapWorkspaceIds } from './workspaceRemap.js';
 
@@ -163,7 +164,8 @@ async function doRestart(appId: string, only?: string[]): Promise<RestartResult>
 type Placement = { wsId: string; index: number; rect?: unknown; focused: boolean };
 
 async function readWorkspaces(): Promise<WsShape | null> {
-  const entry = await defaultKv().get('os', 'workspaces');
+  // The owner's desktop (D46): their own workspaces, else the shared ones from before the move.
+  const entry = await readUserPref(defaultKv(), localOwnerId(), 'workspaces');
   const state = entry?.value as WsShape | undefined;
   return state && Array.isArray(state.workspaces) ? state : null;
 }
@@ -242,9 +244,9 @@ async function placeWindows(
   }
   if (JSON.stringify(next) === JSON.stringify(state)) return false;
 
-  const stored = await defaultKv().set('os', 'workspaces', next);
+  const stored = await writeUserPref(defaultKv(), localOwnerId(), 'workspaces', next);
   // Same events the KV route emits for a browser-side PUT.
-  OsEventBus.emit('kv:changed', { namespace: 'os', key: 'workspaces', value: stored.value });
+  OsEventBus.emit('kv:changed', { namespace: 'os', key: 'workspaces', value: stored.value, userId: localOwnerId() });
   OsEventBus.emit('workspaces:changed', {
     workspaces: next.workspaces.map((w) => ({
       id: String(w.id ?? ''),

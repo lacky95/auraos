@@ -8,6 +8,7 @@ import {
   terminalSessionInstance,
 } from '../../../../server/terminal-embed.mjs';
 import { explicitTargetRefusal } from '../../../lib/intentTarget.ts';
+import { requestUserId } from '../../../lib/userContext.js';
 
 interface IntentBody {
   action?:   unknown;
@@ -93,7 +94,9 @@ export const POST: APIRoute = async (ctx) => {
   const refusal = await openTerminalRefusal(intent, asking);
   if (refusal) return jsonResponse({ kind: 'error', code: 'terminal-not-granted', error: refusal }, 403);
   try {
-    const result = await getAppManager().startIntent(intent);
+    // The verified caller's user (D46): the handler's hook gets it.
+    const userId = (await requestUserId(request)) ?? undefined;
+    const result = await getAppManager().startIntent(intent, userId ? { userId } : {});
     if (result.kind === 'noHandler') return errorResponse('No app handles this intent', 404);
     if (result.kind === 'rejected') return jsonResponse({ ...result, error: result.message }, result.status);
     // Only the System Terminal's own answer to OPEN_TERMINAL names a session it created.

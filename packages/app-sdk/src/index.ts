@@ -12,8 +12,9 @@ export type {
 export { ActivityApi } from './activity.js';
 // Free-flight activities — `osClient.flight`.
 export { FlightApi, FlightHandle } from './flight.js';
-export { UserApi, UserConfirmError } from './user.js';
-export type { ConfirmLevel, ConfirmOptions, ConfirmResult } from './user.js';
+export { UserApi, UserConfirmError, UserError } from './user.js';
+export type { AuraUser, ConfirmLevel, ConfirmOptions, ConfirmResult, UserProfileView } from './user.js';
+export { StorageApi, StorageError } from './storage.js';
 export type {
   FlightEdge, FlightRect, FlightBadge, FlightNotice, FlightNoticeLevel, FlightAction, FlightState, FlightOpenOptions,
   FlightMode, FlightAnchor, FlightEdgeSize,
@@ -82,6 +83,7 @@ export {
   createActivityDestroyHandler,
   createIntentHandler,
   createSaveStateHandler,
+  createAssignHandler,
 } from './lifecycle.js';
 export { parseIntentPayload, IntentRejectedError } from './intent.js';
 export type { IntentPayload } from './intent.js';
@@ -94,6 +96,7 @@ export type {
   SaveStateRequest,
   SaveStateResult,
   IntentRequest,
+  AssignRequest,
 } from './lifecycle.js';
 
 // Android-`Context`-equivalent: env-var + header readers. See ./context.ts.

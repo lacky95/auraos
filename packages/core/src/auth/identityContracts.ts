@@ -7,6 +7,7 @@
  */
 import { DEFAULT_USER_ID } from '../scopes/ScopeRegistry.js';
 import type { UserRole } from './types.js';
+import type { ProfileFieldName, UserProfile } from '../users/profileRegistry.js';
 
 /** The first account keeps this id, so `/data/scopes/users/default` stays put. */
 export const DEFAULT_OWNER_ID = DEFAULT_USER_ID;
@@ -41,6 +42,20 @@ export interface UserStore {
    * limit, because a shared bucket would let one caller lock out everyone.
    */
   verifyPassword(username: string, password: string, opts?: { rateLimitKey?: string }): Promise<PasswordCheck>;
+}
+
+/**
+ * A user and their profile (D46). Kept apart from the credential parts of
+ * `UserStore`: the profile is its own versioned record, `user:<id>:profile`,
+ * described by the profile field registry (users/profileRegistry.ts).
+ */
+export interface UserProfiles {
+  /** The account without its hash, or null for an unknown id. */
+  getUser(userId: string): Promise<UserAccount | null>;
+  /** Every stored field; the caller filters it for its audience. Null for an unknown user. */
+  getProfile(userId: string): Promise<UserProfile | null>;
+  /** Sets and clears fields of an already validated patch. The profile after the change. */
+  updateProfile(userId: string, patch: { set: UserProfile; clear: readonly ProfileFieldName[] }): Promise<UserProfile | null>;
 }
 
 // ── login sessions ──────────────────────────────────────────────────────────
