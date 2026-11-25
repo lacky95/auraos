@@ -2,14 +2,14 @@ import type { APIRoute } from 'astro';
 import { getAppManager, getNexusManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
 import { resolveCaller } from '../../../lib/auth.ts';
-import { mountedSourcePath } from '../../../lib/appSource.ts';
+import { mountedSourcePath, type ScopedApp } from '../../../lib/appSource.ts';
 
 /** The path to publish, in the shell: a sandbox's view of its own source mount maps to the app's dir. */
 async function shellPath(request: Request, path: string): Promise<string> {
   const caller = (await resolveCaller(request)).principal;
   if (caller.kind !== 'instance') return path;
   const mgr = getAppManager();
-  return mountedSourcePath(path, mgr.mounts.list(caller.instanceId), (id) => mgr.getManifest(id)?.appDir);
+  return mountedSourcePath(path, mgr.mounts.list(caller.instanceId), (id) => (mgr.registry.getById(id) as ScopedApp | undefined)?.appDir);
 }
 
 /**
