@@ -1,4 +1,5 @@
 import type { AppLifecycleState } from './lifecycle.js';
+import type { LifecycleStatus } from '../app-manager/lifecycleGate.js';
 
 /**
  * A running (or transitioning) instance of an app.
@@ -35,6 +36,12 @@ export interface AppInstance {
    * undefined only while the instance is an unclaimed pool member.
    */
   owner?: string;
+  /**
+   * How this start passed the lifecycle checks (`AURA_LIFECYCLE_STRICT`): the
+   * health identity class and the runtime check of the health guard. Absent
+   * when not measured (an instance adopted from a previous shell).
+   */
+  lifecycle?: LifecycleStatus;
 }
 
 export type SidecarState = 'running' | 'starting' | 'stopped' | 'error' | 'unknown';

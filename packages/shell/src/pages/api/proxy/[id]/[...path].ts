@@ -1,4 +1,4 @@
-import { APP_HOST_ROUTE_HEADER } from '@aura/core/host-rules';
+import { APP_HOST_ROUTE_HEADER, lifecycleRequestPath } from '@aura/core/host-rules';
 import type { APIContext, APIRoute } from 'astro';
 import { browserDocumentRequest } from '../../../../../server/host-policy.mjs';
 import { dropServiceWorkerScope, stripShellCredentials } from '../../../../../server/shell-credentials.mjs';
@@ -14,7 +14,8 @@ import { getAppManager, resolveProxyConfig, INTERFACE_PATH_KINDS } from '@aura/c
  *   - an instanceId (e.g. "com.aura.terminal-2") — that exact backend process
  *
  * The `/api/proxy/<id>` prefix is stripped, and the body passes through
- * untouched. It is never executable browser content on the shell's origin
+ * untouched. An app's `/api/lifecycle/*` routes are the kernel's alone (the
+ * runner calls them directly, with the lifecycle token): refused here. It is never executable browser content on the shell's origin
  * (D40, D43): a navigation or frame load is refused, responses carry no
  * cookies and a `sandbox` policy. An app's pages are served on its own App
  * Host (server/app-hosts.mjs).
@@ -90,6 +91,19 @@ const forward = async ({ params, request }: APIContext): Promise<Response> => {
     });
   }
 
+  // Lifecycle hooks and health belong to the kernel's runner, never a caller.
+  const reqUrl = new URL(request.url);
+  const upstreamPrefix = `/api/proxy/${id}/`;
+  const forwardPath = reqUrl.pathname.startsWith(upstreamPrefix)
+    ? reqUrl.pathname.slice(upstreamPrefix.length)
+    : path;
+  if (lifecycleRequestPath('/' + forwardPath) !== null || lifecycleRequestPath('/' + path) !== null) {
+    return jsonError(403, {
+      error: 'lifecycle-path-refused',
+      message: 'An app\'s /api/lifecycle routes are called by AuraOS only.',
+    });
+  }
+
   const mgr = getAppManager();
   // Prefer a live exact-instanceId match; fall back to the first non-dead
   // instance of the bare appId. Skipping error/destroyed instances avoids
@@ -153,17 +167,12 @@ const forward = async ({ params, request }: APIContext): Promise<Response> => {
   // For container-sandbox instances, the upstream lives on the shared docker
   // network with a hostname like `aura-com.aura.terminal-3`. For PRoot-
   // sandbox instances it's 127.0.0.1. getUpstreamUrl encapsulates the choice.
-  const reqUrl = new URL(request.url);
   const up = mgr.getUpstreamUrl?.(instance.instanceId);
   const upHost = up?.host ?? 'localhost';
   const upPort = up?.port ?? instance.port;
   // Astro's `[...path]` param drops a trailing page-format extension (a
   // request for `.../blank.html` arrives as `.../blank`), so the forwarded
-  // path comes from `reqUrl.pathname`, which keeps it.
-  const upstreamPrefix = `/api/proxy/${id}/`;
-  const forwardPath = reqUrl.pathname.startsWith(upstreamPrefix)
-    ? reqUrl.pathname.slice(upstreamPrefix.length)
-    : path;
+  // path comes from `reqUrl.pathname` (above), which keeps it.
   const targetUrl = `http://${upHost}:${upPort}/${forwardPath}${reqUrl.search}`;
 
   try {

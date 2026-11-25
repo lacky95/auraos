@@ -24,6 +24,8 @@ export interface InstanceDto {
   startedAt?: string | null;
   inPool?: boolean;
   sandbox?: 'proot' | 'container';
+  /** How the start passed the lifecycle checks (core `LifecycleStatus`); absent when not measured. */
+  lifecycle?: { identity: string; guard: string };
 }
 
 export interface ActivityDto {
@@ -220,6 +222,10 @@ const instances: ResourceDef<InstanceRow> = {
     { header: 'SANDBOX', value: (i) => i.sandbox ?? '-', wide: true },
     { header: 'PID', value: (i) => i.pid?.toString() ?? '-', wide: true },
     { header: 'POOL', value: (i) => (i.inPool ? 'yes' : '-'), wide: true },
+    // Lifecycle checks of this start: the health identity class and the
+    // runtime check of the health guard (AURA_LIFECYCLE_STRICT).
+    { header: 'HEALTH-ID', value: (i) => i.lifecycle?.identity ?? '-', wide: true },
+    { header: 'LC-GUARD', value: (i) => i.lifecycle?.guard ?? '-', wide: true },
     { header: 'UPTIME', value: (i) => uptime(i.startedAt) },
   ],
 };

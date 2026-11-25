@@ -26,7 +26,8 @@
 import http from 'node:http';
 import net from 'node:net';
 import {
-  APP_HOST_ROUTE_HEADER, AURA_RESERVED_PATHS, OWNER_SSR_HEADER, appHostCookieName, isAuraReservedPath, parseAppHost,
+  APP_HOST_ROUTE_HEADER, AURA_RESERVED_PATHS, OWNER_SSR_HEADER, appHostCookieName, isAuraReservedPath, lifecycleRequestPath,
+  parseAppHost,
 } from '@aura/core/host-rules';
 import {
   SESSION_COOKIES, countSurfaceEvent, gatedHttpSurface, internalServiceHeaders, observeHttpSurface, reportSurface,
@@ -508,6 +509,9 @@ export function createAppHostRouter({
       return page(403, 'Request refused', 'This sign-in shows one embedded session only.');
     }
 
+    // An app's lifecycle routes are the kernel runner's alone.
+    if (lifecycleRequestPath(url) !== null) return page(404, 'Not found', 'This path is reserved by AuraOS.');
+
     if (isAuraReservedPath(url)) {
       if (path === AURA_RESERVED_PATHS.runtime) return serveAppRuntime(req, res, { record: route.record, slot: route.slot });
       if (path.startsWith(AURA_RESERVED_PATHS.os)) return handleAppGateway(req, res, { record: route.record, slot: route.slot, session, services: route.svc });
@@ -542,7 +546,7 @@ export function createAppHostRouter({
     socket.on('error', () => {});
     const url = String(req.url ?? '');
     const mux = url.split(/[?#]/, 1)[0] === `${AURA_RESERVED_PATHS.os}sse-mux`;
-    if (!url.startsWith('/') || (!mux && isAuraReservedPath(url))) return fail(404, 'Not Found');
+    if (!url.startsWith('/') || (!mux && isAuraReservedPath(url)) || lifecycleRequestPath(url) !== null) return fail(404, 'Not Found');
     if (req.headers.origin !== edge.origin) return fail(403, 'Forbidden');
     let t;
     try {

@@ -32,6 +32,9 @@ import {
   existsSync, readFileSync, writeFileSync, statSync, readdirSync, rmSync, renameSync, watch,
 } from 'node:fs';
 import { join } from 'node:path';
+import {
+  LIFECYCLE_TOKEN_HEADER, lifecycleRequestRefused,
+} from '@aura/app-sdk/runtime/lifecycle-guard';
 
 const ROOT = process.cwd();
 const PORT = Number(process.env.APP_PORT || 4101);
@@ -153,6 +156,12 @@ function identityHeaders() {
 
 function placeholder(req, res) {
   const url = req.url || '/';
+  // The SDK's lifecycle-token check, as `next start` runs it in the routes.
+  if (lifecycleRequestRefused(url, req.headers[LIFECYCLE_TOKEN_HEADER])) {
+    res.writeHead(401, { 'Content-Type': 'application/json', ...identityHeaders() });
+    res.end('{"ok":false,"error":"lifecycle-token-required"}');
+    return;
+  }
   if (/^\/api\/lifecycle\/health(\?|$)/.test(url)) {
     res.writeHead(200, { 'Content-Type': 'application/json', ...identityHeaders() });
     res.end(JSON.stringify({ ok: true, appId: APP_ID, instanceId: INSTANCE_ID, building: true }));
