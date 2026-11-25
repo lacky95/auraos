@@ -709,6 +709,28 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
       btn.textContent = text;
       setTimeout(() => { btn.textContent = 'Copy'; then?.(); }, 700);
     }
+    // Why a button paste failed, and what works instead. The async clipboard
+    // exists only on a secure origin (https, localhost, *.localhost); this
+    // Terminal runs on its own App Host, so plain-http nip.io or an IP has none.
+    // Keyboard paste needs no clipboard API and works everywhere.
+    let clipHintEl: HTMLElement | null = null;
+    let clipHintTimer: ReturnType<typeof setTimeout> | undefined;
+    function showClipboardHint(reason: 'unavailable' | 'denied') {
+      const keys = IS_IOS || /Mac/.test(navigator.platform) ? '⌘V' : 'Ctrl+Shift+V';
+      const text = reason === 'unavailable'
+        ? `Paste button needs a secure address (https or *.localhost). Use ${keys} instead.`
+        : `The browser blocked clipboard access for this Terminal. Allow "Clipboard" in the site settings, or use ${keys}.`;
+      if (!clipHintEl) {
+        clipHintEl = document.createElement('div');
+        clipHintEl.setAttribute('role', 'status');
+        clipHintEl.style.cssText = 'position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:47;max-width:min(92vw,520px);padding:8px 12px;border:1px solid var(--aura-color-primary,#00ff41);background:var(--aura-color-surface,#0f0f0f);color:var(--aura-color-text,#e0e0e0);font-family:var(--aura-font-mono,monospace);font-size:0.75rem;line-height:1.4;box-shadow:0 6px 20px rgba(0,0,0,0.5);pointer-events:none;';
+        document.body.appendChild(clipHintEl);
+      }
+      clipHintEl.textContent = text;
+      clipHintEl.style.display = 'block';
+      clearTimeout(clipHintTimer);
+      clipHintTimer = setTimeout(() => { if (clipHintEl) clipHintEl.style.display = 'none'; }, 6000);
+    }
     selBar?.addEventListener('pointerdown', (e) => e.preventDefault());  // keep focus where it is (mouse)
     const selActOf = (el: EventTarget | Element | null) =>
       (el as HTMLElement | null)?.closest?.('[data-sel]')?.getAttribute('data-sel') ?? null;
@@ -727,8 +749,9 @@ const sessionHost = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
         if (await touchSelect.copy()) flashSelBar('Copied', () => touchSelect.clear());
         else flashSelBar('No access');
       } else if (act === 'paste') {
-        if (await touchSelect.paste()) touchSelect.clear();
-        else flashSelBar('No access');
+        const pasted = await touchSelect.paste();
+        if (pasted === 'pasted') touchSelect.clear();
+        else showClipboardHint(pasted);
       } else if (act === 'all') {
         touchSelect.selectAll();
       } else if (act === 'close') {

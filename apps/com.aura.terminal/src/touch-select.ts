@@ -303,16 +303,21 @@ export function attachTouchSelect(term: SelectTerminal, opts: TouchSelectOptions
       } catch { /* not allowed here — try the fallback */ }
       return opts.fallbackCopy?.(text) ?? false;
     },
-    /** Paste the clipboard into the program. False when reading isn't allowed. */
-    async paste(): Promise<boolean> {
+    /**
+     * Paste the clipboard into the program. `unavailable`: this page has no
+     * async clipboard (not a secure context); `denied`: the browser refused
+     * to read it (permission blocked or dismissed).
+     */
+    async paste(): Promise<PasteResult> {
+      if (!opts.clipboard?.readText) return 'unavailable';
       try {
-        if (!opts.clipboard?.readText) return false;
         const text = await opts.clipboard.readText();
         if (text) term.paste(text);
-        return true;
-      } catch { return false; }
+        return 'pasted';
+      } catch { return 'denied'; }
     },
   };
 }
 
 export type TouchSelect = ReturnType<typeof attachTouchSelect>;
+export type PasteResult = 'pasted' | 'unavailable' | 'denied';

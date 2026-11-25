@@ -176,13 +176,17 @@ test('copy uses the clipboard, then the fallback when it is refused', async () =
   assert.deepEqual(fell, ['TEXT']);
 });
 
-test('paste sends the clipboard to the program; false without read access', async () => {
+test('paste sends the clipboard to the program and says why it could not', async () => {
   const term = fakeTerm(['x']);
   const { ts } = setup(term, { clipboard: { readText: async () => 'hello' } });
-  assert.equal(await ts.paste(), true);
+  assert.equal(await ts.paste(), 'pasted');
   assert.deepEqual(term.pasted, ['hello']);
   const t2 = fakeTerm(['x']);
-  assert.equal(await setup(t2, { clipboard: null }).ts.paste(), false);
+  assert.equal(await setup(t2, { clipboard: null }).ts.paste(), 'unavailable');
+  const t3 = fakeTerm(['x']);
+  const denied = { readText: async () => { throw new Error('NotAllowedError'); } };
+  assert.equal(await setup(t3, { clipboard: denied }).ts.paste(), 'denied');
+  assert.deepEqual(t3.pasted, []);
 });
 
 test('a selection xterm dropped during a repaint comes back when the text is unchanged', () => {
