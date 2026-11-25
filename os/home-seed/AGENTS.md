@@ -95,7 +95,7 @@ The grammar is kubectl-style: `aura <verb> <resource> [name]`. Short resource na
   1. `aura dev patch start <app>` gives you a writable copy at `/mnt/aura/work/<appId>`. Edit and test there.
   2. `aura dev patch save` saves your change as a versioned patch.
   3. `aura dev patch activate` installs it. The owner approves it in the desktop; the previous version is kept for rollback.
-- **A system app** (Settings, Terminal, …) is patched the same way. Activation installs your own copy of it (an overlay that keeps the system app's rights, because the owner approved it); the AuraOS checkout stays as released.
+- **Built-in apps** (Settings, Terminal, …) are read-only: you can read their source, but patching built-in apps comes later. Use a normal app (installed from Nexus, or your own) or Developer Mode.
 - **An open install** (the owner ran `aura dev open <app>`) and **your own apps** (`aura dev new`) are writable: `status` prints the writable path.
 - Never open an app yourself to make a change easier. Opening is the owner's decision.
 - Upstream updates keep your patches: `aura dev update <app>`. If a patch no longer applies, the working version keeps running and the patch is marked "needs repair" (you also get a notification naming the patch, the files and the repair command).

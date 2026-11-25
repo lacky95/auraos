@@ -19,7 +19,9 @@ import type { Command } from 'commander';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { initRepo, patchesRoot, readSeries, safeDirectoryArgs, type SeriesBase } from '@aura/core';
+import {
+  initRepo, patchesRoot, readSeries, safeDirectoryArgs, SYSTEM_APP_LATER_MESSAGE, SYSTEM_APP_OVERLAYS, type SeriesBase,
+} from '@aura/core';
 import { api } from '../lib/client.js';
 import { color, fail, info, ok, warn } from '../lib/format.js';
 
@@ -120,6 +122,16 @@ export async function cleanWorkspaces(app: string, opts: { keep?: number; dryRun
   }));
   if (r.error) routeFail(`clean workspaces of ${app}`, r);
   return r;
+}
+
+/** A built-in app (system scope, or an overlay of one): not patched in Track P v1 (core SYSTEM_APP_OVERLAYS). */
+export function isBuiltInLater(v: Pick<AppSourceView, 'scope' | 'overlay'>): boolean {
+  return (v.scope === 'system' || v.overlay) && !SYSTEM_APP_OVERLAYS;
+}
+
+/** Stop a patch command on a built-in app, with the reason. */
+export function refuseBuiltIn(v: Pick<AppSourceView, 'appId' | 'scope' | 'overlay'>): void {
+  if (isBuiltInLater(v)) fail(`${v.appId} is a built-in app. ${SYSTEM_APP_LATER_MESSAGE}.`);
 }
 
 // ─── where things are ───────────────────────────────────────────────────────
@@ -224,6 +236,7 @@ export function printStatus(v: AppSourceView, local: { repo: string; head: strin
   console.log(`  patches:    ${local.patches ? `${local.patches} in ${local.repo} @ ${short(local.head)}` : color.dim('(none saved)')}`);
   console.log(`  active:     ${local.active ? short(local.active) : color.dim('(no patches installed)')}${local.active && local.head && local.active !== local.head ? color.yellow('  (saved changes not activated yet)') : ''}`);
   console.log(`  workspace:  ${v.workspace ? v.workspace.path : color.dim(v.workspaces.length ? `(not bound; existing: ${v.workspaces.join(', ')})` : '(none)')}`);
+  if (isBuiltInLater(v)) console.log(`  patching:   ${color.yellow(`built-in app — ${SYSTEM_APP_LATER_MESSAGE}`)}`);
   console.log(`  next:       ${v.next}`);
 }
 

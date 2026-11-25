@@ -231,11 +231,14 @@ export async function appSourceStatus(request: Request, instanceId: string | und
   const work = deps.mounts.list(inst).find((m) => m.id === `${app.id}:work`);
   const workspaces = key ? core.listWorkspaces(deps.dataDir, userId, key) : [];
   const path = view?.containerPath ?? sourcePath(app.id);
-  const next = mode.mode === 'open' && view?.mode === 'rw'
-    ? `Edit the source at ${path} directly: ${app.id} is open.`
-    : work
-      ? `Edit in ${work.containerPath}, then \`aura dev patch save\`; \`aura dev patch activate\` installs it.`
-      : `Read the source at ${path} (read-only). To change it: \`aura dev patch start ${app.id}\`.`;
+  const builtIn = (app.scopeId === 'system' || isOverlay(deps, app)) && !core.SYSTEM_APP_OVERLAYS;
+  const next = builtIn
+    ? `Read the source at ${path} (read-only). ${core.SYSTEM_APP_LATER_MESSAGE}.`
+    : mode.mode === 'open' && view?.mode === 'rw'
+      ? `Edit the source at ${path} directly: ${app.id} is open.`
+      : work
+        ? `Edit in ${work.containerPath}, then \`aura dev patch save\`; \`aura dev patch activate\` installs it.`
+        : `Read the source at ${path} (read-only). To change it: \`aura dev patch start ${app.id}\`.`;
   return json({
     appId: app.id, name: app.name, version: app.version, scope: app.scopeId,
     installationId: key, activeInstallationId: active, overlay,
@@ -369,7 +372,7 @@ export async function setSourceMode(ctx: RouteCtx, appId: string | undefined, de
   const mode = body['mode'];
   if (mode !== 'open' && mode !== 'closed') return json({ error: 'invalid-mode', message: "mode must be 'open' or 'closed'" }, 400);
   if (app.scopeId === 'system') {
-    return json({ error: 'system-app', message: `${app.id} is a system app: its source stays closed. Patch it (\`aura dev patch start ${app.id}\`); activation makes your own copy.` }, 409);
+    return json({ error: 'system-app', message: `${app.id} is a built-in app: its source stays closed. ${core.SYSTEM_APP_LATER_MESSAGE}.` }, 409);
   }
   const record = deps.nexus.records.get(app.id);
   if (!record || record.scope !== app.scopeId) {
@@ -410,6 +413,10 @@ export async function activatePrepared(request: Request, appId: string | undefin
   const identity = parseIdentity(body['identity']);
   if (identity instanceof Response) return identity;
   const overlay = app.scopeId === 'system' || isOverlay(deps, app);
+  // Track P v1 patches normal apps only (core SYSTEM_APP_OVERLAYS).
+  if (overlay && !core.SYSTEM_APP_OVERLAYS) {
+    return json({ error: core.SYSTEM_APP_LATER, message: `${app.id} is a built-in app. ${core.SYSTEM_APP_LATER_MESSAGE}.` }, 409);
+  }
   // A system app is patched as the user's own copy: /workspace stays as released.
   const scope: 'global' | 'user' = app.scopeId === 'global' ? 'global' : 'user';
 

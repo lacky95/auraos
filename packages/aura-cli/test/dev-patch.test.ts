@@ -386,3 +386,36 @@ test('patch clean (command): passes --keep and --force', async () => {
   const cleans = seen.filter((r) => r.url.endsWith('/app-workspace/clean')).map((r) => r.body);
   assert.deepEqual(cleans, [{ app: APP, keep: 1, dryRun: true }, { app: APP, keep: 1, delete: [], force: true }]);
 });
+
+test('Track P v1: patch start / activate / update refuse a built-in app with the reason; status shows its read-only source and says so', async () => {
+  const view = {
+    appId: 'com.aura.terminal', name: 'Terminal', version: '1.0.0', scope: 'system', installationId: '00000000-1111-4222-8333-444444444444',
+    activeInstallationId: '00000000-1111-4222-8333-444444444444', overlay: false, mode: 'closed', defaultMode: 'closed', modeFrom: 'system',
+    upstream: { repository: 'https://example.invalid/auraos.git', commit: 'a'.repeat(40) },
+    source: { path: '/mnt/aura/com.aura.terminal', writable: false, mounted: true }, workspace: null, workspaces: [],
+    next: 'Read the source at /mnt/aura/com.aura.terminal (read-only). Patching built-in apps comes later; use a normal app or Developer Mode.',
+  };
+  const seen = await fakeShell((r) => (r.url.startsWith(`/api/instances/${INST}/app-source`) ? [200, view] : undefined));
+  const said = async (fn: () => Promise<unknown>) => {
+    const lines: string[] = [];
+    const [log, err] = [console.log, console.error];
+    console.log = (...a: unknown[]) => { lines.push(a.join(' ')); }; console.error = console.log;
+    try { await fn(); return { ok: true, text: lines.join('\n') }; }
+    catch (e) { return { ok: false, text: `${lines.join('\n')}\n${(e as Error).message}` }; }
+    finally { console.log = log; console.error = err; }
+  };
+  for (const run of [() => startWorkspace('com.aura.terminal'), () => activateRevision('com.aura.terminal'), () => updateSeries('com.aura.terminal')]) {
+    const out = await said(run);
+    assert.equal(out.ok, false);
+    assert.match(out.text, /com\.aura\.terminal is a built-in app\. Patching built-in apps comes later; use a normal app or Developer Mode\./);
+  }
+  assert.deepEqual(seen.filter((r) => !r.url.includes('/app-source')), [], 'no workspace was bound, nothing activated');
+
+  const program = new Command();
+  program.exitOverride();
+  registerDev(program);
+  const status = await said(() => program.parseAsync(['node', 'aura', 'dev', 'status', 'com.aura.terminal']));
+  assert.equal(status.ok, true);
+  assert.match(status.text, /\/mnt\/aura\/com\.aura\.terminal\s+.*read-only/);
+  assert.match(status.text, /built-in app — Patching built-in apps comes later/);
+});

@@ -38,7 +38,7 @@ import { installWithChoices } from './nexus.js';
 import type { RestartResult } from './app.js';
 import {
   ACTIVE_REF, appFromArgOrCwd, bindWorkspace, cleanWorkspaces, detachWorkspace, findWorkspace, getAppSource, gitOut,
-  patchRepoDir, readWorkspaceMarker, upstreamBase, writeWorkspaceMarker, type AppSourceView, type WorkspaceMarker,
+  patchRepoDir, readWorkspaceMarker, refuseBuiltIn, upstreamBase, writeWorkspaceMarker, type AppSourceView, type WorkspaceMarker,
 } from './dev-source.js';
 
 const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
@@ -80,6 +80,7 @@ export interface StartResult { path: string; n: number; created: boolean; marker
  */
 export async function startWorkspace(app: string, opts: { base?: string; new?: boolean } = {}): Promise<StartResult> {
   const v = await getAppSource(app);
+  refuseBuiltIn(v);
   const repo = patchRepoDir(v.installationId);
   const series = seriesAt(repo);
   const upstream = upstreamBase(v);
@@ -320,6 +321,7 @@ async function rebind(v: AppSourceView): Promise<void> {
 /** `dev patch activate [rev]`: base + series at `rev` (default: the last save), built fresh and installed. */
 export async function activateRevision(app: string, rev?: string): Promise<ActivateOutcome> {
   const v = await getAppSource(app);
+  refuseBuiltIn(v);
   const repo = patchRepoDir(v.installationId);
   const commit = existsSync(join(repo, '.git')) ? gitOut(repo, ['rev-parse', '-q', '--verify', `${rev ?? 'HEAD'}^{commit}`]) : null;
   if (!commit) fail(rev ? `'${rev}' is not a revision of ${repo}` : `nothing saved for ${v.appId} yet — aura dev patch start, change, aura dev patch save`);
@@ -368,6 +370,7 @@ export function resolveRemoteRef(repository: string, ref: string): string {
  */
 export async function updateSeries(app: string, opts: { ref?: string; activate?: boolean } = {}): Promise<ActivateOutcome | { status: 'current'; commit: string } | { status: 'saved'; rev: string }> {
   const v = await getAppSource(app);
+  refuseBuiltIn(v);
   const repo = patchRepoDir(v.installationId);
   const series = seriesAt(repo);
   if (!series?.patches.length) fail(`${v.appId} has no saved patches — update it with aura nexus app update ${v.appId}`);

@@ -657,43 +657,47 @@ test('nexus: a copy installs without the hosts it may not claim, and keeps its o
 
 // ── Track P: a patched system app's overlay keeps its trust ─────────────────
 
-test('overlay: an approved patch activation links the user copy to the system installation; nothing else does', async () => {
+test('overlay: Track P v1 refuses a patch activation of a built-in app; the (inactive) link mechanism still works and clears', async () => {
   const w = nexusWorld();
   const id = 'com.aura.settings';
   const originId = randomUUID();
   putApp(w.defs[0], id, { originId, entry: 'src/index.ts' });
   const system = (await lifecycle.sync({ appId: id, originId, scope: 'system', source: { kind: 'system', ref: id } })).installation;
 
-  // The first activation of a patched tree: the user-scope overlay, linked.
-  const first = await w.run({ ref: w.source('ws1', { id, originId }), action: 'app.patch.activate' });
-  assert.ok(first.record, String(first.error));
-  let overlay = await registry.findInstallation(id, 'user');
-  assert.notEqual(overlay.installationId, system.installationId);
+  // No path creates an overlay: the activation is refused before anyone is asked.
+  const refused = await w.run({ ref: w.source('ws1', { id, originId }), action: 'app.patch.activate' });
+  assert.match(String(refused.error?.message), /^system-app-later: Patching built-in apps comes later; use a normal app or Developer Mode$/);
+  assert.equal(refused.events.some((e) => e.type === 'permission.needed' || e.type === 'install.start'), false);
+  assert.equal(await registry.findInstallation(id, 'user'), null);
+  assert.equal(existsSync(join(w.user.appsDir, id)), false);
+  assert.equal(lifecycle.trustedOverlay(id), null);
+
+  // The link mechanism (kept for later): set on completeInstall({ overlayOf }), kept by a sync, cleared by any other install.
+  putApp(w.user, id, { originId });
+  const facts = { appId: id, originId, scope: 'user', source: { kind: 'local', ref: join(w.user.appsDir, id) } };
+  await lifecycle.completeInstall(facts, { kind: 'none' }, [], { overlayOf: system.installationId });
+  const overlay = await registry.findInstallation(id, 'user');
   assert.equal(overlay.overlay?.of, system.installationId);
   assert.equal(await registry.approvedOverlay(overlay), true);
   assert.equal(lifecycle.trustedOverlay(id), overlay.installationId);
-
-  // A re-activation (another workspace) keeps the link, on the same installation.
-  const again = await w.run({ ref: w.source('ws2', { id, originId, version: '1.0.1' }), action: 'app.patch.activate' });
-  assert.ok(again.record, String(again.error));
-  const kept = await registry.findInstallation(id, 'user');
-  assert.equal(kept.installationId, overlay.installationId);
-  assert.equal(await registry.approvedOverlay(kept), true);
-  // ...and a later sync (the boot migration) reads the same source back: still linked.
   await lifecycle.migrate(w.defs);
-  assert.equal(await registry.approvedOverlay(await registry.findInstallation(id, 'user')), true);
-  assert.equal(lifecycle.trustedOverlay(id), overlay.installationId);
-
-  // An ordinary install of a same-id tree over it (a store update, a local copy) drops the link.
-  // (another source: the owner confirms replacing the copy, as the store's identity question asks)
-  const store = await w.run({ ref: w.source('store', { id, originId, version: '2.0.0' }), identity: { action: 'update-existing' } });
-  assert.ok(store.record, String(store.error));
-  overlay = await registry.findInstallation(id, 'user');
-  assert.equal(overlay.overlay, undefined);
+  assert.equal(lifecycle.trustedOverlay(id), overlay.installationId, 'a boot sync keeps it');
+  await lifecycle.completeInstall(facts, { kind: 'none' }, []);
+  assert.equal((await registry.findInstallation(id, 'user')).overlay, undefined);
   assert.equal(lifecycle.trustedOverlay(id), null);
-  // ...and a patch activation over that copy does not make it the system app's again.
-  const patched = await w.run({ ref: w.source('ws3', { id, originId, version: '2.0.1' }), action: 'app.patch.activate' });
+});
+
+test('overlay: a normal app with a built-in id (a store copy in user scope) is patched like any app, and never linked', async () => {
+  const w = nexusWorld();
+  const id = 'com.aura.settings';
+  const originId = randomUUID();
+  putApp(w.defs[0], id, { originId, entry: 'src/index.ts' });
+  await lifecycle.sync({ appId: id, originId, scope: 'system', source: { kind: 'system', ref: id } });
+  const store = await w.run({ ref: w.source('store', { id, originId }) });
+  assert.ok(store.record, String(store.error));
+  const patched = await w.run({ ref: w.source('ws', { id, originId, version: '1.0.1' }), action: 'app.patch.activate' });
   assert.ok(patched.record, String(patched.error));
+  assert.equal(patched.record.version, '1.0.1');
   assert.equal(await registry.approvedOverlay(await registry.findInstallation(id, 'user')), false);
   assert.equal(lifecycle.trustedOverlay(id), null);
 });

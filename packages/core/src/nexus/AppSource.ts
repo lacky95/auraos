@@ -415,6 +415,18 @@ export function effectiveSourceMode(
   return { mode: defaultMode, defaultMode, from: declared ? 'manifest' : 'default' };
 }
 
+/**
+ * Patching built-in (system-scope) apps as user-scope overlays (D52) waits
+ * for the architecture review (owner, 2026-11-25): Track P v1 covers normal
+ * apps only (Nexus installs in global and user scope). While this is false no
+ * path creates an overlay link: R4 answers 409 `system-app-later`, the
+ * install pipeline refuses such an activation, and `aura dev` says so. The
+ * overlay code (link, trust checks, the user-scope port) stays, inactive.
+ */
+export const SYSTEM_APP_OVERLAYS: boolean = false;
+export const SYSTEM_APP_LATER = 'system-app-later';
+export const SYSTEM_APP_LATER_MESSAGE = 'Patching built-in apps comes later; use a normal app or Developer Mode';
+
 /** Apps whose source mode changes need the owner's password (D9). */
 export const SENSITIVE_APPS: ReadonlySet<string> = new Set(['com.aura.settings', 'com.aura.terminal', 'com.aura.nexus']);
 

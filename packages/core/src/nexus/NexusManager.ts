@@ -29,7 +29,7 @@ import { fetchLocal } from './Fetchers/LocalFetcher.js';
 import { fetchGit } from './Fetchers/GitFetcher.js';
 import { fetchOci } from './Fetchers/OciFetcher.js';
 import { publishGit, publishOci } from './Publisher.js';
-import { isDevCheckout } from './AppSource.js';
+import { isDevCheckout, SYSTEM_APP_LATER, SYSTEM_APP_LATER_MESSAGE, SYSTEM_APP_OVERLAYS } from './AppSource.js';
 import { computePermissionDiff } from './PermissionDiff.js';
 import type {
   IdentityDecision, InstallBinding, InstallRecord, NexusProgressEvent, PermissionDiff, ResolvedRef,
@@ -320,6 +320,16 @@ export class NexusManager {
     return validateStagedDir(stagingDir);
   }
 
+  /**
+   * Whether a patch activation of system app `appId` into `scope` is an
+   * overlay: no copy there yet (a new overlay), or the copy there is an
+   * approved overlay. A store or local copy with the id is a normal app.
+   */
+  private async isOverlayActivation(appId: string, scope: ScopeId): Promise<boolean> {
+    if (!existsSync(join(this.installerFor(scope).appsDir, appId))) return true;
+    return !!this.hostLifecycle && (await this.hostLifecycle.overlayLinkFor(appId, scope, true)) !== null;
+  }
+
   /** Whether the system scope ships an app with this id (a patched tree of it is an overlay). */
   private isSystemAppId(appId: string): boolean {
     const sys = this.scopeDefs.find((s) => s.id === 'system')?.appsDir;
@@ -518,10 +528,16 @@ export class NexusManager {
         mark();
         yield { type: 'identity.resolved', action: decision.action, appId: manifest.id };
       }
-      // A patched tree of a system app comes from the monorepo (`workspace:`
-      // deps and all): ported like `aura dev clone` before it is approved and
-      // installed, or refused when it can't run outside the monorepo.
-      if (opts.action === 'app.patch.activate' && this.isSystemAppId(manifest.id)) {
+      // A patched tree of a system app installs as its user-scope overlay
+      // (D52): a new one, or a new build of an approved one. Not in Track P
+      // v1 (SYSTEM_APP_OVERLAYS): refused before anyone is asked.
+      const overlayCopy = opts.action === 'app.patch.activate' && this.isSystemAppId(manifest.id)
+        && await this.isOverlayActivation(manifest.id, targetScope);
+      if (overlayCopy && !SYSTEM_APP_OVERLAYS) throw new Error(`${SYSTEM_APP_LATER}: ${SYSTEM_APP_LATER_MESSAGE}`);
+      // Its tree comes from the monorepo (`workspace:` deps and all): ported
+      // like `aura dev clone` before it is approved and installed, or refused
+      // when it can't run outside the monorepo.
+      if (overlayCopy) {
         const port = portAppDirForScope(stagingDir, targetScope, this.sdkVersion());
         if (port.unportable.length) {
           throw new Error(`cannot activate ${manifest.id} in ${targetScope} scope: these dependencies only resolve inside the AuraOS monorepo — ${port.unportable.join(', ')}`);
@@ -604,7 +620,7 @@ export class NexusManager {
       // An approved patch activation of a system app (or of its overlay) is
       // its overlay: linked to the system installation, it keeps that app's
       // trust (D29, D45). Decided before the files move; anything else clears it.
-      const overlayOf = opts.action === 'app.patch.activate' && this.hostLifecycle
+      const overlayOf = overlayCopy && this.hostLifecycle
         ? await this.hostLifecycle.overlayLinkFor(manifest.id, targetScope, existsSync(join(installer.appsDir, manifest.id)))
         : null;
       let record: InstallRecord;
