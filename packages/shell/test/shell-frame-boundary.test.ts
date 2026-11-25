@@ -412,11 +412,13 @@ test('the auto-hide badge is above keyboard and launcher, below every trusted di
 });
 
 test('the owner dialog is a native modal, mounted, and gives the requester only the outcome', () => {
-  const src = css('OwnerPasswordDialog.astro');
-  assert.match(src, /<dialog id="aura-owner-password"/);
+  const markup = css('OwnerPasswordDialog.astro');
+  assert.match(markup, /<dialog id="aura-owner-password"/);
+  assert.match(markup, /initOwnerDialog\(\)/);
+  assert.match(markup, /autocomplete="current-password"/);
+  assert.match(markup, /autocomplete="new-password"/);
+  const src = readFileSync(new URL('../src/lib/approvals/ownerDialog.ts', import.meta.url), 'utf8');
   assert.match(src, /\.showModal\(\)/);
-  assert.match(src, /autocomplete="current-password"/);
-  assert.match(src, /autocomplete="new-password"/);
   // The reply carries {ok, error?} only, never a field value. An approval's
   // answer is built by approvalReply() alone (approvals.test.ts pins it).
   const literal = [...src.matchAll(/replyTo\([\w.]+, \{([^}]*)\}/g)].length;
