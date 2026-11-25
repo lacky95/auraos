@@ -1,0 +1,300 @@
+---
+import '../styles/settings.css';
+import Icon from '../components/Icon.astro';
+
+/**
+ * Settings → Users & Identities.
+ *
+ * My account: the signed-in owner, their login sessions, "Change password…"
+ * and "Sign out other sessions". Global: the password policy for new and
+ * changed passwords.
+ *
+ * A password is never typed into this page: it runs on its own App Host, so
+ * its script could read anything typed here. "Change password…" and
+ * "Save…" ask the shell (`aura.account.password.request`,
+ * `aura.account.policy.request`), whose own dialog takes the password, shows
+ * the change and calls `/api/auth/*` with the owner's login cookie. This page
+ * gets back only `{ok, error?}`.
+ *
+ * Reads go through the gateway as the owner acting through Settings (D45):
+ * `/api/auth/account` and the public `/api/auth/password-policy`.
+ */
+const MIN = 4;
+const MAX = 128;
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Settings · Users &amp; Identities — AuraOS</title>
+  <link rel="stylesheet" href="/api/os/theme.css" />
+  <style is:global>
+    .usr-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--aura-color-border, #333); margin-bottom: 16px; }
+    .usr-tab {
+      background: none; border: none; border-bottom: 2px solid transparent; color: var(--aura-color-text-dim);
+      font-size: 0.68rem; letter-spacing: 0.1em; padding: 8px 14px; cursor: pointer; text-transform: uppercase;
+    }
+    .usr-tab.active { color: var(--aura-color-primary); border-bottom-color: var(--aura-color-primary); }
+    .usr-panel { display: none; }
+    .usr-panel.active { display: block; }
+    .acc-section { border: var(--aura-border); padding: 14px 16px; margin-bottom: 14px; display: flex; flex-direction: column; gap: 10px; }
+    .acc-head { display: flex; align-items: center; gap: 10px; }
+    .acc-title { flex: 1; display: inline-flex; align-items: center; gap: 6px; font-size: var(--aura-font-size-sm); letter-spacing: 0.1em; text-transform: uppercase; color: var(--aura-color-primary); }
+    .acc-note { font-size: 0.65rem; color: var(--aura-color-text-dim); letter-spacing: 0.04em; line-height: 1.5; }
+    .acc-table { width: 100%; border-collapse: collapse; font-size: 0.7rem; }
+    .acc-table th { text-align: left; font-weight: normal; color: var(--aura-color-text-dim); letter-spacing: 0.1em; font-size: 0.6rem; padding: 4px 6px; border-bottom: var(--aura-border); }
+    .acc-table td { padding: 5px 6px; border-bottom: 1px solid var(--aura-color-border, rgba(0,255,65,0.12)); vertical-align: middle; }
+    .acc-table code { font-family: var(--aura-font-mono, monospace); font-size: 0.65rem; }
+    .pill { display: inline-block; padding: 1px 6px; border: var(--aura-border); font-size: 0.6rem; letter-spacing: 0.08em; margin-right: 4px; }
+    .pill.on { color: var(--aura-color-primary); }
+    .pill.off { color: var(--aura-color-text-dim); }
+    .btn { font: inherit; font-size: 0.65rem; letter-spacing: 0.08em; padding: 3px 9px; background: var(--aura-color-surface, #111); color: var(--aura-color-text); border: var(--aura-border); cursor: pointer; }
+    .btn:hover:not(:disabled) { color: var(--aura-color-primary); }
+    .btn:disabled { opacity: 0.4; cursor: default; }
+    .usr-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; font-size: 0.72rem; }
+    .usr-facts dt { color: var(--aura-color-text-dim); letter-spacing: 0.08em; font-size: 0.62rem; text-transform: uppercase; }
+    .usr-facts dd { margin: 0; }
+    .row-inline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .row-inline label { font-size: 0.68rem; letter-spacing: 0.06em; display: inline-flex; align-items: center; gap: 8px; }
+    .row-inline input[type="number"], .row-inline select { font: inherit; font-size: 0.7rem; padding: 3px 6px; background: var(--aura-color-bg); color: var(--aura-color-text); border: var(--aura-border); }
+    .row-inline input[type="number"] { width: 7ch; }
+    #status { font-size: 0.65rem; letter-spacing: 0.06em; color: var(--aura-color-text-dim); }
+    #status[data-tone="error"] { color: var(--aura-color-danger, #ff4a4a); }
+  </style>
+</head>
+<body>
+  <main class="settings-body">
+    <div class="usr-tabs" role="tablist">
+      <button class="usr-tab active" type="button" role="tab" data-tab="account" aria-selected="true">My account</button>
+      <button class="usr-tab" type="button" role="tab" data-tab="global" aria-selected="false">Global</button>
+    </div>
+    <p id="status"></p>
+
+    <!-- ── MY ACCOUNT ─────────────────────────────────────────────────── -->
+    <div class="usr-panel active" id="panel-account" role="tabpanel">
+      <section class="acc-section">
+        <div class="acc-head">
+          <span class="acc-title"><Icon name="user" /> Account</span>
+          <button class="btn" id="btn-password" type="button">CHANGE PASSWORD…</button>
+        </div>
+        <dl class="usr-facts">
+          <dt>Username</dt><dd id="acc-username">—</dd>
+          <dt>Role</dt><dd id="acc-role">—</dd>
+          <dt>Member since</dt><dd id="acc-since">—</dd>
+        </dl>
+        <p class="acc-note">
+          The password is typed only into AuraOS's own dialog, never into this page. Changing it signs out
+          your other sessions; this one stays. Display name, language and avatar come with the profile in Phase 3.
+        </p>
+      </section>
+
+      <section class="acc-section">
+        <div class="acc-head">
+          <span class="acc-title"><Icon name="log-in" /> Signed-in sessions</span>
+          <button class="btn" id="btn-revoke-others" type="button">SIGN OUT OTHER SESSIONS</button>
+        </div>
+        <table class="acc-table">
+          <thead><tr><th>SESSION</th><th>METHOD</th><th>STARTED</th><th></th></tr></thead>
+          <tbody id="sessions-body"><tr><td colspan="4" class="acc-note">Loading…</td></tr></tbody>
+        </table>
+      </section>
+    </div>
+
+    <!-- ── GLOBAL ─────────────────────────────────────────────────────── -->
+    <div class="usr-panel" id="panel-global" role="tabpanel">
+      <section class="acc-section">
+        <div class="acc-head">
+          <span class="acc-title"><Icon name="key" /> Password policy</span>
+          <button class="btn" id="btn-policy" type="button" disabled>SAVE…</button>
+        </div>
+        <div class="row-inline">
+          <label>Minimum length
+            <input id="pol-min" type="number" min={MIN} max={MAX} step="1" value={MIN} />
+            <span class="acc-note">{MIN}–{MAX} characters</span>
+          </label>
+        </div>
+        <div class="row-inline">
+          <label>Required character types
+            <select id="pol-classes">
+              <option value="0">0 · any</option>
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4 · all</option>
+            </select>
+          </label>
+          <span class="acc-note">of lowercase, uppercase, digits and other</span>
+        </div>
+        <div class="row-inline">
+          <label><input id="pol-username" type="checkbox" checked /> Must differ from the username</label>
+        </div>
+        <p class="acc-note">
+          Existing passwords stay valid. The rules apply to new and changed passwords, and to a reset with
+          <code>aura user reset-password</code>. Saving asks for your password in AuraOS's own dialog, which shows
+          the exact change.
+        </p>
+      </section>
+    </div>
+  </main>
+
+  <footer class="settings-foot">PROVIDER · /api/auth/account · /api/auth/password-policy · /api/auth/sessions/revoke-others</footer>
+
+  <script is:inline define:vars={{ MIN, MAX }}>
+    (() => {
+      const $ = (id) => document.getElementById(id);
+      const statusEl = $('status');
+      const setStatus = (msg, tone) => {
+        statusEl.textContent = msg || '';
+        if (tone) statusEl.dataset.tone = tone; else delete statusEl.dataset.tone;
+      };
+      const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+      const fmt = (ms) => (ms ? new Date(ms).toLocaleString() : '—');
+      const METHOD = { password: 'password', 'shared-key': 'admin credential' };
+
+      async function getJson(path) {
+        const r = await fetch(window.auraOs.url(path));
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+        return data;
+      }
+
+      // ── my account ───────────────────────────────────────────────────
+      async function loadAccount() {
+        try {
+          const a = await getJson('/api/auth/account');
+          $('acc-username').textContent = a.username;
+          $('acc-role').textContent = a.role;
+          $('acc-since').textContent = fmt(a.createdAt);
+          const others = a.sessions.filter((s) => !s.current).length;
+          $('btn-revoke-others').disabled = others === 0;
+          $('sessions-body').innerHTML = a.sessions.length ? a.sessions.map((s) => `
+            <tr>
+              <td><code>${esc(s.id8)}…</code></td>
+              <td>${esc(METHOD[s.method] ?? s.method)}</td>
+              <td class="acc-note">${esc(fmt(s.createdAt))}</td>
+              <td>${s.current ? '<span class="pill on">THIS DEVICE</span>' : ''}</td>
+            </tr>`).join('') : '<tr><td colspan="4" class="acc-note">No sessions.</td></tr>';
+        } catch (err) {
+          $('sessions-body').innerHTML = '<tr><td colspan="4" class="acc-note">Unavailable.</td></tr>';
+          setStatus(err.message === 'login-required'
+            ? 'Sign in to the desktop to see your account.'
+            : `ERROR — ${err.message}`, 'error');
+        }
+      }
+
+      $('btn-revoke-others').addEventListener('click', async () => {
+        const btn = $('btn-revoke-others');
+        btn.disabled = true;
+        try {
+          const r = await fetch(window.auraOs.url('/api/auth/sessions/revoke-others'), {
+            method: 'POST', headers: window.auraOs.bodylessHeaders(),
+          });
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+          setStatus(`Signed out ${data.revoked} other session${data.revoked === 1 ? '' : 's'}.`);
+        } catch (err) {
+          setStatus(`ERROR — ${err.message}`, 'error');
+        }
+        await loadAccount();
+      });
+
+      // ── asking the shell ─────────────────────────────────────────────
+      const ERRORS = {
+        cancelled: '',
+        busy: 'Another password dialog is open.',
+        unchanged: 'Nothing changed.',
+        'invalid-policy': 'Those rules are out of range.',
+        unavailable: 'AuraOS could not read the password rules. Try again.',
+      };
+      /** Settings asks; the shell's dialog takes the password and answers {ok, error?}. */
+      function askShell(type, extra) {
+        return new Promise((resolve) => {
+          if (!window.auraOs || !window.auraOs.appHost()) { resolve({ ok: false, error: 'unavailable' }); return; }
+          const requestId = Math.random().toString(36).slice(2); // correlation only
+          const onResult = (ev) => {
+            if (!window.auraOs.isFromShell(ev)) return;
+            const d = ev.data;
+            if (!d || d.type !== type.replace(/\.request$/, '.result') || d.requestId !== requestId) return;
+            window.removeEventListener('message', onResult);
+            resolve({ ok: d.ok === true, error: typeof d.error === 'string' ? d.error : undefined });
+          };
+          window.addEventListener('message', onResult);
+          window.auraOs.postToShell({ type, requestId, ...extra });
+        });
+      }
+
+      $('btn-password').addEventListener('click', async () => {
+        const r = await askShell('aura.account.password.request', {});
+        if (r.ok) setStatus('Password changed. Your other sessions were signed out.');
+        else if (r.error && ERRORS[r.error] !== '') setStatus(ERRORS[r.error] ?? `ERROR — ${r.error}`, 'error');
+        await loadAccount();
+      });
+
+      // ── global: password policy ──────────────────────────────────────
+      let saved = null;
+      const form = () => ({
+        minLength: Number($('pol-min').value),
+        requiredClasses: Number($('pol-classes').value),
+        differFromUsername: $('pol-username').checked,
+      });
+      const valid = (p) => Number.isInteger(p.minLength) && p.minLength >= MIN && p.minLength <= MAX;
+      const same = (a, b) => !!a && !!b && a.minLength === b.minLength && a.requiredClasses === b.requiredClasses
+        && a.differFromUsername === b.differFromUsername;
+      function updateSave() {
+        const p = form();
+        $('btn-policy').disabled = !saved || !valid(p) || same(p, saved);
+      }
+      function showPolicy(p) {
+        saved = p;
+        $('pol-min').value = String(p.minLength);
+        $('pol-classes').value = String(p.requiredClasses);
+        $('pol-username').checked = p.differFromUsername;
+        updateSave();
+      }
+      async function loadPolicy() {
+        try { showPolicy((await getJson('/api/auth/password-policy')).policy); }
+        catch (err) { setStatus(`ERROR — ${err.message}`, 'error'); }
+      }
+      ['pol-min', 'pol-classes', 'pol-username'].forEach((id) => {
+        $(id).addEventListener('input', updateSave);
+        $(id).addEventListener('change', updateSave);
+      });
+      $('btn-policy').addEventListener('click', async () => {
+        const policy = form();
+        if (!valid(policy)) { setStatus(`Minimum length is ${MIN} to ${MAX}.`, 'error'); return; }
+        const r = await askShell('aura.account.policy.request', { policy });
+        if (r.ok) setStatus('Password rules saved.');
+        else if (r.error && ERRORS[r.error] !== '') setStatus(ERRORS[r.error] ?? `ERROR — ${r.error}`, 'error');
+        await loadPolicy();
+      });
+
+      // ── tabs ──────────────────────────────────────────────────────────
+      document.querySelectorAll('.usr-tab').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.usr-tab').forEach((b) => {
+            b.classList.toggle('active', b === btn);
+            b.setAttribute('aria-selected', String(b === btn));
+          });
+          const tab = btn.dataset.tab;
+          $('panel-account').classList.toggle('active', tab === 'account');
+          $('panel-global').classList.toggle('active', tab === 'global');
+        });
+      });
+
+      // scripts/os.ts sets window.auraOs once the bundled module has run.
+      function whenReady(fn) {
+        if (window.auraOs) return fn();
+        setTimeout(() => whenReady(fn), 10);
+      }
+      whenReady(() => { void loadAccount(); void loadPolicy(); });
+    })();
+  </script>
+  <script>
+    import { OsClient } from '@aura/app-sdk';
+    import '../scripts/os.ts';
+    new OsClient().nav.installGridNav({
+      selector: '.usr-tab, #btn-password, #btn-revoke-others, #pol-min, #pol-classes, #pol-username, #btn-policy',
+    });
+  </script>
+</body>
+</html>

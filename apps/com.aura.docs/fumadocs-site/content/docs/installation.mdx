@@ -86,7 +86,9 @@ docker exec -it aura-shell aura setup-code
 ```
 
 The code works once and expires after 10 minutes. Enter it with a username
-and password; that is the owner account. From then on the desktop asks you
+and password; that is the owner account. By default a password needs at
+least 4 characters and must differ from the username; the setup page shows
+the rules that apply. From then on the desktop asks you
 to sign in at `/login`: for 12 hours, or 30 days with **Stay signed in**.
 Each address you open AuraOS at signs in separately
 ([Reaching AuraOS](/docs/reaching-auraos#signing-in)).
@@ -97,6 +99,26 @@ Each address you open AuraOS at signs in separately
 ```bash
 docker exec -it aura-shell aura user reset-password <username>
 ```
+
+## Users & Identities
+
+**Settings → Users & Identities** manages the owner account.
+
+- **My account** shows your username, role and the date the account was
+  created, plus every signed-in session. **Sign out other sessions** ends
+  all of them except this one. **Change password…** opens AuraOS's own
+  dialog for the current and the new password; it signs out your other
+  sessions and keeps this one.
+- **Global** sets the password rules: the minimum length (4 to 128
+  characters, default 4), how many character types are required (0 to 4 of
+  lowercase, uppercase, digits and other; default 0) and whether a password
+  must differ from the username (default on). **Save…** asks for your
+  password in AuraOS's own dialog, which shows the exact change.
+
+The rules apply to new and changed passwords: setup, a reset and a change.
+Existing passwords keep working after the rules get stricter. A password is
+never typed into the Settings page itself, only into the dialog that the
+desktop owns.
 
 ## Troubleshooting
 

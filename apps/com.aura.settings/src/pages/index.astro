@@ -48,6 +48,10 @@ import Icon from '../components/Icon.astro';
         <h3><Icon name="key" /> CONTEXT</h3>
         <p>Env vars · tokens · secrets · injected into apps</p>
       </button>
+      <button class="tile" data-section="users">
+        <h3><Icon name="users" /> USERS &amp; IDENTITIES</h3>
+        <p>My account · password · sessions · password rules</p>
+      </button>
       <button class="tile" data-section="access">
         <h3><Icon name="shield" /> NOTIFICATIONS &amp; ACCESS</h3>
         <p>Notification permissions · API keys · admin audit</p>
@@ -92,6 +96,7 @@ import Icon from '../components/Icon.astro';
         case 'context':    return ['/context',    'Settings · Context'];
         case 'interfaces': return ['/interfaces', 'Settings · Interfaces'];
         case 'access':     return ['/access',     'Settings · Notifications & access'];
+        case 'users':      return ['/users',      'Settings · Users & Identities'];
         case 'about':      return ['/about',      'Settings · About'];
         default:           return ['/',           'Settings'];
       }
