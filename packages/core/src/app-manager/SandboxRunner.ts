@@ -112,6 +112,14 @@ export interface SandboxRunner {
     lifecycleToken?: string;
   }): void;
   /**
+   * The lifecycle checks again for an instance adopted from a previous shell
+   * (`registerAdopted`): its health identity and the runtime check of the
+   * health guard, as a fresh start measures them. Reported only: a running
+   * instance is never stopped for it. Null when the health endpoint gave no
+   * answer. Container-only; PRoot instances don't survive a shell restart.
+   */
+  measureAdopted?(instanceId: string): Promise<LifecycleStatus | null>;
+  /**
    * Remove EVERY host sandbox belonging to an app (all instances, incl.
    * untracked survivors) — used as a belt-and-braces step before uninstall.
    * Container-only; PRoot's children die with the shell so it doesn't implement it.

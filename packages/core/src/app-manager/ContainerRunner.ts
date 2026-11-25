@@ -1322,6 +1322,42 @@ export class ContainerRunner implements SandboxRunner {
   lifecycleStatus(instanceId: string): LifecycleStatus | null {
     return this.containers.get(instanceId)?.lifecycle ?? null;
   }
+
+  /**
+   * The same two measurements a fresh start makes (spawn → waitHealthy +
+   * checkHealthGuard), for a container adopted after a shell restart. The
+   * health probe carries the token only to the bound address, as every
+   * lifecycle call does; without an address it asks by name and without the
+   * token (health still answers). The runtime check sends a deliberately
+   * wrong token, which is no secret. The result is recorded and logged by
+   * the mode (`lifecycleStatusRefusal`); in `strict` the refusal is reported,
+   * and the running instance is left alone.
+   */
+  async measureAdopted(instanceId: string): Promise<LifecycleStatus | null> {
+    const t = this.containers.get(instanceId);
+    if (!t) return null;
+    const url = t.address
+      ? lifecycleUrl(t.address, t.port, 'health')
+      : `http://${t.hostname}:${t.port}${lifecyclePath('health')}`;
+    let identity: LifecycleStatus['identity'];
+    try {
+      const res = await fetch(url, {
+        headers: lifecycleHeaders(t.address ? t.lifecycleToken : undefined), signal: AbortSignal.timeout(5_000),
+      });
+      const body = await res.text();
+      if (!res.ok) return null;
+      identity = classifyHealthIdentity(body, t.appId, instanceId).kind;
+    } catch {
+      return null;
+    }
+    const lifecycle: LifecycleStatus = { identity, guard: await checkHealthGuard(url) };
+    // Still the container we measured (it may have exited meanwhile).
+    if (this.containers.get(instanceId) !== t) return null;
+    t.lifecycle = lifecycle;
+    const refusal = lifecycleStatusRefusal(instanceId, lifecycle);
+    if (refusal) console.warn(`[ContainerRunner] adopted ${refusal}; left running (it was started by a previous shell)`);
+    return lifecycle;
+  }
   /**
    * `astro build` an app in a throwaway container — never in aura-shell
    * (its pids budget) and never on the launch path. Same app-dir /

@@ -276,6 +276,17 @@ export class AppManager {
     if (blocked) this.reloadManifest(appId);
   }
 
+  /** Record an adopted instance's lifecycle status (ContainerRunner `measureAdopted`). Never throws. */
+  private async measureAdopted(instanceId: string): Promise<void> {
+    try {
+      const status = await this.runners.container.measureAdopted?.(instanceId);
+      const inst = this.instances.get(instanceId);
+      if (status && inst) inst.lifecycle = status;
+    } catch (err) {
+      console.warn(`[AppManager] lifecycle check of adopted ${instanceId} failed: ${(err as Error).message}`);
+    }
+  }
+
   /** A slot is assigned when an instance is claimed for use, never to a pool member. */
   async claimHostSlot(appId: string, instanceId: string): Promise<void> {
     const scope: ScopeId | undefined = this.registry.getScopeId(appId);
@@ -997,6 +1008,9 @@ export class AppManager {
           console.warn(`[AppManager] skipping orphan adoption for ${o.instanceId}: manifest for ${o.appId} not found`);
         }
         console.log(`[AppManager] adopted orphan container ${o.instanceId} (appId=${o.appId}, port=${o.port})`);
+        // The lifecycle checks a fresh start makes, again (F0a): the status
+        // `aura get inst -o wide` shows. In the background: never holds boot.
+        if (manifest) void this.measureAdopted(o.instanceId);
       }
     } catch (err) {
       console.warn(`[AppManager] orphan adoption failed: ${(err as Error).message}`);
