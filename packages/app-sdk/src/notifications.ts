@@ -328,7 +328,7 @@ export class NotificationsApi {
 
   /** Bearer on Node only — a browser never sends (or sees) the instance token. */
   private authHeaders(url: string): Record<string, string> {
-    return osAuthHeaders(url, this.opts.token !== undefined ? { token: this.opts.token } : {});
+    return osAuthHeaders(url, { base: this.base(), ...(this.opts.token !== undefined ? { token: this.opts.token } : {}) });
   }
 
   private doFetch(): typeof fetch {

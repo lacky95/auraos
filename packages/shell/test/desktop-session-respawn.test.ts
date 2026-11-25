@@ -1,11 +1,13 @@
 // PRoot instances after a shell restart (lib/desktopSession.ts). Container
 // apps survive and are adopted; a PRoot app is a child process of the shell
 // and dies with it. The desktop snapshot keeps every running PRoot instance,
-// with or without a window, and the restore starts it again — also when the
-// activities themselves are not restored.
+// with or without a window, and the restore starts it again, only when the
+// desktop is restored: restore off or a restart without restoring brings
+// nothing back (M5, D57).
 //
 //   cd packages/shell && npx tsx --test test/desktop-session-respawn.test.ts
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { reopenActivities, sessionInstances, type DesktopSnapshot, type RestoreReport } from '../src/lib/desktopSession.ts';
 
@@ -45,6 +47,8 @@ test('the snapshot keeps a running PRoot instance without a window; a container 
     { instanceId: 'com.aura.term-2', appId: 'com.aura.term', state: 'resumed', sandbox: 'container' },
     { instanceId: 'io.ex.tx-pool', appId: 'io.ex.tx', state: 'resumed', sandbox: 'proot', inPool: true },
     { instanceId: 'io.ex.tx-dead', appId: 'io.ex.tx', state: 'error', sandbox: 'proot' },
+    { instanceId: 'io.ex.tx-stopped', appId: 'io.ex.tx', state: 'stopped', sandbox: 'proot' },
+    { instanceId: 'io.ex.tx-crashed', appId: 'io.ex.tx', state: 'crashed', sandbox: 'proot' },
     { instanceId: 'io.ex.svc', appId: 'io.ex.svc', state: 'resumed', sandbox: 'proot' },
   ]);
   const got = sessionInstances(mgr, new Set(), new Set(['com.aura.term-2']));
@@ -77,14 +81,20 @@ test('the restore starts the PRoot instance again; the adopted container keeps i
   assert.deepEqual(r.failed, []);
 });
 
-test('activities not restored (setting off, or a restart without restore): PRoot still comes back, no windows', async () => {
+test('M5: activities not restored (setting off, or a restart without restore): nothing comes back, PRoot included', async () => {
   const { mgr, started, opened } = mgrOf([]);
   const r = report();
   await reopenActivities(mgr, snap, r, false);
-  assert.deepEqual(started, ['io.ex.tx']);
+  assert.deepEqual(started, []);
   assert.deepEqual(opened, []);
   assert.equal(r.restored, 0);
-  assert.equal(r.respawned, 1);
+  assert.equal(r.respawned, 0);
+});
+
+test('M5: doRestore passes windows only when nothing skipped the restore', () => {
+  const src = readFileSync(new URL('../src/lib/desktopSession.ts', import.meta.url), 'utf8');
+  assert.match(src, /await reopenActivities\(mgr, snap, report, !report\.skipped\)/);
+  assert.match(src, /for \(const si of windows \? snap\.instances\.filter\(\(i\) => i\.respawn\) : \[\]\)/);
 });
 
 test('a PRoot instance with a window is started once, by its window', async () => {
@@ -102,7 +112,7 @@ test('a PRoot instance with a window is started once, by its window', async () =
 test('a PRoot app that is already running again (autoStart) is not started twice', async () => {
   const { mgr, started } = mgrOf([{ instanceId: 'io.ex.tx', appId: 'io.ex.tx', state: 'resumed', sandbox: 'proot' }]);
   const r = report();
-  await reopenActivities(mgr, { ...snap, activities: [] }, r, false);
+  await reopenActivities(mgr, { ...snap, activities: [] }, r);
   assert.deepEqual(started, []);
   assert.equal(r.respawned, 1);
   assert.equal(r.idMap['io.ex.tx'], 'io.ex.tx');

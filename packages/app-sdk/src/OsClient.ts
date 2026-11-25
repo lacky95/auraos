@@ -249,7 +249,7 @@ export class OsClient {
     // Server side, the instance token says which app asks (OPEN_TERMINAL grants, D29).
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...osAuthHeaders(url) },
+      headers: { 'Content-Type': 'application/json', ...osAuthHeaders(url, { base: this.base }) },
       body: JSON.stringify(intent),
     });
     const body = await res.json().catch(() => null) as { kind?: string; error?: string; code?: string; hint?: string } | null;

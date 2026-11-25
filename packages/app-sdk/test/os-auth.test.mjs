@@ -43,6 +43,7 @@ test('osBase keeps each caller’s Node and browser default', () => {
 });
 
 test('a browser never gets a token, explicit or from the env', () => {
+  process.env.OS_API_BASE = 'http://os';
   process.env.AURA_INSTANCE_TOKEN = 'env-token';
   assert.deepEqual(osAuthHeaders('http://os/api/notifications'), { Authorization: 'Bearer env-token' });
   inBrowser();
@@ -51,6 +52,7 @@ test('a browser never gets a token, explicit or from the env', () => {
 });
 
 test('proxied URLs stay tokenless in every spelling', () => {
+  process.env.OS_API_BASE = 'http://os';
   process.env.AURA_INSTANCE_TOKEN = 'env-token';
   for (const u of ['http://os/api/proxy/a/b', 'http://os/api/proxy', 'http://os//api/proxy/a', 'http://os/API/Proxy/a',
     'http://os/api/x/../proxy/a', 'http://os/api/%70roxy/a', 'http://os/api/%2570roxy/a', '/api/proxy/a', 'http://os/%zz']) {
@@ -60,6 +62,7 @@ test('proxied URLs stay tokenless in every spelling', () => {
 });
 
 test('a page render forwards the owner SSR claim with the token, to the shell only (D45)', () => {
+  process.env.OS_API_BASE = 'http://os';
   const page = new Request('http://settings--desk.test/apps', { headers: { 'x-aura-owner-ssr': 'agw1.claim.mac' } });
   assert.deepEqual(osAuthHeaders('http://os/api/apps', { request: page }), {});
   process.env.AURA_INSTANCE_TOKEN = 'env-token';
@@ -70,6 +73,24 @@ test('a page render forwards the owner SSR claim with the token, to the shell on
   assert.deepEqual(osAuthHeaders('http://os/api/proxy/com.example.counter/x', { request: page }), {}, 'never to another app');
   inBrowser();
   assert.deepEqual(osAuthHeaders('http://os/api/apps', { request: page }), {});
+});
+
+test('L2: the token and the owner SSR claim go to the OS base only, never another origin', () => {
+  process.env.OS_API_BASE = 'http://aura-shell:3000';
+  process.env.AURA_INSTANCE_TOKEN = 'env-token';
+  const page = new Request('http://settings--desk.test/apps', { headers: { 'x-aura-owner-ssr': 'agw1.claim.mac' } });
+  assert.deepEqual(osAuthHeaders('https://example.com/x', { request: page }), {});
+  assert.deepEqual(osAuthHeaders('http://aura-shell:3001/api/apps', { request: page }), {}, 'another port is another origin');
+  assert.deepEqual(osAuthHeaders('http://aura-shell.evil.test:3000/api/apps', { request: page }), {});
+  assert.deepEqual(osAuthHeaders('//example.com/x', { request: page }), {});
+  assert.deepEqual(osAuthHeaders('file:///etc/passwd'), {});
+  assert.deepEqual(osAuthHeaders('http://aura-shell:3000/api/apps', { request: page }),
+    { Authorization: 'Bearer env-token', 'x-aura-owner-ssr': 'agw1.claim.mac' });
+  assert.deepEqual(osAuthHeaders('/api/apps'), { Authorization: 'Bearer env-token' }, 'a path the caller resolves against the OS base');
+  delete process.env.OS_API_BASE;
+  assert.deepEqual(osAuthHeaders('http://localhost:3000/api/apps'), { Authorization: 'Bearer env-token' }, 'the default base');
+  process.env.AURA_OS_URL = 'http://sidecar-os:3000';
+  assert.deepEqual(osAuthHeaders('http://sidecar-os:3000/api/x'), { Authorization: 'Bearer env-token' }, 'a sidecar\'s OS URL');
 });
 
 test('notifications send no token from a browser', async () => {

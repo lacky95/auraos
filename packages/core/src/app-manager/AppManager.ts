@@ -44,9 +44,6 @@ import { getAppHostServices } from '../app-hosts/services.js';
 import { appSourceFingerprint } from '../app-hosts/lifecycle.js';
 
 const RECONCILE_INTERVAL_MS = 5_000;
-/** Boot attempts of the survivor scan before the reconciler takes over. */
-const ADOPT_ATTEMPTS = 3;
-const ADOPT_RETRY_MS = 2_000;
 const ERROR_GRACE_MS        = 30_000;
 
 export class AppManager {
@@ -153,6 +150,8 @@ export class AppManager {
       proot:     new ProotRunner(runnerOpts),
       container: new ContainerRunner(runnerOpts),
     };
+    // M6: while adoption is pending a spawn never removes a running survivor by name.
+    (this.runners.container as ContainerRunner).survivorsUnknown = () => this.adoptionPending;
     // Default runner for utility calls; per-app spawn routes via runnerOf().
     this.runner = this.runners['proot'];
     this.permissions = new PermissionManager(this.registry);
@@ -942,16 +941,13 @@ export class AppManager {
     this.refreshManifestDerived();
     console.log(`[AppManager] Ready. Apps found: ${this.registry.getAll().length}, keymap actions: ${keymapRegistry.list().length}`);
     // Adopt every sibling container that survived the last shell lifetime
-    // (see adoptOrphans). A failed scan is retried; if it still fails, the
-    // reconciler keeps trying, and nothing is reaped as an orphan meanwhile.
-    for (let attempt = 1; attempt <= ADOPT_ATTEMPTS; attempt++) {
-      if (await this.adoptOrphans()) break;
-      if (attempt === ADOPT_ATTEMPTS) {
-        this.adoptionPending = true;
-        console.error('[AppManager] orphan adoption failed at boot; the reconciler retries it');
-      } else {
-        await new Promise((r) => setTimeout(r, ADOPT_RETRY_MS));
-      }
+    // (see adoptOrphans). One try here, so a failing Docker never holds boot
+    // (and every first request) up; the reconciler retries it. Until it
+    // succeeds nothing is reaped as an orphan, and no spawn removes a running
+    // container by name (ContainerRunner `survivorsUnknown`, M6).
+    if (!(await this.adoptOrphans())) {
+      this.adoptionPending = true;
+      console.error('[AppManager] orphan adoption failed at boot; the reconciler retries it');
     }
     if (!this.adoptionPending) await this.reconcileSurvivors();
     // Sidecars likewise outlive this process: a docker daemon restart removes

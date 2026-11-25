@@ -17,6 +17,8 @@ export interface ApprovalDialogView {
   expiresAt: number;
   display: { title: string; details: string[]; requestedBy: string; reason?: string };
   appId: string | null;
+  /** The app "Deny and block" would block (L4), or null: no block offered. */
+  blockable: string | null;
 }
 
 export type ApprovalWaiterKind = 'approval' | 'confirm';
@@ -44,6 +46,7 @@ export function parseApprovalView(x: unknown): ApprovalDialogView | null {
       ...(typeof d['reason'] === 'string' ? { reason: d['reason'] } : {}),
     },
     appId: typeof v['appId'] === 'string' ? v['appId'] : null,
+    blockable: typeof v['blockable'] === 'string' ? v['blockable'] : null,
   };
 }
 

@@ -152,7 +152,10 @@ export async function buildSnapshot(reason: DesktopSnapshot['reason']): Promise<
   return { schema: 1, savedAt: new Date().toISOString(), reason, instances: sessionInstances(mgr, members, withWindows), activities };
 }
 
-/** The instances a snapshot keeps: shown on a workspace, parent of a window, or PRoot. */
+/** Instance states a PRoot respawn brings back: running ones, never one that had crashed or stopped (M5). */
+const RESPAWN_STATES = new Set(['resumed', 'started', 'paused']);
+
+/** The instances a snapshot keeps: shown on a workspace, parent of a window, or a running PRoot one. */
 export function sessionInstances(
   mgr: Pick<Mgr, 'getAllInstances' | 'getManifest'>, members: Set<string>, withWindows: Set<string>,
 ): SessionInstance[] {
@@ -163,7 +166,7 @@ export function sessionInstances(
     const m = mgr.getManifest(inst.appId);
     if (!m || m.componentType === 'service') continue;
     const view = m.activityMode !== 'multi' && members.has(inst.instanceId);
-    const respawn = inst.sandbox === 'proot';
+    const respawn = inst.sandbox === 'proot' && RESPAWN_STATES.has(inst.state);
     if (!view && !respawn && !withWindows.has(inst.instanceId)) continue;
     instances.push({ instanceId: inst.instanceId, appId: inst.appId, view, ...(respawn ? { respawn: true as const } : {}) });
   }
@@ -400,8 +403,10 @@ export async function reopenActivities(
     }
   }
 
-  // PRoot instances not brought back by a window above (instMap dedupes).
-  for (const si of snap.instances.filter((i) => i.respawn)) {
+  // PRoot instances not brought back by a window above (instMap dedupes), only
+  // when the desktop is being restored: restore off or a restart without
+  // restoring brings nothing back, as before (M5, D57).
+  for (const si of windows ? snap.instances.filter((i) => i.respawn) : []) {
     if (instMap.has(si.instanceId)) continue;
     try {
       report.idMap[si.instanceId] = await instanceFor(si.instanceId, si.appId);

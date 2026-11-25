@@ -205,7 +205,7 @@ export function osSidecars(options: OsSidecarsOptions = {}): OsSidecarsClient {
     try {
       res = await doFetch(url, {
         method,
-        headers: { ...osAuthHeaders(url, { token }), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+        headers: { ...osAuthHeaders(url, { token, base }), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
         signal: AbortSignal.timeout(timeoutMs),
       });

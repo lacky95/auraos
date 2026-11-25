@@ -29,8 +29,8 @@ import {
   APP_HOST_ROUTE_HEADER, AURA_RESERVED_PATHS, OWNER_SSR_HEADER, appHostCookieName, isAuraReservedPath, parseAppHost,
 } from '@aura/core/host-rules';
 import {
-  SESSION_COOKIES, countSurfaceEvent, gatedHttpSurface, internalServiceHeaders, observeHttpSurface, reportSurface,
-  requestIdentity, surfaceGate,
+  SESSION_COOKIES, countSurfaceEvent, followIdentity, gatedHttpSurface, internalServiceHeaders, observeHttpSurface,
+  reportSurface, requestIdentity, surfaceGate,
 } from './access-bridge.mjs';
 import { appHostAuth, appHostEmbedCookieName, safeReturnPath } from './app-host-auth.mjs';
 import { handleAppGateway, handleAppGatewayUpgrade, serveAppRuntime } from './app-gateway.mjs';
@@ -579,6 +579,9 @@ export function createAppHostRouter({
     for (let i = 0; i + 1 < raw.length; i += 2) lines.push(`${raw[i]}: ${raw[i + 1]}`);
     for (const [k, v] of Object.entries(extra)) lines.push(`${k}: ${v}`);
     pipeUpgrade(route.label, t, socket, head, lines, reportUpgrade, fail);
+    // M4: the socket (the Terminal PTY among them) ends with the session it opened on.
+    const unfollow = followIdentity(hostIdentity(route, req), () => socket.destroy());
+    socket.once('close', unfollow);
   }
 
   function refuse(event, target, status, title, body, opts = {}) {

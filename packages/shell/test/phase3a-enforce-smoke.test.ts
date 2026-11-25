@@ -434,7 +434,9 @@ test('enforce: the owner SSR claim grants nothing on its own, replayed, stale, f
       } as unknown as GatewayIdentityClaim),
     };
   })();
-  const forged = { [OWNER_SSR_HEADER]: ownerSsr()[OWNER_SSR_HEADER].replace(/.$/, (ch) => (ch === 'A' ? 'B' : 'A')) };
+  // Not the last character: in a 43-character base64url HMAC its two low bits are padding, so A↔B there
+  // decodes to the same signature (the test then failed now and then).
+  const forged = { [OWNER_SSR_HEADER]: ownerSsr()[OWNER_SSR_HEADER].replace(/.(?=.{4}$)/, (ch) => (ch === 'A' ? 'B' : 'A')) };
   for (const c of SSR_READS) {
     const cases: Array<[string, Record<string, string>, string]> = [
       ['no instance token', ownerSsr(), '401 unauthenticated'],

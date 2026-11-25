@@ -15,17 +15,17 @@
  *
  * The session must be in its Terminal instance's own list, so a name that was
  * never created (or has ended) reads nothing. Nothing is audited per call: it
- * is polled. Each caller gets `SCREEN_READS_PER_MINUTE` instead. A caller
- * without an app identity (the owner's desktop, the CLI) is left to the
- * manifest rule, as on `/api/terminal/sessions`; the System Terminal is not
- * limited by grants.
+ * is polled. Each caller (each app, the owner, the operator, each API key:
+ * L1) gets `SCREEN_READS_PER_MINUTE` instead. A caller without an app
+ * identity (the owner's desktop, the CLI) is left to the manifest rule, as on
+ * `/api/terminal/sessions`; the System Terminal is not limited by grants.
  */
 
 /** Claude Code and Codex both show this while they work. */
 export const SCREEN_BUSY_RE = /esc to interrupt/i;
 /** Codex's banner, to tell the two apart. */
 export const SCREEN_CODEX_RE = /OpenAI Codex/;
-/** Per caller app (TerminalX polls each agent session every 5 s). */
+/** Per caller (TerminalX polls each agent session every 5 s). */
 export const SCREEN_READS_PER_MINUTE = 120;
 const WINDOW_MS = 60_000;
 
@@ -33,7 +33,8 @@ export interface ScreenState { id: string; busy: boolean; codex: boolean }
 
 export interface ScreenStateDeps {
   /** The proved app making the call; null without an app identity; 'invalid' for a claim that does not verify. */
-  caller(request: Request): { appId: string } | null | 'invalid';
+  /** The caller (lib/terminalCaller.ts): the app it is held to, and its own rate-limit key (L1). */
+  caller(request: Request): Promise<{ app: { appId: string } | null; key: string } | 'invalid'>;
   isSystemTerminal(appId: string): Promise<boolean>;
   /** Both grants: `terminal.sessions.list` and `terminal.screen.read`. */
   mayReadScreens(appId: string): Promise<boolean>;
@@ -70,8 +71,9 @@ export function createScreenStateRoute(deps: ScreenStateDeps): (request: Request
   }
 
   return async (request) => {
-    let caller = deps.caller(request);
-    if (caller === 'invalid') return json({ error: 'caller-invalid' }, 401);
+    const who = await deps.caller(request);
+    if (who === 'invalid') return json({ error: 'caller-invalid' }, 401);
+    let caller = who.app;
     if (caller && await deps.isSystemTerminal(caller.appId)) caller = null;
     if (caller && !(await deps.mayReadScreens(caller.appId))) {
       return json({ error: 'not-granted', message: `${caller.appId} was not granted terminal.sessions.list and terminal.screen.read` }, 403);
@@ -79,7 +81,7 @@ export function createScreenStateRoute(deps: ScreenStateDeps): (request: Request
     const id = new URL(request.url).searchParams.get('id');
     const instanceId = deps.sessionInstance(id);
     if (!id || !instanceId) return json({ error: 'bad-session-id' }, 400);
-    if (!take(caller ? `app:${caller.appId}` : 'no-app')) {
+    if (!take(who.key)) {
       return json({ error: 'rate-limited', message: `at most ${SCREEN_READS_PER_MINUTE} screen reads a minute` }, 429, { 'retry-after': '60' });
     }
     try {

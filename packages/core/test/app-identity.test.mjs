@@ -17,6 +17,7 @@ import {
   classifyIdentity, suggestFreeAppId, scanInstalledIdentities, idRegex,
 } from '../dist/app-manager/AppIdentity.js';
 import { AppManifestSchema } from '../dist/types/manifest.js';
+import { payloadHash } from '../dist/approvals/state.js';
 import { buildStoreAnnotations, parseStoreAnnotations } from '../dist/nexus/ociMetadata.js';
 import { parseCatalog } from '../dist/nexus/OciCatalog.js';
 
@@ -298,4 +299,15 @@ test('install gate (D31): no approval, or a body autoApprove, stops at permissio
   const changed = mgr.install({ ref: dir, scope: 'user', approval: async (b) => { assert.notEqual(b.digest, seen.digest, 'a changed tree is another artifact'); return false; } });
   await until(changed);
   await changed.return(null);
+  assert.equal(seen.replaceCheckout, false, 'a plain install replaces no checkout');
+
+  // M1: over a dev checkout, force is bound: an approval of the plain install is not one for replacing it.
+  mkdirSync(join(scopes[2].appsDir, 'io.gate.app', '.git'), { recursive: true });
+  await assert.rejects(() => until(mgr.install({ ref: dir, scope: 'user', approval: async () => true })), /dev checkout/);
+  let forced = null;
+  const force = mgr.install({ ref: dir, scope: 'user', replaceCheckout: true, approval: async (b) => { forced = b; return false; } });
+  await until(force);
+  await force.return(null);
+  assert.equal(forced.replaceCheckout, true);
+  assert.notEqual(payloadHash(forced), payloadHash({ ...forced, replaceCheckout: false }), 'part of the approval hash');
 });

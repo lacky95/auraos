@@ -270,12 +270,24 @@ export function requesterView(r: ApprovalRecord) {
   };
 }
 
+/**
+ * The app "Deny and block" blocks (L4): an app that asked as itself. Never
+ * the owner acting through an app (that request is the owner's, and blocking
+ * the app would block the owner's own UI), and never Settings, the owner's
+ * own system UI. Null: the dialog offers no block.
+ */
+export function blockableApp(r: ApprovalRecord['requester']): string | null {
+  if (r.kind !== 'instance' || r.appId === 'com.aura.settings') return null;
+  return r.appId;
+}
+
 /** A record as the owner's dialog sees it: plus the requester and its app, for the frame check. */
 export function ownerView(r: ApprovalRecord) {
   return {
     ...requesterView(r),
     requester: r.requester,
     appId: core.requesterAppId(r.requester),
+    blockable: blockableApp(r.requester),
     ...(r.decidedBy ? { decidedBy: r.decidedBy.kind === 'operator' ? 'operator' : 'owner' } : {}),
   };
 }

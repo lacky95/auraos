@@ -49,11 +49,14 @@ export function streamSessionOf(
       ? check(() => deps.sessionLive(sid, userId))
       : null;
   }
-  if (principal?.kind === 'user') {
-    const { sessionId, userId } = principal;
-    return check(() => deps.sessionLive(sessionId, userId));
-  }
-  return null;
+  return principalSession(principal, deps);
+}
+
+/** The login session a verified principal rides on: a user's, else none. */
+function principalSession(principal: AccessPrincipal | null, deps: StreamSessionDeps): StreamSession | null {
+  if (principal?.kind !== 'user') return null;
+  const { sessionId, userId } = principal;
+  return check(() => deps.sessionLive(sessionId, userId));
 }
 
 /**
@@ -79,4 +82,25 @@ export function followSession(session: StreamSession, end: () => void): { rechec
   };
   core.OsEventBus.on('auth:sessionsRevoked', onRevoked);
   return { recheck, stop };
+}
+
+/** How often a socket rechecks its session (expiry); a revocation ends it at once. */
+export const SOCKET_RECHECK_MS = 60_000;
+
+/**
+ * followSession for a long-lived socket of the `.mjs` servers (M4): the
+ * socket.io `/os-events` connection, an App Host upgrade (the Terminal PTY),
+ * the WebSocket proxy. They reach it through the access bridge
+ * (access-bridge.mjs `followIdentity`) with the verdict they were let in on.
+ * Null when that rides on no session.
+ */
+export function followSocket(
+  principal: AccessPrincipal | null, end: () => void, deps: StreamSessionDeps = liveDeps,
+): { stop(): void } | null {
+  const session = principalSession(principal, deps);
+  if (!session) return null;
+  const following = followSession(session, end);
+  const timer = setInterval(following.recheck, SOCKET_RECHECK_MS);
+  timer.unref?.();
+  return { stop() { clearInterval(timer); following.stop(); } };
 }

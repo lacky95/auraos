@@ -28,7 +28,7 @@ import {
   confirmDisplay, confirmPayload, contextDisplay, contextWrite, requesterReason,
 } from './display.ts';
 import {
-  approvalsChanged, approvalsVersion, json, ownerView, refusal, requestApproval, requesterSummary,
+  approvalsChanged, approvalsVersion, blockableApp, json, ownerView, refusal, requestApproval, requesterSummary,
   requesterView, waitForApprovals, consumeApproval, type ApprovalServiceDeps,
 } from './service.ts';
 
@@ -219,7 +219,7 @@ export async function decideApproval(
   const result = decision === 'approve' ? await deps.store.approve(id, decider) : await deps.store.deny(id, decider);
   if (!result.ok) return refusal(result.reason);
 
-  const appId = core.requesterAppId(record.requester);
+  const appId = blockableApp(record.requester);
   const block = decision === 'deny' && body['block'] === true && appId !== null;
   if (block) await deps.store.block(appId, `user:${owner.userId}`);
   approvalsChanged();

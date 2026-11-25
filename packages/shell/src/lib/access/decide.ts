@@ -1,7 +1,8 @@
 import * as core from '@aura/core';
 import type { AccessPrincipal, InstancePrincipal, Principal } from '@aura/core';
+import { OWNER_AGENT_APPS, OWNER_AGENT_EXCLUDED_TARGETS } from './identify.ts';
 import type {
-  AccessReason, AccessRule, AccessTarget, Decide, DecideInput, DecideResult, PolicyResource,
+  AccessReason, AccessRule, Decide, DecideInput, DecideResult, PolicyResource,
 } from './types.ts';
 
 /**
@@ -23,9 +24,6 @@ export interface DecideDeps {
   /** D29: whether this instance acts for the owner (identify.ts `isTrustedOwnerAgent`). Never asked at the gateway. */
   ownerAgent?(principal: InstancePrincipal): boolean;
 }
-
-/** What a trusted owner agent never reaches as the owner: the owner's login session and a shell screen. */
-const OWNER_AGENT_EXCLUDED_TARGETS: ReadonlySet<AccessTarget> = new Set(['session', 'client-session']);
 
 const allow = (reason: AccessReason): DecideResult => ({ outcome: 'allow', reason });
 const deny = (reason: AccessReason): DecideResult => ({ outcome: 'deny', reason });
@@ -132,8 +130,15 @@ async function evaluate(input: DecideInput, deps: DecideDeps): Promise<DecideRes
 
   const via = input.auth.via;
   const refusedAs: AccessReason = principal.kind === 'anonymous' ? 'unauthenticated' : 'wrong-principal';
-  // D28: a network-identified caller is good for a `networkCaller` rule and nothing else.
-  if (via === 'network') return rule.networkCaller ? allow('network-caller') : deny('unauthenticated');
+  // D28: a network-identified caller is good for a `networkCaller` rule and nothing else,
+  // and never for an owner agent's upstream (the Terminal's PTY, MCP and sessions,
+  // aurashelld's MCP) unless it is the System Terminal itself (H2).
+  if (via === 'network') {
+    if (!rule.networkCaller) return deny('unauthenticated');
+    if (rule.target === 'proxy-upstream' && resource.appId && OWNER_AGENT_APPS.has(resource.appId)
+      && !(principal.kind === 'instance' && deps.ownerAgent?.(principal))) return deny('wrong-target');
+    return allow('network-caller');
+  }
   if (rule.credentials && !(via && rule.credentials.includes(via))) return deny(refusedAs);
 
   const { granted, failure } = await matchLevel(input, rule, deps);

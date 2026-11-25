@@ -1,6 +1,6 @@
 import { APP_HOST_ROUTE_HEADER } from '@aura/core/host-rules';
 import type { APIContext, APIRoute } from 'astro';
-import { browserDocumentRequest } from '../../../../../server/host-policy.mjs';
+import { browserDocumentRequest, plainProxyPath } from '../../../../../server/host-policy.mjs';
 import { dropServiceWorkerScope, stripShellCredentials } from '../../../../../server/shell-credentials.mjs';
 import { getAppManager, resolveProxyConfig, INTERFACE_PATH_KINDS } from '@aura/core';
 
@@ -81,6 +81,8 @@ const forward = async ({ params, request }: APIContext): Promise<Response> => {
   const path = params['path'] ?? '';
 
   if (!id) return jsonError(400, { error: 'missing-instance-id' });
+  // H1: the upstream must get the path the access rules judged.
+  if (!plainProxyPath(new URL(request.url).pathname)) return jsonError(400, { error: 'unplain-proxy-path' });
 
   // A browser loading this as a page, frame or worker: never on this origin.
   if (browserDocumentRequest(request.method, (name: string) => request.headers.get(name) ?? undefined)) {

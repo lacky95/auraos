@@ -189,6 +189,19 @@ export function browserDocumentRequest(method, header) {
     && READ_METHODS.has(String(method ?? 'GET').toUpperCase()) && !dest;
 }
 
+/**
+ * Whether a path below `/api/proxy/` reaches the upstream as written (H1): no
+ * `.` or `..` segment, and no encoded dot, slash or backslash, which the
+ * upstream's URL parser (WHATWG in `ws` and undici) would turn into another
+ * path than the one the access rules judged. Both proxies (the HTTP route and
+ * the WebSocket upgrade in attach.mjs) answer 400 to anything else.
+ * @param {string} path
+ */
+export function plainProxyPath(path) {
+  if (/%(?:2e|2f|5c)|\\/i.test(path)) return false;
+  return !path.split('/').some((s) => s === '.' || s === '..');
+}
+
 /** `host` without the scheme's default port, lowercase. */
 function bareHost(scheme, host) {
   const h = String(host ?? '').trim().toLowerCase();

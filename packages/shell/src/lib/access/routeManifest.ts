@@ -198,6 +198,13 @@ const routes: RouteAccessManifest['routes'] = {
       rule: ownerManages('Overwriting an app replaces the code under its id: the owner decides. Decided on `force: true` alone, as clone-app.'),
     }],
   },
+  // M2: restarting or updating the OS, in every mode (the routes check no caller themselves):
+  // the owner, the operator, and `aura` in the trusted Terminal (D29).
+  '/api/admin/self-update': {
+    methods: { GET: rule(OWNER, 'system'), POST: rule(OWNER, 'system', { guard: 'rule' }) },
+  },
+  '/api/admin/restart': { methods: { POST: rule(OWNER, 'system', { guard: 'rule' }) } },
+  '/api/admin/soft-restart': { methods: { POST: rule(OWNER, 'system', { guard: 'rule' }) } },
   // D29: the owner's trusted terminal acts for the owner, so `aura enable|disable app` works from it.
   '/api/admin/apps/enabled': {
     methods: on(['GET', 'POST'], rule(OWNER, 'system', why('The owner: the desktop, Settings (D45) and `aura enable|disable app` from the trusted Terminal (D29).'))),
@@ -388,10 +395,11 @@ const routes: RouteAccessManifest['routes'] = {
       rule: rule(APP_PERMISSION, 'app', { permissions: ['terminal.sessions.list'] }),
     }],
   },
+  // M2: in every mode, since the route gives a caller with no app identity the whole stream.
   '/api/apps/events': {
     methods: {
-      GET: rule(INSTANCE, 'system', why(
-        'The owner gets the whole stream; an app instance its own per-caller view (lib/access/gatewayEvents.ts), on the gateway and off it.')),
+      GET: rule(INSTANCE, 'system', { guard: 'rule', ...why(
+        'The owner gets the whole stream; an app instance its own per-caller view (lib/access/gatewayEvents.ts), on the gateway and off it.') }),
     },
   },
 
@@ -399,10 +407,11 @@ const routes: RouteAccessManifest['routes'] = {
   // app names a system app or owner UI as the target: the route decides those
   // on the parsed intent (start.ts, server/terminal-embed.mjs,
   // lib/intentTarget.ts).
+  // M2: in every mode, since the route checks an explicit target only for a verified app.
   '/api/intents/start': {
     methods: {
-      POST: rule(INSTANCE, 'system', why(
-        'The owner and any verified app instance: apps open each other through intents (TerminalX\'s OPEN_TERMINAL embed, D25; Aura Browser\'s VIEW of an App Host address, lib/appHostIntent.ts). An owner grant for a trusted terminal (D24) is Phase 5.')),
+      POST: rule(INSTANCE, 'system', { guard: 'rule', ...why(
+        'The owner and any verified app instance: apps open each other through intents (TerminalX\'s OPEN_TERMINAL embed, D25; Aura Browser\'s VIEW of an App Host address, lib/appHostIntent.ts). An owner grant for a trusted terminal (D24) is Phase 5.') }),
     },
     variants: [{
       // Types a line and presses Enter as the owner (5.16). Matched on any
@@ -429,8 +438,9 @@ const routes: RouteAccessManifest['routes'] = {
     methods: { POST: rule(INSTANCE, 'app', { systemApp: 'com.aura.terminal' }) },
   },
   // Programmatic screen access (5.16): both grants; derived facts only (lib/terminalScreen.ts).
+  // New in Phase 3, so held to its rule in every mode (L1).
   '/api/terminal/sessions/screen': {
-    methods: { GET: rule(APP_PERMISSION, 'app', { permissions: ['terminal.sessions.list', 'terminal.screen.read'] }) },
+    methods: { GET: rule(APP_PERMISSION, 'app', { permissions: ['terminal.sessions.list', 'terminal.screen.read'], guard: 'rule' }) },
   },
   // TerminalX's agent watch: the sessions' agent events, which the list already shows.
   // New in Phase 3, so held to their rule in every mode (`guard: 'rule'`).
@@ -438,10 +448,11 @@ const routes: RouteAccessManifest['routes'] = {
   // The agent hooks in the owner's home: an app installs or removes them only
   // with the owner's approval, which the route asks for and consumes (lib/terminalAgents.ts).
   '/api/terminal/agent-hooks': { methods: on(['GET', 'POST', 'DELETE'], TERMINAL_AGENTS) },
+  // M2: in every mode, since the route lists and closes any session for a caller with no app identity.
   '/api/terminal/sessions': {
     methods: {
-      GET: rule(APP_PERMISSION, 'app', { permissions: ['terminal.sessions.list'] }),
-      DELETE: rule(APP_PERMISSION, 'app', { permissions: ['terminal.embed'] }),
+      GET: rule(APP_PERMISSION, 'app', { permissions: ['terminal.sessions.list'], guard: 'rule' }),
+      DELETE: rule(APP_PERMISSION, 'app', { permissions: ['terminal.embed'], guard: 'rule' }),
     },
   },
 

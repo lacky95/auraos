@@ -85,6 +85,32 @@ export function requestIdentity(req, { appHost = null } = {}) {
   return id;
 }
 
+/**
+ * End a long-lived socket with the sign-in it was let in on (M4): a session
+ * revocation, logout or password change closes it, as it ends the event
+ * streams (lib/streamSession.ts `followSession`, the one mechanism, through
+ * the observer). `identity` is the one the surface decided on; a verdict that
+ * rides on no session (an app token, the operator) is not followed. Returns
+ * the function that stops following, for the socket's close. Never throws.
+ */
+export function followIdentity(identity, end) {
+  let stopped = false;
+  let handle = null;
+  try {
+    const follow = globalThis[BRIDGE]?.followSession;
+    const verified = identity?.verified;
+    if (typeof follow === 'function' && verified) {
+      void verified.then((v) => {
+        if (!stopped && v?.principal) handle = follow(v.principal, end);
+      }).catch(() => {});
+    }
+  } catch { /* nothing to follow */ }
+  return () => {
+    stopped = true;
+    try { handle?.stop(); } catch { /* already stopped */ }
+  };
+}
+
 // ── the surface gate ────────────────────────────────────────────────────────
 
 /**

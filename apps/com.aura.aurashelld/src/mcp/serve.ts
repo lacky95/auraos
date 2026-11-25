@@ -28,6 +28,7 @@
 import type { APIRoute } from 'astro';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
+import { fromShell as liveFromShell, shellOnlyResponse } from '@aura/app-sdk/shell-peer';
 
 /**
  * Turn a server factory into an Astro route. Export the result as `ALL` so
@@ -40,8 +41,17 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
  * session). The spec's answer for "no stream here" is 405, which clients
  * take as final.
  */
-export function createMcpRoute(build: () => Server): APIRoute {
-  return async ({ request }) => {
+export function createMcpRoute(
+  build: () => Server, fromShell: (peer: string | undefined) => Promise<boolean> = liveFromShell,
+): APIRoute {
+  return async (ctx) => {
+    const { request } = ctx;
+    // H3: only a call the shell relays (@aura/app-sdk/shell-peer); the shell decides who that may be.
+    let peer: string | undefined;
+    try { peer = ctx.clientAddress; } catch { peer = undefined; }
+    if (!(await fromShell(peer))) {
+      return shellOnlyResponse('/api/mcp/shell');
+    }
     if (request.method === 'GET') return new Response(null, { status: 405, headers: { allow: 'POST, DELETE' } });
     const server = build();
     const transport = new WebStandardStreamableHTTPServerTransport({

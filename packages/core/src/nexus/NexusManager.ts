@@ -513,7 +513,8 @@ export class NexusManager {
       else await this.assertHostsAllowed(manifest);
       const installer = this.installerFor(targetScope);
       // A dev checkout holds work that is not in any release.
-      if (!opts.replaceCheckout && isDevCheckout(join(installer.appsDir, manifest.id))) {
+      const replacesCheckout = isDevCheckout(join(installer.appsDir, manifest.id));
+      if (!opts.replaceCheckout && replacesCheckout) {
         throw new Error(`${manifest.id} is a dev checkout (it has .git) — installing would replace your working tree. Commit/push your work, then pass force to replace it.`);
       }
 
@@ -560,6 +561,7 @@ export class NexusManager {
         digest: resolved.digest || treeDigest(stagingDir),
         scope: targetScope, identity: opts.identity ?? null,
         tools: [...new Set(manifest.tools)].sort(), permissions: [...new Set(manifest.permissions)].sort(),
+        replaceCheckout: replacesCheckout,
       };
 
       // Installing code is always the owner's decision (D31), not only when

@@ -14,7 +14,7 @@ export const POST: APIRoute = async ({ request, url }) => {
   const id = url.searchParams.get('id');
   const instanceId = terminalSessionInstance(id);
   if (!id || !instanceId) return jsonResponse({ error: 'bad-session-id' }, 400);
-  const caller = verifiedAppCaller(request, core.getAppManager());
+  const caller = await verifiedAppCaller(request);
   if (!caller || caller === 'invalid' || caller.instanceId !== instanceId || !(await isSystemTerminal(caller.appId))) {
     return jsonResponse({ error: 'terminal-only' }, 403);
   }

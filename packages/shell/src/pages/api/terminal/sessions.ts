@@ -15,8 +15,8 @@ import {
  *          `terminal.embed` grant, so an embedder closes only what it created.
  *
  * Callers prove who they are with the instance token (the SDK's server side)
- * or the App Host gateway. A caller without an app identity is not limited
- * here (server/terminal-embed.mjs). The machine path
+ * or the App Host gateway; an API key is held to the grants like an app
+ * (lib/terminalCaller.ts). The owner and the operator are not limited here. The machine path
  * `/api/proxy/<terminal>/api/sessions` stays open to app containers until the
  * private Terminal ingress (Phase 5).
  */
@@ -24,7 +24,7 @@ import {
 const TIMEOUT_MS = 10_000;
 
 async function appCaller(request: Request): Promise<{ appId: string } | null | Response> {
-  const caller = await grantedAppCaller(request, core.getAppManager());
+  const caller = await grantedAppCaller(request);
   return caller === 'invalid' ? jsonResponse({ error: 'caller-invalid' }, 401) : caller;
 }
 

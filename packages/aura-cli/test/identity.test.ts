@@ -361,7 +361,7 @@ test('the CLI and the SDK agree on what is a proxy path', () => {
     '/api/proxyish', '/api/admin/grants', '/api/apps', 'http://shell:3000/api/apps', '/api/apps?u=/api/proxy/a',
   ];
   for (const c of cases) {
-    const sdkProxied = Object.keys(osAuthHeaders(c, { token: 't' })).length === 0;
+    const sdkProxied = Object.keys(osAuthHeaders(c, { token: 't', base: 'http://shell:3000' })).length === 0;
     assert.equal(sdkProxied, isProxyPath(c), c);
   }
   assert.equal(isProxyPath('/api/proxy/a'), true);

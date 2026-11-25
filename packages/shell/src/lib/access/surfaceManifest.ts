@@ -104,7 +104,8 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     rule: {
       allow: ['owner'],
       target: 'proxy-upstream',
-      ...decide(5, 'Existing MCP URLs must keep working in Open (5.17). The private Terminal ingress identifies callers by socket, and Terminal MCP read and control need separate grants.'),
+      networkCaller: true,
+      note: 'The /api/proxy route rule decides (C6: the same rule): the owner, and an app container by its network address (D28), except to an owner agent\'s MCP (the Terminal, aurashelld), which only the owner and the System Terminal reach (H2). Caller-scoped grants and the private Terminal ingress are Phase 5.',
     },
   },
   {

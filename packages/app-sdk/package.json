@@ -25,6 +25,10 @@
       "import": "./dist/os-auth.js",
       "types": "./dist/os-auth.d.ts"
     },
+    "./shell-peer": {
+      "import": "./dist/shell-peer.js",
+      "types": "./dist/shell-peer.d.ts"
+    },
     "./os-sidecars": {
       "import": "./dist/os-sidecars.js",
       "types": "./dist/os-sidecars.d.ts"

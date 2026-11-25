@@ -9,7 +9,7 @@ import { fetchTerminal, holdsListGrant } from '../../../../../server/terminal-em
  * `terminal.sessions.list` (TerminalX's watcher). Rules: lib/terminalAgents.ts.
  */
 const handle = createAgentEventsRoute({
-  caller: (request) => grantedAppCaller(request, core.getAppManager()),
+  caller: grantedAppCaller,
   holdsListGrant,
   open: (instanceId, signal) => fetchTerminal(core.getAppManager(), instanceId, '/api/sessions/events?stream=1', { signal }, null),
 });

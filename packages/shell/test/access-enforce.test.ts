@@ -41,9 +41,11 @@ const instances: Record<string, { appId: string; instanceId: string; sandbox?: s
   'com.other.app-1': { appId: 'com.other.app', instanceId: 'com.other.app-1', sandbox: 'container' },
   'com.aura.terminal-1': { appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-1', sandbox: 'container' },
   'com.aura.settings-1': { appId: 'com.aura.settings', instanceId: 'com.aura.settings-1', sandbox: 'container' },
+  'com.aura.aurashelld-1': { appId: 'com.aura.aurashelld', instanceId: 'com.aura.aurashelld-1', sandbox: 'container' },
 };
 const scopes: Record<string, string> = {
   'com.acme.notes': 'user', 'com.other.app': 'user', 'com.aura.terminal': 'system', 'com.aura.settings': 'system',
+  'com.aura.aurashelld': 'system',
 };
 const mgr = {
   tokens: { hasNonce: () => false, verify: () => null },
@@ -60,6 +62,7 @@ const declared: Record<string, string[]> = {
   'com.other.app': [],
   'com.aura.terminal': ['apps.mount'],
   'com.aura.settings': [],
+  'com.aura.aurashelld': [],
 };
 const authorizer = new Authorizer({
   grants: { get: async () => null } as never,
@@ -75,7 +78,10 @@ async function held(appId: string, permission: string): Promise<{ before: string
 }
 
 const SECRET = 'internal-secret';
-const NET: Record<string, { appId: string; instanceId: string }> = { '172.20.0.7': instances['com.aura.terminal-1']! };
+const NET: Record<string, { appId: string; instanceId: string }> = {
+  '172.20.0.7': instances['com.aura.terminal-1']!,
+  '172.20.0.8': instances['com.acme.notes-1']!,
+};
 
 function deps(mode: string, who: { principal: AccessPrincipal; via: AccessVia }): GateDeps {
   return {
@@ -486,4 +492,73 @@ test('candidate rules read the body only for variants marked read', () => {
   assert.equal(unread.length, 2, 'unread: both candidates');
   const read = candidateRules(M, info, 'POST', { query: new URLSearchParams(), namespace: null, body: { mode: 'assign' } });
   assert.deepEqual(read.map((c) => c.variant), [null]);
+});
+
+// ── Phase 3a review fixes ───────────────────────────────────────────────────
+
+test('H1: a proxy path the upstream would read as another is refused; the Terminal PTY is classified on the upstream path', async () => {
+  const { plainProxyPath } = await import('../server/host-policy.mjs');
+  const { wsProxySubject } = await import('../server/attach.mjs');
+  for (const p of ['com.aura.terminal/ws', 'com.aura.docs/mcp', 'x/api/a.b/c..d', 'x/.well-known/y']) assert.equal(plainProxyPath(p), true, p);
+  for (const p of ['com.aura.terminal/./ws', 'com.aura.terminal/a/../ws', 'com.aura.terminal/%2e/ws', 'com.aura.terminal/a/%2E%2E/ws',
+    'com.aura.terminal/.%2e/ws', 'com.aura.terminal/a%2f..%2fws', 'com.aura.terminal/a%5C..%5Cws', 'com.aura.terminal/a\\..\\ws', '../ws', 'x/..']) {
+    assert.equal(plainProxyPath(p), false, p);
+  }
+  assert.equal(wsProxySubject('com.aura.terminal', 'ws'), 'terminal-pty');
+  assert.equal(wsProxySubject('com.aura.terminal', 'ws/'), 'ws-proxy', 'the Terminal answers /ws only');
+  assert.equal(wsProxySubject('com.acme.notes', 'ws'), 'ws-proxy');
+  const src = (f: string) => fs.readFileSync(path.join(root, f), 'utf8');
+  assert.match(src('server/attach.mjs'), /if \(!plainProxyPath\(`\$\{instanceId\}\/\$\{proxyPath\}`\)\) \{[^}]*400 Bad Request/);
+  assert.match(src('src/pages/api/proxy/[id]/[...path].ts'), /if \(!plainProxyPath\(new URL\(request\.url\)\.pathname\)\) return jsonError\(400/);
+});
+
+test('H2: a network-identified app reaches no owner agent upstream through /api/proxy; the System Terminal and the owner do', async () => {
+  const proxy = (id: string, peer?: string, p = 'mcp') =>
+    ({ method: 'POST', path: `/api/proxy/${id}/${p}`, route: '/api/proxy/[id]/[...path]', params: { id, path: p }, ...(peer ? { peer } : {}) });
+  for (const target of ['com.aura.terminal', 'com.aura.terminal-1', 'com.aura.aurashelld']) {
+    assert.equal(await gate('enforce', anon, proxy(target, '172.20.0.8')), '403 access-denied', `notes → ${target}`);
+    assert.equal(await gate('enforce', anon, proxy(target, '172.20.0.8', 'api/sessions/input')), '403 access-denied');
+    assert.equal(await gate('enforce', anon, proxy(target, '172.20.0.7')), 'pass', `System Terminal → ${target}`);
+    assert.equal(await gate('enforce', owner, proxy(target)), 'pass', `owner → ${target}`);
+    assert.equal(await gate('enforce', anon, proxy(target)), '401 unauthenticated');
+  }
+  assert.equal(await gate('enforce', anon, proxy('com.other.app', '172.20.0.8')), 'pass', 'app-to-app MCP keeps working until Phase 5');
+  assert.equal(await gate('enforce', anon, proxy('com.acme.notes', '172.20.0.7')), 'pass', 'the Terminal\'s agents reach app MCPs');
+
+  // The upgrade surface decides the same, by the app it resolved.
+  const d = deps('enforce', { principal: anon, via: 'none' });
+  const { bridge } = createObserver({ deps: d, report: new AccessReport({ redis: () => null }) });
+  const ws = async (subject: string, appId: string, peer: string) => (await bridge.decideSurface({
+    subject, method: 'UPGRADE', status: 0, appId,
+    identity: { verified: { principal: anon, via: 'none' }, referer: null, instanceId: null, peer },
+  })).outcome;
+  assert.equal(await ws('ws-proxy', 'com.aura.terminal', '172.20.0.8'), 'deny');
+  assert.equal(await ws('ws-proxy', 'com.acme.notes', '172.20.0.7'), 'allow');
+  assert.equal(await ws('ws-proxy', 'com.other.app', '172.20.0.8'), 'allow');
+  bridge.dispose();
+});
+
+test('M2, L1: the must-close routes hold their rule in every mode: a tokenless caller is refused even in report', async () => {
+  const calls = [
+    { path: '/api/apps/events', route: '/api/apps/events' },
+    { method: 'POST', path: '/api/intents/start', route: '/api/intents/start', body: { action: 'VIEW', appId: 'com.aura.settings' } },
+    { path: '/api/terminal/sessions', route: '/api/terminal/sessions' },
+    { method: 'DELETE', path: '/api/terminal/sessions?id=s1', route: '/api/terminal/sessions' },
+    { path: '/api/terminal/sessions/screen?id=s1', route: '/api/terminal/sessions/screen' },
+    { method: 'POST', path: '/api/admin/self-update', route: '/api/admin/self-update', body: {} },
+    { method: 'POST', path: '/api/admin/restart', route: '/api/admin/restart' },
+    { method: 'POST', path: '/api/admin/soft-restart', route: '/api/admin/soft-restart' },
+    { method: 'POST', path: '/api/admin/scaffold', route: '/api/admin/scaffold', body: { appId: 'com.acme.notes', force: true } },
+    { method: 'POST', path: '/api/admin/clone-app', route: '/api/admin/clone-app', body: { source: 'com.acme.notes', force: true } },
+  ];
+  const term = inst('com.aura.terminal', 'com.aura.terminal-1');
+  for (const mode of MODES) {
+    for (const c of calls) {
+      assert.equal(await gate(mode, anon, c), '401 unauthenticated', `${mode} ${c.method ?? 'GET'} ${c.path}`);
+      assert.equal(await gate(mode, owner, c), 'pass', `owner ${c.path}`);
+      assert.equal(await gate(mode, term, c), 'pass', `System Terminal ${c.path}`);
+    }
+    for (const c of calls.slice(0, 2)) assert.equal(await gate(mode, inst('com.acme.notes'), c), 'pass', `a verified app ${c.path}`);
+    assert.equal(await gate(mode, operator, calls[5]!), 'pass', 'the host operator updates the OS');
+  }
 });

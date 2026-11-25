@@ -80,3 +80,14 @@ test('fails clearly when the name never frees up', async () => {
   deps.timeoutMs = 0;
   await assert.rejects(clearContainerName('aura-x', deps), /still taken.*state=removing/);
 });
+
+test('M6: while the survivors are unknown, a running untracked container is never removed; a dead leftover still is', async () => {
+  const running = fakeDocker([{ id: 'surv1', status: 'running' }]);
+  running.deps.survivorsUnknown = () => true;
+  await assert.rejects(clearContainerName('aura-com.aura.terminal-1', running.deps), /may survive from before the shell restart/);
+  assert.deepEqual(running.calls.removed, []);
+  const exited = fakeDocker([{ id: 'dead1', status: 'exited' }, null]);
+  exited.deps.survivorsUnknown = () => true;
+  await clearContainerName('aura-x', exited.deps);
+  assert.deepEqual(exited.calls.removed, ['dead1']);
+});

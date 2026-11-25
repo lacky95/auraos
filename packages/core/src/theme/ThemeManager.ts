@@ -512,6 +512,9 @@ export class ThemeManager {
    *     without JS.
    */
   static toCss(themeIdLight: string, themeIdDark: string, mode: ColorMode = ThemeManager.DEFAULT_COLOR_MODE): string {
+    // The mode comes from KV (`os/theme`), which apps holding the theme
+    // permission write: only the three known values reach the CSS text.
+    if (mode !== 'light' && mode !== 'dark' && mode !== 'auto') mode = ThemeManager.DEFAULT_COLOR_MODE;
     const lightTheme = ThemeManager.getTheme(themeIdLight) ?? ThemeManager.getTheme(ThemeManager.DEFAULT_THEME_ID_LIGHT)!;
     const darkTheme  = ThemeManager.getTheme(themeIdDark)  ?? ThemeManager.getTheme(ThemeManager.DEFAULT_THEME_ID_DARK)!;
     const { theme: active, resolvedMode } = ThemeManager.resolveActiveTheme(themeIdLight, themeIdDark, mode);

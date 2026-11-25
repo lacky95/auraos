@@ -60,6 +60,7 @@ export function installDisplay(binding: InstallBinding, diff: PermissionDiff, re
     `Source: ${binding.source} ${binding.address}`,
     `Artifact: ${binding.digest}`,
   ];
+  if (binding.replaceCheckout) details.push(`Replaces your dev checkout of ${binding.appId} (uncommitted work is lost)`);
   if (binding.identity) details.push(`Identity: ${binding.identity.action}${binding.identity.appId ? ` as ${binding.identity.appId}` : ''}`);
   if (diff.toolsAdded.length) details.push(`Tools it gains: ${list(diff.toolsAdded)}`);
   if (diff.permissionsAdded.length) details.push(`Permissions it gains: ${list(diff.permissionsAdded)}`);

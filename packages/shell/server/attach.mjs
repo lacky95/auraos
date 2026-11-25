@@ -14,9 +14,9 @@ import { createAppHostRouter } from './app-hosts.mjs';
 import { loadAppHostServices } from './app-host-auth.mjs';
 import { terminalEmbedAncestors, watchTerminalInstances } from './terminal-embed.mjs';
 import { buildAppHost } from '@aura/core/host-rules';
-import { originOf } from './host-policy.mjs';
+import { originOf, plainProxyPath } from './host-policy.mjs';
 import {
-  countSurfaceEvent, internalServiceHeaders, reportSurface, requestIdentity, surfaceGate, surfaceIdentity,
+  countSurfaceEvent, followIdentity, internalServiceHeaders, reportSurface, requestIdentity, surfaceGate, surfaceIdentity,
 } from './access-bridge.mjs';
 import { stripShellCredentials } from './shell-credentials.mjs';
 
@@ -104,6 +104,18 @@ export function appsListCached({ fresh = false } = {}) {
  */
 const WS_PING_MS = 25_000;
 
+/**
+ * The surface an upgrade through /api/proxy is judged as: a Terminal PTY when
+ * the Terminal's upstream would see `/ws` (H1: on the path the upstream gets,
+ * never the raw one), else the plain ws-proxy.
+ * @param {string | null} appId
+ * @param {string} proxyPath  the path after `/api/proxy/<id>/`, already plainProxyPath
+ */
+export function wsProxySubject(appId, proxyPath) {
+  return appId === 'com.aura.terminal' && new URL(`/${proxyPath}`, 'http://upstream').pathname === '/ws'
+    ? 'terminal-pty' : 'ws-proxy';
+}
+
 /** Proxy WebSocket upgrades for /api/proxy/[appId]/[path]. */
 export function attachWsProxy(httpServer) {
   httpServer.on('upgrade', async (req, socket, head) => {
@@ -114,6 +126,11 @@ export function attachWsProxy(httpServer) {
     const m = url.match(/^\/api\/proxy\/([^/]+)\/([^?]*)(\?.*)?$/);
     if (!m) { dbg('WS-PROXY', 'no-match', url); return; }
     const [, instanceId, proxyPath, rawQuery] = m;
+    if (!plainProxyPath(`${instanceId}/${proxyPath}`)) {
+      dbg('WS-PROXY', 'unplain-path → 400', url);
+      try { socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); } catch { /* gone */ }
+      return;
+    }
 
     let activityId = null;
     let upstreamQuery = rawQuery ?? '';
@@ -159,7 +176,7 @@ export function attachWsProxy(httpServer) {
     let chosenInstanceId = null;
     let chosenAppId = null;
     const identity = requestIdentity(req);
-    const subject = () => (chosenAppId === 'com.aura.terminal' && proxyPath === 'ws' ? 'terminal-pty' : 'ws-proxy');
+    const subject = () => wsProxySubject(chosenAppId, proxyPath);
     let reported = false;
     const reportWs = (status) => {
       if (reported) return;
@@ -270,7 +287,9 @@ export function attachWsProxy(httpServer) {
           }, WS_PING_MS);
           if (typeof hb.unref === 'function') hb.unref();
 
-          client.on('close', () => { clearInterval(hb); upstream.terminate(); });
+          // M4: a revoked sign-in closes the relay.
+          const unfollow = followIdentity(identity, () => { try { client.terminate(); } catch {} });
+          client.on('close', () => { clearInterval(hb); unfollow(); upstream.terminate(); });
           upstream.on('close', () => { clearInterval(hb); try { client.terminate(); } catch {} });
         });
       });
@@ -404,6 +423,9 @@ export async function attachSio(httpServer) {
   io.on('connection', (socket) => {
     sioDbg('connect', socket.id);
     reportSurface({ subject: 'socketio-os-events', method: 'UPGRADE', status: 101, identity: handshakeIdentity(socket) });
+    // M4: a revoked sign-in ends the socket (the desktop reconnects through the handshake).
+    const unfollow = followIdentity(handshakeIdentity(socket), () => socket.disconnect(true));
+    socket.once('disconnect', unfollow);
     const kv = kvAllowed.get(socket) === true;
     const countEmit = (type) => countSurfaceEvent(type === 'kv:changed' ? 'socketio-kv' : 'socketio-os-events');
     let accepts = null;  // null = firehose; otherwise topic matcher

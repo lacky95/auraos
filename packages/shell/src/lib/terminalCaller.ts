@@ -1,31 +1,47 @@
-import type * as core from '@aura/core';
 import type { APIContext } from 'astro';
-import { gatewayInstance } from './access/identify.ts';
+import { actingInstance, bearerToken } from './access/identify.ts';
 import { shellOwner } from './appHostHandoff.ts';
-import { authenticate } from './auth.ts';
+import { authenticate, resolveCaller, type AuthDeps } from './auth.ts';
 import { isSystemTerminal } from '../../server/terminal-embed.mjs';
 
+/** The app a Terminal rule holds to its grants. */
+export interface AppCaller { appId: string; instanceId: string }
+
 /**
- * The app making a call, when that is proved: an App Host gateway claim, or
- * the instance token the OS injects into every app container
- * (`Authorization: Bearer $AURA_INSTANCE_TOKEN`, the SDK's server side).
- * `invalid` = a claim that doesn't verify. Null = no app identity (the owner's
- * desktop, the CLI, an unverified machine call), which these Terminal rules
- * leave to Phase 3 (see server/terminal-embed.mjs).
+ * Who called, for the Terminal routes and the intent target check (M3), from
+ * the one resolver (identify.ts `resolvePrincipal`, through auth.ts
+ * `resolveCaller`), never a second reading of the bearer:
+ *
+ *   invalid   a credential was presented and did not verify, or could not be
+ *             checked: 401, never "no app identity"
+ *   app       an app instance (its token, or the gateway), the owner acting
+ *             through an app's page (D45, App Hosts), or an API key, which is
+ *             held to the per-app grants like an app that has none (its id
+ *             `api-key:<id>` is no app's); null for the owner's own login,
+ *             the operator and an anonymous caller, which the manifest rule
+ *             decided alone
+ *   key       one caller, for per-caller limits (lib/terminalScreen.ts)
  */
-export function verifiedAppCaller(
-  request: Request,
-  mgr: Pick<ReturnType<typeof core.getAppManager>, 'getInstance' | 'tokens'>,
-): { appId: string; instanceId: string } | 'invalid' | null {
-  const gw = gatewayInstance(request, mgr);
-  if (gw === 'invalid') return 'invalid';
-  if (gw) return { appId: gw.appId, instanceId: gw.instanceId };
-  const token = /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization') ?? '')?.[1];
-  if (!token) return null;
-  const claims = mgr.tokens.verify(token);
-  if (!claims) return null;
-  const inst = mgr.getInstance(claims.instanceId);
-  return inst ? { appId: inst.appId, instanceId: inst.instanceId } : 'invalid';
+export async function terminalCaller(
+  request: Request, deps?: AuthDeps,
+): Promise<'invalid' | { app: AppCaller | null; key: string }> {
+  const r = await resolveCaller(request, deps);
+  if (r.rejected || (r.via === 'unverified' && bearerToken(request) !== null)) return 'invalid';
+  const p = r.principal;
+  const acting = actingInstance(p);
+  if (acting) return { app: { appId: acting.appId, instanceId: acting.instanceId }, key: `app:${acting.appId}` };
+  if (p.kind === 'apiKey') {
+    const appId = `api-key:${p.keyId}`;
+    return { app: { appId, instanceId: appId }, key: appId };
+  }
+  if (p.kind === 'user') return { app: null, key: `user:${p.userId}` };
+  return { app: null, key: p.kind };
+}
+
+/** The app a call is held to (see terminalCaller), or `invalid`. */
+export async function verifiedAppCaller(request: Request): Promise<AppCaller | 'invalid' | null> {
+  const c = await terminalCaller(request);
+  return c === 'invalid' ? c : c.app;
 }
 
 /**
@@ -33,11 +49,8 @@ export function verifiedAppCaller(
  * System Terminal (which keeps full control). Null for a caller without an
  * app identity, which the manifest rule decides alone.
  */
-export async function grantedAppCaller(
-  request: Request,
-  mgr: Pick<ReturnType<typeof core.getAppManager>, 'getInstance' | 'tokens'>,
-): Promise<{ appId: string; instanceId: string } | 'invalid' | null> {
-  const caller = verifiedAppCaller(request, mgr);
+export async function grantedAppCaller(request: Request): Promise<AppCaller | 'invalid' | null> {
+  const caller = await verifiedAppCaller(request);
   if (caller && caller !== 'invalid' && await isSystemTerminal(caller.appId)) return null;
   return caller;
 }

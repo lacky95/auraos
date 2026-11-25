@@ -161,3 +161,18 @@ test('while the survivors are unknown, sidecars are never reaped', async () => {
   };
   await AppManager.prototype.syncSidecars.call(fake, 1);
 });
+
+test('M6: boot tries the scan once and leaves retries to the reconciler; the runner refuses survivors meanwhile; inspect is async', async () => {
+  const src = readFileSync(new URL('../src/app-manager/AppManager.ts', import.meta.url), 'utf-8');
+  const init = src.slice(src.indexOf('async init(): Promise<void> {'), src.indexOf('private async adoptOrphans('));
+  assert.equal((init.match(/this\.adoptOrphans\(\)/g) ?? []).length, 1, 'one try in init');
+  assert.doesNotMatch(init, /setTimeout/, 'no sleep in init');
+  assert.match(src, /survivorsUnknown = \(\) => this\.adoptionPending/);
+  const runnerSrc = readFileSync(new URL('../src/app-manager/ContainerRunner.ts', import.meta.url), 'utf-8');
+  const scan = runnerSrc.slice(runnerSrc.indexOf('public async listOrphanRecords()'), runnerSrc.indexOf('public registerAdopted('));
+  assert.doesNotMatch(scan, /execSync/, 'no blocking docker call in the scan');
+  assert.match(runnerSrc, /survivorsUnknown: \(\) => this\.survivorsUnknown\(\)/);
+  // The async inspect still reads every survivor.
+  const recs = await runner().listOrphanRecords();
+  assert.equal(recs.length, 3);
+});

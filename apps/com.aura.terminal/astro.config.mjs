@@ -3,6 +3,7 @@ import node from '@astrojs/node';
 import { auraAppIntegration , resolveAppPort } from '@aura/app-sdk/integration';
 import { fileURLToPath } from 'node:url';
 import { shellWriteIgnore } from './watch-ignore.mjs';
+import { fromShell } from '@aura/app-sdk/shell-peer';
 
 // APP_PORT when the OS assigned one, otherwise a free port picked at
 // startup — so running this app by hand (or `astro check`) never fights
@@ -17,9 +18,11 @@ function ptyWsIntegration() {
         const { getPtyWss } = await server.ssrLoadModule('/src/pty-server.ts');
         const ptyWss = getPtyWss();
 
-        server.httpServer?.on('upgrade', (req, socket, head) => {
+        server.httpServer?.on('upgrade', async (req, socket, head) => {
           const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
           if (pathname === '/ws') {
+            // Only the shell relays a PTY socket (src/middleware.ts, H4 stopgap).
+            if (!(await fromShell(req.socket.remoteAddress))) { socket.destroy(); return; }
             ptyWss.handleUpgrade(req, socket, head, (client) => {
               ptyWss.emit('connection', client, req);
             });

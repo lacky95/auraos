@@ -17,6 +17,7 @@ import { installGate, runInstall } from '../src/lib/approvals/nexus.ts';
 import { agentHooksDisplay, contextWrite, installDisplay, installLevel, requesterReason } from '../src/lib/approvals/display.ts';
 import { approvedOrAsk, presentsApproval } from '../src/lib/approvals/service.ts';
 import { approvalReply, outcomeOf, parseApprovalView } from '../src/lib/approvals/dialogClient.ts';
+import { blockableApp } from '../src/lib/approvals/service.ts';
 import { approvalBelongsToSender, authorizeShellMessage, type ChannelSender } from '../src/lib/auraChannelShell.ts';
 import { ROUTE_ACCESS_MANIFEST } from '../src/lib/access/routeManifest.ts';
 
@@ -245,6 +246,21 @@ test('deny and block stops the app asking until the block is lifted', async () =
   assert.equal((await askConfirm({}, OTHER)).status, 201);
 });
 
+test('L4: deny and block never blocks the owner acting through an app, nor Settings; only an app that asked as itself', async () => {
+  const SETTINGS_OWNER: Principal = { ...NEXUS_OWNER, through: { appId: 'com.aura.settings', instanceId: 'com.aura.settings-1' } } as Principal;
+  const SETTINGS_APP: Principal = { kind: 'instance', appId: 'com.aura.settings', instanceId: 'com.aura.settings-1', verification: 'verified' };
+  for (const who of [SETTINGS_OWNER, SETTINGS_APP, NEXUS_OWNER]) {
+    const { body } = await askConfirm({}, who);
+    ownerOk = true;
+    const view = (await read(await getApproval(ctx('GET', `/api/approvals/${body.id}`), body.id, deps()))).body;
+    assert.equal(view.blockable, null, 'the dialog offers no block');
+    const r = await decide(body.id, 'deny', { block: true });
+    assert.deepEqual([r.body.state, r.body.blocked], ['denied', undefined]);
+    assert.notEqual((await askConfirm({}, who)).body.error, 'blocked', 'it can still ask');
+  }
+  assert.equal(blockableApp({ kind: 'instance', appId: 'com.example.notes', instanceId: 'com.example.notes-1' }), 'com.example.notes');
+});
+
 test('the host operator: a code for exactly this decision; preview does not use it up', async () => {
   const { body } = await askConfirm({ level: 'fresh' });
   tickets.set('CODE-1', { sha256: 'x', purpose: 'operator', expiresAt: Infinity, subject: `approve:${body.id}` });
@@ -287,6 +303,7 @@ test('the owner list: pending requests only for the owner on the shell', async (
 const BINDING: InstallBinding = {
   action: 'nexus.install', appId: 'com.example.notes', name: 'Notes', version: '1.2.0', source: 'oci',
   address: 'ghcr.io/x/notes:1.2.0', digest: 'sha256:aaa', scope: 'user', identity: null, tools: ['git'], permissions: [],
+  replaceCheckout: false,
 };
 const DIFF: PermissionDiff = {
   appId: 'com.example.notes', versionFrom: null, versionTo: '1.2.0', toolsAdded: ['git'], toolsRemoved: [],
@@ -337,6 +354,16 @@ test('a moved tag, another scope or another requester needs a new approval', asy
   assert.notEqual(other.body.ok, true, 'another scope is not installed');
   const stolen = await install(OTHER, { 'x-aura-approval': body.approvalId });
   assert.equal(stolen.status, 202);
+  assert.equal((await install(NEXUS_OWNER, { 'x-aura-approval': body.approvalId })).body.ok, true, 'the exact request still works');
+});
+
+test('M1: replacing a dev checkout is bound and shown; an approval without it does not cover it', async () => {
+  const { body } = await install(NEXUS_OWNER);
+  await decide(body.approvalId, 'approve');
+  const forced = await install(NEXUS_OWNER, { 'x-aura-approval': body.approvalId }, { ...BINDING, replaceCheckout: true });
+  assert.deepEqual([forced.status, forced.body.refused], [202, 'mismatch']);
+  assert.ok(forced.body.display.details.includes('Replaces your dev checkout of com.example.notes (uncommitted work is lost)'));
+  assert.ok(!installDisplay(BINDING, DIFF, 'x').details.some((d) => /dev checkout/.test(d)));
   assert.equal((await install(NEXUS_OWNER, { 'x-aura-approval': body.approvalId })).body.ok, true, 'the exact request still works');
 });
 

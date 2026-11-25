@@ -168,6 +168,8 @@ export interface InstallBinding {
   /** Everything the app declares, sorted; the diff is shown, this is bound. */
   tools:       string[];
   permissions: string[];
+  /** It replaces a dev checkout (`force`): the owner's working tree, uncommitted work included (M1). */
+  replaceCheckout: boolean;
 }
 
 /**

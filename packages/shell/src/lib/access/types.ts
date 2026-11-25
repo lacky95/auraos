@@ -264,6 +264,8 @@ export interface AccessBridge {
   observeSurface(observation: SurfaceObservation): void;
   /** The decision for a surface about to proceed, as `enforce` applies it. Never counted, never throws. */
   decideSurface(observation: SurfaceObservation): Promise<SurfaceDecision>;
+  /** M4: end a socket with the session its verdict rides on (lib/streamSession.ts `followSocket`). */
+  followSession(principal: AccessPrincipal | null, end: () => void): { stop(): void } | null;
   /** A high-frequency event on a surface: a counter only. */
   countEvent(subject: string): void;
   countCredential(kind: string, surface: string): void;

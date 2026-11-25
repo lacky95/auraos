@@ -22,6 +22,7 @@ export function requestIdentity(
   req: unknown,
   opts?: { appHost?: { appId: string; instanceId?: string; userId: string; sid: string } | null },
 ): SurfaceIdentityLike | null;
+export function followIdentity(identity: SurfaceIdentityLike | null, end: () => void): () => void;
 export function surfaceGate(observation: {
   subject: string; method: string; appId?: string | null; identity: SurfaceIdentityLike | null;
 }): Promise<boolean>;

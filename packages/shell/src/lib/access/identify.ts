@@ -45,12 +45,30 @@ function cachedOwner(request: Request, resolve: () => Promise<UserPrincipal | nu
 }
 
 /**
- * Targets the owner never reaches through an app, whatever the rule says: its
- * login session and handoff, a shell screen's client session, and another
- * app's upstream (which includes the Terminal, D23, D29). The gateway
- * (gatewayCaller.ts) and the access gate (enforce.ts) both apply it.
+ * Targets the owner's authority never reaches through an app, whatever the
+ * rule says (C3: the one list, with who it binds and why):
+ *
+ *   session          the owner's login session and handoff: only the owner's
+ *                    own login, never an app or agent acting for it
+ *   client-session   a shell screen's client session: the desktop itself
+ *   proxy-upstream   another app's upstream, which includes the Terminal (D23,
+ *                    D29): not through a trusted UI (D45). A trusted owner
+ *                    agent does reach it: the System Terminal's agents call
+ *                    app MCPs through /api/proxy.
+ *
+ * OWNER_UI_EXCLUDED_TARGETS binds the owner acting through a trusted UI (the
+ * gateway, gatewayCaller.ts, and the access gate, enforce.ts);
+ * OWNER_AGENT_EXCLUDED_TARGETS binds a trusted owner agent (decide.ts).
  */
-export const OWNER_UI_EXCLUDED_TARGETS: ReadonlySet<AccessTarget> = new Set(['session', 'client-session', 'proxy-upstream']);
+const OWNER_EXCLUDED_TARGETS: Readonly<Record<string, { agents: boolean }>> = {
+  'session':        { agents: true },
+  'client-session': { agents: true },
+  'proxy-upstream': { agents: false },
+};
+export const OWNER_UI_EXCLUDED_TARGETS: ReadonlySet<AccessTarget> = new Set(Object.keys(OWNER_EXCLUDED_TARGETS) as AccessTarget[]);
+export const OWNER_AGENT_EXCLUDED_TARGETS: ReadonlySet<AccessTarget> = new Set(
+  (Object.keys(OWNER_EXCLUDED_TARGETS) as AccessTarget[]).filter((t) => OWNER_EXCLUDED_TARGETS[t]!.agents),
+);
 
 /**
  * D45: the owner acting through a trusted system UI, or null. The gateway
@@ -366,7 +384,13 @@ export function actingInstance(p: AccessPrincipal): InstancePrincipal | null {
  *                        shell, `aura` CLI and coding agents
  *   com.aura.aurashelld  the owner's shell-control MCP, which those agents
  *                        drive (it reached the OS as `system` without a token
- *                        before Phase 3). Phase 5 scopes who may call it.
+ *                        before Phase 3). Its MCP answers only calls the shell
+ *                        relays (src/mcp/serve.ts), and the shell relays an
+ *                        app's call to it only for the System Terminal
+ *                        (decide.ts, H2, H3). Phase 5 scopes who may call it.
+ *
+ * Their upstreams are also the ones a network-identified app container never
+ * reaches through /api/proxy, the System Terminal itself excepted (decide.ts, H2).
  */
 export const OWNER_AGENT_APPS: ReadonlySet<string> = new Set(['com.aura.terminal', 'com.aura.aurashelld']);
 

@@ -83,7 +83,7 @@ export const POST: APIRoute = async (ctx) => {
   }
   const appHostApp = await appHostViewTarget(intent);
   if (appHostApp) intent.appId = appHostApp;
-  const caller = verifiedAppCaller(request, getAppManager());
+  const caller = await verifiedAppCaller(request);
   if (caller === 'invalid') return errorResponse('The caller identity did not verify', 401);
   if (caller) {
     const blocked = explicitTargetRefusal(intent, caller, getAppManager());

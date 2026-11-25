@@ -10,6 +10,7 @@ import {
   isTrustedOwnerAgent, liveNetworkIdentity, resolvePrincipal, type AppHostSession, type PrincipalDeps,
 } from './identify.ts';
 import { refererProxyId } from './legacyReferer.ts';
+import { followSocket } from '../streamSession.ts';
 import { AccessReport, type ReportRedis } from './report.ts';
 import { candidateRules, handlersOf, manifestRoute, normalizeMethod } from './resolve.ts';
 import { ROUTE_ACCESS_MANIFEST } from './routeManifest.ts';
@@ -543,6 +544,9 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
       return evaluateSurface(observation)
         .then((event) => (event ? { outcome: event.decision, reason: event.reason } : DENIED))
         .catch(() => DENIED);
+    },
+    followSession(principal, end) {
+      try { return followSocket(principal, end); } catch { return null; }
     },
     countEvent(subject) {
       if (surfaceById.has(subject)) report.note(`event|${subject}`);

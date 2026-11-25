@@ -15,7 +15,7 @@ import { fetchTerminal } from '../../../../server/terminal-embed.mjs';
 const TIMEOUT_MS = 10_000;
 
 const handle = createAgentHooksRoute({
-  caller: (request) => grantedAppCaller(request, core.getAppManager()),
+  caller: grantedAppCaller,
   approve: async (request, change) => {
     const principal = await authenticate(request);
     if (principal instanceof Response) return principal;

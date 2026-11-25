@@ -24,9 +24,10 @@ function route(opts: { grants?: Record<string, string[]>; listed?: string[] | nu
   });
   const reads: string[] = [];
   const handle = createScreenStateRoute({
-    caller: (request) => {
+    caller: async (request) => {
       const who = request.headers.get('x-test-app');
-      return who === 'invalid' ? 'invalid' : who ? { appId: who } : null;
+      const user = request.headers.get('x-test-user');
+      return who === 'invalid' ? 'invalid' : who ? { app: { appId: who }, key: `app:${who}` } : { app: null, key: user ? `user:${user}` : 'operator' };
     },
     isSystemTerminal: access.isSystemTerminal,
     mayReadScreens: access.mayReadScreens,
@@ -35,9 +36,9 @@ function route(opts: { grants?: Record<string, string[]>; listed?: string[] | nu
     screen: async (_instanceId, sessionId) => { reads.push(sessionId); return ROWS; },
     now: opts.now,
   });
-  const call = async (app: string | null, id: string | null = SESSION) => {
+  const call = async (app: string | null, id: string | null = SESSION, user?: string) => {
     const url = `http://shell/api/terminal/sessions/screen${id === null ? '' : `?id=${encodeURIComponent(id)}`}`;
-    const res = await handle(new Request(url, { headers: app ? { 'x-test-app': app } : {} }));
+    const res = await handle(new Request(url, { headers: { ...(app ? { 'x-test-app': app } : {}), ...(user ? { 'x-test-user': user } : {}) } }));
     return { status: res.status, body: await res.json() as Record<string, unknown> };
   };
   return { call, reads };
@@ -92,8 +93,46 @@ test('polling is rate-limited per caller app, and the window resets', async () =
   assert.equal((await r.call(TX)).status, 200);
 });
 
+test('L1: the limit is per caller; callers without an app identity no longer share one bucket; the rule holds in every mode', async () => {
+  const r = route({ now: () => 1_000 });
+  for (let i = 0; i < SCREEN_READS_PER_MINUTE; i++) assert.equal((await r.call(null, SESSION, 'default')).status, 200);
+  assert.equal((await r.call(null, SESSION, 'default')).status, 429);
+  assert.equal((await r.call(null)).status, 200, 'the operator has its own bucket');
+  assert.equal((await r.call(TX)).status, 200, 'and each app');
+  assert.equal(ROUTE_ACCESS_MANIFEST.routes['/api/terminal/sessions/screen']?.methods?.GET?.guard, 'rule');
+});
+
 test('the route audits nothing per poll', () => {
   const src = readFileSync(new URL('../src/pages/api/terminal/sessions/screen.ts', import.meta.url), 'utf8')
     + readFileSync(new URL('../src/lib/terminalScreen.ts', import.meta.url), 'utf8');
   assert.ok(!/audit/i.test(src.replace(/Nothing is audited per call/, '')));
+});
+
+test('M3: the Terminal routes read the caller from the one resolver: a bad bearer is 401, an API key is held to grants', async () => {
+  const { terminalCaller, verifiedAppCaller } = await import('../src/lib/terminalCaller.ts');
+  const instances: Record<string, { appId: string; instanceId: string }> = { 'io.lakner.terminalx-1': { appId: 'io.lakner.terminalx', instanceId: 'io.lakner.terminalx-1' } };
+  const deps = {
+    mgr: {
+      getInstance: (id: string) => instances[id],
+      getManifest: () => undefined,
+      tokens: { verify: (t: string) => (t === 'aura1.good' ? { instanceId: 'io.lakner.terminalx-1' } : null) },
+    },
+    apiKeys: { verify: async (k: string) => (k === 'aura_k1_good' ? { id: 'k1', name: 'ci', scopes: ['terminal.embed'] } : null) },
+  } as never;
+  const req = (auth?: string) => new Request('http://shell/api/terminal/sessions', { headers: auth ? { authorization: auth } : {} });
+  assert.equal(await terminalCaller(req('Bearer garbage'), deps), 'invalid', 'never "no app identity"');
+  assert.equal(await terminalCaller(req('Bearer aura1.forged'), deps), 'invalid');
+  assert.equal(await terminalCaller(req('Bearer aura_k1_revoked'), deps), 'invalid', 'a revoked API key');
+  assert.equal(await terminalCaller(req('Basic xyz'), deps), 'invalid');
+  assert.deepEqual(await terminalCaller(req('Bearer aura1.good'), deps),
+    { app: { appId: 'io.lakner.terminalx', instanceId: 'io.lakner.terminalx-1' }, key: 'app:io.lakner.terminalx' });
+  const key = await terminalCaller(req('Bearer aura_k1_good'), deps);
+  assert.ok(key !== 'invalid' && key.app?.appId === 'api-key:k1', 'an API key is an app with no grants, never unlimited');
+  assert.deepEqual(await terminalCaller(req(), deps), { app: null, key: 'anonymous' });
+  // The grant check then refuses the key: no app holds grants under that id.
+  const access = createTerminalAccess({ scopeOf: async () => 'user', authorize: async () => true, sessionGrant: async () => null, sessionLife: async () => null });
+  assert.equal(await access.mayUseSession('api-key:k1', SESSION), false);
+  assert.equal(typeof verifiedAppCaller, 'function');
+  const src = readFileSync(new URL('../src/lib/terminalCaller.ts', import.meta.url), 'utf8');
+  assert.ok(!/tokens\.verify|authorization/i.test(src.replace(/Authorization header/g, '')), 'no second reading of the bearer');
 });

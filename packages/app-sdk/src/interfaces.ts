@@ -185,7 +185,7 @@ export class InterfacesApi {
    * identity. The server sends its instance token, never a self-set id.
    */
   private identity(): Record<string, string> {
-    return osAuthHeaders(`${this.base()}/api/interfaces`);
+    return osAuthHeaders(`${this.base()}/api/interfaces`, { base: this.base() });
   }
 }
 

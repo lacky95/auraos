@@ -108,6 +108,8 @@ export interface ClearContainerNameDeps {
   sleep: (ms: number) => Promise<void>;
   /** True when `id` is the container a live instance is using right now. */
   isLive: (id: string) => boolean;
+  /** True while the survivors of a shell restart are unknown (the adoption scan failed): a running container is kept. */
+  survivorsUnknown?: () => boolean;
   timeoutMs?: number;
   pollMs?: number;
 }
@@ -121,7 +123,10 @@ export interface ClearContainerNameDeps {
  * `docker run` then hits "Conflict. The container name … is already in use".
  * So: wait while the container is `removing`, force-remove any other leftover
  * (exited, created, dead, or an untracked orphan), and re-check until the name
- * is free. A container a live instance is still using is never removed.
+ * is free. A container a live instance is still using is never removed, nor
+ * is a running one while the survivors of a shell restart are still unknown
+ * (`survivorsUnknown`: the adoption scan failed): it may be a survivor the
+ * owner is working in (M6), and the spawn fails instead.
  */
 export async function clearContainerName(name: string, deps: ClearContainerNameDeps): Promise<void> {
   const timeoutMs = deps.timeoutMs ?? 20_000;
@@ -134,6 +139,9 @@ export async function clearContainerName(name: string, deps: ClearContainerNameD
     last = st.status;
     if (deps.isLive(st.id)) {
       throw new Error(`container name ${name} is in use by live container ${st.id.slice(0, 12)} (${st.status})`);
+    }
+    if (st.status === 'running' && deps.survivorsUnknown?.()) {
+      throw new Error(`container name ${name} is held by running container ${st.id.slice(0, 12)}, which may survive from before the shell restart; not removed until adoption succeeds`);
     }
     if (st.status !== 'removing') {
       try { await deps.remove(st.id); } catch { /* removal may already be under way; re-check below */ }
@@ -220,6 +228,13 @@ export class ContainerRunner implements SandboxRunner {
   private contextStore: ContextStore;
   /** OS-managed shared volumes, mounted into every container. */
   private volumeStore: VolumeStore;
+
+  /**
+   * Whether the survivors of the last shell lifetime are still unknown: the
+   * AppManager's adoption scan failed and its reconciler retries it. Set by
+   * the AppManager; spawns then never remove a running container by name (M6).
+   */
+  public survivorsUnknown: () => boolean = () => false;
 
   constructor(opts: SandboxRunnerOpts) {
     this.toolchainDir = opts.toolchainDir;
@@ -333,6 +348,7 @@ export class ContainerRunner implements SandboxRunner {
       remove: async (ref) => { await execFileAsync('docker', ['rm', '-f', ref], { timeout: 10_000 }); },
       sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
       isLive: (id) => this.containers.get(instanceId)?.containerId === id,
+      survivorsUnknown: () => this.survivorsUnknown(),
     });
 
     // Resolve OS Context (env/secret) LIVE from Valkey on every spawn so a
@@ -995,7 +1011,7 @@ export class ContainerRunner implements SandboxRunner {
       if (name === 'aura-shell') continue;
       let inspect: DockerInspect;
       try {
-        const raw = execSync(`docker inspect ${name} --format "{{json .}}"`, {
+        const { stdout: raw } = await execFileAsync('docker', ['inspect', name, '--format', '{{json .}}'], {
           encoding: 'utf-8',
           timeout: 3_000,
         });

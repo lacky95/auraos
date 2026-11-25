@@ -789,7 +789,7 @@ test('the display actor falls back to x-aura-agent, then user-agent; the argumen
     const calls = fakeNotifOs(() => [201, { notification: notif(), warnings: [] }]);
     const { createMcpRoute } = await import('../src/mcp/serve.ts');
     const route = createMcpRoute(buildShellServer);
-    const rpc = (body) => route({ request: new Request('http://svc/api/mcp/shell', {
+    const rpc = (body) => route({ clientAddress: '127.0.0.1', request: new Request('http://svc/api/mcp/shell', {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'x-aura-agent': 'header-agent' },
       body: JSON.stringify(body),
@@ -823,4 +823,21 @@ test('notification tools: popupDurationMs is forwarded on create and update (nul
     const bad = await call(client, 'create_notification', { title: 'x', popupDurationMs: 90_000_000 });
     assert.equal(bad.isError, true, 'over 24 h is refused by the tool schema');
   } finally { delete process.env.AURA_INSTANCE_TOKEN; }
+});
+
+test('H3: the MCP answers only calls the shell relays; a direct container call is refused', async () => {
+  const { createMcpRoute } = await import('../src/mcp/serve.ts');
+  const fromShell = async (peer) => peer === '172.20.0.2';
+  const route = createMcpRoute(buildShellServer, fromShell);
+  const post = (clientAddress) => route({ clientAddress, request: new Request('http://svc/api/mcp/shell', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } } }),
+  }) });
+  const direct = await post('172.20.0.9');
+  assert.equal(direct.status, 403);
+  assert.equal((await direct.json()).error, 'shell-only');
+  assert.equal((await post('172.20.0.2')).status, 200);
+  const noPeer = await route({ get clientAddress() { throw new Error('no adapter'); }, request: new Request('http://svc/api/mcp/shell', { method: 'POST' }) });
+  assert.equal(noPeer.status, 403);
 });

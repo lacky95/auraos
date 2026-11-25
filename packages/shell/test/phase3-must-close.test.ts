@@ -9,7 +9,9 @@ import { ownerUiCovers, signGatewayClaim } from '../server/gateway-identity.mjs'
 import { instanceEventView, principalEventView } from '../src/lib/access/gatewayEvents.ts';
 import { kvEventAllowed } from '../src/lib/access/kvAccess.ts';
 import { explicitTargetRefusal } from '../src/lib/intentTarget.ts';
-import { followSession, streamSessionOf } from '../src/lib/streamSession.ts';
+import { followSession, followSocket, streamSessionOf } from '../src/lib/streamSession.ts';
+import { followIdentity } from '../server/access-bridge.mjs';
+import { readFileSync } from 'node:fs';
 import { POST as enabledRoute } from '../src/pages/api/admin/apps/enabled.ts';
 import { GET as selfUpdateGet, POST as selfUpdatePost } from '../src/pages/api/admin/self-update.ts';
 import { POST as manifestEditRoute } from '../src/pages/api/admin/manifest-edit.ts';
@@ -86,6 +88,51 @@ test('a session revocation ends the stream at once; expiry at the next heartbeat
 
   const broken = streamSessionOf(new Request('http://x/'), user, { ...deps, sessionLive: async () => { throw new Error('valkey down'); } })!;
   assert.equal(await broken.live(), false, 'fails closed');
+});
+
+test('M4: sockets end with their sign-in: socket.io, App Host upgrades (the Terminal PTY) and the WS proxy follow it', async () => {
+  let live = true;
+  const user = { kind: 'user', userId: 'u', role: 'owner', sessionId: 's1', verification: 'verified' } as const;
+  const deps = { sessionLive: async () => live };
+  let ended = 0;
+  const f = followSocket(user, () => { ended += 1; }, deps)!;
+  assert.ok(f);
+  OsEventBus.emit('auth:sessionsRevoked', { count: 1 });
+  await tick();
+  assert.equal(ended, 0, 'still live');
+  live = false;
+  OsEventBus.emit('auth:sessionsRevoked', { count: 1 });
+  await tick();
+  assert.equal(ended, 1, 'revoked: the socket ends at once');
+  f.stop();
+  const inst = { kind: 'instance', appId: 'com.acme.notes', instanceId: 'com.acme.notes-1', verification: 'verified' } as const;
+  assert.equal(followSocket(inst, () => {}, deps), null, 'an app token rides on no session');
+
+  // The .mjs side: through the access bridge, on the verdict the surface decided on.
+  const G2 = globalThis as unknown as Record<symbol, unknown>;
+  const BRIDGE = Symbol.for('aura.access');
+  const saved = G2[BRIDGE];
+  const followed: unknown[] = [];
+  let stops = 0;
+  G2[BRIDGE] = { followSession: (p: unknown, end: () => void) => { followed.push(p); end(); return { stop: () => { stops += 1; } }; } };
+  try {
+    let closed = 0;
+    const unfollow = followIdentity({ verified: Promise.resolve({ principal: user, via: 'login-session' }), referer: null, instanceId: null, peer: null }, () => { closed += 1; });
+    await tick();
+    assert.deepEqual([followed.length, closed], [1, 1]);
+    unfollow();
+    assert.equal(stops, 1);
+    const early = followIdentity({ verified: Promise.resolve({ principal: user, via: 'login-session' }), referer: null, instanceId: null, peer: null }, () => { closed += 1; });
+    early();
+    await tick();
+    assert.equal(closed, 1, 'a socket closed before the verdict is never followed');
+    assert.doesNotThrow(() => followIdentity(null, () => {})());
+  } finally { if (saved === undefined) delete G2[BRIDGE]; else G2[BRIDGE] = saved; }
+
+  const src = (f2: string) => readFileSync(new URL(`../server/${f2}`, import.meta.url), 'utf8');
+  assert.match(src('attach.mjs'), /followIdentity\(handshakeIdentity\(socket\), \(\) => socket\.disconnect\(true\)\)/, 'socket.io /os-events');
+  assert.match(src('attach.mjs'), /followIdentity\(identity, \(\) => \{ try \{ client\.terminate\(\)/, 'the WS proxy');
+  assert.match(src('app-hosts.mjs'), /followIdentity\(hostIdentity\(route, req\), \(\) => socket\.destroy\(\)\)/, 'App Host upgrades');
 });
 
 // ── 3 + 4. instances get their own view; os kv:changed is an allowlist ─────

@@ -24,4 +24,5 @@ export function browserBoundaryError(
   },
 ): string | null;
 export function isShellOrigin(origin: unknown, req: { headers: Record<string, unknown> }): boolean;
+export function plainProxyPath(path: string): boolean;
 export function browserDocumentRequest(method: string | undefined, header: (name: string) => unknown): boolean;

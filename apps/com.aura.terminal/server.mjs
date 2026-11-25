@@ -2,6 +2,7 @@
 // standalone Astro server plus the PTY WebSocket on /ws — what the dev server
 // gets from ptyWsIntegration in astro.config.mjs.
 process.env.ASTRO_NODE_AUTOSTART = 'disabled';
+const { fromShell } = await import('@aura/app-sdk/shell-peer');
 
 const { startServer } = await import('./dist/server/entry.mjs');
 const { server } = startServer();
@@ -25,9 +26,11 @@ http.once('listening', () => {
   );
 });
 
-http.on('upgrade', (req, socket, head) => {
+http.on('upgrade', async (req, socket, head) => {
   const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
   if (pathname !== '/ws') return;
+  // Only the shell relays a PTY socket (src/middleware.ts, H4 stopgap).
+  if (!(await fromShell(req.socket.remoteAddress))) { socket.destroy(); return; }
   ensurePty().then((get) => {
     if (!get) { socket.destroy(); return; }
     const wss = get();
