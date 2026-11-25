@@ -9,7 +9,7 @@ import {
   combineCandidates, concreteRule, decideRule, isInternalCall, kvNamespace, liveDeps, resourceFor, withNetworkCaller,
   type CandidateRequest, type ObserverDeps,
 } from './observer.ts';
-import { candidateRules, handlersOf, normalizeMethod, readsBody, type RuleCandidate } from './resolve.ts';
+import { candidateRules, handlersOf, manifestRoute, normalizeMethod, readsBody, type RuleCandidate } from './resolve.ts';
 import { ROUTE_ACCESS_MANIFEST } from './routeManifest.ts';
 import type {
   AccessReason, AccessRule, DecideResult, PolicyOutcome, RequestSnapshot, RouteAccessManifest, VerifiedIdentity,
@@ -135,13 +135,13 @@ async function guardDecision(
 export async function accessGate(
   ctx: AccessContext, deps: GateDeps, manifest: RouteAccessManifest = ROUTE_ACCESS_MANIFEST,
 ): Promise<GateResult> {
-  const route = ctx.routePattern ?? '';
+  const route = manifestRoute(manifest, ctx.routePattern ?? '');
   if (!route.startsWith('/api/')) return PASS;
   const mode = (deps.mode ?? accessMode)();
   const enforcing = mode === 'enforce';
   const gateway = ctx.request.headers.has(GATEWAY_IDENTITY_HEADER);
   const method = normalizeMethod(ctx.request.method);
-  const snapshot: RequestSnapshot = snapshotOf(ctx);
+  const snapshot: RequestSnapshot = { ...snapshotOf(ctx), routePattern: route };
   const info = { route, handlers: handlersOf(manifest, route) };
   const facts = { query: new URLSearchParams(snapshot.search), namespace: kvNamespace(snapshot), params: snapshot.params };
   let candidates = candidateRules(manifest, info, method, facts);

@@ -11,7 +11,7 @@ import {
 } from './identify.ts';
 import { refererProxyId } from './legacyReferer.ts';
 import { AccessReport, type ReportRedis } from './report.ts';
-import { candidateRules, handlersOf, normalizeMethod } from './resolve.ts';
+import { candidateRules, handlersOf, manifestRoute, normalizeMethod } from './resolve.ts';
 import { ROUTE_ACCESS_MANIFEST } from './routeManifest.ts';
 import { SURFACE_MANIFEST } from './surfaceManifest.ts';
 import {
@@ -423,9 +423,10 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
   async function evaluateRequest(s: RequestSnapshot): Promise<AccessEvent> {
     const method = normalizeMethod(s.method);
     const page = pagesByRoute.get(s.routePattern);
-    const isApi = s.routePattern.startsWith('/api/');
+    const route = manifestRoute(manifest, s.routePattern);
+    const isApi = route.startsWith('/api/');
     const surface: AccessEventSurface = page ? 'page' : 'api';
-    const subject = page?.id ?? (isApi ? s.routePattern : 'unmatched');
+    const subject = page?.id ?? (isApi ? route : 'unmatched');
     const status = statusClass(s.status);
 
     if (isInternal(s)) {
@@ -443,7 +444,7 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
     else if (isApi) {
       candidates = candidateRules(
         manifest,
-        { route: s.routePattern, handlers: handlersOf(manifest, s.routePattern) },
+        { route, handlers: handlersOf(manifest, route) },
         method,
         { query: new URLSearchParams(s.search), namespace: kvNamespace(s), params: s.params, bodyVariant: s.bodyVariant },
       );

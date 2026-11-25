@@ -16,7 +16,7 @@ import { accessGate, type GateDeps } from '../src/lib/access/enforce.ts';
 import { createNetworkIdentity, isTrustedOwnerAgent, normalizePeer } from '../src/lib/access/identify.ts';
 import { createObserver, type ObserverManager } from '../src/lib/access/observer.ts';
 import { AccessReport } from '../src/lib/access/report.ts';
-import { candidateRules, dispatchedMethods, effectiveRule, handlersOf } from '../src/lib/access/resolve.ts';
+import { candidateRules, dispatchedMethods, effectiveRule, handlersOf, manifestRoute } from '../src/lib/access/resolve.ts';
 import { ROUTE_ACCESS_MANIFEST as M } from '../src/lib/access/routeManifest.ts';
 import { SURFACE_MANIFEST } from '../src/lib/access/surfaceManifest.ts';
 import type { AccessLabel, AccessVia, DecideInput, RouteAccessManifest } from '../src/lib/access/types.ts';
@@ -322,6 +322,19 @@ test('guard sidecarGate → the instance\'s own token and its app\'s permission,
   // `with-tools` is read from the body: it also needs sidecars.tools, which notes lacks.
   const tools = { ...spawn('com.acme.notes-1'), body: { template: 't', tools: ['git'] } };
   assert.equal(await gate('report', inst('com.acme.notes'), tools), '403 access-denied');
+});
+
+test('Astro\'s lowercased routePattern still finds the manifest rule: the guard applies and the route gets its caller', async () => {
+  // Astro hands `/api/instances/[instanceid]/sidecars`; the manifest writes `[instanceId]`.
+  const lower = { method: 'POST', path: '/api/instances/com.acme.notes-1/sidecars', route: '/api/instances/[instanceid]/sidecars', params: { instanceId: 'com.acme.notes-1' }, body: { template: 't' } };
+  assert.equal(manifestRoute(M, lower.route), '/api/instances/[instanceId]/sidecars');
+  assert.equal(manifestRoute(M, '/api/not/listed'), '/api/not/listed');
+  for (const mode of MODES) {
+    const own = await accessGate(ctx(lower), deps(mode, { principal: inst('com.acme.notes'), via: 'instance-token' }));
+    assert.equal(own.refused, null, mode);
+    assert.equal((own.identity?.principal as { instanceId?: string } | undefined)?.instanceId, 'com.acme.notes-1', `${mode}: the route reads its caller`);
+    assert.equal(await gate(mode, inst('com.other.app'), lower), '403 access-denied', `${mode}: another instance`);
+  }
 });
 
 test('guard hasPermission (target) → ports and mounts need the target app\'s permission from anyone, in every mode', async () => {

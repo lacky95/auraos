@@ -20,6 +20,24 @@ export function dispatchedMethods(handlers: readonly string[]): RouteMethod[] {
   return ROUTE_METHODS.filter((m) => methods.has(m));
 }
 
+const spellings = new WeakMap<RouteAccessManifest, Map<string, string>>();
+
+/**
+ * The manifest's spelling of a route pattern. Astro hands `routePattern`
+ * lowercased (`/api/instances/[instanceid]/sidecars`), while the manifest
+ * writes parameters as the route files name them (`[instanceId]`), so a
+ * lookup by Astro's pattern would miss the rule and fall back to the group.
+ * A pattern the manifest doesn't list comes back unchanged.
+ */
+export function manifestRoute(manifest: RouteAccessManifest, pattern: string): string {
+  let byLower = spellings.get(manifest);
+  if (!byLower) {
+    byLower = new Map(Object.keys(manifest.routes).map((r) => [r.toLowerCase(), r]));
+    spellings.set(manifest, byLower);
+  }
+  return byLower.get(pattern.toLowerCase()) ?? pattern;
+}
+
 /** The group of `/api/<group>/…`. */
 export const groupOf = (route: string): string => route.split('/')[2] ?? '';
 

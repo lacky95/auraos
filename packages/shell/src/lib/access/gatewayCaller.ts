@@ -8,7 +8,7 @@ import { decide as liveDecide } from './decide.ts';
 import { readJsonBody, refused, TOO_LARGE } from './enforce.ts';
 import { gatewayInstance, gatewayOwner, type GatewayOwnerDeps } from './identify.ts';
 import { combineCandidates, concreteRule, kvNamespace, resourceFor, type ObserverManager } from './observer.ts';
-import { candidateRules, handlersOf, normalizeMethod, readsBody as routeReadsBody } from './resolve.ts';
+import { candidateRules, handlersOf, manifestRoute, normalizeMethod, readsBody as routeReadsBody } from './resolve.ts';
 import { ROUTE_ACCESS_MANIFEST } from './routeManifest.ts';
 import type { AccessLabel, AccessTarget, Decide, RequestSnapshot, RouteAccessManifest } from './types.ts';
 
@@ -71,10 +71,10 @@ export async function enforceGateway(
   const inst = gatewayInstance(ctx.request, deps.mgr as unknown as Parameters<typeof gatewayInstance>[1]);
   if (!claim || !inst || inst === 'invalid') return refused(401, 'gateway-identity-invalid');
 
-  const route = ctx.routePattern ?? '';
+  const manifest = deps.manifest ?? ROUTE_ACCESS_MANIFEST;
+  const route = manifestRoute(manifest, ctx.routePattern ?? '');
   if (!route.startsWith('/api/')) return refused(403, 'gateway-denied');
 
-  const manifest = deps.manifest ?? ROUTE_ACCESS_MANIFEST;
   const method = normalizeMethod(ctx.request.method);
   const snapshot: RequestSnapshot = {
     method: ctx.request.method,
