@@ -44,6 +44,9 @@ import { getAppHostServices } from '../app-hosts/services.js';
 import { appSourceFingerprint } from '../app-hosts/lifecycle.js';
 
 const RECONCILE_INTERVAL_MS = 5_000;
+/** Boot attempts of the survivor scan before the reconciler takes over. */
+const ADOPT_ATTEMPTS = 3;
+const ADOPT_RETRY_MS = 2_000;
 const ERROR_GRACE_MS        = 30_000;
 
 export class AppManager {
@@ -86,6 +89,11 @@ export class AppManager {
   private scopeRegistry: ScopeRegistry;
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
   private reconcileRunning = false;
+  /**
+   * The boot scan for surviving containers failed: who survived is unknown.
+   * Until a reconciler pass adopts them, nothing is reaped as an orphan.
+   */
+  private adoptionPending = false;
   /** Last known sidecars per backend, refreshed by `syncSidecars` (reconciler cadence). */
   private sidecars: Array<{ runner: SandboxRunner; info: SidecarInfo }> = [];
   /** Consecutive syncs each sidecar's parent was absent — see selectOrphanSidecars. */
@@ -933,90 +941,19 @@ export class AppManager {
     await this.registry.init();
     this.refreshManifestDerived();
     console.log(`[AppManager] Ready. Apps found: ${this.registry.getAll().length}, keymap actions: ${keymapRegistry.list().length}`);
-    // Adopt every sibling container that survived the last shell lifetime.
-    // Without this, `docker compose restart aura-os` strands every running
-    // container-mode app as an orphan — they're still up on aura-net (they're
-    // siblings, not children, so SIGCHLD doesn't reap them), but AppManager
-    // has no record. That means `getInstancesByApp` returns empty, so cap
-    // grant/revoke can't hot-refresh them, lifecycle events don't fire, and
-    // warm-pool refills race with the surviving members. We hydrate from
-    // `docker ps` + `docker inspect` (env carries APP_ID/APP_INSTANCE_ID/
-    // APP_PORT — set in buildDockerArgs) and resurrect each instance in
-    // `state: 'resumed'` ready for normal lifecycle calls.
-    try {
-      const orphans = await this.runners.container.listOrphanRecords?.() ?? [];
-      // Idle warm-pool members stay pool members: adopted as ordinary
-      // instances, every restart left one more window-less container behind
-      // while the pool spawned a fresh one.
-      const pooled = this.loadPoolIds();
-      for (const o of orphans) {
-        if (this.instances.has(o.instanceId)) continue;
-        const inst: AppInstance = {
-          instanceId:        o.instanceId,
-          appId:             o.appId,
-          state:             'resumed',
-          port:              o.port,
-          pid:               o.pid,
-          startedAt:         new Date(),
-          lastTransitionAt:  new Date(),
-          restartCount:      0,
-          inPool:            pooled.has(o.instanceId),
-          sandbox:           'container',
-          owner:             adoptedInstanceOwner(o.ownerLabel, pooled.has(o.instanceId)),
-        };
-        this.instances.set(o.instanceId, inst);
-        // The FSM must agree with the record: left at its default
-        // ('installed'), every lifecycle call on an adopted instance failed —
-        // `stop` answered "Invalid lifecycle transition: installed → pausing".
-        this.fsm.set(o.instanceId, 'resumed');
-        // Containers from before instance tokens carry no nonce: they keep
-        // working, but the token-gated routes answer 401 until they restart.
-        if (o.tokenNonce) this.tokens.register(o.instanceId, o.tokenNonce);
-        // Bump nextInstanceNum so future spawns don't collide with this
-        // adopted name. Instance IDs are "<appId>-<n>" or "<appId>" (single).
-        const m = o.instanceId.match(/-(\d+)$/);
-        if (m) {
-          const n = parseInt(m[1]!, 10);
-          const cur = this.nextInstanceNum.get(o.appId) ?? 0;
-          if (n > cur) this.nextInstanceNum.set(o.appId, n);
-        }
-        const manifest = this.registry.getById(o.appId);
-        if (manifest) {
-          this.runners.container.registerAdopted?.(o);
-          // Wire the crash handler so a dying adopted container is detected
-          // (registerAdopted starts the `docker wait` watcher that fires this).
-          // Without it the instance would stick in `resumed` forever and be
-          // unrecoverable via `start`/`restart`.
-          this.runners.container.onExit(o.instanceId, (code) => this.handleUnexpectedExit(o.instanceId, o.appId, code));
-          this.providers.registerInstance(inst, manifest);
-          this.interfaces.registerInstance(inst, manifest);
-        } else {
-          // Manifest gone (app uninstalled mid-restart). Skip adoption — without
-          // a manifest the runner can't build correct lifecycle URLs and the
-          // reconciler will tear the container down on the next pass anyway.
-          console.warn(`[AppManager] skipping orphan adoption for ${o.instanceId}: manifest for ${o.appId} not found`);
-        }
-        console.log(`[AppManager] adopted orphan container ${o.instanceId} (appId=${o.appId}, port=${o.port})`);
+    // Adopt every sibling container that survived the last shell lifetime
+    // (see adoptOrphans). A failed scan is retried; if it still fails, the
+    // reconciler keeps trying, and nothing is reaped as an orphan meanwhile.
+    for (let attempt = 1; attempt <= ADOPT_ATTEMPTS; attempt++) {
+      if (await this.adoptOrphans()) break;
+      if (attempt === ADOPT_ATTEMPTS) {
+        this.adoptionPending = true;
+        console.error('[AppManager] orphan adoption failed at boot; the reconciler retries it');
+      } else {
+        await new Promise((r) => setTimeout(r, ADOPT_RETRY_MS));
       }
-    } catch (err) {
-      console.warn(`[AppManager] orphan adoption failed: ${(err as Error).message}`);
     }
-    // Cross-app mounts live in the HOST kernel, so they outlive this process
-    // entirely. Run AFTER orphan adoption so the live-instance set is complete
-    // — otherwise every mount belonging to a surviving container would look
-    // orphaned and get reaped out from under it.
-    // OS sidecars first: their tokens and fan-out view come back from docker
-    // labels, and mount reconcile needs their consumer keys to tell a live
-    // sidecar's binds from a dead one's.
-    await this.osSidecars.reconcile(new Set(this.instances.keys())).catch((err: unknown) => {
-      console.warn(`[AppManager] OS sidecar reconcile failed: ${(err as Error).message}`);
-    });
-    try {
-      this.mounts.reconcile(new Set([...this.instances.keys(), ...this.osSidecars.liveConsumerKeys()]));
-      this.portExpose.reconcile(new Set(this.instances.keys()));
-    } catch (err) {
-      console.warn(`[AppManager] mount reconcile failed: ${(err as Error).message}`);
-    }
+    if (!this.adoptionPending) await this.reconcileSurvivors();
     // Sidecars likewise outlive this process: a docker daemon restart removes
     // the `--rm` app containers but revives their `unless-stopped` sidecars,
     // which nothing would ever reap. Same ordering constraint as mounts. At
@@ -1068,6 +1005,105 @@ export class AppManager {
     // The local OCI registry is seeded with @aura/* by the shell after init()
     // (packages/shell/src/lib/sdkBootstrap.ts — every boot, skips by digest,
     // and the first-boot setup card shows its progress).
+  }
+
+  /**
+   * Adopt every sibling container that survived the last shell lifetime.
+   * Without this, `docker compose restart aura-os` strands every running
+   * container-mode app as an orphan — they're still up on aura-net (they're
+   * siblings, not children, so SIGCHLD doesn't reap them), but AppManager
+   * has no record. That means `getInstancesByApp` returns empty, so cap
+   * grant/revoke can't hot-refresh them, lifecycle events don't fire, and
+   * warm-pool refills race with the surviving members. We hydrate from
+   * `docker ps` + `docker inspect` (env carries APP_ID/APP_INSTANCE_ID/
+   * APP_PORT — set in buildDockerArgs) and resurrect each instance in
+   * `state: 'resumed'` ready for normal lifecycle calls.
+   * False when the scan failed (the survivors are unknown); never throws.
+   */
+  private async adoptOrphans(): Promise<boolean> {
+    try {
+      const runner = this.runners.container;
+      const orphans = runner.listOrphanRecords ? await runner.listOrphanRecords() : [];
+      if (!orphans) return false;
+      // Idle warm-pool members stay pool members: adopted as ordinary
+      // instances, every restart left one more window-less container behind
+      // while the pool spawned a fresh one.
+      const pooled = this.loadPoolIds();
+      for (const o of orphans) {
+        // Known already, or still the runner's (a late pass: mid-stop).
+        if (this.instances.has(o.instanceId) || runner.isRunning(o.instanceId)) continue;
+        const inst: AppInstance = {
+          instanceId:        o.instanceId,
+          appId:             o.appId,
+          state:             'resumed',
+          port:              o.port,
+          pid:               o.pid,
+          startedAt:         new Date(),
+          lastTransitionAt:  new Date(),
+          restartCount:      0,
+          inPool:            pooled.has(o.instanceId),
+          sandbox:           'container',
+          owner:             adoptedInstanceOwner(o.ownerLabel, pooled.has(o.instanceId)),
+        };
+        this.instances.set(o.instanceId, inst);
+        // The FSM must agree with the record: left at its default
+        // ('installed'), every lifecycle call on an adopted instance failed —
+        // `stop` answered "Invalid lifecycle transition: installed → pausing".
+        this.fsm.set(o.instanceId, 'resumed');
+        // Containers from before instance tokens carry no nonce: they keep
+        // working, but the token-gated routes answer 401 until they restart.
+        if (o.tokenNonce) this.tokens.register(o.instanceId, o.tokenNonce);
+        // Bump nextInstanceNum so future spawns don't collide with this
+        // adopted name. Instance IDs are "<appId>-<n>" or "<appId>" (single).
+        const m = o.instanceId.match(/-(\d+)$/);
+        if (m) {
+          const n = parseInt(m[1]!, 10);
+          const cur = this.nextInstanceNum.get(o.appId) ?? 0;
+          if (n > cur) this.nextInstanceNum.set(o.appId, n);
+        }
+        const manifest = this.registry.getById(o.appId);
+        if (manifest) {
+          this.runners.container.registerAdopted?.(o);
+          // Wire the crash handler so a dying adopted container is detected
+          // (registerAdopted starts the `docker wait` watcher that fires this).
+          // Without it the instance would stick in `resumed` forever and be
+          // unrecoverable via `start`/`restart`.
+          this.runners.container.onExit(o.instanceId, (code) => this.handleUnexpectedExit(o.instanceId, o.appId, code));
+          this.providers.registerInstance(inst, manifest);
+          this.interfaces.registerInstance(inst, manifest);
+        } else {
+          // Manifest gone (app uninstalled mid-restart). Skip adoption — without
+          // a manifest the runner can't build correct lifecycle URLs and the
+          // reconciler will tear the container down on the next pass anyway.
+          console.warn(`[AppManager] skipping orphan adoption for ${o.instanceId}: manifest for ${o.appId} not found`);
+        }
+        console.log(`[AppManager] adopted orphan container ${o.instanceId} (appId=${o.appId}, port=${o.port})`);
+      }
+    } catch (err) {
+      console.warn(`[AppManager] orphan adoption failed: ${(err as Error).message}`);
+      return false;
+    }
+    return true;
+  }
+
+  /** After adoption: drop the mounts, port forwards and OS sidecars of instances that did not survive. */
+  private async reconcileSurvivors(): Promise<void> {
+    // Cross-app mounts live in the HOST kernel, so they outlive this process
+    // entirely. Run AFTER orphan adoption so the live-instance set is complete
+    // — otherwise every mount belonging to a surviving container would look
+    // orphaned and get reaped out from under it.
+    // OS sidecars first: their tokens and fan-out view come back from docker
+    // labels, and mount reconcile needs their consumer keys to tell a live
+    // sidecar's binds from a dead one's.
+    await this.osSidecars.reconcile(new Set(this.instances.keys())).catch((err: unknown) => {
+      console.warn(`[AppManager] OS sidecar reconcile failed: ${(err as Error).message}`);
+    });
+    try {
+      this.mounts.reconcile(new Set([...this.instances.keys(), ...this.osSidecars.liveConsumerKeys()]));
+      this.portExpose.reconcile(new Set(this.instances.keys()));
+    } catch (err) {
+      console.warn(`[AppManager] mount reconcile failed: ${(err as Error).message}`);
+    }
   }
 
   /**
@@ -2475,6 +2511,13 @@ export class AppManager {
   }
 
   private async reconcileOnce(): Promise<void> {
+    // 0) The boot scan for surviving containers failed: retry it. Until it
+    //    succeeds, syncSidecars and reconcileSurvivors reap nothing.
+    if (this.adoptionPending && await this.adoptOrphans()) {
+      this.adoptionPending = false;
+      console.log('[AppManager] reconcile: surviving containers adopted');
+      await this.reconcileSurvivors();
+    }
     // 1) Tracked-instance liveness: any pid we believe is alive but isn't
     //    must be flagged error, port released, view dropped.
     //
@@ -2659,6 +2702,8 @@ export class AppManager {
    * a failed read must never look like "all parents are gone".
    */
   private async syncSidecars(graceTicks: number): Promise<void> {
+    // Survivors unknown: their sidecars must not look orphaned.
+    if (this.adoptionPending) return;
     const fresh: Array<{ runner: SandboxRunner; info: SidecarInfo }> = [];
     for (const runner of new Set(Object.values(this.runners))) {
       if (!runner.listSidecars) continue;

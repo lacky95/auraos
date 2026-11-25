@@ -79,7 +79,9 @@ export interface SandboxRunner {
    * Optional — runners whose sandboxes outlive the shell process (currently
    * just ContainerRunner) implement these so AppManager.init() can pick up
    * survivors from the last shell lifetime. PRoot intentionally doesn't:
-   * its proots are direct child processes of the shell node and die with it.
+   * its proots are direct child processes of the shell node and die with it
+   * (the desktop session starts running ones again: shell desktopSession.ts).
+   * `null` = the scan failed: the survivors are unknown, not absent.
    */
   listOrphanRecords?(): Promise<Array<{
     instanceId: string;
@@ -91,7 +93,7 @@ export interface SandboxRunner {
     tokenNonce?: string;
     /** `aura.owner` label — absent on containers from before owners and on pool members. */
     ownerLabel?: string;
-  }>>;
+  }> | null>;
   registerAdopted?(rec: {
     instanceId: string;
     appId:      string;

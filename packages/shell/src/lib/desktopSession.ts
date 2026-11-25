@@ -16,7 +16,10 @@
  *     the same instance ids) every saved activity is reopened: on the adopted
  *     instance with its old id when possible, else on a freshly started
  *     instance of its app. The app gets `restore: { previousActivityId,
- *     state }` in onActivityCreate. Workspace members, layout data and the
+ *     state }` in onActivityCreate. PRoot instances die with the shell
+ *     process, so a running one is started again even without a window, also
+ *     when the activities are not restored (a container app survives either
+ *     way). Workspace members, layout data and the
  *     shell's per-activity state are remapped to the new ids
  *     (lib/workspaceRemap.ts); members that no longer exist are pruned.
  *   • Auto-save starts only after the restore: the empty desktop of a fresh
@@ -64,6 +67,8 @@ export interface SessionInstance {
   appId:      string;
   /** The instance itself is an activity (activityMode != 'multi') on a workspace. */
   view:       boolean;
+  /** A PRoot instance: it dies with the shell, so the restore starts it again. */
+  respawn?:   true;
 }
 export interface DesktopSnapshot {
   schema:     1;
@@ -144,6 +149,13 @@ export async function buildSnapshot(reason: DesktopSnapshot['reason']): Promise<
     .sort((x, y) => x.createdAt.localeCompare(y.createdAt));
 
   const withWindows = new Set(activities.map((a) => a.parentInstanceId));
+  return { schema: 1, savedAt: new Date().toISOString(), reason, instances: sessionInstances(mgr, members, withWindows), activities };
+}
+
+/** The instances a snapshot keeps: shown on a workspace, parent of a window, or PRoot. */
+export function sessionInstances(
+  mgr: Pick<Mgr, 'getAllInstances' | 'getManifest'>, members: Set<string>, withWindows: Set<string>,
+): SessionInstance[] {
   const instances: SessionInstance[] = [];
   for (const inst of mgr.getAllInstances()) {
     if (inst.inPool) continue;
@@ -151,10 +163,11 @@ export async function buildSnapshot(reason: DesktopSnapshot['reason']): Promise<
     const m = mgr.getManifest(inst.appId);
     if (!m || m.componentType === 'service') continue;
     const view = m.activityMode !== 'multi' && members.has(inst.instanceId);
-    if (!view && !withWindows.has(inst.instanceId)) continue;
-    instances.push({ instanceId: inst.instanceId, appId: inst.appId, view });
+    const respawn = inst.sandbox === 'proot';
+    if (!view && !respawn && !withWindows.has(inst.instanceId)) continue;
+    instances.push({ instanceId: inst.instanceId, appId: inst.appId, view, ...(respawn ? { respawn: true as const } : {}) });
   }
-  return { schema: 1, savedAt: new Date().toISOString(), reason, instances, activities };
+  return instances;
 }
 
 async function writeSnapshot(reason: DesktopSnapshot['reason']): Promise<void> {
@@ -239,6 +252,8 @@ export function unfreeze(): void {
 export interface RestoreReport {
   skipped?:  'disabled' | 'one-shot' | 'no-snapshot';
   restored:  number;
+  /** PRoot instances back without a window of their own (started again, or already running). */
+  respawned: number;
   failed:    Array<{ viewId: string; appId: string; error: string }>;
   idMap:     Record<string, string>;
   pruned:    number;
@@ -274,7 +289,7 @@ export async function waitForRestore(timeoutMs: number): Promise<void> {
 }
 
 async function doRestore(): Promise<RestoreReport> {
-  const report: RestoreReport = { restored: 0, failed: [], idMap: {}, pruned: 0 };
+  const report: RestoreReport = { restored: 0, respawned: 0, failed: [], idMap: {}, pruned: 0 };
   const mgr = core.getAppManager();
 
   const [enabled, skip, snap, restartDaemon] = await withKv(async (kv) => [
@@ -289,7 +304,7 @@ async function doRestore(): Promise<RestoreReport> {
   if (enabled === false) report.skipped = 'disabled';
   else if (skip) report.skipped = 'one-shot';
   else if (!snap || snap.schema !== 1) report.skipped = 'no-snapshot';
-  else await reopenActivities(mgr, snap, report);
+  if (snap?.schema === 1) await reopenActivities(mgr, snap, report, !report.skipped);
 
   // Workspaces follow the activities: renamed ids, gone ones pruned — also when
   // nothing was restored (stale members from before the restart).
@@ -298,9 +313,11 @@ async function doRestore(): Promise<RestoreReport> {
 
   if (restartDaemon) await restartShellDaemon(mgr);
 
-  const summary = report.skipped
+  const summary = (report.skipped
     ? `skipped (${report.skipped})`
-    : `${report.restored} activities restored${report.failed.length ? `, ${report.failed.length} failed` : ''}`;
+    : `${report.restored} activities restored`)
+    + (report.respawned ? `, ${report.respawned} PRoot instance(s) back` : '')
+    + (report.failed.length ? `, ${report.failed.length} failed` : '');
   console.log(`[desktop-session] restore: ${summary}${report.pruned ? `, ${report.pruned} stale member(s) pruned` : ''}`);
   core.OsEventBus.emit('session:restored', { restored: report.restored, failed: report.failed, idMap: report.idMap, bootId: g().bootId });
   if (report.failed.length) await notifyFailures(report.failed);
@@ -309,12 +326,19 @@ async function doRestore(): Promise<RestoreReport> {
 
 type Mgr = ReturnType<typeof core.getAppManager>;
 
-function alive(mgr: Mgr, instanceId: string, appId: string): boolean {
+function alive(mgr: Pick<Mgr, 'getInstance'>, instanceId: string, appId: string): boolean {
   const i = mgr.getInstance(instanceId);
   return !!i && i.appId === appId && !i.inPool && i.state !== 'destroyed' && i.state !== 'error';
 }
 
-async function reopenActivities(mgr: Mgr, snap: DesktopSnapshot, report: RestoreReport): Promise<void> {
+/**
+ * Bring the snapshot back: its windows when `windows` (the restore is on), and
+ * every PRoot instance that was running, which died with the shell.
+ */
+export async function reopenActivities(
+  mgr: Pick<Mgr, 'getInstance' | 'getManifest' | 'isEnabled' | 'start' | 'openActivity'>,
+  snap: DesktopSnapshot, report: RestoreReport, windows = true,
+): Promise<void> {
   const instMap = new Map<string, string | Error>();
   const instanceFor = async (oldId: string, appId: string): Promise<string> => {
     const known = instMap.get(oldId);
@@ -339,7 +363,7 @@ async function reopenActivities(mgr: Mgr, snap: DesktopSnapshot, report: Restore
   };
 
   // Activities that ARE instances (activityMode != 'multi').
-  for (const si of snap.instances.filter((i) => i.view)) {
+  for (const si of windows ? snap.instances.filter((i) => i.view) : []) {
     try {
       const id = await instanceFor(si.instanceId, si.appId);
       report.idMap[si.instanceId] = id;
@@ -350,7 +374,7 @@ async function reopenActivities(mgr: Mgr, snap: DesktopSnapshot, report: Restore
   }
 
   // Activities, oldest first — a stack parent always predates its children.
-  for (const a of snap.activities) {
+  for (const a of windows ? snap.activities : []) {
     try {
       const inst = await instanceFor(a.parentInstanceId, a.appId);
       const sameInstance = inst === a.parentInstanceId;
@@ -373,6 +397,17 @@ async function reopenActivities(mgr: Mgr, snap: DesktopSnapshot, report: Restore
       report.restored++;
     } catch (err) {
       report.failed.push({ viewId: a.activityId, appId: a.appId, error: (err as Error).message });
+    }
+  }
+
+  // PRoot instances not brought back by a window above (instMap dedupes).
+  for (const si of snap.instances.filter((i) => i.respawn)) {
+    if (instMap.has(si.instanceId)) continue;
+    try {
+      report.idMap[si.instanceId] = await instanceFor(si.instanceId, si.appId);
+      report.respawned++;
+    } catch (err) {
+      report.failed.push({ viewId: si.instanceId, appId: si.appId, error: (err as Error).message });
     }
   }
 }
