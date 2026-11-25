@@ -196,7 +196,7 @@ export type AccessReason = (typeof ACCESS_REASONS)[number];
 
 /** How the caller's identity was established. The `*-hint` values prove nothing. */
 export const ACCESS_VIAS = [
-  'login-session', 'instance-token', 'api-key', 'admin-session', 'operator-ticket',
+  'login-session', 'instance-token', 'api-key', 'operator-ticket',
   // a signed App Host gateway claim / a verified App Host cookie session
   'gateway', 'app-host',
   'referer-hint', 'instance-id-hint', 'internal', 'sse-mux',

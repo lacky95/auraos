@@ -12,7 +12,7 @@ import { authenticate } from './auth.js';
  *       reads everything; a screen it sends along (its client session,
  *       clientSession.ts `viewerFor`) keeps its lock view. Not a sender.
  *   an instance or API key: its own items, plus a notifications.read grant
- *   an admin session: reads everything, sends nothing
+ *   the host operator (its one-time ticket): reads everything, sends nothing
  *   anonymous: basic sending; a shell screen by its client session; a
  *       declared app id in a legacy body is attribution only
  *

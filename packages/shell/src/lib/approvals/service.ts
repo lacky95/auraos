@@ -183,7 +183,10 @@ export function actionGate(
   presented: { approvalId: string | null; operatorCode?: unknown },
 ) {
   let refused: ApprovalRefusal | 'not-a-requester' | 'operator-code-invalid' | null = null;
+  let consumed: ApprovalRecord | null = null;
   return {
+    /** The approval this request used up, once `allows` said yes to one (not for an operator code). */
+    consumed: (): ApprovalRecord | null => consumed,
     /** Whether this request may go ahead. Uses up what it presented. */
     async allows(action: ApprovalAction, payload: unknown): Promise<boolean> {
       if (presented.operatorCode !== undefined) {
@@ -198,7 +201,8 @@ export function actionGate(
       }
       if (!presented.approvalId) return false;
       const r = await consumeApproval(deps, principal, presented.approvalId, action, payload);
-      if (!r.ok) refused = r.reason;
+      if (r.ok) consumed = r.record;
+      else refused = r.reason;
       return r.ok;
     },
     /** The 202 answer: a new pending approval, or (no requester identity) what an operator code must name. */

@@ -1,6 +1,6 @@
 import { shellUrl } from './shell-url.js';
-import { isAdminPath, recoverAdminSession } from './admin-session.js';
-import { adminRefusal, isTrustedShellUrl, shellFetch } from './identity.js';
+import { APPROVAL_HEADER, askOwner, needsApprovalOf } from './approval.js';
+import { shellFetch } from './identity.js';
 
 export { shellUrl };
 
@@ -19,16 +19,16 @@ async function request<T>(
   path: string,
   body?: unknown,
 ): Promise<T> {
-  const admin = isAdminPath(path);
-  const send = async (): Promise<Response> => {
+  const send = async (approvalId?: string): Promise<Response> => {
     const headers: Record<string, string> = {};
     if (body !== undefined) headers['Content-Type'] = 'application/json';
+    if (approvalId) headers[APPROVAL_HEADER] = approvalId;
     try {
-      // /api/admin/* takes the admin session; every call carries the instance token otherwise (identity.ts).
+      // Every call carries this process's identity (identity.ts).
       return await shellFetch(path, {
         method,
         headers,
-        intent: admin ? 'admin' : 'self',
+        intent: 'self',
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });
     } catch (err) {
@@ -40,28 +40,27 @@ async function request<T>(
   };
   let res = await send();
   let text = await res.text();
-  // An admin route refused us: get a session (env / master key file / prompt)
-  // and retry once. Without one, explain how instead of a bare 401.
-  if (admin && res.status === 401 && /"error"\s*:\s*"admin-(required|session-invalid)"/.test(text)) {
-    if (await recoverAdminSession()) {
-      res = await send();
-      text = await res.text();
-    }
-    if (res.status === 401) {
-      const e = new Error(
-        `${method} ${path} needs an admin session.\n` +
-        (isTrustedShellUrl(shellUrl())
-          ? '  Run `aura admin login --save` (asks for the shared admin credential), or set AURA_ADMIN_CREDENTIAL / AURA_ADMIN_SESSION.\n' +
-            '  Read the credential on the host: `docker exec -it aura-shell aura admin credential`.'
-          : `  ${adminRefusal(shellUrl())}`),
-      ) as ShellError;
-      e.status = 401;
+  // The owner decides this call (D50, 5.10): show what the server built, wait
+  // for the desktop, then send the very same request with the approval.
+  const asked = needsApprovalOf(res.status, text);
+  if (asked) {
+    const answer = await askOwner(asked);
+    if ('refused' in answer) {
+      const e = new Error(`${method} ${path}: ${answer.refused}`) as ShellError;
+      e.status = res.status;
       e.body = text;
       throw e;
     }
+    res = await send(answer.approvalId);
+    text = await res.text();
   }
   if (!res.ok) {
-    const e = new Error(`${method} ${path} failed with ${res.status}: ${text}`) as ShellError;
+    const refusedHere = path.startsWith('/api/admin/') && (res.status === 401 || res.status === 403)
+      && /"error"\s*:\s*"(access-denied|unauthenticated)"/.test(text);
+    const e = new Error(refusedHere
+      ? `${method} ${path} is the owner's (${res.status}). Run it in the System Terminal (the owner approves it in the desktop), `
+        + 'use Settings, or run it on the host: docker exec -it aura-shell aura …'
+      : `${method} ${path} failed with ${res.status}: ${text}`) as ShellError;
     e.status = res.status;
     e.body = text;
     throw e;

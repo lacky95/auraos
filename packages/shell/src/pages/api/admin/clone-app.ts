@@ -8,7 +8,7 @@ import {
   getAppManager, rewriteAppIdentity,
   type ManifestPatch, type ScopeDefinition, type ScopeId,
 } from '@aura/core';
-import { adminOf, auditAdmin } from '../../../lib/auth.js';
+import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
 
 /**
  * Server-side app cloning — the engine behind `aura dev clone`.
@@ -60,7 +60,8 @@ interface CloneRequest {
   dryRun?:       boolean;
 }
 
-export const POST: APIRoute = async ({ request, locals }) => {
+export const POST: APIRoute = async (ctx) => {
+  const { request } = ctx;
   let body: CloneRequest;
   try { body = await request.json() as CloneRequest; }
   catch { return json({ error: 'invalid-json' }, 400); }
@@ -140,11 +141,18 @@ export const POST: APIRoute = async ({ request, locals }) => {
     return json({ error: 'exists', message: `${dest} already exists. Pass force=true to overwrite.` }, 409);
   }
   // Overwriting an EXISTING app replaces the code that runs under its id (and
-  // inherits its grants): admin only. New clones — including same-id shadows
-  // in another scope, which don't inherit scope-pinned grants — need nothing.
+  // inherits its grants): the owner's decision (D50, lib/approvals/admin.ts).
+  // New clones — including same-id shadows in another scope, which don't
+  // inherit scope-pinned grants — need nothing.
   if (destExists && body.force) {
-    const admin = adminOf(locals);
-    await auditAdmin(admin, 'app.clone-overwrite', { target: `app:${targetAppId}`, detail: { sourceAppId, scope: targetScopeId } });
+    const admin = await ownerAction(ctx, {
+      action: 'admin.change', level: 'session',
+      payload: { op: 'clone-app.overwrite', sourceAppId, sourceScope, targetAppId, scope: targetScopeId },
+      title: `Overwrite ${targetAppId} with a copy of ${sourceAppId}`,
+      details: [`Into scope: ${targetScopeId}`, `From scope: ${sourceScope}`, 'The code that runs under that app id is replaced.'],
+    });
+    if (admin instanceof Response) return admin;
+    await auditOwner(admin, 'app.clone-overwrite', { target: `app:${targetAppId}`, detail: { sourceAppId, scope: targetScopeId } });
   }
 
   // A clone that lands on an id already present in a LOWER-priority scope

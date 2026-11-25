@@ -1,5 +1,6 @@
 // Credential rules of the CLI against fake shells on loopback: origins, proxy
-// paths, the fake-401 key leak, redirects, SSE and explicit credentials.
+// paths, redirects, SSE, no shared admin credential anywhere (D50), and the
+// owner's approval that a 202 asks for.
 //
 //   pnpm --filter @aura/cli test
 import './helpers/isolated-env.js';
@@ -8,14 +9,13 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import net from 'node:net';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { defaultAdminKeyFile } from '@aura/core';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { api, subscribeEvents } from '../src/lib/client.js';
-import { ADMIN_SESSION_FILE, adminLogin, forgetInProcessSession, obtainCredential, saveSession } from '../src/lib/admin-session.js';
 import {
   holdsInstanceIdentity, isProxyPath, isRunnerShellUrl, isTrustedShellUrl, resetIdentityWarnings,
-  resolveIdentity, runnerShellUrl, shellFetch,
+  runnerShellUrl, shellFetch,
 } from '../src/lib/identity.js';
 import { issueSetupCode, SetupCodeRefused } from '../src/lib/setup-ticket.js';
 import { fetchWhoami, localHints } from '../src/commands/identity.js';
@@ -27,7 +27,7 @@ const KEY = `aura_admin_${'k'.repeat(43)}`;
 const ENV = ['AURA_SHELL_URL', 'OS_API_BASE', 'AURA_OS_URL', 'AURA_INSTANCE_TOKEN', 'APP_INSTANCE_ID', 'AURA_INSTANCE_ID',
   'AURA_ADMIN_SESSION', 'AURA_ADMIN_CREDENTIAL', 'APP_ID', 'AURA_APP_ID'];
 
-interface Seen { method: string; url: string; auth?: string; body: string }
+interface Seen { method: string; url: string; auth?: string; approval?: string; body: string }
 type Handler = (r: Seen, res: http.ServerResponse) => [number, unknown] | 'handled';
 const servers: http.Server[] = [];
 
@@ -36,7 +36,11 @@ async function fakeShell(handler: Handler = () => [200, {}]): Promise<{ base: st
   const server = http.createServer(async (req, res) => {
     let body = '';
     for await (const chunk of req) body += chunk;
-    const rec: Seen = { method: req.method ?? '', url: req.url ?? '', body, ...(req.headers.authorization ? { auth: req.headers.authorization } : {}) };
+    const rec: Seen = {
+      method: req.method ?? '', url: req.url ?? '', body,
+      ...(req.headers.authorization ? { auth: req.headers.authorization } : {}),
+      ...(req.headers['x-aura-approval'] ? { approval: String(req.headers['x-aura-approval']) } : {}),
+    };
     seen.push(rec);
     const out = handler(rec, res);
     if (out === 'handled') return;
@@ -46,16 +50,6 @@ async function fakeShell(handler: Handler = () => [200, {}]): Promise<{ base: st
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   servers.push(server);
   return { base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, seen };
-}
-
-const fake401: Handler = ({ method, url }) => (method === 'POST' && url === '/api/admin/session'
-  ? [200, { token: 'fresh-session', expiresAt: Date.now() + 60_000 }]
-  : [401, { error: 'admin-required' }]);
-
-function writeKey(): void {
-  const f = defaultAdminKeyFile();
-  mkdirSync(dirname(f), { recursive: true });
-  writeFileSync(f, `${KEY}\n`, { mode: 0o600 });
 }
 
 async function stderrOf(fn: () => Promise<unknown>): Promise<string> {
@@ -68,10 +62,7 @@ async function stderrOf(fn: () => Promise<unknown>): Promise<string> {
 
 beforeEach(() => {
   for (const k of ENV) delete process.env[k];
-  forgetInProcessSession();
   resetIdentityWarnings();
-  rmSync(ADMIN_SESSION_FILE, { force: true });
-  rmSync(defaultAdminKeyFile(), { force: true });
 });
 
 afterEach(() => {
@@ -113,9 +104,8 @@ test('proxy paths in any spelling get no credential', async () => {
   process.env['OS_API_BASE'] = shell.base;
   process.env['AURA_INSTANCE_TOKEN'] = 'inst-token';
   process.env['APP_INSTANCE_ID'] = 'a.b';
-  process.env['AURA_ADMIN_SESSION'] = 'pinned';
-  await shellFetch('/api/proxy/a/b', { intent: 'admin' });
-  await shellFetch('/api/admin/../proxy/a', { intent: 'admin' });
+  await shellFetch('/api/proxy/a/b');
+  await shellFetch('/api/admin/../proxy/a');
   await shellFetch('/api/proxy/a', { intent: 'instance', instanceId: 'a.b' });
   await shellFetch('/api/proxy/a', { intent: 'whoami' });
   assert.equal(shell.seen.length, 4);
@@ -142,7 +132,7 @@ test('instance token: only to the runner origin, only for its own instance', asy
   assert.equal(other.seen[0]!.auth, undefined);
 });
 
-test('every shell call and event stream carries the instance token, never an admin session (5.8)', async () => {
+test('every shell call and event stream carries the instance token, owner routes too (5.8, D50)', async () => {
   const shell = await fakeShell(({ url }, res) => {
     if (url !== '/api/apps/events') return [200, []];
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -162,11 +152,8 @@ test('every shell call and event stream carries the instance token, never an adm
   assert.deepEqual(event, { type: 'x' });
   assert.equal(shell.seen.length, 4);
   assert.ok(shell.seen.every((r) => r.auth === 'Bearer inst-token'), JSON.stringify(shell.seen));
-  // An admin route takes the admin session when there is one, else the token.
+  // An owner route takes the same token; AURA_ADMIN_SESSION means nothing any more.
   await api.get('/api/admin/grants');
-  assert.equal(shell.seen.at(-1)!.auth, 'Bearer pinned');
-  delete process.env['AURA_ADMIN_SESSION'];
-  await shellFetch('/api/admin/grants', { intent: 'admin' });
   assert.equal(shell.seen.at(-1)!.auth, 'Bearer inst-token');
 });
 
@@ -198,39 +185,76 @@ test('the instance token never goes to a foreign URL or through the proxy (D28: 
   assert.ok(foreign.seen.every((r) => r.auth === undefined), 'nothing for a URL the runner did not inject');
 });
 
-test('fake 401 from a non-shell URL: no key read, nothing sent, saved session kept', async () => {
-  writeKey();
-  saveSession({ token: 'saved-session', expiresAt: Date.now() + 60_000 });
-  const evil = await fakeShell(fake401);
-  process.env['OS_API_BASE'] = 'http://127.0.0.1:1';
-  process.env['AURA_SHELL_URL'] = evil.base;
-
-  await assert.rejects(api.get('/api/admin/grants'), (e: Error & { status?: number }) => e.status === 401 && /not this system's shell/.test(e.message));
-  assert.equal(evil.seen.length, 1, 'no login attempt followed the 401');
-  assert.equal(evil.seen[0]!.auth, undefined);
-  assert.ok(!evil.seen[0]!.body.includes(KEY));
-  assert.equal(existsSync(ADMIN_SESSION_FILE), true, 'a fake 401 cannot delete the saved session');
-});
-
-test('the same applies with no runner env and a custom --shell-url', async () => {
-  writeKey();
-  const evil = await fakeShell(fake401);
-  process.env['AURA_SHELL_URL'] = evil.base;
-  await assert.rejects(api.get('/api/admin/grants'));
-  assert.equal(evil.seen.length, 1);
-  assert.ok(evil.seen.every((r) => r.auth === undefined && !r.body.includes(KEY)));
-});
-
-test('a real 401 from the trusted shell still recovers with the master key', async () => {
-  writeKey();
-  const shell = await fakeShell(({ method, url, auth }) => {
-    if (method === 'POST' && url === '/api/admin/session') return [200, { token: 'fresh-session', expiresAt: Date.now() + 60_000 }];
-    return auth === 'Bearer fresh-session' ? [200, { ok: true }] : [401, { error: 'admin-required' }];
-  });
+test('D50: no shared admin credential is read or sent: AURA_ADMIN_*, ~/.aura/admin-session and admin.key are ignored', async () => {
+  const shell = await fakeShell(() => [401, { error: 'admin-required' }]);
   process.env['OS_API_BASE'] = shell.base;
-  assert.deepEqual(await api.get('/api/admin/grants'), { ok: true });
-  assert.equal(JSON.parse(shell.seen[1]!.body).credential, KEY);
-  assert.equal(shell.seen[2]!.auth, 'Bearer fresh-session');
+  process.env['AURA_ADMIN_SESSION'] = 'pinned-value';
+  process.env['AURA_ADMIN_CREDENTIAL'] = KEY;
+  mkdirSync(join(homedir(), '.aura'), { recursive: true });
+  writeFileSync(join(homedir(), '.aura', 'admin-session'), JSON.stringify({ token: 'saved-session', expiresAt: Date.now() + 60_000 }));
+  const keyFile = join(process.env['AURA_DATA_DIR']!, 'aura', 'secrets', 'admin.key');
+  mkdirSync(join(keyFile, '..'), { recursive: true });
+  writeFileSync(keyFile, `${KEY}\n`, { mode: 0o600 });
+
+  await assert.rejects(api.get('/api/admin/grants'), (e: Error & { status?: number }) => e.status === 401);
+  assert.equal(shell.seen.length, 1, 'no login was attempted after the 401');
+  const sent = JSON.stringify(shell.seen);
+  for (const secret of [KEY, 'pinned-value', 'saved-session']) assert.ok(!sent.includes(secret), secret);
+  assert.ok(!(shell.seen[0]!.auth ?? '').startsWith('Bearer aura-admin1'), 'no admin bearer');
+});
+
+function approvalShell(decision: 'approved' | 'denied') {
+  return fakeShell(({ method, url, approval }) => {
+    if (method === 'GET' && url === '/api/approvals/apr_AAAAAAAAAAAAAAAAAAAAAA') return [200, { id: 'apr_AAAAAAAAAAAAAAAAAAAAAA', state: decision }];
+    if (url.startsWith('/api/admin/grants')) {
+      return approval === 'apr_AAAAAAAAAAAAAAAAAAAAAA'
+        ? [200, { ok: true, changed: true }]
+        : [202, {
+          ok: false, error: 'needs-approval', needsApproval: true, action: 'admin.grant', level: 'fresh',
+          approvalId: 'apr_AAAAAAAAAAAAAAAAAAAAAA',
+          display: { title: 'Grant io.lakner.terminalx terminal.screen.read', details: ['App: io.lakner.terminalx'], requestedBy: 'Terminal (com.aura.terminal-1)' },
+        }];
+    }
+    return [404, {}];
+  });
+}
+
+test('D50: a 202 needs-approval waits for the owner in the desktop, then sends the same request with the approval', async () => {
+  const shell = await approvalShell('approved');
+  process.env['OS_API_BASE'] = shell.base;
+  process.env['AURA_INSTANCE_TOKEN'] = 'inst-token';
+  process.env['APP_INSTANCE_ID'] = 'com.aura.terminal-1';
+  const body = { subjectKind: 'app', subjectId: 'io.lakner.terminalx', permission: 'terminal.screen.read' };
+  let result: unknown;
+  const err = await stderrOf(async () => { result = await api.post('/api/admin/grants', body); });
+  assert.deepEqual(result, { ok: true, changed: true });
+  assert.deepEqual(shell.seen.map((r) => `${r.method} ${r.url}`), [
+    'POST /api/admin/grants', 'GET /api/approvals/apr_AAAAAAAAAAAAAAAAAAAAAA', 'POST /api/admin/grants',
+  ]);
+  assert.equal(shell.seen[0]!.approval, undefined);
+  assert.equal(shell.seen[2]!.approval, 'apr_AAAAAAAAAAAAAAAAAAAAAA');
+  assert.equal(shell.seen[2]!.body, shell.seen[0]!.body, 'the very same request');
+  assert.ok(shell.seen.every((r) => r.auth === 'Bearer inst-token'));
+  assert.match(err, /Grant io\.lakner\.terminalx terminal\.screen\.read/);
+  assert.match(err, /with your password/);
+  assert.match(err, /aura approve apr_AAAAAAAAAAAAAAAAAAAAAA/);
+});
+
+test('D50: a denied approval ends the command; nothing is retried', async () => {
+  const shell = await approvalShell('denied');
+  process.env['OS_API_BASE'] = shell.base;
+  process.env['AURA_INSTANCE_TOKEN'] = 'inst-token';
+  process.env['APP_INSTANCE_ID'] = 'com.aura.terminal-1';
+  await stderrOf(() => assert.rejects(api.del('/api/admin/grants?subjectKind=app&subjectId=x&permission=y'), /not approved: denied/));
+  assert.equal(shell.seen.length, 2);
+});
+
+test('D50: an app refused on an owner route is told where it works', async () => {
+  const shell = await fakeShell(() => [403, { error: 'access-denied', reason: 'wrong-principal' }]);
+  process.env['OS_API_BASE'] = shell.base;
+  process.env['AURA_INSTANCE_TOKEN'] = 'inst-token';
+  process.env['APP_INSTANCE_ID'] = 'com.example.counter-1';
+  await assert.rejects(api.get('/api/admin/audit'), /System Terminal.*docker exec -it aura-shell aura/s);
 });
 
 test('credentialed requests never follow a redirect; anonymous ones still do', async () => {
@@ -243,11 +267,9 @@ test('credentialed requests never follow a redirect; anonymous ones still do', a
   process.env['OS_API_BASE'] = shell.base;
   process.env['AURA_INSTANCE_TOKEN'] = 'inst-token';
   process.env['APP_INSTANCE_ID'] = 'a.b';
-  process.env['AURA_ADMIN_SESSION'] = 'pinned';
 
-  await assert.rejects(shellFetch('/api/admin/grants', { intent: 'admin' }));
+  await assert.rejects(shellFetch('/api/admin/grants'));
   await assert.rejects(shellFetch('/api/instances/a.b/sidecars', { intent: 'instance', instanceId: 'a.b' }));
-  await assert.rejects(adminLogin(KEY));
   assert.equal(sink.seen.length, 0, 'nothing reached the redirect target');
 
   await assert.rejects(shellFetch('/api/apps'), undefined, 'an ordinary call carries the token now');
@@ -255,52 +277,6 @@ test('credentialed requests never follow a redirect; anonymous ones still do', a
   assert.equal(res.status, 200);
   assert.equal(sink.seen.length, 1);
   assert.equal(sink.seen[0]!.auth, undefined);
-});
-
-test('explicit AURA_ADMIN_* is never sent to another URL, even after a 401', async () => {
-  const other = await fakeShell(fake401);
-  process.env['AURA_SHELL_URL'] = other.base;
-  const refused = (e: Error & { status?: number }) => e.status === 401 && /not this system's shell/.test(e.message) && /AURA_ADMIN_/.test(e.message);
-
-  process.env['AURA_ADMIN_SESSION'] = 'pinned-value';
-  const first = await stderrOf(() => assert.rejects(api.get('/api/admin/grants'), refused));
-  assert.match(first, /AURA_ADMIN_/);
-  assert.doesNotMatch(first, /pinned-value/);
-  assert.equal(resolveIdentity({ url: other.base, path: '/api/admin/x', intent: 'whoami' }).kind, 'none');
-
-  delete process.env['AURA_ADMIN_SESSION'];
-  process.env['AURA_ADMIN_CREDENTIAL'] = KEY;
-  await assert.rejects(api.get('/api/admin/grants'), refused);
-  await assert.rejects(obtainCredential('login'), /not this system's shell/);
-  assert.equal(await obtainCredential('recover'), null);
-  await assert.rejects(adminLogin(KEY), /not this system's shell/);
-
-  assert.ok(other.seen.every((r) => r.auth === undefined && !r.body.includes(KEY) && !r.body.includes('pinned-value')));
-  assert.ok(other.seen.every((r) => r.method === 'GET'), 'no credential exchange was attempted');
-});
-
-test('explicit AURA_ADMIN_* still works on the trusted shell', async () => {
-  const shell = await fakeShell(({ method, url, auth }) => {
-    if (method === 'POST' && url === '/api/admin/session') return [200, { token: 'env-session', expiresAt: Date.now() + 60_000 }];
-    return auth ? [200, { ok: true }] : [401, { error: 'admin-required' }];
-  });
-  process.env['OS_API_BASE'] = shell.base;
-  process.env['AURA_ADMIN_SESSION'] = 'pinned-value';
-  assert.deepEqual(await api.get('/api/admin/grants'), { ok: true });
-  assert.equal(shell.seen[0]!.auth, 'Bearer pinned-value');
-  delete process.env['AURA_ADMIN_SESSION'];
-  process.env['AURA_ADMIN_CREDENTIAL'] = KEY;
-  assert.deepEqual(await api.get('/api/admin/grants'), { ok: true });
-  assert.equal(shell.seen.at(-1)!.auth, 'Bearer env-session');
-});
-
-test('an in-process session is bound to the origin that issued it', async () => {
-  const a = await fakeShell(({ method }) => (method === 'POST' ? [200, { token: 'a-session', expiresAt: Date.now() + 60_000 }] : [200, {}]));
-  const b = await fakeShell();
-  process.env['OS_API_BASE'] = a.base;
-  await stderrOf(() => adminLogin(KEY));
-  assert.equal(resolveIdentity({ url: a.base, path: '/api/admin/x', intent: 'admin' }).kind, 'admin');
-  assert.equal(resolveIdentity({ url: b.base, path: '/api/admin/x', intent: 'admin' }).kind, 'none');
 });
 
 test('whoami: verified, dark, rejected, unreachable; no secret in the output', async () => {

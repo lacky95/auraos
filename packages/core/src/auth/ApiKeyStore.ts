@@ -1,5 +1,5 @@
 /**
- * ApiKeyStore — admin-issued keys for external REST callers.
+ * ApiKeyStore — owner-issued keys for external REST callers.
  *
  *   key format   aura_k1_<id: 16 hex>_<secret: 43 base64url>
  *                shown ONCE at creation, never stored
@@ -15,7 +15,7 @@
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Redis } from '@aura/kv-store';
-import type { AdminAttribution } from './types.js';
+import type { ChangeAttribution, LegacyAdminAttribution } from './types.js';
 
 export const API_KEY_PREFIX = 'aura_k1_';
 export const API_KEY_INDEX = 'apikey:idx';
@@ -34,7 +34,8 @@ export interface ApiKeyRecord {
   name: string;
   scopes: string[];
   createdAt: number;
-  createdBy: AdminAttribution | { kind: 'system' };
+  /** A key from before D50 may name the retired shared admin credential. */
+  createdBy: ChangeAttribution | { kind: 'system' } | LegacyAdminAttribution;
   lastUsedAt?: number;
   revokedAt?: number;
 }
@@ -71,7 +72,7 @@ export class ApiKeyStore {
   constructor(private readonly redis: () => Redis, private readonly now: () => number = Date.now) {}
 
   /** Create a key. `key` is returned ONCE — only its hash is stored. */
-  async create(input: { name: string; scopes: string[]; by: ApiKeyRecord['createdBy'] }): Promise<{ key: string; apiKey: ApiKeyRecord }> {
+  async create(input: { name: string; scopes: string[]; by: ChangeAttribution | { kind: 'system' } }): Promise<{ key: string; apiKey: ApiKeyRecord }> {
     const name = typeof input.name === 'string' ? input.name.trim() : '';
     if (!name || name.length > 100) throw new ApiKeyError(400, 'name is required (1–100 chars)');
     const scopes = [...new Set(input.scopes ?? [])];

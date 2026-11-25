@@ -32,7 +32,7 @@ const g = globalThis as unknown as Record<symbol, unknown>;
 const anon: AccessPrincipal = { kind: 'anonymous', verification: 'unverified' };
 const inst = (appId: string, instanceId = `${appId}-1`, extra: Partial<InstancePrincipal> = {}): InstancePrincipal =>
   ({ kind: 'instance', appId, instanceId, verification: 'verified', ...extra });
-const admin: AccessPrincipal = { kind: 'admin', credential: 'shared', sessionId: 'abcd', verification: 'verified' };
+const operator: AccessPrincipal = { kind: 'operator', verification: 'verified' };
 const owner: AccessPrincipal = { kind: 'user', userId: 'default', role: 'owner', sessionId: 's', verification: 'verified' };
 const ownerThrough = (appId: string): AccessPrincipal => ({ ...owner, through: { appId, instanceId: `${appId}-1` } } as AccessPrincipal);
 
@@ -116,7 +116,7 @@ function ctx(c: Call) {
 /** The gate's answer: 'pass' or the refusal's status and error. */
 async function gate(mode: string, principal: AccessPrincipal, call: Call, via?: AccessVia): Promise<string> {
   const v: AccessVia = via ?? (principal.kind === 'anonymous' ? 'none'
-    : principal.kind === 'admin' ? 'admin-session'
+    : principal.kind === 'operator' ? 'operator-ticket'
       : principal.kind === 'user' ? (('through' in principal && principal.through) ? 'gateway' : 'login-session')
         : 'instance-token');
   const r = await accessGate(ctx(call), deps(mode, { principal, via: v }));
@@ -171,7 +171,7 @@ test('modes: off and report pass everything without a guard; enforce applies the
   assert.equal(await gate('enforce', anon, call), '401 unauthenticated');
   assert.equal(await gate('enforce', inst('com.other.app'), call), '403 access-denied');
   assert.equal(await gate('enforce', owner, call), 'pass');
-  assert.equal(await gate('enforce', admin, call), 'pass');
+  assert.equal(await gate('enforce', operator, call), 'pass');
   // Public routes stay public.
   assert.equal(await gate('enforce', anon, { method: 'POST', path: '/api/auth/login', route: '/api/auth/login' }), 'pass');
 });
@@ -209,8 +209,8 @@ test('D29: the system Terminal by its own token acts for the owner; not through 
   assert.equal(await gate('enforce', inst('com.aura.terminal', 'com.aura.terminal-1', { sidecar: 'x' }), enabled), '403 access-denied');
   assert.equal(await gate('enforce', inst('com.other.app'), enabled), '403 access-denied');
   assert.equal(await gate('enforce', term, { method: 'POST', path: '/api/auth/password', route: '/api/auth/password' }), '403 access-denied');
-  // The operator credential's routes still want the admin session.
-  assert.equal(await gate('enforce', term, { path: '/api/admin/grants', route: '/api/admin/grants' }), '401 admin-required');
+  // D50: the owner's management routes let the Terminal through; the route asks the owner's approval.
+  assert.equal(await gate('enforce', term, { path: '/api/admin/grants', route: '/api/admin/grants' }), 'pass');
 });
 
 test('D29: TerminalX lists the Terminal\'s instances with its terminal.sessions.list grant; other apps\' instances stay the owner\'s', async () => {
@@ -280,28 +280,31 @@ test('D28: the network table names live containers by their DNS name, and is reb
 
 // ── guard classes: what the routes checked themselves, in every mode ────────
 
-test('guard requireAdmin → admin routes take only the admin session, in every mode', async () => {
+test('guard ownerManages (D50) → the owner, the operator and the System Terminal reach the owner routes in every mode; other apps never', async () => {
   const grants = { path: '/api/admin/grants', route: '/api/admin/grants' };
+  const term = inst('com.aura.terminal', 'com.aura.terminal-1', { userId: 'default' });
+  const callers: AccessPrincipal[] = [operator, owner, ownerThrough('com.aura.settings'), term];
   for (const mode of MODES) {
-    assert.equal(await gate(mode, admin, grants), 'pass', mode);
-    const callers: AccessPrincipal[] = [anon, owner, ownerThrough('com.aura.settings'), inst('com.acme.notes'), inst('com.aura.terminal', 'com.aura.terminal-1', { userId: 'default' })];
     for (const p of callers) {
-      assert.equal(await gate(mode, p, grants), '401 admin-required', `${mode} ${p.kind}`);
+      assert.equal(await gate(mode, p, grants), 'pass', `${mode} ${p.kind}`);
     }
+    assert.equal(await gate(mode, anon, grants), '401 unauthenticated', mode);
+    assert.equal(await gate(mode, inst('com.acme.notes'), grants), '403 access-denied', `${mode} another app`);
   }
-  // The admin session the shell's dialog gave Settings, on the gateway.
-  for (const mode of NON_ENFORCE) assert.equal(await gate(mode, admin, { ...grants, headers: { [GATEWAY_IDENTITY_HEADER]: 'agw1.x' } }), 'pass');
+  // A retired admin session is no credential at all: the resolver refuses it before any rule (principal-resolver tests).
 });
 
-test('guard requireAdmin (conditional) → only the body variant that needed it', async () => {
+test('guard ownerManages (conditional) → only the body variant that needed it', async () => {
   const origin = (mode: string) => ({ method: 'POST', path: '/api/admin/app-origin', route: '/api/admin/app-origin', body: { mode } });
   const clone = (force: boolean) => ({ method: 'POST', path: '/api/admin/clone-app', route: '/api/admin/clone-app', body: { sourceAppId: 'a', force } });
+  const term = inst('com.aura.terminal', 'com.aura.terminal-1', { userId: 'default' });
   for (const mode of NON_ENFORCE) {
     assert.equal(await gate(mode, anon, origin('assign')), 'pass');
-    assert.equal(await gate(mode, anon, origin('reassign')), '401 admin-required');
-    assert.equal(await gate(mode, admin, origin('reassign')), 'pass');
-    assert.equal(await gate(mode, inst('com.aura.terminal', 'com.aura.terminal-1', { userId: 'default' }), clone(false)), 'pass');
-    assert.equal(await gate(mode, inst('com.aura.terminal', 'com.aura.terminal-1', { userId: 'default' }), clone(true)), '401 admin-required');
+    assert.equal(await gate(mode, anon, origin('reassign')), '401 unauthenticated');
+    assert.equal(await gate(mode, operator, origin('reassign')), 'pass');
+    assert.equal(await gate(mode, term, clone(false)), 'pass');
+    assert.equal(await gate(mode, term, clone(true)), 'pass', 'the route then asks the owner');
+    assert.equal(await gate(mode, inst('com.acme.notes'), clone(true)), '403 access-denied');
   }
 });
 
@@ -313,7 +316,7 @@ test('guard sidecarGate → the instance\'s own token and its app\'s permission,
     assert.equal(await gate(mode, inst('com.other.app'), spawn('com.acme.notes-1')), '403 access-denied', 'another instance');
     assert.equal(await gate(mode, inst('com.other.app'), spawn('com.other.app-1')), '403 access-denied', 'no sidecars.spawn');
     assert.equal(await gate(mode, inst('com.acme.notes'), spawn('com.acme.notes-1'), 'gateway'), '403 access-denied', 'no token through the gateway');
-    assert.equal(await gate(mode, admin, spawn('com.acme.notes-1')), '403 access-denied');
+    assert.equal(await gate(mode, operator, spawn('com.acme.notes-1')), '403 access-denied');
     assert.equal(await gate(mode, anon, spawn('com.acme.notes-1')), '401 unauthenticated');
   }
   // `with-tools` is read from the body: it also needs sidecars.tools, which notes lacks.

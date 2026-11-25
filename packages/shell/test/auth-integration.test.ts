@@ -39,7 +39,7 @@ function authDeps(): AuthDeps {
     getInstance: () => undefined,
     getInstancesByApp: () => [],
   } as unknown as AuthDeps['mgr'];
-  return { mgr, apiKeys: svc.apiKeys, admin: svc.admin };
+  return { mgr, apiKeys: svc.apiKeys };
 }
 
 function services(over: Partial<AuthSurfaceServices> = {}): AuthSurfaceServices {
@@ -286,14 +286,14 @@ test('fail-open: the real observer records an error instead of throwing on a bad
   assert.ok(report.pending().meta['errors']! >= 1);
 });
 
-test('a Valkey blip on an admin session is a service error, never a 401', async () => {
+test('a Valkey blip on a login session bearer is a service error, never a 401', async () => {
   const deps = {
     ...authDeps(),
-    admin: { verifySession: async () => { throw new Error('valkey down'); } },
+    login: { cookieToken: () => null, ownerSession: async () => { throw new Error('valkey down'); } },
   } as AuthDeps;
-  const request = new Request('http://localhost/api/admin/x', { headers: { authorization: 'Bearer aura-admin1.a.b' } });
+  const request = new Request('http://localhost/api/admin/x', { headers: { authorization: 'Bearer aura-sess1.a.b' } });
   await assert.rejects(authenticate(request, deps), /valkey down/);
-  const who = await authWhoami(get({ authorization: 'Bearer aura-admin1.a.b' }), {
+  const who = await authWhoami(get({ authorization: 'Bearer aura-sess1.a.b' }), {
     env: {}, services: () => null, authenticate: (r) => authenticate(r, deps),
   });
   assert.equal(who.status, 503);
@@ -307,12 +307,13 @@ test('fail-open: a Valkey failure in peek is counted and never reaches a respons
     redisReady: () => true,
     internalSecret: () => null,
     services: () => ({
-      admin: { peekSession: async () => { throw new Error('valkey down'); } },
+      loginSessions: { verify: async () => { throw new Error('valkey down'); } },
+      users: { getOwner: async () => { throw new Error('valkey down'); } },
       apiKeys: { peek: async () => { throw new Error('valkey down'); } },
     }),
   };
   const observer = createObserver({ report, deps });
-  for (const authorization of ['Bearer aura-admin1.a.b', `Bearer aura_k1_${'0'.repeat(16)}_${'a'.repeat(43)}`]) {
+  for (const authorization of ['Bearer aura-sess1.a.b', `Bearer aura_k1_${'0'.repeat(16)}_${'a'.repeat(43)}`]) {
     const request = new Request('http://localhost/api/apps', { headers: { authorization } });
     const snapshot = captureAccess({ request, url: new URL(request.url), routePattern: '/api/apps', params: {} })!;
     snapshot.identity.verified = identifyRequest(request, deps);

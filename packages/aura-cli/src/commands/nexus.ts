@@ -32,11 +32,10 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { api, type ShellError } from '../lib/client.js';
 import { inSandbox } from '../lib/identity.js';
-import { approvalLines, operatorCode, postJson, waitForApproval, type ApprovalView } from '../lib/approval.js';
-import { promptSecret } from '../lib/admin-session.js';
+import { askOwner, operatorCode, postJson, type ApprovalView } from '../lib/approval.js';
 import { color, fail, info, ok, table, warn } from '../lib/format.js';
 import {
-  BACK, promptChoice, promptConfirm, promptText, PromptCancelled,
+  BACK, promptChoice, promptConfirm, promptSecret, promptText, PromptCancelled,
 } from '../lib/prompts.js';
 
 interface PermissionDiff {
@@ -933,14 +932,12 @@ export async function installWithChoices(
         continue;
       }
       if (!res.approvalId) return res;
-      if (res.display) for (const line of approvalLines({ display: res.display, level: res.level ?? 'session' })) info(line);
-      info(`Approve in the desktop (or \`aura approve ${res.approvalId}\` on the host). Waiting…`);
-      const state = await waitForApproval(res.approvalId);
-      if (state !== 'approved') {
-        warn(`not approved: ${state}`);
+      const answer = await askOwner({ ...res, needsApproval: true }, { print: info });
+      if ('refused' in answer) {
+        warn(answer.refused);
         return null;
       }
-      approvalId = res.approvalId;
+      approvalId = answer.approvalId;
       continue;
     }
     return res;

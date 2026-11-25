@@ -79,7 +79,7 @@ test('a command needs a proved owner or the System Terminal; background and sess
   assert.notEqual(await openTerminalRefusal(intent({ command: 'id' }), null, access()), null);
   assert.notEqual(await openTerminalRefusal(intent({ command: 'id', background: true }), null, access()), null);
   assert.notEqual(await openTerminalRefusal(intent({ command: 'id' }), { owner: false } as never, access()), null);
-  // The owner (the desktop's own page or an admin session).
+  // The owner (the desktop's own page or the host operator).
   assert.equal(await openTerminalRefusal(intent({ command: 'id' }), { owner: true } as never, access()), null);
   // `background` and `sessionId` reach a session too: an unverified caller is refused them.
   assert.match(String(await openTerminalRefusal(intent({ background: true }), null, access())), /owner/);

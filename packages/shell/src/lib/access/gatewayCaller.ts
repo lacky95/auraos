@@ -1,5 +1,5 @@
 import * as core from '@aura/core';
-import type { AccessPrincipal, AdminPrincipal, AuditInput, UserPrincipal } from '@aura/core';
+import type { AccessPrincipal, AuditInput, UserPrincipal } from '@aura/core';
 import { accessMode } from '../../../server/access-mode.mjs';
 import { gatewayClaimOf } from '../../../server/gateway-identity.mjs';
 import { afterResponse } from '../afterResponse.ts';
@@ -10,7 +10,7 @@ import { gatewayInstance, gatewayOwner, type GatewayOwnerDeps } from './identify
 import { combineCandidates, concreteRule, kvNamespace, resourceFor, type ObserverManager } from './observer.ts';
 import { candidateRules, handlersOf, normalizeMethod, readsBody as routeReadsBody } from './resolve.ts';
 import { ROUTE_ACCESS_MANIFEST } from './routeManifest.ts';
-import type { AccessLabel, AccessTarget, AccessVia, Decide, RequestSnapshot, RouteAccessManifest } from './types.ts';
+import type { AccessLabel, AccessTarget, Decide, RequestSnapshot, RouteAccessManifest } from './types.ts';
 
 /**
  * The enforcement of `/_aura/os/*`. The gateway proves who is calling; this
@@ -39,24 +39,8 @@ export interface GatewayEnforceDeps {
   ownerServices?: GatewayOwnerDeps['services'];
   /** Where an owner action through a trusted UI is recorded. */
   audit?: (entry: AuditInput) => Promise<unknown>;
-  /** Admin sessions, for a trusted UI's admin bearer; core's when absent. */
-  adminSessions?: { verifySession(token: string): Promise<{ sessionId: string } | null> };
   /** The access mode (server/access-mode.mjs) when absent. */
   mode?: () => string;
-}
-
-const ADMIN_BEARER = /^Bearer\s+(aura-admin1\.\S+)\s*$/i;
-
-/** The admin session a trusted UI's request carries, verified; else null. */
-async function gatewayAdmin(request: Request, deps: GatewayEnforceDeps): Promise<AdminPrincipal | null> {
-  const token = ADMIN_BEARER.exec(request.headers.get('authorization') ?? '')?.[1];
-  if (!token) return null;
-  try {
-    const s = await (deps.adminSessions ?? core.getAuthServices().admin).verifySession(token);
-    return s ? { kind: 'admin', credential: 'shared', sessionId: s.sessionId, verification: 'verified' } : null;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -117,7 +101,7 @@ export async function enforceGateway(
 
   const transport = snapshot.https ? 'https' as const : 'http' as const;
   const strict = (deps.mode ?? accessMode)() === 'enforce';
-  const decideAs = (principal: AccessPrincipal, via: AccessVia = 'gateway') => Promise.all(candidates.map(async ({ variant, rule }) => {
+  const decideAs = (principal: AccessPrincipal) => Promise.all(candidates.map(async ({ variant, rule }) => {
     if (principal.kind !== 'instance' && OWNER_UI_EXCLUDED_TARGETS.has(rule.target)) {
       return { variant, result: { outcome: 'deny' as const, reason: 'wrong-principal' as const } };
     }
@@ -131,7 +115,7 @@ export async function enforceGateway(
       resource: resourceFor(concrete, snapshot, deps.mgr),
       transport,
       // A presented approval meets the fresh-auth precondition; the handler consumes it.
-      auth: { fresh: presentsApproval(ctx.request), via },
+      auth: { fresh: presentsApproval(ctx.request), via: 'gateway' },
       strict,
       accessProfile: 'open',
       systemMode: 'normal',
@@ -150,10 +134,7 @@ export async function enforceGateway(
   if (!claim.owner) return refused(403, 'gateway-denied');
   const owner = await gatewayOwner(ctx.request, { mgr: deps.mgr as unknown as GatewayOwnerDeps['mgr'], services: deps.ownerServices });
   if (!owner) return refused(403, 'gateway-denied');
-  // With the admin session the shell's own unlock dialog handed it (the
-  // gateway forwards that bearer for a trusted UI alone), it is that session.
-  const admin = await gatewayAdmin(ctx.request, deps);
-  if (!allowed(await (admin ? decideAs(admin, 'admin-session') : decideAs(owner)))) return refused(403, 'gateway-denied');
+  if (!allowed(await decideAs(owner))) return refused(403, 'gateway-denied');
   if (method !== 'GET' && method !== 'HEAD') {
     const audit = deps.audit ?? liveAudit;
     afterResponse(ctx.request, (status) => recordOwnerAction(audit, owner, route, method, status));

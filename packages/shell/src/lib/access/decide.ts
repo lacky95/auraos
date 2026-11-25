@@ -11,9 +11,9 @@ import type {
  * `Authorizer`, so its answers and its auto-grants stay the single source;
  * `strict` (`enforce`) stops an auto-grant from counting.
  *
- * `owner` is satisfied by the shared `admin` session (the report's
- * `operator`), the owner's login (a verified `user`, identify.ts
- * `resolvePrincipal`), and a trusted owner agent (D29): the System Terminal
+ * `owner` is satisfied by the host operator (its one-time ticket), the
+ * owner's login (a verified `user`, identify.ts `resolvePrincipal`), and a
+ * trusted owner agent (D29): the System Terminal
  * or the owner's shell MCP by its own token, never on the owner's login
  * session or a shell screen.
  */
@@ -31,7 +31,7 @@ const allow = (reason: AccessReason): DecideResult => ({ outcome: 'allow', reaso
 const deny = (reason: AccessReason): DecideResult => ({ outcome: 'deny', reason });
 
 const isOwner = (p: AccessPrincipal): boolean =>
-  p.kind === 'operator' || p.kind === 'admin' || (p.kind === 'user' && p.role === 'owner');
+  p.kind === 'operator' || (p.kind === 'user' && p.role === 'owner');
 
 /** Core's wording is the only signal of an MVP auto-grant; a test pins it. */
 const isAutoGrant = (reason: string): boolean => reason.includes('MVP auto-grant');

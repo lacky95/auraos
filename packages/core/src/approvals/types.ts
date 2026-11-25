@@ -47,8 +47,23 @@ export const FINAL_APPROVAL_STATES: ReadonlySet<ApprovalState> = new Set(['denie
  *   user.confirm       an app asks the owner to confirm (D49, `osClient.user.confirm`)
  *   terminal.agent-hooks  an app installs or removes the Terminal's agent hooks in
  *                      the owner's home (`/api/terminal/agent-hooks`)
+ *
+ * The owner's management routes (D50), asked for from a sandbox (the CLI in
+ * the System Terminal) or through Settings; shell `lib/approvals/admin.ts`:
+ *   admin.grant        grant a privileged permission (`/api/admin/grants` POST)
+ *   admin.revoke       revoke one (`/api/admin/grants` DELETE)
+ *   admin.api-key      create or revoke an API key (`/api/admin/api-keys`)
+ *   admin.manifest-edit  change an app's tools or permissions (`/api/admin/manifest-edit`)
+ *   admin.read         read an owner view: grants, API keys, the audit trail,
+ *                      the access report
+ *   admin.change       any other owner change: release system modals, reset
+ *                      onboarding, reassign an app's origin, overwrite an app
+ *                      (`clone-app` / `scaffold` with `force`)
  */
-export const APPROVAL_ACTIONS = ['nexus.install', 'nexus.update', 'os.context.write', 'user.confirm', 'terminal.agent-hooks'] as const;
+export const APPROVAL_ACTIONS = [
+  'nexus.install', 'nexus.update', 'os.context.write', 'user.confirm', 'terminal.agent-hooks',
+  'admin.grant', 'admin.revoke', 'admin.api-key', 'admin.manifest-edit', 'admin.read', 'admin.change',
+] as const;
 export type ApprovalAction = (typeof APPROVAL_ACTIONS)[number];
 
 /**
@@ -65,8 +80,8 @@ export type ApprovalRequester =
 
 /**
  * Who decided. Only a signed-in user on the shell itself, or the host
- * operator (`aura approve <id>`, D18). Instance tokens, API keys, the shared
- * admin session and a user acting through an app never decide.
+ * operator (`aura approve <id>`, D18). Instance tokens, API keys and a user
+ * acting through an app never decide.
  */
 export type ApprovalDecider =
   /** `fresh`: the password was verified in the same approve request. */
@@ -189,8 +204,8 @@ export function approvalRequester(p: AccessPrincipal): ApprovalRequester | null 
     case 'apiKey':
       return { kind: 'apiKey', keyId: p.keyId, name: p.name };
     default:
-      // anonymous proves nothing; system acts in-process; the shared admin
-      // session is no individual; the operator approves, it does not ask.
+      // anonymous proves nothing; system acts in-process; the operator
+      // approves, it does not ask.
       return null;
   }
 }

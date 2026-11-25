@@ -42,6 +42,10 @@ test('single use and a 10-minute expiry', () => {
   assert.equal(MAX_PENDING_PER_REQUESTER, 1);
   assert.deepEqual([...APPROVAL_STATES], ['pending', 'approved', 'denied', 'consumed', 'expired']);
   assert.ok(APPROVAL_ACTIONS.includes('user.confirm'));
+  // D50: the owner's management routes, asked for from a sandbox or through Settings.
+  for (const a of ['admin.grant', 'admin.revoke', 'admin.api-key', 'admin.manifest-edit', 'admin.read', 'admin.change']) {
+    assert.ok(APPROVAL_ACTIONS.includes(a), a);
+  }
   const r = record();
   assert.equal(r.state, 'pending');
   assert.equal(r.createdAt, T0);
@@ -104,7 +108,7 @@ test('requesters: instance (acting for a user), user (also through an app), api 
     { kind: 'instance', appId: 'a', instanceId: 'a-1', sidecar: 'db', systemId: 'sys' });
 });
 
-test('anonymous, system, the shared admin session and the operator cannot request', () => {
+test('anonymous, system, a retired shared-admin look-alike and the operator cannot request', () => {
   for (const p of [
     { kind: 'anonymous', verification: 'unverified', hints: { appId: 'x' } },
     SYSTEM_PRINCIPAL,

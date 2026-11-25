@@ -112,10 +112,6 @@ export const AURA_CHANNEL_MESSAGES = {
   // An http(s) address in a tab of its own, opened by the Shell: no opener, no sandbox
   'aura.system.openExternal': TO_SHELL,
 
-  // Admin unlock: Settings asks, the Shell collects the credential itself
-  'aura.admin.unlock.request': TO_SHELL,
-  'aura.admin.unlock.result': TO_APP,
-
   // Users & Identities: Settings asks, the Shell's own dialog takes the password
   'aura.account.password.request': TO_SHELL,
   'aura.account.password.result': TO_APP,

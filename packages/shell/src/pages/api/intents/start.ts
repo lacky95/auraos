@@ -40,7 +40,7 @@ interface IntentBody {
  * `{ kind: 'error', code, error, hint? }`.
  *
  * OPEN_TERMINAL (D29, 5.16): `command` needs the System Terminal (its
- * instance token) or the owner (the desktop's own page, or an admin session);
+ * instance token) or the owner (the desktop's own page, or the host operator);
  * from an app, `background` needs the owner's `terminal.embed` grant and
  * `sessionId` a session the app was granted (403 `terminal-not-granted`); a
  * caller that is no verified app needs the owner for all three. A session an

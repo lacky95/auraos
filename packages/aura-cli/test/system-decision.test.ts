@@ -70,3 +70,14 @@ test('admin notif release: one id or --app, never both; registered', () => {
   const rel = admin.commands.find((c: Command) => c.name() === 'notif')!.commands.find((c: Command) => c.name() === 'release')!;
   assert.ok(rel.options.some((o) => o.long === '--app'));
 });
+
+test('D50: no admin login, logout, status, credential or rotate; the help says how authorization works', () => {
+  const program = buildProgram();
+  const admin = program.commands.find((c: Command) => c.name() === 'admin')!;
+  for (const gone of ['login', 'logout', 'status', 'credential', 'rotate']) {
+    assert.equal(admin.commands.some((c: Command) => c.name() === gone), false, gone);
+  }
+  const help = program.helpInformation();
+  assert.doesNotMatch(help, /aura admin login|AURA_ADMIN_|admin credential/);
+  assert.match(help.replace(/\s+/g, ' '), /in the System Terminal they wait for your approval in the desktop/);
+});

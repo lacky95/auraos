@@ -1,12 +1,12 @@
 /**
  * The identity key on disk — file operations only (no Valkey).
  *
- *   <dataDir>/aura/secrets/identity.key   0600, next to admin.key
+ *   <dataDir>/aura/secrets/identity.key   0600, master container only
  *
  * It signs password sessions and MACs the user record, so a Valkey writer can
- * neither forge a session nor swap a password hash. It is independent of the
- * shared admin credential in both directions: rotating that never logs out a
- * password user, and a damaged identity key never blocks shared-key recovery.
+ * neither forge a session nor swap a password hash. Recovery never needs it:
+ * the host operator's one-time tickets (`aura user reset-password`) are files
+ * in the same directory.
  *
  * A malformed file is an error and is never overwritten. Password login fails
  * closed until the operator moves it aside and runs a password reset.
@@ -20,7 +20,7 @@ const IDENTITY_KEY_PATTERN = /^aura_identity_[A-Za-z0-9_-]{43}$/;
 /** Operator-facing. Never contains key material. */
 export class IdentityKeyError extends Error {
   constructor(detail: 'malformed' | 'unreadable') {
-    super(`identity.key is ${detail}: password login is disabled. Shared-key admin recovery still works. `
+    super(`identity.key is ${detail}: password login is disabled; the host operator still works. `
       + 'Move the file aside, then run `aura user reset-password <username>` on the host.');
     this.name = 'IdentityKeyError';
   }

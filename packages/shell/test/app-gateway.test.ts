@@ -360,7 +360,7 @@ test('a forged, replayed, expired or dead-instance claim is refused', async () =
 });
 
 test('authenticate() trusts only a verified claim, and a bad one is never anonymous', async () => {
-  const deps = { mgr, apiKeys: { verify: async () => null }, admin: { verifySession: async () => null } } as unknown as AuthDeps;
+  const deps = { mgr, apiKeys: { verify: async () => null } } as unknown as AuthDeps;
   const url = 'http://127.0.0.1:3000/api/notifications';
   const ok = await authenticate(new Request(url, { headers: { [GATEWAY_IDENTITY_HEADER]: signGatewayClaim(claim('GET', '/api/notifications')) } }), deps);
   assert.deepEqual(ok, { kind: 'instance', appId: record.appId, instanceId: slot.instanceId, verification: 'verified' });

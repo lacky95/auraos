@@ -73,7 +73,7 @@ export async function startOnboarding(opts: OnboardingOpts): Promise<OnboardingH
   };
 }
 
-/** Tick off a welcome step from outside (e.g. a successful admin unlock). */
+/** Tick off a welcome step from outside (a route that sees it done). */
 export async function markWelcomeStep(id: WelcomeStepId): Promise<void> {
   const w = currentWelcome();
   if (w) { await w.markDone(id); return; }

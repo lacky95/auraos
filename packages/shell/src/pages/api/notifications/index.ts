@@ -18,7 +18,7 @@ import { viewerFor } from '../../../lib/clientSession.js';
  *            screen (`X-Aura-Client-Session`) sees everything in the view of
  *            its lock state (locked/unknown: public without components,
  *            private redacted, secret left out); anonymous WITHOUT a client
- *            session sees nothing; admin sessions see all.
+ *            session sees nothing; the host operator sees all.
  *   POST   CreateInput → 201 { ok, notification, senderToken?, warnings[] }
  *            Caller identity is established server-side (lib/notificationCaller.ts):
  *            Bearer $AURA_INSTANCE_TOKEN / API key → verified; invalid → 401;

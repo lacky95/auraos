@@ -1,10 +1,10 @@
 /**
- * GrantStore — permissions an admin GRANTED to a subject (central Valkey).
+ * GrantStore — permissions the owner GRANTED to a subject (central Valkey).
  *
  *   grant:<subjectKind>:<subjectId>   HASH  "<scopeKey>|<permission>" → JSON GrantRecord
  *   grant:idx                         SET   of the subject hash keys above
  *
- * The manifest REQUESTS a privileged permission; a grant here is the admin's
+ * The manifest REQUESTS a privileged permission; a grant here is the owner's
  * answer. `Authorizer` needs both. Grants are explicitly scoped
  * (`GrantScope`), so per-user grants can be added later without re-keying.
  * Today a grant is OS-wide (`{kind:'os'}`), except a Terminal embed grant for
@@ -23,14 +23,14 @@
 import type { Redis } from '@aura/kv-store';
 import { OsEventBus } from '../ipc/OsEventBus.js';
 import { describeReadScope, normalizeReadScope, type ReadGrant } from '../notifications/access.js';
-import { OS_SCOPE, type AdminAttribution, type GrantScope, type GrantSubject, type GrantSubjectKind } from './types.js';
+import { OS_SCOPE, type ChangeAttribution, type GrantScope, type LegacyAdminAttribution, type GrantSubject, type GrantSubjectKind } from './types.js';
 
 export const GRANT_PREFIX = 'grant:';
 export const GRANT_INDEX_KEY = 'grant:idx';
 export const grantKey = (s: GrantSubject) => `grant:${s.kind}:${s.id}`;
 
 /**
- * Permissions that only take effect when an admin grants them.
+ * Permissions that only take effect when the owner grants them.
  * `notifications.read` (phase 5) additionally carries a read scope
  * (`GrantRecord.read`): which senders, and whether secret items count.
  */
@@ -65,7 +65,7 @@ export const GRANTABLE_PERMISSIONS: readonly string[] = [...PRIVILEGED_PERMISSIO
 /**
  * Writing an OS-wide KV topic (`/api/kv/os/<topic>`: the theme, keymap, lock
  * screen, notification settings, ...): one family of privileged permissions,
- * one per topic. Declaring it only requests it; an admin grants it. The
+ * one per topic. Declaring it only requests it; the owner grants it. The
  * owner acting through system Settings (D45) is the owner and needs none.
  */
 export const KV_OS_WRITE_PERMISSION_RE = /^system\.kv\.os\.[A-Za-z0-9_-]{1,128}\.write$/;
@@ -79,7 +79,8 @@ const SUBJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 const TERMINAL_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}#[A-Za-z0-9._-]{1,64}$/;
 const SUBJECT_KINDS: readonly GrantSubjectKind[] = ['app', 'apiKey'];
 
-export type GrantedBy = AdminAttribution | { kind: 'system' };
+/** Who grants: the owner, the host operator or AuraOS itself (D50). */
+export type GrantedBy = ChangeAttribution | { kind: 'system' };
 
 export interface GrantRecord {
   subject: GrantSubject;
@@ -88,7 +89,8 @@ export interface GrantRecord {
   /** App subjects: the install scope the grant was given for (system|global|user). */
   appScope?: string;
   grantedAt: number;
-  grantedBy: GrantedBy;
+  /** A record from before D50 may name the retired shared admin credential. */
+  grantedBy: GrantedBy | LegacyAdminAttribution;
   /** `notifications.read` only: what the grant lets the subject read. */
   read?: ReadGrant;
   /**

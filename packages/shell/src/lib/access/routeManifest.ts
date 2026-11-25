@@ -36,12 +36,14 @@ const APP_PERMISSION = ['app-permission', 'owner'] as const;
 /** `app-permission` without permissions: any verified app instance or API key (Open, D26). */
 const VERIFIED = ['app-permission', 'owner'] as const;
 /**
- * Before Phase 3 `requireAdmin`: the shared admin session (`aura admin login`),
- * in every mode. The host operator's one-time ticket counts too: the operator
- * is above the admin (D8), and the host CLI sends nothing else unless a
- * session was saved.
+ * The owner's management routes (D50; before Phase 3 `requireAdmin`, then
+ * the shared admin session): the owner (the desktop, Settings through D45,
+ * the host operator's ticket) or the System Terminal by its own token, which
+ * asks the owner's approval for each call. The handler decides which of
+ * them acts directly (lib/approvals/admin.ts `ownerAction`). Every other app
+ * is refused, in every mode.
  */
-const ADMIN_SESSION = { credentials: ['admin-session', 'operator-ticket'], guard: 'rule' } as const;
+const OWNER_MANAGES = { systemApp: 'com.aura.terminal', guard: 'rule' } as const;
 
 // ── shared open questions ───────────────────────────────────────────────────
 
@@ -131,21 +133,13 @@ const dataWrite = rule(APP_PERMISSION, 'data-provider', {
   permissions: ['data:<authority>:<writePermission>'], guard: 'app-callers', ...DATA_ACCESS,
 });
 
-/** Was `requireAdmin` in the route. */
-const adminSession = (note: string) => rule(OWNER, 'system', { ...ADMIN_SESSION, ...why(note) });
+/** Was `requireAdmin` in the route, then the shared admin session. */
+const ownerManages = (note: string) => rule(INSTANCE, 'app', { ...OWNER_MANAGES, ...why(note) });
 
 // ── per-route refinements ───────────────────────────────────────────────────
 
 const routes: RouteAccessManifest['routes'] = {
   // Login and setup (Q27).
-  '/api/admin/session': {
-    methods: {
-      POST: rule(['public'], 'session'),
-      // The session itself, so an admin session only (an operator has none).
-      GET: rule(OWNER, 'system', { credentials: ['admin-session'], guard: 'rule', ...why('Reports the admin session it is called with.') }),
-      DELETE: rule(OWNER, 'system', { credentials: ['admin-session'], guard: 'rule', ...why('Locks the admin session it is called with.') }),
-    },
-  },
   '/api/admin/first-boot': {
     methods: {
       GET: rule(['public'], 'system'),
@@ -155,38 +149,37 @@ const routes: RouteAccessManifest['routes'] = {
     // The build transcript is not setup status.
     variants: [{ id: 'build-log', methods: ['GET'], match: { on: 'query', name: 'log' }, rule: rule(OWNER, 'system') }],
   },
-  '/api/admin/access-report': { methods: { GET: adminSession('The access report names apps and callers.') } },
+  '/api/admin/access-report': { methods: { GET: ownerManages('The access report names apps and callers.') } },
   '/api/admin/onboarding': {
     methods: {
       GET: rule(OWNER, 'system', decide(1, 'Reports setupDoneAt. Decide whether the setup page reads it before login or uses first-boot status instead.')),
-      POST: adminSession('Resets onboarding and the first-boot card.'),
+      POST: ownerManages('Resets onboarding and the first-boot card.'),
     },
   },
-  // The operator credential's routes stay on the admin session in every mode
-  // (until the Phase 4 ledger): grants, keys and the audit trail, and changes
-  // to what code runs under an app id.
+  // The owner's management routes in every mode (D50): grants, keys and the
+  // audit trail, and changes to what code runs under an app id.
   '/api/admin/grants': {
-    methods: on(['GET', 'POST', 'DELETE'], adminSession('Privileged permission grants: operator only.')),
+    methods: on(['GET', 'POST', 'DELETE'], ownerManages('Privileged permission grants: the owner decides; a grant needs the password.')),
   },
   '/api/admin/api-keys': {
-    methods: on(['GET', 'POST', 'DELETE'], adminSession('API keys: operator only.')),
+    methods: on(['GET', 'POST', 'DELETE'], ownerManages('API keys: the owner decides; creating one needs the password.')),
   },
-  '/api/admin/audit': { methods: { GET: adminSession('The audit trail: operator only.') } },
+  '/api/admin/audit': { methods: { GET: ownerManages('The audit trail: an owner view.') } },
   '/api/admin/manifest-edit': {
-    methods: { POST: adminSession('Edits an app\'s permissions and tools: operator only.') },
+    methods: { POST: ownerManages('Edits an app\'s permissions and tools: the owner decides.') },
   },
   '/api/admin/notifications/release': {
-    methods: { POST: adminSession('Releases blocking system modals: operator only.') },
+    methods: { POST: ownerManages('Releases blocking system modals: the owner decides.') },
   },
   '/api/admin/dev/system-decision': {
-    methods: { POST: adminSession('A dev hook that raises a system decision: operator only.') },
+    methods: { POST: ownerManages('A dev hook that raises a system decision: the owner decides.') },
   },
   '/api/admin/app-origin': {
     variants: [{
       id: 'reassign',
       methods: ['POST'],
       match: { on: 'body', field: 'mode', equals: 'reassign', read: true },
-      rule: adminSession('Gives an app another identity: operator only. Assigning a missing one needs no admin.'),
+      rule: ownerManages('Gives an app another identity: the owner decides. Assigning a missing one needs nobody.'),
     }],
   },
   '/api/admin/clone-app': {
@@ -194,7 +187,7 @@ const routes: RouteAccessManifest['routes'] = {
       id: 'force',
       methods: ['POST'],
       match: { on: 'body', field: 'force', equals: true, read: true },
-      rule: adminSession('Overwriting an app replaces the code under its id: operator only. Decided on `force: true` alone, since the route checks the existing copy after the rule.'),
+      rule: ownerManages('Overwriting an app replaces the code under its id: the owner decides. Decided on `force: true` alone, since the route checks the existing copy after the rule.'),
     }],
   },
   '/api/admin/scaffold': {
@@ -202,7 +195,7 @@ const routes: RouteAccessManifest['routes'] = {
       id: 'force',
       methods: ['POST'],
       match: { on: 'body', field: 'force', equals: true, read: true },
-      rule: adminSession('Overwriting an app replaces the code under its id: operator only. Decided on `force: true` alone, as clone-app.'),
+      rule: ownerManages('Overwriting an app replaces the code under its id: the owner decides. Decided on `force: true` alone, as clone-app.'),
     }],
   },
   // D29: the owner's trusted terminal acts for the owner, so `aura enable|disable app` works from it.

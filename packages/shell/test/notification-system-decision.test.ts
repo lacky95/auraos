@@ -1,7 +1,7 @@
 // DEV hook POST /api/admin/dev/system-decision (phase 6): scope system is
 // forced, the payload goes through the normal create (schema), and the hook
-// is refused outside the dev server. The admin session is the route access
-// manifest's (test/access-enforce.test.ts).
+// is refused outside the dev server. Who may call is the route access manifest's
+// (test/access-enforce.test.ts); the owner's approval is lib/approvals/admin.ts.
 //
 //   cd packages/shell && npx tsx --test test/notification-system-decision.test.ts
 import { test } from 'node:test';
@@ -13,7 +13,7 @@ function deps(over: Partial<SystemDecisionDeps> = {}) {
   const created: Array<Record<string, unknown>> = [];
   const d: SystemDecisionDeps = {
     dev: true,
-    admin: { kind: 'admin' },
+    actor: async () => ({ by: { kind: 'operator' }, detail: {} }),
     audit: async (a, action, e) => { audits.push([a, action, e]); },
     create: async (input) => { created.push(input); return { notification: { id: 'ntf_000000000sys00001' }, warnings: [] }; },
     readJson: async (r) => JSON.parse(await r.text() || '{}'),
@@ -37,14 +37,14 @@ test('input: type dialogue + scope system are forced over any payload; defaults;
   assert.deepEqual([legacy['title'], legacy['text'], legacy['priority'], legacy['scope']], ['Old', 'x', 'urgent', 'system']);
 });
 
-test('route: 404 outside DEV (no admin check, nothing created)', async () => {
+test('route: 404 outside DEV (no owner check, nothing created)', async () => {
   const { d, created, audits } = deps({ dev: false });
   const r = await handleSystemDecision(req({}), d);
   assert.equal(r.status, 404);
   assert.equal(created.length + audits.length, 0);
 });
 
-test('route: admin + DEV → 201, created with scope system, audited ok; schema errors pass through (400) and are audited', async () => {
+test('route: the owner + DEV → 201, created with scope system, audited ok; schema errors pass through (400) and are audited', async () => {
   const { d, created, audits } = deps();
   const r = await handleSystemDecision(req({ payload: { title: 'Allow?', scope: 'auto' } }), d);
   assert.equal(r.status, 201);
@@ -54,4 +54,12 @@ test('route: admin + DEV → 201, created with scope system, audited ok; schema 
   const r2 = await handleSystemDecision(req({ payload: { title: '' } }), bad.d);
   assert.equal(r2.status, 400);
   assert.equal(bad.audits.at(-1)![2]['outcome'], 'failed');
+});
+
+test('route: an app gets the owner\'s approval answer, and nothing is created (D50)', async () => {
+  const asked = new Response(JSON.stringify({ needsApproval: true, approvalId: 'apr_x' }), { status: 202 });
+  const { d, created, audits } = deps({ actor: async () => asked });
+  const r = await handleSystemDecision(req({ payload: { title: 'Allow?' } }), d);
+  assert.equal(r.status, 202);
+  assert.equal(created.length + audits.length, 0);
 });

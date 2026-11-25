@@ -4,7 +4,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import {
   APP_FRAME_ALLOW, APP_FRAME_SANDBOX, AppFrameBlockedError, assertAppHostOrigin,
   logicalFrameUrl, parseLogicalFrameUrl, resolveAppFrame,
@@ -153,13 +153,13 @@ test('nested senders are classed by their origin', () => {
 });
 
 const SETTINGS_ONLY_TYPES = [
-  'aura.lockscreen.activate', 'aura.admin.unlock.request', 'aura.account.password.request', 'aura.account.policy.request',
+  'aura.lockscreen.activate', 'aura.account.password.request', 'aura.account.policy.request',
 ];
 
 const allowed = (type: string, sender: ReturnType<ReturnType<typeof worlds>['from']>, data: Record<string, unknown> = {}, nativeRuntime = false) =>
   !!sender && authorizeShellMessage(type, sender, data, { nativeRuntime });
 
-test('only the verified Settings window may trigger the lock message, admin unlock or the password dialog', () => {
+test('only the verified Settings window may trigger the lock message or the password dialog', () => {
   const w = worlds();
   for (const type of SETTINGS_ONLY_TYPES) {
     assert.equal(allowed(type, w.from(w.hostSettingsWin, SETTINGS_APP)), true, type);
@@ -428,10 +428,12 @@ test('the owner dialog is a native modal, mounted, and gives the requester only 
   assert.match(layout, /<OwnerPasswordDialog \/>/);
 });
 
-test('the admin unlock is a native modal, above every z-index', () => {
-  const src = css('AdminUnlockDialog.astro');
-  assert.match(src, /<dialog id="aura-admin-unlock"/);
-  assert.match(src, /\.showModal\(\)/);
+test('D50: the shared admin unlock is gone: no dialog, no channel message', () => {
+  const layout = readFileSync(new URL('../src/layouts/OSLayout.astro', import.meta.url), 'utf8');
+  assert.doesNotMatch(layout, /AdminUnlock/);
+  assert.equal(existsSync(new URL('../src/components/shell/AdminUnlockDialog.astro', import.meta.url)), false);
+  const w = worlds();
+  assert.equal(allowed('aura.admin.unlock.request', w.from(w.hostSettingsWin, SETTINGS_APP)), false, 'not a channel message any more');
 });
 
 test('IP mode moves to the App Hosts address on its own, unless the owner stays or the probe failed', () => {

@@ -1,7 +1,7 @@
 // Namespace import: the running shell may cache a core build without the
 // auth exports; a named import would 500 every route until restart.
 import * as core from '@aura/core';
-import type { AdminPrincipal, AppManager, OperatorPrincipal } from '@aura/core';
+import type { AppManager } from '@aura/core';
 import { errorResponse, jsonResponse } from './appResponse.js';
 import {
   bearerToken, resolvePrincipal, type CallerPrincipal, type CredentialRejection, type GatewayOwnerDeps, type PrincipalDeps,
@@ -16,8 +16,7 @@ import { coreAuthServices, ownerSessionOf, sessionCookieToken } from './authSurf
  * `resolvePrincipal`); this turns its verdict into a route's answer:
  *
  *   Authorization: Bearer aura1.…        → instance (verified AURA_INSTANCE_TOKEN; `userId` = its user)
- *   Authorization: Bearer aura_k1_…      → apiKey   (admin-issued key, verified)
- *   Authorization: Bearer aura-admin1.…  → admin    (session from the shared credential)
+ *   Authorization: Bearer aura_k1_…      → apiKey   (owner-issued key, verified)
  *   Authorization: Bearer aura-sess1.…   → user     (the owner's live login session)
  *   X-Aura-Operator: <one-time code>     → operator (the host CLI in the master, its
  *                                          ticket for exactly this request)
@@ -26,9 +25,7 @@ import { coreAuthServices, ownerSessionOf, sessionCookieToken } from './authSurf
  *   no credentials                       → anonymous (Referer / X-Aura-Instance-Id = hints only)
  *   signed App Host gateway claim        → instance, acting for the App Host session's user
  *                                          (checked first; the gateway forwards no bearer)
- *   … from a trusted system UI (D45)     → user through that UI; admin with a valid admin
- *                                          session bearer, which the gateway forwards for that
- *                                          UI alone, and only on a path that UI covers
+ *   … from a trusted system UI (D45)     → user through that UI, only on a path that UI covers
  *                                          (identify.ts `gatewayOwner`, the one D45 scope decision)
  *
  * Who may call a route is not decided here: the route access manifest says,
@@ -37,8 +34,8 @@ import { coreAuthServices, ownerSessionOf, sessionCookieToken } from './authSurf
  *
  * `SYSTEM_PRINCIPAL` is unreachable from HTTP by construction.
  *
- * Admin credentials are headers, never cookies: the shell proxy forwards
- * request headers to app upstreams, so a cookie would leak to every app.
+ * The shared admin credential is gone (D50): the owner's management routes
+ * take the owner, the operator, or the owner's approval (lib/approvals/admin.ts).
  */
 
 export interface AuthDeps {
@@ -46,7 +43,6 @@ export interface AuthDeps {
   /** App Host services for the D45 owner check; loaded when absent. */
   ownerServices?: GatewayOwnerDeps['services'];
   apiKeys: { verify(key: string): Promise<{ id: string; name: string; scopes: string[] } | null> };
-  admin: { verifySession(token: string): Promise<{ sessionId: string; expiresAt: number } | null> };
   /** The owner's login sessions. Absent: a login cookie is not read, a login bearer is refused. */
   login?: PrincipalDeps['login'];
   /** The host operator's one-time tickets. Absent: an operator header is not verified. */
@@ -66,7 +62,7 @@ const coreLogin: NonNullable<PrincipalDeps['login']> = {
 
 export function defaultAuthDeps(): AuthDeps {
   const svc = core.getAuthServices();
-  return { mgr: core.getAppManager(), apiKeys: svc.apiKeys, admin: svc.admin, login: coreLogin, operatorTickets: svc.setupTickets };
+  return { mgr: core.getAppManager(), apiKeys: svc.apiKeys, login: coreLogin, operatorTickets: svc.setupTickets };
 }
 
 function unauthorized(error: string, message: string): Response {
@@ -78,21 +74,17 @@ function refusal(rejected: { reason: CredentialRejection; instanceId?: string })
   switch (rejected.reason) {
     case 'gateway-identity-invalid':
       return unauthorized('gateway-identity-invalid', 'invalid gateway identity');
-    case 'gateway-admin-session-invalid':
-      return unauthorized('admin-session-invalid', 'admin session invalid or expired — unlock admin again');
     case 'api-key-invalid':
       return unauthorized('invalid-api-key', 'invalid or revoked API key');
-    case 'admin-session-invalid':
-      return unauthorized('admin-session-invalid', 'admin session invalid or expired — unlock admin again (aura admin login)');
     case 'unsupported-scheme':
-      return errorResponse('unsupported Authorization header — send Authorization: Bearer $AURA_INSTANCE_TOKEN (or an API key / admin session), or no Authorization at all', 401);
+      return errorResponse('unsupported Authorization header — send Authorization: Bearer $AURA_INSTANCE_TOKEN (or an API key / login session), or no Authorization at all', 401);
     case 'instance-not-running':
       return errorResponse(`token belongs to ${rejected.instanceId}, which is not running`, 401);
     case 'operator-ticket-invalid':
       return unauthorized('operator-ticket-invalid', 'operator code invalid, used or expired — run the aura command on the host again');
     case 'credential-invalid':
     default:
-      return errorResponse('invalid or expired credential (instance token, API key or admin session)', 401);
+      return errorResponse('invalid or expired credential (instance token, API key or login session)', 401);
   }
 }
 
@@ -101,7 +93,6 @@ export function resolveCaller(request: Request, deps: AuthDeps = defaultAuthDeps
   return resolvePrincipal(request, {
     mgr: deps.mgr as unknown as PrincipalDeps['mgr'],
     apiKeys: deps.apiKeys,
-    admin: deps.admin,
     login: deps.login ?? null,
     ownerServices: deps.ownerServices,
     operatorTickets: deps.operatorTickets ?? null,
@@ -115,41 +106,4 @@ export async function authenticate(request: Request, deps: AuthDeps = defaultAut
   // A credential that could not be checked is never anonymous.
   if (r.via === 'unverified' && bearerToken(request) !== null) return refusal({ reason: 'credential-invalid' });
   return { kind: 'anonymous', verification: 'unverified' };
-}
-
-/** Who may use an admin route: the admin session, or the host operator above it (D8). */
-export type AdminCaller = AdminPrincipal | OperatorPrincipal;
-
-/**
- * The admin session or operator ticket a route's rule required (routeManifest
- * `credentials`), as the middleware's gate verified it (`locals.access`), for
- * audit attribution.
- */
-export function adminOf(locals: App.Locals | undefined): AdminCaller | null {
-  const p = locals?.access?.principal;
-  return p?.kind === 'admin' || p?.kind === 'operator' ? p as AdminCaller : null;
-}
-
-/**
- * Who a grant or API key record names as its maker: the admin (shared
- * credential). The host operator acts with that authority; the audit trail
- * names the operator (`auditAdmin`).
- */
-export const adminRecordBy = (p: AdminCaller | null): ReturnType<typeof core.adminAttribution> =>
-  core.adminAttribution(p?.kind === 'admin' ? p : undefined);
-
-/** Append an admin change to the `audit:admin` stream (never throws). */
-export async function auditAdmin(
-  principal: AdminCaller | null,
-  action: string,
-  opts: { target?: string; outcome?: 'ok' | 'denied' | 'failed'; detail?: Record<string, unknown> } = {},
-): Promise<void> {
-  try {
-    await core.getAuthServices().audit.record({
-      by: principal?.kind === 'operator' ? core.operatorAttribution() : principal ? core.adminAttribution(principal) : { kind: 'anonymous' },
-      action, ...opts,
-    });
-  } catch (err) {
-    console.warn(`[auth] audit write failed: ${(err as Error).message}`);
-  }
 }

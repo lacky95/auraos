@@ -47,7 +47,6 @@ const ownerServices = (async () => ({
 const deps: AuthDeps = {
   mgr: mgr as never, ownerServices, login,
   apiKeys: { verify: async () => null },
-  admin: { verifySession: async () => null },
 };
 const req = (headers: Record<string, string> = {}, path = '/api/notifications', method = 'GET') =>
   new Request(`http://127.0.0.1:3000${path}`, { method, headers });
@@ -127,7 +126,7 @@ test('D45: the owner through system Settings → user through it', async () => {
 
 test('App Host cookie session (verified by app-hosts.mjs) → the owner acting through that app', async () => {
   const r = await resolvePrincipal(req({ authorization: 'Bearer the-apps-own-token' }), {
-    mgr: mgr as never, apiKeys: null, admin: null, login,
+    mgr: mgr as never, apiKeys: null, login,
   }, { appHost: { appId: 'com.acme.notes', instanceId: 'com.acme.notes-1', userId: 'default', sid: SID } });
   assert.deepEqual(r, {
     principal: { ...USER, through: { appId: 'com.acme.notes', instanceId: 'com.acme.notes-1' } },

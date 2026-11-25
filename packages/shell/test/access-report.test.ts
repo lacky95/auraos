@@ -1,16 +1,15 @@
 // Phase 1 stream B: the report-only policy path. Nothing here may be able to
 // change a response, and nothing sensitive may reach the stored report.
-import { test, after } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 // @ts-expect-error ws has no type declarations in this workspace
 import { WebSocketServer, WebSocket } from 'ws';
-import { AdminAuth, ApiKeyStore, Authorizer, SYSTEM_PRINCIPAL } from '@aura/core';
+import { ApiKeyStore, Authorizer, SYSTEM_PRINCIPAL } from '@aura/core';
 import type { AccessPrincipal } from '@aura/core';
 import { createDecide } from '../src/lib/access/decide.ts';
 import { captureAccess, createAccessReporter } from '../src/lib/access/guard.ts';
@@ -41,7 +40,7 @@ const g = globalThis as unknown as Record<symbol, unknown>;
 const anon: AccessPrincipal = { kind: 'anonymous', verification: 'unverified' };
 const inst = (appId: string, instanceId = `${appId}-1`): AccessPrincipal =>
   ({ kind: 'instance', appId, instanceId, verification: 'verified' });
-const admin: AccessPrincipal = { kind: 'admin', credential: 'shared', sessionId: 'abcd', verification: 'verified' };
+const operator: AccessPrincipal = { kind: 'operator', verification: 'verified' };
 
 const authorizer = (declared: Record<string, string[]> = {}) => new Authorizer({
   grants: { get: async () => null } as never,
@@ -130,11 +129,12 @@ function withMode<T>(value: string | undefined, fn: () => T): T {
 
 // ── decide ──────────────────────────────────────────────────────────────────
 
-test('decide: the shared admin satisfies owner, and anonymous does not', async () => {
+test('decide: the operator and the owner satisfy owner, and anonymous does not', async () => {
   const d = createDecide({ authorizer: authorizer() });
   const rule: AccessRule = { allow: ['owner'], target: 'system' };
-  assert.deepEqual(await d(input(admin, rule)), { outcome: 'allow', reason: 'owner' });
-  assert.deepEqual(await d(input({ kind: 'operator', verification: 'verified' }, rule)), { outcome: 'allow', reason: 'owner' });
+  assert.deepEqual(await d(input(operator, rule)), { outcome: 'allow', reason: 'owner' });
+  assert.deepEqual(await d(input({ kind: 'user', userId: 'default', role: 'owner', sessionId: 's', verification: 'verified' }, rule)), { outcome: 'allow', reason: 'owner' });
+  assert.equal((await d(input({ kind: 'admin', credential: 'shared', sessionId: 'a', verification: 'verified' } as never, rule))).outcome, 'deny', 'a retired admin look-alike is nobody');
   assert.deepEqual(await d(input(anon, rule)), { outcome: 'deny', reason: 'unauthenticated' });
   assert.deepEqual(await d(input(inst('com.a.app'), rule)), { outcome: 'deny', reason: 'wrong-principal' });
 });
@@ -142,7 +142,7 @@ test('decide: the shared admin satisfies owner, and anonymous does not', async (
 test('decide: unclassified, empty and public rules', async () => {
   const d = createDecide({ authorizer: authorizer() });
   assert.deepEqual(await d(input(anon, null)), { outcome: 'deny', reason: 'unclassified' });
-  assert.deepEqual(await d(input(admin, { allow: [], target: 'system' })), { outcome: 'deny', reason: 'rule-denied' });
+  assert.deepEqual(await d(input(operator, { allow: [], target: 'system' })), { outcome: 'deny', reason: 'rule-denied' });
   assert.deepEqual(await d(input(anon, { allow: ['public'], target: 'system' })), { outcome: 'allow', reason: 'public' });
   assert.deepEqual(await d(input(SYSTEM_PRINCIPAL, null)), { outcome: 'allow', reason: 'system' });
 });
@@ -167,9 +167,9 @@ test('decide: an MVP auto-grant is surfaced, and Authorizer answers are unchange
 test('decide: transport and fresh-auth outcomes', async () => {
   const d = createDecide({ authorizer: authorizer() });
   const fresh: AccessRule = { allow: ['owner'], target: 'system', freshAuth: true };
-  assert.equal((await d(input(admin, fresh))).outcome, 'needs-operator');
-  assert.equal((await d({ ...input(admin, fresh), transport: 'https' })).outcome, 'needs-fresh-auth');
-  assert.equal((await d({ ...input(admin, fresh), auth: { fresh: true } })).outcome, 'allow');
+  assert.equal((await d(input(operator, fresh))).outcome, 'needs-operator');
+  assert.equal((await d({ ...input(operator, fresh), transport: 'https' })).outcome, 'needs-fresh-auth');
+  assert.equal((await d({ ...input(operator, fresh), auth: { fresh: true } })).outcome, 'allow');
   const login: AccessRule = { allow: ['public'], target: 'session' };
   assert.equal((await d(input(anon, login))).outcome, 'allow');
   assert.equal((await d({ ...input(anon, login), deployment: 'public' })).outcome, 'needs-https');
@@ -338,11 +338,10 @@ test('identity: with Valkey down, keys and sessions are `unverified` and not loo
   let calls = 0;
   const services = {
     apiKeys: { peek: async () => { calls += 1; return null; } },
-    admin: { peekSession: async () => { calls += 1; return null; } },
     loginSessions: { verify: async () => { calls += 1; return null; } },
     users: { getOwner: async () => { calls += 1; return null; } },
   };
-  for (const headers of [{ authorization: 'Bearer aura_k1_x' }, { authorization: 'Bearer aura-admin1.a.b' }, { authorization: 'Bearer aura-sess1.a.b' }] as Record<string, string>[]) {
+  for (const headers of [{ authorization: 'Bearer aura_k1_x' }, { authorization: 'Bearer aura-sess1.a.b' }] as Record<string, string>[]) {
     const seen = await identityOf(headers, deps({ services: () => services as never, redisReady: () => false }));
     assert.equal(seen.via, 'unverified');
   }
@@ -394,26 +393,6 @@ test('ApiKeyStore.peek verifies without recording a use', async () => {
   assert.deepEqual(r.writes, [], 'apikey:used untouched');
   await store.verify(key);
   assert.ok(r.writes.some((w) => w === 'hset apikey:used'), 'the real verify still records');
-});
-
-test('AdminAuth.peekSession verifies and leaves rotation to the real path', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'access-admin-'));
-  after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const keyFile = path.join(dir, 'admin.key');
-  const r = memoryRedis();
-  const auth = new AdminAuth({ keyFile, redis: () => r as never });
-  auth.ensure();
-  const credential = fs.readFileSync(keyFile, 'utf8').trim();
-  const unlocked = await auth.unlock(credential);
-  assert.ok(unlocked.ok);
-  const token = (unlocked as { token: string }).token;
-  assert.ok(await auth.peekSession(token));
-  assert.equal(await auth.peekSession('aura-admin1.bad.sig'), null);
-
-  fs.writeFileSync(keyFile, `${credential}x`.padEnd(credential.length + 8, 'y'));
-  r.writes.length = 0;
-  assert.equal(await auth.peekSession(token), null);
-  assert.deepEqual(r.writes, [], 'no session purge from the observer');
 });
 
 // ── fail-open ───────────────────────────────────────────────────────────────
@@ -757,17 +736,13 @@ test('observer: an unmatched route is unclassified, and the variant is reported'
   assert.ok(keys.some((k) => k.subject === '/api/instances/[instanceId]/ports'));
 });
 
-test('observer: the admin session reports as operator', async () => {
-  const { report, observer } = observerWith({
-    services: () => ({ admin: { peekSession: async () => ({ sessionId: 'abcd' }) } }),
-  });
-  const d = deps({ services: () => ({ admin: { peekSession: async () => ({ sessionId: 'abcd' }) } }) });
-  const verified = identifyRequest(new Request('http://x/', { headers: { authorization: 'Bearer aura-admin1.a.b' } }), d);
+test('observer: a retired admin session bearer (D50) is no credential: refused, never the operator', async () => {
+  const { report, observer } = observerWith();
+  const verified = identifyRequest(new Request('http://x/', { headers: { authorization: 'Bearer aura-admin1.a.b' } }), deps());
   await observer.observeRequest(snapshot({ identity: { verified, referer: null, instanceId: null } }));
   const [key] = [...(report as unknown as { counts: Map<string, number> }).counts.keys()].map(fields);
-  assert.equal(key!.principal, 'operator');
-  assert.equal(key!.decision, 'allow');
-  assert.equal(key!.via, 'admin-session');
+  assert.equal(key!.principal, 'anonymous');
+  assert.equal(key!.via, 'foreign-or-invalid');
 });
 
 test('observer: the internal label needs the secret AND an allowlisted route', async () => {

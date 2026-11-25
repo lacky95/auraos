@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { kvServer, createRedis } from '@aura/kv-store';
-import { AdminAuth, defaultIdentityKeyFile, loginSessionKey } from '../dist/auth/index.js';
+import { LoginSessionStore, defaultIdentityKeyFile, loginSessionKey } from '../dist/auth/index.js';
 import { OsEventBus } from '../dist/ipc/OsEventBus.js';
 
 const DATA_DIR = mkdtempSync(join(tmpdir(), 'aura-session-live-'));
@@ -18,12 +18,7 @@ let sessions;
 before(async () => {
   const uri = await kvServer.start({ dataDir: join(DATA_DIR, 'kv') });
   redis = createRedis(uri);
-  const admin = new AdminAuth({
-    keyFile: join(DATA_DIR, 'aura', 'secrets', 'admin.key'),
-    identityKeyFile: defaultIdentityKeyFile(DATA_DIR), redis: () => redis, now: () => clock,
-  });
-  admin.ensure();
-  sessions = admin.sessions;
+  sessions = new LoginSessionStore({ identityKeyFile: defaultIdentityKeyFile(DATA_DIR), redis: () => redis, now: () => clock });
 });
 
 after(async () => {
@@ -46,8 +41,8 @@ test('a password session is live for its own user only, until revoked or expired
   assert.equal(await sessions.isLive(session.sessionId, 'default'), false, 'revoked');
 });
 
-test('a shared-key (admin) session never counts as a user session', async () => {
-  // The nonce of an admin session carries no user; one planted with a user is still not a password session.
+test('a retired shared-key (admin) nonce never counts as a user session', async () => {
+  // Left over from before D50; one planted with a user is still not a password session.
   const sid = 'b'.repeat(32);
   await redis.set(loginSessionKey(sid), JSON.stringify({ m: 'shared-key', u: 'default', createdAt: clock, expiresAt: clock + 60_000 }));
   assert.equal(await sessions.isLive(sid, 'default'), false);

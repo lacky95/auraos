@@ -149,7 +149,7 @@ const MAX = 128;
       };
       const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
       const fmt = (ms) => (ms ? new Date(ms).toLocaleString() : '—');
-      const METHOD = { password: 'password', 'shared-key': 'admin credential' };
+      const METHOD = { password: 'password' };
 
       async function getJson(path) {
         const r = await fetch(window.auraOs.url(path));

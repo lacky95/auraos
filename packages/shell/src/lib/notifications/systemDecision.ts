@@ -3,8 +3,9 @@
  * of `POST /api/admin/dev/system-decision`, injectable so it is unit tested.
  *
  * The policy is not weakened: only the in-process SYSTEM_CALLER may create a
- * desktop-wide modal. This hook exists only on the dev server, needs an admin
- * session (the CLI's `aura admin dev system-decision`, never an app page), and
+ * desktop-wide modal. This hook exists only on the dev server, is the owner's
+ * (the CLI's `aura admin dev system-decision`: the host operator directly,
+ * the System Terminal with the owner's approval, never an app page), and
  * every call is audited. The payload is validated by the normal notification
  * schema (in `create`); whatever it says, the result is a `type:'dialogue'`
  * with `scope:'system'`.
@@ -42,9 +43,12 @@ export function buildSystemDecisionInput(body: Record<string, unknown>): Record<
 
 export interface SystemDecisionDeps {
   dev: boolean;
-  /** The admin session the middleware required (routeManifest.ts `credentials`), for the audit. */
-  admin: unknown;
-  audit(admin: unknown, action: string, entry: Record<string, unknown>): Promise<void>;
+  /**
+   * Who acts for this input (lib/approvals/admin.ts `ownerAction`): passed
+   * to `audit`, or the answer to send instead (202 needs-approval).
+   */
+  actor(input: Record<string, unknown>): Promise<unknown>;
+  audit(actor: unknown, action: string, entry: Record<string, unknown>): Promise<void>;
   /** Creates as SYSTEM_CALLER; throws NotificationError-like `{status}` on invalid input. */
   create(input: Record<string, unknown>): Promise<{ notification: { id: string }; warnings?: unknown[] }>;
   readJson(request: Request): Promise<Record<string, unknown> | Response>;
@@ -56,10 +60,11 @@ const json = (body: unknown, status: number) =>
 
 export async function handleSystemDecision(request: Request, deps: SystemDecisionDeps): Promise<Response> {
   if (!deps.dev) return json({ error: 'not found', hint: 'the system-decision test hook exists only on the dev shell (astro dev)' }, 404);
-  const admin = deps.admin;
   const body = await deps.readJson(request);
   if (body instanceof Response) return body;
   const input = buildSystemDecisionInput(body);
+  const admin = await deps.actor(input);
+  if (admin instanceof Response) return admin;
   try {
     const result = await deps.create(input);
     await deps.audit(admin, 'dev.systemDecision', { target: result.notification.id, outcome: 'ok', detail: { title: input['title'] } });

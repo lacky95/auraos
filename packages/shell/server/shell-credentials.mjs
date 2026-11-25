@@ -5,7 +5,7 @@
  *
  * Removes only:
  *   - the session cookie (`aura_session`, `__Host-aura_session`)
- *   - bearers starting `aura-sess1.` or `aura-admin1.`
+ *   - bearers starting `aura-sess1.`, or the retired `aura-admin1.` (D50: worthless, still never forwarded)
  *   - the internal service label
  *   - the gateway's signed identity claim
  *

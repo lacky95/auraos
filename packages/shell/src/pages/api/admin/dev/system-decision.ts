@@ -2,7 +2,7 @@ import type { APIRoute } from 'astro';
 // Namespace import: the running shell may cache a core build without newer exports.
 import * as core from '@aura/core';
 import { notificationErrorResponse, readJson } from '../../../../lib/notificationCaller.js';
-import { adminOf, auditAdmin } from '../../../../lib/auth.js';
+import { auditOwner, ownerAction, type OwnerActor } from '../../../../lib/approvals/admin.ts';
 import { handleSystemDecision } from '../../../../lib/notifications/systemDecision.js';
 
 /**
@@ -10,7 +10,6 @@ import { handleSystemDecision } from '../../../../lib/notifications/systemDecisi
  * any payload, used by `aura admin dev system-decision`).
  *
  *   POST /api/admin/dev/system-decision
- *        Authorization: Bearer <admin session>   (aura admin login)
  *        { payload?: <notification input> }  or legacy { title?, text?, components?, priority? }
  *     → 201 { ok, notification, warnings }
  *
@@ -18,15 +17,19 @@ import { handleSystemDecision } from '../../../../lib/notifications/systemDecisi
  * SYSTEM_CALLER — the only way a desktop-wide modal can exist. `type` and
  * `scope` are forced; the payload is validated by the normal schema. The
  * route answers 404 unless the shell runs the dev server
- * (`import.meta.env.DEV`), needs an admin session, and every call is audited
+ * (`import.meta.env.DEV`), is the owner's (D50: the operator directly, an app
+ * with the owner's approval of this exact payload), and every call is audited
  * (`dev.systemDecision`). Nothing else in the HTTP API can obtain system
  * identity: the request body never chooses the caller. Logic and tests:
  * lib/notifications/systemDecision.ts.
  */
-export const POST: APIRoute = async ({ request, locals }) => handleSystemDecision(request, {
+export const POST: APIRoute = async (ctx) => handleSystemDecision(ctx.request, {
   dev: !!import.meta.env.DEV,
-  admin: adminOf(locals),
-  audit: (admin, action, entry) => auditAdmin(admin as Parameters<typeof auditAdmin>[0], action, entry as Parameters<typeof auditAdmin>[2]),
+  actor: (input) => ownerAction(ctx, {
+    action: 'admin.change', level: 'session', payload: { op: 'dev.system-decision', input },
+    title: 'Show a test system decision (dev)', details: ['It blocks the whole desktop until answered.'],
+  }),
+  audit: (actor, action, entry) => auditOwner(actor as OwnerActor, action, entry as Parameters<typeof auditOwner>[2]),
   create: (input) => core.getNotificationService().create(input, core.SYSTEM_CALLER),
   readJson: (r) => readJson(r),
   errorResponse: (err) => notificationErrorResponse(err),

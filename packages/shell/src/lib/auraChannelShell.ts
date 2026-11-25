@@ -101,7 +101,7 @@ function isSystemApp<E>(frame: ChannelFrame<unknown, E> | null, appId: string): 
 
 /** Messages only the verified system Settings window may send. */
 const SETTINGS_ONLY: ReadonlySet<string> = new Set([
-  'aura.lockscreen.activate', 'aura.admin.unlock.request',
+  'aura.lockscreen.activate',
   'aura.account.password.request', 'aura.account.policy.request',
 ]);
 
@@ -131,8 +131,8 @@ export function authorizeShellMessage<E>(
     return ctx.nativeRuntime;
   }
 
-  // Locking the desktop and collecting the admin credential or the owner's
-  // password (Users & Identities) belong to Settings.
+  // Locking the desktop and collecting the owner's password (Users &
+  // Identities) belong to Settings.
   if (SETTINGS_ONLY.has(type)) {
     return sender.direct && isSystemApp(frame, SETTINGS_APP_ID)
       && isAuraChannelRouteAllowed(type, sender.endpoint, 'shell');

@@ -38,7 +38,7 @@ export function registerApprove(program: Command): void {
       if (o.unblock) {
         const operator = await code(`unblock:${o.unblock}`);
         const res = await shellFetch(`/api/approvals/blocked/${encodeURIComponent(o.unblock)}`, {
-          method: 'DELETE', intent: 'admin', headers: { 'Content-Type': 'application/json' },
+          method: 'DELETE', intent: 'self', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ operatorCode: operator }),
         });
         const out = await res.json().catch(() => ({})) as { removed?: boolean; error?: string };
@@ -51,7 +51,7 @@ export function registerApprove(program: Command): void {
       const path = `/api/approvals/${encodeURIComponent(id!)}/${decision}`;
       const operator = await code(`${decision}:${id}`);
 
-      const view = await postJson<ApprovalView & { error?: string; message?: string }>(path, { operatorCode: operator, preview: true }, { intent: 'admin' });
+      const view = await postJson<ApprovalView & { error?: string; message?: string }>(path, { operatorCode: operator, preview: true });
       if (view.error) fail(view.message ?? view.error);
       for (const line of approvalLines(view)) info(line);
       if (view.state !== 'pending') fail(`it is ${view.state}`);
@@ -64,7 +64,7 @@ export function registerApprove(program: Command): void {
           throw err;
         }
       }
-      const res = await postJson<{ ok?: boolean; state?: string; error?: string; message?: string }>(path, { operatorCode: operator }, { intent: 'admin' });
+      const res = await postJson<{ ok?: boolean; state?: string; error?: string; message?: string }>(path, { operatorCode: operator });
       if (!res.ok) fail(res.message ?? res.error ?? 'failed');
       ok(`${color.cyan(id!)} ${res.state}`);
     });

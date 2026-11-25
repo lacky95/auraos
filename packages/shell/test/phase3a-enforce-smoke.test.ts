@@ -99,7 +99,6 @@ after(() => {
 const authDeps = (): AuthDeps => ({
   mgr: mgr as unknown as AuthDeps['mgr'],
   apiKeys: { verify: async () => null },
-  admin: { verifySession: async () => null },
   login,
   ownerServices,
   operatorTickets: tickets,
@@ -268,7 +267,7 @@ test('the report peeks at an operator ticket; the gate and the route share one c
   const { resolvePrincipal } = await import('../src/lib/access/identify.ts');
   const h = operator('GET', '/api/apps');
   const request = new Request('http://127.0.0.1:3000/api/apps', { headers: h });
-  const base = { mgr: null, apiKeys: null, admin: null, login: null };
+  const base = { mgr: null, apiKeys: null, login: null };
   // The access report (observer.ts) only peeks: the ticket stays.
   assert.equal((await resolvePrincipal(request, { ...base, operatorTickets: { peek: tickets.peek.bind(tickets) } })).via, 'operator-ticket');
   let claims = 0;
@@ -320,20 +319,28 @@ test('enforce: Counter reads no Aura Context keys and starts no Terminal; report
   }
 });
 
-test('enforce: the host operator\'s ticket opens the admin-session routes, not the admin session itself', async () => {
+test('enforce (D50): the owner\'s management routes take the owner, the operator and the System Terminal; other apps never, in any mode', async () => {
   for (const c of [
     { path: '/api/admin/access-report', route: '/api/admin/access-report' },
     { path: '/api/admin/grants', route: '/api/admin/grants' },
     { method: 'POST', path: '/api/admin/grants', route: '/api/admin/grants', body: { subjectId: COUNTER, permission: 'notifications.popup' } },
+    { method: 'POST', path: '/api/admin/manifest-edit', route: '/api/admin/manifest-edit', body: { appId: COUNTER, action: 'add-tool', tool: 'git' } },
   ] as Call[]) {
     const method = c.method ?? 'GET';
-    assert.equal(await middleware({ ...c, headers: operator(method, c.path) }), 'pass', `${method} ${c.path}`);
-    assert.equal(await inReport({ ...c, headers: operator(method, c.path) }), 'pass', `report: ${method} ${c.path}`);
-    assert.equal(await middleware({ ...c, headers: bearer('aura1.terminal') }), '401 admin-required', 'the Terminal is not the operator');
-    assert.equal(await middleware({ ...c, headers: desktop }), '401 admin-required', 'nor the login');
+    const what = `${method} ${c.path}`;
+    assert.equal(await middleware({ ...c, headers: operator(method, c.path) }), 'pass', `operator ${what}`);
+    assert.equal(await inReport({ ...c, headers: operator(method, c.path) }), 'pass', `report: operator ${what}`);
+    // The route then asks the owner's approval (lib/approvals/admin.ts).
+    assert.equal(await middleware({ ...c, headers: bearer('aura1.terminal') }), 'pass', `System Terminal ${what}`);
+    assert.equal(await middleware({ ...c, headers: desktop }), 'pass', `the owner's login ${what}`);
+    assert.equal(await middleware({ ...c, headers: gatewayClaim(SETTINGS, method, c.path, { installationId: 'inst-settings', owner: { userId: 'default', sid: OWNER_SID } } as Partial<GatewayIdentityClaim>) }), 'pass', `Settings ${what}`);
+    for (const app of ['aura1.counter', 'aura1.terminalx']) {
+      assert.equal(await middleware({ ...c, headers: bearer(app) }), '403 access-denied', `${app} ${what}`);
+      assert.equal(await inReport({ ...c, headers: bearer(app) }), '403 access-denied', `report: ${app} ${what}`);
+    }
+    assert.equal(await middleware(c), '401 unauthenticated', `anonymous ${what}`);
+    assert.equal(await middleware({ ...c, headers: bearer('aura-admin1.retired.token') }), '401 unauthenticated', `retired admin bearer ${what}`);
   }
-  const session = { path: '/api/admin/session', route: '/api/admin/session' };
-  assert.equal(await middleware({ ...session, headers: operator('GET', session.path) }), '401 admin-required');
 });
 
 test('enforce: apps send intents; only the System Terminal and the owner carry a command', async () => {

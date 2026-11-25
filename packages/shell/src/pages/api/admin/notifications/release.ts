@@ -3,13 +3,14 @@ import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { errorResponse, jsonResponse } from '../../../../lib/appResponse.js';
 import { notificationErrorResponse, readJson } from '../../../../lib/notificationCaller.js';
-import { adminOf, auditAdmin } from '../../../../lib/auth.js';
+import { auditOwner, ownerAction } from '../../../../lib/approvals/admin.ts';
 
 /**
- * Admin escape hatch (phase 6): stop app system modals from blocking the
- * shell — `aura admin notif release <id>` / `--app <appId>`.
+ * The owner's escape hatch (phase 6): stop app system modals from blocking
+ * the shell — `aura admin notif release <id>` / `--app <appId>`. From an app
+ * it needs the owner's approval (D50, lib/approvals/admin.ts).
  *
- *   POST /api/admin/notifications/release   Authorization: Bearer <admin session>
+ *   POST /api/admin/notifications/release
  *        { id } → { released: [id] }      one modal
  *        { appId } → { released: [ids] }  every active modal of that app
  *
@@ -17,27 +18,32 @@ import { adminOf, auditAdmin } from '../../../../lib/auth.js';
  * sender sees history `updated` with reason `admin-released`. AuraOS's own
  * decisions are never released (409). Audited as `notifications.release`.
  */
-export const POST: APIRoute = async ({ request, locals }) => {
-  const admin = adminOf(locals);
-  const body = await readJson(request);
+export const POST: APIRoute = async (ctx) => {
+  const body = await readJson(ctx.request);
   if (body instanceof Response) return body;
+  const target: { id: string } | { appId: string } | null = typeof body['id'] === 'string' && body['id'] ? { id: body['id'] }
+    : typeof body['appId'] === 'string' && body['appId'] ? { appId: body['appId'] } : null;
+  if (!target) return errorResponse('give { id } or { appId }', 400);
+  const admin = await ownerAction(ctx, {
+    action: 'admin.change', level: 'session', payload: { op: 'notifications.release', ...target },
+    title: 'id' in target ? `Release the system modal ${target.id}` : `Release every system modal of ${target.appId}`,
+    details: ['The dialogs stay as normal ones; they stop blocking the desktop.'],
+  });
+  if (admin instanceof Response) return admin;
   const svc = core.getNotificationService();
   if (typeof (svc as { releaseSystemModal?: unknown }).releaseSystemModal !== 'function') return errorResponse('release is not available in the running core yet (restart pending)', 501);
   const actor = { kind: 'system' as const, verification: 'internal' as const, reason: 'admin-released' };
   try {
-    if (typeof body['id'] === 'string' && body['id']) {
-      const n = await svc.releaseSystemModal(body['id'], 'admin-released', actor);
-      await auditAdmin(admin, 'notifications.release', { target: n.id, outcome: 'ok' });
+    if ('id' in target) {
+      const n = await svc.releaseSystemModal(target.id, 'admin-released', actor);
+      await auditOwner(admin, 'notifications.release', { target: n.id, outcome: 'ok' });
       return jsonResponse({ released: [n.id] });
     }
-    if (typeof body['appId'] === 'string' && body['appId']) {
-      const ids = await svc.releaseSystemModalsOf(`app:${body['appId']}`, 'admin-released', actor);
-      await auditAdmin(admin, 'notifications.release', { target: `app:${body['appId']}`, outcome: 'ok', detail: { released: ids.length } });
-      return jsonResponse({ released: ids });
-    }
-    return errorResponse('give { id } or { appId }', 400);
+    const ids = await svc.releaseSystemModalsOf(`app:${target.appId}`, 'admin-released', actor);
+    await auditOwner(admin, 'notifications.release', { target: `app:${target.appId}`, outcome: 'ok', detail: { released: ids.length } });
+    return jsonResponse({ released: ids });
   } catch (err) {
-    await auditAdmin(admin, 'notifications.release', { outcome: 'failed', detail: { error: (err as Error).message } });
+    await auditOwner(admin, 'notifications.release', { outcome: 'failed', detail: { error: (err as Error).message } });
     return notificationErrorResponse(err);
   }
 };

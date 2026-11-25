@@ -6,7 +6,7 @@
  * `setupDoneAt` — the first-boot setup card finished once; later boots only
  * show it again when the base image has to be built.
  * `welcome.done` — welcome steps ticked off (auto-detected or marked by a
- * route, e.g. a successful admin unlock). Kept even when the detection would
+ * route). Kept even when the detection would
  * now say otherwise: a step done once stays done.
  * `welcome.hidden` — the user hid or dismissed the checklist.
  *

@@ -4,30 +4,31 @@
  * Rules:
  *   - An instance token goes only to the origin of the runner-injected
  *     OS_API_BASE or AURA_OS_URL.
- *   - Every admin credential (AURA_ADMIN_*, saved session, master key file,
- *     typed credential) goes only to the trusted shell: the runner origin, or
- *     the loopback default when no runner origin exists. A 401 from any other
- *     URL never triggers a send. Remote admin login does not exist yet.
+ *   - An operator ticket goes only to the trusted shell: the runner origin, or
+ *     the loopback default when no runner origin exists.
  *   - Nothing is attached to /api/proxy/*: the proxy forwards it to the app
  *     (MCP and other proxied calls stay tokenless, D28). A credentialed
  *     request never follows a redirect.
  *
- * Phase 3 (5.8): inside a sandbox, every other call carries this process's
- * instance token (`self`), event streams included, so the shell sees the
- * instance and the user it acts for. An admin route takes the admin session
- * instead when there is one. On the host (`docker exec aura-shell aura …`) a
+ * Authorization (5.8, D13, D50): inside a sandbox every call carries this
+ * process's instance token (`self`), event streams included, so the shell
+ * sees the instance and the user it acts for. What the owner decides (grants,
+ * API keys, the audit trail, manifest edits, installs) answers 202
+ * needs-approval there, and the CLI waits for the owner's approval in the
+ * desktop (lib/client.ts). On the host (`docker exec aura-shell aura …`) a
  * call with no other credential carries a one-time operator ticket for
- * exactly that request (`X-Aura-Operator`), so the shell sees the operator.
+ * exactly that request (`X-Aura-Operator`), and the operator acts directly.
+ * There is no shared admin credential: no `aura admin login`, no
+ * AURA_ADMIN_*, no ~/.aura/admin-session. A per-device login token for a
+ * remote CLI comes later.
  */
 // The file-only entry: the package root would bundle Valkey and the server runtime.
 import { createSetupTicket, operatorRequestSubject } from '@aura/core/setup-tickets';
 import { DEFAULT_SHELL_URL, shellUrl } from './shell-url.js';
-import { inProcessSession, savedSession } from './admin-session-store.js';
 
 export type IdentityIntent =
   | 'anonymous'
   | 'self'                  // this process's own instance token, if it may go to this URL
-  | 'admin'                 // an admin session, if one may go to this URL; else as `self`
   | 'instance'              // this process's own instance (needs instanceId)
   | 'whoami'                // the best identity to ask the server about
   | 'credential-exchange';  // the body holds a credential: no header, no redirects
@@ -39,10 +40,10 @@ export interface IdentityRequest {
   instanceId?: string;
 }
 
-export type IdentitySource = 'none' | 'instance-token' | 'admin-env' | 'admin-process' | 'admin-saved' | 'operator-ticket';
+export type IdentitySource = 'none' | 'instance-token' | 'operator-ticket';
 
 export interface ResolvedIdentity {
-  kind: 'none' | 'instance' | 'admin' | 'operator';
+  kind: 'none' | 'instance' | 'operator';
   source: IdentitySource;
   headers: Record<string, string>;
   /** The request carries a secret in a header or body: redirects are refused. */
@@ -78,7 +79,7 @@ export function isRunnerShellUrl(url: string): boolean {
   return origin !== null && runnerOrigins().includes(origin);
 }
 
-/** May implicit admin credentials go here? */
+/** Is this the shell of this system (may an operator ticket go here)? */
 export function isTrustedShellUrl(url: string): boolean {
   const origin = httpOrigin(url);
   if (origin === null) return false;
@@ -121,41 +122,11 @@ export function resetIdentityWarnings(): void {
   warned.clear();
 }
 
-/** Why no admin credential goes to this URL. Never contains a credential. */
-export function adminRefusal(url: string): string {
-  return `${httpOrigin(url) ?? 'this URL'} is not this system's shell, so no admin credential (including AURA_ADMIN_*) is sent to it. Remote admin login is not available yet.`;
-}
-
-/** Warn about an explicit AURA_ADMIN_* variable. Its value is never printed. */
-export function warnExplicitAdmin(name: string): void {
-  if (inSandbox()) {
-    warnOnce(`sandbox:${name}`, `${name} is set inside an app sandbox, where other agents may read it. It stops working here in Phase 4.`);
-  }
-}
-
 function none(trusted: boolean, credentialed = false): ResolvedIdentity {
   return { kind: 'none', source: 'none', headers: {}, credentialed, trusted };
 }
 
 const bearer = (token: string) => ({ Authorization: `Bearer ${token}` });
-
-function adminIdentity(target: string, trusted: boolean): ResolvedIdentity {
-  const pinned = process.env['AURA_ADMIN_SESSION']?.trim();
-  if (!trusted) {
-    if (pinned) warnOnce('refused:AURA_ADMIN_SESSION', adminRefusal(target));
-    return none(trusted);
-  }
-  if (pinned) {
-    warnExplicitAdmin('AURA_ADMIN_SESSION');
-    return { kind: 'admin', source: 'admin-env', headers: bearer(pinned), credentialed: true, trusted };
-  }
-  const own = inProcessSession(httpOrigin(target));
-  if (own) return { kind: 'admin', source: 'admin-process', headers: bearer(own.token), credentialed: true, trusted };
-  const saved = savedSession();
-  return saved
-    ? { kind: 'admin', source: 'admin-saved', headers: bearer(saved.token), credentialed: true, trusted }
-    : none(trusted);
-}
 
 /** This process's instance token for `target`; with `instanceId`, only when that is this instance. */
 function instanceIdentity(target: string, trusted: boolean, instanceId?: string): ResolvedIdentity | null {
@@ -175,12 +146,8 @@ export function resolveIdentity({ url, path, intent, instanceId }: IdentityReque
   switch (intent) {
     case 'credential-exchange': return none(trusted, true);
     case 'self':     return instanceIdentity(target, trusted) ?? none(trusted);
-    case 'admin': {
-      const admin = adminIdentity(target, trusted);
-      return admin.kind === 'admin' ? admin : instanceIdentity(target, trusted) ?? admin;
-    }
     case 'instance': return instanceIdentity(target, trusted, instanceId ?? '') ?? none(trusted);
-    case 'whoami':   return instanceIdentity(target, trusted) ?? adminIdentity(target, trusted);
+    case 'whoami':   return instanceIdentity(target, trusted) ?? none(trusted);
   }
 }
 

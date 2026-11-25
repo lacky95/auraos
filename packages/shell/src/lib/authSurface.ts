@@ -613,7 +613,6 @@ function publicPrincipal(p: CallerPrincipal): Record<string, string> {
       };
     case 'apiKey':
       return { kind: p.kind, verification: p.verification, name: p.name };
-    case 'admin':
     case 'operator':
       return { kind: p.kind, verification: p.verification };
     case 'user':

@@ -5,36 +5,35 @@
  * The Authorizer reads app manifests and install scopes from the live
  * AppManager registry, lazily, so this module never forces AppManager init.
  */
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { defaultRedis } from '@aura/kv-store';
 import { getAppManager } from '../app-manager/AppManager.js';
 import { ValkeyApprovalStore } from '../approvals/ValkeyApprovalStore.js';
 import { AdminAudit, IDENTITY_AUDIT_ACTIONS, operatorAttribution } from './AdminAudit.js';
-import { AdminAuth } from './AdminAuth.js';
-import { defaultAdminKeyFile } from './adminCredential.js';
 import { ApiKeyStore } from './ApiKeyStore.js';
 import { ClientSessionStore } from './ClientSessions.js';
 import { Authorizer } from './Authorizer.js';
 import { GrantStore } from './GrantStore.js';
 import { defaultIdentityKeyFile } from './identityKey.js';
-import type { LoginSessionStore } from './LoginSessionStore.js';
+import { LoginSessionStore } from './LoginSessionStore.js';
 import { defaultSetupTicketDir, FileSetupTickets } from './setupTickets.js';
 import { ValkeyUserStore } from './ValkeyUserStore.js';
 
 /** Bump when the shape changes, so a singleton made by an older module copy is replaced. */
-export const AUTH_SERVICES_VERSION = 7;
+export const AUTH_SERVICES_VERSION = 8;
 
 export interface AuthServices {
   version: number;
   grants: GrantStore;
   apiKeys: ApiKeyStore;
-  admin: AdminAuth;
   audit: AdminAudit;
   authorizer: Authorizer;
   /** Phase 5: lock state per shell client (tab). Not a credential. */
   clientSessions: ClientSessionStore;
   /** The owner account. */
   users: ValkeyUserStore;
-  /** The one session store; the same object as `admin.sessions`. */
+  /** The one session store: the owner's password sessions. */
   loginSessions: LoginSessionStore;
   /** One-time setup, reset and operator codes. */
   setupTickets: FileSetupTickets;
@@ -57,15 +56,7 @@ export function getAuthServices(): AuthServices {
   const redis = () => defaultRedis();
   const grants = new GrantStore(redis);
   const audit = new AdminAudit(redis);
-  const admin = new AdminAuth({
-    keyFile: defaultAdminKeyFile(),
-    identityKeyFile: defaultIdentityKeyFile(),
-    redis,
-    onRotated: (purged) => {
-      console.log(`[auth] admin credential changed on disk (rotation) — ${purged} admin session(s) revoked`);
-      void audit.record({ by: { kind: 'system' }, action: 'credential.rotated', detail: { sessionsRevoked: purged } }).catch(() => undefined);
-    },
-  });
+  const loginSessions = new LoginSessionStore({ identityKeyFile: defaultIdentityKeyFile(), redis });
   const authorizer = new Authorizer({
     grants,
     declared: (appId) => registry()?.getById(appId)?.permissions,
@@ -82,7 +73,7 @@ export function getAuthServices(): AuthServices {
       console.error(`[auth] ${err.message}`);
       void audit.record({ by: { kind: 'system' }, action: IDENTITY_AUDIT_ACTIONS.identityKeyError, outcome: 'failed' }).catch(() => undefined);
     },
-    sessions: admin.sessions,
+    sessions: loginSessions,
     audit,
     onPolicyTampered: () => {
       console.warn('[auth] the password policy failed its integrity check; the defaults apply');
@@ -108,9 +99,9 @@ export function getAuthServices(): AuthServices {
   };
   const setupTickets: FileSetupTickets = new FileSetupTickets({ dir: defaultSetupTicketDir(), beforeClaim: auditCreatedTickets });
   const svc: AuthServices = {
-    version: AUTH_SERVICES_VERSION, grants, apiKeys: new ApiKeyStore(redis), admin, audit, authorizer,
+    version: AUTH_SERVICES_VERSION, grants, apiKeys: new ApiKeyStore(redis), audit, authorizer,
     clientSessions: new ClientSessionStore({ redis }),
-    users, loginSessions: admin.sessions, setupTickets,
+    users, loginSessions, setupTickets,
     approvals: new ValkeyApprovalStore({ redis }),
   };
   g[GLOBAL_KEY] = svc;
@@ -127,6 +118,34 @@ export function getAuthServices(): AuthServices {
     }
   }).catch((err) => console.warn(`[auth] grant migration failed: ${(err as Error).message}`));
   return svc;
+}
+
+/**
+ * D50 boot migration: the shared admin credential is retired. Its sessions
+ * left in Valkey are deleted (audited when there were any). The `admin.key`
+ * file stays where it is, unused, with a log line; a later release removes it.
+ * Never throws.
+ */
+export async function retireSharedAdminCredential(
+  svc: Pick<AuthServices, 'loginSessions' | 'audit'> = getAuthServices(),
+  dataDir: string = process.env['AURA_DATA_DIR'] ?? '/data',
+): Promise<{ sessionsRevoked: number; keyFileLeft: boolean }> {
+  let sessionsRevoked = 0;
+  try {
+    sessionsRevoked = await svc.loginSessions.revokeLegacySharedKey();
+    if (sessionsRevoked > 0) {
+      console.log(`[auth] removed ${sessionsRevoked} session(s) of the retired shared admin credential`);
+      await svc.audit.record({ by: { kind: 'system' }, action: 'auth.shared-admin-retired', detail: { sessionsRevoked } }).catch(() => undefined);
+    }
+  } catch (err) {
+    console.warn(`[auth] could not remove the retired admin sessions: ${(err as Error).message}`);
+  }
+  const keyFile = join(dataDir, 'aura', 'secrets', 'admin.key');
+  const keyFileLeft = existsSync(keyFile);
+  if (keyFileLeft) {
+    console.log(`[auth] ${keyFile} is no longer used: the owner account and the host operator replace the shared admin credential (D50). It is left in place and removed in a later release.`);
+  }
+  return { sessionsRevoked, keyFileLeft };
 }
 
 /** Tests / soft-restart. */

@@ -1,4 +1,4 @@
-// lib/auth.ts: central request authentication + the admin route guard.
+// lib/auth.ts: central request authentication.
 //
 //   cd packages/shell && npx tsx --test test/auth.test.ts
 import { test } from 'node:test';
@@ -14,7 +14,6 @@ const instances = new Map([
   ['com.example.notes-1', { instanceId: 'com.example.notes-1', appId: 'com.example.notes', inPool: false, port: 4001 }],
 ]);
 const GOOD_KEY = `aura_k1_0123456789abcdef_${'a'.repeat(43)}`;
-const GOOD_ADMIN = 'aura-admin1.payload.sig';
 const deps: AuthDeps = {
   mgr: {
     tokens,
@@ -22,18 +21,18 @@ const deps: AuthDeps = {
     getInstancesByApp: (appId: string) => [...instances.values()].filter((i) => i.appId === appId),
   } as never,
   apiKeys: { verify: async (k) => (k === GOOD_KEY ? { id: '0123456789abcdef', name: 'CI', scopes: ['system.notifications'] } : null) },
-  admin: { verifySession: async (t) => (t === GOOD_ADMIN ? { sessionId: 'feedfacecafebeef', expiresAt: Date.now() + 1000 } : null) },
 };
 const req = (headers: Record<string, string> = {}) => new Request('http://aura-shell:3000/api/notifications', { method: 'POST', headers });
 const bearer = (t: string) => req({ authorization: `Bearer ${t}` });
 
-test('order: instance token → verified instance; API key → apiKey; admin session → admin', async () => {
+test('order: instance token → verified instance; API key → apiKey; a retired admin session → 401 (D50)', async () => {
   const inst = await authenticate(bearer(tokens.mint('com.example.notes-1').token), deps);
   assert.deepEqual(inst, { kind: 'instance', appId: 'com.example.notes', instanceId: 'com.example.notes-1', verification: 'verified' });
   const key = await authenticate(bearer(GOOD_KEY), deps);
   assert.deepEqual(key, { kind: 'apiKey', keyId: '0123456789abcdef', name: 'CI', scopes: ['system.notifications'], verification: 'verified' });
-  const admin = await authenticate(bearer(GOOD_ADMIN), deps);
-  assert.deepEqual(admin, { kind: 'admin', credential: 'shared', sessionId: 'feedfacecafebeef', verification: 'verified' });
+  const admin = await authenticate(bearer('aura-admin1.payload.sig'), deps);
+  assert.ok(admin instanceof Response);
+  assert.equal(admin.status, 401);
 });
 
 test('bad credentials of every kind → 401, never anonymous', async () => {

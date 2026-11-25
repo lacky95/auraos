@@ -239,6 +239,27 @@ aura port expose at.oebb.opsconsole:5173 --host --sticky
 `install cap` adds a tool to the OS-wide toolchain; `grant cap` exposes it
 inside one app's sandbox.
 
+### Who may run them (D50)
+
+Grants, API keys (`aura apikey …`), the audit trail and the access report
+(`aura admin …`) and manifest edits are the **owner's**. There is no admin
+login and no shared admin credential (`aura admin login`, `--save`,
+`AURA_ADMIN_*` and `~/.aura/admin-session` are gone).
+
+- **In the System Terminal** the command sends the request to the desktop
+  and waits: AuraOS's own dialog shows exactly what changes, built by the
+  server. A read or an ordinary grant needs one click; a privileged grant
+  (Docker or `*` tools, `terminal.*`, `notifications.*`, `system.kv.os.*`,
+  `sidecars.privileged`) or a new API key also needs your password. Once you
+  approve, the command sends the same request again with the approval, which
+  the server uses up once.
+- **On the host** (`docker exec -it aura-shell aura …`) the host operator acts
+  directly. Over plain HTTP the desktop cannot take your password; approve such
+  a request on the host with `aura approve <id>`.
+- **Other apps** are refused: they never manage AuraOS.
+- **Recovery** stays on the host: `aura user reset-password <username>` and
+  `aura setup-code`.
+
 ### Capabilities — `aura cap …`
 
 | Command | What it does | Key flags |
@@ -299,7 +320,7 @@ Ref shapes `install` / `info` accept:
 | `aura dev new [appId]` | Scaffold a new app. Wizard if `appId` is omitted. | `--name`, `--icon`, `--description`, `--shape activity\|activity-bg\|service`, `--instance-mode single\|multi`, `--sandbox proot\|container`, `--tools`, `--scope user\|global`, `--force`, `--non-interactive` |
 | `aura dev clone [source] [target]` | Clone any app (incl. system apps) into `user` or `global` scope. The copy gets a new `originId`. Wizard if ids are omitted. | `--scope`, `--source-scope`, `--name`, `--keep-origin`, `--no-rewrite-ids`, `--exclude-git`, `--with-data`, `--force`, `--dry-run`, `--json`, … |
 | `aura dev validate [path]` | Validate one manifest against the schema, or all with `--all`. Warns when `originId` is missing. | `--all` |
-| `aura dev origin [appId]` | List app `originId`s, or set them. | `--assign [--all]`, `--reassign` (admin), `--origin-id <uuid>`, `--scope`, `--json` |
+| `aura dev origin [appId]` | List app `originId`s, or set them. | `--assign [--all]`, `--reassign` (the owner's), `--origin-id <uuid>`, `--scope`, `--json` |
 | `aura dev checkout <appId>` | Make an installed app a git checkout of its source repo, in place (files untouched), at the release's commit. Nexus then stops updating it. | `--repo <url>`, `--ref <ref>`, `--branch <name>`, `--scope`, `--dry-run`, `--json` |
 | `aura dev clean-manifest [path]` | Strip manifest fields equal to the schema default. | `--all`, `--dry-run` |
 | `aura dev standalone <appId>` | Run an app directly with `astro dev` (no sandbox, no shell wrapper) for fast UI iteration. | — |

@@ -51,8 +51,8 @@ export interface SystemCaller {
 }
 
 /**
- * A request authenticated with an admin-issued API key (`aura_k1_…`) —
- * an external REST caller. `name` is the label the admin gave the key.
+ * A request authenticated with an owner-issued API key (`aura_k1_…`) —
+ * an external REST caller. `name` is the label the owner gave the key.
  */
 export interface ApiKeyCaller {
   kind: 'apiKey';
@@ -62,18 +62,6 @@ export interface ApiKeyCaller {
 }
 
 export type NotificationCaller = InstanceCaller | ApiKeyCaller | AnonymousCaller | SystemCaller;
-
-/**
- * An admin session (shared operator credential). It may READ everything but
- * is not a sender: the Authorizer refuses it every sender permission. Never
- * stored as a notification's caller.
- */
-export interface AdminCaller {
-  kind: 'admin';
-  credential: 'shared';
-  sessionId: string;
-  verification: 'verified';
-}
 
 /**
  * The signed-in owner (a `user` principal): from the desktop's login, or
@@ -91,8 +79,17 @@ export interface OwnerCaller {
   through?: { appId: string; instanceId?: string };
 }
 
-/** Anyone the service can be called by: a sender, or an admin or the owner (reads only). */
-export type NotificationPrincipal = NotificationCaller | AdminCaller | OwnerCaller;
+/**
+ * The host operator (a one-time ticket, D8): reads everything, like the
+ * owner, but is not a sender. Never stored as a notification's caller.
+ */
+export interface OperatorCaller {
+  kind: 'operator';
+  verification: 'verified';
+}
+
+/** Anyone the service can be called by: a sender, or the owner or the operator (reads only). */
+export type NotificationPrincipal = NotificationCaller | OwnerCaller | OperatorCaller;
 
 /**
  * The ONLY system caller. Checked by object identity (`caller === SYSTEM_CALLER`),

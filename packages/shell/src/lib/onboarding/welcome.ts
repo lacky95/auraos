@@ -4,7 +4,6 @@
  * (through the shell UI command broker, so nothing in the notification
  * schema had to change), and steps tick themselves off:
  *
- *   admin     an admin unlock succeeded (pages/api/admin/session.ts marks it)
  *   agent     claude or codex is in the app toolchain
  *   login     a Claude / Codex login exists in the shared home
  *   theme     os/theme differs from the seeded default
@@ -59,7 +58,7 @@ export function detectDone(opts: WelcomeOpts, theme: unknown): Set<WelcomeStepId
 const KEY = Symbol.for('aura.onboarding.welcome');
 type G = typeof globalThis & { [KEY]?: Welcome };
 
-/** The running checklist, so routes can mark steps (admin unlock). */
+/** The running checklist, so routes can mark steps (`markWelcomeStep`). */
 export function currentWelcome(): Welcome | undefined {
   return (globalThis as G)[KEY];
 }

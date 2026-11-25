@@ -2,7 +2,7 @@ import type { APIRoute } from 'astro';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BUILTIN_PERMISSIONS, toolsGrant } from '@aura/core';
-import { adminOf, auditAdmin } from '../../../lib/auth.js';
+import { auditOwner, manifestEditLevel, ownerAction } from '../../../lib/approvals/admin.ts';
 
 /**
  * Server-side manifest mutation. Required because container-sandbox apps
@@ -23,10 +23,13 @@ import { adminOf, auditAdmin } from '../../../lib/auth.js';
  * global + user `/data/scopes/…/apps`). A hardcoded `/workspace/apps` only
  * covers system-scope apps and 404s on user/global installs.
  *
- * ADMIN ONLY (phase 2): it changes what an app may do (permissions[], tools[],
- * services[].tools), so it needs `Authorization: Bearer <admin session>`
- * (`aura admin login`); otherwise 401 `{error:'admin-required'}`. Every change
- * is audited as "admin (shared credential)". Declaring a privileged
+ * THE OWNER'S (D50): it changes what an app may do (permissions[], tools[],
+ * services[].tools). The owner and the host operator edit directly; the CLI
+ * in the System Terminal (and Settings) gets 202 needs-approval and sends
+ * the same edit again with the owner's approval (lib/approvals/admin.ts).
+ * Adding Docker or every tool, or a privileged permission, needs the
+ * password (`fresh`); any other edit one click. Every change is audited with
+ * the owner (or the operator) who decided. Declaring a privileged
  * permission here (notifications.locked / popup) only REQUESTS it — the grant
  * is separate (POST /api/admin/grants).
  *
@@ -55,12 +58,23 @@ interface Body {
 }
 
 const PERMISSION_ACTIONS = new Set<Action>(['add-permission', 'remove-permission']);
+/** How the owner's dialog names an edit. */
+function editTitle(e: { appId: string; action: Action; tool?: string; tools?: string[]; permission?: string; service?: string }): string {
+  switch (e.action) {
+    case 'add-tool': return `Give ${e.appId} the tool ${e.tool}`;
+    case 'remove-tool': return `Take the tool ${e.tool} from ${e.appId}`;
+    case 'set-tools': return `Set the tools of ${e.appId} to ${(e.tools ?? []).join(', ') || 'none'}`;
+    case 'add-permission': return `Add the permission ${e.permission} to ${e.appId}`;
+    case 'remove-permission': return `Remove the permission ${e.permission} from ${e.appId}`;
+    case 'add-service-tool': return `Give the ${e.service} sidecars of ${e.appId} the tool ${e.tool}`;
+    case 'remove-service-tool': return `Take the tool ${e.tool} from the ${e.service} sidecars of ${e.appId}`;
+  }
+}
 const SERVICE_ACTIONS = new Set<Action>(['add-service-tool', 'remove-service-tool']);
 
-export const POST: APIRoute = async ({ request, locals }) => {
-  const admin = adminOf(locals);
+export const POST: APIRoute = async (ctx) => {
   let body: Body;
-  try { body = await request.json() as Body; }
+  try { body = await ctx.request.json() as Body; }
   catch { return json({ error: 'invalid-json' }, 400); }
 
   const { appId, action, tool } = body;
@@ -111,6 +125,25 @@ export const POST: APIRoute = async ({ request, locals }) => {
   try { manifest = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>; }
   catch (err) { return json({ error: 'manifest-parse-failed', message: (err as Error).message }, 500); }
 
+  // The owner decides this exact edit (D50).
+  const edit: { appId: string; action: Action; tool?: string; tools?: string[]; permission?: string; service?: string } = {
+    appId, action,
+    ...(PERMISSION_ACTIONS.has(action) ? { permission: body.permission! } : {}),
+    ...(SERVICE_ACTIONS.has(action) ? { service: body.service! } : {}),
+    ...(setTools ? { tools: setTools } : !PERMISSION_ACTIONS.has(action) ? { tool: tool! } : {}),
+  };
+  const admin = await ownerAction(ctx, {
+    action: 'admin.manifest-edit', level: manifestEditLevel(edit), payload: edit,
+    title: editTitle(edit),
+    details: [
+      `App: ${appId} (${mgr.registry.getScopeId(appId) ?? 'unknown'} scope)`,
+      ...(edit.service ? [`Sidecar template: ${edit.service}`] : []),
+      ...(edit.tools ?? (edit.tool ? [edit.tool] : [])).includes('docker') ? ['Warning: docker controls the container runtime, which is root on the host.'] : [],
+      ...(edit.tools ?? (edit.tool ? [edit.tool] : [])).includes('*') ? ['Warning: * grants every tool AuraOS can provide.'] : [],
+    ],
+  });
+  if (admin instanceof Response) return admin;
+
   // ─── permissions ────────────────────────────────────────────────────────
   // Separate from tools: permissions gate API calls, not binaries, so there's
   // no allowlist dir to re-provision. The registry reload is the whole point —
@@ -137,7 +170,7 @@ export const POST: APIRoute = async ({ request, locals }) => {
       manifest['permissions'] = next;
       try { writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n'); }
       catch (err) { return json({ error: 'write-failed', message: (err as Error).message }, 500); }
-      await auditAdmin(admin, `manifest.${action}`, { target: `app:${appId}`, detail: { permission: perm } });
+      await auditOwner(admin, `manifest.${action}`, { target: `app:${appId}`, detail: { permission: perm } });
     }
 
     // Reload even on a no-op. The in-memory registry can drift from disk (a
@@ -196,7 +229,7 @@ export const POST: APIRoute = async ({ request, locals }) => {
       svc['tools'] = next;
       try { writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n'); }
       catch (err) { return json({ error: 'write-failed', message: (err as Error).message }, 500); }
-      await auditAdmin(admin, `manifest.${action}`, { target: `app:${appId}`, detail: { service: body.service, tool } });
+      await auditOwner(admin, `manifest.${action}`, { target: `app:${appId}`, detail: { service: body.service, tool } });
     }
     // Editing the manifest stays an admin action, but its sidecars only get
     // own tools when the app holds sidecars.tools (spawn 403s otherwise).
@@ -229,7 +262,7 @@ export const POST: APIRoute = async ({ request, locals }) => {
     manifest['tools'] = nextTools;
     try { writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n'); }
     catch (err) { return json({ error: 'write-failed', message: (err as Error).message }, 500); }
-    await auditAdmin(admin, `manifest.${action}`, { target: `app:${appId}`, detail: action === 'set-tools' ? { tools: nextTools } : { tool } });
+    await auditOwner(admin, `manifest.${action}`, { target: `app:${appId}`, detail: action === 'set-tools' ? { tools: nextTools } : { tool } });
 
     // Hot-refresh running instances of this app so their /aura/my-tools
     // allowlist picks up the change without a backend respawn. AppManager

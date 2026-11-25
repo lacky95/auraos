@@ -112,6 +112,7 @@ Your own app can show up in the registry too: add `provides[]` to its manifest (
 - Explore with read-only commands (`get`, `describe`, `logs`, `status`).
 - Confirm with the user before `rm`, `revoke`, `disable`, `kill` and `stop`. Stopping `com.aura.terminal` ends the session you are running in.
 - Use `aura start|stop|restart` to control apps. Plain `docker restart` drops an instance from AuraOS.
+- Grants, API keys, the audit trail, manifest edits and installs are the owner's. From this Terminal they ask for approval in the desktop and the command waits; tell the user to approve it there. There is no admin login. On the host (`docker exec -it aura-shell aura …`) they run directly.
 
 ## Your notes
 

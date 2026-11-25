@@ -5,18 +5,18 @@
  *
  * Rules:
  *   system     everything (in-process `SYSTEM_PRINCIPAL` only, by identity)
- *   admin      management actions (`admin.*`) only — an admin session is not
- *              a sender and has no app permissions
  *   instance   the app's manifest-declared permissions (strict for
  *              ENFORCED ones, MVP auto-grant for the rest, as PermissionManager),
- *              PLUS an admin grant (GrantStore) for privileged ones
+ *              PLUS the owner's grant (GrantStore) for privileged ones
  *              (notifications.locked / .popup / .read / .systemModal). A grant only counts
  *              while the app still resolves to the install scope it was given for.
  *              `readGrant()` returns the SCOPE of a `notifications.read` grant.
- *   apiKey     its scopes (fixed by the admin at creation) or a GrantStore
+ *   apiKey     its scopes (fixed by the owner at creation) or a GrantStore
  *              grant to the key; nothing else
  *   anonymous  phase-1 compatibility: basic sending only (an unverified Simple
- *              notification); never privileged, never admin
+ *              notification); never privileged
+ *   `admin.*`  never a permission: the owner's management routes decide who
+ *              may manage (shell `lib/approvals/admin.ts`, D50)
  *
  * Delegation hook (ready for verified agents later):
  *   effective = principal's permissions ∩ actor's scope
@@ -40,12 +40,6 @@ import {
 } from './types.js';
 
 export const BASIC_NOTIFICATION_PERMISSION = 'system.notifications';
-
-/** Management actions an admin session may perform. */
-export const ADMIN_ACTIONS = [
-  'admin.session', 'admin.grants', 'admin.apiKeys', 'admin.audit', 'admin.manifest', 'admin.apps',
-] as const;
-export type AdminAction = typeof ADMIN_ACTIONS[number];
 
 export interface AuthzDecision {
   allow: boolean;
@@ -109,23 +103,17 @@ export class Authorizer {
     if (isSystemPrincipal(principal)) return allow('AuraOS core (in-process)');
     if ((principal as { kind: string }).kind === 'system') return deny('only the in-process SYSTEM_PRINCIPAL may act as system');
 
-    const isAdminAction = action.startsWith('admin.');
-    if (principal.kind === 'admin') {
-      return isAdminAction
-        ? allow('admin session (shared credential)')
-        : deny(`an admin session manages grants and keys; it has no '${action}' permission itself`);
-    }
-    if (isAdminAction) return deny('admin session required — unlock admin first');
+    if (action.startsWith('admin.')) return deny('managing AuraOS is the owner\'s, through its routes: never an app permission');
 
     switch (principal.kind) {
       case 'anonymous':
         if (action === BASIC_NOTIFICATION_PERMISSION) return allow('unverified caller: basic Simple notifications only (phase-1 compatibility)');
-        return deny(`'${action}' needs a verified caller (Authorization: Bearer $AURA_INSTANCE_TOKEN or an API key) and an admin grant`);
+        return deny(`'${action}' needs a verified caller (Authorization: Bearer $AURA_INSTANCE_TOKEN or an API key) and the owner's grant`);
 
       case 'apiKey': {
         if (principal.scopes.includes(action)) return allow(`API key '${principal.name}' has scope '${action}'`);
         if (isPrivilegedPermission(action) && await this.deps.grants.get({ kind: 'apiKey', id: principal.keyId }, action)) {
-          return allow(`granted to API key '${principal.name}' by an admin`);
+          return allow(`granted to API key '${principal.name}' by the owner`);
         }
         return deny(`API key '${principal.name}' has no scope '${action}'`);
       }
@@ -143,12 +131,12 @@ export class Authorizer {
           const subject: GrantSubject = { kind: 'app', id: appId };
           const g = await this.deps.grants.get(subject, action);
           const short = action.startsWith('notifications.') ? action.split('.')[1] : action;
-          if (!g) return deny(`'${action}' is requested by ${appId} but not granted — an admin must grant it (aura grant notif-perms ${appId} ${short})`);
+          if (!g) return deny(`'${action}' is requested by ${appId} but not granted — the owner must grant it (aura grant notif-perms ${appId} ${short})`);
           const scope = this.deps.appScope(appId);
           if (g.appScope && scope && g.appScope !== scope) {
             return deny(`'${action}' was granted to ${appId} in scope '${g.appScope}', but the app now resolves to scope '${scope}' — grant it again`);
           }
-          return allow(`requested by ${appId} and granted by an admin`);
+          return allow(`requested by ${appId} and granted by the owner`);
         }
         if (has) return allow(`declared by ${appId}`);
         if (ENFORCED.has(action)) {

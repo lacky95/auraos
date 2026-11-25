@@ -4,8 +4,9 @@
  * Two separate questions, never mixed:
  *
  *   READ ACCESS   — may this viewer see the item at all?
- *     system / admin / in-process      everything
- *     verified app (instance), API key its OWN items, plus whatever an admin
+ *     system / owner / operator /      everything
+ *     in-process
+ *     verified app (instance), API key its OWN items, plus whatever the owner
  *                                      granted with `notifications.read`
  *                                      (scope apps / senders / all; secret
  *                                      items only with `includeSecret`)
@@ -362,7 +363,7 @@ export function staticAccess(viewer: ViewerInput, settings: NotificationSettings
   const v: NotificationViewer = isViewer(viewer) ? viewer : { principal: viewer };
   const p = v.principal;
   if (p.kind === 'system') return isSystemCaller(p) ? { kind: 'full' } : { kind: 'none' };
-  if (p.kind === 'admin') return { kind: 'full' };
+  if (p.kind === 'operator') return { kind: 'full' };
   if (p.kind === 'user') return ownerAccess(v, settings);
   if (p.kind === 'instance') return { kind: 'principal', own: `app:${p.appId}`, grant };
   if (p.kind === 'apiKey') return { kind: 'principal', own: `key:${p.keyId}`, grant };

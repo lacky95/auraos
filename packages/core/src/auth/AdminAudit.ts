@@ -1,17 +1,20 @@
 /**
  * The audit trail — the `audit:admin` Valkey stream (MAXLEN ~ 10000).
  *
- * One entry per admin change (unlock / lock, grant / revoke, API key create /
- * revoke, manifest edits, credential rotation) and per identity event (setup,
- * login, logout, password reset or change, policy change, ticket creation). The actor is the shared
- * admin credential, a signed-in `user:<id>`, the host `operator`, `system` or
- * `anonymous`.
+ * One entry per owner change (grant / revoke, API key create / revoke,
+ * manifest edits, approvals) and per identity event (setup, login, logout,
+ * password reset or change, policy change, ticket creation). The actor is the
+ * owner `user:<id>` (also when the owner approved an app's request; the
+ * detail names the requester), the host `operator`, `system` or `anonymous`.
+ * Entries from before D50 may name `admin (shared credential)`.
  *
  * Passwords, codes, tokens and hashes never go in here: `detail` fields with
  * such names are dropped on write, at any depth.
  */
 import type { Redis } from '@aura/kv-store';
-import { ADMIN_AUDIT_LABEL, type AdminAttribution, type UserPrincipal } from './types.js';
+import type { OperatorAttribution, UserAttribution, UserPrincipal } from './types.js';
+
+export type { OperatorAttribution, UserAttribution } from './types.js';
 
 export const AUDIT_ADMIN_KEY = 'audit:admin';
 export const AUDIT_MAXLEN = 10_000;
@@ -30,14 +33,6 @@ export const IDENTITY_AUDIT_ACTIONS = {
   sessionsRevoked: 'auth.sessions-revoked',
 } as const;
 
-export interface UserAttribution {
-  kind: 'user';
-  userId: string;
-  /** Short prefix of the session id. */
-  session?: string;
-}
-export interface OperatorAttribution { kind: 'operator' }
-
 export function userAttribution(p: Pick<UserPrincipal, 'userId'> & { sessionId?: string }): UserAttribution {
   return { kind: 'user', userId: p.userId, ...(p.sessionId ? { session: p.sessionId.slice(0, 8) } : {}) };
 }
@@ -47,7 +42,7 @@ export interface AuditEntry {
   /** Stream id `<ms>-<seq>`. */
   id: string;
   at: number;
-  /** `admin (shared credential)`, `user:<id>`, `operator`, `system` or `anonymous`. */
+  /** `user:<id>`, `operator`, `system` or `anonymous` (`admin (shared credential)` before D50). */
   actor: string;
   session?: string;
   action: string;
@@ -58,7 +53,7 @@ export interface AuditEntry {
 }
 
 export interface AuditInput {
-  by: AdminAttribution | UserAttribution | OperatorAttribution | { kind: 'system' } | { kind: 'anonymous' };
+  by: UserAttribution | OperatorAttribution | { kind: 'system' } | { kind: 'anonymous' };
   action: string;
   target?: string;
   outcome?: 'ok' | 'denied' | 'failed';
@@ -79,7 +74,6 @@ function scrub(value: unknown, depth = 0): unknown {
 }
 
 function actorOf(by: AuditInput['by']): string {
-  if (by.kind === 'admin') return ADMIN_AUDIT_LABEL;
   if (by.kind === 'user') return `user:${by.userId}`;
   return by.kind;
 }
@@ -89,7 +83,7 @@ export class AdminAudit {
 
   async record(e: AuditInput): Promise<string> {
     const fields: string[] = ['at', String(this.now()), 'actor', actorOf(e.by), 'action', e.action, 'outcome', e.outcome ?? 'ok'];
-    if ((e.by.kind === 'admin' || e.by.kind === 'user') && e.by.session) fields.push('session', e.by.session);
+    if (e.by.kind === 'user' && e.by.session) fields.push('session', e.by.session);
     if (e.target) fields.push('target', e.target);
     if (e.detail) fields.push('detail', JSON.stringify(scrub(e.detail)));
     const id = await this.redis().xadd(AUDIT_ADMIN_KEY, 'MAXLEN', '~', String(AUDIT_MAXLEN), '*', ...fields);

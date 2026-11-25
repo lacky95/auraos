@@ -44,19 +44,17 @@ export async function grantedAppCaller(
 
 /**
  * Whether the owner made this call: the desktop's own page (exact Origin and
- * the owner's session, or login dark; appHostHandoff `shellOwner`) or an
- * admin session (`aura admin login`). For the one Terminal action that needs
- * it (OPEN_TERMINAL `command`); never throws.
+ * the owner's session, or login dark; appHostHandoff `shellOwner`), or the
+ * host operator (its one-time ticket). A `user` principal alone is not
+ * enough: a sibling App Host's page sends the login cookie too (same site)
+ * and this types a line as the owner (D29). For the one Terminal action that
+ * needs it (OPEN_TERMINAL `command`); never throws.
  */
 export async function isOwnerCaller(ctx: Pick<APIContext, 'request' | 'cookies'> & { clientAddress?: string }): Promise<boolean> {
   try {
     const p = await authenticate(ctx.request);
-    // A `user` principal (the owner's login, or the owner through a trusted
-    // system UI) is not enough on its own: `shellOwner` below also wants the
-    // desktop's exact Origin, since a sibling App Host's page sends the login
-    // cookie too (same site) and this types a line as the owner (D29).
-    if (!(p instanceof Response) && p.kind === 'admin') return true;
-  } catch { /* not an admin session */ }
+    if (!(p instanceof Response) && p.kind === 'operator') return true;
+  } catch { /* not the operator */ }
   try {
     return !('error' in await shellOwner(ctx));
   } catch {

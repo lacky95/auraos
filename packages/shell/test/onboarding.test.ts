@@ -45,19 +45,19 @@ test('welcome: open steps get one button per distinct app, in checklist order, p
   const v = renderWelcome(new Set(), ALL);
   assert.equal(v.allDone, false);
   const buttons = v.components.filter((c) => c.kind === 'button').map((c) => c.id);
-  assert.deepEqual(buttons, [openButtonId('settings'), openButtonId('terminal'), openButtonId('docs'), HIDE_BUTTON_ID]);
-  assert.match(v.text, /0 of 6 done/);
+  assert.deepEqual(buttons, [openButtonId('terminal'), openButtonId('settings'), openButtonId('docs'), HIDE_BUTTON_ID]);
+  assert.match(v.text, /0 of 5 done/);
 });
 
 test('welcome: done steps are checked off and their app button goes away', () => {
-  const done = new Set<WelcomeStepId>(['admin', 'theme', 'docs']);
+  const done = new Set<WelcomeStepId>(['theme', 'docs']);
   const v = renderWelcome(done, ALL);
   const md = v.components.find((c) => c.kind === 'markdown');
   assert.ok(md && md.kind === 'markdown');
-  assert.match(md.text, /- \[x\] ~~Unlock admin~~/);
+  assert.match(md.text, /- \[x\] ~~Pick a theme~~/);
   assert.match(md.text, /- \[ \] \*\*Install an AI agent\*\*/);
   assert.deepEqual(v.components.filter((c) => c.kind === 'button').map((c) => c.id), ['open-terminal', HIDE_BUTTON_ID]);
-  assert.match(v.text, /3 of 6 done/);
+  assert.match(v.text, /2 of 5 done/);
 });
 
 test('welcome: no button for an app that is not installed or disabled', () => {

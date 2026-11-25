@@ -3,7 +3,6 @@ import * as core from '@aura/core';
 import type { AccessPrincipal } from '@aura/core';
 import { loadAppHostServices } from '../../server/app-host-auth.mjs';
 import { gatewayClaimOf } from '../../server/gateway-identity.mjs';
-import { bearerToken } from './access/identify.ts';
 
 /**
  * The sign-in a long-lived response (an event stream) rides on, so it can end
@@ -13,7 +12,6 @@ import { bearerToken } from './access/identify.ts';
  *
  *   App Host gateway claim with a session  → that owner session (the frame's cookie)
  *   user (login cookie or `aura-sess1.` bearer, or D45) → its login session
- *   admin (`aura-admin1.` bearer)           → that admin session
  *   anything else                           → nothing to follow (null)
  *
  * The check fails closed: a store that can't be read ends the stream, and
@@ -26,7 +24,6 @@ export interface StreamSession {
 
 export interface StreamSessionDeps {
   sessionLive(sid: string, userId: string): Promise<boolean>;
-  adminSession(token: string): Promise<unknown>;
 }
 
 const liveDeps: StreamSessionDeps = {
@@ -34,7 +31,6 @@ const liveDeps: StreamSessionDeps = {
     const svc = await loadAppHostServices();
     return !!svc && await svc.sessionLive(sid, userId);
   },
-  adminSession: (token) => core.getAuthServices().admin.verifySession(token),
 };
 
 const check = (fn: () => Promise<unknown>): StreamSession => ({
@@ -56,10 +52,6 @@ export function streamSessionOf(
   if (principal?.kind === 'user') {
     const { sessionId, userId } = principal;
     return check(() => deps.sessionLive(sessionId, userId));
-  }
-  if (principal?.kind === 'admin') {
-    const token = bearerToken(request);
-    return token ? check(() => deps.adminSession(token)) : null;
   }
   return null;
 }

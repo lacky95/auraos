@@ -1,5 +1,5 @@
 import type {
-  AccessPrincipal, AdminPrincipal, AppInstance, AppManager, InstancePrincipal, OperatorPrincipal, Principal, UserPrincipal,
+  AccessPrincipal, AppInstance, AppManager, InstancePrincipal, OperatorPrincipal, Principal, UserPrincipal,
 } from '@aura/core';
 // The file-only entry, as the CLI uses it: one subject rule on both sides.
 import { operatorRequestSubject } from '@aura/core/setup-tickets';
@@ -84,9 +84,7 @@ async function resolveGatewayOwner(request: Request, deps: GatewayOwnerDeps): Pr
  */
 export type CredentialRejection =
   | 'gateway-identity-invalid'
-  | 'gateway-admin-session-invalid'
   | 'api-key-invalid'
-  | 'admin-session-invalid'
   | 'unsupported-scheme'
   | 'credential-invalid'
   | 'instance-not-running'
@@ -107,7 +105,6 @@ export interface PrincipalDeps {
     tokens: Pick<AppManager['tokens'], 'verify'> & Partial<Pick<AppManager['tokens'], 'hasNonce'>>;
   }) | null;
   apiKeys: { verify(key: string): Promise<{ id: string; name: string; scopes: string[] } | null> } | null;
-  admin: { verifySession(token: string): Promise<{ sessionId: string } | null> } | null;
   /**
    * The login token a request carries in its session cookie, and the live
    * password session of the enabled owner it names (authSurface
@@ -144,7 +141,6 @@ export interface AppHostSession {
 }
 
 const API_KEY_PREFIX = 'aura_k1_';
-const ADMIN_SESSION_PREFIX = 'aura-admin1.';
 const LOGIN_SESSION_PREFIX = 'aura-sess1.';
 const INSTANCE_TOKEN_PREFIX = 'aura1.';
 
@@ -193,23 +189,12 @@ function instancePrincipal(
   };
 }
 
-async function resolveGateway(
-  request: Request, token: string | null, deps: PrincipalDeps,
-): Promise<ResolvedPrincipal> {
+async function resolveGateway(request: Request, deps: PrincipalDeps): Promise<ResolvedPrincipal> {
   const mgr = deps.mgr;
   if (!mgr) return unverified();
   const inst = gatewayInstance(request, mgr);
   if (!inst || inst === 'invalid') return rejected('gateway-identity-invalid');
   const owner = await gatewayOwner(request, { mgr, services: deps.ownerServices });
-  // D45: Settings with an admin session from the shell's own unlock dialog.
-  // The owner check runs first, so a bearer on any other gateway call is ignored.
-  if (owner && token?.startsWith(ADMIN_SESSION_PREFIX)) {
-    if (!deps.admin) return unverified();
-    const s = await deps.admin.verifySession(token);
-    if (!s) return rejected('gateway-admin-session-invalid');
-    const admin: AdminPrincipal = { kind: 'admin', credential: 'shared', sessionId: s.sessionId, verification: 'verified' };
-    return seen(admin, 'admin-session');
-  }
   if (owner) return seen(owner, 'gateway');
   // The app acts for the user whose App Host session the gateway checked (a
   // claim with `sid`); a claim without one (the runtime script) names nobody.
@@ -225,12 +210,6 @@ async function resolveBearer(token: string, deps: PrincipalDeps): Promise<Resolv
     const rec = await deps.apiKeys.verify(token);
     if (!rec) return rejected('api-key-invalid');
     return seen({ kind: 'apiKey', keyId: rec.id, name: rec.name, scopes: [...rec.scopes], verification: 'verified' }, 'api-key');
-  }
-  if (token.startsWith(ADMIN_SESSION_PREFIX)) {
-    if (!deps.admin) return unverified();
-    const s = await deps.admin.verifySession(token);
-    if (!s) return rejected('admin-session-invalid');
-    return seen({ kind: 'admin', credential: 'shared', sessionId: s.sessionId, verification: 'verified' }, 'admin-session');
   }
   if (token.startsWith(LOGIN_SESSION_PREFIX)) {
     if (!deps.login) return unverified();
@@ -281,12 +260,10 @@ function resolveOperator(request: Request, code: string, deps: PrincipalDeps): P
  * ask it, for Astro routes and for the plain servers' surfaces alike.
  *
  *   App Host cookie session (verified by app-hosts.mjs) → user, through that app
- *   signed gateway claim     → user through a trusted system UI (D45); admin with
- *                              that UI's admin session bearer; else the instance,
- *                              acting for the claim's session user
+ *   signed gateway claim     → user through a trusted system UI (D45); else the
+ *                              instance, acting for the claim's session user
  *   Bearer aura1.…           → instance, acting for its `u` claim or owner
  *   Bearer aura_k1_…         → apiKey
- *   Bearer aura-admin1.…     → admin
  *   Bearer aura-sess1.…      → user (a live password session of the enabled owner)
  *   any other Authorization  → rejected
  *   X-Aura-Operator: <code>  → operator (the host CLI's one-time ticket for this request)
@@ -304,7 +281,7 @@ export async function resolvePrincipal(
     return seen(userPrincipal(userId, sid, { appId, ...(instanceId ? { instanceId } : {}) }), 'app-host');
   }
   const token = bearerToken(request);
-  if (gatewayClaimOf(request) !== null) return resolveGateway(request, token, deps);
+  if (gatewayClaimOf(request) !== null) return resolveGateway(request, deps);
   if (token !== null) return resolveBearer(token, deps);
   const operatorCode = request.headers.get(OPERATOR_HEADER);
   if (operatorCode !== null) return resolveOperator(request, operatorCode, deps);
@@ -326,7 +303,7 @@ export async function resolvePrincipal(
 /**
  * The app instance a caller is, when it is one: an instance (by token or
  * gateway claim), or a user acting through an app instance (D45, App Hosts),
- * judged as that instance. Null for the owner's own login, admin, API keys
+ * judged as that instance. Null for the owner's own login, the operator, API keys
  * and anonymous callers. The routes that name their caller app (KV, data,
  * interfaces) and the `app-callers` guard ask this; it never reads a hint.
  */

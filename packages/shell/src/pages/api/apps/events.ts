@@ -21,7 +21,7 @@ let nextStreamId = 1;
  * server side, sidecars). The System Terminal's own instance keeps the whole
  * stream: it is the owner's terminal (D29), where `aura events` and
  * `aura ps -w` run. A stream opened on a sign-in (the desktop's login, an App
- * Host frame, an admin session) ends when that sign-in is revoked or expires
+ * Host frame) ends when that sign-in is revoked or expires
  * (lib/streamSession.ts).
  */
 export const GET: APIRoute = async ({ url, request }) => {

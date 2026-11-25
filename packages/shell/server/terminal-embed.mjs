@@ -312,8 +312,8 @@ export function openTerminalNeedsProof(intent) {
 
 /**
  * Why this caller may not send this intent, or null. `caller` is a verified
- * app ({appId}), the proved owner ({owner: true}: the desktop's own page or an
- * admin session), or null (nothing proved).
+ * app ({appId}), the proved owner ({owner: true}: the desktop's own page or the
+ * host operator), or null (nothing proved).
  *   `command` types a line as the owner (5.16 safeguard 2): the System
  *             Terminal's own or the owner's, never an embedder's, and never
  *             an unproved caller's (any site can POST a no-cors text/plain body).

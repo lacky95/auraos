@@ -33,14 +33,14 @@ const post = (url: string, body: unknown, headers: Record<string, string> = {}) 
 
 // ── 2. event streams end with their sign-in ─────────────────────────────────
 
-test('a stream follows its sign-in: the login, the App Host session, the admin session; none for an app token', () => {
-  const deps = { sessionLive: async () => true, adminSession: async () => ({}) };
+test('a stream follows its sign-in: the login, the App Host session; none for an app token or the operator', () => {
+  const deps = { sessionLive: async () => true };
   const user = { kind: 'user', userId: 'u', role: 'owner', sessionId: 's1', verification: 'verified' } as const;
-  const admin = { kind: 'admin', credential: 'shared', sessionId: 'a1', verification: 'verified' } as const;
+  const operator = { kind: 'operator', verification: 'verified' } as const;
   const inst = { kind: 'instance', appId: 'com.acme.notes', instanceId: 'com.acme.notes-1', verification: 'verified' } as const;
   const plain = new Request('http://x/api/apps/events');
   assert.ok(streamSessionOf(plain, user, deps));
-  assert.ok(streamSessionOf(new Request('http://x/', { headers: { authorization: 'Bearer aura-admin1.x' } }), admin, deps));
+  assert.equal(streamSessionOf(plain, operator, deps), null, 'a one-time ticket has no session to follow');
   assert.equal(streamSessionOf(plain, inst, deps), null);
   assert.equal(streamSessionOf(plain, null, deps), null);
   // An App Host frame: the session its gateway claim names.
@@ -62,7 +62,6 @@ test('a session revocation ends the stream at once; expiry at the next heartbeat
   const user = { kind: 'user', userId: 'u', role: 'owner', sessionId: 's1', verification: 'verified' } as const;
   const deps = {
     sessionLive: async (sid: string, userId: string) => { checked = `${sid}/${userId}`; return live; },
-    adminSession: async () => null,
   };
   const session = streamSessionOf(new Request('http://x/'), user, deps)!;
   let ended = 0;
@@ -207,7 +206,6 @@ test('manifest-edit refuses a permission change on a system app (Phase 6 overlay
   const auth = {
     version: Number.MAX_SAFE_INTEGER,
     apiKeys: { verify: async () => null },
-    admin: { verifySession: async (t: string) => (t === 'aura-admin1.ok' ? { sessionId: 'a1', expiresAt: Date.now() + 60_000 } : null) },
     audit: { record: async () => undefined },
   };
   const mgr = {
@@ -220,7 +218,7 @@ test('manifest-edit refuses a permission change on a system app (Phase 6 overlay
   };
   await withGlobals({ [MANAGER]: mgr, [AUTH_SERVICES]: auth }, async () => {
     const call = async (body: unknown) => {
-      const res = await manifestEditRoute({ request: post('http://x/api/admin/manifest-edit', body, { authorization: 'Bearer aura-admin1.ok' }) } as never) as Response;
+      const res = await manifestEditRoute({ request: post('http://x/api/admin/manifest-edit', body) } as never) as Response;
       return { status: res.status, body: await res.json() as { error?: string; message?: string } };
     };
     for (const action of ['add-permission', 'remove-permission']) {

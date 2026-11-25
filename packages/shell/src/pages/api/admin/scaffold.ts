@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync, chmodSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, normalize, dirname, resolve } from 'node:path';
 import { getAppManager } from '@aura/core';
-import { adminOf, auditAdmin } from '../../../lib/auth.js';
+import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
 
 /**
  * Server-side app scaffolding.
@@ -69,7 +69,8 @@ interface ScaffoldRequest {
   scope?: ScopeId;
 }
 
-export const POST: APIRoute = async ({ request, locals }) => {
+export const POST: APIRoute = async (ctx) => {
+  const { request } = ctx;
   let body: ScaffoldRequest;
   try { body = await request.json() as ScaffoldRequest; }
   catch { return json({ error: 'invalid-json' }, 400); }
@@ -105,11 +106,16 @@ export const POST: APIRoute = async ({ request, locals }) => {
     return json({ error: 'exists', message: `${dest} already exists. Pass force=true to overwrite.` }, 409);
   }
   // Overwriting an EXISTING app replaces the code that runs under its id —
-  // and with it whatever was granted to that id. That needs an admin session.
-  // Creating a new app does not.
+  // and with it whatever was granted to that id. That is the owner's decision
+  // on exactly these files (D50, lib/approvals/admin.ts). Creating a new app is not.
   if (existsSync(dest) && force) {
-    const admin = adminOf(locals);
-    await auditAdmin(admin, 'app.scaffold-overwrite', { target: `app:${appId}`, detail: { scope } });
+    const admin = await ownerAction(ctx, {
+      action: 'admin.change', level: 'session', payload: { op: 'scaffold.overwrite', appId, scope, files },
+      title: `Overwrite ${appId} with a new scaffold`,
+      details: [`Scope: ${scope}`, `Files: ${files.length}`, 'The code that runs under that app id is replaced.'],
+    });
+    if (admin instanceof Response) return admin;
+    await auditOwner(admin, 'app.scaffold-overwrite', { target: `app:${appId}`, detail: { scope } });
   }
 
   // Path traversal guard: every file's resolved path must stay under the

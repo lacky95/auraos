@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 // Namespace import: the running shell may cache a core build without newer exports.
 import * as core from '@aura/core';
-import { adminOf, auditAdmin, type AdminCaller } from '../../../lib/auth.js';
+import { auditOwner, ownerAction, type OwnerActor } from '../../../lib/approvals/admin.ts';
 
 /**
  * Origin ids of the installed apps — the engine behind `aura dev origin`.
@@ -12,10 +12,11 @@ import { adminOf, auditAdmin, type AdminCaller } from '../../../lib/auth.js';
  *                                 every app dir in every scope (shadowed ones too)
  *   POST { mode: 'assign', appIds?: string[], all?: true, scope? }
  *        → give apps WITHOUT an originId a new one. Never touches an existing
- *          originId, so no admin needed: it only records what an app already is.
+ *          originId, so no owner decision: it only records what an app already is.
  *   POST { mode: 'reassign', appIds: [one], scope?, originId? }
  *        → replace an app's originId: an explicit identity change (it stops
- *          being recognised as the artifact it was). Admin only, audited.
+ *          being recognised as the artifact it was). The owner's: from an app
+ *          it needs the owner's approval (D50, lib/approvals/admin.ts). Audited.
  *
  * System apps live in the immutable in-repo scope: they get their originId in
  * the AuraOS repo, never here. Lives in the shell for the same reason as
@@ -51,7 +52,8 @@ export const GET: APIRoute = async () => {
   catch (err) { return json({ error: 'app-manager-unavailable', message: (err as Error).message }, 503); }
 };
 
-export const POST: APIRoute = async ({ request, locals }) => {
+export const POST: APIRoute = async (context) => {
+  const { request } = context;
   let body: Body;
   try { body = await request.json() as Body; }
   catch { return json({ error: 'invalid-json' }, 400); }
@@ -67,13 +69,10 @@ export const POST: APIRoute = async ({ request, locals }) => {
   try { ctx = listRows(); }
   catch (err) { return json({ error: 'app-manager-unavailable', message: (err as Error).message }, 503); }
 
-  let admin: AdminCaller | null = null;
   if (mode === 'reassign') {
     if (!Array.isArray(body.appIds) || body.appIds.length !== 1 || body.all) {
       return json({ error: 'one-app', message: 'reassign changes the identity of ONE app — pass exactly one appId.' }, 400);
     }
-    // Only with an admin session (routeManifest.ts, variant `reassign`).
-    admin = adminOf(locals);
   } else if (body.originId !== undefined) {
     return json({ error: 'invalid-origin-id', message: 'assign generates the originId; pass one only with reassign.' }, 400);
   }
@@ -95,6 +94,21 @@ export const POST: APIRoute = async ({ request, locals }) => {
     }
   }
 
+  // A reassign is the owner's decision on exactly this app and id (D50).
+  let admin: OwnerActor | null = null;
+  if (mode === 'reassign') {
+    const t = targets[0]!;
+    const decided = await ownerAction(context, {
+      action: 'admin.change', level: 'session',
+      payload: { op: 'app-origin.reassign', appId: t.appId, scope: t.scope, originId: body.originId ?? null },
+      title: `Give ${t.appId} a new origin id`,
+      details: [`Scope: ${t.scope}`, `From: ${t.originId ?? 'none'}`, `To: ${body.originId ?? 'a new random id'}`,
+        'Updates and store installs stop recognising it as the app it was.'],
+    });
+    if (decided instanceof Response) return decided;
+    admin = decided;
+  }
+
   const results: Array<{ appId: string; scope: core.ScopeId; originId: string | null; previous: string | null; changed: boolean; skipped?: string }> = [];
   for (const t of targets) {
     if (!t.mutable) {
@@ -113,7 +127,7 @@ export const POST: APIRoute = async ({ request, locals }) => {
       results.push({ appId: t.appId, scope: t.scope, originId: r.originId, previous: r.previous, changed: r.changed });
       if (r.changed && t.active) { try { ctx.mgr.reloadManifest(t.appId); } catch { /* watcher reconciles */ } }
       if (r.changed && mode === 'reassign') {
-        await auditAdmin(admin, 'app.origin-reassign', {
+        await auditOwner(admin, 'app.origin-reassign', {
           target: `app:${t.appId}`, detail: { scope: t.scope, from: r.previous, to: r.originId },
         });
       }

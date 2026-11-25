@@ -414,8 +414,8 @@ test('session and whoami report only the verified principal', async () => {
 
 test('a session of another kind or a disabled owner is not a principal', async () => {
   const f = await withOwner();
-  const { token } = await f.services.loginSessions.issue({ method: 'shared-key', keyFingerprint: 'abc', userId: 'default' });
-  assert.equal((await (await authWhoami(get({ cookie: `aura_session=${token}` }), f.deps())).json()).login.state, 'signed-out');
+  // The retired shared-admin prefix (D50) never parses as a session.
+  assert.equal((await (await authWhoami(get({ cookie: 'aura_session=aura-admin1.a.b' }), f.deps())).json()).login.state, 'signed-out');
   const login = await authLogin(post({ username: 'lukas', password: PASSWORD }), f.deps());
   f.disableOwner();
   assert.deepEqual(await (await authSession(get({ cookie: `aura_session=${tokenOf(login)}` }), f.deps())).json(), { authenticated: false });

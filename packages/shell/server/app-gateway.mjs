@@ -14,8 +14,7 @@
  *     each other, so SameSite does not separate them)
  *   - mutations: exact Origin, plus a JSON content type or the CSRF token
  *   - request headers: an allowlist, so cookies, Authorization, X-Forwarded-*
- *     and any inbound identity never reach the shell. One exception: a trusted
- *     system UI acting for the owner (D45) may send an admin session bearer
+ *     and any inbound identity never reach the shell, with no exception
  *   - owner acting through a trusted system UI (D45): only the `system` copy of
  *     an app in OWNER_UI_APPS, on a host cookie bound to a live owner session,
  *     gets an `owner` field in its claim. Nothing in the request can set it
@@ -34,9 +33,6 @@ export const GATEWAY_MUX_PATH = `${OS_PREFIX}sse-mux`;
 export const GATEWAY_CSRF_PATH = `${OS_PREFIX}_csrf`;
 export const GATEWAY_CSRF_HEADER = 'x-aura-csrf';
 const RUNTIME_ROUTE = '/api/os/app-runtime.js';
-
-/** An admin session, the only Authorization a trusted system UI may pass on (lib/auth.ts). */
-const ADMIN_BEARER_RE = /^Bearer aura-admin1\.[A-Za-z0-9._~+/=-]{1,2048}$/;
 
 
 const FORWARDED_REQUEST_HEADERS = [
@@ -126,9 +122,6 @@ function shellHeaders(reqHeaders, claim) {
   for (const name of FORWARDED_REQUEST_HEADERS) {
     if (reqHeaders[name] !== undefined) headers[name] = reqHeaders[name];
   }
-  // An admin session the shell's own unlock dialog handed to a trusted UI.
-  const auth = reqHeaders.authorization;
-  if (claim.owner && typeof auth === 'string' && ADMIN_BEARER_RE.test(auth)) headers.authorization = auth;
   headers[GATEWAY_IDENTITY_HEADER] = signGatewayClaim(claim);
   headers['x-aura-app-id'] = claim.appId;
   headers['x-aura-instance-id'] = claim.instanceId;

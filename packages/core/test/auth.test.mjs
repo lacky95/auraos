@@ -5,19 +5,19 @@
 // Covers: the Authorizer matrix, grants / revokes taking effect live in the
 // NotificationService (downgrade ↔ accepted, no restart), `system.notifications`
 // enforcement, ownership + read scoping, API keys (create / verify / revoke),
-// admin sessions (TTL, lock, rotation, bad credentials), the audit stream,
+// the owner's attribution (D50: no shared admin credential), the audit stream,
 // the rate limit, waitFor, and that a declared actor name never changes a result.
 import { test, after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, statSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { KvServer, KvClient, createRedis } from '@aura/kv-store';
 import {
-  Authorizer, GrantStore, ApiKeyStore, AdminAuth, AdminAudit,
-  SYSTEM_PRINCIPAL, ADMIN_AUDIT_LABEL, PRIVILEGED_PERMISSIONS, GrantError, ApiKeyError,
-  adminAttribution, rotateAdminCredential, readAdminCredential, API_KEY_PATTERN, terminalSessionScope,
+  Authorizer, GrantStore, ApiKeyStore, AdminAudit,
+  SYSTEM_PRINCIPAL, PRIVILEGED_PERMISSIONS, GrantError, ApiKeyError,
+  userAttribution, operatorAttribution, API_KEY_PATTERN, terminalSessionScope,
 } from '../dist/auth/index.js';
 import { NotificationService, NotificationError } from '../dist/notifications/index.js';
 import { ENFORCED_PERMISSIONS } from '../dist/permissions/PermissionManager.js';
@@ -44,9 +44,9 @@ const apps = new Map([
 ]);
 const inst = (appId, n = 1) => ({ kind: 'instance', appId, instanceId: `${appId}-${n}`, verification: 'verified' });
 const ANON = { kind: 'anonymous', verification: 'unverified' };
-const ADMIN = { kind: 'admin', credential: 'shared', sessionId: '0123456789abcdef', verification: 'verified' };
+const OWNER = { kind: 'user', userId: 'default', role: 'owner', sessionId: '0123456789abcdef', verification: 'verified' };
 
-let grants, keys, authz, svc, admin, audit;
+let grants, keys, authz, svc, audit;
 
 before(async () => {
   const uri = await server.start({ dataDir: join(DATA_DIR, 'kv') });
@@ -61,7 +61,6 @@ before(async () => {
     appScope: (id) => apps.get(id)?.scope,
   });
   svc = new NotificationService({ redis, now, authorizer: authz });
-  admin = new AdminAuth({ keyFile: join(DATA_DIR, 'secrets', 'admin.key'), redis: r, now });
 });
 
 after(async () => {
@@ -79,26 +78,23 @@ async function rejectsStatus(p, status, re) {
   });
 }
 
-const by = adminAttribution(ADMIN);
+const by = userAttribution(OWNER);
 
 // ---------------------------------------------------------------------------
 // Authorizer matrix
 // ---------------------------------------------------------------------------
 
-test('Authorizer matrix: system / admin / instance / apiKey / anonymous', async () => {
+test('Authorizer matrix: system / owner / instance / apiKey / anonymous', async () => {
   const a = (p, act) => authz.authorize(p, act).then((d) => d.allow);
   // system: everything; a JSON look-alike: nothing
   assert.equal(await a(SYSTEM_PRINCIPAL, 'notifications.locked'), true);
   assert.equal(await a(SYSTEM_PRINCIPAL, 'admin.grants'), true);
   const fake = JSON.parse(JSON.stringify(SYSTEM_PRINCIPAL));
   assert.equal(await a(fake, 'system.notifications'), false);
-  // admin: management only
-  assert.equal(await a(ADMIN, 'admin.grants'), true);
-  assert.equal(await a(ADMIN, 'admin.apiKeys'), true);
-  assert.equal(await a(ADMIN, 'system.notifications'), false);
-  assert.equal(await a(ADMIN, 'notifications.locked'), false);
-  // nobody else gets admin actions
-  for (const p of [inst('com.example.priv'), ANON]) assert.equal(await a(p, 'admin.grants'), false);
+  // the owner is not a sender, and `admin.*` is nobody's permission (D50: the routes decide)
+  assert.equal(await a(OWNER, 'system.notifications'), false);
+  assert.equal(await a(OWNER, 'notifications.locked'), false);
+  for (const p of [OWNER, inst('com.example.priv'), ANON]) assert.equal(await a(p, 'admin.grants'), false);
   // instance: declared system.notifications is enough; not declared → deny (enforced)
   assert.equal(await a(inst('com.example.basic'), 'system.notifications'), true);
   assert.equal(await a(inst('com.example.mute'), 'system.notifications'), false);
@@ -120,7 +116,7 @@ test('Authorizer matrix: system / admin / instance / apiKey / anonymous', async 
 
 test('a declared actor name never changes a decision', async () => {
   const names = ['admin', 'root', 'system', 'AuraOS', 'com.example.priv', 'claude'];
-  for (const p of [inst('com.example.basic'), inst('com.example.mute'), inst('com.example.priv'), ANON, ADMIN]) {
+  for (const p of [inst('com.example.basic'), inst('com.example.mute'), inst('com.example.priv'), ANON, OWNER]) {
     for (const action of ['system.notifications', 'notifications.locked', 'notifications.popup', 'admin.grants']) {
       const base = await authz.authorize(p, action);
       for (const name of names) {
@@ -143,7 +139,7 @@ test('GrantStore: validation, idempotence, listing, permissions:changed events',
     const g1 = await grants.grant(s, 'notifications.popup', { by, appScope: 'user' });
     assert.equal(g1.changed, true);
     assert.deepEqual(g1.record.scope, { kind: 'os' });
-    assert.equal(g1.record.grantedBy.label, ADMIN_AUDIT_LABEL);
+    assert.deepEqual(g1.record.grantedBy, by);
     const g2 = await grants.grant(s, 'notifications.popup', { by, appScope: 'user' });
     assert.equal(g2.changed, false);
     assert.equal((await grants.listFor(s)).length, 1);
@@ -174,8 +170,8 @@ test('system.notifications is enforced: 403 without it, ok when declared', async
   const a = await svc.create({ title: 'anon', type: 'locked' }, ANON);
   assert.equal(a.notification.type, 'simple');
   assert.equal(a.notification.sender.attribution, 'unverified');
-  // an admin session is not a sender
-  await rejectsStatus(svc.create({ title: 'admin' }, ADMIN), 403, /admin/);
+  // the owner reads, it does not send
+  await rejectsStatus(svc.create({ title: 'owner' }, OWNER), 403, /owner/);
 });
 
 test('privileged features: downgraded until granted, accepted at once, downgraded again after revoke', async () => {
@@ -237,7 +233,7 @@ test('ownership: a verified sender changes only its own notifications', async ()
   assert.equal(removed.removedReason, 'completed');
 });
 
-test('read scoping: verified apps / API keys see only their own; admin + in-process see all; anonymous without a client session sees nothing (phase 5)', async () => {
+test('read scoping: verified apps / API keys see only their own; the owner + in-process see all; anonymous without a client session sees nothing (phase 5)', async () => {
   const A = inst('com.example.basic');
   const B = inst('com.example.other');
   const a = (await svc.create({ title: 'A-only' }, A)).notification;
@@ -247,7 +243,7 @@ test('read scoping: verified apps / API keys see only their own; admin + in-proc
   const la = await svc.list({ state: 'all', limit: 200 }, A);
   assert.ok(la.items.length > 0 && la.items.every((n) => n.senderKey === 'app:com.example.basic'));
   assert.deepEqual((await svc.list({ sender: 'app:com.example.other' }, A)).items, []);
-  for (const viewer of [ADMIN, undefined]) {
+  for (const viewer of [OWNER, undefined]) {
     assert.ok(await svc.get(b.id, viewer));
     const ids = (await svc.list({ state: 'all', limit: 200 }, viewer)).items.map((n) => n.id);
     assert.ok(ids.includes(a.id) && ids.includes(b.id));
@@ -300,86 +296,19 @@ test('API keys: create (shown once, hash stored) → verify → verified sender 
 });
 
 // ---------------------------------------------------------------------------
-// Admin sessions
+// Audit (D50: the owner or the operator, never a shared credential)
 // ---------------------------------------------------------------------------
 
-test('admin credential: created 0600 outside Valkey; unlock → session; bad credentials refused', async () => {
-  const { created, keyFile } = admin.ensure();
-  assert.equal(created, true);
-  assert.equal(statSync(keyFile).mode & 0o777, 0o600);
-  assert.equal(admin.ensure().created, false);
-  const cred = readAdminCredential(keyFile);
-  assert.match(cred, /^aura_admin_/);
-
-  for (const bad of ['', 'aura_admin_wrong', cred.slice(0, -1), null, 42]) {
-    const r = await admin.unlock(bad);
-    assert.equal(r.ok, false);
-  }
-  const s = await admin.unlock(cred);
-  assert.equal(s.ok, true);
-  assert.match(s.token, /^aura-admin1\./);
-  assert.equal(s.expiresAt, clock + 15 * 60_000);
-  assert.deepEqual(await admin.verifySession(s.token), { sessionId: s.sessionId, expiresAt: s.expiresAt });
-  // tampering → null
-  const [p0, p1, p2] = s.token.split('.');
-  const forged = Buffer.from(JSON.stringify({ s: s.sessionId, e: s.expiresAt + 3_600_000, f: 'x' })).toString('base64url');
-  assert.equal(await admin.verifySession(`${p0}.${forged}.${p2}`), null);
-  assert.equal(await admin.verifySession(`${p0}.${p1}.AAAA`), null);
-  assert.equal(await admin.verifySession('aura-admin1.garbage'), null);
-  assert.equal(await admin.verifySession(null), null);
-  // the credential never reaches Valkey
-  const keysInKv = await redis.keys('*');
-  for (const k of keysInKv) {
-    const type = await redis.type(k);
-    if (type === 'string') assert.equal(String(await redis.get(k)).includes(cred), false, k);
-  }
-});
-
-test('admin session: TTL, lock, and rotation revoke sessions', async () => {
-  const cred = readAdminCredential(admin.keyFile);
-  const s1 = await admin.unlock(cred);
-  clock += 15 * 60_000 + 1;
-  assert.equal(await admin.verifySession(s1.token), null, 'expired');
-  const s2 = await admin.unlock(cred);
-  assert.ok(await admin.verifySession(s2.token));
-  assert.equal(await admin.lock(s2.sessionId), true);
-  assert.equal(await admin.verifySession(s2.token), null, 'locked');
-
-  const s3 = await admin.unlock(cred);
-  assert.ok(await admin.verifySession(s3.token));
-  const rotatedSeen = new Promise((resolve) => {
-    const a2 = new AdminAuth({ keyFile: admin.keyFile, redis: () => redis, now, onRotated: resolve });
-    a2.ensure();
-    // rotate on disk (what `aura admin rotate` does in the master container)
-    const fresh = rotateAdminCredential(admin.keyFile);
-    assert.notEqual(fresh, cred);
-    assert.equal(a2.verifyCredential(fresh), true);
-  });
-  const purged = await rotatedSeen;
-  assert.ok(purged >= 1);
-  assert.equal(await admin.verifySession(s3.token), null, 'old token dead after rotation');
-  assert.equal((await admin.unlock(cred)).ok, false, 'old credential refused');
-  assert.equal((await admin.unlock(readAdminCredential(admin.keyFile))).ok, true);
-});
-
-test('admin unlock: failed attempts are rate limited, the right credential still works', async () => {
-  clock += 60_000;
-  let last;
-  for (let i = 0; i < 31; i++) last = await admin.unlock('aura_admin_nope');
-  assert.deepEqual(last, { ok: false, reason: 'rate-limited' });
-  assert.equal((await admin.unlock(readAdminCredential(admin.keyFile))).ok, true);
-});
-
-test('audit: entries are attributed to "admin (shared credential)", newest first', async () => {
+test('audit: entries name the owner or the host operator, newest first', async () => {
   await audit.record({ by, action: 'grant', target: 'app:com.example.priv', detail: { permission: 'notifications.locked' } });
-  await audit.record({ by, action: 'revoke', target: 'app:com.example.priv', detail: { permission: 'notifications.locked' } });
+  await audit.record({ by: operatorAttribution(), action: 'revoke', target: 'app:com.example.priv', detail: { permission: 'notifications.locked' } });
   const list = await audit.list(10);
   assert.equal(list[0].action, 'revoke');
-  assert.equal(list[0].actor, ADMIN_AUDIT_LABEL);
-  assert.equal(list[0].session, ADMIN.sessionId.slice(0, 8));
+  assert.equal(list[0].actor, 'operator');
+  assert.equal(list[0].session, undefined);
+  assert.equal(list[1].actor, 'user:default');
+  assert.equal(list[1].session, OWNER.sessionId.slice(0, 8));
   assert.deepEqual(list[1].detail, { permission: 'notifications.locked' });
-  const raw = readFileSync(admin.keyFile, 'utf-8').trim();
-  assert.equal(JSON.stringify(list).includes(raw), false);
 });
 
 // ---------------------------------------------------------------------------
@@ -480,7 +409,7 @@ test('rename: stored desktopModal grants migrate to systemModal (subject, scope,
 });
 
 test('terminal.embed, terminal.sessions.list and terminal.screen.read: requested AND owner-granted, per app, revocable', async () => {
-  const BY = adminAttribution(ADMIN);
+  const BY = userAttribution(OWNER);
   const app = { kind: 'app', id: 'com.example.embedder' };
   for (const perm of ['terminal.embed', 'terminal.sessions.list', 'terminal.screen.read']) {
     assert.ok(PRIVILEGED_PERMISSIONS.includes(perm) && ENFORCED_PERMISSIONS.includes(perm), perm);
@@ -504,7 +433,7 @@ test('terminal.embed, terminal.sessions.list and terminal.screen.read: requested
 });
 
 test('a Terminal session grant is its own record, and revoking the app grant drops it', async () => {
-  const BY = adminAttribution(ADMIN);
+  const BY = userAttribution(OWNER);
   const app = { kind: 'app', id: 'com.example.embedder' };
   const s1 = terminalSessionScope('com.aura.terminal-2#a3');
   const s2 = terminalSessionScope('com.aura.terminal-2#a4');
@@ -542,7 +471,7 @@ test('a Terminal session grant records the instance life it was made in, and not
 });
 
 test('an ended Terminal session takes every grant of it along, and nothing else', async () => {
-  const BY = adminAttribution(ADMIN);
+  const BY = userAttribution(OWNER);
   const a = { kind: 'app', id: 'com.example.embedder' };
   const b = { kind: 'app', id: 'com.example.basic' };
   const s1 = terminalSessionScope('com.aura.terminal-2#a3');
@@ -567,7 +496,7 @@ test('an ended Terminal session takes every grant of it along, and nothing else'
 
 // ── Phase 3: system.kv.os.<topic>.write needs a grant, not just a declaration ──
 
-test('declaring system.kv.os.<topic>.write grants nothing; an admin grant does', async () => {
+test('declaring system.kv.os.<topic>.write grants nothing; the owner\'s grant does', async () => {
   const themer = inst('com.example.themer');
   const subject = { kind: 'app', id: 'com.example.themer' };
   const before = await authz.authorize(themer, 'system.kv.os.theme.write');

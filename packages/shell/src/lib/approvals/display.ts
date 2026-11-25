@@ -15,6 +15,11 @@ import type { ApprovalDisplay, ApprovalLevel, ApprovalRequester, InstallBinding,
 const RISKY_TOOLS: ReadonlySet<string> = new Set(['docker', '*']);
 const RISKY_PERMISSIONS: ReadonlySet<string> = new Set(['sidecars.privileged', 'sidecars.anyImage']);
 
+/** A tool whose grant needs the password (D9): docker, or every tool. */
+export const isRiskyTool = (tool: string): boolean => RISKY_TOOLS.has(tool);
+/** A permission that lets an app start privileged or arbitrary sidecar images. */
+export const isRiskyPermission = (permission: string): boolean => RISKY_PERMISSIONS.has(permission);
+
 const MAX_REASON = 300;
 const MAX_LINE = 400;
 const clip = (s: string, n = MAX_LINE) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -43,8 +48,7 @@ export function requesterReason(raw: unknown): string | undefined {
 // ── nexus.install / nexus.update ────────────────────────────────────────────
 
 export function installLevel(binding: InstallBinding): ApprovalLevel {
-  return binding.tools.some((t) => RISKY_TOOLS.has(t)) || binding.permissions.some((p) => RISKY_PERMISSIONS.has(p))
-    ? 'fresh' : 'session';
+  return binding.tools.some(isRiskyTool) || binding.permissions.some(isRiskyPermission) ? 'fresh' : 'session';
 }
 
 export function installDisplay(binding: InstallBinding, diff: PermissionDiff, requestedBy: string): ApprovalDisplay {
@@ -67,7 +71,7 @@ export function installDisplay(binding: InstallBinding, diff: PermissionDiff, re
   details.push(`All permissions: ${binding.permissions.length ? list(binding.permissions) : 'none'}`);
   if (binding.tools.includes('docker')) details.push('Warning: docker controls the container runtime, which is root on the host.');
   else if (binding.tools.includes('*')) details.push('Warning: * grants every tool AuraOS can provide.');
-  if (binding.permissions.some((p) => RISKY_PERMISSIONS.has(p))) details.push('Warning: it may start privileged or arbitrary sidecar images.');
+  if (binding.permissions.some(isRiskyPermission)) details.push('Warning: it may start privileged or arbitrary sidecar images.');
   return { title: clip(title), details: details.map((d) => clip(d)), requestedBy };
 }
 
@@ -147,4 +151,11 @@ export function agentHooksDisplay(change: AgentHooksChange, requestedBy: string)
     ],
     requestedBy,
   };
+}
+
+// ── admin.* (D50): the owner's management routes ────────────────────────────
+
+/** What an owner-management request shows: its own title and facts, built by the route from what it validated. */
+export function adminDisplay(title: string, details: readonly string[], requestedBy: string): ApprovalDisplay {
+  return { title: clip(title), details: details.map((d) => clip(d)), requestedBy };
 }

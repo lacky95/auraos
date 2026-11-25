@@ -39,11 +39,10 @@ import { followSession, streamSessionOf } from '../../../lib/streamSession.ts';
  *     are skipped entirely;
  *   - anonymous WITHOUT a client session: nothing (the stream stays open
  *     with heartbeats only);
- *   - admin sessions: everything.
+ *   - the host operator: everything.
  * An invalid credential → 401.
  *
- * A stream opened on a sign-in (the desktop's login, an App Host frame, an
- * admin session) ends when that sign-in is revoked or expires
+ * A stream opened on a sign-in (the desktop's login, an App Host frame) ends when that sign-in is revoked or expires
  * (lib/streamSession.ts); the client reconnects through the checks above.
  */
 const EVENT_NAMES = [

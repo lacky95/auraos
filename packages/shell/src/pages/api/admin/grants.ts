@@ -2,12 +2,16 @@ import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { jsonResponse } from '../../../lib/appResponse.js';
 import { readJson } from '../../../lib/notificationCaller.js';
-import { adminOf, adminRecordBy, auditAdmin } from '../../../lib/auth.js';
+import { auditOwner, grantLevel, ownerAction } from '../../../lib/approvals/admin.ts';
 import { ownerUiApp } from '../../../../server/gateway-identity.mjs';
 
 /**
- * Admin grants of privileged permissions (core auth `GrantStore`).
- * Every method needs an admin session (`Authorization: Bearer aura-admin1.…`).
+ * The owner's grants of privileged permissions (core auth `GrantStore`).
+ * Who may call (D50, lib/approvals/admin.ts): the owner in the desktop and the
+ * host operator directly; Settings reads directly and asks the owner's
+ * approval for a change; the CLI in the System Terminal asks for every call
+ * (202 needs-approval, then the same request with `X-Aura-Approval`). A grant
+ * needs the password (`fresh`), a revoke or a read one click.
  *
  *   GET    → { privileged, grants: GrantRecord[], apps: [{appId, name, scope,
  *             requested: [...], granted: [...], effective: [...], asOwner?: [...]}] }
@@ -22,7 +26,8 @@ import { ownerUiApp } from '../../../../server/gateway-identity.mjs';
  *   DELETE {subjectKind, subjectId, permission} (body or query) → revoke
  *
  * Takes effect on the very next request (no restart); emits
- * `permissions:changed`; audited as "admin (shared credential)".
+ * `permissions:changed`; the record and the audit name the owner (or the
+ * operator) who decided, and the requester of an approved request.
  * Grantable: notifications.locked, notifications.popup, notifications.read,
  * notifications.systemModal (phase 6; revoking it releases that sender's modals).
  * An app must also REQUEST the permission in its manifest for the grant to count.
@@ -58,7 +63,9 @@ export function asOwnerPermissions(appId: string, scope: string | null, declared
   return declared.filter((x) => core.KV_OS_WRITE_PERMISSION_RE.test(x));
 }
 
-export const GET: APIRoute = async () => {
+export const GET: APIRoute = async (ctx) => {
+  const actor = await ownerAction(ctx, { action: 'admin.read', payload: { view: 'grants' }, level: 'session', title: 'Show the permission grants' });
+  if (actor instanceof Response) return actor;
   const { grants, authorizer } = core.getAuthServices();
   const all = await grants.listAll();
   const mgr = core.getAppManager();
@@ -91,8 +98,8 @@ export const GET: APIRoute = async () => {
   return jsonResponse({ privileged: core.PRIVILEGED_PERMISSIONS, grants: all, apps });
 };
 
-export const POST: APIRoute = async ({ request, url, locals }) => {
-  const p = adminOf(locals);
+export const POST: APIRoute = async (ctx) => {
+  const { request, url } = ctx;
   const a = await subjectArgs(request, url);
   if (a instanceof Response) return a;
   const { grants, apiKeys } = core.getAuthServices();
@@ -111,26 +118,42 @@ export const POST: APIRoute = async ({ request, url, locals }) => {
     if (!k) return jsonResponse({ error: `unknown API key ${a.id}` }, 404);
     if (k.revokedAt) return jsonResponse({ error: `API key ${a.id} is revoked` }, 409);
   }
+  const readArg = a.src['readScope'] ?? (a.permission === 'notifications.read' ? a.src['scope'] : undefined);
+  const read = a.permission === 'notifications.read' && readArg !== undefined
+    ? { scope: readArg, includeSecret: a.src['includeSecret'] === true || a.src['includeSecret'] === 'true' }
+    : undefined;
+  const actor = await ownerAction(ctx, {
+    action: 'admin.grant', level: grantLevel(a.permission),
+    payload: { subjectKind: a.kind, subjectId: a.id, permission: a.permission, ...(read ? { read } : {}) },
+    title: `Grant ${a.id} ${a.permission}`,
+    details: [
+      `${a.kind === 'apiKey' ? 'API key' : 'App'}: ${a.id}${appScope ? ` (${appScope} scope)` : ''}`,
+      ...(read ? [`Reads: ${typeof read.scope === 'string' ? read.scope : JSON.stringify(read.scope)}${read.includeSecret ? ', secret items included' : ''}`] : []),
+      ...warnings,
+    ],
+  });
+  if (actor instanceof Response) return actor;
   try {
-    const readArg = a.src['readScope'] ?? (a.permission === 'notifications.read' ? a.src['scope'] : undefined);
-    const read = a.permission === 'notifications.read' && readArg !== undefined
-      ? { scope: readArg, includeSecret: a.src['includeSecret'] === true || a.src['includeSecret'] === 'true' }
-      : undefined;
-    const r = await grants.grant({ kind: a.kind as 'app' | 'apiKey', id: a.id }, a.permission, { by: adminRecordBy(p), appScope, ...(read ? { read } : {}) });
-    await auditAdmin(p, 'grant', { target: `${a.kind}:${a.id}`, detail: { permission: a.permission, appScope: appScope ?? null, changed: r.changed, ...(r.record.read ? { read: core.GrantStore.describeRead(r.record) } : {}) } });
+    const r = await grants.grant({ kind: a.kind as 'app' | 'apiKey', id: a.id }, a.permission, { by: actor.by, appScope, ...(read ? { read } : {}) });
+    await auditOwner(actor, 'grant', { target: `${a.kind}:${a.id}`, detail: { permission: a.permission, appScope: appScope ?? null, changed: r.changed, ...(r.record.read ? { read: core.GrantStore.describeRead(r.record) } : {}) } });
     return jsonResponse({ ok: true, ...r, warnings });
   } catch (err) {
     return fail(err);
   }
 };
 
-export const DELETE: APIRoute = async ({ request, url, locals }) => {
-  const p = adminOf(locals);
-  const a = await subjectArgs(request, url);
+export const DELETE: APIRoute = async (ctx) => {
+  const a = await subjectArgs(ctx.request, ctx.url);
   if (a instanceof Response) return a;
+  const actor = await ownerAction(ctx, {
+    action: 'admin.revoke', level: 'session',
+    payload: { subjectKind: a.kind, subjectId: a.id, permission: a.permission },
+    title: `Revoke ${a.permission} from ${a.id}`,
+  });
+  if (actor instanceof Response) return actor;
   try {
     const removed = await core.getAuthServices().grants.revoke({ kind: a.kind as 'app' | 'apiKey', id: a.id }, a.permission);
-    await auditAdmin(p, 'revoke', { target: `${a.kind}:${a.id}`, detail: { permission: a.permission, changed: !!removed } });
+    await auditOwner(actor, 'revoke', { target: `${a.kind}:${a.id}`, detail: { permission: a.permission, changed: !!removed } });
     return jsonResponse({ ok: true, changed: !!removed, removed });
   } catch (err) {
     return fail(err);

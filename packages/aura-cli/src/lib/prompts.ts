@@ -771,3 +771,31 @@ export async function promptMultiSelect<T>(
     draw();
   });
 }
+
+/** Read a line without echo (TTY only): a password, never argv. */
+export async function promptSecret(question: string): Promise<string> {
+  if (!stdin.isTTY) throw new Error('no TTY for a prompt');
+  process.stderr.write(question);
+  return new Promise((resolve, reject) => {
+    let buf = '';
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.setEncoding('utf8');
+    const done = (err?: Error) => {
+      stdin.setRawMode(false);
+      stdin.pause();
+      stdin.off('data', onData);
+      process.stderr.write('\n');
+      if (err) reject(err); else resolve(buf.trim());
+    };
+    const onData = (chunk: string) => {
+      for (const ch of chunk) {
+        if (ch === '\r' || ch === '\n') return done();
+        if (ch === '\u0003') return done(new Error('cancelled'));
+        if (ch === '\u007f' || ch === '\b') { buf = buf.slice(0, -1); continue; }
+        buf += ch;
+      }
+    };
+    stdin.on('data', onData);
+  });
+}

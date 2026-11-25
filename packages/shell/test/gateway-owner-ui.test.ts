@@ -255,14 +255,10 @@ test('Nexus install: only the owner through system Nexus, and fresh auth still a
   assert.equal((await install(nexus, undefined, fresh))?.status, 403);
 });
 
-// ── authenticate(): the admin session from the shell's unlock dialog ───────
+// ── authenticate(): through the gateway a bearer is nothing (D50) ──────────
 
-test('authenticate(): an admin bearer counts only through the owner path', async () => {
-  const deps = {
-    mgr, ownerServices,
-    apiKeys: { verify: async () => null },
-    admin: { verifySession: async (t: string) => (t === 'aura-admin1.good' ? { sessionId: 'adm-1', expiresAt: 9e15 } : null) },
-  } as unknown as AuthDeps;
+test('authenticate(): a retired admin bearer through the gateway changes nothing: the owner path or the instance', async () => {
+  const deps = { mgr, ownerServices, apiKeys: { verify: async () => null } } as unknown as AuthDeps;
   const req = (c: Caller, bearer: string, owner: GatewayIdentityClaim['owner'] | null = OWNER) => {
     const path = '/api/admin/grants';
     return new Request(`http://127.0.0.1:3000${path}`, {
@@ -272,10 +268,8 @@ test('authenticate(): an admin bearer counts only through the owner path', async
       },
     });
   };
-  assert.deepEqual(await authenticate(req(settings, 'aura-admin1.good'), deps),
-    { kind: 'admin', credential: 'shared', sessionId: 'adm-1', verification: 'verified' });
-  const bad = await authenticate(req(settings, 'aura-admin1.bad'), deps);
-  assert.ok(bad instanceof Response && bad.status === 401);
+  const owner = await authenticate(req(settings, 'aura-admin1.good'), deps);
+  assert.ok(!(owner instanceof Response) && owner.kind === 'user' && owner.through?.appId === SETTINGS, JSON.stringify(owner));
   for (const r of [
     req(notes, 'aura-admin1.good'),
     req(settings, 'aura-admin1.good', null),
@@ -287,18 +281,11 @@ test('authenticate(): an admin bearer counts only through the owner path', async
   }
 });
 
-test('authenticate(): an admin bearer counts only on a path the trusted UI covers (the one D45 scope)', async () => {
-  const deps = {
-    mgr, ownerServices,
-    apiKeys: { verify: async () => null },
-    admin: { verifySession: async (t: string) => (t === 'aura-admin1.good' ? { sessionId: 'adm-1', expiresAt: 9e15 } : null) },
-  } as unknown as AuthDeps;
+test('authenticate(): the owner through a trusted UI only on a path it covers (the one D45 scope)', async () => {
+  const deps = { mgr, ownerServices, apiKeys: { verify: async () => null } } as unknown as AuthDeps;
   const req = (c: Caller, path: string, method = 'GET') => new Request(`http://127.0.0.1:3000${path}`, {
     method,
-    headers: {
-      [GATEWAY_IDENTITY_HEADER]: signGatewayClaim(claim(c, method, path, { owner: OWNER })),
-      authorization: 'Bearer aura-admin1.good',
-    },
+    headers: { [GATEWAY_IDENTITY_HEADER]: signGatewayClaim(claim(c, method, path, { owner: OWNER })) },
   });
   // Nexus covers `apps` and `nexus` only: not the admin API.
   for (const [c, path] of [
@@ -309,7 +296,7 @@ test('authenticate(): an admin bearer counts only on a path the trusted UI cover
   }
   for (const [c, path] of [[settings, '/api/admin/grants'], [nexus, '/api/apps/com.acme.notes/start'], [nexus, '/api/os/ui/command']] as Array<[Caller, string]>) {
     const p = await authenticate(req(c, path, 'POST'), deps);
-    assert.ok(!(p instanceof Response) && p.kind === 'admin', `${c.appId} ${path}`);
+    assert.ok(!(p instanceof Response) && p.kind === 'user', `${c.appId} ${path}`);
   }
 });
 
@@ -369,11 +356,11 @@ async function forwarded(c: ReturnType<typeof gatewayCtx>, headers: Record<strin
   return { claim: verifyGatewayClaim(String(h[GATEWAY_IDENTITY_HEADER]), { method: 'GET', path: '/api/admin/grants' }), authorization: h.authorization };
 }
 
-test('gateway: system Settings on a live session gets the owner claim and may pass an admin session', async () => {
+test('gateway: system Settings on a live session gets the owner claim, and no Authorization passes (D50)', async () => {
   const out = await forwarded(gatewayCtx(SETTINGS, 'inst-settings'), { authorization: 'Bearer aura-admin1.abc.def' });
   assert.deepEqual(out.claim?.owner, OWNER);
-  assert.equal(out.authorization, 'Bearer aura-admin1.abc.def');
-  // Any other Authorization still stays behind.
+  assert.equal(out.authorization, undefined);
+  // Nor any other Authorization.
   assert.equal((await forwarded(gatewayCtx(SETTINGS, 'inst-settings'), { authorization: 'Bearer aura_k1_key' })).authorization, undefined);
 });
 
@@ -393,7 +380,7 @@ test('gateway: no owner claim and no Authorization for anyone else', async () =>
   }
 });
 
-test('gateway: no owner claim or admin session outside the paths the trusted UI covers', async () => {
+test('gateway: no owner claim outside the paths the trusted UI covers', async () => {
   ctx = gatewayCtx(NEXUS, 'inst-nexus');
   seen.length = 0;
   assert.equal(await call('/_aura/os/api/admin/grants', { authorization: 'Bearer aura-admin1.abc.def' }), 200);

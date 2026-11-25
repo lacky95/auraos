@@ -20,7 +20,7 @@ const mgr = {
   getInstance: (id: string) => instances.get(id),
   getInstancesByApp: (appId: string) => [...instances.values()].filter((i) => i.appId === appId),
 } as never;
-const deps: AuthDeps = { mgr, apiKeys: { verify: async () => null }, admin: { verifySession: async () => null } };
+const deps: AuthDeps = { mgr, apiKeys: { verify: async () => null } };
 
 const req = (headers: Record<string, string> = {}) => new Request('http://aura-shell:3000/api/notifications', { method: 'POST', headers });
 

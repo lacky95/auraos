@@ -367,14 +367,14 @@ Placement, blocking and opening by itself are separate permissions:
 - **Revocation releases blocking:** revoking `systemModal`, disabling or uninstalling the app releases each of its active
   system modals at once (blocking off, scope auto, reason `permission-revoked`); every client lets go immediately. A
   startup / periodic sweep does the same for modals whose grant went away while the shell was down.
-- **Admin escape hatch:** `aura admin notif release <id>` or `aura admin notif release --app <appId>` (reason
+- **Owner escape hatch:** `aura admin notif release <id>` or `aura admin notif release --app <appId>` (reason
   `admin-released`). The user op is `POST /api/notifications/<id>/force-hide`.
 
 #### Desktop-modal limit
 
 Each sender may keep at most **5 blocking system modals per 10 minutes** by default; beyond that the request is
 downgraded to a normal dialogue. The user changes it in **Settings → Notifications & access → System modals** (no
-admin unlock — it is a preference, stored in `os/notifications`):
+approval needed — it is a preference, stored in `os/notifications`):
 
 ```json
 { "systemModal": { "limit": 5, "windowMinutes": 10, "perSender": { "app:com.example.ops": "unlimited", "app:com.example.chatty": 1 } } }
@@ -444,15 +444,15 @@ another app's window gets no badge and no in-window panel.
 - A sender changes and removes only its **own** notifications. Every sender
   is limited to 30 creates per minute (429 beyond).
 
-### Admin login, grants and API keys
+### Grants and API keys
 
-Privileged grants and API keys need an **admin session**. There is one shared
-operator credential, kept in the master container at
-`/data/aura/secrets/admin.key`. It is never logged.
+Privileged grants and API keys are the **owner's** (there is no shared
+admin credential any more). From the Terminal each command asks for your
+approval in the desktop and waits: one click, or your password for a
+privileged grant or a new API key. On the host
+(`docker exec -it aura-shell aura …`) they run directly.
 
 ```sh
-aura admin login              # credential from AURA_ADMIN_CREDENTIAL, the master key file, or a prompt
-aura admin status
 aura get nperm                # requested vs granted vs effective, per app
 aura grant nperm com.example.app locked popup
 aura grant nperm com.example.dash read --scope app:com.example.notes
@@ -461,15 +461,14 @@ aura revoke nperm com.example.app popup
 aura apikey create ci-bot     # Bearer aura_k1_… — the secret is shown once
 aura apikey ls
 aura apikey revoke <id>
-aura admin audit              # every admin action, with its actor
-aura admin logout
+aura admin audit              # every change, with the owner or operator who made it
 ```
 
-- Admin sessions last 15 minutes. `aura admin credential` prints the credential and
-  `aura admin rotate` replaces it; both work only in the master container (`aura jump -m`).
-- In the UI: **Settings → Notifications & access**. It is unlocked with the credential; the
-  session is kept in memory only and locks itself after 15 minutes. It has the grant toggles,
-  the READS OTHERS column, API keys, the audit log, and lock-screen and history settings.
+- In the UI: **Settings → Notifications & access**, as the signed-in owner. Each change opens
+  AuraOS's approval dialog. It has the grant toggles, the READS OTHERS column, API keys, the
+  audit log, and lock-screen and history settings.
+- The old `admin.key` file in `/data/aura/secrets/` is no longer used. It is left in place for
+  now and removed in a later release.
 - An **API key** authenticates an external caller as a verified sender of kind `rest`.
   A key can get the locked / popup / read features by a grant to the key.
 
@@ -636,11 +635,11 @@ verified app:
 AuraOS's own system decisions (the system look, never hideable) are created
 only by the in-process system caller; apps request *app* system modals with
 the `systemModal` grant instead (see [System modals](#system-modals)). To
-see a real AuraOS decision on a **dev** shell, use the admin CLI. It calls a DEV-only hook that needs an admin session and is
-audited as `dev.systemDecision`:
+see a real AuraOS decision on a **dev** shell, use the CLI on the host. It calls a DEV-only hook that is the owner's
+(the host operator runs it directly) and is audited as `dev.systemDecision`:
 
 ```sh
-# master container (auto-login with the master key file)
+# on the host: the operator acts directly
 docker exec aura-shell aura admin dev system-decision \
   --title "Install the update now?" --options "Now,Tonight" --inputs "Reason" \
   --cancel-label "Not now" --submit-label "Install" --wait
@@ -655,7 +654,7 @@ docker exec aura-shell aura admin dev system-decision --json '{"title":"Allow?",
 - In the Notification Tester:
   - The preset "AuraOS system decision — via CLI" builds this command from the composer instead of sending.
   - The group "System modal (app)" tests app modals: opens automatically, waits in list, form, non-blocking (centred), force-hide (with repeated requests) and revocation.
-  - App pages never hold an admin session.
+  - App pages never hold a credential of the owner.
 
 ## Privacy note
 

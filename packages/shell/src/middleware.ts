@@ -45,17 +45,13 @@ async function ensureAppManager() {
     // skip this entirely. Idempotent.
     await bootstrapKv({ dataDir });
 
-    // Minimal admin auth: make sure the shared operator credential exists
-    // (<dataDir>/aura/secrets/admin.key, 0600, master container only). The
-    // secret itself is NEVER logged — only where to read it.
+    // D50: the shared admin credential is retired. Its leftover sessions go;
+    // admin.key stays on disk, unused, until a later release removes it.
+    // Never blocks boot.
     try {
-      const auth = core.getAuthServices?.();
-      const r = auth?.admin.ensure();
-      if (r?.created) {
-        console.log(`[auth] created the AuraOS admin credential at ${r.keyFile} — read it from the host: \`docker exec -it aura-shell aura admin credential\``);
-      }
+      void core.retireSharedAdminCredential(core.getAuthServices(), dataDir);
     } catch (err) {
-      console.warn(`[middleware] admin credential setup failed: ${(err as Error).message}`);
+      console.warn(`[middleware] retiring the admin credential failed: ${(err as Error).message}`);
     }
 
     // Notifications (store in the same Valkey): start the expiry sweeper.

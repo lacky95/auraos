@@ -86,7 +86,6 @@ export interface ObserverManager {
 
 export interface ObserverServices {
   apiKeys?: { peek?(key: string): Promise<{ id: string; name: string; scopes: string[] } | null> };
-  admin?: { peekSession?(token: string): Promise<{ sessionId: string } | null> };
   loginSessions?: Parameters<typeof ownerSessionOf>[1]['loginSessions'];
   users?: Parameters<typeof ownerSessionOf>[1]['users'];
   setupTickets?: { peek?(code: string, purpose: 'operator'): Promise<{ subject?: string } | null> };
@@ -103,22 +102,20 @@ interface Observed {
 // ── identity, without side effects ──────────────────────────────────────────
 
 /**
- * The resolver's inputs as the report reads them: API keys and admin sessions
- * are peeked (no last-used write, no rotation handling), and nothing that
+ * The resolver's inputs as the report reads them: API keys and operator
+ * tickets are peeked (no last-used write, nothing used up), and nothing that
  * needs Valkey is looked up while it is down.
  */
 export function observerPrincipalDeps(deps: ObserverDeps): PrincipalDeps {
   const svc = deps.services();
   const ready = deps.redisReady();
   const peekKey = svc?.apiKeys?.peek;
-  const peekSession = svc?.admin?.peekSession;
   const loginSessions = svc?.loginSessions;
   const users = svc?.users;
   const peekTicket = svc?.setupTickets?.peek;
   return {
     mgr: deps.mgr() as unknown as PrincipalDeps['mgr'],
     apiKeys: peekKey && ready ? { verify: (key) => peekKey.call(svc!.apiKeys, key) } : null,
-    admin: peekSession && ready ? { verifySession: (token) => peekSession.call(svc!.admin, token) } : null,
     login: loginSessions && users && ready ? {
       cookieToken: sessionCookieToken,
       ownerSession: async (token) => {
@@ -471,7 +468,7 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
     return {
       surface, subject: label(subject), method,
       variant: variant ? label(variant) : null,
-      principal: seen.principal.kind === 'admin' ? 'operator' : seen.principal.kind,
+      principal: seen.principal.kind,
       appId: knownApp(callerApp ?? targetApp) as AccessLabel | null,
       decision: result.outcome, reason: result.reason, status, via: seen.via,
       // A gateway call was already decided by enforceGateway, in every mode: a
@@ -520,7 +517,7 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
     const caller = principalApp(seen.principal) ?? seen.hintAppId;
     return {
       surface: surface.kind, subject: label(surface.id), method, variant: null,
-      principal: seen.principal.kind === 'admin' ? 'operator' : seen.principal.kind,
+      principal: seen.principal.kind,
       appId: knownApp(caller ?? appId) as AccessLabel | null,
       decision: result.outcome, reason: result.reason,
       status: statusClass(Number(o.status)), via: o.via ?? seen.via,

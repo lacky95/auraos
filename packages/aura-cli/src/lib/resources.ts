@@ -534,12 +534,13 @@ const short = (ps: string[]) => (ps.length ? ps.map((p) => p.replace('notificati
 
 /**
  * Privileged notification permissions (locked, popup, read, systemModal): the manifest
- * requests, an admin grants. Reading needs an admin session too.
+ * requests, the owner grants. Reading is an owner view too (D50: from a sandbox,
+ * one click in the desktop).
  */
 const notifPerms: ResourceDef<NotifPermRow> = {
   name: 'notif-perms',
   aliases: ['notif-perm', 'nperm'],
-  description: 'Privileged notification permissions: requested (manifest) vs granted (admin)',
+  description: 'Privileged notification permissions: requested (manifest) vs granted (owner)',
   verbs: ['get', 'grant', 'revoke'],
   scopes: ['app'],
   nameOf: (p) => p.app,

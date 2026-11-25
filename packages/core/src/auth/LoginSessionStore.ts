@@ -1,18 +1,14 @@
 /**
- * The one login-session mechanism, for password and shared-key sessions.
+ * The one login-session mechanism: the owner's password sessions.
  *
- *   token   <prefix>.<b64url {s,e,m,u?,f?}>.<b64url HMAC>
- *   prefix  `aura-sess1` for password sessions; `aura-admin1` for shared-key
- *           sessions, which is the prefix the shell and CLI route as admin.
- *           The prefix is covered by the MAC and must match the method, so a
- *           password session can never be relabelled as an admin session.
- *   HMAC    password: subkey of identity.key. shared-key: derived from the
- *           admin credential, so recovery never depends on identity.key. The
- *           method is part of the MAC input as well.
+ *   token   aura-sess1.<b64url {s,e,m,u}>.<b64url HMAC>
+ *   HMAC    subkey of identity.key; the prefix and the method are MAC input.
  *   nonce   usersess:<sid> in Valkey with the session's TTL; deleting it
  *           revokes the session.
- *   `f`     shared-key sessions only: must match the current credential, so a
- *           rotation invalidates them at once, even before the purge runs.
+ *
+ * The shared admin credential's `shared-key` sessions (`aura-admin1.`) are
+ * gone (D50). Their nonces left in Valkey are purged once on boot
+ * (`revokeLegacySharedKey`); a token that names one no longer parses.
  */
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Redis } from '@aura/kv-store';
@@ -24,8 +20,8 @@ import {
   type LoginSessions,
 } from './identityContracts.js';
 
-export const SHARED_KEY_SESSION_PREFIX = 'aura-admin1';
-export const SHARED_KEY_SESSION_TTL_MS = 15 * 60_000;
+/** The method of the retired shared-admin sessions (D50), for the boot purge only. */
+export const LEGACY_SHARED_KEY_METHOD = 'shared-key';
 export const PASSWORD_SESSION_TTL_MS = 12 * 60 * 60_000;
 export const STAY_SIGNED_IN_TTL_MS = 30 * 24 * 60 * 60_000;
 export const loginSessionKey = (sid: string) => `usersess:${sid}`;
@@ -33,99 +29,56 @@ export const loginSessionKey = (sid: string) => `usersess:${sid}`;
 const SESSION_ID_RE = /^[0-9a-f]{32}$/;
 const MAX_TOKEN_LENGTH = 2048;
 
-interface Nonce { m: LoginMethod; u?: string; createdAt: number; expiresAt: number }
+interface Nonce { m: LoginMethod | typeof LEGACY_SHARED_KEY_METHOD; u?: string; createdAt: number; expiresAt: number }
 
 export interface LoginSessionStoreOptions {
   identityKeyFile: string;
   redis: () => Redis;
   now?: () => number;
-  /** MAC key and fingerprint of the current shared credential; null when there is none. */
-  sharedKey?: () => { fingerprint: string; macKey: Buffer } | null;
 }
-
-type SharedKey = () => { fingerprint: string; macKey: Buffer } | null;
-
-const prefixFor = (m: LoginMethod) => (m === 'password' ? LOGIN_SESSION_PREFIX : SHARED_KEY_SESSION_PREFIX);
 
 export class LoginSessionStore implements LoginSessions {
   private readonly redis: () => Redis;
   private readonly now: () => number;
   private readonly identityKeyFile: string;
-  private readonly sharedKey: () => { fingerprint: string; macKey: Buffer } | null;
 
   constructor(opts: LoginSessionStoreOptions) {
     this.identityKeyFile = opts.identityKeyFile;
     this.redis = opts.redis;
     this.now = opts.now ?? Date.now;
-    this.sharedKey = opts.sharedKey ?? (() => null);
   }
 
-  /** Throws `IdentityKeyError` for a password session when identity.key is unusable. */
-  private mac(method: LoginMethod, prefix: string, payload: string, shared: SharedKey = this.sharedKey): Buffer {
-    const key = method === 'password'
-      ? deriveIdentitySubkey(this.identityKeyFile, 'login-session')
-      : shared()?.macKey;
-    if (!key) throw new Error('no shared credential');
+  /** Throws `IdentityKeyError` when identity.key is unusable. */
+  private mac(method: LoginMethod, prefix: string, payload: string): Buffer {
+    const key = deriveIdentitySubkey(this.identityKeyFile, 'login-session');
     return createHmac('sha256', key).update(`${method}\0${prefix}.${payload}`).digest();
   }
 
   async issue(input: LoginSessionInput): Promise<{ token: string; session: LoginSession }> {
-    const maxTtl = input.method === 'password' ? STAY_SIGNED_IN_TTL_MS : SHARED_KEY_SESSION_TTL_MS;
-    const ttlMs = input.ttlMs ?? (input.method === 'password' ? PASSWORD_SESSION_TTL_MS : SHARED_KEY_SESSION_TTL_MS);
-    if (!Number.isInteger(ttlMs) || ttlMs <= 0 || ttlMs > maxTtl) throw new RangeError('invalid session lifetime');
-    if (input.method === 'shared-key' && this.sharedKey()?.fingerprint !== input.keyFingerprint) {
-      throw new Error('shared-key fingerprint does not match the current credential');
-    }
+    const ttlMs = input.ttlMs ?? PASSWORD_SESSION_TTL_MS;
+    if (!Number.isInteger(ttlMs) || ttlMs <= 0 || ttlMs > STAY_SIGNED_IN_TTL_MS) throw new RangeError('invalid session lifetime');
+    if (!input.userId) throw new Error('a login session belongs to a user');
 
     const sessionId = randomBytes(16).toString('hex');
     const createdAt = this.now();
     const expiresAt = createdAt + ttlMs;
-    const claims: LoginSessionPayload = {
-      s: sessionId, e: expiresAt, m: input.method,
-      ...(input.userId ? { u: input.userId } : {}),
-      ...(input.method === 'shared-key' ? { f: input.keyFingerprint } : {}),
-    };
-    const prefix = prefixFor(input.method);
+    const claims: LoginSessionPayload = { s: sessionId, e: expiresAt, m: input.method, u: input.userId };
+    const prefix = LOGIN_SESSION_PREFIX;
     const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
     const token = `${prefix}.${payload}.${this.mac(input.method, prefix, payload).toString('base64url')}`;
-    const nonce: Nonce = { m: input.method, ...(input.userId ? { u: input.userId } : {}), createdAt, expiresAt };
+    const nonce: Nonce = { m: input.method, u: input.userId, createdAt, expiresAt };
     await this.redis().set(loginSessionKey(sessionId), JSON.stringify(nonce), 'PX', ttlMs);
-    return {
-      token,
-      session: {
-        sessionId, expiresAt, method: input.method,
-        ...(input.userId ? { userId: input.userId } : {}),
-        ...(input.method === 'shared-key' ? { keyFingerprint: input.keyFingerprint } : {}),
-      },
-    };
+    return { token, session: { sessionId, expiresAt, method: input.method, userId: input.userId } };
   }
 
-  verify(token: string | null | undefined): Promise<LoginSession | null> {
-    return this.check(token, this.sharedKey);
-  }
-
-  /**
-   * `verify` of a shared-key session against key material the caller already
-   * holds, so it can't trigger rotation handling. Reads only.
-   */
-  async peekShared(
-    token: string | null | undefined,
-    material: { fingerprint: string; macKey: Buffer },
-  ): Promise<LoginSession | null> {
-    if (typeof token !== 'string' || !token.startsWith(`${SHARED_KEY_SESSION_PREFIX}.`)) return null;
-    return this.check(token, () => material);
-  }
-
-  private async check(token: string | null | undefined, shared: SharedKey): Promise<LoginSession | null> {
+  async verify(token: string | null | undefined): Promise<LoginSession | null> {
     if (typeof token !== 'string' || token.length === 0 || token.length > MAX_TOKEN_LENGTH) return null;
     const parts = token.split('.');
     if (parts.length !== 3) return null;
     const [prefix, payload, sig] = parts as [string, string, string];
-    const method: LoginMethod | null = prefix === LOGIN_SESSION_PREFIX ? 'password'
-      : prefix === SHARED_KEY_SESSION_PREFIX ? 'shared-key' : null;
-    if (!method) return null;
+    if (prefix !== LOGIN_SESSION_PREFIX) return null;
 
-    const p = this.claimsOf(method, prefix, payload, sig, shared);
+    const p = this.claimsOf('password', prefix, payload, sig);
     if (!p) return null;
 
     // Outside any catch: a Valkey failure is a service error, not a bad session.
@@ -134,33 +87,23 @@ export class LoginSessionStore implements LoginSessions {
     let nonce: Partial<Nonce>;
     try { nonce = JSON.parse(raw) as Partial<Nonce>; } catch { return null; }
     if (nonce.m !== p.m || nonce.u !== p.u) return null;
-    return {
-      sessionId: p.s, expiresAt: p.e, method: p.m,
-      ...(p.u ? { userId: p.u } : {}),
-      ...(p.f ? { keyFingerprint: p.f } : {}),
-    };
+    return { sessionId: p.s, expiresAt: p.e, method: p.m, userId: p.u };
   }
 
   /** The token's verified claims, or null. An unusable MAC key counts as invalid. */
   private claimsOf(
-    method: LoginMethod, prefix: string, payload: string, sig: string, shared: SharedKey,
-  ): { s: string; e: number; m: LoginMethod; u?: string; f?: string } | null {
+    method: LoginMethod, prefix: string, payload: string, sig: string,
+  ): { s: string; e: number; m: LoginMethod; u: string } | null {
     try {
       const given = Buffer.from(sig, 'base64url');
-      const want = this.mac(method, prefix, payload, shared);
+      const want = this.mac(method, prefix, payload);
       if (given.length !== want.length || !timingSafeEqual(given, want)) return null;
 
       const p = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as Partial<LoginSessionPayload>;
       if (typeof p.s !== 'string' || !SESSION_ID_RE.test(p.s) || typeof p.e !== 'number') return null;
       if (p.m !== method || p.e <= this.now()) return null;
-      if (p.u !== undefined && typeof p.u !== 'string') return null;
-      if (p.m === 'password' && !p.u) return null;
-      if (p.m === 'shared-key' && (typeof p.f !== 'string' || p.f !== shared()?.fingerprint)) return null;
-      return {
-        s: p.s, e: p.e, m: p.m,
-        ...(p.u ? { u: p.u } : {}),
-        ...(p.f ? { f: p.f } : {}),
-      };
+      if (typeof p.u !== 'string' || !p.u) return null;
+      return { s: p.s, e: p.e, m: p.m, u: p.u };
     } catch {
       return null;
     }
@@ -197,6 +140,11 @@ export class LoginSessionStore implements LoginSessions {
     return this.revokeWhere((n) => n.m === method);
   }
 
+  /** Delete what is left of the retired shared-admin sessions (D50, once on boot). How many. */
+  revokeLegacySharedKey(): Promise<number> {
+    return this.revokeWhere((n) => n.m === LEGACY_SHARED_KEY_METHOD);
+  }
+
   /**
    * The live sessions of `userId`, oldest first. Nonces past their `expiresAt`
    * that Valkey still holds (its TTL runs on its own clock) are deleted on
@@ -211,7 +159,7 @@ export class LoginSessionStore implements LoginSessions {
       for (const { key, nonce: n } of batch) {
         if (typeof n.expiresAt === 'number' && n.expiresAt <= now) { expired.push(key); continue; }
         const sessionId = key.slice(prefix.length);
-        if (n.u !== userId || !SESSION_ID_RE.test(sessionId) || (n.m !== 'password' && n.m !== 'shared-key')) continue;
+        if (n.u !== userId || !SESSION_ID_RE.test(sessionId) || n.m !== 'password') continue;
         if (typeof n.createdAt !== 'number' || typeof n.expiresAt !== 'number') continue;
         found.push({ sessionId, method: n.m, createdAt: n.createdAt, expiresAt: n.expiresAt });
       }

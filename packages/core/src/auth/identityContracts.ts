@@ -47,35 +47,28 @@ export interface UserStore {
 
 export const LOGIN_SESSION_PREFIX = 'aura-sess1';
 
-export type LoginMethod = 'password' | 'shared-key';
+/** The shared admin credential's `shared-key` method is retired (D50). */
+export type LoginMethod = 'password';
 
-/**
- * Signed token payload: `<prefix>.<b64url payload>.<b64url MAC>`. The prefix is
- * `aura-sess1` for password sessions and `aura-admin1` for shared-key sessions.
- */
+/** Signed token payload: `aura-sess1.<b64url payload>.<b64url MAC>`. */
 export interface LoginSessionPayload {
   /** Session id. */
   s: string;
   /** Expiry, ms since the epoch. */
   e: number;
   m: LoginMethod;
-  /** User id, for `password` sessions. */
-  u?: string;
-  /** Shared-key fingerprint, for `shared-key` sessions. */
-  f?: string;
+  /** User id. */
+  u: string;
 }
 
 export interface LoginSession {
   sessionId: string;
   expiresAt: number;
   method: LoginMethod;
-  userId?: string;
-  keyFingerprint?: string;
+  userId: string;
 }
 
-export type LoginSessionInput =
-  | { method: 'password'; userId: string; ttlMs?: number }
-  | { method: 'shared-key'; keyFingerprint: string; userId?: string; ttlMs?: number };
+export type LoginSessionInput = { method: 'password'; userId: string; ttlMs?: number };
 
 /** A live session as listed for its owner. Carries no token. */
 export interface LoginSessionInfo {

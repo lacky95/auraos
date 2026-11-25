@@ -1,21 +1,19 @@
 import type { Command } from 'commander';
-import { existsSync } from 'node:fs';
-import { defaultAdminKeyFile, readAdminCredential, rotateAdminCredential } from '@aura/core';
-import { api, shellUrl } from '../lib/client.js';
-import { inSandbox, isTrustedShellUrl, resolveIdentity, shellFetch, warnOnce } from '../lib/identity.js';
+import { api } from '../lib/client.js';
+import { shellFetch } from '../lib/identity.js';
 import { buildSystemDecisionPayload, describeDecision, releaseBody } from '../lib/system-decision.js';
 import { color, fail, info, ok, table, warn } from '../lib/format.js';
-import { promptConfirm } from '../lib/prompts.js';
-import {
-  ADMIN_SESSION_FILE, adminLogin, clearSavedSession, forgetInProcessSession,
-  obtainCredential, saveSession, savedSession,
-} from '../lib/admin-session.js';
 
 /**
- * `aura admin …` — minimal admin authentication (ONE shared operator
- * credential, no user accounts) plus the admin-only management commands.
+ * `aura admin …` — the owner's management commands: grants, the audit trail,
+ * the access report, releasing system modals (D50).
  *
- * Every change is audited by the shell as "admin (shared credential)".
+ * There is no admin login: the shared admin credential is gone. In the
+ * System Terminal each call asks the owner, who approves it in the desktop
+ * (one click; the password for privileged grants); the CLI waits and retries
+ * (lib/client.ts). On the host (`docker exec -it aura-shell aura admin …`)
+ * the operator acts directly. Every change is audited with the owner or the
+ * operator who decided.
  */
 
 const FEATURES: Record<string, string> = {
@@ -96,12 +94,6 @@ export async function grantNotif(verb: 'grant' | 'revoke', appId: string, featur
   }
 }
 
-function inMaster(): boolean {
-  return existsSync(defaultAdminKeyFile());
-}
-
-const adminIdentity = () => resolveIdentity({ url: shellUrl(), path: '/api/admin/session', intent: 'admin' });
-
 function fmtTime(ms: number): string {
   return new Date(ms).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
 }
@@ -109,96 +101,11 @@ function fmtTime(ms: number): string {
 export function registerAdmin(program: Command): void {
   const admin = program
     .command('admin')
-    .description('Admin authentication (shared operator credential) and admin-only management: grants, API keys, audit.');
-
-  admin
-    .command('login')
-    .description('Unlock admin: exchange the shared credential for a 15-minute session (AURA_ADMIN_CREDENTIAL, the master key file, or a hidden prompt).')
-    .option('--save', `keep the session in ${ADMIN_SESSION_FILE} (0600) for its 15 minutes`)
-    .option('--print', 'print the session token (for `export AURA_ADMIN_SESSION=…`)')
-    .action(async (opts: { save?: boolean; print?: boolean }) => {
-      if (inSandbox() && (opts.save || opts.print)) {
-        warnOnce('login-sandbox', `${opts.save ? '--save' : '--print'} inside an app sandbox exposes the admin session to other apps and agents. It stops working here in Phase 4.`);
-      }
-      const credential = await obtainCredential('login').catch((err: Error) => fail(err.message));
-      if (!credential) fail('no credential: set AURA_ADMIN_CREDENTIAL or run this on a TTY. Read it on the host: `docker exec -it aura-shell aura admin credential`.');
-      const s = await adminLogin(credential!).catch((err: Error) => fail(err.message));
-      if (opts.print) {
-        process.stdout.write(`${s.token}\n`);
-        return;
-      }
-      if (opts.save) {
-        saveSession(s);
-        ok(`admin unlocked until ${fmtTime(s.expiresAt)} — saved to ${ADMIN_SESSION_FILE}`);
-        warn('~ is shared by every app: any app sandbox can read this file while it is valid. `aura admin logout` removes it.');
-      } else {
-        ok(`credential accepted — session valid until ${fmtTime(s.expiresAt)}, but NOT kept (this command only).`);
-        info('Use --save to keep it for 15 minutes, or --print to export it. Admin commands also ask for the credential when needed.');
-      }
-    });
-
-  admin
-    .command('logout')
-    .description('Lock admin: revoke the saved / exported session and delete the session file.')
-    .action(async () => {
-      if (adminIdentity().kind === 'admin') {
-        const res = await shellFetch('/api/admin/session', { method: 'DELETE', intent: 'admin' })
-          .catch(() => null);
-        if (res?.ok) ok('admin session revoked');
-        else info('session was already invalid or expired');
-      } else if (savedSession() && !isTrustedShellUrl(shellUrl())) {
-        warn(`the saved session was not revoked on the server: ${shellUrl()} is not this system's shell.`);
-      } else {
-        info('no admin session');
-      }
-      forgetInProcessSession();
-      if (clearSavedSession()) ok(`removed ${ADMIN_SESSION_FILE}`);
-      if (process.env['AURA_ADMIN_SESSION']) warn('AURA_ADMIN_SESSION is still set in this shell — `unset AURA_ADMIN_SESSION`.');
-    });
-
-  admin
-    .command('status')
-    .description('Is an admin session available, and until when?')
-    .action(async () => {
-      if (adminIdentity().kind !== 'admin') { info('locked — no admin session (aura admin login --save)'); return; }
-      const res = await shellFetch('/api/admin/session', { intent: 'admin' }).catch(() => null);
-      if (!res?.ok) { info('locked — the session is invalid or expired'); return; }
-      const body = await res.json() as { expiresAt?: number };
-      const saved = savedSession();
-      ok(`unlocked as ${color.bold('admin (shared credential)')} until ${body.expiresAt ? fmtTime(body.expiresAt) : '?'}${saved ? color.dim(` · saved in ${ADMIN_SESSION_FILE}`) : ''}`);
-    });
-
-  admin
-    .command('credential')
-    .description('Print the shared admin credential (master container only; from the host: `docker exec -it aura-shell aura admin credential`).')
-    .action(() => {
-      const f = defaultAdminKeyFile();
-      const c = inMaster() ? readAdminCredential(f) : null;
-      if (!c) fail(`no readable credential at ${f} — this works only in the master container. From the host: docker exec -it aura-shell aura admin credential`);
-      process.stdout.write(`${c}\n`);
-    });
-
-  admin
-    .command('rotate')
-    .description('Replace the shared admin credential (master container only). Every admin session ends at once.')
-    .option('-y, --yes', 'do not ask')
-    .action(async (opts: { yes?: boolean }) => {
-      const f = defaultAdminKeyFile();
-      if (!inMaster()) fail(`${f} is not here. Rotate from the host: docker exec -it aura-shell aura admin rotate`);
-      if (!opts.yes) {
-        const yes = await promptConfirm('Rotate the admin credential? Every admin session (CLI and Settings) ends now.', false);
-        if (yes !== true) { info('aborted'); return; }
-      }
-      const fresh = rotateAdminCredential(f);
-      clearSavedSession();
-      ok(`rotated — new credential (shown once; also readable with \`aura admin credential\`):`);
-      process.stdout.write(`${fresh}\n`);
-      info('The shell notices the new key file on its next admin check and revokes all sessions (audited as credential.rotated).');
-    });
+    .description("The owner's management: grants, the audit trail, the access report. From the System Terminal each call waits for the owner's approval in the desktop; on the host it runs directly.");
 
   admin
     .command('grants')
-    .description('Privileged notification permissions per app: requested (manifest) vs granted (admin) vs effective.')
+    .description('Privileged permissions per app: requested (manifest) vs granted (owner) vs effective.')
     .action(async () => {
       const d = await fetchNotifPerms();
       if (d.apps.length === 0) { info('no app sends or requests notification permissions'); return; }
@@ -251,7 +158,7 @@ export function registerAdmin(program: Command): void {
 
   admin
     .command('audit')
-    .description('The admin audit trail, newest first.')
+    .description('The audit trail, newest first: who (the owner or the host operator) changed what.')
     .option('-n, --limit <n>', 'entries', '30')
     .action(async (opts: { limit: string }) => {
       const { entries } = await api.get<{ entries: Array<{ at: number; actor: string; action: string; target?: string; outcome: string; detail?: unknown }> }>(
@@ -307,7 +214,7 @@ export function printAccessReport(report: unknown): void {
 // ─── aura admin notif … ─────────────────────────────────────────────────────
 
 export function registerAdminNotif(admin: Command): void {
-  const notif = admin.command('notif').description('Admin actions on notifications.');
+  const notif = admin.command('notif').description("The owner's actions on notifications.");
   notif
     .command('release [id]')
     .description("Stop app system modals from blocking the shell (escape hatch): one by id, or every active one of --app. They stay as normal dialogues; the sender sees reason 'admin-released'. AuraOS decisions cannot be released.")
@@ -326,7 +233,7 @@ export function registerAdminNotif(admin: Command): void {
 export function registerAdminDev(admin: Command): void {
   const dev = admin
     .command('dev')
-    .description('DEV-only test hooks (dev shell only, admin session, audited).');
+    .description("DEV-only test hooks (dev shell only, the owner's, audited).");
   dev
     .command('system-decision')
     .description('Show an AuraOS system decision: a desktop-wide modal (scope system) that BLOCKS THE WHOLE DESKTOP until answered. Dev shell only; created as AuraOS, audited as dev.systemDecision.')
@@ -371,8 +278,8 @@ export function registerAdminDev(admin: Command): void {
       for (;;) {
         const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
         const t = Math.min(25, left);
-        // The admin session reads every notification (GET is not an /api/admin route, so ask for it here).
-        const res = await shellFetch(`/api/notifications/${encodeURIComponent(r.notification.id)}?waitFor=resolved&timeout=${t}`, { intent: 'admin' })
+        // The host operator reads every notification; in a sandbox, the app's own view.
+        const res = await shellFetch(`/api/notifications/${encodeURIComponent(r.notification.id)}?waitFor=resolved&timeout=${t}`, { intent: 'self' })
           .catch((err: Error) => fail(`cannot reach the shell: ${err.message}`));
         const n = await (res as Response).json() as { state: string; outcome?: string; answer?: unknown; removedReason?: string; error?: string };
         if (!(res as Response).ok) fail(`waiting failed: ${(res as Response).status} ${n.error ?? ''}`);
@@ -397,7 +304,7 @@ const SCOPE_ALIASES: Record<string, string> = {
 export function registerApiKey(program: Command): void {
   const key = program
     .command('apikey')
-    .description('API keys for external REST callers (admin only). A key authenticates as `Authorization: Bearer aura_k1_…`.');
+    .description("API keys for external REST callers (the owner's; creating one needs the password). A key authenticates as `Authorization: Bearer aura_k1_…`.");
 
   key
     .command('create <name>')

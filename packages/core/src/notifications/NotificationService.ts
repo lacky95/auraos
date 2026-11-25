@@ -326,7 +326,7 @@ export function readScopeFor(viewer: NotificationPrincipal | undefined): string 
 
 /**
  * May `viewer` read `rec` without any grant or lock-screen lookup? (In-process
- * / system and admin: yes; apps / keys: own items; screens: per their lock;
+ * / system, the owner and the operator: yes; apps / keys: own items; screens: per their lock;
  * anonymous without a session: no.) Routes use `accessFor()` instead.
  */
 export function canRead(viewer: ViewerInput, rec: Pick<Notification, 'senderKey' | 'visibility'>): boolean {
@@ -334,7 +334,7 @@ export function canRead(viewer: ViewerInput, rec: Pick<Notification, 'senderKey'
   const v: NotificationViewer = isViewer(viewer) ? viewer : { principal: viewer };
   const p = v.principal;
   if (p.kind === 'system') return isSystemCaller(p);
-  if (p.kind === 'admin') return true;
+  if (p.kind === 'operator') return true;
   if (p.kind === 'user') return accessCanRead(ownerAccess(v), rec);
   if (p.kind === 'instance') return rec.senderKey === `app:${p.appId}`;
   if (p.kind === 'apiKey') return rec.senderKey === `key:${p.keyId}`;
@@ -504,7 +504,7 @@ export class NotificationService {
 
   /**
    * Resolve who is reading, ONCE per request (phase 5).
-   *   undefined (in-process), system, admin → full
+   *   undefined (in-process), system, operator → full
    *   app instance / API key               → own + `notifications.read` grant
    *   anonymous with a client session      → screen view of its lock state
    *   anonymous without                    → none
@@ -514,7 +514,7 @@ export class NotificationService {
     const v: NotificationViewer = isViewer(viewer) ? viewer : { principal: viewer };
     const p = v.principal;
     if (p.kind === 'system') return isSystemCaller(p) ? { kind: 'full' } : { kind: 'none' };
-    if (p.kind === 'admin') return { kind: 'full' };
+    if (p.kind === 'operator') return { kind: 'full' };
     if (p.kind === 'user') return ownerAccess(v, v.screen ? await this.settings() : undefined);
     if (p.kind === 'instance' || p.kind === 'apiKey') {
       let grant: ReadGrant | null = null;
@@ -639,11 +639,8 @@ export class NotificationService {
     if (caller.kind === 'system' && !isSystemCaller(caller)) {
       throw new NotificationError(403, 'only the in-process SYSTEM_CALLER may act as system');
     }
-    if (caller.kind === 'admin') {
-      throw new NotificationError(403, 'an admin session manages grants and keys — it cannot send or change notifications');
-    }
-    if (caller.kind === 'user') {
-      throw new NotificationError(403, 'the owner reads notifications; sending or changing one is an app\'s or an API key\'s');
+    if (caller.kind === 'user' || caller.kind === 'operator') {
+      throw new NotificationError(403, `the ${caller.kind === 'user' ? 'owner' : 'host operator'} reads notifications; sending or changing one is an app's or an API key's`);
     }
   }
 
@@ -1328,9 +1325,9 @@ export class NotificationService {
    * sees an `updated` history entry with `detail.reason`:
    *   force-hidden        the user (an unlocked shell screen) hid it
    *   permission-revoked  its sender lost `notifications.systemModal` / was disabled
-   *   admin-released      `aura admin notif release`
+   *   admin-released      `aura admin notif release` (the owner)
    * It is not resolved or dismissed. AuraOS's own decisions cannot be
-   * released (409). Without a viewer (in-process / admin) no read check.
+   * released (409). Without a viewer (in-process / the owner) no read check.
    */
   async releaseSystemModal(id: string, reason: SystemModalRelease, actor: Actor = UNVERIFIED_USER, viewer?: ViewerInput): Promise<Notification> {
     const access = await this.userAccess(viewer);

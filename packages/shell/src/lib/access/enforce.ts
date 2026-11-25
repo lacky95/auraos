@@ -31,12 +31,11 @@ import type {
  * report counts and the route reads (`locals.access`). A refusal is JSON in
  * the gateway's style: 401 for an unauthenticated caller, 403 otherwise, its
  * `error` the outcome when a further step is needed (`needs-fresh-auth`,
- * `needs-approval`, …). The CLI's `admin-required` stays for the routes that
- * take only an admin session.
+ * `needs-approval`, …).
  */
 
 export interface GateDeps extends ObserverDeps {
-  /** The verifying resolver (auth.ts): records API key use, follows admin key rotation. */
+  /** The verifying resolver (auth.ts): records API key use. */
   principal(request: Request): Promise<ResolvedPrincipal>;
   mode?(): string;
 }
@@ -84,11 +83,9 @@ export const refused = (status: number, error: string, extra: Record<string, str
   });
 
 /** The answer to a decision that is not `allow`. */
-export function refusal(result: DecideResult, rules: readonly AccessRule[]): Response {
+export function refusal(result: DecideResult): Response {
   const outcome: PolicyOutcome = result.outcome;
   if (outcome !== 'deny') return refused(403, outcome, { reason: result.reason });
-  // The CLI offers `aura admin login` on this code (aura-cli lib/client.ts).
-  if (rules.some((r) => r.credentials?.includes('admin-session'))) return refused(401, 'admin-required', { reason: result.reason });
   if (result.reason === 'unauthenticated') return refused(401, 'unauthenticated', { reason: result.reason });
   return refused(403, 'access-denied', { reason: result.reason });
 }
@@ -183,7 +180,7 @@ export async function accessGate(
   const { result } = enforcing || results.length ? combineCandidates(results) : { result: allowed() };
   const verdict: VerifiedIdentity = { principal: seen.principal, via: seen.via };
   if (result.outcome === 'allow') return { refused: null, identity: verdict, ...settled };
-  return { refused: refusal(result, candidates.map((c) => c.rule)), identity: verdict, ...settled };
+  return { refused: refusal(result), identity: verdict, ...settled };
 }
 
 // ── the running shell ───────────────────────────────────────────────────────

@@ -8,9 +8,7 @@
  *
  *   instance   verified AURA_INSTANCE_TOKEN (an app backend or OS sidecar) or a
  *              signed App Host gateway claim; `userId` when it acts for a user
- *   apiKey     verified admin-issued API key (`aura_k1_…`), external REST
- *   admin      verified admin session (`aura-admin1.…`) unlocked with the
- *              SHARED operator credential. It is never an individual user.
+ *   apiKey     verified owner-issued API key (`aura_k1_…`), external REST
  *   user       a logged-in human: a verified login session (cookie or
  *              `aura-sess1.` bearer), or that session acting through an app
  *              (an App Host cookie, or a trusted system UI's claim, D45)
@@ -21,7 +19,10 @@
  * reports them: routes still act on what they acted on before.
  *
  * Typed for the access policy only:
- *   operator   the host operator, in access reports only
+ *   operator   the host operator (a one-time ticket, shell `identify.ts`)
+ *
+ * The shared admin credential and its sessions are gone (D50): the owner
+ * manages grants and keys, and the host operator stands above the owner.
  *
  * Reserved for later (delegation), NOT implemented:
  *   agent      a verified agent identity acting for a principal
@@ -31,7 +32,7 @@
  * an authorization result (see `Authorizer`, delegation hook).
  */
 import type {
-  AdminCaller, AnonymousCaller, ApiKeyCaller, InstanceCaller, SystemCaller,
+  AnonymousCaller, ApiKeyCaller, InstanceCaller, SystemCaller,
 } from '../notifications/types.js';
 import { SYSTEM_CALLER } from '../notifications/types.js';
 
@@ -58,14 +59,9 @@ interface WithSystem { systemId?: string }
  */
 export type InstancePrincipal = InstanceCaller & WithActor & WithSystem & { userId?: string };
 export type ApiKeyPrincipal = ApiKeyCaller & WithActor & {
-  /** The key's scopes (permission names), fixed by the admin at creation. */
+  /** The key's scopes (permission names), fixed by the owner at creation. */
   scopes: string[];
 };
-/**
- * Holder of a valid admin session. Management actions only. `credential` is
- * always `'shared'` — the one operator credential; there are no user accounts yet.
- */
-export type AdminPrincipal = AdminCaller & WithActor;
 export type AnonymousPrincipal = AnonymousCaller & WithActor;
 export type SystemPrincipal = SystemCaller;
 
@@ -90,7 +86,6 @@ export type UserPrincipal = WithActor & WithSystem & {
 export type Principal =
   | InstancePrincipal
   | ApiKeyPrincipal
-  | AdminPrincipal
   | UserPrincipal
   | AnonymousPrincipal
   | SystemPrincipal;
@@ -98,7 +93,7 @@ export type Principal =
 /** Kinds reserved for delegation. Not produced anywhere yet. */
 export type ReservedPrincipalKind = 'agent';
 
-/** The host operator, as a report-level class. It never authenticates a request. */
+/** The host operator, from a one-time ticket for exactly one request (shell `identify.ts`). */
 export interface OperatorPrincipal {
   kind: 'operator';
   verification: 'verified';
@@ -118,9 +113,6 @@ export function isSystemPrincipal(p: AccessPrincipal): p is SystemPrincipal {
   return p === SYSTEM_PRINCIPAL;
 }
 
-/** How every admin change is attributed. Never an individual user. */
-export const ADMIN_AUDIT_LABEL = 'admin (shared credential)';
-
 /** Subjects a grant can be given to. `user` / `agent` come with multi-user. */
 export type GrantSubjectKind = 'app' | 'apiKey';
 export interface GrantSubject {
@@ -129,7 +121,7 @@ export interface GrantSubject {
 }
 
 /**
- * Where a grant applies. Every grant today is OS-wide (one shared admin, no
+ * Where a grant applies. Every grant today is OS-wide (one owner, no other
  * users). Multi-user adds e.g. `{ kind: 'user', userId }` without changing
  * the subject or the permission.
  */
@@ -139,18 +131,22 @@ export type GrantScope =
   | { kind: 'terminal-session'; id: string };
 export const OS_SCOPE: GrantScope = Object.freeze({ kind: 'os' as const });
 
-/** Admin attribution stored with a grant / key / audit entry. */
-export interface AdminAttribution {
-  kind: 'admin';
-  credential: 'shared';
-  label: typeof ADMIN_AUDIT_LABEL;
-  /** Short prefix of the session id (not secret: the token also needs the HMAC). */
+/**
+ * Who made a change, as a grant, an API key or the audit trail records it
+ * (D50): the owner, or the host operator above the owner. A change an app
+ * asked for and the owner approved names the owner who approved it.
+ */
+export interface UserAttribution {
+  kind: 'user';
+  userId: string;
+  /** Short prefix of the session id. */
   session?: string;
 }
+export interface OperatorAttribution { kind: 'operator' }
+export type ChangeAttribution = UserAttribution | OperatorAttribution;
 
-export function adminAttribution(p?: AdminPrincipal): AdminAttribution {
-  return {
-    kind: 'admin', credential: 'shared', label: ADMIN_AUDIT_LABEL,
-    ...(p ? { session: p.sessionId.slice(0, 8) } : {}),
-  };
-}
+/**
+ * A record written before D50 by the retired shared admin credential. Read
+ * only: nothing writes it any more.
+ */
+export interface LegacyAdminAttribution { kind: 'admin'; label?: string; session?: string }

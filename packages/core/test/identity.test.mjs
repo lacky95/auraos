@@ -8,11 +8,11 @@ import { dirname, join } from 'node:path';
 
 import { kvServer, defaultRedis, createRedis } from '@aura/kv-store';
 import {
-  AdminAuth, AdminAudit, FileSetupTickets, IDENTITY_AUDIT_ACTIONS, IdentityKeyError, getAuthServices, resetAuthServices, LOGIN_ATTEMPTS_PER_KEY_PER_MINUTE,
+  AdminAudit, FileSetupTickets, IDENTITY_AUDIT_ACTIONS, IdentityKeyError, getAuthServices, resetAuthServices, LOGIN_ATTEMPTS_PER_KEY_PER_MINUTE,
   LOGIN_SESSION_PREFIX, LoginSessionStore, OWNER_RECORD_KEY, PASSWORD_MAX_BYTES, PASSWORD_SESSION_TTL_MS,
   DEFAULT_PASSWORD_POLICY, PASSWORD_POLICY_KEY, UserStoreError, parsePasswordPolicy, passwordViolation,
   SETUP_TICKET_TTL_MS, STAY_SIGNED_IN_TTL_MS, ValkeyUserStore, createSetupTicket, defaultIdentityKeyFile,
-  defaultSetupTicketDir, operatorAttribution, rotateAdminCredential, readAdminCredential, userAttribution,
+  defaultSetupTicketDir, operatorAttribution, retireSharedAdminCredential, userAttribution,
 } from '../dist/auth/index.js';
 import { adoptedInstanceOwner } from '../dist/app-manager/instanceOwner.js';
 
@@ -25,16 +25,14 @@ let redis;
 let clock = 1_800_000_000_000;
 const now = () => clock;
 const r = () => redis;
-let users, admin, sessions, audit;
+let users, sessions, audit;
 
 before(async () => {
   const uri = await server.start({ dataDir: join(DATA_DIR, 'kv') });
   redis = createRedis(uri);
   users = new ValkeyUserStore({ identityKeyFile: IDENTITY_KEY, redis: r, now });
-  admin = new AdminAuth({ keyFile: join(SECRETS, 'admin.key'), redis: r, now });
-  sessions = admin.sessions;
+  sessions = new LoginSessionStore({ identityKeyFile: IDENTITY_KEY, redis: r, now });
   audit = new AdminAudit(r, now);
-  admin.ensure();
 });
 
 after(async () => {
@@ -124,20 +122,16 @@ test('a Valkey failure is a service error, not an invalid session', async () => 
     },
   });
   try {
-    const auth = new AdminAuth({ keyFile: join(dir, 'admin.key'), redis: () => flaky, now });
-    auth.ensure();
-    const unlocked = await auth.unlock(readAdminCredential(auth.keyFile));
-    const password = await auth.sessions.issue({ method: 'password', userId: 'default' });
+    const store = new LoginSessionStore({ identityKeyFile: join(dir, 'identity.key'), redis: () => flaky, now });
+    const password = await store.issue({ method: 'password', userId: 'default' });
     down = true;
-    await assert.rejects(auth.verifySession(unlocked.token), /valkey down/);
-    await assert.rejects(auth.peekSession(unlocked.token), /valkey down/);
-    await assert.rejects(auth.sessions.verify(password.token), /valkey down/);
-    assert.equal(await auth.sessions.verify('aura-sess1.bad.sig'), null, 'a bad token needs no store');
+    await assert.rejects(store.verify(password.token), /valkey down/);
+    assert.equal(await store.verify('aura-sess1.bad.sig'), null, 'a bad token needs no store');
     down = false;
-    assert.ok(await auth.verifySession(unlocked.token), 'the session survives the blip');
+    assert.ok(await store.verify(password.token), 'the session survives the blip');
 
-    await redis.set(`usersess:${unlocked.sessionId}`, 'not json');
-    assert.equal(await auth.verifySession(unlocked.token), null, 'a corrupt nonce is invalid');
+    await redis.set(`usersess:${password.session.sessionId}`, 'not json');
+    assert.equal(await store.verify(password.token), null, 'a corrupt nonce is invalid');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -168,9 +162,7 @@ test('password session: lifetimes, expiry, revoke and revokeByUser', async () =>
 test('session tokens cannot be forged or relabelled', async () => {
   const { token } = await sessions.issue({ method: 'password', userId: 'default' });
   const [, payload, sig] = token.split('.');
-  assert.equal(await sessions.verify(`aura-admin1.${payload}.${sig}`), null);
-  assert.equal(await admin.verifySession(`aura-admin1.${payload}.${sig}`), null);
-  assert.equal(await admin.verifySession(token), null, 'a password session is never admin');
+  assert.equal(await sessions.verify(`aura-admin1.${payload}.${sig}`), null, 'the retired admin prefix never verifies');
   const forged = Buffer.from(JSON.stringify({ s: 'a'.repeat(32), e: clock + 1000, m: 'password', u: 'default' })).toString('base64url');
   assert.equal(await sessions.verify(`${LOGIN_SESSION_PREFIX}.${forged}.${sig}`), null);
   for (const bad of [null, undefined, '', 'garbage', 'a.b.c', `${LOGIN_SESSION_PREFIX}.x`, 'x'.repeat(5000)]) {
@@ -181,36 +173,24 @@ test('session tokens cannot be forged or relabelled', async () => {
   assert.equal(await other.verify(token), null);
 });
 
-test('rotation revokes shared-key sessions only', async () => {
-  const cred = readAdminCredential(admin.keyFile);
-  const shared = await admin.unlock(cred);
-  assert.match(shared.token, /^aura-admin1\./);
-  assert.equal(shared.expiresAt, clock + 15 * 60_000);
-  assert.deepEqual(await admin.verifySession(shared.token), { sessionId: shared.sessionId, expiresAt: shared.expiresAt });
+test('D50 boot migration: retired shared-admin sessions are deleted, password sessions stay, admin.key stays', async () => {
   const password = await sessions.issue({ method: 'password', userId: 'default' });
+  const sid = 'b'.repeat(32);
+  await redis.set(`usersess:${sid}`, JSON.stringify({ m: 'shared-key', createdAt: clock, expiresAt: clock + 60_000 }), 'PX', 60_000);
+  const keyFile = join(SECRETS, 'admin.key');
+  mkdirSync(SECRETS, { recursive: true });
+  writeFileSync(keyFile, 'aura_admin_' + 'x'.repeat(43) + '\n', { mode: 0o600 });
 
-  const purged = new Promise((resolve) => {
-    const watcher = new AdminAuth({ keyFile: admin.keyFile, redis: r, now, onRotated: resolve });
-    watcher.ensure();
-    const fresh = rotateAdminCredential(admin.keyFile);
-    assert.equal(watcher.verifyCredential(fresh), true);
-  });
-  assert.ok(await purged >= 1);
-  assert.equal(await admin.verifySession(shared.token), null);
-  assert.equal((await sessions.verify(password.token)).userId, 'default', 'password user stays signed in');
-  assert.equal((await admin.unlock(readAdminCredential(admin.keyFile))).ok, true, 'recovery still works');
+  const first = await retireSharedAdminCredential({ loginSessions: sessions, audit }, DATA_DIR);
+  assert.deepEqual(first, { sessionsRevoked: 1, keyFileLeft: true });
+  assert.equal(await redis.exists(`usersess:${sid}`), 0);
+  assert.equal((await sessions.verify(password.token)).userId, 'default', 'the owner stays signed in');
+  assert.equal(existsSync(keyFile), true, 'the key file is left in place');
+  assert.equal((await audit.list(1))[0].action, 'auth.shared-admin-retired');
+
+  assert.deepEqual(await retireSharedAdminCredential({ loginSessions: sessions, audit }, DATA_DIR), { sessionsRevoked: 0, keyFileLeft: true });
+  rmSync(keyFile);
   await sessions.revoke(password.session.sessionId);
-});
-
-test('rotation invalidates a shared-key token even if the purge never ran', async () => {
-  const s = await admin.unlock(readAdminCredential(admin.keyFile));
-  rotateAdminCredential(admin.keyFile);
-  // The nonce is still present for a store that has not purged yet.
-  const fresh = new AdminAuth({ keyFile: admin.keyFile, redis: r, now });
-  fresh.ensure();
-  assert.equal(await redis.exists(`usersess:${s.sessionId}`), 1);
-  assert.equal(await fresh.verifySession(s.token), null);
-  assert.equal(await admin.sessions.verify(s.token), null);
 });
 
 test('setup ticket: stored hashed at 0600, single use, purpose-bound, wrong code harmless', async () => {
@@ -318,56 +298,20 @@ async function isolated(username = 'lukas', extra = {}) {
   const secrets = join(dataDir, 'aura', 'secrets');
   mkdirSync(secrets, { recursive: true });
   const identityKeyFile = defaultIdentityKeyFile(dataDir);
-  const adminAuth = new AdminAuth({ keyFile: join(secrets, 'admin.key'), identityKeyFile, redis: r, now });
-  adminAuth.ensure();
-  const store = new ValkeyUserStore({ identityKeyFile, redis: r, now, sessions: adminAuth.sessions, ...extra });
+  const loginSessions = new LoginSessionStore({ identityKeyFile, redis: r, now });
+  const store = new ValkeyUserStore({ identityKeyFile, redis: r, now, sessions: loginSessions, ...extra });
   await redis.del(OWNER_RECORD_KEY);
   if (username) assert.ok(await store.createOwner({ username, password: PASSWORD }));
   const tickets = new FileSetupTickets({ dir: defaultSetupTicketDir(dataDir), now });
   const claimReset = (name = username) =>
     tickets.claim(createSetupTicket(dataDir, { purpose: 'reset', username: name }, now).code, 'reset');
-  return { dataDir, identityKeyFile, adminAuth, store, tickets, claimReset };
+  return { dataDir, identityKeyFile, loginSessions, store, tickets, claimReset };
 }
-
-test('shared-key unlock and verify work with a missing, malformed or replaced identity.key', async () => {
-  const { identityKeyFile, adminAuth } = await isolated();
-  const cred = readAdminCredential(adminAuth.keyFile);
-  const before = await adminAuth.unlock(cred);
-  assert.equal(before.ok, true);
-
-  rmSync(identityKeyFile);
-  assert.ok(await adminAuth.verifySession(before.token), 'missing: existing session');
-  assert.equal((await adminAuth.unlock(cred)).ok, true, 'missing: unlock');
-
-  rmSync(identityKeyFile, { force: true });
-  writeFileSync(identityKeyFile, 'not a key', { mode: 0o600 });
-  assert.ok(await adminAuth.verifySession(before.token), 'malformed: existing session');
-  const during = await adminAuth.unlock(cred);
-  assert.equal(during.ok, true, 'malformed: unlock');
-  assert.ok(await adminAuth.verifySession(during.token));
-
-  rmSync(identityKeyFile);
-  writeFileSync(identityKeyFile, `aura_identity_${'A'.repeat(43)}\n`, { mode: 0o600 });
-  assert.ok(await adminAuth.verifySession(before.token), 'replaced: existing session');
-});
-
-test('rotation invalidates shared sessions while identity.key is malformed', async () => {
-  const { identityKeyFile, adminAuth } = await isolated();
-  rmSync(identityKeyFile);
-  writeFileSync(identityKeyFile, 'garbage', { mode: 0o600 });
-  const old = readAdminCredential(adminAuth.keyFile);
-  const s = await adminAuth.unlock(old);
-  assert.equal(s.ok, true);
-  const fresh = rotateAdminCredential(adminAuth.keyFile);
-  assert.equal(await adminAuth.verifySession(s.token), null);
-  assert.equal((await adminAuth.unlock(old)).ok, false);
-  assert.equal((await adminAuth.unlock(fresh)).ok, true);
-});
 
 test('a malformed identity.key fails password login closed, with a clear error', async () => {
   const errors = [];
-  const { identityKeyFile, adminAuth, store } = await isolated('lukas', { onIdentityKeyError: (e) => errors.push(e) });
-  const live = await adminAuth.sessions.issue({ method: 'password', userId: 'default' });
+  const { identityKeyFile, loginSessions, store } = await isolated('lukas', { onIdentityKeyError: (e) => errors.push(e) });
+  const live = await loginSessions.issue({ method: 'password', userId: 'default' });
   rmSync(identityKeyFile);
   writeFileSync(identityKeyFile, 'garbage', { mode: 0o600 });
 
@@ -375,26 +319,19 @@ test('a malformed identity.key fails password login closed, with a clear error',
   assert.deepEqual(await store.verifyPassword('lukas', PASSWORD, { rateLimitKey: 'k1' }), { ok: false, reason: 'invalid' });
   assert.equal(await store.getOwner(), null);
   assert.equal(await store.hasOwner(), true);
-  assert.equal(await adminAuth.sessions.verify(live.token), null);
-  await assert.rejects(adminAuth.sessions.issue({ method: 'password', userId: 'default' }), IdentityKeyError);
+  assert.equal(await loginSessions.verify(live.token), null);
+  await assert.rejects(loginSessions.issue({ method: 'password', userId: 'default' }), IdentityKeyError);
   assert.equal(errors.length, 1, 'reported once');
   assert.match(errors[0].message, /identity\.key is malformed.*reset-password/);
   assert.equal(errors[0].message.includes('garbage'), false);
   assert.equal(readFileSync(identityKeyFile, 'utf-8'), 'garbage', 'never overwritten');
 });
 
-test('cross-method relabelling is rejected in both directions', async () => {
-  const { adminAuth } = await isolated();
-  const sessionsStore = adminAuth.sessions;
+test('a password session cannot be relabelled as the retired shared-key method', async () => {
+  const { loginSessions: sessionsStore } = await isolated();
   const pw = await sessionsStore.issue({ method: 'password', userId: 'default' });
-  const shared = await adminAuth.unlock(readAdminCredential(adminAuth.keyFile));
   const swap = (token, prefix) => [prefix, ...token.split('.').slice(1)].join('.');
-
-  const asAdmin = swap(pw.token, 'aura-admin1');
-  assert.equal(await sessionsStore.verify(asAdmin), null);
-  assert.equal(await adminAuth.verifySession(asAdmin), null);
-  const asPassword = swap(shared.token, LOGIN_SESSION_PREFIX);
-  assert.equal(await sessionsStore.verify(asPassword), null);
+  assert.equal(await sessionsStore.verify(swap(pw.token, 'aura-admin1')), null);
 
   // A correctly keyed payload claiming the other method is also refused.
   const [, payload, sig] = pw.token.split('.');
@@ -406,9 +343,8 @@ test('cross-method relabelling is rejected in both directions', async () => {
 
 test('recovery after a replaced identity.key re-seals from the ticket and revokes password sessions', async () => {
   const recovered = [];
-  const { identityKeyFile, adminAuth, store, claimReset } = await isolated('lukas', { onOwnerRecovered: (e) => { recovered.push(e); } });
-  const pw = await adminAuth.sessions.issue({ method: 'password', userId: 'default' });
-  const shared = await adminAuth.unlock(readAdminCredential(adminAuth.keyFile));
+  const { identityKeyFile, loginSessions, store, claimReset } = await isolated('lukas', { onOwnerRecovered: (e) => { recovered.push(e); } });
+  const pw = await loginSessions.issue({ method: 'password', userId: 'default' });
   rmSync(identityKeyFile);
   assert.equal(await store.getOwner(), null, 'old MAC no longer verifies');
 
@@ -421,7 +357,6 @@ test('recovery after a replaced identity.key re-seals from the ticket and revoke
   assert.equal((await store.verifyPassword('lukas', NEW_PASSWORD, { rateLimitKey: 'k2' })).ok, true);
   assert.equal((await store.verifyPassword('lukas', PASSWORD, { rateLimitKey: 'k2' })).ok, false);
   assert.equal(await redis.exists(`usersess:${pw.session.sessionId}`), 0);
-  assert.ok(await adminAuth.verifySession(shared.token), 'shared-key session unaffected');
 });
 
 test('recovery with an untrusted record ignores its forged username, role and disabled flag', async () => {
@@ -489,15 +424,13 @@ test('getAuthServices initializes with a malformed identity.key; recovery is aud
     const keyFile = defaultIdentityKeyFile(dataDir);
     mkdirSync(join(dataDir, 'aura', 'secrets'), { recursive: true });
     const svc0 = getAuthServices();
-    svc0.admin.ensure();
     await redis.del(OWNER_RECORD_KEY);
     assert.ok(await svc0.users.createOwner({ username: 'lukas', password: PASSWORD }));
     writeFileSync(keyFile, 'garbage', { mode: 0o600 });
 
     resetAuthServices();
     const svc = getAuthServices();
-    assert.equal(svc.loginSessions, svc.admin.sessions);
-    assert.equal((await svc.admin.unlock(readAdminCredential(svc.admin.keyFile))).ok, true);
+    assert.equal('admin' in svc, false, 'no shared admin credential (D50)');
     assert.equal((await svc.users.verifyPassword('lukas', PASSWORD, { rateLimitKey: 'k5' })).ok, false);
 
     rmSync(keyFile);
@@ -623,19 +556,18 @@ test('the policy applies to setup, recovery and change, never to login', async (
 });
 
 test('changeOwnerPassword: checks the current password, moves the epoch and keeps only this session', async () => {
-  const { adminAuth, store, recorded } = await withPolicyOwner();
-  const mine = await adminAuth.sessions.issue({ method: 'password', userId: 'default' });
-  const other = await adminAuth.sessions.issue({ method: 'password', userId: 'default' });
-  const shared = await adminAuth.unlock(readAdminCredential(adminAuth.keyFile));
+  const { loginSessions, store, recorded } = await withPolicyOwner();
+  const mine = await loginSessions.issue({ method: 'password', userId: 'default' });
+  const other = await loginSessions.issue({ method: 'password', userId: 'default' });
   const NEXT = 'changed password 2';
 
   assert.deepEqual(await store.changeOwnerPassword('default', 'wrong password', NEXT, mine.session.sessionId, { rateLimitKey: 'c1' }),
     { ok: false, reason: 'invalid' });
   await assert.rejects(store.changeOwnerPassword('default', PASSWORD, 'abc', mine.session.sessionId), (e) => e.rule === 'length');
   await assert.rejects(store.changeOwnerPassword('default', PASSWORD, 'LUKAS', mine.session.sessionId), (e) => e.rule === 'username');
-  assert.ok(await adminAuth.sessions.verify(other.token), 'nothing changed yet');
+  assert.ok(await loginSessions.verify(other.token), 'nothing changed yet');
 
-  const listed = await adminAuth.sessions.listByUser('default');
+  const listed = await loginSessions.listByUser('default');
   assert.ok(listed.some((s) => s.sessionId === mine.session.sessionId && s.method === 'password'));
   assert.equal(JSON.stringify(listed).includes(mine.token), false);
 
@@ -644,12 +576,11 @@ test('changeOwnerPassword: checks the current password, moves the epoch and keep
   assert.equal(out.ok, true);
   assert.ok(out.sessionsRevoked >= 1);
   assert.equal(store.credentialEpoch(), epoch + 1);
-  assert.ok(await adminAuth.sessions.verify(mine.token), 'this session stays');
-  assert.equal(await adminAuth.sessions.verify(other.token), null, 'the other one is signed out');
-  assert.ok(await adminAuth.verifySession(shared.token), 'shared-key session unaffected');
+  assert.ok(await loginSessions.verify(mine.token), 'this session stays');
+  assert.equal(await loginSessions.verify(other.token), null, 'the other one is signed out');
   assert.equal((await store.verifyPassword('lukas', PASSWORD, { rateLimitKey: 'c2' })).ok, false, 'old password fails');
   assert.equal((await store.verifyPassword('lukas', NEXT, { rateLimitKey: 'c2' })).ok, true);
-  assert.deepEqual((await adminAuth.sessions.listByUser('default')).map((s) => s.sessionId), [mine.session.sessionId]);
+  assert.deepEqual((await loginSessions.listByUser('default')).map((s) => s.sessionId), [mine.session.sessionId]);
 
   const entry = recorded.find((e) => e.action === IDENTITY_AUDIT_ACTIONS.passwordChanged);
   assert.deepEqual(entry.by, { kind: 'user', userId: 'default', session: mine.session.sessionId.slice(0, 8) });
