@@ -7,6 +7,7 @@ import LauncherOverlay from '../components/shell/LauncherOverlay.astro';
 import LockScreenOverlay from '../components/shell/LockScreenOverlay.astro';
 import AppHostSetupBar from '../components/shell/AppHostSetupBar.astro';
 import AdminUnlockDialog from '../components/shell/AdminUnlockDialog.astro';
+import OwnerPasswordDialog from '../components/shell/OwnerPasswordDialog.astro';
 import TerminalShareDialog from '../components/shell/TerminalShareDialog.astro';
 import NotificationCenter from '../components/shell/notifications/NotificationCenter.astro';
 import NotificationToasts from '../components/shell/notifications/NotificationToasts.astro';
@@ -557,6 +558,7 @@ const activeThemeId   = activeTheme.id;
   <KeyboardOverlay />
   <!-- Shell-owned admin unlock: a native modal, in the browser's top layer. -->
   <AdminUnlockDialog />
+  <OwnerPasswordDialog />
   <TerminalShareDialog />
   <!--
     LockScreenOverlay mounted last so its z-index 2000 sits above every

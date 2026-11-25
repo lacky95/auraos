@@ -27,6 +27,7 @@ const POLICY: AuditPolicy = {
   publicRoutes: new Set([
     'POST /api/admin/session', 'GET /api/admin/first-boot', 'HEAD /api/admin/first-boot',
     'GET /api/auth/status', 'HEAD /api/auth/status', 'POST /api/auth/setup', 'POST /api/auth/login',
+    'GET /api/auth/password-policy', 'HEAD /api/auth/password-policy',
     ...candidateKeys,
   ]),
   publicCandidates: new Set(candidateKeys),
@@ -35,6 +36,7 @@ const POLICY: AuditPolicy = {
 const NEVER_PUBLIC = [
   '/api/os/context', '/api/os/volumes', '/api/os/lock', '/api/os/unlock', '/api/os/ui/command',
   '/api/auth/logout', '/api/auth/session', '/api/auth/whoami',
+  '/api/auth/password', '/api/auth/account', '/api/auth/sessions/revoke-others',
 ];
 // Classified in SURFACE_MANIFEST as shell-listener, ws-proxy and sse-mux.
 const KNOWN_LISTENERS = [

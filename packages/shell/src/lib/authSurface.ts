@@ -16,8 +16,9 @@ import { isIP } from 'node:net';
 // Namespace import: the running shell may cache a core build without these.
 import * as core from '@aura/core';
 import type {
-  LoginSession, LoginSessions, Principal, SetupTickets, UserAccount, UserStore, ValkeyUserStore,
+  LoginSession, LoginSessions, PasswordRule, Principal, SetupTickets, UserAccount, UserPrincipal, UserStore, ValkeyUserStore,
 } from '@aura/core';
+import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { authenticate } from './auth.js';
 import { isTrustedProxy } from '../../server/host-policy.mjs';
 
@@ -58,7 +59,10 @@ export interface AuthAudit {
 }
 
 export interface AuthSurfaceServices {
-  users: UserStore & Pick<ValkeyUserStore, 'recoverOwnerPassword' | 'credentialEpoch'> & Partial<Pick<ValkeyUserStore, 'identityKeyStatus'>>;
+  users: UserStore
+    & Pick<ValkeyUserStore, 'recoverOwnerPassword' | 'credentialEpoch'
+      | 'getPasswordPolicy' | 'checkNewPassword' | 'changeOwnerPassword' | 'setPasswordPolicy'>
+    & Partial<Pick<ValkeyUserStore, 'identityKeyStatus'>>;
   loginSessions: LoginSessions;
   setupTickets: SetupTickets;
   audit?: AuthAudit;
@@ -71,6 +75,8 @@ export interface AuthSurfaceDeps {
   services: () => AuthSurfaceServices | null;
   /** The shell's bearer authentication. Replaced in tests. */
   authenticate?: (request: Request) => Promise<Principal | Response>;
+  /** D45: the owner acting through a trusted system UI (identify.ts). Replaced in tests. */
+  gatewayOwner?: (request: Request) => Promise<UserPrincipal | null>;
 }
 
 /** The part of Astro's APIContext these handlers read. */
@@ -93,7 +99,13 @@ export function coreAuthServices(): AuthSurfaceServices | null {
   };
 }
 
-const defaultDeps = (): AuthSurfaceDeps => ({ env: process.env, services: coreAuthServices });
+/** Loaded on first use, so the login pages never pull in AppManager. */
+async function liveGatewayOwner(request: Request): Promise<UserPrincipal | null> {
+  const { gatewayOwner } = await import('./access/identify.js');
+  return gatewayOwner(request, { mgr: core.getAppManager() });
+}
+
+const defaultDeps = (): AuthSurfaceDeps => ({ env: process.env, services: coreAuthServices, gatewayOwner: liveGatewayOwner });
 
 // ── responses ───────────────────────────────────────────────────────────────
 
@@ -266,9 +278,35 @@ async function mutate(
   return guarded(deps, (svc) => run(svc, parsed, scheme));
 }
 
+/**
+ * A password typed into the shell's own document only (Settings → Users &
+ * Identities): a request through an App Host gateway never reaches it. The
+ * route manifest refuses it there too (target `session`).
+ */
+function shellOnly(
+  ctx: AuthContext,
+  deps: AuthSurfaceDeps,
+  run: (svc: AuthSurfaceServices, body: Body, scheme: Scheme) => Promise<Response>,
+): Promise<Response> {
+  if (ctx.request.headers.has(GATEWAY_IDENTITY_HEADER)) return Promise.resolve(json({ error: 'forbidden' }, 403));
+  return mutate(ctx, deps, run);
+}
+
+/** Answers for a new password that breaks the policy. */
+const passwordRefused = (rule: PasswordRule | undefined) => json({ error: 'invalid-password', ...(rule ? { rule } : {}) }, 400);
+
+/** A policy failure from core as a 400; anything else rethrown. */
+function policyError(err: unknown): Response {
+  if (err instanceof core.UserStoreError) {
+    if (err.code === 'invalid-password') return passwordRefused(err.rule);
+    if (err.code === 'invalid-policy') return json({ error: 'invalid-policy' }, 400);
+  }
+  throw err;
+}
+
 async function audit(
   svc: AuthSurfaceServices,
-  action: 'setup' | 'login' | 'logout',
+  action: 'setup' | 'login' | 'logout' | 'sessionsRevoked',
   by: () => AuditActor,
   target?: string,
 ): Promise<void> {
@@ -310,6 +348,30 @@ export async function currentOwnerSession(
   return current ? { sessionId: current.session.sessionId, userId: current.user.id, expiresAt: current.session.expiresAt } : null;
 }
 
+/**
+ * The owner behind a Users & Identities read or session action: the shell's
+ * login cookie, or the owner acting through Settings (D45), which the gateway
+ * signs and `gatewayOwner` checks again. The session is the owner's login
+ * session in either case.
+ */
+async function ownerCaller(
+  ctx: AuthContext,
+  deps: AuthSurfaceDeps,
+  svc: AuthSurfaceServices,
+  scheme: Scheme,
+): Promise<{ userId: string; sessionId: string } | null> {
+  if (ctx.request.headers.has(GATEWAY_IDENTITY_HEADER)) {
+    const owner = await deps.gatewayOwner?.(ctx.request);
+    if (!owner?.sessionId) return null;
+    const user = await svc.users.getOwner();
+    return user && !user.disabled && user.id === owner.userId ? { userId: user.id, sessionId: owner.sessionId } : null;
+  }
+  const current = await currentSession(ctx, svc, scheme);
+  return current ? { userId: current.user.id, sessionId: current.session.sessionId } : null;
+}
+
+const loginRequired = () => json({ error: 'login-required' }, 401);
+
 // ── routes ──────────────────────────────────────────────────────────────────
 
 export async function authStatus(_ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps()): Promise<Response> {
@@ -337,13 +399,16 @@ async function createOwner(svc: AuthSurfaceServices, body: Body): Promise<Respon
   }
   const username = normalizeUsername(rawName);
   if (!USERNAME_RE.test(username)) return json({ error: 'invalid-username' }, 400);
-  if (!core.passwordAcceptable(password) || password.toLowerCase() === username) return json({ error: 'invalid-password' }, 400);
+  const rule = await svc.users.checkNewPassword(password, username);
+  if (rule) return passwordRefused(rule);
 
   // Before the claim, so a finished setup never burns a code.
   if (await svc.users.hasOwner()) return setupRejected();
   if (!identityKeyUsable(svc)) return unavailable();
   if (!(await svc.setupTickets.claim(code, 'setup'))) return setupRejected();
-  const owner = await svc.users.createOwner({ username, password });
+  let owner: UserAccount | null;
+  try { owner = await svc.users.createOwner({ username, password }); }
+  catch (err) { return policyError(err); }
   if (!owner) return setupRejected();
   // The code came from the host, so the operator is the actor.
   await audit(svc, 'setup', () => core.operatorAttribution(), `user:${owner.id}`);
@@ -354,14 +419,18 @@ async function createOwner(svc: AuthSurfaceServices, body: Body): Promise<Respon
 async function resetPassword(svc: AuthSurfaceServices, body: Body, scheme: Scheme): Promise<Response> {
   const { code, password } = body;
   if (!codeAcceptable(code) || typeof password !== 'string') return json({ error: 'invalid-request' }, 400);
-  if (!core.passwordAcceptable(password)) return json({ error: 'invalid-password' }, 400);
+  // The username rule waits for the ticket, which names the account.
+  const rule = await svc.users.checkNewPassword(password);
+  if (rule) return passwordRefused(rule);
 
   if (!identityKeyUsable(svc)) return unavailable();
   const ticket = await svc.setupTickets.claim(code, 'reset');
   if (!ticket) return setupRejected();
   // The store moves the credential epoch, revokes sessions and writes the one
   // audit event (`auth.owner-recovered`) with the final outcome.
-  const result = await svc.users.recoverOwnerPassword(ticket, password);
+  let result: Awaited<ReturnType<AuthSurfaceServices['users']['recoverOwnerPassword']>>;
+  try { result = await svc.users.recoverOwnerPassword(ticket, password); }
+  catch (err) { return policyError(err); }
   if (!result.ok) {
     return result.reason === 'identity-key-unavailable' || result.reason === 'conflict' ? unavailable() : setupRejected();
   }
@@ -423,6 +492,88 @@ export function authSession(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDep
     const current = await currentSession(ctx, svc, scheme);
     return json(current ? { authenticated: true, expiresAt: current.session.expiresAt } : { authenticated: false });
   });
+}
+
+// ── Users & Identities (Settings) ───────────────────────────────────────────
+
+/** The rules for new passwords. Public: the setup page shows them. */
+export function authPasswordPolicy(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps()): Promise<Response> {
+  return read(ctx, deps, async (svc) => json({ policy: await svc.users.getPasswordPolicy() }));
+}
+
+/** A refused credential check, answered alike for both routes below. */
+function credentialRefused(reason: 'invalid' | 'rate-limited' | 'conflict'): Response {
+  if (reason === 'rate-limited') return json({ error: 'rate-limited' }, 429);
+  if (reason === 'conflict') return json({ error: 'conflict' }, 409);
+  return badCredentials();
+}
+
+/**
+ * The signed-in owner changes their password from the shell's dialog. Keeps
+ * this session and signs out the others; core audits it.
+ */
+export function authChangePassword(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps()): Promise<Response> {
+  return shellOnly(ctx, deps, async (svc, body, scheme) => {
+    const current = await currentSession(ctx, svc, scheme);
+    if (!current) return loginRequired();
+    const { current: password, next } = body;
+    if (typeof password !== 'string' || typeof next !== 'string') return json({ error: 'invalid-request' }, 400);
+    let result: Awaited<ReturnType<AuthSurfaceServices['users']['changeOwnerPassword']>>;
+    try {
+      result = await svc.users.changeOwnerPassword(
+        current.user.id, password, next, current.session.sessionId, { rateLimitKey: clientRateKey(ctx, deps.env) },
+      );
+    } catch (err) { return policyError(err); }
+    return result.ok ? json({ ok: true }) : credentialRefused(result.reason);
+  });
+}
+
+/** The owner sets the password policy, confirmed with the password in the shell's dialog. */
+export function authSetPasswordPolicy(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps()): Promise<Response> {
+  return shellOnly(ctx, deps, async (svc, body, scheme) => {
+    const current = await currentSession(ctx, svc, scheme);
+    if (!current) return loginRequired();
+    const { current: password, policy } = body;
+    if (typeof password !== 'string') return json({ error: 'invalid-request' }, 400);
+    let result: Awaited<ReturnType<AuthSurfaceServices['users']['setPasswordPolicy']>>;
+    try {
+      result = await svc.users.setPasswordPolicy(policy, {
+        userId: current.user.id, current: password, sessionId: current.session.sessionId,
+        rateLimitKey: clientRateKey(ctx, deps.env),
+      });
+    } catch (err) { return policyError(err); }
+    return result.ok ? json({ ok: true, policy: result.policy }) : credentialRefused(result.reason);
+  });
+}
+
+/** The owner's account and live sessions. Never a token or a full session id. */
+export function authAccount(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps()): Promise<Response> {
+  return read(ctx, deps, async (svc, scheme) => {
+    const caller = await ownerCaller(ctx, deps, svc, scheme);
+    const user = caller && await svc.users.getOwner();
+    if (!caller || !user) return loginRequired();
+    const sessions = (await svc.loginSessions.listByUser(user.id))
+      .map((s) => ({ id8: s.sessionId.slice(0, 8), method: s.method, createdAt: s.createdAt, current: s.sessionId === caller.sessionId }))
+      .sort((a, b) => b.createdAt - a.createdAt);
+    return json({ userId: user.id, username: user.username, role: user.role, createdAt: user.createdAt, sessions });
+  });
+}
+
+/**
+ * Signs out every other session of the owner. From the shell with the login
+ * cookie (exact Origin), or from Settings through the gateway, which checked
+ * Origin and the JSON type itself and forwards neither cookie nor Origin.
+ */
+export async function authRevokeOtherSessions(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps()): Promise<Response> {
+  const run = async (svc: AuthSurfaceServices, scheme: Scheme): Promise<Response> => {
+    const caller = await ownerCaller(ctx, deps, svc, scheme);
+    if (!caller) return loginRequired();
+    const revoked = await svc.loginSessions.revokeByUser(caller.userId, { except: caller.sessionId });
+    await audit(svc, 'sessionsRevoked', () => core.userAttribution(caller), `user:${caller.userId}`);
+    return json({ ok: true, revoked });
+  };
+  if (ctx.request.headers.has(GATEWAY_IDENTITY_HEADER)) return read(ctx, deps, run);
+  return mutate(ctx, deps, (svc, _body, scheme) => run(svc, scheme));
 }
 
 /** The verified class of the caller. Hints, session ids and scopes stay out. */

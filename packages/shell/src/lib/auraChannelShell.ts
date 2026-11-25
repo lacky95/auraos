@@ -99,6 +99,12 @@ function isSystemApp<E>(frame: ChannelFrame<unknown, E> | null, appId: string): 
   return !!frame && frame.appId === appId && frame.system;
 }
 
+/** Messages only the verified system Settings window may send. */
+const SETTINGS_ONLY: ReadonlySet<string> = new Set([
+  'aura.lockscreen.activate', 'aura.admin.unlock.request',
+  'aura.account.password.request', 'aura.account.policy.request',
+]);
+
 /** Whether a verified sender may deliver this message to the shell. */
 export function authorizeShellMessage<E>(
   type: unknown,
@@ -116,8 +122,9 @@ export function authorizeShellMessage<E>(
     return ctx.nativeRuntime;
   }
 
-  // Locking the desktop and collecting the admin credential belong to Settings.
-  if (type === 'aura.lockscreen.activate' || type === 'aura.admin.unlock.request') {
+  // Locking the desktop and collecting the admin credential or the owner's
+  // password (Users & Identities) belong to Settings.
+  if (SETTINGS_ONLY.has(type)) {
     return sender.direct && isSystemApp(frame, SETTINGS_APP_ID)
       && isAuraChannelRouteAllowed(type, sender.endpoint, 'shell');
   }

@@ -108,7 +108,7 @@ test('before setup: no owner, and the desktop sends the browser to setup', async
 test('setup is once only, and a replayed code is refused', async () => {
   const ticket = code('setup');
   const body = { code: ticket, username: 'lukas', password: PASSWORD };
-  assert.equal((await authSetup(post({ ...body, password: 'elevenchars' }), on())).status, 400, 'core password policy');
+  assert.equal((await authSetup(post({ ...body, password: 'abc' }), on())).status, 400, 'core password policy');
   const res = await authSetup(post(body), on());
   assert.equal(res.status, 200);
   assert.equal(res.headers.get('set-cookie'), null);
@@ -195,7 +195,7 @@ test('a failed revoke is reported, in the audit and to the caller', async () => 
   const failing = new core.ValkeyUserStore({
     identityKeyFile: core.defaultIdentityKeyFile(DATA_DIR),
     redis: () => defaultRedis(),
-    sessions: { revokeByMethod: async () => { throw new Error('valkey'); } },
+    sessions: { revokeByMethod: async () => { throw new Error('valkey'); }, revokeByUser: async () => 0 },
     onOwnerRecovered: async (e) => {
       await core.getAuthServices().audit.record({
         by: core.operatorAttribution(), action: core.IDENTITY_AUDIT_ACTIONS.ownerRecovered,

@@ -151,12 +151,16 @@ test('nested senders are classed by their origin', () => {
   assert.equal(w.from(w.nestedForeign, SHELL)?.endpoint, 'app-subframe', 'nothing nested speaks for the shell');
 });
 
+const SETTINGS_ONLY_TYPES = [
+  'aura.lockscreen.activate', 'aura.admin.unlock.request', 'aura.account.password.request', 'aura.account.policy.request',
+];
+
 const allowed = (type: string, sender: ReturnType<ReturnType<typeof worlds>['from']>, data: Record<string, unknown> = {}, nativeRuntime = false) =>
   !!sender && authorizeShellMessage(type, sender, data, { nativeRuntime });
 
-test('only the verified Settings window may trigger the lock message or admin unlock', () => {
+test('only the verified Settings window may trigger the lock message, admin unlock or the password dialog', () => {
   const w = worlds();
-  for (const type of ['aura.lockscreen.activate', 'aura.admin.unlock.request']) {
+  for (const type of SETTINGS_ONLY_TYPES) {
     assert.equal(allowed(type, w.from(w.hostSettingsWin, SETTINGS_APP)), true, type);
     assert.equal(allowed(type, w.from(w.hostWin, APP)), false, type);
     assert.equal(allowed(type, w.from(w.nestedForeign, OTHER_APP)), false, type);
@@ -198,7 +202,7 @@ test('a host app cannot read the shell console backlog, except Console', () => {
 
 test('on App Hosts only the system installation of Settings or Console is trusted, never a same-id copy', () => {
   const w = worlds();
-  for (const type of ['aura.lockscreen.activate', 'aura.admin.unlock.request']) {
+  for (const type of SETTINGS_ONLY_TYPES) {
     assert.equal(allowed(type, w.from(w.hostSettingsWin, SETTINGS_APP)), true, type);
     assert.equal(allowed(type, w.from(w.shadowSettingsWin, SHADOW_APP)), false, `${type} from a global/user copy`);
   }
@@ -404,6 +408,19 @@ test('the auto-hide badge is above keyboard and launcher, below every trusted di
   assert.ok(badge > launcher, 'above the launcher');
   assert.ok(badge < trusted, 'below system, approval and password dialogs');
   assert.ok(badge < lock, 'below the lock screen');
+});
+
+test('the owner password dialog is a native modal, mounted, and gives the requester only the outcome', () => {
+  const src = css('OwnerPasswordDialog.astro');
+  assert.match(src, /<dialog id="aura-owner-password"/);
+  assert.match(src, /\.showModal\(\)/);
+  assert.match(src, /autocomplete="current-password"/);
+  assert.match(src, /autocomplete="new-password"/);
+  // The reply carries {ok, error?} only, never a field value.
+  assert.equal([...src.matchAll(/replyTo\(/g)].length, [...src.matchAll(/replyTo\([\w.]+, \{([^}]*)\}/g)].length);
+  for (const reply of src.matchAll(/replyTo\([\w.]+, \{([^}]*)\}/g)) assert.doesNotMatch(reply[1]!, /value|password:|current:|next:/, reply[0]);
+  const layout = readFileSync(new URL('../src/layouts/OSLayout.astro', import.meta.url), 'utf8');
+  assert.match(layout, /<OwnerPasswordDialog \/>/);
 });
 
 test('the admin unlock is a native modal, above every z-index', () => {

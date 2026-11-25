@@ -15,6 +15,7 @@ import { enforceGateway } from '../src/lib/access/gatewayCaller.ts';
 import type { GatewayOwnerDeps } from '../src/lib/access/identify.ts';
 import type { ObserverManager } from '../src/lib/access/observer.ts';
 import type { RouteAccessManifest } from '../src/lib/access/types.ts';
+import { ROUTE_ACCESS_MANIFEST } from '../src/lib/access/routeManifest.ts';
 import { authenticate, type AuthDeps } from '../src/lib/auth.ts';
 
 const SETTINGS = 'com.aura.settings';
@@ -180,6 +181,32 @@ test('never a login session, a shell screen or another app, even for Settings', 
   ] as Array<[string, string, string, Record<string, string>]>) {
     assert.equal((await enforce(apiCtx(settings, method, path, route, { params })))?.status, 403, path);
   }
+});
+
+test('Users & Identities: Settings reads the account and signs out other sessions, never a password route', async () => {
+  const ACCOUNT: Array<[string, string]> = [['GET', '/api/auth/account'], ['POST', '/api/auth/sessions/revoke-others']];
+  for (const [method, route] of ACCOUNT) {
+    assert.equal(ownerUiCovers(SETTINGS, route), true, route);
+    assert.equal(await enforce(apiCtx(settings, method, route, route)), null, `${method} ${route}`);
+    assert.equal((await enforce(apiCtx(notes, method, route, route)))?.status, 403, `notes ${route}`);
+    assert.equal((await enforce(apiCtx(nexus, method, route, route)))?.status, 403, `nexus ${route}`);
+    assert.equal((await enforce(apiCtx(settings, method, route, route, { owner: null })))?.status, 403, `no owner ${route}`);
+  }
+  // The password and policy writes: not covered, and on a target no app reaches for the owner.
+  const PASSWORD: Array<[string, string]> = [['POST', '/api/auth/password'], ['PUT', '/api/auth/password-policy']];
+  for (const [method, route] of PASSWORD) {
+    assert.equal(ownerUiCovers(SETTINGS, route), false, route);
+    assert.equal(ROUTE_ACCESS_MANIFEST.routes[route]?.methods?.[method as 'POST']?.target, 'session', route);
+    assert.equal((await enforce(apiCtx(settings, method, route, route)))?.status, 403, `${method} ${route}`);
+  }
+  // Each layer alone refuses: a covered route on the `session` target is still refused.
+  const sessionTarget: RouteAccessManifest = {
+    ...ROUTE_ACCESS_MANIFEST,
+    routes: { ...ROUTE_ACCESS_MANIFEST.routes, '/api/auth/account': { methods: { GET: { allow: ['owner'], target: 'session' } } } },
+  };
+  assert.equal((await enforce(apiCtx(settings, 'GET', '/api/auth/account', '/api/auth/account'), sessionTarget))?.status, 403);
+  // The rules themselves are public, for any app.
+  assert.equal(await enforce(apiCtx(notes, 'GET', '/api/auth/password-policy', '/api/auth/password-policy', { owner: null })), null);
 });
 
 test('Nexus acts for the owner on its own routes only', async () => {

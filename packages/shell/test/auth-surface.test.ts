@@ -5,9 +5,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { LoginSession, LoginSessionInput, SetupTicket, UserAccount } from '@aura/core';
+import type { LoginSession, LoginSessionInput, PasswordPolicy, SetupTicket, UserAccount, UserPrincipal } from '@aura/core';
+import { DEFAULT_PASSWORD_POLICY, parsePasswordPolicy, passwordViolation, UserStoreError } from '@aura/core';
+import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import {
-  authLogin, authLogout, authPageHeaders, authSession, authSetup, authStatus, authWhoami,
+  authAccount, authChangePassword, authLogin, authLogout, authPageHeaders, authPasswordPolicy, authRevokeOtherSessions,
+  authSession, authSetPasswordPolicy, authSetup, authStatus, authWhoami,
   desktopSignIn, MAX_BODY_BYTES, requestScheme,
 } from '../src/lib/authSurface.ts';
 import type { AuthContext, AuthSurfaceDeps, AuthSurfaceServices } from '../src/lib/authSurface.ts';
@@ -16,6 +19,10 @@ import { POST as setupRoute } from '../src/pages/api/auth/setup.ts';
 import { POST as loginRoute } from '../src/pages/api/auth/login.ts';
 import { POST as logoutRoute } from '../src/pages/api/auth/logout.ts';
 import { GET as sessionRoute } from '../src/pages/api/auth/session.ts';
+import { GET as policyRoute, PUT as policyPutRoute } from '../src/pages/api/auth/password-policy.ts';
+import { POST as passwordRoute } from '../src/pages/api/auth/password.ts';
+import { GET as accountRoute } from '../src/pages/api/auth/account.ts';
+import { POST as revokeOthersRoute } from '../src/pages/api/auth/sessions/revoke-others.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ORIGIN = 'http://aura.test:3000';
@@ -26,6 +33,12 @@ function fakes() {
   const sessions = new Map<string, LoginSession>();
   const tickets = new Map<string, SetupTicket>();
   const calls = { verify: 0, claim: 0, create: 0 };
+  let policy: PasswordPolicy = { ...DEFAULT_PASSWORD_POLICY };
+  const assertNew = (password: string, username?: string) => {
+    const rule = passwordViolation(password, { username, policy });
+    if (rule) throw new UserStoreError('invalid-password', rule, rule);
+  };
+  let gatewayOwner: UserPrincipal | null = null;
   let seq = 0;
   let beforeIssue: (() => Promise<void>) | null = null;
   let epoch = 0;
@@ -41,6 +54,7 @@ function fakes() {
       getOwner: async () => publicUser(),
       createOwner: async ({ username, password }) => {
         calls.create++;
+        assertNew(password, username);
         if (owner) return null;
         owner = { id: 'default', username, password, role: 'owner', createdAt: 1, disabled: false };
         return publicUser();
@@ -56,6 +70,7 @@ function fakes() {
         if (!ticket.username) return { ok: false, reason: 'invalid-ticket' };
         if (!owner) return { ok: false, reason: 'no-owner' };
         if (ticket.username !== owner.username) return { ok: false, reason: 'username-mismatch' };
+        assertNew(password, owner.username);
         owner.password = password;
         epoch += 1;
         const sessionsRevoked = sessions.size;
@@ -63,11 +78,35 @@ function fakes() {
         audited.push('auth.owner-recovered');
         return { ok: true, user: publicUser()!, recordTrusted: true, sessionsRevoked };
       },
+      getPasswordPolicy: async () => ({ ...policy }),
+      checkNewPassword: async (password, username) => passwordViolation(password, { username, policy }),
+      changeOwnerPassword: async (userId, current, next, keepSessionId) => {
+        assertNew(next);
+        calls.verify++;
+        if (current === 'limited') return { ok: false, reason: 'rate-limited' };
+        if (!owner || owner.id !== userId || owner.password !== current) return { ok: false, reason: 'invalid' };
+        assertNew(next, owner.username);
+        owner.password = next;
+        epoch += 1;
+        let sessionsRevoked = 0;
+        for (const [id, s] of sessions) if (s.userId === userId && id !== keepSessionId) { sessions.delete(id); sessionsRevoked++; }
+        audited.push('auth.password-changed');
+        return { ok: true, sessionsRevoked };
+      },
+      setPasswordPolicy: async (input, { userId, current }) => {
+        const next = parsePasswordPolicy(input);
+        if (!next) throw new UserStoreError('invalid-policy', 'out of range');
+        if (!owner || owner.id !== userId || owner.password !== current) return { ok: false, reason: 'invalid' };
+        const previous = policy;
+        policy = next;
+        audited.push('auth.password-policy-changed');
+        return { ok: true, previous, policy: next };
+      },
     },
     loginSessions: {
       issue: async (input: LoginSessionInput) => {
         await beforeIssue?.();
-        const sessionId = `s${++seq}`;
+        const sessionId = `s${++seq}`.padEnd(32, '0');
         const session: LoginSession = {
           sessionId, method: input.method, userId: input.userId, expiresAt: Date.now() + (input.ttlMs ?? 0),
         };
@@ -76,11 +115,14 @@ function fakes() {
       },
       verify: async (token) => sessions.get(/^aura-sess1\.(\w+)\.mac$/.exec(token ?? '')?.[1] ?? '') ?? null,
       revoke: async (id) => sessions.delete(id),
-      revokeByUser: async (userId) => {
+      revokeByUser: async (userId, opts = {}) => {
         let n = 0;
-        for (const [id, s] of sessions) if (s.userId === userId) { sessions.delete(id); n++; }
+        for (const [id, s] of sessions) if (s.userId === userId && id !== opts.except) { sessions.delete(id); n++; }
         return n;
       },
+      listByUser: async (userId) => [...sessions.values()]
+        .filter((s) => s.userId === userId)
+        .map((s, i) => ({ sessionId: s.sessionId, method: s.method, createdAt: i, expiresAt: s.expiresAt })),
       revokeByMethod: async () => 0,
     },
     setupTickets: {
@@ -100,10 +142,14 @@ function fakes() {
     services, sessions, calls, audited, addTicket,
     disableOwner: () => { if (owner) owner.disabled = true; },
     setBeforeIssue: (fn: (() => Promise<void>) | null) => { beforeIssue = fn; },
+    setGatewayOwner: (p: UserPrincipal | null) => { gatewayOwner = p; },
+    policy: () => policy,
+    password: () => owner?.password,
     deps: (env: Record<string, string> = {}): AuthSurfaceDeps => ({
       env: { ...env },
       services: () => services,
       authenticate: async () => ({ kind: 'anonymous', verification: 'unverified' }),
+      gatewayOwner: async () => gatewayOwner,
     }),
   };
 }
@@ -275,7 +321,7 @@ test('invalid input is refused before a code is claimed', async () => {
   for (const [over, error] of [
     [{ username: 'x' }, 'invalid-username'],
     [{ username: 'has space' }, 'invalid-username'],
-    [{ password: 'short' }, 'invalid-password'],
+    [{ password: 'abc' }, 'invalid-password'],
     [{ password: 'p'.repeat(513) }, 'invalid-password'],
     [{ username: 'longusername12', password: 'LongUsername12' }, 'invalid-password'],
     [{ code: 7 }, 'invalid-request'],
@@ -537,4 +583,164 @@ test('the HTTPS and HTTP cookies are never read across transports', async () => 
 test('clientAddress stays the socket peer: astro.config sets no allowedDomains', () => {
   const config = fs.readFileSync(path.join(root, 'astro.config.mjs'), 'utf8');
   assert.ok(!config.includes('allowedDomains'), 'with allowedDomains, Astro takes clientAddress from X-Forwarded-For');
+});
+
+// ── Users & Identities ──────────────────────────────────────────────────────
+
+async function signedIn(f: Awaited<ReturnType<typeof withOwner>>) {
+  const token = tokenOf(await authLogin(post({ username: 'lukas', password: PASSWORD }), f.deps()));
+  return { cookie: `aura_session=${token}` };
+}
+
+function put(body: unknown, headers: Record<string, string | null> = {}): AuthContext {
+  const merged = Object.fromEntries(
+    Object.entries({ ...JSON_HEADERS, ...headers }).filter((e): e is [string, string] => e[1] !== null),
+  );
+  return { clientAddress: '10.0.0.9', request: new Request('http://localhost/api/auth/password-policy', { method: 'PUT', headers: merged, body: JSON.stringify(body) }) };
+}
+
+test('the password policy is public and holds only the rules', async () => {
+  const f = await withOwner();
+  const res = await authPasswordPolicy(get(), f.deps());
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { policy: { minLength: 4, requiredClasses: 0, differFromUsername: true } });
+  assert.equal(res.headers.get('cache-control'), 'no-store');
+});
+
+test('setup and reset answer with the rule the password broke, before any code is claimed', async () => {
+  const f = fakes();
+  await f.addTicket('code-1', 'setup');
+  for (const [password, rule] of [['abc', 'length'], ['Lukas', 'username']] as const) {
+    const res = await authSetup(post(setupBody({ password })), f.deps());
+    assert.equal(res.status, 400);
+    assert.deepEqual(await res.json(), { error: 'invalid-password', rule });
+  }
+  assert.equal(f.calls.claim, 0);
+  // Reset: the username rule waits for the ticket, which names the account.
+  assert.equal((await authSetup(post(setupBody()), f.deps())).status, 200);
+  await f.addTicket('reset-1', 'reset', 'lukas');
+  const reset = await authSetup(post({ purpose: 'reset', code: 'reset-1', password: 'abc' }), f.deps());
+  assert.deepEqual(await reset.json(), { error: 'invalid-password', rule: 'length' });
+  const named = await authSetup(post({ purpose: 'reset', code: 'reset-1', password: 'LUKAS' }), f.deps());
+  assert.deepEqual(await named.json(), { error: 'invalid-password', rule: 'username' });
+});
+
+test('change password: this session stays, the others are signed out, the old password fails', async () => {
+  const f = await withOwner();
+  const mine = await signedIn(f);
+  const other = await signedIn(f);
+  const res = await authChangePassword(post({ current: PASSWORD, next: 'new password 2' }, mine), f.deps());
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true });
+  assert.equal(res.headers.get('set-cookie'), null);
+  assert.equal((await (await authSession(get(mine), f.deps())).json()).authenticated, true);
+  assert.equal((await (await authSession(get(other), f.deps())).json()).authenticated, false);
+  assert.equal((await authLogin(post({ username: 'lukas', password: PASSWORD }), f.deps())).status, 401);
+  assert.equal((await authLogin(post({ username: 'lukas', password: 'new password 2' }), f.deps())).status, 200);
+  assert.ok(f.audited.includes('auth.password-changed'));
+});
+
+test('change password refuses a wrong password, a weak one, no session, a foreign Origin and the gateway', async () => {
+  const f = await withOwner();
+  const mine = await signedIn(f);
+  const cases: Array<[AuthContext, number, Record<string, unknown> | null]> = [
+    [post({ current: 'wrong', next: 'new password 2' }, mine), 401, { error: 'invalid-credentials' }],
+    [post({ current: 'limited', next: 'new password 2' }, mine), 429, { error: 'rate-limited' }],
+    [post({ current: PASSWORD, next: 'abc' }, mine), 400, { error: 'invalid-password', rule: 'length' }],
+    [post({ current: PASSWORD, next: 'LUKAS' }, mine), 400, { error: 'invalid-password', rule: 'username' }],
+    [post({ current: PASSWORD }, mine), 400, { error: 'invalid-request' }],
+    [post({ current: PASSWORD, next: 'new password 2' }), 401, { error: 'login-required' }],
+    [post({ current: PASSWORD, next: 'new password 2' }, { ...mine, origin: 'http://evil.test' }), 403, { error: 'forbidden-origin' }],
+    [post({ current: PASSWORD, next: 'new password 2' }, { ...mine, 'sec-fetch-site': 'same-site' }), 403, { error: 'forbidden-origin' }],
+    [post({ current: PASSWORD, next: 'new password 2' }, { ...mine, [GATEWAY_IDENTITY_HEADER]: 'agw1.x.y' }), 403, { error: 'forbidden' }],
+  ];
+  for (const [ctx, status, body] of cases) {
+    const res = await authChangePassword(ctx, f.deps());
+    assert.equal(res.status, status, JSON.stringify(body));
+    if (body) assert.deepEqual(await res.json(), body);
+  }
+  assert.equal(f.password(), PASSWORD, 'unchanged');
+  // The owner acting through Settings never reaches it either.
+  f.setGatewayOwner({ kind: 'user', userId: 'default', role: 'owner', sessionId: 's1', verification: 'verified' });
+  const viaGateway = await authChangePassword(post({ current: PASSWORD, next: 'new password 2' }, { [GATEWAY_IDENTITY_HEADER]: 'agw1.x.y' }), f.deps());
+  assert.equal(viaGateway.status, 403);
+});
+
+test('set password policy: confirmed with the password, range-checked, never through the gateway', async () => {
+  const f = await withOwner();
+  const mine = await signedIn(f);
+  const want = { minLength: 6, requiredClasses: 2, differFromUsername: true };
+  assert.equal((await authSetPasswordPolicy(put({ current: 'wrong', policy: want }, mine), f.deps())).status, 401);
+  const range = await authSetPasswordPolicy(put({ current: PASSWORD, policy: { ...want, minLength: 3 } }, mine), f.deps());
+  assert.deepEqual([range.status, await range.json()], [400, { error: 'invalid-policy' }]);
+  assert.equal((await authSetPasswordPolicy(put({ current: PASSWORD, policy: want }), f.deps())).status, 401, 'no session');
+  assert.equal((await authSetPasswordPolicy(put({ current: PASSWORD, policy: want }, { ...mine, origin: 'http://evil.test' }), f.deps())).status, 403);
+  assert.equal((await authSetPasswordPolicy(put({ current: PASSWORD, policy: want }, { ...mine, [GATEWAY_IDENTITY_HEADER]: 'agw1.x.y' }), f.deps())).status, 403);
+  assert.deepEqual(f.policy(), DEFAULT_PASSWORD_POLICY, 'unchanged');
+
+  const ok = await authSetPasswordPolicy(put({ current: PASSWORD, policy: want }, mine), f.deps());
+  assert.deepEqual([ok.status, await ok.json()], [200, { ok: true, policy: want }]);
+  assert.deepEqual((await (await authPasswordPolicy(get(), f.deps())).json()).policy, want);
+  assert.ok(f.audited.includes('auth.password-policy-changed'));
+  // The new rules apply to the next change; the current password still logs in.
+  assert.equal((await authLogin(post({ username: 'lukas', password: PASSWORD }), f.deps())).status, 200);
+  const weak = await authChangePassword(post({ current: PASSWORD, next: 'abcd' }, mine), f.deps());
+  assert.deepEqual(await weak.json(), { error: 'invalid-password', rule: 'length' });
+});
+
+test('account: the owner and their sessions, never a token or a full session id', async () => {
+  const f = await withOwner();
+  const mine = await signedIn(f);
+  await signedIn(f);
+  const res = await authAccount(get(mine), f.deps());
+  assert.equal(res.status, 200);
+  const text = await res.text();
+  const body = JSON.parse(text);
+  assert.deepEqual({ ...body, sessions: undefined }, { userId: 'default', username: 'lukas', role: 'owner', createdAt: 1, sessions: undefined });
+  assert.equal(body.sessions.length, 2);
+  assert.equal(body.sessions.filter((s: { current: boolean }) => s.current).length, 1);
+  for (const s of body.sessions) {
+    assert.deepEqual(Object.keys(s).sort(), ['createdAt', 'current', 'id8', 'method']);
+    assert.equal(s.id8.length, 8);
+  }
+  for (const id of f.sessions.keys()) assert.equal(text.includes(id), false, 'no full id');
+  assert.equal(text.includes('aura-sess1'), false, 'no token');
+  assert.equal((await authAccount(get(), f.deps())).status, 401);
+});
+
+test('account and revoke-others work for the owner through Settings (D45), with the owner session as current', async () => {
+  const f = await withOwner();
+  const mine = await signedIn(f);
+  const other = await signedIn(f);
+  const [sid] = [...f.sessions.keys()];
+  const gw = { [GATEWAY_IDENTITY_HEADER]: 'agw1.x.y' };
+  // No verified owner: nothing, even with a login cookie alongside.
+  assert.equal((await authAccount(get({ ...gw, ...mine }), f.deps())).status, 401);
+  f.setGatewayOwner({ kind: 'user', userId: 'default', role: 'owner', sessionId: sid!, verification: 'verified' });
+  const account = await (await authAccount(get(gw), f.deps())).json();
+  assert.equal(account.sessions.find((s: { current: boolean }) => s.current).id8, sid!.slice(0, 8));
+
+  // The gateway forwards neither Origin nor cookie; it checked them itself.
+  const res = await authRevokeOtherSessions(post({}, { ...gw, origin: null, 'sec-fetch-site': null }), f.deps());
+  assert.deepEqual([res.status, await res.json()], [200, { ok: true, revoked: 1 }]);
+  assert.equal((await (await authSession(get(mine), f.deps())).json()).authenticated, true);
+  assert.equal((await (await authSession(get(other), f.deps())).json()).authenticated, false);
+  assert.ok(f.audited.includes('auth.sessions-revoked'));
+});
+
+test('revoke-others from the shell needs the login cookie and the exact Origin', async () => {
+  const f = await withOwner();
+  const mine = await signedIn(f);
+  const other = await signedIn(f);
+  assert.equal((await authRevokeOtherSessions(post({}, { ...mine, origin: 'http://evil.test' }), f.deps())).status, 403);
+  assert.equal((await authRevokeOtherSessions(post({}), f.deps())).status, 401);
+  assert.equal((await (await authSession(get(other), f.deps())).json()).authenticated, true);
+  const res = await authRevokeOtherSessions(post({}, mine), f.deps());
+  assert.deepEqual(await res.json(), { ok: true, revoked: 1 });
+  assert.equal((await (await authSession(get(mine), f.deps())).json()).authenticated, true);
+  assert.equal((await (await authSession(get(other), f.deps())).json()).authenticated, false);
+});
+
+test('the Users & Identities route files delegate to the surface', () => {
+  for (const route of [policyRoute, policyPutRoute, passwordRoute, accountRoute, revokeOthersRoute]) assert.equal(typeof route, 'function');
 });

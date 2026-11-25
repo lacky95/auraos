@@ -114,6 +114,12 @@ export const AURA_CHANNEL_MESSAGES = {
   'aura.admin.unlock.request': TO_SHELL,
   'aura.admin.unlock.result': TO_APP,
 
+  // Users & Identities: Settings asks, the Shell's own dialog takes the password
+  'aura.account.password.request': TO_SHELL,
+  'aura.account.password.result': TO_APP,
+  'aura.account.policy.request': TO_SHELL,
+  'aura.account.policy.result': TO_APP,
+
   // Terminal session share: an embed host asks, the owner decides in the Shell (D25)
   'aura.terminal.share.request': TO_SHELL,
   'aura.terminal.share.result': TO_APP,

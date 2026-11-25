@@ -1,6 +1,5 @@
 ---
 import AuthLayout from '../layouts/AuthLayout.astro';
-import * as core from '@aura/core';
 import { authPageHeaders } from '../lib/authSurface.js';
 
 const gate = authPageHeaders();
@@ -20,7 +19,7 @@ for (const [name, value] of Object.entries(gate.headers)) Astro.response.headers
   <form id="setup" method="post" novalidate>
     <label>One-time code <input name="code" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" required /></label>
     <label id="username-field">Username <input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required /></label>
-    <label>New password (at least {core.PASSWORD_MIN_LENGTH} characters) <input name="password" type="password" autocomplete="new-password" required /></label>
+    <label>New password <span id="password-rules"></span> <input name="password" type="password" autocomplete="new-password" required /></label>
     <label>Repeat password <input name="confirm" type="password" autocomplete="new-password" required /></label>
     <button type="submit">Continue</button>
     <p class="error" role="alert"></p>
@@ -33,7 +32,25 @@ for (const [name, value] of Object.entries(gate.headers)) Astro.response.headers
       const messages = {
         'setup-rejected': 'That code is not valid. Create a new one and try again.',
         'invalid-username': 'Use 3 to 32 lowercase letters, digits, dots, dashes or underscores.',
-        'invalid-password': 'Choose a longer password that differs from the username.',
+        'invalid-password': 'Choose a password that meets the rules.',
+      };
+      // The configured rules (Settings → Users & Identities), never a constant.
+      let policy = null;
+      try {
+        policy = (await (await fetch('/api/auth/password-policy', { credentials: 'same-origin' })).json()).policy ?? null;
+      } catch { /* the server still checks */ }
+      const types = (n) => `${n} character type${n === 1 ? '' : 's'}`;
+      if (policy) {
+        const parts = [`at least ${policy.minLength} characters`];
+        if (policy.requiredClasses > 0) parts.push(`${types(policy.requiredClasses)} (lowercase, uppercase, digits, other)`);
+        if (policy.differFromUsername) parts.push('different from the username');
+        document.getElementById('password-rules').textContent = `(${parts.join(', ')})`;
+      }
+      const ruleText = {
+        length: () => `The password needs at least ${policy?.minLength ?? 'more'} characters.`,
+        'max-bytes': () => 'The password is too long.',
+        classes: () => `The password needs ${policy ? types(policy.requiredClasses) : 'more character types'}: lowercase, uppercase, digits, other.`,
+        username: () => 'The password must differ from the username.',
       };
       let reset = false;
       try {
@@ -62,7 +79,8 @@ for (const [name, value] of Object.entries(gate.headers)) Astro.response.headers
           });
           if (res.ok) { location.replace('/login'); return; }
           const data = await res.json().catch(() => ({}));
-          error.textContent = messages[data.error] ?? 'Setup is unavailable right now.';
+          error.textContent = (data.error === 'invalid-password' && ruleText[data.rule]?.())
+            || messages[data.error] || 'Setup is unavailable right now.';
         } catch {
           error.textContent = 'Could not reach AuraOS.';
         }

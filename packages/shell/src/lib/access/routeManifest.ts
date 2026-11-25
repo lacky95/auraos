@@ -136,6 +136,16 @@ const routes: RouteAccessManifest['routes'] = {
     methods: { GET: rule(OWNER, 'session', decide(3,
       'Answers authenticated:false to a visitor without a session. Decide whether enforcement keeps that answer or returns 401 first.')) },
   },
+  // Settings → Users & Identities. A password is typed only into the shell's
+  // own dialog, so those two stay on target `session`, which no app reaches
+  // for the owner (gatewayCaller.ts). Settings reads the account and signs out
+  // other sessions through the gateway (D45, OWNER_UI_APPS).
+  '/api/auth/password-policy': {
+    methods: { GET: rule(['public'], 'system'), PUT: rule(OWNER, 'session') },
+  },
+  '/api/auth/password': { methods: { POST: rule(OWNER, 'session') } },
+  '/api/auth/account': { methods: { GET: rule(OWNER, 'system') } },
+  '/api/auth/sessions/revoke-others': { methods: { POST: rule(OWNER, 'system') } },
   '/api/auth/whoami': {
     methods: { GET: rule(INSTANCE, 'session', decide(3,
       'Reflects only the caller, and a login cookie is labelled information. Anonymous and API-key callers count as would-deny here; decide at enforcement whether they keep an answer.')) },
