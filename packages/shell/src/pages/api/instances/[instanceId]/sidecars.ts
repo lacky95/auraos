@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
-import { jsonBody, sidecarError, sidecarGate } from '../../../../lib/instanceAuth.js';
+import { jsonBody, sidecarError, sidecarTarget } from '../../../../lib/instanceAuth.js';
 
 /**
  * Inspect data for one instance: its own sandbox plus every sidecar attached
@@ -27,7 +27,7 @@ import { jsonBody, sidecarError, sidecarGate } from '../../../../lib/instanceAut
  * OS-managed sidecars: the OS does the `docker run` (SidecarManager), so the
  * app needs no docker tool. See core's sidecar-spec.ts for what may be asked.
  */
-export const GET: APIRoute = async ({ params, url, request }) => {
+export const GET: APIRoute = async ({ params, url, locals }) => {
   const instanceId = params['instanceId'];
   if (!instanceId) return errorResponse('Missing instance id', 400);
 
@@ -35,7 +35,7 @@ export const GET: APIRoute = async ({ params, url, request }) => {
   if (!mgr.getInstance(instanceId)) return errorResponse(`Instance not found: ${instanceId}`, 404);
 
   if (url.searchParams.get('view') === 'managed') {
-    const gate = sidecarGate(params, request, ['sidecars.spawn']);
+    const gate = sidecarTarget(params, locals);
     if (gate instanceof Response) return gate;
     // A sidecar caller sees only what it may manage (its own subtree, unless sidecars.manageAll).
     try { return jsonResponse({ sidecars: await gate.mgr.osSidecars.list(instanceId, gate.caller) }); }
@@ -58,8 +58,8 @@ export const GET: APIRoute = async ({ params, url, request }) => {
   }
 };
 
-export const POST: APIRoute = async ({ params, request }) => {
-  const gate = sidecarGate(params, request, ['sidecars.spawn']);
+export const POST: APIRoute = async ({ params, request, locals }) => {
+  const gate = sidecarTarget(params, locals);
   if (gate instanceof Response) return gate;
   const body = await jsonBody<unknown>(request);
   if (body instanceof Response) return body;

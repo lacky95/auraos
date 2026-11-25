@@ -12,8 +12,9 @@ import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
  *   POST host: { kind:'host', sourcePort, port?/hostPort?, bindAddr?, sticky? }
  *           → the URL instance is the SOURCE; its port is published on the host.
  *
- * Same permission model as mounts: the requesting app is derived from the
- * instance record (never the body) and must declare `apps.port`.
+ * Same permission model as mounts: the app of the instance in the URL (never
+ * the body) must declare `apps.port`, the route access manifest's
+ * `targetPermissions` (routeManifest.ts), applied by the middleware.
  */
 export const GET: APIRoute = ({ params }) => {
   const instanceId = params['instanceId'];
@@ -32,13 +33,6 @@ export const POST: APIRoute = async ({ params, request }) => {
   const mgr = getAppManager();
   const instance = mgr.getInstance(instanceId);
   if (!instance) return errorResponse(`Instance not found: ${instanceId}`, 404);
-
-  if (!mgr.permissions.hasPermission(instance.appId, 'apps.port')) {
-    return errorResponse(
-      `${instance.appId} is not granted 'apps.port'. Add it to the app's manifest permissions[] to expose ports.`,
-      403,
-    );
-  }
 
   let body: {
     kind?: string; sourceAppId?: string; sourcePort?: number;

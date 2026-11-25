@@ -1,7 +1,6 @@
 import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { jsonResponse } from '../../../lib/appResponse.js';
-import { requireAdmin } from '../../../lib/auth.js';
 
 /**
  * The admin audit trail (`audit:admin` Valkey stream), newest first.
@@ -12,9 +11,7 @@ import { requireAdmin } from '../../../lib/auth.js';
  * credential)" (or `system` / `anonymous` for rotation and failed unlocks);
  * no entry names an individual person.
  */
-export const GET: APIRoute = async ({ request, url }) => {
-  const p = await requireAdmin(request);
-  if (p instanceof Response) return p;
+export const GET: APIRoute = async ({ url }) => {
   const limit = Number(url.searchParams.get('limit') ?? 100);
   return jsonResponse({ entries: await core.getAuthServices().audit.list(limit) });
 };

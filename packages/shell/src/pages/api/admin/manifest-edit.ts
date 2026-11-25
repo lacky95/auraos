@@ -2,7 +2,7 @@ import type { APIRoute } from 'astro';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BUILTIN_PERMISSIONS, toolsGrant } from '@aura/core';
-import { auditAdmin, requireAdmin } from '../../../lib/auth.js';
+import { adminOf, auditAdmin } from '../../../lib/auth.js';
 
 /**
  * Server-side manifest mutation. Required because container-sandbox apps
@@ -52,9 +52,8 @@ interface Body {
 const PERMISSION_ACTIONS = new Set<Action>(['add-permission', 'remove-permission']);
 const SERVICE_ACTIONS = new Set<Action>(['add-service-tool', 'remove-service-tool']);
 
-export const POST: APIRoute = async ({ request }) => {
-  const admin = await requireAdmin(request);
-  if (admin instanceof Response) return admin;
+export const POST: APIRoute = async ({ request, locals }) => {
+  const admin = adminOf(locals);
   let body: Body;
   try { body = await request.json() as Body; }
   catch { return json({ error: 'invalid-json' }, 400); }

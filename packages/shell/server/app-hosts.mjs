@@ -27,7 +27,8 @@ import {
   APP_HOST_ROUTE_HEADER, AURA_RESERVED_PATHS, appHostCookieName, isAuraReservedPath, parseAppHost,
 } from '@aura/core/host-rules';
 import {
-  SESSION_COOKIES, countSurfaceEvent, internalServiceHeaders, observeHttpSurface, reportSurface, surfaceIdentity,
+  SESSION_COOKIES, countSurfaceEvent, gatedHttpSurface, internalServiceHeaders, observeHttpSurface, reportSurface,
+  requestIdentity, surfaceGate,
 } from './access-bridge.mjs';
 import { appHostAuth, appHostEmbedCookieName, safeReturnPath } from './app-host-auth.mjs';
 import { handleAppGateway, handleAppGatewayUpgrade, serveAppRuntime } from './app-gateway.mjs';
@@ -344,7 +345,8 @@ export function createAppHostRouter({
       appId: route.record.appId, userId: session.userId, sid: session.sid,
       ...(route.slot?.instanceId ? { instanceId: route.slot.instanceId } : {}),
     } : null;
-    return surfaceIdentity(req.headers, { method: req.method, url: req.url, appHost });
+    // Once per request: the gate, the report and the SSE mux share it.
+    return requestIdentity(req, { appHost });
   }
 
   /** Asks for a start, once at a time. `start()` claims the slot in the lifecycle. */
@@ -458,6 +460,9 @@ export function createAppHostRouter({
 
     const session = await appSession(route, req, edge);
     if (!session) return page(401, 'Open this app from AuraOS', 'This address needs a sign-in from the AuraOS desktop.');
+    if (!(await surfaceGate({ subject: 'app-hosts', method: req.method, appId: route.record.appId, identity: hostIdentity(route, req) }))) {
+      return page(403, 'Request refused', 'This sign-in may not open this app.');
+    }
     const policy = OWN_ORIGIN_ONLY_APPS.has(route.record.appId) ? 'own-origin' : 'app';
     if (browserBoundaryError(req, { policy, origin: edge.origin, path })) {
       return page(403, 'Request refused', 'This request came from another origin.');
@@ -505,6 +510,10 @@ export function createAppHostRouter({
       const session = await appSession(route, req, edge);
       if (!session) return fail(401, 'Unauthorized');
       if (mux && session.embed) return fail(403, 'Forbidden');
+      const identity = hostIdentity(route, req);
+      if (!(await surfaceGate({ subject: mux ? 'sse-mux' : 'app-hosts', method: 'UPGRADE', appId: route.record.appId, identity }))) {
+        return fail(403, 'Forbidden');
+      }
       if (mux) {
         reportUpgrade(0);   // the gateway answers the handshake
         return await handleAppGatewayUpgrade(req, socket, head, { record: route.record, slot: route.slot, session });
@@ -583,6 +592,14 @@ export function createAppHostRouter({
             return true;
           }
           if (event === 'request') observeHttpSurface(req, rest[0]);
+          // Vite's dev server serves source outside Astro's middleware: it waits for the surface gate.
+          if (event === 'request' && gatedHttpSurface(req)) {
+            const target = rest[0];
+            void surfaceGate({ subject: 'vite-dev-server', method: req.method, identity: requestIdentity(req) })
+              .then((ok) => (ok ? emit.call(this, event, req, ...rest) : refuse(event, target, 403, 'Forbidden', 'Sign in on the desktop first.')))
+              .catch(() => refuse(event, target, 503, 'Service Unavailable', 'AuraOS could not check this request.'));
+            return true;
+          }
           return emit.call(this, event, req, ...rest);
         };
         const edge = requestEdge(req, env);

@@ -1,7 +1,6 @@
 import type { APIRoute } from 'astro';
 import { defaultRedis } from '@aura/kv-store';
 import { jsonResponse } from '../../../lib/appResponse.js';
-import { requireAdmin } from '../../../lib/auth.js';
 import { readAccessReport } from '../../../lib/access/report.ts';
 import { ACCESS_BRIDGE_KEY, type AccessBridgeHost } from '../../../lib/access/types.ts';
 
@@ -13,9 +12,7 @@ import { ACCESS_BRIDGE_KEY, type AccessBridgeHost } from '../../../lib/access/ty
  * Needs an admin session, like /api/admin/audit. `pending` is what the
  * observer holds in memory until its next flush.
  */
-export const GET: APIRoute = async ({ request, url }) => {
-  const p = await requireAdmin(request);
-  if (p instanceof Response) return p;
+export const GET: APIRoute = async ({ url }) => {
   const asked = Number(url.searchParams.get('days') ?? 1);
   const days = Number.isInteger(asked) ? Math.min(Math.max(asked, 1), 14) : 1;
   let redis: ReturnType<typeof defaultRedis>;

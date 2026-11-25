@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import { jsonResponse } from '../../../lib/appResponse.js';
-import { auditAdmin, requireAdmin } from '../../../lib/auth.js';
+import { adminOf, auditAdmin } from '../../../lib/auth.js';
 import { resetOnboarding } from '../../../lib/onboarding/index.js';
 import { readOnboarding } from '../../../lib/onboarding/state.js';
 
@@ -15,9 +15,8 @@ import { readOnboarding } from '../../../lib/onboarding/state.js';
  */
 export const GET: APIRoute = async () => jsonResponse(await readOnboarding() ?? { welcome: { done: {} } });
 
-export const POST: APIRoute = async ({ request }) => {
-  const p = await requireAdmin(request);
-  if (p instanceof Response) return p;
+export const POST: APIRoute = async ({ request, locals }) => {
+  const p = adminOf(locals);
   const body = await request.json().catch(() => ({})) as { setup?: unknown };
   const setup = body.setup === true;
   await resetOnboarding({ setup });

@@ -14,7 +14,7 @@ import { AdminAuth, ApiKeyStore, Authorizer, SYSTEM_PRINCIPAL } from '@aura/core
 import type { AccessPrincipal } from '@aura/core';
 import { createDecide } from '../src/lib/access/decide.ts';
 import { captureAccess, createAccessReporter } from '../src/lib/access/guard.ts';
-import { refererAppId, refererProxyId } from '../src/lib/access/legacyReferer.ts';
+import { refererProxyId } from '../src/lib/access/legacyReferer.ts';
 import {
   combineCandidates, createObserver, identifyRequest, observeIdentity, requestFromFacts, statusClass,
 } from '../src/lib/access/observer.ts';
@@ -676,7 +676,7 @@ test('report: a sample carries wouldEnforce', async () => {
   assert.equal(args[args.indexOf('wouldEnforce') + 1], 'true');
 });
 
-test('observer: wouldEnforce follows the mode; a gateway call is already enforced', async () => {
+test('observer: wouldEnforce follows the mode; a gateway refusal is already enforced', async () => {
   const gatewayIdentity = { verified: { principal: inst('com.a.app'), via: 'gateway' as const }, referer: null, instanceId: null };
   const flags = async (mode: string, over: Partial<RequestSnapshot> = {}) => {
     const prev = process.env['AURA_ACCESS_ENFORCE'];
@@ -693,7 +693,10 @@ test('observer: wouldEnforce follows the mode; a gateway call is already enforce
   assert.equal(report.decision, 'deny');
   assert.equal(report.wouldEnforce, '1');
   assert.equal((await flags('enforce')).wouldEnforce, '0');
-  assert.equal((await flags('report', { identity: gatewayIdentity })).wouldEnforce, '0');
+  // Refused at the gateway already: nothing for enforce to add.
+  assert.equal((await flags('report', { identity: gatewayIdentity, status: 403 })).wouldEnforce, '0');
+  // Served by the gateway, but enforce would refuse it (an auto-grant stops counting there).
+  assert.equal((await flags('report', { identity: gatewayIdentity, status: 200 })).wouldEnforce, '1');
 });
 
 test('redaction: nothing from the request reaches the stored report', async () => {
@@ -966,27 +969,13 @@ test('WS proxy strips shell credentials and keeps app cookies', { timeout: 10_00
 
 // ── legacy Referer ──────────────────────────────────────────────────────────
 
-test('legacy Referer: one parser with the old semantics', () => {
-  const mgr = {
-    getInstance: (id: string) => (id === 'com.a.app-1' ? { appId: 'com.a.app' } : undefined),
-    getInstancesByApp: (id: string) => (id === 'com.b.app' ? [{ appId: 'com.b.app' }] : []),
-  };
-  const cases: Array<[string | null, string | null]> = [
-    [null, null],
-    ['', null],
-    ['not a url', null],
-    ['http://x/launcher', null],
-    ['http://x/api/proxy/com.a.app-1', null],          // no trailing slash: no match
-    ['http://x/api/proxy/com.a.app-1/', 'com.a.app'],
-    ['http://x/api/proxy/com.b.app/page', 'com.b.app'],
-    ['http://x/api/proxy/unknown/page', 'unknown'],
-    ['http://x/api/proxy/system/page', 'system'],
-  ];
-  for (const [referer, want] of cases) assert.equal(refererAppId(referer, mgr), want, String(referer));
+test('legacy Referer: one parser, and no route trusts it', () => {
   assert.equal(refererProxyId('http://x/api/proxy/a/b'), 'a');
   const src = ['src/pages/api/kv/[...path].ts', 'src/pages/api/data/[authority]/[...path].ts', 'src/lib/customInterfaces.ts', 'src/middleware.ts', 'src/lib/access/identify.ts'];
   for (const f of src) {
-    assert.ok(!fs.readFileSync(path.join(root, f), 'utf8').includes('.match(/^\\/api\\/proxy'), `${f} has its own parser`);
+    const text = fs.readFileSync(path.join(root, f), 'utf8');
+    assert.ok(!text.includes('.match(/^\\/api\\/proxy'), `${f} has its own parser`);
+    assert.ok(!text.includes('legacyReferer'), `${f} trusts a Referer`);
   }
 });
 

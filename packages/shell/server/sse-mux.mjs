@@ -24,7 +24,7 @@
  *                    {op:'fail', id, status}               bad response; client closes for good
  */
 
-import { reportSurface, surfaceIdentity } from './access-bridge.mjs';
+import { reportSurface, requestIdentity } from './access-bridge.mjs';
 
 const PING_MS = 25_000;
 const MAX_STREAMS_PER_SOCKET = 256;
@@ -90,7 +90,8 @@ export async function createSseMux(log = () => {}) {
   function serve(ws, req, scope) {
     const streams = new Map(); // id → AbortController
     log('connect', req.socket.remoteAddress);
-    const identity = surfaceIdentity(req.headers, { url: req.url });
+    // The verdict the App Host router decided the upgrade on (surfaceGate), with its verified session.
+    const identity = requestIdentity(req);
     const reportStream = (method, status) => reportSurface({ subject: 'sse-mux', method, status, via: 'sse-mux', identity });
     reportStream('UPGRADE', 101);
 

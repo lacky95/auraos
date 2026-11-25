@@ -3,13 +3,17 @@
  * `.mjs` with no imports, so the Astro middleware, lib/access and the shell's
  * `.mjs` servers all ask the same function.
  *
- *   off       no access report and no manifest enforcement: the observer,
- *             surface events and the internal service label are all off.
+ *   off       no access report: the observer, surface events and the
+ *             internal service label are all off.
  *   report    (default) every decision is counted in the access report;
  *             nothing is refused because of it. A would-deny row is marked
  *             `wouldEnforce`.
- *   enforce   the central middleware refuses what the manifest denies
- *             (Phase 3 stream A), and the report keeps counting.
+ *   enforce   the central middleware (lib/access/enforce.ts) and the surface
+ *             gate (access-bridge.mjs `surfaceGate`) refuse what the manifest
+ *             denies, and the report keeps counting.
+ *
+ * In every mode the middleware applies a rule's `guard`: the check its route
+ * made itself before Phase 3 (D36), so no mode opens what a route refused.
  *
  * App Host gateway calls (`/_aura/os/*`) are enforced in every mode: that is
  * the Phase 2 boundary, not this switch. An unknown value counts as the

@@ -23,10 +23,23 @@ export class ShellApiError extends Error {
   }
 }
 
+/**
+ * Every OS call carries this service's identity, `Authorization: Bearer
+ * $AURA_INSTANCE_TOKEN` (never on a proxied path: `osAuthHeaders`). The
+ * shell's access rules know the system copy of this service as the owner's
+ * shell-control MCP (lib/access/identify.ts `isTrustedOwnerAgent`); without a
+ * token it would be an anonymous caller.
+ */
+function withIdentity(path: string, init: RequestInit): RequestInit {
+  const auth = osAuthHeaders(`${OS_BASE}${path}`);
+  if (!auth['Authorization']) return init;
+  return { ...init, headers: { ...auth, ...(init.headers as Record<string, string> | undefined) } };
+}
+
 async function call<T>(path: string, init: RequestInit = {}, timeoutMs = 10_000): Promise<T> {
   let res: Response;
   try {
-    res = await fetchImpl(`${OS_BASE}${path}`, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+    res = await fetchImpl(`${OS_BASE}${path}`, { ...withIdentity(path, init), signal: AbortSignal.timeout(timeoutMs) });
   } catch (err) {
     throw new ShellApiError(0, `the OS API at ${OS_BASE} is not reachable: ${(err as Error).message}`);
   }
@@ -142,10 +155,10 @@ export const closeActivity = (activityId: string) =>
 
 // ── Notifications (verified as this service) ───────────────────────────────
 //
-// Only these calls carry `Authorization: Bearer $AURA_INSTANCE_TOKEN`, so the
+// These calls REQUIRE `Authorization: Bearer $AURA_INSTANCE_TOKEN`, so the
 // shell attributes the notification to com.aura.aurashelld (sender kind
-// `agent`, verified). Every other route keeps its old, token-less behaviour.
-// No token → refuse rather than silently send as an anonymous caller.
+// `agent`, verified). No token → refuse rather than silently send as an
+// anonymous caller.
 
 /** Base wire shape (the shell's `Notification`). */
 export interface NotificationWire {
@@ -230,7 +243,7 @@ export async function ui<T = unknown>(action: string, params?: Record<string, un
   let res: Response;
   try {
     res = await fetchImpl(`${OS_BASE}/api/os/ui/command`,
-      { ...jsonInit('POST', { action, params, timeoutMs }), signal: AbortSignal.timeout(timeoutMs + 3_000) });
+      { ...withIdentity('/api/os/ui/command', jsonInit('POST', { action, params, timeoutMs })), signal: AbortSignal.timeout(timeoutMs + 3_000) });
   } catch (err) {
     return { ok: false, error: 'unreachable', message: `the OS API at ${OS_BASE} is not reachable: ${(err as Error).message}` };
   }

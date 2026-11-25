@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getAppManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
-import { checkCustomWrite, loadCustomInterfaces, parseCustomInterface, saveCustomInterfaces } from '../../../../lib/customInterfaces.js';
+import { loadCustomInterfaces, parseCustomInterface, saveCustomInterfaces } from '../../../../lib/customInterfaces.js';
 
 /**
  *   GET    /api/interfaces/custom/<name>  → { interface }
@@ -14,8 +14,6 @@ export const GET: APIRoute = async ({ params }) => {
 };
 
 export const PUT: APIRoute = async ({ params, request }) => {
-  const denied = checkCustomWrite(request, getAppManager());
-  if (denied) return errorResponse(denied, 403);
   const parsed = parseCustomInterface(await request.json().catch(() => null));
   if (!parsed.ok) return errorResponse(parsed.error, 400);
 
@@ -30,9 +28,7 @@ export const PUT: APIRoute = async ({ params, request }) => {
   return jsonResponse({ ok: true, interface: parsed.value });
 };
 
-export const DELETE: APIRoute = async ({ params, request }) => {
-  const denied = checkCustomWrite(request, getAppManager());
-  if (denied) return errorResponse(denied, 403);
+export const DELETE: APIRoute = async ({ params }) => {
   const entries = await loadCustomInterfaces();
   const kept = entries.filter((e) => e.name !== params['name']);
   if (kept.length === entries.length) return errorResponse(`no custom interface '${params['name']}'`, 404);

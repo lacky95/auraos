@@ -1,23 +1,31 @@
 import * as core from '@aura/core';
-import type { AccessPrincipal, Principal } from '@aura/core';
+import type { AccessPrincipal, InstancePrincipal, Principal } from '@aura/core';
 import type {
-  AccessReason, AccessRule, Decide, DecideInput, DecideResult, PolicyResource,
+  AccessReason, AccessRule, AccessTarget, Decide, DecideInput, DecideResult, PolicyResource,
 } from './types.ts';
 
 /**
- * The central access decision (5.11), over a manifest rule. Phase 1 only
- * reports what it returns. Permission checks go through core's `Authorizer`,
- * so its answers and its auto-grants stay the single source.
+ * The central access decision (5.11), over a manifest rule. The middleware
+ * (enforce.ts), the gateway (gatewayCaller.ts), the surface gate and the
+ * report (observer.ts) all ask it. Permission checks go through core's
+ * `Authorizer`, so its answers and its auto-grants stay the single source;
+ * `strict` (`enforce`) stops an auto-grant from counting.
  *
- * The shared `admin` session counts as the report-level `operator`, which
- * satisfies `owner` so recovery keeps working. The owner's login (a verified
- * `user`, identify.ts `resolvePrincipal`) satisfies `owner` too; since Phase 3
- * Stage 0 that is reported, and enforced only from Stage 2.
+ * `owner` is satisfied by the shared `admin` session (the report's
+ * `operator`), the owner's login (a verified `user`, identify.ts
+ * `resolvePrincipal`), and a trusted owner agent (D29): the System Terminal
+ * or the owner's shell MCP by its own token, never on the owner's login
+ * session or a shell screen.
  */
 
 export interface DecideDeps {
   authorizer: { authorize(principal: Principal, action: string): Promise<{ allow: boolean; reason: string }> };
+  /** D29: whether this instance acts for the owner (identify.ts `isTrustedOwnerAgent`). Never asked at the gateway. */
+  ownerAgent?(principal: InstancePrincipal): boolean;
 }
+
+/** What a trusted owner agent never reaches as the owner: the owner's login session and a shell screen. */
+const OWNER_AGENT_EXCLUDED_TARGETS: ReadonlySet<AccessTarget> = new Set(['session', 'client-session']);
 
 const allow = (reason: AccessReason): DecideResult => ({ outcome: 'allow', reason });
 const deny = (reason: AccessReason): DecideResult => ({ outcome: 'deny', reason });
@@ -43,18 +51,41 @@ function ownsTarget(p: Extract<AccessPrincipal, { kind: 'instance' }>, r: Policy
   }
 }
 
-/** Whether each permission is held; `auto` when any was only auto-granted. */
+/**
+ * Whether each permission is held; `auto` when any was only auto-granted. In
+ * `strict` an auto-grant is not held: the permission has to be declared.
+ */
 async function checkPermissions(
-  deps: DecideDeps, principal: Principal, permissions: readonly string[],
+  deps: DecideDeps, principal: Principal, permissions: readonly string[], strict = false,
 ): Promise<{ ok: boolean; auto: boolean }> {
   let auto = false;
   for (const permission of permissions) {
     if (permission.includes('<')) return { ok: false, auto };
     const d = await deps.authorizer.authorize(principal, permission);
     if (!d.allow) return { ok: false, auto };
-    auto ||= isAutoGrant(d.reason);
+    if (isAutoGrant(d.reason)) {
+      if (strict) return { ok: false, auto: true };
+      auto = true;
+    }
   }
   return { ok: true, auto };
+}
+
+/** The whole `targetPermissions` check of a rule, held by the TARGET app. */
+export async function targetPermissionsHeld(
+  deps: DecideDeps, rule: AccessRule, resource: PolicyResource, strict = false,
+): Promise<DecideResult> {
+  if (!rule.targetPermissions?.length) return allow('public');
+  if (!resource.appId) return deny('wrong-target');
+  const target: Principal = {
+    kind: 'instance',
+    appId: resource.appId,
+    instanceId: resource.instanceId ?? resource.appId,
+    verification: 'verified',
+  };
+  const held = await checkPermissions(deps, target, rule.targetPermissions, strict);
+  if (!held.ok) return deny('missing-target-permission');
+  return allow(held.auto ? 'auto-granted' : 'public');
 }
 
 async function matchLevel(
@@ -63,7 +94,13 @@ async function matchLevel(
   const p = input.principal;
   let failure: AccessReason = p.kind === 'anonymous' ? 'unauthenticated' : 'wrong-principal';
 
-  if (rule.allow.includes('owner') && isOwner(p)) return { granted: 'owner', failure };
+  if (rule.allow.includes('owner')) {
+    if (isOwner(p)) return { granted: 'owner', failure };
+    if (p.kind === 'instance' && input.auth.via === 'instance-token'
+      && !OWNER_AGENT_EXCLUDED_TARGETS.has(rule.target) && deps.ownerAgent?.(p)) {
+      return { granted: 'owner', failure };
+    }
+  }
 
   if (rule.allow.includes('own-instance') && p.kind === 'instance') {
     if (ownsTarget(p, input.resource)) return { granted: 'own-instance', failure };
@@ -75,7 +112,7 @@ async function matchLevel(
     const canHold = p.kind === 'instance' || p.kind === 'apiKey'
       || (p.kind === 'anonymous' && permissions.length > 0);
     if (canHold) {
-      const held = await checkPermissions(deps, p as Principal, permissions);
+      const held = await checkPermissions(deps, p as Principal, permissions, input.strict);
       if (held.ok) return { granted: held.auto ? 'auto-granted' : 'app-permission', failure };
       if (p.kind !== 'anonymous') failure = 'missing-permission';
     }
@@ -93,22 +130,19 @@ async function evaluate(input: DecideInput, deps: DecideDeps): Promise<DecideRes
   }
   if (rule.allow.includes('public')) return allow('public');
 
+  const via = input.auth.via;
+  const refusedAs: AccessReason = principal.kind === 'anonymous' ? 'unauthenticated' : 'wrong-principal';
+  // D28: a network-identified caller is good for a `networkCaller` rule and nothing else.
+  if (via === 'network') return rule.networkCaller ? allow('network-caller') : deny('unauthenticated');
+  if (rule.credentials && !(via && rule.credentials.includes(via))) return deny(refusedAs);
+
   const { granted, failure } = await matchLevel(input, rule, deps);
   if (!granted) return deny(failure);
 
   let reason = granted;
-  if (rule.targetPermissions?.length) {
-    if (!resource.appId) return deny('wrong-target');
-    const target: Principal = {
-      kind: 'instance',
-      appId: resource.appId,
-      instanceId: resource.instanceId ?? resource.appId,
-      verification: 'verified',
-    };
-    const held = await checkPermissions(deps, target, rule.targetPermissions);
-    if (!held.ok) return deny('missing-target-permission');
-    if (held.auto) reason = 'auto-granted';
-  }
+  const target = await targetPermissionsHeld(deps, rule, resource, input.strict);
+  if (target.outcome !== 'allow') return target;
+  if (target.reason === 'auto-granted') reason = 'auto-granted';
 
   if (rule.freshAuth && !input.auth.fresh) {
     return input.transport === 'https'

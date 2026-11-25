@@ -1,10 +1,8 @@
 import type { APIRoute } from 'astro';
-import { getAppManager, OsEventBus, ThemeManager, type ColorMode } from '@aura/core';
+import { OsEventBus, ThemeManager, type ColorMode } from '@aura/core';
 import { isValidKey, isValidNamespace, type KvNamespace } from '@aura/kv-store';
 import { sharedKv } from '../../../lib/sharedKv.js';
 import { withEtag } from '../../../lib/etag.js';
-import { kvReadAllowed } from '../../../lib/access/kvAccess.ts';
-import { refererAppId } from '../../../lib/access/legacyReferer.ts';
 
 /**
  * OS-wide key-value store proxy.
@@ -20,13 +18,13 @@ import { refererAppId } from '../../../lib/access/legacyReferer.ts';
  *        is 409 `{ error, current: { value, updatedAt } }`.
  * DELETE removes the key; same event with `value: null`.
  *
- * Permission model (see plan):
- *   • Read `os.*`               — public.
- *   • Read `app/<id>.*`         — caller must be `<id>` (Referer check)
- *                                  or hold `data:app/<id>:read`.
- *   • Write `os.<topic>`        — caller must hold `system.kv.os.<topic>.write`
- *                                  (or be `'system'` — server-side SSR).
- *   • Write `app/<id>.*`        — caller must be `<id>`.
+ * Who may read and write which key is the route access manifest's
+ * (routeManifest.ts, `/api/kv/[...path]`), applied by the middleware:
+ *   • `os.*`          read by the owner and any app; written by the owner, or
+ *                     an app holding `system.kv.os.<topic>.write`
+ *   • `app/<id>.*`    only app `<id>`, and the owner
+ * An app is the verified caller (instance token or gateway claim), never a
+ * Referer; that rule applies to app callers in every access mode.
  */
 export const ALL: APIRoute = async ({ params, request }) => {
   const segments = (params['path'] ?? '').split('/').filter(Boolean);
@@ -58,16 +56,7 @@ export const ALL: APIRoute = async ({ params, request }) => {
   if (!isValidKey(key))       return jsonError(`Invalid key '${key}'`,       400);
 
   const namespace = ns as KvNamespace;
-  const mgr = getAppManager();
-  const sourceAppId = refererAppId(request.headers.get('referer'), mgr) ?? 'system';
   const method = request.method.toUpperCase();
-
-  // Permission gate. `'system'` (no Referer, e.g. SSR / curl) is privileged
-  // and skips checks — same convention as the content-provider proxy.
-  if (sourceAppId !== 'system') {
-    const gate = checkPermission(namespace, key, sourceAppId, method, mgr);
-    if (gate) return gate;
-  }
 
   const kv = sharedKv();
 
@@ -149,36 +138,6 @@ function serialized<T>(id: string, fn: () => Promise<T>): Promise<T> {
   putQueue.set(id, tail);
   void tail.then(() => { if (putQueue.get(id) === tail) putQueue.delete(id); });
   return run;
-}
-
-/**
- * Returns a Response if the caller is forbidden, `null` if they may proceed.
- */
-function checkPermission(
-  namespace: KvNamespace,
-  key:       string,
-  sourceAppId: string,
-  method:    string,
-  mgr:       ReturnType<typeof getAppManager>,
-): Response | null {
-  const isRead  = method === 'GET' || method === 'HEAD';
-  if (isRead && kvReadAllowed(namespace, sourceAppId)) return null;
-
-  if (namespace === 'os') {
-    // First topic segment of the key → permission scope. e.g. key
-    // `theme.colorMode` ⇒ permission `system.kv.os.theme.write`.
-    const topic = key.split(/[./]/, 1)[0]!;
-    const permKey = `system.kv.os.${topic}.write`;
-    if (mgr.permissions.hasPermission(sourceAppId, permKey)) return null;
-    return jsonError(`Permission denied: ${permKey}`, 403);
-  }
-
-  // namespace === 'app/<id>': must be the same app.
-  const ownerAppId = namespace.slice(4); // strip "app/"
-  if (sourceAppId === ownerAppId) return null;
-  // Cross-app read can be granted later via `data:app/<id>:read`; for now
-  // refuse everything but same-app.
-  return jsonError(`Cross-app access to ${namespace} requires same-app caller (saw '${sourceAppId}')`, 403);
 }
 
 function jsonResponse(body: unknown, status = 200): Response {

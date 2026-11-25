@@ -1,14 +1,13 @@
 import type { APIRoute } from 'astro';
 import { getAppManager } from '@aura/core';
 import { errorResponse, jsonResponse } from '../../../../../../lib/appResponse.js';
-import { jsonBody, sidecarError, sidecarGate } from '../../../../../../lib/instanceAuth.js';
+import { jsonBody, sidecarError, sidecarTarget } from '../../../../../../lib/instanceAuth.js';
 
 /**
  * Tools of one OS-managed sidecar — what it holds at /aura/my-tools.
  *
  *   GET                       → { own, inherited, template, runtime, effective, ignored }
- *        No token needed (read-only, like `GET …/sidecars?usage=0`); with a
- *        token the caller must be allowed to manage that sidecar.
+ *        Read-only, like `GET …/sidecars?usage=0` (who may read: routeManifest.ts).
  *   POST   { tools: [...] }   → { ok, granted, …view }   (token, sidecars.tools)
  *   DELETE ?tool=<name>[&tool=…] → { ok, revoked, …view } (token, sidecars.tools)
  *
@@ -19,19 +18,9 @@ import { jsonBody, sidecarError, sidecarGate } from '../../../../../../lib/insta
  * template (409 here). The sidecar's template must declare `tools` (even
  * `[]`) so it has a tools dir of its own — 409 otherwise.
  */
-export const GET: APIRoute = async ({ params, request }) => {
+export const GET: APIRoute = async ({ params }) => {
   const name = params['name'];
   if (!name) return errorResponse('Missing sidecar name', 400);
-  if (request.headers.get('authorization')) {
-    const gate = sidecarGate(params, request, ['sidecars.spawn']);
-    if (gate instanceof Response) return gate;
-    try {
-      await gate.mgr.osSidecars.authorize(gate.instance.instanceId, name, gate.caller);
-      return jsonResponse(await gate.mgr.osSidecars.listTools(gate.instance.instanceId, name));
-    } catch (err) {
-      return sidecarError(err);
-    }
-  }
   const instanceId = params['instanceId'];
   if (!instanceId) return errorResponse('Missing instance id', 400);
   const mgr = getAppManager();
@@ -43,8 +32,8 @@ export const GET: APIRoute = async ({ params, request }) => {
   }
 };
 
-export const POST: APIRoute = async ({ params, request }) => {
-  const gate = sidecarGate(params, request, ['sidecars.tools']);
+export const POST: APIRoute = async ({ params, request, locals }) => {
+  const gate = sidecarTarget(params, locals);
   if (gate instanceof Response) return gate;
   const name = params['name'];
   if (!name) return errorResponse('Missing sidecar name', 400);
@@ -59,8 +48,8 @@ export const POST: APIRoute = async ({ params, request }) => {
   }
 };
 
-export const DELETE: APIRoute = async ({ params, request, url }) => {
-  const gate = sidecarGate(params, request, ['sidecars.tools']);
+export const DELETE: APIRoute = async ({ params, url, locals }) => {
+  const gate = sidecarTarget(params, locals);
   if (gate instanceof Response) return gate;
   const name = params['name'];
   if (!name) return errorResponse('Missing sidecar name', 400);

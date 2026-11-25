@@ -2,7 +2,7 @@ import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { jsonResponse } from '../../../lib/appResponse.js';
 import { readJson } from '../../../lib/notificationCaller.js';
-import { auditAdmin, requireAdmin } from '../../../lib/auth.js';
+import { adminOf, auditAdmin } from '../../../lib/auth.js';
 
 /**
  * Admin grants of privileged permissions (core auth `GrantStore`).
@@ -44,9 +44,7 @@ async function subjectArgs(request: Request, url: URL): Promise<{ kind: string; 
   return { kind, id, permission, src };
 }
 
-export const GET: APIRoute = async ({ request }) => {
-  const p = await requireAdmin(request);
-  if (p instanceof Response) return p;
+export const GET: APIRoute = async () => {
   const { grants, authorizer } = core.getAuthServices();
   const all = await grants.listAll();
   const mgr = core.getAppManager();
@@ -75,9 +73,8 @@ export const GET: APIRoute = async ({ request }) => {
   return jsonResponse({ privileged: core.PRIVILEGED_PERMISSIONS, grants: all, apps });
 };
 
-export const POST: APIRoute = async ({ request, url }) => {
-  const p = await requireAdmin(request);
-  if (p instanceof Response) return p;
+export const POST: APIRoute = async ({ request, url, locals }) => {
+  const p = adminOf(locals);
   const a = await subjectArgs(request, url);
   if (a instanceof Response) return a;
   const { grants, apiKeys } = core.getAuthServices();
@@ -101,7 +98,7 @@ export const POST: APIRoute = async ({ request, url }) => {
     const read = a.permission === 'notifications.read' && readArg !== undefined
       ? { scope: readArg, includeSecret: a.src['includeSecret'] === true || a.src['includeSecret'] === 'true' }
       : undefined;
-    const r = await grants.grant({ kind: a.kind as 'app' | 'apiKey', id: a.id }, a.permission, { by: core.adminAttribution(p), appScope, ...(read ? { read } : {}) });
+    const r = await grants.grant({ kind: a.kind as 'app' | 'apiKey', id: a.id }, a.permission, { by: core.adminAttribution(p ?? undefined), appScope, ...(read ? { read } : {}) });
     await auditAdmin(p, 'grant', { target: `${a.kind}:${a.id}`, detail: { permission: a.permission, appScope: appScope ?? null, changed: r.changed, ...(r.record.read ? { read: core.GrantStore.describeRead(r.record) } : {}) } });
     return jsonResponse({ ok: true, ...r, warnings });
   } catch (err) {
@@ -109,9 +106,8 @@ export const POST: APIRoute = async ({ request, url }) => {
   }
 };
 
-export const DELETE: APIRoute = async ({ request, url }) => {
-  const p = await requireAdmin(request);
-  if (p instanceof Response) return p;
+export const DELETE: APIRoute = async ({ request, url, locals }) => {
+  const p = adminOf(locals);
   const a = await subjectArgs(request, url);
   if (a instanceof Response) return a;
   try {

@@ -63,7 +63,7 @@ export function handlersOf(manifest: RouteAccessManifest, route: string): string
 export interface VariantFacts {
   query: URLSearchParams;
   namespace: 'os' | 'app' | null;
-  /** The parsed JSON body, for `readAtGateway` variants. Undefined = not read. */
+  /** The parsed JSON body, for `read` body variants. Undefined = not read. */
   body?: unknown;
 }
 
@@ -72,7 +72,7 @@ export interface VariantFacts {
  * `__proto__` on the path counts as a match: a later merge could turn it into
  * the inherited field this check looked for.
  */
-export function bodyFieldMatches(body: unknown, field: string, equals?: string): boolean {
+export function bodyFieldMatches(body: unknown, field: string, equals?: string | boolean): boolean {
   let current = body;
   for (const part of field.split('.')) {
     if (!current || typeof current !== 'object' || Array.isArray(current)) return false;
@@ -81,6 +81,12 @@ export function bodyFieldMatches(body: unknown, field: string, equals?: string):
     current = (current as Record<string, unknown>)[part];
   }
   return equals === undefined || current === equals;
+}
+
+/** Whether some body variant of this route that applies to `method` is to be read. */
+export function readsBody(manifest: RouteAccessManifest, info: RouteHandlers, method: RouteMethod): boolean {
+  return (manifest.routes[info.route]?.variants ?? []).some((v) =>
+    v.match.on === 'body' && v.match.read === true && variantApplies(v.methods, method, info));
 }
 
 export interface RuleCandidate {
@@ -101,7 +107,7 @@ export function candidateRules(
     if (!variantApplies(v.methods, method, info)) continue;
     const m = v.match;
     if (m.on === 'body') {
-      if (m.readAtGateway && facts.body !== undefined) {
+      if (m.read && facts.body !== undefined) {
         if (!bodyFieldMatches(facts.body, m.field, m.equals)) continue;
         out.push({ variant: v.id, rule: v.rule });
         return out;

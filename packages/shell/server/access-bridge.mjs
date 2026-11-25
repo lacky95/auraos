@@ -4,10 +4,12 @@
  *
  *   globalThis[Symbol.for('aura.access')]   registered by lib/access/observer.ts
  *
- * Everything here is report-only: no function throws, returns a decision or is
- * awaited by a caller. Events sent before the observer registers (it loads on
- * the first Astro request) are only counted. AURA_ACCESS_ENFORCE=off
- * (access-mode.mjs) stops all of it, including the internal service label.
+ * The report side never throws, returns a decision or is awaited by a caller.
+ * Events sent before the observer registers (it loads on the first Astro
+ * request) are only counted. `surfaceGate` is the one decision a surface
+ * waits for: it refuses only in `enforce`, and fails closed there.
+ * AURA_ACCESS_ENFORCE=off (access-mode.mjs) stops the report and the
+ * internal service label.
  */
 import { randomBytes } from 'node:crypto';
 import { accessMode } from './access-mode.mjs';
@@ -51,20 +53,56 @@ function verify(facts) {
 }
 
 /**
- * The request's identity for the report: the principal resolver's verdict
- * (lib/access/identify.ts, through the observer), started while the request
- * is in hand, plus the two hints. No credential is kept: not the bearer, not
- * a cookie. `appHost`: an App Host session app-hosts.mjs already verified.
+ * The request's identity: the principal resolver's verdict (lib/access/
+ * identify.ts, through the observer), started while the request is in hand,
+ * plus the two report hints and the socket peer (a `networkCaller` rule, D28).
+ * No credential is kept: not the bearer, not a cookie. `appHost`: an App
+ * Host session app-hosts.mjs already verified.
  */
-export function surfaceIdentity(headers, { method = 'GET', url = '/', appHost = null } = {}) {
+export function surfaceIdentity(headers, { method = 'GET', url = '/', appHost = null, peer = null } = {}) {
   try {
     return {
       verified: verify({ headers, method, url, appHost }),
       referer: first(headers?.referer),
       instanceId: first(headers?.['x-aura-instance-id']),
+      peer: typeof peer === 'string' ? peer : null,
     };
   } catch {
     return null;
+  }
+}
+
+/** One identity per request, so a surface that hands a request on reports and decides on the same verdict. */
+const identities = new WeakMap();
+
+/** The identity of a Node request, started once: `appHost` as surfaceIdentity. */
+export function requestIdentity(req, { appHost = null } = {}) {
+  let id = identities.get(req);
+  if (id === undefined) {
+    id = surfaceIdentity(req?.headers, { method: req?.method, url: req?.url, appHost, peer: req?.socket?.remoteAddress ?? null });
+    if (req && typeof req === 'object') identities.set(req, id);
+  }
+  return id;
+}
+
+// ── the surface gate ────────────────────────────────────────────────────────
+
+/**
+ * Whether a surface may go on: `{ subject, method, appId?, identity }`, the
+ * same observation `reportSurface` takes. Outside `enforce` always yes (the
+ * report counts it as before). In `enforce` the observer decides on the
+ * surface's manifest rule; a refusal, an observer that isn't loaded yet or
+ * any failure is a no. Never throws.
+ */
+export async function surfaceGate(observation) {
+  try {
+    if (accessMode() !== 'enforce') return true;
+    const decide = globalThis[BRIDGE]?.decideSurface;
+    if (typeof decide !== 'function') return false;
+    const decision = await decide(observation);
+    return decision?.outcome === 'allow';
+  } catch {
+    return false;
   }
 }
 
@@ -80,12 +118,15 @@ export function staticSurface(url) {
   return null;
 }
 
+/** Whether this request waits for `surfaceGate` before the dev server serves it (`enforce` only). */
+export const gatedHttpSurface = (req) => accessMode() === 'enforce' && staticSurface(req?.url) === 'vite-dev-server';
+
 export function observeHttpSurface(req, res) {
   try {
     if (!reporting()) return;
     const subject = staticSurface(req.url);
     if (!subject) return;
-    const identity = surfaceIdentity(req.headers, { method: req.method, url: req.url });
+    const identity = requestIdentity(req);
     const method = req.method;
     res.once('close', () => reportSurface({
       subject, method, identity, status: res.headersSent ? res.statusCode : 0,

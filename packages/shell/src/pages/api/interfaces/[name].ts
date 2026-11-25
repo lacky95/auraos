@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getAppManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
-import { identifyInstance } from '../../../lib/access/identify.js';
+import { actingInstance } from '../../../lib/access/identify.js';
 
 /**
  * DELETE /api/interfaces/<name> — drop a runtime registration.
@@ -11,20 +11,18 @@ import { identifyInstance } from '../../../lib/access/identify.js';
  * are not removable — they are the app's contract, not a runtime detail.
  *
  * There is no appId in the path on purpose: the caller's identity supplies it,
- * so the ordinary way of touching another app's entry does not exist. (Identity
- * itself is self-asserted — see lib/access/identify.ts for exactly how far that goes.)
+ * so the ordinary way of touching another app's entry does not exist. The
+ * identity is verified: an instance token or a gateway claim, never a hint.
  */
-export const DELETE: APIRoute = ({ params, request }) => {
+export const DELETE: APIRoute = ({ params, locals }) => {
   const mgr = getAppManager();
   const name = params['name'];
   if (!name) return errorResponse('missing interface name', 400);
 
-  const instance = identifyInstance(request, mgr);
+  // The verified caller (routeManifest.ts: only an app instance, in every mode).
+  const instance = locals.access ? actingInstance(locals.access.principal) : null;
   if (!instance) {
-    return errorResponse(
-      'Could not identify the calling instance. Call from an app iframe, or send X-Aura-Instance-Id.',
-      401,
-    );
+    return errorResponse('Could not identify the calling instance: send Authorization: Bearer $AURA_INSTANCE_TOKEN, or call through the App Host gateway.', 401);
   }
 
   const removed = mgr.interfaces.unregister(instance.instanceId, name);

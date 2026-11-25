@@ -4,11 +4,10 @@
  * desktop's sign-in gate. Login is always on (D6): until the owner exists the
  * desktop sends everyone to `/setup`, after that to `/login`.
  *
- * `whoami` reports the principal routes act on (`authenticateLegacy`) and
- * only labels the login cookie. The shell's principal resolver reads the
- * cookie through `sessionCookieToken` / `ownerSessionOf`, but in Phase 3
- * Stage 0 that is report-only. A login session opens the desktop and its App
- * Hosts (the handoff).
+ * `whoami` reports the caller's principal (`authenticate()`, which reads the
+ * login cookie through `sessionCookieToken` / `ownerSessionOf`) and labels
+ * the login cookie. A login session opens the desktop and its App Hosts (the
+ * handoff).
  *
  * Nothing here needs AppManager. `getAuthServices()` builds its stores lazily.
  */
@@ -20,7 +19,7 @@ import type {
   LoginSession, LoginSessions, PasswordRule, Principal, SetupTickets, UserAccount, UserPrincipal, UserStore, ValkeyUserStore,
 } from '@aura/core';
 import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
-import { authenticateLegacy } from './auth.js';
+import { authenticate } from './auth.js';
 import { isTrustedProxy } from '../../server/host-policy.mjs';
 
 export const COOKIE_HTTPS = '__Host-aura_session';
@@ -604,6 +603,11 @@ function publicPrincipal(p: Principal): Record<string, string> {
       return { kind: p.kind, verification: p.verification, name: p.name };
     case 'admin':
       return { kind: p.kind, verification: p.verification };
+    case 'user':
+      return {
+        kind: p.kind, verification: p.verification, role: p.role,
+        ...(p.through ? { through: p.through.appId } : {}),
+      };
     default:
       return { kind: 'anonymous', verification: 'unverified' };
   }
@@ -624,14 +628,10 @@ async function observedLogin(ctx: AuthContext, deps: AuthSurfaceDeps): Promise<R
   }
 }
 
-/**
- * A login cookie never changes `principal`. PHASE3-ENFORCE: whoami reports
- * what routes act on (`authenticateLegacy`), so a login user is labelled
- * under `login` only until Stage 2 makes it the principal.
- */
+/** The caller as routes see it; the login cookie, if any, is labelled under `login`. */
 export async function authWhoami(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps()): Promise<Response> {
   let principal: Principal | Response;
-  try { principal = await (deps.authenticate ?? authenticateLegacy)(ctx.request); }
+  try { principal = await (deps.authenticate ?? authenticate)(ctx.request); }
   catch { return unavailable(); }
   if (principal instanceof Response) return json({ error: 'invalid-credential' }, 401);
   return json({ principal: publicPrincipal(principal), login: await observedLogin(ctx, deps) });

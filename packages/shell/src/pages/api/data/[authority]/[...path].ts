@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import { getAppManager } from '@aura/core';
-import { refererAppId } from '../../../../lib/access/legacyReferer.ts';
+import { actingInstance } from '../../../../lib/access/identify.ts';
 import { dropServiceWorkerScope, stripShellCredentials } from '../../../../../server/shell-credentials.mjs';
 
 /**
@@ -9,15 +9,15 @@ import { dropServiceWorkerScope, stripShellCredentials } from '../../../../../se
  * Routes `GET|PUT|POST|PATCH|DELETE /api/data/<authority>/<path>` to the running
  * app instance that declared `manifest.dataProvider.authority === <authority>`.
  *
- * Source-app identification: extracted from the `Referer` header. If the
- * referer matches `/api/proxy/<X>/...` we treat X as the requesting app.
- * Missing/unknown referer = `'system'` (privileged, e.g. curl, SSR call).
+ * Source app: the verified caller the middleware resolved (`locals.access`):
+ * an app instance, or a user acting through one. Anyone else is `'system'`
+ * (the owner, the shell). Never a Referer.
  *
- * Permission check: looks up read- or writePermission on the matched provider
- * entry. Same-app access is always allowed. Otherwise delegated to
- * `PermissionManager.hasPermission` — currently auto-grants but logs.
+ * Permission check: the route access manifest's (routeManifest.ts, `data`),
+ * applied by the middleware: the provider entry's read- or writePermission,
+ * unless the caller is the provider's own app.
  */
-export const ALL: APIRoute = async ({ params, request }) => {
+export const ALL: APIRoute = async ({ params, request, locals }) => {
   const authority = params['authority'];
   const subPath   = params['path'] ?? '';
   if (!authority) return jsonError('Missing authority', 400);
@@ -32,22 +32,9 @@ export const ALL: APIRoute = async ({ params, request }) => {
   }
 
   // ---- Source-app identification ----
-  const sourceAppId = refererAppId(request.headers.get('referer'), mgr) ?? 'system';
-
-  // ---- Permission check ----
+  const caller = locals.access ? actingInstance(locals.access.principal) : null;
+  const sourceAppId = caller?.appId ?? 'system';
   const method = request.method.toUpperCase();
-  const isRead = method === 'GET' || method === 'HEAD';
-  const requiredPerm = isRead
-    ? resolved.entry.readPermission
-    : resolved.entry.writePermission;
-
-  if (requiredPerm && sourceAppId !== 'system' && sourceAppId !== resolved.appId) {
-    // Permission keys flow as `data:<authority>:<perm-name>` to be consistent with manifests
-    const permKey = `data:${authority}:${requiredPerm}`;
-    if (!mgr.permissions.hasPermission(sourceAppId, permKey)) {
-      return jsonError(`Permission denied: ${permKey}`, 403);
-    }
-  }
 
   // ---- Forward to the provider ----
   const reqUrl = new URL(request.url);

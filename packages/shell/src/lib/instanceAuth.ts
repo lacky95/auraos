@@ -2,13 +2,14 @@ import { getAppManager } from '@aura/core';
 import { errorResponse } from './appResponse.js';
 
 /**
- * Caller identity for the token-gated routes (OS-managed sidecars).
+ * The OS-managed sidecar routes' target and caller.
  *
- * Every other `/api/instances/:id/*` route trusts the id in the URL. These
- * can start containers on an app's behalf, so the caller must prove it IS
- * that instance (or one of its OS sidecars) with the bearer the OS injected
- * at spawn: `Authorization: Bearer $AURA_INSTANCE_TOKEN`. See core's
- * InstanceTokens.
+ * Who may call them is the route access manifest's (routeManifest.ts,
+ * `sidecar`): only the instance itself, or one of its OS sidecars, by the
+ * bearer the OS injected at spawn (`Authorization: Bearer
+ * $AURA_INSTANCE_TOKEN`, core's InstanceTokens), with the permissions its
+ * app declares. The middleware applies that in every access mode, so a route
+ * here only reads the caller it verified (`locals.access`).
  */
 
 type AppManager = ReturnType<typeof getAppManager>;
@@ -20,60 +21,34 @@ export interface SidecarCaller {
   sidecar?: string;
 }
 
-export interface Gate {
+export interface SidecarTarget {
   mgr: AppManager;
   instance: Instance;
   caller: SidecarCaller;
 }
 
-/** Resolve + authenticate a caller, or a ready error Response. */
-export function requireInstanceToken(request: Request, instanceId: string, mgr: AppManager): SidecarCaller | Response {
-  const header = request.headers.get('authorization') ?? '';
-  const token = /^Bearer\s+(.+)$/i.exec(header)?.[1]?.trim();
-  if (!token) {
-    return errorResponse('missing bearer token — send Authorization: Bearer $AURA_INSTANCE_TOKEN (the OS injects it into every app container)', 401);
-  }
-  const claims = mgr.tokens.verify(token);
-  if (!claims) {
-    const hint = mgr.tokens.hasNonce(instanceId)
-      ? 'invalid or expired token'
-      : `invalid token — ${instanceId} has no current token (started before instance tokens existed? restart it)`;
-    return errorResponse(hint, 401);
-  }
-  if (claims.instanceId !== instanceId) {
-    return errorResponse(`token belongs to ${claims.instanceId}${claims.sidecar ? `/${claims.sidecar}` : ''}, not ${instanceId}`, 403);
-  }
-  return claims;
-}
-
 /**
- * The shared prelude of every sidecar route: instance exists → token →
- * permission(s) of the instance's app → container sandbox.
+ * The shared prelude of every sidecar route: the instance exists, its caller
+ * is the one the middleware verified, and it runs in a container sandbox.
  */
-export function sidecarGate(
+export function sidecarTarget(
   params: Record<string, string | undefined>,
-  request: Request,
-  permissions: string[],
-): Gate | Response {
+  locals: App.Locals | undefined,
+): SidecarTarget | Response {
   const instanceId = params['instanceId'];
   if (!instanceId) return errorResponse('Missing instance id', 400);
   const mgr = getAppManager();
   const instance = mgr.getInstance(instanceId);
   if (!instance) return errorResponse(`Instance not found: ${instanceId}`, 404);
 
-  const caller = requireInstanceToken(request, instanceId, mgr);
-  if (caller instanceof Response) return caller;
-
-  // The app id comes from the instance record, never from the request.
-  for (const p of permissions) {
-    if (!mgr.permissions.hasPermission(instance.appId, p)) {
-      return errorResponse(`${instance.appId} is not granted '${p}'. Add it to the app's manifest permissions[].`, 403);
-    }
+  const p = locals?.access?.principal;
+  if (p?.kind !== 'instance' || p.instanceId !== instanceId) {
+    return errorResponse('send Authorization: Bearer $AURA_INSTANCE_TOKEN (the OS injects it into every app container)', 401);
   }
   if (instance.sandbox && instance.sandbox !== 'container') {
     return errorResponse(`${instanceId} runs in a '${instance.sandbox}' sandbox; OS sidecars need sandbox: container`, 409);
   }
-  return { mgr, instance, caller };
+  return { mgr, instance, caller: { instanceId, ...(p.sidecar ? { sidecar: p.sidecar } : {}) } };
 }
 
 /** Map a SidecarManager / MountManager failure to a status. */
