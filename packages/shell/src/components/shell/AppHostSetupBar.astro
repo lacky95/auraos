@@ -1,8 +1,9 @@
 ---
 /**
- * Limited IP mode: a full-width bar that can't be dismissed. It links to this
- * installation's App Hosts address, or to the custom-domain guide when that
- * address doesn't resolve. The same bar shows on an App Hosts address whose
+ * Limited IP mode: a full-width bar that can't be dismissed. When this
+ * installation's App Hosts address answers, the desktop moves there on its own
+ * after a short notice ("Stay on this address" keeps it here for this tab);
+ * otherwise the bar shows the custom-domain guide. The same bar shows on an App Hosts address whose
  * App Host cookie this browser drops (WebKit on `os.aura.localhost`, D44).
  * Decisions are in lib/desktop/setupBar.ts.
  */
@@ -11,19 +12,48 @@
   <strong id="aura-setup-bar-title">Limited IP mode.</strong>
   <span id="aura-setup-bar-text"></span>
   <a id="aura-setup-bar-link" hidden></a>
+  <button type="button" id="aura-setup-bar-stay" hidden>Stay on this address</button>
 </div>
 
 <script>
   import { APP_FRAME_SANDBOX } from '../../lib/appFrame.ts';
   import {
-    cookieProbeUrl, isWebKitBrowser, planCookieFallback, planSetupBar, probeAppHostAddress, probeAppHostCookie,
-    settleSetupBar, type SetupBarPlan,
+    AUTO_SWITCH_SECONDS, SETUP_BAR_STAY_KEY, autoSwitchTarget, cookieProbeUrl, isWebKitBrowser, planCookieFallback,
+    planSetupBar, probeAppHostAddress, probeAppHostCookie, settleSetupBar, shouldAutoSwitch, type SetupBarPlan,
   } from '../../lib/desktop/setupBar.ts';
 
   const bar = document.getElementById('aura-setup-bar');
   const title = document.getElementById('aura-setup-bar-title');
   const text = document.getElementById('aura-setup-bar-text');
   const link = document.getElementById('aura-setup-bar-link') as HTMLAnchorElement | null;
+  const stayBtn = document.getElementById('aura-setup-bar-stay') as HTMLButtonElement | null;
+
+  function stayRequested(): boolean {
+    try { return sessionStorage.getItem(SETUP_BAR_STAY_KEY) === '1'; } catch { return false; }
+  }
+
+  /** The notice before the move, with a way to stay. Falls back to the plain bar. */
+  function countdown(plan: SetupBarPlan & { kind: 'link' }): void {
+    paint(plan);
+    if (!text || !stayBtn) return;
+    const target = autoSwitchTarget(plan.href, location.search, location.hash);
+    let left = AUTO_SWITCH_SECONDS;
+    const tick = () => { text.textContent = `Apps open on this installation's app address. Switching in ${left} s…`; };
+    tick();
+    stayBtn.hidden = false;
+    const timer = setInterval(() => {
+      left -= 1;
+      if (left > 0) { tick(); return; }
+      clearInterval(timer);
+      location.replace(target);
+    }, 1000);
+    stayBtn.addEventListener('click', () => {
+      clearInterval(timer);
+      try { sessionStorage.setItem(SETUP_BAR_STAY_KEY, '1'); } catch { /* the bar stays anyway */ }
+      stayBtn.hidden = true;
+      paint(plan);
+    }, { once: true });
+  }
 
   function paint(plan: SetupBarPlan): void {
     if (!bar || !title || !text || !link || !plan.show) return;
@@ -63,7 +93,11 @@
   };
   const show = (plan: SetupBarPlan) => {
     if (plan.show && plan.kind === 'link') {
-      void probeAppHostAddress(plan.probeUrl).then((ok) => paint(settleSetupBar(plan, ok)));
+      void probeAppHostAddress(plan.probeUrl).then((ok) => {
+        const settled = settleSetupBar(plan, ok);
+        if (settled.show && settled.kind === 'link' && shouldAutoSwitch(settled, stayRequested())) countdown(settled);
+        else paint(settled);
+      });
     } else {
       paint(plan);
     }
@@ -97,4 +131,8 @@
   }
   #aura-setup-bar[hidden] { display: none; }
   #aura-setup-bar a { color: inherit; font-weight: 700; text-decoration: underline; overflow-wrap: anywhere; }
+  #aura-setup-bar button {
+    font: inherit; color: inherit; background: transparent; cursor: pointer;
+    border: 1px solid currentColor; padding: 1px 8px;
+  }
 </style>

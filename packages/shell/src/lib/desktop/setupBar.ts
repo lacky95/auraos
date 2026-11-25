@@ -62,6 +62,26 @@ export function planSetupBar(input: SetupBarInput): SetupBarPlan {
   return linkPlan(input, 'address', address);
 }
 
+/** Session flag: the owner chose to stay on this address for this tab. */
+export const SETUP_BAR_STAY_KEY = 'aura.setupBar.stay';
+
+/** Seconds the switch notice shows before the desktop moves. */
+export const AUTO_SWITCH_SECONDS = 3;
+
+/**
+ * Whether a settled plan moves the desktop to the App Hosts address on its
+ * own: only a link whose probe answered, and only when the owner hasn't asked
+ * to stay. The guide never moves anything.
+ */
+export function shouldAutoSwitch(plan: SetupBarPlan, stay: boolean): boolean {
+  return plan.show && plan.kind === 'link' && !stay;
+}
+
+/** Where the switch goes: the link plus this page's query and hash. */
+export function autoSwitchTarget(href: string, search: string, hash: string): string {
+  return `${href}${search}${hash}`;
+}
+
 /** A link whose probe failed (DNS rebinding protection, usually) becomes the guide. */
 export function settleSetupBar(plan: SetupBarPlan, probeOk: boolean): SetupBarPlan {
   return plan.show && plan.kind === 'link' && !probeOk ? { show: true, kind: 'guide', reason: plan.reason } : plan;

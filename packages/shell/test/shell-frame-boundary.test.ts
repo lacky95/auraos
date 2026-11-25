@@ -11,6 +11,7 @@ import {
 } from '../src/lib/appFrame.ts';
 import { authorizeShellMessage, classifySender, isHostNestedSender, nestedFocusChange, senderAppId, type ChannelFrame } from '../src/lib/auraChannelShell.ts';
 import {
+  AUTO_SWITCH_SECONDS, autoSwitchTarget, shouldAutoSwitch,
   COOKIE_PROBE_LABEL, cookieProbeUrl, isWebKitBrowser, planCookieFallback, planSetupBar, probeAppHostAddress, probeAppHostCookie, settleSetupBar,
 } from '../src/lib/desktop/setupBar.ts';
 import { SHELL_FRAME_ANCESTORS, shellFramePolicy } from '../src/lib/desktop/shellFramePolicy.ts';
@@ -427,4 +428,15 @@ test('the admin unlock is a native modal, above every z-index', () => {
   const src = css('AdminUnlockDialog.astro');
   assert.match(src, /<dialog id="aura-admin-unlock"/);
   assert.match(src, /\.showModal\(\)/);
+});
+
+test('IP mode moves to the App Hosts address on its own, unless the owner stays or the probe failed', () => {
+  const plan = planSetupBar({ host: '10.0.0.5:3000', protocol: 'http:', pathname: '/', webkit: false });
+  assert.ok(plan.show && plan.kind === 'link');
+  assert.equal(shouldAutoSwitch(settleSetupBar(plan, true), false), true);
+  assert.equal(shouldAutoSwitch(settleSetupBar(plan, true), true), false, 'Stay on this address');
+  assert.equal(shouldAutoSwitch(settleSetupBar(plan, false), false), false, 'the guide never moves');
+  assert.equal(shouldAutoSwitch(planSetupBar({ host: 'os.aura.localhost:3000', protocol: 'http:', pathname: '/', webkit: false }), false), false);
+  assert.equal(autoSwitchTarget('http://10-0-0-5.nip.io:3000/', '?a=1', '#x'), 'http://10-0-0-5.nip.io:3000/?a=1#x');
+  assert.ok(AUTO_SWITCH_SECONDS > 0 && AUTO_SWITCH_SECONDS <= 5);
 });
