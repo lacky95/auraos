@@ -173,3 +173,58 @@ test('DOM: an AuraOS decision keeps its look — no identity bar, no Force hide,
   assert.equal(overlay.querySelector('.aura-dlg-forcehide-confirm'), null);
   m.dispose();
 });
+
+test('DOM: the owner dialog takes precedence — never inert, its keys and clicks pass, the modal waits behind and takes the focus back', () => {
+  // The owner dialog (OwnerPasswordDialog.astro) is a body child like the modal.
+  resetDom('<nav id="dock"><button id="outside">x</button></nav>'
+    + '<dialog id="aura-owner-password"><input id="owner-pw" type="password"><button id="owner-deny" type="button">DENY</button></dialog>');
+  const owner = doc.getElementById('aura-owner-password') as HTMLDialogElement;
+  const pw = doc.getElementById('owner-pw') as HTMLInputElement;
+  const deny = doc.getElementById('owner-deny') as HTMLButtonElement;
+  const outside = doc.getElementById('outside') as HTMLButtonElement;
+  const mouse = (el: EventTarget) => {
+    const ev = new dom.MouseEvent('mousedown', { bubbles: true, cancelable: true } as never) as unknown as Event;
+    el.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  };
+  const keyOn = (el: EventTarget, init: Record<string, unknown>) => {
+    const ev = new dom.KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init } as never) as unknown as Event;
+    el.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  };
+
+  // 1. The owner dialog is already open: the modal arrives and waits behind it.
+  owner.showModal();
+  pw.focus();
+  const m = mountSystemModal(ntf(), { actions, systemModal: { onForceHide: async () => true } });
+  const overlay = doc.querySelector<HTMLElement>('.aura-dlg-system')!;
+  assert.equal((doc.getElementById('dock') as HTMLElement).inert, true, 'the desktop is still blocked');
+  assert.equal(owner.inert, false, 'the owner dialog is never made inert');
+  assert.equal(doc.activeElement, pw, 'the modal does not take the focus from the owner dialog');
+  assert.equal(keyOn(pw, { key: 'a' }), false, 'typing in the owner dialog passes');
+  assert.equal(keyOn(deny, { key: 'Enter' }), false, 'keys on its buttons pass');
+  assert.equal(mouse(deny), false, 'clicks in the owner dialog pass');
+  assert.equal(keyOn(pw, { key: 'Escape', ctrlKey: true, altKey: true, shiftKey: true }), false, 'the force-hide shortcut is the owner dialog\'s key now');
+  assert.equal(overlay.querySelector('.aura-dlg-forcehide-confirm'), null, 'no force-hide confirm behind the owner dialog');
+  assert.equal(keyOn(outside, { key: 'a' }), true, 'the rest of the desktop stays guarded');
+  assert.equal(mouse(outside), true);
+
+  // 2. It closes: the modal takes the focus back.
+  owner.close();
+  assert.ok(overlay.contains(doc.activeElement), 'focus back in the modal');
+  assert.equal(keyOn(pw, { key: 'a' }), true, 'a closed owner dialog gets no pass');
+
+  // 3. The owner dialog opens over the modal that is already up.
+  owner.showModal();
+  pw.focus();
+  assert.equal(owner.inert, false);
+  assert.equal(keyOn(pw, { key: 'a' }), false);
+  assert.equal(mouse(deny), false);
+  // Closed and reopened at once (the next approval): the modal keeps waiting.
+  owner.addEventListener('close', () => { owner.showModal(); pw.focus(); }, { once: true });
+  owner.close();
+  assert.equal(doc.activeElement, pw, 'still the owner dialog');
+  m.dispose();
+  assert.equal((doc.getElementById('dock') as HTMLElement).inert, false, 'released');
+  owner.close();
+});

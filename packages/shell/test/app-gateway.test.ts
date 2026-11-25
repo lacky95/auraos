@@ -320,7 +320,7 @@ test('events route: another namespace never reaches the wire, the shell still ge
 
 test('a spoofed identity header is replaced on the way in', async () => {
   seen.length = 0;
-  const forged = signGatewayClaim(claim('GET', '/api/os/themes', { appId: 'com.aura.settings' })).replace(/.$/, 'x');
+  const forged = signGatewayClaim(claim('GET', '/api/os/themes', { appId: 'com.aura.settings' })).replace(/\.([^.])([^.]*)$/, (_m, c: string, rest: string) => `.${c === 'A' ? 'B' : 'A'}${rest}`); // first signature char: the last one is partly padding bits
   const res = await call('/_aura/os/api/os/themes', 'GET', {
     [GATEWAY_IDENTITY_HEADER]: forged,
     'x-aura-instance-id': 'com.aura.settings-1',
