@@ -1030,41 +1030,40 @@ export class ContainerRunner implements SandboxRunner {
     ownerLabel?: string;
     address?:   string;
     lifecycleToken?: string;
-  }>> {
-    type DockerPsRow = { Names: string };
+  }> | null> {
     type DockerInspect = {
       Config: { Env: string[]; Labels?: Record<string, string> }; State: { Pid: number };
       NetworkSettings?: { Networks?: Record<string, { IPAddress?: string }> };
     };
     let psOut: string;
     try {
-      psOut = execSync(`docker ps --filter "name=aura-" --format "{{json .}}"`, {
+      // Names only. `{{json .}}` made the daemon compute every container's
+      // disk size (the `Size` column): 2-11 s on a busy host, over the
+      // timeout at boot, and a failed scan adopted nothing.
+      ({ stdout: psOut } = await execFileAsync('docker', ['ps', '--filter', 'name=aura-', '--format', '{{.Names}}'], {
         encoding: 'utf-8',
-        timeout: 5_000,
-      });
+        timeout: 15_000,
+      }));
     } catch (err) {
       console.warn(`[ContainerRunner] adoption scan: docker ps failed: ${(err as Error).message}`);
-      return [];
+      return null;
     }
-    const lines = psOut.split('\n').map((l) => l.trim()).filter(Boolean);
+    const names = psOut.split('\n').map((l) => l.trim()).filter(Boolean);
     const out: Array<{ instanceId: string; appId: string; port: number; hostname: string; pid: number; tokenNonce?: string; ownerLabel?: string; address?: string; lifecycleToken?: string }> = [];
-    for (const line of lines) {
-      let row: DockerPsRow;
-      try { row = JSON.parse(line) as DockerPsRow; }
-      catch { continue; }
-      if (!row.Names?.startsWith('aura-')) continue;
+    for (const name of names) {
+      if (!name.startsWith('aura-')) continue;
       // Skip aura-shell itself — it's not an app instance, just the
       // controller container that owns this runner.
-      if (row.Names === 'aura-shell') continue;
+      if (name === 'aura-shell') continue;
       let inspect: DockerInspect;
       try {
-        const raw = execSync(`docker inspect ${row.Names} --format "{{json .}}"`, {
+        const raw = execSync(`docker inspect ${name} --format "{{json .}}"`, {
           encoding: 'utf-8',
           timeout: 3_000,
         });
         inspect = JSON.parse(raw) as DockerInspect;
       } catch (err) {
-        console.warn(`[ContainerRunner] inspect ${row.Names} failed: ${(err as Error).message}`);
+        console.warn(`[ContainerRunner] inspect ${name} failed: ${(err as Error).message}`);
         continue;
       }
       // App-spawned SIBLING runtime containers (labelled `aura.parent`) are not
@@ -1086,7 +1085,7 @@ export class ContainerRunner implements SandboxRunner {
         instanceId,
         appId,
         port,
-        hostname: row.Names,
+        hostname: name,
         pid: inspect.State?.Pid ?? 0,
         tokenNonce: inspect.Config?.Labels?.['aura.token.nonce'],
         ownerLabel: inspect.Config?.Labels?.[OWNER_LABEL],

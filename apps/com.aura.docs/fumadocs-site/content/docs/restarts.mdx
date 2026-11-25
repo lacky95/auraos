@@ -19,8 +19,9 @@ activities, where they were, showing what they showed: your work comes back.
 
 Container apps keep running through a shell restart and are picked up again
 with the same instance — a Terminal activity comes back on the *same running
-shell*. Apps that run in the shell's own sandbox (proot) are started again; their
-activities reopen on the new instance.
+shell*. Apps that run in the shell's own sandbox (proot) are started again,
+also the ones without an open window and also when restoring the desktop is
+turned off; their activities reopen on the new instance.
 
 What does not come back: anything an app kept only in its browser page and did
 not save (unsaved input, scroll positions), and activities of apps that were

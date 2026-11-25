@@ -52,6 +52,9 @@ import { getAppHostServices } from '../app-hosts/services.js';
 import { appSourceFingerprint } from '../app-hosts/lifecycle.js';
 
 const RECONCILE_INTERVAL_MS = 5_000;
+/** Boot attempts of the survivor scan before the reconciler takes over. */
+const ADOPT_ATTEMPTS = 3;
+const ADOPT_RETRY_MS = 2_000;
 const ERROR_GRACE_MS        = 30_000;
 
 export class AppManager {
@@ -94,6 +97,11 @@ export class AppManager {
   private scopeRegistry: ScopeRegistry;
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
   private reconcileRunning = false;
+  /**
+   * The boot scan for surviving containers failed: who survived is unknown.
+   * Until a reconciler pass adopts them, nothing is reaped as an orphan.
+   */
+  private adoptionPending = false;
   /** Last known sidecars per backend, refreshed by `syncSidecars` (reconciler cadence). */
   private sidecars: Array<{ runner: SandboxRunner; info: SidecarInfo }> = [];
   /** Consecutive syncs each sidecar's parent was absent — see selectOrphanSidecars. */
@@ -952,24 +960,97 @@ export class AppManager {
     await this.registry.init();
     this.refreshManifestDerived();
     console.log(`[AppManager] Ready. Apps found: ${this.registry.getAll().length}, keymap actions: ${keymapRegistry.list().length}`);
-    // Adopt every sibling container that survived the last shell lifetime.
-    // Without this, `docker compose restart aura-os` strands every running
-    // container-mode app as an orphan — they're still up on aura-net (they're
-    // siblings, not children, so SIGCHLD doesn't reap them), but AppManager
-    // has no record. That means `getInstancesByApp` returns empty, so cap
-    // grant/revoke can't hot-refresh them, lifecycle events don't fire, and
-    // warm-pool refills race with the surviving members. We hydrate from
-    // `docker ps` + `docker inspect` (env carries APP_ID/APP_INSTANCE_ID/
-    // APP_PORT — set in buildDockerArgs) and resurrect each instance in
-    // `state: 'resumed'` ready for normal lifecycle calls.
+    // Adopt every sibling container that survived the last shell lifetime
+    // (see adoptOrphans). A failed scan is retried; if it still fails, the
+    // reconciler keeps trying, and nothing is reaped as an orphan meanwhile.
+    for (let attempt = 1; attempt <= ADOPT_ATTEMPTS; attempt++) {
+      if (await this.adoptOrphans()) break;
+      if (attempt === ADOPT_ATTEMPTS) {
+        this.adoptionPending = true;
+        console.error('[AppManager] orphan adoption failed at boot; the reconciler retries it');
+      } else {
+        await new Promise((r) => setTimeout(r, ADOPT_RETRY_MS));
+      }
+    }
+    if (!this.adoptionPending) await this.reconcileSurvivors();
+    // Sidecars likewise outlive this process: a docker daemon restart removes
+    // the `--rm` app containers but revives their `unless-stopped` sidecars,
+    // which nothing would ever reap. Same ordering constraint as mounts. At
+    // boot nothing can be mid-spawn, so no grace period (graceTicks = 1).
+    await this.syncSidecars(1).catch((err) => {
+      console.warn(`[AppManager] sidecar reconcile failed: ${(err as Error).message}`);
+    });
+    await this.migrateAppHosts();
+    this.startReconciler();
+    // Background, missing images only — never delays boot.
+    for (const m of this.registry.getAll()) {
+      if (m.services?.some((x) => x.prePull)) void this.osSidecars.prePull(m);
+    }
+    // Kick off warm-pool fills for opted-in apps (non-blocking — init returns
+    // immediately, pool members spawn in the background). The reconciler tops
+    // up later if any of these fail or die.
+    for (const m of this.registry.getAll()) {
+      if (!this.isEnabled(m.id)) continue;
+      if (m.warmPool > 0 && m.instanceMode === 'multi') {
+        for (let i = 0; i < m.warmPool; i++) this.scheduleRefill(m.id);
+      }
+    }
+    // Auto-start every Service component. Independent of the warm-pool path —
+    // services aren't pre-staged copies of a user-facing app, they ARE the
+    // running backend. The reconciler crash-recovers them on the same loop it
+    // already uses for orphan reaping, so we don't need a dedicated supervisor.
+    for (const m of this.registry.getAll()) {
+      if (m.componentType !== 'service') continue;
+      if (!this.isEnabled(m.id)) { console.log(`[AppManager] skipping disabled service ${m.id}`); continue; }
+      console.log(`[AppManager] starting service ${m.id}`);
+      this.startService(m.id).catch((err) => {
+        console.error(`[AppManager] service ${m.id} failed to start: ${(err as Error).message}`);
+      });
+    }
+    // Auto-start non-service apps that declared autoStart=true (e.g. Settings,
+    // whose content providers /api/data/{theme,workspaces,layouts} are read
+    // by the shell SSR and every iframe-side OsClient). Without this they 404
+    // on every cold load until the user happens to open the app manually.
+    for (const m of this.registry.getAll()) {
+      if (m.componentType === 'service') continue; // already handled above
+      if (!m.autoStart) continue;
+      if (!this.isEnabled(m.id)) { console.log(`[AppManager] skipping disabled autoStart ${m.id}`); continue; }
+      console.log(`[AppManager] auto-starting ${m.id}`);
+      this.start(m.id).catch((err) => {
+        console.error(`[AppManager] autoStart ${m.id} failed: ${(err as Error).message}`);
+      });
+    }
+
+    // The local OCI registry is seeded with @aura/* by the shell after init()
+    // (packages/shell/src/lib/sdkBootstrap.ts — every boot, skips by digest,
+    // and the first-boot setup card shows its progress).
+  }
+
+  /**
+   * Adopt every sibling container that survived the last shell lifetime.
+   * Without this, `docker compose restart aura-os` strands every running
+   * container-mode app as an orphan — they're still up on aura-net (they're
+   * siblings, not children, so SIGCHLD doesn't reap them), but AppManager
+   * has no record. That means `getInstancesByApp` returns empty, so cap
+   * grant/revoke can't hot-refresh them, lifecycle events don't fire, and
+   * warm-pool refills race with the surviving members. We hydrate from
+   * `docker ps` + `docker inspect` (env carries APP_ID/APP_INSTANCE_ID/
+   * APP_PORT — set in buildDockerArgs) and resurrect each instance in
+   * `state: 'resumed'` ready for normal lifecycle calls.
+   * False when the scan failed (the survivors are unknown); never throws.
+   */
+  private async adoptOrphans(): Promise<boolean> {
     try {
-      const orphans = await this.runners.container.listOrphanRecords?.() ?? [];
+      const runner = this.runners.container;
+      const orphans = runner.listOrphanRecords ? await runner.listOrphanRecords() : [];
+      if (!orphans) return false;
       // Idle warm-pool members stay pool members: adopted as ordinary
       // instances, every restart left one more window-less container behind
       // while the pool spawned a fresh one.
       const pooled = this.loadPoolIds();
       for (const o of orphans) {
-        if (this.instances.has(o.instanceId)) continue;
+        // Known already, or still the runner's (a late pass: mid-stop).
+        if (this.instances.has(o.instanceId) || runner.isRunning(o.instanceId)) continue;
         const inst: AppInstance = {
           instanceId:        o.instanceId,
           appId:             o.appId,
@@ -1022,7 +1103,13 @@ export class AppManager {
       }
     } catch (err) {
       console.warn(`[AppManager] orphan adoption failed: ${(err as Error).message}`);
+      return false;
     }
+    return true;
+  }
+
+  /** After adoption: drop the mounts, port forwards and OS sidecars of instances that did not survive. */
+  private async reconcileSurvivors(): Promise<void> {
     // Cross-app mounts live in the HOST kernel, so they outlive this process
     // entirely. Run AFTER orphan adoption so the live-instance set is complete
     // — otherwise every mount belonging to a surviving container would look
@@ -1039,57 +1126,6 @@ export class AppManager {
     } catch (err) {
       console.warn(`[AppManager] mount reconcile failed: ${(err as Error).message}`);
     }
-    // Sidecars likewise outlive this process: a docker daemon restart removes
-    // the `--rm` app containers but revives their `unless-stopped` sidecars,
-    // which nothing would ever reap. Same ordering constraint as mounts. At
-    // boot nothing can be mid-spawn, so no grace period (graceTicks = 1).
-    await this.syncSidecars(1).catch((err) => {
-      console.warn(`[AppManager] sidecar reconcile failed: ${(err as Error).message}`);
-    });
-    await this.migrateAppHosts();
-    this.startReconciler();
-    // Background, missing images only — never delays boot.
-    for (const m of this.registry.getAll()) {
-      if (m.services?.some((x) => x.prePull)) void this.osSidecars.prePull(m);
-    }
-    // Kick off warm-pool fills for opted-in apps (non-blocking — init returns
-    // immediately, pool members spawn in the background). The reconciler tops
-    // up later if any of these fail or die.
-    for (const m of this.registry.getAll()) {
-      if (!this.isEnabled(m.id)) continue;
-      if (m.warmPool > 0 && m.instanceMode === 'multi') {
-        for (let i = 0; i < m.warmPool; i++) this.scheduleRefill(m.id);
-      }
-    }
-    // Auto-start every Service component. Independent of the warm-pool path —
-    // services aren't pre-staged copies of a user-facing app, they ARE the
-    // running backend. The reconciler crash-recovers them on the same loop it
-    // already uses for orphan reaping, so we don't need a dedicated supervisor.
-    for (const m of this.registry.getAll()) {
-      if (m.componentType !== 'service') continue;
-      if (!this.isEnabled(m.id)) { console.log(`[AppManager] skipping disabled service ${m.id}`); continue; }
-      console.log(`[AppManager] starting service ${m.id}`);
-      this.startService(m.id).catch((err) => {
-        console.error(`[AppManager] service ${m.id} failed to start: ${(err as Error).message}`);
-      });
-    }
-    // Auto-start non-service apps that declared autoStart=true (e.g. Settings,
-    // whose content providers /api/data/{theme,workspaces,layouts} are read
-    // by the shell SSR and every iframe-side OsClient). Without this they 404
-    // on every cold load until the user happens to open the app manually.
-    for (const m of this.registry.getAll()) {
-      if (m.componentType === 'service') continue; // already handled above
-      if (!m.autoStart) continue;
-      if (!this.isEnabled(m.id)) { console.log(`[AppManager] skipping disabled autoStart ${m.id}`); continue; }
-      console.log(`[AppManager] auto-starting ${m.id}`);
-      this.start(m.id).catch((err) => {
-        console.error(`[AppManager] autoStart ${m.id} failed: ${(err as Error).message}`);
-      });
-    }
-
-    // The local OCI registry is seeded with @aura/* by the shell after init()
-    // (packages/shell/src/lib/sdkBootstrap.ts — every boot, skips by digest,
-    // and the first-boot setup card shows its progress).
   }
 
   /**
@@ -2520,6 +2556,13 @@ export class AppManager {
   }
 
   private async reconcileOnce(): Promise<void> {
+    // 0) The boot scan for surviving containers failed: retry it. Until it
+    //    succeeds, syncSidecars and reconcileSurvivors reap nothing.
+    if (this.adoptionPending && await this.adoptOrphans()) {
+      this.adoptionPending = false;
+      console.log('[AppManager] reconcile: surviving containers adopted');
+      await this.reconcileSurvivors();
+    }
     // 1) Tracked-instance liveness: any pid we believe is alive but isn't
     //    must be flagged error, port released, view dropped.
     //
@@ -2704,6 +2747,8 @@ export class AppManager {
    * a failed read must never look like "all parents are gone".
    */
   private async syncSidecars(graceTicks: number): Promise<void> {
+    // Survivors unknown: their sidecars must not look orphaned.
+    if (this.adoptionPending) return;
     const fresh: Array<{ runner: SandboxRunner; info: SidecarInfo }> = [];
     for (const runner of new Set(Object.values(this.runners))) {
       if (!runner.listSidecars) continue;
