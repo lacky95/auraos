@@ -33,6 +33,8 @@ export function captureAccess(ctx: AccessContext): RequestSnapshot | null {
       https: ctx.url.protocol === 'https:',
       status: 0,
       internal: h.get('x-aura-internal-service'),
+      // Presence only (lib/approvals `APPROVAL_HEADER`); the handler checks and consumes it.
+      approval: h.has('x-aura-approval'),
       identity: {
         verified: null,
         referer: h.get('referer'),

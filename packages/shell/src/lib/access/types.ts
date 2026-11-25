@@ -52,7 +52,7 @@ export interface AccessRule {
   /** The right rule isn't settled yet. Requires `decision`. */
   ambiguous?: true;
   decision?: AccessDecision;
-  /** Needs a fresh authentication (5.11). No route sets it yet. */
+  /** Needs a fresh authentication (5.11): a presented approval, which the handler consumes (Aura Context writes). */
   freshAuth?: true;
   /**
    * The `app` target is this app, and only while its system-scope copy is the
@@ -278,6 +278,11 @@ export interface RequestSnapshot {
   status: number;
   internal: string | null;
   identity: SurfaceIdentity;
+  /**
+   * The request names an approval (`X-Aura-Approval`): decide()'s fresh-auth
+   * precondition. Its handler consumes it; presenting proves nothing alone.
+   */
+  approval?: boolean;
 }
 
 export const CREDENTIAL_COUNT_KINDS = [

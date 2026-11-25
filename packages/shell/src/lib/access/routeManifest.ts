@@ -55,6 +55,9 @@ const CUSTOM_INTERFACE_WRITE = decide(3,
 const DATA_ACCESS = decide(3,
   'A missing Referer counts as `system`, and data:* permissions auto-grant today. Decide whether the owner bypasses provider permissions and move callers to instance tokens.');
 
+const CONTEXT_Q31 = decide(5,
+  'Holds secrets and is never public. The Settings app manages it from an app context today; Q31 gives other apps only keys approved per instance.');
+
 const PROXY_ACCESS = decide(2,
   'Owner-only as proposed, but iframes cannot send a bearer token and apps call each other (including MCP) through this path. Replace with the App Host login handoff and caller-scoped grants; GET can cold-start an app.');
 
@@ -63,6 +66,7 @@ const PROXY_ACCESS = decide(2,
 const groups: RouteAccessManifest['groups'] = {
   activities:    rule(INSTANCE, 'activity'),
   admin:         rule(OWNER, 'system'),
+  approvals:     rule(OWNER, 'session'),
   apps:          rule(OWNER, 'app'),
   auth:          rule(OWNER, 'session'),
   data:          rule(['app-permission'], 'data-provider'),
@@ -82,6 +86,9 @@ const groups: RouteAccessManifest['groups'] = {
 };
 
 // ── reusable refinements ────────────────────────────────────────────────────
+
+/** The owner, or the System Terminal asking for the owner's approval (D29, D31). */
+const TERMINAL_ASKS = rule(INSTANCE, 'app', { systemApp: 'com.aura.terminal' });
 
 const staticAsset = { methods: on(['GET'], rule(['public', 'owner'], 'system', STATIC_CANDIDATE)) };
 
@@ -166,11 +173,14 @@ const routes: RouteAccessManifest['routes'] = {
     },
   },
   '/api/os/context': {
-    methods: on(['GET', 'POST', 'PUT'], rule(OWNER, 'system', decide(5,
-      'Holds secrets and is never public. The Settings app manages it from an app context today; Q31 gives other apps only keys approved per instance.'))),
+    methods: {
+      GET: rule(OWNER, 'system', CONTEXT_Q31),
+      // Writes need a fresh owner approval (5.10), which the handler consumes.
+      ...on(['POST', 'PUT'], rule(OWNER, 'system', { freshAuth: true, ...CONTEXT_Q31 })),
+    },
   },
   '/api/os/context/[key]': {
-    methods: { DELETE: rule(OWNER, 'system', decide(5, 'Holds secrets and is never public. Settle with the Q31 migration of /api/os/context.')) },
+    methods: { DELETE: rule(OWNER, 'system', { freshAuth: true, ...decide(5, 'Holds secrets and is never public. Settle with the Q31 migration of /api/os/context.') }) },
   },
   '/api/os/volumes': { methods: on(['GET', 'POST'], rule(OWNER, 'system', SYSTEM_APP_CALLER)) },
   '/api/os/volumes/[name]': { methods: { DELETE: rule(OWNER, 'system', SYSTEM_APP_CALLER) } },
@@ -189,6 +199,20 @@ const routes: RouteAccessManifest['routes'] = {
     methods: { POST: rule(OWNER, 'client-session', decide(1, 'A tab registers before it may have logged in. Decide whether the login page needs a client session.')) },
   },
   '/api/os/clients/[sid]/[action]': { methods: { POST: rule(OWNER, 'client-session') } },
+
+  // Owner approvals (5.10). The group baseline is the owner's own desktop
+  // (target `session`, which no app reaches for the owner). The handlers do
+  // the rest: a requester polls only its own request, only the owner's shell
+  // document (or the host operator's code) decides, the requester consumes.
+  '/api/approvals': {
+    methods: {
+      GET: rule(OWNER, 'session'),
+      POST: rule(APP_PERMISSION, 'app', { permissions: ['user.confirm'] }),
+    },
+  },
+  '/api/approvals/[id]': { methods: { GET: rule(INSTANCE, 'system') } },
+  '/api/approvals/[id]/[decision]': { methods: { POST: rule(INSTANCE, 'session') } },
+  '/api/approvals/blocked/[appId]': { methods: { DELETE: rule(OWNER, 'session') } },
 
   // Instances: the URL names the target, so the check is on that instance.
   '/api/instances/[instanceId]/ports': {
@@ -315,6 +339,13 @@ const routes: RouteAccessManifest['routes'] = {
       DELETE: rule(APP_PERMISSION, 'app', { permissions: ['terminal.embed'] }),
     },
   },
+
+  // Installing code (D31): the owner (through Nexus), or a Terminal agent or
+  // the CLI in the System Terminal, which asks and waits. The handler installs
+  // only with the owner's approval of the exact artifact, scope and
+  // permissions, consumed once (lib/approvals/nexus.ts).
+  '/api/nexus/install': { methods: { POST: TERMINAL_ASKS } },
+  '/api/nexus/update/[id]': { methods: { POST: TERMINAL_ASKS } },
 
   '/api/nexus/assets/[source]/[appId]/[digest]': {
     methods: {

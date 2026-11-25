@@ -37,6 +37,8 @@ export const ENFORCED_PERMISSIONS: readonly string[] = [
   // The owner's System Terminal (D25, D29): embed its sessions, list them.
   'terminal.embed',
   'terminal.sessions.list',
+  // Owner confirmation through the shell's dialog (D49). Declaring it is enough.
+  'user.confirm',
 ];
 const ENFORCED = new Set<string>(ENFORCED_PERMISSIONS);
 

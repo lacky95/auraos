@@ -8,7 +8,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -243,7 +243,7 @@ test('install: --copy installs a second copy of an installed app; --as for it is
   };
   const mgr = new NexusManager({ scopes, rootDataDir: join(root, 'root') });
   const run = async (opts) => {
-    const it = mgr.install({ scope: 'user', autoApprove: true, ...opts });
+    const it = mgr.install({ scope: 'user', approval: async () => true, ...opts });
     for (let c = await it.next(); ; c = await it.next()) if (c.done) return c.value;
   };
   const manifestAt = (id) => JSON.parse(readFileSync(join(scopes[2].appsDir, id, 'app.manifest.json'), 'utf-8'));
@@ -263,4 +263,39 @@ test('install: --copy installs a second copy of an installed app; --as for it is
   const as = await run({ ref: src('io.b.app', '1.0.0', O2), identity: { action: 'install-as', appId: 'io.b.mine' } });
   assert.deepEqual([as.id, as.remoteId, as.detached], ['io.b.mine', 'io.b.app', undefined]);
   assert.equal(manifestAt('io.b.mine').originId, O2);
+});
+
+test('install gate (D31): no approval, or a body autoApprove, stops at permission.needed with the exact binding', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'aura-gate-'));
+  const scope = (id, priority, immutable) => ({ id, appsDir: join(root, id, 'apps'), dataDir: join(root, id, 'data'), immutable, priority });
+  const scopes = [scope('system', 0, true), scope('global', 1, false), scope('user', 2, false)];
+  const dir = join(root, 'src', 'io.gate.app'); mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'app.manifest.json'), JSON.stringify({ id: 'io.gate.app', originId: O1, name: 'Gate', version: '1.0.0', tools: ['git'], permissions: ['storage.read'] }));
+  const mgr = new NexusManager({ scopes, rootDataDir: join(root, 'root') });
+  const until = async (it) => { for (let c = await it.next(); ; c = await it.next()) if (c.done || c.value.type === 'permission.needed') return c; };
+
+  for (const opts of [{}, { autoApprove: true }, { approval: async () => false }]) {
+    const it = mgr.install({ ref: dir, scope: 'user', ...opts });
+    const c = await until(it);
+    assert.equal(c.value.type, 'permission.needed', JSON.stringify(Object.keys(opts)));
+    const b = c.value.binding;
+    assert.deepEqual([b.action, b.appId, b.version, b.scope, b.source, b.tools, b.permissions, b.identity],
+      ['nexus.install', 'io.gate.app', '1.0.0', 'user', 'local', ['git'], ['storage.read'], null]);
+    assert.match(b.digest, /^tree:sha256:[0-9a-f]{64}$/, 'a local path is bound to its tree');
+    await it.return(null);
+    assert.equal(existsSync(join(scopes[2].appsDir, 'io.gate.app')), false, 'nothing installed');
+  }
+
+  let seen = null;
+  const it = mgr.install({ ref: dir, scope: 'user', approval: async (b) => { seen = b; return true; } });
+  const done = await until(it);
+  assert.equal(done.done, true);
+  assert.equal(done.value.id, 'io.gate.app');
+  const again = mgr.install({ ref: dir, scope: 'user', approval: async (b) => { assert.deepEqual(b, seen, 'same tree, same binding'); return false; } });
+  await until(again);
+  await again.return(null);
+  writeFileSync(join(dir, 'extra.txt'), 'changed');
+  const changed = mgr.install({ ref: dir, scope: 'user', approval: async (b) => { assert.notEqual(b.digest, seen.digest, 'a changed tree is another artifact'); return false; } });
+  await until(changed);
+  await changed.return(null);
 });

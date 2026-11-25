@@ -8,6 +8,10 @@
  *                                    [--tag] [--channel] [--branch] [-y]
  *   aura nexus app install   <ref>   [-y] [--channel] [--scope global|user]
  *   aura nexus app update     [id]   [-y] [--all]
+ *     Installing code needs the owner's approval of the exact artifact,
+ *     scope and permissions (D31). In an app sandbox the CLI asks and waits
+ *     for the desktop (or `aura approve <id>` on the host); -y is refused
+ *     there. On the host, the operator confirms here (-y: without a prompt).
  *   aura nexus app uninstall <id>    [--purge]
  *   aura nexus app list              [--source git|oci|index|local]
  *   aura nexus app info      <ref>
@@ -27,6 +31,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { api, type ShellError } from '../lib/client.js';
+import { inSandbox } from '../lib/identity.js';
+import { approvalLines, operatorCode, postJson, waitForApproval, type ApprovalView } from '../lib/approval.js';
 import { promptSecret } from '../lib/admin-session.js';
 import { color, fail, info, ok, table, warn } from '../lib/format.js';
 import {
@@ -63,6 +69,16 @@ interface InstallResponse {
   record?:        InstallRecord;
   needsApproval?: boolean;
   diff?:          PermissionDiff;
+  /** A pending owner approval to wait for (sandbox callers). */
+  approvalId?:    string;
+  display?:       ApprovalView['display'];
+  level?:         ApprovalView['level'];
+  /** No requester identity (the host): an operator code for this subject. */
+  operatorOnly?:  boolean;
+  operatorSubject?: string;
+  /** Why a presented approval or code did not count. */
+  refused?:       string;
+  message?:       string;
   needsIdentityChoice?: boolean;
   conflict?:      IdentityConflict;
   error?:         string;
@@ -767,7 +783,7 @@ function wireInstall(parent: Command, opts: { hidden?: boolean } = {}): void {
   identityOptions(parent
     .command('install <ref>', { hidden: opts.hidden })
     .description('Install an app. <ref> can be a git URL, OCI tag, index id, or local path.')
-    .option('-y, --yes',             'auto-approve any permission changes')
+    .option('-y, --yes',             'host only: approve as the operator without a prompt')
     .option('--channel <name>',      'channel to install (when <ref> is an index id)', 'stable')
     .option('--scope <global|user>', 'install into this scope (default: global)', 'global')
     .option('--force',               'replace the app even if it is a dev checkout (`aura dev checkout`)'))
@@ -854,12 +870,17 @@ function flagFor(a: IdentityAction): string {
 
 /**
  * POST an install/update, answering the store's questions: the identity of
- * the app (A/B/D) first, then new permissions. Each answer is a re-POST with
- * the decision in the body. null = the user cancelled.
+ * the app (A/B/D) first, then the owner's approval (D31). Each answer is a
+ * re-POST: the identity decision in the body, the approval as
+ * `X-Aura-Approval` (sandbox) or an operator code (host). null = cancelled
+ * or not approved.
  */
-async function installWithChoices(
+export async function installWithChoices(
   path: string, body: Record<string, unknown>, o: { yes?: boolean } & IdentityFlags, verb: 'install' | 'update',
 ): Promise<InstallResponse | null> {
+  if (o.yes && inSandbox()) {
+    fail('-y is not available in an app sandbox: the owner approves installs in the desktop. Run it without -y.');
+  }
   // On install, --as / --copy are sent up front: the store does not ask when
   // the same app is already installed (it would just update it), so a flag
   // held back for a question was silently ignored. The store checks them
@@ -868,9 +889,14 @@ async function installWithChoices(
   const preset = decisionFromFlags(o);
   let identity: IdentityDecision | undefined =
     verb === 'install' && preset && preset.action !== 'update-existing' ? preset : undefined;
-  let autoApprove = !!o.yes;
+  let approvalId: string | undefined;
+  let operator: string | undefined;
   for (let round = 0; round < 4; round++) {
-    const res = await postStore<InstallResponse>(path, { ...body, autoApprove, ...(identity ? { identity } : {}) });
+    const res = await postJson<InstallResponse>(
+      path,
+      { ...body, ...(identity ? { identity } : {}), ...(operator ? { operatorCode: operator } : {}) },
+      approvalId ? { approvalId } : {},
+    );
     if (res.needsIdentityChoice && res.conflict) {
       if (identity) fail('the store asked about the app identity again — giving up');
       const d = await askIdentity(res.conflict, preset);
@@ -878,16 +904,37 @@ async function installWithChoices(
       identity = d;
       continue;
     }
-    if (res.needsApproval && res.diff && !autoApprove) {
-      printPermissionDiff(res.diff);
-      try {
-        const okPrompt = await promptConfirm(`Approve and ${verb}?`, false);
-        if (okPrompt !== true) return null;
-      } catch (err) {
-        if (err instanceof PromptCancelled) return null;
-        throw err;
+    if (res.needsApproval) {
+      if (approvalId || operator) {
+        // The artifact, scope or permissions changed since (a moved tag): approve again.
+        warn(`the approval did not cover this ${verb}${res.refused ? ` (${res.refused})` : ''} — asking again`);
       }
-      autoApprove = true;
+      approvalId = undefined;
+      operator = undefined;
+      if (res.diff) printPermissionDiff(res.diff);
+      if (res.operatorOnly && res.operatorSubject) {
+        // The host: the operator stands in for the owner (D18).
+        if (!o.yes) {
+          if (!process.stdin.isTTY) fail(`pass -y to approve this ${verb} as the host operator`);
+          try {
+            if (await promptConfirm(`Approve and ${verb} as the host operator?`, false) !== true) return null;
+          } catch (err) {
+            if (err instanceof PromptCancelled) return null;
+            throw err;
+          }
+        }
+        operator = await operatorCode(res.operatorSubject);
+        continue;
+      }
+      if (!res.approvalId) return res;
+      if (res.display) for (const line of approvalLines({ display: res.display, level: res.level ?? 'session' })) info(line);
+      info(`Approve in the desktop (or \`aura approve ${res.approvalId}\` on the host). Waiting…`);
+      const state = await waitForApproval(res.approvalId);
+      if (state !== 'approved') {
+        warn(`not approved: ${state}`);
+        return null;
+      }
+      approvalId = res.approvalId;
       continue;
     }
     return res;
@@ -900,7 +947,7 @@ function wireUpdate(parent: Command, opts: { hidden?: boolean } = {}): void {
   identityOptions(parent
     .command('update [id]', { hidden: opts.hidden })
     .description('Re-resolve an installed app and reinstall if updated.')
-    .option('-y, --yes', 'auto-approve any permission changes')
+    .option('-y, --yes', 'host only: approve as the operator without a prompt')
     .option('--all',     'update every Nexus-installed app (dev checkouts are skipped)')
     .option('--force',   'also replace an app that is a dev checkout (`aura dev checkout`)'))
     .action(async (id: string | undefined, o: { yes?: boolean; all?: boolean; force?: boolean } & IdentityFlags) => {

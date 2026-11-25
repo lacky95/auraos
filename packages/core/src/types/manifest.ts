@@ -56,6 +56,13 @@ export const BUILTIN_PERMISSIONS = [
   'terminal.embed',
   /** List the metadata of every Terminal session (`/api/terminal/sessions`). Privileged like `terminal.embed`. */
   'terminal.sessions.list',
+  /**
+   * Ask the owner to confirm an action in the shell's own dialog
+   * (`osClient.user.confirm`, D49). The app gets back only whether the owner
+   * confirmed and a single-use approval id; never a password. ENFORCED:
+   * declaring it is enough.
+   */
+  'user.confirm',
   'system.clipboard',
   'system.overlay',
   'system.theme.broadcast',

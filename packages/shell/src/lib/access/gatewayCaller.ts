@@ -1,6 +1,7 @@
 import * as core from '@aura/core';
 import type { AccessPrincipal, AuditInput, UserPrincipal } from '@aura/core';
 import { gatewayClaimOf } from '../../../server/gateway-identity.mjs';
+import { presentsApproval } from '../approvals/service.ts';
 import { decide as liveDecide } from './decide.ts';
 import { gatewayInstance, gatewayOwner, type GatewayOwnerDeps } from './identify.ts';
 import { combineCandidates, concreteRule, kvNamespace, resourceFor, type ObserverManager } from './observer.ts';
@@ -135,7 +136,8 @@ export async function enforceGateway(
       },
       resource: resourceFor(concrete, snapshot, deps.mgr),
       transport,
-      auth: { fresh: false },
+      // A presented approval meets the fresh-auth precondition; the handler consumes it.
+      auth: { fresh: presentsApproval(ctx.request) },
       accessProfile: 'open',
       systemMode: 'normal',
       deployment: 'private',

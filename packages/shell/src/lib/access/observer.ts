@@ -329,12 +329,12 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
 
   const policy = (rule: AccessRule | null, resource: PolicyResource, principal: AccessPrincipal, https: boolean, action: {
     surface: AccessEventSurface; subject: string; method: AccessEventMethod; variant: string | null;
-  }) => decideRule({
+  }, fresh = false) => decideRule({
     principal,
     action: { ...action, subject: label(action.subject), variant: action.variant ? label(action.variant) : null, rule },
     resource,
     transport: https ? 'https' : 'http',
-    auth: { fresh: false },
+    auth: { fresh },
     accessProfile: 'open',
     systemMode: 'normal',
     deployment: 'private',
@@ -380,7 +380,7 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
     const results = candidates.length
       ? await Promise.all(candidates.map(async ({ variant, rule }) => {
         const concrete = concreteRule(rule, s, seen.principal, mgr);
-        const result = await policy(concrete, resourceFor(concrete, s, mgr), seen.principal, s.https, { surface, subject, method, variant });
+        const result = await policy(concrete, resourceFor(concrete, s, mgr), seen.principal, s.https, { surface, subject, method, variant }, s.approval === true);
         return { variant, result };
       }))
       : [{ variant: null, result: await policy(null, { target: 'system' }, seen.principal, s.https, { surface, subject, method, variant: null }) }];

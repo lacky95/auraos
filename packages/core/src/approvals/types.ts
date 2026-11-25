@@ -82,6 +82,11 @@ export interface ApprovalDisplay {
   details: string[];
   /** The verified requester as shown, e.g. "Terminal (com.aura.terminal-3)". */
   requestedBy: string;
+  /**
+   * The requester's own words, if it gave any. The dialog shows them only
+   * under a label saying so; they never replace `title` or `details`.
+   */
+  reason?: string;
 }
 
 export interface ApprovalRecord {
@@ -132,7 +137,11 @@ export type ApprovalRefusal =
   /** Not a principal that may decide (`approvalDecider()` returned null). */
   | 'not-a-decider'
   /** The requester already holds MAX_PENDING_PER_REQUESTER pending requests. */
-  | 'too-many-pending';
+  | 'too-many-pending'
+  /** The requester created too many requests in the last minute. */
+  | 'rate-limited'
+  /** The owner chose "Deny and block requests from this app". */
+  | 'blocked';
 
 export type ApprovalResult =
   | { ok: true; record: ApprovalRecord }
@@ -145,7 +154,7 @@ export type ApprovalResult =
  * consumers can never both succeed.
  */
 export interface ApprovalStore {
-  /** A new pending record, or `too-many-pending`. */
+  /** A new pending record, or `too-many-pending`, `rate-limited` or `blocked`. */
   create(request: ApprovalRequest): Promise<ApprovalResult>;
   /** The record with its effective state (`effectiveApprovalState`), or null. */
   get(id: string): Promise<ApprovalRecord | null>;

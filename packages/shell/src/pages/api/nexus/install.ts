@@ -1,34 +1,46 @@
 import type { APIRoute } from 'astro';
 import { getNexusManager } from '@aura/core';
-import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
+import { errorResponse } from '../../../lib/appResponse.js';
+import { authenticate } from '../../../lib/auth.ts';
 import { parseIdentity } from '../../../lib/nexusIdentity.js';
+import { liveApprovalDeps } from '../../../lib/approvals/service.ts';
+import { installGate, runInstall } from '../../../lib/approvals/nexus.ts';
 
 /**
- * Install an app from a Nexus ref.
+ * Install an app from a Nexus ref. Every install needs the owner's approval
+ * of the exact artifact, scope and permissions (D31, lib/approvals/nexus.ts).
  *
  * POST body:
- *   { ref: string, scope?: 'global' | 'user', autoApprove?: boolean, force?: boolean,
- *     identity?: { action: 'update-existing' | 'install-as' | 'install-copy', appId?: string } }
+ *   { ref: string, scope?: 'global' | 'user', force?: boolean,
+ *     identity?: { action: 'update-existing' | 'install-as' | 'install-copy', appId?: string },
+ *     operatorCode?: string }
+ * Header `X-Aura-Approval: <id>`: the approved request this install uses up.
  *
  * Returns one of:
- *   { ok: true, record: InstallRecord }
- *   { ok: false, needsApproval: true, diff: PermissionDiff }
- *   { ok: false, needsIdentityChoice: true, conflict: IdentityConflict }
+ *   200 { ok: true, record: InstallRecord }
+ *   202 { ok: false, error: 'needs-approval', needsApproval: true, approvalId, level, expiresAt, display, diff }
+ *       the owner decides in the desktop (or `aura approve <id>` on the host);
+ *       then POST the same body again with the header
+ *   202 { ..., operatorOnly: true, operatorSubject } for a caller with no
+ *       requester identity (the host CLI): an operator code for that subject
+ *   200 { ok: false, needsIdentityChoice: true, conflict: IdentityConflict }
  *       the app shares an id or originId with an installed app (scenarios A,
  *       B, D — core AppIdentity). Nothing was installed; POST again with
  *       `identity` set to one of `conflict.choices`.
- *   { ok: false, error: string }
+ *   4xx/5xx { error: string }
  *
  * `force` replaces an app that is a dev checkout (`aura dev checkout`); without
  * it such an install fails rather than overwriting the working tree.
  */
 export const POST: APIRoute = async ({ request }) => {
+  const principal = await authenticate(request);
+  if (principal instanceof Response) return principal;
   const body = await request.json().catch(() => ({})) as {
-    ref?:         string;
-    scope?:       string;
-    autoApprove?: boolean;
-    force?:       boolean;
-    identity?:    unknown;
+    ref?:          string;
+    scope?:        string;
+    force?:        boolean;
+    identity?:     unknown;
+    operatorCode?: unknown;
   };
   if (!body.ref || typeof body.ref !== 'string') {
     return errorResponse('missing or invalid `ref`', 400);
@@ -41,34 +53,9 @@ export const POST: APIRoute = async ({ request }) => {
   const identity = parseIdentity(body.identity);
   if (identity instanceof Response) return identity;
 
-  const nexus = getNexusManager();
-  const it = nexus.install({
-    ref: body.ref, scope, autoApprove: body.autoApprove,
+  const gate = installGate(liveApprovalDeps(), principal, request, body.operatorCode);
+  return runInstall(getNexusManager().install({
+    ref: body.ref, scope, approval: gate.approval,
     ...(identity ? { identity } : {}), ...(body.force === true ? { replaceCheckout: true } : {}),
-  });
-
-  try {
-    let cursor = await it.next();
-    while (!cursor.done) {
-      const ev = cursor.value;
-      if (ev.type === 'identity.choice') {
-        await it.return(undefined as never).catch(() => undefined);
-        return jsonResponse({ ok: false, needsIdentityChoice: true, conflict: ev.conflict });
-      }
-      if (ev.type === 'permission.needed') {
-        await it.return(undefined as never).catch(() => undefined);
-        return jsonResponse({ ok: false, needsApproval: true, diff: ev.diff });
-      }
-      if (ev.type === 'error') {
-        return errorResponse(ev.message, 500);
-      }
-      if (ev.type === 'install.done') {
-        return jsonResponse({ ok: true, record: ev.record });
-      }
-      cursor = await it.next();
-    }
-    return jsonResponse({ ok: true, record: cursor.value });
-  } catch (err) {
-    return errorResponse((err as Error).message, 500);
-  }
+  }), gate);
 };
