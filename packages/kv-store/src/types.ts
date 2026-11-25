@@ -14,7 +14,7 @@
  * `app/<id>` is preserved because it never collides with the `:` separator.
  */
 
-export type KvNamespace = 'os' | `app/${string}` | `context:${string}`;
+export type KvNamespace = 'os' | `app/${string}` | `context:${string}` | `user/${string}`;
 
 /**
  * The stored shape. The shell stores values together with a wall-clock
@@ -49,12 +49,25 @@ export const KV_NAMESPACE_PATTERN = /^(?:os|app\/[a-z][a-z0-9]*(?:\.[a-z][a-z0-9
  * shapes. IMPORTANT: the public `/api/kv/...` proxy additionally rejects any
  * namespace beginning with `context` — these are only reachable via the
  * dedicated `/api/os/context` API and the server-internal `ContextStore`.
+ * `context:user:<userId>` is a user's personal vault (D56, core
+ * `CredentialVault`): sealed and injected nowhere.
  */
 export const KV_CONTEXT_NAMESPACE_PATTERN =
-  /^context:(?:system|volumes|app:[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+)$/;
+  /^context:(?:system|volumes|app:[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+|user:[A-Za-z0-9][A-Za-z0-9._-]{0,63})$/;
+
+/**
+ * Per-user namespaces (D46), server-side only: the public `/api/kv` route
+ * builds `os` or `app/<appId>` from its URL and never one of these; the shell
+ * maps a caller onto them from its verified user.
+ *   `user/<userId>/<area>`       the user's own data, e.g. `user/default/prefs`
+ *   `app/<appId>/u/<userId>`     an app's storage for one user
+ *   `app/<appId>/shared`         an app's storage shared by all its users
+ */
+export const KV_USER_NAMESPACE_PATTERN =
+  /^(?:user\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/[a-z][a-z0-9-]{0,31}|app\/[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+\/(?:u\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}|shared))$/;
 
 export function isValidNamespace(ns: string): ns is KvNamespace {
-  return KV_NAMESPACE_PATTERN.test(ns) || KV_CONTEXT_NAMESPACE_PATTERN.test(ns);
+  return KV_NAMESPACE_PATTERN.test(ns) || KV_CONTEXT_NAMESPACE_PATTERN.test(ns) || KV_USER_NAMESPACE_PATTERN.test(ns);
 }
 
 export function isValidKey(key: string): boolean {

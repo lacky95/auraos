@@ -24,6 +24,8 @@ export interface InstanceDto {
   startedAt?: string | null;
   inPool?: boolean;
   sandbox?: 'proot' | 'container';
+  /** How the start passed the lifecycle checks (core `LifecycleStatus`); absent when not measured. */
+  lifecycle?: { identity: string; guard: string };
 }
 
 export interface ActivityDto {
@@ -46,6 +48,8 @@ export interface AppDto {
     sandbox?: string;
     tools?: string[];
     permissions?: string[];
+    /** The app contract it was built for (D48); absent before the contract. */
+    auraContract?: number;
   };
   enabled?: boolean;
   instances: InstanceDto[];
@@ -188,6 +192,8 @@ const apps: ResourceDef<AppDto> = {
     { header: 'MODE', value: (a) => `${a.manifest.instanceMode ?? '-'}/${a.manifest.activityMode ?? '-'}`, wide: true },
     { header: 'SANDBOX', value: (a) => a.manifest.sandbox ?? 'proot', wide: true },
     { header: 'BG', value: (a) => (a.manifest.backgroundService ? 'yes' : '-'), wide: true },
+    // The app contract the app was built for (D48): `-` before the contract.
+    { header: 'CONTRACT', value: (a) => (a.manifest.auraContract ? String(a.manifest.auraContract) : '-'), wide: true },
     { header: 'EN', value: (a) => (a.enabled === false ? color.red('off') : color.green('on')) },
   ],
 };
@@ -220,6 +226,10 @@ const instances: ResourceDef<InstanceRow> = {
     { header: 'SANDBOX', value: (i) => i.sandbox ?? '-', wide: true },
     { header: 'PID', value: (i) => i.pid?.toString() ?? '-', wide: true },
     { header: 'POOL', value: (i) => (i.inPool ? 'yes' : '-'), wide: true },
+    // Lifecycle checks of this start: the health identity class and the
+    // runtime check of the health guard (AURA_LIFECYCLE_STRICT).
+    { header: 'HEALTH-ID', value: (i) => i.lifecycle?.identity ?? '-', wide: true },
+    { header: 'LC-GUARD', value: (i) => i.lifecycle?.guard ?? '-', wide: true },
     { header: 'UPTIME', value: (i) => uptime(i.startedAt) },
   ],
 };

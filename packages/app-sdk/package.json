@@ -37,6 +37,10 @@
       "import": "./dist/runtime/loader.js",
       "types": "./dist/runtime/loader.d.ts"
     },
+    "./runtime/lifecycle-guard": {
+      "import": "./dist/runtime/lifecycle-guard.js",
+      "types": "./dist/runtime/lifecycle-guard.d.ts"
+    },
     "./runtime/next": {
       "import": "./dist/runtime/next.js",
       "types": "./dist/runtime/next.d.ts"

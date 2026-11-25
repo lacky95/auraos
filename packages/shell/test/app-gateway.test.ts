@@ -21,6 +21,9 @@ import type { ObserverManager } from '../src/lib/access/observer.ts';
 import { buildAppRuntimeJs } from '../src/lib/appRuntime.ts';
 import { authenticate, type AuthDeps } from '../src/lib/auth.ts';
 import { GET as eventsRoute } from '../src/pages/api/apps/events.ts';
+import { localSystemId } from '@aura/core/system-identity';
+/** The test data dir's own system id (D47): every resolved principal carries it. */
+const SYS = localSystemId();
 
 const ORIGIN = 'http://notesabcd1234--desk.example:3000';
 const record = { appId: 'com.acme.notes', installationId: 'inst-1', instanceScope: { kind: 'user', userId: 'default' } };
@@ -91,7 +94,8 @@ const mgr = {
   getInstancesByApp: () => [],
   getManifest: (id: string) => (id === 'com.acme.notes' || id === 'com.other.app' ? {} : undefined),
 } as unknown as ObserverManager;
-const decide = createDecide({ authorizer: { authorize: async () => ({ allow: false, reason: 'not granted' }) } });
+// Only what an app declares for its own data (D46): storage.read / storage.write.
+const decide = createDecide({ authorizer: { authorize: async (_p, a) => ({ allow: a === 'storage.read' || a === 'storage.write', reason: 'declared' }) } });
 
 function claim(method: string, path: string, over: Partial<GatewayIdentityClaim> = {}): GatewayIdentityClaim {
   const iat = Math.floor(Date.now() / 1000);
@@ -363,7 +367,7 @@ test('authenticate() trusts only a verified claim, and a bad one is never anonym
   const deps = { mgr, apiKeys: { verify: async () => null } } as unknown as AuthDeps;
   const url = 'http://127.0.0.1:3000/api/notifications';
   const ok = await authenticate(new Request(url, { headers: { [GATEWAY_IDENTITY_HEADER]: signGatewayClaim(claim('GET', '/api/notifications')) } }), deps);
-  assert.deepEqual(ok, { kind: 'instance', appId: record.appId, instanceId: slot.instanceId, verification: 'verified' });
+  assert.deepEqual(ok, { kind: 'instance', appId: record.appId, instanceId: slot.instanceId, verification: 'verified', systemId: SYS });
   const bad = await authenticate(new Request(url, { headers: { [GATEWAY_IDENTITY_HEADER]: 'forged' } }), deps);
   assert.ok(bad instanceof Response);
   assert.equal((bad as Response).status, 401);

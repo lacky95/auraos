@@ -416,6 +416,23 @@ test('/_aura/* never reaches the app, in any spelling', async () => {
   assert.equal(seen.length, 0);
 });
 
+test('an app\'s /api/lifecycle routes never reach it through its App Host, in any spelling', async () => {
+  const good = await signIn();
+  for (const path of ['/api/lifecycle/onDestroy', '/api/lifecycle/health', '/API/Lifecycle/onStop', '/api/%6cifecycle/onStop', '/a/../api/lifecycle/x', '//api//lifecycle']) {
+    for (const method of ['GET', 'POST']) {
+      const r = await get(HOST, path, { cookie: good, 'x-aura-lifecycle': 'guess' }, method);
+      assert.equal(r.status, 404, `${method} ${path}`);
+    }
+  }
+  const up = await upgrade(HOST, '/api/lifecycle/onDestroy', { cookie: good, origin: ORIGIN });
+  assert.match(up, /^HTTP\/1\.1 404/);
+  assert.equal(seen.length, 0);
+  // Any other path still reaches the app, without a caller's lifecycle header.
+  const r = await get(HOST, '/api/lifecyclex', { cookie: good, 'x-aura-lifecycle': 'guess' });
+  assert.equal(r.status, 200);
+  assert.equal(seen.at(-1)!.headers['x-aura-lifecycle'], undefined);
+});
+
 test('an absolute-form target cannot hide a reserved path', async () => {
   const good = await signIn();
   const r = await new Promise<string>((resolve, reject) => {
@@ -1253,5 +1270,18 @@ test('the machine proxy refuses a browser document and serves a machine call, st
     assert.equal(r.headers.get('set-cookie'), null, 'an app cannot set cookies on the shell origin');
     assert.equal(r.headers.get('content-security-policy'), 'sandbox');
     assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
+
+    // Lifecycle routes are the kernel's: refused before any lookup, in any
+    // spelling, and a caller's lifecycle header never reaches the app.
+    const before = seen.length;
+    for (const path of ['/api/lifecycle/onDestroy', '/api/lifecycle/health', '/API/lifecycle/onStop', '/api/%6cifecycle/onStop', '/x/../api/lifecycle/onStop']) {
+      const refused = await call(path, { 'x-aura-lifecycle': 'guess' }, 'POST');
+      assert.equal(refused.status, 403, path);
+      assert.equal((await refused.json() as { error: string }).error, 'lifecycle-path-refused');
+    }
+    assert.equal(seen.length, before, 'a refused lifecycle call never reaches the app');
+    const other = await call('/mcp', { 'x-aura-lifecycle': 'guess', accept: 'application/json' });
+    assert.equal(other.status, 200);
+    assert.equal(seen.at(-1)!.headers['x-aura-lifecycle'], undefined, 'the shell never forwards a lifecycle header');
   } finally { G[MANAGER] = saved; if (saved === undefined) delete G[MANAGER]; }
 });

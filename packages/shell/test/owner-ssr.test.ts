@@ -8,7 +8,7 @@ import { after, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { GATEWAY_IDENTITY_HEADER, OWNER_SSR_HEADER } from '@aura/core/host-rules';
+import { GATEWAY_IDENTITY_HEADER, LIFECYCLE_TOKEN_HEADER, OWNER_SSR_HEADER } from '@aura/core/host-rules';
 import type { GatewayIdentityClaim } from '@aura/core';
 import { createAppHostRouter } from '../server/app-hosts.mjs';
 import { createAppHostAuth } from '../server/app-host-auth.mjs';
@@ -18,6 +18,9 @@ import {
 import { stripShellCredentials } from '../server/shell-credentials.mjs';
 import type { GatewayOwnerDeps } from '../src/lib/access/identify.ts';
 import { authenticate, type AuthDeps } from '../src/lib/auth.ts';
+import { localSystemId } from '@aura/core/system-identity';
+/** The test data dir's own system id (D47): every resolved principal carries it. */
+const SYS = localSystemId();
 
 const listen = (s: http.Server) =>
   new Promise<number>((r) => s.listen(0, '127.0.0.1', () => r((s.address() as AddressInfo).port)));
@@ -184,6 +187,16 @@ test('the shell strips the owner claim from anything leaving for an app', () => 
   assert.deepEqual(node, {});
 });
 
+test('the shell strips a lifecycle token header from anything leaving for an app', () => {
+  const headers = new Headers({ [LIFECYCLE_TOKEN_HEADER]: 'guess', accept: 'text/html' });
+  stripShellCredentials(headers, 'test');
+  assert.equal(headers.get(LIFECYCLE_TOKEN_HEADER), null);
+  assert.deepEqual(stripShellCredentials(['X-Aura-Lifecycle', 'guess', 'accept', 'x'], 'test'), ['accept', 'x']);
+  const node: Record<string, string> = { [LIFECYCLE_TOKEN_HEADER]: 'guess', accept: 'x' };
+  stripShellCredentials(node, 'test');
+  assert.deepEqual(node, { accept: 'x' });
+});
+
 // ── the claim itself ────────────────────────────────────────────────────────
 
 test('an owner SSR claim and a gateway claim never stand in for each other', () => {
@@ -241,7 +254,7 @@ async function who(path: string, headers: Record<string, string>, method = 'GET'
 test('authenticate(): Settings\' token plus its owner claim is the owner through Settings', async () => {
   const p = await who('/api/apps', { authorization: 'Bearer aura1.settings', [OWNER_SSR_HEADER]: settingsClaim() });
   assert.deepEqual(p, {
-    kind: 'user', userId: OWNER.userId, role: 'owner', sessionId: OWNER.sid, verification: 'verified',
+    kind: 'user', userId: OWNER.userId, role: 'owner', sessionId: OWNER.sid, verification: 'verified', systemId: SYS,
     through: { appId: SETTINGS, instanceId: 'com.aura.settings-1' },
   });
   const nexus = signOwnerSsrClaim({ appId: NEXUS, installationId: 'inst-nexus', instanceId: 'com.aura.nexus-1', ...OWNER });

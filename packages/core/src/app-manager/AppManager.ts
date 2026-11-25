@@ -1,5 +1,13 @@
 import { DEFAULT_OWNER_ID } from '../auth/identityContracts.js';
 import { adoptedInstanceOwner } from './instanceOwner.js';
+
+/** The verified user a launch or hook call is for (D46). Absent: the OS itself, which acts for the local owner. */
+export interface LaunchUser { userId?: string }
+
+/** The user a hook call is for: the verified caller's, else the instance's owner. */
+function hookUser(instances: ReadonlyMap<string, { owner?: string }>, instanceId: string, userId?: string): string | undefined {
+  return userId ?? instances.get(instanceId)?.owner;
+}
 import { mkdirSync, readdirSync, readFileSync, lstatSync, writeFileSync, chmodSync, copyFileSync, renameSync, unlinkSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
@@ -281,6 +289,17 @@ export class AppManager {
       if (await lifecycle.isForeignLabel(appId, h.name)) { guard.block(appId, h.name); blocked = true; }
     }
     if (blocked) this.reloadManifest(appId);
+  }
+
+  /** Record an adopted instance's lifecycle status (ContainerRunner `measureAdopted`). Never throws. */
+  private async measureAdopted(instanceId: string): Promise<void> {
+    try {
+      const status = await this.runners.container.measureAdopted?.(instanceId);
+      const inst = this.instances.get(instanceId);
+      if (status && inst) inst.lifecycle = status;
+    } catch (err) {
+      console.warn(`[AppManager] lifecycle check of adopted ${instanceId} failed: ${(err as Error).message}`);
+    }
   }
 
   /** A slot is assigned when an instance is claimed for use, never to a pool member. */
@@ -1074,6 +1093,9 @@ export class AppManager {
           console.warn(`[AppManager] skipping orphan adoption for ${o.instanceId}: manifest for ${o.appId} not found`);
         }
         console.log(`[AppManager] adopted orphan container ${o.instanceId} (appId=${o.appId}, port=${o.port})`);
+        // The lifecycle checks a fresh start makes, again (F0a): the status
+        // `aura get inst -o wide` shows. In the background: never holds boot.
+        if (manifest) void this.measureAdopted(o.instanceId);
       }
     } catch (err) {
       console.warn(`[AppManager] orphan adoption failed: ${(err as Error).message}`);
@@ -1121,14 +1143,18 @@ export class AppManager {
    * For apps with warmPool > 0 and instanceMode='multi': claims a pre-spawned
    * idle instance from the warm pool if available; otherwise spawns fresh.
    * @returns instanceId of the (new or existing) running instance.
+   *
+   * `opts.userId` is the verified user the launch is for (D46): a new
+   * instance and a claimed warm-pool member are owned by them. Without one
+   * (the OS itself: autostart, restore), the local owner.
    */
-  async start(appId: string): Promise<string> {
-    const instanceId = await this.launch(appId);
+  async start(appId: string, opts: LaunchUser = {}): Promise<string> {
+    const instanceId = await this.launch(appId, opts.userId);
     await this.claimHostSlot(appId, instanceId);
     return instanceId;
   }
 
-  private async launch(appId: string): Promise<string> {
+  private async launch(appId: string, userId?: string): Promise<string> {
     const manifest = this.registry.getById(appId);
     if (!manifest) throw new Error(`App not found: ${appId}`);
     // Disabled apps refuse launches. Same error class as a missing manifest
@@ -1170,14 +1196,15 @@ export class AppManager {
     // mode, a pool member would BE the singleton, and refills would race the
     // user's claim. Guarded explicitly.
     if (manifest.warmPool > 0 && manifest.instanceMode === 'multi') {
-      const claimed = this.claimFromPool(appId);
+      const claimed = this.claimFromPool(appId, userId);
       if (claimed) {
         this.scheduleRefill(appId);
+        await this.notifyAssigned(claimed);
         return claimed.instanceId;
       }
     }
 
-    const instanceId = await this.spawnInstance(appId, { inPool: false });
+    const instanceId = await this.spawnInstance(appId, { inPool: false, userId });
     if (manifest.warmPool > 0 && manifest.instanceMode === 'multi') {
       // User stole a slot the pool could have filled; top up.
       this.scheduleRefill(appId);
@@ -1227,7 +1254,7 @@ export class AppManager {
    * `intentDelivered` reports whether the app answered that lifecycle call
    * (false = hook not implemented or it failed; the app is still started).
    */
-  async startIntent(intent: Intent): Promise<
+  async startIntent(intent: Intent, opts: LaunchUser = {}): Promise<
     | { kind: 'started'; appId: string; instanceId: string; activityId?: string; intentDelivered: boolean; result?: Record<string, unknown> }
     | { kind: 'rejected'; appId: string; instanceId: string; code: string; message: string; hint?: string; status: number }
     | { kind: 'disambiguation'; candidates: IntentMatch[] }
@@ -1257,7 +1284,8 @@ export class AppManager {
     // …and the user-owned ones: a warm-pool member claimed for this intent is
     // as new to the user as a fresh spawn, so a rejection hands it back too.
     const beforeOwned = new Set(this.getInstancesByApp(chosen.appId).filter((i) => !i.inPool).map((i) => i.instanceId));
-    const instanceId = await this.pickIntentInstance(manifest, intent);
+    const instanceId = await this.pickIntentInstance(manifest, intent, opts.userId);
+    const userId = hookUser(this.instances, instanceId, opts.userId);
 
     const rejected = async (r: IntentRejection) => {
       // An instance that exists only because of this intent must not outlive
@@ -1271,7 +1299,7 @@ export class AppManager {
     };
 
     if (manifest.activityMode === 'multi') {
-      const opened = await this.openActivityAndReport(instanceId, intent.extras, { intent });
+      const opened = await this.openActivityAndReport(instanceId, intent.extras, { intent, userId });
       if (opened.rejected) return rejected(opened.rejected);
       return {
         kind: 'started', appId: chosen.appId, instanceId,
@@ -1283,6 +1311,7 @@ export class AppManager {
     const reply = await this.runnerOf(instanceId).callOptionalLifecycle(instanceId, 'onIntent', {
       intent: intentPayload(intent),
       newInstance: !before.has(instanceId),
+      ...(userId ? { userId } : {}),
     });
     const rejection = parseIntentRejection(reply);
     if (rejection) return rejected(rejection);
@@ -1298,7 +1327,7 @@ export class AppManager {
    * The instance an intent lands on — see `startIntent`. Validates the
    * intent-level launch fields first so a bad intent never starts anything.
    */
-  private async pickIntentInstance(manifest: AppManifest, intent: Intent): Promise<string> {
+  private async pickIntentInstance(manifest: AppManifest, intent: Intent, userId?: string): Promise<string> {
     const appId = manifest.id;
     const flags = intent.flags ?? [];
     const unknown = flags.filter((f) => !(INTENT_FLAGS as readonly string[]).includes(f));
@@ -1335,14 +1364,14 @@ export class AppManager {
         throw new IntentError(409, 'single-instance',
           `${appId} is a service; services run one instance, so NEW_INSTANCE cannot be honoured.`);
       }
-      return this.startService(appId);
+      return this.startService(appId, { userId });
     }
     if (newInstance) {
       if (manifest.instanceMode !== 'multi') {
         throw new IntentError(409, 'single-instance',
           `${appId} is single-instance (instanceMode='${manifest.instanceMode}'); NEW_INSTANCE cannot be honoured.`);
       }
-      return this.start(appId);   // multi: always a fresh instance (warm-pool claim or spawn)
+      return this.start(appId, { userId });   // multi: always a fresh instance (warm-pool claim or spawn)
     }
     // Default: what the launcher does on an icon click (shell auraLaunchApp).
     // A multi/multi app that launches into new activities reuses the first
@@ -1358,7 +1387,7 @@ export class AppManager {
         return reuse.instanceId;
       }
     }
-    return this.start(appId);
+    return this.start(appId, { userId });
   }
 
   // -------- Service component (Android Service equivalent) --------
@@ -1374,7 +1403,7 @@ export class AppManager {
    * stale instance 'error', then init/auto-restart logic kicks in via the
    * usual orphan-reap + state transition path).
    */
-  async startService(appId: string): Promise<string> {
+  async startService(appId: string, opts: LaunchUser = {}): Promise<string> {
     const manifest = this.registry.getById(appId);
     if (!manifest) throw new Error(`App not found: ${appId}`);
     if (manifest.componentType !== 'service') {
@@ -1385,7 +1414,7 @@ export class AppManager {
       (i) => i.state !== 'destroyed' && i.state !== 'error',
     );
     if (existing) return existing.instanceId;
-    return this.spawnInstance(appId, { inPool: false });
+    return this.spawnInstance(appId, { inPool: false, userId: opts.userId });
   }
 
   /**
@@ -1410,7 +1439,7 @@ export class AppManager {
    * behavioural difference is whether content-provider routes get registered
    * (pool members don't claim them — see comment below).
    */
-  private async spawnInstance(appId: string, opts: { inPool: boolean }): Promise<string> {
+  private async spawnInstance(appId: string, opts: { inPool: boolean; userId?: string }): Promise<string> {
     const manifest = this.registry.getById(appId);
     if (!manifest) throw new Error(`App not found: ${appId}`);
 
@@ -1424,7 +1453,7 @@ export class AppManager {
     // com.aura.registry to pin :4090 so RegistryConfig URLs stay stable).
     const port = await this.ports.allocate(instanceId, manifest.serverPort);
     // A pool member belongs to nobody until it is claimed.
-    const owner = opts.inPool ? undefined : this.instances.get(instanceId)?.owner ?? DEFAULT_OWNER_ID;
+    const owner = opts.inPool ? undefined : opts.userId ?? this.instances.get(instanceId)?.owner ?? DEFAULT_OWNER_ID;
 
     try {
       const runner = this.runners[manifest.sandbox] ?? this.runners['proot'];
@@ -1437,7 +1466,8 @@ export class AppManager {
         instanceToken:   this.tokens.mint(instanceId, undefined, owner),
         ...(owner ? { owner } : {}),
       });
-      this.upsertInstance(instanceId, appId, { pid, port, startedAt: new Date(), inPool: opts.inPool, sandbox: manifest.sandbox, owner });
+      const lifecycle = runner.lifecycleStatus(instanceId) ?? undefined;
+      this.upsertInstance(instanceId, appId, { pid, port, startedAt: new Date(), inPool: opts.inPool, sandbox: manifest.sandbox, owner, lifecycle });
       if (opts.inPool) this.savePoolIds();
       this.transition(instanceId, appId, 'created', port);
 
@@ -1504,7 +1534,18 @@ export class AppManager {
    * the pool is empty or every candidate failed its readiness check (e.g.
    * the backing pid died between spawn and claim).
    */
-  private claimFromPool(appId: string): AppInstance | null {
+  /**
+   * `onAssign { userId }`: a warm-pool member was just handed to a user. The
+   * hook is optional; a missing or failing one never fails the claim.
+   */
+  private async notifyAssigned(inst: AppInstance): Promise<void> {
+    if (!inst.owner) return;
+    await this.runnerOf(inst.instanceId)
+      .callOptionalLifecycle(inst.instanceId, 'onAssign', { userId: inst.owner })
+      .catch(() => undefined);
+  }
+
+  private claimFromPool(appId: string, userId?: string): AppInstance | null {
     for (const inst of this.instances.values()) {
       if (inst.appId !== appId || !inst.inPool) continue;
       if (inst.state !== 'resumed' || inst.pid == null) continue;
@@ -1525,7 +1566,8 @@ export class AppManager {
       // Hand-off — keep the existing instanceId (its env was baked at spawn
       // time with this id, so renaming would break identity invariants).
       inst.inPool = false;
-      inst.owner ??= DEFAULT_OWNER_ID;
+      // A pool member was created for nobody: it belongs to the user it is claimed for.
+      inst.owner = userId ?? DEFAULT_OWNER_ID;
       this.savePoolIds();
       const manifest = this.registry.getById(appId);
       if (manifest) {
@@ -1840,7 +1882,7 @@ export class AppManager {
   async openActivity(
     instanceId: string,
     data?: Record<string, unknown>,
-    opts?: { stackParent?: string; restore?: ActivityRestoreSeed; flight?: Partial<FlightState>; path?: string },
+    opts?: { stackParent?: string; restore?: ActivityRestoreSeed; flight?: Partial<FlightState>; path?: string; userId?: string },
   ): Promise<AppActivity> {
     // No `intent` in opts ⇒ never declined/window-less, so always an activity.
     return (await this.openActivityAndReport(instanceId, data, opts)).activity as AppActivity;
@@ -1854,7 +1896,7 @@ export class AppManager {
   private async openActivityAndReport(
     instanceId: string,
     data?: Record<string, unknown>,
-    opts?: { stackParent?: string; intent?: Intent; restore?: ActivityRestoreSeed; flight?: Partial<FlightState>; path?: string },
+    opts?: { stackParent?: string; intent?: Intent; restore?: ActivityRestoreSeed; flight?: Partial<FlightState>; path?: string; userId?: string },
   ): Promise<{ activity: AppActivity; hookAnswered: boolean; rejected?: undefined; result?: Record<string, unknown> }
     | { activity: null; hookAnswered: true; rejected?: IntentRejection; result?: Record<string, unknown> }> {
     const inst = this.instances.get(instanceId);
@@ -1877,13 +1919,14 @@ export class AppManager {
     // Also schedules a refill so the pool stays at target size.
     if (inst.inPool) {
       inst.inPool = false;
-      inst.owner ??= DEFAULT_OWNER_ID;
+      inst.owner = opts?.userId ?? DEFAULT_OWNER_ID;
       this.savePoolIds();
       this.providers.registerInstance(inst, manifest);
       this.interfaces.registerInstance(inst, manifest);
       OsEventBus.emit('app:stateChanged', { instanceId: inst.instanceId, appId: inst.appId, state: inst.state, port: inst.port });
       console.log(`[AppManager] pool: auto-claimed ${inst.instanceId} (activity open on pool member)`);
       this.scheduleRefill(inst.appId);
+      await this.notifyAssigned(inst);
     }
     // A flight is asked for explicitly (opts.flight) or comes back as one
     // after an OS restart. Flights have their own cap and don't count
@@ -1905,9 +1948,11 @@ export class AppManager {
     // Optional notification to the app. 404 / errors are silently ignored.
     // `restore` (desktop session restore after an OS restart) carries the
     // activity's previous id and the state the app saved for it.
+    const forUser = hookUser(this.instances, instanceId, opts?.userId);
     const result = await this.runnerOf(instanceId).callOptionalLifecycle(instanceId, 'onActivityCreate', {
       activityId,
       data,
+      ...(forUser ? { userId: forUser } : {}),
       ...(opts?.intent ? { intent: intentPayload(opts.intent) } : {}),
       ...(restore ? { restore: { previousActivityId: restore.previousActivityId, state: restore.savedState ?? null } } : {}),
       ...(flightReq ? { presentation: 'flight' } : {}),

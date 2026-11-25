@@ -18,6 +18,9 @@ import { signGatewayClaim } from '../server/gateway-identity.mjs';
 import { resolvePrincipal, type GatewayOwnerDeps, type PrincipalDeps } from '../src/lib/access/identify.ts';
 import { authenticate, type AuthDeps } from '../src/lib/auth.ts';
 import { sessionCookieToken } from '../src/lib/authSurface.ts';
+import { localSystemId } from '@aura/core/system-identity';
+/** The test data dir's own system id (D47): every resolved principal carries it. */
+const SYS = localSystemId();
 
 const tokens = new InstanceTokens(join(mkdtempSync(join(tmpdir(), 'aura-resolver-')), 'secrets', 'k.key'));
 const instances: Record<string, { appId: string; instanceId: string; owner?: string; inPool?: boolean; port?: number }> = {
@@ -60,7 +63,7 @@ function gateway(appId: string, instanceId: string, installationId: string, over
   return req({ [GATEWAY_IDENTITY_HEADER]: signGatewayClaim(claim) }, path);
 }
 
-const USER = { kind: 'user', userId: 'default', role: 'owner', sessionId: SID, verification: 'verified' };
+const USER = { kind: 'user', userId: 'default', role: 'owner', sessionId: SID, verification: 'verified', systemId: SYS };
 
 test('login cookie → the owner, whatever hint comes along', async () => {
   revoked = false;
@@ -100,7 +103,7 @@ test('an aura-sess1 bearer → the owner; invalid → 401', async () => {
 
 test('instance token → the instance acting for its `u` claim, else its owner', async () => {
   const owned = tokens.mint('com.acme.notes-1', undefined, 'default').token;
-  const instance = { kind: 'instance', appId: 'com.acme.notes', instanceId: 'com.acme.notes-1', verification: 'verified' };
+  const instance = { kind: 'instance', appId: 'com.acme.notes', instanceId: 'com.acme.notes-1', verification: 'verified', systemId: SYS };
   assert.deepEqual(await authenticate(req({ authorization: `Bearer ${owned}` }), deps), { ...instance, userId: 'default' });
   const old = tokens.mint('com.acme.notes-1').token;  // minted before the claim: the server-side owner
   assert.deepEqual(await authenticate(req({ authorization: `Bearer ${old}` }), deps), { ...instance, userId: 'default' });
@@ -108,7 +111,7 @@ test('instance token → the instance acting for its `u` claim, else its owner',
 
 test('gateway claim → the instance, acting for the App Host session user only when the claim has one', async () => {
   const notes = (over: Partial<GatewayIdentityClaim>) => gateway('com.acme.notes', 'com.acme.notes-1', 'inst-notes', over);
-  const instance = { kind: 'instance', appId: 'com.acme.notes', instanceId: 'com.acme.notes-1', verification: 'verified' };
+  const instance = { kind: 'instance', appId: 'com.acme.notes', instanceId: 'com.acme.notes-1', verification: 'verified', systemId: SYS };
   assert.deepEqual(await authenticate(notes({ sid: SID }), deps), { ...instance, userId: 'default' });
   // The runtime script's claim names a scope user and no session: nobody.
   assert.deepEqual(await authenticate(notes({ userId: 'shared' }), deps), instance);

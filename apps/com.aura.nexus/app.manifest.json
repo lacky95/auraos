@@ -3,6 +3,7 @@
   "originId": "b61b5559-5176-472b-8270-b8e1792b83a5",
   "name": "Nexus",
   "version": "0.1.0",
+  "auraContract": 1,
   "description": "AuraOS app store + package manager. Browse, install, update, publish.",
   "icon": "NEX",
   "category": "system",

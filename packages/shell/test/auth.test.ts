@@ -8,6 +8,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InstanceTokens } from '@aura/core';
 import { authenticate, type AuthDeps } from '../src/lib/auth.ts';
+import { localSystemId } from '@aura/core/system-identity';
+/** The test data dir's own system id (D47): every resolved principal carries it. */
+const SYS = localSystemId();
 
 const tokens = new InstanceTokens(join(mkdtempSync(join(tmpdir(), 'aura-auth-')), 'secrets', 'k.key'));
 const instances = new Map([
@@ -27,7 +30,7 @@ const bearer = (t: string) => req({ authorization: `Bearer ${t}` });
 
 test('order: instance token → verified instance; API key → apiKey; a retired admin session → 401 (D50)', async () => {
   const inst = await authenticate(bearer(tokens.mint('com.example.notes-1').token), deps);
-  assert.deepEqual(inst, { kind: 'instance', appId: 'com.example.notes', instanceId: 'com.example.notes-1', verification: 'verified' });
+  assert.deepEqual(inst, { kind: 'instance', appId: 'com.example.notes', instanceId: 'com.example.notes-1', verification: 'verified', systemId: SYS });
   const key = await authenticate(bearer(GOOD_KEY), deps);
   assert.deepEqual(key, { kind: 'apiKey', keyId: '0123456789abcdef', name: 'CI', scopes: ['system.notifications'], verification: 'verified' });
   const admin = await authenticate(bearer('aura-admin1.payload.sig'), deps);

@@ -242,7 +242,22 @@ export interface OsEvents {
    * SSE subscribers can topic-filter `kv:*` to get every change, or read
    * the namespace from the payload to narrow further.
    */
-  'kv:changed': { namespace: 'os' | `app/${string}`; key: string; value: unknown | null };
+  'kv:changed': {
+    namespace: 'os' | `app/${string}`; key: string; value: unknown | null;
+    /**
+     * Whose value changed (D46): a per-user preference (`os` keys the shell
+     * keeps per user) or an app's per-user storage. Absent for OS-wide keys.
+     */
+    userId?: string;
+    /** An app's shared storage (`osClient.storage.shared`). */
+    shared?: true;
+  };
+  /**
+   * A user's profile changed (D46). Carries no field values, so nothing an
+   * app may not read rides along: a subscriber reads the profile again
+   * (`osClient.user.get()`), filtered for it.
+   */
+  'user:changed': { userId: string; systemId?: string };
   /**
    * Aura Context value changed (env var / secret). `deleted` distinguishes a
    * removal from an upsert. Values are never included in the payload. `scope`

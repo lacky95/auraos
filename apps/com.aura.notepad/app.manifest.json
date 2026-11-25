@@ -4,6 +4,7 @@
   "name": "Notepad",
   "icon": "NP",
   "version": "0.1.0",
+  "auraContract": 1,
   "description": "Shared note buffer — multiple activities edit the same text live (single backend, multi activities). Also serves an MCP server over open tabs and saved notes.",
   "category": "productivity",
   "permissions": [

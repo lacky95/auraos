@@ -45,6 +45,7 @@ import { randomUUID } from 'node:crypto';
 import * as core from '@aura/core';
 import type { AppActivity, FlightState } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
+import { localOwnerId } from './userContext.js';
 import { allMembers, overdueDeadMembers, remapWorkspaceIds, type RemapState } from './workspaceRemap.js';
 
 export interface SessionActivity {
@@ -127,7 +128,7 @@ export async function buildSnapshot(reason: DesktopSnapshot['reason']): Promise<
   const mgr = core.getAppManager();
   const members = new Set<string>();
   try {
-    const ws = await withKv((kv) => kv.getValue<RemapState>('os', 'workspaces'));
+    const ws = await withKv((kv) => core.readUserPrefValue<RemapState>(kv, localOwnerId(), 'workspaces'));
     if (ws?.workspaces) for (const m of allMembers(ws)) members.add(m);
   } catch { /* no workspaces: instance views unknown */ }
 
@@ -175,7 +176,7 @@ export function sessionInstances(
 
 async function writeSnapshot(reason: DesktopSnapshot['reason']): Promise<void> {
   const snap = await buildSnapshot(reason);
-  await withKv((kv) => kv.set('os', SESSION_KEY, snap));
+  await withKv((kv) => core.writeUserPref(kv, localOwnerId(), SESSION_KEY, snap));
 }
 
 function scheduleSave(): void {
@@ -222,7 +223,7 @@ export async function flushAndFreeze(reason: DesktopSnapshot['reason'] = 'planne
   if (st.timer) { clearTimeout(st.timer); st.timer = null; }
   if (st.writing) await st.writing.catch(() => undefined);
   const snap = await buildSnapshot(reason);
-  await withKv((kv) => kv.set('os', SESSION_KEY, snap));
+  await withKv((kv) => core.writeUserPref(kv, localOwnerId(), SESSION_KEY, snap));
   return snap;
 }
 
@@ -298,7 +299,7 @@ async function doRestore(): Promise<RestoreReport> {
   const [enabled, skip, snap, restartDaemon] = await withKv(async (kv) => [
     await kv.getValue<boolean>('os', RESTORE_SETTING_KEY),
     await kv.getValue<boolean>('os', SKIP_KEY),
-    await kv.getValue<DesktopSnapshot>('os', SESSION_KEY),
+    await core.readUserPrefValue<DesktopSnapshot>(kv, localOwnerId(), SESSION_KEY),
     await kv.getValue<boolean>('os', RESTART_DAEMON_KEY),
   ] as const);
   if (skip) await withKv((kv) => kv.del('os', SKIP_KEY));

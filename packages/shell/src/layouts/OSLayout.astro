@@ -15,7 +15,8 @@ import LockScreenNotifications from '../components/shell/notifications/LockScree
 import KeyboardOverlay from '../components/shell/keyboard/KeyboardOverlay.astro';
 import FlightLayer from '../components/shell/flight/FlightLayer.astro';
 import ClientSession from '../components/shell/ClientSession.astro';
-import { ThemeManager } from '@aura/core';
+import { ThemeManager, readUserPrefValue } from '@aura/core';
+import { localOwnerId, requestUserId } from '../lib/userContext';
 import type { AppManifest, ColorMode } from '@aura/core';
 import { sharedKv } from '../lib/sharedKv';
 
@@ -36,9 +37,10 @@ let activeColorMode: ColorMode = ThemeManager.DEFAULT_COLOR_MODE;
 {
   const kv = sharedKv();
   try {
-    const theme = await kv.getValue<{
+    // The signed-in user's own theme (D46), else the shared one from before the move.
+    const theme = await readUserPrefValue<{
       themeIdDark?: string; themeIdLight?: string; colorMode?: ColorMode;
-    }>('os', 'theme');
+    }>(kv, (await requestUserId(Astro.request)) ?? localOwnerId(), 'theme');
     if (theme?.themeIdDark)  themeIdDark     = theme.themeIdDark;
     if (theme?.themeIdLight) themeIdLight    = theme.themeIdLight;
     // A KV string goes into the <style> below (toCss): only the known modes.

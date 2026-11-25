@@ -22,6 +22,7 @@ import { join } from 'node:path';
 import * as core from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
 import { uiCommandBroker } from '../uiCommandBroker.js';
+import { localOwnerId } from '../userContext.js';
 import { SystemCard } from './card.js';
 import { readOnboarding, updateOnboarding, type OnboardingState } from './state.js';
 import {
@@ -125,7 +126,8 @@ export class Welcome {
       try {
         const kv = defaultKv();
         let theme: unknown = null;
-        try { theme = await kv.getValue('os', 'theme'); } finally { await kv.close().catch(() => undefined); }
+        // The owner's own theme (D46): the welcome tour is the owner's.
+        try { theme = await core.readUserPrefValue(kv, localOwnerId(), 'theme'); } finally { await kv.close().catch(() => undefined); }
         const found = detectDone(this.opts, theme);
         const known = this.state?.welcome.done ?? {};
         const fresh = [...found].filter((id) => !known[id]);

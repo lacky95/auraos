@@ -10,7 +10,8 @@ import { kvEventAllowed } from './kvAccess.ts';
  *
  * An allowlist, so a new bus event stays private until it is added here:
  * the theme, the caller's own app and activities, and `kv:changed` for its
- * own bucket and the `os` keys kvAccess.ts lists.
+ * own bucket and the `os` keys kvAccess.ts lists, and `user:changed` (which
+ * carries no profile values). A per-user one only for the instance's user.
  */
 
 const SHARED_EVENTS: ReadonlySet<string> = new Set(['theme:changed', 'mode:changed']);
@@ -41,7 +42,10 @@ export function instanceEventView(
     allows(type, ev) {
       if (!live()) return false;
       if (SHARED_EVENTS.has(type)) return true;
-      const e = (ev ?? {}) as { appId?: unknown; namespace?: unknown; key?: unknown };
+      const e = (ev ?? {}) as { appId?: unknown; namespace?: unknown; key?: unknown; userId?: unknown };
+      // A per-user value or profile (D46) reaches only an instance of that user.
+      if (e.userId !== undefined && e.userId !== (mgr.getInstance(instanceId) as { owner?: string } | undefined)?.owner) return false;
+      if (type === 'user:changed') return true;
       if (type === 'kv:changed') return typeof e.namespace === 'string' && kvEventAllowed(e.namespace, e.key, appId);
       return OWN_APP_EVENTS.has(type) && e.appId === appId;
     },

@@ -2,9 +2,9 @@ import type { Command } from 'commander';
 import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync, chmodSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { AppManifestSchema, AURA_NPMRC, needsNpmrc, newOriginId, portPackageJsonForScope, portToolsForScope } from '@aura/core';
+import { AppManifestSchema, AURA_CONTRACT, AURA_NPMRC, needsNpmrc, newOriginId, portPackageJsonForScope, portToolsForScope } from '@aura/core';
 import { color, error, fail, info, ok, warn } from '../lib/format.js';
-import { DOCS_HINT, lintAppSources, lintManifestKeys, type Finding } from '../lib/apphost-lint.js';
+import { CONTRACT_DOCS_HINT, DOCS_HINT, lintAppSources, lintContract, lintManifestKeys, type Finding } from '../lib/apphost-lint.js';
 import { promptText, promptChoice, promptConfirm, promptMultiSelect, PromptCancelled, BACK, type MultiSelectMode } from '../lib/prompts.js';
 import { ensureRegistry, loadRegistry, loadState, type CapabilityEntry } from '../lib/registry.js';
 import { api } from '../lib/client.js';
@@ -112,6 +112,8 @@ function manifestFromConfig(cfg: ScaffoldConfig): Record<string, unknown> {
     originId:    newOriginId(),
     name:        cfg.name,
     version:     '0.1.0',
+    // The app contract it is built for (D48); `aura dev validate` checks it.
+    auraContract: AURA_CONTRACT,
     description: cfg.description ?? 'Scaffolded by `aura dev new`.',
   };
   if (cfg.icon) m['icon'] = cfg.icon;
@@ -795,7 +797,7 @@ export function registerDev(program: Command): void {
     .command('validate [path]')
     .option('--all', 'Validate every app across all scopes (system/global/user)')
     .option('--no-source', 'Only check the manifest, not the app\'s source files')
-    .description('Validate one or all app manifests against the AuraOS schema, and check the app against the App Host contract.')
+    .description('Validate one or all app manifests against the AuraOS schema, and check the app against the App Host contract and the Aura app contract.')
     .addHelpText('after', `
 Besides the schema, the App Host checks (warnings unless noted) report with file:line:
   - removed or unknown manifest keys (e.g. proxy.rewriteHtml), which the schema drops silently
@@ -803,7 +805,13 @@ Besides the schema, the App Host checks (warnings unless noted) report with file
   - reads of the AURA_APP_BASE_PATH / AURA_APP_ID / AURA_INSTANCE_ID globals or aura-* meta tags
   - /api/proxy/ URLs in browser-served files (pages are served from / on their App Host)
   - notes: on('upgrade') handlers with no path check, hmr: false
-Skips node_modules, dist, .astro and .next. ${DOCS_HINT}.`)
+The app contract checks (D48, warnings: report only):
+  - auraContract missing, or newer than this AuraOS (${AURA_CONTRACT})
+  - context.get('KEY') of a key not in context[]; reads of the raw Context (/run/context)
+  - SDK calls whose permission is missing (user.confirm, storage, osSidecars, notifications)
+  - services[] without sidecars.spawn or docker; privileged sidecars without sidecars.privileged
+  - the docker CLI or socket without "docker" in tools[]; interfaces.resolve() of a name not in consumes[]
+Skips node_modules, dist, .astro and .next. ${DOCS_HINT}; ${CONTRACT_DOCS_HINT}.`)
     .action((path: string | undefined, opts: { all?: boolean; source?: boolean }) => {
       const targets: string[] = [];
       if (opts.all) {
@@ -847,6 +855,7 @@ Skips node_modules, dist, .astro and .next. ${DOCS_HINT}.`)
               warn(`  no originId — run ${color.cyan(`aura dev origin --assign ${result.data.id}`)}`);
             }
             findings.push(...lintManifestKeys(m, text, data, result.data, REMOVED_MANIFEST_KEYS));
+            findings.push(...lintContract(m, text, result.data, { source: opts.source !== false }));
           }
         } catch (err) { warn(`${m}: ${String(err)}`); failed++; }
         if (opts.source !== false) findings.push(...lintAppSources(dirname(m)));
@@ -951,6 +960,7 @@ const SCHEMA_DEFAULTS: Record<string, unknown> = {
   entrypoint:              'entrypoint.sh',
   permissions:             [],
   tools:                   [],
+  context:                 [],
   rootfsMode:              'shared',
   category:                'utility',
   instanceMode:            'single',

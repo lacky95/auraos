@@ -11,6 +11,9 @@
  *      the next boot skips this branch.
  *   3. Else → seed defaults from `@aura/core`'s ThemeManager +
  *      DEFAULT_WORKSPACE_STATE so the first paint isn't blank.
+ *   4. Once (D46, F0): copy the per-user preferences out of `os` and every
+ *      `app/<appId>` bucket into the owner's area, after a backup. The old
+ *      values stay, and reads fall back to them for one release.
  *
  * Idempotent: the `exists` guard short-circuits on every subsequent run.
  * Persistence (RDB+AOF) means subsequent boots see step 1 even after a
@@ -23,7 +26,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { defaultKv } from '@aura/kv-store';
-import { DEFAULT_WORKSPACE_STATE, ThemeManager } from '@aura/core';
+import { DEFAULT_OWNER_ID, DEFAULT_WORKSPACE_STATE, ThemeManager, migrateUserData } from '@aura/core';
 
 interface LegacySettingsState {
   themeIdDark?:  string;
@@ -163,6 +166,16 @@ export async function bootstrapKv(opts: { dataDir?: string } = {}): Promise<void
       }
     } catch (err) {
       console.warn(`[KvBootstrap] could not seed os/keymap: ${(err as Error).message}`);
+    }
+    // Step 4. The owner keeps the bootstrap id (D47 rule 2), so their area is known before setup.
+    try {
+      const done = await migrateUserData(kv, { ownerId: DEFAULT_OWNER_ID, dataDir });
+      if (done.ran) {
+        console.log(`[KvBootstrap] per-user data: ${done.prefs} preferences and ${done.appKeys} app keys copied to the owner's area`
+          + `${done.backup ? ` (backup ${done.backup})` : ''}; old values kept as the fallback`);
+      }
+    } catch (err) {
+      console.warn(`[KvBootstrap] per-user data migration failed, will retry next boot: ${(err as Error).message}`);
     }
     // Viewport profiles used to be seeded here, but they moved to device
     // localStorage (`aura.os.viewport`) since they're per-device, not

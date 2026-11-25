@@ -29,6 +29,8 @@
  */
 
 import { isBrowser, osAuthHeaders, osBase, osEnv } from './os-auth.js';
+import { OsError, statusCode } from './errors.js';
+import { ownInstanceId } from './context.js';
 
 export interface SidecarMountsRequest {
   own?: boolean;
@@ -136,10 +138,10 @@ export interface OsSidecarsOptions {
  * grant it with `aura grant perms <appId> <permission>` or declare it in the
  * manifest's permissions[].
  */
-export class OsSidecarError extends Error {
+export class OsSidecarError extends OsError {
   readonly permission?: string;
-  constructor(readonly status: number, message: string) {
-    super(message);
+  constructor(status: number, message: string, code: string = statusCode(status)) {
+    super(status, code, message);
     this.name = 'OsSidecarError';
     const perm = status === 403 ? /(?:not granted|needs) '([\w.]+)'/.exec(message)?.[1] : undefined;
     if (perm) this.permission = perm;
@@ -188,7 +190,7 @@ export interface OsSidecarsClient {
 export function osSidecars(options: OsSidecarsOptions = {}): OsSidecarsClient {
   const env = osEnv();
   const base = (options.base ?? osBase({ mode: 'server' })).replace(/\/+$/, '');
-  const instanceId = options.instanceId ?? env['APP_INSTANCE_ID'] ?? env['AURA_INSTANCE_ID'] ?? '';
+  const instanceId = options.instanceId ?? ownInstanceId() ?? '';
   const token = options.token ?? env['AURA_INSTANCE_TOKEN'] ?? '';
   const timeoutMs = options.timeoutMs ?? 15 * 60_000;
   const doFetch = options.fetch ?? fetch;
@@ -216,8 +218,9 @@ export function osSidecars(options: OsSidecarsOptions = {}): OsSidecarsClient {
     let data: unknown = undefined;
     try { data = text ? JSON.parse(text) : undefined; } catch { data = text; }
     if (!res.ok) {
-      const msg = (data as { error?: string } | undefined)?.error ?? (typeof data === 'string' ? data : res.statusText);
-      throw new OsSidecarError(res.status, msg);
+      const error = (data as { error?: string } | undefined)?.error;
+      const msg = error ?? (typeof data === 'string' ? data : res.statusText);
+      throw new OsSidecarError(res.status, msg, typeof error === 'string' && /^[\w.:-]{1,64}$/.test(error) ? error : statusCode(res.status));
     }
     return data as T;
   }

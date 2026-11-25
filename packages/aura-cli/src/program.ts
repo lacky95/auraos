@@ -28,6 +28,7 @@ import { registerAdmin, registerApiKey } from './commands/admin.js';
 import { registerShellMode } from './commands/shellMode.js';
 import { registerIdentity } from './commands/identity.js';
 import { registerApprove } from './commands/approve.js';
+import { registerSecret } from './commands/secret.js';
 import { LEGACY_GROUPS, markLegacy } from './lib/deprecate.js';
 import { color, visibleWidth } from './lib/format.js';
 import { RESOURCES, fetchApps, findResource, liveInstances, shortName } from './lib/resources.js';
@@ -116,11 +117,13 @@ export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]
     ['aura grant nperm <app> read --scope app:<id>|sender:<key>|all', "Let an app read other senders' notifications (--include-secret)"],
     ['aura revoke nperm <app> <locked|popup|read>', 'Revoke them again, takes effect at once'],
     ['aura get nperm [app]', 'Requested vs granted notification features'],
-    ['aura admin ...', 'grants · audit · access-report · notif release'],
+    ['aura admin ...', 'grants · audit · access-report · contract-report · notif release'],
     ['aura whoami', 'Server-verified identity, and local hints'],
     ['aura setup-code', 'Host: one-time owner setup code'],
     ['aura user reset-password <username>', 'Host: one-time password reset code'],
+    ['aura system reidentify', 'Host: new systemId and key for a copied /data'],
     ['aura approve <id>', 'Host: approve (--deny) a pending owner approval as the operator'],
+    ['aura secret ask <name>', 'Ask the owner to type a secret for an app (--for <app>) in the desktop dialog'],
     ['aura apikey ...', 'API keys for REST callers: create · ls · revoke'],
   ], note: 'Grants, API keys, the audit and manifest edits are the owner\'s: in the System Terminal they wait for '
     + 'your approval in the desktop (privileged ones with your password); on the host (docker exec -it aura-shell aura …) '
@@ -275,6 +278,7 @@ export function buildProgram(): Command {
   registerShellMode(program);
   registerIdentity(program);
   registerApprove(program);
+  registerSecret(program);
   registerApiKey(program);
   // Pre-kubectl groups: registered so they keep working, then hidden.
   registerApp(program);

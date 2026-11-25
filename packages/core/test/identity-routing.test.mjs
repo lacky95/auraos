@@ -7,8 +7,9 @@
 //
 //   1. PortAllocator refuses to hand out a port that is already bound at the
 //      OS level (squatter test).
-//   2. verifyHealthIdentity rejects a health response whose declared identity
-//      doesn't match the expected (appId, instanceId) pair (identity-drift).
+//   2. classifyHealthIdentity (lifecycleGate.ts, shared by both runners) flags a
+//      health response whose declared identity doesn't match the expected
+//      (appId, instanceId) pair (identity-drift).
 //   3. killProcessGroup terminates the entire process group of a detached
 //      child, not just the spawned root (process-group kill).
 
@@ -19,7 +20,8 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 
 import { PortAllocator } from '../dist/app-manager/PortAllocator.js';
-import { verifyHealthIdentity, killProcessGroup, OutputTail } from '../dist/app-manager/ProotRunner.js';
+import { killProcessGroup, OutputTail } from '../dist/app-manager/ProotRunner.js';
+import { classifyHealthIdentity } from '../dist/app-manager/lifecycleGate.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -43,9 +45,9 @@ test('PortAllocator refuses ports that are bound at the OS level', async () => {
   }
 });
 
-test('verifyHealthIdentity rejects mismatched appId / instanceId', () => {
+test('classifyHealthIdentity flags mismatched appId / instanceId', () => {
   // Mismatch: live upstream answers as the wrong app.
-  const bad = verifyHealthIdentity(
+  const bad = classifyHealthIdentity(
     JSON.stringify({ ok: true, appId: 'com.aura.wrong', instanceId: 'com.aura.wrong' }),
     'com.aura.right',
     'com.aura.right',
@@ -57,20 +59,20 @@ test('verifyHealthIdentity rejects mismatched appId / instanceId', () => {
   }
 
   // Match: identity lines up.
-  const ok = verifyHealthIdentity(
+  const ok = classifyHealthIdentity(
     JSON.stringify({ ok: true, appId: 'com.aura.right', instanceId: 'com.aura.right' }),
     'com.aura.right',
     'com.aura.right',
   );
   assert.equal(ok.kind, 'match');
 
-  // Legacy app without identity body — accepted, since the rollout has to
-  // tolerate older app templates until they're retrofitted.
-  const legacy = verifyHealthIdentity(JSON.stringify({ ok: true }), 'com.aura.x', 'com.aura.x');
+  // Legacy app without identity body — its own class; the mode decides
+  // (lifecycle-gate.test.mjs).
+  const legacy = classifyHealthIdentity(JSON.stringify({ ok: true }), 'com.aura.x', 'com.aura.x');
   assert.equal(legacy.kind, 'legacy');
 });
 
-test('verifyHealthIdentity rejects identity-drift live via a fake HTTP upstream', async () => {
+test('classifyHealthIdentity flags identity-drift live via a fake HTTP upstream', async () => {
   // Real over-the-wire test: stand up a tiny HTTP server pretending to be the
   // wrong app, fetch its /api/lifecycle/health, run the verdict. Catches any
   // future regression that breaks the fetch → JSON → verify chain end-to-end.
@@ -89,7 +91,7 @@ test('verifyHealthIdentity rejects identity-drift live via a fake HTTP upstream'
   try {
     const res = await fetch(`http://127.0.0.1:${port}/api/lifecycle/health`);
     const body = await res.text();
-    const verdict = verifyHealthIdentity(body, 'com.aura.expected', 'com.aura.expected-1');
+    const verdict = classifyHealthIdentity(body, 'com.aura.expected', 'com.aura.expected-1');
     assert.equal(verdict.kind, 'mismatch');
   } finally {
     await new Promise((r) => server.close(r));

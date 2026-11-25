@@ -13,6 +13,7 @@
  */
 import type { Redis } from '@aura/kv-store';
 import type { OperatorAttribution, UserAttribution, UserPrincipal } from './types.js';
+import { localSystemId } from '../system/systemIdentity.js';
 
 export type { OperatorAttribution, UserAttribution } from './types.js';
 
@@ -50,6 +51,8 @@ export interface AuditEntry {
   /** ok | denied | failed */
   outcome: string;
   detail?: Record<string, unknown>;
+  /** The Aura the entry was written on (D47); absent on entries from before 3b. */
+  systemId?: string;
 }
 
 export interface AuditInput {
@@ -79,11 +82,16 @@ function actorOf(by: AuditInput['by']): string {
 }
 
 export class AdminAudit {
-  constructor(private readonly redis: () => Redis, private readonly now: () => number = Date.now) {}
+  constructor(
+    private readonly redis: () => Redis,
+    private readonly now: () => number = Date.now,
+    private readonly systemId: () => string = () => localSystemId(),
+  ) {}
 
   async record(e: AuditInput): Promise<string> {
     const fields: string[] = ['at', String(this.now()), 'actor', actorOf(e.by), 'action', e.action, 'outcome', e.outcome ?? 'ok'];
     if (e.by.kind === 'user' && e.by.session) fields.push('session', e.by.session);
+    try { fields.push('sys', this.systemId()); } catch { /* an unreadable identity must not lose the entry */ }
     if (e.target) fields.push('target', e.target);
     if (e.detail) fields.push('detail', JSON.stringify(scrub(e.detail)));
     const id = await this.redis().xadd(AUDIT_ADMIN_KEY, 'MAXLEN', '~', String(AUDIT_MAXLEN), '*', ...fields);
@@ -105,6 +113,7 @@ export class AdminAudit {
         ...(m['session'] ? { session: m['session'] } : {}),
         ...(m['target'] ? { target: m['target'] } : {}),
         ...(detail ? { detail } : {}),
+        ...(m['sys'] ? { systemId: m['sys'] } : {}),
       };
     });
   }

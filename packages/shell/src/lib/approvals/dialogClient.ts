@@ -79,6 +79,16 @@ export function operatorRequiredText(approvalId: string): string {
   return `This needs HTTPS, or approve on the host with \`aura approve ${approvalId}\`.`;
 }
 
+/**
+ * D56 (owner decision): a secret may be stored over plain HTTP, with this
+ * notice under the secret field. None on HTTPS, none for other approvals.
+ */
+export const SECRET_OVER_HTTP_NOTICE = 'This connection is not encrypted — use HTTPS for sensitive secrets.';
+
+export function secretTransportNotice(action: string, protocol: string): string | null {
+  return action === 'credential.store' && protocol !== 'https:' ? SECRET_OVER_HTTP_NOTICE : null;
+}
+
 /** The dialog's text for a refused decision. */
 export function decisionErrorText(error: string | undefined, approvalId: string): string {
   switch (error) {
@@ -89,6 +99,10 @@ export function decisionErrorText(error: string | undefined, approvalId: string)
     case 'locked': return 'Unlock the screen first.';
     case 'login-required': return 'Your login session has ended. Sign in again.';
     case 'forbidden-origin': return 'This page may not decide approvals.';
+    case 'secret-required': return 'Enter the secret to approve this.';
+    case 'secret-too-long': return 'That secret is too long (4 KiB at most).';
+    case 'other-user': return 'This request acts for another user.';
+    case 'store-failed': return 'AuraOS could not keep the secret. Try again.';
     default: return 'That did not work. Try again.';
   }
 }

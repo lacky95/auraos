@@ -103,7 +103,10 @@ test('kv is denied unless a namespace variant allows it', () => {
   const byId = new Map(kv.variants!.map((v) => [v.id, v]));
   assert.deepEqual(byId.get('os-read')!.rule.allow, ['own-instance', 'owner']);
   assert.deepEqual(byId.get('os-write')!.rule.permissions, ['system.kv.os.<topic>.write']);
-  assert.deepEqual(byId.get('app-entry')!.rule.allow, ['own-instance', 'owner']);
+  // D46: an app's storage, per user, needs its own storage.read / storage.write.
+  assert.deepEqual(byId.get('app-read')!.rule.allow, ['own-instance', 'owner']);
+  assert.deepEqual(byId.get('app-read')!.rule.targetPermissions, ['storage.read']);
+  assert.deepEqual(byId.get('app-write')!.rule.targetPermissions, ['storage.write']);
 });
 
 // ── the enumerator ──────────────────────────────────────────────────────────

@@ -57,7 +57,9 @@
  * work server-side too.
  */
 
-import { appHostRuntime, osBase } from './os-auth.js';
+import { osAuthHeaders, osBase } from './os-auth.js';
+import { ownInstanceId } from './context.js';
+import { OsError, statusCode } from './errors.js';
 import type { OsClient } from './OsClient.js';
 
 export type FlightEdge = 'left' | 'right' | 'top' | 'bottom';
@@ -181,16 +183,21 @@ export interface FlightEvents {
 type Handler<K extends keyof FlightEvents> = (ev: FlightEvents[K]) => void;
 
 async function call(path: string, method: string, body?: unknown): Promise<Response> {
-  const res = await fetch(`${osBase()}${path}`, {
+  const url = `${osBase()}${path}`;
+  const res = await fetch(url, {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...osAuthHeaders(url) },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     let msg = text;
-    try { msg = (JSON.parse(text) as { error?: string }).error ?? text; } catch { /* plain text */ }
-    throw new Error(`flight: ${method} ${path} → ${res.status} ${msg}`.trim());
+    let code = statusCode(res.status);
+    try {
+      const error = (JSON.parse(text) as { error?: string }).error;
+      if (typeof error === 'string') { msg = error; code = error; }
+    } catch { /* plain text */ }
+    throw new OsError(res.status, code, `flight: ${method} ${path} → ${res.status} ${msg}`.trim());
   }
   return res;
 }
@@ -361,7 +368,7 @@ export class FlightApi {
   /** Open a new flight of this app. Needs `system.overlay`. */
   async open(opts: FlightOpenOptions = {}): Promise<FlightHandle> {
     const instanceId = opts.instanceId ?? ownInstanceId();
-    if (!instanceId) throw new Error('flight: cannot tell this app\'s instance id — pass opts.instanceId');
+    if (!instanceId) throw new OsError(0, 'no-instance-id', 'flight: cannot tell this app\'s instance id — pass opts.instanceId');
     const flight: Partial<FlightState> & { size?: { w: number; h: number } } = {};
     if (opts.size) flight.size = opts.size;
     if (opts.minSize) flight.minSize = opts.minSize;
@@ -414,8 +421,3 @@ export class FlightApi {
   }
 }
 
-/** APP_INSTANCE_ID on the server, the runtime bootstrap in a page. */
-function ownInstanceId(): string | null {
-  if (typeof process !== 'undefined' && process.env?.['APP_INSTANCE_ID']) return process.env['APP_INSTANCE_ID'];
-  return appHostRuntime()?.instanceId ?? null;
-}

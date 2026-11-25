@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
@@ -15,6 +15,10 @@ import {
   ASTRO_START_SHELL, RAW_START_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
 } from './provisioning.js';
 import { serveState } from './appBuild.js';
+import {
+  checkHealthGuard, classifyHealthIdentity, healthIdentityRefusal, lifecycleHeaders, lifecycleStatusRefusal,
+  newLifecycleToken, type HealthIdentityClass, type LifecycleStatus,
+} from './lifecycleGate.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
 const HEALTH_CHECK_TIMEOUT_MS = 30_000;
@@ -46,6 +50,10 @@ interface SpawnedApp {
   /** How the instance was launched, so `exec` can join the same sandbox:
    *  the proot args minus the entrypoint (empty when not prooted), env, cwd. */
   launch: { prooted: boolean; sandboxArgs: string[]; env: Record<string, string>; appDir: string };
+  /** This start's lifecycle secret (also `AURA_LIFECYCLE_TOKEN` in `launch.env`). */
+  lifecycleToken: string;
+  /** Health identity and runtime-check result, once healthy. */
+  lifecycle?: LifecycleStatus;
 }
 
 const execFileAsync = promisify(execFile);
@@ -183,6 +191,8 @@ export class ProotRunner implements SandboxRunner {
       // still answer 409 for proot sandboxes; carrying it keeps identity
       // uniform across runners.
       ...(ctx.instanceToken ? { AURA_INSTANCE_TOKEN: ctx.instanceToken.token } : {}),
+      // Per-start shell→app secret for the lifecycle routes (lifecycleGate.ts).
+      AURA_LIFECYCLE_TOKEN: newLifecycleToken(),
     };
 
     try {
@@ -236,13 +246,19 @@ export class ProotRunner implements SandboxRunner {
     child.once('error', (err) => { exited = `spawn error: ${err.message}`; });
 
     const sandboxArgs = prooted ? args.slice(0, args.length - entrypointArgv.length) : [];
-    this.processes.set(instanceId, {
+    const spawned: SpawnedApp = {
       process: child, port, appId, provision,
       launch: { prooted, sandboxArgs, env, appDir },
-    });
+      lifecycleToken: env['AURA_LIFECYCLE_TOKEN']!,
+    };
+    this.processes.set(instanceId, spawned);
 
     try {
-      await this.waitHealthy(instanceId, appId, port, () => exited);
+      const identity = await this.waitHealthy(instanceId, appId, port, () => exited);
+      const lifecycle: LifecycleStatus = { identity, guard: await checkHealthGuard(this.lifecycleUrl(port, 'health')) };
+      const refusal = lifecycleStatusRefusal(instanceId, lifecycle);
+      if (refusal) throw new Error(`[ProotRunner] ${refusal}`);
+      spawned.lifecycle = lifecycle;
     } catch (err) {
       // Either timeout, early exit or identity mismatch — clean up the partial
       // spawn so we don't leak an orphan process or a stale instance entry.
@@ -396,46 +412,57 @@ export class ProotRunner implements SandboxRunner {
    * identity matches what we just spawned. Identity match guards against the
    * "another app squatting our port" failure mode that caused the wrong-
    * content bug — a bare 200 is no longer enough.
+   *
+   * The probe carries the lifecycle token, so it goes out only once the
+   * listener on the port is proven to belong to the spawned process tree
+   * (`listenerOwnership`). A listener that belongs to anyone else fails the
+   * start; so does a port whose owner can't be read.
    */
   private async waitHealthy(
     instanceId: string, appId: string, port: number,
     exited: () => string | null = () => null,
-  ): Promise<void> {
+  ): Promise<HealthIdentityClass> {
     // See ContainerRunner.waitHealthy — a cold app installs its dependency
     // tree in the entrypoint, which must not be timed with the boot budget.
     const startedAt    = Date.now();
     const hardDeadline = startedAt + PROVISION_TIMEOUT_MS;
     const provision    = this.processes.get(instanceId)?.provision;
     let   deadline     = startedAt + HEALTH_CHECK_TIMEOUT_MS;
-    const healthUrl = `http://localhost:${port}${lifecyclePath('health')}`;
+    const healthUrl = this.lifecycleUrl(port, 'health');
+    const spawned = this.processes.get(instanceId);
     let lastBody: string | null = null;
     while (Date.now() < deadline) {
       const exit = exited();
       if (exit) {
         throw new StartupFailure(`[ProotRunner] ${instanceId} exited during startup (${exit}) before answering on port ${port}`);
       }
-      try {
-        const res = await fetch(healthUrl, { signal: AbortSignal.timeout(1000) });
-        if (res.ok) {
-          const text = await res.text();
-          lastBody = text;
-          const verdict = verifyHealthIdentity(text, appId, instanceId);
-          if (verdict.kind === 'match') return;
-          if (verdict.kind === 'legacy') {
-            console.warn(`[ProotRunner] ${instanceId} health endpoint returned no identity body; accepting on legacy fallback.`);
-            return;
+      // Nothing listens yet: keep waiting. Someone else listens: the port is
+      // poisoned, fail loud. Only our own listener gets the token.
+      const owner = spawned ? listenerOwnership(port, spawned.process.pid) : 'unknown';
+      if (owner === 'foreign' || owner === 'unknown') {
+        throw new DestinationBindingError(
+          `[ProotRunner] ${instanceId} on port ${port}: ` + (owner === 'foreign'
+            ? 'the listener does not belong to the spawned process tree. Another process is likely squatting this port.'
+            : 'cannot confirm that the listener belongs to the spawned process tree.'),
+        );
+      }
+      if (owner === 'own') {
+        try {
+          const res = await fetch(healthUrl, { headers: lifecycleHeaders(spawned!.lifecycleToken), signal: AbortSignal.timeout(1000) });
+          if (res.ok) {
+            const text = await res.text();
+            lastBody = text;
+            const identity = classifyHealthIdentity(text, appId, instanceId);
+            const refusal = healthIdentityRefusal(identity, appId, instanceId);
+            // Port poisoned or identity required — fail loud, no point waiting.
+            if (refusal) throw new DestinationBindingError(`[ProotRunner] ${refusal} on port ${port}.`);
+            if (identity.kind === 'legacy') console.warn(`[ProotRunner] ${instanceId} health endpoint returned no identity body; admitted as a known legacy app (warn mode).`);
+            return identity.kind;
           }
-          // Mismatch — port poisoned, fail loud.
-          throw new Error(
-            `[ProotRunner] ${instanceId} on port ${port}: health identity mismatch ` +
-            `(expected appId=${appId} instanceId=${instanceId}, got appId=${verdict.claimedApp} instanceId=${verdict.claimedInstance}). ` +
-            `Another process is likely squatting this port.`
-          );
+        } catch (err) {
+          if (err instanceof DestinationBindingError) throw err;
+          // Otherwise keep polling (connection refused, etc.)
         }
-      } catch (err) {
-        // Re-throw identity mismatch immediately — port is poisoned, no point waiting.
-        if (err instanceof Error && err.message.includes('identity mismatch')) throw err;
-        // Otherwise keep polling (connection refused, etc.)
       }
       deadline = nextHealthDeadline({
         now: Date.now(), deadline, hardDeadline,
@@ -452,12 +479,31 @@ export class ProotRunner implements SandboxRunner {
     );
   }
 
-  async callLifecycle(instanceId: string, hook: string): Promise<void> {
+  /** `http://localhost:<port>/api/lifecycle/<hook>` — PRoot apps share the shell's network. */
+  private lifecycleUrl(port: number, hook: string): string {
+    return `http://localhost:${port}${lifecyclePath(hook)}`;
+  }
+
+  /**
+   * The instance, if the listener on its port still belongs to its process
+   * tree — checked before every call that carries the lifecycle token.
+   */
+  private boundInstance(instanceId: string): SpawnedApp | null {
     const spawned = this.processes.get(instanceId);
-    if (!spawned) throw new Error(`[ProotRunner] ${instanceId} is not running`);
-    const url = `http://localhost:${spawned.port}${lifecyclePath(hook)}`;
-    const res = await fetch(url, {
+    if (!spawned) return null;
+    const owner = listenerOwnership(spawned.port, spawned.process.pid);
+    if (owner === 'own') return spawned;
+    console.warn(`[ProotRunner] ${instanceId}: listener on port ${spawned.port} is ${owner}; lifecycle call not sent`);
+    return null;
+  }
+
+  async callLifecycle(instanceId: string, hook: string, opts: { reason?: string } = {}): Promise<void> {
+    if (!this.processes.has(instanceId)) throw new Error(`[ProotRunner] ${instanceId} is not running`);
+    const spawned = this.boundInstance(instanceId);
+    if (!spawned) throw new Error(`[ProotRunner] ${instanceId}: port ${this.processes.get(instanceId)?.port} is not bound to the instance; ${hook} not sent`);
+    const res = await fetch(this.lifecycleUrl(spawned.port, hook), {
       method: 'POST',
+      headers: lifecycleHeaders(spawned.lifecycleToken, opts.reason ? { 'x-aura-stop-reason': opts.reason } : {}),
       signal: AbortSignal.timeout(LIFECYCLE_TIMEOUT_MS),
     });
     if (!res.ok) {
@@ -476,12 +522,12 @@ export class ProotRunner implements SandboxRunner {
     hook: string,
     body?: unknown,
   ): Promise<unknown | null> {
-    const spawned = this.processes.get(instanceId);
+    const spawned = this.boundInstance(instanceId);
     if (!spawned) return null;
     try {
-      const res = await fetch(`http://localhost:${spawned.port}${lifecyclePath(hook)}`, {
+      const res = await fetch(this.lifecycleUrl(spawned.port, hook), {
         method: 'POST',
-        headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+        headers: lifecycleHeaders(spawned.lifecycleToken, body !== undefined ? { 'Content-Type': 'application/json' } : {}),
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: AbortSignal.timeout(LIFECYCLE_TIMEOUT_MS),
       });
@@ -527,6 +573,10 @@ export class ProotRunner implements SandboxRunner {
 
   getPort(instanceId: string): number | null {
     return this.processes.get(instanceId)?.port ?? null;
+  }
+
+  lifecycleStatus(instanceId: string): LifecycleStatus | null {
+    return this.processes.get(instanceId)?.lifecycle ?? null;
   }
 
   /**
@@ -595,34 +645,83 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-export type IdentityVerdict =
-  | { kind: 'match' }
-  | { kind: 'legacy' }
-  | { kind: 'mismatch'; claimedApp: string | null; claimedInstance: string | null };
+/**
+ * The port's listener does not belong to the instance just started (or that
+ * can't be confirmed), or its health identity is refused. A retry in another
+ * serve mode can't fix either.
+ */
+export class DestinationBindingError extends Error {}
+
+export type ListenerOwnership = 'none' | 'own' | 'foreign' | 'unknown';
 
 /**
- * Parse a `/api/lifecycle/health` response body and decide whether the
- * upstream owner is who we expect. Pulled out of `waitHealthy` so the
- * regression test can exercise the contract directly without spawning
- * real processes.
- *
- * - `match`    : body identity matches both expected appId and instanceId.
- * - `legacy`   : body has no identity fields at all (older app template) —
- *                accepted with a warning during rollout.
- * - `mismatch` : body identifies a different app/instance — fail loud.
+ * Who listens on TCP `port` in this network namespace (the one PRoot apps
+ * share with the shell): `own` when every listening socket on the port is an
+ * open fd of a process in the tree rooted at `rootPid` (its descendants, or
+ * members of its session — the spawn is `detached`, so it leads one), `none`
+ * when nothing listens yet, `foreign` when any listener belongs to another
+ * process, `unknown` when /proc can't tell.
  */
-export function verifyHealthIdentity(
-  rawBody: string,
-  expectedAppId: string,
-  expectedInstanceId: string,
-): IdentityVerdict {
-  let body: { appId?: unknown; instanceId?: unknown } = {};
-  try { body = JSON.parse(rawBody) as typeof body; } catch { /* tolerate non-JSON / legacy */ }
-  const claimedApp      = typeof body.appId      === 'string' ? body.appId      : null;
-  const claimedInstance = typeof body.instanceId === 'string' ? body.instanceId : null;
-  if (claimedApp === null && claimedInstance === null) return { kind: 'legacy' };
-  if (claimedApp === expectedAppId && claimedInstance === expectedInstanceId) return { kind: 'match' };
-  return { kind: 'mismatch', claimedApp, claimedInstance };
+export function listenerOwnership(port: number, rootPid: number | undefined, procRoot = '/proc'): ListenerOwnership {
+  if (!rootPid) return 'unknown';
+  const listening = new Set<string>();
+  let readAny = false;
+  for (const file of ['net/tcp', 'net/tcp6']) {
+    let text: string;
+    try { text = readFileSync(`${procRoot}/${file}`, 'utf-8'); readAny = true; } catch { continue; }
+    for (const line of text.split('\n').slice(1)) {
+      const f = line.trim().split(/\s+/);
+      // sl local_address rem_address st tx:rx tr:when retrnsmt uid timeout inode
+      if (f.length < 10 || f[3] !== '0A') continue;
+      if (parseInt(f[1]!.split(':')[1] ?? '', 16) === port) listening.add(f[9]!);
+    }
+  }
+  if (!readAny) return 'unknown';
+  if (listening.size === 0) return 'none';
+  const tree = processTree(rootPid, procRoot);
+  if (!tree) return 'unknown';
+  const owned = new Set<string>();
+  for (const pid of tree) {
+    let fds: string[];
+    try { fds = readdirSync(`${procRoot}/${pid}/fd`); }
+    catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;   // exited meanwhile
+      return 'unknown';
+    }
+    for (const fd of fds) {
+      try {
+        const m = /^socket:\[(\d+)\]$/.exec(readlinkSync(`${procRoot}/${pid}/fd/${fd}`));
+        if (m) owned.add(m[1]!);
+      } catch { /* fd closed meanwhile */ }
+    }
+  }
+  for (const inode of listening) if (!owned.has(inode)) return 'foreign';
+  return 'own';
+}
+
+/** `rootPid`, its descendants and its session's members, from /proc/<pid>/stat. */
+function processTree(rootPid: number, procRoot: string): Set<number> | null {
+  let entries: string[];
+  try { entries = readdirSync(procRoot); } catch { return null; }
+  const children = new Map<number, number[]>();
+  const tree = new Set<number>([rootPid]);
+  for (const name of entries) {
+    if (!/^\d+$/.test(name)) continue;
+    let stat: string;
+    try { stat = readFileSync(`${procRoot}/${name}/stat`, 'utf-8'); } catch { continue; }
+    // pid (comm) state ppid pgrp session … — comm may hold spaces and parens.
+    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    const pid = Number(name);
+    const ppid = Number(rest[1]);
+    if (Number(rest[3]) === rootPid) tree.add(pid);
+    const list = children.get(ppid);
+    if (list) list.push(pid); else children.set(ppid, [pid]);
+  }
+  const queue = [...tree];
+  while (queue.length) {
+    for (const c of children.get(queue.pop()!) ?? []) if (!tree.has(c)) { tree.add(c); queue.push(c); }
+  }
+  return tree;
 }
 
 /**

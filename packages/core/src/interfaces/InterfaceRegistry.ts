@@ -36,6 +36,7 @@
  * doesn't, the consumer gets a 404 from the app. A phone book is not a health
  * checker.
  */
+import { localSystemId } from '../system/systemIdentity.js';
 import type { AppInstance } from '../types/instance.js';
 import type { AppLifecycleState } from '../types/lifecycle.js';
 import type {
@@ -69,6 +70,8 @@ export type InterfaceStatus = 'catalog' | 'live' | 'down' | 'external';
 export interface InterfaceView {
   /** Globally unique ref: `<appId>/<name>`. */
   id: string;
+  /** The Aura that provides it (D47). Always this system in the alpha. */
+  systemId?: string;
   appId: string;
   name: string;
   kind: InterfaceKind;
@@ -473,9 +476,15 @@ export class InterfaceRegistry {
 
 // ────────────────────────────── helpers ────────────────────────────────────
 
+/** This system's id on every entry (D47); left out if the identity can't be read, never an error. */
+function systemOf(): { systemId?: string } {
+  try { return { systemId: localSystemId() }; } catch { return {}; }
+}
+
 function toBase(appId: string, iface: ProvidedInterface | (CustomInterface & { permission?: undefined })): Omit<InterfaceView, 'source' | 'status'> {
   return {
     id: `${appId}/${iface.name}`,
+    ...systemOf(),
     appId,
     name: iface.name,
     kind: iface.kind,

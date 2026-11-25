@@ -3,6 +3,7 @@
   "originId": "4889422d-af8c-416a-b51d-873aeb140edf",
   "name": "Browser",
   "version": "0.1.0",
+  "auraContract": 1,
   "description": "minimal web browser",
   "icon": "BR",
   "instanceMode": "single",

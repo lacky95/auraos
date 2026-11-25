@@ -16,7 +16,7 @@ import { candidateRules, handlersOf, manifestRoute, normalizeMethod } from './re
 import { ROUTE_ACCESS_MANIFEST } from './routeManifest.ts';
 import { SURFACE_MANIFEST } from './surfaceManifest.ts';
 import {
-  ACCESS_BRIDGE_KEY, CREDENTIAL_COUNT_KINDS, CREDENTIAL_SURFACES, UNRESOLVED_VARIANT,
+  ACCESS_BRIDGE_KEY, CONTRACT_SIGNALS, CREDENTIAL_COUNT_KINDS, CREDENTIAL_SURFACES, UNRESOLVED_VARIANT,
 } from './types.ts';
 import type {
   AccessBridge, AccessBridgeHost, AccessEvent, AccessEventMethod, AccessEventSurface, AccessLabel,
@@ -554,6 +554,11 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
     },
     countCredential(kind, surface) {
       if (closed(CREDENTIAL_COUNT_KINDS, kind) && closed(CREDENTIAL_SURFACES, surface)) report.note(`cred|${kind}|${surface}`);
+      else report.note('dropped');
+    },
+    countContract(signal, appId) {
+      const app = knownApp(appId);
+      if (closed(CONTRACT_SIGNALS, signal) && app) report.note(`contract|${signal}|${app}`);
       else report.note('dropped');
     },
     pending: () => report.pending(),

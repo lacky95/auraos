@@ -174,6 +174,8 @@ export interface AppHostCookiePayload {
 /** Signed by the router and sent in `GATEWAY_IDENTITY_HEADER`. */
 export interface GatewayIdentityClaim {
   v: 1;
+  /** The Aura that signed it (D47). Absent only if its identity was unreadable. */
+  sys?: string;
   appId: string;
   installationId: string;
   instanceId: string | null;

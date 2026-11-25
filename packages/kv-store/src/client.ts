@@ -98,6 +98,25 @@ export class KvClient {
     return out;
   }
 
+  /**
+   * Raw keys (`<namespace>:<key>`) matching a glob, at most `limit`. For
+   * one-time maintenance such as a data migration, never a request path.
+   */
+  async scan(match: string, opts: { limit?: number } = {}): Promise<string[]> {
+    const limit = Math.max(1, Math.min(opts.limit ?? 10_000, 100_000));
+    const out: string[] = [];
+    let cursor = '0';
+    do {
+      const [next, batch] = await this.redis.scan(cursor, 'MATCH', match, 'COUNT', 500);
+      for (const k of batch) {
+        out.push(k);
+        if (out.length >= limit) return out;
+      }
+      cursor = next;
+    } while (cursor !== '0');
+    return out;
+  }
+
   /** Close the connection. Safe to call multiple times. */
   async close(): Promise<void> {
     try { await this.redis.quit(); } catch { /* already disconnected */ }

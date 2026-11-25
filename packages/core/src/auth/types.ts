@@ -47,8 +47,9 @@ export interface DeclaredActor {
 interface WithActor { actor?: DeclaredActor }
 
 /**
- * The Aura a principal belongs to (D47, `userId@systemId`). Read wherever a
- * principal is, not generated yet (3b): absent means this system.
+ * The Aura a principal belongs to (D47, `userId@systemId`). The shell's
+ * resolver sets it to the local `systemId` (system/systemIdentity.ts); absent
+ * still means this system, for principals built elsewhere.
  */
 interface WithSystem { systemId?: string }
 
@@ -121,6 +122,15 @@ export interface GrantSubject {
 }
 
 /**
+ * Reserved for federation (D47), types only: nothing grants to them in the
+ * alpha, and `GrantStore` takes only `GrantSubject`. A remote Aura as a whole,
+ * and a user named by a qualified reference (`userId@systemId`).
+ */
+export type ReservedGrantSubject =
+  | { kind: 'system'; systemId: string }
+  | { kind: 'user'; userId: string; systemId: string };
+
+/**
  * Where a grant applies. Every grant today is OS-wide (one owner, no other
  * users). Multi-user adds e.g. `{ kind: 'user', userId }` without changing
  * the subject or the permission.
@@ -128,7 +138,12 @@ export interface GrantSubject {
 export type GrantScope =
   | { kind: 'os' }
   /** One Terminal session (`<instanceId>#<label>`), for `terminal.embed` only (D25). */
-  | { kind: 'terminal-session'; id: string };
+  | { kind: 'terminal-session'; id: string }
+  /** One user (D56): a `credential.read:<NAME>` grant reads that user's vault entry only. */
+  | { kind: 'user'; id: string };
+
+/** Reserved scopes for federation (D47), types only, like `ReservedGrantSubject`. */
+export type ReservedGrantScope = { kind: 'system'; systemId: string };
 export const OS_SCOPE: GrantScope = Object.freeze({ kind: 'os' as const });
 
 /**

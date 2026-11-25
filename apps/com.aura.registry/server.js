@@ -17,6 +17,7 @@
  */
 
 const http = require('node:http');
+const { createHash, timingSafeEqual } = require('node:crypto');
 
 const APP_ID       = process.env.APP_ID          || 'com.aura.registry';
 const INSTANCE_ID  = process.env.APP_INSTANCE_ID || APP_ID;
@@ -43,7 +44,34 @@ function jsonReply(res, status, body) {
 // killing the container is enough; AppManager's onDestroy → SIGKILL).
 const LIFECYCLE_HOOKS = ['onCreate','onStart','onResume','onPause','onStop','onDestroy'];
 
+// The kernel's per-start lifecycle secret: every /api/lifecycle/* call needs
+// it in `x-aura-lifecycle`, except a health probe that sends no token (a
+// wrong one is refused). The same rule as the SDK's runtime/lifecycle-guard,
+// inline because this server has no dependencies.
+const LIFECYCLE_TOKEN = process.env.AURA_LIFECYCLE_TOKEN || '';
+const sha256 = (v) => createHash('sha256').update(String(v)).digest();
+
+/** The normalized path under /api/lifecycle, or null (as the SDK's hostRules). */
+function lifecyclePathOf(url) {
+  let p;
+  try { p = decodeURIComponent(url.split(/[?#]/, 1)[0]); }
+  catch { return /^[/\\]+api[/\\]/i.test(url) ? '/api/lifecycle/?' : null; }
+  p = new URL(`/${p.replace(/\\/g, '/')}`.replace(/\/{2,}/g, '/'), 'http://h').pathname.toLowerCase().replace(/\/+$/, '');
+  return p === '/api/lifecycle' || p.startsWith('/api/lifecycle/') ? p : null;
+}
+
+function lifecycleRefused(req, url) {
+  const route = lifecyclePathOf(url);
+  if (route === null || !LIFECYCLE_TOKEN) return false;
+  const presented = req.headers['x-aura-lifecycle'];
+  if (presented === undefined) return route !== '/api/lifecycle/health';
+  return typeof presented !== 'string' || !timingSafeEqual(sha256(presented), sha256(LIFECYCLE_TOKEN));
+}
+
 function handleLifecycle(req, res, url) {
+  if (lifecycleRefused(req, url)) {
+    return jsonReply(res, 401, { ok: false, error: 'lifecycle-token-required' });
+  }
   if (req.method === 'GET' && url === '/api/lifecycle/health') {
     return jsonReply(res, 200, {
       ok: true, appId: APP_ID, instanceId: INSTANCE_ID,
